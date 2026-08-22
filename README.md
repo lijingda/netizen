@@ -193,11 +193,20 @@ Codex Skill。用户在飞书中自然语言询问 Netizen 用法、命令、会
 ## 安装、升级与启停
 
 第一版支持 Linux + systemd，macOS adapter 后续补充。克隆、同步或直接在云主机编辑本
-仓库后，以准备运行服务的当前用户执行：
+仓库后，以准备运行服务的当前用户执行。真人在终端中安装时使用第一条命令；Agent、CI
+或后台 shell 首次运行时使用第二条：
 
 ```bash
+# 真人交互安装
 ./install.sh
+
+# Agent / CI：凭据缺失时生成文件和精确后续步骤，不等待交互
+./install.sh </dev/null
 ```
+
+只有在命令工具能跨对话轮次保留同一个 PTY/后台进程、读取中间输出并继续写入 stdin 时，
+Agent 才应代用户承载交互浏览器初始化；具体交接流程见
+[部署文档](docs/deployment.md#agent-驱动首次安装)。
 
 脚本不接收参数，也不会执行 `git pull`。它将当前工作区（包括未提交改动）做成内容寻址
 快照，安装到 `~/.netizen/releases/<digest>`，并以
@@ -219,11 +228,20 @@ Netizen 产品根始终是当前账号数据库中 home 下的 `~/.netizen`，�
 不会被认领或卸载。若 systemd user manager 自身配置了另一套 `XDG_CONFIG_HOME`，且其
 `SYSTEMD_UNIT_PATH` 不包含固定 unit 目录，安装器会明确拒绝而不是生成无法加载的 unit。
 
-首次交互安装会询问 Feishu App ID，并以隐藏输入读取 App Secret；安装器同时自动生成一次
-高熵 `0600` Admin Web credential。Agent、CI 或其他无 TTY 调用绝不会等待输入：脚本会
-创建配置骨架、空的 Feishu Secret 文件和可立即保留使用的 Admin credential，明确退出并
-给出路径；调用方填好 App ID 与 Feishu Secret 后再次执行 `./install.sh`。会主动分配伪终端的 Agent 应先用
-`./install.sh </dev/null` 获取这些路径。不要把 Secret 放进命令参数、仓库或 YAML。
+首次交互安装发现 Feishu/Lark 凭据不完整时，默认显示官方浏览器链接和终端二维码：确认后
+安装器创建新 Bot 应用，或在已有 `appId` 但 Secret 缺失时更新该 exact 应用，并预填
+Netizen 所需的应用身份权限、`im.message.receive_v1` 事件和 `card.action.trigger` 回调。
+该流程使用随 release 固定的官方 Python SDK，不安装或依赖 Lark CLI，也不申请用户身份
+scope/token；菜单中的手工 App ID + 隐藏 App Secret 输入始终可用，浏览器流程失败也会
+安全回退到它。App Secret 只经父子进程 pipe 写入受保护文件，不显示、不进入 argv、环境、
+YAML、unit 或日志。用户确认后仍需按租户策略完成管理员审批/应用发布，设置可用范围，并
+把机器人加入目标群。
+
+安装器同时自动生成一次高熵 `0600` Admin Web credential。Agent、CI 或其他无 TTY 调用
+绝不会等待输入或启动浏览器流程：脚本会创建配置骨架、空的 Feishu Secret 文件和可立即
+保留使用的 Admin credential，明确退出并给出路径；调用方填好 App ID 与 Feishu Secret
+后再次执行 `./install.sh`。会主动分配伪终端的 Agent 应先用 `./install.sh </dev/null`
+获取这些路径。不要把 Secret 放进命令参数、仓库或 YAML。
 
 systemd 本身不读取 `.bashrc` 或 `.profile`。Netizen 的短生命周期 launcher 会在每次
 服务启动时运行当前账号的无 TTY interactive login shell，读取其完整导出环境，再用
@@ -315,8 +333,10 @@ make check
 
 复制 `config.example.yaml`，设置绝对 `defaultCwd` 和 `projectRoot`；旧
 `projects` mapping 仍会在首次启动时导入，此后可在飞书 `/settings` 完成 Project
-管理。还需在飞书应用后台配置可用用户和群，并在“事件与回调 → 回调配置”启用卡片
-回调。群聊逐条引用还需应用权限 `im:message.group_msg`；只配置接收群聊 @ 机器人
+管理。通过 `./install.sh` 浏览器流程创建/更新的应用已请求下述权限、消息事件和卡片回调；
+本地手工准备应用时则需在飞书应用后台逐项配置。两种路径都还要完成租户审批/发布、配置
+可用用户和群并把机器人加入目标群。群聊逐条引用需要应用权限
+`im:message.group_msg`；只配置接收群聊 @ 机器人
 消息的权限无法回查被引用的另一条消息。当前 Prompt 发送者姓名解析还需
 `im:chat.members:read`；缺失时不会用匿名身份提交。Prompt 的运行、steer 确认与终态
 表情还需

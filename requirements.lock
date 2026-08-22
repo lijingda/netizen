@@ -9,12 +9,14 @@ httpcore==1.0.9
 httpx==0.28.1
 idna==3.18
 lark-channel-sdk==1.2.0
+lark-oapi==1.7.2
 openai-codex==0.147.0
 openai-codex-cli-bin==0.147.0
 pycryptodome==3.23.0
 pydantic==2.13.4
 pydantic_core==2.46.4
 PyYAML==6.0.3
+qrcode==8.2
 requests==2.34.2
 requests-toolbelt==1.0.0
 typing-inspection==0.4.2

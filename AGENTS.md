@@ -47,13 +47,20 @@ design detail, compatibility findings, and procedures in their source docs.
   control plane while preserving one Runtime and the existing Feishu controls.
   [ADR 0032](docs/adr/0032-use-single-user-product-root.md) fixes the single
   `~/.netizen` product root and its preserved-versus-deletable lifecycle boundary.
+  [ADR 0033](docs/adr/0033-use-official-sdk-for-feishu-app-onboarding.md)
+  defines the Lark-CLI-free, official-SDK Feishu/Lark Bot app onboarding flow.
   Superseded ADRs are historical context.
 - [docs/deployment.md](docs/deployment.md): setup, verification, and release
   procedures.
 - Public deployment uses zero-argument `./install.sh` / `./uninstall.sh`; use
   `./service.sh start|stop|restart|status` without sudo. A non-interactive
   installer prepares credential files and exits with exact completion steps;
-  agents with a pseudo-TTY should first use `./install.sh </dev/null`.
+  agents must default to `./install.sh </dev/null` when credentials may be
+  absent. An agent may carry the interactive browser setup only when its runner
+  can preserve the exact PTY/background process across user turns, surface
+  intermediate output, and resume stdin. Otherwise use the non-interactive
+  credential-file handoff. Follow the exact relay procedure in
+  `docs/deployment.md`; never ask the user to paste an App Secret into chat.
 - The product root is fixed at `~/.netizen` below the effective user's account
   home; do not use XDG overrides as profiles or as a second Netizen instance.
   The systemd user unit remains in its native discovery path and `CODEX_HOME`

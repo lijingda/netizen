@@ -189,6 +189,276 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertNotIn("hidden-secret", layout.config_file.read_text())
             self.assertEqual(layout.secret_file.read_text(), "hidden-secret")
 
+    def test_interactive_configuration_defaults_to_browser_app_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            requested_app_ids: list[str | None] = []
+
+            def register_app(app_id: str | None) -> installer.FeishuAppCredentials:
+                requested_app_ids.append(app_id)
+                return installer.FeishuAppCredentials(
+                    app_id="cli_browser",
+                    app_secret="browser-secret",
+                )
+
+            installer.prepare_configuration(
+                layout,
+                interactive=True,
+                input_stream=io.StringIO("\n"),
+                secret_prompt=lambda _prompt: self.fail("manual secret prompt was used"),
+                app_registrar=register_app,
+            )
+
+            self.assertEqual(requested_app_ids, [None])
+            self.assertIn("cli_browser", layout.config_file.read_text())
+            self.assertNotIn("browser-secret", layout.config_file.read_text())
+            self.assertEqual(layout.secret_file.read_text(), "browser-secret")
+            self.assertEqual(stat.S_IMODE(layout.config_file.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(layout.secret_file.stat().st_mode), 0o600)
+
+    def test_browser_setup_updates_an_existing_app_with_a_missing_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text().replace(
+                    "cli_REPLACE_ME",
+                    "cli_existing",
+                ),
+                encoding="utf-8",
+            )
+            requested_app_ids: list[str | None] = []
+
+            def register_app(app_id: str | None) -> installer.FeishuAppCredentials:
+                requested_app_ids.append(app_id)
+                return installer.FeishuAppCredentials(
+                    app_id="cli_existing",
+                    app_secret="recovered-secret",
+                )
+
+            installer.prepare_configuration(
+                layout,
+                interactive=True,
+                input_stream=io.StringIO("\n"),
+                app_registrar=register_app,
+            )
+
+            self.assertEqual(requested_app_ids, ["cli_existing"])
+            self.assertEqual(layout.secret_file.read_text(), "recovered-secret")
+            self.assertEqual(
+                layout.config_file.read_text().count("cli_existing"),
+                1,
+            )
+
+    def test_browser_setup_failure_falls_back_to_manual_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+
+            def fail_registration(_app_id: str | None) -> installer.FeishuAppCredentials:
+                raise installer.InstallError("private SDK detail")
+
+            with patch("sys.stderr", new=io.StringIO()) as stderr:
+                installer.prepare_configuration(
+                    layout,
+                    interactive=True,
+                    input_stream=io.StringIO("\ncli_manual\n"),
+                    secret_prompt=lambda _prompt: "manual-secret",
+                    app_registrar=fail_registration,
+                )
+
+            self.assertIn("did not complete", stderr.getvalue())
+            self.assertNotIn("private SDK detail", stderr.getvalue())
+            self.assertIn("cli_manual", layout.config_file.read_text())
+            self.assertEqual(layout.secret_file.read_text(), "manual-secret")
+
+    def test_browser_credentials_roll_back_both_files_on_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            original_config = layout.config_file.read_bytes()
+            original_secret = layout.secret_file.read_bytes()
+            real_write = installer._write_atomic
+
+            def fail_new_secret(path: Path, content: bytes, *, mode: int) -> None:
+                if path == layout.secret_file and content == b"new-secret":
+                    raise OSError("simulated write failure")
+                real_write(path, content, mode=mode)
+
+            with (
+                patch.object(installer, "_write_atomic", side_effect=fail_new_secret),
+                self.assertRaisesRegex(OSError, "simulated write failure"),
+            ):
+                installer._store_registered_feishu_credentials(
+                    layout,
+                    config_text=original_config.decode(),
+                    expected_app_id=None,
+                    credentials=installer.FeishuAppCredentials(
+                        app_id="cli_new",
+                        app_secret="new-secret",
+                    ),
+                )
+
+            self.assertEqual(layout.config_file.read_bytes(), original_config)
+            self.assertEqual(layout.secret_file.read_bytes(), original_secret)
+
+    def test_release_app_registrar_keeps_secret_out_of_command_and_errors(self) -> None:
+        release = installer.Release(
+            digest="a" * 64,
+            root=ROOT,
+            source=ROOT,
+            venv=ROOT / ".venv",
+        )
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def fake_runner(
+            argv: list[object],
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            rendered = [os.fspath(value) for value in argv]
+            calls.append((rendered, kwargs))
+            return subprocess.CompletedProcess(
+                rendered,
+                0,
+                json.dumps(
+                    {
+                        "version": 1,
+                        "appId": "cli_existing",
+                        "appSecret": "sdk-secret",
+                    }
+                ),
+                None,
+            )
+
+        credentials = installer._register_feishu_app_from_release(
+            release,
+            "cli_existing",
+            runner=fake_runner,
+        )
+
+        self.assertEqual(credentials.app_id, "cli_existing")
+        self.assertEqual(credentials.app_secret, "sdk-secret")
+        self.assertNotIn("sdk-secret", repr(credentials))
+        command, kwargs = calls[0]
+        self.assertNotIn("sdk-secret", command)
+        self.assertEqual(command[-2:], ["--app-id", "cli_existing"])
+        self.assertIs(kwargs["capture_stdout"], True)
+        self.assertIs(kwargs["check"], False)
+        self.assertEqual(kwargs["timeout"], 660.0)
+
+        def malformed_runner(
+            argv: list[object],
+            **_kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(argv, 0, "sdk-secret", None)
+
+        with self.assertRaises(installer.InstallError) as raised:
+            installer._register_feishu_app_from_release(
+                release,
+                None,
+                runner=malformed_runner,
+            )
+        self.assertNotIn("sdk-secret", str(raised.exception))
+
+    def test_noninteractive_install_does_not_build_before_credentials_are_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            with (
+                patch.object(installer, "require_linux"),
+                patch.object(installer, "prepare_release") as prepare_release,
+                patch.object(installer, "info") as installer_info,
+                self.assertRaises(installer.ConfigurationRequired),
+            ):
+                installer.install(
+                    source_root=ROOT,
+                    layout=layout,
+                    interactive=False,
+                )
+
+            prepare_release.assert_not_called()
+            installer_info.assert_not_called()
+            self.assertIn("cli_REPLACE_ME", layout.config_file.read_text())
+            self.assertEqual(layout.secret_file.read_bytes(), b"")
+
+    def test_interactive_install_builds_candidate_before_browser_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            release = installer.Release(
+                digest="b" * 64,
+                root=ROOT,
+                source=ROOT,
+                venv=ROOT / ".venv",
+            )
+            events: list[str] = []
+            messages: list[str] = []
+            expected_warning = (
+                "Feishu/Lark credentials are incomplete; interactive setup follows "
+                "release preparation. Agent/CI callers should cancel now and rerun "
+                "./install.sh </dev/null."
+            )
+
+            def prepare_release(*_args: object, **_kwargs: object) -> installer.Release:
+                self.assertIn("cli_REPLACE_ME", layout.config_file.read_text())
+                self.assertEqual(messages, [expected_warning])
+                events.append("release")
+                return release
+
+            def register_app(
+                selected_release: installer.Release,
+                app_id: str | None,
+                **_kwargs: object,
+            ) -> installer.FeishuAppCredentials:
+                self.assertEqual(selected_release, release)
+                self.assertIsNone(app_id)
+                self.assertEqual(events, ["release"])
+                events.append("register")
+                return installer.FeishuAppCredentials(
+                    app_id="cli_installed",
+                    app_secret="installed-secret",
+                )
+
+            with (
+                patch.object(installer, "require_linux"),
+                patch.object(
+                    installer,
+                    "prepare_release",
+                    side_effect=prepare_release,
+                ),
+                patch.object(
+                    installer,
+                    "_register_feishu_app_from_release",
+                    side_effect=register_app,
+                ),
+                patch.object(
+                    installer,
+                    "validate_runtime",
+                    return_value=installer.RuntimeValidation(
+                        data_dir=layout.state_dir,
+                        admin_bind=installer.AdminBind(False, "127.0.0.1", 8787),
+                    ),
+                ),
+                patch.object(installer, "ensure_linger"),
+                patch.object(installer, "activate_release"),
+                patch.object(installer, "info", side_effect=messages.append),
+                patch("sys.stdin", new=io.StringIO("\n")),
+            ):
+                installed = installer.install(
+                    source_root=ROOT,
+                    layout=layout,
+                    interactive=True,
+                )
+
+            self.assertEqual(installed, release)
+            self.assertEqual(events, ["release", "register"])
+            self.assertEqual(messages[0], expected_warning)
+            self.assertIn("cli_installed", layout.config_file.read_text())
+            self.assertEqual(layout.secret_file.read_text(), "installed-secret")
+
     def test_admin_secret_is_preserved_and_invalid_existing_file_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))

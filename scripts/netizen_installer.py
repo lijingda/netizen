@@ -28,7 +28,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
 
@@ -84,6 +84,11 @@ IGNORED_SOURCE_NAMES = {
 RELEASE_NAME = re.compile(r"^[0-9a-f]{64}$")
 ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RUNNING_UNIT_STATES = {"active", "activating", "reloading", "deactivating"}
+CONFIGURED_APP_ID = re.compile(
+    r"(?m)^[ \t]*appId:[ \t]*(?:\"(?P<double>cli_[A-Za-z0-9_-]+)\"|"
+    r"'(?P<single>cli_[A-Za-z0-9_-]+)'|(?P<plain>cli_[A-Za-z0-9_-]+))"
+    r"[ \t]*(?:#.*)?$"
+)
 
 
 class InstallError(RuntimeError):
@@ -168,12 +173,19 @@ class AdminBind:
 
 
 @dataclass(frozen=True, slots=True)
+class FeishuAppCredentials:
+    app_id: str
+    app_secret: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeValidation:
     data_dir: Path
     admin_bind: AdminBind
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+AppRegistrar = Callable[[str | None], FeishuAppCredentials]
 
 
 def info(message: str) -> None:
@@ -311,18 +323,24 @@ def run_command(
     *,
     check: bool = True,
     capture_output: bool = False,
+    capture_stdout: bool = False,
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     rendered = [os.fspath(value) for value in argv]
+    if capture_output and capture_stdout:
+        raise InstallError("capture_output and capture_stdout are mutually exclusive")
     try:
         return subprocess.run(
             rendered,
             check=check,
             capture_output=capture_output,
+            stdout=subprocess.PIPE if capture_stdout else None,
             cwd=cwd,
             env=None if env is None else dict(env),
             text=True,
+            timeout=timeout,
         )
     except FileNotFoundError as error:
         raise InstallError(f"required command was not found: {rendered[0]}") from error
@@ -331,6 +349,11 @@ def run_command(
         detail = (error.stderr or error.stdout or "").strip()
         suffix = f": {detail}" if detail else ""
         raise InstallError(f"command failed ({error.returncode}): {command}{suffix}") from error
+    except subprocess.TimeoutExpired as error:
+        duration = f"{error.timeout:g}" if error.timeout is not None else "configured"
+        raise InstallError(
+            f"command timed out after {duration} seconds: {rendered[0]}"
+        ) from error
 
 
 def require_linux(*, require_analyze: bool = False) -> None:
@@ -433,6 +456,7 @@ def prepare_configuration(
     interactive: bool,
     input_stream: IO[str] | None = None,
     secret_prompt: Callable[[str], str] = getpass.getpass,
+    app_registrar: AppRegistrar | None = None,
 ) -> None:
     """Create or complete config without ever waiting on a non-TTY caller."""
 
@@ -457,18 +481,6 @@ def prepare_configuration(
     except UnicodeError as error:
         raise InstallError(f"configuration is not valid UTF-8: {layout.config_file}") from error
     needs_app_id = "cli_REPLACE_ME" in config_text
-    if needs_app_id and interactive:
-        while True:
-            print("Feishu App ID (cli_...): ", end="", flush=True)
-            app_id = source.readline().strip()
-            if not app_id:
-                raise InstallError("Feishu App ID input ended before a value was provided")
-            if app_id.startswith("cli_"):
-                break
-            print("App ID must start with cli_.", file=sys.stderr)
-        updated = config_text.replace("cli_REPLACE_ME", app_id, 1)
-        _write_atomic(layout.config_file, updated.encode(), mode=0o600)
-        needs_app_id = False
 
     if secret_missing:
         _write_atomic(layout.secret_file, b"", mode=0o600)
@@ -481,17 +493,64 @@ def prepare_configuration(
         raise InstallError(
             f"could not read Feishu secret file {layout.secret_file}: {error}"
         ) from error
-    if needs_secret and interactive:
-        try:
-            secret = secret_prompt("Feishu App Secret: ").strip()
-        except EOFError as error:
-            raise InstallError(
-                "Feishu App Secret input ended before a value was provided"
-            ) from error
-        if not secret:
-            raise InstallError("Feishu App Secret must not be empty")
-        _write_atomic(layout.secret_file, secret.encode(), mode=0o600)
-        needs_secret = False
+
+    if interactive and (needs_app_id or needs_secret):
+        configured_app_id = None if needs_app_id else _configured_app_id(config_text)
+        can_register = app_registrar is not None and (
+            needs_app_id or configured_app_id is not None
+        )
+        use_browser = can_register and _prompt_feishu_setup_method(
+            source,
+            app_id=configured_app_id,
+        )
+        if use_browser:
+            info(
+                "starting official Feishu/Lark browser setup; "
+                "the App Secret will not be displayed"
+            )
+            try:
+                credentials = app_registrar(configured_app_id)
+                config_text = _store_registered_feishu_credentials(
+                    layout,
+                    config_text=config_text,
+                    expected_app_id=configured_app_id,
+                    credentials=credentials,
+                )
+            except InstallError:
+                print(
+                    "Browser setup did not complete. Enter an existing App ID and "
+                    "App Secret manually instead.",
+                    file=sys.stderr,
+                )
+            else:
+                needs_app_id = False
+                needs_secret = False
+                info(
+                    f"Feishu/Lark app {credentials.app_id} configured; "
+                    f"credential saved to {layout.secret_file}"
+                )
+                info(
+                    "finish any tenant-admin approval/application publication, "
+                    "set availability, and add the bot to target chats"
+                )
+
+        if needs_app_id:
+            app_id = _prompt_app_id(source)
+            config_text = config_text.replace("cli_REPLACE_ME", app_id, 1)
+            _write_atomic(layout.config_file, config_text.encode(), mode=0o600)
+            needs_app_id = False
+
+        if needs_secret:
+            try:
+                secret = secret_prompt("Feishu App Secret: ").strip()
+            except EOFError as error:
+                raise InstallError(
+                    "Feishu App Secret input ended before a value was provided"
+                ) from error
+            if not secret:
+                raise InstallError("Feishu App Secret must not be empty")
+            _write_atomic(layout.secret_file, secret.encode(), mode=0o600)
+            needs_secret = False
 
     if needs_app_id or needs_secret:
         missing: list[str] = []
@@ -504,6 +563,101 @@ def prepare_configuration(
             + "; ".join(missing)
             + "; then rerun ./install.sh"
         )
+
+
+def _configured_app_id(config_text: str) -> str | None:
+    match = CONFIGURED_APP_ID.search(config_text)
+    if match is None:
+        return None
+    return next(value for value in match.groupdict().values() if value is not None)
+
+
+def _prompt_feishu_setup_method(source: IO[str], *, app_id: str | None) -> bool:
+    if app_id is None:
+        browser_action = "Create and configure a Feishu/Lark app in the browser"
+    else:
+        browser_action = f"Configure existing app {app_id} in the browser"
+    print("Feishu/Lark application setup:")
+    print(f"  1) {browser_action} (recommended)")
+    print("  2) Enter App ID and App Secret manually")
+    while True:
+        print("Choose [1]: ", end="", flush=True)
+        raw_choice = source.readline()
+        if raw_choice == "":
+            raise InstallError("Feishu/Lark setup choice ended before a value was provided")
+        choice = raw_choice.strip()
+        if choice in {"", "1"}:
+            return True
+        if choice == "2":
+            return False
+        print("Choose 1 or 2.", file=sys.stderr)
+
+
+def _prompt_app_id(source: IO[str]) -> str:
+    while True:
+        print("Feishu App ID (cli_...): ", end="", flush=True)
+        raw_app_id = source.readline()
+        if raw_app_id == "":
+            raise InstallError("Feishu App ID input ended before a value was provided")
+        app_id = raw_app_id.strip()
+        if app_id.startswith("cli_"):
+            return app_id
+        print("App ID must start with cli_.", file=sys.stderr)
+
+
+def _store_registered_feishu_credentials(
+    layout: Layout,
+    *,
+    config_text: str,
+    expected_app_id: str | None,
+    credentials: FeishuAppCredentials,
+) -> str:
+    app_id = credentials.app_id
+    app_secret = credentials.app_secret
+    if (
+        not app_id.startswith("cli_")
+        or app_id.strip() != app_id
+        or any(ord(character) < 0x20 for character in app_id)
+    ):
+        raise InstallError("browser setup returned an invalid App ID")
+    if (
+        not app_secret
+        or app_secret.strip() != app_secret
+        or any(ord(character) < 0x20 for character in app_secret)
+    ):
+        raise InstallError("browser setup returned an invalid App Secret")
+    if expected_app_id is not None and app_id != expected_app_id:
+        raise InstallError("browser setup returned a different App ID")
+    if expected_app_id is None:
+        if "cli_REPLACE_ME" not in config_text:
+            raise InstallError("configuration has no App ID placeholder to update")
+        updated_config = config_text.replace("cli_REPLACE_ME", app_id, 1)
+    else:
+        updated_config = config_text
+
+    config_snapshot = _capture_file(layout.config_file, label="configuration")
+    secret_snapshot = _capture_file(layout.secret_file, label="Feishu secret")
+    try:
+        if updated_config != config_text:
+            _write_atomic(layout.config_file, updated_config.encode(), mode=0o600)
+        _write_atomic(layout.secret_file, app_secret.encode(), mode=0o600)
+    except BaseException as error:
+        rollback_failed = False
+        for path, snapshot, label in (
+            (layout.config_file, config_snapshot, "configuration"),
+            (layout.secret_file, secret_snapshot, "Feishu secret"),
+        ):
+            try:
+                _restore_file(path, snapshot, label=label)
+            except (OSError, InstallError):
+                rollback_failed = True
+        if rollback_failed:
+            raise InstallError(
+                "could not roll back Feishu credential files; inspect "
+                f"{layout.config_file} and {layout.secret_file} before rerunning"
+            ) from error
+        raise
+    return updated_config
 
 
 def _default_config(layout: Layout, *, app_id: str) -> str:
@@ -806,6 +960,54 @@ def _verify_installed_package(
         cwd=release.root,
         env=environment,
         capture_output=True,
+    )
+
+
+def _register_feishu_app_from_release(
+    release: Release,
+    app_id: str | None,
+    *,
+    runner: Runner,
+) -> FeishuAppCredentials:
+    command: list[str | os.PathLike[str]] = [
+        release.venv / "bin" / "python",
+        "-E",
+        "-B",
+        "-u",
+        release.source / "scripts" / "feishu_app_onboarding.py",
+    ]
+    if app_id is not None:
+        command.extend(("--app-id", app_id))
+    result = runner(
+        command,
+        check=False,
+        capture_stdout=True,
+        env=_clean_subprocess_environment(),
+        timeout=660.0,
+    )
+    if result.returncode == 130:
+        raise KeyboardInterrupt
+    if result.returncode != 0:
+        raise InstallError("official Feishu/Lark browser setup did not complete")
+    try:
+        payload = json.loads(result.stdout or "")
+    except (TypeError, json.JSONDecodeError) as error:
+        raise InstallError(
+            "official Feishu/Lark browser setup returned an invalid result"
+        ) from error
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"version", "appId", "appSecret"}
+        or payload.get("version") != 1
+        or not isinstance(payload.get("appId"), str)
+        or not isinstance(payload.get("appSecret"), str)
+    ):
+        raise InstallError(
+            "official Feishu/Lark browser setup returned an invalid result"
+        )
+    return FeishuAppCredentials(
+        app_id=payload["appId"],
+        app_secret=payload["appSecret"],
     )
 
 
@@ -1855,10 +2057,10 @@ def _stream_digest(path: Path) -> bytes:
     return digest.digest()
 
 
-def _capture_file(path: Path) -> FileSnapshot:
+def _capture_file(path: Path, *, label: str = "managed unit") -> FileSnapshot:
     if not _path_exists(path):
         return FileSnapshot(existed=False)
-    _require_regular_file(path, "managed unit")
+    _require_regular_file(path, label)
     metadata = path.stat()
     return FileSnapshot(
         existed=True,
@@ -1867,14 +2069,19 @@ def _capture_file(path: Path) -> FileSnapshot:
     )
 
 
-def _restore_file(path: Path, snapshot: FileSnapshot) -> None:
+def _restore_file(
+    path: Path,
+    snapshot: FileSnapshot,
+    *,
+    label: str = "managed unit",
+) -> None:
     if snapshot.existed:
         _write_atomic(path, snapshot.content, mode=snapshot.mode)
     elif _path_exists(path):
         if path.is_symlink() or path.is_file():
             path.unlink()
         else:
-            raise InstallError(f"refusing to remove unexpected unit path: {path}")
+            raise InstallError(f"refusing to remove unexpected {label} path: {path}")
 
 
 def _capture_skill(layout: Layout, temporary_root: Path) -> SkillSnapshot:
@@ -1980,12 +2187,34 @@ def install(
     _validate_source_location(source_root, selected_layout)
     with installation_lock(selected_layout):
         prepare_directories(selected_layout)
-        prepare_configuration(selected_layout, interactive=is_interactive)
+        configuration_ready = True
+        try:
+            prepare_configuration(selected_layout, interactive=False)
+        except ConfigurationRequired:
+            configuration_ready = False
+            if not is_interactive:
+                raise
+        if not configuration_ready:
+            info(
+                "Feishu/Lark credentials are incomplete; interactive setup follows "
+                "release preparation. Agent/CI callers should cancel now and rerun "
+                "./install.sh </dev/null."
+            )
         release = prepare_release(
             selected_layout,
             source_root=source_root,
             runner=execute,
         )
+        if not configuration_ready:
+            prepare_configuration(
+                selected_layout,
+                interactive=True,
+                app_registrar=lambda app_id: _register_feishu_app_from_release(
+                    release,
+                    app_id,
+                    runner=execute,
+                ),
+            )
         validation = validate_runtime(release, selected_layout, execute)
         ensure_linger(
             selected_layout,

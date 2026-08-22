@@ -75,7 +75,9 @@ codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
 失败掩盖认证问题。
 
 逐条引用会调用“获取指定消息”，普通/富文本图片还会调用“获取消息中的资源文件”。
-飞书应用版本在发布前必须确认：
+`./install.sh` 的官方 SDK 浏览器流程会用最小模板请求下面的应用身份权限、
+`im.message.receive_v1` 应用身份事件和 `card.action.trigger` 回调，不申请用户身份权限或
+token；手工准备的应用必须逐项配置。无论来源，飞书应用版本在发布前都必须确认：
 
 - 单聊读取具备 `im:message` 或官方允许的对应 readonly 权限；
 - 群聊回查额外具备 `im:message.group_msg`，不能只有接收 @ 消息的
@@ -317,10 +319,14 @@ phase，以新结果为准。
 
 需要 Python 3.11+、`venv`、systemd/logind 和有效的当前用户 Codex 登录。源码可以来自
 git checkout、文件同步，也可以直接在目标云主机编辑；入口始终是源码根目录下的零参数
-脚本：
+脚本。真人在终端中安装时使用第一条命令；Agent、CI 或后台 shell 首次运行时使用第二条：
 
 ```bash
+# 真人交互安装
 ./install.sh
+
+# Agent / CI：凭据缺失时生成文件和精确后续步骤，不等待交互
+./install.sh </dev/null
 ```
 
 不要用 `sudo ./install.sh`“提升权限”：脚本总是为执行它的 effective user 安装；若明确以
@@ -331,14 +337,43 @@ pyc 不进入快照。将代码获取与主机安装解耦后，本机调试、�
 同一个入口；公开 `curl | sh` bootstrap 要等项目具备稳定的签名 release URL 后另行增加，
 不能让本地开发路径猜测远端包来源。
 
-首次有 TTY 安装时，脚本询问 `cli_...` App ID，并用隐藏输入读取 App Secret。它还会用
-`secrets.token_urlsafe(32)` 自动生成不带换行的独立 Admin Web credential；已存在的合法
-文件只验证、永不覆盖。两个 Secret 都不会进入命令参数、YAML、unit 文本或日志。无 TTY
-（Agent、CI、后台 shell）时绝不 prompt：若飞书凭据缺失，脚本创建带
-`cli_REPLACE_ME` 的配置骨架、空的 `0600` Feishu Secret 和已经可用的 `0600` Admin
-credential 后退出。Agent 应按错误中打印的精确路径完成 App ID/Feishu Secret，再重新运行
-`./install.sh`；若 Agent 的命令工具默认分配伪终端，首次用 `./install.sh </dev/null`
-强制走同一路径。已有有效配置和 Secret 的升级天然非交互。
+首次有 TTY 且飞书凭据不完整时，安装器先构建、验证候选 release，再提供两种方式：默认
+使用候选 venv 中固定的官方 `lark-oapi` device flow，显示 URL 与终端二维码；或手工输入
+`cli_...` App ID 和隐藏 App Secret。默认流程对全新骨架只创建新 Bot 应用；配置已有
+`appId` 但 Secret 缺失时更新该 exact 应用。它使用 `addons.preset=false`，只声明前置门禁
+列出的 tenant scopes、`im.message.receive_v1` tenant event 和 `card.action.trigger`
+callback；不安装/调用 Lark CLI，不申请 user scope/event，不保存 user token/info。确认成功
+后 App ID 与 Secret 直接写入现有受保护文件；失败会显示手工回退，Ctrl-C 中止安装。
+
+device flow 只完成公开应用配置：租户管理员审批、按租户策略发布应用版本、配置可用范围、
+把机器人加入目标群仍是人工完成项。安装器还会用 `secrets.token_urlsafe(32)` 自动生成不带
+换行的独立 Admin Web credential；已存在的合法文件只验证、永不覆盖。两个 Secret 都不会
+进入命令参数、环境、YAML、unit 文本或日志；Feishu App Secret 只从 helper stdout 的父进程
+捕获 pipe 落到 `0600` 文件，stdout 不转发到终端。
+
+### Agent 驱动首次安装
+
+Agent 默认使用 `./install.sh </dev/null`。无 TTY 时安装器绝不 prompt，也不启动 device
+flow：若飞书凭据缺失，脚本创建带 `cli_REPLACE_ME` 的配置骨架、空的 `0600` Feishu
+Secret 和已经可用的 `0600` Admin credential 后退出。Agent 按错误中打印的精确路径完成
+App ID/Feishu Secret，再重新运行 `./install.sh`。已有有效配置和 Secret 的升级天然非交互。
+不要让用户把 App Secret 粘贴到聊天、命令参数、仓库或 YAML 中。
+
+只有同时具备以下能力时，Agent 才可以选择代用户承载上面的交互浏览器流程：命令工具能
+保持同一个长运行 PTY 或后台进程跨越对话轮次，能在进程退出前读取中间输出，并能继续向
+同一进程写入 stdin。满足这些条件时：
+
+1. 在持久 PTY/后台会话中运行 `./install.sh`，等安装方式菜单出现后选择 `1`（直接回车
+   也会选择默认项）。
+2. 等待 helper 在继承的 stderr 中打印验证 URL、终端二维码和进度；将 URL 原样及可用的
+   二维码交给用户，明确请用户在浏览器完成确认后回复。helper 的 credential stdout 由
+   安装器私下捕获，Agent 不应尝试读取或展示凭据。
+3. 把对话控制权交还用户，同时保留该进程；用户确认后继续读取同一个会话，直至安装完成。
+   父进程最多等待约 660 秒，过期后应重新发起，不保存或复用旧链接。
+
+缺少任何一项会话能力时不要启动交互流程，继续使用 `./install.sh </dev/null` 和凭据文件
+交接。浏览器流程失败后安装器会为真人提供手工输入回退；由 Agent 承载时应中止该会话并
+回到凭据文件路径，不要通过聊天收集 Secret。
 
 systemd user service 本身不读取 `.bashrc`、`.profile` 等 shell 启动文件。渲染 unit 只给
 profile loader 一条固定的基础 `PATH`，不保存执行安装的 SSH、Agent、venv 或 NVM PATH。
@@ -510,8 +545,9 @@ cutover；不得按通用重建流程丢弃 Side 墓碑，否则旧 Side 话题�
 路由。配置文件中的 `projects` mapping 会在启动时以 `INSERT OR IGNORE` 导入，数据库
 里已经停用或由飞书创建的条目始终优先。不要手工编辑 `projects` 或 `bindings` 表。
 
-使用卡片前，在飞书开发者后台打开“事件与回调 → 回调配置”。回调仍走现有 WebSocket
-长连接，不需要公网 callback URL；若未启用，文本命令正常但点击卡片不会产生事件。
+浏览器初始化会请求 `card.action.trigger`；手工准备应用时，使用卡片前须在飞书开发者后台
+打开“事件与回调 → 回调配置”。回调仍走现有 WebSocket 长连接，不需要公网 callback URL；
+若未启用，文本命令正常但点击卡片不会产生事件。
 
 ## Fail-closed 运维语义
 

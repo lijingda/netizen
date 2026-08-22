@@ -378,6 +378,13 @@ Skill catalog、plan/checklist、reaction、cwd
 queue 表，也不保存 Admin credential、session、action/CSRF token、native metadata 索引或
 audit record。
 
+首次交互安装的飞书应用初始化是 release 外的安装期流程，不是第二个运行时认证层。候选
+release 中固定的官方 OpenAPI SDK 只用 device flow 创建/更新 Bot 应用，并请求当前能力
+所需的 tenant scopes、消息事件和卡片回调；不申请或持久化 user token。成功后只更新同一
+份 `~/.netizen/config.yaml` App ID 与 `0600` `credentials/feishu-app-secret`，不向 Channel
+Database、Codex state、环境或日志写入凭据。无 TTY、已有完整凭据和服务运行时都不会进入
+该流程；手工凭据路径继续等价可用。
+
 文件数据库使用 WAL、`synchronous=FULL` 和有界 writer busy timeout。Admin 的 keyset
 分页查询只通过 Store-owned `query_only` connection 与单 worker executor 执行，SQL 有
 progress deadline 和提交前容量门禁；读事务不跨 `await`，也不会让 Web 自己成为第二个
