@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netizen"
+version = "0.3.0"
+description = "Use native Codex threads through a Feishu Channel."
+requires-python = ">=3.11"
+dependencies = [
+  "h11==0.16.0",
+  "lark-channel-sdk==1.2.0",
+  "openai-codex==0.147.0",
+  "pydantic==2.13.4",
+  "PyYAML==6.0.3",
+]
+
+[project.scripts]
+netizen = "netizen.main:main"
+
+[tool.setuptools.packages.find]
+include = ["netizen*"]
+
+[tool.setuptools.package-data]
+"netizen.admin" = ["static/*.html", "static/*.css", "static/*.js"]

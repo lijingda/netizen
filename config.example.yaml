@@ -1,0 +1,30 @@
+instance:
+  appId: cli_example
+  dataDir: /home/your-user/.netizen/state
+  # `none` maps to this one native cwd; it is not a per-session workspace.
+  defaultCwd: /home/your-user
+  # Empty Projects created from Feishu are confined below this directory.
+  projectRoot: /home/your-user/projects
+
+# User and chat availability are configured in the Feishu app console. Netizen
+# does not maintain a second allowlist.
+projects:
+  # All native Codex Threads under this alias share the exact same cwd.
+  test: /home/your-user/projects/test
+
+channel:
+  securityMode: audit
+
+# Single-administrator management UI. It is enabled by default and listens on
+# all interfaces for direct access inside the trusted private network.
+adminWeb:
+  enabled: true
+  host: 0.0.0.0
+  port: 8787
+
+# Local development may use an environment value. Linux deployment uses a
+# regular, non-symlink 0600 raw-value file and FEISHU_APP_SECRET_FILE.
+# FEISHU_APP_SECRET=...
+# FEISHU_APP_SECRET_FILE=/home/your-user/.netizen/credentials/feishu-app-secret
+# Admin Web supports only a canonical 32-byte base64url credential file.
+# NETIZEN_ADMIN_SECRET_FILE=/home/your-user/.netizen/credentials/admin-web-secret

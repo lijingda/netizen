@@ -1,0 +1,44 @@
+# Managed by Netizen install.sh
+[Unit]
+Description=Netizen Feishu Codex channel (Python SDK)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+
+Environment=@HOME_ENV@
+Environment=@CODEX_HOME_ENV@
+Environment=@PATH_ENV@
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=@CONFIG_ENV@
+Environment=@SECRET_ENV@
+Environment=@ADMIN_SECRET_ENV@
+UnsetEnvironment=FEISHU_APP_SECRET NETIZEN_ADMIN_SECRET PYTHONHOME PYTHONPATH VIRTUAL_ENV __PYVENV_LAUNCHER__
+
+# The launcher performs one bounded account-profile capture and then execs the
+# release Python process. Profile output and exported values never enter the journal.
+ExecStart=@EXEC_START@
+
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=75s
+KillMode=control-group
+UMask=0077
+
+# Deliberately do not impose an outer filesystem/network sandbox. Native Codex
+# reads the shared user config and applies its own config.toml permission mode.
+TasksMax=256
+LimitNOFILE=4096
+LimitCORE=0
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=netizen
+
+[Install]
+WantedBy=default.target

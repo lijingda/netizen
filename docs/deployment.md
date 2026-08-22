@@ -1,0 +1,723 @@
+# 单实例 Linux 部署
+
+Netizen 以执行 `install.sh` 的当前用户运行，与该用户的 CLI 共用标准 `$CODEX_HOME`
+（默认 `~/.codex`）；不创建专用 Agent 用户、第二套 Codex 状态或 system-level daemon。
+第一版只支持 Linux + systemd user manager，macOS adapter 是后续工作。
+
+## 选择部署目标
+
+仓库不定义默认服务器、SSH alias、账号或远端 checkout。选择一台满足本文前置条件的
+Linux 主机，并在执行同步、远端调试、候选门禁、安装、升级或运行验收时显式使用同一个
+`<deployment-host>`。它可以是本机 SSH config 中的 alias，也可以是
+`<user>@<hostname>`。
+
+维护者若需要在某个 checkout 中保存自己的主机、路径和私有验收记录，可复制
+`LOCAL_ENVIRONMENT.example.md` 为被 Git 忽略的 `LOCAL_ENVIRONMENT.md`。该文件不是
+运行时配置；没有它的全新 clone 仍应完全按本文完成部署。
+
+每个 Python release 与自己的 venv 一起安装到当前用户的标准 data 目录。ADR 0014 的 Goal/Skills
+与 ADR 0021 的 Side Adapter 不做运行时版本 allowlist，但候选
+构建必须对实际 resolved SDK/App Server 通过本文 capability harness。ADR 0019 将
+Thread Delete Adapter 保持为非生产 synthetic/migration 边界；服务不会构造它。ADR 0020 的 active-Turn plan
+observer 另行精确锁定 SDK 版本、源码指纹和非消费 queue contract；门禁失败只关闭
+checklist 展示，不关闭普通 Turn。这个降级以候选已通过 ADR 0009 独立的 service-wide
+SDK/cleanup 门禁为前提；不能用 plan 的展示降级绕过该启动门禁。
+
+## 目录
+
+```text
+~/.netizen/
+  config.yaml                                   # Channel 配置，0600
+  credentials/
+    feishu-app-secret                           # raw Secret，0600
+    admin-web-secret                            # 独立 32-byte base64url credential，0600
+  state/
+    channel.sqlite3[-wal|-shm]                  # Binding/Turn settings/Registry/Dedup
+    .install.lock / .activation-intent.json     # 跨卸载锁与异常中断恢复意图
+    rollback-recovery-*                         # 回滚恢复材料
+  releases/.netizen-managed                     # 删除前必须匹配的 ownership marker
+  releases/<sha256>/source/                     # 当前工作区的只读语义快照
+  releases/<sha256>/venv/                       # 与源码成对的 runtime
+  current -> releases/<sha256>                  # 现役 release
+  previous -> releases/<sha256>                 # 一个回滚点
+  cache/.netizen-managed                        # 可删除安装缓存的 ownership marker
+~/.config/systemd/user/
+  netizen.service                               # 渲染后的 user unit
+${CODEX_HOME:-~/.codex}/
+  skills/netizen-user-guide/                    # release 全量管理的用户咨询 Skill
+```
+
+配置、Channel 状态和 Codex 原生状态都在 release 之外。ProjectRegistry 仍会解析并保存
+canonical cwd；安装器不复制 Project，也不会创建 per-Binding workspace。
+
+Netizen 产品根固定为 effective user 的账号 home 下的 `~/.netizen`，安装器有意忽略
+`XDG_DATA_HOME`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME` 和 `XDG_CACHE_HOME`。这是单一
+user unit、单一全局用户指南 Skill 的固定安装身份，不是可用来运行多实例的 profile。
+`CODEX_HOME` 仍遵循 Codex 原生覆盖。开发源码位置与安装位置解耦：任意 checkout、文件
+同步或云上直接修改仍可部署到同一套 release；需要隔离安装器黑盒测试时使用临时 Unix
+用户、容器或 VM，而不是改 XDG 变量。
+
+安装器只会新建空的 `releases`/`cache`，或复用带精确 `.netizen-managed` marker 的目录。
+若它们已经非空且无标记，安装和卸载都会 fail closed，避免仅凭目录名认领并递归删除。
+安装器还会读取 systemd user manager 的环境；若它用 `XDG_CONFIG_HOME` 或
+`SYSTEMD_UNIT_PATH` 排除了固定的 `~/.config/systemd/user`，安装会在切换前明确失败。
+
+## 前置门禁
+
+先确认 CLI 登录有效：
+
+```bash
+codex login status
+codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
+```
+
+不要把一次登录成功当作持久前提。若命令出现认证错误，应先独立验证登录，不要用服务
+失败掩盖认证问题。
+
+逐条引用会调用“获取指定消息”，普通/富文本图片还会调用“获取消息中的资源文件”。
+飞书应用版本在发布前必须确认：
+
+- 单聊读取具备 `im:message` 或官方允许的对应 readonly 权限；
+- 群聊回查额外具备 `im:message.group_msg`，不能只有接收 @ 消息的
+  `im:message.group_at_msg`/readonly；
+- 当前 Prompt 发送者姓名解析具备 `im:chat.members:read`；权限不足时 Channel SDK
+  无法从 chat member roster 补全真实显示名，Netizen 会零 start/steer；
+- Prompt pulse、steer 确认和终态表情具备
+  `im:message.reactions:write_only`，或已具备覆盖该能力的 `im:message`；
+- 本轮文件具备 `im:resource` 与 `im:message:send_as_bot`，允许机器人上传图片/文件并
+  回复消息；“事件与回调 → 回调配置”已开启，按钮 callback 能到达当前 WebSocket；
+- 机器人仍在目标群中，新权限已随应用版本发布而非只保存在开发者后台。
+
+权限不足时不降级为忽略引用或图片的普通 prompt；当前消息必须显式失败且
+不调用 Codex。任务表情是展示层的尽力操作：reaction 权限或单次请求失败只记录日志，
+不得阻断已经启动的 Turn 或最终文本回复；`OnIt` 失败会在 native steer 已成功时回退
+一条简短确认，避免把成功操作显示成无响应。
+
+引用功能发布后要用真实消息手工验收普通文本与 CardKit 2.0 应用卡片。卡片用例应
+确认 header/body 可见文本进入 Codex，而按钮 value、确认弹窗和隐藏 option 不进入；
+确认两次 SDK 读取分别使用 10 秒预算，不得退回共享总预算而产生假超时。
+当前消息来源还要由两名真实参与者交叉验收：A 启动长 Turn，B 发送 steer，Codex 应分别
+看到两条消息的实际发送者，但完成回复仍锚定 A 的原任务消息。随后从 Codex App/CLI 查看
+同一 native Thread，确认公开身份字段进入原生历史，并确认 `/sessions`、`/status` 的首条
+preview 仍以 A 的真实请求开头，而不是 attribution 元数据。此验收只确认归属可见性，
+不得把显示名或 ID 当作额外权限。临时撤销 `im:chat.members:read` 或使用未发布该权限的
+应用版本重试时，消息必须明确提示开通权限且零 start/steer，不能出现“未知发送者”
+Prompt；恢复并发布权限后同一成员应重新解析出真实姓名。
+图片用例还要覆盖：单聊普通图片、群聊 @机器人富文本多图、文字引用图片、当前图文
+引用另一条图文。确认图片以原生视觉输入提交；任一资源删除/保密/无权时零
+start/steer。观察进程 RSS：固定 Channel SDK 在 20 MB 应用层门禁前可能完整读取
+飞书允许的最大 100 MB 单资源，data URL 和 native RPC JSON 还会产生额外副本。
+不同 Binding 的图片准备保持并发，没有全局容量 gate；asyncio 超时也不能停止已经进入
+worker thread 的阻塞读取。Pilot 依赖受控用户范围、低频小图，并需持续观察并发图片时
+的 RSS；若实际使用模式变化，应先推动 Channel SDK 的有界流式下载能力。
+
+候选 release 必须通过：
+
+```bash
+make check
+for phase in models turn-settings smoke usage steer plan polling compact concurrency interrupt skills lifecycle side; do
+  timeout --signal=INT --kill-after=10s 420s \
+    .venv/bin/python scripts/probe_python_sdk.py \
+    --cwd "$HOME/projects/test" --phase "$phase" || exit
+done
+timeout --signal=INT --kill-after=10s 420s \
+  .venv/bin/python scripts/probe_python_sdk.py \
+  --cwd "$HOME/projects/test" --phase release
+timeout --signal=INT --kill-after=10s 660s \
+  .venv/bin/python scripts/probe_python_sdk.py \
+  --cwd "$HOME/projects/test" --phase config
+timeout --signal=INT --kill-after=10s 660s \
+  .venv/bin/python scripts/probe_python_sdk.py \
+  --cwd "$HOME/projects/test" --phase goal
+timeout --signal=INT --kill-after=10s 300s \
+  .venv/bin/python scripts/probe_python_sdk.py \
+  --cwd "$HOME/projects/test" --phase sandbox
+```
+
+这些 live commands 必须在与服务相同的账号 interactive login 环境中运行。人工部署先
+正常登录 `ssh -t <deployment-host>` 再执行；自动化 remote command 必须显式采用该账号
+shell 的 login 模式（Bash 示例为 `/bin/bash -lic '<commands>'`）。普通
+`ssh <deployment-host> '<commands>'` 的
+non-interactive shell 不等价：它可能缺少 profile 导出的代理/CA/PATH，使 models 等只读
+请求成功而真实 Turn 持续等待。诊断环境差异时只比较变量名或摘要，不得把值写入日志。
+
+`make check` 是不创建真实 Codex Thread 的统一本地门禁。另在带 `.git` 的源码 checkout
+运行 `git diff --check`；内容寻址的安装快照没有 `.git`，不要在那里执行该命令。后续
+live probe 会创建原生 Thread，只在已登录的目标 Linux
+执行。每个 phase 会把 started/passed/failed 进度写到 stderr，并只把最终 JSON 写到
+stdout；异常路径的二次 interrupt、terminal cleanup 和 task drain 都有界，外层
+`timeout` 是整个 phase 的最后兜底。
+
+`make check` 还固定验证公开 `AsyncTurnHandle.stream()` 的 exact
+`turn/diff/updated` latest aggregate snapshot、公开 `ThreadItem.root` 的 completed
+`fileChange` / `imageGeneration.saved_path` fallback、unified diff metadata parser、v3
+过期拒绝、v4 自包含循环分页、100/500 完整 manifest、1000 明确拒绝，以及 Lark
+`OutboundImage`/`OutboundFile`/`SendOpts` 合同。任一固定 SDK/Channel shape 变化都必须先
+更新兼容性结论，不能把本轮文件降级成工作区扫描、最终文本解析、私有 RPC 或静默截断。
+
+`models` phase 是只读门禁：它必须通过公共 `codex.models()` 输出一个且仅一个默认
+Model，并列出每个 Model 的默认/支持 Effort、默认/支持 Speed。输出只用于核对本次
+目标环境，不能复制进生产代码或文档作为静态选项。它不会创建 Thread 或 Turn。
+若返回非空 `next_cursor`，固定高层 facade 无法翻页，phase 必须失败，不能只展示
+第一页。
+
+`smoke` phase 使用与生产无引用文本相同的 Current Prompt Message renderer；除了要求
+Turn 正常完成、exact ID 可 resume 外，还要求 `thread_list.preview` 以真实请求正文开头。
+这只验证原生 preview 兼容性；两名飞书参与者的实际身份归属仍按下文人工验收。
+
+`turn-settings` phase 从同一 live catalog 选择默认 Model/Effort，显式提交 Standard
+Service Tier 的 configured Turn，再按 exact Thread ID resume 并重复提交同一组三项
+override；两轮都必须完成。它是 SDK/App Server 升级时对持久 Binding 配置重复应用的
+端到端 shape/连续性门禁，不声称能读取或证明 Thread 内部当前值。SQLite 持久化、每轮
+live revalidation、admission revision 和 steer 不应用由 `make check` 的 synthetic
+Runtime/SQLite 测试负责。
+
+`usage` phase 先通过公开 `thread/read(include_turns=True)` 观察 exact Turn 为
+`inProgress`，再用公开 read 确认持久化终态，最后排空该 handle 的公开 stream。它必须
+收到 identity 匹配的 `thread/tokenUsage/updated`，且 `last.total_tokens` 非负、
+`model_context_window` 为正数。这个门禁验证 `/status` 的生产时序；外层进程 `timeout`
+负责 SDK/App Server 违约时的最终隔离，不在进程内取消阻塞 stream。
+
+所有依赖普通 Turn final response 的 live phase 都必须在公开 full-history 中同时看到
+terminal status 与 final agent message；若 App Server 短暂先暴露 completed 状态，探针
+继续有界重读，不能把部分 materialized Turn 当成最终结果。生产 Runtime 对同一窗口最多
+重读 4 次，并保留无文本 Turn 的既有显式兜底。
+
+`make check` 会运行 `probe_sdk_turn_plan.py`：真实安装 SDK 连接 fake App Server，observer
+先快照 exact active Turn 的 plan，再证明队列长度、顺序和对象身份未变，最后由公开
+stream 收到同一 plan 并排空 completion。`plan` live phase 会要求模型先生成 checklist，
+在有界延迟 Turn 中接受一次 steer，再观察包含 steer 新步骤的完整 plan replacement、
+最终 steered 回复和终态后公开 stream 中仍存在这些通知。任一步失败都不得通过升级门禁。
+
+每次 probe 都输出实际 `openai_codex_version` 并先运行 facade inventory。若 Goal、
+Skills、Side boundary inject、Thread unsubscribe、Apps 或 Thread Delete 出现候选高层 API，
+`sdk_gap_facade_migrations` 必须使候选
+失败，直到对应 port 切回公开 provider 并删除 shim。`make check` 还会让真实安装 SDK client 连接 fake
+stdio App Server，按能力验证 fixed method/params/generated model、Goal 的即时通知与
+多 Turn logical stream、resume route-before-mutation、Thread Delete 空响应与 response-loss
+unknown、Side 固定 boundary、三种 unsubscribe status 与 response-loss 不重试，以及无
+版本/experimental gate；
+不能用 mock 私有 helper 代替，也不能因一个能力 shape 失败连带关闭另一个能力。
+
+`skills` phase 在临时 Project 中创建两个受控 Skill，先经 `skills/list` discovery，再
+验证一条 Turn 同时携带文本 marker 与两个 typed `SkillInput`，并验证 running Turn 的
+typed steer。目录错误、disabled/重名/stale Skill 或 name/path 不一致都必须在 start/
+steer 前失败；结果不能复制成生产静态目录。
+
+`lifecycle` phase 只管理自己创建的原生 Thread：完成一个 seed Turn 后，依次用公开 SDK
+重命名、归档、恢复。每一步都通过显式 `thread_list(archived=False|True)` 分页目录验证
+名称保留、归档只出现在 archived catalog、恢复保持同一 native ID。它不会调用
+`thread/delete`，验证恢复后会再次公开归档该探针，避免污染普通 native Thread 目录。
+materialized `/delete` 按 ADR 0019 固定为 unavailable；dormant Adapter 只由
+shape/synthetic 与 facade migration sentinel 覆盖。
+
+`release` phase 是普通持久 Thread 空闲订阅释放的原生硬门禁。它先在 App Server A 创建
+并完成一个 Thread，确认 `thread/backgroundTerminals/list(limit=1)` 为空后取消当前连接
+订阅，再在同一连接按 exact ID resume 并完成后续 Turn。关闭 A 后，App Server B 必须按
+同一 ID 接管、继续 Turn 并再次取消订阅；这证明 Binding 可以保留 ID/历史而无需常驻订阅。
+该 phase 不等待也不冒充 App Server 最后订阅者离开后的 30 分钟卸载宽限期。当前协议没有
+稳定、无副作用的 live registered-terminal fixture，因此 list 非空、检查错误与 unsubscribe
+响应未知的阻断/重试由真实 SDK fake-server harness 和 Runtime 测试作为发布硬门禁。
+
+`side` phase 是 Side 上线的原生硬门禁：先创建并物化 Parent，再启动一个可观察的普通
+Parent Turn；在该 Turn 仍 running 时用公开 `thread_fork(..., ephemeral=True)` 验证 exact
+ID、ephemeral 与 parent shape，通过固定 Adapter 注入 boundary，并在 Parent marker 仍存活
+时启动 Side Turn，证明 Parent/Side 真并发。随后在同一 Side Thread 连续完成至少两轮，
+请求 terminal cleanup 和 unsubscribe，最后证明 Parent 仍能继续并将 Parent 归档。Parent
+的 seed、并发 Turn 和 after Turn 都使用公开 full-history 终态恢复；只有 ephemeral Side
+使用 `handle.run()`。它不增加 Side 专项 completion-race gate；普通持久 Thread 的
+read-recovery 门禁仍由 `make check` 保留。
+飞书 topic 能力另做下文五入口 live 验收，尤其不能用 FakeChannel 宣称 P2P Topic 已支持。
+
+`goal` phase 是 Goal 上线的硬门禁。它首先创建零 Turn Thread，并用公开 read 证明该
+Thread 已是 idle、非 ephemeral 且有持久化 path；这一项失败时 Goal 必须保持 unavailable，
+不能用 dummy Turn 或 synthetic 结果替代。随后用有界、无破坏 objective 验证 start ->
+pause -> exact physical Turn interrupt -> resume rollover -> terminal -> same-Thread normal
+Turn，并由第二个无本地 route 的 SDK client 只读确认 persisted active Goal。灰度前还
+必须记录目标环境实际 sandbox/approval 姿态，确认原生自动 continuation
+适合无人值守执行。进程重启后 external-active Goal 的隔离仍需手工验证；当前版本不会
+安全重挂或替用户暂停它。
+
+`compact` phase 创建一条短原生会话，要求公开 `compact()` 的立即 acknowledgement
+之后，公开 `thread.read(include_turns=True)` 能观察到 baseline 之后新增的 completed
+`contextCompaction` Turn，并在同一 Thread 完成 `COMPACT-AFTER`。只看到空响应或
+Thread idle 不算通过；phase 会记录实际状态序列和 compact Turn/item 类型。生产命令
+还要求 baseline 后候选唯一，多个候选或 10 分钟无终态均 fail closed。
+
+ADR 0009 的 fail-closed 门禁会校验整个 pinned `openai_codex` Python 源码树的
+确定性聚合指纹；部署包必须保留 `.py` 源文件。只有 `.pyc`、无法读取源码或任一源码
+文件不匹配的安装都会按设计拒绝启动，不能绕过该门禁。
+
+上述版本/指纹规则只属于 terminal inspection/cleanup。Goal/Skills SDK Gap Adapter 按
+ADR 0014、Side boundary 与 Thread subscription Adapter 按 ADR 0021/0028 使用 capability
+shape + synthetic + live harness，不得新增另一套运行时版本白名单。
+Thread Delete Adapter 按 ADR 0019 只保留 shape/synthetic migration harness，不做 live
+mutation、也不进入生产；同样不得删除 ADR 0009 的既有门禁来“统一”两类 Adapter。
+
+原生 `handle.run()` completion 探针在 `openai-codex==0.147.0` 第 1 次复现失败，
+但它不是 production 路径；带 `--read-recovery` 的公开 polling 门禁必须通过。
+interrupt phase 按 ADR 0010 精确等待 `argv[0] == marker`，执行 exact Turn
+interrupt，并为 exact Thread 请求清理 App Server 已登记的后台 terminal。它记录
+`foreground_process_exited_within_5s`，但该值是版本能力分类，不是 cleanup 成功
+证明，也不是硬门禁。phase 必须观察 native `interrupted`、有界等待自己的 marker
+自然退出而不留孤儿，并在同一 native Thread 上完成 `AFTER-CLEANUP` 新 Turn。
+
+### 已验证的兼容性结论
+
+实例专属的主机、账号、PID、native ID、release/备份路径、数据库行数和私网访问结果不属于
+公共部署契约；维护者应把这类记录保存在被忽略的 `LOCAL_ENVIRONMENT.md` 或自己的运维
+系统中。公共候选是否可发布，只由当前代码对应的自动化门禁、live probe 和下列稳定结论
+决定，不能复用某次实例验收结果：
+
+- 固定 `openai-codex==0.147.0` 与 bundled CLI `0.147.0` 已通过公开 models、
+  Turn settings、smoke、usage、steer、plan、polling、compact、concurrency、
+  interrupt、Skills、lifecycle、Side、release、config、Goal 和 sandbox 能力门禁；
+  每个新候选仍必须在自己的目标环境重跑完整集合。
+- 精确 SDK 源码指纹为
+  `35ec9419cb9f42577080f9bf410e81cb5a97ae64e5297c4302878c73749d39eb`。
+  该值属于 ADR 0009/0020 的版本兼容门禁，不是某台主机的环境配置。
+- foreground tool process 不属于 background-terminal registry；
+  `interrupt` 和 terminal cleanup 成功不证明前台进程已退出。
+  `foreground_process_exited_within_5s=false` 是受支持分类，但 native Turn 必须进入
+  `interrupted`、same-Thread resume 必须成功，probe 自己不得遗留 marker。
+- 固定 SDK 的 Project config 观测分类为 `hot-reloaded`；升级后
+  `restart-required` 仍可接受，但必须按新版本实际结果更新兼容性判断。
+- sandbox probe 只报告 `workspace-write-or-full` 或 `read-only-or-denied` 的端到端
+  体感分类，不识别配置来源，也不能替代目标账号的真实权限验收。
+- Admin Web 候选必须从另一台受信内网主机直接验证 readiness、login、CSRF/Origin/Host、
+  inventory、mutation、restart session invalidation、journal 脱敏和数据库完整性；
+  使用 `http://<server-ip>:<port>`，不得把真实实例地址写回本文。
+- non-interactive SSH 可能缺少账号 profile 中的代理、CA 和 PATH。所有 live gate 必须在与
+  服务相同的账号 login 环境运行，只比较必要变量名或摘要，不记录环境值。
+- migration、rollback、installed-source equality、database integrity、service ready、
+  `NRestarts` 和遗留进程都必须针对本次候选重新验证，历史绿灯不能作为当前证据。
+
+`--phase config` 只在给定测试 cwd 下创建临时 Project，验证同一 App Server 的
+Project config 重载后自动清理；它不会读写全局 `config.toml`。实测结果为
+`CONFIG-A -> CONFIG-B`，当前固定 `0.147.0` 分类为 `hot-reloaded`。升级后若输出
+`restart-required` 仍是受支持结果，但必须更新兼容性判断并按重启语义验收。用户级
+`~/.codex/config.toml` 不由 Netizen 监听；修改官方要求重启的键后先执行：
+
+```bash
+"$HOME/.netizen/current/source/service.sh" restart
+```
+
+然后重跑对应 probe，不能拿重启前的分类替代新配置的实际效果。
+
+`--phase sandbox` 同样只使用临时 Project：它不向 SDK 传 sandbox/approval override，
+也不写任何 Codex 配置，只通过一次 cwd marker 写入报告当前实际权限为
+`workspace-write-or-full` 或 `read-only-or-denied`。这是端到端体感分类，不声称识别了
+具体配置层；修改用户级 profile 后可重跑比较。
+
+不要把某次 sandbox 分类固化成现役状态，也不能拿全局 CLI 的显示替代 SDK 探针。
+需要改变飞书侧权限时，修改云端用户级 Codex 配置、按配置语义重启服务，并重跑此
+phase，以新结果为准。
+
+## 安装
+
+需要 Python 3.11+、`venv`、systemd/logind 和有效的当前用户 Codex 登录。源码可以来自
+git checkout、文件同步，也可以直接在目标云主机编辑；入口始终是源码根目录下的零参数
+脚本：
+
+```bash
+./install.sh
+```
+
+不要用 `sudo ./install.sh`“提升权限”：脚本总是为执行它的 effective user 安装；若明确以
+root 执行，得到的就是 root 自己的安装。脚本不接收 App ID、Secret、路径、branch 或
+upgrade 参数，也不执行 `git pull`。当前工作区里的受管源码、文档、Skill 和测试（包括
+未提交的新文件与改动）一起计算 SHA-256 并复制到独立 release，`.git`、venv、cache 和
+pyc 不进入快照。将代码获取与主机安装解耦后，本机调试、云上开发和正式 release 使用
+同一个入口；公开 `curl | sh` bootstrap 要等项目具备稳定的签名 release URL 后另行增加，
+不能让本地开发路径猜测远端包来源。
+
+首次有 TTY 安装时，脚本询问 `cli_...` App ID，并用隐藏输入读取 App Secret。它还会用
+`secrets.token_urlsafe(32)` 自动生成不带换行的独立 Admin Web credential；已存在的合法
+文件只验证、永不覆盖。两个 Secret 都不会进入命令参数、YAML、unit 文本或日志。无 TTY
+（Agent、CI、后台 shell）时绝不 prompt：若飞书凭据缺失，脚本创建带
+`cli_REPLACE_ME` 的配置骨架、空的 `0600` Feishu Secret 和已经可用的 `0600` Admin
+credential 后退出。Agent 应按错误中打印的精确路径完成 App ID/Feishu Secret，再重新运行
+`./install.sh`；若 Agent 的命令工具默认分配伪终端，首次用 `./install.sh </dev/null`
+强制走同一路径。已有有效配置和 Secret 的升级天然非交互。
+
+systemd user service 本身不读取 `.bashrc`、`.profile` 等 shell 启动文件。渲染 unit 只给
+profile loader 一条固定的基础 `PATH`，不保存执行安装的 SSH、Agent、venv 或 NVM PATH。
+每次 start/restart 和 systemd 自动重启都会先运行 release 内的短生命周期 launcher；它
+根据 effective uid 的账号数据库取得 home 与 login shell，执行一次无 TTY interactive
+login profile，取得完整导出环境后直接 `exec` release Python。systemd 因而继续监督真实
+Netizen PID、信号和退出状态，不把 daemon 长期包在交互 shell、tmux 或伪终端中。
+
+Bash/Zsh/POSIX shell 使用 `-lic`，Fish 使用等价 login + interactive 模式。profile 的
+stdout 和环境快照由 launcher 增量、有界读取，stderr 直接丢弃，都不进入 journal 或
+文件；随机 NUL 边界定位快照，声明长度和 SHA-256 摘要会拒绝后台 writer 在边界内并发
+插入的内容。探针用 `exec` 替换 login shell，因此
+不会在完成环境捕获时执行 `.bash_logout`、`.zlogout` 等会话结束 hook。探针超过 10 秒、
+输出超过 4 MiB、shell/profile 退出
+非零或未返回完整快照时会 fail closed，错误只报告 shell 和状态，不回显可能含 Secret 的
+profile 输出。用户应先在终端验证相同模式，例如 Bash 使用：
+
+```bash
+/bin/bash -lic 'command -v codex; command -v bytedcli; command -v node'
+```
+
+Bash 的 interactive login shell 按原生规则读取 `.bash_profile` / `.bash_login` / `.profile`，
+不会额外自动读取 `.bashrc`。若 NVM 等初始化只在 `.bashrc`，应由 login profile 正常 source
+它；launcher 不替用户强制再 source 一遍，避免常见 profile 已经引用时产生双重副作用。
+Zsh、Fish 和其他支持的 shell 同样遵循各自原生 startup 顺序。
+
+捕获结果保留 PATH、NVM、代理/CA、语言、XDG 和普通导出变量；随后重新覆盖账号身份、
+`HOME`、安装时选择的 `CODEX_HOME`、Netizen 配置/两个 Secret 路径，并清除 profile 中
+的 direct Feishu/Admin Secret、两条可能漂移的 Secret path，以及会污染 release Python
+的 venv/Python 变量；随后写回安装器固定路径。unit 中的 launcher、环境探针和最终 Netizen
+解释器都显式使用 `-E -B -u`（非交互校验省略 `-u`），因此其他 `PYTHON*` 变量可以继续
+作为工具环境存在，却不能改变受管 release Python 的 import、优化、pyc 或缓冲行为。
+Codex 工具子进程的继承、过滤和显式 set 仍由同一份用户级
+`~/.codex/config.toml` 的原生 `shell_environment_policy` 决定。Netizen 只通过公开
+`CodexConfig` 固定 `allow_login_shell=false`：工具默认直接继承 launcher 已取得的环境，
+不会再由 Codex 的 non-interactive login shell/snapshot 把 NVM PATH 覆盖回系统 PATH；
+不写死 PATH，也不维护第二份变量策略。修改持久 profile 后执行 `./service.sh restart`
+即可；某个已有终端里的临时 `export`、alias、未导出的 shell function 和真实 TTY 状态
+不会被后台服务继承。
+
+systemd user service 在用户注销后继续运行依赖 linger。若未启用，交互安装会执行一次
+`sudo loginctl enable-linger <当前用户>`；无 TTY 安装会先退出并打印这条命令，Agent 可
+经主机授权独立执行后重试。安装器不会关闭 linger，因为它可能同时服务该用户的其他
+user units。
+
+### 候选验证与切换
+
+安装器先在新 release 创建全新 venv，并以 `requirements.lock` 约束安装依赖。接受候选
+前自动执行与 `make check` 相同的安全本地门禁、`pip check`、
+`scripts/verify_installed_release.py`（逐一比较 Python 与 Admin HTML/CSS/JS 等所有普通
+package files，并做 `importlib.resources` smoke）、配置解析和候选 venv 中固定 Codex CLI 的
+`login status`。这些安全检查使用安装调用者经清理的环境；安装器不会在 service cgroup
+之外执行任意账号 profile，因为 profile 可以产生不可逆副作用或自行 daemonize。真实
+profile 只在候选 service 启动时加载：首次安装和原本 active 的升级会等待 ready，失败时
+回滚；原本停止的升级保持停止，之后 `service.sh start/restart` 会等待最多 45 秒确认 ready
+并直接暴露 shell/profile 启动错误；对已经 active 的 unit，`start` 幂等返回而不等待一条
+不会重复产生的 ready 日志。任意具体 MCP/工具是否可用仍取决于其自身配置，不能
+由安装器枚举。真实 Thread capability phases 仍由 release 发布者按“前置门禁”执行，
+不在每个最终用户安装中重复创建探针 Thread。
+
+激活阶段停止现役 user service（如果原本在运行），随后对 configured Admin Web address
+执行 best-effort bind preflight。所有成功 socket 会持有到本次地址枚举结束，IPv6 明确
+设置 `IPV6_V6ONLY`；`EADDRNOTAVAIL` 只有在同一配置至少一个地址成功时才可忽略，端口占用
+则在数据库快照、unit 和 `current` 切换之前失败并进入既有 activation rollback。runtime
+bind 仍是最终事实。预检通过后才渲染并验证 user unit，原子切换
+`current`，再用候选 release 完整替换
+`${CODEX_HOME:-~/.codex}/skills/netizen-user-guide`。这一个 Skill 内的人工修改会在升级
+时丢失；其他 Skill 不会被读取或修改。首次安装会 enable 并启动服务；升级前若服务在
+运行，新版本会启动并等待 journal 出现 `netizen service ready`；若原本停止则保持停止，
+已有 release 的 enabled/disabled 状态也保持不变。
+
+只有 unit、release、Skill 和服务 ready 全部成功，旧 `current` 才记录为 `previous`，
+并只保留这两个 release。候选启动前会在旧进程停止且端口预检通过后复制
+`channel.sqlite3` 及现有
+sidecar；任一步失败都会停止候选并恢复旧 release 指针、unit、数据库、Skill 和
+enable/active 状态。即使回滚点来自该 Skill 上线前，也会按安装前快照恢复“原本不存在”
+的状态，不要求旧 release 提供新脚本。若数据库或 Skill 恢复本身失败，受保留的 state
+目录会保存 recovery snapshot，并在错误里打印精确路径。
+
+任何可能停止旧服务的 mutation 之前，安装器都会原子写入 activation intent，记录本次
+操作完成后应保持的 active/enabled 状态。正常成功或完整回滚会清除它；若进程在切换中被
+`SIGKILL` 或异常退出，下次 `./install.sh` 会优先恢复该意图，再执行候选切换。因此
+发布后的半成品状态不会被误认成用户主动停止/禁用服务；`uninstall.sh` 会清除遗留意图。
+
+从早期 `/etc/systemd/system/netizen.service` 升级时，安装器只自动迁移带 Netizen 标识的
+旧 unit。若它仍 active/enabled，交互安装会请求一次 `sudo systemctl disable --now
+netizen.service`；无 TTY 时打印同一条预备命令。候选失败会尽力恢复旧 system service。
+不认识的同名 system unit 一律 fail closed，不代替用户停用。
+
+### 升级、启停和卸载
+
+更新任意开发目录后再次运行即可升级；内容相同的 release 会验证后复用：
+
+```bash
+./install.sh
+```
+
+日常服务控制只走当前用户的 systemd manager；`service.sh` 内外都不使用 sudo：
+
+```bash
+./service.sh start
+./service.sh stop
+./service.sh restart
+./service.sh status
+```
+
+若原 checkout 已删除，从安装目录使用完全相同的入口：
+
+```bash
+"$HOME/.netizen/current/source/service.sh" status
+"$HOME/.netizen/current/source/uninstall.sh"
+```
+
+`uninstall.sh` 无参数，停止/disable user unit，并删除渲染 unit、程序 releases、安装
+cache 和精确的受管用户指南 Skill。它明确保留 `config.yaml`、`credentials`、含 Channel
+SQLite 的 `state`、Project 目录、其他 Codex Skills 及原生 Thread/Turn 历史。若用户也
+要删除这些数据，应在确认备份和影响后另行处理，不能扩张卸载器的默认删除范围。
+
+安装或升级后核对 ready 日志，并在飞书发送“运行中的任务再发一条消息会怎样？”确认
+自然语言回答包含 steer 且明确不排队；再用 `$netizen-user-guide 如何切换会话？` 验证
+显式调用能说明 `/sessions` 和 `/resume`。
+
+`config.yaml` 采用仓库示例的 mapping 形态。Feishu Secret 文件只含 raw value，权限必须是
+`0600` 或更严格；Admin credential 必须是 `token_urlsafe(32)` 的 canonical base64url 单行、
+无尾换行，且 mode 必须精确为 `0600`。若需要由 Agent 预配置，可安全地以文件写入 API/
+受控 stdin 写入；不要把 Secret 放在 CLI 参数或 shell history 中。示意路径可由安装器首次
+无 TTY 运行生成：
+
+```bash
+./install.sh  # 无 TTY 且缺配置时，生成骨架后明确退出
+```
+
+从带 Netizen allowlist 的旧版本升级时，必须先从 live `config.yaml` 删除整个
+`access:` 段。用户和群的可用范围改由飞书应用后台管理；新版若发现旧段会明确拒绝
+启动，避免部署者误以为这些字段仍然生效。
+
+不要把 Secret 内容写入 YAML、仓库、shell 参数、shell profile 或 systemd
+`Environment=`。unit 只注入两个受保护文件的固定路径。
+
+`adminWeb` 默认等价于：
+
+```yaml
+adminWeb:
+  enabled: true
+  host: 0.0.0.0
+  port: 8787
+```
+
+可覆盖 host/port 或显式关闭；启用时 `NETIZEN_ADMIN_SECRET_FILE` 必须是绝对路径。直接在
+受信内网打开 `http://<服务器 IP>:8787`，未登录时根路径会跳转到 `/login`。登录凭据可由
+实例管理员在受控终端读取：
+
+```bash
+cat "$HOME/.netizen/credentials/admin-web-secret"
+```
+
+轮换时用安全的原子文件写入替换同一路径并保持 0600，然后刷新页面；运行中 auth 会在下一
+认证边界检测到合法 identity/content 变化并立即注销全部旧 session。非法替换会锁闭 Admin
+admission，修复文件后仍需 `./service.sh restart`，不会自动重新开放。V1 使用不加密的内网
+HTTP；不得把该端口直接暴露到不受信网络。
+
+`instance.projectRoot` 用于限制从飞书自动创建的空 Project；未配置时回退为
+`defaultCwd.parent`。Channel Database 只接受当前 schema v5，不自动迁移旧 schema。
+首次从没有 Side 数据的 schema v4 升到 v5 时，若遇到 schema mismatch，可停止服务并
+归档旧数据库，再让新版本创建干净数据库；这会丢弃 Netizen 的
+Scope/Binding/Project Registry 和去重记录，但不会删除 Codex 原生 Thread。v5 投入使用
+后，后续 schema 升级必须迁移 `side_topics` 的永久路由墓碑，或提供等价的 fail-closed
+cutover；不得按通用重建流程丢弃 Side 墓碑，否则旧 Side 话题会重新落入普通 Binding
+路由。配置文件中的 `projects` mapping 会在启动时以 `INSERT OR IGNORE` 导入，数据库
+里已经停用或由飞书创建的条目始终优先。不要手工编辑 `projects` 或 `bindings` 表。
+
+使用卡片前，在飞书开发者后台打开“事件与回调 → 回调配置”。回调仍走现有 WebSocket
+长连接，不需要公网 callback URL；若未启用，文本命令正常但点击卡片不会产生事件。
+
+## Fail-closed 运维语义
+
+- 若 Netizen 提示 admission 已关闭或要求重启，表示一次 native start/turn/terminal
+  结果无法安全判定。Pilot 有意不自动重试，也不自动修改 Binding；检查 journal 后
+  人工执行当前 release 的 `service.sh restart`。
+- 若某个 Binding 长时间停留在 running，公开 native read 会继续保留该 slot 并周期
+  记录 warning，避免在未知终态下误开第二轮。其他 Binding 不受影响；持续异常时检查
+  App Server/journal，并通过正常 `/stop` 或服务重启恢复，禁止手工清理 SQLite 或
+  `.codex` 状态。
+- 若引用 prompt 提示超时、撤回/删除、权限不足或准备期间任务状态已变，
+  该次输入没有 start/steer。请先修复权限或确认当前 Turn，然后由用户重新发送；
+  不要在运维层自动重放旧消息。
+- 若图片 prompt 提示不可读、格式不支持、超过 20 张、单图 20 MB 或合计 50 MB，
+  该次输入同样没有 start/steer；让用户压缩或拆分后重新发送，不做部分重放。
+- 若本轮文件按钮提示文件已不可用、卡片已删除或话题关系未确认，
+  原终态卡应保持不变。先检查当前文件和
+  `im:resource`/`im:message:send_as_bot` 已发布权限；
+  v4 callback payload 明文包含路径和分页 manifest，这是已接受的飞书应用边界，不是
+  下载凭证或快照；不要手工写 SQLite，也不要把失败文件补发到主聊天。
+- 若 Side 显示 `creating`、清理未确认或要求再次结束，不要删除 SQLite route 或把该话题
+  当普通 Binding 使用；在原 Side 话题重试 `/side close`，或正常重启让遗留 open route
+  转为 expired。Side 卡在 active close 时先检查 App Server/journal；禁止猜测 native ID。
+- 正常停机会停止所有 pulse，并用已记录的 exact reaction ID 清理常驻的 `Typing` 与
+  当时可见的 `THINKING`。若进程被 `SIGKILL`、主机掉电或崩溃，运行态表情可能留在原
+  消息；在“不持久化飞书展示状态”的边界下无法安全恢复，禁止为此扫描/猜测 reaction
+  或修改 SQLite。
+
+## systemd
+
+仓库 `deploy/netizen.service` 是安装器渲染的 user-unit 模板；它不包含 `User=`、固定
+home 或 release 路径，也有意不增加外层 filesystem/network sandbox。用户仍由共享
+`.codex/config.toml` 的原生 permission mode 决定 Codex 行为。不要手工把模板复制到
+`/etc/systemd/system`，也不要用 system-level `systemctl` 控制它。
+
+```bash
+./service.sh status
+journalctl --user -u netizen.service -n 100 --no-pager
+loginctl show-user "$USER" --property=Linger
+```
+
+`install.sh` 负责 unit 写入、`systemctl --user daemon-reload/enable`、首次启动或按旧状态
+切换；`uninstall.sh` 负责 stop/disable 和删除。`service.sh` 只接受
+`start|stop|restart|status`，不会安装、升级、enable、改配置或请求 sudo。
+
+ready marker 只有在 Admin credential/closed bind、唯一 Codex Runtime、Store、Channel
+application、Feishu ingress 和 Admin admission 全部成功后才打印。正常 shutdown 在 Channel
+background loop 使用一个 60 秒 monotonic absolute budget：先关闭 Admin listener、Feishu
+policy 和 Runtime admission，再排空 Admin/Feishu handlers 与 blocking I/O，最后清理 native
+Turns/reactions、Codex transport 和 Store。unit 的 `TimeoutStopSec=75s` 给 Python finally 与
+进程退出保留 15 秒外层余量；不要把它调回小于内部预算的值。
+
+## 验收顺序
+
+先从另一台受信内网主机直接访问 `http://<服务器 IP>:8787`：未登录的 `/` 返回 303
+重定向到 `/login`（不返回 HTML 或状态），未知 route 和 API 必须返回 401，只有登录页复用的
+无状态 CSS 可匿名读取，`/health/ready` 只返回无细节状态；
+使用独立 credential 登录后，检查三个一级
+页面、筛选、分页和五秒 runtime polling。依次验收 Project register/create/enable/disable，
+两个 Scope 中 active/inactive、Lazy/materialized/archived Binding 的 create/activate/
+configure/rename/archive/两种 unarchive/delete-lazy/Stop/Release，以及一个 open Side 的 exact
+Close。双击同一 action 应返回 stale/consumed；与飞书并发操作同一目标时只允许符合 exact
+precondition 的一方提交。重启服务后旧 Admin session 必须失效，持久 Binding/设置/Side
+墓碑不变；journal 不得出现 credential、cookie/action token、cwd、name/preview 或 body。
+最后占用 configured port 再执行一次候选激活，确认它在数据库快照/current 切换前失败且旧
+release 恢复；释放端口后再部署。以上真实浏览器、跨主机与端口回滚是候选 release 门禁，
+本地 loopback 单测不能替代。
+
+1. P2P `/help`、`/new test`、`/sessions`、`/status`（native=pending）；`/sessions`
+   将 lazy Binding 显示为“新会话”，有原生 Thread 时优先显示 `name`、否则显示
+   `preview`；`/status` 分行显示 `name`、`preview` 与“上下文窗口：暂无（首条消息后
+   生成）”。帮助包含 `/config`、`/compact`、`/goal`、`/rename`、`/archive`、`/delete`、
+   `/unarchive`，不包含
+   `/skills`、`/model`、`/effort`、`/fast` 或当前不可用的
+   `/plan`、`/apps`；`/copy`、`/vim`、`/theme`、`/exit` 也不展示。
+2. `/new test` 后发送首条 prompt：原消息先出现并一直保留敲键盘（`Typing`）表情，
+   “思考中”（`THINKING`）按低频节奏显示/隐藏，不收到“已接收”或心跳回复。running 时
+   `/status` 出现完整 native ID、
+   已接受 steer 次数，以及原生 checklist（`✓/→/○`）；无 plan 时明确显示“Codex 尚未
+   生成”，observer unavailable 时显示“暂不可用”。发送一条 steer 后，原消息 pulse
+   保持原锚点，steer 消息只添加
+   `OnIt` 且正常不回复文字；`/status` 在新 plan 到达前标记旧 checklist 可能过期，之后
+   整体替换并清除标记。Turn 到达终态后先添加 completed/failed/interrupted 对应的
+   `DONE`/`ERROR`/`CrossMark`，再移除 `THINKING` 与 `Typing`，模型结果照常回复；
+   在可观测 Turn 完成、公开 usage 通知已排空后 `/status` 显示当前
+   窗口已用 tokens、窗口上限和百分比。再启动一个普通 Turn 时，running `/status` 保留
+   并标注“上一轮完成时”的快照；本轮完成后覆盖为新值。固定 SDK 若丢失即时完成通知，
+   则终态后明确显示暂不可用并在下一次可观测 Turn 完成后更新。该继承路径不得读取模型
+   目录或向 SDK 传 Model/Effort/Speed override。
+3. 零参数 `/new` 只显示一个 form，包含 Project、Model、Effort、Speed，不显示“配置方式”、
+   任务输入或快速按钮。提交只创建带三项配置的 lazy Binding；`/status` 仍为
+   native=pending，且没有任务回执。选项必须与本机 `models` phase 一致，成功卡片显示
+   动态名称。模型目录不可用时不得显示可提交 form，并提示重试或 `/new alias`；即使原卡
+   更新失败，同一 Scope 也应收到兜底回复。
+4. 在 idle active Binding 上发送 `/config`，选择三项后直接保存；不得要求任务或立即
+   启动 Turn，也不得显示“目标会话”或“配置方式”；配置其他会话必须先 `/resume`。
+   后续每条需要启动新 Turn 的普通消息都在 exact native Thread 重新校验并显式应用，
+   配置不会在首轮后清除。对目录中支持加速 Tier 的模型依次验收
+   `Fast/priority -> Fast/priority -> /config Standard/default -> Standard/default`，
+   四轮必须在同一 native Thread 连续成功；卡片只显示动态名称，不显示协议 ID，也不
+   出现费用提示。打开卡片后先
+   `/resume` 另一个 Binding，再提交旧卡片，必须零 Codex mutation 并提示重开；两张
+   `/config` 卡也必须由 settings revision 拒绝后提交的旧卡。running Turn 上 `/config`
+   必须拒绝，running steer 不得解析或应用 Binding 配置。
+5. 在已有历史的 idle Binding 发送 `/compact`：先收到开始提示，`/status` 显示
+   `compacting`，并使压缩前的上下文用量快照失效；普通 Prompt、`/config`、再次
+   `/compact` 必须拒绝，`/stop` 必须说明只控制普通 Turn。随后收到压缩完成提示，同一
+   Thread 可继续；下一次可观测普通 Turn 完成后用量重新出现。lazy/running Binding 上
+   `/compact` 必须拒绝。压缩期间不要从 CLI/其他 App Server 并发写同一 Thread；serial
+   exact-ID resume 仍按后续步骤验收。
+6. `/skills` 必须作为未知命令拒绝且零 Codex mutation；用自然语言询问当前可用 Skill
+   必须按普通 Prompt 启动或 steer。在消息开头连续输入两个 `$skill-name`，只启动一个
+   原生 Turn；running 时同样只 steer exact Turn 一次。未知、
+   disabled、重名或 stale 引用必须零 Codex mutation；引用消息历史里的 `$skill` 不得
+   激活，当前消息的引用仍正常。
+7. 在已通过 zero-Turn live gate 的环境发送 `/goal <objective>`，卡片与 `/status` /
+   `/sessions` 显示 Goal 状态；同一 Binding 的普通 Prompt、`/config`、`/compact` 被
+   拒绝。验证自动 rollover 后只有一个逻辑终态；`/goal pause` 与 `/stop` 都先暂停 Goal、
+   中断 exact 物理 Turn 并请求 terminal cleanup，随后 `/goal resume` 可继续，paused/
+   terminal 时 `/goal clear` 可清除。重启期间保留的 active Goal 必须显示为外部活跃并
+   拒绝 mutation，提示在原生 Codex 暂停，不能自动重挂。
+8. 第二轮验证 exact-ID 上下文。
+9. 长 Turn 中发第二条消息，结果必须被 steer 改变；native steer 失败时不得出现
+   `OnIt` 或 steer count，必须明确提示本条未执行。故意使 `OnIt` 投递失败时，只在 native
+   steer 已成功后收到“已接收调整”兜底，原 Turn pulse 不受影响。
+10. 长 Turn `/stop`，确认先收到“正在中断当前 Codex Turn”，再收到明确警告前台工具
+   进程可能继续运行的唯一终态；native Turn 为 `interrupted`，之后同一 Thread 可
+   继续。不得把 cleanup 空响应当作前台进程退出证明。
+11. 在空闲 active 普通会话查看 `/status` 的“Netizen 订阅”行；等待十五分钟后应显示当前
+    连接已取消订阅，但不得声称 writer 已立即释放。再次发送消息必须 resume 同一 native
+    ID 并保留上下文。再用 `/new` 或 `/resume` 切走一个 idle 会话，确认旧订阅立即释放；
+    `/release` 应得到相同的保留 Binding/历史语义，running、后台 terminal 或状态未知时
+    必须拒绝。重启服务后不扫描旧 Binding 或重建 timer。最后验证全局
+    `codex exec resume <native-id> "..."` 能接续飞书 Thread；必要时要等 App Server 的
+    最后订阅宽限期释放 writer，不能把 unsubscribe 返回当成 writer 已释放证明。
+12. 同一 Project 两个 Binding 同时运行，cwd 相同、native ID 不同。
+13. 运行 exact-`argv[0]` interrupt probe，记录 foreground 5 秒退出分类；probe 有界
+   等待其测试 marker 自然退出后，检查无遗留 exact marker/App Server probe 进程。
+14. 加一个测试群：未 @ 忽略，每条 @ 可用。在话题群中分别用纯文本根消息
+   `@机器人 /new test` 创建两个话题，再进入各话题逐条 @机器人；话题 A 的
+   Binding/上下文不得出现在话题 B，群主线与两个话题也必须是三个不同 Scope。
+15. 验收逐条引用：在 P2P 和普通群主线分别验证首层与嵌套文本/富文本；
+    由 A 发送被引用消息、B 发送当前提问，模型输入必须把两名发送者分别归到
+    `quoted_message` 与 `current_message`；群内当前提问仍要 `@机器人`。再验证
+    Card 1.0/default 和 Card 2.0 的可见文本、
+    图片/文件的“公开资源 key 与元数据，而非正文”提示、撤回目标与临时去掉
+    `im:message.group_msg`
+    后的零 Codex 提交。在真实话题内回复根消息时不应混入“被引用消息”
+    上下文；话题 Scope 和原有上下文仍正常。
+16. 在单聊发送普通图片；在群聊发送 `@机器人` 的多图富文本；再分别验证文字引用
+    图片、当前图文引用另一条图文。模型必须能描述真实像素且正确区分当前/引用来源；
+    删除其中一张资源后重试必须零提交。连续发送的多条独立图片不要求自动合并。
+17. 在单聊、群聊、话题分别发送 `/settings` 和零参数 `/new`；卡片必须留在原
+    Scope。Settings 只显示已实现分区，Projects 使用下拉管理且新增表单留在同一卡片；
+    创建/登记/启停或业务错误后仍显示原 Projects 分区。重启服务后 Registry 仍存在；
+    停用条目不能新建 Binding，但旧 Binding 仍可继续。
+18. 由群内另一名真实参与者点击设置卡片的刷新操作，确认 callback operator 不受
+    Netizen allowlist/ACL 限制且响应不转为私聊。自动化契约已通过；该跨账号手工项
+    尚未复验，是当前小范围 Pilot 的非阻塞待办。
+19. 在一个 idle materialized 当前会话上验收 `/rename` 直接参数和无参数卡片，Codex
+    App/CLI 与 `/sessions`、`/status` 都应看到同一原生名称。打开 `/archive` 卡后先切换
+    会话，再点旧卡必须零 mutation；重新归档后 active pointer 为空，Binding 配置保留，
+    普通 `/sessions` 不显示它而 `/sessions archived` 显示。用卡片或
+    `/unarchive <短 ID>` 恢复并自动切换。Lazy 会话的 `/delete` 必须显示红色不可恢复
+    二次确认、只删 Binding，并验证 stale current 防护。materialized `/delete` 必须在
+    native metadata read 或 mutation 前明确提示暂不可用；原生 Thread、Binding 与 active
+    pointer 均保持不变，也不显示删除确认卡。
+20. 在已物化 Parent 上分别从 P2P、P2P 话题、普通群主线、普通群话题和话题模式群触发
+    `/side`；从已有话题触发必须得到同 chat 的 sibling，不得留在或嵌套原话题。P2P 与
+    P2P Side 话题无需 @，三类群入口及 Side 后续每条消息都必须 @。每个 Side 连续完成
+    至少三轮，并在 running 时验证下一条只 steer；`/stop` 后仍可继续，`/side close` 和
+    根卡片按钮都能结束。验证 `/side <首轮问题>` 在新话题先出现明确标注来源的首轮问题，
+    Codex 中的首轮来源/发送者仍是原 `/side` 人类消息，reaction 和模型回复则锚定机器人
+    seed；Parent 成功时没有文字回复。再由另一名参与者发送 Side 后续和 running steer，
+    模型应看到每条实际发送者而完成锚点不迁移；重复投递同一 source 不
+    重复 fork。在父 Turn 正在运行时从飞书创建 Side，并让
+    Parent 与 Side 的 Turn 重叠；再从同一个 Parent 创建多个 Side，确认它们同时运行且互不
+    steer/阻塞。用目标 app 的真实发送链路分别覆盖 direct-root 和 root-plus-seed 两种返回：
+    对 root 与 seed 各重放一次相同 UUID，必须返回原消息的 exact message/chat/root/thread
+    identity，且只产生一个话题；不同 root/seed UUID 必须互异。这个对账门禁失败时 Side
+    必须保持 unavailable，因为 FakeChannel 只能证明本地复用了 UUID，不能证明飞书的响应
+    形状。重启服务后旧 Side 明确 expired 且不创建 Binding；再验证 idle 两小时过期。若
+    P2P 建话题返回 230071，记录为当前飞书 live gate 未通过并保持 Side unavailable，不能
+    以单元测试替代。
+21. 在普通持久 Turn 中分别用 native Turn diff 和结构化 items 生成 Project 内普通文件、
+    Project 外普通文件、Codex 原生 generated-images 目录中的 PNG/JPEG/GIF/WebP 图片和
+    至少 18 个文件；另对 100、500 个 synthetic manifest 发真实目标应用卡片，确认平台
+    完整 create/update；1000 个必须在本地门禁中明确拒绝且不截断，并保留目标应用
+    96.9 KB 请求返回 230099/200800 的容量证据。无文件
+    Turn 必须仍只有纯文本最终回复；有文件 Turn 必须只有一张同时包含最终回复和本轮文件的
+    卡片。Project 内文件显示相对路径，Project 外文件显示脱敏逻辑位置；所有条目显示大小，
+    按 8 个一页完整翻页，可见正文不出现绝对路径、预览、diff 或发送全部；v4 callback
+    payload 则必须逐项携带明文 absolute path。依次在 P2P 平面消息、
+    群主线和已有话题点击普通文件与“发送原图到话题”：平面卡片必须出现以该卡片为锚点的话题，记录真实
+    root/parent/thread 返回；已有话题必须保持原 thread ID，飞书能正常预览/下载实际文件。
+    切换到另一 Binding 后旧卡仍能翻页和发送；正常重启 Netizen/App Server 后，再点击
+    重启前的 v4 卡，必须只从 callback 内的原回答 + manifest 恢复，且不读取 source card、completed
+    Turn。抽样一张升级前 v3 卡，必须明确提示已过期且不发送文件、不读取 history。
+    重复点击同一按钮不产生重复文件消息。再分别在点击前删除文件、改成目录、把同一上报
+    路径重新绑定到另一个普通文件和删除原卡片：前两类不可用目标应失败，重绑路径发送点击
+    时当前内容，删除卡片失败；所有失败均保持原卡且没有文件掉入主聊天。翻页还必须确认
+    最终回复区逐字保留、缺失条目在原页显示不可用，并按单个“下一页/回到第一页”按钮循环
+    覆盖全部页面。
+    P2P 若返回 230071 必须记录为
+    本轮文件 live gate 未通过，不得用 FakeChannel 或普通主线发送替代。最后确认这些操作不
+    改变 schema v5 表、Binding、Turn settings 或 Side route 行数。
+
+CLI 中新增的消息不要求回填飞书；验证目标是共享原生后端和可接续性，不是两个 UI
+的逐条镜像。

@@ -1,0 +1,149 @@
+"""Channel-facing domain types; native agent state stays in Codex."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from urllib.parse import quote
+
+
+class ScopeKind(str, Enum):
+    DIRECT = "direct"
+    GROUP = "group"
+    TOPIC = "topic"
+
+
+@dataclass(frozen=True, slots=True)
+class FeishuScope:
+    app_id: str
+    chat_id: str
+    kind: ScopeKind
+    topic_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.app_id or not self.chat_id:
+            raise ValueError("app_id and chat_id are required")
+        if self.kind is ScopeKind.TOPIC and not self.topic_id:
+            raise ValueError("a topic scope requires topic_id")
+        if self.kind is not ScopeKind.TOPIC and self.topic_id is not None:
+            raise ValueError("only a topic scope may carry topic_id")
+
+    @property
+    def key(self) -> str:
+        parts = (self.app_id, self.kind.value, self.chat_id, self.topic_id or "")
+        return "scope:v1:" + ":".join(quote(part, safe="") for part in parts)
+
+
+@dataclass(frozen=True, slots=True)
+class PromptInput:
+    scope: FeishuScope
+    source_id: str
+    sender_id: str
+    text: str
+    skill_names: tuple[str, ...] = ()
+
+
+class NativeCapability(str, Enum):
+    SKILLS = "skills"
+    GOAL = "goal"
+    SIDE = "side"
+    RELEASE = "release"
+
+
+class ControlName(str, Enum):
+    MENU = "menu"
+    NEW = "new"
+    SIDE = "side"
+    CONFIG = "config"
+    COMPACT = "compact"
+    SETTINGS = "settings"
+    SESSIONS = "sessions"
+    RESUME = "resume"
+    RENAME = "rename"
+    ARCHIVE = "archive"
+    DELETE = "delete"
+    UNARCHIVE = "unarchive"
+    STOP = "stop"
+    RELEASE = "release"
+    STATUS = "status"
+    GOAL = "goal"
+    HELP = "help"
+
+
+class SettingsSection(str, Enum):
+    PROJECTS = "projects"
+
+
+@dataclass(frozen=True, slots=True)
+class ControlIntent:
+    scope: FeishuScope
+    source_id: str
+    sender_id: str
+    name: ControlName
+    arguments: tuple[str, ...] = ()
+
+
+class CardControlName(str, Enum):
+    OPEN_SETTINGS_SECTION = "settings.section.open"
+    REFRESH_SETTINGS = "settings.refresh"
+    REGISTER_PROJECT = "project.register"
+    SET_PROJECT_ENABLED = "project.enabled.set"
+    CREATE_BINDING = "binding.create"
+    CONFIGURE_BINDING = "binding.configure"
+    RENAME_BINDING = "binding.rename"
+    ARCHIVE_BINDING = "binding.archive"
+    DELETE_BINDING = "binding.delete"
+    UNARCHIVE_BINDING = "binding.unarchive"
+    GOAL_PAUSE = "goal.pause"
+    GOAL_RESUME = "goal.resume"
+    GOAL_CLEAR = "goal.clear"
+    SIDE_CLOSE = "side.close"
+
+
+@dataclass(frozen=True, slots=True)
+class CardControlIntent:
+    scope: FeishuScope
+    source_id: str
+    sender_id: str
+    name: CardControlName
+    settings_section: SettingsSection | None = None
+    project_alias: str | None = None
+    expected_revision: int | None = None
+    expected_settings_revision: int | None = None
+    enabled: bool | None = None
+    project_path: str | None = None
+    create_directory: bool | None = None
+    binding_id: str | None = None
+    thread_name: str | None = None
+    model_id: str | None = None
+    effort_id: str | None = None
+    service_tier_id: str | None = None
+    side_id: str | None = None
+
+
+class TurnFileActionName(str, Enum):
+    PAGE = "turn-file.page"
+    SEND = "turn-file.send"
+
+
+@dataclass(frozen=True, slots=True)
+class TurnFileManifestItem:
+    path: str
+    label: str
+
+
+@dataclass(frozen=True, slots=True)
+class TurnFileActionIntent:
+    scope: FeishuScope
+    source_id: str
+    sender_id: str
+    name: TurnFileActionName
+    binding_id: str
+    turn_id: str
+    page: int | None = None
+    path: str | None = None
+    files: tuple[TurnFileManifestItem, ...] = ()
+    answer: str | None = None
+
+
+ChannelInteraction = PromptInput | ControlIntent

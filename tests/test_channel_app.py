@@ -1,0 +1,6216 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from lark_channel import (
+    Conversation,
+    Identity,
+    ImageContent,
+    InboundMessage,
+    InteractiveContent,
+    MediaSource,
+    OutboundCard,
+    OutboundFile,
+    OutboundImage,
+    PostContent,
+    QuotedContext,
+    ResourceDescriptor,
+    TextContent,
+)
+from openai_codex import ImageInput, TextInput
+from openai_codex.types import ThreadItem
+
+from netizen import channel_app
+from netizen.bindings import (
+    BindingNotFound,
+    BindingStore,
+    BindingTurnSettings,
+    SideTopicState,
+)
+from netizen.cards import goal_card
+from netizen.channel_app import ChannelApplication, SideTopicCreateFailed
+from netizen.codex_runtime import (
+    ActiveState,
+    ActiveTurnSnapshot,
+    CompactSubmission,
+    CompactionOutcome,
+    ContextWindowUsage,
+    GoalOperationState,
+    GoalSubmission,
+    NativeThreadMetadata,
+    ReleaseDisposition,
+    SideCloseFailed,
+    SideLifecycleOutcome,
+    SideSessionNotFound,
+    SideSessionSnapshot,
+    SideSessionState,
+    SideSubmission,
+    SideSubmissionAdmission,
+    SideTurnOutcome,
+    SubmissionAdmission,
+    StopDisposition,
+    Submission,
+    SubmitDisposition,
+    SteerRace,
+    TerminalCleanupFailed,
+    ThreadDeleteUnavailable,
+    ThreadArchived,
+    ThreadBackgroundTerminalsActive,
+    ThreadReleaseStateUnknown,
+    ThreadRunningConfiguration,
+    ThreadSubscriptionSnapshot,
+    ThreadSubscriptionState,
+    TurnProgressSnapshot,
+    TurnOutcome,
+)
+from netizen.domain import FeishuScope, NativeCapability, ScopeKind
+from netizen.model_settings import (
+    EffortOption,
+    ModelCatalog,
+    ModelOption,
+    ServiceTierOption,
+    TurnModelSettings,
+)
+from netizen.projects import ProjectRegistry
+from netizen.sdk_gap_adapter import GoalSnapshot, GoalStatus
+from netizen.turn_plan_observer import (
+    TurnPlanStepSnapshot,
+    TurnPlanStepState,
+)
+PNG = b"\x89PNG\r\n\x1a\nchannel-test"
+
+
+class FakeMessage:
+    def __init__(
+        self,
+        text: str,
+        *,
+        message_id: str,
+        sender_id: str = "ou_user",
+        display_name: str = "Current User",
+        union_id: str | None = None,
+        user_id: str | None = None,
+        sender_type: str = "user",
+        is_bot: bool = False,
+        chat_id: str = "oc_direct",
+        chat_type: str = "p2p",
+        thread_id: str | None = None,
+        mentioned_bot: bool = True,
+        raw_content_type: str = "text",
+        resources: list[object] | None = None,
+        mentions: list[object] | None = None,
+        content: object | None = None,
+        reply_id: str | None = None,
+        raw: dict[str, object] | None = None,
+    ) -> None:
+        self.id = message_id
+        self.body_text = text
+        self.sender = SimpleNamespace(
+            open_id=sender_id,
+            display_name=display_name,
+            union_id=union_id,
+            user_id=user_id,
+            sender_type=sender_type,
+            is_bot=is_bot,
+        )
+        self.conversation = SimpleNamespace(
+            chat_id=chat_id,
+            chat_type=chat_type,
+            thread_id=thread_id,
+        )
+        self.mentioned_bot = mentioned_bot
+        self.resources = resources or []
+        self.raw_content_type = raw_content_type
+        self.mentions = mentions or []
+        self.content = content
+        self.content_text = text
+        self.reply = (
+            SimpleNamespace(message_id=reply_id) if reply_id is not None else None
+        )
+        self.raw = raw or {}
+
+
+class FakeChannel:
+    def __init__(self) -> None:
+        self.replies: list[tuple[str, object]] = []
+        self.reply_targets: list[object] = []
+        self.reply_results: list[object | BaseException] = []
+        self.send_calls: list[tuple[str, object, object]] = []
+        self.send_results: list[object | BaseException] = []
+        self.reactions: list[tuple[str, str]] = []
+        self.reaction_operations: list[tuple[str, str, str]] = []
+        self.reaction_removals: list[tuple[str, str]] = []
+        self.reaction_remove_attempted = asyncio.Event()
+        self._next_reaction_id = 1
+        self.updates: list[tuple[str, dict[str, object]]] = []
+        self.fetched_messages: dict[str, dict[str, object]] = {}
+        self.inbound_messages: dict[str, object | None | BaseException] = {}
+        self.quoted_contexts: dict[str, object | None | BaseException] = {}
+        self.fetch_inbound_calls: list[str] = []
+        self.fetch_quoted_calls: list[str] = []
+        self.chat_types: dict[str, str] = {}
+        self.chat_info_calls: list[str] = []
+        self.resource_bodies: dict[
+            tuple[str, str],
+            bytes | None | BaseException | asyncio.Event,
+        ] = {}
+        self.download_resource_calls: list[tuple[str, str, str | None]] = []
+        self.fail_card_updates = False
+        self.card_update_success = True
+        self.fail_once_reaction_on: str | None = None
+        self.fail_once_reaction_remove = False
+        self.bot_identity = SimpleNamespace(open_id="ou_bot", name="椰羊")
+
+    async def reply(self, message: FakeMessage, content: object, opts=None) -> object:
+        self.reply_targets.append(message)
+        self.replies.append((message.id, content))
+        if self.reply_results:
+            result = self.reply_results.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        return object()
+
+    async def send(self, to: str, content: object, opts=None) -> object:
+        self.send_calls.append((to, content, opts))
+        if not self.send_results:
+            raise AssertionError("unexpected channel.send call")
+        result = self.send_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    async def add_reaction(self, message_id: str, emoji_type: str) -> object:
+        self.reactions.append((message_id, emoji_type))
+        self.reaction_operations.append(("add", message_id, emoji_type))
+        if self.fail_once_reaction_on == emoji_type:
+            self.fail_once_reaction_on = None
+            raise RuntimeError("reaction failed")
+        reaction_id = f"reaction-{self._next_reaction_id}"
+        self._next_reaction_id += 1
+        return SimpleNamespace(
+            success=True,
+            raw={"data": {"reaction_id": reaction_id}},
+        )
+
+    async def remove_reaction(
+        self,
+        message_id: str,
+        reaction_id: str,
+    ) -> object:
+        self.reaction_removals.append((message_id, reaction_id))
+        self.reaction_operations.append(("remove", message_id, reaction_id))
+        self.reaction_remove_attempted.set()
+        if self.fail_once_reaction_remove:
+            self.fail_once_reaction_remove = False
+            return SimpleNamespace(success=False)
+        return SimpleNamespace(success=True)
+
+    async def update_card(self, message_id: str, card: dict[str, object]) -> object:
+        self.updates.append((message_id, card))
+        if self.fail_card_updates:
+            raise RuntimeError("card update failed")
+        return SimpleNamespace(success=self.card_update_success)
+
+    async def fetch_message(self, message_id: str) -> dict[str, object]:
+        return self.fetched_messages[message_id]
+
+    async def fetch_inbound_message(self, message_id: str) -> object | None:
+        self.fetch_inbound_calls.append(message_id)
+        result = self.inbound_messages.get(message_id)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    async def fetch_quoted_context(self, message_id: str) -> object | None:
+        self.fetch_quoted_calls.append(message_id)
+        result = self.quoted_contexts.get(message_id)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    async def download_resource(
+        self,
+        file_key: str,
+        resource_type: str = "image",
+        message_id: str | None = None,
+    ) -> bytes | None:
+        self.download_resource_calls.append((file_key, resource_type, message_id))
+        result = self.resource_bodies.get((str(message_id), file_key))
+        if isinstance(result, BaseException):
+            raise result
+        if isinstance(result, asyncio.Event):
+            await result.wait()
+            return PNG
+        return result
+
+    async def get_chat_info(self, chat_id: str) -> object:
+        self.chat_info_calls.append(chat_id)
+        return SimpleNamespace(
+            chat_type="unknown",
+            chat_mode=self.chat_types.get(chat_id, "group"),
+        )
+
+
+def quoted_inbound(
+    *,
+    message_id: str = "om_quoted",
+    chat_id: str = "oc_direct",
+    content: object | None = None,
+    content_text: str = "quoted text",
+    raw_content_type: str = "text",
+    resources: list[ResourceDescriptor] | None = None,
+) -> InboundMessage:
+    return InboundMessage(
+        id=message_id,
+        create_time=123,
+        conversation=Conversation(chat_id=chat_id, chat_type="p2p"),
+        sender=Identity(open_id="ou_quoted", display_name="Quoted User"),
+        content=content or TextContent(text=content_text),
+        raw={"message_id": message_id},
+        content_text=content_text,
+        resources=resources or [],
+        body_text=content_text,
+        raw_content_type=raw_content_type,
+    )
+
+
+def plain_prompt_projection(native_input: object) -> tuple[str, dict[str, object]]:
+    if isinstance(native_input, list):
+        prompt_text = native_input[-1].text
+    else:
+        prompt_text = native_input
+    assert isinstance(prompt_text, str)
+    request_text, trailer = prompt_text.split(
+        "\n\n<feishu_current_message_context>\n",
+        1,
+    )
+    metadata_json, closing = trailer.rsplit(
+        "\n</feishu_current_message_context>",
+        1,
+    )
+    assert closing == ""
+    return request_text, json.loads(metadata_json)
+
+
+def native_goal(status: GoalStatus = GoalStatus.ACTIVE) -> GoalSnapshot:
+    return GoalSnapshot(
+        thread_id="native-one",
+        objective="ship safely",
+        status=status,
+        token_budget=None,
+        tokens_used=10,
+        time_used_seconds=2,
+        created_at=1,
+        updated_at=2,
+    )
+
+
+def sent_result(
+    message_id: str,
+    *,
+    chat_id: str,
+    thread_id: str | None = None,
+    root_id: str | None = None,
+    parent_id: str | None = None,
+    success: bool = True,
+    code: int = 0,
+) -> object:
+    return SimpleNamespace(
+        success=success,
+        message_id=message_id,
+        chunk_ids=(),
+        raw={
+            "code": code,
+            "data": {
+                "message_id": message_id,
+                "chat_id": chat_id,
+                "thread_id": thread_id,
+                "root_id": root_id,
+                "parent_id": parent_id,
+            },
+        },
+    )
+
+
+def retryable_sent_result(*, code: int = 999_999) -> object:
+    return SimpleNamespace(
+        success=False,
+        message_id=None,
+        chunk_ids=(),
+        error=SimpleNamespace(retryable=True),
+        raw={"code": code, "data": None},
+    )
+
+
+def file_change_item(*paths: str) -> ThreadItem:
+    return ThreadItem.model_validate(
+        {
+            "type": "fileChange",
+            "id": "file-change",
+            "status": "completed",
+            "changes": [
+                {"path": path, "diff": "", "kind": {"type": "add"}}
+                for path in paths
+            ],
+        }
+    )
+
+
+def image_generation_item(path: Path) -> ThreadItem:
+    return ThreadItem.model_validate(
+        {
+            "type": "imageGeneration",
+            "id": "image-generation",
+            "status": "completed",
+            "result": "generated",
+            "savedPath": str(path),
+        }
+    )
+
+
+def completed_turn_result(
+    *items: ThreadItem,
+    final_response: str | None = "done",
+) -> object:
+    return SimpleNamespace(
+        final_response=final_response,
+        status=SimpleNamespace(value="completed"),
+        items=list(items),
+    )
+
+
+class StubRuntime:
+    def __init__(self) -> None:
+        self.available_capabilities = frozenset()
+        self.completion = None
+        self.submit_calls: list[dict[str, object]] = []
+        self.submission: Submission | None = None
+        self.active: dict[str, ActiveTurnSnapshot] = {}
+        self.stop_result = StopDisposition.REQUESTED
+        self.compacting: set[str] = set()
+        self.compact_calls: list[dict[str, object]] = []
+        self.compact_submission: CompactSubmission | None = None
+        self.capture_calls: list[str] = []
+        self.admission: SubmissionAdmission | None = None
+        self.catalog = ModelCatalog(
+            models=(
+                ModelOption(
+                    id="future-model",
+                    model="gpt-future-codex",
+                    display_name="GPT Future",
+                    description="future model",
+                    is_default=True,
+                    default_effort_id="ultra",
+                    default_service_tier_id="priority-v2",
+                    efforts=(
+                        EffortOption("low", "low", "low-wire"),
+                        EffortOption("ultra", "ultra", "ultra-wire"),
+                    ),
+                    service_tiers=(
+                        ServiceTierOption(
+                            "priority-v2",
+                            "Fast v2",
+                            "future fast tier",
+                        ),
+                    ),
+                ),
+            )
+        )
+        self.model_catalog_calls = 0
+        self.resolve_model_settings_calls: list[dict[str, str]] = []
+        self.configure_settings_calls: list[dict[str, object]] = []
+        self.binding_store: BindingStore | None = None
+        self.model_catalog_error: Exception | None = None
+        self.goal_snapshot_value: GoalSnapshot | None = None
+        self.goal_snapshot_calls: list[str] = []
+        self.active_goals: dict[str, object] = {}
+        self.goal_submission: GoalSubmission | None = None
+        self.start_goal_calls: list[dict[str, object]] = []
+        self.resume_goal_calls: list[dict[str, object]] = []
+        self.clear_goal_calls: list[object] = []
+        self.clear_goal_result = True
+        self.goal_snapshot_after_stop: GoalSnapshot | None = None
+        self.thread_metadata_values: dict[str, NativeThreadMetadata] = {}
+        self.archived_thread_metadata_values: dict[str, NativeThreadMetadata] = {}
+        self.thread_metadata_calls: list[tuple[str, ...]] = []
+        self.archived_thread_metadata_calls: list[tuple[str, ...]] = []
+        self.thread_metadata_error: Exception | None = None
+        self.context_window_usage_values: dict[str, ContextWindowUsage] = {}
+        self.context_window_usage_calls: list[str] = []
+        self.turn_progress_values: dict[str, TurnProgressSnapshot] = {}
+        self.lifecycle_states: dict[str, object] = {}
+        self.rename_binding_calls: list[tuple[str, str]] = []
+        self.archive_binding_calls: list[str] = []
+        self.delete_binding_calls: list[str] = []
+        self.unarchive_binding_calls: list[str] = []
+        self.enforce_active_submission = False
+        self.create_side_calls: list[dict[str, object]] = []
+        self.attach_side_calls: list[dict[str, str]] = []
+        self.capture_side_calls: list[str] = []
+        self.submit_side_calls: list[dict[str, object]] = []
+        self.close_side_calls: list[tuple[str, SideTopicState]] = []
+        self.stop_side_calls: list[str] = []
+        self.side_snapshots: dict[str, SideSessionSnapshot] = {}
+        self.side_submission: SideSubmission | None = None
+        self.side_stop_result = StopDisposition.REQUESTED
+        self.side_close_error: BaseException | None = None
+        self.active_binding_change_calls: list[tuple[str | None, str | None]] = []
+        self.subscription_snapshots: dict[str, ThreadSubscriptionSnapshot] = {}
+        self.release_disposition = ReleaseDisposition.RELEASED
+        self.release_binding_calls: list[str] = []
+        self.release_error: BaseException | None = None
+
+    def set_completion_handler(self, handler) -> None:
+        self.completion = handler
+
+    async def active_binding_changed(
+        self,
+        previous_binding_id: str | None,
+        current_binding_id: str | None,
+    ) -> None:
+        self.active_binding_change_calls.append(
+            (previous_binding_id, current_binding_id)
+        )
+
+    async def binding_pointer_changed(
+        self,
+        previous_binding_id: str | None,
+        current_binding_id: str | None,
+    ) -> None:
+        await self.active_binding_changed(previous_binding_id, current_binding_id)
+
+    def thread_subscription_snapshot(
+        self,
+        binding_id: str,
+    ) -> ThreadSubscriptionSnapshot | None:
+        return self.subscription_snapshots.get(binding_id)
+
+    async def release_binding(self, binding) -> ReleaseDisposition:
+        self.release_binding_calls.append(binding.id)
+        if self.release_error is not None:
+            raise self.release_error
+        return self.release_disposition
+
+    async def release_exact(self, binding_id: str) -> ReleaseDisposition:
+        assert self.binding_store is not None
+        return await self.release_binding(self.binding_store.get(binding_id))
+
+    async def submit(self, **kwargs) -> Submission:
+        if self.enforce_active_submission:
+            assert self.binding_store is not None
+            binding = self.binding_store.get(kwargs["binding"].id)
+            if not binding.active:
+                raise SteerRace(
+                    "准备本条消息期间 active 会话已切换，本条消息未执行，请重新发送。"
+                )
+        self.submit_calls.append(kwargs)
+        assert self.submission is not None
+        return self.submission
+
+    async def capture_submission_admission(
+        self,
+        binding_id: str,
+    ) -> SubmissionAdmission:
+        self.capture_calls.append(binding_id)
+        return self.admission or SubmissionAdmission(binding_id, 0, None, None, 1)
+
+    async def model_catalog(self) -> ModelCatalog:
+        self.model_catalog_calls += 1
+        if self.model_catalog_error is not None:
+            raise self.model_catalog_error
+        return self.catalog
+
+    async def thread_metadata(
+        self,
+        thread_ids: tuple[str, ...],
+        *,
+        archived: bool = False,
+    ) -> dict[str, NativeThreadMetadata]:
+        calls = (
+            self.archived_thread_metadata_calls
+            if archived
+            else self.thread_metadata_calls
+        )
+        calls.append(thread_ids)
+        if self.thread_metadata_error is not None:
+            raise self.thread_metadata_error
+        values = (
+            self.archived_thread_metadata_values
+            if archived
+            else self.thread_metadata_values
+        )
+        return {
+            thread_id: values[thread_id]
+            for thread_id in thread_ids
+            if thread_id in values
+        }
+
+    def context_window_usage(self, binding_id: str) -> ContextWindowUsage | None:
+        self.context_window_usage_calls.append(binding_id)
+        return self.context_window_usage_values.get(binding_id)
+
+    def turn_progress(self, binding_id: str) -> TurnProgressSnapshot | None:
+        return self.turn_progress_values.get(binding_id)
+
+    async def thread_is_archived(self, thread_id: str) -> bool:
+        return thread_id in self.archived_thread_metadata_values
+
+    async def activate_exact(self, binding_id: str):
+        assert self.binding_store is not None
+        binding = self.binding_store.get(binding_id)
+        if binding.native_thread_id in self.archived_thread_metadata_values:
+            raise ThreadArchived("该会话已归档，请先恢复后再切换。")
+        return self.binding_store.activate(
+            scope_key=binding.scope_key,
+            binding_id=binding.id,
+        )
+
+    def lifecycle_state(self, binding_id: str):
+        return self.lifecycle_states.get(binding_id)
+
+    async def rename_binding(self, binding, name: str) -> str:
+        normalized = " ".join(name.split())
+        self.rename_binding_calls.append((binding.id, normalized))
+        return normalized
+
+    async def rename_exact(self, binding_id: str, name: str) -> str:
+        assert self.binding_store is not None
+        return await self.rename_binding(self.binding_store.get(binding_id), name)
+
+    async def archive_binding(self, binding):
+        self.archive_binding_calls.append(binding.id)
+        assert self.binding_store is not None
+        return self.binding_store.deactivate(
+            scope_key=binding.scope_key,
+            binding_id=binding.id,
+        )
+
+    async def archive_exact(self, binding_id: str):
+        assert self.binding_store is not None
+        return await self.archive_binding(self.binding_store.get(binding_id))
+
+    async def delete_binding(self, binding):
+        assert self.binding_store is not None
+        current = self.binding_store.get(binding.id)
+        if current.native_thread_id is not None:
+            raise ThreadDeleteUnavailable(
+                "已有原生历史的会话暂不支持删除；本次未调用 Codex。"
+            )
+        self.delete_binding_calls.append(binding.id)
+        return self.binding_store.delete_binding(binding.id)
+
+    async def delete_lazy_exact(self, binding_id: str):
+        assert self.binding_store is not None
+        return await self.delete_binding(self.binding_store.get(binding_id))
+
+    async def unarchive_binding(self, binding):
+        self.unarchive_binding_calls.append(binding.id)
+        assert self.binding_store is not None
+        return self.binding_store.activate(
+            scope_key=binding.scope_key,
+            binding_id=binding.id,
+        )
+
+    async def restore_exact(self, binding_id: str):
+        self.unarchive_binding_calls.append(binding_id)
+        assert self.binding_store is not None
+        return self.binding_store.get(binding_id)
+
+    async def restore_as_current_exact(self, binding_id: str):
+        assert self.binding_store is not None
+        return await self.unarchive_binding(self.binding_store.get(binding_id))
+
+    async def resolve_model_settings(
+        self,
+        *,
+        model_id: str,
+        effort_id: str,
+        service_tier_id: str,
+    ) -> TurnModelSettings:
+        values = {
+            "model_id": model_id,
+            "effort_id": effort_id,
+            "service_tier_id": service_tier_id,
+        }
+        self.resolve_model_settings_calls.append(values)
+        if self.model_catalog_error is not None:
+            raise self.model_catalog_error
+        return self.catalog.resolve(**values)
+
+    async def configure_turn_settings(
+        self,
+        *,
+        binding_id: str,
+        expected_revision: int,
+        settings: BindingTurnSettings | None,
+    ):
+        values = {
+            "binding_id": binding_id,
+            "expected_revision": expected_revision,
+            "settings": settings,
+        }
+        self.configure_settings_calls.append(values)
+        assert self.binding_store is not None
+        return self.binding_store.set_turn_settings(**values)
+
+    async def configure_exact(
+        self,
+        *,
+        binding_id: str,
+        expected_revision: int,
+        settings: BindingTurnSettings | None,
+    ):
+        return await self.configure_turn_settings(
+            binding_id=binding_id,
+            expected_revision=expected_revision,
+            settings=settings,
+        )
+
+    def active_turn(self, binding_id: str) -> ActiveTurnSnapshot | None:
+        return self.active.get(binding_id)
+
+    def active_goal(self, binding_id: str):
+        return self.active_goals.get(binding_id)
+
+    async def goal_snapshot(self, binding):
+        self.goal_snapshot_calls.append(binding.id)
+        return self.goal_snapshot_value
+
+    async def start_goal(self, **kwargs):
+        self.start_goal_calls.append(kwargs)
+        assert self.goal_submission is not None
+        return self.goal_submission
+
+    async def resume_goal(self, **kwargs):
+        self.resume_goal_calls.append(kwargs)
+        assert self.goal_submission is not None
+        return self.goal_submission
+
+    async def clear_goal(self, binding):
+        self.clear_goal_calls.append(binding)
+        return self.clear_goal_result
+
+    def is_compacting(self, binding_id: str) -> bool:
+        return binding_id in self.compacting
+
+    async def compact(self, **kwargs) -> CompactSubmission:
+        self.compact_calls.append(kwargs)
+        assert self.compact_submission is not None
+        return self.compact_submission
+
+    async def stop(
+        self,
+        binding_id: str,
+        *,
+        acknowledge=None,
+    ) -> StopDisposition:
+        if acknowledge is not None and self.stop_result is not StopDisposition.COMPACTING:
+            await acknowledge()
+        if self.goal_snapshot_after_stop is not None:
+            self.goal_snapshot_value = self.goal_snapshot_after_stop
+        return self.stop_result
+
+    async def stop_exact(
+        self,
+        binding_id: str,
+        *,
+        acknowledge=None,
+    ) -> StopDisposition:
+        return await self.stop(binding_id, acknowledge=acknowledge)
+
+    async def create_side(self, **kwargs) -> SideSessionSnapshot:
+        self.create_side_calls.append(kwargs)
+        binding = kwargs["binding"]
+        snapshot = SideSessionSnapshot(
+            side_id=kwargs["side_id"],
+            parent_binding_id=binding.id,
+            parent_thread_id=binding.native_thread_id,
+            thread_id=f"native-side-{len(self.create_side_calls)}",
+            project_alias=binding.project_alias,
+            cwd=Path(kwargs["cwd"]),
+            creator_id=kwargs["creator_id"],
+            state=SideSessionState.OPEN,
+            topic_id=None,
+            root_message_id=None,
+            turn_id=None,
+            turn_state=None,
+            last_activity=1.0,
+        )
+        self.side_snapshots[snapshot.side_id] = snapshot
+        return snapshot
+
+    async def attach_side_topic(
+        self,
+        *,
+        side_id: str,
+        topic_id: str,
+        root_message_id: str,
+    ) -> SideSessionSnapshot:
+        self.attach_side_calls.append(
+            {
+                "side_id": side_id,
+                "topic_id": topic_id,
+                "root_message_id": root_message_id,
+            }
+        )
+        before = self.side_snapshot(side_id)
+        snapshot = SideSessionSnapshot(
+            side_id=before.side_id,
+            parent_binding_id=before.parent_binding_id,
+            parent_thread_id=before.parent_thread_id,
+            thread_id=before.thread_id,
+            project_alias=before.project_alias,
+            cwd=before.cwd,
+            creator_id=before.creator_id,
+            state=before.state,
+            topic_id=topic_id,
+            root_message_id=root_message_id,
+            turn_id=before.turn_id,
+            turn_state=before.turn_state,
+            last_activity=before.last_activity,
+        )
+        self.side_snapshots[side_id] = snapshot
+        return snapshot
+
+    def side_snapshot(self, side_id: str) -> SideSessionSnapshot:
+        try:
+            return self.side_snapshots[side_id]
+        except KeyError as error:
+            raise SideSessionNotFound(side_id) from error
+
+    async def capture_side_submission_admission(
+        self,
+        side_id: str,
+    ) -> SideSubmissionAdmission:
+        self.capture_side_calls.append(side_id)
+        snapshot = self.side_snapshot(side_id)
+        return SideSubmissionAdmission(
+            side_id=side_id,
+            revision=0,
+            thread_id=snapshot.thread_id,
+            turn_id=snapshot.turn_id,
+        )
+
+    async def submit_side(self, **kwargs) -> SideSubmission:
+        self.submit_side_calls.append(kwargs)
+        if self.side_submission is not None:
+            return self.side_submission
+        snapshot = self.side_snapshot(kwargs["side_id"])
+        return SideSubmission(
+            SubmitDisposition.STARTED,
+            snapshot.side_id,
+            snapshot.thread_id,
+            f"side-turn-{len(self.submit_side_calls)}",
+            lambda: None,
+        )
+
+    async def stop_side(self, side_id: str, *, acknowledge=None) -> StopDisposition:
+        self.stop_side_calls.append(side_id)
+        if acknowledge is not None:
+            await acknowledge()
+        return self.side_stop_result
+
+    async def close_side(
+        self,
+        side_id: str,
+        *,
+        state: SideTopicState = SideTopicState.CLOSED,
+    ) -> SideLifecycleOutcome:
+        self.close_side_calls.append((side_id, state))
+        if self.side_close_error is not None:
+            raise self.side_close_error
+        self.side_snapshots.pop(side_id, None)
+        assert self.binding_store is not None
+        record = self.binding_store.transition_side_topic(side_id, state)
+        outcome = SideLifecycleOutcome(side_id, record.state)
+        if self.completion is not None:
+            await self.completion(outcome)
+        return outcome
+
+    async def close_side_exact(
+        self,
+        side_id: str,
+        *,
+        state: SideTopicState = SideTopicState.CLOSED,
+    ) -> SideLifecycleOutcome:
+        return await self.close_side(side_id, state=state)
+
+
+class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
+    def test_quote_fetch_timeout_is_ten_seconds_per_sdk_request(self) -> None:
+        self.assertEqual(channel_app._QUOTE_FETCH_TIMEOUT_SECONDS, 10.0)
+
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.default = root / "default"
+        self.project = root / "project"
+        self.default.mkdir()
+        self.project.mkdir()
+        ids = iter(
+            [
+                "11111111-0000-0000-0000-000000000001",
+                "22222222-0000-0000-0000-000000000002",
+                "33333333-0000-0000-0000-000000000003",
+            ]
+        )
+        self.store = BindingStore(id_factory=lambda: next(ids))
+        self.channel = FakeChannel()
+        self.runtime = StubRuntime()
+        self.runtime.binding_store = self.store
+        self.projects = ProjectRegistry(
+            store=self.store,
+            default_cwd=self.default,
+            projects={"test": self.project},
+        )
+        self.app = ChannelApplication(
+            app_id="cli_test",
+            channel=self.channel,
+            runtime=self.runtime,  # type: ignore[arg-type]
+            bindings=self.store,
+            projects=self.projects,
+        )
+
+    async def asyncTearDown(self) -> None:
+        await self.app.close()
+        self.store.close()
+        self.tmp.cleanup()
+
+    async def new(self, *, message_id: str = "om_new") -> FakeMessage:
+        message = FakeMessage("/new test", message_id=message_id)
+        await self.app.handle_message(message)
+        return message
+
+    def direct_card_event(
+        self,
+        form_value: dict[str, object],
+        *,
+        message_id: str = "om_card",
+    ) -> object:
+        self.channel.fetched_messages[message_id] = {
+            "data": {"items": [{"chat_id": "oc_direct", "thread_id": None}]}
+        }
+        self.channel.chat_types["oc_direct"] = "p2p"
+        return SimpleNamespace(
+            message_id=message_id,
+            chat_id="oc_direct",
+            operator=SimpleNamespace(open_id="ou_user"),
+            action=SimpleNamespace(
+                tag="button",
+                value={},
+                form_value=form_value,
+            ),
+        )
+
+    def direct_button_event(
+        self,
+        value: dict[str, object],
+        *,
+        message_id: str = "om_card",
+    ) -> object:
+        return SimpleNamespace(
+            message_id=message_id,
+            chat_id="oc_direct",
+            operator=SimpleNamespace(open_id="ou_user"),
+            action=SimpleNamespace(
+                tag="button",
+                value=value,
+                form_value=None,
+            ),
+        )
+
+    def new_form_values(
+        self,
+        card: OutboundCard,
+        *,
+        project_alias: str = "test",
+    ) -> dict[str, object]:
+        form = next(
+            item
+            for item in _elements(card.card, "form")
+            if item["name"] == "new_binding_v4"
+        )
+        fields = {
+            item["name"]: item
+            for item in form["elements"]
+            if "name" in item
+        }
+        project_reference = next(
+            option["value"]
+            for option in fields["new_project"]["options"]
+            if option["text"]["content"].startswith(f"{project_alias} ·")
+        )
+        values: dict[str, object] = {"new_project": project_reference}
+        for name in ("new_model", "new_effort", "new_speed"):
+            if name in fields:
+                values[name] = fields[name]["initial_option"]
+        return values
+
+    def config_form_values(
+        self,
+        card: OutboundCard,
+        *,
+        effort_id: str | None = None,
+        speed_id: str | None = None,
+    ) -> dict[str, object]:
+        form = next(
+            item
+            for item in _elements(card.card, "form")
+            if item["name"] == "binding_config_v4"
+        )
+        fields = {
+            item["name"]: item
+            for item in form["elements"]
+            if "name" in item
+        }
+        return {
+            "config_model": fields["config_model"]["initial_option"],
+            "config_effort": (
+                effort_id or fields["config_effort"]["initial_option"]
+            ),
+            "config_speed": (
+                speed_id or fields["config_speed"]["initial_option"]
+            ),
+        }
+
+    async def test_new_is_lazy_and_first_prompt_uses_bound_project(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.assertIsNone(binding.native_thread_id)
+        self.assertEqual(self.runtime.submit_calls, [])
+
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            self.assertIn(("om_prompt", "Typing"), self.channel.reactions)
+            self.assertIn(("om_prompt", "THINKING"), self.channel.reactions)
+            released = True
+
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            release,
+        )
+        prompt = FakeMessage(
+            "hello",
+            message_id="om_prompt",
+            sender_id="ou_alice",
+            display_name="Alice",
+            union_id="on_alice",
+            user_id="user_alice",
+        )
+        await self.app.handle_message(prompt)
+
+        self.assertTrue(released)
+        self.assertEqual(self.runtime.submit_calls[0]["binding"].id, binding.id)
+        self.assertEqual(self.runtime.submit_calls[0]["cwd"], self.project.resolve())
+        self.assertEqual(self.runtime.submit_calls[0]["owner_id"], "ou_alice")
+        request_text, current_context = plain_prompt_projection(
+            self.runtime.submit_calls[0]["input"]
+        )
+        self.assertEqual(request_text, "hello")
+        self.assertEqual(
+            current_context["sender"],
+            {
+                "display_name": "Alice",
+                "is_bot": False,
+                "open_id": "ou_alice",
+                "sender_type": "user",
+            },
+        )
+        self.assertEqual(
+            self.channel.reactions,
+            [("om_prompt", "Typing"), ("om_prompt", "THINKING")],
+        )
+        self.assertNotIn(("om_prompt", "已接收，开始处理。"), self.channel.replies)
+
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                turn_id="turn-one",
+                owner_id="ou_alice",
+                origin=prompt,
+                result=SimpleNamespace(
+                    final_response="done",
+                    status=SimpleNamespace(value="completed"),
+                ),
+            )
+        )
+
+        self.assertEqual(
+            self.channel.reactions,
+            [
+                ("om_prompt", "Typing"),
+                ("om_prompt", "THINKING"),
+                ("om_prompt", "DONE"),
+            ],
+        )
+        self.assertEqual(
+            self.channel.reaction_removals,
+            [
+                ("om_prompt", "reaction-2"),
+                ("om_prompt", "reaction-1"),
+            ],
+        )
+        self.assertEqual(
+            self.channel.reaction_operations,
+            [
+                ("add", "om_prompt", "Typing"),
+                ("add", "om_prompt", "THINKING"),
+                ("add", "om_prompt", "DONE"),
+                ("remove", "om_prompt", "reaction-2"),
+                ("remove", "om_prompt", "reaction-1"),
+            ],
+        )
+        self.assertIn(("om_prompt", "done"), self.channel.replies)
+
+    async def test_completed_turn_with_files_is_one_answer_and_file_card(
+        self,
+    ) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-files")
+        report = self.project / "reports" / "sales.xlsx"
+        report.parent.mkdir()
+        report.write_bytes(b"spreadsheet")
+        before = len(self.channel.replies)
+
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-files",
+                turn_id="turn-files",
+                owner_id="ou_user",
+                origin=origin,
+                result=completed_turn_result(
+                    file_change_item("reports/sales.xlsx"),
+                    final_response="analysis complete",
+                ),
+            )
+        )
+
+        delivered = self.channel.replies[before:]
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(delivered[0][0], origin.id)
+        self.assertIsInstance(delivered[0][1], OutboundCard)
+        rendered = json.dumps(delivered[0][1].card, ensure_ascii=False)
+        visible = "\n".join(
+            element["content"]
+            for element in _elements(delivered[0][1].card, "markdown")
+        )
+        self.assertIn("analysis complete", rendered)
+        self.assertIn("reports/sales.xlsx", rendered)
+        self.assertIn("发送文件到话题", rendered)
+        self.assertNotIn(str(self.project.resolve()), visible)
+        self.assertEqual(self.channel.send_calls, [])
+
+    async def test_completed_turn_diff_alone_produces_the_file_card(self) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-files")
+        report = self.project / "research.md"
+        report.write_text("research", encoding="utf-8")
+
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-files",
+                turn_id="turn-diff-only",
+                owner_id="ou_user",
+                origin=origin,
+                result=completed_turn_result(final_response="research complete"),
+                turn_diff=(
+                    "diff --git a/research.md b/research.md\n"
+                    "new file mode 100644\n"
+                    "--- /dev/null\n"
+                    "+++ b/research.md\n"
+                ),
+            )
+        )
+
+        card = self.channel.replies[-1][1]
+        self.assertIsInstance(card, OutboundCard)
+        assert isinstance(card, OutboundCard)
+        rendered = json.dumps(card.card, ensure_ascii=False)
+        self.assertIn("research complete", rendered)
+        self.assertIn("research.md", rendered)
+        self.assertEqual(_card_button_value(card, "发送文件到话题")["v"], 4)
+
+    async def test_generated_image_outside_project_gets_artifact_aware_card(
+        self,
+    ) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-files")
+        image = (
+            self.project.parent
+            / "codex-home"
+            / "generated_images"
+            / "native-files"
+            / "generated.png"
+        )
+        image.parent.mkdir(parents=True)
+        image.write_bytes(PNG)
+        before = len(self.channel.replies)
+
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-files",
+                turn_id="turn-files",
+                owner_id="ou_user",
+                origin=origin,
+                result=completed_turn_result(
+                    image_generation_item(image),
+                    final_response=None,
+                ),
+            )
+        )
+
+        delivered = self.channel.replies[before:]
+        self.assertEqual(len(delivered), 1)
+        self.assertIsInstance(delivered[0][1], OutboundCard)
+        rendered = json.dumps(delivered[0][1].card, ensure_ascii=False)
+        visible = "\n".join(
+            element["content"]
+            for element in _elements(delivered[0][1].card, "markdown")
+        )
+        self.assertIn("任务已完成，已生成以下文件", rendered)
+        self.assertIn("生成图片/generated.png", rendered)
+        self.assertIn("发送原图到话题", rendered)
+        self.assertNotIn(str(image.parent), visible)
+
+    async def test_file_card_delivery_failure_falls_back_to_plain_answer(
+        self,
+    ) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-files")
+        report = self.project / "report.txt"
+        report.write_text("report", encoding="utf-8")
+        self.channel.reply_results.extend((RuntimeError("card failed"), object()))
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_completion(
+                TurnOutcome(
+                    binding_id=binding.id,
+                    thread_id="native-files",
+                    turn_id="turn-files",
+                    owner_id="ou_user",
+                    origin=origin,
+                    result=completed_turn_result(
+                        file_change_item("report.txt"),
+                        final_response="answer survives",
+                    ),
+                )
+            )
+
+        self.assertIsInstance(self.channel.replies[-2][1], OutboundCard)
+        self.assertEqual(self.channel.replies[-1], (origin.id, "answer survives"))
+
+    async def test_file_card_limit_is_explicit_and_never_truncates(self) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-files")
+        report = self.project / "report.txt"
+        report.write_text("report", encoding="utf-8")
+
+        with (
+            patch.object(
+                channel_app,
+                "turn_files_card",
+                side_effect=channel_app.TurnFileCardLimitError(
+                    "本轮文件共 501 个，超过上限；未截断文件清单。"
+                ),
+            ),
+            self.assertLogs("netizen.channel_app", level="WARNING"),
+        ):
+            await self.app.handle_completion(
+                TurnOutcome(
+                    binding_id=binding.id,
+                    thread_id="native-files",
+                    turn_id="turn-files",
+                    owner_id="ou_user",
+                    origin=origin,
+                    result=completed_turn_result(
+                        file_change_item("report.txt"),
+                        final_response="answer survives",
+                    ),
+                )
+            )
+
+        self.assertEqual(len(self.channel.replies), 2)
+        fallback = self.channel.replies[-1][1]
+        self.assertIsInstance(fallback, str)
+        self.assertIn("answer survives", fallback)
+        self.assertIn("未截断文件清单", fallback)
+        self.assertNotIsInstance(fallback, OutboundCard)
+
+    async def test_v4_file_card_pages_survive_restart_without_turn_read(self) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-files")
+        paths = tuple(f"result-{index:02}.txt" for index in range(10))
+        for path in paths:
+            (self.project / path).write_text(path, encoding="utf-8")
+        result = completed_turn_result(
+            file_change_item(*paths),
+            final_response="ten files",
+        )
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-files",
+                turn_id="turn-files",
+                owner_id="ou_user",
+                origin=origin,
+                result=result,
+            )
+        )
+        card = self.channel.replies[-1][1]
+        assert isinstance(card, OutboundCard)
+        next_page = _card_button_value(card, "下一页")
+
+        await self.new(message_id="om_switched")
+        self.assertNotEqual(self.store.active_binding(scope.key).id, binding.id)
+        restarted_runtime = StubRuntime()
+        restarted_runtime.binding_store = self.store
+        restarted_app = ChannelApplication(
+            app_id="cli_test",
+            channel=self.channel,
+            runtime=restarted_runtime,  # type: ignore[arg-type]
+            bindings=self.store,
+            projects=self.projects,
+        )
+        changes_before_callback = self.store._connection.total_changes
+        await restarted_app.handle_card_action(
+            self.direct_button_event(next_page, message_id="om_file_card")
+        )
+
+        self.assertEqual(len(self.channel.updates), 1)
+        updated = json.dumps(self.channel.updates[0][1], ensure_ascii=False)
+        updated_visible = "\n".join(
+            element["content"]
+            for element in _elements(self.channel.updates[0][1], "markdown")
+        )
+        self.assertIn("result-08.txt", updated)
+        self.assertIn("result-09.txt", updated)
+        self.assertNotIn("result-00.txt", updated_visible)
+        self.assertEqual(
+            self.store._connection.total_changes,
+            changes_before_callback,
+        )
+
+    async def test_file_buttons_send_file_and_original_image_to_card_topic(
+        self,
+    ) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-files")
+        report = self.project / "report.pdf"
+        image = self.project / "trend.png"
+        report.write_bytes(b"pdf")
+        image.write_bytes(PNG)
+        result = completed_turn_result(
+            file_change_item("report.pdf"),
+            image_generation_item(image),
+            final_response="two files",
+        )
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-files",
+                turn_id="turn-files",
+                owner_id="ou_user",
+                origin=origin,
+                result=result,
+            )
+        )
+        card = self.channel.replies[-1][1]
+        assert isinstance(card, OutboundCard)
+        send_file = _card_button_value(card, "发送文件到话题")
+        send_image = _card_button_value(card, "发送原图到话题")
+        self.channel.send_results.extend(
+            (
+                sent_result(
+                    "om_report_one",
+                    chat_id="oc_direct",
+                    thread_id="omt_files",
+                    root_id="om_file_card",
+                    parent_id="om_file_card",
+                ),
+                sent_result(
+                    "om_report_two",
+                    chat_id="oc_direct",
+                    thread_id="omt_files",
+                    root_id="om_file_card",
+                    parent_id="om_file_card",
+                ),
+                sent_result(
+                    "om_image",
+                    chat_id="oc_direct",
+                    thread_id="omt_files",
+                    root_id="om_file_card",
+                    parent_id="om_file_card",
+                ),
+            )
+        )
+
+        file_event = self.direct_button_event(
+            send_file,
+            message_id="om_file_card",
+        )
+        changes_before_callbacks = self.store._connection.total_changes
+        replies_before_callbacks = len(self.channel.replies)
+        await self.app.handle_card_action(file_event)
+        await self.app.handle_card_action(file_event)
+        await self.app.handle_card_action(
+            self.direct_button_event(send_image, message_id="om_file_card")
+        )
+
+        first = self.channel.send_calls[0]
+        second = self.channel.send_calls[1]
+        third = self.channel.send_calls[2]
+        self.assertEqual(first[0], "oc_direct")
+        self.assertIsInstance(first[1], OutboundFile)
+        self.assertIsInstance(first[1].source, MediaSource)
+        self.assertEqual(Path(first[1].source.path), report.resolve())
+        self.assertEqual(first[1].file_name, "report.pdf")
+        self.assertEqual(first[2].reply_to, "om_file_card")
+        self.assertTrue(first[2].reply_in_thread)
+        self.assertEqual(first[2].reply_target_gone, "fail")
+        self.assertEqual(first[2].uuid, second[2].uuid)
+        self.assertLessEqual(len(first[2].uuid), 50)
+        self.assertIsInstance(third[1], OutboundImage)
+        self.assertEqual(Path(third[1].source.path), image.resolve())
+        self.assertEqual(self.channel.updates, [])
+        self.assertEqual(
+            self.store._connection.total_changes,
+            changes_before_callbacks,
+        )
+        self.assertEqual(len(self.channel.replies), replies_before_callbacks)
+
+    async def test_missing_file_reports_in_card_topic_without_mutating_card(
+        self,
+    ) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-files")
+        report = self.project / "ephemeral.txt"
+        report.write_text("gone soon", encoding="utf-8")
+        result = completed_turn_result(file_change_item("ephemeral.txt"))
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-files",
+                turn_id="turn-files",
+                owner_id="ou_user",
+                origin=origin,
+                result=result,
+            )
+        )
+        card = self.channel.replies[-1][1]
+        assert isinstance(card, OutboundCard)
+        send_file = _card_button_value(card, "发送文件到话题")
+        report.unlink()
+        self.channel.send_results.append(
+            sent_result(
+                "om_feedback",
+                chat_id="oc_direct",
+                thread_id="omt_files",
+                root_id="om_file_card",
+                parent_id="om_file_card",
+            )
+        )
+
+        await self.app.handle_card_action(
+            self.direct_button_event(send_file, message_id="om_file_card")
+        )
+
+        self.assertEqual(len(self.channel.send_calls), 1)
+        self.assertIsInstance(self.channel.send_calls[0][1], str)
+        self.assertIn("已不可用", self.channel.send_calls[0][1])
+        self.assertEqual(self.channel.updates, [])
+
+    async def test_file_send_failure_is_reported_without_replacing_card(
+        self,
+    ) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-files")
+        report = self.project / "report.txt"
+        report.write_text("report", encoding="utf-8")
+        result = completed_turn_result(file_change_item("report.txt"))
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-files",
+                turn_id="turn-files",
+                owner_id="ou_user",
+                origin=origin,
+                result=result,
+            )
+        )
+        card = self.channel.replies[-1][1]
+        assert isinstance(card, OutboundCard)
+        send_file = _card_button_value(card, "发送文件到话题")
+        self.channel.send_results.extend(
+            (
+                sent_result(
+                    "om_failed",
+                    chat_id="oc_direct",
+                    success=False,
+                    code=500,
+                ),
+                sent_result(
+                    "om_feedback",
+                    chat_id="oc_direct",
+                    thread_id="omt_files",
+                    root_id="om_file_card",
+                    parent_id="om_file_card",
+                ),
+            )
+        )
+        replies_before = len(self.channel.replies)
+
+        await self.app.handle_card_action(
+            self.direct_button_event(send_file, message_id="om_file_card")
+        )
+
+        self.assertEqual(len(self.channel.send_calls), 2)
+        self.assertIsInstance(self.channel.send_calls[0][1], OutboundFile)
+        self.assertIsInstance(self.channel.send_calls[1][1], str)
+        self.assertIn("code=500", self.channel.send_calls[1][1])
+        self.assertEqual(self.channel.updates, [])
+        self.assertEqual(len(self.channel.replies), replies_before)
+
+    async def test_v3_file_button_reports_expired_without_sending_file(
+        self,
+    ) -> None:
+        self.channel.send_results.append(
+            sent_result(
+                "om_expired_feedback",
+                chat_id="oc_direct",
+                thread_id="omt_files",
+                root_id="om_legacy_card",
+                parent_id="om_legacy_card",
+            )
+        )
+        value = {
+            "v": 3,
+            "intent": "turn-file.send",
+            "chat_id": "oc_direct",
+            "scope_kind": "direct",
+            "binding_id": "binding:v1:legacy-binding",
+            "turn_id": "turn:v1:turn-legacy",
+            "file_ref": "turn-file:v1:" + "a" * 64,
+        }
+
+        await self.app.handle_card_action(
+            self.direct_button_event(value, message_id="om_legacy_card")
+        )
+
+        self.assertEqual(len(self.channel.send_calls), 1)
+        self.assertIsInstance(self.channel.send_calls[0][1], str)
+        self.assertIn("已过期", self.channel.send_calls[0][1])
+
+    async def test_turn_file_reply_validator_checks_exact_topic_relationship(
+        self,
+    ) -> None:
+        direct = channel_app.TurnFileActionIntent(
+            scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+            source_id="om_card",
+            sender_id="ou_user",
+            name=channel_app.TurnFileActionName.SEND,
+            binding_id="binding-one",
+            turn_id="turn-one",
+            path="/tmp/report.pdf",
+        )
+        valid = sent_result(
+            "om_file",
+            chat_id="oc_direct",
+            thread_id="omt_files",
+            root_id="om_card",
+            parent_id="om_card",
+        )
+        parsed = channel_app._validate_turn_file_reply(valid, intent=direct)
+        self.assertEqual(parsed.message_id, "om_file")
+
+        topic = channel_app.TurnFileActionIntent(
+            scope=FeishuScope(
+                "cli_test",
+                "oc_group",
+                ScopeKind.TOPIC,
+                "omt_existing",
+            ),
+            source_id="om_card",
+            sender_id="ou_user",
+            name=channel_app.TurnFileActionName.SEND,
+            binding_id="binding-one",
+            turn_id="turn-one",
+            path="/tmp/topic.pdf",
+        )
+        parsed_topic = channel_app._validate_turn_file_reply(
+            sent_result(
+                "om_topic_file",
+                chat_id="oc_group",
+                thread_id="omt_existing",
+                root_id="om_existing_root",
+                parent_id="om_existing_root",
+            ),
+            intent=topic,
+        )
+        self.assertEqual(parsed_topic.thread_id, "omt_existing")
+        with self.assertRaises(channel_app.TurnFileError):
+            channel_app._validate_turn_file_reply(
+                sent_result(
+                    "om_topic_file",
+                    chat_id="oc_group",
+                    thread_id="omt_other",
+                    root_id="om_existing_root",
+                    parent_id="om_card",
+                ),
+                intent=topic,
+            )
+
+        invalid = (
+            sent_result(
+                "om_file",
+                chat_id="oc_other",
+                thread_id="omt_files",
+                root_id="om_card",
+                parent_id="om_card",
+            ),
+            sent_result(
+                "om_file",
+                chat_id="oc_direct",
+                thread_id=None,
+                root_id="om_card",
+                parent_id="om_card",
+            ),
+            sent_result(
+                "om_file",
+                chat_id="oc_direct",
+                thread_id="omt_files",
+                root_id=None,
+                parent_id="om_card",
+            ),
+            sent_result(
+                "om_file",
+                chat_id="oc_direct",
+                thread_id="omt_files",
+                root_id="om_card",
+                parent_id="om_other",
+            ),
+            sent_result(
+                "om_file",
+                chat_id="oc_direct",
+                success=False,
+                code=230071,
+            ),
+        )
+        for result in invalid:
+            with self.subTest(result=result), self.assertRaises(
+                channel_app.TurnFileError
+            ):
+                channel_app._validate_turn_file_reply(result, intent=direct)
+
+    async def test_thinking_reaction_pulses_while_typing_stays_visible(self) -> None:
+        controller = channel_app._ReactionController(
+            self.channel,
+            visible_seconds=0.001,
+            hidden_seconds=0.001,
+        )
+        try:
+            self.assertTrue(await controller.start("turn-one", "om_prompt"))
+            async with asyncio.timeout(1):
+                while self.channel.reactions.count(("om_prompt", "THINKING")) < 2:
+                    await asyncio.sleep(0)
+            await controller.stop("turn-one")
+        finally:
+            await controller.close()
+
+        self.assertEqual(
+            self.channel.reactions,
+            [
+                ("om_prompt", "Typing"),
+                ("om_prompt", "THINKING"),
+                ("om_prompt", "THINKING"),
+            ],
+        )
+        self.assertEqual(
+            self.channel.reaction_removals,
+            [
+                ("om_prompt", "reaction-2"),
+                ("om_prompt", "reaction-3"),
+                ("om_prompt", "reaction-1"),
+            ],
+        )
+
+    async def test_thinking_remove_failure_gets_one_terminal_retry(self) -> None:
+        controller = channel_app._ReactionController(
+            self.channel,
+            visible_seconds=0.001,
+            hidden_seconds=10,
+        )
+        self.channel.fail_once_reaction_remove = True
+        try:
+            with self.assertLogs("netizen.channel_app", level="ERROR"):
+                self.assertTrue(await controller.start("turn-one", "om_prompt"))
+                await asyncio.wait_for(
+                    self.channel.reaction_remove_attempted.wait(),
+                    timeout=1,
+                )
+                await controller.stop("turn-one")
+        finally:
+            await controller.close()
+
+        self.assertEqual(
+            self.channel.reaction_removals,
+            [
+                ("om_prompt", "reaction-2"),
+                ("om_prompt", "reaction-2"),
+                ("om_prompt", "reaction-1"),
+            ],
+        )
+
+    async def test_application_close_removes_both_visible_turn_reactions(self) -> None:
+        controller = channel_app._ReactionController(
+            self.channel,
+            visible_seconds=10,
+            hidden_seconds=10,
+        )
+        self.app._reactions = controller
+
+        self.assertTrue(await controller.start("turn-one", "om_prompt"))
+        await self.app.close()
+
+        self.assertEqual(
+            self.channel.reaction_removals,
+            [
+                ("om_prompt", "reaction-2"),
+                ("om_prompt", "reaction-1"),
+            ],
+        )
+
+    async def test_thinking_add_failure_keeps_typing_placeholder(self) -> None:
+        controller = channel_app._ReactionController(
+            self.channel,
+            visible_seconds=10,
+            hidden_seconds=10,
+        )
+        self.channel.fail_once_reaction_on = "THINKING"
+        try:
+            with self.assertLogs("netizen.channel_app", level="ERROR"):
+                self.assertTrue(await controller.start("turn-one", "om_prompt"))
+            self.assertIn("turn-one", controller._pulses)
+            self.assertIsNone(controller._pulses["turn-one"].task)
+            await controller.stop("turn-one")
+        finally:
+            await controller.close()
+
+        self.assertEqual(
+            self.channel.reaction_operations,
+            [
+                ("add", "om_prompt", "Typing"),
+                ("add", "om_prompt", "THINKING"),
+                ("remove", "om_prompt", "reaction-1"),
+            ],
+        )
+
+    async def test_terminal_reaction_failure_still_clears_running_state(self) -> None:
+        controller = channel_app._ReactionController(
+            self.channel,
+            visible_seconds=10,
+            hidden_seconds=10,
+        )
+        self.app._reactions = controller
+        self.assertTrue(await controller.start("turn-one", "om_prompt"))
+        self.channel.fail_once_reaction_on = "DONE"
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_completion(
+                TurnOutcome(
+                    binding_id="binding-one",
+                    thread_id="native-one",
+                    turn_id="turn-one",
+                    owner_id="ou_user",
+                    origin=FakeMessage("hello", message_id="om_prompt"),
+                    result=SimpleNamespace(
+                        final_response="done",
+                        status=SimpleNamespace(value="completed"),
+                    ),
+                )
+            )
+
+        self.assertEqual(
+            self.channel.reaction_operations,
+            [
+                ("add", "om_prompt", "Typing"),
+                ("add", "om_prompt", "THINKING"),
+                ("add", "om_prompt", "DONE"),
+                ("remove", "om_prompt", "reaction-2"),
+                ("remove", "om_prompt", "reaction-1"),
+            ],
+        )
+        self.assertNotIn("turn-one", controller._pulses)
+
+    async def test_status_is_multiline_and_shows_lazy_codex_defaults(self) -> None:
+        await self.new()
+
+        await self.app.handle_message(
+            FakeMessage("/status", message_id="om_status")
+        )
+
+        self.assertEqual(
+            self.channel.replies[-1][1].splitlines(),
+            [
+                "当前会话",
+                "会话：11111111",
+                "名称：新会话",
+                "会话预览：暂无（首条消息后生成）",
+                "Project：test",
+                "Native Thread：pending（首条消息后创建）",
+                "状态：idle",
+                "Netizen 订阅：未建立（会话尚未物化）",
+                "上下文窗口：暂无（首条消息后生成）",
+                "Model：继承 Codex",
+                "Effort：继承 Codex",
+                "Speed：继承 Codex",
+                "配置来源：Codex",
+            ],
+        )
+
+    async def test_status_shows_transient_subscription_without_writer_claim(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        assert binding is not None
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.subscription_snapshots[binding.id] = ThreadSubscriptionSnapshot(
+            binding_id=binding.id,
+            thread_id="native-one",
+            state=ThreadSubscriptionState.RELEASED,
+            release_in_seconds=None,
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/status", message_id="om_subscription_status")
+        )
+
+        reply = str(self.channel.replies[-1][1])
+        self.assertIn("Netizen 订阅：本进程已取消", reply)
+        self.assertIn("不表示 App Server writer 已立即释放", reply)
+
+    async def test_release_command_keeps_binding_and_native_history(self) -> None:
+        self.runtime.available_capabilities = frozenset({NativeCapability.RELEASE})
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        assert binding is not None
+        self.store.assign_native_thread_id(binding.id, "native-one")
+
+        await self.app.handle_message(
+            FakeMessage("/release", message_id="om_release")
+        )
+
+        self.assertEqual(self.runtime.release_binding_calls, [binding.id])
+        self.assertEqual(self.store.active_binding(scope.key).id, binding.id)
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-one")
+        reply = str(self.channel.replies[-1][1])
+        self.assertIn("已取消本进程", reply)
+        self.assertIn("不表示 App Server writer 已立即释放", reply)
+
+    async def test_release_reports_lazy_and_already_unsubscribed_states(self) -> None:
+        self.runtime.available_capabilities = frozenset({NativeCapability.RELEASE})
+        await self.new()
+        self.runtime.release_disposition = ReleaseDisposition.NOT_MATERIALIZED
+        await self.app.handle_message(
+            FakeMessage("/release", message_id="om_release_lazy")
+        )
+        self.assertIn("尚未物化", str(self.channel.replies[-1][1]))
+
+        binding = self.store.active_binding(
+            FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT).key
+        )
+        assert binding is not None
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.release_disposition = ReleaseDisposition.NOT_SUBSCRIBED
+        await self.app.handle_message(
+            FakeMessage("/release", message_id="om_release_absent")
+        )
+        self.assertIn("本进程当前没有", str(self.channel.replies[-1][1]))
+
+    async def test_release_surfaces_busy_terminal_and_unknown_refusals(self) -> None:
+        self.runtime.available_capabilities = frozenset({NativeCapability.RELEASE})
+        await self.new()
+        cases = (
+            (
+                ThreadRunningConfiguration("当前 Turn 正在执行，不能释放订阅。"),
+                "正在执行",
+            ),
+            (
+                ThreadBackgroundTerminalsActive(
+                    "当前 Thread 仍有已登记后台终端，本次未释放订阅。"
+                ),
+                "后台终端",
+            ),
+            (
+                ThreadReleaseStateUnknown("Thread 取消订阅结果未确认。"),
+                "结果未确认",
+            ),
+        )
+        for index, (error, expected) in enumerate(cases):
+            with self.subTest(expected=expected):
+                self.runtime.release_error = error
+                await self.app.handle_message(
+                    FakeMessage(
+                        "/release",
+                        message_id=f"om_release_error_{index}",
+                    )
+                )
+                self.assertIn(expected, str(self.channel.replies[-1][1]))
+
+    async def test_status_renders_bounded_native_checklist_and_stale_label(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.active[binding.id] = ActiveTurnSnapshot(
+            binding.id,
+            "native-one",
+            "turn-one",
+            "ou_user",
+            ActiveState.RUNNING,
+        )
+        steps = (
+            TurnPlanStepSnapshot("done", TurnPlanStepState.COMPLETED),
+            TurnPlanStepSnapshot("working", TurnPlanStepState.IN_PROGRESS),
+            TurnPlanStepSnapshot("later", TurnPlanStepState.PENDING),
+            *tuple(
+                TurnPlanStepSnapshot(
+                    ("x" * 200) if index == 0 else f"extra-{index}",
+                    TurnPlanStepState.PENDING,
+                )
+                for index in range(11)
+            ),
+        )
+        self.runtime.turn_progress_values[binding.id] = TurnProgressSnapshot(
+            binding_id=binding.id,
+            thread_id="native-one",
+            turn_id="turn-one",
+            steer_count=2,
+            plan_available=True,
+            plan_generated=True,
+            plan_may_be_stale=True,
+            steps=steps,
+        )
+
+        await self.app.handle_message(FakeMessage("/status", message_id="om_status"))
+
+        reply = str(self.channel.replies[-1][1])
+        self.assertIn("任务进展", reply)
+        self.assertIn("已接收调整：2 次", reply)
+        self.assertIn("任务清单（可能尚未反映最近一次调整）：", reply)
+        self.assertIn("✓ done", reply)
+        self.assertIn("→ working", reply)
+        self.assertIn("○ later", reply)
+        self.assertIn("… 另有 2 项未展示", reply)
+        checklist_lines = reply.splitlines()
+        long_line = next(line for line in checklist_lines if line.startswith("○ xxx"))
+        self.assertLessEqual(
+            len(long_line),
+            channel_app._STATUS_PLAN_STEP_MAX_CHARS + 2,
+        )
+
+    async def test_status_reports_plan_gate_failure_without_affecting_turn(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.active[binding.id] = ActiveTurnSnapshot(
+            binding.id,
+            "native-one",
+            "turn-one",
+            "ou_user",
+            ActiveState.RUNNING,
+        )
+        self.runtime.turn_progress_values[binding.id] = TurnProgressSnapshot(
+            binding_id=binding.id,
+            thread_id="native-one",
+            turn_id="turn-one",
+            steer_count=1,
+            plan_available=False,
+            plan_generated=False,
+            plan_may_be_stale=True,
+            steps=(),
+        )
+
+        await self.app.handle_message(FakeMessage("/status", message_id="om_status"))
+
+        reply = str(self.channel.replies[-1][1])
+        self.assertIn("状态：running", reply)
+        self.assertIn("已接收调整：1 次", reply)
+        self.assertIn("任务清单：暂不可用", reply)
+        self.assertEqual(self.runtime.resolve_model_settings_calls, [])
+        self.assertEqual(self.runtime.thread_metadata_calls, [])
+
+    async def test_sessions_prefer_name_then_preview_and_show_lazy_binding(
+        self,
+    ) -> None:
+        await self.new(message_id="om_new_one")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        first = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(first.id, "native-one")
+        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
+            thread_id="native-one",
+            name="  Named\nThread  ",
+            preview="name must win",
+        )
+
+        await self.new(message_id="om_new_two")
+        second = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(second.id, "native-two")
+        self.runtime.thread_metadata_values["native-two"] = NativeThreadMetadata(
+            thread_id="native-two",
+            name=None,
+            preview="Preview\n" + "x" * 80,
+        )
+
+        await self.new(message_id="om_new_three")
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+
+        reply = self.channel.replies[-1][1]
+        self.assertIn("○ Named Thread\n", reply)
+        self.assertNotIn("name must win", reply)
+        self.assertIn("○ Preview " + "x" * 39 + "…\n", reply)
+        self.assertIn("● 新会话\n", reply)
+        self.assertIn("会话：11111111 · Project：test", reply)
+        self.assertIn("会话：22222222 · Project：test", reply)
+        self.assertIn("会话：33333333 · Project：test", reply)
+        self.assertEqual(len(self.runtime.thread_metadata_calls), 1)
+        self.assertEqual(
+            set(self.runtime.thread_metadata_calls[0]),
+            {"native-one", "native-two"},
+        )
+
+    async def test_rename_supports_direct_name_and_current_binding_form(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
+            "native-one",
+            "Old name",
+            "first task",
+        )
+
+        await self.app.handle_message(
+            FakeMessage('/rename "Release review"', message_id="om_rename_direct")
+        )
+        self.assertEqual(
+            self.runtime.rename_binding_calls,
+            [(binding.id, "Release review")],
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/rename", message_id="om_rename_card")
+        )
+        card = self.channel.replies[-1][1]
+        self.assertIsInstance(card, OutboundCard)
+        field = _elements(card.card, "input")[0]["name"]
+        await self.app.handle_card_action(
+            self.direct_card_event(
+                {field: "  Final   title  "},
+                message_id="om_rename_result",
+            )
+        )
+
+        self.assertEqual(
+            self.runtime.rename_binding_calls[-1],
+            (binding.id, "Final title"),
+        )
+        self.assertIn("会话已重命名", str(self.channel.updates[-1][1]))
+
+    async def test_archive_confirmation_retains_binding_and_clears_current(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
+            "native-one",
+            "Release review",
+            "first task",
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/archive", message_id="om_archive")
+        )
+        card = self.channel.replies[-1][1]
+        button = next(
+            item
+            for item in _elements(card.card, "button")
+            if item["text"]["content"] == "确认归档当前会话"
+        )
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                button["behaviors"][0]["value"],
+                message_id="om_archive_card",
+            )
+        )
+
+        self.assertEqual(self.runtime.archive_binding_calls, [binding.id])
+        self.assertIsNone(self.store.active_binding(scope.key))
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-one")
+        self.assertIn("会话已归档", str(self.channel.updates[-1][1]))
+
+    async def test_stale_archive_confirmation_cannot_touch_new_current_binding(self) -> None:
+        await self.new(message_id="om_new_first")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        first = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(first.id, "native-one")
+        await self.app.handle_message(
+            FakeMessage("/archive", message_id="om_archive")
+        )
+        card = self.channel.replies[-1][1]
+        button = next(
+            item
+            for item in _elements(card.card, "button")
+            if item["text"]["content"] == "确认归档当前会话"
+        )
+        await self.new(message_id="om_new_second")
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                button["behaviors"][0]["value"],
+                message_id="om_stale_archive",
+            )
+        )
+
+        self.assertEqual(self.runtime.archive_binding_calls, [])
+        self.assertNotEqual(self.store.active_binding(scope.key).id, first.id)
+        self.assertIn("active 会话已切换", str(self.channel.updates[-1][1]))
+
+    async def test_delete_lazy_binding_requires_confirmation_then_removes_it(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+
+        await self.app.handle_message(
+            FakeMessage("/delete", message_id="om_delete")
+        )
+        card = self.channel.replies[-1][1]
+        self.assertIn("只删除本地 Binding", str(card.card))
+        button = next(
+            item
+            for item in _elements(card.card, "button")
+            if item["text"]["content"] == "永久删除当前会话"
+        )
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                button["behaviors"][0]["value"],
+                message_id="om_delete_card",
+            )
+        )
+
+        self.assertEqual(self.runtime.delete_binding_calls, [binding.id])
+        self.assertIsNone(self.store.active_binding(scope.key))
+        with self.assertRaises(BindingNotFound):
+            self.store.get(binding.id)
+        self.assertIn("会话已永久删除", str(self.channel.updates[-1][1]))
+
+    async def test_delete_materialized_binding_is_unavailable_without_native_read(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+
+        await self.app.handle_message(
+            FakeMessage("/delete", message_id="om_delete_materialized")
+        )
+
+        reply = str(self.channel.replies[-1][1])
+        self.assertIn("已有原生历史的会话暂不支持删除", reply)
+        self.assertIn("本次未调用 Codex", reply)
+        self.assertEqual(self.runtime.thread_metadata_calls, [])
+        self.assertEqual(self.runtime.delete_binding_calls, [])
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-one")
+
+    async def test_lazy_delete_card_cannot_delete_binding_materialized_before_click(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        await self.app.handle_message(
+            FakeMessage("/delete", message_id="om_delete_lazy_race")
+        )
+        card = self.channel.replies[-1][1]
+        button = next(
+            item
+            for item in _elements(card.card, "button")
+            if item["text"]["content"] == "永久删除当前会话"
+        )
+        self.store.assign_native_thread_id(binding.id, "native-raced")
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                button["behaviors"][0]["value"],
+                message_id="om_delete_lazy_race_card",
+            )
+        )
+
+        self.assertEqual(self.runtime.delete_binding_calls, [])
+        self.assertEqual(
+            self.store.get(binding.id).native_thread_id,
+            "native-raced",
+        )
+        self.assertIn("已有原生历史的会话暂不支持删除", str(self.channel.updates[-1][1]))
+
+    async def test_stale_delete_confirmation_cannot_delete_new_current_binding(self) -> None:
+        await self.new(message_id="om_new_first")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        first = self.store.active_binding(scope.key)
+        await self.app.handle_message(
+            FakeMessage("/delete", message_id="om_delete")
+        )
+        card = self.channel.replies[-1][1]
+        button = next(
+            item
+            for item in _elements(card.card, "button")
+            if item["text"]["content"] == "永久删除当前会话"
+        )
+        await self.new(message_id="om_new_second")
+        second = self.store.active_binding(scope.key)
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                button["behaviors"][0]["value"],
+                message_id="om_stale_delete",
+            )
+        )
+
+        self.assertEqual(self.runtime.delete_binding_calls, [])
+        self.assertEqual(self.store.active_binding(scope.key).id, second.id)
+        self.assertEqual(self.store.get(first.id).id, first.id)
+        self.assertIn("active 会话已切换", str(self.channel.updates[-1][1]))
+
+    async def test_archived_sessions_are_separate_and_restore_switches_current(self) -> None:
+        await self.new(message_id="om_new_archived")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        archived_binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(archived_binding.id, "native-one")
+        self.store.deactivate(
+            scope_key=scope.key,
+            binding_id=archived_binding.id,
+        )
+        self.runtime.archived_thread_metadata_values["native-one"] = (
+            NativeThreadMetadata("native-one", "Archived work", "old task")
+        )
+        await self.new(message_id="om_new_current")
+        current = self.store.active_binding(scope.key)
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        ordinary = self.channel.replies[-1][1]
+        self.assertIn(current.short_id, ordinary)
+        self.assertNotIn(archived_binding.short_id, ordinary)
+
+        await self.app.handle_message(
+            FakeMessage("/sessions archived", message_id="om_archived")
+        )
+        card = self.channel.replies[-1][1]
+        self.assertIsInstance(card, OutboundCard)
+        self.assertIn("Archived work", str(card.card))
+        button = next(
+            item
+            for item in _elements(card.card, "button")
+            if item["text"]["content"] == "恢复并切换"
+        )
+
+        await self.app.handle_message(
+            FakeMessage(
+                f"/resume {archived_binding.short_id}",
+                message_id="om_resume_archived",
+            )
+        )
+        self.assertIn("已归档", str(self.channel.replies[-1][1]))
+        self.assertEqual(self.store.active_binding(scope.key).id, current.id)
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                button["behaviors"][0]["value"],
+                message_id="om_unarchive_card",
+            )
+        )
+        self.assertEqual(
+            self.runtime.unarchive_binding_calls,
+            [archived_binding.id],
+        )
+        self.assertEqual(
+            self.store.active_binding(scope.key).id,
+            archived_binding.id,
+        )
+        self.assertEqual(
+            self.runtime.active_binding_change_calls[-1],
+            (current.id, archived_binding.id),
+        )
+        self.assertIn("会话已恢复并切换", str(self.channel.updates[-1][1]))
+
+    async def test_unarchive_command_restores_exact_local_binding(self) -> None:
+        await self.new(message_id="om_new_archived")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        archived = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(archived.id, "native-one")
+        self.store.deactivate(scope_key=scope.key, binding_id=archived.id)
+        self.runtime.archived_thread_metadata_values["native-one"] = (
+            NativeThreadMetadata("native-one", "Archived work", "old task")
+        )
+        await self.new(message_id="om_new_current")
+
+        await self.app.handle_message(
+            FakeMessage(
+                f"/unarchive {archived.short_id}",
+                message_id="om_unarchive",
+            )
+        )
+
+        self.assertEqual(self.runtime.unarchive_binding_calls, [archived.id])
+        self.assertEqual(self.store.active_binding(scope.key).id, archived.id)
+        self.assertIn("已恢复并切换", str(self.channel.replies[-1][1]))
+
+    async def test_status_shows_native_name_and_preview(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
+            thread_id="native-one",
+            name="  Release\nreview ",
+            preview="Check\tcurrent changes",
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/status", message_id="om_status")
+        )
+
+        lines = self.channel.replies[-1][1].splitlines()
+        self.assertIn("名称：Release review", lines)
+        self.assertIn("会话预览：Check current changes", lines)
+        self.assertIn("上下文窗口：暂不可用（下次可观测 Turn 完成后更新）", lines)
+        self.assertEqual(self.runtime.thread_metadata_calls, [("native-one",)])
+
+    async def test_status_shows_observed_context_window_usage(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
+            thread_id="native-one",
+            name=None,
+            preview="First task",
+        )
+        self.runtime.context_window_usage_values[binding.id] = ContextWindowUsage(
+            used_tokens=24_500,
+            context_window_tokens=100_000,
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/status", message_id="om_status")
+        )
+
+        self.assertIn(
+            "上下文窗口：24,500 / 100,000 tokens（24.5% 已用）",
+            self.channel.replies[-1][1].splitlines(),
+        )
+        self.assertEqual(self.runtime.context_window_usage_calls, [binding.id])
+
+    async def test_status_labels_previous_usage_while_turn_is_running(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.context_window_usage_values[binding.id] = ContextWindowUsage(
+            used_tokens=24_500,
+            context_window_tokens=100_000,
+        )
+        self.runtime.active[binding.id] = ActiveTurnSnapshot(
+            binding_id=binding.id,
+            thread_id="native-one",
+            turn_id="turn-two",
+            owner_id="ou_user",
+            state=ActiveState.RUNNING,
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/status", message_id="om_status")
+        )
+
+        lines = self.channel.replies[-1][1].splitlines()
+        self.assertIn("状态：running", lines)
+        self.assertIn(
+            "上下文窗口（上一轮完成时）：24,500 / 100,000 tokens（24.5% 已用）",
+            lines,
+        )
+
+    async def test_status_keeps_usage_when_window_size_is_unavailable(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.context_window_usage_values[binding.id] = ContextWindowUsage(
+            used_tokens=24_500,
+            context_window_tokens=None,
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/status", message_id="om_status")
+        )
+
+        self.assertIn(
+            "上下文窗口：已用 24,500 tokens（窗口大小暂不可用）",
+            self.channel.replies[-1][1].splitlines(),
+        )
+
+    async def test_status_clamps_overfilled_context_percentage(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.context_window_usage_values[binding.id] = ContextWindowUsage(
+            used_tokens=105_000,
+            context_window_tokens=100_000,
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/status", message_id="om_status")
+        )
+
+        self.assertIn(
+            "上下文窗口：105,000 / 100,000 tokens（100.0% 已用）",
+            self.channel.replies[-1][1].splitlines(),
+        )
+
+    async def test_status_uses_preview_when_native_name_is_unset(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
+            thread_id="native-one",
+            name=None,
+            preview="First task",
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/status", message_id="om_status")
+        )
+
+        lines = self.channel.replies[-1][1].splitlines()
+        self.assertIn("名称：未设置", lines)
+        self.assertIn("会话预览：First task", lines)
+
+    async def test_thread_metadata_failure_keeps_status_but_sessions_fail_closed(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.thread_metadata_error = RuntimeError("history unavailable")
+
+        with self.assertLogs("netizen.channel_app", level="WARNING"):
+            await self.app.handle_message(
+                FakeMessage("/status", message_id="om_status")
+            )
+        status_reply = self.channel.replies[-1][1]
+        self.assertIn("名称：暂不可用", status_reply)
+        self.assertIn("会话预览：暂不可用", status_reply)
+        self.assertIn("状态：idle", status_reply)
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        sessions_reply = self.channel.replies[-1][1]
+        self.assertIn("无法读取 Codex 归档会话列表", sessions_reply)
+
+    async def test_status_resolves_exact_persistent_turn_settings(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.set_turn_settings(
+            binding_id=binding.id,
+            expected_revision=binding.settings_revision,
+            settings=BindingTurnSettings(
+                "future-model",
+                "ultra",
+                "priority-v2",
+            ),
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/status", message_id="om_status")
+        )
+
+        reply = self.channel.replies[-1][1]
+        self.assertIn("\nModel：gpt-future-codex\n", reply)
+        self.assertIn("\nEffort：ultra\n", reply)
+        self.assertIn("\nSpeed：Fast v2\n", reply)
+        self.assertTrue(reply.endswith("配置来源：Netizen 会话配置"))
+        self.assertEqual(self.runtime.model_catalog_calls, 1)
+        self.assertEqual(self.runtime.resolve_model_settings_calls, [])
+
+    async def test_status_without_override_always_shows_codex_inheritance(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+
+        await self.app.handle_message(
+            FakeMessage("/status", message_id="om_status")
+        )
+
+        lines = self.channel.replies[-1][1].splitlines()
+        self.assertIn("Native Thread：native-one", lines)
+        self.assertIn(
+            "Model：继承 Codex",
+            lines,
+        )
+        self.assertIn(
+            "Effort：继承 Codex",
+            lines,
+        )
+        self.assertIn(
+            "Speed：继承 Codex",
+            lines,
+        )
+        self.assertIn("配置来源：Codex", lines)
+        self.assertEqual(self.runtime.resolve_model_settings_calls, [])
+
+    async def test_status_falls_back_to_persistent_ids_when_catalog_is_down(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.set_turn_settings(
+            binding_id=binding.id,
+            expected_revision=binding.settings_revision,
+            settings=BindingTurnSettings(
+                "future-model",
+                "ultra",
+                "priority-v2",
+            ),
+        )
+        self.runtime.model_catalog_error = RuntimeError("catalog down")
+
+        with self.assertLogs("netizen.channel_app", level="WARNING") as logs:
+            await self.app.handle_message(
+                FakeMessage("/status", message_id="om_status")
+            )
+
+        reply = self.channel.replies[-1][1]
+        self.assertIn("\nModel：future-model\n", reply)
+        self.assertIn("\nEffort：ultra\n", reply)
+        self.assertIn("\nSpeed：priority-v2\n", reply)
+        self.assertTrue(
+            reply.endswith(
+                "配置来源：Netizen 会话配置（模型目录暂不可用）"
+            )
+        )
+        self.assertIn("model catalog unavailable", logs.output[0])
+
+    async def test_status_marks_persistent_selection_invalid_when_catalog_changed(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.set_turn_settings(
+            binding_id=binding.id,
+            expected_revision=binding.settings_revision,
+            settings=BindingTurnSettings(
+                "removed-model",
+                "removed-effort",
+                "removed-tier",
+            ),
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/status", message_id="om_status")
+        )
+
+        reply = self.channel.replies[-1][1]
+        self.assertIn("\nModel：removed-model\n", reply)
+        self.assertTrue(
+            reply.endswith(
+                "配置来源：Netizen 会话配置（已失效，请使用 /config 更新）"
+            )
+        )
+
+    async def test_skills_command_is_rejected_without_native_mutation(self) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.SKILLS})
+
+        await self.app.handle_message(FakeMessage("/skills", message_id="om_skills"))
+
+        reply = str(self.channel.replies[-1][1])
+        self.assertIn("未知命令：/skills", reply)
+        self.assertEqual(self.runtime.submit_calls, [])
+
+    async def test_multiple_skills_from_current_message_reach_one_submission(
+        self,
+    ) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.SKILLS})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+
+        await self.app.handle_message(
+            FakeMessage(
+                "$code-review $test-triage inspect",
+                message_id="om_skilled",
+                display_name="$old-skill Current User",
+            )
+        )
+
+        call = self.runtime.submit_calls[-1]
+        self.assertEqual(
+            call["skill_names"],
+            ("code-review", "test-triage"),
+        )
+        self.assertNotIn("$old-skill", call["input"])
+        self.assertIn(r"\u0024old-skill", call["input"])
+        self.assertEqual(len(self.runtime.submit_calls), 1)
+
+    async def test_quoted_skill_marker_never_becomes_a_typed_reference(self) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.SKILLS})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+        self.channel.inbound_messages["om_old"] = quoted_inbound(
+            message_id="om_old",
+            content_text="$old-skill historical",
+        )
+
+        await self.app.handle_message(
+            FakeMessage(
+                "$new-skill current",
+                message_id="om_current",
+                reply_id="om_old",
+            )
+        )
+
+        call = self.runtime.submit_calls[-1]
+        self.assertEqual(call["skill_names"], ("new-skill",))
+        self.assertNotIn("$old-skill", call["input"])
+        self.assertIn(r"\u0024old-skill", call["input"])
+
+    async def test_goal_command_starts_one_logical_operation_and_renders_card(
+        self,
+    ) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        self.runtime.goal_snapshot_value = native_goal()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            released = True
+
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id,
+            "native-one",
+            "goal-one",
+            release,
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/goal ship safely", message_id="om_goal")
+        )
+
+        self.assertTrue(released)
+        self.assertEqual(len(self.runtime.start_goal_calls), 1)
+        self.assertEqual(
+            self.runtime.start_goal_calls[0]["objective"],
+            "ship safely",
+        )
+        self.assertIsInstance(self.channel.replies[-1][1], OutboundCard)
+        self.assertIn(
+            "Goal 已启动",
+            json.dumps(self.channel.replies[-1][1].card, ensure_ascii=False),
+        )
+
+    async def test_goal_pause_card_finishes_on_the_same_card(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.stop_result = StopDisposition.GOAL_REQUESTED
+        self.runtime.goal_snapshot_value = native_goal(GoalStatus.ACTIVE)
+        self.runtime.goal_snapshot_after_stop = native_goal(GoalStatus.PAUSED)
+        card = goal_card(
+            scope=scope,
+            binding_id=binding.id,
+            short_id=binding.short_id,
+            project_alias=binding.project_alias,
+            goal=self.runtime.goal_snapshot_value,
+            runtime_state=GoalOperationState.RUNNING.value,
+        )
+        pause = next(
+            item
+            for item in _elements(card.card, "button")
+            if item["text"]["content"] == "暂停 Goal"
+        )
+
+        await self.app.handle_card_action(
+            SimpleNamespace(
+                message_id="om_goal_card",
+                chat_id="oc_direct",
+                operator=SimpleNamespace(open_id="ou_user"),
+                action=SimpleNamespace(
+                    tag="button",
+                    value=pause["behaviors"][0]["value"],
+                    form_value=None,
+                ),
+            )
+        )
+
+        rendered = json.dumps(self.channel.updates[-1][1], ensure_ascii=False)
+        self.assertIn("Goal 已暂停", rendered)
+        self.assertIn("goal-paused", rendered)
+        self.assertIn("前台工具进程可能仍在运行", rendered)
+
+    async def test_direct_image_message_is_native_visual_input(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+        self.channel.resource_bodies[("om_image", "img_current")] = PNG
+        image = FakeMessage(
+            "![image](img_current)",
+            message_id="om_image",
+            raw_content_type="image",
+            content=ImageContent(image_key="img_current"),
+            resources=[ResourceDescriptor(type="image", file_key="img_current")],
+        )
+
+        await self.app.handle_message(image)
+
+        self.assertEqual(self.runtime.capture_calls, [binding.id])
+        self.assertEqual(
+            self.channel.download_resource_calls,
+            [("img_current", "image", "om_image")],
+        )
+        submitted = self.runtime.submit_calls[0]
+        self.assertEqual(submitted["admission"].binding_id, binding.id)
+        native_input = submitted["input"]
+        self.assertIsInstance(native_input, list)
+        self.assertIsInstance(native_input[0], TextInput)
+        self.assertIsInstance(native_input[1], ImageInput)
+        label = json.loads(native_input[0].text)
+        self.assertEqual(label["source"], "current_message")
+        self.assertEqual(label["file_key"], "img_current")
+        request_text, current_context = plain_prompt_projection(native_input)
+        self.assertEqual(request_text, "![image](img_current)")
+        self.assertEqual(current_context["message_id"], "om_image")
+        self.assertEqual(current_context["message_type"], "image")
+        self.assertEqual(current_context["content_fidelity"], "full_multimodal")
+        self.assertEqual(current_context["sender"]["open_id"], "ou_user")
+        self.assertEqual(
+            sum(
+                item.text.count("![image](img_current)")
+                for item in native_input
+                if isinstance(item, TextInput)
+            ),
+            1,
+        )
+
+    async def test_image_without_binding_does_not_download(self) -> None:
+        image = FakeMessage(
+            "![image](img_current)",
+            message_id="om_image",
+            raw_content_type="image",
+            content=ImageContent(image_key="img_current"),
+            resources=[ResourceDescriptor(type="image", file_key="img_current")],
+        )
+
+        await self.app.handle_message(image)
+
+        self.assertEqual(self.runtime.capture_calls, [])
+        self.assertEqual(self.channel.download_resource_calls, [])
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertIn("还没有会话", str(self.channel.replies[-1][1]))
+
+    async def test_current_post_and_quoted_image_are_both_native_visual_inputs(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+        self.channel.inbound_messages["om_quote_image"] = quoted_inbound(
+            message_id="om_quote_image",
+            content=ImageContent(image_key="img_quoted"),
+            content_text="![image](img_quoted)",
+            raw_content_type="image",
+            resources=[ResourceDescriptor(type="image", file_key="img_quoted")],
+        )
+        self.channel.resource_bodies[("om_quote_image", "img_quoted")] = PNG
+        self.channel.resource_bodies[("om_current_post", "img_current")] = PNG
+        current = FakeMessage(
+            "compare quoted ![image](img_current)",
+            message_id="om_current_post",
+            raw_content_type="post",
+            content=PostContent(
+                text="compare quoted",
+                post={
+                    "zh_cn": {
+                        "content_v2": [[
+                            {"tag": "text", "text": "compare quoted "},
+                            {"tag": "img", "image_key": "img_current"},
+                        ]]
+                    }
+                },
+            ),
+            resources=[ResourceDescriptor(type="image", file_key="img_current")],
+            reply_id="om_quote_image",
+            raw={"parent_id": "om_quote_image", "root_id": "om_root"},
+        )
+
+        await self.app.handle_message(current)
+
+        self.assertEqual(
+            self.channel.download_resource_calls,
+            [
+                ("img_quoted", "image", "om_quote_image"),
+                ("img_current", "image", "om_current_post"),
+            ],
+        )
+        native_input = self.runtime.submit_calls[0]["input"]
+        self.assertIsInstance(native_input, list)
+        labels = [json.loads(native_input[index].text) for index in (0, 2)]
+        self.assertEqual(
+            [(label["source"], label["file_key"]) for label in labels],
+            [
+                ("quoted_message", "img_quoted"),
+                ("current_message", "img_current"),
+            ],
+        )
+        envelope = json.loads(native_input[-1].text)
+        self.assertEqual(envelope["kind"], "feishu_quoted_prompt")
+        self.assertEqual(
+            envelope["current_message"]["request_text"],
+            "compare quoted ![image](img_current)",
+        )
+        self.assertEqual(
+            envelope["current_message"]["content_fidelity"],
+            "full_multimodal",
+        )
+        self.assertEqual(
+            envelope["quoted_message"]["content_fidelity"],
+            "full_multimodal",
+        )
+        self.assertTrue(envelope["quoted_message"]["content_read"])
+        self.assertTrue(
+            envelope["quoted_message"]["resources"][0]["content_read"]
+        )
+        current_text = "compare quoted ![image](img_current)"
+        self.assertEqual(
+            sum(
+                item.text.count(current_text)
+                for item in native_input
+                if isinstance(item, TextInput)
+            ),
+            1,
+        )
+
+    async def test_quoted_post_downloads_all_images_in_rendered_order(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+        self.channel.inbound_messages["om_quote_post"] = quoted_inbound(
+            message_id="om_quote_post",
+            content=PostContent(
+                text="before and after",
+                post={
+                    "zh_cn": {
+                        "content": [[
+                            {"tag": "img", "image_key": "img_hidden_v1"},
+                        ]],
+                        "content_v2": [[
+                            {"tag": "text", "text": "before "},
+                            {"tag": "img", "image_key": "img_one"},
+                            {"tag": "text", "text": " after "},
+                            {"tag": "img", "image_key": "img_two"},
+                        ]],
+                    }
+                },
+            ),
+            content_text="before ![image](img_one) after ![image](img_two)",
+            raw_content_type="post",
+            resources=[
+                # SDK 1.2.0 can omit content_v2 images and expose an
+                # unrendered content-v1 resource instead.
+                ResourceDescriptor(type="image", file_key="img_hidden_v1"),
+            ],
+        )
+        self.channel.resource_bodies[("om_quote_post", "img_one")] = PNG
+        self.channel.resource_bodies[("om_quote_post", "img_two")] = PNG
+
+        await self.app.handle_message(
+            FakeMessage(
+                "summarize the post",
+                message_id="om_prompt",
+                reply_id="om_quote_post",
+                raw={"parent_id": "om_quote_post", "root_id": "om_root"},
+            )
+        )
+
+        self.assertEqual(
+            self.channel.download_resource_calls,
+            [
+                ("img_one", "image", "om_quote_post"),
+                ("img_two", "image", "om_quote_post"),
+            ],
+        )
+        native_input = self.runtime.submit_calls[0]["input"]
+        labels = [json.loads(native_input[index].text) for index in (0, 2)]
+        self.assertEqual([label["index"] for label in labels], [1, 2])
+        self.assertEqual([label["count"] for label in labels], [2, 2])
+        envelope = json.loads(native_input[-1].text)
+        self.assertEqual(envelope["kind"], "feishu_quoted_prompt")
+        self.assertEqual(
+            envelope["current_message"]["request_text"],
+            "summarize the post",
+        )
+
+    async def test_image_download_failure_and_image_control_do_not_submit(self) -> None:
+        await self.new()
+        self.runtime.submit_calls.clear()
+        missing = FakeMessage(
+            "![image](img_missing)",
+            message_id="om_missing_image",
+            raw_content_type="image",
+            content=ImageContent(image_key="img_missing"),
+            resources=[ResourceDescriptor(type="image", file_key="img_missing")],
+        )
+
+        await self.app.handle_message(missing)
+
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertIn("无法读取消息中的图片", str(self.channel.replies[-1][1]))
+
+        command = FakeMessage(
+            "/status ![image](img_command)",
+            message_id="om_image_command",
+            raw_content_type="post",
+            content=PostContent(
+                text="/status",
+                post={
+                    "zh_cn": {
+                        "content": [[
+                            {"tag": "text", "text": "/status "},
+                            {"tag": "img", "image_key": "img_command"},
+                        ]]
+                    }
+                },
+            ),
+            resources=[ResourceDescriptor(type="image", file_key="img_command")],
+        )
+        await self.app.handle_message(command)
+
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertIn("不接受参数", str(self.channel.replies[-1][1]))
+        self.assertNotIn(
+            ("img_command", "image", "om_image_command"),
+            self.channel.download_resource_calls,
+        )
+
+    async def test_different_bindings_prepare_images_concurrently(self) -> None:
+        await self.new()
+        other_scope = FeishuScope("cli_test", "oc_other", ScopeKind.DIRECT)
+        self.store.create_binding(
+            scope=other_scope,
+            project_alias="test",
+            creator_id="ou_other",
+        )
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            "binding-any",
+            "native-any",
+            "turn-any",
+            lambda: None,
+        )
+        first_gate = asyncio.Event()
+        second_gate = asyncio.Event()
+        self.channel.resource_bodies[("om_image_one", "img_one")] = first_gate
+        self.channel.resource_bodies[("om_image_two", "img_two")] = second_gate
+
+        first = FakeMessage(
+            "![image](img_one)",
+            message_id="om_image_one",
+            raw_content_type="image",
+            content=ImageContent(image_key="img_one"),
+            resources=[ResourceDescriptor(type="image", file_key="img_one")],
+        )
+        second = FakeMessage(
+            "![image](img_two)",
+            message_id="om_image_two",
+            sender_id="ou_other",
+            chat_id="oc_other",
+            raw_content_type="image",
+            content=ImageContent(image_key="img_two"),
+            resources=[ResourceDescriptor(type="image", file_key="img_two")],
+        )
+
+        first_task = asyncio.create_task(self.app.handle_message(first))
+        second_task = asyncio.create_task(self.app.handle_message(second))
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if len(self.channel.download_resource_calls) == 2:
+                break
+
+        self.assertCountEqual(
+            self.channel.download_resource_calls,
+            [
+                ("img_one", "image", "om_image_one"),
+                ("img_two", "image", "om_image_two"),
+            ],
+        )
+        first_gate.set()
+        second_gate.set()
+        await asyncio.gather(first_task, second_task)
+        self.assertEqual(len(self.runtime.submit_calls), 2)
+        self.assertNotIn(
+            "Codex 后端处理失败",
+            [reply[1] for reply in self.channel.replies],
+        )
+
+    async def test_first_level_quote_fetches_exact_message_and_composes_context(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+        self.channel.inbound_messages["om_quoted"] = quoted_inbound(
+            content_text="quoted account ou_secret"
+        )
+
+        await self.app.handle_message(
+            FakeMessage(
+                "what does this mean?",
+                message_id="om_prompt",
+                sender_id="ou_current",
+                display_name="Current User",
+                raw={"parent_id": "om_quoted", "root_id": "om_quoted"},
+            )
+        )
+
+        self.assertEqual(self.runtime.capture_calls, [binding.id])
+        self.assertEqual(self.channel.fetch_inbound_calls, ["om_quoted"])
+        submitted = self.runtime.submit_calls[0]
+        self.assertEqual(submitted["admission"].binding_id, binding.id)
+        envelope = json.loads(submitted["input"])
+        self.assertEqual(envelope["kind"], "feishu_quoted_prompt")
+        self.assertEqual(envelope["version"], 3)
+        self.assertEqual(
+            envelope["current_message"]["request_text"],
+            "what does this mean?",
+        )
+        self.assertEqual(
+            envelope["current_message"]["sender"]["open_id"],
+            "ou_current",
+        )
+        self.assertIn("quoted account", envelope["quoted_message"]["text"])
+        self.assertIn("ou_secret", submitted["input"])
+        self.assertEqual(envelope["quoted_message"]["message_id"], "om_quoted")
+        self.assertEqual(
+            envelope["quoted_message"]["conversation"]["chat_id"],
+            "oc_direct",
+        )
+        self.assertEqual(
+            envelope["quoted_message"]["sender"]["open_id"],
+            "ou_quoted",
+        )
+        self.assertNotEqual(
+            envelope["current_message"]["sender"],
+            envelope["quoted_message"]["sender"],
+        )
+
+    async def test_interactive_quote_recovers_cardkit_v2_visible_text(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+        self.channel.inbound_messages["om_card"] = quoted_inbound(
+            message_id="om_card",
+            content=InteractiveContent(card={"schema": "2.0"}, card_version="v2"),
+            content_text="[interactive]",
+            raw_content_type="interactive",
+        )
+        card = {
+            "schema": "2.0",
+            "header": {
+                "title": {"tag": "plain_text", "content": "Application title"}
+            },
+            "body": {
+                "elements": [
+                    {"tag": "markdown", "content": "Visible application content"}
+                ]
+            },
+        }
+        self.channel.quoted_contexts["om_card"] = QuotedContext(
+            message_id="om_card",
+            content_type="interactive",
+            text="",
+            raw={"body": {"content": json.dumps(card)}},
+        )
+
+        await self.app.handle_message(
+            FakeMessage(
+                "summarize it",
+                message_id="om_prompt",
+                reply_id="om_card",
+                raw={"parent_id": "om_card", "root_id": "om_root"},
+            )
+        )
+
+        self.assertEqual(self.channel.fetch_quoted_calls, ["om_card"])
+        envelope = json.loads(self.runtime.submit_calls[0]["input"])
+        self.assertEqual(envelope["quoted_message"]["message_type"], "interactive")
+        self.assertEqual(
+            envelope["quoted_message"]["text"],
+            "Application title\nVisible application content",
+        )
+
+    async def test_interactive_quote_rejects_unverifiable_fallbacks(self) -> None:
+        await self.new()
+        self.channel.inbound_messages["om_card"] = quoted_inbound(
+            message_id="om_card",
+            content=InteractiveContent(card={}, card_version="v1"),
+            content_text="[interactive]",
+            raw_content_type="interactive",
+        )
+        invalid_fallbacks = [
+            None,
+            SimpleNamespace(
+                message_id="om_other",
+                content_type="interactive",
+                text="visible",
+            ),
+            SimpleNamespace(
+                message_id="om_card",
+                content_type="text",
+                text="visible",
+            ),
+        ]
+
+        for index, fallback in enumerate(invalid_fallbacks):
+            with self.subTest(fallback=fallback):
+                self.channel.quoted_contexts["om_card"] = fallback
+                await self.app.handle_message(
+                    FakeMessage(
+                        "summarize it",
+                        message_id=f"om_prompt_{index}",
+                        reply_id="om_card",
+                        raw={"parent_id": "om_card", "root_id": "om_root"},
+                    )
+                )
+                self.assertIn(
+                    "没有可验证的可见内容",
+                    str(self.channel.replies[-1][1]),
+                )
+
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(self.channel.fetch_quoted_calls, ["om_card"] * 3)
+
+    async def test_conflicting_quote_relation_fails_before_fetch_or_submit(self) -> None:
+        await self.new()
+
+        await self.app.handle_message(
+            FakeMessage(
+                "inspect it",
+                message_id="om_prompt",
+                reply_id="om_public",
+                raw={"parent_id": "om_raw", "root_id": "om_root"},
+            )
+        )
+
+        self.assertEqual(self.runtime.capture_calls, [])
+        self.assertEqual(self.channel.fetch_inbound_calls, [])
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertIn("相互冲突的引用目标", str(self.channel.replies[-1][1]))
+
+    async def test_quote_fetch_failure_does_not_submit(self) -> None:
+        await self.new()
+        self.runtime.submit_calls.clear()
+
+        await self.app.handle_message(
+            FakeMessage(
+                "inspect it",
+                message_id="om_prompt",
+                raw={"parent_id": "om_missing", "root_id": "om_missing"},
+            )
+        )
+
+        self.assertEqual(self.channel.fetch_inbound_calls, ["om_missing"])
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertIn("无法读取被引用的消息", str(self.channel.replies[-1][1]))
+
+    async def test_quote_fetch_timeout_does_not_submit(self) -> None:
+        await self.new()
+        self.runtime.submit_calls.clear()
+
+        async def never_returns(_message_id: str) -> object:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        with (
+            patch.object(
+                self.channel,
+                "fetch_inbound_message",
+                side_effect=never_returns,
+            ),
+            patch("netizen.channel_app._QUOTE_FETCH_TIMEOUT_SECONDS", 0.001),
+        ):
+            await self.app.handle_message(
+                FakeMessage(
+                    "inspect it",
+                    message_id="om_prompt",
+                    raw={"parent_id": "om_slow", "root_id": "om_slow"},
+                )
+            )
+
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertIn("读取被引用消息超时", str(self.channel.replies[-1][1]))
+
+    async def test_interactive_quote_fetches_have_independent_timeouts(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+        self.channel.inbound_messages["om_card"] = quoted_inbound(
+            message_id="om_card",
+            content=InteractiveContent(card={}, card_version="v1"),
+            content_text="[interactive]",
+            raw_content_type="interactive",
+        )
+        self.channel.quoted_contexts["om_card"] = QuotedContext(
+            message_id="om_card",
+            content_type="interactive",
+            text="Visible card",
+        )
+        fetch_inbound = self.channel.fetch_inbound_message
+        fetch_context = self.channel.fetch_quoted_context
+
+        async def delayed_inbound(message_id: str) -> object | None:
+            await asyncio.sleep(0.03)
+            return await fetch_inbound(message_id)
+
+        async def delayed_context(message_id: str) -> object | None:
+            await asyncio.sleep(0.03)
+            return await fetch_context(message_id)
+
+        with (
+            patch.object(
+                self.channel,
+                "fetch_inbound_message",
+                side_effect=delayed_inbound,
+            ),
+            patch.object(
+                self.channel,
+                "fetch_quoted_context",
+                side_effect=delayed_context,
+            ),
+            patch("netizen.channel_app._QUOTE_FETCH_TIMEOUT_SECONDS", 0.05),
+        ):
+            await self.app.handle_message(
+                FakeMessage(
+                    "summarize it",
+                    message_id="om_prompt",
+                    reply_id="om_card",
+                    raw={"parent_id": "om_card", "root_id": "om_root"},
+                )
+            )
+
+        self.assertEqual(len(self.runtime.submit_calls), 1)
+        envelope = json.loads(self.runtime.submit_calls[0]["input"])
+        self.assertEqual(envelope["quoted_message"]["text"], "Visible card")
+
+    async def test_interactive_fallback_timeout_does_not_submit(self) -> None:
+        await self.new()
+        self.channel.inbound_messages["om_card"] = quoted_inbound(
+            message_id="om_card",
+            content=InteractiveContent(card={}, card_version="v1"),
+            content_text="[interactive]",
+            raw_content_type="interactive",
+        )
+
+        async def never_returns(_message_id: str) -> object:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        with (
+            patch.object(
+                self.channel,
+                "fetch_quoted_context",
+                side_effect=never_returns,
+            ),
+            patch("netizen.channel_app._QUOTE_FETCH_TIMEOUT_SECONDS", 0.001),
+        ):
+            await self.app.handle_message(
+                FakeMessage(
+                    "summarize it",
+                    message_id="om_prompt",
+                    reply_id="om_card",
+                    raw={"parent_id": "om_card", "root_id": "om_root"},
+                )
+            )
+
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertIn("读取被引用消息超时", str(self.channel.replies[-1][1]))
+
+    async def test_quote_without_binding_does_not_fetch(self) -> None:
+        await self.app.handle_message(
+            FakeMessage(
+                "inspect it",
+                message_id="om_prompt",
+                raw={"parent_id": "om_quoted", "root_id": "om_quoted"},
+            )
+        )
+
+        self.assertEqual(self.runtime.capture_calls, [])
+        self.assertEqual(self.channel.fetch_inbound_calls, [])
+        self.assertIn("还没有会话", str(self.channel.replies[-1][1]))
+
+    async def test_control_command_with_quote_does_not_fetch(self) -> None:
+        await self.new()
+
+        await self.app.handle_message(
+            FakeMessage(
+                "/status",
+                message_id="om_status",
+                raw={"parent_id": "om_quoted", "root_id": "om_quoted"},
+            )
+        )
+
+        self.assertEqual(self.runtime.capture_calls, [])
+        self.assertEqual(self.channel.fetch_inbound_calls, [])
+
+    async def test_topic_parent_relation_is_not_treated_as_quote(self) -> None:
+        topic_scope = FeishuScope(
+            "cli_test",
+            "oc_group",
+            ScopeKind.TOPIC,
+            "omt_topic",
+        )
+        await self.app.handle_message(
+            FakeMessage(
+                "/new test",
+                message_id="om_new_topic",
+                chat_id="oc_group",
+                chat_type="group",
+                thread_id="omt_topic",
+            )
+        )
+        binding = self.store.active_binding(topic_scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-topic",
+            "turn-topic",
+            lambda: None,
+        )
+
+        await self.app.handle_message(
+            FakeMessage(
+                "topic follow-up",
+                message_id="om_topic_prompt",
+                chat_id="oc_group",
+                chat_type="group",
+                thread_id="omt_topic",
+                raw={"parent_id": "om_root", "root_id": "om_root"},
+            )
+        )
+
+        self.assertEqual(self.channel.fetch_inbound_calls, [])
+        self.assertEqual(self.runtime.capture_calls, [binding.id])
+        request_text, current_context = plain_prompt_projection(
+            self.runtime.submit_calls[0]["input"]
+        )
+        self.assertEqual(request_text, "topic follow-up")
+        self.assertEqual(current_context["message_id"], "om_topic_prompt")
+
+    async def test_resume_during_quote_fetch_rejects_prepared_prompt(self) -> None:
+        await self.new(message_id="om_new_1")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        first = self.store.active_binding(scope.key)
+        await self.new(message_id="om_new_2")
+        second = self.store.active_binding(scope.key)
+        await self.app.handle_message(
+            FakeMessage(f"/resume {first.short_id}", message_id="om_resume_first")
+        )
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            first.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+        self.runtime.enforce_active_submission = True
+        quoted = quoted_inbound(content_text="quoted context")
+        fetch_started = asyncio.Event()
+        release_fetch = asyncio.Event()
+
+        async def delayed_fetch(message_id: str) -> object:
+            self.assertEqual(message_id, "om_quoted")
+            fetch_started.set()
+            await release_fetch.wait()
+            return quoted
+
+        with patch.object(
+            self.channel,
+            "fetch_inbound_message",
+            side_effect=delayed_fetch,
+        ):
+            prompt_task = asyncio.create_task(
+                self.app.handle_message(
+                    FakeMessage(
+                        "inspect it",
+                        message_id="om_prompt",
+                        raw={
+                            "parent_id": "om_quoted",
+                            "root_id": "om_quoted",
+                        },
+                    )
+                )
+            )
+            await asyncio.wait_for(fetch_started.wait(), timeout=0.1)
+            await self.app.handle_message(
+                FakeMessage(
+                    f"/resume {second.short_id}",
+                    message_id="om_resume_second",
+                )
+            )
+            release_fetch.set()
+            await asyncio.wait_for(prompt_task, timeout=0.1)
+
+        self.assertEqual(self.store.active_binding(scope.key).id, second.id)
+        self.assertEqual(self.runtime.capture_calls, [first.id])
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertIn("active 会话已切换", str(self.channel.replies[-1][1]))
+
+    async def test_settings_and_bare_new_reply_with_cards_in_the_origin_scope(self) -> None:
+        topic = FakeMessage(
+            "/settings",
+            message_id="om_settings",
+            chat_id="oc_group",
+            chat_type="group",
+            thread_id="omt_settings",
+        )
+        await self.app.handle_message(topic)
+        settings_reply = self.channel.replies[-1]
+        self.assertEqual(settings_reply[0], "om_settings")
+        self.assertIsInstance(settings_reply[1], OutboundCard)
+        self.assertEqual(settings_reply[1].card["schema"], "2.0")
+        self.assertIn("project_manage_v1", str(settings_reply[1].card))
+        self.assertIn("project_create_v1", str(settings_reply[1].card))
+
+        projects_tab = next(
+            element
+            for element in _elements(settings_reply[1].card, "button")
+            if element["text"]["content"] == "Projects"
+        )
+        await self.app.handle_card_action(
+            SimpleNamespace(
+                message_id="om_settings_card",
+                chat_id="oc_group",
+                operator=SimpleNamespace(open_id="ou_other_participant"),
+                action=SimpleNamespace(
+                    tag="button",
+                    value=projects_tab["behaviors"][0]["value"],
+                    form_value=None,
+                ),
+            )
+        )
+        self.assertEqual(self.channel.updates[-1][0], "om_settings_card")
+        self.assertIn("project_manage_v1", str(self.channel.updates[-1][1]))
+
+        await self.app.handle_message(
+            FakeMessage(
+                "/new",
+                message_id="om_picker",
+                chat_id="oc_group",
+                chat_type="group",
+                thread_id="omt_settings",
+            )
+        )
+        picker = self.channel.replies[-1][1]
+        self.assertIsInstance(picker, OutboundCard)
+        self.assertIn("test ·", str(picker.card))
+        self.assertIn("new_binding_v4", str(picker.card))
+        self.assertNotIn("配置方式", str(picker.card))
+        self.assertNotIn("下一条真实任务", str(picker.card))
+        scope = FeishuScope(
+            "cli_test", "oc_group", ScopeKind.TOPIC, "omt_settings"
+        )
+        self.assertIsNone(self.store.active_binding(scope.key))
+
+    async def test_new_model_configuration_creates_only_lazy_binding(self) -> None:
+        await self.app.handle_message(FakeMessage("/new", message_id="om_picker"))
+        picker = self.channel.replies[-1][1]
+        form = next(
+            item
+            for item in _elements(picker.card, "form")
+            if item["name"] == "new_binding_v4"
+        )
+        fields = {
+            item["name"]: item
+            for item in form["elements"]
+            if "name" in item
+        }
+        project_reference = next(
+            option["value"]
+            for option in fields["new_project"]["options"]
+            if option["text"]["content"].startswith("test ·")
+        )
+        event = self.direct_card_event(
+            {
+                "new_project": project_reference,
+                "new_model": fields["new_model"]["initial_option"],
+                "new_effort": fields["new_effort"]["initial_option"],
+                "new_speed": fields["new_speed"]["initial_option"],
+            }
+        )
+
+        await self.app.handle_card_action(event)
+
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.assertEqual(
+            binding.id,
+            "11111111-0000-0000-0000-000000000001",
+        )
+        self.assertEqual(binding.project_alias, "test")
+        self.assertIsNone(binding.native_thread_id)
+        self.assertEqual(
+            binding.turn_settings,
+            BindingTurnSettings("future-model", "ultra", "priority-v2"),
+        )
+        self.assertEqual(self.runtime.submit_calls, [])
+        rendered = str(self.channel.updates[-1][1])
+        self.assertIn("Project 选择成功", rendered)
+        self.assertIn("会话后续新 Turn 将使用", rendered)
+        self.assertIn("Fast v2", rendered)
+        self.assertEqual(self.runtime.model_catalog_calls, 1)
+        self.assertEqual(len(self.runtime.resolve_model_settings_calls), 1)
+
+    async def test_config_targets_exact_binding_and_only_saves_settings(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        await self.app.handle_message(FakeMessage("/config", message_id="om_config"))
+        config = self.channel.replies[-1][1]
+        self.assertIsInstance(config, OutboundCard)
+        await self.app.handle_card_action(
+            self.direct_card_event(self.config_form_values(config))
+        )
+
+        self.assertEqual(len(self.store.list_bindings(scope.key)), 1)
+        configured = self.store.get(binding.id)
+        self.assertEqual(
+            configured.turn_settings,
+            BindingTurnSettings("future-model", "ultra", "priority-v2"),
+        )
+        self.assertEqual(configured.settings_revision, 2)
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(len(self.runtime.configure_settings_calls), 1)
+        self.assertIn("会话配置已保存", str(self.channel.updates[-1][1]))
+        self.assertIn("会话后续新 Turn 将使用", str(self.channel.updates[-1][1]))
+
+    async def test_config_replaces_persistent_settings_without_starting_turn(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        settings = BindingTurnSettings("future-model", "ultra", "priority-v2")
+        binding = self.store.set_turn_settings(
+            binding_id=binding.id,
+            expected_revision=1,
+            settings=settings,
+        )
+        await self.app.handle_message(FakeMessage("/config", message_id="om_config"))
+        card = self.channel.replies[-1][1]
+
+        await self.app.handle_card_action(
+            self.direct_card_event(
+                self.config_form_values(
+                    card,
+                    effort_id="low",
+                    speed_id="default",
+                )
+            )
+        )
+
+        configured = self.store.get(binding.id)
+        self.assertEqual(
+            configured.turn_settings,
+            BindingTurnSettings("future-model", "low", "default"),
+        )
+        self.assertEqual(configured.settings_revision, 3)
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(
+            self.runtime.configure_settings_calls[-1]["settings"],
+            BindingTurnSettings("future-model", "low", "default"),
+        )
+        self.assertIn("会话后续新 Turn 将使用", str(self.channel.updates[-1][1]))
+
+    async def test_second_config_card_is_rejected_by_settings_revision(self) -> None:
+        await self.new()
+        await self.app.handle_message(FakeMessage("/config", message_id="om_config_1"))
+        first = self.channel.replies[-1][1]
+        await self.app.handle_message(FakeMessage("/config", message_id="om_config_2"))
+        second = self.channel.replies[-1][1]
+
+        await self.app.handle_card_action(
+            self.direct_card_event(
+                self.config_form_values(first),
+                message_id="om_card_1",
+            )
+        )
+        selected = self.store.active_binding(
+            FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT).key
+        ).turn_settings
+        await self.app.handle_card_action(
+            self.direct_card_event(
+                self.config_form_values(second),
+                message_id="om_card_2",
+            )
+        )
+
+        self.assertEqual(
+            self.store.active_binding(
+                FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT).key
+            ).turn_settings,
+            selected,
+        )
+        self.assertIn("会话配置已变化", str(self.channel.updates[-1][1]))
+        self.assertEqual(self.runtime.submit_calls, [])
+
+    async def test_stale_config_card_cannot_apply_after_resume_or_new(self) -> None:
+        await self.new(message_id="om_new_1")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        first = self.store.active_binding(scope.key)
+        await self.app.handle_message(FakeMessage("/config", message_id="om_config"))
+        config = self.channel.replies[-1][1]
+        await self.new(message_id="om_new_2")
+        second = self.store.active_binding(scope.key)
+        self.assertNotEqual(first.id, second.id)
+
+        await self.app.handle_card_action(
+            self.direct_card_event(self.config_form_values(config))
+        )
+
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(self.runtime.configure_settings_calls, [])
+        self.assertEqual(self.store.active_binding(scope.key).id, second.id)
+        self.assertIn("active 会话已切换", str(self.channel.updates[-1][1]))
+
+    async def test_config_rejects_running_turn_before_rendering_card(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.active[binding.id] = ActiveTurnSnapshot(
+            binding.id,
+            "native-one",
+            "turn-one",
+            "ou_user",
+            ActiveState.RUNNING,
+        )
+
+        await self.app.handle_message(FakeMessage("/config", message_id="om_config"))
+
+        self.assertIn("当前 Turn 正在执行", str(self.channel.replies[-1][1]))
+        self.assertEqual(self.runtime.model_catalog_calls, 0)
+
+    async def test_new_has_no_submittable_form_when_model_catalog_fails(self) -> None:
+        self.runtime.model_catalog_error = RuntimeError("catalog unavailable")
+
+        with self.assertLogs("netizen.channel_app", level="WARNING"):
+            await self.app.handle_message(FakeMessage("/new", message_id="om_picker"))
+
+        picker = self.channel.replies[-1][1]
+        rendered = str(picker.card)
+        self.assertIn("Model / Effort / Speed 暂不可用", rendered)
+        self.assertIn("/new alias", rendered)
+        self.assertEqual(_elements(picker.card, "form"), [])
+        self.assertNotIn("配置方式", rendered)
+        self.assertNotIn("new_model", rendered)
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        self.assertIsNone(self.store.active_binding(scope.key))
+
+    async def test_new_form_creates_lazy_configured_binding_in_exact_topic(self) -> None:
+        await self.app.handle_message(
+            FakeMessage(
+                "/new",
+                message_id="om_picker",
+                chat_id="oc_group",
+                chat_type="group",
+                thread_id="omt_picker",
+            )
+        )
+        picker = self.channel.replies[-1][1]
+        self.channel.fetched_messages["om_card"] = {
+            "data": {
+                "items": [
+                    {"chat_id": "oc_group", "thread_id": "omt_picker"}
+                ]
+            }
+        }
+        event = SimpleNamespace(
+            message_id="om_card",
+            chat_id="oc_group",
+            operator=SimpleNamespace(open_id="ou_other_participant"),
+            action=SimpleNamespace(
+                tag="button",
+                value={},
+                form_value=self.new_form_values(picker),
+            ),
+        )
+
+        await self.app.handle_card_action(event)
+
+        scope = FeishuScope(
+            "cli_test", "oc_group", ScopeKind.TOPIC, "omt_picker"
+        )
+        binding = self.store.active_binding(scope.key)
+        self.assertEqual(binding.project_alias, "test")
+        self.assertIsNone(binding.native_thread_id)
+        self.assertEqual(
+            binding.turn_settings,
+            BindingTurnSettings("future-model", "ultra", "priority-v2"),
+        )
+        self.assertEqual(len(self.runtime.resolve_model_settings_calls), 1)
+        self.assertEqual(self.channel.updates[-1][0], "om_card")
+        rendered = str(self.channel.updates[-1][1])
+        self.assertIn("Project 选择成功", rendered)
+        self.assertIn(binding.short_id, rendered)
+        self.assertIn("现在可以直接发送任务", rendered)
+
+    async def test_new_form_replies_when_success_card_cannot_update(
+        self,
+    ) -> None:
+        await self.app.handle_message(
+            FakeMessage(
+                "/new",
+                message_id="om_picker",
+                chat_id="oc_group",
+                chat_type="group",
+                thread_id="omt_picker",
+            )
+        )
+        picker = self.channel.replies[-1][1]
+        self.channel.card_update_success = False
+        self.channel.fetched_messages["om_card"] = {
+            "data": {
+                "items": [
+                    {"chat_id": "oc_group", "thread_id": "omt_picker"}
+                ]
+            }
+        }
+        event = SimpleNamespace(
+            message_id="om_card",
+            chat_id="oc_group",
+            operator=SimpleNamespace(open_id="ou_user"),
+            action=SimpleNamespace(
+                tag="button",
+                value={},
+                form_value=self.new_form_values(picker),
+            ),
+        )
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_card_action(event)
+
+        scope = FeishuScope(
+            "cli_test",
+            "oc_group",
+            ScopeKind.TOPIC,
+            "omt_picker",
+        )
+        binding = self.store.active_binding(scope.key)
+        self.assertIsNotNone(binding)
+        fallback = next(
+            text
+            for message_id, text in self.channel.replies
+            if message_id == "om_card" and "Project 选择成功" in str(text)
+        )
+        self.assertIn("`test`", fallback)
+        self.assertIn(binding.short_id, fallback)
+        target = self.channel.reply_targets[-1]
+        self.assertEqual(target.chat_id, "oc_group")
+        self.assertEqual(target.conversation.thread_id, "omt_picker")
+
+    async def test_new_form_replies_when_failure_card_cannot_update(
+        self,
+    ) -> None:
+        await self.app.handle_message(FakeMessage("/new", message_id="om_picker"))
+        picker = self.channel.replies[-1][1]
+        values = self.new_form_values(picker)
+        project = self.projects.resolve_for_new("test")
+        self.projects.set_enabled(
+            alias="test",
+            enabled=False,
+            expected_revision=project.revision,
+        )
+        self.channel.card_update_success = False
+        event = self.direct_card_event(values)
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_card_action(event)
+
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        self.assertIsNone(self.store.active_binding(scope.key))
+        fallback = next(
+            text
+            for message_id, text in self.channel.replies
+            if message_id == "om_card" and "会话操作失败" in str(text)
+        )
+        self.assertIn("其他操作修改", fallback)
+
+    async def test_inline_project_create_recovers_topic_and_persists_registry(self) -> None:
+        await self.app.handle_message(
+            FakeMessage(
+                "/settings",
+                message_id="om_settings",
+                chat_id="oc_group",
+                chat_type="group",
+                thread_id="omt_settings",
+            )
+        )
+        settings = self.channel.replies[-1][1]
+        self.assertIn("project_create_v1", str(settings.card))
+        self.assertIn("project_manage_v1", str(settings.card))
+
+        self.channel.fetched_messages["om_card"] = {
+            "data": {
+                "items": [
+                    {"chat_id": "oc_group", "thread_id": "omt_settings"}
+                ]
+            }
+        }
+        await self.app.handle_card_action(
+            SimpleNamespace(
+                message_id="om_card",
+                chat_id="oc_group",
+                operator=SimpleNamespace(open_id="ou_other_participant"),
+                action=SimpleNamespace(
+                    tag="button",
+                    value={},
+                    form_value={
+                        "project_alias": "demo",
+                        "project_mode": "create",
+                        "project_path": "",
+                    },
+                ),
+            )
+        )
+
+        project = self.projects.resolve_for_new("demo")
+        self.assertEqual(project.cwd, (self.default.parent / "demo").resolve())
+        self.assertTrue(project.cwd.is_dir())
+        self.assertIn("已登记 Project demo", str(self.channel.updates[-1][1]))
+        self.assertIn("project_create_v1", str(self.channel.updates[-1][1]))
+        self.assertIn("demo · 已启用", str(self.channel.updates[-1][1]))
+        self.assertEqual(self.channel.chat_info_calls, [])
+
+    async def test_project_management_targets_revision_and_keeps_errors_inline(self) -> None:
+        await self.app.handle_message(
+            FakeMessage(
+                "/settings",
+                message_id="om_settings",
+                chat_id="oc_group",
+                chat_type="group",
+                thread_id="omt_settings",
+            )
+        )
+        settings = self.channel.replies[-1][1]
+        manage = next(
+            form
+            for form in _elements(settings.card, "form")
+            if form["name"] == "project_manage_v1"
+        )
+        target = next(
+            element
+            for element in manage["elements"]
+            if element.get("name") == "project_manage_target"
+        )
+        project_reference = next(
+            option["value"]
+            for option in target["options"]
+            if option["text"]["content"].startswith("test ·")
+        )
+        self.channel.fetched_messages["om_card"] = {
+            "data": {
+                "items": [
+                    {"chat_id": "oc_group", "thread_id": "omt_settings"}
+                ]
+            }
+        }
+
+        async def submit(reference: str, operation: str) -> None:
+            await self.app.handle_card_action(
+                SimpleNamespace(
+                    message_id="om_card",
+                    chat_id="oc_group",
+                    operator=SimpleNamespace(open_id="ou_other_participant"),
+                    action=SimpleNamespace(
+                        tag="button",
+                        value={},
+                        form_value={
+                            "project_manage_target": reference,
+                            "project_manage_operation": operation,
+                        },
+                    ),
+                )
+            )
+
+        await submit(project_reference, "disable")
+        project = next(
+            project for project in self.projects.list() if project.alias == "test"
+        )
+        self.assertFalse(project.enabled)
+        self.assertIn("已停用 Project test", str(self.channel.updates[-1][1]))
+        self.assertIn("project_create_v1", str(self.channel.updates[-1][1]))
+
+        await submit(project_reference, "enable")
+        stale = str(self.channel.updates[-1][1])
+        self.assertIn("已被其他操作修改", stale)
+        self.assertIn("project_manage_v1", stale)
+        self.assertIn("project_create_v1", stale)
+        self.assertFalse(
+            next(
+                project
+                for project in self.projects.list()
+                if project.alias == "test"
+            ).enabled
+        )
+
+    async def test_project_create_validation_error_stays_in_settings(self) -> None:
+        self.channel.fetched_messages["om_card"] = {
+            "data": {"items": [{"chat_id": "oc_direct", "thread_id": None}]}
+        }
+        self.channel.chat_types["oc_direct"] = "p2p"
+
+        await self.app.handle_card_action(
+            SimpleNamespace(
+                message_id="om_card",
+                chat_id="oc_direct",
+                operator=SimpleNamespace(open_id="ou_user"),
+                action=SimpleNamespace(
+                    tag="button",
+                    value={},
+                    form_value={
+                        "project_alias": "missing_path",
+                        "project_mode": "existing",
+                        "project_path": "",
+                    },
+                ),
+            )
+        )
+
+        rendered = str(self.channel.updates[-1][1])
+        self.assertIn("登记已有目录时必须填写绝对路径", rendered)
+        self.assertIn("project_manage_v1", rendered)
+        self.assertIn("project_create_v1", rendered)
+
+    async def test_committed_project_is_not_misreported_when_card_update_fails(self) -> None:
+        self.channel.fetched_messages["om_card"] = {
+            "data": {"items": [{"chat_id": "oc_direct", "thread_id": None}]}
+        }
+        self.channel.chat_types["oc_direct"] = "p2p"
+        self.channel.fail_card_updates = True
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_card_action(
+                SimpleNamespace(
+                    message_id="om_card",
+                    chat_id="oc_direct",
+                    operator=SimpleNamespace(open_id="ou_user"),
+                    action=SimpleNamespace(
+                        tag="button",
+                        value={},
+                        form_value={
+                            "project_alias": "committed",
+                            "project_mode": "create",
+                            "project_path": "",
+                        },
+                    ),
+                )
+            )
+
+        self.assertEqual(self.projects.resolve_for_new("committed").alias, "committed")
+        self.assertEqual(len(self.channel.updates), 1)
+
+    async def test_working_reaction_failure_releases_completion_barrier(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            released = True
+
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            release,
+        )
+        self.channel.fail_once_reaction_on = "Typing"
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_message(FakeMessage("hello", message_id="om_prompt"))
+
+        self.assertTrue(released)
+        self.assertIn(("om_prompt", "Typing"), self.channel.reactions)
+        self.assertFalse(
+            any(
+                isinstance(text, str) and "发送一条新消息重试" in text
+                for _message_id, text in self.channel.replies
+            )
+        )
+
+    async def test_busy_prompt_is_reported_as_native_steer(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STEERED,
+            binding.id,
+            "native-one",
+            "turn-one",
+        )
+
+        await self.app.handle_message(FakeMessage("new direction", message_id="om_steer"))
+
+        self.assertNotIn(("om_steer", "已调整当前任务。"), self.channel.replies)
+        self.assertNotIn(("om_steer", "已接收调整。"), self.channel.replies)
+        self.assertEqual(self.channel.reactions, [("om_steer", "OnIt")])
+
+    async def test_missing_sender_name_blocks_ordinary_turn_before_context_io(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+
+        await self.app.handle_message(
+            FakeMessage(
+                "inspect this image",
+                message_id="om_missing_sender",
+                display_name="",
+                raw_content_type="image",
+                content=ImageContent(image_key="img_current"),
+                resources=[
+                    ResourceDescriptor(type="image", file_key="img_current")
+                ],
+                raw={"parent_id": "om_quoted", "root_id": "om_quoted"},
+            )
+        )
+
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(self.channel.fetch_inbound_calls, [])
+        self.assertEqual(self.channel.download_resource_calls, [])
+        self.assertIn(
+            "im:chat.members:read",
+            str(self.channel.replies[-1][1]),
+        )
+        self.assertIn("本条消息未执行", str(self.channel.replies[-1][1]))
+
+    async def test_missing_sender_name_blocks_running_steer(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.admission = SubmissionAdmission(
+            binding.id,
+            3,
+            "native-one",
+            "turn-running",
+            1,
+        )
+
+        await self.app.handle_message(
+            FakeMessage(
+                "new direction",
+                message_id="om_missing_steer_sender",
+                display_name="",
+            )
+        )
+
+        self.assertEqual(self.runtime.capture_calls, [binding.id])
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(self.channel.reactions, [])
+        self.assertIn(
+            "im:chat.members:read",
+            str(self.channel.replies[-1][1]),
+        )
+
+    async def test_accepted_steer_keeps_original_turn_pulse_anchored(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STEERED,
+            binding.id,
+            "native-one",
+            "turn-one",
+        )
+        self.assertTrue(
+            await self.app._reactions.start("turn-one", "om_original")
+        )
+
+        await self.app.handle_message(
+            FakeMessage(
+                "new direction",
+                message_id="om_steer",
+                sender_id="ou_bob",
+                display_name="Bob",
+            )
+        )
+
+        call = self.runtime.submit_calls[-1]
+        request_text, current_context = plain_prompt_projection(call["input"])
+        self.assertEqual(request_text, "new direction")
+        self.assertEqual(call["owner_id"], "ou_bob")
+        self.assertEqual(current_context["sender"]["display_name"], "Bob")
+        self.assertEqual(current_context["sender"]["open_id"], "ou_bob")
+        self.assertEqual(call["origin"].id, "om_steer")
+        self.assertIn("turn-one", self.app._reactions._pulses)
+        self.assertEqual(self.channel.reaction_removals, [])
+        self.assertIn(("om_original", "Typing"), self.channel.reactions)
+        self.assertIn(("om_original", "THINKING"), self.channel.reactions)
+        self.assertIn(("om_steer", "OnIt"), self.channel.reactions)
+
+    async def test_failed_steer_has_no_confirmation_reaction(self) -> None:
+        await self.new()
+
+        async def fail_submit(**_kwargs: object) -> Submission:
+            raise SteerRace("当前任务恰好已经结束，本条消息未执行，请重新发送。")
+
+        self.runtime.submit = fail_submit  # type: ignore[method-assign]
+
+        await self.app.handle_message(
+            FakeMessage("new direction", message_id="om_steer")
+        )
+
+        self.assertNotIn(("om_steer", "OnIt"), self.channel.reactions)
+        self.assertIn(
+            (
+                "om_steer",
+                "当前任务恰好已经结束，本条消息未执行，请重新发送。",
+            ),
+            self.channel.replies,
+        )
+
+    async def test_accepted_steer_falls_back_to_text_if_reaction_fails(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STEERED,
+            binding.id,
+            "native-one",
+            "turn-one",
+        )
+        self.channel.fail_once_reaction_on = "OnIt"
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_message(
+                FakeMessage("new direction", message_id="om_steer")
+            )
+
+        self.assertIn(("om_steer", "已接收调整。"), self.channel.replies)
+
+    async def test_any_delivered_sender_can_manage_a_group_scope(self) -> None:
+        await self.new()
+        self.assertEqual(
+            len(self.store.list_bindings(
+                FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT).key
+            )),
+            1,
+        )
+        group = FakeMessage(
+            "/new test",
+            message_id="om_group",
+            sender_id="ou_not_configured",
+            chat_id="oc_not_configured",
+            chat_type="group",
+            mentioned_bot=True,
+        )
+
+        await self.app.handle_message(group)
+
+        scope = FeishuScope(
+            "cli_test", "oc_not_configured", ScopeKind.GROUP
+        )
+        self.assertIsNotNone(self.store.active_binding(scope.key))
+        self.assertTrue(
+            any(
+                message_id == "om_group" and "已创建并切换会话" in text
+                for message_id, text in self.channel.replies
+            )
+        )
+
+    async def test_group_and_topics_require_mention_and_have_distinct_scopes(self) -> None:
+        ignored = FakeMessage(
+            "/new test",
+            message_id="om_ignored",
+            sender_id="ou_participant",
+            chat_id="oc_group",
+            chat_type="group",
+            thread_id="omt_unmentioned",
+            mentioned_bot=False,
+            raw_content_type="post",
+        )
+        await self.app.handle_message(ignored)
+        self.assertEqual(self.channel.replies, [])
+
+        first = FakeMessage(
+            "/new test",
+            message_id="om_topic_1",
+            sender_id="ou_participant",
+            chat_id="oc_group",
+            chat_type="group",
+            thread_id="omt_one",
+        )
+        second = FakeMessage(
+            "/new test",
+            message_id="om_topic_2",
+            sender_id="ou_participant",
+            chat_id="oc_group",
+            chat_type="group",
+            thread_id="omt_two",
+        )
+        await self.app.handle_message(first)
+        await self.app.handle_message(second)
+
+        one = FeishuScope(
+            "cli_test", "oc_group", ScopeKind.TOPIC, "omt_one"
+        )
+        two = FeishuScope(
+            "cli_test", "oc_group", ScopeKind.TOPIC, "omt_two"
+        )
+        self.assertNotEqual(
+            self.store.active_binding(one.key).id,
+            self.store.active_binding(two.key).id,
+        )
+
+    async def test_topic_root_post_repairs_sdk_bot_mention_before_command(self) -> None:
+        bot_mention = SimpleNamespace(
+            key="@_user_1",
+            open_id="ou_bot",
+            name="椰羊",
+        )
+        message = FakeMessage(
+            "@椰羊 /new test",
+            message_id="om_topic_root",
+            sender_id="ou_participant",
+            chat_id="oc_group",
+            chat_type="group",
+            thread_id="omt_new_topic",
+            mentioned_bot=True,
+            raw_content_type="post",
+            mentions=[bot_mention],
+            content=SimpleNamespace(
+                post={
+                    "title": "",
+                    "content": [[
+                        {
+                            "tag": "at",
+                            "user_id": "@_user_1",
+                            "user_name": "椰羊",
+                            "style": [],
+                        },
+                        {"tag": "text", "text": " /new test", "style": []},
+                    ]],
+                    "content_v2": [[
+                        {
+                            "tag": "at",
+                            "user_id": "@_user_1",
+                            "user_name": "椰羊",
+                            "style": [],
+                        },
+                        {"tag": "text", "text": " /new test", "style": []},
+                    ]],
+                }
+            ),
+        )
+
+        await self.app.handle_message(message)
+
+        scope = FeishuScope(
+            "cli_test", "oc_group", ScopeKind.TOPIC, "omt_new_topic"
+        )
+        self.assertIsNotNone(self.store.active_binding(scope.key))
+        self.assertTrue(
+            any(
+                message_id == "om_topic_root" and "已创建并切换会话" in text
+                for message_id, text in self.channel.replies
+            )
+        )
+
+    async def test_group_post_with_image_repairs_bot_mention_and_submits_pixels(
+        self,
+    ) -> None:
+        await self.app.handle_message(
+            FakeMessage(
+                "/new test",
+                message_id="om_new_image_topic",
+                chat_id="oc_group",
+                chat_type="group",
+                thread_id="omt_image_topic",
+            )
+        )
+        scope = FeishuScope(
+            "cli_test", "oc_group", ScopeKind.TOPIC, "omt_image_topic"
+        )
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+        bot_mention = SimpleNamespace(
+            key="@_user_1",
+            open_id="ou_bot",
+            name="椰羊",
+        )
+        message = FakeMessage(
+            "@椰羊 inspect ![image](img_group)",
+            message_id="om_group_post_image",
+            chat_id="oc_group",
+            chat_type="group",
+            thread_id="omt_image_topic",
+            raw_content_type="post",
+            mentions=[bot_mention],
+            resources=[ResourceDescriptor(type="image", file_key="img_group")],
+            content=PostContent(
+                post={
+                    "content": [[
+                        {
+                            "tag": "at",
+                            "user_id": "@_user_1",
+                            "user_name": "椰羊",
+                            "style": [],
+                        },
+                        {"tag": "text", "text": " inspect ", "style": []},
+                        {"tag": "img", "image_key": "img_group"},
+                    ]]
+                }
+            ),
+        )
+        self.channel.resource_bodies[("om_group_post_image", "img_group")] = PNG
+
+        await self.app.handle_message(message)
+
+        native_input = self.runtime.submit_calls[0]["input"]
+        self.assertEqual(
+            json.loads(native_input[0].text)["source"],
+            "current_message",
+        )
+        self.assertIsInstance(native_input[1], ImageInput)
+        request_text, current_context = plain_prompt_projection(native_input)
+        self.assertEqual(request_text, "inspect ![image](img_group)")
+        self.assertEqual(current_context["message_type"], "post")
+        self.assertEqual(current_context["content_fidelity"], "full_multimodal")
+        self.assertEqual(
+            self.channel.download_resource_calls,
+            [("img_group", "image", "om_group_post_image")],
+        )
+
+    async def test_post_does_not_strip_another_leading_mention(self) -> None:
+        message = FakeMessage(
+            "@同事 @椰羊 /new test",
+            message_id="om_other_mention_first",
+            chat_id="oc_group",
+            chat_type="group",
+            thread_id="omt_other_mention_first",
+            raw_content_type="post",
+            mentions=[
+                SimpleNamespace(
+                    key="@_user_1",
+                    open_id="ou_colleague",
+                    name="同事",
+                ),
+                SimpleNamespace(
+                    key="@_user_2",
+                    open_id="ou_bot",
+                    name="椰羊",
+                ),
+            ],
+            content=SimpleNamespace(
+                post={
+                    "title": "",
+                    "content": [[
+                        {
+                            "tag": "at",
+                            "user_id": "@_user_1",
+                            "user_name": "同事",
+                            "style": [],
+                        },
+                        {"tag": "text", "text": " ", "style": []},
+                        {
+                            "tag": "at",
+                            "user_id": "@_user_2",
+                            "user_name": "椰羊",
+                            "style": [],
+                        },
+                        {"tag": "text", "text": " /new test", "style": []},
+                    ]],
+                }
+            ),
+        )
+
+        await self.app.handle_message(message)
+
+        scope = FeishuScope(
+            "cli_test", "oc_group", ScopeKind.TOPIC, "omt_other_mention_first"
+        )
+        self.assertIsNone(self.store.active_binding(scope.key))
+        self.assertEqual(
+            self.channel.replies,
+            [
+                (
+                    "om_other_mention_first",
+                    "当前聊天或话题还没有会话，请先发送 /new [project|none]。",
+                )
+            ],
+        )
+
+    async def test_post_with_unsupported_resource_is_rejected(self) -> None:
+        message = FakeMessage(
+            "/new test",
+            message_id="om_topic_with_resource",
+            chat_id="oc_group",
+            chat_type="group",
+            thread_id="omt_with_resource",
+            raw_content_type="post",
+            resources=[object()],
+        )
+
+        await self.app.handle_message(message)
+
+        scope = FeishuScope(
+            "cli_test", "oc_group", ScopeKind.TOPIC, "omt_with_resource"
+        )
+        self.assertIsNone(self.store.active_binding(scope.key))
+        self.assertEqual(
+            self.channel.replies,
+            [
+                (
+                    "om_topic_with_resource",
+                    "当前消息还包含暂不支持的附件；"
+                    "目前仅支持普通图片和富文本图片。",
+                )
+            ],
+        )
+
+    async def test_bare_group_mention_is_not_sent_to_codex(self) -> None:
+        message = FakeMessage(
+            "",
+            message_id="om_bare_mention",
+            sender_id="ou_participant",
+            chat_id="oc_group",
+            chat_type="group",
+            mentioned_bot=True,
+        )
+        message.safe_content_text = "@Netizen"
+
+        await self.app.handle_message(message)
+
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertIn((message.id, "消息内容为空。"), self.channel.replies)
+
+    async def test_resume_switches_binding_while_old_runtime_can_remain_active(self) -> None:
+        await self.new(message_id="om_new_1")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        first = self.store.active_binding(scope.key)
+        self.runtime.active[first.id] = ActiveTurnSnapshot(
+            first.id,
+            "native-one",
+            "turn-one",
+            "ou_user",
+            ActiveState.RUNNING,
+        )
+        await self.new(message_id="om_new_2")
+        second = self.store.active_binding(scope.key)
+        self.assertNotEqual(first.id, second.id)
+
+        await self.app.handle_message(
+            FakeMessage(f"/resume {first.short_id}", message_id="om_resume")
+        )
+
+        self.assertEqual(self.store.active_binding(scope.key).id, first.id)
+        self.assertIn(first.id, self.runtime.active)
+        self.assertEqual(
+            self.runtime.active_binding_change_calls[-1],
+            (second.id, first.id),
+        )
+
+    async def test_compact_maps_to_exact_native_control_and_reports_completion(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            released = True
+
+        self.runtime.compact_submission = CompactSubmission(
+            binding.id,
+            "native-one",
+            release,
+        )
+        command = FakeMessage("/compact", message_id="om_compact")
+
+        await self.app.handle_message(command)
+
+        self.assertTrue(released)
+        self.assertEqual(len(self.runtime.compact_calls), 1)
+        call = self.runtime.compact_calls[0]
+        self.assertEqual(call["binding"].id, binding.id)
+        self.assertEqual(call["owner_id"], "ou_user")
+        self.assertIs(call["origin"], command)
+        self.assertIn(
+            (
+                "om_compact",
+                "已开始压缩当前 Codex 会话；完成前该会话暂不接受新任务。",
+            ),
+            self.channel.replies,
+        )
+
+        await self.app.handle_completion(
+            CompactionOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                owner_id="ou_user",
+                origin=command,
+                compact_turn_id="compact-one",
+                status="completed",
+            )
+        )
+        self.assertIn(
+            ("om_compact", "会话上下文压缩已完成。"),
+            self.channel.replies,
+        )
+
+    async def test_compacting_state_blocks_config_and_stop_does_not_fake_interrupt(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.compacting.add(binding.id)
+
+        await self.app.handle_message(FakeMessage("/status", message_id="om_status"))
+        self.assertIn("状态：compacting", self.channel.replies[-1][1])
+
+        await self.app.handle_message(FakeMessage("/config", message_id="om_config"))
+        self.assertIn("正在压缩上下文", self.channel.replies[-1][1])
+        self.assertEqual(self.runtime.model_catalog_calls, 0)
+
+        self.runtime.stop_result = StopDisposition.COMPACTING
+        await self.app.handle_message(FakeMessage("/stop", message_id="om_stop"))
+        self.assertIn("/stop 只中断普通 Turn", self.channel.replies[-1][1])
+        self.assertNotIn(
+            ("om_stop", "正在中断当前 Codex Turn。"),
+            self.channel.replies,
+        )
+
+    async def test_scope_participant_can_stop_and_completion_uses_origin(self) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.active[binding.id] = ActiveTurnSnapshot(
+            binding.id,
+            "native-one",
+            "turn-one",
+            "ou_originator",
+            ActiveState.RUNNING,
+        )
+
+        stop_sender = "ou_other_participant"
+        self.assertNotEqual(stop_sender, self.runtime.active[binding.id].owner_id)
+        await self.app.handle_message(
+            FakeMessage("/stop", message_id="om_stop", sender_id=stop_sender)
+        )
+        self.assertIn(("om_stop", "正在中断当前 Codex Turn。"), self.channel.replies)
+
+        outcome = TurnOutcome(
+            binding_id=binding.id,
+            thread_id="native-one",
+            turn_id="turn-one",
+            owner_id="ou_originator",
+            origin=origin,
+            result=SimpleNamespace(
+                final_response="done",
+                status=SimpleNamespace(value="completed"),
+            ),
+        )
+        await self.app.handle_completion(outcome)
+        self.assertIn((origin.id, "done"), self.channel.replies)
+        self.assertIn((origin.id, "DONE"), self.channel.reactions)
+
+    async def test_stop_ack_precedes_background_cleanup_warning(self) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.active[binding.id] = ActiveTurnSnapshot(
+            binding.id,
+            "native-one",
+            "turn-one",
+            "ou_user",
+            ActiveState.RUNNING,
+        )
+
+        await self.app.handle_message(FakeMessage("/stop", message_id="om_stop"))
+        self.assertIn(
+            (
+                "om_stop",
+                "正在中断当前 Codex Turn。",
+            ),
+            self.channel.replies,
+        )
+
+        outcome = TurnOutcome(
+            binding_id=binding.id,
+            thread_id="native-one",
+            turn_id="turn-one",
+            owner_id="ou_user",
+            origin=origin,
+            result=SimpleNamespace(
+                final_response=None,
+                status=SimpleNamespace(value="interrupted"),
+            ),
+            background_cleanup_requested=True,
+        )
+        await self.app.handle_completion(outcome)
+        self.assertIn(
+            (
+                origin.id,
+                "Codex Turn 已中断；已请求清理该 Thread 中已登记的后台终端。"
+                "前台工具进程不受此接口保证，可能仍在运行。",
+            ),
+            self.channel.replies,
+        )
+        self.assertLess(
+            self.channel.replies.index(("om_stop", "正在中断当前 Codex Turn。")),
+            self.channel.replies.index(
+                (
+                    origin.id,
+                    "Codex Turn 已中断；已请求清理该 Thread 中已登记的后台终端。"
+                    "前台工具进程不受此接口保证，可能仍在运行。",
+                )
+            ),
+        )
+        self.assertEqual(
+            [
+                text
+                for message_id, text in self.channel.replies
+                if message_id == "om_stop"
+            ],
+            ["正在中断当前 Codex Turn。"],
+        )
+
+    async def test_cleanup_failure_is_visible_and_does_not_claim_stopped(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.active[binding.id] = ActiveTurnSnapshot(
+            binding.id,
+            "native-one",
+            "turn-one",
+            "ou_user",
+            ActiveState.RUNNING,
+        )
+
+        async def fail_stop(
+            _binding_id: str,
+            *,
+            acknowledge,
+        ) -> StopDisposition:
+            await acknowledge()
+            raise TerminalCleanupFailed(
+                "Codex Turn 已请求中断，但已登记后台终端的清理请求失败；"
+                "当前会话保持 stopping，不能假定后台终端已经停止。"
+                "请再次发送 /stop 重试清理。"
+            )
+
+        self.runtime.stop = fail_stop  # type: ignore[method-assign]
+        await self.app.handle_message(FakeMessage("/stop", message_id="om_stop"))
+
+        replies = [
+            text for message_id, text in self.channel.replies if message_id == "om_stop"
+        ]
+        self.assertEqual(replies[0], "正在中断当前 Codex Turn。")
+        reply = replies[-1]
+        self.assertIn("已登记后台终端的清理请求失败", reply)
+        self.assertIn("不能假定后台终端已经停止", reply)
+        self.assertIn("再次发送 /stop", reply)
+
+    async def test_stop_ack_is_immediate_while_native_cleanup_is_blocked(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.active[binding.id] = ActiveTurnSnapshot(
+            binding.id,
+            "native-one",
+            "turn-one",
+            "ou_user",
+            ActiveState.RUNNING,
+        )
+        stop_entered = asyncio.Event()
+        release_stop = asyncio.Event()
+
+        async def blocked_stop(
+            _binding_id: str,
+            *,
+            acknowledge,
+        ) -> StopDisposition:
+            await acknowledge()
+            stop_entered.set()
+            await release_stop.wait()
+            return StopDisposition.REQUESTED
+
+        self.runtime.stop = blocked_stop  # type: ignore[method-assign]
+        task = asyncio.create_task(
+            self.app.handle_message(FakeMessage("/stop", message_id="om_stop"))
+        )
+        await stop_entered.wait()
+
+        self.assertIn(
+            ("om_stop", "正在中断当前 Codex Turn。"),
+            self.channel.replies,
+        )
+        self.assertFalse(task.done())
+        release_stop.set()
+        await task
+
+    async def test_external_interrupt_does_not_claim_background_cleanup(self) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                turn_id="turn-one",
+                owner_id="ou_user",
+                origin=origin,
+                result=SimpleNamespace(
+                    final_response=None,
+                    status=SimpleNamespace(value="interrupted"),
+                ),
+            )
+        )
+
+        self.assertIn(
+            (
+                origin.id,
+                "Codex Turn 已被外部中断；本服务未请求清理已登记的后台终端。"
+                "前台工具进程可能仍在运行。",
+            ),
+            self.channel.replies,
+        )
+        self.assertIn((origin.id, "CrossMark"), self.channel.reactions)
+
+    async def test_failed_turn_uses_error_reaction_and_failure_reply(self) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                turn_id="turn-one",
+                owner_id="ou_user",
+                origin=origin,
+                result=SimpleNamespace(
+                    final_response="native failure",
+                    status=SimpleNamespace(value="failed"),
+                ),
+            )
+        )
+
+        self.assertIn((origin.id, "ERROR"), self.channel.reactions)
+        self.assertIn((origin.id, "任务未完成：native failure"), self.channel.replies)
+
+
+class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.default = root / "default"
+        self.project = root / "project"
+        self.default.mkdir()
+        self.project.mkdir()
+        self.next_id = 0
+
+        def make_id() -> str:
+            self.next_id += 1
+            return f"record-{self.next_id}"
+
+        self.store = BindingStore(id_factory=make_id)
+        self.channel = FakeChannel()
+        self.runtime = StubRuntime()
+        self.runtime.binding_store = self.store
+        self.runtime.available_capabilities = frozenset({NativeCapability.SIDE})
+        self.projects = ProjectRegistry(
+            store=self.store,
+            default_cwd=self.default,
+            projects={"test": self.project},
+        )
+        self.app = ChannelApplication(
+            app_id="cli_test",
+            channel=self.channel,
+            runtime=self.runtime,  # type: ignore[arg-type]
+            bindings=self.store,
+            projects=self.projects,
+        )
+
+    async def asyncTearDown(self) -> None:
+        await self.app.close()
+        self.store.close()
+        self.tmp.cleanup()
+
+    def binding_for(self, message: FakeMessage):
+        scope = self.app._scope(message)
+        binding = self.store.create_binding(
+            scope=scope,
+            project_alias="test",
+            creator_id="ou_owner",
+        )
+        self.store.assign_native_thread_id(binding.id, f"native-{binding.id}")
+        return self.store.get(binding.id)
+
+    def queue_promoted_topic(
+        self,
+        *,
+        chat_id: str,
+        root_id: str,
+        seed_id: str,
+        topic_id: str,
+    ) -> None:
+        self.channel.send_results.extend(
+            (
+                sent_result(root_id, chat_id=chat_id),
+                sent_result(
+                    seed_id,
+                    chat_id=chat_id,
+                    thread_id=topic_id,
+                    root_id=root_id,
+                    parent_id=root_id,
+                ),
+            )
+        )
+
+    def queue_direct_topic(
+        self,
+        *,
+        chat_id: str,
+        root_id: str,
+        topic_id: str,
+    ) -> None:
+        self.channel.send_results.append(
+            sent_result(
+                root_id,
+                chat_id=chat_id,
+                thread_id=topic_id,
+                root_id=root_id,
+            )
+        )
+
+    async def test_side_creation_covers_all_entry_contexts_and_always_sends_fresh(
+        self,
+    ) -> None:
+        cases = (
+            FakeMessage(
+                "/side",
+                message_id="om-direct",
+                chat_id="oc-direct",
+                chat_type="p2p",
+                mentioned_bot=False,
+            ),
+            FakeMessage(
+                "/side",
+                message_id="om-direct-topic",
+                chat_id="oc-direct-topic",
+                chat_type="p2p",
+                thread_id="omt-parent-direct",
+                mentioned_bot=False,
+            ),
+            FakeMessage(
+                "/side",
+                message_id="om-group",
+                chat_id="oc-group",
+                chat_type="group",
+            ),
+            FakeMessage(
+                "/side",
+                message_id="om-group-topic",
+                chat_id="oc-group-topic",
+                chat_type="group",
+                thread_id="omt-parent-group",
+            ),
+            FakeMessage(
+                "/side",
+                message_id="om-topic-mode",
+                chat_id="oc-topic-mode",
+                chat_type="group",
+            ),
+        )
+        for index, message in enumerate(cases, start=1):
+            self.binding_for(message)
+            if index == len(cases):
+                self.queue_direct_topic(
+                    chat_id=message.conversation.chat_id,
+                    root_id=f"om-root-{index}",
+                    topic_id=f"omt-side-{index}",
+                )
+            else:
+                self.queue_promoted_topic(
+                    chat_id=message.conversation.chat_id,
+                    root_id=f"om-root-{index}",
+                    seed_id=f"om-seed-{index}",
+                    topic_id=f"omt-side-{index}",
+                )
+
+            before = len(self.channel.send_calls)
+            await self.app.handle_message(message)
+            calls = self.channel.send_calls[before:]
+            self.assertEqual(calls[0][0], message.conversation.chat_id)
+            self.assertIsNone(calls[0][2].reply_to)
+            self.assertEqual(calls[0][2].receive_id_type, "chat_id")
+            self.assertNotIn("side.close", str(calls[0][1]))
+            if message.conversation.thread_id is not None:
+                self.assertNotIn(
+                    message.conversation.thread_id,
+                    str(calls[0][1]),
+                )
+            if index == len(cases):
+                self.assertEqual(len(calls), 1)
+            else:
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(
+                    calls[1][1],
+                    channel_app._SIDE_EMPTY_TOPIC_PROMPT,
+                )
+                opts = calls[1][2]
+                self.assertEqual(opts.receive_id_type, "chat_id")
+                self.assertEqual(opts.reply_to, f"om-root-{index}")
+                self.assertTrue(opts.reply_in_thread)
+                self.assertEqual(opts.reply_target_gone, "fail")
+            source_replies = [
+                content
+                for message_id, content in self.channel.replies
+                if message_id == message.id
+            ]
+            self.assertEqual(source_replies, [])
+            open_card = str(self.channel.updates[-1][1])
+            self.assertNotIn("Side 已创建，可以开始多轮对话", open_card)
+            if index == len(cases):
+                self.assertIn(channel_app._SIDE_EMPTY_TOPIC_PROMPT, open_card)
+            else:
+                self.assertNotIn(channel_app._SIDE_EMPTY_TOPIC_PROMPT, open_card)
+            record = self.store.side_topic_for_source(
+                app_id="cli_test",
+                source_message_id=message.id,
+            )
+            assert record is not None
+            self.assertEqual(record.state, SideTopicState.OPEN)
+            self.assertEqual(record.topic_id, f"omt-side-{index}")
+            self.assertNotEqual(record.topic_id, message.conversation.thread_id)
+            self.assertEqual(record.requires_mention, index >= 3)
+            root_uuid = calls[0][2].uuid
+            self.assertEqual(
+                root_uuid,
+                channel_app._side_send_uuid(
+                    channel_app._SIDE_ROOT_UUID_PREFIX,
+                    record.id,
+                ),
+            )
+            self.assertLessEqual(len(root_uuid), 50)
+            if len(calls) == 2:
+                seed_uuid = calls[1][2].uuid
+                self.assertEqual(
+                    seed_uuid,
+                    channel_app._side_send_uuid(
+                        channel_app._SIDE_SEED_UUID_PREFIX,
+                        record.id,
+                    ),
+                )
+                self.assertNotEqual(seed_uuid, root_uuid)
+
+        self.assertEqual(len(self.runtime.create_side_calls), 5)
+        self.assertEqual(len(self.runtime.attach_side_calls), 5)
+
+    async def test_initial_prompt_stays_in_new_topic_and_redelivery_is_idempotent(
+        self,
+    ) -> None:
+        source = FakeMessage(
+            "/side inspect this",
+            message_id="om-source",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            mentioned_bot=False,
+            reply_id="om-quoted-control",
+            raw={
+                "parent_id": "om-quoted-control",
+                "root_id": "om-quoted-control",
+            },
+        )
+        self.binding_for(source)
+        self.queue_promoted_topic(
+            chat_id="oc-direct",
+            root_id="om-root",
+            seed_id="om-seed",
+            topic_id="omt-side",
+        )
+
+        await self.app.handle_message(source)
+
+        self.assertEqual(len(self.runtime.submit_side_calls), 1)
+        self.assertEqual(
+            self.channel.send_calls[1][1],
+            channel_app._side_initial_question_echo("inspect this"),
+        )
+        self.assertEqual(
+            [
+                content
+                for message_id, content in self.channel.replies
+                if message_id == source.id
+            ],
+            [],
+        )
+        self.assertNotIn(
+            "Side 已创建，可以开始多轮对话",
+            str(self.channel.updates[-1][1]),
+        )
+        submission = self.runtime.submit_side_calls[0]
+        request_text, current_context = plain_prompt_projection(submission["input"])
+        self.assertEqual(request_text, "inspect this")
+        self.assertEqual(current_context["message_id"], "om-source")
+        self.assertEqual(current_context["sender"]["open_id"], "ou_user")
+        self.assertEqual(self.channel.fetch_inbound_calls, [])
+        self.assertEqual(submission["owner_id"], "ou_user")
+        self.assertEqual(submission["origin"].message_id, "om-seed")
+        self.assertEqual(submission["origin"].conversation.thread_id, "omt-side")
+        self.assertIn(("om-seed", "Typing"), self.channel.reactions)
+        self.assertIn(("om-seed", "THINKING"), self.channel.reactions)
+
+        await self.app.handle_message(source)
+
+        self.assertEqual(len(self.runtime.create_side_calls), 1)
+        self.assertEqual(len(self.channel.send_calls), 2)
+        self.assertEqual(len(self.runtime.submit_side_calls), 1)
+        self.assertEqual(
+            [
+                content
+                for message_id, content in self.channel.replies
+                if message_id == source.id
+            ],
+            [],
+        )
+
+        origin = submission["origin"]
+        await self.app.handle_completion(
+            SideTurnOutcome(
+                side_id=submission["side_id"],
+                thread_id="native-side-1",
+                turn_id="side-turn-1",
+                owner_id="ou_user",
+                origin=origin,
+                result=SimpleNamespace(
+                    status=SimpleNamespace(value="completed"),
+                    final_response="side answer",
+                ),
+            )
+        )
+        self.assertIn(("om-seed", "side answer"), self.channel.replies)
+        self.assertNotIn(("om-source", "side answer"), self.channel.replies)
+
+    async def test_initial_prompt_missing_sender_name_reports_permission(self) -> None:
+        source = FakeMessage(
+            "/side inspect this",
+            message_id="om-missing-side-source",
+            display_name="",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(source)
+        self.queue_promoted_topic(
+            chat_id="oc-direct",
+            root_id="om-missing-side-root",
+            seed_id="om-missing-side-seed",
+            topic_id="omt-missing-side",
+        )
+
+        await self.app.handle_message(source)
+
+        self.assertEqual(self.runtime.submit_side_calls, [])
+        self.assertIn(
+            (
+                "om-missing-side-seed",
+                "无法获取当前消息发送者姓名，本条消息未执行；"
+                "请为飞书应用开通 im:chat.members:read 权限、"
+                "发布应用版本后重试。",
+            ),
+            self.channel.replies,
+        )
+        self.assertIn(
+            "im:chat.members:read",
+            str(self.channel.updates[-1][1]),
+        )
+
+    async def test_side_followup_missing_sender_name_blocks_steer(self) -> None:
+        source = FakeMessage(
+            "/side",
+            message_id="om-side-source",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(source)
+        self.queue_promoted_topic(
+            chat_id="oc-direct",
+            root_id="om-side-root",
+            seed_id="om-side-seed",
+            topic_id="omt-side-missing-name",
+        )
+        await self.app.handle_message(source)
+        record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=source.id,
+        )
+        assert record is not None
+        self.runtime.side_submission = SideSubmission(
+            SubmitDisposition.STEERED,
+            record.id,
+            "native-side-running",
+            "side-turn-running",
+        )
+
+        await self.app.handle_message(
+            FakeMessage(
+                "adjust side",
+                message_id="om-side-missing-sender",
+                display_name="",
+                chat_id="oc-direct",
+                chat_type="p2p",
+                thread_id="omt-side-missing-name",
+                mentioned_bot=False,
+            )
+        )
+
+        self.assertEqual(self.runtime.submit_side_calls, [])
+        self.assertEqual(self.channel.reactions, [])
+        self.assertIn(
+            "im:chat.members:read",
+            str(self.channel.replies[-1][1]),
+        )
+
+    async def test_direct_topic_initial_prompt_uses_question_echo_as_origin(
+        self,
+    ) -> None:
+        source = FakeMessage(
+            "/side inspect direct",
+            message_id="om-source-direct",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(source)
+        self.queue_direct_topic(
+            chat_id="oc-direct",
+            root_id="om-root-direct",
+            topic_id="omt-side-direct",
+        )
+        self.channel.send_results.append(
+            sent_result(
+                "om-question-direct",
+                chat_id="oc-direct",
+                thread_id="omt-side-direct",
+                root_id="om-root-direct",
+                parent_id="om-root-direct",
+            )
+        )
+
+        await self.app.handle_message(source)
+
+        submission = self.runtime.submit_side_calls[0]
+        self.assertEqual(submission["origin"].message_id, "om-question-direct")
+        self.assertEqual(
+            submission["origin"].conversation.thread_id,
+            "omt-side-direct",
+        )
+        self.assertIn(("om-question-direct", "Typing"), self.channel.reactions)
+        self.assertEqual(len(self.channel.send_calls), 2)
+        _chat_id, content, opts = self.channel.send_calls[1]
+        self.assertEqual(
+            content,
+            channel_app._side_initial_question_echo("inspect direct"),
+        )
+        self.assertEqual(opts.reply_to, "om-root-direct")
+        self.assertTrue(opts.reply_in_thread)
+        self.assertEqual(opts.reply_target_gone, "fail")
+        record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=source.id,
+        )
+        assert record is not None
+        self.assertEqual(
+            opts.uuid,
+            channel_app._side_send_uuid(
+                channel_app._SIDE_SEED_UUID_PREFIX,
+                record.id,
+            ),
+        )
+        self.assertNotEqual(opts.uuid, self.channel.send_calls[0][2].uuid)
+        self.assertEqual(
+            [
+                content
+                for message_id, content in self.channel.replies
+                if message_id == source.id
+            ],
+            [],
+        )
+
+    def test_initial_question_echo_is_bounded_and_marks_excerpt(self) -> None:
+        text = "x" * (channel_app._SIDE_INITIAL_QUESTION_MAX_CHARS + 100)
+
+        echo = channel_app._side_initial_question_echo(text)
+
+        self.assertIn("首轮问题（来自 /side 发起消息，内容节选）", echo)
+        self.assertTrue(echo.endswith("…"))
+        self.assertLess(len(echo), 3500)
+
+        mention_echo = channel_app._side_initial_question_echo(
+            '<AT user_id="all">everyone</AT>'
+        )
+        self.assertNotIn("<at", mention_echo.lower())
+        self.assertNotIn("</at", mention_echo.lower())
+        self.assertIn("‹AT", mention_echo)
+
+    async def test_redelivery_identity_mismatch_fails_closed(self) -> None:
+        original = FakeMessage(
+            "/side",
+            message_id="om-source",
+            chat_id="oc-original",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        binding = self.binding_for(original)
+        self.store.create_side_topic(
+            app_id="cli_test",
+            chat_id="oc-original",
+            source_message_id="om-source",
+            parent_binding_id=binding.id,
+            creator_id="ou_user",
+            requires_mention=False,
+        )
+
+        await self.app.handle_message(
+            FakeMessage(
+                "/side",
+                message_id="om-source",
+                chat_id="oc-other",
+                chat_type="p2p",
+                mentioned_bot=False,
+            )
+        )
+
+        self.assertEqual(self.runtime.create_side_calls, [])
+        self.assertEqual(self.channel.send_calls, [])
+        self.assertTrue(
+            any(
+                message_id == "om-source" and "different identity" in str(content)
+                for message_id, content in self.channel.replies
+            )
+        )
+
+    async def test_fresh_side_root_must_not_belong_to_an_existing_topic(self) -> None:
+        source = FakeMessage(
+            "/side",
+            message_id="om-source",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(source)
+        self.channel.send_results.append(
+            sent_result(
+                "om-root",
+                chat_id="oc-direct",
+                root_id="om-existing-root",
+                parent_id="om-existing-parent",
+            )
+        )
+
+        await self.app.handle_message(source)
+
+        record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=source.id,
+        )
+        assert record is not None
+        self.assertEqual(record.state, SideTopicState.FAILED)
+        self.assertEqual(len(self.channel.send_calls), 1)
+        self.assertEqual(
+            self.runtime.close_side_calls,
+            [(record.id, SideTopicState.FAILED)],
+        )
+        self.assertTrue(
+            any("不是新话题根消息" in str(content) for _mid, content in self.channel.replies)
+        )
+
+    async def test_unknown_lark_send_reconciles_once_with_the_same_uuid(self) -> None:
+        source = FakeMessage(
+            "/side",
+            message_id="om-source-reconcile",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(source)
+        self.channel.send_results.extend(
+            (
+                RuntimeError("response lost"),
+                sent_result(
+                    "om-root-reconciled",
+                    chat_id="oc-direct",
+                    thread_id="omt-side-reconciled",
+                    root_id="om-root-reconciled",
+                ),
+            )
+        )
+
+        await self.app.handle_message(source)
+
+        record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=source.id,
+        )
+        assert record is not None
+        self.assertEqual(record.state, SideTopicState.OPEN)
+        self.assertEqual(len(self.channel.send_calls), 2)
+        first_opts = self.channel.send_calls[0][2]
+        second_opts = self.channel.send_calls[1][2]
+        self.assertIs(first_opts, second_opts)
+        self.assertEqual(first_opts.uuid, second_opts.uuid)
+
+    async def test_retryable_lark_send_reconciles_once_with_the_same_uuid(
+        self,
+    ) -> None:
+        source = FakeMessage(
+            "/side",
+            message_id="om-source-retryable",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(source)
+        self.channel.send_results.extend(
+            (
+                retryable_sent_result(),
+                sent_result(
+                    "om-root-reconciled",
+                    chat_id="oc-direct",
+                    thread_id="omt-side-reconciled",
+                    root_id="om-root-reconciled",
+                ),
+            )
+        )
+
+        await self.app.handle_message(source)
+
+        record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=source.id,
+        )
+        assert record is not None
+        self.assertEqual(record.state, SideTopicState.OPEN)
+        calls = self.channel.send_calls[-2:]
+        self.assertEqual(len(calls), 2)
+        self.assertIs(calls[0][2], calls[1][2])
+        self.assertEqual(calls[0][2].uuid, calls[1][2].uuid)
+
+    async def test_lark_send_reconciliation_has_one_shared_retry_budget(self) -> None:
+        cases = (
+            (RuntimeError("response lost"), retryable_sent_result()),
+            (retryable_sent_result(), retryable_sent_result()),
+        )
+        for index, results in enumerate(cases, start=1):
+            with self.subTest(index=index):
+                source = FakeMessage(
+                    "/side",
+                    message_id=f"om-source-budget-{index}",
+                    chat_id=f"oc-budget-{index}",
+                    chat_type="p2p",
+                    mentioned_bot=False,
+                )
+                self.binding_for(source)
+                self.channel.send_results.extend(results)
+                before = len(self.channel.send_calls)
+
+                await self.app.handle_message(source)
+
+                record = self.store.side_topic_for_source(
+                    app_id="cli_test",
+                    source_message_id=source.id,
+                )
+                assert record is not None
+                calls = self.channel.send_calls[before:]
+                self.assertEqual(record.state, SideTopicState.FAILED)
+                self.assertEqual(len(calls), 2)
+                self.assertIs(calls[0][2], calls[1][2])
+                self.assertEqual(calls[0][2].uuid, calls[1][2].uuid)
+
+    async def test_seed_and_source_topic_relationships_fail_closed(self) -> None:
+        for index, seed in enumerate(
+            (
+                sent_result(
+                    "om-seed-wrong-root",
+                    chat_id="oc-chat",
+                    thread_id="omt-side-1",
+                    root_id="om-other",
+                    parent_id="om-root-1",
+                ),
+                sent_result(
+                    "om-seed-wrong-parent",
+                    chat_id="oc-chat",
+                    thread_id="omt-side-2",
+                    root_id="om-root-2",
+                    parent_id="om-other",
+                ),
+            ),
+            start=1,
+        ):
+            with self.subTest(index=index):
+                source = FakeMessage(
+                    "/side",
+                    message_id=f"om-source-{index}",
+                    chat_id="oc-chat",
+                    chat_type="group",
+                    thread_id=f"omt-parent-{index}",
+                )
+                self.binding_for(source)
+                self.channel.send_results.extend(
+                    (sent_result(f"om-root-{index}", chat_id="oc-chat"), seed)
+                )
+                await self.app.handle_message(source)
+                record = self.store.side_topic_for_source(
+                    app_id="cli_test",
+                    source_message_id=source.id,
+                )
+                assert record is not None
+                self.assertEqual(record.state, SideTopicState.FAILED)
+
+        direct_query = FakeMessage(
+            "/side inspect direct mismatch",
+            message_id="om-source-direct-mismatch",
+            chat_id="oc-direct-mismatch",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(direct_query)
+        self.channel.send_results.extend(
+            (
+                sent_result(
+                    "om-root-direct-mismatch",
+                    chat_id="oc-direct-mismatch",
+                    thread_id="omt-side-direct",
+                    root_id="om-root-direct-mismatch",
+                ),
+                sent_result(
+                    "om-question-direct-mismatch",
+                    chat_id="oc-direct-mismatch",
+                    thread_id="omt-wrong-side",
+                    root_id="om-root-direct-mismatch",
+                    parent_id="om-root-direct-mismatch",
+                ),
+            )
+        )
+        await self.app.handle_message(direct_query)
+        direct_record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=direct_query.id,
+        )
+        assert direct_record is not None
+        self.assertEqual(direct_record.state, SideTopicState.FAILED)
+        self.assertEqual(self.runtime.submit_side_calls, [])
+
+        same_topic = FakeMessage(
+            "/side",
+            message_id="om-source-same",
+            chat_id="oc-same",
+            chat_type="group",
+            thread_id="omt-existing",
+        )
+        self.binding_for(same_topic)
+        self.queue_direct_topic(
+            chat_id="oc-same",
+            root_id="om-root-same",
+            topic_id="omt-existing",
+        )
+        await self.app.handle_message(same_topic)
+        same_record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=same_topic.id,
+        )
+        assert same_record is not None
+        self.assertEqual(same_record.state, SideTopicState.FAILED)
+
+    async def test_side_routing_precedes_binding_and_uses_underlying_chat_mention_rule(
+        self,
+    ) -> None:
+        group_source = FakeMessage(
+            "/side",
+            message_id="om-group-source",
+            chat_id="oc-group",
+            chat_type="group",
+        )
+        self.binding_for(group_source)
+        self.queue_direct_topic(
+            chat_id="oc-group",
+            root_id="om-group-root",
+            topic_id="omt-group-side",
+        )
+        await self.app.handle_message(group_source)
+        group_record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=group_source.id,
+        )
+        assert group_record is not None
+
+        await self.app.handle_message(
+            FakeMessage(
+                "ignored",
+                message_id="om-unmentioned",
+                chat_id="oc-group",
+                chat_type="group",
+                thread_id="omt-group-side",
+                mentioned_bot=False,
+            )
+        )
+        self.assertEqual(self.runtime.submit_side_calls, [])
+        await self.app.handle_message(
+            FakeMessage(
+                "accepted",
+                message_id="om-mentioned",
+                chat_id="oc-group",
+                chat_type="group",
+                thread_id="omt-group-side",
+                mentioned_bot=True,
+            )
+        )
+        self.assertEqual(len(self.runtime.submit_side_calls), 1)
+
+        direct_source = FakeMessage(
+            "/side",
+            message_id="om-direct-source",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(direct_source)
+        self.queue_direct_topic(
+            chat_id="oc-direct",
+            root_id="om-direct-root",
+            topic_id="omt-direct-side",
+        )
+        await self.app.handle_message(direct_source)
+        direct_record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id="om-direct-source",
+        )
+        assert direct_record is not None
+        self.runtime.side_submission = SideSubmission(
+            SubmitDisposition.STEERED,
+            direct_record.id,
+            "native-side-running",
+            "side-turn-running",
+        )
+        await self.app.handle_message(
+            FakeMessage(
+                "accepted without mention",
+                message_id="om-direct-prompt",
+                sender_id="ou_side_bob",
+                display_name="Side Bob",
+                chat_id="oc-direct",
+                chat_type="p2p",
+                thread_id="omt-direct-side",
+                mentioned_bot=False,
+            )
+        )
+        self.assertEqual(len(self.runtime.submit_side_calls), 2)
+        request_text, current_context = plain_prompt_projection(
+            self.runtime.submit_side_calls[-1]["input"]
+        )
+        self.assertEqual(request_text, "accepted without mention")
+        self.assertEqual(current_context["message_id"], "om-direct-prompt")
+        self.assertEqual(
+            current_context["sender"]["open_id"],
+            "ou_side_bob",
+        )
+        self.assertEqual(
+            self.runtime.submit_side_calls[-1]["owner_id"],
+            "ou_side_bob",
+        )
+        self.assertEqual(
+            self.runtime.submit_side_calls[-1]["origin"].id,
+            "om-direct-prompt",
+        )
+        self.assertIn(("om-direct-prompt", "OnIt"), self.channel.reactions)
+
+        ordinary_topic = FakeMessage(
+            "ordinary p2p topic",
+            message_id="om-ordinary",
+            chat_id="oc-ordinary",
+            chat_type="p2p",
+            thread_id="omt-ordinary",
+            mentioned_bot=False,
+        )
+        binding = self.binding_for(ordinary_topic)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            binding.native_thread_id or "",
+            "turn-ordinary",
+            lambda: None,
+        )
+        await self.app.handle_message(ordinary_topic)
+        request_text, current_context = plain_prompt_projection(
+            self.runtime.submit_calls[-1]["input"]
+        )
+        self.assertEqual(request_text, "ordinary p2p topic")
+        self.assertEqual(current_context["message_id"], "om-ordinary")
+
+    async def test_terminal_and_root_fallback_tombstones_never_become_bindings(self) -> None:
+        parent = FakeMessage(
+            "/side",
+            message_id="om-parent",
+            chat_id="oc-chat",
+            chat_type="group",
+        )
+        binding = self.binding_for(parent)
+        closed = self.store.create_side_topic(
+            app_id="cli_test",
+            chat_id="oc-chat",
+            source_message_id="om-closed-source",
+            parent_binding_id=binding.id,
+            creator_id="ou_owner",
+            requires_mention=True,
+        )
+        self.store.set_side_topic_root(closed.id, "om-closed-root")
+        self.store.open_side_topic(closed.id, "omt-closed")
+        self.store.transition_side_topic(closed.id, SideTopicState.CLOSED)
+        closed_scope = FeishuScope(
+            "cli_test", "oc-chat", ScopeKind.TOPIC, "omt-closed"
+        )
+        self.store.create_binding(
+            scope=closed_scope,
+            project_alias="test",
+            creator_id="ou_owner",
+        )
+
+        await self.app.handle_message(
+            FakeMessage(
+                "must not run",
+                message_id="om-closed-message",
+                chat_id="oc-chat",
+                chat_type="group",
+                thread_id="omt-closed",
+                mentioned_bot=True,
+            )
+        )
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertTrue(
+            any("不会转成普通会话" in str(content) for _mid, content in self.channel.replies)
+        )
+
+        creating = self.store.create_side_topic(
+            app_id="cli_test",
+            chat_id="oc-chat",
+            source_message_id="om-creating-source",
+            parent_binding_id=binding.id,
+            creator_id="ou_owner",
+            requires_mention=True,
+        )
+        self.store.set_side_topic_root(creating.id, "om-creating-root")
+        await self.app.handle_message(
+            FakeMessage(
+                "promotion response was lost",
+                message_id="om-unknown-topic-message",
+                chat_id="oc-chat",
+                chat_type="group",
+                thread_id="omt-unknown",
+                mentioned_bot=True,
+                raw={"root_id": "om-creating-root"},
+            )
+        )
+        self.assertTrue(
+            any("仍在创建" in str(content) for _mid, content in self.channel.replies)
+        )
+
+    async def test_open_route_without_runtime_session_is_expired_fail_closed(self) -> None:
+        source = FakeMessage(
+            "/side",
+            message_id="om-parent",
+            chat_id="oc-chat",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        binding = self.binding_for(source)
+        record = self.store.create_side_topic(
+            app_id="cli_test",
+            chat_id="oc-chat",
+            source_message_id="om-orphan-source",
+            parent_binding_id=binding.id,
+            creator_id="ou_owner",
+            requires_mention=False,
+        )
+        self.store.set_side_topic_root(record.id, "om-orphan-root")
+        self.store.open_side_topic(record.id, "omt-orphan")
+
+        await self.app.handle_message(
+            FakeMessage(
+                "must expire",
+                message_id="om-orphan-message",
+                chat_id="oc-chat",
+                chat_type="p2p",
+                thread_id="omt-orphan",
+                mentioned_bot=False,
+            )
+        )
+
+        self.assertEqual(
+            self.store.get_side_topic(record.id).state,
+            SideTopicState.EXPIRED,
+        )
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(self.runtime.submit_side_calls, [])
+
+    async def test_side_controls_are_scoped_and_close_button_validates_root(self) -> None:
+        source = FakeMessage(
+            "/side",
+            message_id="om-source",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(source)
+        self.queue_direct_topic(
+            chat_id="oc-direct",
+            root_id="om-root",
+            topic_id="omt-side",
+        )
+        await self.app.handle_message(source)
+        record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=source.id,
+        )
+        assert record is not None
+
+        await self.app.handle_message(
+            FakeMessage(
+                "/status",
+                message_id="om-status",
+                chat_id="oc-direct",
+                chat_type="p2p",
+                thread_id="omt-side",
+                mentioned_bot=False,
+            )
+        )
+        await self.app.handle_message(
+            FakeMessage(
+                "/new test",
+                message_id="om-new-forbidden",
+                chat_id="oc-direct",
+                chat_type="p2p",
+                thread_id="omt-side",
+                mentioned_bot=False,
+            )
+        )
+        self.assertTrue(any("当前 Side" in str(content) for _mid, content in self.channel.replies))
+        self.assertTrue(any("Side 中不可用" in str(content) for _mid, content in self.channel.replies))
+
+        open_card = self.channel.updates[-1][1]
+        button = _elements(open_card, "button")[0]
+        value = button["behaviors"][0]["value"]
+        tampered = {**value, "topic_id": "omt-other"}
+        await self.app.handle_card_action(
+            SimpleNamespace(
+                message_id="om-root",
+                chat_id="oc-direct",
+                operator=SimpleNamespace(open_id="ou_other"),
+                action=SimpleNamespace(tag="button", value=tampered, form_value=None),
+            )
+        )
+        self.assertEqual(self.runtime.close_side_calls, [])
+        self.assertIn("side.close", str(self.channel.updates[-1][1]))
+
+        other = self.store.create_side_topic(
+            app_id="cli_test",
+            chat_id="oc-direct",
+            source_message_id="om-other-side-source",
+            parent_binding_id=record.parent_binding_id,
+            creator_id="ou_owner",
+            requires_mention=False,
+        )
+        self.store.set_side_topic_root(other.id, "om-other-root")
+        self.store.open_side_topic(other.id, "omt-other-side")
+        tampered_side = {**value, "side_id": f"side:v1:{other.id}"}
+        await self.app.handle_card_action(
+            SimpleNamespace(
+                message_id="om-root",
+                chat_id="oc-direct",
+                operator=SimpleNamespace(open_id="ou_other"),
+                action=SimpleNamespace(
+                    tag="button",
+                    value=tampered_side,
+                    form_value=None,
+                ),
+            )
+        )
+        self.assertEqual(self.runtime.close_side_calls, [])
+        self.assertEqual(self.channel.updates[-1][0], "om-root")
+        self.assertIn("side.close", str(self.channel.updates[-1][1]))
+
+        await self.app.handle_card_action(
+            SimpleNamespace(
+                message_id="om-root",
+                chat_id="oc-direct",
+                operator=SimpleNamespace(open_id="ou_other"),
+                action=SimpleNamespace(tag="button", value=value, form_value=None),
+            )
+        )
+        self.assertEqual(
+            self.runtime.close_side_calls,
+            [(record.id, SideTopicState.CLOSED)],
+        )
+        self.assertEqual(
+            self.store.get_side_topic(record.id).state,
+            SideTopicState.CLOSED,
+        )
+
+    async def test_side_close_button_expires_missing_runtime_session(self) -> None:
+        source = FakeMessage(
+            "/side",
+            message_id="om-source",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(source)
+        self.queue_direct_topic(
+            chat_id="oc-direct",
+            root_id="om-root",
+            topic_id="omt-side",
+        )
+        await self.app.handle_message(source)
+        record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=source.id,
+        )
+        assert record is not None
+        card = self.channel.updates[-1][1]
+        value = _elements(card, "button")[0]["behaviors"][0]["value"]
+        self.runtime.side_snapshots.pop(record.id)
+        self.runtime.side_close_error = SideSessionNotFound(record.id)
+
+        await self.app.handle_card_action(
+            SimpleNamespace(
+                message_id="om-root",
+                chat_id="oc-direct",
+                operator=SimpleNamespace(open_id="ou_other"),
+                action=SimpleNamespace(tag="button", value=value, form_value=None),
+            )
+        )
+
+        self.assertEqual(
+            self.store.get_side_topic(record.id).state,
+            SideTopicState.EXPIRED,
+        )
+        self.assertTrue(
+            any("已没有对应 Side Session" in str(card) for _mid, card in self.channel.updates)
+        )
+
+    async def test_creating_side_exposes_retriable_close_in_its_known_topic(self) -> None:
+        source = FakeMessage(
+            "/side",
+            message_id="om-source",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(source)
+        self.queue_direct_topic(
+            chat_id="oc-direct",
+            root_id="om-root",
+            topic_id="omt-side",
+        )
+        self.runtime.side_close_error = SideCloseFailed("cleanup lost")
+        with patch.object(
+            self.runtime,
+            "attach_side_topic",
+            side_effect=RuntimeError("attach failed"),
+        ):
+            await self.app.handle_message(source)
+
+        record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=source.id,
+        )
+        assert record is not None
+        self.assertEqual(record.state, SideTopicState.CREATING)
+        self.assertEqual(record.topic_id, "omt-side")
+        self.assertIn("side.close", str(self.channel.updates[-1][1]))
+
+        self.runtime.side_close_error = None
+        await self.app.handle_message(
+            FakeMessage(
+                "/side close",
+                message_id="om-close",
+                chat_id="oc-direct",
+                chat_type="p2p",
+                thread_id="omt-side",
+                mentioned_bot=False,
+                raw={"root_id": "om-root"},
+            )
+        )
+        self.assertEqual(
+            self.store.get_side_topic(record.id).state,
+            SideTopicState.FAILED,
+        )
+
+    async def test_project_resolution_and_handler_cancellation_compensate(self) -> None:
+        missing = FakeMessage(
+            "/side",
+            message_id="om-missing-project",
+            chat_id="oc-missing-project",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(missing)
+        with patch.object(
+            self.projects,
+            "resolve_for_binding",
+            side_effect=RuntimeError("project disappeared"),
+        ):
+            await self.app.handle_message(missing)
+        missing_record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=missing.id,
+        )
+        assert missing_record is not None
+        self.assertEqual(missing_record.state, SideTopicState.FAILED)
+
+        cancelled = FakeMessage(
+            "/side",
+            message_id="om-cancelled",
+            chat_id="oc-cancelled",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(cancelled)
+        send_entered = asyncio.Event()
+        never = asyncio.Event()
+
+        async def blocked_send(*_args, **_kwargs):
+            send_entered.set()
+            await never.wait()
+
+        with patch.object(self.channel, "send", new=blocked_send):
+            handling = asyncio.create_task(self.app.handle_message(cancelled))
+            await send_entered.wait()
+            handling.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await handling
+        cancelled_record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=cancelled.id,
+        )
+        assert cancelled_record is not None
+        self.assertEqual(cancelled_record.state, SideTopicState.FAILED)
+
+    async def test_side_stop_keeps_topic_open_then_side_close_ends_it(self) -> None:
+        source = FakeMessage(
+            "/side",
+            message_id="om-source",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(source)
+        self.queue_direct_topic(
+            chat_id="oc-direct",
+            root_id="om-root",
+            topic_id="omt-side",
+        )
+        await self.app.handle_message(source)
+        record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=source.id,
+        )
+        assert record is not None
+        before = self.runtime.side_snapshot(record.id)
+        self.runtime.side_snapshots[record.id] = SideSessionSnapshot(
+            side_id=before.side_id,
+            parent_binding_id=before.parent_binding_id,
+            parent_thread_id=before.parent_thread_id,
+            thread_id=before.thread_id,
+            project_alias=before.project_alias,
+            cwd=before.cwd,
+            creator_id=before.creator_id,
+            state=before.state,
+            topic_id=before.topic_id,
+            root_message_id=before.root_message_id,
+            turn_id="side-turn-running",
+            turn_state=ActiveState.RUNNING,
+            last_activity=before.last_activity,
+        )
+
+        await self.app.handle_message(
+            FakeMessage(
+                "/stop",
+                message_id="om-stop",
+                chat_id="oc-direct",
+                chat_type="p2p",
+                thread_id="omt-side",
+                mentioned_bot=False,
+            )
+        )
+        self.assertEqual(self.runtime.stop_side_calls, [record.id])
+        self.assertEqual(self.store.get_side_topic(record.id).state, SideTopicState.OPEN)
+
+        await self.app.handle_message(
+            FakeMessage(
+                "/side close",
+                message_id="om-close",
+                chat_id="oc-direct",
+                chat_type="p2p",
+                thread_id="omt-side",
+                mentioned_bot=False,
+            )
+        )
+        self.assertEqual(
+            self.runtime.close_side_calls,
+            [(record.id, SideTopicState.CLOSED)],
+        )
+        self.assertEqual(
+            self.store.get_side_topic(record.id).state,
+            SideTopicState.CLOSED,
+        )
+
+    async def test_lark_230071_fails_explicitly_and_compensates(self) -> None:
+        source = FakeMessage(
+            "/side",
+            message_id="om-source",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        self.binding_for(source)
+        self.channel.send_results.append(
+            sent_result(
+                "om-root",
+                chat_id="oc-direct",
+                success=False,
+                code=230071,
+            )
+        )
+
+        await self.app.handle_message(source)
+
+        record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=source.id,
+        )
+        assert record is not None
+        self.assertEqual(record.state, SideTopicState.FAILED)
+        self.assertEqual(
+            self.runtime.close_side_calls,
+            [(record.id, SideTopicState.FAILED)],
+        )
+        self.assertTrue(any("230071" in str(content) for _mid, content in self.channel.replies))
+
+    def test_side_send_result_validator_rejects_every_identity_boundary(self) -> None:
+        valid = sent_result(
+            "om-valid",
+            chat_id="oc-chat",
+            thread_id="omt-valid",
+            root_id="om-valid",
+        )
+        parsed = channel_app._validated_sent_message(
+            valid,
+            expected_chat_id="oc-chat",
+        )
+        self.assertEqual(parsed.message_id, "om-valid")
+
+        missing_code = sent_result("om-missing-code", chat_id="oc-chat")
+        missing_code.raw.pop("code")
+        nonzero_code = sent_result("om-code", chat_id="oc-chat", code=1)
+        chunked = sent_result("om-chunked", chat_id="oc-chat")
+        chunked.chunk_ids = ("om-chunked", "om-other")
+        mismatch = sent_result("om-result", chat_id="oc-chat")
+        mismatch.raw["data"]["message_id"] = "om-data"
+        wrong_chat = sent_result("om-wrong-chat", chat_id="oc-other")
+        missing_data = sent_result("om-missing-data", chat_id="oc-chat")
+        missing_data.raw.pop("data")
+        unsuccessful = sent_result(
+            "om-unsuccessful",
+            chat_id="oc-chat",
+            success=False,
+            code=2,
+        )
+
+        for label, result in (
+            ("missing-code", missing_code),
+            ("nonzero-code", nonzero_code),
+            ("chunked", chunked),
+            ("mismatched-message", mismatch),
+            ("wrong-chat", wrong_chat),
+            ("missing-data", missing_data),
+            ("unsuccessful", unsuccessful),
+        ):
+            with self.subTest(label=label), self.assertRaises(
+                SideTopicCreateFailed
+            ):
+                channel_app._validated_sent_message(
+                    result,
+                    expected_chat_id="oc-chat",
+                )
+
+
+def _elements(value: object, tag: str) -> list[dict[str, object]]:
+    found: list[dict[str, object]] = []
+    if isinstance(value, dict):
+        if value.get("tag") == tag:
+            found.append(value)
+        for child in value.values():
+            found.extend(_elements(child, tag))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(_elements(child, tag))
+    return found
+
+
+def _card_button_value(card: OutboundCard, label: str) -> dict[str, object]:
+    for button in _elements(card.card, "button"):
+        text = button.get("text")
+        if isinstance(text, dict) and text.get("content") == label:
+            behaviors = button.get("behaviors")
+            if isinstance(behaviors, list) and len(behaviors) == 1:
+                behavior = behaviors[0]
+                if isinstance(behavior, dict):
+                    value = behavior.get("value")
+                    if isinstance(value, dict):
+                        return value
+    raise AssertionError(f"button not found: {label}")
