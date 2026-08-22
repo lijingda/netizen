@@ -42,6 +42,23 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("not a Netizen runtime configuration file", template)
         self.assertIn("`<ssh-config-alias-or-user-at-host>`", template)
 
+    def test_readme_local_development_names_its_prerequisites(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        local_development = readme.split("## 本地开发", 1)[1].split(
+            "## 发布验证状态", 1
+        )[0]
+
+        for expected in (
+            "Python 3.11+",
+            "macOS 和 Linux",
+            "只支持 Linux + systemd",
+            "`make check`",
+            "使用 fake App Server",
+            "codex login status",
+            "codex exec --skip-git-repo-check",
+        ):
+            self.assertIn(expected, local_development)
+
     def test_installed_release_probe_detects_stale_and_shadowed_packages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -303,6 +320,9 @@ class DeploymentAssetsTest(unittest.TestCase):
     def test_example_config_uses_alias_to_one_canonical_cwd_shape(self) -> None:
         config = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
 
+        self.assertIn("Manual-development example", config)
+        self.assertIn("./install.sh does not copy this file", config)
+        self.assertIn("`projects: {}`", config)
         self.assertIn("defaultCwd:", config)
         self.assertIn("projectRoot:", config)
         self.assertIn("test: /home/your-user/projects/test", config)

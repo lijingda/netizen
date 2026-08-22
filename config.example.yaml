@@ -1,3 +1,6 @@
+# Manual-development example. ./install.sh does not copy this file: it generates
+# ~/.netizen/config.yaml with account-specific absolute paths and `projects: {}`.
+# Replace every /home/your-user path before running Netizen directly.
 instance:
   appId: cli_example
   dataDir: /home/your-user/.netizen/state

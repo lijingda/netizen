@@ -285,6 +285,16 @@ Channel SQLite、Project 目录、其他 Skills 以及全部 Codex 原生历史�
 
 ## 本地开发
 
+源码开发需要 Python 3.11+ 和 `venv`。macOS 和 Linux 都可以运行下面的源码开发与安全
+本地门禁；`install.sh`、`service.sh` 和正式服务部署只支持 Linux + systemd。`make check`
+使用 fake App Server，不创建真实 Codex Thread，也不要求 Codex 登录；启动 Netizen、执行
+真实 Turn 或运行 live probe 前，先确认当前账号的 Codex 登录有效：
+
+```bash
+codex login status
+codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
+```
+
 维护者可以把某个 checkout 专属的开发机路径、SSH 目标、远端账号、Admin URL 和私有
 发布记录保存在 `LOCAL_ENVIRONMENT.md`。先复制公开模板：
 
