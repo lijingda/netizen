@@ -25,7 +25,9 @@ class FeishuAppOnboardingTest(unittest.TestCase):
             check=False,
             capture_output=True,
             text=True,
-            timeout=30,
+            # A first import from a freshly built macOS release can spend more
+            # than 30 seconds loading the generated SDK modules from cold disk.
+            timeout=90,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         parameters = result.stdout.strip().split(",")

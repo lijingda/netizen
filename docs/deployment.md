@@ -1,15 +1,18 @@
-# 单实例 Linux 部署
+# 单实例 Linux 与 macOS 部署
 
 Netizen 以执行 `install.sh` 的当前用户运行，与该用户的 CLI 共用标准 `$CODEX_HOME`
 （默认 `~/.codex`）；不创建专用 Agent 用户、第二套 Codex 状态或 system-level daemon。
-第一版只支持 Linux + systemd user manager，macOS adapter 是后续工作。
+正式支持 Linux 的 systemd user manager，以及 macOS 14+ Apple Silicon 当前 GUI 登录用户的
+LaunchAgent。macOS 注销后停止、下次登录自动启动；不提供 LaunchDaemon。
 
 ## 选择部署目标
 
-仓库不定义默认服务器、SSH alias、账号或远端 checkout。选择一台满足本文前置条件的
-Linux 主机，并在执行同步、远端调试、候选门禁、安装、升级或运行验收时显式使用同一个
-`<deployment-host>`。它可以是本机 SSH config 中的 alias，也可以是
-`<user>@<hostname>`。
+仓库不定义默认服务器、SSH alias、账号或远端 checkout。选择满足本文前置条件的 Linux
+主机，或由实际桌面用户登录的 macOS 14+ Apple Silicon 主机。执行同步、远端调试、候选
+门禁、安装、升级或运行验收时显式使用同一个 `<deployment-host>`；它可以是本机 SSH
+config 中的 alias，也可以是 `<user>@<hostname>`。LaunchAgent 的首次 bootstrap 还要求
+该用户的 `gui/<uid>` launchd domain 已存在；只有 SSH 登录、没有 GUI 登录会明确失败且
+不写入安装状态。
 
 维护者若需要在某个 checkout 中保存自己的主机、路径和私有验收记录，可复制
 `LOCAL_ENVIRONMENT.example.md` 为被 Git 忽略的 `LOCAL_ENVIRONMENT.md`。该文件不是
@@ -34,6 +37,8 @@ SDK/cleanup 门禁为前提；不能用 plan 的展示降级绕过该启动门�
   state/
     channel.sqlite3[-wal|-shm]                  # Binding/Turn settings/Registry/Dedup
     .install.lock / .activation-intent.json     # 跨卸载锁与异常中断恢复意图
+    service.lifetime.lock / service.ready       # 精确退出与 readiness 契约
+    netizen.log / launchd.stderr.log            # macOS 有界服务日志/launcher 错误
     rollback-recovery-*                         # 回滚恢复材料
   releases/.netizen-managed                     # 删除前必须匹配的 ownership marker
   releases/<sha256>/source/                     # 当前工作区的只读语义快照
@@ -42,7 +47,9 @@ SDK/cleanup 门禁为前提；不能用 plan 的展示降级绕过该启动门�
   previous -> releases/<sha256>                 # 一个回滚点
   cache/.netizen-managed                        # 可删除安装缓存的 ownership marker
 ~/.config/systemd/user/
-  netizen.service                               # 渲染后的 user unit
+  netizen.service                               # Linux 渲染后的 user unit
+~/Library/LaunchAgents/
+  io.github.lijingda.netizen.plist              # macOS 渲染后的 LaunchAgent
 ${CODEX_HOME:-~/.codex}/
   skills/netizen-user-guide/                    # release 全量管理的用户咨询 Skill
 ```
@@ -52,15 +59,17 @@ canonical cwd；安装器不复制 Project，也不会创建 per-Binding workspa
 
 Netizen 产品根固定为 effective user 的账号 home 下的 `~/.netizen`，安装器有意忽略
 `XDG_DATA_HOME`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME` 和 `XDG_CACHE_HOME`。这是单一
-user unit、单一全局用户指南 Skill 的固定安装身份，不是可用来运行多实例的 profile。
+user service、单一全局用户指南 Skill 的固定安装身份，不是可用来运行多实例的 profile。
 `CODEX_HOME` 仍遵循 Codex 原生覆盖。开发源码位置与安装位置解耦：任意 checkout、文件
 同步或云上直接修改仍可部署到同一套 release；需要隔离安装器黑盒测试时使用临时 Unix
 用户、容器或 VM，而不是改 XDG 变量。
 
 安装器只会新建空的 `releases`/`cache`，或复用带精确 `.netizen-managed` marker 的目录。
 若它们已经非空且无标记，安装和卸载都会 fail closed，避免仅凭目录名认领并递归删除。
-安装器还会读取 systemd user manager 的环境；若它用 `XDG_CONFIG_HOME` 或
+Linux 安装器还会读取 systemd user manager 的环境；若它用 `XDG_CONFIG_HOME` 或
 `SYSTEMD_UNIT_PATH` 排除了固定的 `~/.config/systemd/user`，安装会在切换前明确失败。
+macOS 则在任何配置、release 或服务文件 mutation 前检查当前 GUI launchd domain，并用
+`plutil -lint` 与结构化回读验证 plist。
 
 ## 前置门禁
 
@@ -115,23 +124,37 @@ worker thread 的阻塞读取。Pilot 依赖受控用户范围、低频小图，
 
 候选 release 必须通过：
 
+macOS 系统不自带 GNU `timeout`；只在执行发布者 live probes 时先用
+`brew install coreutils` 提供 `gtimeout`。最终用户安装和日常服务运行不依赖 Homebrew
+coreutils。下面的块会按平台选择命令，并在缺失时明确失败：
+
 ```bash
+case "$(uname -s)" in
+  Darwin) deadline=gtimeout ;;
+  Linux) deadline=timeout ;;
+  *) echo "unsupported release-gate platform" >&2; exit 1 ;;
+esac
+command -v "$deadline" >/dev/null || {
+  echo "missing $deadline (macOS: brew install coreutils)" >&2
+  exit 1
+}
+
 make check
 for phase in models turn-settings smoke usage steer plan polling compact concurrency interrupt skills lifecycle side; do
-  timeout --signal=INT --kill-after=10s 420s \
+  "$deadline" --signal=INT --kill-after=10s 420s \
     .venv/bin/python scripts/probe_python_sdk.py \
     --cwd "$HOME/projects/test" --phase "$phase" || exit
 done
-timeout --signal=INT --kill-after=10s 420s \
+"$deadline" --signal=INT --kill-after=10s 420s \
   .venv/bin/python scripts/probe_python_sdk.py \
   --cwd "$HOME/projects/test" --phase release
-timeout --signal=INT --kill-after=10s 660s \
+"$deadline" --signal=INT --kill-after=10s 660s \
   .venv/bin/python scripts/probe_python_sdk.py \
   --cwd "$HOME/projects/test" --phase config
-timeout --signal=INT --kill-after=10s 660s \
+"$deadline" --signal=INT --kill-after=10s 660s \
   .venv/bin/python scripts/probe_python_sdk.py \
   --cwd "$HOME/projects/test" --phase goal
-timeout --signal=INT --kill-after=10s 300s \
+"$deadline" --signal=INT --kill-after=10s 300s \
   .venv/bin/python scripts/probe_python_sdk.py \
   --cwd "$HOME/projects/test" --phase sandbox
 ```
@@ -145,7 +168,7 @@ non-interactive shell 不等价：它可能缺少 profile 导出的代理/CA/PAT
 
 `make check` 是不创建真实 Codex Thread 的统一本地门禁。另在带 `.git` 的源码 checkout
 运行 `git diff --check`；内容寻址的安装快照没有 `.git`，不要在那里执行该命令。后续
-live probe 会创建原生 Thread，只在已登录的目标 Linux
+live probe 会创建原生 Thread，只在已登录的目标部署账号
 执行。每个 phase 会把 started/passed/failed 进度写到 stderr，并只把最终 JSON 写到
 stdout；异常路径的二次 interrupt、terminal cleanup 和 task drain 都有界，外层
 `timeout` 是整个 phase 的最后兜底。
@@ -287,12 +310,13 @@ interrupt，并为 exact Thread 请求清理 App Server 已登记的后台 termi
 - sandbox probe 只报告 `workspace-write-or-full` 或 `read-only-or-denied` 的端到端
   体感分类，不识别配置来源，也不能替代目标账号的真实权限验收。
 - Admin Web 候选必须从另一台受信内网主机直接验证 readiness、login、CSRF/Origin/Host、
-  inventory、mutation、restart session invalidation、journal 脱敏和数据库完整性；
+  inventory、mutation、restart session invalidation、平台日志脱敏和数据库完整性；
   使用 `http://<server-ip>:<port>`，不得把真实实例地址写回本文。
 - non-interactive SSH 可能缺少账号 profile 中的代理、CA 和 PATH。所有 live gate 必须在与
   服务相同的账号 login 环境运行，只比较必要变量名或摘要，不记录环境值。
 - migration、rollback、installed-source equality、database integrity、service ready、
-  `NRestarts` 和遗留进程都必须针对本次候选重新验证，历史绿灯不能作为当前证据。
+  Linux `NRestarts` 或 macOS failure restart，以及遗留进程都必须针对本次候选重新验证，
+  历史绿灯不能作为当前证据。
 
 `--phase config` 只在给定测试 cwd 下创建临时 Project，验证同一 App Server 的
 Project config 重载后自动清理；它不会读写全局 `config.toml`。实测结果为
@@ -317,9 +341,12 @@ phase，以新结果为准。
 
 ## 安装
 
-需要 Python 3.11+、`venv`、systemd/logind 和有效的当前用户 Codex 登录。源码可以来自
-git checkout、文件同步，也可以直接在目标云主机编辑；入口始终是源码根目录下的零参数
-脚本。真人在终端中安装时使用第一条命令；Agent、CI 或后台 shell 首次运行时使用第二条：
+需要 Python 3.11+、`venv` 和有效的当前用户 Codex 登录。Linux 还需要 systemd/logind；
+macOS 需要系统自带 `launchctl`、`plutil` 和当前用户的 GUI 登录会话。源码可以来自 git
+checkout、文件同步，也可以直接在目标主机编辑；入口始终是源码根目录下的零参数脚本。
+服务内的 HTTPS/WebSocket 在 macOS 上直接使用系统钥匙串信任；企业根证书应由管理员安装并
+标记为受信任。Netizen 不生成或维护单独的 CA bundle，Linux 的证书路径不受此行为影响。
+真人在终端中安装时使用第一条命令；Agent、CI 或后台 shell 首次运行时使用第二条：
 
 ```bash
 # 真人交互安装
@@ -375,16 +402,18 @@ App ID/Feishu Secret，再重新运行 `./install.sh`。已有有效配置和 Se
 交接。浏览器流程失败后安装器会为真人提供手工输入回退；由 Agent 承载时应中止该会话并
 回到凭据文件路径，不要通过聊天收集 Secret。
 
-systemd user service 本身不读取 `.bashrc`、`.profile` 等 shell 启动文件。渲染 unit 只给
-profile loader 一条固定的基础 `PATH`，不保存执行安装的 SSH、Agent、venv 或 NVM PATH。
-每次 start/restart 和 systemd 自动重启都会先运行 release 内的短生命周期 launcher；它
+systemd 与 launchd 都不会替服务读取完整的 `.bashrc`、`.profile` 等账号工具环境。渲染的
+service definition 只给 profile loader 一条固定基础 `PATH`；macOS 额外包含标准
+`/opt/homebrew/bin` 与 `/opt/homebrew/sbin`，但两种平台都不保存执行安装的 SSH、Agent、
+venv 或 NVM PATH。每次 start/restart 和服务管理器自动重启都会先运行 release 内的短生命
+周期 launcher；它
 根据 effective uid 的账号数据库取得 home 与 login shell，执行一次无 TTY interactive
-login profile，取得完整导出环境后直接 `exec` release Python。systemd 因而继续监督真实
-Netizen PID、信号和退出状态，不把 daemon 长期包在交互 shell、tmux 或伪终端中。
+login profile，取得完整导出环境后直接 `exec` release Python。服务管理器因而继续监督
+真实 Netizen PID、信号和退出状态，不把进程长期包在交互 shell、tmux 或伪终端中。
 
 Bash/Zsh/POSIX shell 使用 `-lic`，Fish 使用等价 login + interactive 模式。profile 的
-stdout 和环境快照由 launcher 增量、有界读取，stderr 直接丢弃，都不进入 journal 或
-文件；随机 NUL 边界定位快照，声明长度和 SHA-256 摘要会拒绝后台 writer 在边界内并发
+stdout 和环境快照由 launcher 增量、有界读取，stderr 直接丢弃，都不进入 journal、launchd
+stderr 或文件；随机 NUL 边界定位快照，声明长度和 SHA-256 摘要会拒绝后台 writer 在边界内并发
 插入的内容。探针用 `exec` 替换 login shell，因此
 不会在完成环境捕获时执行 `.bash_logout`、`.zlogout` 等会话结束 hook。探针超过 10 秒、
 输出超过 4 MiB、shell/profile 退出
@@ -403,7 +432,7 @@ Zsh、Fish 和其他支持的 shell 同样遵循各自原生 startup 顺序。
 捕获结果保留 PATH、NVM、代理/CA、语言、XDG 和普通导出变量；随后重新覆盖账号身份、
 `HOME`、安装时选择的 `CODEX_HOME`、Netizen 配置/两个 Secret 路径，并清除 profile 中
 的 direct Feishu/Admin Secret、两条可能漂移的 Secret path，以及会污染 release Python
-的 venv/Python 变量；随后写回安装器固定路径。unit 中的 launcher、环境探针和最终 Netizen
+的 venv/Python 变量；随后写回安装器固定路径。service definition 中的 launcher、环境探针和最终 Netizen
 解释器都显式使用 `-E -B -u`（非交互校验省略 `-u`），因此其他 `PYTHON*` 变量可以继续
 作为工具环境存在，却不能改变受管 release Python 的 import、优化、pyc 或缓冲行为。
 Codex 工具子进程的继承、过滤和显式 set 仍由同一份用户级
@@ -419,6 +448,12 @@ systemd user service 在用户注销后继续运行依赖 linger。若未启用�
 经主机授权独立执行后重试。安装器不会关闭 linger，因为它可能同时服务该用户的其他
 user units。
 
+macOS 不使用 linger，也不会请求 sudo。`~/Library/LaunchAgents/io.github.lijingda.netizen.plist`
+只属于当前用户登录会话；退出登录会停止服务，下次登录由 `RunAtLoad` 自动启动。若用户执行
+`service.sh stop`，当前会话保持停止，但 plist 仍为下一次登录启用。每次显式 bootstrap 前
+安装器都会执行 `launchctl enable gui/<uid>/io.github.lijingda.netizen`，清除 launchd 保存的
+sticky disabled 状态。
+
 ### 候选验证与切换
 
 安装器先在新 release 创建全新 venv，并以 `requirements.lock` 约束安装依赖。接受候选
@@ -429,27 +464,30 @@ package files，并做 `importlib.resources` smoke）、配置解析和候选 ve
 之外执行任意账号 profile，因为 profile 可以产生不可逆副作用或自行 daemonize。真实
 profile 只在候选 service 启动时加载：首次安装和原本 active 的升级会等待 ready，失败时
 回滚；原本停止的升级保持停止，之后 `service.sh start/restart` 会等待最多 45 秒确认 ready
-并直接暴露 shell/profile 启动错误；对已经 active 的 unit，`start` 幂等返回而不等待一条
-不会重复产生的 ready 日志。任意具体 MCP/工具是否可用仍取决于其自身配置，不能
+并直接暴露 shell/profile 启动错误；对已经 loaded 且已有有效 ready marker 的服务，
+`start` 幂等返回，loaded 但未 ready 则只做有界等待。任意具体 MCP/工具是否可用仍取决于其自身配置，不能
 由安装器枚举。真实 Thread capability phases 仍由 release 发布者按“前置门禁”执行，
 不在每个最终用户安装中重复创建探针 Thread。
 
 激活阶段停止现役 user service（如果原本在运行），随后对 configured Admin Web address
 执行 best-effort bind preflight。所有成功 socket 会持有到本次地址枚举结束，IPv6 明确
 设置 `IPV6_V6ONLY`；`EADDRNOTAVAIL` 只有在同一配置至少一个地址成功时才可忽略，端口占用
-则在数据库快照、unit 和 `current` 切换之前失败并进入既有 activation rollback。runtime
-bind 仍是最终事实。预检通过后才渲染并验证 user unit，原子切换
+则在数据库快照、service definition 和 `current` 切换之前失败并进入既有 activation rollback。runtime
+bind 仍是最终事实。预检通过后才渲染并验证平台 service definition，原子切换
 `current`，再用候选 release 完整替换
 `${CODEX_HOME:-~/.codex}/skills/netizen-user-guide`。这一个 Skill 内的人工修改会在升级
 时丢失；其他 Skill 不会被读取或修改。首次安装会 enable 并启动服务；升级前若服务在
-运行，新版本会启动并等待 journal 出现 `netizen service ready`；若原本停止则保持停止，
-已有 release 的 enabled/disabled 状态也保持不变。
+运行，新版本会启动并等待主进程发布 `0600` ready marker；若原本停止则保持当前会话停止。
+Linux 延续原 enabled/disabled 意图；macOS 保证 plist 已安装/enabled，供下次登录自动启动。
 
-只有 unit、release、Skill 和服务 ready 全部成功，旧 `current` 才记录为 `previous`，
+只有 service definition、release、Skill 和服务 ready 全部成功，旧 `current` 才记录为 `previous`，
 并只保留这两个 release。候选启动前会在旧进程停止且端口预检通过后复制
 `channel.sqlite3` 及现有
-sidecar；任一步失败都会停止候选并恢复旧 release 指针、unit、数据库、Skill 和
-enable/active 状态。即使回滚点来自该 Skill 上线前，也会按安装前快照恢复“原本不存在”
+sidecar；任一步失败都会停止候选并恢复旧 release 指针、service definition、数据库、Skill
+和 enable/active 状态。launcher 启动时在稳定的 `state/service.lifetime.lock` inode 上持有
+独占锁；主进程接管同一 FD 后立即恢复 CLOEXEC，Codex 工具与后台 terminal 不会继承。
+安装器只有在服务管理器目标已卸载且该锁可取得时才恢复数据库或 Skill；若无法确认，跳过
+两项恢复并保留 recovery snapshot，避免仍存活的候选写入旧状态。即使回滚点来自该 Skill 上线前，也会按安装前快照恢复“原本不存在”
 的状态，不要求旧 release 提供新脚本。若数据库或 Skill 恢复本身失败，受保留的 state
 目录会保存 recovery snapshot，并在错误里打印精确路径。
 
@@ -471,7 +509,7 @@ netizen.service`；无 TTY 时打印同一条预备命令。候选失败会尽�
 ./install.sh
 ```
 
-日常服务控制只走当前用户的 systemd manager；`service.sh` 内外都不使用 sudo：
+日常服务控制只走当前用户的平台 service manager；`service.sh` 内外都不使用 sudo：
 
 ```bash
 ./service.sh start
@@ -487,8 +525,8 @@ netizen.service`；无 TTY 时打印同一条预备命令。候选失败会尽�
 "$HOME/.netizen/current/source/uninstall.sh"
 ```
 
-`uninstall.sh` 无参数，停止/disable user unit，并删除渲染 unit、程序 releases、安装
-cache 和精确的受管用户指南 Skill。它明确保留 `config.yaml`、`credentials`、含 Channel
+`uninstall.sh` 无参数，停止/disable user service，并删除渲染的 unit/plist、程序 releases、
+安装 cache 和精确的受管用户指南 Skill。它明确保留 `config.yaml`、`credentials`、含 Channel
 SQLite 的 `state`、Project 目录、其他 Codex Skills 及原生 Thread/Turn 历史。若用户也
 要删除这些数据，应在确认备份和影响后另行处理，不能扩张卸载器的默认删除范围。
 
@@ -510,8 +548,8 @@ SQLite 的 `state`、Project 目录、其他 Codex Skills 及原生 Thread/Turn 
 `access:` 段。用户和群的可用范围改由飞书应用后台管理；新版若发现旧段会明确拒绝
 启动，避免部署者误以为这些字段仍然生效。
 
-不要把 Secret 内容写入 YAML、仓库、shell 参数、shell profile 或 systemd
-`Environment=`。unit 只注入两个受保护文件的固定路径。
+不要把 Secret 内容写入 YAML、仓库、shell 参数、shell profile、systemd `Environment=`
+或 LaunchAgent plist。service definition 只注入两个受保护文件的固定路径。
 
 `adminWeb` 默认等价于：
 
@@ -552,11 +590,11 @@ cutover；不得按通用重建流程丢弃 Side 墓碑，否则旧 Side 话题�
 ## Fail-closed 运维语义
 
 - 若 Netizen 提示 admission 已关闭或要求重启，表示一次 native start/turn/terminal
-  结果无法安全判定。Pilot 有意不自动重试，也不自动修改 Binding；检查 journal 后
+  结果无法安全判定。Pilot 有意不自动重试，也不自动修改 Binding；检查平台日志后
   人工执行当前 release 的 `service.sh restart`。
 - 若某个 Binding 长时间停留在 running，公开 native read 会继续保留该 slot 并周期
   记录 warning，避免在未知终态下误开第二轮。其他 Binding 不受影响；持续异常时检查
-  App Server/journal，并通过正常 `/stop` 或服务重启恢复，禁止手工清理 SQLite 或
+  App Server/平台日志，并通过正常 `/stop` 或服务重启恢复，禁止手工清理 SQLite 或
   `.codex` 状态。
 - 若引用 prompt 提示超时、撤回/删除、权限不足或准备期间任务状态已变，
   该次输入没有 start/steer。请先修复权限或确认当前 Turn，然后由用户重新发送；
@@ -570,13 +608,15 @@ cutover；不得按通用重建流程丢弃 Side 墓碑，否则旧 Side 话题�
   下载凭证或快照；不要手工写 SQLite，也不要把失败文件补发到主聊天。
 - 若 Side 显示 `creating`、清理未确认或要求再次结束，不要删除 SQLite route 或把该话题
   当普通 Binding 使用；在原 Side 话题重试 `/side close`，或正常重启让遗留 open route
-  转为 expired。Side 卡在 active close 时先检查 App Server/journal；禁止猜测 native ID。
+  转为 expired。Side 卡在 active close 时先检查 App Server/平台日志；禁止猜测 native ID。
 - 正常停机会停止所有 pulse，并用已记录的 exact reaction ID 清理常驻的 `Typing` 与
   当时可见的 `THINKING`。若进程被 `SIGKILL`、主机掉电或崩溃，运行态表情可能留在原
   消息；在“不持久化飞书展示状态”的边界下无法安全恢复，禁止为此扫描/猜测 reaction
   或修改 SQLite。
 
-## systemd
+## 平台服务管理器
+
+### Linux systemd
 
 仓库 `deploy/netizen.service` 是安装器渲染的 user-unit 模板；它不包含 `User=`、固定
 home 或 release 路径，也有意不增加外层 filesystem/network sandbox。用户仍由共享
@@ -593,14 +633,50 @@ loginctl show-user "$USER" --property=Linger
 切换；`uninstall.sh` 负责 stop/disable 和删除。`service.sh` 只接受
 `start|stop|restart|status`，不会安装、升级、enable、改配置或请求 sudo。
 
+### macOS LaunchAgent
+
+安装器用 `plistlib` 生成并回读
+`~/Library/LaunchAgents/io.github.lijingda.netizen.plist`，随后执行 `plutil -lint`。受管判断
+同时要求：当前 UID 拥有的普通非 symlink 文件、无 group/world write、exact Label、指向
+`~/.netizen/current` 的 exact `ProgramArguments`，以及受管 environment sentinel；任一不符
+都拒绝覆盖或卸载。不要手工用 `launchctl load/unload` 或编辑 plist；使用相同的
+`service.sh` 命令。
+
+```bash
+./service.sh status
+tail -n 100 "$HOME/.netizen/state/netizen.log"
+tail -n 100 "$HOME/.netizen/state/launchd.stderr.log"
+```
+
+状态只把 `launchctl print gui/<uid>/io.github.lijingda.netizen` 的退出码作为 loaded 判断，
+不解析其文本；Apple 不把该文本声明为稳定 API。`start` 使用
+`enable + bootstrap gui/<uid> <plist>`，`stop` 使用 exact service target 的 `bootout` 并等待
+lifetime lock，`restart` 是完整 stop-confirm 后再 bootstrap，不使用 `kickstart`。应用 INFO
+日志由标准库 rotating handler 保留为最多 5 MiB × 3 个文件；launcher/exec 失败单独进入
+`launchd.stderr.log`，两者都不得含 Secret。
+
 ready marker 只有在 Admin credential/closed bind、唯一 Codex Runtime、Store、Channel
-application、Feishu ingress 和 Admin admission 全部成功后才打印。正常 shutdown 在 Channel
+application、Feishu ingress 和 Admin admission 全部成功后才以原子 `0600` 文件发布。
+installer 每次启动前权威删除旧 marker，launcher 每次进程启动再次清理，正常退出也尽力
+删除；service manager 的 loaded/active 不能替代 ready。正常 shutdown 在 Channel
 background loop 使用一个 60 秒 monotonic absolute budget：先关闭 Admin listener、Feishu
 policy 和 Runtime admission，再排空 Admin/Feishu handlers 与 blocking I/O，最后清理 native
-Turns/reactions、Codex transport 和 Store。unit 的 `TimeoutStopSec=75s` 给 Python finally 与
-进程退出保留 15 秒外层余量；不要把它调回小于内部预算的值。
+Turns/reactions、Codex transport 和 Store。systemd `TimeoutStopSec=75s` 与 LaunchAgent
+`ExitTimeOut=75` 给 Python finally 留出完整内部预算；安装器的停止确认窗口为 90 秒，且未
+取得 lifetime lock 就不会执行状态回滚。
+唯一兼容例外是候选失败后恢复本机制上线前的旧 Linux unit：旧 release 的重启仍按其原有
+journal ready 日志确认；候选和所有新 service definition 只接受私有 marker。
 
 ## 验收顺序
+
+每次改动安装器、launcher、主进程 ready 时，先完成两套平台门禁：Linux 重跑 systemd
+fresh/active/stopped upgrade、失败回滚、linger 和卸载；真实 macOS 14+ Apple Silicon 在
+实际 GUI 登录用户下依次验证首次安装、`start|stop|restart|status`、active/stopped upgrade、
+故意启动失败后恢复旧版本、失败自动重启、sleep/wake、logout/login 后自动启动，以及卸载
+保留边界。macOS 还必须在 Codex 启动一个后台 terminal 后停止 Netizen，确认 terminal 可继续
+存活但不会持有 `service.lifetime.lock`；检查 plist、进程 argv/environment、`netizen.log` 和
+`launchd.stderr.log` 均不含 App/Admin Secret。最后在两平台重跑真实 Codex Thread、steer、
+cleanup 和 exact-ID resume probes；fake launchctl/systemctl 单测不能替代这些真机门禁。
 
 先从另一台受信内网主机直接访问 `http://<服务器 IP>:8787`：未登录的 `/` 返回 303
 重定向到 `/login`（不返回 HTML 或状态），未知 route 和 API 必须返回 401，只有登录页复用的

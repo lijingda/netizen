@@ -18,6 +18,8 @@ Environment=PYTHONUNBUFFERED=1
 Environment=@CONFIG_ENV@
 Environment=@SECRET_ENV@
 Environment=@ADMIN_SECRET_ENV@
+Environment=@READY_FILE_ENV@
+Environment=@LIFETIME_LOCK_FILE_ENV@
 UnsetEnvironment=FEISHU_APP_SECRET NETIZEN_ADMIN_SECRET PYTHONHOME PYTHONPATH VIRTUAL_ENV __PYVENV_LAUNCHER__
 
 # The launcher performs one bounded account-profile capture and then execs the

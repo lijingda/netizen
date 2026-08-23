@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import os
 import pwd
 import select
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -277,6 +279,10 @@ def service_environment(
     config_path: str,
     secret_file: str,
     admin_secret_file: str,
+    ready_file: str,
+    lifetime_lock_file: str,
+    log_file: str | None = None,
+    launch_agent_sentinel: str | None = None,
 ) -> dict[str, str]:
     """Preserve the shell snapshot while enforcing Netizen-owned launch values."""
 
@@ -285,6 +291,11 @@ def service_environment(
     environment.pop("FEISHU_APP_SECRET_FILE", None)
     environment.pop("NETIZEN_ADMIN_SECRET", None)
     environment.pop("NETIZEN_ADMIN_SECRET_FILE", None)
+    environment.pop("NETIZEN_LIFETIME_LOCK_FD", None)
+    environment.pop("NETIZEN_LIFETIME_LOCK_FILE", None)
+    environment.pop("NETIZEN_LOG_FILE", None)
+    environment.pop("NETIZEN_MANAGED_LAUNCH_AGENT", None)
+    environment.pop("NETIZEN_READY_FILE", None)
     for name in _SCRUBBED_PYTHON_ENVIRONMENT:
         environment.pop(name, None)
     environment.update(
@@ -295,12 +306,18 @@ def service_environment(
             "LOGNAME": username,
             "NETIZEN_CONFIG_PATH": config_path,
             "NETIZEN_ADMIN_SECRET_FILE": admin_secret_file,
+            "NETIZEN_LIFETIME_LOCK_FILE": lifetime_lock_file,
+            "NETIZEN_READY_FILE": ready_file,
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONUNBUFFERED": "1",
             "SHELL": str(shell),
             "USER": username,
         }
     )
+    if log_file is not None:
+        environment["NETIZEN_LOG_FILE"] = log_file
+    if launch_agent_sentinel is not None:
+        environment["NETIZEN_MANAGED_LAUNCH_AGENT"] = launch_agent_sentinel
     return environment
 
 
@@ -311,7 +328,87 @@ def _required_environment(name: str) -> str:
     return value
 
 
+def _optional_environment(name: str) -> str | None:
+    value = os.environ.get(name, "").strip()
+    return value or None
+
+
+def _managed_absolute_path(value: str, *, label: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute() or path == Path(path.anchor):
+        raise ServiceLaunchError(f"{label} must be an absolute non-root path: {path}")
+    return path
+
+
+def acquire_lifetime_lock(path: Path) -> int:
+    """Acquire the stable service-lifetime inode and return its CLOEXEC FD."""
+
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise ServiceLaunchError(f"could not open service lifetime lock {path}: {error}") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise ServiceLaunchError(
+                f"service lifetime lock is not a current-user regular file: {path}"
+            )
+        os.fchmod(descriptor, 0o600)
+        os.set_inheritable(descriptor, False)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ServiceLaunchError("another Netizen service process still owns the lifetime lock") from error
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def clear_ready_marker(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_dir() and not path.is_symlink():
+        raise ServiceLaunchError(f"service ready marker is a directory: {path}")
+    try:
+        path.unlink()
+    except OSError as error:
+        raise ServiceLaunchError(f"could not clear service ready marker {path}: {error}") from error
+
+
 def launch() -> None:
+    lifetime_lock_path = _managed_absolute_path(
+        _required_environment("NETIZEN_LIFETIME_LOCK_FILE"),
+        label="NETIZEN_LIFETIME_LOCK_FILE",
+    )
+    ready_path = _managed_absolute_path(
+        _required_environment("NETIZEN_READY_FILE"),
+        label="NETIZEN_READY_FILE",
+    )
+    lifetime_descriptor = acquire_lifetime_lock(lifetime_lock_path)
+    try:
+        clear_ready_marker(ready_path)
+        _launch_with_lifetime_lock(
+            lifetime_descriptor,
+            lifetime_lock_path=lifetime_lock_path,
+            ready_path=ready_path,
+        )
+    finally:
+        with contextlib.suppress(OSError):
+            os.set_inheritable(lifetime_descriptor, False)
+        with contextlib.suppress(OSError):
+            os.close(lifetime_descriptor)
+
+
+def _launch_with_lifetime_lock(
+    lifetime_descriptor: int,
+    *,
+    lifetime_lock_path: Path,
+    ready_path: Path,
+) -> None:
     try:
         account = pwd.getpwuid(os.geteuid())
     except KeyError as error:
@@ -335,12 +432,23 @@ def launch() -> None:
         config_path=_required_environment("NETIZEN_CONFIG_PATH"),
         secret_file=_required_environment("FEISHU_APP_SECRET_FILE"),
         admin_secret_file=_required_environment("NETIZEN_ADMIN_SECRET_FILE"),
+        ready_file=str(ready_path),
+        lifetime_lock_file=str(lifetime_lock_path),
+        log_file=_optional_environment("NETIZEN_LOG_FILE"),
+        launch_agent_sentinel=_optional_environment(
+            "NETIZEN_MANAGED_LAUNCH_AGENT"
+        ),
     )
-    os.execve(
-        sys.executable,
-        [sys.executable, "-E", "-B", "-u", "-m", "netizen.main"],
-        environment,
-    )
+    environment["NETIZEN_LIFETIME_LOCK_FD"] = str(lifetime_descriptor)
+    os.set_inheritable(lifetime_descriptor, True)
+    try:
+        os.execve(
+            sys.executable,
+            [sys.executable, "-E", "-B", "-u", "-m", "netizen.main"],
+            environment,
+        )
+    finally:
+        os.set_inheritable(lifetime_descriptor, False)
 
 
 def main(_argv: Sequence[str] | None = None) -> int:

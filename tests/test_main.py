@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import os
+import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,8 +16,17 @@ from openai_codex import CodexConfig
 
 from netizen.bindings import BindingStore, SideTopicState
 from netizen.domain import FeishuScope, ScopeKind
-from netizen.main import ServiceCore, _scrub_channel_environment, build_channel
-from netizen.main import _register_channel_handlers
+from netizen.main import (
+    ServiceCore,
+    _adopt_lifetime_lock,
+    _clear_ready_marker,
+    _configure_platform_trust,
+    _publish_ready_marker,
+    _register_channel_handlers,
+    _scrub_channel_environment,
+    build_channel,
+    main,
+)
 from netizen.projects import ProjectRegistry
 from netizen.settings import AdminWebSettings, Settings
 
@@ -36,6 +49,55 @@ def settings(root: Path) -> Settings:
 
 
 class MainConfigurationTest(unittest.TestCase):
+    def test_platform_trust_uses_keychain_on_macos(self) -> None:
+        calls: list[str] = []
+        fake_truststore = SimpleNamespace(
+            inject_into_ssl=lambda: calls.append("inject")
+        )
+
+        with (
+            patch("netizen.main.sys.platform", "darwin"),
+            patch.dict(sys.modules, {"truststore": fake_truststore}),
+        ):
+            _configure_platform_trust()
+        self.assertEqual(calls, ["inject"])
+
+    def test_platform_trust_does_not_import_truststore_on_linux(self) -> None:
+        with (
+            patch("netizen.main.sys.platform", "linux"),
+            patch.dict(sys.modules, {"truststore": None}),
+        ):
+            _configure_platform_trust()
+
+    def test_main_configures_platform_trust_before_starting_runtime(self) -> None:
+        events: list[str] = []
+        runtime = object()
+
+        with (
+            patch.dict(os.environ, {"NETIZEN_CONFIG_PATH": "/tmp/config"}, clear=True),
+            patch("netizen.main._adopt_lifetime_lock", return_value=None),
+            patch(
+                "netizen.main._configure_platform_trust",
+                side_effect=lambda: events.append("trust"),
+            ),
+            patch("netizen.main._configure_logging"),
+            patch("netizen.main.Settings.from_file", return_value=object()),
+            patch("netizen.main._scrub_channel_environment"),
+            patch(
+                "netizen.main.run",
+                new=lambda *_args, **_kwargs: runtime,
+            ),
+            patch(
+                "netizen.main.asyncio.run",
+                side_effect=lambda candidate: events.append(
+                    "runtime" if candidate is runtime else "unexpected"
+                ),
+            ),
+        ):
+            main()
+
+        self.assertEqual(events, ["trust", "runtime"])
+
     def test_message_and_card_action_handlers_are_registered(self) -> None:
         registered: dict[str, object] = {}
 
@@ -90,6 +152,10 @@ class MainConfigurationTest(unittest.TestCase):
                 "FEISHU_APP_SECRET_FILE": "/secret-file",
                 "NETIZEN_ADMIN_SECRET": "admin-secret",
                 "NETIZEN_ADMIN_SECRET_FILE": "/admin-secret-file",
+                "NETIZEN_CONFIG_PATH": "/managed/config.yaml",
+                "NETIZEN_LOG_FILE": "/managed/netizen.log",
+                "NETIZEN_MANAGED_LAUNCH_AGENT": "sentinel",
+                "NETIZEN_READY_FILE": "/managed/service.ready",
                 "CODEX_HOME": "/home/user/.codex",
                 "HOME": "/home/user",
             },
@@ -101,8 +167,66 @@ class MainConfigurationTest(unittest.TestCase):
             self.assertNotIn("FEISHU_APP_SECRET_FILE", os.environ)
             self.assertNotIn("NETIZEN_ADMIN_SECRET", os.environ)
             self.assertNotIn("NETIZEN_ADMIN_SECRET_FILE", os.environ)
+            self.assertNotIn("NETIZEN_CONFIG_PATH", os.environ)
+            self.assertNotIn("NETIZEN_LOG_FILE", os.environ)
+            self.assertNotIn("NETIZEN_MANAGED_LAUNCH_AGENT", os.environ)
+            self.assertNotIn("NETIZEN_READY_FILE", os.environ)
             self.assertEqual(os.environ["CODEX_HOME"], "/home/user/.codex")
             self.assertEqual(os.environ["HOME"], "/home/user")
+
+    def test_adopted_lifetime_lock_is_cloexec_for_tool_subprocesses(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "service.lifetime.lock"
+            descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.set_inheritable(descriptor, True)
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "NETIZEN_LIFETIME_LOCK_FD": str(descriptor),
+                        "NETIZEN_LIFETIME_LOCK_FILE": str(path),
+                    },
+                    clear=True,
+                ):
+                    adopted = _adopt_lifetime_lock()
+                    self.assertEqual(adopted, descriptor)
+                    self.assertFalse(os.get_inheritable(descriptor))
+                    self.assertNotIn("NETIZEN_LIFETIME_LOCK_FD", os.environ)
+                    self.assertNotIn("NETIZEN_LIFETIME_LOCK_FILE", os.environ)
+
+                    probe = subprocess.run(
+                        [
+                            sys.executable,
+                            "-c",
+                            (
+                                "import os,sys; fd=int(sys.argv[1]); "
+                                "\ntry: os.fstat(fd)"
+                                "\nexcept OSError: raise SystemExit(0)"
+                                "\nraise SystemExit(1)"
+                            ),
+                            str(descriptor),
+                        ],
+                        check=False,
+                        close_fds=False,
+                    )
+                self.assertEqual(probe.returncode, 0)
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+    def test_ready_marker_is_atomic_private_and_removable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "service.ready"
+            path.write_text("stale", encoding="utf-8")
+
+            _publish_ready_marker(path)
+
+            self.assertEqual(path.read_bytes(), b"netizen service ready\n")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+            _clear_ready_marker(path)
+            self.assertFalse(path.exists())
 
 
 class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):

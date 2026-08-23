@@ -2,12 +2,30 @@
 
 from __future__ import annotations
 
+import os
+
+# The launcher makes this one descriptor inheritable only for its final exec.
+# Restore CLOEXEC before importing SDK modules so import-time subprocesses could
+# never inherit the service-lifetime lock.
+_EARLY_LIFETIME_DESCRIPTOR = os.environ.get("NETIZEN_LIFETIME_LOCK_FD", "")
+if _EARLY_LIFETIME_DESCRIPTOR.isdecimal():
+    try:
+        os.set_inheritable(int(_EARLY_LIFETIME_DESCRIPTOR), False)
+    except OSError:
+        # _adopt_lifetime_lock() reports the authoritative validation error.
+        pass
+del _EARLY_LIFETIME_DESCRIPTOR
+
 import asyncio
 import concurrent.futures
+import contextlib
 import logging
-import os
 import signal
+import stat
+import sys
+import uuid
 from collections.abc import Awaitable, Callable
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +74,22 @@ logger = logging.getLogger(__name__)
 
 _CODEX_SERVICE_CONFIG_OVERRIDES = ("allow_login_shell=false",)
 _SHUTDOWN_BUDGET_SECONDS = 60.0
+_READY_MARKER_CONTENT = b"netizen service ready\n"
+_LOG_MAX_BYTES = 5 * 1024 * 1024
+_LOG_BACKUP_COUNT = 2
+
+
+def _configure_platform_trust() -> None:
+    """Use the native macOS trust store for application-owned TLS."""
+
+    if sys.platform != "darwin":
+        return
+    import truststore
+
+    # Netizen is the application entry point, so application-wide injection is
+    # intentional. It lets the Channel WebSocket honor Keychain-managed roots
+    # without generating a CA bundle or inventing another environment policy.
+    truststore.inject_into_ssl()
 
 
 def build_channel(settings: Settings, store: BindingStore) -> FeishuChannel:
@@ -352,7 +386,7 @@ class ServiceCore:
                     )
 
 
-async def run(settings: Settings) -> None:
+async def run(settings: Settings, *, ready_file: Path | None = None) -> None:
     settings.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(settings.data_dir, 0o700)
     store = BindingStore(settings.data_dir / "channel.sqlite3")
@@ -389,6 +423,8 @@ async def run(settings: Settings) -> None:
         _register_channel_handlers(channel, core.application)
         await channel.start_background()
         await _await_channel_future(channel.schedule(_open_core_admission(core)))
+        if ready_file is not None:
+            _publish_ready_marker(ready_file)
         logger.info(
             "netizen service ready",
             extra={"projects": len(projects.list())},
@@ -399,9 +435,13 @@ async def run(settings: Settings) -> None:
             if core_started:
                 await _await_channel_future(channel.schedule(core.close()))
         finally:
-            await asyncio.to_thread(channel.stop)
-            if not core._closed:
-                store.close()
+            try:
+                await asyncio.to_thread(channel.stop)
+                if not core._closed:
+                    store.close()
+            finally:
+                if ready_file is not None:
+                    _clear_ready_marker(ready_file)
 
 
 async def _open_core_admission(core: ServiceCore) -> None:
@@ -465,17 +505,139 @@ def _scrub_channel_environment() -> None:
     os.environ.pop("FEISHU_APP_SECRET_FILE", None)
     os.environ.pop("NETIZEN_ADMIN_SECRET", None)
     os.environ.pop("NETIZEN_ADMIN_SECRET_FILE", None)
+    os.environ.pop("NETIZEN_CONFIG_PATH", None)
+    os.environ.pop("NETIZEN_LOG_FILE", None)
+    os.environ.pop("NETIZEN_MANAGED_LAUNCH_AGENT", None)
+    os.environ.pop("NETIZEN_READY_FILE", None)
 
 
-def main() -> None:
+def _managed_absolute_path(raw: str, *, label: str) -> Path:
+    path = Path(raw)
+    if not path.is_absolute() or path == Path(path.anchor):
+        raise RuntimeError(f"{label} must be an absolute non-root path: {path}")
+    return path
+
+
+def _adopt_lifetime_lock() -> int | None:
+    raw_descriptor = os.environ.pop("NETIZEN_LIFETIME_LOCK_FD", None)
+    raw_path = os.environ.pop("NETIZEN_LIFETIME_LOCK_FILE", None)
+    if raw_descriptor is None and raw_path is None:
+        return None
+    if raw_descriptor is None or raw_path is None:
+        raise RuntimeError("managed service lifetime lock environment is incomplete")
+    if not raw_descriptor.isdecimal():
+        raise RuntimeError("NETIZEN_LIFETIME_LOCK_FD is not a file descriptor")
+    descriptor = int(raw_descriptor)
+    lock_path = _managed_absolute_path(
+        raw_path,
+        label="NETIZEN_LIFETIME_LOCK_FILE",
+    )
+    if lock_path.is_symlink():
+        raise RuntimeError(f"service lifetime lock must not be a symlink: {lock_path}")
+    try:
+        descriptor_metadata = os.fstat(descriptor)
+        path_metadata = lock_path.stat()
+    except OSError as error:
+        raise RuntimeError(f"could not adopt service lifetime lock: {error}") from error
+    if (
+        not stat.S_ISREG(descriptor_metadata.st_mode)
+        or descriptor_metadata.st_uid != os.geteuid()
+        or (descriptor_metadata.st_dev, descriptor_metadata.st_ino)
+        != (path_metadata.st_dev, path_metadata.st_ino)
+    ):
+        raise RuntimeError("service lifetime lock FD does not match its managed path")
+    os.set_inheritable(descriptor, False)
+    return descriptor
+
+
+def _publish_ready_marker(path: Path) -> None:
+    temporary = path.parent / f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}"
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        view = memoryview(_READY_MARKER_CONTENT)
+        while view:
+            written = os.write(descriptor, view)
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    except OSError as error:
+        raise RuntimeError(f"could not publish service ready marker {path}: {error}") from error
+    finally:
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+
+
+def _clear_ready_marker(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_dir() and not path.is_symlink():
+        logger.error("service ready marker became a directory: %s", path)
+        return
+    try:
+        path.unlink()
+    except OSError:
+        logger.exception("failed to clear service ready marker")
+
+
+def _configure_logging() -> None:
+    raw_log_file = os.environ.get("NETIZEN_LOG_FILE", "").strip()
+    if not raw_log_file:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s %(message)s",
+            force=True,
+        )
+        return
+    log_file = _managed_absolute_path(raw_log_file, label="NETIZEN_LOG_FILE")
+    if log_file.is_symlink() or (log_file.exists() and not log_file.is_file()):
+        raise RuntimeError(f"managed service log is not a regular file: {log_file}")
+    handler = RotatingFileHandler(
+        log_file,
+        maxBytes=_LOG_MAX_BYTES,
+        backupCount=_LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    os.chmod(log_file, 0o600)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        handlers=[handler],
+        force=True,
     )
-    config_path = Path(os.environ.get("NETIZEN_CONFIG_PATH", "config.yaml"))
-    settings = Settings.from_file(config_path)
-    _scrub_channel_environment()
-    asyncio.run(run(settings))
+
+
+def main() -> None:
+    lifetime_descriptor = _adopt_lifetime_lock()
+    try:
+        _configure_platform_trust()
+        raw_ready_file = os.environ.get("NETIZEN_READY_FILE", "").strip()
+        if lifetime_descriptor is not None and not raw_ready_file:
+            raise RuntimeError("managed service environment is missing NETIZEN_READY_FILE")
+        ready_file = (
+            _managed_absolute_path(raw_ready_file, label="NETIZEN_READY_FILE")
+            if lifetime_descriptor is not None
+            else None
+        )
+        _configure_logging()
+        config_path = Path(os.environ.get("NETIZEN_CONFIG_PATH", "config.yaml"))
+        settings = Settings.from_file(config_path)
+        _scrub_channel_environment()
+        asyncio.run(run(settings, ready_file=ready_file))
+    finally:
+        if lifetime_descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(lifetime_descriptor)
 
 
 if __name__ == "__main__":

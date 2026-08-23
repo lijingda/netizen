@@ -19,6 +19,7 @@ PyYAML==6.0.3
 qrcode==8.2
 requests==2.34.2
 requests-toolbelt==1.0.0
+truststore==0.10.4; sys_platform == 'darwin'
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.7.0

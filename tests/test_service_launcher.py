@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
+import os
 import shutil
 import sys
 import tempfile
@@ -274,6 +276,10 @@ printf 'logout-noise=ignored'
             admin_secret_file=(
                 "/home/service-user/.netizen/credentials/admin-web-secret"
             ),
+            ready_file="/home/service-user/.netizen/state/service.ready",
+            lifetime_lock_file=(
+                "/home/service-user/.netizen/state/service.lifetime.lock"
+            ),
         )
 
         self.assertEqual(
@@ -317,6 +323,12 @@ printf 'logout-noise=ignored'
             "NETIZEN_CONFIG_PATH": (
                 "/home/service-user/.netizen/config.yaml"
             ),
+            "NETIZEN_READY_FILE": (
+                "/home/service-user/.netizen/state/service.ready"
+            ),
+            "NETIZEN_LIFETIME_LOCK_FILE": (
+                "/home/service-user/.netizen/state/service.lifetime.lock"
+            ),
         }
         with (
             patch.dict(launcher.os.environ, managed, clear=True),
@@ -330,6 +342,9 @@ printf 'logout-noise=ignored'
                 },
             ),
             patch.object(launcher.os, "execve") as execute,
+            patch.object(launcher, "acquire_lifetime_lock", return_value=9),
+            patch.object(launcher, "clear_ready_marker") as clear_ready,
+            patch.object(launcher.os, "set_inheritable") as set_inheritable,
         ):
             launcher.launch()
 
@@ -345,6 +360,64 @@ printf 'logout-noise=ignored'
         )
         self.assertEqual(environment["PYTHONOPTIMIZE"], "2")
         self.assertEqual(environment["CODEX_HOME"], managed["CODEX_HOME"])
+        self.assertEqual(environment["NETIZEN_LIFETIME_LOCK_FD"], "9")
+        clear_ready.assert_called_once_with(Path(managed["NETIZEN_READY_FILE"]))
+        self.assertEqual(
+            [call.args for call in set_inheritable.call_args_list],
+            [(9, True), (9, False), (9, False)],
+        )
+
+    def test_lifetime_lock_uses_one_stable_cloexec_inode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "service.lifetime.lock"
+            first = launcher.acquire_lifetime_lock(path)
+            first_inode = os.fstat(first).st_ino
+            try:
+                self.assertFalse(os.get_inheritable(first))
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                with self.assertRaisesRegex(
+                    launcher.ServiceLaunchError,
+                    "still owns the lifetime lock",
+                ):
+                    launcher.acquire_lifetime_lock(path)
+            finally:
+                fcntl.flock(first, fcntl.LOCK_UN)
+                os.close(first)
+
+            second = launcher.acquire_lifetime_lock(path)
+            try:
+                self.assertEqual(os.fstat(second).st_ino, first_inode)
+                self.assertFalse(os.get_inheritable(second))
+            finally:
+                fcntl.flock(second, fcntl.LOCK_UN)
+                os.close(second)
+
+    def test_launcher_removes_stale_ready_marker_before_profile_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ready = root / "service.ready"
+            lock = root / "service.lifetime.lock"
+            ready.write_text("stale", encoding="utf-8")
+            with (
+                patch.dict(
+                    launcher.os.environ,
+                    {
+                        "NETIZEN_LIFETIME_LOCK_FILE": str(lock),
+                        "NETIZEN_READY_FILE": str(ready),
+                    },
+                    clear=True,
+                ),
+                patch.object(
+                    launcher,
+                    "_launch_with_lifetime_lock",
+                ) as launch_main,
+            ):
+                launcher.launch()
+
+            self.assertFalse(ready.exists())
+            descriptor = launch_main.call_args.args[0]
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
 
 
 if __name__ == "__main__":

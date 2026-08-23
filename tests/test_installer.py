@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import fcntl
+import inspect
 import io
 import json
 import os
+import plistlib
 import shutil
 import socket
 import stat
@@ -27,6 +30,7 @@ class NetizenInstallerTest(unittest.TestCase):
             account_home=home,
             uid=os.geteuid(),
             username="current-user",
+            platform_name="linux",
         )
 
     def test_layout_uses_fixed_current_user_paths_and_ignores_xdg_overrides(self) -> None:
@@ -46,6 +50,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 account_home=home,
                 uid=os.geteuid(),
                 username="chosen-user",
+                platform_name="linux",
             )
 
             self.assertEqual(layout.home, home)
@@ -63,7 +68,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(layout.cache_dir, home / ".netizen/cache")
             self.assertEqual(layout.releases, home / ".netizen/releases")
             self.assertEqual(
-                layout.unit_file,
+                layout.service_file,
                 home / ".config/systemd/user/netizen.service",
             )
             self.assertEqual(layout.codex_home, root / "codex")
@@ -83,6 +88,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     account_home=home,
                     uid=os.geteuid(),
                     username="current-user",
+                    platform_name="linux",
                 )
 
     def test_source_checkout_must_not_overlap_managed_install_or_data_paths(self) -> None:
@@ -95,6 +101,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 account_home=home,
                 uid=os.geteuid(),
                 username="current-user",
+                platform_name="linux",
             )
             source = layout.product_root / "checkout"
             source.mkdir(parents=True)
@@ -369,7 +376,8 @@ class NetizenInstallerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
             with (
-                patch.object(installer, "require_linux"),
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer.SystemdServiceBackend, "preflight"),
                 patch.object(installer, "prepare_release") as prepare_release,
                 patch.object(installer, "info") as installer_info,
                 self.assertRaises(installer.ConfigurationRequired),
@@ -423,7 +431,9 @@ class NetizenInstallerTest(unittest.TestCase):
                 )
 
             with (
-                patch.object(installer, "require_linux"),
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(installer.SystemdServiceBackend, "prepare_host"),
                 patch.object(
                     installer,
                     "prepare_release",
@@ -442,7 +452,6 @@ class NetizenInstallerTest(unittest.TestCase):
                         admin_bind=installer.AdminBind(False, "127.0.0.1", 8787),
                     ),
                 ),
-                patch.object(installer, "ensure_linger"),
                 patch.object(installer, "activate_release"),
                 patch.object(installer, "info", side_effect=messages.append),
                 patch("sys.stdin", new=io.StringIO("\n")),
@@ -557,7 +566,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 venv=ROOT / ".venv",
             )
 
-            unit = installer.render_user_unit(release, layout)
+            unit = installer.render_systemd_service(release, layout)
 
             self.assertNotIn("User=", unit)
             self.assertNotIn("Group=", unit)
@@ -633,8 +642,12 @@ class NetizenInstallerTest(unittest.TestCase):
     def test_service_action_invokes_only_systemd_user_manager(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
-            layout.unit_file.parent.mkdir(parents=True)
-            layout.unit_file.write_text(installer.UNIT_MARKER, encoding="utf-8")
+            installer.prepare_directories(layout)
+            layout.service_file.write_text(
+                installer.SYSTEMD_SERVICE_MARKER
+                + "\nEnvironment=NETIZEN_READY_FILE=/managed/service.ready\n",
+                encoding="utf-8",
+            )
             calls: list[list[str]] = []
 
             def fake_runner(argv: list[object], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -643,8 +656,9 @@ class NetizenInstallerTest(unittest.TestCase):
                 return subprocess.CompletedProcess(rendered, 0, "", "")
 
             with (
-                patch.object(installer, "require_linux"),
-                patch.object(installer, "_wait_for_ready") as wait_for_ready,
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(installer, "_wait_for_systemd_ready") as wait_for_ready,
             ):
                 code = installer.service_action(
                     "restart",
@@ -653,8 +667,14 @@ class NetizenInstallerTest(unittest.TestCase):
                 )
 
             self.assertEqual(code, 0)
-            self.assertEqual(calls, [["systemctl", "--user", "restart", "netizen.service"]])
-            self.assertNotIn("sudo", calls[0])
+            self.assertEqual(
+                calls,
+                [
+                    ["systemctl", "--user", "stop", "netizen.service"],
+                    ["systemctl", "--user", "start", "netizen.service"],
+                ],
+            )
+            self.assertTrue(all("sudo" not in call for call in calls))
             wait_for_ready.assert_called_once()
             self.assertEqual(
                 wait_for_ready.call_args.kwargs["timeout"],
@@ -664,8 +684,12 @@ class NetizenInstallerTest(unittest.TestCase):
     def test_service_restart_surfaces_a_post_systemctl_ready_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
-            layout.unit_file.parent.mkdir(parents=True)
-            layout.unit_file.write_text(installer.UNIT_MARKER, encoding="utf-8")
+            installer.prepare_directories(layout)
+            layout.service_file.write_text(
+                installer.SYSTEMD_SERVICE_MARKER
+                + "\nEnvironment=NETIZEN_READY_FILE=/managed/service.ready\n",
+                encoding="utf-8",
+            )
             calls: list[list[str]] = []
 
             def fake_runner(
@@ -677,10 +701,11 @@ class NetizenInstallerTest(unittest.TestCase):
                 return subprocess.CompletedProcess(rendered, 0, "", "")
 
             with (
-                patch.object(installer, "require_linux"),
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer.SystemdServiceBackend, "preflight"),
                 patch.object(
                     installer,
-                    "_wait_for_ready",
+                    "_wait_for_systemd_ready",
                     side_effect=installer.InstallError("profile failed"),
                 ),
                 self.assertRaisesRegex(installer.InstallError, "profile failed"),
@@ -693,14 +718,22 @@ class NetizenInstallerTest(unittest.TestCase):
 
             self.assertEqual(
                 calls,
-                [["systemctl", "--user", "restart", "netizen.service"]],
+                [
+                    ["systemctl", "--user", "stop", "netizen.service"],
+                    ["systemctl", "--user", "start", "netizen.service"],
+                ],
             )
 
     def test_service_start_is_idempotent_when_unit_is_already_active(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
-            layout.unit_file.parent.mkdir(parents=True)
-            layout.unit_file.write_text(installer.UNIT_MARKER, encoding="utf-8")
+            installer.prepare_directories(layout)
+            layout.service_file.write_text(
+                installer.SYSTEMD_SERVICE_MARKER,
+                encoding="utf-8",
+            )
+            layout.ready_file.write_bytes(installer.READY_MARKER_CONTENT)
+            layout.ready_file.chmod(0o600)
             calls: list[list[str]] = []
 
             def fake_runner(
@@ -712,8 +745,9 @@ class NetizenInstallerTest(unittest.TestCase):
                 return subprocess.CompletedProcess(rendered, 0, "active\n", "")
 
             with (
-                patch.object(installer, "require_linux"),
-                patch.object(installer, "_wait_for_ready") as wait_for_ready,
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(installer, "_wait_for_systemd_ready") as wait_for_ready,
             ):
                 code = installer.service_action(
                     "start",
@@ -768,7 +802,7 @@ class NetizenInstallerTest(unittest.TestCase):
             installer._validate_user_unit_search_path(
                 layout,
                 "XDG_CONFIG_HOME=/custom\n"
-                f"SYSTEMD_UNIT_PATH={layout.unit_dir}\n",
+                f"SYSTEMD_UNIT_PATH={layout.service_dir}\n",
             )
 
     def test_systemd_manager_environment_escapes_are_decoded_without_a_shell(self) -> None:
@@ -796,11 +830,17 @@ class NetizenInstallerTest(unittest.TestCase):
     def test_service_action_refuses_an_unrecognized_same_name_unit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
-            layout.unit_file.parent.mkdir(parents=True)
-            layout.unit_file.write_text("[Service]\nExecStart=/bin/other\n", encoding="utf-8")
+            layout.service_file.parent.mkdir(parents=True)
+            layout.service_file.write_text(
+                "[Service]\nExecStart=/bin/other\n",
+                encoding="utf-8",
+            )
 
-            with patch.object(installer, "require_linux"):
-                with self.assertRaisesRegex(installer.InstallError, "unrecognized user unit"):
+            with patch.object(installer, "require_supported_platform"):
+                with self.assertRaisesRegex(
+                    installer.InstallError,
+                    "unrecognized systemd user service",
+                ):
                     installer.service_action("stop", layout=layout)
 
     def test_activation_refuses_an_orphaned_active_same_name_user_unit(self) -> None:
@@ -832,8 +872,8 @@ class NetizenInstallerTest(unittest.TestCase):
             old = self._release(layout, "1" * 64)
             candidate = self._release(layout, "2" * 64)
             installer._set_release_link(layout.current, old.root, layout)
-            old_unit_text = installer.UNIT_MARKER + "\n# old unit\n"
-            layout.unit_file.write_text(old_unit_text, encoding="utf-8")
+            old_unit_text = installer.SYSTEMD_SERVICE_MARKER + "\n# old unit\n"
+            layout.service_file.write_text(old_unit_text, encoding="utf-8")
             old_skill = layout.codex_home / "skills/netizen-user-guide"
             old_skill.mkdir(parents=True)
             (old_skill / "SKILL.md").write_text("old skill\n", encoding="utf-8")
@@ -845,6 +885,13 @@ class NetizenInstallerTest(unittest.TestCase):
             def fake_runner(argv: list[object], **_kwargs: object) -> subprocess.CompletedProcess[str]:
                 rendered = [os.fspath(value) for value in argv]
                 calls.append(rendered)
+                if rendered[0] == "journalctl":
+                    return subprocess.CompletedProcess(
+                        rendered,
+                        0,
+                        installer.LEGACY_SYSTEMD_READY_LOG + "\n",
+                        "",
+                    )
                 return subprocess.CompletedProcess(rendered, 0, "active\n", "")
 
             def fail_candidate_once(*_args: object, **_kwargs: object) -> None:
@@ -859,7 +906,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch.object(installer, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
                 patch.object(
                     installer,
-                    "_wait_for_ready",
+                    "_wait_for_systemd_ready",
                     side_effect=fail_candidate_once,
                 ),
             ):
@@ -873,7 +920,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     )
 
             self.assertEqual(installer._read_release_link(layout.current, layout), old.root.resolve())
-            self.assertEqual(layout.unit_file.read_text(), old_unit_text)
+            self.assertEqual(layout.service_file.read_text(), old_unit_text)
             self.assertEqual((old_skill / "SKILL.md").read_text(), "old skill\n")
             self.assertEqual(database.read_text(), "old database")
             self.assertFalse((layout.state_dir / installer.ACTIVATION_INTENT).exists())
@@ -882,6 +929,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 2,
             )
             self.assertIn(["systemctl", "--user", "start", "netizen.service"], calls)
+            self.assertTrue(any(call[0] == "journalctl" for call in calls))
 
     def test_failed_skill_rollback_preserves_a_recovery_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -891,7 +939,10 @@ class NetizenInstallerTest(unittest.TestCase):
             old = self._release(layout, "7" * 64)
             candidate = self._release(layout, "8" * 64)
             installer._set_release_link(layout.current, old.root, layout)
-            layout.unit_file.write_text(installer.UNIT_MARKER, encoding="utf-8")
+            layout.service_file.write_text(
+                installer.SYSTEMD_SERVICE_MARKER,
+                encoding="utf-8",
+            )
             old_skill = layout.codex_home / "skills/netizen-user-guide"
             old_skill.mkdir(parents=True)
             (old_skill / "SKILL.md").write_text("recovery content", encoding="utf-8")
@@ -905,7 +956,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch.object(installer, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
                 patch.object(
                     installer,
-                    "_wait_for_ready",
+                    "_wait_for_systemd_ready",
                     side_effect=installer.InstallError("candidate failed"),
                 ),
                 patch.object(
@@ -937,7 +988,10 @@ class NetizenInstallerTest(unittest.TestCase):
             old = self._release(layout, "3" * 64)
             candidate = self._release(layout, "4" * 64)
             installer._set_release_link(layout.current, old.root, layout)
-            layout.unit_file.write_text(installer.UNIT_MARKER, encoding="utf-8")
+            layout.service_file.write_text(
+                installer.SYSTEMD_SERVICE_MARKER,
+                encoding="utf-8",
+            )
             calls: list[list[str]] = []
 
             def fake_runner(argv: list[object], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -1011,7 +1065,7 @@ class NetizenInstallerTest(unittest.TestCase):
             with (
                 patch.object(installer, "_user_service_state", return_value=(False, False)),
                 patch.object(installer, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
-                patch.object(installer, "_wait_for_ready"),
+                patch.object(installer, "_wait_for_systemd_ready"),
             ):
                 installer.activate_release(
                     candidate,
@@ -1035,7 +1089,10 @@ class NetizenInstallerTest(unittest.TestCase):
             installer.prepare_directories(layout)
             candidate = self._release(layout, "d" * 64)
             installer._set_release_link(layout.current, candidate.root, layout)
-            layout.unit_file.write_text(installer.UNIT_MARKER, encoding="utf-8")
+            layout.service_file.write_text(
+                installer.SYSTEMD_SERVICE_MARKER,
+                encoding="utf-8",
+            )
             installer._write_activation_intent(
                 layout,
                 candidate,
@@ -1059,7 +1116,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     "inspect_legacy_service",
                     return_value=installer.LegacyServiceState(),
                 ),
-                patch.object(installer, "_wait_for_ready"),
+                patch.object(installer, "_wait_for_systemd_ready"),
             ):
                 installer.activate_release(
                     candidate,
@@ -1088,7 +1145,10 @@ class NetizenInstallerTest(unittest.TestCase):
             newer = self._release(layout, "3" * 64)
             installer._set_release_link(layout.current, interrupted.root, layout)
             installer._set_release_link(layout.previous, old.root, layout)
-            layout.unit_file.write_text(installer.UNIT_MARKER, encoding="utf-8")
+            layout.service_file.write_text(
+                installer.SYSTEMD_SERVICE_MARKER,
+                encoding="utf-8",
+            )
             installer._write_activation_intent(
                 layout,
                 interrupted,
@@ -1111,7 +1171,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     "inspect_legacy_service",
                     return_value=installer.LegacyServiceState(),
                 ),
-                patch.object(installer, "_wait_for_ready"),
+                patch.object(installer, "_wait_for_systemd_ready"),
             ):
                 installer.activate_release(
                     newer,
@@ -1260,7 +1320,10 @@ class NetizenInstallerTest(unittest.TestCase):
             root = Path(directory)
             layout = self._layout(root)
             installer.prepare_directories(layout)
-            layout.unit_file.write_text(installer.UNIT_MARKER, encoding="utf-8")
+            layout.service_file.write_text(
+                installer.SYSTEMD_SERVICE_MARKER,
+                encoding="utf-8",
+            )
             (layout.cache_dir / "artifact").write_text("cached", encoding="utf-8")
             layout.config_file.write_text("config", encoding="utf-8")
             layout.admin_secret_file.write_text("A" * 43, encoding="ascii")
@@ -1286,7 +1349,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 rendered = [os.fspath(value) for value in argv]
                 return subprocess.CompletedProcess(rendered, 0, "", "")
 
-            with patch.object(installer, "require_linux"):
+            with patch.object(installer, "require_supported_platform"):
                 installer.uninstall(layout=layout, runner=fake_runner)
 
             self.assertTrue(layout.product_root.exists())
@@ -1294,7 +1357,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertFalse(layout.cache_dir.exists())
             self.assertFalse(layout.current.exists())
             self.assertFalse(layout.previous.exists())
-            self.assertFalse(layout.unit_file.exists())
+            self.assertFalse(layout.service_file.exists())
             self.assertFalse(managed_skill.exists())
             self.assertTrue(layout.config_file.exists())
             self.assertEqual(layout.admin_secret_file.read_text(), "A" * 43)
@@ -1317,9 +1380,13 @@ class NetizenInstallerTest(unittest.TestCase):
                 account_home=home,
                 uid=os.geteuid(),
                 username="current-user",
+                platform_name="linux",
             )
             installer.prepare_directories(layout)
-            layout.unit_file.write_text(installer.UNIT_MARKER, encoding="utf-8")
+            layout.service_file.write_text(
+                installer.SYSTEMD_SERVICE_MARKER,
+                encoding="utf-8",
+            )
             unrelated = root / "drift-data/netizen/keep"
             unrelated.parent.mkdir(parents=True)
             unrelated.write_text("unrelated", encoding="utf-8")
@@ -1328,7 +1395,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 rendered = [os.fspath(value) for value in argv]
                 return subprocess.CompletedProcess(rendered, 0, "", "")
 
-            with patch.object(installer, "require_linux"):
+            with patch.object(installer, "require_supported_platform"):
                 installer.uninstall(layout=layout, runner=fake_runner)
 
             self.assertTrue(unrelated.exists())
@@ -1358,7 +1425,7 @@ class NetizenInstallerTest(unittest.TestCase):
             (managed_skill / "SKILL.md").write_text("managed", encoding="utf-8")
 
             with (
-                patch.object(installer, "require_linux"),
+                patch.object(installer, "require_supported_platform"),
                 patch.object(installer, "_user_service_state", return_value=(True, False)),
             ):
                 with self.assertRaisesRegex(installer.InstallError, "active/enabled"):
@@ -1396,7 +1463,7 @@ class NetizenInstallerTest(unittest.TestCase):
 
             self.assertIn(["systemctl", "--user", "stop", "netizen.service"], calls)
             self.assertIsNone(installer._read_release_link(layout.current, layout))
-            self.assertFalse(layout.unit_file.exists())
+            self.assertFalse(layout.service_file.exists())
             self.assertFalse((layout.codex_home / "skills/netizen-user-guide").exists())
 
     def test_managed_directory_removal_never_follows_a_symlink(self) -> None:
@@ -1430,8 +1497,11 @@ class NetizenInstallerTest(unittest.TestCase):
             keep.write_text("external", encoding="utf-8")
             layout.product_root.symlink_to(external, target_is_directory=True)
 
-            with patch.object(installer, "require_linux"):
-                with self.assertRaisesRegex(installer.InstallError, "symlink"):
+            with patch.object(installer, "require_supported_platform"):
+                with self.assertRaisesRegex(
+                    installer.InstallError,
+                    "not a real directory",
+                ):
                     installer.uninstall(layout=layout)
 
             self.assertEqual(keep.read_text(), "external")
@@ -1451,7 +1521,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 calls.append(rendered)
                 return subprocess.CompletedProcess(rendered, 0, "", "")
 
-            with patch.object(installer, "require_linux"):
+            with patch.object(installer, "require_supported_platform"):
                 with self.assertRaisesRegex(installer.InstallError, "must be a symlink"):
                     installer.uninstall(layout=layout, runner=fake_runner)
 
@@ -1484,6 +1554,584 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(database.read_text(), "old database")
             self.assertEqual(wal.read_text(), "old wal")
             self.assertFalse((data_dir / "channel.sqlite3-journal").exists())
+
+    def test_platform_selection_accepts_linux_and_darwin_only(self) -> None:
+        self.assertEqual(installer._supported_platform_name("linux"), "linux")
+        self.assertEqual(installer._supported_platform_name("linux2"), "linux")
+        self.assertEqual(installer._supported_platform_name("darwin"), "darwin")
+        with self.assertRaisesRegex(installer.InstallError, "supports Linux"):
+            installer._supported_platform_name("win32")
+
+    def test_common_activation_transaction_has_no_manager_commands(self) -> None:
+        source = inspect.getsource(installer.activate_release)
+
+        self.assertNotIn("systemctl", source)
+        self.assertNotIn("launchctl", source)
+        self.assertIn("backend.stop_and_confirm", source)
+        self.assertIn("backend.publish_definition", source)
+        self.assertIn("backend.start_and_wait", source)
+
+    def test_macos_layout_and_launch_agent_definition_are_user_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._darwin_layout(Path(directory))
+            installer.prepare_directories(layout)
+            release = self._release(layout, "a" * 64)
+            layout.secret_file.write_text("must-not-enter-plist", encoding="utf-8")
+
+            content = installer.render_launch_agent(release, layout)
+            payload = plistlib.loads(content)
+            installer._write_atomic(layout.service_file, content, mode=0o600)
+            installer._require_managed_launch_agent(layout.service_file, layout)
+
+            self.assertEqual(layout.platform, "darwin")
+            self.assertEqual(
+                layout.service_file,
+                layout.home
+                / "Library/LaunchAgents/io.github.lijingda.netizen.plist",
+            )
+            self.assertEqual(payload["Label"], installer.LAUNCH_AGENT_LABEL)
+            self.assertEqual(
+                payload["ProgramArguments"],
+                installer._launch_agent_program_arguments(layout),
+            )
+            self.assertEqual(payload["WorkingDirectory"], str(layout.home))
+            self.assertIs(payload["RunAtLoad"], True)
+            self.assertEqual(payload["KeepAlive"], {"SuccessfulExit": False})
+            self.assertEqual(payload["ExitTimeOut"], 75)
+            self.assertEqual(payload["Umask"], 0o077)
+            self.assertEqual(payload["StandardOutPath"], "/dev/null")
+            self.assertEqual(
+                payload["StandardErrorPath"],
+                str(layout.service_error_log),
+            )
+            environment = payload["EnvironmentVariables"]
+            self.assertEqual(
+                environment[installer.LAUNCH_AGENT_SENTINEL_NAME],
+                installer.LAUNCH_AGENT_SENTINEL_VALUE,
+            )
+            self.assertIn("/opt/homebrew/bin", environment["PATH"].split(":"))
+            self.assertNotIn("must-not-enter-plist", content.decode())
+            self.assertEqual(stat.S_IMODE(layout.service_file.stat().st_mode), 0o600)
+            with patch.dict(
+                os.environ,
+                {
+                    "PATH": "/usr/bin",
+                    "XDG_RUNTIME_DIR": "/run/user/wrong",
+                    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/wrong/bus",
+                },
+                clear=True,
+            ):
+                subprocess_environment = installer._service_environment(layout)
+            self.assertNotIn("XDG_RUNTIME_DIR", subprocess_environment)
+            self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", subprocess_environment)
+
+    def test_macos_launch_agent_permissions_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._darwin_layout(Path(directory))
+            installer.prepare_directories(layout)
+            release = self._release(layout, "8" * 64)
+            installer._write_atomic(
+                layout.service_file,
+                installer.render_launch_agent(release, layout),
+                mode=0o600,
+            )
+            layout.service_file.chmod(0o620)
+
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "group/world writable",
+            ):
+                installer._require_managed_launch_agent(
+                    layout.service_file,
+                    layout,
+                )
+
+    def test_macos_fresh_activation_publishes_enables_and_starts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._darwin_layout(Path(directory))
+            installer.prepare_directories(layout)
+            candidate = self._release(layout, "9" * 64)
+            runner, state, calls = self._launchd_runner(
+                layout,
+                ready_on_bootstrap=True,
+            )
+
+            installer.activate_release(
+                candidate,
+                layout,
+                interactive=False,
+                runner=runner,
+            )
+
+            target = f"gui/{layout.uid}/{installer.LAUNCH_AGENT_LABEL}"
+            self.assertIn(["launchctl", "enable", target], calls)
+            self.assertIn(
+                [
+                    "launchctl",
+                    "bootstrap",
+                    f"gui/{layout.uid}",
+                    str(layout.service_file),
+                ],
+                calls,
+            )
+            self.assertIs(state["loaded"], True)
+            self.assertTrue(layout.service_file.is_file())
+            self.assertEqual(
+                installer._read_release_link(layout.current, layout),
+                candidate.root.resolve(),
+            )
+            self.assertIsNone(
+                installer._read_release_link(layout.previous, layout)
+            )
+
+    def test_macos_gui_domain_preflight_fails_before_any_install_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._darwin_layout(Path(directory))
+            calls: list[list[str]] = []
+
+            def fake_runner(
+                argv: list[object], **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
+                rendered = [os.fspath(value) for value in argv]
+                calls.append(rendered)
+                return subprocess.CompletedProcess(rendered, 1, "", "no gui domain")
+
+            with (
+                patch.object(installer, "require_supported_platform"),
+                self.assertRaisesRegex(installer.InstallError, "GUI launchd domain"),
+            ):
+                installer.install(
+                    source_root=ROOT,
+                    layout=layout,
+                    runner=fake_runner,
+                    interactive=False,
+                )
+
+            self.assertEqual(
+                calls,
+                [["launchctl", "print", f"gui/{layout.uid}"]],
+            )
+            self.assertFalse(layout.product_root.exists())
+            self.assertFalse(layout.service_file.exists())
+
+    def test_macos_start_clears_sticky_disable_before_exact_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._darwin_layout(Path(directory))
+            installer.prepare_directories(layout)
+            release = self._release(layout, "b" * 64)
+            installer._write_atomic(
+                layout.service_file,
+                installer.render_launch_agent(release, layout),
+                mode=0o600,
+            )
+            runner, _state, calls = self._launchd_runner(
+                layout,
+                ready_on_bootstrap=True,
+            )
+            backend = installer.LaunchAgentServiceBackend(layout, runner)
+
+            backend.preflight()
+            backend.start_and_wait(timeout=0.1)
+
+            target = f"gui/{layout.uid}/{installer.LAUNCH_AGENT_LABEL}"
+            enable = ["launchctl", "enable", target]
+            bootstrap = [
+                "launchctl",
+                "bootstrap",
+                f"gui/{layout.uid}",
+                str(layout.service_file),
+            ]
+            self.assertIn(enable, calls)
+            self.assertIn(bootstrap, calls)
+            self.assertLess(calls.index(enable), calls.index(bootstrap))
+            self.assertNotIn("kickstart", [argument for call in calls for argument in call])
+
+    def test_macos_restart_boots_out_before_enable_and_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._darwin_layout(Path(directory))
+            installer.prepare_directories(layout)
+            release = self._release(layout, "a" * 64)
+            installer._write_atomic(
+                layout.service_file,
+                installer.render_launch_agent(release, layout),
+                mode=0o600,
+            )
+            runner, _state, calls = self._launchd_runner(
+                layout,
+                initially_loaded=True,
+                initially_ready=True,
+                ready_on_bootstrap=True,
+            )
+            backend = installer.LaunchAgentServiceBackend(layout, runner)
+
+            self.assertEqual(backend.service_action("restart"), 0)
+
+            target = f"gui/{layout.uid}/{installer.LAUNCH_AGENT_LABEL}"
+            bootout = ["launchctl", "bootout", target]
+            enable = ["launchctl", "enable", target]
+            bootstrap = [
+                "launchctl",
+                "bootstrap",
+                f"gui/{layout.uid}",
+                str(layout.service_file),
+            ]
+            self.assertLess(calls.index(bootout), calls.index(enable))
+            self.assertLess(calls.index(enable), calls.index(bootstrap))
+
+    def test_macos_loaded_without_ready_waits_without_rebootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._darwin_layout(Path(directory))
+            installer.prepare_directories(layout)
+            release = self._release(layout, "c" * 64)
+            installer._write_atomic(
+                layout.service_file,
+                installer.render_launch_agent(release, layout),
+                mode=0o600,
+            )
+            runner, _state, calls = self._launchd_runner(
+                layout,
+                initially_loaded=True,
+            )
+            backend = installer.LaunchAgentServiceBackend(layout, runner)
+
+            with self.assertRaisesRegex(installer.InstallError, "did not become ready"):
+                backend.start_and_wait(timeout=0.01)
+
+            flattened = [argument for call in calls for argument in call]
+            self.assertNotIn("bootstrap", flattened)
+            self.assertNotIn("kickstart", flattened)
+
+    def test_macos_bootstrap_response_loss_reconciles_by_loaded_and_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._darwin_layout(Path(directory))
+            installer.prepare_directories(layout)
+            release = self._release(layout, "d" * 64)
+            installer._write_atomic(
+                layout.service_file,
+                installer.render_launch_agent(release, layout),
+                mode=0o600,
+            )
+            runner, state, _calls = self._launchd_runner(
+                layout,
+                ready_on_bootstrap=True,
+                lose_bootstrap_response=True,
+            )
+            backend = installer.LaunchAgentServiceBackend(layout, runner)
+
+            backend.start_and_wait(timeout=0.1)
+
+            self.assertIs(state["loaded"], True)
+            self.assertTrue(installer._ready_marker_present(layout))
+
+    def test_macos_refuses_unmanaged_plist_and_orphan_loaded_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._darwin_layout(Path(directory))
+            installer.prepare_directories(layout)
+            release = self._release(layout, "e" * 64)
+            layout.service_file.write_bytes(
+                plistlib.dumps(
+                    {
+                        "Label": installer.LAUNCH_AGENT_LABEL,
+                        "ProgramArguments": ["/bin/other"],
+                        "EnvironmentVariables": {
+                            installer.LAUNCH_AGENT_SENTINEL_NAME:
+                                installer.LAUNCH_AGENT_SENTINEL_VALUE,
+                        },
+                    }
+                )
+            )
+            runner, _state, _calls = self._launchd_runner(layout)
+            backend = installer.LaunchAgentServiceBackend(layout, runner)
+            with self.assertRaisesRegex(installer.InstallError, "unrecognized LaunchAgent"):
+                backend.capture_definition()
+
+            layout.service_file.unlink()
+            runner, _state, _calls = self._launchd_runner(
+                layout,
+                initially_loaded=True,
+            )
+            with self.assertRaisesRegex(installer.InstallError, "inspect it"):
+                installer.activate_release(
+                    release,
+                    layout,
+                    interactive=False,
+                    runner=runner,
+                )
+            self.assertFalse(layout.current.exists())
+
+    def test_macos_active_upgrade_stops_then_publishes_and_restarts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._darwin_layout(Path(directory))
+            installer.prepare_directories(layout)
+            old = self._release(layout, "1" * 64)
+            candidate = self._release(layout, "2" * 64)
+            installer._set_release_link(layout.current, old.root, layout)
+            installer._write_atomic(
+                layout.service_file,
+                installer.render_launch_agent(old, layout),
+                mode=0o600,
+            )
+            runner, _state, calls = self._launchd_runner(
+                layout,
+                initially_loaded=True,
+                initially_ready=True,
+                ready_on_bootstrap=True,
+            )
+
+            installer.activate_release(
+                candidate,
+                layout,
+                interactive=False,
+                runner=runner,
+                data_dir=layout.state_dir,
+            )
+
+            target = f"gui/{layout.uid}/{installer.LAUNCH_AGENT_LABEL}"
+            bootout = ["launchctl", "bootout", target]
+            bootstrap = [
+                "launchctl",
+                "bootstrap",
+                f"gui/{layout.uid}",
+                str(layout.service_file),
+            ]
+            self.assertIn(bootout, calls)
+            self.assertIn(bootstrap, calls)
+            self.assertLess(calls.index(bootout), calls.index(bootstrap))
+            self.assertEqual(
+                installer._read_release_link(layout.current, layout),
+                candidate.root.resolve(),
+            )
+            self.assertEqual(
+                installer._read_release_link(layout.previous, layout),
+                old.root.resolve(),
+            )
+
+    def test_macos_stopped_upgrade_stays_unloaded_but_enabled_for_next_login(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._darwin_layout(Path(directory))
+            installer.prepare_directories(layout)
+            old = self._release(layout, "3" * 64)
+            candidate = self._release(layout, "4" * 64)
+            installer._set_release_link(layout.current, old.root, layout)
+            installer._write_atomic(
+                layout.service_file,
+                installer.render_launch_agent(old, layout),
+                mode=0o600,
+            )
+            runner, state, calls = self._launchd_runner(layout)
+
+            installer.activate_release(
+                candidate,
+                layout,
+                interactive=False,
+                runner=runner,
+            )
+
+            target = f"gui/{layout.uid}/{installer.LAUNCH_AGENT_LABEL}"
+            self.assertIn(["launchctl", "enable", target], calls)
+            self.assertNotIn("bootstrap", [argument for call in calls for argument in call])
+            self.assertIs(state["loaded"], False)
+            self.assertEqual(
+                installer._read_release_link(layout.previous, layout),
+                old.root.resolve(),
+            )
+
+    def test_macos_stop_requires_both_unloaded_target_and_released_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._darwin_layout(Path(directory))
+            installer.prepare_directories(layout)
+            release = self._release(layout, "5" * 64)
+            installer._write_atomic(
+                layout.service_file,
+                installer.render_launch_agent(release, layout),
+                mode=0o600,
+            )
+            descriptor = os.open(
+                layout.lifetime_lock_file,
+                os.O_RDWR | os.O_CREAT,
+                0o600,
+            )
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            runner, state, _calls = self._launchd_runner(
+                layout,
+                initially_loaded=True,
+            )
+            backend = installer.LaunchAgentServiceBackend(layout, runner)
+            try:
+                with self.assertRaisesRegex(
+                    installer.InstallError,
+                    "refusing to mutate rollback-protected state",
+                ):
+                    backend.stop_and_confirm(timeout=0.01)
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+            self.assertIs(state["loaded"], False)
+
+    def test_macos_failed_stop_skips_database_and_skill_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._darwin_layout(Path(directory))
+            installer.prepare_directories(layout)
+            candidate = self._release(layout, "6" * 64)
+            database = layout.state_dir / "channel.sqlite3"
+            database.write_text("old database", encoding="utf-8")
+            runner, _state, _calls = self._launchd_runner(
+                layout,
+                ready_on_bootstrap=False,
+            )
+
+            def fail_ready(
+                _backend: installer.LaunchAgentServiceBackend,
+                *,
+                timeout: float,
+            ) -> None:
+                del timeout
+                database.write_text("candidate database", encoding="utf-8")
+                raise installer.InstallError("candidate failed")
+
+            with (
+                patch.object(
+                    installer.LaunchAgentServiceBackend,
+                    "_wait_for_ready",
+                    autospec=True,
+                    side_effect=fail_ready,
+                ),
+                patch.object(
+                    installer.LaunchAgentServiceBackend,
+                    "stop_and_confirm",
+                    side_effect=installer.InstallError("candidate still alive"),
+                ),
+                self.assertRaisesRegex(
+                    installer.InstallError,
+                    "restore database: skipped",
+                ),
+            ):
+                installer.activate_release(
+                    candidate,
+                    layout,
+                    interactive=False,
+                    runner=runner,
+                    data_dir=layout.state_dir,
+                )
+
+            self.assertEqual(database.read_text(), "candidate database")
+            self.assertTrue(
+                (layout.codex_home / "skills/netizen-user-guide/SKILL.md").is_file()
+            )
+            self.assertTrue(list(layout.state_dir.glob("rollback-recovery-*")))
+
+    def test_macos_uninstall_removes_only_managed_artifacts_and_preserves_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._darwin_layout(Path(directory))
+            installer.prepare_directories(layout)
+            release = self._release(layout, "7" * 64)
+            installer._set_release_link(layout.current, release.root, layout)
+            installer._write_atomic(
+                layout.service_file,
+                installer.render_launch_agent(release, layout),
+                mode=0o600,
+            )
+            preserved = layout.state_dir / "channel.sqlite3"
+            preserved.write_text("state", encoding="utf-8")
+            runner, _state, calls = self._launchd_runner(
+                layout,
+                initially_loaded=True,
+            )
+
+            with patch.object(installer, "require_supported_platform"):
+                installer.uninstall(layout=layout, runner=runner)
+
+            target = f"gui/{layout.uid}/{installer.LAUNCH_AGENT_LABEL}"
+            self.assertIn(["launchctl", "bootout", target], calls)
+            self.assertIn(["launchctl", "disable", target], calls)
+            self.assertFalse(layout.service_file.exists())
+            self.assertFalse(layout.current.exists())
+            self.assertFalse(layout.releases.exists())
+            self.assertFalse(layout.cache_dir.exists())
+            self.assertEqual(preserved.read_text(), "state")
+
+    def _darwin_layout(self, root: Path) -> installer.Layout:
+        home = root / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        return installer.resolve_layout(
+            environ={},
+            account_home=home,
+            uid=os.geteuid(),
+            username="current-user",
+            platform_name="darwin",
+        )
+
+    def _launchd_runner(
+        self,
+        layout: installer.Layout,
+        *,
+        initially_loaded: bool = False,
+        initially_ready: bool = False,
+        ready_on_bootstrap: bool = False,
+        lose_bootstrap_response: bool = False,
+        domain_available: bool = True,
+    ) -> tuple[
+        object,
+        dict[str, bool],
+        list[list[str]],
+    ]:
+        state = {"loaded": initially_loaded}
+        calls: list[list[str]] = []
+        domain = f"gui/{layout.uid}"
+        target = f"{domain}/{installer.LAUNCH_AGENT_LABEL}"
+        if initially_ready:
+            layout.ready_file.write_bytes(installer.READY_MARKER_CONTENT)
+            layout.ready_file.chmod(0o600)
+
+        def mark_ready() -> None:
+            layout.ready_file.write_bytes(installer.READY_MARKER_CONTENT)
+            layout.ready_file.chmod(0o600)
+
+        def fake_runner(
+            argv: list[object],
+            **_kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            rendered = [os.fspath(value) for value in argv]
+            calls.append(rendered)
+            if rendered == ["launchctl", "print", domain]:
+                return subprocess.CompletedProcess(
+                    rendered,
+                    0 if domain_available else 1,
+                    "",
+                    "",
+                )
+            if rendered == ["launchctl", "print", target]:
+                return subprocess.CompletedProcess(
+                    rendered,
+                    0 if state["loaded"] else 1,
+                    "",
+                    "",
+                )
+            if rendered == ["launchctl", "enable", target]:
+                return subprocess.CompletedProcess(rendered, 0, "", "")
+            if rendered == ["launchctl", "disable", target]:
+                return subprocess.CompletedProcess(rendered, 0, "", "")
+            if rendered == ["launchctl", "bootout", target]:
+                state["loaded"] = False
+                return subprocess.CompletedProcess(rendered, 0, "", "")
+            if rendered == [
+                "launchctl",
+                "bootstrap",
+                domain,
+                str(layout.service_file),
+            ]:
+                state["loaded"] = True
+                if ready_on_bootstrap:
+                    mark_ready()
+                if lose_bootstrap_response:
+                    raise installer.InstallError("bootstrap response lost")
+                return subprocess.CompletedProcess(rendered, 0, "", "")
+            if rendered == ["plutil", "-lint", str(layout.service_file)]:
+                return subprocess.CompletedProcess(rendered, 0, "", "")
+            raise AssertionError(f"unexpected command: {rendered}")
+
+        return fake_runner, state, calls
 
     def _release(self, layout: installer.Layout, digest: str) -> installer.Release:
         root = layout.releases / digest

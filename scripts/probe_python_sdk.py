@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import subprocess
 import sys
 import tempfile
 import time
@@ -99,6 +100,7 @@ def _matching_processes(
     marker: str,
     *,
     proc_root: Path = Path("/proc"),
+    platform_name: str | None = None,
 ) -> list[int]:
     """Return processes whose exact ``argv[0]`` is the probe marker.
 
@@ -107,6 +109,10 @@ def _matching_processes(
     wrapper-only false positive and can interrupt the Turn before the marker
     process has ever existed.
     """
+
+    selected_platform = sys.platform if platform_name is None else platform_name
+    if not proc_root.exists() and selected_platform == "darwin":
+        return _matching_processes_from_ps(marker)
 
     matches: list[int] = []
     marker_bytes = marker.encode()
@@ -119,6 +125,26 @@ def _matching_processes(
             continue
         if argv0 == marker_bytes:
             matches.append(int(entry.name))
+    return sorted(matches)
+
+
+def _matching_processes_from_ps(marker: str) -> list[int]:
+    """Darwin fallback for exact probe argv[0] matching without ``/proc``."""
+
+    result = subprocess.run(
+        ["/bin/ps", "-ww", "-axo", "pid=,command="],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    matches: list[int] = []
+    for raw_line in result.stdout.splitlines():
+        fields = raw_line.strip().split(maxsplit=1)
+        if len(fields) != 2 or not fields[0].isdigit():
+            continue
+        argv0 = fields[1].split(maxsplit=1)[0]
+        if argv0 == marker:
+            matches.append(int(fields[0]))
     return sorted(matches)
 
 
@@ -573,7 +599,7 @@ async def _side_live(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
 
         parent_running = await parent.turn(
             "Use the terminal to run exactly this command and wait for it: "
-            f"/usr/bin/bash -lc 'exec -a {parent_marker} /bin/sleep 30'. "
+            f"/bin/bash -lc 'exec -a {parent_marker} /bin/sleep 30'. "
             "When it exits, reply exactly: SIDE-PARENT-RUNNING"
         )
         parent_task = asyncio.create_task(
@@ -686,7 +712,7 @@ async def _steer(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
     thread = await codex.thread_start(cwd=str(cwd))
     handle = await thread.turn(
         "Use the terminal to run exactly this command and wait for it: "
-        f"/usr/bin/bash -lc 'exec -a {marker} /bin/sleep 8'. "
+        f"/bin/bash -lc 'exec -a {marker} /bin/sleep 8'. "
         "When it exits, reply exactly: PROBE-ORIGINAL"
     )
     task = asyncio.create_task(_public_terminal_turn(thread, handle.id))
@@ -1228,12 +1254,12 @@ async def _concurrency(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
     handles = await asyncio.gather(
         threads[0].turn(
             "Use the terminal to run exactly this command and wait for it: "
-            f"/usr/bin/bash -lc 'exec -a {markers[0]} /bin/sleep 30'. "
+            f"/bin/bash -lc 'exec -a {markers[0]} /bin/sleep 30'. "
             "Then reply exactly: PROBE-A"
         ),
         threads[1].turn(
             "Use the terminal to run exactly this command and wait for it: "
-            f"/usr/bin/bash -lc 'exec -a {markers[1]} /bin/sleep 30'. "
+            f"/bin/bash -lc 'exec -a {markers[1]} /bin/sleep 30'. "
             "Then reply exactly: PROBE-B"
         ),
     )
@@ -1296,7 +1322,7 @@ async def _interrupt_orphan(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
     thread = await codex.thread_start(cwd=str(cwd))
     handle = await thread.turn(
         "Use the terminal to run exactly this command and wait for it: "
-        f"/usr/bin/bash -lc 'exec -a {marker} /bin/sleep 15'. "
+        f"/bin/bash -lc 'exec -a {marker} /bin/sleep 15'. "
         "After it exits, reply exactly: ORPHAN-PROBE-DONE"
     )
     task = asyncio.create_task(_public_terminal_turn(thread, handle.id))
@@ -1542,7 +1568,7 @@ async def _skills_live(codex: AsyncCodex, parent: Path) -> dict[str, Any]:
         steer_marker = f"netizen-skill-steer-{time.time_ns()}"
         steer_handle = await thread.turn(
             "Use the terminal to run exactly this command and wait for it: "
-            f"/usr/bin/bash -lc 'exec -a {steer_marker} /bin/sleep 8'. "
+            f"/bin/bash -lc 'exec -a {steer_marker} /bin/sleep 8'. "
             "Then reply exactly: SKILL-STEER-ORIGINAL"
         )
         steer_task = asyncio.create_task(

@@ -385,6 +385,18 @@ release 中固定的官方 OpenAPI SDK 只用 device flow 创建/更新 Bot 应�
 Database、Codex state、环境或日志写入凭据。无 TTY、已有完整凭据和服务运行时都不会进入
 该流程；手工凭据路径继续等价可用。
 
+部署保持一份 release/配置/凭据/数据库/Skill/activation-intent 事务；平台 Service Backend
+只负责定义、manager 状态、停止确认、发布、启停、status 与 ready 等待。Linux 使用 systemd
+user unit；macOS 14+ Apple Silicon 使用当前 GUI 登录用户的 LaunchAgent，不增加
+LaunchDaemon 或第二个运行时。macOS 只使用 `launchctl print` 退出码判断 loaded，不解析文本。
+launcher 在稳定的 `state/service.lifetime.lock` inode 上持有独占锁，并只为最终 exec 短暂
+开放 FD 继承；主进程在导入 SDK 边界前恢复 CLOEXEC。候选回滚只有同时确认 manager target
+已卸载且锁已释放时才能恢复 Channel Database/Skill。loaded 与 ready 分离：installer 和
+launcher 清理旧 marker，主进程仅在 Feishu background、Runtime 与 admission 全部开启后原子
+发布 `0600 state/service.ready`，正常退出尽力删除。
+macOS 应用入口通过精确锁定的 `truststore` 使用 Security.framework 的系统钥匙串验证 TLS；
+它不导出证书、不生成 CA bundle，也不增加 Netizen 环境配置。Linux TLS 行为保持不变。
+
 文件数据库使用 WAL、`synchronous=FULL` 和有界 writer busy timeout。Admin 的 keyset
 分页查询只通过 Store-owned `query_only` connection 与单 worker executor 执行，SQL 有
 progress deadline 和提交前容量门禁；读事务不跨 `await`，也不会让 Web 自己成为第二个
@@ -647,7 +659,8 @@ interrupt cleanup、CLI resume 与 Linux compatibility；高层 surface 出现�
 - Admin Web 默认开启；credential 非法、静态资源缺失或 bind 失败会使整个服务启动失败，
   不会只保留飞书入口。shutdown 先关闭 Admin listener、Feishu admission 和 Runtime
   admission，再在一个 60 秒 monotonic absolute budget 内排空 handlers/blocking I/O，最后
-  interrupt/清理 Runtime、Codex 和 Store；systemd 以 75 秒外层 deadline 兜底。
+  interrupt/清理 Runtime、Codex 和 Store；systemd `TimeoutStopSec` 与 LaunchAgent
+  `ExitTimeOut` 都以 75 秒外层 deadline 兜底，安装器再以 90 秒完成精确退出确认。
 - Admin mutation 发出后遇到 response loss/cancellation 不自动重试。一次性 grant 已消费，
   页面只能刷新对账；若 native 结果未知，沿用相同的 lifecycle/service admission fail-closed
   语义。结构化日志不含 credential、cookie/token、cwd、name/preview 或 request body。

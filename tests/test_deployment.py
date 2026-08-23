@@ -51,13 +51,36 @@ class DeploymentAssetsTest(unittest.TestCase):
         for expected in (
             "Python 3.11+",
             "macOS 和 Linux",
-            "只支持 Linux + systemd",
+            "macOS LaunchAgent",
+            "Linux systemd",
             "`make check`",
             "使用 fake App Server",
             "codex login status",
             "codex exec --skip-git-repo-check",
         ):
             self.assertIn(expected, local_development)
+
+    def test_macos_launchagent_contract_is_public_and_platform_bounded(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+        adr = (
+            ROOT / "docs/adr/0034-support-macos-with-a-user-launchagent.md"
+        ).read_text(encoding="utf-8")
+
+        for document in (readme, deployment, adr):
+            self.assertIn("LaunchAgent", document)
+            self.assertIn("lifetime", document)
+            self.assertIn("ready", document)
+            self.assertIn("LaunchDaemon", document)
+        self.assertIn("macOS 14+", readme)
+        self.assertIn("Apple Silicon", deployment)
+        self.assertIn("退出登录", readme)
+        self.assertIn("下次登录", deployment)
+        self.assertIn("不解析", deployment)
+        self.assertIn("launchctl print", deployment)
+        self.assertIn("service.lifetime.lock", deployment)
+        self.assertIn("gtimeout", deployment)
+        self.assertIn("brew install coreutils", deployment)
 
     def test_installed_release_probe_detects_stale_and_shadowed_packages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -329,6 +352,8 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("adminWeb:", config)
         self.assertIn("host: 0.0.0.0", config)
         self.assertIn("port: 8787", config)
+        self.assertIn("Managed Linux and macOS", config)
+        self.assertIn("FEISHU_APP_SECRET_FILE", config)
         self.assertNotIn("allowedUsers:", config)
         self.assertNotIn("allowedChats:", config)
         self.assertNotIn("operators:", config)

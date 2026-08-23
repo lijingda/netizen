@@ -49,6 +49,9 @@ design detail, compatibility findings, and procedures in their source docs.
   `~/.netizen` product root and its preserved-versus-deletable lifecycle boundary.
   [ADR 0033](docs/adr/0033-use-official-sdk-for-feishu-app-onboarding.md)
   defines the Lark-CLI-free, official-SDK Feishu/Lark Bot app onboarding flow.
+  [ADR 0034](docs/adr/0034-support-macos-with-a-user-launchagent.md) adds the
+  macOS user LaunchAgent while preserving the shared activation/rollback
+  transaction and exact lifetime-lock/ready boundary.
   Superseded ADRs are historical context.
 - [docs/deployment.md](docs/deployment.md): setup, verification, and release
   procedures.
@@ -63,13 +66,22 @@ design detail, compatibility findings, and procedures in their source docs.
   `docs/deployment.md`; never ask the user to paste an App Secret into chat.
 - The product root is fixed at `~/.netizen` below the effective user's account
   home; do not use XDG overrides as profiles or as a second Netizen instance.
-  The systemd user unit remains in its native discovery path and `CODEX_HOME`
-  remains the native Codex state override.
+  The Linux systemd user unit and macOS LaunchAgent plist remain in their
+  native discovery paths; `CODEX_HOME` remains the native Codex state override.
 - The user service reloads the account's exported interactive-login-shell
   environment on every start through the bounded launcher in ADR 0022. ADR
   0023's sole service-owned Codex override disables tool login shells so they
   cannot replace that environment. Do not add a persistent Netizen environment
   file, install-time PATH snapshot, TTY emulation, or copied variable policy.
+- Keep one shared release/configuration/credential/database/Skill activation
+  transaction across platforms. Service backends own only service definition,
+  manager state, stop confirmation, publish/start/status, and ready waiting.
+  macOS support is a current-user LaunchAgent only: do not add a LaunchDaemon,
+  root helper, second environment/config layer, or parsing of `launchctl print`
+  text. Database/Skill rollback requires both an unloaded manager target and a
+  released stable lifetime lock; the inherited lock FD must be CLOEXEC before
+  any Codex child can start. Loaded is never a substitute for the private ready
+  marker written after admission opens.
 - The repository defines no default remote host, SSH alias, account, or
   deployment path. A maintainer may keep those checkout-specific values in the
   ignored root file `LOCAL_ENVIRONMENT.md`; read it when present, never copy

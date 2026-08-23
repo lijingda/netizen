@@ -192,9 +192,12 @@ Codex Skill。用户在飞书中自然语言询问 Netizen 用法、命令、会
 
 ## 安装、升级与启停
 
-第一版支持 Linux + systemd，macOS adapter 后续补充。克隆、同步或直接在云主机编辑本
-仓库后，以准备运行服务的当前用户执行。真人在终端中安装时使用第一条命令；Agent、CI
-或后台 shell 首次运行时使用第二条：
+正式部署支持 Linux + systemd user manager，以及 macOS 14+ Apple Silicon 当前登录用户的
+LaunchAgent。两种平台都以准备运行服务的当前用户执行，不使用 sudo；macOS 的 LaunchAgent
+会在退出登录时停止、下次登录自动启动，不提供 logout 后常驻的 LaunchDaemon。代码不主动拒绝
+Intel Mac，但在真实门禁完成前不把它列入正式支持范围。真人在终端中安装时使用第一条
+命令；Agent、CI 或后台 shell 首次运行时使用第二条。macOS 服务使用系统钥匙串验证 TLS，
+不要求 Netizen 维护第二份 CA bundle：
 
 ```bash
 # 真人交互安装
@@ -216,7 +219,8 @@ Agent 才应代用户承载交互浏览器初始化；具体交接流程见
 ```text
 ~/.netizen/                                  # 配置、凭据、状态、缓存与 releases
 ${CODEX_HOME:-~/.codex}/                     # Codex 登录、历史、配置与 Skills
-~/.config/systemd/user/netizen.service       # systemd user unit
+~/.config/systemd/user/netizen.service       # Linux: systemd user unit
+~/Library/LaunchAgents/io.github.lijingda.netizen.plist  # macOS: LaunchAgent
 ```
 
 Netizen 产品根始终是当前账号数据库中 home 下的 `~/.netizen`，明确忽略 `XDG_DATA_HOME`、
@@ -225,7 +229,7 @@ Netizen 产品根始终是当前账号数据库中 home 下的 `~/.netizen`，�
 生效。源码 checkout 可以在任意非受管目录，本机或云上修改后仍用同一个 `install.sh`
 部署；同一 Unix 用户不支持并行的第二套 Netizen。需要隔离验证安装器时使用临时用户、
 容器或 VM。`releases` 和 `cache` 必须为空或带安装器 ownership marker；非空的无标记目录
-不会被认领或卸载。若 systemd user manager 自身配置了另一套 `XDG_CONFIG_HOME`，且其
+不会被认领或卸载。Linux 上若 systemd user manager 自身配置了另一套 `XDG_CONFIG_HOME`，且其
 `SYSTEMD_UNIT_PATH` 不包含固定 unit 目录，安装器会明确拒绝而不是生成无法加载的 unit。
 
 首次交互安装发现 Feishu/Lark 凭据不完整时，默认显示官方浏览器链接和终端二维码：确认后
@@ -243,12 +247,15 @@ YAML、unit 或日志。用户确认后仍需按租户策略完成管理员审�
 后再次执行 `./install.sh`。会主动分配伪终端的 Agent 应先用 `./install.sh </dev/null`
 获取这些路径。不要把 Secret 放进命令参数、仓库或 YAML。
 
-systemd 本身不读取 `.bashrc` 或 `.profile`。Netizen 的短生命周期 launcher 会在每次
+systemd 和 launchd 本身都不会读取 `.bashrc`、`.profile`，也不会替 Netizen 取得账号
+终端里的完整工具环境。短生命周期
+launcher 会在每次
 服务启动时运行当前账号的无 TTY interactive login shell，读取其完整导出环境，再用
 `exec` 探针替换 shell（不会触发 `.bash_logout`/`.zlogout`），随后原位启动 release
 Python。因此 profile 中的 NVM PATH、代理、CA 和其他新工具在
 `./service.sh restart` 后自动生效，不需要维护第二份变量清单；profile 输出和环境值既不
-落盘也不写入 journal。unit 只覆盖 `HOME`、`CODEX_HOME`、配置/Secret 路径和 Python
+落盘，也不写入 journal 或 launchd stderr。服务定义只覆盖 `HOME`、`CODEX_HOME`、
+配置/Secret 路径和 Python
 runtime 等 Netizen 自己拥有的启动值；launcher 和服务解释器使用 `-E -B -u`，避免
 profile 中的 `PYTHON*` 变量改变受管 runtime。Codex 工具子进程仍使用同一份原生
 `~/.codex/config.toml` shell environment policy；Netizen 只固定公开的
@@ -265,12 +272,15 @@ cgroup 之外额外执行一次任意 profile。
 安装器在候选 release 中新建 venv，运行安全的本地 release gates，验证配置、固定 Codex
 CLI 登录和已安装包一致性后才切换。profile 只在真实 user service 的 cgroup 内执行；首次
 安装自动 enable 并启动，升级前服务若在运行则
-切换后启动并等待 ready，若已停止则保持停止，已有 release 的 enabled/disabled 状态也
-保持不变。候选启动前会在旧服务停止后预检配置的 Admin Web address，再快照 Channel SQLite；
-unit、release、数据库或全局用户指南 Skill 发布失败时会恢复旧版本。systemd user
-service 要在注销后继续运行需要 linger；尚未启用时，交互安装可能
+切换后启动并等待 ready，若已停止则保持当前会话停止。Linux 保持原 enabled/disabled
+意图；macOS 保证 plist 已安装并清除 sticky disabled 状态，使它在下次登录自动启动。
+候选启动前会在旧服务停止后预检配置的 Admin Web address，再快照 Channel SQLite；
+服务定义、release、数据库或全局用户指南 Skill 发布失败时会恢复旧版本。停止确认同时
+要求服务管理器已卸载目标且主进程 lifetime lock 已释放，未确认前不会恢复数据库或 Skill。
+Linux systemd user service 要在注销后继续运行需要 linger；尚未启用时，交互安装可能
 请求一次 `sudo loginctl enable-linger <当前用户>` 授权，无 TTY 时会返回可单独执行的命令。
-从旧版 system-level unit 迁移也遵循相同的一次性授权规则。
+从旧版 system-level unit 迁移也遵循相同的一次性授权规则。macOS 不配置 linger，
+LaunchAgent 只属于当前 GUI 登录会话。
 切换前写入的 activation intent 会记录原服务应当 active/enabled 的状态；即使安装进程在
 停止旧服务或发布 `current` 后被 `SIGKILL`，再次执行 `./install.sh` 也会继续恢复该意图，
 不会把异常中断误判成用户主动停服。
@@ -284,9 +294,10 @@ service 要在注销后继续运行需要 linger；尚未启用时，交互安�
 ./service.sh status
 ```
 
-`start` 在 unit 已经 active 时幂等返回；否则它和 `restart` 都会等待最多 45 秒，只有
-journal 出现服务 ready 且 unit 保持 active 才返回成功。profile 超时、shell 失败或主服务
-未就绪会直接返回非零；`stop` 与 `status` 不做这段 ready 等待。
+`start` 在服务已经 loaded 且 ready 时幂等返回；loaded 但尚未 ready 时只做有界等待，不会
+另起第二个进程。它和 `restart` 最多等待 45 秒，只有服务管理器仍保持 loaded 且主进程在
+admission 开放后发布了私有 ready marker 才返回成功。profile 超时、shell 失败或主服务未
+就绪会直接返回非零；macOS `status` 会显示 installed、loaded、ready 与两个日志路径。
 
 仓库删除后仍可从已安装 release 调用
 `$HOME/.netizen/current/source/service.sh`。升级只需在新的或已更新
@@ -296,15 +307,17 @@ journal 出现服务 ready 且 unit 保持 active 才返回成功。profile 超�
 ./uninstall.sh
 ```
 
-它停止并移除 user unit、程序 release、安装缓存和受管用户指南 Skill；保留配置、两个 Secret、
-Channel SQLite、Project 目录、其他 Skills 以及全部 Codex 原生历史。它不会关闭 linger，
-因为同一用户的其他 user service 也可能依赖它。完整发布与迁移细节见
+它停止并移除 systemd user unit 或 LaunchAgent plist、程序 release、安装缓存和受管用户
+指南 Skill；保留配置、两个 Secret、Channel SQLite、Project 目录、其他 Skills 以及全部
+Codex 原生历史。Linux 上不会关闭 linger，因为同一用户的其他 user service 也可能依赖它。
+完整发布与迁移细节见
 [部署手册](docs/deployment.md)。
 
 ## 本地开发
 
-源码开发需要 Python 3.11+ 和 `venv`。macOS 和 Linux 都可以运行下面的源码开发与安全
-本地门禁；`install.sh`、`service.sh` 和正式服务部署只支持 Linux + systemd。`make check`
+源码开发需要 Python 3.11+ 和 `venv`。macOS 和 Linux 都可以运行下面的源码开发、安全
+本地门禁以及相同的安装/服务命令；正式服务分别使用 macOS LaunchAgent 与 Linux systemd
+user manager。`make check`
 使用 fake App Server，不创建真实 Codex Thread，也不要求 Codex 登录；启动 Netizen、执行
 真实 Turn 或运行 live probe 前，先确认当前账号的 Codex 登录有效：
 
@@ -323,7 +336,7 @@ chmod 600 LOCAL_ENVIRONMENT.md
 
 该文件被 Git 忽略且不会进入安装 release；不得写入 raw Secret。它只是可选的维护者
 运维档案，不存在时仍按下面的通用步骤开发，并按
-[部署手册](docs/deployment.md)选择自己的 Linux 目标。
+[部署手册](docs/deployment.md)选择自己的 Linux 或 macOS 目标。
 
 ```bash
 python3 -m venv .venv
@@ -343,7 +356,7 @@ make check
 `im:message.reactions:write_only`，或已具备覆盖该能力的 `im:message`；权限变更必须
 随应用版本发布。本轮文件上传与话题回复还需 `im:resource` 和
 `im:message:send_as_bot`；任一权限缺失时文件按钮必须显式失败，不能掉到主聊天。
-开发可用 `FEISHU_APP_SECRET`；Linux 服务使用 `FEISHU_APP_SECRET_FILE` 指向 0600 的纯
+开发可用 `FEISHU_APP_SECRET`；两种受管服务都使用 `FEISHU_APP_SECRET_FILE` 指向 0600 的纯
 Secret 文件。Admin Web 不接受 raw secret 环境变量：启用时还必须设置绝对的
 `NETIZEN_ADMIN_SECRET_FILE`；若本地只调试飞书入口，可在 YAML 中显式设置
 `adminWeb.enabled: false`。
@@ -359,7 +372,7 @@ export NETIZEN_ADMIN_SECRET_FILE=/absolute/path/admin-web-secret
 
 ## 发布验证状态
 
-发布前必须确认目标 Linux 的 Codex 登录有效。现役版本的真实探针已确认 SDK 创建的
+发布前必须确认目标部署账号的 Codex 登录有效。现役版本的真实探针已确认 SDK 创建的
 原生 Thread 可被全局 CLI 按相同 ID 接续，`steer()` 能改变当前 Turn 结果，两个
 Thread 也能同时执行。
 
@@ -479,6 +492,12 @@ boundary inject Adapter 的移除边界。
 [ADR 0032](docs/adr/0032-use-single-user-product-root.md) 固定 `~/.netizen` 单一产品根，
 并在根内分隔持久配置/状态与可删除的 release/cache 生命周期。
 
+[ADR 0033](docs/adr/0033-use-official-sdk-for-feishu-app-onboarding.md) 固定不依赖 Lark CLI
+的官方 SDK 浏览器初始化、Agent 非交互交接和 Secret 边界。
+
+[ADR 0034](docs/adr/0034-support-macos-with-a-user-launchagent.md) 固定 macOS LaunchAgent、
+窄服务后端、lifetime lock 与 ready marker 的停止/回滚安全契约。
+
 P2P、群聊、同群多话题、Netizen 设置卡片、服务重启恢复和全局 CLI exact-ID resume
 的 Pilot 验收仍有效。另一名真实群成员点击设置卡片仍是非阻塞手工复验项。背景、
 边界和完整证据见
@@ -496,6 +515,7 @@ P2P、群聊、同群多话题、Netizen 设置卡片、服务重启恢复和全
 [ADR 0021](docs/adr/0021-support-multi-turn-ephemeral-side-topics.md)、
 [ADR 0022](docs/adr/0022-load-account-shell-environment-at-service-start.md)、
 [ADR 0028](docs/adr/0028-release-idle-persistent-thread-subscriptions.md)、
+[ADR 0034](docs/adr/0034-support-macos-with-a-user-launchagent.md)、
 [部署与验收](docs/deployment.md)、
 [官方 App Server API](https://developers.openai.com/codex/app-server/)。
 

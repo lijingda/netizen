@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -202,6 +203,41 @@ class ProcessProbeTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual([202], matches)
+
+    def test_matching_processes_uses_exact_darwin_ps_argv0(self) -> None:
+        marker = "netizen-exact-marker"
+        result = subprocess.CompletedProcess(
+            ["/bin/ps"],
+            0,
+            """
+              101 bwrap -- exec -a netizen-exact-marker /bin/sleep 30
+              202 netizen-exact-marker 30
+              303 netizen-exact-marker-wrapper 30
+              404 /bin/sleep netizen-exact-marker
+            """,
+            "",
+        )
+        with (
+            tempfile.TemporaryDirectory() as raw_root,
+            patch.object(
+                probe_python_sdk.subprocess,
+                "run",
+                return_value=result,
+            ) as run,
+        ):
+            matches = probe_python_sdk._matching_processes(
+                marker,
+                proc_root=Path(raw_root) / "missing-proc",
+                platform_name="darwin",
+            )
+
+        self.assertEqual([202], matches)
+        run.assert_called_once_with(
+            ["/bin/ps", "-ww", "-axo", "pid=,command="],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
     async def test_process_exit_classification_has_true_and_false_results(
         self,
