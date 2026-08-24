@@ -513,8 +513,18 @@ Projects、Sessions、Side Topics 都使用服务端 keyset cursor。Binding 查
 索引中过滤 Project、Scope kind、chat/topic/Binding/native ID、Lazy/materialized/current 和
 时间，只为当前页读取 native title/preview/catalog 与 best-effort chat label；archived 条件或
 Project archived aggregate 需要完整、有 deadline/页数/条目上限的公开 catalog，失败时整次
-失败。Runtime polling 只接收当前页最多 50 个完整 ID，读取进程内 immutable snapshot，既不
-查 native catalog，也不签发 action token。
+失败。Sessions 每页只接受 10/20/50/100，默认 20；浏览器用 cursor 栈提供前后翻页，不计算
+总数或支持随机页码。Runtime snapshot primitive 仍只接受最多 50 个完整 ID；100 行 Sessions
+首屏由 Web adapter 分两批读取，浏览器五秒 polling 同样分片后合并，既不查 native catalog，
+也不签发 action token。
+
+chat label 只解析当前页去重后的 `chat_id`。进程级 resolver 使用最多 4096 项的 LRU：成功
+结果保留 10 分钟，失败结果保留 30 秒，同 ID 并发请求合并且飞书查询并发最多 10；缓存不写
+SQLite，也不预取其他页。群聊和话题群使用公开 chat info 的 `name`/`chat_mode`，P2P 再使用
+公开 chat-members 取得唯一真人名称；任一步失败只把该行降级为 ID。UI 分开显示 Scope 的
+“消息/话题”、chat mode 的“单聊/群聊/话题群”、Binding 的“当前/非当前”以及 native
+archived/missing/Lazy 与运行态。Chat 名称使用飞书 AppLink；话题只打开所在会话，不猜测
+未公开的 exact-topic URL。名称与 AppLink 都是当次管理展示事实，不成为 Channel 持久状态。
 
 所有 Web mutation 进入 `InstanceManagementService`，与飞书 controls 共用唯一
 `ScopeCoordinator` 和 Runtime exact primitive。每个列表 action 都携带 session-bound、短期、

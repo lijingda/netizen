@@ -6,9 +6,10 @@ import asyncio
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, NoReturn, Protocol
+from typing import Any, NoReturn
 
 from .blocking_io import BoundedBlockingIOExecutor
+from .chat_labels import ChatLabel, ChatLabelProvider, ChatLabelResolver
 from .coordination import ScopeCoordinator
 from ..bindings import (
     BindingCursor,
@@ -91,17 +92,6 @@ class NativeCatalogInconsistent(ManagementError):
 
 class RuntimeStateChanged(ManagementError):
     pass
-
-
-class ChatLabelProvider(Protocol):
-    async def get_chat_info(self, chat_id: str) -> Any: ...
-
-
-@dataclass(frozen=True, slots=True)
-class ChatLabel:
-    chat_id: str
-    display_name: str
-    chat_type: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,7 +380,9 @@ class InstanceManagementService:
         self._projects = projects
         self._runtime = runtime
         self._scope_coordinator = scope_coordinator
-        self._chat_labels = chat_labels
+        self._chat_labels = (
+            ChatLabelResolver(chat_labels) if chat_labels is not None else None
+        )
         self._blocking_io = blocking_io or BoundedBlockingIOExecutor(
             max_workers=1,
             capacity=2,
@@ -401,6 +393,8 @@ class InstanceManagementService:
         return self._scope_coordinator
 
     async def close(self, *, deadline: float | None = None) -> None:
+        if self._chat_labels is not None:
+            await self._chat_labels.aclose()
         await self._blocking_io.aclose(deadline=deadline)
 
     async def register_project(
@@ -469,11 +463,15 @@ class InstanceManagementService:
         *,
         query: SessionQuery = SessionQuery(),
         cursor: BindingCursor | None = None,
-        limit: int = 25,
+        limit: int = 20,
         deadline: float,
     ) -> SessionInventoryPage:
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
-            raise ValueError("page size must be between 1 and 50")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 100
+        ):
+            raise ValueError("page size must be between 1 and 100")
         if query.native_state is None:
             page = await self._bindings.query_bindings(
                 query=query.local,
@@ -1079,43 +1077,13 @@ class InstanceManagementService:
         deadline: float,
     ) -> dict[str, ChatLabel]:
         unique = tuple(dict.fromkeys(chat_ids))
-        labels = {
-            chat_id: ChatLabel(chat_id, chat_id, None) for chat_id in unique
-        }
-        provider = self._chat_labels
-        if provider is None or not unique:
-            return labels
-
-        async def fetch(chat_id: str) -> tuple[str, Any]:
-            try:
-                return chat_id, await provider.get_chat_info(chat_id)
-            except Exception:
-                return chat_id, None
-
-        tasks = tuple(asyncio.create_task(fetch(chat_id)) for chat_id in unique)
-        timeout = max(
-            0.0,
-            min(0.5, deadline - asyncio.get_running_loop().time()),
-        )
-        done, pending = await asyncio.wait(tasks, timeout=timeout)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        for task in done:
-            chat_id, info = task.result()
-            if info is None:
-                continue
-            raw_name = getattr(info, "name", None)
-            name = raw_name.strip() if isinstance(raw_name, str) else ""
-            raw_type = getattr(info, "chat_type", None)
-            chat_type = str(raw_type) if raw_type else None
-            labels[chat_id] = ChatLabel(
-                chat_id=chat_id,
-                display_name=name or chat_id,
-                chat_type=chat_type,
-            )
-        return labels
+        resolver = self._chat_labels
+        if resolver is None:
+            return {
+                chat_id: ChatLabelResolver.fallback(chat_id)
+                for chat_id in unique
+            }
+        return await resolver.resolve_many(unique, deadline=deadline)
 
     @staticmethod
     def _require_disjoint_native_catalogs(

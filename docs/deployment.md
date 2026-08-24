@@ -703,7 +703,11 @@ cleanup 和 exact-ID resume probes；fake launchctl/systemctl 单测不能替代
 重定向到 `/login`（不返回 HTML 或状态），未知 route 和 API 必须返回 401，只有登录页复用的
 无状态 CSS 可匿名读取，`/health/ready` 只返回无细节状态；
 使用独立 credential 登录后，检查三个一级
-页面、筛选、分页和五秒 runtime polling。依次验收 Project register/create/enable/disable，
+页面、筛选、分页和五秒 runtime polling。Sessions 分别选择 10/20/50/100，确认前后翻页、
+页码与当前页条数正确；在 P2P、普通群和话题群 Binding 上确认显示真人/群名称与正确类型，
+重复刷新命中缓存，名称链接能打开对应飞书会话，话题行只承诺打开所在会话。100 条页面的
+首屏和 polling 都不得向单次 runtime snapshot 请求发送超过 50 个 ID。依次验收 Project
+register/create/enable/disable，
 两个 Scope 中 active/inactive、Lazy/materialized/archived Binding 的 create/activate/
 configure/rename/archive/两种 unarchive/delete-lazy/Stop/Release，以及一个 open Side 的 exact
 Close。双击同一 action 应返回 stale/consumed；与飞书并发操作同一目标时只允许符合 exact

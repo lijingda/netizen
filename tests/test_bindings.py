@@ -1031,8 +1031,10 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
             {item.binding.id for item in current.items},
             {first.id, third.id},
         )
+        hundred = await self.store.query_bindings(limit=100)
+        self.assertEqual(len(hundred.items), 3)
         with self.assertRaises(ValueError):
-            await self.store.query_bindings(limit=51)
+            await self.store.query_bindings(limit=101)
         with self.assertRaises(ValueError):
             await self.store.query_bindings(query=BindingQuery(chat_id=""))
 
@@ -1108,6 +1110,10 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
             "2030-01-01T00:00:00+00:00",
         )
         self.assertIsNone(inactive.activated_at)
+        with self.assertRaises(ValueError):
+            await self.store.query_side_topics(limit=51)
+        with self.assertRaises(ValueError):
+            await self.store.query_project_aggregates(limit=51)
         self.assertEqual(aggregates.next_cursor, "alpha")
         beta_page = await self.store.query_project_aggregates(
             cursor=aggregates.next_cursor,

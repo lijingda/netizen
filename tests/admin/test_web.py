@@ -12,7 +12,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
-from netizen.admin.web import AdminWebRunner, accepted_authorities
+from netizen.admin.web import (
+    AdminWebError,
+    AdminWebRunner,
+    _batches,
+    _chat_open_url,
+    _session_page_size,
+    _session_state,
+    accepted_authorities,
+)
 from netizen.bindings import (
     BindingInventoryRecord,
     BindingTurnSettings,
@@ -63,6 +71,9 @@ from netizen.projects import Project
 class FakeManagement:
     def __init__(self, root: Path) -> None:
         self.calls: list[tuple[str, object]] = []
+        self.query_session_calls: list[dict[str, object]] = []
+        self.snapshot_batches: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+        self.session_items_override: tuple[SessionInventoryItem, ...] | None = None
         self.set_enabled_entered: asyncio.Event | None = None
         self.set_enabled_release: asyncio.Event | None = None
         self.project = Project("test", root, True, 1)
@@ -196,7 +207,17 @@ class FakeManagement:
         return ProjectInventoryPage((ProjectInventoryItem(aggregate, 1),), None)
 
     async def query_sessions(self, **_kwargs):
-        label = ChatLabel("oc_chat", "Demo Chat", "p2p")
+        self.query_session_calls.append(dict(_kwargs))
+        if self.session_items_override is not None:
+            return SessionInventoryPage(self.session_items_override, None)
+        label = ChatLabel(
+            "oc_chat",
+            "Demo Chat",
+            "p2p",
+            True,
+            "ou_partner",
+            "private",
+        )
         records = (
             SessionInventoryItem(
                 BindingInventoryRecord(self.lazy, self.scope), None, label
@@ -223,12 +244,20 @@ class FakeManagement:
     async def query_side_topics(self, **_kwargs):
         item = SideTopicInventoryItem(
             SideTopicInventoryRecord(self.side_record, "test"),
-            ChatLabel("oc_chat", "Demo Chat", "p2p"),
+            ChatLabel(
+                "oc_chat",
+                "Demo Chat",
+                "p2p",
+                True,
+                "ou_partner",
+                "private",
+            ),
             self.side_runtime,
         )
         return SideTopicInventoryPage((item,), None)
 
     def runtime_snapshots(self, *, binding_ids=(), side_ids=()):
+        self.snapshot_batches.append((tuple(binding_ids), tuple(side_ids)))
         return RuntimeSnapshots(
             tuple(self.runtime_by_id[item] for item in binding_ids),
             tuple(self.side_runtime for item in side_ids if item == "side-1"),
@@ -298,6 +327,76 @@ class FakeManagement:
         self.calls.append(("close-side", values))
         closed = replace(self.side_record, state=SideTopicState.CLOSED)
         return ClosedSide(closed, None)
+
+
+class AdminSessionPresentationTest(unittest.TestCase):
+    def test_sessions_page_sizes_are_exact_and_default_to_twenty(self) -> None:
+        self.assertEqual(_session_page_size({}), 20)
+        for value in (10, 20, 50, 100):
+            self.assertEqual(_session_page_size({"pageSize": [str(value)]}), value)
+        for value in (1, 25, 101):
+            with self.subTest(value=value), self.assertRaises(AdminWebError):
+                _session_page_size({"pageSize": [str(value)]})
+
+    def test_runtime_batches_preserve_order_and_never_exceed_fifty(self) -> None:
+        ids = tuple(f"binding-{index}" for index in range(100))
+        batches = _batches(ids, 50)
+        self.assertEqual(tuple(map(len, batches)), (50, 50))
+        self.assertEqual(tuple(item for batch in batches for item in batch), ids)
+
+    def test_session_state_and_chat_link_are_derived_from_raw_facts(self) -> None:
+        scope_key = "cli_test:direct:oc_chat"
+        lazy = ThreadBinding(
+            "binding-lazy",
+            scope_key,
+            "test",
+            None,
+            None,
+            1,
+            "admin:web",
+            False,
+            "2030-01-01",
+            None,
+        )
+        current = replace(
+            lazy,
+            id="binding-current",
+            native_thread_id="native-current",
+            active=True,
+        )
+        inactive = replace(current, id="binding-inactive", active=False)
+
+        self.assertEqual(_session_state(lazy, None), "lazy-non-current")
+        self.assertEqual(
+            _session_state(replace(lazy, active=True), None),
+            "lazy-current",
+        )
+        self.assertEqual(
+            _session_state(current, NativeThreadCatalogState.ACTIVE),
+            "current",
+        )
+        self.assertEqual(
+            _session_state(inactive, NativeThreadCatalogState.ACTIVE),
+            "non-current",
+        )
+        self.assertEqual(
+            _session_state(current, NativeThreadCatalogState.ARCHIVED),
+            "archived",
+        )
+        self.assertEqual(
+            _session_state(current, NativeThreadCatalogState.MISSING),
+            "missing",
+        )
+        self.assertEqual(
+            _chat_open_url(
+                ChatLabel("oc_direct", "Alice", "p2p", True, "ou_alice")
+            ),
+            "https://applink.feishu.cn/client/chat/open?openId=ou_alice",
+        )
+        self.assertEqual(
+            _chat_open_url(ChatLabel("oc_group", "Engineering", "group")),
+            "https://applink.feishu.cn/client/chat/open?openChatId=oc_group",
+        )
 
 
 class AdminWebTest(unittest.IsolatedAsyncioTestCase):
@@ -681,7 +780,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             _fingerprint(
                 "sessions",
                 {
-                    "pageSize": 25,
+                    "pageSize": 20,
                     "local": {
                         "project_alias": "first",
                         "scope_kind": None,
@@ -703,6 +802,99 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 400)
         self.assertEqual(error["code"], "invalid_cursor")
+        status, _headers, error = await self.json_get(
+            f"/api/v1/sessions?project=first&pageSize=50&cursor={cursor}",
+            session,
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(error["code"], "invalid_cursor")
+
+    async def test_sessions_api_exposes_page_size_presentation_and_state(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+
+        status, _headers, page = await self.json_get("/api/v1/sessions", session)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(page["pageSize"], 20)
+        self.assertEqual(self.management.query_session_calls[-1]["limit"], 20)
+        by_id = {item["bindingId"]: item for item in page["items"]}
+        self.assertEqual(by_id["binding-lazy"]["sessionState"], "lazy-non-current")
+        self.assertEqual(by_id["binding-native"]["sessionState"], "current")
+        self.assertEqual(by_id["binding-archived"]["sessionState"], "archived")
+        self.assertEqual(by_id["binding-native"]["sessionType"], "message")
+        self.assertEqual(by_id["binding-native"]["chatMode"], "p2p")
+        self.assertTrue(by_id["binding-native"]["chatLabelResolved"])
+        self.assertEqual(
+            by_id["binding-native"]["chatOpenUrl"],
+            "https://applink.feishu.cn/client/chat/open?openId=ou_partner",
+        )
+
+        status, _headers, page = await self.json_get(
+            "/api/v1/sessions?pageSize=100",
+            session,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(page["pageSize"], 100)
+        self.assertEqual(self.management.query_session_calls[-1]["limit"], 100)
+
+        status, _headers, error = await self.json_get(
+            "/api/v1/sessions?pageSize=25",
+            session,
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(error["code"], "invalid_page_size")
+
+    async def test_hundred_session_page_chunks_initial_runtime_snapshots(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        label = ChatLabel("oc_chat", "Demo Chat", "group")
+        items = []
+        for index in range(100):
+            binding = replace(
+                self.management.native,
+                id=f"binding-{index:03d}",
+                native_thread_id=f"native-{index:03d}",
+                active=False,
+            )
+            items.append(
+                SessionInventoryItem(
+                    BindingInventoryRecord(binding, self.management.scope),
+                    NativeThreadView(
+                        NativeThreadCatalogState.ACTIVE,
+                        NativeThreadMetadata(
+                            binding.native_thread_id,
+                            f"Session {index}",
+                            f"Preview {index}",
+                        ),
+                    ),
+                    label,
+                )
+            )
+            self.management.runtime_by_id[binding.id] = self.management._runtime(
+                binding.id,
+                index,
+            )
+        self.management.session_items_override = tuple(items)
+        self.management.snapshot_batches.clear()
+
+        status, _headers, page = await self.json_get(
+            "/api/v1/sessions?pageSize=100",
+            session,
+        )
+
+        self.assertEqual(status, 200, page)
+        self.assertEqual(len(page["items"]), 100)
+        binding_batches = [
+            binding_ids
+            for binding_ids, side_ids in self.management.snapshot_batches
+            if binding_ids and not side_ids
+        ]
+        self.assertEqual(tuple(map(len, binding_batches)), (50, 50))
+        self.assertEqual(
+            tuple(item for batch in binding_batches for item in batch),
+            tuple(f"binding-{index:03d}" for index in range(100)),
+        )
 
     async def test_forbidden_capabilities_have_no_http_or_management_surface(self) -> None:
         self.runner.open_admission()
@@ -789,6 +981,17 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertEqual(parser.stylesheets, ["/static/admin.css"])
         self.assertFalse(parser.inline_script_text.strip())
         self.assertTrue({"projects", "sessions", "side-topics"} <= parser.ids)
+        self.assertTrue(
+            {
+                "session-page-size",
+                "sessions-previous",
+                "sessions-page",
+                "sessions-next",
+            }
+            <= parser.ids
+        )
+        for option in ('value="10"', 'value="20" selected', 'value="50"', 'value="100"'):
+            self.assertIn(option, html)
         for unsafe in (
             "innerHTML",
             "outerHTML",
@@ -799,6 +1002,11 @@ class AdminStaticAssetsTest(unittest.TestCase):
             self.assertNotIn(unsafe, javascript)
         self.assertIn("textContent", javascript)
         self.assertIn("applyRuntimeSnapshots", javascript)
+        self.assertIn("fetchRuntimeSnapshots", javascript)
+        self.assertIn("chunkValues(bindingIds)", javascript)
+        self.assertIn("resetSessionPagination", javascript)
+        self.assertIn("sessionLocationCell", javascript)
+        self.assertIn('link.rel = "noopener noreferrer"', javascript)
         self.assertIn("await refresh(state.tab);", javascript)
         self.assertIn('state.tab === "sessions"', javascript)
         self.assertIn('state.tab === "side-topics"', javascript)

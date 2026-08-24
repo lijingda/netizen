@@ -18,7 +18,7 @@ from enum import Enum
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, TypeVar
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from .auth import (
     ActionCsrfRejected,
@@ -50,6 +50,7 @@ from ..bindings import (
     SideTopicNotFound,
     SideTopicQuery,
     SideTopicState,
+    ThreadBinding,
 )
 from ..management.blocking_io import (
     BlockingIODrainTimeout,
@@ -83,6 +84,7 @@ from ..domain import ScopeKind
 from ..management import (
     ActivePointerChanged,
     BindingScopeMismatch,
+    ChatLabel,
     CurrentSideTarget,
     ExactBindingTarget,
     InstanceManagementService,
@@ -115,6 +117,8 @@ _MUTATION_DEADLINE_SECONDS = 15.0
 _MAX_QUERY_FIELDS = 24
 _MAX_JSON_FIELDS = 20
 _MAX_TEXT_BYTES = 4_096
+_SESSION_PAGE_SIZES = frozenset((10, 20, 50, 100))
+_RUNTIME_SNAPSHOT_BATCH_SIZE = 50
 
 _SECURITY_HEADERS = (
     (b"Cache-Control", b"no-store"),
@@ -547,7 +551,7 @@ class AdminWebApplication:
             "nativeState",
         }
         _require_query_keys(context.query, allowed)
-        page_size = _page_size(context.query)
+        page_size = _session_page_size(context.query)
         local = BindingQuery(
             project_alias=_optional_text_query(context.query, "project"),
             scope_kind=_optional_scope_kind(context.query),
@@ -575,8 +579,12 @@ class AdminWebApplication:
             deadline=deadline,
         )
         binding_ids = tuple(item.record.binding.id for item in page.items)
-        snapshots = self._management.runtime_snapshots(binding_ids=binding_ids)
-        snapshots_by_id = {snapshot.binding_id: snapshot for snapshot in snapshots.bindings}
+        snapshots_by_id = {}
+        for batch in _batches(binding_ids, _RUNTIME_SNAPSHOT_BATCH_SIZE):
+            snapshots = self._management.runtime_snapshots(binding_ids=batch)
+            snapshots_by_id.update(
+                (snapshot.binding_id, snapshot) for snapshot in snapshots.bindings
+            )
         items = [
             self._session_item(context, item, snapshots_by_id[item.record.binding.id])
             for item in page.items
@@ -587,6 +595,7 @@ class AdminWebApplication:
                 "requestId": context.request.request_id,
                 "items": items,
                 "nextCursor": _encode_binding_cursor(page.next_cursor, fingerprint),
+                "pageSize": page_size,
             },
         )
 
@@ -675,8 +684,15 @@ class AdminWebApplication:
             "appId": scope.app_id,
             "chatId": scope.chat_id,
             "chatLabel": item.chat.display_name,
+            "chatLabelResolved": item.chat.resolved,
+            "chatMode": item.chat.chat_mode,
             "chatType": item.chat.chat_type,
+            "chatOpenUrl": _chat_open_url(item.chat),
             "topicId": scope.topic_id,
+            "sessionType": (
+                "topic" if scope.kind is ScopeKind.TOPIC else "message"
+            ),
+            "sessionState": _session_state(binding, native_state),
             "projectAlias": binding.project_alias,
             "nativeThreadId": binding.native_thread_id,
             "nativeState": native_state.value if native_state is not None else "lazy",
@@ -789,6 +805,8 @@ class AdminWebApplication:
                     "appId": side.app_id,
                     "chatId": side.chat_id,
                     "chatLabel": item.chat.display_name,
+                    "chatLabelResolved": item.chat.resolved,
+                    "chatMode": item.chat.chat_mode,
                     "chatType": item.chat.chat_type,
                     "topicId": side.topic_id,
                     "rootMessageId": side.root_message_id,
@@ -1631,6 +1649,53 @@ def _page_size(values: Mapping[str, list[str]]) -> int:
     if not 1 <= value <= 50:
         raise AdminWebError(400, "invalid_page_size", "分页大小必须为 1 到 50。")
     return value
+
+
+def _session_page_size(values: Mapping[str, list[str]]) -> int:
+    raw = _optional_one(values, "pageSize")
+    if raw is None:
+        return 20
+    try:
+        value = int(raw, 10)
+    except ValueError:
+        raise AdminWebError(400, "invalid_page_size", "分页大小无效。") from None
+    if value not in _SESSION_PAGE_SIZES:
+        raise AdminWebError(
+            400,
+            "invalid_page_size",
+            "Sessions 分页大小必须为 10、20、50 或 100。",
+        )
+    return value
+
+
+def _batches(values: Sequence[str], size: int) -> tuple[tuple[str, ...], ...]:
+    if size < 1:
+        raise ValueError("batch size must be positive")
+    return tuple(
+        tuple(values[index : index + size])
+        for index in range(0, len(values), size)
+    )
+
+
+def _chat_open_url(chat: ChatLabel) -> str:
+    if chat.chat_mode == "p2p" and chat.p2p_target_open_id is not None:
+        query = urlencode({"openId": chat.p2p_target_open_id})
+    else:
+        query = urlencode({"openChatId": chat.chat_id})
+    return f"https://applink.feishu.cn/client/chat/open?{query}"
+
+
+def _session_state(
+    binding: ThreadBinding,
+    native_state: NativeThreadCatalogState | None,
+) -> str:
+    if native_state is NativeThreadCatalogState.MISSING:
+        return "missing"
+    if native_state is NativeThreadCatalogState.ARCHIVED:
+        return "archived"
+    if binding.native_thread_id is None:
+        return "lazy-current" if binding.active else "lazy-non-current"
+    return "current" if binding.active else "non-current"
 
 
 def _optional_text_query(

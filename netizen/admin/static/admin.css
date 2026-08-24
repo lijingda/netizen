@@ -37,10 +37,23 @@ input, select { min-width: 0; border: 1px solid #bac3d0; border-radius: 7px; pad
 .filter-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); align-items: end; gap: 10px; margin: 20px 0; }
 .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 9px; }
 table { width: 100%; border-collapse: collapse; min-width: 900px; }
+#sessions table { min-width: 1100px; table-layout: fixed; }
+#sessions th:nth-child(1) { width: 16%; }
+#sessions th:nth-child(2) { width: 6%; }
+#sessions th:nth-child(3) { width: 29%; }
+#sessions th:nth-child(4) { width: 11%; }
+#sessions th:nth-child(5) { width: 7%; }
+#sessions th:nth-child(6) { width: 7%; }
+#sessions th:nth-child(7) { width: 9%; }
+#sessions th:nth-child(8) { width: 15%; }
 th, td { padding: 11px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 13px; }
 th { position: sticky; top: 0; background: #f7f9fc; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
 tr:last-child td { border-bottom: 0; }
 .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--muted); word-break: break-all; }
+.chat-link { color: var(--blue); font-weight: 700; text-decoration: none; }
+.chat-link:hover { text-decoration: underline; }
+.meta-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+.preview { max-width: 380px; margin-top: 4px; color: var(--muted); line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .badge { display: inline-block; border-radius: 999px; padding: 3px 7px; background: #edf1f6; font-size: 11px; }
 .badge.on { background: #e5f6ed; color: #136c3c; }
 .badge.warn { background: #fff2df; color: #925400; }
@@ -48,6 +61,9 @@ tr:last-child td { border-bottom: 0; }
 .action { padding: 5px 8px; font-size: 12px; }
 .action.danger { background: var(--danger); }
 .next { margin-top: 14px; }
+button:disabled { cursor: default; opacity: .48; }
+.pagination { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 14px; color: var(--muted); font-size: 13px; }
+.pagination .next { margin-top: 0; }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid #8cb4ff; outline-offset: 2px; }
 .login-body { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
 .login-card { width: min(420px, 100%); background: white; border: 1px solid var(--line); border-radius: 14px; padding: 28px; }

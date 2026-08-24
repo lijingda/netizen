@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from netizen.bindings import BindingQuery, BindingStore, SideTopicState
 from netizen.channel_app import ChannelApplication
@@ -164,6 +165,22 @@ class FakeManagementRuntime:
     def side_snapshot_exact(self, side_id: str):
         self.calls.append(("side-snapshot", side_id))
         return self.side_snapshots.get(side_id)
+
+
+class FakeChatLabels:
+    def __init__(self) -> None:
+        self.info_calls: list[str] = []
+
+    async def get_chat_info(self, chat_id: str):
+        self.info_calls.append(chat_id)
+        return SimpleNamespace(
+            name=f"Name {chat_id}",
+            chat_mode="group",
+            chat_type="private",
+        )
+
+    async def get_chat_members(self, _chat_id: str, **_kwargs):
+        return []
 
 
 class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
@@ -391,6 +408,64 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         metadata_calls = [call for call in self.runtime.calls if call[0] == "metadata"]
         self.assertEqual(len(metadata_calls), 2)
         self.assertEqual(metadata_calls[0][2], ("native-active",))
+
+    async def test_session_pages_resolve_only_page_cache_misses(self) -> None:
+        for index in range(3):
+            await self._create(
+                FeishuScope(
+                    "cli_test",
+                    f"oc_page_{index}",
+                    ScopeKind.DIRECT,
+                )
+            )
+        labels = FakeChatLabels()
+        service = InstanceManagementService(
+            bindings=self.store,
+            projects=self.projects,
+            runtime=self.runtime,  # type: ignore[arg-type]
+            scope_coordinator=self.coordinator,
+            chat_labels=labels,
+        )
+        try:
+            first = await service.query_sessions(
+                limit=2,
+                deadline=asyncio.get_running_loop().time() + 1,
+            )
+            first_chat_ids = tuple(item.record.scope.chat_id for item in first.items)
+            self.assertEqual(tuple(labels.info_calls), first_chat_ids)
+
+            await service.query_sessions(
+                limit=2,
+                deadline=asyncio.get_running_loop().time() + 1,
+            )
+            self.assertEqual(tuple(labels.info_calls), first_chat_ids)
+
+            second = await service.query_sessions(
+                cursor=first.next_cursor,
+                limit=2,
+                deadline=asyncio.get_running_loop().time() + 1,
+            )
+            second_chat_ids = tuple(
+                item.record.scope.chat_id for item in second.items
+            )
+            self.assertEqual(
+                tuple(labels.info_calls),
+                first_chat_ids + second_chat_ids,
+            )
+        finally:
+            await service.close()
+
+    async def test_session_query_accepts_one_hundred_only(self) -> None:
+        page = await self.service.query_sessions(
+            limit=100,
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+        self.assertEqual(page.items, ())
+        with self.assertRaises(ValueError):
+            await self.service.query_sessions(
+                limit=101,
+                deadline=asyncio.get_running_loop().time() + 1,
+            )
 
     async def test_native_state_filter_uses_complete_catalog_and_keeps_missing(
         self,

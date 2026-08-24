@@ -1358,7 +1358,7 @@ class BindingStore:
     ) -> BindingPage:
         """Read one global Binding inventory page off the shared event loop."""
 
-        page_limit = _validate_page_limit(limit)
+        page_limit = _validate_page_limit(limit, maximum=100)
         statement, parameters = _binding_inventory_statement(
             query=query,
             cursor=cursor,
@@ -2033,9 +2033,13 @@ def _side_inventory_statement(
     )
 
 
-def _validate_page_limit(limit: int) -> int:
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
-        raise ValueError("page size must be between 1 and 50")
+def _validate_page_limit(limit: int, *, maximum: int = 50) -> int:
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1 <= limit <= maximum
+    ):
+        raise ValueError(f"page size must be between 1 and {maximum}")
     return limit
 
 

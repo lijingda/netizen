@@ -131,8 +131,11 @@ class AuthLimits:
     max_preauth_per_source: int = 16
     max_sessions: int = 256
     max_sessions_per_source: int = 16
-    max_actions: int = 4_096
-    max_actions_per_session: int = 256
+    # A 100-row Sessions page can expose several exact actions per row, and
+    # cursor navigation keeps the previous page's one-shot grants alive until
+    # their normal TTL. Keep this bounded while allowing several full pages.
+    max_actions: int = 32_768
+    max_actions_per_session: int = 8_192
 
     def __post_init__(self) -> None:
         durations = (

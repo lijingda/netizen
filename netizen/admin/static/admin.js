@@ -6,8 +6,13 @@ const state = {
   sessions: null,
   sides: null,
   projectCursor: null,
-  sessionCursor: null,
   sideCursor: null,
+  sessionPage: {
+    cursor: null,
+    nextCursor: null,
+    previousCursors: [],
+    number: 1,
+  },
 };
 
 const statusNode = document.querySelector("#status");
@@ -123,12 +128,12 @@ async function loadProjects(cursor = null) {
   document.querySelector("#projects-next").hidden = !data.nextCursor;
 }
 
-function formQuery(form) {
+function formQuery(form, defaultPageSize = "25") {
   const query = new URLSearchParams();
   for (const [key, value] of new FormData(form)) {
     if (String(value)) query.set(key, String(value));
   }
-  query.set("pageSize", "25");
+  if (!query.has("pageSize")) query.set("pageSize", defaultPageSize);
   return query;
 }
 
@@ -141,39 +146,140 @@ function runtimeLabel(runtime) {
   return "Idle";
 }
 
-async function loadSessions(cursor = null) {
-  const query = formQuery(document.querySelector("#session-filter"));
+function chatModeLabel(mode, scopeKind = null) {
+  const known = { p2p: "单聊", group: "群聊", topic: "话题群" }[mode];
+  if (known) return known;
+  if (scopeKind === "direct") return "单聊";
+  if (scopeKind === "group") return "群聊";
+  return "飞书会话";
+}
+
+function sessionStateLabel(value) {
+  return {
+    current: "当前",
+    "non-current": "非当前",
+    archived: "已归档",
+    "lazy-current": "Lazy · 当前",
+    "lazy-non-current": "Lazy · 非当前",
+    missing: "原生会话缺失",
+  }[value] || value;
+}
+
+function shortIdentity(value) {
+  const text = String(value || "");
+  return text.length > 18 ? `${text.slice(0, 12)}…` : text;
+}
+
+function locationFallback(session) {
+  return `${chatModeLabel(session.chatMode, session.scopeKind)} · ${shortIdentity(session.chatId)}`;
+}
+
+function sessionLocationCell(row, session) {
+  const td = document.createElement("td");
+  const link = document.createElement("a");
+  link.className = "chat-link";
+  link.href = session.chatOpenUrl;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = session.chatLabelResolved
+    ? session.chatLabel
+    : locationFallback(session);
+  link.title = session.sessionType === "topic"
+    ? "打开所在飞书会话（暂不定位具体话题）"
+    : "打开飞书会话";
+  const mode = document.createElement("div");
+  mode.className = "meta-line";
+  mode.append(badge(chatModeLabel(session.chatMode, session.scopeKind)));
+  const chatId = document.createElement("span");
+  chatId.className = "id";
+  chatId.textContent = session.chatId;
+  mode.append(chatId);
+  td.append(link, mode);
+  if (session.topicId) {
+    const topicId = document.createElement("div");
+    topicId.className = "id";
+    topicId.textContent = `Topic ${session.topicId}`;
+    td.append(topicId);
+  }
+  row.append(td);
+}
+
+function sessionIdentityCell(row, session) {
+  const td = document.createElement("td");
+  const title = document.createElement("strong");
+  title.textContent = session.nativeTitle
+    || (session.nativeState === "lazy" ? "Lazy Session" : "未命名 Session");
+  td.append(title);
+  if (session.nativePreview) {
+    const preview = document.createElement("div");
+    preview.className = "preview";
+    preview.textContent = session.nativePreview;
+    td.append(preview);
+  }
+  const bindingId = document.createElement("div");
+  bindingId.className = "id";
+  bindingId.textContent = `Binding ${session.shortId} · ${session.bindingId}`;
+  td.append(bindingId);
+  if (session.nativeThreadId) {
+    const threadId = document.createElement("div");
+    threadId.className = "id";
+    threadId.textContent = `Thread ${session.nativeThreadId}`;
+    td.append(threadId);
+  }
+  row.append(td);
+}
+
+function renderSessionPagination() {
+  const page = state.sessionPage;
+  document.querySelector("#sessions-previous").disabled = page.previousCursors.length === 0;
+  document.querySelector("#sessions-next").disabled = !page.nextCursor;
+  const count = state.sessions?.items?.length || 0;
+  document.querySelector("#sessions-page").textContent = `第 ${page.number} 页 · ${count} 条`;
+}
+
+function resetSessionPagination() {
+  state.sessionPage = {
+    cursor: null,
+    nextCursor: null,
+    previousCursors: [],
+    number: 1,
+  };
+}
+
+async function loadSessions(cursor = state.sessionPage.cursor) {
+  const query = formQuery(document.querySelector("#session-filter"), "20");
   if (cursor) query.set("cursor", cursor);
   const data = await api(`/api/v1/sessions?${query}`);
   state.sessions = data;
-  state.sessionCursor = data.nextCursor;
+  state.sessionPage.cursor = cursor;
+  state.sessionPage.nextCursor = data.nextCursor;
   const body = document.querySelector("#sessions-body");
   body.replaceChildren();
   for (const session of data.items) {
     const row = document.createElement("tr");
     row.dataset.bindingId = session.bindingId;
-    const identity = document.createElement("td");
-    const title = document.createElement("strong");
-    title.textContent = session.nativeTitle || session.shortId;
-    const id = document.createElement("div");
-    id.className = "id";
-    id.textContent = session.bindingId;
-    identity.append(title, id);
-    row.append(identity);
-    cell(row, session.projectAlias);
-    cell(row, `${session.chatLabel} · ${session.scopeKind}${session.topicId ? ` · ${session.topicId}` : ""}`);
-    const native = document.createElement("td");
-    native.append(badge(session.nativeState, session.nativeState === "active", session.nativeState === "missing"));
-    row.append(native);
+    sessionLocationCell(row, session);
+    const type = document.createElement("td");
+    type.append(badge(session.sessionType === "topic" ? "话题" : "消息"));
+    row.append(type);
+    sessionIdentityCell(row, session);
+    const sessionState = document.createElement("td");
+    sessionState.append(badge(
+      sessionStateLabel(session.sessionState),
+      session.sessionState === "current" || session.sessionState === "lazy-current",
+      session.sessionState === "missing",
+    ));
+    row.append(sessionState);
     const runtime = cell(row, runtimeLabel(session.runtime));
     runtime.className = "runtime-state";
+    cell(row, session.projectAlias);
     const settings = session.turnSettings;
     cell(row, settings ? `${settings.modelId} / ${settings.effortId} / ${settings.serviceTierId}` : "默认");
     const actions = actionsCell(row);
     wireSessionActions(actions, session);
     body.append(row);
   }
-  document.querySelector("#sessions-next").hidden = !data.nextCursor;
+  renderSessionPagination();
 }
 
 function wireSessionActions(actions, session) {
@@ -243,6 +349,30 @@ async function loadSides(cursor = null) {
   document.querySelector("#sides-next").hidden = !data.nextCursor;
 }
 
+async function moveSessionPage(direction) {
+  const page = state.sessionPage;
+  const previousState = {
+    cursor: page.cursor,
+    nextCursor: page.nextCursor,
+    previousCursors: [...page.previousCursors],
+    number: page.number,
+  };
+  if (direction === "next") {
+    if (!page.nextCursor) return;
+    page.previousCursors.push(page.cursor);
+    page.cursor = page.nextCursor;
+    page.number += 1;
+  } else {
+    if (!page.previousCursors.length) return;
+    page.cursor = page.previousCursors.pop();
+    page.number -= 1;
+  }
+  if (!await refresh("sessions")) {
+    state.sessionPage = previousState;
+    renderSessionPagination();
+  }
+}
+
 function sideRuntimeLabel(runtime) {
   return runtime
     ? `${runtime.state}${runtime.turnState ? ` · ${runtime.turnState}` : ""}`
@@ -278,15 +408,20 @@ function applyRuntimeSnapshots(payload) {
   }
 }
 
-async function refresh(tab, cursor = null) {
+async function refresh(tab, cursor = undefined) {
   setStatus("正在读取服务端事实…");
   try {
-    if (tab === "projects") await loadProjects(cursor);
-    if (tab === "sessions") await loadSessions(cursor);
-    if (tab === "side-topics") await loadSides(cursor);
+    if (tab === "projects") await loadProjects(cursor || null);
+    if (tab === "sessions") {
+      if (cursor === undefined) await loadSessions();
+      else await loadSessions(cursor);
+    }
+    if (tab === "side-topics") await loadSides(cursor || null);
     setStatus("已更新。");
+    return true;
   } catch (error) {
     setStatus(error.message, true);
+    return false;
   }
 }
 
@@ -325,12 +460,47 @@ document.querySelector("#create-project").addEventListener("submit", async (even
   event.currentTarget.reset();
 });
 
-document.querySelector("#session-filter").addEventListener("submit", (event) => { event.preventDefault(); refresh("sessions"); });
+document.querySelector("#session-filter").addEventListener("submit", (event) => {
+  event.preventDefault();
+  resetSessionPagination();
+  refresh("sessions");
+});
+document.querySelector("#session-page-size").addEventListener("change", () => {
+  resetSessionPagination();
+  refresh("sessions");
+});
 document.querySelector("#side-filter").addEventListener("submit", (event) => { event.preventDefault(); refresh("side-topics"); });
 document.querySelector("#projects-next").addEventListener("click", () => refresh("projects", state.projectCursor));
-document.querySelector("#sessions-next").addEventListener("click", () => refresh("sessions", state.sessionCursor));
+document.querySelector("#sessions-previous").addEventListener("click", () => moveSessionPage("previous"));
+document.querySelector("#sessions-next").addEventListener("click", () => moveSessionPage("next"));
 document.querySelector("#sides-next").addEventListener("click", () => refresh("side-topics", state.sideCursor));
 document.querySelector("#logout").addEventListener("click", async () => { await api("/logout", { method: "POST" }); window.location.assign("/login"); });
+
+function chunkValues(values, size = 50) {
+  const chunks = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
+}
+
+async function fetchRuntimeSnapshots(bindingIds, sideIds) {
+  const requests = [];
+  for (const ids of chunkValues(bindingIds)) {
+    const query = new URLSearchParams({ bindingIds: ids.join(",") });
+    requests.push(api(`/api/v1/runtime-snapshots?${query}`));
+  }
+  for (const ids of chunkValues(sideIds)) {
+    const query = new URLSearchParams({ sideIds: ids.join(",") });
+    requests.push(api(`/api/v1/runtime-snapshots?${query}`));
+  }
+  const payloads = await Promise.all(requests);
+  return {
+    bindings: payloads.flatMap((payload) => payload.bindings),
+    sides: payloads.flatMap((payload) => payload.sides),
+    missingSideIds: payloads.flatMap((payload) => payload.missingSideIds),
+  };
+}
 
 setInterval(async () => {
   if (document.hidden || (state.tab !== "sessions" && state.tab !== "side-topics")) return;
@@ -340,12 +510,9 @@ setInterval(async () => {
   const sideIds = state.tab === "side-topics"
     ? state.sides?.items?.map((item) => item.sideId) || []
     : [];
-  const query = new URLSearchParams();
-  if (bindingIds.length) query.set("bindingIds", bindingIds.join(","));
-  if (sideIds.length) query.set("sideIds", sideIds.join(","));
-  if (!query.size) return;
+  if (!bindingIds.length && !sideIds.length) return;
   try {
-    const snapshots = await api(`/api/v1/runtime-snapshots?${query}`);
+    const snapshots = await fetchRuntimeSnapshots(bindingIds, sideIds);
     applyRuntimeSnapshots(snapshots);
   } catch (error) {
     setStatus(error.message, true);

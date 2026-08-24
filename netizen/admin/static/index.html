@@ -67,19 +67,26 @@
           <select name="materialized"><option value="">全部</option><option value="false">Lazy</option><option value="true">Materialized</option></select>
         </label>
         <label>当前指针
-          <select name="current"><option value="">全部</option><option value="true">Current</option><option value="false">Inactive</option></select>
+          <select name="current"><option value="">全部</option><option value="true">当前</option><option value="false">非当前</option></select>
         </label>
         <label>原生状态
           <select name="nativeState"><option value="">全部</option><option value="active">Active</option><option value="archived">Archived</option><option value="missing">Missing</option></select>
         </label>
         <label>创建时间从<input name="createdFrom" maxlength="64" placeholder="ISO-8601"></label>
         <label>创建时间至<input name="createdBefore" maxlength="64" placeholder="ISO-8601"></label>
+        <label>每页
+          <select id="session-page-size" name="pageSize"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select>
+        </label>
         <button type="submit">筛选</button>
       </form>
       <div class="table-wrap"><table><thead><tr>
-        <th>会话</th><th>Project</th><th>飞书维度</th><th>原生状态</th><th>运行态</th><th>配置</th><th>操作</th>
+        <th>飞书位置</th><th>类型</th><th>Session</th><th>会话状态</th><th>运行态</th><th>Project</th><th>配置</th><th>操作</th>
       </tr></thead><tbody id="sessions-body"></tbody></table></div>
-      <button id="sessions-next" class="next" hidden>下一页</button>
+      <nav class="pagination" aria-label="Sessions 分页">
+        <button id="sessions-previous" class="next" disabled>上一页</button>
+        <span id="sessions-page" aria-live="polite">第 1 页</span>
+        <button id="sessions-next" class="next" disabled>下一页</button>
+      </nav>
     </section>
 
     <section id="side-topics" class="panel" aria-labelledby="sides-heading" hidden>

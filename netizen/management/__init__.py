@@ -1,11 +1,10 @@
 """Application management boundary shared by Feishu and Admin adapters."""
 
 from .coordination import ScopeCoordinator
+from .chat_labels import ChatLabel, ChatLabelProvider, ChatLabelResolver
 from .service import (
     ActivePointerChanged,
     BindingScopeMismatch,
-    ChatLabel,
-    ChatLabelProvider,
     ClosedSide,
     CreatedBinding,
     CurrentBindingChanged,
@@ -40,6 +39,7 @@ __all__ = (
     "BindingScopeMismatch",
     "ChatLabel",
     "ChatLabelProvider",
+    "ChatLabelResolver",
     "ClosedSide",
     "CreatedBinding",
     "CurrentBindingChanged",
