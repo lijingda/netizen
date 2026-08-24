@@ -3,6 +3,10 @@
 **Binding Scope / 普通 Scope**：独立承载 active Binding 指针的飞书位置：P2P、群聊
 主线或一个普通真实话题。被 Side Topic Route 占用的话题不再解释为 Binding Scope。
 
+**Feishu App Binding / 飞书应用绑定**：当前 Netizen 实例使用的 exact 飞书应用身份。
+更换 App ID 会进入新的 Binding Scope 命名空间；旧 Channel 记录和原生 Codex 历史继续
+保留，但不迁移到新应用的 Scope。
+
 **Thread Binding / 会话**：Scope 内的 Channel 记录，保存本地 ID、Project alias、
 可空 native Codex Thread ID、可选的 Binding Turn Settings、配置 revision、creator
 和时间。它不复制 Codex 历史或已生效的原生 Thread 配置。

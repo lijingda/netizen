@@ -20,7 +20,9 @@ class FeishuAppOnboardingTest(unittest.TestCase):
                 sys.executable,
                 "-c",
                 "import inspect, lark_oapi; "
-                "print(','.join(inspect.signature(lark_oapi.register_app).parameters))",
+                "from lark_oapi.api.application.v6 import ListScopeRequest; "
+                "print(','.join(inspect.signature(lark_oapi.register_app).parameters)); "
+                "print(ListScopeRequest.builder().build().uri)",
             ],
             check=False,
             capture_output=True,
@@ -30,15 +32,17 @@ class FeishuAppOnboardingTest(unittest.TestCase):
             timeout=90,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        parameters = result.stdout.strip().split(",")
+        parameters_line, scope_uri = result.stdout.strip().splitlines()
+        parameters = parameters_line.split(",")
         self.assertIn("addons", parameters)
         self.assertIn("create_only", parameters)
         self.assertIn("app_id", parameters)
+        self.assertEqual(scope_uri, "/open-apis/application/v6/scopes")
         output = io.StringIO()
         onboarding._default_qr_renderer("https://example.com/setup", output)
         self.assertGreater(len(output.getvalue().splitlines()), 10)
 
-    def test_new_app_uses_only_explicit_bot_configuration(self) -> None:
+    def test_unbound_app_uses_official_create_or_select_page(self) -> None:
         captured: dict[str, Any] = {}
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -78,14 +82,19 @@ class FeishuAppOnboardingTest(unittest.TestCase):
         self.assertIn("https://accounts.feishu.cn/device/example", stderr.getvalue())
         self.assertIn("QR:https://accounts.feishu.cn/device/example", stderr.getvalue())
         self.assertEqual(captured["source"], "netizen-installer")
-        self.assertIs(captured["create_only"], True)
+        self.assertNotIn("create_only", captured)
         self.assertNotIn("app_id", captured)
         addons = captured["addons"]
         self.assertIs(addons["preset"], False)
         self.assertEqual(
             addons["scopes"],
-            {"tenant": list(onboarding.TENANT_SCOPES)},
+            {"tenant": list(onboarding.REQUIRED_TENANT_SCOPES)},
         )
+        self.assertIn(
+            "im:message.p2p_msg:readonly",
+            onboarding.REQUIRED_TENANT_SCOPES,
+        )
+        self.assertIn("im:chat:readonly", onboarding.REQUIRED_TENANT_SCOPES)
         self.assertNotIn("user", addons["scopes"])
         self.assertEqual(
             addons["events"],

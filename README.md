@@ -192,12 +192,12 @@ Codex Skill。用户在飞书中自然语言询问 Netizen 用法、命令、会
 
 ## 安装、升级与启停
 
-正式部署支持 Linux + systemd user manager，以及 macOS 14+ Apple Silicon 当前登录用户的
-LaunchAgent。两种平台都以准备运行服务的当前用户执行，不使用 sudo；macOS 的 LaunchAgent
-会在退出登录时停止、下次登录自动启动，不提供 logout 后常驻的 LaunchDaemon。代码不主动拒绝
-Intel Mac，但在真实门禁完成前不把它列入正式支持范围。真人在终端中安装时使用第一条
-命令；Agent、CI 或后台 shell 首次运行时使用第二条。macOS 服务使用系统钥匙串验证 TLS，
-不要求 Netizen 维护第二份 CA bundle：
+正式部署支持 Linux + systemd user manager，以及 macOS 14+ 当前登录用户的 LaunchAgent；
+Apple Silicon 与 Intel Mac 都在正式支持范围内，并已完成服务运行真机验证。两种平台都以
+准备运行服务的当前用户执行，不使用 sudo；macOS 的 LaunchAgent 会在退出登录时停止、下次
+登录自动启动，不提供 logout 后常驻的 LaunchDaemon。真人在终端中安装时使用第一条命令；
+Agent、CI 或后台 shell 首次运行时使用第二条。macOS 服务使用系统钥匙串验证 TLS，不要求
+Netizen 维护第二份 CA bundle：
 
 ```bash
 # 真人交互安装
@@ -232,14 +232,24 @@ Netizen 产品根始终是当前账号数据库中 home 下的 `~/.netizen`，�
 不会被认领或卸载。Linux 上若 systemd user manager 自身配置了另一套 `XDG_CONFIG_HOME`，且其
 `SYSTEMD_UNIT_PATH` 不包含固定 unit 目录，安装器会明确拒绝而不是生成无法加载的 unit。
 
-首次交互安装发现 Feishu/Lark 凭据不完整时，默认显示官方浏览器链接和终端二维码：确认后
-安装器创建新 Bot 应用，或在已有 `appId` 但 Secret 缺失时更新该 exact 应用，并预填
-Netizen 所需的应用身份权限、`im.message.receive_v1` 事件和 `card.action.trigger` 回调。
+首次交互安装发现 Feishu/Lark 凭据不完整时，默认显示官方浏览器链接和终端二维码：官方
+页面可创建新 Bot 应用或选择已有应用；已有 `appId` 且受保护的 Secret 文件存在但内容为空
+时只更新该 exact 应用。部署后若要更换应用，无需卸载 Netizen；删除（或先移走备份）
+`~/.netizen/credentials/feishu-app-secret` 再运行 `./install.sh`，安装器会把文件缺失解释为
+显式的飞书应用绑定重置，再次打开官方创建/选择页面，并允许选择结果替换原 App ID。两种
+路径都会预填 Netizen 所需的应用身份权限、`im.message.receive_v1` 事件和
+`card.action.trigger` 回调。
 该流程使用随 release 固定的官方 Python SDK，不安装或依赖 Lark CLI，也不申请用户身份
 scope/token；菜单中的手工 App ID + 隐藏 App Secret 输入始终可用，浏览器流程失败也会
 安全回退到它。App Secret 只经父子进程 pipe 写入受保护文件，不显示、不进入 argv、环境、
-YAML、unit 或日志。用户确认后仍需按租户策略完成管理员审批/应用发布，设置可用范围，并
-把机器人加入目标群。
+YAML、unit 或日志。每次安装都会在切换 release 前通过官方 API 确认全部必需 tenant scope
+已经授权；已有应用缺权限时，交互安装只尝试一次 exact-App 官方修复，Agent/CI 则立即列出
+缺失项并退出。用户仍需按租户策略完成管理员审批/应用发布与租户安装，设置可用范围，并
+把机器人加入目标群；完成后重新运行 `./install.sh`。
+
+飞书应用绑定重置不会迁移旧 App ID 下的飞书 Scope/Binding；Channel 数据库和 Codex 原生
+历史仍会保留，但新应用从自己的飞书会话命名空间开始。正常代码升级不要删除 Secret 文件，
+只需在更新后的源码目录再次运行 `./install.sh`。
 
 安装器同时自动生成一次高熵 `0600` Admin Web credential。Agent、CI 或其他无 TTY 调用
 绝不会等待输入或启动浏览器流程：脚本会创建配置骨架、空的 Feishu Secret 文件和可立即
@@ -348,7 +358,9 @@ make check
 `projects` mapping 仍会在首次启动时导入，此后可在飞书 `/settings` 完成 Project
 管理。通过 `./install.sh` 浏览器流程创建/更新的应用已请求下述权限、消息事件和卡片回调；
 本地手工准备应用时则需在飞书应用后台逐项配置。两种路径都还要完成租户审批/发布、配置
-可用用户和群并把机器人加入目标群。群聊逐条引用需要应用权限
+可用用户和群并把机器人加入目标群。单聊事件投递必须具备
+`im:message.p2p_msg:readonly`；设置卡片识别单聊/群聊需要 `im:chat:readonly`。群聊逐条
+引用需要应用权限
 `im:message.group_msg`；只配置接收群聊 @ 机器人
 消息的权限无法回查被引用的另一条消息。当前 Prompt 发送者姓名解析还需
 `im:chat.members:read`；缺失时不会用匿名身份提交。Prompt 的运行、steer 确认与终态

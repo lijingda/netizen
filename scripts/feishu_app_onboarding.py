@@ -16,9 +16,11 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, IO
 
 
-TENANT_SCOPES = (
+REQUIRED_TENANT_SCOPES = (
     "im:message",
     "im:message.group_msg",
+    "im:message.p2p_msg:readonly",
+    "im:chat:readonly",
     "im:chat.members:read",
     "im:message.reactions:write_only",
     "im:resource",
@@ -45,14 +47,12 @@ def _registration_options(app_id: str | None) -> dict[str, Any]:
         },
         "addons": {
             "preset": False,
-            "scopes": {"tenant": list(TENANT_SCOPES)},
+            "scopes": {"tenant": list(REQUIRED_TENANT_SCOPES)},
             "events": {"items": {"tenant": list(TENANT_EVENTS)}},
             "callbacks": {"items": list(CALLBACKS)},
         },
     }
-    if app_id is None:
-        options["create_only"] = True
-    else:
+    if app_id is not None:
         options["app_id"] = app_id
     return options
 

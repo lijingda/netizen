@@ -379,16 +379,24 @@ queue 表，也不保存 Admin credential、session、action/CSRF token、native
 audit record。
 
 首次交互安装的飞书应用初始化是 release 外的安装期流程，不是第二个运行时认证层。候选
-release 中固定的官方 OpenAPI SDK 只用 device flow 创建/更新 Bot 应用，并请求当前能力
-所需的 tenant scopes、消息事件和卡片回调；不申请或持久化 user token。成功后只更新同一
-份 `~/.netizen/config.yaml` App ID 与 `0600` `credentials/feishu-app-secret`，不向 Channel
-Database、Codex state、环境或日志写入凭据。无 TTY、已有完整凭据和服务运行时都不会进入
-该流程；手工凭据路径继续等价可用。
+release 中固定的官方 OpenAPI SDK 用 device flow 创建或从官方页面选择 Bot 应用，并请求
+当前能力所需的 tenant scopes、消息事件和卡片回调；已知 App ID 配合存在但为空的 Secret
+文件时保持 exact identity。有效 App ID 配合不存在的 Secret 文件是显式的 Feishu App
+Binding reset：device flow 不绑定旧 App ID，官方页面可选择同一或不同应用，返回身份以
+带回滚的配置/凭据更新替换旧绑定。该流程不申请或持久化 user token。成功后只更新同一份
+`~/.netizen/config.yaml` App ID 与
+`0600` `credentials/feishu-app-secret`，不向 Channel Database、Codex state、环境或日志写入
+凭据。安装器在 host mutation/activation 前用官方 scope API 校验同一份 tenant 权限契约；
+缺失权限的已有完整凭据只有在 TTY 安装中执行一次 exact-App 修复，无 TTY 直接失败，二者
+都不停止旧服务或切换 `current`。手工凭据路径继续等价可用，但不能绕过授权门禁；服务
+运行时不进入该流程。App ID 改变后新消息进入新的 Scope namespace；旧 Binding 与原生
+历史保留但不迁移。
 
 部署保持一份 release/配置/凭据/数据库/Skill/activation-intent 事务；平台 Service Backend
 只负责定义、manager 状态、停止确认、发布、启停、status 与 ready 等待。Linux 使用 systemd
-user unit；macOS 14+ Apple Silicon 使用当前 GUI 登录用户的 LaunchAgent，不增加
-LaunchDaemon 或第二个运行时。macOS 只使用 `launchctl print` 退出码判断 loaded，不解析文本。
+user unit；macOS 14+ 的 Apple Silicon 与 Intel Mac 使用当前 GUI 登录用户的 LaunchAgent，
+不增加 LaunchDaemon 或第二个运行时。macOS 只使用 `launchctl print` 退出码判断 loaded，
+不解析文本。
 launcher 在稳定的 `state/service.lifetime.lock` inode 上持有独占锁，并只为最终 exec 短暂
 开放 FD 继承；主进程在导入 SDK 边界前恢复 CLOEXEC。候选回滚只有同时确认 manager target
 已卸载且锁已释放时才能恢复 Channel Database/Skill。loaded 与 ready 分离：installer 和

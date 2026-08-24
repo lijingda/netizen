@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from scripts import netizen_installer as installer
 
@@ -260,6 +260,98 @@ class NetizenInstallerTest(unittest.TestCase):
                 1,
             )
 
+    def test_deleted_secret_rebinds_through_unbound_browser_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text().replace(
+                    "cli_REPLACE_ME",
+                    "cli_existing",
+                ),
+                encoding="utf-8",
+            )
+            layout.secret_file.write_text("old-secret", encoding="utf-8")
+            layout.secret_file.unlink()
+            requested_app_ids: list[str | None] = []
+
+            def register_app(app_id: str | None) -> installer.FeishuAppCredentials:
+                requested_app_ids.append(app_id)
+                return installer.FeishuAppCredentials(
+                    app_id="cli_replacement",
+                    app_secret="replacement-secret",
+                )
+
+            installer.prepare_configuration(
+                layout,
+                interactive=True,
+                input_stream=io.StringIO("\n"),
+                secret_prompt=lambda _prompt: self.fail("manual secret prompt was used"),
+                app_registrar=register_app,
+            )
+
+            self.assertEqual(requested_app_ids, [None])
+            self.assertIn("cli_replacement", layout.config_file.read_text())
+            self.assertNotIn("cli_existing", layout.config_file.read_text())
+            self.assertEqual(layout.secret_file.read_text(), "replacement-secret")
+            self.assertEqual(stat.S_IMODE(layout.secret_file.stat().st_mode), 0o600)
+
+    def test_noninteractive_deleted_secret_preserves_rebind_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text().replace(
+                    "cli_REPLACE_ME",
+                    "cli_existing",
+                ),
+                encoding="utf-8",
+            )
+            layout.secret_file.unlink()
+
+            with self.assertRaisesRegex(
+                installer.ConfigurationRequired,
+                r"interactive terminal.*update instance\.appId",
+            ):
+                installer.prepare_configuration(layout, interactive=False)
+
+            self.assertFalse(layout.secret_file.exists())
+            self.assertIn("cli_existing", layout.config_file.read_text())
+
+    def test_deleted_secret_manual_rebind_replaces_app_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text().replace(
+                    "cli_REPLACE_ME",
+                    "cli_existing",
+                ),
+                encoding="utf-8",
+            )
+            layout.secret_file.unlink()
+
+            installer.prepare_configuration(
+                layout,
+                interactive=True,
+                input_stream=io.StringIO("2\ncli_manual_replacement\n"),
+                secret_prompt=lambda _prompt: "manual-replacement-secret",
+                app_registrar=lambda _app_id: self.fail("browser setup was used"),
+            )
+
+            self.assertIn("cli_manual_replacement", layout.config_file.read_text())
+            self.assertNotIn("cli_existing", layout.config_file.read_text())
+            self.assertEqual(
+                layout.secret_file.read_text(),
+                "manual-replacement-secret",
+            )
+
     def test_browser_setup_failure_falls_back_to_manual_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
@@ -313,6 +405,46 @@ class NetizenInstallerTest(unittest.TestCase):
 
             self.assertEqual(layout.config_file.read_bytes(), original_config)
             self.assertEqual(layout.secret_file.read_bytes(), original_secret)
+
+    def test_rebind_credentials_roll_back_config_and_missing_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text().replace(
+                    "cli_REPLACE_ME",
+                    "cli_existing",
+                ),
+                encoding="utf-8",
+            )
+            layout.secret_file.unlink()
+            original_config = layout.config_file.read_bytes()
+            real_write = installer._write_atomic
+
+            def fail_new_secret(path: Path, content: bytes, *, mode: int) -> None:
+                if path == layout.secret_file and content == b"new-secret":
+                    raise OSError("simulated write failure")
+                real_write(path, content, mode=mode)
+
+            with (
+                patch.object(installer, "_write_atomic", side_effect=fail_new_secret),
+                self.assertRaisesRegex(OSError, "simulated write failure"),
+            ):
+                installer._store_registered_feishu_credentials(
+                    layout,
+                    config_text=original_config.decode(),
+                    expected_app_id=None,
+                    replace_existing_app_id="cli_existing",
+                    credentials=installer.FeishuAppCredentials(
+                        app_id="cli_replacement",
+                        app_secret="new-secret",
+                    ),
+                )
+
+            self.assertEqual(layout.config_file.read_bytes(), original_config)
+            self.assertFalse(layout.secret_file.exists())
 
     def test_release_app_registrar_keeps_secret_out_of_command_and_errors(self) -> None:
         release = installer.Release(
@@ -371,6 +503,310 @@ class NetizenInstallerTest(unittest.TestCase):
                 runner=malformed_runner,
             )
         self.assertNotIn("sdk-secret", str(raised.exception))
+
+    def test_release_permission_query_uses_secret_file_and_contract_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text().replace(
+                    "cli_REPLACE_ME",
+                    "cli_existing",
+                ),
+                encoding="utf-8",
+            )
+            layout.secret_file.write_text("private-secret", encoding="utf-8")
+            release = installer.Release(
+                digest="c" * 64,
+                root=ROOT,
+                source=ROOT,
+                venv=ROOT / ".venv",
+            )
+            calls: list[tuple[list[str], dict[str, object]]] = []
+
+            def fake_runner(
+                argv: list[object], **kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
+                rendered = [os.fspath(value) for value in argv]
+                calls.append((rendered, kwargs))
+                return subprocess.CompletedProcess(
+                    rendered,
+                    0,
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "missingScopes": [
+                                "im:message.p2p_msg:readonly",
+                                "im:chat:readonly",
+                            ],
+                        }
+                    ),
+                    "",
+                )
+
+            missing = installer._query_missing_feishu_permissions_from_release(
+                release,
+                layout,
+                runner=fake_runner,
+            )
+
+            self.assertEqual(
+                missing,
+                ("im:message.p2p_msg:readonly", "im:chat:readonly"),
+            )
+            command, kwargs = calls[0]
+            self.assertEqual(
+                command[-4:],
+                [
+                    "--app-id",
+                    "cli_existing",
+                    "--secret-file",
+                    str(layout.secret_file),
+                ],
+            )
+            self.assertNotIn("private-secret", command)
+            self.assertIs(kwargs["capture_output"], True)
+            self.assertEqual(kwargs["timeout"], 90.0)
+
+    def test_noninteractive_permission_failure_prevents_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text().replace(
+                    "cli_REPLACE_ME",
+                    "cli_existing",
+                ),
+                encoding="utf-8",
+            )
+            layout.secret_file.write_text("existing-secret", encoding="utf-8")
+            release = installer.Release(
+                digest="d" * 64,
+                root=ROOT,
+                source=ROOT,
+                venv=ROOT / ".venv",
+            )
+
+            with (
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(
+                    installer.SystemdServiceBackend, "prepare_host"
+                ) as prepare_host,
+                patch.object(installer, "prepare_release", return_value=release),
+                patch.object(
+                    installer,
+                    "validate_runtime",
+                    return_value=installer.RuntimeValidation(
+                        data_dir=layout.state_dir,
+                        admin_bind=installer.AdminBind(False, "127.0.0.1", 8787),
+                    ),
+                ),
+                patch.object(
+                    installer,
+                    "_query_missing_feishu_permissions_from_release",
+                    return_value=("im:chat:readonly",),
+                ),
+                patch.object(
+                    installer, "_register_feishu_app_from_release"
+                ) as register,
+                patch.object(installer, "activate_release") as activate,
+                self.assertRaisesRegex(
+                    installer.InstallError,
+                    "im:chat:readonly.*rerun ./install.sh",
+                ),
+            ):
+                installer.install(
+                    source_root=ROOT,
+                    layout=layout,
+                    interactive=False,
+                )
+
+            register.assert_not_called()
+            prepare_host.assert_not_called()
+            activate.assert_not_called()
+
+    def test_interactive_rebind_permission_failure_prevents_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text().replace(
+                    "cli_REPLACE_ME",
+                    "cli_existing",
+                ),
+                encoding="utf-8",
+            )
+            layout.secret_file.write_text("old-secret", encoding="utf-8")
+            layout.secret_file.unlink()
+            release = installer.Release(
+                digest="9" * 64,
+                root=ROOT,
+                source=ROOT,
+                venv=ROOT / ".venv",
+            )
+
+            with (
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(
+                    installer.SystemdServiceBackend, "prepare_host"
+                ) as prepare_host,
+                patch.object(installer, "prepare_release", return_value=release),
+                patch.object(
+                    installer,
+                    "validate_runtime",
+                    return_value=installer.RuntimeValidation(
+                        data_dir=layout.state_dir,
+                        admin_bind=installer.AdminBind(False, "127.0.0.1", 8787),
+                    ),
+                ),
+                patch.object(
+                    installer,
+                    "_register_feishu_app_from_release",
+                    return_value=installer.FeishuAppCredentials(
+                        app_id="cli_replacement",
+                        app_secret="replacement-secret",
+                    ),
+                ) as register,
+                patch.object(
+                    installer,
+                    "_query_missing_feishu_permissions_from_release",
+                    return_value=("im:chat:readonly",),
+                ),
+                patch.object(installer, "activate_release") as activate,
+                patch("sys.stdin", new=io.StringIO("\n")),
+                self.assertRaisesRegex(
+                    installer.InstallError,
+                    "im:chat:readonly.*rerun ./install.sh",
+                ),
+            ):
+                installer.install(
+                    source_root=ROOT,
+                    layout=layout,
+                    interactive=True,
+                )
+
+            register.assert_called_once_with(release, None, runner=ANY)
+            self.assertIn("cli_replacement", layout.config_file.read_text())
+            self.assertEqual(layout.secret_file.read_text(), "replacement-secret")
+            prepare_host.assert_not_called()
+            activate.assert_not_called()
+
+    def test_interactive_existing_app_repairs_once_before_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text().replace(
+                    "cli_REPLACE_ME",
+                    "cli_existing",
+                ),
+                encoding="utf-8",
+            )
+            layout.secret_file.write_text("old-secret", encoding="utf-8")
+            release = installer.Release(
+                digest="e" * 64,
+                root=ROOT,
+                source=ROOT,
+                venv=ROOT / ".venv",
+            )
+
+            with (
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(
+                    installer.SystemdServiceBackend, "prepare_host"
+                ) as prepare_host,
+                patch.object(installer, "prepare_release", return_value=release),
+                patch.object(
+                    installer,
+                    "validate_runtime",
+                    return_value=installer.RuntimeValidation(
+                        data_dir=layout.state_dir,
+                        admin_bind=installer.AdminBind(False, "127.0.0.1", 8787),
+                    ),
+                ),
+                patch.object(
+                    installer,
+                    "_query_missing_feishu_permissions_from_release",
+                    side_effect=[("im:chat:readonly",), ()],
+                ) as query,
+                patch.object(
+                    installer,
+                    "_register_feishu_app_from_release",
+                    return_value=installer.FeishuAppCredentials(
+                        app_id="cli_existing",
+                        app_secret="updated-secret",
+                    ),
+                ) as register,
+                patch.object(installer, "activate_release") as activate,
+            ):
+                installed = installer.install(
+                    source_root=ROOT,
+                    layout=layout,
+                    interactive=True,
+                )
+
+            self.assertEqual(installed, release)
+            register.assert_called_once_with(
+                release,
+                "cli_existing",
+                runner=ANY,
+            )
+            self.assertEqual(query.call_count, 2)
+            self.assertEqual(layout.secret_file.read_text(), "updated-secret")
+            prepare_host.assert_called_once_with(interactive=True)
+            activate.assert_called_once()
+
+    def test_newly_configured_app_is_not_sent_through_a_second_browser_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text().replace(
+                    "cli_REPLACE_ME",
+                    "cli_new",
+                ),
+                encoding="utf-8",
+            )
+            layout.secret_file.write_text("new-secret", encoding="utf-8")
+            release = installer.Release(
+                digest="f" * 64,
+                root=ROOT,
+                source=ROOT,
+                venv=ROOT / ".venv",
+            )
+
+            with (
+                patch.object(
+                    installer,
+                    "_query_missing_feishu_permissions_from_release",
+                    return_value=("im:chat:readonly",),
+                ),
+                patch.object(
+                    installer, "_register_feishu_app_from_release"
+                ) as register,
+                self.assertRaisesRegex(installer.InstallError, "im:chat:readonly"),
+            ):
+                installer.require_feishu_permissions(
+                    release,
+                    layout,
+                    interactive=True,
+                    repair_existing_app=False,
+                )
+
+            register.assert_not_called()
 
     def test_noninteractive_install_does_not_build_before_credentials_are_ready(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -451,6 +887,11 @@ class NetizenInstallerTest(unittest.TestCase):
                         data_dir=layout.state_dir,
                         admin_bind=installer.AdminBind(False, "127.0.0.1", 8787),
                     ),
+                ),
+                patch.object(
+                    installer,
+                    "_query_missing_feishu_permissions_from_release",
+                    return_value=(),
                 ),
                 patch.object(installer, "activate_release"),
                 patch.object(installer, "info", side_effect=messages.append),

@@ -2,15 +2,16 @@
 
 Netizen 以执行 `install.sh` 的当前用户运行，与该用户的 CLI 共用标准 `$CODEX_HOME`
 （默认 `~/.codex`）；不创建专用 Agent 用户、第二套 Codex 状态或 system-level daemon。
-正式支持 Linux 的 systemd user manager，以及 macOS 14+ Apple Silicon 当前 GUI 登录用户的
-LaunchAgent。macOS 注销后停止、下次登录自动启动；不提供 LaunchDaemon。
+正式支持 Linux 的 systemd user manager，以及 macOS 14+ 当前 GUI 登录用户的 LaunchAgent；
+Apple Silicon 与 Intel Mac 均在支持范围内。macOS 注销后停止、下次登录自动启动；不提供
+LaunchDaemon。
 
 ## 选择部署目标
 
 仓库不定义默认服务器、SSH alias、账号或远端 checkout。选择满足本文前置条件的 Linux
-主机，或由实际桌面用户登录的 macOS 14+ Apple Silicon 主机。执行同步、远端调试、候选
-门禁、安装、升级或运行验收时显式使用同一个 `<deployment-host>`；它可以是本机 SSH
-config 中的 alias，也可以是 `<user>@<hostname>`。LaunchAgent 的首次 bootstrap 还要求
+主机，或由实际桌面用户登录的 macOS 14+ 主机（Apple Silicon 或 Intel）。执行同步、远端
+调试、候选门禁、安装、升级或运行验收时显式使用同一个 `<deployment-host>`；它可以是本机
+SSH config 中的 alias，也可以是 `<user>@<hostname>`。LaunchAgent 的首次 bootstrap 还要求
 该用户的 `gui/<uid>` launchd domain 已存在；只有 SSH 登录、没有 GUI 登录会明确失败且
 不写入安装状态。
 
@@ -88,7 +89,8 @@ codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
 `im.message.receive_v1` 应用身份事件和 `card.action.trigger` 回调，不申请用户身份权限或
 token；手工准备的应用必须逐项配置。无论来源，飞书应用版本在发布前都必须确认：
 
-- 单聊读取具备 `im:message` 或官方允许的对应 readonly 权限；
+- 单聊事件投递具备 `im:message.p2p_msg:readonly`，普通消息能力具备 `im:message`；
+- `/settings` 等卡片回调识别会话类型具备 `im:chat:readonly`；
 - 群聊回查额外具备 `im:message.group_msg`，不能只有接收 @ 消息的
   `im:message.group_at_msg`/readonly；
 - 当前 Prompt 发送者姓名解析具备 `im:chat.members:read`；权限不足时 Channel SDK
@@ -366,14 +368,28 @@ pyc 不进入快照。将代码获取与主机安装解耦后，本机调试、�
 
 首次有 TTY 且飞书凭据不完整时，安装器先构建、验证候选 release，再提供两种方式：默认
 使用候选 venv 中固定的官方 `lark-oapi` device flow，显示 URL 与终端二维码；或手工输入
-`cli_...` App ID 和隐藏 App Secret。默认流程对全新骨架只创建新 Bot 应用；配置已有
-`appId` 但 Secret 缺失时更新该 exact 应用。它使用 `addons.preset=false`，只声明前置门禁
+`cli_...` App ID 和隐藏 App Secret。全新骨架由官方页面选择创建新 Bot 应用或复用已有
+应用；已有 `appId` 且 Secret 文件存在但内容为空时只更新该 exact 应用。已有有效 App ID
+但 Secret 文件不存在时则视为显式飞书应用绑定重置：官方页面重新创建或选择应用，并允许
+结果替换旧 App ID。它使用
+`addons.preset=false`，只声明前置门禁
 列出的 tenant scopes、`im.message.receive_v1` tenant event 和 `card.action.trigger`
 callback；不安装/调用 Lark CLI，不申请 user scope/event，不保存 user token/info。确认成功
 后 App ID 与 Secret 直接写入现有受保护文件；失败会显示手工回退，Ctrl-C 中止安装。
 
-device flow 只完成公开应用配置：租户管理员审批、按租户策略发布应用版本、配置可用范围、
-把机器人加入目标群仍是人工完成项。安装器还会用 `secrets.token_urlsafe(32)` 自动生成不带
+部署后更换应用不要求卸载程序。删除（或先移走备份）固定路径
+`~/.netizen/credentials/feishu-app-secret`，再从目标源码执行 `./install.sh` 即可进入上述
+绑定重置；正常升级不要删除该文件，只需直接再次安装。选择不同 App ID 后，旧应用的
+Scope/Binding 和 Codex 原生历史仍保留，但不会迁移到新应用的飞书 Scope。
+
+取得完整凭据后，安装器使用候选 release 的官方 SDK 查询租户授权状态；唯一 tenant scope
+契约中的每一项都必须为已授权，才能准备 host 或进入 release activation。已有完整凭据的
+交互安装发现缺失项时只对 exact App 运行一次官方浏览器修复并重新查询；本轮刚完成首次
+初始化、无 TTY、二次查询仍缺失或查询不可验证时直接退出。旧 `current`、运行中服务和服务
+定义此时均未改变。device flow 只完成公开应用配置：租户管理员审批、按租户策略发布应用
+版本、完成租户安装、配置可用范围、把机器人加入目标群仍是人工完成项；完成后重新执行
+`./install.sh`，安装器不会轮询审批或自动重复申请。安装器还会用
+`secrets.token_urlsafe(32)` 自动生成不带
 换行的独立 Admin Web credential；已存在的合法文件只验证、永不覆盖。两个 Secret 都不会
 进入命令参数、环境、YAML、unit 文本或日志；Feishu App Secret 只从 helper stdout 的父进程
 捕获 pipe 落到 `0600` 文件，stdout 不转发到终端。
@@ -383,7 +399,12 @@ device flow 只完成公开应用配置：租户管理员审批、按租户策�
 Agent 默认使用 `./install.sh </dev/null`。无 TTY 时安装器绝不 prompt，也不启动 device
 flow：若飞书凭据缺失，脚本创建带 `cli_REPLACE_ME` 的配置骨架、空的 `0600` Feishu
 Secret 和已经可用的 `0600` Admin credential 后退出。Agent 按错误中打印的精确路径完成
-App ID/Feishu Secret，再重新运行 `./install.sh`。已有有效配置和 Secret 的升级天然非交互。
+App ID/Feishu Secret，再重新运行 `./install.sh`。已有完整凭据但 tenant scope 未全部授权时，
+同样直接列出缺失项并退出，不切换 release；完成飞书侧审批/发布/安装后重跑。已有有效配置、
+Secret 和完整授权的升级天然非交互。
+若有效 App ID 对应的 Secret 文件被显式删除，无 TTY 安装会保留“文件不存在”这一重置
+信号，立即退出并提示改用交互安装，或由 Agent 同时写入目标 App ID 与 Secret 后重跑；它
+不会创建空文件、启动浏览器或等待输入。
 不要让用户把 App Secret 粘贴到聊天、命令参数、仓库或 YAML 中。
 
 只有同时具备以下能力时，Agent 才可以选择代用户承载上面的交互浏览器流程：命令工具能
@@ -670,7 +691,7 @@ journal ready 日志确认；候选和所有新 service definition 只接受私�
 ## 验收顺序
 
 每次改动安装器、launcher、主进程 ready 时，先完成两套平台门禁：Linux 重跑 systemd
-fresh/active/stopped upgrade、失败回滚、linger 和卸载；真实 macOS 14+ Apple Silicon 在
+fresh/active/stopped upgrade、失败回滚、linger 和卸载；真实 macOS 14+ 受支持架构真机在
 实际 GUI 登录用户下依次验证首次安装、`start|stop|restart|status`、active/stopped upgrade、
 故意启动失败后恢复旧版本、失败自动重启、sleep/wake、logout/login 后自动启动，以及卸载
 保留边界。macOS 还必须在 Codex 启动一个后台 terminal 后停止 Netizen，确认 terminal 可继续

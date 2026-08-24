@@ -38,6 +38,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from scripts.feishu_app_onboarding import REQUIRED_TENANT_SCOPES  # noqa: E402
 from scripts.install_user_guide_skill import (  # noqa: E402
     SKILL_NAME,
     SkillInstallError,
@@ -589,27 +590,41 @@ def prepare_configuration(
     except UnicodeError as error:
         raise InstallError(f"configuration is not valid UTF-8: {layout.config_file}") from error
     needs_app_id = "cli_REPLACE_ME" in config_text
+    configured_app_id = None if needs_app_id else _configured_app_id(config_text)
+    rebind_requested = secret_missing and configured_app_id is not None
 
-    if secret_missing:
+    if secret_missing and not rebind_requested:
         _write_atomic(layout.secret_file, b"", mode=0o600)
-    else:
+    elif not secret_missing:
         _require_regular_file(layout.secret_file, "Feishu secret")
         layout.secret_file.chmod(0o600)
-    try:
-        needs_secret = not layout.secret_file.read_bytes().strip()
-    except OSError as error:
-        raise InstallError(
-            f"could not read Feishu secret file {layout.secret_file}: {error}"
-        ) from error
+    if rebind_requested:
+        needs_secret = True
+    else:
+        try:
+            needs_secret = not layout.secret_file.read_bytes().strip()
+        except OSError as error:
+            raise InstallError(
+                f"could not read Feishu secret file {layout.secret_file}: {error}"
+            ) from error
 
     if interactive and (needs_app_id or needs_secret):
-        configured_app_id = None if needs_app_id else _configured_app_id(config_text)
+        if rebind_requested:
+            assert configured_app_id is not None
+            info(
+                "Feishu/Lark app binding reset requested because the App Secret "
+                f"file is missing; selecting a different app replaces {configured_app_id} "
+                "and does not migrate its Feishu sessions"
+            )
+        registration_app_id = (
+            None if needs_app_id or rebind_requested else configured_app_id
+        )
         can_register = app_registrar is not None and (
-            needs_app_id or configured_app_id is not None
+            needs_app_id or rebind_requested or configured_app_id is not None
         )
         use_browser = can_register and _prompt_feishu_setup_method(
             source,
-            app_id=configured_app_id,
+            app_id=registration_app_id,
         )
         if use_browser:
             info(
@@ -617,11 +632,14 @@ def prepare_configuration(
                 "the App Secret will not be displayed"
             )
             try:
-                credentials = app_registrar(configured_app_id)
+                credentials = app_registrar(registration_app_id)
                 config_text = _store_registered_feishu_credentials(
                     layout,
                     config_text=config_text,
-                    expected_app_id=configured_app_id,
+                    expected_app_id=registration_app_id,
+                    replace_existing_app_id=(
+                        configured_app_id if rebind_requested else None
+                    ),
                     credentials=credentials,
                 )
             except InstallError:
@@ -633,6 +651,8 @@ def prepare_configuration(
             else:
                 needs_app_id = False
                 needs_secret = False
+                rebind_requested = False
+                configured_app_id = credentials.app_id
                 info(
                     f"Feishu/Lark app {credentials.app_id} configured; "
                     f"credential saved to {layout.secret_file}"
@@ -642,11 +662,21 @@ def prepare_configuration(
                     "set availability, and add the bot to target chats"
                 )
 
-        if needs_app_id:
+        if needs_app_id or rebind_requested:
             app_id = _prompt_app_id(source)
-            config_text = config_text.replace("cli_REPLACE_ME", app_id, 1)
+            if rebind_requested:
+                assert configured_app_id is not None
+                config_text = _replace_configured_app_id(
+                    config_text,
+                    expected_app_id=configured_app_id,
+                    replacement_app_id=app_id,
+                )
+            else:
+                config_text = config_text.replace("cli_REPLACE_ME", app_id, 1)
             _write_atomic(layout.config_file, config_text.encode(), mode=0o600)
             needs_app_id = False
+            rebind_requested = False
+            configured_app_id = app_id
 
         if needs_secret:
             try:
@@ -662,9 +692,16 @@ def prepare_configuration(
 
     if needs_app_id or needs_secret:
         missing: list[str] = []
-        if needs_app_id:
+        if rebind_requested:
+            missing.append(
+                "rerun ./install.sh in an interactive terminal to create or select "
+                "a Feishu/Lark app, or update instance.appId in "
+                f"{layout.config_file} and write the raw App Secret to "
+                f"{layout.secret_file}"
+            )
+        elif needs_app_id:
             missing.append(f"replace cli_REPLACE_ME in {layout.config_file}")
-        if needs_secret:
+        if needs_secret and not rebind_requested:
             missing.append(f"write the raw App Secret to {layout.secret_file}")
         raise ConfigurationRequired(
             "non-interactive install will not prompt for credentials; "
@@ -680,9 +717,28 @@ def _configured_app_id(config_text: str) -> str | None:
     return next(value for value in match.groupdict().values() if value is not None)
 
 
+def _replace_configured_app_id(
+    config_text: str,
+    *,
+    expected_app_id: str,
+    replacement_app_id: str,
+) -> str:
+    matches = list(CONFIGURED_APP_ID.finditer(config_text))
+    if len(matches) != 1:
+        raise InstallError("configuration does not contain exactly one Feishu/Lark App ID")
+    match = matches[0]
+    matched_group = next(
+        name for name, value in match.groupdict().items() if value is not None
+    )
+    if match.group(matched_group) != expected_app_id:
+        raise InstallError("configuration App ID changed during Feishu/Lark setup")
+    start, end = match.span(matched_group)
+    return config_text[:start] + replacement_app_id + config_text[end:]
+
+
 def _prompt_feishu_setup_method(source: IO[str], *, app_id: str | None) -> bool:
     if app_id is None:
-        browser_action = "Create and configure a Feishu/Lark app in the browser"
+        browser_action = "Create or select and configure a Feishu/Lark app in the browser"
     else:
         browser_action = f"Configure existing app {app_id} in the browser"
     print("Feishu/Lark application setup:")
@@ -718,6 +774,7 @@ def _store_registered_feishu_credentials(
     *,
     config_text: str,
     expected_app_id: str | None,
+    replace_existing_app_id: str | None = None,
     credentials: FeishuAppCredentials,
 ) -> str:
     app_id = credentials.app_id
@@ -734,9 +791,17 @@ def _store_registered_feishu_credentials(
         or any(ord(character) < 0x20 for character in app_secret)
     ):
         raise InstallError("browser setup returned an invalid App Secret")
+    if expected_app_id is not None and replace_existing_app_id is not None:
+        raise InstallError("Feishu/Lark setup has conflicting App ID expectations")
     if expected_app_id is not None and app_id != expected_app_id:
         raise InstallError("browser setup returned a different App ID")
-    if expected_app_id is None:
+    if replace_existing_app_id is not None:
+        updated_config = _replace_configured_app_id(
+            config_text,
+            expected_app_id=replace_existing_app_id,
+            replacement_app_id=app_id,
+        )
+    elif expected_app_id is None:
         if "cli_REPLACE_ME" not in config_text:
             raise InstallError("configuration has no App ID placeholder to update")
         updated_config = config_text.replace("cli_REPLACE_ME", app_id, 1)
@@ -1117,6 +1182,133 @@ def _register_feishu_app_from_release(
         app_id=payload["appId"],
         app_secret=payload["appSecret"],
     )
+
+
+def _configured_app_id_from_file(layout: Layout) -> tuple[str, str]:
+    try:
+        config_text = layout.config_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise InstallError(
+            f"could not read configuration {layout.config_file}: {error}"
+        ) from error
+    app_id = _configured_app_id(config_text)
+    if app_id is None:
+        raise InstallError("configuration does not contain one valid Feishu/Lark App ID")
+    return app_id, config_text
+
+
+def _query_missing_feishu_permissions_from_release(
+    release: Release,
+    layout: Layout,
+    *,
+    runner: Runner,
+) -> tuple[str, ...]:
+    app_id, _ = _configured_app_id_from_file(layout)
+    command: list[str | os.PathLike[str]] = [
+        release.venv / "bin" / "python",
+        "-E",
+        "-B",
+        release.source / "scripts" / "feishu_app_permissions.py",
+        "--app-id",
+        app_id,
+        "--secret-file",
+        layout.secret_file,
+    ]
+    result = runner(
+        command,
+        check=False,
+        capture_output=True,
+        env=_clean_subprocess_environment(),
+        timeout=90.0,
+    )
+    if result.returncode == 130:
+        raise KeyboardInterrupt
+    if result.returncode != 0:
+        raise InstallError(
+            "could not verify Feishu/Lark tenant permissions; ensure the app is "
+            "installed in the tenant and its current version is published, then "
+            "rerun ./install.sh"
+        )
+    try:
+        payload = json.loads(result.stdout or "")
+    except (TypeError, json.JSONDecodeError) as error:
+        raise InstallError(
+            "Feishu/Lark tenant permission verification returned an invalid result"
+        ) from error
+    missing = payload.get("missingScopes") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"version", "missingScopes"}
+        or payload.get("version") != 1
+        or not isinstance(missing, list)
+        or any(not isinstance(scope, str) for scope in missing)
+        or len(set(missing)) != len(missing)
+        or missing
+        != [scope for scope in REQUIRED_TENANT_SCOPES if scope in set(missing)]
+    ):
+        raise InstallError(
+            "Feishu/Lark tenant permission verification returned an invalid result"
+        )
+    return tuple(missing)
+
+
+def _missing_feishu_permissions_message(missing: Sequence[str]) -> str:
+    return (
+        "Feishu/Lark tenant permissions are not fully authorized: "
+        + ", ".join(missing)
+        + "; finish tenant-admin approval and application publication, ensure the "
+        "app is installed in the tenant, then rerun ./install.sh"
+    )
+
+
+def require_feishu_permissions(
+    release: Release,
+    layout: Layout,
+    *,
+    interactive: bool,
+    repair_existing_app: bool,
+    runner: Runner | None = None,
+) -> None:
+    """Gate activation on the effective tenant grant contract."""
+
+    execute = run_command if runner is None else runner
+    missing = _query_missing_feishu_permissions_from_release(
+        release,
+        layout,
+        runner=execute,
+    )
+    if missing and interactive and repair_existing_app:
+        app_id, config_text = _configured_app_id_from_file(layout)
+        info(
+            "Feishu/Lark app is missing required tenant permissions; opening the "
+            f"official browser flow to update exact app {app_id}: "
+            + ", ".join(missing)
+        )
+        try:
+            credentials = _register_feishu_app_from_release(
+                release,
+                app_id,
+                runner=execute,
+            )
+            _store_registered_feishu_credentials(
+                layout,
+                config_text=config_text,
+                expected_app_id=app_id,
+                credentials=credentials,
+            )
+        except InstallError as error:
+            raise InstallError(
+                "official Feishu/Lark browser repair did not complete; "
+                + _missing_feishu_permissions_message(missing)
+            ) from error
+        missing = _query_missing_feishu_permissions_from_release(
+            release,
+            layout,
+            runner=execute,
+        )
+    if missing:
+        raise InstallError(_missing_feishu_permissions_message(missing))
+    info("Feishu/Lark tenant permissions verified")
 
 
 def _release_is_ready(release: Release) -> bool:
@@ -2965,6 +3157,13 @@ def install(
                 ),
             )
         validation = validate_runtime(release, selected_layout, execute)
+        require_feishu_permissions(
+            release,
+            selected_layout,
+            interactive=is_interactive,
+            repair_existing_app=configuration_ready,
+            runner=execute,
+        )
         backend.prepare_host(interactive=is_interactive)
         activate_release(
             release,

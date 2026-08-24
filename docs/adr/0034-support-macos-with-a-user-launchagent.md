@@ -15,12 +15,13 @@ Netizen 的源码开发已可在 macOS 进行，但正式安装事务只认识 L
 
 ## 决定
 
-Netizen 正式支持 macOS 14+ Apple Silicon 当前登录用户的 LaunchAgent，保持零参数
+Netizen 正式支持 macOS 14+ 当前登录用户的 LaunchAgent，Apple Silicon 与 Intel Mac 均在
+支持范围内，保持零参数
 `install.sh` / `uninstall.sh` 与 `service.sh start|stop|restart|status`，不使用 sudo。Linux 与
 macOS 共用 release、配置、凭据、数据库、Skill、activation intent 和回滚事务；窄
 Service Backend 只拥有服务定义、状态、停止确认、发布、启动和 ready 等待。macOS 使用
 `~/Library/LaunchAgents/io.github.lijingda.netizen.plist`，不提供 LaunchDaemon；注销时停止，
-下次登录自动启动。代码不主动拒绝 Intel Mac，但在真实门禁完成前不把它列为正式支持平台。
+下次登录自动启动。两类芯片均已完成服务运行真机验证，实现不按 CPU 架构分叉。
 
 LaunchAgent 只通过 `launchctl print gui/<uid>/<label>` 的退出码判断 loaded，不解析输出文本；
 每次 bootstrap 前先 `enable` 以清除 sticky disabled 状态。受管 plist 必须同时满足当前 UID

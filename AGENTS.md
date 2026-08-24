@@ -52,6 +52,9 @@ design detail, compatibility findings, and procedures in their source docs.
   [ADR 0034](docs/adr/0034-support-macos-with-a-user-launchagent.md) adds the
   macOS user LaunchAgent while preserving the shared activation/rollback
   transaction and exact lifetime-lock/ready boundary.
+  [ADR 0035](docs/adr/0035-gate-activation-on-effective-feishu-permissions.md)
+  lets the official registration page create or select an app and gates every
+  activation on the effective tenant permission contract.
   Superseded ADRs are historical context.
 - [docs/deployment.md](docs/deployment.md): setup, verification, and release
   procedures.
