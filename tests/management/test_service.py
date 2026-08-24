@@ -107,6 +107,18 @@ class FakeManagementRuntime:
         assert binding.native_thread_id is None
         return self.store.delete_binding(binding_id)
 
+    async def delete_exact(
+        self,
+        binding_id: str,
+        *,
+        expected_native_thread_id: str | None,
+    ):
+        binding = self.store.get(binding_id)
+        if binding.native_thread_id != expected_native_thread_id:
+            raise AssertionError("unexpected native Thread identity")
+        self.calls.append(("delete", binding_id))
+        return self.store.delete_binding(binding_id)
+
     async def stop_exact(self, binding_id: str, *, acknowledge=None):
         self.calls.append(("stop", binding_id))
         if acknowledge is not None:
@@ -277,6 +289,28 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(archived.id, binding.id)
         self.assertIsNone(self.store.active_binding(self.scope.key))
         self.assertEqual(self.runtime.calls[-1], ("pointer", binding.id, None))
+
+    async def test_current_delete_requires_exact_native_identity(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-one")
+
+        with self.assertRaises(CurrentBindingChanged):
+            await self.service.delete_current_binding(
+                target=CurrentBindingTarget(self.scope.key, binding.id),
+                expected_native_thread_id=None,
+            )
+
+        deleted = await self.service.delete_current_binding(
+            target=CurrentBindingTarget(self.scope.key, binding.id),
+            expected_native_thread_id="native-one",
+        )
+
+        self.assertEqual(deleted.id, binding.id)
+        self.assertIsNone(self.store.active_binding(self.scope.key))
+        self.assertEqual(
+            self.runtime.calls[-2:],
+            [("delete", binding.id), ("pointer", binding.id, None)],
+        )
 
     async def test_exact_pointer_precondition_distinguishes_none(self) -> None:
         binding = await self._create()

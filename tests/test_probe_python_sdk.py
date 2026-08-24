@@ -117,7 +117,7 @@ class ProcessProbeTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_lifecycle_probe_uses_only_public_non_delete_operations(
+    async def test_lifecycle_probe_uses_public_lifecycle_and_thin_delete(
         self,
     ) -> None:
         thread = SimpleNamespace(
@@ -139,10 +139,13 @@ class ProcessProbeTest(unittest.IsolatedAsyncioTestCase):
                 None,
                 SimpleNamespace(id="thread-1", name="Netizen lifecycle probe 7"),
                 None,
-                SimpleNamespace(id="thread-1", name="Netizen lifecycle probe 7"),
+                None,
+                None,
+                None,
                 None,
             )
         )
+        delete = AsyncMock()
 
         with (
             patch.object(
@@ -154,6 +157,11 @@ class ProcessProbeTest(unittest.IsolatedAsyncioTestCase):
                 probe_python_sdk,
                 "_wait_for_thread_visibility",
                 new=visible,
+            ),
+            patch.object(
+                probe_python_sdk,
+                "AppServerThreadDeleteControl",
+                return_value=SimpleNamespace(delete=delete),
             ),
             patch.object(probe_python_sdk.time, "time_ns", return_value=7),
         ):
@@ -171,15 +179,18 @@ class ProcessProbeTest(unittest.IsolatedAsyncioTestCase):
                 "rename_visible": True,
                 "archive_visible": True,
                 "unarchive_restored_same_id": True,
-                "probe_left_archived": True,
+                "delete_acknowledged": True,
+                "delete_absent_from_scan_and_state_db": True,
             },
         )
         thread.set_name.assert_awaited_once_with("Netizen lifecycle probe 7")
-        self.assertEqual(
-            codex.thread_archive.await_args_list,
-            [call("thread-1"), call("thread-1")],
-        )
+        codex.thread_archive.assert_awaited_once_with("thread-1")
         codex.thread_unarchive.assert_awaited_once_with("thread-1")
+        delete.assert_awaited_once_with("thread-1")
+        self.assertEqual(
+            [item.kwargs.get("use_state_db_only") for item in visible.await_args_list[-4:]],
+            [False, False, True, True],
+        )
 
     def test_matching_processes_requires_exact_argv0(self) -> None:
         marker = "netizen-exact-marker"

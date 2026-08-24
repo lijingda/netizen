@@ -115,7 +115,7 @@ COMMAND_SPECS = (
         ControlName.DELETE,
         CommandOwner.HYBRID,
         "/delete",
-        "永久删除当前 Lazy 会话；已有原生历史时暂不可用",
+        "永久删除当前会话及其原生历史",
     ),
     CommandSpec(
         "unarchive",

@@ -62,6 +62,7 @@ _COMPACTION_TERMINAL_TIMEOUT_SECONDS = 600.0
 _THREAD_LIST_PAGE_LIMIT = 100
 _THREAD_CATALOG_MAX_PAGES = 1_000
 _THREAD_CATALOG_MAX_ITEMS = 100_000
+_THREAD_DELETE_RECONCILE_TIMEOUT_SECONDS = 20.0
 _TERMINAL_RESPONSE_MATERIALIZATION_RETRIES = 4
 _SIDE_CLOSE_DRAIN_TIMEOUT_SECONDS = 5.0
 _SIDE_IDLE_SECONDS = 2 * 60 * 60
@@ -197,6 +198,10 @@ class ThreadLifecycleStateUnknown(ThreadLifecycleError):
     pass
 
 
+class _ThreadLifecycleReadUnavailable(ThreadLifecycleError):
+    pass
+
+
 class ThreadArchived(ThreadLifecycleError):
     pass
 
@@ -206,6 +211,10 @@ class ThreadNotArchived(ThreadLifecycleError):
 
 
 class ThreadDeleteUnavailable(ThreadLifecycleError):
+    pass
+
+
+class ThreadDeleteTargetChanged(ThreadLifecycleError):
     pass
 
 
@@ -819,6 +828,8 @@ class CodexRuntime:
             and self._background_terminal_inspector is not None
         ):
             capabilities.add(NativeCapability.RELEASE)
+        if self._thread_delete_control is not None:
+            capabilities.add(NativeCapability.DELETE)
         return frozenset(capabilities)
 
     def thread_subscription_snapshot(
@@ -1855,6 +1866,7 @@ class CodexRuntime:
         deadline: float | None = None,
         max_pages: int | None = None,
         max_items: int | None = None,
+        use_state_db_only: bool | None = None,
     ) -> dict[str, NativeThreadMetadata]:
         """Read native titles without loading, resuming, or mutating Threads."""
 
@@ -1870,6 +1882,11 @@ class CodexRuntime:
             raise ValueError("native metadata page limit must be positive")
         if max_items is not None and max_items < 1:
             raise ValueError("native metadata item limit must be positive")
+        if use_state_db_only is not None and not isinstance(
+            use_state_db_only,
+            bool,
+        ):
+            raise ValueError("use_state_db_only must be boolean or None")
         if deadline is not None and deadline <= asyncio.get_running_loop().time():
             raise ThreadCatalogDeadlineExceeded(
                 "native Thread metadata deadline elapsed"
@@ -1896,6 +1913,8 @@ class CodexRuntime:
                         # stay visible in both active and archived catalogs.
                         "model_providers": [],
                     }
+                    if use_state_db_only is not None:
+                        list_kwargs["use_state_db_only"] = use_state_db_only
                     response = await self._codex.thread_list(**list_kwargs)
                     page_count += 1
                     data = getattr(response, "data", None)
@@ -2062,6 +2081,47 @@ class CodexRuntime:
             return NativeThreadCatalogState.ARCHIVED
         return NativeThreadCatalogState.MISSING
 
+    async def _thread_delete_catalog_state(
+        self,
+        thread_id: str,
+    ) -> NativeThreadCatalogState:
+        """Reconcile one delete against both rollout scan and state DB views."""
+
+        deadline = (
+            asyncio.get_running_loop().time()
+            + _THREAD_DELETE_RECONCILE_TIMEOUT_SECONDS
+        )
+        active_present = False
+        archived_present = False
+        for use_state_db_only in (False, True):
+            active = await self.thread_metadata(
+                (thread_id,),
+                archived=False,
+                deadline=deadline,
+                max_pages=_THREAD_CATALOG_MAX_PAGES,
+                max_items=_THREAD_CATALOG_MAX_ITEMS,
+                use_state_db_only=use_state_db_only,
+            )
+            archived = await self.thread_metadata(
+                (thread_id,),
+                archived=True,
+                deadline=deadline,
+                max_pages=_THREAD_CATALOG_MAX_PAGES,
+                max_items=_THREAD_CATALOG_MAX_ITEMS,
+                use_state_db_only=use_state_db_only,
+            )
+            active_present = active_present or thread_id in active
+            archived_present = archived_present or thread_id in archived
+        if active_present and archived_present:
+            raise ThreadCatalogError(
+                "native Thread appeared in active and archived delete views"
+            )
+        if active_present:
+            return NativeThreadCatalogState.ACTIVE
+        if archived_present:
+            return NativeThreadCatalogState.ARCHIVED
+        return NativeThreadCatalogState.MISSING
+
     def context_window_usage(
         self,
         binding_id: str,
@@ -2211,19 +2271,34 @@ class CodexRuntime:
             return archived
 
     async def delete_binding(self, binding: ThreadBinding) -> ThreadBinding:
-        """Compatibility path retaining the dormant materialized adapter."""
+        """Compatibility wrapper for exact Binding delete."""
+
+        return await self.delete_exact(
+            binding.id,
+            expected_native_thread_id=binding.native_thread_id,
+        )
+
+    async def delete_exact(
+        self,
+        binding_id: str,
+        *,
+        expected_native_thread_id: str | None,
+    ) -> ThreadBinding:
+        """Delete one exact Lazy or materialized Binding."""
 
         return await self._delete_binding_exact(
-            binding.id,
+            binding_id,
             allow_materialized=True,
+            expected_native_thread_id=expected_native_thread_id,
         )
 
     async def delete_lazy_exact(self, binding_id: str) -> ThreadBinding:
-        """Delete one exact Lazy Binding; materialized delete is unreachable."""
+        """Delete one exact Lazy Binding without reaching native delete."""
 
         return await self._delete_binding_exact(
             binding_id,
             allow_materialized=False,
+            expected_native_thread_id=None,
         )
 
     async def _delete_binding_exact(
@@ -2231,6 +2306,7 @@ class CodexRuntime:
         binding_id: str,
         *,
         allow_materialized: bool,
+        expected_native_thread_id: str | None,
     ) -> ThreadBinding:
         if not self._accepting:
             raise RuntimeClosed("服务正在停止，暂不能删除会话。")
@@ -2239,6 +2315,15 @@ class CodexRuntime:
                 raise RuntimeClosed("服务正在停止，暂不能删除会话。")
             self._guard_no_lifecycle_locked(binding_id)
             binding = self._bindings.get(binding_id)
+            if binding.native_thread_id != expected_native_thread_id:
+                if not allow_materialized and binding.native_thread_id is not None:
+                    raise ThreadDeleteUnavailable(
+                        "已有原生历史的会话不支持 Lazy 删除；本次未调用 Codex。"
+                    )
+                raise ThreadDeleteTargetChanged(
+                    "会话的原生 Thread 已变化，本删除确认未执行；"
+                    "请重新发送 /delete。"
+                )
             if binding.id in self._compacting:
                 raise ThreadCompacting("当前会话正在压缩上下文，不能删除。")
             if binding.id in self._goals:
@@ -2270,25 +2355,73 @@ class CodexRuntime:
             control = self._thread_delete_control
             if control is None:
                 raise ThreadDeleteUnavailable(
-                    "已有原生历史的会话暂不支持删除；等待 Python SDK 提供公开、"
-                    "可靠的 Thread Delete 后再开放。本次未执行。"
+                    "当前 SDK/App Server 的 Thread Delete 兼容契约未通过；"
+                    "本次未调用 Codex，Binding 与原生历史均未改变。"
                 )
-            await self._idle_lifecycle_thread_locked(binding)
+            native_already_absent = False
+            try:
+                await self._idle_lifecycle_thread_locked(binding)
+            except _ThreadLifecycleReadUnavailable as read_error:
+                try:
+                    state = await self._thread_delete_catalog_state(
+                        binding.native_thread_id
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as reconcile_error:
+                    raise ThreadLifecycleError(
+                        "无法读取 Codex 会话或完成原生目录对账；"
+                        "本次未启动删除，请稍后重试。"
+                    ) from reconcile_error
+                if state is not NativeThreadCatalogState.MISSING:
+                    raise read_error
+                native_already_absent = True
             operation = self._begin_lifecycle_locked(
                 binding,
                 ThreadLifecycleState.DELETING,
             )
+            delete_error: Exception | None = None
+            if not native_already_absent:
+                try:
+                    await control.delete(binding.native_thread_id)
+                except asyncio.CancelledError:
+                    self._retain_unknown_lifecycle(operation)
+                    raise
+                except Exception as error:
+                    delete_error = error
+
+            if delete_error is not None:
+                try:
+                    state = await self._thread_delete_catalog_state(
+                        binding.native_thread_id
+                    )
+                except asyncio.CancelledError:
+                    self._retain_unknown_lifecycle(operation)
+                    raise
+                except Exception as reconcile_error:
+                    self._retain_unknown_lifecycle(operation)
+                    raise ThreadLifecycleStateUnknown(
+                        "Codex 会话删除结果与原生目录均未确认；Binding 保留且"
+                        "服务已关闭 admission，请重启后重新执行 /delete 对账。"
+                    ) from reconcile_error
+                if state is not NativeThreadCatalogState.MISSING:
+                    self._finish_lifecycle_locked(operation)
+                    self._schedule_known_subscription_locked(
+                        binding.id,
+                        binding.native_thread_id,
+                    )
+                    raise ThreadLifecycleError(
+                        "Codex 会话仍存在于原生目录，Binding 已保留；"
+                        "本次删除未完成，请重新确认后重试。"
+                    ) from delete_error
+
             try:
-                await control.delete(binding.native_thread_id)
                 deleted = self._bindings.delete_binding(binding.id)
-            except asyncio.CancelledError:
-                self._retain_unknown_lifecycle(operation)
-                raise
             except Exception as error:
                 self._retain_unknown_lifecycle(operation)
                 raise ThreadLifecycleStateUnknown(
-                    "Codex 会话删除结果未确认；Binding 保留且服务已关闭 "
-                    "admission，不能自动重试。"
+                    "原生 Codex 会话已删除或确认不存在，但 Binding 删除结果未确认；"
+                    "服务已关闭 admission，请重启后重新执行 /delete 收尾。"
                 ) from error
             self._finish_lifecycle_locked(operation)
             record = self._subscriptions.pop(binding.id, None)
@@ -3399,12 +3532,19 @@ class CodexRuntime:
         if active is not None:
             raise self._running_lifecycle_error(active, operation="修改")
         await self._guard_no_goal_locked(binding)
-        thread = await self._lifecycle_thread_locked(binding)
+        try:
+            thread = await self._lifecycle_thread_locked(binding)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            raise _ThreadLifecycleReadUnavailable(
+                "无法读取当前原生 Codex Thread，生命周期操作未开始。"
+            ) from error
         self._schedule_known_subscription_locked(binding.id, thread.id)
         try:
             response = await thread.read(include_turns=False)
         except Exception as error:
-            raise ThreadLifecycleError(
+            raise _ThreadLifecycleReadUnavailable(
                 "无法读取当前原生 Codex Thread，生命周期操作未开始。"
             ) from error
         native = getattr(response, "thread", None)

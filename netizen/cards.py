@@ -49,6 +49,9 @@ _PROJECT_REFERENCE = re.compile(
     r"project:v1:([a-z0-9][a-z0-9_-]{0,63}):([1-9][0-9]*)"
 )
 _BINDING_REFERENCE = re.compile(r"binding:v1:([A-Za-z0-9][A-Za-z0-9-]{0,127})")
+_NATIVE_THREAD_REFERENCE = re.compile(
+    r"native-thread:v1:([A-Za-z0-9][A-Za-z0-9._-]{0,191})"
+)
 _CONFIG_MODEL_REFERENCE = re.compile(
     r"config-model:v2:([A-Za-z0-9][A-Za-z0-9-]{0,127}):"
     r"([1-9][0-9]*):([A-Za-z0-9_-]+)"
@@ -903,16 +906,34 @@ def delete_binding_card(
     short_id: str,
     project_alias: str,
     title: str,
+    native_thread_id: str | None = None,
 ) -> OutboundCard:
     builder = _builder(
         "永久删除当前会话",
         f"{short_id} · {project_alias}",
         template="red",
     )
-    builder.markdown(
-        f"即将删除：`{_md_code(title)}`\n"
-        "该 Lazy 会话尚无原生历史；确认后只删除本地 Binding。"
-    )
+    if native_thread_id is None:
+        builder.markdown(
+            f"即将删除：`{_md_code(title)}`\n"
+            "该 Lazy 会话尚无原生历史；确认后只删除本地 Binding。"
+        )
+        confirm_body = "请再次确认：该本地会话映射将被永久删除。"
+        callback_extra: dict[str, object] = {}
+    else:
+        builder.markdown(
+            f"即将删除：`{_md_code(title)}`\n"
+            "确认后将永久删除原生 Codex Thread、其 spawned descendants 与本地 "
+            "Binding；Codex App/CLI 中的对应历史也会消失。"
+        )
+        confirm_body = (
+            "请再次确认：原生会话、派生会话与本地 Binding 都将永久删除，无法恢复。"
+        )
+        callback_extra = {
+            "expected_native_thread_id": _native_thread_reference(
+                native_thread_id
+            )
+        }
     builder.raw(
         _callback_button(
             label="永久删除当前会话",
@@ -920,10 +941,11 @@ def delete_binding_card(
                 scope,
                 CardControlName.DELETE_BINDING,
                 binding_id=_binding_reference(binding_id),
+                **callback_extra,
             ),
             confirm=(
                 "永久删除且无法恢复",
-                "请再次确认：该本地会话映射将被永久删除。",
+                confirm_body,
             ),
         )
     )
@@ -1452,6 +1474,11 @@ def decode_button_action(
         raise CardActionError("未知 Scope kind。") from error
     scope_fields = {"topic_id"} if scope_kind is ScopeKind.TOPIC else set()
     expected = common | scope_fields | extra_by_name[name]
+    if (
+        name is CardControlName.DELETE_BINDING
+        and "expected_native_thread_id" in payload
+    ):
+        expected.add("expected_native_thread_id")
     if set(payload) != expected:
         raise CardActionError("卡片动作字段不完整或包含未知字段。")
     if payload["chat_id"] != callback_chat_id:
@@ -1466,6 +1493,7 @@ def decode_button_action(
     alias = None
     binding_id = None
     expected_active_binding_id = None
+    expected_native_thread_id = None
     side_id = None
     revision = None
     enabled = None
@@ -1491,6 +1519,13 @@ def decode_button_action(
                     "expected_active_binding_id",
                 )
             )
+    if "expected_native_thread_id" in payload:
+        expected_native_thread_id = _decode_native_thread_reference(
+            _required_string(
+                payload["expected_native_thread_id"],
+                "expected_native_thread_id",
+            )
+        )
     if "side_id" in payload:
         side_id = _decode_side_reference(
             _required_string(payload["side_id"], "side_id")
@@ -1527,6 +1562,7 @@ def decode_button_action(
         enabled=enabled,
         binding_id=binding_id,
         expected_active_binding_id=expected_active_binding_id,
+        expected_native_thread_id=expected_native_thread_id,
         side_id=side_id,
         page=page,
     )
@@ -1904,6 +1940,20 @@ def _decode_binding_reference(value: str) -> str:
     match = _BINDING_REFERENCE.fullmatch(value)
     if match is None:
         raise CardActionError("会话引用无效，请重新打开原卡片。")
+    return match.group(1)
+
+
+def _native_thread_reference(thread_id: str) -> str:
+    value = f"native-thread:v1:{thread_id}"
+    if _NATIVE_THREAD_REFERENCE.fullmatch(value) is None:
+        raise ValueError("invalid native Thread reference")
+    return value
+
+
+def _decode_native_thread_reference(value: str) -> str:
+    match = _NATIVE_THREAD_REFERENCE.fullmatch(value)
+    if match is None:
+        raise CardActionError("原生会话引用无效，请重新发送 /delete。")
     return match.group(1)
 
 

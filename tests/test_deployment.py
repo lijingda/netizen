@@ -208,12 +208,13 @@ class DeploymentAssetsTest(unittest.TestCase):
             r"for phase in [^\n]*\blifecycle\b",
         )
         self.assertIn("thread_list(archived=False|True)", deployment)
-        self.assertIn("它不会调用\n`thread/delete`", deployment)
+        self.assertIn("`thread/delete`", deployment)
+        self.assertIn("scan/state-db", deployment)
         lifecycle = probe.split("async def _thread_lifecycle_live", 1)[1].split(
             "async def _steer", 1
         )[0]
-        self.assertNotIn("ThreadDelete", lifecycle)
-        self.assertNotIn(".delete(", lifecycle)
+        self.assertIn("AppServerThreadDeleteControl", lifecycle)
+        self.assertIn(".delete(", lifecycle)
 
     def test_release_gate_includes_non_consuming_turn_plan_probes(self) -> None:
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")

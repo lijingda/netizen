@@ -275,11 +275,11 @@ class AppServerSkillCatalog:
 
 
 class AppServerThreadDeleteControl:
-    """Dormant migration harness for the missing public delete facade.
+    """Narrow fixed-method bridge for the missing public delete facade.
 
-    ADR 0019 forbids constructing this adapter in production.  It remains here
-    only so installed-SDK shape/synthetic tests and the facade sentinel can
-    force an explicit migration when a public delete API arrives.
+    ADR 0037 permits this capability-specific adapter in production.  The
+    facade sentinel still forces an explicit migration as soon as the public
+    SDK exposes native Thread delete.
     """
 
     __slots__ = ("_client", "_response_model")

@@ -47,6 +47,7 @@ from ..codex_runtime import (
     StopDisposition,
     ThreadArchived,
     ThreadCatalogIdentityMissing,
+    ThreadDeleteTargetChanged,
 )
 from ..domain import FeishuScope
 from ..projects import (
@@ -231,8 +232,10 @@ class ManagementRuntimePort:
 
     Keeping this as a real object, rather than merely a structural Protocol,
     prevents a future HTTP handler from accidentally receiving the complete
-    Runtime and reaching Prompt, Turn, Goal, Compact, Side-create, or
-    materialized-delete capabilities.
+    Runtime and reaching Prompt, Turn, Goal, Compact, or Side-create
+    capabilities.  Native delete is exposed only as one exact Binding
+    lifecycle operation; adapters still decide which product surfaces may use
+    it.
     """
 
     __slots__ = ("__runtime",)
@@ -288,6 +291,17 @@ class ManagementRuntimePort:
 
     async def delete_lazy_exact(self, binding_id: str) -> ThreadBinding:
         return await self.__runtime.delete_lazy_exact(binding_id)
+
+    async def delete_exact(
+        self,
+        binding_id: str,
+        *,
+        expected_native_thread_id: str | None,
+    ) -> ThreadBinding:
+        return await self.__runtime.delete_exact(
+            binding_id,
+            expected_native_thread_id=expected_native_thread_id,
+        )
 
     async def stop_exact(
         self,
@@ -764,9 +778,32 @@ class InstanceManagementService:
         *,
         target: CurrentBindingTarget,
     ) -> ThreadBinding:
+        return await self.delete_current_binding(
+            target=target,
+            expected_native_thread_id=None,
+        )
+
+    async def delete_current_binding(
+        self,
+        *,
+        target: CurrentBindingTarget,
+        expected_native_thread_id: str | None,
+    ) -> ThreadBinding:
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
-            deleted = await self._runtime.delete_lazy_exact(binding.id)
+            if binding.native_thread_id != expected_native_thread_id:
+                raise CurrentBindingChanged(
+                    "the current Binding native Thread changed"
+                )
+            try:
+                deleted = await self._runtime.delete_exact(
+                    binding.id,
+                    expected_native_thread_id=expected_native_thread_id,
+                )
+            except ThreadDeleteTargetChanged as error:
+                raise CurrentBindingChanged(
+                    "the current Binding native Thread changed"
+                ) from error
             current_id = self._active_id(target.scope_key)
             await self._runtime.binding_pointer_changed(binding.id, current_id)
             return deleted

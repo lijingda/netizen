@@ -142,8 +142,11 @@ Turn Settings、重命名、归档、恢复或恢复并设为当前、删除 Laz
 
 - `/archive`：确认后归档当前空闲的原生 Thread，保留会话配置，并清空当前会话指针；不会自动切换到另一会话。
 - `/unarchive <短 ID>`：恢复已归档会话并切换到它。
-- `/delete`：只有尚未产生原生历史的 Lazy 会话可以二次确认后永久删除本地 Binding。
-- 已有原生历史的会话暂不能通过飞书删除，因为当前固定的 Python SDK 尚未提供公开、可靠的 Thread Delete。此时 `/delete` 不会调用 Codex，也不会改变 Binding 或原生历史；可选择归档并等待 SDK 升级。
+- `/delete`：Lazy 会话二次确认后只永久删除本地 Binding；已有原生历史的 idle 会话会显示
+  更强的红色确认，确认后永久删除原生 Thread、App Server 管理的 spawned descendants、
+  Codex App/CLI 历史与本地 Binding，无法恢复。
+- 删除失败不会自动再发一次 delete。系统会只读对账原生目录：明确仍存在时保留会话供用户
+  重新确认，明确已不存在时收尾删除 Binding，无法判定时暂停新任务并要求重启后再对账。
 
 `/rename`、`/archive` 命令和 `/delete` 只作用于当前会话。要重命名或删除另一个普通会话，
 应先 `/resume`；`/sessions` 行内的“归档”是明确例外，不需要先切换，也不改变 `/archive`
@@ -238,7 +241,8 @@ Netizen 复用原生 Codex Thread、历史、配置和工具，但飞书不是 C
 - `/plan` 和 `/apps` 当前没有安全、公开的高层 SDK 控制面，在飞书中不可用。
 - `$app` 当前不会被包装成原生结构化 attachment。
 - `/model`、`/effort`、`/fast` 被统一为 `/new` 和 `/config` 卡片。
-- 已物化 Thread 的永久删除仍不可用；使用 `/archive` 隐藏并保留历史。
+- 已物化 Thread 只能在 idle、已持久化且 Delete compatibility gate 可用时永久删除；
+  不想丢失历史时使用 `/archive`。
 - `/release` 只释放飞书服务当前连接的订阅，不删除 Thread；CLI/App 或其他 App Server
   的订阅彼此独立。之后飞书仍可按原 native ID 继续。
 - Codex 认证、MCP、Skills、AGENTS、`config.toml`、sandbox 和其他原生配置来自服务用户的标准 Codex 状态，不由每个飞书 Scope 另建一套配置系统。
@@ -265,9 +269,10 @@ Goal、停止或压缩状态会直接拒绝普通消息。等待状态回到空�
 
 ### “为什么 `/delete` 删除不了？”
 
-当前会话已经有原生历史，而当前固定的 Python SDK 没有公开、可靠的 Thread Delete。
-因此飞书侧只删除尚未物化的 Lazy 会话；本次不会调用 Codex，Binding 和原生历史都不变。
-有历史的会话请 `/archive`，或等待 SDK 升级。
+已有原生历史的会话只有在空闲、已持久化且当前实例的 Delete compatibility gate 可用时
+才能删除；运行中、Goal、压缩中、ephemeral、未持久化或原生状态不可读都会拒绝。失败
+提示若说原生目录仍存在，可重新发送 `/delete` 并再次确认；若说状态 unknown，应先让
+部署者正常重启服务再对账，不要连续点击。只想隐藏并保留历史时使用 `/archive`。
 
 ### “`/stop` 已完成，为什么进程还在？”
 

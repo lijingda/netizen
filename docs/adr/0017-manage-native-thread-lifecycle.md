@@ -2,15 +2,15 @@
 status: accepted
 date: 2026-08-12
 amends: 0008, 0014
-amended_by: 0019, 0036
+amended_by: 0019, 0036, 0037
 related: 0001, 0016
 ---
 
 # 以当前 Binding 管理原生 Thread 生命周期
 
-> **修订：** materialized Thread Delete 的产品入口、生产 Adapter 与 live delete gate 已由
-> [ADR 0019](0019-keep-native-thread-delete-unavailable.md) 暂停。本文关于 rename、archive、
-> unarchive、Lazy Binding Delete 以及作为迁移哨兵保留的 delete synthetic contract 仍有效。
+> **修订：** [ADR 0019](0019-keep-native-thread-delete-unavailable.md) 曾暂停 materialized
+> Thread Delete；[ADR 0037](0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md)
+> 已在重新实测后，用薄 Adapter 与四视图失败对账恢复该能力。
 > [ADR 0036](0036-archive-exact-idle-sessions-from-the-sessions-card.md) 另行允许普通
 > `/sessions` 卡片按 exact Binding 归档 idle materialized 会话；`/archive` 命令仍只作用于
 > 当前会话。
@@ -31,8 +31,8 @@ Netizen 已能在一个 Feishu Scope 中创建、切换和展示多个 Binding�
   不带参数时打开卡片。名称归一化空白后必须为 1 到 120 个字符。
 - `/archive` 只为当前会话显示确认卡。成功后归档原生 Thread、清空 Scope 的 active
   pointer，但保留 Binding、Project 和 Binding Turn Settings，因此恢复后配置不变。
-- `/delete` 只为 Lazy Binding 显示红色不可恢复确认卡并删除本地记录。materialized
-  Binding 的原生删除已由 ADR 0019 暂停，命令在任何 native read/mutation 前明确拒绝。
+- `/delete` 为 Lazy Binding 显示红色不可恢复确认卡并删除本地记录；materialized Binding
+  按 ADR 0037 携带 exact native ID 二次确认，原生成功或 absent 对账后才删除本地记录。
 - 普通 `/sessions` 不显示归档会话；`/sessions archived` 使用原生 archived catalog
   单独展示。`/unarchive <会话短 ID>` 或归档卡片中的“恢复并切换”按钮恢复原生 Thread
   并把对应 Binding 设为 active。
@@ -57,9 +57,10 @@ rename 使用公开 `AsyncThread.set_name()`，archive/unarchive 使用公开
 Goal、compaction 和其他 lifecycle mutation 互斥；rename 可以在原生 Thread 存在时执行，
 但自身仍占用一个短生命周期槽。
 
-任何已经开始的原生 mutation 若响应、取消或后续本地映射提交结果未知，Runtime 保留该
-Binding 的 lifecycle-unknown 槽并关闭进程级 admission；不得自动重试、猜测成功或切到
-另一 Thread。成功归档或删除后不自动选择其他会话，避免后续普通消息被静默重定向。
+任何已经开始的原生 mutation 若响应、取消或后续本地映射提交结果未知，Runtime 默认保留
+该 Binding 的 lifecycle-unknown 槽并关闭进程级 admission。delete 的唯一例外是 ADR 0037
+规定的一次有界四视图只读对账：明确 present 时保留并允许重新确认，明确 absent 时提交
+Binding Delete；unknown 仍 fail closed。成功归档或删除后不自动选择其他会话。
 
 ### delete 只使用一个可移除的窄 Adapter
 
@@ -71,7 +72,7 @@ Binding 的 lifecycle-unknown 槽并关闭进程级 admission；不得自动重�
 - 不暴露通用 request、字符串 method、任意 response model、第二客户端或本地删除模拟；
 - 不使用 SDK 版本 allowlist。构造时按能力独立校验 ownership edge、generated model
   fields/aliases 与空 response；synthetic harness 断言 exact method/params，并把响应丢失
-  归为 unknown mutation；
+  作为 unknown mutation 交给 ADR 0037 的 Runtime 对账；
 - facade inventory 一旦发现 `AsyncCodex.thread_delete` 或 `AsyncThread.delete`，升级即以
   `migration-required:thread-delete` 失败，直到实现改回公开 SDK 并删除该 shim。Goal、
   Skills 和 delete 各自独立迁移，不建立 provider framework。
@@ -84,9 +85,9 @@ Server 的 delete shape/synthetic contract。
 
 每次 SDK/App Server 升级和候选发布还必须在目标环境运行 `--phase lifecycle`。该 phase
 只操作自己创建的探针 Thread，依次执行一个 seed Turn、公开 rename、公开 archive、公开
-unarchive 和 Adapter delete，并通过 active/archived 两套分页 catalog 观察名称保留、
-同一 ID 恢复以及最终从两套目录消失。任一步失败都不得发布 materialized delete；探针
-不会删除任何既有 Thread，也不会在 delete 响应丢失后自动重试。
+unarchive 和 Adapter delete，并通过 rollout scan/state DB 各自的 active/archived 分页
+catalog 观察名称保留、同一 ID 恢复以及最终从四个视图消失。任一步失败都不得发布
+materialized delete；探针不会删除任何既有 Thread，也不会在 delete 响应丢失后自动重试。
 
 ## 结果
 

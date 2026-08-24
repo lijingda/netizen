@@ -172,6 +172,34 @@ class CardCodecTest(unittest.TestCase):
                 self.assertEqual(intent.name, expected)
                 self.assertEqual(intent.binding_id, "binding-123")
 
+        materialized_delete = self.decode(
+            {
+                "v": 3,
+                "intent": "binding.delete",
+                "chat_id": "oc_group",
+                "scope_kind": "topic",
+                "topic_id": "omt_topic",
+                "binding_id": "binding:v1:binding-123",
+                "expected_native_thread_id": "native-thread:v1:thread-123",
+            }
+        )
+        self.assertEqual(
+            materialized_delete.expected_native_thread_id,
+            "thread-123",
+        )
+        with self.assertRaises(CardActionError):
+            self.decode(
+                {
+                    "v": 3,
+                    "intent": "binding.delete",
+                    "chat_id": "oc_group",
+                    "scope_kind": "topic",
+                    "topic_id": "omt_topic",
+                    "binding_id": "binding:v1:binding-123",
+                    "expected_native_thread_id": "thread-123",
+                }
+            )
+
         renamed = decode_card_form(
             scope=self.scope,
             message_id="om_card",
@@ -1257,6 +1285,14 @@ class CardRendererTest(unittest.TestCase):
             project_alias="test",
             title="Release review",
         )
+        materialized_delete = delete_binding_card(
+            scope=self.scope,
+            binding_id=binding_id,
+            short_id="11111111",
+            project_alias="test",
+            title="Release review",
+            native_thread_id="native-one",
+        )
         archived = archived_sessions_card(
             scope=self.scope,
             sessions=(
@@ -1281,6 +1317,12 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("永久删除且无法恢复", str(delete.card))
         self.assertIn("只删除本地 Binding", str(delete.card))
         self.assertNotIn("原生 Thread", str(delete.card))
+        self.assertIn("原生 Codex Thread", str(materialized_delete.card))
+        self.assertIn("spawned descendants", str(materialized_delete.card))
+        self.assertIn(
+            "native-thread:v1:native-one",
+            str(materialized_delete.card),
+        )
         self.assertIn("binding.unarchive", str(archived.card))
         self.assertIn("恢复并切换", str(archived.card))
 

@@ -113,9 +113,10 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
 - `/archive`：确认后归档当前 idle 原生 Thread，保留 Binding 与会话 Turn 配置，并清空
   当前 active pointer；不会自动切换到另一会话。
 - `/unarchive <短 ID>`：恢复指定的已归档会话并切换到它。
-- `/delete`：Lazy 会话显示红色二次确认并只删除本地 Binding。已有原生历史的会话明确
-  提示暂不可用，不读取或修改原生 Thread，也不删除 Binding；等待 Python SDK 提供公开
-  可靠的 Thread Delete 后再开放。
+- `/delete`：Lazy 会话显示红色二次确认并只删除本地 Binding。已有原生历史的 idle 会话
+  显示包含 exact native ID 的红色二次确认；成功后原生 Thread、App Server 管理的
+  spawned descendants、Codex App/CLI 历史与本地 Binding 都永久删除。失败不会盲目重发，
+  而是通过 rollout scan/state DB 的 active/archived 四视图对账后再决定保留或提交 Binding。
 - `/status`：逐行显示当前会话短 ID、原生名称与首条消息预览、Project、完整 native
   Thread ID、状态、当前 active Turn 的原生 checklist 与已接受 steer 次数、最近完成且
   可观测 Turn 的上下文窗口用量，以及 Model、Effort、Speed。checklist 使用
@@ -146,8 +147,8 @@ slash command 由同一注册表区分 Channel control 与 native capability。�
 `openai-codex==0.147.0` 的高层 facade 尚无完整 Goal、Skills discovery、Side boundary
 inject、Thread unsubscribe 与 Thread Delete。ADR 0014 用同一 SDK client 上的窄 Adapter
 暂时补齐 Goal/Skills；ADR 0021 只为 Side 暴露固定 boundary inject，ADR 0028 将普通
-Binding 与 Side 共用的 exact-thread unsubscribe 拆成独立窄 Adapter；Thread Delete Adapter
-只保留为非生产兼容性测试边界，服务不会构造它，materialized `/delete` 保持 unavailable。
+Binding 与 Side 共用的 exact-thread unsubscribe 拆成独立窄 Adapter；ADR 0037 只为
+Thread Delete 暴露固定 `thread/delete`，由 Runtime 承担一次四视图失败对账。
 rename/archive/unarchive 始终使用公开 SDK。SDK 高层支持任一缺口后，升级 harness 会
 要求切回公开 provider 并删除对应 shim。
 ADR 0020 另行批准一个精确版本/源码指纹门禁的只读 plan observer：它只在 `/status`
@@ -422,13 +423,13 @@ active Turn plan 的只读快照不改变队列，随后公开 stream 仍能收�
 `turn/plan/updated`、steer 后完整 plan 替换、最终回复与终态后公开 stream drain。
 
 `make check` 中的 SDK Gap synthetic harness 会让实际安装的 SDK client 连接 fake
-App Server，验证固定 Goal/Skills/Side method、shape、Side boundary 与 unsubscribe
-终态、即时通知、多物理 Turn、resume route 顺序，以及 dormant Thread Delete shim 的
-shape 与 facade migration sentinel；它不按
+App Server，验证固定 Goal/Skills/Side/Delete method、shape、Side boundary 与 unsubscribe
+终态、即时通知、多物理 Turn、resume route 顺序、Thread Delete 空响应/response loss
+以及 facade migration sentinel；它不按
 SDK 版本号或整包 hash 放行。候选 release 还必须在目标环境分别运行 `--phase skills`、
-`--phase lifecycle` 与 `--phase goal`。lifecycle phase 只用公开 SDK 验证自己创建的探针
-Thread 可 rename → archive → unarchive 且保持同一 ID，验证后重新归档探针；它不调用
-Thread Delete。
+`--phase lifecycle` 与 `--phase goal`。lifecycle phase 用公开 SDK 验证自己创建的探针
+Thread 可 rename → archive → unarchive 且保持同一 ID，再通过薄 Adapter 删除并确认
+rollout scan/state DB 的 active/archived 四视图全部 absent。
 Goal phase
 首先硬性证明零 Turn Thread 已持久化，再验证 start/pause/resume/terminal 与同 Thread
 普通 Turn；任何一步不成立时不得开放 Goal。这里不改变 ADR 0009 对实验 terminal
@@ -495,6 +496,10 @@ boundary inject Adapter 的移除边界。
 [ADR 0028](docs/adr/0028-release-idle-persistent-thread-subscriptions.md) 固定普通持久 Thread
 的十五分钟空闲订阅释放、active pointer 切换、显式 `/release`、后台 terminal 阻断、
 无持久 timer 与 same-ID resume 语义，并拆分可复用的 unsubscribe Adapter。
+
+[ADR 0037](docs/adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md) 在
+`0.147.0` live requalification 后恢复 materialized Thread Delete，固定薄 Adapter、exact
+native identity 确认、native-first 提交顺序与 present/absent/unknown 四视图对账。
 
 [ADR 0022](docs/adr/0022-load-account-shell-environment-at-service-start.md) 固定 systemd
 每次启动时加载账号 shell 导出环境、无 TTY/超时边界和受管变量覆盖语义。

@@ -60,6 +60,7 @@ from netizen.codex_runtime import (
     ThreadCompactStartFailed,
     ThreadCompacting,
     ThreadDeleteUnavailable,
+    ThreadDeleteTargetChanged,
     ThreadGoalActive,
     ThreadBackgroundTerminalsActive,
     ThreadCatalogDeadlineExceeded,
@@ -2433,6 +2434,18 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.delete_control.calls, [])
         self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
 
+    async def test_stale_lazy_delete_snapshot_cannot_expand_to_native_delete(
+        self,
+    ) -> None:
+        stale = self.binding()
+        self.store.assign_native_thread_id(stale.id, "native-1")
+
+        with self.assertRaises(ThreadDeleteTargetChanged):
+            await self.runtime.delete_binding(stale)
+
+        self.assertEqual(self.delete_control.calls, [])
+        self.assertEqual(self.store.get(stale.id).native_thread_id, "native-1")
+
     async def test_delete_native_ack_precedes_local_binding_delete(self) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
@@ -2444,6 +2457,131 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.delete_control.calls, ["native-1"])
         with self.assertRaises(BindingNotFound):
             self.store.get(binding.id)
+
+    async def test_delete_error_reconciles_four_missing_native_views(self) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        binding = self.store.get(binding.id)
+        self.delete_control.errors.append(RuntimeError("app-server error"))
+        self.codex.thread_list_pages = [
+            SimpleNamespace(data=[], next_cursor=None),
+            SimpleNamespace(data=[], next_cursor=None),
+            SimpleNamespace(data=[], next_cursor=None),
+            SimpleNamespace(data=[], next_cursor=None),
+        ]
+
+        deleted = await self.runtime.delete_binding(binding)
+
+        self.assertEqual(deleted.id, binding.id)
+        with self.assertRaises(BindingNotFound):
+            self.store.get(binding.id)
+        self.assertEqual(
+            self.codex.thread_list_calls,
+            [
+                {
+                    "archived": False,
+                    "cursor": None,
+                    "limit": 100,
+                    "model_providers": [],
+                    "use_state_db_only": False,
+                },
+                {
+                    "archived": True,
+                    "cursor": None,
+                    "limit": 100,
+                    "model_providers": [],
+                    "use_state_db_only": False,
+                },
+                {
+                    "archived": False,
+                    "cursor": None,
+                    "limit": 100,
+                    "model_providers": [],
+                    "use_state_db_only": True,
+                },
+                {
+                    "archived": True,
+                    "cursor": None,
+                    "limit": 100,
+                    "model_providers": [],
+                    "use_state_db_only": True,
+                },
+            ],
+        )
+        self.assertTrue(self.runtime._accepting)
+
+    async def test_delete_error_with_present_native_thread_is_retryable(self) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        binding = self.store.get(binding.id)
+        self.delete_control.errors.append(RuntimeError("app-server error"))
+        present = SimpleNamespace(
+            id="native-1",
+            name=None,
+            preview="existing",
+        )
+        self.codex.thread_list_pages = [
+            SimpleNamespace(data=[present], next_cursor=None),
+            SimpleNamespace(data=[], next_cursor=None),
+            SimpleNamespace(data=[present], next_cursor=None),
+            SimpleNamespace(data=[], next_cursor=None),
+        ]
+
+        with self.assertRaisesRegex(ThreadLifecycleError, "仍存在"):
+            await self.runtime.delete_binding(binding)
+
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
+        self.assertIsNone(self.runtime.lifecycle_state(binding.id))
+        self.assertTrue(self.runtime._accepting)
+
+    async def test_delete_retry_finishes_binding_when_native_is_already_absent(
+        self,
+    ) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        binding = self.store.get(binding.id)
+        self.codex.resume_errors.append(RuntimeError("no rollout found"))
+        self.codex.thread_list_pages = [
+            SimpleNamespace(data=[], next_cursor=None),
+            SimpleNamespace(data=[], next_cursor=None),
+            SimpleNamespace(data=[], next_cursor=None),
+            SimpleNamespace(data=[], next_cursor=None),
+        ]
+
+        deleted = await self.runtime.delete_binding(binding)
+
+        self.assertEqual(deleted.id, binding.id)
+        self.assertEqual(self.delete_control.calls, [])
+        with self.assertRaises(BindingNotFound):
+            self.store.get(binding.id)
+        self.assertTrue(self.runtime._accepting)
+
+    async def test_delete_read_failure_keeps_binding_when_catalog_still_has_thread(
+        self,
+    ) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        binding = self.store.get(binding.id)
+        self.codex.resume_errors.append(RuntimeError("resume failed"))
+        present = SimpleNamespace(
+            id="native-1",
+            name=None,
+            preview="existing",
+        )
+        self.codex.thread_list_pages = [
+            SimpleNamespace(data=[present], next_cursor=None),
+            SimpleNamespace(data=[], next_cursor=None),
+            SimpleNamespace(data=[present], next_cursor=None),
+            SimpleNamespace(data=[], next_cursor=None),
+        ]
+
+        with self.assertRaisesRegex(ThreadLifecycleError, "无法读取"):
+            await self.runtime.delete_binding(binding)
+
+        self.assertEqual(self.delete_control.calls, [])
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
+        self.assertIsNone(self.runtime.lifecycle_state(binding.id))
+        self.assertTrue(self.runtime._accepting)
 
     async def test_materialized_delete_is_unavailable_without_gap_contract(self) -> None:
         binding = self.binding()
@@ -2457,7 +2595,9 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
         self.assertIsNone(self.runtime.lifecycle_state(binding.id))
 
-    async def test_delete_response_loss_retains_binding_and_fails_closed(self) -> None:
+    async def test_delete_reconciliation_failure_retains_binding_and_fails_closed(
+        self,
+    ) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
         binding = self.store.get(binding.id)
@@ -2470,6 +2610,47 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         lifecycle = self.runtime.lifecycle_state(binding.id)
         self.assertIsNotNone(lifecycle)
         self.assertEqual(lifecycle.state, ThreadLifecycleState.UNKNOWN)
+        with self.assertRaises(RuntimeClosed):
+            await self.runtime.capture_submission_admission(binding.id)
+
+    async def test_delete_cancellation_retains_unknown_and_fails_closed(self) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        binding = self.store.get(binding.id)
+        self.delete_control.errors.append(asyncio.CancelledError())
+
+        with self.assertRaises(asyncio.CancelledError):
+            await self.runtime.delete_binding(binding)
+
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
+        self.assertEqual(
+            self.runtime.lifecycle_state(binding.id).state,
+            ThreadLifecycleState.UNKNOWN,
+        )
+        with self.assertRaises(RuntimeClosed):
+            await self.runtime.capture_submission_admission(binding.id)
+
+    async def test_delete_local_commit_failure_after_native_ack_fails_closed(
+        self,
+    ) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        binding = self.store.get(binding.id)
+
+        with patch.object(
+            self.store,
+            "delete_binding",
+            side_effect=RuntimeError("sqlite commit lost"),
+        ):
+            with self.assertRaises(ThreadLifecycleStateUnknown):
+                await self.runtime.delete_binding(binding)
+
+        self.assertEqual(self.delete_control.calls, ["native-1"])
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
+        self.assertEqual(
+            self.runtime.lifecycle_state(binding.id).state,
+            ThreadLifecycleState.UNKNOWN,
+        )
         with self.assertRaises(RuntimeClosed):
             await self.runtime.capture_submission_admission(binding.id)
 

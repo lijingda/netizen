@@ -48,6 +48,7 @@ class NativeCapability(str, Enum):
     GOAL = "goal"
     SIDE = "side"
     RELEASE = "release"
+    DELETE = "delete"
 
 
 class ControlName(str, Enum):
@@ -118,6 +119,7 @@ class CardControlIntent:
     create_directory: bool | None = None
     binding_id: str | None = None
     expected_active_binding_id: str | None = None
+    expected_native_thread_id: str | None = None
     thread_name: str | None = None
     model_id: str | None = None
     effort_id: str | None = None

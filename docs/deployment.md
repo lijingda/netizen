@@ -19,10 +19,10 @@ SSH config 中的 alias，也可以是 `<user>@<hostname>`。LaunchAgent 的首�
 `LOCAL_ENVIRONMENT.example.md` 为被 Git 忽略的 `LOCAL_ENVIRONMENT.md`。该文件不是
 运行时配置；没有它的全新 clone 仍应完全按本文完成部署。
 
-每个 Python release 与自己的 venv 一起安装到当前用户的标准 data 目录。ADR 0014 的 Goal/Skills
-与 ADR 0021 的 Side Adapter 不做运行时版本 allowlist，但候选
-构建必须对实际 resolved SDK/App Server 通过本文 capability harness。ADR 0019 将
-Thread Delete Adapter 保持为非生产 synthetic/migration 边界；服务不会构造它。ADR 0020 的 active-Turn plan
+每个 Python release 与自己的 venv 一起安装到当前用户的标准 data 目录。ADR 0014 的
+Goal/Skills、ADR 0021 的 Side 与 ADR 0037 的 Thread Delete Adapter 不做运行时版本
+allowlist，但候选构建必须对实际 resolved SDK/App Server 通过本文 capability harness。
+Delete 还必须通过 disposable lifecycle live gate 与 Runtime 四视图对账测试。ADR 0020 的 active-Turn plan
 observer 另行精确锁定 SDK 版本、源码指纹和非消费 queue contract；门禁失败只关闭
 checklist 展示，不关闭普通 Turn。这个降级以候选已通过 ADR 0009 独立的 service-wide
 SDK/cleanup 门禁为前提；不能用 plan 的展示降级绕过该启动门禁。
@@ -233,10 +233,9 @@ steer 前失败；结果不能复制成生产静态目录。
 
 `lifecycle` phase 只管理自己创建的原生 Thread：完成一个 seed Turn 后，依次用公开 SDK
 重命名、归档、恢复。每一步都通过显式 `thread_list(archived=False|True)` 分页目录验证
-名称保留、归档只出现在 archived catalog、恢复保持同一 native ID。它不会调用
-`thread/delete`，验证恢复后会再次公开归档该探针，避免污染普通 native Thread 目录。
-materialized `/delete` 按 ADR 0019 固定为 unavailable；dormant Adapter 只由
-shape/synthetic 与 facade migration sentinel 覆盖。
+名称保留、归档只出现在 archived catalog、恢复保持同一 native ID；随后通过薄 Adapter
+调用 `thread/delete`，并确认 rollout scan/state-db 两种来源的 active/archived 四视图
+全部 absent。探针不触碰任何既有 Thread；delete 响应失败时也不得自动重发。
 
 `release` phase 是普通持久 Thread 空闲订阅释放的原生硬门禁。它先在 App Server A 创建
 并完成一个 Thread，确认 `thread/backgroundTerminals/list(limit=1)` 为空后取消当前连接
@@ -276,10 +275,10 @@ ADR 0009 的 fail-closed 门禁会校验整个 pinned `openai_codex` Python 源�
 文件不匹配的安装都会按设计拒绝启动，不能绕过该门禁。
 
 上述版本/指纹规则只属于 terminal inspection/cleanup。Goal/Skills SDK Gap Adapter 按
-ADR 0014、Side boundary 与 Thread subscription Adapter 按 ADR 0021/0028 使用 capability
-shape + synthetic + live harness，不得新增另一套运行时版本白名单。
-Thread Delete Adapter 按 ADR 0019 只保留 shape/synthetic migration harness，不做 live
-mutation、也不进入生产；同样不得删除 ADR 0009 的既有门禁来“统一”两类 Adapter。
+ADR 0014、Side boundary 与 Thread subscription Adapter 按 ADR 0021/0028、Thread Delete
+Adapter 按 ADR 0037 使用 capability shape + synthetic + live harness，不得新增另一套
+运行时版本白名单。Delete 的生产调用还必须固定为一个 method，并由 Runtime 承担
+present/absent/unknown 对账；同样不得删除 ADR 0009 的既有门禁来“统一”两类 Adapter。
 
 原生 `handle.run()` completion 探针在 `openai-codex==0.147.0` 第 1 次复现失败，
 但它不是 production 路径；带 `--read-recovery` 的公开 polling 门禁必须通过。
@@ -816,9 +815,14 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     会话，再点旧卡必须零 mutation；重新归档后 active pointer 为空，Binding 配置保留，
     普通 `/sessions` 不显示它而 `/sessions archived` 显示。用卡片或
     `/unarchive <短 ID>` 恢复并自动切换。Lazy 会话的 `/delete` 必须显示红色不可恢复
-    二次确认、只删 Binding，并验证 stale current 防护。materialized `/delete` 必须在
-    native metadata read 或 mutation 前明确提示暂不可用；原生 Thread、Binding 与 active
-    pointer 均保持不变，也不显示删除确认卡。
+    二次确认、只删 Binding，并验证 stale current 防护。idle materialized `/delete` 必须
+    显示原生 Thread、spawned descendants、Codex App/CLI 历史与 Binding 均永久删除的红色
+    确认卡；打开卡后切换 active、令 Lazy 物化或改变 exact native ID，再点击都必须零
+    mutation。正常确认后 root 与 descendants 从原生四视图消失，Binding/pointer 再删除。
+    用 synthetic response loss 分别覆盖：四视图 absent 时提交 Binding、任一 present 时
+    保留 Binding 并允许重新确认、查询冲突/失败时保留 lifecycle-unknown 并关闭 admission；
+    任何路径都不能盲目再次调用 delete。running、Goal、compacting、ephemeral、未持久化
+    和 compatibility gate 不可用时必须拒绝且保持原生 Thread 与 Binding。
     另在 `/sessions` 中直接归档一个 idle materialized 非当前行，确认真实 active pointer
     不变、目标移入 archived catalog、原卡刷新并在删除末页唯一项时夹取页码；再归档当前
     行，确认 pointer 为空。打开行内确认后改变 active pointer 或令目标开始 running，再点

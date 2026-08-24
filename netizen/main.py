@@ -58,6 +58,7 @@ from .sdk_gap_adapter import (
     AppServerGoalControl,
     AppServerSideBoundaryControl,
     AppServerSkillCatalog,
+    AppServerThreadDeleteControl,
     AppServerThreadSubscriptionControl,
     SdkGapCapabilityUnavailable,
 )
@@ -181,6 +182,7 @@ class ServiceCore:
             skill_catalog = None
             goal_control = None
             side_boundary_control = None
+            thread_delete_control = None
             turn_plan_observer = None
             try:
                 skill_catalog = AppServerSkillCatalog(self._codex)
@@ -198,6 +200,10 @@ class ServiceCore:
             else:
                 logger.warning("native Side unavailable: AsyncCodex.thread_fork missing")
             try:
+                thread_delete_control = AppServerThreadDeleteControl(self._codex)
+            except SdkGapCapabilityUnavailable as error:
+                logger.warning("native Thread Delete unavailable: %s", error)
+            try:
                 turn_plan_observer = PinnedTurnPlanObserver(self._codex)
             except TurnPlanObservationUnavailable as error:
                 logger.warning("native Turn plan observation unavailable: %s", error)
@@ -210,6 +216,7 @@ class ServiceCore:
                 side_boundary_control=side_boundary_control,
                 thread_subscription_control=thread_subscription_control,
                 background_terminal_inspector=terminal_cleanup,
+                thread_delete_control=thread_delete_control,
                 turn_plan_observer=turn_plan_observer,
             )
             scope_coordinator = ScopeCoordinator()

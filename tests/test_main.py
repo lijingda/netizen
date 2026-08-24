@@ -505,6 +505,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         cleanup_codex: list[object] = []
         boundary_codex: list[object] = []
         subscription_codex: list[object] = []
+        delete_codex: list[object] = []
         side_card_updates: list[tuple[str, object]] = []
         closed = False
 
@@ -547,6 +548,14 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
 
             async def unsubscribe(self, _thread_id: str):
                 return "unsubscribed"
+
+        class FakeDeleteControl:
+            def __init__(self, codex: object) -> None:
+                delete_codex.append(codex)
+                self.codex = codex
+
+            async def delete(self, _thread_id: str) -> None:
+                return None
 
         async def update_card(message_id: str, card: object) -> object:
             side_card_updates.append((message_id, card))
@@ -602,10 +611,17 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                         "netizen.main.AppServerThreadSubscriptionControl",
                         FakeSubscriptionControl,
                     ),
+                    patch(
+                        "netizen.main.AppServerThreadDeleteControl",
+                        FakeDeleteControl,
+                    ),
                 ):
                     await core.start()
                     assert core._runtime is not None
-                    self.assertIsNone(core._runtime._thread_delete_control)
+                    self.assertIs(
+                        core._runtime._thread_delete_control.codex,
+                        delete_codex[0],
+                    )
                     self.assertIs(
                         core._runtime._side_boundary_control.codex,
                         boundary_codex[0],

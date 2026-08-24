@@ -115,24 +115,31 @@ Channel Database。
 
 **SDK Gap Adapter / SDK 能力缺口适配器**：ADR 0014 定义的临时、可逐项删除边界。
 它只复用同一个 `AsyncCodex` 已初始化的 App Server，为 ADR 0014 的固定 Goal/Skills
-method、ADR 0021 的固定 Side boundary 和 ADR 0028 的固定 Thread unsubscribe method
-提供窄语义口；不暴露通用
-RPC，不复制协议或状态，也不按 SDK 版本号做运行时许可。ADR 0017 的 Thread Delete shim
-在 ADR 0019 下只保留为非生产 shape/synthetic
-迁移哨兵。SDK 升级由能力 shape、真实 SDK client synthetic harness 和目标环境 live
-probe 放行；高层 facade 支持一项就切回并删除一项 shim。
+method、ADR 0021 的固定 Side boundary、ADR 0028 的固定 Thread unsubscribe method 和
+ADR 0037 的固定 Thread Delete method 提供窄语义口；不暴露通用 RPC，不复制协议或状态，
+也不按 SDK 版本号做运行时许可。SDK 升级由能力 shape、真实 SDK client synthetic harness
+和目标环境 live probe 放行；高层 facade 支持一项就切回并删除一项 shim。
 
 **Thread Lifecycle Operation / 会话生命周期操作**：一个 exact Binding 上短暂占用的
-rename/archive/unarchive；飞书入口围绕当前会话，Admin Control Plane 按实例级 authority
-选择 exact target。原生 mutation 开始后结果未知就保留 `lifecycle-unknown`
-槽并关闭 admission；名称与归档状态始终由 Codex 拥有，不写入 Channel Database。
+rename/archive/unarchive/delete；飞书入口围绕当前会话，Admin Control Plane 按实例级
+authority 选择它已开放操作的 exact target。原生 mutation 开始后结果未知就保留
+`lifecycle-unknown` 槽并关闭 admission；Delete 只有 ADR 0037 的一次只读对账例外。
+名称、归档与原生存在性始终由 Codex 拥有，不写入 Channel Database。
 
-**Binding Delete / 本地会话删除**：永久删除尚未物化、没有原生 Thread 的 Lazy
-Binding。它只改变 Channel Database，不涉及 Codex 历史。
+**Binding Delete / 本地会话删除**：永久删除 Channel Database 中的 exact Binding。
+Lazy Binding 可直接删除；materialized Binding 只能在原生 Delete 正常返回或 Native
+Thread Delete Reconciliation 明确 absent 后提交。它本身不修改 Codex 历史。
 
-**Native Thread Delete / 原生会话删除**：永久删除已有历史的 Codex Thread，并在确认
-后删除 Binding。它是独立的不可逆 native capability；ADR 0019 决定在 Python SDK 尚无
-公开可靠方法时保持 unavailable，不能用本地 Binding 删除模拟。
+**Native Thread Delete / 原生会话删除**：永久删除已有历史的 Codex Thread、App Server
+管理的 spawned descendants 及其 Codex App/CLI 历史，并在确认后删除 Binding。它是
+ADR 0037 批准的独立不可逆 native capability，只能通过固定薄 Adapter 调用，不能用本地
+Binding 删除模拟。
+
+**Native Thread Delete Reconciliation / 原生删除对账**：Delete 非取消异常后，对 exact
+native ID 做一次有界四视图读取：rollout scan 与 state DB 各自的 active/archived catalog。
+任一视图存在为 **present**，保留 Binding 并允许用户重新确认；四个完整视图均不存在为
+**absent**，可以提交 Binding Delete；视图冲突、失败、超时或取消为 **unknown**，保留
+Binding/lifecycle 槽并关闭 admission。它是只读判定，不会自动再发一次 delete。
 
 **Goal Operation / Goal 操作**：一个原生持久化 Goal 在 Runtime 中的单一逻辑槽位。
 它可跨多个物理 Turn 自动 continuation；只有逻辑通知流、persisted Goal、exact 最终
@@ -143,9 +150,10 @@ persisted Goal，但当前进程没有可安全重建的通知 route。Netizen �
 Binding 的新 mutation；当前不猜测重挂或替用户暂停。
 
 **Native Capability Gate / 原生能力门控**：统一命令注册表中对原生能力可用性的声明。
-能力必须来自公开高层 API，或来自 ADR 0014 / ADR 0021 / ADR 0028 已验证的窄 Adapter；否则保持 unavailable，
-不能通过 prompt、本地状态或任意私有 RPC 模拟。当前 Goal、Skills 与 Side 已通过独立口
-接入，Native Thread Delete、Plan control 与 Apps 仍是显式 gap。
+能力必须来自公开高层 API，或来自 ADR 0014 / ADR 0021 / ADR 0028 / ADR 0037 已验证的
+窄 Adapter；否则保持 unavailable，不能通过 prompt、本地状态或任意私有 RPC 模拟。
+当前 Goal、Skills、Side 与 Native Thread Delete 已通过独立口接入，Plan control 与 Apps
+仍是显式 gap。
 
 **Project**：Channel alias 对应的一个 canonical 真实 cwd。多个 native Thread 可
 同时共享和修改它；不是 clone、worktree 或快照。

@@ -2402,12 +2402,20 @@ class ChannelApplication:
             if binding is None:
                 await self._reply(message, "当前 Scope 没有 active 会话。")
                 return
-            if binding.native_thread_id is not None:
+            if (
+                binding.native_thread_id is not None
+                and NativeCapability.DELETE
+                not in self._runtime.available_capabilities
+            ):
                 raise ThreadDeleteUnavailable(
-                    "已有原生历史的会话暂不支持删除：当前 Python SDK 尚未提供"
-                    "公开、可靠的 Thread Delete。本次未调用 Codex，Binding 与"
-                    "原生历史均未改变；请等待 SDK 升级。"
+                    "当前 SDK/App Server 的 Thread Delete 兼容契约未通过；"
+                    "本次未调用 Codex，Binding 与原生历史均未改变。"
                 )
+            metadata = (
+                await self._read_thread_metadata((binding,))
+                if binding.native_thread_id is not None
+                else {}
+            )
             await self._reply(
                 message,
                 delete_binding_card(
@@ -2415,7 +2423,11 @@ class ChannelApplication:
                     binding_id=binding.id,
                     short_id=binding.short_id,
                     project_alias=binding.project_alias,
-                    title=_session_title(binding, None),
+                    title=_session_title(
+                        binding,
+                        metadata.get(binding.native_thread_id),
+                    ),
+                    native_thread_id=binding.native_thread_id,
                 ),
             )
             return
@@ -2914,11 +2926,12 @@ class ChannelApplication:
         if intent.name is CardControlName.DELETE_BINDING:
             assert intent.binding_id is not None
             try:
-                deleted = await self._management.delete_current_lazy_binding(
+                deleted = await self._management.delete_current_binding(
                     target=CurrentBindingTarget(
                         intent.scope.key,
                         intent.binding_id,
-                    )
+                    ),
+                    expected_native_thread_id=intent.expected_native_thread_id,
                 )
             except (NoCurrentBinding, CurrentBindingChanged) as error:
                 raise CardActionError(
@@ -2931,8 +2944,13 @@ class ChannelApplication:
                     short_id=deleted.short_id,
                     project_alias=deleted.project_alias,
                     message=(
-                        "✅ 当前会话已删除，当前 Scope 已没有 active 会话。"
-                        "\n\n发送 `/new` 创建新会话，或 `/resume <短 ID>` 切换。"
+                        (
+                            "✅ 原生 Codex 会话及本地 Binding 已永久删除，"
+                            "当前 Scope 已没有 active 会话。"
+                            if deleted.native_thread_id is not None
+                            else "✅ 当前 Lazy 会话已删除，当前 Scope 已没有 active 会话。"
+                        )
+                        + "\n\n发送 `/new` 创建新会话，或 `/resume <短 ID>` 切换。"
                     ),
                 ),
             )

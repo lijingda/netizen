@@ -117,11 +117,12 @@ continuation 的多个物理 Turn 合并为一个通知流。`/goal` 只读展�
 和 Goal 卡片按钮进入同一 typed control 路由；token budget 暂不暴露。
 
 会话生命周期的命令入口按 [ADR 0017](adr/0017-manage-native-thread-lifecycle.md) 与
-[ADR 0019](adr/0019-keep-native-thread-delete-unavailable.md) 管理当前 Binding：
+[ADR 0037](adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md) 管理当前 Binding：
 `/rename [name]` 写原生 Thread name；`/archive` 先显示确认卡，提交时再次确认 exact
 Binding 仍为 Scope active。归档成功后只清空 active pointer 并保留 Binding/Turn
-Settings。`/delete` 只为 Lazy Binding 显示确认卡并删除本地记录；已有原生历史时在任何
-native read/mutation 前明确拒绝。
+Settings。`/delete` 为 Lazy Binding 显示只删本地记录的确认卡；materialized Binding
+还把 exact native ID 固定进危险确认卡，只有原生正常返回或四视图明确 absent 后才删除
+本地 Binding。
 普通 `/sessions` 显式读取 `thread_list(archived=False)`，`/sessions archived` 显式读取
 `archived=True`，归档状态与名称都不进 Channel Database。普通列表卡片的“设为当前”只
 切换 exact active Binding，不创建 Turn，也不停止其他 Binding 的运行。按
@@ -171,7 +172,7 @@ baseline Turn ID、compacting task 和 receipt Event；Goal 保存一个
 `starting/running/pausing/external-active/unknown` 的逻辑操作槽、opaque handle、
 persisted snapshot、cleanup barrier 与 receipt Event。Scope 锁只保护
 new/resume/active pointer 与 stale lifecycle 卡片校验；Binding 锁保护首次 start、
-steer、stop、compact、短暂的 rename/archive/Lazy delete/unarchive lifecycle 槽和 terminal
+steer、stop、compact、短暂的 rename/archive/delete/unarchive lifecycle 槽和 terminal
 cleanup。不同 Binding 不互锁，也没有全局/Project semaphore。
 
 普通持久 Thread 的连接订阅按 [ADR 0028](adr/0028-release-idle-persistent-thread-subscriptions.md)
@@ -274,19 +275,24 @@ process exit attestation。ADR 0014 的 SDK Gap Adapter 则只为 Goal 与 Skill
 不提供通用 request，不维护运行时版本 allowlist。SDK 升级必须通过 per-capability shape、
 真实 SDK client synthetic harness 与目标环境 live probe；facade 出现对应公开能力时，
 migration sentinel 阻止继续永久保留 shim，并要求逐项切回公开 provider。ADR 0017 的
-`ThreadDeleteControl` 在 ADR 0019 下仅保留为非生产 shape/synthetic 迁移哨兵，服务不
-构造或注入它。ADR 0020 的 `PinnedTurnPlanObserver` 精确校验 SDK 版本、整包源码指纹、
+ADR 0037 的 `ThreadDeleteControl` 同样只暴露固定 `thread/delete`，生产服务在独立
+shape/synthetic 门禁通过时构造；Runtime 而非 Adapter 负责失败后的有界四视图对账。
+ADR 0020 的 `PinnedTurnPlanObserver` 精确校验 SDK 版本、整包源码指纹、
 内部持有类型与 queue shape；它只在 `/status` 或 steer freshness bookkeeping 时，在
 router lock 与 exact Queue mutex 下复制 cursor 后的通知引用，不调用 RPC、不注册/注销、
 不 `get`/`put`、不新建 worker。rename/archive/unarchive 全部使用高层公开 API。原生名称、
 归档状态与 plan 通知仍以 Codex 为事实源，不增加本地 lifecycle 或 progress 状态列。
 
-archive 只允许公开 read 已证明 persisted、non-ephemeral 且 idle 的原生 Thread，并与
+archive 与 materialized delete 只允许公开 read 已证明 persisted、non-ephemeral 且 idle
+的原生 Thread，并与
 普通 Turn、Goal、compaction 和其他 lifecycle mutation 互斥。rename 允许复用当前
 Thread handle，但自身同样短暂占槽。已经开始的 mutation 若响应或取消结果未知，保留
 `lifecycle-unknown` 并关闭进程级 admission；不能自动重试或把后续 prompt 交给另一
-Thread。成功 archive 后不自动选择其他 Binding。Lazy delete 只有本地 Binding mutation；
-materialized delete 不进入 Runtime native mutation。
+Thread。Delete 非取消异常是唯一有界例外：Runtime 不重发 RPC，而是读取 rollout scan 与
+state DB 的 active/archived 四视图；任一 present 就保留 Binding 并允许用户重新确认，
+全部 absent 才提交 Binding Delete，冲突/失败/超时为 unknown 并关闭 admission。原生
+resume/read 失败且四视图全 absent 时允许收尾本地 Binding，用于恢复 native-first 与
+local-second 之间的进程退出。成功 archive/delete 后不自动选择其他 Binding。
 
 普通持久 Binding 的终态不通过 pinned `handle.run()` 消费。运行时每 0.5 秒用
 `thread.read(include_turns=False)` 读取轻量 Thread status；`notLoaded` 和 `active`
@@ -641,8 +647,9 @@ prompt，未知 slash command fail closed，不增加任意 `/`/`@` 链式解释
 另一普通会话的 rename/delete 应先 `/resume`。`/sessions` 中按 ADR 0036 确认归档 exact
 idle materialized 行是唯一 archive 例外，不改变 `/archive` 命令。rename 可直接带名称或打开 form；archive 与 Lazy delete 的
 callback 携带完整 Binding ID 和 Feishu Scope envelope，并由内置 confirm 二次确认，
-其中 delete 使用红色危险卡。materialized `/delete` 不生成卡片，直接说明等待公开 SDK。
-提交时 Scope 锁重新检查 active pointer，旧卡片不执行。归档列表只为同一 Scope 的原生
+其中 delete 使用红色危险卡。materialized `/delete` 还携带打开卡片时的 exact native
+Thread ID，并明确 spawned descendants 与 Codex App/CLI 历史也会永久消失。提交时 Scope
+锁重新检查 active pointer 与 native identity，旧卡片不执行。归档列表只为同一 Scope 的原生
 archived Thread 生成恢复按钮；恢复前再次校验 catalog，不把 stale 或跨 Scope Binding
 激活。
 
@@ -682,10 +689,10 @@ A 改为 B，下一条新 Thread 直接返回 `CONFIG-B`，重启后仍为 B；�
 control、Skills/Apps discovery、Side boundary inject、Thread unsubscribe、config 或 MCP
 的高层方法。
 ADR 0014 只为 Goal/Skills
-使用生产 capability-specific Adapter；ADR 0017 的 Thread Delete Adapter 按 ADR 0019
-保持 dormant；ADR 0021 的 Side boundary Adapter 只暴露一个固定方法并配合公开 ephemeral
+使用生产 capability-specific Adapter；ADR 0037 的 Thread Delete Adapter 只暴露固定
+delete method 并由 Runtime 对账；ADR 0021 的 Side boundary Adapter 只暴露一个固定方法并配合公开 ephemeral
 fork；ADR 0028 的 subscription Adapter 由普通持久 Thread 和 Side close 共用。
-materialized delete、Plan 与 Apps 均显式 unavailable，`$app` 不被包装成
+Plan 与 Apps 仍显式 unavailable，`$app` 不被包装成
 结构化 attachment。不能增加通用 JSON-RPC gateway。
 每次 SDK/App Server 升级先运行 facade inventory、shape/synthetic harness 和
 Goal/Skills/Side/lifecycle/release live probes，再重跑 models、compact、completion、steer、
@@ -730,5 +737,7 @@ interrupt cleanup、CLI resume 与 Linux compatibility；高层 surface 出现�
   Prompt，重复 close 只重试未确认步骤。服务重启不恢复 ephemeral Thread，而是在 handler
   注册前把遗留 creating/open route 转为 expired。
 - Thread rename/archive/unarchive mutation 一旦开始而结果无法确认，就保留 lifecycle
-  slot 并关闭 admission。materialized Thread Delete 在公开 SDK 支持前不会启动；历史
-  live gate 已证明固定私有 RPC 可能报错同时产生目录副作用，因此不能重发或猜测成功。
+  slot 并关闭 admission。materialized Thread Delete 正常响应后直接提交 Binding；异常时
+  不重发，只做一次有界 rollout scan/state DB × active/archived 对账。present 保留并允许
+  重新确认，absent 提交 Binding，unknown 保留 lifecycle 并关闭 admission；取消仍直接
+  unknown。

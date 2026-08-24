@@ -18,8 +18,8 @@ design detail, compatibility findings, and procedures in their source docs.
   defines current-Binding lifecycle management and the removable Thread Delete gap.
   [ADR 0018](docs/adr/0018-remove-skills-command.md) removes the dedicated
   `/skills` browser while preserving native Skill invocation. [ADR 0019](docs/adr/0019-keep-native-thread-delete-unavailable.md)
-  keeps materialized Thread Delete unavailable until the public Python SDK
-  catches up. [ADR 0020](docs/adr/0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md)
+  is the superseded `0.144.4` Thread Delete compatibility record.
+  [ADR 0020](docs/adr/0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md)
   defines the exact-gated, non-consuming active-Turn plan observer.
   [ADR 0021](docs/adr/0021-support-multi-turn-ephemeral-side-topics.md)
   defines ephemeral multi-turn Side Topics and their removable fixed-method
@@ -58,6 +58,9 @@ design detail, compatibility findings, and procedures in their source docs.
   [ADR 0036](docs/adr/0036-archive-exact-idle-sessions-from-the-sessions-card.md)
   permits confirmed exact archive of eligible idle sessions from `/sessions`
   while keeping the `/archive` command current-only.
+  [ADR 0037](docs/adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md)
+  requalifies native Thread Delete and defines its thin Adapter plus four-view
+  failure reconciliation.
   Superseded ADRs are historical context.
 - [docs/deployment.md](docs/deployment.md): setup, verification, and release
   procedures.
@@ -126,10 +129,10 @@ design detail, compatibility findings, and procedures in their source docs.
   approved reach-throughs are ADR 0009's isolated, version/fingerprint-gated
   terminal cleanup and ADR 0014's removable capability-specific Goal/Skills
   adapters, ADR 0021's fixed Side boundary adapter, ADR 0028's reusable fixed
-  Thread unsubscribe adapter, plus ADR 0020's
-  version/fingerprint-gated, non-consuming plan observer. ADR 0017's Thread
-  Delete adapter is dormant compatibility-harness code under ADR 0019 and must
-  not be constructed in production. Do not parse
+  Thread unsubscribe adapter, ADR 0037's fixed Thread Delete adapter, plus ADR
+  0020's version/fingerprint-gated, non-consuming plan observer. The Delete
+  adapter is production-permitted only through ADR 0037's exact method and
+  Runtime reconciliation contract. Do not parse
   CLI output, add a generic/private RPC gateway, patch SDK internals, copy
   protocol models, or signal arbitrary processes.
 - Treat ADR 0009 cleanup success only as a successful request for App Server's
@@ -139,8 +142,9 @@ design detail, compatibility findings, and procedures in their source docs.
   identity and never cleans or terminates a terminal.
 - Treat compatibility workarounds as narrow, fail-closed code. ADR 0014
   adapters are gated by per-capability shape/synthetic/live harnesses rather
-  than a runtime version allowlist; ADR 0017's dormant delete adapter retains
-  only shape/synthetic migration checks. ADR 0009 retains its exact
+  than a runtime version allowlist; ADR 0037's delete adapter additionally
+  requires its disposable live gate and four-view Runtime reconciliation. ADR
+  0009 retains its exact
   version/fingerprint gate; ADR 0020 independently retains the same strict
   class of gate for read-only queue observation. Changing one requires updated
   probes, focused tests, an accepted ADR, and a removal trigger.

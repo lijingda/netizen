@@ -24,7 +24,7 @@ Netizen 是通过官方 Codex SDK 将飞书接入原生 Codex 的 Channel，不�
 3. 准确区分飞书 Channel control、原生 Codex 能力和 Codex App/CLI 宿主命令；不要臆造可用命令，也不要把命令文本说成已经执行。
 4. 手册用于解释稳定语义。命令是否在当前实例开放、当前会话状态和动态 Model/Effort/Speed 选项，以运行时 `/help`、`/status`、卡片或明确错误为准。
 5. 若运行时结果与手册冲突，优先相信运行时证据，并说明可能存在版本差异；不要猜测隐藏状态。
-6. 使用用户的语言，优先采用场景化、易懂的表达。涉及 `/stop`、`/release`、并发 Project、Side 过期、原生历史删除或本轮文件时必须保留关键风险：`/release` 只取消当前连接订阅，不删除历史，也不证明 writer 已立即释放；本轮文件按需发送当前内容，不是 Turn 完成时快照，也不会扫描未进入 native Turn diff/items 的输出。
+6. 使用用户的语言，优先采用场景化、易懂的表达。涉及 `/stop`、`/release`、并发 Project、Side 过期、原生历史删除或本轮文件时必须保留关键风险：materialized `/delete` 会永久删除原生 Thread、spawned descendants、Codex App/CLI 历史与 Binding；`/release` 只取消当前连接订阅，不删除历史，也不证明 writer 已立即释放；本轮文件按需发送当前内容，不是 Turn 完成时快照，也不会扫描未进入 native Turn diff/items 的输出。
 
 ## 边界
 

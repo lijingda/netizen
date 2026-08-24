@@ -220,7 +220,7 @@ class ExperienceTest(unittest.TestCase):
         self.assertIn("/rename [名称]", help_text)
         self.assertIn("/sessions [archived]", help_text)
         self.assertIn("/unarchive <会话短 ID>", help_text)
-        self.assertIn("已有原生历史时暂不可用", help_text)
+        self.assertIn("永久删除当前会话及其原生历史", help_text)
         self.assertIn("不保证前台工具进程退出", help_text)
         self.assertNotIn("/model", help_text)
         self.assertNotIn("/goal", help_text)

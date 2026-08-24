@@ -615,16 +615,29 @@ class StubRuntime:
     async def delete_binding(self, binding):
         assert self.binding_store is not None
         current = self.binding_store.get(binding.id)
-        if current.native_thread_id is not None:
-            raise ThreadDeleteUnavailable(
-                "已有原生历史的会话暂不支持删除；本次未调用 Codex。"
-            )
         self.delete_binding_calls.append(binding.id)
         return self.binding_store.delete_binding(binding.id)
 
+    async def delete_exact(
+        self,
+        binding_id: str,
+        *,
+        expected_native_thread_id: str | None,
+    ):
+        assert self.binding_store is not None
+        binding = self.binding_store.get(binding_id)
+        if binding.native_thread_id != expected_native_thread_id:
+            raise ThreadLifecycleError("会话的原生 Thread 已变化。")
+        return await self.delete_binding(binding)
+
     async def delete_lazy_exact(self, binding_id: str):
         assert self.binding_store is not None
-        return await self.delete_binding(self.binding_store.get(binding_id))
+        binding = self.binding_store.get(binding_id)
+        if binding.native_thread_id is not None:
+            raise ThreadDeleteUnavailable(
+                "已有原生历史的会话不能走 Lazy 删除。"
+            )
+        return await self.delete_binding(binding)
 
     async def unarchive_binding(self, binding):
         self.unarchive_binding_calls.append(binding.id)
@@ -2172,7 +2185,48 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.store.get(binding.id)
         self.assertIn("会话已永久删除", str(self.channel.updates[-1][1]))
 
-    async def test_delete_materialized_binding_is_unavailable_without_native_read(
+    async def test_delete_materialized_binding_requires_exact_confirmation(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.available_capabilities = frozenset({NativeCapability.DELETE})
+        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
+            "native-one",
+            "Materialized",
+            "first prompt",
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/delete", message_id="om_delete_materialized")
+        )
+
+        card = self.channel.replies[-1][1]
+        serialized = str(card.card)
+        self.assertIn("原生 Codex Thread", serialized)
+        self.assertIn("native-thread:v1:native-one", serialized)
+        self.assertEqual(self.runtime.thread_metadata_calls, [("native-one",)])
+        button = next(
+            item
+            for item in _elements(card.card, "button")
+            if item["text"]["content"] == "永久删除当前会话"
+        )
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                button["behaviors"][0]["value"],
+                message_id="om_delete_materialized_card",
+            )
+        )
+
+        self.assertEqual(self.runtime.delete_binding_calls, [binding.id])
+        with self.assertRaises(BindingNotFound):
+            self.store.get(binding.id)
+        self.assertIn("原生 Codex 会话", str(self.channel.updates[-1][1]))
+
+    async def test_delete_materialized_binding_is_unavailable_without_capability(
         self,
     ) -> None:
         await self.new()
@@ -2181,11 +2235,11 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.store.assign_native_thread_id(binding.id, "native-one")
 
         await self.app.handle_message(
-            FakeMessage("/delete", message_id="om_delete_materialized")
+            FakeMessage("/delete", message_id="om_delete_unavailable")
         )
 
         reply = str(self.channel.replies[-1][1])
-        self.assertIn("已有原生历史的会话暂不支持删除", reply)
+        self.assertIn("Thread Delete 兼容契约未通过", reply)
         self.assertIn("本次未调用 Codex", reply)
         self.assertEqual(self.runtime.thread_metadata_calls, [])
         self.assertEqual(self.runtime.delete_binding_calls, [])
@@ -2220,7 +2274,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.store.get(binding.id).native_thread_id,
             "native-raced",
         )
-        self.assertIn("已有原生历史的会话暂不支持删除", str(self.channel.updates[-1][1]))
+        self.assertIn("active 会话已切换", str(self.channel.updates[-1][1]))
 
     async def test_stale_delete_confirmation_cannot_delete_new_current_binding(self) -> None:
         await self.new(message_id="om_new_first")

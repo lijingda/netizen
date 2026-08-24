@@ -1,11 +1,17 @@
 ---
-status: accepted
+status: superseded
 date: 2026-08-13
 amends: 0017
 related: 0014
+superseded_by: 0037
 ---
 
 # 在公开 Python SDK 支持前保持原生 Thread Delete 不可用
+
+> **已被取代：** [ADR 0037](0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md)
+> 在 `0.147.0` 重新完成 active、archived、descendant cascade、response-loss 与四视图
+> live qualification 后，以薄 Adapter 和失败对账恢复了 materialized Thread Delete。
+> 本文继续保留 `0.144.4` 的失败证据与当时的安全决定。
 
 ## 背景
 

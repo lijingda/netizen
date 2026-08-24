@@ -36,6 +36,7 @@ from netizen.sdk_gap_adapter import (
     AppServerGoalControl,
     AppServerSideBoundaryControl,
     AppServerSkillCatalog,
+    AppServerThreadDeleteControl,
     AppServerThreadSubscriptionControl,
     GoalStatus,
     facade_migration_requirements,
@@ -207,16 +208,22 @@ async def _find_listed_thread(
     thread_id: str,
     *,
     archived: bool,
+    use_state_db_only: bool | None = None,
 ) -> object | None:
     """Find one exact Thread without assuming the native catalog fits one page."""
 
     cursor: str | None = None
     seen_cursors: set[str] = set()
     while True:
+        list_kwargs: dict[str, object] = {
+            "archived": archived,
+            "cursor": cursor,
+            "limit": 100,
+        }
+        if use_state_db_only is not None:
+            list_kwargs["use_state_db_only"] = use_state_db_only
         response = await codex.thread_list(
-            archived=archived,
-            cursor=cursor,
-            limit=100,
+            **list_kwargs,
         )
         data = getattr(response, "data", None)
         if not isinstance(data, list):
@@ -245,6 +252,7 @@ async def _wait_for_thread_visibility(
     *,
     archived: bool,
     present: bool,
+    use_state_db_only: bool | None = None,
     timeout: float = 15.0,
 ) -> object | None:
     deadline = asyncio.get_running_loop().time() + timeout
@@ -253,6 +261,7 @@ async def _wait_for_thread_visibility(
             codex,
             thread_id,
             archived=archived,
+            use_state_db_only=use_state_db_only,
         )
         if (found is not None) is present:
             return found
@@ -409,7 +418,7 @@ async def _thread_lifecycle_live(
     codex: AsyncCodex,
     cwd: Path,
 ) -> dict[str, Any]:
-    """Exercise the public native rename/archive/unarchive lifecycle."""
+    """Exercise public lifecycle plus the approved narrow native delete."""
 
     thread = await codex.thread_start(cwd=str(cwd))
     turn = await thread.turn("Reply exactly: THREAD-LIFECYCLE-LIVE")
@@ -459,21 +468,22 @@ async def _thread_lifecycle_live(
         archived=True,
         present=False,
     )
-    # Keep release probes out of the ordinary native Thread catalog without
-    # relying on the unavailable delete capability.
-    await codex.thread_archive(thread.id)
-    await _wait_for_thread_visibility(
-        codex,
-        thread.id,
-        archived=True,
-        present=True,
-    )
-    await _wait_for_thread_visibility(
-        codex,
-        thread.id,
-        archived=False,
-        present=False,
-    )
+    await AppServerThreadDeleteControl(codex).delete(thread.id)
+    for use_state_db_only in (False, True):
+        await _wait_for_thread_visibility(
+            codex,
+            thread.id,
+            archived=False,
+            present=False,
+            use_state_db_only=use_state_db_only,
+        )
+        await _wait_for_thread_visibility(
+            codex,
+            thread.id,
+            archived=True,
+            present=False,
+            use_state_db_only=use_state_db_only,
+        )
     return {
         "thread_id": thread.id,
         "turn_id": turn.id,
@@ -481,7 +491,8 @@ async def _thread_lifecycle_live(
         "rename_visible": True,
         "archive_visible": True,
         "unarchive_restored_same_id": True,
-        "probe_left_archived": True,
+        "delete_acknowledged": True,
+        "delete_absent_from_scan_and_state_db": True,
     }
 
 

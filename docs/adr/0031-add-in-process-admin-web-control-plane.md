@@ -2,7 +2,8 @@
 status: accepted
 date: 2026-08-21
 amends: 0017, 0021, 0028
-related: 0016, 0019
+amended_by: 0037
+related: 0016, 0019, 0037
 ---
 
 # 引入进程内 Admin Web 管理控制面
@@ -159,7 +160,7 @@ credential、CSRF、name、preview、cwd 或 Prompt 内容。
 | Binding | 恢复归档 | exact Binding 必须在 live archived catalog；公开 unarchive 后 exact resume 验证同一 native ID，保留原 Binding/Turn Settings 和 Scope pointer，并立即按 inactive 策略尝试释放新订阅。 |
 | Binding | 恢复并设为当前 | 满足恢复条件；公开 unarchive 和 exact resume 成功后在同一 Scope coordinator 中设置 exact active pointer，并按 current warm-window 策略保留订阅。 |
 | Binding | 删除 Lazy 会话 | exact Binding 仍没有 native Thread 且没有 Runtime 活动；原子删除 Binding，并仅在它 active 时清空 pointer。 |
-| Binding | 删除 materialized 会话 | 不提供。继续受 ADR 0019 约束，不调用 dormant Adapter、不只删本地 Binding。 |
+| Binding | 删除 materialized 会话 | 不提供。ADR 0037 只恢复飞书 current `/delete`；Admin 不调用该 Adapter，也不只删本地 Binding。 |
 | Binding | Stop | exact Binding 当前存在本进程可控的普通 Turn 或 Goal 物理 Turn；复用现有 interrupt、Goal pause 和 terminal cleanup 语义。Stop 中的 Goal pause 是停止既有工作的一部分，不开放 Goal start/resume/clear。 |
 | Binding | Release | exact active 或 inactive materialized Binding 已 idle，且满足 ADR 0028 除“当前 active”外的无活动/后台 terminal 前置条件；只取消本连接订阅，下一次消息仍 resume 同一 Thread。 |
 | Binding | Compact / Goal mutation | 不提供。它们会发起或推进 Codex 工作，继续从当前飞书会话控制；Web 只展示状态。 |
@@ -199,14 +200,15 @@ Channel Participant 仍只能管理消息所在 Scope 的 Binding 或 exact Side
   inactive rename/archive、恢复是否激活、active archive/delete pointer 提交和双击去重；
 - Web 与飞书并发操作同一 Scope/Binding 的锁序、running/Goal/compaction/lifecycle 互斥、
   response loss、cancel 和 lifecycle-unknown admission close；
-- materialized delete、Prompt/Turn、Goal mutation、批量 mutation 与 Side tombstone delete 在
-  HTTP route、application service 和窄化的 Admin Runtime port 三层均不可达；完整 Runtime
-  继续保留飞书所需能力及 ADR 0019 的 dormant compatibility boundary。
+- materialized delete、Prompt/Turn、Goal mutation、批量 mutation 与 Side tombstone delete
+  在 Admin HTTP route/controller 不可达。ADR 0037 为共享 current-Binding application
+  service 与窄化 Runtime port 增加 exact delete primitive，但 Admin Web 不调用它；完整
+  Runtime 继续保留飞书所需能力及 fixed-method Delete boundary。
 
 候选部署必须从另一台受信内网主机直接打开 `http://<server-ip>:<port>`，验证未登录根路径
 重定向、其他 endpoint 拒绝、登录、CSRF、Project mutation、跨 Scope ordinary Binding 的
 允许操作、Side close、服务重启注销和 journald 脱敏。真实 lifecycle probe 仍使用既有公开
-SDK 门禁；Admin Web 不获得新的私有 App Server method。
+SDK 门禁；Admin Web 产品面不获得 materialized Delete route。
 
 ## 后果
 
