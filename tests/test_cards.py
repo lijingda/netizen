@@ -9,10 +9,12 @@ from lark_channel import OutboundCard
 from netizen.cards import (
     ArchivedSessionCardItem,
     CardActionError,
+    SessionCardItem,
     SettingsCardActionError,
     TurnFileCardLimitError,
     archive_binding_card,
     archived_sessions_card,
+    sessions_card,
     binding_configured_card,
     config_card,
     decode_button_action,
@@ -193,6 +195,84 @@ class CardCodecTest(unittest.TestCase):
                     "extra": "forbidden",
                 },
             )
+
+    def test_activate_binding_round_trips_exact_binding_id(self) -> None:
+        value = {
+            "v": 3,
+            "intent": "binding.activate",
+            "chat_id": "oc_group",
+            "scope_kind": "topic",
+            "topic_id": "omt_topic",
+            "binding_id": "binding:v1:binding-123",
+        }
+        intent = self.decode(value)
+        self.assertEqual(intent.name, CardControlName.ACTIVATE_BINDING)
+        self.assertEqual(intent.binding_id, "binding-123")
+        self.assertIsNone(intent.page)
+
+        for mutation in (
+            {**value, "extra": "field"},
+            {**value, "page": 0},
+            {**value, "binding_id": "binding-123"},
+        ):
+            with self.subTest(mutation=mutation), self.assertRaises(CardActionError):
+                self.decode(mutation)
+
+    def test_exact_archive_round_trips_binding_pointer_and_page(self) -> None:
+        value = {
+            "v": 3,
+            "intent": "binding.archive.exact",
+            "chat_id": "oc_group",
+            "scope_kind": "topic",
+            "topic_id": "omt_topic",
+            "binding_id": "binding:v1:binding-123",
+            "expected_active_binding_id": "binding:v1:binding-current",
+            "page": 2,
+        }
+
+        intent = self.decode(value)
+
+        self.assertEqual(intent.name, CardControlName.ARCHIVE_EXACT_BINDING)
+        self.assertEqual(intent.binding_id, "binding-123")
+        self.assertEqual(intent.expected_active_binding_id, "binding-current")
+        self.assertEqual(intent.page, 2)
+
+        without_current = self.decode(
+            {**value, "expected_active_binding_id": None}
+        )
+        self.assertIsNone(without_current.expected_active_binding_id)
+
+        for mutation in (
+            {key: item for key, item in value.items() if key != "page"},
+            {**value, "extra": "field"},
+            {**value, "page": -1},
+            {**value, "page": True},
+            {**value, "expected_active_binding_id": "binding-current"},
+            {**value, "binding_id": "binding-123"},
+        ):
+            with self.subTest(mutation=mutation), self.assertRaises(CardActionError):
+                self.decode(mutation)
+
+    def test_sessions_page_round_trips_page_and_rejects_extras(self) -> None:
+        value = {
+            "v": 3,
+            "intent": "sessions.page",
+            "chat_id": "oc_group",
+            "scope_kind": "topic",
+            "topic_id": "omt_topic",
+            "page": 1,
+        }
+        intent = self.decode(value)
+        self.assertEqual(intent.name, CardControlName.SESSIONS_PAGE)
+        self.assertEqual(intent.page, 1)
+
+        for mutation in (
+            {**value, "extra": "field"},
+            {**value, "page": -1},
+            {**value, "page": "1"},
+        ):
+            with self.subTest(mutation=mutation), self.assertRaises(CardActionError):
+                self.decode(mutation)
 
     def test_button_decoder_rejects_version_extras_chat_and_topic_mismatch(self) -> None:
         for mutation in (
@@ -1203,6 +1283,181 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("原生 Thread", str(delete.card))
         self.assertIn("binding.unarchive", str(archived.card))
         self.assertIn("恢复并切换", str(archived.card))
+
+    def test_sessions_card_pins_active_and_offers_activate_for_others(self) -> None:
+        active = SessionCardItem(
+            binding_id="11111111-0000-0000-0000-000000000001",
+            short_id="11111111",
+            project_alias="test",
+            native_thread_id="native-one",
+            title="Active work",
+            state="running",
+            active=True,
+        )
+        other = SessionCardItem(
+            binding_id="22222222-0000-0000-0000-000000000002",
+            short_id="22222222",
+            project_alias="test",
+            native_thread_id="native-two",
+            title="Other work",
+            state="idle",
+            active=False,
+        )
+        lazy = SessionCardItem(
+            binding_id="33333333-0000-0000-0000-000000000003",
+            short_id="33333333",
+            project_alias="none",
+            native_thread_id=None,
+            title="新会话",
+            state="idle",
+            active=False,
+        )
+        card = sessions_card(
+            scope=self.scope,
+            sessions=(other, lazy, active),
+            page=0,
+        )
+        text = str(card.card)
+        # Active is pinned to the top.
+        self.assertLess(text.index("Active work"), text.index("Other work"))
+        self.assertLess(text.index("Active work"), text.index("新会话"))
+        self.assertIn("● 当前", text)
+        self.assertIn("Native：native-o", text)
+        self.assertIn("Native：pending", text)
+        self.assertIn("切换不会停止其他会话正在运行的任务", text)
+        buttons = _elements(card.card, "button")
+        labels = [b["text"]["content"] for b in buttons]
+        self.assertIn("设为当前", labels)
+        # Active row has no activate button; only two non-active rows have it.
+        self.assertEqual(labels.count("设为当前"), 2)
+        # Only the idle materialized row can be archived.
+        self.assertEqual(labels.count("归档"), 1)
+        archive = next(b for b in buttons if b["text"]["content"] == "归档")
+        archive_value = archive["behaviors"][0]["value"]
+        self.assertEqual(archive_value["intent"], "binding.archive.exact")
+        self.assertEqual(
+            archive_value["binding_id"],
+            "binding:v1:22222222-0000-0000-0000-000000000002",
+        )
+        self.assertEqual(
+            archive_value["expected_active_binding_id"],
+            "binding:v1:11111111-0000-0000-0000-000000000001",
+        )
+        self.assertEqual(archive_value["page"], 0)
+        self.assertEqual(
+            archive["confirm"]["title"]["content"],
+            "确认归档此会话？",
+        )
+        self.assertIn("历史不会删除", archive["confirm"]["text"]["content"])
+
+    def test_sessions_archive_is_hidden_for_non_idle_or_lazy_rows(self) -> None:
+        sessions = (
+            SessionCardItem(
+                binding_id="11111111-0000-0000-0000-000000000001",
+                short_id="11111111",
+                project_alias="test",
+                native_thread_id="native-one",
+                title="Idle current",
+                state="idle",
+                active=True,
+            ),
+            SessionCardItem(
+                binding_id="22222222-0000-0000-0000-000000000002",
+                short_id="22222222",
+                project_alias="test",
+                native_thread_id="native-two",
+                title="Running",
+                state="running",
+                active=False,
+            ),
+            SessionCardItem(
+                binding_id="33333333-0000-0000-0000-000000000003",
+                short_id="33333333",
+                project_alias="test",
+                native_thread_id="native-three",
+                title="Goal",
+                state="goal-active",
+                active=False,
+            ),
+            SessionCardItem(
+                binding_id="44444444-0000-0000-0000-000000000004",
+                short_id="44444444",
+                project_alias="test",
+                native_thread_id=None,
+                title="Lazy",
+                state="idle",
+                active=False,
+            ),
+            SessionCardItem(
+                binding_id="55555555-0000-0000-0000-000000000005",
+                short_id="55555555",
+                project_alias="test",
+                native_thread_id="native-five",
+                title="Compacting",
+                state="compacting",
+                active=False,
+            ),
+            SessionCardItem(
+                binding_id="66666666-0000-0000-0000-000000000006",
+                short_id="66666666",
+                project_alias="test",
+                native_thread_id="native-six",
+                title="Archiving",
+                state="archiving",
+                active=False,
+            ),
+        )
+
+        card = sessions_card(scope=self.scope, sessions=sessions)
+        archive_buttons = [
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "归档"
+        ]
+
+        self.assertEqual(len(archive_buttons), 1)
+        self.assertEqual(
+            archive_buttons[0]["behaviors"][0]["value"]["binding_id"],
+            "binding:v1:11111111-0000-0000-0000-000000000001",
+        )
+
+    def test_sessions_card_paginates_and_clamps_page(self) -> None:
+        sessions = tuple(
+            SessionCardItem(
+                binding_id=f"{i:08d}-0000-0000-0000-000000000000",
+                short_id=f"{i:08d}",
+                project_alias="test",
+                native_thread_id=f"native-{i}",
+                title=f"Session {i}",
+                state="idle",
+                active=(i == 0),
+            )
+            for i in range(25)
+        )
+        card = sessions_card(scope=self.scope, sessions=sessions, page=0)
+        text = str(card.card)
+        self.assertIn("第 1/3 页", text)
+        self.assertIn("下一页", text)
+        self.assertNotIn("上一页", text)
+
+        card = sessions_card(scope=self.scope, sessions=sessions, page=1)
+        text = str(card.card)
+        self.assertIn("第 2/3 页", text)
+        self.assertIn("上一页", text)
+        self.assertIn("下一页", text)
+
+        # Out-of-range page is clamped to the last valid page.
+        card = sessions_card(scope=self.scope, sessions=sessions, page=99)
+        text = str(card.card)
+        self.assertIn("第 3/3 页", text)
+        self.assertIn("上一页", text)
+        self.assertNotIn("下一页", text)
+
+    def test_sessions_card_empty_state(self) -> None:
+        card = sessions_card(scope=self.scope, sessions=(), page=0)
+        text = str(card.card)
+        self.assertIn("没有普通会话", text)
+        self.assertIn("/sessions archived", text)
 
 
 def _elements(value, tag: str):

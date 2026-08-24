@@ -116,15 +116,19 @@ write-once 绑定一个已持久化、idle、非 ephemeral 的零 Turn Thread；
 continuation 的多个物理 Turn 合并为一个通知流。`/goal` 只读展示，`pause/resume/clear`
 和 Goal 卡片按钮进入同一 typed control 路由；token budget 暂不暴露。
 
-会话生命周期按 [ADR 0017](adr/0017-manage-native-thread-lifecycle.md) 与
-[ADR 0019](adr/0019-keep-native-thread-delete-unavailable.md) 只管理当前 Binding：
+会话生命周期的命令入口按 [ADR 0017](adr/0017-manage-native-thread-lifecycle.md) 与
+[ADR 0019](adr/0019-keep-native-thread-delete-unavailable.md) 管理当前 Binding：
 `/rename [name]` 写原生 Thread name；`/archive` 先显示确认卡，提交时再次确认 exact
 Binding 仍为 Scope active。归档成功后只清空 active pointer 并保留 Binding/Turn
 Settings。`/delete` 只为 Lazy Binding 显示确认卡并删除本地记录；已有原生历史时在任何
 native read/mutation 前明确拒绝。
 普通 `/sessions` 显式读取 `thread_list(archived=False)`，`/sessions archived` 显式读取
-`archived=True`，归档状态与名称都不进 Channel Database。恢复是必须选择目标的例外：
-`/unarchive <短 ID>` 或归档卡按钮恢复 exact native ID 并切换 Binding。
+`archived=True`，归档状态与名称都不进 Channel Database。普通列表卡片的“设为当前”只
+切换 exact active Binding，不创建 Turn，也不停止其他 Binding 的运行。按
+[ADR 0036](adr/0036-archive-exact-idle-sessions-from-the-sessions-card.md)，列表中的 idle
+materialized 行可确认后直接 exact archive；inactive 目标保持 active pointer，当前目标
+清空 pointer。归档恢复仍显式选择目标：`/unarchive <短 ID>` 或归档卡按钮恢复 exact
+native ID 并切换 Binding。
 
 `/side [首轮问题]` 按 [ADR 0021](adr/0021-support-multi-turn-ephemeral-side-topics.md)
 从当前 exact active、materialized Parent Binding 创建
@@ -549,9 +553,23 @@ Turn。卡片不显示会话选择或“继承/自定义”模式；配置其他
 `/sessions` 通过公开、只读且支持分页的
 `codex.thread_list(model_providers=[])` 跨 provider 批量读取原生 Thread
 元数据；每项优先显示 `name`，未设置时回退到首条用户消息 `preview`，并把短 Binding
-ID 保留为 `/resume` 的稳定引用。lazy Binding 显示“新会话”。名称和预览只用于当次
-展示，不写入 Channel 数据库；Thread 列表读取失败或找不到对应 Thread 时明确显示暂不可用，
-不会为了标题而 resume Thread。
+ID 保留为 `/resume` 的稳定引用。普通列表呈现为无持久状态的分页卡片：active Binding
+置顶并明确标记，其他行用携带完整 Binding ID 和 Scope envelope 的
+`binding.activate` 按钮“设为当前”；独立的 `sessions.page` 回调只携带 Scope 与页码。
+回调重新读取 live Binding 与 native catalog，通过 Scope coordinator 和 exact
+activation 边界校验目标仍属同一 Scope、未归档且仍存在；
+成功后原地刷新卡片，多个参与者并发操作时最后一次成功切换生效。该动作不创建 Turn、
+不停止旧 Binding 的 running Turn，也不保存 card session；列表缩短时页码夹取到有效页。
+呈现为 idle 的 materialized 行还显示带内置确认的 `binding.archive.exact`；动作携带
+目标、Scope、当前页和 active pointer 快照，并在共享 Scope 锁内按实时 Runtime 状态重新
+校验，并以原生 read 证明 persisted、non-ephemeral、idle。归档 inactive 行不改变真实
+active pointer，归档当前行清空 pointer；旧卡、跨 Scope、已归档、外部 active、running、
+Goal、compacting 和 lifecycle-unknown 目标均零 mutation 地失败。成功后
+从 live catalog 重建并夹取原页；mutation 已确认成功但刷新失败时只回退等价成功消息。
+lazy Binding 显示“新会话”且同样可切换。名称和预览只用于当次展示，不写入 Channel
+数据库；Thread 列表读取失败或找不到对应 Thread 时明确显示暂不可用，不会为了标题而
+resume Thread。切换已成功但后续卡片刷新失败时发送等价成功反馈，不能把已提交 mutation
+误报成失败。
 
 `/status` 以一项一行展示当前 Binding、原生 `name`、首条消息 `preview`、Project、完整
 native Thread ID、运行状态、当前 active Turn checklist、已接受 steer 次数、上下文窗口
@@ -609,8 +627,9 @@ prompt，未知 slash command fail closed，不增加任意 `/`/`@` 链式解释
 `/compact` 可用；CLI/App 的 `/copy`、`/vim`、`/theme`、`/exit` 等纯宿主命令明确
 不可用且不进入帮助。
 
-`/rename`、`/archive`、`/delete` 只作用于当前 active Binding，不接受目标 ID；管理另一
-普通会话应先 `/resume`。rename 可直接带名称或打开 form；archive 与 Lazy delete 的
+`/rename`、`/archive`、`/delete` 命令只作用于当前 active Binding，不接受目标 ID；管理
+另一普通会话的 rename/delete 应先 `/resume`。`/sessions` 中按 ADR 0036 确认归档 exact
+idle materialized 行是唯一 archive 例外，不改变 `/archive` 命令。rename 可直接带名称或打开 form；archive 与 Lazy delete 的
 callback 携带完整 Binding ID 和 Feishu Scope envelope，并由内置 confirm 二次确认，
 其中 delete 使用红色危险卡。materialized `/delete` 不生成卡片，直接说明等待公开 SDK。
 提交时 Scope 锁重新检查 active pointer，旧卡片不执行。归档列表只为同一 Scope 的原生

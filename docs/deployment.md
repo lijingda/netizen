@@ -714,8 +714,11 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
 本地 loopback 单测不能替代。
 
 1. P2P `/help`、`/new test`、`/sessions`、`/status`（native=pending）；`/sessions`
-   将 lazy Binding 显示为“新会话”，有原生 Thread 时优先显示 `name`、否则显示
-   `preview`；`/status` 分行显示 `name`、`preview` 与“上下文窗口：暂无（首条消息后
+   返回分页卡片，将 active Binding 置顶、将 lazy Binding 显示为“新会话”，有原生
+   Thread 时优先显示 `name`、否则显示 `preview`。创建第二个会话后点击第一项的
+   “设为当前”，原卡必须刷新 active 标记，且不得停止另一会话仍在运行的 Turn；归档项
+   不得混入普通卡片。idle materialized 行显示带确认的“归档”，Lazy、running、Goal、
+   compacting 和 lifecycle-unknown 行不显示。`/status` 分行显示 `name`、`preview` 与“上下文窗口：暂无（首条消息后
    生成）”。帮助包含 `/config`、`/compact`、`/goal`、`/rename`、`/archive`、`/delete`、
    `/unarchive`，不包含
    `/skills`、`/model`、`/effort`、`/fast` 或当前不可用的
@@ -812,6 +815,10 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     二次确认、只删 Binding，并验证 stale current 防护。materialized `/delete` 必须在
     native metadata read 或 mutation 前明确提示暂不可用；原生 Thread、Binding 与 active
     pointer 均保持不变，也不显示删除确认卡。
+    另在 `/sessions` 中直接归档一个 idle materialized 非当前行，确认真实 active pointer
+    不变、目标移入 archived catalog、原卡刷新并在删除末页唯一项时夹取页码；再归档当前
+    行，确认 pointer 为空。打开行内确认后改变 active pointer 或令目标开始 running，再点
+    旧按钮必须零 mutation。`/archive` 仍不接受目标参数且保持 current-only。
 20. 在已物化 Parent 上分别从 P2P、P2P 话题、普通群主线、普通群话题和话题模式群触发
     `/side`；从已有话题触发必须得到同 chat 的 sibling，不得留在或嵌套原话题。P2P 与
     P2P Side 话题无需 @，三类群入口及 Side 后续每条消息都必须 @。每个 Side 连续完成

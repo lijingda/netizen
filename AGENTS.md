@@ -55,6 +55,9 @@ design detail, compatibility findings, and procedures in their source docs.
   [ADR 0035](docs/adr/0035-gate-activation-on-effective-feishu-permissions.md)
   lets the official registration page create or select an app and gates every
   activation on the effective tenant permission contract.
+  [ADR 0036](docs/adr/0036-archive-exact-idle-sessions-from-the-sessions-card.md)
+  permits confirmed exact archive of eligible idle sessions from `/sessions`
+  while keeping the `/archive` command current-only.
   Superseded ADRs are historical context.
 - [docs/deployment.md](docs/deployment.md): setup, verification, and release
   procedures.

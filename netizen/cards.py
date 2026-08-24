@@ -38,6 +38,7 @@ from .turn_files import (
 
 ACTION_VERSION = 3
 TURN_FILE_ACTION_VERSION = 4
+SESSIONS_PAGE_SIZE = 10
 TURN_FILE_MANIFEST_LIMIT = 500
 TURN_FILE_CARD_JSON_LIMIT_BYTES = 55_000
 _TURN_ANSWER_ELEMENT_ID = "turnanswerv1"
@@ -68,6 +69,17 @@ class ArchivedSessionCardItem:
     project_alias: str
     native_thread_id: str
     title: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionCardItem:
+    binding_id: str
+    short_id: str
+    project_alias: str
+    native_thread_id: str | None
+    title: str
+    state: str
+    active: bool
 
 
 class CardActionError(ValueError):
@@ -940,6 +952,211 @@ def archived_sessions_card(
     return OutboundCard(card=builder.to_dict())
 
 
+def sessions_card(
+    *,
+    scope: FeishuScope,
+    sessions: tuple[SessionCardItem, ...],
+    page: int = 0,
+    notice: str | None = None,
+    notice_is_error: bool = False,
+) -> OutboundCard:
+    builder = _builder("会话", f"{len(sessions)} 个普通会话")
+    if notice:
+        builder.raw(_notice(notice, error=notice_is_error))
+    builder.markdown(
+        "切换不会停止其他会话正在运行的任务。"
+        "归档仅对空闲且已有原生历史的会话开放；历史不会删除，"
+        "可从 `/sessions archived` 恢复。"
+    )
+    if not sessions:
+        builder.markdown(
+            "当前 Scope 没有普通会话；发送 `/sessions archived` 查看归档。"
+        )
+        return OutboundCard(card=builder.to_dict())
+
+    ordered = sorted(sessions, key=lambda item: (not item.active,))
+    total_pages = max(
+        1,
+        (len(ordered) + SESSIONS_PAGE_SIZE - 1) // SESSIONS_PAGE_SIZE,
+    )
+    clamped_page = max(0, min(page, total_pages - 1))
+    start = clamped_page * SESSIONS_PAGE_SIZE
+    end = start + SESSIONS_PAGE_SIZE
+    visible = ordered[start:end]
+    expected_active_binding_id = next(
+        (session.binding_id for session in ordered if session.active),
+        None,
+    )
+
+    for session in visible:
+        builder.raw(
+            _session_row(
+                scope=scope,
+                session=session,
+                page=clamped_page,
+                expected_active_binding_id=expected_active_binding_id,
+            )
+        )
+
+    if total_pages > 1:
+        builder.raw(
+            _sessions_pagination(
+                scope=scope,
+                page=clamped_page,
+                total_pages=total_pages,
+            )
+        )
+    return OutboundCard(card=builder.to_dict())
+
+
+def _session_row(
+    *,
+    scope: FeishuScope,
+    session: SessionCardItem,
+    page: int,
+    expected_active_binding_id: str | None,
+) -> dict[str, Any]:
+    native = (
+        session.native_thread_id[:8]
+        if session.native_thread_id is not None
+        else "pending"
+    )
+    marker_text = "● 当前" if session.active else "○"
+    text = (
+        f"{marker_text} {session.title}\n"
+        f"会话：{session.short_id} · Project：{session.project_alias} · "
+        f"Native：{native} · 状态：{session.state}"
+    )
+    controls: list[dict[str, Any]] = []
+    if not session.active:
+        controls.append(
+            _callback_button(
+                label="设为当前",
+                value=_envelope(
+                    scope,
+                    CardControlName.ACTIVATE_BINDING,
+                    binding_id=_binding_reference(session.binding_id),
+                ),
+                style="primary_filled",
+            )
+        )
+    if session.native_thread_id is not None and session.state == "idle":
+        controls.append(
+            _callback_button(
+                label="归档",
+                value=_envelope(
+                    scope,
+                    CardControlName.ARCHIVE_EXACT_BINDING,
+                    binding_id=_binding_reference(session.binding_id),
+                    expected_active_binding_id=(
+                        _binding_reference(expected_active_binding_id)
+                        if expected_active_binding_id is not None
+                        else None
+                    ),
+                    page=page,
+                ),
+                confirm=(
+                    "确认归档此会话？",
+                    (
+                        f"将归档会话 {session.short_id}（{session.title}）。"
+                        "历史不会删除，之后可以恢复。"
+                    ),
+                ),
+            )
+        )
+    columns = [
+        {
+            "tag": "column",
+            "width": "weighted",
+            "weight": 5,
+            "padding": "8px",
+            "elements": [_plain(text)],
+        },
+    ]
+    if controls:
+        columns.extend(
+            {
+                "tag": "column",
+                "width": "auto",
+                "vertical_align": "center",
+                "padding": "8px",
+                "elements": [control],
+            }
+            for control in controls
+        )
+    background = "blue-50" if session.active else "grey-50"
+    return {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "background_style": background,
+        "margin": "0 0 8px 0",
+        "columns": columns,
+    }
+
+
+def _sessions_pagination(
+    *,
+    scope: FeishuScope,
+    page: int,
+    total_pages: int,
+) -> dict[str, Any]:
+    columns: list[dict[str, Any]] = [
+        {
+            "tag": "column",
+            "width": "weighted",
+            "weight": 1,
+            "vertical_align": "center",
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"<font color='grey'>第 {page + 1}/{total_pages} 页</font>",
+                }
+            ],
+        }
+    ]
+    if page > 0:
+        columns.append(
+            {
+                "tag": "column",
+                "width": "auto",
+                "elements": [
+                    _callback_button(
+                        label="上一页",
+                        value=_sessions_page_envelope(
+                            scope=scope,
+                            target=page - 1,
+                        ),
+                    )
+                ],
+            }
+        )
+    if page + 1 < total_pages:
+        columns.append(
+            {
+                "tag": "column",
+                "width": "auto",
+                "elements": [
+                    _callback_button(
+                        label="下一页",
+                        value=_sessions_page_envelope(
+                            scope=scope,
+                            target=page + 1,
+                        ),
+                    )
+                ],
+            }
+        )
+    return {"tag": "column_set", "flex_mode": "none", "columns": columns}
+
+
+def _sessions_page_envelope(*, scope: FeishuScope, target: int) -> dict[str, Any]:
+    return _envelope(
+        scope,
+        CardControlName.SESSIONS_PAGE,
+        page=target,
+    )
+
+
 def binding_lifecycle_result_card(
     *,
     title: str,
@@ -1215,8 +1432,15 @@ def decode_button_action(
             "expected_revision",
         },
         CardControlName.ARCHIVE_BINDING: {"binding_id"},
+        CardControlName.ARCHIVE_EXACT_BINDING: {
+            "binding_id",
+            "expected_active_binding_id",
+            "page",
+        },
         CardControlName.DELETE_BINDING: {"binding_id"},
         CardControlName.UNARCHIVE_BINDING: {"binding_id"},
+        CardControlName.ACTIVATE_BINDING: {"binding_id"},
+        CardControlName.SESSIONS_PAGE: {"page"},
         CardControlName.GOAL_PAUSE: {"binding_id"},
         CardControlName.GOAL_RESUME: {"binding_id"},
         CardControlName.GOAL_CLEAR: {"binding_id"},
@@ -1241,10 +1465,12 @@ def decode_button_action(
 
     alias = None
     binding_id = None
+    expected_active_binding_id = None
     side_id = None
     revision = None
     enabled = None
     section = None
+    page = None
     if "settings_section" in payload:
         try:
             section = SettingsSection(payload["settings_section"])
@@ -1256,6 +1482,15 @@ def decode_button_action(
         binding_id = _decode_binding_reference(
             _required_string(payload["binding_id"], "binding_id")
         )
+    if "expected_active_binding_id" in payload:
+        raw_active_binding_id = payload["expected_active_binding_id"]
+        if raw_active_binding_id is not None:
+            expected_active_binding_id = _decode_binding_reference(
+                _required_string(
+                    raw_active_binding_id,
+                    "expected_active_binding_id",
+                )
+            )
     if "side_id" in payload:
         side_id = _decode_side_reference(
             _required_string(payload["side_id"], "side_id")
@@ -1268,6 +1503,15 @@ def decode_button_action(
         enabled = payload["enabled"]
         if not isinstance(enabled, bool):
             raise CardActionError("enabled 必须是布尔值。")
+    if "page" in payload:
+        raw_page = payload["page"]
+        if (
+            isinstance(raw_page, bool)
+            or not isinstance(raw_page, int)
+            or raw_page < 0
+        ):
+            raise CardActionError("页码必须是非负整数。")
+        page = raw_page
     if name is CardControlName.SET_PROJECT_ENABLED:
         section = SettingsSection.PROJECTS
     if name is CardControlName.SIDE_CLOSE and scope.kind is not ScopeKind.TOPIC:
@@ -1282,7 +1526,9 @@ def decode_button_action(
         expected_revision=revision,
         enabled=enabled,
         binding_id=binding_id,
+        expected_active_binding_id=expected_active_binding_id,
         side_id=side_id,
+        page=page,
     )
 
 

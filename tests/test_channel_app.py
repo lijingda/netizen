@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -448,6 +449,7 @@ class StubRuntime:
         self.lifecycle_states: dict[str, object] = {}
         self.rename_binding_calls: list[tuple[str, str]] = []
         self.archive_binding_calls: list[str] = []
+        self.archive_binding_error: BaseException | None = None
         self.delete_binding_calls: list[str] = []
         self.unarchive_binding_calls: list[str] = []
         self.enforce_active_submission = False
@@ -585,9 +587,23 @@ class StubRuntime:
         return await self.rename_binding(self.binding_store.get(binding_id), name)
 
     async def archive_binding(self, binding):
+        if self.archive_binding_error is not None:
+            raise self.archive_binding_error
         self.archive_binding_calls.append(binding.id)
         assert self.binding_store is not None
-        return self.binding_store.deactivate(
+        if binding.native_thread_id is not None:
+            metadata = self.thread_metadata_values.pop(
+                binding.native_thread_id,
+                NativeThreadMetadata(
+                    binding.native_thread_id,
+                    None,
+                    "",
+                ),
+            )
+            self.archived_thread_metadata_values[binding.native_thread_id] = (
+                metadata
+            )
+        return self.binding_store.deactivate_if_active(
             scope_key=binding.scope_key,
             binding_id=binding.id,
         )
@@ -2002,19 +2018,34 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             FakeMessage("/sessions", message_id="om_sessions")
         )
 
-        reply = self.channel.replies[-1][1]
-        self.assertIn("○ Named Thread\n", reply)
-        self.assertNotIn("name must win", reply)
-        self.assertIn("○ Preview " + "x" * 39 + "…\n", reply)
-        self.assertIn("● 新会话\n", reply)
-        self.assertIn("会话：11111111 · Project：test", reply)
-        self.assertIn("会话：22222222 · Project：test", reply)
-        self.assertIn("会话：33333333 · Project：test", reply)
+        card = self.channel.replies[-1][1]
+        self.assertIsInstance(card, OutboundCard)
+        text = str(card.card)
+        self.assertIn("Named Thread", text)
+        self.assertNotIn("name must win", text)
+        self.assertIn("Preview " + "x" * 39 + "…", text)
+        self.assertIn("新会话", text)
+        self.assertIn("会话：11111111 · Project：test", text)
+        self.assertIn("会话：22222222 · Project：test", text)
+        self.assertIn("会话：33333333 · Project：test", text)
+        self.assertIn("● 当前", text)
+        self.assertIn("设为当前", text)
         self.assertEqual(len(self.runtime.thread_metadata_calls), 1)
         self.assertEqual(
             set(self.runtime.thread_metadata_calls[0]),
             {"native-one", "native-two"},
         )
+
+    async def test_sessions_without_bindings_returns_empty_card(self) -> None:
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions_empty")
+        )
+
+        card = self.channel.replies[-1][1]
+        self.assertIsInstance(card, OutboundCard)
+        self.assertIn("0 个普通会话", str(card.card))
+        self.assertIn("没有普通会话", str(card.card))
+        self.assertEqual(self.runtime.thread_metadata_calls, [])
 
     async def test_rename_supports_direct_name_and_current_binding_form(self) -> None:
         await self.new()
@@ -2238,8 +2269,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             FakeMessage("/sessions", message_id="om_sessions")
         )
         ordinary = self.channel.replies[-1][1]
-        self.assertIn(current.short_id, ordinary)
-        self.assertNotIn(archived_binding.short_id, ordinary)
+        self.assertIsInstance(ordinary, OutboundCard)
+        ordinary_text = str(ordinary.card)
+        self.assertIn(current.short_id, ordinary_text)
+        self.assertNotIn(archived_binding.short_id, ordinary_text)
 
         await self.app.handle_message(
             FakeMessage("/sessions archived", message_id="om_archived")
@@ -2281,6 +2314,494 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             (current.id, archived_binding.id),
         )
         self.assertIn("会话已恢复并切换", str(self.channel.updates[-1][1]))
+
+    async def test_sessions_activate_button_switches_and_refreshes_in_place(self) -> None:
+        await self.new(message_id="om_new_one")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        first = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(first.id, "native-one")
+        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
+            "native-one", "First", "task one",
+        )
+        await self.new(message_id="om_new_two")
+        second = self.store.active_binding(scope.key)
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        self.assertIsInstance(card, OutboundCard)
+        buttons = _elements(card.card, "button")
+        activate = next(
+            b for b in buttons if b["text"]["content"] == "设为当前"
+        )
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                activate["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+
+        self.assertEqual(self.store.active_binding(scope.key).id, first.id)
+        self.assertEqual(
+            self.runtime.active_binding_change_calls[-1],
+            (second.id, first.id),
+        )
+        updated = self.channel.updates[-1][1]
+        self.assertIn("已切换到会话", str(updated))
+        self.assertIn("● 当前", str(updated))
+
+    async def test_sessions_activate_does_not_stop_old_running_turn(self) -> None:
+        await self.new(message_id="om_new_one")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        first = self.store.active_binding(scope.key)
+        self.runtime.active[first.id] = ActiveTurnSnapshot(
+            first.id, "native-one", "turn-one", "ou_user", ActiveState.RUNNING,
+        )
+        await self.new(message_id="om_new_two")
+        second = self.store.active_binding(scope.key)
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        activate = next(
+            b
+            for b in _elements(card.card, "button")
+            if b["text"]["content"] == "设为当前"
+        )
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                activate["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+
+        self.assertEqual(self.store.active_binding(scope.key).id, first.id)
+        self.assertIn(first.id, self.runtime.active)
+
+    async def test_sessions_activate_refresh_failure_still_reports_success(self) -> None:
+        await self.new(message_id="om_new_one")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        first = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(first.id, "native-one")
+        await self.new(message_id="om_new_two")
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        activate = next(
+            b
+            for b in _elements(card.card, "button")
+            if b["text"]["content"] == "设为当前"
+        )
+
+        self.runtime.thread_metadata_error = RuntimeError("history down")
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                activate["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+
+        self.assertEqual(self.store.active_binding(scope.key).id, first.id)
+        reply = self.channel.replies[-1][1]
+        self.assertIn("已切换到会话", reply)
+
+    async def test_sessions_activate_rejects_cross_scope_binding(self) -> None:
+        await self.new(message_id="om_new_one")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        # Create a second binding in the same scope so the card renders a
+        # "设为当前" button (the active binding has no switch button).
+        await self.new(message_id="om_new_two")
+        other_scope = FeishuScope("cli_test", "oc_other", ScopeKind.DIRECT)
+        other = self.store.create_binding(
+            scope=other_scope,
+            project_alias="test",
+            creator_id="ou_other",
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        activate = next(
+            b
+            for b in _elements(card.card, "button")
+            if b["text"]["content"] == "设为当前"
+        )
+        value = dict(activate["behaviors"][0]["value"])
+        # Keep the current scope envelope but point at another scope's binding.
+        value["binding_id"] = f"binding:v1:{other.id}"
+
+        before_active = self.store.active_binding(scope.key).id
+        await self.app.handle_card_action(
+            self.direct_button_event(value, message_id="om_sessions")
+        )
+        # The active binding pointer must not change for a cross-scope binding.
+        self.assertEqual(self.store.active_binding(scope.key).id, before_active)
+        self.assertIn("操作失败", str(self.channel.updates[-1][1]))
+
+    async def test_sessions_activate_lazy_binding_succeeds(self) -> None:
+        await self.new(message_id="om_new_lazy")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        lazy = self.store.active_binding(scope.key)
+        await self.new(message_id="om_new_other")
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        activate = next(
+            b
+            for b in _elements(card.card, "button")
+            if b["text"]["content"] == "设为当前"
+        )
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                activate["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+
+        self.assertEqual(self.store.active_binding(scope.key).id, lazy.id)
+        self.assertIn("已切换到会话", str(self.channel.updates[-1][1]))
+
+    async def test_sessions_archives_exact_inactive_binding_and_keeps_current(
+        self,
+    ) -> None:
+        await self.new(message_id="om_new_archive_target")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        target = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(target.id, "native-target")
+        self.runtime.thread_metadata_values["native-target"] = NativeThreadMetadata(
+            "native-target",
+            "Archive target",
+            "old task",
+        )
+        await self.new(message_id="om_new_current")
+        current = self.store.active_binding(scope.key)
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        archive = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "归档"
+        )
+        value = archive["behaviors"][0]["value"]
+        self.assertEqual(value["binding_id"], f"binding:v1:{target.id}")
+        self.assertEqual(
+            value["expected_active_binding_id"],
+            f"binding:v1:{current.id}",
+        )
+
+        await self.app.handle_card_action(
+            self.direct_button_event(value, message_id="om_sessions")
+        )
+
+        self.assertEqual(self.runtime.archive_binding_calls, [target.id])
+        self.assertEqual(self.store.active_binding(scope.key).id, current.id)
+        self.assertEqual(
+            self.runtime.active_binding_change_calls[-1],
+            (current.id, current.id),
+        )
+        self.assertIn(
+            "native-target",
+            self.runtime.archived_thread_metadata_values,
+        )
+        updated = self.channel.updates[-1][1]
+        self.assertIn("✅ 已归档会话", str(updated))
+        self.assertIn("1 个普通会话", str(updated))
+        self.assertNotIn("Archive target", str(updated))
+
+    async def test_sessions_archives_current_binding_and_clears_pointer(
+        self,
+    ) -> None:
+        await self.new(message_id="om_new_current")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        current = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(current.id, "native-current")
+        self.runtime.thread_metadata_values["native-current"] = NativeThreadMetadata(
+            "native-current",
+            "Current work",
+            "current task",
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        archive = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "归档"
+        )
+        value = archive["behaviors"][0]["value"]
+        self.assertEqual(
+            value["expected_active_binding_id"],
+            f"binding:v1:{current.id}",
+        )
+
+        await self.app.handle_card_action(
+            self.direct_button_event(value, message_id="om_sessions")
+        )
+
+        self.assertEqual(self.runtime.archive_binding_calls, [current.id])
+        self.assertIsNone(self.store.active_binding(scope.key))
+        self.assertEqual(
+            self.runtime.active_binding_change_calls[-1],
+            (current.id, None),
+        )
+        updated = self.channel.updates[-1][1]
+        self.assertIn("0 个普通会话", str(updated))
+        self.assertNotIn("Current work", str(updated))
+
+    async def test_sessions_archive_fails_closed_when_active_pointer_changes(
+        self,
+    ) -> None:
+        await self.new(message_id="om_new_archive_target")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        target = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(target.id, "native-target")
+        self.runtime.thread_metadata_values["native-target"] = NativeThreadMetadata(
+            "native-target",
+            "Archive target",
+            "old task",
+        )
+        await self.new(message_id="om_new_expected_current")
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        archive = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "归档"
+        )
+        value = archive["behaviors"][0]["value"]
+
+        await self.new(message_id="om_new_changed_current")
+        changed_current = self.store.active_binding(scope.key)
+        await self.app.handle_card_action(
+            self.direct_button_event(value, message_id="om_sessions")
+        )
+
+        self.assertEqual(self.runtime.archive_binding_calls, [])
+        self.assertEqual(
+            self.store.active_binding(scope.key).id,
+            changed_current.id,
+        )
+        self.assertIn("会话列表已变化", str(self.channel.updates[-1][1]))
+        self.assertEqual(
+            self.store.get(target.id).native_thread_id,
+            "native-target",
+        )
+
+    async def test_sessions_archive_rejects_cross_scope_binding(self) -> None:
+        await self.new(message_id="om_new_archive_target")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        target = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(target.id, "native-target")
+        await self.new(message_id="om_new_current")
+        current = self.store.active_binding(scope.key)
+        other_scope = FeishuScope("cli_test", "oc_other", ScopeKind.DIRECT)
+        other = self.store.create_binding(
+            scope=other_scope,
+            project_alias="test",
+            creator_id="ou_other",
+        )
+        self.store.assign_native_thread_id(other.id, "native-other")
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        archive = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "归档"
+        )
+        value = dict(archive["behaviors"][0]["value"])
+        value["binding_id"] = f"binding:v1:{other.id}"
+
+        await self.app.handle_card_action(
+            self.direct_button_event(value, message_id="om_sessions")
+        )
+
+        self.assertEqual(self.runtime.archive_binding_calls, [])
+        self.assertEqual(self.store.active_binding(scope.key).id, current.id)
+        self.assertIn("操作失败", str(self.channel.updates[-1][1]))
+
+    async def test_sessions_archive_revalidates_runtime_state_on_click(self) -> None:
+        await self.new(message_id="om_new_archive_target")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        target = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(target.id, "native-target")
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        archive = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "归档"
+        )
+        self.runtime.archive_binding_error = ThreadRunningConfiguration(
+            "会话正在运行，无法归档。"
+        )
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                archive["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+
+        self.assertEqual(self.runtime.archive_binding_calls, [])
+        self.assertEqual(self.store.active_binding(scope.key).id, target.id)
+        self.assertIn("会话正在运行", str(self.channel.updates[-1][1]))
+
+    async def test_sessions_archive_refresh_failure_still_reports_success(
+        self,
+    ) -> None:
+        await self.new(message_id="om_new_archive_target")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        target = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(target.id, "native-target")
+        await self.new(message_id="om_new_current")
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        archive = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "归档"
+        )
+        self.runtime.thread_metadata_error = RuntimeError("history down")
+
+        with self.assertLogs("netizen.channel_app", level="WARNING"):
+            await self.app.handle_card_action(
+                self.direct_button_event(
+                    archive["behaviors"][0]["value"],
+                    message_id="om_sessions",
+                )
+            )
+
+        self.assertEqual(self.runtime.archive_binding_calls, [target.id])
+        reply = self.channel.replies[-1][1]
+        self.assertIsInstance(reply, str)
+        self.assertIn("✅ 已归档会话", reply)
+
+    async def test_sessions_archive_refresh_clamps_removed_last_page(self) -> None:
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        self.store._id_factory = lambda: str(uuid.uuid4())
+        for i in range(11):
+            await self.new(message_id=f"om_new_archive_page_{i}")
+            binding = self.store.active_binding(scope.key)
+            self.store.assign_native_thread_id(binding.id, f"native-page-{i}")
+            self.runtime.thread_metadata_values[f"native-page-{i}"] = (
+                NativeThreadMetadata(
+                    f"native-page-{i}",
+                    f"Session {i}",
+                    f"task {i}",
+                )
+            )
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        first_page = self.channel.replies[-1][1]
+        next_value = next(
+            button
+            for button in _elements(first_page.card, "button")
+            if button["text"]["content"] == "下一页"
+        )["behaviors"][0]["value"]
+        await self.app.handle_card_action(
+            self.direct_button_event(next_value, message_id="om_sessions")
+        )
+        second_page = self.channel.updates[-1][1]
+        archive = next(
+            button
+            for button in _elements(second_page, "button")
+            if button["text"]["content"] == "归档"
+        )
+        self.assertEqual(archive["behaviors"][0]["value"]["page"], 1)
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                archive["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+
+        clamped = self.channel.updates[-1][1]
+        clamped_text = str(clamped)
+        self.assertIn("10 个普通会话", clamped_text)
+        self.assertNotIn("上一页", clamped_text)
+        self.assertNotIn("下一页", clamped_text)
+
+    async def test_sessions_page_rereads_live_list_and_clamps_out_of_range(self) -> None:
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        self.store._id_factory = lambda: str(uuid.uuid4())
+        for i in range(15):
+            await self.new(message_id=f"om_new_{i}")
+            binding = self.store.active_binding(scope.key)
+            self.store.assign_native_thread_id(binding.id, f"native-{i}")
+            self.runtime.thread_metadata_values[f"native-{i}"] = NativeThreadMetadata(
+                f"native-{i}", f"Session {i}", f"task {i}",
+            )
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        first_page = self.channel.replies[-1][1]
+        self.assertIn("第 1/2 页", str(first_page.card))
+        next_button = next(
+            b
+            for b in _elements(first_page.card, "button")
+            if b["text"]["content"] == "下一页"
+        )
+        next_value = next_button["behaviors"][0]["value"]
+        self.assertEqual(next_value["page"], 1)
+
+        await self.app.handle_card_action(
+            self.direct_button_event(next_value, message_id="om_sessions")
+        )
+        second_page = self.channel.updates[-1][1]
+        self.assertIn("第 2/2 页", str(second_page))
+
+        # Shrink the live list to one page by archiving 8 bindings (7 remain).
+        for i in range(8):
+            self.runtime.archived_thread_metadata_values[f"native-{i}"] = (
+                NativeThreadMetadata(f"native-{i}", "Archived", "old")
+            )
+
+        # Request a page that is now out of range; the handler must clamp it
+        # to the only valid page rather than using the stale list.
+        out_of_range_value = {
+            "v": 3,
+            "intent": "sessions.page",
+            "chat_id": "oc_direct",
+            "scope_kind": "direct",
+            "page": 99,
+        }
+        await self.app.handle_card_action(
+            self.direct_button_event(out_of_range_value, message_id="om_sessions")
+        )
+        clamped = self.channel.updates[-1][1]
+        clamped_text = str(clamped)
+        self.assertIn("7 个普通会话", clamped_text)
+        self.assertNotIn("下一页", clamped_text)
+        self.assertNotIn("上一页", clamped_text)
 
     async def test_unarchive_command_restores_exact_local_binding(self) -> None:
         await self.new(message_id="om_new_archived")

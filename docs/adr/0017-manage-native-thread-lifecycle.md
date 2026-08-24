@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-08-12
 amends: 0008, 0014
+amended_by: 0019, 0036
 related: 0001, 0016
 ---
 
@@ -10,6 +11,9 @@ related: 0001, 0016
 > **修订：** materialized Thread Delete 的产品入口、生产 Adapter 与 live delete gate 已由
 > [ADR 0019](0019-keep-native-thread-delete-unavailable.md) 暂停。本文关于 rename、archive、
 > unarchive、Lazy Binding Delete 以及作为迁移哨兵保留的 delete synthetic contract 仍有效。
+> [ADR 0036](0036-archive-exact-idle-sessions-from-the-sessions-card.md) 另行允许普通
+> `/sessions` 卡片按 exact Binding 归档 idle materialized 会话；`/archive` 命令仍只作用于
+> 当前会话。
 
 ## 背景
 

@@ -99,9 +99,12 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   `/compact` 或 `/config`。Goal 卡片按钮进入同一 typed control 路由。
 - `/settings`：在当前单聊、群聊或话题打开 Netizen 设置卡片。当前 Projects 分区可
   通过下拉表单启停 Project，并在同一卡片内创建或登记 Project。
-- `/sessions`：列出当前 Scope 的会话。每个会话优先显示原生 `Thread.name`，没有名称时
-  使用首条用户消息 `preview`，同时保留 `/resume` 所需的短 ID（`/threads` 是兼容别名）；
-  已归档会话不混入普通列表。
+- `/sessions`：用分页卡片列出当前 Scope 的会话。当前会话置顶显示，其他会话可直接点击
+  “设为当前”；切换只改变 Scope 的 active Binding，不会停止其他会话正在运行的任务。
+  已有原生历史且当前 idle 的行还可二次确认后直接“归档”：归档非当前行不改变 active
+  Binding，归档当前行才清空 pointer；卡片状态已变化时操作会拒绝并要求重新打开。
+  每个会话优先显示原生 `Thread.name`，没有名称时使用首条用户消息 `preview`，同时保留
+  `/resume` 所需的短 ID（`/threads` 是兼容别名）；已归档会话不混入普通列表。
 - `/sessions archived`：从 Codex 原生 archived catalog 读取当前 Scope 的归档会话，并
   提供“恢复并切换”按钮。
 - `/resume <短 ID>`：切换普通会话；已归档会话必须先恢复。

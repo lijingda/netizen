@@ -94,6 +94,9 @@ class CardControlName(str, Enum):
     ARCHIVE_BINDING = "binding.archive"
     DELETE_BINDING = "binding.delete"
     UNARCHIVE_BINDING = "binding.unarchive"
+    ACTIVATE_BINDING = "binding.activate"
+    ARCHIVE_EXACT_BINDING = "binding.archive.exact"
+    SESSIONS_PAGE = "sessions.page"
     GOAL_PAUSE = "goal.pause"
     GOAL_RESUME = "goal.resume"
     GOAL_CLEAR = "goal.clear"
@@ -114,11 +117,13 @@ class CardControlIntent:
     project_path: str | None = None
     create_directory: bool | None = None
     binding_id: str | None = None
+    expected_active_binding_id: str | None = None
     thread_name: str | None = None
     model_id: str | None = None
     effort_id: str | None = None
     service_tier_id: str | None = None
     side_id: str | None = None
+    page: int | None = None
 
 
 class TurnFileActionName(str, Enum):

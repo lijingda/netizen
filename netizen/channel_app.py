@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from lark_channel import MediaSource, OutboundFile, OutboundImage, SendOpts
+from lark_channel import MediaSource, OutboundCard, OutboundFile, OutboundImage, SendOpts
 
 from .bindings import (
     AmbiguousBinding,
@@ -27,11 +27,13 @@ from .bindings import (
 from .cards import (
     ArchivedSessionCardItem,
     CardActionError,
+    SessionCardItem,
     SettingsCardActionError,
     TURN_FILE_ACTION_VERSION,
     TurnFileCardLimitError,
     archive_binding_card,
     archived_sessions_card,
+    sessions_card,
     binding_configured_card,
     binding_created_card,
     binding_lifecycle_result_card,
@@ -117,9 +119,11 @@ from .experience import (
 )
 from .model_settings import ModelCatalogError, TurnModelSettings
 from .management import (
+    ActivePointerChanged,
     CurrentBindingChanged,
     CurrentBindingTarget,
     CurrentSideTarget,
+    ExactBindingTarget,
     InstanceManagementService,
     ManagementRuntimePort,
     NoCurrentBinding,
@@ -927,8 +931,10 @@ class ChannelApplication:
                     CardControlName.CONFIGURE_BINDING,
                     CardControlName.RENAME_BINDING,
                     CardControlName.ARCHIVE_BINDING,
+                    CardControlName.ARCHIVE_EXACT_BINDING,
                     CardControlName.DELETE_BINDING,
                     CardControlName.UNARCHIVE_BINDING,
+                    CardControlName.ACTIVATE_BINDING,
                 }
             ):
                 await self._safe_reply_to_card(
@@ -962,8 +968,10 @@ class ChannelApplication:
                     CardControlName.CONFIGURE_BINDING,
                     CardControlName.RENAME_BINDING,
                     CardControlName.ARCHIVE_BINDING,
+                    CardControlName.ARCHIVE_EXACT_BINDING,
                     CardControlName.DELETE_BINDING,
                     CardControlName.UNARCHIVE_BINDING,
+                    CardControlName.ACTIVATE_BINDING,
                 }
             ):
                 await self._safe_reply_to_card(
@@ -2269,9 +2277,6 @@ class ChannelApplication:
         if intent.name is ControlName.SESSIONS:
             bindings = self._bindings.list_bindings(intent.scope.key)
             archived_view = bool(intent.arguments)
-            if not bindings and not archived_view:
-                await self._reply(message, "当前聊天或话题还没有会话。")
-                return
             if archived_view:
                 metadata = await self._read_thread_metadata(
                     bindings,
@@ -2302,41 +2307,10 @@ class ChannelApplication:
                 )
                 return
 
-            metadata = await self._read_thread_metadata(bindings)
-            archived_metadata = await self._read_thread_metadata(
-                bindings,
-                archived=True,
-                strict=True,
+            await self._reply(
+                message,
+                await self._sessions_card(scope=intent.scope, page=0),
             )
-            entries: list[str] = []
-            for binding in bindings:
-                if binding.native_thread_id in archived_metadata:
-                    continue
-                state = await self._binding_state(binding)
-                native = (
-                    binding.native_thread_id[:8]
-                    if binding.native_thread_id is not None
-                    else "pending"
-                )
-                title = _session_title(
-                    binding,
-                    metadata.get(binding.native_thread_id),
-                )
-                entries.append(
-                    f"{'●' if binding.active else '○'} {title}\n"
-                    f"  会话：{binding.short_id} · Project：{binding.project_alias} · "
-                    f"Native：{native} · 状态：{state}"
-                )
-            if entries:
-                await self._reply(
-                    message,
-                    "当前 Scope 的会话：\n\n" + "\n\n".join(entries),
-                )
-            else:
-                await self._reply(
-                    message,
-                    "当前 Scope 没有普通会话；发送 /sessions archived 查看归档。",
-                )
             return
         if intent.name is ControlName.RESUME:
             binding = await self._management.resume_current_binding(
@@ -2992,6 +2966,82 @@ class ChannelApplication:
                     f"✅ 已恢复并切换到会话 {restored.short_id}。",
                 )
             return
+        if intent.name is CardControlName.ACTIVATE_BINDING:
+            assert intent.binding_id is not None
+            binding = self._bindings.get(intent.binding_id)
+            if binding.scope_key != intent.scope.key:
+                raise BindingNotFound(intent.binding_id)
+            activated = await self._management.resume_current_binding(
+                scope_key=intent.scope.key,
+                reference=binding.id,
+            )
+            success_notice = (
+                f"✅ 已切换到会话 {activated.short_id}"
+                f"（{activated.project_alias}）。"
+            )
+            try:
+                refreshed = await self._safe_update_card(
+                    intent.source_id,
+                    await self._sessions_card(
+                        scope=intent.scope,
+                        page=0,
+                        notice=success_notice,
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "failed to rebuild sessions card after binding activation",
+                )
+                refreshed = False
+            if not refreshed:
+                await self._safe_reply_to_card(intent, success_notice)
+            return
+        if intent.name is CardControlName.ARCHIVE_EXACT_BINDING:
+            assert intent.binding_id is not None
+            assert intent.page is not None
+            binding = self._bindings.get(intent.binding_id)
+            if binding.scope_key != intent.scope.key:
+                raise BindingNotFound(intent.binding_id)
+            try:
+                archived = await self._management.archive_exact_binding(
+                    target=ExactBindingTarget(
+                        scope_key=intent.scope.key,
+                        binding_id=binding.id,
+                        expected_active_binding_id=intent.expected_active_binding_id,
+                    ),
+                )
+            except ActivePointerChanged as error:
+                raise CardActionError(
+                    "会话列表已变化，本次归档未执行；请重新发送 /sessions。"
+                ) from error
+            success_notice = (
+                f"✅ 已归档会话 {archived.short_id}"
+                f"（{archived.project_alias}）；历史仍可恢复。"
+            )
+            try:
+                refreshed = await self._safe_update_card(
+                    intent.source_id,
+                    await self._sessions_card(
+                        scope=intent.scope,
+                        page=intent.page,
+                        notice=success_notice,
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "failed to rebuild sessions card after exact archive",
+                )
+                refreshed = False
+            if not refreshed:
+                await self._safe_reply_to_card(intent, success_notice)
+            return
+        if intent.name is CardControlName.SESSIONS_PAGE:
+            page = intent.page or 0
+            await self._safe_update_card(
+                intent.source_id,
+                await self._sessions_card(scope=intent.scope, page=page),
+            )
+            return
         if intent.name in {
             CardControlName.GOAL_PAUSE,
             CardControlName.GOAL_RESUME,
@@ -3164,6 +3214,47 @@ class ChannelApplication:
                 extra={"error_type": type(error).__name__},
             )
             return {}
+
+    async def _sessions_card(
+        self,
+        *,
+        scope: FeishuScope,
+        page: int = 0,
+        notice: str | None = None,
+    ) -> OutboundCard:
+        bindings = self._bindings.list_bindings(scope.key)
+        metadata = await self._read_thread_metadata(bindings)
+        archived_metadata = await self._read_thread_metadata(
+            bindings,
+            archived=True,
+            strict=True,
+        )
+        sessions: list[SessionCardItem] = []
+        for binding in bindings:
+            if binding.native_thread_id in archived_metadata:
+                continue
+            state = await self._binding_state(binding)
+            title = _session_title(
+                binding,
+                metadata.get(binding.native_thread_id),
+            )
+            sessions.append(
+                SessionCardItem(
+                    binding_id=binding.id,
+                    short_id=binding.short_id,
+                    project_alias=binding.project_alias,
+                    native_thread_id=binding.native_thread_id,
+                    title=title,
+                    state=state,
+                    active=binding.active,
+                )
+            )
+        return sessions_card(
+            scope=scope,
+            sessions=tuple(sessions),
+            page=page,
+            notice=notice,
+        )
 
     async def _binding_model_status_lines(
         self,
