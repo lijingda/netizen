@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import inspect
 import io
 import json
@@ -12,6 +13,7 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
@@ -32,6 +34,39 @@ class NetizenInstallerTest(unittest.TestCase):
             uid=os.geteuid(),
             username="current-user",
             platform_name="linux",
+        )
+
+    def _published_source(
+        self,
+        destination: Path,
+        *,
+        commit: str = "a" * 40,
+    ) -> installer.PublishedReleaseManifest:
+        source_digest_value, _ = installer.snapshot_source(ROOT, destination)
+        project = tomllib.loads(
+            (destination / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        version = project["project"]["version"]
+        requirements_digest = hashlib.sha256(
+            (destination / "requirements.lock").read_bytes()
+        ).hexdigest()
+        payload = {
+            "schema": 1,
+            "version": version,
+            "commit": commit,
+            "sourceDigest": source_digest_value,
+            "requirementsDigest": requirements_digest,
+            "qualification": installer.PUBLISHED_RELEASE_QUALIFICATION,
+        }
+        (destination / installer.PUBLISHED_RELEASE_MANIFEST).write_text(
+            json.dumps(payload, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return installer.PublishedReleaseManifest(
+            version=version,
+            commit=commit,
+            source_digest=source_digest_value,
+            requirements_digest=requirements_digest,
         )
 
     def test_layout_uses_fixed_current_user_paths_and_ignores_xdg_overrides(self) -> None:
@@ -74,6 +109,19 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             self.assertEqual(layout.codex_home, root / "codex")
             self.assertEqual(layout.username, "chosen-user")
+
+    def test_internal_install_cli_requires_an_explicit_candidate_origin(self) -> None:
+        source_args = installer.parse_args(["install-source"])
+        release_args = installer.parse_args(["install-release", "/tmp/candidate"])
+
+        self.assertEqual(source_args.command, "install-source")
+        self.assertEqual(release_args.command, "install-release")
+        self.assertEqual(release_args.source_root, Path("/tmp/candidate"))
+        with (
+            patch("sys.stderr", new=io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            installer.parse_args(["install"])
 
     def test_layout_rejects_uninstall_targets_that_overlap_preserved_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -598,7 +646,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch.object(
                     installer.SystemdServiceBackend, "prepare_host"
                 ) as prepare_host,
-                patch.object(installer, "prepare_release", return_value=release),
+                patch.object(installer, "prepare_source_release", return_value=release),
                 patch.object(
                     installer,
                     "validate_runtime",
@@ -618,10 +666,10 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch.object(installer, "activate_release") as activate,
                 self.assertRaisesRegex(
                     installer.InstallError,
-                    "im:chat:readonly.*rerun ./install.sh",
+                    "im:chat:readonly.*rerun ./dev-install.sh",
                 ),
             ):
-                installer.install(
+                installer.install_source(
                     source_root=ROOT,
                     layout=layout,
                     interactive=False,
@@ -659,7 +707,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch.object(
                     installer.SystemdServiceBackend, "prepare_host"
                 ) as prepare_host,
-                patch.object(installer, "prepare_release", return_value=release),
+                patch.object(installer, "prepare_source_release", return_value=release),
                 patch.object(
                     installer,
                     "validate_runtime",
@@ -685,10 +733,10 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch("sys.stdin", new=io.StringIO("\n")),
                 self.assertRaisesRegex(
                     installer.InstallError,
-                    "im:chat:readonly.*rerun ./install.sh",
+                    "im:chat:readonly.*rerun ./dev-install.sh",
                 ),
             ):
-                installer.install(
+                installer.install_source(
                     source_root=ROOT,
                     layout=layout,
                     interactive=True,
@@ -727,7 +775,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch.object(
                     installer.SystemdServiceBackend, "prepare_host"
                 ) as prepare_host,
-                patch.object(installer, "prepare_release", return_value=release),
+                patch.object(installer, "prepare_source_release", return_value=release),
                 patch.object(
                     installer,
                     "validate_runtime",
@@ -751,7 +799,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 ) as register,
                 patch.object(installer, "activate_release") as activate,
             ):
-                installed = installer.install(
+                installed = installer.install_source(
                     source_root=ROOT,
                     layout=layout,
                     interactive=True,
@@ -815,11 +863,11 @@ class NetizenInstallerTest(unittest.TestCase):
             with (
                 patch.object(installer, "require_supported_platform"),
                 patch.object(installer.SystemdServiceBackend, "preflight"),
-                patch.object(installer, "prepare_release") as prepare_release,
+                patch.object(installer, "prepare_source_release") as prepare_release,
                 patch.object(installer, "info") as installer_info,
                 self.assertRaises(installer.ConfigurationRequired),
             ):
-                installer.install(
+                installer.install_source(
                     source_root=ROOT,
                     layout=layout,
                     interactive=False,
@@ -844,7 +892,7 @@ class NetizenInstallerTest(unittest.TestCase):
             expected_warning = (
                 "Feishu/Lark credentials are incomplete; interactive setup follows "
                 "release preparation. Agent/CI callers should cancel now and rerun "
-                "./install.sh </dev/null."
+                "the selected installer with </dev/null."
             )
 
             def prepare_release(*_args: object, **_kwargs: object) -> installer.Release:
@@ -873,7 +921,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch.object(installer.SystemdServiceBackend, "prepare_host"),
                 patch.object(
                     installer,
-                    "prepare_release",
+                    "prepare_source_release",
                     side_effect=prepare_release,
                 ),
                 patch.object(
@@ -898,7 +946,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch.object(installer, "info", side_effect=messages.append),
                 patch("sys.stdin", new=io.StringIO("\n")),
             ):
-                installed = installer.install(
+                installed = installer.install_source(
                     source_root=ROOT,
                     layout=layout,
                     interactive=True,
@@ -962,12 +1010,186 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(first_digest, second_digest)
             self.assertEqual(first_count, second_count)
             self.assertTrue((first / "install.sh").is_file())
+            self.assertTrue((first / "dev-install.sh").is_file())
             self.assertTrue((first / ".gitignore").is_file())
             self.assertTrue((first / "LOCAL_ENVIRONMENT.example.md").is_file())
             self.assertFalse((first / "LOCAL_ENVIRONMENT.md").exists())
             self.assertTrue((first / "scripts/netizen_installer.py").is_file())
             self.assertTrue((first / "scripts/netizen_service_launcher.py").is_file())
             self.assertFalse(any(path.name == "__pycache__" for path in first.rglob("*")))
+
+    def test_published_manifest_binds_version_source_and_dependency_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "published"
+            expected = self._published_source(source)
+
+            self.assertEqual(
+                installer.read_published_release_manifest(source),
+                expected,
+            )
+
+            readme = source / "README.md"
+            readme.write_text(readme.read_text(encoding="utf-8") + "tampered\n")
+            with self.assertRaisesRegex(installer.InstallError, "source digest"):
+                installer.read_published_release_manifest(source)
+
+    def test_published_manifest_rejects_unknown_fields_and_invalid_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "published"
+            self._published_source(source)
+            path = source / installer.PUBLISHED_RELEASE_MANIFEST
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+            path.write_text(
+                json.dumps({**payload, "unexpected": True}) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(installer.InstallError, "unsupported shape"):
+                installer.read_published_release_manifest(source)
+
+            payload["commit"] = "not-a-full-commit"
+            path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(installer.InstallError, "invalid values"):
+                installer.read_published_release_manifest(source)
+
+    def test_published_install_rejects_unqualified_source_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout = self._layout(root)
+            source = root / "unqualified"
+            installer.snapshot_source(ROOT, source)
+
+            with self.assertRaisesRegex(installer.InstallError, "manifest"):
+                installer.install_published(
+                    source_root=source,
+                    layout=layout,
+                    interactive=False,
+                )
+
+            self.assertFalse(layout.product_root.exists())
+
+    def test_source_and_published_candidates_use_isolated_qualification_gates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout = self._layout(root)
+            installer.prepare_directories(layout)
+            published_source = root / "published"
+            published_manifest = self._published_source(published_source)
+            calls: list[list[str]] = []
+
+            def fake_runner(
+                argv: list[object],
+                **_kwargs: object,
+            ) -> subprocess.CompletedProcess[str]:
+                rendered = [os.fspath(value) for value in argv]
+                calls.append(rendered)
+                if len(rendered) >= 4 and rendered[1:3] == ["-m", "venv"]:
+                    candidate_bin = Path(rendered[3]) / "bin"
+                    candidate_bin.mkdir(parents=True)
+                    (candidate_bin / "python").write_text("candidate", encoding="utf-8")
+                return subprocess.CompletedProcess(rendered, 0, "", "")
+
+            source_release = installer.prepare_source_release(
+                layout,
+                source_root=ROOT,
+                runner=fake_runner,
+            )
+            source_commands = list(calls)
+            calls.clear()
+            published_release = installer.prepare_published_release(
+                layout,
+                source_root=published_source,
+                manifest=published_manifest,
+                runner=fake_runner,
+            )
+
+            self.assertNotEqual(source_release.digest, published_release.digest)
+            self.assertTrue(
+                any("unittest" in command for command in source_commands)
+            )
+            self.assertFalse(any("unittest" in command for command in calls))
+            self.assertTrue(any(command[-2:] == ["pip", "check"] for command in calls))
+            self.assertEqual(
+                installer.read_published_release_manifest(published_release.source),
+                published_manifest,
+            )
+
+            calls.clear()
+            reused_published_release = installer.prepare_published_release(
+                layout,
+                source_root=published_source,
+                manifest=published_manifest,
+                runner=fake_runner,
+            )
+            self.assertEqual(reused_published_release, published_release)
+            self.assertFalse(any(command[1:3] == ["-m", "venv"] for command in calls))
+            self.assertFalse(any("unittest" in command for command in calls))
+            self.assertTrue(any(command[-2:] == ["pip", "check"] for command in calls))
+            self.assertEqual(
+                installer.read_published_release_manifest(published_release.source),
+                published_manifest,
+            )
+
+    def test_published_install_uses_the_shared_activation_orchestration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout = self._layout(root)
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text(encoding="utf-8").replace(
+                    "cli_REPLACE_ME",
+                    "cli_existing",
+                ),
+                encoding="utf-8",
+            )
+            layout.secret_file.write_text("existing-secret", encoding="utf-8")
+            published_source = root / "published"
+            self._published_source(published_source)
+            release = installer.Release(
+                digest="8" * 64,
+                root=ROOT,
+                source=ROOT,
+                venv=ROOT / ".venv",
+            )
+            validation = installer.RuntimeValidation(
+                data_dir=layout.state_dir,
+                admin_bind=installer.AdminBind(False, "127.0.0.1", 8787),
+            )
+
+            with (
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(
+                    installer.SystemdServiceBackend,
+                    "prepare_host",
+                ) as prepare_host,
+                patch.object(
+                    installer,
+                    "prepare_published_release",
+                    return_value=release,
+                ) as prepare_candidate,
+                patch.object(
+                    installer,
+                    "validate_runtime",
+                    return_value=validation,
+                ),
+                patch.object(installer, "require_feishu_permissions") as permissions,
+                patch.object(installer, "activate_release") as activate,
+            ):
+                installed = installer.install_published(
+                    source_root=published_source,
+                    layout=layout,
+                    interactive=False,
+                )
+
+            self.assertEqual(installed, release)
+            prepare_candidate.assert_called_once()
+            permissions.assert_called_once()
+            prepare_host.assert_called_once_with(interactive=False)
+            activate.assert_called_once()
 
     def test_release_build_is_content_addressed_and_reused_only_after_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -984,7 +1206,11 @@ class NetizenInstallerTest(unittest.TestCase):
                     (candidate_bin / "python").write_text("candidate", encoding="utf-8")
                 return subprocess.CompletedProcess(rendered, 0, "", "")
 
-            first = installer.prepare_release(layout, source_root=ROOT, runner=fake_runner)
+            first = installer.prepare_source_release(
+                layout,
+                source_root=ROOT,
+                runner=fake_runner,
+            )
 
             self.assertEqual(first.root.name, first.digest)
             self.assertTrue((first.root / installer.RELEASE_METADATA).is_file())
@@ -992,10 +1218,15 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertTrue(any(call[1:3] == ["-m", "venv"] for call in calls))
 
             calls.clear()
-            second = installer.prepare_release(layout, source_root=ROOT, runner=fake_runner)
+            second = installer.prepare_source_release(
+                layout,
+                source_root=ROOT,
+                runner=fake_runner,
+            )
 
             self.assertEqual(second, first)
             self.assertFalse(any(call[1:3] == ["-m", "venv"] for call in calls))
+            self.assertTrue(any("unittest" in call for call in calls))
             self.assertTrue(any(call[-2:] == ["pip", "check"] for call in calls))
 
     def test_user_unit_has_no_user_or_sudo_and_targets_current_release(self) -> None:
@@ -1037,6 +1268,7 @@ class NetizenInstallerTest(unittest.TestCase):
     def test_public_shell_scripts_reject_unsupported_arguments_before_installing(self) -> None:
         cases = (
             ("install.sh", ["unexpected"]),
+            ("dev-install.sh", ["unexpected"]),
             ("uninstall.sh", ["unexpected"]),
             ("service.sh", []),
             ("service.sh", ["enable"]),
@@ -1051,7 +1283,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("usage:", result.stderr)
-        for script in ("install.sh", "service.sh", "uninstall.sh"):
+        for script in ("install.sh", "dev-install.sh", "service.sh", "uninstall.sh"):
             with self.subTest(executable=script):
                 self.assertTrue((ROOT / script).stat().st_mode & stat.S_IXUSR)
 
@@ -2259,7 +2491,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch.object(installer, "require_supported_platform"),
                 self.assertRaisesRegex(installer.InstallError, "GUI launchd domain"),
             ):
-                installer.install(
+                installer.install_source(
                     source_root=ROOT,
                     layout=layout,
                     runner=fake_runner,

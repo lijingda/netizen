@@ -1,4 +1,4 @@
-# Manual-development example. ./install.sh does not copy this file: it generates
+# Manual-development example. The managed installers do not copy this file: they generate
 # ~/.netizen/config.yaml with account-specific absolute paths and `projects: {}`.
 # Replace every /home/your-user path before running Netizen directly.
 instance:

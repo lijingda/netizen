@@ -1,0 +1,187 @@
+#!/bin/sh
+set -eu
+
+main() {
+if [ "$#" -ne 0 ]; then
+    echo "usage: install.sh" >&2
+    exit 2
+fi
+
+REPOSITORY='@@REPOSITORY@@'
+TAG='@@TAG@@'
+ARCHIVE_NAME='@@ARCHIVE_NAME@@'
+ARCHIVE_SHA256='@@ARCHIVE_SHA256@@'
+VERSION='@@VERSION@@'
+
+fail() {
+    echo "Netizen installation failed: $*" >&2
+    exit 1
+}
+
+command -v curl >/dev/null 2>&1 || fail "curl is required"
+command -v python3 >/dev/null 2>&1 || fail "Python 3.11 or 3.12 is required"
+python3 -E -B -c \
+    'import sys; raise SystemExit(sys.version_info[:2] not in {(3, 11), (3, 12)})' || \
+    fail "Python 3.11 or 3.12 is required"
+
+temporary_base=${TMPDIR:-/tmp}
+temporary_directory=$(mktemp -d "$temporary_base/netizen-install.XXXXXX") || \
+    fail "could not create a private temporary directory"
+cleanup() {
+    if [ -n "$temporary_directory" ] && [ -d "$temporary_directory" ]; then
+        rm -rf -- "$temporary_directory"
+    fi
+}
+trap cleanup 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+archive_path="$temporary_directory/$ARCHIVE_NAME"
+download_url="https://github.com/$REPOSITORY/releases/download/$TAG/$ARCHIVE_NAME"
+curl -fL --proto '=https' --tlsv1.2 -o "$archive_path" "$download_url" || \
+    fail "could not download exact release asset $TAG/$ARCHIVE_NAME"
+
+python3 -E -B - "$archive_path" "$ARCHIVE_SHA256" <<'PY' || \
+    fail "release archive SHA-256 does not match the published bootstrap"
+import hashlib
+import pathlib
+import sys
+
+archive = pathlib.Path(sys.argv[1])
+expected = sys.argv[2]
+digest = hashlib.sha256()
+with archive.open("rb") as source:
+    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        digest.update(chunk)
+raise SystemExit(digest.hexdigest() != expected)
+PY
+
+extract_root="$temporary_directory/extracted"
+archive_root="netizen-$TAG"
+python3 -E -B - "$archive_path" "$extract_root" "$archive_root" "$VERSION" <<'PY' || \
+    fail "release archive is malformed or unsafe"
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import sys
+import tarfile
+
+archive_path = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+expected_root = sys.argv[3]
+expected_version = sys.argv[4]
+destination.mkdir(mode=0o700)
+destination_resolved = destination.resolve()
+
+with tarfile.open(archive_path, mode="r:gz") as archive:
+    members = archive.getmembers()
+    if not members:
+        raise ValueError("empty archive")
+    if len(members) > 20_000:
+        raise ValueError("archive contains too many members")
+    if sum(member.size for member in members if member.isfile()) > 512 * 1024 * 1024:
+        raise ValueError("archive expands beyond the 512 MiB safety limit")
+    validated = []
+    names = set()
+    root_directory_seen = False
+    for member in members:
+        raw_name = member.name[:-1] if member.isdir() and member.name.endswith("/") else member.name
+        pure = PurePosixPath(raw_name)
+        parts = pure.parts
+        if (
+            not parts
+            or pure.is_absolute()
+            or parts[0] != expected_root
+            or any(part in {"", ".", ".."} or "\\" in part for part in parts)
+            or raw_name != "/".join(parts)
+        ):
+            raise ValueError(f"unsafe archive member path: {member.name!r}")
+        canonical = "/".join(parts)
+        if canonical in names:
+            raise ValueError(f"duplicate archive member: {canonical}")
+        names.add(canonical)
+        if not (member.isdir() or member.isfile()):
+            raise ValueError(f"unsupported archive member type: {canonical}")
+        if canonical == expected_root:
+            if not member.isdir():
+                raise ValueError("archive root is not a directory")
+            root_directory_seen = True
+        target = destination.joinpath(*parts)
+        if not target.resolve().is_relative_to(destination_resolved):
+            raise ValueError(f"archive member escapes extraction root: {canonical}")
+        validated.append((member, target))
+    if not root_directory_seen:
+        raise ValueError("archive root directory is missing")
+
+    for member, target in validated:
+        if member.isdir():
+            target.mkdir(mode=0o755, parents=True, exist_ok=False)
+    for member, target in validated:
+        if member.isdir():
+            continue
+        target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        source = archive.extractfile(member)
+        if source is None:
+            raise ValueError(f"archive file has no payload: {member.name}")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(target, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                shutil.copyfileobj(source, output)
+                if output.tell() != member.size:
+                    raise ValueError(f"archive file size changed: {member.name}")
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
+        os.chmod(target, 0o755 if member.mode & 0o111 else 0o644)
+
+source_root = destination / expected_root
+manifest_path = source_root / ".netizen-release.json"
+installer_path = source_root / "scripts" / "netizen_installer.py"
+if manifest_path.is_symlink() or not manifest_path.is_file():
+    raise ValueError("release manifest is missing")
+if installer_path.is_symlink() or not installer_path.is_file():
+    raise ValueError("internal release installer is missing")
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+if (
+    not isinstance(manifest, dict)
+    or manifest.get("schema") != 1
+    or manifest.get("version") != expected_version
+    or manifest.get("qualification") != "github-release"
+    or re.fullmatch(r"[0-9a-f]{40}", manifest.get("commit", "")) is None
+    or re.fullmatch(r"[0-9a-f]{64}", manifest.get("sourceDigest", "")) is None
+    or re.fullmatch(r"[0-9a-f]{64}", manifest.get("requirementsDigest", "")) is None
+):
+    raise ValueError("release manifest does not identify the expected Published Release")
+requirements = source_root / "requirements.lock"
+if hashlib.sha256(requirements.read_bytes()).hexdigest() != manifest["requirementsDigest"]:
+    raise ValueError("requirements.lock does not match the release manifest")
+PY
+
+source_root="$extract_root/$archive_root"
+installer="$source_root/scripts/netizen_installer.py"
+
+# A downloaded script may already have a TTY on stdin.  `curl ... | sh` instead
+# leaves stdin as a pipe, so a real controlling terminal restores the normal
+# human setup flow.  Every remaining case is explicitly non-interactive.
+if [ -t 0 ]; then
+    python3 -E -B -u "$installer" install-release "$source_root"
+elif [ -p /dev/stdin ] && (: </dev/tty) 2>/dev/null; then
+    python3 -E -B -u "$installer" install-release "$source_root" </dev/tty
+else
+    python3 -E -B -u "$installer" install-release "$source_root" </dev/null
+fi
+}
+
+# Keeping all effects inside one parsed function makes a truncated `curl | sh`
+# fail with a syntax error before it downloads or installs anything.
+main "$@"

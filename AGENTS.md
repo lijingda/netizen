@@ -68,14 +68,22 @@ design detail, compatibility findings, and procedures in their source docs.
   adds Binding-scoped, still-mention-triggered catch-up context with a durable
   exact-message boundary. [ADR 0040](docs/adr/0040-make-new-card-only-and-show-all-projects.md)
   makes `/new` card-only and displays all enabled Projects in one dropdown.
+  [ADR 0041](docs/adr/0041-separate-published-release-and-source-install.md)
+  separates qualified Published Release installation from full-gated Source
+  Install while preserving one activation and rollback transaction.
   Superseded ADRs are historical context.
 - [docs/deployment.md](docs/deployment.md): setup, verification, and release
   procedures.
-- Public deployment uses zero-argument `./install.sh` / `./uninstall.sh`; use
-  `./service.sh start|stop|restart|status` without sudo. A non-interactive
-  installer prepares credential files and exits with exact completion steps;
-  agents must default to `./install.sh </dev/null` when credentials may be
-  absent. An agent may carry the interactive browser setup only when its runner
+- Public Published Release deployment uses the zero-argument official
+  `install.sh`; a repository checkout's zero-argument `./install.sh` downloads
+  the latest stable official installer, while `./dev-install.sh` installs the
+  exact current workspace and runs the full local gate. Use zero-argument
+  `./uninstall.sh` and `./service.sh start|stop|restart|status` without sudo.
+  A non-interactive installer prepares credential files and exits with exact
+  completion steps; agents must download the official installer to a file and
+  run `sh install.sh </dev/null` when credentials may be absent. Do not pipe an
+  Agent install through `curl | sh`. An agent may carry the interactive browser
+  setup only when its runner
   can preserve the exact PTY/background process across user turns, surface
   intermediate output, and resume stdin. Otherwise use the non-interactive
   credential-file handoff. Follow the exact relay procedure in
@@ -90,7 +98,8 @@ design detail, compatibility findings, and procedures in their source docs.
   cannot replace that environment. Do not add a persistent Netizen environment
   file, install-time PATH snapshot, TTY emulation, or copied variable policy.
 - Keep one shared release/configuration/credential/database/Skill activation
-  transaction across platforms. Service backends own only service definition,
+  transaction across Published Release and Source Install modes and across
+  platforms. Service backends own only service definition,
   manager state, stop confirmation, publish/start/status, and ready waiting.
   macOS support is a current-user LaunchAgent only: do not add a LaunchDaemon,
   root helper, second environment/config layer, or parsing of `launchctl print`

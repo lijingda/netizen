@@ -198,7 +198,7 @@ Codex Skill。用户在飞书中自然语言询问 Netizen 用法、命令、会
 `$netizen-user-guide <问题>`。它读取同目录的用户手册并按问题回答，补充而不替代
 运行时 `/help`。
 
-`install.sh` 在接受 release 时调用受测的 Skill 安装器，把 release 中的 Skill 完整替换到
+受管安装器在接受 release 时调用受测的 Skill 安装器，把 release 中的 Skill 完整替换到
 `$CODEX_HOME/skills/netizen-user-guide`。该路径内的人工修改会在下一次部署丢失；其他
 全局 Skill 不会被修改。卸载也只删除这个受管 Skill。
 
@@ -207,26 +207,36 @@ Codex Skill。用户在飞书中自然语言询问 Netizen 用法、命令、会
 正式部署支持 Linux + systemd user manager，以及 macOS 14+ 当前登录用户的 LaunchAgent；
 Apple Silicon 与 Intel Mac 都在正式支持范围内，并已完成服务运行真机验证。两种平台都以
 准备运行服务的当前用户执行，不使用 sudo；macOS 的 LaunchAgent 会在退出登录时停止、下次
-登录自动启动，不提供 logout 后常驻的 LaunchDaemon。真人在终端中安装时使用第一条命令；
-Agent、CI 或后台 shell 首次运行时使用第二条。macOS 服务使用系统钥匙串验证 TLS，不要求
-Netizen 维护第二份 CA bundle：
+登录自动启动，不提供 logout 后常驻的 LaunchDaemon。普通用户安装 Published Release；
+仓库开发者安装当前工作区。macOS 服务使用系统钥匙串验证 TLS，不要求 Netizen 维护第二份
+CA bundle：
 
 ```bash
-# 真人交互安装
+# 仓库中的 install.sh 下载并运行最新稳定 Published Release
 ./install.sh
 
-# Agent / CI：凭据缺失时生成文件和精确后续步骤，不等待交互
-./install.sh </dev/null
+# 等价的一行正式安装
+curl -fsSL https://github.com/lijingda/netizen/releases/latest/download/install.sh | sh
+
+# 开发者：安装当前工作区（包括未提交修改）并执行完整本地门禁
+./dev-install.sh
 ```
+
+需要固定版本时，直接下载该 tag 的 `install.sh`，例如
+`https://github.com/lijingda/netizen/releases/download/v0.3.0/install.sh`。Agent、CI 或后台
+shell 不使用 pipe：先把 latest 或 exact-tag `install.sh` 下载到文件，再运行
+`sh install.sh </dev/null`。凭据缺失时它会生成文件和精确后续步骤，不等待交互。
 
 只有在命令工具能跨对话轮次保留同一个 PTY/后台进程、读取中间输出并继续写入 stdin 时，
 Agent 才应代用户承载交互浏览器初始化；具体交接流程见
 [部署文档](docs/deployment.md#agent-驱动首次安装)。
 
-脚本不接收参数，也不会执行 `git pull`。它将当前工作区（包括未提交改动）做成内容寻址
-快照，安装到 `~/.netizen/releases/<digest>`，并以
-`current` / `previous` 原子指针切换；因此同一份脚本同时覆盖正式源码安装、本机调试部署
-和云上直接开发后部署。配置、数据库与 Codex 状态位于 release 外：
+所有公开脚本都不接收参数，也不会执行 `git pull`。正式 bootstrap 下载自己固定 tag 的
+项目构建 tarball，校验内嵌 SHA-256 和 Published Release manifest 后安装；发布前已对这份
+exact tarball 完成 Linux/macOS、Python 3.11/3.12 全量门禁，因此目标机不重复运行完整
+unittest。`dev-install.sh` 则把当前工作区做成隔离的内容寻址候选，并在本机运行完整门禁。
+两条路径都安装到 `~/.netizen/releases/<digest>`，汇入同一个 `current` / `previous` 原子
+切换、ready 和回滚事务。配置、数据库与 Codex 状态位于 release 外：
 
 ```text
 ~/.netizen/                                  # 配置、凭据、状态、缓存与 releases
@@ -238,7 +248,7 @@ ${CODEX_HOME:-~/.codex}/                     # Codex 登录、历史、配置与
 Netizen 产品根始终是当前账号数据库中 home 下的 `~/.netizen`，明确忽略 `XDG_DATA_HOME`、
 `XDG_CONFIG_HOME`、`XDG_STATE_HOME` 和 `XDG_CACHE_HOME`，避免不同 shell、Agent 或 sudo
 环境把同一 user service 的安装身份漂移到另一套目录。`CODEX_HOME` 仍按 Codex 原生语义
-生效。源码 checkout 可以在任意非受管目录，本机或云上修改后仍用同一个 `install.sh`
+生效。源码 checkout 可以在任意非受管目录，本机或云上修改后用 `./dev-install.sh`
 部署；同一 Unix 用户不支持并行的第二套 Netizen。需要隔离验证安装器时使用临时用户、
 容器或 VM。`releases` 和 `cache` 必须为空或带安装器 ownership marker；非空的无标记目录
 不会被认领或卸载。Linux 上若 systemd user manager 自身配置了另一套 `XDG_CONFIG_HOME`，且其
@@ -247,7 +257,7 @@ Netizen 产品根始终是当前账号数据库中 home 下的 `~/.netizen`，�
 首次交互安装发现 Feishu/Lark 凭据不完整时，默认显示官方浏览器链接和终端二维码：官方
 页面可创建新 Bot 应用或选择已有应用；已有 `appId` 且受保护的 Secret 文件存在但内容为空
 时只更新该 exact 应用。部署后若要更换应用，无需卸载 Netizen；删除（或先移走备份）
-`~/.netizen/credentials/feishu-app-secret` 再运行 `./install.sh`，安装器会把文件缺失解释为
+`~/.netizen/credentials/feishu-app-secret` 再运行原安装入口，安装器会把文件缺失解释为
 显式的飞书应用绑定重置，再次打开官方创建/选择页面，并允许选择结果替换原 App ID。两种
 路径都会预填 Netizen 所需的应用身份权限、`im.message.receive_v1` 事件和
 `card.action.trigger` 回调。
@@ -257,16 +267,18 @@ scope/token；菜单中的手工 App ID + 隐藏 App Secret 输入始终可用�
 YAML、unit 或日志。每次安装都会在切换 release 前通过官方 API 确认全部必需 tenant scope
 已经授权；已有应用缺权限时，交互安装只尝试一次 exact-App 官方修复，Agent/CI 则立即列出
 缺失项并退出。用户仍需按租户策略完成管理员审批/应用发布与租户安装，设置可用范围，并
-把机器人加入目标群；完成后重新运行 `./install.sh`。
+把机器人加入目标群；完成后重新运行同一个正式或开发安装入口。
 
 飞书应用绑定重置不会迁移旧 App ID 下的飞书 Scope/Binding；Channel 数据库和 Codex 原生
 历史仍会保留，但新应用从自己的飞书会话命名空间开始。正常代码升级不要删除 Secret 文件，
-只需在更新后的源码目录再次运行 `./install.sh`。
+只需在更新后的源码目录再次运行 `./dev-install.sh`；正式升级则重新运行 latest 或指定版本的
+官方 `install.sh`。
 
 安装器同时自动生成一次高熵 `0600` Admin Web credential。Agent、CI 或其他无 TTY 调用
 绝不会等待输入或启动浏览器流程：脚本会创建配置骨架、空的 Feishu Secret 文件和可立即
 保留使用的 Admin credential，明确退出并给出路径；调用方填好 App ID 与 Feishu Secret
-后再次执行 `./install.sh`。会主动分配伪终端的 Agent 应先用 `./install.sh </dev/null`
+后再次执行同一个下载到文件的正式 installer。会主动分配伪终端的 Agent 应显式使用
+`sh install.sh </dev/null`
 获取这些路径。不要把 Secret 放进命令参数、仓库或 YAML。
 
 systemd 和 launchd 本身都不会读取 `.bashrc`、`.profile`，也不会替 Netizen 取得账号
@@ -291,8 +303,9 @@ fail closed；先修复账号 login shell 的启动文件再 restart。Bash 仍�
 不会额外强制 source，避免同一启动文件执行两遍。安装器不会为了预检而在 service
 cgroup 之外额外执行一次任意 profile。
 
-安装器在候选 release 中新建 venv，运行安全的本地 release gates，验证配置、固定 Codex
-CLI 登录和已安装包一致性后才切换。profile 只在真实 user service 的 cgroup 内执行；首次
+安装器在候选 release 中新建 venv；源码候选运行完整本地门禁，正式候选运行每台主机必需
+的 package、compile、依赖和 SDK probes。两路都验证配置、固定 Codex CLI 登录、飞书权限
+和已安装包一致性后才切换。profile 只在真实 user service 的 cgroup 内执行；首次
 安装自动 enable 并启动，升级前服务若在运行则
 切换后启动并等待 ready，若已停止则保持当前会话停止。Linux 保持原 enabled/disabled
 意图；macOS 保证 plist 已安装并清除 sticky disabled 状态，使它在下次登录自动启动。
@@ -304,7 +317,7 @@ Linux systemd user service 要在注销后继续运行需要 linger；尚未启�
 从旧版 system-level unit 迁移也遵循相同的一次性授权规则。macOS 不配置 linger，
 LaunchAgent 只属于当前 GUI 登录会话。
 切换前写入的 activation intent 会记录原服务应当 active/enabled 的状态；即使安装进程在
-停止旧服务或发布 `current` 后被 `SIGKILL`，再次执行 `./install.sh` 也会继续恢复该意图，
+停止旧服务或发布 `current` 后被 `SIGKILL`，再次执行原安装入口也会继续恢复该意图，
 不会把异常中断误判成用户主动停服。
 
 日常启停只使用 user manager，脚本内部没有 `sudo`，调用时也不要加 `sudo`：
@@ -322,8 +335,8 @@ admission 开放后发布了私有 ready marker 才返回成功。profile 超时
 就绪会直接返回非零；macOS `status` 会显示 installed、loaded、ready 与两个日志路径。
 
 仓库删除后仍可从已安装 release 调用
-`$HOME/.netizen/current/source/service.sh`。升级只需在新的或已更新
-的开发目录再次执行 `./install.sh`。卸载同样不接收参数：
+`$HOME/.netizen/current/source/service.sh`。正式升级重新运行 latest 或 exact-tag installer；
+开发目录升级运行 `./dev-install.sh`。卸载同样不接收参数：
 
 ```bash
 ./uninstall.sh
@@ -337,7 +350,7 @@ Codex 原生历史。Linux 上不会关闭 linger，因为同一用户的其他 
 
 ## 本地开发
 
-源码开发需要 Python 3.11+ 和 `venv`。macOS 和 Linux 都可以运行下面的源码开发、安全
+源码开发需要 Python 3.11 或 3.12 和 `venv`。macOS 和 Linux 都可以运行下面的源码开发、安全
 本地门禁以及相同的安装/服务命令；正式服务分别使用 macOS LaunchAgent 与 Linux systemd
 user manager。`make check`
 使用 fake App Server，不创建真实 Codex Thread，也不要求 Codex 登录；启动 Netizen、执行
@@ -368,7 +381,7 @@ make check
 
 复制 `config.example.yaml`，设置绝对 `defaultCwd` 和 `projectRoot`；旧
 `projects` mapping 仍会在首次启动时导入，此后可在飞书 `/settings` 完成 Project
-管理。通过 `./install.sh` 浏览器流程创建/更新的应用已请求下述权限、消息事件和卡片回调；
+管理。通过受管安装器浏览器流程创建/更新的应用已请求下述权限、消息事件和卡片回调；
 本地手工准备应用时则需在飞书应用后台逐项配置。两种路径都还要完成租户审批/发布、配置
 可用用户和群并把机器人加入目标群。单聊事件投递必须具备
 `im:message.p2p_msg:readonly`；设置卡片识别单聊/群聊需要 `im:chat:readonly`。群聊逐条
