@@ -48,6 +48,7 @@ from .cards import (
     is_turn_file_action,
     scope_from_fetched_card,
     delete_binding_card,
+    sessions_delete_binding_card,
     rename_binding_card,
     settings_card,
     side_topic_card,
@@ -86,6 +87,7 @@ from .codex_runtime import (
     ThreadGoalActive,
     ThreadArchived,
     ThreadDeleteUnavailable,
+    ThreadDeleteTargetChanged,
     ThreadLifecycleError,
     ThreadNotMaterialized,
     ThreadReleaseError,
@@ -933,6 +935,8 @@ class ChannelApplication:
                     CardControlName.ARCHIVE_BINDING,
                     CardControlName.ARCHIVE_EXACT_BINDING,
                     CardControlName.DELETE_BINDING,
+                    CardControlName.PREPARE_EXACT_DELETE_BINDING,
+                    CardControlName.DELETE_EXACT_BINDING,
                     CardControlName.UNARCHIVE_BINDING,
                     CardControlName.ACTIVATE_BINDING,
                 }
@@ -970,6 +974,8 @@ class ChannelApplication:
                     CardControlName.ARCHIVE_BINDING,
                     CardControlName.ARCHIVE_EXACT_BINDING,
                     CardControlName.DELETE_BINDING,
+                    CardControlName.PREPARE_EXACT_DELETE_BINDING,
+                    CardControlName.DELETE_EXACT_BINDING,
                     CardControlName.UNARCHIVE_BINDING,
                     CardControlName.ACTIVATE_BINDING,
                 }
@@ -3053,6 +3059,115 @@ class ChannelApplication:
             if not refreshed:
                 await self._safe_reply_to_card(intent, success_notice)
             return
+        if intent.name is CardControlName.PREPARE_EXACT_DELETE_BINDING:
+            assert intent.binding_id is not None
+            assert intent.page is not None
+            async with self._scope_coordinator.hold(intent.scope.key):
+                active = self._bindings.active_binding(intent.scope.key)
+                active_id = active.id if active is not None else None
+                if active_id != intent.expected_active_binding_id:
+                    raise CardActionError(
+                        "会话列表已变化，请重新发送 /sessions 后再删除。"
+                    )
+                binding = self._bindings.get(intent.binding_id)
+                if binding.scope_key != intent.scope.key:
+                    raise BindingNotFound(intent.binding_id)
+                if binding.native_thread_id != intent.expected_native_thread_id:
+                    raise CardActionError(
+                        "会话的原生历史已变化，请重新发送 /sessions 后再删除。"
+                    )
+                state = await self._binding_state(binding)
+                if state != "idle":
+                    raise CardActionError(
+                        f"会话状态已变为 {state}，当前不能删除；请刷新 /sessions。"
+                    )
+                if (
+                    binding.native_thread_id is not None
+                    and NativeCapability.DELETE
+                    not in self._runtime.available_capabilities
+                ):
+                    raise ThreadDeleteUnavailable(
+                        "当前 SDK/App Server 的 Thread Delete 兼容契约未通过；"
+                        "本次未调用 Codex。"
+                    )
+            metadata = (
+                await self._read_thread_metadata((binding,))
+                if binding.native_thread_id is not None
+                else {}
+            )
+            confirmation = sessions_delete_binding_card(
+                scope=intent.scope,
+                binding_id=binding.id,
+                expected_active_binding_id=active_id,
+                short_id=binding.short_id,
+                project_alias=binding.project_alias,
+                title=_session_title(
+                    binding,
+                    metadata.get(binding.native_thread_id),
+                ),
+                native_thread_id=binding.native_thread_id,
+                page=intent.page,
+            )
+            updated = await self._safe_update_card(
+                intent.source_id,
+                confirmation,
+            )
+            if not updated:
+                await self._safe_reply_to_card(
+                    intent,
+                    "无法打开删除确认卡，请重新发送 /sessions。",
+                )
+            return
+        if intent.name is CardControlName.DELETE_EXACT_BINDING:
+            assert intent.binding_id is not None
+            assert intent.page is not None
+            binding = self._bindings.get(intent.binding_id)
+            if binding.scope_key != intent.scope.key:
+                raise BindingNotFound(intent.binding_id)
+            try:
+                deleted = await self._management.delete_exact_binding(
+                    target=ExactBindingTarget(
+                        scope_key=intent.scope.key,
+                        binding_id=binding.id,
+                        expected_active_binding_id=(
+                            intent.expected_active_binding_id
+                        ),
+                    ),
+                    expected_native_thread_id=intent.expected_native_thread_id,
+                )
+            except (ActivePointerChanged, ThreadDeleteTargetChanged) as error:
+                raise CardActionError(
+                    "会话列表或原生历史已变化，本次删除未执行；"
+                    "请重新发送 /sessions。"
+                ) from error
+            success_notice = (
+                (
+                    f"✅ 已永久删除原生 Codex 会话 {deleted.short_id}"
+                    f"（{deleted.project_alias}）及本地 Binding。"
+                )
+                if deleted.native_thread_id is not None
+                else (
+                    f"✅ 已删除 Lazy 会话 {deleted.short_id}"
+                    f"（{deleted.project_alias}）。"
+                )
+            )
+            try:
+                refreshed = await self._safe_update_card(
+                    intent.source_id,
+                    await self._sessions_card(
+                        scope=intent.scope,
+                        page=intent.page,
+                        notice=success_notice,
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "failed to rebuild sessions card after exact delete",
+                )
+                refreshed = False
+            if not refreshed:
+                await self._safe_reply_to_card(intent, success_notice)
+            return
         if intent.name is CardControlName.SESSIONS_PAGE:
             page = intent.page or 0
             await self._safe_update_card(
@@ -3270,6 +3385,9 @@ class ChannelApplication:
         return sessions_card(
             scope=scope,
             sessions=tuple(sessions),
+            native_delete_available=(
+                NativeCapability.DELETE in self._runtime.available_capabilities
+            ),
             page=page,
             notice=notice,
         )

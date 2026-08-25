@@ -15,6 +15,7 @@ from netizen.cards import (
     archive_binding_card,
     archived_sessions_card,
     sessions_card,
+    sessions_delete_binding_card,
     binding_configured_card,
     config_card,
     decode_button_action,
@@ -280,6 +281,61 @@ class CardCodecTest(unittest.TestCase):
         ):
             with self.subTest(mutation=mutation), self.assertRaises(CardActionError):
                 self.decode(mutation)
+
+    def test_exact_delete_actions_round_trip_all_preconditions(self) -> None:
+        for raw_intent, expected_name in (
+            (
+                "binding.delete.exact.prepare",
+                CardControlName.PREPARE_EXACT_DELETE_BINDING,
+            ),
+            ("binding.delete.exact", CardControlName.DELETE_EXACT_BINDING),
+        ):
+            value = {
+                "v": 3,
+                "intent": raw_intent,
+                "chat_id": "oc_group",
+                "scope_kind": "topic",
+                "topic_id": "omt_topic",
+                "binding_id": "binding:v1:binding-123",
+                "expected_active_binding_id": "binding:v1:binding-current",
+                "expected_native_thread_id": "native-thread:v1:thread-123",
+                "page": 2,
+            }
+
+            with self.subTest(raw_intent=raw_intent):
+                intent = self.decode(value)
+                self.assertEqual(intent.name, expected_name)
+                self.assertEqual(intent.binding_id, "binding-123")
+                self.assertEqual(
+                    intent.expected_active_binding_id,
+                    "binding-current",
+                )
+                self.assertEqual(intent.expected_native_thread_id, "thread-123")
+                self.assertEqual(intent.page, 2)
+                lazy = self.decode(
+                    {
+                        **value,
+                        "expected_active_binding_id": None,
+                        "expected_native_thread_id": None,
+                    }
+                )
+                self.assertIsNone(lazy.expected_active_binding_id)
+                self.assertIsNone(lazy.expected_native_thread_id)
+
+                for mutation in (
+                    {key: item for key, item in value.items() if key != "page"},
+                    {
+                        key: item
+                        for key, item in value.items()
+                        if key != "expected_native_thread_id"
+                    },
+                    {**value, "extra": "field"},
+                    {**value, "page": True},
+                    {**value, "page": -1},
+                    {**value, "expected_native_thread_id": "thread-123"},
+                ):
+                    with self.assertRaises(CardActionError):
+                        self.decode(mutation)
 
     def test_sessions_page_round_trips_page_and_rejects_extras(self) -> None:
         value = {
@@ -1357,6 +1413,7 @@ class CardRendererTest(unittest.TestCase):
         card = sessions_card(
             scope=self.scope,
             sessions=(other, lazy, active),
+            native_delete_available=True,
             page=0,
         )
         text = str(card.card)
@@ -1374,6 +1431,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertEqual(labels.count("设为当前"), 2)
         # Only the idle materialized row can be archived.
         self.assertEqual(labels.count("归档"), 1)
+        self.assertEqual(labels.count("删除"), 2)
         archive = next(b for b in buttons if b["text"]["content"] == "归档")
         archive_value = archive["behaviors"][0]["value"]
         self.assertEqual(archive_value["intent"], "binding.archive.exact")
@@ -1392,7 +1450,7 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertIn("历史不会删除", archive["confirm"]["text"]["content"])
 
-    def test_sessions_archive_is_hidden_for_non_idle_or_lazy_rows(self) -> None:
+    def test_sessions_lifecycle_actions_are_hidden_for_ineligible_rows(self) -> None:
         sessions = (
             SessionCardItem(
                 binding_id="11111111-0000-0000-0000-000000000001",
@@ -1450,7 +1508,11 @@ class CardRendererTest(unittest.TestCase):
             ),
         )
 
-        card = sessions_card(scope=self.scope, sessions=sessions)
+        card = sessions_card(
+            scope=self.scope,
+            sessions=sessions,
+            native_delete_available=True,
+        )
         archive_buttons = [
             button
             for button in _elements(card.card, "button")
@@ -1461,6 +1523,126 @@ class CardRendererTest(unittest.TestCase):
         self.assertEqual(
             archive_buttons[0]["behaviors"][0]["value"]["binding_id"],
             "binding:v1:11111111-0000-0000-0000-000000000001",
+        )
+        delete_buttons = [
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "删除"
+        ]
+        self.assertEqual(len(delete_buttons), 2)
+        self.assertEqual(
+            {
+                button["behaviors"][0]["value"]["binding_id"]
+                for button in delete_buttons
+            },
+            {
+                "binding:v1:11111111-0000-0000-0000-000000000001",
+                "binding:v1:44444444-0000-0000-0000-000000000004",
+            },
+        )
+
+    def test_sessions_materialized_delete_requires_native_capability(self) -> None:
+        sessions = (
+            SessionCardItem(
+                binding_id="11111111-0000-0000-0000-000000000001",
+                short_id="11111111",
+                project_alias="test",
+                native_thread_id="native-one",
+                title="Materialized",
+                state="idle",
+                active=True,
+            ),
+            SessionCardItem(
+                binding_id="22222222-0000-0000-0000-000000000002",
+                short_id="22222222",
+                project_alias="test",
+                native_thread_id=None,
+                title="Lazy",
+                state="idle",
+                active=False,
+            ),
+        )
+
+        card = sessions_card(
+            scope=self.scope,
+            sessions=sessions,
+            native_delete_available=False,
+        )
+        delete_values = [
+            button["behaviors"][0]["value"]
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "删除"
+        ]
+
+        self.assertEqual(len(delete_values), 1)
+        self.assertEqual(
+            delete_values[0]["binding_id"],
+            "binding:v1:22222222-0000-0000-0000-000000000002",
+        )
+        self.assertIsNone(delete_values[0]["expected_native_thread_id"])
+
+    def test_sessions_delete_confirmation_is_exact_red_and_has_back_action(
+        self,
+    ) -> None:
+        common = {
+            "scope": self.scope,
+            "binding_id": "11111111-0000-0000-0000-000000000001",
+            "expected_active_binding_id": (
+                "22222222-0000-0000-0000-000000000002"
+            ),
+            "short_id": "11111111",
+            "project_alias": "test",
+            "title": "Release cleanup",
+            "page": 3,
+        }
+        materialized = sessions_delete_binding_card(
+            **common,
+            native_thread_id="native-one",
+        )
+        lazy = sessions_delete_binding_card(
+            **common,
+            native_thread_id=None,
+        )
+
+        self.assertEqual(materialized.card["header"]["template"], "red")
+        self.assertIn("spawned descendants", str(materialized.card))
+        self.assertIn("Codex App/CLI", str(materialized.card))
+        final = next(
+            button
+            for button in _elements(materialized.card, "button")
+            if button["text"]["content"] == "永久删除此会话"
+        )
+        value = final["behaviors"][0]["value"]
+        self.assertEqual(value["intent"], "binding.delete.exact")
+        self.assertEqual(
+            value["binding_id"],
+            "binding:v1:11111111-0000-0000-0000-000000000001",
+        )
+        self.assertEqual(
+            value["expected_active_binding_id"],
+            "binding:v1:22222222-0000-0000-0000-000000000002",
+        )
+        self.assertEqual(
+            value["expected_native_thread_id"],
+            "native-thread:v1:native-one",
+        )
+        self.assertEqual(value["page"], 3)
+        self.assertEqual(final["type"], "danger")
+        self.assertIn("无法恢复", final["confirm"]["title"]["content"])
+        back = next(
+            button
+            for button in _elements(materialized.card, "button")
+            if button["text"]["content"] == "返回会话列表"
+        )
+        self.assertEqual(back["behaviors"][0]["value"]["page"], 3)
+        self.assertIn("只永久删除本地 Binding", str(lazy.card))
+        lazy_final = next(
+            button
+            for button in _elements(lazy.card, "button")
+            if button["text"]["content"] == "永久删除此会话"
+        )
+        self.assertIsNone(
+            lazy_final["behaviors"][0]["value"]["expected_native_thread_id"]
         )
 
     def test_sessions_card_paginates_and_clamps_page(self) -> None:
@@ -1476,27 +1658,47 @@ class CardRendererTest(unittest.TestCase):
             )
             for i in range(25)
         )
-        card = sessions_card(scope=self.scope, sessions=sessions, page=0)
+        card = sessions_card(
+            scope=self.scope,
+            sessions=sessions,
+            native_delete_available=True,
+            page=0,
+        )
         text = str(card.card)
         self.assertIn("第 1/3 页", text)
         self.assertIn("下一页", text)
         self.assertNotIn("上一页", text)
 
-        card = sessions_card(scope=self.scope, sessions=sessions, page=1)
+        card = sessions_card(
+            scope=self.scope,
+            sessions=sessions,
+            native_delete_available=True,
+            page=1,
+        )
         text = str(card.card)
         self.assertIn("第 2/3 页", text)
         self.assertIn("上一页", text)
         self.assertIn("下一页", text)
 
         # Out-of-range page is clamped to the last valid page.
-        card = sessions_card(scope=self.scope, sessions=sessions, page=99)
+        card = sessions_card(
+            scope=self.scope,
+            sessions=sessions,
+            native_delete_available=True,
+            page=99,
+        )
         text = str(card.card)
         self.assertIn("第 3/3 页", text)
         self.assertIn("上一页", text)
         self.assertNotIn("下一页", text)
 
     def test_sessions_card_empty_state(self) -> None:
-        card = sessions_card(scope=self.scope, sessions=(), page=0)
+        card = sessions_card(
+            scope=self.scope,
+            sessions=(),
+            native_delete_available=False,
+            page=0,
+        )
         text = str(card.card)
         self.assertIn("没有普通会话", text)
         self.assertIn("/sessions archived", text)

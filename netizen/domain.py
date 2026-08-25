@@ -94,6 +94,8 @@ class CardControlName(str, Enum):
     RENAME_BINDING = "binding.rename"
     ARCHIVE_BINDING = "binding.archive"
     DELETE_BINDING = "binding.delete"
+    PREPARE_EXACT_DELETE_BINDING = "binding.delete.exact.prepare"
+    DELETE_EXACT_BINDING = "binding.delete.exact"
     UNARCHIVE_BINDING = "binding.unarchive"
     ACTIVATE_BINDING = "binding.activate"
     ARCHIVE_EXACT_BINDING = "binding.archive.exact"

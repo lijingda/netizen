@@ -952,6 +952,70 @@ def delete_binding_card(
     return OutboundCard(card=builder.to_dict())
 
 
+def sessions_delete_binding_card(
+    *,
+    scope: FeishuScope,
+    binding_id: str,
+    expected_active_binding_id: str | None,
+    short_id: str,
+    project_alias: str,
+    title: str,
+    native_thread_id: str | None,
+    page: int,
+) -> OutboundCard:
+    builder = _builder(
+        "永久删除会话",
+        f"{short_id} · {project_alias}",
+        template="red",
+    )
+    if native_thread_id is None:
+        builder.markdown(
+            f"即将删除：`{_md_code(title)}`\n"
+            "该 Lazy 会话尚无原生历史；确认后只永久删除本地 Binding。"
+        )
+        confirm_body = "请再次确认：该本地会话映射将被永久删除。"
+    else:
+        builder.markdown(
+            f"即将删除：`{_md_code(title)}`\n"
+            "确认后将永久删除原生 Codex Thread、其 spawned descendants 与本地 "
+            "Binding；Codex App/CLI 中的对应历史也会消失。"
+        )
+        confirm_body = (
+            "请再次确认：原生会话、派生会话与本地 Binding 都将永久删除，无法恢复。"
+        )
+    expected_native_thread_id = (
+        _native_thread_reference(native_thread_id)
+        if native_thread_id is not None
+        else None
+    )
+    builder.raw(
+        _button_row(
+            _callback_button(
+                label="永久删除此会话",
+                value=_envelope(
+                    scope,
+                    CardControlName.DELETE_EXACT_BINDING,
+                    binding_id=_binding_reference(binding_id),
+                    expected_active_binding_id=(
+                        _binding_reference(expected_active_binding_id)
+                        if expected_active_binding_id is not None
+                        else None
+                    ),
+                    expected_native_thread_id=expected_native_thread_id,
+                    page=page,
+                ),
+                style="danger",
+                confirm=("永久删除且无法恢复", confirm_body),
+            ),
+            _callback_button(
+                label="返回会话列表",
+                value=_sessions_page_envelope(scope=scope, target=page),
+            ),
+        )
+    )
+    return OutboundCard(card=builder.to_dict())
+
+
 def archived_sessions_card(
     *,
     scope: FeishuScope,
@@ -978,6 +1042,7 @@ def sessions_card(
     *,
     scope: FeishuScope,
     sessions: tuple[SessionCardItem, ...],
+    native_delete_available: bool,
     page: int = 0,
     notice: str | None = None,
     notice_is_error: bool = False,
@@ -988,7 +1053,7 @@ def sessions_card(
     builder.markdown(
         "切换不会停止其他会话正在运行的任务。"
         "归档仅对空闲且已有原生历史的会话开放；历史不会删除，"
-        "可从 `/sessions archived` 恢复。"
+        "可从 `/sessions archived` 恢复。删除是永久操作，需进入红色确认卡。"
     )
     if not sessions:
         builder.markdown(
@@ -1017,6 +1082,7 @@ def sessions_card(
                 session=session,
                 page=clamped_page,
                 expected_active_binding_id=expected_active_binding_id,
+                native_delete_available=native_delete_available,
             )
         )
 
@@ -1037,6 +1103,7 @@ def _session_row(
     session: SessionCardItem,
     page: int,
     expected_active_binding_id: str | None,
+    native_delete_available: bool,
 ) -> dict[str, Any]:
     native = (
         session.native_thread_id[:8]
@@ -1084,6 +1151,31 @@ def _session_row(
                         "历史不会删除，之后可以恢复。"
                     ),
                 ),
+            )
+        )
+    if session.state == "idle" and (
+        session.native_thread_id is None or native_delete_available
+    ):
+        controls.append(
+            _callback_button(
+                label="删除",
+                value=_envelope(
+                    scope,
+                    CardControlName.PREPARE_EXACT_DELETE_BINDING,
+                    binding_id=_binding_reference(session.binding_id),
+                    expected_active_binding_id=(
+                        _binding_reference(expected_active_binding_id)
+                        if expected_active_binding_id is not None
+                        else None
+                    ),
+                    expected_native_thread_id=(
+                        _native_thread_reference(session.native_thread_id)
+                        if session.native_thread_id is not None
+                        else None
+                    ),
+                    page=page,
+                ),
+                style="danger",
             )
         )
     columns = [
@@ -1460,6 +1552,18 @@ def decode_button_action(
             "page",
         },
         CardControlName.DELETE_BINDING: {"binding_id"},
+        CardControlName.PREPARE_EXACT_DELETE_BINDING: {
+            "binding_id",
+            "expected_active_binding_id",
+            "expected_native_thread_id",
+            "page",
+        },
+        CardControlName.DELETE_EXACT_BINDING: {
+            "binding_id",
+            "expected_active_binding_id",
+            "expected_native_thread_id",
+            "page",
+        },
         CardControlName.UNARCHIVE_BINDING: {"binding_id"},
         CardControlName.ACTIVATE_BINDING: {"binding_id"},
         CardControlName.SESSIONS_PAGE: {"page"},
@@ -1520,12 +1624,14 @@ def decode_button_action(
                 )
             )
     if "expected_native_thread_id" in payload:
-        expected_native_thread_id = _decode_native_thread_reference(
-            _required_string(
-                payload["expected_native_thread_id"],
-                "expected_native_thread_id",
+        raw_native_thread_id = payload["expected_native_thread_id"]
+        if raw_native_thread_id is not None:
+            expected_native_thread_id = _decode_native_thread_reference(
+                _required_string(
+                    raw_native_thread_id,
+                    "expected_native_thread_id",
+                )
             )
-        )
     if "side_id" in payload:
         side_id = _decode_side_reference(
             _required_string(payload["side_id"], "side_id")

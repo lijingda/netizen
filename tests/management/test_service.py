@@ -19,10 +19,12 @@ from netizen.codex_runtime import (
     StopDisposition,
     ThreadArchived,
     ThreadCatalogIdentityMissing,
+    ThreadDeleteTargetChanged,
 )
 from netizen.domain import FeishuScope, ScopeKind
 from netizen.management import (
     ActivePointerChanged,
+    BindingScopeMismatch,
     CurrentBindingChanged,
     CurrentBindingTarget,
     CurrentSideTarget,
@@ -311,6 +313,90 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.calls[-2:],
             [("delete", binding.id), ("pointer", binding.id, None)],
         )
+
+    async def test_exact_inactive_delete_preserves_other_pointer(self) -> None:
+        target = await self._create()
+        self.store.assign_native_thread_id(target.id, "native-target")
+        current = await self._create()
+
+        deleted = await self.service.delete_exact_binding(
+            target=ExactBindingTarget(
+                scope_key=self.scope.key,
+                binding_id=target.id,
+                expected_active_binding_id=current.id,
+            ),
+            expected_native_thread_id="native-target",
+        )
+
+        self.assertEqual(deleted.id, target.id)
+        self.assertEqual(self.store.active_binding(self.scope.key).id, current.id)
+        self.assertEqual(
+            self.runtime.calls[-2:],
+            [("delete", target.id), ("pointer", current.id, current.id)],
+        )
+
+    async def test_exact_current_lazy_delete_clears_pointer(self) -> None:
+        target = await self._create()
+
+        deleted = await self.service.delete_exact_binding(
+            target=ExactBindingTarget(
+                scope_key=self.scope.key,
+                binding_id=target.id,
+                expected_active_binding_id=target.id,
+            ),
+            expected_native_thread_id=None,
+        )
+
+        self.assertEqual(deleted.id, target.id)
+        self.assertIsNone(self.store.active_binding(self.scope.key))
+        self.assertEqual(
+            self.runtime.calls[-2:],
+            [("delete", target.id), ("pointer", target.id, None)],
+        )
+
+    async def test_exact_delete_rejects_native_identity_change_before_runtime(
+        self,
+    ) -> None:
+        target = await self._create()
+        self.store.assign_native_thread_id(target.id, "native-target")
+        before = tuple(self.runtime.calls)
+
+        with self.assertRaises(ThreadDeleteTargetChanged):
+            await self.service.delete_exact_binding(
+                target=ExactBindingTarget(
+                    scope_key=self.scope.key,
+                    binding_id=target.id,
+                    expected_active_binding_id=target.id,
+                ),
+                expected_native_thread_id=None,
+            )
+
+        self.assertEqual(tuple(self.runtime.calls), before)
+        self.assertEqual(
+            self.store.get(target.id).native_thread_id,
+            "native-target",
+        )
+
+    async def test_exact_delete_rejects_cross_scope_target_before_runtime(
+        self,
+    ) -> None:
+        current = await self._create()
+        other = await self._create(self.other_scope)
+        before = tuple(self.runtime.calls)
+
+        with self.assertRaises(BindingScopeMismatch):
+            await self.service.delete_exact_binding(
+                target=ExactBindingTarget(
+                    scope_key=self.scope.key,
+                    binding_id=other.id,
+                    expected_active_binding_id=current.id,
+                ),
+                expected_native_thread_id=None,
+            )
+
+        self.assertEqual(tuple(self.runtime.calls), before)
+        self.assertEqual(self.store.get(other.id).id, other.id)
+        self.assertEqual(self.store.active_binding(self.scope.key).id, current.id)
 
     async def test_exact_pointer_precondition_distinguishes_none(self) -> None:
         binding = await self._create()

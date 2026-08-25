@@ -61,6 +61,9 @@ design detail, compatibility findings, and procedures in their source docs.
   [ADR 0037](docs/adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md)
   requalifies native Thread Delete and defines its thin Adapter plus four-view
   failure reconciliation.
+  [ADR 0038](docs/adr/0038-delete-exact-idle-sessions-from-the-sessions-card.md)
+  permits two-stage exact deletion of eligible idle sessions from `/sessions`
+  while keeping the `/delete` command current-only.
   Superseded ADRs are historical context.
 - [docs/deployment.md](docs/deployment.md): setup, verification, and release
   procedures.
