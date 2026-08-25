@@ -1,10 +1,11 @@
 # Repository prerequisite: GitHub Immutable Releases must be enabled.  This
 # workflow creates a new exact-tag release and never replaces an existing asset.
-# Account-scoped Codex/Feishu live probes cannot run on GitHub-hosted runners;
-# dispatch therefore requires a durable external evidence URL, the exact
-# archive SHA-256, an explicit human confirmation, and approval through the
-# protected `published-release` environment.
-name: Publish qualified release
+# Code qualification belongs to the exact main commit's required CI run.  This
+# workflow does not rerun tests or account-scoped live probes; it verifies that
+# qualification, builds one deterministic artifact, checks its identity, and
+# publishes only after approval through the protected `published-release`
+# environment.
+name: Publish main-qualified release
 
 on:
   workflow_dispatch:
@@ -13,21 +14,9 @@ on:
         description: Exact existing release tag, for example v0.3.0
         required: true
         type: string
-      live_probe_evidence:
-        description: HTTPS URL for the successful account-scoped release live-probe report
-        required: true
-        type: string
-      live_probe_archive_sha256:
-        description: Archive SHA-256 recorded by that live-probe report
-        required: true
-        type: string
-      confirm_publish:
-        description: I reviewed the evidence and authorize publishing this exact release
-        required: true
-        default: false
-        type: boolean
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -41,6 +30,7 @@ jobs:
       archive-name: ${{ steps.identity.outputs.archive-name }}
       archive-sha256: ${{ steps.build.outputs.archive-sha256 }}
       commit: ${{ steps.identity.outputs.commit }}
+      main-gate-url: ${{ steps.main-gate.outputs.url }}
     steps:
       - name: Check out exact tag
         uses: actions/checkout@v4
@@ -68,6 +58,39 @@ jobs:
           test "$RELEASE_TAG" = "v$version"
           echo "archive-name=netizen-$RELEASE_TAG.tar.gz" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Require successful main CI for the exact commit
+        id: main-gate
+        uses: actions/github-script@v7
+        env:
+          RELEASE_COMMIT: ${{ steps.identity.outputs.commit }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const expectedCommit = process.env.RELEASE_COMMIT;
+            const response = await github.rest.actions.listWorkflowRuns({
+              owner,
+              repo,
+              workflow_id: 'ci.yml',
+              branch: 'main',
+              event: 'push',
+              head_sha: expectedCommit,
+              per_page: 100,
+            });
+            const successful = response.data.workflow_runs.find((run) =>
+              run.head_sha === expectedCommit &&
+              run.head_branch === 'main' &&
+              run.event === 'push' &&
+              run.status === 'completed' &&
+              run.conclusion === 'success'
+            );
+            if (!successful) {
+              throw new Error(
+                `Exact release commit ${expectedCommit} has no successful main CI run.`
+              );
+            }
+            core.setOutput('url', successful.html_url);
+            core.notice(`Reusing successful main qualification: ${successful.html_url}`);
 
       - name: Build one deterministic candidate and bootstrap
         id: build
@@ -101,21 +124,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  qualify-artifact:
-    name: Qualify ${{ matrix.os }} / Python ${{ matrix.python }}
+  verify-artifact:
+    name: Verify release artifact identity
     needs: build-artifact
-    strategy:
-      fail-fast: false
-      matrix:
-        # GitHub documents macos-15 as arm64 and macos-15-intel as Intel.
-        os: [ubuntu-latest, macos-15, macos-15-intel]
-        python: ["3.11", "3.12"]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
-      - name: Set up supported Python
+      - name: Set up artifact verifier
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: "3.11"
 
       - name: Download the one built candidate
         uses: actions/download-artifact@v4
@@ -157,64 +174,14 @@ jobs:
           assert manifest["qualification"] == "github-release"
           PY
 
-      - name: Run the complete local gate on extracted candidate bytes
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          cd "candidate/netizen-$RELEASE_TAG"
-          python -m venv .venv
-          .venv/bin/python -m pip install \
-            --disable-pip-version-check \
-            --no-input \
-            --constraint requirements.lock \
-            .
-          make check
-
-  live-probe-evidence:
-    name: Admit external live-probe evidence
-    needs: [build-artifact, qualify-artifact]
+  publish-release:
+    needs: [build-artifact, verify-artifact]
     runs-on: ubuntu-latest
     environment: published-release
-    steps:
-      # GitHub-hosted jobs deliberately do not run account-scoped live probes.
-      # The dispatching maintainer and environment reviewer must inspect the
-      # linked report.  The exact SHA binds that evidence to this candidate.
-      - name: Require a durable evidence URL
-        env:
-          CONFIRM_PUBLISH: ${{ inputs.confirm_publish }}
-          EXPECTED_ARCHIVE_SHA256: ${{ needs.build-artifact.outputs.archive-sha256 }}
-          LIVE_PROBE_EVIDENCE: ${{ inputs.live_probe_evidence }}
-          REPORTED_ARCHIVE_SHA256: ${{ inputs.live_probe_archive_sha256 }}
-        run: |
-          python - <<'PY'
-          import os
-          import re
-          from urllib.parse import urlsplit
-
-          if os.environ["CONFIRM_PUBLISH"] != "true":
-              raise SystemExit("confirm_publish must be explicitly enabled")
-          evidence = os.environ["LIVE_PROBE_EVIDENCE"]
-          parsed = urlsplit(evidence)
-          if parsed.scheme != "https" or not parsed.netloc or "\n" in evidence:
-              raise SystemExit("live_probe_evidence must be one HTTPS report URL")
-          reported = os.environ["REPORTED_ARCHIVE_SHA256"]
-          if re.fullmatch(r"[0-9a-f]{64}", reported) is None:
-              raise SystemExit("live_probe_archive_sha256 must be lowercase SHA-256")
-          if reported != os.environ["EXPECTED_ARCHIVE_SHA256"]:
-              raise SystemExit("live-probe evidence belongs to a different release archive")
-          print("External account-scoped live-probe evidence was explicitly supplied.")
-          print("Hosted runners did not execute or independently attest those probes.")
-          PY
-
-  publish-release:
-    needs: [build-artifact, qualify-artifact, live-probe-evidence]
-    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download the qualified candidate without rebuilding it
+      - name: Download the main-qualified candidate without rebuilding it
         uses: actions/download-artifact@v4
         with:
           name: release-candidate
@@ -225,16 +192,16 @@ jobs:
         env:
           ARCHIVE_NAME: ${{ needs.build-artifact.outputs.archive-name }}
           ARCHIVE_SHA256: ${{ needs.build-artifact.outputs.archive-sha256 }}
-          LIVE_PROBE_EVIDENCE: ${{ inputs.live_probe_evidence }}
+          MAIN_GATE_URL: ${{ needs.build-artifact.outputs.main-gate-url }}
           RELEASE_COMMIT: ${{ needs.build-artifact.outputs.commit }}
           RELEASE_TAG: ${{ inputs.tag }}
         with:
           script: |
+            const crypto = require('crypto');
             const fs = require('fs');
             const path = require('path');
             const { owner, repo } = context.repo;
             const tag = process.env.RELEASE_TAG;
-            const evidence = process.env.LIVE_PROBE_EVIDENCE;
             const expectedCommit = process.env.RELEASE_COMMIT;
 
             async function resolveTagCommit() {
@@ -272,6 +239,15 @@ jobs:
 
             await requireExactTag();
 
+            const archivePath = path.join('dist', process.env.ARCHIVE_NAME);
+            const actualArchiveSha256 = crypto
+              .createHash('sha256')
+              .update(fs.readFileSync(archivePath))
+              .digest('hex');
+            if (actualArchiveSha256 !== process.env.ARCHIVE_SHA256) {
+              throw new Error('Downloaded release archive no longer matches its built SHA-256.');
+            }
+
             try {
               await github.rest.repos.getReleaseByTag({ owner, repo, tag });
               core.setFailed(`Release ${tag} already exists; immutable assets are never replaced.`);
@@ -287,13 +263,11 @@ jobs:
               target_commitish: process.env.RELEASE_COMMIT,
               name: `Netizen ${tag}`,
               body: [
-                'This release was built once and the exact archive bytes passed the full',
-                'Linux/macOS × CPython 3.11/3.12 local qualification matrix.',
+                'This release was built once from an exact main commit whose required',
+                'Main quality gate completed successfully.',
                 '',
-                `External account-scoped live-probe evidence: ${evidence}`,
-                `Qualified archive SHA-256: ${process.env.ARCHIVE_SHA256}`,
-                '',
-                'The GitHub-hosted workflow did not execute those account-scoped probes.',
+                `Main quality gate: ${process.env.MAIN_GATE_URL}`,
+                `Release archive SHA-256: ${process.env.ARCHIVE_SHA256}`,
               ].join('\n'),
               draft: true,
               prerelease: false,

@@ -211,7 +211,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("受管用户指南 Skill", deployment)
         self.assertIn("$netizen-user-guide 如何切换会话？", deployment)
 
-    def test_release_gate_includes_native_thread_lifecycle_probe(self) -> None:
+    def test_live_suite_includes_native_thread_lifecycle_probe(self) -> None:
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
         probe = (ROOT / "scripts" / "probe_python_sdk.py").read_text(
             encoding="utf-8"
@@ -230,7 +230,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("AppServerThreadDeleteControl", lifecycle)
         self.assertIn(".delete(", lifecycle)
 
-    def test_release_gate_includes_non_consuming_turn_plan_probes(self) -> None:
+    def test_live_suite_includes_non_consuming_turn_plan_probes(self) -> None:
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
         probe = (ROOT / "scripts" / "probe_python_sdk.py").read_text(
             encoding="utf-8"
@@ -241,7 +241,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("PinnedTurnPlanObserver", probe)
         self.assertIn("async for notification in handle.stream()", probe)
 
-    def test_release_gate_includes_ephemeral_multi_turn_side_probe(self) -> None:
+    def test_live_suite_includes_ephemeral_multi_turn_side_probe(self) -> None:
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
         probe = (ROOT / "scripts" / "probe_python_sdk.py").read_text(
             encoding="utf-8"
@@ -272,7 +272,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("相同 UUID", deployment)
         self.assertIn("Parent 仍能继续", deployment)
 
-    def test_release_gate_uses_two_app_servers_and_exact_same_id_resume(self) -> None:
+    def test_live_suite_uses_two_app_servers_and_exact_same_id_resume(self) -> None:
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
         probe = (ROOT / "scripts" / "probe_python_sdk.py").read_text(
             encoding="utf-8"
@@ -304,7 +304,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("`side_topics`", design)
         self.assertIn("不保存\nephemeral native Thread ID", design)
 
-    def test_make_check_covers_safe_local_release_gates(self) -> None:
+    def test_make_check_covers_safe_local_code_gates(self) -> None:
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 
         self.assertIn("check: test", makefile)
