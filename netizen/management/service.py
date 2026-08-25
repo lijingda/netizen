@@ -918,6 +918,26 @@ class InstanceManagementService:
             await self._runtime.binding_pointer_changed(previous_id, current_id)
             return deleted
 
+    async def delete_exact_binding(
+        self,
+        *,
+        target: ExactBindingTarget,
+        expected_native_thread_id: str | None,
+    ) -> ThreadBinding:
+        async with self._scope_coordinator.hold(target.scope_key):
+            binding, previous_id = self._require_exact(target)
+            if binding.native_thread_id != expected_native_thread_id:
+                raise ThreadDeleteTargetChanged(
+                    "会话的原生 Thread 已变化，本删除确认未执行。"
+                )
+            deleted = await self._runtime.delete_exact(
+                binding.id,
+                expected_native_thread_id=expected_native_thread_id,
+            )
+            current_id = self._active_id(target.scope_key)
+            await self._runtime.binding_pointer_changed(previous_id, current_id)
+            return deleted
+
     async def release_exact_binding(
         self,
         *,

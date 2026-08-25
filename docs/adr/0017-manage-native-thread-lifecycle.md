@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-12
 amends: 0008, 0014
-amended_by: 0019, 0036, 0037
+amended_by: 0019, 0036, 0037, 0038
 related: 0001, 0016
 ---
 
@@ -13,7 +13,9 @@ related: 0001, 0016
 > 已在重新实测后，用薄 Adapter 与四视图失败对账恢复该能力。
 > [ADR 0036](0036-archive-exact-idle-sessions-from-the-sessions-card.md) 另行允许普通
 > `/sessions` 卡片按 exact Binding 归档 idle materialized 会话；`/archive` 命令仍只作用于
-> 当前会话。
+> 当前会话。[ADR 0038](0038-delete-exact-idle-sessions-from-the-sessions-card.md) 同样只为
+> 普通 `/sessions` 增加 exact idle 会话的两阶段删除入口；`/delete` 命令仍只作用于当前
+> 会话。
 
 ## 背景
 

@@ -103,6 +103,9 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   “设为当前”；切换只改变 Scope 的 active Binding，不会停止其他会话正在运行的任务。
   已有原生历史且当前 idle 的行还可二次确认后直接“归档”：归档非当前行不改变 active
   Binding，归档当前行才清空 pointer；卡片状态已变化时操作会拒绝并要求重新打开。
+  idle 的 Lazy 行与 Delete capability 可用的 materialized 行还可打开红色确认卡后永久
+  “删除”：删除非当前行保留 active Binding，删除当前行清空 pointer；确认期间目标、
+  active pointer 或运行状态变化时零 mutation 地拒绝。
   每个会话优先显示原生 `Thread.name`，没有名称时使用首条用户消息 `preview`，同时保留
   `/resume` 所需的短 ID（`/threads` 是兼容别名）；已归档会话不混入普通列表。
 - `/sessions archived`：从 Codex 原生 archived catalog 读取当前 Scope 的归档会话，并

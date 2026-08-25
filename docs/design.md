@@ -128,8 +128,10 @@ Settings。`/delete` 为 Lazy Binding 显示只删本地记录的确认卡；mat
 切换 exact active Binding，不创建 Turn，也不停止其他 Binding 的运行。按
 [ADR 0036](adr/0036-archive-exact-idle-sessions-from-the-sessions-card.md)，列表中的 idle
 materialized 行可确认后直接 exact archive；inactive 目标保持 active pointer，当前目标
-清空 pointer。归档恢复仍显式选择目标：`/unarchive <短 ID>` 或归档卡按钮恢复 exact
-native ID 并切换 Binding。
+清空 pointer。按 [ADR 0038](adr/0038-delete-exact-idle-sessions-from-the-sessions-card.md)，
+列表中的 idle Lazy 行和 Delete capability 可用的 idle materialized 行可经独立红色确认卡
+exact delete；inactive 目标保持 active pointer，当前目标清空 pointer。归档恢复仍显式选择
+目标：`/unarchive <短 ID>` 或归档卡按钮恢复 exact native ID 并切换 Binding。
 
 `/side [首轮问题]` 按 [ADR 0021](adr/0021-support-multi-turn-ephemeral-side-topics.md)
 从当前 exact active、materialized Parent Binding 创建
@@ -582,10 +584,18 @@ activation 边界校验目标仍属同一 Scope、未归档且仍存在；
 active pointer，归档当前行清空 pointer；旧卡、跨 Scope、已归档、外部 active、running、
 Goal、compacting 和 lifecycle-unknown 目标均零 mutation 地失败。成功后
 从 live catalog 重建并夹取原页；mutation 已确认成功但刷新失败时只回退等价成功消息。
-lazy Binding 显示“新会话”且同样可切换。名称和预览只用于当次展示，不写入 Channel
-数据库；Thread 列表读取失败或找不到对应 Thread 时明确显示暂不可用，不会为了标题而
-resume Thread。切换已成功但后续卡片刷新失败时发送等价成功反馈，不能把已提交 mutation
-误报成失败。
+呈现为 idle 的 Lazy 行以及 Delete capability 可用的 idle materialized 行还显示
+`binding.delete.exact.prepare`；该入口不产生 mutation，而是按 live active pointer、Scope、
+native identity 和 Runtime 状态重新校验后打开独立红色危险卡。最终
+`binding.delete.exact` 携带完整 Binding ID、Scope、active pointer 快照、可空的 exact
+native ID 和页码，再次执行同样校验；Lazy 仅删除本地 Binding，materialized 复用 ADR 0037
+的 native-first 删除与一次四视图失败对账。删除 inactive 行不改变真实 active pointer，
+删除当前行清空 pointer；旧卡、跨 Scope、已归档、running、Goal、compacting 和
+lifecycle-unknown 目标均零 mutation 地失败。成功后同样重建并夹取原页，mutation 已提交但
+刷新失败时只回退等价成功消息。lazy Binding 显示“新会话”且同样可切换。名称和预览只
+用于当次展示，不写入 Channel 数据库；Thread 列表读取失败或找不到对应 Thread 时明确显示
+暂不可用，不会为了标题而 resume Thread。切换已成功但后续卡片刷新失败时发送等价成功
+反馈，不能把已提交 mutation 误报成失败。
 
 `/status` 以一项一行展示当前 Binding、原生 `name`、首条消息 `preview`、Project、完整
 native Thread ID、运行状态、当前 active Turn checklist、已接受 steer 次数、上下文窗口
@@ -644,11 +654,13 @@ prompt，未知 slash command fail closed，不增加任意 `/`/`@` 链式解释
 不可用且不进入帮助。
 
 `/rename`、`/archive`、`/delete` 命令只作用于当前 active Binding，不接受目标 ID；管理
-另一普通会话的 rename/delete 应先 `/resume`。`/sessions` 中按 ADR 0036 确认归档 exact
-idle materialized 行是唯一 archive 例外，不改变 `/archive` 命令。rename 可直接带名称或打开 form；archive 与 Lazy delete 的
-callback 携带完整 Binding ID 和 Feishu Scope envelope，并由内置 confirm 二次确认，
-其中 delete 使用红色危险卡。materialized `/delete` 还携带打开卡片时的 exact native
-Thread ID，并明确 spawned descendants 与 Codex App/CLI 历史也会永久消失。提交时 Scope
+另一普通会话的 rename 仍应先 `/resume`。`/sessions` 中按 ADR 0036 确认归档 exact idle
+materialized 行是唯一 archive 例外，按 ADR 0038 经独立红色确认卡删除 exact idle 行是
+唯一 delete 例外；两者都不改变对应文本命令，也不新增 `/delete <id>`。rename 可直接带
+名称或打开 form；archive 与 Lazy delete 的 callback 携带完整 Binding ID 和 Feishu Scope
+envelope，并由内置 confirm 二次确认，其中 delete 使用红色危险卡。materialized
+`/delete` 还携带打开卡片时的 exact native Thread ID，并明确 spawned descendants 与
+Codex App/CLI 历史也会永久消失。提交时 Scope
 锁重新检查 active pointer 与 native identity，旧卡片不执行。归档列表只为同一 Scope 的原生
 archived Thread 生成恢复按钮；恢复前再次校验 catalog，不把 stale 或跨 Scope Binding
 激活。

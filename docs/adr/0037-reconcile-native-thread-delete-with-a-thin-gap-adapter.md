@@ -2,11 +2,15 @@
 status: accepted
 date: 2026-08-24
 amends: 0017, 0031
+amended_by: 0038
 supersedes: 0019
 related: 0014, 0026, 0031
 ---
 
 # 用薄 SDK Gap Adapter 与原生目录对账开放 Thread Delete
+
+> 修订说明：ADR 0038 只为普通 `/sessions` 增加 exact idle 会话的两阶段删除入口；本 ADR
+> 定义的原生删除与四视图对账保持不变，`/delete` 文本命令仍为 current-only。
 
 ## 背景
 

@@ -451,6 +451,7 @@ class StubRuntime:
         self.archive_binding_calls: list[str] = []
         self.archive_binding_error: BaseException | None = None
         self.delete_binding_calls: list[str] = []
+        self.delete_binding_error: BaseException | None = None
         self.unarchive_binding_calls: list[str] = []
         self.enforce_active_submission = False
         self.create_side_calls: list[dict[str, object]] = []
@@ -613,6 +614,8 @@ class StubRuntime:
         return await self.archive_binding(self.binding_store.get(binding_id))
 
     async def delete_binding(self, binding):
+        if self.delete_binding_error is not None:
+            raise self.delete_binding_error
         assert self.binding_store is not None
         current = self.binding_store.get(binding.id)
         self.delete_binding_calls.append(binding.id)
@@ -2522,6 +2525,385 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.store.active_binding(scope.key).id, lazy.id)
         self.assertIn("已切换到会话", str(self.channel.updates[-1][1]))
+
+    async def test_sessions_delete_lazy_is_two_stage_and_keeps_current(
+        self,
+    ) -> None:
+        await self.new(message_id="om_new_delete_target")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        target = self.store.active_binding(scope.key)
+        await self.new(message_id="om_new_current")
+        current = self.store.active_binding(scope.key)
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        prepare = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "删除"
+            and button["behaviors"][0]["value"]["binding_id"]
+            == f"binding:v1:{target.id}"
+        )
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                prepare["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+
+        self.assertEqual(self.runtime.delete_binding_calls, [])
+        confirmation = self.channel.updates[-1][1]
+        self.assertEqual(confirmation["header"]["template"], "red")
+        self.assertIn("只永久删除本地 Binding", str(confirmation))
+        final = next(
+            button
+            for button in _elements(confirmation, "button")
+            if button["text"]["content"] == "永久删除此会话"
+        )
+        final_value = final["behaviors"][0]["value"]
+        self.assertEqual(final_value["binding_id"], f"binding:v1:{target.id}")
+        self.assertEqual(
+            final_value["expected_active_binding_id"],
+            f"binding:v1:{current.id}",
+        )
+        self.assertIsNone(final_value["expected_native_thread_id"])
+        self.assertIn("confirm", final)
+
+        await self.app.handle_card_action(
+            self.direct_button_event(final_value, message_id="om_sessions")
+        )
+
+        self.assertEqual(self.runtime.delete_binding_calls, [target.id])
+        with self.assertRaises(BindingNotFound):
+            self.store.get(target.id)
+        self.assertEqual(self.store.active_binding(scope.key).id, current.id)
+        self.assertEqual(
+            self.runtime.active_binding_change_calls[-1],
+            (current.id, current.id),
+        )
+        updated = self.channel.updates[-1][1]
+        self.assertIn("✅ 已删除 Lazy 会话", str(updated))
+        self.assertIn("1 个普通会话", str(updated))
+
+    async def test_sessions_delete_materialized_current_clears_pointer(
+        self,
+    ) -> None:
+        await self.new(message_id="om_new_delete_current")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        target = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(target.id, "native-target")
+        self.runtime.available_capabilities = frozenset({NativeCapability.DELETE})
+        self.runtime.thread_metadata_values["native-target"] = NativeThreadMetadata(
+            "native-target",
+            "Delete target",
+            "old task",
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        prepare = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "删除"
+        )
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                prepare["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+        confirmation = self.channel.updates[-1][1]
+        self.assertIn("spawned descendants", str(confirmation))
+        self.assertIn("Delete target", str(confirmation))
+        final = next(
+            button
+            for button in _elements(confirmation, "button")
+            if button["text"]["content"] == "永久删除此会话"
+        )
+        self.assertEqual(
+            final["behaviors"][0]["value"]["expected_native_thread_id"],
+            "native-thread:v1:native-target",
+        )
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                final["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+
+        self.assertEqual(self.runtime.delete_binding_calls, [target.id])
+        self.assertIsNone(self.store.active_binding(scope.key))
+        self.assertEqual(
+            self.runtime.active_binding_change_calls[-1],
+            (target.id, None),
+        )
+        self.assertIn("0 个普通会话", str(self.channel.updates[-1][1]))
+
+    async def test_sessions_materialized_delete_is_hidden_without_capability(
+        self,
+    ) -> None:
+        await self.new(message_id="om_new_materialized")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        materialized = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(materialized.id, "native-target")
+        await self.new(message_id="om_new_lazy")
+        lazy = self.store.active_binding(scope.key)
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        delete_values = [
+            button["behaviors"][0]["value"]
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "删除"
+        ]
+
+        self.assertEqual(len(delete_values), 1)
+        self.assertEqual(delete_values[0]["binding_id"], f"binding:v1:{lazy.id}")
+
+    async def test_sessions_delete_final_rejects_active_pointer_change(self) -> None:
+        await self.new(message_id="om_new_delete_target")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        target = self.store.active_binding(scope.key)
+        await self.new(message_id="om_new_expected_current")
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        prepare = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "删除"
+            and button["behaviors"][0]["value"]["binding_id"]
+            == f"binding:v1:{target.id}"
+        )
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                prepare["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+        confirmation = self.channel.updates[-1][1]
+        final = next(
+            button
+            for button in _elements(confirmation, "button")
+            if button["text"]["content"] == "永久删除此会话"
+        )
+        await self.new(message_id="om_new_changed_current")
+        changed_current = self.store.active_binding(scope.key)
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                final["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+
+        self.assertEqual(self.runtime.delete_binding_calls, [])
+        self.assertEqual(self.store.active_binding(scope.key).id, changed_current.id)
+        self.assertEqual(self.store.get(target.id).id, target.id)
+        self.assertIn("会话列表或原生历史已变化", str(self.channel.updates[-1][1]))
+
+    async def test_sessions_delete_final_rejects_lazy_materialization(self) -> None:
+        await self.new(message_id="om_new_delete_target")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        target = self.store.active_binding(scope.key)
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        prepare = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "删除"
+        )
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                prepare["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+        confirmation = self.channel.updates[-1][1]
+        final = next(
+            button
+            for button in _elements(confirmation, "button")
+            if button["text"]["content"] == "永久删除此会话"
+        )
+        self.store.assign_native_thread_id(target.id, "native-raced")
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                final["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+
+        self.assertEqual(self.runtime.delete_binding_calls, [])
+        self.assertEqual(
+            self.store.get(target.id).native_thread_id,
+            "native-raced",
+        )
+        self.assertIn("会话列表或原生历史已变化", str(self.channel.updates[-1][1]))
+
+    async def test_sessions_delete_revalidates_runtime_state_after_confirmation(
+        self,
+    ) -> None:
+        await self.new(message_id="om_new_delete_target")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        target = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(target.id, "native-target")
+        self.runtime.available_capabilities = frozenset({NativeCapability.DELETE})
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        prepare = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "删除"
+        )
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                prepare["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+        confirmation = self.channel.updates[-1][1]
+        final = next(
+            button
+            for button in _elements(confirmation, "button")
+            if button["text"]["content"] == "永久删除此会话"
+        )
+        self.runtime.delete_binding_error = ThreadRunningConfiguration(
+            "会话正在运行，无法删除。"
+        )
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                final["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+
+        self.assertEqual(self.runtime.delete_binding_calls, [])
+        self.assertEqual(self.store.get(target.id).id, target.id)
+        self.assertIn("会话正在运行", str(self.channel.updates[-1][1]))
+
+    async def test_sessions_delete_refresh_failure_still_reports_success(
+        self,
+    ) -> None:
+        await self.new(message_id="om_new_delete_target")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        target = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(target.id, "native-target")
+        self.runtime.thread_metadata_values["native-target"] = NativeThreadMetadata(
+            "native-target", "Delete target", "old task"
+        )
+        await self.new(message_id="om_new_current")
+        current = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(current.id, "native-current")
+        self.runtime.thread_metadata_values["native-current"] = NativeThreadMetadata(
+            "native-current", "Current", "current task"
+        )
+        self.runtime.available_capabilities = frozenset({NativeCapability.DELETE})
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        prepare = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "删除"
+            and button["behaviors"][0]["value"]["binding_id"]
+            == f"binding:v1:{target.id}"
+        )
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                prepare["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+        confirmation = self.channel.updates[-1][1]
+        final = next(
+            button
+            for button in _elements(confirmation, "button")
+            if button["text"]["content"] == "永久删除此会话"
+        )
+        self.runtime.thread_metadata_error = RuntimeError("history down")
+
+        with self.assertLogs("netizen.channel_app", level="WARNING"):
+            await self.app.handle_card_action(
+                self.direct_button_event(
+                    final["behaviors"][0]["value"],
+                    message_id="om_sessions",
+                )
+            )
+
+        self.assertEqual(self.runtime.delete_binding_calls, [target.id])
+        self.assertEqual(self.store.active_binding(scope.key).id, current.id)
+        reply = self.channel.replies[-1][1]
+        self.assertIsInstance(reply, str)
+        self.assertIn("✅ 已永久删除原生 Codex 会话", reply)
+
+    async def test_sessions_delete_refresh_clamps_removed_last_page(self) -> None:
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        self.store._id_factory = lambda: str(uuid.uuid4())
+        for i in range(11):
+            await self.new(message_id=f"om_new_delete_page_{i}")
+
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        first_page = self.channel.replies[-1][1]
+        next_value = next(
+            button
+            for button in _elements(first_page.card, "button")
+            if button["text"]["content"] == "下一页"
+        )["behaviors"][0]["value"]
+        await self.app.handle_card_action(
+            self.direct_button_event(next_value, message_id="om_sessions")
+        )
+        second_page = self.channel.updates[-1][1]
+        prepare = next(
+            button
+            for button in _elements(second_page, "button")
+            if button["text"]["content"] == "删除"
+        )
+        self.assertEqual(prepare["behaviors"][0]["value"]["page"], 1)
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                prepare["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+        confirmation = self.channel.updates[-1][1]
+        final = next(
+            button
+            for button in _elements(confirmation, "button")
+            if button["text"]["content"] == "永久删除此会话"
+        )
+        self.assertEqual(final["behaviors"][0]["value"]["page"], 1)
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                final["behaviors"][0]["value"],
+                message_id="om_sessions",
+            )
+        )
+
+        clamped = self.channel.updates[-1][1]
+        clamped_text = str(clamped)
+        self.assertIn("10 个普通会话", clamped_text)
+        self.assertNotIn("上一页", clamped_text)
+        self.assertNotIn("下一页", clamped_text)
 
     async def test_sessions_archives_exact_inactive_binding_and_keeps_current(
         self,

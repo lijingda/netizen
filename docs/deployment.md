@@ -721,8 +721,11 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    Thread 时优先显示 `name`、否则显示 `preview`。创建第二个会话后点击第一项的
    “设为当前”，原卡必须刷新 active 标记，且不得停止另一会话仍在运行的 Turn；归档项
    不得混入普通卡片。idle materialized 行显示带确认的“归档”，Lazy、running、Goal、
-   compacting 和 lifecycle-unknown 行不显示。`/status` 分行显示 `name`、`preview` 与“上下文窗口：暂无（首条消息后
-   生成）”。帮助包含 `/config`、`/compact`、`/goal`、`/rename`、`/archive`、`/delete`、
+   compacting 和 lifecycle-unknown 行不显示。idle Lazy 行与 Delete capability 可用的 idle
+   materialized 行显示“删除”；第一次点击只打开独立红色确认卡且不得 mutation，running、
+   Goal、compacting 和 lifecycle-unknown 行不显示。`/status` 分行显示 `name`、`preview`
+   与“上下文窗口：暂无（首条消息后生成）”。帮助包含 `/config`、`/compact`、`/goal`、
+   `/rename`、`/archive`、`/delete`、
    `/unarchive`，不包含
    `/skills`、`/model`、`/effort`、`/fast` 或当前不可用的
    `/plan`、`/apps`；`/copy`、`/vim`、`/theme`、`/exit` 也不展示。
@@ -826,7 +829,12 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     另在 `/sessions` 中直接归档一个 idle materialized 非当前行，确认真实 active pointer
     不变、目标移入 archived catalog、原卡刷新并在删除末页唯一项时夹取页码；再归档当前
     行，确认 pointer 为空。打开行内确认后改变 active pointer 或令目标开始 running，再点
-    旧按钮必须零 mutation。`/archive` 仍不接受目标参数且保持 current-only。
+    旧按钮必须零 mutation。再从 `/sessions` 分别删除 idle Lazy 与 idle materialized 非当前
+    行：第一次点击只出现带 exact 目标的红色确认卡，最终确认后 active pointer 保持不变；
+    删除当前行时 pointer 清空。确认期间切换 active、令 Lazy 物化、改变 exact native ID 或
+    令目标开始 running，旧按钮必须零 mutation；删除末页唯一项后页码夹取。materialized
+    路径必须复用上述一次四视图对账与 admission fail-closed。`/archive` 与 `/delete` 仍不
+    接受目标参数且保持 current-only，`/sessions archived` 不提供删除。
 20. 在已物化 Parent 上分别从 P2P、P2P 话题、普通群主线、普通群话题和话题模式群触发
     `/side`；从已有话题触发必须得到同 chat 的 sibling，不得留在或嵌套原话题。P2P 与
     P2P Side 话题无需 @，三类群入口及 Side 后续每条消息都必须 @。每个 Side 连续完成
