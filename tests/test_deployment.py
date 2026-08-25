@@ -49,7 +49,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         )[0]
 
         for expected in (
-            "Python 3.11+",
+            "Python 3.11 或 3.12",
             "macOS 和 Linux",
             "macOS LaunchAgent",
             "Linux systemd",
@@ -162,6 +162,20 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("飞书应用绑定重置", deployment)
         self.assertIn("feishu-app-secret", deployment)
         self.assertIn("不会迁移到新应用", deployment)
+
+    def test_deployment_separates_published_and_source_installation(self) -> None:
+        deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        for document in (deployment, readme):
+            self.assertIn("Published Release", document)
+            self.assertIn("dev-install.sh", document)
+            self.assertIn("Python 3.11/3.12", document)
+        self.assertIn("releases/latest/download/install.sh", deployment)
+        self.assertIn("install-release <source-root>", deployment)
+        self.assertIn("不重复运行", deployment)
+        self.assertIn("同一个", deployment)
+        self.assertIn("rollback", deployment)
 
     def test_deployment_documents_service_start_shell_environment(self) -> None:
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
@@ -357,7 +371,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         config = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
 
         self.assertIn("Manual-development example", config)
-        self.assertIn("./install.sh does not copy this file", config)
+        self.assertIn("managed installers do not copy this file", config)
         self.assertIn("`projects: {}`", config)
         self.assertIn("defaultCwd:", config)
         self.assertIn("projectRoot:", config)

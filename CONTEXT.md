@@ -1,5 +1,16 @@
 # Netizen 领域词汇
 
+**Published Release / 已发布 Release**：由发布者对 exact 最终制品完成发布门禁后，
+通过官方 Release 渠道提供的不可变安装候选。它的全量验证归属于该制品，不因被安装到
+另一台已支持主机而重复。
+
+**Source Install / 源码安装**：把当前工作区（包括本地未提交修改）作为未获发布者认证的
+候选进行安装。它与 Published Release 安装共享激活事务，但必须自行通过完整本地门禁。
+
+**Host Validation / 主机验证**：每次安装都对目标账号、解释器、依赖、配置、原生 SDK、
+飞书权限，以及按原服务意图需要启动时的 ready 条件执行的验证。它不替代 Published
+Release 或 Source Install 的全量发布门禁。
+
 **Binding Scope / 普通 Scope**：独立承载 active Binding 指针的飞书位置：P2P、群聊
 主线或一个普通真实话题。被 Side Topic Route 占用的话题不再解释为 Binding Scope。
 

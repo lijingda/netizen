@@ -441,7 +441,10 @@ Binding reset：device flow 不绑定旧 App ID，官方页面可选择同一或
 运行时不进入该流程。App ID 改变后新消息进入新的 Scope namespace；旧 Binding 与原生
 历史保留但不迁移。
 
-部署保持一份 release/配置/凭据/数据库/Skill/activation-intent 事务；平台 Service Backend
+部署候选有两个显式来源：Published Release 携带发布流水线对 exact archive 的资格，Source
+Install 在目标机对当前工作区运行完整门禁。两者只在候选准备和本地 release identity 上
+分流；配置解析、Codex 登录、飞书 tenant 权限、Host Validation、服务状态与回滚语义不随
+来源变化。部署保持一份 release/配置/凭据/数据库/Skill/activation-intent 事务；平台 Service Backend
 只负责定义、manager 状态、停止确认、发布、启停、status 与 ready 等待。Linux 使用 systemd
 user unit；macOS 14+ 的 Apple Silicon 与 Intel Mac 使用当前 GUI 登录用户的 LaunchAgent，
 不增加 LaunchDaemon 或第二个运行时。macOS 只使用 `launchctl print` 退出码判断 loaded，

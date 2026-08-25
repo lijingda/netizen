@@ -1,6 +1,6 @@
 # 单实例 Linux 与 macOS 部署
 
-Netizen 以执行 `install.sh` 的当前用户运行，与该用户的 CLI 共用标准 `$CODEX_HOME`
+Netizen 以执行正式 `install.sh` 或源码 `dev-install.sh` 的当前用户运行，与该用户的 CLI 共用标准 `$CODEX_HOME`
 （默认 `~/.codex`）；不创建专用 Agent 用户、第二套 Codex 状态或 system-level daemon。
 正式支持 Linux 的 systemd user manager，以及 macOS 14+ 当前 GUI 登录用户的 LaunchAgent；
 Apple Silicon 与 Intel Mac 均在支持范围内。macOS 注销后停止、下次登录自动启动；不提供
@@ -42,7 +42,7 @@ SDK/cleanup 门禁为前提；不能用 plan 的展示降级绕过该启动门�
     netizen.log / launchd.stderr.log            # macOS 有界服务日志/launcher 错误
     rollback-recovery-*                         # 回滚恢复材料
   releases/.netizen-managed                     # 删除前必须匹配的 ownership marker
-  releases/<sha256>/source/                     # 当前工作区的只读语义快照
+  releases/<sha256>/source/                     # Published Release 或当前工作区快照
   releases/<sha256>/venv/                       # 与源码成对的 runtime
   current -> releases/<sha256>                  # 现役 release
   previous -> releases/<sha256>                 # 一个回滚点
@@ -87,7 +87,7 @@ codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
 逐条引用会调用“获取指定消息”，普通/富文本图片还会调用“获取消息中的资源文件”。群聊
 Binding 的 catch-up 模式会在收到有效 @ 后，通过同一应用身份调用“获取会话历史消息”和
 exact “获取指定消息”；群主线使用 chat container，普通话题使用 thread container。
-`./install.sh` 的官方 SDK 浏览器流程会用最小模板请求下面的应用身份权限、
+受管安装器的官方 SDK 浏览器流程会用最小模板请求下面的应用身份权限、
 `im.message.receive_v1` 应用身份事件和 `card.action.trigger` 回调，不申请用户身份权限或
 token；手工准备的应用必须逐项配置。无论来源，飞书应用版本在发布前都必须确认：
 
@@ -348,30 +348,79 @@ Project config 重载后自动清理；它不会读写全局 `config.toml`。实
 需要改变飞书侧权限时，修改云端用户级 Codex 配置、按配置语义重启服务，并重跑此
 phase，以新结果为准。
 
+## 发布正式 Release
+
+`.github/workflows/ci.yml` 在面向 `main` 的 pull request 和每次 push 到 `main` 时，分别用
+Python 3.11、3.12 安装固定版本依赖并运行 `make check`。公开仓库的 `Protect main` ruleset
+禁止删除和 force-push、要求所有变更经过 pull request，并把这两个 job 配置为 required
+status checks；仓库所有者也不在绕过名单中。
+
+仓库使用 `.github/workflows/release.yml` 的手工 dispatch 发布正式版本。GitHub 仓库必须启用
+Immutable Releases；active 的 `Protect version tags` ruleset 禁止任何人更新或删除已创建的
+`v*` tag，且无绕过者；`published-release` environment 要求仓库所有者审批。tag 采用与
+`pyproject.toml` 完全一致的 `vX.Y.Z`。手工 dispatch、`confirm_publish`、持久证据 URL、
+exact archive SHA-256 和 environment 审批共同构成人工发布边界。workflow 校验 clean
+exact-tag checkout 和 full commit，并在
+创建 draft 前和正式发布前再次解析 lightweight/annotated tag、核对它仍指向同一 commit；
+不一致时在 Release 变为 immutable 前失败关闭。构建阶段只运行一次
+`scripts/build_release_artifact.py`，生成项目自建的
+deterministic archive 与 exact `install.sh` bootstrap，再把同一份 artifact fan out 到
+Ubuntu、macOS ARM64、macOS Intel 和 Python 3.11/3.12 矩阵。每个 job 解压同一 archive 后
+安装固定版本依赖并运行 `make check`，不得重新打包候选。
+
+账号级 Codex、飞书和真实 service lifecycle probes 不能由无登录态的 GitHub-hosted runner
+冒充。维护者必须按本文前置门禁在受支持真机、服务账号 login 环境对同一 archive SHA-256
+完成 live probe。dispatch 维护者必须检查持久证据，提交证据 URL 和对应 archive SHA-256，
+并显式选中 `confirm_publish`；`published-release` reviewer 在矩阵完成后再次批准该 exact
+candidate。只有本地矩阵、绑定证据和审批都通过，最终 job 才通过 GitHub Release API 创建
+draft、上传那一份 archive 与 bootstrap、再发布；它不依赖 GitHub CLI，也不允许覆盖已有
+tag 或 asset。发布失败时 draft 保留供维护者检查，不得用重新构建的同名文件补传后声称原
+候选已验证。
+
+archive 内的 `.netizen-release.json` 不参与自身记录的 `sourceDigest`，但会作为独立成员被
+installer 再校验。当前 `requirements.lock` 固定版本但尚未锁定各平台 wheel hash，因此
+发布资格证明的是 exact Netizen source archive 与这些依赖版本组合，不声称目标机从 package
+index 下载的 wheel 与 CI 字节完全相同；目标机的 `pip check` 和 SDK probes 仍是强制 Host
+Validation。若要升级为离线或 wheel 字节级认证，应另行引入 hash-locked wheelhouse。
+
 ## 安装
 
-需要 Python 3.11+、`venv` 和有效的当前用户 Codex 登录。Linux 还需要 systemd/logind；
-macOS 需要系统自带 `launchctl`、`plutil` 和当前用户的 GUI 登录会话。源码可以来自 git
-checkout、文件同步，也可以直接在目标主机编辑；入口始终是源码根目录下的零参数脚本。
+需要 Python 3.11 或 3.12、`venv` 和有效的当前用户 Codex 登录。Linux 还需要
+systemd/logind；macOS 需要系统自带 `launchctl`、`plutil` 和当前用户的 GUI 登录会话。
 服务内的 HTTPS/WebSocket 在 macOS 上直接使用系统钥匙串信任；企业根证书应由管理员安装并
 标记为受信任。Netizen 不生成或维护单独的 CA bundle，Linux 的证书路径不受此行为影响。
-真人在终端中安装时使用第一条命令；Agent、CI 或后台 shell 首次运行时使用第二条：
+
+普通用户使用 GitHub Published Release。latest URL 返回最新稳定 Release 的 bootstrap；
+重定向后的脚本已经固定自己的 exact tag、项目构建 archive 名和 SHA-256，不会在安装中途
+再次追随 latest：
 
 ```bash
-# 真人交互安装
-./install.sh
+# 最新稳定版本
+curl -fsSL https://github.com/lijingda/netizen/releases/latest/download/install.sh | sh
 
-# Agent / CI：凭据缺失时生成文件和精确后续步骤，不等待交互
-./install.sh </dev/null
+# 指定版本（示例）
+curl -fsSL https://github.com/lijingda/netizen/releases/download/v0.3.0/install.sh | sh
 ```
 
-不要用 `sudo ./install.sh`“提升权限”：脚本总是为执行它的 effective user 安装；若明确以
-root 执行，得到的就是 root 自己的安装。脚本不接收 App ID、Secret、路径、branch 或
-upgrade 参数，也不执行 `git pull`。当前工作区里的受管源码、文档、Skill 和测试（包括
-未提交的新文件与改动）一起计算 SHA-256 并复制到独立 release，`.git`、venv、cache 和
-pyc 不进入快照。将代码获取与主机安装解耦后，本机调试、云上开发和正式 release 使用
-同一个入口；公开 `curl | sh` bootstrap 要等项目具备稳定的签名 release URL 后另行增加，
-不能让本地开发路径猜测远端包来源。
+仓库根的零参数 `./install.sh` 只是同一 latest 正式入口。它不会安装当前 checkout；开发、
+本机调试或云上直接编辑后部署当前工作区必须显式运行零参数 `./dev-install.sh`。两类脚本都
+不接收 App ID、Secret、路径、branch、`skip-tests` 或 upgrade 参数，也不执行 `git pull`。
+不要用 `sudo`“提升权限”：脚本总是为执行它的 effective user 安装；若明确以 root 执行，
+得到的就是 root 自己的安装。
+
+正式 bootstrap 只下载该 exact tag 的 `netizen-v<version>.tar.gz`，先校验 bootstrap 内嵌的
+SHA-256，再用拒绝绝对路径、`..`、重复成员、链接、特殊文件和超限展开的 extractor 解包，
+并要求 `.netizen-release.json` 的 version、full commit、`sourceDigest`、
+`requirementsDigest` 和 qualification 全部合法。随后内部 `install-release <source-root>`
+安装固定依赖，执行 package/resource 完整性、`compileall`、`pip check` 和固定 SDK probes；
+它不重复运行已在发布矩阵中对 exact archive 完成的全量 unittest。
+
+`dev-install.sh` 调用内部 `install-source`。当前工作区里的受管源码、文档、Skill 和测试
+（包括未提交的新文件与改动）一起计算 SHA-256 并复制到独立 release，`.git`、venv、cache
+和 pyc 不进入快照；候选随后运行完整 unittest 及全部 Host Validation。Source 与 Published
+使用隔离的本地 release identity，不能以相同源码摘要跨模式复用资格。两条路径在候选准备
+后汇入同一个配置、凭据、Service Backend、数据库/Skill snapshot、activation intent、
+`current`/`previous`、ready 和 rollback 事务。
 
 首次有 TTY 且飞书凭据不完整时，安装器先构建、验证候选 release，再提供两种方式：默认
 使用候选 venv 中固定的官方 `lark-oapi` device flow，显示 URL 与终端二维码；或手工输入
@@ -385,7 +434,7 @@ callback；不安装/调用 Lark CLI，不申请 user scope/event，不保存 us
 后 App ID 与 Secret 直接写入现有受保护文件；失败会显示手工回退，Ctrl-C 中止安装。
 
 部署后更换应用不要求卸载程序。删除（或先移走备份）固定路径
-`~/.netizen/credentials/feishu-app-secret`，再从目标源码执行 `./install.sh` 即可进入上述
+`~/.netizen/credentials/feishu-app-secret`，再执行原来的正式或源码安装入口即可进入上述
 绑定重置；正常升级不要删除该文件，只需直接再次安装。选择不同 App ID 后，旧应用的
 Scope/Binding 和 Codex 原生历史仍保留，但不会迁移到新应用的飞书 Scope。
 
@@ -395,7 +444,7 @@ Scope/Binding 和 Codex 原生历史仍保留，但不会迁移到新应用的�
 初始化、无 TTY、二次查询仍缺失或查询不可验证时直接退出。旧 `current`、运行中服务和服务
 定义此时均未改变。device flow 只完成公开应用配置：租户管理员审批、按租户策略发布应用
 版本、完成租户安装、配置可用范围、把机器人加入目标群仍是人工完成项；完成后重新执行
-`./install.sh`，安装器不会轮询审批或自动重复申请。安装器还会用
+同一个安装入口，安装器不会轮询审批或自动重复申请。安装器还会用
 `secrets.token_urlsafe(32)` 自动生成不带
 换行的独立 Admin Web credential；已存在的合法文件只验证、永不覆盖。两个 Secret 都不会
 进入命令参数、环境、YAML、unit 文本或日志；Feishu App Secret 只从 helper stdout 的父进程
@@ -403,10 +452,12 @@ Scope/Binding 和 Codex 原生历史仍保留，但不会迁移到新应用的�
 
 ### Agent 驱动首次安装
 
-Agent 默认使用 `./install.sh </dev/null`。无 TTY 时安装器绝不 prompt，也不启动 device
-flow：若飞书凭据缺失，脚本创建带 `cli_REPLACE_ME` 的配置骨架、空的 `0600` Feishu
-Secret 和已经可用的 `0600` Admin credential 后退出。Agent 按错误中打印的精确路径完成
-App ID/Feishu Secret，再重新运行 `./install.sh`。已有完整凭据但 tenant scope 未全部授权时，
+Agent 不得使用 `curl | sh`，因为脚本内容和安装器输入会争用同一 stdin。先把 latest 或
+exact-tag 正式 `install.sh` 下载到文件，再运行 `sh install.sh </dev/null`；源码安装则运行
+`./dev-install.sh </dev/null`。无 TTY 时安装器绝不 prompt，也不启动 device flow：若飞书
+凭据缺失，脚本创建带 `cli_REPLACE_ME` 的配置骨架、空的 `0600` Feishu Secret 和已经可用的
+`0600` Admin credential 后退出。Agent 按错误中打印的精确路径完成 App ID/Feishu Secret，
+再重新运行同一个文件或开发入口。已有完整凭据但 tenant scope 未全部授权时，
 同样直接列出缺失项并退出，不切换 release；完成飞书侧审批/发布/安装后重跑。已有有效配置、
 Secret 和完整授权的升级天然非交互。
 若有效 App ID 对应的 Secret 文件被显式删除，无 TTY 安装会保留“文件不存在”这一重置
@@ -418,16 +469,16 @@ Secret 和完整授权的升级天然非交互。
 保持同一个长运行 PTY 或后台进程跨越对话轮次，能在进程退出前读取中间输出，并能继续向
 同一进程写入 stdin。满足这些条件时：
 
-1. 在持久 PTY/后台会话中运行 `./install.sh`，等安装方式菜单出现后选择 `1`（直接回车
-   也会选择默认项）。
+1. 在持久 PTY/后台会话中运行下载到文件的正式 installer 或 `./dev-install.sh`，等安装方式
+   菜单出现后选择 `1`（直接回车也会选择默认项）。
 2. 等待 helper 在继承的 stderr 中打印验证 URL、终端二维码和进度；将 URL 原样及可用的
    二维码交给用户，明确请用户在浏览器完成确认后回复。helper 的 credential stdout 由
    安装器私下捕获，Agent 不应尝试读取或展示凭据。
 3. 把对话控制权交还用户，同时保留该进程；用户确认后继续读取同一个会话，直至安装完成。
    父进程最多等待约 660 秒，过期后应重新发起，不保存或复用旧链接。
 
-缺少任何一项会话能力时不要启动交互流程，继续使用 `./install.sh </dev/null` 和凭据文件
-交接。浏览器流程失败后安装器会为真人提供手工输入回退；由 Agent 承载时应中止该会话并
+缺少任何一项会话能力时不要启动交互流程，继续使用下载脚本或 `./dev-install.sh` 的
+`</dev/null` 形式和凭据文件交接。浏览器流程失败后安装器会为真人提供手工输入回退；由 Agent 承载时应中止该会话并
 回到凭据文件路径，不要通过聊天收集 Secret。
 
 systemd 与 launchd 都不会替服务读取完整的 `.bashrc`、`.profile` 等账号工具环境。渲染的
@@ -484,11 +535,11 @@ sticky disabled 状态。
 
 ### 候选验证与切换
 
-安装器先在新 release 创建全新 venv，并以 `requirements.lock` 约束安装依赖。接受候选
-前自动执行与 `make check` 相同的安全本地门禁、`pip check`、
-`scripts/verify_installed_release.py`（逐一比较 Python 与 Admin HTML/CSS/JS 等所有普通
-package files，并做 `importlib.resources` smoke）、配置解析和候选 venv 中固定 Codex CLI 的
-`login status`。这些安全检查使用安装调用者经清理的环境；安装器不会在 service cgroup
+安装器先在新 release 创建全新 venv，并以 `requirements.lock` 约束安装依赖。
+Source Install 额外执行完整 unittest；两路都在目标机运行 `compileall`、`pip check`、固定
+SDK synthetic probes 和 `scripts/verify_installed_release.py`（逐一比较 Python 与 Admin
+HTML/CSS/JS 等所有普通 package files，并做 `importlib.resources` smoke）、配置解析和候选
+venv 中固定 Codex CLI 的 `login status`。这些安全检查使用安装调用者经清理的环境；安装器不会在 service cgroup
 之外执行任意账号 profile，因为 profile 可以产生不可逆副作用或自行 daemonize。真实
 profile 只在候选 service 启动时加载：首次安装和原本 active 的升级会等待 ready，失败时
 回滚；原本停止的升级保持停止，之后 `service.sh start/restart` 会等待最多 45 秒确认 ready
@@ -521,7 +572,7 @@ sidecar；任一步失败都会停止候选并恢复旧 release 指针、service
 
 任何可能停止旧服务的 mutation 之前，安装器都会原子写入 activation intent，记录本次
 操作完成后应保持的 active/enabled 状态。正常成功或完整回滚会清除它；若进程在切换中被
-`SIGKILL` 或异常退出，下次 `./install.sh` 会优先恢复该意图，再执行候选切换。因此
+`SIGKILL` 或异常退出，下次执行原安装入口会优先恢复该意图，再执行候选切换。因此
 发布后的半成品状态不会被误认成用户主动停止/禁用服务；`uninstall.sh` 会清除遗留意图。
 
 从早期 `/etc/systemd/system/netizen.service` 升级时，安装器只自动迁移带 Netizen 标识的
@@ -531,10 +582,10 @@ netizen.service`；无 TTY 时打印同一条预备命令。候选失败会尽�
 
 ### 升级、启停和卸载
 
-更新任意开发目录后再次运行即可升级；内容相同的 release 会验证后复用：
+正式升级重新运行 latest 或选定 exact-tag installer；更新任意开发目录后运行源码入口：
 
 ```bash
-./install.sh
+./dev-install.sh
 ```
 
 日常服务控制只走当前用户的平台 service manager；`service.sh` 内外都不使用 sudo：
@@ -569,7 +620,7 @@ SQLite 的 `state`、Project 目录、其他 Codex Skills 及原生 Thread/Turn 
 无 TTY 运行生成：
 
 ```bash
-./install.sh  # 无 TTY 且缺配置时，生成骨架后明确退出
+./dev-install.sh </dev/null  # 缺配置时生成骨架后明确退出
 ```
 
 从带 Netizen allowlist 的旧版本升级时，必须先从 live `config.yaml` 删除整个
@@ -661,7 +712,7 @@ journalctl --user -u netizen.service -n 100 --no-pager
 loginctl show-user "$USER" --property=Linger
 ```
 
-`install.sh` 负责 unit 写入、`systemctl --user daemon-reload/enable`、首次启动或按旧状态
+正式与源码安装器共同负责 unit 写入、`systemctl --user daemon-reload/enable`、首次启动或按旧状态
 切换；`uninstall.sh` 负责 stop/disable 和删除。`service.sh` 只接受
 `start|stop|restart|status`，不会安装、升级、enable、改配置或请求 sudo。
 

@@ -1,0 +1,330 @@
+# Repository prerequisite: GitHub Immutable Releases must be enabled.  This
+# workflow creates a new exact-tag release and never replaces an existing asset.
+# Account-scoped Codex/Feishu live probes cannot run on GitHub-hosted runners;
+# dispatch therefore requires a durable external evidence URL, the exact
+# archive SHA-256, an explicit human confirmation, and approval through the
+# protected `published-release` environment.
+name: Publish qualified release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact existing release tag, for example v0.3.0
+        required: true
+        type: string
+      live_probe_evidence:
+        description: HTTPS URL for the successful account-scoped release live-probe report
+        required: true
+        type: string
+      live_probe_archive_sha256:
+        description: Archive SHA-256 recorded by that live-probe report
+        required: true
+        type: string
+      confirm_publish:
+        description: I reviewed the evidence and authorize publishing this exact release
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: netizen-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build-artifact:
+    runs-on: ubuntu-latest
+    outputs:
+      archive-name: ${{ steps.identity.outputs.archive-name }}
+      archive-sha256: ${{ steps.build.outputs.archive-sha256 }}
+      commit: ${{ steps.identity.outputs.commit }}
+    steps:
+      - name: Check out exact tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Set up artifact builder
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve exact release identity
+        id: identity
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          test -n "$commit"
+          test "$(git rev-parse HEAD)" = "$commit"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          version="${RELEASE_TAG#v}"
+          test "$RELEASE_TAG" = "v$version"
+          echo "archive-name=netizen-$RELEASE_TAG.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Build one deterministic candidate and bootstrap
+        id: build
+        env:
+          RELEASE_COMMIT: ${{ steps.identity.outputs.commit }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python scripts/build_release_artifact.py \
+            --output-dir dist \
+            --tag "$RELEASE_TAG" \
+            --commit "$RELEASE_COMMIT" \
+            --repository "$RELEASE_REPOSITORY"
+          ARCHIVE_PATH="dist/netizen-$RELEASE_TAG.tar.gz" python - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+
+          digest = hashlib.sha256(Path(os.environ["ARCHIVE_PATH"]).read_bytes()).hexdigest()
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"archive-sha256={digest}\n")
+          PY
+
+      - name: Preserve exact candidate bytes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate
+          path: |
+            dist/${{ steps.identity.outputs.archive-name }}
+            dist/install.sh
+          if-no-files-found: error
+          retention-days: 7
+
+  qualify-artifact:
+    name: Qualify ${{ matrix.os }} / Python ${{ matrix.python }}
+    needs: build-artifact
+    strategy:
+      fail-fast: false
+      matrix:
+        # GitHub documents macos-15 as arm64 and macos-15-intel as Intel.
+        os: [ubuntu-latest, macos-15, macos-15-intel]
+        python: ["3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Set up supported Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Download the one built candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: release-candidate
+          path: dist
+
+      - name: Extract and verify candidate identity
+        shell: bash
+        env:
+          ARCHIVE_NAME: ${{ needs.build-artifact.outputs.archive-name }}
+          ARCHIVE_SHA256: ${{ needs.build-artifact.outputs.archive-sha256 }}
+          RELEASE_COMMIT: ${{ needs.build-artifact.outputs.commit }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+
+          archive = Path("dist") / os.environ["ARCHIVE_NAME"]
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == os.environ["ARCHIVE_SHA256"]
+          PY
+          mkdir candidate
+          tar -xzf "dist/$ARCHIVE_NAME" -C candidate
+          source_root="candidate/netizen-$RELEASE_TAG"
+          test -d "$source_root"
+          SOURCE_ROOT="$source_root" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["SOURCE_ROOT"])
+          manifest = json.loads((root / ".netizen-release.json").read_text())
+          assert manifest["schema"] == 1
+          assert manifest["commit"] == os.environ["RELEASE_COMMIT"]
+          assert manifest["version"] == os.environ["RELEASE_TAG"].removeprefix("v")
+          assert manifest["qualification"] == "github-release"
+          PY
+
+      - name: Run the complete local gate on extracted candidate bytes
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          cd "candidate/netizen-$RELEASE_TAG"
+          python -m venv .venv
+          .venv/bin/python -m pip install \
+            --disable-pip-version-check \
+            --no-input \
+            --constraint requirements.lock \
+            .
+          make check
+
+  live-probe-evidence:
+    name: Admit external live-probe evidence
+    needs: [build-artifact, qualify-artifact]
+    runs-on: ubuntu-latest
+    environment: published-release
+    steps:
+      # GitHub-hosted jobs deliberately do not run account-scoped live probes.
+      # The dispatching maintainer and environment reviewer must inspect the
+      # linked report.  The exact SHA binds that evidence to this candidate.
+      - name: Require a durable evidence URL
+        env:
+          CONFIRM_PUBLISH: ${{ inputs.confirm_publish }}
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.build-artifact.outputs.archive-sha256 }}
+          LIVE_PROBE_EVIDENCE: ${{ inputs.live_probe_evidence }}
+          REPORTED_ARCHIVE_SHA256: ${{ inputs.live_probe_archive_sha256 }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          from urllib.parse import urlsplit
+
+          if os.environ["CONFIRM_PUBLISH"] != "true":
+              raise SystemExit("confirm_publish must be explicitly enabled")
+          evidence = os.environ["LIVE_PROBE_EVIDENCE"]
+          parsed = urlsplit(evidence)
+          if parsed.scheme != "https" or not parsed.netloc or "\n" in evidence:
+              raise SystemExit("live_probe_evidence must be one HTTPS report URL")
+          reported = os.environ["REPORTED_ARCHIVE_SHA256"]
+          if re.fullmatch(r"[0-9a-f]{64}", reported) is None:
+              raise SystemExit("live_probe_archive_sha256 must be lowercase SHA-256")
+          if reported != os.environ["EXPECTED_ARCHIVE_SHA256"]:
+              raise SystemExit("live-probe evidence belongs to a different release archive")
+          print("External account-scoped live-probe evidence was explicitly supplied.")
+          print("Hosted runners did not execute or independently attest those probes.")
+          PY
+
+  publish-release:
+    needs: [build-artifact, qualify-artifact, live-probe-evidence]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the qualified candidate without rebuilding it
+        uses: actions/download-artifact@v4
+        with:
+          name: release-candidate
+          path: dist
+
+      - name: Create draft, upload exact assets, then publish
+        uses: actions/github-script@v7
+        env:
+          ARCHIVE_NAME: ${{ needs.build-artifact.outputs.archive-name }}
+          ARCHIVE_SHA256: ${{ needs.build-artifact.outputs.archive-sha256 }}
+          LIVE_PROBE_EVIDENCE: ${{ inputs.live_probe_evidence }}
+          RELEASE_COMMIT: ${{ needs.build-artifact.outputs.commit }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const { owner, repo } = context.repo;
+            const tag = process.env.RELEASE_TAG;
+            const evidence = process.env.LIVE_PROBE_EVIDENCE;
+            const expectedCommit = process.env.RELEASE_COMMIT;
+
+            async function resolveTagCommit() {
+              let object = (await github.rest.git.getRef({
+                owner,
+                repo,
+                ref: `tags/${tag}`,
+              })).data.object;
+              const visited = new Set();
+              while (object.type === 'tag') {
+                if (visited.has(object.sha)) {
+                  throw new Error(`Tag ${tag} contains a cycle.`);
+                }
+                visited.add(object.sha);
+                object = (await github.rest.git.getTag({
+                  owner,
+                  repo,
+                  tag_sha: object.sha,
+                })).data.object;
+              }
+              if (object.type !== 'commit') {
+                throw new Error(`Tag ${tag} does not resolve to a commit.`);
+              }
+              return object.sha;
+            }
+
+            async function requireExactTag() {
+              const actualCommit = await resolveTagCommit();
+              if (actualCommit !== expectedCommit) {
+                throw new Error(
+                  `Tag ${tag} moved: expected ${expectedCommit}, found ${actualCommit}.`
+                );
+              }
+            }
+
+            await requireExactTag();
+
+            try {
+              await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              core.setFailed(`Release ${tag} already exists; immutable assets are never replaced.`);
+              return;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+            const created = await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: tag,
+              target_commitish: process.env.RELEASE_COMMIT,
+              name: `Netizen ${tag}`,
+              body: [
+                'This release was built once and the exact archive bytes passed the full',
+                'Linux/macOS × CPython 3.11/3.12 local qualification matrix.',
+                '',
+                `External account-scoped live-probe evidence: ${evidence}`,
+                `Qualified archive SHA-256: ${process.env.ARCHIVE_SHA256}`,
+                '',
+                'The GitHub-hosted workflow did not execute those account-scoped probes.',
+              ].join('\n'),
+              draft: true,
+              prerelease: false,
+            });
+
+            const assets = [
+              [process.env.ARCHIVE_NAME, 'application/gzip'],
+              ['install.sh', 'application/x-sh'],
+            ];
+            for (const [name, contentType] of assets) {
+              const data = fs.readFileSync(path.join('dist', name));
+              await github.rest.repos.uploadReleaseAsset({
+                owner,
+                repo,
+                release_id: created.data.id,
+                name,
+                data,
+                headers: {
+                  'content-type': contentType,
+                  'content-length': data.length,
+                },
+              });
+            }
+
+            // Recheck after asset upload despite the active tag ruleset.  The
+            // workflow fails closed before release immutability takes effect.
+            await requireExactTag();
+            const published = await github.rest.repos.updateRelease({
+              owner,
+              repo,
+              release_id: created.data.id,
+              draft: false,
+            });
+            core.notice(`Published immutable release candidate: ${published.data.html_url}`);
