@@ -21,11 +21,12 @@ SSH config 中的 alias，也可以是 `<user>@<hostname>`。LaunchAgent 的首�
 
 每个 Python release 与自己的 venv 一起安装到当前用户的标准 data 目录。ADR 0014 的
 Goal/Skills、ADR 0021 的 Side 与 ADR 0037 的 Thread Delete Adapter 不做运行时版本
-allowlist，但候选构建必须对实际 resolved SDK/App Server 通过本文 capability harness。
-Delete 还必须通过 disposable lifecycle live gate 与 Runtime 四视图对账测试。ADR 0020 的 active-Turn plan
+allowlist；修改 pinned SDK/App Server 或这些 Adapter 时，开发迭代必须对实际 resolved
+组合运行受影响的 capability harness。Delete 能力变更还必须覆盖 disposable lifecycle
+live probe 与 Runtime 四视图对账测试。ADR 0020 的 active-Turn plan
 observer 另行精确锁定 SDK 版本、源码指纹和非消费 queue contract；门禁失败只关闭
-checklist 展示，不关闭普通 Turn。这个降级以候选已通过 ADR 0009 独立的 service-wide
-SDK/cleanup 门禁为前提；不能用 plan 的展示降级绕过该启动门禁。
+checklist 展示，不关闭普通 Turn。这个降级以 ADR 0009 独立的 service-wide SDK/cleanup
+启动门禁通过为前提；不能用 plan 的展示降级绕过该门禁。
 
 ## 目录
 
@@ -132,9 +133,18 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 暂不可见的消息能在一次有界重读中收敛或被明确标成不完整。若平台表现为静默遗漏，必须
 保持 catch-up unavailable，不能用 generated SDK shape 或本地 Fake 代替这个 rollout gate。
 
-候选 release 必须通过：
+### 代码门禁与按需实时兼容性验证
 
-macOS 系统不自带 GNU `timeout`；只在执行发布者 live probes 时先用
+所有面向 `main` 的代码先通过 `make check`；PR 和 main push 的 GitHub CI 都在
+Python 3.11/3.12 执行这一个统一本地门禁。正式 Release 复用 exact main commit 的成功 CI
+结论，不重新执行本节测试。
+
+真实账号 live probes 是开发阶段按变更触发的兼容性工具，不是普通 merge 或正式 Release
+门禁。升级 pinned SDK/App Server 时运行完整集合；修改 SDK Gap Adapter、相关原生生命周期、
+模型提供方、飞书租户能力或服务环境时，只运行受影响的 phase。没有触及这些边界的迭代无需
+运行 live probe。
+
+macOS 系统不自带 GNU `timeout`；只在执行 live probes 时先用
 `brew install coreutils` 提供 `gtimeout`。最终用户安装和日常服务运行不依赖 Homebrew
 coreutils。下面的块会按平台选择命令，并在缺失时明确失败：
 
@@ -142,14 +152,13 @@ coreutils。下面的块会按平台选择命令，并在缺失时明确失败�
 case "$(uname -s)" in
   Darwin) deadline=gtimeout ;;
   Linux) deadline=timeout ;;
-  *) echo "unsupported release-gate platform" >&2; exit 1 ;;
+  *) echo "unsupported live-probe platform" >&2; exit 1 ;;
 esac
 command -v "$deadline" >/dev/null || {
   echo "missing $deadline (macOS: brew install coreutils)" >&2
   exit 1
 }
 
-make check
 for phase in models turn-settings smoke usage steer plan polling compact concurrency interrupt skills lifecycle side; do
   "$deadline" --signal=INT --kill-after=10s 420s \
     .venv/bin/python scripts/probe_python_sdk.py \
@@ -169,7 +178,8 @@ done
   --cwd "$HOME/projects/test" --phase sandbox
 ```
 
-这些 live commands 必须在与服务相同的账号 interactive login 环境中运行。人工部署先
+这些 live commands 只在需要更新兼容性结论时执行，并且必须位于与服务相同的账号
+interactive login 环境。人工验证先
 正常登录 `ssh -t <deployment-host>` 再执行；自动化 remote command 必须显式采用该账号
 shell 的 login 模式（Bash 示例为 `/bin/bash -lic '<commands>'`）。普通
 `ssh <deployment-host> '<commands>'` 的
@@ -177,7 +187,7 @@ non-interactive shell 不等价：它可能缺少 profile 导出的代理/CA/PAT
 请求成功而真实 Turn 持续等待。诊断环境差异时只比较变量名或摘要，不得把值写入日志。
 
 `make check` 是不创建真实 Codex Thread 的统一本地门禁。另在带 `.git` 的源码 checkout
-运行 `git diff --check`；内容寻址的安装快照没有 `.git`，不要在那里执行该命令。后续
+运行 `git diff --check`；内容寻址的安装快照没有 `.git`，不要在那里执行该命令。按需
 live probe 会创建原生 Thread，只在已登录的目标部署账号
 执行。每个 phase 会把 started/passed/failed 进度写到 stderr，并只把最终 JSON 写到
 stdout；异常路径的二次 interrupt、terminal cleanup 和 task drain 都有界，外层
@@ -190,7 +200,7 @@ stdout；异常路径的二次 interrupt、terminal cleanup 和 task drain 都�
 `OutboundImage`/`OutboundFile`/`SendOpts` 合同。任一固定 SDK/Channel shape 变化都必须先
 更新兼容性结论，不能把本轮文件降级成工作区扫描、最终文本解析、私有 RPC 或静默截断。
 
-`models` phase 是只读门禁：它必须通过公共 `codex.models()` 输出一个且仅一个默认
+`models` phase 是只读探针：它必须通过公共 `codex.models()` 输出一个且仅一个默认
 Model，并列出每个 Model 的默认/支持 Effort、默认/支持 Speed。输出只用于核对本次
 目标环境，不能复制进生产代码或文档作为静态选项。它不会创建 Thread 或 Turn。
 若返回非空 `next_cursor`，固定高层 facade 无法翻页，phase 必须失败，不能只展示
@@ -203,14 +213,14 @@ Turn 正常完成、exact ID 可 resume 外，还要求 `thread_list.preview` �
 `turn-settings` phase 从同一 live catalog 选择默认 Model/Effort，显式提交 Standard
 Service Tier 的 configured Turn，再按 exact Thread ID resume 并重复提交同一组三项
 override；两轮都必须完成。它是 SDK/App Server 升级时对持久 Binding 配置重复应用的
-端到端 shape/连续性门禁，不声称能读取或证明 Thread 内部当前值。SQLite 持久化、每轮
+端到端 shape/连续性验证，不声称能读取或证明 Thread 内部当前值。SQLite 持久化、每轮
 live revalidation、admission revision 和 steer 不应用由 `make check` 的 synthetic
 Runtime/SQLite 测试负责。
 
 `usage` phase 先通过公开 `thread/read(include_turns=True)` 观察 exact Turn 为
 `inProgress`，再用公开 read 确认持久化终态，最后排空该 handle 的公开 stream。它必须
 收到 identity 匹配的 `thread/tokenUsage/updated`，且 `last.total_tokens` 非负、
-`model_context_window` 为正数。这个门禁验证 `/status` 的生产时序；外层进程 `timeout`
+`model_context_window` 为正数。这个 probe 验证 `/status` 的生产时序；外层进程 `timeout`
 负责 SDK/App Server 违约时的最终隔离，不在进程内取消阻塞 stream。
 
 所有依赖普通 Turn final response 的 live phase 都必须在公开 full-history 中同时看到
@@ -222,7 +232,8 @@ terminal status 与 final agent message；若 App Server 短暂先暴露 complet
 先快照 exact active Turn 的 plan，再证明队列长度、顺序和对象身份未变，最后由公开
 stream 收到同一 plan 并排空 completion。`plan` live phase 会要求模型先生成 checklist，
 在有界延迟 Turn 中接受一次 steer，再观察包含 steer 新步骤的完整 plan replacement、
-最终 steered 回复和终态后公开 stream 中仍存在这些通知。任一步失败都不得通过升级门禁。
+最终 steered 回复和终态后公开 stream 中仍存在这些通知。相关 SDK/Plan 迭代必须在合入前
+解释并处理任一步失败。
 
 每次 probe 都输出实际 `openai_codex_version` 并先运行 facade inventory。若 Goal、
 Skills、Side boundary inject、Thread unsubscribe、Apps 或 Thread Delete 出现候选高层 API，
@@ -245,13 +256,13 @@ steer 前失败；结果不能复制成生产静态目录。
 调用 `thread/delete`，并确认 rollout scan/state-db 两种来源的 active/archived 四视图
 全部 absent。探针不触碰任何既有 Thread；delete 响应失败时也不得自动重发。
 
-`release` phase 是普通持久 Thread 空闲订阅释放的原生硬门禁。它先在 App Server A 创建
+`release` phase 是普通持久 Thread 空闲订阅释放的原生兼容性探针。它先在 App Server A 创建
 并完成一个 Thread，确认 `thread/backgroundTerminals/list(limit=1)` 为空后取消当前连接
 订阅，再在同一连接按 exact ID resume 并完成后续 Turn。关闭 A 后，App Server B 必须按
 同一 ID 接管、继续 Turn 并再次取消订阅；这证明 Binding 可以保留 ID/历史而无需常驻订阅。
 该 phase 不等待也不冒充 App Server 最后订阅者离开后的 30 分钟卸载宽限期。当前协议没有
 稳定、无副作用的 live registered-terminal fixture，因此 list 非空、检查错误与 unsubscribe
-响应未知的阻断/重试由真实 SDK fake-server harness 和 Runtime 测试作为发布硬门禁。
+响应未知的阻断/重试由真实 SDK fake-server harness 和 Runtime 测试作为本地代码门禁。
 
 `side` phase 是 Side 上线的原生硬门禁：先创建并物化 Parent，再启动一个可观察的普通
 Parent Turn；在该 Turn 仍 running 时用公开 `thread_fork(..., ephemeral=True)` 验证 exact
@@ -300,13 +311,15 @@ interrupt，并为 exact Thread 请求清理 App Server 已登记的后台 termi
 
 实例专属的主机、账号、PID、native ID、release/备份路径、数据库行数和私网访问结果不属于
 公共部署契约；维护者应把这类记录保存在被忽略的 `LOCAL_ENVIRONMENT.md` 或自己的运维
-系统中。公共候选是否可发布，只由当前代码对应的自动化门禁、live probe 和下列稳定结论
-决定，不能复用某次实例验收结果：
+系统中。下列记录用于判断何时需要重新运行相关 live probe，不属于每个正式 Release 的资格
+输入，也不能拿某次实例验收替代目标主机自己的 Host Validation：
 
-- 固定 `openai-codex==0.147.0` 与 bundled CLI `0.147.0` 已通过公开 models、
-  Turn settings、smoke、usage、steer、plan、polling、compact、concurrency、
-  interrupt、Skills、lifecycle、Side、release、config、Goal 和 sandbox 能力门禁；
-  每个新候选仍必须在自己的目标环境重跑完整集合。
+- 固定 `openai-codex==0.147.0` 与 bundled CLI `0.147.0` 已保留 models、Turn settings、
+  smoke、usage、steer、plan、polling、concurrency、interrupt、Skills、lifecycle、Side、
+  release、config、Goal 和 sandbox 的开发验证记录；普通新候选不重跑完整集合。
+- `0.147.0` 的同连接 `COMPACT-AFTER` 在 2026-08-25 重新验证时失败；隔离使用
+  App Server `0.149.0` 的同一探针已通过。当前不增加临时 workaround，待匹配的 Python
+  SDK/App Server `0.149` 组合发布后，在依赖升级迭代中重跑 compact 及相关 phase。
 - 精确 SDK 源码指纹为
   `35ec9419cb9f42577080f9bf410e81cb5a97ae64e5297c4302878c73749d39eb`。
   该值属于 ADR 0009/0020 的版本兼容门禁，不是某台主机的环境配置。
@@ -318,10 +331,11 @@ interrupt，并为 exact Thread 请求清理 App Server 已登记的后台 termi
   `restart-required` 仍可接受，但必须按新版本实际结果更新兼容性判断。
 - sandbox probe 只报告 `workspace-write-or-full` 或 `read-only-or-denied` 的端到端
   体感分类，不识别配置来源，也不能替代目标账号的真实权限验收。
-- Admin Web 候选必须从另一台受信内网主机直接验证 readiness、login、CSRF/Origin/Host、
+- Admin Web 首次上线或相关边界变更时，必须从另一台受信内网主机直接验证 readiness、
+  login、CSRF/Origin/Host、
   inventory、mutation、restart session invalidation、平台日志脱敏和数据库完整性；
   使用 `http://<server-ip>:<port>`，不得把真实实例地址写回本文。
-- non-interactive SSH 可能缺少账号 profile 中的代理、CA 和 PATH。所有 live gate 必须在与
+- non-interactive SSH 可能缺少账号 profile 中的代理、CA 和 PATH。所有 live probe 必须在与
   服务相同的账号 login 环境运行，只比较必要变量名或摘要，不记录环境值。
 - migration、rollback、installed-source equality、database integrity、service ready、
   Linux `NRestarts` 或 macOS failure restart，以及遗留进程都必须针对本次候选重新验证，
@@ -358,29 +372,26 @@ status checks；仓库所有者也不在绕过名单中。
 仓库使用 `.github/workflows/release.yml` 的手工 dispatch 发布正式版本。GitHub 仓库必须启用
 Immutable Releases；active 的 `Protect version tags` ruleset 禁止任何人更新或删除已创建的
 `v*` tag，且无绕过者；`published-release` environment 要求仓库所有者审批。tag 采用与
-`pyproject.toml` 完全一致的 `vX.Y.Z`。手工 dispatch、`confirm_publish`、持久证据 URL、
-exact archive SHA-256 和 environment 审批共同构成人工发布边界。workflow 校验 clean
-exact-tag checkout 和 full commit，并在
+`pyproject.toml` 完全一致的 `vX.Y.Z`。workflow 校验 clean exact-tag checkout 和 full
+commit，并通过 GitHub Actions API 要求该 exact SHA 已有一次成功完成的 `main` push
+`Main quality gate`；只有 PR 上别的 SHA 成功，或 main run 尚未完成，都不能发布。随后在
 创建 draft 前和正式发布前再次解析 lightweight/annotated tag、核对它仍指向同一 commit；
 不一致时在 Release 变为 immutable 前失败关闭。构建阶段只运行一次
 `scripts/build_release_artifact.py`，生成项目自建的
-deterministic archive 与 exact `install.sh` bootstrap，再把同一份 artifact fan out 到
-Ubuntu、macOS ARM64、macOS Intel 和 Python 3.11/3.12 矩阵。每个 job 解压同一 archive 后
-安装固定版本依赖并运行 `make check`，不得重新打包候选。
+deterministic archive 与 exact `install.sh` bootstrap；单个完整性 job 校验 archive SHA-256、
+安全解压、manifest 的 version/full commit/qualification，再把同一份字节交给发布 job。
 
-账号级 Codex、飞书和真实 service lifecycle probes 不能由无登录态的 GitHub-hosted runner
-冒充。维护者必须按本文前置门禁在受支持真机、服务账号 login 环境对同一 archive SHA-256
-完成 live probe。dispatch 维护者必须检查持久证据，提交证据 URL 和对应 archive SHA-256，
-并显式选中 `confirm_publish`；`published-release` reviewer 在矩阵完成后再次批准该 exact
-candidate。只有本地矩阵、绑定证据和审批都通过，最终 job 才通过 GitHub Release API 创建
-draft、上传那一份 archive 与 bootstrap、再发布；它不依赖 GitHub CLI，也不允许覆盖已有
-tag 或 asset。发布失败时 draft 保留供维护者检查，不得用重新构建的同名文件补传后声称原
-候选已验证。
+Release workflow 不安装依赖、不运行 `make check`，也不接收或执行账号级 Codex、飞书与
+真实 service lifecycle live probes。手工 dispatch 与 `published-release` environment 审批
+构成人工发布边界；最终 job 通过 GitHub Release API 创建 draft、上传已经验证摘要的 archive
+与 bootstrap、再次核对 tag 后发布。它不依赖 GitHub CLI，也不允许覆盖已有 tag 或 asset。
+发布失败时 draft 保留供维护者检查，不得用重新构建的同名文件替换原候选。
 
 archive 内的 `.netizen-release.json` 不参与自身记录的 `sourceDigest`，但会作为独立成员被
 installer 再校验。当前 `requirements.lock` 固定版本但尚未锁定各平台 wheel hash，因此
-发布资格证明的是 exact Netizen source archive 与这些依赖版本组合，不声称目标机从 package
-index 下载的 wheel 与 CI 字节完全相同；目标机的 `pip check` 和 SDK probes 仍是强制 Host
+Release Integrity 证明的是 exact Netizen source archive、requirements lock 摘要和 main
+代码资格的绑定，不声称目标机从 package index 下载的 wheel 与 CI 字节完全相同；目标机的
+`pip check` 和 SDK synthetic probes 仍是强制 Host
 Validation。若要升级为离线或 wheel 字节级认证，应另行引入 hash-locked wheelhouse。
 
 ## 安装
@@ -413,7 +424,7 @@ SHA-256，再用拒绝绝对路径、`..`、重复成员、链接、特殊文件
 并要求 `.netizen-release.json` 的 version、full commit、`sourceDigest`、
 `requirementsDigest` 和 qualification 全部合法。随后内部 `install-release <source-root>`
 安装固定依赖，执行 package/resource 完整性、`compileall`、`pip check` 和固定 SDK probes；
-它不重复运行已在发布矩阵中对 exact archive 完成的全量 unittest。
+它不重复运行该 exact source commit 已在 Main Qualification 中通过的全量 unittest。
 
 `dev-install.sh` 调用内部 `install-source`。当前工作区里的受管源码、文档、Skill 和测试
 （包括未提交的新文件与改动）一起计算 SHA-256 并复制到独立 release，`.git`、venv、cache
@@ -545,8 +556,8 @@ profile 只在候选 service 启动时加载：首次安装和原本 active 的�
 回滚；原本停止的升级保持停止，之后 `service.sh start/restart` 会等待最多 45 秒确认 ready
 并直接暴露 shell/profile 启动错误；对已经 loaded 且已有有效 ready marker 的服务，
 `start` 幂等返回，loaded 但未 ready 则只做有界等待。任意具体 MCP/工具是否可用仍取决于其自身配置，不能
-由安装器枚举。真实 Thread capability phases 仍由 release 发布者按“前置门禁”执行，
-不在每个最终用户安装中重复创建探针 Thread。
+由安装器枚举。真实 Thread capability phases 只在相关 SDK/Adapter/环境开发变更时按前文
+运行，不在正式 Release workflow 或每个最终用户安装中重复创建探针 Thread。
 
 激活阶段停止现役 user service（如果原本在运行），随后对 configured Admin Web address
 执行 best-effort bind preflight。所有成功 socket 会持有到本次地址枚举结束，IPv6 明确
@@ -776,8 +787,8 @@ Close。双击同一 action 应返回 stale/consumed；与飞书并发操作同�
 precondition 的一方提交。重启服务后旧 Admin session 必须失效，持久 Binding/设置/Side
 墓碑不变；journal 不得出现 credential、cookie/action token、cwd、name/preview 或 body。
 最后占用 configured port 再执行一次候选激活，确认它在数据库快照/current 切换前失败且旧
-release 恢复；释放端口后再部署。以上真实浏览器、跨主机与端口回滚是候选 release 门禁，
-本地 loopback 单测不能替代。
+release 恢复；释放端口后再部署。以上真实浏览器、跨主机与端口回滚属于 Admin Web 首次
+上线或相关边界变更的 live 验收，本地 loopback 单测不能替代。
 
 1. P2P `/help`、exact `/new`、`/sessions`、`/status`（native=pending）；`/sessions`
    返回分页卡片，将 active Binding 置顶、将 lazy Binding 显示为“新会话”，有原生
@@ -831,10 +842,11 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    必须拒绝，running steer 不得解析或应用 Binding 配置。
 5. 在已有历史的 idle Binding 发送 `/compact`：先收到开始提示，`/status` 显示
    `compacting`，并使压缩前的上下文用量快照失效；普通 Prompt、`/config`、再次
-   `/compact` 必须拒绝，`/stop` 必须说明只控制普通 Turn。随后收到压缩完成提示，同一
-   Thread 可继续；下一次可观测普通 Turn 完成后用量重新出现。lazy/running Binding 上
-   `/compact` 必须拒绝。压缩期间不要从 CLI/其他 App Server 并发写同一 Thread；serial
-   exact-ID resume 仍按后续步骤验收。
+   `/compact` 必须拒绝，`/stop` 必须说明只控制普通 Turn。lazy/running Binding 上
+   `/compact` 必须拒绝。固定 `0.147.0` 当前存在 compact 完成后同连接后续 Turn 失败的已知
+   上游兼容性问题；该项不作为正式 Release 门禁，也不增加临时 workaround，待匹配的
+   Python SDK/App Server `0.149` 发布后再验收同一 Thread 继续和用量恢复。压缩期间不要从
+   CLI/其他 App Server 并发写同一 Thread。
 6. `/skills` 必须作为未知命令拒绝且零 Codex mutation；用自然语言询问当前可用 Skill
    必须按普通 Prompt 启动或 steer。在消息开头连续输入两个 `$skill-name`，只启动一个
    原生 Turn；running 时同样只 steer exact Turn 一次。未知、

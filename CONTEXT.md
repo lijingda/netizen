@@ -1,15 +1,28 @@
 # Netizen 领域词汇
 
-**Published Release / 已发布 Release**：由发布者对 exact 最终制品完成发布门禁后，
-通过官方 Release 渠道提供的不可变安装候选。它的全量验证归属于该制品，不因被安装到
-另一台已支持主机而重复。
+**Main Qualification / main 代码资格**：exact `main` commit 的 required CI 已成功完成
+统一本地代码门禁。它是正式发布复用的代码可靠性结论，不包含账号、租户、模型提供方或
+目标主机的实时兼容性结论。
+
+**Release Integrity / 发布完整性**：证明正式制品来自具有 Main Qualification 的 exact
+tag/commit，且构建后的 manifest、摘要和不可变 Release 资产保持一致。它不重新执行代码
+测试或 Live Compatibility Probe。
+
+**Published Release / 已发布 Release**：由具有 Main Qualification 的 exact commit 构建、
+通过 Release Integrity 验证并经官方 Release 渠道提供的不可变安装候选。安装到另一台
+受支持主机时只重复该主机自己的 Host Validation。
 
 **Source Install / 源码安装**：把当前工作区（包括本地未提交修改）作为未获发布者认证的
 候选进行安装。它与 Published Release 安装共享激活事务，但必须自行通过完整本地门禁。
 
 **Host Validation / 主机验证**：每次安装都对目标账号、解释器、依赖、配置、原生 SDK、
 飞书权限，以及按原服务意图需要启动时的 ready 条件执行的验证。它不替代 Published
-Release 或 Source Install 的全量发布门禁。
+Release 的 Main Qualification / Release Integrity，也不替代 Source Install 的完整本地
+门禁。
+
+**Live Compatibility Probe / 实时兼容性探针**：需要真实 Codex/飞书账号、模型提供方或
+目标服务环境的开发验证。它在相关 SDK、Adapter、原生生命周期或环境变更时按需运行，
+用于形成或更新兼容性结论，不是每次 merge 或 Published Release 的通用门禁。
 
 **Binding Scope / 普通 Scope**：独立承载 active Binding 指针的飞书位置：P2P、群聊
 主线或一个普通真实话题。被 Side Topic Route 占用的话题不再解释为 Binding Scope。

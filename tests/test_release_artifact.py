@@ -597,38 +597,40 @@ class ReleaseArtifactTests(unittest.TestCase):
                     repository="someone/netizen",
                 )
 
-    def test_release_workflow_qualifies_exact_archive_before_publish(self) -> None:
+    def test_release_workflow_reuses_exact_main_gate_before_publish(self) -> None:
         workflow_path = ROOT / ".github" / "workflows" / "release.yml"
         self.assertTrue(workflow_path.is_file())
         workflow = workflow_path.read_text(encoding="utf-8")
-        self.assertIn(
-            "os: [ubuntu-latest, macos-15, macos-15-intel]", workflow
-        )
-        self.assertIn("python: [\"3.11\", \"3.12\"]", workflow)
         self.assertIn("ref: refs/tags/${{ inputs.tag }}", workflow)
         self.assertIn('git rev-parse "refs/tags/${RELEASE_TAG}^{commit}"', workflow)
-        self.assertIn("make check", workflow)
-        self.assertIn(
-            "live-probe-evidence:\n"
-            "    name: Admit external live-probe evidence\n"
-            "    needs: [build-artifact, qualify-artifact]",
-            workflow,
-        )
-        self.assertIn("needs: [build-artifact, qualify-artifact, live-probe-evidence]", workflow)
+        self.assertIn("actions: read", workflow)
+        self.assertIn("github.rest.actions.listWorkflowRuns", workflow)
+        self.assertIn("workflow_id: 'ci.yml'", workflow)
+        self.assertIn("head_sha: expectedCommit", workflow)
+        self.assertIn("run.head_branch === 'main'", workflow)
+        self.assertIn("run.event === 'push'", workflow)
+        self.assertIn("run.conclusion === 'success'", workflow)
+        self.assertIn("Exact release commit ${expectedCommit}", workflow)
+        self.assertNotIn("make check", workflow)
+        self.assertNotIn("pip install", workflow)
+        self.assertNotIn("probe_python_sdk.py", workflow)
+        self.assertNotIn("live_probe_evidence", workflow)
+        self.assertNotIn("confirm_publish", workflow)
+        self.assertNotIn("qualify-artifact", workflow)
+        self.assertNotIn("python: [\"3.11\", \"3.12\"]", workflow)
+        self.assertIn("verify-artifact:\n", workflow)
+        self.assertIn("needs: [build-artifact, verify-artifact]", workflow)
         self.assertEqual(workflow.count("python scripts/build_release_artifact.py"), 1)
-        self.assertIn("permissions:\n  contents: read", workflow)
+        self.assertIn('hashlib.sha256(archive.read_bytes()).hexdigest()', workflow)
+        self.assertIn('manifest["commit"]', workflow)
         self.assertIn("publish-release:\n", workflow)
         self.assertIn("    permissions:\n      contents: write", workflow)
-        self.assertIn("LIVE_PROBE_EVIDENCE", workflow)
-        self.assertIn("live_probe_archive_sha256", workflow)
-        self.assertIn("confirm_publish", workflow)
-        self.assertIn('os.environ["CONFIRM_PUBLISH"] != "true"', workflow)
-        self.assertIn("EXPECTED_ARCHIVE_SHA256", workflow)
+        self.assertIn("environment: published-release", workflow)
+        self.assertIn("MAIN_GATE_URL", workflow)
+        self.assertIn("createHash('sha256')", workflow)
         self.assertEqual(workflow.count("await requireExactTag();"), 2)
         self.assertIn("github.rest.git.getTag", workflow)
         self.assertIn("Tag ${tag} moved", workflow)
-        self.assertIn("do not run account-scoped live probes", workflow)
-        self.assertIn("environment: published-release", workflow)
 
     def test_main_ci_runs_repository_gate_for_supported_python_versions(self) -> None:
         workflow_path = ROOT / ".github" / "workflows" / "ci.yml"

@@ -407,20 +407,23 @@ export NETIZEN_ADMIN_SECRET_FILE=/absolute/path/admin-web-secret
 .venv/bin/python -m netizen.main
 ```
 
-## 发布验证状态
+## 开发与兼容性验证
 
-发布前必须确认目标部署账号的 Codex 登录有效。现役版本的真实探针已确认 SDK 创建的
-原生 Thread 可被全局 CLI 按相同 ID 接续，`steer()` 能改变当前 Turn 结果，两个
-Thread 也能同时执行。
+PR 和 main push 统一运行 `make check`；正式 Release 复用 exact main commit 的成功 CI，
+不重复运行测试或账号级 live probe。只有执行真实 Turn、调试目标环境或运行按变更触发的
+live probe 时，才需要先确认当前账号的 Codex 登录有效。现役版本的已有真实探针记录确认
+SDK 创建的原生 Thread 可被全局 CLI 按相同 ID 接续，`steer()` 能改变当前 Turn 结果，
+两个 Thread 也能同时执行。
 
 `scripts/probe_python_sdk.py --phase models` 通过只读 `codex.models()` 输出实时默认
 模型以及各模型支持的 Effort、Service Tier 和默认值。2026-08-09 本地固定 SDK 探针
 已通过；产品和测试不固化该次返回的模型列表。
 
 `scripts/probe_python_sdk.py --phase compact` 验证公开 `compact()` 的异步语义和公开
-`thread.read()` 完成证据。固定 SDK 的本地真实探针观察到 start 空响应先于
-`idle -> active -> idle`，随后新增 completed `contextCompaction` Turn，同一 Thread
-仍可继续运行；因此运行时不会把 start acknowledgement 当作完成。
+`thread.read()` 完成证据。固定 `0.147.0` 在 2026-08-25 的重新验证中能观察到 completed
+`contextCompaction`，但同连接的后续 Turn 失败；隔离使用 App Server `0.149.0` 已通过同一
+序列。当前不增加临时 workaround，待匹配的 Python SDK/App Server `0.149` 发布后随依赖
+升级重新验证。
 
 `scripts/probe_python_sdk.py --phase usage` 验证 exact active read、持久化终态与公开
 usage stream 排空，并要求当前窗口用量和窗口上限具有有效 shape。
@@ -428,13 +431,13 @@ usage stream 排空，并要求当前窗口用量和窗口上限具有有效 sha
 `scripts/probe_python_sdk.py --phase side` 验证 materialized Parent 正在运行时公开
 ephemeral fork、Parent/Side Turn 重叠、固定 Side boundary、多轮 Turn、terminal
 cleanup/unsubscribe，以及关闭 Side 后 Parent 仍可继续。Parent Turn 使用公开 history
-recovery；该 phase 不把 Side 的极快 completion race 提升为 release gate，普通持久 Thread
-原有 completion recovery 门禁保持不变。
+recovery；该 phase 不把 Side 的极快 completion race 提升为本地代码门禁，普通持久 Thread
+原有 completion recovery 本地代码门禁保持不变。
 
 `scripts/probe_python_sdk.py --phase release` 使用两个先后启动的 App Server：先在同一
 连接取消订阅并按 exact ID resume/继续 Turn，再关闭该连接，由新的 App Server 按同一 ID
 接管并继续 Turn。live 环境同时验证后台 terminal inspector 的空列表投影；非空、错误与
-unsubscribe 响应未知的阻断语义由真实 SDK fake-server harness 和 Runtime 测试硬门禁。
+unsubscribe 响应未知的阻断语义由真实 SDK fake-server harness 和 Runtime 本地代码门禁覆盖。
 
 `make check` 中的 `probe_sdk_turn_plan.py` 使用真实安装 SDK 和 fake App Server，证明
 active Turn plan 的只读快照不改变队列，随后公开 stream 仍能收到同一对象并排空终态。
@@ -445,9 +448,10 @@ active Turn plan 的只读快照不改变队列，随后公开 stream 仍能收�
 App Server，验证固定 Goal/Skills/Side/Delete method、shape、Side boundary 与 unsubscribe
 终态、即时通知、多物理 Turn、resume route 顺序、Thread Delete 空响应/response loss
 以及 facade migration sentinel；它不按
-SDK 版本号或整包 hash 放行。候选 release 还必须在目标环境分别运行 `--phase skills`、
-`--phase lifecycle` 与 `--phase goal`。lifecycle phase 用公开 SDK 验证自己创建的探针
-Thread 可 rename → archive → unarchive 且保持同一 ID，再通过薄 Adapter 删除并确认
+SDK 版本号或整包 hash 放行。修改 pinned SDK 或相应 Adapter 时，在开发迭代中按影响范围
+运行 `--phase skills`、`--phase lifecycle` 与 `--phase goal`。lifecycle phase 用公开 SDK
+验证自己创建的探针 Thread 可 rename → archive → unarchive 且保持同一 ID，再通过薄
+Adapter 删除并确认
 rollout scan/state DB 的 active/archived 四视图全部 absent。
 Goal phase
 首先硬性证明零 Turn Thread 已持久化，再验证 start/pause/resume/terminal 与同 Thread
@@ -491,7 +495,7 @@ background-terminal registry，interrupt 与 clean 返回后仍继续运行，�
 异步完成证据、Binding reservation 和未知副作用 fail-closed 语义。
 
 [ADR 0014](docs/adr/0014-use-removable-sdk-gap-adapters.md) 固定 Goal/Skills 的临时
-Adapter 边界、每项独立迁移、Goal 生命周期与 SDK upgrade/release harness。
+Adapter 边界、每项独立迁移、Goal 生命周期与 SDK upgrade harness。
 
 [ADR 0015](docs/adr/0015-support-native-image-inputs-for-message-and-quote.md) 让普通图片
 和富文本图片通过公开 Channel 下载方法进入 Codex 原生 `ImageInput`，覆盖当前消息、
@@ -557,6 +561,8 @@ P2P、群聊、同群多话题、Netizen 设置卡片、服务重启恢复和全
 [ADR 0022](docs/adr/0022-load-account-shell-environment-at-service-start.md)、
 [ADR 0028](docs/adr/0028-release-idle-persistent-thread-subscriptions.md)、
 [ADR 0034](docs/adr/0034-support-macos-with-a-user-launchagent.md)、
+[ADR 0041](docs/adr/0041-separate-published-release-and-source-install.md)、
+[ADR 0042](docs/adr/0042-reuse-main-qualification-for-release.md)、
 [部署与验收](docs/deployment.md)、
 [官方 App Server API](https://developers.openai.com/codex/app-server/)。
 

@@ -71,6 +71,10 @@ design detail, compatibility findings, and procedures in their source docs.
   [ADR 0041](docs/adr/0041-separate-published-release-and-source-install.md)
   separates qualified Published Release installation from full-gated Source
   Install while preserving one activation and rollback transaction.
+  [ADR 0042](docs/adr/0042-reuse-main-qualification-for-release.md) makes the
+  exact main CI result the reusable code qualification, keeps the release
+  workflow integrity-only, and moves live probes to change-triggered
+  development requalification.
   Superseded ADRs are historical context.
 - [docs/deployment.md](docs/deployment.md): setup, verification, and release
   procedures.
