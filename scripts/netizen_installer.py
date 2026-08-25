@@ -45,6 +45,9 @@ from scripts.install_user_guide_skill import (  # noqa: E402
     install_user_guide_skill,
     remove_user_guide_skill,
 )
+from netizen.bindings import (  # noqa: E402
+    migrate_channel_database_v5_to_v6,
+)
 
 
 SYSTEMD_SERVICE_NAME = "netizen.service"
@@ -67,6 +70,7 @@ CHANNEL_DATABASE_FILES = (
     "channel.sqlite3-shm",
     "channel.sqlite3-wal",
 )
+SQLITE_DATABASE_HEADER = b"SQLite format 3\x00"
 SOURCE_DIRECTORIES = ("netizen", "scripts", "skills", "deploy", "docs", "tests")
 SOURCE_FILES = (
     ".gitignore",
@@ -1971,6 +1975,47 @@ def _lifetime_lock_available(layout: Layout) -> bool:
         os.close(descriptor)
 
 
+@contextlib.contextmanager
+def _hold_service_lifetime_lock(layout: Layout) -> Iterator[None]:
+    """Exclude service startup while rollback-protected state is migrated."""
+
+    path = layout.lifetime_lock_file
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise InstallError(
+            f"could not open service lifetime lock {path}: {error}"
+        ) from error
+    locked = False
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != layout.uid:
+            raise InstallError(
+                f"service lifetime lock is not a current-user regular file: {path}"
+            )
+        os.fchmod(descriptor, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise InstallError(
+                "service lifetime lock is still held; refusing to migrate "
+                "the Channel database"
+            ) from error
+        locked = True
+        yield
+    except OSError as error:
+        raise InstallError(
+            f"could not hold service lifetime lock {path}: {error}"
+        ) from error
+    finally:
+        if locked:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def _wait_for_stop_confirmation(
     layout: Layout,
     *,
@@ -2698,13 +2743,34 @@ def activate_release(
             if admin_bind is not None:
                 preflight_admin_bind(admin_bind)
 
-            if should_start:
-                database_snapshot = _capture_database(
-                    layout.state_dir if data_dir is None else data_dir,
-                    Path(temp),
-                )
-
-            _set_release_link(layout.current, release.root, layout)
+            channel_data_dir = layout.state_dir if data_dir is None else data_dir
+            channel_database = channel_data_dir / "channel.sqlite3"
+            if _path_exists(channel_database):
+                # The old service is already confirmed stopped above. Holding
+                # its stable lifetime lock closes the race with an external
+                # service start while the rollback snapshot and one-step
+                # schema migration are in progress.
+                with _hold_service_lifetime_lock(layout):
+                    database_snapshot = _capture_database(
+                        channel_data_dir,
+                        Path(temp),
+                    )
+                    _set_release_link(layout.current, release.root, layout)
+                    if (
+                        _has_sqlite_database_header(channel_database)
+                        and migrate_channel_database_v5_to_v6(channel_database)
+                    ):
+                        info(
+                            "migrated Channel database from schema v5 to v6 "
+                            "with existing Bindings and Side Topic tombstones"
+                        )
+            else:
+                if should_start:
+                    database_snapshot = _capture_database(
+                        channel_data_dir,
+                        Path(temp),
+                    )
+                _set_release_link(layout.current, release.root, layout)
             install_user_guide_skill(
                 source_skill=release.source / "skills" / SKILL_NAME,
                 codex_home=layout.codex_home,
@@ -2957,6 +3023,15 @@ def _capture_database(data_dir: Path, temporary_root: Path) -> DatabaseSnapshot:
         saved_root=saved_root,
         existing_files=tuple(existing),
     )
+
+
+def _has_sqlite_database_header(path: Path) -> bool:
+    _require_regular_file(path, "Channel database")
+    try:
+        with path.open("rb") as database:
+            return database.read(len(SQLITE_DATABASE_HEADER)) == SQLITE_DATABASE_HEADER
+    except OSError as error:
+        raise InstallError(f"could not inspect Channel database {path}: {error}") from error
 
 
 def _restore_database(snapshot: DatabaseSnapshot | None) -> None:

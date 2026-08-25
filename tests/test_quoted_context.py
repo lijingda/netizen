@@ -45,6 +45,16 @@ from netizen.quoted_context import (
     quoted_message_id,
     validate_quoted_message,
 )
+from netizen.message_projection import (
+    HistoricalMessageContractError,
+    HistoricalMessageUnavailable,
+    SupplementalContextStats,
+    SupplementalMessageOmission,
+    compose_message_context_prompt,
+    project_quoted_message,
+    project_supplemental_message,
+    select_supplemental_messages,
+)
 from netizen.prompt_projection import CurrentMessageProjection, project_identity
 
 
@@ -702,6 +712,219 @@ class QuotedProjectionTest(unittest.TestCase):
                 ),
                 "current",
             )
+
+
+class SupplementalProjectionTest(unittest.TestCase):
+    def project(
+        self,
+        text: str,
+        *,
+        message_id: str,
+        create_time: int,
+        sender: Identity | None = None,
+    ) -> object:
+        message = inbound(
+            TextContent(text=text),
+            message_id=message_id,
+            content_text=text,
+            sender=sender,
+        )
+        message.create_time = create_time
+        return project_supplemental_message(message)
+
+    def test_supplemental_requires_resolved_human_identity(self) -> None:
+        bot = project_supplemental_message(
+            inbound(
+                sender=Identity(
+                    open_id="ou_bot",
+                    display_name="Bot",
+                    is_bot=True,
+                )
+            )
+        )
+        system = project_supplemental_message(
+            inbound(SystemContent(template="system"), content_text="system")
+        )
+        unknown = project_supplemental_message(
+            inbound(UnknownContent(message_type="new_type"), content_text="unknown")
+        )
+
+        self.assertEqual(
+            (bot.reason, system.reason, unknown.reason),  # type: ignore[union-attr]
+            ("bot_sender", "system_message", "unsupported_message_type"),
+        )
+        self.assertTrue(
+            all(
+                isinstance(item, SupplementalMessageOmission)
+                for item in (bot, system, unknown)
+            )
+        )
+        for sender in (
+            Identity(open_id="", display_name="Alice"),
+            Identity(open_id="ou_sender", display_name=None),
+        ):
+            with self.subTest(sender=sender):
+                with self.assertRaises(HistoricalMessageUnavailable):
+                    project_supplemental_message(inbound(sender=sender))
+
+    def test_context_envelope_orders_history_deduplicates_quote_and_keeps_request_last(
+        self,
+    ) -> None:
+        first = self.project(
+            "/stop is historical",
+            message_id="om_first",
+            create_time=100,
+        )
+        duplicate = self.project(
+            "$old-skill quoted duplicate",
+            message_id="om_quote",
+            create_time=200,
+        )
+        latest = self.project(
+            "$old-skill supplemental",
+            message_id="om_latest",
+            create_time=300,
+        )
+        quoted = project_quoted_message(
+            inbound(
+                content_text="$old-skill quoted",
+                message_id="om_quote",
+            )
+        )
+        assert not isinstance(first, SupplementalMessageOmission)
+        assert not isinstance(duplicate, SupplementalMessageOmission)
+        assert not isinstance(latest, SupplementalMessageOmission)
+
+        result = compose_message_context_prompt(
+            supplemental_messages=(first, duplicate, latest),
+            quoted_message=quoted,
+            current=current("$live-skill answer this"),
+            supplemental_stats=SupplementalContextStats(
+                scanned_count=5,
+                omitted_count=2,
+                unsupported_omitted_count=1,
+                truncated_before=True,
+            ),
+        )
+
+        current_prefix, current_json = result.text.split('"current_message"', 1)
+        self.assertNotIn("$old-skill", current_prefix)
+        self.assertIn(r"\u0024old-skill", current_prefix)
+        self.assertIn("$live-skill answer this", current_json)
+        envelope = json.loads(result.text)
+        self.assertEqual(envelope["kind"], "feishu_message_context_prompt")
+        self.assertEqual(envelope["version"], 1)
+        self.assertEqual(
+            [item["message_id"] for item in envelope["supplemental_messages"]],
+            ["om_first", "om_latest"],
+        )
+        self.assertEqual(
+            envelope["supplemental_messages"][0]["text"],
+            "/stop is historical",
+        )
+        self.assertEqual(envelope["quoted_message"]["message_id"], "om_quote")
+        self.assertEqual(
+            envelope["current_message"]["request_text"],
+            "$live-skill answer this",
+        )
+        self.assertEqual(list(envelope)[-1], "current_message")
+        self.assertIn("slash-prefixed", envelope["handling"])
+        self.assertEqual(result.stats.selected_count, 2)
+        self.assertEqual(result.stats.quoted_deduplicated_count, 1)
+        self.assertEqual(result.stats.omitted_count, 2)
+        self.assertTrue(result.stats.truncated_before)
+
+    def test_aggregate_limits_retain_the_newest_complete_suffix_and_report_stats(
+        self,
+    ) -> None:
+        projected = []
+        for index, text in enumerate(("aaaa", "bb", "ccc", "dddd"), start=1):
+            item = self.project(
+                text,
+                message_id=f"om_{index}",
+                create_time=index,
+            )
+            assert not isinstance(item, SupplementalMessageOmission)
+            projected.append(item)
+
+        result = compose_message_context_prompt(
+            supplemental_messages=projected,
+            quoted_message=None,
+            current=current("now"),
+            max_supplemental_messages=3,
+            max_supplemental_text=7,
+        )
+        envelope = json.loads(result.text)
+
+        self.assertEqual(
+            [item["message_id"] for item in envelope["supplemental_messages"]],
+            ["om_3", "om_4"],
+        )
+        self.assertEqual(result.stats.selected_count, 2)
+        self.assertEqual(result.stats.truncated_count, 2)
+        self.assertTrue(result.stats.message_limit_reached)
+        self.assertTrue(result.stats.text_limit_reached)
+
+        text_limited = compose_message_context_prompt(
+            supplemental_messages=projected,
+            quoted_message=None,
+            current=current("now"),
+            max_supplemental_messages=4,
+            max_supplemental_text=7,
+        )
+        self.assertEqual(text_limited.stats.selected_count, 2)
+        self.assertEqual(text_limited.stats.truncated_count, 2)
+        self.assertTrue(text_limited.stats.text_limit_reached)
+
+    def test_decreasing_snapshot_order_fails_closed(self) -> None:
+        newer = self.project("newer", message_id="om_new", create_time=2)
+        older = self.project("older", message_id="om_old", create_time=1)
+        assert not isinstance(newer, SupplementalMessageOmission)
+        assert not isinstance(older, SupplementalMessageOmission)
+
+        with self.assertRaises(HistoricalMessageContractError):
+            compose_message_context_prompt(
+                supplemental_messages=(newer, older),
+                quoted_message=None,
+                current=current("now"),
+            )
+
+    def test_pre_media_selection_can_be_reprojected_without_double_counting(self) -> None:
+        first = self.project("a", message_id="om_first", create_time=1)
+        second = self.project("b", message_id="om_second", create_time=2)
+        assert not isinstance(first, SupplementalMessageOmission)
+        assert not isinstance(second, SupplementalMessageOmission)
+        selection = select_supplemental_messages(
+            (first, second),
+            max_supplemental_text=7,
+        )
+
+        revised_first = self.project(
+            "xxxx",
+            message_id="om_first",
+            create_time=1,
+        )
+        revised_second = self.project(
+            "yyyy",
+            message_id="om_second",
+            create_time=2,
+        )
+        assert not isinstance(revised_first, SupplementalMessageOmission)
+        assert not isinstance(revised_second, SupplementalMessageOmission)
+        revised = selection.reproject((revised_first, revised_second))
+        result = compose_message_context_prompt(
+            supplemental_selection=revised,
+            quoted_message=None,
+            current=current("now"),
+        )
+
+        self.assertEqual(
+            [message.message_id for message in result.supplemental_messages],
+            ["om_second"],
+        )
+        self.assertEqual(result.stats.selected_count, 1)
+        self.assertEqual(result.stats.truncated_count, 1)
+        self.assertTrue(result.stats.text_limit_reached)
 
 
 if __name__ == "__main__":

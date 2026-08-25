@@ -274,7 +274,8 @@ async function loadSessions(cursor = state.sessionPage.cursor) {
     runtime.className = "runtime-state";
     cell(row, session.projectAlias);
     const settings = session.turnSettings;
-    cell(row, settings ? `${settings.modelId} / ${settings.effortId} / ${settings.serviceTierId}` : "默认");
+    const model = settings ? `${settings.modelId} / ${settings.effortId} / ${settings.serviceTierId}` : "继承 Codex";
+    cell(row, `${session.messageContextMode} · ${model}`);
     const actions = actionsCell(row);
     wireSessionActions(actions, session);
     body.append(row);

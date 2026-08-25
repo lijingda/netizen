@@ -30,6 +30,12 @@ from lark_channel import (
 )
 from lark_channel.channel.normalize.pipeline import PipelineConfig, PipelineDeps
 from lark_channel.channel.quote import QuoteResolver
+from lark_oapi.api.im.v1 import (
+    GetMessageRequest,
+    GetMessageResponse,
+    ListMessageRequest,
+    ListMessageResponse,
+)
 from openai_codex import ImageInput, TextInput
 
 from netizen.image_inputs import image_references
@@ -40,6 +46,76 @@ from netizen.quoted_context import (
 
 
 class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_lark_oapi_message_history_generated_contract(self) -> None:
+        self.assertEqual(importlib.metadata.version("lark-oapi"), "1.7.2")
+
+        exact = (
+            GetMessageRequest.builder()
+            .message_id("om_exact")
+            .user_id_type("open_id")
+            .with_sender_name(True)
+            .build()
+        )
+        self.assertEqual(exact.uri, "/open-apis/im/v1/messages/:message_id")
+        self.assertEqual(exact.message_id, "om_exact")
+        self.assertEqual(exact.user_id_type, "open_id")
+        self.assertTrue(exact.with_sender_name)
+
+        history = (
+            ListMessageRequest.builder()
+            .container_id_type("thread")
+            .container_id("omt_topic")
+            .sort_type("ByCreateTimeDesc")
+            .page_size(50)
+            .with_sender_name(True)
+            .page_token("next-page")
+            .build()
+        )
+        self.assertEqual(history.uri, "/open-apis/im/v1/messages")
+        self.assertEqual(history.container_id_type, "thread")
+        self.assertEqual(history.container_id, "omt_topic")
+        self.assertEqual(history.sort_type, "ByCreateTimeDesc")
+        self.assertEqual(history.page_size, 50)
+        self.assertTrue(history.with_sender_name)
+        self.assertEqual(history.page_token, "next-page")
+        self.assertIsNone(history.start_time)
+        self.assertIsNone(history.end_time)
+
+        raw_item = {
+            "message_id": "om_exact",
+            "chat_id": "oc_group",
+            "thread_id": "omt_topic",
+            "create_time": "1700000000123",
+            "msg_type": "text",
+            "deleted": False,
+            "sender": {
+                "id": "ou_alice",
+                "id_type": "open_id",
+                "sender_type": "user",
+                "sender_name": "Alice",
+            },
+        }
+        exact_response = GetMessageResponse(
+            {"code": 0, "msg": "success", "data": {"items": [raw_item]}}
+        )
+        list_response = ListMessageResponse(
+            {
+                "code": 0,
+                "msg": "success",
+                "data": {
+                    "items": [raw_item],
+                    "has_more": True,
+                    "page_token": "next-page",
+                },
+            }
+        )
+        self.assertTrue(exact_response.success())
+        self.assertEqual(exact_response.data.items[0].message_id, "om_exact")
+        self.assertEqual(exact_response.data.items[0].sender.sender_name, "Alice")
+        self.assertTrue(list_response.success())
+        self.assertTrue(list_response.data.has_more)
+        self.assertEqual(list_response.data.page_token, "next-page")
+
     async def test_public_identity_fields_and_inbound_id_aliases(self) -> None:
         sender = Identity(
             open_id="ou_current",

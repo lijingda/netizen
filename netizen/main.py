@@ -42,6 +42,7 @@ from lark_channel import (
     SecurityConfig,
     TextBatchConfig,
 )
+import lark_oapi as lark
 from openai_codex import AsyncCodex, CodexConfig
 
 from .admin.web import AdminWebRunner
@@ -53,6 +54,7 @@ from .management import (
     ManagementRuntimePort,
     ScopeCoordinator,
 )
+from .message_history import FeishuMessageHistoryReader
 from .projects import ProjectRegistry
 from .sdk_gap_adapter import (
     AppServerGoalControl,
@@ -143,6 +145,7 @@ class ServiceCore:
         self._codex: AsyncCodex | None = None
         self._runtime: CodexRuntime | None = None
         self._management: InstanceManagementService | None = None
+        self._message_history_client: Any | None = None
         self._admin: AdminWebRunner | None = None
         self.application: ChannelApplication | None = None
         self._started = False
@@ -229,12 +232,23 @@ class ServiceCore:
             )
             if self._admin is not None:
                 self._admin.attach_management(self._management)
+            self._message_history_client = (
+                lark.Client.builder()
+                .app_id(self._settings.app_id)
+                .app_secret(self._settings.app_secret)
+                .timeout(10)
+                .log_level(lark.LogLevel.WARNING)
+                .build()
+            )
             self.application = ChannelApplication(
                 app_id=self._settings.app_id,
                 channel=self._channel,
                 runtime=self._runtime,
                 bindings=self._store,
                 projects=self._projects,
+                message_history=FeishuMessageHistoryReader(
+                    self._message_history_client
+                ),
                 scope_coordinator=scope_coordinator,
                 management=self._management,
             )

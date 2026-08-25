@@ -80,7 +80,7 @@ from ..codex_runtime import (
     ThreadReleaseStateUnknown,
     ThreadRunningConfiguration,
 )
-from ..domain import ScopeKind
+from ..domain import MentionContextMode, ScopeKind
 from ..management import (
     ActivePointerChanged,
     BindingScopeMismatch,
@@ -636,9 +636,13 @@ class AdminWebApplication:
             )
         }
         native_state = item.native.state if item.native is not None else None
-        if not binding.active and (
-            binding.native_thread_id is None
-            or native_state is NativeThreadCatalogState.ACTIVE
+        if (
+            binding.message_context_mode is MentionContextMode.CURRENT_ONLY
+            and not binding.active
+            and (
+                binding.native_thread_id is None
+                or native_state is NativeThreadCatalogState.ACTIVE
+            )
         ):
             actions["activate"] = self._grant(
                 context, "sessions.activate", target, preconditions
@@ -662,9 +666,10 @@ class AdminWebApplication:
             actions["unarchive"] = self._grant(
                 context, "sessions.unarchive", target, preconditions
             )
-            actions["unarchiveCurrent"] = self._grant(
-                context, "sessions.unarchive-current", target, preconditions
-            )
+            if binding.message_context_mode is MentionContextMode.CURRENT_ONLY:
+                actions["unarchiveCurrent"] = self._grant(
+                    context, "sessions.unarchive-current", target, preconditions
+                )
         if runtime.turn is not None or runtime.goal is not None:
             actions["stop"] = self._grant(
                 context, "sessions.stop", target, preconditions
@@ -704,6 +709,8 @@ class AdminWebApplication:
             "activatedAt": binding.activated_at,
             "settingsRevision": binding.settings_revision,
             "turnSettings": _settings_json(binding.turn_settings),
+            "messageContextMode": binding.message_context_mode.value,
+            "contextRevision": binding.context_revision,
             "runtime": _runtime_binding_json(runtime),
             "actions": actions,
         }
@@ -2151,6 +2158,8 @@ def _binding_result(context: _RequestContext, binding: Any) -> dict[str, object]
         "current": binding.active,
         "nativeThreadId": binding.native_thread_id,
         "settingsRevision": binding.settings_revision,
+        "messageContextMode": binding.message_context_mode.value,
+        "contextRevision": binding.context_revision,
     }
 
 

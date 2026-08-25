@@ -13,6 +13,31 @@ class ScopeKind(str, Enum):
     TOPIC = "topic"
 
 
+class MentionContextMode(str, Enum):
+    """Binding-scoped policy for context gathered by an explicit mention."""
+
+    CURRENT_ONLY = "current-only"
+    CATCH_UP = "catch-up"
+
+
+@dataclass(frozen=True, slots=True)
+class MessageContextAnchor:
+    """Exact Feishu message boundary for one catch-up Binding."""
+
+    message_id: str
+    create_time_ms: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.message_id, str) or not self.message_id:
+            raise ValueError("context anchor message_id must not be empty")
+        if (
+            isinstance(self.create_time_ms, bool)
+            or not isinstance(self.create_time_ms, int)
+            or self.create_time_ms <= 0
+        ):
+            raise ValueError("context anchor create_time_ms must be positive")
+
+
 @dataclass(frozen=True, slots=True)
 class FeishuScope:
     app_id: str
@@ -116,6 +141,7 @@ class CardControlIntent:
     project_alias: str | None = None
     expected_revision: int | None = None
     expected_settings_revision: int | None = None
+    expected_context_revision: int | None = None
     enabled: bool | None = None
     project_path: str | None = None
     create_directory: bool | None = None
@@ -126,6 +152,7 @@ class CardControlIntent:
     model_id: str | None = None
     effort_id: str | None = None
     service_tier_id: str | None = None
+    message_context_mode: MentionContextMode | None = None
     side_id: str | None = None
     page: int | None = None
 

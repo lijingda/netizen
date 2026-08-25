@@ -277,11 +277,16 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("same_id_resumed_by_fresh_app_server", release)
         self.assertIn("30 分钟", deployment)
 
-    def test_current_schema_documents_side_route_tombstones(self) -> None:
+    def test_current_schema_documents_context_boundary_and_side_tombstones(
+        self,
+    ) -> None:
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
         design = (ROOT / "docs" / "design.md").read_text(encoding="utf-8")
 
-        self.assertIn("当前 schema v5", deployment)
+        self.assertIn("当前 schema v6", deployment)
+        self.assertIn("Mention Context Mode", deployment)
+        self.assertIn("Context Boundary", design)
+        self.assertIn("不保存任何补充消息正文", deployment)
         self.assertIn("`side_topics`", design)
         self.assertIn("不保存\nephemeral native Thread ID", design)
 

@@ -46,8 +46,8 @@ COMMAND_SPECS = (
         "new",
         ControlName.NEW,
         CommandOwner.HYBRID,
-        "/new [project|none]",
-        "新建 lazy 会话；卡片可选下一 Turn 的 Model / Effort / Speed",
+        "/new",
+        "用卡片新建 lazy 会话并选择 Project 与后续 Turn 配置",
     ),
     CommandSpec(
         "side",
@@ -259,6 +259,17 @@ def parse_message(
 
     raw_parts = body[1:].lstrip().split(maxsplit=1)
     raw_spec = _COMMANDS.get(raw_parts[0].lower()) if raw_parts else None
+    if (
+        raw_spec is not None
+        and raw_spec.intent is ControlName.NEW
+        and len(raw_parts) == 2
+    ):
+        # `/new` is deliberately card-only. Reject the raw tail before shlex
+        # so quoted and even unterminated-quote variants all receive the same
+        # migration result and can never reach a mutating ControlIntent.
+        raise InvalidInteraction(
+            "快捷创建已下线，请发送 /new 并在卡片中选择。"
+        )
     if raw_spec is not None and raw_spec.intent in {
         ControlName.GOAL,
         ControlName.SIDE,
@@ -310,7 +321,7 @@ def parse_message(
 def _validate_arguments(name: ControlName, arguments: tuple[str, ...]) -> None:
     expected = {
         ControlName.MENU: 0,
-        ControlName.NEW: None,
+        ControlName.NEW: 0,
         ControlName.SIDE: None,
         ControlName.CONFIG: 0,
         ControlName.COMPACT: 0,
@@ -327,8 +338,6 @@ def _validate_arguments(name: ControlName, arguments: tuple[str, ...]) -> None:
         ControlName.GOAL: None,
         ControlName.HELP: 0,
     }[name]
-    if name is ControlName.NEW and len(arguments) in {0, 1}:
-        return
     if name is ControlName.SIDE and len(arguments) in {0, 1}:
         if arguments:
             value = arguments[0].strip()
@@ -375,7 +384,9 @@ def _validate_arguments(name: ControlName, arguments: tuple[str, ...]) -> None:
     if expected is not None and len(arguments) == expected:
         return
     if name is ControlName.NEW:
-        raise InvalidInteraction("用法：/new [project|none]")
+        raise InvalidInteraction(
+            "快捷创建已下线，请发送 /new 并在卡片中选择。"
+        )
     if name is ControlName.SIDE:
         raise InvalidInteraction("用法：/side [首轮问题]")
     if name is ControlName.RESUME:

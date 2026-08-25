@@ -41,6 +41,8 @@ from netizen.codex_runtime import (
     CompactionOutcome,
     CompactionStateUnknown,
     ContextWindowUsage,
+    ContextBoundaryCommitFailed,
+    ContextCursorCommit,
     CodexRuntime,
     RuntimeClosed,
     ReleaseDisposition,
@@ -77,7 +79,12 @@ from netizen.codex_runtime import (
     TurnStartFailed,
     TurnOutcome,
 )
-from netizen.domain import FeishuScope, ScopeKind
+from netizen.domain import (
+    FeishuScope,
+    MentionContextMode,
+    MessageContextAnchor,
+    ScopeKind,
+)
 from netizen.model_settings import ModelCatalogError
 from netizen.sdk_gap_adapter import (
     DiscoveredSkill,
@@ -2224,6 +2231,16 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             creator_id="ou_user",
         )
 
+    def catch_up_binding(self):
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        return self.store.create_binding(
+            scope=scope,
+            project_alias="test",
+            creator_id="ou_user",
+            message_context_mode=MentionContextMode.CATCH_UP,
+            context_anchor=MessageContextAnchor("om-lower", 1_000),
+        )
+
     async def test_thread_metadata_uses_paginated_public_history_list(self) -> None:
         self.codex.thread_list_pages = [
             SimpleNamespace(
@@ -2864,6 +2881,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding,
         text: object = "hello",
         admission: SubmissionAdmission | None = None,
+        context_commit: ContextCursorCommit | None = None,
     ):
         return await self.runtime.submit(
             binding=binding,
@@ -2872,6 +2890,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             owner_id="ou_user",
             origin=object(),
             admission=admission,
+            context_commit=context_commit,
         )
 
     def install_model_catalog(
@@ -2940,6 +2959,137 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.outcomes[0].final_response, "done:turn-1")
         self.assertIn(("native-1", False), self.codex.read_calls)
         self.assertIn(("native-1", True), self.codex.read_calls)
+
+    async def test_catch_up_start_commits_boundary_after_native_acceptance(
+        self,
+    ) -> None:
+        binding = self.catch_up_binding()
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        upper = MessageContextAnchor("om-upper", 2_000)
+
+        submission = await self.submit(
+            binding,
+            "catch up",
+            admission,
+            ContextCursorCommit(admission.context_revision, upper),
+        )
+
+        updated = self.store.get(binding.id)
+        self.assertEqual(updated.context_anchor, upper)
+        self.assertEqual(updated.context_revision, 2)
+        self.assertEqual(submission.disposition, SubmitDisposition.STARTED)
+        await self.finish(self.codex.handles[0], submission)
+
+    async def test_catch_up_steer_commits_next_boundary_exactly_once(self) -> None:
+        binding = self.catch_up_binding()
+        first_admission = await self.runtime.capture_submission_admission(binding.id)
+        first_upper = MessageContextAnchor("om-upper-1", 2_000)
+        first = await self.submit(
+            binding,
+            "first",
+            first_admission,
+            ContextCursorCommit(first_admission.context_revision, first_upper),
+        )
+        running_admission = await self.runtime.capture_submission_admission(binding.id)
+        second_upper = MessageContextAnchor("om-upper-2", 3_000)
+
+        steered = await self.submit(
+            self.store.get(binding.id),
+            "adjust",
+            running_admission,
+            ContextCursorCommit(running_admission.context_revision, second_upper),
+        )
+
+        updated = self.store.get(binding.id)
+        self.assertEqual(steered.disposition, SubmitDisposition.STEERED)
+        self.assertEqual(updated.context_anchor, second_upper)
+        self.assertEqual(updated.context_revision, 3)
+        self.assertEqual(self.codex.handles[0].steers, ["adjust"])
+        await self.finish(self.codex.handles[0], first)
+
+    async def test_failed_catch_up_steer_does_not_advance_boundary(self) -> None:
+        binding = self.catch_up_binding()
+        first_admission = await self.runtime.capture_submission_admission(binding.id)
+        first_upper = MessageContextAnchor("om-upper-1", 2_000)
+        first = await self.submit(
+            binding,
+            "first",
+            first_admission,
+            ContextCursorCommit(first_admission.context_revision, first_upper),
+        )
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        self.codex.handles[0].steer_error = InvalidRequestError(
+            -32600,
+            "already done",
+        )
+
+        with self.assertRaises(SteerRace):
+            await self.submit(
+                self.store.get(binding.id),
+                "must retry",
+                admission,
+                ContextCursorCommit(
+                    admission.context_revision,
+                    MessageContextAnchor("om-upper-2", 3_000),
+                ),
+            )
+
+        updated = self.store.get(binding.id)
+        self.assertEqual(updated.context_anchor, first_upper)
+        self.assertEqual(updated.context_revision, 2)
+        await self.finish(self.codex.handles[0], first)
+
+    async def test_unconfirmed_catch_up_start_does_not_advance_boundary(self) -> None:
+        binding = self.catch_up_binding()
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        self.codex.turn_errors_after_start.append(RuntimeError("response lost"))
+
+        with self.assertRaisesRegex(TurnStartFailed, "启动结果未确认"):
+            await self.submit(
+                binding,
+                "unconfirmed",
+                admission,
+                ContextCursorCommit(
+                    admission.context_revision,
+                    MessageContextAnchor("om-upper", 2_000),
+                ),
+            )
+
+        updated = self.store.get(binding.id)
+        self.assertEqual(updated.context_anchor, binding.context_anchor)
+        self.assertEqual(updated.context_revision, 1)
+
+    async def test_cursor_commit_failure_keeps_native_tracking_and_closes_admission(
+        self,
+    ) -> None:
+        binding = self.catch_up_binding()
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        upper = MessageContextAnchor("om-upper", 2_000)
+
+        with (
+            patch.object(
+                self.store,
+                "commit_context_anchor",
+                side_effect=BindingConflict("CAS failed"),
+            ),
+            self.assertRaisesRegex(
+                ContextBoundaryCommitFailed,
+                "任务已被 Codex 接受",
+            ),
+        ):
+            await self.submit(
+                binding,
+                "accepted before CAS",
+                admission,
+                ContextCursorCommit(admission.context_revision, upper),
+            )
+
+        self.assertIsNotNone(self.runtime.active_turn(binding.id))
+        self.assertEqual(self.store.get(binding.id).context_anchor, binding.context_anchor)
+        with self.assertRaises(RuntimeClosed):
+            await self.runtime.capture_submission_admission(binding.id)
+        self.codex.handles[0].complete()
+        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
 
     async def test_public_turn_stream_tracks_completed_context_usage(self) -> None:
         binding = self.binding()

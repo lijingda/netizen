@@ -17,10 +17,123 @@ from enum import Enum
 from pathlib import Path
 from typing import TypeVar
 
-from .domain import FeishuScope, ScopeKind
+from .domain import (
+    FeishuScope,
+    MentionContextMode,
+    MessageContextAnchor,
+    ScopeKind,
+)
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+PREVIOUS_SCHEMA_VERSION = 5
+
+
+_CONTEXT_INTEGRITY_TRIGGERS = (
+    """
+    CREATE TRIGGER IF NOT EXISTS bindings_context_shape_insert
+    BEFORE INSERT ON bindings
+    WHEN NOT (
+        (
+            NEW.message_context_mode = 'current-only'
+            AND NEW.context_anchor_message_id IS NULL
+            AND NEW.context_anchor_create_time_ms IS NULL
+        ) OR (
+            NEW.message_context_mode = 'catch-up'
+            AND NEW.context_anchor_message_id IS NOT NULL
+            AND length(NEW.context_anchor_message_id) > 0
+            AND NEW.context_anchor_create_time_ms IS NOT NULL
+            AND typeof(NEW.context_anchor_create_time_ms) = 'integer'
+            AND NEW.context_anchor_create_time_ms > 0
+        )
+    )
+    BEGIN
+        SELECT RAISE(
+            ABORT,
+            'Binding context must match its mode'
+        );
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS bindings_context_shape_update
+    BEFORE UPDATE OF message_context_mode,
+        context_anchor_message_id, context_anchor_create_time_ms
+    ON bindings
+    WHEN NOT (
+        (
+            NEW.message_context_mode = 'current-only'
+            AND NEW.context_anchor_message_id IS NULL
+            AND NEW.context_anchor_create_time_ms IS NULL
+        ) OR (
+            NEW.message_context_mode = 'catch-up'
+            AND NEW.context_anchor_message_id IS NOT NULL
+            AND length(NEW.context_anchor_message_id) > 0
+            AND NEW.context_anchor_create_time_ms IS NOT NULL
+            AND typeof(NEW.context_anchor_create_time_ms) = 'integer'
+            AND NEW.context_anchor_create_time_ms > 0
+        )
+    )
+    BEGIN
+        SELECT RAISE(
+            ABORT,
+            'Binding context must match its mode'
+        );
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS bindings_context_scope_insert
+    BEFORE INSERT ON bindings
+    WHEN NEW.message_context_mode = 'catch-up'
+         AND EXISTS (
+             SELECT 1
+             FROM scopes
+             WHERE scope_key = NEW.scope_key
+               AND kind = 'direct'
+         )
+    BEGIN
+        SELECT RAISE(
+            ABORT,
+            'direct Binding cannot use catch-up context'
+        );
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS bindings_context_scope_update
+    BEFORE UPDATE OF scope_key, message_context_mode,
+        context_anchor_message_id, context_anchor_create_time_ms
+    ON bindings
+    WHEN NEW.message_context_mode = 'catch-up'
+         AND EXISTS (
+             SELECT 1
+             FROM scopes
+             WHERE scope_key = NEW.scope_key
+               AND kind = 'direct'
+         )
+    BEGIN
+        SELECT RAISE(
+            ABORT,
+            'direct Binding cannot use catch-up context'
+        );
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS scopes_context_kind_update
+    BEFORE UPDATE OF kind ON scopes
+    WHEN NEW.kind = 'direct'
+         AND EXISTS (
+             SELECT 1
+             FROM bindings
+             WHERE scope_key = NEW.scope_key
+               AND message_context_mode = 'catch-up'
+         )
+    BEGIN
+        SELECT RAISE(
+            ABORT,
+            'direct Scope cannot contain catch-up Binding'
+        );
+    END
+    """,
+)
 
 
 class BindingConflict(RuntimeError):
@@ -32,6 +145,10 @@ class BindingNotFound(LookupError):
 
 
 class BindingSettingsRevisionConflict(RuntimeError):
+    pass
+
+
+class BindingContextRevisionConflict(RuntimeError):
     pass
 
 
@@ -109,6 +226,9 @@ class ThreadBinding:
     active: bool
     created_at: str
     activated_at: str | None
+    message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY
+    context_anchor: MessageContextAnchor | None = None
+    context_revision: int = 1
 
     @property
     def short_id(self) -> str:
@@ -266,6 +386,229 @@ class SideTopicRecord:
         return self.id[:8]
 
 
+def migrate_channel_database_v5_to_v6(path: str | Path) -> bool:
+    """Upgrade a stopped v5 database inside the installer transaction.
+
+    ``BindingStore`` deliberately remains current-schema-only. The installer
+    calls this one-step migration only after the service target is unloaded,
+    the stable lifetime lock is held, and rollback files have been captured.
+    Existing Bindings become ``current-only`` with an empty Context Boundary.
+    """
+
+    database = Path(path)
+    if not database.exists():
+        return False
+    if database.is_symlink() or not database.is_file():
+        raise RuntimeError(
+            "Channel database migration target must be a regular file"
+        )
+
+    connection = sqlite3.connect(database, isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 0")
+        version_rows = connection.execute(
+            "SELECT version FROM schema_version"
+        ).fetchall()
+        if len(version_rows) != 1:
+            raise RuntimeError("Channel database must contain one schema version")
+        version = version_rows[0]["version"]
+        if version == SCHEMA_VERSION:
+            _require_v6_context_columns(connection)
+            return False
+        if version != PREVIOUS_SCHEMA_VERSION:
+            raise RuntimeError(
+                "unsupported Channel database migration source version: "
+                f"{version!r}"
+            )
+
+        required_tables = {
+            "schema_version",
+            "scopes",
+            "bindings",
+            "projects",
+            "dedup_keys",
+            "side_topics",
+        }
+        actual_tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        missing_tables = required_tables - actual_tables
+        if missing_tables:
+            raise RuntimeError(
+                "v5 Channel database is missing required tables: "
+                + ", ".join(sorted(missing_tables))
+            )
+        legacy_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(bindings)"
+            ).fetchall()
+        }
+        required_legacy_columns = {
+            "binding_id",
+            "scope_key",
+            "project_alias",
+            "native_thread_id",
+            "model_id",
+            "effort_id",
+            "service_tier_id",
+            "settings_revision",
+            "creator_id",
+            "created_at",
+            "activated_at",
+            "ever_activated",
+        }
+        missing_columns = required_legacy_columns - legacy_columns
+        context_columns = {
+            "message_context_mode",
+            "context_anchor_message_id",
+            "context_anchor_create_time_ms",
+            "context_revision",
+        }
+        if missing_columns or legacy_columns & context_columns:
+            details: list[str] = []
+            if missing_columns:
+                details.append("missing " + ", ".join(sorted(missing_columns)))
+            if legacy_columns & context_columns:
+                details.append(
+                    "unexpected "
+                    + ", ".join(sorted(legacy_columns & context_columns))
+                )
+            raise RuntimeError(
+                "unexpected v5 bindings schema: " + "; ".join(details)
+            )
+        _require_database_integrity(connection)
+        binding_count = connection.execute(
+            "SELECT COUNT(*) FROM bindings"
+        ).fetchone()[0]
+        side_count = connection.execute(
+            "SELECT COUNT(*) FROM side_topics"
+        ).fetchone()[0]
+
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(
+                """
+                ALTER TABLE bindings
+                ADD COLUMN message_context_mode TEXT NOT NULL
+                    DEFAULT 'current-only'
+                    CHECK(message_context_mode IN ('current-only', 'catch-up'))
+                """
+            )
+            connection.execute(
+                """
+                ALTER TABLE bindings
+                ADD COLUMN context_anchor_message_id TEXT
+                """
+            )
+            connection.execute(
+                """
+                ALTER TABLE bindings
+                ADD COLUMN context_anchor_create_time_ms INTEGER
+                    CHECK(
+                        context_anchor_create_time_ms IS NULL OR (
+                            typeof(context_anchor_create_time_ms) = 'integer'
+                            AND context_anchor_create_time_ms > 0
+                        )
+                    )
+                """
+            )
+            connection.execute(
+                """
+                ALTER TABLE bindings
+                ADD COLUMN context_revision INTEGER NOT NULL DEFAULT 1
+                    CHECK(
+                        typeof(context_revision) = 'integer'
+                        AND context_revision >= 1
+                    )
+                """
+            )
+            for statement in _CONTEXT_INTEGRITY_TRIGGERS:
+                connection.execute(statement)
+            updated = connection.execute(
+                "UPDATE schema_version SET version = ? WHERE version = ?",
+                (SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError(
+                    "Channel database schema version changed during migration"
+                )
+            _require_database_integrity(connection)
+            migrated_binding_count = connection.execute(
+                "SELECT COUNT(*) FROM bindings"
+            ).fetchone()[0]
+            migrated_side_count = connection.execute(
+                "SELECT COUNT(*) FROM side_topics"
+            ).fetchone()[0]
+            if migrated_binding_count != binding_count:
+                raise RuntimeError(
+                    "Binding count changed during Channel database migration"
+                )
+            if migrated_side_count != side_count:
+                raise RuntimeError(
+                    "Side Topic count changed during Channel database migration"
+                )
+            invalid_context_rows = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM bindings
+                WHERE message_context_mode != 'current-only'
+                   OR context_anchor_message_id IS NOT NULL
+                   OR context_anchor_create_time_ms IS NOT NULL
+                   OR context_revision != 1
+                """
+            ).fetchone()[0]
+            if invalid_context_rows:
+                raise RuntimeError(
+                    "legacy Bindings did not receive safe context defaults"
+                )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        _require_v6_context_columns(connection)
+        _require_database_integrity(connection)
+        return True
+    except sqlite3.Error as error:
+        raise RuntimeError(
+            f"Channel database migration failed: {error}"
+        ) from error
+    finally:
+        connection.close()
+
+
+def _require_v6_context_columns(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(bindings)").fetchall()
+    }
+    required = {
+        "message_context_mode",
+        "context_anchor_message_id",
+        "context_anchor_create_time_ms",
+        "context_revision",
+    }
+    missing = required - columns
+    if missing:
+        raise RuntimeError(
+            "schema v6 Channel database is missing context columns: "
+            + ", ".join(sorted(missing))
+        )
+
+
+def _require_database_integrity(connection: sqlite3.Connection) -> None:
+    integrity_rows = connection.execute("PRAGMA integrity_check").fetchall()
+    if [row[0] for row in integrity_rows] != ["ok"]:
+        raise RuntimeError("Channel database integrity check failed")
+    if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+        raise RuntimeError("Channel database foreign-key check failed")
+
+
 class BindingStore:
     """Keep only state that native Codex cannot own.
 
@@ -373,6 +716,17 @@ class BindingStore:
                     service_tier_id TEXT,
                     settings_revision INTEGER NOT NULL DEFAULT 1
                         CHECK(settings_revision >= 1),
+                    message_context_mode TEXT NOT NULL DEFAULT 'current-only'
+                        CHECK(
+                            message_context_mode IN ('current-only', 'catch-up')
+                        ),
+                    context_anchor_message_id TEXT,
+                    context_anchor_create_time_ms INTEGER,
+                    context_revision INTEGER NOT NULL DEFAULT 1
+                        CHECK(
+                            typeof(context_revision) = 'integer'
+                            AND context_revision >= 1
+                        ),
                     creator_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     activated_at TEXT NOT NULL,
@@ -387,6 +741,20 @@ class BindingStore:
                             model_id IS NOT NULL
                             AND effort_id IS NOT NULL
                             AND service_tier_id IS NOT NULL
+                        )
+                    ),
+                    CHECK(
+                        (
+                            message_context_mode = 'current-only'
+                            AND context_anchor_message_id IS NULL
+                            AND context_anchor_create_time_ms IS NULL
+                        ) OR (
+                            message_context_mode = 'catch-up'
+                            AND context_anchor_message_id IS NOT NULL
+                            AND length(context_anchor_message_id) > 0
+                            AND context_anchor_create_time_ms IS NOT NULL
+                            AND typeof(context_anchor_create_time_ms) = 'integer'
+                            AND context_anchor_create_time_ms > 0
                         )
                     )
                 );
@@ -499,6 +867,8 @@ class BindingStore:
                     END
                     """
                 )
+                for statement in _CONTEXT_INTEGRITY_TRIGGERS:
+                    self._connection.execute(statement)
                 self._connection.execute(
                     """
                     CREATE TRIGGER IF NOT EXISTS scopes_activate_binding
@@ -568,6 +938,8 @@ class BindingStore:
         project_alias: str,
         creator_id: str,
         turn_settings: BindingTurnSettings | None = None,
+        message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
+        context_anchor: MessageContextAnchor | None = None,
     ) -> ThreadBinding:
         """Compatibility entry point for older callers.
 
@@ -583,6 +955,8 @@ class BindingStore:
             project_alias=project_alias,
             creator_id=creator_id,
             turn_settings=turn_settings,
+            message_context_mode=message_context_mode,
+            context_anchor=context_anchor,
             expected_project_revision=None,
             activate=True,
             allow_scope_insert=True,
@@ -597,6 +971,8 @@ class BindingStore:
         creator_id: str,
         expected_project_revision: int | None = None,
         turn_settings: BindingTurnSettings | None = None,
+        message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
+        context_anchor: MessageContextAnchor | None = None,
     ) -> ThreadBinding:
         """Atomically validate Project state, upsert exact Scope, and activate."""
 
@@ -607,6 +983,8 @@ class BindingStore:
             project_alias=project_alias,
             creator_id=creator_id,
             turn_settings=turn_settings,
+            message_context_mode=message_context_mode,
+            context_anchor=context_anchor,
             expected_project_revision=expected_project_revision,
             activate=True,
             allow_scope_insert=True,
@@ -632,6 +1010,8 @@ class BindingStore:
             project_alias=project_alias,
             creator_id=creator_id,
             turn_settings=turn_settings,
+            message_context_mode=MentionContextMode.CURRENT_ONLY,
+            context_anchor=None,
             expected_project_revision=expected_project_revision,
             activate=activate,
             allow_scope_insert=False,
@@ -645,6 +1025,8 @@ class BindingStore:
         project_alias: str,
         creator_id: str,
         turn_settings: BindingTurnSettings | None,
+        message_context_mode: MentionContextMode,
+        context_anchor: MessageContextAnchor | None,
         expected_project_revision: int | None,
         activate: bool,
         allow_scope_insert: bool,
@@ -652,9 +1034,15 @@ class BindingStore:
     ) -> ThreadBinding:
         if not project_alias or not creator_id:
             raise ValueError("Binding Project and creator must not be empty")
+        _validate_context_state(
+            scope_kind=scope.kind,
+            mode=message_context_mode,
+            anchor=context_anchor,
+        )
         binding_id = self._id_factory()
         now = _now()
         settings_values = _settings_values(turn_settings)
+        context_values = _context_values(context_anchor)
         with self._transaction():
             scope_row = self._connection.execute(
                 _SCOPE_SELECT + " WHERE scope_key = ?",
@@ -713,14 +1101,18 @@ class BindingStore:
                 INSERT INTO bindings(
                     binding_id, scope_key, project_alias, native_thread_id,
                     model_id, effort_id, service_tier_id, settings_revision,
+                    message_context_mode, context_anchor_message_id,
+                    context_anchor_create_time_ms, context_revision,
                     creator_id, created_at, activated_at, ever_activated
-                ) VALUES (?, ?, ?, NULL, ?, ?, ?, 1, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, NULL, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, ?)
                 """,
                 (
                     binding_id,
                     scope.key,
                     project_alias,
                     *settings_values,
+                    message_context_mode.value,
+                    *context_values,
                     creator_id,
                     now,
                     now,
@@ -781,23 +1173,211 @@ class BindingStore:
                 raise BindingSettingsRevisionConflict(binding_id)
         return self.get(binding_id)
 
-    def activate(self, *, scope_key: str, binding_id: str) -> ThreadBinding:
+    def set_configuration(
+        self,
+        *,
+        binding_id: str,
+        expected_settings_revision: int,
+        expected_context_revision: int,
+        settings: BindingTurnSettings | None,
+        message_context_mode: MentionContextMode,
+        context_anchor: MessageContextAnchor | None,
+    ) -> ThreadBinding:
+        """Atomically replace Turn settings and configure mention context.
+
+        Supplying an anchor is only meaningful when changing from
+        ``current-only`` to ``catch-up``.  A model-only update on an existing
+        catch-up Binding retains its exact boundary.
+        """
+
+        if expected_settings_revision < 1:
+            raise ValueError("expected settings revision must be positive")
+        if expected_context_revision < 1:
+            raise ValueError("expected context revision must be positive")
+        if not isinstance(message_context_mode, MentionContextMode):
+            raise ValueError("message context mode must be a MentionContextMode")
+        settings_values = _settings_values(settings)
+        with self._transaction():
+            row = self._connection.execute(
+                """
+                SELECT
+                    b.model_id, b.effort_id, b.service_tier_id,
+                    b.settings_revision, b.message_context_mode,
+                    b.context_anchor_message_id,
+                    b.context_anchor_create_time_ms, b.context_revision,
+                    s.kind AS scope_kind
+                FROM bindings b
+                JOIN scopes s ON s.scope_key = b.scope_key
+                WHERE b.binding_id = ?
+                """,
+                (binding_id,),
+            ).fetchone()
+            if row is None:
+                raise BindingNotFound(binding_id)
+            if row["settings_revision"] != expected_settings_revision:
+                raise BindingSettingsRevisionConflict(binding_id)
+            if row["context_revision"] != expected_context_revision:
+                raise BindingContextRevisionConflict(binding_id)
+
+            current_settings = (
+                row["model_id"],
+                row["effort_id"],
+                row["service_tier_id"],
+            )
+            current_mode = _mention_context_mode(row["message_context_mode"])
+            current_anchor = _message_context_anchor(
+                row["context_anchor_message_id"],
+                row["context_anchor_create_time_ms"],
+            )
+            scope_kind = ScopeKind(row["scope_kind"])
+            if message_context_mode is current_mode:
+                if context_anchor is not None:
+                    raise ValueError(
+                        "context anchor may only reset when context mode changes"
+                    )
+                next_anchor = current_anchor
+                context_changed = False
+            else:
+                next_anchor = context_anchor
+                context_changed = True
+            _validate_context_state(
+                scope_kind=scope_kind,
+                mode=message_context_mode,
+                anchor=next_anchor,
+            )
+
+            settings_changed = current_settings != settings_values
+            if not settings_changed and not context_changed:
+                return self.get(binding_id)
+            anchor_values = _context_values(next_anchor)
+            cursor = self._connection.execute(
+                """
+                UPDATE bindings
+                SET model_id = ?, effort_id = ?, service_tier_id = ?,
+                    settings_revision = settings_revision + ?,
+                    message_context_mode = ?,
+                    context_anchor_message_id = ?,
+                    context_anchor_create_time_ms = ?,
+                    context_revision = context_revision + ?
+                WHERE binding_id = ?
+                  AND settings_revision = ?
+                  AND context_revision = ?
+                """,
+                (
+                    *settings_values,
+                    int(settings_changed),
+                    message_context_mode.value,
+                    *anchor_values,
+                    int(context_changed),
+                    binding_id,
+                    expected_settings_revision,
+                    expected_context_revision,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise BindingConflict("Binding configuration changed concurrently")
+        return self.get(binding_id)
+
+    def commit_context_anchor(
+        self,
+        *,
+        binding_id: str,
+        expected_context_revision: int,
+        anchor: MessageContextAnchor,
+    ) -> ThreadBinding:
+        """Advance one catch-up boundary after native submission is accepted."""
+
+        if expected_context_revision < 1:
+            raise ValueError("expected context revision must be positive")
+        anchor_values = _context_values(anchor)
+        with self._transaction():
+            row = self._connection.execute(
+                """
+                SELECT b.message_context_mode, b.context_revision,
+                       s.kind AS scope_kind
+                FROM bindings b
+                JOIN scopes s ON s.scope_key = b.scope_key
+                WHERE b.binding_id = ?
+                """,
+                (binding_id,),
+            ).fetchone()
+            if row is None:
+                raise BindingNotFound(binding_id)
+            if row["context_revision"] != expected_context_revision:
+                raise BindingContextRevisionConflict(binding_id)
+            mode = _mention_context_mode(row["message_context_mode"])
+            if mode is not MentionContextMode.CATCH_UP:
+                raise BindingConflict(
+                    "current-only Binding has no context anchor to commit"
+                )
+            _validate_context_state(
+                scope_kind=ScopeKind(row["scope_kind"]),
+                mode=mode,
+                anchor=anchor,
+            )
+            cursor = self._connection.execute(
+                """
+                UPDATE bindings
+                SET context_anchor_message_id = ?,
+                    context_anchor_create_time_ms = ?,
+                    context_revision = context_revision + 1
+                WHERE binding_id = ? AND context_revision = ?
+                """,
+                (*anchor_values, binding_id, expected_context_revision),
+            )
+            if cursor.rowcount != 1:
+                raise BindingContextRevisionConflict(binding_id)
+        return self.get(binding_id)
+
+    def activate(
+        self,
+        *,
+        scope_key: str,
+        binding_id: str,
+        context_anchor: MessageContextAnchor | None = None,
+    ) -> ThreadBinding:
         now = _now()
         with self._transaction():
             owner = self._connection.execute(
-                "SELECT scope_key FROM bindings WHERE binding_id = ?",
+                """
+                SELECT b.scope_key, b.message_context_mode,
+                       s.kind AS scope_kind
+                FROM bindings b
+                JOIN scopes s ON s.scope_key = b.scope_key
+                WHERE b.binding_id = ?
+                """,
                 (binding_id,),
             ).fetchone()
             if owner is None or owner["scope_key"] != scope_key:
                 raise BindingNotFound(binding_id)
-            self._connection.execute(
-                """
-                UPDATE bindings
-                SET activated_at = ?, ever_activated = 1
-                WHERE binding_id = ?
-                """,
-                (now, binding_id),
+            mode = _mention_context_mode(owner["message_context_mode"])
+            _validate_context_state(
+                scope_kind=ScopeKind(owner["scope_kind"]),
+                mode=mode,
+                anchor=context_anchor,
             )
+            if mode is MentionContextMode.CATCH_UP:
+                anchor_values = _context_values(context_anchor)
+                self._connection.execute(
+                    """
+                    UPDATE bindings
+                    SET activated_at = ?, ever_activated = 1,
+                        context_anchor_message_id = ?,
+                        context_anchor_create_time_ms = ?,
+                        context_revision = context_revision + 1
+                    WHERE binding_id = ?
+                    """,
+                    (now, *anchor_values, binding_id),
+                )
+            else:
+                self._connection.execute(
+                    """
+                    UPDATE bindings
+                    SET activated_at = ?, ever_activated = 1
+                    WHERE binding_id = ?
+                    """,
+                    (now, binding_id),
+                )
             self._connection.execute(
                 """
                 UPDATE scopes
@@ -1727,6 +2307,10 @@ _BINDING_SELECT = """
         b.effort_id,
         b.service_tier_id,
         b.settings_revision,
+        b.message_context_mode,
+        b.context_anchor_message_id,
+        b.context_anchor_create_time_ms,
+        b.context_revision,
         b.creator_id,
         b.created_at,
         b.activated_at,
@@ -1761,6 +2345,10 @@ _BINDING_INVENTORY_SELECT = """
         b.effort_id,
         b.service_tier_id,
         b.settings_revision,
+        b.message_context_mode,
+        b.context_anchor_message_id,
+        b.context_anchor_create_time_ms,
+        b.context_revision,
         b.creator_id,
         b.created_at,
         b.activated_at,
@@ -1828,6 +2416,22 @@ def _binding(row: sqlite3.Row) -> ThreadBinding:
     settings_revision = row["settings_revision"]
     if not isinstance(settings_revision, int) or settings_revision < 1:
         raise RuntimeError("Binding contains an invalid settings revision")
+    message_context_mode = _mention_context_mode(row["message_context_mode"])
+    context_anchor = _message_context_anchor(
+        row["context_anchor_message_id"],
+        row["context_anchor_create_time_ms"],
+    )
+    if (
+        message_context_mode is MentionContextMode.CURRENT_ONLY
+        and context_anchor is not None
+    ) or (
+        message_context_mode is MentionContextMode.CATCH_UP
+        and context_anchor is None
+    ):
+        raise RuntimeError("Binding contains inconsistent mention context")
+    context_revision = row["context_revision"]
+    if not isinstance(context_revision, int) or context_revision < 1:
+        raise RuntimeError("Binding contains an invalid context revision")
     ever_activated = row["ever_activated"]
     if not isinstance(ever_activated, int) or ever_activated not in {0, 1}:
         raise RuntimeError("Binding contains an invalid activation flag")
@@ -1842,6 +2446,9 @@ def _binding(row: sqlite3.Row) -> ThreadBinding:
         active=bool(row["active"]),
         created_at=row["created_at"],
         activated_at=(row["activated_at"] if ever_activated else None),
+        message_context_mode=message_context_mode,
+        context_anchor=context_anchor,
+        context_revision=context_revision,
     )
 
 
@@ -1870,6 +2477,59 @@ def _settings_values(
     if settings is None:
         return (None, None, None)
     return (settings.model_id, settings.effort_id, settings.service_tier_id)
+
+
+def _mention_context_mode(value: object) -> MentionContextMode:
+    try:
+        return MentionContextMode(value)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(
+            "Binding contains an invalid mention context mode"
+        ) from error
+
+
+def _message_context_anchor(
+    message_id: object,
+    create_time_ms: object,
+) -> MessageContextAnchor | None:
+    if message_id is None and create_time_ms is None:
+        return None
+    try:
+        return MessageContextAnchor(
+            message_id=message_id,  # type: ignore[arg-type]
+            create_time_ms=create_time_ms,  # type: ignore[arg-type]
+        )
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("Binding contains an invalid context anchor") from error
+
+
+def _context_values(
+    anchor: MessageContextAnchor | None,
+) -> tuple[str | None, int | None]:
+    if anchor is None:
+        return (None, None)
+    if not isinstance(anchor, MessageContextAnchor):
+        raise ValueError("context anchor must be a MessageContextAnchor")
+    return (anchor.message_id, anchor.create_time_ms)
+
+
+def _validate_context_state(
+    *,
+    scope_kind: ScopeKind,
+    mode: MentionContextMode,
+    anchor: MessageContextAnchor | None,
+) -> None:
+    if not isinstance(mode, MentionContextMode):
+        raise ValueError("message context mode must be a MentionContextMode")
+    _context_values(anchor)
+    if mode is MentionContextMode.CURRENT_ONLY:
+        if anchor is not None:
+            raise ValueError("current-only context must not have an anchor")
+        return
+    if scope_kind is ScopeKind.DIRECT:
+        raise ValueError("direct Binding cannot use catch-up context")
+    if anchor is None:
+        raise ValueError("catch-up context requires an exact message anchor")
 
 
 def _project_record(row: sqlite3.Row) -> ProjectRecord:

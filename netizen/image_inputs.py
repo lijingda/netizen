@@ -42,7 +42,16 @@ class ImageInputContractError(ImageInputError):
     pass
 
 
-ImageSource = Literal["current_message", "quoted_message"]
+ImageSource = Literal[
+    "supplemental_message",
+    "quoted_message",
+    "current_message",
+]
+_IMAGE_SOURCE_ORDER: tuple[ImageSource, ...] = (
+    "supplemental_message",
+    "quoted_message",
+    "current_message",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,13 +302,23 @@ def compose_multimodal_input(
 
     if not images:
         return prompt_text
+    ordered_images = tuple(
+        image
+        for source in _IMAGE_SOURCE_ORDER
+        for image in images
+        if image.reference.source == source
+    )
+    if len(ordered_images) != len(images):
+        raise ImageInputContractError(
+            "图片输入包含未知的历史来源，本条消息未执行。"
+        )
     counts = {
         source: sum(image.reference.source == source for image in images)
-        for source in ("quoted_message", "current_message")
+        for source in _IMAGE_SOURCE_ORDER
     }
-    indexes = {"quoted_message": 0, "current_message": 0}
+    indexes = {source: 0 for source in _IMAGE_SOURCE_ORDER}
     items: list[Any] = []
-    for image in images:
+    for image in ordered_images:
         reference = image.reference
         indexes[reference.source] += 1
         label = {

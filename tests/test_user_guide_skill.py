@@ -373,6 +373,25 @@ class UserGuideSkillContentTest(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, guide)
 
+    def test_guide_explains_card_only_new_and_mention_context_modes(self) -> None:
+        guide = (RELEASE_SKILL / "references" / "user-guide.md").read_text(
+            encoding="utf-8"
+        )
+
+        for phrase in (
+            "`/new` 不接受参数",
+            "全部 enabled Projects",
+            "不由 Netizen\n  截断或分页",
+            "仅当前 @ 消息",
+            "补充上次请求后的消息",
+            "仍然只有 `@机器人` 才触发",
+            "不会执行 control",
+            "P2P、P2P 话题与 Side",
+            "最近 50 条补充消息",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, guide)
+
 
 class UserGuideSkillDiscoveryTest(unittest.IsolatedAsyncioTestCase):
     async def test_pinned_codex_discovers_the_managed_global_skill(self) -> None:

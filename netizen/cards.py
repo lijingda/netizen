@@ -18,6 +18,7 @@ from .domain import (
     CardControlIntent,
     CardControlName,
     FeishuScope,
+    MentionContextMode,
     SettingsSection,
     ScopeKind,
     TurnFileActionIntent,
@@ -43,8 +44,11 @@ TURN_FILE_MANIFEST_LIMIT = 500
 TURN_FILE_CARD_JSON_LIMIT_BYTES = 55_000
 _TURN_ANSWER_ELEMENT_ID = "turnanswerv1"
 _TURN_FILES_ELEMENT_ID = "turnfilesv4"
-MAX_PROJECT_ROWS = 12
 MAX_THREAD_NAME_CHARS = 120
+MAX_MODEL_ID_CHARS = 256
+MAX_ENCODED_MODEL_ID_CHARS = 1368
+MAX_SETTING_ID_CHARS = 128
+_INHERIT_MODEL_CHOICE = "inherit"
 _PROJECT_REFERENCE = re.compile(
     r"project:v1:([a-z0-9][a-z0-9_-]{0,63}):([1-9][0-9]*)"
 )
@@ -52,9 +56,16 @@ _BINDING_REFERENCE = re.compile(r"binding:v1:([A-Za-z0-9][A-Za-z0-9-]{0,127})")
 _NATIVE_THREAD_REFERENCE = re.compile(
     r"native-thread:v1:([A-Za-z0-9][A-Za-z0-9._-]{0,191})"
 )
+_NEW_MODEL_REFERENCE = re.compile(
+    r"new-model:v1:(inherit|explicit:([A-Za-z0-9_-]+))"
+)
 _CONFIG_MODEL_REFERENCE = re.compile(
-    r"config-model:v2:([A-Za-z0-9][A-Za-z0-9-]{0,127}):"
-    r"([1-9][0-9]*):([A-Za-z0-9_-]+)"
+    r"config-model:v3:([A-Za-z0-9][A-Za-z0-9-]{0,127}):"
+    r"([1-9][0-9]{0,18}):([1-9][0-9]{0,18}):"
+    r"(inherit|explicit:([A-Za-z0-9_-]+))"
+)
+_CONTEXT_MODE_REFERENCE = re.compile(
+    r"context-mode:v1:(current-only|catch-up)"
 )
 _RENAME_NAME_FIELD = re.compile(
     r"rename_name_v1__([A-Za-z0-9][A-Za-z0-9-]{0,127})"
@@ -597,7 +608,10 @@ def _project_create_form(project_root: str) -> dict[str, Any]:
 
 def _new_binding_form(
     projects: tuple[Project, ...],
-    catalog: ModelCatalog,
+    catalog: ModelCatalog | None,
+    *,
+    allow_context_mode: bool,
+    message_context_mode: MentionContextMode,
 ) -> dict[str, Any]:
     elements = [
         _form_label("Project"),
@@ -613,12 +627,41 @@ def _new_binding_form(
             ),
             initial_option=_project_reference(projects[0]),
         ),
-        *_model_settings_form_elements(prefix="new", catalog=catalog),
-        _form_submit_button(name="new_binding_submit_v4", label="新建会话"),
     ]
+    if allow_context_mode:
+        elements.extend(
+            _context_mode_form_elements(
+                prefix="new",
+                initial_mode=message_context_mode,
+            )
+        )
+    if catalog is None:
+        elements.extend(
+            [
+                _form_label("Model"),
+                _static_select(
+                    name="new_model",
+                    placeholder="选择 Model 来源",
+                    options=(("继承 Codex", _new_model_reference(None)),),
+                    initial_option=_new_model_reference(None),
+                ),
+            ]
+        )
+    else:
+        elements.extend(
+            _model_settings_form_elements(
+                prefix="new",
+                catalog=catalog,
+                model_value_encoder=_new_model_reference,
+                inherit_initial_when_unset=False,
+            )
+        )
+    elements.append(
+        _form_submit_button(name="new_binding_submit_v5", label="新建会话")
+    )
     return {
         "tag": "form",
-        "name": "new_binding_v4",
+        "name": "new_binding_v5",
         "elements": elements,
     }
 
@@ -627,28 +670,60 @@ def _binding_config_form(
     *,
     binding_id: str,
     settings_revision: int,
+    context_revision: int,
     turn_settings: BindingTurnSettings | None,
-    catalog: ModelCatalog,
+    message_context_mode: MentionContextMode,
+    allow_context_mode: bool,
+    catalog: ModelCatalog | None,
 ) -> dict[str, Any]:
-    return {
-        "tag": "form",
-        "name": "binding_config_v4",
-        "elements": [
-            *_model_settings_form_elements(
+    def model_reference(model_id: str | None) -> str:
+        return _config_model_reference(
+            binding_id=binding_id,
+            settings_revision=settings_revision,
+            context_revision=context_revision,
+            model_id=model_id,
+        )
+
+    elements: list[dict[str, Any]] = []
+    if allow_context_mode:
+        elements.extend(
+            _context_mode_form_elements(
+                prefix="config",
+                initial_mode=message_context_mode,
+            )
+        )
+    if catalog is None:
+        elements.extend(
+            [
+                _form_label("Model"),
+                _static_select(
+                    name="config_model",
+                    placeholder="选择 Model 来源",
+                    options=(("继承 Codex", model_reference(None)),),
+                    initial_option=model_reference(None),
+                ),
+            ]
+        )
+    else:
+        elements.extend(
+            _model_settings_form_elements(
                 prefix="config",
                 catalog=catalog,
                 turn_settings=turn_settings,
-                model_value_encoder=lambda model_id: _config_model_reference(
-                    binding_id=binding_id,
-                    settings_revision=settings_revision,
-                    model_id=model_id,
-                ),
-            ),
-            _form_submit_button(
-                name="binding_config_submit_v4",
-                label="保存会话配置",
-            ),
-        ],
+                model_value_encoder=model_reference,
+                inherit_initial_when_unset=True,
+            )
+        )
+    elements.append(
+        _form_submit_button(
+            name="binding_config_submit_v5",
+            label="保存会话配置",
+        )
+    )
+    return {
+        "tag": "form",
+        "name": "binding_config_v5",
+        "elements": elements,
     }
 
 
@@ -657,11 +732,14 @@ def _model_settings_form_elements(
     prefix: str,
     catalog: ModelCatalog,
     turn_settings: BindingTurnSettings | None = None,
-    model_value_encoder: Callable[[str], str] | None = None,
+    model_value_encoder: Callable[[str | None], str],
+    inherit_initial_when_unset: bool,
     model_label: str = "Model",
 ) -> list[dict[str, Any]]:
     default = catalog.default_model
-    model_id = default.id
+    model_id: str | None = (
+        None if inherit_initial_when_unset else default.id
+    )
     effort_id = default.default_effort_id
     service_tier_id = default.default_service_tier_id
     if turn_settings is not None:
@@ -684,22 +762,17 @@ def _model_settings_form_elements(
             name=f"{prefix}_model",
             placeholder="选择 Model",
             options=tuple(
-                (
-                    model.display_name
-                    + (" · 默认" if model.is_default else ""),
+                [("继承 Codex", model_value_encoder(None))]
+                + [
                     (
-                        model_value_encoder(model.id)
-                        if model_value_encoder is not None
-                        else model.id
-                    ),
-                )
-                for model in catalog.models
+                        model.display_name
+                        + (" · 默认" if model.is_default else ""),
+                        model_value_encoder(model.id),
+                    )
+                    for model in catalog.models
+                ]
             ),
-            initial_option=(
-                model_value_encoder(model_id)
-                if model_value_encoder is not None
-                else model_id
-            ),
+            initial_option=model_value_encoder(model_id),
         ),
         _form_label("Effort"),
         _static_select(
@@ -719,6 +792,31 @@ def _model_settings_form_elements(
                 for option in catalog.service_tier_options
             ),
             initial_option=service_tier_id,
+        ),
+    ]
+
+
+def _context_mode_form_elements(
+    *,
+    prefix: str,
+    initial_mode: MentionContextMode,
+) -> list[dict[str, Any]]:
+    return [
+        _form_label("@ 上下文模式"),
+        _static_select(
+            name=f"{prefix}_context_mode",
+            placeholder="选择 @ 上下文模式",
+            options=(
+                (
+                    "仅当前 @ 消息（默认）",
+                    _context_mode_reference(MentionContextMode.CURRENT_ONLY),
+                ),
+                (
+                    "补充上次请求后的消息",
+                    _context_mode_reference(MentionContextMode.CATCH_UP),
+                ),
+            ),
+            initial_option=_context_mode_reference(initial_mode),
         ),
     ]
 
@@ -764,28 +862,36 @@ def new_binding_card(
     projects: tuple[Project, ...],
     catalog: ModelCatalog | None = None,
     catalog_error: str | None = None,
+    allow_context_mode: bool = True,
+    message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
 ) -> OutboundCard:
-    builder = _builder("新建会话", "选择 Project 与模型配置")
+    builder = _builder("新建会话", "选择 Project 与会话配置")
     builder.markdown(
-        "只创建 lazy Binding，不会立即启动任务。所选 Model / Effort / Speed "
-        "会保存到当前会话，并应用于 Netizen 后续启动的每条新 Turn。"
+        "只创建 lazy Binding，不会立即启动任务。Model 可继承 Codex；"
+        "显式选择的 Model / Effort / Speed 会应用于后续每条新 Turn。"
     )
-    visible = projects[:MAX_PROJECT_ROWS]
-    if not visible:
+    if allow_context_mode:
+        builder.markdown(
+            "选择“补充上次请求后的消息”后，同一群聊或话题中未 @ 机器人的"
+            "成员消息也可能在下一次 @ 时进入 Codex 原生历史。"
+        )
+    if not projects:
         builder.markdown("当前没有可用 Project。请先发送 `/settings` 新增或启用。")
-    elif catalog is not None:
-        builder.raw(_new_binding_form(visible, catalog))
-        if len(projects) > len(visible):
-            builder.markdown(
-                f"<font color='grey'>仅显示前 {MAX_PROJECT_ROWS} 个 Project；"
-                "也可使用 `/new alias`。</font>"
-            )
     else:
+        if catalog is None:
+            builder.raw(
+                _notice(
+                    (catalog_error or "Model / Effort / Speed 暂不可用。")
+                    + " 当前仍可选择 Project 并继承 Codex 创建会话。",
+                    error=True,
+                )
+            )
         builder.raw(
-            _notice(
-                (catalog_error or "Model / Effort / Speed 暂不可用。")
-                + " 请稍后重试，或使用 `/new alias` 创建继承 Codex 的会话。",
-                error=True,
+            _new_binding_form(
+                projects,
+                catalog,
+                allow_context_mode=allow_context_mode,
+                message_context_mode=message_context_mode,
             )
         )
     return OutboundCard(card=builder.to_dict())
@@ -799,14 +905,31 @@ def config_card(
     project_alias: str,
     settings_revision: int,
     turn_settings: BindingTurnSettings | None,
-    catalog: ModelCatalog,
+    catalog: ModelCatalog | None,
+    context_revision: int = 1,
+    message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
+    allow_context_mode: bool = True,
+    catalog_error: str | None = None,
 ) -> OutboundCard:
     builder = _builder("当前会话配置", f"{short_id} · {project_alias}")
     builder.markdown(
-        "请选择当前会话使用的 Model / Effort / Speed；保存不会启动任务。"
-        "Netizen 后续每次启动新 Turn 时都会重新校验并应用这三项配置。"
+        "Model 可继承 Codex，也可显式选择 Model / Effort / Speed；"
+        "保存不会启动任务。"
     )
-    if turn_settings is not None:
+    if allow_context_mode:
+        builder.markdown(
+            "选择“补充上次请求后的消息”后，同一群聊或话题中未 @ 机器人的"
+            "成员消息也可能在下一次 @ 时进入 Codex 原生历史。"
+        )
+    if catalog is None:
+        builder.raw(
+            _notice(
+                (catalog_error or "Model / Effort / Speed 暂不可用。")
+                + " 当前仍可清除显式配置并改为继承 Codex。",
+                error=True,
+            )
+        )
+    elif turn_settings is not None:
         try:
             catalog.resolve(
                 model_id=turn_settings.model_id,
@@ -825,7 +948,10 @@ def config_card(
         _binding_config_form(
             binding_id=binding_id,
             settings_revision=settings_revision,
+            context_revision=context_revision,
             turn_settings=turn_settings,
+            message_context_mode=message_context_mode,
+            allow_context_mode=allow_context_mode,
             catalog=catalog,
         )
     )
@@ -1441,6 +1567,7 @@ def binding_created_card(
     short_id: str,
     project_alias: str,
     settings: TurnModelSettings | None = None,
+    message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
 ) -> OutboundCard:
     builder = _builder(
         "Project 选择成功",
@@ -1454,15 +1581,8 @@ def binding_created_card(
     builder.markdown(
         "现在可以直接发送任务；首条普通消息将创建原生 Codex Thread。"
     )
-    if settings is None:
-        builder.markdown("Model / Effort / Speed：继承 Codex。")
-    else:
-        builder.markdown(
-            "会话后续新 Turn 将使用："
-            f"Model=`{_md_code(settings.model)}` · "
-            f"Effort=`{_md_code(settings.effort_id)}` · "
-            f"Speed=`{_md_code(settings.service_tier_name)}`"
-        )
+    builder.markdown(_model_source_summary(settings))
+    builder.markdown(_context_mode_summary(message_context_mode))
     return OutboundCard(card=builder.to_dict())
 
 
@@ -1470,20 +1590,37 @@ def binding_configured_card(
     *,
     short_id: str,
     project_alias: str,
-    settings: TurnModelSettings,
+    settings: TurnModelSettings | None,
+    message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
 ) -> OutboundCard:
     builder = _builder(
         "会话配置已保存",
         f"{project_alias} · {short_id}",
         template="green",
     )
-    builder.markdown(
-        "会话后续新 Turn 将使用："
+    builder.markdown(_model_source_summary(settings))
+    builder.markdown(_context_mode_summary(message_context_mode))
+    return OutboundCard(card=builder.to_dict())
+
+
+def _model_source_summary(settings: TurnModelSettings | None) -> str:
+    if settings is None:
+        return "Model 来源：继承 Codex（不发送 Model / Effort / Speed override）。"
+    return (
+        "Model 来源：Netizen 会话显式配置。后续新 Turn 将使用："
         f"Model=`{_md_code(settings.model)}` · "
         f"Effort=`{_md_code(settings.effort_id)}` · "
         f"Speed=`{_md_code(settings.service_tier_name)}`"
     )
-    return OutboundCard(card=builder.to_dict())
+
+
+def _context_mode_summary(mode: MentionContextMode) -> str:
+    if mode is MentionContextMode.CATCH_UP:
+        return (
+            "@ 上下文模式：补充上次请求后的消息（catch-up）。"
+            "同一 Scope 中未 @ 机器人的成员消息可能在下一次 @ 时进入 Codex。"
+        )
+    return "@ 上下文模式：仅当前 @ 消息（current-only）。"
 
 
 def error_card(message: str, *, scope: FeishuScope | None = None) -> OutboundCard:
@@ -1733,19 +1870,65 @@ def _decode_new_binding_form(
 ) -> CardControlIntent:
     if tag != "button" or not message_id or not sender_id:
         raise CardActionError("会话配置表单回调不完整。")
-    expected_fields = {
-        "new_project",
-        "new_model",
-        "new_effort",
-        "new_speed",
-    }
     payload = dict(form_value)
-    if set(payload) != expected_fields:
+    base_fields = {"new_project", "new_model"}
+    context_fields = (
+        {"new_context_mode"} if "new_context_mode" in payload else set()
+    )
+    catalog_fields = {"new_effort", "new_speed"}
+    if frozenset(payload) not in {
+        frozenset(base_fields | context_fields),
+        frozenset(base_fields | context_fields | catalog_fields),
+    }:
         raise CardActionError("会话配置表单字段不完整或包含未知字段。")
 
     project_alias, expected_revision = _decode_project_reference(
         _required_string(payload["new_project"], "new_project")
     )
+    model_id = _decode_new_model_reference(
+        _required_string(payload["new_model"], "new_model")
+    )
+    message_context_mode = _decode_context_mode_reference(
+        _required_string(
+            payload.get(
+                "new_context_mode",
+                _context_mode_reference(MentionContextMode.CURRENT_ONLY),
+            ),
+            "new_context_mode",
+        )
+    )
+    effort_id = None
+    service_tier_id = None
+    has_catalog_fields = catalog_fields.issubset(payload)
+    if model_id is None:
+        if has_catalog_fields:
+            # A catalog-backed card renders these fields even when inherit is
+            # selected. Validate their bounds, then deliberately discard them.
+            _bounded_string(
+                payload["new_effort"],
+                "new_effort",
+                max_chars=MAX_SETTING_ID_CHARS,
+            )
+            _bounded_string(
+                payload["new_speed"],
+                "new_speed",
+                max_chars=MAX_SETTING_ID_CHARS,
+            )
+    else:
+        if not has_catalog_fields:
+            raise CardActionError(
+                "显式 Model 必须同时选择 Effort 与 Speed，请重新打开卡片。"
+            )
+        effort_id = _bounded_string(
+            payload["new_effort"],
+            "new_effort",
+            max_chars=MAX_SETTING_ID_CHARS,
+        )
+        service_tier_id = _bounded_string(
+            payload["new_speed"],
+            "new_speed",
+            max_chars=MAX_SETTING_ID_CHARS,
+        )
     return CardControlIntent(
         scope=scope,
         source_id=message_id,
@@ -1753,9 +1936,10 @@ def _decode_new_binding_form(
         name=CardControlName.CREATE_BINDING,
         project_alias=project_alias,
         expected_revision=expected_revision,
-        model_id=_required_string(payload["new_model"], "new_model"),
-        effort_id=_required_string(payload["new_effort"], "new_effort"),
-        service_tier_id=_required_string(payload["new_speed"], "new_speed"),
+        model_id=model_id,
+        effort_id=effort_id,
+        service_tier_id=service_tier_id,
+        message_context_mode=message_context_mode,
     )
 
 
@@ -1770,21 +1954,75 @@ def _decode_config_form(
     if tag != "button" or not message_id or not sender_id:
         raise CardActionError("会话配置表单回调不完整。")
     payload = dict(form_value)
-    if set(payload) != {"config_model", "config_effort", "config_speed"}:
+    base_fields = {"config_model"}
+    context_fields = (
+        {"config_context_mode"} if "config_context_mode" in payload else set()
+    )
+    catalog_fields = {"config_effort", "config_speed"}
+    if frozenset(payload) not in {
+        frozenset(base_fields | context_fields),
+        frozenset(base_fields | context_fields | catalog_fields),
+    }:
         raise CardActionError("会话配置表单字段不完整或包含未知字段。")
-    binding_id, expected_settings_revision, model_id = _decode_config_model_reference(
+    (
+        binding_id,
+        expected_settings_revision,
+        expected_context_revision,
+        model_id,
+    ) = _decode_config_model_reference(
         _required_string(payload["config_model"], "config_model")
     )
+    message_context_mode = _decode_context_mode_reference(
+        _required_string(
+            payload.get(
+                "config_context_mode",
+                _context_mode_reference(MentionContextMode.CURRENT_ONLY),
+            ),
+            "config_context_mode",
+        )
+    )
+    effort_id = None
+    service_tier_id = None
+    has_catalog_fields = catalog_fields.issubset(payload)
+    if model_id is None:
+        if has_catalog_fields:
+            _bounded_string(
+                payload["config_effort"],
+                "config_effort",
+                max_chars=MAX_SETTING_ID_CHARS,
+            )
+            _bounded_string(
+                payload["config_speed"],
+                "config_speed",
+                max_chars=MAX_SETTING_ID_CHARS,
+            )
+    else:
+        if not has_catalog_fields:
+            raise CardActionError(
+                "显式 Model 必须同时选择 Effort 与 Speed，请重新打开卡片。"
+            )
+        effort_id = _bounded_string(
+            payload["config_effort"],
+            "config_effort",
+            max_chars=MAX_SETTING_ID_CHARS,
+        )
+        service_tier_id = _bounded_string(
+            payload["config_speed"],
+            "config_speed",
+            max_chars=MAX_SETTING_ID_CHARS,
+        )
     return CardControlIntent(
         scope=scope,
         source_id=message_id,
         sender_id=sender_id,
         name=CardControlName.CONFIGURE_BINDING,
         expected_settings_revision=expected_settings_revision,
+        expected_context_revision=expected_context_revision,
         binding_id=binding_id,
         model_id=model_id,
-        effort_id=_required_string(payload["config_effort"], "config_effort"),
-        service_tier_id=_required_string(payload["config_speed"], "config_speed"),
+        effort_id=effort_id,
+        service_tier_id=service_tier_id,
+        message_context_mode=message_context_mode,
     )
 
 
@@ -2097,28 +2335,88 @@ def _rename_name_field(binding_id: str) -> str:
     return f"rename_name_v1__{binding_id}"
 
 
+def _new_model_reference(model_id: str | None) -> str:
+    choice = _encode_model_choice(model_id)
+    value = f"new-model:v1:{choice}"
+    if _NEW_MODEL_REFERENCE.fullmatch(value) is None:
+        raise ValueError("invalid new Binding model reference")
+    return value
+
+
+def _decode_new_model_reference(value: str) -> str | None:
+    match = _NEW_MODEL_REFERENCE.fullmatch(value)
+    if match is None:
+        raise CardActionError("新建会话卡片已过期，请重新发送 /new。")
+    return _decode_model_choice(match.group(1), match.group(2), command="/new")
+
+
 def _config_model_reference(
     *,
     binding_id: str,
     settings_revision: int,
-    model_id: str,
+    context_revision: int,
+    model_id: str | None,
 ) -> str:
-    encoded_model = base64.urlsafe_b64encode(model_id.encode("utf-8")).decode(
-        "ascii"
-    ).rstrip("=")
+    choice = _encode_model_choice(model_id)
     value = (
-        f"config-model:v2:{binding_id}:{settings_revision}:{encoded_model}"
+        f"config-model:v3:{binding_id}:{settings_revision}:"
+        f"{context_revision}:{choice}"
     )
     if _CONFIG_MODEL_REFERENCE.fullmatch(value) is None:
         raise ValueError("invalid Binding model settings reference")
     return value
 
 
-def _decode_config_model_reference(value: str) -> tuple[str, int, str]:
+def _decode_config_model_reference(
+    value: str,
+) -> tuple[str, int, int, str | None]:
     match = _CONFIG_MODEL_REFERENCE.fullmatch(value)
     if match is None:
         raise CardActionError("会话配置卡片已过期，请重新发送 /config。")
-    encoded_model = match.group(3)
+    model_id = _decode_model_choice(
+        match.group(4),
+        match.group(5),
+        command="/config",
+    )
+    return match.group(1), int(match.group(2)), int(match.group(3)), model_id
+
+
+def _encode_model_choice(model_id: str | None) -> str:
+    if model_id is None:
+        return _INHERIT_MODEL_CHOICE
+    if (
+        not isinstance(model_id, str)
+        or not model_id
+        or len(model_id) > MAX_MODEL_ID_CHARS
+        or "\x00" in model_id
+    ):
+        raise ValueError("invalid model ID")
+    encoded_model = base64.urlsafe_b64encode(model_id.encode("utf-8")).decode(
+        "ascii"
+    ).rstrip("=")
+    return f"explicit:{encoded_model}"
+
+
+def _decode_model_choice(
+    choice: str,
+    encoded_model: str | None,
+    *,
+    command: str,
+) -> str | None:
+    if choice == _INHERIT_MODEL_CHOICE:
+        if encoded_model is not None:
+            raise CardActionError(
+                f"会话配置卡片已过期，请重新发送 {command}。"
+            )
+        return None
+    if encoded_model is None:
+        raise CardActionError(
+            f"会话配置卡片已过期，请重新发送 {command}。"
+        )
+    if len(encoded_model) > MAX_ENCODED_MODEL_ID_CHARS:
+        raise CardActionError(
+            f"会话配置卡片已过期，请重新发送 {command}。"
+        )
     padding = "=" * (-len(encoded_model) % 4)
     try:
         model_id = base64.b64decode(
@@ -2128,11 +2426,28 @@ def _decode_config_model_reference(value: str) -> tuple[str, int, str]:
         ).decode("utf-8")
     except (UnicodeDecodeError, ValueError) as error:
         raise CardActionError(
-            "会话配置卡片已过期，请重新发送 /config。"
+            f"会话配置卡片已过期，请重新发送 {command}。"
         ) from error
-    if not model_id:
-        raise CardActionError("会话配置卡片已过期，请重新发送 /config。")
-    return match.group(1), int(match.group(2)), model_id
+    if (
+        not model_id
+        or len(model_id) > MAX_MODEL_ID_CHARS
+        or "\x00" in model_id
+    ):
+        raise CardActionError(
+            f"会话配置卡片已过期，请重新发送 {command}。"
+        )
+    return model_id
+
+
+def _context_mode_reference(mode: MentionContextMode) -> str:
+    return f"context-mode:v1:{mode.value}"
+
+
+def _decode_context_mode_reference(value: str) -> MentionContextMode:
+    match = _CONTEXT_MODE_REFERENCE.fullmatch(value)
+    if match is None:
+        raise CardActionError("@ 上下文模式卡片已过期，请重新打开卡片。")
+    return MentionContextMode(match.group(1))
 
 
 def _builder(title: str, subtitle: str, *, template: str = "blue"):
@@ -2523,6 +2838,13 @@ def _required_string(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise CardActionError(f"{field} 必须是非空字符串。")
     return value
+
+
+def _bounded_string(value: Any, field: str, *, max_chars: int) -> str:
+    result = _required_string(value, field)
+    if len(result) > max_chars or "\x00" in result:
+        raise CardActionError(f"{field} 内容无效或超过 {max_chars} 个字符。")
+    return result
 
 
 def _md_code(value: str) -> str:

@@ -50,10 +50,16 @@ Server 是 `AsyncCodex` 的子进程，不是第二套业务服务。
 
 Scope 分为 P2P、群聊主线和真实 topic。Binding 保存本地 UUID、Scope、Project
 alias、可空 write-once native Thread ID、可选的 Binding-scoped Model/Effort/Speed
-目录 ID、settings revision、creator 和时间；Scope 只保存 active Binding 指针。
+目录 ID、settings revision、Mention Context Mode、Context Boundary、context revision、
+creator 和时间；Scope 只保存 active Binding 指针。P2P 固定为 `current-only`；普通群聊
+主线与群话题可在 `current-only|catch-up` 中选择，默认 `current-only`。Side 不是普通
+Binding，不继承 Parent 的选择并固定沿用 current-only。
 
-`/new <alias>` 命令和零参数 `/new` 的唯一表单都只写 Binding。命令路径把三项留空并
-继承 Codex；卡片直接保存三个全有的目录 ID，但不要求任务、不创建 native Thread。
+exact `/new` 是普通用户创建会话的唯一入口；任何 `/new ...` 参数都零 mutation 地拒绝。
+卡片在单个静态下拉框中按 Registry 顺序展示全部 enabled Projects，不设置应用级条数上限、
+不分页，也不以命令旁路兜底。卡片可以选择 `inherit Codex`，或保存三个全有的目录 ID；
+在群聊/群话题中还可以选择 Mention Context Mode。它只写 Binding，不要求任务、不创建
+native Thread。模型目录不可用时仍展示可提交的 Project + inherit 表单。
 下一条需要启动新 Turn 的普通消息执行：
 
 1. 若有 Binding 配置，在进入 native mutation 前重新调用 live `codex.models()`，按所选
@@ -79,8 +85,35 @@ admission 并要求重启，不能把 Binding 当 idle 再启动第二轮。
 
 running Turn 的普通输入仍只调用 exact handle `steer()`：即使 Binding 有配置，也不读取
 模型目录或应用它。`/config` 在 running/stopping、Goal active
-或 compacting 时明确拒绝。配置 revision 同时进入 submission admission；引用/图片/
-Skill 准备期间配置发生变化时，本条消息不执行并要求重发。
+或 compacting 时明确拒绝。settings/context revision 同时进入 submission admission；
+引用、补充历史、图片或 Skill 准备期间配置或 Context Boundary 发生变化时，本条消息不
+执行并要求重发。
+
+Mention Context Mode 按
+[ADR 0039](adr/0039-add-binding-scoped-mention-catch-up-context.md) 保持群聊逐条 @ 的准入不变：
+
+- `current-only` 只投影当前 @ 消息及用户显式选择的一条逐条引用；
+- `catch-up` 在收到有效 @ 消息后才按需读取同一 group-main 或 ordinary-topic Scope 中，
+  上一条已接受 Context Boundary 之后、当前消息之前的 eligible 非 bot 成员消息。历史中的
+  `/control` 和 `$skill` 都编码为 inert supplemental context，不会自动触发任何动作；
+- P2P 与 Side 不读取补充历史。未 @ 的消息不会直接 start/steer，也不会由 Channel 缓存或
+  写入 SQLite；只有最终 native input 进入 Codex 原生历史。
+
+Context Boundary 是 Binding-scoped exact 飞书消息 marker，不是机器人回复时间。`/new`
+创建 catch-up Binding、`/resume`、`/unarchive` 或从 current-only 切换为 catch-up 时，以
+exact control/card message 重置边界，避免补录 Binding 非 active 期间的讨论。start/steer
+被 native Runtime 确认接受后，Runtime 才在同一 Binding lock 内 CAS 推进边界；失败、竞态
+拒绝或准备超时不推进。若 native 已接受但 SQLite commit 失败，Runtime 保留 active tracking、
+关闭全局 admission，并明确报告任务已接受但边界未持久化。
+
+补充历史由一个进程内、只读的 official `lark-oapi` typed reader 按需读取；它复用同一
+App ID/Secret，不创建第二个 Channel/WebSocket。群主线使用 exact chat container 并排除
+topic replies，普通话题使用 exact thread container；lower/upper 都通过 exact message ID
+核验。一次读取最多 10 页/500 条 raw message/60 秒，最多保留最近 50 条 eligible message、
+64,000 字符 supplemental visible text，候选 exact fetch 最多 4 路并发。图片与当前/引用
+消息共用 20 张、单图 20 MB、总计 50 MB 的原有准入限制。截断和 unsupported omission
+通过 envelope 与提交前可见回执披露；被选中消息的 Scope/identity/资源失败则整条 fail
+closed。完整历史语义与上线 live probe 见 ADR 0039。
 
 每个真实普通或 Side Prompt 在进入 Runtime 前都按
 [ADR 0029](adr/0029-project-current-message-provenance-into-prompts.md) 投影 exact Current
@@ -90,10 +123,11 @@ Prompt Message。投影使用 Channel SDK 公开的消息 ID、`text/image/post`
 member roster 姓名补全，并要求当前 sender 具有真实显示名；缺名时在引用读取或图片下载前
 零 start/steer，明确提示 `im:chat.members:read`，不再生成“未知发送者”。sender 只投影
 `display_name`、应用内 `open_id`、`is_bot` 和 `sender_type`；不把跨应用 `union_id` 或
-租户级 `user_id` 写入 Codex 历史。无逐条引用时，
-归一化请求正文位于最前，版本化 attribution trailer 位于末尾，且不重复正文；有引用时
-使用 v3 JSON envelope，最后的 `current_message.request_text` 保持完整。两者都会作为
-native input 进入 Codex 历史，
+租户级 `user_id` 写入 Codex 历史。无补充上下文且无逐条引用时，归一化请求正文位于最前，
+版本化 attribution trailer 位于末尾且不重复正文；只有引用时使用 v3 JSON envelope；
+catch-up 使用 v1 `feishu_message_context_prompt` envelope，顺序固定为 supplemental
+messages、可选且去重的 quoted message、最后的 current message，且
+`current_message.request_text` 保持完整。这些输入都会进入 Codex 原生历史，
 但不写 Channel Database。来源消息 ID/sender 与同次解析冲突时整条 fail closed。
 
 普通消息开头的连续 `$skill-name` 引用由 Prompt compiler 在当前消息上解析。Runtime
@@ -375,16 +409,19 @@ handle 回报不同 ID，关闭 admission 且不对不可信 handle 执行 inter
 
 `channel.sqlite3` 只有 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`。最后一张表直接实现 Channel SDK 冻结的 `seen/mark`
-DedupStore 协议。Schema v5 的 `bindings` 保存全空或全有的三个 Binding-scoped catalog
-ID、settings revision 和 rollback-compatible `ever_activated` 标记；旧行/default 仍为 1，
+DedupStore 协议。Schema v6 的 `bindings` 保存全空或全有的三个 Binding-scoped catalog
+ID、settings revision、`current-only|catch-up`、全空或全有的 exact Context Boundary、
+context revision，以及 rollback-compatible `ever_activated` 标记；旧行/default 仍为 1，
 Admin 仅创建且从未设为当前的 Lazy Binding 为 0，第一次 active-pointer 提交由 trigger
-原子改为 1。`side_topics` 保存 app/chat/topic/root/source、Parent Binding
+原子改为 1。`current-only` 不得有 boundary，group/topic 的 catch-up 必须有完整 boundary；
+模式/边界更新和 Runtime 接受后的 cursor CAS 都由数据库约束保护。`side_topics` 保存
+app/chat/topic/root/source、Parent Binding
 ID、creator、mention policy、creating/open/closed/expired/failed 和时间，不保存
 ephemeral native Thread ID 或内容。服务只接受当前 schema，不承担旧 Channel Database 的自动迁移；
-没有历史 Side 的首次 v4 -> v5 Pilot 升级可归档旧数据库后重建；v5 之后的升级必须迁移或
-等价保留 `side_topics` 永久墓碑，不能把旧 Side 话题重新开放为普通 Binding。它不保存
-解析后的 wire value 或已生效配置。
-数据库没有 prompt、当前消息发送者投影、回复、ephemeral native Thread ID、Turn、Goal、
+v5 -> v6 必须由 release transaction 迁移或等价保留 `side_topics` 永久墓碑，不能按通用
+重建流程把旧 Side 话题重新开放为普通 Binding。它不保存解析后的 wire value 或已生效配置。
+数据库没有 prompt、补充消息正文/发送者投影、当前消息发送者投影、回复、ephemeral
+native Thread ID、Turn、Goal、
 Skill catalog、plan/checklist、reaction、cwd
 副本、本轮文件清单/快照/摘要、card session、Codex config、Thread name/archive 状态或
 queue 表，也不保存 Admin credential、session、action/CSRF token、native metadata 索引或
@@ -473,13 +510,13 @@ JSON envelope；被引用消息保持 ADR 0011 的宽类型矩阵，当前 `text
 raw 事件/card JSON 不会整体复制。被引用消息自己的 reply 只保留公开关系 ID，
 不递归读取；图片不保存到 SQLite、文件或长期 cache。超时、撤回、
 缺权限、返回 ID/chat 不一致和类型不支持都在 start/steer 前显式拒绝。
-引用或图片准备期间若 `/resume`、`/new`、archive/unarchive 改变 Scope 的 current
-Binding，已经捕获 admission 的消息也会明确失败并要求重发；它不会继续投递到旧
+引用、补充历史或图片准备期间若 `/resume`、`/new`、archive/unarchive 改变 Scope 的
+current Binding，已经捕获 admission 的消息也会明确失败并要求重发；它不会继续投递到旧
 Binding，更不会被重解释为新 current Binding 的 Turn/steer。
 
-当前消息和被引用消息只要类型为普通 `image` 或 `post`，Channel 边界都会从公开
+当前消息、被引用消息和被选中的补充消息只要类型为普通 `image` 或 `post`，Channel 边界都会从公开
 普通资源描述与 typed `PostContent.post` 当前渲染版本收集真实图片节点，并按
-“引用在前、当前在后”的来源 label 转成 Codex 原生
+“补充、引用、当前”的稳定来源顺序和 label 转成 Codex 原生
 `TextInput/ImageInput` 列表。总计最多 20 张、单图 20 MB、原始字节合计 50 MB；
 每条 prompt 内串行下载，单图 10 秒、整批 60 秒，只接受 PNG/JPEG/GIF/WebP magic
 bytes。不同 Binding 的图片准备保持并发，不增加全局 gate、semaphore 或 prompt queue。
@@ -556,17 +593,23 @@ card-session 状态。管理表单把 alias 与 revision 编码进静态下拉�
 Channel SDK 尚未透传的单选 change option，也不读取原始回调。Projects 卡片动作只
 执行短 SQLite 事务，不获取 Codex Turn 锁。
 
-`/new` 卡片只有一个 form：Project、Model、Effort、Speed，不显示额外的“配置方式”。
-三项默认值来自实时模型目录，提交时全部保存。模型目录不可用时不展示可提交 form，
-并提示稍后重试或使用 `/new <alias>` 创建继承 Codex 的会话。提交后只创建 lazy
-Binding，并把原卡重绘为包含 Project、会话短 ID、配置摘要和下一步的绿色终态；业务
-失败显示红色原因。若公开卡片更新返回失败或抛错，回调在同一聊天或话题回复等价结果，
-避免已提交的 Binding 没有反馈。
+`/new` 卡片只有一个创建 form：一个包含全部 enabled Projects 的 Project 下拉框，以及
+Model、Effort、Speed；群聊和群话题再增加 Mention Context Mode。默认 mode 是
+`current-only`，P2P 不显示该字段。Model 下拉包含稳定的 `inherit Codex` sentinel；选择
+实际模型时三项必须完整并经 live catalog resolve。模型目录不可用时仍展示 Project、
+Context Mode 和 inherit 的 minimal form，不要求用户改走命令。提交后只创建 lazy Binding，
+并把原卡重绘为包含 Project、会话短 ID、Model 来源、Mention Context Mode 和下一步的绿色
+终态；业务失败显示红色原因。若完整 Project card 被飞书平台拒绝，明确说明没有静默截断、
+分页或快捷创建兜底。若公开卡片更新返回失败或抛错，回调在同一聊天或话题回复等价结果，
+避免已提交的 Binding 没有反馈。完整决定见
+[ADR 0040](adr/0040-make-new-card-only-and-show-all-projects.md)。
+
 `/config` 是独立的会话卡片，不属于实例级 `/settings` Projects 分区；它用同一组
-Model、Effort、Speed 选择器更新当前 active Binding 的持久配置，不要求任务、不创建
-Turn。卡片不显示会话选择或“继承/自定义”模式；配置其他 Binding 必须先 `/resume`
-切换。完整 Binding ID 与 settings revision 编码在 Model 选择器不可见的 option value 中，
-即使 active Binding 已切换或另一张卡先提交，旧卡也会零 mutation 地失败。
+Model inherit/explicit 语义更新当前 active Binding 的持久设置，并在群聊/群话题允许切换
+Mention Context Mode，不要求任务、不创建 Turn。配置其他 Binding 必须先 `/resume` 切换。
+完整 Binding ID、settings revision 与 context revision 编码在版本化 option reference 中；
+模式与模型设置在一笔 Store transaction 内校验和保存，即使 active Binding 已切换、另一张
+卡先提交或 catch-up anchor 读取失败，旧卡也会零 mutation 地失败，不会部分保存。
 
 `/sessions` 通过公开、只读且支持分页的
 `codex.thread_list(model_providers=[])` 跨 provider 批量读取原生 Thread
@@ -640,8 +683,9 @@ steer 请求开始后到达的下一次 exact plan update 清除标记，失败 
 不完整且无法公开翻页，必须整体拒绝而不是把第一页伪装成完整选项。`default` 是 App
 Server 显式回到 Standard 服务层的协议值，其余 Speed
 完全来自模型目录。Fast 仍是同一模型的 Service Tier，不能与独立 Codex Spark Model
-合并。配置表单携带完整 Binding ID 和 settings revision；若打开后 active Binding 被
-`/new`/`/resume` 切换，或配置已被另一张卡修改，本次操作失败。running/
+合并。配置表单携带完整 Binding ID、settings revision 和 context revision；若打开后
+active Binding 被 `/new`/`/resume` 切换，或配置/Context Boundary 已被另一张卡或成功
+Prompt 修改，本次操作失败。running/
 stopping Turn 同样拒绝，不转成 steer、queue 或延迟重放。卡片提交本身没有 Turn
 receipt/completion 生命周期；后续普通消息沿用统一的 prompt 表情回执与终态路径。
 

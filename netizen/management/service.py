@@ -49,7 +49,11 @@ from ..codex_runtime import (
     ThreadCatalogIdentityMissing,
     ThreadDeleteTargetChanged,
 )
-from ..domain import FeishuScope
+from ..domain import (
+    FeishuScope,
+    MessageContextAnchor,
+    MentionContextMode,
+)
 from ..projects import (
     Project,
     ProjectDisabled,
@@ -256,8 +260,35 @@ class ManagementRuntimePort:
             settings=settings,
         )
 
-    async def activate_exact(self, binding_id: str) -> ThreadBinding:
-        return await self.__runtime.activate_exact(binding_id)
+    async def configure_context_exact(
+        self,
+        *,
+        binding_id: str,
+        expected_settings_revision: int,
+        expected_context_revision: int,
+        settings: BindingTurnSettings | None,
+        message_context_mode: MentionContextMode,
+        context_anchor: MessageContextAnchor | None,
+    ) -> ThreadBinding:
+        return await self.__runtime.configure_context_exact(
+            binding_id=binding_id,
+            expected_settings_revision=expected_settings_revision,
+            expected_context_revision=expected_context_revision,
+            settings=settings,
+            message_context_mode=message_context_mode,
+            context_anchor=context_anchor,
+        )
+
+    async def activate_exact(
+        self,
+        binding_id: str,
+        *,
+        context_anchor: MessageContextAnchor | None = None,
+    ) -> ThreadBinding:
+        return await self.__runtime.activate_exact(
+            binding_id,
+            context_anchor=context_anchor,
+        )
 
     async def resolve_turn_settings(
         self,
@@ -286,8 +317,16 @@ class ManagementRuntimePort:
     async def restore_exact(self, binding_id: str) -> ThreadBinding:
         return await self.__runtime.restore_exact(binding_id)
 
-    async def restore_as_current_exact(self, binding_id: str) -> ThreadBinding:
-        return await self.__runtime.restore_as_current_exact(binding_id)
+    async def restore_as_current_exact(
+        self,
+        binding_id: str,
+        *,
+        context_anchor: MessageContextAnchor | None = None,
+    ) -> ThreadBinding:
+        return await self.__runtime.restore_as_current_exact(
+            binding_id,
+            context_anchor=context_anchor,
+        )
 
     async def delete_lazy_exact(self, binding_id: str) -> ThreadBinding:
         return await self.__runtime.delete_lazy_exact(binding_id)
@@ -612,6 +651,8 @@ class InstanceManagementService:
         project_alias: str,
         expected_project_revision: int | None = None,
         turn_settings: BindingTurnSettings | None = None,
+        message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
+        context_anchor: MessageContextAnchor | None = None,
         deadline: float | None = None,
     ) -> CreatedBinding:
         project = await self._blocking_io.submit(
@@ -629,6 +670,8 @@ class InstanceManagementService:
                     creator_id=creator_id,
                     expected_project_revision=expected_project_revision,
                     turn_settings=turn_settings,
+                    message_context_mode=message_context_mode,
+                    context_anchor=context_anchor,
                 )
             except (
                 StoredProjectNotFound,
@@ -699,6 +742,7 @@ class InstanceManagementService:
         *,
         scope_key: str,
         reference: str,
+        context_anchor: MessageContextAnchor | None = None,
     ) -> ThreadBinding:
         async with self._scope_coordinator.hold(scope_key):
             previous_id = self._active_id(scope_key)
@@ -707,7 +751,10 @@ class InstanceManagementService:
                 reference=reference,
             )
             try:
-                activated = await self._runtime.activate_exact(binding.id)
+                activated = await self._runtime.activate_exact(
+                    binding.id,
+                    context_anchor=context_anchor,
+                )
             except ThreadCatalogIdentityMissing as error:
                 raise NativeThreadMissing(
                     "原生会话不在 active 或 archived catalog；本次未设为当前。"
@@ -720,6 +767,7 @@ class InstanceManagementService:
         *,
         scope_key: str,
         reference: str,
+        context_anchor: MessageContextAnchor | None = None,
     ) -> ThreadBinding:
         async with self._scope_coordinator.hold(scope_key):
             previous_id = self._active_id(scope_key)
@@ -727,7 +775,10 @@ class InstanceManagementService:
                 scope_key=scope_key,
                 reference=reference,
             )
-            restored = await self._runtime.restore_as_current_exact(binding.id)
+            restored = await self._runtime.restore_as_current_exact(
+                binding.id,
+                context_anchor=context_anchor,
+            )
             await self._runtime.binding_pointer_changed(previous_id, restored.id)
             return restored
 
@@ -736,14 +787,20 @@ class InstanceManagementService:
         *,
         target: CurrentBindingTarget,
         expected_settings_revision: int,
+        expected_context_revision: int,
         settings: BindingTurnSettings | None,
+        message_context_mode: MentionContextMode,
+        context_anchor: MessageContextAnchor | None,
     ) -> ThreadBinding:
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
-            return await self._runtime.configure_exact(
+            return await self._runtime.configure_context_exact(
                 binding_id=binding.id,
-                expected_revision=expected_settings_revision,
+                expected_settings_revision=expected_settings_revision,
+                expected_context_revision=expected_context_revision,
                 settings=settings,
+                message_context_mode=message_context_mode,
+                context_anchor=context_anchor,
             )
 
     async def rename_current_binding(

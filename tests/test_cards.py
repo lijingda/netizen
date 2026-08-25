@@ -16,6 +16,7 @@ from netizen.cards import (
     archived_sessions_card,
     sessions_card,
     sessions_delete_binding_card,
+    binding_created_card,
     binding_configured_card,
     config_card,
     decode_button_action,
@@ -37,6 +38,7 @@ from netizen.bindings import BindingTurnSettings, SideTopicState
 from netizen.domain import (
     CardControlName,
     FeishuScope,
+    MentionContextMode,
     SettingsSection,
     ScopeKind,
     TurnFileActionName,
@@ -563,7 +565,9 @@ class CardCodecTest(unittest.TestCase):
                         },
                     )
 
-    def test_binding_settings_forms_are_strict_and_typed(self) -> None:
+    def test_binding_settings_forms_decode_explicit_and_context_revisions(
+        self,
+    ) -> None:
         created = decode_card_form(
             scope=self.scope,
             message_id="om_card",
@@ -571,7 +575,8 @@ class CardCodecTest(unittest.TestCase):
             tag="button",
             form_value={
                 "new_project": "project:v1:test:3",
-                "new_model": "future-model",
+                "new_context_mode": "context-mode:v1:catch-up",
+                "new_model": "new-model:v1:explicit:ZnV0dXJlLW1vZGVs",
                 "new_effort": "ultra",
                 "new_speed": "priority-v2",
             },
@@ -582,6 +587,10 @@ class CardCodecTest(unittest.TestCase):
         self.assertEqual(created.model_id, "future-model")
         self.assertEqual(created.effort_id, "ultra")
         self.assertEqual(created.service_tier_id, "priority-v2")
+        self.assertEqual(
+            created.message_context_mode,
+            MentionContextMode.CATCH_UP,
+        )
 
         configured = decode_card_form(
             scope=self.scope,
@@ -590,10 +599,11 @@ class CardCodecTest(unittest.TestCase):
             tag="button",
             form_value={
                 "config_model": (
-                    "config-model:v2:"
-                    "11111111-0000-0000-0000-000000000001:7:"
-                    "ZnV0dXJlLW1vZGVs"
+                    "config-model:v3:"
+                    "11111111-0000-0000-0000-000000000001:7:11:"
+                    "explicit:ZnV0dXJlLW1vZGVs"
                 ),
+                "config_context_mode": "context-mode:v1:current-only",
                 "config_effort": "ultra",
                 "config_speed": "default",
             },
@@ -604,26 +614,88 @@ class CardCodecTest(unittest.TestCase):
             "11111111-0000-0000-0000-000000000001",
         )
         self.assertEqual(configured.expected_settings_revision, 7)
+        self.assertEqual(configured.expected_context_revision, 11)
         self.assertEqual(configured.model_id, "future-model")
         self.assertEqual(configured.effort_id, "ultra")
         self.assertEqual(configured.service_tier_id, "default")
+        self.assertEqual(
+            configured.message_context_mode,
+            MentionContextMode.CURRENT_ONLY,
+        )
 
+    def test_binding_settings_forms_decode_minimal_and_catalog_inherit(
+        self,
+    ) -> None:
+        minimal = decode_card_form(
+            scope=self.scope,
+            message_id="om_card",
+            sender_id="ou_user",
+            tag="button",
+            form_value={
+                "new_project": "project:v1:test:3",
+                "new_context_mode": "context-mode:v1:current-only",
+                "new_model": "new-model:v1:inherit",
+            },
+        )
+        catalog = decode_card_form(
+            scope=self.scope,
+            message_id="om_card",
+            sender_id="ou_user",
+            tag="button",
+            form_value={
+                "new_project": "project:v1:test:3",
+                "new_context_mode": "context-mode:v1:catch-up",
+                "new_model": "new-model:v1:inherit",
+                "new_effort": "rendered-effort",
+                "new_speed": "rendered-speed",
+            },
+        )
+        configured = decode_card_form(
+            scope=self.scope,
+            message_id="om_card",
+            sender_id="ou_user",
+            tag="button",
+            form_value={
+                "config_model": (
+                    "config-model:v3:"
+                    "11111111-0000-0000-0000-000000000001:7:11:inherit"
+                ),
+                "config_context_mode": "context-mode:v1:catch-up",
+            },
+        )
+
+        for intent in (minimal, catalog, configured):
+            self.assertIsNone(intent.model_id)
+            self.assertIsNone(intent.effort_id)
+            self.assertIsNone(intent.service_tier_id)
+        self.assertEqual(
+            minimal.message_context_mode,
+            MentionContextMode.CURRENT_ONLY,
+        )
+        self.assertEqual(catalog.message_context_mode, MentionContextMode.CATCH_UP)
+        self.assertEqual(configured.expected_settings_revision, 7)
+        self.assertEqual(configured.expected_context_revision, 11)
+        self.assertEqual(configured.message_context_mode, MentionContextMode.CATCH_UP)
+
+    def test_binding_settings_forms_reject_old_mixed_and_unbounded_shapes(
+        self,
+    ) -> None:
         invalid_forms = (
             {
                 "new_project": "project:v1:test:3",
-                "new_model": "future-model",
+                "new_model": "new-model:v1:inherit",
                 "new_effort": "ultra",
                 "new_speed": "priority-v2",
                 "unexpected": "value",
             },
             {
                 "new_project": "project:v1:test:3",
+                "new_model": "future-model",
             },
             {
                 "new_project": "project:v1:test:3",
-                # Old cards with the removed mode field must fail closed.
                 "new_settings_mode": "custom-v2",
-                "new_model": "future-model",
+                "new_model": "new-model:v1:explicit:ZnV0dXJlLW1vZGVs",
                 "new_effort": "ultra",
                 "new_speed": "priority-v2",
             },
@@ -634,24 +706,31 @@ class CardCodecTest(unittest.TestCase):
             },
             {
                 "config_model": (
-                    "config-model:v2:"
-                    "11111111-0000-0000-0000-000000000001:1:"
-                    "ZnV0dXJlLW1vZGVs"
+                    "config-model:v3:"
+                    "11111111-0000-0000-0000-000000000001:1:1:"
+                    "explicit:ZnV0dXJlLW1vZGVs"
                 ),
                 "config_effort": "ultra",
             },
             {
                 "new_project": "project:v1:test:3",
-                "new_model": "future-model",
+                "new_model": "new-model:v1:explicit:ZnV0dXJlLW1vZGVs",
                 "new_effort": "ultra",
                 "new_speed": "priority-v2",
                 "config_model": (
-                    "config-model:v2:"
-                    "11111111-0000-0000-0000-000000000001:1:"
-                    "ZnV0dXJlLW1vZGVs"
+                    "config-model:v3:"
+                    "11111111-0000-0000-0000-000000000001:1:1:inherit"
                 ),
-                "config_effort": "ultra",
-                "config_speed": "default",
+            },
+            {
+                "new_project": "project:v1:test:3",
+                "new_model": "new-model:v1:inherit",
+                "new_effort": "x" * 129,
+                "new_speed": "default",
+            },
+            {
+                "new_project": "project:v1:test:3",
+                "new_model": "new-model:v1:explicit:ZnV0dXJlLW1vZGVs",
             },
         )
         for form_value in invalid_forms:
@@ -1077,34 +1156,47 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertEqual(len(target["options"]), 50)
 
-    def test_new_card_has_one_model_settings_form_and_no_mode_or_task(self) -> None:
+    def test_new_card_has_one_form_with_inherit_explicit_and_context_mode(
+        self,
+    ) -> None:
         outbound = new_binding_card(
             scope=self.scope,
             projects=tuple(project for project in self.projects if project.enabled),
             catalog=self.catalog,
+            allow_context_mode=True,
         )
         serialized = str(outbound.card)
         self.assertIn("none · /home/user", serialized)
         self.assertIn("test · /home/user/test", serialized)
         self.assertNotIn("off · /home/user/off", serialized)
-        self.assertIn("new_binding_v4", serialized)
+        self.assertIn("new_binding_v5", serialized)
         self.assertNotIn("快速新建", serialized)
         self.assertNotIn("下一条真实任务", serialized)
-        self.assertNotIn("配置方式", serialized)
-        self.assertNotIn("仅自定义时生效", serialized)
+        self.assertIn("继承 Codex", serialized)
+        self.assertIn("@ 上下文模式", serialized)
+        self.assertIn("未 @ 机器人", serialized)
 
         form = next(
             item
             for item in _elements(outbound.card, "form")
-            if item["name"] == "new_binding_v4"
+            if item["name"] == "new_binding_v5"
         )
         fields = {
             item["name"]: item
             for item in form["elements"]
             if "name" in item
         }
-        self.assertNotIn("new_settings_mode", fields)
-        self.assertEqual(fields["new_model"]["initial_option"], "future-model")
+        self.assertEqual(
+            fields["new_model"]["initial_option"],
+            "new-model:v1:explicit:ZnV0dXJlLW1vZGVs",
+        )
+        self.assertEqual(
+            [option["value"] for option in fields["new_model"]["options"]],
+            [
+                "new-model:v1:inherit",
+                "new-model:v1:explicit:ZnV0dXJlLW1vZGVs",
+            ],
+        )
         self.assertEqual(
             [option["value"] for option in fields["new_effort"]["options"]],
             ["low", "ultra"],
@@ -1118,11 +1210,116 @@ class CardRendererTest(unittest.TestCase):
             fields["new_speed"]["initial_option"],
             "priority-v2",
         )
+        self.assertEqual(
+            fields["new_context_mode"]["initial_option"],
+            "context-mode:v1:current-only",
+        )
         self.assertNotIn("new_prompt", fields)
         self.assertEqual(len(_elements(outbound.card, "form")), 1)
         self.assertNotIn("credits", serialized.lower())
         self.assertNotIn("cost", serialized.lower())
         self.assertNotIn("费用", serialized)
+
+    def test_new_card_shows_every_project_without_pagination_or_truncation(
+        self,
+    ) -> None:
+        for count in (0, 1, 12, 13, 80):
+            projects = tuple(
+                Project(
+                    "none" if index == 0 else f"project_{index}",
+                    Path(f"/home/user/project_{index}"),
+                    True,
+                    index + 1,
+                )
+                for index in range(count)
+            )
+            outbound = new_binding_card(
+                scope=self.scope,
+                projects=projects,
+                catalog=self.catalog,
+                allow_context_mode=True,
+            )
+            with self.subTest(count=count):
+                forms = _elements(outbound.card, "form")
+                if count == 0:
+                    self.assertEqual(forms, [])
+                    continue
+                form = next(
+                    item for item in forms if item["name"] == "new_binding_v5"
+                )
+                project = next(
+                    item
+                    for item in form["elements"]
+                    if item.get("name") == "new_project"
+                )
+                self.assertEqual(
+                    [option["value"] for option in project["options"]],
+                    [
+                        f"project:v1:{item.alias}:{item.revision}"
+                        for item in projects
+                    ],
+                )
+                serialized = str(outbound.card)
+                self.assertNotIn("仅显示前", serialized)
+                self.assertNotIn("/new alias", serialized)
+                self.assertNotIn("上一页", serialized)
+                self.assertNotIn("下一页", serialized)
+
+    def test_context_mode_field_is_explicitly_suppressible_for_p2p(self) -> None:
+        direct = FeishuScope("cli_test", "oc_p2p", ScopeKind.DIRECT)
+        group = new_binding_card(
+            scope=self.scope,
+            projects=self.projects[:2],
+            catalog=self.catalog,
+            allow_context_mode=True,
+        )
+        p2p = new_binding_card(
+            scope=direct,
+            projects=self.projects[:2],
+            catalog=self.catalog,
+            allow_context_mode=False,
+        )
+        p2p_config = config_card(
+            scope=direct,
+            binding_id="11111111-0000-0000-0000-000000000001",
+            short_id="11111111",
+            project_alias="test",
+            settings_revision=7,
+            context_revision=11,
+            turn_settings=None,
+            message_context_mode=MentionContextMode.CURRENT_ONLY,
+            allow_context_mode=False,
+            catalog=self.catalog,
+        )
+
+        self.assertIn("new_context_mode", str(group.card))
+        self.assertNotIn("new_context_mode", str(p2p.card))
+        self.assertNotIn("未 @ 机器人", str(p2p.card))
+        self.assertNotIn("config_context_mode", str(p2p_config.card))
+        p2p_form = next(
+            item
+            for item in _elements(p2p.card, "form")
+            if item["name"] == "new_binding_v5"
+        )
+        p2p_fields = {
+            item["name"]: item
+            for item in p2p_form["elements"]
+            if item.get("tag") == "select_static"
+        }
+        decoded = decode_card_form(
+            scope=direct,
+            message_id="om_card",
+            sender_id="ou_user",
+            tag="button",
+            form_value={
+                "new_project": p2p_fields["new_project"]["initial_option"],
+                "new_model": "new-model:v1:inherit",
+            },
+        )
+        self.assertEqual(
+            decoded.message_context_mode,
+            MentionContextMode.CURRENT_ONLY,
+        )
 
     def test_config_card_targets_exact_binding_and_uses_live_catalog_options(
         self,
@@ -1139,11 +1336,14 @@ class CardRendererTest(unittest.TestCase):
                 "default",
             ),
             catalog=self.catalog,
+            context_revision=11,
+            message_context_mode=MentionContextMode.CATCH_UP,
+            allow_context_mode=True,
         )
         form = next(
             item
             for item in _elements(outbound.card, "form")
-            if item["name"] == "binding_config_v4"
+            if item["name"] == "binding_config_v5"
         )
         fields = {
             item["name"]: item
@@ -1152,25 +1352,26 @@ class CardRendererTest(unittest.TestCase):
         }
         self.assertEqual(
             fields["config_model"]["options"][0]["value"],
-            "config-model:v2:"
-            "11111111-0000-0000-0000-000000000001:7:"
-            "ZnV0dXJlLW1vZGVs",
+            "config-model:v3:"
+            "11111111-0000-0000-0000-000000000001:7:11:inherit",
         )
         self.assertEqual(
             fields["config_model"]["initial_option"],
-            "config-model:v2:"
-            "11111111-0000-0000-0000-000000000001:7:"
-            "ZnV0dXJlLW1vZGVs",
+            "config-model:v3:"
+            "11111111-0000-0000-0000-000000000001:7:11:"
+            "explicit:ZnV0dXJlLW1vZGVs",
         )
         self.assertNotIn("config_binding", fields)
-        self.assertNotIn("config_settings_mode", fields)
+        self.assertEqual(
+            fields["config_context_mode"]["initial_option"],
+            "context-mode:v1:catch-up",
+        )
         self.assertEqual(fields["config_effort"]["initial_option"], "low")
         self.assertEqual(fields["config_speed"]["initial_option"], "default")
         self.assertNotIn("config_prompt", fields)
         self.assertIn("不会启动任务", str(outbound.card))
         self.assertNotIn("目标会话", str(outbound.card))
-        self.assertNotIn("配置方式", str(outbound.card))
-        self.assertNotIn("继承 Codex", str(outbound.card))
+        self.assertIn("继承 Codex", str(outbound.card))
 
     def test_configured_success_card_shows_speed_name_not_protocol_value(self) -> None:
         settings = TurnModelSettings(
@@ -1187,6 +1388,7 @@ class CardRendererTest(unittest.TestCase):
                 short_id="11111111",
                 project_alias="test",
                 settings=settings,
+                message_context_mode=MentionContextMode.CATCH_UP,
             ).card
         )
 
@@ -1194,6 +1396,32 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("Speed=`default`", rendered)
         self.assertNotIn("credits", rendered.lower())
         self.assertNotIn("cost", rendered.lower())
+        self.assertIn("catch-up", rendered)
+
+        inherited = str(
+            binding_configured_card(
+                short_id="11111111",
+                project_alias="test",
+                settings=None,
+                message_context_mode=MentionContextMode.CURRENT_ONLY,
+            ).card
+        )
+        self.assertIn("继承 Codex", inherited)
+        self.assertIn("current-only", inherited)
+
+        created = str(
+            binding_created_card(
+                short_id="22222222",
+                project_alias="none",
+                settings=None,
+                message_context_mode=MentionContextMode.CATCH_UP,
+            ).card
+        )
+        self.assertIn("none", created)
+        self.assertIn("22222222", created)
+        self.assertIn("继承 Codex", created)
+        self.assertIn("catch-up", created)
+        self.assertIn("未 @ 机器人", created)
 
     def test_config_card_marks_stale_persistent_selection(self) -> None:
         outbound = config_card(
@@ -1208,25 +1436,79 @@ class CardRendererTest(unittest.TestCase):
                 "removed-tier",
             ),
             catalog=self.catalog,
+            context_revision=3,
+            allow_context_mode=True,
         )
 
         rendered = str(outbound.card)
         self.assertIn("不再出现在当前模型目录", rendered)
         self.assertIn("重新选择三项配置", rendered)
-        self.assertNotIn("继承 Codex", rendered)
+        self.assertIn("继承 Codex", rendered)
 
-    def test_new_card_without_catalog_has_no_submittable_form(self) -> None:
+    def test_new_and_config_without_catalog_have_minimal_inherit_forms(self) -> None:
         outbound = new_binding_card(
             scope=self.scope,
             projects=self.projects[:2],
             catalog=None,
             catalog_error="模型目录暂不可用。",
+            allow_context_mode=True,
         )
         serialized = str(outbound.card)
-        self.assertEqual(_elements(outbound.card, "form"), [])
+        form = next(
+            item
+            for item in _elements(outbound.card, "form")
+            if item["name"] == "new_binding_v5"
+        )
+        fields = {
+            item.get("name")
+            for item in form["elements"]
+            if item.get("name")
+        }
+        self.assertEqual(
+            fields,
+            {
+                "new_project",
+                "new_context_mode",
+                "new_model",
+                "new_binding_submit_v5",
+            },
+        )
         self.assertIn("模型目录暂不可用", serialized)
-        self.assertIn("/new alias", serialized)
-        self.assertNotIn("配置方式", serialized)
+        self.assertIn("继承 Codex", serialized)
+        self.assertNotIn("/new alias", serialized)
+
+        configured = config_card(
+            scope=self.scope,
+            binding_id="11111111-0000-0000-0000-000000000001",
+            short_id="11111111",
+            project_alias="test",
+            settings_revision=7,
+            context_revision=11,
+            turn_settings=BindingTurnSettings("future-model", "low", "default"),
+            message_context_mode=MentionContextMode.CATCH_UP,
+            allow_context_mode=True,
+            catalog=None,
+            catalog_error="模型目录暂不可用。",
+        )
+        config_form = next(
+            item
+            for item in _elements(configured.card, "form")
+            if item["name"] == "binding_config_v5"
+        )
+        config_fields = {
+            item.get("name")
+            for item in config_form["elements"]
+            if item.get("name")
+        }
+        self.assertEqual(
+            config_fields,
+            {
+                "config_context_mode",
+                "config_model",
+                "binding_config_submit_v5",
+            },
+        )
+        self.assertIn("清除显式配置", str(configured.card))
 
     def test_goal_card_uses_typed_controls_without_native_paths(self) -> None:
         goal = GoalSnapshot(

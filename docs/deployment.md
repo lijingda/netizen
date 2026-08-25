@@ -84,7 +84,9 @@ codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
 不要把一次登录成功当作持久前提。若命令出现认证错误，应先独立验证登录，不要用服务
 失败掩盖认证问题。
 
-逐条引用会调用“获取指定消息”，普通/富文本图片还会调用“获取消息中的资源文件”。
+逐条引用会调用“获取指定消息”，普通/富文本图片还会调用“获取消息中的资源文件”。群聊
+Binding 的 catch-up 模式会在收到有效 @ 后，通过同一应用身份调用“获取会话历史消息”和
+exact “获取指定消息”；群主线使用 chat container，普通话题使用 thread container。
 `./install.sh` 的官方 SDK 浏览器流程会用最小模板请求下面的应用身份权限、
 `im.message.receive_v1` 应用身份事件和 `card.action.trigger` 回调，不申请用户身份权限或
 token；手工准备的应用必须逐项配置。无论来源，飞书应用版本在发布前都必须确认：
@@ -123,6 +125,12 @@ start/steer。观察进程 RSS：固定 Channel SDK 在 20 MB 应用层门禁前
 不同 Binding 的图片准备保持并发，没有全局容量 gate；asyncio 超时也不能停止已经进入
 worker thread 的阻塞读取。Pilot 依赖受控用户范围、低频小图，并需持续观察并发图片时
 的 RSS；若实际使用模式变化，应先推动 Channel SDK 的有界流式下载能力。
+
+catch-up 上线前必须使用目标租户和目标应用做群主线 chat container、普通话题 thread
+container 两类 live probe。probe 要同时证明 lower/upper exact endpoint 可见、同秒消息、
+倒序分页、sender name、机器人加入前已创建/历史受限的话题，以及早于 upper 但首个快照
+暂不可见的消息能在一次有界重读中收敛或被明确标成不完整。若平台表现为静默遗漏，必须
+保持 catch-up unavailable，不能用 generated SDK shape 或本地 Fake 代替这个 rollout gate。
 
 候选 release 必须通过：
 
@@ -594,13 +602,12 @@ admission，修复文件后仍需 `./service.sh restart`，不会自动重新开
 HTTP；不得把该端口直接暴露到不受信网络。
 
 `instance.projectRoot` 用于限制从飞书自动创建的空 Project；未配置时回退为
-`defaultCwd.parent`。Channel Database 只接受当前 schema v5，不自动迁移旧 schema。
-首次从没有 Side 数据的 schema v4 升到 v5 时，若遇到 schema mismatch，可停止服务并
-归档旧数据库，再让新版本创建干净数据库；这会丢弃 Netizen 的
-Scope/Binding/Project Registry 和去重记录，但不会删除 Codex 原生 Thread。v5 投入使用
-后，后续 schema 升级必须迁移 `side_topics` 的永久路由墓碑，或提供等价的 fail-closed
-cutover；不得按通用重建流程丢弃 Side 墓碑，否则旧 Side 话题会重新落入普通 Binding
-路由。配置文件中的 `projects` mapping 会在启动时以 `INSERT OR IGNORE` 导入，数据库
+`defaultCwd.parent`。Channel Database 只接受当前 schema v6，不在服务启动时自动迁移旧
+schema。schema v6 为 Binding 增加 Mention Context Mode、exact Context Boundary 和独立
+revision；不保存任何补充消息正文。v5 -> v6 cutover 必须在 release transaction 中完成，
+并保留现有 Scope/Binding/Project、去重记录和 `side_topics` 永久路由墓碑；迁移失败时
+恢复旧数据库与旧 release。不得归档后创建空数据库，否则旧 Side 话题可能重新落入普通
+Binding 路由。配置文件中的 `projects` mapping 会在启动时以 `INSERT OR IGNORE` 导入，数据库
 里已经停用或由飞书创建的条目始终优先。不要手工编辑 `projects` 或 `bindings` 表。
 
 浏览器初始化会请求 `card.action.trigger`；手工准备应用时，使用卡片前须在飞书开发者后台
@@ -619,6 +626,11 @@ cutover；不得按通用重建流程丢弃 Side 墓碑，否则旧 Side 话题�
 - 若引用 prompt 提示超时、撤回/删除、权限不足或准备期间任务状态已变，
   该次输入没有 start/steer。请先修复权限或确认当前 Turn，然后由用户重新发送；
   不要在运维层自动重放旧消息。
+- 若 catch-up 提示历史读取、Scope/identity、分页或被选中消息失败，本条同样没有
+  start/steer，Context Boundary 也不会推进；让用户修复后重新 @。若提示“任务已接受但
+  上下文边界未持久化”，native Turn 已经开始，必须停止新 admission、检查 SQLite/磁盘并
+  重启，不得自动重放当前消息。截断或 unsupported omission 的可见回执不是失败；边界会在
+  native 接受后推进，已省略的较早内容不会在下一轮重复补入。
 - 若图片 prompt 提示不可读、格式不支持、超过 20 张、单图 20 MB 或合计 50 MB，
   该次输入同样没有 start/steer；让用户压缩或拆分后重新发送，不做部分重放。
 - 若本轮文件按钮提示文件已不可用、卡片已删除或话题关系未确认，
@@ -716,7 +728,7 @@ precondition 的一方提交。重启服务后旧 Admin session 必须失效，�
 release 恢复；释放端口后再部署。以上真实浏览器、跨主机与端口回滚是候选 release 门禁，
 本地 loopback 单测不能替代。
 
-1. P2P `/help`、`/new test`、`/sessions`、`/status`（native=pending）；`/sessions`
+1. P2P `/help`、exact `/new`、`/sessions`、`/status`（native=pending）；`/sessions`
    返回分页卡片，将 active Binding 置顶、将 lazy Binding 显示为“新会话”，有原生
    Thread 时优先显示 `name`、否则显示 `preview`。创建第二个会话后点击第一项的
    “设为当前”，原卡必须刷新 active 标记，且不得停止另一会话仍在运行的 Turn；归档项
@@ -729,7 +741,10 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    `/unarchive`，不包含
    `/skills`、`/model`、`/effort`、`/fast` 或当前不可用的
    `/plan`、`/apps`；`/copy`、`/vim`、`/theme`、`/exit` 也不展示。
-2. `/new test` 后发送首条 prompt：原消息先出现并一直保留敲键盘（`Typing`）表情，
+   另发送 `/new test`、`/new none`、带引号和坏引号的 `/new ...`，都必须得到同一迁移提示、
+   零 Binding mutation；`//new test` 仍作为字面 prompt。
+2. 通过 `/new` 卡片选择 `test` Project 和 inherit Codex 后发送首条 prompt：原消息先出现
+   并一直保留敲键盘（`Typing`）表情，
    “思考中”（`THINKING`）按低频节奏显示/隐藏，不收到“已接收”或心跳回复。running 时
    `/status` 出现完整 native ID、
    已接受 steer 次数，以及原生 checklist（`✓/→/○`）；无 plan 时明确显示“Codex 尚未
@@ -743,20 +758,25 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    并标注“上一轮完成时”的快照；本轮完成后覆盖为新值。固定 SDK 若丢失即时完成通知，
    则终态后明确显示暂不可用并在下一次可观测 Turn 完成后更新。该继承路径不得读取模型
    目录或向 SDK 传 Model/Effort/Speed override。
-3. 零参数 `/new` 只显示一个 form，包含 Project、Model、Effort、Speed，不显示“配置方式”、
-   任务输入或快速按钮。提交只创建带三项配置的 lazy Binding；`/status` 仍为
-   native=pending，且没有任务回执。选项必须与本机 `models` phase 一致，成功卡片显示
-   动态名称。模型目录不可用时不得显示可提交 form，并提示重试或 `/new alias`；即使原卡
-   更新失败，同一 Scope 也应收到兜底回复。
-4. 在 idle active Binding 上发送 `/config`，选择三项后直接保存；不得要求任务或立即
-   启动 Turn，也不得显示“目标会话”或“配置方式”；配置其他会话必须先 `/resume`。
+3. 零参数 `/new` 只显示一个创建 form，不显示任务输入或快速按钮。Project 使用现有单个
+   静态下拉框，并展示 Registry 中全部 enabled 项和 `none`；准备 13 个以上 enabled
+   Projects 验证没有 12 项截断、分页控件或命令兜底，disabled 项不出现。P2P 表单不显示
+   @ 上下文模式；群主线和普通群话题显示“仅当前 @ 消息（默认）”与“补充上次请求后的
+   消息”。选择 inherit Codex 时不保存 Model/Effort/Speed override；选择实际 Model 时
+   三项必须与本机 `models` phase 一致并全部保存。模型目录不可用时仍显示可提交的
+   Project + inherit 表单。成功卡片显示 Project、会话短 ID、Model 来源与 @ 上下文模式；
+   即使原卡更新失败，同一 Scope 也应收到等价兜底回复。再用足够大的 Registry 触发真实
+   平台容量错误，必须明确说明没有截断、分页或快捷创建，且零 Binding mutation。
+4. 在 idle active Binding 上发送 `/config`，选择三项和群聊 @ 上下文模式后原子保存；
+   不得要求任务或立即启动 Turn，也不得显示目标会话；配置其他会话必须先 `/resume`。
    后续每条需要启动新 Turn 的普通消息都在 exact native Thread 重新校验并显式应用，
    配置不会在首轮后清除。对目录中支持加速 Tier 的模型依次验收
    `Fast/priority -> Fast/priority -> /config Standard/default -> Standard/default`，
    四轮必须在同一 native Thread 连续成功；卡片只显示动态名称，不显示协议 ID，也不
    出现费用提示。打开卡片后先
    `/resume` 另一个 Binding，再提交旧卡片，必须零 Codex mutation 并提示重开；两张
-   `/config` 卡也必须由 settings revision 拒绝后提交的旧卡。running Turn 上 `/config`
+   `/config` 卡也必须分别由 settings/context revision 拒绝后提交的旧卡。启用 catch-up 时
+   exact card anchor 读取失败必须同时保持旧 Model 与旧 mode；running Turn 上 `/config`
    必须拒绝，running steer 不得解析或应用 Binding 配置。
 5. 在已有历史的 idle Binding 发送 `/compact`：先收到开始提示，`/status` 显示
    `compacting`，并使压缩前的上下文用量快照失效；普通 Prompt、`/config`、再次
@@ -792,9 +812,17 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
 12. 同一 Project 两个 Binding 同时运行，cwd 相同、native ID 不同。
 13. 运行 exact-`argv[0]` interrupt probe，记录 foreground 5 秒退出分类；probe 有界
    等待其测试 marker 自然退出后，检查无遗留 exact marker/App Server probe 进程。
-14. 加一个测试群：未 @ 忽略，每条 @ 可用。在话题群中分别用纯文本根消息
-   `@机器人 /new test` 创建两个话题，再进入各话题逐条 @机器人；话题 A 的
-   Binding/上下文不得出现在话题 B，群主线与两个话题也必须是三个不同 Scope。
+14. 加一个测试群：未 @ 不触发，每条 @ 可用。在话题群中分别用纯文本根消息
+   `@机器人 /new` 打开卡片并创建两个话题会话，再进入各话题逐条 @机器人；话题 A 的
+   Binding/上下文不得出现在话题 B，群主线与两个话题也必须是三个不同 Scope。分别在群
+   主线和两个普通话题验收 current-only 与 catch-up：current-only 只看到当前 @ 消息；
+   catch-up 能按原顺序看到上一次已接受请求之后、当前请求之前的非 bot 成员消息，历史中
+   的 `/stop`、`/new`、`$skill` 均不激活，当前消息仍位于 envelope 最后。实际带入时必须
+   在 native submission 前公开回复条数，截断/unsupported omission 同时可见。并发发送
+   两条 @ 时旧 boundary 最多被一条兑换；失败/竞态拒绝不推进，start 与 running steer
+   成功才推进。切换/恢复 catch-up 会话或刚从 current-only 启用时重置边界，不得补录非
+   active 期间讨论；服务重启后从持久边界继续且不重复已提交区间。P2P 和 Side 必须零
+   history list call。以上依赖前置的 chat/thread live history probe 通过。
 15. 验收逐条引用：在 P2P 和普通群主线分别验证首层与嵌套文本/富文本；
     由 A 发送被引用消息、B 发送当前提问，模型输入必须把两名发送者分别归到
     `quoted_message` 与 `current_message`；群内当前提问仍要 `@机器人`。再验证
@@ -804,12 +832,14 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     后的零 Codex 提交。在真实话题内回复根消息时不应混入“被引用消息”
     上下文；话题 Scope 和原有上下文仍正常。
 16. 在单聊发送普通图片；在群聊发送 `@机器人` 的多图富文本；再分别验证文字引用
-    图片、当前图文引用另一条图文。模型必须能描述真实像素且正确区分当前/引用来源；
+    图片、当前图文引用另一条图文和 catch-up 补充消息中的图片。模型必须能描述真实像素
+    且正确区分 supplemental/当前/引用来源；
     删除其中一张资源后重试必须零提交。连续发送的多条独立图片不要求自动合并。
 17. 在单聊、群聊、话题分别发送 `/settings` 和零参数 `/new`；卡片必须留在原
     Scope。Settings 只显示已实现分区，Projects 使用下拉管理且新增表单留在同一卡片；
     创建/登记/启停或业务错误后仍显示原 Projects 分区。重启服务后 Registry 仍存在；
-    停用条目不能新建 Binding，但旧 Binding 仍可继续。
+    停用条目不能新建 Binding，但旧 Binding 仍可继续。`/new` Project 下拉应同步展示全部
+    enabled 条目而不分页。
 18. 由群内另一名真实参与者点击设置卡片的刷新操作，确认 callback operator 不受
     Netizen allowlist/ACL 限制且响应不转为私聊。自动化契约已通过；该跨账号手工项
     尚未复验，是当前小范围 Pilot 的非阻塞待办。
@@ -873,7 +903,7 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     覆盖全部页面。
     P2P 若返回 230071 必须记录为
     本轮文件 live gate 未通过，不得用 FakeChannel 或普通主线发送替代。最后确认这些操作不
-    改变 schema v5 表、Binding、Turn settings 或 Side route 行数。
+    改变 schema v6 表、Binding、Turn settings、Context Boundary 或 Side route 行数。
 
 CLI 中新增的消息不要求回填飞书；验证目标是共享原生后端和可接续性，不是两个 UI
 的逐条镜像。

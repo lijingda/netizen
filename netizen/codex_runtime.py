@@ -28,7 +28,7 @@ from .bindings import (
     SideTopicState,
     ThreadBinding,
 )
-from .domain import NativeCapability
+from .domain import MessageContextAnchor, MentionContextMode, NativeCapability
 from .model_settings import ModelCatalog, TurnModelSettings
 from .sdk_gap_adapter import (
     GoalControl,
@@ -150,6 +150,12 @@ class TurnStartFailed(RuntimeError):
     pass
 
 
+class ContextBoundaryCommitFailed(RuntimeError):
+    """The native submission succeeded but its catch-up cursor did not."""
+
+    pass
+
+
 class ThreadCompactStartFailed(RuntimeError):
     pass
 
@@ -191,6 +197,10 @@ class GoalStateUnknown(RuntimeError):
 
 
 class ThreadLifecycleError(RuntimeError):
+    pass
+
+
+class ContextAnchorRequired(ThreadLifecycleError):
     pass
 
 
@@ -510,16 +520,31 @@ class SubmissionAdmission:
     thread_id: str | None
     turn_id: str | None
     settings_revision: int
+    context_revision: int = 1
 
     def __post_init__(self) -> None:
         if self.revision < 0:
             raise ValueError("submission admission revision must be non-negative")
         if self.settings_revision < 1:
             raise ValueError("settings revision must be positive")
+        if self.context_revision < 1:
+            raise ValueError("context revision must be positive")
         if (self.thread_id is None) != (self.turn_id is None):
             raise ValueError(
                 "submission admission thread_id and turn_id must both be set or unset"
             )
+
+
+@dataclass(frozen=True, slots=True)
+class ContextCursorCommit:
+    """Catch-up boundary to commit after one exact native submission."""
+
+    expected_context_revision: int
+    anchor: MessageContextAnchor
+
+    def __post_init__(self) -> None:
+        if self.expected_context_revision < 1:
+            raise ValueError("expected context revision must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -892,7 +917,12 @@ class CodexRuntime:
 
         await self.active_binding_changed(previous_binding_id, current_binding_id)
 
-    async def activate_exact(self, binding_id: str) -> ThreadBinding:
+    async def activate_exact(
+        self,
+        binding_id: str,
+        *,
+        context_anchor: MessageContextAnchor | None = None,
+    ) -> ThreadBinding:
         """Select an exact Binding while serializing transient state.
 
         The caller owns the Scope lock. Taking the target Binding lock here
@@ -907,6 +937,19 @@ class CodexRuntime:
                 raise RuntimeClosed("服务正在停止，暂不能切换会话。")
             self._guard_no_lifecycle_locked(binding_id)
             binding = self._bindings.get(binding_id)
+            if (
+                binding.message_context_mode is MentionContextMode.CATCH_UP
+                and context_anchor is None
+            ):
+                raise ContextAnchorRequired(
+                    "该会话启用了 @ 时补充上下文；请从飞书 /resume 切换，"
+                    "以建立新的消息边界。"
+                )
+            if (
+                binding.message_context_mode is MentionContextMode.CURRENT_ONLY
+                and context_anchor is not None
+            ):
+                raise ValueError("current-only activation cannot carry an anchor")
             if binding.native_thread_id is not None:
                 state = await self.thread_catalog_state(binding.native_thread_id)
                 if state is NativeThreadCatalogState.ARCHIVED:
@@ -918,7 +961,9 @@ class CodexRuntime:
             activated = self._bindings.activate(
                 scope_key=binding.scope_key,
                 binding_id=binding.id,
+                context_anchor=context_anchor,
             )
+            self._advance_admission_revision(binding.id)
             record = self._subscriptions.get(binding.id)
             if (
                 record is not None
@@ -2439,16 +2484,26 @@ class CodexRuntime:
 
         return await self._restore_exact(binding_id, activate=False)
 
-    async def restore_as_current_exact(self, binding_id: str) -> ThreadBinding:
+    async def restore_as_current_exact(
+        self,
+        binding_id: str,
+        *,
+        context_anchor: MessageContextAnchor | None = None,
+    ) -> ThreadBinding:
         """Restore one archived Binding and select it in its Scope."""
 
-        return await self._restore_exact(binding_id, activate=True)
+        return await self._restore_exact(
+            binding_id,
+            activate=True,
+            context_anchor=context_anchor,
+        )
 
     async def _restore_exact(
         self,
         binding_id: str,
         *,
         activate: bool,
+        context_anchor: MessageContextAnchor | None = None,
     ) -> ThreadBinding:
         if not self._accepting:
             raise RuntimeClosed("服务正在停止，暂不能恢复归档会话。")
@@ -2457,6 +2512,24 @@ class CodexRuntime:
                 raise RuntimeClosed("服务正在停止，暂不能恢复归档会话。")
             self._guard_no_lifecycle_locked(binding_id)
             binding = self._bindings.get(binding_id)
+            if activate:
+                if (
+                    binding.message_context_mode is MentionContextMode.CATCH_UP
+                    and context_anchor is None
+                ):
+                    raise ContextAnchorRequired(
+                        "该会话启用了 @ 时补充上下文；请从飞书恢复卡片操作，"
+                        "以建立新的消息边界。"
+                    )
+                if (
+                    binding.message_context_mode is MentionContextMode.CURRENT_ONLY
+                    and context_anchor is not None
+                ):
+                    raise ValueError(
+                        "current-only restore cannot carry a context anchor"
+                    )
+            elif context_anchor is not None:
+                raise ValueError("non-current restore cannot carry a context anchor")
             if binding.native_thread_id is None:
                 raise ThreadNotArchived("Lazy 会话不是归档会话。")
             if binding.id in self._active or binding.id in self._compacting:
@@ -2490,11 +2563,14 @@ class CodexRuntime:
                     self._bindings.activate(
                         scope_key=binding.scope_key,
                         binding_id=binding.id,
+                        context_anchor=context_anchor,
                     )
                     if activate
                     else self._bindings.get(binding.id)
                 )
                 self._mark_thread_subscribed_locked(restored, thread)
+                if activate:
+                    self._advance_admission_revision(binding.id)
             except asyncio.CancelledError:
                 self._retain_unknown_lifecycle(operation)
                 raise
@@ -2596,6 +2672,67 @@ class CodexRuntime:
                 self._advance_admission_revision(binding_id)
             return updated
 
+    async def configure_context_exact(
+        self,
+        *,
+        binding_id: str,
+        expected_settings_revision: int,
+        expected_context_revision: int,
+        settings: BindingTurnSettings | None,
+        message_context_mode: MentionContextMode,
+        context_anchor: MessageContextAnchor | None,
+    ) -> ThreadBinding:
+        """Atomically update Turn settings and Mention Context Mode."""
+
+        if not self._accepting:
+            raise RuntimeClosed("服务正在停止，暂不能修改会话配置。")
+        if binding_id in self._compacting:
+            raise ThreadCompacting("当前会话正在压缩上下文，完成前不能修改会话配置。")
+        if binding_id in self._goals:
+            raise self._goal_slot_error(self._goals[binding_id])
+        active = self._active.get(binding_id)
+        if active is not None:
+            raise ThreadRunningConfiguration(
+                "当前 Turn 正在执行，不能修改会话配置；请等待完成或先发送 /stop。"
+            )
+
+        async with self._lock(binding_id):
+            if not self._accepting:
+                raise RuntimeClosed("服务正在停止，暂不能修改会话配置。")
+            self._guard_no_lifecycle_locked(binding_id)
+            if binding_id in self._compacting:
+                raise ThreadCompacting(
+                    "当前会话正在压缩上下文，完成前不能修改会话配置。"
+                )
+            binding = self._bindings.get(binding_id)
+            await self._guard_no_goal_locked(binding)
+            binding = self._bindings.get(binding_id)
+            active = self._active.get(binding_id)
+            if active is not None:
+                if active.state is ActiveState.STOPPING:
+                    raise ThreadStopping(
+                        "当前 Turn 正在停止，不能修改会话配置；"
+                        "若 /stop 曾提示清理失败，请再次发送 /stop 重试。"
+                    )
+                raise ThreadRunningConfiguration(
+                    "当前 Turn 正在执行，不能修改会话配置；"
+                    "请等待完成或先发送 /stop。"
+                )
+            updated = self._bindings.set_configuration(
+                binding_id=binding_id,
+                expected_settings_revision=expected_settings_revision,
+                expected_context_revision=expected_context_revision,
+                settings=settings,
+                message_context_mode=message_context_mode,
+                context_anchor=context_anchor,
+            )
+            if (
+                updated.settings_revision != binding.settings_revision
+                or updated.context_revision != binding.context_revision
+            ):
+                self._advance_admission_revision(binding_id)
+            return updated
+
     async def capture_submission_admission(
         self,
         binding_id: str,
@@ -2640,6 +2777,7 @@ class CodexRuntime:
                 thread_id=active.handle.thread_id if active is not None else None,
                 turn_id=active.handle.id if active is not None else None,
                 settings_revision=binding.settings_revision,
+                context_revision=binding.context_revision,
             )
 
     async def submit(
@@ -2651,6 +2789,7 @@ class CodexRuntime:
         owner_id: str,
         origin: object,
         admission: SubmissionAdmission | None = None,
+        context_commit: ContextCursorCommit | None = None,
         skill_names: tuple[str, ...] = (),
     ) -> Submission:
         if admission is not None and admission.binding_id != binding.id:
@@ -2661,6 +2800,7 @@ class CodexRuntime:
                 "准备本条消息期间 active 会话已切换，本条消息未执行，请重新发送。"
             )
         prepared_settings_revision = prepared_binding.settings_revision
+        prepared_context_revision = prepared_binding.context_revision
         configured_settings = prepared_binding.turn_settings
         if admission is not None and (
             admission.settings_revision != prepared_settings_revision
@@ -2668,6 +2808,22 @@ class CodexRuntime:
             raise SteerRace(
                 "准备本条消息期间会话配置已变化，本条消息未执行，请重新发送。"
             )
+        if admission is not None and (
+            admission.context_revision != prepared_context_revision
+        ):
+            raise SteerRace(
+                "准备本条消息期间上下文边界已变化，本条消息未执行，请重新发送。"
+            )
+        if prepared_binding.message_context_mode is MentionContextMode.CATCH_UP:
+            if admission is None or context_commit is None:
+                raise ValueError("catch-up submission requires admission and cursor commit")
+            if (
+                context_commit.expected_context_revision
+                != admission.context_revision
+            ):
+                raise ValueError("context cursor commit does not match admission")
+        elif context_commit is not None:
+            raise ValueError("current-only submission cannot commit a context cursor")
         if configured_settings is not None and admission is None:
             admission = await self.capture_submission_admission(binding.id)
             prepared_binding = self._bindings.get(binding.id)
@@ -2676,6 +2832,7 @@ class CodexRuntime:
                     "准备本条消息期间会话配置已变化，本条消息未执行，请重新发送。"
                 )
             prepared_settings_revision = prepared_binding.settings_revision
+            prepared_context_revision = prepared_binding.context_revision
             configured_settings = prepared_binding.turn_settings
 
         resolved_settings = None
@@ -2735,6 +2892,10 @@ class CodexRuntime:
                 raise SteerRace(
                     "准备本条消息期间会话配置已变化，本条消息未执行，请重新发送。"
                 )
+            if binding.context_revision != prepared_context_revision:
+                raise SteerRace(
+                    "准备本条消息期间上下文边界已变化，本条消息未执行，请重新发送。"
+                )
             await self._guard_no_goal_locked(binding)
             binding = self._bindings.get(binding.id)
             if not binding.active:
@@ -2780,6 +2941,10 @@ class CodexRuntime:
                 else:
                     active.plan_may_be_stale = True
                     active.plan_stale_after_cursor = stale_after_cursor
+                self._commit_context_cursor_locked(
+                    binding=binding,
+                    commit=context_commit,
+                )
                 return Submission(
                     SubmitDisposition.STEERED,
                     binding.id,
@@ -2874,6 +3039,17 @@ class CodexRuntime:
                 plan_available=self._turn_plan_observer is not None,
             )
             self._track(active)
+            try:
+                self._commit_context_cursor_locked(
+                    binding=binding,
+                    commit=context_commit,
+                )
+            except BaseException:
+                # The native Turn is already accepted and tracked. Let its
+                # consumer proceed even though the caller receives the exact
+                # persistence warning instead of a normal receipt callback.
+                receipt_attempted.set()
+                raise
             return Submission(
                 SubmitDisposition.STARTED,
                 binding.id,
@@ -5215,6 +5391,10 @@ class CodexRuntime:
             raise SteerRace(
                 "准备本条消息期间会话配置已变化，本条消息未执行，请重新发送。"
             )
+        if admission.context_revision != binding.context_revision:
+            raise SteerRace(
+                "准备本条消息期间上下文边界已变化，本条消息未执行，请重新发送。"
+            )
         actual_thread_id = active.handle.thread_id if active is not None else None
         actual_turn_id = active.handle.id if active is not None else None
         if (
@@ -5226,6 +5406,27 @@ class CodexRuntime:
                 "submission admission state changed without a revision; "
                 "service admission is closed"
             )
+
+    def _commit_context_cursor_locked(
+        self,
+        *,
+        binding: ThreadBinding,
+        commit: ContextCursorCommit | None,
+    ) -> None:
+        if commit is None:
+            return
+        try:
+            self._bindings.commit_context_anchor(
+                binding_id=binding.id,
+                expected_context_revision=commit.expected_context_revision,
+                anchor=commit.anchor,
+            )
+        except BaseException as error:
+            self.close_admission()
+            raise ContextBoundaryCommitFailed(
+                "任务已被 Codex 接受，但 @ 上下文边界未能持久化；"
+                "服务已停止接收新任务，请重启后对账。"
+            ) from error
 
     def _admission_revision(self, binding_id: str) -> int:
         return self._admission_revisions.get(binding_id, 0)

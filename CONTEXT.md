@@ -8,8 +8,8 @@
 保留，但不迁移到新应用的 Scope。
 
 **Thread Binding / 会话**：Scope 内的 Channel 记录，保存本地 ID、Project alias、
-可空 native Codex Thread ID、可选的 Binding Turn Settings、配置 revision、creator
-和时间。它不复制 Codex 历史或已生效的原生 Thread 配置。
+可空 native Codex Thread ID、可选的 Binding Turn Settings、Mention Context Mode、
+对应 revision、creator 和时间。它不复制 Codex 历史或已生效的原生 Thread 配置。
 
 **Active Binding**：Scope 中普通消息默认进入的 Binding。`/new`、`/resume` 只切换
 这条指针，不停止其他 Binding 的 Turn。
@@ -60,6 +60,17 @@ _Avoid_：“产物快照”“Turn 完成时版本”，因为 Netizen 不保�
 它的发送者只表明请求来源，不赋予权限、所有权或指令优先级；它可以不同于被引用消息和
 完成投递锚点。发送者归属只使用当前飞书应用内的 Open ID，不建立跨应用或租户级身份关联。
 
+**Mention Context Mode / @ 上下文模式**：普通 Binding 对一次显式 @ 请求选择的上下文
+范围；`current-only` 只使用当前消息，`catch-up` 还补充同一 Scope 中上一条 Context
+Boundary 之后的 eligible participant messages。两种模式都不让未 @ 消息自行触发任务。
+
+**Context Boundary / 上下文边界**：`catch-up` Binding 上最近一次被原生 Runtime 成功
+接受的 exact Current Prompt Message。它不是机器人回复完成时间，也不保存边界间消息正文。
+
+**Supplemental Context Message / 补充上下文消息**：`catch-up` 为当前显式 @ 请求读取的
+历史参与者消息；它只作 inert background，不是 Current Prompt、Control Intent 或 Skill
+invocation。
+
 **Completion Origin / 完成投递锚点**：本次任务的运行态展示与最终回复所依附的飞书消息。
 它通常是当前 Prompt 消息；Side 首轮则是新话题中的问题 seed，且不反向定义模型请求来源。
 
@@ -98,9 +109,9 @@ Participant、Binding creator 或 Project owner，后几者都不自动获得实
 CLI/App/Netizen 的设置；Netizen 只通过原生 Codex 接口读取或修改。
 
 **Turn Model Settings / Turn 模型配置**：Model、Reasoning Effort 与 Speed
-（Service Tier）的成组选择。`/new <project|none>` 完全省略 override；零参数 `/new`
-表单或 `/config` 保存 Binding-scoped intent。Netizen 后续每次启动新 Turn 前都按 live
-模型目录解析为真实 wire value 并显式应用；running Turn 的 steer 不应用。
+（Service Tier）的成组选择。`/new` 卡片或 `/config` 可以选择继承 Codex，或保存
+Binding-scoped intent。Netizen 后续每次启动新 Turn 前都按 live 模型目录解析显式选择为
+真实 wire value 并应用；继承时完全省略 override，running Turn 的 steer 不应用。
 
 **Binding Turn Settings / 会话 Turn 配置**：Binding 上三个全有或全空的目录 ID
 （Model、Effort、Service Tier）及 revision。它是用户要求 Netizen 在该会话后续新
@@ -182,8 +193,9 @@ JSONL/SQLite 格式。
 
 **Channel Database**：`channel.sqlite3`，只保存 Scope、Binding、Project Registry、
 schema version、Channel SDK dedup TTL key、Binding 上可选的 Binding Turn Settings
-目录 ID，以及不含 native ID/content 的 Side Topic Route/墓碑；不保存解析后的 wire
-value、Codex 已生效配置、普通 Thread 订阅状态或空闲 timer。
+目录 ID、Mention Context Mode 与 exact Context Boundary metadata，以及不含 native
+ID/content 的 Side Topic Route/墓碑；不保存补充消息正文、解析后的 wire value、Codex
+已生效配置、普通 Thread 订阅状态或空闲 timer。
 
 **Channel Participant / Channel 参与者**：飞书应用权限允许其消息到达 Netizen 的
 发送者。Netizen 不再按 user、chat 或角色做二次准入；同一普通 Scope 的参与者共享

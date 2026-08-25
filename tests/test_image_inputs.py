@@ -109,6 +109,7 @@ class ImageReferenceTest(unittest.TestCase):
 
         current = current_message_image_references(standalone)
         quoted = image_references(post, source="quoted_message")
+        supplemental = image_references(post, source="supplemental_message")
 
         self.assertEqual(
             current,
@@ -119,6 +120,13 @@ class ImageReferenceTest(unittest.TestCase):
             (
                 ImageReference("quoted_message", "om_post", "img_two"),
                 ImageReference("quoted_message", "om_post", "img_three"),
+            ),
+        )
+        self.assertEqual(
+            supplemental,
+            (
+                ImageReference("supplemental_message", "om_post", "img_two"),
+                ImageReference("supplemental_message", "om_post", "img_three"),
             ),
         )
 
@@ -394,6 +402,42 @@ class ImagePreparationTest(unittest.IsolatedAsyncioTestCase):
 
 
 class MultimodalCompositionTest(unittest.TestCase):
+    def test_labels_are_grouped_supplemental_then_quoted_then_current(self) -> None:
+        images = tuple(
+            PreparedImage(
+                reference,
+                "image/png",
+                len(PNG),
+                "data:image/png;base64,AA==",
+            )
+            for reference in (
+                ImageReference("current_message", "om_current", "img_current"),
+                ImageReference("supplemental_message", "om_two", "img_two"),
+                ImageReference("quoted_message", "om_quote", "img_quote"),
+                ImageReference("supplemental_message", "om_one", "img_one"),
+            )
+        )
+
+        result = compose_multimodal_input("request", images=images)
+
+        assert isinstance(result, list)
+        labels = [
+            json.loads(item.text)
+            for item in result[:-1]
+            if isinstance(item, TextInput)
+        ]
+        self.assertEqual(
+            [label["source"] for label in labels],
+            [
+                "supplemental_message",
+                "supplemental_message",
+                "quoted_message",
+                "current_message",
+            ],
+        )
+        self.assertEqual([label["index"] for label in labels], [1, 2, 1, 1])
+        self.assertEqual([label["count"] for label in labels], [2, 2, 1, 1])
+
     def test_images_are_labeled_before_one_complete_final_prompt(self) -> None:
         images = (
             PreparedImage(

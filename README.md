@@ -12,10 +12,10 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
 - 一个常驻 Python 服务、一个 `FeishuChannel`、一个共享 `AsyncCodex`。
 - 一个普通飞书单聊、群聊主线或话题是一个 Binding Scope；每个 Scope 可有多个会话
   Binding 和一个 active pointer。Side 话题由持久 route 保留，不解释为普通 Scope。
-- `/new <project>` 和统一 `/new` 卡片都只创建 lazy Binding，首条真实消息才创建
-  native Thread。命令快捷路径完全继承 Codex；卡片直接选择并保存
-  Binding-scoped Model/Effort/Speed，由 Netizen 后续每次启动新 Turn 时动态校验并
-  显式提交。
+- exact `/new` 打开唯一的新建卡片；任何带参数的 `/new ...` 都明确拒绝且零 mutation。
+  卡片在一个下拉框中展示全部 enabled Projects，不做应用级截断或分页，并可选择继承
+  Codex 或保存 Binding-scoped Model/Effort/Speed。它只创建 lazy Binding，首条真实消息
+  才创建 native Thread。
 - 同一 Binding 空闲时启动下一 Turn，运行中消息固定调用 native `steer()`；不
   queue、不拼 prompt。`/stop` 先 native `interrupt()`，再请求清理 App Server 为该
   Thread 登记的后台 terminal；当前接口不保证前台工具进程退出。
@@ -42,16 +42,19 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   `skills/netizen-user-guide` 这一个随 release 发布的用户咨询 Skill，其他用户 Skill
   不受影响。
 - Channel SQLite 只保存 Scope/Binding/Project Registry/去重 TTL、可选的
-  Binding-scoped Model/Effort/Speed 选择 ID，以及不含 native ID/content 的 Side
-  Topic 路由墓碑；不保存 prompt、回复、cwd 副本、卡片 session、解析后的 wire value、
+  Binding-scoped Model/Effort/Speed 选择 ID、群聊 Binding 的 Mention Context Mode 与
+  exact Context Boundary metadata，以及不含 native ID/content 的 Side Topic 路由墓碑；
+  不保存 prompt、补充消息正文、回复、cwd 副本、卡片 session、解析后的 wire value、
   Codex 已生效配置或 Turn 历史。
 - 同一进程默认在 `0.0.0.0:8787` 提供单管理员 Admin Web。它与飞书共用唯一的
   application service、Scope coordinator、SQLite、Runtime 和 `AsyncCodex`，集中分页管理
   Projects、普通 Sessions 和 Side Topics；它不能发送 Prompt、浏览完整历史或调用任意
   Codex RPC。`/settings` 仍保留给当前飞书 Scope 的普通使用者。
-- 群聊和群话题中，每条发给机器人的输入都必须重新 `@机器人`；P2P 及 P2P Side
-  话题无需 @。新建话题的纯文本
-  根消息可以直接 `@机器人 /new <project|none>`；后续话题消息仍须逐条 `@机器人`。
+- 群聊和群话题中，每条触发机器人的输入仍必须重新 `@机器人`；P2P 及 P2P Side
+  话题无需 @。普通群聊 Binding 可选择默认的 `current-only`（只提交当前 @ 消息和显式
+  引用），或 `catch-up`（下一次 @ 时有界读取同一 Scope 中上次已接受请求之后的成员消息）。
+  未 @ 消息只作为 inert supplemental context，不会自动触发 Turn、steer、control 或 Skill；
+  P2P 与 Side 固定为 current-only。
 - 每条真实普通或 Side Prompt 都会把当前飞书消息的公开发送者信息作为归属元数据交给
   Codex，并随原生输入进入 Thread 历史；它只说明“谁发送了这条请求”，不授予权限、
   owner 或更高指令优先级。Channel SDK 会通过当前 chat 的成员名单补全真实显示名；
@@ -74,19 +77,19 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   普通 Turn 完成后若出现“本轮文件”卡片，可翻页并按需将单个文件发送到该卡片话题；
   发送的是点击时当前仍可访问的内容，不是 Turn 完成时快照。
 - `//...`：发送字面 `/...` prompt。
-- `/new`：发送唯一的新建表单，直接选择 Project、Model、Effort、Speed，并保存三项
-  会话配置；只创建并切换 lazy 会话，不要求任务文本。
-- `/new <project|none>`：使用 alias 直接创建并切换 lazy 会话。
+- `/new`：发送唯一的新建表单，在单个下拉框中展示全部 enabled Projects，并选择继承
+  Codex 或显式 Model/Effort/Speed；群聊和群话题还可选择 @ 上下文模式。只创建并切换
+  lazy 会话，不要求任务文本。`/new` 不接受任何参数。
 - `/side [首轮问题]`：要求当前 active Binding 已有原生历史；在同一 chat 新建一个
   sibling Side 话题。省略问题时只创建，带问题时新话题先显示明确标注的首轮问题，
   随后的模型回复和 reactions 也只出现在新话题；Parent 成功时不再发送导航回复。
   首轮模型来源仍是原 `/side` 消息及其发送者，新话题 seed 只作为完成投递锚点。
   Side 内仅支持普通 Prompt、`//`、`/status`、`/stop`、`/help`、`/` 和
   `/side close`；空闲两小时或服务重启后过期。旧 Side 话题不会变成普通 Binding。
-- `/config`：直接选择并保存当前会话后续新 Turn 的 Model、Effort、Speed，不要求
-  任务、不创建空白 Turn，也不提供跨会话选择；配置其他会话应先 `/resume`。每条普通
-  消息需要启动新 Turn 时都会重新读取 live 模型目录并显式应用三项；running Turn
-  明确拒绝修改，普通消息仍只 steer 当前 exact Turn。
+- `/config`：选择并保存当前会话后续新 Turn 的 Model、Effort、Speed；群聊和群话题还可
+  切换 @ 上下文模式。不要求任务、不创建空白 Turn，也不提供跨会话选择；配置其他会话
+  应先 `/resume`。每条普通消息需要启动新 Turn 时都会重新读取 live 模型目录并显式应用
+  三项；running Turn 明确拒绝修改，普通消息仍只 steer 当前 exact Turn。
 - `/compact`：调用公开原生压缩能力。仅支持已有历史的 idle 会话；完成前该 Binding
   显示 `compacting` 并拒绝新 Prompt/配置，只有公开 history 中唯一新增的
   `contextCompaction` Turn 进入终态才报告完成；多候选或 10 分钟无终态会 fail closed。

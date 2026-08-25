@@ -71,8 +71,7 @@ class ExperienceTest(unittest.TestCase):
             self.parse("$code-review inspect")
 
     def test_supported_commands_are_typed_controls(self) -> None:
-        new = self.parse('/new "my-project"')
-        picker = self.parse("/new")
+        new = self.parse("/new")
         settings = self.parse("/settings")
         config = self.parse("/config")
         compact = self.parse("/compact")
@@ -85,9 +84,7 @@ class ExperienceTest(unittest.TestCase):
 
         self.assertIsInstance(new, ControlIntent)
         self.assertEqual(new.name, ControlName.NEW)
-        self.assertEqual(new.arguments, ("my-project",))
-        self.assertEqual(picker.name, ControlName.NEW)
-        self.assertEqual(picker.arguments, ())
+        self.assertEqual(new.arguments, ())
         self.assertEqual(settings.name, ControlName.SETTINGS)
         self.assertEqual(config.name, ControlName.CONFIG)
         self.assertEqual(compact.name, ControlName.COMPACT)
@@ -97,6 +94,26 @@ class ExperienceTest(unittest.TestCase):
         self.assertEqual(archive.name, ControlName.ARCHIVE)
         self.assertEqual(delete.name, ControlName.DELETE)
         self.assertEqual(unarchive.arguments, ("abcdef12",))
+
+    def test_new_is_card_only_and_all_raw_tails_get_one_migration_result(
+        self,
+    ) -> None:
+        for command in (
+            "/new none",
+            "/new alias",
+            '/new "alias"',
+            "/new one two",
+            '/new "unterminated',
+        ):
+            with self.subTest(command=command), self.assertRaisesRegex(
+                InvalidInteraction,
+                "快捷创建已下线，请发送 /new 并在卡片中选择",
+            ):
+                self.parse(command)
+
+        escaped = self.parse("//new alias")
+        self.assertIsInstance(escaped, PromptInput)
+        self.assertEqual(escaped.text, "/new alias")
 
     def test_model_shortcuts_are_routed_to_config_not_registered(self) -> None:
         for command in ("/model", "/effort high", "/fast"):
@@ -216,7 +233,8 @@ class ExperienceTest(unittest.TestCase):
         help_text = command_help()
         self.assertIn("/config", help_text)
         self.assertIn("/compact", help_text)
-        self.assertIn("/new [project|none]", help_text)
+        self.assertIn("/new：", help_text)
+        self.assertNotIn("/new [", help_text)
         self.assertIn("/rename [名称]", help_text)
         self.assertIn("/sessions [archived]", help_text)
         self.assertIn("/unarchive <会话短 ID>", help_text)
@@ -243,7 +261,7 @@ class ExperienceTest(unittest.TestCase):
             self.parse("/unknown")
 
     def test_argument_counts_are_strict(self) -> None:
-        with self.assertRaisesRegex(InvalidInteraction, "/new"):
+        with self.assertRaisesRegex(InvalidInteraction, "快捷创建已下线"):
             self.parse("/new one two")
         with self.assertRaisesRegex(InvalidInteraction, "不接受参数"):
             self.parse("/status extra")

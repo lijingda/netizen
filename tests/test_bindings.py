@@ -12,6 +12,7 @@ from netizen.bindings import (
     AmbiguousBinding,
     BindingCursor,
     BindingConflict,
+    BindingContextRevisionConflict,
     BindingNotFound,
     BindingQuery,
     BindingQueryBusy,
@@ -32,8 +33,14 @@ from netizen.bindings import (
     _binding_inventory_statement,
     _side_inventory_statement,
     _Transaction,
+    migrate_channel_database_v5_to_v6,
 )
-from netizen.domain import FeishuScope, ScopeKind
+from netizen.domain import (
+    FeishuScope,
+    MentionContextMode,
+    MessageContextAnchor,
+    ScopeKind,
+)
 
 
 class BindingStoreTest(unittest.TestCase):
@@ -70,6 +77,12 @@ class BindingStoreTest(unittest.TestCase):
         self.assertIsNone(first.native_thread_id)
         self.assertIsNone(first.turn_settings)
         self.assertEqual(first.settings_revision, 1)
+        self.assertEqual(
+            first.message_context_mode,
+            MentionContextMode.CURRENT_ONLY,
+        )
+        self.assertIsNone(first.context_anchor)
+        self.assertEqual(first.context_revision, 1)
         self.assertEqual(self.store.active_binding(self.scope.key).id, second.id)
         bindings = self.store.list_bindings(self.scope.key)
         self.assertEqual({binding.id for binding in bindings}, {first.id, second.id})
@@ -130,6 +143,246 @@ class BindingStoreTest(unittest.TestCase):
                 ("model", binding.id),
             )
         self.assertIsNone(self.store.get(binding.id).turn_settings)
+
+    def test_catch_up_context_is_group_or_topic_only_and_requires_anchor(
+        self,
+    ) -> None:
+        anchor = MessageContextAnchor("om_initial", 1_700_000_000_000)
+        with self.assertRaisesRegex(ValueError, "direct"):
+            self.store.create_binding(
+                scope=self.scope,
+                project_alias="none",
+                creator_id="ou_user",
+                message_context_mode=MentionContextMode.CATCH_UP,
+                context_anchor=anchor,
+            )
+        self.assertEqual(
+            self.store._connection.execute("SELECT COUNT(*) FROM scopes").fetchone()[
+                0
+            ],
+            0,
+        )
+
+        group = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        with self.assertRaisesRegex(ValueError, "must not have"):
+            self.store.create_binding(
+                scope=group,
+                project_alias="none",
+                creator_id="ou_user",
+                context_anchor=anchor,
+            )
+        with self.assertRaisesRegex(ValueError, "requires"):
+            self.store.create_binding(
+                scope=group,
+                project_alias="none",
+                creator_id="ou_user",
+                message_context_mode=MentionContextMode.CATCH_UP,
+            )
+        binding = self.store.create_binding(
+            scope=group,
+            project_alias="none",
+            creator_id="ou_user",
+            message_context_mode=MentionContextMode.CATCH_UP,
+            context_anchor=anchor,
+        )
+        self.assertEqual(binding.message_context_mode, MentionContextMode.CATCH_UP)
+        self.assertEqual(binding.context_anchor, anchor)
+        self.assertEqual(binding.context_revision, 1)
+
+        topic = FeishuScope(
+            "cli_test",
+            "oc_group",
+            ScopeKind.TOPIC,
+            "omt_topic",
+        )
+        topic_binding = self.store.create_binding(
+            scope=topic,
+            project_alias="none",
+            creator_id="ou_user",
+            message_context_mode=MentionContextMode.CATCH_UP,
+            context_anchor=anchor,
+        )
+        self.assertEqual(topic_binding.context_anchor, anchor)
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store._connection.execute(
+                """
+                UPDATE bindings
+                SET context_anchor_message_id = NULL
+                WHERE binding_id = ?
+                """,
+                (binding.id,),
+            )
+        self.assertEqual(self.store.get(binding.id).context_anchor, anchor)
+
+        direct = self.store.create_binding(
+            scope=self.scope,
+            project_alias="none",
+            creator_id="ou_user",
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "direct"):
+            self.store._connection.execute(
+                """
+                UPDATE bindings
+                SET message_context_mode = 'catch-up',
+                    context_anchor_message_id = ?,
+                    context_anchor_create_time_ms = ?
+                WHERE binding_id = ?
+                """,
+                (anchor.message_id, anchor.create_time_ms, direct.id),
+            )
+        self.assertEqual(
+            self.store.get(direct.id).message_context_mode,
+            MentionContextMode.CURRENT_ONLY,
+        )
+        with self.assertRaisesRegex(ValueError, "direct"):
+            self.store.set_configuration(
+                binding_id=direct.id,
+                expected_settings_revision=1,
+                expected_context_revision=1,
+                settings=BindingTurnSettings("model", "high", "priority"),
+                message_context_mode=MentionContextMode.CATCH_UP,
+                context_anchor=anchor,
+            )
+        unchanged = self.store.get(direct.id)
+        self.assertIsNone(unchanged.turn_settings)
+        self.assertEqual(unchanged.settings_revision, 1)
+        self.assertEqual(unchanged.context_revision, 1)
+
+    def test_configuration_atomically_guards_settings_and_context_revisions(
+        self,
+    ) -> None:
+        group = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        binding = self.store.create_binding(
+            scope=group,
+            project_alias="none",
+            creator_id="ou_user",
+        )
+        selected = BindingTurnSettings("model", "high", "priority")
+        initial = MessageContextAnchor("om_initial", 1_700_000_000_000)
+
+        configured = self.store.set_configuration(
+            binding_id=binding.id,
+            expected_settings_revision=1,
+            expected_context_revision=1,
+            settings=selected,
+            message_context_mode=MentionContextMode.CATCH_UP,
+            context_anchor=initial,
+        )
+        self.assertEqual(configured.turn_settings, selected)
+        self.assertEqual(configured.settings_revision, 2)
+        self.assertEqual(configured.message_context_mode, MentionContextMode.CATCH_UP)
+        self.assertEqual(configured.context_anchor, initial)
+        self.assertEqual(configured.context_revision, 2)
+
+        inherited = self.store.set_configuration(
+            binding_id=binding.id,
+            expected_settings_revision=2,
+            expected_context_revision=2,
+            settings=None,
+            message_context_mode=MentionContextMode.CATCH_UP,
+            context_anchor=None,
+        )
+        self.assertIsNone(inherited.turn_settings)
+        self.assertEqual(inherited.settings_revision, 3)
+        self.assertEqual(inherited.context_anchor, initial)
+        self.assertEqual(inherited.context_revision, 2)
+
+        with self.assertRaises(BindingContextRevisionConflict):
+            self.store.set_configuration(
+                binding_id=binding.id,
+                expected_settings_revision=3,
+                expected_context_revision=1,
+                settings=selected,
+                message_context_mode=MentionContextMode.CURRENT_ONLY,
+                context_anchor=None,
+            )
+        unchanged = self.store.get(binding.id)
+        self.assertIsNone(unchanged.turn_settings)
+        self.assertEqual(unchanged.settings_revision, 3)
+        self.assertEqual(unchanged.context_anchor, initial)
+
+        cleared = self.store.set_configuration(
+            binding_id=binding.id,
+            expected_settings_revision=3,
+            expected_context_revision=2,
+            settings=None,
+            message_context_mode=MentionContextMode.CURRENT_ONLY,
+            context_anchor=None,
+        )
+        self.assertEqual(cleared.settings_revision, 3)
+        self.assertEqual(cleared.context_revision, 3)
+        self.assertIsNone(cleared.context_anchor)
+
+    def test_context_anchor_commit_is_revision_guarded(self) -> None:
+        group = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        initial = MessageContextAnchor("om_initial", 1_700_000_000_000)
+        binding = self.store.create_binding(
+            scope=group,
+            project_alias="none",
+            creator_id="ou_user",
+            message_context_mode=MentionContextMode.CATCH_UP,
+            context_anchor=initial,
+        )
+        current = MessageContextAnchor("om_current", 1_700_000_001_000)
+
+        committed = self.store.commit_context_anchor(
+            binding_id=binding.id,
+            expected_context_revision=1,
+            anchor=current,
+        )
+        self.assertEqual(committed.context_anchor, current)
+        self.assertEqual(committed.context_revision, 2)
+        with self.assertRaises(BindingContextRevisionConflict):
+            self.store.commit_context_anchor(
+                binding_id=binding.id,
+                expected_context_revision=1,
+                anchor=MessageContextAnchor("om_late", 1_700_000_002_000),
+            )
+        self.assertEqual(self.store.get(binding.id), committed)
+
+        current_only = self.store.create_binding(
+            scope=group,
+            project_alias="none",
+            creator_id="ou_user",
+        )
+        with self.assertRaisesRegex(BindingConflict, "no context anchor"):
+            self.store.commit_context_anchor(
+                binding_id=current_only.id,
+                expected_context_revision=1,
+                anchor=current,
+            )
+
+    def test_catch_up_activation_requires_and_commits_a_reset_anchor(self) -> None:
+        group = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        initial = MessageContextAnchor("om_initial", 1_700_000_000_000)
+        catch_up = self.store.create_binding(
+            scope=group,
+            project_alias="none",
+            creator_id="ou_user",
+            message_context_mode=MentionContextMode.CATCH_UP,
+            context_anchor=initial,
+        )
+        current_only = self.store.create_binding(
+            scope=group,
+            project_alias="none",
+            creator_id="ou_user",
+        )
+        self.assertEqual(self.store.active_binding(group.key).id, current_only.id)
+
+        with self.assertRaisesRegex(ValueError, "requires"):
+            self.store.activate(scope_key=group.key, binding_id=catch_up.id)
+        self.assertEqual(self.store.active_binding(group.key).id, current_only.id)
+
+        reset = MessageContextAnchor("om_resume", 1_700_000_003_000)
+        activated = self.store.activate(
+            scope_key=group.key,
+            binding_id=catch_up.id,
+            context_anchor=reset,
+        )
+        self.assertTrue(activated.active)
+        self.assertEqual(activated.context_anchor, reset)
+        self.assertEqual(activated.context_revision, 2)
 
     def test_reference_resolution_is_scope_local_and_detects_ambiguity(self) -> None:
         first = self.create()
@@ -221,10 +474,13 @@ class BindingStoreTest(unittest.TestCase):
             path = Path(directory) / "channel.sqlite3"
             first = BindingStore(path, id_factory=lambda: "binding-one")
             scope = FeishuScope("cli_test", "oc_chat", ScopeKind.GROUP)
+            anchor = MessageContextAnchor("om_initial", 1_700_000_000_000)
             binding = first.create_binding(
                 scope=scope,
                 project_alias="test",
                 creator_id="ou_operator",
+                message_context_mode=MentionContextMode.CATCH_UP,
+                context_anchor=anchor,
             )
             first.assign_native_thread_id(binding.id, "native-one")
             first.close()
@@ -233,6 +489,12 @@ class BindingStoreTest(unittest.TestCase):
             try:
                 restored = second.active_binding(scope.key)
                 self.assertEqual(restored.native_thread_id, "native-one")
+                self.assertEqual(
+                    restored.message_context_mode,
+                    MentionContextMode.CATCH_UP,
+                )
+                self.assertEqual(restored.context_anchor, anchor)
+                self.assertEqual(restored.context_revision, 1)
                 self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             finally:
                 second.close()
@@ -430,7 +692,9 @@ class BindingStoreTest(unittest.TestCase):
             finally:
                 second.close()
 
-    def test_schema_contains_only_binding_scoped_settings_intent(self) -> None:
+    def test_schema_contains_only_binding_scoped_settings_and_context_intent(
+        self,
+    ) -> None:
         connection = self.store._connection  # Architecture contract.
         tables = {
             row[0]
@@ -475,6 +739,10 @@ class BindingStoreTest(unittest.TestCase):
                 "service_tier_id",
                 "settings_revision",
                 "ever_activated",
+                "message_context_mode",
+                "context_anchor_message_id",
+                "context_anchor_create_time_ms",
+                "context_revision",
             }.issubset(columns)
         )
         side_columns = {
@@ -664,102 +932,119 @@ class BindingStoreManagementSchemaTest(unittest.TestCase):
         finally:
             store.close()
 
-    def test_old_v5_new_old_new_round_trip_preserves_activation_semantics(self) -> None:
+    def test_v5_database_is_rejected_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "channel.sqlite3"
             _create_frozen_v5_database(path)
-            scope = FeishuScope("cli_test", "oc_legacy", ScopeKind.DIRECT)
-
-            upgraded = BindingStore(path, id_factory=lambda: "admin-binding")
-            admin = upgraded.create_admin_binding(
-                scope=scope,
-                project_alias="legacy",
-                expected_project_revision=1,
-            )
-            self.assertIsNone(admin.activated_at)
-            columns = {
-                row[1]
-                for row in upgraded._connection.execute(
-                    "PRAGMA table_info(bindings)"
-                ).fetchall()
-            }
-            self.assertIn("ever_activated", columns)
-            self.assertEqual(
-                upgraded._connection.execute(
-                    "SELECT version FROM schema_version"
-                ).fetchone()[0],
-                5,
-            )
-
-            # Leave a deliberately inconsistent same-pointer row so the frozen
-            # old activate SQL proves the trigger runs even when OLD == NEW.
-            upgraded._connection.execute(
-                "UPDATE scopes SET active_binding_id = ? WHERE scope_key = ?",
-                (admin.id, scope.key),
-            )
-            upgraded._connection.execute(
-                "UPDATE bindings SET ever_activated = 0 WHERE binding_id = ?",
-                (admin.id,),
-            )
-            upgraded.close()
-
-            legacy = sqlite3.connect(path)
+            before_bytes = path.read_bytes()
+            before = sqlite3.connect(path)
             try:
-                legacy.execute(
-                    "UPDATE bindings SET activated_at = ? WHERE binding_id = ?",
-                    ("2030-01-01T00:00:00+00:00", admin.id),
-                )
-                legacy.execute(
-                    "UPDATE scopes SET active_binding_id = ? WHERE scope_key = ?",
-                    (admin.id, scope.key),
-                )
-                legacy.execute(
-                    """
-                    INSERT INTO bindings(
-                        binding_id, scope_key, project_alias, native_thread_id,
-                        model_id, effort_id, service_tier_id, settings_revision,
-                        creator_id, created_at, activated_at
-                    ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, 1, ?, ?, ?)
-                    """,
-                    (
-                        "legacy-binding",
-                        scope.key,
-                        "legacy",
-                        "ou_legacy",
-                        "2030-01-02T00:00:00+00:00",
-                        "2030-01-02T00:00:00+00:00",
-                    ),
-                )
-                selected = legacy.execute(
-                    """
-                    SELECT binding_id, scope_key, project_alias, native_thread_id,
-                           creator_id, created_at, activated_at
-                    FROM bindings ORDER BY binding_id
-                    """
+                before_schema = before.execute(
+                    "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
                 ).fetchall()
-                self.assertEqual(len(selected), 2)
-                legacy.commit()
+                before_rows = before.execute(
+                    "SELECT alias, cwd, enabled, revision FROM projects"
+                ).fetchall()
             finally:
-                legacy.close()
+                before.close()
 
-            reopened = BindingStore(path)
+            with self.assertRaisesRegex(RuntimeError, "recreate"):
+                BindingStore(path)
+
+            self.assertEqual(path.read_bytes(), before_bytes)
+            self.assertFalse(Path(str(path) + "-wal").exists())
+            self.assertFalse(Path(str(path) + "-shm").exists())
+            after = sqlite3.connect(path)
             try:
                 self.assertEqual(
-                    reopened.get(admin.id).activated_at,
-                    "2030-01-01T00:00:00+00:00",
+                    after.execute(
+                        "SELECT type, name, sql FROM sqlite_master "
+                        "ORDER BY type, name"
+                    ).fetchall(),
+                    before_schema,
                 )
                 self.assertEqual(
-                    reopened.get("legacy-binding").activated_at,
-                    "2030-01-02T00:00:00+00:00",
+                    after.execute(
+                        "SELECT alias, cwd, enabled, revision FROM projects"
+                    ).fetchall(),
+                    before_rows,
                 )
-                flags = dict(
-                    reopened._connection.execute(
-                        "SELECT binding_id, ever_activated FROM bindings"
-                    ).fetchall()
+                self.assertEqual(
+                    after.execute("SELECT version FROM schema_version").fetchone()[0],
+                    5,
                 )
-                self.assertEqual(flags, {admin.id: 1, "legacy-binding": 1})
             finally:
-                reopened.close()
+                after.close()
+
+    def test_explicit_v5_to_v6_migration_preserves_rows_and_is_idempotent(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "channel.sqlite3"
+            _create_migratable_v5_database(path)
+
+            self.assertTrue(migrate_channel_database_v5_to_v6(path))
+            self.assertFalse(migrate_channel_database_v5_to_v6(path))
+
+            connection = sqlite3.connect(path)
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT version FROM schema_version"
+                    ).fetchone()[0],
+                    6,
+                )
+                self.assertEqual(
+                    connection.execute(
+                        """
+                        SELECT binding_id, message_context_mode,
+                               context_anchor_message_id,
+                               context_anchor_create_time_ms,
+                               context_revision
+                        FROM bindings
+                        """
+                    ).fetchall(),
+                    [("legacy-binding", "current-only", None, None, 1)],
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT side_id, state FROM side_topics"
+                    ).fetchall(),
+                    [("legacy-side", "closed")],
+                )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        """
+                        UPDATE bindings
+                        SET message_context_mode = 'catch-up',
+                            context_anchor_message_id = 'om_anchor',
+                            context_anchor_create_time_ms = 1
+                        """
+                    )
+            finally:
+                connection.close()
+
+            migrated = BindingStore(path)
+            try:
+                binding = migrated.get("legacy-binding")
+                self.assertEqual(
+                    binding.message_context_mode,
+                    MentionContextMode.CURRENT_ONLY,
+                )
+                self.assertIsNone(binding.context_anchor)
+            finally:
+                migrated.close()
+
+    def test_explicit_migration_rejects_partial_v5_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "channel.sqlite3"
+            _create_frozen_v5_database(path)
+            before = path.read_bytes()
+
+            with self.assertRaisesRegex(RuntimeError, "missing required tables"):
+                migrate_channel_database_v5_to_v6(path)
+
+            self.assertEqual(path.read_bytes(), before)
 
     def test_file_database_uses_bounded_full_wal_writer_and_hot_wal_is_legacy_readable(
         self,
@@ -933,6 +1218,66 @@ class BindingStoreManagementSchemaTest(unittest.TestCase):
                 )
                 self.assertFalse(first.get_project(project.alias).enabled)
                 self.assertEqual(first.get_project(project.alias).revision, 2)
+            finally:
+                second.close()
+                first.close()
+
+    def test_context_anchor_cas_has_one_concurrent_winner(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "channel.sqlite3"
+            first = BindingStore(path, id_factory=lambda: "binding")
+            second = BindingStore(path)
+            group = FeishuScope("cli_test", "oc_context_race", ScopeKind.GROUP)
+            initial = MessageContextAnchor("om_initial", 1_700_000_000_000)
+            binding = first.create_binding(
+                scope=group,
+                project_alias="none",
+                creator_id="ou_user",
+                message_context_mode=MentionContextMode.CATCH_UP,
+                context_anchor=initial,
+            )
+            barrier = threading.Barrier(2)
+            results: list[BaseException | object] = []
+            result_lock = threading.Lock()
+
+            def commit(store: BindingStore, suffix: str) -> None:
+                barrier.wait()
+                try:
+                    result: BaseException | object = store.commit_context_anchor(
+                        binding_id=binding.id,
+                        expected_context_revision=1,
+                        anchor=MessageContextAnchor(
+                            f"om_{suffix}",
+                            1_700_000_001_000,
+                        ),
+                    )
+                except BaseException as error:
+                    result = error
+                with result_lock:
+                    results.append(result)
+
+            threads = (
+                threading.Thread(target=commit, args=(first, "first")),
+                threading.Thread(target=commit, args=(second, "second")),
+            )
+            try:
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(0.5)
+                    self.assertFalse(thread.is_alive())
+                self.assertEqual(
+                    sum(not isinstance(result, BaseException) for result in results),
+                    1,
+                )
+                self.assertEqual(
+                    sum(
+                        isinstance(result, BindingContextRevisionConflict)
+                        for result in results
+                    ),
+                    1,
+                )
+                self.assertEqual(first.get(binding.id).context_revision, 2)
             finally:
                 second.close()
                 first.close()
@@ -1265,6 +1610,128 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("side_topics_state_created", side_plan)
         self.assertNotIn("USE TEMP B-TREE", side_plan)
+
+
+def _create_migratable_v5_database(path: Path) -> None:
+    scope = FeishuScope("cli_test", "oc_legacy", ScopeKind.DIRECT)
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            """
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version(version) VALUES (5);
+            CREATE TABLE scopes (
+                scope_key TEXT PRIMARY KEY,
+                app_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                topic_id TEXT,
+                active_binding_id TEXT,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE bindings (
+                binding_id TEXT PRIMARY KEY,
+                scope_key TEXT NOT NULL REFERENCES scopes(scope_key),
+                project_alias TEXT NOT NULL,
+                native_thread_id TEXT UNIQUE,
+                model_id TEXT,
+                effort_id TEXT,
+                service_tier_id TEXT,
+                settings_revision INTEGER NOT NULL DEFAULT 1,
+                creator_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                activated_at TEXT NOT NULL,
+                ever_activated INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE projects (
+                alias TEXT PRIMARY KEY,
+                cwd TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE dedup_keys (
+                dedup_key TEXT PRIMARY KEY,
+                expires_at REAL NOT NULL
+            );
+            CREATE TABLE side_topics (
+                side_id TEXT PRIMARY KEY,
+                app_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                topic_id TEXT,
+                root_message_id TEXT,
+                source_message_id TEXT NOT NULL,
+                parent_binding_id TEXT NOT NULL,
+                creator_id TEXT NOT NULL,
+                requires_mention INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(app_id, source_message_id)
+            );
+            INSERT INTO projects(
+                alias, cwd, enabled, revision, created_at, updated_at
+            ) VALUES (
+                'legacy', '/tmp/legacy', 1, 1,
+                '2029-01-01T00:00:00+00:00',
+                '2029-01-01T00:00:00+00:00'
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO scopes(
+                scope_key, app_id, chat_id, kind, topic_id,
+                active_binding_id, updated_at
+            ) VALUES (?, ?, ?, ?, NULL, 'legacy-binding', ?)
+            """,
+            (
+                scope.key,
+                scope.app_id,
+                scope.chat_id,
+                scope.kind.value,
+                "2029-01-01T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO bindings(
+                binding_id, scope_key, project_alias, native_thread_id,
+                model_id, effort_id, service_tier_id, settings_revision,
+                creator_id, created_at, activated_at, ever_activated
+            ) VALUES (?, ?, 'legacy', 'thread-legacy', NULL, NULL, NULL, 3,
+                      'ou_legacy', ?, ?, 1)
+            """,
+            (
+                "legacy-binding",
+                scope.key,
+                "2029-01-01T00:00:00+00:00",
+                "2029-01-01T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO side_topics(
+                side_id, app_id, chat_id, topic_id, root_message_id,
+                source_message_id, parent_binding_id, creator_id,
+                requires_mention, state, created_at, updated_at
+            ) VALUES (
+                'legacy-side', 'cli_test', 'oc_legacy', 'omt_side',
+                'om_root', 'om_source', 'legacy-binding', 'ou_legacy',
+                1, 'closed',
+                '2029-01-02T00:00:00+00:00',
+                '2029-01-02T00:00:00+00:00'
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO dedup_keys(dedup_key, expires_at) VALUES ('event', 1.0)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def _create_frozen_v5_database(path: Path) -> None:

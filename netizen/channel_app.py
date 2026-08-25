@@ -14,6 +14,7 @@ from lark_channel import MediaSource, OutboundCard, OutboundFile, OutboundImage,
 
 from .bindings import (
     AmbiguousBinding,
+    BindingContextRevisionConflict,
     BindingNotFound,
     BindingSettingsRevisionConflict,
     BindingStore,
@@ -59,6 +60,9 @@ from .codex_runtime import (
     ActiveState,
     CodexRuntime,
     CompactionOutcome,
+    ContextAnchorRequired,
+    ContextBoundaryCommitFailed,
+    ContextCursorCommit,
     ContextWindowUsage,
     ExternalGoalActive,
     GoalNotFound,
@@ -106,6 +110,8 @@ from .domain import (
     ControlIntent,
     ControlName,
     FeishuScope,
+    MessageContextAnchor,
+    MentionContextMode,
     NativeCapability,
     PromptInput,
     SettingsSection,
@@ -143,6 +149,7 @@ from .image_inputs import (
     prepare_images,
 )
 from .prompt_projection import (
+    CurrentMessageProjection,
     PromptProjectionError,
     project_current_message,
     render_plain_prompt,
@@ -156,6 +163,24 @@ from .quoted_context import (
     needs_interactive_fallback,
     quoted_message_id,
     validate_quoted_message,
+)
+from .message_history import (
+    MessageHistoryError,
+    MessageHistoryReader,
+    MessageHistoryRef,
+    MessageHistoryUnavailable,
+)
+from .message_projection import (
+    HistoricalMessageError,
+    HistoricalMessageProjection,
+    SupplementalContextStats,
+    SupplementalMessageOmission,
+    compose_message_context_prompt,
+    historical_message_deleted,
+    normalized_historical_message_type,
+    project_quoted_message,
+    project_supplemental_message,
+    select_supplemental_messages,
 )
 from .sdk_gap_adapter import SkillCatalogError
 from .sdk_gap_adapter import GoalControlError, GoalStatus
@@ -175,6 +200,12 @@ _TURN_FILES_WITHOUT_FINAL_RESPONSE = "任务已完成，已生成以下文件。
 
 _TEXTUAL_CONTENT_TYPES = frozenset({"text", "post"})
 _QUOTE_FETCH_TIMEOUT_SECONDS = 10.0
+_CONTEXT_PREPARATION_TIMEOUT_SECONDS = 60.0
+_CONTEXT_FETCH_TIMEOUT_SECONDS = 10.0
+_CONTEXT_FETCH_CONCURRENCY = 4
+_CONTEXT_RECEIPT_TIMEOUT_SECONDS = 5.0
+_CONTEXT_MESSAGE_LIMIT = 50
+_CONTEXT_TEXT_LIMIT = 64_000
 _DONE_REACTION = "DONE"
 _ERROR_REACTION = "ERROR"
 _INTERRUPTED_REACTION = "CrossMark"
@@ -719,6 +750,7 @@ class ChannelApplication:
         runtime: CodexRuntime,
         bindings: BindingStore,
         projects: ProjectRegistry,
+        message_history: MessageHistoryReader | None = None,
         scope_coordinator: ScopeCoordinator | None = None,
         management: InstanceManagementService | None = None,
     ) -> None:
@@ -727,6 +759,7 @@ class ChannelApplication:
         self._runtime = runtime
         self._bindings = bindings
         self._projects = projects
+        self._message_history = message_history
         if management is None:
             self._scope_coordinator = scope_coordinator or ScopeCoordinator()
             self._management = InstanceManagementService(
@@ -818,7 +851,12 @@ class ChannelApplication:
             await self._reply(message, f"当前 Scope 找不到会话：{error.args[0]}。")
         except AmbiguousBinding as error:
             await self._reply(message, f"会话短 ID 不唯一：{error.args[0]}。")
-        except QuotedMessageError as error:
+        except (
+            QuotedMessageError,
+            MessageHistoryError,
+            HistoricalMessageError,
+            ContextBoundaryCommitFailed,
+        ) as error:
             await self._reply(message, str(error))
         except ImageInputError as error:
             await self._reply(message, str(error))
@@ -898,12 +936,15 @@ class ChannelApplication:
                 return
             await self._safe_update_card(message_id, error_card(str(error)))
         except (
+            BindingContextRevisionConflict,
             BindingNotFound,
+            ContextAnchorRequired,
             GoalControlError,
             GoalNotFound,
             GoalNotMaterialized,
             GoalStateUnknown,
             ModelCatalogError,
+            MessageHistoryError,
             ProjectError,
             RuntimeClosed,
             ThreadCompacting,
@@ -1189,20 +1230,50 @@ class ChannelApplication:
         if binding is None:
             await self._reply(
                 message,
-                "当前聊天或话题还没有会话，请先发送 /new [project|none]。",
+                "当前聊天或话题还没有会话，请先发送 /new。",
             )
             return
         project = self._projects.resolve_for_binding(binding.project_alias)
         target_id = quoted_message_id(message)
-        admission = await self._runtime.capture_submission_admission(binding.id)
-        input_value = await self._compose_prompt_input(
-            source_message=message,
-            source_id=prompt.source_id,
-            sender_id=prompt.sender_id,
-            quoted_target_id=target_id,
-            current_text=prompt.text,
-            current_images=current_images,
+        current = project_current_message(
+            message,
+            expected_message_id=prompt.source_id,
+            expected_sender_id=prompt.sender_id,
+            message_type=normalized_message_type(message),
+            content_fidelity=(
+                "full_multimodal" if current_images else "full_text"
+            ),
+            request_text=prompt.text,
         )
+        admission = await self._runtime.capture_submission_admission(binding.id)
+        context_commit = None
+        if binding.message_context_mode is MentionContextMode.CATCH_UP:
+            self._require_catch_up_message_scope(message, prompt.scope)
+            if binding.context_anchor is None:
+                raise MessageHistoryUnavailable(
+                    "当前会话缺少群聊上下文边界，本条消息未执行；"
+                    "请重新发送 /config 并切换一次上下文模式。"
+                )
+            input_value, context_commit, context_stats = (
+                await self._compose_catch_up_prompt_input(
+                    source_message=message,
+                    scope=prompt.scope,
+                    lower=binding.context_anchor,
+                    upper_id=prompt.source_id,
+                    quoted_target_id=target_id,
+                    current=current,
+                    current_images=current_images,
+                    expected_context_revision=admission.context_revision,
+                )
+            )
+            await self._send_context_receipt(message, context_stats)
+        else:
+            input_value = await self._compose_prompt_input(
+                source_message=message,
+                quoted_target_id=target_id,
+                current=current,
+                current_images=current_images,
+            )
 
         submit_kwargs: dict[str, Any] = dict(
             binding=binding,
@@ -1211,6 +1282,7 @@ class ChannelApplication:
             owner_id=prompt.sender_id,
             origin=message,
             skill_names=prompt.skill_names,
+            context_commit=context_commit,
         )
         submit_kwargs["admission"] = admission
         try:
@@ -1339,12 +1411,20 @@ class ChannelApplication:
         current_images: tuple[ImageReference, ...] = (),
     ) -> None:
         admission = await self._runtime.capture_side_submission_admission(side_id)
+        current = project_current_message(
+            source_message,
+            expected_message_id=prompt.source_id,
+            expected_sender_id=prompt.sender_id,
+            message_type=normalized_message_type(source_message),
+            content_fidelity=(
+                "full_multimodal" if current_images else "full_text"
+            ),
+            request_text=prompt.text,
+        )
         input_value = await self._compose_prompt_input(
             source_message=source_message,
-            source_id=prompt.source_id,
-            sender_id=prompt.sender_id,
             quoted_target_id=quoted_target_id,
-            current_text=prompt.text,
+            current=current,
             current_images=current_images,
         )
         submit_kwargs: dict[str, Any] = dict(
@@ -1616,7 +1696,7 @@ class ChannelApplication:
                 return
             await self._reply(
                 message,
-                "当前聊天或话题还没有会话，请先发送 /new [project|none]。",
+                "当前聊天或话题还没有会话，请先发送 /new。",
             )
             return
         record = existing
@@ -1936,23 +2016,11 @@ class ChannelApplication:
         self,
         *,
         source_message: Any,
-        source_id: str,
-        sender_id: str,
         quoted_target_id: str | None,
-        current_text: str,
+        current: CurrentMessageProjection,
         current_images: tuple[ImageReference, ...],
     ) -> Any:
         try:
-            current = project_current_message(
-                source_message,
-                expected_message_id=source_id,
-                expected_sender_id=sender_id,
-                message_type=normalized_message_type(source_message),
-                content_fidelity=(
-                    "full_multimodal" if current_images else "full_text"
-                ),
-                request_text=current_text,
-            )
             quoted = None
             fallback_text = None
             quoted_images: tuple[ImageReference, ...] = ()
@@ -2040,6 +2108,396 @@ class ChannelApplication:
                 "无法处理消息中的图片，本条消息未执行；请重新发送。"
             ) from error
 
+    async def _compose_catch_up_prompt_input(
+        self,
+        *,
+        source_message: Any,
+        scope: FeishuScope,
+        lower: MessageContextAnchor,
+        upper_id: str,
+        quoted_target_id: str | None,
+        current: CurrentMessageProjection,
+        current_images: tuple[ImageReference, ...],
+        expected_context_revision: int,
+    ) -> tuple[Any, ContextCursorCommit, SupplementalContextStats]:
+        reader = self._message_history
+        if reader is None:
+            raise MessageHistoryUnavailable(
+                "群聊上下文读取能力尚不可用，本条消息未执行；请联系维护者。"
+            )
+
+        try:
+            async with asyncio.timeout(_CONTEXT_PREPARATION_TIMEOUT_SECONDS):
+                window = await reader.read_window(scope, lower, upper_id)
+                fetched = await self._fetch_history_candidates(
+                    scope,
+                    window.candidates,
+                )
+                by_id = {
+                    reference.message_id: value
+                    for reference, value in zip(window.candidates, fetched)
+                }
+
+                quoted_input: tuple[Any, str | None] | None = None
+                quoted_projection: HistoricalMessageProjection | None = None
+                if quoted_target_id is not None:
+                    quoted_input = by_id.get(quoted_target_id)
+                    if quoted_input is None:
+                        quoted_input = await self._fetch_normalized_history_message(
+                            quoted_target_id
+                        )
+                    quoted_message, quoted_fallback = quoted_input
+                    validate_quoted_message(
+                        quoted_message,
+                        expected_message_id=quoted_target_id,
+                        expected_chat_id=scope.chat_id,
+                    )
+                    quoted_projection = project_quoted_message(
+                        quoted_message,
+                        interactive_fallback_text=quoted_fallback,
+                    )
+
+                eligible_inputs: list[
+                    tuple[Any, str | None, HistoricalMessageProjection]
+                ] = []
+                projection_omissions: list[SupplementalMessageOmission] = []
+                for message, fallback in fetched:
+                    projection = project_supplemental_message(
+                        message,
+                        interactive_fallback_text=fallback,
+                    )
+                    if isinstance(projection, SupplementalMessageOmission):
+                        projection_omissions.append(projection)
+                    else:
+                        eligible_inputs.append((message, fallback, projection))
+
+                supplemental_stats = SupplementalContextStats(
+                    scanned_count=window.stats.raw_messages_scanned,
+                    omitted_count=(
+                        window.stats.omitted_messages + len(projection_omissions)
+                    ),
+                    unsupported_omitted_count=sum(
+                        omission.reason == "unsupported_message_type"
+                        for omission in projection_omissions
+                    ),
+                    truncated_before=window.stats.truncated_before,
+                    message_limit_reached=window.stats.scan_limit_hit,
+                )
+                selection = select_supplemental_messages(
+                    tuple(item[2] for item in eligible_inputs),
+                    quoted_message_id=(
+                        quoted_projection.message_id
+                        if quoted_projection is not None
+                        else None
+                    ),
+                    supplemental_stats=supplemental_stats,
+                    max_supplemental_messages=_CONTEXT_MESSAGE_LIMIT,
+                    max_supplemental_text=_CONTEXT_TEXT_LIMIT,
+                )
+                image_eligible_ids = frozenset(
+                    projection.message_id for projection in selection.messages
+                )
+
+                supplemental_image_references: list[ImageReference] = []
+                for message, _, projection in eligible_inputs:
+                    if projection.message_id not in image_eligible_ids:
+                        continue
+                    supplemental_image_references.extend(
+                        image_references(
+                            message,
+                            source="supplemental_message",
+                        )
+                    )
+                quoted_image_references: tuple[ImageReference, ...] = ()
+                if quoted_input is not None:
+                    quoted_image_references = image_references(
+                        quoted_input[0],
+                        source="quoted_message",
+                    )
+        except (MessageHistoryError, HistoricalMessageError, ImageInputError):
+            raise
+        except TimeoutError as error:
+            raise MessageHistoryUnavailable(
+                "读取并整理群聊上下文超过时间限制，本条消息未执行；请重试。"
+            ) from error
+        except Exception as error:
+            logger.warning(
+                "catch-up context preparation failed",
+                extra={"error_type": type(error).__name__},
+            )
+            raise MessageHistoryUnavailable(
+                "无法安全整理群聊上下文，本条消息未执行；请重试。"
+            ) from error
+
+        prepared_images = await prepare_images(
+            self._channel,
+            tuple(supplemental_image_references)
+            + quoted_image_references
+            + current_images,
+        )
+
+        selected_inputs = {
+            projection.message_id: (message, fallback)
+            for message, fallback, projection in eligible_inputs
+            if projection.message_id in image_eligible_ids
+        }
+        supplemental_projections: list[HistoricalMessageProjection] = []
+        for selected in selection.messages:
+            assert selected.message_id is not None
+            message, fallback = selected_inputs[selected.message_id]
+            projection = project_supplemental_message(
+                message,
+                interactive_fallback_text=fallback,
+                read_image_keys=self._prepared_image_keys(
+                    prepared_images,
+                    source="supplemental_message",
+                    message_id=_message_id(message),
+                ),
+            )
+            if isinstance(projection, SupplementalMessageOmission):
+                raise MessageHistoryUnavailable(
+                    "补充上下文消息在整理期间发生变化，本条消息未执行；请重试。"
+                )
+            supplemental_projections.append(projection)
+        selection = selection.reproject(supplemental_projections)
+        final_supplemental_ids = frozenset(
+            projection.message_id for projection in selection.messages
+        )
+        prepared_images = tuple(
+            image
+            for image in prepared_images
+            if image.reference.source != "supplemental_message"
+            or image.reference.message_id in final_supplemental_ids
+        )
+
+        final_quoted_projection = None
+        if quoted_input is not None:
+            quoted_message, quoted_fallback = quoted_input
+            final_quoted_projection = project_quoted_message(
+                quoted_message,
+                interactive_fallback_text=quoted_fallback,
+                read_image_keys=self._prepared_image_keys(
+                    prepared_images,
+                    source="quoted_message",
+                    message_id=_message_id(quoted_message),
+                ),
+            )
+
+        context = compose_message_context_prompt(
+            supplemental_selection=selection,
+            quoted_message=final_quoted_projection,
+            current=current,
+        )
+        return (
+            compose_multimodal_input(context.text, images=prepared_images),
+            ContextCursorCommit(
+                expected_context_revision=expected_context_revision,
+                anchor=window.upper,
+            ),
+            context.stats,
+        )
+
+    async def _fetch_history_candidates(
+        self,
+        scope: FeishuScope,
+        references: tuple[MessageHistoryRef, ...],
+    ) -> tuple[tuple[Any, str | None], ...]:
+        semaphore = asyncio.Semaphore(_CONTEXT_FETCH_CONCURRENCY)
+
+        async def fetch(
+            reference: MessageHistoryRef,
+        ) -> tuple[Any, str | None]:
+            async with semaphore:
+                value = await self._fetch_normalized_history_message(
+                    reference.message_id
+                )
+                self._validate_history_candidate(scope, reference, value[0])
+                return value
+
+        tasks = tuple(asyncio.create_task(fetch(reference)) for reference in references)
+        if not tasks:
+            return ()
+        try:
+            return tuple(await asyncio.gather(*tasks))
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _fetch_normalized_history_message(
+        self,
+        message_id: str,
+    ) -> tuple[Any, str | None]:
+        try:
+            async with asyncio.timeout(_CONTEXT_FETCH_TIMEOUT_SECONDS):
+                message = await self._channel.fetch_inbound_message(message_id)
+        except TimeoutError as error:
+            raise MessageHistoryUnavailable(
+                "读取补充上下文消息超时，本条消息未执行；请重试。"
+            ) from error
+        except Exception as error:
+            raise MessageHistoryUnavailable(
+                "无法读取补充上下文消息，本条消息未执行；请重试。"
+            ) from error
+        if message is None:
+            raise MessageHistoryUnavailable(
+                "补充上下文消息已不可读取，本条消息未执行；请重试。"
+            )
+
+        fallback_text = None
+        if needs_interactive_fallback(message):
+            try:
+                async with asyncio.timeout(_CONTEXT_FETCH_TIMEOUT_SECONDS):
+                    fallback = await self._channel.fetch_quoted_context(message_id)
+            except TimeoutError as error:
+                raise MessageHistoryUnavailable(
+                    "读取历史应用消息可见内容超时，本条消息未执行；请重试。"
+                ) from error
+            except Exception as error:
+                raise MessageHistoryUnavailable(
+                    "无法读取历史应用消息可见内容，本条消息未执行；请重试。"
+                ) from error
+            if (
+                fallback is None
+                or getattr(fallback, "message_id", None) != message_id
+                or getattr(fallback, "content_type", None) != "interactive"
+            ):
+                raise MessageHistoryUnavailable(
+                    "历史应用消息没有可验证的可见内容，本条消息未执行；请重试。"
+                )
+            fallback_text = interactive_quote_visible_text(fallback)
+        return message, fallback_text
+
+    @staticmethod
+    def _validate_history_candidate(
+        scope: FeishuScope,
+        reference: MessageHistoryRef,
+        message: Any,
+    ) -> None:
+        if _message_id(message) != reference.message_id:
+            raise MessageHistoryUnavailable(
+                "补充上下文 exact message ID 不一致，本条消息未执行。"
+            )
+        conversation = getattr(message, "conversation", None)
+        if str(getattr(conversation, "chat_id", "") or "") != scope.chat_id:
+            raise MessageHistoryUnavailable(
+                "补充上下文消息不属于当前会话，本条消息未执行。"
+            )
+        thread_id = str(getattr(conversation, "thread_id", "") or "") or None
+        if scope.kind is ScopeKind.GROUP and thread_id is not None:
+            raise MessageHistoryUnavailable(
+                "补充上下文消息不属于当前群聊主线，本条消息未执行。"
+            )
+        if scope.kind is ScopeKind.TOPIC and thread_id != scope.topic_id:
+            raise MessageHistoryUnavailable(
+                "补充上下文消息不属于当前话题，本条消息未执行。"
+            )
+        create_time = getattr(message, "create_time", None)
+        if isinstance(create_time, bool):
+            actual_create_time = None
+        elif isinstance(create_time, int):
+            actual_create_time = create_time
+        elif isinstance(create_time, str) and create_time.isdigit():
+            actual_create_time = int(create_time)
+        else:
+            actual_create_time = None
+        if actual_create_time != reference.create_time_ms:
+            raise MessageHistoryUnavailable(
+                "补充上下文消息时间与历史索引不一致，本条消息未执行；请重试。"
+            )
+        if historical_message_deleted(message):
+            return
+        sender = getattr(message, "sender", None)
+        sender_id = str(getattr(sender, "open_id", "") or "")
+        sender_name = str(getattr(sender, "display_name", "") or "")
+        if (
+            sender_id != reference.sender_id
+            or sender_name != reference.sender_name
+            or bool(getattr(sender, "is_bot", False))
+            or str(getattr(sender, "sender_type", "user") or "") != "user"
+        ):
+            raise MessageHistoryUnavailable(
+                "补充上下文消息发送者与历史索引不一致，本条消息未执行；请重试。"
+            )
+        actual_type = normalized_historical_message_type(message)
+        expected_type = "media" if reference.message_type == "video" else reference.message_type
+        if actual_type != expected_type:
+            raise MessageHistoryUnavailable(
+                "补充上下文消息类型与历史索引不一致，本条消息未执行；请重试。"
+            )
+
+    @staticmethod
+    def _prepared_image_keys(
+        images: Sequence[Any],
+        *,
+        source: str,
+        message_id: str,
+    ) -> tuple[str, ...]:
+        return tuple(
+            image.reference.file_key
+            for image in images
+            if image.reference.source == source
+            and image.reference.message_id == message_id
+        )
+
+    async def _send_context_receipt(
+        self,
+        message: Any,
+        stats: SupplementalContextStats,
+    ) -> None:
+        if (
+            stats.selected_count == 0
+            and stats.omitted_count == 0
+            and not stats.is_truncated
+        ):
+            return
+        parts = [f"本次将带入 {stats.selected_count} 条同一范围内的新增消息。"]
+        if stats.omitted_count:
+            parts.append(f"另有 {stats.omitted_count} 条不符合条件或不受支持，已省略。")
+        if stats.is_truncated:
+            parts.append("历史扫描、消息数量或文本上限已命中，仅保留较新的上下文。")
+        try:
+            async with asyncio.timeout(_CONTEXT_RECEIPT_TIMEOUT_SECONDS):
+                await self._reply(message, " ".join(parts))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "failed to deliver visible catch-up context receipt",
+                extra={
+                    "message_id": _message_id(message),
+                    "selected_count": stats.selected_count,
+                    "omitted_count": stats.omitted_count,
+                    "truncated": stats.is_truncated,
+                },
+            )
+
+    def _require_catch_up_message_scope(
+        self,
+        message: Any,
+        scope: FeishuScope,
+    ) -> None:
+        if (
+            scope.kind not in {ScopeKind.GROUP, ScopeKind.TOPIC}
+            or _message_chat_type(message) != "group"
+        ):
+            raise MessageHistoryUnavailable(
+                "私聊和私聊话题不支持补充群聊上下文，本条消息未执行。"
+            )
+
+    async def _resolve_context_anchor(
+        self,
+        scope: FeishuScope,
+        message_id: str,
+    ) -> MessageContextAnchor:
+        reader = self._message_history
+        if reader is None:
+            raise MessageHistoryUnavailable(
+                "群聊上下文读取能力尚不可用，本次会话操作未执行。"
+            )
+        return await reader.resolve_anchor(scope, message_id)
+
     async def _control(self, message: Any, intent: ControlIntent) -> None:
         if intent.name in {ControlName.MENU, ControlName.HELP}:
             await self._reply(message, self._help())
@@ -2055,7 +2513,7 @@ class ChannelApplication:
             if binding is None:
                 await self._reply(
                     message,
-                    "当前聊天或话题还没有会话，请先发送 /new [project|none]。",
+                    "当前聊天或话题还没有会话，请先发送 /new。",
                 )
                 return
             project = self._projects.resolve_for_binding(binding.project_alias)
@@ -2172,7 +2630,7 @@ class ChannelApplication:
             if binding is None:
                 await self._reply(
                     message,
-                    "当前聊天或话题还没有会话，请先发送 /new [project|none]。",
+                    "当前聊天或话题还没有会话，请先发送 /new。",
                 )
                 return
             goal = await self._runtime.goal_snapshot(binding)
@@ -2210,7 +2668,16 @@ class ChannelApplication:
                     notice,
                 )
                 return
-            catalog = await self._runtime.model_catalog()
+            catalog = None
+            catalog_error = None
+            try:
+                catalog = await self._runtime.model_catalog()
+            except Exception as error:
+                logger.warning(
+                    "native model catalog unavailable for /config settings",
+                    extra={"error_type": type(error).__name__},
+                )
+                catalog_error = "Model / Effort / Speed 暂不可用。"
             await self._reply(
                 message,
                 config_card(
@@ -2221,6 +2688,12 @@ class ChannelApplication:
                     settings_revision=binding.settings_revision,
                     turn_settings=binding.turn_settings,
                     catalog=catalog,
+                    context_revision=binding.context_revision,
+                    message_context_mode=binding.message_context_mode,
+                    allow_context_mode=(
+                        _message_chat_type(message) == "group"
+                    ),
+                    catalog_error=catalog_error,
                 ),
             )
             return
@@ -2229,7 +2702,7 @@ class ChannelApplication:
             if binding is None:
                 await self._reply(
                     message,
-                    "当前聊天或话题还没有会话，请先发送 /new [project|none]。",
+                    "当前聊天或话题还没有会话，请先发送 /new。",
                 )
                 return
             submission = await self._runtime.compact(
@@ -2247,38 +2720,41 @@ class ChannelApplication:
                 submission.release_receipt_attempt()
             return
         if intent.name is ControlName.NEW:
-            if not intent.arguments:
-                projects = self._projects.list(enabled_only=True)
-                catalog = None
-                catalog_error = None
-                try:
-                    catalog = await self._runtime.model_catalog()
-                except Exception as error:
-                    logger.warning(
-                        "native model catalog unavailable for /new settings",
-                        extra={"error_type": type(error).__name__},
-                    )
-                    catalog_error = "Model / Effort / Speed 暂不可用。"
+            projects = self._projects.list(enabled_only=True)
+            catalog = None
+            catalog_error = None
+            try:
+                catalog = await self._runtime.model_catalog()
+            except Exception as error:
+                logger.warning(
+                    "native model catalog unavailable for /new settings",
+                    extra={"error_type": type(error).__name__},
+                )
+                catalog_error = "Model / Effort / Speed 暂不可用。"
+            card = new_binding_card(
+                scope=intent.scope,
+                projects=projects,
+                catalog=catalog,
+                catalog_error=catalog_error,
+                allow_context_mode=(_message_chat_type(message) == "group"),
+            )
+            try:
                 await self._reply(
                     message,
-                    new_binding_card(
-                        scope=intent.scope,
-                        projects=projects,
-                        catalog=catalog,
-                        catalog_error=catalog_error,
-                    ),
+                    card,
                 )
-                return
-            project, binding = await self._create_binding(
-                scope=intent.scope,
-                sender_id=intent.sender_id,
-                project_alias=intent.arguments[0],
-            )
-            await self._reply(
-                message,
-                f"已创建并切换会话 {binding.short_id}（{project.alias}）；"
-                "首条消息将创建原生 Codex Thread。",
-            )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Feishu rejected the complete /new Project card",
+                    extra={"project_count": len(projects)},
+                )
+                await self._reply(
+                    message,
+                    "飞书未接受包含全部 Project 的新建卡片；"
+                    "本次不会静默截断、分页或改走快捷创建。请稍后重试 /new。",
+                )
             return
         if intent.name is ControlName.SESSIONS:
             bindings = self._bindings.list_bindings(intent.scope.key)
@@ -2319,9 +2795,21 @@ class ChannelApplication:
             )
             return
         if intent.name is ControlName.RESUME:
+            target = self._bindings.resolve_reference(
+                scope_key=intent.scope.key,
+                reference=intent.arguments[0],
+            )
+            context_anchor = None
+            if target.message_context_mode is MentionContextMode.CATCH_UP:
+                self._require_catch_up_message_scope(message, intent.scope)
+                context_anchor = await self._resolve_context_anchor(
+                    intent.scope,
+                    intent.source_id,
+                )
             binding = await self._management.resume_current_binding(
                 scope_key=intent.scope.key,
                 reference=intent.arguments[0],
+                context_anchor=context_anchor,
             )
             await self._reply(
                 message,
@@ -2329,9 +2817,21 @@ class ChannelApplication:
             )
             return
         if intent.name is ControlName.UNARCHIVE:
+            target = self._bindings.resolve_reference(
+                scope_key=intent.scope.key,
+                reference=intent.arguments[0],
+            )
+            context_anchor = None
+            if target.message_context_mode is MentionContextMode.CATCH_UP:
+                self._require_catch_up_message_scope(message, intent.scope)
+                context_anchor = await self._resolve_context_anchor(
+                    intent.scope,
+                    intent.source_id,
+                )
             binding = await self._management.restore_current_binding(
                 scope_key=intent.scope.key,
                 reference=intent.arguments[0],
+                context_anchor=context_anchor,
             )
             await self._reply(
                 message,
@@ -2493,6 +2993,11 @@ class ChannelApplication:
                 binding,
                 self._runtime.thread_subscription_snapshot(binding.id),
             )
+            context_mode_lines = (
+                ()
+                if _message_chat_type(message) == "p2p"
+                else (f"@ 上下文模式：{binding.message_context_mode.value}",)
+            )
             await self._reply(
                 message,
                 "\n".join(
@@ -2506,6 +3011,7 @@ class ChannelApplication:
                         subscription_line,
                         *progress_lines,
                         context_window_line,
+                        *context_mode_lines,
                         *model_lines,
                     )
                 ),
@@ -2794,6 +3300,15 @@ class ChannelApplication:
         if intent.name is CardControlName.CREATE_BINDING:
             assert intent.project_alias is not None
             assert intent.expected_revision is not None
+            message_context_mode = (
+                intent.message_context_mode or MentionContextMode.CURRENT_ONLY
+            )
+            context_anchor = None
+            if message_context_mode is MentionContextMode.CATCH_UP:
+                context_anchor = await self._resolve_context_anchor(
+                    intent.scope,
+                    intent.source_id,
+                )
             settings = await self._resolve_card_model_settings(intent)
             turn_settings = _binding_turn_settings(settings)
             project, binding = await self._create_binding(
@@ -2802,6 +3317,8 @@ class ChannelApplication:
                 project_alias=intent.project_alias,
                 expected_revision=intent.expected_revision,
                 turn_settings=turn_settings,
+                message_context_mode=message_context_mode,
+                context_anchor=context_anchor,
             )
             updated = await self._safe_update_card(
                 intent.source_id,
@@ -2809,6 +3326,7 @@ class ChannelApplication:
                     short_id=binding.short_id,
                     project_alias=project.alias,
                     settings=settings,
+                    message_context_mode=binding.message_context_mode,
                 ),
             )
             if not updated:
@@ -2816,16 +3334,26 @@ class ChannelApplication:
                     intent,
                     f"✅ Project 选择成功：已选择 `{project.alias}`，"
                     f"并创建、切换到会话 `{binding.short_id}`。"
+                    f"Model 来源：{'继承 Codex' if settings is None else '显式配置'}；"
+                    f"@ 上下文模式：{binding.message_context_mode.value}。"
                     "现在可以直接发送任务。",
                 )
             return
         if intent.name is CardControlName.CONFIGURE_BINDING:
             assert intent.binding_id is not None
             assert intent.expected_settings_revision is not None
+            assert intent.expected_context_revision is not None
+            assert intent.message_context_mode is not None
             settings = await self._resolve_card_model_settings(intent)
-            if settings is None:
-                raise CardActionError(
-                    "会话配置卡片已过期，请重新发送 /config。"
+            before = self._bindings.get(intent.binding_id)
+            context_anchor = None
+            if (
+                before.message_context_mode is MentionContextMode.CURRENT_ONLY
+                and intent.message_context_mode is MentionContextMode.CATCH_UP
+            ):
+                context_anchor = await self._resolve_context_anchor(
+                    intent.scope,
+                    intent.source_id,
                 )
             try:
                 binding = await self._management.configure_current_binding(
@@ -2834,7 +3362,10 @@ class ChannelApplication:
                         intent.binding_id,
                     ),
                     expected_settings_revision=intent.expected_settings_revision,
+                    expected_context_revision=intent.expected_context_revision,
                     settings=_binding_turn_settings(settings),
+                    message_context_mode=intent.message_context_mode,
+                    context_anchor=context_anchor,
                 )
             except NoCurrentBinding as error:
                 raise CardActionError(
@@ -2844,7 +3375,10 @@ class ChannelApplication:
                 raise CardActionError(
                     "active 会话已切换，本卡片未执行；请重新发送 /config。"
                 ) from error
-            except BindingSettingsRevisionConflict as error:
+            except (
+                BindingSettingsRevisionConflict,
+                BindingContextRevisionConflict,
+            ) as error:
                 raise CardActionError(
                     "会话配置已变化，本卡片未执行；请重新发送 /config。"
                 ) from error
@@ -2854,12 +3388,15 @@ class ChannelApplication:
                     short_id=binding.short_id,
                     project_alias=binding.project_alias,
                     settings=settings,
+                    message_context_mode=binding.message_context_mode,
                 ),
             )
             if not updated:
                 await self._safe_reply_to_card(
                     intent,
                     f"✅ 会话 `{binding.short_id}` 配置已保存："
+                    f"Model 来源：{'继承 Codex' if settings is None else '显式配置'}；"
+                    f"@ 上下文模式：{binding.message_context_mode.value}。"
                     "会话后续每条新 Turn 都会应用。",
                 )
             return
@@ -2971,9 +3508,16 @@ class ChannelApplication:
             binding = self._bindings.get(intent.binding_id)
             if binding.scope_key != intent.scope.key:
                 raise BindingNotFound(intent.binding_id)
+            context_anchor = None
+            if binding.message_context_mode is MentionContextMode.CATCH_UP:
+                context_anchor = await self._resolve_context_anchor(
+                    intent.scope,
+                    intent.source_id,
+                )
             restored = await self._management.restore_current_binding(
                 scope_key=intent.scope.key,
                 reference=binding.id,
+                context_anchor=context_anchor,
             )
             updated = await self._safe_update_card(
                 intent.source_id,
@@ -3465,19 +4009,33 @@ class ChannelApplication:
                 if topic_id is not None
                 else await self._channel.get_chat_info(chat_id)
             )
+            chat_kind = _public_chat_kind(chat_info)
             scope = scope_from_fetched_card(
                 app_id=self._app_id,
                 callback_chat_id=chat_id,
                 fetched_message=fetched,
-                chat_type=_public_chat_kind(chat_info),
+                chat_type=chat_kind,
             )
-            return decode_card_form(
+            intent = decode_card_form(
                 scope=scope,
                 message_id=message_id,
                 sender_id=sender_id,
                 tag=tag,
                 form_value=form_value,
             )
+            if (
+                intent.message_context_mode is MentionContextMode.CATCH_UP
+            ):
+                if topic_id is not None:
+                    chat_kind = _public_chat_kind(
+                        await self._channel.get_chat_info(chat_id)
+                    )
+                if chat_kind == "group":
+                    return intent
+                raise CardActionError(
+                    "私聊和私聊话题不支持补充群聊上下文，本次未执行。"
+                )
+            return intent
         return decode_button_action(
             app_id=self._app_id,
             message_id=message_id,
@@ -3495,6 +4053,8 @@ class ChannelApplication:
         project_alias: str,
         expected_revision: int | None = None,
         turn_settings: BindingTurnSettings | None = None,
+        message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
+        context_anchor: MessageContextAnchor | None = None,
     ):
         created = await self._management.create_current_binding(
             scope=scope,
@@ -3502,6 +4062,8 @@ class ChannelApplication:
             project_alias=project_alias,
             expected_project_revision=expected_revision,
             turn_settings=turn_settings,
+            message_context_mode=message_context_mode,
+            context_anchor=context_anchor,
         )
         return created.project, created.binding
 

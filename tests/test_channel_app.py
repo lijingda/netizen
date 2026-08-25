@@ -70,13 +70,24 @@ from netizen.codex_runtime import (
     TurnProgressSnapshot,
     TurnOutcome,
 )
-from netizen.domain import FeishuScope, NativeCapability, ScopeKind
+from netizen.domain import (
+    FeishuScope,
+    MentionContextMode,
+    MessageContextAnchor,
+    NativeCapability,
+    ScopeKind,
+)
 from netizen.model_settings import (
     EffortOption,
     ModelCatalog,
     ModelOption,
     ServiceTierOption,
     TurnModelSettings,
+)
+from netizen.message_history import (
+    MessageHistoryRef,
+    MessageHistoryStats,
+    MessageHistoryWindow,
 )
 from netizen.projects import ProjectRegistry
 from netizen.sdk_gap_adapter import GoalSnapshot, GoalStatus
@@ -109,8 +120,10 @@ class FakeMessage:
         content: object | None = None,
         reply_id: str | None = None,
         raw: dict[str, object] | None = None,
+        create_time: int = 123,
     ) -> None:
         self.id = message_id
+        self.create_time = create_time
         self.body_text = text
         self.sender = SimpleNamespace(
             open_id=sender_id,
@@ -257,6 +270,38 @@ class FakeChannel:
             chat_type="unknown",
             chat_mode=self.chat_types.get(chat_id, "group"),
         )
+
+
+class FakeMessageHistory:
+    def __init__(self) -> None:
+        self.resolve_calls: list[tuple[FeishuScope, str]] = []
+        self.read_calls: list[
+            tuple[FeishuScope, MessageContextAnchor, str]
+        ] = []
+        self.anchors: dict[str, MessageContextAnchor] = {}
+        self.window: MessageHistoryWindow | None = None
+
+    async def resolve_anchor(
+        self,
+        scope: FeishuScope,
+        message_id: str,
+    ) -> MessageContextAnchor:
+        self.resolve_calls.append((scope, message_id))
+        return self.anchors.get(
+            message_id,
+            MessageContextAnchor(message_id, 1_000),
+        )
+
+    async def read_window(
+        self,
+        scope: FeishuScope,
+        lower: MessageContextAnchor,
+        upper_id: str,
+    ) -> MessageHistoryWindow:
+        self.read_calls.append((scope, lower, upper_id))
+        if self.window is None:
+            raise AssertionError("unexpected history read")
+        return self.window
 
 
 def quoted_inbound(
@@ -522,7 +567,18 @@ class StubRuntime:
         binding_id: str,
     ) -> SubmissionAdmission:
         self.capture_calls.append(binding_id)
-        return self.admission or SubmissionAdmission(binding_id, 0, None, None, 1)
+        if self.admission is not None:
+            return self.admission
+        assert self.binding_store is not None
+        binding = self.binding_store.get(binding_id)
+        return SubmissionAdmission(
+            binding_id,
+            0,
+            None,
+            None,
+            binding.settings_revision,
+            binding.context_revision,
+        )
 
     async def model_catalog(self) -> ModelCatalog:
         self.model_catalog_calls += 1
@@ -565,7 +621,12 @@ class StubRuntime:
     async def thread_is_archived(self, thread_id: str) -> bool:
         return thread_id in self.archived_thread_metadata_values
 
-    async def activate_exact(self, binding_id: str):
+    async def activate_exact(
+        self,
+        binding_id: str,
+        *,
+        context_anchor: MessageContextAnchor | None = None,
+    ):
         assert self.binding_store is not None
         binding = self.binding_store.get(binding_id)
         if binding.native_thread_id in self.archived_thread_metadata_values:
@@ -573,6 +634,7 @@ class StubRuntime:
         return self.binding_store.activate(
             scope_key=binding.scope_key,
             binding_id=binding.id,
+            context_anchor=context_anchor,
         )
 
     def lifecycle_state(self, binding_id: str):
@@ -655,9 +717,20 @@ class StubRuntime:
         assert self.binding_store is not None
         return self.binding_store.get(binding_id)
 
-    async def restore_as_current_exact(self, binding_id: str):
+    async def restore_as_current_exact(
+        self,
+        binding_id: str,
+        *,
+        context_anchor: MessageContextAnchor | None = None,
+    ):
         assert self.binding_store is not None
-        return await self.unarchive_binding(self.binding_store.get(binding_id))
+        binding = self.binding_store.get(binding_id)
+        self.unarchive_binding_calls.append(binding.id)
+        return self.binding_store.activate(
+            scope_key=binding.scope_key,
+            binding_id=binding.id,
+            context_anchor=context_anchor,
+        )
 
     async def resolve_model_settings(
         self,
@@ -703,6 +776,36 @@ class StubRuntime:
             binding_id=binding_id,
             expected_revision=expected_revision,
             settings=settings,
+        )
+
+    async def configure_context_exact(
+        self,
+        *,
+        binding_id: str,
+        expected_settings_revision: int,
+        expected_context_revision: int,
+        settings: BindingTurnSettings | None,
+        message_context_mode: MentionContextMode,
+        context_anchor: MessageContextAnchor | None,
+    ):
+        self.configure_settings_calls.append(
+            {
+                "binding_id": binding_id,
+                "expected_revision": expected_settings_revision,
+                "expected_context_revision": expected_context_revision,
+                "settings": settings,
+                "message_context_mode": message_context_mode,
+                "context_anchor": context_anchor,
+            }
+        )
+        assert self.binding_store is not None
+        return self.binding_store.set_configuration(
+            binding_id=binding_id,
+            expected_settings_revision=expected_settings_revision,
+            expected_context_revision=expected_context_revision,
+            settings=settings,
+            message_context_mode=message_context_mode,
+            context_anchor=context_anchor,
         )
 
     def active_turn(self, binding_id: str) -> ActiveTurnSnapshot | None:
@@ -895,6 +998,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.store = BindingStore(id_factory=lambda: next(ids))
         self.channel = FakeChannel()
+        self.message_history = FakeMessageHistory()
         self.runtime = StubRuntime()
         self.runtime.binding_store = self.store
         self.projects = ProjectRegistry(
@@ -908,6 +1012,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             runtime=self.runtime,  # type: ignore[arg-type]
             bindings=self.store,
             projects=self.projects,
+            message_history=self.message_history,
         )
 
     async def asyncTearDown(self) -> None:
@@ -916,9 +1021,43 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     async def new(self, *, message_id: str = "om_new") -> FakeMessage:
-        message = FakeMessage("/new test", message_id=message_id)
-        await self.app.handle_message(message)
+        message = FakeMessage("/new", message_id=message_id)
+        await self.create_binding(
+            FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        )
         return message
+
+    async def create_binding(self, scope: FeishuScope):
+        return await self.app._management.create_current_binding(
+            scope=scope,
+            creator_id="ou_user",
+            project_alias="test",
+        )
+
+    def form_card_event(
+        self,
+        form_value: dict[str, object],
+        *,
+        message_id: str,
+        chat_id: str,
+        thread_id: str | None,
+        sender_id: str = "ou_user",
+        chat_type: str = "group",
+    ) -> object:
+        self.channel.fetched_messages[message_id] = {
+            "data": {"items": [{"chat_id": chat_id, "thread_id": thread_id}]}
+        }
+        self.channel.chat_types[chat_id] = chat_type
+        return SimpleNamespace(
+            message_id=message_id,
+            chat_id=chat_id,
+            operator=SimpleNamespace(open_id=sender_id),
+            action=SimpleNamespace(
+                tag="button",
+                value={},
+                form_value=form_value,
+            ),
+        )
 
     def direct_card_event(
         self,
@@ -967,7 +1106,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         form = next(
             item
             for item in _elements(card.card, "form")
-            if item["name"] == "new_binding_v4"
+            if item["name"] == "new_binding_v5"
         )
         fields = {
             item["name"]: item
@@ -980,7 +1119,12 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             if option["text"]["content"].startswith(f"{project_alias} ·")
         )
         values: dict[str, object] = {"new_project": project_reference}
-        for name in ("new_model", "new_effort", "new_speed"):
+        for name in (
+            "new_context_mode",
+            "new_model",
+            "new_effort",
+            "new_speed",
+        ):
             if name in fields:
                 values[name] = fields[name]["initial_option"]
         return values
@@ -991,26 +1135,43 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         *,
         effort_id: str | None = None,
         speed_id: str | None = None,
+        inherit: bool = False,
     ) -> dict[str, object]:
         form = next(
             item
             for item in _elements(card.card, "form")
-            if item["name"] == "binding_config_v4"
+            if item["name"] == "binding_config_v5"
         )
         fields = {
             item["name"]: item
             for item in form["elements"]
             if "name" in item
         }
-        return {
-            "config_model": fields["config_model"]["initial_option"],
-            "config_effort": (
+        model_field = fields["config_model"]
+        model_value = model_field["initial_option"]
+        if not inherit:
+            model_value = next(
+                (
+                    option["value"]
+                    for option in model_field["options"]
+                    if ":explicit:" in option["value"]
+                ),
+                model_value,
+            )
+        values = {"config_model": model_value}
+        if "config_context_mode" in fields:
+            values["config_context_mode"] = fields["config_context_mode"][
+                "initial_option"
+            ]
+        if "config_effort" in fields:
+            values["config_effort"] = (
                 effort_id or fields["config_effort"]["initial_option"]
-            ),
-            "config_speed": (
+            )
+        if "config_speed" in fields:
+            values["config_speed"] = (
                 speed_id or fields["config_speed"]["initial_option"]
-            ),
-        }
+            )
+        return values
 
     async def test_new_is_lazy_and_first_prompt_uses_bound_project(self) -> None:
         await self.new()
@@ -1066,6 +1227,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             [("om_prompt", "Typing"), ("om_prompt", "THINKING")],
         )
         self.assertNotIn(("om_prompt", "已接收，开始处理。"), self.channel.replies)
+        self.assertEqual(self.message_history.read_calls, [])
 
         await self.app.handle_completion(
             TurnOutcome(
@@ -1107,6 +1269,257 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertIn(("om_prompt", "done"), self.channel.replies)
+
+    async def test_group_new_card_creates_catch_up_binding_from_exact_anchor(
+        self,
+    ) -> None:
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        await self.app.handle_message(
+            FakeMessage(
+                "/new",
+                message_id="om_new_group",
+                chat_id="oc_group",
+                chat_type="group",
+            )
+        )
+        picker = self.channel.replies[-1][1]
+        values = self.new_form_values(picker)
+        form = _elements(picker.card, "form")[0]
+        context_field = next(
+            item
+            for item in form["elements"]
+            if item.get("name") == "new_context_mode"
+        )
+        values["new_context_mode"] = next(
+            option["value"]
+            for option in context_field["options"]
+            if option["value"].endswith(":catch-up")
+        )
+        anchor = MessageContextAnchor("om_new_group_card", 4_000)
+        self.message_history.anchors[anchor.message_id] = anchor
+
+        await self.app.handle_card_action(
+            self.form_card_event(
+                values,
+                message_id=anchor.message_id,
+                chat_id="oc_group",
+                thread_id=None,
+            )
+        )
+
+        binding = self.store.active_binding(scope.key)
+        self.assertIsNotNone(binding)
+        self.assertIs(binding.message_context_mode, MentionContextMode.CATCH_UP)
+        self.assertEqual(binding.context_anchor, anchor)
+        self.assertEqual(
+            self.message_history.resolve_calls,
+            [(scope, anchor.message_id)],
+        )
+        rendered = str(self.channel.updates[-1][1])
+        self.assertIn("catch-up", rendered)
+        self.assertIn("同一群聊或话题", str(picker.card))
+
+    async def test_p2p_topic_cannot_forge_catch_up_card_submission(self) -> None:
+        await self.app.handle_message(
+            FakeMessage(
+                "/new",
+                message_id="om_new_topic_picker",
+                chat_id="oc_group",
+                chat_type="group",
+                thread_id="omt_topic",
+            )
+        )
+        picker = self.channel.replies[-1][1]
+        values = self.new_form_values(picker)
+        form = _elements(picker.card, "form")[0]
+        context_field = next(
+            item
+            for item in form["elements"]
+            if item.get("name") == "new_context_mode"
+        )
+        values["new_context_mode"] = next(
+            option["value"]
+            for option in context_field["options"]
+            if option["value"].endswith(":catch-up")
+        )
+        event = self.form_card_event(
+            values,
+            message_id="om_p2p_topic_card",
+            chat_id="oc_group",
+            thread_id="omt_topic",
+            chat_type="p2p",
+        )
+
+        await self.app.handle_card_action(event)
+
+        scope = FeishuScope(
+            "cli_test", "oc_group", ScopeKind.TOPIC, "omt_topic"
+        )
+        self.assertIsNone(self.store.active_binding(scope.key))
+        self.assertEqual(self.message_history.resolve_calls, [])
+        self.assertIn("私聊话题不支持", str(self.channel.updates[-1][1]))
+
+    async def test_config_switch_to_catch_up_is_one_atomic_card_operation(
+        self,
+    ) -> None:
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        created = await self.create_binding(scope)
+        await self.app.handle_message(
+            FakeMessage(
+                "/config",
+                message_id="om_config_group",
+                chat_id="oc_group",
+                chat_type="group",
+            )
+        )
+        card = self.channel.replies[-1][1]
+        values = self.config_form_values(card)
+        form = _elements(card.card, "form")[0]
+        context_field = next(
+            item
+            for item in form["elements"]
+            if item.get("name") == "config_context_mode"
+        )
+        values["config_context_mode"] = next(
+            option["value"]
+            for option in context_field["options"]
+            if option["value"].endswith(":catch-up")
+        )
+        anchor = MessageContextAnchor("om_config_card", 5_000)
+        self.message_history.anchors[anchor.message_id] = anchor
+
+        await self.app.handle_card_action(
+            self.form_card_event(
+                values,
+                message_id=anchor.message_id,
+                chat_id="oc_group",
+                thread_id=None,
+            )
+        )
+
+        binding = self.store.get(created.binding.id)
+        self.assertIs(binding.message_context_mode, MentionContextMode.CATCH_UP)
+        self.assertEqual(binding.context_anchor, anchor)
+        self.assertEqual(binding.context_revision, 2)
+        self.assertEqual(binding.settings_revision, 2)
+        self.assertEqual(len(self.runtime.configure_settings_calls), 1)
+
+    async def test_catch_up_prompt_projects_history_and_visible_receipt(self) -> None:
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        lower = MessageContextAnchor("om_lower", 1_000)
+        created = await self.app._management.create_current_binding(
+            scope=scope,
+            creator_id="ou_user",
+            project_alias="test",
+            message_context_mode=MentionContextMode.CATCH_UP,
+            context_anchor=lower,
+        )
+        binding = created.binding
+        reference = MessageHistoryRef(
+            message_id="om_history",
+            create_time_ms=2_000,
+            sender_id="ou_alice",
+            sender_name="Alice",
+            message_type="text",
+        )
+        upper = MessageContextAnchor("om_prompt", 3_000)
+        self.message_history.window = MessageHistoryWindow(
+            lower=lower,
+            upper=upper,
+            candidates=(reference,),
+            stats=MessageHistoryStats(
+                pages_scanned=1,
+                raw_messages_scanned=3,
+                duplicate_messages=0,
+                ignored_after_upper=0,
+                omitted_messages=0,
+                truncated_before=False,
+                scan_limit_hit=False,
+            ),
+        )
+        self.channel.inbound_messages[reference.message_id] = FakeMessage(
+            "讨论里的背景 /stop $danger",
+            message_id=reference.message_id,
+            sender_id=reference.sender_id,
+            display_name=reference.sender_name,
+            chat_id=scope.chat_id,
+            chat_type="group",
+            content=TextContent(text="讨论里的背景 /stop $danger"),
+            create_time=reference.create_time_ms,
+        )
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+        prompt = FakeMessage(
+            "请总结",
+            message_id=upper.message_id,
+            sender_id="ou_bob",
+            display_name="Bob",
+            chat_id=scope.chat_id,
+            chat_type="group",
+            create_time=upper.create_time_ms,
+        )
+
+        await self.app.handle_message(prompt)
+
+        submitted = self.runtime.submit_calls[0]
+        envelope = json.loads(submitted["input"])
+        self.assertEqual(envelope["kind"], "feishu_message_context_prompt")
+        self.assertEqual(
+            envelope["supplemental_messages"][0]["sender"]["display_name"],
+            "Alice",
+        )
+        self.assertEqual(envelope["current_message"]["request_text"], "请总结")
+        self.assertIn("\\u0024danger", submitted["input"])
+        commit = submitted["context_commit"]
+        self.assertEqual(commit.expected_context_revision, 1)
+        self.assertEqual(commit.anchor, upper)
+        self.assertEqual(
+            self.message_history.read_calls,
+            [(scope, lower, upper.message_id)],
+        )
+        self.assertTrue(
+            any(
+                message_id == upper.message_id and "带入 1 条" in str(content)
+                for message_id, content in self.channel.replies
+            )
+        )
+
+    async def test_resume_catch_up_binding_resets_boundary_to_control_message(
+        self,
+    ) -> None:
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        first = await self.app._management.create_current_binding(
+            scope=scope,
+            creator_id="ou_user",
+            project_alias="test",
+            message_context_mode=MentionContextMode.CATCH_UP,
+            context_anchor=MessageContextAnchor("om_old", 1_000),
+        )
+        await self.create_binding(scope)
+        reset = MessageContextAnchor("om_resume", 6_000)
+        self.message_history.anchors[reset.message_id] = reset
+
+        await self.app.handle_message(
+            FakeMessage(
+                f"/resume {first.binding.short_id}",
+                message_id=reset.message_id,
+                chat_id=scope.chat_id,
+                chat_type="group",
+            )
+        )
+
+        resumed = self.store.active_binding(scope.key)
+        self.assertEqual(resumed.id, first.binding.id)
+        self.assertEqual(resumed.context_anchor, reset)
+        self.assertEqual(
+            self.message_history.resolve_calls,
+            [(scope, reset.message_id)],
+        )
 
     async def test_completed_turn_with_files_is_one_answer_and_file_card(
         self,
@@ -1288,7 +1701,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-        self.assertEqual(len(self.channel.replies), 2)
+        self.assertEqual(len(self.channel.replies), 1)
         fallback = self.channel.replies[-1][1]
         self.assertIsInstance(fallback, str)
         self.assertIn("answer survives", fallback)
@@ -4340,15 +4753,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ScopeKind.TOPIC,
             "omt_topic",
         )
-        await self.app.handle_message(
-            FakeMessage(
-                "/new test",
-                message_id="om_new_topic",
-                chat_id="oc_group",
-                chat_type="group",
-                thread_id="omt_topic",
-            )
-        )
+        await self.create_binding(topic_scope)
         binding = self.store.active_binding(topic_scope.key)
         self.runtime.submission = Submission(
             SubmitDisposition.STARTED,
@@ -4484,7 +4889,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         picker = self.channel.replies[-1][1]
         self.assertIsInstance(picker, OutboundCard)
         self.assertIn("test ·", str(picker.card))
-        self.assertIn("new_binding_v4", str(picker.card))
+        self.assertIn("new_binding_v5", str(picker.card))
         self.assertNotIn("配置方式", str(picker.card))
         self.assertNotIn("下一条真实任务", str(picker.card))
         scope = FeishuScope(
@@ -4498,7 +4903,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         form = next(
             item
             for item in _elements(picker.card, "form")
-            if item["name"] == "new_binding_v4"
+            if item["name"] == "new_binding_v5"
         )
         fields = {
             item["name"]: item
@@ -4536,7 +4941,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.submit_calls, [])
         rendered = str(self.channel.updates[-1][1])
         self.assertIn("Project 选择成功", rendered)
-        self.assertIn("会话后续新 Turn 将使用", rendered)
+        self.assertIn("后续新 Turn 将使用", rendered)
         self.assertIn("Fast v2", rendered)
         self.assertEqual(self.runtime.model_catalog_calls, 1)
         self.assertEqual(len(self.runtime.resolve_model_settings_calls), 1)
@@ -4562,7 +4967,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.submit_calls, [])
         self.assertEqual(len(self.runtime.configure_settings_calls), 1)
         self.assertIn("会话配置已保存", str(self.channel.updates[-1][1]))
-        self.assertIn("会话后续新 Turn 将使用", str(self.channel.updates[-1][1]))
+        self.assertIn("后续新 Turn 将使用", str(self.channel.updates[-1][1]))
 
     async def test_config_replaces_persistent_settings_without_starting_turn(self) -> None:
         await self.new()
@@ -4598,7 +5003,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.configure_settings_calls[-1]["settings"],
             BindingTurnSettings("future-model", "low", "default"),
         )
-        self.assertIn("会话后续新 Turn 将使用", str(self.channel.updates[-1][1]))
+        self.assertIn("后续新 Turn 将使用", str(self.channel.updates[-1][1]))
 
     async def test_second_config_card_is_rejected_by_settings_revision(self) -> None:
         await self.new()
@@ -4668,7 +5073,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("当前 Turn 正在执行", str(self.channel.replies[-1][1]))
         self.assertEqual(self.runtime.model_catalog_calls, 0)
 
-    async def test_new_has_no_submittable_form_when_model_catalog_fails(self) -> None:
+    async def test_new_can_inherit_when_model_catalog_fails(self) -> None:
         self.runtime.model_catalog_error = RuntimeError("catalog unavailable")
 
         with self.assertLogs("netizen.channel_app", level="WARNING"):
@@ -4677,12 +5082,19 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         picker = self.channel.replies[-1][1]
         rendered = str(picker.card)
         self.assertIn("Model / Effort / Speed 暂不可用", rendered)
-        self.assertIn("/new alias", rendered)
-        self.assertEqual(_elements(picker.card, "form"), [])
-        self.assertNotIn("配置方式", rendered)
-        self.assertNotIn("new_model", rendered)
+        self.assertNotIn("/new alias", rendered)
+        self.assertEqual(len(_elements(picker.card, "form")), 1)
+        self.assertIn("继承 Codex", rendered)
+        self.assertIn("new_model", rendered)
+        self.assertNotIn("new_effort", rendered)
+        self.assertNotIn("new_speed", rendered)
+        await self.app.handle_card_action(
+            self.direct_card_event(self.new_form_values(picker))
+        )
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
-        self.assertIsNone(self.store.active_binding(scope.key))
+        binding = self.store.active_binding(scope.key)
+        self.assertIsNotNone(binding)
+        self.assertIsNone(binding.turn_settings)
 
     async def test_new_form_creates_lazy_configured_binding_in_exact_topic(self) -> None:
         await self.app.handle_message(
@@ -5092,7 +5504,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(self.runtime.capture_calls, [binding.id])
+        self.assertEqual(self.runtime.capture_calls, [])
         self.assertEqual(self.runtime.submit_calls, [])
         self.assertEqual(self.channel.reactions, [])
         self.assertIn(
@@ -5185,7 +5597,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             1,
         )
         group = FakeMessage(
-            "/new test",
+            "/new",
             message_id="om_group",
             sender_id="ou_not_configured",
             chat_id="oc_not_configured",
@@ -5194,6 +5606,16 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
         await self.app.handle_message(group)
+        picker = self.channel.replies[-1][1]
+        await self.app.handle_card_action(
+            self.form_card_event(
+                self.new_form_values(picker),
+                message_id="om_group_card",
+                chat_id="oc_not_configured",
+                thread_id=None,
+                sender_id="ou_not_configured",
+            )
+        )
 
         scope = FeishuScope(
             "cli_test", "oc_not_configured", ScopeKind.GROUP
@@ -5201,14 +5623,15 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.store.active_binding(scope.key))
         self.assertTrue(
             any(
-                message_id == "om_group" and "已创建并切换会话" in text
+                message_id == "om_group_card" and "Project 选择成功" in str(text)
                 for message_id, text in self.channel.replies
             )
+            or "Project 选择成功" in str(self.channel.updates[-1][1])
         )
 
     async def test_group_and_topics_require_mention_and_have_distinct_scopes(self) -> None:
         ignored = FakeMessage(
-            "/new test",
+            "/new",
             message_id="om_ignored",
             sender_id="ou_participant",
             chat_id="oc_group",
@@ -5221,7 +5644,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.replies, [])
 
         first = FakeMessage(
-            "/new test",
+            "/new",
             message_id="om_topic_1",
             sender_id="ou_participant",
             chat_id="oc_group",
@@ -5229,7 +5652,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             thread_id="omt_one",
         )
         second = FakeMessage(
-            "/new test",
+            "/new",
             message_id="om_topic_2",
             sender_id="ou_participant",
             chat_id="oc_group",
@@ -5238,6 +5661,26 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         await self.app.handle_message(first)
         await self.app.handle_message(second)
+        first_picker, second_picker = (
+            self.channel.replies[-2][1],
+            self.channel.replies[-1][1],
+        )
+        await self.app.handle_card_action(
+            self.form_card_event(
+                self.new_form_values(first_picker),
+                message_id="om_topic_card_1",
+                chat_id="oc_group",
+                thread_id="omt_one",
+            )
+        )
+        await self.app.handle_card_action(
+            self.form_card_event(
+                self.new_form_values(second_picker),
+                message_id="om_topic_card_2",
+                chat_id="oc_group",
+                thread_id="omt_two",
+            )
+        )
 
         one = FeishuScope(
             "cli_test", "oc_group", ScopeKind.TOPIC, "omt_one"
@@ -5257,7 +5700,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             name="椰羊",
         )
         message = FakeMessage(
-            "@椰羊 /new test",
+            "@椰羊 /new",
             message_id="om_topic_root",
             sender_id="ou_participant",
             chat_id="oc_group",
@@ -5276,7 +5719,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                             "user_name": "椰羊",
                             "style": [],
                         },
-                        {"tag": "text", "text": " /new test", "style": []},
+                        {"tag": "text", "text": " /new", "style": []},
                     ]],
                     "content_v2": [[
                         {
@@ -5285,13 +5728,22 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                             "user_name": "椰羊",
                             "style": [],
                         },
-                        {"tag": "text", "text": " /new test", "style": []},
+                        {"tag": "text", "text": " /new", "style": []},
                     ]],
                 }
             ),
         )
 
         await self.app.handle_message(message)
+        picker = self.channel.replies[-1][1]
+        await self.app.handle_card_action(
+            self.form_card_event(
+                self.new_form_values(picker),
+                message_id="om_topic_root_card",
+                chat_id="oc_group",
+                thread_id="omt_new_topic",
+            )
+        )
 
         scope = FeishuScope(
             "cli_test", "oc_group", ScopeKind.TOPIC, "omt_new_topic"
@@ -5299,21 +5751,19 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.store.active_binding(scope.key))
         self.assertTrue(
             any(
-                message_id == "om_topic_root" and "已创建并切换会话" in text
+                message_id == "om_topic_root_card"
+                and "Project 选择成功" in str(text)
                 for message_id, text in self.channel.replies
             )
+            or "Project 选择成功" in str(self.channel.updates[-1][1])
         )
 
     async def test_group_post_with_image_repairs_bot_mention_and_submits_pixels(
         self,
     ) -> None:
-        await self.app.handle_message(
-            FakeMessage(
-                "/new test",
-                message_id="om_new_image_topic",
-                chat_id="oc_group",
-                chat_type="group",
-                thread_id="omt_image_topic",
+        await self.create_binding(
+            FeishuScope(
+                "cli_test", "oc_group", ScopeKind.TOPIC, "omt_image_topic"
             )
         )
         scope = FeishuScope(
@@ -5429,14 +5879,14 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             [
                 (
                     "om_other_mention_first",
-                    "当前聊天或话题还没有会话，请先发送 /new [project|none]。",
+                    "当前聊天或话题还没有会话，请先发送 /new。",
                 )
             ],
         )
 
     async def test_post_with_unsupported_resource_is_rejected(self) -> None:
         message = FakeMessage(
-            "/new test",
+            "/new",
             message_id="om_topic_with_resource",
             chat_id="oc_group",
             chat_type="group",
@@ -6787,7 +7237,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         await self.app.handle_message(
             FakeMessage(
-                "/new test",
+                "/new",
                 message_id="om-new-forbidden",
                 chat_id="oc-direct",
                 chat_type="p2p",

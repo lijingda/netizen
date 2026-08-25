@@ -64,6 +64,10 @@ design detail, compatibility findings, and procedures in their source docs.
   [ADR 0038](docs/adr/0038-delete-exact-idle-sessions-from-the-sessions-card.md)
   permits two-stage exact deletion of eligible idle sessions from `/sessions`
   while keeping the `/delete` command current-only.
+  [ADR 0039](docs/adr/0039-add-binding-scoped-mention-catch-up-context.md)
+  adds Binding-scoped, still-mention-triggered catch-up context with a durable
+  exact-message boundary. [ADR 0040](docs/adr/0040-make-new-card-only-and-show-all-projects.md)
+  makes `/new` card-only and displays all enabled Projects in one dropdown.
   Superseded ADRs are historical context.
 - [docs/deployment.md](docs/deployment.md): setup, verification, and release
   procedures.
@@ -123,8 +127,9 @@ design detail, compatibility findings, and procedures in their source docs.
 - Use the service user's standard Codex state. Channel SQLite stores only
   Scope/Binding/Project Registry metadata, schema version, and deduplication
   TTL keys, plus ADR 0016's optional Binding-scoped Turn-setting catalog IDs
-  and revision, plus ADR 0021's Side Topic routes/tombstones without native
-  Thread IDs. Never persist prompts, responses, Turn history, card sessions,
+  and revision, ADR 0039's Mention Context Mode/exact boundary/revision without
+  message bodies, plus ADR 0021's Side Topic routes/tombstones without native
+  Thread IDs. Never persist prompts, supplemental messages, responses, Turn history, card sessions,
   queues, resolved/effective/default Codex configuration, or other Codex-owned
   state. Admin login sessions, CSRF tokens, native metadata indexes, and audit
   records also stay out of Channel SQLite.
@@ -138,6 +143,11 @@ design detail, compatibility findings, and procedures in their source docs.
   Runtime reconciliation contract. Do not parse
   CLI output, add a generic/private RPC gateway, patch SDK internals, copy
   protocol models, or signal arbitrary processes.
+- ADR 0039's `lark-oapi` message-history reader is a narrow public, typed,
+  read-only Channel port that reuses the same application credentials. It is
+  not a second Channel, event subscription, generic OpenAPI gateway, or message
+  store. Keep chat-main and thread-topic container semantics distinct and retain
+  the documented live-history rollout gate.
 - Treat ADR 0009 cleanup success only as a successful request for App Server's
   registered background terminals. It never attests that foreground tool
   processes exited; `/stop` must preserve ADR 0010's explicit warning. ADR
