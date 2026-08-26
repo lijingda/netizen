@@ -448,6 +448,26 @@ SHA-256，再用拒绝绝对路径、`..`、重复成员、链接、特殊文件
 callback；不安装/调用 Lark CLI，不申请 user scope/event，不保存 user token/info。确认成功
 后 App ID 与 Secret 直接写入现有受保护文件；失败会显示手工回退，Ctrl-C 中止安装。
 
+### 维护飞书权限契约
+
+新增或替换 `scripts/feishu_app_onboarding.py` 中的 `REQUIRED_TENANT_SCOPES` 前，不能只
+根据某个 API 文档列出的可选权限或 `99991679` 错误中的候选 scope 判断它当前可申请。
+API 能接受的历史或替代 scope，与特定应用类型、租户策略和应用能力在注册页允许申请的
+权限目录不是同一个集合。维护者必须在目标应用的开发者后台依次核验：
+
+1. 在 **开发配置 > 权限管理** 的当前权限列表中搜索 exact scope，确认它尚未开通；
+2. 点击 **开通权限**，切换到 **应用身份权限（tenant_access_token）**，再次搜索 exact
+   scope；只有选择页实际返回该权限，才可把它加入 tenant 权限契约；
+3. 手工验证 `register_app` 时，使用一个在选择页可见、但当前权限列表中不存在的 scope，
+   并先确认官方页面准确列出权限名称。纯诊断应在点击最终确认前取消；有意变更契约时，
+   确认后仍必须通过 `GET /open-apis/application/v6/scopes` 验证 tenant grant 生效。
+
+`lark_oapi.register_app` 只校验 `addons` 的数据形状，不校验平台权限目录；飞书页面可能静默
+忽略不存在或当前应用不可申请的项目，并直接显示“配置成功”。本次排查中的
+`drive:drive:readonly` 就是具体例子：它虽出现在部分 API 文档的候选权限中，但在目标应用的
+**开通权限** 选择页搜索结果为零，因此不能作为该应用的 onboarding addon。浏览器页面成功
+始终不能替代安装器已有的有效 tenant scope 二次门禁。
+
 部署后更换应用不要求卸载程序。如需保留人工回退能力，先成对备份固定路径
 `~/.netizen/config.yaml` 与 `~/.netizen/credentials/feishu-app-secret`，再删除 Secret 文件并
 执行原来的正式或源码安装入口即可进入上述绑定重置；正常升级不要删除该文件，只需直接
