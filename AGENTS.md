@@ -75,6 +75,9 @@ design detail, compatibility findings, and procedures in their source docs.
   exact main CI result the reusable code qualification, keeps the release
   workflow integrity-only, and moves live probes to change-triggered
   development requalification.
+  [ADR 0043](docs/adr/0043-remove-redundant-release-approval.md)
+  keeps the release environment for deployment history without a redundant
+  required-reviewer gate.
   Superseded ADRs are historical context.
 - [docs/deployment.md](docs/deployment.md): setup, verification, and release
   procedures.

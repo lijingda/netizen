@@ -3,8 +3,8 @@
 # Code qualification belongs to the exact main commit's required CI run.  This
 # workflow does not rerun tests or account-scoped live probes; it verifies that
 # qualification, builds one deterministic artifact, checks its identity, and
-# publishes only after approval through the protected `published-release`
-# environment.
+# publishes through the `published-release` environment for deployment history;
+# that environment does not require a separate reviewer.
 name: Publish main-qualified release
 
 on:

@@ -626,6 +626,8 @@ class ReleaseArtifactTests(unittest.TestCase):
         self.assertIn("publish-release:\n", workflow)
         self.assertIn("    permissions:\n      contents: write", workflow)
         self.assertIn("environment: published-release", workflow)
+        self.assertIn("does not require a separate reviewer", workflow)
+        self.assertNotIn("publishes only after approval", workflow)
         self.assertIn("MAIN_GATE_URL", workflow)
         self.assertIn("createHash('sha256')", workflow)
         self.assertEqual(workflow.count("await requireExactTag();"), 2)
