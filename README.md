@@ -178,9 +178,10 @@ slash control 串联；`$skill` 使用 Codex 原生语义，不占用飞书的 `
 App Secret，也不写入 YAML。登录后：
 
 - **Projects** 可查看会话聚合、登记已有目录、在 `projectRoot` 内创建空目录及启停；
-- **Sessions** 可按 Project、Scope、chat/topic 和 native 状态筛选，以 10/20/50/100 条
-  keyset 分页查看当前页的单聊、群聊或话题群名称，并从名称打开对应飞书会话；页面区分
-  消息/话题、当前/非当前、Lazy/archived/missing 与独立运行态。可管理创建、切换、配置、
+- **Sessions** 可按 Project、Scope、chat/topic、当前指针和统一会话状态筛选；状态包括默认
+  `Active` 以及 `Lazy`、`Archived`、`Missing`、`全部`。页面以 10/20/50/100 条 keyset
+  分页查看当前页的单聊、群聊或话题群名称，并从名称打开对应飞书会话；页面区分消息/话题、
+  当前/非当前与独立运行态。可管理创建、切换、配置、
   重命名、归档、两种恢复、Lazy 删除、exact Stop 和 Release；名称仅使用有界进程缓存，
   不写入 Channel 数据库；
 - **Side Topics** 可按 Project、chat 和 route 状态筛选，并结束当前进程仍可控的 exact Side。

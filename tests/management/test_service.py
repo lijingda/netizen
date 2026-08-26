@@ -35,6 +35,7 @@ from netizen.management import (
     RuntimePrecondition,
     RuntimeStateChanged,
     ScopeCoordinator,
+    SessionInventoryState,
     SessionQuery,
     SideIdentityMismatch,
 )
@@ -587,7 +588,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                 deadline=asyncio.get_running_loop().time() + 1,
             )
 
-    async def test_native_state_filter_uses_complete_catalog_and_keeps_missing(
+    async def test_session_state_filter_reads_only_required_native_catalogs(
         self,
     ) -> None:
         active = await self._create()
@@ -596,40 +597,46 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         self.store.assign_native_thread_id(archived.id, "native-archived")
         missing = await self._create()
         self.store.assign_native_thread_id(missing.id, "native-missing")
+        lazy = await self._create()
         self.runtime.active_metadata["native-active"] = NativeThreadMetadata(
             "native-active", None, "active"
         )
         self.runtime.archived_metadata["native-archived"] = NativeThreadMetadata(
             "native-archived", None, "archived"
         )
-        deadline = asyncio.get_running_loop().time() + 1
+        cases = (
+            (SessionInventoryState.ACTIVE, active.id, (False,)),
+            (SessionInventoryState.LAZY, lazy.id, ()),
+            (SessionInventoryState.ARCHIVED, archived.id, (True,)),
+            (SessionInventoryState.MISSING, missing.id, (False, True)),
+        )
+        for state, expected_id, expected_catalogs in cases:
+            with self.subTest(state=state):
+                self.runtime.calls.clear()
+                page = await self.service.query_sessions(
+                    query=SessionQuery(
+                        local=BindingQuery(project_alias="test"),
+                        inventory_state=state,
+                    ),
+                    deadline=asyncio.get_running_loop().time() + 1,
+                )
 
-        archived_page = await self.service.query_sessions(
-            query=SessionQuery(
-                local=BindingQuery(project_alias="test"),
-                native_state=NativeThreadCatalogState.ARCHIVED,
-            ),
-            deadline=deadline,
-        )
-        missing_page = await self.service.query_sessions(
-            query=SessionQuery(
-                native_state=NativeThreadCatalogState.MISSING,
-            ),
-            deadline=asyncio.get_running_loop().time() + 1,
-        )
-
-        self.assertEqual(
-            [item.record.binding.id for item in archived_page.items],
-            [archived.id],
-        )
-        self.assertEqual(
-            [item.record.binding.id for item in missing_page.items],
-            [missing.id],
-        )
-        self.assertGreaterEqual(
-            len([call for call in self.runtime.calls if call[0] == "catalog"]),
-            4,
-        )
+                self.assertEqual(
+                    [item.record.binding.id for item in page.items],
+                    [expected_id],
+                )
+                self.assertEqual(
+                    tuple(
+                        call[1]
+                        for call in self.runtime.calls
+                        if call[0] == "catalog"
+                    ),
+                    expected_catalogs,
+                )
+                if state is SessionInventoryState.LAZY:
+                    self.assertFalse(
+                        any(call[0] == "metadata" for call in self.runtime.calls)
+                    )
 
     async def test_project_query_merges_complete_archived_catalog_counts(self) -> None:
         archived = await self._create()

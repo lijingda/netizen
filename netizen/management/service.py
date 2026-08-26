@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Any, NoReturn
 
 from .blocking_io import BoundedBlockingIOExecutor
@@ -105,10 +106,17 @@ class NativeThreadView:
     metadata: NativeThreadMetadata | None
 
 
+class SessionInventoryState(str, Enum):
+    ACTIVE = "active"
+    LAZY = "lazy"
+    ARCHIVED = "archived"
+    MISSING = "missing"
+
+
 @dataclass(frozen=True, slots=True)
 class SessionQuery:
     local: BindingQuery = BindingQuery()
-    native_state: NativeThreadCatalogState | None = None
+    inventory_state: SessionInventoryState | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,7 +533,13 @@ class InstanceManagementService:
             or not 1 <= limit <= 100
         ):
             raise ValueError("page size must be between 1 and 100")
-        if query.native_state is None:
+        inventory_state = query.inventory_state
+        if inventory_state is not None and not isinstance(
+            inventory_state,
+            SessionInventoryState,
+        ):
+            raise ValueError("Session inventory state filter is invalid")
+        if inventory_state is None:
             page = await self._bindings.query_bindings(
                 query=query.local,
                 cursor=cursor,
@@ -540,17 +554,46 @@ class InstanceManagementService:
                 deadline=deadline,
             )
 
-        if not isinstance(query.native_state, NativeThreadCatalogState):
-            raise ValueError("native Thread state filter is invalid")
-        active, archived = await self._complete_native_views(deadline=deadline)
+        if inventory_state is SessionInventoryState.LAZY:
+            page = await self._bindings.query_bindings(
+                query=replace(query.local, materialized=False),
+                cursor=cursor,
+                limit=limit,
+                deadline_seconds=self._query_seconds(deadline),
+            )
+            return await self._session_page(
+                page.items,
+                native={},
+                next_cursor=page.next_cursor,
+                deadline=deadline,
+            )
+
+        local = replace(query.local, materialized=True)
+        if inventory_state is SessionInventoryState.MISSING:
+            active, archived = await self._complete_native_views(deadline=deadline)
+        elif inventory_state is SessionInventoryState.ACTIVE:
+            active = await self._native_catalog_views(
+                archived=False,
+                deadline=deadline,
+            )
+            archived = {}
+        elif inventory_state is SessionInventoryState.ARCHIVED:
+            active = {}
+            archived = await self._native_catalog_views(
+                archived=True,
+                deadline=deadline,
+            )
+        else:  # pragma: no cover - exhaustive after the validated enum branches
+            raise AssertionError("unhandled Session inventory state")
         native = {**active, **archived}
+        native_state = NativeThreadCatalogState(inventory_state.value)
         selected: list[BindingInventoryRecord] = []
         scan_cursor = cursor
         next_cursor: BindingCursor | None = None
         exhausted = False
         while len(selected) < limit and not exhausted:
             page = await self._bindings.query_bindings(
-                query=query.local,
+                query=local,
                 cursor=scan_cursor,
                 limit=50,
                 deadline_seconds=self._query_seconds(deadline),
@@ -561,7 +604,7 @@ class InstanceManagementService:
                 binding = record.binding
                 scan_cursor = BindingCursor(binding.created_at, binding.id)
                 view = self._native_view(binding, active=active, archived=archived)
-                if view is None or view.state is not query.native_state:
+                if view is None or view.state is not native_state:
                     continue
                 selected.append(record)
                 if len(selected) == limit:
@@ -1111,33 +1154,36 @@ class InstanceManagementService:
         *,
         deadline: float,
     ) -> tuple[dict[str, NativeThreadView], dict[str, NativeThreadView]]:
-        active_catalog = await self._runtime.thread_catalog_exact(
+        active = await self._native_catalog_views(
             archived=False,
             deadline=deadline,
         )
-        archived_catalog = await self._runtime.thread_catalog_exact(
+        archived = await self._native_catalog_views(
             archived=True,
             deadline=deadline,
         )
-        active_metadata = active_catalog.by_id()
-        archived_metadata = archived_catalog.by_id()
-        self._require_disjoint_native_catalogs(active_metadata, archived_metadata)
-        return (
-            {
-                thread_id: NativeThreadView(
-                    NativeThreadCatalogState.ACTIVE,
-                    metadata,
-                )
-                for thread_id, metadata in active_metadata.items()
-            },
-            {
-                thread_id: NativeThreadView(
-                    NativeThreadCatalogState.ARCHIVED,
-                    metadata,
-                )
-                for thread_id, metadata in archived_metadata.items()
-            },
+        self._require_disjoint_native_catalogs(active, archived)
+        return active, archived
+
+    async def _native_catalog_views(
+        self,
+        *,
+        archived: bool,
+        deadline: float,
+    ) -> dict[str, NativeThreadView]:
+        catalog = await self._runtime.thread_catalog_exact(
+            archived=archived,
+            deadline=deadline,
         )
+        state = (
+            NativeThreadCatalogState.ARCHIVED
+            if archived
+            else NativeThreadCatalogState.ACTIVE
+        )
+        return {
+            thread_id: NativeThreadView(state, metadata)
+            for thread_id, metadata in catalog.by_id().items()
+        }
 
     @staticmethod
     def _native_view(

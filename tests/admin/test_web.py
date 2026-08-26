@@ -17,6 +17,7 @@ from netizen.admin.web import (
     AdminWebRunner,
     _batches,
     _chat_open_url,
+    _session_inventory_state,
     _session_page_size,
     _session_state,
     accepted_authorities,
@@ -51,6 +52,8 @@ from netizen.management import (
     ChatLabel,
     ClosedSide,
     CreatedBinding,
+    InstanceManagementService,
+    ManagementRuntimePort,
     NativeThreadView,
     ProjectInventoryItem,
     ProjectInventoryPage,
@@ -58,9 +61,8 @@ from netizen.management import (
     RenamedBinding,
     RuntimeSnapshots,
     SessionInventoryItem,
-    InstanceManagementService,
-    ManagementRuntimePort,
     SessionInventoryPage,
+    SessionInventoryState,
     SideTopicInventoryItem,
     SideTopicInventoryPage,
     StoppedBinding,
@@ -330,6 +332,20 @@ class FakeManagement:
 
 
 class AdminSessionPresentationTest(unittest.TestCase):
+    def test_session_inventory_state_defaults_to_active_and_accepts_all(self) -> None:
+        self.assertIs(
+            _session_inventory_state({}),
+            SessionInventoryState.ACTIVE,
+        )
+        for state in SessionInventoryState:
+            self.assertIs(
+                _session_inventory_state({"inventoryState": [state.value]}),
+                state,
+            )
+        self.assertIsNone(_session_inventory_state({"inventoryState": ["all"]}))
+        with self.assertRaises(AdminWebError):
+            _session_inventory_state({"inventoryState": ["materialized"]})
+
     def test_sessions_page_sizes_are_exact_and_default_to_twenty(self) -> None:
         self.assertEqual(_session_page_size({}), 20)
         for value in (10, 20, 50, 100):
@@ -698,7 +714,10 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         session = await self.login()
 
         async def fresh_items():
-            status, _headers, page = await self.json_get("/api/v1/sessions", session)
+            status, _headers, page = await self.json_get(
+                "/api/v1/sessions?inventoryState=all",
+                session,
+            )
             self.assertEqual(status, 200)
             return {item["bindingId"]: item for item in page["items"]}
 
@@ -792,7 +811,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                         "created_from": None,
                         "created_before": None,
                     },
-                    "nativeState": None,
+                    "inventoryState": "active",
                 },
             ),
         )
@@ -812,12 +831,21 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
     async def test_sessions_api_exposes_page_size_presentation_and_state(self) -> None:
         self.runner.open_admission()
         session = await self.login()
+        started = asyncio.get_running_loop().time()
 
         status, _headers, page = await self.json_get("/api/v1/sessions", session)
+        finished = asyncio.get_running_loop().time()
 
         self.assertEqual(status, 200)
         self.assertEqual(page["pageSize"], 20)
-        self.assertEqual(self.management.query_session_calls[-1]["limit"], 20)
+        call = self.management.query_session_calls[-1]
+        self.assertEqual(call["limit"], 20)
+        self.assertIs(
+            call["query"].inventory_state,
+            SessionInventoryState.ACTIVE,
+        )
+        self.assertGreaterEqual(call["deadline"], started + 10.0)
+        self.assertLessEqual(call["deadline"], finished + 10.0)
         by_id = {item["bindingId"]: item for item in page["items"]}
         self.assertEqual(by_id["binding-lazy"]["sessionState"], "lazy-non-current")
         self.assertEqual(by_id["binding-native"]["sessionState"], "current")
@@ -844,6 +872,36 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 400)
         self.assertEqual(error["code"], "invalid_page_size")
+
+        status, _headers, _page = await self.json_get(
+            "/api/v1/sessions?inventoryState=lazy",
+            session,
+        )
+        self.assertEqual(status, 200)
+        self.assertIs(
+            self.management.query_session_calls[-1]["query"].inventory_state,
+            SessionInventoryState.LAZY,
+        )
+        status, _headers, _page = await self.json_get(
+            "/api/v1/sessions?inventoryState=all",
+            session,
+        )
+        self.assertEqual(status, 200)
+        self.assertIsNone(
+            self.management.query_session_calls[-1]["query"].inventory_state
+        )
+        status, _headers, error = await self.json_get(
+            "/api/v1/sessions?inventoryState=materialized",
+            session,
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(error["code"], "invalid_inventory_state")
+        status, _headers, error = await self.json_get(
+            "/api/v1/sessions?materialized=false",
+            session,
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(error["code"], "invalid_query")
 
     async def test_hundred_session_page_chunks_initial_runtime_snapshots(self) -> None:
         self.runner.open_admission()
@@ -992,6 +1050,14 @@ class AdminStaticAssetsTest(unittest.TestCase):
         )
         for option in ('value="10"', 'value="20" selected', 'value="50"', 'value="100"'):
             self.assertIn(option, html)
+        self.assertIn('name="inventoryState"', html)
+        self.assertIn('<option value="active" selected>Active</option>', html)
+        self.assertIn('<option value="lazy">Lazy</option>', html)
+        self.assertIn('<option value="archived">Archived</option>', html)
+        self.assertIn('<option value="missing">Missing</option>', html)
+        self.assertIn('<option value="all">全部</option>', html)
+        self.assertNotIn('name="materialized"', html)
+        self.assertNotIn('name="nativeState"', html)
         for unsafe in (
             "innerHTML",
             "outerHTML",
