@@ -63,14 +63,11 @@
         <label>Chat ID<input name="chatId" maxlength="512"></label>
         <label>Topic ID<input name="topicId" maxlength="512"></label>
         <label>Binding / Thread ID<input name="identity" maxlength="512"></label>
-        <label>物化状态
-          <select name="materialized"><option value="">全部</option><option value="false">Lazy</option><option value="true">Materialized</option></select>
+        <label>会话状态
+          <select name="inventoryState"><option value="active" selected>Active</option><option value="lazy">Lazy</option><option value="archived">Archived</option><option value="missing">Missing</option><option value="all">全部</option></select>
         </label>
         <label>当前指针
           <select name="current"><option value="">全部</option><option value="true">当前</option><option value="false">非当前</option></select>
-        </label>
-        <label>原生状态
-          <select name="nativeState"><option value="">全部</option><option value="active">Active</option><option value="archived">Archived</option><option value="missing">Missing</option></select>
         </label>
         <label>创建时间从<input name="createdFrom" maxlength="64" placeholder="ISO-8601"></label>
         <label>创建时间至<input name="createdBefore" maxlength="64" placeholder="ISO-8601"></label>

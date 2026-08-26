@@ -561,13 +561,17 @@ Host 只接受启动时发现的本机地址/名称和 exact port，带 body 的
 OIDC、多管理员或 RBAC。
 
 Projects、Sessions、Side Topics 都使用服务端 keyset cursor。Binding 查询先在 Channel-owned
-索引中过滤 Project、Scope kind、chat/topic/Binding/native ID、Lazy/materialized/current 和
-时间，只为当前页读取 native title/preview/catalog 与 best-effort chat label；archived 条件或
-Project archived aggregate 需要完整、有 deadline/页数/条目上限的公开 catalog，失败时整次
-失败。Sessions 每页只接受 10/20/50/100，默认 20；浏览器用 cursor 栈提供前后翻页，不计算
-总数或支持随机页码。Runtime snapshot primitive 仍只接受最多 50 个完整 ID；100 行 Sessions
-首屏由 Web adapter 分两批读取，浏览器五秒 polling 同样分片后合并，既不查 native catalog，
-也不签发 action token。
+索引中过滤 Project、Scope kind、chat/topic/Binding/native ID、current 和时间。Sessions
+把原来的 materialized/native 两个条件合并成一个清单状态：`Active`（默认）、`Lazy`、
+`Archived`、`Missing`、`全部`；current 仍是独立条件。`Active` 只读取公开
+`thread_list(archived=False)` 完整目录，`Archived` 只读取
+`thread_list(archived=True)` 完整目录，`Lazy` 不访问原生目录，`Missing` 才读取并对比两个
+完整目录，`全部`只为当前 Binding 页从两个目录查找 title/preview。原生读取均保留
+deadline/页数/条目上限，Sessions 的请求预算为 10 秒，失败时整次失败；Project archived
+aggregate 仍需要归档完整目录。Sessions 每页只接受 10/20/50/100，默认 20；浏览器用 cursor
+栈提供前后翻页，不计算总数或支持随机页码。Runtime snapshot primitive 仍只接受最多 50 个
+完整 ID；100 行 Sessions 首屏由 Web adapter 分两批读取，浏览器五秒 polling 同样分片后
+合并，既不查 native catalog，也不签发 action token。
 
 chat label 只解析当前页去重后的 `chat_id`。进程级 resolver 使用最多 4096 项的 LRU：成功
 结果保留 10 分钟，失败结果保留 30 秒，同 ID 并发请求合并且飞书查询并发最多 10；缓存不写

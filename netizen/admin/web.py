@@ -93,6 +93,7 @@ from ..management import (
     RuntimePrecondition,
     RuntimeStateChanged,
     SessionInventoryItem,
+    SessionInventoryState,
     SessionQuery,
     SideIdentityMismatch,
 )
@@ -113,6 +114,7 @@ _PREAUTH_COOKIE = "netizen_admin_preauth"
 _JSON_TYPE = "application/json"
 _FORM_TYPE = "application/x-www-form-urlencoded"
 _QUERY_DEADLINE_SECONDS = 5.0
+_SESSION_QUERY_DEADLINE_SECONDS = 10.0
 _MUTATION_DEADLINE_SECONDS = 15.0
 _MAX_QUERY_FIELDS = 24
 _MAX_JSON_FIELDS = 20
@@ -544,11 +546,10 @@ class AdminWebApplication:
             "chatId",
             "topicId",
             "identity",
-            "materialized",
+            "inventoryState",
             "current",
             "createdFrom",
             "createdBefore",
-            "nativeState",
         }
         _require_query_keys(context.query, allowed)
         page_size = _session_page_size(context.query)
@@ -558,22 +559,28 @@ class AdminWebApplication:
             chat_id=_optional_text_query(context.query, "chatId"),
             topic_id=_optional_text_query(context.query, "topicId"),
             identity=_optional_text_query(context.query, "identity"),
-            materialized=_optional_bool_query(context.query, "materialized"),
             current=_optional_bool_query(context.query, "current"),
             created_from=_optional_text_query(context.query, "createdFrom"),
             created_before=_optional_text_query(context.query, "createdBefore"),
         )
-        native_state = _optional_native_state(context.query)
+        inventory_state = _session_inventory_state(context.query)
         filter_values = {
             "pageSize": page_size,
             "local": _jsonable(local),
-            "nativeState": native_state.value if native_state is not None else None,
+            "inventoryState": (
+                inventory_state.value if inventory_state is not None else "all"
+            ),
         }
         fingerprint = _fingerprint("sessions", filter_values)
         cursor = _decode_binding_cursor(_optional_one(context.query, "cursor"), fingerprint)
-        deadline = asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS
+        deadline = (
+            asyncio.get_running_loop().time() + _SESSION_QUERY_DEADLINE_SECONDS
+        )
         page = await self._management.query_sessions(
-            query=SessionQuery(local=local, native_state=native_state),
+            query=SessionQuery(
+                local=local,
+                inventory_state=inventory_state,
+            ),
             cursor=cursor,
             limit=page_size,
             deadline=deadline,
@@ -1743,16 +1750,22 @@ def _optional_scope_kind(values: Mapping[str, list[str]]) -> ScopeKind | None:
         raise AdminWebError(400, "invalid_scope_kind", "Scope 类型无效。") from None
 
 
-def _optional_native_state(
+def _session_inventory_state(
     values: Mapping[str, list[str]],
-) -> NativeThreadCatalogState | None:
-    raw = _optional_one(values, "nativeState")
+) -> SessionInventoryState | None:
+    raw = _optional_one(values, "inventoryState")
     if raw is None:
+        return SessionInventoryState.ACTIVE
+    if raw == "all":
         return None
     try:
-        return NativeThreadCatalogState(raw)
+        return SessionInventoryState(raw)
     except ValueError:
-        raise AdminWebError(400, "invalid_native_state", "原生会话状态无效。") from None
+        raise AdminWebError(
+            400,
+            "invalid_inventory_state",
+            "会话状态无效。",
+        ) from None
 
 
 def _id_query(values: Mapping[str, list[str]], name: str) -> tuple[str, ...]:
