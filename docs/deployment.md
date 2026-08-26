@@ -639,9 +639,17 @@ netizen.service`；无 TTY 时打印同一条预备命令。候选失败会尽�
 SQLite 的 `state`、Project 目录、其他 Codex Skills 及原生 Thread/Turn 历史。若用户也
 要删除这些数据，应在确认备份和影响后另行处理，不能扩张卸载器的默认删除范围。
 
-安装或升级后核对 ready 日志，并在飞书发送“运行中的任务再发一条消息会怎样？”确认
-自然语言回答包含 steer 且明确不排队；再用 `$netizen-user-guide 如何切换会话？` 验证
-显式调用能说明 `/sessions` 和 `/resume`。
+下载到文件运行的官方 installer 返回 0，就是 Published Release 安装事务成功的权威判据。
+此时目标机 Host Validation 和 activation/rollback transaction 已完成；安装前 active 的
+服务已经等待私有 ready marker，安装前主动停止的服务则按原意保持停止。常规升级成功后
+无需再次检查数据库完整性、journal、跨主机 Admin Web、live Thread 或人工飞书消息，也
+不能拿单独的 service-manager `active` 替代 installer 成功。只有 installer 返回非零、进程
+中断导致结果不明确、本轮变更的安装/服务/持久化/SDK 兼容边界要求重新验收，或用户明确
+要求时，才展开对应检查。
+
+首次上线验收或相关产品边界发生变化时，按本文对应门禁核对 ready 日志，并在飞书发送
+“运行中的任务再发一条消息会怎样？”确认自然语言回答包含 steer 且明确不排队；再用
+`$netizen-user-guide 如何切换会话？` 验证显式调用能说明 `/sessions` 和 `/resume`。
 
 `config.yaml` 采用仓库示例的 mapping 形态。Feishu Secret 文件只含 raw value，权限必须是
 `0600` 或更严格；Admin credential 必须是 `token_urlsafe(32)` 的 canonical base64url 单行、

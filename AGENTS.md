@@ -103,6 +103,16 @@ design detail, compatibility findings, and procedures in their source docs.
   surfacing intermediate output, and resuming stdin; otherwise use the
   credential-file handoff. Follow the exact relay procedure in
   `docs/deployment.md`; never ask the user to paste an App Secret into chat.
+- A zero exit from the downloaded official installer is the authoritative
+  success signal for a routine Published Release upgrade. It already completes
+  Host Validation and the activation/rollback transaction; when the service was
+  active it also waits for the private ready marker, while an intentionally
+  stopped service remains stopped. After that success, do not repeat database
+  integrity, journal, cross-host Admin Web, live-Thread, or manual Feishu
+  acceptance checks. Expand verification only when the installer is nonzero or
+  its result is ambiguous, the changed boundary requires requalification, or
+  the user explicitly requests it. Service-manager `active` alone remains
+  weaker than installer success.
 - The product root is fixed at `~/.netizen` below the effective user's account
   home; do not use XDG overrides as profiles or as a second Netizen instance.
   The Linux systemd user unit and macOS LaunchAgent plist remain in their
