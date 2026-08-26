@@ -333,6 +333,10 @@ LaunchAgent 只属于当前 GUI 登录会话。
 停止旧服务或发布 `current` 后被 `SIGKILL`，再次执行原安装入口也会继续恢复该意图，
 不会把异常中断误判成用户主动停服。
 
+常规 Published Release 升级以下载到文件运行的官方 installer 返回 0 为成功判据：原服务
+active 时它已经等待 ready，原服务主动停止时则保持停止，无需再重复人工验收。详细边界与
+需要展开检查的例外见[部署手册](docs/deployment.md#升级启停和卸载)。
+
 日常启停只使用 user manager，脚本内部没有 `sudo`，调用时也不要加 `sudo`：
 
 ```bash

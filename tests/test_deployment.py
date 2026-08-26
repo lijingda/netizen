@@ -167,6 +167,22 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("两种失败都不自动恢复旧应用凭据", deployment)
         self.assertIn("成对恢复", deployment)
 
+    def test_routine_published_upgrade_uses_installer_exit_as_success_signal(
+        self,
+    ) -> None:
+        deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+        self.assertIn("官方 installer 返回 0", deployment)
+        self.assertIn("常规 Published Release 升级", readme)
+        self.assertIn("zero exit from the downloaded official installer", agents)
+        self.assertIn("安装前 active", deployment)
+        self.assertIn("主动停止的服务", deployment)
+        self.assertIn("无需再次检查数据库完整性", deployment)
+        self.assertIn("installer 返回非零", deployment)
+        self.assertIn("Service-manager `active` alone", agents)
+
     def test_deployment_separates_published_and_source_installation(self) -> None:
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
