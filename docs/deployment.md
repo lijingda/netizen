@@ -371,10 +371,12 @@ status checks；仓库所有者也不在绕过名单中。
 
 仓库使用 `.github/workflows/release.yml` 的手工 dispatch 发布正式版本。GitHub 仓库必须启用
 Immutable Releases；active 的 `Protect version tags` ruleset 禁止任何人更新或删除已创建的
-`v*` tag，且无绕过者；`published-release` environment 要求仓库所有者审批。tag 采用与
-`pyproject.toml` 完全一致的 `vX.Y.Z`。workflow 校验 clean exact-tag checkout 和 full
-commit，并通过 GitHub Actions API 要求该 exact SHA 已有一次成功完成的 `main` push
-`Main quality gate`；只有 PR 上别的 SHA 成功，或 main run 尚未完成，都不能发布。随后在
+`v*` tag，且无绕过者。`published-release` environment 只保留 deployment history，不配置
+required reviewer 或 wait timer；创建受保护的 exact tag 并手工 dispatch 已共同表达明确的
+发布意图。tag 采用与 `pyproject.toml` 完全一致的 `vX.Y.Z`。workflow 校验 clean exact-tag
+checkout 和 full commit，并通过 GitHub Actions API 要求该 exact SHA 已有一次成功完成的
+`main` push `Main quality gate`；只有 PR 上别的 SHA 成功，或 main run 尚未完成，
+都不能发布。随后在
 创建 draft 前和正式发布前再次解析 lightweight/annotated tag、核对它仍指向同一 commit；
 不一致时在 Release 变为 immutable 前失败关闭。构建阶段只运行一次
 `scripts/build_release_artifact.py`，生成项目自建的
@@ -382,9 +384,10 @@ deterministic archive 与 exact `install.sh` bootstrap；单个完整性 job 校
 安全解压、manifest 的 version/full commit/qualification，再把同一份字节交给发布 job。
 
 Release workflow 不安装依赖、不运行 `make check`，也不接收或执行账号级 Codex、飞书与
-真实 service lifecycle live probes。手工 dispatch 与 `published-release` environment 审批
-构成人工发布边界；最终 job 通过 GitHub Release API 创建 draft、上传已经验证摘要的 archive
-与 bootstrap、再次核对 tag 后发布。它不依赖 GitHub CLI，也不允许覆盖已有 tag 或 asset。
+真实 service lifecycle live probes。创建 exact tag 与手工 dispatch 构成人工发布边界；
+`published-release` environment 不增加一次无法提供新技术证据的重复审批。最终 job 通过
+GitHub Release API 创建 draft、上传已经验证摘要的 archive 与 bootstrap、再次核对 tag 后
+发布。它不依赖 GitHub CLI，也不允许覆盖已有 tag 或 asset。
 发布失败时 draft 保留供维护者检查，不得用重新构建的同名文件替换原候选。
 
 archive 内的 `.netizen-release.json` 不参与自身记录的 `sourceDigest`，但会作为独立成员被

@@ -182,6 +182,9 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("该 tag 的 exact main commit", readme)
         self.assertIn("发布流水线复用该 exact SHA", readme)
         self.assertNotIn("发布前已对这份", readme)
+        self.assertIn("required reviewer 或 wait timer", deployment)
+        self.assertIn("创建 exact tag 与手工 dispatch 构成人工发布边界", deployment)
+        self.assertNotIn("environment 要求仓库所有者审批", deployment)
 
     def test_deployment_documents_service_start_shell_environment(self) -> None:
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
