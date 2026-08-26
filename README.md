@@ -223,7 +223,7 @@ curl -fsSL https://github.com/lijingda/netizen/releases/latest/download/install.
 ```
 
 需要固定版本时，直接下载该 tag 的 `install.sh`，例如
-`https://github.com/lijingda/netizen/releases/download/v0.3.0/install.sh`。Agent、CI 或后台
+`https://github.com/lijingda/netizen/releases/download/v0.3.1/install.sh`。Agent、CI 或后台
 shell 不使用 pipe：先把 latest 或 exact-tag `install.sh` 下载到文件，再运行
 `sh install.sh </dev/null`。凭据缺失时它会生成文件和精确后续步骤，不等待交互。
 
@@ -232,9 +232,11 @@ Agent 才应代用户承载交互浏览器初始化；具体交接流程见
 [部署文档](docs/deployment.md#agent-驱动首次安装)。
 
 所有公开脚本都不接收参数，也不会执行 `git pull`。正式 bootstrap 下载自己固定 tag 的
-项目构建 tarball，校验内嵌 SHA-256 和 Published Release manifest 后安装；发布前已对这份
-exact tarball 完成 Linux/macOS、Python 3.11/3.12 全量门禁，因此目标机不重复运行完整
-unittest。`dev-install.sh` 则把当前工作区做成隔离的内容寻址候选，并在本机运行完整门禁。
+项目构建 tarball，校验内嵌 SHA-256 和 Published Release manifest 后安装；
+该 tag 的 exact main commit 已在 Python 3.11/3.12 CI 通过统一代码门禁；
+发布流水线复用该 exact SHA 并验证
+同一次构建制品的身份和摘要，因此目标机不重复运行完整 unittest。`dev-install.sh` 则把当前
+工作区做成隔离的内容寻址候选，并在本机运行完整门禁。
 两条路径都安装到 `~/.netizen/releases/<digest>`，汇入同一个 `current` / `previous` 原子
 切换、ready 和回滚事务。配置、数据库与 Codex 状态位于 release 外：
 
@@ -256,10 +258,11 @@ Netizen 产品根始终是当前账号数据库中 home 下的 `~/.netizen`，�
 
 首次交互安装发现 Feishu/Lark 凭据不完整时，默认显示官方浏览器链接和终端二维码：官方
 页面可创建新 Bot 应用或选择已有应用；已有 `appId` 且受保护的 Secret 文件存在但内容为空
-时只更新该 exact 应用。部署后若要更换应用，无需卸载 Netizen；删除（或先移走备份）
-`~/.netizen/credentials/feishu-app-secret` 再运行原安装入口，安装器会把文件缺失解释为
-显式的飞书应用绑定重置，再次打开官方创建/选择页面，并允许选择结果替换原 App ID。两种
-路径都会预填 Netizen 所需的应用身份权限、`im.message.receive_v1` 事件和
+时只更新该 exact 应用。部署后若要更换应用，无需卸载 Netizen；如需保留人工回退能力，先
+成对备份 `~/.netizen/config.yaml` 与 `~/.netizen/credentials/feishu-app-secret`，再删除
+Secret 文件并运行原安装入口。安装器会把文件缺失解释为显式的飞书应用绑定重置，再次打开
+官方创建/选择页面，并允许选择结果替换原 App ID。
+两种路径都会预填 Netizen 所需的应用身份权限、`im.message.receive_v1` 事件和
 `card.action.trigger` 回调。
 该流程使用随 release 固定的官方 Python SDK，不安装或依赖 Lark CLI，也不申请用户身份
 scope/token；菜单中的手工 App ID + 隐藏 App Secret 输入始终可用，浏览器流程失败也会
@@ -268,6 +271,13 @@ YAML、unit 或日志。每次安装都会在切换 release 前通过官方 API 
 已经授权；已有应用缺权限时，交互安装只尝试一次 exact-App 官方修复，Agent/CI 则立即列出
 缺失项并退出。用户仍需按租户策略完成管理员审批/应用发布与租户安装，设置可用范围，并
 把机器人加入目标群；完成后重新运行同一个正式或开发安装入口。
+
+应用重绑定与 release 激活是明确的两阶段过程：新 App ID/Secret 一旦成功写入，就作为用户
+选择的新绑定保留；后续权限门禁或候选启动失败不会恢复旧凭据，但不会切换 `current`，已经
+进入激活的失败还会恢复旧 release、服务定义、数据库和 Skill。完成新应用审批后重跑同一
+入口会复用新绑定继续安装，无需重复选择应用；若要放弃本次重绑定，必须成对恢复此前备份的
+`config.yaml` 和 `feishu-app-secret`。权限门禁失败且旧进程未停止时，它继续使用启动时已
+加载的旧凭据；候选启动失败回滚或任何后续服务启动，都以磁盘上的新绑定为准。
 
 飞书应用绑定重置不会迁移旧 App ID 下的飞书 Scope/Binding；Channel 数据库和 Codex 原生
 历史仍会保留，但新应用从自己的飞书会话命名空间开始。正常代码升级不要删除 Secret 文件，

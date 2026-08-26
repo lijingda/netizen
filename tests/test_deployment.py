@@ -162,6 +162,9 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("飞书应用绑定重置", deployment)
         self.assertIn("feishu-app-secret", deployment)
         self.assertIn("不会迁移到新应用", deployment)
+        self.assertIn("应用重绑定和 release 激活采用两阶段语义", deployment)
+        self.assertIn("两种失败都不自动恢复旧应用凭据", deployment)
+        self.assertIn("成对恢复", deployment)
 
     def test_deployment_separates_published_and_source_installation(self) -> None:
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
@@ -176,6 +179,9 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("不重复运行", deployment)
         self.assertIn("同一个", deployment)
         self.assertIn("rollback", deployment)
+        self.assertIn("该 tag 的 exact main commit", readme)
+        self.assertIn("发布流水线复用该 exact SHA", readme)
+        self.assertNotIn("发布前已对这份", readme)
 
     def test_deployment_documents_service_start_shell_environment(self) -> None:
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
