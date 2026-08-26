@@ -435,11 +435,14 @@ Binding reset：device flow 不绑定旧 App ID，官方页面可选择同一或
 带回滚的配置/凭据更新替换旧绑定。该流程不申请或持久化 user token。成功后只更新同一份
 `~/.netizen/config.yaml` App ID 与
 `0600` `credentials/feishu-app-secret`，不向 Channel Database、Codex state、环境或日志写入
-凭据。安装器在 host mutation/activation 前用官方 scope API 校验同一份 tenant 权限契约；
-缺失权限的已有完整凭据只有在 TTY 安装中执行一次 exact-App 修复，无 TTY 直接失败，二者
-都不停止旧服务或切换 `current`。手工凭据路径继续等价可用，但不能绕过授权门禁；服务
-运行时不进入该流程。App ID 改变后新消息进入新的 Scope namespace；旧 Binding 与原生
-历史保留但不迁移。
+凭据。安装器在 host mutation/activation 前用官方 scope API 校验同一份 tenant 权限能力契约；
+精确权限逐项验证，群信息能力则接受官方 API 声明的 `im:chat`、`im:chat:read`、
+`im:chat:readonly` 三种 tenant grant，并以最小的 `im:chat:read` 作为新申请 canonical scope。
+缺失权限的已有完整凭据不依赖 TTY，始终执行一次有界的 exact-App 官方修复并重新查询一次。
+验证 URL/二维码写入 stderr，Secret 只进入父进程私有 pipe，流程不读取 stdin；失败或二次
+查询仍缺失都不停止旧服务或切换 `current`。无 TTY 且凭据不完整的首次安装仍使用受保护的
+credential-file handoff，手工凭据路径继续等价可用但不能绕过授权门禁；服务运行时不进入
+该流程。App ID 改变后新消息进入新的 Scope namespace；旧 Binding 与原生历史保留但不迁移。
 
 部署候选有两个显式来源：Published Release 携带发布流水线对 exact archive 的资格，Source
 Install 在目标机对当前工作区运行完整门禁。两者只在候选准备和本地 release identity 上

@@ -15,7 +15,10 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1]
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from scripts.feishu_app_onboarding import REQUIRED_TENANT_SCOPES  # noqa: E402
+from scripts.feishu_app_onboarding import (  # noqa: E402
+    REQUIRED_TENANT_SCOPES,
+    TENANT_SCOPE_ALTERNATIVES,
+)
 
 
 class PermissionCheckError(RuntimeError):
@@ -51,7 +54,11 @@ def _missing_required_scopes(response: Any) -> tuple[str, ...]:
             )
         if scope_type == "tenant" and status == 1:
             granted.add(name)
-    return tuple(scope for scope in REQUIRED_TENANT_SCOPES if scope not in granted)
+    return tuple(
+        scope
+        for scope in REQUIRED_TENANT_SCOPES
+        if not (TENANT_SCOPE_ALTERNATIVES.get(scope, frozenset((scope,))) & granted)
+    )
 
 
 def run_permission_check(

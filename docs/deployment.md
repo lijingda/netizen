@@ -93,7 +93,8 @@ exact “获取指定消息”；群主线使用 chat container，普通话题�
 token；手工准备的应用必须逐项配置。无论来源，飞书应用版本在发布前都必须确认：
 
 - 单聊事件投递具备 `im:message.p2p_msg:readonly`，普通消息能力具备 `im:message`；
-- `/settings` 等卡片回调识别会话类型具备 `im:chat:readonly`；
+- `/settings` 等卡片回调识别会话类型具备 canonical `im:chat:read`；官方“获取群信息”接口
+  支持的 `im:chat`、`im:chat:read`、`im:chat:readonly` 三者任一 tenant 授权都满足门禁；
 - 群聊回查额外具备 `im:message.group_msg`，不能只有接收 @ 消息的
   `im:message.group_at_msg`/readonly；
 - 当前 Prompt 发送者姓名解析具备 `im:chat.members:read`；权限不足时 Channel SDK
@@ -462,13 +463,15 @@ callback；不安装/调用 Lark CLI，不申请 user scope/event，不保存 us
 继续使用启动时已加载的旧凭据；候选启动失败回滚或任何后续服务启动，都使用磁盘上的新绑定，
 因此不能把权限未就绪状态长期搁置。
 
-取得完整凭据后，安装器使用候选 release 的官方 SDK 查询租户授权状态；唯一 tenant scope
-契约中的每一项都必须为已授权，才能准备 host 或进入 release activation。已有完整凭据的
-交互安装发现缺失项时只对 exact App 运行一次官方浏览器修复并重新查询；本轮刚完成首次
-初始化、无 TTY、二次查询仍缺失或查询不可验证时直接退出。旧 `current`、运行中服务和服务
-定义此时均未改变。device flow 只完成公开应用配置：租户管理员审批、按租户策略发布应用
-版本、完成租户安装、配置可用范围、把机器人加入目标群仍是人工完成项；完成后重新执行
-同一个安装入口，安装器不会轮询审批或自动重复申请。安装器还会用
+取得完整凭据后，安装器使用候选 release 的官方 SDK 查询租户授权状态；tenant 权限能力
+契约中的精确 scope 或官方等价 scope 组必须满足，才能准备 host 或进入 release activation。
+已有完整凭据的安装发现缺失项时，无论是否有 TTY 都只对 exact App 运行一次官方浏览器修复
+并重新查询；
+该流程通过 stderr 输出验证 URL/二维码并有界等待最多约 660 秒，不读取 stdin。本轮刚完成
+首次初始化时不重复打开修复流程；二次查询仍缺失或查询不可验证时直接退出。旧 `current`、
+运行中服务和服务定义此时均未改变。device flow 只完成公开应用配置：租户管理员审批、按
+租户策略发布应用版本、完成租户安装、配置可用范围、把机器人加入目标群仍是人工完成项；
+完成后重新执行同一个安装入口，安装器不会轮询审批或自动重复申请。安装器还会用
 `secrets.token_urlsafe(32)` 自动生成不带
 换行的独立 Admin Web credential；已存在的合法文件只验证、永不覆盖。两个 Secret 都不会
 进入命令参数、环境、YAML、unit 文本或日志；Feishu App Secret 只从 helper stdout 的父进程
@@ -478,32 +481,35 @@ callback；不安装/调用 Lark CLI，不申请 user scope/event，不保存 us
 
 Agent 不得使用 `curl | sh`，因为脚本内容和安装器输入会争用同一 stdin。先把 latest 或
 exact-tag 正式 `install.sh` 下载到文件，再运行 `sh install.sh </dev/null`；源码安装则运行
-`./dev-install.sh </dev/null`。无 TTY 时安装器绝不 prompt，也不启动 device flow：若飞书
-凭据缺失，脚本创建带 `cli_REPLACE_ME` 的配置骨架、空的 `0600` Feishu Secret 和已经可用的
-`0600` Admin credential 后退出。Agent 按错误中打印的精确路径完成 App ID/Feishu Secret，
-再重新运行同一个文件或开发入口。已有完整凭据但 tenant scope 未全部授权时，
-同样直接列出缺失项并退出，不切换 release；完成飞书侧审批/发布/安装后重跑。已有有效配置、
-Secret 和完整授权的升级天然非交互。
+`./dev-install.sh </dev/null`。无 TTY 时安装器绝不 prompt：若飞书凭据缺失，脚本创建带
+`cli_REPLACE_ME` 的配置骨架、空的 `0600` Feishu Secret 和已经可用的 `0600` Admin
+credential 后退出。Agent 按错误中打印的精确路径完成 App ID/Feishu Secret，再重新运行
+同一个文件或开发入口。已有完整凭据但 tenant scope 未全部授权时是唯一的浏览器例外：候选
+release 自动对 exact App 启动一次官方 device flow，通过 stderr 输出 URL/二维码并等待确认，
+不读取 stdin；确认后重新查询有效权限，通过才继续，不通过则在切换 release 前退出。已有
+有效配置、Secret 和完整授权的升级仍天然非交互。
 若有效 App ID 对应的 Secret 文件被显式删除，无 TTY 安装会保留“文件不存在”这一重置
 信号，立即退出并提示改用交互安装，或由 Agent 同时写入目标 App ID 与 Secret 后重跑；它
 不会创建空文件、启动浏览器或等待输入。
 不要让用户把 App Secret 粘贴到聊天、命令参数、仓库或 YAML 中。
 
-只有同时具备以下能力时，Agent 才可以选择代用户承载上面的交互浏览器流程：命令工具能
-保持同一个长运行 PTY 或后台进程跨越对话轮次，能在进程退出前读取中间输出，并能继续向
-同一进程写入 stdin。满足这些条件时：
+Agent 代用户承载浏览器流程时，命令工具必须能保持同一个长运行进程跨越对话轮次，并在进程
+退出前读取中间 stderr。已有完整凭据的 exact-App 权限修复不需要 PTY 或可写 stdin；首次
+凭据初始化若要使用浏览器而不是 credential-file handoff，才额外需要持久 PTY 和 stdin 来
+选择安装方式。满足对应能力时：
 
-1. 在持久 PTY/后台会话中运行下载到文件的正式 installer 或 `./dev-install.sh`，等安装方式
-   菜单出现后选择 `1`（直接回车也会选择默认项）。
+1. 首次凭据初始化在持久 PTY 中运行下载到文件的正式 installer 或 `./dev-install.sh`，等
+   安装方式菜单出现后选择 `1`（直接回车也会选择默认项）；已有应用权限修复则照常使用
+   `</dev/null`，安装器发现缺失项后会自动进入 exact-App flow。
 2. 等待 helper 在继承的 stderr 中打印验证 URL、终端二维码和进度；将 URL 原样及可用的
    二维码交给用户，明确请用户在浏览器完成确认后回复。helper 的 credential stdout 由
    安装器私下捕获，Agent 不应尝试读取或展示凭据。
-3. 把对话控制权交还用户，同时保留该进程；用户确认后继续读取同一个会话，直至安装完成。
-   父进程最多等待约 660 秒，过期后应重新发起，不保存或复用旧链接。
+3. 把对话控制权交还用户，同时保留该进程；用户确认后继续读取同一个会话，直至安装完成或
+   有效权限复查明确失败。父进程最多等待约 660 秒，过期后应重新发起，不保存或复用旧链接。
 
-缺少任何一项会话能力时不要启动交互流程，继续使用下载脚本或 `./dev-install.sh` 的
-`</dev/null` 形式和凭据文件交接。浏览器流程失败后安装器会为真人提供手工输入回退；由 Agent 承载时应中止该会话并
-回到凭据文件路径，不要通过聊天收集 Secret。
+不能保留进程或转交中间输出时，不要让 Agent 承载浏览器确认：首次安装继续使用凭据文件交接；
+已有应用可由管理员在飞书后台完成权限申请、审批、发布和安装后重跑。首次凭据浏览器流程失败后，
+安装器只在有 TTY 时提供手工凭据回退；Agent 不要通过聊天收集 Secret。
 
 systemd 与 launchd 都不会替服务读取完整的 `.bashrc`、`.profile` 等账号工具环境。渲染的
 service definition 只给 profile loader 一条固定基础 `PATH`；macOS 额外包含标准

@@ -588,7 +588,7 @@ class NetizenInstallerTest(unittest.TestCase):
                             "version": 1,
                             "missingScopes": [
                                 "im:message.p2p_msg:readonly",
-                                "im:chat:readonly",
+                                "im:chat:read",
                             ],
                         }
                     ),
@@ -603,7 +603,7 @@ class NetizenInstallerTest(unittest.TestCase):
 
             self.assertEqual(
                 missing,
-                ("im:message.p2p_msg:readonly", "im:chat:readonly"),
+                ("im:message.p2p_msg:readonly", "im:chat:read"),
             )
             command, kwargs = calls[0]
             self.assertEqual(
@@ -619,7 +619,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertIs(kwargs["capture_output"], True)
             self.assertEqual(kwargs["timeout"], 90.0)
 
-    def test_noninteractive_permission_failure_prevents_activation(self) -> None:
+    def test_noninteractive_existing_app_repairs_once_before_activation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
             installer.prepare_directories(layout)
@@ -658,15 +658,91 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch.object(
                     installer,
                     "_query_missing_feishu_permissions_from_release",
-                    return_value=("im:chat:readonly",),
+                    side_effect=[("im:chat:read",), ()],
+                ) as query,
+                patch.object(
+                    installer,
+                    "_register_feishu_app_from_release",
+                    return_value=installer.FeishuAppCredentials(
+                        app_id="cli_existing",
+                        app_secret="updated-secret",
+                    ),
+                ) as register,
+                patch.object(installer, "activate_release") as activate,
+            ):
+                installed = installer.install_source(
+                    source_root=ROOT,
+                    layout=layout,
+                    interactive=False,
+                )
+
+            self.assertEqual(installed, release)
+            register.assert_called_once_with(
+                release,
+                "cli_existing",
+                runner=ANY,
+            )
+            self.assertEqual(query.call_count, 2)
+            self.assertEqual(layout.secret_file.read_text(), "updated-secret")
+            prepare_host.assert_called_once_with(interactive=False)
+            activate.assert_called_once()
+
+    def test_noninteractive_existing_app_recheck_failure_prevents_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text().replace(
+                    "cli_REPLACE_ME",
+                    "cli_existing",
+                ),
+                encoding="utf-8",
+            )
+            layout.secret_file.write_text("existing-secret", encoding="utf-8")
+            release = installer.Release(
+                digest="d" * 64,
+                root=ROOT,
+                source=ROOT,
+                venv=ROOT / ".venv",
+            )
+
+            with (
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(
+                    installer.SystemdServiceBackend, "prepare_host"
+                ) as prepare_host,
+                patch.object(installer, "prepare_source_release", return_value=release),
+                patch.object(
+                    installer,
+                    "validate_runtime",
+                    return_value=installer.RuntimeValidation(
+                        data_dir=layout.state_dir,
+                        admin_bind=installer.AdminBind(False, "127.0.0.1", 8787),
+                    ),
                 ),
                 patch.object(
-                    installer, "_register_feishu_app_from_release"
+                    installer,
+                    "_query_missing_feishu_permissions_from_release",
+                    side_effect=[
+                        ("im:chat:read",),
+                        ("im:chat:read",),
+                    ],
+                ) as query,
+                patch.object(
+                    installer,
+                    "_register_feishu_app_from_release",
+                    return_value=installer.FeishuAppCredentials(
+                        app_id="cli_existing",
+                        app_secret="updated-secret",
+                    ),
                 ) as register,
                 patch.object(installer, "activate_release") as activate,
                 self.assertRaisesRegex(
                     installer.InstallError,
-                    "im:chat:readonly.*rerun ./dev-install.sh",
+                    "im:chat:read.*rerun ./dev-install.sh",
                 ),
             ):
                 installer.install_source(
@@ -675,7 +751,13 @@ class NetizenInstallerTest(unittest.TestCase):
                     interactive=False,
                 )
 
-            register.assert_not_called()
+            register.assert_called_once_with(
+                release,
+                "cli_existing",
+                runner=ANY,
+            )
+            self.assertEqual(query.call_count, 2)
+            self.assertEqual(layout.secret_file.read_text(), "updated-secret")
             prepare_host.assert_not_called()
             activate.assert_not_called()
 
@@ -727,13 +809,13 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch.object(
                     installer,
                     "_query_missing_feishu_permissions_from_release",
-                    return_value=("im:chat:readonly",),
+                    return_value=("im:chat:read",),
                 ),
                 patch.object(installer, "activate_release") as activate,
                 patch("sys.stdin", new=io.StringIO("\n")),
                 self.assertRaisesRegex(
                     installer.InstallError,
-                    "im:chat:readonly.*rerun ./dev-install.sh",
+                    "im:chat:read.*rerun ./dev-install.sh",
                 ),
             ):
                 installer.install_source(
@@ -787,7 +869,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch.object(
                     installer,
                     "_query_missing_feishu_permissions_from_release",
-                    side_effect=[("im:chat:readonly",), ()],
+                    side_effect=[("im:chat:read",), ()],
                 ) as query,
                 patch.object(
                     installer,
@@ -841,17 +923,16 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch.object(
                     installer,
                     "_query_missing_feishu_permissions_from_release",
-                    return_value=("im:chat:readonly",),
+                    return_value=("im:chat:read",),
                 ),
                 patch.object(
                     installer, "_register_feishu_app_from_release"
                 ) as register,
-                self.assertRaisesRegex(installer.InstallError, "im:chat:readonly"),
+                self.assertRaisesRegex(installer.InstallError, "im:chat:read"),
             ):
                 installer.require_feishu_permissions(
                     release,
                     layout,
-                    interactive=True,
                     repair_existing_app=False,
                 )
 
@@ -1366,7 +1447,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     app_secret="published-secret",
                 )
             )
-            query_permissions = MagicMock(return_value=("im:chat:readonly",))
+            query_permissions = MagicMock(return_value=("im:chat:read",))
             with (
                 patch.object(installer, "require_supported_platform"),
                 patch.object(installer, "_service_backend", return_value=backend),
@@ -1390,7 +1471,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     patch("sys.stdin", new=io.StringIO("\n")),
                     self.assertRaisesRegex(
                         installer.InstallError,
-                        "im:chat:readonly",
+                        "im:chat:read",
                     ),
                 ):
                     installer.install_published(

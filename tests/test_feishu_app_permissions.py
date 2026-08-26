@@ -44,17 +44,46 @@ class FeishuAppPermissionsTest(unittest.TestCase):
             {"version": 1, "missingScopes": []},
         )
 
+    def test_each_official_chat_info_scope_satisfies_the_requirement(self) -> None:
+        other_grants = [
+            (scope, 1)
+            for scope in REQUIRED_TENANT_SCOPES
+            if scope != "im:chat:read"
+        ]
+
+        for chat_scope in ("im:chat", "im:chat:read", "im:chat:readonly"):
+            with self.subTest(chat_scope=chat_scope):
+                output = io.StringIO()
+                permissions.run_permission_check(
+                    list_scopes=lambda chat_scope=chat_scope: _response(
+                        *other_grants,
+                        (chat_scope, 1),
+                    ),
+                    stdout=output,
+                )
+                self.assertEqual(
+                    json.loads(output.getvalue()),
+                    {"version": 1, "missingScopes": []},
+                )
+
     def test_absent_and_unauthorized_scopes_are_reported_in_contract_order(self) -> None:
         granted = [
             (scope, 1)
             for scope in REQUIRED_TENANT_SCOPES
-            if scope not in {"im:message.p2p_msg:readonly", "im:chat:readonly"}
+            if scope not in {"im:message.p2p_msg:readonly", "im:chat:read"}
         ]
-        granted.append(("im:chat:readonly", 2))
+        granted.append(("im:chat:read", 2))
         response = _response(*granted)
         response.data.scopes.append(
             SimpleNamespace(
                 scope_name="im:message.p2p_msg:readonly",
+                grant_status=1,
+                scope_type="user",
+            )
+        )
+        response.data.scopes.append(
+            SimpleNamespace(
+                scope_name="im:chat:readonly",
                 grant_status=1,
                 scope_type="user",
             )
@@ -68,7 +97,7 @@ class FeishuAppPermissionsTest(unittest.TestCase):
 
         self.assertEqual(
             json.loads(output.getvalue())["missingScopes"],
-            ["im:message.p2p_msg:readonly", "im:chat:readonly"],
+            ["im:message.p2p_msg:readonly", "im:chat:read"],
         )
 
     def test_failed_or_malformed_platform_response_fails_closed(self) -> None:
