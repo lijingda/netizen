@@ -410,7 +410,7 @@ systemd/logind；macOS 需要系统自带 `launchctl`、`plutil` 和当前用户
 curl -fsSL https://github.com/lijingda/netizen/releases/latest/download/install.sh | sh
 
 # 指定版本（示例）
-curl -fsSL https://github.com/lijingda/netizen/releases/download/v0.3.0/install.sh | sh
+curl -fsSL https://github.com/lijingda/netizen/releases/download/v0.3.1/install.sh | sh
 ```
 
 仓库根的零参数 `./install.sh` 只是同一 latest 正式入口。它不会安装当前 checkout；开发、
@@ -444,10 +444,20 @@ SHA-256，再用拒绝绝对路径、`..`、重复成员、链接、特殊文件
 callback；不安装/调用 Lark CLI，不申请 user scope/event，不保存 user token/info。确认成功
 后 App ID 与 Secret 直接写入现有受保护文件；失败会显示手工回退，Ctrl-C 中止安装。
 
-部署后更换应用不要求卸载程序。删除（或先移走备份）固定路径
-`~/.netizen/credentials/feishu-app-secret`，再执行原来的正式或源码安装入口即可进入上述
-绑定重置；正常升级不要删除该文件，只需直接再次安装。选择不同 App ID 后，旧应用的
-Scope/Binding 和 Codex 原生历史仍保留，但不会迁移到新应用的飞书 Scope。
+部署后更换应用不要求卸载程序。如需保留人工回退能力，先成对备份固定路径
+`~/.netizen/config.yaml` 与 `~/.netizen/credentials/feishu-app-secret`，再删除 Secret 文件并
+执行原来的正式或源码安装入口即可进入上述绑定重置；正常升级不要删除该文件，只需直接
+再次安装。选择不同 App ID 后，旧应用的 Scope/Binding 和 Codex 原生历史仍保留，但
+不会迁移到新应用的飞书 Scope。
+
+应用重绑定和 release 激活采用两阶段语义。官方或手工流程一旦成功写入新 App ID/Secret，
+这对凭据就是持久的用户配置意图；随后 tenant 权限门禁失败时不会进入 activation，候选启动
+失败时则回滚旧 `current`、服务定义、数据库和 Skill，但两种失败都不自动恢复旧应用凭据。
+完成管理员审批、应用发布和租户安装后重跑同一入口，会复用新绑定继续验证与激活，不重复
+打开应用选择流程。若用户决定放弃重绑定，必须成对恢复事先备份的 `config.yaml` 与
+`feishu-app-secret`；只恢复其中一个会形成不匹配凭据。权限门禁失败且旧进程未停止时，它
+继续使用启动时已加载的旧凭据；候选启动失败回滚或任何后续服务启动，都使用磁盘上的新绑定，
+因此不能把权限未就绪状态长期搁置。
 
 取得完整凭据后，安装器使用候选 release 的官方 SDK 查询租户授权状态；唯一 tenant scope
 契约中的每一项都必须为已授权，才能准备 host 或进入 release activation。已有完整凭据的

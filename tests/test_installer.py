@@ -1191,6 +1191,323 @@ class NetizenInstallerTest(unittest.TestCase):
             prepare_host.assert_called_once_with(interactive=False)
             activate.assert_called_once()
 
+    def test_source_and_published_installs_switch_both_directions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout = self._layout(root)
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text(encoding="utf-8").replace(
+                    "cli_REPLACE_ME",
+                    "cli_existing",
+                ),
+                encoding="utf-8",
+            )
+            layout.secret_file.write_text("existing-secret", encoding="utf-8")
+            published_source = root / "published"
+            published_manifest = self._published_source(published_source)
+            backend = _stopped_backend()
+            validation = installer.RuntimeValidation(
+                data_dir=layout.state_dir,
+                admin_bind=installer.AdminBind(False, "127.0.0.1", 8787),
+            )
+
+            def fake_runner(
+                argv: list[object],
+                **_kwargs: object,
+            ) -> subprocess.CompletedProcess[str]:
+                rendered = [os.fspath(value) for value in argv]
+                if len(rendered) >= 4 and rendered[1:3] == ["-m", "venv"]:
+                    candidate_bin = Path(rendered[3]) / "bin"
+                    candidate_bin.mkdir(parents=True)
+                    (candidate_bin / "python").write_text(
+                        "candidate",
+                        encoding="utf-8",
+                    )
+                return subprocess.CompletedProcess(rendered, 0, "", "")
+
+            with (
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer, "_service_backend", return_value=backend),
+                patch.object(
+                    installer,
+                    "validate_runtime",
+                    return_value=validation,
+                ),
+                patch.object(installer, "require_feishu_permissions"),
+            ):
+                source_release = installer.install_source(
+                    source_root=ROOT,
+                    layout=layout,
+                    runner=fake_runner,
+                    interactive=False,
+                )
+                self.assertEqual(
+                    installer._read_release_link(layout.current, layout),
+                    source_release.root.resolve(),
+                )
+                self.assertIsNone(
+                    installer._read_release_link(layout.previous, layout)
+                )
+
+                published_release = installer.install_published(
+                    source_root=published_source,
+                    layout=layout,
+                    runner=fake_runner,
+                    interactive=False,
+                )
+                self.assertEqual(
+                    installer._read_release_link(layout.current, layout),
+                    published_release.root.resolve(),
+                )
+                self.assertEqual(
+                    installer._read_release_link(layout.previous, layout),
+                    source_release.root.resolve(),
+                )
+
+                source_again = installer.install_source(
+                    source_root=ROOT,
+                    layout=layout,
+                    runner=fake_runner,
+                    interactive=False,
+                )
+
+            self.assertEqual(source_again, source_release)
+            self.assertNotEqual(source_release.digest, published_release.digest)
+            self.assertEqual(
+                installer._read_release_link(layout.current, layout),
+                source_release.root.resolve(),
+            )
+            self.assertEqual(
+                installer._read_release_link(layout.previous, layout),
+                published_release.root.resolve(),
+            )
+            source_metadata = json.loads(
+                (source_release.root / installer.RELEASE_METADATA).read_text(
+                    encoding="utf-8"
+                )
+            )
+            published_metadata = json.loads(
+                (published_release.root / installer.RELEASE_METADATA).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(source_metadata["qualification"], "source")
+            self.assertNotIn("publishedRelease", source_metadata)
+            self.assertEqual(published_metadata["qualification"], "published")
+            self.assertEqual(
+                published_metadata["publishedRelease"]["commit"],
+                published_manifest.commit,
+            )
+
+    def test_app_rebind_composes_with_both_origins_and_failure_retries(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout = self._layout(root)
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text(encoding="utf-8").replace(
+                    "cli_REPLACE_ME",
+                    "cli_original",
+                ),
+                encoding="utf-8",
+            )
+            layout.secret_file.write_text("original-secret", encoding="utf-8")
+            published_source = root / "published"
+            self._published_source(published_source)
+            backend = _stopped_backend()
+            validation = installer.RuntimeValidation(
+                data_dir=layout.state_dir,
+                admin_bind=installer.AdminBind(False, "127.0.0.1", 8787),
+            )
+
+            def fake_runner(
+                argv: list[object],
+                **_kwargs: object,
+            ) -> subprocess.CompletedProcess[str]:
+                rendered = [os.fspath(value) for value in argv]
+                if len(rendered) >= 4 and rendered[1:3] == ["-m", "venv"]:
+                    candidate_bin = Path(rendered[3]) / "bin"
+                    candidate_bin.mkdir(parents=True)
+                    (candidate_bin / "python").write_text(
+                        "candidate",
+                        encoding="utf-8",
+                    )
+                return subprocess.CompletedProcess(rendered, 0, "", "")
+
+            with (
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer, "_service_backend", return_value=backend),
+                patch.object(
+                    installer,
+                    "validate_runtime",
+                    return_value=validation,
+                ),
+                patch.object(installer, "require_feishu_permissions"),
+            ):
+                source_release = installer.install_source(
+                    source_root=ROOT,
+                    layout=layout,
+                    runner=fake_runner,
+                    interactive=False,
+                )
+
+            layout.secret_file.unlink()
+            backend.reset_mock()
+            register = MagicMock(
+                return_value=installer.FeishuAppCredentials(
+                    app_id="cli_published",
+                    app_secret="published-secret",
+                )
+            )
+            query_permissions = MagicMock(return_value=("im:chat:readonly",))
+            with (
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer, "_service_backend", return_value=backend),
+                patch.object(
+                    installer,
+                    "validate_runtime",
+                    return_value=validation,
+                ),
+                patch.object(
+                    installer,
+                    "_register_feishu_app_from_release",
+                    new=register,
+                ),
+                patch.object(
+                    installer,
+                    "_query_missing_feishu_permissions_from_release",
+                    new=query_permissions,
+                ),
+            ):
+                with (
+                    patch("sys.stdin", new=io.StringIO("\n")),
+                    self.assertRaisesRegex(
+                        installer.InstallError,
+                        "im:chat:readonly",
+                    ),
+                ):
+                    installer.install_published(
+                        source_root=published_source,
+                        layout=layout,
+                        runner=fake_runner,
+                        interactive=True,
+                    )
+
+                self.assertEqual(
+                    installer._read_release_link(layout.current, layout),
+                    source_release.root.resolve(),
+                )
+                self.assertIsNone(
+                    installer._read_release_link(layout.previous, layout)
+                )
+                self.assertIn("cli_published", layout.config_file.read_text())
+                self.assertEqual(
+                    layout.secret_file.read_text(encoding="utf-8"),
+                    "published-secret",
+                )
+                self.assertEqual(register.call_count, 1)
+                backend.prepare_host.assert_not_called()
+                backend.publish_definition.assert_not_called()
+
+                query_permissions.return_value = ()
+                backend.capture_definition.return_value = installer.FileSnapshot(
+                    True,
+                    b"old service definition",
+                )
+                backend.inspect_state.return_value = installer.ServiceState(True, True)
+                start_attempts = 0
+
+                def fail_candidate_start_once(
+                    *_args: object,
+                    **_kwargs: object,
+                ) -> None:
+                    nonlocal start_attempts
+                    start_attempts += 1
+                    if start_attempts == 1:
+                        raise installer.InstallError("candidate failed to become ready")
+
+                backend.start_and_wait.side_effect = fail_candidate_start_once
+                with self.assertRaisesRegex(installer.InstallError, "rolled back"):
+                    installer.install_published(
+                        source_root=published_source,
+                        layout=layout,
+                        runner=fake_runner,
+                        interactive=False,
+                    )
+                self.assertEqual(start_attempts, 2)
+                self.assertEqual(register.call_count, 1)
+                self.assertEqual(
+                    installer._read_release_link(layout.current, layout),
+                    source_release.root.resolve(),
+                )
+                self.assertIsNone(
+                    installer._read_release_link(layout.previous, layout)
+                )
+                self.assertIn("cli_published", layout.config_file.read_text())
+                self.assertEqual(
+                    layout.secret_file.read_text(encoding="utf-8"),
+                    "published-secret",
+                )
+
+                published_release = installer.install_published(
+                    source_root=published_source,
+                    layout=layout,
+                    runner=fake_runner,
+                    interactive=False,
+                )
+                self.assertEqual(register.call_count, 1)
+                self.assertEqual(
+                    installer._read_release_link(layout.current, layout),
+                    published_release.root.resolve(),
+                )
+                self.assertEqual(
+                    installer._read_release_link(layout.previous, layout),
+                    source_release.root.resolve(),
+                )
+
+                layout.secret_file.unlink()
+                register.return_value = installer.FeishuAppCredentials(
+                    app_id="cli_source",
+                    app_secret="source-secret",
+                )
+                backend.reset_mock()
+                with patch("sys.stdin", new=io.StringIO("\n")):
+                    source_again = installer.install_source(
+                        source_root=ROOT,
+                        layout=layout,
+                        runner=fake_runner,
+                        interactive=True,
+                    )
+
+            self.assertEqual(source_again, source_release)
+            self.assertEqual(register.call_count, 2)
+            self.assertEqual(
+                [call.args[1] for call in register.call_args_list],
+                [None, None],
+            )
+            self.assertEqual(
+                installer._read_release_link(layout.current, layout),
+                source_release.root.resolve(),
+            )
+            self.assertEqual(
+                installer._read_release_link(layout.previous, layout),
+                published_release.root.resolve(),
+            )
+            config_text = layout.config_file.read_text(encoding="utf-8")
+            self.assertIn("cli_source", config_text)
+            self.assertNotIn("cli_published", config_text)
+            self.assertEqual(
+                layout.secret_file.read_text(encoding="utf-8"),
+                "source-secret",
+            )
+
     def test_release_build_is_content_addressed_and_reused_only_after_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
