@@ -1545,7 +1545,6 @@ def require_feishu_permissions(
     release: Release,
     layout: Layout,
     *,
-    interactive: bool,
     repair_existing_app: bool,
     rerun_instruction: str = "rerun ./dev-install.sh",
     runner: Runner | None = None,
@@ -1559,7 +1558,7 @@ def require_feishu_permissions(
         runner=execute,
         rerun_instruction=rerun_instruction,
     )
-    if missing and interactive and repair_existing_app:
+    if missing and repair_existing_app:
         app_id, config_text = _configured_app_id_from_file(layout)
         info(
             "Feishu/Lark app is missing required tenant permissions; opening the "
@@ -3604,7 +3603,6 @@ def _install(
         require_feishu_permissions(
             release,
             selected_layout,
-            interactive=is_interactive,
             repair_existing_app=configuration_ready,
             rerun_instruction=rerun_instruction,
             runner=execute,

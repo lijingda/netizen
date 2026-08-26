@@ -155,10 +155,11 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("不会被误认成用户主动停止/禁用服务", deployment)
         self.assertNotIn("${XDG_DATA_HOME", deployment)
         self.assertIn("scripts/verify_installed_release.py", deployment)
-        self.assertIn("Secret 和完整授权的升级天然非交互", deployment)
+        self.assertIn("Secret 和完整授权的升级仍天然非交互", deployment)
         self.assertIn("im:message.p2p_msg:readonly", deployment)
-        self.assertIn("im:chat:readonly", deployment)
-        self.assertIn("不切换 release", deployment)
+        self.assertIn("canonical `im:chat:read`", deployment)
+        self.assertIn("`im:chat`、`im:chat:read`、`im:chat:readonly` 三者任一", deployment)
+        self.assertIn("在切换 release 前退出", deployment)
         self.assertIn("飞书应用绑定重置", deployment)
         self.assertIn("feishu-app-secret", deployment)
         self.assertIn("不会迁移到新应用", deployment)
@@ -185,6 +186,29 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("required reviewer 或 wait timer", deployment)
         self.assertIn("创建 exact tag 与手工 dispatch 构成人工发布边界", deployment)
         self.assertNotIn("environment 要求仓库所有者审批", deployment)
+
+    def test_existing_app_permission_repair_does_not_require_tty(self) -> None:
+        deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+        design = (ROOT / "docs" / "design.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        decision = (
+            ROOT
+            / "docs"
+            / "adr"
+            / "0044-decouple-existing-app-repair-from-terminal-input.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("无论是否有 TTY", deployment)
+        self.assertIn("不读取 stdin", deployment)
+        self.assertIn("约 660 秒", deployment)
+        self.assertIn("不依赖 TTY", design)
+        self.assertIn("权限修复是唯一例外", readme)
+        self.assertIn("exact-App permission repair is the sole browser exception", agents)
+        self.assertIn("does not require a PTY or writable", agents)
+        self.assertIn("amends: 0033, 0035", decision)
+        self.assertIn("凭据不完整的首次安装继续", decision)
+        self.assertIn("不调用 `scope.apply`", decision)
 
     def test_deployment_documents_service_start_shell_environment(self) -> None:
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")

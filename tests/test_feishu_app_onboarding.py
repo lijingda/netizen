@@ -94,7 +94,12 @@ class FeishuAppOnboardingTest(unittest.TestCase):
             "im:message.p2p_msg:readonly",
             onboarding.REQUIRED_TENANT_SCOPES,
         )
-        self.assertIn("im:chat:readonly", onboarding.REQUIRED_TENANT_SCOPES)
+        self.assertIn("im:chat:read", onboarding.REQUIRED_TENANT_SCOPES)
+        self.assertNotIn("im:chat:readonly", onboarding.REQUIRED_TENANT_SCOPES)
+        self.assertEqual(
+            onboarding.TENANT_SCOPE_ALTERNATIVES["im:chat:read"],
+            frozenset(("im:chat", "im:chat:read", "im:chat:readonly")),
+        )
         self.assertNotIn("user", addons["scopes"])
         self.assertEqual(
             addons["events"],

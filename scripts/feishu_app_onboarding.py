@@ -20,12 +20,15 @@ REQUIRED_TENANT_SCOPES = (
     "im:message",
     "im:message.group_msg",
     "im:message.p2p_msg:readonly",
-    "im:chat:readonly",
+    "im:chat:read",
     "im:chat.members:read",
     "im:message.reactions:write_only",
     "im:resource",
     "im:message:send_as_bot",
 )
+TENANT_SCOPE_ALTERNATIVES = {
+    "im:chat:read": frozenset(("im:chat", "im:chat:read", "im:chat:readonly")),
+}
 TENANT_EVENTS = ("im.message.receive_v1",)
 CALLBACKS = ("card.action.trigger",)
 

@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-22
 related: 0022, 0023, 0032
-amended_by: 0035
+amended_by: 0035, 0044, 0045
 ---
 
 # 使用官方 SDK 完成飞书应用初始化

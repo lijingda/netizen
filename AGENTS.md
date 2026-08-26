@@ -78,6 +78,12 @@ design detail, compatibility findings, and procedures in their source docs.
   [ADR 0043](docs/adr/0043-remove-redundant-release-approval.md)
   keeps the release environment for deployment history without a redundant
   required-reviewer gate.
+  [ADR 0044](docs/adr/0044-decouple-existing-app-repair-from-terminal-input.md)
+  runs bounded exact-App permission repair independently of terminal input
+  while preserving the non-interactive credential-file handoff.
+  [ADR 0045](docs/adr/0045-model-chat-info-as-an-alternative-scope-requirement.md)
+  requests the canonical chat-read scope while accepting the three official
+  equivalent tenant grants for the public chat-info API.
   Superseded ADRs are historical context.
 - [docs/deployment.md](docs/deployment.md): setup, verification, and release
   procedures.
@@ -86,13 +92,15 @@ design detail, compatibility findings, and procedures in their source docs.
   the latest stable official installer, while `./dev-install.sh` installs the
   exact current workspace and runs the full local gate. Use zero-argument
   `./uninstall.sh` and `./service.sh start|stop|restart|status` without sudo.
-  A non-interactive installer prepares credential files and exits with exact
-  completion steps; agents must download the official installer to a file and
-  run `sh install.sh </dev/null` when credentials may be absent. Do not pipe an
-  Agent install through `curl | sh`. An agent may carry the interactive browser
-  setup only when its runner
-  can preserve the exact PTY/background process across user turns, surface
-  intermediate output, and resume stdin. Otherwise use the non-interactive
+  A non-interactive installer with incomplete credentials prepares credential
+  files and exits with exact completion steps; agents must download the official
+  installer to a file and run `sh install.sh </dev/null` when credentials may be
+  absent. Do not pipe an Agent install through `curl | sh`. With complete existing
+  credentials, exact-App permission repair is the sole browser exception: an
+  agent may relay it when its runner can preserve the exact process across user
+  turns and surface intermediate stderr; it does not require a PTY or writable
+  stdin. First-time browser setup still requires preserving the exact PTY/process,
+  surfacing intermediate output, and resuming stdin; otherwise use the
   credential-file handoff. Follow the exact relay procedure in
   `docs/deployment.md`; never ask the user to paste an App Secret into chat.
 - The product root is fixed at `~/.netizen` below the effective user's account

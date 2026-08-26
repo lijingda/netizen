@@ -267,10 +267,11 @@ Secret 文件并运行原安装入口。安装器会把文件缺失解释为显�
 该流程使用随 release 固定的官方 Python SDK，不安装或依赖 Lark CLI，也不申请用户身份
 scope/token；菜单中的手工 App ID + 隐藏 App Secret 输入始终可用，浏览器流程失败也会
 安全回退到它。App Secret 只经父子进程 pipe 写入受保护文件，不显示、不进入 argv、环境、
-YAML、unit 或日志。每次安装都会在切换 release 前通过官方 API 确认全部必需 tenant scope
-已经授权；已有应用缺权限时，交互安装只尝试一次 exact-App 官方修复，Agent/CI 则立即列出
-缺失项并退出。用户仍需按租户策略完成管理员审批/应用发布与租户安装，设置可用范围，并
-把机器人加入目标群；完成后重新运行同一个正式或开发安装入口。
+YAML、unit 或日志。每次安装都会在切换 release 前通过官方 API 确认全部必需 tenant 权限能力
+已经授权；已有完整凭据的应用缺权限时，无论是否有 TTY 都只尝试一次有界的 exact-App 官方
+修复，输出验证 URL/二维码并在修复后重新查询一次。该流程不读取 stdin；用户仍需按租户
+策略完成管理员审批/应用发布与租户安装，设置可用范围，并把机器人加入目标群。二次查询
+仍缺失时安装器在激活前退出，外部步骤完成后重新运行同一个正式或开发安装入口。
 
 应用重绑定与 release 激活是明确的两阶段过程：新 App ID/Secret 一旦成功写入，就作为用户
 选择的新绑定保留；后续权限门禁或候选启动失败不会恢复旧凭据，但不会切换 `current`，已经
@@ -284,12 +285,14 @@ YAML、unit 或日志。每次安装都会在切换 release 前通过官方 API 
 只需在更新后的源码目录再次运行 `./dev-install.sh`；正式升级则重新运行 latest 或指定版本的
 官方 `install.sh`。
 
-安装器同时自动生成一次高熵 `0600` Admin Web credential。Agent、CI 或其他无 TTY 调用
-绝不会等待输入或启动浏览器流程：脚本会创建配置骨架、空的 Feishu Secret 文件和可立即
-保留使用的 Admin credential，明确退出并给出路径；调用方填好 App ID 与 Feishu Secret
-后再次执行同一个下载到文件的正式 installer。会主动分配伪终端的 Agent 应显式使用
-`sh install.sh </dev/null`
-获取这些路径。不要把 Secret 放进命令参数、仓库或 YAML。
+安装器同时自动生成一次高熵 `0600` Admin Web credential。凭据不完整时，Agent、CI 或其他
+无 TTY 调用仍不等待输入或启动首次应用选择：脚本会创建配置骨架、空的 Feishu Secret 文件
+和可立即保留使用的 Admin credential，明确退出并给出路径；调用方填好 App ID 与 Feishu
+Secret 后再次执行同一个下载到文件的正式 installer。已有完整凭据后的权限修复是唯一例外：
+它不读取 stdin，会输出 URL/二维码并有界等待最多约 660 秒。能保留进程和转交中间输出的
+Agent 可把链接交给用户，不需要分配伪终端或写 stdin。会主动分配伪终端但只想取得首次配置
+路径的 Agent 仍应显式使用 `sh install.sh </dev/null`。不要把 Secret 放进命令参数、仓库或
+YAML。
 
 systemd 和 launchd 本身都不会读取 `.bashrc`、`.profile`，也不会替 Netizen 取得账号
 终端里的完整工具环境。短生命周期
@@ -394,8 +397,9 @@ make check
 管理。通过受管安装器浏览器流程创建/更新的应用已请求下述权限、消息事件和卡片回调；
 本地手工准备应用时则需在飞书应用后台逐项配置。两种路径都还要完成租户审批/发布、配置
 可用用户和群并把机器人加入目标群。单聊事件投递必须具备
-`im:message.p2p_msg:readonly`；设置卡片识别单聊/群聊需要 `im:chat:readonly`。群聊逐条
-引用需要应用权限
+`im:message.p2p_msg:readonly`；设置卡片识别单聊/群聊会请求最小权限 `im:chat:read`，并接受
+飞书“获取群信息”接口官方支持的 `im:chat`、`im:chat:read`、`im:chat:readonly` 三者任一。
+群聊逐条引用需要应用权限
 `im:message.group_msg`；只配置接收群聊 @ 机器人
 消息的权限无法回查被引用的另一条消息。当前 Prompt 发送者姓名解析还需
 `im:chat.members:read`；缺失时不会用匿名身份提交。Prompt 的运行、steer 确认与终态
