@@ -398,7 +398,10 @@ Event，最后投递结果。Channel 按 exact Turn ID 在内存管理原消息�
 `DONE`/`ERROR`/`CrossMark`，最后依次移除可见的 `THINKING` 与常驻 `Typing` 并投递最终
 文本。所有表情操作均为尽力而为，不把展示失败误报为 Codex 后端失败。强制 kill 可能
 留下当时可见的运行态表情；正常终态与正常 shutdown 都会清理，但不为这个展示状态新增
-持久化。
+持久化。若公开 `reply()` 明确返回 `230028` 内容审核拒绝，应用不回显原回复或
+上游错误文本；它只将白名单审核类型（当前 `EMAIL_ADDRESS` 为“邮箱地址”）翻译为
+固定中文失败回执，并对同一 origin 补发一次。未知审核类型只说明“未通过飞书
+审核”；结果不确定或其他失败不自动补发，回执自身失败也只记录日志，不递归。
 
 首个 real prompt 调用 `thread_start` 后，先把返回的 native ID 原子写入 Binding，再
 发送首 Turn；写入失败或冲突时关闭新 admission，且不发送 prompt。每次 cleanup 前还

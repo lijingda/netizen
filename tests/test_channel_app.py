@@ -395,6 +395,25 @@ def retryable_sent_result(*, code: int = 999_999) -> object:
     )
 
 
+def failed_reply_result(
+    *,
+    code: int,
+    message: str,
+    retryable: bool = False,
+) -> object:
+    return SimpleNamespace(
+        success=False,
+        message_id=None,
+        chunk_ids=(),
+        error=SimpleNamespace(
+            retryable=retryable,
+            raw_code=code,
+            hint=message,
+        ),
+        raw={"code": code, "msg": message, "data": None},
+    )
+
+
 def file_change_item(*paths: str) -> ThreadItem:
     return ThreadItem.model_validate(
         {
@@ -1269,6 +1288,104 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertIn(("om_prompt", "done"), self.channel.replies)
+
+    async def test_completed_turn_email_audit_rejection_gets_safe_notice(
+        self,
+    ) -> None:
+        origin = await self.new(message_id="om_audit")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        sensitive_response = "已将邮箱改为 alice@example.com"
+        audit_message = (
+            "The messages do NOT pass the audit, "
+            "ext=contain sensitive data: EMAIL_ADDRESS"
+        )
+        self.channel.reply_results.extend(
+            (
+                failed_reply_result(code=230028, message=audit_message),
+                sent_result("om_notice", chat_id="oc_direct"),
+            )
+        )
+
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-audit",
+                turn_id="turn-audit",
+                owner_id="ou_user",
+                origin=origin,
+                result=completed_turn_result(final_response=sensitive_response),
+            )
+        )
+
+        self.assertEqual(
+            self.channel.replies,
+            [
+                (origin.id, sensitive_response),
+                (
+                    origin.id,
+                    "消息发送失败：飞书内容审核认为回复中包含邮箱地址。"
+                    "（错误码 230028）",
+                ),
+            ],
+        )
+        notice = str(self.channel.replies[-1][1])
+        self.assertNotIn("alice@example.com", notice)
+        self.assertNotIn("请让我", notice)
+
+    async def test_content_audit_unknown_reason_gets_generic_notice(self) -> None:
+        origin = FakeMessage("hello", message_id="om_unknown_audit")
+        self.channel.reply_results.extend(
+            (
+                failed_reply_result(
+                    code=230028,
+                    message="audit rejected: PHONE_NUMBER",
+                ),
+                sent_result("om_notice", chat_id="oc_direct"),
+            )
+        )
+
+        await self.app._reply(origin, "sensitive source response")
+
+        self.assertEqual(
+            self.channel.replies[-1],
+            (
+                origin.id,
+                "消息发送失败：回复内容未通过飞书审核。（错误码 230028）",
+            ),
+        )
+        self.assertNotIn("PHONE_NUMBER", str(self.channel.replies[-1][1]))
+
+    async def test_content_audit_notice_failure_does_not_recurse(self) -> None:
+        origin = FakeMessage("hello", message_id="om_rejected_notice")
+        rejected = failed_reply_result(
+            code=230028,
+            message="contain sensitive data: EMAIL_ADDRESS",
+        )
+        self.channel.reply_results.extend((rejected, rejected))
+
+        with self.assertLogs("netizen.channel_app", level="ERROR") as logs:
+            await self.app._reply(origin, "alice@example.com")
+
+        self.assertEqual(len(self.channel.replies), 2)
+        self.assertIn(
+            "failed to send safe reply failure notice",
+            "\n".join(logs.output),
+        )
+
+    async def test_non_audit_reply_failure_does_not_auto_send(self) -> None:
+        origin = FakeMessage("hello", message_id="om_unknown_failure")
+        self.channel.reply_results.append(
+            failed_reply_result(
+                code=50_001,
+                message="upstream state unknown",
+                retryable=True,
+            )
+        )
+
+        await self.app._reply(origin, "answer")
+
+        self.assertEqual(self.channel.replies, [(origin.id, "answer")])
 
     async def test_group_new_card_creates_catch_up_binding_from_exact_anchor(
         self,
