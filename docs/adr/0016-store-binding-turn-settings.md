@@ -2,9 +2,16 @@
 status: accepted
 date: 2026-08-12
 amends: 0008, 0012
+amended_by: 0039, 0040
 ---
 
 # 在 Binding 上保存持久的 Turn 配置意图
+
+> 修订说明：[ADR 0039](0039-add-binding-scoped-mention-catch-up-context.md) 将 Channel schema
+> 升至 v6，并由安装事务从 v5 保留迁移现有数据；
+> [ADR 0040](0040-make-new-card-only-and-show-all-projects.md) 将会话创建收口为 `/new`
+> 卡片，移除命令旁路，并允许模型目录不可用时选择继承 Codex。下文的 schema v4、旧库重建
+> 及旧 `/new` 路径仅保留为历史背景。
 
 ## 背景
 

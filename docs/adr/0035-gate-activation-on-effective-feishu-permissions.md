@@ -8,6 +8,10 @@ related: 0032, 0034
 
 # 激活前校验飞书租户权限并复用官方已有应用选择
 
+> 2026-08-27 权限契约更正：飞书 reaction create/delete API 接受 `im:message` 或更窄的
+> `im:message.reactions:write_only`。当前契约已经独立要求 `im:message`，因此后者不再作为
+> 另一项必需权限请求或校验；以下清单保留 2026-08-24 决策形成时的历史记录。
+
 ## 背景
 
 ADR 0033 使用官方 `register_app` 配置应用，但全新骨架主动传入

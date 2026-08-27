@@ -225,6 +225,10 @@ _SIDE_SEED_UUID_PREFIX = "side-seed-"
 _SIDE_INITIAL_QUESTION_MAX_CHARS = 3000
 _SIDE_EMPTY_TOPIC_PROMPT = "在本话题发送第一条问题，开始 Side 对话。"
 _FEISHU_AT_TAG_START = re.compile(r"<(?=/?at(?:\s|>|/))", re.IGNORECASE)
+_FEISHU_CONTENT_AUDIT_REJECTION_CODE = 230028
+_FEISHU_AUDIT_REASON_LABELS = {
+    "EMAIL_ADDRESS": "邮箱地址",
+}
 
 
 class SideTopicCreateFailed(RuntimeError):
@@ -3539,9 +3543,16 @@ class ChannelApplication:
             binding = self._bindings.get(intent.binding_id)
             if binding.scope_key != intent.scope.key:
                 raise BindingNotFound(intent.binding_id)
+            context_anchor = None
+            if binding.message_context_mode is MentionContextMode.CATCH_UP:
+                context_anchor = await self._resolve_context_anchor(
+                    intent.scope,
+                    intent.source_id,
+                )
             activated = await self._management.resume_current_binding(
                 scope_key=intent.scope.key,
                 reference=binding.id,
+                context_anchor=context_anchor,
             )
             success_notice = (
                 f"✅ 已切换到会话 {activated.short_id}"
@@ -4105,7 +4116,36 @@ class ChannelApplication:
         )
 
     async def _reply(self, message: Any, content: Any) -> None:
-        await self._channel.reply(message, content)
+        result = await self._channel.reply(message, content)
+        failure_notice = _reply_failure_notice(result)
+        if failure_notice is None:
+            return
+        message_id = _message_id(message)
+        logger.warning(
+            "reply rejected by Feishu content audit; sending safe failure notice",
+            extra={
+                "message_id": message_id,
+                "error_code": _send_result_error_code(result),
+            },
+        )
+        try:
+            fallback_result = await self._channel.reply(message, failure_notice)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "failed to send safe reply failure notice",
+                extra={"message_id": message_id},
+            )
+            return
+        if getattr(fallback_result, "success", True) is False:
+            logger.error(
+                "failed to send safe reply failure notice",
+                extra={
+                    "message_id": message_id,
+                    "error_code": _send_result_error_code(fallback_result),
+                },
+            )
 
     async def _safe_add_reaction(self, message: Any, emoji_type: str) -> bool:
         message_id = _message_id(message)
@@ -4338,6 +4378,39 @@ def _object_field(value: object, name: str) -> object | None:
     if isinstance(value, Mapping):
         return value.get(name)
     return getattr(value, name, None)
+
+
+def _reply_failure_notice(result: object) -> str | None:
+    if getattr(result, "success", None) is not False:
+        return None
+    code = _send_result_error_code(result)
+    if code != _FEISHU_CONTENT_AUDIT_REJECTION_CODE:
+        return None
+    raw = _object_field(result, "raw")
+    message = _object_field(raw, "msg")
+    if not isinstance(message, str):
+        error = _object_field(result, "error")
+        message = _object_field(error, "hint")
+    normalized = message.upper() if isinstance(message, str) else ""
+    for reason, label in _FEISHU_AUDIT_REASON_LABELS.items():
+        if reason in normalized:
+            return (
+                "消息发送失败：飞书内容审核认为回复中包含"
+                f"{label}。（错误码 {code}）"
+            )
+    return f"消息发送失败：回复内容未通过飞书审核。（错误码 {code}）"
+
+
+def _send_result_error_code(result: object) -> int | None:
+    raw = _object_field(result, "raw")
+    code = _object_field(raw, "code")
+    if isinstance(code, int) and not isinstance(code, bool):
+        return code
+    error = _object_field(result, "error")
+    raw_code = _object_field(error, "raw_code")
+    if isinstance(raw_code, int) and not isinstance(raw_code, bool):
+        return raw_code
+    return None
 
 
 def _nonempty_field(value: object, name: str) -> str | None:

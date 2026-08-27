@@ -2,14 +2,16 @@
 status: accepted
 date: 2026-08-09
 amends: 0008
-amended_by: 0014, 0016, 0018
+amended_by: 0014, 0016, 0018, 0040
 ---
 
 # 通过真实 Turn 配置 Model、Effort 与 Speed
 
 > 当前交互与持久化语义已由
 > [ADR 0016](0016-store-binding-turn-settings.md) 修订：`/new`、`/config` 不再要求任务，
-> 并允许 Binding 保存后续新 Turn 重复应用的客户端配置意图。下文保留原决定的历史背景。
+> 并允许 Binding 保存后续新 Turn 重复应用的客户端配置意图；
+> [ADR 0040](0040-make-new-card-only-and-show-all-projects.md) 又把会话创建收口为 `/new`
+> 卡片，并允许模型目录不可用时选择继承 Codex。下文保留原决定的历史背景。
 
 ## 背景
 

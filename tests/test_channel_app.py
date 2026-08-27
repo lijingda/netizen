@@ -40,7 +40,6 @@ from netizen.codex_runtime import (
     ActiveState,
     ActiveTurnSnapshot,
     CompactSubmission,
-    CompactionOutcome,
     ContextWindowUsage,
     GoalOperationState,
     GoalSubmission,
@@ -392,6 +391,25 @@ def retryable_sent_result(*, code: int = 999_999) -> object:
         chunk_ids=(),
         error=SimpleNamespace(retryable=True),
         raw={"code": code, "data": None},
+    )
+
+
+def failed_reply_result(
+    *,
+    code: int,
+    message: str,
+    retryable: bool = False,
+) -> object:
+    return SimpleNamespace(
+        success=False,
+        message_id=None,
+        chunk_ids=(),
+        error=SimpleNamespace(
+            retryable=retryable,
+            raw_code=code,
+            hint=message,
+        ),
+        raw={"code": code, "msg": message, "data": None},
     )
 
 
@@ -1097,6 +1115,24 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    def group_button_event(
+        self,
+        value: dict[str, object],
+        *,
+        message_id: str = "om_card",
+        chat_id: str = "oc_group",
+    ) -> object:
+        return SimpleNamespace(
+            message_id=message_id,
+            chat_id=chat_id,
+            operator=SimpleNamespace(open_id="ou_user"),
+            action=SimpleNamespace(
+                tag="button",
+                value=value,
+                form_value=None,
+            ),
+        )
+
     def new_form_values(
         self,
         card: OutboundCard,
@@ -1269,6 +1305,104 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertIn(("om_prompt", "done"), self.channel.replies)
+
+    async def test_completed_turn_email_audit_rejection_gets_safe_notice(
+        self,
+    ) -> None:
+        origin = await self.new(message_id="om_audit")
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        sensitive_response = "已将邮箱改为 alice@example.com"
+        audit_message = (
+            "The messages do NOT pass the audit, "
+            "ext=contain sensitive data: EMAIL_ADDRESS"
+        )
+        self.channel.reply_results.extend(
+            (
+                failed_reply_result(code=230028, message=audit_message),
+                sent_result("om_notice", chat_id="oc_direct"),
+            )
+        )
+
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-audit",
+                turn_id="turn-audit",
+                owner_id="ou_user",
+                origin=origin,
+                result=completed_turn_result(final_response=sensitive_response),
+            )
+        )
+
+        self.assertEqual(
+            self.channel.replies,
+            [
+                (origin.id, sensitive_response),
+                (
+                    origin.id,
+                    "消息发送失败：飞书内容审核认为回复中包含邮箱地址。"
+                    "（错误码 230028）",
+                ),
+            ],
+        )
+        notice = str(self.channel.replies[-1][1])
+        self.assertNotIn("alice@example.com", notice)
+        self.assertNotIn("请让我", notice)
+
+    async def test_content_audit_unknown_reason_gets_generic_notice(self) -> None:
+        origin = FakeMessage("hello", message_id="om_unknown_audit")
+        self.channel.reply_results.extend(
+            (
+                failed_reply_result(
+                    code=230028,
+                    message="audit rejected: PHONE_NUMBER",
+                ),
+                sent_result("om_notice", chat_id="oc_direct"),
+            )
+        )
+
+        await self.app._reply(origin, "sensitive source response")
+
+        self.assertEqual(
+            self.channel.replies[-1],
+            (
+                origin.id,
+                "消息发送失败：回复内容未通过飞书审核。（错误码 230028）",
+            ),
+        )
+        self.assertNotIn("PHONE_NUMBER", str(self.channel.replies[-1][1]))
+
+    async def test_content_audit_notice_failure_does_not_recurse(self) -> None:
+        origin = FakeMessage("hello", message_id="om_rejected_notice")
+        rejected = failed_reply_result(
+            code=230028,
+            message="contain sensitive data: EMAIL_ADDRESS",
+        )
+        self.channel.reply_results.extend((rejected, rejected))
+
+        with self.assertLogs("netizen.channel_app", level="ERROR") as logs:
+            await self.app._reply(origin, "alice@example.com")
+
+        self.assertEqual(len(self.channel.replies), 2)
+        self.assertIn(
+            "failed to send safe reply failure notice",
+            "\n".join(logs.output),
+        )
+
+    async def test_non_audit_reply_failure_does_not_auto_send(self) -> None:
+        origin = FakeMessage("hello", message_id="om_unknown_failure")
+        self.channel.reply_results.append(
+            failed_reply_result(
+                code=50_001,
+                message="upstream state unknown",
+                retryable=True,
+            )
+        )
+
+        await self.app._reply(origin, "answer")
+
+        self.assertEqual(self.channel.replies, [(origin.id, "answer")])
 
     async def test_group_new_card_creates_catch_up_binding_from_exact_anchor(
         self,
@@ -2789,6 +2923,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.new(message_id="om_new_one")
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         first = self.store.active_binding(scope.key)
+        first_context_revision = first.context_revision
         self.store.assign_native_thread_id(first.id, "native-one")
         self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
             "native-one", "First", "task one",
@@ -2818,9 +2953,120 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.active_binding_change_calls[-1],
             (second.id, first.id),
         )
+        activated = self.store.get(first.id)
+        self.assertIsNone(activated.context_anchor)
+        self.assertEqual(activated.context_revision, first_context_revision)
+        self.assertEqual(self.message_history.resolve_calls, [])
         updated = self.channel.updates[-1][1]
         self.assertIn("已切换到会话", str(updated))
         self.assertIn("● 当前", str(updated))
+
+    async def test_sessions_activate_catch_up_resets_boundary_to_exact_card(
+        self,
+    ) -> None:
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        old_anchor = MessageContextAnchor("om_old_boundary", 1_000)
+        target = await self.app._management.create_current_binding(
+            scope=scope,
+            creator_id="ou_user",
+            project_alias="test",
+            message_context_mode=MentionContextMode.CATCH_UP,
+            context_anchor=old_anchor,
+        )
+        current = await self.create_binding(scope)
+        await self.app.handle_message(
+            FakeMessage(
+                "/sessions",
+                message_id="om_sessions_request",
+                chat_id=scope.chat_id,
+                chat_type="group",
+            )
+        )
+        card = self.channel.replies[-1][1]
+        activate = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "设为当前"
+            and button["behaviors"][0]["value"]["binding_id"]
+            == f"binding:v1:{target.binding.id}"
+        )
+        exact_card_anchor = MessageContextAnchor("om_sessions_card", 7_000)
+        self.message_history.anchors[exact_card_anchor.message_id] = exact_card_anchor
+
+        await self.app.handle_card_action(
+            self.group_button_event(
+                activate["behaviors"][0]["value"],
+                message_id=exact_card_anchor.message_id,
+                chat_id=scope.chat_id,
+            )
+        )
+
+        activated = self.store.active_binding(scope.key)
+        self.assertEqual(activated.id, target.binding.id)
+        self.assertEqual(activated.context_anchor, exact_card_anchor)
+        self.assertEqual(
+            activated.context_revision,
+            target.binding.context_revision + 1,
+        )
+        self.assertEqual(
+            self.message_history.resolve_calls,
+            [(scope, exact_card_anchor.message_id)],
+        )
+        self.assertEqual(
+            self.runtime.active_binding_change_calls[-1],
+            (current.binding.id, target.binding.id),
+        )
+        self.assertIn("已切换到会话", str(self.channel.updates[-1][1]))
+
+    async def test_sessions_activate_catch_up_fails_before_pointer_change_when_anchor_is_unavailable(
+        self,
+    ) -> None:
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        old_anchor = MessageContextAnchor("om_old_boundary", 1_000)
+        target = await self.app._management.create_current_binding(
+            scope=scope,
+            creator_id="ou_user",
+            project_alias="test",
+            message_context_mode=MentionContextMode.CATCH_UP,
+            context_anchor=old_anchor,
+        )
+        current = await self.create_binding(scope)
+        await self.app.handle_message(
+            FakeMessage(
+                "/sessions",
+                message_id="om_sessions_request",
+                chat_id=scope.chat_id,
+                chat_type="group",
+            )
+        )
+        card = self.channel.replies[-1][1]
+        activate = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "设为当前"
+            and button["behaviors"][0]["value"]["binding_id"]
+            == f"binding:v1:{target.binding.id}"
+        )
+        pointer_changes = list(self.runtime.active_binding_change_calls)
+
+        with patch.object(self.app, "_message_history", None):
+            await self.app.handle_card_action(
+                self.group_button_event(
+                    activate["behaviors"][0]["value"],
+                    message_id="om_sessions_card",
+                    chat_id=scope.chat_id,
+                )
+            )
+
+        self.assertEqual(self.store.active_binding(scope.key).id, current.binding.id)
+        unchanged = self.store.get(target.binding.id)
+        self.assertEqual(unchanged.context_anchor, old_anchor)
+        self.assertEqual(
+            unchanged.context_revision,
+            target.binding.context_revision,
+        )
+        self.assertEqual(self.runtime.active_binding_change_calls, pointer_changes)
+        self.assertIn("群聊上下文读取能力尚不可用", str(self.channel.updates[-1][1]))
 
     async def test_sessions_activate_does_not_stop_old_running_turn(self) -> None:
         await self.new(message_id="om_new_one")
@@ -5954,54 +6200,22 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             (second.id, first.id),
         )
 
-    async def test_compact_maps_to_exact_native_control_and_reports_completion(
-        self,
-    ) -> None:
+    async def test_compact_is_unavailable_without_native_mutation(self) -> None:
         await self.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
         self.store.assign_native_thread_id(binding.id, "native-one")
-        released = False
-
-        def release() -> None:
-            nonlocal released
-            released = True
-
-        self.runtime.compact_submission = CompactSubmission(
-            binding.id,
-            "native-one",
-            release,
-        )
         command = FakeMessage("/compact", message_id="om_compact")
 
         await self.app.handle_message(command)
 
-        self.assertTrue(released)
-        self.assertEqual(len(self.runtime.compact_calls), 1)
-        call = self.runtime.compact_calls[0]
-        self.assertEqual(call["binding"].id, binding.id)
-        self.assertEqual(call["owner_id"], "ou_user")
-        self.assertIs(call["origin"], command)
+        self.assertEqual(self.runtime.compact_calls, [])
         self.assertIn(
             (
                 "om_compact",
-                "已开始压缩当前 Codex 会话；完成前该会话暂不接受新任务。",
+                "/compact 尚未开放：固定 openai-codex 0.147.0 的压缩后同连接"
+                "继续 Turn 兼容验证未通过，本条消息未执行。",
             ),
-            self.channel.replies,
-        )
-
-        await self.app.handle_completion(
-            CompactionOutcome(
-                binding_id=binding.id,
-                thread_id="native-one",
-                owner_id="ou_user",
-                origin=command,
-                compact_turn_id="compact-one",
-                status="completed",
-            )
-        )
-        self.assertIn(
-            ("om_compact", "会话上下文压缩已完成。"),
             self.channel.replies,
         )
 

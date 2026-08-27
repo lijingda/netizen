@@ -2,10 +2,15 @@
 status: accepted
 date: 2026-08-19
 amends: 0008, 0009, 0020
+amended_by: 0027
 related: 0014, 0021, 0022, 0024, 0025
 ---
 
 # 升级并重新认证 Python SDK 0.147.0
+
+> 修订说明：[ADR 0027](0027-use-turn-diff-and-self-contained-file-cards.md) 在本版本上增加并
+> 认证了公开 Turn diff stream 作为文件来源；persisted Thread read 仍是普通 Turn 终态权威。
+> 下文关于本轮文件只沿用既有 item shape 的结论仅保留为升级当时的历史背景。
 
 ## 背景
 

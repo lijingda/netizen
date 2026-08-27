@@ -1,10 +1,16 @@
 ---
 status: accepted
 date: 2026-08-19
+amended_by: 0027
 related: 0008, 0015, 0016, 0021, 0025
 ---
 
 # 从普通 Turn 终态卡片按需发送结构化本轮文件
+
+> 修订说明：[ADR 0027](0027-use-turn-diff-and-self-contained-file-cards.md) 将文件来源改为
+> Turn diff 优先、结构化 items 补充，并让新卡片通过 callback 自带 manifest 独立于
+> Binding、Project 和 Turn history。下文依赖 history 重读与 opaque file ref 的 v3
+> 回调语义仅保留为历史背景。
 
 ## 背景
 

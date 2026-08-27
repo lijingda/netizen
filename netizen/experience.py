@@ -69,10 +69,13 @@ COMMAND_SPECS = (
     ),
     CommandSpec(
         "compact",
-        ControlName.COMPACT,
+        None,
         CommandOwner.NATIVE_THREAD,
         "/compact",
         "压缩当前原生 Codex 会话上下文",
+        unavailable_reason=(
+            "固定 openai-codex 0.147.0 的压缩后同连接继续 Turn 兼容验证未通过"
+        ),
     ),
     CommandSpec(
         "settings",

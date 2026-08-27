@@ -5,86 +5,17 @@ design detail, compatibility findings, and procedures in their source docs.
 
 ## Project map
 
+Treat the Project map as curated contributor navigation, not a complete ADR
+index. Reference a new ADR here only when it creates a durable guardrail that
+contributors must know before starting related work.
+
 - [README.md](README.md): product overview, commands, setup, and current status.
 - [CONTEXT.md](CONTEXT.md): domain vocabulary.
 - [docs/design.md](docs/design.md): current architecture, runtime semantics,
   persistence, configuration, and failures.
-- [ADR 0008](docs/adr/0008-use-python-sdk-for-native-turn-control.md) and
-  [ADR 0009](docs/adr/0009-use-version-gated-experimental-terminal-cleanup.md):
-  SDK integration decisions. [ADR 0010](docs/adr/0010-correct-stop-and-background-cleanup-semantics.md)
-  corrects `/stop` and foreground-process semantics. [ADR 0014](docs/adr/0014-use-removable-sdk-gap-adapters.md)
-  defines the removable Goal/Skills facade-gap boundary. [ADR 0016](docs/adr/0016-store-binding-turn-settings.md)
-  defines persistent Binding-scoped Turn-setting intent. [ADR 0017](docs/adr/0017-manage-native-thread-lifecycle.md)
-  defines current-Binding lifecycle management and the removable Thread Delete gap.
-  [ADR 0018](docs/adr/0018-remove-skills-command.md) removes the dedicated
-  `/skills` browser while preserving native Skill invocation. [ADR 0019](docs/adr/0019-keep-native-thread-delete-unavailable.md)
-  is the superseded `0.144.4` Thread Delete compatibility record.
-  [ADR 0020](docs/adr/0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md)
-  defines the exact-gated, non-consuming active-Turn plan observer.
-  [ADR 0021](docs/adr/0021-support-multi-turn-ephemeral-side-topics.md)
-  defines ephemeral multi-turn Side Topics and their removable fixed-method
-  adapter. [ADR 0022](docs/adr/0022-load-account-shell-environment-at-service-start.md)
-  defines service-start environment parity with the account shell.
-  [ADR 0023](docs/adr/0023-keep-service-environment-authoritative-for-tools.md)
-  keeps that captured environment authoritative for tool subprocesses.
-  [ADR 0024](docs/adr/0024-send-structured-turn-files-from-completion-cards.md)
-  defines stateless, structured ordinary-Turn file delivery through Feishu
-  completion cards. [ADR 0025](docs/adr/0025-use-turn-provenance-not-project-containment-for-files.md)
-  keeps Project as a relative-path base rather than a file authorization
-  boundary. [ADR 0026](docs/adr/0026-upgrade-and-requalify-python-sdk-0147.md)
-  upgrades the exact Python SDK/bundled CLI pair and requalifies both
-  fingerprint-gated compatibility adapters. [ADR 0027](docs/adr/0027-use-turn-diff-and-self-contained-file-cards.md)
-  uses native Turn diff as the primary file source and makes new completion
-  cards self-contained across service restarts. [ADR 0028](docs/adr/0028-release-idle-persistent-thread-subscriptions.md)
-  releases idle ordinary-Thread connection subscriptions without deleting
-  Bindings or native history. [ADR 0029](docs/adr/0029-project-current-message-provenance-into-prompts.md)
-  projects exact current-message sender attribution into ordinary and Side
-  Prompts while keeping Side completion origin separate. [ADR 0030](docs/adr/0030-require-resolved-current-sender-names.md)
-  requires the Channel SDK to resolve each current Prompt sender name and
-  fails closed with the Feishu member-read permission when it cannot, while
-  limiting sender identity to the app-scoped Open ID. [ADR 0031](docs/adr/0031-add-in-process-admin-web-control-plane.md)
-  accepts the default-on, single-administrator, in-process Admin Web
-  control plane while preserving one Runtime and the existing Feishu controls.
-  [ADR 0032](docs/adr/0032-use-single-user-product-root.md) fixes the single
-  `~/.netizen` product root and its preserved-versus-deletable lifecycle boundary.
-  [ADR 0033](docs/adr/0033-use-official-sdk-for-feishu-app-onboarding.md)
-  defines the Lark-CLI-free, official-SDK Feishu/Lark Bot app onboarding flow.
-  [ADR 0034](docs/adr/0034-support-macos-with-a-user-launchagent.md) adds the
-  macOS user LaunchAgent while preserving the shared activation/rollback
-  transaction and exact lifetime-lock/ready boundary.
-  [ADR 0035](docs/adr/0035-gate-activation-on-effective-feishu-permissions.md)
-  lets the official registration page create or select an app and gates every
-  activation on the effective tenant permission contract.
-  [ADR 0036](docs/adr/0036-archive-exact-idle-sessions-from-the-sessions-card.md)
-  permits confirmed exact archive of eligible idle sessions from `/sessions`
-  while keeping the `/archive` command current-only.
-  [ADR 0037](docs/adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md)
-  requalifies native Thread Delete and defines its thin Adapter plus four-view
-  failure reconciliation.
-  [ADR 0038](docs/adr/0038-delete-exact-idle-sessions-from-the-sessions-card.md)
-  permits two-stage exact deletion of eligible idle sessions from `/sessions`
-  while keeping the `/delete` command current-only.
-  [ADR 0039](docs/adr/0039-add-binding-scoped-mention-catch-up-context.md)
-  adds Binding-scoped, still-mention-triggered catch-up context with a durable
-  exact-message boundary. [ADR 0040](docs/adr/0040-make-new-card-only-and-show-all-projects.md)
-  makes `/new` card-only and displays all enabled Projects in one dropdown.
-  [ADR 0041](docs/adr/0041-separate-published-release-and-source-install.md)
-  separates qualified Published Release installation from full-gated Source
-  Install while preserving one activation and rollback transaction.
-  [ADR 0042](docs/adr/0042-reuse-main-qualification-for-release.md) makes the
-  exact main CI result the reusable code qualification, keeps the release
-  workflow integrity-only, and moves live probes to change-triggered
-  development requalification.
-  [ADR 0043](docs/adr/0043-remove-redundant-release-approval.md)
-  keeps the release environment for deployment history without a redundant
-  required-reviewer gate.
-  [ADR 0044](docs/adr/0044-decouple-existing-app-repair-from-terminal-input.md)
-  runs bounded exact-App permission repair independently of terminal input
-  while preserving the non-interactive credential-file handoff.
-  [ADR 0045](docs/adr/0045-model-chat-info-as-an-alternative-scope-requirement.md)
-  requests the canonical chat-read scope while accepting the three official
-  equivalent tenant grants for the public chat-info API.
-  Superseded ADRs are historical context.
+- [docs/adr/](docs/adr/): accepted architecture decisions and superseded
+  historical context; start from the decisions cited by the relevant guardrails
+  below.
 - [docs/deployment.md](docs/deployment.md): setup, verification, and release
   procedures.
 - Public Published Release deployment uses the zero-argument official
@@ -199,8 +130,11 @@ design detail, compatibility findings, and procedures in their source docs.
   admission boundary. ADR 0031's single Instance Administrator
   is a separate, dedicated-credential authority for the Admin Web only; do not
   turn it into multi-user RBAC, a Netizen allowlist, or Project ACLs. Except for
-  ADR 0023's non-login tool boundary, let native Codex configuration control
-  model, tools, Skills, MCP, approval, sandboxing, and shell environment policy.
+  ADR 0016's optional Binding-scoped Model/Effort/Speed intent and ADR 0023's
+  non-login tool boundary, let native Codex configuration control model, tools,
+  Skills, MCP, sandboxing, and shell environment policy. New Threads use the
+  public SDK's `auto_review` default because Ask/Custom approval cannot be
+  inherited; do not claim that native approval configuration is fully preserved.
 - Unsupported native capabilities remain explicit gaps. Only capabilities
   explicitly approved by an ADR may use a narrow SDK Gap Adapter; never simulate
   them with prompts or local state. Keep Pilot non-goals in `docs/design.md`

@@ -3,7 +3,7 @@ status: accepted
 date: 2026-08-21
 amends: 0017, 0021, 0028
 amended_by: 0037
-related: 0016, 0019, 0037
+related: 0016, 0019
 ---
 
 # 引入进程内 Admin Web 管理控制面
