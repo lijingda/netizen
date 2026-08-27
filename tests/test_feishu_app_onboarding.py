@@ -96,6 +96,11 @@ class FeishuAppOnboardingTest(unittest.TestCase):
         )
         self.assertIn("im:chat:read", onboarding.REQUIRED_TENANT_SCOPES)
         self.assertNotIn("im:chat:readonly", onboarding.REQUIRED_TENANT_SCOPES)
+        self.assertIn("im:message", onboarding.REQUIRED_TENANT_SCOPES)
+        self.assertNotIn(
+            "im:message.reactions:write_only",
+            onboarding.REQUIRED_TENANT_SCOPES,
+        )
         self.assertEqual(
             onboarding.TENANT_SCOPE_ALTERNATIVES["im:chat:read"],
             frozenset(("im:chat", "im:chat:read", "im:chat:readonly")),

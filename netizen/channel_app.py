@@ -3543,9 +3543,16 @@ class ChannelApplication:
             binding = self._bindings.get(intent.binding_id)
             if binding.scope_key != intent.scope.key:
                 raise BindingNotFound(intent.binding_id)
+            context_anchor = None
+            if binding.message_context_mode is MentionContextMode.CATCH_UP:
+                context_anchor = await self._resolve_context_anchor(
+                    intent.scope,
+                    intent.source_id,
+                )
             activated = await self._management.resume_current_binding(
                 scope_key=intent.scope.key,
                 reference=binding.id,
+                context_anchor=context_anchor,
             )
             success_notice = (
                 f"✅ 已切换到会话 {activated.short_id}"

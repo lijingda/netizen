@@ -2,9 +2,14 @@
 status: accepted
 date: 2026-08-25
 amends: 0041
+amended_by: 0043
 ---
 
 # 正式发布复用 main 代码资格
+
+> 修订说明：[ADR 0043](0043-remove-redundant-release-approval.md) 移除了正式发布 environment
+> 的 required reviewer；environment 仅保留 deployment history。本文其余代码资格与制品
+> 完整性门禁保持不变。
 
 ADR 0041 把 Published Release 与 Source Install 分开后，仍让正式发布流水线对同一份代码
 重复执行跨平台本地测试矩阵，并把依赖真实账号和环境的 live probe 作为每次发布的外部

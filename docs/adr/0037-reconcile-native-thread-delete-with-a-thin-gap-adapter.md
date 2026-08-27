@@ -4,7 +4,7 @@ date: 2026-08-24
 amends: 0017, 0031
 amended_by: 0038
 supersedes: 0019
-related: 0014, 0026, 0031
+related: 0014, 0026
 ---
 
 # 用薄 SDK Gap Adapter 与原生目录对账开放 Thread Delete

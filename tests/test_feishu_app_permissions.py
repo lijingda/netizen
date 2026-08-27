@@ -29,6 +29,13 @@ def _response(*scope_states: tuple[str, int], success: bool = True) -> SimpleNam
 
 
 class FeishuAppPermissionsTest(unittest.TestCase):
+    def test_reaction_only_scope_is_not_an_independent_requirement(self) -> None:
+        self.assertIn("im:message", REQUIRED_TENANT_SCOPES)
+        self.assertNotIn(
+            "im:message.reactions:write_only",
+            REQUIRED_TENANT_SCOPES,
+        )
+
     def test_complete_contract_has_no_missing_scopes(self) -> None:
         output = io.StringIO()
 

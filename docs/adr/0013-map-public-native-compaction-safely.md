@@ -6,6 +6,12 @@ amends: 0008
 
 # 安全映射原生会话压缩
 
+> 2026-08-27 兼容性更正：固定 `openai-codex 0.147.0` 的 live probe 能确认
+> `contextCompaction` 终态，但未能成功完成同一连接的后续普通 Turn。由于本 ADR 的验收
+> 明确包含压缩后继续 Turn，当前 `/compact` 保持 unavailable、不进入帮助且不执行 native
+> mutation。底层 controller 与探针保留；只有匹配 SDK/App Server 的完整 compact phase
+> 通过后才重新开放。以下正文保留决策形成时的历史依据。
+
 ## 背景
 
 统一命令层应把固定 SDK 已提供的原生能力映射为飞书 control，而不是把 slash

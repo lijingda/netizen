@@ -2,10 +2,16 @@
 status: accepted
 date: 2026-08-25
 amends: 0033, 0034
+amended_by: 0042
 related: 0032, 0035
 ---
 
 # 分离已发布 Release 安装与源码安装
+
+> 修订说明：[ADR 0042](0042-reuse-main-qualification-for-release.md) 将 Published Release
+> 的代码资格改为复用 exact main push CI，并把 live probes 改为相关边界变更时的开发验证；
+> 发布流水线不再重复运行完整测试矩阵或 live probes。本文的双安装入口与共享激活事务保持
+> 不变。
 
 ## 背景
 

@@ -133,7 +133,7 @@ Side 的模型上下文继承 Parent 创建时的历史，但之后独立；两�
 文档给出 UUID 去重窗口和长度约束，但没有按 UUID 查询已发送消息的接口；因此上述 same-UUID
 exact identity 验收是发布门禁，不是可由本地单测替代的协议事实。
 
-官方 Python SDK 一旦公开 inject/unsubscribe 等价高层 API并通过 synthetic/live 行为验证，
+官方 Python SDK 一旦公开 inject/unsubscribe 等价高层 API 并通过 synthetic/live 行为验证，
 删除 `SideThreadControl` reach-through，改用公开 facade；ephemeral fork、多轮 Session、飞书
 route 和墓碑语义保留。不得把本 Adapter 扩展成通用私有 RPC、持久 Side native ID、提示词
 模拟边界或第二套 Agent Runtime。

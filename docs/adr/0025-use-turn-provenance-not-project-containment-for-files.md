@@ -1,10 +1,16 @@
 ---
 status: accepted
 date: 2026-08-19
+amended_by: 0027
 related: 0015, 0024
 ---
 
 # 本轮文件使用 Turn provenance，而不是 Project containment
+
+> 修订说明：[ADR 0027](0027-use-turn-diff-and-self-contained-file-cards.md) 保留 Project
+> 不是文件授权边界的决定，但新卡 callback 改为携带 canonical absolute path，并发送点击时
+> 该路径当前解析到的内容，不再使用 opaque ref 检测路径重绑。下文对应旧卡的该部分语义仅
+> 保留为历史背景。
 
 生产实测表明，原生 `imageGeneration.saved_path` 位于标准
 `$CODEX_HOME/generated_images/<thread-id>`，而普通任务也可能在 Codex 原生权限允许时

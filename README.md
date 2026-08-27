@@ -70,8 +70,9 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
 
 - 普通文本：空闲时开始 Turn，运行中时 steer 当前 Turn。若使用飞书逐条引用，
   可读取文本、富文本、卡片、日程/任务/投票等结构化可见文本以及有界的合并
-  转发；当前消息与被引用消息各自保留发送者归属。当前消息和被引用消息中的普通图片、
-  富文本图片会作为 Codex 原生视觉输入；
+  转发；当前消息与被引用消息各自保留发送者归属。当前消息、被引用消息和
+  `catch-up` 选中的补充上下文消息中的普通图片、富文本图片会作为 Codex
+  原生视觉输入；
   最多 20 张、单图 20 MB、合计 50 MB，任一图片不可读时整条不执行。卡片图片、
   合并转发图片、文件和音视频仍只保留公开资源元数据，不读取二进制内容。
   普通 Turn 完成后若出现“本轮文件”卡片，可翻页并按需将单个文件发送到该卡片话题；
@@ -88,11 +89,12 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   `/side close`；空闲两小时或服务重启后过期。旧 Side 话题不会变成普通 Binding。
 - `/config`：选择并保存当前会话后续新 Turn 的 Model、Effort、Speed；群聊和群话题还可
   切换 @ 上下文模式。不要求任务、不创建空白 Turn，也不提供跨会话选择；配置其他会话
-  应先 `/resume`。每条普通消息需要启动新 Turn 时都会重新读取 live 模型目录并显式应用
-  三项；running Turn 明确拒绝修改，普通消息仍只 steer 当前 exact Turn。
-- `/compact`：调用公开原生压缩能力。仅支持已有历史的 idle 会话；完成前该 Binding
-  显示 `compacting` 并拒绝新 Prompt/配置，只有公开 history 中唯一新增的
-  `contextCompaction` Turn 进入终态才报告完成；多候选或 10 分钟无终态会 fail closed。
+  应先 `/resume`。Binding 已显式配置三项时，每条需要启动新 Turn 的普通消息都会重新读取
+  live 模型目录并显式应用；未配置时由 Codex 继承且不传这三项。running Turn 明确拒绝
+  修改，普通消息仍只 steer 当前 exact Turn。
+- `/compact`：当前固定 `openai-codex 0.147.0` 中明确不可用，也不进入 `/help`；输入该
+  命令会说明兼容验证未通过且不调用原生压缩。底层实现和 live probe 保留，只有同一
+  Thread 在压缩后继续 Turn 的完整序列重新通过，命令才会开放。
 - `$skill-name ...`：在普通消息开头可连续显式调用多个 Codex Skills；提交前会重新
   discovery/revalidate，并把原文本与多个公开 `SkillInput` 一起交给同一个 Turn 或
   exact running Turn 的 steer。查询当前有哪些 Skill 可用时直接发送普通自然语言消息，
@@ -232,7 +234,9 @@ shell 不使用 pipe：先把 latest 或 exact-tag `install.sh` 下载到文件�
 Agent 才应代用户承载交互浏览器初始化；具体交接流程见
 [部署文档](docs/deployment.md#agent-驱动首次安装)。
 
-所有公开脚本都不接收参数，也不会执行 `git pull`。正式 bootstrap 下载自己固定 tag 的
+`install.sh`、`dev-install.sh` 和 `uninstall.sh` 不接收参数；`service.sh` 只接收
+`start|stop|restart|status` 中的一个动作。这些公开脚本都不会执行 `git pull`。
+正式 bootstrap 下载自己固定 tag 的
 项目构建 tarball，校验内嵌 SHA-256 和 Published Release manifest 后安装；
 该 tag 的 exact main commit 已在 Python 3.11/3.12 CI 通过统一代码门禁；
 发布流水线复用该 exact SHA 并验证
@@ -370,9 +374,9 @@ Codex 原生历史。Linux 上不会关闭 linger，因为同一用户的其他 
 
 源码开发需要 Python 3.11 或 3.12 和 `venv`。macOS 和 Linux 都可以运行下面的源码开发、安全
 本地门禁以及相同的安装/服务命令；正式服务分别使用 macOS LaunchAgent 与 Linux systemd
-user manager。`make check`
-使用 fake App Server，不创建真实 Codex Thread，也不要求 Codex 登录；启动 Netizen、执行
-真实 Turn 或运行 live probe 前，先确认当前账号的 Codex 登录有效：
+user manager。`make check` 不创建真实 Codex Thread，也不要求 Codex 登录：SDK 合同测试主要
+使用 fake App Server，受管 Skill discovery 另启动真实 bundled App Server 做只读发现。
+启动 Netizen、执行真实 Turn 或运行 live probe 前，先确认当前账号的 Codex 登录有效：
 
 ```bash
 codex login status
@@ -408,9 +412,9 @@ make check
 `im:message.group_msg`；只配置接收群聊 @ 机器人
 消息的权限无法回查被引用的另一条消息。当前 Prompt 发送者姓名解析还需
 `im:chat.members:read`；缺失时不会用匿名身份提交。Prompt 的运行、steer 确认与终态
-表情还需
-`im:message.reactions:write_only`，或已具备覆盖该能力的 `im:message`；权限变更必须
-随应用版本发布。本轮文件上传与话题回复还需 `im:resource` 和
+表情由当前必需的 `im:message` 覆盖；官方也提供更窄的
+`im:message.reactions:write_only` 作为替代，但 Netizen 不再把它列为独立必需项。权限变更
+必须随应用版本发布。本轮文件上传与话题回复还需 `im:resource` 和
 `im:message:send_as_bot`；任一权限缺失时文件按钮必须显式失败，不能掉到主聊天。
 开发可用 `FEISHU_APP_SECRET`；两种受管服务都使用 `FEISHU_APP_SECRET_FILE` 指向 0600 的纯
 Secret 文件。Admin Web 不接受 raw secret 环境变量：启用时还必须设置绝对的
@@ -429,162 +433,19 @@ export NETIZEN_ADMIN_SECRET_FILE=/absolute/path/admin-web-secret
 ## 开发与兼容性验证
 
 PR 和 main push 统一运行 `make check`；正式 Release 复用 exact main commit 的成功 CI，
-不重复运行测试或账号级 live probe。只有执行真实 Turn、调试目标环境或运行按变更触发的
-live probe 时，才需要先确认当前账号的 Codex 登录有效。现役版本的已有真实探针记录确认
-SDK 创建的原生 Thread 可被全局 CLI 按相同 ID 接续，`steer()` 能改变当前 Turn 结果，
-两个 Thread 也能同时执行。
-
-`scripts/probe_python_sdk.py --phase models` 通过只读 `codex.models()` 输出实时默认
-模型以及各模型支持的 Effort、Service Tier 和默认值。2026-08-09 本地固定 SDK 探针
-已通过；产品和测试不固化该次返回的模型列表。
+不重复运行测试或账号级 live probe。`make check` 是不创建原生 Thread 的本地代码门禁；
+按变更触发的 `scripts/probe_python_sdk.py` live phases 则验证真实账号、App Server 和
+目标环境，执行前必须确认 Codex 登录有效。具体 phase、命令和触发条件只在
+[部署与验收](docs/deployment.md)中维护。
 
 `scripts/probe_python_sdk.py --phase compact` 验证公开 `compact()` 的异步语义和公开
 `thread.read()` 完成证据。固定 `0.147.0` 在 2026-08-25 的重新验证中能观察到 completed
-`contextCompaction`，但同连接的后续 Turn 失败；隔离使用 App Server `0.149.0` 已通过同一
-序列。当前不增加临时 workaround，待匹配的 Python SDK/App Server `0.149` 发布后随依赖
-升级重新验证。
+`contextCompaction`，但未能成功完成同连接的后续 Turn；隔离使用 App Server `0.149.0`
+已通过同一序列。因此当前 `/compact` 不开放，也不增加临时 workaround；待匹配的 Python
+SDK/App Server `0.149` 发布后随依赖升级重新验证。
 
-`scripts/probe_python_sdk.py --phase usage` 验证 exact active read、持久化终态与公开
-usage stream 排空，并要求当前窗口用量和窗口上限具有有效 shape。
-
-`scripts/probe_python_sdk.py --phase side` 验证 materialized Parent 正在运行时公开
-ephemeral fork、Parent/Side Turn 重叠、固定 Side boundary、多轮 Turn、terminal
-cleanup/unsubscribe，以及关闭 Side 后 Parent 仍可继续。Parent Turn 使用公开 history
-recovery；该 phase 不把 Side 的极快 completion race 提升为本地代码门禁，普通持久 Thread
-原有 completion recovery 本地代码门禁保持不变。
-
-`scripts/probe_python_sdk.py --phase release` 使用两个先后启动的 App Server：先在同一
-连接取消订阅并按 exact ID resume/继续 Turn，再关闭该连接，由新的 App Server 按同一 ID
-接管并继续 Turn。live 环境同时验证后台 terminal inspector 的空列表投影；非空、错误与
-unsubscribe 响应未知的阻断语义由真实 SDK fake-server harness 和 Runtime 本地代码门禁覆盖。
-
-`make check` 中的 `probe_sdk_turn_plan.py` 使用真实安装 SDK 和 fake App Server，证明
-active Turn plan 的只读快照不改变队列，随后公开 stream 仍能收到同一对象并排空终态。
-目标环境的 `scripts/probe_python_sdk.py --phase plan` 进一步验证真实
-`turn/plan/updated`、steer 后完整 plan 替换、最终回复与终态后公开 stream drain。
-
-`make check` 中的 SDK Gap synthetic harness 会让实际安装的 SDK client 连接 fake
-App Server，验证固定 Goal/Skills/Side/Delete method、shape、Side boundary 与 unsubscribe
-终态、即时通知、多物理 Turn、resume route 顺序、Thread Delete 空响应/response loss
-以及 facade migration sentinel；它不按
-SDK 版本号或整包 hash 放行。修改 pinned SDK 或相应 Adapter 时，在开发迭代中按影响范围
-运行 `--phase skills`、`--phase lifecycle` 与 `--phase goal`。lifecycle phase 用公开 SDK
-验证自己创建的探针 Thread 可 rename → archive → unarchive 且保持同一 ID，再通过薄
-Adapter 删除并确认
-rollout scan/state DB 的 active/archived 四视图全部 absent。
-Goal phase
-首先硬性证明零 Turn Thread 已持久化，再验证 start/pause/resume/terminal 与同 Thread
-普通 Turn；任何一步不成立时不得开放 Goal。这里不改变 ADR 0009 对实验 terminal
-cleanup 的精确版本、源码指纹和 capability 门禁。
-
-仓库锁定的 `openai-codex==0.147.0` 中，`handle.run()` 仍会在 synthetic 即时
-completion 场景丢失 `turn/completed`。Netizen 不再走该路径：它使用公开
-`thread.read` 先读取轻量 Thread 状态，结束后读取完整原生 Turn 并按精确 ID 取结果。
-synthetic 门禁已连续 20/20 通过，真实 Linux 也验证了 polling、steer 和最终回复。
-固定 `0.147.0` 的真实 config 探针已在目标 Linux 观察到：受信任 Project 的
-`.codex/config.toml` 修改被同一个常驻 `AsyncCodex` 的下一条新 Thread 直接读取。
-这是版本实测结果，不作为永久 SDK 契约；探针也能报告 `restart-required`。Netizen
-不增加 watcher，用户级 `~/.codex/config.toml` 仍遵循各配置项自己的加载契约，
-必要时执行已安装 release 的 `service.sh restart`。
-
-用户已批准 [ADR 0009](docs/adr/0009-use-version-gated-experimental-terminal-cleanup.md)
-的窄 adapter：它只允许固定 `0.147.0` 上为 exact Thread 请求清理已登记的后台
-terminal，版本、SDK 源码指纹或实验 capability 不符即在接受 Turn 前失败。cleanup
-请求失败会保留 `stopping`。
-
-[ADR 0010](docs/adr/0010-correct-stop-and-background-cleanup-semantics.md) 修正了此前的
-错误能力判断：旧探针按 cmdline 子串匹配，可能把先出现的 `bwrap` wrapper 当成真实
-marker，形成竞态性假阳性。精确等待 `argv[0]` 后，旧版 `0.144.4`/同机 CLI
-`0.146.0` 与本次重新认证的 `0.147.0` 都观察到：foreground tool 未进入
-background-terminal registry，interrupt 与 clean 返回后仍继续运行，而 native Turn
-已是 `interrupted`、同一 Thread
-仍可 resume。因此 `/stop` 不再声称前台工具进程已经停止；live probe 只分类记录它
-是否在 5 秒内退出，并有界等待测试进程自然结束以避免探针自身遗留孤儿。
-
-[ADR 0011](docs/adr/0011-support-feishu-quoted-message-context.md) 区分了真实话题和逐条
-引用，并固定 `lark-channel-sdk==1.2.0` 丢失普通首层 `ReplyRef` 的兼容边界。
-引用内容只走 Channel SDK 公开 typed fetch；读取期间若 exact Turn 变化，本条
-消息明确失败，不会被重解释为新 Turn 或另一个 steer。
-
-[ADR 0012](docs/adr/0012-use-native-turn-model-settings.md) 固定默认继承、动态模型目录、
-真实 Turn override、running/stale fail-closed 和原生命令能力门控；其“配置必须携带
-任务”的交互已由 ADR 0016 修订。
-
-[ADR 0013](docs/adr/0013-map-public-native-compaction-safely.md) 固定 `/compact` 的
-异步完成证据、Binding reservation 和未知副作用 fail-closed 语义。
-
-[ADR 0014](docs/adr/0014-use-removable-sdk-gap-adapters.md) 固定 Goal/Skills 的临时
-Adapter 边界、每项独立迁移、Goal 生命周期与 SDK upgrade harness。
-
-[ADR 0015](docs/adr/0015-support-native-image-inputs-for-message-and-quote.md) 让普通图片
-和富文本图片通过公开 Channel 下载方法进入 Codex 原生 `ImageInput`，覆盖当前消息、
-被引用消息及两者组合；卡片和合并转发图片仍受飞书官方资源接口限制。
-
-[ADR 0016](docs/adr/0016-store-binding-turn-settings.md) 统一 `/new`，并把三项选择作为
-带 revision 的 Binding-scoped intent 保存；Netizen 在后续每条新 Turn 上重新校验并
-应用，但不把它冒充成 Codex 已生效配置或可反查的原生状态。
-
-[ADR 0018](docs/adr/0018-remove-skills-command.md) 删除只用于浏览目录的 `/skills`
-control；自然语言查询继续走普通 Turn，显式 `$skill-name` 调用及其 live revalidation
-保持不变。
-
-[ADR 0020](docs/adr/0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md)
-固定 active Turn checklist 的非消费观察边界、steer freshness、兼容性门禁与移除触发器。
-
-[ADR 0021](docs/adr/0021-support-multi-turn-ephemeral-side-topics.md) 固定多轮
-ephemeral Side、飞书 sibling Topic 路由/墓碑、两小时 idle 生命周期，以及固定
-boundary inject Adapter 的移除边界。
-
-[ADR 0028](docs/adr/0028-release-idle-persistent-thread-subscriptions.md) 固定普通持久 Thread
-的十五分钟空闲订阅释放、active pointer 切换、显式 `/release`、后台 terminal 阻断、
-无持久 timer 与 same-ID resume 语义，并拆分可复用的 unsubscribe Adapter。
-
-[ADR 0037](docs/adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md) 在
-`0.147.0` live requalification 后恢复 materialized Thread Delete，固定薄 Adapter、exact
-native identity 确认、native-first 提交顺序与 present/absent/unknown 四视图对账。
-
-[ADR 0022](docs/adr/0022-load-account-shell-environment-at-service-start.md) 固定 systemd
-每次启动时加载账号 shell 导出环境、无 TTY/超时边界和受管变量覆盖语义。
-
-[ADR 0023](docs/adr/0023-keep-service-environment-authoritative-for-tools.md) 固定工具使用
-服务已捕获环境的非登录 shell 边界，以及不得演变成 PATH/NVM 特例的移除条件。
-
-[ADR 0031](docs/adr/0031-add-in-process-admin-web-control-plane.md) 固定默认开启、直接内网
-访问的单管理员 Admin Web，以及它与飞书共享唯一 Store/Runtime、exact target 管理操作、
-认证/资源上限和启动关闭顺序。
-
-[ADR 0032](docs/adr/0032-use-single-user-product-root.md) 固定 `~/.netizen` 单一产品根，
-并在根内分隔持久配置/状态与可删除的 release/cache 生命周期。
-
-[ADR 0033](docs/adr/0033-use-official-sdk-for-feishu-app-onboarding.md) 固定不依赖 Lark CLI
-的官方 SDK 浏览器初始化、Agent 非交互交接和 Secret 边界。
-
-[ADR 0034](docs/adr/0034-support-macos-with-a-user-launchagent.md) 固定 macOS LaunchAgent、
-窄服务后端、lifetime lock 与 ready marker 的停止/回滚安全契约。
-
-P2P、群聊、同群多话题、Netizen 设置卡片、服务重启恢复和全局 CLI exact-ID resume
-的 Pilot 验收仍有效。另一名真实群成员点击设置卡片仍是非阻塞手工复验项。背景、
-边界和完整证据见
-[ADR 0008](docs/adr/0008-use-python-sdk-for-native-turn-control.md)、
-[ADR 0009](docs/adr/0009-use-version-gated-experimental-terminal-cleanup.md)、
-[ADR 0010](docs/adr/0010-correct-stop-and-background-cleanup-semantics.md)、
-[ADR 0011](docs/adr/0011-support-feishu-quoted-message-context.md)、
-[ADR 0012](docs/adr/0012-use-native-turn-model-settings.md)、
-[ADR 0013](docs/adr/0013-map-public-native-compaction-safely.md)、
-[ADR 0014](docs/adr/0014-use-removable-sdk-gap-adapters.md)、
-[ADR 0015](docs/adr/0015-support-native-image-inputs-for-message-and-quote.md)、
-[ADR 0016](docs/adr/0016-store-binding-turn-settings.md)、
-[ADR 0018](docs/adr/0018-remove-skills-command.md)、
-[ADR 0020](docs/adr/0020-observe-active-turn-plans-with-a-pinned-read-only-adapter.md)、
-[ADR 0021](docs/adr/0021-support-multi-turn-ephemeral-side-topics.md)、
-[ADR 0022](docs/adr/0022-load-account-shell-environment-at-service-start.md)、
-[ADR 0028](docs/adr/0028-release-idle-persistent-thread-subscriptions.md)、
-[ADR 0034](docs/adr/0034-support-macos-with-a-user-launchagent.md)、
-[ADR 0041](docs/adr/0041-separate-published-release-and-source-install.md)、
-[ADR 0042](docs/adr/0042-reuse-main-qualification-for-release.md)、
-[部署与验收](docs/deployment.md)、
-[官方 App Server API](https://developers.openai.com/codex/app-server/)。
-
-- [设计](docs/design.md)
-- [部署](docs/deployment.md)
+- [当前架构与运行语义](docs/design.md)
+- [部署、测试与验收](docs/deployment.md)
 - [领域词汇](CONTEXT.md)
+- [架构决策记录](docs/adr/)
+- [官方 App Server API](https://developers.openai.com/codex/app-server/)

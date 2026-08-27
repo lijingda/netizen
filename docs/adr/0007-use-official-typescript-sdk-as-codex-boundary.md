@@ -59,4 +59,3 @@ list/fork/archive 或审批交互。
 ## 被取代方案
 
 本 ADR 取代 ADR 0001–0006 对当前 Pilot 的架构约束；这些文档保留为历史记录。
-Python SDK/App Server 方案对应的旧 ADR 0007 已随实现删除。

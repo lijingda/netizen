@@ -2,7 +2,7 @@
 
 ## 目标与边界
 
-目标是让少量受信用户在一台云主机上，通过飞书单聊、群聊和话题使用原生 Codex。
+目标是让少量受信用户在一台受支持的 Linux 或 macOS 主机上，通过飞书单聊、群聊和话题使用原生 Codex。
 飞书只是新的 Channel；历史、工具、Skills、MCP、配置、sandbox 和认证仍由 Codex
 管理。Project Registry 可通过飞书设置卡片或 Admin Web 管理；当前仍不实现审批卡、Codex 原生配置
 值的 idle read/update、文件/音视频作为 prompt 输入、流式 token、HA 或
@@ -56,10 +56,8 @@ creator 和时间；Scope 只保存 active Binding 指针。P2P 固定为 `curre
 Binding，不继承 Parent 的选择并固定沿用 current-only。
 
 exact `/new` 是普通用户创建会话的唯一入口；任何 `/new ...` 参数都零 mutation 地拒绝。
-卡片在单个静态下拉框中按 Registry 顺序展示全部 enabled Projects，不设置应用级条数上限、
-不分页，也不以命令旁路兜底。卡片可以选择 `inherit Codex`，或保存三个全有的目录 ID；
-在群聊/群话题中还可以选择 Mention Context Mode。它只写 Binding，不要求任务、不创建
-native Thread。模型目录不可用时仍展示可提交的 Project + inherit 表单。
+它打开 Card 2.0，提交只写入包含 Project、可选 Turn Settings 和 Mention Context
+Mode 的 lazy Binding，不要求任务、不创建 native Thread；完整表单及目录降级语义见下文。
 下一条需要启动新 Turn 的普通消息执行：
 
 1. 若有 Binding 配置，在进入 native mutation 前重新调用 live `codex.models()`，按所选
@@ -138,11 +136,14 @@ discovery 期间不持有 Binding 锁，返回后用 admission revision 防止�
 被引用历史中的 `$` 会在版本化 quote envelope 中编码为非激活文本，不能把历史内容
 变成当前 Skill 调用。
 
-已有历史的 idle Binding 可通过 `/compact` 调用公开 `AsyncThread.compact()`。该方法
-只立即确认 start；运行时先记录公开 history 中已有 Turn ID，再保留 Binding 的
-`compacting` 槽位，直到 `thread.read(include_turns=True)` 出现且仅出现一个新的
-terminal `contextCompaction` Turn 且 Thread 回到 idle。首次 idle read 不能单独证明
-完成；固定 SDK 的真实探针会观察到 `idle -> active -> idle`。完整决定见 ADR 0013。
+Runtime 保留基于公开 `AsyncThread.compact()` 和 history read 的压缩 controller，供兼容
+重验使用。它先记录已有 Turn ID，再保留 Binding 的 `compacting` 槽位，直到
+`thread.read(include_turns=True)` 出现且仅出现一个新的 terminal
+`contextCompaction` Turn 且 Thread 回到 idle；首次 idle read 不能单独证明完成。固定
+`0.147.0` 的真实探针虽能确认该终态，却未能成功完成同一连接的后续普通 Turn。当前
+`/compact` 因此注册为 unavailable、不进入 `/help`，输入时明确失败且不调用 controller；
+不增加临时 workaround。完整决定见 ADR 0013，当前兼容性结论见
+`docs/deployment.md`。
 
 `/goal <objective>` 在当前 Binding 上启动原生 persisted Goal。lazy Binding 先创建并
 write-once 绑定一个已持久化、idle、非 ephemeral 的零 Turn Thread；若公开 read 不能
@@ -269,13 +270,13 @@ cleanup，但不把 interrupt RPC 伪装成成功；否则 terminal child 与原
 若公开 native read 已经观察到终态而 Binding 仍是 running，则 stop 返回已结束，不
 再做 Thread cleanup，避免自然完成竞态误杀后台 terminal。
 
-compacting 时普通 Prompt、引用消息准备、`/config` 和再次 `/compact` 都明确拒绝，
-不会 steer、queue 或自动重放。`/stop` 只中断普通 Turn，不声称能终止原生压缩；
-`/status` 和 `/sessions` 显示 `compacting`。压缩请求响应或终态未知时保留槽位并关闭
-进程级 admission；只有唯一 compaction candidate 的 completed/failed/interrupted 才
-释放。`compact()` 的公开 ACK 不含 Turn ID，因此同一 native Thread 在该生命周期内
-不支持外部 CLI/App Server 并发写；检测到多个 candidate 必须 fail closed。轮询只在
-Thread idle 时读取完整 history，并以 10 分钟为终态上限。
+保留的 compaction controller 进入 `compacting` 时，普通 Prompt、引用消息准备、
+`/config` 和再次压缩都会明确拒绝，不会 steer、queue 或自动重放。`/stop` 只中断普通
+Turn，不声称能终止原生压缩；`/status` 和 `/sessions` 显示 `compacting`。压缩请求响应
+或终态未知时保留槽位并关闭进程级 admission；只有唯一 compaction candidate 的
+completed/failed/interrupted 才释放。`compact()` 的公开 ACK 不含 Turn ID，因此同一
+native Thread 在该生命周期内不支持外部 CLI/App Server 并发写；检测到多个 candidate
+必须 fail closed。轮询只在 Thread idle 时读取完整 history，并以 10 分钟为终态上限。
 
 Goal active 时同一 Binding 的普通 Prompt/steer、`/compact`、`/config` 和第二个 Goal
 都明确拒绝；其他 Binding 仍可并发。Goal pause 先确认 persisted status 为 paused，再
@@ -310,8 +311,8 @@ process exit attestation。ADR 0014 的 SDK Gap Adapter 则只为 Goal 与 Skill
 `ThreadSubscriptionControl.unsubscribe` 拆成独立能力：两项都固定 method 和安装 SDK 的 generated model，
 不提供通用 request，不维护运行时版本 allowlist。SDK 升级必须通过 per-capability shape、
 真实 SDK client synthetic harness 与目标环境 live probe；facade 出现对应公开能力时，
-migration sentinel 阻止继续永久保留 shim，并要求逐项切回公开 provider。ADR 0017 的
-ADR 0037 的 `ThreadDeleteControl` 同样只暴露固定 `thread/delete`，生产服务在独立
+migration sentinel 阻止继续永久保留 shim，并要求逐项切回公开 provider。ADR 0037 的
+`ThreadDeleteControl` 同样只暴露固定 `thread/delete`，生产服务在独立
 shape/synthetic 门禁通过时构造；Runtime 而非 Adapter 负责失败后的有界四视图对账。
 ADR 0020 的 `PinnedTurnPlanObserver` 精确校验 SDK 版本、整包源码指纹、
 内部持有类型与 queue shape；它只在 `/status` 或 steer freshness bookkeeping 时，在
@@ -705,20 +706,17 @@ receipt/completion 生命周期；后续普通消息沿用统一的 prompt 表�
 文本命令由统一注册表记录 owner（Channel/native/hybrid/host）、usage、alias 与能力
 状态，`/help` 只从可用条目生成。Model/Effort/Speed 只由 `/new` 和 `/config`
 管理；`/model`、`/effort`、`/fast` 不注册。每条飞书消息只解析一个 control 或
-prompt，未知 slash command fail closed，不增加任意 `/`/`@` 链式解释器。固定 SDK
-的公开 `AsyncThread.compact()` 与公开 history read 满足安全完成条件，因此
-`/compact` 可用；CLI/App 的 `/copy`、`/vim`、`/theme`、`/exit` 等纯宿主命令明确
-不可用且不进入帮助。
+prompt，未知 slash command fail closed，不增加任意 `/`/`@` 链式解释器。`/compact`
+保留为带原因的 unavailable 条目，不映射 native control、不调用压缩并且不进入帮助；
+CLI/App 的 `/copy`、`/vim`、`/theme`、`/exit` 等纯宿主命令同样明确不可用且不进入帮助。
 
 `/rename`、`/archive`、`/delete` 命令只作用于当前 active Binding，不接受目标 ID；管理
 另一普通会话的 rename 仍应先 `/resume`。`/sessions` 中按 ADR 0036 确认归档 exact idle
 materialized 行是唯一 archive 例外，按 ADR 0038 经独立红色确认卡删除 exact idle 行是
 唯一 delete 例外；两者都不改变对应文本命令，也不新增 `/delete <id>`。rename 可直接带
-名称或打开 form；archive 与 Lazy delete 的 callback 携带完整 Binding ID 和 Feishu Scope
-envelope，并由内置 confirm 二次确认，其中 delete 使用红色危险卡。materialized
-`/delete` 还携带打开卡片时的 exact native Thread ID，并明确 spawned descendants 与
-Codex App/CLI 历史也会永久消失。提交时 Scope
-锁重新检查 active pointer 与 native identity，旧卡片不执行。归档列表只为同一 Scope 的原生
+名称或打开 form；archive/delete 卡片沿用上文 `/sessions` 的 exact
+Scope/Binding/native identity 预置条件与二次确认。materialized `/delete` 还要明确 spawned
+descendants 与 Codex App/CLI 历史会永久消失。归档列表只为同一 Scope 的原生
 archived Thread 生成恢复按钮；恢复前再次校验 catalog，不把 stale 或跨 Scope Binding
 激活。
 
@@ -750,18 +748,16 @@ ID intent。固定 `0.147.0` 的 Linux compatibility probe 用
 A 改为 B，下一条新 Thread 直接返回 `CONFIG-B`，重启后仍为 B；全局
 `config.toml` 未修改。这是锁定版本的观测值，升级后探针可能分类为
 `restart-required`，不泛化为所有用户级键；官方或探针要求重启的设置通过
-`systemctl restart netizen` 生效。
+已安装 release 的 `service.sh restart` 生效。
 
 仓库锁定的 `openai-codex==0.147.0` 已公开 `models()`、Turn 级三项 override、
 `compact()`、persisted Thread read、Thread rename/archive/unarchive 与 `SkillInput`，但
 没有公开 Thread delete、idle Thread settings read/update、完整 Goal、Plan collaboration
 control、Skills/Apps discovery、Side boundary inject、Thread unsubscribe、config 或 MCP
 的高层方法。
-ADR 0014 只为 Goal/Skills
-使用生产 capability-specific Adapter；ADR 0037 的 Thread Delete Adapter 只暴露固定
-delete method 并由 Runtime 对账；ADR 0021 的 Side boundary Adapter 只暴露一个固定方法并配合公开 ephemeral
-fork；ADR 0028 的 subscription Adapter 由普通持久 Thread 和 Side close 共用。
-Plan 与 Apps 仍显式 unavailable，`$app` 不被包装成
+生产兼容面仅限上文列出的 capability-specific Adapter、experimental cleanup 与
+Observer；Plan 与 Apps
+仍显式 unavailable，`$app` 不被包装成
 结构化 attachment。不能增加通用 JSON-RPC gateway。
 每次 SDK/App Server 升级先运行 facade inventory、shape/synthetic harness 和
 Goal/Skills/Side/lifecycle/release live probes，再重跑 models、compact、completion、steer、
@@ -798,6 +794,9 @@ interrupt cleanup、CLI resume 与 Linux compatibility；高层 surface 出现�
 - `compact()` 的空响应不是终态；若公开 history 无法确认唯一的新
   `contextCompaction` candidate、出现多个 candidate 或 10 分钟内没有终态，运行时
   保持 Binding reserved 并关闭新 admission，不能把可能仍在压缩的 Thread 当作 idle。
+- 固定 `0.147.0` 虽能确认压缩终态，但 live probe 未能成功完成同一连接的后续普通 Turn；
+  `/compact` 当前不可用且零 native mutation。当前不增加临时 workaround，待匹配的
+  Python SDK/App Server `0.149` 组合发布后重新验收完整序列。
 - Goal mutation、通知流或四重终态证据无法确认时保留 Goal slot；可能发生副作用的
   start/resume/clear 会关闭进程级 admission，绝不自动重试。重启后发现外部 active
   Goal 只做只读隔离，当前 SDK 不能安全重挂是显式产品限制。

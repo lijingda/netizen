@@ -22,7 +22,6 @@ REQUIRED_TENANT_SCOPES = (
     "im:message.p2p_msg:readonly",
     "im:chat:read",
     "im:chat.members:read",
-    "im:message.reactions:write_only",
     "im:resource",
     "im:message:send_as_bot",
 )

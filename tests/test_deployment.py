@@ -44,9 +44,10 @@ class DeploymentAssetsTest(unittest.TestCase):
 
     def test_readme_local_development_names_its_prerequisites(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        local_development = readme.split("## 本地开发", 1)[1].split(
-            "## 发布验证状态", 1
-        )[0]
+        after_local_development = readme.split("## 本地开发", 1)[1]
+        local_development, _ = after_local_development.split(
+            "## 开发与兼容性验证", 1
+        )
 
         for expected in (
             "Python 3.11 或 3.12",
@@ -55,6 +56,7 @@ class DeploymentAssetsTest(unittest.TestCase):
             "Linux systemd",
             "`make check`",
             "使用 fake App Server",
+            "bundled App Server",
             "codex login status",
             "codex exec --skip-git-repo-check",
         ):
