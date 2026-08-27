@@ -1450,8 +1450,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             [(scope, anchor.message_id)],
         )
         rendered = str(self.channel.updates[-1][1])
-        self.assertIn("catch-up", rendered)
-        self.assertIn("同一群聊或话题", str(picker.card))
+        self.assertIn("自动带上期间的群聊讨论", rendered)
+        self.assertIn("未 @ 机器人", str(picker.card))
 
     async def test_p2p_topic_cannot_forge_catch_up_card_submission(self) -> None:
         await self.app.handle_message(

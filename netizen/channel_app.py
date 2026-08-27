@@ -39,6 +39,7 @@ from .cards import (
     binding_created_card,
     binding_lifecycle_result_card,
     config_card,
+    context_mode_display,
     decode_button_action,
     decode_card_form,
     decode_turn_file_action,
@@ -1256,7 +1257,7 @@ class ChannelApplication:
             if binding.context_anchor is None:
                 raise MessageHistoryUnavailable(
                     "当前会话缺少群聊上下文边界，本条消息未执行；"
-                    "请重新发送 /config 并切换一次上下文模式。"
+                    "请重新发送 /config 并重新选择 @ 时读取的消息范围。"
                 )
             input_value, context_commit, context_stats = (
                 await self._compose_catch_up_prompt_input(
@@ -3000,7 +3001,10 @@ class ChannelApplication:
             context_mode_lines = (
                 ()
                 if _message_chat_type(message) == "p2p"
-                else (f"@ 上下文模式：{binding.message_context_mode.value}",)
+                else (
+                    "@ 时读取的消息范围："
+                    f"{context_mode_display(binding.message_context_mode)}",
+                )
             )
             await self._reply(
                 message,
@@ -3339,7 +3343,8 @@ class ChannelApplication:
                     f"✅ Project 选择成功：已选择 `{project.alias}`，"
                     f"并创建、切换到会话 `{binding.short_id}`。"
                     f"Model 来源：{'继承 Codex' if settings is None else '显式配置'}；"
-                    f"@ 上下文模式：{binding.message_context_mode.value}。"
+                    f"@ 时读取的消息范围："
+                    f"{context_mode_display(binding.message_context_mode)}。"
                     "现在可以直接发送任务。",
                 )
             return
@@ -3400,7 +3405,8 @@ class ChannelApplication:
                     intent,
                     f"✅ 会话 `{binding.short_id}` 配置已保存："
                     f"Model 来源：{'继承 Codex' if settings is None else '显式配置'}；"
-                    f"@ 上下文模式：{binding.message_context_mode.value}。"
+                    f"@ 时读取的消息范围："
+                    f"{context_mode_display(binding.message_context_mode)}。"
                     "会话后续每条新 Turn 都会应用。",
                 )
             return

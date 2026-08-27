@@ -628,13 +628,6 @@ def _new_binding_form(
             initial_option=_project_reference(projects[0]),
         ),
     ]
-    if allow_context_mode:
-        elements.extend(
-            _context_mode_form_elements(
-                prefix="new",
-                initial_mode=message_context_mode,
-            )
-        )
     if catalog is None:
         elements.extend(
             [
@@ -654,6 +647,13 @@ def _new_binding_form(
                 catalog=catalog,
                 model_value_encoder=_new_model_reference,
                 inherit_initial_when_unset=False,
+            )
+        )
+    if allow_context_mode:
+        elements.extend(
+            _context_mode_form_elements(
+                prefix="new",
+                initial_mode=message_context_mode,
             )
         )
     elements.append(
@@ -685,13 +685,6 @@ def _binding_config_form(
         )
 
     elements: list[dict[str, Any]] = []
-    if allow_context_mode:
-        elements.extend(
-            _context_mode_form_elements(
-                prefix="config",
-                initial_mode=message_context_mode,
-            )
-        )
     if catalog is None:
         elements.extend(
             [
@@ -712,6 +705,13 @@ def _binding_config_form(
                 turn_settings=turn_settings,
                 model_value_encoder=model_reference,
                 inherit_initial_when_unset=True,
+            )
+        )
+    if allow_context_mode:
+        elements.extend(
+            _context_mode_form_elements(
+                prefix="config",
+                initial_mode=message_context_mode,
             )
         )
     elements.append(
@@ -796,33 +796,51 @@ def _model_settings_form_elements(
     ]
 
 
+def context_mode_display(mode: MentionContextMode) -> str:
+    if mode is MentionContextMode.CATCH_UP:
+        return "自动带上期间的群聊讨论"
+    return "仅这条 @ 消息"
+
+
 def _context_mode_form_elements(
     *,
     prefix: str,
     initial_mode: MentionContextMode,
 ) -> list[dict[str, Any]]:
     return [
-        _form_label("@ 上下文模式"),
+        _form_label("@ 时读取的消息范围"),
         _static_select(
             name=f"{prefix}_context_mode",
-            placeholder="选择 @ 上下文模式",
+            placeholder="选择 @ 时读取的消息范围",
             options=(
                 (
-                    "仅当前 @ 消息（默认）",
+                    "仅这条 @ 消息（默认）",
                     _context_mode_reference(MentionContextMode.CURRENT_ONLY),
                 ),
                 (
-                    "补充上次请求后的消息",
+                    "自动带上期间的群聊讨论",
                     _context_mode_reference(MentionContextMode.CATCH_UP),
                 ),
             ),
             initial_option=_context_mode_reference(initial_mode),
+        ),
+        _form_hint(
+            "机器人始终只响应 @ 它的消息。选择“自动带上”后，"
+            "两次 @ 之间群里其他成员未 @ 机器人的消息，"
+            "也会在下一次 @ 时被读取，作为背景交给 Codex。"
         ),
     ]
 
 
 def _form_label(label: str) -> dict[str, Any]:
     return {"tag": "div", "text": _plain_text(label)}
+
+
+def _form_hint(text: str) -> dict[str, Any]:
+    return {
+        "tag": "markdown",
+        "content": f"<font color='grey'>{text}</font>",
+    }
 
 
 def _static_select(
@@ -870,11 +888,6 @@ def new_binding_card(
         "只创建 lazy Binding，不会立即启动任务。Model 可继承 Codex；"
         "显式选择的 Model / Effort / Speed 会应用于后续每条新 Turn。"
     )
-    if allow_context_mode:
-        builder.markdown(
-            "选择“补充上次请求后的消息”后，同一群聊或话题中未 @ 机器人的"
-            "成员消息也可能在下一次 @ 时进入 Codex 原生历史。"
-        )
     if not projects:
         builder.markdown("当前没有可用 Project。请先发送 `/settings` 新增或启用。")
     else:
@@ -916,11 +929,6 @@ def config_card(
         "Model 可继承 Codex，也可显式选择 Model / Effort / Speed；"
         "保存不会启动任务。"
     )
-    if allow_context_mode:
-        builder.markdown(
-            "选择“补充上次请求后的消息”后，同一群聊或话题中未 @ 机器人的"
-            "成员消息也可能在下一次 @ 时进入 Codex 原生历史。"
-        )
     if catalog is None:
         builder.raw(
             _notice(
@@ -1617,10 +1625,11 @@ def _model_source_summary(settings: TurnModelSettings | None) -> str:
 def _context_mode_summary(mode: MentionContextMode) -> str:
     if mode is MentionContextMode.CATCH_UP:
         return (
-            "@ 上下文模式：补充上次请求后的消息（catch-up）。"
-            "同一 Scope 中未 @ 机器人的成员消息可能在下一次 @ 时进入 Codex。"
+            "@ 时读取的消息范围：自动带上期间的群聊讨论。"
+            "两次 @ 之间群里未 @ 机器人的成员消息，"
+            "也会在下一次 @ 时作为背景交给 Codex。"
         )
-    return "@ 上下文模式：仅当前 @ 消息（current-only）。"
+    return "@ 时读取的消息范围：仅这条 @ 消息。"
 
 
 def error_card(message: str, *, scope: FeishuScope | None = None) -> OutboundCard:
@@ -2446,7 +2455,7 @@ def _context_mode_reference(mode: MentionContextMode) -> str:
 def _decode_context_mode_reference(value: str) -> MentionContextMode:
     match = _CONTEXT_MODE_REFERENCE.fullmatch(value)
     if match is None:
-        raise CardActionError("@ 上下文模式卡片已过期，请重新打开卡片。")
+        raise CardActionError("消息范围选择已过期，请重新打开卡片。")
     return MentionContextMode(match.group(1))
 
 

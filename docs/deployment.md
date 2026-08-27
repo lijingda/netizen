@@ -888,13 +888,15 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
 3. 零参数 `/new` 只显示一个创建 form，不显示任务输入或快速按钮。Project 使用现有单个
    静态下拉框，并展示 Registry 中全部 enabled 项和 `none`；准备 13 个以上 enabled
    Projects 验证没有 12 项截断、分页控件或命令兜底，disabled 项不出现。P2P 表单不显示
-   @ 上下文模式；群主线和普通群话题显示“仅当前 @ 消息（默认）”与“补充上次请求后的
-   消息”。选择 inherit Codex 时不保存 Model/Effort/Speed override；选择实际 Model 时
-   三项必须与本机 `models` phase 一致并全部保存。模型目录不可用时仍显示可提交的
-   Project + inherit 表单。成功卡片显示 Project、会话短 ID、Model 来源与 @ 上下文模式；
-   即使原卡更新失败，同一 Scope 也应收到等价兜底回复。再用足够大的 Registry 触发真实
-   平台容量错误，必须明确说明没有截断、分页或快捷创建，且零 Binding mutation。
-4. 在 idle active Binding 上发送 `/config`，选择三项和群聊 @ 上下文模式后原子保存；
+   @ 时读取的消息范围；群主线和普通群话题显示“仅这条 @ 消息（默认）”与“自动带上期间
+   的群聊讨论”，下拉框下方有灰色说明。选择 inherit Codex 时不保存 Model/Effort/Speed
+   override；选择实际 Model 时三项必须与本机 `models` phase 一致并全部保存。模型目录
+   不可用时仍显示可提交的 Project + inherit 表单。成功卡片显示 Project、会话短 ID、
+   Model 来源与 @ 时读取的消息范围；即使原卡更新失败，同一 Scope 也应收到等价兜底
+   回复。再用足够大的 Registry 触发真实平台容量错误，必须明确说明没有截断、分页或
+   快捷创建，且零 Binding mutation。
+4. 在 idle active Binding 上发送 `/config`，选择三项和群聊 @ 时读取的消息范围后
+   原子保存；
    不得要求任务或立即启动 Turn，也不得显示目标会话；配置其他会话必须先 `/resume`。
    后续每条需要启动新 Turn 的普通消息都在 exact native Thread 重新校验并显式应用，
    配置不会在首轮后清除。对目录中支持加速 Tier 的模型依次验收

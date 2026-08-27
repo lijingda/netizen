@@ -1173,13 +1173,25 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("快速新建", serialized)
         self.assertNotIn("下一条真实任务", serialized)
         self.assertIn("继承 Codex", serialized)
-        self.assertIn("@ 上下文模式", serialized)
+        self.assertIn("@ 时读取的消息范围", serialized)
+        self.assertIn("机器人始终只响应", serialized)
         self.assertIn("未 @ 机器人", serialized)
 
         form = next(
             item
             for item in _elements(outbound.card, "form")
             if item["name"] == "new_binding_v5"
+        )
+        self.assertEqual(
+            [item["name"] for item in form["elements"] if "name" in item],
+            [
+                "new_project",
+                "new_model",
+                "new_effort",
+                "new_speed",
+                "new_context_mode",
+                "new_binding_submit_v5",
+            ],
         )
         fields = {
             item["name"]: item
@@ -1345,6 +1357,16 @@ class CardRendererTest(unittest.TestCase):
             for item in _elements(outbound.card, "form")
             if item["name"] == "binding_config_v5"
         )
+        self.assertEqual(
+            [item["name"] for item in form["elements"] if "name" in item],
+            [
+                "config_model",
+                "config_effort",
+                "config_speed",
+                "config_context_mode",
+                "binding_config_submit_v5",
+            ],
+        )
         fields = {
             item["name"]: item
             for item in form["elements"]
@@ -1396,7 +1418,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("Speed=`default`", rendered)
         self.assertNotIn("credits", rendered.lower())
         self.assertNotIn("cost", rendered.lower())
-        self.assertIn("catch-up", rendered)
+        self.assertIn("自动带上期间的群聊讨论", rendered)
 
         inherited = str(
             binding_configured_card(
@@ -1407,7 +1429,7 @@ class CardRendererTest(unittest.TestCase):
             ).card
         )
         self.assertIn("继承 Codex", inherited)
-        self.assertIn("current-only", inherited)
+        self.assertIn("仅这条 @ 消息", inherited)
 
         created = str(
             binding_created_card(
@@ -1420,7 +1442,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("none", created)
         self.assertIn("22222222", created)
         self.assertIn("继承 Codex", created)
-        self.assertIn("catch-up", created)
+        self.assertIn("自动带上期间的群聊讨论", created)
         self.assertIn("未 @ 机器人", created)
 
     def test_config_card_marks_stale_persistent_selection(self) -> None:
