@@ -149,7 +149,10 @@ Runtime 保留基于公开 `AsyncThread.compact()` 和 history read 的压缩 co
 write-once 绑定一个已持久化、idle、非 ephemeral 的零 Turn Thread；若公开 read 不能
 证明这一点，Goal 明确不可用。Adapter 返回一个 opaque logical handle，SDK 自己把自动
 continuation 的多个物理 Turn 合并为一个通知流。`/goal` 只读展示，`pause/resume/clear`
-和 Goal 卡片按钮进入同一 typed control 路由；token budget 暂不暴露。
+和 Goal 卡片按钮进入同一 typed control 路由；Goal 模块显示 objective、tokens used 与
+可用的 token budget，不显示耗时。Goal start、过程、
+pause/resume 与终态复用同一张组合回复卡，Goal 模块承担状态和暂停/继续/结束按钮；切换
+Scope 的 active Binding 不会使原卡失去对其 exact Binding 的控制权。
 
 会话生命周期的命令入口按 [ADR 0017](adr/0017-manage-native-thread-lifecycle.md) 与
 [ADR 0037](adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md) 管理当前 Binding：
@@ -283,8 +286,22 @@ Goal active 时同一 Binding 的普通 Prompt/steer、`/compact`、`/config` �
 中断 SDK route 当时给出的 exact 物理 Turn，最后复用 ADR 0009 的 exact-Thread terminal
 cleanup。pause、interrupt、cleanup 或 mutation 响应未知时槽位不释放，并按副作用范围
 fail closed。只有 SDK logical stream 正常终止、`goal/get` 为非 active、公开 Thread
-idle、完整 history 中 exact 最终物理 Turn terminal 四项同时成立，consumer 才释放
-槽位并投递一个逻辑终态；单个物理 Turn completed 不代表 Goal 完成。
+idle、完整 history 中 exact 最终物理 Turn terminal 四项同时成立，consumer 才冻结并
+投递一个逻辑终态；单个物理 Turn completed 不代表 Goal 完成。四项证据完成后，
+只有 persisted Goal 为 `complete` 且 exact 最终物理 Turn 为 `completed` 时才自动执行一次
+`goal/clear`，并以再次读取为 absent 确认收尾。paused、blocked、usage/budget limited 和
+external-active 均不自动 clear；clear 返回 false、响应丢失/取消或复读仍存在时保留
+`goal-unknown` 槽位、关闭 admission 且绝不自动重试，但已取得的权威最终回复仍要显示。
+非 unknown 终态在事实冻结后继续占用 exact Goal slot，直到 Channel 的有界终态 handoff
+返回；因此显式 clear、同秒新 Goal、`/goal` recovery 与 shutdown 都不能越过 Result/Files
+投递。handoff 超时会结束展示等待并释放非 unknown slot，不能永久改变 Runtime 可用性。
+
+Goal 卡控制身份由当前进程 exact message source、logical run 与 SDK 可见的最强 fingerprint
+共同组成；fingerprint 包含 Thread、秒级 `createdAt`、objective 与 token budget，本身可能
+在同秒复用。进程重启后的旧按钮一律 stale，裸 `/goal` 只注册一张新的当前快照卡。
+Netizen 支持的 Goal mutation 都在 Binding lock 内串行；外部 CLI/App Server 在同一生命周期
+并发改写同一 Thread Goal 不受支持。当前 thread-scoped `goal/clear` 没有
+expected-generation CAS，因此 clear 前复读无法原子覆盖外部在最后一次 get 后发生的替换。
 
 重启后只通过 `thread/goal/get` 对账 Codex-owned 状态。发现 active Goal 但当前进程没有
 安全 route 时标记 `external-active-goal`，拒绝同一 Binding 的 mutation，并提示用户先
@@ -345,7 +362,8 @@ full-history 重读退避到 2 秒。completed 状态还可能短暂先于 final
 interrupted 和 final agent message 都来自 SDK 的公开 native Turn 模型，不创建
 外层 Turn 记录。
 
-普通 Turn completed 后按 [ADR 0024](adr/0024-send-structured-turn-files-from-completion-cards.md)、
+普通 Turn completed 后，按
+[ADR 0024](adr/0024-send-structured-turn-files-from-completion-cards.md)、
 [ADR 0025](adr/0025-use-turn-provenance-not-project-containment-for-files.md) 与
 [ADR 0027](adr/0027-use-turn-diff-and-self-contained-file-cards.md)，优先解析该 exact Turn
 最新公开 `turn/diff/updated.diff` aggregate snapshot，再用 completed `fileChange`
@@ -354,22 +372,28 @@ add/update/move 与 `imageGeneration.saved_path` 补充。unified diff 只读 fi
 相对路径解析基准，不是文件授权边界；absolute 或 `..` 路径当前解析为普通文件时同样
 可用。访问权限仍由原生 Codex sandbox/approval 决定。canonical 重复、缺失、目录和设备
 文件被忽略；不扫描目录、不解析最终文本，也不推断没有进入 Turn diff/items 的
-shell/MCP/第三方工具输出。Progress Card 关闭时，没有可用文件仍发送原富文本/静态文本；
-存在文件时只发送一张包含最终回复与“本轮文件”的 Card 2.0。Progress Card 开启时，
-completed 结果与可用文件进入已发送的同一张进度卡。Goal、Side、compaction、失败和中断
-终态不进入本轮文件路径。
+shell/MCP/第三方工具输出。非 Goal 且 Progress Card 关闭时，没有可用文件仍发送原
+富文本/静态文本；存在文件时只发送一张包含最终回复与“本轮文件”的 Card 2.0。Progress
+Card 开启时，completed 结果与可用文件进入已发送的同一张卡。Goal 始终使用组合卡，但
+满足四项终态证据后，首期只从 exact 最终成功物理 Turn 的 completed structured items
+提取文件；Goal adapter 不提供对应 aggregate diff，也不扫描或聚合更早 rollover Turn。
+Side、compaction、失败和中断终态不进入本轮文件路径。
 
-新 v4 卡片每页 8 个，最多 500 个完整循环分页，展示总数、页码、脱敏逻辑位置与当次读取的
+普通 Result + Files 与 Activity + Result + Files 卡继续使用 v4 callback；Goal 与 Files
+同卡时使用 v5 完整组合 manifest。两版每页 8 个，最多 500 个完整循环分页，展示总数、页码、
+脱敏逻辑位置与当次读取的
 大小；Project 内文件使用 Project 相对路径，Project 外原生生成图使用
 `生成图片/<文件名>`，账号 home 内其他文件使用 `~/...`，其余位置只显示有界路径尾部。
 不使用表格、预览、diff、发送全部或静默截断；超过 500 个或完整 JSON 超过 55,000 bytes
 时明确说明平台边界。可见正文不显示绝对路径，但每个发送 callback 明文携带该文件
-canonical absolute path；每页唯一的“下一页/回到第一页”循环 callback 明文携带完整
-`{path,label}` manifest 和原最终回答。Binding/Turn 只保留 provenance 和幂等 identity；
-v4 callback 不读取飞书原卡、Binding、Project 或 completed Turn，直接重建并更新完整
-Card 2.0。完成后的文件清单、卡片 session、内容和快照都不作为会话状态留在进程内存或
-SQLite，因此服务/App Server 重启后已发送的 v4 卡片仍能工作。本轮文件 callback 只接受 v4；
-旧 v3 opaque-ref 卡片点击时明确提示已过期，不再重读历史。
+canonical absolute path；每页唯一的“下一页/回到第一页”循环 callback 明文携带完整文件
+manifest 和有界冻结的 Goal/Activity/Result 模块。Binding/Turn 只保留 provenance 和
+幂等 identity；v5 callback 不读取飞书原卡、Binding、Project 或 completed Turn，直接重建
+并更新完整 Card 2.0，翻页不会丢失其他模块。cleared 卡不在进程内保留文件清单、Projection
+或 session；非 cleared Goal 只为当前进程控制面有界保留终态 Projection。两者都不写入
+SQLite，且 v5 文件 callback 自包含，所以服务/App Server 重启后已发送卡仍可翻页和发送，
+但旧 Goal 控制按钮会过期。既有 v4 自包含文件卡保持兼容；旧 v3 opaque-ref 卡片点击时
+明确提示已过期，不再重读历史。
 
 每次翻页和发送都从 payload path 重新 resolve/stat；不可用文件在分页中保留位置并取消
 发送按钮。图片白名单为 PNG/JPEG/GIF/WebP，点击后用 `OutboundImage`；其他普通文件用
@@ -386,29 +410,36 @@ ephemeral Side 明确不复用上述持久 history recovery：consumer 只调用
 release gate。产品接受极快 Side Turn 可能遇到 `turn/completed` 通知竞态；这个豁免不
 删除或放宽普通持久 Thread 的现有恢复和 release probe。
 
-普通 Binding 每个新 Turn 在 exact admission 中捕获当时的 Binding Task Feedback；运行中
-修改配置不会改变已开始 Turn。两个选项默认均关闭：Task Reaction 控制表情生命周期，
-Progress Card 控制一张运行卡。两项都关闭时，从 native accepted 到终态之间不产生任务反馈，
-最终结果才按原路径投递。首期不向 Side、Goal 或 compaction 传播这两个选项。完整边界见
-[ADR 0046](adr/0046-add-opt-in-binding-task-feedback.md)。
+普通 Binding 每个新 Turn，以及 Goal start/resume，在 exact admission 中捕获当时的 Binding
+Task Feedback；运行中修改配置不会改变已开始的 operation。两个选项默认均关闭：Task
+Reaction 只控制普通 Turn 的表情生命周期，Progress Card 控制普通 Turn 是否产生 Activity
+运行卡，以及 Goal 组合卡是否加入 Activity 模块。普通 Turn 两项都关闭时，从 native
+accepted 到终态之间不产生任务反馈，最终结果才按原路径投递；Goal 模块本身始终存在。
+Side 与 compaction 不使用这两个选项。完整边界见
+[ADR 0046](adr/0046-add-opt-in-binding-task-feedback.md) 与
+[ADR 0047](adr/0047-compose-typed-reply-cards-and-finalize-complete-goals.md)。
 
-Runtime 为 exact Ordinary Active Turn 维护带 revision 的 Turn Activity Projection。首期
-只有 native accepted 后的 running/stopping 状态和 ADR 0020 的原生 plan/checklist；终态
-卡只使用权威 outcome。它不是 reasoning、commentary、工具/命令日志或原生终态事实。
-Progress Card 开启时，Channel 有界
-读取该快照并只在 revision 变化时合并更新；关闭时不启动这项轮询，也不创建或更新进度卡。
+Runtime 为 exact Ordinary Active Turn 维护带 revision 的 Turn Activity Projection，并为
+Goal 当前 exact 物理 Turn 暴露同样受限的 Goal Activity Snapshot。首期只有 native
+accepted 后的 running/stopping/pausing 状态和 ADR 0020 的原生 plan/checklist；终态卡只
+使用权威 outcome。它不是 reasoning、commentary、工具/命令日志或原生终态事实。Progress
+Card 开启时，Channel 有界读取对应快照并只在 revision 变化时合并更新；关闭时普通 Turn
+不创建 Activity 卡，Goal 也不启动 Activity 轮询，但仍更新 Goal 模块。
 卡片不显示 elapsed time、百分比或 ETA。plan observer 仍保持版本/源码指纹门禁、exact
 `thread_id + turn_id`、非消费队列和完整 plan replacement，不能因进度卡扩展成任意通知流。
 
-Progress Card 在 native Turn 确认接受后依附 Completion Origin 发送；运行时顶部
-`collapsible_panel` 展开并显示状态与 checklist。终态先停止 updater，再把同一张卡更新为
-折叠过程、最终回答和可用的本轮文件。初始发送失败、任一中间更新失败或终态更新/容量校验
-失败时，停止该 Turn 的进度 presenter，并在终态回退到现有投递：无文件仍是富文本/静态
-文本，有文件仍是原“最终回复 + 本轮文件”卡。展示失败不阻断、取消、重试或改写 native
-Turn。有文件的进度卡分页 callback 只携带已经过滤、裁剪且有界的过程 manifest，翻页后
-继续显示折叠过程，不退化成普通完成卡。进程内只在 active 生命周期保留 card identity、
-projection revision 与 updater；不持久化卡片 session，崩溃或强制 kill 后不扫描或猜测
-旧运行卡。
+唯一 Reply Card Presenter 接受固定顺序的 Goal、Activity、Result、Files typed modules，
+每次变化都重绘完整 Projection，模块不能各自持有或更新飞书消息。Goal、Activity 或 Files
+任一存在时使用卡片；三者都不存在的 Result 继续走富文本/静态文本。Activity 运行时顶部
+`collapsible_panel` 展开并显示状态与 checklist，终态折叠；Goal 从 start 到
+pause/resume/terminal 复用同一张卡并更新其控制按钮。初始发送、任一中间更新、终态更新或
+容量校验失败时停止对应 presenter；展示失败不阻断、取消、重试或改写 native execution，
+终态按可用模块回退为新的自包含卡或既有文本。只有 Goal + Files 使用的 v5 callback
+携带完整、裁剪且有界的 Reply Card manifest，翻页不丢 Goal/Activity/Result；普通文件卡
+继续使用 v4。进程内在 active lifecycle 保留 updater，并为非 cleared Goal 有界保留终态
+控制 Projection；不持久化卡片 session。崩溃或强制 kill 后不扫描或猜测旧运行卡，之后
+`/goal` 只创建新的状态快照卡。Goal 初始卡失败提供可见文字回执；终态 Channel handoff
+整体有界，展示故障不能永久占住非 unknown Runtime slot。
 
 Task Reaction 开启时，Channel 按 exact Turn ID 在内存管理原消息与两个当前 reaction ID：
 `Typing` 从开始到终态常驻，`THINKING` 首次显示 2 秒、隐藏 13 秒后继续低频 pulse；每次
@@ -455,7 +486,7 @@ Topic 行并把现有 Binding 两项 Task Feedback 设为关闭；不能按通�
 重新开放为普通 Binding。它不保存解析后的 wire value 或已生效配置。
 数据库没有 prompt、补充消息正文/发送者投影、当前消息发送者投影、回复、ephemeral
 native Thread ID、Turn、Goal、
-Skill catalog、plan/checklist、Turn Activity Projection、reaction、Progress Card identity、cwd
+Skill catalog、plan/checklist、Turn Activity Projection、reaction、Reply Card identity、cwd
 副本、本轮文件清单/快照/摘要、card session、Codex config、Thread name/archive 状态或
 queue 表，也不保存 Admin credential、session、action/CSRF token、native metadata 索引或
 audit record。
@@ -515,9 +546,10 @@ root，再按需以 `reply_in_thread=True` promotion；promotion 固定 `fail`�
 source card 固定 `reply_in_thread=True` 与 `reply_target_gone="fail"`。平面卡片响应必须
 返回非空 thread 且确认该卡片的 parent 关系；已有 topic 卡片必须返回同一个 thread ID，
 并接受飞书把 root/parent 归一到既有话题根。发送
-UUID 由卡片、sender、Binding、Turn、动作和 v4 absolute path 确定，重复 callback
-不生成新的本地幂等状态。v4 分页只从 callback 恢复回答、清单
-和目标页，再用公开 `update_card()` 写回完整 Card 2.0；不读取 source card，也不在 Channel
+UUID 由卡片、sender、Binding、Turn、动作和 v4/v5 absolute path 确定，重复 callback
+不生成新的本地幂等状态。v5 分页只从 callback 恢复完整 Reply Card manifest 和目标页，
+既有 v4 分页仍从 callback 恢复回答与清单；两者都用公开 `update_card()` 写回完整 Card 2.0，
+不读取 source card，也不在 Channel
 Database 或进程内保存 card session。删除卡片、错误 230071 或任何关系不一致
 都不允许 fresh fallthrough。
 
@@ -761,8 +793,9 @@ archived Thread 生成恢复按钮；恢复前再次校验 catalog，不把 stal
 
 按 ADR 0018，不注册独立的 `/skills` 浏览 control；用户可用普通自然语言消息询问当前
 可用 Skill。显式执行仍是普通消息开头一个或多个 `$skill-name`，并在提交前通过 live
-catalog 重新校验。`/goal`、`/goal <objective>`、`pause/resume/clear` 与卡片按钮映射
-原生 Goal。一个消息仍只表示一个 control 或一个 prompt，Goal objective 中的 `$skill`
+catalog 重新校验。`/goal`、`/goal <objective>`、`pause/resume/clear` 与组合卡片按钮映射
+原生 Goal；complete-only 自动 clear 只发生在四项终态证据与 exact final Turn completed
+全部确认之后。一个消息仍只表示一个 control 或一个 prompt，Goal objective 中的 `$skill`
 在 live probe 证明语义前明确拒绝。Plan collaboration control 与 Apps discovery 仍
 不可用且不进入帮助。
 
@@ -836,8 +869,9 @@ interrupt cleanup、CLI resume 与 Linux compatibility；高层 surface 出现�
 - 固定 `0.147.0` 虽能确认压缩终态，但 live probe 未能成功完成同一连接的后续普通 Turn；
   `/compact` 当前不可用且零 native mutation。当前不增加临时 workaround，待匹配的
   Python SDK/App Server `0.149` 组合发布后重新验收完整序列。
-- Goal mutation、通知流或四重终态证据无法确认时保留 Goal slot；可能发生副作用的
-  start/resume/clear 会关闭进程级 admission，绝不自动重试。重启后发现外部 active
+- Goal mutation、通知流、四重终态证据或 complete-only clear 无法确认时保留 Goal slot；
+  可能发生副作用的 start/resume/clear 会关闭进程级 admission，绝不自动重试。paused、
+  blocked 与额度限制不自动 clear；权威结果即使在收尾不确定时仍通过 Goal 卡展示。重启后发现外部 active
   Goal 只做只读隔离，当前 SDK 不能安全重挂是显式产品限制。
 - Side fork/boundary/topic promotion 失败会保留 creating/failed route 防止落入普通
   Binding；interrupt、terminal cleanup 或 unsubscribe 未确认时保持 closing 且拒绝新

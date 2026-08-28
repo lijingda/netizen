@@ -50,21 +50,22 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 ### 飞书中的运行反馈
 
 - 每个普通会话有两个独立的任务反馈选项，可在 `/new` 创建时或空闲时通过 `/config`
-  修改；两项默认都关闭。都关闭时，任务被接受后到终态之间不发送任务表情或进度卡，
-  最终结果仍会正常回复。
+  修改；两项默认都关闭。普通 Turn 两项都关闭时，任务被接受后到终态之间不发送任务
+  表情或进度卡，最终结果仍会正常回复。
 - Task Reaction 开启后，普通任务在原任务消息上使用 `Typing` 和低频 `THINKING`；steer
   成功后在 steer 消息上使用 `OnIt`，原任务消息仍是运行状态锚点。完成、失败或中断时先
   使用相应终态表情，再清理运行态表情。关闭时也不会发送 `OnIt` 失败的文字确认。
-- Progress Card 开启后，Turn 被接受时回复一张运行卡。顶部过程区在运行中展开，只按
+- Progress Card 开启后，普通 Turn 被接受时回复一张运行卡；Goal 始终使用一张组合卡，
+  开启该选项时在卡中增加过程区。过程区在运行中展开，只按
   当前状态与原生 checklist 的变化更新同一张卡；不显示耗时、完成百分比、ETA、内部
   reasoning、raw command/tool output 或 tool arguments；计划步骤中的常见 secret/token、
   邮箱、用户目录和内联代码/参数会被过滤。终态会在同一卡片折叠过程并显示最终回答和
   可用的本轮文件，文件翻页后仍保留折叠过程。
 - 两项可以只开一个或同时开启。reaction/card 展示失败不会改变 Codex Turn；Progress
   Card 初始、过程或终态更新失败时，最终结果会回退到原有回复方式。
-- Progress Card 关闭时严格保持原有终态：无文件的普通 Turn 使用富文本/静态文本回复，
-  有文件时最终文本和“本轮文件”合成现有完成卡。首期这两个会话选项不改变 Goal、Side
-  或压缩自己的展示方式。
+- Progress Card 关闭时严格保持普通 Turn 原有终态：无文件时使用富文本/静态文本回复，
+  有文件时最终文本和“本轮文件”合成完成卡。Goal 卡本身始终存在，关闭只是不加入
+  Activity 模块；Task Reaction 仍不作用于 Goal。Side 和压缩不使用这两个选项。
 
 ## 发送消息、引用与图片
 
@@ -118,7 +119,8 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 
 ### 查看和发送本轮文件
 
-- 普通 Turn 成功完成后，Codex 的结构化文件修改或图片生成记录若指向当前仍可访问的
+- 普通 Turn 成功完成后，或 Goal 四项终态证据确认后其 exact 最终物理 Turn 成功完成时，
+  Codex 的结构化文件修改或图片生成记录若指向当前仍可访问的
   普通文件，最终回复下方会显示“本轮文件”。Progress Card 关闭时，它和最终回复组成
   现有完成卡；Progress Card 开启时，它进入最初的同一张运行卡并随终态折叠。
   Project 不是额外的文件权限边界，只作为相对路径的解析基准，不会过滤 exact Turn
@@ -134,8 +136,10 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 - 本轮文件不是快照。点击时会重新读取卡片记录的路径并发送当前内容；文件若已删除、变成
   目录或卡片已失效，会明确失败且原卡片保持不变。同一路径后来被替换或重绑时，发送的是
   点击时当前普通文件。
-- 新卡片把分页清单保存在飞书 callback payload 中，因此 Netizen 服务或 App Server 正常
-  重启后，已发送卡片仍可翻页和发送；不会为此保存本地 card session。
+- 普通完成/进度文件卡继续使用 v4 callback；Goal 与 Files 同卡时使用 v5，把有界的
+  Goal/Activity/Result 投影与完整文件清单保存在飞书 callback payload 中，因此翻页不会
+  丢失其他模块。Netizen 服务或 App Server 正常重启后，已发送卡片仍可翻页和发送，不会
+  为此保存本地 card session。两版文件卡都可用。
 - 文件来源优先采用原生 Turn 的 latest aggregate diff，并用 completed `fileChange` 和
   `imageGeneration` 补充。shell、MCP 或第三方工具的输出若没有进入这些 native 事实，
   不会被扫描补齐；最终答复里写出路径也不会自动把它变成卡片文件。
@@ -267,7 +271,15 @@ Goal 适合让 Codex 围绕一个持续目标自动推进多个物理 Turn。
 
 - `/goal`：查看当前会话的 Goal。
 - `/goal <objective>`：启动一个 Goal。
-- `/goal pause`、`/goal resume`、`/goal clear`：暂停、恢复或清除 Goal。
+- `/goal pause`、`/goal resume`、`/goal clear`：暂停、恢复或显式结束 Goal；同样的控制也
+  位于 Goal 卡中。
+- Goal 从启动、过程、暂停/恢复到终态只更新同一张组合卡。Progress Card 开启时增加过程
+  模块，关闭时仍保留 Goal 状态、结果和可用文件模块。
+- 只有 Goal 真实完成、exact 最终物理 Turn 成功完成且四项终态证据全部确认时才会自动
+  结束并清理。paused、blocked、额度限制或收尾不确定都不会自动清理；卡片仍允许恢复或
+  显式结束。收尾结果不确定时不会自动重试，`/stop` 和 `/goal clear` 也不会绕过隔离，
+  但已确认的最终回答仍会显示。服务重启后的旧 Goal 控制按钮会过期；重新发送 `/goal`
+  会创建当前进程可安全校验的新控制卡。
 - Goal 运行期间，同一会话不接受普通 prompt、`/compact` 或 `/config`。
 - `/stop` 会先暂停 Goal，再中断当前物理 Turn；它不会把 Goal 当普通一次性任务清除。
 - 当前不支持在 Goal objective 中调用 `$skill`；请先在普通消息中使用 Skill。
@@ -323,8 +335,9 @@ Goal、停止或压缩状态会直接拒绝普通消息。等待状态回到空�
 ### “为什么任务运行时没有表情或进度卡？”
 
 Task Reaction 和 Progress Card 默认都关闭。请在新建会话的 `/new` 卡片中开启，或等当前
-会话空闲后通过 `/config` 修改；两项互不依赖。Progress Card 关闭并不影响最终回复：没有
-文件时仍回复富文本/静态文本，有文件时仍使用现有完成卡。
+会话空闲后通过 `/config` 修改；两项互不依赖。Progress Card 关闭并不影响普通 Turn 的
+最终回复：没有文件时仍回复富文本/静态文本，有文件时仍使用完成卡。Goal 始终有一张状态
+与控制卡，关闭该选项只会隐藏 Activity 过程模块。
 
 ### “为什么 `/delete` 删除不了？”
 
@@ -355,10 +368,11 @@ Side 可能因空闲两小时、服务重启或关闭流程进入终态而过期
 
 ### “为什么任务生成了文件，却没有出现‘本轮文件’？”
 
-当前版本只读取普通成功 Turn 的原生 latest aggregate diff，以及 completed
-`fileChange` / `imageGeneration` 记录；不解析最终回复中的路径，也不扫描 Project。
-shell、MCP 或第三方工具生成但未进入这些 native 事实的文件，
-以及 Goal、Side、压缩的输出，都不会进入卡片。文件必须仍存在且是普通文件；Project
+当前版本为普通成功 Turn 读取原生 latest aggregate diff，并用 completed `fileChange` /
+`imageGeneration` 记录补充；Goal 首期只读取 exact 最终成功物理 Turn 的这两类 completed
+structured items，不提供 aggregate diff。两者都不解析最终回复中的路径，也不扫描 Project。
+shell、MCP 或第三方工具生成但未进入这些 native 事实的文件，以及 Side、压缩的输出，都
+不会进入卡片。Goal 不聚合更早的自动 continuation Turn。文件必须仍存在且是普通文件；Project
 不是额外的文件权限边界，exact Turn 明确报告的其他目录文件仍可出现。
 
 ### “点击本轮文件后，拿到的是任务完成时的版本吗？”

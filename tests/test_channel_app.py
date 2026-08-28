@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -35,15 +36,26 @@ from netizen.bindings import (
     BindingTurnSettings,
     SideTopicState,
 )
-from netizen.cards import goal_card
+from netizen.cards import (
+    CardActionError,
+    decode_turn_file_action,
+    goal_card,
+    goal_generation,
+    reply_card,
+)
 from netizen.channel_app import ChannelApplication, SideTopicCreateFailed
 from netizen.codex_runtime import (
+    ActiveGoalSnapshot,
     ActiveState,
     ActiveTurnSnapshot,
     CompactSubmission,
     ContextWindowUsage,
+    GoalActivitySnapshot,
+    GoalFinalizationStatus,
     GoalOperationState,
+    GoalOutcome,
     GoalSubmission,
+    GoalStateUnknown,
     NativeThreadMetadata,
     ReleaseDisposition,
     SideCloseFailed,
@@ -76,6 +88,10 @@ from netizen.domain import (
     MentionContextMode,
     MessageContextAnchor,
     NativeCapability,
+    ReplyCardFileItem,
+    ReplyCardFilesModule,
+    ReplyCardProjection,
+    ReplyCardResultModule,
     ScopeKind,
 )
 from netizen.model_settings import (
@@ -347,7 +363,11 @@ def plain_prompt_projection(native_input: object) -> tuple[str, dict[str, object
     return request_text, json.loads(metadata_json)
 
 
-def native_goal(status: GoalStatus = GoalStatus.ACTIVE) -> GoalSnapshot:
+def native_goal(
+    status: GoalStatus = GoalStatus.ACTIVE,
+    *,
+    created_at: int = 1,
+) -> GoalSnapshot:
     return GoalSnapshot(
         thread_id="native-one",
         objective="ship safely",
@@ -355,7 +375,7 @@ def native_goal(status: GoalStatus = GoalStatus.ACTIVE) -> GoalSnapshot:
         token_budget=None,
         tokens_used=10,
         time_used_seconds=2,
-        created_at=1,
+        created_at=created_at,
         updated_at=2,
     )
 
@@ -476,6 +496,25 @@ def turn_activity_snapshot(
     )
 
 
+def goal_activity_snapshot(
+    *,
+    binding_id: str,
+    revision: int = 1,
+    steps: tuple[TurnPlanStepSnapshot, ...] = (),
+) -> GoalActivitySnapshot:
+    return GoalActivitySnapshot(
+        binding_id=binding_id,
+        thread_id="native-one",
+        logical_turn_id="goal-one",
+        physical_turn_id="goal-turn-final",
+        revision=revision,
+        state=GoalOperationState.RUNNING,
+        plan_available=True,
+        plan_generated=bool(steps),
+        steps=steps,
+    )
+
+
 class StubRuntime:
     def __init__(self) -> None:
         self.available_capabilities = frozenset()
@@ -526,6 +565,7 @@ class StubRuntime:
         self.resume_goal_calls: list[dict[str, object]] = []
         self.clear_goal_calls: list[object] = []
         self.clear_goal_result = True
+        self.clear_goal_error: BaseException | None = None
         self.goal_snapshot_after_stop: GoalSnapshot | None = None
         self.thread_metadata_values: dict[str, NativeThreadMetadata] = {}
         self.archived_thread_metadata_values: dict[str, NativeThreadMetadata] = {}
@@ -537,6 +577,11 @@ class StubRuntime:
         self.turn_progress_values: dict[str, TurnProgressSnapshot] = {}
         self.turn_activity_values: dict[str, TurnActivitySnapshot] = {}
         self.turn_activity_calls: list[tuple[str, str | None, str | None, bool]] = []
+        self.goal_activity_values: dict[str, GoalActivitySnapshot] = {}
+        self.goal_activity_calls: list[
+            tuple[str, str | None, str | None, bool]
+        ] = []
+        self.stop_calls: list[str] = []
         self.lifecycle_states: dict[str, object] = {}
         self.rename_binding_calls: list[tuple[str, str]] = []
         self.archive_binding_calls: list[str] = []
@@ -682,6 +727,29 @@ class StubRuntime:
         if thread_id is not None and snapshot.thread_id != thread_id:
             return None
         if turn_id is not None and snapshot.turn_id != turn_id:
+            return None
+        return snapshot
+
+    def goal_activity(
+        self,
+        binding_id: str,
+        *,
+        thread_id: str | None = None,
+        logical_turn_id: str | None = None,
+        refresh_plan: bool = False,
+    ) -> GoalActivitySnapshot | None:
+        self.goal_activity_calls.append(
+            (binding_id, thread_id, logical_turn_id, refresh_plan)
+        )
+        snapshot = self.goal_activity_values.get(binding_id)
+        if snapshot is None:
+            return None
+        if thread_id is not None and snapshot.thread_id != thread_id:
+            return None
+        if (
+            logical_turn_id is not None
+            and snapshot.logical_turn_id != logical_turn_id
+        ):
             return None
         return snapshot
 
@@ -901,8 +969,10 @@ class StubRuntime:
         assert self.goal_submission is not None
         return self.goal_submission
 
-    async def clear_goal(self, binding):
+    async def clear_goal(self, binding, **kwargs):
         self.clear_goal_calls.append(binding)
+        if self.clear_goal_error is not None:
+            raise self.clear_goal_error
         return self.clear_goal_result
 
     def is_compacting(self, binding_id: str) -> bool:
@@ -919,6 +989,7 @@ class StubRuntime:
         *,
         acknowledge=None,
     ) -> StopDisposition:
+        self.stop_calls.append(binding_id)
         if acknowledge is not None and self.stop_result is not StopDisposition.COMPACTING:
             await acknowledge()
         if self.goal_snapshot_after_stop is not None:
@@ -1106,6 +1177,49 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             creator_id="ou_user",
             project_alias="test",
         )
+
+    async def register_goal_card(
+        self,
+        *,
+        scope: FeishuScope,
+        binding,
+        goal: GoalSnapshot,
+        message_id: str,
+        runtime_state: str,
+        logical_turn_id: str = "goal-one",
+    ) -> OutboundCard:
+        if binding.native_thread_id is None:
+            self.store.assign_native_thread_id(binding.id, goal.thread_id)
+            binding = self.store.get(binding.id)
+        projection = ReplyCardProjection(
+            scope=scope,
+            goal=channel_app._reply_goal_module(
+                binding=binding,
+                goal=goal,
+                runtime_state=runtime_state,
+            ),
+        )
+        generation = goal_generation(goal)
+        self.assertTrue(
+            await self.app._progress_cards.start_goal(
+                binding_id=binding.id,
+                thread_id=goal.thread_id,
+                logical_turn_id=logical_turn_id,
+                generation=generation,
+                origin=channel_app.GoalCardOrigin(
+                    message_id=message_id,
+                    scope=scope,
+                    binding_id=binding.id,
+                    short_id=binding.short_id,
+                    project_alias=binding.project_alias,
+                ),
+                projection=projection,
+                revision=("test",),
+                refresh=None,
+            )
+        )
+        self.channel.updates.clear()
+        return reply_card(projection)
 
     def form_card_event(
         self,
@@ -4827,6 +4941,9 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "goal-one",
             release,
         )
+        self.channel.reply_results.append(
+            sent_result("om_goal_card", chat_id="oc_direct")
+        )
 
         await self.app.handle_message(
             FakeMessage("/goal ship safely", message_id="om_goal")
@@ -4844,6 +4961,629 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             json.dumps(self.channel.replies[-1][1].card, ensure_ascii=False),
         )
 
+    async def test_goal_start_card_failure_has_visible_text_receipt(self) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.goal_snapshot_value = native_goal()
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            released = True
+
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id,
+            "native-one",
+            "goal-one",
+            release,
+        )
+        self.channel.reply_results.append(RuntimeError("card send failed"))
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_message(
+                FakeMessage("/goal ship safely", message_id="om_goal_start_fail")
+            )
+
+        self.assertTrue(released)
+        self.assertEqual(len(self.runtime.start_goal_calls), 1)
+        self.assertIn("Goal 已启动并在原生 Codex 中执行", self.channel.replies[-1][1])
+        self.assertIn("状态卡暂时无法展示", self.channel.replies[-1][1])
+
+    async def test_goal_status_recovers_failed_initial_card_without_losing_terminal_result(
+        self,
+    ) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        running = native_goal()
+        self.runtime.goal_snapshot_value = running
+        self.runtime.active_goals[binding.id] = ActiveGoalSnapshot(
+            binding_id=binding.id,
+            thread_id="native-one",
+            logical_turn_id="goal-one",
+            owner_id="ou_user",
+            state=GoalOperationState.RUNNING,
+            persisted=running,
+        )
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id,
+            "native-one",
+            "goal-one",
+            lambda: None,
+        )
+        self.channel.reply_results.append(RuntimeError("initial card failed"))
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_message(
+                FakeMessage("/goal ship safely", message_id="om_goal_initial_fail")
+            )
+
+        self.channel.reply_results.append(
+            sent_result("om_goal_recovered", chat_id="oc_direct")
+        )
+        await self.app.handle_message(
+            FakeMessage("/goal", message_id="om_goal_recover_status")
+        )
+        origin = self.runtime.start_goal_calls[0]["origin"]
+        self.assertIsInstance(origin, channel_app.GoalCardOrigin)
+        paused = native_goal(GoalStatus.PAUSED)
+
+        await self.app.handle_completion(
+            GoalOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-one",
+                owner_id="ou_user",
+                origin=origin,
+                goal=paused,
+                final_physical_turn_id="turn-final",
+                final_turn_status="interrupted",
+                final_response="terminal result survives recovery",
+            )
+        )
+
+        self.assertEqual(self.channel.updates[-1][0], "om_goal_recovered")
+        serialized = json.dumps(
+            self.channel.updates[-1][1],
+            ensure_ascii=False,
+        )
+        self.assertIn("terminal result survives recovery", serialized)
+
+    async def test_goal_resume_card_failure_has_visible_receipts(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        paused = native_goal(GoalStatus.PAUSED)
+        self.runtime.goal_snapshot_value = paused
+        card = await self.register_goal_card(
+            scope=scope,
+            binding=binding,
+            goal=paused,
+            message_id="om_goal_resume_fail",
+            runtime_state="goal-paused",
+        )
+        resume_value = next(
+            behavior["value"]
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "恢复 Goal"
+            for behavior in button.get("behaviors", ())
+        )
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id,
+            "native-one",
+            "goal-resumed",
+            lambda: None,
+        )
+        self.channel.fail_card_updates = True
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_card_action(
+                self.direct_button_event(
+                    resume_value,
+                    message_id="om_goal_resume_fail",
+                )
+            )
+
+        self.assertEqual(len(self.runtime.resume_goal_calls), 1)
+        self.assertIn("Goal 已恢复并在原生 Codex 中执行", self.channel.replies[-1][1])
+        self.assertIn("原卡片暂时无法更新", self.channel.replies[-1][1])
+
+    async def test_goal_resume_command_card_failure_has_text_receipt(self) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        paused = native_goal(GoalStatus.PAUSED)
+        self.runtime.goal_snapshot_value = paused
+        await self.register_goal_card(
+            scope=scope,
+            binding=binding,
+            goal=paused,
+            message_id="om_goal_resume_command_card",
+            runtime_state="goal-paused",
+        )
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id,
+            "native-one",
+            "goal-resumed",
+            lambda: None,
+        )
+        self.channel.fail_card_updates = True
+
+        await self.app.handle_message(
+            FakeMessage("/goal resume", message_id="om_goal_resume_command")
+        )
+
+        self.assertEqual(len(self.runtime.resume_goal_calls), 1)
+        self.assertIn("Goal 已恢复并在原生 Codex 中执行", self.channel.replies[-1][1])
+        self.assertIn("状态卡暂时无法展示", self.channel.replies[-1][1])
+
+    async def test_goal_status_refreshes_the_canonical_running_card(self) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.goal_snapshot_value = native_goal()
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id,
+            "native-one",
+            "goal-one",
+            lambda: None,
+        )
+        self.channel.reply_results.append(
+            sent_result("om_goal_canonical", chat_id="oc_direct")
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/goal ship safely", message_id="om_goal_start")
+        )
+        await self.app.handle_message(
+            FakeMessage("/goal", message_id="om_goal_status")
+        )
+
+        self.assertEqual(len(self.channel.replies), 1)
+        self.assertEqual(self.channel.updates[-1][0], "om_goal_canonical")
+
+    async def test_goal_status_after_restart_registers_new_controls(self) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        paused = native_goal(GoalStatus.PAUSED)
+        self.runtime.goal_snapshot_value = paused
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id,
+            "native-one",
+            "goal-resumed",
+            lambda: None,
+        )
+        self.channel.reply_results.append(
+            sent_result("om_goal_restart_snapshot", chat_id="oc_direct")
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/goal", message_id="om_goal_restart_status")
+        )
+
+        snapshot_card = self.channel.replies[-1][1]
+        self.assertIsInstance(snapshot_card, OutboundCard)
+        assert isinstance(snapshot_card, OutboundCard)
+        resume_value = next(
+            behavior["value"]
+            for button in _elements(snapshot_card.card, "button")
+            if button["text"]["content"] == "恢复 Goal"
+            for behavior in button.get("behaviors", ())
+        )
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                resume_value,
+                message_id="om_goal_restart_snapshot",
+            )
+        )
+
+        self.assertEqual(len(self.runtime.resume_goal_calls), 1)
+        self.assertEqual(self.channel.updates[-1][0], "om_goal_restart_snapshot")
+
+    async def test_stale_logical_goal_completion_cannot_overwrite_resume(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        goal = native_goal(GoalStatus.ACTIVE)
+        generation = goal_generation(goal)
+        origin = channel_app.GoalCardOrigin(
+            message_id=None,
+            scope=scope,
+            binding_id=binding.id,
+            short_id=binding.short_id,
+            project_alias=binding.project_alias,
+            fallback_origin=FakeMessage("/goal", message_id="om_origin"),
+        )
+        first = ReplyCardProjection(
+            scope=scope,
+            goal=channel_app._reply_goal_module(
+                binding=binding,
+                goal=goal,
+                runtime_state=GoalOperationState.RUNNING.value,
+                notice="first run",
+            ),
+        )
+        resumed = ReplyCardProjection(
+            scope=scope,
+            goal=channel_app._reply_goal_module(
+                binding=binding,
+                goal=goal,
+                runtime_state=GoalOperationState.RUNNING.value,
+                notice="resumed run",
+            ),
+        )
+        self.channel.reply_results.append(
+            sent_result("om_goal_race", chat_id="oc_direct")
+        )
+        self.assertTrue(
+            await self.app._progress_cards.start_goal(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-old",
+                generation=generation,
+                origin=origin,
+                projection=first,
+                revision=(1,),
+                refresh=None,
+            )
+        )
+        self.assertTrue(
+            await self.app._progress_cards.start_goal(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-new",
+                generation=generation,
+                origin=origin,
+                projection=resumed,
+                revision=(2,),
+                refresh=None,
+            )
+        )
+        update_count = len(self.channel.updates)
+
+        delivered = await self.app._progress_cards.finish_goal(
+            binding_id=binding.id,
+            thread_id="native-one",
+            logical_turn_id="goal-old",
+            generation=generation,
+            origin=origin,
+            projection=first,
+            retain_session=True,
+        )
+
+        self.assertTrue(delivered)
+        self.assertEqual(len(self.channel.updates), update_count)
+        session = self.app._progress_cards._goal_sessions[
+            (binding.id, "native-one", generation)
+        ]
+        self.assertEqual(session.logical_turn_id, "goal-new")
+
+        self.assertIs(
+            await self.app._progress_cards.finish_goal(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-new",
+                generation=generation,
+                origin=origin,
+                projection=resumed,
+                retain_session=False,
+            ),
+            channel_app._GoalCardDelivery.DELIVERED,
+        )
+        update_count = len(self.channel.updates)
+        self.assertNotIn(
+            (binding.id, "native-one", generation),
+            self.app._progress_cards._goal_sessions,
+        )
+
+        self.assertIs(
+            await self.app._progress_cards.finish_goal(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-old",
+                generation=generation,
+                origin=origin,
+                projection=first,
+                retain_session=True,
+            ),
+            channel_app._GoalCardDelivery.SUPERSEDED,
+        )
+        self.assertEqual(len(self.channel.updates), update_count)
+        current = self.app._progress_cards.goal_projection(
+            source_id="om_goal_race",
+            generation=generation,
+        )
+        self.assertIsNone(current)
+        self.assertIn(
+            "resumed run",
+            json.dumps(self.channel.updates[-1][1], ensure_ascii=False),
+        )
+
+    async def test_goal_finish_does_not_deadlock_with_refresh_in_flight(self) -> None:
+        await self.new()
+        await self.app._progress_cards.close()
+        self.app._progress_cards = channel_app._ProgressCardController(
+            self.channel,
+            self.runtime,  # type: ignore[arg-type]
+            poll_seconds=0.01,
+            operation_timeout_seconds=0.5,
+        )
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        goal = native_goal(GoalStatus.ACTIVE)
+        generation = goal_generation(goal)
+        projection = ReplyCardProjection(
+            scope=scope,
+            goal=channel_app._reply_goal_module(
+                binding=binding,
+                goal=goal,
+                runtime_state=GoalOperationState.RUNNING.value,
+            ),
+        )
+        origin = channel_app.GoalCardOrigin(
+            message_id=None,
+            scope=scope,
+            binding_id=binding.id,
+            short_id=binding.short_id,
+            project_alias=binding.project_alias,
+            fallback_origin=FakeMessage("/goal", message_id="om_goal_gate"),
+        )
+        refresh_entered = asyncio.Event()
+        release_refresh = asyncio.Event()
+
+        async def refresh():
+            refresh_entered.set()
+            await release_refresh.wait()
+            return (2,), projection
+
+        self.channel.reply_results.append(
+            sent_result("om_goal_gate_card", chat_id="oc_direct")
+        )
+        self.assertTrue(
+            await self.app._progress_cards.start_goal(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-one",
+                generation=generation,
+                origin=origin,
+                projection=projection,
+                revision=(1,),
+                refresh=refresh,
+            )
+        )
+        async with asyncio.timeout(1):
+            await refresh_entered.wait()
+
+        finishing = asyncio.create_task(
+            self.app._progress_cards.finish_goal(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-one",
+                generation=generation,
+                origin=origin,
+                projection=projection,
+                retain_session=False,
+            )
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(finishing.done())
+        release_refresh.set()
+
+        async with asyncio.timeout(1):
+            self.assertIs(
+                await finishing,
+                channel_app._GoalCardDelivery.DELIVERED,
+            )
+        self.assertEqual(self.channel.updates[-1][0], "om_goal_gate_card")
+
+    async def test_superseded_goal_fallback_is_suppressed_before_reply(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        goal = native_goal(GoalStatus.ACTIVE)
+        generation = goal_generation(goal)
+        origin = channel_app.GoalCardOrigin(
+            message_id=None,
+            scope=scope,
+            binding_id=binding.id,
+            short_id=binding.short_id,
+            project_alias=binding.project_alias,
+            fallback_origin=FakeMessage("/goal", message_id="om_fallback_origin"),
+        )
+        old_projection = ReplyCardProjection(
+            scope=scope,
+            goal=channel_app._reply_goal_module(
+                binding=binding,
+                goal=goal,
+                runtime_state=GoalOperationState.RUNNING.value,
+                notice="old run",
+            ),
+        )
+        new_projection = replace(
+            old_projection,
+            goal=replace(old_projection.goal, notice="new run"),
+        )
+        self.channel.reply_results.append(
+            sent_result("om_goal_fallback_race", chat_id="oc_direct")
+        )
+        self.assertTrue(
+            await self.app._progress_cards.start_goal(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-old",
+                generation=generation,
+                origin=origin,
+                projection=old_projection,
+                revision=(1,),
+                refresh=None,
+            )
+        )
+        self.assertTrue(
+            await self.app._progress_cards.start_goal(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-new",
+                generation=generation,
+                origin=origin,
+                projection=new_projection,
+                revision=(2,),
+                refresh=None,
+            )
+        )
+        reply_count = len(self.channel.replies)
+
+        delivery = await self.app._progress_cards.reply_goal_fallback(
+            binding_id=binding.id,
+            thread_id="native-one",
+            logical_turn_id="goal-old",
+            generation=generation,
+            target=origin.fallback_origin,
+            card=reply_card(old_projection),
+            origin=origin,
+            projection=old_projection,
+            retain_session=True,
+        )
+
+        self.assertIs(delivery, channel_app._GoalCardDelivery.SUPERSEDED)
+        self.assertEqual(len(self.channel.replies), reply_count)
+
+    async def test_superseded_oversized_goal_result_is_not_replied(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        goal = native_goal(GoalStatus.ACTIVE)
+        generation = goal_generation(goal)
+        origin = channel_app.GoalCardOrigin(
+            message_id=None,
+            scope=scope,
+            binding_id=binding.id,
+            short_id=binding.short_id,
+            project_alias=binding.project_alias,
+            fallback_origin=FakeMessage("/goal", message_id="om_oversized_origin"),
+        )
+        projection = ReplyCardProjection(
+            scope=scope,
+            goal=channel_app._reply_goal_module(
+                binding=binding,
+                goal=goal,
+                runtime_state=GoalOperationState.RUNNING.value,
+            ),
+        )
+        self.channel.reply_results.append(
+            sent_result("om_goal_oversized_race", chat_id="oc_direct")
+        )
+        self.assertTrue(
+            await self.app._progress_cards.start_goal(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-old",
+                generation=generation,
+                origin=origin,
+                projection=projection,
+                revision=(1,),
+                refresh=None,
+            )
+        )
+        self.assertTrue(
+            await self.app._progress_cards.start_goal(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-new",
+                generation=generation,
+                origin=origin,
+                projection=projection,
+                revision=(2,),
+                refresh=None,
+            )
+        )
+        reply_count = len(self.channel.replies)
+        update_count = len(self.channel.updates)
+
+        await self.app.handle_completion(
+            GoalOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-old",
+                owner_id="ou_user",
+                origin=origin,
+                goal=native_goal(GoalStatus.PAUSED),
+                final_physical_turn_id="turn-old-final",
+                final_turn_status="interrupted",
+                final_response="x" * 100_001,
+            )
+        )
+
+        self.assertEqual(len(self.channel.replies), reply_count)
+        self.assertEqual(len(self.channel.updates), update_count)
+
+    async def test_goal_session_projection_survives_cache_eviction(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        goal = native_goal(GoalStatus.PAUSED)
+        generation = goal_generation(goal)
+        projection = ReplyCardProjection(
+            scope=scope,
+            goal=channel_app._reply_goal_module(
+                binding=binding,
+                goal=goal,
+                runtime_state="goal-paused",
+            ),
+            result=ReplyCardResultModule("retained result"),
+        )
+        origin = channel_app.GoalCardOrigin(
+            message_id=None,
+            scope=scope,
+            binding_id=binding.id,
+            short_id=binding.short_id,
+            project_alias=binding.project_alias,
+            fallback_origin=FakeMessage("/goal", message_id="om_cache_origin"),
+        )
+        self.channel.reply_results.append(
+            sent_result("om_cache_goal", chat_id="oc_direct")
+        )
+        self.assertTrue(
+            await self.app._progress_cards.start_goal(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-one",
+                generation=generation,
+                origin=origin,
+                projection=projection,
+                revision=(1,),
+                refresh=None,
+            )
+        )
+
+        for index in range(channel_app._GOAL_REPLY_CARD_CACHE_LIMIT + 1):
+            self.app._progress_cards._remember_goal_projection(
+                f"om_cache_{index}",
+                f"generation_{index}",
+                projection,
+            )
+
+        self.assertNotIn(
+            ("om_cache_goal", generation),
+            self.app._progress_cards._goal_cards,
+        )
+        self.assertEqual(
+            self.app._progress_cards.goal_projection(
+                source_id="om_cache_goal",
+                generation=generation,
+            ),
+            projection,
+        )
+
     async def test_goal_pause_card_finishes_on_the_same_card(self) -> None:
         await self.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
@@ -4851,12 +5591,11 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.runtime.stop_result = StopDisposition.GOAL_REQUESTED
         self.runtime.goal_snapshot_value = native_goal(GoalStatus.ACTIVE)
         self.runtime.goal_snapshot_after_stop = native_goal(GoalStatus.PAUSED)
-        card = goal_card(
+        card = await self.register_goal_card(
             scope=scope,
-            binding_id=binding.id,
-            short_id=binding.short_id,
-            project_alias=binding.project_alias,
+            binding=binding,
             goal=self.runtime.goal_snapshot_value,
+            message_id="om_goal_card",
             runtime_state=GoalOperationState.RUNNING.value,
         )
         pause = next(
@@ -4878,10 +5617,880 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+        pausing = json.dumps(self.channel.updates[-1][1], ensure_ascii=False)
+        self.assertIn("正在暂停 Goal", pausing)
+        await self.app.handle_completion(
+            GoalOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-one",
+                owner_id="ou_user",
+                origin=channel_app.GoalCardOrigin(
+                    message_id="om_goal_card",
+                    scope=scope,
+                    binding_id=binding.id,
+                    short_id=binding.short_id,
+                    project_alias=binding.project_alias,
+                ),
+                goal=self.runtime.goal_snapshot_after_stop,
+                final_physical_turn_id="turn-final",
+                final_turn_status="interrupted",
+            )
+        )
+
         rendered = json.dumps(self.channel.updates[-1][1], ensure_ascii=False)
         self.assertIn("Goal 已暂停", rendered)
         self.assertIn("goal-paused", rendered)
-        self.assertIn("前台工具进程可能仍在运行", rendered)
+        self.assertIn("前台工具进程不受此接口保证，可能仍在运行", rendered)
+
+    async def test_goal_uses_one_composed_card_through_result_files_and_paging(
+        self,
+    ) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        feedback = BindingTaskFeedback(progress_card_enabled=True)
+        activity = goal_activity_snapshot(
+            binding_id=binding.id,
+            steps=tuple(
+                TurnPlanStepSnapshot(
+                    "generate outputs" if index == 0 else f"step {index}",
+                    TurnPlanStepState.COMPLETED,
+                )
+                for index in range(13)
+            ),
+        )
+        self.runtime.goal_activity_values[binding.id] = activity
+        self.runtime.goal_snapshot_value = native_goal(GoalStatus.ACTIVE)
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id,
+            "native-one",
+            "goal-one",
+            lambda: None,
+            task_feedback=feedback,
+        )
+        self.channel.reply_results.append(
+            sent_result("om_goal_composed", chat_id="oc_direct")
+        )
+        paths = tuple(f"goal-result-{index:02}.txt" for index in range(10))
+        for path in paths:
+            (self.project / path).write_text(path, encoding="utf-8")
+
+        await self.app.handle_message(
+            FakeMessage("/goal ship safely", message_id="om_goal_composed_origin")
+        )
+
+        self.assertEqual(len(self.channel.replies), 1)
+        origin = self.runtime.start_goal_calls[-1]["origin"]
+        self.assertIsInstance(origin, channel_app.GoalCardOrigin)
+        assert isinstance(origin, channel_app.GoalCardOrigin)
+        self.assertEqual(origin.message_id, "om_goal_composed")
+        initial = self.channel.replies[0][1]
+        assert isinstance(initial, OutboundCard)
+        self.assertEqual(len(tuple(_elements(initial.card, "collapsible_panel"))), 1)
+
+        final_item = file_change_item(*paths)
+        await self.app.handle_completion(
+            GoalOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-one",
+                owner_id="ou_user",
+                origin=origin,
+                goal=native_goal(GoalStatus.COMPLETE),
+                final_physical_turn_id="goal-turn-final",
+                final_turn_status="completed",
+                final_items=(final_item,),
+                final_response="goal files ready",
+                task_feedback=feedback,
+                activity=activity,
+                finalization=GoalFinalizationStatus.CLEARED,
+            )
+        )
+
+        self.assertEqual(len(self.channel.replies), 1)
+        self.assertEqual(self.channel.updates[-1][0], "om_goal_composed")
+        terminal = self.channel.updates[-1][1]
+        rendered = json.dumps(terminal, ensure_ascii=False)
+        self.assertIn("Goal 已完成并自动结束", rendered)
+        self.assertIn("generate outputs", rendered)
+        self.assertIn("另有 1 项未展示", rendered)
+        self.assertIn("goal files ready", rendered)
+        self.assertIn("goal-result-00.txt", rendered)
+        self.assertNotIn("结束 Goal", rendered)
+        panel = next(iter(_elements(terminal, "collapsible_panel")))
+        self.assertFalse(panel["expanded"])
+        page_value = next(
+            behavior["value"]
+            for button in _elements(terminal, "button")
+            for behavior in button.get("behaviors", ())
+            if behavior["value"]["intent"] == "turn-file.page"
+        )
+        self.assertEqual(page_value["v"], 5)
+        self.runtime.goal_snapshot_value = None
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                page_value,
+                message_id="om_goal_composed",
+            )
+        )
+
+        paged = json.dumps(self.channel.updates[-1][1], ensure_ascii=False)
+        self.assertIn("Goal 已完成并自动结束", paged)
+        self.assertIn("generate outputs", paged)
+        self.assertIn("goal files ready", paged)
+        self.assertIn("goal-result-08.txt", paged)
+        # The cleared G1 card remains a frozen result even after G2 exists.
+        # Paging G1 updates only G1's exact source message.
+        self.runtime.goal_snapshot_value = native_goal(
+            GoalStatus.ACTIVE,
+            created_at=2,
+        )
+        update_count = len(self.channel.updates)
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                page_value,
+                message_id="om_goal_composed",
+            )
+        )
+        self.assertEqual(len(self.channel.updates), update_count + 1)
+        self.assertIn(
+            "goal-result-08.txt",
+            json.dumps(self.channel.updates[-1][1], ensure_ascii=False),
+        )
+
+    async def test_goal_completion_survives_exact_binding_deletion(self) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.goal_snapshot_value = native_goal(GoalStatus.ACTIVE)
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id,
+            "native-one",
+            "goal-one",
+            lambda: None,
+        )
+        self.channel.reply_results.append(
+            sent_result("om_goal_deleted", chat_id="oc_direct")
+        )
+        await self.app.handle_message(
+            FakeMessage("/goal ship safely", message_id="om_goal_origin")
+        )
+        origin = self.runtime.start_goal_calls[-1]["origin"]
+        result_path = "goal-after-binding-deletion.txt"
+        (self.project / result_path).write_text("result", encoding="utf-8")
+        self.store.delete_binding(binding.id)
+
+        await self.app.handle_completion(
+            GoalOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-one",
+                owner_id="ou_user",
+                origin=origin,
+                goal=native_goal(GoalStatus.COMPLETE),
+                final_physical_turn_id="goal-turn-final",
+                final_turn_status="completed",
+                final_items=(file_change_item(result_path),),
+                final_response="result after binding deletion",
+                finalization=GoalFinalizationStatus.CLEARED,
+            )
+        )
+
+        self.assertEqual(self.channel.updates[-1][0], "om_goal_deleted")
+        self.assertIn(
+            "result after binding deletion",
+            json.dumps(self.channel.updates[-1][1], ensure_ascii=False),
+        )
+        self.assertIn(
+            result_path,
+            json.dumps(self.channel.updates[-1][1], ensure_ascii=False),
+        )
+
+    async def test_paused_goal_completed_turn_keeps_files_without_text_response(
+        self,
+    ) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.goal_snapshot_value = native_goal(GoalStatus.ACTIVE)
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id,
+            "native-one",
+            "goal-one",
+            lambda: None,
+        )
+        self.channel.reply_results.append(
+            sent_result("om_goal_paused_files", chat_id="oc_direct")
+        )
+        await self.app.handle_message(
+            FakeMessage("/goal ship safely", message_id="om_goal_paused_files_origin")
+        )
+        origin = self.runtime.start_goal_calls[-1]["origin"]
+        result_path = "paused-goal-output.txt"
+        (self.project / result_path).write_text("paused output", encoding="utf-8")
+
+        await self.app.handle_completion(
+            GoalOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-one",
+                owner_id="ou_user",
+                origin=origin,
+                goal=native_goal(GoalStatus.PAUSED),
+                final_physical_turn_id="goal-turn-final",
+                final_turn_status="completed",
+                final_items=(file_change_item(result_path),),
+                final_response=None,
+            )
+        )
+
+        rendered = json.dumps(self.channel.updates[-1][1], ensure_ascii=False)
+        self.assertIn("Goal 已暂停，未产生文本回复", rendered)
+        self.assertIn(result_path, rendered)
+
+    async def test_terminal_goal_fallback_card_clear_preserves_result_and_files(
+        self,
+    ) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.goal_snapshot_value = native_goal(GoalStatus.ACTIVE)
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id,
+            "native-one",
+            "goal-one",
+            lambda: None,
+        )
+        self.channel.reply_results.extend(
+            (
+                sent_result("om_goal_original", chat_id="oc_direct"),
+                sent_result("om_goal_fallback", chat_id="oc_direct"),
+            )
+        )
+        await self.app.handle_message(
+            FakeMessage("/goal ship safely", message_id="om_goal_origin")
+        )
+        origin = self.runtime.start_goal_calls[-1]["origin"]
+        result_path = self.project / "fallback-result.txt"
+        result_path.write_text("result", encoding="utf-8")
+        self.channel.fail_card_updates = True
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_completion(
+                GoalOutcome(
+                    binding_id=binding.id,
+                    thread_id="native-one",
+                    logical_turn_id="goal-one",
+                    owner_id="ou_user",
+                    origin=origin,
+                    goal=native_goal(GoalStatus.COMPLETE),
+                    final_physical_turn_id="goal-turn-final",
+                    final_turn_status="completed",
+                    final_items=(file_change_item(result_path.name),),
+                    final_response="fallback answer survives",
+                )
+            )
+
+        self.channel.fail_card_updates = False
+        fallback = self.channel.replies[-1][1]
+        self.assertIsInstance(fallback, OutboundCard)
+        assert isinstance(fallback, OutboundCard)
+        fallback_text = json.dumps(fallback.card, ensure_ascii=False)
+        self.assertIn("fallback answer survives", fallback_text)
+        self.assertIn(result_path.name, fallback_text)
+        clear_value = next(
+            behavior["value"]
+            for button in _elements(fallback.card, "button")
+            if button["text"]["content"] == "结束 Goal"
+            for behavior in button.get("behaviors", ())
+        )
+        self.runtime.goal_snapshot_value = native_goal(GoalStatus.COMPLETE)
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                clear_value,
+                message_id="om_goal_fallback",
+            )
+        )
+
+        self.assertEqual(self.runtime.clear_goal_calls, [self.store.get(binding.id)])
+        updated = json.dumps(self.channel.updates[-1][1], ensure_ascii=False)
+        self.assertIn("Goal 已结束", updated)
+        self.assertIn("fallback answer survives", updated)
+        self.assertIn(result_path.name, updated)
+
+    async def test_restart_stale_goal_control_cannot_drop_result_modules(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        paused = native_goal(GoalStatus.PAUSED)
+        result_path = self.project / "restart-retained.txt"
+        result_path.write_text("retained", encoding="utf-8")
+        stale = reply_card(
+            ReplyCardProjection(
+                scope=scope,
+                goal=channel_app._reply_goal_module(
+                    binding=self.store.get(binding.id),
+                    goal=paused,
+                    runtime_state="goal-paused",
+                ),
+                result=ReplyCardResultModule("retained after restart"),
+                files=ReplyCardFilesModule(
+                    binding_id=binding.id,
+                    turn_id="goal-turn-final",
+                    items=(
+                        ReplyCardFileItem(
+                            path=str(result_path),
+                            label=result_path.name,
+                            size=result_path.stat().st_size,
+                            media_kind="file",
+                        ),
+                    ),
+                ),
+            )
+        )
+        clear_value = next(
+            behavior["value"]
+            for button in _elements(stale.card, "button")
+            if button["text"]["content"] == "结束 Goal"
+            for behavior in button.get("behaviors", ())
+        )
+        self.runtime.goal_snapshot_value = paused
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                clear_value,
+                message_id="om_restart_stale_goal",
+            )
+        )
+
+        self.assertEqual(self.runtime.clear_goal_calls, [])
+        self.assertEqual(self.channel.updates, [])
+        self.assertIn("Goal 卡片已过期", self.channel.replies[-1][1])
+
+    async def test_goal_clear_command_preserves_result_files_and_current_page(
+        self,
+    ) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        binding = self.store.get(binding.id)
+        paused = native_goal(GoalStatus.PAUSED)
+        items = []
+        for index in range(10):
+            path = self.project / f"clear-page-{index:02}.txt"
+            path.write_text(str(index), encoding="utf-8")
+            items.append(
+                ReplyCardFileItem(
+                    path=str(path),
+                    label=path.name,
+                    size=path.stat().st_size,
+                    media_kind="file",
+                )
+            )
+        projection = ReplyCardProjection(
+            scope=scope,
+            goal=channel_app._reply_goal_module(
+                binding=binding,
+                goal=paused,
+                runtime_state="goal-paused",
+            ),
+            result=ReplyCardResultModule("clear keeps this result"),
+            files=ReplyCardFilesModule(
+                binding_id=binding.id,
+                turn_id="goal-turn-final",
+                items=tuple(items),
+            ),
+        )
+        generation = goal_generation(paused)
+        self.assertTrue(
+            await self.app._progress_cards.start_goal(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-terminal",
+                generation=generation,
+                origin=channel_app.GoalCardOrigin(
+                    message_id="om_goal_clear_page",
+                    scope=scope,
+                    binding_id=binding.id,
+                    short_id=binding.short_id,
+                    project_alias=binding.project_alias,
+                ),
+                projection=projection,
+                revision=("terminal",),
+                refresh=None,
+            )
+        )
+        self.channel.updates.clear()
+        card = reply_card(projection)
+        page_value = next(
+            behavior["value"]
+            for button in _elements(card.card, "button")
+            for behavior in button.get("behaviors", ())
+            if behavior["value"]["intent"] == "turn-file.page"
+        )
+        self.runtime.goal_snapshot_value = paused
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                page_value,
+                message_id="om_goal_clear_page",
+            )
+        )
+        await self.app.handle_message(
+            FakeMessage("/goal clear", message_id="om_goal_clear_command")
+        )
+
+        updated = json.dumps(self.channel.updates[-1][1], ensure_ascii=False)
+        self.assertIn("Goal 已结束", updated)
+        self.assertIn("clear keeps this result", updated)
+        visible = "\n".join(
+            element["content"]
+            for element in _elements(self.channel.updates[-1][1], "markdown")
+        )
+        self.assertIn("clear-page-08.txt", visible)
+        self.assertNotIn("clear-page-00.txt", visible)
+
+    async def test_oversized_goal_result_falls_back_without_losing_text(
+        self,
+    ) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.goal_snapshot_value = native_goal(GoalStatus.ACTIVE)
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id,
+            "native-one",
+            "goal-one",
+            lambda: None,
+        )
+        self.channel.reply_results.append(
+            sent_result("om_goal_oversized", chat_id="oc_direct")
+        )
+        await self.app.handle_message(
+            FakeMessage("/goal ship safely", message_id="om_goal_origin")
+        )
+        origin = self.runtime.start_goal_calls[-1]["origin"]
+        oversized = "x" * 100_001
+
+        await self.app.handle_completion(
+            GoalOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-one",
+                owner_id="ou_user",
+                origin=origin,
+                goal=native_goal(GoalStatus.COMPLETE),
+                final_physical_turn_id="goal-turn-final",
+                final_turn_status="completed",
+                final_response=oversized,
+                finalization=GoalFinalizationStatus.CLEARED,
+            )
+        )
+
+        self.assertIn(
+            "结果正文无法完整放入卡片",
+            json.dumps(self.channel.updates[-1][1], ensure_ascii=False),
+        )
+        self.assertEqual(self.channel.replies[-1][1], oversized)
+
+    async def test_stale_goal_file_page_cannot_overwrite_cleared_card(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        paused = native_goal(GoalStatus.PAUSED)
+        items = []
+        for index in range(9):
+            path = self.project / f"stale-page-{index}.txt"
+            path.write_text(str(index), encoding="utf-8")
+            items.append(
+                ReplyCardFileItem(
+                    path=str(path),
+                    label=path.name,
+                    size=None,
+                    media_kind=None,
+                )
+            )
+        card = reply_card(
+            ReplyCardProjection(
+                scope=scope,
+                goal=channel_app._reply_goal_module(
+                    binding=binding,
+                    goal=paused,
+                    runtime_state="goal-paused",
+                ),
+                result=ReplyCardResultModule("paused result"),
+                files=ReplyCardFilesModule(
+                    binding_id=binding.id,
+                    turn_id="goal-turn-final",
+                    items=tuple(items),
+                ),
+            )
+        )
+        page_value = next(
+            behavior["value"]
+            for button in _elements(card.card, "button")
+            for behavior in button.get("behaviors", ())
+            if behavior["value"]["intent"] == "turn-file.page"
+        )
+        intent = decode_turn_file_action(
+            app_id="cli_test",
+            message_id="om_cleared_goal",
+            callback_chat_id="oc_direct",
+            sender_id="ou_user",
+            tag="button",
+            value=page_value,
+        )
+        self.runtime.goal_snapshot_value = None
+
+        with self.assertRaisesRegex(CardActionError, "Goal 已变化"):
+            await self.app._turn_file_action(intent)
+
+        self.assertEqual(self.channel.updates, [])
+
+    async def test_goal_file_page_rejects_changed_current_file_manifest(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        paused = native_goal(GoalStatus.PAUSED)
+        old_items = []
+        for index in range(9):
+            path = self.project / f"old-page-{index}.txt"
+            path.write_text(str(index), encoding="utf-8")
+            old_items.append(
+                ReplyCardFileItem(
+                    path=str(path),
+                    label=path.name,
+                    size=path.stat().st_size,
+                    media_kind="file",
+                )
+            )
+        old_projection = ReplyCardProjection(
+            scope=scope,
+            goal=channel_app._reply_goal_module(
+                binding=binding,
+                goal=paused,
+                runtime_state="goal-paused",
+            ),
+            result=ReplyCardResultModule("old result"),
+            files=ReplyCardFilesModule(
+                binding_id=binding.id,
+                turn_id="goal-turn-final",
+                items=tuple(old_items),
+            ),
+        )
+        card = reply_card(old_projection)
+        page_value = next(
+            behavior["value"]
+            for button in _elements(card.card, "button")
+            for behavior in button.get("behaviors", ())
+            if behavior["value"]["intent"] == "turn-file.page"
+        )
+        intent = decode_turn_file_action(
+            app_id="cli_test",
+            message_id="om_changed_files",
+            callback_chat_id="oc_direct",
+            sender_id="ou_user",
+            tag="button",
+            value=page_value,
+        )
+        replacement = self.project / "replacement.txt"
+        replacement.write_text("replacement", encoding="utf-8")
+        generation = goal_generation(paused)
+        self.app._progress_cards._remember_goal_projection(
+            "om_changed_files",
+            generation,
+            replace(
+                old_projection,
+                files=ReplyCardFilesModule(
+                    binding_id=binding.id,
+                    turn_id="goal-turn-final",
+                    items=(
+                        ReplyCardFileItem(
+                            path=str(replacement),
+                            label=replacement.name,
+                            size=replacement.stat().st_size,
+                            media_kind="file",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        self.runtime.goal_snapshot_value = paused
+
+        with self.assertRaisesRegex(CardActionError, "结果或文件已变化"):
+            await self.app._turn_file_action(intent)
+
+        self.assertEqual(self.channel.updates, [])
+
+    async def test_goal_clear_unknown_keeps_result_and_disables_controls(self) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.goal_snapshot_value = native_goal(GoalStatus.ACTIVE)
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id,
+            "native-one",
+            "goal-one",
+            lambda: None,
+        )
+        self.channel.reply_results.append(
+            sent_result("om_goal_unknown", chat_id="oc_direct")
+        )
+        await self.app.handle_message(
+            FakeMessage("/goal ship safely", message_id="om_goal_unknown_origin")
+        )
+        origin = self.runtime.start_goal_calls[-1]["origin"]
+
+        await self.app.handle_completion(
+            GoalOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-one",
+                owner_id="ou_user",
+                origin=origin,
+                goal=native_goal(GoalStatus.COMPLETE),
+                final_physical_turn_id="goal-turn-final",
+                final_turn_status="completed",
+                final_response="answer survives",
+                finalization=GoalFinalizationStatus.UNKNOWN,
+                finalization_error=RuntimeError("clear response lost"),
+            )
+        )
+
+        rendered = json.dumps(self.channel.updates[-1][1], ensure_ascii=False)
+        self.assertIn("自动结束结果未知", rendered)
+        self.assertIn("answer survives", rendered)
+        self.assertIn("goal-unknown", rendered)
+        self.assertNotIn("暂停 Goal", rendered)
+        self.assertNotIn("恢复 Goal", rendered)
+        self.assertNotIn("结束 Goal", rendered)
+        self.assertEqual(len(self.channel.replies), 1)
+
+    async def test_goal_unknown_with_native_absent_keeps_frozen_status_and_rejects_clear(
+        self,
+    ) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        frozen = native_goal(GoalStatus.COMPLETE)
+        self.runtime.goal_snapshot_value = frozen
+        self.runtime.active_goals[binding.id] = ActiveGoalSnapshot(
+            binding_id=binding.id,
+            thread_id="native-one",
+            logical_turn_id="goal-one",
+            owner_id="ou_user",
+            state=GoalOperationState.UNKNOWN,
+            persisted=frozen,
+        )
+        self.runtime.clear_goal_error = GoalStateUnknown(
+            "当前 Goal 状态未确认；该会话保持占用。"
+        )
+        self.channel.reply_results.append(
+            sent_result("om_goal_frozen_unknown", chat_id="oc_direct")
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/goal", message_id="om_goal_unknown_status")
+        )
+
+        status_card = self.channel.replies[-1][1]
+        self.assertIsInstance(status_card, OutboundCard)
+        assert isinstance(status_card, OutboundCard)
+        serialized = json.dumps(status_card.card, ensure_ascii=False)
+        self.assertIn("goal-unknown", serialized)
+        self.assertIn("ship safely", serialized)
+        self.assertNotIn("当前原生 Thread 没有 Goal", serialized)
+
+        await self.app.handle_message(
+            FakeMessage("/goal clear", message_id="om_goal_unknown_clear")
+        )
+
+        self.assertEqual(len(self.runtime.clear_goal_calls), 1)
+        self.assertIn("Goal 状态未确认", self.channel.replies[-1][1])
+        self.assertEqual(self.channel.updates, [])
+
+    async def test_goal_start_unknown_without_snapshot_never_claims_no_goal(
+        self,
+    ) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.goal_snapshot_value = None
+        self.runtime.active_goals[binding.id] = ActiveGoalSnapshot(
+            binding_id=binding.id,
+            thread_id="native-one",
+            logical_turn_id=None,
+            owner_id="ou_user",
+            state=GoalOperationState.UNKNOWN,
+            persisted=None,
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/goal", message_id="om_goal_start_unknown_status")
+        )
+
+        status_card = self.channel.replies[-1][1]
+        self.assertIsInstance(status_card, OutboundCard)
+        assert isinstance(status_card, OutboundCard)
+        serialized = json.dumps(status_card.card, ensure_ascii=False)
+        self.assertIn("Goal 状态未确认", serialized)
+        self.assertIn("当前会话仍保持占用", serialized)
+        self.assertNotIn("当前原生 Thread 没有 Goal", serialized)
+
+    async def test_goal_card_controls_exact_binding_after_active_switch(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        goal_binding = self.store.active_binding(scope.key)
+        await self.create_binding(scope)
+        self.assertNotEqual(
+            self.store.active_binding(scope.key).id,
+            goal_binding.id,
+        )
+        self.runtime.goal_snapshot_value = native_goal(GoalStatus.ACTIVE)
+        card = await self.register_goal_card(
+            scope=scope,
+            binding=goal_binding,
+            goal=self.runtime.goal_snapshot_value,
+            message_id="om_background_goal",
+            runtime_state=GoalOperationState.RUNNING.value,
+        )
+        pause = next(
+            item
+            for item in _elements(card.card, "button")
+            if item["text"]["content"] == "暂停 Goal"
+        )
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                pause["behaviors"][0]["value"],
+                message_id="om_background_goal",
+            )
+        )
+
+        self.assertEqual(self.runtime.stop_calls, [goal_binding.id])
+        self.assertEqual(self.channel.updates[-1][0], "om_background_goal")
+        self.assertIn(
+            "正在暂停 Goal",
+            json.dumps(self.channel.updates[-1][1], ensure_ascii=False),
+        )
+
+    async def test_stale_goal_generation_has_zero_native_mutation(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        old = native_goal(GoalStatus.ACTIVE, created_at=1)
+        card = await self.register_goal_card(
+            scope=scope,
+            binding=binding,
+            goal=old,
+            message_id="om_stale_goal",
+            runtime_state=GoalOperationState.RUNNING.value,
+        )
+        self.runtime.goal_snapshot_value = native_goal(
+            GoalStatus.ACTIVE,
+            created_at=2,
+        )
+        pause = next(
+            item
+            for item in _elements(card.card, "button")
+            if item["text"]["content"] == "暂停 Goal"
+        )
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                pause["behaviors"][0]["value"],
+                message_id="om_stale_goal",
+            )
+        )
+
+        self.assertEqual(self.runtime.stop_calls, [])
+        self.assertEqual(self.channel.updates[-1][0], "om_stale_goal")
+        self.assertIn(
+            "Goal 已变化",
+            json.dumps(self.channel.updates[-1][1], ensure_ascii=False),
+        )
+
+    async def test_same_second_goal_fingerprint_still_requires_exact_card_owner(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        first_goal = native_goal(GoalStatus.ACTIVE, created_at=1)
+        old_card = await self.register_goal_card(
+            scope=scope,
+            binding=binding,
+            goal=first_goal,
+            message_id="om_goal_same_second_old",
+            runtime_state=GoalOperationState.RUNNING.value,
+            logical_turn_id="goal-old",
+        )
+        old_pause = next(
+            item
+            for item in _elements(old_card.card, "button")
+            if item["text"]["content"] == "暂停 Goal"
+        )
+        generation = goal_generation(first_goal)
+        self.assertTrue(
+            await self.app._progress_cards.update_goal_module(
+                source_id="om_goal_same_second_old",
+                generation=generation,
+                scope=scope,
+                goal=channel_app._reply_goal_module(
+                    binding=self.store.get(binding.id),
+                    goal=None,
+                    notice="Goal 已结束。",
+                ),
+                retain_session=False,
+            )
+        )
+        second_goal = native_goal(GoalStatus.ACTIVE, created_at=1)
+        self.assertEqual(goal_generation(second_goal), generation)
+        await self.register_goal_card(
+            scope=scope,
+            binding=self.store.get(binding.id),
+            goal=second_goal,
+            message_id="om_goal_same_second_new",
+            runtime_state=GoalOperationState.RUNNING.value,
+            logical_turn_id="goal-new",
+        )
+        self.channel.updates.clear()
+        self.runtime.goal_snapshot_value = second_goal
+
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                old_pause["behaviors"][0]["value"],
+                message_id="om_goal_same_second_old",
+            )
+        )
+
+        self.assertEqual(self.runtime.stop_calls, [])
+        self.assertEqual(self.channel.updates, [])
+        self.assertIn("Goal 卡片已过期", self.channel.replies[-1][1])
 
     async def test_direct_image_message_is_native_visual_input(self) -> None:
         await self.new()

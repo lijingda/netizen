@@ -145,8 +145,9 @@ Turn 上重复应用的客户端意图，不是 Codex 已生效配置、默认�
 模型目录失效或读取失败时保留；running Turn 的 steer 不解析也不应用。
 
 **Binding Task Feedback / 会话任务反馈**：Binding 上对 Task Reaction 与 Progress Card
-的两个独立选择及 revision。两项默认关闭，只决定后续普通 Turn 的飞书展示，不是
-Codex 原生设置或 Turn 状态事实。
+的两个独立选择及 revision。两项默认关闭；Task Reaction 只决定后续普通 Turn 的表情，
+Progress Card 决定后续普通 Turn 与 Goal 是否加入 Activity Module。它们不是 Codex 原生
+设置或 Turn/Goal 状态事实。
 
 **Native Compaction / 原生压缩**：`/compact` 对已有历史的 idle Binding 调用公开
 Codex compaction。start 空响应不是完成；Netizen 临时保留 `compacting` 槽位，直到
@@ -184,7 +185,17 @@ Binding/lifecycle 槽并关闭 admission。它是只读判定，不会自动再�
 
 **Goal Operation / Goal 操作**：一个原生持久化 Goal 在 Runtime 中的单一逻辑槽位。
 它可跨多个物理 Turn 自动 continuation；只有逻辑通知流、persisted Goal、exact 最终
-物理 Turn 与公开 Thread idle 共同确认后才释放。Goal 不写入 Channel Database。
+物理 Turn 与公开 Thread idle 共同确认，并完成有界 Channel 终态 handoff 后才释放。
+Goal 不写入 Channel Database。
+
+**Goal Finalization / Goal 收尾**：四项 Goal 终态证据确认后对 `complete` Goal 执行的
+一次 clear-and-confirm；它先冻结最终回复与 exact 最终物理 Turn，再清除原生 Goal。
+paused、blocked、usage-limited、budget-limited 与任何 unknown 状态都不自动收尾。
+
+**Goal Control Identity / Goal 控制身份**：当前进程 exact Reply Card message source、
+logical run 与 SDK 可见不可变字段 fingerprint 的组合。fingerprint 使用 Thread、秒级
+`createdAt`、objective 与 token budget，因此不是全局唯一 generation；控制按钮必须同时
+通过当前 source ownership 与原生状态复读。服务重启后旧按钮视为 stale。
 
 **Externally Active Goal / 外部活跃 Goal**：服务重启或外部 Codex 客户端留下的 active
 persisted Goal，但当前进程没有可安全重建的通知 route。Netizen 只读识别并阻止同一
@@ -220,10 +231,17 @@ recovery，且不写入 Channel Database。
 纯内存展示。原任务消息使用 `Typing`/`THINKING`，成功 steer 使用 `OnIt`，终态使用
 `DONE`/`ERROR`/`CrossMark`；它不是 Turn 状态事实源，也不进入 Channel Database。
 
-**Progress Card / 进度卡**：Binding 可选开启、依附 Completion Origin 的 ordinary Turn
-展示卡；运行中展开 Turn Activity Projection，终态在同一卡片折叠过程并呈现结果。它不
-保存执行历史，也不是 Turn 状态事实源；所有可见 plan step 和随分页携带的过程 manifest
-都经过同一套有界的常见敏感模式过滤。
+**Reply Card / 回复卡**：依附 Completion Origin、由 Goal、Activity、Result 与 Files
+四种 typed Reply Card Module 按需组合的一张 Card 2.0。Goal、Activity 或 Files 任一模块
+存在时使用卡片；只有 Result 时继续使用富文本/静态文本。它不是 Turn 或 Goal 的状态事实源。
+
+**Reply Card Module / 回复卡模块**：Reply Card 中封闭、类型化的展示块；当前只有 Goal、
+Activity、Result 与 Files 四种。模块只投影已经确认的领域状态，不独立发送或更新消息，也
+不构成动态插件系统。
+
+**Progress Card / 进度卡**：Binding 可选开启 Activity Module 的用户设置。普通 Turn 或
+Goal 执行中展开有界活动投影，终态在同一 Reply Card 折叠过程；所有 plan step 和随分页
+携带的过程 manifest 都经过同一套有界敏感模式过滤。它不保存执行历史，也不是终态事实源。
 
 **Standard CODEX_HOME**：服务 effective user 的原生 Codex 状态根；显式
 `CODEX_HOME` 优先，否则为该账号的 `$HOME/.codex`。Netizen 不修改其内部

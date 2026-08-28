@@ -19,6 +19,7 @@ from netizen.sdk_gap_adapter import (
     AppServerSkillCatalog,
     AppServerThreadDeleteControl,
     AppServerThreadSubscriptionControl,
+    GoalControlError,
     GoalMutationStateUnknown,
     GoalStatus,
     SIDE_THREAD_BOUNDARY,
@@ -37,7 +38,7 @@ import sys
 
 log_path = sys.argv[1]
 mode = sys.argv[2]
-goal_status = "paused" if mode in {"resume", "resume-loss", "clear", "clear-loss"} else None
+goal_status = "paused" if mode in {"resume", "resume-loss", "clear", "clear-loss", "wrong-goal-thread"} else None
 objective = "existing objective"
 
 def send(payload):
@@ -50,7 +51,7 @@ def log(message):
 
 def goal(status):
     return {
-        "threadId": "thread-goal",
+        "threadId": "thread-other" if mode == "wrong-goal-thread" else "thread-goal",
         "objective": objective,
         "status": status,
         "tokenBudget": None,
@@ -496,6 +497,21 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
         methods = [item.get("method") for item in messages if "id" in item]
         self.assertNotIn("thread/goal/clear", methods)
         self.assertEqual(methods.count("thread/goal/set"), 1)
+
+    async def test_goal_get_rejects_a_wrong_thread_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            log_path = Path(raw) / "requests.jsonl"
+            async with AsyncCodex(_config(log_path, "wrong-goal-thread")) as codex:
+                process = codex._client._sync._proc
+                control = AppServerGoalControl(codex)
+                with self.assertRaisesRegex(GoalControlError, "Thread 不一致"):
+                    await control.get("thread-goal")
+            _close_probe_pipes(process)
+            gc.collect()
+            messages = _messages(log_path)
+
+        methods = [item.get("method") for item in messages if "id" in item]
+        self.assertEqual(methods, ["initialize", "thread/goal/get"])
 
     async def test_goal_pause_persists_before_interrupting_exact_turn(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -28,6 +28,7 @@ from netizen.cards import (
     delete_binding_card,
     fetched_card_topic_id,
     goal_card,
+    goal_generation,
     new_binding_card,
     rename_binding_card,
     side_topic_card,
@@ -37,6 +38,8 @@ from netizen.cards import (
     turn_files_card_from_manifest,
     turn_progress_card,
     turn_progress_card_from_manifest,
+    reply_card,
+    reply_card_from_manifest,
 )
 from netizen.bindings import (
     BindingTaskFeedback,
@@ -47,10 +50,18 @@ from netizen.domain import (
     CardControlName,
     FeishuScope,
     MentionContextMode,
+    ReplyCardActivityModule,
+    ReplyCardFileItem,
+    ReplyCardFilesModule,
+    ReplyCardGoalModule,
+    ReplyCardProjection,
+    ReplyCardResultModule,
     SettingsSection,
     ScopeKind,
     TurnFileActionName,
     TurnFileManifestItem,
+    TurnProgressManifest,
+    TurnProgressManifestStep,
 )
 from netizen.projects import Project
 from netizen.model_settings import (
@@ -127,14 +138,45 @@ class CardCodecTest(unittest.TestCase):
             "scope_kind": "topic",
             "topic_id": "omt_topic",
             "binding_id": "binding:v1:binding-123",
+            "goal_generation": "a" * 43,
+            "expected_goal_status": "active",
         }
 
         intent = self.decode(value)
 
         self.assertEqual(intent.name, CardControlName.GOAL_PAUSE)
         self.assertEqual(intent.binding_id, "binding-123")
+        self.assertEqual(intent.goal_generation, "a" * 43)
+        self.assertEqual(intent.expected_goal_status, "active")
+        with self.assertRaises(CardActionError):
+            self.decode(
+                {
+                    key: item
+                    for key, item in value.items()
+                    if key != "goal_generation"
+                }
+            )
+        with self.assertRaises(CardActionError):
+            self.decode({**value, "expected_goal_status": "paused"})
         with self.assertRaises(CardActionError):
             self.decode({**value, "native_path": "/tmp/forbidden"})
+
+    def test_goal_end_accepts_complete_snapshot_that_was_not_auto_cleared(self) -> None:
+        intent = self.decode(
+            {
+                "v": 3,
+                "intent": "goal.clear",
+                "chat_id": "oc_group",
+                "scope_kind": "topic",
+                "topic_id": "omt_topic",
+                "binding_id": "binding:v1:binding-123",
+                "goal_generation": "a" * 43,
+                "expected_goal_status": "complete",
+            }
+        )
+
+        self.assertEqual(intent.name, CardControlName.GOAL_CLEAR)
+        self.assertEqual(intent.expected_goal_status, "complete")
 
     def test_side_close_round_trips_exact_side_and_topic(self) -> None:
         value = {
@@ -1154,6 +1196,74 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn(secret, serialized)
         self.assertIn("result-08.txt", serialized)
 
+    def test_v4_progress_file_pages_preserve_existing_step_truncation(self) -> None:
+        snapshot = SimpleNamespace(
+            state=SimpleNamespace(value="running"),
+            steer_count=0,
+            plan_available=True,
+            plan_generated=True,
+            plan_may_be_stale=False,
+            steps=tuple(
+                SimpleNamespace(
+                    step=f"legacy step {index}",
+                    status=SimpleNamespace(value="completed"),
+                )
+                for index in range(14)
+            ),
+        )
+        files = tuple(
+            TurnFile(
+                display_path=f"legacy-result-{index:02}.txt",
+                resolved_path=Path(f"/tmp/legacy-result-{index:02}.txt"),
+                size=1,
+                media_kind="file",
+            )
+            for index in range(10)
+        )
+
+        first = turn_progress_card(
+            snapshot=snapshot,
+            final_response="done",
+            files=files,
+            terminal_status="completed",
+            scope=self.scope,
+            binding_id="binding-123",
+            turn_id="turn-123",
+        )
+        value = next(
+            behavior["value"]
+            for button in _elements(first.card, "button")
+            for behavior in button.get("behaviors", ())
+            if behavior["value"]["intent"] == "turn-file.page"
+        )
+        intent = decode_turn_file_action(
+            app_id="cli_test",
+            message_id="om_card",
+            callback_chat_id=self.scope.chat_id,
+            sender_id="ou_user",
+            tag="button",
+            value=value,
+        )
+        assert intent.progress is not None
+        rebuilt = turn_progress_card_from_manifest(
+            scope=intent.scope,
+            binding_id=intent.binding_id,
+            turn_id=intent.turn_id,
+            final_response=intent.answer or "",
+            manifest=intent.files,
+            progress=intent.progress,
+            page=intent.page or 0,
+        )
+
+        self.assertNotIn(
+            "项未展示",
+            json.dumps(first.card, ensure_ascii=False),
+        )
+        self.assertNotIn(
+            "项未展示",
+            json.dumps(rebuilt.card, ensure_ascii=False),
+        )
+
     def test_terminal_progress_card_collapses_and_reuses_answer_and_files(
         self,
     ) -> None:
@@ -1963,6 +2073,256 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertNotIn("native-one", serialized)
         self.assertNotIn("SKILL.md", serialized)
+        self.assertNotIn("**Time**", serialized)
+        self.assertNotIn("耗时", serialized)
+        pause = next(
+            behavior["value"]
+            for button in _elements(outbound.card, "button")
+            for behavior in button.get("behaviors", ())
+            if behavior["value"]["intent"] == "goal.pause"
+        )
+        self.assertEqual(pause["expected_goal_status"], "active")
+        self.assertEqual(pause["goal_generation"], goal_generation(goal))
+        self.assertNotIn("thread_id", pause)
+
+        same_creation = GoalSnapshot(
+            thread_id="native-one",
+            objective="ship safely",
+            status=GoalStatus.ACTIVE,
+            token_budget=None,
+            tokens_used=100,
+            time_used_seconds=999,
+            created_at=1,
+            updated_at=999,
+        )
+        next_creation = GoalSnapshot(
+            thread_id="native-one",
+            objective="ship safely",
+            status=GoalStatus.ACTIVE,
+            token_budget=None,
+            tokens_used=0,
+            time_used_seconds=0,
+            created_at=3,
+            updated_at=3,
+        )
+        self.assertEqual(goal_generation(goal), goal_generation(same_creation))
+        self.assertNotEqual(goal_generation(goal), goal_generation(next_creation))
+        different_objective = GoalSnapshot(
+            thread_id="native-one",
+            objective="different objective",
+            status=GoalStatus.ACTIVE,
+            token_budget=None,
+            tokens_used=0,
+            time_used_seconds=0,
+            created_at=goal.created_at,
+            updated_at=goal.updated_at,
+        )
+        self.assertNotEqual(
+            goal_generation(goal),
+            goal_generation(different_objective),
+        )
+
+    def test_reply_card_closed_modules_render_legal_combinations(self) -> None:
+        progress = TurnProgressManifest(
+            state="running",
+            steer_count=0,
+            plan_available=True,
+            plan_generated=True,
+            plan_may_be_stale=False,
+            steps=(TurnProgressManifestStep("检查实现", "completed"),),
+        )
+        active_goal = ReplyCardGoalModule(
+            binding_id="binding-123",
+            short_id="binding1",
+            project_alias="test",
+            goal_generation="g" * 43,
+            status="active",
+            runtime_state="goal-running",
+            objective="deliver safely",
+            token_budget=1000,
+            tokens_used=20,
+        )
+        file_module = ReplyCardFilesModule(
+            binding_id="binding-123",
+            turn_id="turn-123",
+            items=(
+                ReplyCardFileItem(
+                    path="/tmp/report.txt",
+                    label="report.txt",
+                    size=1,
+                    media_kind="file",
+                ),
+            ),
+        )
+        combinations = (
+            (
+                ReplyCardProjection(result=ReplyCardResultModule("done")),
+                {"turnanswerv1"},
+            ),
+            (
+                ReplyCardProjection(scope=self.scope, goal=active_goal),
+                {"goalmodulev1"},
+            ),
+            (
+                ReplyCardProjection(
+                    activity=ReplyCardActivityModule(progress=progress)
+                ),
+                {"turnprogressv1"},
+            ),
+            (
+                ReplyCardProjection(
+                    scope=self.scope,
+                    result=ReplyCardResultModule("done"),
+                    files=file_module,
+                ),
+                {"turnanswerv1", "turnfilesv4"},
+            ),
+            (
+                ReplyCardProjection(
+                    scope=self.scope,
+                    goal=active_goal,
+                    activity=ReplyCardActivityModule(
+                        progress=progress,
+                        terminal_status="completed",
+                        collapsed=True,
+                    ),
+                    result=ReplyCardResultModule("done"),
+                    files=file_module,
+                ),
+                {
+                    "goalmodulev1",
+                    "turnprogressv1",
+                    "turnanswerv1",
+                    "turnfilesv4",
+                },
+            ),
+        )
+        for projection, expected_ids in combinations:
+            with self.subTest(expected_ids=expected_ids):
+                card = reply_card(projection)
+                element_ids = {
+                    item.get("element_id")
+                    for item in _tagged_elements(card.card)
+                    if item.get("element_id")
+                }
+                self.assertEqual(element_ids, expected_ids)
+
+        with self.assertRaisesRegex(ValueError, "same binding_id"):
+            reply_card(
+                ReplyCardProjection(
+                    scope=self.scope,
+                    goal=active_goal,
+                    result=ReplyCardResultModule("done"),
+                    files=ReplyCardFilesModule(
+                        binding_id="binding-other",
+                        turn_id=file_module.turn_id,
+                        items=file_module.items,
+                    ),
+                )
+            )
+
+    def test_v5_pagination_rebuilds_goal_activity_result_and_files(self) -> None:
+        files = tuple(
+            ReplyCardFileItem(
+                path=f"/tmp/result-{index:02}.txt",
+                label=f"result-{index:02}.txt",
+                size=1,
+                media_kind="file",
+            )
+            for index in range(10)
+        )
+        projection = ReplyCardProjection(
+            scope=self.scope,
+            goal=ReplyCardGoalModule(
+                binding_id="binding-123",
+                short_id="binding1",
+                project_alias="test",
+                goal_generation="z" * 43,
+                status="paused",
+                runtime_state="goal-paused",
+                objective="generate reports",
+                token_budget=None,
+                tokens_used=50,
+            ),
+            activity=ReplyCardActivityModule(
+                progress=TurnProgressManifest(
+                    state="running",
+                    steer_count=1,
+                    plan_available=True,
+                    plan_generated=True,
+                    plan_may_be_stale=False,
+                    steps=(
+                        TurnProgressManifestStep(
+                            "password: do-not-leak", "completed"
+                        ),
+                    ),
+                ),
+                terminal_status="completed",
+                collapsed=True,
+            ),
+            result=ReplyCardResultModule("**完成**：报告已生成。"),
+            files=ReplyCardFilesModule(
+                binding_id="binding-123",
+                turn_id="turn-123",
+                items=files,
+            ),
+        )
+        first = reply_card(projection)
+        page_value = next(
+            behavior["value"]
+            for button in _elements(first.card, "button")
+            for behavior in button.get("behaviors", ())
+            if behavior["value"]["intent"] == "turn-file.page"
+        )
+        self.assertEqual(page_value["v"], 5)
+        self.assertEqual(
+            set(page_value["reply"]), {"goal", "activity", "result"}
+        )
+        encoded = json.dumps(page_value, ensure_ascii=False)
+        self.assertNotIn("do-not-leak", encoded)
+        self.assertIn("敏感内容已隐藏", encoded)
+
+        intent = decode_turn_file_action(
+            app_id="cli_test",
+            message_id="om_card",
+            callback_chat_id=self.scope.chat_id,
+            sender_id="ou_user",
+            tag="button",
+            value=page_value,
+        )
+        assert intent.reply is not None
+        rebuilt = reply_card_from_manifest(
+            scope=intent.scope,
+            binding_id=intent.binding_id,
+            turn_id=intent.turn_id,
+            manifest=intent.files,
+            reply=intent.reply,
+            page=intent.page or 0,
+        )
+        rebuilt_text = json.dumps(rebuilt.card, ensure_ascii=False)
+        self.assertIn("generate reports", rebuilt_text)
+        self.assertIn("敏感内容已隐藏", rebuilt_text)
+        self.assertIn("报告已生成", rebuilt_text)
+        rebuilt_visible = "\n".join(
+            element["content"]
+            for element in _elements(rebuilt.card, "markdown")
+        )
+        self.assertIn("result-08.txt", rebuilt_visible)
+        self.assertNotIn("result-00.txt", rebuilt_visible)
+        self.assertIn("结束 Goal", rebuilt_text)
+        self.assertNotIn("**Time**", rebuilt_text)
+
+        retargeted = json.loads(json.dumps(page_value))
+        retargeted["binding_id"] = "binding:v1:binding-other"
+        with self.assertRaisesRegex(CardActionError, "Goal .* Files"):
+            decode_turn_file_action(
+                app_id="cli_test",
+                message_id="om_card",
+                callback_chat_id=self.scope.chat_id,
+                sender_id="ou_user",
+                tag="button",
+                value=retargeted,
+            )
 
     def test_side_card_exposes_close_for_open_and_routable_creating_states(self) -> None:
         topic = FeishuScope(

@@ -27,22 +27,27 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   chat 新开 sibling 话题。Side 在同一 fork 上支持多轮：idle 开新 Turn、running
   steer exact Turn；`/stop` 只停当前 Side Turn，`/side close` 才结束 Side。Parent 与
   多个 Side 可并发，但共享同一个真实 Project cwd，文件改动彼此可见。
-- 普通 Binding 有两个相互独立、默认关闭的 Task Feedback 选项，可在 `/new` 或 `/config`
+- Binding 有两个相互独立、默认关闭的 Task Feedback 选项，可在 `/new` 或 `/config`
   按需开启。Task Reaction 开启后，运行时在原任务消息上使用 `Typing` 和低频
   `THINKING`，steer 成功使用 `OnIt`，终态使用 `DONE`/`ERROR`/`CrossMark`；关闭时不会
-  调用 reaction，也不会因 `OnIt` 失败发送文字确认。
-- Progress Card 开启后，native Turn 接受时回复一张运行卡，顶部展开区只按状态与原生
-  checklist 的变化逐步更新；不显示耗时、百分比、ETA、reasoning 或 raw tool/command
-  output；计划步骤还经过有界的常见敏感模式过滤。终态在同一卡片折叠过程并呈现回答和
-  可用文件，翻页后仍保留折叠过程。任一卡片展示失败都不影响 Turn，终态回退到现有投递。
-- 普通 Turn 成功完成且 latest native Turn diff 或 completed `fileChange` /
-  `imageGeneration` item 指向当前普通文件时，最终回复与“本轮文件”合成一张卡片。
+  调用 reaction，也不会因 `OnIt` 失败发送文字确认。Task Reaction 仍只作用于普通 Turn。
+- Progress Card 开启后，普通 native Turn 接受时回复一张运行卡；Goal 则无论该选项是否
+  开启都只使用一张 Goal 回复卡，开启时在其中增加 Activity 模块。顶部展开区只按状态与
+  原生 checklist 的变化逐步更新；不显示耗时、百分比、ETA、reasoning 或 raw
+  tool/command output；计划步骤还经过有界的常见敏感模式过滤。终态在同一卡片折叠过程并
+  呈现回答和可用文件，翻页后仍保留全部模块。任一卡片展示失败都不影响原生执行。
+- 普通 Turn 成功完成，且 latest native Turn diff 或 completed `fileChange` /
+  `imageGeneration` item 指向当前普通文件时，最终回复与“本轮文件”合成一张卡片；Goal
+  首期只使用四项终态证据中 exact 最终成功物理 Turn 的 completed structured items，
+  不猜测 aggregate diff 或更早 rollover Turn 的文件。
   Project 只解析相对路径，不过滤 exact Turn 明确报告的外部文件；文件每页 8 个，最多
   500 个完整循环分页，点击后以原图或文件消息回复到卡片话题。可见正文只显示脱敏逻辑位置；
-  v4 按钮在飞书 callback payload 中明文自带绝对路径和完整清单，因此服务重启后仍可翻页
-  和发送，无需保存快照或 card session。不会自动上传，也不会扫描/解析最终回复来补齐
-  未进入 Turn diff/items 的输出。Progress Card 关闭时严格保持现有行为：没有文件用
-  富文本/静态文本回复，有文件才使用这张完成卡。
+  普通完成/进度文件卡继续使用 v4 callback；Goal 与 Files 同卡时使用 v5，并在飞书
+  callback payload 中明文自带绝对路径、完整清单和有界回复卡模块。因此服务重启后仍可
+  翻页和发送，无需保存快照或 card session；v5 翻页会保留 Goal、Activity 与 Result，
+  既有 v4 卡继续兼容。不会自动上传，也不会扫描/解析最终回复来补齐
+  未进入 Turn diff/items 的输出。Progress Card 关闭且不是 Goal 时
+  严格保持现有行为：没有文件用富文本/静态文本回复，有文件才使用完成卡。
 - 服务以执行安装的当前用户身份复用其标准 `$CODEX_HOME`（默认 `~/.codex`），因此
   认证、历史、Skills、MCP、AGENTS 和 `config.toml` 仍由 Codex 原生发现；部署只完整管理
   `skills/netizen-user-guide` 这一个随 release 发布的用户咨询 Skill，其他用户 Skill
@@ -51,7 +56,7 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   Binding-scoped Model/Effort/Speed 选择 ID、两个 Task Feedback 布尔值及 revision、群聊
   Binding 的 Mention Context Mode 与 exact Context Boundary metadata，以及不含 native
   ID/content 的 Side Topic 路由墓碑；不保存 prompt、补充消息正文、回复、cwd 副本、
-  Turn Activity Projection、进度卡 identity/session、解析后的 wire value、Codex 已生效
+  Turn Activity Projection、回复卡 identity/session、解析后的 wire value、Codex 已生效
   配置或 Turn 历史。
 - 同一进程默认在 `0.0.0.0:8787` 提供单管理员 Admin Web。它与飞书共用唯一的
   application service、Scope coordinator、SQLite、Runtime 和 `AsyncCodex`，集中分页管理
@@ -108,9 +113,13 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   discovery/revalidate，并把原文本与多个公开 `SkillInput` 一起交给同一个 Turn 或
   exact running Turn 的 steer。查询当前有哪些 Skill 可用时直接发送普通自然语言消息，
   不提供独立的 `/skills` 浏览命令。
-- `/goal [objective|pause|resume|clear]`：查看、启动、暂停、恢复或清除当前会话的原生
-  Goal。一个 Goal 可自动产生多个物理 Turn；执行期间同一 Binding 不接受普通 Prompt、
-  `/compact` 或 `/config`。Goal 卡片按钮进入同一 typed control 路由。
+- `/goal [objective|pause|resume|clear]`：查看、启动、暂停、恢复或结束当前会话的原生
+  Goal。一个 Goal 可自动产生多个物理 Turn；start、pause、resume 和终态持续更新同一张
+  组合卡，卡片按钮进入同一 typed control 路由。只有四项终态证据完整、Goal 为
+  `complete` 且 exact 最终物理 Turn 为 `completed` 时自动 clear；paused、blocked、额度
+  限制和任何收尾不确定状态都保留 Goal，仍可显式结束。执行期间同一 Binding 不接受普通
+  Prompt、`/compact` 或 `/config`。服务重启后的旧 Goal 按钮会过期，重新发送 `/goal`
+  可建立当前进程可校验的新控制卡。
 - `/settings`：在当前单聊、群聊或话题打开 Netizen 设置卡片。当前 Projects 分区可
   通过下拉表单启停 Project，并在同一卡片内创建或登记 Project。
 - `/sessions`：用分页卡片列出当前 Scope 的会话。当前会话置顶显示，其他会话可直接点击

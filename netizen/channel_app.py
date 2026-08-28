@@ -7,7 +7,8 @@ import hashlib
 import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Any, Protocol
 
 from lark_channel import MediaSource, OutboundCard, OutboundFile, OutboundImage, SendOpts
@@ -33,6 +34,7 @@ from .cards import (
     SessionCardItem,
     SettingsCardActionError,
     TURN_FILE_ACTION_VERSION,
+    REPLY_CARD_ACTION_VERSION,
     TurnFileCardLimitError,
     archive_binding_card,
     archived_sessions_card,
@@ -50,6 +52,7 @@ from .cards import (
     fetched_card_topic_id,
     new_binding_card,
     goal_card,
+    goal_generation,
     is_turn_file_action,
     scope_from_fetched_card,
     delete_binding_card,
@@ -61,6 +64,8 @@ from .cards import (
     turn_files_card_from_manifest,
     turn_progress_card,
     turn_progress_card_from_manifest,
+    reply_card,
+    reply_card_from_manifest,
 )
 from .codex_runtime import (
     ActiveState,
@@ -73,7 +78,10 @@ from .codex_runtime import (
     ExternalGoalActive,
     GoalNotFound,
     GoalNotMaterialized,
+    GoalActivitySnapshot,
+    GoalFinalizationStatus,
     GoalOutcome,
+    GoalSubmission,
     GoalStateUnknown,
     GoalOperationState,
     NativeThreadMetadata,
@@ -125,6 +133,15 @@ from .domain import (
     ScopeKind,
     TurnFileActionIntent,
     TurnFileActionName,
+    ReplyCardActivityModule,
+    ReplyCardFileItem,
+    ReplyCardFilesModule,
+    ReplyCardGoalModule,
+    ReplyCardManifest,
+    ReplyCardProjection,
+    ReplyCardResultModule,
+    TurnProgressManifest,
+    TurnProgressManifestStep,
 )
 from .experience import (
     InvalidInteraction,
@@ -190,7 +207,7 @@ from .message_projection import (
     select_supplemental_messages,
 )
 from .sdk_gap_adapter import SkillCatalogError
-from .sdk_gap_adapter import GoalControlError, GoalStatus
+from .sdk_gap_adapter import GoalControlError, GoalSnapshot, GoalStatus
 from .skill_references import InvalidSkillReference, parse_skill_references
 from .turn_files import (
     TurnFile,
@@ -224,6 +241,7 @@ _THINKING_HIDDEN_SECONDS = 13.0
 _REACTION_OPERATION_TIMEOUT_SECONDS = 3.0
 _PROGRESS_CARD_POLL_SECONDS = 1.0
 _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS = 5.0
+_GOAL_REPLY_CARD_CACHE_LIMIT = 256
 _SESSION_TITLE_MAX_CHARS = 48
 _STATUS_THREAD_NAME_MAX_CHARS = 120
 _STATUS_THREAD_PREVIEW_MAX_CHARS = 240
@@ -421,13 +439,116 @@ def _turn_progress_status_lines(
     return tuple(lines)
 
 
-@dataclass(frozen=True, slots=True)
+def _reply_goal_module(
+    *,
+    binding: ThreadBinding,
+    goal: GoalSnapshot | None,
+    runtime_state: str | None = None,
+    notice: str | None = None,
+    notice_is_error: bool = False,
+) -> ReplyCardGoalModule:
+    return _reply_goal_module_for_identity(
+        binding_id=binding.id,
+        short_id=binding.short_id,
+        project_alias=binding.project_alias,
+        goal=goal,
+        runtime_state=runtime_state,
+        notice=notice,
+        notice_is_error=notice_is_error,
+    )
+
+
+def _reply_goal_module_for_identity(
+    *,
+    binding_id: str,
+    short_id: str,
+    project_alias: str,
+    goal: GoalSnapshot | None,
+    runtime_state: str | None = None,
+    notice: str | None = None,
+    notice_is_error: bool = False,
+) -> ReplyCardGoalModule:
+    return ReplyCardGoalModule(
+        binding_id=binding_id,
+        short_id=short_id,
+        project_alias=project_alias,
+        goal_generation=None if goal is None else goal_generation(goal),
+        status=None if goal is None else goal.status.value,
+        runtime_state=None if goal is None else runtime_state,
+        objective=None if goal is None else goal.objective,
+        token_budget=None if goal is None else goal.token_budget,
+        tokens_used=0 if goal is None else goal.tokens_used,
+        notice=notice,
+        notice_is_error=notice_is_error,
+    )
+
+
+def _reply_activity_module(
+    snapshot: TurnActivitySnapshot | GoalActivitySnapshot,
+    *,
+    terminal_status: str | None = None,
+    collapsed: bool = False,
+) -> ReplyCardActivityModule:
+    state = getattr(snapshot.state, "value", snapshot.state)
+    if state in {ActiveState.STOPPING.value, GoalOperationState.PAUSING.value}:
+        state = ActiveState.STOPPING.value
+    else:
+        state = ActiveState.RUNNING.value
+    visible_steps = snapshot.steps[:_STATUS_PLAN_MAX_STEPS]
+    return ReplyCardActivityModule(
+        progress=TurnProgressManifest(
+            state=state,
+            steer_count=max(0, int(getattr(snapshot, "steer_count", 0))),
+            plan_available=bool(snapshot.plan_available),
+            plan_generated=bool(snapshot.plan_generated),
+            plan_may_be_stale=bool(
+                getattr(snapshot, "plan_may_be_stale", False)
+            ),
+            steps=tuple(
+                TurnProgressManifestStep(
+                    step=activity_step_display(item.step),
+                    status=getattr(item.status, "value", item.status),
+                )
+                for item in visible_steps
+            ),
+        ),
+        terminal_status=terminal_status,
+        collapsed=collapsed,
+        hidden_steps=max(0, len(snapshot.steps) - len(visible_steps)),
+    )
+
+
+def _reply_files_module(
+    *,
+    binding_id: str,
+    turn_id: str,
+    files: tuple[TurnFile, ...],
+) -> ReplyCardFilesModule:
+    return ReplyCardFilesModule(
+        binding_id=binding_id,
+        turn_id=turn_id,
+        items=tuple(
+            ReplyCardFileItem(
+                path=str(item.resolved_path),
+                label=item.display_path,
+                size=item.size,
+                media_kind=item.media_kind,
+            )
+            for item in files
+        ),
+        action_version=REPLY_CARD_ACTION_VERSION,
+    )
+
+
+@dataclass(slots=True)
 class GoalCardOrigin:
-    message_id: str
+    message_id: str | None
     scope: FeishuScope
     binding_id: str
     short_id: str
     project_alias: str
+    fallback_origin: object | None = None
+    goal_generation: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,8 +629,32 @@ class _TurnProgressCardSession:
     task: asyncio.Task[None] | None = None
 
 
-class _ProgressCardController:
-    """Best-effort in-memory presenter for one exact ordinary Turn."""
+@dataclass(slots=True)
+class _GoalReplyCardSession:
+    binding_id: str
+    thread_id: str
+    goal_generation: str
+    logical_turn_id: str
+    message_id: str
+    stopped: asyncio.Event
+    projection: ReplyCardProjection
+    revision: object
+    refresh: Callable[
+        [],
+        Awaitable[tuple[object, ReplyCardProjection] | None],
+    ] | None = None
+    failed: bool = False
+    task: asyncio.Task[None] | None = None
+
+
+class _GoalCardDelivery(Enum):
+    DELIVERED = "delivered"
+    SUPERSEDED = "superseded"
+    FAILED = "failed"
+
+
+class _ReplyCardPresenter:
+    """One best-effort owner for complete Turn and Goal Reply Card values."""
 
     def __init__(
         self,
@@ -531,6 +676,18 @@ class _ProgressCardController:
             tuple[str, str, str],
             _TurnProgressCardSession,
         ] = {}
+        self._goal_sessions: dict[
+            tuple[str, str, str],
+            _GoalReplyCardSession,
+        ] = {}
+        self._goal_cards: dict[
+            tuple[str, str],
+            ReplyCardProjection,
+        ] = {}
+        self._goal_lock = asyncio.Lock()
+        self._goal_card_lock = asyncio.Lock()
+        self._retired_goal_runs: set[tuple[str, str, str]] = set()
+        self._goal_latest_runs: dict[tuple[str, str, str], str] = {}
         self._closed = False
 
     async def start(
@@ -659,14 +816,638 @@ class _ProgressCardController:
         if session is not None:
             await self._stop_session(session)
 
+    async def start_goal(
+        self,
+        *,
+        binding_id: str,
+        thread_id: str,
+        logical_turn_id: str,
+        generation: str,
+        origin: GoalCardOrigin,
+        projection: ReplyCardProjection,
+        revision: object,
+        refresh: Callable[
+            [],
+            Awaitable[tuple[object, ReplyCardProjection] | None],
+        ]
+        | None,
+    ) -> bool:
+        async with self._goal_lock:
+            return await self._start_goal_locked(
+                binding_id=binding_id,
+                thread_id=thread_id,
+                logical_turn_id=logical_turn_id,
+                generation=generation,
+                origin=origin,
+                projection=projection,
+                revision=revision,
+                refresh=refresh,
+            )
+
+    async def _start_goal_locked(
+        self,
+        *,
+        binding_id: str,
+        thread_id: str,
+        logical_turn_id: str,
+        generation: str,
+        origin: GoalCardOrigin,
+        projection: ReplyCardProjection,
+        revision: object,
+        refresh: Callable[
+            [],
+            Awaitable[tuple[object, ReplyCardProjection] | None],
+        ]
+        | None,
+    ) -> bool:
+        if self._closed:
+            return False
+        key = (binding_id, thread_id, generation)
+        self._goal_latest_runs = {
+            existing: run_id
+            for existing, run_id in self._goal_latest_runs.items()
+            if existing[:2] != (binding_id, thread_id) or existing == key
+        }
+        self._goal_latest_runs[key] = logical_turn_id
+        previous = self._goal_sessions.pop(key, None)
+        message_id = origin.message_id
+        if previous is not None:
+            await self._stop_session(previous)
+            if not previous.failed:
+                message_id = previous.message_id
+        try:
+            card = reply_card(projection)
+            if message_id is None:
+                fallback = origin.fallback_origin
+                if fallback is None:
+                    return False
+                async with asyncio.timeout(self._operation_timeout_seconds):
+                    result = await self._channel.reply(fallback, card)
+                message_id = _progress_card_message_id(result)
+            else:
+                async with self._goal_card_lock:
+                    if not await self._update_message(
+                        message_id,
+                        card,
+                        binding_id=binding_id,
+                        operation_id=logical_turn_id,
+                    ):
+                        return False
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "failed to establish Goal Reply Card",
+                extra={
+                    "binding_id": binding_id,
+                    "logical_turn_id": logical_turn_id,
+                },
+            )
+            return False
+        if message_id is None:
+            logger.error(
+                "failed to establish Goal Reply Card: reply message ID unavailable",
+                extra={
+                    "binding_id": binding_id,
+                    "logical_turn_id": logical_turn_id,
+                },
+            )
+            return False
+        origin.message_id = message_id
+        origin.goal_generation = generation
+        self._retired_goal_runs = {
+            item
+            for item in self._retired_goal_runs
+            if item[:2] != (message_id, generation)
+        }
+        session = _GoalReplyCardSession(
+            binding_id=binding_id,
+            thread_id=thread_id,
+            goal_generation=generation,
+            logical_turn_id=logical_turn_id,
+            message_id=message_id,
+            stopped=asyncio.Event(),
+            projection=projection,
+            revision=revision,
+            refresh=refresh,
+        )
+        self._goal_sessions[key] = session
+        self._remember_goal_projection(message_id, generation, projection)
+        if refresh is not None:
+            session.task = asyncio.create_task(
+                self._poll_goal(session),
+                name=f"netizen-goal-reply-card-{logical_turn_id}",
+            )
+        return True
+
+    async def finish_goal(
+        self,
+        *,
+        binding_id: str,
+        thread_id: str,
+        logical_turn_id: str | None,
+        generation: str,
+        origin: GoalCardOrigin,
+        projection: ReplyCardProjection,
+        retain_session: bool,
+    ) -> _GoalCardDelivery:
+        async with self._goal_lock:
+            return await self._finish_goal_locked(
+                binding_id=binding_id,
+                thread_id=thread_id,
+                logical_turn_id=logical_turn_id,
+                generation=generation,
+                origin=origin,
+                projection=projection,
+                retain_session=retain_session,
+            )
+
+    async def reply_goal_fallback(
+        self,
+        *,
+        binding_id: str,
+        thread_id: str,
+        logical_turn_id: str | None,
+        generation: str,
+        target: object,
+        card: OutboundCard,
+        origin: GoalCardOrigin,
+        projection: ReplyCardProjection,
+        retain_session: bool,
+    ) -> _GoalCardDelivery:
+        """CAS, reply, and adopt one fallback while the Goal route is stable."""
+
+        async with self._goal_lock:
+            if self._closed:
+                return _GoalCardDelivery.FAILED
+            key = (binding_id, thread_id, generation)
+            latest_run = self._goal_latest_runs.get(key)
+            if latest_run is not None and latest_run != logical_turn_id:
+                return _GoalCardDelivery.SUPERSEDED
+            current = self._goal_sessions.get(key)
+            if current is not None and current.logical_turn_id != logical_turn_id:
+                return _GoalCardDelivery.SUPERSEDED
+            if current is not None:
+                self._goal_sessions.pop(key, None)
+                await self._stop_session(current)
+            try:
+                async with asyncio.timeout(self._operation_timeout_seconds):
+                    result = await self._channel.reply(target, card)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "terminal Goal card fallback failed",
+                    extra={"binding_id": binding_id},
+                )
+                return _GoalCardDelivery.FAILED
+            if getattr(result, "success", True) is False:
+                logger.error(
+                    "terminal Goal card fallback was not confirmed",
+                    extra={"binding_id": binding_id},
+                )
+                return _GoalCardDelivery.FAILED
+            message_id = _progress_card_message_id(result)
+            if message_id is None:
+                logger.warning(
+                    "terminal Goal fallback lacks a reusable message identity",
+                    extra={"binding_id": binding_id},
+                )
+                return _GoalCardDelivery.DELIVERED
+            origin.message_id = message_id
+            origin.goal_generation = generation
+            if logical_turn_id is not None:
+                self._goal_latest_runs[key] = logical_turn_id
+            async with self._goal_card_lock:
+                if not retain_session:
+                    return _GoalCardDelivery.DELIVERED
+                self._remember_goal_projection(
+                    message_id,
+                    generation,
+                    projection,
+                )
+            if retain_session:
+                self._goal_sessions[key] = _GoalReplyCardSession(
+                    binding_id=binding_id,
+                    thread_id=thread_id,
+                    goal_generation=generation,
+                    logical_turn_id=logical_turn_id or generation,
+                    message_id=message_id,
+                    stopped=asyncio.Event(),
+                    projection=projection,
+                    revision=("terminal-fallback",),
+                )
+            return _GoalCardDelivery.DELIVERED
+
+    async def _finish_goal_locked(
+        self,
+        *,
+        binding_id: str,
+        thread_id: str,
+        logical_turn_id: str | None,
+        generation: str,
+        origin: GoalCardOrigin,
+        projection: ReplyCardProjection,
+        retain_session: bool,
+    ) -> _GoalCardDelivery:
+        key = (binding_id, thread_id, generation)
+        latest_run = self._goal_latest_runs.get(key)
+        if latest_run is not None and latest_run != logical_turn_id:
+            # The exact Goal generation has already advanced to a newer
+            # logical run, even if that newer run has also reached terminal.
+            return _GoalCardDelivery.SUPERSEDED
+        session = self._goal_sessions.get(key)
+        if (
+            session is not None
+            and session.logical_turn_id != logical_turn_id
+        ):
+            # A resumed run already owns this Goal generation and card.  The
+            # previous run's delayed terminal projection must not overwrite it.
+            return _GoalCardDelivery.SUPERSEDED
+        retired_key = (
+            origin.message_id or "",
+            generation,
+            logical_turn_id or "",
+        )
+        if session is None and retired_key in self._retired_goal_runs:
+            self._retired_goal_runs.discard(retired_key)
+            return _GoalCardDelivery.SUPERSEDED
+        if session is not None:
+            self._goal_sessions.pop(key, None)
+        if session is not None:
+            await self._stop_session(session)
+            if session.failed:
+                return _GoalCardDelivery.FAILED
+            message_id = session.message_id
+        else:
+            message_id = origin.message_id
+        if message_id is None:
+            return _GoalCardDelivery.FAILED
+        try:
+            card = reply_card(projection)
+        except Exception:
+            logger.exception(
+                "failed to render terminal Goal Reply Card",
+                extra={"binding_id": binding_id},
+            )
+            return _GoalCardDelivery.FAILED
+        async with self._goal_card_lock:
+            delivered = await self._update_message(
+                message_id,
+                card,
+                binding_id=binding_id,
+                operation_id=origin.goal_generation or generation,
+            )
+            if delivered and retain_session:
+                self._remember_goal_projection(
+                    message_id,
+                    generation,
+                    projection,
+                )
+            elif delivered:
+                self._goal_cards.pop((message_id, generation), None)
+        if delivered and retain_session:
+            self._goal_sessions[key] = _GoalReplyCardSession(
+                binding_id=binding_id,
+                thread_id=thread_id,
+                goal_generation=generation,
+                logical_turn_id=(
+                    session.logical_turn_id
+                    if session is not None
+                    else (logical_turn_id or generation)
+                ),
+                message_id=message_id,
+                stopped=asyncio.Event(),
+                projection=projection,
+                revision=("terminal",),
+            )
+        elif delivered:
+            self._retired_goal_runs.discard(retired_key)
+        return (
+            _GoalCardDelivery.DELIVERED
+            if delivered
+            else _GoalCardDelivery.FAILED
+        )
+
+    async def update_goal(
+        self,
+        *,
+        source_id: str,
+        generation: str,
+        projection: ReplyCardProjection,
+        retain_session: bool = True,
+    ) -> bool:
+        async with self._goal_lock:
+            return await self._update_goal_locked(
+                source_id=source_id,
+                generation=generation,
+                projection=projection,
+                retain_session=retain_session,
+            )
+
+    async def refresh_goal_snapshot(
+        self,
+        *,
+        source_id: str,
+        generation: str,
+        logical_turn_id: str | None,
+        projection: ReplyCardProjection,
+    ) -> bool:
+        """Merge `/goal` status into the canonical card without regressing it."""
+
+        async with self._goal_lock:
+            matched = next(
+                (
+                    session
+                    for session in self._goal_sessions.values()
+                    if session.message_id == source_id
+                    and session.goal_generation == generation
+                ),
+                None,
+            )
+            current = self._goal_projection(source_id, generation)
+            if matched is None:
+                # A terminal update won the race after the read-only native
+                # snapshot.  Its newer projection already answers the status
+                # request and must not be overwritten by the stale read.
+                return current is not None
+            incoming_goal = projection.goal
+            assert incoming_goal is not None
+            if matched.refresh is not None and (
+                (
+                    logical_turn_id is not None
+                    and logical_turn_id != matched.logical_turn_id
+                )
+                or incoming_goal.status != GoalStatus.ACTIVE.value
+            ):
+                return True
+            merged = projection
+            if current is not None:
+                merged_goal = incoming_goal
+                if (
+                    current.goal is not None
+                    and current.goal.goal_generation == generation
+                    and current.goal.status == incoming_goal.status
+                ):
+                    merged_goal = replace(
+                        incoming_goal,
+                        notice=current.goal.notice,
+                        notice_is_error=current.goal.notice_is_error,
+                    )
+                merged = replace(
+                    current,
+                    scope=projection.scope or current.scope,
+                    goal=merged_goal,
+                    activity=(
+                        projection.activity
+                        if matched.refresh is not None
+                        else current.activity
+                    ),
+                )
+            return await self._update_goal_locked(
+                source_id=source_id,
+                generation=generation,
+                projection=merged,
+                retain_session=True,
+            )
+
+    async def update_goal_module(
+        self,
+        *,
+        source_id: str,
+        generation: str,
+        scope: FeishuScope,
+        goal: ReplyCardGoalModule,
+        retain_session: bool,
+    ) -> bool:
+        """Atomically replace only Goal while preserving other card modules."""
+
+        async with self._goal_lock:
+            current = self._goal_projection(source_id, generation)
+            projection = (
+                ReplyCardProjection(scope=scope, goal=goal)
+                if current is None
+                else replace(current, scope=scope, goal=goal)
+            )
+            return await self._update_goal_locked(
+                source_id=source_id,
+                generation=generation,
+                projection=projection,
+                retain_session=retain_session,
+            )
+
+    async def _update_goal_locked(
+        self,
+        *,
+        source_id: str,
+        generation: str,
+        projection: ReplyCardProjection,
+        retain_session: bool,
+    ) -> bool:
+        matched_key: tuple[str, str, str] | None = None
+        matched: _GoalReplyCardSession | None = None
+        for key, session in self._goal_sessions.items():
+            if (
+                session.message_id == source_id
+                and session.goal_generation == generation
+            ):
+                matched_key = key
+                matched = session
+                break
+        if matched_key is not None and matched is not None:
+            self._goal_sessions.pop(matched_key, None)
+            await self._stop_session(matched)
+            if not retain_session and matched.refresh is not None:
+                self._retired_goal_runs.add(
+                    (source_id, generation, matched.logical_turn_id)
+                )
+        try:
+            card = reply_card(projection)
+        except Exception:
+            logger.exception("failed to render Goal Reply Card update")
+            return False
+        async with self._goal_card_lock:
+            delivered = await self._update_message(
+                source_id,
+                card,
+                binding_id=(
+                    matched.binding_id if matched is not None else "unknown"
+                ),
+                operation_id=generation,
+            )
+            if delivered and retain_session:
+                self._remember_goal_projection(
+                    source_id,
+                    generation,
+                    projection,
+                )
+            elif delivered:
+                self._goal_cards.pop((source_id, generation), None)
+        if delivered and retain_session and matched_key is not None and matched is not None:
+            refreshed_session = _GoalReplyCardSession(
+                binding_id=matched.binding_id,
+                thread_id=matched.thread_id,
+                goal_generation=matched.goal_generation,
+                logical_turn_id=matched.logical_turn_id,
+                message_id=source_id,
+                stopped=asyncio.Event(),
+                projection=projection,
+                revision=matched.revision,
+                refresh=matched.refresh,
+            )
+            self._goal_sessions[matched_key] = refreshed_session
+            if refreshed_session.refresh is not None:
+                refreshed_session.task = asyncio.create_task(
+                    self._poll_goal(refreshed_session),
+                    name=(
+                        "netizen-goal-reply-card-"
+                        f"{refreshed_session.logical_turn_id}"
+                    ),
+                )
+        return delivered
+
+    async def abandon_goal(
+        self,
+        *,
+        binding_id: str,
+        thread_id: str,
+        logical_turn_id: str | None,
+        generation: str,
+    ) -> None:
+        async with self._goal_lock:
+            key = (binding_id, thread_id, generation)
+            session = self._goal_sessions.get(key)
+            if (
+                session is None
+                or session.logical_turn_id != logical_turn_id
+            ):
+                return
+            self._goal_sessions.pop(key, None)
+            await self._stop_session(session)
+
+    def goal_projection(
+        self,
+        *,
+        source_id: str,
+        generation: str,
+    ) -> ReplyCardProjection | None:
+        return self._goal_projection(source_id, generation)
+
+    def _goal_projection(
+        self,
+        source_id: str,
+        generation: str,
+    ) -> ReplyCardProjection | None:
+        current = self._goal_cards.get((source_id, generation))
+        if current is not None:
+            return current
+        for session in self._goal_sessions.values():
+            if (
+                session.message_id == source_id
+                and session.goal_generation == generation
+            ):
+                return session.projection
+        return None
+
+    async def update_goal_page(
+        self,
+        *,
+        source_id: str,
+        binding_id: str,
+        generation: str,
+        page: int,
+        render: Callable[[ReplyCardProjection | None], OutboundCard],
+    ) -> bool:
+        """Serialize one Goal file-page rebuild with every card mutation."""
+
+        async with self._goal_lock:
+            async with self._goal_card_lock:
+                current = self._goal_projection(source_id, generation)
+                if (
+                    current is not None
+                    and current.goal is not None
+                    and current.goal.binding_id != binding_id
+                ):
+                    raise CardActionError("Goal 文件卡片的会话身份不一致。")
+                card = render(current)
+                delivered = await self._update_message(
+                    source_id,
+                    card,
+                    binding_id=binding_id,
+                    operation_id=generation,
+                )
+                if delivered and current is not None and current.files is not None:
+                    current = replace(
+                        current,
+                        files=replace(current.files, page=page),
+                    )
+                    self._remember_goal_projection(
+                        source_id,
+                        generation,
+                        current,
+                    )
+                    for session in self._goal_sessions.values():
+                        if (
+                            session.message_id == source_id
+                            and session.goal_generation == generation
+                        ):
+                            session.projection = current
+                            break
+                return delivered
+
+    def _remember_goal_projection(
+        self,
+        source_id: str,
+        generation: str,
+        projection: ReplyCardProjection,
+    ) -> None:
+        key = (source_id, generation)
+        if key not in self._goal_cards and (
+            len(self._goal_cards) >= _GOAL_REPLY_CARD_CACHE_LIMIT
+        ):
+            self._goal_cards.pop(next(iter(self._goal_cards)))
+        self._goal_cards[key] = projection
+
+    def goal_message_id(
+        self,
+        *,
+        binding_id: str,
+        thread_id: str,
+        generation: str,
+    ) -> str | None:
+        session = self._goal_sessions.get((binding_id, thread_id, generation))
+        return None if session is None else session.message_id
+
+    def owns_goal_card(
+        self,
+        *,
+        source_id: str,
+        binding_id: str,
+        thread_id: str,
+        generation: str,
+    ) -> bool:
+        """Return whether one live exact Goal route owns this control card."""
+
+        session = self._goal_sessions.get((binding_id, thread_id, generation))
+        return session is not None and session.message_id == source_id
+
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         sessions = tuple(self._sessions.values())
         self._sessions.clear()
+        async with self._goal_lock:
+            goal_sessions = tuple(self._goal_sessions.values())
+            self._goal_sessions.clear()
+            self._retired_goal_runs.clear()
+            self._goal_latest_runs.clear()
+            self._goal_cards.clear()
         await asyncio.gather(
-            *(self._stop_session(session) for session in sessions),
+            *(
+                self._stop_session(session)
+                for session in (*sessions, *goal_sessions)
+            ),
             return_exceptions=False,
         )
 
@@ -718,15 +1499,101 @@ class _ProgressCardController:
                 session.failed = True
                 return
 
+    async def _poll_goal(self, session: _GoalReplyCardSession) -> None:
+        refresh = session.refresh
+        if refresh is None:
+            return
+        while not session.stopped.is_set():
+            try:
+                await asyncio.wait_for(
+                    session.stopped.wait(),
+                    timeout=self._poll_seconds,
+                )
+                return
+            except TimeoutError:
+                pass
+            try:
+                async with asyncio.timeout(self._operation_timeout_seconds):
+                    refreshed = await refresh()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "failed to refresh running Goal Reply Card",
+                    extra={
+                        "binding_id": session.binding_id,
+                        "logical_turn_id": session.logical_turn_id,
+                    },
+                )
+                session.failed = True
+                return
+            if refreshed is None:
+                continue
+            revision, projection = refreshed
+            if session.stopped.is_set():
+                return
+            async with self._goal_card_lock:
+                key = (
+                    session.binding_id,
+                    session.thread_id,
+                    session.goal_generation,
+                )
+                if (
+                    session.stopped.is_set()
+                    or self._goal_sessions.get(key) is not session
+                ):
+                    return
+                if revision == session.revision:
+                    continue
+                session.revision = revision
+                session.projection = projection
+                try:
+                    card = reply_card(projection)
+                except Exception:
+                    logger.exception(
+                        "failed to render running Goal Reply Card",
+                        extra={"binding_id": session.binding_id},
+                    )
+                    session.failed = True
+                    return
+                if not await self._update_message(
+                    session.message_id,
+                    card,
+                    binding_id=session.binding_id,
+                    operation_id=session.logical_turn_id,
+                ):
+                    session.failed = True
+                    return
+                self._remember_goal_projection(
+                    session.message_id,
+                    session.goal_generation,
+                    projection,
+                )
+
     async def _update(
         self,
         session: _TurnProgressCardSession,
         card: OutboundCard,
     ) -> bool:
+        return await self._update_message(
+            session.message_id,
+            card,
+            binding_id=session.binding_id,
+            operation_id=session.turn_id,
+        )
+
+    async def _update_message(
+        self,
+        message_id: str,
+        card: OutboundCard,
+        *,
+        binding_id: str,
+        operation_id: str,
+    ) -> bool:
         try:
             async with asyncio.timeout(self._operation_timeout_seconds):
                 result = await self._channel.update_card(
-                    session.message_id,
+                    message_id,
                     card.card,
                 )
         except asyncio.CancelledError:
@@ -735,9 +1602,9 @@ class _ProgressCardController:
             logger.exception(
                 "failed to update progress card",
                 extra={
-                    "binding_id": session.binding_id,
-                    "turn_id": session.turn_id,
-                    "message_id": session.message_id,
+                    "binding_id": binding_id,
+                    "operation_id": operation_id,
+                    "message_id": message_id,
                 },
             )
             return False
@@ -745,16 +1612,18 @@ class _ProgressCardController:
             logger.error(
                 "failed to update progress card: unsuccessful result",
                 extra={
-                    "binding_id": session.binding_id,
-                    "turn_id": session.turn_id,
-                    "message_id": session.message_id,
+                    "binding_id": binding_id,
+                    "operation_id": operation_id,
+                    "message_id": message_id,
                 },
             )
             return False
         return True
 
     @staticmethod
-    async def _stop_session(session: _TurnProgressCardSession) -> None:
+    async def _stop_session(
+        session: _TurnProgressCardSession | _GoalReplyCardSession,
+    ) -> None:
         session.stopped.set()
         task = session.task
         if task is None or task is asyncio.current_task():
@@ -768,9 +1637,17 @@ class _ProgressCardController:
                 "progress card updater failed while stopping",
                 extra={
                     "binding_id": session.binding_id,
-                    "turn_id": session.turn_id,
+                    "operation_id": getattr(
+                        session,
+                        "turn_id",
+                        getattr(session, "logical_turn_id", "unknown"),
+                    ),
                 },
             )
+
+
+# Compatibility construction seam retained for focused ordinary-Turn tests.
+_ProgressCardController = _ReplyCardPresenter
 
 
 class _ReactionController:
@@ -1212,6 +2089,18 @@ class ChannelApplication:
                 ),
             )
         except CardActionError as error:
+            if (
+                intent is not None
+                and intent.name
+                in {
+                    CardControlName.GOAL_PAUSE,
+                    CardControlName.GOAL_RESUME,
+                    CardControlName.GOAL_CLEAR,
+                }
+            ):
+                if not await self._update_goal_action_notice(intent, str(error)):
+                    await self._safe_reply_to_card(intent, str(error))
+                return
             record = self._bindings.side_topic_for_message(
                 app_id=self._app_id,
                 chat_id=callback_chat_id,
@@ -1245,6 +2134,18 @@ class ChannelApplication:
             ThreadStopping,
             TurnStartFailed,
         ) as error:
+            if (
+                intent is not None
+                and intent.name
+                in {
+                    CardControlName.GOAL_PAUSE,
+                    CardControlName.GOAL_RESUME,
+                    CardControlName.GOAL_CLEAR,
+                }
+            ):
+                if not await self._update_goal_action_notice(intent, str(error)):
+                    await self._safe_reply_to_card(intent, str(error))
+                return
             card = (
                 self._settings_card(
                     intent.scope,
@@ -1282,6 +2183,24 @@ class ChannelApplication:
                 "card interaction failed",
                 extra={"error_type": type(error).__name__},
             )
+            if (
+                intent is not None
+                and intent.name
+                in {
+                    CardControlName.GOAL_PAUSE,
+                    CardControlName.GOAL_RESUME,
+                    CardControlName.GOAL_CLEAR,
+                }
+            ):
+                if not await self._update_goal_action_notice(
+                    intent,
+                    "卡片操作失败，请重新发送 /goal。",
+                ):
+                    await self._safe_reply_to_card(
+                        intent,
+                        "卡片操作失败，请重新发送 /goal。",
+                    )
+                return
             card = (
                 self._settings_card(
                     intent.scope,
@@ -1576,41 +2495,432 @@ class ChannelApplication:
         )
 
     async def _complete_goal(self, outcome: GoalOutcome) -> None:
-        status = outcome.goal.status.value if outcome.goal is not None else "unknown"
+        try:
+            binding: ThreadBinding | None = self._bindings.get(outcome.binding_id)
+        except BindingNotFound:
+            binding = None
+        if isinstance(outcome.origin, GoalCardOrigin):
+            origin = outcome.origin
+            scope = origin.scope
+            fallback_origin = origin.fallback_origin
+            if origin.binding_id != outcome.binding_id:
+                logger.error(
+                    "terminal Goal origin identity mismatch",
+                    extra={"binding_id": outcome.binding_id},
+                )
+                target = fallback_origin
+                if target is not None:
+                    await self._reply(
+                        target,
+                        outcome.final_response or "Goal 已结束，但卡片身份校验失败。",
+                    )
+                return
+        else:
+            if binding is None:
+                await self._reply(
+                    outcome.origin,
+                    outcome.final_response or "Goal 已结束，但会话已不存在。",
+                )
+                return
+            scope = self._scope(outcome.origin)
+            fallback_origin = outcome.origin
+            origin = GoalCardOrigin(
+                message_id=None,
+                scope=scope,
+                binding_id=binding.id,
+                short_id=binding.short_id,
+                project_alias=binding.project_alias,
+                fallback_origin=fallback_origin,
+            )
+        identity_binding_id = outcome.binding_id
+        identity_short_id = (
+            binding.short_id if binding is not None else origin.short_id
+        )
+        identity_project_alias = (
+            binding.project_alias if binding is not None else origin.project_alias
+        )
+        goal = outcome.goal
+        status = goal.status.value if goal is not None else "unknown"
         if outcome.error is not None:
             detail = str(outcome.error).strip() or type(outcome.error).__name__
-            message = f"Goal 未能确认终态：{detail[:500]}"
-            error = True
-        elif outcome.goal is not None and outcome.goal.status is GoalStatus.PAUSED:
-            message = (
+            notice = f"Goal 未能确认终态：{detail[:500]}"
+            notice_is_error = True
+            runtime_state = GoalOperationState.UNKNOWN.value
+            result_text = None
+        elif outcome.finalization is GoalFinalizationStatus.UNKNOWN:
+            detail = (
+                str(outcome.finalization_error).strip()
+                if outcome.finalization_error is not None
+                else "自动结束结果未确认"
+            )
+            notice = f"Goal 已完成，但自动结束结果未知：{detail[:500]}"
+            notice_is_error = True
+            runtime_state = GoalOperationState.UNKNOWN.value
+            result_text = (
+                outcome.final_response
+                or "Goal 已完成，未产生文本回复。"
+            )
+        elif goal is not None and goal.status is GoalStatus.PAUSED:
+            notice = (
                 "Goal 已暂停；已请求清理该 Thread 中已登记的后台终端。"
                 "前台工具进程不受此接口保证，可能仍在运行。"
             )
-            error = False
+            notice_is_error = False
+            runtime_state = f"goal-{status}"
+            result_text = (
+                outcome.final_response
+                or "Goal 已暂停，未产生文本回复。"
+            )
         else:
-            message = (
+            notice = (
+                "Goal 已完成并自动结束。"
+                if outcome.finalization is GoalFinalizationStatus.CLEARED
+                else f"Goal 已进入 {status}。"
+            )
+            notice_is_error = False
+            runtime_state = (
+                "goal-cleared"
+                if outcome.finalization is GoalFinalizationStatus.CLEARED
+                else f"goal-{status}"
+            )
+            result_text = (
                 outcome.final_response
                 or f"Goal 已进入 {status}，未产生文本回复。"
             )
-            error = False
-        if isinstance(outcome.origin, GoalCardOrigin):
-            await self._safe_update_card(
-                outcome.origin.message_id,
-                goal_card(
-                    scope=outcome.origin.scope,
-                    binding_id=outcome.origin.binding_id,
-                    short_id=outcome.origin.short_id,
-                    project_alias=outcome.origin.project_alias,
-                    goal=outcome.goal,
-                    runtime_state=(
-                        f"goal-{status}" if outcome.goal is not None else None
+
+        activity = None
+        if (
+            outcome.task_feedback.progress_card_enabled
+            and outcome.activity is not None
+            and outcome.final_turn_status in {"completed", "interrupted", "failed"}
+        ):
+            activity = _reply_activity_module(
+                outcome.activity,
+                terminal_status=outcome.final_turn_status,
+                collapsed=True,
+            )
+        files: tuple[TurnFile, ...] = ()
+        if (
+            outcome.final_turn_status == "completed"
+            and outcome.final_physical_turn_id is not None
+            and has_turn_file_references(outcome.final_items)
+        ):
+            try:
+                if binding is not None and (
+                    binding.scope_key != scope.key
+                    or binding.native_thread_id != outcome.thread_id
+                ):
+                    raise TurnFileError("Goal 文件与完成卡片的会话身份不一致。")
+                project = self._projects.resolve_for_binding(
+                    identity_project_alias
+                )
+                files = extract_turn_files(outcome.final_items, project.cwd)
+            except Exception:
+                logger.exception(
+                    "failed to prepare terminal Goal Reply Card files",
+                    extra={"binding_id": outcome.binding_id},
+                )
+
+        projection = ReplyCardProjection(
+            scope=scope,
+            goal=_reply_goal_module_for_identity(
+                binding_id=identity_binding_id,
+                short_id=identity_short_id,
+                project_alias=identity_project_alias,
+                goal=goal,
+                runtime_state=runtime_state,
+                notice=notice,
+                notice_is_error=notice_is_error,
+            ),
+            activity=activity,
+            result=(
+                ReplyCardResultModule(result_text)
+                if result_text is not None
+                else None
+            ),
+            files=(
+                _reply_files_module(
+                    binding_id=identity_binding_id,
+                    turn_id=outcome.final_physical_turn_id,
+                    files=files,
+                )
+                if files and outcome.final_physical_turn_id is not None
+                and result_text is not None
+                else None
+            ),
+        )
+        terminal_card: OutboundCard | None = None
+        plain_result_required = False
+        try:
+            terminal_card = reply_card(projection)
+        except TurnFileCardLimitError as error:
+            if projection.files is None:
+                logger.warning(
+                    "terminal Goal Reply Card exceeds card limit",
+                    extra={"binding_id": outcome.binding_id},
+                )
+            else:
+                logger.warning(
+                    "terminal Goal Reply Card files exceed card limit",
+                    extra={"binding_id": outcome.binding_id},
+                )
+                goal_module = projection.goal
+                assert goal_module is not None
+                projection = replace(
+                    projection,
+                    goal=replace(
+                        goal_module,
+                        notice=f"{notice} 文件模块未生成：{error}",
+                        notice_is_error=True,
                     ),
-                    notice=message,
-                    notice_is_error=error,
+                    files=None,
+                )
+                try:
+                    terminal_card = reply_card(projection)
+                except Exception:
+                    logger.exception(
+                        "terminal Goal Reply Card without files could not be rendered",
+                        extra={"binding_id": outcome.binding_id},
+                    )
+        except Exception:
+            logger.exception(
+                "terminal Goal Reply Card could not be rendered",
+                extra={"binding_id": outcome.binding_id},
+            )
+
+        if terminal_card is None:
+            goal_module = projection.goal
+            assert goal_module is not None
+            projection = replace(
+                projection,
+                goal=replace(
+                    goal_module,
+                    notice=(
+                        f"{notice} 结果正文无法完整放入卡片，已另行回复。"
+                    ),
+                    notice_is_error=True,
+                ),
+                result=None,
+                files=None,
+            )
+            plain_result_required = result_text is not None
+            try:
+                terminal_card = reply_card(projection)
+            except Exception:
+                logger.exception(
+                    "compact terminal Goal Reply Card could not be rendered",
+                    extra={"binding_id": outcome.binding_id},
+                )
+
+        generation = (
+            goal_generation(goal)
+            if goal is not None
+            else origin.goal_generation
+        )
+        retain_terminal_session = (
+            goal is not None
+            and outcome.finalization is not GoalFinalizationStatus.CLEARED
+        )
+        delivery = _GoalCardDelivery.FAILED
+        if generation is not None:
+            origin.goal_generation = generation
+            if terminal_card is not None:
+                delivery = await self._progress_cards.finish_goal(
+                    binding_id=identity_binding_id,
+                    thread_id=outcome.thread_id,
+                    logical_turn_id=outcome.logical_turn_id,
+                    generation=generation,
+                    origin=origin,
+                    projection=projection,
+                    retain_session=retain_terminal_session,
+                )
+            else:
+                await self._progress_cards.abandon_goal(
+                    binding_id=identity_binding_id,
+                    thread_id=outcome.thread_id,
+                    logical_turn_id=outcome.logical_turn_id,
+                    generation=generation,
+                )
+        target = fallback_origin
+        if target is None and origin.message_id is not None:
+            target = _CardReplyTarget(
+                id=origin.message_id,
+                message_id=origin.message_id,
+                chat_id=scope.chat_id,
+                conversation=_CardReplyConversation(thread_id=scope.topic_id),
+            )
+        if target is None:
+            logger.error("cannot deliver terminal Goal card without reply target")
+            return
+        if delivery is _GoalCardDelivery.SUPERSEDED:
+            return
+        if delivery is _GoalCardDelivery.DELIVERED:
+            if plain_result_required:
+                await self._reply(target, result_text or notice)
+            return
+        if terminal_card is None:
+            await self._reply(target, result_text or notice)
+            return
+        if generation is None:
+            await self._reply(target, terminal_card)
+            if plain_result_required:
+                await self._reply(target, result_text or notice)
+            return
+        fallback_delivery = await self._progress_cards.reply_goal_fallback(
+            binding_id=identity_binding_id,
+            thread_id=outcome.thread_id,
+            logical_turn_id=outcome.logical_turn_id,
+            generation=generation,
+            target=target,
+            card=terminal_card,
+            origin=origin,
+            projection=projection,
+            retain_session=retain_terminal_session,
+        )
+        if fallback_delivery is _GoalCardDelivery.SUPERSEDED:
+            return
+        if fallback_delivery is _GoalCardDelivery.FAILED:
+            await self._reply(target, result_text or notice)
+            return
+        if plain_result_required:
+            await self._reply(target, result_text or notice)
+
+    async def _present_running_goal(
+        self,
+        *,
+        binding: ThreadBinding,
+        scope: FeishuScope,
+        submission: GoalSubmission,
+        origin: GoalCardOrigin,
+        notice: str,
+    ) -> bool:
+        snapshot = await self._runtime.goal_snapshot(binding)
+        if snapshot is None:
+            return False
+        generation = goal_generation(snapshot)
+        origin.goal_generation = generation
+        activity_enabled = submission.task_feedback.progress_card_enabled
+
+        def current_projection(
+            goal_snapshot: GoalSnapshot,
+            activity_snapshot: GoalActivitySnapshot | None,
+            *,
+            runtime_state: str,
+            card_notice: str | None,
+        ) -> ReplyCardProjection:
+            return ReplyCardProjection(
+                scope=scope,
+                goal=_reply_goal_module(
+                    binding=binding,
+                    goal=goal_snapshot,
+                    runtime_state=runtime_state,
+                    notice=card_notice,
+                ),
+                activity=(
+                    _reply_activity_module(activity_snapshot)
+                    if activity_enabled and activity_snapshot is not None
+                    else None
                 ),
             )
-            return
-        await self._reply(outcome.origin, message)
+
+        activity = (
+            self._runtime.goal_activity(
+                binding.id,
+                thread_id=submission.thread_id,
+                logical_turn_id=submission.logical_turn_id,
+                refresh_plan=True,
+            )
+            if activity_enabled
+            else None
+        )
+        projection = current_projection(
+            snapshot,
+            activity,
+            runtime_state=GoalOperationState.RUNNING.value,
+            card_notice=notice,
+        )
+
+        return await self._progress_cards.start_goal(
+            binding_id=binding.id,
+            thread_id=submission.thread_id,
+            logical_turn_id=submission.logical_turn_id,
+            generation=generation,
+            origin=origin,
+            projection=projection,
+            revision=(
+                snapshot.updated_at,
+                GoalOperationState.RUNNING.value,
+                None if activity is None else activity.revision,
+            ),
+            refresh=self._goal_refresh_callback(
+                binding=binding,
+                scope=scope,
+                thread_id=submission.thread_id,
+                logical_turn_id=submission.logical_turn_id,
+                activity_enabled=activity_enabled,
+            ),
+        )
+
+    def _goal_refresh_callback(
+        self,
+        *,
+        binding: ThreadBinding,
+        scope: FeishuScope,
+        thread_id: str,
+        logical_turn_id: str,
+        activity_enabled: bool,
+    ) -> Callable[
+        [],
+        Awaitable[tuple[object, ReplyCardProjection] | None],
+    ]:
+        """Build the exact-run refresh used by start/resume and `/goal` recovery."""
+
+        async def refresh() -> tuple[object, ReplyCardProjection] | None:
+            current = await self._runtime.goal_snapshot(binding)
+            active = self._runtime.active_goal(binding.id)
+            if current is None or active is None:
+                return None
+            display_goal = current
+            if (
+                active.state
+                in {
+                    GoalOperationState.STARTING,
+                    GoalOperationState.RUNNING,
+                    GoalOperationState.PAUSING,
+                }
+                and current.status is not GoalStatus.ACTIVE
+            ):
+                display_goal = replace(current, status=GoalStatus.ACTIVE)
+            current_activity = (
+                self._runtime.goal_activity(
+                    binding.id,
+                    thread_id=thread_id,
+                    logical_turn_id=logical_turn_id,
+                    refresh_plan=True,
+                )
+                if activity_enabled
+                else None
+            )
+            revision = (
+                current.updated_at,
+                active.state.value,
+                None if current_activity is None else current_activity.revision,
+            )
+            return revision, ReplyCardProjection(
+                scope=scope,
+                goal=_reply_goal_module(
+                    binding=binding,
+                    goal=display_goal,
+                    runtime_state=active.state.value,
+                ),
+                activity=(
+                    _reply_activity_module(current_activity)
+                    if activity_enabled and current_activity is not None
+                    else None
+                ),
+            )
+
+        return refresh
 
     async def _prompt(
         self,
@@ -2931,31 +4241,168 @@ class ChannelApplication:
             if argument is None:
                 snapshot = await self._runtime.goal_snapshot(binding)
                 active_goal = self._runtime.active_goal(binding.id)
-                await self._reply(
-                    message,
-                    goal_card(
+                unresolved_goal = (
+                    snapshot is None
+                    and active_goal is not None
+                    and active_goal.state is GoalOperationState.UNKNOWN
+                )
+                activity = None
+                if (
+                    binding.task_feedback.progress_card_enabled
+                    and active_goal is not None
+                    and active_goal.logical_turn_id is not None
+                ):
+                    activity = self._runtime.goal_activity(
+                        binding.id,
+                        thread_id=active_goal.thread_id,
+                        logical_turn_id=active_goal.logical_turn_id,
+                        refresh_plan=True,
+                    )
+                projection = ReplyCardProjection(
+                    scope=intent.scope,
+                    goal=_reply_goal_module(
+                        binding=binding,
+                        goal=snapshot,
+                        runtime_state=(
+                            active_goal.state.value
+                            if active_goal is not None
+                            else None
+                        ),
+                        notice=(
+                            "Goal 状态未确认；服务仍保留该会话占用，"
+                            "不会把 absent 读取解释为已清除。"
+                            if unresolved_goal
+                            else None
+                        ),
+                        notice_is_error=unresolved_goal,
+                    ),
+                    activity=(
+                        _reply_activity_module(activity)
+                        if activity is not None
+                        else None
+                    ),
+                )
+                if snapshot is not None:
+                    generation = goal_generation(snapshot)
+                    message_id = self._progress_cards.goal_message_id(
+                        binding_id=binding.id,
+                        thread_id=snapshot.thread_id,
+                        generation=generation,
+                    )
+                    if (
+                        message_id is not None
+                        and await self._progress_cards.refresh_goal_snapshot(
+                            source_id=message_id,
+                            generation=generation,
+                            logical_turn_id=(
+                                active_goal.logical_turn_id
+                                if active_goal is not None
+                                else None
+                            ),
+                            projection=projection,
+                        )
+                    ):
+                        return
+                    snapshot_origin = GoalCardOrigin(
+                        message_id=None,
                         scope=intent.scope,
                         binding_id=binding.id,
                         short_id=binding.short_id,
                         project_alias=binding.project_alias,
-                        goal=snapshot,
-                        runtime_state=(
-                            active_goal.state.value if active_goal is not None else None
-                        ),
-                    ),
-                )
-                return
-            if action == "pause":
-                await self._runtime.goal_snapshot(binding)
-                acknowledged = False
-
-                async def acknowledge_goal_pause() -> None:
-                    nonlocal acknowledged
+                        fallback_origin=message,
+                        goal_generation=generation,
+                    )
+                    logical_turn_id = (
+                        active_goal.logical_turn_id
+                        if active_goal is not None
+                        and active_goal.logical_turn_id is not None
+                        else f"snapshot:{generation}"
+                    )
+                    refresh = (
+                        self._goal_refresh_callback(
+                            binding=binding,
+                            scope=intent.scope,
+                            thread_id=snapshot.thread_id,
+                            logical_turn_id=logical_turn_id,
+                            activity_enabled=(
+                                binding.task_feedback.progress_card_enabled
+                            ),
+                        )
+                        if active_goal is not None
+                        and active_goal.logical_turn_id is not None
+                        and active_goal.state
+                        in {
+                            GoalOperationState.STARTING,
+                            GoalOperationState.RUNNING,
+                            GoalOperationState.PAUSING,
+                        }
+                        else None
+                    )
+                    if await self._progress_cards.start_goal(
+                        binding_id=binding.id,
+                        thread_id=snapshot.thread_id,
+                        logical_turn_id=logical_turn_id,
+                        generation=generation,
+                        origin=snapshot_origin,
+                        projection=projection,
+                        revision=("snapshot", snapshot.updated_at),
+                        refresh=refresh,
+                    ):
+                        return
                     await self._reply(
                         message,
-                        "正在暂停 Codex Goal 并中断当前物理 Turn。",
+                        "Goal 状态已读取，但状态卡暂时无法展示。",
                     )
-                    acknowledged = True
+                    return
+                await self._reply(message, reply_card(projection))
+                return
+            if action == "pause":
+                goal_before_pause = await self._runtime.goal_snapshot(binding)
+                if goal_before_pause is None:
+                    await self._reply(message, "当前没有 Goal。")
+                    return
+                generation = goal_generation(goal_before_pause)
+                message_id = self._progress_cards.goal_message_id(
+                    binding_id=binding.id,
+                    thread_id=goal_before_pause.thread_id,
+                    generation=generation,
+                )
+
+                async def acknowledge_goal_pause() -> None:
+                    if message_id is None:
+                        return
+                    active_goal = self._runtime.active_goal(binding.id)
+                    activity = None
+                    if (
+                        binding.task_feedback.progress_card_enabled
+                        and active_goal is not None
+                        and active_goal.logical_turn_id is not None
+                    ):
+                        activity = self._runtime.goal_activity(
+                            binding.id,
+                            thread_id=active_goal.thread_id,
+                            logical_turn_id=active_goal.logical_turn_id,
+                        )
+                    await self._progress_cards.update_goal(
+                        source_id=message_id,
+                        generation=generation,
+                        projection=ReplyCardProjection(
+                            scope=intent.scope,
+                            goal=_reply_goal_module(
+                                binding=binding,
+                                goal=goal_before_pause,
+                                runtime_state=GoalOperationState.PAUSING.value,
+                                notice=(
+                                    "正在暂停 Goal 并中断当前物理 Turn。"
+                                ),
+                            ),
+                            activity=(
+                                _reply_activity_module(activity)
+                                if activity is not None
+                                else None
+                            ),
+                        ),
+                    )
 
                 result = await self._runtime.stop(
                     binding.id,
@@ -2967,70 +4414,126 @@ class ChannelApplication:
                         "这是重启前或外部客户端启动的 active Goal；"
                         "当前 SDK 无法安全重挂并暂停，请先在原生 Codex 中暂停。",
                     )
-                elif result is StopDisposition.NOT_RUNNING and not acknowledged:
+                elif result is StopDisposition.NOT_RUNNING:
                     await self._reply(message, "当前没有本服务可控的 running Goal。")
                 return
             if action == "resume":
+                goal_before_resume = await self._runtime.goal_snapshot(binding)
+                if goal_before_resume is None:
+                    await self._reply(message, "当前没有 Goal。")
+                    return
+                generation = goal_generation(goal_before_resume)
+                message_id = self._progress_cards.goal_message_id(
+                    binding_id=binding.id,
+                    thread_id=goal_before_resume.thread_id,
+                    generation=generation,
+                )
+                origin = GoalCardOrigin(
+                    message_id=message_id,
+                    scope=intent.scope,
+                    binding_id=binding.id,
+                    short_id=binding.short_id,
+                    project_alias=binding.project_alias,
+                    fallback_origin=message,
+                )
                 submission = await self._runtime.resume_goal(
                     binding=binding,
                     owner_id=intent.sender_id,
-                    origin=message,
+                    origin=origin,
+                    expected_created_at=goal_before_resume.created_at,
                 )
                 try:
-                    snapshot = await self._runtime.goal_snapshot(binding)
-                    await self._reply(
-                        message,
-                        goal_card(
-                            scope=intent.scope,
-                            binding_id=binding.id,
-                            short_id=binding.short_id,
-                            project_alias=binding.project_alias,
-                            goal=snapshot,
-                            runtime_state=GoalOperationState.RUNNING.value,
-                            notice="Goal 已恢复。",
-                        ),
+                    presented = await self._present_running_goal(
+                        binding=binding,
+                        scope=intent.scope,
+                        submission=submission,
+                        origin=origin,
+                        notice="Goal 已恢复。",
                     )
+                    if not presented:
+                        await self._reply(
+                            message,
+                            "Goal 已恢复并在原生 Codex 中执行，"
+                            "但状态卡暂时无法展示。",
+                        )
                 finally:
                     submission.release_receipt_attempt()
                 return
             if action == "clear":
-                cleared = await self._runtime.clear_goal(binding)
+                before = await self._runtime.goal_snapshot(binding)
+                generation = None if before is None else goal_generation(before)
+                message_id = (
+                    None
+                    if before is None
+                    else self._progress_cards.goal_message_id(
+                        binding_id=binding.id,
+                        thread_id=before.thread_id,
+                        generation=generation,
+                    )
+                )
+                cleared = await self._runtime.clear_goal(
+                    binding,
+                    expected_created_at=(
+                        None if before is None else before.created_at
+                    ),
+                )
+                goal_module = _reply_goal_module(
+                    binding=binding,
+                    goal=None,
+                    notice=("Goal 已结束。" if cleared else "当前没有 Goal。"),
+                )
+                if (
+                    message_id is not None
+                    and generation is not None
+                    and await self._progress_cards.update_goal_module(
+                        source_id=message_id,
+                        generation=generation,
+                        scope=intent.scope,
+                        goal=goal_module,
+                        retain_session=False,
+                    )
+                ):
+                    return
                 await self._reply(
                     message,
-                    goal_card(
-                        scope=intent.scope,
-                        binding_id=binding.id,
-                        short_id=binding.short_id,
-                        project_alias=binding.project_alias,
-                        goal=None,
-                        notice=("Goal 已清除。" if cleared else "当前没有 Goal。"),
+                    reply_card(
+                        ReplyCardProjection(
+                            scope=intent.scope,
+                            goal=goal_module,
+                        )
                     ),
                 )
                 return
             assert argument is not None
+            origin = GoalCardOrigin(
+                message_id=None,
+                scope=intent.scope,
+                binding_id=binding.id,
+                short_id=binding.short_id,
+                project_alias=binding.project_alias,
+                fallback_origin=message,
+            )
             submission = await self._runtime.start_goal(
                 binding=binding,
                 cwd=project.cwd,
                 objective=argument,
                 owner_id=intent.sender_id,
-                origin=message,
+                origin=origin,
             )
             try:
-                snapshot = await self._runtime.goal_snapshot(
-                    self._bindings.get(binding.id)
+                presented = await self._present_running_goal(
+                    binding=self._bindings.get(binding.id),
+                    scope=intent.scope,
+                    submission=submission,
+                    origin=origin,
+                    notice="Goal 已启动；原生 Codex 可自动继续多个物理 Turn。",
                 )
-                await self._reply(
-                    message,
-                    goal_card(
-                        scope=intent.scope,
-                        binding_id=binding.id,
-                        short_id=binding.short_id,
-                        project_alias=binding.project_alias,
-                        goal=snapshot,
-                        runtime_state=GoalOperationState.RUNNING.value,
-                        notice="Goal 已启动；原生 Codex 可自动继续多个物理 Turn。",
-                    ),
-                )
+                if not presented:
+                    await self._reply(
+                        message,
+                        "Goal 已启动并在原生 Codex 中执行，"
+                        "但状态卡暂时无法展示。",
+                    )
             finally:
                 submission.release_receipt_attempt()
             return
@@ -3508,7 +5011,15 @@ class ChannelApplication:
                 tag=str(getattr(action, "tag", "") or ""),
                 value=getattr(action, "value", None),
             )
-            await self._turn_file_action(intent)
+            if (
+                intent.name is TurnFileActionName.PAGE
+                and intent.reply is not None
+                and intent.reply.goal is not None
+            ):
+                async with self._scope_coordinator.hold(intent.scope.key):
+                    await self._turn_file_action(intent)
+            else:
+                await self._turn_file_action(intent)
         except (CardActionError, TurnFileError) as error:
             await self._safe_turn_file_feedback(
                 message_id=message_id,
@@ -3540,7 +5051,66 @@ class ChannelApplication:
         if intent.name is TurnFileActionName.PAGE:
             assert intent.page is not None
             assert intent.answer is not None
-            if intent.progress is None:
+            if intent.reply is not None:
+                if intent.reply.goal is not None:
+                    frozen = await self._validated_goal_page_manifest(intent)
+
+                    def render_goal_page(
+                        current: ReplyCardProjection | None,
+                    ) -> OutboundCard:
+                        reply = frozen
+                        if current is not None:
+                            current_files = current.files
+                            if (
+                                current.result is None
+                                or current_files is None
+                                or current_files.binding_id != intent.binding_id
+                                or current_files.turn_id != intent.turn_id
+                                or tuple(
+                                    (item.path, item.label)
+                                    for item in current_files.items
+                                )
+                                != tuple(
+                                    (item.path, item.label)
+                                    for item in intent.files
+                                )
+                            ):
+                                raise CardActionError(
+                                    "Goal 结果或文件已变化，本次翻页未执行。"
+                                )
+                            reply = ReplyCardManifest(
+                                goal=current.goal,
+                                activity=current.activity,
+                                result=current.result,
+                            )
+                        return reply_card_from_manifest(
+                            scope=intent.scope,
+                            binding_id=intent.binding_id,
+                            turn_id=intent.turn_id,
+                            manifest=intent.files,
+                            reply=reply,
+                            page=intent.page,
+                        )
+
+                    updated = await self._progress_cards.update_goal_page(
+                        source_id=intent.source_id,
+                        binding_id=intent.binding_id,
+                        generation=intent.reply.goal.goal_generation or "",
+                        page=intent.page,
+                        render=render_goal_page,
+                    )
+                    if not updated:
+                        raise TurnFileError("飞书未确认本轮文件卡片翻页成功。")
+                    return
+                card = reply_card_from_manifest(
+                    scope=intent.scope,
+                    binding_id=intent.binding_id,
+                    turn_id=intent.turn_id,
+                    manifest=intent.files,
+                    reply=intent.reply,
+                    page=intent.page,
+                )
+            elif intent.progress is None:
                 card = turn_files_card_from_manifest(
                     scope=intent.scope,
                     binding_id=intent.binding_id,
@@ -3568,6 +5138,41 @@ class ChannelApplication:
         assert intent.path is not None
         turn_file = require_turn_file_path(intent.path)
         await self._send_turn_file(intent, turn_file)
+
+    async def _validated_goal_page_manifest(
+        self,
+        intent: TurnFileActionIntent,
+    ) -> ReplyCardManifest:
+        """Reject a stale Goal page callback before it can replace the card."""
+
+        reply = intent.reply
+        assert reply is not None and reply.goal is not None
+        frozen = reply.goal
+        try:
+            binding = self._bindings.get(intent.binding_id)
+        except BindingNotFound:
+            # v5 file callbacks remain self-contained across restart and exact
+            # Binding deletion.  Filesystem validation still occurs while the
+            # card is rebuilt.
+            return reply
+        if binding.scope_key != intent.scope.key:
+            raise CardActionError("Goal 文件卡片与当前会话不一致。")
+        current = await self._runtime.goal_snapshot(binding)
+        if frozen.status is None or frozen.runtime_state == "goal-cleared":
+            # A cleared card is a frozen, self-contained record of its exact
+            # completed Goal.  A later Goal owns another generation/card and
+            # cannot be overwritten by paging this historical result.
+            return reply
+        if (
+            current is None
+            or current.thread_id != binding.native_thread_id
+            or goal_generation(current) != frozen.goal_generation
+            or current.status.value != frozen.status
+        ):
+            raise CardActionError(
+                "Goal 已变化，本次翻页未执行；请重新发送 /goal。"
+            )
+        return reply
 
     async def _send_turn_file(
         self,
@@ -4181,27 +5786,59 @@ class ChannelApplication:
             CardControlName.GOAL_CLEAR,
         }:
             assert intent.binding_id is not None
+            assert intent.goal_generation is not None
+            assert intent.expected_goal_status is not None
             async with self._scope_coordinator.hold(intent.scope.key):
-                binding = self._bindings.active_binding(intent.scope.key)
-                if binding is None or binding.id != intent.binding_id:
+                binding = self._bindings.get(intent.binding_id)
+                if binding.scope_key != intent.scope.key:
+                    raise BindingNotFound(intent.binding_id)
+                native_thread_id = binding.native_thread_id
+                if (
+                    native_thread_id is None
+                    or not self._progress_cards.owns_goal_card(
+                        source_id=intent.source_id,
+                        binding_id=binding.id,
+                        thread_id=native_thread_id,
+                        generation=intent.goal_generation,
+                    )
+                ):
                     raise CardActionError(
-                        "active 会话已切换，本 Goal 卡片未执行；请重新发送 /goal。"
+                        "Goal 卡片已过期或已被新卡片取代；"
+                        "请重新发送 /goal。"
+                    )
+                goal_before = await self._runtime.goal_snapshot(binding)
+                if (
+                    goal_before is None
+                    or goal_generation(goal_before) != intent.goal_generation
+                    or goal_before.status.value != intent.expected_goal_status
+                ):
+                    raise CardActionError(
+                        "Goal 已变化，本卡片操作未执行；请重新发送 /goal。"
                     )
                 if intent.name is CardControlName.GOAL_PAUSE:
-                    goal_before_pause = await self._runtime.goal_snapshot(binding)
-
                     async def acknowledge_goal_card_pause() -> None:
-                        await self._safe_update_card(
-                            intent.source_id,
-                            goal_card(
+                        current = self._progress_cards.goal_projection(
+                            source_id=intent.source_id,
+                            generation=intent.goal_generation,
+                        )
+                        goal_module = _reply_goal_module(
+                            binding=binding,
+                            goal=goal_before,
+                            runtime_state=GoalOperationState.PAUSING.value,
+                            notice="正在暂停 Goal 并中断当前物理 Turn。",
+                        )
+                        projection = (
+                            ReplyCardProjection(
                                 scope=intent.scope,
-                                binding_id=binding.id,
-                                short_id=binding.short_id,
-                                project_alias=binding.project_alias,
-                                goal=goal_before_pause,
-                                runtime_state=GoalOperationState.PAUSING.value,
-                                notice="正在暂停 Goal 并中断当前物理 Turn。",
-                            ),
+                                goal=goal_module,
+                            )
+                            if current is None
+                            else replace(current, goal=goal_module)
+                        )
+                        await self._progress_cards.update_goal(
+                            source_id=intent.source_id,
+                            generation=intent.goal_generation,
+                            projection=projection,
                         )
 
                     result = await self._runtime.stop(
@@ -4212,29 +5849,9 @@ class ChannelApplication:
                         raise CardActionError(
                             "这是外部 active Goal，当前 SDK 无法安全重挂并暂停。"
                         )
-                    if result in {
-                        StopDisposition.GOAL_REQUESTED,
-                        StopDisposition.GOAL_STOPPING,
-                    }:
-                        paused = await self._runtime.goal_snapshot(binding)
-                        await self._safe_update_card(
-                            intent.source_id,
-                            goal_card(
-                                scope=intent.scope,
-                                binding_id=binding.id,
-                                short_id=binding.short_id,
-                                project_alias=binding.project_alias,
-                                goal=paused,
-                                runtime_state=(
-                                    f"goal-{paused.status.value}"
-                                    if paused is not None
-                                    else GoalOperationState.PAUSING.value
-                                ),
-                                notice=(
-                                    "Goal 已暂停；已请求清理该 Thread 中已登记的"
-                                    "后台终端。前台工具进程可能仍在运行。"
-                                ),
-                            ),
+                    if result is StopDisposition.NOT_RUNNING:
+                        raise CardActionError(
+                            "Goal 已结束运行，本次暂停未执行；请重新发送 /goal。"
                         )
                     return
                 if intent.name is CardControlName.GOAL_RESUME:
@@ -4244,42 +5861,93 @@ class ChannelApplication:
                         binding_id=binding.id,
                         short_id=binding.short_id,
                         project_alias=binding.project_alias,
+                        fallback_origin=_CardReplyTarget(
+                            id=intent.source_id,
+                            message_id=intent.source_id,
+                            chat_id=intent.scope.chat_id,
+                            conversation=_CardReplyConversation(
+                                thread_id=intent.scope.topic_id
+                            ),
+                        ),
+                        goal_generation=intent.goal_generation,
                     )
                     submission = await self._runtime.resume_goal(
                         binding=binding,
                         owner_id=intent.sender_id,
                         origin=origin,
+                        expected_created_at=goal_before.created_at,
                     )
                     try:
-                        await self._safe_update_card(
-                            intent.source_id,
-                            goal_card(
-                                scope=intent.scope,
-                                binding_id=binding.id,
-                                short_id=binding.short_id,
-                                project_alias=binding.project_alias,
-                                goal=await self._runtime.goal_snapshot(binding),
-                                runtime_state=GoalOperationState.RUNNING.value,
-                                notice="Goal 已恢复。",
-                            ),
+                        presented = await self._present_running_goal(
+                            binding=binding,
+                            scope=intent.scope,
+                            submission=submission,
+                            origin=origin,
+                            notice="Goal 已恢复。",
                         )
+                        if not presented:
+                            await self._safe_reply_to_card(
+                                intent,
+                                "Goal 已恢复并在原生 Codex 中执行，"
+                                "但原卡片暂时无法更新。",
+                            )
                     finally:
                         submission.release_receipt_attempt()
                     return
-                cleared = await self._runtime.clear_goal(binding)
-                await self._safe_update_card(
-                    intent.source_id,
-                    goal_card(
-                        scope=intent.scope,
-                        binding_id=binding.id,
-                        short_id=binding.short_id,
-                        project_alias=binding.project_alias,
-                        goal=None,
-                        notice=("Goal 已清除。" if cleared else "当前没有 Goal。"),
-                    ),
+                cleared = await self._runtime.clear_goal(
+                    binding,
+                    expected_created_at=goal_before.created_at,
                 )
+                current = self._progress_cards.goal_projection(
+                    source_id=intent.source_id,
+                    generation=intent.goal_generation,
+                )
+                goal_module = _reply_goal_module(
+                    binding=binding,
+                    goal=None,
+                    notice=("Goal 已结束。" if cleared else "当前没有 Goal。"),
+                )
+                projection = (
+                    ReplyCardProjection(scope=intent.scope, goal=goal_module)
+                    if current is None
+                    else replace(current, goal=goal_module)
+                )
+                if not await self._progress_cards.update_goal(
+                    source_id=intent.source_id,
+                    generation=intent.goal_generation,
+                    projection=projection,
+                    retain_session=False,
+                ):
+                    raise CardActionError("飞书未确认 Goal 卡片已更新。")
             return
         raise CardActionError(f"尚未处理的卡片动作：{intent.name.value}")
+
+    async def _update_goal_action_notice(
+        self,
+        intent: CardControlIntent,
+        message: str,
+    ) -> bool:
+        generation = intent.goal_generation
+        if generation is None:
+            return False
+        current = self._progress_cards.goal_projection(
+            source_id=intent.source_id,
+            generation=generation,
+        )
+        if current is None or current.goal is None:
+            return False
+        return await self._progress_cards.update_goal(
+            source_id=intent.source_id,
+            generation=generation,
+            projection=replace(
+                current,
+                goal=replace(
+                    current.goal,
+                    notice=message[:4_000],
+                    notice_is_error=True,
+                ),
+            ),
+        )
 
     async def _resolve_card_model_settings(
         self,

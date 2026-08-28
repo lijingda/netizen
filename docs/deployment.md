@@ -110,8 +110,9 @@ token；手工准备的应用必须逐项配置。无论来源，飞书应用版
 不调用 Codex。Task Reaction 与 Progress Card 都是展示层的尽力操作：reaction/card
 权限或单次请求失败只记录脱敏日志，不得阻断已经启动的 Turn 或最终结果。只有 Task
 Reaction 已开启时，`OnIt` 失败才会在 native steer 已成功后回退一条简短确认；关闭时
-不得发送这条 fallback。Progress Card 初始、中间或终态更新失败时，终态回退到无文件
-富文本/静态文本、有文件现有完成卡的标准路径。
+不得发送这条 fallback。Progress Card 初始、中间或终态更新失败时，普通 Turn 终态回退到
+无文件富文本/静态文本、有文件完成卡的标准路径；Goal 展示故障不得改变原生执行，终态
+使用新的自包含组合卡或明确的文本 fallback，不能因为更新失败丢掉权威结果。
 
 引用功能发布后要用真实消息手工验收普通文本与 CardKit 2.0 应用卡片。卡片用例应
 确认 header/body 可见文本进入 Codex，而按钮 value、确认弹窗和隐藏 option 不进入；
@@ -209,7 +210,8 @@ stdout；异常路径的二次 interrupt、terminal cleanup 和 task drain 都�
 `make check` 还固定验证公开 `AsyncTurnHandle.stream()` 的 exact
 `turn/diff/updated` latest aggregate snapshot、公开 `ThreadItem.root` 的 completed
 `fileChange` / `imageGeneration.saved_path` fallback、unified diff metadata parser、v3
-过期拒绝、v4 自包含循环分页、100/500 完整 manifest、1000 明确拒绝，以及 Lark
+过期拒绝、v4 兼容解码、v5 完整 Reply Card manifest 循环分页、100/500 完整 manifest、
+1000 明确拒绝，以及 Lark
 `OutboundImage`/`OutboundFile`/`SendOpts` 合同。任一固定 SDK/Channel shape 变化都必须先
 更新兼容性结论，不能把本轮文件降级成工作区扫描、最终文本解析、私有 RPC 或静默截断。
 
@@ -735,7 +737,7 @@ HTTP；不得把该端口直接暴露到不受信网络。
 `defaultCwd.parent`。Channel Database 只接受当前 schema v7，不在服务启动时自动迁移旧
 schema。v7 在 v6 的 Mention Context Mode、exact Context Boundary 与独立 revision 上，
 为 Binding 增加两个 Task Feedback 布尔值和 feedback revision；不保存任何补充消息正文、Turn
-Activity Projection 或 Progress Card session。v6 -> v7 cutover 必须在 release transaction
+Activity Projection 或 Reply Card session。v6 -> v7 cutover 必须在 release transaction
 中完成，把所有现有 Binding 的 Task Reaction 与 Progress Card 初始化为关闭，并保留现有
 Scope/Binding/Project、去重记录和 `side_topics` 永久路由墓碑；迁移失败时恢复旧数据库与
 旧 release。不得归档后创建空数据库，否则旧 Side 话题可能重新落入普通 Binding 路由。
@@ -768,12 +770,12 @@ Scope/Binding/Project、去重记录和 `side_topics` 永久路由墓碑；迁�
 - 若本轮文件按钮提示文件已不可用、卡片已删除或话题关系未确认，
   原终态卡应保持不变。先检查当前文件和
   `im:resource`/`im:message:send_as_bot` 已发布权限；
-  v4 callback payload 明文包含路径和分页 manifest，这是已接受的飞书应用边界，不是
+  v4/v5 callback payload 明文包含路径和分页 manifest，这是已接受的飞书应用边界，不是
   下载凭证或快照；不要手工写 SQLite，也不要把失败文件补发到主聊天。
 - 若 Side 显示 `creating`、清理未确认或要求再次结束，不要删除 SQLite route 或把该话题
   当普通 Binding 使用；在原 Side 话题重试 `/side close`，或正常重启让遗留 open route
   转为 expired。Side 卡在 active close 时先检查 App Server/平台日志；禁止猜测 native ID。
-- 正常停机会停止所有 pulse 和 Progress Card updater，并用已记录的 exact reaction ID
+- 正常停机会停止所有 pulse 和 Reply Card Activity updater，并用已记录的 exact reaction ID
   清理常驻的 `Typing` 与当时可见的 `THINKING`；没有 native 终态时不把运行卡伪装成完成。
   若进程被 `SIGKILL`、主机掉电或崩溃，运行态表情或最后一次更新的运行卡可能留在原消息；
   在“不持久化飞书展示状态”的边界下无法安全恢复，禁止为此扫描/猜测 reaction/card
@@ -892,7 +894,7 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    生成”，observer unavailable 时显示“暂不可用”。卡片不显示耗时、百分比、ETA、
    reasoning、raw command/tool output 或 tool arguments。成功 steer 后旧 checklist 在新
    plan 到达前标记可能过期，之后整体替换。终态在同一卡片折叠过程并显示结果；有文件时
-   同卡保留 v4 文件分页/callback。分别使 initial、中间和终态 card update 失败，native
+   同卡保留既有 v4 文件分页/callback。分别使 initial、中间和终态 card update 失败，native
    Turn 都必须继续，终态回退标准投递且不重试风暴。最后同时开启两项，确认两套 presenter
    并存而不重复最终结果，并在 P2P、群主线和普通话题各验证一次。
 
@@ -937,12 +939,24 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    原生 Turn；running 时同样只 steer exact Turn 一次。未知、
    disabled、重名或 stale 引用必须零 Codex mutation；引用消息历史里的 `$skill` 不得
    激活，当前消息的引用仍正常。
-7. 在已通过 zero-Turn live gate 的环境发送 `/goal <objective>`，卡片与 `/status` /
-   `/sessions` 显示 Goal 状态；同一 Binding 的普通 Prompt、`/config`、`/compact` 被
-   拒绝。验证自动 rollover 后只有一个逻辑终态；`/goal pause` 与 `/stop` 都先暂停 Goal、
-   中断 exact 物理 Turn 并请求 terminal cleanup，随后 `/goal resume` 可继续，paused/
-   terminal 时 `/goal clear` 可清除。重启期间保留的 active Goal 必须显示为外部活跃并
-   拒绝 mutation，提示在原生 Codex 暂停，不能自动重挂。
+7. 在已通过 zero-Turn live gate 的环境发送 `/goal <objective>`，只出现一张组合卡，并与
+   `/status`、`/sessions` 一致显示 Goal 状态；同一 Binding 的普通 Prompt、`/config`、
+   `/compact` 被拒绝。Progress Card 关闭时该卡只有 Goal/终态 Result/可选 Files，开启时
+   增加 Activity，且 start、rollover、pause、resume、terminal 都更新同一个 message ID。
+   `/goal pause` 与 `/stop` 都先暂停 Goal、中断 exact 物理 Turn 并请求 terminal cleanup，
+   随后卡片或 `/goal resume` 可继续；paused、blocked、usage/budget limited 都不得自动
+   clear，并保留“结束 Goal”。只有 logical stream、persisted Goal、exact final Turn 与
+   Thread idle 四项证据完整，Goal 为 complete 且 final Turn 为 completed 时才自动 clear；
+   清理后卡片仍显示冻结的最终回答和 exact final Turn 文件，`/sessions` 恢复 idle 的归档/
+   删除按钮。模拟 clear false、响应丢失和清理后仍可读，必须显示收尾不确定、保留 unknown
+   slot、关闭 admission、零自动重试但不丢最终回答；即使 clear 已生效且后续 get absent，
+   `/goal` 也必须显示冻结的 goal-unknown，`/goal clear` 必须拒绝。用阻塞终态投递证明
+   handoff 返回前显式 clear 与同秒同 objective 新 Goal 都被拒绝，handoff 超时后非 unknown
+   slot 会释放，shutdown 对已终态 Goal 零 pause/cleanup。使初始 Goal 卡发送失败后发送
+   `/goal`，恢复卡必须复用 exact logical run、继续 Activity 并接住最终 Result/Files。
+   重启期间保留的 active Goal 必须显示为外部活跃并拒绝 mutation，提示在原生 Codex 暂停，
+   不能自动重挂；重启前旧控制按钮 stale，新的 `/goal` 卡按钮才可用。生命周期内不得用外部
+   CLI/App Server 并发改写同一 Thread Goal，因为 thread-scoped clear 没有 generation CAS。
 8. 长 Turn 中发第二条消息，结果必须被 steer 改变；native steer 失败时不得出现
    `OnIt` 或 steer count，必须明确提示本条未执行。故意使 `OnIt` 投递失败时，只在 native
    steer 已成功后收到“已接收调整”兜底，原 Turn pulse 不受影响。
@@ -1056,15 +1070,19 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     96.9 KB 请求返回 230099/200800 的容量证据。Progress Card 关闭时，无文件 Turn 必须仍
     只有富文本/静态文本最终回复；有文件 Turn 必须只有一张同时包含最终回复和本轮文件的
     现有完成卡。Progress Card 开启时，两种结果都更新最初的同一张运行卡，有文件时继续
-    包含同一套 v4 manifest。Project 内文件显示相对路径，Project 外文件显示脱敏逻辑位置；
+    包含既有 v4 manifest。再验证 Goal exact 最终物理 Turn completed 的文件进入同一张
+    Goal 卡并使用 v5 完整 Reply Card manifest，而更早 rollover Turn 的文件不会被猜测
+    聚合。Project 内文件显示相对路径，Project 外文件显示脱敏逻辑位置；
     所有条目显示大小，
-    按 8 个一页完整翻页，可见正文不出现绝对路径、预览、diff 或发送全部；v4 callback
-    payload 则必须逐项携带明文 absolute path。依次在 P2P 平面消息、
+    按 8 个一页完整翻页，可见正文不出现绝对路径、预览、diff 或发送全部；v5 callback
+    payload 则必须逐项携带明文 absolute path，并在翻页后完整保留 Goal/Activity/Result。
+    依次在 P2P 平面消息、
     群主线和已有话题点击普通文件与“发送原图到话题”：平面卡片必须出现以该卡片为锚点的话题，记录真实
     root/parent/thread 返回；已有话题必须保持原 thread ID，飞书能正常预览/下载实际文件。
     切换到另一 Binding 后旧卡仍能翻页和发送；正常重启 Netizen/App Server 后，再点击
-    重启前的 v4 卡，必须只从 callback 内的原回答 + manifest 恢复，且不读取 source card、completed
-    Turn。抽样一张升级前 v3 卡，必须明确提示已过期且不发送文件、不读取 history。
+    重启前的 v5 卡，必须只从 callback 内的完整 Reply Card manifest 恢复，且不读取 source
+    card、Binding 或 completed Turn；再抽样一张升级前 v4 卡确认兼容。升级前 v3 卡必须
+    明确提示已过期且不发送文件、不读取 history。
     重复点击同一按钮不产生重复文件消息。再分别在点击前删除文件、改成目录、把同一上报
     路径重新绑定到另一个普通文件和删除原卡片：前两类不可用目标应失败，重绑路径发送点击
     时当前内容，删除卡片失败；所有失败均保持原卡且没有文件掉入主聊天。翻页还必须确认

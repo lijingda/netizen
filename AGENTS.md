@@ -96,16 +96,25 @@ contributors must know before starting related work.
   message bodies, ADR 0046's two Binding-scoped Task Feedback booleans/revision,
   plus ADR 0021's Side Topic routes/tombstones without native Thread IDs. Never
   persist prompts, supplemental messages, responses, Turn history/activity
-  projections, progress-card identities/sessions, queues, resolved/effective/
+  projections, reply-card identities/sessions, queues, resolved/effective/
   default Codex configuration, or other Codex-owned state. Admin login sessions,
   CSRF tokens, native metadata indexes, and audit records also stay out of
   Channel SQLite.
 - ADR 0046's Task Reaction and Progress Card are independent Binding-scoped
-  opt-ins that default off. Display failures never alter a Turn. With Progress
-  Card off, preserve the existing terminal contract: no files use rich/static
-  text and files use the self-contained completion card. The first projection
-  is exact-Turn status plus plan only; never expose reasoning, raw tool/command
-  output, tool arguments, elapsed time, percentage, or ETA through it.
+  opt-ins that default off. ADR 0047 renders Goal, Activity, Result, and Files as
+  one closed set of typed Reply Card modules under a single best-effort
+  presenter; it is not a plugin system. Goal always contributes its control
+  module, while Progress Card controls Activity for ordinary Turns and Goals.
+  With no Goal, Activity, or files, preserve rich/static terminal text. Never
+  expose reasoning, raw tool/command output, tool arguments, elapsed time,
+  percentage, or ETA. Display failures never alter native execution.
+- ADR 0047 auto-clears only a four-proof complete Goal whose exact final Turn
+  completed. Hold its Runtime slot through the bounded terminal display handoff;
+  paused/blocked/limited/unknown Goals never auto-clear. Goal controls require
+  exact process-local message ownership plus the strongest SDK-visible native
+  fingerprint; that fingerprint is not globally unique. Concurrent external
+  mutation of the same Thread Goal is unsupported because the pinned SDK's
+  thread-scoped clear has no expected-generation CAS.
 - Use exact-pinned official SDKs and public high-level APIs by default. The only
   approved reach-throughs are ADR 0009's isolated, version/fingerprint-gated
   terminal cleanup and ADR 0014's removable capability-specific Goal/Skills

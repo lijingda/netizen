@@ -158,6 +158,8 @@ class CardControlIntent:
     message_context_mode: MentionContextMode | None = None
     side_id: str | None = None
     page: int | None = None
+    goal_generation: str | None = None
+    expected_goal_status: str | None = None
 
 
 class TurnFileActionName(str, Enum):
@@ -190,6 +192,77 @@ class TurnProgressManifest:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplyCardGoalModule:
+    """Frozen, display-only Goal control projection for one Goal generation."""
+
+    binding_id: str
+    short_id: str
+    project_alias: str
+    goal_generation: str | None
+    status: str | None
+    runtime_state: str | None
+    objective: str | None
+    token_budget: int | None
+    tokens_used: int
+    notice: str | None = None
+    notice_is_error: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyCardActivityModule:
+    """Bounded, sanitized Turn activity plus its presentation state."""
+
+    progress: TurnProgressManifest
+    terminal_status: str | None = None
+    collapsed: bool = False
+    hidden_steps: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyCardResultModule:
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyCardFileItem:
+    """One current file view; callbacks carry only path and display label."""
+
+    path: str
+    label: str
+    size: int | None
+    media_kind: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyCardFilesModule:
+    binding_id: str
+    turn_id: str
+    items: tuple[ReplyCardFileItem, ...]
+    page: int = 0
+    action_version: int = 5
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyCardManifest:
+    """Frozen non-file modules carried by a self-contained page callback."""
+
+    goal: ReplyCardGoalModule | None = None
+    activity: ReplyCardActivityModule | None = None
+    result: ReplyCardResultModule | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyCardProjection:
+    """Closed Reply Card module set rendered atomically as one Card 2.0 body."""
+
+    scope: FeishuScope | None = None
+    goal: ReplyCardGoalModule | None = None
+    activity: ReplyCardActivityModule | None = None
+    result: ReplyCardResultModule | None = None
+    files: ReplyCardFilesModule | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TurnFileActionIntent:
     scope: FeishuScope
     source_id: str
@@ -202,6 +275,7 @@ class TurnFileActionIntent:
     files: tuple[TurnFileManifestItem, ...] = ()
     answer: str | None = None
     progress: TurnProgressManifest | None = None
+    reply: ReplyCardManifest | None = None
 
 
 ChannelInteraction = PromptInput | ControlIntent

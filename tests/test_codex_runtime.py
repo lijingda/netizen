@@ -33,6 +33,7 @@ from netizen.bindings import (
 from netizen.codex_runtime import (
     ActiveState,
     ExternalGoalActive,
+    GoalFinalizationStatus,
     GoalOutcome,
     GoalOperationState,
     GoalStateUnknown,
@@ -609,15 +610,17 @@ def goal_snapshot(
     status: GoalStatus,
     *,
     objective: str = "ship safely",
+    thread_id: str = "native-1",
+    created_at: int = 1,
 ) -> GoalSnapshot:
     return GoalSnapshot(
-        thread_id="native-1",
+        thread_id=thread_id,
         objective=objective,
         status=status,
         token_budget=None,
         tokens_used=1,
         time_used_seconds=1,
-        created_at=1,
+        created_at=created_at,
         updated_at=2,
     )
 
@@ -631,6 +634,9 @@ class FakeGoalHandle:
         self.closed = False
         self.pause_calls = 0
         self.pause_errors: list[BaseException] = []
+        self.pause_started = asyncio.Event()
+        self.pause_gate: asyncio.Event | None = None
+        self.terminal_logical_turn_id: str | None = None
         self.record = SimpleNamespace(
             id=turn_id,
             status=FakeStatus("inProgress"),
@@ -648,13 +654,16 @@ class FakeGoalHandle:
     async def wait_terminal(self) -> GoalStreamTerminal:
         await self.terminal.wait()
         return GoalStreamTerminal(
-            self.id,
+            self.terminal_logical_turn_id or self.id,
             self.id,
             self.record.status.value,
         )
 
     async def pause(self) -> GoalPauseAck:
         self.pause_calls += 1
+        self.pause_started.set()
+        if self.pause_gate is not None:
+            await self.pause_gate.wait()
         if self.pause_errors:
             raise self.pause_errors.pop(0)
         self.control.persisted = goal_snapshot(
@@ -3441,6 +3450,343 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(outcome, GoalOutcome)
         self.assertEqual(outcome.goal.status, GoalStatus.COMPLETE)
         self.assertEqual(outcome.final_response, "goal final")
+        self.assertEqual(outcome.final_turn_status, "completed")
+        self.assertEqual(len(outcome.final_items), 1)
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.CLEARED)
+        self.assertIsNone(outcome.finalization_error)
+        self.assertEqual(control.clear_calls, ["native-1"])
+        self.assertIsNone(control.persisted)
+
+    async def test_paused_goal_holds_slot_until_terminal_delivery_finishes(
+        self,
+    ) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        delivery_entered = asyncio.Event()
+        release_delivery = asyncio.Event()
+
+        async def gated_capture(outcome: object) -> None:
+            self.outcomes.append(outcome)
+            delivery_entered.set()
+            await release_delivery.wait()
+
+        self.runtime._on_completion = gated_capture
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="deliver paused result before clear",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+        control.handles[0].finish(
+            goal_status=GoalStatus.PAUSED,
+            turn_status="interrupted",
+            response="paused result",
+        )
+        async with asyncio.timeout(1):
+            await delivery_entered.wait()
+
+        self.assertIsNotNone(self.runtime.active_goal(binding.id))
+        with self.assertRaises(ThreadGoalActive):
+            await self.runtime.clear_goal(binding, expected_created_at=1)
+        self.assertEqual(control.clear_calls, [])
+
+        release_delivery.set()
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+        self.assertEqual(self.outcomes[-1].final_response, "paused result")
+        self.assertTrue(
+            await self.runtime.clear_goal(binding, expected_created_at=1)
+        )
+
+    async def test_complete_goal_holds_slot_against_same_second_restart_until_delivery(
+        self,
+    ) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        delivery_entered = asyncio.Event()
+        release_delivery = asyncio.Event()
+
+        async def gated_capture(outcome: object) -> None:
+            self.outcomes.append(outcome)
+            delivery_entered.set()
+            await release_delivery.wait()
+
+        self.runtime._on_completion = gated_capture
+        first = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="same-second objective",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        first.release_receipt_attempt()
+        control.handles[0].finish(response="first result")
+        async with asyncio.timeout(1):
+            await delivery_entered.wait()
+
+        with self.assertRaises(ThreadGoalActive):
+            await self.runtime.start_goal(
+                binding=binding,
+                cwd=self.cwd,
+                objective="same-second objective",
+                owner_id="ou_user",
+                origin=object(),
+            )
+        self.assertEqual(len(control.start_calls), 1)
+
+        release_delivery.set()
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        second = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="same-second objective",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        second.release_receipt_attempt()
+        self.assertEqual(len(control.start_calls), 2)
+        self.assertEqual(self.outcomes[-1].final_response, "first result")
+        control.handles[1].finish(response="second result")
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+    async def test_goal_delivery_timeout_releases_non_unknown_slot(self) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        delivery_entered = asyncio.Event()
+
+        async def never_finishes(outcome: object) -> None:
+            self.outcomes.append(outcome)
+            delivery_entered.set()
+            await asyncio.Event().wait()
+
+        self.runtime._on_completion = never_finishes
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="bounded terminal delivery",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+
+        with patch(
+            "netizen.codex_runtime._GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS",
+            0.01,
+        ), self.assertLogs("netizen.codex_runtime", level="ERROR"):
+            control.handles[0].finish(
+                goal_status=GoalStatus.PAUSED,
+                turn_status="interrupted",
+                response="confirmed before delivery timeout",
+            )
+            async with asyncio.timeout(1):
+                await delivery_entered.wait()
+            self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+        self.assertEqual(
+            self.outcomes[-1].final_response,
+            "confirmed before delivery timeout",
+        )
+        self.assertEqual(control.clear_calls, [])
+
+    async def test_shutdown_does_not_mutate_terminal_goal_held_for_delivery(
+        self,
+    ) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        delivery_entered = asyncio.Event()
+        release_delivery = asyncio.Event()
+
+        async def gated_capture(outcome: object) -> None:
+            self.outcomes.append(outcome)
+            delivery_entered.set()
+            await release_delivery.wait()
+
+        self.runtime._on_completion = gated_capture
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="do not pause terminal delivery",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+        control.handles[0].finish(response="already terminal")
+        async with asyncio.timeout(1):
+            await delivery_entered.wait()
+
+        await self.runtime.interrupt_all()
+        self.assertEqual(control.handles[0].pause_calls, 0)
+        self.assertEqual(self.cleanup.calls, [])
+
+        release_delivery.set()
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+    async def test_completed_goal_waits_for_final_response_materialization(
+        self,
+    ) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="wait for final response",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+        self.codex.omit_agent_items_full_reads = 1
+
+        with self.assertLogs("netizen.codex_runtime", level="WARNING") as logs:
+            control.handles[0].finish(response="materialized Goal response")
+            await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertEqual(outcome.final_response, "materialized Goal response")
+        self.assertEqual(
+            self.codex.read_calls.count((submission.thread_id, True)),
+            2,
+        )
+        self.assertIn("response not materialized", logs.output[0])
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.CLEARED)
+
+    async def test_pause_wins_over_stale_complete_before_auto_clear(self) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="pause at completion boundary",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+        handle = control.handles[0]
+        handle.pause_gate = asyncio.Event()
+        stop_task = asyncio.create_task(self.runtime.stop(binding.id))
+        await handle.pause_started.wait()
+
+        handle.finish(response="completed before pause persisted")
+
+        async def wait_for_terminal_proof() -> None:
+            while not self.runtime._goals[binding.id].terminal_observed:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_terminal_proof(), timeout=0.2)
+        handle.pause_gate.set()
+        self.assertEqual(
+            await stop_task,
+            StopDisposition.GOAL_REQUESTED,
+        )
+        await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertEqual(outcome.goal.status, GoalStatus.PAUSED)
+        self.assertEqual(
+            outcome.finalization,
+            GoalFinalizationStatus.NOT_APPLICABLE,
+        )
+        self.assertEqual(control.clear_calls, [])
+        self.assertIsNotNone(control.persisted)
+
+    async def test_goal_terminal_identity_mismatch_fails_closed_before_clear(
+        self,
+    ) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="reject wrong Goal identity",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+
+        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+            control.handles[0].finish()
+            control.persisted = goal_snapshot(
+                GoalStatus.COMPLETE,
+                objective="reject wrong Goal identity",
+                thread_id="native-other",
+            )
+            await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertIsInstance(outcome.error, GoalStateUnknown)
+        self.assertEqual(control.clear_calls, [])
+        self.assertEqual(
+            self.runtime.active_goal(binding.id).state,
+            GoalOperationState.UNKNOWN,
+        )
+
+    async def test_goal_stream_identity_mismatch_fails_closed_before_clear(
+        self,
+    ) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="reject wrong logical stream",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+        control.handles[0].terminal_logical_turn_id = "other-logical-turn"
+
+        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+            control.handles[0].finish()
+            await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertIsInstance(outcome.error, GoalStateUnknown)
+        self.assertEqual(control.clear_calls, [])
+
+    async def test_complete_goal_with_noncompleted_final_turn_is_not_cleared(
+        self,
+    ) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        for turn_status in ("interrupted", "failed"):
+            with self.subTest(turn_status=turn_status):
+                submission = await self.runtime.start_goal(
+                    binding=self.store.get(binding.id),
+                    cwd=self.cwd,
+                    objective=f"complete with {turn_status}",
+                    owner_id="ou_user",
+                    origin=object(),
+                )
+                submission.release_receipt_attempt()
+                control.handles[-1].finish(
+                    goal_status=GoalStatus.COMPLETE,
+                    turn_status=turn_status,
+                )
+                await self.runtime.wait_idle()
+
+                outcome = self.outcomes[-1]
+                self.assertIsInstance(outcome, GoalOutcome)
+                self.assertEqual(outcome.final_turn_status, turn_status)
+                self.assertEqual(
+                    outcome.finalization,
+                    GoalFinalizationStatus.NOT_APPLICABLE,
+                )
+                self.assertEqual(control.clear_calls, [])
 
     async def test_goal_stop_pauses_interrupts_and_cleans_before_release(self) -> None:
         control = FakeGoalControl(self.codex)
@@ -3466,6 +3812,375 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         outcome = self.outcomes[-1]
         self.assertIsInstance(outcome, GoalOutcome)
         self.assertTrue(outcome.background_cleanup_requested)
+        self.assertEqual(
+            outcome.finalization,
+            GoalFinalizationStatus.NOT_APPLICABLE,
+        )
+        self.assertEqual(control.clear_calls, [])
+
+    async def test_noncomplete_goal_terminal_never_auto_clears(self) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        for index, status in enumerate(
+            (
+                GoalStatus.BLOCKED,
+                GoalStatus.USAGE_LIMITED,
+                GoalStatus.BUDGET_LIMITED,
+            )
+        ):
+            with self.subTest(status=status):
+                submission = await self.runtime.start_goal(
+                    binding=self.store.get(binding.id),
+                    cwd=self.cwd,
+                    objective=f"wait for input {index}",
+                    owner_id="ou_user",
+                    origin=object(),
+                )
+                submission.release_receipt_attempt()
+                control.handles[-1].finish(goal_status=status)
+                await self.runtime.wait_idle()
+
+                outcome = self.outcomes[-1]
+                self.assertIsInstance(outcome, GoalOutcome)
+                self.assertEqual(outcome.goal.status, status)
+                self.assertEqual(
+                    outcome.finalization,
+                    GoalFinalizationStatus.NOT_APPLICABLE,
+                )
+                self.assertEqual(control.clear_calls, [])
+                self.assertIsNotNone(control.persisted)
+
+    async def test_completed_goal_clear_unknown_retains_slot_and_delivers_result(
+        self,
+    ) -> None:
+        class LostClearControl(FakeGoalControl):
+            async def clear(self, thread_id: str) -> bool:
+                self.clear_calls.append(thread_id)
+                self.persisted = None
+                raise RuntimeError("clear response lost")
+
+        control = LostClearControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="finish then lose clear response",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+
+        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+            control.handles[0].finish(response="answer survives")
+            await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertEqual(outcome.final_response, "answer survives")
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.UNKNOWN)
+        self.assertIsInstance(outcome.finalization_error, GoalStateUnknown)
+        self.assertEqual(control.clear_calls, ["native-1"])
+        self.assertEqual(
+            self.runtime.active_goal(binding.id).state,
+            GoalOperationState.UNKNOWN,
+        )
+        frozen = await self.runtime.goal_snapshot(binding)
+        self.assertIsNotNone(frozen)
+        assert frozen is not None
+        self.assertEqual(frozen.status, GoalStatus.COMPLETE)
+        self.assertEqual(frozen.objective, "finish then lose clear response")
+        with self.assertRaises(GoalStateUnknown):
+            await self.runtime.clear_goal(binding, expected_created_at=1)
+        self.assertEqual(control.clear_calls, ["native-1"])
+        with self.assertRaises(GoalStateUnknown):
+            await self.runtime.stop(binding.id)
+        self.assertEqual(control.handles[0].pause_calls, 0)
+        self.assertEqual(self.cleanup.calls, [])
+        with self.assertRaises(RuntimeClosed):
+            await self.submit(self.store.get(binding.id), "must remain closed")
+
+    async def test_completed_goal_unconfirmed_clear_is_unknown_and_not_retried(
+        self,
+    ) -> None:
+        class UnconfirmedClearControl(FakeGoalControl):
+            async def clear(self, thread_id: str) -> bool:
+                self.clear_calls.append(thread_id)
+                return False
+
+        control = UnconfirmedClearControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="finish without confirmed clear",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+
+        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+            control.handles[0].finish()
+            await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.UNKNOWN)
+        self.assertEqual(control.clear_calls, ["native-1"])
+        self.assertIsNotNone(control.persisted)
+        self.assertEqual(
+            self.runtime.active_goal(binding.id).state,
+            GoalOperationState.UNKNOWN,
+        )
+
+    async def test_completed_goal_cancelled_clear_is_unknown_and_delivers_result(
+        self,
+    ) -> None:
+        class CancelledClearControl(FakeGoalControl):
+            async def clear(self, thread_id: str) -> bool:
+                self.clear_calls.append(thread_id)
+                raise asyncio.CancelledError
+
+        control = CancelledClearControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="cancel finalization",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+
+        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+            control.handles[0].finish(response="result survives cancellation")
+            await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertEqual(outcome.final_response, "result survives cancellation")
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.UNKNOWN)
+        self.assertEqual(control.clear_calls, ["native-1"])
+        self.assertEqual(
+            self.runtime.active_goal(binding.id).state,
+            GoalOperationState.UNKNOWN,
+        )
+
+    async def test_completed_goal_clear_true_but_still_present_is_unknown(
+        self,
+    ) -> None:
+        class StillPresentClearControl(FakeGoalControl):
+            async def clear(self, thread_id: str) -> bool:
+                self.clear_calls.append(thread_id)
+                return True
+
+        control = StillPresentClearControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="clear remains present",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+
+        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+            control.handles[0].finish()
+            await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.UNKNOWN)
+        self.assertEqual(control.clear_calls, ["native-1"])
+        self.assertIsNotNone(control.persisted)
+
+    async def test_completed_goal_replacement_generation_is_never_cleared(
+        self,
+    ) -> None:
+        class ReplacedGenerationControl(FakeGoalControl):
+            async def get(self, thread_id: str) -> GoalSnapshot | None:
+                current = await super().get(thread_id)
+                if (
+                    len(self.get_calls) == 4
+                    and current is not None
+                    and current.status is GoalStatus.COMPLETE
+                ):
+                    self.persisted = goal_snapshot(
+                        GoalStatus.COMPLETE,
+                        objective="replacement generation",
+                        created_at=2,
+                    )
+                    return self.persisted
+                return current
+
+        control = ReplacedGenerationControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="original generation",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+
+        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+            control.handles[0].finish(response="original result survives")
+            await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertEqual(outcome.final_response, "original result survives")
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.UNKNOWN)
+        self.assertEqual(control.clear_calls, [])
+        self.assertEqual(control.persisted.created_at, 2)
+        self.assertEqual(
+            self.runtime.active_goal(binding.id).state,
+            GoalOperationState.UNKNOWN,
+        )
+
+    async def test_goal_replacement_before_terminal_read_fails_closed(self) -> None:
+        class ReplacedBeforeTerminalReadControl(FakeGoalControl):
+            async def get(self, thread_id: str) -> GoalSnapshot | None:
+                current = await super().get(thread_id)
+                if (
+                    len(self.get_calls) == 3
+                    and current is not None
+                    and current.status is GoalStatus.COMPLETE
+                ):
+                    self.persisted = goal_snapshot(
+                        GoalStatus.COMPLETE,
+                        objective="replacement before terminal read",
+                        # The SDK exposes createdAt with second precision.  A
+                        # changed objective in that same second must still be
+                        # treated as a different native Goal fingerprint.
+                        created_at=1,
+                    )
+                    return self.persisted
+                return current
+
+        control = ReplacedBeforeTerminalReadControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="original generation",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+
+        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+            control.handles[0].finish(response="stale generation result")
+            await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertIsInstance(outcome.error, GoalStateUnknown)
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.NOT_APPLICABLE)
+        self.assertEqual(control.clear_calls, [])
+        self.assertEqual(control.persisted.created_at, 1)
+        self.assertEqual(
+            control.persisted.objective,
+            "replacement before terminal read",
+        )
+        self.assertEqual(
+            self.runtime.active_goal(binding.id).state,
+            GoalOperationState.UNKNOWN,
+        )
+
+    async def test_goal_activity_is_exact_opt_in_and_carried_to_completion(
+        self,
+    ) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.store.create_binding(
+            scope=self.scope,
+            project_alias="test",
+            creator_id="ou_user",
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+        )
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="show bounded progress",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+        self.assertTrue(submission.task_feedback.progress_card_enabled)
+        observer.append(
+            thread_id=submission.thread_id,
+            turn_id=submission.logical_turn_id,
+            steps=(
+                TurnPlanStepSnapshot("inspect", TurnPlanStepState.IN_PROGRESS),
+            ),
+        )
+
+        self.assertIsNone(
+            self.runtime.goal_activity(
+                binding.id,
+                thread_id="another-thread",
+                logical_turn_id=submission.logical_turn_id,
+                refresh_plan=True,
+            )
+        )
+        self.assertEqual(observer.calls, [])
+        activity = self.runtime.goal_activity(
+            binding.id,
+            thread_id=submission.thread_id,
+            logical_turn_id=submission.logical_turn_id,
+            refresh_plan=True,
+        )
+
+        assert activity is not None
+        self.assertEqual(activity.physical_turn_id, submission.logical_turn_id)
+        self.assertEqual([step.step for step in activity.steps], ["inspect"])
+        control.handles[0].finish(response="goal complete")
+        await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertTrue(outcome.task_feedback.progress_card_enabled)
+        self.assertIsNotNone(outcome.activity)
+        self.assertEqual(
+            [step.step for step in outcome.activity.steps],
+            ["inspect"],
+        )
+
+    async def test_disabled_goal_progress_adds_no_plan_observation(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="quiet progress",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+
+        control.handles[0].finish()
+        await self.runtime.wait_idle()
+
+        self.assertEqual(observer.calls, [])
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertIsNone(outcome.activity)
 
     async def test_goal_cleanup_failure_keeps_slot_and_repeat_stop_retries(self) -> None:
         control = FakeGoalControl(self.codex)
@@ -3555,7 +4270,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         control.persisted = goal_snapshot(GoalStatus.PAUSED)
         cleared = await self.runtime.clear_goal(self.store.get(binding.id))
         self.assertTrue(cleared)
-        self.assertEqual(control.clear_calls, ["native-1"])
+        self.assertEqual(control.clear_calls, ["native-1", "native-1"])
         self.assertIsNone(control.persisted)
 
     async def test_cancelled_goal_resume_keeps_route_owned_without_second_cleanup(
@@ -3588,6 +4303,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         active = self.runtime.active_goal(binding.id)
         self.assertEqual(active.state, GoalOperationState.UNKNOWN)
         self.assertIs(self.runtime._goals[binding.id].handle, control.handles[0])
+        with self.assertRaises(GoalStateUnknown):
+            await self.runtime.stop(binding.id)
+        self.assertEqual(control.handles[0].pause_calls, 0)
+        self.assertEqual(self.cleanup.calls, [])
         with self.assertLogs("netizen.codex_runtime", level="WARNING"):
             await self.runtime.interrupt_all()
         self.assertEqual(control.handles[0].pause_calls, 0)

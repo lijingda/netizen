@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send and round-trip one real v4 Turn-file capacity card."""
+"""Send and round-trip one real v5 composed Reply Card at file capacity."""
 
 from __future__ import annotations
 
@@ -12,10 +12,17 @@ from lark_channel import FeishuChannel, LogLevel, SendOpts
 
 from netizen.cards import (
     decode_turn_file_action,
-    turn_files_card,
-    turn_files_card_from_manifest,
+    reply_card,
+    reply_card_from_manifest,
 )
-from netizen.domain import FeishuScope, ScopeKind
+from netizen.domain import (
+    FeishuScope,
+    ReplyCardFileItem,
+    ReplyCardFilesModule,
+    ReplyCardProjection,
+    ReplyCardResultModule,
+    ScopeKind,
+)
 from netizen.settings import Settings
 from netizen.turn_files import TurnFile
 
@@ -72,15 +79,27 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
         )
         for index in range(args.count)
     )
-    card = turn_files_card(
-        scope=scope,
-        binding_id="capacity-probe",
-        turn_id="capacity-probe",
-        final_response=(
-            "**Netizen 部署验收卡，可忽略。**\n"
-            f"正在验证 {args.count} 个文件的完整分页与重启后自包含恢复能力。"
-        ),
-        files=files,
+    card = reply_card(
+        ReplyCardProjection(
+            scope=scope,
+            result=ReplyCardResultModule(
+                "**Netizen 部署验收卡，可忽略。**\n"
+                f"正在验证 {args.count} 个文件的完整分页与重启后自包含恢复能力。"
+            ),
+            files=ReplyCardFilesModule(
+                binding_id="capacity-probe",
+                turn_id="capacity-probe",
+                items=tuple(
+                    ReplyCardFileItem(
+                        path=str(item.resolved_path),
+                        label=item.display_path,
+                        size=item.size,
+                        media_kind=item.media_kind,
+                    )
+                    for item in files
+                ),
+            ),
+        )
     )
     try:
         sent = await channel.send(
@@ -101,14 +120,14 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
             tag="button",
             value=page_value,
         )
-        if page_intent.answer is None:
-            raise RuntimeError("capacity card page callback omitted its answer")
-        updated = turn_files_card_from_manifest(
+        if page_intent.reply is None:
+            raise RuntimeError("capacity card page callback omitted its Reply manifest")
+        updated = reply_card_from_manifest(
             scope=scope,
             binding_id="capacity-probe",
             turn_id="capacity-probe",
-            final_response=page_intent.answer,
             manifest=page_intent.files,
+            reply=page_intent.reply,
             page=1,
         )
         update_result = await channel.update_card(sent.message_id, updated.card)

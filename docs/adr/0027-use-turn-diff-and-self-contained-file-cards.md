@@ -3,9 +3,14 @@ status: accepted
 date: 2026-08-19
 amends: 0024, 0025, 0026
 related: 0008, 0015, 0021
+amended_by: 0047
 ---
 
 # 以 Turn diff 补全本轮文件，并让新卡片自带文件清单
+
+> 修订说明：[ADR 0047](0047-compose-typed-reply-cards-and-finalize-complete-goals.md) 保留
+> 自包含 callback 边界；Goal + Files 使用 v5 完整 Reply Card manifest，使 Goal、Activity、
+> Result 与 Files 在分页后仍能整体重建，普通完成/进度文件卡继续使用 v4。
 
 ## 背景
 

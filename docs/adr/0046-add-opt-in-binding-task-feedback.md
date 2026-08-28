@@ -2,9 +2,14 @@
 status: accepted
 date: 2026-08-27
 amends: 0016, 0020, 0024, 0027, 0039
+amended_by: 0047
 ---
 
 # 增加默认关闭的 Binding 任务反馈与有界进度卡
+
+> 修订说明：[ADR 0047](0047-compose-typed-reply-cards-and-finalize-complete-goals.md) 保留两项
+> 默认关闭和相互独立的设置，但将 Progress Card 的 Activity 投影扩展到 Goal；Goal 卡片
+> 本身始终存在，Task Reaction 仍只属于普通 Turn。下文“首期排除 Goal”仅保留为历史背景。
 
 Netizen 需要让飞书用户在长 Turn 中看见“已经接受、正在做什么、计划到了哪里”，同时避免
 任务表情在移动端形成额外通知，也不能把展示层变成第二套 Agent Runtime。我们选择两个
