@@ -37,7 +37,7 @@ checklist 展示，不关闭普通 Turn。这个降级以 ADR 0009 独立的 ser
     feishu-app-secret                           # raw Secret，0600
     admin-web-secret                            # 独立 32-byte base64url credential，0600
   state/
-    channel.sqlite3[-wal|-shm]                  # Binding/Turn settings/Registry/Dedup
+    channel.sqlite3[-wal|-shm]                  # Binding/Turn settings/Task feedback/Registry/Dedup
     .install.lock / .activation-intent.json     # 跨卸载锁与异常中断恢复意图
     service.lifetime.lock / service.ready       # 精确退出与 readiness 契约
     netizen.log / launchd.stderr.log            # macOS 有界服务日志/launcher 错误
@@ -99,16 +99,19 @@ token；手工准备的应用必须逐项配置。无论来源，飞书应用版
   `im:message.group_at_msg`/readonly；
 - 当前 Prompt 发送者姓名解析具备 `im:chat.members:read`；权限不足时 Channel SDK
   无法从 chat member roster 补全真实显示名，Netizen 会零 start/steer；
-- Prompt pulse、steer 确认和终态表情由当前必需的 `im:message` 覆盖；官方提供的
+- Task Reaction 开启后的 Prompt pulse、steer 确认和终态表情由当前必需的
+  `im:message` 覆盖；官方提供的
   `im:message.reactions:write_only` 是替代权限，不作为 Netizen 的另一项独立必需权限；
 - 本轮文件具备 `im:resource` 与 `im:message:send_as_bot`，允许机器人上传图片/文件并
   回复消息；“事件与回调 → 回调配置”已开启，按钮 callback 能到达当前 WebSocket；
 - 机器人仍在目标群中，新权限已随应用版本发布而非只保存在开发者后台。
 
 权限不足时不降级为忽略引用或图片的普通 prompt；当前消息必须显式失败且
-不调用 Codex。任务表情是展示层的尽力操作：reaction 权限或单次请求失败只记录日志，
-不得阻断已经启动的 Turn 或最终文本回复；`OnIt` 失败会在 native steer 已成功时回退
-一条简短确认，避免把成功操作显示成无响应。
+不调用 Codex。Task Reaction 与 Progress Card 都是展示层的尽力操作：reaction/card
+权限或单次请求失败只记录脱敏日志，不得阻断已经启动的 Turn 或最终结果。只有 Task
+Reaction 已开启时，`OnIt` 失败才会在 native steer 已成功后回退一条简短确认；关闭时
+不得发送这条 fallback。Progress Card 初始、中间或终态更新失败时，终态回退到无文件
+富文本/静态文本、有文件现有完成卡的标准路径。
 
 引用功能发布后要用真实消息手工验收普通文本与 CardKit 2.0 应用卡片。卡片用例应
 确认 header/body 可见文本进入 Codex，而按钮 value、确认弹窗和隐藏 option 不进入；
@@ -729,13 +732,15 @@ admission，修复文件后仍需 `./service.sh restart`，不会自动重新开
 HTTP；不得把该端口直接暴露到不受信网络。
 
 `instance.projectRoot` 用于限制从飞书自动创建的空 Project；未配置时回退为
-`defaultCwd.parent`。Channel Database 只接受当前 schema v6，不在服务启动时自动迁移旧
-schema。schema v6 为 Binding 增加 Mention Context Mode、exact Context Boundary 和独立
-revision；不保存任何补充消息正文。v5 -> v6 cutover 必须在 release transaction 中完成，
-并保留现有 Scope/Binding/Project、去重记录和 `side_topics` 永久路由墓碑；迁移失败时
-恢复旧数据库与旧 release。不得归档后创建空数据库，否则旧 Side 话题可能重新落入普通
-Binding 路由。配置文件中的 `projects` mapping 会在启动时以 `INSERT OR IGNORE` 导入，数据库
-里已经停用或由飞书创建的条目始终优先。不要手工编辑 `projects` 或 `bindings` 表。
+`defaultCwd.parent`。Channel Database 只接受当前 schema v7，不在服务启动时自动迁移旧
+schema。v7 在 v6 的 Mention Context Mode、exact Context Boundary 与独立 revision 上，
+为 Binding 增加两个 Task Feedback 布尔值和 feedback revision；不保存任何补充消息正文、Turn
+Activity Projection 或 Progress Card session。v6 -> v7 cutover 必须在 release transaction
+中完成，把所有现有 Binding 的 Task Reaction 与 Progress Card 初始化为关闭，并保留现有
+Scope/Binding/Project、去重记录和 `side_topics` 永久路由墓碑；迁移失败时恢复旧数据库与
+旧 release。不得归档后创建空数据库，否则旧 Side 话题可能重新落入普通 Binding 路由。
+配置文件中的 `projects` mapping 会在启动时以 `INSERT OR IGNORE` 导入，数据库里已经停用
+或由飞书创建的条目始终优先。不要手工编辑 `projects` 或 `bindings` 表。
 
 浏览器初始化会请求 `card.action.trigger`；手工准备应用时，使用卡片前须在飞书开发者后台
 打开“事件与回调 → 回调配置”。回调仍走现有 WebSocket 长连接，不需要公网 callback URL；
@@ -768,10 +773,11 @@ Binding 路由。配置文件中的 `projects` mapping 会在启动时以 `INSER
 - 若 Side 显示 `creating`、清理未确认或要求再次结束，不要删除 SQLite route 或把该话题
   当普通 Binding 使用；在原 Side 话题重试 `/side close`，或正常重启让遗留 open route
   转为 expired。Side 卡在 active close 时先检查 App Server/平台日志；禁止猜测 native ID。
-- 正常停机会停止所有 pulse，并用已记录的 exact reaction ID 清理常驻的 `Typing` 与
-  当时可见的 `THINKING`。若进程被 `SIGKILL`、主机掉电或崩溃，运行态表情可能留在原
-  消息；在“不持久化飞书展示状态”的边界下无法安全恢复，禁止为此扫描/猜测 reaction
-  或修改 SQLite。
+- 正常停机会停止所有 pulse 和 Progress Card updater，并用已记录的 exact reaction ID
+  清理常驻的 `Typing` 与当时可见的 `THINKING`；没有 native 终态时不把运行卡伪装成完成。
+  若进程被 `SIGKILL`、主机掉电或崩溃，运行态表情或最后一次更新的运行卡可能留在原消息；
+  在“不持久化飞书展示状态”的边界下无法安全恢复，禁止为此扫描/猜测 reaction/card
+  identity 或修改 SQLite。
 
 ## 平台服务管理器
 
@@ -820,7 +826,7 @@ installer 每次启动前权威删除旧 marker，launcher 每次进程启动再
 删除；service manager 的 loaded/active 不能替代 ready。正常 shutdown 在 Channel
 background loop 使用一个 60 秒 monotonic absolute budget：先关闭 Admin listener、Feishu
 policy 和 Runtime admission，再排空 Admin/Feishu handlers 与 blocking I/O，最后清理 native
-Turns/reactions、Codex transport 和 Store。systemd `TimeoutStopSec=75s` 与 LaunchAgent
+Turns/task-feedback presenters、Codex transport 和 Store。systemd `TimeoutStopSec=75s` 与 LaunchAgent
 `ExitTimeOut=75` 给 Python finally 留出完整内部预算；安装器的停止确认窗口为 90 秒，且未
 取得 lifetime lock 就不会执行状态回滚。
 唯一兼容例外是候选失败后恢复本机制上线前的旧 Linux unit：旧 release 的重启仍按其原有
@@ -870,17 +876,28 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    `/plan`、`/apps`；`/copy`、`/vim`、`/theme`、`/exit` 也不展示。
    另发送 `/new test`、`/new none`、带引号和坏引号的 `/new ...`，都必须得到同一迁移提示、
    零 Binding mutation；`//new test` 仍作为字面 prompt。
-2. 通过 `/new` 卡片选择 `test` Project 和 inherit Codex 后发送首条 prompt：原消息先出现
-   并一直保留敲键盘（`Typing`）表情，
-   “思考中”（`THINKING`）按低频节奏显示/隐藏，不收到“已接收”或心跳回复。running 时
-   `/status` 出现完整 native ID、
-   已接受 steer 次数，以及原生 checklist（`✓/→/○`）；无 plan 时明确显示“Codex 尚未
-   生成”，observer unavailable 时显示“暂不可用”。发送一条 steer 后，原消息 pulse
-   保持原锚点，steer 消息只添加
-   `OnIt` 且正常不回复文字；`/status` 在新 plan 到达前标记旧 checklist 可能过期，之后
-   整体替换并清除标记。Turn 到达终态后先添加 completed/failed/interrupted 对应的
-   `DONE`/`ERROR`/`CrossMark`，再移除 `THINKING` 与 `Typing`，模型结果照常回复；
-   在可观测 Turn 完成、公开 usage 通知已排空后 `/status` 显示当前
+2. 通过 `/new` 卡片选择 `test` Project、inherit Codex，并保持 Task Reaction 与 Progress
+   Card 默认关闭后发送首条 prompt：native accepted 到终态之间不得出现任务表情、进度卡、
+   steer 文字确认或心跳；无文件终态仍是富文本/静态文本，有文件终态仍只有现有“最终回复 +
+   本轮文件”卡片。手机端也不得因关闭的 Task Reaction 收到额外表情消息。
+
+   用 `/config` 只开启 Task Reaction 后启动长 Turn：原消息常驻 `Typing`，`THINKING` 按
+   低频节奏显示/隐藏，不收到“已接收”或心跳回复；成功 steer 的消息只添加 `OnIt`，原任务
+   pulse 不迁移。终态先添加 completed/failed/interrupted 对应的
+   `DONE`/`ERROR`/`CrossMark`，再移除 `THINKING` 与 `Typing`。故意使 `OnIt` 失败时仅在
+   native steer 已成功后收到文字 fallback；关闭 Task Reaction 后同一故障不发 fallback。
+
+   再只开启 Progress Card：native accepted 后只出现一张运行卡，顶部过程区展开；status 与
+   原生 checklist（`✓/→/○`）变化必须更新同一个 message ID，无 plan 时显示“Codex 尚未
+   生成”，observer unavailable 时显示“暂不可用”。卡片不显示耗时、百分比、ETA、
+   reasoning、raw command/tool output 或 tool arguments。成功 steer 后旧 checklist 在新
+   plan 到达前标记可能过期，之后整体替换。终态在同一卡片折叠过程并显示结果；有文件时
+   同卡保留 v4 文件分页/callback。分别使 initial、中间和终态 card update 失败，native
+   Turn 都必须继续，终态回退标准投递且不重试风暴。最后同时开启两项，确认两套 presenter
+   并存而不重复最终结果，并在 P2P、群主线和普通话题各验证一次。
+
+   running 时 `/status` 仍出现完整 native ID、已接受 steer 次数和同一 checklist。在可观测
+   Turn 完成、公开 usage 通知已排空后 `/status` 显示当前
    窗口已用 tokens、窗口上限和百分比。再启动一个普通 Turn 时，running `/status` 保留
    并标注“上一轮完成时”的快照；本轮完成后覆盖为新值。固定 SDK 若丢失即时完成通知，
    则终态后明确显示暂不可用并在下一次可观测 Turn 完成后更新。该继承路径不得读取模型
@@ -889,14 +906,15 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    静态下拉框，并展示 Registry 中全部 enabled 项和 `none`；准备 13 个以上 enabled
    Projects 验证没有 12 项截断、分页控件或命令兜底，disabled 项不出现。P2P 表单不显示
    @ 时读取的消息范围；群主线和普通群话题显示“仅这条 @ 消息（默认）”与“自动带上期间
-   的群聊讨论”，下拉框下方有灰色说明。选择 inherit Codex 时不保存 Model/Effort/Speed
-   override；选择实际 Model 时三项必须与本机 `models` phase 一致并全部保存。模型目录
-   不可用时仍显示可提交的 Project + inherit 表单。成功卡片显示 Project、会话短 ID、
-   Model 来源与 @ 时读取的消息范围；即使原卡更新失败，同一 Scope 也应收到等价兜底
-   回复。再用足够大的 Registry 触发真实平台容量错误，必须明确说明没有截断、分页或
+   的群聊讨论”，下拉框下方有灰色说明。两个 Task Feedback 控件在所有普通 Scope 都显示
+   且默认关闭。选择 inherit Codex 时不保存 Model/Effort/Speed override；选择实际 Model
+   时三项必须与本机 `models` phase 一致并全部保存。模型目录不可用时仍显示可提交的
+   Project + inherit + Task Feedback 表单。成功卡片显示 Project、会话短 ID、Model 来源、
+   两项 Task Feedback 与 @ 时读取的消息范围；即使原卡更新失败，同一 Scope 也应收到等价
+   兜底回复。再用足够大的 Registry 触发真实平台容量错误，必须明确说明没有截断、分页或
    快捷创建，且零 Binding mutation。
-4. 在 idle active Binding 上发送 `/config`，选择三项和群聊 @ 时读取的消息范围后
-   原子保存；
+4. 在 idle active Binding 上发送 `/config`，选择三项、两个 Task Feedback 和群聊 @ 时读取
+   的消息范围后原子保存；
    不得要求任务或立即启动 Turn，也不得显示目标会话；配置其他会话必须先 `/resume`。
    后续每条需要启动新 Turn 的普通消息都在 exact native Thread 重新校验并显式应用，
    配置不会在首轮后清除。对目录中支持加速 Tier 的模型依次验收
@@ -904,9 +922,10 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    四轮必须在同一 native Thread 连续成功；卡片只显示动态名称，不显示协议 ID，也不
    出现费用提示。打开卡片后先
    `/resume` 另一个 Binding，再提交旧卡片，必须零 Codex mutation 并提示重开；两张
-   `/config` 卡也必须分别由 settings/context revision 拒绝后提交的旧卡。启用 catch-up 时
-   exact card anchor 读取失败必须同时保持旧 Model 与旧 mode；running Turn 上 `/config`
-   必须拒绝，running steer 不得解析或应用 Binding 配置。
+   `/config` 卡也必须分别由 settings/feedback/context revision 拒绝后提交的旧卡。启用
+   catch-up 时 exact card anchor 读取失败必须同时保持旧 Model、旧 Task Feedback 与旧 mode；
+   running Turn 上 `/config` 必须拒绝，running steer 不得解析或应用 Binding 配置，已经
+   开始的 Turn 也不得被后来保存的反馈开关改变。
 5. 当前固定 `0.147.0` 上发送 `/compact`，必须收到包含兼容验证原因的明确 unavailable
    回复；无论 Binding 是否已有历史或处于 idle，都不得调用 native compact、改变运行状态
    或使上下文用量快照失效，帮助中也不得展示该命令。底层 controller 的单元测试继续覆盖
@@ -1034,9 +1053,11 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     ```
 
     1000 个必须在本地门禁中明确拒绝且不截断，并保留目标应用
-    96.9 KB 请求返回 230099/200800 的容量证据。无文件
-    Turn 必须仍只有纯文本最终回复；有文件 Turn 必须只有一张同时包含最终回复和本轮文件的
-    卡片。Project 内文件显示相对路径，Project 外文件显示脱敏逻辑位置；所有条目显示大小，
+    96.9 KB 请求返回 230099/200800 的容量证据。Progress Card 关闭时，无文件 Turn 必须仍
+    只有富文本/静态文本最终回复；有文件 Turn 必须只有一张同时包含最终回复和本轮文件的
+    现有完成卡。Progress Card 开启时，两种结果都更新最初的同一张运行卡，有文件时继续
+    包含同一套 v4 manifest。Project 内文件显示相对路径，Project 外文件显示脱敏逻辑位置；
+    所有条目显示大小，
     按 8 个一页完整翻页，可见正文不出现绝对路径、预览、diff 或发送全部；v4 callback
     payload 则必须逐项携带明文 absolute path。依次在 P2P 平面消息、
     群主线和已有话题点击普通文件与“发送原图到话题”：平面卡片必须出现以该卡片为锚点的话题，记录真实
@@ -1051,7 +1072,8 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     覆盖全部页面。
     P2P 若返回 230071 必须记录为
     本轮文件 live gate 未通过，不得用 FakeChannel 或普通主线发送替代。最后确认这些操作不
-    改变 schema v6 表、Binding、Turn settings、Context Boundary 或 Side route 行数。
+    改变 schema v7 表、Binding、Turn settings、Task Feedback、Context Boundary 或 Side
+    route 行数。
 
 CLI 中新增的消息不要求回填飞书；验证目标是共享原生后端和可接续性，不是两个 UI
 的逐条镜像。

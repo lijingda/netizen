@@ -2006,7 +2006,7 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             self.assertTrue(any(call[0] == "journalctl" for call in calls))
 
-    def test_stopped_upgrade_migrates_v5_database_without_losing_side_routes(
+    def test_stopped_upgrade_migrates_v6_database_without_losing_side_routes(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2017,7 +2017,7 @@ class NetizenInstallerTest(unittest.TestCase):
             candidate = self._release(layout, "2" * 64)
             installer._set_release_link(layout.current, old.root, layout)
             database = layout.state_dir / "channel.sqlite3"
-            _write_v5_channel_database(database)
+            _write_v6_channel_database(database)
             backend = _stopped_backend()
 
             with patch.object(
@@ -2038,7 +2038,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     connection.execute(
                         "SELECT version FROM schema_version"
                     ).fetchone()[0],
-                    6,
+                    7,
                 )
                 self.assertEqual(
                     connection.execute(
@@ -2046,11 +2046,14 @@ class NetizenInstallerTest(unittest.TestCase):
                         SELECT message_context_mode,
                                context_anchor_message_id,
                                context_anchor_create_time_ms,
-                               context_revision
+                               context_revision,
+                               task_reactions_enabled,
+                               progress_card_enabled,
+                               feedback_revision
                         FROM bindings
                         """
                     ).fetchall(),
-                    [("current-only", None, None, 1)],
+                    [("current-only", None, None, 1, 0, 0, 1)],
                 )
                 self.assertEqual(
                     connection.execute(
@@ -2066,7 +2069,7 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             backend.start_and_wait.assert_not_called()
 
-    def test_failed_publish_rolls_back_v5_database_migration(self) -> None:
+    def test_failed_publish_rolls_back_v6_database_migration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             layout = self._layout(root)
@@ -2075,7 +2078,7 @@ class NetizenInstallerTest(unittest.TestCase):
             candidate = self._release(layout, "4" * 64)
             installer._set_release_link(layout.current, old.root, layout)
             database = layout.state_dir / "channel.sqlite3"
-            _write_v5_channel_database(database)
+            _write_v6_channel_database(database)
             before = database.read_bytes()
             backend = _stopped_backend()
             backend.publish_definition.side_effect = installer.InstallError(
@@ -2104,7 +2107,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     connection.execute(
                         "SELECT version FROM schema_version"
                     ).fetchone()[0],
-                    5,
+                    6,
                 )
                 columns = {
                     row[1]
@@ -2112,7 +2115,8 @@ class NetizenInstallerTest(unittest.TestCase):
                         "PRAGMA table_info(bindings)"
                     ).fetchall()
                 }
-                self.assertNotIn("message_context_mode", columns)
+                self.assertIn("message_context_mode", columns)
+                self.assertNotIn("task_reactions_enabled", columns)
             finally:
                 connection.close()
             self.assertEqual(
@@ -3350,14 +3354,14 @@ def _stopped_backend() -> MagicMock:
     return backend
 
 
-def _write_v5_channel_database(path: Path) -> None:
+def _write_v6_channel_database(path: Path) -> None:
     connection = sqlite3.connect(path)
     try:
         connection.executescript(
             """
             PRAGMA foreign_keys = ON;
             CREATE TABLE schema_version (version INTEGER NOT NULL);
-            INSERT INTO schema_version(version) VALUES (5);
+            INSERT INTO schema_version(version) VALUES (6);
             CREATE TABLE scopes (
                 scope_key TEXT PRIMARY KEY,
                 app_id TEXT NOT NULL,
@@ -3376,6 +3380,10 @@ def _write_v5_channel_database(path: Path) -> None:
                 effort_id TEXT,
                 service_tier_id TEXT,
                 settings_revision INTEGER NOT NULL DEFAULT 1,
+                message_context_mode TEXT NOT NULL DEFAULT 'current-only',
+                context_anchor_message_id TEXT,
+                context_anchor_create_time_ms INTEGER,
+                context_revision INTEGER NOT NULL DEFAULT 1,
                 creator_id TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 activated_at TEXT NOT NULL,
@@ -3426,10 +3434,13 @@ def _write_v5_channel_database(path: Path) -> None:
             INSERT INTO bindings(
                 binding_id, scope_key, project_alias, native_thread_id,
                 model_id, effort_id, service_tier_id, settings_revision,
+                message_context_mode, context_anchor_message_id,
+                context_anchor_create_time_ms, context_revision,
                 creator_id, created_at, activated_at, ever_activated
             ) VALUES (
                 'binding-legacy', 'cli_test:direct:oc_legacy', 'legacy',
-                'thread-legacy', NULL, NULL, NULL, 1, 'ou_legacy',
+                'thread-legacy', NULL, NULL, NULL, 1,
+                'current-only', NULL, NULL, 1, 'ou_legacy',
                 '2029-01-01T00:00:00+00:00',
                 '2029-01-01T00:00:00+00:00', 1
             );

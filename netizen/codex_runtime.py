@@ -23,6 +23,7 @@ from openai_codex.types import ThreadTokenUsageUpdatedNotification
 
 from .bindings import (
     BindingStore,
+    BindingTaskFeedback,
     BindingTurnSettings,
     SideTopicConflict,
     SideTopicState,
@@ -342,6 +343,12 @@ class Submission:
     thread_id: str
     turn_id: str
     release_receipt_attempt: Callable[[], None] | None = None
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+
+    def __post_init__(self) -> None:
+        if self.feedback_revision < 1:
+            raise ValueError("feedback revision must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,6 +408,35 @@ class TurnProgressSnapshot:
     plan_generated: bool
     plan_may_be_stale: bool
     steps: tuple[TurnPlanStepSnapshot, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TurnActivitySnapshot:
+    """Latest bounded display projection for one exact active Turn.
+
+    The projection keeps only the current state and latest full plan
+    replacement. It is process-local display data, not a Turn history or a
+    second terminal-state authority.
+    """
+
+    binding_id: str
+    thread_id: str
+    turn_id: str
+    revision: int
+    state: ActiveState
+    steer_count: int
+    plan_available: bool
+    plan_generated: bool
+    plan_may_be_stale: bool
+    steps: tuple[TurnPlanStepSnapshot, ...]
+
+    def __post_init__(self) -> None:
+        if not self.binding_id or not self.thread_id or not self.turn_id:
+            raise ValueError("Turn activity identity must not be empty")
+        if self.revision < 1:
+            raise ValueError("Turn activity revision must be positive")
+        if self.steer_count < 0:
+            raise ValueError("Turn activity steer count must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,6 +557,7 @@ class SubmissionAdmission:
     turn_id: str | None
     settings_revision: int
     context_revision: int = 1
+    feedback_revision: int = 1
 
     def __post_init__(self) -> None:
         if self.revision < 0:
@@ -529,6 +566,8 @@ class SubmissionAdmission:
             raise ValueError("settings revision must be positive")
         if self.context_revision < 1:
             raise ValueError("context revision must be positive")
+        if self.feedback_revision < 1:
+            raise ValueError("feedback revision must be positive")
         if (self.thread_id is None) != (self.turn_id is None):
             raise ValueError(
                 "submission admission thread_id and turn_id must both be set or unset"
@@ -563,6 +602,19 @@ class TurnOutcome:
     # ``turn/diff/updated`` notification for this exact Turn.  It is carried
     # only through completion delivery and is never persisted by Netizen.
     turn_diff: str | None = None
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+    activity: TurnActivitySnapshot | None = None
+
+    def __post_init__(self) -> None:
+        if self.feedback_revision < 1:
+            raise ValueError("feedback revision must be positive")
+        if self.activity is not None and (
+            self.activity.binding_id != self.binding_id
+            or self.activity.thread_id != self.thread_id
+            or self.activity.turn_id != self.turn_id
+        ):
+            raise ValueError("Turn outcome activity belongs to another Turn")
 
     @property
     def final_response(self) -> str | None:
@@ -663,6 +715,9 @@ class _ActiveTurn:
     cleanup_ready: asyncio.Event = field(default_factory=asyncio.Event)
     terminal_stream_safe: bool = False
     latest_diff: str | None = None
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+    activity_revision: int = 1
     steer_count: int = 0
     plan_cursor: int = 0
     plan_generated: bool = False
@@ -2678,11 +2733,13 @@ class CodexRuntime:
         binding_id: str,
         expected_settings_revision: int,
         expected_context_revision: int,
+        expected_feedback_revision: int,
         settings: BindingTurnSettings | None,
+        task_feedback: BindingTaskFeedback,
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
     ) -> ThreadBinding:
-        """Atomically update Turn settings and Mention Context Mode."""
+        """Atomically update Turn settings, context, and task feedback."""
 
         if not self._accepting:
             raise RuntimeClosed("服务正在停止，暂不能修改会话配置。")
@@ -2722,13 +2779,16 @@ class CodexRuntime:
                 binding_id=binding_id,
                 expected_settings_revision=expected_settings_revision,
                 expected_context_revision=expected_context_revision,
+                expected_feedback_revision=expected_feedback_revision,
                 settings=settings,
+                task_feedback=task_feedback,
                 message_context_mode=message_context_mode,
                 context_anchor=context_anchor,
             )
             if (
                 updated.settings_revision != binding.settings_revision
                 or updated.context_revision != binding.context_revision
+                or updated.feedback_revision != binding.feedback_revision
             ):
                 self._advance_admission_revision(binding_id)
             return updated
@@ -2778,6 +2838,7 @@ class CodexRuntime:
                 turn_id=active.handle.id if active is not None else None,
                 settings_revision=binding.settings_revision,
                 context_revision=binding.context_revision,
+                feedback_revision=binding.feedback_revision,
             )
 
     async def submit(
@@ -2801,6 +2862,7 @@ class CodexRuntime:
             )
         prepared_settings_revision = prepared_binding.settings_revision
         prepared_context_revision = prepared_binding.context_revision
+        prepared_feedback_revision = prepared_binding.feedback_revision
         configured_settings = prepared_binding.turn_settings
         if admission is not None and (
             admission.settings_revision != prepared_settings_revision
@@ -2813,6 +2875,12 @@ class CodexRuntime:
         ):
             raise SteerRace(
                 "准备本条消息期间上下文边界已变化，本条消息未执行，请重新发送。"
+            )
+        if admission is not None and (
+            admission.feedback_revision != prepared_feedback_revision
+        ):
+            raise SteerRace(
+                "准备本条消息期间任务反馈配置已变化，本条消息未执行，请重新发送。"
             )
         if prepared_binding.message_context_mode is MentionContextMode.CATCH_UP:
             if admission is None or context_commit is None:
@@ -2831,8 +2899,17 @@ class CodexRuntime:
                 raise SteerRace(
                     "准备本条消息期间会话配置已变化，本条消息未执行，请重新发送。"
                 )
+            if admission.context_revision != prepared_binding.context_revision:
+                raise SteerRace(
+                    "准备本条消息期间上下文边界已变化，本条消息未执行，请重新发送。"
+                )
+            if admission.feedback_revision != prepared_binding.feedback_revision:
+                raise SteerRace(
+                    "准备本条消息期间任务反馈配置已变化，本条消息未执行，请重新发送。"
+                )
             prepared_settings_revision = prepared_binding.settings_revision
             prepared_context_revision = prepared_binding.context_revision
+            prepared_feedback_revision = prepared_binding.feedback_revision
             configured_settings = prepared_binding.turn_settings
 
         resolved_settings = None
@@ -2896,6 +2973,10 @@ class CodexRuntime:
                 raise SteerRace(
                     "准备本条消息期间上下文边界已变化，本条消息未执行，请重新发送。"
                 )
+            if binding.feedback_revision != prepared_feedback_revision:
+                raise SteerRace(
+                    "准备本条消息期间任务反馈配置已变化，本条消息未执行，请重新发送。"
+                )
             await self._guard_no_goal_locked(binding)
             binding = self._bindings.get(binding.id)
             if not binding.active:
@@ -2941,15 +3022,18 @@ class CodexRuntime:
                 else:
                     active.plan_may_be_stale = True
                     active.plan_stale_after_cursor = stale_after_cursor
+                active.activity_revision += 1
                 self._commit_context_cursor_locked(
                     binding=binding,
                     commit=context_commit,
                 )
                 return Submission(
-                    SubmitDisposition.STEERED,
-                    binding.id,
-                    active.handle.thread_id,
-                    active.handle.id,
+                    disposition=SubmitDisposition.STEERED,
+                    binding_id=binding.id,
+                    thread_id=active.handle.thread_id,
+                    turn_id=active.handle.id,
+                    task_feedback=active.task_feedback,
+                    feedback_revision=active.feedback_revision,
                 )
 
             # A caller may hold the lazy Binding snapshot returned by /new even
@@ -3036,6 +3120,8 @@ class CodexRuntime:
                 owner_id=owner_id,
                 origin=origin,
                 receipt_attempted=receipt_attempted,
+                task_feedback=binding.task_feedback,
+                feedback_revision=binding.feedback_revision,
                 plan_available=self._turn_plan_observer is not None,
             )
             self._track(active)
@@ -3051,11 +3137,13 @@ class CodexRuntime:
                 receipt_attempted.set()
                 raise
             return Submission(
-                SubmitDisposition.STARTED,
-                binding.id,
-                thread.id,
-                handle.id,
-                receipt_attempted.set,
+                disposition=SubmitDisposition.STARTED,
+                binding_id=binding.id,
+                thread_id=thread.id,
+                turn_id=handle.id,
+                release_receipt_attempt=receipt_attempted.set,
+                task_feedback=active.task_feedback,
+                feedback_revision=active.feedback_revision,
             )
 
     async def _compile_skill_input(
@@ -3124,14 +3212,55 @@ class CodexRuntime:
     def turn_progress(self, binding_id: str) -> TurnProgressSnapshot | None:
         """Project the latest native plan for the current active Turn only."""
 
+        activity = self.turn_activity(binding_id, refresh_plan=True)
+        if activity is None:
+            return None
+        return TurnProgressSnapshot(
+            binding_id=activity.binding_id,
+            thread_id=activity.thread_id,
+            turn_id=activity.turn_id,
+            steer_count=activity.steer_count,
+            plan_available=activity.plan_available,
+            plan_generated=activity.plan_generated,
+            plan_may_be_stale=activity.plan_may_be_stale,
+            steps=activity.steps,
+        )
+
+    def turn_activity(
+        self,
+        binding_id: str,
+        *,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+        refresh_plan: bool = False,
+    ) -> TurnActivitySnapshot | None:
+        """Return one exact Turn's latest process-local display projection.
+
+        Callers opt into the pinned plan observation explicitly. A disabled
+        progress presenter therefore adds no polling merely because a Turn is
+        active. Exact IDs fail closed to ``None`` so a delayed card updater
+        cannot render a replacement Turn into an older card.
+        """
+
         active = self._active.get(binding_id)
         if active is None or active.terminal_observed:
             return None
-        self._refresh_turn_plan(active)
-        return TurnProgressSnapshot(
+        if thread_id is not None and active.handle.thread_id != thread_id:
+            return None
+        if turn_id is not None and active.handle.id != turn_id:
+            return None
+        if refresh_plan:
+            self._refresh_turn_plan(active)
+        return self._turn_activity_snapshot(active)
+
+    @staticmethod
+    def _turn_activity_snapshot(active: _ActiveTurn) -> TurnActivitySnapshot:
+        return TurnActivitySnapshot(
             binding_id=active.binding_id,
             thread_id=active.handle.thread_id,
             turn_id=active.handle.id,
+            revision=active.activity_revision,
+            state=active.state,
             steer_count=active.steer_count,
             plan_available=active.plan_available,
             plan_generated=active.plan_generated,
@@ -3139,10 +3268,24 @@ class CodexRuntime:
             steps=active.plan_steps,
         )
 
+    @staticmethod
+    def _turn_activity_visible_state(active: _ActiveTurn) -> tuple[object, ...]:
+        return (
+            active.state,
+            active.steer_count,
+            active.plan_available,
+            active.plan_generated,
+            active.plan_may_be_stale,
+            active.plan_steps,
+        )
+
     def _refresh_turn_plan(self, active: _ActiveTurn) -> None:
+        before = self._turn_activity_visible_state(active)
         observer = self._turn_plan_observer
         if observer is None:
             active.plan_available = False
+            if self._turn_activity_visible_state(active) != before:
+                active.activity_revision += 1
             return
         try:
             observation = observer.observe(
@@ -3152,6 +3295,8 @@ class CodexRuntime:
             )
         except Exception as error:
             active.plan_available = False
+            if self._turn_activity_visible_state(active) != before:
+                active.activity_revision += 1
             logger.warning(
                 "native Turn plan observation unavailable",
                 extra={
@@ -3164,6 +3309,8 @@ class CodexRuntime:
         active.plan_available = True
         active.plan_cursor = observation.next_cursor
         if not observation.plan_updated:
+            if self._turn_activity_visible_state(active) != before:
+                active.activity_revision += 1
             return
         active.plan_steps = observation.steps
         active.plan_generated = True
@@ -3177,6 +3324,8 @@ class CodexRuntime:
         ):
             active.plan_may_be_stale = False
             active.plan_stale_after_cursor = None
+        if self._turn_activity_visible_state(active) != before:
+            active.activity_revision += 1
 
     def is_compacting(self, binding_id: str) -> bool:
         return binding_id in self._compacting
@@ -3903,6 +4052,7 @@ class CodexRuntime:
                     )
             if active.terminal_observed and not active.interrupt_attempted:
                 active.state = ActiveState.RUNNING
+                active.activity_revision += 1
                 return StopDisposition.NOT_RUNNING
             if active.state is ActiveState.STOPPING:
                 if not active.interrupt_succeeded:
@@ -4977,6 +5127,7 @@ class CodexRuntime:
         result: object | None = None
         error: BaseException | None = None
         retain_active = False
+        activity: TurnActivitySnapshot | None = None
         try:
             result = await self._read_terminal_result(active)
         except asyncio.CancelledError:
@@ -5004,6 +5155,12 @@ class CodexRuntime:
                 )
         finally:
             try:
+                # The progress-card path gets one last plan replacement before
+                # the terminal stream may consume the native notification
+                # queue. Disabled progress adds no observation here.
+                if active.task_feedback.progress_card_enabled:
+                    self._refresh_turn_plan(active)
+                activity = self._turn_activity_snapshot(active)
                 if active.terminal_observed:
                     # Preserve the preceding completed Turn's snapshot while
                     # this Turn is running, then replace it only with usage
@@ -5059,6 +5216,9 @@ class CodexRuntime:
             error=error,
             background_cleanup_requested=active.cleanup_succeeded,
             turn_diff=active.latest_diff,
+            task_feedback=active.task_feedback,
+            feedback_revision=active.feedback_revision,
+            activity=activity,
         )
         try:
             await self._on_completion(outcome)
@@ -5439,6 +5599,7 @@ class CodexRuntime:
     def _mark_stopping(self, active: _ActiveTurn) -> None:
         if active.state is ActiveState.RUNNING:
             active.state = ActiveState.STOPPING
+            active.activity_revision += 1
             self._advance_admission_revision(active.binding_id)
 
     def _lock(self, binding_id: str) -> asyncio.Lock:

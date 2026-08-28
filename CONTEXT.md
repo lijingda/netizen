@@ -32,8 +32,9 @@ Release 的 Main Qualification / Release Integrity，也不替代 Source Install
 保留，但不迁移到新应用的 Scope。
 
 **Thread Binding / 会话**：Scope 内的 Channel 记录，保存本地 ID、Project alias、
-可空 native Codex Thread ID、可选的 Binding Turn Settings、Mention Context Mode、
-对应 revision、creator 和时间。它不复制 Codex 历史或已生效的原生 Thread 配置。
+可空 native Codex Thread ID、可选的 Binding Turn Settings、Binding Task Feedback、
+Mention Context Mode、对应 revision、creator 和时间。它不复制 Codex 历史或已生效的
+原生 Thread 配置。
 
 **Active Binding**：Scope 中普通消息默认进入的 Binding。`/new`、`/resume` 只切换
 这条指针，不停止其他 Binding 的 Turn。
@@ -54,7 +55,8 @@ handle、当前 Turn、创建时 Turn Settings 快照、admission revision 和 i
 
 **Archived Binding / 已归档会话**：仍保留在 Channel Database、但其 native Thread
 位于 Codex archived catalog 且不作为 Scope active pointer 的 Binding。归档状态不写入
-Binding；`/sessions archived` 每次从 Codex 读取，恢复后原 Binding Turn Settings 不变。
+Binding；`/sessions archived` 每次从 Codex 读取，恢复后原 Binding Turn Settings 与
+Binding Task Feedback 不变。
 
 **Native Codex Thread**：由 SDK-pinned App Server/CLI 管理的连续上下文。普通 Binding
 Thread 持久化到标准 `.codex`；Side Thread 是不持久化到历史 catalog 的 ephemeral
@@ -142,6 +144,10 @@ Binding-scoped intent。Netizen 后续每次启动新 Turn 前都按 live 模型
 Turn 上重复应用的客户端意图，不是 Codex 已生效配置、默认值快照或可反查的原生状态。
 模型目录失效或读取失败时保留；running Turn 的 steer 不解析也不应用。
 
+**Binding Task Feedback / 会话任务反馈**：Binding 上对 Task Reaction 与 Progress Card
+的两个独立选择及 revision。两项默认关闭，只决定后续普通 Turn 的飞书展示，不是
+Codex 原生设置或 Turn 状态事实。
+
 **Native Compaction / 原生压缩**：`/compact` 对已有历史的 idle Binding 调用公开
 Codex compaction。start 空响应不是完成；Netizen 临时保留 `compacting` 槽位，直到
 公开 Thread history 出现唯一的新 terminal `contextCompaction` Turn。多个 candidate
@@ -202,14 +208,22 @@ alias、canonical cwd 和是否可用于新会话；停用不影响已有会话�
 task、receipt Event，以及只读 plan cursor/checklist、成功 steer count 与 freshness。
 native 终态到达即释放，均不持久化。
 
+**Turn Activity Projection / Turn 活动投影**：一个 exact Ordinary Active Turn 的有界、
+瞬态展示视图，当前只包含状态与原生 checklist。它不是推理过程、工具日志、Turn 历史或
+终态事实源。
+
 **Side Turn**：以 Side ID 为键、在同一 ephemeral Side Thread 上串行开始或 steer 的
 当前 Turn。它使用普通 `AsyncTurnHandle.run()` 完成路径，不使用持久 Thread history
 recovery，且不写入 Channel Database。
 
-**Task Reaction / 任务表情**：Channel 以 exact Turn ID 管理的纯内存展示状态。原任务
-消息常驻 `Typing` 并低频闪烁 `THINKING`，成功 steer 的消息添加 `OnIt`，终态先使用
-`DONE`/`ERROR`/`CrossMark` 再清理两个运行态表情；不是 Turn 状态事实源，也不进入
-Channel Database。
+**Task Reaction / 任务表情**：Binding 可选开启、由 Channel 以 exact Turn ID 管理的
+纯内存展示。原任务消息使用 `Typing`/`THINKING`，成功 steer 使用 `OnIt`，终态使用
+`DONE`/`ERROR`/`CrossMark`；它不是 Turn 状态事实源，也不进入 Channel Database。
+
+**Progress Card / 进度卡**：Binding 可选开启、依附 Completion Origin 的 ordinary Turn
+展示卡；运行中展开 Turn Activity Projection，终态在同一卡片折叠过程并呈现结果。它不
+保存执行历史，也不是 Turn 状态事实源；所有可见 plan step 和随分页携带的过程 manifest
+都经过同一套有界的常见敏感模式过滤。
 
 **Standard CODEX_HOME**：服务 effective user 的原生 Codex 状态根；显式
 `CODEX_HOME` 优先，否则为该账号的 `$HOME/.codex`。Netizen 不修改其内部
@@ -217,9 +231,10 @@ JSONL/SQLite 格式。
 
 **Channel Database**：`channel.sqlite3`，只保存 Scope、Binding、Project Registry、
 schema version、Channel SDK dedup TTL key、Binding 上可选的 Binding Turn Settings
-目录 ID、Mention Context Mode 与 exact Context Boundary metadata，以及不含 native
-ID/content 的 Side Topic Route/墓碑；不保存补充消息正文、解析后的 wire value、Codex
-已生效配置、普通 Thread 订阅状态或空闲 timer。
+目录 ID、Binding Task Feedback、Mention Context Mode 与 exact Context Boundary
+metadata，以及不含 native ID/content 的 Side Topic Route/墓碑；不保存补充消息正文、
+解析后的 wire value、Codex 已生效配置、Turn Activity Projection、Progress Card session、
+普通 Thread 订阅状态或空闲 timer。
 
 **Channel Participant / Channel 参与者**：飞书应用权限允许其消息到达 Netizen 的
 发送者。Netizen 不再按 user、chat 或角色做二次准入；同一普通 Scope 的参与者共享

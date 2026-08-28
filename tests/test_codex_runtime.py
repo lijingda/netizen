@@ -26,6 +26,7 @@ from netizen.bindings import (
     BindingConflict,
     BindingNotFound,
     BindingStore,
+    BindingTaskFeedback,
     BindingTurnSettings,
     SideTopicState,
 )
@@ -4466,6 +4467,169 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         first.release_receipt_attempt()
         second.release_receipt_attempt()
         await self.runtime.wait_idle()
+
+    async def test_turn_activity_is_exact_opt_in_and_revisioned_by_visible_change(
+        self,
+    ) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.binding()
+        first = await self.submit(binding, "first")
+
+        initial = self.runtime.turn_activity(
+            binding.id,
+            thread_id=first.thread_id,
+            turn_id=first.turn_id,
+        )
+
+        assert initial is not None
+        self.assertEqual(initial.revision, 1)
+        self.assertEqual(initial.state, ActiveState.RUNNING)
+        self.assertEqual(observer.calls, [])
+        self.assertIsNone(
+            self.runtime.turn_activity(
+                binding.id,
+                thread_id="another-thread",
+                turn_id=first.turn_id,
+                refresh_plan=True,
+            )
+        )
+        self.assertIsNone(
+            self.runtime.turn_activity(
+                binding.id,
+                thread_id=first.thread_id,
+                turn_id="another-turn",
+                refresh_plan=True,
+            )
+        )
+        self.assertEqual(observer.calls, [])
+
+        observer.append(
+            thread_id=first.thread_id,
+            turn_id=first.turn_id,
+            steps=(TurnPlanStepSnapshot("inspect", TurnPlanStepState.IN_PROGRESS),),
+        )
+        with_plan = self.runtime.turn_activity(
+            binding.id,
+            thread_id=first.thread_id,
+            turn_id=first.turn_id,
+            refresh_plan=True,
+        )
+
+        assert with_plan is not None
+        self.assertEqual(with_plan.revision, 2)
+        self.assertEqual([step.step for step in with_plan.steps], ["inspect"])
+        unchanged = self.runtime.turn_activity(
+            binding.id,
+            thread_id=first.thread_id,
+            turn_id=first.turn_id,
+            refresh_plan=True,
+        )
+        assert unchanged is not None
+        self.assertEqual(unchanged.revision, with_plan.revision)
+
+        steered = await self.submit(binding, "change direction")
+        self.assertEqual(steered.task_feedback, BindingTaskFeedback())
+        after_steer = self.runtime.turn_activity(
+            binding.id,
+            thread_id=first.thread_id,
+            turn_id=first.turn_id,
+        )
+        assert after_steer is not None
+        self.assertEqual(after_steer.revision, 3)
+        self.assertEqual(after_steer.steer_count, 1)
+        self.assertTrue(after_steer.plan_may_be_stale)
+
+        self.codex.handles[0].complete_on_interrupt = False
+        self.assertEqual(
+            await self.runtime.stop(binding.id),
+            StopDisposition.REQUESTED,
+        )
+        stopping = self.runtime.turn_activity(
+            binding.id,
+            thread_id=first.thread_id,
+            turn_id=first.turn_id,
+        )
+        assert stopping is not None
+        self.assertEqual(stopping.revision, 4)
+        self.assertEqual(stopping.state, ActiveState.STOPPING)
+        await self.finish(self.codex.handles[0], first)
+
+    async def test_disabled_progress_adds_no_terminal_plan_observation(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.binding()
+        submission = await self.submit(binding, "quiet progress")
+        observer.append(
+            thread_id=submission.thread_id,
+            turn_id=submission.turn_id,
+            steps=(TurnPlanStepSnapshot("hidden", TurnPlanStepState.COMPLETED),),
+        )
+
+        await self.finish(self.codex.handles[0], submission)
+
+        self.assertEqual(observer.calls, [])
+        outcome = self.outcomes[-1]
+        assert isinstance(outcome, TurnOutcome)
+        self.assertEqual(outcome.task_feedback, BindingTaskFeedback())
+        self.assertEqual(outcome.feedback_revision, 1)
+        assert outcome.activity is not None
+        self.assertFalse(outcome.activity.plan_generated)
+
+    async def test_progress_feedback_and_final_activity_are_exact_turn_snapshots(
+        self,
+    ) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        feedback = BindingTaskFeedback(progress_card_enabled=True)
+        binding = self.store.create_binding(
+            scope=self.scope,
+            project_alias="test",
+            creator_id="ou_user",
+            task_feedback=feedback,
+        )
+        submission = await self.submit(binding, "visible progress")
+        observer.append(
+            thread_id=submission.thread_id,
+            turn_id=submission.turn_id,
+            steps=(TurnPlanStepSnapshot("verify", TurnPlanStepState.COMPLETED),),
+        )
+
+        self.assertEqual(submission.task_feedback, feedback)
+        self.assertEqual(submission.feedback_revision, 1)
+        await self.finish(self.codex.handles[0], submission)
+
+        self.assertEqual(
+            observer.calls,
+            [(submission.thread_id, submission.turn_id, 0)],
+        )
+        outcome = self.outcomes[-1]
+        assert isinstance(outcome, TurnOutcome)
+        self.assertEqual(outcome.task_feedback, feedback)
+        self.assertEqual(outcome.feedback_revision, 1)
+        assert outcome.activity is not None
+        self.assertEqual(outcome.activity.binding_id, binding.id)
+        self.assertEqual(outcome.activity.thread_id, submission.thread_id)
+        self.assertEqual(outcome.activity.turn_id, submission.turn_id)
+        self.assertEqual([step.step for step in outcome.activity.steps], ["verify"])
+
+    async def test_feedback_revision_invalidates_prepared_submission(self) -> None:
+        binding = self.binding()
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        self.store.set_configuration(
+            binding_id=binding.id,
+            expected_settings_revision=binding.settings_revision,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
+            settings=binding.turn_settings,
+            task_feedback=BindingTaskFeedback(task_reactions_enabled=True),
+            message_context_mode=binding.message_context_mode,
+            context_anchor=None,
+        )
+
+        with self.assertRaisesRegex(SteerRace, "任务反馈配置已变化"):
+            await self.submit(binding, "stale feedback", admission=admission)
+        self.assertEqual(self.codex.start_kwargs, [])
 
     async def test_native_multimodal_lists_pass_through_start_and_steer(self) -> None:
         binding = self.binding()

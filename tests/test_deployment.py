@@ -348,7 +348,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
         design = (ROOT / "docs" / "design.md").read_text(encoding="utf-8")
 
-        self.assertIn("当前 schema v6", deployment)
+        self.assertIn("当前 schema v7", deployment)
         self.assertIn("Mention Context Mode", deployment)
         self.assertIn("Context Boundary", design)
         self.assertIn("不保存任何补充消息正文", deployment)

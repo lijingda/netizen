@@ -142,6 +142,7 @@ class CardControlIntent:
     expected_revision: int | None = None
     expected_settings_revision: int | None = None
     expected_context_revision: int | None = None
+    feedback_revision: int | None = None
     enabled: bool | None = None
     project_path: str | None = None
     create_directory: bool | None = None
@@ -152,6 +153,8 @@ class CardControlIntent:
     model_id: str | None = None
     effort_id: str | None = None
     service_tier_id: str | None = None
+    task_reactions_enabled: bool | None = None
+    progress_card_enabled: bool | None = None
     message_context_mode: MentionContextMode | None = None
     side_id: str | None = None
     page: int | None = None
@@ -169,6 +172,24 @@ class TurnFileManifestItem:
 
 
 @dataclass(frozen=True, slots=True)
+class TurnProgressManifestStep:
+    step: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class TurnProgressManifest:
+    """Sanitized, self-contained progress panel carried by file pagination."""
+
+    state: str
+    steer_count: int
+    plan_available: bool
+    plan_generated: bool
+    plan_may_be_stale: bool
+    steps: tuple[TurnProgressManifestStep, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class TurnFileActionIntent:
     scope: FeishuScope
     source_id: str
@@ -180,6 +201,7 @@ class TurnFileActionIntent:
     path: str | None = None
     files: tuple[TurnFileManifestItem, ...] = ()
     answer: str | None = None
+    progress: TurnProgressManifest | None = None
 
 
 ChannelInteraction = PromptInput | ControlIntent

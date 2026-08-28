@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from lark_channel import OutboundCard
 
@@ -12,6 +13,7 @@ from netizen.cards import (
     SessionCardItem,
     SettingsCardActionError,
     TurnFileCardLimitError,
+    activity_step_display,
     archive_binding_card,
     archived_sessions_card,
     sessions_card,
@@ -33,8 +35,14 @@ from netizen.cards import (
     settings_card,
     turn_files_card,
     turn_files_card_from_manifest,
+    turn_progress_card,
+    turn_progress_card_from_manifest,
 )
-from netizen.bindings import BindingTurnSettings, SideTopicState
+from netizen.bindings import (
+    BindingTaskFeedback,
+    BindingTurnSettings,
+    SideTopicState,
+)
 from netizen.domain import (
     CardControlName,
     FeishuScope,
@@ -579,6 +587,8 @@ class CardCodecTest(unittest.TestCase):
                 "new_model": "new-model:v1:explicit:ZnV0dXJlLW1vZGVs",
                 "new_effort": "ultra",
                 "new_speed": "priority-v2",
+                "new_task_reactions": "task-feedback:v1:on",
+                "new_progress_card": "task-feedback:v1:off",
             },
         )
         self.assertEqual(created.name, CardControlName.CREATE_BINDING)
@@ -587,6 +597,8 @@ class CardCodecTest(unittest.TestCase):
         self.assertEqual(created.model_id, "future-model")
         self.assertEqual(created.effort_id, "ultra")
         self.assertEqual(created.service_tier_id, "priority-v2")
+        self.assertTrue(created.task_reactions_enabled)
+        self.assertFalse(created.progress_card_enabled)
         self.assertEqual(
             created.message_context_mode,
             MentionContextMode.CATCH_UP,
@@ -599,13 +611,15 @@ class CardCodecTest(unittest.TestCase):
             tag="button",
             form_value={
                 "config_model": (
-                    "config-model:v3:"
-                    "11111111-0000-0000-0000-000000000001:7:11:"
+                    "config-model:v4:"
+                    "11111111-0000-0000-0000-000000000001:7:11:13:"
                     "explicit:ZnV0dXJlLW1vZGVs"
                 ),
                 "config_context_mode": "context-mode:v1:current-only",
                 "config_effort": "ultra",
                 "config_speed": "default",
+                "config_task_reactions": "task-feedback:v1:off",
+                "config_progress_card": "task-feedback:v1:on",
             },
         )
         self.assertEqual(configured.name, CardControlName.CONFIGURE_BINDING)
@@ -615,9 +629,12 @@ class CardCodecTest(unittest.TestCase):
         )
         self.assertEqual(configured.expected_settings_revision, 7)
         self.assertEqual(configured.expected_context_revision, 11)
+        self.assertEqual(configured.feedback_revision, 13)
         self.assertEqual(configured.model_id, "future-model")
         self.assertEqual(configured.effort_id, "ultra")
         self.assertEqual(configured.service_tier_id, "default")
+        self.assertFalse(configured.task_reactions_enabled)
+        self.assertTrue(configured.progress_card_enabled)
         self.assertEqual(
             configured.message_context_mode,
             MentionContextMode.CURRENT_ONLY,
@@ -635,6 +652,8 @@ class CardCodecTest(unittest.TestCase):
                 "new_project": "project:v1:test:3",
                 "new_context_mode": "context-mode:v1:current-only",
                 "new_model": "new-model:v1:inherit",
+                "new_task_reactions": "task-feedback:v1:off",
+                "new_progress_card": "task-feedback:v1:off",
             },
         )
         catalog = decode_card_form(
@@ -648,6 +667,8 @@ class CardCodecTest(unittest.TestCase):
                 "new_model": "new-model:v1:inherit",
                 "new_effort": "rendered-effort",
                 "new_speed": "rendered-speed",
+                "new_task_reactions": "task-feedback:v1:on",
+                "new_progress_card": "task-feedback:v1:on",
             },
         )
         configured = decode_card_form(
@@ -657,10 +678,12 @@ class CardCodecTest(unittest.TestCase):
             tag="button",
             form_value={
                 "config_model": (
-                    "config-model:v3:"
-                    "11111111-0000-0000-0000-000000000001:7:11:inherit"
+                    "config-model:v4:"
+                    "11111111-0000-0000-0000-000000000001:7:11:13:inherit"
                 ),
                 "config_context_mode": "context-mode:v1:catch-up",
+                "config_task_reactions": "task-feedback:v1:off",
+                "config_progress_card": "task-feedback:v1:on",
             },
         )
 
@@ -675,6 +698,7 @@ class CardCodecTest(unittest.TestCase):
         self.assertEqual(catalog.message_context_mode, MentionContextMode.CATCH_UP)
         self.assertEqual(configured.expected_settings_revision, 7)
         self.assertEqual(configured.expected_context_revision, 11)
+        self.assertEqual(configured.feedback_revision, 13)
         self.assertEqual(configured.message_context_mode, MentionContextMode.CATCH_UP)
 
     def test_binding_settings_forms_reject_old_mixed_and_unbounded_shapes(
@@ -731,6 +755,20 @@ class CardCodecTest(unittest.TestCase):
             {
                 "new_project": "project:v1:test:3",
                 "new_model": "new-model:v1:explicit:ZnV0dXJlLW1vZGVs",
+            },
+            {
+                "new_project": "project:v1:test:3",
+                "new_model": "new-model:v1:inherit",
+                "new_task_reactions": True,
+                "new_progress_card": "task-feedback:v1:off",
+            },
+            {
+                "config_model": (
+                    "config-model:v4:"
+                    "11111111-0000-0000-0000-000000000001:1:1:1:inherit"
+                ),
+                "config_task_reactions": "task-feedback:v1:off",
+                "config_progress_card": "on",
             },
         )
         for form_value in invalid_forms:
@@ -910,6 +948,324 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("src/file-17.txt", last_visible)
         self.assertNotIn("下一页", json.dumps(last.card, ensure_ascii=False))
         self.assertIn("回到第一页", json.dumps(last.card, ensure_ascii=False))
+
+    def test_running_progress_card_is_expanded_bounded_and_projection_only(
+        self,
+    ) -> None:
+        snapshot = SimpleNamespace(
+            state=SimpleNamespace(value="running"),
+            steer_count=2,
+            plan_available=True,
+            plan_generated=True,
+            plan_may_be_stale=True,
+            steps=tuple(
+                SimpleNamespace(
+                    step=(
+                        "检查当前实现 " + "x" * 300
+                        if index == 0
+                        else (
+                            "调用 Authorization: Bearer "
+                            "SECRET_PLAN_VALUE_1234567890"
+                            if index == 2
+                            else (
+                                "联系 alice@example.com，ETA 5m，完成 50%，"
+                                "耗时 18m"
+                                if index == 3
+                                else f"步骤 {index}"
+                            )
+                        )
+                    ),
+                    status=SimpleNamespace(
+                        value=(
+                            "completed"
+                            if index == 0
+                            else "inProgress"
+                            if index == 1
+                            else "pending"
+                        )
+                    ),
+                )
+                for index in range(14)
+            ),
+            reasoning="SECRET_REASONING",
+            tool_arguments="SECRET_ARGUMENTS",
+            raw_output="SECRET_RAW_OUTPUT",
+        )
+
+        outbound = turn_progress_card(snapshot=snapshot)
+
+        self.assertEqual(outbound.card["schema"], "2.0")
+        self.assertEqual(outbound.card["header"]["template"], "blue")
+        self.assertEqual(
+            outbound.card["body"]["elements"][0]["tag"],
+            "collapsible_panel",
+        )
+        panel = _elements(outbound.card, "collapsible_panel")[0]
+        self.assertTrue(panel["expanded"])
+        self.assertEqual(panel["element_id"], "turnprogressv1")
+        visible = "\n".join(
+            item["text"]["content"]
+            for item in _elements(panel, "div")
+            if item.get("text", {}).get("tag") == "plain_text"
+        )
+        self.assertIn("状态：正在执行", visible)
+        self.assertIn("已接收调整：2 次", visible)
+        self.assertIn("可能尚未反映最近一次调整", visible)
+        self.assertIn("✓ 检查当前实现", visible)
+        self.assertIn("→ 步骤 1", visible)
+        self.assertIn("… 另有 2 项未展示", visible)
+        self.assertNotIn("步骤 12", visible)
+        serialized = json.dumps(outbound.card, ensure_ascii=False)
+        for forbidden in (
+            "SECRET_REASONING",
+            "SECRET_ARGUMENTS",
+            "SECRET_RAW_OUTPUT",
+            "SECRET_PLAN_VALUE",
+            "alice@example.com",
+            "耗时",
+            "ETA",
+            "%",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_activity_steps_filter_chinese_adjacent_sensitive_patterns(self) -> None:
+        fully_hidden = (
+            "使用password: correct horse battery staple",
+            "调用认证：Bearer x",
+            "凭据postgresql://user:pass@example.com继续",
+            "读取密码：correct horse battery staple",
+            "使用API密钥：foo bar baz",
+            "session令牌：foo bar",
+            "DB_PASSWORD=foo bar",
+            "OPENAI_API_KEY=shortsecret",
+            "-----BEGIN PRIVATE KEY-----abc",
+        )
+        for value in fully_hidden:
+            with self.subTest(value=value):
+                self.assertEqual(
+                    activity_step_display(value),
+                    "[敏感内容已隐藏]",
+                )
+
+        partially_hidden = {
+            "联系alice@example.com后继续": "alice@example.com",
+            "使用sk-proj-abcdefghijklmnopqrstuvwx继续": (
+                "sk-proj-abcdefghijklmnopqrstuvwx"
+            ),
+        }
+        for value, forbidden in partially_hidden.items():
+            with self.subTest(value=value):
+                self.assertNotIn(forbidden, activity_step_display(value))
+
+        for value, forbidden in (
+            ("已完成50%", "%"),
+            ("已完成 50％", "％"),
+            ("当前ETA：5m", "ETA"),
+            ("本步耗时 18m", "耗时"),
+        ):
+            with self.subTest(value=value):
+                self.assertNotIn(forbidden, activity_step_display(value))
+
+    def test_progress_file_pagination_preserves_sanitized_collapsed_panel(
+        self,
+    ) -> None:
+        secret = "foo bar baz"
+        snapshot = SimpleNamespace(
+            state=SimpleNamespace(value="running"),
+            steer_count=1,
+            plan_available=True,
+            plan_generated=True,
+            plan_may_be_stale=False,
+            steps=(
+                SimpleNamespace(
+                    step=f"读取 secret: {secret} 后生成报告",
+                    status=SimpleNamespace(value="completed"),
+                ),
+            ),
+        )
+        files = tuple(
+            TurnFile(
+                display_path=f"result-{index:02}.txt",
+                resolved_path=Path(f"/tmp/result-{index:02}.txt"),
+                size=1,
+                media_kind="file",
+            )
+            for index in range(10)
+        )
+        first = turn_progress_card(
+            snapshot=snapshot,
+            final_response="done",
+            files=files,
+            terminal_status="completed",
+            scope=self.scope,
+            binding_id="binding-123",
+            turn_id="turn-123",
+        )
+        page_value = next(
+            behavior["value"]
+            for button in _elements(first.card, "button")
+            for behavior in button.get("behaviors", ())
+            if behavior["value"]["intent"] == "turn-file.page"
+        )
+        self.assertIn("progress", page_value)
+        self.assertNotIn(secret, json.dumps(page_value, ensure_ascii=False))
+
+        intent = decode_turn_file_action(
+            app_id="cli_test",
+            message_id="om_card",
+            callback_chat_id=self.scope.chat_id,
+            sender_id="ou_user",
+            tag="button",
+            value=page_value,
+        )
+        self.assertIsNotNone(intent.progress)
+        assert intent.progress is not None
+        tampered_value = json.loads(json.dumps(page_value))
+        tampered_value["progress"]["steps"][0]["step"] = (
+            'password: "correct horse battery staple"'
+        )
+        tampered_intent = decode_turn_file_action(
+            app_id="cli_test",
+            message_id="om_card",
+            callback_chat_id=self.scope.chat_id,
+            sender_id="ou_user",
+            tag="button",
+            value=tampered_value,
+        )
+        assert tampered_intent.progress is not None
+        self.assertEqual(
+            tampered_intent.progress.steps[0].step,
+            "[敏感内容已隐藏]",
+        )
+        rebuilt = turn_progress_card_from_manifest(
+            scope=intent.scope,
+            binding_id=intent.binding_id,
+            turn_id=intent.turn_id,
+            final_response=intent.answer or "",
+            manifest=intent.files,
+            progress=intent.progress,
+            page=intent.page or 0,
+        )
+
+        panel = _elements(rebuilt.card, "collapsible_panel")[0]
+        self.assertFalse(panel["expanded"])
+        serialized = json.dumps(rebuilt.card, ensure_ascii=False)
+        self.assertIn("敏感内容已隐藏", serialized)
+        self.assertNotIn(secret, serialized)
+        self.assertIn("result-08.txt", serialized)
+
+    def test_terminal_progress_card_collapses_and_reuses_answer_and_files(
+        self,
+    ) -> None:
+        snapshot = SimpleNamespace(
+            state=SimpleNamespace(value="running"),
+            steer_count=0,
+            plan_available=True,
+            plan_generated=True,
+            plan_may_be_stale=False,
+            steps=(
+                SimpleNamespace(
+                    step="生成报告",
+                    status=SimpleNamespace(value="completed"),
+                ),
+            ),
+        )
+        files = (
+            TurnFile(
+                display_path="reports/result.txt",
+                resolved_path=Path("/server/private/reports/result.txt"),
+                size=32,
+                media_kind="file",
+            ),
+        )
+
+        outbound = turn_progress_card(
+            snapshot=snapshot,
+            final_response="**任务完成**：报告已生成。",
+            files=files,
+            terminal_status="completed",
+            scope=self.scope,
+            binding_id="binding-123",
+            turn_id="turn-123",
+        )
+
+        self.assertEqual(outbound.card["header"]["template"], "green")
+        panel = _elements(outbound.card, "collapsible_panel")[0]
+        self.assertFalse(panel["expanded"])
+        self.assertIn("已完成", panel["header"]["title"]["content"])
+        visible = "\n".join(
+            item["content"] for item in _elements(outbound.card, "markdown")
+        )
+        self.assertIn("任务完成", visible)
+        self.assertIn("reports/result.txt", visible)
+        self.assertNotIn("/server/private", visible)
+        element_ids = {
+            item.get("element_id")
+            for item in _tagged_elements(outbound.card)
+            if item.get("element_id")
+        }
+        self.assertEqual(
+            element_ids,
+            {"turnprogressv1", "turnanswerv1", "turnfilesv4"},
+        )
+        button = _elements(outbound.card, "button")[0]
+        self.assertEqual(
+            button["behaviors"][0]["value"]["intent"],
+            "turn-file.send",
+        )
+
+    def test_progress_card_terminal_variants_and_invalid_payloads(self) -> None:
+        snapshot = SimpleNamespace(
+            state=SimpleNamespace(value="stopping"),
+            steer_count=0,
+            plan_available=False,
+            plan_generated=False,
+            plan_may_be_stale=False,
+            steps=(),
+        )
+        running = turn_progress_card(snapshot=snapshot)
+        self.assertIn(
+            "正在停止",
+            _elements(running.card, "collapsible_panel")[0]["header"]["title"][
+                "content"
+            ],
+        )
+        interrupted = turn_progress_card(
+            snapshot=snapshot,
+            terminal_status="interrupted",
+            final_response="Codex Turn 已中断。",
+        )
+        self.assertEqual(interrupted.card["header"]["template"], "orange")
+        self.assertFalse(
+            _elements(interrupted.card, "collapsible_panel")[0]["expanded"]
+        )
+
+        with self.assertRaises(ValueError):
+            turn_progress_card(snapshot=snapshot, final_response="尚未结束")
+        with self.assertRaises(ValueError):
+            turn_progress_card(snapshot=snapshot, collapsed=True)
+        with self.assertRaises(ValueError):
+            turn_progress_card(snapshot=snapshot, terminal_status="unknown")
+        with self.assertRaisesRegex(TurnFileCardLimitError, "bytes"):
+            turn_progress_card(
+                snapshot=snapshot,
+                terminal_status="completed",
+                final_response="x" * 55_000,
+            )
+        with self.assertRaises(ValueError):
+            turn_progress_card(
+                snapshot=snapshot,
+                terminal_status="completed",
+                final_response="done",
+                files=(
+                    TurnFile(
+                        display_path="result.txt",
+                        resolved_path=Path("/tmp/result.txt"),
+                        size=1,
+                        media_kind="file",
+                    ),
+                ),
+            )
 
     def test_v4_page_update_preserves_answer_and_marks_missing_files(self) -> None:
         existing = Path("/tmp/report-existing.txt")
@@ -1169,7 +1525,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("none · /home/user", serialized)
         self.assertIn("test · /home/user/test", serialized)
         self.assertNotIn("off · /home/user/off", serialized)
-        self.assertIn("new_binding_v5", serialized)
+        self.assertIn("new_binding_v6", serialized)
         self.assertNotIn("快速新建", serialized)
         self.assertNotIn("下一条真实任务", serialized)
         self.assertIn("继承 Codex", serialized)
@@ -1180,7 +1536,7 @@ class CardRendererTest(unittest.TestCase):
         form = next(
             item
             for item in _elements(outbound.card, "form")
-            if item["name"] == "new_binding_v5"
+            if item["name"] == "new_binding_v6"
         )
         self.assertEqual(
             [item["name"] for item in form["elements"] if "name" in item],
@@ -1190,7 +1546,9 @@ class CardRendererTest(unittest.TestCase):
                 "new_effort",
                 "new_speed",
                 "new_context_mode",
-                "new_binding_submit_v5",
+                "new_task_reactions",
+                "new_progress_card",
+                "new_binding_submit_v6",
             ],
         )
         fields = {
@@ -1226,6 +1584,14 @@ class CardRendererTest(unittest.TestCase):
             fields["new_context_mode"]["initial_option"],
             "context-mode:v1:current-only",
         )
+        self.assertEqual(
+            fields["new_task_reactions"]["initial_option"],
+            "task-feedback:v1:off",
+        )
+        self.assertEqual(
+            fields["new_progress_card"]["initial_option"],
+            "task-feedback:v1:off",
+        )
         self.assertNotIn("new_prompt", fields)
         self.assertEqual(len(_elements(outbound.card, "form")), 1)
         self.assertNotIn("credits", serialized.lower())
@@ -1257,7 +1623,7 @@ class CardRendererTest(unittest.TestCase):
                     self.assertEqual(forms, [])
                     continue
                 form = next(
-                    item for item in forms if item["name"] == "new_binding_v5"
+                    item for item in forms if item["name"] == "new_binding_v6"
                 )
                 project = next(
                     item
@@ -1311,7 +1677,7 @@ class CardRendererTest(unittest.TestCase):
         p2p_form = next(
             item
             for item in _elements(p2p.card, "form")
-            if item["name"] == "new_binding_v5"
+            if item["name"] == "new_binding_v6"
         )
         p2p_fields = {
             item["name"]: item
@@ -1326,12 +1692,20 @@ class CardRendererTest(unittest.TestCase):
             form_value={
                 "new_project": p2p_fields["new_project"]["initial_option"],
                 "new_model": "new-model:v1:inherit",
+                "new_task_reactions": p2p_fields["new_task_reactions"][
+                    "initial_option"
+                ],
+                "new_progress_card": p2p_fields["new_progress_card"][
+                    "initial_option"
+                ],
             },
         )
         self.assertEqual(
             decoded.message_context_mode,
             MentionContextMode.CURRENT_ONLY,
         )
+        self.assertFalse(decoded.task_reactions_enabled)
+        self.assertFalse(decoded.progress_card_enabled)
 
     def test_config_card_targets_exact_binding_and_uses_live_catalog_options(
         self,
@@ -1349,13 +1723,18 @@ class CardRendererTest(unittest.TestCase):
             ),
             catalog=self.catalog,
             context_revision=11,
+            feedback_revision=13,
             message_context_mode=MentionContextMode.CATCH_UP,
+            task_feedback=BindingTaskFeedback(
+                task_reactions_enabled=True,
+                progress_card_enabled=False,
+            ),
             allow_context_mode=True,
         )
         form = next(
             item
             for item in _elements(outbound.card, "form")
-            if item["name"] == "binding_config_v5"
+            if item["name"] == "binding_config_v6"
         )
         self.assertEqual(
             [item["name"] for item in form["elements"] if "name" in item],
@@ -1364,7 +1743,9 @@ class CardRendererTest(unittest.TestCase):
                 "config_effort",
                 "config_speed",
                 "config_context_mode",
-                "binding_config_submit_v5",
+                "config_task_reactions",
+                "config_progress_card",
+                "binding_config_submit_v6",
             ],
         )
         fields = {
@@ -1374,13 +1755,13 @@ class CardRendererTest(unittest.TestCase):
         }
         self.assertEqual(
             fields["config_model"]["options"][0]["value"],
-            "config-model:v3:"
-            "11111111-0000-0000-0000-000000000001:7:11:inherit",
+            "config-model:v4:"
+            "11111111-0000-0000-0000-000000000001:7:11:13:inherit",
         )
         self.assertEqual(
             fields["config_model"]["initial_option"],
-            "config-model:v3:"
-            "11111111-0000-0000-0000-000000000001:7:11:"
+            "config-model:v4:"
+            "11111111-0000-0000-0000-000000000001:7:11:13:"
             "explicit:ZnV0dXJlLW1vZGVs",
         )
         self.assertNotIn("config_binding", fields)
@@ -1390,6 +1771,14 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertEqual(fields["config_effort"]["initial_option"], "low")
         self.assertEqual(fields["config_speed"]["initial_option"], "default")
+        self.assertEqual(
+            fields["config_task_reactions"]["initial_option"],
+            "task-feedback:v1:on",
+        )
+        self.assertEqual(
+            fields["config_progress_card"]["initial_option"],
+            "task-feedback:v1:off",
+        )
         self.assertNotIn("config_prompt", fields)
         self.assertIn("不会启动任务", str(outbound.card))
         self.assertNotIn("目标会话", str(outbound.card))
@@ -1411,6 +1800,10 @@ class CardRendererTest(unittest.TestCase):
                 project_alias="test",
                 settings=settings,
                 message_context_mode=MentionContextMode.CATCH_UP,
+                task_feedback=BindingTaskFeedback(
+                    task_reactions_enabled=True,
+                    progress_card_enabled=True,
+                ),
             ).card
         )
 
@@ -1419,6 +1812,8 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("credits", rendered.lower())
         self.assertNotIn("cost", rendered.lower())
         self.assertIn("自动带上期间的群聊讨论", rendered)
+        self.assertIn("任务表情：开启", rendered)
+        self.assertIn("进度卡：开启", rendered)
 
         inherited = str(
             binding_configured_card(
@@ -1430,6 +1825,8 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertIn("继承 Codex", inherited)
         self.assertIn("仅这条 @ 消息", inherited)
+        self.assertIn("任务表情：关闭", inherited)
+        self.assertIn("进度卡：关闭", inherited)
 
         created = str(
             binding_created_card(
@@ -1479,7 +1876,7 @@ class CardRendererTest(unittest.TestCase):
         form = next(
             item
             for item in _elements(outbound.card, "form")
-            if item["name"] == "new_binding_v5"
+            if item["name"] == "new_binding_v6"
         )
         fields = {
             item.get("name")
@@ -1492,7 +1889,9 @@ class CardRendererTest(unittest.TestCase):
                 "new_project",
                 "new_context_mode",
                 "new_model",
-                "new_binding_submit_v5",
+                "new_task_reactions",
+                "new_progress_card",
+                "new_binding_submit_v6",
             },
         )
         self.assertIn("模型目录暂不可用", serialized)
@@ -1515,7 +1914,7 @@ class CardRendererTest(unittest.TestCase):
         config_form = next(
             item
             for item in _elements(configured.card, "form")
-            if item["name"] == "binding_config_v5"
+            if item["name"] == "binding_config_v6"
         )
         config_fields = {
             item.get("name")
@@ -1527,7 +1926,9 @@ class CardRendererTest(unittest.TestCase):
             {
                 "config_context_mode",
                 "config_model",
-                "binding_config_submit_v5",
+                "config_task_reactions",
+                "config_progress_card",
+                "binding_config_submit_v6",
             },
         )
         self.assertIn("清除显式配置", str(configured.card))

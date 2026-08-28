@@ -9,11 +9,11 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from lark_channel import OutboundCard, new_card
 
-from .bindings import BindingTurnSettings, SideTopicState
+from .bindings import BindingTaskFeedback, BindingTurnSettings, SideTopicState
 from .domain import (
     CardControlIntent,
     CardControlName,
@@ -24,6 +24,8 @@ from .domain import (
     TurnFileActionIntent,
     TurnFileActionName,
     TurnFileManifestItem,
+    TurnProgressManifest,
+    TurnProgressManifestStep,
 )
 from .model_settings import ModelCatalog, TurnModelSettings
 from .projects import Project
@@ -44,6 +46,9 @@ TURN_FILE_MANIFEST_LIMIT = 500
 TURN_FILE_CARD_JSON_LIMIT_BYTES = 55_000
 _TURN_ANSWER_ELEMENT_ID = "turnanswerv1"
 _TURN_FILES_ELEMENT_ID = "turnfilesv4"
+_TURN_PROGRESS_ELEMENT_ID = "turnprogressv1"
+_TURN_PROGRESS_MAX_STEPS = 12
+_TURN_PROGRESS_STEP_MAX_CHARS = 160
 MAX_THREAD_NAME_CHARS = 120
 MAX_MODEL_ID_CHARS = 256
 MAX_ENCODED_MODEL_ID_CHARS = 1368
@@ -60,12 +65,61 @@ _NEW_MODEL_REFERENCE = re.compile(
     r"new-model:v1:(inherit|explicit:([A-Za-z0-9_-]+))"
 )
 _CONFIG_MODEL_REFERENCE = re.compile(
-    r"config-model:v3:([A-Za-z0-9][A-Za-z0-9-]{0,127}):"
+    r"config-model:v4:([A-Za-z0-9][A-Za-z0-9-]{0,127}):"
     r"([1-9][0-9]{0,18}):([1-9][0-9]{0,18}):"
-    r"(inherit|explicit:([A-Za-z0-9_-]+))"
+    r"([1-9][0-9]{0,18}):(inherit|explicit:([A-Za-z0-9_-]+))"
 )
 _CONTEXT_MODE_REFERENCE = re.compile(
     r"context-mode:v1:(current-only|catch-up)"
+)
+_TASK_FEEDBACK_REFERENCE = re.compile(r"task-feedback:v1:(off|on)")
+_PROGRESS_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)(?:api[ _-]?key|access[ _-]?token|"
+    r"auth(?:entication|orization)?|bearer|cookie|credential|password|"
+    r"passwd|secret|session[ _-]?token|密码|口令|密钥|令牌|凭据|授权|认证)"
+    r"\s*(?:=|:|：|(?<![A-Za-z0-9_])is(?![A-Za-z0-9_]))"
+    r"\s*[^\s,;，；]+"
+)
+_PROGRESS_BEARER_TOKEN = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])bearer(?![A-Za-z0-9_])\s+\S+"
+)
+_PROGRESS_PEM = re.compile(
+    r"-----BEGIN [^-]+-----",
+    re.IGNORECASE,
+)
+_PROGRESS_URL_CREDENTIAL = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9+.-]*://"
+    r"[^\s/@:]*:[^\s/@]+@"
+)
+_PROGRESS_KNOWN_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9_])(?:AKIA[0-9A-Z]{16}|"
+    r"(?:sk|gh[pousr])[-_][A-Za-z0-9_-]{16,}|"
+    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
+    r"(?![A-Za-z0-9_])"
+)
+_PROGRESS_LONG_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9_])[A-Za-z0-9_+/=-]{32,}(?![A-Za-z0-9_])"
+)
+_PROGRESS_EMAIL = re.compile(
+    r"(?<![A-Za-z0-9_])[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?![A-Za-z0-9_])"
+)
+_PROGRESS_HOME_PATH = re.compile(
+    r"(?i)(?:~[/\\]|/(?:Users|home)/[^\s/\\]+[/\\]|"
+    r"[A-Z]:\\Users\\[^\s\\]+\\)[^\s,;]*"
+)
+_PROGRESS_INLINE_CODE = re.compile(r"`[^`]*`")
+_PROGRESS_ELAPSED = re.compile(
+    r"(?i)(?:(?<![A-Za-z0-9_])(?:elapsed|worked\s+for)"
+    r"(?![A-Za-z0-9_])|(?:耗时|用时))"
+    r"\s*[:=：]?\s*[^,;，。；]*"
+)
+_PROGRESS_PERCENT = re.compile(
+    r"(?<!\d)\d{1,3}(?:[.．]\d+)?\s*[%％]"
+)
+_PROGRESS_ETA = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])ETA(?![A-Za-z0-9_])"
+    r"(?:\s*[:=：]?\s*[^,;，。；]*)?"
 )
 _RENAME_NAME_FIELD = re.compile(
     r"rename_name_v1__([A-Za-z0-9][A-Za-z0-9-]{0,127})"
@@ -94,6 +148,20 @@ class SessionCardItem:
     title: str
     state: str
     active: bool
+
+
+class _TurnPlanStepLike(Protocol):
+    step: str
+    status: object
+
+
+class _TurnActivitySnapshotLike(Protocol):
+    state: object
+    steer_count: int
+    plan_available: bool
+    plan_generated: bool
+    plan_may_be_stale: bool
+    steps: tuple[_TurnPlanStepLike, ...]
 
 
 class CardActionError(ValueError):
@@ -133,13 +201,7 @@ def turn_files_card(
             f"本轮文件共 {len(files)} 个，超过卡片完整分页上限 "
             f"{TURN_FILE_MANIFEST_LIMIT} 个；未截断文件清单。"
         )
-    manifest = tuple(
-        TurnFileManifestItem(
-            path=str(turn_file.resolved_path),
-            label=turn_file.display_path,
-        )
-        for turn_file in files
-    )
+    manifest = _turn_file_manifest(files)
     return _render_and_validate_turn_file_pages(
         scope=scope,
         binding_id=binding_id,
@@ -149,6 +211,340 @@ def turn_files_card(
         manifest=manifest,
         page=page,
     )
+
+
+def turn_progress_card(
+    *,
+    snapshot: _TurnActivitySnapshotLike,
+    final_response: str | None = None,
+    files: tuple[TurnFile, ...] = (),
+    terminal_status: str | None = None,
+    collapsed: bool = False,
+    scope: FeishuScope | None = None,
+    binding_id: str | None = None,
+    turn_id: str | None = None,
+) -> OutboundCard:
+    """Render one replaceable Phase 1 Turn progress card.
+
+    The activity panel deliberately reads only the bounded status/checklist
+    projection.  It never inspects reasoning, tool arguments, or tool output.
+    A terminal render always collapses that panel and appends the authoritative
+    final response plus the existing optional Turn-file controls.
+    """
+
+    normalized_terminal_status = _terminal_progress_status(terminal_status)
+    if normalized_terminal_status is None:
+        if collapsed:
+            raise ValueError("a running progress card must remain expanded")
+        if final_response is not None or files:
+            raise ValueError(
+                "a running progress card cannot contain a final response or files"
+            )
+    elif files and normalized_terminal_status != "completed":
+        raise ValueError("only a completed progress card may contain files")
+
+    manifest: tuple[TurnFileManifestItem, ...] = ()
+    progress_manifest: TurnProgressManifest | None = None
+    pages = (None,)
+    if files:
+        if len(files) > TURN_FILE_MANIFEST_LIMIT:
+            raise TurnFileCardLimitError(
+                f"本轮文件共 {len(files)} 个，超过卡片完整分页上限 "
+                f"{TURN_FILE_MANIFEST_LIMIT} 个；未截断文件清单。"
+            )
+        if scope is None or not binding_id or not turn_id:
+            raise ValueError(
+                "a progress card with files requires scope, binding_id, and turn_id"
+            )
+        manifest = _turn_file_manifest(files)
+        progress_manifest = _turn_progress_manifest(snapshot)
+        first_page = paginate_turn_files(files, 0)
+        pages = tuple(range(first_page.total_pages))
+
+    selected: OutboundCard | None = None
+    for page in pages:
+        visible = paginate_turn_files(files, page) if page is not None else None
+        candidate = _render_turn_progress_card(
+            snapshot=progress_manifest or snapshot,
+            final_response=final_response,
+            terminal_status=normalized_terminal_status,
+            collapsed=collapsed or normalized_terminal_status is not None,
+            scope=scope,
+            binding_id=binding_id,
+            turn_id=turn_id,
+            page=visible,
+            manifest=manifest,
+            progress_manifest=progress_manifest,
+        )
+        if page in {None, 0}:
+            selected = candidate
+    assert selected is not None
+    return selected
+
+
+def _turn_file_manifest(
+    files: tuple[TurnFile, ...],
+) -> tuple[TurnFileManifestItem, ...]:
+    return tuple(
+        TurnFileManifestItem(
+            path=str(turn_file.resolved_path),
+            label=turn_file.display_path,
+        )
+        for turn_file in files
+    )
+
+
+def _turn_progress_manifest(
+    snapshot: _TurnActivitySnapshotLike,
+) -> TurnProgressManifest:
+    state = getattr(snapshot.state, "value", snapshot.state)
+    if state not in {"running", "stopping"}:
+        state = "running"
+    steps = tuple(
+        TurnProgressManifestStep(
+            step=activity_step_display(item.step),
+            status=(
+                getattr(item.status, "value", item.status)
+                if getattr(item.status, "value", item.status)
+                in {"pending", "inProgress", "completed"}
+                else "pending"
+            ),
+        )
+        for item in snapshot.steps[:_TURN_PROGRESS_MAX_STEPS]
+    )
+    return TurnProgressManifest(
+        state=state,
+        steer_count=max(0, snapshot.steer_count),
+        plan_available=bool(snapshot.plan_available),
+        plan_generated=bool(snapshot.plan_generated),
+        plan_may_be_stale=bool(snapshot.plan_may_be_stale),
+        steps=steps,
+    )
+
+
+def _render_turn_progress_card(
+    *,
+    snapshot: _TurnActivitySnapshotLike,
+    final_response: str | None,
+    terminal_status: str | None,
+    collapsed: bool,
+    scope: FeishuScope | None,
+    binding_id: str | None,
+    turn_id: str | None,
+    page: TurnFilePage | None,
+    manifest: tuple[TurnFileManifestItem, ...],
+    progress_manifest: TurnProgressManifest | None,
+) -> OutboundCard:
+    header_title, template, summary = _progress_card_chrome(terminal_status)
+    builder = (
+        new_card()
+        .config(
+            update_multi=True,
+            width_mode="default",
+            summary={"content": summary},
+        )
+        .header(
+            header_title,
+            template=template,
+            icon={"tag": "standard_icon", "token": "todo_colorful"},
+        )
+    )
+    builder.raw(
+        _turn_progress_panel(
+            snapshot,
+            terminal_status=terminal_status,
+            expanded=not collapsed,
+        )
+    )
+    if terminal_status is not None:
+        builder.raw(
+            _turn_answer_block(
+                final_response or _default_terminal_response(terminal_status)
+            )
+        )
+        if page is not None:
+            assert scope is not None and binding_id is not None and turn_id is not None
+            builder.raw(
+                _turn_files_block(
+                    scope=scope,
+                    binding_id=binding_id,
+                    turn_id=turn_id,
+                    page=page,
+                    manifest=manifest,
+                    final_response=(
+                        final_response or _default_terminal_response(terminal_status)
+                    ),
+                    progress=progress_manifest,
+                )
+            )
+    card = builder.to_dict()
+    body = card.get("body")
+    if isinstance(body, dict):
+        body.update(
+            {
+                "direction": "vertical",
+                "padding": "12px 12px 20px 12px",
+                "vertical_spacing": "12px",
+            }
+        )
+    _validate_turn_card_size(
+        card,
+        label="进度卡片",
+        untruncated="卡片内容",
+    )
+    return OutboundCard(card=card)
+
+
+def _terminal_progress_status(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = getattr(value, "value", value)
+    if normalized not in {"completed", "interrupted", "failed"}:
+        raise ValueError(f"unsupported terminal progress status: {normalized!r}")
+    return normalized
+
+
+def _progress_card_chrome(status: str | None) -> tuple[str, str, str]:
+    if status == "completed":
+        return "任务已完成", "green", "任务已完成"
+    if status == "interrupted":
+        return "任务已中断", "orange", "任务已中断"
+    if status == "failed":
+        return "任务未完成", "red", "任务未完成"
+    return "任务进行中", "blue", "任务正在执行，进度会逐步更新"
+
+
+def _default_terminal_response(status: str) -> str:
+    if status == "completed":
+        return "任务已结束，未产生文本回复。"
+    if status == "interrupted":
+        return "Codex Turn 已中断。"
+    return "任务未完成。"
+
+
+def _turn_progress_panel(
+    snapshot: _TurnActivitySnapshotLike,
+    *,
+    terminal_status: str | None,
+    expanded: bool,
+) -> dict[str, Any]:
+    status_label = _progress_status_label(snapshot, terminal_status)
+    return {
+        "tag": "collapsible_panel",
+        "element_id": _TURN_PROGRESS_ELEMENT_ID,
+        "expanded": expanded,
+        "border": {"color": "grey", "corner_radius": "8px"},
+        "padding": "8px 12px 12px 12px",
+        "vertical_spacing": "8px",
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": f"执行过程 · {status_label}",
+            },
+            "vertical_align": "center",
+            "padding": "4px 0",
+            "icon": {
+                "tag": "standard_icon",
+                "token": "down-small-ccm_outlined",
+                "size": "16px 16px",
+            },
+            "icon_position": "right",
+            "icon_expanded_angle": -180,
+        },
+        "elements": _turn_activity_elements(snapshot, status_label=status_label),
+    }
+
+
+def _progress_status_label(
+    snapshot: _TurnActivitySnapshotLike,
+    terminal_status: str | None,
+) -> str:
+    if terminal_status == "completed":
+        return "已完成"
+    if terminal_status == "interrupted":
+        return "已中断"
+    if terminal_status == "failed":
+        return "未完成"
+    state = getattr(snapshot.state, "value", snapshot.state)
+    if state == "stopping":
+        return "正在停止"
+    return "正在执行"
+
+
+def _turn_activity_elements(
+    snapshot: _TurnActivitySnapshotLike,
+    *,
+    status_label: str,
+) -> list[dict[str, Any]]:
+    elements = [_plain(f"状态：{status_label}")]
+    if snapshot.steer_count:
+        elements.append(_plain(f"已接收调整：{snapshot.steer_count} 次"))
+    if not snapshot.plan_available:
+        elements.append(_plain("任务清单：暂不可用"))
+        return elements
+    if not snapshot.plan_generated:
+        suffix = (
+            "（最近一次调整后仍在等待更新）"
+            if snapshot.plan_may_be_stale
+            else ""
+        )
+        elements.append(_plain(f"任务清单：Codex 尚未生成{suffix}"))
+        return elements
+
+    title = "任务清单"
+    if snapshot.plan_may_be_stale:
+        title += "（可能尚未反映最近一次调整）"
+    elements.append(_plain(title))
+    visible = snapshot.steps[:_TURN_PROGRESS_MAX_STEPS]
+    if not visible:
+        elements.append(_plain("（当前为空）"))
+    icons = {"completed": "✓", "inProgress": "→", "pending": "○"}
+    for item in visible:
+        status = getattr(item.status, "value", item.status)
+        elements.append(
+            _plain(
+                f"{icons.get(status, '○')} "
+                f"{activity_step_display(item.step)}"
+            )
+        )
+    remaining = len(snapshot.steps) - len(visible)
+    if remaining > 0:
+        elements.append(_plain(f"… 另有 {remaining} 项未展示"))
+    return elements
+
+
+def activity_step_display(value: str) -> str:
+    """Return bounded display text with conservative credential redaction."""
+
+    normalized = " ".join(
+        "".join(character if character.isprintable() else "�" for character in value)
+        .split()
+    )
+    if not normalized:
+        return "未命名步骤"
+    # A secret assignment can be quoted or contain arbitrary whitespace, so
+    # token-level replacement is not a safe boundary. Hide the whole model-
+    # generated step instead of guessing where the credential ends.
+    if (
+        _PROGRESS_SECRET_ASSIGNMENT.search(normalized)
+        or _PROGRESS_BEARER_TOKEN.search(normalized)
+        or _PROGRESS_PEM.search(normalized)
+        or _PROGRESS_URL_CREDENTIAL.search(normalized)
+    ):
+        return "[敏感内容已隐藏]"
+    redacted = normalized
+    redacted = _PROGRESS_KNOWN_TOKEN.sub("[敏感内容已隐藏]", redacted)
+    redacted = _PROGRESS_LONG_TOKEN.sub("[敏感内容已隐藏]", redacted)
+    redacted = _PROGRESS_EMAIL.sub("[敏感内容已隐藏]", redacted)
+    redacted = _PROGRESS_HOME_PATH.sub("[路径已隐藏]", redacted)
+    redacted = _PROGRESS_INLINE_CODE.sub("[代码或参数已隐藏]", redacted)
+    redacted = _PROGRESS_ELAPSED.sub("[时间信息已隐藏]", redacted)
+    redacted = _PROGRESS_PERCENT.sub("[百分比已隐藏]", redacted)
+    redacted = _PROGRESS_ETA.sub("[时间估算已隐藏]", redacted)
+    redacted = " ".join(redacted.split()) or "内容已隐藏"
+    if len(redacted) > _TURN_PROGRESS_STEP_MAX_CHARS:
+        return redacted[: _TURN_PROGRESS_STEP_MAX_CHARS - 1].rstrip() + "…"
+    return redacted
 
 
 def _render_and_validate_turn_file_pages(
@@ -213,6 +609,43 @@ def turn_files_card_from_manifest(
     )
 
 
+def turn_progress_card_from_manifest(
+    *,
+    scope: FeishuScope,
+    binding_id: str,
+    turn_id: str,
+    final_response: str,
+    manifest: tuple[TurnFileManifestItem, ...],
+    progress: TurnProgressManifest,
+    page: int,
+) -> OutboundCard:
+    """Rebuild a completed progress card from its self-contained callback."""
+
+    if not manifest:
+        raise CardActionError("本轮文件清单为空，请重新执行任务。")
+    if len(manifest) > TURN_FILE_MANIFEST_LIMIT:
+        raise TurnFileCardLimitError(
+            f"本轮文件共 {len(manifest)} 个，超过卡片完整分页上限 "
+            f"{TURN_FILE_MANIFEST_LIMIT} 个；未截断文件清单。"
+        )
+    files = tuple(
+        inspect_turn_file_path(entry.path, entry.label) for entry in manifest
+    )
+    visible = paginate_turn_files(files, page)
+    return _render_turn_progress_card(
+        snapshot=progress,
+        final_response=final_response,
+        terminal_status="completed",
+        collapsed=True,
+        scope=scope,
+        binding_id=binding_id,
+        turn_id=turn_id,
+        page=visible,
+        manifest=manifest,
+        progress_manifest=progress,
+    )
+
+
 def _render_turn_files_card(
     *,
     scope: FeishuScope,
@@ -263,16 +696,29 @@ def _render_turn_files_card(
                 "vertical_spacing": "12px",
             }
         )
+    _validate_turn_card_size(
+        card,
+        label="本轮文件卡片",
+        untruncated="文件清单",
+    )
+    return OutboundCard(card=card)
+
+
+def _validate_turn_card_size(
+    card: Mapping[str, Any],
+    *,
+    label: str,
+    untruncated: str,
+) -> None:
     # Match the Channel SDK's actual outbound Card serialization rather than
     # undercounting with compact separators.
     encoded_size = len(json.dumps(card, ensure_ascii=False).encode("utf-8"))
     if encoded_size > TURN_FILE_CARD_JSON_LIMIT_BYTES:
         raise TurnFileCardLimitError(
-            "本轮文件卡片编码后为 "
-            f"{encoded_size} bytes，超过已验证的平台安全上限 "
-            f"{TURN_FILE_CARD_JSON_LIMIT_BYTES} bytes；未截断文件清单。"
+            f"{label}编码后为 {encoded_size} bytes，"
+            "超过已验证的平台安全上限 "
+            f"{TURN_FILE_CARD_JSON_LIMIT_BYTES} bytes；未截断{untruncated}。"
         )
-    return OutboundCard(card=card)
 
 
 def is_turn_file_action(value: Any) -> bool:
@@ -321,12 +767,15 @@ def decode_turn_file_action(
         "turn_id",
     }
     scope_fields = {"topic_id"} if scope_kind is ScopeKind.TOPIC else set()
-    action_fields = (
-        {"page", "files", "answer"}
-        if name is TurnFileActionName.PAGE
-        else {"path"}
-    )
-    if set(payload) != common | scope_fields | action_fields:
+    action_fields = {"path"}
+    allowed_action_fields = (action_fields,)
+    if name is TurnFileActionName.PAGE:
+        action_fields = {"page", "files", "answer"}
+        allowed_action_fields = (action_fields, action_fields | {"progress"})
+    if not any(
+        set(payload) == common | scope_fields | fields
+        for fields in allowed_action_fields
+    ):
         raise CardActionError("本轮文件动作字段不完整或包含未知字段。")
     if payload["chat_id"] != callback_chat_id:
         raise CardActionError("本轮文件卡片与当前聊天不一致。")
@@ -346,6 +795,7 @@ def decode_turn_file_action(
     path = None
     files: tuple[TurnFileManifestItem, ...] = ()
     answer = None
+    progress = None
     if name is TurnFileActionName.PAGE:
         raw_page = payload["page"]
         if (
@@ -359,6 +809,8 @@ def decode_turn_file_action(
         answer = _required_string(payload["answer"], "answer")
         if len(answer) > 100_000 or "\x00" in answer:
             raise CardActionError("本轮文件卡片回答内容无效。")
+        if "progress" in payload:
+            progress = _decode_turn_progress_manifest(payload["progress"])
     else:
         path = _decode_turn_file_path(payload["path"])
     return TurnFileActionIntent(
@@ -372,6 +824,7 @@ def decode_turn_file_action(
         path=path,
         files=files,
         answer=answer,
+        progress=progress,
     )
 
 
@@ -398,6 +851,71 @@ def _decode_turn_file_manifest(value: Any) -> tuple[TurnFileManifestItem, ...]:
         seen.add(path)
         results.append(TurnFileManifestItem(path=path, label=label))
     return tuple(results)
+
+
+def _decode_turn_progress_manifest(value: Any) -> TurnProgressManifest:
+    if not isinstance(value, Mapping):
+        raise CardActionError("进度卡过程字段无效。")
+    payload = dict(value)
+    expected = {
+        "state",
+        "steer_count",
+        "plan_available",
+        "plan_generated",
+        "plan_may_be_stale",
+        "steps",
+    }
+    if set(payload) != expected:
+        raise CardActionError("进度卡过程字段不完整或包含未知字段。")
+    state = _required_string(payload["state"], "progress.state")
+    if state not in {"running", "stopping"}:
+        raise CardActionError("进度卡过程状态无效。")
+    steer_count = payload["steer_count"]
+    if (
+        isinstance(steer_count, bool)
+        or not isinstance(steer_count, int)
+        or not 0 <= steer_count <= 1_000_000
+    ):
+        raise CardActionError("进度卡调整次数无效。")
+    flags: dict[str, bool] = {}
+    for field in (
+        "plan_available",
+        "plan_generated",
+        "plan_may_be_stale",
+    ):
+        raw = payload[field]
+        if type(raw) is not bool:
+            raise CardActionError("进度卡计划状态无效。")
+        flags[field] = raw
+    raw_steps = payload["steps"]
+    if not isinstance(raw_steps, list) or len(raw_steps) > _TURN_PROGRESS_MAX_STEPS:
+        raise CardActionError("进度卡计划步骤无效。")
+    steps: list[TurnProgressManifestStep] = []
+    for raw in raw_steps:
+        if not isinstance(raw, Mapping) or set(raw) != {"step", "status"}:
+            raise CardActionError("进度卡计划步骤字段无效。")
+        step = _required_string(raw["step"], "progress.step")
+        if len(step) > _TURN_PROGRESS_STEP_MAX_CHARS or "\x00" in step:
+            raise CardActionError("进度卡计划步骤内容无效。")
+        status = _required_string(raw["status"], "progress.status")
+        if status not in {"pending", "inProgress", "completed"}:
+            raise CardActionError("进度卡计划步骤状态无效。")
+        steps.append(
+            TurnProgressManifestStep(
+                step=activity_step_display(step),
+                status=status,
+            )
+        )
+    if not flags["plan_generated"] and steps:
+        raise CardActionError("未生成计划的进度卡不能携带步骤。")
+    return TurnProgressManifest(
+        state=state,
+        steer_count=steer_count,
+        plan_available=flags["plan_available"],
+        plan_generated=flags["plan_generated"],
+        plan_may_be_stale=flags["plan_may_be_stale"],
+        steps=tuple(steps),
+    )
 
 
 def _decode_turn_file_path(value: Any) -> str:
@@ -612,6 +1130,7 @@ def _new_binding_form(
     *,
     allow_context_mode: bool,
     message_context_mode: MentionContextMode,
+    task_feedback: BindingTaskFeedback,
 ) -> dict[str, Any]:
     elements = [
         _form_label("Project"),
@@ -656,12 +1175,15 @@ def _new_binding_form(
                 initial_mode=message_context_mode,
             )
         )
+    elements.extend(
+        _task_feedback_form_elements(prefix="new", initial=task_feedback)
+    )
     elements.append(
-        _form_submit_button(name="new_binding_submit_v5", label="新建会话")
+        _form_submit_button(name="new_binding_submit_v6", label="新建会话")
     )
     return {
         "tag": "form",
-        "name": "new_binding_v5",
+        "name": "new_binding_v6",
         "elements": elements,
     }
 
@@ -671,8 +1193,10 @@ def _binding_config_form(
     binding_id: str,
     settings_revision: int,
     context_revision: int,
+    feedback_revision: int,
     turn_settings: BindingTurnSettings | None,
     message_context_mode: MentionContextMode,
+    task_feedback: BindingTaskFeedback,
     allow_context_mode: bool,
     catalog: ModelCatalog | None,
 ) -> dict[str, Any]:
@@ -681,6 +1205,7 @@ def _binding_config_form(
             binding_id=binding_id,
             settings_revision=settings_revision,
             context_revision=context_revision,
+            feedback_revision=feedback_revision,
             model_id=model_id,
         )
 
@@ -714,15 +1239,18 @@ def _binding_config_form(
                 initial_mode=message_context_mode,
             )
         )
+    elements.extend(
+        _task_feedback_form_elements(prefix="config", initial=task_feedback)
+    )
     elements.append(
         _form_submit_button(
-            name="binding_config_submit_v5",
+            name="binding_config_submit_v6",
             label="保存会话配置",
         )
     )
     return {
         "tag": "form",
-        "name": "binding_config_v5",
+        "name": "binding_config_v6",
         "elements": elements,
     }
 
@@ -832,6 +1360,47 @@ def _context_mode_form_elements(
     ]
 
 
+def _task_feedback_form_elements(
+    *,
+    prefix: str,
+    initial: BindingTaskFeedback,
+) -> list[dict[str, Any]]:
+    return [
+        _form_label("任务表情"),
+        _static_select(
+            name=f"{prefix}_task_reactions",
+            placeholder="选择是否使用任务表情",
+            options=(
+                ("关闭（默认）", _task_feedback_reference(False)),
+                ("开启", _task_feedback_reference(True)),
+            ),
+            initial_option=_task_feedback_reference(
+                initial.task_reactions_enabled
+            ),
+        ),
+        _form_hint(
+            "开启后会用表情反馈接收、运行和终态；"
+            "部分移动端会把表情显示成单独消息。"
+        ),
+        _form_label("进度卡"),
+        _static_select(
+            name=f"{prefix}_progress_card",
+            placeholder="选择是否使用进度卡",
+            options=(
+                ("关闭（默认）", _task_feedback_reference(False)),
+                ("开启", _task_feedback_reference(True)),
+            ),
+            initial_option=_task_feedback_reference(
+                initial.progress_card_enabled
+            ),
+        ),
+        _form_hint(
+            "开启后会逐步更新任务状态与清单；"
+            "完成后执行过程自动折叠。"
+        ),
+    ]
+
+
 def _form_label(label: str) -> dict[str, Any]:
     return {"tag": "div", "text": _plain_text(label)}
 
@@ -882,6 +1451,7 @@ def new_binding_card(
     catalog_error: str | None = None,
     allow_context_mode: bool = True,
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
+    task_feedback: BindingTaskFeedback | None = None,
 ) -> OutboundCard:
     builder = _builder("新建会话", "选择 Project 与会话配置")
     builder.markdown(
@@ -905,6 +1475,7 @@ def new_binding_card(
                 catalog,
                 allow_context_mode=allow_context_mode,
                 message_context_mode=message_context_mode,
+                task_feedback=task_feedback or BindingTaskFeedback(),
             )
         )
     return OutboundCard(card=builder.to_dict())
@@ -920,7 +1491,9 @@ def config_card(
     turn_settings: BindingTurnSettings | None,
     catalog: ModelCatalog | None,
     context_revision: int = 1,
+    feedback_revision: int = 1,
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
+    task_feedback: BindingTaskFeedback | None = None,
     allow_context_mode: bool = True,
     catalog_error: str | None = None,
 ) -> OutboundCard:
@@ -957,8 +1530,10 @@ def config_card(
             binding_id=binding_id,
             settings_revision=settings_revision,
             context_revision=context_revision,
+            feedback_revision=feedback_revision,
             turn_settings=turn_settings,
             message_context_mode=message_context_mode,
+            task_feedback=task_feedback or BindingTaskFeedback(),
             allow_context_mode=allow_context_mode,
             catalog=catalog,
         )
@@ -1576,6 +2151,7 @@ def binding_created_card(
     project_alias: str,
     settings: TurnModelSettings | None = None,
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
+    task_feedback: BindingTaskFeedback | None = None,
 ) -> OutboundCard:
     builder = _builder(
         "Project 选择成功",
@@ -1591,6 +2167,9 @@ def binding_created_card(
     )
     builder.markdown(_model_source_summary(settings))
     builder.markdown(_context_mode_summary(message_context_mode))
+    builder.markdown(
+        _task_feedback_summary(task_feedback or BindingTaskFeedback())
+    )
     return OutboundCard(card=builder.to_dict())
 
 
@@ -1600,6 +2179,7 @@ def binding_configured_card(
     project_alias: str,
     settings: TurnModelSettings | None,
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
+    task_feedback: BindingTaskFeedback | None = None,
 ) -> OutboundCard:
     builder = _builder(
         "会话配置已保存",
@@ -1608,6 +2188,9 @@ def binding_configured_card(
     )
     builder.markdown(_model_source_summary(settings))
     builder.markdown(_context_mode_summary(message_context_mode))
+    builder.markdown(
+        _task_feedback_summary(task_feedback or BindingTaskFeedback())
+    )
     return OutboundCard(card=builder.to_dict())
 
 
@@ -1630,6 +2213,12 @@ def _context_mode_summary(mode: MentionContextMode) -> str:
             "也会在下一次 @ 时作为背景交给 Codex。"
         )
     return "@ 时读取的消息范围：仅这条 @ 消息。"
+
+
+def _task_feedback_summary(feedback: BindingTaskFeedback) -> str:
+    reactions = "开启" if feedback.task_reactions_enabled else "关闭"
+    progress = "开启" if feedback.progress_card_enabled else "关闭"
+    return f"任务表情：{reactions}\n进度卡：{progress}"
 
 
 def error_card(message: str, *, scope: FeishuScope | None = None) -> OutboundCard:
@@ -1880,7 +2469,12 @@ def _decode_new_binding_form(
     if tag != "button" or not message_id or not sender_id:
         raise CardActionError("会话配置表单回调不完整。")
     payload = dict(form_value)
-    base_fields = {"new_project", "new_model"}
+    base_fields = {
+        "new_project",
+        "new_model",
+        "new_task_reactions",
+        "new_progress_card",
+    }
     context_fields = (
         {"new_context_mode"} if "new_context_mode" in payload else set()
     )
@@ -1905,6 +2499,14 @@ def _decode_new_binding_form(
             ),
             "new_context_mode",
         )
+    )
+    task_reactions_enabled = _decode_task_feedback_reference(
+        payload["new_task_reactions"],
+        "new_task_reactions",
+    )
+    progress_card_enabled = _decode_task_feedback_reference(
+        payload["new_progress_card"],
+        "new_progress_card",
     )
     effort_id = None
     service_tier_id = None
@@ -1949,6 +2551,8 @@ def _decode_new_binding_form(
         effort_id=effort_id,
         service_tier_id=service_tier_id,
         message_context_mode=message_context_mode,
+        task_reactions_enabled=task_reactions_enabled,
+        progress_card_enabled=progress_card_enabled,
     )
 
 
@@ -1963,7 +2567,11 @@ def _decode_config_form(
     if tag != "button" or not message_id or not sender_id:
         raise CardActionError("会话配置表单回调不完整。")
     payload = dict(form_value)
-    base_fields = {"config_model"}
+    base_fields = {
+        "config_model",
+        "config_task_reactions",
+        "config_progress_card",
+    }
     context_fields = (
         {"config_context_mode"} if "config_context_mode" in payload else set()
     )
@@ -1977,6 +2585,7 @@ def _decode_config_form(
         binding_id,
         expected_settings_revision,
         expected_context_revision,
+        feedback_revision,
         model_id,
     ) = _decode_config_model_reference(
         _required_string(payload["config_model"], "config_model")
@@ -1989,6 +2598,14 @@ def _decode_config_form(
             ),
             "config_context_mode",
         )
+    )
+    task_reactions_enabled = _decode_task_feedback_reference(
+        payload["config_task_reactions"],
+        "config_task_reactions",
+    )
+    progress_card_enabled = _decode_task_feedback_reference(
+        payload["config_progress_card"],
+        "config_progress_card",
     )
     effort_id = None
     service_tier_id = None
@@ -2027,11 +2644,14 @@ def _decode_config_form(
         name=CardControlName.CONFIGURE_BINDING,
         expected_settings_revision=expected_settings_revision,
         expected_context_revision=expected_context_revision,
+        feedback_revision=feedback_revision,
         binding_id=binding_id,
         model_id=model_id,
         effort_id=effort_id,
         service_tier_id=service_tier_id,
         message_context_mode=message_context_mode,
+        task_reactions_enabled=task_reactions_enabled,
+        progress_card_enabled=progress_card_enabled,
     )
 
 
@@ -2364,12 +2984,13 @@ def _config_model_reference(
     binding_id: str,
     settings_revision: int,
     context_revision: int,
+    feedback_revision: int,
     model_id: str | None,
 ) -> str:
     choice = _encode_model_choice(model_id)
     value = (
-        f"config-model:v3:{binding_id}:{settings_revision}:"
-        f"{context_revision}:{choice}"
+        f"config-model:v4:{binding_id}:{settings_revision}:"
+        f"{context_revision}:{feedback_revision}:{choice}"
     )
     if _CONFIG_MODEL_REFERENCE.fullmatch(value) is None:
         raise ValueError("invalid Binding model settings reference")
@@ -2378,16 +2999,22 @@ def _config_model_reference(
 
 def _decode_config_model_reference(
     value: str,
-) -> tuple[str, int, int, str | None]:
+) -> tuple[str, int, int, int, str | None]:
     match = _CONFIG_MODEL_REFERENCE.fullmatch(value)
     if match is None:
         raise CardActionError("会话配置卡片已过期，请重新发送 /config。")
     model_id = _decode_model_choice(
-        match.group(4),
         match.group(5),
+        match.group(6),
         command="/config",
     )
-    return match.group(1), int(match.group(2)), int(match.group(3)), model_id
+    return (
+        match.group(1),
+        int(match.group(2)),
+        int(match.group(3)),
+        int(match.group(4)),
+        model_id,
+    )
 
 
 def _encode_model_choice(model_id: str | None) -> str:
@@ -2459,6 +3086,17 @@ def _decode_context_mode_reference(value: str) -> MentionContextMode:
     return MentionContextMode(match.group(1))
 
 
+def _task_feedback_reference(enabled: bool) -> str:
+    return f"task-feedback:v1:{'on' if enabled else 'off'}"
+
+
+def _decode_task_feedback_reference(value: Any, field: str) -> bool:
+    match = _TASK_FEEDBACK_REFERENCE.fullmatch(_required_string(value, field))
+    if match is None:
+        raise CardActionError("任务反馈选择已过期，请重新打开卡片。")
+    return match.group(1) == "on"
+
+
 def _builder(title: str, subtitle: str, *, template: str = "blue"):
     return (
         new_card()
@@ -2496,6 +3134,7 @@ def _turn_files_block(
     page: TurnFilePage,
     manifest: tuple[TurnFileManifestItem, ...],
     final_response: str,
+    progress: TurnProgressManifest | None = None,
 ) -> dict[str, Any]:
     elements: list[dict[str, Any]] = [
         {
@@ -2526,6 +3165,7 @@ def _turn_files_block(
                 total_pages=page.total_pages,
                 manifest=manifest,
                 final_response=final_response,
+                progress=progress,
             )
         )
     return {
@@ -2637,6 +3277,7 @@ def _turn_file_pagination(
     total_pages: int,
     manifest: tuple[TurnFileManifestItem, ...],
     final_response: str,
+    progress: TurnProgressManifest | None,
 ) -> dict[str, Any]:
     columns: list[dict[str, Any]] = [
         {
@@ -2654,6 +3295,18 @@ def _turn_file_pagination(
     ]
     target = 0 if page + 1 >= total_pages else page + 1
     label = "回到第一页" if target == 0 else "下一页"
+    page_value: dict[str, Any] = {
+        "binding_id": _binding_reference(binding_id),
+        "turn_id": _turn_reference(turn_id),
+        "page": target,
+        "files": [
+            {"path": item.path, "label": item.label}
+            for item in manifest
+        ],
+        "answer": final_response,
+    }
+    if progress is not None:
+        page_value["progress"] = _encode_turn_progress_manifest(progress)
     columns.append(
         {
             "tag": "column",
@@ -2664,14 +3317,7 @@ def _turn_file_pagination(
                     value=_turn_file_envelope(
                         scope,
                         TurnFileActionName.PAGE,
-                        binding_id=_binding_reference(binding_id),
-                        turn_id=_turn_reference(turn_id),
-                        page=target,
-                        files=[
-                            {"path": item.path, "label": item.label}
-                            for item in manifest
-                        ],
-                        answer=final_response,
+                        **page_value,
                     ),
                 )
             ],
@@ -2695,6 +3341,22 @@ def _turn_file_envelope(
     if scope.kind is ScopeKind.TOPIC:
         value["topic_id"] = scope.topic_id
     return value
+
+
+def _encode_turn_progress_manifest(
+    progress: TurnProgressManifest,
+) -> dict[str, Any]:
+    return {
+        "state": progress.state,
+        "steer_count": progress.steer_count,
+        "plan_available": progress.plan_available,
+        "plan_generated": progress.plan_generated,
+        "plan_may_be_stale": progress.plan_may_be_stale,
+        "steps": [
+            {"step": item.step, "status": item.status}
+            for item in progress.steps
+        ],
+    }
 
 
 def _turn_file_label(value: str) -> str:

@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -15,9 +15,11 @@ from lark_channel import MediaSource, OutboundCard, OutboundFile, OutboundImage,
 from .bindings import (
     AmbiguousBinding,
     BindingContextRevisionConflict,
+    BindingFeedbackRevisionConflict,
     BindingNotFound,
     BindingSettingsRevisionConflict,
     BindingStore,
+    BindingTaskFeedback,
     BindingTurnSettings,
     SideTopicConflict,
     SideTopicNotFound,
@@ -34,6 +36,7 @@ from .cards import (
     TurnFileCardLimitError,
     archive_binding_card,
     archived_sessions_card,
+    activity_step_display,
     sessions_card,
     binding_configured_card,
     binding_created_card,
@@ -56,6 +59,8 @@ from .cards import (
     side_topic_card,
     turn_files_card,
     turn_files_card_from_manifest,
+    turn_progress_card,
+    turn_progress_card_from_manifest,
 )
 from .codex_runtime import (
     ActiveState,
@@ -101,6 +106,7 @@ from .codex_runtime import (
     ThreadSubscriptionState,
     ThreadStopping,
     TurnProgressSnapshot,
+    TurnActivitySnapshot,
     TurnInterruptFailed,
     TurnStartFailed,
     TurnOutcome,
@@ -216,11 +222,12 @@ _THINKING_REACTION = "THINKING"
 _THINKING_VISIBLE_SECONDS = 2.0
 _THINKING_HIDDEN_SECONDS = 13.0
 _REACTION_OPERATION_TIMEOUT_SECONDS = 3.0
+_PROGRESS_CARD_POLL_SECONDS = 1.0
+_PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS = 5.0
 _SESSION_TITLE_MAX_CHARS = 48
 _STATUS_THREAD_NAME_MAX_CHARS = 120
 _STATUS_THREAD_PREVIEW_MAX_CHARS = 240
 _STATUS_PLAN_MAX_STEPS = 12
-_STATUS_PLAN_STEP_MAX_CHARS = 160
 _SIDE_ROOT_UUID_PREFIX = "side-root-"
 _SIDE_SEED_UUID_PREFIX = "side-seed-"
 _SIDE_INITIAL_QUESTION_MAX_CHARS = 3000
@@ -405,9 +412,7 @@ def _turn_progress_status_lines(
     if not visible:
         lines.append("（当前为空）")
     for item in visible:
-        normalized = " ".join(item.step.split())
-        if len(normalized) > _STATUS_PLAN_STEP_MAX_CHARS:
-            normalized = normalized[: _STATUS_PLAN_STEP_MAX_CHARS - 1].rstrip() + "…"
+        normalized = activity_step_display(item.step)
         icon = icons.get(item.status.value, "○")
         lines.append(f"{icon} {normalized}")
     remaining = len(progress.steps) - len(visible)
@@ -489,6 +494,283 @@ class _TurnReactionPulse:
     typing_reaction_id: str | None = None
     thinking_reaction_id: str | None = None
     task: asyncio.Task[None] | None = None
+
+
+@dataclass(slots=True)
+class _TurnProgressCardSession:
+    binding_id: str
+    thread_id: str
+    turn_id: str
+    message_id: str
+    stopped: asyncio.Event
+    snapshot: TurnActivitySnapshot
+    failed: bool = False
+    task: asyncio.Task[None] | None = None
+
+
+class _ProgressCardController:
+    """Best-effort in-memory presenter for one exact ordinary Turn."""
+
+    def __init__(
+        self,
+        channel: ReplyChannel,
+        runtime: CodexRuntime,
+        *,
+        poll_seconds: float = _PROGRESS_CARD_POLL_SECONDS,
+        operation_timeout_seconds: float = _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS,
+    ) -> None:
+        if poll_seconds <= 0:
+            raise ValueError("progress card poll interval must be positive")
+        if operation_timeout_seconds <= 0:
+            raise ValueError("progress card operation timeout must be positive")
+        self._channel = channel
+        self._runtime = runtime
+        self._poll_seconds = poll_seconds
+        self._operation_timeout_seconds = operation_timeout_seconds
+        self._sessions: dict[
+            tuple[str, str, str],
+            _TurnProgressCardSession,
+        ] = {}
+        self._closed = False
+
+    async def start(
+        self,
+        *,
+        binding_id: str,
+        thread_id: str,
+        turn_id: str,
+        origin: object,
+    ) -> bool:
+        if self._closed:
+            return False
+        try:
+            snapshot = self._runtime.turn_activity(
+                binding_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                refresh_plan=True,
+            )
+        except Exception:
+            logger.exception(
+                "failed to read initial progress-card activity",
+                extra={"binding_id": binding_id, "turn_id": turn_id},
+            )
+            return False
+        if snapshot is None:
+            logger.error(
+                "failed to start progress card: exact Turn activity unavailable",
+                extra={
+                    "binding_id": binding_id,
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                },
+            )
+            return False
+        try:
+            card = turn_progress_card(snapshot=snapshot)
+            async with asyncio.timeout(self._operation_timeout_seconds):
+                result = await self._channel.reply(origin, card)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "failed to send initial progress card",
+                extra={"binding_id": binding_id, "turn_id": turn_id},
+            )
+            return False
+        message_id = _progress_card_message_id(result)
+        if message_id is None:
+            logger.error(
+                "failed to start progress card: reply message ID unavailable",
+                extra={"binding_id": binding_id, "turn_id": turn_id},
+            )
+            return False
+        key = (binding_id, thread_id, turn_id)
+        previous = self._sessions.pop(key, None)
+        if previous is not None:
+            await self._stop_session(previous)
+        session = _TurnProgressCardSession(
+            binding_id=binding_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            message_id=message_id,
+            stopped=asyncio.Event(),
+            snapshot=snapshot,
+        )
+        self._sessions[key] = session
+        session.task = asyncio.create_task(
+            self._poll(session),
+            name=f"netizen-progress-card-{turn_id}",
+        )
+        return True
+
+    async def finish(
+        self,
+        *,
+        binding_id: str,
+        thread_id: str,
+        turn_id: str,
+        activity: TurnActivitySnapshot | None,
+        render: Callable[[TurnActivitySnapshot], OutboundCard],
+    ) -> bool:
+        session = self._sessions.pop((binding_id, thread_id, turn_id), None)
+        if session is None:
+            return False
+        await self._stop_session(session)
+        if session.failed:
+            return False
+        snapshot = activity or session.snapshot
+        if (
+            snapshot.binding_id != session.binding_id
+            or snapshot.thread_id != session.thread_id
+            or snapshot.turn_id != session.turn_id
+        ):
+            logger.error(
+                "failed to finish progress card: activity identity mismatch",
+                extra={
+                    "binding_id": session.binding_id,
+                    "turn_id": session.turn_id,
+                },
+            )
+            return False
+        try:
+            card = render(snapshot)
+            return await self._update(session, card)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "failed to render terminal progress card",
+                extra={
+                    "binding_id": session.binding_id,
+                    "turn_id": session.turn_id,
+                },
+            )
+            return False
+
+    async def abandon(
+        self,
+        *,
+        binding_id: str,
+        thread_id: str,
+        turn_id: str,
+    ) -> None:
+        session = self._sessions.pop((binding_id, thread_id, turn_id), None)
+        if session is not None:
+            await self._stop_session(session)
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        sessions = tuple(self._sessions.values())
+        self._sessions.clear()
+        await asyncio.gather(
+            *(self._stop_session(session) for session in sessions),
+            return_exceptions=False,
+        )
+
+    async def _poll(self, session: _TurnProgressCardSession) -> None:
+        while not session.stopped.is_set():
+            try:
+                await asyncio.wait_for(
+                    session.stopped.wait(),
+                    timeout=self._poll_seconds,
+                )
+                return
+            except TimeoutError:
+                pass
+            try:
+                snapshot = self._runtime.turn_activity(
+                    session.binding_id,
+                    thread_id=session.thread_id,
+                    turn_id=session.turn_id,
+                    refresh_plan=True,
+                )
+            except Exception:
+                logger.exception(
+                    "failed to refresh running progress card",
+                    extra={
+                        "binding_id": session.binding_id,
+                        "turn_id": session.turn_id,
+                    },
+                )
+                session.failed = True
+                return
+            if snapshot is None:
+                continue
+            if snapshot.revision == session.snapshot.revision:
+                continue
+            session.snapshot = snapshot
+            try:
+                card = turn_progress_card(snapshot=snapshot)
+            except Exception:
+                logger.exception(
+                    "failed to render running progress card",
+                    extra={
+                        "binding_id": session.binding_id,
+                        "turn_id": session.turn_id,
+                    },
+                )
+                session.failed = True
+                return
+            if not await self._update(session, card):
+                session.failed = True
+                return
+
+    async def _update(
+        self,
+        session: _TurnProgressCardSession,
+        card: OutboundCard,
+    ) -> bool:
+        try:
+            async with asyncio.timeout(self._operation_timeout_seconds):
+                result = await self._channel.update_card(
+                    session.message_id,
+                    card.card,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "failed to update progress card",
+                extra={
+                    "binding_id": session.binding_id,
+                    "turn_id": session.turn_id,
+                    "message_id": session.message_id,
+                },
+            )
+            return False
+        if getattr(result, "success", True) is False:
+            logger.error(
+                "failed to update progress card: unsuccessful result",
+                extra={
+                    "binding_id": session.binding_id,
+                    "turn_id": session.turn_id,
+                    "message_id": session.message_id,
+                },
+            )
+            return False
+        return True
+
+    @staticmethod
+    async def _stop_session(session: _TurnProgressCardSession) -> None:
+        session.stopped.set()
+        task = session.task
+        if task is None or task is asyncio.current_task():
+            return
+        try:
+            await task
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "progress card updater failed while stopping",
+                extra={
+                    "binding_id": session.binding_id,
+                    "turn_id": session.turn_id,
+                },
+            )
 
 
 class _ReactionController:
@@ -785,13 +1067,17 @@ class ChannelApplication:
             self._management = management
             self._scope_coordinator = management.scope_coordinator
         self._reactions = _ReactionController(channel)
+        self._progress_cards = _ProgressCardController(channel, runtime)
         runtime.set_completion_handler(self.handle_completion)
 
     async def close(self) -> None:
         try:
-            await self._reactions.close()
+            await self._progress_cards.close()
         finally:
-            await self._management.close()
+            try:
+                await self._reactions.close()
+            finally:
+                await self._management.close()
 
     async def refresh_expired_side_cards(
         self,
@@ -1070,9 +1356,38 @@ class ChannelApplication:
             terminal_reaction = _INTERRUPTED_REACTION
         else:
             terminal_reaction = _ERROR_REACTION
-        await self._reactions.freeze(outcome.turn_id)
-        await self._safe_add_reaction(outcome.origin, terminal_reaction)
-        await self._reactions.stop(outcome.turn_id)
+        reactions_enabled = (
+            not isinstance(outcome, TurnOutcome)
+            or outcome.task_feedback.task_reactions_enabled
+        )
+        if reactions_enabled:
+            await self._reactions.freeze(outcome.turn_id)
+            await self._safe_add_reaction(outcome.origin, terminal_reaction)
+            await self._reactions.stop(outcome.turn_id)
+        if (
+            isinstance(outcome, TurnOutcome)
+            and outcome.task_feedback.progress_card_enabled
+        ):
+            try:
+                progress_delivered = await self._complete_turn_progress_card(outcome)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "terminal progress-card delivery failed",
+                    extra={
+                        "binding_id": outcome.binding_id,
+                        "turn_id": outcome.turn_id,
+                    },
+                )
+                await self._progress_cards.abandon(
+                    binding_id=outcome.binding_id,
+                    thread_id=outcome.thread_id,
+                    turn_id=outcome.turn_id,
+                )
+                progress_delivered = False
+            if progress_delivered:
+                return
         if outcome.error is not None:
             detail = str(outcome.error).strip() or type(outcome.error).__name__
             await self._reply(outcome.origin, f"任务未完成：{detail[:500]}")
@@ -1103,6 +1418,91 @@ class ChannelApplication:
             outcome.final_response or "任务已结束，未产生文本回复。",
         )
 
+    async def _complete_turn_progress_card(self, outcome: TurnOutcome) -> bool:
+        terminal_status = "failed"
+        final_response: str
+        files: tuple[TurnFile, ...] = ()
+        scope: FeishuScope | None = None
+        if outcome.error is not None:
+            detail = str(outcome.error).strip() or type(outcome.error).__name__
+            final_response = f"任务未完成：{detail[:500]}"
+        elif outcome.status == "interrupted":
+            terminal_status = "interrupted"
+            if outcome.background_cleanup_requested:
+                final_response = (
+                    "Codex Turn 已中断；已请求清理该 Thread 中已登记的后台终端。"
+                    "前台工具进程不受此接口保证，可能仍在运行。"
+                )
+            else:
+                final_response = (
+                    "Codex Turn 已被外部中断；本服务未请求清理已登记的后台终端。"
+                    "前台工具进程可能仍在运行。"
+                )
+        elif outcome.status != "completed":
+            detail = outcome.final_response or f"Codex Turn 状态为 {outcome.status!r}。"
+            final_response = f"任务未完成：{detail[:500]}"
+        else:
+            terminal_status = "completed"
+            final_response = outcome.final_response or "任务已结束，未产生文本回复。"
+            if has_turn_file_references(
+                tuple(getattr(outcome.result, "items", ())),
+                turn_diff=outcome.turn_diff,
+            ):
+                try:
+                    scope, files = self._completion_files(outcome)
+                except Exception:
+                    logger.exception(
+                        "failed to prepare terminal progress-card files",
+                        extra={
+                            "binding_id": outcome.binding_id,
+                            "turn_id": outcome.turn_id,
+                        },
+                    )
+                    await self._progress_cards.abandon(
+                        binding_id=outcome.binding_id,
+                        thread_id=outcome.thread_id,
+                        turn_id=outcome.turn_id,
+                    )
+                    return False
+
+        def render(snapshot: TurnActivitySnapshot) -> OutboundCard:
+            return turn_progress_card(
+                snapshot=snapshot,
+                final_response=final_response,
+                files=files,
+                terminal_status=terminal_status,
+                collapsed=True,
+                scope=scope,
+                binding_id=(outcome.binding_id if files else None),
+                turn_id=(outcome.turn_id if files else None),
+            )
+
+        return await self._progress_cards.finish(
+            binding_id=outcome.binding_id,
+            thread_id=outcome.thread_id,
+            turn_id=outcome.turn_id,
+            activity=outcome.activity,
+            render=render,
+        )
+
+    def _completion_files(
+        self,
+        outcome: TurnOutcome,
+    ) -> tuple[FeishuScope, tuple[TurnFile, ...]]:
+        binding = self._bindings.get(outcome.binding_id)
+        scope = self._scope(outcome.origin)
+        if (
+            binding.scope_key != scope.key
+            or binding.native_thread_id != outcome.thread_id
+        ):
+            raise TurnFileError("本轮文件与完成消息的会话身份不一致。")
+        project = self._projects.resolve_for_binding(binding.project_alias)
+        return scope, extract_turn_files(
+            tuple(getattr(outcome.result, "items", ())),
+            project.cwd,
+            turn_diff=outcome.turn_diff,
+        )
+
     async def _complete_turn_with_files(self, outcome: TurnOutcome) -> None:
         final_response = outcome.final_response or "任务已结束，未产生文本回复。"
         items = tuple(getattr(outcome.result, "items", ()))
@@ -1110,25 +1510,13 @@ class ChannelApplication:
             await self._reply(outcome.origin, final_response)
             return
         try:
-            binding = self._bindings.get(outcome.binding_id)
-            scope = self._scope(outcome.origin)
-            if (
-                binding.scope_key != scope.key
-                or binding.native_thread_id != outcome.thread_id
-            ):
-                raise TurnFileError("本轮文件与完成消息的会话身份不一致。")
-            project = self._projects.resolve_for_binding(binding.project_alias)
-            files = extract_turn_files(
-                items,
-                project.cwd,
-                turn_diff=outcome.turn_diff,
-            )
+            scope, files = self._completion_files(outcome)
             if not files:
                 await self._reply(outcome.origin, final_response)
                 return
             card = turn_files_card(
                 scope=scope,
-                binding_id=binding.id,
+                binding_id=outcome.binding_id,
                 turn_id=outcome.turn_id,
                 final_response=(
                     outcome.final_response or _TURN_FILES_WITHOUT_FINAL_RESPONSE
@@ -1299,17 +1687,33 @@ class ChannelApplication:
             submit_kwargs.pop("input", None)
             input_value = None
         if submission.disposition is SubmitDisposition.STEERED:
-            if not await self._safe_add_reaction(message, _STEER_REACTION):
-                await self._reply(message, "已接收调整。")
+            if submission.task_feedback.task_reactions_enabled:
+                if not await self._safe_add_reaction(message, _STEER_REACTION):
+                    await self._reply(message, "已接收调整。")
             return
 
         release = submission.release_receipt_attempt
         assert release is not None
         try:
-            await self._reactions.start(
-                submission.turn_id,
-                _message_id(message),
-            )
+            presenters: list[Awaitable[bool]] = []
+            if submission.task_feedback.task_reactions_enabled:
+                presenters.append(
+                    self._reactions.start(
+                        submission.turn_id,
+                        _message_id(message),
+                    )
+                )
+            if submission.task_feedback.progress_card_enabled:
+                presenters.append(
+                    self._progress_cards.start(
+                        binding_id=submission.binding_id,
+                        thread_id=submission.thread_id,
+                        turn_id=submission.turn_id,
+                        origin=message,
+                    )
+                )
+            if presenters:
+                await asyncio.gather(*presenters)
         finally:
             release()
 
@@ -2645,27 +3049,26 @@ class ChannelApplication:
             ):
                 await self._reply(
                     message,
-                    "当前 Goal 正在执行或状态未完成，不能修改 "
-                    "Model / Effort / Speed；请先暂停 Goal。",
+                    "当前 Goal 正在执行或状态未完成，不能修改会话配置；"
+                    "请先暂停 Goal。",
                 )
                 return
             active = self._runtime.active_turn(binding.id)
             if self._runtime.is_compacting(binding.id):
                 await self._reply(
                     message,
-                    "当前会话正在压缩上下文，完成前不能修改 "
-                    "Model / Effort / Speed。",
+                    "当前会话正在压缩上下文，完成前不能修改会话配置。",
                 )
                 return
             if active is not None:
                 if active.state is ActiveState.STOPPING:
                     notice = (
-                        "当前 Turn 正在停止，不能修改 Model / Effort / Speed；"
+                        "当前 Turn 正在停止，不能修改会话配置；"
                         "若 /stop 曾提示清理失败，请再次发送 /stop 重试。"
                     )
                 else:
                     notice = (
-                        "当前 Turn 正在执行，不能修改 Model / Effort / Speed；"
+                        "当前 Turn 正在执行，不能修改会话配置；"
                         "请等待完成或先发送 /stop。"
                     )
                 await self._reply(
@@ -2695,6 +3098,8 @@ class ChannelApplication:
                     catalog=catalog,
                     context_revision=binding.context_revision,
                     message_context_mode=binding.message_context_mode,
+                    feedback_revision=binding.feedback_revision,
+                    task_feedback=binding.task_feedback,
                     allow_context_mode=(
                         _message_chat_type(message) == "group"
                     ),
@@ -3135,14 +3540,25 @@ class ChannelApplication:
         if intent.name is TurnFileActionName.PAGE:
             assert intent.page is not None
             assert intent.answer is not None
-            card = turn_files_card_from_manifest(
-                scope=intent.scope,
-                binding_id=intent.binding_id,
-                turn_id=intent.turn_id,
-                final_response=intent.answer,
-                manifest=intent.files,
-                page=intent.page,
-            )
+            if intent.progress is None:
+                card = turn_files_card_from_manifest(
+                    scope=intent.scope,
+                    binding_id=intent.binding_id,
+                    turn_id=intent.turn_id,
+                    final_response=intent.answer,
+                    manifest=intent.files,
+                    page=intent.page,
+                )
+            else:
+                card = turn_progress_card_from_manifest(
+                    scope=intent.scope,
+                    binding_id=intent.binding_id,
+                    turn_id=intent.turn_id,
+                    final_response=intent.answer,
+                    manifest=intent.files,
+                    progress=intent.progress,
+                    page=intent.page,
+                )
             updated = await self._safe_update_card(intent.source_id, card)
             if not updated:
                 raise TurnFileError("飞书未确认本轮文件卡片翻页成功。")
@@ -3308,6 +3724,8 @@ class ChannelApplication:
         if intent.name is CardControlName.CREATE_BINDING:
             assert intent.project_alias is not None
             assert intent.expected_revision is not None
+            assert intent.task_reactions_enabled is not None
+            assert intent.progress_card_enabled is not None
             message_context_mode = (
                 intent.message_context_mode or MentionContextMode.CURRENT_ONLY
             )
@@ -3319,12 +3737,17 @@ class ChannelApplication:
                 )
             settings = await self._resolve_card_model_settings(intent)
             turn_settings = _binding_turn_settings(settings)
+            task_feedback = BindingTaskFeedback(
+                task_reactions_enabled=bool(intent.task_reactions_enabled),
+                progress_card_enabled=bool(intent.progress_card_enabled),
+            )
             project, binding = await self._create_binding(
                 scope=intent.scope,
                 sender_id=intent.sender_id,
                 project_alias=intent.project_alias,
                 expected_revision=intent.expected_revision,
                 turn_settings=turn_settings,
+                task_feedback=task_feedback,
                 message_context_mode=message_context_mode,
                 context_anchor=context_anchor,
             )
@@ -3334,6 +3757,7 @@ class ChannelApplication:
                     short_id=binding.short_id,
                     project_alias=project.alias,
                     settings=settings,
+                    task_feedback=binding.task_feedback,
                     message_context_mode=binding.message_context_mode,
                 ),
             )
@@ -3345,6 +3769,8 @@ class ChannelApplication:
                     f"Model 来源：{'继承 Codex' if settings is None else '显式配置'}；"
                     f"@ 时读取的消息范围："
                     f"{context_mode_display(binding.message_context_mode)}。"
+                    f"任务表情：{'开启' if binding.task_feedback.task_reactions_enabled else '关闭'}；"
+                    f"进度卡：{'开启' if binding.task_feedback.progress_card_enabled else '关闭'}。"
                     "现在可以直接发送任务。",
                 )
             return
@@ -3352,8 +3778,15 @@ class ChannelApplication:
             assert intent.binding_id is not None
             assert intent.expected_settings_revision is not None
             assert intent.expected_context_revision is not None
+            assert intent.feedback_revision is not None
             assert intent.message_context_mode is not None
+            assert intent.task_reactions_enabled is not None
+            assert intent.progress_card_enabled is not None
             settings = await self._resolve_card_model_settings(intent)
+            task_feedback = BindingTaskFeedback(
+                task_reactions_enabled=bool(intent.task_reactions_enabled),
+                progress_card_enabled=bool(intent.progress_card_enabled),
+            )
             before = self._bindings.get(intent.binding_id)
             context_anchor = None
             if (
@@ -3372,7 +3805,9 @@ class ChannelApplication:
                     ),
                     expected_settings_revision=intent.expected_settings_revision,
                     expected_context_revision=intent.expected_context_revision,
+                    expected_feedback_revision=intent.feedback_revision,
                     settings=_binding_turn_settings(settings),
+                    task_feedback=task_feedback,
                     message_context_mode=intent.message_context_mode,
                     context_anchor=context_anchor,
                 )
@@ -3387,6 +3822,7 @@ class ChannelApplication:
             except (
                 BindingSettingsRevisionConflict,
                 BindingContextRevisionConflict,
+                BindingFeedbackRevisionConflict,
             ) as error:
                 raise CardActionError(
                     "会话配置已变化，本卡片未执行；请重新发送 /config。"
@@ -3397,6 +3833,7 @@ class ChannelApplication:
                     short_id=binding.short_id,
                     project_alias=binding.project_alias,
                     settings=settings,
+                    task_feedback=binding.task_feedback,
                     message_context_mode=binding.message_context_mode,
                 ),
             )
@@ -3407,6 +3844,8 @@ class ChannelApplication:
                     f"Model 来源：{'继承 Codex' if settings is None else '显式配置'}；"
                     f"@ 时读取的消息范围："
                     f"{context_mode_display(binding.message_context_mode)}。"
+                    f"任务表情：{'开启' if binding.task_feedback.task_reactions_enabled else '关闭'}；"
+                    f"进度卡：{'开启' if binding.task_feedback.progress_card_enabled else '关闭'}。"
                     "会话后续每条新 Turn 都会应用。",
                 )
             return
@@ -4070,6 +4509,7 @@ class ChannelApplication:
         project_alias: str,
         expected_revision: int | None = None,
         turn_settings: BindingTurnSettings | None = None,
+        task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
         message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
         context_anchor: MessageContextAnchor | None = None,
     ):
@@ -4079,6 +4519,7 @@ class ChannelApplication:
             project_alias=project_alias,
             expected_project_revision=expected_revision,
             turn_settings=turn_settings,
+            task_feedback=task_feedback,
             message_context_mode=message_context_mode,
             context_anchor=context_anchor,
         )
@@ -4422,6 +4863,22 @@ def _send_result_error_code(result: object) -> int | None:
 def _nonempty_field(value: object, name: str) -> str | None:
     field = _object_field(value, name)
     return field if isinstance(field, str) and field else None
+
+
+def _progress_card_message_id(result: object) -> str | None:
+    """Return an exact reply ID only when Feishu did not report failure."""
+
+    if getattr(result, "success", True) is False:
+        return None
+    if getattr(result, "chunk_ids", None):
+        return None
+    direct = _nonempty_field(result, "message_id")
+    raw = _object_field(result, "raw")
+    data = _object_field(raw, "data")
+    nested = _nonempty_field(data, "message_id")
+    if direct is not None and nested is not None and direct != nested:
+        return None
+    return direct or nested
 
 
 def _message_chat_type(message: Any) -> str:

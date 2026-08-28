@@ -31,6 +31,7 @@ from netizen import channel_app
 from netizen.bindings import (
     BindingNotFound,
     BindingStore,
+    BindingTaskFeedback,
     BindingTurnSettings,
     SideTopicState,
 )
@@ -67,6 +68,7 @@ from netizen.codex_runtime import (
     ThreadSubscriptionSnapshot,
     ThreadSubscriptionState,
     TurnProgressSnapshot,
+    TurnActivitySnapshot,
     TurnOutcome,
 )
 from netizen.domain import (
@@ -95,6 +97,7 @@ from netizen.turn_plan_observer import (
     TurnPlanStepState,
 )
 PNG = b"\x89PNG\r\n\x1a\nchannel-test"
+REACTIONS_ON = BindingTaskFeedback(task_reactions_enabled=True)
 
 
 class FakeMessage:
@@ -450,6 +453,29 @@ def completed_turn_result(
     )
 
 
+def turn_activity_snapshot(
+    *,
+    binding_id: str,
+    revision: int = 1,
+    thread_id: str = "native-one",
+    turn_id: str = "turn-one",
+    state: ActiveState = ActiveState.RUNNING,
+    steps: tuple[TurnPlanStepSnapshot, ...] = (),
+) -> TurnActivitySnapshot:
+    return TurnActivitySnapshot(
+        binding_id=binding_id,
+        thread_id=thread_id,
+        turn_id=turn_id,
+        revision=revision,
+        state=state,
+        steer_count=0,
+        plan_available=True,
+        plan_generated=bool(steps),
+        plan_may_be_stale=False,
+        steps=steps,
+    )
+
+
 class StubRuntime:
     def __init__(self) -> None:
         self.available_capabilities = frozenset()
@@ -509,6 +535,8 @@ class StubRuntime:
         self.context_window_usage_values: dict[str, ContextWindowUsage] = {}
         self.context_window_usage_calls: list[str] = []
         self.turn_progress_values: dict[str, TurnProgressSnapshot] = {}
+        self.turn_activity_values: dict[str, TurnActivitySnapshot] = {}
+        self.turn_activity_calls: list[tuple[str, str | None, str | None, bool]] = []
         self.lifecycle_states: dict[str, object] = {}
         self.rename_binding_calls: list[tuple[str, str]] = []
         self.archive_binding_calls: list[str] = []
@@ -596,6 +624,7 @@ class StubRuntime:
             None,
             binding.settings_revision,
             binding.context_revision,
+            binding.feedback_revision,
         )
 
     async def model_catalog(self) -> ModelCatalog:
@@ -635,6 +664,26 @@ class StubRuntime:
 
     def turn_progress(self, binding_id: str) -> TurnProgressSnapshot | None:
         return self.turn_progress_values.get(binding_id)
+
+    def turn_activity(
+        self,
+        binding_id: str,
+        *,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+        refresh_plan: bool = False,
+    ) -> TurnActivitySnapshot | None:
+        self.turn_activity_calls.append(
+            (binding_id, thread_id, turn_id, refresh_plan)
+        )
+        snapshot = self.turn_activity_values.get(binding_id)
+        if snapshot is None:
+            return None
+        if thread_id is not None and snapshot.thread_id != thread_id:
+            return None
+        if turn_id is not None and snapshot.turn_id != turn_id:
+            return None
+        return snapshot
 
     async def thread_is_archived(self, thread_id: str) -> bool:
         return thread_id in self.archived_thread_metadata_values
@@ -802,7 +851,9 @@ class StubRuntime:
         binding_id: str,
         expected_settings_revision: int,
         expected_context_revision: int,
+        expected_feedback_revision: int,
         settings: BindingTurnSettings | None,
+        task_feedback: BindingTaskFeedback,
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
     ):
@@ -811,7 +862,9 @@ class StubRuntime:
                 "binding_id": binding_id,
                 "expected_revision": expected_settings_revision,
                 "expected_context_revision": expected_context_revision,
+                "expected_feedback_revision": expected_feedback_revision,
                 "settings": settings,
+                "task_feedback": task_feedback,
                 "message_context_mode": message_context_mode,
                 "context_anchor": context_anchor,
             }
@@ -821,7 +874,9 @@ class StubRuntime:
             binding_id=binding_id,
             expected_settings_revision=expected_settings_revision,
             expected_context_revision=expected_context_revision,
+            expected_feedback_revision=expected_feedback_revision,
             settings=settings,
+            task_feedback=task_feedback,
             message_context_mode=message_context_mode,
             context_anchor=context_anchor,
         )
@@ -1142,7 +1197,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         form = next(
             item
             for item in _elements(card.card, "form")
-            if item["name"] == "new_binding_v5"
+            if item["name"] == "new_binding_v6"
         )
         fields = {
             item["name"]: item
@@ -1160,6 +1215,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "new_model",
             "new_effort",
             "new_speed",
+            "new_task_reactions",
+            "new_progress_card",
         ):
             if name in fields:
                 values[name] = fields[name]["initial_option"]
@@ -1172,11 +1229,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         effort_id: str | None = None,
         speed_id: str | None = None,
         inherit: bool = False,
+        task_reactions_enabled: bool | None = None,
+        progress_card_enabled: bool | None = None,
     ) -> dict[str, object]:
         form = next(
             item
             for item in _elements(card.card, "form")
-            if item["name"] == "binding_config_v5"
+            if item["name"] == "binding_config_v6"
         )
         fields = {
             item["name"]: item
@@ -1195,6 +1254,23 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 model_value,
             )
         values = {"config_model": model_value}
+        values["config_task_reactions"] = fields["config_task_reactions"][
+            "initial_option"
+        ]
+        values["config_progress_card"] = fields["config_progress_card"][
+            "initial_option"
+        ]
+        for name, enabled in (
+            ("config_task_reactions", task_reactions_enabled),
+            ("config_progress_card", progress_card_enabled),
+        ):
+            if enabled is not None:
+                suffix = ":on" if enabled else ":off"
+                values[name] = next(
+                    option["value"]
+                    for option in fields[name]["options"]
+                    if option["value"].endswith(suffix)
+                )
         if "config_context_mode" in fields:
             values["config_context_mode"] = fields["config_context_mode"][
                 "initial_option"
@@ -1230,6 +1306,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "native-one",
             "turn-one",
             release,
+            task_feedback=REACTIONS_ON,
         )
         prompt = FakeMessage(
             "hello",
@@ -1276,6 +1353,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     final_response="done",
                     status=SimpleNamespace(value="completed"),
                 ),
+                task_feedback=REACTIONS_ON,
             )
         )
 
@@ -1305,6 +1383,468 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertIn(("om_prompt", "done"), self.channel.replies)
+
+    async def test_default_feedback_is_silent_until_plain_completion(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            released = True
+
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            release,
+        )
+        prompt = FakeMessage("hello", message_id="om_silent")
+
+        await self.app.handle_message(prompt)
+
+        self.assertTrue(released)
+        self.assertEqual(self.channel.reactions, [])
+        self.assertEqual(self.channel.replies, [])
+        self.assertEqual(self.runtime.turn_activity_calls, [])
+
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                turn_id="turn-one",
+                owner_id="ou_user",
+                origin=prompt,
+                result=completed_turn_result(final_response="done"),
+            )
+        )
+
+        self.assertEqual(self.channel.reactions, [])
+        self.assertEqual(self.channel.replies, [("om_silent", "done")])
+        self.assertEqual(self.channel.updates, [])
+
+    async def test_progress_card_updates_same_message_and_collapses_at_terminal(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        feedback = BindingTaskFeedback(progress_card_enabled=True)
+        initial = turn_activity_snapshot(binding_id=binding.id)
+        self.runtime.turn_activity_values[binding.id] = initial
+        self.app._progress_cards = channel_app._ProgressCardController(
+            self.channel,
+            self.runtime,  # type: ignore[arg-type]
+            poll_seconds=0.01,
+        )
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            released = True
+
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            release,
+            task_feedback=feedback,
+        )
+        self.channel.reply_results.append(
+            sent_result("om_progress", chat_id="oc_direct")
+        )
+        prompt = FakeMessage("hello", message_id="om_progress_origin")
+
+        await self.app.handle_message(prompt)
+
+        self.assertTrue(released)
+        self.assertEqual(self.channel.reactions, [])
+        self.assertEqual(len(self.channel.replies), 1)
+        running = self.channel.replies[0][1]
+        self.assertIsInstance(running, OutboundCard)
+        assert isinstance(running, OutboundCard)
+        running_panel = next(iter(_elements(running.card, "collapsible_panel")))
+        self.assertTrue(running_panel["expanded"])
+
+        updated = turn_activity_snapshot(
+            binding_id=binding.id,
+            revision=2,
+            steps=(
+                TurnPlanStepSnapshot(
+                    "inspect repository",
+                    TurnPlanStepState.IN_PROGRESS,
+                ),
+            ),
+        )
+        self.runtime.turn_activity_values[binding.id] = updated
+        async with asyncio.timeout(1):
+            while not self.channel.updates:
+                await asyncio.sleep(0.01)
+        self.assertEqual(self.channel.updates[-1][0], "om_progress")
+        self.assertIn("inspect repository", str(self.channel.updates[-1][1]))
+
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                turn_id="turn-one",
+                owner_id="ou_user",
+                origin=prompt,
+                result=completed_turn_result(final_response="done"),
+                task_feedback=feedback,
+                activity=updated,
+            )
+        )
+
+        self.assertEqual(len(self.channel.replies), 1)
+        self.assertEqual(self.channel.updates[-1][0], "om_progress")
+        terminal_panel = next(
+            iter(_elements(self.channel.updates[-1][1], "collapsible_panel"))
+        )
+        self.assertFalse(terminal_panel["expanded"])
+        self.assertIn("done", str(self.channel.updates[-1][1]))
+
+    async def test_initial_progress_card_failure_falls_back_at_terminal(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        feedback = BindingTaskFeedback(progress_card_enabled=True)
+        activity = turn_activity_snapshot(binding_id=binding.id)
+        self.runtime.turn_activity_values[binding.id] = activity
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            released = True
+
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            release,
+            task_feedback=feedback,
+        )
+        self.channel.reply_results.append(RuntimeError("progress send failed"))
+        prompt = FakeMessage("hello", message_id="om_progress_failed")
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_message(prompt)
+        self.assertTrue(released)
+
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                turn_id="turn-one",
+                owner_id="ou_user",
+                origin=prompt,
+                result=completed_turn_result(final_response="answer survives"),
+                task_feedback=feedback,
+                activity=activity,
+            )
+        )
+
+        self.assertEqual(self.channel.replies[-1], (prompt.id, "answer survives"))
+        self.assertEqual(self.channel.updates, [])
+
+    async def test_progress_sessions_are_isolated_by_exact_turn_identity(self) -> None:
+        controller = self.app._progress_cards
+        first = turn_activity_snapshot(
+            binding_id="binding-one",
+            thread_id="thread-one",
+            turn_id="shared-turn",
+        )
+        second = turn_activity_snapshot(
+            binding_id="binding-two",
+            thread_id="thread-two",
+            turn_id="shared-turn",
+        )
+        self.runtime.turn_activity_values.update(
+            {"binding-one": first, "binding-two": second}
+        )
+        self.channel.reply_results.extend(
+            (
+                sent_result("om_progress_one", chat_id="oc_direct"),
+                sent_result("om_progress_two", chat_id="oc_direct"),
+            )
+        )
+
+        self.assertTrue(
+            await controller.start(
+                binding_id=first.binding_id,
+                thread_id=first.thread_id,
+                turn_id=first.turn_id,
+                origin=FakeMessage("one", message_id="om_one"),
+            )
+        )
+        self.assertTrue(
+            await controller.start(
+                binding_id=second.binding_id,
+                thread_id=second.thread_id,
+                turn_id=second.turn_id,
+                origin=FakeMessage("two", message_id="om_two"),
+            )
+        )
+        self.assertEqual(len(controller._sessions), 2)
+
+        delivered = await controller.finish(
+            binding_id=first.binding_id,
+            thread_id=first.thread_id,
+            turn_id=first.turn_id,
+            activity=first,
+            render=lambda snapshot: channel_app.turn_progress_card(
+                snapshot=snapshot,
+                terminal_status="completed",
+                final_response="done",
+            ),
+        )
+
+        self.assertTrue(delivered)
+        self.assertEqual(self.channel.updates[-1][0], "om_progress_one")
+        self.assertEqual(len(controller._sessions), 1)
+        self.assertIn(
+            (second.binding_id, second.thread_id, second.turn_id),
+            controller._sessions,
+        )
+        await controller.abandon(
+            binding_id=second.binding_id,
+            thread_id=second.thread_id,
+            turn_id=second.turn_id,
+        )
+        self.assertEqual(controller._sessions, {})
+
+    async def test_progress_file_page_keeps_collapsed_process_panel(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        feedback = BindingTaskFeedback(progress_card_enabled=True)
+        activity = turn_activity_snapshot(
+            binding_id=binding.id,
+            steps=(
+                TurnPlanStepSnapshot("generate files", TurnPlanStepState.COMPLETED),
+            ),
+        )
+        self.runtime.turn_activity_values[binding.id] = activity
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+            task_feedback=feedback,
+        )
+        self.channel.reply_results.append(
+            sent_result("om_progress", chat_id="oc_direct")
+        )
+        prompt = FakeMessage("hello", message_id="om_progress_origin")
+        await self.app.handle_message(prompt)
+        paths = tuple(f"result-{index:02}.txt" for index in range(10))
+        for path in paths:
+            (self.project / path).write_text(path, encoding="utf-8")
+
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                turn_id="turn-one",
+                owner_id="ou_user",
+                origin=prompt,
+                result=completed_turn_result(
+                    file_change_item(*paths),
+                    final_response="files ready",
+                ),
+                task_feedback=feedback,
+                activity=activity,
+            )
+        )
+
+        terminal = self.channel.updates[-1][1]
+        page_value = next(
+            behavior["value"]
+            for button in _elements(terminal, "button")
+            for behavior in button.get("behaviors", ())
+            if behavior["value"]["intent"] == "turn-file.page"
+        )
+        await self.app.handle_card_action(
+            self.direct_button_event(page_value, message_id="om_progress")
+        )
+
+        paged = self.channel.updates[-1][1]
+        panel = next(iter(_elements(paged, "collapsible_panel")))
+        self.assertFalse(panel["expanded"])
+        self.assertIn("generate files", str(paged))
+        self.assertIn("result-08.txt", str(paged))
+
+    async def test_terminal_progress_update_failure_falls_back_to_plain_answer(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        feedback = BindingTaskFeedback(progress_card_enabled=True)
+        activity = turn_activity_snapshot(binding_id=binding.id)
+        self.runtime.turn_activity_values[binding.id] = activity
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+            task_feedback=feedback,
+        )
+        self.channel.reply_results.append(
+            sent_result("om_progress", chat_id="oc_direct")
+        )
+        prompt = FakeMessage("hello", message_id="om_progress_origin")
+        await self.app.handle_message(prompt)
+        self.channel.fail_card_updates = True
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_completion(
+                TurnOutcome(
+                    binding_id=binding.id,
+                    thread_id="native-one",
+                    turn_id="turn-one",
+                    owner_id="ou_user",
+                    origin=prompt,
+                    result=completed_turn_result(final_response="answer survives"),
+                    task_feedback=feedback,
+                    activity=activity,
+                )
+            )
+
+        self.assertEqual(self.channel.replies[-1], (prompt.id, "answer survives"))
+        self.assertEqual(self.channel.updates[-1][0], "om_progress")
+
+    async def test_intermediate_progress_failure_stops_updates_and_falls_back(
+        self,
+    ) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        feedback = BindingTaskFeedback(progress_card_enabled=True)
+        initial = turn_activity_snapshot(binding_id=binding.id)
+        self.runtime.turn_activity_values[binding.id] = initial
+        self.app._progress_cards = channel_app._ProgressCardController(
+            self.channel,
+            self.runtime,  # type: ignore[arg-type]
+            poll_seconds=0.01,
+        )
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+            task_feedback=feedback,
+        )
+        self.channel.reply_results.append(
+            sent_result("om_progress", chat_id="oc_direct")
+        )
+        prompt = FakeMessage("hello", message_id="om_progress_origin")
+        await self.app.handle_message(prompt)
+        self.channel.fail_card_updates = True
+        updated = turn_activity_snapshot(
+            binding_id=binding.id,
+            revision=2,
+            steps=(
+                TurnPlanStepSnapshot("verify", TurnPlanStepState.IN_PROGRESS),
+            ),
+        )
+        self.runtime.turn_activity_values[binding.id] = updated
+        key = (binding.id, "native-one", "turn-one")
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            async with asyncio.timeout(1):
+                while not self.app._progress_cards._sessions[key].failed:
+                    await asyncio.sleep(0.01)
+        attempts = len(self.channel.updates)
+        await asyncio.sleep(0.03)
+        self.assertEqual(len(self.channel.updates), attempts)
+
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                turn_id="turn-one",
+                owner_id="ou_user",
+                origin=prompt,
+                result=completed_turn_result(final_response="answer survives"),
+                task_feedback=feedback,
+                activity=updated,
+            )
+        )
+
+        self.assertEqual(self.channel.replies[-1], (prompt.id, "answer survives"))
+
+    async def test_reactions_off_steer_has_no_mobile_fallback_message(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STEERED,
+            binding.id,
+            "native-one",
+            "turn-one",
+        )
+
+        await self.app.handle_message(
+            FakeMessage("new direction", message_id="om_silent_steer")
+        )
+
+        self.assertEqual(self.channel.reactions, [])
+        self.assertEqual(self.channel.replies, [])
+
+    async def test_reactions_and_progress_card_can_run_together(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        feedback = BindingTaskFeedback(
+            task_reactions_enabled=True,
+            progress_card_enabled=True,
+        )
+        activity = turn_activity_snapshot(binding_id=binding.id)
+        self.runtime.turn_activity_values[binding.id] = activity
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+            task_feedback=feedback,
+        )
+        self.channel.reply_results.append(
+            sent_result("om_progress", chat_id="oc_direct")
+        )
+        prompt = FakeMessage("hello", message_id="om_both")
+
+        await self.app.handle_message(prompt)
+
+        self.assertIn((prompt.id, "Typing"), self.channel.reactions)
+        self.assertIn((prompt.id, "THINKING"), self.channel.reactions)
+        self.assertIsInstance(self.channel.replies[-1][1], OutboundCard)
+
+        await self.app.handle_completion(
+            TurnOutcome(
+                binding_id=binding.id,
+                thread_id="native-one",
+                turn_id="turn-one",
+                owner_id="ou_user",
+                origin=prompt,
+                result=completed_turn_result(final_response="done"),
+                task_feedback=feedback,
+                activity=activity,
+            )
+        )
+
+        self.assertIn((prompt.id, "DONE"), self.channel.reactions)
+        self.assertEqual(self.channel.updates[-1][0], "om_progress")
+        self.assertNotIn((prompt.id, "done"), self.channel.replies)
 
     async def test_completed_turn_email_audit_rejection_gets_safe_notice(
         self,
@@ -2340,6 +2880,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                         final_response="done",
                         status=SimpleNamespace(value="completed"),
                     ),
+                    task_feedback=REACTIONS_ON,
                 )
             )
 
@@ -2483,13 +3024,17 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "ou_user",
             ActiveState.RUNNING,
         )
+        secret = "correct horse battery staple"
         steps = (
-            TurnPlanStepSnapshot("done", TurnPlanStepState.COMPLETED),
+            TurnPlanStepSnapshot(
+                f'done password: "{secret}"',
+                TurnPlanStepState.COMPLETED,
+            ),
             TurnPlanStepSnapshot("working", TurnPlanStepState.IN_PROGRESS),
             TurnPlanStepSnapshot("later", TurnPlanStepState.PENDING),
             *tuple(
                 TurnPlanStepSnapshot(
-                    ("x" * 200) if index == 0 else f"extra-{index}",
+                    ("x " * 200) if index == 0 else f"extra-{index}",
                     TurnPlanStepState.PENDING,
                 )
                 for index in range(11)
@@ -2512,15 +3057,16 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("任务进展", reply)
         self.assertIn("已接收调整：2 次", reply)
         self.assertIn("任务清单（可能尚未反映最近一次调整）：", reply)
-        self.assertIn("✓ done", reply)
+        self.assertIn("✓ [敏感内容已隐藏]", reply)
+        self.assertNotIn(secret, reply)
         self.assertIn("→ working", reply)
         self.assertIn("○ later", reply)
         self.assertIn("… 另有 2 项未展示", reply)
         checklist_lines = reply.splitlines()
-        long_line = next(line for line in checklist_lines if line.startswith("○ xxx"))
+        long_line = next(line for line in checklist_lines if line.startswith("○ x x"))
         self.assertLessEqual(
             len(long_line),
-            channel_app._STATUS_PLAN_STEP_MAX_CHARS + 2,
+            162,
         )
 
     async def test_status_reports_plan_gate_failure_without_affecting_turn(self) -> None:
@@ -5135,7 +5681,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         picker = self.channel.replies[-1][1]
         self.assertIsInstance(picker, OutboundCard)
         self.assertIn("test ·", str(picker.card))
-        self.assertIn("new_binding_v5", str(picker.card))
+        self.assertIn("new_binding_v6", str(picker.card))
         self.assertNotIn("配置方式", str(picker.card))
         self.assertNotIn("下一条真实任务", str(picker.card))
         scope = FeishuScope(
@@ -5149,7 +5695,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         form = next(
             item
             for item in _elements(picker.card, "form")
-            if item["name"] == "new_binding_v5"
+            if item["name"] == "new_binding_v6"
         )
         fields = {
             item["name"]: item
@@ -5167,6 +5713,12 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 "new_model": fields["new_model"]["initial_option"],
                 "new_effort": fields["new_effort"]["initial_option"],
                 "new_speed": fields["new_speed"]["initial_option"],
+                "new_task_reactions": fields["new_task_reactions"][
+                    "initial_option"
+                ],
+                "new_progress_card": fields["new_progress_card"][
+                    "initial_option"
+                ],
             }
         )
 
@@ -5184,6 +5736,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             binding.turn_settings,
             BindingTurnSettings("future-model", "ultra", "priority-v2"),
         )
+        self.assertEqual(binding.task_feedback, BindingTaskFeedback())
         self.assertEqual(self.runtime.submit_calls, [])
         rendered = str(self.channel.updates[-1][1])
         self.assertIn("Project 选择成功", rendered)
@@ -5214,6 +5767,37 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.runtime.configure_settings_calls), 1)
         self.assertIn("会话配置已保存", str(self.channel.updates[-1][1]))
         self.assertIn("后续新 Turn 将使用", str(self.channel.updates[-1][1]))
+
+    async def test_config_enables_feedback_without_starting_turn(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        await self.app.handle_message(FakeMessage("/config", message_id="om_config"))
+        card = self.channel.replies[-1][1]
+
+        await self.app.handle_card_action(
+            self.direct_card_event(
+                self.config_form_values(
+                    card,
+                    task_reactions_enabled=True,
+                    progress_card_enabled=True,
+                )
+            )
+        )
+
+        configured = self.store.get(binding.id)
+        self.assertEqual(
+            configured.task_feedback,
+            BindingTaskFeedback(
+                task_reactions_enabled=True,
+                progress_card_enabled=True,
+            ),
+        )
+        self.assertEqual(configured.feedback_revision, 2)
+        self.assertEqual(self.runtime.submit_calls, [])
+        rendered = str(self.channel.updates[-1][1])
+        self.assertIn("任务表情：开启", rendered)
+        self.assertIn("进度卡：开启", rendered)
 
     async def test_config_replaces_persistent_settings_without_starting_turn(self) -> None:
         await self.new()
@@ -5661,6 +6245,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "native-one",
             "turn-one",
             release,
+            task_feedback=REACTIONS_ON,
         )
         self.channel.fail_once_reaction_on = "Typing"
 
@@ -5685,6 +6270,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             binding.id,
             "native-one",
             "turn-one",
+            task_feedback=REACTIONS_ON,
         )
 
         await self.app.handle_message(FakeMessage("new direction", message_id="om_steer"))
@@ -5767,6 +6353,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             binding.id,
             "native-one",
             "turn-one",
+            task_feedback=REACTIONS_ON,
         )
         self.assertTrue(
             await self.app._reactions.start("turn-one", "om_original")
@@ -5824,6 +6411,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             binding.id,
             "native-one",
             "turn-one",
+            task_feedback=REACTIONS_ON,
         )
         self.channel.fail_once_reaction_on = "OnIt"
 
@@ -6272,6 +6860,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 final_response="done",
                 status=SimpleNamespace(value="completed"),
             ),
+            task_feedback=REACTIONS_ON,
         )
         await self.app.handle_completion(outcome)
         self.assertIn((origin.id, "done"), self.channel.replies)
@@ -6427,6 +7016,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     final_response=None,
                     status=SimpleNamespace(value="interrupted"),
                 ),
+                task_feedback=REACTIONS_ON,
             )
         )
 
@@ -6456,6 +7046,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     final_response="native failure",
                     status=SimpleNamespace(value="failed"),
                 ),
+                task_feedback=REACTIONS_ON,
             )
         )
 

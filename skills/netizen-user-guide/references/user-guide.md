@@ -7,7 +7,8 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 ## 快速开始
 
 1. 发送 exact `/new`，在卡片的单个下拉框中选择 Project，并选择继承 Codex 或显式
-   Model、Effort 和 Speed；群聊和群话题还可选择 @ 时读取的消息范围。`/new` 不接受参数。
+   Model、Effort 和 Speed；还可按需开启 Task Reaction 和 Progress Card，两项默认关闭。
+   群聊和群话题还可选择 @ 时读取的消息范围。`/new` 不接受参数。
 2. 直接发送任务描述。第一次真实任务才会创建原生 Codex Thread；单独 `/new` 不会产生空白 Turn。
 3. 普通 Turn 运行时继续发送普通消息，会 steer 当前精确 Turn，不会排队成下一轮；
    Goal、停止或压缩状态会拒绝普通消息。
@@ -48,11 +49,22 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 
 ### 飞书中的运行反馈
 
-- 普通任务运行时，原任务消息保留 `Typing`，并低频显示或隐藏 `THINKING`；不会持续发送心跳文字。
-- steer 成功后，steer 消息通常只添加 `OnIt`，原任务消息仍是运行状态锚点。
-- Turn 完成、失败或中断时，先显示相应终态表情，再移除运行态表情，并正常回复最终文本。
-- 普通 Turn 成功完成且报告了当前可用文件时，最终文本和“本轮文件”会合成一张卡片；
-  没有文件以及 Goal、Side、压缩等终态仍保持原回复方式。
+- 每个普通会话有两个独立的任务反馈选项，可在 `/new` 创建时或空闲时通过 `/config`
+  修改；两项默认都关闭。都关闭时，任务被接受后到终态之间不发送任务表情或进度卡，
+  最终结果仍会正常回复。
+- Task Reaction 开启后，普通任务在原任务消息上使用 `Typing` 和低频 `THINKING`；steer
+  成功后在 steer 消息上使用 `OnIt`，原任务消息仍是运行状态锚点。完成、失败或中断时先
+  使用相应终态表情，再清理运行态表情。关闭时也不会发送 `OnIt` 失败的文字确认。
+- Progress Card 开启后，Turn 被接受时回复一张运行卡。顶部过程区在运行中展开，只按
+  当前状态与原生 checklist 的变化更新同一张卡；不显示耗时、完成百分比、ETA、内部
+  reasoning、raw command/tool output 或 tool arguments；计划步骤中的常见 secret/token、
+  邮箱、用户目录和内联代码/参数会被过滤。终态会在同一卡片折叠过程并显示最终回答和
+  可用的本轮文件，文件翻页后仍保留折叠过程。
+- 两项可以只开一个或同时开启。reaction/card 展示失败不会改变 Codex Turn；Progress
+  Card 初始、过程或终态更新失败时，最终结果会回退到原有回复方式。
+- Progress Card 关闭时严格保持原有终态：无文件的普通 Turn 使用富文本/静态文本回复，
+  有文件时最终文本和“本轮文件”合成现有完成卡。首期这两个会话选项不改变 Goal、Side
+  或压缩自己的展示方式。
 
 ## 发送消息、引用与图片
 
@@ -107,8 +119,10 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 ### 查看和发送本轮文件
 
 - 普通 Turn 成功完成后，Codex 的结构化文件修改或图片生成记录若指向当前仍可访问的
-  普通文件，最终回复下方会显示“本轮文件”。这和最终回复是同一张卡片；Project 不是额外的文件权限边界，
-  只作为相对路径的解析基准，不会过滤 exact Turn 明确报告的其他目录文件。
+  普通文件，最终回复下方会显示“本轮文件”。Progress Card 关闭时，它和最终回复组成
+  现有完成卡；Progress Card 开启时，它进入最初的同一张运行卡并随终态折叠。
+  Project 不是额外的文件权限边界，只作为相对路径的解析基准，不会过滤 exact Turn
+  明确报告的其他目录文件。
 - 每页显示 8 个文件、总数和页码；列表不会用 Markdown 表格撑长，也不会静默截断。
   单张卡片最多完整承载 500 个；通过“下一页/回到第一页”循环覆盖全部页面。超过文件数或
   卡片编码容量时会明确提示，不发送残缺清单。
@@ -131,8 +145,9 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 ### 新建与配置 Project
 
 - `/new`：打开唯一的新建卡片。Project 下拉框展示全部 enabled Projects，不由 Netizen
-  截断或分页；Model 可继承 Codex，也可显式选择 Model、Effort 和 Speed。群聊和群话题
-  还可选择 @ 时读取的消息范围。提交后创建并切换 Lazy 会话。
+  截断或分页；Model 可继承 Codex，也可显式选择 Model、Effort 和 Speed。Task Reaction
+  与 Progress Card 可独立选择且默认关闭；群聊和群话题还可选择 @ 时读取的消息范围。
+  提交后创建并切换 Lazy 会话。
 - 任何带参数的 `/new ...` 快捷创建都已下线；请在卡片中选择，包括默认目录 `none`。
 - `/settings`：打开实例设置卡片。当前可在 Projects 分区启用、停用、创建或登记 Project。
 - 停用 Project 只阻止用它创建新会话，已有会话仍可继续；Netizen 不会删除 Project 目录。
@@ -165,14 +180,15 @@ Turn Settings、重命名、归档、恢复或恢复并设为当前、删除 Laz
 - `/resume <短 ID>`：切换到普通会话。已归档会话要先恢复。
 - `/rename [名称]`：重命名当前原生 Thread；省略名称时打开卡片。名称也会显示在 Codex App/CLI。
 - `/release`：显式取消当前 active 普通会话在本 Netizen 连接上的订阅。它保留 Binding、
-  原生 Thread、历史和配置，下一条普通消息仍 resume 同一 native ID。运行中、状态未知或
-  有已登记后台 terminal 时会拒绝；Side 使用 `/side close`。
+  原生 Thread、历史、配置和 Task Feedback，下一条普通消息仍 resume 同一 native ID。
+  运行中、状态未知或有已登记后台 terminal 时会拒绝；Side 使用 `/side close`。
 
 短 ID 只用于当前 Scope 中的会话选择。不能拿另一个聊天或话题里的短 ID 跨 Scope 切换。
 
 ### 归档、恢复和删除
 
-- `/archive`：确认后归档当前空闲的原生 Thread，保留会话配置，并清空当前会话指针；不会自动切换到另一会话。
+- `/archive`：确认后归档当前空闲的原生 Thread，保留会话配置与 Task Feedback，并清空
+  当前会话指针；不会自动切换到另一会话。
 - `/unarchive <短 ID>`：恢复已归档会话并切换到它。
 - `/delete`：Lazy 会话二次确认后只永久删除本地 Binding；已有原生历史的 idle 会话会显示
   更强的红色确认，确认后永久删除原生 Thread、App Server 管理的 spawned descendants、
@@ -184,13 +200,14 @@ Turn Settings、重命名、归档、恢复或恢复并设为当前、删除 Laz
 重命名另一个普通会话，应先 `/resume`；`/sessions` 行内的“归档”和经独立红色确认卡的
 “删除”是明确例外，不需要先切换，也不改变 `/archive`、`/delete` 命令的语义。
 
-## Model、Effort、Speed 与 @ 时读取的消息范围
+## Model、Effort、Speed、Task Feedback 与 @ 时读取的消息范围
 
 - `/new` 卡片可以为新会话选择继承 Codex 或显式 Model、Effort 和 Speed；群聊和群话题
-  还可选择 @ 时读取的消息范围。
-- `/config` 原子修改当前会话后续新 Turn 的三项设置和群聊 @ 时读取的消息范围。它不
-  创建 Turn，也不能直接配置另一个会话；应先 `/resume`。
+  还可选择 @ 时读取的消息范围；Task Reaction 与 Progress Card 默认关闭、可独立开启。
+- `/config` 原子修改当前会话后续新 Turn 的三项设置、两个 Task Feedback，以及群聊 @ 时
+  读取的消息范围。它不创建 Turn，也不能直接配置另一个会话；应先 `/resume`。
 - 当前 Turn 运行、停止中或正在压缩时不能修改配置。运行时的普通消息仍只会 steer 当前 Turn。
+- 已经开始的 Turn 沿用开始时捕获的 Task Feedback；之后修改只影响后续新 Turn。
 - 选项来自 Codex 实时模型目录，并在卡片提交及每次新 Turn 前重新校验；手册不维护静态模型名单。
 - 没有 Netizen 会话配置时，三项显示“继承 Codex”。
 - 不提供 `/model`、`/effort` 或 `/fast` 独立命令。Fast 是同一模型的 Service Tier；Codex Spark 是独立 Model。
@@ -302,6 +319,12 @@ Goal、停止或压缩状态会直接拒绝普通消息。等待状态回到空�
 ### “为什么不能修改配置？”
 
 当前会话可能正在运行、停止或压缩。等待其回到空闲后再用 `/config`；要配置别的会话，先 `/resume`。
+
+### “为什么任务运行时没有表情或进度卡？”
+
+Task Reaction 和 Progress Card 默认都关闭。请在新建会话的 `/new` 卡片中开启，或等当前
+会话空闲后通过 `/config` 修改；两项互不依赖。Progress Card 关闭并不影响最终回复：没有
+文件时仍回复富文本/静态文本，有文件时仍使用现有完成卡。
 
 ### “为什么 `/delete` 删除不了？”
 

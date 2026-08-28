@@ -93,17 +93,25 @@ contributors must know before starting related work.
   Scope/Binding/Project Registry metadata, schema version, and deduplication
   TTL keys, plus ADR 0016's optional Binding-scoped Turn-setting catalog IDs
   and revision, ADR 0039's Mention Context Mode/exact boundary/revision without
-  message bodies, plus ADR 0021's Side Topic routes/tombstones without native
-  Thread IDs. Never persist prompts, supplemental messages, responses, Turn history, card sessions,
-  queues, resolved/effective/default Codex configuration, or other Codex-owned
-  state. Admin login sessions, CSRF tokens, native metadata indexes, and audit
-  records also stay out of Channel SQLite.
+  message bodies, ADR 0046's two Binding-scoped Task Feedback booleans/revision,
+  plus ADR 0021's Side Topic routes/tombstones without native Thread IDs. Never
+  persist prompts, supplemental messages, responses, Turn history/activity
+  projections, progress-card identities/sessions, queues, resolved/effective/
+  default Codex configuration, or other Codex-owned state. Admin login sessions,
+  CSRF tokens, native metadata indexes, and audit records also stay out of
+  Channel SQLite.
+- ADR 0046's Task Reaction and Progress Card are independent Binding-scoped
+  opt-ins that default off. Display failures never alter a Turn. With Progress
+  Card off, preserve the existing terminal contract: no files use rich/static
+  text and files use the self-contained completion card. The first projection
+  is exact-Turn status plus plan only; never expose reasoning, raw tool/command
+  output, tool arguments, elapsed time, percentage, or ETA through it.
 - Use exact-pinned official SDKs and public high-level APIs by default. The only
   approved reach-throughs are ADR 0009's isolated, version/fingerprint-gated
   terminal cleanup and ADR 0014's removable capability-specific Goal/Skills
   adapters, ADR 0021's fixed Side boundary adapter, ADR 0028's reusable fixed
   Thread unsubscribe adapter, ADR 0037's fixed Thread Delete adapter, plus ADR
-  0020's version/fingerprint-gated, non-consuming plan observer. The Delete
+  0020/0046's version/fingerprint-gated, non-consuming plan observer. The Delete
   adapter is production-permitted only through ADR 0037's exact method and
   Runtime reconciliation contract. Do not parse
   CLI output, add a generic/private RPC gateway, patch SDK internals, copy
