@@ -52,10 +52,10 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 - 每个普通会话有两个独立的任务反馈选项，可在 `/new` 创建时或空闲时通过 `/config`
   修改；两项默认都关闭。普通 Turn 两项都关闭时，任务被接受后到终态之间不发送任务
   表情或进度卡，最终结果仍会正常回复。
-- Task Reaction 开启后，普通任务在原任务消息上使用 `Typing` 和低频 `THINKING`；steer
+- Task Reaction 开启后，普通或 Side 任务在原任务消息上使用 `Typing` 和低频 `THINKING`；steer
   成功后在 steer 消息上使用 `OnIt`，原任务消息仍是运行状态锚点。完成、失败或中断时先
   使用相应终态表情，再清理运行态表情。关闭时也不会发送 `OnIt` 失败的文字确认。
-- Progress Card 开启后，普通 Turn 被接受时回复一张运行卡；Goal 始终使用一张组合卡，
+- Progress Card 开启后，普通或 Side Turn 被接受时回复一张运行卡；Goal 始终使用一张组合卡，
   开启该选项时在卡中增加过程区。过程区在运行中展开，只按
   当前状态与原生 checklist 的变化更新同一张卡；不显示耗时、完成百分比、ETA、内部
   reasoning、raw command/tool output 或 tool arguments；计划步骤中的常见 secret/token、
@@ -63,9 +63,10 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
   可用的本轮文件，文件翻页后仍保留折叠过程。
 - 两项可以只开一个或同时开启。reaction/card 展示失败不会改变 Codex Turn；Progress
   Card 初始、过程或终态更新失败时，最终结果会回退到原有回复方式。
-- Progress Card 关闭时严格保持普通 Turn 原有终态：无文件时使用富文本/静态文本回复，
+- Progress Card 关闭时严格保持普通或 Side Turn 原有终态：无文件时使用富文本/静态文本回复，
   有文件时最终文本和“本轮文件”合成完成卡。Goal 卡本身始终存在，关闭只是不加入
-  Activity 模块；Task Reaction 仍不作用于 Goal。Side 和压缩不使用这两个选项。
+  Activity 模块；Task Reaction 仍不作用于 Goal。Side 使用创建时冻结的 Parent 选项，
+  压缩不使用这两个选项。
 
 ## 发送消息、引用与图片
 
@@ -119,7 +120,7 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 
 ### 查看和发送本轮文件
 
-- 普通 Turn 成功完成后，或 Goal 四项终态证据确认后其 exact 最终物理 Turn 成功完成时，
+- 普通或 Side Turn 成功完成后，或 Goal 四项终态证据确认后其 exact 最终物理 Turn 成功完成时，
   Codex 的结构化文件修改或图片生成记录若指向当前仍可访问的
   普通文件，最终回复下方会显示“本轮文件”。Progress Card 关闭时，它和最终回复组成
   现有完成卡；Progress Card 开启时，它进入最初的同一张运行卡并随终态折叠。
@@ -140,9 +141,10 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
   Goal/Activity/Result 投影与完整文件清单保存在飞书 callback payload 中，因此翻页不会
   丢失其他模块。Netizen 服务或 App Server 正常重启后，已发送卡片仍可翻页和发送，不会
   为此保存本地 card session。两版文件卡都可用。
-- 文件来源优先采用原生 Turn 的 latest aggregate diff，并用 completed `fileChange` 和
-  `imageGeneration` 补充。shell、MCP 或第三方工具的输出若没有进入这些 native 事实，
-  不会被扫描补齐；最终答复里写出路径也不会自动把它变成卡片文件。
+- 普通 Turn 文件来源优先采用 latest aggregate diff，并用 completed `fileChange` 和
+  `imageGeneration` 补充；Side 与 Goal 只读取各自 exact 成功终态 Turn 的 completed
+  structured items，不读取 aggregate diff 或更早 Turn。shell、MCP 或第三方工具的输出若
+  没有进入这些 native 事实，不会被扫描补齐；最终答复里写出路径也不会自动把它变成卡片文件。
 
 ## 会话与 Project 管理
 
@@ -259,7 +261,11 @@ Side 适合在不打断 Parent 会话的情况下讨论一个临时分支。
   只承载 reaction 和最终回复。后续每条 Side Prompt 使用其实际发送者。
 - Parent 和多个 Side 可以并发，但共享同一个真实 Project 目录。
 - Side 在同一个临时 fork 上支持多轮：空闲时开始新 Turn，运行中继续 steer。
+- Side 创建时冻结 Parent 当时的 Model、Effort、Speed、Task Reaction 与 Progress Card；
+  Parent 后续 `/config` 不影响既有 Side。每轮 Side Turn 的表情、进度卡、富文本和文件卡
+  与普通 Turn 使用同一规则。
 - Side 内只支持普通 prompt、`//`、`/status`、`/stop`、`/help`、`/` 和 `/side close`。
+- Side 内不支持 Goal；需要 Goal 时回到普通会话。
 - `/stop` 只中断当前 Side Turn，Side 仍可继续；`/side close` 才真正结束 Side 并取消订阅。
 - Side 空闲两小时或 Netizen 服务重启后过期。旧 Side 话题不会自动变成普通会话。
 
@@ -337,7 +343,8 @@ Goal、停止或压缩状态会直接拒绝普通消息。等待状态回到空�
 Task Reaction 和 Progress Card 默认都关闭。请在新建会话的 `/new` 卡片中开启，或等当前
 会话空闲后通过 `/config` 修改；两项互不依赖。Progress Card 关闭并不影响普通 Turn 的
 最终回复：没有文件时仍回复富文本/静态文本，有文件时仍使用完成卡。Goal 始终有一张状态
-与控制卡，关闭该选项只会隐藏 Activity 过程模块。
+与控制卡，关闭该选项只会隐藏 Activity 过程模块。Side 使用创建瞬间冻结的 Parent 选项；
+若想改变既有 Side 的反馈方式，需要回到 Parent 修改后重新创建 Side。
 
 ### “为什么 `/delete` 删除不了？”
 
@@ -369,10 +376,10 @@ Side 可能因空闲两小时、服务重启或关闭流程进入终态而过期
 ### “为什么任务生成了文件，却没有出现‘本轮文件’？”
 
 当前版本为普通成功 Turn 读取原生 latest aggregate diff，并用 completed `fileChange` /
-`imageGeneration` 记录补充；Goal 首期只读取 exact 最终成功物理 Turn 的这两类 completed
-structured items，不提供 aggregate diff。两者都不解析最终回复中的路径，也不扫描 Project。
-shell、MCP 或第三方工具生成但未进入这些 native 事实的文件，以及 Side、压缩的输出，都
-不会进入卡片。Goal 不聚合更早的自动 continuation Turn。文件必须仍存在且是普通文件；Project
+`imageGeneration` 记录补充；Side 与 Goal 只读取各自 exact 最终成功 Turn 的这两类
+completed structured items，不提供 aggregate diff，也不聚合更早 Turn。三者都不解析最终
+回复中的路径，也不扫描 Project。shell、MCP 或第三方工具生成但未进入这些 native 事实的
+文件，以及压缩输出，都不会进入卡片。文件必须仍存在且是普通文件；Project
 不是额外的文件权限边界，exact Turn 明确报告的其他目录文件仍可出现。
 
 ### “点击本轮文件后，拿到的是任务完成时的版本吗？”

@@ -386,6 +386,12 @@ class SideSubmission:
     thread_id: str
     turn_id: str
     release_receipt_attempt: Callable[[], None] | None = None
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+
+    def __post_init__(self) -> None:
+        if self.feedback_revision < 1:
+            raise ValueError("feedback revision must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,6 +456,32 @@ class TurnActivitySnapshot:
             raise ValueError("Turn activity revision must be positive")
         if self.steer_count < 0:
             raise ValueError("Turn activity steer count must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
+class SideTurnActivitySnapshot:
+    """Latest bounded display projection for one exact active Side Turn."""
+
+    side_id: str
+    thread_id: str
+    turn_id: str
+    revision: int
+    state: ActiveState
+    steer_count: int
+    plan_available: bool
+    plan_generated: bool
+    plan_may_be_stale: bool
+    steps: tuple[TurnPlanStepSnapshot, ...]
+
+    def __post_init__(self) -> None:
+        if not self.side_id or not self.thread_id or not self.turn_id:
+            raise ValueError("Side Turn activity identity must not be empty")
+        if self.revision < 1:
+            raise ValueError("Side Turn activity revision must be positive")
+        if self.steer_count < 0:
+            raise ValueError(
+                "Side Turn activity steer count must be non-negative"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -707,13 +739,28 @@ class GoalOutcome:
 @dataclass(frozen=True, slots=True)
 class SideTurnOutcome:
     side_id: str
+    parent_binding_id: str
     thread_id: str
     turn_id: str
     owner_id: str
     origin: object
+    cwd: Path
     result: object | None = None
     error: BaseException | None = None
     background_cleanup_requested: bool = False
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+    activity: SideTurnActivitySnapshot | None = None
+
+    def __post_init__(self) -> None:
+        if self.feedback_revision < 1:
+            raise ValueError("feedback revision must be positive")
+        if self.activity is not None and (
+            self.activity.side_id != self.side_id
+            or self.activity.thread_id != self.thread_id
+            or self.activity.turn_id != self.turn_id
+        ):
+            raise ValueError("Side outcome activity belongs to another Side Turn")
 
     @property
     def final_response(self) -> str | None:
@@ -882,6 +929,17 @@ class _ActiveSideTurn:
     cleanup_succeeded: bool = False
     terminal_observed: bool = False
     cleanup_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+    activity_revision: int = 1
+    steer_count: int = 0
+    plan_cursor: int = 0
+    plan_generated: bool = False
+    plan_available: bool = True
+    plan_may_be_stale: bool = False
+    plan_stale_after_cursor: int | None = None
+    plan_last_update_cursor: int | None = None
+    plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
     task: asyncio.Task[None] | None = None
 
 
@@ -895,6 +953,8 @@ class _SideSession:
     cwd: Path
     creator_id: str
     turn_settings: TurnModelSettings | None
+    task_feedback: BindingTaskFeedback
+    feedback_revision: int
     last_activity: float
     state: SideSessionState = SideSessionState.OPEN
     topic_id: str | None = None
@@ -1494,6 +1554,8 @@ class CodexRuntime:
                 "再使用 /side。"
             )
         prepared_revision = prepared.settings_revision
+        prepared_feedback_revision = prepared.feedback_revision
+        prepared_feedback = prepared.task_feedback
         configured = prepared.turn_settings
         resolved_settings = None
         if configured is not None:
@@ -1521,6 +1583,10 @@ class CodexRuntime:
                 )
             if current.settings_revision != prepared_revision:
                 raise SteerRace("创建 Side 期间会话配置已变化，请重新发送 /side。")
+            if current.feedback_revision != prepared_feedback_revision:
+                raise SteerRace(
+                    "创建 Side 期间任务反馈配置已变化，请重新发送 /side。"
+                )
             existing = self._sides.get(side_id)
             if existing is not None:
                 return self._side_snapshot(existing)
@@ -1528,6 +1594,12 @@ class CodexRuntime:
             current = self._bindings.get(binding.id)
             if not current.active or current.native_thread_id is None:
                 raise SteerRace("创建 Side 期间当前会话已变化，请重新发送 /side。")
+            if current.settings_revision != prepared_revision:
+                raise SteerRace("创建 Side 期间会话配置已变化，请重新发送 /side。")
+            if current.feedback_revision != prepared_feedback_revision:
+                raise SteerRace(
+                    "创建 Side 期间任务反馈配置已变化，请重新发送 /side。"
+                )
             parent_active = self._active.get(binding.id)
             if (
                 parent_active is not None
@@ -1628,6 +1700,8 @@ class CodexRuntime:
                         cwd=cwd.resolve(),
                         creator_id=creator_id,
                         turn_settings=resolved_settings,
+                        task_feedback=prepared_feedback,
+                        feedback_revision=prepared_feedback_revision,
                         last_activity=asyncio.get_running_loop().time(),
                         state=SideSessionState.CLOSING,
                     )
@@ -1659,6 +1733,8 @@ class CodexRuntime:
                 cwd=cwd.resolve(),
                 creator_id=creator_id,
                 turn_settings=resolved_settings,
+                task_feedback=prepared_feedback,
+                feedback_revision=prepared_feedback_revision,
                 last_activity=asyncio.get_running_loop().time(),
             )
             self._sides[side_id] = session
@@ -1773,6 +1849,9 @@ class CodexRuntime:
                     raise SideSessionClosing(
                         "当前 Side Turn 正在停止，暂不接受新消息。"
                     )
+                if active.task_feedback.progress_card_enabled:
+                    self._refresh_turn_plan(active)
+                stale_after_cursor = active.plan_cursor
                 try:
                     await active.handle.steer(native_input)
                 except asyncio.CancelledError:
@@ -1794,6 +1873,15 @@ class CodexRuntime:
                         "Codex Side steer 结果未确认；服务已停止接收新任务，"
                         "请重启服务。"
                     ) from error
+                active.steer_count += 1
+                last_update = active.plan_last_update_cursor
+                if last_update is not None and last_update > stale_after_cursor:
+                    active.plan_may_be_stale = False
+                    active.plan_stale_after_cursor = None
+                else:
+                    active.plan_may_be_stale = True
+                    active.plan_stale_after_cursor = stale_after_cursor
+                active.activity_revision += 1
                 session.last_activity = asyncio.get_running_loop().time()
                 self._touch_side_topic(side_id)
                 return SideSubmission(
@@ -1801,6 +1889,8 @@ class CodexRuntime:
                     side_id,
                     active.handle.thread_id,
                     active.handle.id,
+                    task_feedback=active.task_feedback,
+                    feedback_revision=active.feedback_revision,
                 )
 
             turn_kwargs: dict[str, object] = {}
@@ -1837,6 +1927,8 @@ class CodexRuntime:
                         owner_id=owner_id,
                         origin=origin,
                         receipt_attempted=receipt_attempted,
+                        task_feedback=session.task_feedback,
+                        feedback_revision=session.feedback_revision,
                     )
                     session.active = active
                     session.last_activity = asyncio.get_running_loop().time()
@@ -1849,6 +1941,8 @@ class CodexRuntime:
                         session.thread.id,
                         handle.id,
                         receipt_attempted.set,
+                        task_feedback=active.task_feedback,
+                        feedback_revision=active.feedback_revision,
                     )
 
         if start_error is not None:
@@ -1878,6 +1972,7 @@ class CodexRuntime:
                 return StopDisposition.NOT_RUNNING
             if active.state is ActiveState.RUNNING:
                 active.state = ActiveState.STOPPING
+                active.activity_revision += 1
                 session.revision += 1
             if acknowledge is not None:
                 try:
@@ -1919,7 +2014,9 @@ class CodexRuntime:
                 self._cancel_side_idle(session)
                 active = session.active
                 if active is not None:
-                    active.state = ActiveState.STOPPING
+                    if active.state is ActiveState.RUNNING:
+                        active.state = ActiveState.STOPPING
+                        active.activity_revision += 1
                     active.receipt_attempted.set()
                     if active.cleanup_required:
                         active.cleanup_ready.set()
@@ -3346,8 +3443,52 @@ class CodexRuntime:
             steps=active.plan_steps,
         )
 
+    def side_turn_activity(
+        self,
+        side_id: str,
+        *,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+        refresh_plan: bool = False,
+    ) -> SideTurnActivitySnapshot | None:
+        """Return one exact Side Turn's process-local display projection."""
+
+        session = self._sides.get(side_id)
+        if session is None or session.state is SideSessionState.CLOSING:
+            return None
+        active = session.active
+        if active is None or active.terminal_observed:
+            return None
+        if thread_id is not None and active.handle.thread_id != thread_id:
+            return None
+        if turn_id is not None and active.handle.id != turn_id:
+            return None
+        if refresh_plan:
+            self._refresh_turn_plan(active)
+        return self._side_turn_activity_snapshot(side_id, active)
+
     @staticmethod
-    def _turn_activity_visible_state(active: _ActiveTurn) -> tuple[object, ...]:
+    def _side_turn_activity_snapshot(
+        side_id: str,
+        active: _ActiveSideTurn,
+    ) -> SideTurnActivitySnapshot:
+        return SideTurnActivitySnapshot(
+            side_id=side_id,
+            thread_id=active.handle.thread_id,
+            turn_id=active.handle.id,
+            revision=active.activity_revision,
+            state=active.state,
+            steer_count=active.steer_count,
+            plan_available=active.plan_available,
+            plan_generated=active.plan_generated,
+            plan_may_be_stale=active.plan_may_be_stale,
+            steps=active.plan_steps,
+        )
+
+    @staticmethod
+    def _turn_activity_visible_state(
+        active: _ActiveTurn | _ActiveSideTurn,
+    ) -> tuple[object, ...]:
         return (
             active.state,
             active.steer_count,
@@ -3357,7 +3498,10 @@ class CodexRuntime:
             active.plan_steps,
         )
 
-    def _refresh_turn_plan(self, active: _ActiveTurn) -> None:
+    def _refresh_turn_plan(
+        self,
+        active: _ActiveTurn | _ActiveSideTurn,
+    ) -> None:
         before = self._turn_activity_visible_state(active)
         observer = self._turn_plan_observer
         if observer is None:
@@ -4862,6 +5006,7 @@ class CodexRuntime:
     ) -> None:
         result: object | None = None
         error: BaseException | None = None
+        activity: SideTurnActivitySnapshot | None = None
         try:
             # Side Threads are ephemeral. Intentionally use the normal SDK
             # handle path and do not apply persisted-thread completion recovery.
@@ -4888,6 +5033,12 @@ class CodexRuntime:
                     self._sides.get(session.side_id) is session
                     and session.active is active
                 ):
+                    if active.task_feedback.progress_card_enabled:
+                        self._refresh_turn_plan(active)
+                        activity = self._side_turn_activity_snapshot(
+                            session.side_id,
+                            active,
+                        )
                     cleanup_debt = (
                         active.cleanup_required and not active.cleanup_succeeded
                     )
@@ -4910,13 +5061,18 @@ class CodexRuntime:
         await active.receipt_attempted.wait()
         outcome = SideTurnOutcome(
             side_id=session.side_id,
+            parent_binding_id=session.parent_binding_id,
             thread_id=session.thread.id,
             turn_id=active.handle.id,
             owner_id=active.owner_id,
             origin=active.origin,
+            cwd=session.cwd,
             result=result,
             error=error,
             background_cleanup_requested=active.cleanup_succeeded,
+            task_feedback=active.task_feedback,
+            feedback_revision=active.feedback_revision,
+            activity=activity,
         )
         try:
             await self._on_completion(outcome)

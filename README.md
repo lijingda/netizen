@@ -26,20 +26,24 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
 - `/side [首轮问题]` 从当前已物化 Parent Thread 创建一个 ephemeral fork，并在同一
   chat 新开 sibling 话题。Side 在同一 fork 上支持多轮：idle 开新 Turn、running
   steer exact Turn；`/stop` 只停当前 Side Turn，`/side close` 才结束 Side。Parent 与
-  多个 Side 可并发，但共享同一个真实 Project cwd，文件改动彼此可见。
+  多个 Side 可并发，但共享同一个真实 Project cwd，文件改动彼此可见。创建时冻结 Parent
+  当时的 Model/Effort/Speed、Task Reaction 与 Progress Card，Parent 后续配置不传播；
+  Side 内仍不允许 Goal。
 - Binding 有两个相互独立、默认关闭的 Task Feedback 选项，可在 `/new` 或 `/config`
   按需开启。Task Reaction 开启后，运行时在原任务消息上使用 `Typing` 和低频
   `THINKING`，steer 成功使用 `OnIt`，终态使用 `DONE`/`ERROR`/`CrossMark`；关闭时不会
-  调用 reaction，也不会因 `OnIt` 失败发送文字确认。Task Reaction 仍只作用于普通 Turn。
-- Progress Card 开启后，普通 native Turn 接受时回复一张运行卡；Goal 则无论该选项是否
-  开启都只使用一张 Goal 回复卡，开启时在其中增加 Activity 模块。顶部展开区只按状态与
-  原生 checklist 的变化逐步更新；不显示耗时、百分比、ETA、reasoning 或 raw
+  调用 reaction，也不会因 `OnIt` 失败发送文字确认。Side Turn 使用创建时冻结的同一语义；
+  Goal 不使用 Task Reaction。
+- Progress Card 开启后，普通或 Side native Turn 接受时回复一张运行卡；Goal 则无论该
+  选项是否开启都只使用一张 Goal 回复卡，开启时在其中增加 Activity 模块。顶部展开区只按
+  状态与原生 checklist 的变化逐步更新；不显示耗时、百分比、ETA、reasoning 或 raw
   tool/command output；计划步骤还经过有界的常见敏感模式过滤。终态在同一卡片折叠过程并
   呈现回答和可用文件，翻页后仍保留全部模块。任一卡片展示失败都不影响原生执行。
 - 普通 Turn 成功完成，且 latest native Turn diff 或 completed `fileChange` /
   `imageGeneration` item 指向当前普通文件时，最终回复与“本轮文件”合成一张卡片；Goal
   首期只使用四项终态证据中 exact 最终成功物理 Turn 的 completed structured items，
-  不猜测 aggregate diff 或更早 rollover Turn 的文件。
+  Side 也只使用 exact completed Side Turn 的 structured items；两者都不猜测 aggregate
+  diff 或更早 Turn 的文件。
   Project 只解析相对路径，不过滤 exact Turn 明确报告的外部文件；文件每页 8 个，最多
   500 个完整循环分页，点击后以原图或文件消息回复到卡片话题。可见正文只显示脱敏逻辑位置；
   普通完成/进度文件卡继续使用 v4 callback；Goal 与 Files 同卡时使用 v5，并在飞书
@@ -99,7 +103,9 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   随后的模型回复和 reactions 也只出现在新话题；Parent 成功时不再发送导航回复。
   首轮模型来源仍是原 `/side` 消息及其发送者，新话题 seed 只作为完成投递锚点。
   Side 内仅支持普通 Prompt、`//`、`/status`、`/stop`、`/help`、`/` 和
-  `/side close`；空闲两小时或服务重启后过期。旧 Side 话题不会变成普通 Binding。
+  `/side close`；空闲两小时或服务重启后过期。旧 Side 话题不会变成普通 Binding。Side
+  创建时冻结 Parent 当时的 Model/Effort/Speed、Task Reaction 与 Progress Card；后续
+  `/config` 不影响它，Side 内也不接受 Goal。
 - `/config`：选择并保存当前会话后续新 Turn 的 Model、Effort、Speed、Task Reaction 与
   Progress Card；群聊和群话题还可切换 @ 上下文模式。不要求任务、不创建空白 Turn，也
   不提供跨会话选择；配置其他会话应先 `/resume`。Binding 已显式配置模型三项时，每条
@@ -179,8 +185,8 @@ Thread Delete 暴露固定 `thread/delete`，由 Runtime 承担一次四视图�
 rename/archive/unarchive 始终使用公开 SDK。SDK 高层支持任一缺口后，升级 harness 会
 要求切回公开 provider 并删除对应 shim。
 ADR 0020 另行批准一个精确版本/源码指纹门禁的只读 plan observer：它只在 `/status`
-、steer freshness bookkeeping，或已开启 Progress Card 的有界刷新中快照当前 Turn 已登记
-的通知队列，不消费、注册或修改通知，不新建 worker/RPC/App Server；关闭 Progress Card
+、steer freshness bookkeeping，或普通/Goal/Side 已开启 Progress Card 的有界刷新中快照
+当前 Turn 已登记的通知队列，不消费、注册或修改通知，不新建 worker/RPC/App Server；关闭 Progress Card
 时没有后台 plan polling。公开接口可替代后必须删除，且不得把它扩展为 reasoning、工具
 日志或任意通知浏览器。
 按 ADR 0018，Skills discovery 只服务于普通消息的显式 `$skill-name` 校验，不再注册

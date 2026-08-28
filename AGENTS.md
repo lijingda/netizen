@@ -115,6 +115,10 @@ contributors must know before starting related work.
   fingerprint; that fingerprint is not globally unique. Concurrent external
   mutation of the same Thread Goal is unsupported because the pinned SDK's
   thread-scoped clear has no expected-generation CAS.
+- ADR 0048 keeps the Side root card and ephemeral lifecycle unchanged, freezes
+  Parent Model/Effort/Speed plus both Task Feedback choices at Side creation,
+  and renders each Side Turn through the ordinary Activity/Result/Files reply
+  path. Parent changes do not propagate, and Goal remains unsupported in Side.
 - Use exact-pinned official SDKs and public high-level APIs by default. The only
   approved reach-throughs are ADR 0009's isolated, version/fingerprint-gated
   terminal cleanup and ADR 0014's removable capability-specific Goal/Skills

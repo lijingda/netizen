@@ -2,9 +2,14 @@
 status: accepted
 date: 2026-08-28
 amends: 0014, 0024, 0027, 0046
+amended_by: 0048
 ---
 
 # 组合类型化回复卡并只自动收尾完成的 Goal
+
+> [ADR 0048](0048-integrate-side-turns-with-task-feedback-reply-cards.md) 让 Side Turn 也复用
+> Activity、Result 与 Files 模块，但不允许 Goal Module；本 ADR 的单 Presenter 与封闭模块
+> 集合保持不变。
 
 普通 Turn 已经分别拥有进度卡、完成文件卡与富文本终态，Goal 又有独立状态卡和终态回复，
 导致相同结果被多条消息投递，新增展示项还会继续复制 card shell、分页与失败回退。Netizen

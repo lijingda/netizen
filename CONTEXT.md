@@ -46,8 +46,8 @@ active pointer 改变不重定向已创建的 Side。
 一个多轮、ephemeral native Thread。它不是 Binding Scope，也不拥有 active Binding。
 
 **Side Session**：只存在于当前服务进程内的 Side Runtime 状态：ephemeral Thread
-handle、当前 Turn、创建时 Turn Settings 快照、admission revision 和 idle timer。服务
-重启后不能恢复。
+handle、当前 Turn、创建时冻结的 Turn Settings 与 Task Feedback 快照、admission revision
+和 idle timer。服务重启后不能恢复。
 
 **Side Topic Route / Side 墓碑**：Channel Database 中不含 native Thread ID 的最小
 路由记录。`creating/open` 只在当前进程有效；`closed/expired/failed` 永久阻止旧 Side
@@ -145,9 +145,10 @@ Turn 上重复应用的客户端意图，不是 Codex 已生效配置、默认�
 模型目录失效或读取失败时保留；running Turn 的 steer 不解析也不应用。
 
 **Binding Task Feedback / 会话任务反馈**：Binding 上对 Task Reaction 与 Progress Card
-的两个独立选择及 revision。两项默认关闭；Task Reaction 只决定后续普通 Turn 的表情，
-Progress Card 决定后续普通 Turn 与 Goal 是否加入 Activity Module。它们不是 Codex 原生
-设置或 Turn/Goal 状态事实。
+的两个独立选择及 revision。两项默认关闭；Task Reaction 决定后续普通 Turn 的表情，
+Progress Card 决定后续普通 Turn 与 Goal 是否加入 Activity Module；Side 创建时冻结 Parent
+当时的两项选择，容器内所有 Side Turn 分别沿用同样的表情与 Activity 语义。它们不是
+Codex 原生设置或 Turn/Goal 状态事实。
 
 **Native Compaction / 原生压缩**：`/compact` 对已有历史的 idle Binding 调用公开
 Codex compaction。start 空响应不是完成；Netizen 临时保留 `compacting` 槽位，直到
@@ -225,7 +226,8 @@ native 终态到达即释放，均不持久化。
 
 **Side Turn**：以 Side ID 为键、在同一 ephemeral Side Thread 上串行开始或 steer 的
 当前 Turn。它使用普通 `AsyncTurnHandle.run()` 完成路径，不使用持久 Thread history
-recovery，且不写入 Channel Database。
+recovery，且不写入 Channel Database。展示复用普通 Turn 的 Task Reaction 以及
+Activity、Result、Files 回复模块，但不允许 Goal。
 
 **Task Reaction / 任务表情**：Binding 可选开启、由 Channel 以 exact Turn ID 管理的
 纯内存展示。原任务消息使用 `Typing`/`THINKING`，成功 steer 使用 `OnIt`，终态使用
@@ -240,8 +242,9 @@ Activity、Result 与 Files 四种。模块只投影已经确认的领域状态�
 不构成动态插件系统。
 
 **Progress Card / 进度卡**：Binding 可选开启 Activity Module 的用户设置。普通 Turn 或
-Goal 执行中展开有界活动投影，终态在同一 Reply Card 折叠过程；所有 plan step 和随分页
-携带的过程 manifest 都经过同一套有界敏感模式过滤。它不保存执行历史，也不是终态事实源。
+Goal 执行中展开有界活动投影；Side Turn 使用 Side 创建时冻结的选择。终态在同一 Reply
+Card 折叠过程；所有 plan step 和随分页携带的过程 manifest 都经过同一套有界敏感模式
+过滤。它不保存执行历史，也不是终态事实源。
 
 **Standard CODEX_HOME**：服务 effective user 的原生 Codex 状态根；显式
 `CODEX_HOME` 优先，否则为该账号的 `$HOME/.codex`。Netizen 不修改其内部

@@ -53,7 +53,8 @@ alias、可空 write-once native Thread ID、可选的 Binding-scoped Model/Effo
 目录 ID、settings revision、Mention Context Mode、Context Boundary、context revision、
 creator 和时间；Scope 只保存 active Binding 指针。P2P 固定为 `current-only`；普通群聊
 主线与群话题可在 `current-only|catch-up` 中选择，默认 `current-only`。Side 不是普通
-Binding，不继承 Parent 的选择并固定沿用 current-only。
+Binding，也不形成配置继承链；创建时冻结 Parent 当时的 Model/Effort/Speed 与 Task
+Feedback，之后独立，Mention Context Mode 固定为 current-only。
 
 exact `/new` 是普通用户创建会话的唯一入口；任何 `/new ...` 参数都零 mutation 地拒绝。
 它打开 Card 2.0，提交只写入包含 Project、可选 Turn Settings 和 Mention Context
@@ -245,7 +246,9 @@ Parent Binding 的 active 槽。idle 消息对同一 ephemeral `AsyncThread` 新
 消息只 steer exact handle。引用、图片和 Skills 准备前捕获 Side revision，提交时防止
 close/expiry 或 idle -> running -> idle ABA。Side 内只允许 Prompt、`//`、`/status`、
 `/stop`、`/help`、`/` 和 `/side close`，其他 Binding lifecycle/config/Goal control 和
-嵌套 Side 均拒绝。`/stop` interrupt/clean 当前 Side Turn 后仍回到 idle，可继续多轮。
+嵌套 Side 均拒绝。创建时还在 Parent admission 中冻结并复核 Turn Settings 与 Task
+Feedback revision，后续 Parent 配置不传播。`/stop` interrupt/clean 当前 Side Turn 后仍
+回到 idle，可继续多轮。
 
 Side idle 两小时后过期；active Turn 完成后重新开始完整窗口。长期 timer 不进入普通
 `wait_idle()` task set。close 在 Side 锁内先切 `closing` 并快照 active，释放锁后才
@@ -377,7 +380,8 @@ shell/MCP/第三方工具输出。非 Goal 且 Progress Card 关闭时，没有�
 Card 开启时，completed 结果与可用文件进入已发送的同一张卡。Goal 始终使用组合卡，但
 满足四项终态证据后，首期只从 exact 最终成功物理 Turn 的 completed structured items
 提取文件；Goal adapter 不提供对应 aggregate diff，也不扫描或聚合更早 rollover Turn。
-Side、compaction、失败和中断终态不进入本轮文件路径。
+成功 Side Turn 同样只从 exact completed Turn 的 completed structured items 提取，不读取
+aggregate diff/history 或更早 Side Turn；compaction、失败和中断终态不进入本轮文件路径。
 
 普通 Result + Files 与 Activity + Result + Files 卡继续使用 v4 callback；Goal 与 Files
 同卡时使用 v5 完整组合 manifest。两版每页 8 个，最多 500 个完整循环分页，展示总数、页码、
@@ -411,20 +415,23 @@ release gate。产品接受极快 Side Turn 可能遇到 `turn/completed` 通知
 删除或放宽普通持久 Thread 的现有恢复和 release probe。
 
 普通 Binding 每个新 Turn，以及 Goal start/resume，在 exact admission 中捕获当时的 Binding
-Task Feedback；运行中修改配置不会改变已开始的 operation。两个选项默认均关闭：Task
-Reaction 只控制普通 Turn 的表情生命周期，Progress Card 控制普通 Turn 是否产生 Activity
-运行卡，以及 Goal 组合卡是否加入 Activity 模块。普通 Turn 两项都关闭时，从 native
-accepted 到终态之间不产生任务反馈，最终结果才按原路径投递；Goal 模块本身始终存在。
-Side 与 compaction 不使用这两个选项。完整边界见
+Task Feedback；Side 则在创建时一次性冻结 Parent 当时的 Task Feedback 并供所有 Side Turn
+沿用。运行中或 Side 创建后修改 Parent 配置不会改变已经捕获的 operation。两个选项默认均
+关闭：Task Reaction 控制普通/Side Turn 的表情生命周期，Progress Card 控制普通/Side Turn
+是否产生 Activity 运行卡，以及 Goal 组合卡是否加入 Activity 模块。普通或 Side Turn 两项
+都关闭时，从 native accepted 到终态之间不产生任务反馈，最终结果才按原路径投递；Goal
+模块本身始终存在且不使用 Task Reaction。compaction 不使用这两个选项。完整边界见
 [ADR 0046](adr/0046-add-opt-in-binding-task-feedback.md) 与
-[ADR 0047](adr/0047-compose-typed-reply-cards-and-finalize-complete-goals.md)。
+[ADR 0047](adr/0047-compose-typed-reply-cards-and-finalize-complete-goals.md)，Side 扩展见
+[ADR 0048](adr/0048-integrate-side-turns-with-task-feedback-reply-cards.md)。
 
 Runtime 为 exact Ordinary Active Turn 维护带 revision 的 Turn Activity Projection，并为
-Goal 当前 exact 物理 Turn 暴露同样受限的 Goal Activity Snapshot。首期只有 native
+Goal 当前 exact 物理 Turn 与 exact active Side Turn 暴露同样受限的 Activity Snapshot。
+首期只有 native
 accepted 后的 running/stopping/pausing 状态和 ADR 0020 的原生 plan/checklist；终态卡只
 使用权威 outcome。它不是 reasoning、commentary、工具/命令日志或原生终态事实。Progress
-Card 开启时，Channel 有界读取对应快照并只在 revision 变化时合并更新；关闭时普通 Turn
-不创建 Activity 卡，Goal 也不启动 Activity 轮询，但仍更新 Goal 模块。
+Card 开启时，Channel 有界读取对应快照并只在 revision 变化时合并更新；关闭时普通/Side
+Turn 不创建 Activity 卡，Goal 也不启动 Activity 轮询，但仍更新 Goal 模块。
 卡片不显示 elapsed time、百分比或 ETA。plan observer 仍保持版本/源码指纹门禁、exact
 `thread_id + turn_id`、非消费队列和完整 plan replacement，不能因进度卡扩展成任意通知流。
 
@@ -436,12 +443,14 @@ pause/resume/terminal 复用同一张卡并更新其控制按钮。初始发送�
 容量校验失败时停止对应 presenter；展示失败不阻断、取消、重试或改写 native execution，
 终态按可用模块回退为新的自包含卡或既有文本。只有 Goal + Files 使用的 v5 callback
 携带完整、裁剪且有界的 Reply Card manifest，翻页不丢 Goal/Activity/Result；普通文件卡
-继续使用 v4。进程内在 active lifecycle 保留 updater，并为非 cleared Goal 有界保留终态
+继续使用 v4；Side 只组合 Activity/Result/Files，也使用 v4。进程内在 active lifecycle
+保留 updater，并为非 cleared Goal 有界保留终态
 控制 Projection；不持久化卡片 session。崩溃或强制 kill 后不扫描或猜测旧运行卡，之后
 `/goal` 只创建新的状态快照卡。Goal 初始卡失败提供可见文字回执；终态 Channel handoff
 整体有界，展示故障不能永久占住非 unknown Runtime slot。
 
-Task Reaction 开启时，Channel 按 exact Turn ID 在内存管理原消息与两个当前 reaction ID：
+Task Reaction 开启时，Channel 按 exact native Turn ID 在内存管理原消息与两个当前
+reaction ID：
 `Typing` 从开始到终态常驻，`THINKING` 首次显示 2 秒、隐藏 13 秒后继续低频 pulse；每次
 删除只使用创建响应返回的 exact ID。单次 `THINKING` 添加/删除失败停止该轮 pulse，终态
 或正常 shutdown 对仍记录的 ID 再做一次尽力清理，不会重试风暴或阻塞 Turn。若
@@ -453,7 +462,8 @@ Task Reaction 开启时，Channel 按 exact Turn ID 在内存管理原消息与�
 “已接收调整”，native steer 失败不添加确认。关闭 Task Reaction 时不执行任何 reaction
 create/delete，也不发送这个 steer 文字 fallback。
 
-普通 Turn 到达终态后先冻结已启用的 presenter，再按 completed/failed/interrupted 完成
+普通或 Side Turn 到达终态后先冻结已启用的 presenter，再按 completed/failed/interrupted
+完成
 表情或卡片，最后投递/更新结果。所有展示操作均为尽力而为，不把展示失败误报为 Codex
 后端失败。强制 kill 可能留下当时可见的运行态表情或未终结卡片；正常终态会清理表情并
 终结可用卡片，正常 shutdown 停止 updater，但不伪造 native 终态，也不为展示状态新增

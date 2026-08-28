@@ -1042,7 +1042,13 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     对 root 与 seed 各重放一次相同 UUID，必须返回原消息的 exact message/chat/root/thread
     identity，且只产生一个话题；不同 root/seed UUID 必须互异。这个对账门禁失败时 Side
     必须保持 unavailable，因为 FakeChannel 只能证明本地复用了 UUID，不能证明飞书的响应
-    形状。重启服务后旧 Side 明确 expired 且不创建 Binding；再验证 idle 两小时过期。若
+    形状。创建一个默认关闭两项反馈的 Side，确认无文件终态为富文本/静态文本且零 reaction/
+    plan observation；再创建同时开启两项的 Side，确认 running/steer 表情与 ordinary Turn
+    相同，Activity/Result/Files 始终更新同一个回复卡 message ID。随后修改 Parent 的
+    Model/Effort/Speed 与两项 Task Feedback，既有 Side 后续 Turn 必须继续使用创建时快照；
+    新建 Side 才使用新值。Side 内 `/goal` 必须零 mutation 拒绝，根卡 close/expiry 更新仍
+    独立于 Turn 回复。重启服务后旧 Side 明确 expired 且不创建 Binding；再验证 idle 两小时
+    过期。若
     P2P 建话题返回 230071，记录为当前飞书 live gate 未通过并保持 Side unavailable，不能
     以单元测试替代。
 20. 在普通持久 Turn 中分别用 native Turn diff 和结构化 items 生成 Project 内普通文件、
@@ -1072,7 +1078,9 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     现有完成卡。Progress Card 开启时，两种结果都更新最初的同一张运行卡，有文件时继续
     包含既有 v4 manifest。再验证 Goal exact 最终物理 Turn completed 的文件进入同一张
     Goal 卡并使用 v5 完整 Reply Card manifest，而更早 rollover Turn 的文件不会被猜测
-    聚合。Project 内文件显示相对路径，Project 外文件显示脱敏逻辑位置；
+    聚合；Side exact completed Turn 的 structured items 进入普通 v4 完成/进度卡，而
+    aggregate diff、先前 Side Turn 和未进入 structured items 的文件不会被补齐。Project
+    内文件显示相对路径，Project 外文件显示脱敏逻辑位置；
     所有条目显示大小，
     按 8 个一页完整翻页，可见正文不出现绝对路径、预览、diff 或发送全部；v5 callback
     payload 则必须逐项携带明文 absolute path，并在翻页后完整保留 Goal/Activity/Result。

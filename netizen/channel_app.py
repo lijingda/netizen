@@ -94,6 +94,7 @@ from .codex_runtime import (
     SideSessionNotFound,
     SideSessionState,
     SideStartFailed,
+    SideTurnActivitySnapshot,
     SideTurnOutcome,
     SkillReferenceError,
     SteerRace,
@@ -630,6 +631,18 @@ class _TurnProgressCardSession:
 
 
 @dataclass(slots=True)
+class _SideTurnProgressCardSession:
+    side_id: str
+    thread_id: str
+    turn_id: str
+    message_id: str
+    stopped: asyncio.Event
+    snapshot: SideTurnActivitySnapshot
+    failed: bool = False
+    task: asyncio.Task[None] | None = None
+
+
+@dataclass(slots=True)
 class _GoalReplyCardSession:
     binding_id: str
     thread_id: str
@@ -654,7 +667,7 @@ class _GoalCardDelivery(Enum):
 
 
 class _ReplyCardPresenter:
-    """One best-effort owner for complete Turn and Goal Reply Card values."""
+    """One best-effort owner for Turn, Side Turn, and Goal Reply Cards."""
 
     def __init__(
         self,
@@ -675,6 +688,10 @@ class _ReplyCardPresenter:
         self._sessions: dict[
             tuple[str, str, str],
             _TurnProgressCardSession,
+        ] = {}
+        self._side_sessions: dict[
+            tuple[str, str, str],
+            _SideTurnProgressCardSession,
         ] = {}
         self._goal_sessions: dict[
             tuple[str, str, str],
@@ -813,6 +830,125 @@ class _ReplyCardPresenter:
         turn_id: str,
     ) -> None:
         session = self._sessions.pop((binding_id, thread_id, turn_id), None)
+        if session is not None:
+            await self._stop_session(session)
+
+    async def start_side(
+        self,
+        *,
+        side_id: str,
+        thread_id: str,
+        turn_id: str,
+        origin: object,
+    ) -> bool:
+        if self._closed:
+            return False
+        try:
+            snapshot = self._runtime.side_turn_activity(
+                side_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                refresh_plan=True,
+            )
+        except Exception:
+            logger.exception(
+                "failed to read initial Side progress-card activity",
+                extra={"side_id": side_id, "turn_id": turn_id},
+            )
+            return False
+        if snapshot is None:
+            logger.error(
+                "failed to start Side progress card: exact activity unavailable",
+                extra={
+                    "side_id": side_id,
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                },
+            )
+            return False
+        try:
+            card = turn_progress_card(snapshot=snapshot)
+            async with asyncio.timeout(self._operation_timeout_seconds):
+                result = await self._channel.reply(origin, card)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "failed to send initial Side progress card",
+                extra={"side_id": side_id, "turn_id": turn_id},
+            )
+            return False
+        message_id = _progress_card_message_id(result)
+        if message_id is None:
+            logger.error(
+                "failed to start Side progress card: reply message ID unavailable",
+                extra={"side_id": side_id, "turn_id": turn_id},
+            )
+            return False
+        key = (side_id, thread_id, turn_id)
+        previous = self._side_sessions.pop(key, None)
+        if previous is not None:
+            await self._stop_session(previous)
+        session = _SideTurnProgressCardSession(
+            side_id=side_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            message_id=message_id,
+            stopped=asyncio.Event(),
+            snapshot=snapshot,
+        )
+        self._side_sessions[key] = session
+        session.task = asyncio.create_task(
+            self._poll_side(session),
+            name=f"netizen-side-progress-card-{turn_id}",
+        )
+        return True
+
+    async def finish_side(
+        self,
+        *,
+        side_id: str,
+        thread_id: str,
+        turn_id: str,
+        activity: SideTurnActivitySnapshot | None,
+        render: Callable[[SideTurnActivitySnapshot], OutboundCard],
+    ) -> bool:
+        session = self._side_sessions.pop((side_id, thread_id, turn_id), None)
+        if session is None:
+            return False
+        await self._stop_session(session)
+        if session.failed:
+            return False
+        snapshot = activity or session.snapshot
+        if (
+            snapshot.side_id != session.side_id
+            or snapshot.thread_id != session.thread_id
+            or snapshot.turn_id != session.turn_id
+        ):
+            logger.error(
+                "failed to finish Side progress card: activity identity mismatch",
+                extra={"side_id": session.side_id, "turn_id": session.turn_id},
+            )
+            return False
+        try:
+            return await self._update_side(session, render(snapshot))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "failed to render terminal Side progress card",
+                extra={"side_id": session.side_id, "turn_id": session.turn_id},
+            )
+            return False
+
+    async def abandon_side(
+        self,
+        *,
+        side_id: str,
+        thread_id: str,
+        turn_id: str,
+    ) -> None:
+        session = self._side_sessions.pop((side_id, thread_id, turn_id), None)
         if session is not None:
             await self._stop_session(session)
 
@@ -1437,6 +1573,8 @@ class _ReplyCardPresenter:
         self._closed = True
         sessions = tuple(self._sessions.values())
         self._sessions.clear()
+        side_sessions = tuple(self._side_sessions.values())
+        self._side_sessions.clear()
         async with self._goal_lock:
             goal_sessions = tuple(self._goal_sessions.values())
             self._goal_sessions.clear()
@@ -1446,7 +1584,7 @@ class _ReplyCardPresenter:
         await asyncio.gather(
             *(
                 self._stop_session(session)
-                for session in (*sessions, *goal_sessions)
+                for session in (*sessions, *side_sessions, *goal_sessions)
             ),
             return_exceptions=False,
         )
@@ -1496,6 +1634,54 @@ class _ReplyCardPresenter:
                 session.failed = True
                 return
             if not await self._update(session, card):
+                session.failed = True
+                return
+
+    async def _poll_side(self, session: _SideTurnProgressCardSession) -> None:
+        while not session.stopped.is_set():
+            try:
+                await asyncio.wait_for(
+                    session.stopped.wait(),
+                    timeout=self._poll_seconds,
+                )
+                return
+            except TimeoutError:
+                pass
+            try:
+                snapshot = self._runtime.side_turn_activity(
+                    session.side_id,
+                    thread_id=session.thread_id,
+                    turn_id=session.turn_id,
+                    refresh_plan=True,
+                )
+            except Exception:
+                logger.exception(
+                    "failed to refresh running Side progress card",
+                    extra={
+                        "side_id": session.side_id,
+                        "turn_id": session.turn_id,
+                    },
+                )
+                session.failed = True
+                return
+            if snapshot is None:
+                continue
+            if snapshot.revision == session.snapshot.revision:
+                continue
+            session.snapshot = snapshot
+            try:
+                card = turn_progress_card(snapshot=snapshot)
+            except Exception:
+                logger.exception(
+                    "failed to render running Side progress card",
+                    extra={
+                        "side_id": session.side_id,
+                        "turn_id": session.turn_id,
+                    },
+                )
+                session.failed = True
+                return
+            if not await self._update_side(session, card):
                 session.failed = True
                 return
 
@@ -1582,6 +1768,18 @@ class _ReplyCardPresenter:
             operation_id=session.turn_id,
         )
 
+    async def _update_side(
+        self,
+        session: _SideTurnProgressCardSession,
+        card: OutboundCard,
+    ) -> bool:
+        return await self._update_message(
+            session.message_id,
+            card,
+            binding_id=f"side:{session.side_id}",
+            operation_id=session.turn_id,
+        )
+
     async def _update_message(
         self,
         message_id: str,
@@ -1622,7 +1820,11 @@ class _ReplyCardPresenter:
 
     @staticmethod
     async def _stop_session(
-        session: _TurnProgressCardSession | _GoalReplyCardSession,
+        session: (
+            _TurnProgressCardSession
+            | _SideTurnProgressCardSession
+            | _GoalReplyCardSession
+        ),
     ) -> None:
         session.stopped.set()
         task = session.task
@@ -1636,7 +1838,8 @@ class _ReplyCardPresenter:
             logger.exception(
                 "progress card updater failed while stopping",
                 extra={
-                    "binding_id": session.binding_id,
+                    "binding_id": getattr(session, "binding_id", None),
+                    "side_id": getattr(session, "side_id", None),
                     "operation_id": getattr(
                         session,
                         "turn_id",
@@ -2275,35 +2478,26 @@ class ChannelApplication:
             terminal_reaction = _INTERRUPTED_REACTION
         else:
             terminal_reaction = _ERROR_REACTION
-        reactions_enabled = (
-            not isinstance(outcome, TurnOutcome)
-            or outcome.task_feedback.task_reactions_enabled
-        )
+        reactions_enabled = outcome.task_feedback.task_reactions_enabled
         if reactions_enabled:
             await self._reactions.freeze(outcome.turn_id)
             await self._safe_add_reaction(outcome.origin, terminal_reaction)
             await self._reactions.stop(outcome.turn_id)
-        if (
-            isinstance(outcome, TurnOutcome)
-            and outcome.task_feedback.progress_card_enabled
-        ):
+        if outcome.task_feedback.progress_card_enabled:
             try:
-                progress_delivered = await self._complete_turn_progress_card(outcome)
+                progress_delivered = await self._complete_task_progress_card(outcome)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception(
                     "terminal progress-card delivery failed",
                     extra={
-                        "binding_id": outcome.binding_id,
+                        "binding_id": getattr(outcome, "binding_id", None),
+                        "side_id": getattr(outcome, "side_id", None),
                         "turn_id": outcome.turn_id,
                     },
                 )
-                await self._progress_cards.abandon(
-                    binding_id=outcome.binding_id,
-                    thread_id=outcome.thread_id,
-                    turn_id=outcome.turn_id,
-                )
+                await self._abandon_task_progress_card(outcome)
                 progress_delivered = False
             if progress_delivered:
                 return
@@ -2329,19 +2523,17 @@ class ChannelApplication:
             detail = outcome.final_response or f"Codex Turn 状态为 {outcome.status!r}。"
             await self._reply(outcome.origin, f"任务未完成：{detail[:500]}")
             return
-        if isinstance(outcome, TurnOutcome):
-            await self._complete_turn_with_files(outcome)
-            return
-        await self._reply(
-            outcome.origin,
-            outcome.final_response or "任务已结束，未产生文本回复。",
-        )
+        await self._complete_task_with_files(outcome)
 
-    async def _complete_turn_progress_card(self, outcome: TurnOutcome) -> bool:
+    async def _complete_task_progress_card(
+        self,
+        outcome: TurnOutcome | SideTurnOutcome,
+    ) -> bool:
         terminal_status = "failed"
         final_response: str
         files: tuple[TurnFile, ...] = ()
         scope: FeishuScope | None = None
+        file_provenance_id: str | None = None
         if outcome.error is not None:
             detail = str(outcome.error).strip() or type(outcome.error).__name__
             final_response = f"任务未完成：{detail[:500]}"
@@ -2365,26 +2557,27 @@ class ChannelApplication:
             final_response = outcome.final_response or "任务已结束，未产生文本回复。"
             if has_turn_file_references(
                 tuple(getattr(outcome.result, "items", ())),
-                turn_diff=outcome.turn_diff,
+                turn_diff=self._task_turn_diff(outcome),
             ):
                 try:
-                    scope, files = self._completion_files(outcome)
+                    scope, files, file_provenance_id = (
+                        self._task_completion_files(outcome)
+                    )
                 except Exception:
                     logger.exception(
                         "failed to prepare terminal progress-card files",
                         extra={
-                            "binding_id": outcome.binding_id,
+                            "binding_id": getattr(outcome, "binding_id", None),
+                            "side_id": getattr(outcome, "side_id", None),
                             "turn_id": outcome.turn_id,
                         },
                     )
-                    await self._progress_cards.abandon(
-                        binding_id=outcome.binding_id,
-                        thread_id=outcome.thread_id,
-                        turn_id=outcome.turn_id,
-                    )
+                    await self._abandon_task_progress_card(outcome)
                     return False
 
-        def render(snapshot: TurnActivitySnapshot) -> OutboundCard:
+        def render(
+            snapshot: TurnActivitySnapshot | SideTurnActivitySnapshot,
+        ) -> OutboundCard:
             return turn_progress_card(
                 snapshot=snapshot,
                 final_response=final_response,
@@ -2392,17 +2585,46 @@ class ChannelApplication:
                 terminal_status=terminal_status,
                 collapsed=True,
                 scope=scope,
-                binding_id=(outcome.binding_id if files else None),
+                binding_id=(file_provenance_id if files else None),
                 turn_id=(outcome.turn_id if files else None),
             )
 
-        return await self._progress_cards.finish(
-            binding_id=outcome.binding_id,
+        if isinstance(outcome, TurnOutcome):
+            return await self._progress_cards.finish(
+                binding_id=outcome.binding_id,
+                thread_id=outcome.thread_id,
+                turn_id=outcome.turn_id,
+                activity=outcome.activity,
+                render=render,
+            )
+        return await self._progress_cards.finish_side(
+            side_id=outcome.side_id,
             thread_id=outcome.thread_id,
             turn_id=outcome.turn_id,
             activity=outcome.activity,
             render=render,
         )
+
+    async def _abandon_task_progress_card(
+        self,
+        outcome: TurnOutcome | SideTurnOutcome,
+    ) -> None:
+        if isinstance(outcome, TurnOutcome):
+            await self._progress_cards.abandon(
+                binding_id=outcome.binding_id,
+                thread_id=outcome.thread_id,
+                turn_id=outcome.turn_id,
+            )
+            return
+        await self._progress_cards.abandon_side(
+            side_id=outcome.side_id,
+            thread_id=outcome.thread_id,
+            turn_id=outcome.turn_id,
+        )
+
+    @staticmethod
+    def _task_turn_diff(outcome: TurnOutcome | SideTurnOutcome) -> str | None:
+        return outcome.turn_diff if isinstance(outcome, TurnOutcome) else None
 
     def _completion_files(
         self,
@@ -2422,20 +2644,57 @@ class ChannelApplication:
             turn_diff=outcome.turn_diff,
         )
 
-    async def _complete_turn_with_files(self, outcome: TurnOutcome) -> None:
+    def _side_completion_files(
+        self,
+        outcome: SideTurnOutcome,
+    ) -> tuple[FeishuScope, tuple[TurnFile, ...]]:
+        record = self._bindings.get_side_topic(outcome.side_id)
+        scope = self._scope(outcome.origin)
+        if (
+            record.parent_binding_id != outcome.parent_binding_id
+            or record.app_id != scope.app_id
+            or record.chat_id != scope.chat_id
+            or record.topic_id != scope.topic_id
+        ):
+            raise TurnFileError("本轮文件与 Side 完成消息的身份不一致。")
+        return scope, extract_turn_files(
+            tuple(getattr(outcome.result, "items", ())),
+            outcome.cwd,
+        )
+
+    def _task_completion_files(
+        self,
+        outcome: TurnOutcome | SideTurnOutcome,
+    ) -> tuple[FeishuScope, tuple[TurnFile, ...], str]:
+        if isinstance(outcome, TurnOutcome):
+            scope, files = self._completion_files(outcome)
+            return scope, files, outcome.binding_id
+        scope, files = self._side_completion_files(outcome)
+        # v4 callbacks are self-contained. The captured Parent Binding is
+        # provenance and deterministic-action identity only; paging and send
+        # never read its current state or reinterpret the Side as a Binding.
+        return scope, files, outcome.parent_binding_id
+
+    async def _complete_task_with_files(
+        self,
+        outcome: TurnOutcome | SideTurnOutcome,
+    ) -> None:
         final_response = outcome.final_response or "任务已结束，未产生文本回复。"
         items = tuple(getattr(outcome.result, "items", ()))
-        if not has_turn_file_references(items, turn_diff=outcome.turn_diff):
+        if not has_turn_file_references(
+            items,
+            turn_diff=self._task_turn_diff(outcome),
+        ):
             await self._reply(outcome.origin, final_response)
             return
         try:
-            scope, files = self._completion_files(outcome)
+            scope, files, file_provenance_id = self._task_completion_files(outcome)
             if not files:
                 await self._reply(outcome.origin, final_response)
                 return
             card = turn_files_card(
                 scope=scope,
-                binding_id=outcome.binding_id,
+                binding_id=file_provenance_id,
                 turn_id=outcome.turn_id,
                 final_response=(
                     outcome.final_response or _TURN_FILES_WITHOUT_FINAL_RESPONSE
@@ -2451,7 +2710,8 @@ class ChannelApplication:
             logger.warning(
                 "completed Turn file manifest exceeds card limit",
                 extra={
-                    "binding_id": outcome.binding_id,
+                    "binding_id": getattr(outcome, "binding_id", None),
+                    "side_id": getattr(outcome, "side_id", None),
                     "turn_id": outcome.turn_id,
                 },
             )
@@ -2463,7 +2723,8 @@ class ChannelApplication:
             logger.exception(
                 "failed to deliver completed Turn file card",
                 extra={
-                    "binding_id": outcome.binding_id,
+                    "binding_id": getattr(outcome, "binding_id", None),
+                    "side_id": getattr(outcome, "side_id", None),
                     "turn_id": outcome.turn_id,
                 },
             )
@@ -3160,16 +3421,32 @@ class ChannelApplication:
             submit_kwargs.pop("input", None)
             input_value = None
         if submission.disposition is SubmitDisposition.STEERED:
-            if not await self._safe_add_reaction(reply_origin, _STEER_REACTION):
-                await self._reply(reply_origin, "已接收 Side 调整。")
+            if submission.task_feedback.task_reactions_enabled:
+                if not await self._safe_add_reaction(reply_origin, _STEER_REACTION):
+                    await self._reply(reply_origin, "已接收 Side 调整。")
             return
         release = submission.release_receipt_attempt
         assert release is not None
         try:
-            await self._reactions.start(
-                submission.turn_id,
-                _message_id(reply_origin),
-            )
+            presenters: list[Awaitable[bool]] = []
+            if submission.task_feedback.task_reactions_enabled:
+                presenters.append(
+                    self._reactions.start(
+                        submission.turn_id,
+                        _message_id(reply_origin),
+                    )
+                )
+            if submission.task_feedback.progress_card_enabled:
+                presenters.append(
+                    self._progress_cards.start_side(
+                        side_id=submission.side_id,
+                        thread_id=submission.thread_id,
+                        turn_id=submission.turn_id,
+                        origin=reply_origin,
+                    )
+                )
+            if presenters:
+                await asyncio.gather(*presenters)
         finally:
             release()
 

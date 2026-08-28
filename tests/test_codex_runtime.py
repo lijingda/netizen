@@ -53,6 +53,7 @@ from netizen.codex_runtime import (
     SideSessionClosing,
     SideSessionState,
     SideStartFailed,
+    SideTurnActivitySnapshot,
     SideTurnOutcome,
     SkillReferenceError,
     SubmissionAdmission,
@@ -1536,6 +1537,10 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_side_snapshots_parent_turn_settings_once_at_creation(self) -> None:
         effort = self.install_model_catalog()
+        feedback = BindingTaskFeedback(
+            task_reactions_enabled=True,
+            progress_card_enabled=True,
+        )
         binding = self.store.create_binding(
             scope=self.scope,
             project_alias="test",
@@ -1545,14 +1550,20 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "dynamic-effort",
                 "priority-v2",
             ),
+            task_feedback=feedback,
         )
         self.store.assign_native_thread_id(binding.id, "native-parent")
         binding = self.store.get(binding.id)
         _binding, record, _snapshot = await self.open_side_for_binding(binding)
-        self.store.set_turn_settings(
+        self.store.set_configuration(
             binding_id=binding.id,
-            expected_revision=1,
+            expected_settings_revision=binding.settings_revision,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
             settings=None,
+            task_feedback=BindingTaskFeedback(),
+            message_context_mode=binding.message_context_mode,
+            context_anchor=None,
         )
 
         first = await self.runtime.submit_side(
@@ -1577,6 +1588,168 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual([call[2] for call in self.codex.turn_calls], [expected, expected])
         self.assertEqual(self.codex.model_calls, 1)
+        self.assertEqual(first.task_feedback, feedback)
+        self.assertEqual(second.task_feedback, feedback)
+        outcomes = [
+            item for item in self.outcomes if isinstance(item, SideTurnOutcome)
+        ]
+        self.assertEqual([item.task_feedback for item in outcomes], [feedback, feedback])
+
+    async def test_side_creation_rejects_feedback_change_during_resolution(self) -> None:
+        self.install_model_catalog()
+        binding = self.store.create_binding(
+            scope=self.scope,
+            project_alias="test",
+            creator_id="ou_owner",
+            turn_settings=BindingTurnSettings(
+                "catalog-model",
+                "dynamic-effort",
+                "priority-v2",
+            ),
+        )
+        self.store.assign_native_thread_id(binding.id, "native-parent")
+        binding = self.store.get(binding.id)
+        record = self.store.create_side_topic(
+            app_id=self.scope.app_id,
+            chat_id=self.scope.chat_id,
+            source_message_id="om-side-feedback-race",
+            parent_binding_id=binding.id,
+            creator_id="ou_owner",
+            requires_mention=False,
+        )
+        resolve = self.runtime.resolve_model_settings
+
+        async def resolve_after_feedback_change(**kwargs):
+            resolved = await resolve(**kwargs)
+            current = self.store.get(binding.id)
+            self.store.set_configuration(
+                binding_id=binding.id,
+                expected_settings_revision=current.settings_revision,
+                expected_context_revision=current.context_revision,
+                expected_feedback_revision=current.feedback_revision,
+                settings=current.turn_settings,
+                task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+                message_context_mode=current.message_context_mode,
+                context_anchor=None,
+            )
+            return resolved
+
+        self.runtime.resolve_model_settings = resolve_after_feedback_change  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(SteerRace, "任务反馈配置已变化"):
+            await self.runtime.create_side(
+                side_id=record.id,
+                binding=binding,
+                cwd=self.cwd,
+                creator_id="ou_owner",
+            )
+
+        self.assertEqual(self.codex.fork_calls, [])
+
+    async def test_side_progress_tracks_plan_steer_and_terminal_snapshot(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        feedback = BindingTaskFeedback(progress_card_enabled=True)
+        binding = self.store.create_binding(
+            scope=self.scope,
+            project_alias="test",
+            creator_id="ou_owner",
+            task_feedback=feedback,
+        )
+        self.store.assign_native_thread_id(binding.id, "native-parent")
+        binding = self.store.get(binding.id)
+        _binding, record, snapshot = await self.open_side_for_binding(binding)
+
+        started = await self.runtime.submit_side(
+            side_id=record.id,
+            input="first",
+            owner_id="ou_owner",
+            origin=SimpleNamespace(message_id="om-first"),
+        )
+        initial = self.runtime.side_turn_activity(
+            record.id,
+            thread_id=started.thread_id,
+            turn_id=started.turn_id,
+            refresh_plan=True,
+        )
+        self.assertIsInstance(initial, SideTurnActivitySnapshot)
+        observer.append(
+            thread_id=snapshot.thread_id,
+            turn_id=started.turn_id,
+            steps=(
+                TurnPlanStepSnapshot(
+                    "inspect",
+                    TurnPlanStepState.IN_PROGRESS,
+                ),
+            ),
+        )
+        with_plan = self.runtime.side_turn_activity(
+            record.id,
+            thread_id=started.thread_id,
+            turn_id=started.turn_id,
+            refresh_plan=True,
+        )
+        assert with_plan is not None
+        self.assertEqual([item.step for item in with_plan.steps], ["inspect"])
+
+        steered = await self.runtime.submit_side(
+            side_id=record.id,
+            input="adjust",
+            owner_id="ou_other",
+            origin=SimpleNamespace(message_id="om-steer"),
+        )
+        self.assertEqual(steered.task_feedback, feedback)
+        after_steer = self.runtime.side_turn_activity(record.id)
+        assert after_steer is not None
+        self.assertEqual(after_steer.steer_count, 1)
+        self.assertTrue(after_steer.plan_may_be_stale)
+
+        observer.append(
+            thread_id=snapshot.thread_id,
+            turn_id=started.turn_id,
+            steps=(
+                TurnPlanStepSnapshot(
+                    "inspect",
+                    TurnPlanStepState.COMPLETED,
+                ),
+            ),
+        )
+        await self.finish_side_turn(started)
+
+        outcome = next(
+            item
+            for item in reversed(self.outcomes)
+            if isinstance(item, SideTurnOutcome)
+        )
+        self.assertEqual(outcome.parent_binding_id, binding.id)
+        self.assertEqual(outcome.cwd, self.cwd.resolve())
+        self.assertEqual(outcome.task_feedback, feedback)
+        assert outcome.activity is not None
+        self.assertEqual(outcome.activity.side_id, record.id)
+        self.assertEqual(outcome.activity.steer_count, 1)
+        self.assertFalse(outcome.activity.plan_may_be_stale)
+        self.assertEqual(outcome.activity.steps[0].status, TurnPlanStepState.COMPLETED)
+
+    async def test_disabled_side_progress_never_observes_plan(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        _binding, record, _snapshot = await self.open_side()
+        started = await self.runtime.submit_side(
+            side_id=record.id,
+            input="quiet",
+            owner_id="ou_owner",
+            origin=SimpleNamespace(message_id="om-quiet"),
+        )
+        await self.finish_side_turn(started)
+
+        self.assertEqual(observer.calls, [])
+        outcome = next(
+            item
+            for item in reversed(self.outcomes)
+            if isinstance(item, SideTurnOutcome)
+        )
+        self.assertEqual(outcome.task_feedback, BindingTaskFeedback())
+        self.assertIsNone(outcome.activity)
 
     async def test_multiple_sides_on_one_parent_run_without_cross_side_lock(self) -> None:
         binding = self.materialized_binding()

@@ -65,6 +65,7 @@ from netizen.codex_runtime import (
     SideSessionState,
     SideSubmission,
     SideSubmissionAdmission,
+    SideTurnActivitySnapshot,
     SideTurnOutcome,
     SubmissionAdmission,
     StopDisposition,
@@ -496,6 +497,29 @@ def turn_activity_snapshot(
     )
 
 
+def side_turn_activity_snapshot(
+    *,
+    side_id: str,
+    revision: int = 1,
+    thread_id: str = "native-side-1",
+    turn_id: str = "side-turn-1",
+    state: ActiveState = ActiveState.RUNNING,
+    steps: tuple[TurnPlanStepSnapshot, ...] = (),
+) -> SideTurnActivitySnapshot:
+    return SideTurnActivitySnapshot(
+        side_id=side_id,
+        thread_id=thread_id,
+        turn_id=turn_id,
+        revision=revision,
+        state=state,
+        steer_count=0,
+        plan_available=True,
+        plan_generated=bool(steps),
+        plan_may_be_stale=False,
+        steps=steps,
+    )
+
+
 def goal_activity_snapshot(
     *,
     binding_id: str,
@@ -577,6 +601,10 @@ class StubRuntime:
         self.turn_progress_values: dict[str, TurnProgressSnapshot] = {}
         self.turn_activity_values: dict[str, TurnActivitySnapshot] = {}
         self.turn_activity_calls: list[tuple[str, str | None, str | None, bool]] = []
+        self.side_turn_activity_values: dict[str, SideTurnActivitySnapshot] = {}
+        self.side_turn_activity_calls: list[
+            tuple[str, str | None, str | None, bool]
+        ] = []
         self.goal_activity_values: dict[str, GoalActivitySnapshot] = {}
         self.goal_activity_calls: list[
             tuple[str, str | None, str | None, bool]
@@ -598,6 +626,10 @@ class StubRuntime:
         self.stop_side_calls: list[str] = []
         self.side_snapshots: dict[str, SideSessionSnapshot] = {}
         self.side_submission: SideSubmission | None = None
+        self.side_feedback: dict[
+            str,
+            tuple[BindingTaskFeedback, int],
+        ] = {}
         self.side_stop_result = StopDisposition.REQUESTED
         self.side_close_error: BaseException | None = None
         self.active_binding_change_calls: list[tuple[str | None, str | None]] = []
@@ -750,6 +782,26 @@ class StubRuntime:
             logical_turn_id is not None
             and snapshot.logical_turn_id != logical_turn_id
         ):
+            return None
+        return snapshot
+
+    def side_turn_activity(
+        self,
+        side_id: str,
+        *,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+        refresh_plan: bool = False,
+    ) -> SideTurnActivitySnapshot | None:
+        self.side_turn_activity_calls.append(
+            (side_id, thread_id, turn_id, refresh_plan)
+        )
+        snapshot = self.side_turn_activity_values.get(side_id)
+        if snapshot is None:
+            return None
+        if thread_id is not None and snapshot.thread_id != thread_id:
+            return None
+        if turn_id is not None and snapshot.turn_id != turn_id:
             return None
         return snapshot
 
@@ -1023,6 +1075,10 @@ class StubRuntime:
             last_activity=1.0,
         )
         self.side_snapshots[snapshot.side_id] = snapshot
+        self.side_feedback[snapshot.side_id] = (
+            binding.task_feedback,
+            binding.feedback_revision,
+        )
         return snapshot
 
     async def attach_side_topic(
@@ -1082,12 +1138,18 @@ class StubRuntime:
         if self.side_submission is not None:
             return self.side_submission
         snapshot = self.side_snapshot(kwargs["side_id"])
+        task_feedback, feedback_revision = self.side_feedback.get(
+            snapshot.side_id,
+            (BindingTaskFeedback(), 1),
+        )
         return SideSubmission(
             SubmitDisposition.STARTED,
             snapshot.side_id,
             snapshot.thread_id,
             f"side-turn-{len(self.submit_side_calls)}",
             lambda: None,
+            task_feedback=task_feedback,
+            feedback_revision=feedback_revision,
         )
 
     async def stop_side(self, side_id: str, *, acknowledge=None) -> StopDisposition:
@@ -8700,12 +8762,18 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    def binding_for(self, message: FakeMessage):
+    def binding_for(
+        self,
+        message: FakeMessage,
+        *,
+        task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
+    ):
         scope = self.app._scope(message)
         binding = self.store.create_binding(
             scope=scope,
             project_alias="test",
             creator_id="ou_owner",
+            task_feedback=task_feedback,
         )
         self.store.assign_native_thread_id(binding.id, f"native-{binding.id}")
         return self.store.get(binding.id)
@@ -8746,6 +8814,257 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 root_id=root_id,
             )
         )
+
+    async def open_direct_side(
+        self,
+        *,
+        task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
+    ):
+        source = FakeMessage(
+            "/side",
+            message_id="om-side-source",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            mentioned_bot=False,
+        )
+        binding = self.binding_for(source, task_feedback=task_feedback)
+        self.queue_promoted_topic(
+            chat_id="oc-direct",
+            root_id="om-side-root",
+            seed_id="om-side-seed",
+            topic_id="omt-side",
+        )
+        await self.app.handle_message(source)
+        record = self.store.side_topic_for_source(
+            app_id="cli_test",
+            source_message_id=source.id,
+        )
+        assert record is not None
+        return binding, record
+
+    async def test_side_turn_default_feedback_keeps_rich_text_terminal_reply(
+        self,
+    ) -> None:
+        binding, record = await self.open_direct_side()
+        prompt = FakeMessage(
+            "work quietly",
+            message_id="om-side-prompt",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            thread_id=record.topic_id,
+            mentioned_bot=False,
+        )
+
+        await self.app.handle_message(prompt)
+
+        self.assertEqual(self.channel.reactions, [])
+        self.assertEqual(self.channel.replies, [])
+        await self.app.handle_completion(
+            SideTurnOutcome(
+                side_id=record.id,
+                parent_binding_id=binding.id,
+                thread_id="native-side-1",
+                turn_id="side-turn-1",
+                owner_id="ou_user",
+                origin=prompt,
+                cwd=self.project,
+                result=completed_turn_result(final_response="side answer"),
+            )
+        )
+
+        self.assertEqual(self.channel.replies, [(prompt.id, "side answer")])
+        self.assertEqual(self.channel.reactions, [])
+
+    async def test_side_turn_without_progress_uses_result_files_card(self) -> None:
+        binding, record = await self.open_direct_side()
+        artifact = self.project / "side-output.txt"
+        artifact.write_text("side", encoding="utf-8")
+        prompt = FakeMessage(
+            "create a file",
+            message_id="om-side-file-prompt",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            thread_id=record.topic_id,
+            mentioned_bot=False,
+        )
+        await self.app.handle_message(prompt)
+
+        await self.app.handle_completion(
+            SideTurnOutcome(
+                side_id=record.id,
+                parent_binding_id=binding.id,
+                thread_id="native-side-1",
+                turn_id="side-turn-1",
+                owner_id="ou_user",
+                origin=prompt,
+                cwd=self.project,
+                result=completed_turn_result(
+                    file_change_item("side-output.txt"),
+                    final_response="side file ready",
+                ),
+            )
+        )
+
+        card = self.channel.replies[-1][1]
+        self.assertIsInstance(card, OutboundCard)
+        assert isinstance(card, OutboundCard)
+        visible = json.dumps(card.card, ensure_ascii=False)
+        self.assertIn("side file ready", visible)
+        self.assertIn("side-output.txt", visible)
+        self.assertNotIn("collapsible_panel", visible)
+        send_value = _card_button_value(card, "发送文件到话题")
+        self.assertEqual(send_value["v"], 4)
+        self.assertEqual(send_value["binding_id"], f"binding:v1:{binding.id}")
+        self.assertEqual(send_value["topic_id"], record.topic_id)
+
+    async def test_side_turn_progress_updates_one_card_and_keeps_files(
+        self,
+    ) -> None:
+        feedback = BindingTaskFeedback(
+            task_reactions_enabled=True,
+            progress_card_enabled=True,
+        )
+        binding, record = await self.open_direct_side(task_feedback=feedback)
+        artifact = self.project / "side-progress.txt"
+        artifact.write_text("side", encoding="utf-8")
+        initial = side_turn_activity_snapshot(side_id=record.id)
+        self.runtime.side_turn_activity_values[record.id] = initial
+        self.app._progress_cards = channel_app._ProgressCardController(
+            self.channel,
+            self.runtime,  # type: ignore[arg-type]
+            poll_seconds=0.01,
+        )
+        self.channel.reply_results.append(
+            sent_result(
+                "om-side-progress",
+                chat_id="oc-direct",
+                thread_id=record.topic_id,
+            )
+        )
+        root_updates = len(self.channel.updates)
+        prompt = FakeMessage(
+            "create with progress",
+            message_id="om-side-progress-prompt",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            thread_id=record.topic_id,
+            mentioned_bot=False,
+        )
+
+        await self.app.handle_message(prompt)
+
+        self.assertEqual(len(self.channel.replies), 1)
+        self.assertIn((prompt.id, "Typing"), self.channel.reactions)
+        running = self.channel.replies[0][1]
+        self.assertIsInstance(running, OutboundCard)
+        assert isinstance(running, OutboundCard)
+        panel = next(iter(_elements(running.card, "collapsible_panel")))
+        self.assertTrue(panel["expanded"])
+        updated = side_turn_activity_snapshot(
+            side_id=record.id,
+            revision=2,
+            steps=(
+                TurnPlanStepSnapshot(
+                    "create side file",
+                    TurnPlanStepState.COMPLETED,
+                ),
+            ),
+        )
+        self.runtime.side_turn_activity_values[record.id] = updated
+        async with asyncio.timeout(1):
+            while len(self.channel.updates) == root_updates:
+                await asyncio.sleep(0.01)
+        self.assertEqual(self.channel.updates[-1][0], "om-side-progress")
+
+        await self.app.handle_completion(
+            SideTurnOutcome(
+                side_id=record.id,
+                parent_binding_id=binding.id,
+                thread_id="native-side-1",
+                turn_id="side-turn-1",
+                owner_id="ou_user",
+                origin=prompt,
+                cwd=self.project,
+                result=completed_turn_result(
+                    file_change_item("side-progress.txt"),
+                    final_response="side progress complete",
+                ),
+                task_feedback=feedback,
+                activity=updated,
+            )
+        )
+
+        self.assertEqual(len(self.channel.replies), 1)
+        self.assertEqual(self.channel.updates[-1][0], "om-side-progress")
+        terminal = self.channel.updates[-1][1]
+        panel = next(iter(_elements(terminal, "collapsible_panel")))
+        self.assertFalse(panel["expanded"])
+        visible = json.dumps(terminal, ensure_ascii=False)
+        self.assertIn("side progress complete", visible)
+        self.assertIn("side-progress.txt", visible)
+        self.assertIn("create side file", visible)
+        self.assertIn((prompt.id, "DONE"), self.channel.reactions)
+
+    async def test_side_progress_start_failure_falls_back_at_terminal(self) -> None:
+        feedback = BindingTaskFeedback(progress_card_enabled=True)
+        binding, record = await self.open_direct_side(task_feedback=feedback)
+        activity = side_turn_activity_snapshot(side_id=record.id)
+        self.runtime.side_turn_activity_values[record.id] = activity
+        self.channel.reply_results.append(RuntimeError("progress send failed"))
+        root_updates = len(self.channel.updates)
+        prompt = FakeMessage(
+            "survive display failure",
+            message_id="om-side-progress-failed",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            thread_id=record.topic_id,
+            mentioned_bot=False,
+        )
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_message(prompt)
+        await self.app.handle_completion(
+            SideTurnOutcome(
+                side_id=record.id,
+                parent_binding_id=binding.id,
+                thread_id="native-side-1",
+                turn_id="side-turn-1",
+                owner_id="ou_user",
+                origin=prompt,
+                cwd=self.project,
+                result=completed_turn_result(
+                    final_response="side answer survives",
+                ),
+                task_feedback=feedback,
+                activity=activity,
+            )
+        )
+
+        self.assertEqual(
+            self.channel.replies[-1],
+            (prompt.id, "side answer survives"),
+        )
+        self.assertEqual(len(self.channel.updates), root_updates)
+
+    async def test_side_rejects_goal_even_when_native_goal_is_available(self) -> None:
+        self.runtime.available_capabilities = frozenset(
+            {NativeCapability.SIDE, NativeCapability.GOAL}
+        )
+        _binding, record = await self.open_direct_side()
+
+        await self.app.handle_message(
+            FakeMessage(
+                "/goal ship",
+                message_id="om-side-goal",
+                chat_id="oc-direct",
+                chat_type="p2p",
+                thread_id=record.topic_id,
+                mentioned_bot=False,
+            )
+        )
+
+        self.assertEqual(self.runtime.start_goal_calls, [])
+        self.assertIn("该命令在 Side 中不可用", str(self.channel.replies[-1][1]))
 
     async def test_side_creation_covers_all_entry_contexts_and_always_sends_fresh(
         self,
@@ -8886,7 +9205,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 "root_id": "om-quoted-control",
             },
         )
-        self.binding_for(source)
+        binding = self.binding_for(source, task_feedback=REACTIONS_ON)
         self.queue_promoted_topic(
             chat_id="oc-direct",
             root_id="om-root",
@@ -8943,14 +9262,17 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_completion(
             SideTurnOutcome(
                 side_id=submission["side_id"],
+                parent_binding_id=binding.id,
                 thread_id="native-side-1",
                 turn_id="side-turn-1",
                 owner_id="ou_user",
                 origin=origin,
+                cwd=self.project,
                 result=SimpleNamespace(
                     status=SimpleNamespace(value="completed"),
                     final_response="side answer",
                 ),
+                task_feedback=REACTIONS_ON,
             )
         )
         self.assertIn(("om-seed", "side answer"), self.channel.replies)
@@ -9047,7 +9369,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             chat_type="p2p",
             mentioned_bot=False,
         )
-        self.binding_for(source)
+        self.binding_for(source, task_feedback=REACTIONS_ON)
         self.queue_direct_topic(
             chat_id="oc-direct",
             root_id="om-root-direct",
@@ -9457,6 +9779,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             direct_record.id,
             "native-side-running",
             "side-turn-running",
+            task_feedback=REACTIONS_ON,
         )
         await self.app.handle_message(
             FakeMessage(
