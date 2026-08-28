@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-19
-amended_by: 0027
+amended_by: 0027, 0047
 related: 0008, 0015, 0016, 0021, 0025
 ---
 
@@ -11,6 +11,10 @@ related: 0008, 0015, 0016, 0021, 0025
 > Turn diff 优先、结构化 items 补充，并让新卡片通过 callback 自带 manifest 独立于
 > Binding、Project 和 Turn history。下文依赖 history 重读与 opaque file ref 的 v3
 > 回调语义仅保留为历史背景。
+>
+> [ADR 0047](0047-compose-typed-reply-cards-and-finalize-complete-goals.md) 允许 Goal exact
+> 最终物理 Turn 的 completed 文件进入 Files 模块；Goal + Files 使用 v5 完整 Reply Card
+> manifest，普通完成/进度文件卡继续使用 v4。
 
 ## 背景
 

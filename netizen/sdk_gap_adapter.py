@@ -543,7 +543,14 @@ class AppServerGoalControl:
             response_model=self._get_response_model,
         )
         goal = getattr(response, "goal", None)
-        return None if goal is None else _goal_snapshot(goal)
+        if goal is None:
+            return None
+        snapshot = _goal_snapshot(goal)
+        if snapshot.thread_id != thread_id:
+            raise GoalControlError(
+                "Codex Goal 响应与请求的原生 Thread 不一致。"
+            )
+        return snapshot
 
     async def start(self, thread_id: str, objective: str) -> GoalHandle:
         _validate_thread_id(thread_id)

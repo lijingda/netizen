@@ -3,7 +3,8 @@ name: netizen-user-guide
 description: >-
   Netizen 用户指南。Netizen 是通过官方 Codex SDK 将飞书接入原生 Codex 的 Channel。
   用户询问当前飞书机器人或会话如何使用，或询问 Netizen 的命令、会话、Side、Goal、
-  Skills、配置、状态、引用、图片、本轮文件、与 Codex App/CLI 的差异及常见限制时使用；
+  Skills、配置、任务表情、进度卡、状态、引用、图片、本轮文件、与 Codex App/CLI 的差异
+  及常见限制时使用；
   即使用户未明确说“Netizen”，只要问题指向当前飞书交互或这些 Channel 能力也应触发。
   仅用于使用咨询；普通编码任务以及 Netizen 工程实现、架构、部署、调试或代码修改不应触发。
 ---
@@ -25,6 +26,13 @@ Netizen 是通过官方 Codex SDK 将飞书接入原生 Codex 的 Channel，不�
 4. 手册用于解释稳定语义。命令是否在当前实例开放、当前会话状态和动态 Model/Effort/Speed 选项，以运行时 `/help`、`/status`、卡片或明确错误为准。
 5. 若运行时结果与手册冲突，优先相信运行时证据，并说明可能存在版本差异；不要猜测隐藏状态。
 6. 使用用户的语言，优先采用场景化、易懂的表达。涉及 `/stop`、`/release`、并发 Project、Side 过期、原生历史删除或本轮文件时必须保留关键风险：materialized `/delete` 会永久删除原生 Thread、spawned descendants、Codex App/CLI 历史与 Binding；`/release` 只取消当前连接订阅，不删除历史，也不证明 writer 已立即释放；本轮文件按需发送当前内容，不是 Turn 完成时快照，也不会扫描未进入 native Turn diff/items 的输出。
+7. 用户询问执行反馈时，明确 Task Reaction 与 Progress Card 是会话的两个独立选项，可在
+   `/new` 或 idle 时的 `/config` 开启，默认都关闭。Side 创建时冻结 Parent 当时的两项选择，
+   后续 Parent 配置不传播；Task Reaction 作用于普通与 Side Turn，不作用于 Goal；Progress
+   Card 决定普通/Side Turn 是否使用 Activity 卡，以及 Goal 的单张组合卡是否加入 Activity
+   模块。Activity 只逐步展示状态和 checklist，计划步骤经过常见敏感模式过滤，不显示耗时、
+   百分比、ETA、reasoning 或 raw tool/command output。普通/Side Turn 关闭时仍是无文件
+   富文本/静态文本、有文件完成卡；Goal 卡本身始终存在。展示失败不会改变 Codex execution。
 
 ## 边界
 

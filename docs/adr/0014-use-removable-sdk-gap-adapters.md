@@ -3,7 +3,7 @@ status: accepted
 date: 2026-08-10
 amends: 0008, 0009, 0012
 related: 0010, 0013
-amended_by: 0018
+amended_by: 0018, 0047
 ---
 
 # 用可逐项移除的薄 Adapter 补齐 Python SDK 高层能力缺口
@@ -11,6 +11,11 @@ amended_by: 0018
 > `/skills` 浏览入口已由
 > [ADR 0018](0018-remove-skills-command.md) 删除；本 ADR 定义的 SkillCatalog 与
 > `$skill-name` live revalidation 边界继续有效。下文保留原决定的历史背景。
+>
+> [ADR 0047](0047-compose-typed-reply-cards-and-finalize-complete-goals.md) 将 Goal 展示收敛为
+> 单张组合回复卡，并规定只有四项终态证据完整、Goal 为 complete 且 exact final Turn 为
+> completed 时自动 clear；其他状态与收尾不确定均保留 Goal。下文“显式 clear”仍保留为
+> 用户控制入口，不再表示 completed Goal 必须由用户清理。
 
 ## 背景
 

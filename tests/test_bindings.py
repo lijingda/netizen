@@ -13,12 +13,14 @@ from netizen.bindings import (
     BindingCursor,
     BindingConflict,
     BindingContextRevisionConflict,
+    BindingFeedbackRevisionConflict,
     BindingNotFound,
     BindingQuery,
     BindingQueryBusy,
     BindingQueryTimeout,
     BindingSettingsRevisionConflict,
     BindingStore,
+    BindingTaskFeedback,
     BindingTurnSettings,
     ProjectConflict,
     ProjectDisabled,
@@ -33,7 +35,7 @@ from netizen.bindings import (
     _binding_inventory_statement,
     _side_inventory_statement,
     _Transaction,
-    migrate_channel_database_v5_to_v6,
+    migrate_channel_database_v6_to_v7,
 )
 from netizen.domain import (
     FeishuScope,
@@ -83,6 +85,8 @@ class BindingStoreTest(unittest.TestCase):
         )
         self.assertIsNone(first.context_anchor)
         self.assertEqual(first.context_revision, 1)
+        self.assertEqual(first.task_feedback, BindingTaskFeedback())
+        self.assertEqual(first.feedback_revision, 1)
         self.assertEqual(self.store.active_binding(self.scope.key).id, second.id)
         bindings = self.store.list_bindings(self.scope.key)
         self.assertEqual({binding.id for binding in bindings}, {first.id, second.id})
@@ -143,6 +147,71 @@ class BindingStoreTest(unittest.TestCase):
                 ("model", binding.id),
             )
         self.assertIsNone(self.store.get(binding.id).turn_settings)
+
+    def test_task_feedback_is_persistent_atomic_and_revision_guarded(self) -> None:
+        binding = self.create()
+        enabled = BindingTaskFeedback(
+            task_reactions_enabled=True,
+            progress_card_enabled=True,
+        )
+
+        unchanged = self.store.set_configuration(
+            binding_id=binding.id,
+            expected_settings_revision=1,
+            expected_context_revision=1,
+            expected_feedback_revision=1,
+            settings=None,
+            task_feedback=BindingTaskFeedback(),
+            message_context_mode=MentionContextMode.CURRENT_ONLY,
+            context_anchor=None,
+        )
+        self.assertEqual(unchanged.feedback_revision, 1)
+
+        configured = self.store.set_configuration(
+            binding_id=binding.id,
+            expected_settings_revision=1,
+            expected_context_revision=1,
+            expected_feedback_revision=1,
+            settings=None,
+            task_feedback=enabled,
+            message_context_mode=MentionContextMode.CURRENT_ONLY,
+            context_anchor=None,
+        )
+        self.assertEqual(configured.task_feedback, enabled)
+        self.assertEqual(configured.feedback_revision, 2)
+        self.assertEqual(configured.settings_revision, 1)
+        self.assertEqual(configured.context_revision, 1)
+
+        with self.assertRaises(BindingFeedbackRevisionConflict):
+            self.store.set_configuration(
+                binding_id=binding.id,
+                expected_settings_revision=1,
+                expected_context_revision=1,
+                expected_feedback_revision=1,
+                settings=BindingTurnSettings("model", "high", "priority"),
+                task_feedback=BindingTaskFeedback(),
+                message_context_mode=MentionContextMode.CURRENT_ONLY,
+                context_anchor=None,
+            )
+        self.assertEqual(self.store.get(binding.id), configured)
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store._connection.execute(
+                "UPDATE bindings SET progress_card_enabled = 2 "
+                "WHERE binding_id = ?",
+                (binding.id,),
+            )
+        with self.assertRaisesRegex(ValueError, "booleans"):
+            BindingTaskFeedback(task_reactions_enabled=1)  # type: ignore[arg-type]
+
+        created_enabled = self.store.create_binding(
+            scope=self.scope,
+            project_alias="none",
+            creator_id="ou_user",
+            task_feedback=enabled,
+        )
+        self.assertEqual(created_enabled.task_feedback, enabled)
+        self.assertEqual(created_enabled.feedback_revision, 1)
 
     def test_catch_up_context_is_group_or_topic_only_and_requires_anchor(
         self,
@@ -240,7 +309,9 @@ class BindingStoreTest(unittest.TestCase):
                 binding_id=direct.id,
                 expected_settings_revision=1,
                 expected_context_revision=1,
+                expected_feedback_revision=1,
                 settings=BindingTurnSettings("model", "high", "priority"),
+                task_feedback=BindingTaskFeedback(),
                 message_context_mode=MentionContextMode.CATCH_UP,
                 context_anchor=anchor,
             )
@@ -265,7 +336,9 @@ class BindingStoreTest(unittest.TestCase):
             binding_id=binding.id,
             expected_settings_revision=1,
             expected_context_revision=1,
+            expected_feedback_revision=1,
             settings=selected,
+            task_feedback=BindingTaskFeedback(),
             message_context_mode=MentionContextMode.CATCH_UP,
             context_anchor=initial,
         )
@@ -274,12 +347,16 @@ class BindingStoreTest(unittest.TestCase):
         self.assertEqual(configured.message_context_mode, MentionContextMode.CATCH_UP)
         self.assertEqual(configured.context_anchor, initial)
         self.assertEqual(configured.context_revision, 2)
+        self.assertEqual(configured.task_feedback, BindingTaskFeedback())
+        self.assertEqual(configured.feedback_revision, 1)
 
         inherited = self.store.set_configuration(
             binding_id=binding.id,
             expected_settings_revision=2,
             expected_context_revision=2,
+            expected_feedback_revision=1,
             settings=None,
+            task_feedback=BindingTaskFeedback(task_reactions_enabled=True),
             message_context_mode=MentionContextMode.CATCH_UP,
             context_anchor=None,
         )
@@ -287,13 +364,20 @@ class BindingStoreTest(unittest.TestCase):
         self.assertEqual(inherited.settings_revision, 3)
         self.assertEqual(inherited.context_anchor, initial)
         self.assertEqual(inherited.context_revision, 2)
+        self.assertEqual(
+            inherited.task_feedback,
+            BindingTaskFeedback(task_reactions_enabled=True),
+        )
+        self.assertEqual(inherited.feedback_revision, 2)
 
         with self.assertRaises(BindingContextRevisionConflict):
             self.store.set_configuration(
                 binding_id=binding.id,
                 expected_settings_revision=3,
                 expected_context_revision=1,
+                expected_feedback_revision=2,
                 settings=selected,
+                task_feedback=BindingTaskFeedback(task_reactions_enabled=True),
                 message_context_mode=MentionContextMode.CURRENT_ONLY,
                 context_anchor=None,
             )
@@ -306,13 +390,16 @@ class BindingStoreTest(unittest.TestCase):
             binding_id=binding.id,
             expected_settings_revision=3,
             expected_context_revision=2,
+            expected_feedback_revision=2,
             settings=None,
+            task_feedback=BindingTaskFeedback(task_reactions_enabled=True),
             message_context_mode=MentionContextMode.CURRENT_ONLY,
             context_anchor=None,
         )
         self.assertEqual(cleared.settings_revision, 3)
         self.assertEqual(cleared.context_revision, 3)
         self.assertIsNone(cleared.context_anchor)
+        self.assertEqual(cleared.feedback_revision, 2)
 
     def test_context_anchor_commit_is_revision_guarded(self) -> None:
         group = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
@@ -692,7 +779,7 @@ class BindingStoreTest(unittest.TestCase):
             finally:
                 second.close()
 
-    def test_schema_contains_only_binding_scoped_settings_and_context_intent(
+    def test_schema_contains_only_binding_scoped_configuration_intent(
         self,
     ) -> None:
         connection = self.store._connection  # Architecture contract.
@@ -743,6 +830,9 @@ class BindingStoreTest(unittest.TestCase):
                 "context_anchor_message_id",
                 "context_anchor_create_time_ms",
                 "context_revision",
+                "task_reactions_enabled",
+                "progress_card_enabled",
+                "feedback_revision",
             }.issubset(columns)
         )
         side_columns = {
@@ -932,10 +1022,10 @@ class BindingStoreManagementSchemaTest(unittest.TestCase):
         finally:
             store.close()
 
-    def test_v5_database_is_rejected_without_mutation(self) -> None:
+    def test_v6_database_is_rejected_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "channel.sqlite3"
-            _create_frozen_v5_database(path)
+            _create_frozen_v6_database(path)
             before_bytes = path.read_bytes()
             before = sqlite3.connect(path)
             try:
@@ -971,20 +1061,20 @@ class BindingStoreManagementSchemaTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     after.execute("SELECT version FROM schema_version").fetchone()[0],
-                    5,
+                    6,
                 )
             finally:
                 after.close()
 
-    def test_explicit_v5_to_v6_migration_preserves_rows_and_is_idempotent(
+    def test_explicit_v6_to_v7_migration_preserves_rows_and_is_idempotent(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "channel.sqlite3"
-            _create_migratable_v5_database(path)
+            _create_migratable_v6_database(path)
 
-            self.assertTrue(migrate_channel_database_v5_to_v6(path))
-            self.assertFalse(migrate_channel_database_v5_to_v6(path))
+            self.assertTrue(migrate_channel_database_v6_to_v7(path))
+            self.assertFalse(migrate_channel_database_v6_to_v7(path))
 
             connection = sqlite3.connect(path)
             try:
@@ -992,7 +1082,7 @@ class BindingStoreManagementSchemaTest(unittest.TestCase):
                     connection.execute(
                         "SELECT version FROM schema_version"
                     ).fetchone()[0],
-                    6,
+                    7,
                 )
                 self.assertEqual(
                     connection.execute(
@@ -1000,11 +1090,25 @@ class BindingStoreManagementSchemaTest(unittest.TestCase):
                         SELECT binding_id, message_context_mode,
                                context_anchor_message_id,
                                context_anchor_create_time_ms,
-                               context_revision
+                               context_revision,
+                               task_reactions_enabled,
+                               progress_card_enabled,
+                               feedback_revision
                         FROM bindings
                         """
                     ).fetchall(),
-                    [("legacy-binding", "current-only", None, None, 1)],
+                    [
+                        (
+                            "legacy-binding",
+                            "current-only",
+                            None,
+                            None,
+                            4,
+                            0,
+                            0,
+                            1,
+                        )
+                    ],
                 )
                 self.assertEqual(
                     connection.execute(
@@ -1014,12 +1118,7 @@ class BindingStoreManagementSchemaTest(unittest.TestCase):
                 )
                 with self.assertRaises(sqlite3.IntegrityError):
                     connection.execute(
-                        """
-                        UPDATE bindings
-                        SET message_context_mode = 'catch-up',
-                            context_anchor_message_id = 'om_anchor',
-                            context_anchor_create_time_ms = 1
-                        """
+                        "UPDATE bindings SET task_reactions_enabled = 2"
                     )
             finally:
                 connection.close()
@@ -1031,18 +1130,22 @@ class BindingStoreManagementSchemaTest(unittest.TestCase):
                     binding.message_context_mode,
                     MentionContextMode.CURRENT_ONLY,
                 )
+                self.assertEqual(binding.settings_revision, 3)
                 self.assertIsNone(binding.context_anchor)
+                self.assertEqual(binding.context_revision, 4)
+                self.assertEqual(binding.task_feedback, BindingTaskFeedback())
+                self.assertEqual(binding.feedback_revision, 1)
             finally:
                 migrated.close()
 
-    def test_explicit_migration_rejects_partial_v5_without_mutation(self) -> None:
+    def test_explicit_migration_rejects_partial_v6_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "channel.sqlite3"
-            _create_frozen_v5_database(path)
+            _create_frozen_v6_database(path)
             before = path.read_bytes()
 
             with self.assertRaisesRegex(RuntimeError, "missing required tables"):
-                migrate_channel_database_v5_to_v6(path)
+                migrate_channel_database_v6_to_v7(path)
 
             self.assertEqual(path.read_bytes(), before)
 
@@ -1612,7 +1715,7 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("USE TEMP B-TREE", side_plan)
 
 
-def _create_migratable_v5_database(path: Path) -> None:
+def _create_migratable_v6_database(path: Path) -> None:
     scope = FeishuScope("cli_test", "oc_legacy", ScopeKind.DIRECT)
     connection = sqlite3.connect(path)
     try:
@@ -1620,7 +1723,7 @@ def _create_migratable_v5_database(path: Path) -> None:
             """
             PRAGMA foreign_keys = ON;
             CREATE TABLE schema_version (version INTEGER NOT NULL);
-            INSERT INTO schema_version(version) VALUES (5);
+            INSERT INTO schema_version(version) VALUES (6);
             CREATE TABLE scopes (
                 scope_key TEXT PRIMARY KEY,
                 app_id TEXT NOT NULL,
@@ -1639,6 +1742,10 @@ def _create_migratable_v5_database(path: Path) -> None:
                 effort_id TEXT,
                 service_tier_id TEXT,
                 settings_revision INTEGER NOT NULL DEFAULT 1,
+                message_context_mode TEXT NOT NULL DEFAULT 'current-only',
+                context_anchor_message_id TEXT,
+                context_anchor_create_time_ms INTEGER,
+                context_revision INTEGER NOT NULL DEFAULT 1,
                 creator_id TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 activated_at TEXT NOT NULL,
@@ -1700,9 +1807,13 @@ def _create_migratable_v5_database(path: Path) -> None:
             INSERT INTO bindings(
                 binding_id, scope_key, project_alias, native_thread_id,
                 model_id, effort_id, service_tier_id, settings_revision,
+                message_context_mode, context_anchor_message_id,
+                context_anchor_create_time_ms, context_revision,
                 creator_id, created_at, activated_at, ever_activated
-            ) VALUES (?, ?, 'legacy', 'thread-legacy', NULL, NULL, NULL, 3,
-                      'ou_legacy', ?, ?, 1)
+            ) VALUES (
+                ?, ?, 'legacy', 'thread-legacy', NULL, NULL, NULL, 3,
+                'current-only', NULL, NULL, 4, 'ou_legacy', ?, ?, 1
+            )
             """,
             (
                 "legacy-binding",
@@ -1734,14 +1845,14 @@ def _create_migratable_v5_database(path: Path) -> None:
         connection.close()
 
 
-def _create_frozen_v5_database(path: Path) -> None:
+def _create_frozen_v6_database(path: Path) -> None:
     scope = FeishuScope("cli_test", "oc_legacy", ScopeKind.DIRECT)
     connection = sqlite3.connect(path)
     try:
         connection.executescript(
             """
             CREATE TABLE schema_version (version INTEGER NOT NULL);
-            INSERT INTO schema_version(version) VALUES (5);
+            INSERT INTO schema_version(version) VALUES (6);
             CREATE TABLE scopes (
                 scope_key TEXT PRIMARY KEY,
                 app_id TEXT NOT NULL,

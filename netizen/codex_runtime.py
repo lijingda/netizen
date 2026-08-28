@@ -23,6 +23,7 @@ from openai_codex.types import ThreadTokenUsageUpdatedNotification
 
 from .bindings import (
     BindingStore,
+    BindingTaskFeedback,
     BindingTurnSettings,
     SideTopicConflict,
     SideTopicState,
@@ -59,6 +60,7 @@ _NOT_MATERIALIZED_SUFFIX = (
 )
 _STOP_ACK_ATTEMPT_TIMEOUT_SECONDS = 5.0
 _COMPACTION_TERMINAL_TIMEOUT_SECONDS = 600.0
+_GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS = 20.0
 _THREAD_LIST_PAGE_LIMIT = 100
 _THREAD_CATALOG_MAX_PAGES = 1_000
 _THREAD_CATALOG_MAX_ITEMS = 100_000
@@ -298,6 +300,12 @@ class GoalOperationState(str, Enum):
     UNKNOWN = "goal-unknown"
 
 
+class GoalFinalizationStatus(str, Enum):
+    NOT_APPLICABLE = "not-applicable"
+    CLEARED = "cleared"
+    UNKNOWN = "unknown"
+
+
 class ThreadLifecycleState(str, Enum):
     RENAMING = "renaming"
     ARCHIVING = "archiving"
@@ -342,6 +350,12 @@ class Submission:
     thread_id: str
     turn_id: str
     release_receipt_attempt: Callable[[], None] | None = None
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+
+    def __post_init__(self) -> None:
+        if self.feedback_revision < 1:
+            raise ValueError("feedback revision must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,6 +371,12 @@ class GoalSubmission:
     thread_id: str
     logical_turn_id: str
     release_receipt_attempt: Callable[[], None]
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+
+    def __post_init__(self) -> None:
+        if self.feedback_revision < 1:
+            raise ValueError("feedback revision must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,6 +386,12 @@ class SideSubmission:
     thread_id: str
     turn_id: str
     release_receipt_attempt: Callable[[], None] | None = None
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+
+    def __post_init__(self) -> None:
+        if self.feedback_revision < 1:
+            raise ValueError("feedback revision must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,6 +427,82 @@ class TurnProgressSnapshot:
     plan_generated: bool
     plan_may_be_stale: bool
     steps: tuple[TurnPlanStepSnapshot, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TurnActivitySnapshot:
+    """Latest bounded display projection for one exact active Turn.
+
+    The projection keeps only the current state and latest full plan
+    replacement. It is process-local display data, not a Turn history or a
+    second terminal-state authority.
+    """
+
+    binding_id: str
+    thread_id: str
+    turn_id: str
+    revision: int
+    state: ActiveState
+    steer_count: int
+    plan_available: bool
+    plan_generated: bool
+    plan_may_be_stale: bool
+    steps: tuple[TurnPlanStepSnapshot, ...]
+
+    def __post_init__(self) -> None:
+        if not self.binding_id or not self.thread_id or not self.turn_id:
+            raise ValueError("Turn activity identity must not be empty")
+        if self.revision < 1:
+            raise ValueError("Turn activity revision must be positive")
+        if self.steer_count < 0:
+            raise ValueError("Turn activity steer count must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
+class SideTurnActivitySnapshot:
+    """Latest bounded display projection for one exact active Side Turn."""
+
+    side_id: str
+    thread_id: str
+    turn_id: str
+    revision: int
+    state: ActiveState
+    steer_count: int
+    plan_available: bool
+    plan_generated: bool
+    plan_may_be_stale: bool
+    steps: tuple[TurnPlanStepSnapshot, ...]
+
+    def __post_init__(self) -> None:
+        if not self.side_id or not self.thread_id or not self.turn_id:
+            raise ValueError("Side Turn activity identity must not be empty")
+        if self.revision < 1:
+            raise ValueError("Side Turn activity revision must be positive")
+        if self.steer_count < 0:
+            raise ValueError(
+                "Side Turn activity steer count must be non-negative"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class GoalActivitySnapshot:
+    """Latest bounded display projection for one exact native Goal run."""
+
+    binding_id: str
+    thread_id: str
+    logical_turn_id: str
+    physical_turn_id: str | None
+    revision: int
+    state: GoalOperationState
+    plan_available: bool
+    plan_generated: bool
+    steps: tuple[TurnPlanStepSnapshot, ...]
+
+    def __post_init__(self) -> None:
+        if not self.binding_id or not self.thread_id or not self.logical_turn_id:
+            raise ValueError("Goal activity identity must not be empty")
+        if self.revision < 1:
+            raise ValueError("Goal activity revision must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,6 +623,7 @@ class SubmissionAdmission:
     turn_id: str | None
     settings_revision: int
     context_revision: int = 1
+    feedback_revision: int = 1
 
     def __post_init__(self) -> None:
         if self.revision < 0:
@@ -529,6 +632,8 @@ class SubmissionAdmission:
             raise ValueError("settings revision must be positive")
         if self.context_revision < 1:
             raise ValueError("context revision must be positive")
+        if self.feedback_revision < 1:
+            raise ValueError("feedback revision must be positive")
         if (self.thread_id is None) != (self.turn_id is None):
             raise ValueError(
                 "submission admission thread_id and turn_id must both be set or unset"
@@ -563,6 +668,19 @@ class TurnOutcome:
     # ``turn/diff/updated`` notification for this exact Turn.  It is carried
     # only through completion delivery and is never persisted by Netizen.
     turn_diff: str | None = None
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+    activity: TurnActivitySnapshot | None = None
+
+    def __post_init__(self) -> None:
+        if self.feedback_revision < 1:
+            raise ValueError("feedback revision must be positive")
+        if self.activity is not None and (
+            self.activity.binding_id != self.binding_id
+            or self.activity.thread_id != self.thread_id
+            or self.activity.turn_id != self.turn_id
+        ):
+            raise ValueError("Turn outcome activity belongs to another Turn")
 
     @property
     def final_response(self) -> str | None:
@@ -596,21 +714,53 @@ class GoalOutcome:
     origin: object
     goal: GoalSnapshot | None = None
     final_physical_turn_id: str | None = None
+    final_turn_status: str | None = None
+    final_items: tuple[object, ...] = ()
     final_response: str | None = None
     error: BaseException | None = None
     background_cleanup_requested: bool = False
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+    activity: GoalActivitySnapshot | None = None
+    finalization: GoalFinalizationStatus = GoalFinalizationStatus.NOT_APPLICABLE
+    finalization_error: BaseException | None = None
+
+    def __post_init__(self) -> None:
+        if self.feedback_revision < 1:
+            raise ValueError("feedback revision must be positive")
+        if self.activity is not None and (
+            self.activity.binding_id != self.binding_id
+            or self.activity.thread_id != self.thread_id
+            or self.activity.logical_turn_id != self.logical_turn_id
+        ):
+            raise ValueError("Goal outcome activity belongs to another Goal run")
 
 
 @dataclass(frozen=True, slots=True)
 class SideTurnOutcome:
     side_id: str
+    parent_binding_id: str
     thread_id: str
     turn_id: str
     owner_id: str
     origin: object
+    cwd: Path
     result: object | None = None
     error: BaseException | None = None
     background_cleanup_requested: bool = False
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+    activity: SideTurnActivitySnapshot | None = None
+
+    def __post_init__(self) -> None:
+        if self.feedback_revision < 1:
+            raise ValueError("feedback revision must be positive")
+        if self.activity is not None and (
+            self.activity.side_id != self.side_id
+            or self.activity.thread_id != self.thread_id
+            or self.activity.turn_id != self.turn_id
+        ):
+            raise ValueError("Side outcome activity belongs to another Side Turn")
 
     @property
     def final_response(self) -> str | None:
@@ -663,6 +813,9 @@ class _ActiveTurn:
     cleanup_ready: asyncio.Event = field(default_factory=asyncio.Event)
     terminal_stream_safe: bool = False
     latest_diff: str | None = None
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+    activity_revision: int = 1
     steer_count: int = 0
     plan_cursor: int = 0
     plan_generated: bool = False
@@ -700,8 +853,20 @@ class _ActiveGoal:
     receipt_attempted: asyncio.Event
     state: GoalOperationState
     persisted: GoalSnapshot | None = None
+    generation_created_at: int | None = None
+    generation_token_budget: int | None = None
     stream_terminal: GoalStreamTerminal | None = None
+    final_turn_status: str | None = None
+    final_items: tuple[object, ...] = ()
     final_response: str | None = None
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+    activity_revision: int = 1
+    activity_turn_id: str | None = None
+    plan_cursor: int = 0
+    plan_generated: bool = False
+    plan_available: bool = True
+    plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
     pause_attempted: bool = False
     interrupt_acknowledged: bool = False
     cleanup_required: bool = False
@@ -709,6 +874,21 @@ class _ActiveGoal:
     terminal_observed: bool = False
     cleanup_ready: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task[None] | None = None
+
+
+def _same_goal_generation(
+    active: _ActiveGoal,
+    snapshot: GoalSnapshot,
+) -> bool:
+    """Compare every immutable Goal identity field exposed by the SDK."""
+
+    return (
+        active.generation_created_at is not None
+        and snapshot.thread_id == active.thread_id
+        and snapshot.created_at == active.generation_created_at
+        and snapshot.objective == active.objective
+        and snapshot.token_budget == active.generation_token_budget
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -749,6 +929,17 @@ class _ActiveSideTurn:
     cleanup_succeeded: bool = False
     terminal_observed: bool = False
     cleanup_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
+    activity_revision: int = 1
+    steer_count: int = 0
+    plan_cursor: int = 0
+    plan_generated: bool = False
+    plan_available: bool = True
+    plan_may_be_stale: bool = False
+    plan_stale_after_cursor: int | None = None
+    plan_last_update_cursor: int | None = None
+    plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
     task: asyncio.Task[None] | None = None
 
 
@@ -762,6 +953,8 @@ class _SideSession:
     cwd: Path
     creator_id: str
     turn_settings: TurnModelSettings | None
+    task_feedback: BindingTaskFeedback
+    feedback_revision: int
     last_activity: float
     state: SideSessionState = SideSessionState.OPEN
     topic_id: str | None = None
@@ -1361,6 +1554,8 @@ class CodexRuntime:
                 "再使用 /side。"
             )
         prepared_revision = prepared.settings_revision
+        prepared_feedback_revision = prepared.feedback_revision
+        prepared_feedback = prepared.task_feedback
         configured = prepared.turn_settings
         resolved_settings = None
         if configured is not None:
@@ -1388,6 +1583,10 @@ class CodexRuntime:
                 )
             if current.settings_revision != prepared_revision:
                 raise SteerRace("创建 Side 期间会话配置已变化，请重新发送 /side。")
+            if current.feedback_revision != prepared_feedback_revision:
+                raise SteerRace(
+                    "创建 Side 期间任务反馈配置已变化，请重新发送 /side。"
+                )
             existing = self._sides.get(side_id)
             if existing is not None:
                 return self._side_snapshot(existing)
@@ -1395,6 +1594,12 @@ class CodexRuntime:
             current = self._bindings.get(binding.id)
             if not current.active or current.native_thread_id is None:
                 raise SteerRace("创建 Side 期间当前会话已变化，请重新发送 /side。")
+            if current.settings_revision != prepared_revision:
+                raise SteerRace("创建 Side 期间会话配置已变化，请重新发送 /side。")
+            if current.feedback_revision != prepared_feedback_revision:
+                raise SteerRace(
+                    "创建 Side 期间任务反馈配置已变化，请重新发送 /side。"
+                )
             parent_active = self._active.get(binding.id)
             if (
                 parent_active is not None
@@ -1495,6 +1700,8 @@ class CodexRuntime:
                         cwd=cwd.resolve(),
                         creator_id=creator_id,
                         turn_settings=resolved_settings,
+                        task_feedback=prepared_feedback,
+                        feedback_revision=prepared_feedback_revision,
                         last_activity=asyncio.get_running_loop().time(),
                         state=SideSessionState.CLOSING,
                     )
@@ -1526,6 +1733,8 @@ class CodexRuntime:
                 cwd=cwd.resolve(),
                 creator_id=creator_id,
                 turn_settings=resolved_settings,
+                task_feedback=prepared_feedback,
+                feedback_revision=prepared_feedback_revision,
                 last_activity=asyncio.get_running_loop().time(),
             )
             self._sides[side_id] = session
@@ -1640,6 +1849,9 @@ class CodexRuntime:
                     raise SideSessionClosing(
                         "当前 Side Turn 正在停止，暂不接受新消息。"
                     )
+                if active.task_feedback.progress_card_enabled:
+                    self._refresh_turn_plan(active)
+                stale_after_cursor = active.plan_cursor
                 try:
                     await active.handle.steer(native_input)
                 except asyncio.CancelledError:
@@ -1661,6 +1873,15 @@ class CodexRuntime:
                         "Codex Side steer 结果未确认；服务已停止接收新任务，"
                         "请重启服务。"
                     ) from error
+                active.steer_count += 1
+                last_update = active.plan_last_update_cursor
+                if last_update is not None and last_update > stale_after_cursor:
+                    active.plan_may_be_stale = False
+                    active.plan_stale_after_cursor = None
+                else:
+                    active.plan_may_be_stale = True
+                    active.plan_stale_after_cursor = stale_after_cursor
+                active.activity_revision += 1
                 session.last_activity = asyncio.get_running_loop().time()
                 self._touch_side_topic(side_id)
                 return SideSubmission(
@@ -1668,6 +1889,8 @@ class CodexRuntime:
                     side_id,
                     active.handle.thread_id,
                     active.handle.id,
+                    task_feedback=active.task_feedback,
+                    feedback_revision=active.feedback_revision,
                 )
 
             turn_kwargs: dict[str, object] = {}
@@ -1704,6 +1927,8 @@ class CodexRuntime:
                         owner_id=owner_id,
                         origin=origin,
                         receipt_attempted=receipt_attempted,
+                        task_feedback=session.task_feedback,
+                        feedback_revision=session.feedback_revision,
                     )
                     session.active = active
                     session.last_activity = asyncio.get_running_loop().time()
@@ -1716,6 +1941,8 @@ class CodexRuntime:
                         session.thread.id,
                         handle.id,
                         receipt_attempted.set,
+                        task_feedback=active.task_feedback,
+                        feedback_revision=active.feedback_revision,
                     )
 
         if start_error is not None:
@@ -1745,6 +1972,7 @@ class CodexRuntime:
                 return StopDisposition.NOT_RUNNING
             if active.state is ActiveState.RUNNING:
                 active.state = ActiveState.STOPPING
+                active.activity_revision += 1
                 session.revision += 1
             if acknowledge is not None:
                 try:
@@ -1786,7 +2014,9 @@ class CodexRuntime:
                 self._cancel_side_idle(session)
                 active = session.active
                 if active is not None:
-                    active.state = ActiveState.STOPPING
+                    if active.state is ActiveState.RUNNING:
+                        active.state = ActiveState.STOPPING
+                        active.activity_revision += 1
                     active.receipt_attempted.set()
                     if active.cleanup_required:
                         active.cleanup_ready.set()
@@ -2678,11 +2908,13 @@ class CodexRuntime:
         binding_id: str,
         expected_settings_revision: int,
         expected_context_revision: int,
+        expected_feedback_revision: int,
         settings: BindingTurnSettings | None,
+        task_feedback: BindingTaskFeedback,
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
     ) -> ThreadBinding:
-        """Atomically update Turn settings and Mention Context Mode."""
+        """Atomically update Turn settings, context, and task feedback."""
 
         if not self._accepting:
             raise RuntimeClosed("服务正在停止，暂不能修改会话配置。")
@@ -2722,13 +2954,16 @@ class CodexRuntime:
                 binding_id=binding_id,
                 expected_settings_revision=expected_settings_revision,
                 expected_context_revision=expected_context_revision,
+                expected_feedback_revision=expected_feedback_revision,
                 settings=settings,
+                task_feedback=task_feedback,
                 message_context_mode=message_context_mode,
                 context_anchor=context_anchor,
             )
             if (
                 updated.settings_revision != binding.settings_revision
                 or updated.context_revision != binding.context_revision
+                or updated.feedback_revision != binding.feedback_revision
             ):
                 self._advance_admission_revision(binding_id)
             return updated
@@ -2778,6 +3013,7 @@ class CodexRuntime:
                 turn_id=active.handle.id if active is not None else None,
                 settings_revision=binding.settings_revision,
                 context_revision=binding.context_revision,
+                feedback_revision=binding.feedback_revision,
             )
 
     async def submit(
@@ -2801,6 +3037,7 @@ class CodexRuntime:
             )
         prepared_settings_revision = prepared_binding.settings_revision
         prepared_context_revision = prepared_binding.context_revision
+        prepared_feedback_revision = prepared_binding.feedback_revision
         configured_settings = prepared_binding.turn_settings
         if admission is not None and (
             admission.settings_revision != prepared_settings_revision
@@ -2813,6 +3050,12 @@ class CodexRuntime:
         ):
             raise SteerRace(
                 "准备本条消息期间上下文边界已变化，本条消息未执行，请重新发送。"
+            )
+        if admission is not None and (
+            admission.feedback_revision != prepared_feedback_revision
+        ):
+            raise SteerRace(
+                "准备本条消息期间任务反馈配置已变化，本条消息未执行，请重新发送。"
             )
         if prepared_binding.message_context_mode is MentionContextMode.CATCH_UP:
             if admission is None or context_commit is None:
@@ -2831,8 +3074,17 @@ class CodexRuntime:
                 raise SteerRace(
                     "准备本条消息期间会话配置已变化，本条消息未执行，请重新发送。"
                 )
+            if admission.context_revision != prepared_binding.context_revision:
+                raise SteerRace(
+                    "准备本条消息期间上下文边界已变化，本条消息未执行，请重新发送。"
+                )
+            if admission.feedback_revision != prepared_binding.feedback_revision:
+                raise SteerRace(
+                    "准备本条消息期间任务反馈配置已变化，本条消息未执行，请重新发送。"
+                )
             prepared_settings_revision = prepared_binding.settings_revision
             prepared_context_revision = prepared_binding.context_revision
+            prepared_feedback_revision = prepared_binding.feedback_revision
             configured_settings = prepared_binding.turn_settings
 
         resolved_settings = None
@@ -2896,6 +3148,10 @@ class CodexRuntime:
                 raise SteerRace(
                     "准备本条消息期间上下文边界已变化，本条消息未执行，请重新发送。"
                 )
+            if binding.feedback_revision != prepared_feedback_revision:
+                raise SteerRace(
+                    "准备本条消息期间任务反馈配置已变化，本条消息未执行，请重新发送。"
+                )
             await self._guard_no_goal_locked(binding)
             binding = self._bindings.get(binding.id)
             if not binding.active:
@@ -2941,15 +3197,18 @@ class CodexRuntime:
                 else:
                     active.plan_may_be_stale = True
                     active.plan_stale_after_cursor = stale_after_cursor
+                active.activity_revision += 1
                 self._commit_context_cursor_locked(
                     binding=binding,
                     commit=context_commit,
                 )
                 return Submission(
-                    SubmitDisposition.STEERED,
-                    binding.id,
-                    active.handle.thread_id,
-                    active.handle.id,
+                    disposition=SubmitDisposition.STEERED,
+                    binding_id=binding.id,
+                    thread_id=active.handle.thread_id,
+                    turn_id=active.handle.id,
+                    task_feedback=active.task_feedback,
+                    feedback_revision=active.feedback_revision,
                 )
 
             # A caller may hold the lazy Binding snapshot returned by /new even
@@ -3036,6 +3295,8 @@ class CodexRuntime:
                 owner_id=owner_id,
                 origin=origin,
                 receipt_attempted=receipt_attempted,
+                task_feedback=binding.task_feedback,
+                feedback_revision=binding.feedback_revision,
                 plan_available=self._turn_plan_observer is not None,
             )
             self._track(active)
@@ -3051,11 +3312,13 @@ class CodexRuntime:
                 receipt_attempted.set()
                 raise
             return Submission(
-                SubmitDisposition.STARTED,
-                binding.id,
-                thread.id,
-                handle.id,
-                receipt_attempted.set,
+                disposition=SubmitDisposition.STARTED,
+                binding_id=binding.id,
+                thread_id=thread.id,
+                turn_id=handle.id,
+                release_receipt_attempt=receipt_attempted.set,
+                task_feedback=active.task_feedback,
+                feedback_revision=active.feedback_revision,
             )
 
     async def _compile_skill_input(
@@ -3124,14 +3387,55 @@ class CodexRuntime:
     def turn_progress(self, binding_id: str) -> TurnProgressSnapshot | None:
         """Project the latest native plan for the current active Turn only."""
 
+        activity = self.turn_activity(binding_id, refresh_plan=True)
+        if activity is None:
+            return None
+        return TurnProgressSnapshot(
+            binding_id=activity.binding_id,
+            thread_id=activity.thread_id,
+            turn_id=activity.turn_id,
+            steer_count=activity.steer_count,
+            plan_available=activity.plan_available,
+            plan_generated=activity.plan_generated,
+            plan_may_be_stale=activity.plan_may_be_stale,
+            steps=activity.steps,
+        )
+
+    def turn_activity(
+        self,
+        binding_id: str,
+        *,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+        refresh_plan: bool = False,
+    ) -> TurnActivitySnapshot | None:
+        """Return one exact Turn's latest process-local display projection.
+
+        Callers opt into the pinned plan observation explicitly. A disabled
+        progress presenter therefore adds no polling merely because a Turn is
+        active. Exact IDs fail closed to ``None`` so a delayed card updater
+        cannot render a replacement Turn into an older card.
+        """
+
         active = self._active.get(binding_id)
         if active is None or active.terminal_observed:
             return None
-        self._refresh_turn_plan(active)
-        return TurnProgressSnapshot(
+        if thread_id is not None and active.handle.thread_id != thread_id:
+            return None
+        if turn_id is not None and active.handle.id != turn_id:
+            return None
+        if refresh_plan:
+            self._refresh_turn_plan(active)
+        return self._turn_activity_snapshot(active)
+
+    @staticmethod
+    def _turn_activity_snapshot(active: _ActiveTurn) -> TurnActivitySnapshot:
+        return TurnActivitySnapshot(
             binding_id=active.binding_id,
             thread_id=active.handle.thread_id,
             turn_id=active.handle.id,
+            revision=active.activity_revision,
+            state=active.state,
             steer_count=active.steer_count,
             plan_available=active.plan_available,
             plan_generated=active.plan_generated,
@@ -3139,10 +3443,71 @@ class CodexRuntime:
             steps=active.plan_steps,
         )
 
-    def _refresh_turn_plan(self, active: _ActiveTurn) -> None:
+    def side_turn_activity(
+        self,
+        side_id: str,
+        *,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+        refresh_plan: bool = False,
+    ) -> SideTurnActivitySnapshot | None:
+        """Return one exact Side Turn's process-local display projection."""
+
+        session = self._sides.get(side_id)
+        if session is None or session.state is SideSessionState.CLOSING:
+            return None
+        active = session.active
+        if active is None or active.terminal_observed:
+            return None
+        if thread_id is not None and active.handle.thread_id != thread_id:
+            return None
+        if turn_id is not None and active.handle.id != turn_id:
+            return None
+        if refresh_plan:
+            self._refresh_turn_plan(active)
+        return self._side_turn_activity_snapshot(side_id, active)
+
+    @staticmethod
+    def _side_turn_activity_snapshot(
+        side_id: str,
+        active: _ActiveSideTurn,
+    ) -> SideTurnActivitySnapshot:
+        return SideTurnActivitySnapshot(
+            side_id=side_id,
+            thread_id=active.handle.thread_id,
+            turn_id=active.handle.id,
+            revision=active.activity_revision,
+            state=active.state,
+            steer_count=active.steer_count,
+            plan_available=active.plan_available,
+            plan_generated=active.plan_generated,
+            plan_may_be_stale=active.plan_may_be_stale,
+            steps=active.plan_steps,
+        )
+
+    @staticmethod
+    def _turn_activity_visible_state(
+        active: _ActiveTurn | _ActiveSideTurn,
+    ) -> tuple[object, ...]:
+        return (
+            active.state,
+            active.steer_count,
+            active.plan_available,
+            active.plan_generated,
+            active.plan_may_be_stale,
+            active.plan_steps,
+        )
+
+    def _refresh_turn_plan(
+        self,
+        active: _ActiveTurn | _ActiveSideTurn,
+    ) -> None:
+        before = self._turn_activity_visible_state(active)
         observer = self._turn_plan_observer
         if observer is None:
             active.plan_available = False
+            if self._turn_activity_visible_state(active) != before:
+                active.activity_revision += 1
             return
         try:
             observation = observer.observe(
@@ -3152,6 +3517,8 @@ class CodexRuntime:
             )
         except Exception as error:
             active.plan_available = False
+            if self._turn_activity_visible_state(active) != before:
+                active.activity_revision += 1
             logger.warning(
                 "native Turn plan observation unavailable",
                 extra={
@@ -3164,6 +3531,8 @@ class CodexRuntime:
         active.plan_available = True
         active.plan_cursor = observation.next_cursor
         if not observation.plan_updated:
+            if self._turn_activity_visible_state(active) != before:
+                active.activity_revision += 1
             return
         active.plan_steps = observation.steps
         active.plan_generated = True
@@ -3177,6 +3546,8 @@ class CodexRuntime:
         ):
             active.plan_may_be_stale = False
             active.plan_stale_after_cursor = None
+        if self._turn_activity_visible_state(active) != before:
+            active.activity_revision += 1
 
     def is_compacting(self, binding_id: str) -> bool:
         return binding_id in self._compacting
@@ -3193,6 +3564,130 @@ class CodexRuntime:
             state=active.state,
             persisted=active.persisted,
         )
+
+    def goal_activity(
+        self,
+        binding_id: str,
+        *,
+        thread_id: str | None = None,
+        logical_turn_id: str | None = None,
+        refresh_plan: bool = False,
+    ) -> GoalActivitySnapshot | None:
+        """Return one exact in-process Goal run's bounded display projection."""
+
+        active = self._goals.get(binding_id)
+        handle = active.handle if active is not None else None
+        if active is None or handle is None or handle.id is None:
+            return None
+        if active.terminal_observed:
+            return None
+        if thread_id is not None and active.thread_id != thread_id:
+            return None
+        if logical_turn_id is not None and handle.id != logical_turn_id:
+            return None
+        if refresh_plan:
+            self._refresh_goal_plan(active)
+        return self._goal_activity_snapshot(active)
+
+    @staticmethod
+    def _goal_activity_snapshot(active: _ActiveGoal) -> GoalActivitySnapshot:
+        handle = active.handle
+        assert handle is not None and handle.id is not None
+        return GoalActivitySnapshot(
+            binding_id=active.binding_id,
+            thread_id=active.thread_id,
+            logical_turn_id=handle.id,
+            physical_turn_id=active.activity_turn_id,
+            revision=active.activity_revision,
+            state=active.state,
+            plan_available=active.plan_available,
+            plan_generated=active.plan_generated,
+            steps=active.plan_steps,
+        )
+
+    @staticmethod
+    def _goal_activity_visible_state(active: _ActiveGoal) -> tuple[object, ...]:
+        return (
+            active.state,
+            active.activity_turn_id,
+            active.plan_available,
+            active.plan_generated,
+            active.plan_steps,
+        )
+
+    def _refresh_goal_plan(
+        self,
+        active: _ActiveGoal,
+        *,
+        physical_turn_id: str | None = None,
+    ) -> None:
+        before = self._goal_activity_visible_state(active)
+        handle = active.handle
+        observer = self._turn_plan_observer
+        assert handle is not None
+        try:
+            current_turn_id = (
+                physical_turn_id
+                if physical_turn_id is not None
+                else handle.current_physical_turn_id()
+            )
+        except Exception as error:
+            active.plan_available = False
+            if self._goal_activity_visible_state(active) != before:
+                active.activity_revision += 1
+            logger.warning(
+                "native Goal physical Turn observation unavailable",
+                extra={
+                    "thread_id": active.thread_id,
+                    "logical_turn_id": handle.id,
+                    "error_type": type(error).__name__,
+                },
+            )
+            return
+        if current_turn_id is not None and (
+            not isinstance(current_turn_id, str) or not current_turn_id
+        ):
+            active.plan_available = False
+            if self._goal_activity_visible_state(active) != before:
+                active.activity_revision += 1
+            return
+        if current_turn_id != active.activity_turn_id:
+            active.activity_turn_id = current_turn_id
+            active.plan_cursor = 0
+            active.plan_generated = False
+            active.plan_steps = ()
+        active.plan_available = observer is not None
+        if observer is None or current_turn_id is None:
+            if self._goal_activity_visible_state(active) != before:
+                active.activity_revision += 1
+            return
+        try:
+            observation = observer.observe(
+                thread_id=active.thread_id,
+                turn_id=current_turn_id,
+                after_cursor=active.plan_cursor,
+            )
+        except Exception as error:
+            active.plan_available = False
+            if self._goal_activity_visible_state(active) != before:
+                active.activity_revision += 1
+            logger.warning(
+                "native Goal plan observation unavailable",
+                extra={
+                    "thread_id": active.thread_id,
+                    "logical_turn_id": handle.id,
+                    "turn_id": current_turn_id,
+                    "error_type": type(error).__name__,
+                },
+            )
+            return
+        active.plan_available = True
+        active.plan_cursor = observation.next_cursor
+        if observation.plan_updated:
+            active.plan_steps = observation.steps
+            active.plan_generated = True
+        if self._goal_activity_visible_state(active) != before:
+            active.activity_revision += 1
 
     def binding_runtime_snapshot(self, binding_id: str) -> BindingRuntimeSnapshot:
         """Return all process-local management state without consuming native data."""
@@ -3217,14 +3712,47 @@ class CodexRuntime:
             binding = self._bindings.get(binding.id)
             if binding.native_thread_id is None:
                 return None
+            active = self._goals.get(binding.id)
+            if (
+                active is not None
+                and active.state is GoalOperationState.UNKNOWN
+                and active.persisted is not None
+            ):
+                return active.persisted
             try:
                 snapshot = await control.get(binding.native_thread_id)
             except Exception as error:
                 raise GoalControlError(
                     "无法读取当前 Codex Goal；本次操作未执行。"
                 ) from error
-            active = self._goals.get(binding.id)
             if active is not None:
+                if active.state is GoalOperationState.UNKNOWN:
+                    # A response-lost mutation remains unknown even if a later
+                    # read is absent.  Preserve the last frozen evidence so the
+                    # control surface cannot claim that no Goal exists.
+                    if active.persisted is None and snapshot is not None:
+                        active.persisted = snapshot
+                    return active.persisted
+                if (
+                    active.handle is not None
+                    and (
+                        (
+                            snapshot is None
+                            and not active.terminal_observed
+                        )
+                        or (
+                            snapshot is not None
+                            and not _same_goal_generation(active, snapshot)
+                        )
+                    )
+                ):
+                    active.state = GoalOperationState.UNKNOWN
+                    self.close_admission()
+                    raise GoalStateUnknown(
+                        "当前原生 Goal generation 已变化；服务已关闭 admission。"
+                    )
+                if active.terminal_observed and snapshot is None:
+                    return active.persisted
                 active.persisted = snapshot
             if snapshot is not None and snapshot.status is GoalStatus.ACTIVE:
                 if active is None:
@@ -3283,6 +3811,9 @@ class CodexRuntime:
                 receipt_attempted=receipt_attempted,
                 state=GoalOperationState.STARTING,
                 persisted=persisted,
+                task_feedback=binding.task_feedback,
+                feedback_revision=binding.feedback_revision,
+                plan_available=self._turn_plan_observer is not None,
             )
             self._goals[binding.id] = active
             self._advance_admission_revision(binding.id)
@@ -3309,6 +3840,34 @@ class CodexRuntime:
             self.close_admission()
             active.state = GoalOperationState.UNKNOWN
             raise GoalStateUnknown("Goal handle 与原生 Thread 不一致。")
+        active.handle = handle
+        try:
+            started = await control.get(thread.id)
+        except asyncio.CancelledError:
+            receipt_attempted.set()
+            self.close_admission()
+            active.state = GoalOperationState.UNKNOWN
+            raise
+        except Exception as error:
+            receipt_attempted.set()
+            self.close_admission()
+            active.state = GoalOperationState.UNKNOWN
+            raise GoalStateUnknown(
+                "Codex Goal 已启动，但 generation 无法确认；服务已关闭 admission。"
+            ) from error
+        if (
+            started is None
+            or started.thread_id != thread.id
+            or started.status is not GoalStatus.ACTIVE
+            or started.objective != objective
+        ):
+            receipt_attempted.set()
+            self.close_admission()
+            active.state = GoalOperationState.UNKNOWN
+            raise GoalStateUnknown("Goal 启动后的 generation 无法确认。")
+        active.persisted = started
+        active.generation_created_at = started.created_at
+        active.generation_token_budget = started.token_budget
         async with self._lock(binding.id):
             if self._goals.get(binding.id) is not active:
                 self.close_admission()
@@ -3321,6 +3880,8 @@ class CodexRuntime:
             thread_id=thread.id,
             logical_turn_id=handle.id,
             release_receipt_attempt=receipt_attempted.set,
+            task_feedback=active.task_feedback,
+            feedback_revision=active.feedback_revision,
         )
 
     async def resume_goal(
@@ -3329,6 +3890,7 @@ class CodexRuntime:
         binding: ThreadBinding,
         owner_id: str,
         origin: object,
+        expected_created_at: int | None = None,
     ) -> GoalSubmission:
         control = self._require_goal_control()
         if not self._accepting:
@@ -3350,6 +3912,13 @@ class CodexRuntime:
             persisted = await control.get(thread.id)
             if persisted is None:
                 raise GoalNotFound("当前会话没有可恢复的 Codex Goal。")
+            if (
+                expected_created_at is not None
+                and persisted.created_at != expected_created_at
+            ):
+                raise GoalNotFound(
+                    "Goal 已变化，本次恢复未执行；请重新发送 /goal。"
+                )
             if persisted.status is not GoalStatus.PAUSED:
                 raise ThreadGoalActive(
                     f"当前 Goal 状态为 {persisted.status.value}，只有 paused 可恢复。"
@@ -3366,6 +3935,11 @@ class CodexRuntime:
                 receipt_attempted=receipt_attempted,
                 state=GoalOperationState.STARTING,
                 persisted=persisted,
+                generation_created_at=persisted.created_at,
+                generation_token_budget=persisted.token_budget,
+                task_feedback=binding.task_feedback,
+                feedback_revision=binding.feedback_revision,
+                plan_available=self._turn_plan_observer is not None,
             )
             self._goals[binding.id] = active
             self._advance_admission_revision(binding.id)
@@ -3396,6 +3970,32 @@ class CodexRuntime:
             self.close_admission()
             active.state = GoalOperationState.UNKNOWN
             raise GoalStateUnknown("恢复后的 Goal handle 与原生 Thread 不一致。")
+        active.handle = handle
+        try:
+            resumed = await control.get(thread.id)
+        except asyncio.CancelledError:
+            receipt_attempted.set()
+            self.close_admission()
+            active.state = GoalOperationState.UNKNOWN
+            raise
+        except Exception as error:
+            receipt_attempted.set()
+            self.close_admission()
+            active.state = GoalOperationState.UNKNOWN
+            raise GoalStateUnknown(
+                "Codex Goal 已恢复，但 generation 无法确认；服务已关闭 admission。"
+            ) from error
+        if (
+            resumed is None
+            or resumed.thread_id != thread.id
+            or resumed.status is not GoalStatus.ACTIVE
+            or not _same_goal_generation(active, resumed)
+        ):
+            receipt_attempted.set()
+            self.close_admission()
+            active.state = GoalOperationState.UNKNOWN
+            raise GoalStateUnknown("Goal 恢复后的 generation 无法确认。")
+        active.persisted = resumed
         async with self._lock(binding.id):
             if self._goals.get(binding.id) is not active:
                 self.close_admission()
@@ -3408,9 +4008,16 @@ class CodexRuntime:
             thread_id=thread.id,
             logical_turn_id=handle.id,
             release_receipt_attempt=receipt_attempted.set,
+            task_feedback=active.task_feedback,
+            feedback_revision=active.feedback_revision,
         )
 
-    async def clear_goal(self, binding: ThreadBinding) -> bool:
+    async def clear_goal(
+        self,
+        binding: ThreadBinding,
+        *,
+        expected_created_at: int | None = None,
+    ) -> bool:
         control = self._require_goal_control()
         async with self._lock(binding.id):
             self._guard_no_lifecycle_locked(binding.id)
@@ -3421,9 +4028,15 @@ class CodexRuntime:
             binding = self._bindings.get(binding.id)
             if binding.native_thread_id is None:
                 return False
+            active = self._goals.get(binding.id)
+            if (
+                active is not None
+                and active.state is not GoalOperationState.EXTERNAL_ACTIVE
+            ):
+                raise self._goal_slot_error(active)
             persisted = await control.get(binding.native_thread_id)
             if persisted is None:
-                external = self._goals.get(binding.id)
+                external = active
                 if external is not None and external.state is GoalOperationState.EXTERNAL_ACTIVE:
                     self._goals.pop(binding.id, None)
                     self._advance_admission_revision(binding.id)
@@ -3432,6 +4045,13 @@ class CodexRuntime:
                         binding.native_thread_id,
                     )
                 return False
+            if (
+                expected_created_at is not None
+                and persisted.created_at != expected_created_at
+            ):
+                raise GoalNotFound(
+                    "Goal 已变化，本次结束未执行；请重新发送 /goal。"
+                )
             if persisted.status is GoalStatus.ACTIVE:
                 if binding.id not in self._goals:
                     self._track_external_goal(binding, persisted)
@@ -3452,6 +4072,8 @@ class CodexRuntime:
                 receipt_attempted=asyncio.Event(),
                 state=GoalOperationState.STARTING,
                 persisted=persisted,
+                generation_created_at=persisted.created_at,
+                generation_token_budget=persisted.token_budget,
             )
             self._goals[binding.id] = sentinel
             self._advance_admission_revision(binding.id)
@@ -3578,6 +4200,8 @@ class CodexRuntime:
             receipt_attempted=receipt_attempted,
             state=GoalOperationState.EXTERNAL_ACTIVE,
             persisted=persisted,
+            generation_created_at=persisted.created_at,
+            generation_token_budget=persisted.token_budget,
         )
         self._advance_admission_revision(binding.id)
         self._invalidate_context_window_usage(binding.id)
@@ -3903,6 +4527,7 @@ class CodexRuntime:
                     )
             if active.terminal_observed and not active.interrupt_attempted:
                 active.state = ActiveState.RUNNING
+                active.activity_revision += 1
                 return StopDisposition.NOT_RUNNING
             if active.state is ActiveState.STOPPING:
                 if not active.interrupt_succeeded:
@@ -3928,10 +4553,14 @@ class CodexRuntime:
         *,
         acknowledge: StopAcknowledger | None,
     ) -> StopDisposition:
+        if active.state is GoalOperationState.UNKNOWN:
+            raise GoalStateUnknown(
+                "Goal 状态未确认；/stop 不会再次发起原生 mutation。"
+            )
         handle = active.handle
         if handle is None:
             return StopDisposition.GOAL_STOPPING
-        if active.terminal_observed and active.state is GoalOperationState.RUNNING:
+        if active.terminal_observed:
             return StopDisposition.NOT_RUNNING
         if active.state is GoalOperationState.RUNNING:
             active.state = GoalOperationState.PAUSING
@@ -4377,6 +5006,7 @@ class CodexRuntime:
     ) -> None:
         result: object | None = None
         error: BaseException | None = None
+        activity: SideTurnActivitySnapshot | None = None
         try:
             # Side Threads are ephemeral. Intentionally use the normal SDK
             # handle path and do not apply persisted-thread completion recovery.
@@ -4403,6 +5033,12 @@ class CodexRuntime:
                     self._sides.get(session.side_id) is session
                     and session.active is active
                 ):
+                    if active.task_feedback.progress_card_enabled:
+                        self._refresh_turn_plan(active)
+                        activity = self._side_turn_activity_snapshot(
+                            session.side_id,
+                            active,
+                        )
                     cleanup_debt = (
                         active.cleanup_required and not active.cleanup_succeeded
                     )
@@ -4425,13 +5061,18 @@ class CodexRuntime:
         await active.receipt_attempted.wait()
         outcome = SideTurnOutcome(
             side_id=session.side_id,
+            parent_binding_id=session.parent_binding_id,
             thread_id=session.thread.id,
             turn_id=active.handle.id,
             owner_id=active.owner_id,
             origin=active.origin,
+            cwd=session.cwd,
             result=result,
             error=error,
             background_cleanup_requested=active.cleanup_succeeded,
+            task_feedback=active.task_feedback,
+            feedback_revision=active.feedback_revision,
+            activity=activity,
         )
         try:
             await self._on_completion(outcome)
@@ -4590,6 +5231,11 @@ class CodexRuntime:
     ) -> None:
         async with self._lock(binding_id):
             if self._goals.get(binding_id) is not active:
+                return
+            if active.terminal_observed:
+                # The terminal evidence is already frozen and this slot is
+                # retained only until the Channel handoff completes.  Shutdown
+                # must not issue another pause or terminal-cleanup mutation.
                 return
             if active.state in {
                 GoalOperationState.STARTING,
@@ -4977,6 +5623,7 @@ class CodexRuntime:
         result: object | None = None
         error: BaseException | None = None
         retain_active = False
+        activity: TurnActivitySnapshot | None = None
         try:
             result = await self._read_terminal_result(active)
         except asyncio.CancelledError:
@@ -5004,6 +5651,12 @@ class CodexRuntime:
                 )
         finally:
             try:
+                # The progress-card path gets one last plan replacement before
+                # the terminal stream may consume the native notification
+                # queue. Disabled progress adds no observation here.
+                if active.task_feedback.progress_card_enabled:
+                    self._refresh_turn_plan(active)
+                activity = self._turn_activity_snapshot(active)
                 if active.terminal_observed:
                     # Preserve the preceding completed Turn's snapshot while
                     # this Turn is running, then replace it only with usage
@@ -5059,6 +5712,9 @@ class CodexRuntime:
             error=error,
             background_cleanup_requested=active.cleanup_succeeded,
             turn_diff=active.latest_diff,
+            task_feedback=active.task_feedback,
+            feedback_revision=active.feedback_revision,
+            activity=activity,
         )
         try:
             await self._on_completion(outcome)
@@ -5072,10 +5728,15 @@ class CodexRuntime:
         error: BaseException | None = None
         persisted: GoalSnapshot | None = None
         retain_active = False
+        defer_slot_release_until_delivery = False
+        finalization = GoalFinalizationStatus.NOT_APPLICABLE
+        finalization_error: BaseException | None = None
         handle = active.handle
         assert handle is not None
         try:
             active.stream_terminal = await handle.wait_terminal()
+            if active.stream_terminal.logical_turn_id != handle.id:
+                raise RuntimeError("Goal stream terminal identity mismatch")
             async with asyncio.timeout(_COMPACTION_TERMINAL_TIMEOUT_SECONDS):
                 persisted = await self._read_goal_terminal(active)
             active.persisted = persisted
@@ -5084,6 +5745,63 @@ class CodexRuntime:
                 await active.cleanup_ready.wait()
                 if not active.cleanup_succeeded:
                     active.cleanup_ready.clear()
+            if (
+                persisted.status is GoalStatus.COMPLETE
+                and active.final_turn_status == "completed"
+            ):
+                try:
+                    async with self._lock(active.binding_id):
+                        if self._goals.get(active.binding_id) is not active:
+                            raise RuntimeError(
+                                "Goal slot changed before completed finalization"
+                            )
+                        current = await self._require_goal_control().get(
+                            active.thread_id
+                        )
+                        if current is None:
+                            raise RuntimeError(
+                                "completed Goal disappeared before finalization"
+                            )
+                        if current.thread_id != active.thread_id:
+                            raise RuntimeError(
+                                "completed Goal identity changed before finalization"
+                            )
+                        if not _same_goal_generation(active, current):
+                            raise RuntimeError(
+                                "completed Goal generation changed before finalization"
+                            )
+                        persisted = current
+                        active.persisted = current
+                        if current.status is GoalStatus.ACTIVE:
+                            raise RuntimeError(
+                                "completed Goal became active before finalization"
+                            )
+                        if current.status is GoalStatus.COMPLETE:
+                            await self._clear_completed_goal(active)
+                            finalization = GoalFinalizationStatus.CLEARED
+                except BaseException as caught:
+                    finalization = GoalFinalizationStatus.UNKNOWN
+                    finalization_error = GoalStateUnknown(
+                        "已完成 Goal 的自动清理结果未确认；最终结果仍会展示，"
+                        "但会话保持占用且服务已关闭 admission。"
+                    )
+                    finalization_error.__cause__ = caught
+                    retain_active = True
+                    active.state = GoalOperationState.UNKNOWN
+                    self.close_admission()
+                    logger.error(
+                        "completed Goal finalization is unknown; admission closed",
+                        exc_info=(type(caught), caught, caught.__traceback__),
+                        extra={
+                            "thread_id": active.thread_id,
+                            "logical_turn_id": handle.id,
+                        },
+                    )
+            # Keep the exact Goal slot reserved until its terminal outcome has
+            # been handed to the Channel.  Otherwise a manual clear or a new
+            # same-second Goal can overtake the final Reply Card projection and
+            # cause the confirmed Result/Files to be discarded as stale.
+            defer_slot_release_until_delivery = not retain_active
         except asyncio.CancelledError:
             raise
         except BaseException as caught:
@@ -5107,7 +5825,7 @@ class CodexRuntime:
                     },
                 )
         finally:
-            if not retain_active:
+            if not retain_active and not defer_slot_release_until_delivery:
                 async with self._lock(active.binding_id):
                     if self._goals.get(active.binding_id) is active:
                         self._goals.pop(active.binding_id, None)
@@ -5117,46 +5835,89 @@ class CodexRuntime:
                             active.thread_id,
                         )
 
-        await active.receipt_attempted.wait()
-        outcome = GoalOutcome(
-            binding_id=active.binding_id,
-            thread_id=active.thread_id,
-            logical_turn_id=handle.id,
-            owner_id=active.owner_id,
-            origin=active.origin,
-            goal=persisted,
-            final_physical_turn_id=(
-                active.stream_terminal.final_physical_turn_id
-                if active.stream_terminal is not None
-                else None
-            ),
-            final_response=active.final_response,
-            error=error,
-            background_cleanup_requested=active.cleanup_succeeded,
-        )
         try:
-            await self._on_completion(outcome)
-        except Exception:
-            logger.exception(
-                "goal completion delivery failed",
-                extra={"logical_turn_id": handle.id},
+            await active.receipt_attempted.wait()
+            outcome = GoalOutcome(
+                binding_id=active.binding_id,
+                thread_id=active.thread_id,
+                logical_turn_id=handle.id,
+                owner_id=active.owner_id,
+                origin=active.origin,
+                goal=persisted,
+                final_physical_turn_id=(
+                    active.stream_terminal.final_physical_turn_id
+                    if active.stream_terminal is not None
+                    else None
+                ),
+                final_turn_status=active.final_turn_status,
+                final_items=active.final_items,
+                final_response=active.final_response,
+                error=error,
+                background_cleanup_requested=active.cleanup_succeeded,
+                task_feedback=active.task_feedback,
+                feedback_revision=active.feedback_revision,
+                activity=(
+                    self._goal_activity_snapshot(active)
+                    if active.task_feedback.progress_card_enabled
+                    else None
+                ),
+                finalization=finalization,
+                finalization_error=finalization_error,
             )
+            try:
+                async with asyncio.timeout(
+                    _GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS
+                ):
+                    await self._on_completion(outcome)
+            except Exception:
+                logger.exception(
+                    "goal completion delivery failed",
+                    extra={"logical_turn_id": handle.id},
+                )
+        finally:
+            if defer_slot_release_until_delivery:
+                async with self._lock(active.binding_id):
+                    if self._goals.get(active.binding_id) is active:
+                        self._goals.pop(active.binding_id, None)
+                        self._advance_admission_revision(active.binding_id)
+                        self._schedule_known_subscription_locked(
+                            active.binding_id,
+                            active.thread_id,
+                        )
+
+    async def _clear_completed_goal(self, active: _ActiveGoal) -> None:
+        """Clear one four-proof completed Goal exactly once and confirm absence."""
+
+        control = self._require_goal_control()
+        cleared = await control.clear(active.thread_id)
+        confirmed = await control.get(active.thread_id)
+        if not cleared or confirmed is not None:
+            raise RuntimeError("completed Goal clear could not be confirmed")
 
     async def _read_goal_terminal(self, active: _ActiveGoal) -> GoalSnapshot:
         control = self._require_goal_control()
         thread = active.thread
         terminal = active.stream_terminal
+        response_materialization_retries = (
+            _TERMINAL_RESPONSE_MATERIALIZATION_RETRIES
+        )
         if thread is None or terminal is None:
             raise RuntimeError("Goal terminal cross-check is missing native handles")
         while True:
             persisted = await control.get(active.thread_id)
             if persisted is None:
                 raise RuntimeError("persisted Goal disappeared before terminal check")
+            if persisted.thread_id != active.thread_id:
+                raise RuntimeError("persisted Goal identity mismatch")
+            if not _same_goal_generation(active, persisted):
+                raise RuntimeError("persisted Goal generation mismatch")
             if persisted.status is GoalStatus.ACTIVE:
                 await asyncio.sleep(self._poll_interval_seconds)
                 continue
             response = await thread.read(include_turns=False)
             native = getattr(response, "thread", None)
+            if getattr(native, "id", None) != active.thread_id:
+                raise RuntimeError("Goal Thread identity mismatch")
             status = _thread_status_type(native)
             if status in {"active", "notLoaded"}:
                 await asyncio.sleep(self._poll_interval_seconds)
@@ -5165,6 +5926,8 @@ class CodexRuntime:
                 raise RuntimeError(f"unexpected Goal Thread status: {status!r}")
             response = await thread.read(include_turns=True)
             native = getattr(response, "thread", None)
+            if getattr(native, "id", None) != active.thread_id:
+                raise RuntimeError("Goal history Thread identity mismatch")
             turns = tuple(getattr(native, "turns", ()))
             if any(_enum_value(getattr(turn, "status", None)) == "inProgress" for turn in turns):
                 await asyncio.sleep(self._poll_interval_seconds)
@@ -5185,9 +5948,36 @@ class CodexRuntime:
                 raise RuntimeError(f"unexpected Goal Turn status: {turn_status!r}")
             if turn_status != terminal.turn_status:
                 raise RuntimeError("Goal stream and persisted Turn status disagree")
-            active.final_response = _final_agent_response(
-                list(getattr(exact, "items", ()))
-            )
+            items = tuple(getattr(exact, "items", ()))
+            final_response = _final_agent_response(list(items))
+            if (
+                turn_status == "completed"
+                and final_response is None
+                and response_materialization_retries > 0
+            ):
+                if (
+                    response_materialization_retries
+                    == _TERMINAL_RESPONSE_MATERIALIZATION_RETRIES
+                ):
+                    logger.warning(
+                        "native completed Goal Turn response not materialized; retrying",
+                        extra={
+                            "thread_id": active.thread_id,
+                            "logical_turn_id": terminal.logical_turn_id,
+                            "turn_id": terminal.final_physical_turn_id,
+                        },
+                    )
+                response_materialization_retries -= 1
+                await asyncio.sleep(self._poll_interval_seconds)
+                continue
+            active.final_turn_status = turn_status
+            active.final_items = items
+            active.final_response = final_response
+            if active.task_feedback.progress_card_enabled:
+                self._refresh_goal_plan(
+                    active,
+                    physical_turn_id=terminal.final_physical_turn_id,
+                )
             return persisted
 
     async def _read_terminal_result(self, active: _ActiveTurn) -> TurnResult:
@@ -5439,6 +6229,7 @@ class CodexRuntime:
     def _mark_stopping(self, active: _ActiveTurn) -> None:
         if active.state is ActiveState.RUNNING:
             active.state = ActiveState.STOPPING
+            active.activity_revision += 1
             self._advance_admission_revision(active.binding_id)
 
     def _lock(self, binding_id: str) -> asyncio.Lock:

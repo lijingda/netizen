@@ -25,8 +25,8 @@ from .domain import (
 )
 
 
-SCHEMA_VERSION = 6
-PREVIOUS_SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
+PREVIOUS_SCHEMA_VERSION = 6
 
 
 _CONTEXT_INTEGRITY_TRIGGERS = (
@@ -152,6 +152,10 @@ class BindingContextRevisionConflict(RuntimeError):
     pass
 
 
+class BindingFeedbackRevisionConflict(RuntimeError):
+    pass
+
+
 class AmbiguousBinding(LookupError):
     pass
 
@@ -215,6 +219,22 @@ class BindingTurnSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class BindingTaskFeedback:
+    """Binding-scoped, opt-in Feishu feedback for ordinary Turns."""
+
+    task_reactions_enabled: bool = False
+    progress_card_enabled: bool = False
+
+    def __post_init__(self) -> None:
+        values = (
+            self.task_reactions_enabled,
+            self.progress_card_enabled,
+        )
+        if not all(type(value) is bool for value in values):
+            raise ValueError("Binding task feedback values must be booleans")
+
+
+@dataclass(frozen=True, slots=True)
 class ThreadBinding:
     id: str
     scope_key: str
@@ -229,6 +249,8 @@ class ThreadBinding:
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY
     context_anchor: MessageContextAnchor | None = None
     context_revision: int = 1
+    task_feedback: BindingTaskFeedback = BindingTaskFeedback()
+    feedback_revision: int = 1
 
     @property
     def short_id(self) -> str:
@@ -386,13 +408,13 @@ class SideTopicRecord:
         return self.id[:8]
 
 
-def migrate_channel_database_v5_to_v6(path: str | Path) -> bool:
-    """Upgrade a stopped v5 database inside the installer transaction.
+def migrate_channel_database_v6_to_v7(path: str | Path) -> bool:
+    """Upgrade a stopped v6 database inside the installer transaction.
 
     ``BindingStore`` deliberately remains current-schema-only. The installer
     calls this one-step migration only after the service target is unloaded,
     the stable lifetime lock is held, and rollback files have been captured.
-    Existing Bindings become ``current-only`` with an empty Context Boundary.
+    Existing Bindings receive both task-feedback options disabled.
     """
 
     database = Path(path)
@@ -415,7 +437,7 @@ def migrate_channel_database_v5_to_v6(path: str | Path) -> bool:
             raise RuntimeError("Channel database must contain one schema version")
         version = version_rows[0]["version"]
         if version == SCHEMA_VERSION:
-            _require_v6_context_columns(connection)
+            _require_v7_feedback_columns(connection)
             return False
         if version != PREVIOUS_SCHEMA_VERSION:
             raise RuntimeError(
@@ -440,7 +462,7 @@ def migrate_channel_database_v5_to_v6(path: str | Path) -> bool:
         missing_tables = required_tables - actual_tables
         if missing_tables:
             raise RuntimeError(
-                "v5 Channel database is missing required tables: "
+                "v6 Channel database is missing required tables: "
                 + ", ".join(sorted(missing_tables))
             )
         legacy_columns = {
@@ -462,25 +484,28 @@ def migrate_channel_database_v5_to_v6(path: str | Path) -> bool:
             "created_at",
             "activated_at",
             "ever_activated",
-        }
-        missing_columns = required_legacy_columns - legacy_columns
-        context_columns = {
             "message_context_mode",
             "context_anchor_message_id",
             "context_anchor_create_time_ms",
             "context_revision",
         }
-        if missing_columns or legacy_columns & context_columns:
+        missing_columns = required_legacy_columns - legacy_columns
+        feedback_columns = {
+            "task_reactions_enabled",
+            "progress_card_enabled",
+            "feedback_revision",
+        }
+        if missing_columns or legacy_columns & feedback_columns:
             details: list[str] = []
             if missing_columns:
                 details.append("missing " + ", ".join(sorted(missing_columns)))
-            if legacy_columns & context_columns:
+            if legacy_columns & feedback_columns:
                 details.append(
                     "unexpected "
-                    + ", ".join(sorted(legacy_columns & context_columns))
+                    + ", ".join(sorted(legacy_columns & feedback_columns))
                 )
             raise RuntimeError(
-                "unexpected v5 bindings schema: " + "; ".join(details)
+                "unexpected v6 bindings schema: " + "; ".join(details)
             )
         _require_database_integrity(connection)
         binding_count = connection.execute(
@@ -495,41 +520,33 @@ def migrate_channel_database_v5_to_v6(path: str | Path) -> bool:
             connection.execute(
                 """
                 ALTER TABLE bindings
-                ADD COLUMN message_context_mode TEXT NOT NULL
-                    DEFAULT 'current-only'
-                    CHECK(message_context_mode IN ('current-only', 'catch-up'))
-                """
-            )
-            connection.execute(
-                """
-                ALTER TABLE bindings
-                ADD COLUMN context_anchor_message_id TEXT
-                """
-            )
-            connection.execute(
-                """
-                ALTER TABLE bindings
-                ADD COLUMN context_anchor_create_time_ms INTEGER
+                ADD COLUMN task_reactions_enabled INTEGER NOT NULL DEFAULT 0
                     CHECK(
-                        context_anchor_create_time_ms IS NULL OR (
-                            typeof(context_anchor_create_time_ms) = 'integer'
-                            AND context_anchor_create_time_ms > 0
-                        )
+                        typeof(task_reactions_enabled) = 'integer'
+                        AND task_reactions_enabled IN (0, 1)
                     )
                 """
             )
             connection.execute(
                 """
                 ALTER TABLE bindings
-                ADD COLUMN context_revision INTEGER NOT NULL DEFAULT 1
+                ADD COLUMN progress_card_enabled INTEGER NOT NULL DEFAULT 0
                     CHECK(
-                        typeof(context_revision) = 'integer'
-                        AND context_revision >= 1
+                        typeof(progress_card_enabled) = 'integer'
+                        AND progress_card_enabled IN (0, 1)
                     )
                 """
             )
-            for statement in _CONTEXT_INTEGRITY_TRIGGERS:
-                connection.execute(statement)
+            connection.execute(
+                """
+                ALTER TABLE bindings
+                ADD COLUMN feedback_revision INTEGER NOT NULL DEFAULT 1
+                    CHECK(
+                        typeof(feedback_revision) = 'integer'
+                        AND feedback_revision >= 1
+                    )
+                """
+            )
             updated = connection.execute(
                 "UPDATE schema_version SET version = ? WHERE version = ?",
                 (SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION),
@@ -553,25 +570,24 @@ def migrate_channel_database_v5_to_v6(path: str | Path) -> bool:
                 raise RuntimeError(
                     "Side Topic count changed during Channel database migration"
                 )
-            invalid_context_rows = connection.execute(
+            invalid_feedback_rows = connection.execute(
                 """
                 SELECT COUNT(*)
                 FROM bindings
-                WHERE message_context_mode != 'current-only'
-                   OR context_anchor_message_id IS NOT NULL
-                   OR context_anchor_create_time_ms IS NOT NULL
-                   OR context_revision != 1
+                WHERE task_reactions_enabled != 0
+                   OR progress_card_enabled != 0
+                   OR feedback_revision != 1
                 """
             ).fetchone()[0]
-            if invalid_context_rows:
+            if invalid_feedback_rows:
                 raise RuntimeError(
-                    "legacy Bindings did not receive safe context defaults"
+                    "legacy Bindings did not receive disabled feedback defaults"
                 )
             connection.commit()
         except BaseException:
             connection.rollback()
             raise
-        _require_v6_context_columns(connection)
+        _require_v7_feedback_columns(connection)
         _require_database_integrity(connection)
         return True
     except sqlite3.Error as error:
@@ -597,6 +613,25 @@ def _require_v6_context_columns(connection: sqlite3.Connection) -> None:
     if missing:
         raise RuntimeError(
             "schema v6 Channel database is missing context columns: "
+            + ", ".join(sorted(missing))
+        )
+
+
+def _require_v7_feedback_columns(connection: sqlite3.Connection) -> None:
+    _require_v6_context_columns(connection)
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(bindings)").fetchall()
+    }
+    required = {
+        "task_reactions_enabled",
+        "progress_card_enabled",
+        "feedback_revision",
+    }
+    missing = required - columns
+    if missing:
+        raise RuntimeError(
+            "schema v7 Channel database is missing feedback columns: "
             + ", ".join(sorted(missing))
         )
 
@@ -726,6 +761,21 @@ class BindingStore:
                         CHECK(
                             typeof(context_revision) = 'integer'
                             AND context_revision >= 1
+                        ),
+                    task_reactions_enabled INTEGER NOT NULL DEFAULT 0
+                        CHECK(
+                            typeof(task_reactions_enabled) = 'integer'
+                            AND task_reactions_enabled IN (0, 1)
+                        ),
+                    progress_card_enabled INTEGER NOT NULL DEFAULT 0
+                        CHECK(
+                            typeof(progress_card_enabled) = 'integer'
+                            AND progress_card_enabled IN (0, 1)
+                        ),
+                    feedback_revision INTEGER NOT NULL DEFAULT 1
+                        CHECK(
+                            typeof(feedback_revision) = 'integer'
+                            AND feedback_revision >= 1
                         ),
                     creator_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -938,6 +988,7 @@ class BindingStore:
         project_alias: str,
         creator_id: str,
         turn_settings: BindingTurnSettings | None = None,
+        task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
         message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
         context_anchor: MessageContextAnchor | None = None,
     ) -> ThreadBinding:
@@ -955,6 +1006,7 @@ class BindingStore:
             project_alias=project_alias,
             creator_id=creator_id,
             turn_settings=turn_settings,
+            task_feedback=task_feedback,
             message_context_mode=message_context_mode,
             context_anchor=context_anchor,
             expected_project_revision=None,
@@ -971,6 +1023,7 @@ class BindingStore:
         creator_id: str,
         expected_project_revision: int | None = None,
         turn_settings: BindingTurnSettings | None = None,
+        task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
         message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
         context_anchor: MessageContextAnchor | None = None,
     ) -> ThreadBinding:
@@ -983,6 +1036,7 @@ class BindingStore:
             project_alias=project_alias,
             creator_id=creator_id,
             turn_settings=turn_settings,
+            task_feedback=task_feedback,
             message_context_mode=message_context_mode,
             context_anchor=context_anchor,
             expected_project_revision=expected_project_revision,
@@ -1000,6 +1054,7 @@ class BindingStore:
         activate: bool = False,
         creator_id: str = "admin:web",
         turn_settings: BindingTurnSettings | None = None,
+        task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
     ) -> ThreadBinding:
         """Atomically create a Lazy Binding in an exact existing Scope."""
 
@@ -1010,6 +1065,7 @@ class BindingStore:
             project_alias=project_alias,
             creator_id=creator_id,
             turn_settings=turn_settings,
+            task_feedback=task_feedback,
             message_context_mode=MentionContextMode.CURRENT_ONLY,
             context_anchor=None,
             expected_project_revision=expected_project_revision,
@@ -1025,6 +1081,7 @@ class BindingStore:
         project_alias: str,
         creator_id: str,
         turn_settings: BindingTurnSettings | None,
+        task_feedback: BindingTaskFeedback,
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
         expected_project_revision: int | None,
@@ -1042,6 +1099,7 @@ class BindingStore:
         binding_id = self._id_factory()
         now = _now()
         settings_values = _settings_values(turn_settings)
+        feedback_values = _feedback_values(task_feedback)
         context_values = _context_values(context_anchor)
         with self._transaction():
             scope_row = self._connection.execute(
@@ -1103,8 +1161,12 @@ class BindingStore:
                     model_id, effort_id, service_tier_id, settings_revision,
                     message_context_mode, context_anchor_message_id,
                     context_anchor_create_time_ms, context_revision,
+                    task_reactions_enabled, progress_card_enabled,
+                    feedback_revision,
                     creator_id, created_at, activated_at, ever_activated
-                ) VALUES (?, ?, ?, NULL, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, ?)
+                ) VALUES (
+                    ?, ?, ?, NULL, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, 1, ?, ?, ?, ?
+                )
                 """,
                 (
                     binding_id,
@@ -1113,6 +1175,7 @@ class BindingStore:
                     *settings_values,
                     message_context_mode.value,
                     *context_values,
+                    *feedback_values,
                     creator_id,
                     now,
                     now,
@@ -1179,11 +1242,13 @@ class BindingStore:
         binding_id: str,
         expected_settings_revision: int,
         expected_context_revision: int,
+        expected_feedback_revision: int,
         settings: BindingTurnSettings | None,
+        task_feedback: BindingTaskFeedback,
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
     ) -> ThreadBinding:
-        """Atomically replace Turn settings and configure mention context.
+        """Atomically replace Turn settings, context, and task feedback.
 
         Supplying an anchor is only meaningful when changing from
         ``current-only`` to ``catch-up``.  A model-only update on an existing
@@ -1194,9 +1259,12 @@ class BindingStore:
             raise ValueError("expected settings revision must be positive")
         if expected_context_revision < 1:
             raise ValueError("expected context revision must be positive")
+        if expected_feedback_revision < 1:
+            raise ValueError("expected feedback revision must be positive")
         if not isinstance(message_context_mode, MentionContextMode):
             raise ValueError("message context mode must be a MentionContextMode")
         settings_values = _settings_values(settings)
+        feedback_values = _feedback_values(task_feedback)
         with self._transaction():
             row = self._connection.execute(
                 """
@@ -1205,6 +1273,8 @@ class BindingStore:
                     b.settings_revision, b.message_context_mode,
                     b.context_anchor_message_id,
                     b.context_anchor_create_time_ms, b.context_revision,
+                    b.task_reactions_enabled, b.progress_card_enabled,
+                    b.feedback_revision,
                     s.kind AS scope_kind
                 FROM bindings b
                 JOIN scopes s ON s.scope_key = b.scope_key
@@ -1218,6 +1288,8 @@ class BindingStore:
                 raise BindingSettingsRevisionConflict(binding_id)
             if row["context_revision"] != expected_context_revision:
                 raise BindingContextRevisionConflict(binding_id)
+            if row["feedback_revision"] != expected_feedback_revision:
+                raise BindingFeedbackRevisionConflict(binding_id)
 
             current_settings = (
                 row["model_id"],
@@ -1247,7 +1319,18 @@ class BindingStore:
             )
 
             settings_changed = current_settings != settings_values
-            if not settings_changed and not context_changed:
+            current_feedback = (
+                row["task_reactions_enabled"],
+                row["progress_card_enabled"],
+            )
+            feedback_changed = current_feedback != tuple(
+                int(value) for value in feedback_values
+            )
+            if (
+                not settings_changed
+                and not context_changed
+                and not feedback_changed
+            ):
                 return self.get(binding_id)
             anchor_values = _context_values(next_anchor)
             cursor = self._connection.execute(
@@ -1258,10 +1341,14 @@ class BindingStore:
                     message_context_mode = ?,
                     context_anchor_message_id = ?,
                     context_anchor_create_time_ms = ?,
-                    context_revision = context_revision + ?
+                    context_revision = context_revision + ?,
+                    task_reactions_enabled = ?,
+                    progress_card_enabled = ?,
+                    feedback_revision = feedback_revision + ?
                 WHERE binding_id = ?
                   AND settings_revision = ?
                   AND context_revision = ?
+                  AND feedback_revision = ?
                 """,
                 (
                     *settings_values,
@@ -1269,9 +1356,12 @@ class BindingStore:
                     message_context_mode.value,
                     *anchor_values,
                     int(context_changed),
+                    *(int(value) for value in feedback_values),
+                    int(feedback_changed),
                     binding_id,
                     expected_settings_revision,
                     expected_context_revision,
+                    expected_feedback_revision,
                 ),
             )
             if cursor.rowcount != 1:
@@ -2311,6 +2401,9 @@ _BINDING_SELECT = """
         b.context_anchor_message_id,
         b.context_anchor_create_time_ms,
         b.context_revision,
+        b.task_reactions_enabled,
+        b.progress_card_enabled,
+        b.feedback_revision,
         b.creator_id,
         b.created_at,
         b.activated_at,
@@ -2349,6 +2442,9 @@ _BINDING_INVENTORY_SELECT = """
         b.context_anchor_message_id,
         b.context_anchor_create_time_ms,
         b.context_revision,
+        b.task_reactions_enabled,
+        b.progress_card_enabled,
+        b.feedback_revision,
         b.creator_id,
         b.created_at,
         b.activated_at,
@@ -2432,6 +2528,22 @@ def _binding(row: sqlite3.Row) -> ThreadBinding:
     context_revision = row["context_revision"]
     if not isinstance(context_revision, int) or context_revision < 1:
         raise RuntimeError("Binding contains an invalid context revision")
+    feedback_values = (
+        row["task_reactions_enabled"],
+        row["progress_card_enabled"],
+    )
+    if not all(
+        isinstance(value, int) and value in {0, 1}
+        for value in feedback_values
+    ):
+        raise RuntimeError("Binding contains invalid task feedback")
+    task_feedback = BindingTaskFeedback(
+        task_reactions_enabled=bool(feedback_values[0]),
+        progress_card_enabled=bool(feedback_values[1]),
+    )
+    feedback_revision = row["feedback_revision"]
+    if not isinstance(feedback_revision, int) or feedback_revision < 1:
+        raise RuntimeError("Binding contains an invalid feedback revision")
     ever_activated = row["ever_activated"]
     if not isinstance(ever_activated, int) or ever_activated not in {0, 1}:
         raise RuntimeError("Binding contains an invalid activation flag")
@@ -2449,6 +2561,8 @@ def _binding(row: sqlite3.Row) -> ThreadBinding:
         message_context_mode=message_context_mode,
         context_anchor=context_anchor,
         context_revision=context_revision,
+        task_feedback=task_feedback,
+        feedback_revision=feedback_revision,
     )
 
 
@@ -2477,6 +2591,17 @@ def _settings_values(
     if settings is None:
         return (None, None, None)
     return (settings.model_id, settings.effort_id, settings.service_tier_id)
+
+
+def _feedback_values(
+    feedback: BindingTaskFeedback,
+) -> tuple[bool, bool]:
+    if not isinstance(feedback, BindingTaskFeedback):
+        raise ValueError("task feedback must be a BindingTaskFeedback")
+    return (
+        feedback.task_reactions_enabled,
+        feedback.progress_card_enabled,
+    )
 
 
 def _mention_context_mode(value: object) -> MentionContextMode:

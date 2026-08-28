@@ -142,6 +142,7 @@ class CardControlIntent:
     expected_revision: int | None = None
     expected_settings_revision: int | None = None
     expected_context_revision: int | None = None
+    feedback_revision: int | None = None
     enabled: bool | None = None
     project_path: str | None = None
     create_directory: bool | None = None
@@ -152,9 +153,13 @@ class CardControlIntent:
     model_id: str | None = None
     effort_id: str | None = None
     service_tier_id: str | None = None
+    task_reactions_enabled: bool | None = None
+    progress_card_enabled: bool | None = None
     message_context_mode: MentionContextMode | None = None
     side_id: str | None = None
     page: int | None = None
+    goal_generation: str | None = None
+    expected_goal_status: str | None = None
 
 
 class TurnFileActionName(str, Enum):
@@ -169,6 +174,95 @@ class TurnFileManifestItem:
 
 
 @dataclass(frozen=True, slots=True)
+class TurnProgressManifestStep:
+    step: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class TurnProgressManifest:
+    """Sanitized, self-contained progress panel carried by file pagination."""
+
+    state: str
+    steer_count: int
+    plan_available: bool
+    plan_generated: bool
+    plan_may_be_stale: bool
+    steps: tuple[TurnProgressManifestStep, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyCardGoalModule:
+    """Frozen, display-only Goal control projection for one Goal generation."""
+
+    binding_id: str
+    short_id: str
+    project_alias: str
+    goal_generation: str | None
+    status: str | None
+    runtime_state: str | None
+    objective: str | None
+    token_budget: int | None
+    tokens_used: int
+    notice: str | None = None
+    notice_is_error: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyCardActivityModule:
+    """Bounded, sanitized Turn activity plus its presentation state."""
+
+    progress: TurnProgressManifest
+    terminal_status: str | None = None
+    collapsed: bool = False
+    hidden_steps: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyCardResultModule:
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyCardFileItem:
+    """One current file view; callbacks carry only path and display label."""
+
+    path: str
+    label: str
+    size: int | None
+    media_kind: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyCardFilesModule:
+    binding_id: str
+    turn_id: str
+    items: tuple[ReplyCardFileItem, ...]
+    page: int = 0
+    action_version: int = 5
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyCardManifest:
+    """Frozen non-file modules carried by a self-contained page callback."""
+
+    goal: ReplyCardGoalModule | None = None
+    activity: ReplyCardActivityModule | None = None
+    result: ReplyCardResultModule | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyCardProjection:
+    """Closed Reply Card module set rendered atomically as one Card 2.0 body."""
+
+    scope: FeishuScope | None = None
+    goal: ReplyCardGoalModule | None = None
+    activity: ReplyCardActivityModule | None = None
+    result: ReplyCardResultModule | None = None
+    files: ReplyCardFilesModule | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TurnFileActionIntent:
     scope: FeishuScope
     source_id: str
@@ -180,6 +274,8 @@ class TurnFileActionIntent:
     path: str | None = None
     files: tuple[TurnFileManifestItem, ...] = ()
     answer: str | None = None
+    progress: TurnProgressManifest | None = None
+    reply: ReplyCardManifest | None = None
 
 
 ChannelInteraction = PromptInput | ControlIntent

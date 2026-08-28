@@ -26,26 +26,42 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
 - `/side [首轮问题]` 从当前已物化 Parent Thread 创建一个 ephemeral fork，并在同一
   chat 新开 sibling 话题。Side 在同一 fork 上支持多轮：idle 开新 Turn、running
   steer exact Turn；`/stop` 只停当前 Side Turn，`/side close` 才结束 Side。Parent 与
-  多个 Side 可并发，但共享同一个真实 Project cwd，文件改动彼此可见。
-- 普通 Turn 运行时在原任务消息上常驻 `Typing` 并低频闪烁 `THINKING` reaction，不发送
-  心跳消息；steer 成功只在 steer 消息上添加 `OnIt`，原任务锚点不变。终态先按
-  completed/failed/interrupted 添加 `DONE`/`ERROR`/`CrossMark`，再移除两个运行态表情。
-- 普通 Turn 成功完成且 latest native Turn diff 或 completed `fileChange` /
-  `imageGeneration` item 指向当前普通文件时，最终回复与“本轮文件”合成一张卡片。
+  多个 Side 可并发，但共享同一个真实 Project cwd，文件改动彼此可见。创建时冻结 Parent
+  当时的 Model/Effort/Speed、Task Reaction 与 Progress Card，Parent 后续配置不传播；
+  Side 内仍不允许 Goal。
+- Binding 有两个相互独立、默认关闭的 Task Feedback 选项，可在 `/new` 或 `/config`
+  按需开启。Task Reaction 开启后，运行时在原任务消息上使用 `Typing` 和低频
+  `THINKING`，steer 成功使用 `OnIt`，终态使用 `DONE`/`ERROR`/`CrossMark`；关闭时不会
+  调用 reaction，也不会因 `OnIt` 失败发送文字确认。Side Turn 使用创建时冻结的同一语义；
+  Goal 不使用 Task Reaction。
+- Progress Card 开启后，普通或 Side native Turn 接受时回复一张运行卡；Goal 则无论该
+  选项是否开启都只使用一张 Goal 回复卡，开启时在其中增加 Activity 模块。顶部展开区只按
+  状态与原生 checklist 的变化逐步更新；不显示耗时、百分比、ETA、reasoning 或 raw
+  tool/command output；计划步骤还经过有界的常见敏感模式过滤。终态在同一卡片折叠过程并
+  呈现回答和可用文件，翻页后仍保留全部模块。任一卡片展示失败都不影响原生执行。
+- 普通 Turn 成功完成，且 latest native Turn diff 或 completed `fileChange` /
+  `imageGeneration` item 指向当前普通文件时，最终回复与“本轮文件”合成一张卡片；Goal
+  首期只使用四项终态证据中 exact 最终成功物理 Turn 的 completed structured items，
+  Side 也只使用 exact completed Side Turn 的 structured items；两者都不猜测 aggregate
+  diff 或更早 Turn 的文件。
   Project 只解析相对路径，不过滤 exact Turn 明确报告的外部文件；文件每页 8 个，最多
   500 个完整循环分页，点击后以原图或文件消息回复到卡片话题。可见正文只显示脱敏逻辑位置；
-  v4 按钮在飞书 callback payload 中明文自带绝对路径和完整清单，因此服务重启后仍可翻页
-  和发送，无需保存快照或 card session。不会自动上传，也不会扫描/解析最终回复来补齐
-  未进入 Turn diff/items 的输出。
+  普通完成/进度文件卡继续使用 v4 callback；Goal 与 Files 同卡时使用 v5，并在飞书
+  callback payload 中明文自带绝对路径、完整清单和有界回复卡模块。因此服务重启后仍可
+  翻页和发送，无需保存快照或 card session；v5 翻页会保留 Goal、Activity 与 Result，
+  既有 v4 卡继续兼容。不会自动上传，也不会扫描/解析最终回复来补齐
+  未进入 Turn diff/items 的输出。Progress Card 关闭且不是 Goal 时
+  严格保持现有行为：没有文件用富文本/静态文本回复，有文件才使用完成卡。
 - 服务以执行安装的当前用户身份复用其标准 `$CODEX_HOME`（默认 `~/.codex`），因此
   认证、历史、Skills、MCP、AGENTS 和 `config.toml` 仍由 Codex 原生发现；部署只完整管理
   `skills/netizen-user-guide` 这一个随 release 发布的用户咨询 Skill，其他用户 Skill
   不受影响。
 - Channel SQLite 只保存 Scope/Binding/Project Registry/去重 TTL、可选的
-  Binding-scoped Model/Effort/Speed 选择 ID、群聊 Binding 的 Mention Context Mode 与
-  exact Context Boundary metadata，以及不含 native ID/content 的 Side Topic 路由墓碑；
-  不保存 prompt、补充消息正文、回复、cwd 副本、卡片 session、解析后的 wire value、
-  Codex 已生效配置或 Turn 历史。
+  Binding-scoped Model/Effort/Speed 选择 ID、两个 Task Feedback 布尔值及 revision、群聊
+  Binding 的 Mention Context Mode 与 exact Context Boundary metadata，以及不含 native
+  ID/content 的 Side Topic 路由墓碑；不保存 prompt、补充消息正文、回复、cwd 副本、
+  Turn Activity Projection、回复卡 identity/session、解析后的 wire value、Codex 已生效
+  配置或 Turn 历史。
 - 同一进程默认在 `0.0.0.0:8787` 提供单管理员 Admin Web。它与飞书共用唯一的
   application service、Scope coordinator、SQLite、Runtime 和 `AsyncCodex`，集中分页管理
   Projects、普通 Sessions 和 Side Topics；它不能发送 Prompt、浏览完整历史或调用任意
@@ -79,19 +95,23 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   发送的是点击时当前仍可访问的内容，不是 Turn 完成时快照。
 - `//...`：发送字面 `/...` prompt。
 - `/new`：发送唯一的新建表单，在单个下拉框中展示全部 enabled Projects，并选择继承
-  Codex 或显式 Model/Effort/Speed；群聊和群话题还可选择 @ 上下文模式。只创建并切换
-  lazy 会话，不要求任务文本。`/new` 不接受任何参数。
+  Codex 或显式 Model/Effort/Speed，以及是否开启 Task Reaction、Progress Card（两项默认
+  关闭）；群聊和群话题还可选择 @ 上下文模式。只创建并切换 lazy 会话，不要求任务文本。
+  `/new` 不接受任何参数。
 - `/side [首轮问题]`：要求当前 active Binding 已有原生历史；在同一 chat 新建一个
   sibling Side 话题。省略问题时只创建，带问题时新话题先显示明确标注的首轮问题，
   随后的模型回复和 reactions 也只出现在新话题；Parent 成功时不再发送导航回复。
   首轮模型来源仍是原 `/side` 消息及其发送者，新话题 seed 只作为完成投递锚点。
   Side 内仅支持普通 Prompt、`//`、`/status`、`/stop`、`/help`、`/` 和
-  `/side close`；空闲两小时或服务重启后过期。旧 Side 话题不会变成普通 Binding。
-- `/config`：选择并保存当前会话后续新 Turn 的 Model、Effort、Speed；群聊和群话题还可
-  切换 @ 上下文模式。不要求任务、不创建空白 Turn，也不提供跨会话选择；配置其他会话
-  应先 `/resume`。Binding 已显式配置三项时，每条需要启动新 Turn 的普通消息都会重新读取
-  live 模型目录并显式应用；未配置时由 Codex 继承且不传这三项。running Turn 明确拒绝
-  修改，普通消息仍只 steer 当前 exact Turn。
+  `/side close`；空闲两小时或服务重启后过期。旧 Side 话题不会变成普通 Binding。Side
+  创建时冻结 Parent 当时的 Model/Effort/Speed、Task Reaction 与 Progress Card；后续
+  `/config` 不影响它，Side 内也不接受 Goal。
+- `/config`：选择并保存当前会话后续新 Turn 的 Model、Effort、Speed、Task Reaction 与
+  Progress Card；群聊和群话题还可切换 @ 上下文模式。不要求任务、不创建空白 Turn，也
+  不提供跨会话选择；配置其他会话应先 `/resume`。Binding 已显式配置模型三项时，每条
+  需要启动新 Turn 的普通消息都会重新读取 live 模型目录并显式应用；未配置时由 Codex
+  继承且不传这三项。running Turn 明确拒绝修改，已开始 Turn 沿用启动时捕获的反馈选项，
+  普通消息仍只 steer 当前 exact Turn。
 - `/compact`：当前固定 `openai-codex 0.147.0` 中明确不可用，也不进入 `/help`；输入该
   命令会说明兼容验证未通过且不调用原生压缩。底层实现和 live probe 保留，只有同一
   Thread 在压缩后继续 Turn 的完整序列重新通过，命令才会开放。
@@ -99,9 +119,13 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   discovery/revalidate，并把原文本与多个公开 `SkillInput` 一起交给同一个 Turn 或
   exact running Turn 的 steer。查询当前有哪些 Skill 可用时直接发送普通自然语言消息，
   不提供独立的 `/skills` 浏览命令。
-- `/goal [objective|pause|resume|clear]`：查看、启动、暂停、恢复或清除当前会话的原生
-  Goal。一个 Goal 可自动产生多个物理 Turn；执行期间同一 Binding 不接受普通 Prompt、
-  `/compact` 或 `/config`。Goal 卡片按钮进入同一 typed control 路由。
+- `/goal [objective|pause|resume|clear]`：查看、启动、暂停、恢复或结束当前会话的原生
+  Goal。一个 Goal 可自动产生多个物理 Turn；start、pause、resume 和终态持续更新同一张
+  组合卡，卡片按钮进入同一 typed control 路由。只有四项终态证据完整、Goal 为
+  `complete` 且 exact 最终物理 Turn 为 `completed` 时自动 clear；paused、blocked、额度
+  限制和任何收尾不确定状态都保留 Goal，仍可显式结束。执行期间同一 Binding 不接受普通
+  Prompt、`/compact` 或 `/config`。服务重启后的旧 Goal 按钮会过期，重新发送 `/goal`
+  可建立当前进程可校验的新控制卡。
 - `/settings`：在当前单聊、群聊或话题打开 Netizen 设置卡片。当前 Projects 分区可
   通过下拉表单启停 Project，并在同一卡片内创建或登记 Project。
 - `/sessions`：用分页卡片列出当前 Scope 的会话。当前会话置顶显示，其他会话可直接点击
@@ -118,8 +142,8 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
 - `/resume <短 ID>`：切换普通会话；已归档会话必须先恢复。
 - `/rename [名称]`：重命名当前原生 Thread；省略名称时打开卡片，名称会同步显示在
   Codex App/CLI。
-- `/archive`：确认后归档当前 idle 原生 Thread，保留 Binding 与会话 Turn 配置，并清空
-  当前 active pointer；不会自动切换到另一会话。
+- `/archive`：确认后归档当前 idle 原生 Thread，保留 Binding、会话 Turn 配置与 Task
+  Feedback，并清空当前 active pointer；不会自动切换到另一会话。
 - `/unarchive <短 ID>`：恢复指定的已归档会话并切换到它。
 - `/delete`：Lazy 会话显示红色二次确认并只删除本地 Binding。已有原生历史的 idle 会话
   显示包含 exact native ID 的红色二次确认；成功后原生 Thread、App Server 管理的
@@ -138,7 +162,8 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   这表示客户端配置来源，不冒充公开 SDK 无法反查的原生有效值；还会显示本 Netizen
   进程的瞬态 Thread 订阅状态，但“已取消订阅”不代表 writer 已立即释放。
 - `/release`：显式取消当前 active 普通会话在本 Netizen 连接上的 Thread 订阅；不删除
-  Binding、native Thread、历史或会话配置，下一条消息仍 resume 同一 native ID。运行中、
+  Binding、native Thread、历史、会话配置或 Task Feedback，下一条消息仍 resume 同一
+  native ID。运行中、
   状态未知或存在已登记后台 terminal 时拒绝；Side 应使用 `/side close`。最后一个订阅者
   离开后，App Server 仍有连续三十分钟无订阅和活动的卸载宽限期。
 - `/stop`：中断当前 Scope 的 active Turn；若运行的是 Goal，则先持久化暂停 Goal、
@@ -160,8 +185,10 @@ Thread Delete 暴露固定 `thread/delete`，由 Runtime 承担一次四视图�
 rename/archive/unarchive 始终使用公开 SDK。SDK 高层支持任一缺口后，升级 harness 会
 要求切回公开 provider 并删除对应 shim。
 ADR 0020 另行批准一个精确版本/源码指纹门禁的只读 plan observer：它只在 `/status`
-或 steer freshness bookkeeping 时快照当前 Turn 已登记的通知队列，不消费、注册或修改
-通知，不新建 worker/RPC/App Server；公开接口可替代后必须删除。
+、steer freshness bookkeeping，或普通/Goal/Side 已开启 Progress Card 的有界刷新中快照
+当前 Turn 已登记的通知队列，不消费、注册或修改通知，不新建 worker/RPC/App Server；关闭 Progress Card
+时没有后台 plan polling。公开接口可替代后必须删除，且不得把它扩展为 reasoning、工具
+日志或任意通知浏览器。
 按 ADR 0018，Skills discovery 只服务于普通消息的显式 `$skill-name` 校验，不再注册
 `/skills` 浏览 control。
 `/plan`、`/apps` 仍显式拒绝且不进入帮助；
@@ -411,8 +438,8 @@ make check
 群聊逐条引用需要应用权限
 `im:message.group_msg`；只配置接收群聊 @ 机器人
 消息的权限无法回查被引用的另一条消息。当前 Prompt 发送者姓名解析还需
-`im:chat.members:read`；缺失时不会用匿名身份提交。Prompt 的运行、steer 确认与终态
-表情由当前必需的 `im:message` 覆盖；官方也提供更窄的
+`im:chat.members:read`；缺失时不会用匿名身份提交。Task Reaction 开启后的运行、steer
+确认与终态表情由当前必需的 `im:message` 覆盖；官方也提供更窄的
 `im:message.reactions:write_only` 作为替代，但 Netizen 不再把它列为独立必需项。权限变更
 必须随应用版本发布。本轮文件上传与话题回复还需 `im:resource` 和
 `im:message:send_as_bot`；任一权限缺失时文件按钮必须显式失败，不能掉到主聊天。

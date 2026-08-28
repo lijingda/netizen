@@ -3,12 +3,15 @@ status: accepted
 date: 2026-08-15
 amends: 0008, 0014
 related: 0009, 0010, 0016, 0020
+amended_by: 0048
 ---
 
 # 用 ephemeral fork 支持多轮 Side 话题
 
 > [ADR 0029](0029-project-current-message-provenance-into-prompts.md) 明确区分 Side 首轮的
-> 原 `/side` 来源消息与新话题 seed 完成锚点；本文的 seed 展示、reaction 和完成投递语义不变。
+> 原 `/side` 来源消息与新话题 seed 完成锚点；seed 继续作为 reaction 与完成投递锚点。
+> [ADR 0048](0048-integrate-side-turns-with-task-feedback-reply-cards.md) 进一步让容器内的
+> Side Turn 复用普通 Turn 的任务反馈与 Reply Card；根卡、路由、过期和关闭生命周期不变。
 
 ## 背景
 
@@ -81,8 +84,9 @@ Side 的 native Thread 是 ephemeral，服务重启后不能恢复。与此同�
 ### 多轮 Runtime 与控制面
 
 1. Side Session 只存在内存，以 Side ID 为键，保存 exact Parent、ephemeral
-   `AsyncThread`、创建时的 Binding Turn Settings 解析快照、当前 handle、独立 admission
-   revision、话题标识和 monotonic activity time。
+   `AsyncThread`、创建时的 Binding Turn Settings 与 Task Feedback 解析快照、当前 handle、
+   独立 admission revision、话题标识和 monotonic activity time。两类快照在 fork 前后按
+   revision 复核，Parent 后续配置变化不传播。
 2. idle 消息在同一 Side Thread 上开始新 Turn；running 消息 steer exact handle。引用、
    图片和 `$skill` 使用现有 Prompt preparation，但在异步准备前捕获 Side admission，提交
    时校验 revision，避免 idle/running/idle ABA、关闭或过期后的延迟投递。

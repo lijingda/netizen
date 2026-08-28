@@ -18,6 +18,7 @@ from ..bindings import (
     BindingPage,
     BindingQuery,
     BindingStore,
+    BindingTaskFeedback,
     BindingTurnSettings,
     ProjectAggregate,
     ProjectAggregatePage,
@@ -274,7 +275,9 @@ class ManagementRuntimePort:
         binding_id: str,
         expected_settings_revision: int,
         expected_context_revision: int,
+        expected_feedback_revision: int,
         settings: BindingTurnSettings | None,
+        task_feedback: BindingTaskFeedback,
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
     ) -> ThreadBinding:
@@ -282,7 +285,9 @@ class ManagementRuntimePort:
             binding_id=binding_id,
             expected_settings_revision=expected_settings_revision,
             expected_context_revision=expected_context_revision,
+            expected_feedback_revision=expected_feedback_revision,
             settings=settings,
+            task_feedback=task_feedback,
             message_context_mode=message_context_mode,
             context_anchor=context_anchor,
         )
@@ -694,6 +699,7 @@ class InstanceManagementService:
         project_alias: str,
         expected_project_revision: int | None = None,
         turn_settings: BindingTurnSettings | None = None,
+        task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
         message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
         context_anchor: MessageContextAnchor | None = None,
         deadline: float | None = None,
@@ -713,6 +719,7 @@ class InstanceManagementService:
                     creator_id=creator_id,
                     expected_project_revision=expected_project_revision,
                     turn_settings=turn_settings,
+                    task_feedback=task_feedback,
                     message_context_mode=message_context_mode,
                     context_anchor=context_anchor,
                 )
@@ -831,7 +838,9 @@ class InstanceManagementService:
         target: CurrentBindingTarget,
         expected_settings_revision: int,
         expected_context_revision: int,
+        expected_feedback_revision: int,
         settings: BindingTurnSettings | None,
+        task_feedback: BindingTaskFeedback,
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
     ) -> ThreadBinding:
@@ -841,7 +850,9 @@ class InstanceManagementService:
                 binding_id=binding.id,
                 expected_settings_revision=expected_settings_revision,
                 expected_context_revision=expected_context_revision,
+                expected_feedback_revision=expected_feedback_revision,
                 settings=settings,
+                task_feedback=task_feedback,
                 message_context_mode=message_context_mode,
                 context_anchor=context_anchor,
             )
