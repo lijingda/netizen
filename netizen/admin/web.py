@@ -637,6 +637,7 @@ class AdminWebApplication:
                 else ExpectedValue.expect(physical_turn_id)
             ),
         )
+        lifecycle_preconditions = _empty_preconditions()
         actions: dict[str, object] = {
             "configure": self._grant(
                 context, "sessions.configure", target, preconditions
@@ -663,7 +664,10 @@ class AdminWebApplication:
                 context, "sessions.rename", target, preconditions
             )
             actions["archive"] = self._grant(
-                context, "sessions.archive", target, preconditions
+                context,
+                "sessions.archive",
+                target,
+                lifecycle_preconditions,
             )
             if runtime.subscription is not None:
                 actions["release"] = self._grant(
@@ -1039,7 +1043,9 @@ class AdminWebApplication:
             context,
             "sessions.archive",
             grant.target.target_id,
-            self._management.archive_exact_binding(target=_binding_target(grant)),
+            self._management.archive_exact_binding(
+                target=_lifecycle_binding_target(grant),
+            ),
         )
         return _json_response(200, _binding_result(context, binding))
 
@@ -1920,6 +1926,19 @@ def _binding_target(grant: object) -> ExactBindingTarget:
         scope_key=target.scope_key,
         binding_id=target.target_id,
         expected_active_binding_id=active,
+    )
+
+
+def _lifecycle_binding_target(grant: object) -> ExactBindingTarget:
+    """Resolve an exact Binding without coupling lifecycle to Scope activity."""
+
+    target = getattr(grant, "target", None)
+    if not isinstance(target, AdminActionTarget) or target.scope_key is None:
+        raise RuntimeError("Binding action target type mismatch")
+    return ExactBindingTarget(
+        scope_key=target.scope_key,
+        binding_id=target.target_id,
+        expected_active_binding_id=None,
     )
 
 

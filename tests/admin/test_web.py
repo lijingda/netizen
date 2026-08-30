@@ -741,6 +741,13 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(status, 200, payload)
 
+        archive_call = next(
+            values for name, values in self.management.calls if name == "archive"
+        )
+        self.assertIsNone(
+            archive_call["target"].expected_active_binding_id
+        )
+
         items = await fresh_items()
         create = items["binding-native"]["actions"]["createLazy"]
         status, _headers, payload = await self.json_post(

@@ -76,6 +76,56 @@ class NativeCapability(str, Enum):
     DELETE = "delete"
 
 
+class ActiveState(str, Enum):
+    RUNNING = "running"
+    STOPPING = "stopping"
+    OBSERVATION_UNAVAILABLE = "turn-observation-unavailable"
+
+
+ACTIVE_STATE_VALUES: frozenset[str] = frozenset(state.value for state in ActiveState)
+
+
+class GoalOperationState(str, Enum):
+    STARTING = "goal-starting"
+    RUNNING = "goal-running"
+    PAUSING = "goal-pausing"
+    EXTERNAL_ACTIVE = "externally-active-goal"
+    UNKNOWN = "goal-unknown"
+
+
+class GoalStatus(str, Enum):
+    ACTIVE = "active"
+    PAUSED = "paused"
+    BLOCKED = "blocked"
+    USAGE_LIMITED = "usageLimited"
+    BUDGET_LIMITED = "budgetLimited"
+    COMPLETE = "complete"
+
+    @property
+    def terminal_or_paused(self) -> bool:
+        return self is not GoalStatus.ACTIVE
+
+
+SESSION_IDLE_STATE = "idle"
+
+
+def persisted_goal_session_state(status: GoalStatus) -> str:
+    """Project one typed persisted Goal status into the sessions state space."""
+
+    return f"goal-{status.value}"
+
+
+SESSION_STOP_ACTION_STATES: frozenset[str] = frozenset(
+    {
+        ActiveState.RUNNING.value,
+        ActiveState.STOPPING.value,
+        ActiveState.OBSERVATION_UNAVAILABLE.value,
+        GoalOperationState.RUNNING.value,
+        GoalOperationState.PAUSING.value,
+    }
+)
+
+
 class ControlName(str, Enum):
     MENU = "menu"
     NEW = "new"
@@ -121,10 +171,15 @@ class CardControlName(str, Enum):
     DELETE_BINDING = "binding.delete"
     PREPARE_EXACT_DELETE_BINDING = "binding.delete.exact.prepare"
     DELETE_EXACT_BINDING = "binding.delete.exact"
+    PREPARE_ARCHIVED_DELETE_BINDING = "binding.delete.archived.prepare"
+    DELETE_ARCHIVED_BINDING = "binding.delete.archived"
     UNARCHIVE_BINDING = "binding.unarchive"
     ACTIVATE_BINDING = "binding.activate"
     ARCHIVE_EXACT_BINDING = "binding.archive.exact"
+    STOP_EXACT_BINDING = "binding.stop.exact"
+    RECHECK_EXACT_TURN = "binding.turn.recheck"
     SESSIONS_PAGE = "sessions.page"
+    REFRESH_ARCHIVED_SESSIONS = "sessions.archived.refresh"
     GOAL_PAUSE = "goal.pause"
     GOAL_RESUME = "goal.resume"
     GOAL_CLEAR = "goal.clear"
@@ -149,6 +204,8 @@ class CardControlIntent:
     binding_id: str | None = None
     expected_active_binding_id: str | None = None
     expected_native_thread_id: str | None = None
+    expected_activity_revision: int | None = None
+    expected_turn_id: str | None = None
     thread_name: str | None = None
     model_id: str | None = None
     effort_id: str | None = None

@@ -62,6 +62,15 @@ Binding Task Feedback 不变。
 Thread 持久化到标准 `.codex`；Side Thread 是不持久化到历史 catalog 的 ephemeral
 例外。lazy Binding 在首条真实 prompt 开始前没有 native ID。
 
+**Catalog-active Native Thread / 未归档原生会话**：持久化 rollout 位于 Codex active
+sessions catalog、而不是 archived catalog 的 Native Codex Thread。这里的 active 只描述
+目录位置，不表示当前有 Turn 正在执行。
+_Avoid_：Active Thread（会与 Runtime-active Native Thread 混淆）
+
+**Runtime-active Native Thread / 运行中原生会话**：公开 Runtime 状态表明当前存在原生
+活动的 Native Codex Thread。它与 rollout 位于 active 或 archived catalog 是不同状态轴。
+_Avoid_：Active Thread（未说明是目录状态还是运行状态）
+
 **Ordinary Thread Subscription / 普通会话订阅**：Netizen 当前 App Server 连接因
 start/resume 持有的、面向一个普通持久 Thread 的事件订阅。取消它不会删除 Binding 或
 原生历史，也不等同于 App Server 已卸载 Thread。
@@ -71,6 +80,18 @@ start/resume 持有的、面向一个普通持久 Thread 的事件订阅。取�
 
 **Turn**：`AsyncThread.turn()` 创建、由 `AsyncTurnHandle` 控制的一轮原生执行。
 Netizen 只在内存保留当前 handle，不持久化 Turn。
+
+**Confirmed Turn Terminal / 已确认 Turn 终态**：exact Turn 已由原生事实源确认为
+`completed`、`interrupted` 或 `failed`。三者都结束该 Turn，而不会结束或损坏承载它的
+Native Codex Thread。
+
+**Authoritative Turn Observation / Turn 权威观测**：同一原生视图确认 exact Thread 中的
+exact Turn 仍为 `inProgress`，或确认它已进入 Confirmed Turn Terminal。轻量 Thread
+`active`、`notLoaded`、缺少 exact Turn 或互相矛盾的状态都不是完整的 Turn 权威观测。
+
+**Turn Observation Unavailable / Turn 观测不可用**：Netizen 已完成一次短暂、
+有界的 exact Turn 重读/恢复，仍无法建立 Authoritative Turn Observation 的
+Binding-local 情形。它不表示 Thread 历史损坏，也不改变持久 Thread 的归档或删除资格。
 
 **Turn File / 本轮文件**：一个已完成的普通持久 Turn 通过公开 latest aggregate Turn
 diff，或 completed `fileChange` / `imageGeneration` item 指向的当前文件。Project 只是
@@ -165,9 +186,9 @@ ADR 0037 的固定 Thread Delete method 提供窄语义口；不暴露通用 RPC
 
 **Thread Lifecycle Operation / 会话生命周期操作**：一个 exact Binding 上短暂占用的
 rename/archive/unarchive/delete；飞书入口围绕当前会话，Admin Control Plane 按实例级
-authority 选择它已开放操作的 exact target。原生 mutation 开始后结果未知就保留
-`lifecycle-unknown` 槽并关闭 admission；Delete 只有 ADR 0037 的一次只读对账例外。
-名称、归档与原生存在性始终由 Codex 拥有，不写入 Channel Database。
+authority 选择它已开放操作的 exact target。archive/delete 的 removal 属于 App Server，
+结果无法判定时只把目标 Binding 记为 `lifecycle-unknown`；名称、归档与原生存在性始终由
+Codex 拥有，不写入 Channel Database。
 
 **Binding Delete / 本地会话删除**：永久删除 Channel Database 中的 exact Binding。
 Lazy Binding 可直接删除；materialized Binding 只能在原生 Delete 正常返回或 Native
@@ -182,7 +203,7 @@ Binding 删除模拟。
 native ID 做一次有界四视图读取：rollout scan 与 state DB 各自的 active/archived catalog。
 任一视图存在为 **present**，保留 Binding 并允许用户重新确认；四个完整视图均不存在为
 **absent**，可以提交 Binding Delete；视图冲突、失败、超时或取消为 **unknown**，保留
-Binding/lifecycle 槽并关闭 admission。它是只读判定，不会自动再发一次 delete。
+Binding/lifecycle 槽并只隔离该 Binding。它是只读判定，不会自动再发一次 delete。
 
 **Goal Operation / Goal 操作**：一个原生持久化 Goal 在 Runtime 中的单一逻辑槽位。
 它可跨多个物理 Turn 自动 continuation；只有逻辑通知流、persisted Goal、exact 最终

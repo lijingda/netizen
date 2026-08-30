@@ -2,10 +2,16 @@
 status: accepted
 date: 2026-08-24
 amends: 0017, 0037
+amended_by: 0049
 related: 0036
 ---
 
 # 从 `/sessions` 卡片两阶段删除 exact idle 会话
+
+> **修订：** [ADR 0049](0049-bound-turn-observation-and-delegate-thread-removal.md)
+> 保留本 ADR 的两阶段危险确认和 exact Binding/native identity，删除 idle、active-pointer
+> 和 Runtime activity 前置条件。materialized 行直接委托 App Server Delete；
+> `/sessions archived` 也使用同一原生删除 primitive。Lazy 语义不变。
 
 ## 背景
 

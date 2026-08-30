@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-12
 amends: 0008, 0014
-amended_by: 0019, 0036, 0037, 0038
+amended_by: 0019, 0036, 0037, 0038, 0049
 related: 0001, 0016
 ---
 
@@ -15,7 +15,10 @@ related: 0001, 0016
 > `/sessions` 卡片按 exact Binding 归档 idle materialized 会话；`/archive` 命令仍只作用于
 > 当前会话。[ADR 0038](0038-delete-exact-idle-sessions-from-the-sessions-card.md) 同样只为
 > 普通 `/sessions` 增加 exact idle 会话的两阶段删除入口；`/delete` 命令仍只作用于当前
-> 会话。
+> 会话。[ADR 0049](0049-bound-turn-observation-and-delegate-thread-removal.md) 改为对所有
+> materialized persisted Thread 保留 lifecycle 控制，并为 archived catalog 增加独立
+> Delete。archive/delete 直接委托 App Server 的有界 shutdown/removal，不再要求
+> Netizen 先停止本地活动或证明 idle；响应不确定只做一次目录对账。
 
 ## 背景
 

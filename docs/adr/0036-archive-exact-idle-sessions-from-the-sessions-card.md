@@ -2,10 +2,16 @@
 status: accepted
 date: 2026-08-24
 amends: 0017
+amended_by: 0049
 related: 0031
 ---
 
 # 从 `/sessions` 卡片归档 exact idle 会话
+
+> **修订：** [ADR 0049](0049-bound-turn-observation-and-delegate-thread-removal.md)
+> 保留本 ADR 的 exact 行和跨当前会话交互，但删除 idle 限制与 active-pointer/
+> Runtime activity 前置条件。任何 materialized persisted Thread 都可直接委托 App Server
+> archive，原生成功后才更新本地 pointer。
 
 ## 背景
 

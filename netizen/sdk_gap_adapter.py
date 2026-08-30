@@ -20,6 +20,8 @@ from openai_codex import AsyncCodex
 from openai_codex import _goal as _sdk_goal
 from openai_codex.generated import v2_all as _generated
 
+from .domain import GoalStatus
+
 
 _SKILLS_LIST_METHOD = "skills/list"
 _GOAL_GET_METHOD = "thread/goal/get"
@@ -102,19 +104,6 @@ class SkillCatalog(Protocol):
         *,
         force_reload: bool = True,
     ) -> SkillCatalogSnapshot: ...
-
-
-class GoalStatus(str, Enum):
-    ACTIVE = "active"
-    PAUSED = "paused"
-    BLOCKED = "blocked"
-    USAGE_LIMITED = "usageLimited"
-    BUDGET_LIMITED = "budgetLimited"
-    COMPLETE = "complete"
-
-    @property
-    def terminal_or_paused(self) -> bool:
-        return self is not GoalStatus.ACTIVE
 
 
 @dataclass(frozen=True, slots=True)

@@ -146,7 +146,22 @@ class ProcessProbeTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         delete = AsyncMock()
-
+        archived_delete = {
+            "thread_id": "thread-archived",
+            "turn_id": "turn-archived",
+            "archived_before_delete": True,
+            "delete_acknowledged": True,
+            "delete_absent_from_scan_and_state_db": True,
+        }
+        running_delete = {
+            "thread_id": "thread-running",
+            "turn_id": "turn-running",
+            "running_marker_pids": [123],
+            "deleted_without_interrupt_cleanup_or_idle_read": True,
+            "orphan_pids": [],
+            "delete_acknowledged": True,
+            "delete_absent_from_scan_and_state_db": True,
+        }
         with (
             patch.object(
                 probe_python_sdk,
@@ -163,6 +178,16 @@ class ProcessProbeTest(unittest.IsolatedAsyncioTestCase):
                 "AppServerThreadDeleteControl",
                 return_value=SimpleNamespace(delete=delete),
             ),
+            patch.object(
+                probe_python_sdk,
+                "_archived_thread_delete_live",
+                new=AsyncMock(return_value=archived_delete),
+            ) as archived_live,
+            patch.object(
+                probe_python_sdk,
+                "_running_thread_delete_live",
+                new=AsyncMock(return_value=running_delete),
+            ) as running_live,
             patch.object(probe_python_sdk.time, "time_ns", return_value=7),
         ):
             result = await probe_python_sdk._thread_lifecycle_live(
@@ -181,15 +206,117 @@ class ProcessProbeTest(unittest.IsolatedAsyncioTestCase):
                 "unarchive_restored_same_id": True,
                 "delete_acknowledged": True,
                 "delete_absent_from_scan_and_state_db": True,
+                "archived_delete": archived_delete,
+                "running_delete": running_delete,
             },
         )
         thread.set_name.assert_awaited_once_with("Netizen lifecycle probe 7")
         codex.thread_archive.assert_awaited_once_with("thread-1")
         codex.thread_unarchive.assert_awaited_once_with("thread-1")
         delete.assert_awaited_once_with("thread-1")
+        archived_live.assert_awaited_once()
+        running_live.assert_awaited_once()
         self.assertEqual(
             [item.kwargs.get("use_state_db_only") for item in visible.await_args_list[-4:]],
             [False, False, True, True],
+        )
+
+    async def test_archived_delete_live_deletes_without_unarchive(self) -> None:
+        handle = SimpleNamespace(id="turn-archived")
+        thread = SimpleNamespace(
+            id="thread-archived",
+            turn=AsyncMock(return_value=handle),
+        )
+        codex = SimpleNamespace(
+            thread_start=AsyncMock(return_value=thread),
+            thread_archive=AsyncMock(),
+        )
+        delete = AsyncMock()
+        visible = AsyncMock(
+            side_effect=(SimpleNamespace(id=thread.id), None, None, None, None, None)
+        )
+
+        with (
+            patch.object(
+                probe_python_sdk,
+                "_public_terminal_turn",
+                new=AsyncMock(return_value=SimpleNamespace(status="completed")),
+            ),
+            patch.object(
+                probe_python_sdk,
+                "_wait_for_thread_visibility",
+                new=visible,
+            ),
+        ):
+            result = await probe_python_sdk._archived_thread_delete_live(
+                codex,
+                Path("/project"),
+                SimpleNamespace(delete=delete),
+            )
+
+        self.assertTrue(result["archived_before_delete"])
+        codex.thread_archive.assert_awaited_once_with(thread.id)
+        delete.assert_awaited_once_with(thread.id)
+        self.assertFalse(hasattr(codex, "thread_unarchive"))
+
+    async def test_running_delete_live_delegates_without_local_quiescence(
+        self,
+    ) -> None:
+        handle = SimpleNamespace(
+            id="turn-running",
+            thread_id="thread-running",
+            interrupt=AsyncMock(),
+        )
+        thread = SimpleNamespace(
+            id="thread-running",
+            turn=AsyncMock(return_value=handle),
+        )
+        codex = SimpleNamespace(thread_start=AsyncMock(return_value=thread))
+        delete = AsyncMock()
+        prove_absent = AsyncMock()
+        wait_for_process = AsyncMock(side_effect=([123], []))
+        wait_for_visibility = AsyncMock(return_value=SimpleNamespace(id=thread.id))
+
+        with (
+            patch.object(
+                probe_python_sdk,
+                "_wait_for_thread_visibility",
+                new=wait_for_visibility,
+            ),
+            patch.object(
+                probe_python_sdk,
+                "_wait_for_process",
+                new=wait_for_process,
+            ),
+            patch.object(
+                probe_python_sdk,
+                "_matching_processes",
+                return_value=[],
+            ),
+            patch.object(
+                probe_python_sdk,
+                "_prove_thread_absent_from_all_catalogs",
+                new=prove_absent,
+            ),
+            patch.object(probe_python_sdk.time, "time_ns", return_value=9),
+        ):
+            result = await probe_python_sdk._running_thread_delete_live(
+                codex,
+                Path("/project"),
+                SimpleNamespace(delete=delete),
+            )
+
+        self.assertEqual(result["running_marker_pids"], [123])
+        self.assertTrue(result["deleted_without_interrupt_cleanup_or_idle_read"])
+        handle.interrupt.assert_not_awaited()
+        delete.assert_awaited_once_with(thread.id)
+        prove_absent.assert_awaited_once_with(codex, thread.id)
+        self.assertEqual(wait_for_process.await_count, 2)
+        wait_for_visibility.assert_awaited_once_with(
+            codex,
+            thread.id,
+            archived=False,
+            present=True,
         )
 
     def test_matching_processes_requires_exact_argv0(self) -> None:

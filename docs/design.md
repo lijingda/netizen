@@ -156,7 +156,9 @@ pause/resume 与终态复用同一张组合回复卡，Goal 模块承担状态�
 Scope 的 active Binding 不会使原卡失去对其 exact Binding 的控制权。
 
 会话生命周期的命令入口按 [ADR 0017](adr/0017-manage-native-thread-lifecycle.md) 与
-[ADR 0037](adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md) 管理当前 Binding：
+[ADR 0037](adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md) 管理当前 Binding，
+运行态观测与 Thread removal 委托按
+[ADR 0049](adr/0049-bound-turn-observation-and-delegate-thread-removal.md)：
 `/rename [name]` 写原生 Thread name；`/archive` 先显示确认卡，提交时再次确认 exact
 Binding 仍为 Scope active。归档成功后只清空 active pointer 并保留 Binding/Turn
 Settings。`/delete` 为 Lazy Binding 显示只删本地记录的确认卡；materialized Binding
@@ -165,12 +167,15 @@ Settings。`/delete` 为 Lazy Binding 显示只删本地记录的确认卡；mat
 普通 `/sessions` 显式读取 `thread_list(archived=False)`，`/sessions archived` 显式读取
 `archived=True`，归档状态与名称都不进 Channel Database。普通列表卡片的“设为当前”只
 切换 exact active Binding，不创建 Turn，也不停止其他 Binding 的运行。按
-[ADR 0036](adr/0036-archive-exact-idle-sessions-from-the-sessions-card.md)，列表中的 idle
-materialized 行可确认后直接 exact archive；inactive 目标保持 active pointer，当前目标
-清空 pointer。按 [ADR 0038](adr/0038-delete-exact-idle-sessions-from-the-sessions-card.md)，
-列表中的 idle Lazy 行和 Delete capability 可用的 idle materialized 行可经独立红色确认卡
-exact delete；inactive 目标保持 active pointer，当前目标清空 pointer。归档恢复仍显式选择
-目标：`/unarchive <短 ID>` 或归档卡按钮恢复 exact native ID 并切换 Binding。
+[ADR 0036](adr/0036-archive-exact-idle-sessions-from-the-sessions-card.md)、
+[ADR 0038](adr/0038-delete-exact-idle-sessions-from-the-sessions-card.md) 与 ADR 0049，每个
+materialized persisted 行都可确认后 exact archive/delete，不以本地 Turn、Goal、Compaction
+或观测状态作为资格门禁。Runtime 只占用 exact Binding 的 lifecycle intent 阻止新 Turn，
+然后释放 Binding/Scope lock 并直接委托 App Server。inactive 目标保持 active pointer，当前目标
+清空 pointer。Lazy 删除仍只删本地 Binding。`/sessions archived` 为 exact archived Thread
+提供独立两阶段 Delete，并与 active 列表共用同一原生 primitive；最终只把 root ID
+交给 App Server 级联删除 spawned descendants。归档恢复仍显式选择目标：
+`/unarchive <短 ID>` 或归档卡按钮恢复 exact native ID 并切换 Binding。
 
 `/side [首轮问题]` 按 [ADR 0021](adr/0021-support-multi-turn-ephemeral-side-topics.md)
 从当前 exact active、materialized Parent Binding 创建
@@ -207,7 +212,8 @@ root ID 回退，只有未命中才进入普通 Scope/Binding。P2P/P2P topic �
 ## 运行与锁
 
 内存状态以 Binding ID 为键：普通 Turn 保存 handle、owner、origin message、
-running/stopping、completion task、receipt Event、只读 plan cursor/checklist、成功
+running/stopping/turn-observation-unavailable 的单轴公开状态、completion task、receipt
+Event、只读 plan cursor/checklist、成功
 steer count 与 freshness；原生压缩保存 exact Thread、
 baseline Turn ID、compacting task 和 receipt Event；Goal 保存一个
 `starting/running/pausing/external-active/unknown` 的逻辑操作槽、opaque handle、
@@ -340,30 +346,48 @@ router lock 与 exact Queue mutex 下复制 cursor 后的通知引用，不调�
 不 `get`/`put`、不新建 worker。rename/archive/unarchive 全部使用高层公开 API。原生名称、
 归档状态与 plan 通知仍以 Codex 为事实源，不增加本地 lifecycle 或 progress 状态列。
 
-archive 与 materialized delete 只允许公开 read 已证明 persisted、non-ephemeral 且 idle
-的原生 Thread，并与
-普通 Turn、Goal、compaction 和其他 lifecycle mutation 互斥。rename 允许复用当前
-Thread handle，但自身同样短暂占槽。已经开始的 mutation 若响应或取消结果未知，保留
-`lifecycle-unknown` 并关闭进程级 admission；不能自动重试或把后续 prompt 交给另一
-Thread。Delete 非取消异常是唯一有界例外：Runtime 不重发 RPC，而是读取 rollout scan 与
-state DB 的 active/archived 四视图；任一 present 就保留 Binding 并允许用户重新确认，
-全部 absent 才提交 Binding Delete，冲突/失败/超时为 unknown 并关闭 admission。原生
-resume/read 失败且四视图全 absent 时允许收尾本地 Binding，用于恢复 native-first 与
-local-second 之间的进程退出。成功 archive/delete 后不自动选择其他 Binding。
+原生 archive 与 materialized delete 的准入事实是 Binding 指向 materialized、persisted、
+non-ephemeral Thread，而不是当前 Runtime activity 或 native idle。提交时在 exact Binding lock
+内只确认 Binding/native identity 并占用 lifecycle intent，然后释放 Binding/Scope lock，直接
+调用 `thread/archive` 或固定 `thread/delete`。不在本地先 interrupt Ordinary Turn、pause Goal、
+cleanup terminal、恢复观测、等待 exact terminal 或重读 idle；App Server 0.147.0 负责从
+ThreadManager 移除、有界 shutdown 和 descendant cascade。原生成功后才取消并丢弃本地
+Turn/Goal/Compaction 观察者，更新或删除 Binding，并通过不代表 Turn 终态的内部 discard
+事件停止 Reaction/Progress/Goal presenter。lifecycle intent 保留到展示清理交接结束，
+因此旧 discard 不能越过归档/恢复边界清掉后来创建的活动；展示失败不改写已经确认的
+原生和本地结果。成功后不自动选择其他 Binding。
+
+已开始的 mutation 若返回非取消响应异常，不重发 RPC，只做一次有界只读对账。archive
+若 exact ID 只在 archived catalog 则提交本地成功，仍在 active 则保留 Binding 并释放
+intent。Delete 读取 rollout scan/state DB 的 active/archived 四视图；任一 present 就保留
+Binding 并允许重新确认，全部 absent 才提交 Binding Delete。对账冲突、失败或超时只保留
+Binding-local `lifecycle-unknown`，不关闭其他 Binding 的 admission。调用取消不在已取消任务
+内追加目录 I/O，也直接进入相同的 Binding-local unknown。
 
 普通持久 Binding 的终态不通过 pinned `handle.run()` 消费。运行时每 0.5 秒用
-`thread.read(include_turns=False)` 读取轻量 Thread status；`notLoaded` 和 `active`
-继续等待，只有 `idle` 才调用 `include_turns=True` 并选择 exact Turn ID；
-`systemError` 或未知状态显式失败。新 rollout 短暂为空时公开 API 可能返回
-`InternalRpcError`，保持 Binding active 并重试。SDK 公开判定为 retryable 的
-overload 也走相同路径。真实 App Server 还可能先报告 `idle`，随后短暂拒绝
-`includeTurns`；只对当前 Thread 精确匹配的 `not materialized yet` 错误重试，其他
-`InvalidRequestError` 立即失败。若 idle 后 exact Turn 尚未出现或仍是 inProgress，
-full-history 重读退避到 2 秒。completed 状态还可能短暂先于 final agent message 可见；
+`thread.read(include_turns=False)` 读取轻量 Thread status；普通稳态中，已曾确认 exact Turn
+后可用 `active` 继续等待；`idle` 时调用 `include_turns=True` 并选择 exact Turn ID。第一次
+观察运行或从恢复返回时，必须由同一个 full view 同时确认 exact Thread 为 `active` 且 exact
+Turn 为 `inProgress`，才是 Authoritative Turn Observation 并回到 `running`、恢复 steer。
+合法长 Turn 此后继续无时长上限地轮询。
+
+可恢复的 RPC/transport/I/O、`notLoaded`、`systemError`、缺少 exact Turn、idle/inProgress 等
+预期可收敛的视图差异只启动一次短观测尝试：最多 5 秒、最多三次原生 I/O，
+其中最多 exact `thread_resume` 一次。尝试恢复 exact `active/inProgress` 就回到普通
+`running`/steer，确认 exact terminal 就走普通终态。仍不可验证或遇到明确 identity/
+contract/programming 错误时，转为 Binding-local `turn-observation-unavailable`：保留 exact
+identity/slot、阻止重复 start/steer，并停止全部周期性 I/O。“重新检查”只再启动同样
+有界的一次尝试；同一 Turn 的 Task Reaction 脉冲和 Progress Card 轮询也停止，已有卡片
+一次更新为观测不可用，后续终态仍可走普通回复兜底。不建立长预算、指数退避或背景唤醒
+循环，也不伪造 terminal。
+completed 状态还可能短暂先于 final agent message 可见；
 普通 Turn 最多再做 4 次 full-history 读取（默认约 2 秒），期间已标记 terminal 以避免
-`/stop` 误中断，仍无文本时保留显式无文本兜底。completed/failed/
-interrupted 和 final agent message 都来自 SDK 的公开 native Turn 模型，不创建
-外层 Turn 记录。
+`/stop` 误中断，之后的读取失败也不再进入观测尝试，仍无文本时保留显式无文本兜底。
+completed/failed/interrupted 都是
+Confirmed Turn Terminal：三者都释放 Ordinary Turn slot 并保留同一 Native Thread；
+`failed` 只把本轮显示为错误，后续消息仍在该 Thread 启动下一 Turn。终态和 final agent
+message 都来自 SDK 的公开 native Turn 模型，不创建外层 Turn 记录，也不以异常或超时
+伪造 terminal。
 
 普通 Turn completed 后，按
 [ADR 0024](adr/0024-send-structured-turn-files-from-completion-cards.md)、
@@ -709,21 +733,29 @@ ID 保留为 `/resume` 的稳定引用。普通列表呈现为无持久状态的
 activation 边界校验目标仍属同一 Scope、未归档且仍存在；
 成功后原地刷新卡片，多个参与者并发操作时最后一次成功切换生效。该动作不创建 Turn、
 不停止旧 Binding 的 running Turn，也不保存 card session；列表缩短时页码夹取到有效页。
-呈现为 idle 的 materialized 行还显示带内置确认的 `binding.archive.exact`；动作携带
-目标、Scope、当前页和 active pointer 快照，并在共享 Scope 锁内按实时 Runtime 状态重新
-校验，并以原生 read 证明 persisted、non-ephemeral、idle。归档 inactive 行不改变真实
-active pointer，归档当前行清空 pointer；旧卡、跨 Scope、已归档、外部 active、running、
-Goal、compacting 和 lifecycle-unknown 目标均零 mutation 地失败。成功后
-从 live catalog 重建并夹取原页；mutation 已确认成功但刷新失败时只回退等价成功消息。
-呈现为 idle 的 Lazy 行以及 Delete capability 可用的 idle materialized 行还显示
-`binding.delete.exact.prepare`；该入口不产生 mutation，而是按 live active pointer、Scope、
-native identity 和 Runtime 状态重新校验后打开独立红色危险卡。最终
-`binding.delete.exact` 携带完整 Binding ID、Scope、active pointer 快照、可空的 exact
-native ID 和页码，再次执行同样校验；Lazy 仅删除本地 Binding，materialized 复用 ADR 0037
-的 native-first 删除与一次四视图失败对账。删除 inactive 行不改变真实 active pointer，
-删除当前行清空 pointer；旧卡、跨 Scope、已归档、running、Goal、compacting 和
-lifecycle-unknown 目标均零 mutation 地失败。成功后同样重建并夹取原页，mutation 已提交但
-刷新失败时只回退等价成功消息。lazy Binding 显示“新会话”且同样可切换。名称和预览只
+每个 materialized persisted 行都显示带内置确认的 `binding.archive.exact`，不区分
+idle、Ordinary Turn running/stopping/`turn-observation-unavailable`、Goal 或 Compaction。
+动作只携带 exact Binding、Scope 和当前页；Runtime 在 exact Binding lock 内确认 Scope/native
+identity 并占用 lifecycle intent，随后释放 Binding/Scope lock 并直接调用 App Server archive。
+它不校验卡片生成时的 active pointer、activity revision 或 physical Turn ID，因为运行态变化不应
+剥夺 Thread lifecycle 控制。归档 inactive 行不改变真实 active pointer，归档当前行清空 pointer。
+成功后从 live catalog 重建并夹取原页；mutation 已确认成功但刷新失败时只回退等价
+成功消息。
+
+idle Lazy 行以及 Delete capability 可用的所有 materialized 行显示
+`binding.delete.exact.prepare`。prepare 不产生 mutation，只重新校验 exact Scope/Binding/native
+identity 并打开独立红色危险卡。最终 `binding.delete.exact` 再次校验同一身份；Lazy 仅删除
+本地 Binding，materialized 直接复用 ADR 0037 的 native-first 删除与响应不确定后一次四视图
+对账。删除 inactive 行不改变真实 active pointer，删除当前行清空 pointer。
+`turn-observation-unavailable` 行另外提供 exact “重新检查”和“停止”；重检只产生一次
+短暂有界观察，而归档/删除不要求观测先恢复。
+
+`/sessions archived` 的每个 exact archived 行保留“恢复并切换”，并在 Delete capability
+可用时增加独立 prepare → 红色确认 Delete。最终调用不先 unarchive/resume，不改变
+active pointer，也不再用额外 catalog preflight 制造第二个准入门禁；App Server 自己验证 exact
+persisted root。成功删除 root 时 spawned descendants 由 App Server 级联处理。两类列表在
+成功后都重建 live catalog；mutation 已提交但刷新失败时只回退等价成功消息。lazy Binding
+显示“新会话”且同样可切换。名称和预览只
 用于当次展示，不写入 Channel 数据库；Thread 列表读取失败或找不到对应 Thread 时明确显示
 暂不可用，不会为了标题而 resume Thread。切换已成功但后续卡片刷新失败时发送等价成功
 反馈，不能把已提交 mutation 误报成失败。
@@ -792,14 +824,15 @@ prompt，未知 slash command fail closed，不增加任意 `/`/`@` 链式解释
 CLI/App 的 `/copy`、`/vim`、`/theme`、`/exit` 等纯宿主命令同样明确不可用且不进入帮助。
 
 `/rename`、`/archive`、`/delete` 命令只作用于当前 active Binding，不接受目标 ID；管理
-另一普通会话的 rename 仍应先 `/resume`。`/sessions` 中按 ADR 0036 确认归档 exact idle
-materialized 行是唯一 archive 例外，按 ADR 0038 经独立红色确认卡删除 exact idle 行是
-唯一 delete 例外；两者都不改变对应文本命令，也不新增 `/delete <id>`。rename 可直接带
+另一普通会话的 rename 仍应先 `/resume`。`/sessions` 中按 ADR 0036/0049 对
+exact materialized 行归档，以及按 ADR 0038/0049 经独立红色确认卡删除 exact active-catalog
+或 archived-catalog 行，是跨当前会话的 lifecycle 例外；它们不新增 `/delete <id>`。rename 可直接带
 名称或打开 form；archive/delete 卡片沿用上文 `/sessions` 的 exact
-Scope/Binding/native identity 预置条件与二次确认。materialized `/delete` 还要明确 spawned
-descendants 与 Codex App/CLI 历史会永久消失。归档列表只为同一 Scope 的原生
-archived Thread 生成恢复按钮；恢复前再次校验 catalog，不把 stale 或跨 Scope Binding
-激活。
+Scope/Binding/native identity 与二次确认，但不携带 Runtime activity 前置条件。本地活动仍在
+运行也直接委托 App Server removal，不先 stop/pause 或等待 terminal。materialized `/delete` 还要明确 spawned
+descendants 与 Codex App/CLI 历史会永久消失。归档列表只为同一 Scope 的原生 archived
+Thread 生成恢复和独立删除入口；恢复仍校验 archived catalog，删除则把 exact native ID
+直接交给同一 Delete primitive，不把 stale 或跨 Scope Binding 激活或删除。
 
 按 ADR 0018，不注册独立的 `/skills` 浏览 control；用户可用普通自然语言消息询问当前
 可用 Skill。显式执行仍是普通消息开头一个或多个 `$skill-name`，并在提交前通过 live
@@ -853,8 +886,9 @@ interrupt cleanup、CLI resume 与 Linux compatibility；高层 surface 出现�
   interrupt/清理 Runtime、Codex 和 Store；systemd `TimeoutStopSec` 与 LaunchAgent
   `ExitTimeOut` 都以 75 秒外层 deadline 兜底，安装器再以 90 秒完成精确退出确认。
 - Admin mutation 发出后遇到 response loss/cancellation 不自动重试。一次性 grant 已消费，
-  页面只能刷新对账；若 native 结果未知，沿用相同的 lifecycle/service admission fail-closed
-  语义。结构化日志不含 credential、cookie/token、cwd、name/preview 或 request body。
+  页面只能刷新对账；若 native lifecycle 结果未知，只保留目标 Binding-local
+  `lifecycle-unknown`，不扩大为全局 admission 关闭。结构化日志不含 credential、cookie/token、cwd、
+  name/preview 或 request body。
 - 没有 durable prompt/final-delivery queue；崩溃后原生历史仍在，但飞书最终回复
   可能丢失。
 - CLI 新增消息不回填飞书；飞书 Thread 必须能在 CLI 原生 resume。
@@ -863,6 +897,13 @@ interrupt cleanup、CLI resume 与 Linux compatibility；高层 surface 出现�
   `thread.read` recovery 已通过 synthetic 20/20 和真实 Linux 验证，不再阻断部署。
   ephemeral Side 有意只使用 `handle.run()` 并接受同一极快通知竞态，不增加 Side
   recovery；这不改变普通持久 Thread 的门禁。
+- Ordinary Turn 因可恢复 I/O 或可收敛视图暂时无法取得 exact `active/inProgress` 或 terminal
+  权威观测时，只做一次最多 5 秒/三次原生 I/O 的短恢复。exact `active/inProgress` 回到
+  普通无时限轮询；仍不可验证则进入无周期 I/O 的 Binding-local
+  `turn-observation-unavailable`。用户可在 `/sessions` 有界重检、停止、归档或删除；
+  lifecycle 不依赖观测先恢复。只有 start/steer、Context Boundary
+  提交、Goal/compaction 或已经开始的不可逆 lifecycle 等副作用未知边界，才沿用各自的
+  fail-closed 规则；lifecycle unknown 本身只隔离目标 Binding。
 - Python SDK interrupt 后前台工具进程可能继续运行；ADR 0009 的 experimental clean
   只处理 App Server 已登记的后台 terminal。ADR 0010 将这一项改为显式产品缺口：
   `/stop` 必须警告用户，不得用 cleanup 空响应声称前台进程已停止。精确 Linux 探针
@@ -887,8 +928,9 @@ interrupt cleanup、CLI resume 与 Linux compatibility；高层 surface 出现�
   Binding；interrupt、terminal cleanup 或 unsubscribe 未确认时保持 closing 且拒绝新
   Prompt，重复 close 只重试未确认步骤。服务重启不恢复 ephemeral Thread，而是在 handler
   注册前把遗留 creating/open route 转为 expired。
-- Thread rename/archive/unarchive mutation 一旦开始而结果无法确认，就保留 lifecycle
-  slot 并关闭 admission。materialized Thread Delete 正常响应后直接提交 Binding；异常时
-  不重发，只做一次有界 rollout scan/state DB × active/archived 对账。present 保留并允许
-  重新确认，absent 提交 Binding，unknown 保留 lifecycle 并关闭 admission；取消仍直接
-  unknown。
+- Thread rename/unarchive mutation 一旦开始而结果无法确认，保留目标 Binding 的 lifecycle
+  slot；archive/delete 正常响应后直接提交本地映射，响应异常时不重发 mutation，只做一次
+  有界 native catalog 对账。archive 的 exact ID 只在 archived catalog 时提交；delete 的
+  rollout scan/state DB × active/archived 四视图 absent 时提交。明确仍 present 时释放
+  reservation 并允许重新确认，对账 unknown 只保留目标 Binding 的 lifecycle slot，不关闭
+  其他 Binding admission。

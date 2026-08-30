@@ -468,22 +468,19 @@ async def _thread_lifecycle_live(
         archived=True,
         present=False,
     )
-    await AppServerThreadDeleteControl(codex).delete(thread.id)
-    for use_state_db_only in (False, True):
-        await _wait_for_thread_visibility(
-            codex,
-            thread.id,
-            archived=False,
-            present=False,
-            use_state_db_only=use_state_db_only,
-        )
-        await _wait_for_thread_visibility(
-            codex,
-            thread.id,
-            archived=True,
-            present=False,
-            use_state_db_only=use_state_db_only,
-        )
+    delete_control = AppServerThreadDeleteControl(codex)
+    await delete_control.delete(thread.id)
+    await _prove_thread_absent_from_all_catalogs(codex, thread.id)
+    archived_delete = await _archived_thread_delete_live(
+        codex,
+        cwd,
+        delete_control,
+    )
+    running_delete = await _running_thread_delete_live(
+        codex,
+        cwd,
+        delete_control,
+    )
     return {
         "thread_id": thread.id,
         "turn_id": turn.id,
@@ -491,6 +488,120 @@ async def _thread_lifecycle_live(
         "rename_visible": True,
         "archive_visible": True,
         "unarchive_restored_same_id": True,
+        "delete_acknowledged": True,
+        "delete_absent_from_scan_and_state_db": True,
+        "archived_delete": archived_delete,
+        "running_delete": running_delete,
+    }
+
+
+async def _prove_thread_absent_from_all_catalogs(
+    codex: AsyncCodex,
+    thread_id: str,
+) -> None:
+    for use_state_db_only in (False, True):
+        await _wait_for_thread_visibility(
+            codex,
+            thread_id,
+            archived=False,
+            present=False,
+            use_state_db_only=use_state_db_only,
+        )
+        await _wait_for_thread_visibility(
+            codex,
+            thread_id,
+            archived=True,
+            present=False,
+            use_state_db_only=use_state_db_only,
+        )
+
+
+async def _archived_thread_delete_live(
+    codex: AsyncCodex,
+    cwd: Path,
+    delete_control: AppServerThreadDeleteControl,
+) -> dict[str, Any]:
+    thread = await codex.thread_start(cwd=str(cwd))
+    handle = await thread.turn("Reply exactly: ARCHIVED-DELETE-LIVE")
+    terminal = await _public_terminal_turn(thread, handle.id)
+    if _status_value(terminal) != "completed":
+        raise AssertionError("archived-delete seed Turn did not complete")
+    await codex.thread_archive(thread.id)
+    await _wait_for_thread_visibility(
+        codex,
+        thread.id,
+        archived=True,
+        present=True,
+    )
+    await _wait_for_thread_visibility(
+        codex,
+        thread.id,
+        archived=False,
+        present=False,
+    )
+    await delete_control.delete(thread.id)
+    await _prove_thread_absent_from_all_catalogs(codex, thread.id)
+    return {
+        "thread_id": thread.id,
+        "turn_id": handle.id,
+        "archived_before_delete": True,
+        "delete_acknowledged": True,
+        "delete_absent_from_scan_and_state_db": True,
+    }
+
+
+async def _running_thread_delete_live(
+    codex: AsyncCodex,
+    cwd: Path,
+    delete_control: AppServerThreadDeleteControl,
+) -> dict[str, Any]:
+    """Delete a persisted Thread while its exact Turn is still running."""
+
+    marker = f"netizen-lifecycle-running-{time.time_ns()}"
+    thread = await codex.thread_start(cwd=str(cwd))
+    handle = await thread.turn(
+        "Use the terminal to run exactly this command and wait for it: "
+        f"/bin/bash -lc 'exec -a {marker} /bin/sleep 120'. "
+        "After it exits, reply exactly: RUNNING-DELETE-LIVE"
+    )
+    delete_attempted = False
+    try:
+        observed_pids = await _wait_for_process(marker, present=True, timeout=45)
+        await _wait_for_thread_visibility(
+            codex,
+            thread.id,
+            archived=False,
+            present=True,
+        )
+        delete_attempted = True
+        await delete_control.delete(thread.id)
+        await _prove_thread_absent_from_all_catalogs(codex, thread.id)
+        await _wait_for_process(marker, present=False, timeout=20)
+    except BaseException:
+        # Cleanup is only for a failed disposable probe.  Once delete was sent,
+        # never resend it after an uncertain response.
+        await _cleanup_turns(
+            (handle,),
+            (),
+            terminal_cleanup=PinnedExperimentalTerminalCleanup(codex),
+        )
+        if not delete_attempted:
+            try:
+                await delete_control.delete(thread.id)
+            except Exception:
+                pass
+        raise
+    orphan_pids = _matching_processes(marker)
+    if orphan_pids:
+        raise AssertionError(
+            f"running-delete probe left marker processes: {orphan_pids}"
+        )
+    return {
+        "thread_id": thread.id,
+        "turn_id": handle.id,
+        "running_marker_pids": observed_pids,
+        "deleted_without_interrupt_cleanup_or_idle_read": True,
+        "orphan_pids": orphan_pids,
         "delete_acknowledged": True,
         "delete_absent_from_scan_and_state_db": True,
     }

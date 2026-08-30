@@ -36,6 +36,7 @@ from ..bindings import (
     ThreadBinding,
 )
 from ..codex_runtime import (
+    ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
     CodexRuntime,
     NativeThreadCatalog,
@@ -355,13 +356,49 @@ class ManagementRuntimePort:
             expected_native_thread_id=expected_native_thread_id,
         )
 
+    async def delete_archived_exact(
+        self,
+        binding_id: str,
+        *,
+        expected_native_thread_id: str,
+    ) -> ThreadBinding:
+        return await self.__runtime.delete_archived_exact(
+            binding_id,
+            expected_native_thread_id=expected_native_thread_id,
+        )
+
     async def stop_exact(
         self,
         binding_id: str,
         *,
         acknowledge: StopAcknowledger | None = None,
+        expected_activity_revision: int | None = None,
+        expected_turn_id: str | None = None,
     ) -> StopDisposition:
-        return await self.__runtime.stop_exact(binding_id, acknowledge=acknowledge)
+        if expected_activity_revision is None:
+            return await self.__runtime.stop_exact(
+                binding_id,
+                acknowledge=acknowledge,
+            )
+        return await self.__runtime.stop_exact(
+            binding_id,
+            acknowledge=acknowledge,
+            expected_activity_revision=expected_activity_revision,
+            expected_turn_id=expected_turn_id,
+        )
+
+    async def recheck_turn_exact(
+        self,
+        binding_id: str,
+        *,
+        expected_activity_revision: int,
+        expected_turn_id: str,
+    ) -> ActiveTurnSnapshot:
+        return await self.__runtime.recheck_turn_exact(
+            binding_id,
+            expected_activity_revision=expected_activity_revision,
+            expected_turn_id=expected_turn_id,
+        )
 
     async def release_exact(self, binding_id: str) -> ReleaseDisposition:
         return await self.__runtime.release_exact(binding_id)
@@ -879,10 +916,12 @@ class InstanceManagementService:
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
             previous_id = binding.id
-            archived = await self._runtime.archive_exact(binding.id)
+        archived = await self._runtime.archive_exact(binding.id)
+        async with self._scope_coordinator.hold(target.scope_key):
             current_id = self._active_id(target.scope_key)
-            await self._runtime.binding_pointer_changed(previous_id, current_id)
-            return archived
+            if previous_id == binding.id and current_id is None:
+                await self._runtime.binding_pointer_changed(binding.id, None)
+        return archived
 
     async def delete_current_lazy_binding(
         self,
@@ -906,18 +945,19 @@ class InstanceManagementService:
                 raise CurrentBindingChanged(
                     "the current Binding native Thread changed"
                 )
-            try:
-                deleted = await self._runtime.delete_exact(
-                    binding.id,
-                    expected_native_thread_id=expected_native_thread_id,
-                )
-            except ThreadDeleteTargetChanged as error:
-                raise CurrentBindingChanged(
-                    "the current Binding native Thread changed"
-                ) from error
+        try:
+            deleted = await self._runtime.delete_exact(
+                binding.id,
+                expected_native_thread_id=expected_native_thread_id,
+            )
+        except ThreadDeleteTargetChanged as error:
+            raise CurrentBindingChanged(
+                "the current Binding native Thread changed"
+            ) from error
+        async with self._scope_coordinator.hold(target.scope_key):
             current_id = self._active_id(target.scope_key)
             await self._runtime.binding_pointer_changed(binding.id, current_id)
-            return deleted
+        return deleted
 
     async def release_current_binding(
         self,
@@ -934,12 +974,21 @@ class InstanceManagementService:
         *,
         target: CurrentBindingTarget,
         acknowledge: StopAcknowledger | None = None,
+        runtime_precondition: RuntimePrecondition | None = None,
     ) -> StoppedBinding:
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
+            stop_kwargs: dict[str, object] = {"acknowledge": acknowledge}
+            if runtime_precondition is not None:
+                stop_kwargs.update(
+                    expected_activity_revision=(
+                        runtime_precondition.activity_revision
+                    ),
+                    expected_turn_id=runtime_precondition.physical_turn_id,
+                )
             disposition = await self._runtime.stop_exact(
                 binding.id,
-                acknowledge=acknowledge,
+                **stop_kwargs,
             )
             return StoppedBinding(binding=binding, disposition=disposition)
 
@@ -991,11 +1040,13 @@ class InstanceManagementService:
         target: ExactBindingTarget,
     ) -> ThreadBinding:
         async with self._scope_coordinator.hold(target.scope_key):
-            binding, previous_id = self._require_exact(target)
-            archived = await self._runtime.archive_exact(binding.id)
+            binding, previous_id = self._require_exact_lifecycle_target(target)
+        archived = await self._runtime.archive_exact(binding.id)
+        async with self._scope_coordinator.hold(target.scope_key):
             current_id = self._active_id(target.scope_key)
-            await self._runtime.binding_pointer_changed(previous_id, current_id)
-            return archived
+            if previous_id == binding.id and current_id is None:
+                await self._runtime.binding_pointer_changed(binding.id, None)
+        return archived
 
     async def restore_exact_binding(
         self,
@@ -1036,18 +1087,42 @@ class InstanceManagementService:
         expected_native_thread_id: str | None,
     ) -> ThreadBinding:
         async with self._scope_coordinator.hold(target.scope_key):
-            binding, previous_id = self._require_exact(target)
+            binding, previous_id = self._require_exact_lifecycle_target(target)
             if binding.native_thread_id != expected_native_thread_id:
                 raise ThreadDeleteTargetChanged(
                     "会话的原生 Thread 已变化，本删除确认未执行。"
                 )
-            deleted = await self._runtime.delete_exact(
-                binding.id,
-                expected_native_thread_id=expected_native_thread_id,
-            )
+        deleted = await self._runtime.delete_exact(
+            binding.id,
+            expected_native_thread_id=expected_native_thread_id,
+        )
+        async with self._scope_coordinator.hold(target.scope_key):
             current_id = self._active_id(target.scope_key)
-            await self._runtime.binding_pointer_changed(previous_id, current_id)
-            return deleted
+            if previous_id == binding.id and current_id is None:
+                await self._runtime.binding_pointer_changed(binding.id, None)
+        return deleted
+
+    async def delete_archived_exact_binding(
+        self,
+        *,
+        target: ExactBindingTarget,
+        expected_native_thread_id: str,
+    ) -> ThreadBinding:
+        async with self._scope_coordinator.hold(target.scope_key):
+            binding, previous_id = self._require_exact_lifecycle_target(target)
+            if binding.native_thread_id != expected_native_thread_id:
+                raise ThreadDeleteTargetChanged(
+                    "归档会话的原生 Thread 已变化，本删除确认未执行。"
+                )
+        deleted = await self._runtime.delete_archived_exact(
+            binding.id,
+            expected_native_thread_id=expected_native_thread_id,
+        )
+        async with self._scope_coordinator.hold(target.scope_key):
+            current_id = self._active_id(target.scope_key)
+            if previous_id == binding.id and current_id is None:
+                await self._runtime.binding_pointer_changed(binding.id, None)
+        return deleted
 
     async def release_exact_binding(
         self,
@@ -1070,12 +1145,36 @@ class InstanceManagementService:
     ) -> StoppedBinding:
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
-            self._require_runtime_precondition(binding.id, runtime_precondition)
+            stop_kwargs: dict[str, object] = {"acknowledge": acknowledge}
+            if runtime_precondition is not None:
+                stop_kwargs.update(
+                    expected_activity_revision=(
+                        runtime_precondition.activity_revision
+                    ),
+                    expected_turn_id=runtime_precondition.physical_turn_id,
+                )
             disposition = await self._runtime.stop_exact(
                 binding.id,
-                acknowledge=acknowledge,
+                **stop_kwargs,
             )
             return StoppedBinding(binding, disposition)
+
+    async def recheck_exact_turn(
+        self,
+        *,
+        target: ExactBindingTarget,
+        runtime_precondition: RuntimePrecondition,
+    ) -> ActiveTurnSnapshot:
+        async with self._scope_coordinator.hold(target.scope_key):
+            binding, _ = self._require_exact(target)
+            turn_id = runtime_precondition.physical_turn_id
+            if turn_id is None:
+                raise RuntimeStateChanged("recheck requires an exact physical Turn")
+            return await self._runtime.recheck_turn_exact(
+                binding.id,
+                expected_activity_revision=runtime_precondition.activity_revision,
+                expected_turn_id=turn_id,
+            )
 
     async def close_side(
         self,
@@ -1331,6 +1430,18 @@ class InstanceManagementService:
         current_id = self._active_id(target.scope_key)
         if current_id != target.expected_active_binding_id:
             raise ActivePointerChanged(target.scope_key)
+        binding = self._bindings.get(target.binding_id)
+        if binding.scope_key != target.scope_key:
+            raise BindingScopeMismatch(target.binding_id)
+        return binding, current_id
+
+    def _require_exact_lifecycle_target(
+        self,
+        target: ExactBindingTarget,
+    ) -> tuple[ThreadBinding, str | None]:
+        """Resolve an exact Thread without coupling it to the Scope pointer."""
+
+        current_id = self._active_id(target.scope_key)
         binding = self._bindings.get(target.binding_id)
         if binding.scope_key != target.scope_key:
             raise BindingScopeMismatch(target.binding_id)

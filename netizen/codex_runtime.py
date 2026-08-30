@@ -16,6 +16,7 @@ from openai_codex import (
     InvalidRequestError,
     SkillInput,
     TextInput,
+    TransportClosedError,
     TurnResult,
     is_retryable_error,
 )
@@ -29,7 +30,14 @@ from .bindings import (
     SideTopicState,
     ThreadBinding,
 )
-from .domain import MessageContextAnchor, MentionContextMode, NativeCapability
+from .domain import (
+    ActiveState,
+    GoalOperationState,
+    GoalStatus,
+    MessageContextAnchor,
+    MentionContextMode,
+    NativeCapability,
+)
 from .model_settings import ModelCatalog, TurnModelSettings
 from .sdk_gap_adapter import (
     GoalControl,
@@ -37,7 +45,6 @@ from .sdk_gap_adapter import (
     GoalHandle,
     GoalMutationStateUnknown,
     GoalSnapshot,
-    GoalStatus,
     GoalStreamTerminal,
     SideBoundaryControl,
     SkillCatalog,
@@ -65,6 +72,8 @@ _THREAD_LIST_PAGE_LIMIT = 100
 _THREAD_CATALOG_MAX_PAGES = 1_000
 _THREAD_CATALOG_MAX_ITEMS = 100_000
 _THREAD_DELETE_RECONCILE_TIMEOUT_SECONDS = 20.0
+_TURN_OBSERVATION_RECOVERY_TIMEOUT_SECONDS = 5.0
+_TURN_OBSERVATION_RECOVERY_MAX_IO = 3
 _TERMINAL_RESPONSE_MATERIALIZATION_RETRIES = 4
 _SIDE_CLOSE_DRAIN_TIMEOUT_SECONDS = 5.0
 _SIDE_IDLE_SECONDS = 2 * 60 * 60
@@ -174,6 +183,14 @@ class TerminalStateUnknown(RuntimeError):
     pass
 
 
+class _TurnViewUnverified(RuntimeError):
+    """One read cycle could not establish an exact authoritative Turn view."""
+
+
+class _TurnResumeRequired(_TurnViewUnverified):
+    """One bounded recovery attempt must replace the native Thread handle."""
+
+
 class SkillReferenceError(RuntimeError):
     pass
 
@@ -202,15 +219,15 @@ class ThreadLifecycleError(RuntimeError):
     pass
 
 
+class TurnObservationUnavailable(ThreadLifecycleError):
+    pass
+
+
 class ContextAnchorRequired(ThreadLifecycleError):
     pass
 
 
 class ThreadLifecycleStateUnknown(ThreadLifecycleError):
-    pass
-
-
-class _ThreadLifecycleReadUnavailable(ThreadLifecycleError):
     pass
 
 
@@ -227,6 +244,10 @@ class ThreadDeleteUnavailable(ThreadLifecycleError):
 
 
 class ThreadDeleteTargetChanged(ThreadLifecycleError):
+    pass
+
+
+class ThreadActivityChanged(ThreadLifecycleError):
     pass
 
 
@@ -285,19 +306,6 @@ class SideCloseFailed(RuntimeError):
 class SubmitDisposition(str, Enum):
     STARTED = "started"
     STEERED = "steered"
-
-
-class ActiveState(str, Enum):
-    RUNNING = "running"
-    STOPPING = "stopping"
-
-
-class GoalOperationState(str, Enum):
-    STARTING = "goal-starting"
-    RUNNING = "goal-running"
-    PAUSING = "goal-pausing"
-    EXTERNAL_ACTIVE = "externally-active-goal"
-    UNKNOWN = "goal-unknown"
 
 
 class GoalFinalizationStatus(str, Enum):
@@ -695,6 +703,28 @@ class TurnOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class TurnObservationUnavailableOutcome:
+    """One non-terminal notice that bounded exact Turn observation failed."""
+
+    binding_id: str
+    thread_id: str
+    turn_id: str
+    owner_id: str
+    origin: object
+    error: TerminalStateUnknown
+    state: ActiveState = ActiveState.OBSERVATION_UNAVAILABLE
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadActivityDiscardedOutcome:
+    """Presentation-only notice after native Thread removal is committed."""
+
+    binding_id: str
+    thread_id: str
+    turn_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class CompactionOutcome:
     binding_id: str
     thread_id: str
@@ -783,6 +813,8 @@ class SideLifecycleOutcome:
 
 RuntimeOutcome = (
     TurnOutcome
+    | TurnObservationUnavailableOutcome
+    | ThreadActivityDiscardedOutcome
     | CompactionOutcome
     | GoalOutcome
     | SideTurnOutcome
@@ -825,6 +857,11 @@ class _ActiveTurn:
     plan_last_update_cursor: int | None = None
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
     task: asyncio.Task[None] | None = None
+
+
+class _TurnObservation(Enum):
+    ACTIVE = "active"
+    EXACT_IN_PROGRESS = "exact-in-progress"
 
 
 @dataclass(slots=True)
@@ -1202,7 +1239,15 @@ class CodexRuntime:
                 raise self._goal_slot_error(self._goals[binding.id])
             active = self._active.get(binding.id)
             if active is not None:
-                raise self._running_lifecycle_error(active, operation="释放")
+                if active.state is ActiveState.STOPPING:
+                    raise ThreadStopping("当前 Turn 正在停止，不能释放订阅。")
+                if active.state is ActiveState.OBSERVATION_UNAVAILABLE:
+                    raise TurnObservationUnavailable(
+                        "当前 Turn 观测不可用，不能释放订阅；请重新检查或停止。"
+                    )
+                raise ThreadRunningConfiguration(
+                    "当前 Turn 正在执行，不能释放订阅。"
+                )
             await self._guard_no_goal_locked(binding)
             if binding.id in self._goals:
                 raise self._goal_slot_error(self._goals[binding.id])
@@ -2482,8 +2527,8 @@ class CodexRuntime:
                 if mutation_attempted:
                     self._retain_unknown_lifecycle(operation)
                     raise ThreadLifecycleStateUnknown(
-                        "Codex 会话重命名结果未确认；服务已关闭 admission，"
-                        "请重启后通过 /status 对账。"
+                        "Codex 会话重命名结果未确认；当前 Binding "
+                        "的生命周期状态待对账。"
                     ) from error
                 self._finish_lifecycle_locked(operation)
                 self._schedule_known_subscription_locked(
@@ -2517,33 +2562,76 @@ class CodexRuntime:
                 raise ThreadNotMaterialized(
                     "Lazy 会话没有原生历史可归档；如不再需要，请使用 /delete。"
                 )
-            await self._idle_lifecycle_thread_locked(binding)
             operation = self._begin_lifecycle_locked(
                 binding,
                 ThreadLifecycleState.ARCHIVING,
             )
+            thread_id = binding.native_thread_id
+
+        mutation_error: Exception | None = None
+        try:
+            await self._codex.thread_archive(thread_id)
+        except asyncio.CancelledError:
+            await self._mark_lifecycle_unknown(operation)
+            raise
+        except Exception as error:
+            mutation_error = error
+
+        if mutation_error is not None:
             try:
-                await self._codex.thread_archive(binding.native_thread_id)
+                async with asyncio.timeout(
+                    _THREAD_DELETE_RECONCILE_TIMEOUT_SECONDS
+                ):
+                    state = await self.thread_catalog_state(thread_id)
+            except asyncio.CancelledError:
+                await self._mark_lifecycle_unknown(operation)
+                raise
+            except Exception as reconcile_error:
+                await self._mark_lifecycle_unknown(operation)
+                raise ThreadLifecycleStateUnknown(
+                    "Codex 会话归档结果与原生目录均未确认；Binding 保留，"
+                    "请稍后重新检查。"
+                ) from reconcile_error
+            if state is NativeThreadCatalogState.ACTIVE:
+                await self._release_lifecycle_reservation(operation)
+                raise ThreadLifecycleError(
+                    "Codex 会话仍在 active 目录，Binding 已保留；"
+                    "本次归档未完成，请重新确认后重试。"
+                ) from mutation_error
+            if state is not NativeThreadCatalogState.ARCHIVED:
+                await self._mark_lifecycle_unknown(operation)
+                raise ThreadLifecycleStateUnknown(
+                    "Codex 会话归档结果无法由原生目录确认；Binding 保留，"
+                    "请稍后重新检查。"
+                ) from mutation_error
+
+        local_commit_error: Exception | None = None
+        async with self._lock(binding_id):
+            binding = self._require_reserved_lifecycle_binding_locked(operation)
+            discarded = self._discard_local_thread_activity_locked(
+                binding.id,
+                thread_id,
+            )
+            try:
                 archived = self._bindings.deactivate_if_active(
                     scope_key=binding.scope_key,
                     binding_id=binding.id,
                 )
-            except asyncio.CancelledError:
-                self._retain_unknown_lifecycle(operation)
-                raise
             except Exception as error:
                 self._retain_unknown_lifecycle(operation)
-                raise ThreadLifecycleStateUnknown(
-                    "Codex 会话归档结果未确认；当前会话保持占用且服务已关闭 "
-                    "admission，请重启后对账。"
-                ) from error
-            self._finish_lifecycle_locked(operation)
-            self._schedule_known_subscription_locked(
-                binding.id,
-                binding.native_thread_id,
-                delay=0.0,
-            )
-            return archived
+                local_commit_error = error
+
+        try:
+            await self._deliver_thread_activity_discarded(discarded)
+        finally:
+            if local_commit_error is None:
+                async with self._lock(binding_id):
+                    self._finish_lifecycle_locked(operation)
+        if local_commit_error is not None:
+            raise ThreadLifecycleStateUnknown(
+                "原生 Codex 会话已归档，但本地 Binding 更新结果未确认。"
+            ) from local_commit_error
+        return archived
 
     async def delete_binding(self, binding: ThreadBinding) -> ThreadBinding:
         """Compatibility wrapper for exact Binding delete."""
@@ -2564,6 +2652,19 @@ class CodexRuntime:
         return await self._delete_binding_exact(
             binding_id,
             allow_materialized=True,
+            expected_native_thread_id=expected_native_thread_id,
+        )
+
+    async def delete_archived_exact(
+        self,
+        binding_id: str,
+        *,
+        expected_native_thread_id: str,
+    ) -> ThreadBinding:
+        """Delete one exact persisted Thread through the shared primitive."""
+
+        return await self.delete_exact(
+            binding_id,
             expected_native_thread_id=expected_native_thread_id,
         )
 
@@ -2599,13 +2700,6 @@ class CodexRuntime:
                     "会话的原生 Thread 已变化，本删除确认未执行；"
                     "请重新发送 /delete。"
                 )
-            if binding.id in self._compacting:
-                raise ThreadCompacting("当前会话正在压缩上下文，不能删除。")
-            if binding.id in self._goals:
-                raise self._goal_slot_error(self._goals[binding.id])
-            active = self._active.get(binding.id)
-            if active is not None:
-                raise self._running_lifecycle_error(active, operation="删除")
 
             if binding.native_thread_id is None:
                 operation = self._begin_lifecycle_locked(
@@ -2617,7 +2711,7 @@ class CodexRuntime:
                 except Exception as error:
                     self._retain_unknown_lifecycle(operation)
                     raise ThreadLifecycleStateUnknown(
-                        "Lazy 会话删除结果未确认；服务已关闭 admission。"
+                        "Lazy 会话删除结果未确认。"
                     ) from error
                 self._finish_lifecycle_locked(operation)
                 return deleted
@@ -2633,76 +2727,79 @@ class CodexRuntime:
                     "当前 SDK/App Server 的 Thread Delete 兼容契约未通过；"
                     "本次未调用 Codex，Binding 与原生历史均未改变。"
                 )
-            native_already_absent = False
-            try:
-                await self._idle_lifecycle_thread_locked(binding)
-            except _ThreadLifecycleReadUnavailable as read_error:
-                try:
-                    state = await self._thread_delete_catalog_state(
-                        binding.native_thread_id
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as reconcile_error:
-                    raise ThreadLifecycleError(
-                        "无法读取 Codex 会话或完成原生目录对账；"
-                        "本次未启动删除，请稍后重试。"
-                    ) from reconcile_error
-                if state is not NativeThreadCatalogState.MISSING:
-                    raise read_error
-                native_already_absent = True
             operation = self._begin_lifecycle_locked(
                 binding,
                 ThreadLifecycleState.DELETING,
             )
-            delete_error: Exception | None = None
-            if not native_already_absent:
-                try:
-                    await control.delete(binding.native_thread_id)
-                except asyncio.CancelledError:
-                    self._retain_unknown_lifecycle(operation)
-                    raise
-                except Exception as error:
-                    delete_error = error
+            thread_id = binding.native_thread_id
 
-            if delete_error is not None:
-                try:
-                    state = await self._thread_delete_catalog_state(
-                        binding.native_thread_id
-                    )
-                except asyncio.CancelledError:
-                    self._retain_unknown_lifecycle(operation)
-                    raise
-                except Exception as reconcile_error:
-                    self._retain_unknown_lifecycle(operation)
-                    raise ThreadLifecycleStateUnknown(
-                        "Codex 会话删除结果与原生目录均未确认；Binding 保留且"
-                        "服务已关闭 admission，请重启后重新执行 /delete 对账。"
-                    ) from reconcile_error
-                if state is not NativeThreadCatalogState.MISSING:
-                    self._finish_lifecycle_locked(operation)
-                    self._schedule_known_subscription_locked(
-                        binding.id,
-                        binding.native_thread_id,
-                    )
-                    raise ThreadLifecycleError(
-                        "Codex 会话仍存在于原生目录，Binding 已保留；"
-                        "本次删除未完成，请重新确认后重试。"
-                    ) from delete_error
+        return await self._delete_materialized_reserved(operation, thread_id)
 
+    async def _delete_materialized_reserved(
+        self,
+        operation: _ActiveThreadLifecycle,
+        thread_id: str,
+    ) -> ThreadBinding:
+        control = self._thread_delete_control
+        if control is None:
+            await self._release_lifecycle_reservation(operation)
+            raise ThreadDeleteUnavailable(
+                "当前 SDK/App Server 的 Thread Delete 兼容契约未通过；"
+                "本次未调用 Codex，Binding 与原生历史均未改变。"
+            )
+
+        delete_error: Exception | None = None
+        try:
+            await control.delete(thread_id)
+        except asyncio.CancelledError:
+            await self._mark_lifecycle_unknown(operation)
+            raise
+        except Exception as error:
+            delete_error = error
+
+        if delete_error is not None:
+            try:
+                state = await self._thread_delete_catalog_state(thread_id)
+            except asyncio.CancelledError:
+                await self._mark_lifecycle_unknown(operation)
+                raise
+            except Exception as reconcile_error:
+                await self._mark_lifecycle_unknown(operation)
+                raise ThreadLifecycleStateUnknown(
+                    "Codex 会话删除结果与原生目录均未确认；Binding 保留且"
+                    "当前 Binding 生命周期状态未知，请稍后重新检查。"
+                ) from reconcile_error
+            if state is not NativeThreadCatalogState.MISSING:
+                await self._release_lifecycle_reservation(operation)
+                raise ThreadLifecycleError(
+                    "Codex 会话仍存在于原生目录，Binding 已保留；"
+                    "本次删除未完成，请重新确认后重试。"
+                ) from delete_error
+
+        local_commit_error: Exception | None = None
+        async with self._lock(operation.binding_id):
+            binding = self._require_reserved_lifecycle_binding_locked(operation)
+            discarded = self._discard_local_thread_activity_locked(
+                binding.id,
+                thread_id,
+            )
             try:
                 deleted = self._bindings.delete_binding(binding.id)
             except Exception as error:
                 self._retain_unknown_lifecycle(operation)
-                raise ThreadLifecycleStateUnknown(
-                    "原生 Codex 会话已删除或确认不存在，但 Binding 删除结果未确认；"
-                    "服务已关闭 admission，请重启后重新执行 /delete 收尾。"
-                ) from error
-            self._finish_lifecycle_locked(operation)
-            record = self._subscriptions.pop(binding.id, None)
-            if record is not None:
-                self._cancel_subscription_idle(record)
-            return deleted
+                local_commit_error = error
+
+        try:
+            await self._deliver_thread_activity_discarded(discarded)
+        finally:
+            if local_commit_error is None:
+                async with self._lock(operation.binding_id):
+                    self._finish_lifecycle_locked(operation)
+        if local_commit_error is not None:
+            raise ThreadLifecycleStateUnknown(
+                "原生 Codex 会话已删除或确认不存在，但 Binding 删除结果未确认。"
+            ) from local_commit_error
+        return deleted
 
     async def unarchive_binding(self, binding: ThreadBinding) -> ThreadBinding:
         """Compatibility wrapper that restores and selects the Binding."""
@@ -2807,8 +2904,8 @@ class CodexRuntime:
             except Exception as error:
                 self._retain_unknown_lifecycle(operation)
                 raise ThreadLifecycleStateUnknown(
-                    "Codex 会话恢复结果未确认；服务已关闭 admission，"
-                    "请重启后对账。"
+                    "Codex 会话恢复结果未确认；当前 Binding "
+                    "的生命周期状态待对账。"
                 ) from error
             self._finish_lifecycle_locked(operation)
             self._schedule_known_subscription_locked(
@@ -3006,6 +3103,14 @@ class CodexRuntime:
                     "当前任务正在停止，暂不接受新消息；"
                     "若 /stop 曾提示清理失败，请再次发送 /stop 重试。"
                 )
+            if (
+                active is not None
+                and active.state is ActiveState.OBSERVATION_UNAVAILABLE
+            ):
+                raise TurnObservationUnavailable(
+                    "当前 Turn 状态无法确认，暂不能接收新消息；"
+                    "请在 /sessions 中重新检查，或直接归档、删除会话。"
+                )
             return SubmissionAdmission(
                 binding_id=binding_id,
                 revision=self._admission_revision(binding_id),
@@ -3126,6 +3231,14 @@ class CodexRuntime:
                 "当前任务正在停止，暂不接受新消息；"
                 "若 /stop 曾提示清理失败，请再次发送 /stop 重试。"
             )
+        if (
+            active is not None
+            and active.state is ActiveState.OBSERVATION_UNAVAILABLE
+        ):
+            raise TurnObservationUnavailable(
+                "当前 Turn 状态无法确认，暂不能接收新消息；"
+                "请在 /sessions 中重新检查，或直接归档、删除会话。"
+            )
 
         async with self._lock(binding.id):
             if not self._accepting:
@@ -3164,6 +3277,11 @@ class CodexRuntime:
                     raise ThreadStopping(
                         "当前任务正在停止，暂不接受新消息；"
                         "若 /stop 曾提示清理失败，请再次发送 /stop 重试。"
+                    )
+                if active.state is ActiveState.OBSERVATION_UNAVAILABLE:
+                    raise TurnObservationUnavailable(
+                        "当前 Turn 状态无法确认，暂不能接收新消息；"
+                        "请在 /sessions 中重新检查，或直接归档、删除会话。"
                     )
             self._redeem_submission_admission(
                 binding_id=binding.id,
@@ -4255,14 +4373,43 @@ class CodexRuntime:
         self._advance_admission_revision(binding.id)
         return active
 
+    async def _release_lifecycle_reservation(
+        self,
+        operation: _ActiveThreadLifecycle,
+    ) -> None:
+        async with self._lock(operation.binding_id):
+            if self._lifecycles.get(operation.binding_id) is operation:
+                self._finish_lifecycle_locked(operation)
+
+    async def _mark_lifecycle_unknown(
+        self,
+        operation: _ActiveThreadLifecycle,
+    ) -> None:
+        async with self._lock(operation.binding_id):
+            self._retain_unknown_lifecycle(operation)
+
+    def _require_reserved_lifecycle_binding_locked(
+        self,
+        operation: _ActiveThreadLifecycle,
+    ) -> ThreadBinding:
+        if self._lifecycles.get(operation.binding_id) is not operation:
+            raise RuntimeError(
+                "native Thread lifecycle reservation changed"
+            )
+        binding = self._bindings.get(operation.binding_id)
+        if binding.native_thread_id != operation.thread_id:
+            raise RuntimeError(
+                "native Thread lifecycle identity changed"
+            )
+        return binding
+
     def _finish_lifecycle_locked(
         self,
         active: _ActiveThreadLifecycle,
     ) -> None:
         if self._lifecycles.get(active.binding_id) is not active:
-            self.close_admission()
             raise RuntimeError(
-                "native Thread lifecycle ownership changed; admission closed"
+                "native Thread lifecycle ownership changed"
             )
         self._lifecycles.pop(active.binding_id, None)
         self._advance_admission_revision(active.binding_id)
@@ -4272,24 +4419,86 @@ class CodexRuntime:
         active: _ActiveThreadLifecycle,
     ) -> None:
         if self._lifecycles.get(active.binding_id) is active:
-            active.state = ThreadLifecycleState.UNKNOWN
-        self.close_admission()
+            if active.state is not ThreadLifecycleState.UNKNOWN:
+                active.state = ThreadLifecycleState.UNKNOWN
+                self._advance_admission_revision(active.binding_id)
 
-    def _running_lifecycle_error(
+    def _discard_local_thread_activity_locked(
         self,
-        active: _ActiveTurn,
-        *,
-        operation: str,
-    ) -> RuntimeError:
-        if active.state is ActiveState.STOPPING:
-            return ThreadStopping(
-                f"当前 Turn 正在停止，不能{operation}会话；"
-                "若 /stop 曾提示清理失败，请再次发送 /stop 重试。"
-            )
-        return ThreadRunningConfiguration(
-            f"当前 Turn 正在执行，不能{operation}会话；"
-            "请等待完成或先发送 /stop。"
+        binding_id: str,
+        thread_id: str,
+    ) -> ThreadActivityDiscardedOutcome:
+        """Forget observers only after native archive/delete is confirmed."""
+
+        changed = False
+        turn_id: str | None = None
+        active = self._active.pop(binding_id, None)
+        if active is not None:
+            turn_id = active.handle.id
+            active.receipt_attempted.set()
+            active.cleanup_ready.set()
+            if active.task is not None and not active.task.done():
+                active.task.cancel()
+            changed = True
+
+        compaction = self._compacting.pop(binding_id, None)
+        if compaction is not None:
+            compaction.receipt_attempted.set()
+            if compaction.task is not None and not compaction.task.done():
+                compaction.task.cancel()
+            changed = True
+
+        goal = self._goals.pop(binding_id, None)
+        if goal is not None:
+            goal.receipt_attempted.set()
+            goal.cleanup_ready.set()
+            if goal.task is not None and not goal.task.done():
+                goal.task.cancel()
+            if goal.handle is not None:
+                close_task = asyncio.create_task(
+                    self._close_discarded_goal_handle(goal.handle),
+                    name=f"codex-goal-close:{goal.handle.id}",
+                )
+                self._tasks.add(close_task)
+                close_task.add_done_callback(self._tasks.discard)
+            changed = True
+
+        record = self._subscriptions.pop(binding_id, None)
+        if record is not None:
+            self._cancel_subscription_idle(record)
+        self._invalidate_context_window_usage(binding_id)
+        if changed:
+            self._advance_admission_revision(binding_id)
+        return ThreadActivityDiscardedOutcome(
+            binding_id,
+            thread_id,
+            turn_id,
         )
+
+    async def _deliver_thread_activity_discarded(
+        self,
+        outcome: ThreadActivityDiscardedOutcome,
+    ) -> None:
+        try:
+            await self._on_completion(outcome)
+        except Exception:
+            logger.exception(
+                "Thread activity discard presentation cleanup failed",
+                extra={
+                    "binding_id": outcome.binding_id,
+                    "thread_id": outcome.thread_id,
+                },
+            )
+
+    @staticmethod
+    async def _close_discarded_goal_handle(handle: GoalHandle) -> None:
+        try:
+            await handle.aclose()
+        except Exception:
+            logger.debug(
+                "failed to close Goal observer after native Thread removal",
+                exc_info=True,
+            )
 
     async def _lifecycle_thread_locked(
         self,
@@ -4318,48 +4527,6 @@ class CodexRuntime:
             self.close_admission()
             raise RuntimeError("native lifecycle Thread identity mismatch")
         self._mark_thread_subscribed_locked(binding, thread)
-        return thread
-
-    async def _idle_lifecycle_thread_locked(
-        self,
-        binding: ThreadBinding,
-    ) -> NativeThread:
-        if binding.id in self._compacting:
-            raise ThreadCompacting(
-                "当前会话正在压缩上下文，不能修改会话生命周期。"
-            )
-        active = self._active.get(binding.id)
-        if active is not None:
-            raise self._running_lifecycle_error(active, operation="修改")
-        await self._guard_no_goal_locked(binding)
-        try:
-            thread = await self._lifecycle_thread_locked(binding)
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            raise _ThreadLifecycleReadUnavailable(
-                "无法读取当前原生 Codex Thread，生命周期操作未开始。"
-            ) from error
-        self._schedule_known_subscription_locked(binding.id, thread.id)
-        try:
-            response = await thread.read(include_turns=False)
-        except Exception as error:
-            raise _ThreadLifecycleReadUnavailable(
-                "无法读取当前原生 Codex Thread，生命周期操作未开始。"
-            ) from error
-        native = getattr(response, "thread", None)
-        status = _thread_status_type(native)
-        if status != "idle":
-            raise ThreadRunningConfiguration(
-                f"原生 Thread 状态为 {status!r}，不能修改会话生命周期。"
-            )
-        if getattr(native, "ephemeral", None) is not False:
-            raise ThreadLifecycleError("临时原生 Thread 不能归档或删除。")
-        path = getattr(native, "path", None)
-        if not isinstance(path, str) or not path:
-            raise ThreadNotMaterialized(
-                "原生 Thread 尚未持久化，不能归档或删除。"
-            )
         return thread
 
     def _require_goal_control(self) -> GoalControl:
@@ -4488,9 +4655,17 @@ class CodexRuntime:
         binding_id: str,
         *,
         acknowledge: StopAcknowledger | None = None,
+        expected_activity_revision: int | None = None,
+        expected_turn_id: str | None = None,
     ) -> StopDisposition:
         async with self._lock(binding_id):
             self._guard_no_lifecycle_locked(binding_id)
+            if expected_activity_revision is not None:
+                self._require_turn_activity_precondition_locked(
+                    binding_id,
+                    expected_activity_revision=expected_activity_revision,
+                    expected_turn_id=expected_turn_id,
+                )
             # A stop attempt also cancels the validity of prompts still doing
             # bounded preparation outside this lock. Otherwise an idle /stop
             # could report NOT_RUNNING and a delayed quoted prompt could start
@@ -4529,23 +4704,69 @@ class CodexRuntime:
                 active.state = ActiveState.RUNNING
                 active.activity_revision += 1
                 return StopDisposition.NOT_RUNNING
-            if active.state is ActiveState.STOPPING:
-                if not active.interrupt_succeeded:
-                    return await self._interrupt_and_clean(active)
-                if active.cleanup_required and not active.cleanup_succeeded:
-                    return await self._clean_stopping(active)
-                return StopDisposition.STOPPING
-            return await self._interrupt_and_clean(active)
+            try:
+                return await self._interrupt_and_clean(active)
+            finally:
+                if (
+                    self._active.get(binding_id) is active
+                    and not active.terminal_observed
+                    and (active.task is None or active.task.done())
+                ):
+                    self._start_turn_consumer(active, recover_first=True)
 
     async def stop_exact(
         self,
         binding_id: str,
         *,
         acknowledge: StopAcknowledger | None = None,
+        expected_activity_revision: int | None = None,
+        expected_turn_id: str | None = None,
     ) -> StopDisposition:
         """Management-port name for the exact ordinary Binding stop primitive."""
 
-        return await self.stop(binding_id, acknowledge=acknowledge)
+        return await self.stop(
+            binding_id,
+            acknowledge=acknowledge,
+            expected_activity_revision=expected_activity_revision,
+            expected_turn_id=expected_turn_id,
+        )
+
+    async def recheck_turn_exact(
+        self,
+        binding_id: str,
+        *,
+        expected_activity_revision: int,
+        expected_turn_id: str,
+    ) -> ActiveTurnSnapshot:
+        """Run one new bounded observation attempt for one exact Turn."""
+
+        async with self._lock(binding_id):
+            self._guard_no_lifecycle_locked(binding_id)
+            self._require_turn_activity_precondition_locked(
+                binding_id,
+                expected_activity_revision=expected_activity_revision,
+                expected_turn_id=expected_turn_id,
+            )
+            active = self._active.get(binding_id)
+            if (
+                active is None
+                or active.state is not ActiveState.OBSERVATION_UNAVAILABLE
+            ):
+                raise ThreadActivityChanged(
+                    "当前 Turn 已不再处于观测不可用状态；请刷新 /sessions。"
+                )
+            if active.task is not None and not active.task.done():
+                raise ThreadActivityChanged(
+                    "当前 Turn 正在重新检查；请稍后刷新 /sessions。"
+                )
+            self._start_turn_consumer(active, recover_first=True)
+            return ActiveTurnSnapshot(
+                binding_id=binding_id,
+                thread_id=active.handle.thread_id,
+                turn_id=active.handle.id,
+                owner_id=active.owner_id,
+                state=active.state,
+            )
 
     async def _stop_goal_locked(
         self,
@@ -5264,20 +5485,21 @@ class CodexRuntime:
         async with self._lock(binding_id):
             if self._active.get(binding_id) is not active:
                 return
-            if active.terminal_observed and active.state is ActiveState.RUNNING:
-                return
-            if active.state is ActiveState.STOPPING:
-                if not active.interrupt_succeeded:
-                    await self._interrupt_and_clean(active)
-                    return
-                if active.cleanup_required and not active.cleanup_succeeded:
-                    await self._clean_stopping(active)
+            if (
+                active.terminal_observed
+                and not active.interrupt_attempted
+                and not active.cleanup_required
+            ):
                 return
             await self._interrupt_and_clean(active)
 
     async def _interrupt_and_clean(self, active: _ActiveTurn) -> StopDisposition:
         self._mark_stopping(active)
         active.cleanup_required = True
+        if active.interrupt_succeeded:
+            if active.cleanup_succeeded:
+                return StopDisposition.STOPPING
+            return await self._clean_stopping(active)
         retrying_unknown_interrupt = active.interrupt_attempted
         active.interrupt_attempted = True
         try:
@@ -5619,50 +5841,91 @@ class CodexRuntime:
             )
         return observed_usage
 
-    async def _consume(self, active: _ActiveTurn) -> None:
+    async def _consume(
+        self,
+        active: _ActiveTurn,
+        *,
+        recover_first: bool = False,
+    ) -> None:
         result: object | None = None
         error: BaseException | None = None
-        retain_active = False
+        unavailable_error: BaseException | None = None
         activity: TurnActivitySnapshot | None = None
+        retain_active = False
         try:
-            result = await self._read_terminal_result(active)
-        except asyncio.CancelledError:
-            raise
-        except BaseException as caught:
-            if active.terminal_observed:
-                error = caught
-            else:
-                # Releasing this slot without an exact native terminal could
-                # admit a second Turn on the same Thread. Keep it reserved and
-                # fail the whole single-process admission boundary closed.
-                self.close_admission()
-                retain_active = True
-                error = TerminalStateUnknown(
-                    "Codex Turn 终态未确认；服务已停止接收新任务，"
-                    "请重启服务后再继续。"
-                )
-                logger.error(
-                    "native Turn terminal state is unknown; admission closed",
-                    exc_info=(type(caught), caught, caught.__traceback__),
-                    extra={
-                        "thread_id": active.handle.thread_id,
-                        "turn_id": active.handle.id,
-                    },
-                )
+            observation: TurnResult | _TurnObservation | None = None
+            if recover_first:
+                try:
+                    observation = await self._observe_with_bounded_recovery(
+                        active,
+                        _TurnViewUnverified("manual exact Turn recheck"),
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as caught:
+                    if active.terminal_observed:
+                        error = caught
+                    else:
+                        unavailable_error = caught
+                        retain_active = await self._mark_turn_observation_unavailable(
+                            active
+                        )
+
+            while error is None and unavailable_error is None:
+                if self._active.get(active.binding_id) is not active:
+                    return
+                if observation is None:
+                    try:
+                        observation = await self._read_terminal_result(active)
+                    except asyncio.CancelledError:
+                        raise
+                    except _TurnViewUnverified as caught:
+                        if active.terminal_observed:
+                            error = caught
+                            break
+                        try:
+                            observation = await self._observe_with_bounded_recovery(
+                                active,
+                                caught,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as recovery_error:
+                            if active.terminal_observed:
+                                error = recovery_error
+                            else:
+                                unavailable_error = recovery_error
+                                retain_active = (
+                                    await self._mark_turn_observation_unavailable(
+                                        active
+                                    )
+                                )
+                            break
+                    except Exception as caught:
+                        if active.terminal_observed:
+                            error = caught
+                        else:
+                            unavailable_error = caught
+                            retain_active = (
+                                await self._mark_turn_observation_unavailable(
+                                    active
+                                )
+                            )
+                        break
+
+                if isinstance(observation, TurnResult):
+                    result = observation
+                    break
+                if observation is _TurnObservation.EXACT_IN_PROGRESS:
+                    await self._mark_turn_observation_running(active)
+                observation = None
+                await asyncio.sleep(self._poll_interval_seconds)
         finally:
             try:
-                # The progress-card path gets one last plan replacement before
-                # the terminal stream may consume the native notification
-                # queue. Disabled progress adds no observation here.
                 if active.task_feedback.progress_card_enabled:
                     self._refresh_turn_plan(active)
                 activity = self._turn_activity_snapshot(active)
                 if active.terminal_observed:
-                    # Preserve the preceding completed Turn's snapshot while
-                    # this Turn is running, then replace it only with usage
-                    # observed for this exact terminal Turn.  If the pinned
-                    # SDK omitted the stream, the old snapshot must not survive
-                    # and masquerade as the latest completed context.
                     observed_usage = False
                     try:
                         if active.terminal_stream_safe:
@@ -5674,18 +5937,12 @@ class CodexRuntime:
                             self._invalidate_context_window_usage(active.binding_id)
             finally:
                 while not retain_active:
-                    # Teardown removes active entries before cancelling consumers;
-                    # avoid waiting on a Binding lock held by unrelated Channel I/O.
                     if self._active.get(active.binding_id) is not active:
                         break
                     async with self._lock(active.binding_id):
                         if self._active.get(active.binding_id) is not active:
                             break
-                        if (
-                            active.state is ActiveState.STOPPING
-                            and active.cleanup_required
-                            and not active.cleanup_succeeded
-                        ):
+                        if active.cleanup_required and not active.cleanup_succeeded:
                             wait_for_cleanup = True
                         else:
                             self._active.pop(active.binding_id, None)
@@ -5699,9 +5956,30 @@ class CodexRuntime:
                         break
                     await active.cleanup_ready.wait()
 
-        # Delivery never keeps the native Thread busy, but final output must
-        # not overtake the Feishu working-reaction receipt attempt.
         await active.receipt_attempted.wait()
+        if unavailable_error is not None:
+            if not await self._turn_unavailable_notice_is_current(active):
+                return
+            notice = TurnObservationUnavailableOutcome(
+                binding_id=active.binding_id,
+                thread_id=active.handle.thread_id,
+                turn_id=active.handle.id,
+                owner_id=active.owner_id,
+                origin=active.origin,
+                error=TerminalStateUnknown(
+                    "Codex Turn 状态在短暂恢复后仍无法确认；当前 Turn 已停止自动读取。"
+                    "Thread 仍可在 /sessions 中重新检查、归档或删除。"
+                ),
+            )
+            try:
+                await self._on_completion(notice)
+            except Exception:
+                logger.exception(
+                    "turn observation unavailable notice delivery failed",
+                    extra={"turn_id": active.handle.id},
+                )
+            return
+
         outcome = TurnOutcome(
             binding_id=active.binding_id,
             thread_id=active.handle.thread_id,
@@ -5722,6 +6000,124 @@ class CodexRuntime:
             logger.exception(
                 "turn completion delivery failed",
                 extra={"turn_id": active.handle.id},
+            )
+
+    async def _observe_with_bounded_recovery(
+        self,
+        active: _ActiveTurn,
+        initial_error: BaseException,
+    ) -> TurnResult | _TurnObservation:
+        """Try at most three native I/O operations within one five-second window."""
+
+        last_error = initial_error
+        resume_required = isinstance(initial_error, _TurnResumeRequired)
+        resume_attempted = False
+        io_count = 0
+        terminal_turn: object | None = None
+        try:
+            async with asyncio.timeout(_TURN_OBSERVATION_RECOVERY_TIMEOUT_SECONDS):
+                while io_count < _TURN_OBSERVATION_RECOVERY_MAX_IO:
+                    if self._active.get(active.binding_id) is not active:
+                        raise asyncio.CancelledError
+                    if resume_required and not resume_attempted:
+                        io_count += 1
+                        try:
+                            thread = await self._codex.thread_resume(
+                                active.handle.thread_id
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as caught:
+                            last_error = caught
+                            break
+                        if thread.id != active.handle.thread_id:
+                            raise RuntimeError(
+                                "thread_resume returned a different native Thread identity"
+                            )
+                        async with self._lock(active.binding_id):
+                            if self._active.get(active.binding_id) is not active:
+                                raise asyncio.CancelledError
+                            binding = self._bindings.get(active.binding_id)
+                            if binding.native_thread_id != active.handle.thread_id:
+                                raise RuntimeError(
+                                    "Binding changed native Thread during Turn observation"
+                                )
+                            active.thread = thread
+                            self._mark_thread_subscribed_locked(binding, thread)
+                        resume_attempted = True
+                        resume_required = False
+                        if io_count >= _TURN_OBSERVATION_RECOVERY_MAX_IO:
+                            break
+
+                    io_count += 1
+                    try:
+                        native_thread = await self._read_native_thread(
+                            active,
+                            include_turns=True,
+                        )
+                        classified = self._classify_full_turn_view(
+                            active,
+                            native_thread,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except _TurnResumeRequired as caught:
+                        last_error = caught
+                        resume_required = not resume_attempted
+                    except _TurnViewUnverified as caught:
+                        last_error = caught
+                    else:
+                        if isinstance(classified, _TurnObservation):
+                            return classified
+                        terminal_turn = classified
+                        break
+                    await asyncio.sleep(self._poll_interval_seconds)
+        except TimeoutError as caught:
+            last_error = caught
+
+        if terminal_turn is not None:
+            return await self._materialize_terminal_turn(active, terminal_turn)
+        raise TerminalStateUnknown(
+            "exact Turn observation remained unavailable after bounded recovery"
+        ) from last_error
+
+    async def _mark_turn_observation_unavailable(
+        self,
+        active: _ActiveTurn,
+    ) -> bool:
+        async with self._lock(active.binding_id):
+            if self._active.get(active.binding_id) is not active:
+                return False
+            if active.state is not ActiveState.OBSERVATION_UNAVAILABLE:
+                active.state = ActiveState.OBSERVATION_UNAVAILABLE
+                active.activity_revision += 1
+                self._advance_admission_revision(active.binding_id)
+            logger.warning(
+                "native Turn observation unavailable after bounded recovery",
+                extra={
+                    "thread_id": active.handle.thread_id,
+                    "turn_id": active.handle.id,
+                },
+            )
+            return True
+
+    async def _mark_turn_observation_running(self, active: _ActiveTurn) -> None:
+        async with self._lock(active.binding_id):
+            if self._active.get(active.binding_id) is not active:
+                return
+            if active.state is ActiveState.OBSERVATION_UNAVAILABLE:
+                active.state = ActiveState.RUNNING
+                active.activity_revision += 1
+                self._advance_admission_revision(active.binding_id)
+
+    async def _turn_unavailable_notice_is_current(
+        self,
+        active: _ActiveTurn,
+    ) -> bool:
+        async with self._lock(active.binding_id):
+            return (
+                self._active.get(active.binding_id) is active
+                and active.state is ActiveState.OBSERVATION_UNAVAILABLE
             )
 
     async def _consume_goal(self, active: _ActiveGoal) -> None:
@@ -5980,8 +6376,11 @@ class CodexRuntime:
                 )
             return persisted
 
-    async def _read_terminal_result(self, active: _ActiveTurn) -> TurnResult:
-        """Consume native completion through the public persisted Thread view.
+    async def _read_terminal_result(
+        self,
+        active: _ActiveTurn,
+    ) -> TurnResult | _TurnObservation:
+        """Read one authoritative persisted Thread observation.
 
         ``openai-codex==0.147.0`` can lose an immediate ``turn/completed``
         before ``AsyncTurnHandle.run()`` registers its notification queue.
@@ -5989,110 +6388,170 @@ class CodexRuntime:
         state, and remains usable for steer/interrupt Turns.
         """
 
-        read_failures = 0
-        response_materialization_retries = (
-            _TERMINAL_RESPONSE_MATERIALIZATION_RETRIES
+        native_thread = await self._read_native_thread(
+            active,
+            include_turns=False,
         )
-        while True:
-            native_thread, read_failures = await self._read_native_thread(
-                active,
-                include_turns=False,
-                failures=read_failures,
+        self._require_exact_observation_thread(active, native_thread)
+        thread_status = _thread_status_type(native_thread)
+        if thread_status == "active" and active.terminal_stream_safe:
+            return _TurnObservation.ACTIVE
+        if thread_status in {"notLoaded", "systemError"}:
+            raise _TurnResumeRequired(
+                f"native Thread is {thread_status}"
             )
-            thread_status = _thread_status_type(native_thread)
-            if thread_status == "active":
-                if not active.terminal_stream_safe:
-                    active_view, read_failures = await self._read_native_thread(
-                        active,
-                        include_turns=True,
-                        failures=read_failures,
-                    )
-                    exact = next(
-                        (
-                            turn
-                            for turn in getattr(active_view, "turns", ())
-                            if getattr(turn, "id", None) == active.handle.id
-                        ),
-                        None,
-                    )
-                    active.terminal_stream_safe = (
-                        _thread_status_type(active_view) == "active"
-                        and _enum_value(getattr(exact, "status", None))
-                        == "inProgress"
-                    )
-                await asyncio.sleep(self._poll_interval_seconds)
-                continue
-            if thread_status == "notLoaded":
-                await asyncio.sleep(self._poll_interval_seconds)
-                continue
-            if thread_status == "systemError":
-                raise RuntimeError("native Thread entered systemError")
-            if thread_status != "idle":
-                raise RuntimeError(
-                    f"unexpected native Thread status: {thread_status!r}"
+        if thread_status not in {"active", "idle"}:
+            raise RuntimeError(
+                f"unexpected native Thread status: {thread_status!r}"
+            )
+
+        full_view = await self._read_native_thread(active, include_turns=True)
+        classified = self._classify_full_turn_view(active, full_view)
+        if isinstance(classified, _TurnObservation):
+            if thread_status == "idle":
+                raise _TurnViewUnverified(
+                    "native Thread changed from idle to an in-progress exact Turn"
                 )
+            return classified
+        return await self._materialize_terminal_turn(active, classified)
 
-            native_thread, read_failures = await self._read_native_thread(
-                active,
-                include_turns=True,
-                failures=read_failures,
+    def _classify_full_turn_view(
+        self,
+        active: _ActiveTurn,
+        native_thread: object,
+    ) -> object | _TurnObservation:
+        self._require_exact_observation_thread(active, native_thread)
+        thread_status = _thread_status_type(native_thread)
+        if thread_status in {"notLoaded", "systemError"}:
+            raise _TurnResumeRequired(
+                f"full native Thread view is {thread_status}"
             )
-            turns = getattr(native_thread, "turns", ())
-            turn = next(
-                (item for item in turns if getattr(item, "id", None) == active.handle.id),
-                None,
+        if thread_status not in {"active", "idle"}:
+            raise RuntimeError(
+                f"unexpected full native Thread status: {thread_status!r}"
             )
-            if turn is None:
-                await asyncio.sleep(self._poll_interval_seconds * 4)
-                continue
-
-            status = _enum_value(getattr(turn, "status", None))
-            if status == "inProgress":
-                await asyncio.sleep(self._poll_interval_seconds * 4)
-                continue
-            if status not in {"completed", "interrupted", "failed"}:
-                raise RuntimeError(f"unexpected native Turn status: {status!r}")
-            active.terminal_observed = True
-            if status == "failed":
-                native_error = getattr(turn, "error", None)
-                message = getattr(native_error, "message", None)
-                raise RuntimeError(
-                    message
-                    if isinstance(message, str) and message
-                    else "native Turn failed"
+        turn = next(
+            (
+                item
+                for item in getattr(native_thread, "turns", ())
+                if getattr(item, "id", None) == active.handle.id
+            ),
+            None,
+        )
+        if turn is None:
+            raise _TurnViewUnverified(
+                "full native Thread view did not contain the exact Turn"
+            )
+        turn_status = _enum_value(getattr(turn, "status", None))
+        if turn_status == "inProgress":
+            if thread_status != "active":
+                raise _TurnViewUnverified(
+                    "idle native Thread still reported the exact Turn inProgress"
                 )
+            active.terminal_stream_safe = True
+            return _TurnObservation.EXACT_IN_PROGRESS
+        if turn_status not in {"completed", "interrupted", "failed"}:
+            raise RuntimeError(
+                f"unexpected native Turn status: {turn_status!r}"
+            )
+        active.terminal_observed = True
+        return turn
 
-            items = list(getattr(turn, "items", ()))
-            final_response = _final_agent_response(items)
-            if (
-                status == "completed"
-                and final_response is None
-                and response_materialization_retries > 0
-            ):
-                if (
-                    response_materialization_retries
-                    == _TERMINAL_RESPONSE_MATERIALIZATION_RETRIES
-                ):
-                    logger.warning(
-                        "native completed Turn response not materialized; retrying",
-                        extra={
-                            "thread_id": active.thread.id,
-                            "turn_id": active.handle.id,
-                        },
-                    )
-                response_materialization_retries -= 1
-                await asyncio.sleep(self._poll_interval_seconds)
-                continue
-            return TurnResult(
-                id=active.handle.id,
-                status=getattr(turn, "status"),
-                error=getattr(turn, "error", None),
-                started_at=getattr(turn, "started_at", None),
-                completed_at=getattr(turn, "completed_at", None),
-                duration_ms=getattr(turn, "duration_ms", None),
-                final_response=final_response,
-                items=items,
-                usage=None,
+    async def _materialize_terminal_turn(
+        self,
+        active: _ActiveTurn,
+        turn: object,
+    ) -> TurnResult:
+        """Deliver a proven terminal Turn without re-entering recovery."""
+
+        status = _enum_value(getattr(turn, "status", None))
+        if status == "failed":
+            native_error = getattr(turn, "error", None)
+            message = getattr(native_error, "message", None)
+            raise RuntimeError(
+                message
+                if isinstance(message, str) and message
+                else "native Turn failed"
+            )
+
+        current = turn
+        retries = _TERMINAL_RESPONSE_MATERIALIZATION_RETRIES
+        while status == "completed":
+            items = list(getattr(current, "items", ()))
+            if _final_agent_response(items) is not None or retries == 0:
+                break
+            if retries == _TERMINAL_RESPONSE_MATERIALIZATION_RETRIES:
+                logger.warning(
+                    "native completed Turn response not materialized; retrying",
+                    extra={
+                        "thread_id": active.handle.thread_id,
+                        "turn_id": active.handle.id,
+                    },
+                )
+            retries -= 1
+            await asyncio.sleep(self._poll_interval_seconds)
+            try:
+                native_thread = await self._read_native_thread(
+                    active,
+                    include_turns=True,
+                )
+                refreshed = self._classify_full_turn_view(active, native_thread)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "terminal Turn response refresh failed; delivering without text",
+                    exc_info=True,
+                    extra={
+                        "thread_id": active.handle.thread_id,
+                        "turn_id": active.handle.id,
+                    },
+                )
+                break
+            if isinstance(refreshed, _TurnObservation):
+                logger.warning(
+                    "terminal Turn regressed to inProgress; delivering proven terminal",
+                    extra={
+                        "thread_id": active.handle.thread_id,
+                        "turn_id": active.handle.id,
+                    },
+                )
+                break
+            refreshed_status = _enum_value(getattr(refreshed, "status", None))
+            if refreshed_status != status:
+                logger.warning(
+                    "terminal Turn status changed during response materialization",
+                    extra={
+                        "thread_id": active.handle.thread_id,
+                        "turn_id": active.handle.id,
+                        "status": status,
+                        "refreshed_status": refreshed_status,
+                    },
+                )
+                break
+            current = refreshed
+
+        items = list(getattr(current, "items", ()))
+        return TurnResult(
+            id=active.handle.id,
+            status=getattr(current, "status"),
+            error=getattr(current, "error", None),
+            started_at=getattr(current, "started_at", None),
+            completed_at=getattr(current, "completed_at", None),
+            duration_ms=getattr(current, "duration_ms", None),
+            final_response=_final_agent_response(items),
+            items=items,
+            usage=None,
+        )
+
+    @staticmethod
+    def _require_exact_observation_thread(
+        active: _ActiveTurn,
+        native_thread: object,
+    ) -> None:
+        if getattr(native_thread, "id", None) != active.handle.thread_id:
+            raise RuntimeError(
+                "native Thread read returned a different identity"
             )
 
     async def _read_native_thread(
@@ -6100,43 +6559,47 @@ class CodexRuntime:
         active: _ActiveTurn,
         *,
         include_turns: bool,
-        failures: int,
-    ) -> tuple[object, int]:
-        while True:
-            try:
-                response = await active.thread.read(include_turns=include_turns)
-                return getattr(response, "thread", None), failures
-            except Exception as error:
-                if not _is_transient_thread_read_error(
-                    error,
-                    thread_id=active.handle.thread_id,
-                    include_turns=include_turns,
-                ):
-                    raise
-                # A brand-new rollout can briefly exist as an empty file before
-                # App Server writes its first record. Keep the binding active;
-                # releasing it without a native terminal state could create a
-                # second Turn on the same Thread. Publicly classified overload
-                # errors follow the same invariant-preserving retry path. App
-                # Server can also briefly report idle before includeTurns is
-                # materialized; retry only that exact, version-pinned error.
-                failures += 1
-                if failures == 1 or failures % 120 == 0:
-                    logger.warning(
-                        "native Thread read unavailable; retrying",
-                        extra={
-                            "thread_id": active.handle.thread_id,
-                            "turn_id": active.handle.id,
-                            "failures": failures,
-                            "error_type": type(error).__name__,
-                        },
-                    )
-                await asyncio.sleep(self._poll_interval_seconds)
+    ) -> object:
+        try:
+            response = await active.thread.read(include_turns=include_turns)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.warning(
+                "native Thread read unavailable",
+                extra={
+                    "thread_id": active.handle.thread_id,
+                    "turn_id": active.handle.id,
+                    "error_type": type(error).__name__,
+                },
+            )
+            if _is_recoverable_turn_observation_io_error(error):
+                raise _TurnResumeRequired("native Thread read failed") from error
+            if (
+                include_turns
+                and isinstance(error, InvalidRequestError)
+                and error.code == -32600
+                and error.message
+                == f"thread {active.handle.thread_id} {_NOT_MATERIALIZED_SUFFIX}"
+            ):
+                raise _TurnViewUnverified(
+                    "native Thread turns are not materialized yet"
+                ) from error
+            raise
+        return getattr(response, "thread", None)
 
     def _track(self, active: _ActiveTurn) -> None:
         self._active[active.binding_id] = active
+        self._start_turn_consumer(active)
+
+    def _start_turn_consumer(
+        self,
+        active: _ActiveTurn,
+        *,
+        recover_first: bool = False,
+    ) -> None:
         task = asyncio.create_task(
-            self._consume(active),
+            self._consume(active, recover_first=recover_first),
             name=f"codex-turn:{active.handle.id}",
         )
         active.task = task
@@ -6226,8 +6689,27 @@ class CodexRuntime:
             self._admission_revision(binding_id) + 1
         )
 
+    def _require_turn_activity_precondition_locked(
+        self,
+        binding_id: str,
+        *,
+        expected_activity_revision: int,
+        expected_turn_id: str | None,
+    ) -> None:
+        if expected_activity_revision != self._admission_revision(binding_id):
+            raise ThreadActivityChanged(
+                "会话运行状态已经变化，本次操作未执行；请刷新 /sessions。"
+            )
+        active = self._active.get(binding_id)
+        actual_turn_id = active.handle.id if active is not None else None
+        if actual_turn_id != expected_turn_id:
+            raise ThreadActivityChanged(
+                "会话的 exact Turn 已经变化，本次操作未执行；"
+                "请刷新 /sessions。"
+            )
+
     def _mark_stopping(self, active: _ActiveTurn) -> None:
-        if active.state is ActiveState.RUNNING:
+        if active.state is not ActiveState.STOPPING:
             active.state = ActiveState.STOPPING
             active.activity_revision += 1
             self._advance_admission_revision(active.binding_id)
@@ -6272,7 +6754,7 @@ def _is_transient_thread_read_error(
     thread_id: str,
     include_turns: bool,
 ) -> bool:
-    if isinstance(error, InternalRpcError) or is_retryable_error(error):
+    if _is_transient_thread_rpc_error(error):
         return True
     return (
         include_turns
@@ -6280,6 +6762,17 @@ def _is_transient_thread_read_error(
         and error.code == -32600
         and error.message == f"thread {thread_id} {_NOT_MATERIALIZED_SUFFIX}"
     )
+
+
+def _is_recoverable_turn_observation_io_error(error: BaseException) -> bool:
+    return isinstance(
+        error,
+        (InternalRpcError, TransportClosedError, TimeoutError, ConnectionError, OSError),
+    ) or is_retryable_error(error)
+
+
+def _is_transient_thread_rpc_error(error: BaseException) -> bool:
+    return isinstance(error, InternalRpcError) or is_retryable_error(error)
 
 
 def _thread_status_type(native_thread: object) -> str | None:

@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-24
 amends: 0017, 0031
-amended_by: 0038
+amended_by: 0038, 0049
 supersedes: 0019
 related: 0014, 0026
 ---
@@ -10,7 +10,11 @@ related: 0014, 0026
 # 用薄 SDK Gap Adapter 与原生目录对账开放 Thread Delete
 
 > 修订说明：ADR 0038 只为普通 `/sessions` 增加 exact idle 会话的两阶段删除入口；本 ADR
-> 定义的原生删除与四视图对账保持不变，`/delete` 文本命令仍为 current-only。
+> 定义的固定 Adapter、native-first、descendant cascade 和失败后一次四视图对账保持不变，
+> `/delete` 文本命令仍为 current-only。[ADR 0049](0049-bound-turn-observation-and-delegate-thread-removal.md)
+> 覆盖本 ADR 的 idle/read 前置与进程级 unknown：active 或 archived persisted Thread 都直接
+> 调用 App Server Delete，本地不先停止活动；对账无法完成时只保留 Binding-local
+> `lifecycle-unknown`。
 
 ## 背景
 

@@ -16,9 +16,13 @@ from lark_channel import OutboundCard, new_card
 
 from .bindings import BindingTaskFeedback, BindingTurnSettings, SideTopicState
 from .domain import (
+    ACTIVE_STATE_VALUES,
+    ActiveState,
     CardControlIntent,
     CardControlName,
     FeishuScope,
+    GoalOperationState,
+    GoalStatus,
     MentionContextMode,
     ReplyCardActivityModule,
     ReplyCardFileItem,
@@ -28,6 +32,8 @@ from .domain import (
     ReplyCardProjection,
     ReplyCardResultModule,
     SettingsSection,
+    SESSION_IDLE_STATE,
+    SESSION_STOP_ACTION_STATES,
     ScopeKind,
     TurnFileActionIntent,
     TurnFileActionName,
@@ -37,7 +43,7 @@ from .domain import (
 )
 from .model_settings import ModelCatalog, TurnModelSettings
 from .projects import Project
-from .sdk_gap_adapter import GoalSnapshot, GoalStatus
+from .sdk_gap_adapter import GoalSnapshot
 from .turn_files import (
     TurnFile,
     TurnFilePage,
@@ -47,7 +53,7 @@ from .turn_files import (
 )
 
 
-ACTION_VERSION = 3
+ACTION_VERSION = 4
 TURN_FILE_ACTION_VERSION = 4
 REPLY_CARD_ACTION_VERSION = 5
 SESSIONS_PAGE_SIZE = 10
@@ -159,6 +165,8 @@ class SessionCardItem:
     title: str
     state: str
     active: bool
+    activity_revision: int = 0
+    turn_id: str | None = None
 
 
 class _TurnPlanStepLike(Protocol):
@@ -565,8 +573,8 @@ def _turn_progress_manifest(
     snapshot: _TurnActivitySnapshotLike,
 ) -> TurnProgressManifest:
     state = getattr(snapshot.state, "value", snapshot.state)
-    if state not in {"running", "stopping"}:
-        state = "running"
+    if state not in ACTIVE_STATE_VALUES:
+        state = ActiveState.RUNNING.value
     steps = tuple(
         TurnProgressManifestStep(
             step=activity_step_display(item.step),
@@ -771,7 +779,7 @@ def _reply_goal_block(
         buttons: list[dict[str, Any]] = []
         external = goal.runtime_state == "externally-active-goal"
         controls_unknown = goal.runtime_state == "goal-unknown"
-        pausing = goal.runtime_state == "goal-pausing"
+        pausing = goal.runtime_state == GoalOperationState.PAUSING.value
         if (
             goal.status == GoalStatus.ACTIVE.value
             and not external
@@ -950,8 +958,10 @@ def _progress_status_label(
     if terminal_status == "failed":
         return "未完成"
     state = getattr(snapshot.state, "value", snapshot.state)
-    if state == "stopping":
+    if state == ActiveState.STOPPING.value:
         return "正在停止"
+    if state == ActiveState.OBSERVATION_UNAVAILABLE.value:
+        return "Turn 观测不可用"
     return "正在执行"
 
 
@@ -1293,7 +1303,7 @@ def _decode_turn_progress_manifest(value: Any) -> TurnProgressManifest:
     if set(payload) != expected:
         raise CardActionError("进度卡过程字段不完整或包含未知字段。")
     state = _required_string(payload["state"], "progress.state")
-    if state not in {"running", "stopping"}:
+    if state not in ACTIVE_STATE_VALUES:
         raise CardActionError("进度卡过程状态无效。")
     steer_count = payload["steer_count"]
     if (
@@ -2200,6 +2210,7 @@ def archive_binding_card(
     builder = _builder("归档当前会话", f"{short_id} · {project_alias}")
     builder.markdown(
         f"即将归档：`{_md_code(title)}`\n"
+        "Codex 会处理该 Thread 当前的原生活动后执行归档。"
         "归档会同步影响 Codex App/CLI；历史不会删除，之后可以恢复。"
     )
     builder.raw(
@@ -2244,7 +2255,8 @@ def delete_binding_card(
     else:
         builder.markdown(
             f"即将删除：`{_md_code(title)}`\n"
-            "确认后将永久删除原生 Codex Thread、其 spawned descendants 与本地 "
+            "Codex 会处理该 Thread 当前的原生活动。确认后将永久删除原生 "
+            "Codex Thread、其 spawned descendants 与本地 "
             "Binding；Codex App/CLI 中的对应历史也会消失。"
         )
         confirm_body = (
@@ -2277,7 +2289,6 @@ def sessions_delete_binding_card(
     *,
     scope: FeishuScope,
     binding_id: str,
-    expected_active_binding_id: str | None,
     short_id: str,
     project_alias: str,
     title: str,
@@ -2317,11 +2328,6 @@ def sessions_delete_binding_card(
                     scope,
                     CardControlName.DELETE_EXACT_BINDING,
                     binding_id=_binding_reference(binding_id),
-                    expected_active_binding_id=(
-                        _binding_reference(expected_active_binding_id)
-                        if expected_active_binding_id is not None
-                        else None
-                    ),
                     expected_native_thread_id=expected_native_thread_id,
                     page=page,
                 ),
@@ -2341,10 +2347,16 @@ def archived_sessions_card(
     *,
     scope: FeishuScope,
     sessions: tuple[ArchivedSessionCardItem, ...],
+    native_delete_available: bool,
+    notice: str | None = None,
+    notice_is_error: bool = False,
 ) -> OutboundCard:
     builder = _builder("已归档会话", "恢复后自动切换")
+    if notice:
+        builder.raw(_notice(notice, error=notice_is_error))
     builder.markdown(
-        "已归档会话不会出现在普通 `/sessions` 中。恢复不会修改历史或会话配置。"
+        "已归档会话不会出现在普通 `/sessions` 中。恢复不会修改历史或会话配置；"
+        "删除会永久移除原生 Thread、其 spawned descendants 与本地 Binding。"
     )
     if not sessions:
         builder.markdown("当前 Scope 没有已归档会话。")
@@ -2354,8 +2366,58 @@ def archived_sessions_card(
             _archived_session_row(
                 scope=scope,
                 session=session,
+                native_delete_available=native_delete_available,
             )
         )
+    return OutboundCard(card=builder.to_dict())
+
+
+def archived_sessions_delete_binding_card(
+    *,
+    scope: FeishuScope,
+    binding_id: str,
+    short_id: str,
+    project_alias: str,
+    title: str,
+    native_thread_id: str,
+) -> OutboundCard:
+    builder = _builder(
+        "永久删除已归档会话",
+        f"{short_id} · {project_alias}",
+        template="red",
+    )
+    builder.markdown(
+        f"即将删除：`{_md_code(title)}`\n"
+        "确认后将永久删除原生 Codex Thread、其 spawned descendants 与本地 "
+        "Binding；Codex App/CLI 中的对应历史也会消失。"
+    )
+    builder.raw(
+        _button_row(
+            _callback_button(
+                label="永久删除已归档会话",
+                value=_envelope(
+                    scope,
+                    CardControlName.DELETE_ARCHIVED_BINDING,
+                    binding_id=_binding_reference(binding_id),
+                    expected_native_thread_id=_native_thread_reference(
+                        native_thread_id
+                    ),
+                ),
+                style="danger",
+                confirm=(
+                    "永久删除且无法恢复",
+                    "原生会话、派生会话与本地 Binding 都将永久删除。",
+                ),
+            ),
+            _callback_button(
+                label="返回归档列表",
+                value=_envelope(
+                    scope,
+                    CardControlName.REFRESH_ARCHIVED_SESSIONS,
+                ),
+            ),
+        )
+    )
     return OutboundCard(card=builder.to_dict())
 
 
@@ -2373,8 +2435,8 @@ def sessions_card(
         builder.raw(_notice(notice, error=notice_is_error))
     builder.markdown(
         "切换不会停止其他会话正在运行的任务。"
-        "归档仅对空闲且已有原生历史的会话开放；历史不会删除，"
-        "可从 `/sessions archived` 恢复。删除是永久操作，需进入红色确认卡。"
+        "归档与删除会直接委托 Codex 处理当前原生活动。归档保留历史，可从 "
+        "`/sessions archived` 恢复；删除会级联移除派生会话，需进入红色确认卡。"
     )
     if not sessions:
         builder.markdown(
@@ -2426,6 +2488,9 @@ def _session_row(
     expected_active_binding_id: str | None,
     native_delete_available: bool,
 ) -> dict[str, Any]:
+    expected_turn_id = (
+        _turn_reference(session.turn_id) if session.turn_id is not None else None
+    )
     native = (
         session.native_thread_id[:8]
         if session.native_thread_id is not None
@@ -2450,7 +2515,7 @@ def _session_row(
                 style="primary_filled",
             )
         )
-    if session.native_thread_id is not None and session.state == "idle":
+    if session.native_thread_id is not None:
         controls.append(
             _callback_button(
                 label="归档",
@@ -2458,11 +2523,6 @@ def _session_row(
                     scope,
                     CardControlName.ARCHIVE_EXACT_BINDING,
                     binding_id=_binding_reference(session.binding_id),
-                    expected_active_binding_id=(
-                        _binding_reference(expected_active_binding_id)
-                        if expected_active_binding_id is not None
-                        else None
-                    ),
                     page=page,
                 ),
                 confirm=(
@@ -2474,8 +2534,15 @@ def _session_row(
                 ),
             )
         )
-    if session.state == "idle" and (
-        session.native_thread_id is None or native_delete_available
+    if (
+        (
+            session.native_thread_id is None
+            and session.state == SESSION_IDLE_STATE
+        )
+        or (
+            session.native_thread_id is not None
+            and native_delete_available
+        )
     ):
         controls.append(
             _callback_button(
@@ -2484,11 +2551,6 @@ def _session_row(
                     scope,
                     CardControlName.PREPARE_EXACT_DELETE_BINDING,
                     binding_id=_binding_reference(session.binding_id),
-                    expected_active_binding_id=(
-                        _binding_reference(expected_active_binding_id)
-                        if expected_active_binding_id is not None
-                        else None
-                    ),
                     expected_native_thread_id=(
                         _native_thread_reference(session.native_thread_id)
                         if session.native_thread_id is not None
@@ -2497,6 +2559,47 @@ def _session_row(
                     page=page,
                 ),
                 style="danger",
+            )
+        )
+    if session.state in SESSION_STOP_ACTION_STATES:
+        controls.append(
+            _callback_button(
+                label="停止",
+                value=_envelope(
+                    scope,
+                    CardControlName.STOP_EXACT_BINDING,
+                    binding_id=_binding_reference(session.binding_id),
+                    expected_active_binding_id=(
+                        _binding_reference(expected_active_binding_id)
+                        if expected_active_binding_id is not None
+                        else None
+                    ),
+                    expected_activity_revision=session.activity_revision,
+                    expected_turn_id=expected_turn_id,
+                    page=page,
+                ),
+            )
+        )
+    if (
+        session.state == ActiveState.OBSERVATION_UNAVAILABLE.value
+        and session.turn_id is not None
+    ):
+        controls.append(
+            _callback_button(
+                label="重新检查",
+                value=_envelope(
+                    scope,
+                    CardControlName.RECHECK_EXACT_TURN,
+                    binding_id=_binding_reference(session.binding_id),
+                    expected_active_binding_id=(
+                        _binding_reference(expected_active_binding_id)
+                        if expected_active_binding_id is not None
+                        else None
+                    ),
+                    expected_activity_revision=session.activity_revision,
+                    expected_turn_id=expected_turn_id,
+                    page=page,
+                ),
             )
         )
     columns = [
@@ -2854,25 +2957,47 @@ def decode_button_action(
         CardControlName.ARCHIVE_BINDING: {"binding_id"},
         CardControlName.ARCHIVE_EXACT_BINDING: {
             "binding_id",
-            "expected_active_binding_id",
             "page",
         },
-        CardControlName.DELETE_BINDING: {"binding_id"},
+        CardControlName.DELETE_BINDING: {
+            "binding_id",
+        },
         CardControlName.PREPARE_EXACT_DELETE_BINDING: {
             "binding_id",
-            "expected_active_binding_id",
             "expected_native_thread_id",
             "page",
         },
         CardControlName.DELETE_EXACT_BINDING: {
             "binding_id",
-            "expected_active_binding_id",
             "expected_native_thread_id",
             "page",
         },
+        CardControlName.PREPARE_ARCHIVED_DELETE_BINDING: {
+            "binding_id",
+            "expected_native_thread_id",
+        },
+        CardControlName.DELETE_ARCHIVED_BINDING: {
+            "binding_id",
+            "expected_native_thread_id",
+        },
         CardControlName.UNARCHIVE_BINDING: {"binding_id"},
         CardControlName.ACTIVATE_BINDING: {"binding_id"},
+        CardControlName.STOP_EXACT_BINDING: {
+            "binding_id",
+            "expected_active_binding_id",
+            "expected_activity_revision",
+            "expected_turn_id",
+            "page",
+        },
+        CardControlName.RECHECK_EXACT_TURN: {
+            "binding_id",
+            "expected_active_binding_id",
+            "expected_activity_revision",
+            "expected_turn_id",
+            "page",
+        },
         CardControlName.SESSIONS_PAGE: {"page"},
+        CardControlName.REFRESH_ARCHIVED_SESSIONS: set(),
         CardControlName.GOAL_PAUSE: {
             "binding_id",
             "goal_generation",
@@ -2921,6 +3046,8 @@ def decode_button_action(
     enabled = None
     section = None
     page = None
+    expected_activity_revision = None
+    expected_turn_id = None
     goal_generation_value = None
     expected_goal_status = None
     if "settings_section" in payload:
@@ -2951,6 +3078,23 @@ def decode_button_action(
                     raw_native_thread_id,
                     "expected_native_thread_id",
                 )
+            )
+    if "expected_activity_revision" in payload:
+        raw_activity_revision = payload["expected_activity_revision"]
+        if (
+            isinstance(raw_activity_revision, bool)
+            or not isinstance(raw_activity_revision, int)
+            or raw_activity_revision < 0
+        ):
+            raise CardActionError(
+                "expected_activity_revision 必须是非负整数。"
+            )
+        expected_activity_revision = raw_activity_revision
+    if "expected_turn_id" in payload:
+        raw_turn_id = payload["expected_turn_id"]
+        if raw_turn_id is not None:
+            expected_turn_id = _decode_turn_reference(
+                _required_string(raw_turn_id, "expected_turn_id")
             )
     if "side_id" in payload:
         side_id = _decode_side_reference(
@@ -2997,6 +3141,11 @@ def decode_button_action(
         section = SettingsSection.PROJECTS
     if name is CardControlName.SIDE_CLOSE and scope.kind is not ScopeKind.TOPIC:
         raise CardActionError("Side 结束动作必须来自原 Side 话题。")
+    if (
+        name is CardControlName.RECHECK_EXACT_TURN
+        and expected_turn_id is None
+    ):
+        raise CardActionError("Turn 重新检查动作缺少 exact Turn。")
     return CardControlIntent(
         scope=scope,
         source_id=message_id,
@@ -3009,6 +3158,8 @@ def decode_button_action(
         binding_id=binding_id,
         expected_active_binding_id=expected_active_binding_id,
         expected_native_thread_id=expected_native_thread_id,
+        expected_activity_revision=expected_activity_revision,
+        expected_turn_id=expected_turn_id,
         side_id=side_id,
         page=page,
         goal_generation=goal_generation_value,
@@ -4073,7 +4224,34 @@ def _archived_session_row(
     *,
     scope: FeishuScope,
     session: ArchivedSessionCardItem,
+    native_delete_available: bool,
 ) -> dict[str, Any]:
+    controls = [
+        _callback_button(
+            label="恢复并切换",
+            value=_envelope(
+                scope,
+                CardControlName.UNARCHIVE_BINDING,
+                binding_id=_binding_reference(session.binding_id),
+            ),
+            style="primary_filled",
+        )
+    ]
+    if native_delete_available:
+        controls.append(
+            _callback_button(
+                label="删除",
+                value=_envelope(
+                    scope,
+                    CardControlName.PREPARE_ARCHIVED_DELETE_BINDING,
+                    binding_id=_binding_reference(session.binding_id),
+                    expected_native_thread_id=_native_thread_reference(
+                        session.native_thread_id
+                    ),
+                ),
+                style="danger",
+            )
+        )
     return {
         "tag": "column_set",
         "flex_mode": "none",
@@ -4099,17 +4277,7 @@ def _archived_session_row(
                 "width": "auto",
                 "vertical_align": "center",
                 "padding": "8px",
-                "elements": [
-                    _callback_button(
-                        label="恢复并切换",
-                        value=_envelope(
-                            scope,
-                            CardControlName.UNARCHIVE_BINDING,
-                            binding_id=_binding_reference(session.binding_id),
-                        ),
-                        style="primary_filled",
-                    )
-                ],
+                "elements": controls,
             },
         ],
     }

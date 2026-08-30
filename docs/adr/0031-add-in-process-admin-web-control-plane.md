@@ -2,11 +2,15 @@
 status: accepted
 date: 2026-08-21
 amends: 0017, 0021, 0028
-amended_by: 0037
+amended_by: 0037, 0049
 related: 0016, 0019
 ---
 
 # 引入进程内 Admin Web 管理控制面
+
+> **修订：** [ADR 0049](0049-bound-turn-observation-and-delegate-thread-removal.md)
+> 删除 Admin exact archive 的 idle 与 Runtime activity 前置条件；它与飞书入口一样只占用
+> exact Binding 后直接委托 App Server。Admin materialized Delete 仍不开放。
 
 ## 背景
 

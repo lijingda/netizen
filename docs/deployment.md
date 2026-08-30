@@ -269,7 +269,12 @@ steer 前失败；结果不能复制成生产静态目录。
 重命名、归档、恢复。每一步都通过显式 `thread_list(archived=False|True)` 分页目录验证
 名称保留、归档只出现在 archived catalog、恢复保持同一 native ID；随后通过薄 Adapter
 调用 `thread/delete`，并确认 rollout scan/state-db 两种来源的 active/archived 四视图
-全部 absent。探针不触碰任何既有 Thread；delete 响应失败时也不得自动重发。
+全部 absent。该 phase 还创建两个独立 disposable fixture：一个在 archived catalog 中直接
+Delete、不先恢复；另一个在 marker Turn 仍为 running 时直接 Delete，不先 interrupt、cleanup、
+等待 terminal 或读取 idle。running fixture 的 marker 必须随 App Server removal 退出。
+descendant cascade 由 0.147.0 固定源码契约和 ADR 0037 已记录的真实 root→child→grandchild
+实测约束；routine phase 不依赖模型临时生成一棵非确定性 agent tree。探针不触碰任何既有
+Thread；delete 响应失败时也不得自动重发。
 
 `release` phase 是普通持久 Thread 空闲订阅释放的原生兼容性探针。它先在 App Server A 创建
 并完成一个 Thread，确认 `thread/backgroundTerminals/list(limit=1)` 为空后取消当前连接
@@ -867,10 +872,13 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    返回分页卡片，将 active Binding 置顶、将 lazy Binding 显示为“新会话”，有原生
    Thread 时优先显示 `name`、否则显示 `preview`。创建第二个会话后点击第一项的
    “设为当前”，原卡必须刷新 active 标记，且不得停止另一会话仍在运行的 Turn；归档项
-   不得混入普通卡片。idle materialized 行显示带确认的“归档”，Lazy、running、Goal、
-   compacting 和 lifecycle-unknown 行不显示。idle Lazy 行与 Delete capability 可用的 idle
-   materialized 行显示“删除”；第一次点击只打开独立红色确认卡且不得 mutation，running、
-   Goal、compacting 和 lifecycle-unknown 行不显示。`/status` 分行显示 `name`、`preview`
+   不得混入普通卡片。每个 persisted、non-ephemeral materialized 行都显示带确认的“归档”，
+   Delete capability 可用时也显示“删除”，不因 Ordinary Turn running/stopping、Turn 观测
+   不可用、Goal 或 Compaction 隐藏生命周期入口；第一次点击删除只打开独立红色确认卡且
+   不得 mutation。running/stopping/观测不可用的 Ordinary Turn 还显示“停止”，观测不可用
+   显示“重新检查”。idle Lazy 行显示“删除”。lifecycle-unknown 只阻断该 exact Binding 并
+   显示明确错误，不能关闭其他 Binding admission。`/sessions archived` 同时显示
+   “恢复并切换”和独立两阶段“删除”。`/status` 分行显示 `name`、`preview`
    与“上下文窗口：暂无（首条消息后生成）”。帮助包含 `/config`、`/goal`、
    `/rename`、`/archive`、`/delete`、
    `/unarchive`，不包含
@@ -1006,28 +1014,39 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     私聊；单账号自动化契约不能替代这项跨账号验收。
 18. 在一个 idle materialized 当前会话上验收 `/rename` 直接参数和无参数卡片，Codex
     App/CLI 与 `/sessions`、`/status` 都应看到同一原生名称。打开 `/archive` 卡后先切换
-    会话，再点旧卡必须零 mutation；重新归档后 active pointer 为空，Binding 配置保留，
-    普通 `/sessions` 不显示它而 `/sessions archived` 显示。用卡片或
-    `/unarchive <短 ID>` 恢复并自动切换。Lazy 会话的 `/delete` 必须显示红色不可恢复
-    二次确认、只删 Binding，并验证 stale current 防护。idle materialized `/delete` 必须
-    显示原生 Thread、spawned descendants、Codex App/CLI 历史与 Binding 均永久删除的红色
-    确认卡；打开卡后切换 active、令 Lazy 物化或改变 exact native ID，再点击都必须零
-    mutation。正常确认后 root 与 descendants 从原生四视图消失，Binding/pointer 再删除。
+    会话，旧卡仍应按 exact Binding/native Thread 身份归档原目标；新 current pointer 保持
+    不变。归档当前会话时 pointer 才清空，Binding 配置保留，普通 `/sessions` 不显示它而
+    `/sessions archived` 显示。用卡片或 `/unarchive <短 ID>` 恢复并自动切换。Lazy 会话的
+    `/delete` 必须显示红色不可恢复二次确认并只删 Binding；确认前若它已物化则旧卡必须
+    stale。materialized `/delete` 必须显示原生 Thread、spawned descendants、Codex App/CLI
+    历史与 Binding 均永久删除的红色确认卡；切换 current 或 exact Turn/Goal/Compaction
+    状态变化不能使其失效，只有 Binding/native Thread 身份变化才必须零 mutation。正常确认
+    后 root 与 descendants 从原生四视图消失，Binding/pointer 再删除。
+
     `thread/delete` response loss 与四视图异常是 synthetic fault，不在真实账号手工制造；
     `make check` 通过 `tests/test_sdk_gap_adapter.py` 和 `tests/test_codex_runtime.py` 自动覆盖：
     四视图 absent 时提交 Binding、任一 present 时保留 Binding 并允许重新确认、查询冲突/
-    失败时保留 lifecycle-unknown 并关闭 admission，且任何路径都不能盲目再次调用 delete。
-    running、Goal、compacting、ephemeral、未持久化
-    和 compatibility gate 不可用时必须拒绝且保持原生 Thread 与 Binding。
-    另在 `/sessions` 中直接归档一个 idle materialized 非当前行，确认真实 active pointer
-    不变、目标移入 archived catalog、原卡刷新并在删除末页唯一项时夹取页码；再归档当前
-    行，确认 pointer 为空。打开行内确认后改变 active pointer 或令目标开始 running，再点
-    旧按钮必须零 mutation。再从 `/sessions` 分别删除 idle Lazy 与 idle materialized 非当前
-    行：第一次点击只出现带 exact 目标的红色确认卡，最终确认后 active pointer 保持不变；
-    删除当前行时 pointer 清空。确认期间切换 active、令 Lazy 物化、改变 exact native ID 或
-    令目标开始 running，旧按钮必须零 mutation；删除末页唯一项后页码夹取。materialized
-    路径必须复用上述一次四视图对账与 admission fail-closed。`/archive` 与 `/delete` 仍不
-    接受目标参数且保持 current-only，`/sessions archived` 不提供删除。
+    失败时只保留该 Binding 的 lifecycle-unknown，且任何路径都不能盲目再次调用 delete。
+    同一 Scope 的其他 Binding 必须仍可 start/steer/lifecycle。archive 的响应不确定性同样只做
+    一次 active/archived 目录对账：exact ID 只在 archived 时提交，仍 active 时释放 reservation。
+
+    分别在 running、stopping、`turn-observation-unavailable`、Goal 和 Compaction 上发起
+    Archive/Delete；Netizen 必须直接委托 App Server，不先 interrupt、pause、terminal cleanup、
+    恢复/读取 Turn、等待 terminal 或证明 idle。归档只进入 archived catalog，删除从四视图
+    消失；原生成功后本地 observer 被取消。ephemeral、未持久化、App Server/存储不可达和
+    compatibility gate 不可用仍必须明确失败并保留 Binding，不能伪装成新的 Thread 状态。
+
+    另在 `/sessions` 中归档 materialized 非当前行，确认真实 active pointer 不变、目标移入
+    archived catalog、原卡刷新并在删除末页唯一项时夹取页码；再归档当前行，确认 pointer
+    为空。确认期间切换 active 或令目标替换 exact Turn 不使旧生命周期按钮 stale。再从
+    `/sessions` 分别删除 idle Lazy 与 materialized 非当前行：第一次点击只出现带 exact 目标
+    的红色确认卡，最终确认后 active pointer 保持不变；删除当前行时 pointer 清空。切换
+    active 或改变目标运行状态不使 materialized 确认失效，Lazy 物化或改变 exact native ID
+    必须使旧按钮零 mutation；删除末页唯一项后页码夹取。另从 `/sessions archived` 对 exact
+    archived 行完成独立二次确认 Delete，确认不先 unarchive、active pointer 不变且 spawned
+    descendants 随 root 从四视图消失。active 与 archived materialized delete 必须复用同一
+    native-first primitive 和一次只读对账。`/archive` 与 `/delete` 仍不接受目标参数且保持
+    current-only；归档列表的恢复与删除都必须再次校验 exact archived catalog 身份。
 19. 在已物化 Parent 上分别从 P2P、P2P 话题、普通群主线、普通群话题和话题模式群触发
     `/side`；从已有话题触发必须得到同 chat 的 sibling，不得留在或嵌套原话题。P2P 与
     P2P Side 话题无需 @，三类群入口及 Side 后续每条消息都必须 @。每个 Side 连续完成
