@@ -139,6 +139,22 @@ contributors must know before starting related work.
   processes exited; `/stop` must preserve ADR 0010's explicit warning. ADR
   0028's read-only background-terminal presence check exposes no process
   identity and never cleans or terminates a terminal.
+- ADR 0049 treats `completed`, `interrupted`, and `failed` as terminal for the
+  exact Ordinary Turn while preserving its Native Thread. A recoverable
+  unverified view gets one short bounded resume/read attempt; if it still
+  cannot be verified, keep the exact identity reserved, stop periodic I/O, and
+  expose Binding-local `turn-observation-unavailable`. Exact
+  `active/inProgress` returns to ordinary unbounded polling; manual recheck is
+  the same bounded attempt. Never fabricate a terminal.
+- Every materialized persisted non-ephemeral Thread retains archive/delete
+  controls regardless of local Turn, Goal, Compaction, or observation state.
+  Reserve only the exact Binding lifecycle intent, release Binding/Scope locks,
+  and delegate directly to App Server `thread/archive` or `thread/delete`;
+  never duplicate App Server shutdown with local interrupt, cleanup, terminal
+  waiting, or idle proof. On a non-cancellation response error, reconcile the
+  native catalog once without retrying the mutation. Cancellation and an
+  inconclusive reconciliation remain Binding-local lifecycle unknown; archived
+  and active delete share ADR 0037's native cascade primitive.
 - Treat compatibility workarounds as narrow, fail-closed code. ADR 0014
   adapters are gated by per-capability shape/synthetic/live harnesses rather
   than a runtime version allowlist; ADR 0037's delete adapter additionally

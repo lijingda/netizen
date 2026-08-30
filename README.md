@@ -130,25 +130,30 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   通过下拉表单启停 Project，并在同一卡片内创建或登记 Project。
 - `/sessions`：用分页卡片列出当前 Scope 的会话。当前会话置顶显示，其他会话可直接点击
   “设为当前”；切换只改变 Scope 的 active Binding，不会停止其他会话正在运行的任务。
-  已有原生历史且当前 idle 的行还可二次确认后直接“归档”：归档非当前行不改变 active
-  Binding，归档当前行才清空 pointer；卡片状态已变化时操作会拒绝并要求重新打开。
-  idle 的 Lazy 行与 Delete capability 可用的 materialized 行还可打开红色确认卡后永久
-  “删除”：删除非当前行保留 active Binding，删除当前行清空 pointer；确认期间目标、
-  active pointer 或运行状态变化时零 mutation 地拒绝。
+  所有 persisted materialized 行无论是 idle、running、stopping、Turn 观测不可用、Goal
+  或 Compaction，都可“归档”或打开红色确认卡后永久“删除”。它们直接委托
+  App Server 处理当前原生活动，不要求先恢复观测或停止 Turn。普通 Turn 行还可 exact
+  “停止”，`turn-observation-unavailable` 行可立即“重新检查”。idle Lazy 行仍只删除
+  本地 Binding。归档/删除非当前行不改变 active Binding，操作当前行才清空 pointer；
+  确认期间 exact Binding 或 native Thread identity 改变时零 mutation 地拒绝。
   每个会话优先显示原生 `Thread.name`，没有名称时使用首条用户消息 `preview`，同时保留
   `/resume` 所需的短 ID（`/threads` 是兼容别名）；已归档会话不混入普通列表。
 - `/sessions archived`：从 Codex 原生 archived catalog 读取当前 Scope 的归档会话，并
-  提供“恢复并切换”按钮。
+  提供“恢复并切换”和独立红色二阶段“删除”；删除直接使用与 active Thread 相同的
+  App Server primitive，不先恢复，也不改变当前 active Binding。
 - `/resume <短 ID>`：切换普通会话；已归档会话必须先恢复。
 - `/rename [名称]`：重命名当前原生 Thread；省略名称时打开卡片，名称会同步显示在
   Codex App/CLI。
-- `/archive`：确认后归档当前 idle 原生 Thread，保留 Binding、会话 Turn 配置与 Task
-  Feedback，并清空当前 active pointer；不会自动切换到另一会话。
+- `/archive`：确认后把当前 persisted 原生 Thread 直接交给 App Server 归档；当前有
+  Turn、Goal、Compaction 或观测故障都不剥夺该控制。归档保留 Binding、会话 Turn 配置与
+  Task Feedback，并清空当前 active pointer；不会自动切换到另一会话。
 - `/unarchive <短 ID>`：恢复指定的已归档会话并切换到它。
-- `/delete`：Lazy 会话显示红色二次确认并只删除本地 Binding。已有原生历史的 idle 会话
-  显示包含 exact native ID 的红色二次确认；成功后原生 Thread、App Server 管理的
-  spawned descendants、Codex App/CLI 历史与本地 Binding 都永久删除。失败不会盲目重发，
-  而是通过 rollout scan/state DB 的 active/archived 四视图对账后再决定保留或提交 Binding。
+- `/delete`：Lazy 会话显示红色二次确认并只删除本地 Binding。已有原生历史的
+  persisted 会话无论当前是 running、stopping、Turn 观测不可用、Goal 或
+  compaction，都可由用户确认后直接委托 App Server 删除。App Server 负责有界
+  shutdown 并级联删除 spawned descendants；成功后再删除本地 Binding。非取消响应异常时
+  只做一次 active/archived 四视图对账，不自动重发 mutation；调用取消或对账仍不确定只
+  隔离目标 Binding。
 - `/status`：逐行显示当前会话短 ID、原生名称与首条消息预览、Project、完整 native
   Thread ID、状态、当前 active Turn 的原生 checklist 与已接受 steer 次数、最近完成且
   可观测 Turn 的上下文窗口用量，以及 Model、Effort、Speed。checklist 使用
@@ -169,6 +174,13 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
 - `/stop`：中断当前 Scope 的 active Turn；若运行的是 Goal，则先持久化暂停 Goal、
   再中断其精确物理 Turn。两条路径都会请求清理已登记的后台 terminal；前台工具进程
   可能继续运行，飞书终态会明确提示这一点。
+- Ordinary Turn 的 `completed`、`interrupted`、`failed` 都只终止本轮并释放运行槽；
+  `failed` 后仍可在同一 Thread 继续对话。一次观测故障最多做 5 秒/三次原生 I/O 的
+  短恢复，其中最多一次 resume；恢复 exact `inProgress` 就继续正常无时限轮询，确认终态就
+  正常交付。仍不可验证时转为 `turn-observation-unavailable`，保留 exact 槽但停止自动 I/O；
+  同一 Turn 的 Reaction 脉冲和 Progress Card 轮询也停止，后续终态仍会用普通回复交付。
+  用户可手动重新检查、停止、归档或删除，其他 Binding 不受影响。已确认 terminal 后的
+  final response materialization 不再进入观测恢复。
 - `/help`：显示帮助。
 
 Model、Effort 与 Speed 选项每次都从 `codex.models()` 动态读取，并在卡片提交时再次

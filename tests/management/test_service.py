@@ -50,6 +50,8 @@ class FakeManagementRuntime:
         self.missing: set[str] = set()
         self.rename_entered: asyncio.Event | None = None
         self.rename_release: asyncio.Event | None = None
+        self.archive_entered: asyncio.Event | None = None
+        self.archive_release: asyncio.Event | None = None
         self.side_missing = False
         self.active_metadata: dict[str, NativeThreadMetadata] = {}
         self.archived_metadata: dict[str, NativeThreadMetadata] = {}
@@ -81,6 +83,10 @@ class FakeManagementRuntime:
 
     async def archive_exact(self, binding_id: str):
         self.calls.append(("archive", binding_id))
+        if self.archive_entered is not None:
+            self.archive_entered.set()
+        if self.archive_release is not None:
+            await self.archive_release.wait()
         binding = self.store.get(binding_id)
         assert binding.native_thread_id is not None
         self.archived.add(binding.native_thread_id)
@@ -122,11 +128,58 @@ class FakeManagementRuntime:
         self.calls.append(("delete", binding_id))
         return self.store.delete_binding(binding_id)
 
-    async def stop_exact(self, binding_id: str, *, acknowledge=None):
+    async def delete_archived_exact(
+        self,
+        binding_id: str,
+        *,
+        expected_native_thread_id: str,
+    ):
+        if expected_native_thread_id not in self.archived:
+            raise AssertionError("expected an archived native Thread")
+        self.calls.append(
+            ("delete-archived", binding_id, expected_native_thread_id)
+        )
+        return self.store.delete_binding(binding_id)
+
+    async def stop_exact(
+        self,
+        binding_id: str,
+        *,
+        acknowledge=None,
+        expected_activity_revision: int | None = None,
+        expected_turn_id: str | None = None,
+    ):
+        if expected_activity_revision is not None:
+            snapshot = self.runtime_snapshot_exact(binding_id)
+            if not isinstance(snapshot, BindingRuntimeSnapshot) or (
+                snapshot.activity_revision != expected_activity_revision
+                or (
+                    snapshot.turn.turn_id if snapshot.turn is not None else None
+                )
+                != expected_turn_id
+            ):
+                raise RuntimeStateChanged("runtime state changed")
         self.calls.append(("stop", binding_id))
         if acknowledge is not None:
             await acknowledge()
         return StopDisposition.REQUESTED
+
+    async def recheck_turn_exact(
+        self,
+        binding_id: str,
+        *,
+        expected_activity_revision: int,
+        expected_turn_id: str,
+    ):
+        self.calls.append(
+            (
+                "recheck",
+                binding_id,
+                expected_activity_revision,
+                expected_turn_id,
+            )
+        )
+        return SimpleNamespace(turn_id=expected_turn_id)
 
     async def release_exact(self, binding_id: str):
         self.calls.append(("release", binding_id))
@@ -279,7 +332,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(renamed.name, "inactive thread")
         self.assertEqual(archived.id, first.id)
         self.assertEqual(self.store.active_binding(self.scope.key).id, second.id)
-        self.assertIn(("pointer", second.id, second.id), self.runtime.calls)
+        self.assertNotIn(("pointer", second.id, second.id), self.runtime.calls)
 
     async def test_active_archive_clears_pointer_and_notifies_after_commit(self) -> None:
         binding = await self._create()
@@ -292,6 +345,60 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(archived.id, binding.id)
         self.assertIsNone(self.store.active_binding(self.scope.key))
         self.assertEqual(self.runtime.calls[-1], ("pointer", binding.id, None))
+
+    async def test_exact_archive_ignores_stale_scope_pointer_projection(
+        self,
+    ) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-active")
+        other = await self._create()
+
+        archived = await self.service.archive_exact_binding(
+            target=ExactBindingTarget(
+                self.scope.key,
+                binding.id,
+                "stale-pointer",
+            ),
+        )
+
+        self.assertEqual(archived.id, binding.id)
+        self.assertIn(("archive", binding.id), self.runtime.calls)
+        self.assertEqual(self.store.active_binding(self.scope.key).id, other.id)
+
+    async def test_native_archive_does_not_hold_the_scope_lock(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-active")
+        self.runtime.archive_entered = asyncio.Event()
+        self.runtime.archive_release = asyncio.Event()
+
+        archiving = asyncio.create_task(
+            self.service.archive_exact_binding(
+                target=ExactBindingTarget(
+                    self.scope.key,
+                    binding.id,
+                    binding.id,
+                )
+            )
+        )
+        await self.runtime.archive_entered.wait()
+
+        replacement = await asyncio.wait_for(self._create(), timeout=0.1)
+        self.assertEqual(
+            self.store.active_binding(self.scope.key).id,
+            replacement.id,
+        )
+        self.runtime.archive_release.set()
+        archived = await archiving
+
+        self.assertEqual(archived.id, binding.id)
+        self.assertEqual(
+            self.store.active_binding(self.scope.key).id,
+            replacement.id,
+        )
+        self.assertEqual(
+            self.runtime.calls.count(("pointer", binding.id, replacement.id)),
+            1,
+        )
 
     async def test_current_delete_requires_exact_native_identity(self) -> None:
         binding = await self._create()
@@ -331,9 +438,61 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(deleted.id, target.id)
         self.assertEqual(self.store.active_binding(self.scope.key).id, current.id)
-        self.assertEqual(
-            self.runtime.calls[-2:],
-            [("delete", target.id), ("pointer", current.id, current.id)],
+        self.assertEqual(self.runtime.calls[-1], ("delete", target.id))
+        self.assertNotIn(("pointer", current.id, current.id), self.runtime.calls)
+
+    async def test_materialized_delete_ignores_stale_scope_pointer_projection(
+        self,
+    ) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-active")
+        other = await self._create()
+
+        deleted = await self.service.delete_exact_binding(
+            target=ExactBindingTarget(
+                self.scope.key,
+                binding.id,
+                "stale-pointer",
+            ),
+            expected_native_thread_id="native-active",
+        )
+
+        self.assertEqual(deleted.id, binding.id)
+        self.assertIn(("delete", binding.id), self.runtime.calls)
+        self.assertEqual(self.store.active_binding(self.scope.key).id, other.id)
+
+    async def test_archived_delete_and_recheck_forward_exact_preconditions(
+        self,
+    ) -> None:
+        archived = await self._create()
+        self.store.assign_native_thread_id(archived.id, "native-archived")
+        self.store.deactivate(
+            scope_key=self.scope.key,
+            binding_id=archived.id,
+        )
+        self.runtime.archived.add("native-archived")
+
+        await self.service.delete_archived_exact_binding(
+            target=ExactBindingTarget(self.scope.key, archived.id, None),
+            expected_native_thread_id="native-archived",
+        )
+        self.assertIn(
+            ("delete-archived", archived.id, "native-archived"),
+            self.runtime.calls,
+        )
+
+        current = await self._create()
+        await self.service.recheck_exact_turn(
+            target=ExactBindingTarget(
+                self.scope.key,
+                current.id,
+                current.id,
+            ),
+            runtime_precondition=RuntimePrecondition(9, "turn-nine"),
+        )
+        self.assertIn(
+            ("recheck", current.id, 9, "turn-nine"),
+            self.runtime.calls,
         )
 
     async def test_exact_current_lazy_delete_clears_pointer(self) -> None:

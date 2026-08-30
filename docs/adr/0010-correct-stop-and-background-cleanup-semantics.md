@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-08-07
 amends: 0008, 0009
+amended_by: 0049
 ---
 
 # 更正 `/stop` 与后台终端清理语义

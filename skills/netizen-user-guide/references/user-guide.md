@@ -45,6 +45,14 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 - 当前 Turn 正在运行时，普通消息固定 steer 这个精确 Turn：它用于补充条件、纠正方向或追加要求。
 - 若 steer 恰好碰上 Turn 已结束，本条消息不会执行；看到提示后需要重新发送。
 - Netizen 不保存 prompt queue，不会把运行中的新消息悄悄排成下一轮，也不会把多条消息合并成一个 prompt。
+- `completed`、`interrupted` 和 `failed` 都只结束当前 Turn；即使本轮失败，Thread、历史和
+  Binding 仍保留，下一条消息可以在同一 Thread 开始新 Turn，不必为保留上下文而换会话。
+- 若暂时无法确认 exact Turn 状态，Netizen 只做一次最多 5 秒、最多三次原生 I/O 的
+  短恢复，其中最多 resume 一次。恢复 exact `inProgress` 就继续正常无时限轮询和 steer；
+  确认 terminal 就交付结果。仍不可验证时显示 `turn-observation-unavailable`，保留
+  exact 槽但停止自动 I/O，只隔离这个 Binding。`/sessions` 会提供一次有界重新检查、
+  停止、归档和删除；归档/删除不要求 Turn 观测先恢复。已确认 terminal 后的最终文本
+  读取失败也不会重新进入恢复。
 - 若确实想开始独立任务，应等待当前 Turn 结束、先 `/stop`，或切换/新建另一个会话。不同 Binding 可以并发。
 
 ### 飞书中的运行反馈
@@ -176,13 +184,14 @@ Turn Settings、重命名、归档、恢复或恢复并设为当前、删除 Laz
 
 - `/sessions`：用分页卡片列出当前 Scope 的普通会话。当前会话置顶，其他会话可点击
   “设为当前”；这只切换后续普通消息默认进入的会话，不会停止其他会话正在运行的任务。
-  已有原生历史且空闲的行还可确认后直接“归档”。归档非当前行不会改变当前会话；归档
-  当前行会清空当前会话指针。Lazy、运行中、Goal、压缩中或状态未知的行不提供归档按钮。
-  空闲的 Lazy 行和支持原生删除的空闲历史行还可点击“删除”，先打开独立红色确认卡，再
-  永久删除目标。删除非当前行不会改变当前会话；删除当前行会清空当前会话指针。运行中、
-  Goal、压缩中或状态未知的行不提供删除按钮。
+  所有 persisted materialized 历史行无论是 idle、running、stopping、Turn 观测不可用、
+  Goal 或 Compaction，都可“归档”或打开独立红色确认卡后“删除”；App Server 自己处理
+  当前原生活动。普通 Turn 行还可 exact“停止”，`turn-observation-unavailable` 行可
+  “重新检查”。空闲 Lazy 行仍可删除，但只删除本地 Binding。归档/删除非当前行不会改变
+  当前会话；操作当前行会清空当前会话指针。
   `/threads` 是兼容别名。
-- `/sessions archived`：列出当前 Scope 的已归档会话。
+- `/sessions archived`：列出当前 Scope 的已归档会话，可恢复并切换，也可通过独立红色
+  二阶段确认永久删除；删除直接使用与 active Thread 相同的 App Server primitive，不先恢复。
 - `/resume <短 ID>`：切换到普通会话。已归档会话要先恢复。
 - `/rename [名称]`：重命名当前原生 Thread；省略名称时打开卡片。名称也会显示在 Codex App/CLI。
 - `/release`：显式取消当前 active 普通会话在本 Netizen 连接上的订阅。它保留 Binding、
@@ -193,14 +202,17 @@ Turn Settings、重命名、归档、恢复或恢复并设为当前、删除 Laz
 
 ### 归档、恢复和删除
 
-- `/archive`：确认后归档当前空闲的原生 Thread，保留会话配置与 Task Feedback，并清空
+- `/archive`：确认后把当前 persisted 原生 Thread 直接交给 App Server 归档；Turn、Goal、
+  Compaction 或观测故障都不剥夺该控制。归档保留会话配置与 Task Feedback，并清空
   当前会话指针；不会自动切换到另一会话。
 - `/unarchive <短 ID>`：恢复已归档会话并切换到它。
-- `/delete`：Lazy 会话二次确认后只永久删除本地 Binding；已有原生历史的 idle 会话会显示
-  更强的红色确认，确认后永久删除原生 Thread、App Server 管理的 spawned descendants、
-  Codex App/CLI 历史与本地 Binding，无法恢复。
+- `/delete`：Lazy 会话二次确认后只永久删除本地 Binding；已有原生历史的 persisted 会话
+  会显示带 exact Thread identity 的更强红色确认，并直接委托 App Server 处理当前活动。确认后
+  永久删除原生 Thread、App Server 管理的 spawned descendants、Codex App/CLI 历史与
+  本地 Binding，无法恢复。
 - 删除失败不会自动再发一次 delete。系统会只读对账原生目录：明确仍存在时保留会话供用户
-  重新确认，明确已不存在时收尾删除 Binding，无法判定时暂停新任务并要求重启后再对账。
+  重新确认，明确已不存在时收尾删除 Binding，无法判定时只隔离该 Binding 的 lifecycle，
+  其他会话仍可使用。
 
 `/rename`、`/archive` 命令和 `/delete` 只作用于当前会话，不支持在命令后附目标 ID。要
 重命名另一个普通会话，应先 `/resume`；`/sessions` 行内的“归档”和经独立红色确认卡的
@@ -311,8 +323,8 @@ Netizen 复用原生 Codex Thread、历史、配置和工具，但飞书不是 C
 - `/plan` 和 `/apps` 当前没有安全、公开的高层 SDK 控制面，在飞书中不可用。
 - `$app` 当前不会被包装成原生结构化 attachment。
 - `/model`、`/effort`、`/fast` 被统一为 `/new` 和 `/config` 卡片。
-- 已物化 Thread 只能在 idle、已持久化且 Delete compatibility gate 可用时永久删除；
-  不想丢失历史时使用 `/archive`。
+- 已物化 Thread 必须已持久化且 Delete compatibility gate 可用；删除直接委托 App Server
+  处理当前原生活动。不想丢失历史时使用 `/archive`。
 - `/release` 只释放飞书服务当前连接的订阅，不删除 Thread；CLI/App 或其他 App Server
   的订阅彼此独立。之后飞书仍可按原 native ID 继续。
 - Codex 认证、MCP、Skills、AGENTS、`config.toml`、sandbox 和其他原生配置来自服务用户的标准 Codex 状态，不由每个飞书 Scope 另建一套配置系统。
@@ -348,10 +360,20 @@ Task Reaction 和 Progress Card 默认都关闭。请在新建会话的 `/new` �
 
 ### “为什么 `/delete` 删除不了？”
 
-已有原生历史的会话只有在空闲、已持久化且当前实例的 Delete compatibility gate 可用时
-才能删除；运行中、Goal、压缩中、ephemeral、未持久化或原生状态不可读都会拒绝。失败
-提示若说原生目录仍存在，可重新发送 `/delete` 并再次确认；若说状态 unknown，应先让
-部署者正常重启服务再对账，不要连续点击。只想隐藏并保留历史时使用 `/archive`。
+已有原生历史的会话必须已持久化且当前实例的 Delete compatibility gate 可用。普通 Turn、
+Goal、Compaction 或 Turn 观测不可用时也会直接委托 App Server removal，不要求 Netizen 先确认
+终态。ephemeral、未持久化、compatibility gate 不可用或 App Server/存储故障仍会拒绝。失败提示
+若说原生目录仍存在，可重新发送 `/delete` 并再次确认；若说状态 unknown，目标会话会保持
+占用且不应连续点击，可由部署者正常重启后重新对账；其他会话仍可继续使用。只想隐藏并保留
+历史时使用 `/archive`。
+
+### “Turn 失败后还要换会话吗？”
+
+不用。`failed` 只结束本轮 Turn，原 Thread、历史和 Binding 都保留；下一条普通消息会在
+同一 Thread 开始新 Turn。如果显示 `turn-observation-unavailable`，说明一次短恢复后仍无法
+确认 exact Turn，自动周期读取、任务表情脉冲和进度卡轮询已停止；后续若确认终态仍会收到
+普通完成回复。可从 `/sessions` 重新检查、停止、归档或删除；归档/删除不需要先修好观测，
+其他会话不受影响。
 
 ### “`/stop` 已完成，为什么进程还在？”
 

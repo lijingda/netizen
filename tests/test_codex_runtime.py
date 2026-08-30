@@ -15,6 +15,7 @@ from openai_codex import (
     ServerBusyError,
     SkillInput,
     TextInput,
+    TransportClosedError,
 )
 from openai_codex.types import (
     Notification,
@@ -62,6 +63,8 @@ from netizen.codex_runtime import (
     SubmitDisposition,
     TerminalCleanupFailed,
     TerminalStateUnknown,
+    ThreadActivityChanged,
+    ThreadActivityDiscardedOutcome,
     ThreadCompactStartFailed,
     ThreadCompacting,
     ThreadDeleteUnavailable,
@@ -73,12 +76,15 @@ from netizen.codex_runtime import (
     ThreadLifecycleError,
     ThreadLifecycleState,
     ThreadLifecycleStateUnknown,
+    ThreadNotArchived,
     ThreadNotMaterialized,
     ThreadReleaseError,
     ThreadRunningConfiguration,
     ThreadSubscriptionState,
     ThreadStopping,
     TurnInterruptFailed,
+    TurnObservationUnavailable,
+    TurnObservationUnavailableOutcome,
     TurnStartFailed,
     TurnOutcome,
 )
@@ -337,6 +343,12 @@ class FakeThread:
 
     async def read(self, *, include_turns: bool = False) -> object:
         self.codex.read_calls.append((self.id, include_turns))
+        scheduled_error = self.codex.read_errors_by_call.pop(
+            len(self.codex.read_calls),
+            None,
+        )
+        if scheduled_error is not None:
+            raise scheduled_error
         if include_turns and self.codex.full_read_errors:
             raise self.codex.full_read_errors.pop(0)
         if self.codex.read_errors:
@@ -403,6 +415,7 @@ class FakeCodex:
         self.complete_immediately = False
         self.read_calls: list[tuple[str, bool]] = []
         self.read_errors: list[BaseException] = []
+        self.read_errors_by_call: dict[int, BaseException] = {}
         self.full_read_errors: list[BaseException] = []
         self.omit_agent_items_full_reads = 0
         self.read_statuses: list[str] = []
@@ -412,6 +425,7 @@ class FakeCodex:
         self.resume_thread_id_override: str | None = None
         self.start_errors: list[BaseException] = []
         self.resume_errors: list[BaseException] = []
+        self.resume_gate: asyncio.Event | None = None
         self.turn_errors_after_start: list[BaseException] = []
         self.compact_calls: list[str] = []
         self.compact_records: list[tuple[str, SimpleNamespace]] = []
@@ -458,6 +472,8 @@ class FakeCodex:
 
     async def thread_resume(self, thread_id: str, **kwargs: object) -> FakeThread:
         self.resume_calls.append((thread_id, kwargs))
+        if self.resume_gate is not None:
+            await self.resume_gate.wait()
         if self.resume_errors:
             raise self.resume_errors.pop(0)
         return FakeThread(self.resume_thread_id_override or thread_id, self)
@@ -2380,9 +2396,19 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.codex = FakeCodex()
         self.cleanup = FakeTerminalCleanup(self.codex.events)
         self.delete_control = FakeThreadDeleteControl()
-        self.outcomes: list[TurnOutcome | CompactionOutcome] = []
+        self.outcomes: list[
+            TurnOutcome
+            | TurnObservationUnavailableOutcome
+            | ThreadActivityDiscardedOutcome
+            | CompactionOutcome
+        ] = []
 
-        async def capture(outcome: TurnOutcome | CompactionOutcome) -> None:
+        async def capture(
+            outcome: TurnOutcome
+            | TurnObservationUnavailableOutcome
+            | ThreadActivityDiscardedOutcome
+            | CompactionOutcome,
+        ) -> None:
             self.outcomes.append(outcome)
 
         self.runtime = CodexRuntime(
@@ -2553,7 +2579,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(configured.active)
         self.assertEqual(self.store.active_binding(self.scope.key).id, second.id)
 
-    async def test_archive_requires_idle_then_retains_binding_and_clears_active(self) -> None:
+    async def test_archive_retains_binding_and_clears_active_pointer(self) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
         configured = BindingTurnSettings("model", "high", "priority")
@@ -2582,21 +2608,352 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.archive_calls, ["native-1"])
         self.assertEqual(self.store.active_binding(self.scope.key).id, second.id)
 
-    async def test_archive_and_delete_reject_a_running_turn_without_mutation(self) -> None:
+    async def test_archive_running_turn_delegates_without_local_stop(self) -> None:
+        self.codex.read_gate = asyncio.Event()
         binding = self.binding()
         submission = await self.submit(binding)
-        binding = self.store.get(binding.id)
+        archived = await self.runtime.archive_exact(binding.id)
 
-        with self.assertRaises(ThreadRunningConfiguration):
-            await self.runtime.archive_binding(binding)
-        with self.assertRaises(ThreadRunningConfiguration):
-            await self.runtime.delete_binding(binding)
+        self.assertFalse(archived.active)
+        self.assertEqual(self.codex.archive_calls, [submission.thread_id])
+        self.assertEqual(self.codex.handles[0].interrupt_count, 0)
+        self.assertEqual(self.cleanup.calls, [])
+        self.assertIsNone(self.runtime.active_turn(binding.id))
+        await self.runtime.wait_idle()
+        discarded = next(
+            item
+            for item in self.outcomes
+            if isinstance(item, ThreadActivityDiscardedOutcome)
+        )
+        self.assertEqual(discarded.binding_id, binding.id)
+        self.assertEqual(discarded.thread_id, submission.thread_id)
+        self.assertEqual(discarded.turn_id, submission.turn_id)
+        self.assertFalse(any(isinstance(item, TurnOutcome) for item in self.outcomes))
 
-        self.assertEqual(self.codex.archive_calls, [])
-        self.assertEqual(self.delete_control.calls, [])
-        await self.finish(self.codex.handles[0], submission)
+    async def test_archive_reserves_binding_until_presenters_are_discarded(
+        self,
+    ) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        delivery_started = asyncio.Event()
+        release_delivery = asyncio.Event()
 
-    async def test_archive_response_loss_keeps_current_and_fails_closed(self) -> None:
+        async def capture(outcome) -> None:
+            self.outcomes.append(outcome)
+            if isinstance(outcome, ThreadActivityDiscardedOutcome):
+                delivery_started.set()
+                await release_delivery.wait()
+
+        self.runtime.set_completion_handler(capture)
+        archiving = asyncio.create_task(self.runtime.archive_exact(binding.id))
+        await asyncio.wait_for(delivery_started.wait(), timeout=0.1)
+
+        lifecycle = self.runtime.lifecycle_state(binding.id)
+        self.assertIsNotNone(lifecycle)
+        self.assertEqual(lifecycle.state, ThreadLifecycleState.ARCHIVING)
+        with self.assertRaises(ThreadLifecycleError):
+            await self.runtime.capture_submission_admission(binding.id)
+
+        release_delivery.set()
+        archived = await archiving
+
+        self.assertFalse(archived.active)
+        self.assertIsNone(self.runtime.lifecycle_state(binding.id))
+        self.assertEqual(
+            sum(
+                isinstance(item, ThreadActivityDiscardedOutcome)
+                for item in self.outcomes
+            ),
+            1,
+        )
+
+    async def test_archive_unavailable_turn_delegates_without_recovery_or_stop(
+        self,
+    ) -> None:
+        self.codex.read_errors.extend(
+            TransportClosedError(f"read failure {index}")
+            for index in range(3)
+        )
+        binding = self.binding()
+        submission = await self.submit(binding)
+        submission.release_receipt_attempt()
+
+        while True:
+            active = self.runtime.active_turn(binding.id)
+            if (
+                active is not None
+                and active.state is ActiveState.OBSERVATION_UNAVAILABLE
+            ):
+                break
+            await asyncio.sleep(0)
+        await self.runtime.wait_idle()
+        reads_before = len(self.codex.read_calls)
+        resumes_before = len(self.codex.resume_calls)
+
+        archived = await self.runtime.archive_exact(binding.id)
+
+        self.assertFalse(archived.active)
+        self.assertEqual(self.codex.archive_calls, [submission.thread_id])
+        self.assertEqual(len(self.codex.read_calls), reads_before)
+        self.assertEqual(len(self.codex.resume_calls), resumes_before)
+        self.assertEqual(self.codex.handles[0].interrupt_count, 0)
+        self.assertEqual(self.cleanup.calls, [])
+        self.assertIsNone(self.runtime.active_turn(binding.id))
+
+    async def test_archive_running_goal_delegates_without_pause_or_cleanup(
+        self,
+    ) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="archive this active Goal",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+
+        archived = await self.runtime.archive_exact(binding.id)
+        await self.runtime.wait_idle()
+
+        self.assertFalse(archived.active)
+        self.assertEqual(self.codex.archive_calls, [submission.thread_id])
+        self.assertEqual(control.handles[0].pause_calls, 0)
+        self.assertTrue(control.handles[0].closed)
+        self.assertEqual(self.cleanup.calls, [])
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+        discarded = next(
+            item
+            for item in self.outcomes
+            if isinstance(item, ThreadActivityDiscardedOutcome)
+        )
+        self.assertEqual(discarded.binding_id, binding.id)
+        self.assertEqual(discarded.thread_id, submission.thread_id)
+        self.assertIsNone(discarded.turn_id)
+
+    async def test_delete_running_turn_delegates_without_local_stop(
+        self,
+    ) -> None:
+        self.codex.read_gate = asyncio.Event()
+        binding = self.binding()
+        submission = await self.submit(binding)
+
+        deleted = await self.runtime.delete_exact(
+            binding.id,
+            expected_native_thread_id=submission.thread_id,
+        )
+
+        self.assertEqual(deleted.id, binding.id)
+        self.assertEqual(self.delete_control.calls, [submission.thread_id])
+        self.assertEqual(self.codex.handles[0].interrupt_count, 0)
+        self.assertEqual(self.cleanup.calls, [])
+        self.assertIsNone(self.runtime.active_turn(binding.id))
+        with self.assertRaises(BindingNotFound):
+            self.store.get(binding.id)
+        await self.runtime.wait_idle()
+
+    async def test_delete_compacting_thread_delegates_without_terminal_wait(
+        self,
+    ) -> None:
+        binding = self.binding()
+        first = await self.submit(binding, "materialize before compaction")
+        await self.finish(self.codex.handles[0], first)
+        compact = await self.runtime.compact(
+            binding=self.store.get(binding.id),
+            owner_id="ou_user",
+            origin=object(),
+        )
+
+        deleted = await self.runtime.delete_exact(
+            binding.id,
+            expected_native_thread_id=compact.thread_id,
+        )
+        await self.runtime.wait_idle()
+
+        self.assertEqual(deleted.id, binding.id)
+        self.assertEqual(self.delete_control.calls, [compact.thread_id])
+        self.assertEqual(self.cleanup.calls, [])
+        self.assertFalse(self.runtime.is_compacting(binding.id))
+
+    async def test_lifecycle_reservation_blocks_only_the_target_binding(
+        self,
+    ) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        other = self.binding()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked_delete(thread_id: str) -> None:
+            self.delete_control.calls.append(thread_id)
+            entered.set()
+            await release.wait()
+
+        with patch.object(
+            self.delete_control,
+            "delete",
+            side_effect=blocked_delete,
+        ):
+            deleting = asyncio.create_task(
+                self.runtime.delete_exact(
+                    binding.id,
+                    expected_native_thread_id="native-1",
+                )
+            )
+            await asyncio.wait_for(entered.wait(), timeout=0.1)
+            with self.assertRaises(ThreadLifecycleError):
+                await self.runtime.capture_submission_admission(binding.id)
+            admission = await self.runtime.capture_submission_admission(other.id)
+            self.assertEqual(admission.binding_id, other.id)
+            release.set()
+            deleted = await deleting
+
+        self.assertEqual(deleted.id, binding.id)
+
+    async def test_delete_stopping_turn_does_not_wait_for_terminal_proof(
+        self,
+    ) -> None:
+        binding = self.binding()
+        submission = await self.submit(binding)
+        snapshot = self.runtime.binding_runtime_snapshot(binding.id)
+        handle = self.codex.handles[0]
+        handle.complete_on_interrupt = False
+
+        self.assertEqual(
+            await self.runtime.stop_exact(
+                binding.id,
+                expected_activity_revision=snapshot.activity_revision,
+                expected_turn_id=submission.turn_id,
+            ),
+            StopDisposition.REQUESTED,
+        )
+        deleted = await self.runtime.delete_exact(
+            binding.id,
+            expected_native_thread_id=submission.thread_id,
+        )
+
+        self.assertEqual(deleted.id, binding.id)
+        self.assertEqual(self.delete_control.calls, [submission.thread_id])
+        self.assertEqual(handle.interrupt_count, 1)
+        self.assertEqual(self.cleanup.calls, [submission.thread_id])
+        self.assertIsNone(self.runtime.lifecycle_state(binding.id))
+        await self.runtime.wait_idle()
+
+    async def test_delete_response_loss_reconciles_once_without_retry(
+        self,
+    ) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        self.delete_control.errors.append(RuntimeError("lost response"))
+
+        with (
+            patch.object(
+                self.runtime,
+                "_thread_delete_catalog_state",
+                return_value=NativeThreadCatalogState.ACTIVE,
+            ) as reconcile,
+            self.assertRaises(ThreadLifecycleError),
+        ):
+            await self.runtime.delete_exact(
+                    binding.id,
+                    expected_native_thread_id="native-1",
+                )
+
+        self.assertEqual(self.delete_control.calls, ["native-1"])
+        reconcile.assert_awaited_once_with("native-1")
+        self.assertIsNone(self.runtime.lifecycle_state(binding.id))
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
+        self.assertTrue(self.runtime._accepting)
+
+    async def test_delete_response_loss_commits_when_catalog_proves_absence(
+        self,
+    ) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        self.delete_control.errors.append(RuntimeError("lost response"))
+
+        with patch.object(
+            self.runtime,
+            "_thread_delete_catalog_state",
+            return_value=NativeThreadCatalogState.MISSING,
+        ) as reconcile:
+            deleted = await self.runtime.delete_exact(
+                binding.id,
+                expected_native_thread_id="native-1",
+            )
+
+        self.assertEqual(deleted.id, binding.id)
+        self.assertEqual(self.delete_control.calls, ["native-1"])
+        reconcile.assert_awaited_once_with("native-1")
+        with self.assertRaises(BindingNotFound):
+            self.store.get(binding.id)
+
+    async def test_archive_response_loss_commits_when_catalog_proves_archived(
+        self,
+    ) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        self.codex.archive_errors.append(RuntimeError("lost response"))
+
+        with patch.object(
+            self.runtime,
+            "thread_catalog_state",
+            return_value=NativeThreadCatalogState.ARCHIVED,
+        ) as reconcile:
+            archived = await self.runtime.archive_exact(binding.id)
+
+        self.assertFalse(archived.active)
+        self.assertEqual(self.codex.archive_calls, ["native-1"])
+        reconcile.assert_awaited_once_with("native-1")
+        self.assertIsNone(self.runtime.lifecycle_state(binding.id))
+
+    async def test_archive_response_loss_releases_reservation_when_still_active(
+        self,
+    ) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        self.codex.archive_errors.append(RuntimeError("lost response"))
+
+        with (
+            patch.object(
+                self.runtime,
+                "thread_catalog_state",
+                return_value=NativeThreadCatalogState.ACTIVE,
+            ) as reconcile,
+            self.assertRaises(ThreadLifecycleError),
+        ):
+            await self.runtime.archive_exact(binding.id)
+
+        self.assertEqual(self.codex.archive_calls, ["native-1"])
+        reconcile.assert_awaited_once_with("native-1")
+        self.assertIsNone(self.runtime.lifecycle_state(binding.id))
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
+
+    async def test_active_and_archived_delete_share_the_same_native_primitive(
+        self,
+    ) -> None:
+        active = self.binding()
+        self.store.assign_native_thread_id(active.id, "native-active")
+        archived = self.binding()
+        self.store.assign_native_thread_id(archived.id, "native-archived")
+
+        await self.runtime.delete_exact(
+            active.id,
+            expected_native_thread_id="native-active",
+        )
+        await self.runtime.delete_archived_exact(
+            archived.id,
+            expected_native_thread_id="native-archived",
+        )
+
+        self.assertEqual(
+            self.delete_control.calls,
+            ["native-active", "native-archived"],
+        )
+
+    async def test_archive_response_loss_is_binding_local(self) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
         binding = self.store.get(binding.id)
@@ -2610,8 +2967,12 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.lifecycle_state(binding.id).state,
             ThreadLifecycleState.UNKNOWN,
         )
-        with self.assertRaises(RuntimeClosed):
+        with self.assertRaises(ThreadLifecycleStateUnknown):
             await self.runtime.capture_submission_admission(binding.id)
+        other = self.binding()
+        admission = await self.runtime.capture_submission_admission(other.id)
+        self.assertEqual(admission.binding_id, other.id)
+        self.assertTrue(self.runtime._accepting)
 
     async def test_delete_lazy_binding_never_calls_native_delete(self) -> None:
         binding = self.binding()
@@ -2657,6 +3018,55 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.delete_control.calls, ["native-1"])
         with self.assertRaises(BindingNotFound):
             self.store.get(binding.id)
+
+    async def test_delete_archived_does_not_preflight_native_catalog(self) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        binding = self.store.get(binding.id)
+        archived = SimpleNamespace(
+            id="native-1",
+            name="Archived",
+            preview="history",
+        )
+        self.codex.thread_list_pages = [
+            SimpleNamespace(data=[], next_cursor=None),
+            SimpleNamespace(data=[archived], next_cursor=None),
+            SimpleNamespace(data=[], next_cursor=None),
+            SimpleNamespace(data=[archived], next_cursor=None),
+        ]
+
+        deleted = await self.runtime.delete_archived_exact(
+            binding.id,
+            expected_native_thread_id="native-1",
+        )
+
+        self.assertEqual(deleted.id, binding.id)
+        self.assertEqual(self.delete_control.calls, ["native-1"])
+        self.assertEqual(self.codex.thread_list_calls, [])
+        with self.assertRaises(BindingNotFound):
+            self.store.get(binding.id)
+
+    async def test_delete_archived_uses_same_primitive_even_if_catalog_changed(
+        self,
+    ) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        active = SimpleNamespace(id="native-1", name=None, preview="history")
+        self.codex.thread_list_pages = [
+            SimpleNamespace(data=[active], next_cursor=None),
+            SimpleNamespace(data=[], next_cursor=None),
+            SimpleNamespace(data=[active], next_cursor=None),
+            SimpleNamespace(data=[], next_cursor=None),
+        ]
+
+        deleted = await self.runtime.delete_archived_exact(
+            binding.id,
+            expected_native_thread_id="native-1",
+        )
+
+        self.assertEqual(deleted.id, binding.id)
+        self.assertEqual(self.delete_control.calls, ["native-1"])
+        self.assertEqual(self.codex.thread_list_calls, [])
 
     async def test_delete_error_reconciles_four_missing_native_views(self) -> None:
         binding = self.binding()
@@ -2734,52 +3144,36 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime.lifecycle_state(binding.id))
         self.assertTrue(self.runtime._accepting)
 
-    async def test_delete_retry_finishes_binding_when_native_is_already_absent(
+    async def test_delete_does_not_resume_or_read_before_native_mutation(
         self,
     ) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
         binding = self.store.get(binding.id)
-        self.codex.resume_errors.append(RuntimeError("no rollout found"))
-        self.codex.thread_list_pages = [
-            SimpleNamespace(data=[], next_cursor=None),
-            SimpleNamespace(data=[], next_cursor=None),
-            SimpleNamespace(data=[], next_cursor=None),
-            SimpleNamespace(data=[], next_cursor=None),
-        ]
+        self.codex.resume_errors.append(RuntimeError("must not resume"))
 
         deleted = await self.runtime.delete_binding(binding)
 
         self.assertEqual(deleted.id, binding.id)
-        self.assertEqual(self.delete_control.calls, [])
+        self.assertEqual(self.delete_control.calls, ["native-1"])
+        self.assertEqual(self.codex.resume_calls, [])
+        self.assertEqual(self.codex.read_calls, [])
         with self.assertRaises(BindingNotFound):
             self.store.get(binding.id)
         self.assertTrue(self.runtime._accepting)
 
-    async def test_delete_read_failure_keeps_binding_when_catalog_still_has_thread(
+    async def test_delete_ignores_unrelated_thread_read_failures(
         self,
     ) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
         binding = self.store.get(binding.id)
         self.codex.resume_errors.append(RuntimeError("resume failed"))
-        present = SimpleNamespace(
-            id="native-1",
-            name=None,
-            preview="existing",
-        )
-        self.codex.thread_list_pages = [
-            SimpleNamespace(data=[present], next_cursor=None),
-            SimpleNamespace(data=[], next_cursor=None),
-            SimpleNamespace(data=[present], next_cursor=None),
-            SimpleNamespace(data=[], next_cursor=None),
-        ]
+        deleted = await self.runtime.delete_binding(binding)
 
-        with self.assertRaisesRegex(ThreadLifecycleError, "无法读取"):
-            await self.runtime.delete_binding(binding)
-
-        self.assertEqual(self.delete_control.calls, [])
-        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
+        self.assertEqual(deleted.id, binding.id)
+        self.assertEqual(self.delete_control.calls, ["native-1"])
+        self.assertEqual(self.codex.resume_calls, [])
         self.assertIsNone(self.runtime.lifecycle_state(binding.id))
         self.assertTrue(self.runtime._accepting)
 
@@ -2795,7 +3189,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
         self.assertIsNone(self.runtime.lifecycle_state(binding.id))
 
-    async def test_delete_reconciliation_failure_retains_binding_and_fails_closed(
+    async def test_delete_reconciliation_failure_is_binding_local(
         self,
     ) -> None:
         binding = self.binding()
@@ -2810,10 +3204,11 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         lifecycle = self.runtime.lifecycle_state(binding.id)
         self.assertIsNotNone(lifecycle)
         self.assertEqual(lifecycle.state, ThreadLifecycleState.UNKNOWN)
-        with self.assertRaises(RuntimeClosed):
+        with self.assertRaises(ThreadLifecycleStateUnknown):
             await self.runtime.capture_submission_admission(binding.id)
+        self.assertTrue(self.runtime._accepting)
 
-    async def test_delete_cancellation_retains_unknown_and_fails_closed(self) -> None:
+    async def test_delete_cancellation_retains_binding_local_unknown(self) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
         binding = self.store.get(binding.id)
@@ -2827,15 +3222,16 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.lifecycle_state(binding.id).state,
             ThreadLifecycleState.UNKNOWN,
         )
-        with self.assertRaises(RuntimeClosed):
+        with self.assertRaises(ThreadLifecycleStateUnknown):
             await self.runtime.capture_submission_admission(binding.id)
+        self.assertTrue(self.runtime._accepting)
 
-    async def test_delete_local_commit_failure_after_native_ack_fails_closed(
+    async def test_delete_local_commit_failure_is_binding_local(
         self,
     ) -> None:
+        self.codex.read_gate = asyncio.Event()
         binding = self.binding()
-        self.store.assign_native_thread_id(binding.id, "native-1")
-        binding = self.store.get(binding.id)
+        submission = await self.submit(binding)
 
         with patch.object(
             self.store,
@@ -2843,16 +3239,31 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             side_effect=RuntimeError("sqlite commit lost"),
         ):
             with self.assertRaises(ThreadLifecycleStateUnknown):
-                await self.runtime.delete_binding(binding)
+                await self.runtime.delete_exact(
+                    binding.id,
+                    expected_native_thread_id=submission.thread_id,
+                )
 
-        self.assertEqual(self.delete_control.calls, ["native-1"])
-        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
+        await self.runtime.wait_idle()
+        self.assertEqual(self.delete_control.calls, [submission.thread_id])
+        self.assertEqual(
+            self.store.get(binding.id).native_thread_id,
+            submission.thread_id,
+        )
+        self.assertIsNone(self.runtime.active_turn(binding.id))
+        self.assertTrue(
+            any(
+                isinstance(item, ThreadActivityDiscardedOutcome)
+                for item in self.outcomes
+            )
+        )
         self.assertEqual(
             self.runtime.lifecycle_state(binding.id).state,
             ThreadLifecycleState.UNKNOWN,
         )
-        with self.assertRaises(RuntimeClosed):
+        with self.assertRaises(ThreadLifecycleStateUnknown):
             await self.runtime.capture_submission_admission(binding.id)
+        self.assertTrue(self.runtime._accepting)
 
     async def test_submit_rechecks_current_binding_after_goal_reconcile_await(self) -> None:
         first = self.binding()
@@ -3000,8 +3411,9 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.lifecycle_state(binding.id).state,
             ThreadLifecycleState.UNKNOWN,
         )
-        with self.assertRaises(RuntimeClosed):
+        with self.assertRaises(ThreadLifecycleStateUnknown):
             await self.runtime.capture_submission_admission(binding.id)
+        self.assertTrue(self.runtime._accepting)
 
     async def test_thread_metadata_rejects_repeated_pagination_cursor(self) -> None:
         self.codex.thread_list_pages = [
@@ -6110,71 +6522,55 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.outcomes[0].error)
         self.assertEqual(self.outcomes[0].final_response, "done:turn-1")
 
-    async def test_completed_turn_waits_for_final_response_materialization(self) -> None:
-        self.codex.complete_immediately = True
-        self.codex.omit_agent_items_full_reads = 1
-        binding = self.binding()
-
-        with self.assertLogs("netizen.codex_runtime", level="WARNING") as logs:
-            submission = await self.submit(binding)
-            submission.release_receipt_attempt()
-            await self.runtime.wait_idle()
-
-        self.assertEqual(
-            self.codex.read_calls.count((submission.thread_id, True)),
-            2,
-        )
-        self.assertIn("response not materialized", logs.output[0])
-        self.assertIsNone(self.outcomes[0].error)
-        self.assertEqual(self.outcomes[0].final_response, "done:turn-1")
-
-    async def test_completed_turn_without_text_keeps_bounded_fallback(self) -> None:
+    async def test_single_read_failure_recovers_without_public_state_change(
+        self,
+    ) -> None:
         binding = self.binding()
         submission = await self.submit(binding)
-        handle = self.codex.handles[0]
-        handle.record.status.value = "completed"
-        handle.record.completed_at = 2
-        handle.notifications.put_nowait(_STREAM_END)
         submission.release_receipt_attempt()
-        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
-            await self.runtime.wait_idle()
 
-        self.assertEqual(
-            self.codex.read_calls.count((submission.thread_id, True)),
-            5,
-        )
-        self.assertIsNone(self.outcomes[0].error)
-        self.assertIsNone(self.outcomes[0].final_response)
+        async def initial_exact_view_ready() -> bool:
+            active = self.runtime._active.get(binding.id)
+            return active is not None and active.terminal_stream_safe
 
-    async def test_not_loaded_thread_waits_before_requesting_turns(self) -> None:
-        self.codex.complete_immediately = True
-        self.codex.read_statuses.append("notLoaded")
-        binding = self.binding()
+        while not await initial_exact_view_ready():
+            await asyncio.sleep(0)
+        before = self.runtime.binding_runtime_snapshot(binding.id)
+        self.codex.read_errors.append(TransportClosedError("one read failure"))
 
-        submission = await self.submit(binding)
-        submission.release_receipt_attempt()
-        await self.runtime.wait_idle()
+        while not self.codex.resume_calls:
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
 
-        self.assertEqual(
-            self.codex.read_calls[:3],
-            [
-                (submission.thread_id, False),
-                (submission.thread_id, False),
-                (submission.thread_id, True),
-            ],
-        )
-        self.assertIsNone(self.outcomes[0].error)
-        self.assertEqual(self.outcomes[0].turn_id, submission.turn_id)
-
-    async def test_exact_materialization_error_keeps_active_and_retries(self) -> None:
-        self.codex.complete_immediately = True
-        self.codex.full_read_errors.append(
-            InvalidRequestError(
-                -32600,
-                "thread native-1 is not materialized yet; "
-                "includeTurns is unavailable before first user message",
+        after = self.runtime.binding_runtime_snapshot(binding.id)
+        self.assertEqual(after.turn.state, ActiveState.RUNNING)
+        self.assertEqual(after.activity_revision, before.activity_revision)
+        self.assertFalse(
+            any(
+                isinstance(outcome, TurnObservationUnavailableOutcome)
+                for outcome in self.outcomes
             )
         )
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        steered = await self.submit(
+            self.store.get(binding.id),
+            "continue after retry",
+            admission,
+        )
+        self.assertEqual(steered.disposition, SubmitDisposition.STEERED)
+        self.codex.handles[0].complete(response="recovered")
+        await self.runtime.wait_idle()
+        self.assertEqual(self.outcomes[-1].final_response, "recovered")
+
+    async def test_terminal_materialization_failure_never_enters_recovery(
+        self,
+    ) -> None:
+        self.codex.complete_immediately = True
+        self.codex.omit_agent_items_full_reads = 1
+        self.codex.read_errors_by_call[3] = InternalRpcError(
+            -32603,
+            "terminal response projection unavailable",
+        )
         binding = self.binding()
 
         with self.assertLogs("netizen.codex_runtime", level="WARNING"):
@@ -6182,40 +6578,110 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             submission.release_receipt_attempt()
             await self.runtime.wait_idle()
 
-        self.assertEqual(
-            self.codex.read_calls.count((submission.thread_id, True)),
-            2,
-        )
-        self.assertEqual(len(self.codex.handles), 1)
+        self.assertEqual(len(self.outcomes), 1)
+        self.assertIsInstance(self.outcomes[0], TurnOutcome)
         self.assertIsNone(self.outcomes[0].error)
-        self.assertEqual(self.outcomes[0].turn_id, submission.turn_id)
+        self.assertIsNone(self.outcomes[0].final_response)
+        self.assertIsNone(self.runtime.active_turn(binding.id))
 
-    async def test_other_invalid_request_is_not_retried(self) -> None:
-        self.codex.complete_immediately = True
-        self.codex.full_read_errors.append(
-            InvalidRequestError(-32600, "different permanent error")
+    async def test_bounded_failure_becomes_unavailable_and_stops_io(self) -> None:
+        self.codex.read_errors.extend(
+            TransportClosedError(f"read failure {index}")
+            for index in range(3)
         )
         binding = self.binding()
+        submission = await self.submit(binding)
+        submission.release_receipt_attempt()
 
-        with self.assertLogs("netizen.codex_runtime", level="ERROR") as logs:
-            submission = await self.submit(binding)
-            submission.release_receipt_attempt()
-            await self.runtime.wait_idle()
+        while True:
+            active = self.runtime.active_turn(binding.id)
+            if (
+                active is not None
+                and active.state is ActiveState.OBSERVATION_UNAVAILABLE
+            ):
+                break
+            await asyncio.sleep(0)
+        await self.runtime.wait_idle()
+        reads = len(self.codex.read_calls)
+        resumes = len(self.codex.resume_calls)
+        await asyncio.sleep(0.01)
 
-        self.assertIsInstance(self.outcomes[0].error, TerminalStateUnknown)
-        self.assertTrue(
-            any("terminal state is unknown" in entry for entry in logs.output)
-        )
-        self.assertEqual(
-            self.codex.read_calls.count((submission.thread_id, True)),
-            1,
-        )
+        self.assertEqual(len(self.codex.read_calls), reads)
+        self.assertEqual(len(self.codex.resume_calls), resumes)
         self.assertIsNotNone(self.runtime.active_turn(binding.id))
-        with self.assertRaisesRegex(RuntimeError, "服务正在停止"):
-            await self.submit(self.store.get(binding.id), "must not start")
-        self.assertEqual(len(self.codex.handles), 1)
-        await self.runtime.cancel_tasks()
+        with self.assertRaises(TurnObservationUnavailable):
+            await self.runtime.capture_submission_admission(binding.id)
+        notices = [
+            outcome
+            for outcome in self.outcomes
+            if isinstance(outcome, TurnObservationUnavailableOutcome)
+        ]
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0].turn_id, submission.turn_id)
+
+    async def test_unavailable_manual_recheck_restores_inprogress_turn(self) -> None:
+        self.codex.read_errors.extend(
+            TransportClosedError(f"read failure {index}")
+            for index in range(3)
+        )
+        binding = self.binding()
+        submission = await self.submit(binding)
+        submission.release_receipt_attempt()
+
+        while True:
+            snapshot = self.runtime.binding_runtime_snapshot(binding.id)
+            if (
+                snapshot.turn is not None
+                and snapshot.turn.state is ActiveState.OBSERVATION_UNAVAILABLE
+            ):
+                break
+            await asyncio.sleep(0)
+        await self.runtime.recheck_turn_exact(
+            binding.id,
+            expected_activity_revision=snapshot.activity_revision,
+            expected_turn_id=submission.turn_id,
+        )
+        while self.runtime.active_turn(binding.id).state is not ActiveState.RUNNING:
+            await asyncio.sleep(0)
+
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        steered = await self.submit(
+            self.store.get(binding.id),
+            "continue after manual recheck",
+            admission,
+        )
+        self.assertEqual(steered.disposition, SubmitDisposition.STEERED)
+        self.codex.handles[0].complete(response="manual recovery done")
+        await self.runtime.wait_idle()
+        self.assertEqual(self.outcomes[-1].final_response, "manual recovery done")
+
+    async def test_unavailable_manual_recheck_confirms_terminal(self) -> None:
+        self.codex.read_errors.extend(
+            TransportClosedError(f"read failure {index}")
+            for index in range(3)
+        )
+        binding = self.binding()
+        submission = await self.submit(binding)
+        submission.release_receipt_attempt()
+
+        while True:
+            snapshot = self.runtime.binding_runtime_snapshot(binding.id)
+            if (
+                snapshot.turn is not None
+                and snapshot.turn.state is ActiveState.OBSERVATION_UNAVAILABLE
+            ):
+                break
+            await asyncio.sleep(0)
+        self.codex.handles[0].complete(response="finished while unobserved")
+        await self.runtime.recheck_turn_exact(
+            binding.id,
+            expected_activity_revision=snapshot.activity_revision,
+            expected_turn_id=submission.turn_id,
+        )
+        await self.runtime.wait_idle()
+
         self.assertIsNone(self.runtime.active_turn(binding.id))
+        self.assertEqual(self.outcomes[-1].final_response, "finished while unobserved")
 
     async def test_retryable_overload_keeps_active_slot_until_exact_terminal(self) -> None:
         self.codex.complete_immediately = True
@@ -6248,6 +6714,14 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsInstance(self.outcomes[0].error, RuntimeError)
         self.assertIn("native failure", str(self.outcomes[0].error))
+        self.assertIsNone(self.runtime.active_turn(binding.id))
+
+        follow_up = await self.submit(self.store.get(binding.id), "continue")
+        self.assertEqual(follow_up.thread_id, submission.thread_id)
+        self.codex.handles[-1].complete(response="continued")
+        follow_up.release_receipt_attempt()
+        await self.runtime.wait_idle()
+        self.assertEqual(self.outcomes[-1].final_response, "continued")
 
     async def test_final_answer_wins_over_commentary_items(self) -> None:
         binding = self.binding()

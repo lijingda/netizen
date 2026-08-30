@@ -38,6 +38,7 @@ from .cards import (
     TurnFileCardLimitError,
     archive_binding_card,
     archived_sessions_card,
+    archived_sessions_delete_binding_card,
     activity_step_display,
     sessions_card,
     binding_configured_card,
@@ -68,7 +69,7 @@ from .cards import (
     reply_card_from_manifest,
 )
 from .codex_runtime import (
-    ActiveState,
+    BindingRuntimeSnapshot,
     CodexRuntime,
     CompactionOutcome,
     ContextAnchorRequired,
@@ -83,7 +84,6 @@ from .codex_runtime import (
     GoalOutcome,
     GoalSubmission,
     GoalStateUnknown,
-    GoalOperationState,
     NativeThreadMetadata,
     ReleaseDisposition,
     RuntimeClosed,
@@ -103,6 +103,7 @@ from .codex_runtime import (
     TerminalCleanupFailed,
     ThreadCompactStartFailed,
     ThreadCompacting,
+    ThreadActivityDiscardedOutcome,
     ThreadGoalActive,
     ThreadArchived,
     ThreadDeleteUnavailable,
@@ -117,15 +118,20 @@ from .codex_runtime import (
     TurnProgressSnapshot,
     TurnActivitySnapshot,
     TurnInterruptFailed,
+    TurnObservationUnavailableOutcome,
     TurnStartFailed,
     TurnOutcome,
 )
 from .domain import (
+    ACTIVE_STATE_VALUES,
+    ActiveState,
     CardControlIntent,
     CardControlName,
     ControlIntent,
     ControlName,
     FeishuScope,
+    GoalOperationState,
+    GoalStatus,
     MessageContextAnchor,
     MentionContextMode,
     NativeCapability,
@@ -141,8 +147,10 @@ from .domain import (
     ReplyCardManifest,
     ReplyCardProjection,
     ReplyCardResultModule,
+    SESSION_IDLE_STATE,
     TurnProgressManifest,
     TurnProgressManifestStep,
+    persisted_goal_session_state,
 )
 from .experience import (
     InvalidInteraction,
@@ -160,6 +168,7 @@ from .management import (
     InstanceManagementService,
     ManagementRuntimePort,
     NoCurrentBinding,
+    RuntimePrecondition,
     ScopeCoordinator,
     SideIdentityMismatch,
 )
@@ -208,7 +217,7 @@ from .message_projection import (
     select_supplemental_messages,
 )
 from .sdk_gap_adapter import SkillCatalogError
-from .sdk_gap_adapter import GoalControlError, GoalSnapshot, GoalStatus
+from .sdk_gap_adapter import GoalControlError, GoalSnapshot
 from .skill_references import InvalidSkillReference, parse_skill_references
 from .turn_files import (
     TurnFile,
@@ -759,6 +768,18 @@ class _ReplyCardPresenter:
                 extra={"binding_id": binding_id, "turn_id": turn_id},
             )
             return False
+        current = self._runtime.turn_activity(
+            binding_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            refresh_plan=False,
+        )
+        if (
+            current is None
+            or self._runtime.lifecycle_state(binding_id) is not None
+        ):
+            return False
+        snapshot = current
         key = (binding_id, thread_id, turn_id)
         previous = self._sessions.pop(key, None)
         if previous is not None:
@@ -832,6 +853,93 @@ class _ReplyCardPresenter:
         session = self._sessions.pop((binding_id, thread_id, turn_id), None)
         if session is not None:
             await self._stop_session(session)
+
+    async def abandon_thread(
+        self,
+        *,
+        binding_id: str,
+        thread_id: str,
+    ) -> None:
+        """Stop every ordinary/Goal presenter owned by one removed Thread."""
+
+        ordinary_keys = tuple(
+            key
+            for key in self._sessions
+            if key[0] == binding_id and key[1] == thread_id
+        )
+        for key in ordinary_keys:
+            session = self._sessions.pop(key, None)
+            if session is not None:
+                await self._stop_session(session)
+
+        async with self._goal_lock:
+            goal_keys = tuple(
+                key
+                for key in self._goal_sessions
+                if key[0] == binding_id and key[1] == thread_id
+            )
+            self._goal_latest_runs = {
+                key: run_id
+                for key, run_id in self._goal_latest_runs.items()
+                if key[:2] != (binding_id, thread_id)
+            }
+            removed: list[_GoalReplyCardSession] = []
+            for key in goal_keys:
+                session = self._goal_sessions.pop(key, None)
+                if session is not None:
+                    removed.append(session)
+                    await self._stop_session(session)
+            if removed:
+                async with self._goal_card_lock:
+                    for session in removed:
+                        self._goal_cards.pop(
+                            (session.message_id, session.goal_generation),
+                            None,
+                        )
+
+    async def park_unavailable(
+        self,
+        *,
+        binding_id: str,
+        thread_id: str,
+        turn_id: str,
+    ) -> bool:
+        """Render one unavailable snapshot and stop all future card polling."""
+
+        session = self._sessions.pop((binding_id, thread_id, turn_id), None)
+        if session is None:
+            return False
+        await self._stop_session(session)
+        if session.failed:
+            return False
+        try:
+            snapshot = self._runtime.turn_activity(
+                binding_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                refresh_plan=False,
+            )
+        except Exception:
+            logger.exception(
+                "failed to read unavailable progress-card activity",
+                extra={"binding_id": binding_id, "turn_id": turn_id},
+            )
+            return False
+        if snapshot is None:
+            return False
+        try:
+            return await self._update(
+                session,
+                turn_progress_card(snapshot=snapshot),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "failed to render unavailable progress card",
+                extra={"binding_id": binding_id, "turn_id": turn_id},
+            )
+            return False
 
     async def start_side(
         self,
@@ -1048,6 +1156,8 @@ class _ReplyCardPresenter:
                     "logical_turn_id": logical_turn_id,
                 },
             )
+            return False
+        if self._runtime.lifecycle_state(binding_id) is not None:
             return False
         origin.message_id = message_id
         origin.goal_generation = generation
@@ -2373,8 +2483,13 @@ class ChannelApplication:
                     CardControlName.DELETE_BINDING,
                     CardControlName.PREPARE_EXACT_DELETE_BINDING,
                     CardControlName.DELETE_EXACT_BINDING,
+                    CardControlName.PREPARE_ARCHIVED_DELETE_BINDING,
+                    CardControlName.DELETE_ARCHIVED_BINDING,
                     CardControlName.UNARCHIVE_BINDING,
                     CardControlName.ACTIVATE_BINDING,
+                    CardControlName.STOP_EXACT_BINDING,
+                    CardControlName.RECHECK_EXACT_TURN,
+                    CardControlName.REFRESH_ARCHIVED_SESSIONS,
                 }
             ):
                 await self._safe_reply_to_card(
@@ -2430,8 +2545,13 @@ class ChannelApplication:
                     CardControlName.DELETE_BINDING,
                     CardControlName.PREPARE_EXACT_DELETE_BINDING,
                     CardControlName.DELETE_EXACT_BINDING,
+                    CardControlName.PREPARE_ARCHIVED_DELETE_BINDING,
+                    CardControlName.DELETE_ARCHIVED_BINDING,
                     CardControlName.UNARCHIVE_BINDING,
                     CardControlName.ACTIVATE_BINDING,
+                    CardControlName.STOP_EXACT_BINDING,
+                    CardControlName.RECHECK_EXACT_TURN,
+                    CardControlName.REFRESH_ARCHIVED_SESSIONS,
                 }
             ):
                 await self._safe_reply_to_card(
@@ -2443,12 +2563,47 @@ class ChannelApplication:
         self,
         outcome: (
             TurnOutcome
+            | TurnObservationUnavailableOutcome
+            | ThreadActivityDiscardedOutcome
             | CompactionOutcome
             | GoalOutcome
             | SideTurnOutcome
             | SideLifecycleOutcome
         ),
     ) -> None:
+        if isinstance(outcome, ThreadActivityDiscardedOutcome):
+            await self._progress_cards.abandon_thread(
+                binding_id=outcome.binding_id,
+                thread_id=outcome.thread_id,
+            )
+            if outcome.turn_id is not None:
+                await self._reactions.stop(outcome.turn_id)
+            return
+        if isinstance(outcome, TurnObservationUnavailableOutcome):
+            await self._reactions.stop(outcome.turn_id)
+            try:
+                await self._progress_cards.park_unavailable(
+                    binding_id=outcome.binding_id,
+                    thread_id=outcome.thread_id,
+                    turn_id=outcome.turn_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "failed to park unavailable Turn progress card",
+                    extra={
+                        "binding_id": outcome.binding_id,
+                        "turn_id": outcome.turn_id,
+                    },
+                )
+            message = (
+                "本次 Codex Turn 在短暂重试后仍无法确认状态，已停止后台读取。"
+                "当前会话及上下文仍保留；可发送 `/sessions` 重新检查、停止、"
+                "归档或删除这个会话。"
+            )
+            await self._reply(outcome.origin, message)
+            return
         if isinstance(outcome, SideLifecycleOutcome):
             await self._complete_side_lifecycle(outcome)
             return
@@ -4947,35 +5102,11 @@ class ChannelApplication:
                 )
             return
         if intent.name is ControlName.SESSIONS:
-            bindings = self._bindings.list_bindings(intent.scope.key)
             archived_view = bool(intent.arguments)
             if archived_view:
-                metadata = await self._read_thread_metadata(
-                    bindings,
-                    archived=True,
-                    strict=True,
-                )
-                sessions = tuple(
-                    ArchivedSessionCardItem(
-                        binding_id=binding.id,
-                        short_id=binding.short_id,
-                        project_alias=binding.project_alias,
-                        native_thread_id=binding.native_thread_id,
-                        title=_session_title(
-                            binding,
-                            metadata[binding.native_thread_id],
-                        ),
-                    )
-                    for binding in bindings
-                    if binding.native_thread_id is not None
-                    and binding.native_thread_id in metadata
-                )
                 await self._reply(
                     message,
-                    archived_sessions_card(
-                        scope=intent.scope,
-                        sessions=sessions,
-                    ),
+                    await self._archived_sessions_card(scope=intent.scope),
                 )
                 return
 
@@ -5170,10 +5301,7 @@ class ChannelApplication:
             context_window_line = _context_window_status_line(
                 binding,
                 self._runtime.context_window_usage(binding.id),
-                active_turn=state in {
-                    ActiveState.RUNNING.value,
-                    ActiveState.STOPPING.value,
-                },
+                active_turn=state in ACTIVE_STATE_VALUES,
             )
             progress_lines = _turn_progress_status_lines(
                 self._runtime.turn_progress(binding.id)
@@ -5773,7 +5901,7 @@ class ChannelApplication:
                     target=CurrentBindingTarget(
                         intent.scope.key,
                         intent.binding_id,
-                    )
+                    ),
                 )
             except (NoCurrentBinding, CurrentBindingChanged) as error:
                 raise CardActionError(
@@ -5908,18 +6036,13 @@ class ChannelApplication:
             binding = self._bindings.get(intent.binding_id)
             if binding.scope_key != intent.scope.key:
                 raise BindingNotFound(intent.binding_id)
-            try:
-                archived = await self._management.archive_exact_binding(
-                    target=ExactBindingTarget(
-                        scope_key=intent.scope.key,
-                        binding_id=binding.id,
-                        expected_active_binding_id=intent.expected_active_binding_id,
-                    ),
-                )
-            except ActivePointerChanged as error:
-                raise CardActionError(
-                    "会话列表已变化，本次归档未执行；请重新发送 /sessions。"
-                ) from error
+            archived = await self._management.archive_exact_binding(
+                target=ExactBindingTarget(
+                    scope_key=intent.scope.key,
+                    binding_id=binding.id,
+                    expected_active_binding_id=None,
+                ),
+            )
             success_notice = (
                 f"✅ 已归档会话 {archived.short_id}"
                 f"（{archived.project_alias}）；历史仍可恢复。"
@@ -5944,34 +6067,22 @@ class ChannelApplication:
         if intent.name is CardControlName.PREPARE_EXACT_DELETE_BINDING:
             assert intent.binding_id is not None
             assert intent.page is not None
-            async with self._scope_coordinator.hold(intent.scope.key):
-                active = self._bindings.active_binding(intent.scope.key)
-                active_id = active.id if active is not None else None
-                if active_id != intent.expected_active_binding_id:
-                    raise CardActionError(
-                        "会话列表已变化，请重新发送 /sessions 后再删除。"
-                    )
-                binding = self._bindings.get(intent.binding_id)
-                if binding.scope_key != intent.scope.key:
-                    raise BindingNotFound(intent.binding_id)
-                if binding.native_thread_id != intent.expected_native_thread_id:
-                    raise CardActionError(
-                        "会话的原生历史已变化，请重新发送 /sessions 后再删除。"
-                    )
-                state = await self._binding_state(binding)
-                if state != "idle":
-                    raise CardActionError(
-                        f"会话状态已变为 {state}，当前不能删除；请刷新 /sessions。"
-                    )
-                if (
-                    binding.native_thread_id is not None
-                    and NativeCapability.DELETE
-                    not in self._runtime.available_capabilities
-                ):
-                    raise ThreadDeleteUnavailable(
-                        "当前 SDK/App Server 的 Thread Delete 兼容契约未通过；"
-                        "本次未调用 Codex。"
-                    )
+            binding = self._bindings.get(intent.binding_id)
+            if binding.scope_key != intent.scope.key:
+                raise BindingNotFound(intent.binding_id)
+            if binding.native_thread_id != intent.expected_native_thread_id:
+                raise CardActionError(
+                    "会话的原生历史已变化，请重新发送 /sessions 后再删除。"
+                )
+            if (
+                binding.native_thread_id is not None
+                and NativeCapability.DELETE
+                not in self._runtime.available_capabilities
+            ):
+                raise ThreadDeleteUnavailable(
+                    "当前 SDK/App Server 的 Thread Delete 兼容契约未通过；"
+                    "本次未调用 Codex。"
+                )
             metadata = (
                 await self._read_thread_metadata((binding,))
                 if binding.native_thread_id is not None
@@ -5980,7 +6091,6 @@ class ChannelApplication:
             confirmation = sessions_delete_binding_card(
                 scope=intent.scope,
                 binding_id=binding.id,
-                expected_active_binding_id=active_id,
                 short_id=binding.short_id,
                 project_alias=binding.project_alias,
                 title=_session_title(
@@ -6011,15 +6121,13 @@ class ChannelApplication:
                     target=ExactBindingTarget(
                         scope_key=intent.scope.key,
                         binding_id=binding.id,
-                        expected_active_binding_id=(
-                            intent.expected_active_binding_id
-                        ),
+                        expected_active_binding_id=None,
                     ),
                     expected_native_thread_id=intent.expected_native_thread_id,
                 )
-            except (ActivePointerChanged, ThreadDeleteTargetChanged) as error:
+            except ThreadDeleteTargetChanged as error:
                 raise CardActionError(
-                    "会话列表或原生历史已变化，本次删除未执行；"
+                    "会话的原生历史已变化，本次删除未执行；"
                     "请重新发送 /sessions。"
                 ) from error
             success_notice = (
@@ -6049,6 +6157,189 @@ class ChannelApplication:
                 refreshed = False
             if not refreshed:
                 await self._safe_reply_to_card(intent, success_notice)
+            return
+        if intent.name is CardControlName.STOP_EXACT_BINDING:
+            assert intent.binding_id is not None
+            assert intent.page is not None
+            binding = self._bindings.get(intent.binding_id)
+            if binding.scope_key != intent.scope.key:
+                raise BindingNotFound(intent.binding_id)
+            try:
+                stopped = await self._management.stop_exact_binding(
+                    target=ExactBindingTarget(
+                        scope_key=intent.scope.key,
+                        binding_id=binding.id,
+                        expected_active_binding_id=(
+                            intent.expected_active_binding_id
+                        ),
+                    ),
+                    runtime_precondition=self._runtime_precondition(intent),
+                )
+            except ActivePointerChanged as error:
+                raise CardActionError(
+                    "会话列表已变化，本次停止未执行；请刷新 /sessions。"
+                ) from error
+            notices = {
+                StopDisposition.NOT_RUNNING: "✅ 该会话的任务刚刚已经结束。",
+                StopDisposition.REQUESTED: (
+                    "已请求中断 exact Codex Turn；确认终态前会话仍显示为停止中。"
+                ),
+                StopDisposition.STOPPING: (
+                    "该会话正在停止；已再次尝试完成中断与终端清理。"
+                ),
+                StopDisposition.GOAL_REQUESTED: (
+                    "已请求暂停 Goal 并中断当前物理 Turn。"
+                ),
+                StopDisposition.GOAL_STOPPING: "该 Goal 正在暂停。",
+                StopDisposition.COMPACTING: (
+                    "该会话正在压缩；当前没有已验证的安全取消能力。"
+                ),
+                StopDisposition.EXTERNAL_GOAL: (
+                    "这是外部 active Goal，当前无法安全重挂并暂停。"
+                ),
+            }
+            notice = notices[stopped.disposition]
+            try:
+                refreshed = await self._safe_update_card(
+                    intent.source_id,
+                    await self._sessions_card(
+                        scope=intent.scope,
+                        page=intent.page,
+                        notice=notice,
+                    ),
+                )
+            except Exception:
+                logger.exception("failed to rebuild sessions card after exact stop")
+                refreshed = False
+            if not refreshed:
+                await self._safe_reply_to_card(intent, notice)
+            return
+        if intent.name is CardControlName.RECHECK_EXACT_TURN:
+            assert intent.binding_id is not None
+            assert intent.page is not None
+            binding = self._bindings.get(intent.binding_id)
+            if binding.scope_key != intent.scope.key:
+                raise BindingNotFound(intent.binding_id)
+            try:
+                await self._management.recheck_exact_turn(
+                    target=ExactBindingTarget(
+                        scope_key=intent.scope.key,
+                        binding_id=binding.id,
+                        expected_active_binding_id=(
+                            intent.expected_active_binding_id
+                        ),
+                    ),
+                    runtime_precondition=self._runtime_precondition(intent),
+                )
+            except ActivePointerChanged as error:
+                raise CardActionError(
+                    "会话列表已变化，本次重新检查未执行；请刷新 /sessions。"
+                ) from error
+            notice = (
+                "已启动一次有界的 exact Turn 状态重读；"
+                "成功后会恢复正常观察，仍不可验证则停止后台读取。"
+            )
+            try:
+                refreshed = await self._safe_update_card(
+                    intent.source_id,
+                    await self._sessions_card(
+                        scope=intent.scope,
+                        page=intent.page,
+                        notice=notice,
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "failed to rebuild sessions card after exact Turn recheck"
+                )
+                refreshed = False
+            if not refreshed:
+                await self._safe_reply_to_card(intent, notice)
+            return
+        if intent.name is CardControlName.PREPARE_ARCHIVED_DELETE_BINDING:
+            assert intent.binding_id is not None
+            assert intent.expected_native_thread_id is not None
+            binding = self._bindings.get(intent.binding_id)
+            if binding.scope_key != intent.scope.key:
+                raise BindingNotFound(intent.binding_id)
+            if binding.native_thread_id != intent.expected_native_thread_id:
+                raise CardActionError(
+                    "归档会话的原生历史已变化，请刷新后再删除。"
+                )
+            if NativeCapability.DELETE not in self._runtime.available_capabilities:
+                raise ThreadDeleteUnavailable(
+                    "当前 SDK/App Server 的 Thread Delete 兼容契约未通过；"
+                    "本次未调用 Codex。"
+                )
+            metadata = await self._read_thread_metadata(
+                (binding,),
+                archived=True,
+            )
+            confirmation = archived_sessions_delete_binding_card(
+                scope=intent.scope,
+                binding_id=binding.id,
+                short_id=binding.short_id,
+                project_alias=binding.project_alias,
+                title=_session_title(
+                    binding,
+                    metadata.get(intent.expected_native_thread_id),
+                ),
+                native_thread_id=intent.expected_native_thread_id,
+            )
+            updated = await self._safe_update_card(
+                intent.source_id,
+                confirmation,
+            )
+            if not updated:
+                await self._safe_reply_to_card(
+                    intent,
+                    "无法打开删除确认卡，请重新发送 /sessions archived。",
+                )
+            return
+        if intent.name is CardControlName.DELETE_ARCHIVED_BINDING:
+            assert intent.binding_id is not None
+            assert intent.expected_native_thread_id is not None
+            binding = self._bindings.get(intent.binding_id)
+            if binding.scope_key != intent.scope.key:
+                raise BindingNotFound(intent.binding_id)
+            try:
+                deleted = await self._management.delete_archived_exact_binding(
+                    target=ExactBindingTarget(
+                        scope_key=intent.scope.key,
+                        binding_id=binding.id,
+                        expected_active_binding_id=None,
+                    ),
+                    expected_native_thread_id=intent.expected_native_thread_id,
+                )
+            except ThreadDeleteTargetChanged as error:
+                raise CardActionError(
+                    "归档会话的原生历史已变化，本次删除未执行；请刷新。"
+                ) from error
+            success_notice = (
+                f"✅ 已永久删除归档会话 {deleted.short_id}"
+                f"（{deleted.project_alias}）、派生会话及本地 Binding。"
+            )
+            try:
+                refreshed = await self._safe_update_card(
+                    intent.source_id,
+                    await self._archived_sessions_card(
+                        scope=intent.scope,
+                        notice=success_notice,
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "failed to rebuild archived sessions card after exact delete"
+                )
+                refreshed = False
+            if not refreshed:
+                await self._safe_reply_to_card(intent, success_notice)
+            return
+        if intent.name is CardControlName.REFRESH_ARCHIVED_SESSIONS:
+            await self._safe_update_card(
+                intent.source_id,
+                await self._archived_sessions_card(scope=intent.scope),
+            )
             return
         if intent.name is CardControlName.SESSIONS_PAGE:
             page = intent.page or 0
@@ -6243,20 +6534,41 @@ class ChannelApplication:
             service_tier_id=intent.service_tier_id,
         )
 
-    async def _binding_state(self, binding: ThreadBinding) -> str:
-        lifecycle = self._runtime.lifecycle_state(binding.id)
+    @staticmethod
+    def _runtime_precondition(intent: CardControlIntent) -> RuntimePrecondition:
+        if intent.expected_activity_revision is None:
+            raise CardActionError(
+                "会话运行状态前置条件缺失，请重新发送原命令。"
+            )
+        return RuntimePrecondition(
+            activity_revision=intent.expected_activity_revision,
+            physical_turn_id=intent.expected_turn_id,
+        )
+
+    async def _binding_state(
+        self,
+        binding: ThreadBinding,
+        *,
+        snapshot: BindingRuntimeSnapshot | None = None,
+    ) -> str:
+        snapshot = snapshot or self._runtime.binding_runtime_snapshot(binding.id)
+        lifecycle = snapshot.lifecycle
         if lifecycle is not None:
             return lifecycle.state.value
-        active = self._runtime.active_turn(binding.id)
+        active = snapshot.turn
         if active is not None:
             return active.state.value
-        if self._runtime.is_compacting(binding.id):
+        if snapshot.compacting:
             return "compacting"
-        active_goal = self._runtime.active_goal(binding.id)
+        active_goal = snapshot.goal
         if active_goal is not None:
             return active_goal.state.value
         persisted = await self._runtime.goal_snapshot(binding)
-        return "idle" if persisted is None else f"goal-{persisted.status.value}"
+        return (
+            SESSION_IDLE_STATE
+            if persisted is None
+            else persisted_goal_session_state(persisted.status)
+        )
 
     async def _read_thread_metadata(
         self,
@@ -6311,7 +6623,8 @@ class ChannelApplication:
         for binding in bindings:
             if binding.native_thread_id in archived_metadata:
                 continue
-            state = await self._binding_state(binding)
+            snapshot = self._runtime.binding_runtime_snapshot(binding.id)
+            state = await self._binding_state(binding, snapshot=snapshot)
             title = _session_title(
                 binding,
                 metadata.get(binding.native_thread_id),
@@ -6325,6 +6638,12 @@ class ChannelApplication:
                     title=title,
                     state=state,
                     active=binding.active,
+                    activity_revision=snapshot.activity_revision,
+                    turn_id=(
+                        snapshot.turn.turn_id
+                        if snapshot.turn is not None
+                        else None
+                    ),
                 )
             )
         return sessions_card(
@@ -6335,6 +6654,44 @@ class ChannelApplication:
             ),
             page=page,
             notice=notice,
+        )
+
+    async def _archived_sessions_card(
+        self,
+        *,
+        scope: FeishuScope,
+        notice: str | None = None,
+        notice_is_error: bool = False,
+    ) -> OutboundCard:
+        bindings = self._bindings.list_bindings(scope.key)
+        metadata = await self._read_thread_metadata(
+            bindings,
+            archived=True,
+            strict=True,
+        )
+        sessions = tuple(
+            ArchivedSessionCardItem(
+                binding_id=binding.id,
+                short_id=binding.short_id,
+                project_alias=binding.project_alias,
+                native_thread_id=binding.native_thread_id,
+                title=_session_title(
+                    binding,
+                    metadata[binding.native_thread_id],
+                ),
+            )
+            for binding in bindings
+            if binding.native_thread_id is not None
+            and binding.native_thread_id in metadata
+        )
+        return archived_sessions_card(
+            scope=scope,
+            sessions=sessions,
+            native_delete_available=(
+                NativeCapability.DELETE in self._runtime.available_capabilities
+            ),
+            notice=notice,
+            notice_is_error=notice_is_error,
         )
 
     async def _binding_model_status_lines(

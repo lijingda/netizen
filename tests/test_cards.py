@@ -16,6 +16,7 @@ from netizen.cards import (
     activity_step_display,
     archive_binding_card,
     archived_sessions_card,
+    archived_sessions_delete_binding_card,
     sessions_card,
     sessions_delete_binding_card,
     binding_created_card,
@@ -84,7 +85,7 @@ class CardCodecTest(unittest.TestCase):
             "omt_topic",
         )
         self.value = {
-            "v": 3,
+            "v": 4,
             "intent": "settings.refresh",
             "chat_id": "oc_group",
             "scope_kind": "topic",
@@ -111,7 +112,7 @@ class CardCodecTest(unittest.TestCase):
     def test_direct_and_group_buttons_round_trip_without_topic_field(self) -> None:
         for kind in (ScopeKind.DIRECT, ScopeKind.GROUP):
             value = {
-                "v": 3,
+                "v": 4,
                 "intent": "settings.refresh",
                 "chat_id": "oc_chat",
                 "scope_kind": kind.value,
@@ -132,7 +133,7 @@ class CardCodecTest(unittest.TestCase):
 
     def test_goal_button_round_trips_exact_binding(self) -> None:
         value = {
-            "v": 3,
+            "v": 4,
             "intent": "goal.pause",
             "chat_id": "oc_group",
             "scope_kind": "topic",
@@ -164,7 +165,7 @@ class CardCodecTest(unittest.TestCase):
     def test_goal_end_accepts_complete_snapshot_that_was_not_auto_cleared(self) -> None:
         intent = self.decode(
             {
-                "v": 3,
+                "v": 4,
                 "intent": "goal.clear",
                 "chat_id": "oc_group",
                 "scope_kind": "topic",
@@ -180,7 +181,7 @@ class CardCodecTest(unittest.TestCase):
 
     def test_side_close_round_trips_exact_side_and_topic(self) -> None:
         value = {
-            "v": 3,
+            "v": 4,
             "intent": "side.close",
             "chat_id": "oc_group",
             "scope_kind": "topic",
@@ -214,7 +215,7 @@ class CardCodecTest(unittest.TestCase):
             with self.subTest(raw_intent=raw_intent):
                 intent = self.decode(
                     {
-                        "v": 3,
+                        "v": 4,
                         "intent": raw_intent,
                         "chat_id": "oc_group",
                         "scope_kind": "topic",
@@ -227,7 +228,7 @@ class CardCodecTest(unittest.TestCase):
 
         materialized_delete = self.decode(
             {
-                "v": 3,
+                "v": 4,
                 "intent": "binding.delete",
                 "chat_id": "oc_group",
                 "scope_kind": "topic",
@@ -243,7 +244,7 @@ class CardCodecTest(unittest.TestCase):
         with self.assertRaises(CardActionError):
             self.decode(
                 {
-                    "v": 3,
+                    "v": 4,
                     "intent": "binding.delete",
                     "chat_id": "oc_group",
                     "scope_kind": "topic",
@@ -279,7 +280,7 @@ class CardCodecTest(unittest.TestCase):
 
     def test_activate_binding_round_trips_exact_binding_id(self) -> None:
         value = {
-            "v": 3,
+            "v": 4,
             "intent": "binding.activate",
             "chat_id": "oc_group",
             "scope_kind": "topic",
@@ -299,15 +300,14 @@ class CardCodecTest(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(CardActionError):
                 self.decode(mutation)
 
-    def test_exact_archive_round_trips_binding_pointer_and_page(self) -> None:
+    def test_exact_archive_round_trips_binding_and_page(self) -> None:
         value = {
-            "v": 3,
+            "v": 4,
             "intent": "binding.archive.exact",
             "chat_id": "oc_group",
             "scope_kind": "topic",
             "topic_id": "omt_topic",
             "binding_id": "binding:v1:binding-123",
-            "expected_active_binding_id": "binding:v1:binding-current",
             "page": 2,
         }
 
@@ -315,26 +315,22 @@ class CardCodecTest(unittest.TestCase):
 
         self.assertEqual(intent.name, CardControlName.ARCHIVE_EXACT_BINDING)
         self.assertEqual(intent.binding_id, "binding-123")
-        self.assertEqual(intent.expected_active_binding_id, "binding-current")
         self.assertEqual(intent.page, 2)
-
-        without_current = self.decode(
-            {**value, "expected_active_binding_id": None}
-        )
-        self.assertIsNone(without_current.expected_active_binding_id)
 
         for mutation in (
             {key: item for key, item in value.items() if key != "page"},
             {**value, "extra": "field"},
             {**value, "page": -1},
             {**value, "page": True},
-            {**value, "expected_active_binding_id": "binding-current"},
+            {**value, "expected_active_binding_id": None},
+            {**value, "expected_activity_revision": 7},
+            {**value, "expected_turn_id": "turn:v1:turn-123"},
             {**value, "binding_id": "binding-123"},
         ):
             with self.subTest(mutation=mutation), self.assertRaises(CardActionError):
                 self.decode(mutation)
 
-    def test_exact_delete_actions_round_trip_all_preconditions(self) -> None:
+    def test_exact_delete_actions_round_trip_exact_thread(self) -> None:
         for raw_intent, expected_name in (
             (
                 "binding.delete.exact.prepare",
@@ -343,13 +339,12 @@ class CardCodecTest(unittest.TestCase):
             ("binding.delete.exact", CardControlName.DELETE_EXACT_BINDING),
         ):
             value = {
-                "v": 3,
+                "v": 4,
                 "intent": raw_intent,
                 "chat_id": "oc_group",
                 "scope_kind": "topic",
                 "topic_id": "omt_topic",
                 "binding_id": "binding:v1:binding-123",
-                "expected_active_binding_id": "binding:v1:binding-current",
                 "expected_native_thread_id": "native-thread:v1:thread-123",
                 "page": 2,
             }
@@ -358,20 +353,14 @@ class CardCodecTest(unittest.TestCase):
                 intent = self.decode(value)
                 self.assertEqual(intent.name, expected_name)
                 self.assertEqual(intent.binding_id, "binding-123")
-                self.assertEqual(
-                    intent.expected_active_binding_id,
-                    "binding-current",
-                )
                 self.assertEqual(intent.expected_native_thread_id, "thread-123")
                 self.assertEqual(intent.page, 2)
                 lazy = self.decode(
                     {
                         **value,
-                        "expected_active_binding_id": None,
                         "expected_native_thread_id": None,
                     }
                 )
-                self.assertIsNone(lazy.expected_active_binding_id)
                 self.assertIsNone(lazy.expected_native_thread_id)
 
                 for mutation in (
@@ -385,13 +374,81 @@ class CardCodecTest(unittest.TestCase):
                     {**value, "page": True},
                     {**value, "page": -1},
                     {**value, "expected_native_thread_id": "thread-123"},
+                    {**value, "expected_activity_revision": 7},
+                    {**value, "expected_turn_id": "turn:v1:turn-123"},
                 ):
                     with self.assertRaises(CardActionError):
                         self.decode(mutation)
 
+    def test_exact_stop_recheck_and_archived_delete_actions_are_strict(
+        self,
+    ) -> None:
+        runtime_common = {
+            "v": 4,
+            "chat_id": "oc_group",
+            "scope_kind": "topic",
+            "topic_id": "omt_topic",
+            "binding_id": "binding:v1:binding-123",
+            "expected_active_binding_id": "binding:v1:binding-current",
+            "expected_activity_revision": 9,
+            "expected_turn_id": "turn:v1:turn-123",
+            "page": 2,
+        }
+        stop = self.decode(
+            {**runtime_common, "intent": "binding.stop.exact"}
+        )
+        recheck = self.decode(
+            {**runtime_common, "intent": "binding.turn.recheck"}
+        )
+        self.assertEqual(stop.name, CardControlName.STOP_EXACT_BINDING)
+        self.assertEqual(recheck.name, CardControlName.RECHECK_EXACT_TURN)
+        self.assertEqual(recheck.expected_activity_revision, 9)
+        self.assertEqual(recheck.expected_turn_id, "turn-123")
+        with self.assertRaises(CardActionError):
+            self.decode(
+                {
+                    **runtime_common,
+                    "intent": "binding.turn.recheck",
+                    "expected_turn_id": None,
+                }
+            )
+
+        archived_common = {
+            "v": 4,
+            "chat_id": "oc_group",
+            "scope_kind": "topic",
+            "topic_id": "omt_topic",
+            "binding_id": "binding:v1:binding-123",
+            "expected_native_thread_id": "native-thread:v1:thread-123",
+        }
+        for raw_intent, expected in (
+            (
+                "binding.delete.archived.prepare",
+                CardControlName.PREPARE_ARCHIVED_DELETE_BINDING,
+            ),
+            (
+                "binding.delete.archived",
+                CardControlName.DELETE_ARCHIVED_BINDING,
+            ),
+        ):
+            with self.subTest(raw_intent=raw_intent):
+                intent = self.decode(
+                    {**archived_common, "intent": raw_intent}
+                )
+                self.assertEqual(intent.name, expected)
+                self.assertEqual(intent.expected_native_thread_id, "thread-123")
+                with self.assertRaises(CardActionError):
+                    self.decode(
+                        {
+                            **archived_common,
+                            "intent": raw_intent,
+                            "page": 0,
+                        }
+                    )
+
     def test_sessions_page_round_trips_page_and_rejects_extras(self) -> None:
         value = {
-            "v": 3,
+            "v": 4,
             "intent": "sessions.page",
             "chat_id": "oc_group",
             "scope_kind": "topic",
@@ -413,6 +470,7 @@ class CardCodecTest(unittest.TestCase):
     def test_button_decoder_rejects_version_extras_chat_and_topic_mismatch(self) -> None:
         for mutation in (
             {**self.value, "v": 2},
+            {**self.value, "v": 3},
             {**self.value, "extra": "field"},
             {**self.value, "chat_id": "oc_other"},
             {**self.value, "topic_id": None},
@@ -421,7 +479,7 @@ class CardCodecTest(unittest.TestCase):
                 self.decode(mutation)
 
         with self.assertRaisesRegex(CardActionError, "版本已过期"):
-            self.decode({**self.value, "v": 2})
+            self.decode({**self.value, "v": 3})
 
     def test_v3_turn_file_actions_are_expired(self) -> None:
         common = {
@@ -1340,6 +1398,14 @@ class CardRendererTest(unittest.TestCase):
                 "content"
             ],
         )
+        snapshot.state = SimpleNamespace(value="turn-observation-unavailable")
+        unavailable = turn_progress_card(snapshot=snapshot)
+        self.assertIn(
+            "Turn 观测不可用",
+            _elements(unavailable.card, "collapsible_panel")[0]["header"]["title"][
+                "content"
+            ],
+        )
         interrupted = turn_progress_card(
             snapshot=snapshot,
             terminal_status="interrupted",
@@ -1538,7 +1604,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertTrue(all("value" not in button for button in callback_buttons))
         values = [button["behaviors"][0]["value"] for button in callback_buttons]
         self.assertTrue(all("topic_id" not in value for value in values))
-        self.assertTrue(all(value["v"] == 3 for value in values))
+        self.assertTrue(all(value["v"] == 4 for value in values))
         self.assertTrue(all(value["settings_section"] == "projects" for value in values))
         manage = next(
             form
@@ -2425,6 +2491,7 @@ class CardRendererTest(unittest.TestCase):
                     title="Release review",
                 ),
             ),
+            native_delete_available=True,
         )
 
         rename_fields = [
@@ -2446,6 +2513,7 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertIn("binding.unarchive", str(archived.card))
         self.assertIn("恢复并切换", str(archived.card))
+        self.assertIn("binding.delete.archived.prepare", str(archived.card))
 
     def test_sessions_card_pins_active_and_offers_activate_for_others(self) -> None:
         active = SessionCardItem(
@@ -2456,6 +2524,8 @@ class CardRendererTest(unittest.TestCase):
             title="Active work",
             state="running",
             active=True,
+            activity_revision=11,
+            turn_id="turn-one",
         )
         other = SessionCardItem(
             binding_id="22222222-0000-0000-0000-000000000002",
@@ -2494,28 +2564,47 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("设为当前", labels)
         # Active row has no activate button; only two non-active rows have it.
         self.assertEqual(labels.count("设为当前"), 2)
-        # Only the idle materialized row can be archived.
-        self.assertEqual(labels.count("归档"), 1)
-        self.assertEqual(labels.count("删除"), 2)
-        archive = next(b for b in buttons if b["text"]["content"] == "归档")
+        # A running materialized row keeps lifecycle controls independent of stop.
+        self.assertEqual(labels.count("归档"), 2)
+        self.assertEqual(labels.count("删除"), 3)
+        self.assertEqual(labels.count("停止"), 1)
+        archive = next(
+            b
+            for b in buttons
+            if b["text"]["content"] == "归档"
+            and b["behaviors"][0]["value"]["binding_id"]
+            == "binding:v1:22222222-0000-0000-0000-000000000002"
+        )
         archive_value = archive["behaviors"][0]["value"]
         self.assertEqual(archive_value["intent"], "binding.archive.exact")
         self.assertEqual(
             archive_value["binding_id"],
             "binding:v1:22222222-0000-0000-0000-000000000002",
         )
-        self.assertEqual(
-            archive_value["expected_active_binding_id"],
-            "binding:v1:11111111-0000-0000-0000-000000000001",
-        )
+        self.assertNotIn("expected_active_binding_id", archive_value)
         self.assertEqual(archive_value["page"], 0)
         self.assertEqual(
             archive["confirm"]["title"]["content"],
             "确认归档此会话？",
         )
         self.assertIn("历史不会删除", archive["confirm"]["text"]["content"])
+        running_archive = next(
+            b
+            for b in buttons
+            if b["text"]["content"] == "归档"
+            and b["behaviors"][0]["value"]["binding_id"]
+            == "binding:v1:11111111-0000-0000-0000-000000000001"
+        )
+        self.assertNotIn(
+            "expected_activity_revision",
+            running_archive["behaviors"][0]["value"],
+        )
+        self.assertNotIn(
+            "expected_turn_id",
+            running_archive["behaviors"][0]["value"],
+        )
 
-    def test_sessions_lifecycle_actions_are_hidden_for_ineligible_rows(self) -> None:
+    def test_sessions_lifecycle_actions_depend_only_on_materialization(self) -> None:
         sessions = (
             SessionCardItem(
                 binding_id="11111111-0000-0000-0000-000000000001",
@@ -2534,6 +2623,8 @@ class CardRendererTest(unittest.TestCase):
                 title="Running",
                 state="running",
                 active=False,
+                activity_revision=5,
+                turn_id="turn-two",
             ),
             SessionCardItem(
                 binding_id="33333333-0000-0000-0000-000000000003",
@@ -2584,17 +2675,26 @@ class CardRendererTest(unittest.TestCase):
             if button["text"]["content"] == "归档"
         ]
 
-        self.assertEqual(len(archive_buttons), 1)
+        self.assertEqual(len(archive_buttons), 5)
         self.assertEqual(
-            archive_buttons[0]["behaviors"][0]["value"]["binding_id"],
-            "binding:v1:11111111-0000-0000-0000-000000000001",
+            {
+                button["behaviors"][0]["value"]["binding_id"]
+                for button in archive_buttons
+            },
+            {
+                "binding:v1:11111111-0000-0000-0000-000000000001",
+                "binding:v1:22222222-0000-0000-0000-000000000002",
+                "binding:v1:33333333-0000-0000-0000-000000000003",
+                "binding:v1:55555555-0000-0000-0000-000000000005",
+                "binding:v1:66666666-0000-0000-0000-000000000006",
+            },
         )
         delete_buttons = [
             button
             for button in _elements(card.card, "button")
             if button["text"]["content"] == "删除"
         ]
-        self.assertEqual(len(delete_buttons), 2)
+        self.assertEqual(len(delete_buttons), 6)
         self.assertEqual(
             {
                 button["behaviors"][0]["value"]["binding_id"]
@@ -2602,9 +2702,52 @@ class CardRendererTest(unittest.TestCase):
             },
             {
                 "binding:v1:11111111-0000-0000-0000-000000000001",
+                "binding:v1:22222222-0000-0000-0000-000000000002",
+                "binding:v1:33333333-0000-0000-0000-000000000003",
                 "binding:v1:44444444-0000-0000-0000-000000000004",
+                "binding:v1:55555555-0000-0000-0000-000000000005",
+                "binding:v1:66666666-0000-0000-0000-000000000006",
             },
         )
+        stop_buttons = [
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "停止"
+        ]
+        self.assertEqual(len(stop_buttons), 1)
+
+    def test_sessions_unavailable_row_keeps_lifecycle_and_recheck_controls(
+        self,
+    ) -> None:
+        card = sessions_card(
+            scope=self.scope,
+            sessions=(
+                SessionCardItem(
+                    binding_id="11111111-0000-0000-0000-000000000001",
+                    short_id="11111111",
+                    project_alias="test",
+                    native_thread_id="native-one",
+                    title="Needs recovery",
+                    state="turn-observation-unavailable",
+                    active=True,
+                    activity_revision=12,
+                    turn_id="turn-unavailable",
+                ),
+            ),
+            native_delete_available=True,
+        )
+
+        buttons = _elements(card.card, "button")
+        labels = {button["text"]["content"] for button in buttons}
+        self.assertEqual(labels, {"归档", "删除", "停止", "重新检查"})
+        recheck = next(
+            button
+            for button in buttons
+            if button["text"]["content"] == "重新检查"
+        )
+        value = recheck["behaviors"][0]["value"]
+        self.assertEqual(value["expected_activity_revision"], 12)
+        self.assertEqual(value["expected_turn_id"], "turn:v1:turn-unavailable")
 
     def test_sessions_materialized_delete_requires_native_capability(self) -> None:
         sessions = (
@@ -2652,9 +2795,6 @@ class CardRendererTest(unittest.TestCase):
         common = {
             "scope": self.scope,
             "binding_id": "11111111-0000-0000-0000-000000000001",
-            "expected_active_binding_id": (
-                "22222222-0000-0000-0000-000000000002"
-            ),
             "short_id": "11111111",
             "project_alias": "test",
             "title": "Release cleanup",
@@ -2683,15 +2823,14 @@ class CardRendererTest(unittest.TestCase):
             value["binding_id"],
             "binding:v1:11111111-0000-0000-0000-000000000001",
         )
-        self.assertEqual(
-            value["expected_active_binding_id"],
-            "binding:v1:22222222-0000-0000-0000-000000000002",
-        )
+        self.assertNotIn("expected_active_binding_id", value)
         self.assertEqual(
             value["expected_native_thread_id"],
             "native-thread:v1:native-one",
         )
         self.assertEqual(value["page"], 3)
+        self.assertNotIn("expected_activity_revision", value)
+        self.assertNotIn("expected_turn_id", value)
         self.assertEqual(final["type"], "danger")
         self.assertIn("无法恢复", final["confirm"]["title"]["content"])
         back = next(
@@ -2708,6 +2847,41 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertIsNone(
             lazy_final["behaviors"][0]["value"]["expected_native_thread_id"]
+        )
+
+    def test_archived_delete_confirmation_is_exact_and_returns_to_archive(
+        self,
+    ) -> None:
+        card = archived_sessions_delete_binding_card(
+            scope=self.scope,
+            binding_id="11111111-0000-0000-0000-000000000001",
+            short_id="11111111",
+            project_alias="test",
+            title="Archived work",
+            native_thread_id="native-one",
+        )
+
+        self.assertEqual(card.card["header"]["template"], "red")
+        buttons = _elements(card.card, "button")
+        delete = next(
+            button
+            for button in buttons
+            if button["text"]["content"] == "永久删除已归档会话"
+        )
+        value = delete["behaviors"][0]["value"]
+        self.assertEqual(value["intent"], "binding.delete.archived")
+        self.assertEqual(
+            value["expected_native_thread_id"],
+            "native-thread:v1:native-one",
+        )
+        back = next(
+            button
+            for button in buttons
+            if button["text"]["content"] == "返回归档列表"
+        )
+        self.assertEqual(
+            back["behaviors"][0]["value"]["intent"],
+            "sessions.archived.refresh",
         )
 
     def test_sessions_card_paginates_and_clamps_page(self) -> None:

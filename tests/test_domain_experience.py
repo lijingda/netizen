@@ -3,11 +3,15 @@ from __future__ import annotations
 import unittest
 
 from netizen.domain import (
+    ACTIVE_STATE_VALUES,
+    ActiveState,
     ControlIntent,
     ControlName,
     FeishuScope,
+    GoalOperationState,
     NativeCapability,
     PromptInput,
+    SESSION_STOP_ACTION_STATES,
     ScopeKind,
 )
 from netizen.experience import (
@@ -31,6 +35,26 @@ class ScopeTest(unittest.TestCase):
     def test_topic_requires_topic_id(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires topic_id"):
             FeishuScope("cli_test", "oc_chat", ScopeKind.TOPIC)
+
+
+class SessionActionPolicyTest(unittest.TestCase):
+    def test_active_states_and_stop_actions_are_central(self) -> None:
+        self.assertEqual(
+            ACTIVE_STATE_VALUES,
+            frozenset(state.value for state in ActiveState),
+        )
+        self.assertEqual(
+            SESSION_STOP_ACTION_STATES,
+            frozenset(
+                {
+                    ActiveState.RUNNING.value,
+                    ActiveState.STOPPING.value,
+                    ActiveState.OBSERVATION_UNAVAILABLE.value,
+                    GoalOperationState.RUNNING.value,
+                    GoalOperationState.PAUSING.value,
+                }
+            ),
+        )
 
 
 class ExperienceTest(unittest.TestCase):
