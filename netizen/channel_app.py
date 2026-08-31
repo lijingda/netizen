@@ -4569,10 +4569,8 @@ class ChannelApplication:
             return
         sender = getattr(message, "sender", None)
         sender_id = str(getattr(sender, "open_id", "") or "")
-        sender_name = str(getattr(sender, "display_name", "") or "")
         if (
             sender_id != reference.sender_id
-            or sender_name != reference.sender_name
             or bool(getattr(sender, "is_bot", False))
             or str(getattr(sender, "sender_type", "user") or "") != "user"
         ):

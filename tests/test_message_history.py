@@ -230,17 +230,17 @@ class FeishuMessageHistoryReaderTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([ref.message_id for ref in window.candidates], [
             "om_old",
+            "om_no_name",
             "om_new",
         ])
         self.assertEqual(window.candidates[0].sender_id, "ou_old")
-        self.assertEqual(window.candidates[0].sender_name, "Old")
         self.assertEqual(window.candidates[0].message_type, "post")
         self.assertEqual(window.upper, MessageContextAnchor("om_upper", 4_000))
         self.assertEqual(window.stats.pages_scanned, 2)
         self.assertEqual(window.stats.raw_messages_scanned, 11)
         self.assertEqual(window.stats.duplicate_messages, 1)
         self.assertEqual(window.stats.ignored_after_upper, 1)
-        self.assertEqual(window.stats.omitted_messages, 5)
+        self.assertEqual(window.stats.omitted_messages, 4)
         self.assertFalse(window.stats.truncated_before)
         self.assertFalse(window.stats.scan_limit_hit)
 

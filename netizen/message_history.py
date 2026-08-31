@@ -40,12 +40,16 @@ class MessageHistoryContractError(MessageHistoryError):
 
 @dataclass(frozen=True, slots=True)
 class MessageHistoryRef:
-    """Metadata required to fetch and normalize one candidate exact message."""
+    """Stable metadata required to fetch and normalize one exact message.
+
+    Display names are deliberately absent: the exact-message normalization
+    boundary resolves the name used for prompt attribution.  A mutable name
+    returned by the history-list endpoint is not an identity invariant.
+    """
 
     message_id: str
     create_time_ms: int
     sender_id: str
-    sender_name: str
     message_type: str
 
 
@@ -542,14 +546,12 @@ def _candidate_reference(item: Any) -> MessageHistoryRef | None:
     if _optional_string(getattr(sender, "id_type", None)) != "open_id":
         return None
     sender_id = _optional_string(getattr(sender, "id", None))
-    sender_name = _optional_string(getattr(sender, "sender_name", None))
-    if sender_id is None or sender_name is None:
+    if sender_id is None:
         return None
     return MessageHistoryRef(
         message_id=_required_item_string(item, "message_id"),
         create_time_ms=_positive_timestamp(getattr(item, "create_time", None)),
         sender_id=sender_id,
-        sender_name=sender_name,
         message_type=message_type,
     )
 
