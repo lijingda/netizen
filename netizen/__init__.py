@@ -1,3 +1,3 @@
 """Netizen: a thin Feishu Channel for native Codex Threads."""
 
-__version__ = "0.3.3"
+__version__ = "0.4.0"
