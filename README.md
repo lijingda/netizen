@@ -265,7 +265,7 @@ curl -fsSL https://github.com/lijingda/netizen/releases/latest/download/install.
 ```
 
 需要固定版本时，直接下载该 tag 的 `install.sh`，例如
-`https://github.com/lijingda/netizen/releases/download/v0.4.1/install.sh`。Agent、CI 或后台
+`https://github.com/lijingda/netizen/releases/download/v0.4.2/install.sh`。Agent、CI 或后台
 shell 不使用 pipe：先把 latest 或 exact-tag `install.sh` 下载到文件，再运行
 `sh install.sh </dev/null`。凭据缺失时它会生成文件和精确后续步骤，不等待交互。
 
