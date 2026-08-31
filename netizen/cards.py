@@ -930,7 +930,6 @@ def _turn_progress_panel(
                 "content": f"执行过程 · {status_label}",
             },
             "vertical_align": "center",
-            "padding": "4px 0",
             "icon": {
                 "tag": "standard_icon",
                 "token": "down-small-ccm_outlined",
