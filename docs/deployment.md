@@ -394,11 +394,11 @@ Python 3.11、3.12 安装固定版本依赖并运行 `make check`。公开仓库
 禁止删除和 force-push、要求所有变更经过 pull request，并把这两个 job 配置为 required
 status checks；仓库所有者也不在绕过名单中。
 
-仓库使用 `.github/workflows/release.yml` 的手工 dispatch 发布正式版本。GitHub 仓库必须启用
+正式发布的时机由维护者决定；指令后由 `scripts/release.py`（ADR 0050）一次执行发布全链，
+项目不因 main push 或 tag push 自动发布。GitHub 仓库必须启用
 Immutable Releases；active 的 `Protect version tags` ruleset 禁止任何人更新或删除已创建的
 `v*` tag，且无绕过者。`published-release` environment 只保留 deployment history，不配置
-required reviewer 或 wait timer；创建受保护的 exact tag 并手工 dispatch 已共同表达明确的
-发布意图。tag 采用与 `pyproject.toml` 完全一致的 `vX.Y.Z`。workflow 校验 clean exact-tag
+required reviewer 或 wait timer。tag 采用与 `pyproject.toml` 完全一致的 `vX.Y.Z`。workflow 校验 clean exact-tag
 checkout 和 full commit，并通过 GitHub Actions API 要求该 exact SHA 已有一次成功完成的
 `main` push `Main quality gate`；只有 PR 上别的 SHA 成功，或 main run 尚未完成，
 都不能发布。随后在
@@ -412,11 +412,30 @@ commit/qualification，再把同一份字节交给发布 job。它验证的是 w
 在目标机执行。
 
 Release workflow 不安装依赖、不运行 `make check`，也不接收或执行账号级 Codex、飞书与
-真实 service lifecycle live probes。创建 exact tag 与手工 dispatch 构成人工发布边界；
-`published-release` environment 不增加一次无法提供新技术证据的重复审批。最终 job 通过
+真实 service lifecycle live probes。维护者的发布指令与脚本的 exact-tag 创建、workflow
+dispatch 共同构成发布意图边界（ADR 0043、ADR 0050）；`published-release` environment
+不增加一次无法提供新技术证据的重复审批。最终 job 通过
 GitHub Release API 创建 draft、上传已经验证摘要的 archive 与 bootstrap、再次核对 tag 后
-发布。它不依赖 GitHub CLI，也不允许覆盖已有 tag 或 asset。
+发布。可选的 dispatch `notes` 输入被前置到发布页正文，未传入时正文保持纯完整性元数据。
+它不依赖 GitHub CLI，也不允许覆盖已有 tag 或 asset。
 发布失败时 draft 保留供维护者检查，不得用重新构建的同名文件替换原候选。
+
+### 发布步骤
+
+维护者决定发布后，在干净且与 `origin/main` 一致的 checkout 上运行：
+
+```bash
+python scripts/release.py                  # 版本从 conventional commits 推导
+python scripts/release.py --version v0.5.0 # 显式指定（breaking 等需人工判断时）
+```
+
+脚本依次执行：推导并校验版本（feat→minor，其余→patch；范围内出现 breaking change 时
+失败并升级给维护者）→ 从 git log 确定性生成 release notes → 提交版本 bump PR
+（`pyproject.toml`、`netizen/__init__.py`、README 与本文档中的 exact-tag 示例 URL）→
+等待 required checks 并合入 → 等待 merge commit 的 main CI → 在 merge commit 上创建并
+推送 annotated exact tag → dispatch release workflow（notes 经 `notes` 输入注入发布页）→
+跟踪 workflow 至发布完成。任一门禁失败或出现需要人工判断的歧义时，脚本停止并把原因交回
+维护者；它不绕过或弱化 workflow 自身的任何校验。
 
 archive 内的 `.netizen-release.json` 不参与自身记录的 `sourceDigest`，但会作为独立成员被
 installer 再校验。当前 `requirements.lock` 固定版本但尚未锁定各平台 wheel hash，因此

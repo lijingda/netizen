@@ -18,6 +18,9 @@ contributors must know before starting related work.
   below.
 - [docs/deployment.md](docs/deployment.md): setup, verification, and release
   procedures.
+- Formal releases follow ADR 0050: the maintainer decides timing, then
+  `scripts/release.py` executes the whole chain; nothing auto-releases on
+  main or tag pushes.
 - Public Published Release deployment uses the zero-argument official
   `install.sh`; a repository checkout's zero-argument `./install.sh` downloads
   the latest stable official installer, while `./dev-install.sh` installs the

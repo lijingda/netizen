@@ -14,6 +14,10 @@ on:
         description: Exact existing release tag, for example v0.3.0
         required: true
         type: string
+      notes:
+        description: Optional pre-rendered release notes prepended to the release body
+        required: false
+        type: string
 
 permissions:
   actions: read
@@ -194,6 +198,7 @@ jobs:
           ARCHIVE_SHA256: ${{ needs.build-artifact.outputs.archive-sha256 }}
           MAIN_GATE_URL: ${{ needs.build-artifact.outputs.main-gate-url }}
           RELEASE_COMMIT: ${{ needs.build-artifact.outputs.commit }}
+          RELEASE_NOTES: ${{ inputs.notes }}
           RELEASE_TAG: ${{ inputs.tag }}
         with:
           script: |
@@ -256,19 +261,21 @@ jobs:
               if (error.status !== 404) throw error;
             }
 
+            const standardBody = [
+              'This release was built once from an exact main commit whose required',
+              'Main quality gate completed successfully.',
+              '',
+              `Main quality gate: ${process.env.MAIN_GATE_URL}`,
+              `Release archive SHA-256: ${process.env.ARCHIVE_SHA256}`,
+            ].join('\n');
+            const notes = (process.env.RELEASE_NOTES || '').trim();
             const created = await github.rest.repos.createRelease({
               owner,
               repo,
               tag_name: tag,
               target_commitish: process.env.RELEASE_COMMIT,
               name: `Netizen ${tag}`,
-              body: [
-                'This release was built once from an exact main commit whose required',
-                'Main quality gate completed successfully.',
-                '',
-                `Main quality gate: ${process.env.MAIN_GATE_URL}`,
-                `Release archive SHA-256: ${process.env.ARCHIVE_SHA256}`,
-              ].join('\n'),
+              body: notes ? `${notes}\n\n${standardBody}` : standardBody,
               draft: true,
               prerelease: false,
             });
