@@ -99,6 +99,8 @@ token；手工准备的应用必须逐项配置。无论来源，飞书应用版
   `im:message.group_at_msg`/readonly；
 - 当前 Prompt 发送者姓名解析具备 `im:chat.members:read`；权限不足时 Channel SDK
   无法从 chat member roster 补全真实显示名，Netizen 会零 start/steer；
+- 补充上下文历史消息的发送者姓名使用消息 API 自带的 `sender_name` 投影，不需要
+  通讯录权限，也不受应用通讯录权限范围限制；
 - Lifecycle Reaction 与可选 Reaction Pulse 由当前必需的
   `im:message` 覆盖；官方提供的
   `im:message.reactions:write_only` 是替代权限，不作为 Netizen 的另一项独立必需权限；

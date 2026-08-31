@@ -203,6 +203,7 @@ class FakeChannel:
         self.download_resource_calls: list[tuple[str, str, str | None]] = []
         self.fail_card_updates = False
         self.card_update_success = True
+        self.card_update_results: list[object | BaseException] = []
         self.fail_once_reaction_on: str | None = None
         self.fail_once_reaction_remove = False
         self.bot_identity = SimpleNamespace(open_id="ou_bot", name="椰羊")
@@ -254,6 +255,11 @@ class FakeChannel:
 
     async def update_card(self, message_id: str, card: dict[str, object]) -> object:
         self.updates.append((message_id, card))
+        if self.card_update_results:
+            result = self.card_update_results.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            return result
         if self.fail_card_updates:
             raise RuntimeError("card update failed")
         return SimpleNamespace(success=self.card_update_success)
@@ -441,6 +447,20 @@ def failed_reply_result(
             hint=message,
         ),
         raw={"code": code, "msg": message, "data": None},
+    )
+
+
+def card_action_lock_result(
+    *,
+    outer_code: int = 230099,
+    inner_code: int = 11310,
+) -> object:
+    return failed_reply_result(
+        code=outer_code,
+        message=(
+            "Failed to create card content, "
+            f"ext=ErrCode: {inner_code}; ErrMsg: 可变平台文案;"
+        ),
     )
 
 
@@ -2444,6 +2464,75 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_catch_up_prompt_uses_list_sender_name_for_attribution(self) -> None:
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        lower = MessageContextAnchor("om_lower", 1_000)
+        created = await self.app._management.create_current_binding(
+            scope=scope,
+            creator_id="ou_user",
+            project_alias="test",
+            message_context_mode=MentionContextMode.CATCH_UP,
+            context_anchor=lower,
+        )
+        binding = created.binding
+        reference = MessageHistoryRef(
+            message_id="om_history",
+            create_time_ms=2_000,
+            sender_id="ou_alice",
+            message_type="text",
+            sender_name="List Alice",
+        )
+        upper = MessageContextAnchor("om_prompt", 3_000)
+        self.message_history.window = MessageHistoryWindow(
+            lower=lower,
+            upper=upper,
+            candidates=(reference,),
+            stats=MessageHistoryStats(
+                pages_scanned=1,
+                raw_messages_scanned=2,
+                duplicate_messages=0,
+                ignored_after_upper=0,
+                omitted_messages=0,
+                truncated_before=False,
+                scan_limit_hit=False,
+            ),
+        )
+        self.channel.inbound_messages[reference.message_id] = FakeMessage(
+            "背景",
+            message_id=reference.message_id,
+            sender_id=reference.sender_id,
+            display_name="",
+            chat_id=scope.chat_id,
+            chat_type="group",
+            content=TextContent(text="背景"),
+            create_time=reference.create_time_ms,
+        )
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+        prompt = FakeMessage(
+            "请总结",
+            message_id=upper.message_id,
+            sender_id="ou_bob",
+            display_name="Bob",
+            chat_id=scope.chat_id,
+            chat_type="group",
+            create_time=upper.create_time_ms,
+        )
+
+        await self.app.handle_message(prompt)
+
+        submitted = self.runtime.submit_calls[0]
+        envelope = json.loads(submitted["input"])
+        self.assertEqual(
+            envelope["supplemental_messages"][0]["sender"]["display_name"],
+            "List Alice",
+        )
+
     def test_history_candidate_keeps_stable_sender_identity_gate(self) -> None:
         scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
         reference = MessageHistoryRef(
@@ -4169,6 +4258,106 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.active_binding(scope.key).id, lazy.id)
         self.assertIn("已切换到会话", str(self.channel.updates[-1][1]))
 
+    def test_card_action_lock_matcher_uses_numeric_codes_not_platform_text(
+        self,
+    ) -> None:
+        self.assertTrue(
+            channel_app._is_feishu_card_action_lock(card_action_lock_result())
+        )
+        self.assertFalse(
+            channel_app._is_feishu_card_action_lock(
+                card_action_lock_result(outer_code=230098)
+            )
+        )
+        self.assertFalse(
+            channel_app._is_feishu_card_action_lock(
+                card_action_lock_result(inner_code=11311)
+            )
+        )
+        self.assertFalse(
+            channel_app._is_feishu_card_action_lock(
+                failed_reply_result(
+                    code=230099,
+                    message="Failed to create card content, ext=ErrCode: 113100;",
+                )
+            )
+        )
+
+    async def test_sessions_delete_prepare_exhausts_card_action_lock_retries(
+        self,
+    ) -> None:
+        await self.new(message_id="om_new_delete_target")
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        prepare = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "删除"
+        )
+        self.channel.card_update_results.extend(
+            card_action_lock_result() for _ in range(3)
+        )
+        delays: list[float] = []
+
+        async def record_delay(delay: float) -> None:
+            delays.append(delay)
+
+        replies_before = len(self.channel.replies)
+        with (
+            patch.object(channel_app.asyncio, "sleep", record_delay),
+            self.assertLogs("netizen.channel_app", level="WARNING"),
+        ):
+            await self.app.handle_card_action(
+                self.direct_button_event(
+                    prepare["behaviors"][0]["value"],
+                    message_id="om_sessions",
+                )
+            )
+
+        self.assertEqual(delays, [0.2, 0.5])
+        self.assertEqual(len(self.channel.updates), 3)
+        self.assertEqual(self.runtime.delete_binding_calls, [])
+        self.assertEqual(len(self.channel.replies), replies_before + 1)
+        self.assertIn("无法打开删除确认卡", str(self.channel.replies[-1][1]))
+
+    async def test_sessions_delete_prepare_does_not_retry_other_card_error(
+        self,
+    ) -> None:
+        await self.new(message_id="om_new_delete_target")
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_sessions")
+        )
+        card = self.channel.replies[-1][1]
+        prepare = next(
+            button
+            for button in _elements(card.card, "button")
+            if button["text"]["content"] == "删除"
+        )
+        self.channel.card_update_results.append(
+            card_action_lock_result(inner_code=11311)
+        )
+        delays: list[float] = []
+
+        async def record_delay(delay: float) -> None:
+            delays.append(delay)
+
+        with (
+            patch.object(channel_app.asyncio, "sleep", record_delay),
+            self.assertLogs("netizen.channel_app", level="ERROR"),
+        ):
+            await self.app.handle_card_action(
+                self.direct_button_event(
+                    prepare["behaviors"][0]["value"],
+                    message_id="om_sessions",
+                )
+            )
+
+        self.assertEqual(delays, [])
+        self.assertEqual(len(self.channel.updates), 1)
+        self.assertEqual(self.runtime.delete_binding_calls, [])
+
     async def test_sessions_delete_lazy_is_two_stage_and_keeps_current(
         self,
     ) -> None:
@@ -4213,10 +4402,27 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("confirm", final)
         pointer_change_count = len(self.runtime.active_binding_change_calls)
 
-        await self.app.handle_card_action(
-            self.direct_button_event(final_value, message_id="om_sessions")
+        self.channel.card_update_results.extend(
+            (
+                card_action_lock_result(),
+                card_action_lock_result(),
+                SimpleNamespace(success=True),
+            )
         )
+        delays: list[float] = []
 
+        async def record_delay(delay: float) -> None:
+            delays.append(delay)
+
+        with (
+            patch.object(channel_app.asyncio, "sleep", record_delay),
+            self.assertLogs("netizen.channel_app", level="WARNING"),
+        ):
+            await self.app.handle_card_action(
+                self.direct_button_event(final_value, message_id="om_sessions")
+            )
+
+        self.assertEqual(delays, [0.2, 0.5])
         self.assertEqual(self.runtime.delete_binding_calls, [target.id])
         with self.assertRaises(BindingNotFound):
             self.store.get(target.id)

@@ -328,14 +328,21 @@ def project_supplemental_message(
     interactive_fallback_text: str | None = None,
     read_image_keys: Iterable[str] | None = None,
     text_limit: int = _DEFAULT_TEXT_LIMIT,
+    attribution_name: str | None = None,
 ) -> HistoricalMessageProjection | SupplementalMessageOmission:
     """Classify and project one normalized catch-up candidate.
 
     Bots, deleted messages, system messages, and unknown message types are
     typed omissions.  Once a human message is selected, missing exact IDs,
-    creation time, app-scoped Open ID, display name, or readable supported
-    content is a projection failure and raises instead of being silently
-    omitted.
+    creation time, or app-scoped Open ID is a projection failure and raises
+    instead of being silently omitted.
+
+    ``attribution_name`` is the sender name embedded in the same history-list
+    item as the reference.  Identity verification stays on ``open_id`` plus
+    the user/bot type; the name is display-only and overrides the normalized
+    ``display_name`` when present, keeping supplemental attribution on one
+    source that needs no contact-directory permission.  The projection fails
+    closed only when neither name source is verifiable.
     """
 
     message_type = normalized_historical_message_type(message)
@@ -373,11 +380,14 @@ def project_supplemental_message(
             message_type=message_type,
             reason="non_human_sender",
         )
+    verified_name = _nonempty_string(attribution_name) or _nonempty_string(
+        sender.get("display_name")
+    )
     if (
         message_id is None
         or _positive_timestamp(getattr(message, "create_time", None)) is None
         or _nonempty_string(sender.get("open_id")) is None
-        or _nonempty_string(sender.get("display_name")) is None
+        or verified_name is None
     ):
         raise HistoricalMessageUnavailable(
             "选中的补充上下文消息缺少可验证的消息、时间或"
@@ -385,13 +395,18 @@ def project_supplemental_message(
             "本条消息未执行。"
         )
 
-    return project_historical_message(
+    projection = project_historical_message(
         message,
         source="supplemental_message",
         interactive_fallback_text=interactive_fallback_text,
         read_image_keys=read_image_keys,
         text_limit=text_limit,
     )
+    if _nonempty_string(attribution_name) is not None:
+        merged_sender = dict(projection.sender)
+        merged_sender["display_name"] = _nonempty_string(attribution_name)
+        projection = replace(projection, sender=merged_sender)
+    return projection
 
 
 def project_historical_message(
