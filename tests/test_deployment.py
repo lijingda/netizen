@@ -202,7 +202,11 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("发布流水线复用该 exact SHA", readme)
         self.assertNotIn("发布前已对这份", readme)
         self.assertIn("required reviewer 或 wait timer", deployment)
-        self.assertIn("创建 exact tag 与手工 dispatch 构成人工发布边界", deployment)
+        self.assertIn(
+            "维护者的发布指令与脚本的 exact-tag 创建、workflow", deployment
+        )
+        self.assertIn("dispatch 共同构成发布意图边界（ADR 0043、ADR 0050）", deployment)
+        self.assertIn("不因 main push 或 tag push 自动发布", deployment)
         self.assertNotIn("environment 要求仓库所有者审批", deployment)
 
     def test_existing_app_permission_repair_does_not_require_tty(self) -> None:
