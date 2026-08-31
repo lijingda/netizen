@@ -249,6 +249,11 @@ _THINKING_REACTION = "THINKING"
 _THINKING_VISIBLE_SECONDS = 2.0
 _THINKING_HIDDEN_SECONDS = 13.0
 _REACTION_OPERATION_TIMEOUT_SECONDS = 3.0
+# lark-channel-sdk 1.2.0 exposes the nested transient lock only in SendError.hint.
+# Remove this retry after card-action dispatch is ordered behind its Feishu ack.
+_FEISHU_CARD_ACTION_LOCK_OUTER_CODE = 230099
+_FEISHU_CARD_ACTION_LOCK_INNER_CODE = 11310
+_CARD_ACTION_LOCK_RETRY_DELAYS_SECONDS = (0.2, 0.5)
 _PROGRESS_CARD_POLL_SECONDS = 1.0
 _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS = 5.0
 _GOAL_REPLY_CARD_CACHE_LIMIT = 256
@@ -6937,15 +6942,33 @@ class ChannelApplication:
     async def _safe_update_card(self, message_id: str, content: Any) -> bool:
         if not message_id:
             return False
-        try:
-            result = await self._update_card(message_id, content)
-        except Exception:
-            logger.exception("failed to render card action result")
-            return False
-        if getattr(result, "success", True) is False:
-            logger.error("failed to render card action result: unsuccessful update")
-            return False
-        return True
+        for attempt in range(len(_CARD_ACTION_LOCK_RETRY_DELAYS_SECONDS) + 1):
+            try:
+                result = await self._update_card(message_id, content)
+            except Exception:
+                logger.exception("failed to render card action result")
+                return False
+            if getattr(result, "success", True) is not False:
+                return True
+            if (
+                not _is_feishu_card_action_lock(result)
+                or attempt == len(_CARD_ACTION_LOCK_RETRY_DELAYS_SECONDS)
+            ):
+                logger.error(
+                    "failed to render card action result: unsuccessful update"
+                )
+                return False
+            delay = _CARD_ACTION_LOCK_RETRY_DELAYS_SECONDS[attempt]
+            logger.warning(
+                "transient Feishu card update lock; retrying",
+                extra={
+                    "message_id": message_id,
+                    "retry": attempt + 1,
+                    "delay_seconds": delay,
+                },
+            )
+            await asyncio.sleep(delay)
+        return False
 
     async def _safe_reply_to_card(
         self,
@@ -7121,6 +7144,24 @@ def _validated_sent_message(
         thread_id=_nonempty_field(data, "thread_id"),
         root_id=_nonempty_field(data, "root_id"),
         parent_id=_nonempty_field(data, "parent_id"),
+    )
+
+
+def _is_feishu_card_action_lock(result: object) -> bool:
+    if getattr(result, "success", None) is not False:
+        return False
+    error = getattr(result, "error", None)
+    if getattr(error, "raw_code", None) != _FEISHU_CARD_ACTION_LOCK_OUTER_CODE:
+        return False
+    hint = getattr(error, "hint", None)
+    if not isinstance(hint, str):
+        return False
+    return (
+        re.search(
+            rf"(?<!\d){_FEISHU_CARD_ACTION_LOCK_INNER_CODE}(?!\d)",
+            hint,
+        )
+        is not None
     )
 
 
