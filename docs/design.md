@@ -377,9 +377,10 @@ Turn 为 `inProgress`，才是 Authoritative Turn Observation 并回到 `running
 `running`/steer，确认 exact terminal 就走普通终态。仍不可验证或遇到明确 identity/
 contract/programming 错误时，转为 Binding-local `turn-observation-unavailable`：保留 exact
 identity/slot、阻止重复 start/steer，并停止全部周期性 I/O。“重新检查”只再启动同样
-有界的一次尝试；同一 Turn 的 Task Reaction 脉冲和 Progress Card 轮询也停止，已有卡片
-一次更新为观测不可用，后续终态仍可走普通回复兜底。不建立长预算、指数退避或背景唤醒
-循环，也不伪造 terminal。
+有界的一次尝试；同一 Turn 的 Reaction session、Reaction Pulse 和 Progress Card 轮询也
+停止，已记录的 `Typing` 与当时可见的 `THINKING` 尽力清理，已有卡片一次更新为观测
+不可用，但不添加伪造的终态表情。后续确认终态时仍可走普通回复兜底。不建立长预算、
+指数退避或背景唤醒循环，也不伪造 terminal。
 completed 状态还可能短暂先于 final agent message 可见；
 普通 Turn 最多再做 4 次 full-history 读取（默认约 2 秒），期间已标记 terminal 以避免
 `/stop` 误中断，之后的读取失败也不再进入观测尝试，仍无文本时保留显式无文本兜底。
@@ -441,13 +442,15 @@ release gate。产品接受极快 Side Turn 可能遇到 `turn/completed` 通知
 普通 Binding 每个新 Turn，以及 Goal start/resume，在 exact admission 中捕获当时的 Binding
 Task Feedback；Side 则在创建时一次性冻结 Parent 当时的 Task Feedback 并供所有 Side Turn
 沿用。运行中或 Side 创建后修改 Parent 配置不会改变已经捕获的 operation。两个选项默认均
-关闭：Task Reaction 控制普通/Side Turn 的表情生命周期，Progress Card 控制普通/Side Turn
-是否产生 Activity 运行卡，以及 Goal 组合卡是否加入 Activity 模块。普通或 Side Turn 两项
-都关闭时，从 native accepted 到终态之间不产生任务反馈，最终结果才按原路径投递；Goal
-模块本身始终存在且不使用 Task Reaction。compaction 不使用这两个选项。完整边界见
+关闭：Reaction Pulse 只控制普通/Side Turn 的 `THINKING` 执行中闪烁，Progress Card
+控制普通/Side Turn 是否产生 Activity 运行卡，以及 Goal 组合卡是否加入 Activity 模块。
+普通与 Side Turn 的 Lifecycle Reaction 始终尽力展示；两项都关闭时仍有 accepted、成功
+steer 和终态表情，但没有 `THINKING` pulse 或 Activity 过程卡。Goal 模块本身始终存在且不
+使用 Lifecycle Reaction。compaction 不使用这两个选项。完整边界见
 [ADR 0046](adr/0046-add-opt-in-binding-task-feedback.md) 与
 [ADR 0047](adr/0047-compose-typed-reply-cards-and-finalize-complete-goals.md)，Side 扩展见
-[ADR 0048](adr/0048-integrate-side-turns-with-task-feedback-reply-cards.md)。
+[ADR 0048](adr/0048-integrate-side-turns-with-task-feedback-reply-cards.md)，表情语义修订见
+[ADR 0051](adr/0051-keep-lifecycle-reactions-and-make-pulse-optional.md)。
 
 Runtime 为 exact Ordinary Active Turn 维护带 revision 的 Turn Activity Projection，并为
 Goal 当前 exact 物理 Turn 与 exact active Side Turn 暴露同样受限的 Activity Snapshot。
@@ -473,9 +476,9 @@ pause/resume/terminal 复用同一张卡并更新其控制按钮。初始发送�
 `/goal` 只创建新的状态快照卡。Goal 初始卡失败提供可见文字回执；终态 Channel handoff
 整体有界，展示故障不能永久占住非 unknown Runtime slot。
 
-Task Reaction 开启时，Channel 按 exact native Turn ID 在内存管理原消息与两个当前
-reaction ID：
-`Typing` 从开始到终态常驻，`THINKING` 首次显示 2 秒、隐藏 13 秒后继续低频 pulse；每次
+Channel 按 exact native Turn ID 在内存管理普通/Side Turn 的 Lifecycle Reaction session。
+`Typing` 从 accepted 到终态常驻；只有 Reaction Pulse 开启时，`THINKING` 才首次显示
+2 秒、隐藏 13 秒后继续低频 pulse。每次
 删除只使用创建响应返回的 exact ID。单次 `THINKING` 添加/删除失败停止该轮 pulse，终态
 或正常 shutdown 对仍记录的 ID 再做一次尽力清理，不会重试风暴或阻塞 Turn。若
 `THINKING` 首次添加失败，仍保留已经添加的 `Typing` 作为运行占位。若本地 stop 的 cleanup
@@ -483,8 +486,9 @@ reaction ID：
 已登记后台终端状态未知时开始下一 Turn。cleanup 成功后仍不推断前台工具进程状态。首次
 展示回执放在 `try/finally`，所以表情或卡片失败都不会把已启动 Turn 卡死。成功 steer 不
 迁移或重启原 pulse，只在 steer 消息添加一次 `OnIt`；确认 reaction 失败才回退一条
-“已接收调整”，native steer 失败不添加确认。关闭 Task Reaction 时不执行任何 reaction
-create/delete，也不发送这个 steer 文字 fallback。
+“已接收调整”，native steer 失败不添加确认。Reaction Pulse 关闭时不执行任何
+`THINKING` create/delete 或周期调度，但 `Typing`、`OnIt`、终态表情与 steer 文字 fallback
+语义不变。
 
 普通或 Side Turn 到达终态后先冻结已启用的 presenter，再按 completed/failed/interrupted
 完成
@@ -703,7 +707,7 @@ Channel SDK 尚未透传的单选 change option，也不读取原始回调。Pro
 执行短 SQLite 事务，不获取 Codex Turn 锁。
 
 `/new` 卡片只有一个创建 form：一个包含全部 enabled Projects 的 Project 下拉框，以及
-Model、Effort、Speed、Task Reaction 和 Progress Card；群聊和群话题再增加 Mention
+Model、Effort、Speed、Reaction Pulse 和 Progress Card；群聊和群话题再增加 Mention
 Context Mode。两个 Task Feedback 选项默认关闭，默认 mode 是 `current-only`，P2P 不显示
 mode 字段。Model 下拉包含稳定的 `inherit Codex` sentinel；选择实际模型时三项必须完整并经
 live catalog resolve。模型目录不可用时仍展示 Project、Task Feedback、Context Mode 和
@@ -715,8 +719,8 @@ inherit 的 minimal form，不要求用户改走命令。提交后只创建 lazy
 [ADR 0040](adr/0040-make-new-card-only-and-show-all-projects.md)。
 
 `/config` 是独立的会话卡片，不属于实例级 `/settings` Projects 分区；它用同一组
-Model inherit/explicit 语义更新当前 active Binding 的持久设置，并允许独立切换 Task
-Reaction 与 Progress Card；群聊/群话题还可切换 Mention Context Mode。不要求任务、不创建
+Model inherit/explicit 语义更新当前 active Binding 的持久设置，并允许独立切换
+Reaction Pulse 与 Progress Card；群聊/群话题还可切换 Mention Context Mode。不要求任务、不创建
 Turn。配置其他 Binding 必须先 `/resume` 切换。完整 Binding ID、settings revision、
 feedback revision 与 context revision 编码在版本化 option reference 中；三类设置在一笔
 Store transaction 内校验和保存，即使 active Binding 已切换、另一张卡先提交或 catch-up

@@ -103,8 +103,11 @@ contributors must know before starting related work.
   default Codex configuration, or other Codex-owned state. Admin login sessions,
   CSRF tokens, native metadata indexes, and audit records also stay out of
   Channel SQLite.
-- ADR 0046's Task Reaction and Progress Card are independent Binding-scoped
-  opt-ins that default off. ADR 0047 renders Goal, Activity, Result, and Files as
+- ADR 0051 keeps lifecycle reactions for accepted ordinary/Side Turns,
+  successful steers, and terminal outcomes always on as best-effort display.
+  Reaction Pulse and Progress Card are independent Binding-scoped opt-ins that
+  default off; Reaction Pulse controls only the periodic `THINKING` display.
+  ADR 0047 renders Goal, Activity, Result, and Files as
   one closed set of typed Reply Card modules under a single best-effort
   presenter; it is not a plugin system. Goal always contributes its control
   module, while Progress Card controls Activity for ordinary Turns and Goals.

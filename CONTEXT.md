@@ -165,11 +165,9 @@ Binding-scoped intent。Netizen 后续每次启动新 Turn 前都按 live 模型
 Turn 上重复应用的客户端意图，不是 Codex 已生效配置、默认值快照或可反查的原生状态。
 模型目录失效或读取失败时保留；running Turn 的 steer 不解析也不应用。
 
-**Binding Task Feedback / 会话任务反馈**：Binding 上对 Task Reaction 与 Progress Card
-的两个独立选择及 revision。两项默认关闭；Task Reaction 决定后续普通 Turn 的表情，
-Progress Card 决定后续普通 Turn 与 Goal 是否加入 Activity Module；Side 创建时冻结 Parent
-当时的两项选择，容器内所有 Side Turn 分别沿用同样的表情与 Activity 语义。它们不是
-Codex 原生设置或 Turn/Goal 状态事实。
+**Binding Task Feedback / 会话任务反馈**：Binding 上对 Reaction Pulse 与 Progress Card
+的两个独立选择及 revision，两项默认关闭。Side 创建时冻结 Parent 当时的
+两项选择；它们不是 Codex 原生设置或 Turn/Goal 状态事实。
 
 **Native Compaction / 原生压缩**：`/compact` 对已有历史的 idle Binding 调用公开
 Codex compaction。start 空响应不是完成；Netizen 临时保留 `compacting` 槽位，直到
@@ -247,12 +245,15 @@ native 终态到达即释放，均不持久化。
 
 **Side Turn**：以 Side ID 为键、在同一 ephemeral Side Thread 上串行开始或 steer 的
 当前 Turn。它使用普通 `AsyncTurnHandle.run()` 完成路径，不使用持久 Thread history
-recovery，且不写入 Channel Database。展示复用普通 Turn 的 Task Reaction 以及
+recovery，且不写入 Channel Database。展示复用普通 Turn 的 Lifecycle Reaction 以及
 Activity、Result、Files 回复模块，但不允许 Goal。
 
-**Task Reaction / 任务表情**：Binding 可选开启、由 Channel 以 exact Turn ID 管理的
-纯内存展示。原任务消息使用 `Typing`/`THINKING`，成功 steer 使用 `OnIt`，终态使用
-`DONE`/`ERROR`/`CrossMark`；它不是 Turn 状态事实源，也不进入 Channel Database。
+**Lifecycle Reaction / 任务生命周期表情**：普通与 Side Turn 始终开启的尽力节点反馈：
+accepted 原消息使用 `Typing`，成功 steer 使用 `OnIt`，终态使用
+`DONE`/`ERROR`/`CrossMark`。它不是 Turn 事实源，也不进入 Channel Database。
+
+**Reaction Pulse / 执行中表情闪烁**：Binding 可选开启的 `THINKING` 运行脉冲，默认
+关闭；它不控制 Lifecycle Reaction。Side 在创建时冻结 Parent 当时的选择。
 
 **Reply Card / 回复卡**：依附 Completion Origin、由 Goal、Activity、Result 与 Files
 四种 typed Reply Card Module 按需组合的一张 Card 2.0。Goal、Activity 或 Files 任一模块

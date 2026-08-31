@@ -220,14 +220,14 @@ class BindingTurnSettings:
 
 @dataclass(frozen=True, slots=True)
 class BindingTaskFeedback:
-    """Binding-scoped, opt-in Feishu feedback for ordinary Turns."""
+    """Binding-scoped, opt-in pulse/card feedback for Turns."""
 
-    task_reactions_enabled: bool = False
+    reaction_pulse_enabled: bool = False
     progress_card_enabled: bool = False
 
     def __post_init__(self) -> None:
         values = (
-            self.task_reactions_enabled,
+            self.reaction_pulse_enabled,
             self.progress_card_enabled,
         )
         if not all(type(value) is bool for value in values):
@@ -2528,6 +2528,8 @@ def _binding(row: sqlite3.Row) -> ThreadBinding:
     context_revision = row["context_revision"]
     if not isinstance(context_revision, int) or context_revision < 1:
         raise RuntimeError("Binding contains an invalid context revision")
+    # Schema v7 retains the historical task_reactions_enabled storage name;
+    # ADR 0051 narrows that value to the optional THINKING reaction pulse.
     feedback_values = (
         row["task_reactions_enabled"],
         row["progress_card_enabled"],
@@ -2538,7 +2540,7 @@ def _binding(row: sqlite3.Row) -> ThreadBinding:
     ):
         raise RuntimeError("Binding contains invalid task feedback")
     task_feedback = BindingTaskFeedback(
-        task_reactions_enabled=bool(feedback_values[0]),
+        reaction_pulse_enabled=bool(feedback_values[0]),
         progress_card_enabled=bool(feedback_values[1]),
     )
     feedback_revision = row["feedback_revision"]
@@ -2599,7 +2601,7 @@ def _feedback_values(
     if not isinstance(feedback, BindingTaskFeedback):
         raise ValueError("task feedback must be a BindingTaskFeedback")
     return (
-        feedback.task_reactions_enabled,
+        feedback.reaction_pulse_enabled,
         feedback.progress_card_enabled,
     )
 

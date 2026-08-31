@@ -88,7 +88,7 @@ _CONFIG_MODEL_REFERENCE = re.compile(
 _CONTEXT_MODE_REFERENCE = re.compile(
     r"context-mode:v1:(current-only|catch-up)"
 )
-_TASK_FEEDBACK_REFERENCE = re.compile(r"task-feedback:v1:(off|on)")
+_TASK_FEEDBACK_REFERENCE = re.compile(r"task-feedback:v2:(off|on)")
 _PROGRESS_SECRET_ASSIGNMENT = re.compile(
     r"(?i)(?:api[ _-]?key|access[ _-]?token|"
     r"auth(?:entication|orization)?|bearer|cookie|credential|password|"
@@ -1987,21 +1987,22 @@ def _task_feedback_form_elements(
     initial: BindingTaskFeedback,
 ) -> list[dict[str, Any]]:
     return [
-        _form_label("任务表情"),
+        _form_label("执行中表情闪烁"),
         _static_select(
             name=f"{prefix}_task_reactions",
-            placeholder="选择是否使用任务表情",
+            placeholder="选择是否显示执行中表情闪烁",
             options=(
                 ("关闭（默认）", _task_feedback_reference(False)),
                 ("开启", _task_feedback_reference(True)),
             ),
             initial_option=_task_feedback_reference(
-                initial.task_reactions_enabled
+                initial.reaction_pulse_enabled
             ),
         ),
         _form_hint(
-            "开启后会用表情反馈接收、运行和终态；"
-            "部分移动端会把表情显示成单独消息。"
+            "任务接收、成功调整和结束时始终显示表情。"
+            "开启后，执行中还会间歇显示动态表情；"
+            "部分移动端可能将其显示为单独消息。"
         ),
         _form_label("进度卡"),
         _static_select(
@@ -2889,9 +2890,9 @@ def _context_mode_summary(mode: MentionContextMode) -> str:
 
 
 def _task_feedback_summary(feedback: BindingTaskFeedback) -> str:
-    reactions = "开启" if feedback.task_reactions_enabled else "关闭"
+    pulse = "开启" if feedback.reaction_pulse_enabled else "关闭"
     progress = "开启" if feedback.progress_card_enabled else "关闭"
-    return f"任务表情：{reactions}\n进度卡：{progress}"
+    return f"执行中表情闪烁：{pulse}\n进度卡：{progress}"
 
 
 def error_card(message: str, *, scope: FeishuScope | None = None) -> OutboundCard:
@@ -3257,7 +3258,7 @@ def _decode_new_binding_form(
             "new_context_mode",
         )
     )
-    task_reactions_enabled = _decode_task_feedback_reference(
+    reaction_pulse_enabled = _decode_task_feedback_reference(
         payload["new_task_reactions"],
         "new_task_reactions",
     )
@@ -3308,7 +3309,7 @@ def _decode_new_binding_form(
         effort_id=effort_id,
         service_tier_id=service_tier_id,
         message_context_mode=message_context_mode,
-        task_reactions_enabled=task_reactions_enabled,
+        reaction_pulse_enabled=reaction_pulse_enabled,
         progress_card_enabled=progress_card_enabled,
     )
 
@@ -3356,7 +3357,7 @@ def _decode_config_form(
             "config_context_mode",
         )
     )
-    task_reactions_enabled = _decode_task_feedback_reference(
+    reaction_pulse_enabled = _decode_task_feedback_reference(
         payload["config_task_reactions"],
         "config_task_reactions",
     )
@@ -3407,7 +3408,7 @@ def _decode_config_form(
         effort_id=effort_id,
         service_tier_id=service_tier_id,
         message_context_mode=message_context_mode,
-        task_reactions_enabled=task_reactions_enabled,
+        reaction_pulse_enabled=reaction_pulse_enabled,
         progress_card_enabled=progress_card_enabled,
     )
 
@@ -3844,7 +3845,7 @@ def _decode_context_mode_reference(value: str) -> MentionContextMode:
 
 
 def _task_feedback_reference(enabled: bool) -> str:
-    return f"task-feedback:v1:{'on' if enabled else 'off'}"
+    return f"task-feedback:v2:{'on' if enabled else 'off'}"
 
 
 def _decode_task_feedback_reference(value: Any, field: str) -> bool:

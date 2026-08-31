@@ -120,7 +120,7 @@ from netizen.turn_plan_observer import (
     TurnPlanStepState,
 )
 PNG = b"\x89PNG\r\n\x1a\nchannel-test"
-REACTIONS_ON = BindingTaskFeedback(task_reactions_enabled=True)
+PULSE_ON = BindingTaskFeedback(reaction_pulse_enabled=True)
 
 
 class FakeMessage:
@@ -1488,7 +1488,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         effort_id: str | None = None,
         speed_id: str | None = None,
         inherit: bool = False,
-        task_reactions_enabled: bool | None = None,
+        reaction_pulse_enabled: bool | None = None,
         progress_card_enabled: bool | None = None,
     ) -> dict[str, object]:
         form = next(
@@ -1520,7 +1520,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "initial_option"
         ]
         for name, enabled in (
-            ("config_task_reactions", task_reactions_enabled),
+            ("config_task_reactions", reaction_pulse_enabled),
             ("config_progress_card", progress_card_enabled),
         ):
             if enabled is not None:
@@ -1565,7 +1565,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "native-one",
             "turn-one",
             release,
-            task_feedback=REACTIONS_ON,
+            task_feedback=PULSE_ON,
         )
         prompt = FakeMessage(
             "hello",
@@ -1612,7 +1612,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     final_response="done",
                     status=SimpleNamespace(value="completed"),
                 ),
-                task_feedback=REACTIONS_ON,
+                task_feedback=PULSE_ON,
             )
         )
 
@@ -1643,7 +1643,9 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(("om_prompt", "done"), self.channel.replies)
 
-    async def test_default_feedback_is_silent_until_plain_completion(self) -> None:
+    async def test_default_feedback_keeps_lifecycle_reactions_without_pulse_or_card(
+        self,
+    ) -> None:
         await self.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
@@ -1665,7 +1667,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_message(prompt)
 
         self.assertTrue(released)
-        self.assertEqual(self.channel.reactions, [])
+        self.assertEqual(self.channel.reactions, [("om_silent", "Typing")])
         self.assertEqual(self.channel.replies, [])
         self.assertEqual(self.runtime.turn_activity_calls, [])
 
@@ -1680,7 +1682,14 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(self.channel.reactions, [])
+        self.assertEqual(
+            self.channel.reactions,
+            [("om_silent", "Typing"), ("om_silent", "DONE")],
+        )
+        self.assertEqual(
+            self.channel.reaction_removals,
+            [("om_silent", "reaction-1")],
+        )
         self.assertEqual(self.channel.replies, [("om_silent", "done")])
         self.assertEqual(self.channel.updates, [])
 
@@ -1720,7 +1729,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_message(prompt)
 
         self.assertTrue(released)
-        self.assertEqual(self.channel.reactions, [])
+        self.assertEqual(
+            self.channel.reactions,
+            [("om_progress_origin", "Typing")],
+        )
         self.assertEqual(len(self.channel.replies), 1)
         running = self.channel.replies[0][1]
         self.assertIsInstance(running, OutboundCard)
@@ -1765,6 +1777,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(terminal_panel["expanded"])
         self.assertIn("done", str(self.channel.updates[-1][1]))
+        self.assertEqual(
+            self.channel.reactions,
+            [
+                ("om_progress_origin", "Typing"),
+                ("om_progress_origin", "DONE"),
+            ],
+        )
 
     async def test_initial_progress_card_failure_falls_back_at_terminal(self) -> None:
         await self.new()
@@ -2041,7 +2060,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.channel.replies[-1], (prompt.id, "answer survives"))
 
-    async def test_reactions_off_steer_has_no_mobile_fallback_message(self) -> None:
+    async def test_pulse_off_steer_keeps_lifecycle_confirmation(self) -> None:
         await self.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
@@ -2056,7 +2075,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             FakeMessage("new direction", message_id="om_silent_steer")
         )
 
-        self.assertEqual(self.channel.reactions, [])
+        self.assertEqual(
+            self.channel.reactions,
+            [("om_silent_steer", "OnIt")],
+        )
         self.assertEqual(self.channel.replies, [])
 
     async def test_reactions_and_progress_card_can_run_together(self) -> None:
@@ -2064,7 +2086,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
         feedback = BindingTaskFeedback(
-            task_reactions_enabled=True,
+            reaction_pulse_enabled=True,
             progress_card_enabled=True,
         )
         activity = turn_activity_snapshot(binding_id=binding.id)
@@ -3021,7 +3043,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             hidden_seconds=0.001,
         )
         try:
-            self.assertTrue(await controller.start("turn-one", "om_prompt"))
+            self.assertTrue(
+                await controller.start(
+                    "turn-one",
+                    "om_prompt",
+                    pulse_enabled=True,
+                )
+            )
             async with asyncio.timeout(1):
                 while self.channel.reactions.count(("om_prompt", "THINKING")) < 2:
                     await asyncio.sleep(0)
@@ -3046,6 +3074,32 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_disabled_thinking_pulse_keeps_typing_and_exact_cleanup(
+        self,
+    ) -> None:
+        controller = channel_app._ReactionController(self.channel)
+        try:
+            self.assertTrue(
+                await controller.start(
+                    "turn-one",
+                    "om_prompt",
+                    pulse_enabled=False,
+                )
+            )
+            self.assertIsNone(controller._pulses["turn-one"].task)
+            await controller.stop("turn-one")
+        finally:
+            await controller.close()
+
+        self.assertEqual(self.channel.reactions, [("om_prompt", "Typing")])
+        self.assertEqual(
+            self.channel.reaction_operations,
+            [
+                ("add", "om_prompt", "Typing"),
+                ("remove", "om_prompt", "reaction-1"),
+            ],
+        )
+
     async def test_thinking_remove_failure_gets_one_terminal_retry(self) -> None:
         controller = channel_app._ReactionController(
             self.channel,
@@ -3055,7 +3109,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.channel.fail_once_reaction_remove = True
         try:
             with self.assertLogs("netizen.channel_app", level="ERROR"):
-                self.assertTrue(await controller.start("turn-one", "om_prompt"))
+                self.assertTrue(
+                    await controller.start(
+                        "turn-one",
+                        "om_prompt",
+                        pulse_enabled=True,
+                    )
+                )
                 await asyncio.wait_for(
                     self.channel.reaction_remove_attempted.wait(),
                     timeout=1,
@@ -3081,7 +3141,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.app._reactions = controller
 
-        self.assertTrue(await controller.start("turn-one", "om_prompt"))
+        self.assertTrue(
+            await controller.start(
+                "turn-one",
+                "om_prompt",
+                pulse_enabled=True,
+            )
+        )
         await self.app.close()
 
         self.assertEqual(
@@ -3101,7 +3167,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.channel.fail_once_reaction_on = "THINKING"
         try:
             with self.assertLogs("netizen.channel_app", level="ERROR"):
-                self.assertTrue(await controller.start("turn-one", "om_prompt"))
+                self.assertTrue(
+                    await controller.start(
+                        "turn-one",
+                        "om_prompt",
+                        pulse_enabled=True,
+                    )
+                )
             self.assertIn("turn-one", controller._pulses)
             self.assertIsNone(controller._pulses["turn-one"].task)
             await controller.stop("turn-one")
@@ -3124,7 +3196,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             hidden_seconds=10,
         )
         self.app._reactions = controller
-        self.assertTrue(await controller.start("turn-one", "om_prompt"))
+        self.assertTrue(
+            await controller.start(
+                "turn-one",
+                "om_prompt",
+                pulse_enabled=True,
+            )
+        )
         self.channel.fail_once_reaction_on = "DONE"
 
         with self.assertLogs("netizen.channel_app", level="ERROR"):
@@ -3139,7 +3217,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                         final_response="done",
                         status=SimpleNamespace(value="completed"),
                     ),
-                    task_feedback=REACTIONS_ON,
+                    task_feedback=PULSE_ON,
                 )
             )
 
@@ -7738,7 +7816,9 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("会话配置已保存", str(self.channel.updates[-1][1]))
         self.assertIn("后续新 Turn 将使用", str(self.channel.updates[-1][1]))
 
-    async def test_config_enables_feedback_without_starting_turn(self) -> None:
+    async def test_config_enables_pulse_and_progress_without_starting_turn(
+        self,
+    ) -> None:
         await self.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
@@ -7749,7 +7829,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.direct_card_event(
                 self.config_form_values(
                     card,
-                    task_reactions_enabled=True,
+                    reaction_pulse_enabled=True,
                     progress_card_enabled=True,
                 )
             )
@@ -7759,14 +7839,14 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             configured.task_feedback,
             BindingTaskFeedback(
-                task_reactions_enabled=True,
+                reaction_pulse_enabled=True,
                 progress_card_enabled=True,
             ),
         )
         self.assertEqual(configured.feedback_revision, 2)
         self.assertEqual(self.runtime.submit_calls, [])
         rendered = str(self.channel.updates[-1][1])
-        self.assertIn("任务表情：开启", rendered)
+        self.assertIn("执行中表情闪烁：开启", rendered)
         self.assertIn("进度卡：开启", rendered)
 
     async def test_config_replaces_persistent_settings_without_starting_turn(self) -> None:
@@ -8215,7 +8295,6 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "native-one",
             "turn-one",
             release,
-            task_feedback=REACTIONS_ON,
         )
         self.channel.fail_once_reaction_on = "Typing"
 
@@ -8240,7 +8319,6 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             binding.id,
             "native-one",
             "turn-one",
-            task_feedback=REACTIONS_ON,
         )
 
         await self.app.handle_message(FakeMessage("new direction", message_id="om_steer"))
@@ -8323,10 +8401,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             binding.id,
             "native-one",
             "turn-one",
-            task_feedback=REACTIONS_ON,
         )
         self.assertTrue(
-            await self.app._reactions.start("turn-one", "om_original")
+            await self.app._reactions.start(
+                "turn-one",
+                "om_original",
+                pulse_enabled=True,
+            )
         )
 
         await self.app.handle_message(
@@ -8381,7 +8462,6 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             binding.id,
             "native-one",
             "turn-one",
-            task_feedback=REACTIONS_ON,
         )
         self.channel.fail_once_reaction_on = "OnIt"
 
@@ -8830,7 +8910,6 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 final_response="done",
                 status=SimpleNamespace(value="completed"),
             ),
-            task_feedback=REACTIONS_ON,
         )
         await self.app.handle_completion(outcome)
         self.assertIn((origin.id, "done"), self.channel.replies)
@@ -8859,7 +8938,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 origin=origin,
             )
         )
-        self.assertTrue(await self.app._reactions.start("turn-one", origin.id))
+        self.assertTrue(
+            await self.app._reactions.start(
+                "turn-one",
+                origin.id,
+                pulse_enabled=True,
+            )
+        )
         outcome = TurnObservationUnavailableOutcome(
             binding_id=binding.id,
             thread_id="native-one",
@@ -8881,7 +8966,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Turn 观测不可用", str(self.channel.updates[-1][1]))
 
         feedback = BindingTaskFeedback(
-            task_reactions_enabled=True,
+            reaction_pulse_enabled=True,
             progress_card_enabled=True,
         )
         await self.app.handle_completion(
@@ -8915,7 +9000,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 origin=origin,
             )
         )
-        self.assertTrue(await self.app._reactions.start("turn-one", origin.id))
+        self.assertTrue(
+            await self.app._reactions.start(
+                "turn-one",
+                origin.id,
+                pulse_enabled=True,
+            )
+        )
         reply_count = len(self.channel.replies)
 
         await self.app.handle_completion(
@@ -9137,7 +9228,6 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     final_response=None,
                     status=SimpleNamespace(value="interrupted"),
                 ),
-                task_feedback=REACTIONS_ON,
             )
         )
 
@@ -9167,7 +9257,6 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     final_response="native failure",
                     status=SimpleNamespace(value="failed"),
                 ),
-                task_feedback=REACTIONS_ON,
             )
         )
 
@@ -9307,7 +9396,10 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         await self.app.handle_message(prompt)
 
-        self.assertEqual(self.channel.reactions, [])
+        self.assertEqual(
+            self.channel.reactions,
+            [("om-side-prompt", "Typing")],
+        )
         self.assertEqual(self.channel.replies, [])
         await self.app.handle_completion(
             SideTurnOutcome(
@@ -9323,7 +9415,108 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(self.channel.replies, [(prompt.id, "side answer")])
-        self.assertEqual(self.channel.reactions, [])
+        self.assertEqual(
+            self.channel.reactions,
+            [
+                ("om-side-prompt", "Typing"),
+                ("om-side-prompt", "DONE"),
+            ],
+        )
+        self.assertEqual(
+            self.channel.reaction_removals,
+            [("om-side-prompt", "reaction-1")],
+        )
+
+    async def test_side_rejected_steer_has_no_lifecycle_confirmation(self) -> None:
+        _binding, record = await self.open_direct_side()
+
+        async def reject_side_steer(**_kwargs: object) -> SideSubmission:
+            raise SteerRace(
+                "当前 Side Turn 恰好已经结束，本条消息未执行，请重新发送。"
+            )
+
+        self.runtime.submit_side = reject_side_steer  # type: ignore[method-assign]
+        prompt = FakeMessage(
+            "adjust side",
+            message_id="om-side-rejected-steer",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            thread_id=record.topic_id,
+            mentioned_bot=False,
+        )
+
+        await self.app.handle_message(prompt)
+
+        self.assertNotIn((prompt.id, "OnIt"), self.channel.reactions)
+        self.assertIn(
+            (
+                prompt.id,
+                "当前 Side Turn 恰好已经结束，本条消息未执行，请重新发送。",
+            ),
+            self.channel.replies,
+        )
+
+    async def test_side_accepted_steer_falls_back_when_reaction_fails(
+        self,
+    ) -> None:
+        _binding, record = await self.open_direct_side()
+        self.runtime.side_submission = SideSubmission(
+            SubmitDisposition.STEERED,
+            record.id,
+            "native-side-1",
+            "side-turn-1",
+        )
+        self.channel.fail_once_reaction_on = "OnIt"
+        prompt = FakeMessage(
+            "adjust side",
+            message_id="om-side-steer-fallback",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            thread_id=record.topic_id,
+            mentioned_bot=False,
+        )
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_message(prompt)
+
+        self.assertIn((prompt.id, "已接收 Side 调整。"), self.channel.replies)
+
+    async def test_side_failed_and_interrupted_turns_keep_terminal_reactions(
+        self,
+    ) -> None:
+        binding, record = await self.open_direct_side()
+        cases = (
+            ("failed", "ERROR", "side failure"),
+            ("interrupted", "CrossMark", None),
+        )
+
+        for index, (status, reaction, final_response) in enumerate(cases, start=1):
+            with self.subTest(status=status):
+                origin = FakeMessage(
+                    "side work",
+                    message_id=f"om-side-{status}",
+                    chat_id="oc-direct",
+                    chat_type="p2p",
+                    thread_id=record.topic_id,
+                    mentioned_bot=False,
+                )
+                await self.app.handle_completion(
+                    SideTurnOutcome(
+                        side_id=record.id,
+                        parent_binding_id=binding.id,
+                        thread_id="native-side-1",
+                        turn_id=f"side-turn-terminal-{index}",
+                        owner_id="ou_user",
+                        origin=origin,
+                        cwd=self.project,
+                        result=SimpleNamespace(
+                            status=SimpleNamespace(value=status),
+                            final_response=final_response,
+                        ),
+                    )
+                )
+
+                self.assertIn((origin.id, reaction), self.channel.reactions)
 
     async def test_side_turn_without_progress_uses_result_files_card(self) -> None:
         binding, record = await self.open_direct_side()
@@ -9371,7 +9564,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         feedback = BindingTaskFeedback(
-            task_reactions_enabled=True,
+            reaction_pulse_enabled=True,
             progress_card_enabled=True,
         )
         binding, record = await self.open_direct_side(task_feedback=feedback)
@@ -9655,7 +9848,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 "root_id": "om-quoted-control",
             },
         )
-        binding = self.binding_for(source, task_feedback=REACTIONS_ON)
+        binding = self.binding_for(source, task_feedback=PULSE_ON)
         self.queue_promoted_topic(
             chat_id="oc-direct",
             root_id="om-root",
@@ -9722,7 +9915,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     status=SimpleNamespace(value="completed"),
                     final_response="side answer",
                 ),
-                task_feedback=REACTIONS_ON,
+                task_feedback=PULSE_ON,
             )
         )
         self.assertIn(("om-seed", "side answer"), self.channel.replies)
@@ -9819,7 +10012,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             chat_type="p2p",
             mentioned_bot=False,
         )
-        self.binding_for(source, task_feedback=REACTIONS_ON)
+        self.binding_for(source, task_feedback=PULSE_ON)
         self.queue_direct_topic(
             chat_id="oc-direct",
             root_id="om-root-direct",
@@ -10229,7 +10422,6 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             direct_record.id,
             "native-side-running",
             "side-turn-running",
-            task_feedback=REACTIONS_ON,
         )
         await self.app.handle_message(
             FakeMessage(

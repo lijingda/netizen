@@ -687,8 +687,8 @@ class CardCodecTest(unittest.TestCase):
                 "new_model": "new-model:v1:explicit:ZnV0dXJlLW1vZGVs",
                 "new_effort": "ultra",
                 "new_speed": "priority-v2",
-                "new_task_reactions": "task-feedback:v1:on",
-                "new_progress_card": "task-feedback:v1:off",
+                "new_task_reactions": "task-feedback:v2:on",
+                "new_progress_card": "task-feedback:v2:off",
             },
         )
         self.assertEqual(created.name, CardControlName.CREATE_BINDING)
@@ -697,7 +697,7 @@ class CardCodecTest(unittest.TestCase):
         self.assertEqual(created.model_id, "future-model")
         self.assertEqual(created.effort_id, "ultra")
         self.assertEqual(created.service_tier_id, "priority-v2")
-        self.assertTrue(created.task_reactions_enabled)
+        self.assertTrue(created.reaction_pulse_enabled)
         self.assertFalse(created.progress_card_enabled)
         self.assertEqual(
             created.message_context_mode,
@@ -718,8 +718,8 @@ class CardCodecTest(unittest.TestCase):
                 "config_context_mode": "context-mode:v1:current-only",
                 "config_effort": "ultra",
                 "config_speed": "default",
-                "config_task_reactions": "task-feedback:v1:off",
-                "config_progress_card": "task-feedback:v1:on",
+                "config_task_reactions": "task-feedback:v2:off",
+                "config_progress_card": "task-feedback:v2:on",
             },
         )
         self.assertEqual(configured.name, CardControlName.CONFIGURE_BINDING)
@@ -733,7 +733,7 @@ class CardCodecTest(unittest.TestCase):
         self.assertEqual(configured.model_id, "future-model")
         self.assertEqual(configured.effort_id, "ultra")
         self.assertEqual(configured.service_tier_id, "default")
-        self.assertFalse(configured.task_reactions_enabled)
+        self.assertFalse(configured.reaction_pulse_enabled)
         self.assertTrue(configured.progress_card_enabled)
         self.assertEqual(
             configured.message_context_mode,
@@ -752,8 +752,8 @@ class CardCodecTest(unittest.TestCase):
                 "new_project": "project:v1:test:3",
                 "new_context_mode": "context-mode:v1:current-only",
                 "new_model": "new-model:v1:inherit",
-                "new_task_reactions": "task-feedback:v1:off",
-                "new_progress_card": "task-feedback:v1:off",
+                "new_task_reactions": "task-feedback:v2:off",
+                "new_progress_card": "task-feedback:v2:off",
             },
         )
         catalog = decode_card_form(
@@ -767,8 +767,8 @@ class CardCodecTest(unittest.TestCase):
                 "new_model": "new-model:v1:inherit",
                 "new_effort": "rendered-effort",
                 "new_speed": "rendered-speed",
-                "new_task_reactions": "task-feedback:v1:on",
-                "new_progress_card": "task-feedback:v1:on",
+                "new_task_reactions": "task-feedback:v2:on",
+                "new_progress_card": "task-feedback:v2:on",
             },
         )
         configured = decode_card_form(
@@ -782,8 +782,8 @@ class CardCodecTest(unittest.TestCase):
                     "11111111-0000-0000-0000-000000000001:7:11:13:inherit"
                 ),
                 "config_context_mode": "context-mode:v1:catch-up",
-                "config_task_reactions": "task-feedback:v1:off",
-                "config_progress_card": "task-feedback:v1:on",
+                "config_task_reactions": "task-feedback:v2:off",
+                "config_progress_card": "task-feedback:v2:on",
             },
         )
 
@@ -859,15 +859,21 @@ class CardCodecTest(unittest.TestCase):
             {
                 "new_project": "project:v1:test:3",
                 "new_model": "new-model:v1:inherit",
-                "new_task_reactions": True,
+                "new_task_reactions": "task-feedback:v1:off",
                 "new_progress_card": "task-feedback:v1:off",
+            },
+            {
+                "new_project": "project:v1:test:3",
+                "new_model": "new-model:v1:inherit",
+                "new_task_reactions": True,
+                "new_progress_card": "task-feedback:v2:off",
             },
             {
                 "config_model": (
                     "config-model:v4:"
                     "11111111-0000-0000-0000-000000000001:1:1:1:inherit"
                 ),
-                "config_task_reactions": "task-feedback:v1:off",
+                "config_task_reactions": "task-feedback:v2:off",
                 "config_progress_card": "on",
             },
         )
@@ -1707,6 +1713,9 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("快速新建", serialized)
         self.assertNotIn("下一条真实任务", serialized)
         self.assertIn("继承 Codex", serialized)
+        self.assertIn("执行中表情闪烁", serialized)
+        self.assertIn("任务接收、成功调整和结束时始终显示表情", serialized)
+        self.assertNotIn("开启后会用表情反馈接收、运行和终态", serialized)
         self.assertIn("@ 时读取的消息范围", serialized)
         self.assertIn("机器人始终只响应", serialized)
         self.assertIn("未 @ 机器人", serialized)
@@ -1764,11 +1773,11 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertEqual(
             fields["new_task_reactions"]["initial_option"],
-            "task-feedback:v1:off",
+            "task-feedback:v2:off",
         )
         self.assertEqual(
             fields["new_progress_card"]["initial_option"],
-            "task-feedback:v1:off",
+            "task-feedback:v2:off",
         )
         self.assertNotIn("new_prompt", fields)
         self.assertEqual(len(_elements(outbound.card, "form")), 1)
@@ -1882,7 +1891,7 @@ class CardRendererTest(unittest.TestCase):
             decoded.message_context_mode,
             MentionContextMode.CURRENT_ONLY,
         )
-        self.assertFalse(decoded.task_reactions_enabled)
+        self.assertFalse(decoded.reaction_pulse_enabled)
         self.assertFalse(decoded.progress_card_enabled)
 
     def test_config_card_targets_exact_binding_and_uses_live_catalog_options(
@@ -1904,7 +1913,7 @@ class CardRendererTest(unittest.TestCase):
             feedback_revision=13,
             message_context_mode=MentionContextMode.CATCH_UP,
             task_feedback=BindingTaskFeedback(
-                task_reactions_enabled=True,
+                reaction_pulse_enabled=True,
                 progress_card_enabled=False,
             ),
             allow_context_mode=True,
@@ -1951,11 +1960,11 @@ class CardRendererTest(unittest.TestCase):
         self.assertEqual(fields["config_speed"]["initial_option"], "default")
         self.assertEqual(
             fields["config_task_reactions"]["initial_option"],
-            "task-feedback:v1:on",
+            "task-feedback:v2:on",
         )
         self.assertEqual(
             fields["config_progress_card"]["initial_option"],
-            "task-feedback:v1:off",
+            "task-feedback:v2:off",
         )
         self.assertNotIn("config_prompt", fields)
         self.assertIn("不会启动任务", str(outbound.card))
@@ -1979,7 +1988,7 @@ class CardRendererTest(unittest.TestCase):
                 settings=settings,
                 message_context_mode=MentionContextMode.CATCH_UP,
                 task_feedback=BindingTaskFeedback(
-                    task_reactions_enabled=True,
+                    reaction_pulse_enabled=True,
                     progress_card_enabled=True,
                 ),
             ).card
@@ -1990,7 +1999,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("credits", rendered.lower())
         self.assertNotIn("cost", rendered.lower())
         self.assertIn("自动带上期间的群聊讨论", rendered)
-        self.assertIn("任务表情：开启", rendered)
+        self.assertIn("执行中表情闪烁：开启", rendered)
         self.assertIn("进度卡：开启", rendered)
 
         inherited = str(
@@ -2003,7 +2012,7 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertIn("继承 Codex", inherited)
         self.assertIn("仅这条 @ 消息", inherited)
-        self.assertIn("任务表情：关闭", inherited)
+        self.assertIn("执行中表情闪烁：关闭", inherited)
         self.assertIn("进度卡：关闭", inherited)
 
         created = str(

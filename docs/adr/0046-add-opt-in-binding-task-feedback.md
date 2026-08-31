@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-27
 amends: 0016, 0020, 0024, 0027, 0039
-amended_by: 0047, 0048
+amended_by: 0047, 0048, 0051
 ---
 
 # 增加默认关闭的 Binding 任务反馈与有界进度卡
@@ -12,6 +12,10 @@ amended_by: 0047, 0048
 > 本身始终存在。随后 [ADR 0048](0048-integrate-side-turns-with-task-feedback-reply-cards.md)
 > 让 Side 在创建时冻结 Parent 的两项设置，并让 Side Turn 复用两种反馈。下文“只控制普通
 > Turn”与“排除 Side/Goal”仅保留为历史背景。
+> [ADR 0051](0051-keep-lifecycle-reactions-and-make-pulse-optional.md) 又将历史 Task
+> Reaction 开关收窄为只控制 `THINKING` Reaction Pulse；`Typing`、成功 steer
+> 的 `OnIt` 和终态表情改为始终尽力展示。下文的零 reaction 关闭语义仅保留为
+> 本决定的历史背景。
 
 Netizen 需要让飞书用户在长 Turn 中看见“已经接受、正在做什么、计划到了哪里”，同时避免
 任务表情在移动端形成额外通知，也不能把展示层变成第二套 Agent Runtime。我们选择两个

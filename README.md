@@ -27,13 +27,13 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   chat 新开 sibling 话题。Side 在同一 fork 上支持多轮：idle 开新 Turn、running
   steer exact Turn；`/stop` 只停当前 Side Turn，`/side close` 才结束 Side。Parent 与
   多个 Side 可并发，但共享同一个真实 Project cwd，文件改动彼此可见。创建时冻结 Parent
-  当时的 Model/Effort/Speed、Task Reaction 与 Progress Card，Parent 后续配置不传播；
+  当时的 Model/Effort/Speed、Reaction Pulse 与 Progress Card，Parent 后续配置不传播；
   Side 内仍不允许 Goal。
 - Binding 有两个相互独立、默认关闭的 Task Feedback 选项，可在 `/new` 或 `/config`
-  按需开启。Task Reaction 开启后，运行时在原任务消息上使用 `Typing` 和低频
-  `THINKING`，steer 成功使用 `OnIt`，终态使用 `DONE`/`ERROR`/`CrossMark`；关闭时不会
-  调用 reaction，也不会因 `OnIt` 失败发送文字确认。Side Turn 使用创建时冻结的同一语义；
-  Goal 不使用 Task Reaction。
+  按需开启。普通与 Side Turn 始终尽力显示 Lifecycle Reaction：accepted 时使用
+  `Typing`，steer 成功使用 `OnIt`，终态使用 `DONE`/`ERROR`/`CrossMark`。
+  Reaction Pulse 只控制是否在执行中低频显示/隐藏 `THINKING`；Side Turn 使用创建时
+  冻结的选择，Goal 不使用 Lifecycle Reaction。
 - Progress Card 开启后，普通或 Side native Turn 接受时回复一张运行卡；Goal 则无论该
   选项是否开启都只使用一张 Goal 回复卡，开启时在其中增加 Activity 模块。顶部展开区只按
   状态与原生 checklist 的变化逐步更新；不显示耗时、百分比、ETA、reasoning 或 raw
@@ -95,7 +95,7 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   发送的是点击时当前仍可访问的内容，不是 Turn 完成时快照。
 - `//...`：发送字面 `/...` prompt。
 - `/new`：发送唯一的新建表单，在单个下拉框中展示全部 enabled Projects，并选择继承
-  Codex 或显式 Model/Effort/Speed，以及是否开启 Task Reaction、Progress Card（两项默认
+  Codex 或显式 Model/Effort/Speed，以及是否开启 Reaction Pulse、Progress Card（两项默认
   关闭）；群聊和群话题还可选择 @ 上下文模式。只创建并切换 lazy 会话，不要求任务文本。
   `/new` 不接受任何参数。
 - `/side [首轮问题]`：要求当前 active Binding 已有原生历史；在同一 chat 新建一个
@@ -104,9 +104,9 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   首轮模型来源仍是原 `/side` 消息及其发送者，新话题 seed 只作为完成投递锚点。
   Side 内仅支持普通 Prompt、`//`、`/status`、`/stop`、`/help`、`/` 和
   `/side close`；空闲两小时或服务重启后过期。旧 Side 话题不会变成普通 Binding。Side
-  创建时冻结 Parent 当时的 Model/Effort/Speed、Task Reaction 与 Progress Card；后续
+  创建时冻结 Parent 当时的 Model/Effort/Speed、Reaction Pulse 与 Progress Card；后续
   `/config` 不影响它，Side 内也不接受 Goal。
-- `/config`：选择并保存当前会话后续新 Turn 的 Model、Effort、Speed、Task Reaction 与
+- `/config`：选择并保存当前会话后续新 Turn 的 Model、Effort、Speed、Reaction Pulse 与
   Progress Card；群聊和群话题还可切换 @ 上下文模式。不要求任务、不创建空白 Turn，也
   不提供跨会话选择；配置其他会话应先 `/resume`。Binding 已显式配置模型三项时，每条
   需要启动新 Turn 的普通消息都会重新读取 live 模型目录并显式应用；未配置时由 Codex
@@ -450,8 +450,8 @@ make check
 群聊逐条引用需要应用权限
 `im:message.group_msg`；只配置接收群聊 @ 机器人
 消息的权限无法回查被引用的另一条消息。当前 Prompt 发送者姓名解析还需
-`im:chat.members:read`；缺失时不会用匿名身份提交。Task Reaction 开启后的运行、steer
-确认与终态表情由当前必需的 `im:message` 覆盖；官方也提供更窄的
+`im:chat.members:read`；缺失时不会用匿名身份提交。Lifecycle Reaction 与可选 Reaction
+Pulse 由当前必需的 `im:message` 覆盖；官方也提供更窄的
 `im:message.reactions:write_only` 作为替代，但 Netizen 不再把它列为独立必需项。权限变更
 必须随应用版本发布。本轮文件上传与话题回复还需 `im:resource` 和
 `im:message:send_as_bot`；任一权限缺失时文件按钮必须显式失败，不能掉到主聊天。

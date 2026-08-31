@@ -1554,7 +1554,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_side_snapshots_parent_turn_settings_once_at_creation(self) -> None:
         effort = self.install_model_catalog()
         feedback = BindingTaskFeedback(
-            task_reactions_enabled=True,
+            reaction_pulse_enabled=True,
             progress_card_enabled=True,
         )
         binding = self.store.create_binding(
@@ -5926,7 +5926,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             expected_context_revision=binding.context_revision,
             expected_feedback_revision=binding.feedback_revision,
             settings=binding.turn_settings,
-            task_feedback=BindingTaskFeedback(task_reactions_enabled=True),
+            task_feedback=BindingTaskFeedback(reaction_pulse_enabled=True),
             message_context_mode=binding.message_context_mode,
             context_anchor=None,
         )

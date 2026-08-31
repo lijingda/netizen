@@ -3,9 +3,14 @@ status: accepted
 date: 2026-08-28
 amends: 0021, 0046, 0047
 related: 0020, 0024, 0027
+amended_by: 0051
 ---
 
 # 让 Side Turn 复用普通 Turn 的任务反馈与回复卡
+
+> [ADR 0051](0051-keep-lifecycle-reactions-and-make-pulse-optional.md) 保留 Side
+> 冻结 Parent Task Feedback 的边界，但将其表情选项收窄为只控制
+> `THINKING` Reaction Pulse；Side Turn 的 accepted、成功 steer 与终态表情改为始终尽力展示。
 
 Side Topic 已有独立根卡、两小时 idle expiry、显式 close 和永久路由墓碑；这些是临时
 Thread 容器的生命周期。容器内的每轮执行却仍使用早期专用投递：无条件表情、终态文本，
