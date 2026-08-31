@@ -767,6 +767,43 @@ class SupplementalProjectionTest(unittest.TestCase):
                 with self.assertRaises(HistoricalMessageUnavailable):
                     project_supplemental_message(inbound(sender=sender))
 
+    def test_attribution_name_is_display_only_and_wins_over_display_name(self) -> None:
+        nameless = inbound(
+            sender=Identity(open_id="ou_sender", display_name=None)
+        )
+        nameless.create_time = 100
+        projected = project_supplemental_message(
+            nameless,
+            attribution_name="List Sender",
+        )
+        self.assertEqual(
+            projected.sender["display_name"],  # type: ignore[union-attr]
+            "List Sender",
+        )
+
+        resolved = inbound(
+            sender=Identity(open_id="ou_sender", display_name="Directory Alice")
+        )
+        resolved.create_time = 100
+        projected = project_supplemental_message(
+            resolved,
+            attribution_name="List Sender",
+        )
+        self.assertEqual(
+            projected.sender["display_name"],  # type: ignore[union-attr]
+            "List Sender",
+        )
+        self.assertEqual(
+            projected.sender["open_id"],  # type: ignore[union-attr]
+            "ou_sender",
+        )
+
+        with self.assertRaises(HistoricalMessageUnavailable):
+            project_supplemental_message(
+                inbound(sender=Identity(open_id="ou_sender", display_name=None)),
+                attribution_name=" ",
+            )
+
     def test_context_envelope_orders_history_deduplicates_quote_and_keeps_request_last(
         self,
     ) -> None:

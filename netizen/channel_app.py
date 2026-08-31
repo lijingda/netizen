@@ -4301,6 +4301,10 @@ class ChannelApplication:
                     reference.message_id: value
                     for reference, value in zip(window.candidates, fetched)
                 }
+                attribution_names = {
+                    reference.message_id: reference.sender_name
+                    for reference in window.candidates
+                }
 
                 quoted_input: tuple[Any, str | None] | None = None
                 quoted_projection: HistoricalMessageProjection | None = None
@@ -4329,6 +4333,7 @@ class ChannelApplication:
                     projection = project_supplemental_message(
                         message,
                         interactive_fallback_text=fallback,
+                        attribution_name=attribution_names.get(_message_id(message)),
                     )
                     if isinstance(projection, SupplementalMessageOmission):
                         projection_omissions.append(projection)
@@ -4417,6 +4422,7 @@ class ChannelApplication:
                     source="supplemental_message",
                     message_id=_message_id(message),
                 ),
+                attribution_name=attribution_names.get(_message_id(message)),
             )
             if isinstance(projection, SupplementalMessageOmission):
                 raise MessageHistoryUnavailable(

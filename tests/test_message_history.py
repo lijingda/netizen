@@ -235,6 +235,10 @@ class FeishuMessageHistoryReaderTest(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(window.candidates[0].sender_id, "ou_old")
         self.assertEqual(window.candidates[0].message_type, "post")
+        self.assertEqual(
+            [ref.sender_name for ref in window.candidates],
+            ["Old", None, "New"],
+        )
         self.assertEqual(window.upper, MessageContextAnchor("om_upper", 4_000))
         self.assertEqual(window.stats.pages_scanned, 2)
         self.assertEqual(window.stats.raw_messages_scanned, 11)

@@ -42,15 +42,18 @@ class MessageHistoryContractError(MessageHistoryError):
 class MessageHistoryRef:
     """Stable metadata required to fetch and normalize one exact message.
 
-    Display names are deliberately absent: the exact-message normalization
-    boundary resolves the name used for prompt attribution.  A mutable name
-    returned by the history-list endpoint is not an identity invariant.
+    ``sender_name`` is attribution-only display data carried from the same
+    list item: it never participates in identity consistency checks, which
+    stay on ``sender_id`` plus the user/bot type.  Keeping it optional lets
+    nameless list items remain eligible candidates; the projection boundary
+    fails closed only when no sender name is verifiable at all.
     """
 
     message_id: str
     create_time_ms: int
     sender_id: str
     message_type: str
+    sender_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -553,6 +556,7 @@ def _candidate_reference(item: Any) -> MessageHistoryRef | None:
         create_time_ms=_positive_timestamp(getattr(item, "create_time", None)),
         sender_id=sender_id,
         message_type=message_type,
+        sender_name=_optional_string(getattr(sender, "sender_name", None)),
     )
 
 

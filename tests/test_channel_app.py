@@ -2464,6 +2464,75 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_catch_up_prompt_uses_list_sender_name_for_attribution(self) -> None:
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        lower = MessageContextAnchor("om_lower", 1_000)
+        created = await self.app._management.create_current_binding(
+            scope=scope,
+            creator_id="ou_user",
+            project_alias="test",
+            message_context_mode=MentionContextMode.CATCH_UP,
+            context_anchor=lower,
+        )
+        binding = created.binding
+        reference = MessageHistoryRef(
+            message_id="om_history",
+            create_time_ms=2_000,
+            sender_id="ou_alice",
+            message_type="text",
+            sender_name="List Alice",
+        )
+        upper = MessageContextAnchor("om_prompt", 3_000)
+        self.message_history.window = MessageHistoryWindow(
+            lower=lower,
+            upper=upper,
+            candidates=(reference,),
+            stats=MessageHistoryStats(
+                pages_scanned=1,
+                raw_messages_scanned=2,
+                duplicate_messages=0,
+                ignored_after_upper=0,
+                omitted_messages=0,
+                truncated_before=False,
+                scan_limit_hit=False,
+            ),
+        )
+        self.channel.inbound_messages[reference.message_id] = FakeMessage(
+            "背景",
+            message_id=reference.message_id,
+            sender_id=reference.sender_id,
+            display_name="",
+            chat_id=scope.chat_id,
+            chat_type="group",
+            content=TextContent(text="背景"),
+            create_time=reference.create_time_ms,
+        )
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+        prompt = FakeMessage(
+            "请总结",
+            message_id=upper.message_id,
+            sender_id="ou_bob",
+            display_name="Bob",
+            chat_id=scope.chat_id,
+            chat_type="group",
+            create_time=upper.create_time_ms,
+        )
+
+        await self.app.handle_message(prompt)
+
+        submitted = self.runtime.submit_calls[0]
+        envelope = json.loads(submitted["input"])
+        self.assertEqual(
+            envelope["supplemental_messages"][0]["sender"]["display_name"],
+            "List Alice",
+        )
+
     def test_history_candidate_keeps_stable_sender_identity_gate(self) -> None:
         scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
         reference = MessageHistoryRef(
