@@ -1103,6 +1103,8 @@ class CardRendererTest(unittest.TestCase):
         panel = _elements(outbound.card, "collapsible_panel")[0]
         self.assertTrue(panel["expanded"])
         self.assertEqual(panel["element_id"], "turnprogressv1")
+        self.assertEqual(panel["padding"], "8px 12px 12px 12px")
+        self.assertNotIn("padding", panel["header"])
         visible = "\n".join(
             item["text"]["content"]
             for item in _elements(panel, "div")
