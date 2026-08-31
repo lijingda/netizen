@@ -357,13 +357,21 @@ def wait_for_pull_request_checks(number: int) -> None:
 
 def merge_pull_request(number: int) -> str:
     gh("pr", "merge", str(number), "--merge", "--delete-branch")
-    state = json.loads(gh("pr", "view", str(number), "--json", "state"))
+    state = json.loads(
+        gh("pr", "view", str(number), "--json", "state,mergeCommit")
+    )
     if state["state"] != "MERGED":
         raise ReleaseError(f"pull request #{number} did not merge")
+    merge_commit = state.get("mergeCommit")
+    if not isinstance(merge_commit, Mapping):
+        raise ReleaseError(f"pull request #{number} has no merge commit")
+    merge_oid = merge_commit.get("oid")
+    if not isinstance(merge_oid, str) or not merge_oid:
+        raise ReleaseError(f"pull request #{number} has no merge commit OID")
     if git("rev-parse", "--abbrev-ref", "HEAD").strip() != "main":
         git("checkout", "main")
     git("pull", "--quiet", "--ff-only")
-    return git("rev-parse", "HEAD").strip()
+    return merge_oid
 
 
 def wait_for_main_ci(commit: str) -> str:
@@ -379,18 +387,29 @@ def wait_for_main_ci(commit: str) -> str:
                 "main",
                 "--commit",
                 commit,
+                "--event",
+                "push",
                 "--json",
                 "status,conclusion,url",
             )
         )
-        if runs and runs[0]["status"] == "completed":
+        successful = next(
+            (
+                run
+                for run in runs
+                if run["status"] == "completed"
+                and run["conclusion"] == "success"
+            ),
+            None,
+        )
+        if successful is not None:
+            return str(successful["url"])
+        if runs and all(run["status"] == "completed" for run in runs):
             run = runs[0]
-            if run["conclusion"] != "success":
-                raise ReleaseError(
-                    f"main CI failed for {commit}: {run['conclusion']} "
-                    f"({run['url']})"
-                )
-            return str(run["url"])
+            raise ReleaseError(
+                f"main CI failed for {commit}: {run['conclusion']} "
+                f"({run['url']})"
+            )
         time.sleep(POLL_INTERVAL_SECONDS)
     raise ReleaseError(f"timed out waiting for main CI on {commit}")
 

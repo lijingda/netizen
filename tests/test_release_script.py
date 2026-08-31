@@ -1,19 +1,23 @@
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
+from unittest.mock import call, patch
 
 from scripts.release import (
     CommitEntry,
     ReleaseEscalation,
     ReleaseError,
     bump_text,
+    merge_pull_request,
     next_version,
     parse_log,
     render_notes,
     summarize_rollup,
     validate_explicit_version,
+    wait_for_main_ci,
 )
 
 
@@ -189,6 +193,68 @@ class ValidateExplicitVersionTest(unittest.TestCase):
             validate_explicit_version("v0.3.3", "v0.3.3")
         with self.assertRaises(ReleaseError):
             validate_explicit_version("v0.3.3", "v0.3.2")
+
+
+class ReleaseOrchestrationTest(unittest.TestCase):
+    def test_merge_returns_the_pull_requests_exact_merge_commit(self) -> None:
+        with (
+            patch("scripts.release.gh") as gh_mock,
+            patch("scripts.release.git") as git_mock,
+        ):
+            gh_mock.side_effect = [
+                "",
+                json.dumps(
+                    {"state": "MERGED", "mergeCommit": {"oid": "merge-oid"}}
+                ),
+            ]
+            git_mock.side_effect = ["release-branch\n", "", ""]
+
+            commit = merge_pull_request(42)
+
+        self.assertEqual(commit, "merge-oid")
+        self.assertEqual(
+            gh_mock.call_args_list,
+            [
+                call("pr", "merge", "42", "--merge", "--delete-branch"),
+                call("pr", "view", "42", "--json", "state,mergeCommit"),
+            ],
+        )
+        self.assertNotIn(call("rev-parse", "HEAD"), git_mock.call_args_list)
+
+    def test_main_ci_requires_a_push_run_and_accepts_any_success(self) -> None:
+        runs = [
+            {
+                "status": "completed",
+                "conclusion": "failure",
+                "url": "https://example.invalid/failed",
+            },
+            {
+                "status": "completed",
+                "conclusion": "success",
+                "url": "https://example.invalid/passed",
+            },
+        ]
+        with patch("scripts.release.gh", return_value=json.dumps(runs)) as gh_mock:
+            url = wait_for_main_ci("merge-oid")
+
+        self.assertEqual(url, "https://example.invalid/passed")
+        self.assertEqual(
+            gh_mock.call_args,
+            call(
+                "run",
+                "list",
+                "--workflow",
+                "ci.yml",
+                "--branch",
+                "main",
+                "--commit",
+                "merge-oid",
+                "--event",
+                "push",
+                "--json",
+                "status,conclusion,url",
+            ),
+        )
 
 
 class ReleaseAnchorTest(unittest.TestCase):
