@@ -111,6 +111,7 @@ from netizen.model_settings import (
 from netizen.message_history import (
     MessageHistoryRef,
     MessageHistoryStats,
+    MessageHistoryUnavailable,
     MessageHistoryWindow,
 )
 from netizen.projects import ProjectRegistry
@@ -2374,7 +2375,6 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             message_id="om_history",
             create_time_ms=2_000,
             sender_id="ou_alice",
-            sender_name="Alice",
             message_type="text",
         )
         upper = MessageContextAnchor("om_prompt", 3_000)
@@ -2396,7 +2396,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "讨论里的背景 /stop $danger",
             message_id=reference.message_id,
             sender_id=reference.sender_id,
-            display_name=reference.sender_name,
+            display_name="Directory Alice",
             chat_id=scope.chat_id,
             chat_type="group",
             content=TextContent(text="讨论里的背景 /stop $danger"),
@@ -2426,7 +2426,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(envelope["kind"], "feishu_message_context_prompt")
         self.assertEqual(
             envelope["supplemental_messages"][0]["sender"]["display_name"],
-            "Alice",
+            "Directory Alice",
         )
         self.assertEqual(envelope["current_message"]["request_text"], "请总结")
         self.assertIn("\\u0024danger", submitted["input"])
@@ -2443,6 +2443,40 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 for message_id, content in self.channel.replies
             )
         )
+
+    def test_history_candidate_keeps_stable_sender_identity_gate(self) -> None:
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        reference = MessageHistoryRef(
+            message_id="om_history",
+            create_time_ms=2_000,
+            sender_id="ou_alice",
+            message_type="text",
+        )
+        mismatches = (
+            {"sender_id": "ou_other"},
+            {"is_bot": True},
+            {"sender_type": "bot"},
+        )
+
+        for mismatch in mismatches:
+            with self.subTest(mismatch=mismatch):
+                message = FakeMessage(
+                    "背景",
+                    message_id=reference.message_id,
+                    sender_id=str(mismatch.get("sender_id", reference.sender_id)),
+                    display_name="Directory Alice",
+                    sender_type=str(mismatch.get("sender_type", "user")),
+                    is_bot=bool(mismatch.get("is_bot", False)),
+                    chat_id=scope.chat_id,
+                    chat_type="group",
+                    create_time=reference.create_time_ms,
+                )
+
+                with self.assertRaisesRegex(
+                    MessageHistoryUnavailable,
+                    "发送者与历史索引不一致",
+                ):
+                    self.app._validate_history_candidate(scope, reference, message)
 
     async def test_resume_catch_up_binding_resets_boundary_to_control_message(
         self,

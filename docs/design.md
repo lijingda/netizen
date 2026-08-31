@@ -112,7 +112,9 @@ topic replies，普通话题使用 exact thread container；lower/upper 都通�
 64,000 字符 supplemental visible text，候选 exact fetch 最多 4 路并发。图片与当前/引用
 消息共用 20 张、单图 20 MB、总计 50 MB 的原有准入限制。截断和 unsupported omission
 通过 envelope 与提交前可见回执披露；被选中消息的 Scope/identity/资源失败则整条 fail
-closed。完整历史语义与上线 live probe 见 ADR 0039。
+closed。候选 identity 只用应用内 `open_id` 与 user/bot 类型交叉核验；历史列表返回的可变
+`sender_name` 不参与身份一致性判断，Prompt attribution 使用 exact message 经 Channel SDK
+归一化后的非空 `display_name`。完整历史语义与上线 live probe 见 ADR 0039。
 
 每个真实普通或 Side Prompt 在进入 Runtime 前都按
 [ADR 0029](adr/0029-project-current-message-provenance-into-prompts.md) 投影 exact Current
