@@ -112,9 +112,12 @@ topic replies，普通话题使用 exact thread container；lower/upper 都通�
 64,000 字符 supplemental visible text，候选 exact fetch 最多 4 路并发。图片与当前/引用
 消息共用 20 张、单图 20 MB、总计 50 MB 的原有准入限制。截断和 unsupported omission
 通过 envelope 与提交前可见回执披露；被选中消息的 Scope/identity/资源失败则整条 fail
-closed。候选 identity 只用应用内 `open_id` 与 user/bot 类型交叉核验；历史列表返回的可变
-`sender_name` 不参与身份一致性判断，Prompt attribution 使用 exact message 经 Channel SDK
-归一化后的非空 `display_name`。完整历史语义与上线 live probe 见 ADR 0039。
+closed。候选 identity 只用应用内 `open_id` 与 user/bot 类型交叉核验；Prompt attribution
+的发送者姓名优先使用历史列表同条消息内嵌的 `sender_name`（仅作展示，不参与身份一致性
+判断），exact message 经 Channel SDK 归一化的 `display_name` 只在其缺失时兜底，两个
+来源都不可验证时才整条 fail closed。`sender_name` 由消息 API 的 `with_sender_name`
+参数投影，不需要通讯录权限，也不受应用通讯录权限范围限制。完整历史语义与上线 live
+probe 见 ADR 0039。
 
 每个真实普通或 Side Prompt 在进入 Runtime 前都按
 [ADR 0029](adr/0029-project-current-message-provenance-into-prompts.md) 投影 exact Current
@@ -531,22 +534,13 @@ Skill catalog、plan/checklist、Turn Activity Projection、reaction、Reply Car
 queue 表，也不保存 Admin credential、session、action/CSRF token、native metadata 索引或
 audit record。
 
-首次交互安装的飞书应用初始化是 release 外的安装期流程，不是第二个运行时认证层。候选
-release 中固定的官方 OpenAPI SDK 用 device flow 创建或从官方页面选择 Bot 应用，并请求
-当前能力所需的 tenant scopes、消息事件和卡片回调；已知 App ID 配合存在但为空的 Secret
-文件时保持 exact identity。有效 App ID 配合不存在的 Secret 文件是显式的 Feishu App
-Binding reset：device flow 不绑定旧 App ID，官方页面可选择同一或不同应用，返回身份以
-带回滚的配置/凭据更新替换旧绑定。该流程不申请或持久化 user token。成功后只更新同一份
-`~/.netizen/config.yaml` App ID 与
-`0600` `credentials/feishu-app-secret`，不向 Channel Database、Codex state、环境或日志写入
-凭据。安装器在 host mutation/activation 前用官方 scope API 校验同一份 tenant 权限能力契约；
-精确权限逐项验证，群信息能力则接受官方 API 声明的 `im:chat`、`im:chat:read`、
-`im:chat:readonly` 三种 tenant grant，并以最小的 `im:chat:read` 作为新申请 canonical scope。
-缺失权限的已有完整凭据不依赖 TTY，始终执行一次有界的 exact-App 官方修复并重新查询一次。
-验证 URL/二维码写入 stderr，Secret 只进入父进程私有 pipe，流程不读取 stdin；失败或二次
-查询仍缺失都不停止旧服务或切换 `current`。无 TTY 且凭据不完整的首次安装仍使用受保护的
-credential-file handoff，手工凭据路径继续等价可用但不能绕过授权门禁；服务运行时不进入
-该流程。App ID 改变后新消息进入新的 Scope namespace；旧 Binding 与原生历史保留但不迁移。
+首次交互安装的飞书应用初始化是 release 外的安装期流程，不是第二个运行时认证层；服务
+运行时不进入该流程，也不申请或持久化 user token。成功后只把 App ID 与 Secret 写入
+`~/.netizen/config.yaml` 与 `0600` `credentials/feishu-app-secret`，不向 Channel
+Database、Codex state、环境或日志写入凭据。缺失权限的已有完整凭据不依赖 TTY，始终执行
+一次有界的 exact-App 官方修复并重新查询一次。App ID 改变后新消息进入新的 Scope
+namespace；旧 Binding 与原生历史保留但不迁移。device flow、凭据文件交接与安装期权限
+门禁的完整流程见 [部署文档](deployment.md)。
 
 部署候选有两个显式来源：Published Release 携带发布流水线对 exact archive 的资格，Source
 Install 在目标机对当前工作区运行完整门禁。两者只在候选准备和本地 release identity 上

@@ -442,20 +442,10 @@ make check
 
 复制 `config.example.yaml`，设置绝对 `defaultCwd` 和 `projectRoot`；旧
 `projects` mapping 仍会在首次启动时导入，此后可在飞书 `/settings` 完成 Project
-管理。通过受管安装器浏览器流程创建/更新的应用已请求下述权限、消息事件和卡片回调；
-本地手工准备应用时则需在飞书应用后台逐项配置。两种路径都还要完成租户审批/发布、配置
-可用用户和群并把机器人加入目标群。单聊事件投递必须具备
-`im:message.p2p_msg:readonly`；设置卡片识别单聊/群聊会请求最小权限 `im:chat:read`，并接受
-飞书“获取群信息”接口官方支持的 `im:chat`、`im:chat:read`、`im:chat:readonly` 三者任一。
-群聊逐条引用需要应用权限
-`im:message.group_msg`；只配置接收群聊 @ 机器人
-消息的权限无法回查被引用的另一条消息。当前 Prompt 发送者姓名解析还需
-`im:chat.members:read`；缺失时不会用匿名身份提交。Lifecycle Reaction 与可选 Reaction
-Pulse 由当前必需的 `im:message` 覆盖；官方也提供更窄的
-`im:message.reactions:write_only` 作为替代，但 Netizen 不再把它列为独立必需项。权限变更
-必须随应用版本发布。本轮文件上传与话题回复还需 `im:resource` 和
-`im:message:send_as_bot`；任一权限缺失时文件按钮必须显式失败，不能掉到主聊天。
-开发可用 `FEISHU_APP_SECRET`；两种受管服务都使用 `FEISHU_APP_SECRET_FILE` 指向 0600 的纯
+管理。飞书应用所需的 tenant 权限、消息事件与卡片回调契约只在
+[部署与验收](docs/deployment.md#前置门禁)中逐项维护；受管安装器会自动请求该契约，
+本地手工准备应用时需在飞书应用后台逐项配置。两种路径都还要完成租户审批/发布、配置
+可用用户和群并把机器人加入目标群；权限变更必须随应用版本发布。开发可用 `FEISHU_APP_SECRET`；两种受管服务都使用 `FEISHU_APP_SECRET_FILE` 指向 0600 的纯
 Secret 文件。Admin Web 不接受 raw secret 环境变量：启用时还必须设置绝对的
 `NETIZEN_ADMIN_SECRET_FILE`；若本地只调试飞书入口，可在 YAML 中显式设置
 `adminWeb.enabled: false`。
