@@ -53,9 +53,10 @@ start/steer，并结束所有周期性恢复 I/O。其他 Binding 和进程 admi
 flag 或无限 resume/read 循环。一旦 `terminal_observed=True`，final response materialization
 使用现有有界重读和无文本兜底，不再进入观测恢复。
 
-进入 `turn-observation-unavailable` 时，同一 Turn 的 Task Reaction 脉冲和 Progress Card
-轮询也停止；已有进度卡一次更新为“Turn 观测不可用”后退出 presenter。之后若手动重检
-最终收敛，终态结果仍通过普通完成路径交付，不因旧卡 presenter 已停而丢失。
+进入 `turn-observation-unavailable` 时，同一 Turn 的 Reaction session、Reaction Pulse
+和 Progress Card 轮询全部停止；已记录的 `Typing` 与当时可见的 `THINKING` 会尽力清理，
+但不会添加任何伪造的终态表情。已有进度卡一次更新为“Turn 观测不可用”后退出 presenter。
+之后若手动重检最终收敛，终态结果仍通过普通完成路径交付，不因旧 presenter 已停而丢失。
 
 Ordinary Turn 的公开状态集合因此只是 `running`、`stopping` 和
 `turn-observation-unavailable`。`/stop` 仍是独立 Turn 控制，保留其已有的 interrupt 和

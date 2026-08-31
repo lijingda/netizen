@@ -99,7 +99,7 @@ token；手工准备的应用必须逐项配置。无论来源，飞书应用版
   `im:message.group_at_msg`/readonly；
 - 当前 Prompt 发送者姓名解析具备 `im:chat.members:read`；权限不足时 Channel SDK
   无法从 chat member roster 补全真实显示名，Netizen 会零 start/steer；
-- Task Reaction 开启后的 Prompt pulse、steer 确认和终态表情由当前必需的
+- Lifecycle Reaction 与可选 Reaction Pulse 由当前必需的
   `im:message` 覆盖；官方提供的
   `im:message.reactions:write_only` 是替代权限，不作为 Netizen 的另一项独立必需权限；
 - 本轮文件具备 `im:resource` 与 `im:message:send_as_bot`，允许机器人上传图片/文件并
@@ -107,10 +107,11 @@ token；手工准备的应用必须逐项配置。无论来源，飞书应用版
 - 机器人仍在目标群中，新权限已随应用版本发布而非只保存在开发者后台。
 
 权限不足时不降级为忽略引用或图片的普通 prompt；当前消息必须显式失败且
-不调用 Codex。Task Reaction 与 Progress Card 都是展示层的尽力操作：reaction/card
-权限或单次请求失败只记录脱敏日志，不得阻断已经启动的 Turn 或最终结果。只有 Task
-Reaction 已开启时，`OnIt` 失败才会在 native steer 已成功后回退一条简短确认；关闭时
-不得发送这条 fallback。Progress Card 初始、中间或终态更新失败时，普通 Turn 终态回退到
+不调用 Codex。Lifecycle Reaction、Reaction Pulse 与 Progress Card 都是展示层的尽力操作：
+reaction/card
+权限或单次请求失败只记录脱敏日志，不得阻断已经启动的 Turn 或最终结果。Lifecycle
+Reaction 中的 `OnIt` 失败时，已成功的 native steer 始终回退一条简短确认。
+Progress Card 初始、中间或终态更新失败时，普通 Turn 终态回退到
 无文件富文本/静态文本、有文件完成卡的标准路径；Goal 展示故障不得改变原生执行，终态
 使用新的自包含组合卡或明确的文本 fallback，不能因为更新失败丢掉权威结果。
 
@@ -762,7 +763,8 @@ HTTP；不得把该端口直接暴露到不受信网络。
 schema。v7 在 v6 的 Mention Context Mode、exact Context Boundary 与独立 revision 上，
 为 Binding 增加两个 Task Feedback 布尔值和 feedback revision；不保存任何补充消息正文、Turn
 Activity Projection 或 Reply Card session。v6 -> v7 cutover 必须在 release transaction
-中完成，把所有现有 Binding 的 Task Reaction 与 Progress Card 初始化为关闭，并保留现有
+中完成，把所有现有 Binding 的历史 Task Reaction（现 Reaction Pulse）与 Progress Card
+初始化为关闭，并保留现有
 Scope/Binding/Project、去重记录和 `side_topics` 永久路由墓碑；迁移失败时恢复旧数据库与
 旧 release。不得归档后创建空数据库，否则旧 Side 话题可能重新落入普通 Binding 路由。
 配置文件中的 `projects` mapping 会在启动时以 `INSERT OR IGNORE` 导入，数据库里已经停用
@@ -905,18 +907,19 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    `/plan`、`/apps`；`/copy`、`/vim`、`/theme`、`/exit` 也不展示。
    另发送 `/new test`、`/new none`、带引号和坏引号的 `/new ...`，都必须得到同一迁移提示、
    零 Binding mutation；`//new test` 仍作为字面 prompt。
-2. 通过 `/new` 卡片选择 `test` Project、inherit Codex，并保持 Task Reaction 与 Progress
-   Card 默认关闭后发送首条 prompt：native accepted 到终态之间不得出现任务表情、进度卡、
-   steer 文字确认或心跳；无文件终态仍是富文本/静态文本，有文件终态仍只有现有“最终回复 +
-   本轮文件”卡片。手机端也不得因关闭的 Task Reaction 收到额外表情消息。
+2. 通过 `/new` 卡片选择 `test` Project、inherit Codex，并保持 Reaction Pulse 与 Progress
+   Card 默认关闭后发送首条 prompt：native accepted 后原消息常驻 `Typing`，但整轮零
+   `THINKING`、零进度卡和零心跳回复；成功 steer 的消息添加 `OnIt`，原任务锚点不迁移。
+   终态先添加 completed/failed/interrupted 对应的 `DONE`/`ERROR`/`CrossMark`，再移除
+   `Typing`。无文件终态仍是富文本/静态文本，有文件终态仍只有现有“最终回复 +
+   本轮文件”卡片。手机端可能把这些稀疏生命周期表情显示为少量独立消息，这是已接受的
+   取舍。故意使 `OnIt` 失败时，只在 native steer 已成功后收到文字 fallback。
 
-   用 `/config` 只开启 Task Reaction 后启动长 Turn：原消息常驻 `Typing`，`THINKING` 按
-   低频节奏显示/隐藏，不收到“已接收”或心跳回复；成功 steer 的消息只添加 `OnIt`，原任务
-   pulse 不迁移。终态先添加 completed/failed/interrupted 对应的
-   `DONE`/`ERROR`/`CrossMark`，再移除 `THINKING` 与 `Typing`。故意使 `OnIt` 失败时仅在
-   native steer 已成功后收到文字 fallback；关闭 Task Reaction 后同一故障不发 fallback。
+   用 `/config` 只开启 Reaction Pulse 后再启动长 Turn：Lifecycle Reaction 与上述关闭组
+   相同，但 `THINKING` 按低频节奏显示/隐藏，终态再与 `Typing` 一起清理。
 
-   再只开启 Progress Card：native accepted 后只出现一张运行卡，顶部过程区展开；status 与
+   再只开启 Progress Card：native accepted 后除 Lifecycle Reaction 外只出现一张运行卡，
+   顶部过程区展开；status 与
    原生 checklist（`✓/→/○`）变化必须更新同一个 message ID，无 plan 时显示“Codex 尚未
    生成”，observer unavailable 时显示“暂不可用”。卡片不显示耗时、百分比、ETA、
    reasoning、raw command/tool output 或 tool arguments。成功 steer 后旧 checklist 在新
@@ -1080,8 +1083,9 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     对 root 与 seed 各重放一次相同 UUID，必须返回原消息的 exact message/chat/root/thread
     identity，且只产生一个话题；不同 root/seed UUID 必须互异。这个对账门禁失败时 Side
     必须保持 unavailable，因为 FakeChannel 只能证明本地复用了 UUID，不能证明飞书的响应
-    形状。创建一个默认关闭两项反馈的 Side，确认无文件终态为富文本/静态文本且零 reaction/
-    plan observation；再创建同时开启两项的 Side，确认 running/steer 表情与 ordinary Turn
+    形状。创建一个默认关闭两项反馈的 Side，确认无文件终态为富文本/静态文本，
+    accepted/steer/终态 Lifecycle Reaction 与 ordinary Turn 相同，且零 `THINKING`/plan
+    observation；再创建同时开启两项的 Side，确认 Reaction Pulse 与 ordinary Turn
     相同，Activity/Result/Files 始终更新同一个回复卡 message ID。随后修改 Parent 的
     Model/Effort/Speed 与两项 Task Feedback，既有 Side 后续 Turn 必须继续使用创建时快照；
     新建 Side 才使用新值。Side 内 `/goal` 必须零 mutation 拒绝，根卡 close/expiry 更新仍

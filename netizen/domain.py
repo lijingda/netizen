@@ -210,7 +210,7 @@ class CardControlIntent:
     model_id: str | None = None
     effort_id: str | None = None
     service_tier_id: str | None = None
-    task_reactions_enabled: bool | None = None
+    reaction_pulse_enabled: bool | None = None
     progress_card_enabled: bool | None = None
     message_context_mode: MentionContextMode | None = None
     side_id: str | None = None

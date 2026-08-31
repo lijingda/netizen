@@ -1985,7 +1985,15 @@ class _ReactionController:
         self._pulses: dict[str, _TurnReactionPulse] = {}
         self._closed = False
 
-    async def start(self, turn_id: str, message_id: str) -> bool:
+    async def start(
+        self,
+        turn_id: str,
+        message_id: str,
+        *,
+        pulse_enabled: bool,
+    ) -> bool:
+        if type(pulse_enabled) is not bool:
+            raise ValueError("reaction pulse setting must be a boolean")
         if not turn_id or not message_id:
             logger.error(
                 "failed to start turn reactions: missing identity",
@@ -2019,6 +2027,8 @@ class _ReactionController:
             self._pulses.pop(turn_id, None)
             return False
         pulse.typing_reaction_id = reaction_id
+        if not pulse_enabled:
+            return True
 
         reaction_id = await self._add_reaction(pulse, _THINKING_REACTION)
         if self._pulses.get(turn_id) is not pulse:
@@ -2633,11 +2643,9 @@ class ChannelApplication:
             terminal_reaction = _INTERRUPTED_REACTION
         else:
             terminal_reaction = _ERROR_REACTION
-        reactions_enabled = outcome.task_feedback.task_reactions_enabled
-        if reactions_enabled:
-            await self._reactions.freeze(outcome.turn_id)
-            await self._safe_add_reaction(outcome.origin, terminal_reaction)
-            await self._reactions.stop(outcome.turn_id)
+        await self._reactions.freeze(outcome.turn_id)
+        await self._safe_add_reaction(outcome.origin, terminal_reaction)
+        await self._reactions.stop(outcome.turn_id)
         if outcome.task_feedback.progress_card_enabled:
             try:
                 progress_delivered = await self._complete_task_progress_card(outcome)
@@ -3413,22 +3421,22 @@ class ChannelApplication:
             submit_kwargs.pop("input", None)
             input_value = None
         if submission.disposition is SubmitDisposition.STEERED:
-            if submission.task_feedback.task_reactions_enabled:
-                if not await self._safe_add_reaction(message, _STEER_REACTION):
-                    await self._reply(message, "已接收调整。")
+            if not await self._safe_add_reaction(message, _STEER_REACTION):
+                await self._reply(message, "已接收调整。")
             return
 
         release = submission.release_receipt_attempt
         assert release is not None
         try:
-            presenters: list[Awaitable[bool]] = []
-            if submission.task_feedback.task_reactions_enabled:
-                presenters.append(
-                    self._reactions.start(
-                        submission.turn_id,
-                        _message_id(message),
-                    )
+            presenters: list[Awaitable[bool]] = [
+                self._reactions.start(
+                    submission.turn_id,
+                    _message_id(message),
+                    pulse_enabled=(
+                        submission.task_feedback.reaction_pulse_enabled
+                    ),
                 )
+            ]
             if submission.task_feedback.progress_card_enabled:
                 presenters.append(
                     self._progress_cards.start(
@@ -3576,21 +3584,21 @@ class ChannelApplication:
             submit_kwargs.pop("input", None)
             input_value = None
         if submission.disposition is SubmitDisposition.STEERED:
-            if submission.task_feedback.task_reactions_enabled:
-                if not await self._safe_add_reaction(reply_origin, _STEER_REACTION):
-                    await self._reply(reply_origin, "已接收 Side 调整。")
+            if not await self._safe_add_reaction(reply_origin, _STEER_REACTION):
+                await self._reply(reply_origin, "已接收 Side 调整。")
             return
         release = submission.release_receipt_attempt
         assert release is not None
         try:
-            presenters: list[Awaitable[bool]] = []
-            if submission.task_feedback.task_reactions_enabled:
-                presenters.append(
-                    self._reactions.start(
-                        submission.turn_id,
-                        _message_id(reply_origin),
-                    )
+            presenters: list[Awaitable[bool]] = [
+                self._reactions.start(
+                    submission.turn_id,
+                    _message_id(reply_origin),
+                    pulse_enabled=(
+                        submission.task_feedback.reaction_pulse_enabled
+                    ),
                 )
+            ]
             if submission.task_feedback.progress_card_enabled:
                 presenters.append(
                     self._progress_cards.start_side(
@@ -5734,7 +5742,7 @@ class ChannelApplication:
         if intent.name is CardControlName.CREATE_BINDING:
             assert intent.project_alias is not None
             assert intent.expected_revision is not None
-            assert intent.task_reactions_enabled is not None
+            assert intent.reaction_pulse_enabled is not None
             assert intent.progress_card_enabled is not None
             message_context_mode = (
                 intent.message_context_mode or MentionContextMode.CURRENT_ONLY
@@ -5748,7 +5756,7 @@ class ChannelApplication:
             settings = await self._resolve_card_model_settings(intent)
             turn_settings = _binding_turn_settings(settings)
             task_feedback = BindingTaskFeedback(
-                task_reactions_enabled=bool(intent.task_reactions_enabled),
+                reaction_pulse_enabled=bool(intent.reaction_pulse_enabled),
                 progress_card_enabled=bool(intent.progress_card_enabled),
             )
             project, binding = await self._create_binding(
@@ -5779,7 +5787,8 @@ class ChannelApplication:
                     f"Model 来源：{'继承 Codex' if settings is None else '显式配置'}；"
                     f"@ 时读取的消息范围："
                     f"{context_mode_display(binding.message_context_mode)}。"
-                    f"任务表情：{'开启' if binding.task_feedback.task_reactions_enabled else '关闭'}；"
+                    f"执行中表情闪烁："
+                    f"{'开启' if binding.task_feedback.reaction_pulse_enabled else '关闭'}；"
                     f"进度卡：{'开启' if binding.task_feedback.progress_card_enabled else '关闭'}。"
                     "现在可以直接发送任务。",
                 )
@@ -5790,11 +5799,11 @@ class ChannelApplication:
             assert intent.expected_context_revision is not None
             assert intent.feedback_revision is not None
             assert intent.message_context_mode is not None
-            assert intent.task_reactions_enabled is not None
+            assert intent.reaction_pulse_enabled is not None
             assert intent.progress_card_enabled is not None
             settings = await self._resolve_card_model_settings(intent)
             task_feedback = BindingTaskFeedback(
-                task_reactions_enabled=bool(intent.task_reactions_enabled),
+                reaction_pulse_enabled=bool(intent.reaction_pulse_enabled),
                 progress_card_enabled=bool(intent.progress_card_enabled),
             )
             before = self._bindings.get(intent.binding_id)
@@ -5854,7 +5863,8 @@ class ChannelApplication:
                     f"Model 来源：{'继承 Codex' if settings is None else '显式配置'}；"
                     f"@ 时读取的消息范围："
                     f"{context_mode_display(binding.message_context_mode)}。"
-                    f"任务表情：{'开启' if binding.task_feedback.task_reactions_enabled else '关闭'}；"
+                    f"执行中表情闪烁："
+                    f"{'开启' if binding.task_feedback.reaction_pulse_enabled else '关闭'}；"
                     f"进度卡：{'开启' if binding.task_feedback.progress_card_enabled else '关闭'}。"
                     "会话后续每条新 Turn 都会应用。",
                 )

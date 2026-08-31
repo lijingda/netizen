@@ -151,7 +151,7 @@ class BindingStoreTest(unittest.TestCase):
     def test_task_feedback_is_persistent_atomic_and_revision_guarded(self) -> None:
         binding = self.create()
         enabled = BindingTaskFeedback(
-            task_reactions_enabled=True,
+            reaction_pulse_enabled=True,
             progress_card_enabled=True,
         )
 
@@ -181,6 +181,14 @@ class BindingStoreTest(unittest.TestCase):
         self.assertEqual(configured.feedback_revision, 2)
         self.assertEqual(configured.settings_revision, 1)
         self.assertEqual(configured.context_revision, 1)
+        self.assertEqual(
+            self.store._connection.execute(
+                "SELECT task_reactions_enabled FROM bindings "
+                "WHERE binding_id = ?",
+                (binding.id,),
+            ).fetchone()[0],
+            1,
+        )
 
         with self.assertRaises(BindingFeedbackRevisionConflict):
             self.store.set_configuration(
@@ -202,7 +210,7 @@ class BindingStoreTest(unittest.TestCase):
                 (binding.id,),
             )
         with self.assertRaisesRegex(ValueError, "booleans"):
-            BindingTaskFeedback(task_reactions_enabled=1)  # type: ignore[arg-type]
+            BindingTaskFeedback(reaction_pulse_enabled=1)  # type: ignore[arg-type]
 
         created_enabled = self.store.create_binding(
             scope=self.scope,
@@ -356,7 +364,7 @@ class BindingStoreTest(unittest.TestCase):
             expected_context_revision=2,
             expected_feedback_revision=1,
             settings=None,
-            task_feedback=BindingTaskFeedback(task_reactions_enabled=True),
+            task_feedback=BindingTaskFeedback(reaction_pulse_enabled=True),
             message_context_mode=MentionContextMode.CATCH_UP,
             context_anchor=None,
         )
@@ -366,7 +374,7 @@ class BindingStoreTest(unittest.TestCase):
         self.assertEqual(inherited.context_revision, 2)
         self.assertEqual(
             inherited.task_feedback,
-            BindingTaskFeedback(task_reactions_enabled=True),
+            BindingTaskFeedback(reaction_pulse_enabled=True),
         )
         self.assertEqual(inherited.feedback_revision, 2)
 
@@ -377,7 +385,7 @@ class BindingStoreTest(unittest.TestCase):
                 expected_context_revision=1,
                 expected_feedback_revision=2,
                 settings=selected,
-                task_feedback=BindingTaskFeedback(task_reactions_enabled=True),
+                task_feedback=BindingTaskFeedback(reaction_pulse_enabled=True),
                 message_context_mode=MentionContextMode.CURRENT_ONLY,
                 context_anchor=None,
             )
@@ -392,7 +400,7 @@ class BindingStoreTest(unittest.TestCase):
             expected_context_revision=2,
             expected_feedback_revision=2,
             settings=None,
-            task_feedback=BindingTaskFeedback(task_reactions_enabled=True),
+            task_feedback=BindingTaskFeedback(reaction_pulse_enabled=True),
             message_context_mode=MentionContextMode.CURRENT_ONLY,
             context_anchor=None,
         )

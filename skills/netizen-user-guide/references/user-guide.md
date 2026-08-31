@@ -7,7 +7,7 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 ## 快速开始
 
 1. 发送 exact `/new`，在卡片的单个下拉框中选择 Project，并选择继承 Codex 或显式
-   Model、Effort 和 Speed；还可按需开启 Task Reaction 和 Progress Card，两项默认关闭。
+   Model、Effort 和 Speed；还可按需开启 Reaction Pulse 和 Progress Card，两项默认关闭。
    群聊和群话题还可选择 @ 时读取的消息范围。`/new` 不接受参数。
 2. 直接发送任务描述。第一次真实任务才会创建原生 Codex Thread；单独 `/new` 不会产生空白 Turn。
 3. 普通 Turn 运行时继续发送普通消息，会 steer 当前精确 Turn，不会排队成下一轮；
@@ -58,11 +58,12 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 ### 飞书中的运行反馈
 
 - 每个普通会话有两个独立的任务反馈选项，可在 `/new` 创建时或空闲时通过 `/config`
-  修改；两项默认都关闭。普通 Turn 两项都关闭时，任务被接受后到终态之间不发送任务
-  表情或进度卡，最终结果仍会正常回复。
-- Task Reaction 开启后，普通或 Side 任务在原任务消息上使用 `Typing` 和低频 `THINKING`；steer
-  成功后在 steer 消息上使用 `OnIt`，原任务消息仍是运行状态锚点。完成、失败或中断时先
-  使用相应终态表情，再清理运行态表情。关闭时也不会发送 `OnIt` 失败的文字确认。
+  修改；Reaction Pulse 与 Progress Card 默认都关闭。两项都关闭时仍会显示稀疏的生命周期
+  表情，但没有 `THINKING` 闪烁或进度卡，最终结果仍会正常回复。
+- 普通或 Side Turn 在 accepted 后始终在原任务消息上尽力使用 `Typing`；steer 成功后在
+  steer 消息上使用 `OnIt`，原任务消息仍是运行状态锚点。完成、失败或中断时先使用
+  相应终态表情，再清理运行态表情。`OnIt` 失败时，已成功的 steer 会回退文字确认。
+- Reaction Pulse 开启后，执行中还会低频显示/隐藏 `THINKING`；关闭只停止这个动态闪烁。
 - Progress Card 开启后，普通或 Side Turn 被接受时回复一张运行卡；Goal 始终使用一张组合卡，
   开启该选项时在卡中增加过程区。过程区在运行中展开，只按
   当前状态与原生 checklist 的变化更新同一张卡；不显示耗时、完成百分比、ETA、内部
@@ -73,7 +74,7 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
   Card 初始、过程或终态更新失败时，最终结果会回退到原有回复方式。
 - Progress Card 关闭时严格保持普通或 Side Turn 原有终态：无文件时使用富文本/静态文本回复，
   有文件时最终文本和“本轮文件”合成完成卡。Goal 卡本身始终存在，关闭只是不加入
-  Activity 模块；Task Reaction 仍不作用于 Goal。Side 使用创建时冻结的 Parent 选项，
+  Activity 模块；Lifecycle Reaction 仍不作用于 Goal。Side 使用创建时冻结的 Parent 选项，
   压缩不使用这两个选项。
 
 ## 发送消息、引用与图片
@@ -159,7 +160,7 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 ### 新建与配置 Project
 
 - `/new`：打开唯一的新建卡片。Project 下拉框展示全部 enabled Projects，不由 Netizen
-  截断或分页；Model 可继承 Codex，也可显式选择 Model、Effort 和 Speed。Task Reaction
+  截断或分页；Model 可继承 Codex，也可显式选择 Model、Effort 和 Speed。Reaction Pulse
   与 Progress Card 可独立选择且默认关闭；群聊和群话题还可选择 @ 时读取的消息范围。
   提交后创建并切换 Lazy 会话。
 - 任何带参数的 `/new ...` 快捷创建都已下线；请在卡片中选择，包括默认目录 `none`。
@@ -221,7 +222,7 @@ Turn Settings、重命名、归档、恢复或恢复并设为当前、删除 Laz
 ## Model、Effort、Speed、Task Feedback 与 @ 时读取的消息范围
 
 - `/new` 卡片可以为新会话选择继承 Codex 或显式 Model、Effort 和 Speed；群聊和群话题
-  还可选择 @ 时读取的消息范围；Task Reaction 与 Progress Card 默认关闭、可独立开启。
+  还可选择 @ 时读取的消息范围；Reaction Pulse 与 Progress Card 默认关闭、可独立开启。
 - `/config` 原子修改当前会话后续新 Turn 的三项设置、两个 Task Feedback，以及群聊 @ 时
   读取的消息范围。它不创建 Turn，也不能直接配置另一个会话；应先 `/resume`。
 - 当前 Turn 运行、停止中或正在压缩时不能修改配置。运行时的普通消息仍只会 steer 当前 Turn。
@@ -273,7 +274,7 @@ Side 适合在不打断 Parent 会话的情况下讨论一个临时分支。
   只承载 reaction 和最终回复。后续每条 Side Prompt 使用其实际发送者。
 - Parent 和多个 Side 可以并发，但共享同一个真实 Project 目录。
 - Side 在同一个临时 fork 上支持多轮：空闲时开始新 Turn，运行中继续 steer。
-- Side 创建时冻结 Parent 当时的 Model、Effort、Speed、Task Reaction 与 Progress Card；
+- Side 创建时冻结 Parent 当时的 Model、Effort、Speed、Reaction Pulse 与 Progress Card；
   Parent 后续 `/config` 不影响既有 Side。每轮 Side Turn 的表情、进度卡、富文本和文件卡
   与普通 Turn 使用同一规则。
 - Side 内只支持普通 prompt、`//`、`/status`、`/stop`、`/help`、`/` 和 `/side close`。
@@ -350,10 +351,11 @@ Goal、停止或压缩状态会直接拒绝普通消息。等待状态回到空�
 
 当前会话可能正在运行、停止或压缩。等待其回到空闲后再用 `/config`；要配置别的会话，先 `/resume`。
 
-### “为什么任务运行时没有表情或进度卡？”
+### “为什么没有执行中表情闪烁或进度卡？”
 
-Task Reaction 和 Progress Card 默认都关闭。请在新建会话的 `/new` 卡片中开启，或等当前
-会话空闲后通过 `/config` 修改；两项互不依赖。Progress Card 关闭并不影响普通 Turn 的
+Reaction Pulse 和 Progress Card 默认都关闭。请在新建会话的 `/new` 卡片中开启，或等
+当前会话空闲后通过 `/config` 修改；两项互不依赖。即使 Reaction Pulse 关闭，任务
+accepted、成功 steer 和终态仍会尽力显示生命周期表情。Progress Card 关闭并不影响普通 Turn 的
 最终回复：没有文件时仍回复富文本/静态文本，有文件时仍使用完成卡。Goal 始终有一张状态
 与控制卡，关闭该选项只会隐藏 Activity 过程模块。Side 使用创建瞬间冻结的 Parent 选项；
 若想改变既有 Side 的反馈方式，需要回到 Parent 修改后重新创建 Side。
@@ -371,9 +373,10 @@ Goal、Compaction 或 Turn 观测不可用时也会直接委托 App Server remov
 
 不用。`failed` 只结束本轮 Turn，原 Thread、历史和 Binding 都保留；下一条普通消息会在
 同一 Thread 开始新 Turn。如果显示 `turn-observation-unavailable`，说明一次短恢复后仍无法
-确认 exact Turn，自动周期读取、任务表情脉冲和进度卡轮询已停止；后续若确认终态仍会收到
-普通完成回复。可从 `/sessions` 重新检查、停止、归档或删除；归档/删除不需要先修好观测，
-其他会话不受影响。
+确认 exact Turn，自动周期读取、Reaction Pulse 和进度卡轮询已停止，原消息上已记录的
+`Typing`/`THINKING` 也会尽力清理，但不会冒充任务已经结束；后续若确认终态仍会收到普通
+完成回复。可从 `/sessions` 重新检查、停止、归档或删除；归档/删除不需要先修好观测，其他
+会话不受影响。
 
 ### “`/stop` 已完成，为什么进程还在？”
 
