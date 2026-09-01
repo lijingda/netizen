@@ -66,9 +66,10 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 - Reaction Pulse 开启后，执行中还会低频显示/隐藏 `THINKING`；关闭只停止这个动态闪烁。
 - Progress Card 开启后，普通或 Side Turn 被接受时回复一张运行卡；Goal 始终使用一张组合卡，
   开启该选项时在卡中增加过程区。过程区在运行中展开，只按
-  当前状态与原生 checklist 的变化更新同一张卡；不显示耗时、完成百分比、ETA、内部
-  reasoning、raw command/tool output 或 tool arguments；计划步骤中的常见 secret/token、
-  邮箱、用户目录和内联代码/参数会被过滤。终态会在同一卡片折叠过程并显示最终回答和
+  当前状态、最近完成的 commentary、安全操作类别、子任务聚合与原生 checklist 的变化更新
+  同一张卡；不显示工具名、参数、输出、路径、耗时、完成百分比、ETA 或内部 reasoning；
+  可见文本中的常见 secret/token、邮箱、用户目录和内联代码/参数会被过滤。终态会在同一
+  卡片折叠过程并显示最终回答和
   可用的本轮文件，文件翻页后仍保留折叠过程。
 - 两项可以只开一个或同时开启。reaction/card 展示失败不会改变 Codex Turn；Progress
   Card 初始、过程或终态更新失败时，最终结果会回退到原有回复方式。

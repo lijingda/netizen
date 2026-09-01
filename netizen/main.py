@@ -67,8 +67,8 @@ from .sdk_gap_adapter import (
 from .settings import Settings
 from .terminal_cleanup import PinnedExperimentalTerminalCleanup
 from .turn_plan_observer import (
-    PinnedTurnPlanObserver,
-    TurnPlanObservationUnavailable,
+    PinnedTurnActivityObserver,
+    TurnActivityObservationUnavailable,
 )
 
 
@@ -207,9 +207,9 @@ class ServiceCore:
             except SdkGapCapabilityUnavailable as error:
                 logger.warning("native Thread Delete unavailable: %s", error)
             try:
-                turn_plan_observer = PinnedTurnPlanObserver(self._codex)
-            except TurnPlanObservationUnavailable as error:
-                logger.warning("native Turn plan observation unavailable: %s", error)
+                turn_plan_observer = PinnedTurnActivityObserver(self._codex)
+            except TurnActivityObservationUnavailable as error:
+                logger.warning("native Turn activity observation unavailable: %s", error)
             self._runtime = CodexRuntime(
                 codex=self._codex,
                 bindings=self._store,

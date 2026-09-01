@@ -1,8 +1,8 @@
-"""Pinned, non-consuming observation of one active Turn's native plan queue.
+"""Pinned, non-consuming observation of one active Turn's activity queue.
 
-This is the complete private-SDK exception approved by ADR 0020.  It never
-registers, consumes, or mutates notifications and exposes no generic queue or
-RPC access.
+This is the complete private-SDK exception approved by ADR 0020 and extended
+by ADR 0052.  It never registers, consumes, or mutates notifications and
+exposes no generic queue or RPC access.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ import queue
 import threading
 from collections import deque
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
@@ -22,45 +21,45 @@ from openai_codex._message_router import MessageRouter
 from openai_codex.async_client import AsyncCodexClient
 from openai_codex.client import CodexClient
 from openai_codex.generated.v2_all import (
+    ItemCompletedNotification,
+    ItemStartedNotification,
+    TurnCompletedNotification,
     TurnPlanStep,
     TurnPlanStepStatus,
     TurnPlanUpdatedNotification,
+    TurnStartedNotification,
 )
 from openai_codex.models import Notification
 
 from .terminal_cleanup import _source_tree_fingerprint
+from .turn_activity import (
+    TurnActivityEvent,
+    TurnActivityProjectionUnavailable,
+    TurnPlanStepSnapshot,
+    TurnPlanStepState,
+    project_turn_activity_notification,
+)
 
 
 SUPPORTED_SDK_VERSION = "0.147.0"
 _PACKAGE_SOURCE_FINGERPRINT = (
     "35ec9419cb9f42577080f9bf410e81cb5a97ae64e5297c4302878c73749d39eb"
 )
-_PLAN_METHOD = "turn/plan/updated"
 _LOCK_TYPE = type(threading.Lock())
 
 
-class TurnPlanObservationUnavailable(RuntimeError):
+class TurnActivityObservationUnavailable(RuntimeError):
     """The pinned read-only observation contract cannot be satisfied."""
 
 
-class TurnPlanStepState(str, Enum):
-    PENDING = "pending"
-    IN_PROGRESS = "inProgress"
-    COMPLETED = "completed"
-
-
 @dataclass(frozen=True, slots=True)
-class TurnPlanStepSnapshot:
-    step: str
-    status: TurnPlanStepState
-
-
-@dataclass(frozen=True, slots=True)
-class TurnPlanObservation:
+class TurnActivityObservation:
     next_cursor: int
     plan_updated: bool
     plan_cursor: int | None = None
     steps: tuple[TurnPlanStepSnapshot, ...] = ()
+    events: tuple[TurnActivityEvent, ...] = ()
+    turn_completed: bool = False
 
     def __post_init__(self) -> None:
         if self.next_cursor < 0:
@@ -71,18 +70,18 @@ class TurnPlanObservation:
             raise ValueError("plan update cursor must fall within the observation")
 
 
-class TurnPlanObserver(Protocol):
+class TurnActivityObserver(Protocol):
     def observe(
         self,
         *,
         thread_id: str,
         turn_id: str,
         after_cursor: int,
-    ) -> TurnPlanObservation: ...
+    ) -> TurnActivityObservation: ...
 
 
-class PinnedTurnPlanObserver:
-    """Peek at already-routed plan notifications without consuming them."""
+class PinnedTurnActivityObserver:
+    """Peek at already-routed safe activity without consuming notifications."""
 
     __slots__ = ("_router",)
 
@@ -95,44 +94,50 @@ class PinnedTurnPlanObserver:
         thread_id: str,
         turn_id: str,
         after_cursor: int,
-    ) -> TurnPlanObservation:
+    ) -> TurnActivityObservation:
         _validate_exact_id(thread_id, label="Thread")
         _validate_exact_id(turn_id, label="Turn")
         if isinstance(after_cursor, bool) or not isinstance(after_cursor, int):
-            raise ValueError("plan cursor must be an integer")
+            raise ValueError("activity cursor must be an integer")
         if after_cursor < 0:
-            raise ValueError("plan cursor must be non-negative")
+            raise ValueError("activity cursor must be non-negative")
 
         items, next_cursor = self._snapshot_queue(turn_id, after_cursor)
         latest_steps: tuple[TurnPlanStepSnapshot, ...] = ()
         latest_cursor: int | None = None
+        events: list[TurnActivityEvent] = []
+        turn_completed = False
         for item_cursor, item in enumerate(items, start=after_cursor + 1):
             if isinstance(item, BaseException):
-                raise TurnPlanObservationUnavailable(
+                raise TurnActivityObservationUnavailable(
                     "native Turn notification queue contains a transport failure"
                 )
             if type(item) is not Notification:
-                raise TurnPlanObservationUnavailable(
+                raise TurnActivityObservationUnavailable(
                     "native Turn notification item shape changed"
                 )
-            if item.method != _PLAN_METHOD:
-                continue
-            payload = item.payload
-            if type(payload) is not TurnPlanUpdatedNotification:
-                raise TurnPlanObservationUnavailable(
-                    "native Turn plan payload shape changed"
+            try:
+                projection = project_turn_activity_notification(
+                    item,
+                    expected_thread_id=thread_id,
+                    expected_turn_id=turn_id,
                 )
-            if payload.thread_id != thread_id or payload.turn_id != turn_id:
-                # A mismatched Turn can never update this exact active Turn.
-                continue
-            latest_steps = _plan_steps(payload.plan)
-            latest_cursor = item_cursor
+            except TurnActivityProjectionUnavailable as error:
+                raise TurnActivityObservationUnavailable(str(error)) from error
+            if projection.plan_updated:
+                latest_steps = projection.steps
+                latest_cursor = item_cursor
+            if projection.event is not None:
+                events.append(projection.event)
+            turn_completed = turn_completed or projection.turn_completed
 
-        return TurnPlanObservation(
+        return TurnActivityObservation(
             next_cursor=next_cursor,
             plan_updated=latest_cursor is not None,
             plan_cursor=latest_cursor,
             steps=latest_steps,
+            events=tuple(events),
+            turn_completed=turn_completed,
         )
 
     def _snapshot_queue(
@@ -144,25 +149,25 @@ class PinnedTurnPlanObserver:
         lock = getattr(router, "_lock", None)
         notifications = getattr(router, "_turn_notifications", None)
         if type(lock) is not _LOCK_TYPE or type(notifications) is not dict:
-            raise TurnPlanObservationUnavailable(
+            raise TurnActivityObservationUnavailable(
                 "native notification router shape changed"
             )
         with lock:
             turn_queue = notifications.get(turn_id)
             if type(turn_queue) is not queue.Queue:
-                raise TurnPlanObservationUnavailable(
+                raise TurnActivityObservationUnavailable(
                     "exact native Turn notification queue is unavailable"
                 )
             mutex = getattr(turn_queue, "mutex", None)
             raw_items = getattr(turn_queue, "queue", None)
             if type(mutex) is not _LOCK_TYPE or type(raw_items) is not deque:
-                raise TurnPlanObservationUnavailable(
+                raise TurnActivityObservationUnavailable(
                     "native Turn notification queue shape changed"
                 )
             with mutex:
                 next_cursor = len(raw_items)
                 if after_cursor > next_cursor:
-                    raise TurnPlanObservationUnavailable(
+                    raise TurnActivityObservationUnavailable(
                         "native Turn notification queue was consumed unexpectedly"
                     )
                 items = tuple(
@@ -173,44 +178,44 @@ class PinnedTurnPlanObserver:
 
 def _validate_contract(codex: AsyncCodex) -> MessageRouter:
     if openai_codex.__version__ != SUPPORTED_SDK_VERSION:
-        raise TurnPlanObservationUnavailable(
-            "Turn plan observation supports only openai-codex=="
+        raise TurnActivityObservationUnavailable(
+            "Turn activity observation supports only openai-codex=="
             f"{SUPPORTED_SDK_VERSION}; found {openai_codex.__version__}"
         )
     if type(codex) is not AsyncCodex:
-        raise TurnPlanObservationUnavailable("AsyncCodex implementation type changed")
+        raise TurnActivityObservationUnavailable("AsyncCodex implementation type changed")
     if getattr(codex, "_initialized", False) is not True:
-        raise TurnPlanObservationUnavailable(
-            "AsyncCodex must be initialized before Turn plan observation is enabled"
+        raise TurnActivityObservationUnavailable(
+            "AsyncCodex must be initialized before Turn activity observation is enabled"
         )
     client = getattr(codex, "_client", None)
     if type(client) is not AsyncCodexClient:
-        raise TurnPlanObservationUnavailable("AsyncCodex private client shape changed")
+        raise TurnActivityObservationUnavailable("AsyncCodex private client shape changed")
     sync_client = getattr(client, "_sync", None)
     if type(sync_client) is not CodexClient:
-        raise TurnPlanObservationUnavailable(
+        raise TurnActivityObservationUnavailable(
             "AsyncCodexClient private sync client shape changed"
         )
     router = getattr(sync_client, "_router", None)
     if type(router) is not MessageRouter:
-        raise TurnPlanObservationUnavailable("Codex notification router shape changed")
+        raise TurnActivityObservationUnavailable("Codex notification router shape changed")
     if type(getattr(router, "_lock", None)) is not _LOCK_TYPE:
-        raise TurnPlanObservationUnavailable("Codex notification router lock changed")
+        raise TurnActivityObservationUnavailable("Codex notification router lock changed")
     if type(getattr(router, "_turn_notifications", None)) is not dict:
-        raise TurnPlanObservationUnavailable("Codex Turn route catalog shape changed")
+        raise TurnActivityObservationUnavailable("Codex Turn route catalog shape changed")
 
     _validate_generated_models()
     package_file = getattr(openai_codex, "__file__", None)
     if not isinstance(package_file, str) or not package_file.endswith(".py"):
-        raise TurnPlanObservationUnavailable("cannot locate SDK source package")
+        raise TurnActivityObservationUnavailable("cannot locate SDK source package")
     try:
         actual = _source_tree_fingerprint(Path(package_file).resolve().parent)
     except OSError as error:
-        raise TurnPlanObservationUnavailable(
+        raise TurnActivityObservationUnavailable(
             "cannot read SDK source package"
         ) from error
     if actual != _PACKAGE_SOURCE_FINGERPRINT:
-        raise TurnPlanObservationUnavailable(
+        raise TurnActivityObservationUnavailable(
             "SDK package source fingerprint changed"
         )
     return router
@@ -219,7 +224,7 @@ def _validate_contract(codex: AsyncCodex) -> MessageRouter:
 def _validate_generated_models() -> None:
     payload_fields = getattr(TurnPlanUpdatedNotification, "model_fields", {})
     if set(payload_fields) != {"explanation", "plan", "thread_id", "turn_id"}:
-        raise TurnPlanObservationUnavailable("Turn plan payload fields changed")
+        raise TurnActivityObservationUnavailable("Turn plan payload fields changed")
     if {
         name: getattr(payload_fields.get(name), "alias", None)
         for name in ("explanation", "thread_id", "turn_id", "plan")
@@ -229,39 +234,35 @@ def _validate_generated_models() -> None:
         "turn_id": "turnId",
         "plan": None,
     }:
-        raise TurnPlanObservationUnavailable("Turn plan payload fields changed")
+        raise TurnActivityObservationUnavailable("Turn plan payload fields changed")
     if getattr(payload_fields["explanation"], "default", object()) is not None:
-        raise TurnPlanObservationUnavailable("Turn plan explanation default changed")
+        raise TurnActivityObservationUnavailable("Turn plan explanation default changed")
     step_fields = getattr(TurnPlanStep, "model_fields", {})
     if set(step_fields) != {"step", "status"}:
-        raise TurnPlanObservationUnavailable("Turn plan step fields changed")
+        raise TurnActivityObservationUnavailable("Turn plan step fields changed")
     if {member.value for member in TurnPlanStepStatus} != {
         "pending",
         "inProgress",
         "completed",
     }:
-        raise TurnPlanObservationUnavailable("Turn plan step statuses changed")
+        raise TurnActivityObservationUnavailable("Turn plan step statuses changed")
 
-
-def _plan_steps(items: object) -> tuple[TurnPlanStepSnapshot, ...]:
-    if not isinstance(items, list):
-        raise TurnPlanObservationUnavailable("native Turn plan is not a list")
-    steps: list[TurnPlanStepSnapshot] = []
-    for item in items:
-        if type(item) is not TurnPlanStep:
-            raise TurnPlanObservationUnavailable("native Turn plan step shape changed")
-        step = item.step
-        if not isinstance(step, str) or not step.strip():
-            raise TurnPlanObservationUnavailable("native Turn plan step is empty")
-        status = getattr(item.status, "value", None)
-        try:
-            mapped = TurnPlanStepState(status)
-        except (TypeError, ValueError) as error:
-            raise TurnPlanObservationUnavailable(
-                "native Turn plan step status changed"
-            ) from error
-        steps.append(TurnPlanStepSnapshot(step=step, status=mapped))
-    return tuple(steps)
+    expected_notification_fields = {
+        ItemStartedNotification: {"item", "started_at_ms", "thread_id", "turn_id"},
+        ItemCompletedNotification: {
+            "completed_at_ms",
+            "item",
+            "thread_id",
+            "turn_id",
+        },
+        TurnStartedNotification: {"thread_id", "turn"},
+        TurnCompletedNotification: {"thread_id", "turn"},
+    }
+    for model, expected_fields in expected_notification_fields.items():
+        if set(getattr(model, "model_fields", {})) != expected_fields:
+            raise TurnActivityObservationUnavailable(
+                f"{model.__name__} fields changed"
+            )
 
 
 def _validate_exact_id(value: str, *, label: str) -> None:

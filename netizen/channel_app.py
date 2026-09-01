@@ -148,6 +148,7 @@ from .domain import (
     ReplyCardProjection,
     ReplyCardResultModule,
     SESSION_IDLE_STATE,
+    TurnActivityManifestEntry,
     TurnProgressManifest,
     TurnProgressManifestStep,
     persisted_goal_session_state,
@@ -526,6 +527,16 @@ def _reply_activity_module(
                 )
                 for item in visible_steps
             ),
+            commentary=tuple(snapshot.commentary),
+            operations=tuple(
+                TurnActivityManifestEntry(
+                    kind=getattr(item.kind, "value", item.kind),
+                    status=getattr(item.status, "value", item.status),
+                    text=item.text,
+                    count=item.count,
+                )
+                for item in snapshot.operations
+            ),
         ),
         terminal_status=terminal_status,
         collapsed=collapsed,
@@ -736,7 +747,7 @@ class _ReplyCardPresenter:
                 binding_id,
                 thread_id=thread_id,
                 turn_id=turn_id,
-                refresh_plan=True,
+                refresh_plan=False,
             )
         except Exception:
             logger.exception(
@@ -961,7 +972,7 @@ class _ReplyCardPresenter:
                 side_id,
                 thread_id=thread_id,
                 turn_id=turn_id,
-                refresh_plan=True,
+                refresh_plan=False,
             )
         except Exception:
             logger.exception(
@@ -1719,7 +1730,7 @@ class _ReplyCardPresenter:
                     session.binding_id,
                     thread_id=session.thread_id,
                     turn_id=session.turn_id,
-                    refresh_plan=True,
+                    refresh_plan=False,
                 )
             except Exception:
                 logger.exception(
@@ -1767,7 +1778,7 @@ class _ReplyCardPresenter:
                     session.side_id,
                     thread_id=session.thread_id,
                     turn_id=session.turn_id,
-                    refresh_plan=True,
+                    refresh_plan=False,
                 )
             except Exception:
                 logger.exception(
@@ -3257,7 +3268,6 @@ class ChannelApplication:
                 binding.id,
                 thread_id=submission.thread_id,
                 logical_turn_id=submission.logical_turn_id,
-                refresh_plan=True,
             )
             if activity_enabled
             else None
@@ -3325,7 +3335,6 @@ class ChannelApplication:
                     binding.id,
                     thread_id=thread_id,
                     logical_turn_id=logical_turn_id,
-                    refresh_plan=True,
                 )
                 if activity_enabled
                 else None
@@ -4705,7 +4714,6 @@ class ChannelApplication:
                         binding.id,
                         thread_id=active_goal.thread_id,
                         logical_turn_id=active_goal.logical_turn_id,
-                        refresh_plan=True,
                     )
                 projection = ReplyCardProjection(
                     scope=intent.scope,

@@ -73,6 +73,11 @@ from netizen.model_settings import (
     TurnModelSettings,
 )
 from netizen.sdk_gap_adapter import GoalSnapshot, GoalStatus
+from netizen.turn_activity import (
+    TurnActivityEntrySnapshot,
+    TurnActivityKind,
+    TurnActivityStatus,
+)
 from netizen.turn_files import TurnFile
 
 
@@ -1135,6 +1140,52 @@ class CardRendererTest(unittest.TestCase):
             "%",
         ):
             self.assertNotIn(forbidden, serialized)
+
+    def test_activity_card_renders_bounded_commentary_and_generic_operations(
+        self,
+    ) -> None:
+        snapshot = SimpleNamespace(
+            state=SimpleNamespace(value="running"),
+            steer_count=0,
+            plan_available=True,
+            plan_generated=False,
+            plan_may_be_stale=False,
+            steps=(),
+            commentary=(
+                "first",
+                "second",
+                "third",
+                "checked `/Users/user/private.py`",
+            ),
+            operations=(
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.COMMAND,
+                    TurnActivityStatus.IN_PROGRESS,
+                ),
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.FILE_CHANGE,
+                    TurnActivityStatus.COMPLETED,
+                    count=3,
+                ),
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.SUBAGENT,
+                    TurnActivityStatus.FAILED,
+                    count=2,
+                ),
+            ),
+        )
+
+        outbound = turn_progress_card(snapshot=snapshot)
+        serialized = json.dumps(outbound.card, ensure_ascii=False)
+
+        self.assertNotIn("first", serialized)
+        self.assertIn("second", serialized)
+        self.assertIn("third", serialized)
+        self.assertIn("[路径已隐藏]", serialized)
+        self.assertIn("执行命令", serialized)
+        self.assertIn("修改文件（3 项）", serialized)
+        self.assertIn("子任务（2 项）", serialized)
+        self.assertNotIn("private.py", serialized)
 
     def test_activity_steps_filter_chinese_adjacent_sensitive_patterns(self) -> None:
         fully_hidden = (

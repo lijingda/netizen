@@ -30,6 +30,11 @@ from netizen.sdk_gap_adapter import (
     ThreadUnsubscribeStatus,
     facade_migration_requirements,
 )
+from netizen.turn_activity import (
+    TurnActivityKind,
+    TurnActivityNotificationProjection,
+    TurnActivityStatus,
+)
 
 
 _FAKE_SERVER = r'''
@@ -154,6 +159,23 @@ for line in sys.stdin:
                 "turn/started",
                 {"threadId": "thread-goal", "turn": turn(first, "inProgress")},
             )
+            if mode == "goal":
+                notify(
+                    "item/started",
+                    {
+                        "threadId": "thread-goal",
+                        "turnId": first,
+                        "startedAtMs": 1,
+                        "item": {
+                            "type": "commandExecution",
+                            "id": "goal-command-one",
+                            "command": "cat /tmp/private.txt",
+                            "commandActions": [],
+                            "cwd": "/tmp/project",
+                            "status": "inProgress",
+                        },
+                    },
+                )
             if mode in {"start-loss", "resume-loss"}:
                 sys.exit(0)
             send({"id": request_id, "result": {"goal": goal("active")}})
@@ -446,7 +468,8 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                 control = AppServerGoalControl(codex)
                 self.assertFalse(hasattr(control, "request"))
                 handle = await control.start("thread-goal", "ship safely")
-                terminal = await handle.wait_terminal()
+                activity: list[TurnActivityNotificationProjection | None] = []
+                terminal = await handle.wait_terminal(activity.append)
             _close_probe_pipes(process)
             gc.collect()
             messages = _messages(log_path)
@@ -455,6 +478,27 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal.logical_turn_id, "turn-1")
         self.assertEqual(terminal.final_physical_turn_id, "turn-2")
         self.assertEqual(terminal.turn_status, "completed")
+        self.assertEqual(
+            [
+                (item.turn_id, item.turn_started, item.turn_completed)
+                for item in activity
+                if item is not None and (item.turn_started or item.turn_completed)
+            ],
+            [
+                ("turn-1", True, False),
+                ("turn-1", False, True),
+                ("turn-2", True, False),
+                ("turn-2", False, True),
+            ],
+        )
+        command = next(
+            item.event
+            for item in activity
+            if item is not None and item.event is not None
+        )
+        self.assertIs(command.kind, TurnActivityKind.COMMAND)
+        self.assertIs(command.status, TurnActivityStatus.IN_PROGRESS)
+        self.assertNotIn("private.txt", repr(command))
         methods = [item.get("method") for item in messages if "id" in item]
         self.assertEqual(
             methods,
@@ -476,6 +520,24 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                 "status": "active",
             },
         )
+
+    async def test_goal_activity_sink_failure_does_not_break_unique_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            log_path = Path(raw) / "requests.jsonl"
+            async with AsyncCodex(_config(log_path, "goal")) as codex:
+                process = codex._client._sync._proc
+                control = AppServerGoalControl(codex)
+                handle = await control.start("thread-goal", "ship safely")
+
+                def broken_sink(_projection) -> None:
+                    raise RuntimeError("display unavailable")
+
+                terminal = await handle.wait_terminal(broken_sink)
+            _close_probe_pipes(process)
+            gc.collect()
+
+        self.assertEqual(terminal.logical_turn_id, "turn-1")
+        self.assertEqual(terminal.final_physical_turn_id, "turn-2")
 
     async def test_goal_resume_registers_route_without_clearing_goal(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

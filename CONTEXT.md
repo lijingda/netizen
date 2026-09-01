@@ -236,17 +236,20 @@ alias、canonical cwd 和是否可用于新会话；停用不影响已有会话�
 **none**：映射到服务级 `defaultCwd` 的保留 Project alias。
 
 **Ordinary Active Turn**：以 Binding ID 为键的内存记录：handle、owner、origin、状态、
-task、receipt Event，以及只读 plan cursor/checklist、成功 steer count 与 freshness。
+task、receipt Event，以及只读 Activity cursor/checklist/commentary/安全操作、成功 steer count
+与 freshness。
 native 终态到达即释放，均不持久化。
 
-**Turn Activity Projection / Turn 活动投影**：一个 exact Ordinary Active Turn 的有界、
-瞬态展示视图，当前只包含状态与原生 checklist。它不是推理过程、工具日志、Turn 历史或
-终态事实源。
+**Turn Activity Projection / Turn 活动投影**：一个 exact Ordinary、Side 或 Goal physical
+Turn 的有界、瞬态展示视图，只包含状态、原生 checklist、最近 completed commentary、
+通用操作类别/状态及子任务、文件修改数量。它不包含工具名、参数、输出、路径、reasoning，
+也不是 Turn 历史或终态事实源。
 
 **Side Turn**：以 Side ID 为键、在同一 ephemeral Side Thread 上串行开始或 steer 的
 当前 Turn。它使用普通 `AsyncTurnHandle.run()` 完成路径，不使用持久 Thread history
-recovery，且不写入 Channel Database。展示复用普通 Turn 的 Lifecycle Reaction 以及
-Activity、Result、Files 回复模块，但不允许 Goal。
+recovery，且不写入 Channel Database。Progress Card 开启时可在调用同一个 `run()` 唯一
+消费前只读观察到 exact terminal signal；关闭或观察降级时立即使用原路径。展示复用普通
+Turn 的 Lifecycle Reaction 以及 Activity、Result、Files 回复模块，但不允许 Goal。
 
 **Lifecycle Reaction / 任务生命周期表情**：普通与 Side Turn 始终开启的尽力节点反馈：
 accepted 原消息使用 `Typing`，成功 steer 使用 `OnIt`，终态使用
@@ -265,8 +268,8 @@ Activity、Result 与 Files 四种。模块只投影已经确认的领域状态�
 
 **Progress Card / 进度卡**：Binding 可选开启 Activity Module 的用户设置。普通 Turn 或
 Goal 执行中展开有界活动投影；Side Turn 使用 Side 创建时冻结的选择。终态在同一 Reply
-Card 折叠过程；所有 plan step 和随分页携带的过程 manifest 都经过同一套有界敏感模式
-过滤。它不保存执行历史，也不是终态事实源。
+Card 折叠过程；所有可见 commentary、plan step 和随分页携带的过程 manifest 都经过同一套
+有界敏感模式过滤。它不保存执行历史，也不是终态事实源。
 
 **Standard CODEX_HOME**：服务 effective user 的原生 Codex 状态根；显式
 `CODEX_HOME` 优先，否则为该账号的 `$HOME/.codex`。Netizen 不修改其内部

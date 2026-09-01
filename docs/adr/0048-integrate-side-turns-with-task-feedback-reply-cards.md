@@ -3,7 +3,7 @@ status: accepted
 date: 2026-08-28
 amends: 0021, 0046, 0047
 related: 0020, 0024, 0027
-amended_by: 0051
+amended_by: 0051, 0052
 ---
 
 # 让 Side Turn 复用普通 Turn 的任务反馈与回复卡

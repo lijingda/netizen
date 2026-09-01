@@ -23,10 +23,10 @@ SSH config 中的 alias，也可以是 `<user>@<hostname>`。LaunchAgent 的首�
 Goal/Skills、ADR 0021 的 Side 与 ADR 0037 的 Thread Delete Adapter 不做运行时版本
 allowlist；修改 pinned SDK/App Server 或这些 Adapter 时，开发迭代必须对实际 resolved
 组合运行受影响的 capability harness。Delete 能力变更还必须覆盖 disposable lifecycle
-live probe 与 Runtime 四视图对账测试。ADR 0020 的 active-Turn plan
-observer 另行精确锁定 SDK 版本、源码指纹和非消费 queue contract；门禁失败只关闭
-checklist 展示，不关闭普通 Turn。这个降级以 ADR 0009 独立的 service-wide SDK/cleanup
-启动门禁通过为前提；不能用 plan 的展示降级绕过该门禁。
+live probe 与 Runtime 四视图对账测试。ADR 0020/0052 的 active-Turn Activity observer
+另行精确锁定 SDK 版本、源码指纹、generated shape 和非消费 queue contract；门禁失败只
+关闭 checklist/Activity 展示，不关闭普通 Turn。这个降级以 ADR 0009 独立的 service-wide
+SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕过该门禁。
 
 ## 目录
 
@@ -246,12 +246,13 @@ terminal status 与 final agent message；若 App Server 短暂先暴露 complet
 继续有界重读，不能把部分 materialized Turn 当成最终结果。生产 Runtime 对同一窗口最多
 重读 4 次，并保留无文本 Turn 的既有显式兜底。
 
-`make check` 会运行 `probe_sdk_turn_plan.py`：真实安装 SDK 连接 fake App Server，observer
-先快照 exact active Turn 的 plan，再证明队列长度、顺序和对象身份未变，最后由公开
-stream 收到同一 plan 并排空 completion。`plan` live phase 会要求模型先生成 checklist，
-在有界延迟 Turn 中接受一次 steer，再观察包含 steer 新步骤的完整 plan replacement、
-最终 steered 回复和终态后公开 stream 中仍存在这些通知。相关 SDK/Plan 迭代必须在合入前
-解释并处理任一步失败。
+`make check` 会运行 `probe_sdk_turn_plan.py`：真实安装 SDK 连接 fake App Server，
+`PinnedTurnActivityObserver` 先从 exact active Turn 非消费地投影 plan、completed commentary
+和 command lifecycle，证明队列长度、顺序和对象身份未变且原始命令/敏感文本未进入投影，
+最后由公开 stream 收到同一对象并排空 completion。`plan` live phase 会要求模型先生成
+checklist 和至少一种安全 Activity item，在有界延迟 Turn 中接受一次 steer，再观察完整 plan
+replacement、最终 steered 回复和终态后公开 stream 中仍存在这些通知。相关 SDK/Activity
+迭代必须在合入前解释并处理任一步失败。
 
 每次 probe 都输出实际 `openai_codex_version` 并先运行 facade inventory。若 Goal、
 Skills、Side boundary inject、Thread unsubscribe、Apps 或 Thread Delete 出现候选高层 API，

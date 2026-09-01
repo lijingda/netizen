@@ -3,7 +3,7 @@ status: accepted
 date: 2026-08-13
 amends: 0008
 related: 0009, 0010, 0014
-amended_by: 0026
+amended_by: 0026, 0052
 ---
 
 # 用精确锁定的只读 Adapter 观察运行中 Turn 的原生 Plan

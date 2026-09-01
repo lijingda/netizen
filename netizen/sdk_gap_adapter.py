@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -21,6 +22,11 @@ from openai_codex import _goal as _sdk_goal
 from openai_codex.generated import v2_all as _generated
 
 from .domain import GoalStatus
+from .turn_activity import (
+    TurnActivityNotificationProjection,
+    TurnActivityProjectionUnavailable,
+    project_turn_activity_notification,
+)
 
 
 _SKILLS_LIST_METHOD = "skills/list"
@@ -141,7 +147,13 @@ class GoalHandle(Protocol):
 
     def current_physical_turn_id(self) -> str | None: ...
 
-    async def wait_terminal(self) -> GoalStreamTerminal: ...
+    async def wait_terminal(
+        self,
+        activity_sink: Callable[
+            [TurnActivityNotificationProjection | None], None
+        ]
+        | None = None,
+    ) -> GoalStreamTerminal: ...
 
     async def pause(self) -> GoalPauseAck: ...
 
@@ -622,9 +634,13 @@ class AppServerGoalControl:
         state: Any,
         logical_turn_id: str | None,
     ) -> _AppServerGoalHandle:
+        activity_tap = _GoalActivityTap(state.thread_id)
         stream = self._stream_type(
             state=state,
-            next_notification=lambda: self._client.next_goal_notification(state),
+            next_notification=lambda: activity_tap.next_notification(
+                self._client,
+                state,
+            ),
             unregister=lambda: self._client.unregister_goal_operation(state),
             cancel_goal=lambda: self._client.cancel_goal_operation(state),
         )
@@ -634,7 +650,62 @@ class AppServerGoalControl:
             state=state,
             stream=stream,
             logical_turn_id=logical_turn_id,
+            activity_tap=activity_tap,
         )
+
+
+class _GoalActivityTap:
+    """Project activity inside the existing Goal notification consumer."""
+
+    __slots__ = ("_thread_id", "_turn_id", "_sink")
+
+    def __init__(self, thread_id: str) -> None:
+        self._thread_id = thread_id
+        self._turn_id: str | None = None
+        self._sink: Callable[
+            [TurnActivityNotificationProjection | None], None
+        ] | None = None
+
+    def bind(
+        self,
+        sink: Callable[[TurnActivityNotificationProjection | None], None] | None,
+    ) -> None:
+        self._sink = sink
+
+    async def next_notification(self, client: Any, state: Any) -> Any:
+        notification = await client.next_goal_notification(state)
+        sink = self._sink
+        if sink is None:
+            return notification
+        try:
+            projection = project_turn_activity_notification(
+                notification,
+                expected_thread_id=self._thread_id,
+                expected_turn_id=self._turn_id,
+            )
+        except TurnActivityProjectionUnavailable:
+            self._sink = None
+            try:
+                sink(None)
+            except Exception:
+                pass
+            return notification
+        if projection.turn_started:
+            self._turn_id = projection.turn_id
+        if not (
+            projection.turn_started
+            or projection.turn_completed
+            or projection.plan_updated
+            or projection.event is not None
+        ):
+            return notification
+        try:
+            sink(projection)
+        except Exception:
+            # Activity is display-only. A projection consumer can disable
+            # itself but must never interrupt the one Goal notification stream.
+            self._sink = None
+        return notification
 
 
 class _AppServerGoalHandle:
@@ -644,6 +715,7 @@ class _AppServerGoalHandle:
         "_state",
         "_stream",
         "_logical_turn_id",
+        "_activity_tap",
     )
 
     def __init__(
@@ -654,12 +726,14 @@ class _AppServerGoalHandle:
         state: Any,
         stream: AsyncIterator[Any],
         logical_turn_id: str | None,
+        activity_tap: _GoalActivityTap,
     ) -> None:
         self._client = client
         self._status_model = status_model
         self._state = state
         self._stream = stream
         self._logical_turn_id = logical_turn_id
+        self._activity_tap = activity_tap
 
     @property
     def id(self) -> str | None:
@@ -678,12 +752,22 @@ class _AppServerGoalHandle:
         value = self._state.current_turn()
         return value if isinstance(value, str) and value else None
 
-    async def wait_terminal(self) -> GoalStreamTerminal:
+    async def wait_terminal(
+        self,
+        activity_sink: Callable[
+            [TurnActivityNotificationProjection | None], None
+        ]
+        | None = None,
+    ) -> GoalStreamTerminal:
         logical_turn_id = self._logical_turn_id
         if logical_turn_id is None:
             raise GoalControlError("Goal logical Turn 尚未建立。")
-        async for _notification in self._stream:
-            pass
+        self._activity_tap.bind(activity_sink)
+        try:
+            async for _notification in self._stream:
+                pass
+        finally:
+            self._activity_tap.bind(None)
         final_turn = getattr(self._state, "completed_turn", None)
         physical_turn_id = getattr(final_turn, "id", None)
         status = getattr(getattr(final_turn, "status", None), "value", None)
