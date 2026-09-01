@@ -11,7 +11,9 @@ import asyncio
 import base64
 import json
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
 from openai_codex import ImageInput, TextInput
@@ -67,6 +69,10 @@ class PreparedImage:
     mime_type: str
     size_bytes: int
     data_url: str
+
+
+ImagePromptReferenceKey = tuple[ImageSource, str, str]
+ImagePromptReferences = Mapping[ImagePromptReferenceKey, str]
 
 
 class ImageDownloadChannel(Protocol):
@@ -293,24 +299,80 @@ async def prepare_images(
         ) from error
 
 
+def image_prompt_references(
+    images: Sequence[PreparedImage],
+) -> ImagePromptReferences:
+    """Assign one prompt-local ``imgN`` ref in exact native input order."""
+
+    ordered_images = _ordered_images(images)
+    references: dict[ImagePromptReferenceKey, str] = {}
+    for index, image in enumerate(ordered_images, start=1):
+        key = _image_prompt_reference_key(image.reference)
+        if key in references:
+            raise ImageInputContractError(
+                "图片输入包含重复的 exact 资源，本条消息未执行。"
+            )
+        references[key] = f"img{index}"
+    return MappingProxyType(references)
+
+
+def localize_image_markers(
+    text: str,
+    *,
+    source: ImageSource,
+    message_id: str,
+    image_prompt_refs: ImagePromptReferences,
+) -> str:
+    """Replace SDK-rendered Feishu image keys with prompt-local refs.
+
+    Only Markdown image targets backed by an exact prepared image are changed;
+    ordinary prose and fenced code remain byte-for-byte intact.
+    """
+
+    replacements: dict[str, str] = {}
+    for (candidate_source, candidate_message_id, file_key), prompt_ref in (
+        image_prompt_refs.items()
+    ):
+        if candidate_source != source or candidate_message_id != message_id:
+            continue
+        existing = replacements.get(file_key)
+        if existing is not None and existing != prompt_ref:
+            raise ImageInputContractError(
+                "同一消息图片对应多个本地引用，本条消息未执行。"
+            )
+        replacements[file_key] = prompt_ref
+    if not replacements:
+        return text
+
+    parts = text.split("```")
+    for index in range(0, len(parts), 2):
+        parts[index] = _IMAGE_MARKER_RE.sub(
+            lambda match: _replace_image_marker(match, replacements),
+            parts[index],
+        )
+    return "```".join(parts)
+
+
 def compose_multimodal_input(
     prompt_text: str,
     *,
     images: tuple[PreparedImage, ...],
+    image_prompt_refs: ImagePromptReferences | None = None,
 ) -> str | list[Any]:
     """Place labeled native images before one complete final text prompt."""
 
     if not images:
+        if image_prompt_refs:
+            raise ImageInputContractError(
+                "无图片输入不能携带图片本地引用，本条消息未执行。"
+            )
         return prompt_text
-    ordered_images = tuple(
-        image
-        for source in _IMAGE_SOURCE_ORDER
-        for image in images
-        if image.reference.source == source
-    )
-    if len(ordered_images) != len(images):
+    ordered_images = _ordered_images(images)
+    expected_refs = image_prompt_references(ordered_images)
+    resolved_refs = expected_refs if image_prompt_refs is None else image_prompt_refs
+    if dict(resolved_refs) != dict(expected_refs):
         raise ImageInputContractError(
-            "图片输入包含未知的历史来源，本条消息未执行。"
+            "图片输入与本地引用不一致，本条消息未执行。"
         )
     counts = {
         source: sum(image.reference.source == source for image in images)
@@ -323,9 +385,8 @@ def compose_multimodal_input(
         indexes[reference.source] += 1
         label = {
             "kind": "feishu_image_input",
+            "ref": resolved_refs[_image_prompt_reference_key(reference)],
             "source": reference.source,
-            "message_id": reference.message_id,
-            "file_key": reference.file_key,
             "index": indexes[reference.source],
             "count": counts[reference.source],
             "mime_type": image.mime_type,
@@ -335,6 +396,42 @@ def compose_multimodal_input(
         items.append(ImageInput(image.data_url))
     items.append(TextInput(prompt_text))
     return items
+
+
+def _ordered_images(
+    images: Sequence[PreparedImage],
+) -> tuple[PreparedImage, ...]:
+    ordered = tuple(
+        image
+        for source in _IMAGE_SOURCE_ORDER
+        for image in images
+        if image.reference.source == source
+    )
+    if len(ordered) != len(images):
+        raise ImageInputContractError(
+            "图片输入包含未知的历史来源，本条消息未执行。"
+        )
+    return ordered
+
+
+def _image_prompt_reference_key(
+    reference: ImageReference,
+) -> ImagePromptReferenceKey:
+    return (reference.source, reference.message_id, reference.file_key)
+
+
+def _replace_image_marker(
+    match: re.Match[str],
+    replacements: Mapping[str, str],
+) -> str:
+    file_key = match.group(1).strip()
+    prompt_ref = replacements.get(file_key)
+    if prompt_ref is None:
+        return match.group(0)
+    rendered = match.group(0)
+    relative_start = match.start(1) - match.start(0)
+    relative_end = match.end(1) - match.start(0)
+    return rendered[:relative_start] + prompt_ref + rendered[relative_end:]
 
 
 def normalized_message_type(message: Any) -> str:

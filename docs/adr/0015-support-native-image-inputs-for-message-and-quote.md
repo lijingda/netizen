@@ -7,6 +7,8 @@ date: 2026-08-10
 
 > [ADR 0029](0029-project-current-message-provenance-into-prompts.md) 为最终文本 prompt
 > 增加当前消息来源；本文的图片支持矩阵、原生输入顺序和原子失败边界不变。
+> ADR 0039 加入 supplemental 来源后，2026-09-01 的 compact wire 继续复用本文的
+> exact 下载身份，但模型可见图片关联统一改为 prompt-local `imgN`。
 
 ## 背景
 
@@ -42,12 +44,15 @@ Content-Length 或流式字节数截断。
    包含文件、音频、视频、表情包或其他资源时显式拒绝，不静默忽略。
 2. 被引用消息继续使用 ADR 0011 的类型矩阵；只有引用类型为 `image` 或 `post` 时
    增加图片读取。其他引用类型保持原文本/结构化文本/资源元数据语义。
-3. 当前消息和被引用消息可以同时带图。组合顺序固定为“引用资源在前、当前消息资源
-   在后”；每张图前放一条带 `source`、`message_id`、`file_key`、source 内序号和总数
-   的 `TextInput`，随后放对应 `ImageInput`。最后一项携带完整
-   `current_message`，避免引用内容替换当前请求。
-4. 富文本仍保留 SDK 生成的 Markdown 图片原位置标记；图片 label 用同一个
-   `file_key` 建立文字位置与像素的确定映射。资源按 SDK 渲染顺序处理，同一消息内
+3. 当前消息和被引用消息可以同时带图；catch-up 还可带 supplemental 图片。组合顺序
+   固定为“supplemental、引用、当前”。全部图片按最终 native input 顺序分配同一个
+   prompt-local `img1..imgN` 空间；每张图前的 `TextInput` label 只携带 `ref`、`source`、
+   source 内序号/总数、MIME 和大小，不暴露 exact `message_id` 或 `file_key`。随后放对应
+   `ImageInput`，最后一项携带完整 prompt，避免历史内容替换当前请求。
+4. 富文本仍保留 SDK 生成的 Markdown 图片原位置标记，但只有已验证并成功准备的真实
+   图片 target 会在 fenced code 外改写成对应 `imgN`；Historical Message 的
+   `attachments` 与图片 label 使用同一个 `imgN` 建立文字、消息与像素的确定映射。
+   资源按 SDK 渲染顺序处理，同一消息内
    相同 key 只下载和提交一次。若 SDK 没有提供可验证的 typed post AST、却声称存在
    图片资源，则 fail closed；不会把字面 Markdown 或可能属于其他 locale/旧内容
    版本的图片交给 Codex。
@@ -87,9 +92,10 @@ Channel SDK 提供下载前可验证长度或流式硬上限的公开 API 时，
 锁内兑换。期间发生其他 prompt、stop、completion 或 idle ABA 时，本条显式失败，
 绝不改投另一 Turn。
 
-成功提供的引用图片将其资源 `content_read` 设为 true；普通图片和仅含已读图片的
-富文本使用 `content_fidelity = full_multimodal`。未实际提供的资源继续为 false，
-不能只凭 key 声称已读像素。
+成功提供的引用图片仍在内部 rich projection 将资源 `content_read` 设为 true；普通图片
+和仅含已读图片的富文本仍计算 `content_fidelity = full_multimodal`。这些读取状态不进入
+compact Historical Message，模型只通过 `attachments[].ref -> image label.ref` 看到已经
+实际提交的像素；未成功准备的图片绝不分配本地 ref，也不能只凭 key 声称已读像素。
 
 ## 非目标
 
@@ -103,7 +109,7 @@ Channel SDK 提供下载前可验证长度或流式硬上限的公开 API 时，
 
 - SDK 契约测试固定普通 `image`、多图 `post` 的公开资源顺序、公开下载方法以及
   Codex `TextInput/ImageInput` 输入形状。
-- 纯函数测试覆盖资源缺失、去重、来源 label、PNG/JPEG/GIF/WebP、数量/单图/总量、
+- 纯函数测试覆盖资源缺失、去重、prompt-local ref、来源 label 不暴露 exact ID、PNG/JPEG/GIF/WebP、数量/单图/总量、
   单次/整批超时、字面 Markdown/代码围栏误判和无图片字符串零变化。
 - Channel 测试覆盖当前普通图片、引用普通图片、引用多图富文本、当前富文本与引用
   图片组合、下载失败零提交、图片命令拒绝、admission 捕获和不同 Binding 图片并发。

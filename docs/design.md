@@ -110,9 +110,10 @@ App ID/Secret，不创建第二个 Channel/WebSocket。群主线使用 exact cha
 topic replies，普通话题使用 exact thread container；lower/upper 都通过 exact message ID
 核验。一次读取最多 10 页/500 条 raw message/60 秒，最多保留最近 50 条 eligible message、
 64,000 字符 supplemental visible text，候选 exact fetch 最多 4 路并发。图片与当前/引用
-消息共用 20 张、单图 20 MB、总计 50 MB 的原有准入限制。截断和 unsupported omission
-通过 envelope 与提交前可见回执披露；被选中消息的 Scope/identity/资源失败则整条 fail
-closed。候选 identity 只用应用内 `open_id` 与 user/bot 类型交叉核验；Prompt attribution
+消息共用 20 张、单图 20 MB、总计 50 MB 的原有准入限制。模型可见 envelope 只用 compact
+`context_status` 披露省略数量与是否截断，完整扫描/筛选统计留在服务端；提交前可见回执仍
+披露带入与不完整状态。被选中消息的 Scope/identity/资源失败则整条 fail closed。候选
+identity 只用应用内 `open_id` 与 user/bot 类型交叉核验；Prompt attribution
 的发送者姓名优先使用历史列表同条消息内嵌的 `sender_name`（仅作展示，不参与身份一致性
 判断），exact message 经 Channel SDK 归一化的 `display_name` 只在其缺失时兜底，两个
 来源都不可验证时才整条 fail closed。`sender_name` 由消息 API 的 `with_sender_name`
@@ -128,10 +129,11 @@ member roster 姓名补全，并要求当前 sender 具有真实显示名；缺�
 零 start/steer，明确提示 `im:chat.members:read`，不再生成“未知发送者”。sender 只投影
 `display_name`、应用内 `open_id`、`is_bot` 和 `sender_type`；不把跨应用 `union_id` 或
 租户级 `user_id` 写入 Codex 历史。无补充上下文且无逐条引用时，归一化请求正文位于最前，
-版本化 attribution trailer 位于末尾且不重复正文；只有引用时使用 v3 JSON envelope；
-catch-up 使用 v1 `feishu_message_context_prompt` envelope，顺序固定为 supplemental
+版本化 attribution trailer 位于末尾且不重复正文；只有引用时使用 v4 JSON envelope；
+catch-up 使用 v2 `feishu_message_context_prompt` envelope，顺序固定为 supplemental
 messages、可选且去重的 quoted message、最后的 current message，且
-`current_message.request_text` 保持完整。这些输入都会进入 Codex 原生历史，
+`current_message.request_text` 保持完整。supplemental/quoted 共用 compact Historical
+Message，并与 current message 保持 `text`/`request_text` 的语义边界。这些输入都会进入 Codex 原生历史，
 但不写 Channel Database。来源消息 ID/sender 与同次解析冲突时整条 fail closed。
 
 普通消息开头的连续 `$skill-name` 引用由 Prompt compiler 在当前消息上解析。Runtime
@@ -628,20 +630,27 @@ Database 或进程内保存 card session。删除卡片、错误 230071 或任�
 `thread_id` 都优先解释为话题 Scope，不是逐条引用。被引用内容只通过
 Channel SDK 公开 typed fetch 读取：文本/富文本/卡片/结构化类型使用归一化
 可见文本，合并转发使用 SDK 有界展开；普通 `image` 与 `post` 图片读取真实像素，
-其他资源类型只用公开 key 与元数据，
+其他资源类型在内部 rich projection 保留公开 exact key 与元数据，模型可见 wire 只保留
+类型、名称、时长等可推理信息，
 `system`/未知类型 fail closed。卡片归一化只剩占位符时，才使用 SDK 公开
 quote-context fallback。锁定 SDK 1.2.0 若对 CardKit 2.0 返回空文本，只在精确
 版本门禁和结构/大小/深度边界内，从公共 `QuotedContext.raw` 投影 header/body 的
 可见文本节点；按钮值、确认弹窗、选项及事件不进入 prompt。两次 SDK 网络读取
 各自具有 10 秒单次请求预算，避免健康请求因共享总预算产生假超时。
 
-引用投影是单层、文本最多 16,000 字符且 mention/资源描述各最多 64 项的 v3
+引用投影是单层、文本最多 16,000 字符且 mention/资源描述各最多 64 项的 v4
 JSON envelope；被引用消息保持 ADR 0011 的宽类型矩阵，当前 `text/image/post` 消息对象及
-完整请求始终在最后。飞书应用可用范围与会话成员关系是准入边界，SDK 公共类型中的消息、
-会话、mention 和资源 ID 会随引用上下文进入 prompt；发送者身份仅保留 app-scoped
-`open_id`，不投影 `union_id`/`user_id`；
-raw 事件/card JSON 不会整体复制。被引用消息自己的 reply 只保留公开关系 ID，
-不递归读取；图片不保存到 SQLite、文件或长期 cache。超时、撤回、
+完整请求始终在最后。supplemental/quoted 的模型可见 Historical Message 固定为本地 `hN`、
+类型、发送者 `display_name/open_id`、UTC ISO 8601 `created_at` 与 `text`，按需增加可解析的
+`reply_to`、`key/name` mention、精简附件和 true-only `truncated`。飞书应用可用范围与
+会话成员关系是准入边界；Channel SDK public `Mention.name` 为 optional，真实输入缺少
+key/name 映射时不输出残缺对象，并显式标记该历史消息 truncated；同名同类型但 exact
+身份不同的附件仍保留各自条目。exact
+message/chat/reply/shared-object ID、原始资源 key、读取
+状态和详细统计只留在内部 rich projection，不随历史 wire 进入 prompt。发送者身份仍保留
+app-scoped `open_id`，不投影 `union_id`/`user_id`；raw 事件/card JSON 不会整体复制。
+被引用消息自己的 reply 不递归读取，只有目标也在同一 envelope 时才投影为本地 `hN`；
+图片不保存到 SQLite、文件或长期 cache。超时、撤回、
 缺权限、返回 ID/chat 不一致和类型不支持都在 start/steer 前显式拒绝。
 引用、补充历史或图片准备期间若 `/resume`、`/new`、archive/unarchive 改变 Scope 的
 current Binding，已经捕获 admission 的消息也会明确失败并要求重发；它不会继续投递到旧
@@ -650,7 +659,9 @@ Binding，更不会被重解释为新 current Binding 的 Turn/steer。
 当前消息、被引用消息和被选中的补充消息只要类型为普通 `image` 或 `post`，Channel 边界都会从公开
 普通资源描述与 typed `PostContent.post` 当前渲染版本收集真实图片节点，并按
 “补充、引用、当前”的稳定来源顺序和 label 转成 Codex 原生
-`TextInput/ImageInput` 列表。总计最多 20 张、单图 20 MB、原始字节合计 50 MB；
+`TextInput/ImageInput` 列表。全部图片共享 prompt-local `imgN`；Historical Message 的
+`attachments[].ref`、fenced code 外的真实 Markdown 图片 target 和图片 label 使用同一
+ref，label 不暴露 exact message/resource ID。总计最多 20 张、单图 20 MB、原始字节合计 50 MB；
 每条 prompt 内串行下载，单图 10 秒、整批 60 秒，只接受 PNG/JPEG/GIF/WebP magic
 bytes。不同 Binding 的图片准备保持并发，不增加全局 gate、semaphore 或 prompt queue。
 若 native steer 的等待被取消，Runtime 会先关闭 submission admission，因为底层同步

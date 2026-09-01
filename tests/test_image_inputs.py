@@ -15,7 +15,9 @@ from netizen.image_inputs import (
     UnsupportedPromptMedia,
     compose_multimodal_input,
     current_message_image_references,
+    image_prompt_references,
     image_references,
+    localize_image_markers,
     prepare_images,
 )
 
@@ -402,6 +404,47 @@ class ImagePreparationTest(unittest.IsolatedAsyncioTestCase):
 
 
 class MultimodalCompositionTest(unittest.TestCase):
+    def test_prompt_local_refs_follow_native_order_and_localize_only_real_markers(
+        self,
+    ) -> None:
+        images = (
+            PreparedImage(
+                ImageReference("current_message", "om_current", "img_current"),
+                "image/png",
+                len(PNG),
+                "data:image/png;base64,AA==",
+            ),
+            PreparedImage(
+                ImageReference("quoted_message", "om_quote", "img_quote"),
+                "image/png",
+                len(PNG),
+                "data:image/png;base64,AA==",
+            ),
+        )
+
+        refs = image_prompt_references(images)
+
+        self.assertEqual(
+            dict(refs),
+            {
+                ("quoted_message", "om_quote", "img_quote"): "img1",
+                ("current_message", "om_current", "img_current"): "img2",
+            },
+        )
+        self.assertEqual(
+            localize_image_markers(
+                "before ![image](img_quote)\n"
+                "```md\n![image](img_quote)\n```\n"
+                "literal img_quote",
+                source="quoted_message",
+                message_id="om_quote",
+                image_prompt_refs=refs,
+            ),
+            "before ![image](img1)\n"
+            "```md\n![image](img_quote)\n```\n"
+            "literal img_quote",
+        )
+
     def test_labels_are_grouped_supplemental_then_quoted_then_current(self) -> None:
         images = tuple(
             PreparedImage(
@@ -437,6 +480,10 @@ class MultimodalCompositionTest(unittest.TestCase):
         )
         self.assertEqual([label["index"] for label in labels], [1, 2, 1, 1])
         self.assertEqual([label["count"] for label in labels], [2, 2, 1, 1])
+        self.assertEqual([label["ref"] for label in labels], ["img1", "img2", "img3", "img4"])
+        self.assertTrue(
+            all("message_id" not in label and "file_key" not in label for label in labels)
+        )
 
     def test_images_are_labeled_before_one_complete_final_prompt(self) -> None:
         images = (
@@ -456,7 +503,7 @@ class MultimodalCompositionTest(unittest.TestCase):
         prompt = json.dumps(
             {
                 "kind": "feishu_quoted_prompt",
-                "version": 3,
+                "version": 4,
                 "current_message": {
                     "message_id": "om_current",
                     "message_type": "image",

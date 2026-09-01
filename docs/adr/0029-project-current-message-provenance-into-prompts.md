@@ -35,9 +35,11 @@ reaction 锚定机器人在新话题中发送的问题 seed；若从这个完成
    来源消息 ID 或 sender ID 与同一次解析得到的 `PromptInput` 冲突时 fail closed。
 3. 没有逐条引用时，请求正文保持在 native input 最前，随后附加版本化
    `feishu_current_message` attribution trailer。这样原生首消息 preview 仍以用户请求
-   开头，trailer 不重复正文。有逐条引用时，ADR 0011 的 envelope 从 v2 升为 v3：
-   `quoted_message` 保持原类型矩阵，最后的 `current_message` 改为包含来源、发送者、
-   保真度和完整 `request_text` 的对象。已有 v2 原生历史不迁移。
+   开头，trailer 不重复正文。有逐条引用时，ADR 0011 当前使用 v4 envelope：
+   `quoted_message` 保持原类型矩阵但序列化为 compact Historical Message，最后的
+   `current_message` 仍是本文定义的来源、发送者、保真度和完整 `request_text` 对象。
+   `text` 与 `request_text` 的区别固定“背景/当前可执行请求”边界；已有 v2/v3 原生历史
+   不迁移。
 4. 当前消息仍只支持 ADR 0015 的 `text`、`image`、`post`；被引用消息继续支持 ADR 0011
    更宽的文本、结构化消息、资源元数据和合并转发矩阵。非空 `thread_id` 仍只表示话题
    结构，不产生逐条引用；`/side <问题>` 是 Control，也不因原消息带 reply relation 而
@@ -48,7 +50,9 @@ reaction 锚定机器人在新话题中发送的问题 seed；若从这个完成
    的两个对象通常相同。普通 running Steer 同样投影 steer 消息的实际发送者，但不替换
    当前 Turn 的原 owner 或完成锚点。
 6. 图片顺序继续固定为“被引用图片 label/pixels、当前图片 label/pixels、完整最终文本
-   prompt”，Runtime 再追加当前消息解析出的 typed `SkillInput`。引用内容和所有 attribution
+   prompt”（catch-up 在最前增加 supplemental 图片），Runtime 再追加当前消息解析出的
+   typed `SkillInput`。图片 label 和正文图片 target 使用同一 prompt-local `imgN`，exact
+   message/resource ID 只用于 Channel 内部下载与校验。引用内容和所有 attribution
    元数据中的 `$` 编码为 JSON `\u0024`，只有当前 `request_text` 保留字面 `$skill`，避免
    历史内容或显示名触发 Skill。
 7. Channel Database 不增加字段，也不保存投影、发送者、prompt 或回复。普通持久 Thread

@@ -32,8 +32,10 @@ ADR 0029 直接投影 Channel SDK 的公开 `Identity`，并在 `display_name` �
 4. Slash/card Control 不进入 Current Prompt Message，仍不要求解析显示名。发送者姓名只作
    attribution，不改变 Feishu admission、Scope 共享控制权、Turn owner、approval、sandbox、
    工具权限或指令优先级。
-5. 逐条引用的历史消息继续按 ADR 0011 使用 SDK 回查时的公开身份字段，但 sender 使用与
-   Current Prompt Message 相同的最小字段。当前 chat roster
+5. 逐条引用的历史消息继续按 ADR 0011 使用 SDK 回查时的公开身份字段。内部 rich
+   projection 保留公开 sender 分类；v4 compact Historical Message 的模型可见 sender
+   只使用 `display_name/open_id`，而 Current Prompt Message 继续使用本文定义的
+   `display_name/open_id/is_bot/sender_type`。当前 chat roster
    不能证明已离群用户在历史消息发送时的显示名，因此 Netizen 不用当前 roster 反向补写；
    回查缺名时保留真实 ID，但不再生成“未知发送者”字段。这不放宽本 ADR 对当前消息的严格
    要求。引用中的 mention、`share_user` 等消息内容字段不属于 sender attribution，不因本
