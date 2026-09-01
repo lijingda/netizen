@@ -13,6 +13,7 @@ from netizen.domain import (
     PromptInput,
     SESSION_STOP_ACTION_STATES,
     ScopeKind,
+    session_stop_available,
 )
 from netizen.experience import (
     InvalidInteraction,
@@ -55,6 +56,14 @@ class SessionActionPolicyTest(unittest.TestCase):
                 }
             ),
         )
+
+    def test_stop_availability_consumes_the_shared_status_set(self) -> None:
+        for state in SESSION_STOP_ACTION_STATES:
+            with self.subTest(state=state):
+                self.assertTrue(session_stop_available(state))
+        self.assertFalse(session_stop_available("goal-paused"))
+        self.assertFalse(session_stop_available("externally-active-goal"))
+        self.assertFalse(session_stop_available(None))
 
 
 class ExperienceTest(unittest.TestCase):

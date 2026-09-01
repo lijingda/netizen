@@ -4,6 +4,8 @@ from .coordination import ScopeCoordinator
 from .chat_labels import ChatLabel, ChatLabelProvider, ChatLabelResolver
 from .service import (
     ActivePointerChanged,
+    BindingPrimaryStatusResolution,
+    BindingStatusProjection,
     BindingScopeMismatch,
     ClosedSide,
     CreatedBinding,
@@ -33,10 +35,13 @@ from .service import (
     SideTopicInventoryItem,
     SideTopicInventoryPage,
     StoppedBinding,
+    classify_native_thread_view,
 )
 
 __all__ = (
     "ActivePointerChanged",
+    "BindingPrimaryStatusResolution",
+    "BindingStatusProjection",
     "BindingScopeMismatch",
     "ChatLabel",
     "ChatLabelProvider",
@@ -70,4 +75,5 @@ __all__ = (
     "SideTopicInventoryItem",
     "SideTopicInventoryPage",
     "StoppedBinding",
+    "classify_native_thread_view",
 )

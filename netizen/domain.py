@@ -109,12 +109,6 @@ class GoalStatus(str, Enum):
 SESSION_IDLE_STATE = "idle"
 
 
-def persisted_goal_session_state(status: GoalStatus) -> str:
-    """Project one typed persisted Goal status into the sessions state space."""
-
-    return f"goal-{status.value}"
-
-
 SESSION_STOP_ACTION_STATES: frozenset[str] = frozenset(
     {
         ActiveState.RUNNING.value,
@@ -124,6 +118,12 @@ SESSION_STOP_ACTION_STATES: frozenset[str] = frozenset(
         GoalOperationState.PAUSING.value,
     }
 )
+
+
+def session_stop_available(primary_status: str | None) -> bool:
+    """Return whether a Session status exposes the shared exact Stop control."""
+
+    return primary_status in SESSION_STOP_ACTION_STATES
 
 
 class ControlName(str, Enum):

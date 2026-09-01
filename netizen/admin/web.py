@@ -61,6 +61,7 @@ from ..management.blocking_io import (
 )
 from ..codex_runtime import (
     NativeThreadCatalogState,
+    ReleaseDisposition,
     RuntimeClosed,
     SideCloseFailed,
     SideSessionConflict,
@@ -79,10 +80,12 @@ from ..codex_runtime import (
     ThreadReleaseError,
     ThreadReleaseStateUnknown,
     ThreadRunningConfiguration,
+    StopDisposition,
 )
 from ..domain import MentionContextMode, ScopeKind
 from ..management import (
     ActivePointerChanged,
+    BindingStatusProjection,
     BindingScopeMismatch,
     ChatLabel,
     CurrentSideTarget,
@@ -444,7 +447,7 @@ class AdminWebApplication:
         if route == ("GET", "/api/v1/sessions"):
             return await self._sessions(context)
         if route == ("GET", "/api/v1/runtime-snapshots"):
-            return self._runtime_snapshots(context)
+            return await self._runtime_snapshots(context)
         if route == ("GET", "/api/v1/side-topics"):
             return await self._side_topics(context)
 
@@ -586,11 +589,21 @@ class AdminWebApplication:
             deadline=deadline,
         )
         binding_ids = tuple(item.record.binding.id for item in page.items)
+        catalog_states = {
+            item.record.binding.id: (
+                item.native.state if item.native is not None else None
+            )
+            for item in page.items
+        }
         snapshots_by_id = {}
         for batch in _batches(binding_ids, _RUNTIME_SNAPSHOT_BATCH_SIZE):
-            snapshots = self._management.runtime_snapshots(binding_ids=batch)
+            snapshots = await self._management.binding_statuses_exact(
+                binding_ids=batch,
+                catalog_states={item: catalog_states[item] for item in batch},
+                deadline=deadline,
+            )
             snapshots_by_id.update(
-                (snapshot.binding_id, snapshot) for snapshot in snapshots.bindings
+                (snapshot.binding_id, snapshot) for snapshot in snapshots
             )
         items = [
             self._session_item(context, item, snapshots_by_id[item.record.binding.id])
@@ -610,10 +623,11 @@ class AdminWebApplication:
         self,
         context: _RequestContext,
         item: SessionInventoryItem,
-        runtime: Any,
+        status: BindingStatusProjection,
     ) -> dict[str, object]:
         binding = item.record.binding
         scope = item.record.scope
+        runtime = status.snapshot
         target = AdminActionTarget("binding", binding.id, binding.scope_key)
         active_expected = (
             ExpectedValue.expect_none()
@@ -646,7 +660,7 @@ class AdminWebApplication:
         native_state = item.native.state if item.native is not None else None
         if (
             binding.message_context_mode is MentionContextMode.CURRENT_ONLY
-            and not binding.active
+            and status.pointer_state != "current"
             and (
                 binding.native_thread_id is None
                 or native_state is NativeThreadCatalogState.ACTIVE
@@ -669,7 +683,7 @@ class AdminWebApplication:
                 target,
                 lifecycle_preconditions,
             )
-            if runtime.subscription is not None:
+            if status.can_release:
                 actions["release"] = self._grant(
                     context, "sessions.release", target, preconditions
                 )
@@ -681,7 +695,7 @@ class AdminWebApplication:
                 actions["unarchiveCurrent"] = self._grant(
                     context, "sessions.unarchive-current", target, preconditions
                 )
-        if runtime.turn is not None or runtime.goal is not None:
+        if status.can_stop:
             actions["stop"] = self._grant(
                 context, "sessions.stop", target, preconditions
             )
@@ -708,13 +722,16 @@ class AdminWebApplication:
             "sessionType": (
                 "topic" if scope.kind is ScopeKind.TOPIC else "message"
             ),
-            "sessionState": _session_state(binding, native_state),
+            "pointerState": status.pointer_state,
+            "catalogState": (
+                status.catalog_state.value
+                if status.catalog_state is not None
+                else "lazy"
+            ),
             "projectAlias": binding.project_alias,
             "nativeThreadId": binding.native_thread_id,
-            "nativeState": native_state.value if native_state is not None else "lazy",
             "nativeTitle": metadata.name if metadata is not None else None,
             "nativePreview": metadata.preview if metadata is not None else None,
-            "current": binding.active,
             "creator": binding.creator_id,
             "createdAt": binding.created_at,
             "activatedAt": binding.activated_at,
@@ -722,27 +739,48 @@ class AdminWebApplication:
             "turnSettings": _settings_json(binding.turn_settings),
             "messageContextMode": binding.message_context_mode.value,
             "contextRevision": binding.context_revision,
-            "runtime": _runtime_binding_json(runtime),
+            "runtime": _runtime_binding_json(status),
             "actions": actions,
         }
 
-    def _runtime_snapshots(self, context: _RequestContext) -> Response:
-        _require_query_keys(context.query, {"bindingIds", "sideIds"})
+    async def _runtime_snapshots(self, context: _RequestContext) -> Response:
+        _require_query_keys(
+            context.query,
+            {"bindingIds", "sideIds", "resolvePrimary"},
+        )
         binding_ids = _id_query(context.query, "bindingIds")
         side_ids = _id_query(context.query, "sideIds")
-        snapshots = self._management.runtime_snapshots(
-            binding_ids=binding_ids,
-            side_ids=side_ids,
+        if len(binding_ids) + len(side_ids) > _RUNTIME_SNAPSHOT_BATCH_SIZE:
+            raise ValueError("runtime snapshot request accepts at most 50 IDs")
+        resolve_primary = (
+            _optional_bool_query(context.query, "resolvePrimary") or False
         )
+        if resolve_primary:
+            bindings = await self._management.binding_statuses_exact(
+                binding_ids=binding_ids,
+                deadline=(
+                    asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS
+                ),
+            )
+            side_snapshots = self._management.runtime_snapshots(side_ids=side_ids)
+        else:
+            snapshots = self._management.runtime_snapshots(
+                binding_ids=binding_ids,
+                side_ids=side_ids,
+            )
+            bindings = snapshots.bindings
+            side_snapshots = snapshots
         return _json_response(
             200,
             {
                 "requestId": context.request.request_id,
                 "bindings": [
-                    _runtime_binding_json(snapshot) for snapshot in snapshots.bindings
+                    _runtime_binding_json(snapshot) for snapshot in bindings
                 ],
-                "sides": [_runtime_side_json(snapshot) for snapshot in snapshots.sides],
-                "missingSideIds": list(snapshots.missing_side_ids),
+                "sides": [
+                    _runtime_side_json(snapshot) for snapshot in side_snapshots.sides
+                ],
+                "missingSideIds": list(side_snapshots.missing_side_ids),
             },
         )
 
@@ -1118,6 +1156,7 @@ class AdminWebApplication:
                 "requestId": context.request.request_id,
                 "bindingId": stopped.binding.id,
                 "disposition": stopped.disposition.value,
+                "message": _stop_disposition_message(stopped.disposition),
             },
         )
 
@@ -1142,6 +1181,7 @@ class AdminWebApplication:
                 "requestId": context.request.request_id,
                 "bindingId": released.binding.id,
                 "disposition": released.disposition.value,
+                "message": _release_disposition_message(released.disposition),
             },
         )
 
@@ -1705,19 +1745,6 @@ def _chat_open_url(chat: ChatLabel) -> str:
     return f"https://applink.feishu.cn/client/chat/open?{query}"
 
 
-def _session_state(
-    binding: ThreadBinding,
-    native_state: NativeThreadCatalogState | None,
-) -> str:
-    if native_state is NativeThreadCatalogState.MISSING:
-        return "missing"
-    if native_state is NativeThreadCatalogState.ARCHIVED:
-        return "archived"
-    if binding.native_thread_id is None:
-        return "lazy-current" if binding.active else "lazy-non-current"
-    return "current" if binding.active else "non-current"
-
-
 def _optional_text_query(
     values: Mapping[str, list[str]],
     name: str,
@@ -2103,7 +2130,8 @@ def _settings_json(settings: BindingTurnSettings | None) -> dict[str, str] | Non
     }
 
 
-def _runtime_binding_json(snapshot: Any) -> dict[str, object]:
+def _runtime_binding_json(status: BindingStatusProjection) -> dict[str, object]:
+    snapshot = status.snapshot
     turn = snapshot.turn
     goal = snapshot.goal
     lifecycle = snapshot.lifecycle
@@ -2112,6 +2140,13 @@ def _runtime_binding_json(snapshot: Any) -> dict[str, object]:
     return {
         "bindingId": snapshot.binding_id,
         "activityRevision": snapshot.activity_revision,
+        "primaryStatus": status.primary_status,
+        "primaryStatusResolution": status.primary_status_resolution.value,
+        "subscriptionState": (
+            status.subscription_state.value
+            if status.subscription_state is not None
+            else None
+        ),
         "turn": (
             {
                 "threadId": turn.thread_id,
@@ -2157,6 +2192,43 @@ def _runtime_binding_json(snapshot: Any) -> dict[str, object]:
             else None
         ),
     }
+
+
+def _stop_disposition_message(disposition: StopDisposition) -> str:
+    return {
+        StopDisposition.NOT_RUNNING: "该会话当前没有运行任务。",
+        StopDisposition.REQUESTED: (
+            "已请求中断 exact Codex Turn；确认终态前仍会显示为停止中。"
+        ),
+        StopDisposition.STOPPING: (
+            "该会话正在停止；已再次尝试完成中断与终端清理。"
+        ),
+        StopDisposition.COMPACTING: (
+            "该会话正在压缩，当前没有已验证的安全取消能力。"
+        ),
+        StopDisposition.GOAL_REQUESTED: (
+            "已请求暂停 Goal 并中断当前物理 Turn。"
+        ),
+        StopDisposition.GOAL_STOPPING: "该 Goal 正在暂停。",
+        StopDisposition.EXTERNAL_GOAL: (
+            "这是外部 active Goal，当前无法安全重挂并暂停。"
+        ),
+    }[disposition]
+
+
+def _release_disposition_message(disposition: ReleaseDisposition) -> str:
+    return {
+        ReleaseDisposition.NOT_MATERIALIZED: (
+            "该会话尚未物化，没有原生 Thread 订阅可释放。"
+        ),
+        ReleaseDisposition.NOT_SUBSCRIBED: (
+            "本进程当前没有该 Thread 的订阅；Binding 与原生历史均保留。"
+        ),
+        ReleaseDisposition.RELEASED: (
+            "已取消本进程对该 Thread 的订阅；Binding 与原生历史均保留，"
+            "下次消息仍会 resume 同一 Thread。"
+        ),
+    }[disposition]
 
 
 def _runtime_side_json(snapshot: Any) -> dict[str, object]:

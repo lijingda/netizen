@@ -700,6 +700,18 @@ aggregate 仍需要归档完整目录。Sessions 每页只接受 10/20/50/100，
 完整 ID；100 行 Sessions 首屏由 Web adapter 分两批读取，浏览器五秒 polling 同样分片后
 合并，既不查 native catalog，也不签发 action token。
 
+普通 Binding 的主状态由管理 application 的同一投影提供给飞书与 Admin：固定优先级为
+`lifecycle > Turn > compacting > process-local Goal > persisted Goal > idle`。Scope
+current/inactive、native active/archived/missing/Lazy 与进程订阅是独立事实轴；订阅状态不得
+替代主状态。persisted Goal 是异步原生输入：Sessions 首屏在同一 10 秒请求预算内按最多
+50 行分批，整个 management instance 共享最多 8 个并发读取；archived 仍读取 Goal，只有
+Lazy 或已确认 missing 才能跳过。单行无法确认时显示状态不可用而不伪造 `idle`。五秒
+polling 默认只投影 process-local 快照且不发起 `goal/get`；没有本地活动时返回 typed
+deferred，浏览器保留上次已解析值，并在 `activity_revision` 变化后补读对应 Binding；补读
+失败不提交该 revision，后续轮询继续有界重试直至 exact 投影或新的本地活动可见。
+Stop 与 Release 的可见资格消费这份投影，Runtime exact primitive 仍是 mutation 的最终
+安全检查；Admin 的结果文案直接消费共享 `StopDisposition`/`ReleaseDisposition`。
+
 chat label 只解析当前页去重后的 `chat_id`。进程级 resolver 使用最多 4096 项的 LRU：成功
 结果保留 10 分钟，失败结果保留 30 秒，同 ID 并发请求合并且飞书查询并发最多 10；缓存不写
 SQLite，也不预取其他页。群聊和话题群使用公开 chat info 的 `name`/`chat_mode`，P2P 再使用

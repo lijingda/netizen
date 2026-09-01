@@ -19,7 +19,8 @@ from netizen.admin.web import (
     _chat_open_url,
     _session_inventory_state,
     _session_page_size,
-    _session_state,
+    _release_disposition_message,
+    _stop_disposition_message,
     accepted_authorities,
 )
 from netizen.bindings import (
@@ -47,8 +48,9 @@ from netizen.codex_runtime import (
     ThreadSubscriptionSnapshot,
     ThreadSubscriptionState,
 )
-from netizen.domain import ScopeKind
+from netizen.domain import GoalStatus, ScopeKind
 from netizen.management import (
+    BindingStatusProjection,
     ChatLabel,
     ClosedSide,
     CreatedBinding,
@@ -67,7 +69,9 @@ from netizen.management import (
     SideTopicInventoryPage,
     StoppedBinding,
 )
+from netizen.management.service import _project_binding_status
 from netizen.projects import Project
+from netizen.sdk_gap_adapter import GoalSnapshot
 
 
 class FakeManagement:
@@ -76,6 +80,7 @@ class FakeManagement:
         self.query_session_calls: list[dict[str, object]] = []
         self.snapshot_batches: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
         self.session_items_override: tuple[SessionInventoryItem, ...] | None = None
+        self.persisted_goals: dict[str, GoalSnapshot] = {}
         self.set_enabled_entered: asyncio.Event | None = None
         self.set_enabled_release: asyncio.Event | None = None
         self.project = Project("test", root, True, 1)
@@ -261,10 +266,46 @@ class FakeManagement:
     def runtime_snapshots(self, *, binding_ids=(), side_ids=()):
         self.snapshot_batches.append((tuple(binding_ids), tuple(side_ids)))
         return RuntimeSnapshots(
-            tuple(self.runtime_by_id[item] for item in binding_ids),
+            tuple(
+                _project_binding_status(
+                    binding=self._binding(item),
+                    snapshot=self.runtime_by_id[item],
+                )
+                for item in binding_ids
+            ),
             tuple(self.side_runtime for item in side_ids if item == "side-1"),
             tuple(item for item in side_ids if item != "side-1"),
         )
+
+    async def binding_statuses_exact(
+        self,
+        *,
+        binding_ids=(),
+        catalog_states=None,
+        deadline=None,
+    ) -> tuple[BindingStatusProjection, ...]:
+        del deadline
+        self.snapshot_batches.append((tuple(binding_ids), ()))
+        states = catalog_states or {}
+        return tuple(
+            _project_binding_status(
+                binding=self._binding(item),
+                snapshot=self.runtime_by_id[item],
+                persisted_goal=self.persisted_goals.get(item),
+                persisted_goal_resolved=True,
+                catalog_state=states.get(item),
+            )
+            for item in binding_ids
+        )
+
+    def _binding(self, binding_id: str) -> ThreadBinding:
+        for binding in (self.lazy, self.native, self.archived):
+            if binding.id == binding_id:
+                return binding
+        for item in self.session_items_override or ():
+            if item.record.binding.id == binding_id:
+                return item.record.binding
+        raise AssertionError(f"unknown Binding {binding_id}")
 
     async def register_project(self, **values):
         self.calls.append(("register", values))
@@ -332,6 +373,18 @@ class FakeManagement:
 
 
 class AdminSessionPresentationTest(unittest.TestCase):
+    def test_stop_and_release_render_every_shared_disposition(self) -> None:
+        self.assertEqual(
+            len(set(map(_stop_disposition_message, StopDisposition))),
+            len(StopDisposition),
+        )
+        self.assertTrue(
+            all(_stop_disposition_message(item) for item in StopDisposition)
+        )
+        self.assertTrue(
+            all(_release_disposition_message(item) for item in ReleaseDisposition)
+        )
+
     def test_session_inventory_state_defaults_to_active_and_accepts_all(self) -> None:
         self.assertIs(
             _session_inventory_state({}),
@@ -360,49 +413,7 @@ class AdminSessionPresentationTest(unittest.TestCase):
         self.assertEqual(tuple(map(len, batches)), (50, 50))
         self.assertEqual(tuple(item for batch in batches for item in batch), ids)
 
-    def test_session_state_and_chat_link_are_derived_from_raw_facts(self) -> None:
-        scope_key = "cli_test:direct:oc_chat"
-        lazy = ThreadBinding(
-            "binding-lazy",
-            scope_key,
-            "test",
-            None,
-            None,
-            1,
-            "admin:web",
-            False,
-            "2030-01-01",
-            None,
-        )
-        current = replace(
-            lazy,
-            id="binding-current",
-            native_thread_id="native-current",
-            active=True,
-        )
-        inactive = replace(current, id="binding-inactive", active=False)
-
-        self.assertEqual(_session_state(lazy, None), "lazy-non-current")
-        self.assertEqual(
-            _session_state(replace(lazy, active=True), None),
-            "lazy-current",
-        )
-        self.assertEqual(
-            _session_state(current, NativeThreadCatalogState.ACTIVE),
-            "current",
-        )
-        self.assertEqual(
-            _session_state(inactive, NativeThreadCatalogState.ACTIVE),
-            "non-current",
-        )
-        self.assertEqual(
-            _session_state(current, NativeThreadCatalogState.ARCHIVED),
-            "archived",
-        )
-        self.assertEqual(
-            _session_state(current, NativeThreadCatalogState.MISSING),
-            "missing",
-        )
+    def test_chat_link_is_derived_from_shared_facts(self) -> None:
         self.assertEqual(
             _chat_open_url(
                 ChatLabel("oc_direct", "Alice", "p2p", True, "ou_alice")
@@ -733,6 +744,11 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             ("binding-archived", "unarchiveCurrent", "/api/v1/sessions/unarchive", {"actionKind": "sessions.unarchive-current"}),
         ]
         for binding_id, key, route, extra in cases:
+            if key == "release":
+                self.management.runtime_by_id[binding_id] = self.management._runtime(
+                    binding_id,
+                    5,
+                )
             item = (await fresh_items())[binding_id]
             status, _headers, payload = await self.json_post(
                 route,
@@ -740,6 +756,8 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 _action_payload(item["actions"][key], **extra),
             )
             self.assertEqual(status, 200, payload)
+            if key in {"stop", "release"}:
+                self.assertIn("message", payload)
 
         archive_call = next(
             values for name, values in self.management.calls if name == "archive"
@@ -796,7 +814,38 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         after = self.runner.application._auth.state_counts().actions
         self.assertEqual(status, 200)
         self.assertEqual(payload["bindings"][0]["bindingId"], "binding-native")
+        self.assertEqual(payload["bindings"][0]["primaryStatus"], "running")
+        self.assertEqual(
+            payload["bindings"][0]["primaryStatusResolution"],
+            "local",
+        )
         self.assertEqual(before, after)
+
+        self.management.runtime_by_id["binding-native"] = self.management._runtime(
+            "binding-native",
+            5,
+        )
+        status, _headers, payload = await self.json_get(
+            "/api/v1/runtime-snapshots?bindingIds=binding-native",
+            session,
+        )
+        self.assertEqual(status, 200)
+        self.assertIsNone(payload["bindings"][0]["primaryStatus"])
+        self.assertEqual(
+            payload["bindings"][0]["primaryStatusResolution"],
+            "deferred",
+        )
+
+        status, _headers, payload = await self.json_get(
+            "/api/v1/runtime-snapshots?bindingIds=binding-native&resolvePrimary=true",
+            session,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["bindings"][0]["primaryStatus"], "idle")
+        self.assertEqual(
+            payload["bindings"][0]["primaryStatusResolution"],
+            "resolved",
+        )
 
         from netizen.admin.web import _encode_binding_cursor, _fingerprint
         from netizen.bindings import BindingCursor
@@ -854,15 +903,27 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(call["deadline"], started + 10.0)
         self.assertLessEqual(call["deadline"], finished + 10.0)
         by_id = {item["bindingId"]: item for item in page["items"]}
-        self.assertEqual(by_id["binding-lazy"]["sessionState"], "lazy-non-current")
-        self.assertEqual(by_id["binding-native"]["sessionState"], "current")
-        self.assertEqual(by_id["binding-archived"]["sessionState"], "archived")
         self.assertEqual(by_id["binding-native"]["sessionType"], "message")
         self.assertEqual(by_id["binding-native"]["chatMode"], "p2p")
         self.assertTrue(by_id["binding-native"]["chatLabelResolved"])
         self.assertEqual(
             by_id["binding-native"]["chatOpenUrl"],
             "https://applink.feishu.cn/client/chat/open?openId=ou_partner",
+        )
+        self.assertEqual(by_id["binding-native"]["pointerState"], "current")
+        self.assertEqual(by_id["binding-native"]["catalogState"], "active")
+        self.assertEqual(by_id["binding-lazy"]["pointerState"], "inactive")
+        self.assertEqual(by_id["binding-lazy"]["catalogState"], "lazy")
+        self.assertEqual(by_id["binding-archived"]["pointerState"], "inactive")
+        self.assertEqual(by_id["binding-archived"]["catalogState"], "archived")
+        for item in by_id.values():
+            self.assertNotIn("sessionState", item)
+            self.assertNotIn("nativeState", item)
+            self.assertNotIn("current", item)
+        self.assertEqual(by_id["binding-native"]["runtime"]["primaryStatus"], "running")
+        self.assertEqual(
+            by_id["binding-native"]["runtime"]["subscriptionState"],
+            "subscribed",
         )
 
         status, _headers, page = await self.json_get(
@@ -909,6 +970,79 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 400)
         self.assertEqual(error["code"], "invalid_query")
+
+    async def test_subscription_state_does_not_replace_idle_primary_status(
+        self,
+    ) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        self.management.runtime_by_id[self.management.native.id] = (
+            BindingRuntimeSnapshot(
+                self.management.native.id,
+                9,
+                None,
+                None,
+                False,
+                None,
+                ThreadSubscriptionSnapshot(
+                    self.management.native.id,
+                    "native-active",
+                    ThreadSubscriptionState.RELEASE_PENDING,
+                    30.0,
+                ),
+                None,
+            )
+        )
+
+        status, _headers, page = await self.json_get(
+            "/api/v1/sessions?inventoryState=all",
+            session,
+        )
+
+        self.assertEqual(status, 200)
+        native = next(
+            item for item in page["items"] if item["bindingId"] == "binding-native"
+        )
+        self.assertEqual(native["runtime"]["primaryStatus"], "idle")
+        self.assertEqual(
+            native["runtime"]["subscriptionState"],
+            "release-pending",
+        )
+        self.assertNotIn("stop", native["actions"])
+        self.assertIn("release", native["actions"])
+
+    async def test_persisted_paused_goal_is_not_reported_as_idle(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        self.management.runtime_by_id[self.management.native.id] = (
+            self.management._runtime(self.management.native.id, 10)
+        )
+        self.management.persisted_goals[self.management.native.id] = GoalSnapshot(
+            "native-active",
+            "paused work",
+            GoalStatus.PAUSED,
+            None,
+            10,
+            2,
+            1,
+            2,
+        )
+
+        status, _headers, page = await self.json_get(
+            "/api/v1/sessions?inventoryState=all",
+            session,
+        )
+
+        self.assertEqual(status, 200)
+        native = next(
+            item for item in page["items"] if item["bindingId"] == "binding-native"
+        )
+        self.assertEqual(native["runtime"]["primaryStatus"], "goal-paused")
+        self.assertEqual(
+            native["runtime"]["primaryStatusResolution"],
+            "resolved",
+        )
+        self.assertNotIn("stop", native["actions"])
 
     async def test_hundred_session_page_chunks_initial_runtime_snapshots(self) -> None:
         self.runner.open_admission()
@@ -1077,10 +1211,29 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertIn("applyRuntimeSnapshots", javascript)
         self.assertIn("fetchRuntimeSnapshots", javascript)
         self.assertIn("chunkValues(bindingIds)", javascript)
+        self.assertIn("runtime.primaryStatus", javascript)
+        self.assertIn("runtime.subscriptionState", javascript)
+        self.assertIn("mergeDeferredBindingRuntime", javascript)
+        self.assertIn(
+            "activityRevision: previous?.activityRevision ?? incoming.activityRevision",
+            javascript,
+        )
+        self.assertIn('primaryStatusResolution: "deferred"', javascript)
+        self.assertIn(
+            'previous.primaryStatusResolution === "unavailable"',
+            javascript,
+        )
+        self.assertIn("session.pointerState", javascript)
+        self.assertIn("session.catalogState", javascript)
+        self.assertNotIn("session.nativeState", javascript)
+        self.assertIn('query.set("resolvePrimary", "true")', javascript)
+        self.assertIn("result?.message", javascript)
+        self.assertNotIn("if (runtime.turn)", javascript)
+        self.assertNotIn("if (runtime.goal)", javascript)
         self.assertIn("resetSessionPagination", javascript)
         self.assertIn("sessionLocationCell", javascript)
         self.assertIn('link.rel = "noopener noreferrer"', javascript)
-        self.assertIn("await refresh(state.tab);", javascript)
+        self.assertIn("await refresh(state.tab)", javascript)
         self.assertIn('state.tab === "sessions"', javascript)
         self.assertIn('state.tab === "side-topics"', javascript)
         self.assertRegex(javascript, r"setInterval\([\s\S]+?,\s*5000\s*\)")

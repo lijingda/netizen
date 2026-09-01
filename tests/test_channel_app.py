@@ -3616,6 +3616,25 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("没有普通会话", str(card.card))
         self.assertEqual(self.runtime.thread_metadata_calls, [])
 
+    async def test_status_and_sessions_share_persisted_goal_projection(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.goal_snapshot_value = native_goal(GoalStatus.PAUSED)
+
+        await self.app.handle_message(
+            FakeMessage("/status", message_id="om_goal_status")
+        )
+        status = str(self.channel.replies[-1][1])
+        await self.app.handle_message(
+            FakeMessage("/sessions", message_id="om_goal_sessions")
+        )
+        sessions = str(self.channel.replies[-1][1].card)
+
+        self.assertIn("状态：goal-paused", status)
+        self.assertIn("状态：goal-paused", sessions)
+
     async def test_rename_supports_direct_name_and_current_binding_form(self) -> None:
         await self.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)

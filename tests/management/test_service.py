@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
 from netizen.bindings import BindingQuery, BindingStore, SideTopicState
 from netizen.channel_app import ChannelApplication
 from netizen.codex_runtime import (
+    ActiveGoalSnapshot,
+    ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
     NativeThreadCatalogState,
     NativeThreadCatalog,
@@ -17,11 +20,21 @@ from netizen.codex_runtime import (
     SideLifecycleOutcome,
     SideSessionNotFound,
     StopDisposition,
+    ThreadLifecycleSnapshot,
+    ThreadLifecycleState,
+    ThreadSubscriptionSnapshot,
+    ThreadSubscriptionState,
     ThreadArchived,
     ThreadCatalogIdentityMissing,
     ThreadDeleteTargetChanged,
 )
-from netizen.domain import FeishuScope, ScopeKind
+from netizen.domain import (
+    ActiveState,
+    FeishuScope,
+    GoalOperationState,
+    GoalStatus,
+    ScopeKind,
+)
 from netizen.management import (
     ActivePointerChanged,
     BindingScopeMismatch,
@@ -38,8 +51,11 @@ from netizen.management import (
     SessionInventoryState,
     SessionQuery,
     SideIdentityMismatch,
+    classify_native_thread_view,
 )
 from netizen.projects import ProjectRegistry
+from netizen.sdk_gap_adapter import GoalControlError, GoalSnapshot
+from netizen.management.service import _project_binding_status
 
 
 class FakeManagementRuntime:
@@ -56,6 +72,13 @@ class FakeManagementRuntime:
         self.active_metadata: dict[str, NativeThreadMetadata] = {}
         self.archived_metadata: dict[str, NativeThreadMetadata] = {}
         self.side_snapshots: dict[str, object] = {}
+        self.runtime_snapshots: dict[str, BindingRuntimeSnapshot] = {}
+        self.goal_snapshots: dict[str, GoalSnapshot | None] = {}
+        self.goal_snapshot_after: dict[str, BindingRuntimeSnapshot] = {}
+        self.goal_snapshot_errors: set[str] = set()
+        self.goal_snapshot_gate: asyncio.Event | None = None
+        self.goal_snapshot_concurrency = 0
+        self.goal_snapshot_max_concurrency = 0
 
     async def configure_exact(self, **values):
         self.calls.append(("configure", values["binding_id"]))
@@ -228,7 +251,38 @@ class FakeManagementRuntime:
 
     def runtime_snapshot_exact(self, binding_id: str):
         self.calls.append(("runtime-snapshot", binding_id))
-        return ("binding", binding_id)
+        return self.runtime_snapshots.get(
+            binding_id,
+            BindingRuntimeSnapshot(
+                binding_id,
+                0,
+                None,
+                None,
+                False,
+                None,
+                None,
+                None,
+            ),
+        )
+
+    async def goal_snapshot_exact(self, binding) -> GoalSnapshot | None:
+        self.calls.append(("goal-snapshot", binding.id))
+        if binding.id in self.goal_snapshot_errors:
+            raise GoalControlError("unavailable")
+        self.goal_snapshot_concurrency += 1
+        self.goal_snapshot_max_concurrency = max(
+            self.goal_snapshot_max_concurrency,
+            self.goal_snapshot_concurrency,
+        )
+        try:
+            if self.goal_snapshot_gate is not None:
+                await self.goal_snapshot_gate.wait()
+            after = self.goal_snapshot_after.get(binding.id)
+            if after is not None:
+                self.runtime_snapshots[binding.id] = after
+            return self.goal_snapshots.get(binding.id)
+        finally:
+            self.goal_snapshot_concurrency -= 1
 
     def side_snapshot_exact(self, side_id: str):
         self.calls.append(("side-snapshot", side_id))
@@ -822,11 +876,301 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
             side_ids=("side-missing",),
         )
 
-        self.assertEqual(snapshots.bindings, (("binding", binding.id),))
+        self.assertEqual(snapshots.bindings[0].binding_id, binding.id)
+        self.assertIsNone(snapshots.bindings[0].primary_status)
+        self.assertEqual(
+            snapshots.bindings[0].primary_status_resolution.value,
+            "deferred",
+        )
+        self.assertNotIn(("goal-snapshot", binding.id), self.runtime.calls)
         self.assertEqual(snapshots.sides, ())
         self.assertEqual(snapshots.missing_side_ids, ("side-missing",))
         with self.assertRaises(ValueError):
             self.service.runtime_snapshots(binding_ids=(binding.id, binding.id))
+
+    async def test_primary_status_uses_one_canonical_priority(self) -> None:
+        binding = await self._create()
+        persisted = GoalSnapshot(
+            "native-goal",
+            "ship it",
+            GoalStatus.PAUSED,
+            None,
+            10,
+            2,
+            1,
+            2,
+        )
+        turn = ActiveTurnSnapshot(
+            binding.id,
+            "native-goal",
+            "turn-1",
+            "ou_user",
+            ActiveState.RUNNING,
+        )
+        goal = ActiveGoalSnapshot(
+            binding.id,
+            "native-goal",
+            "goal-1",
+            "ou_user",
+            GoalOperationState.RUNNING,
+            persisted,
+        )
+        lifecycle = ThreadLifecycleSnapshot(
+            binding.id,
+            "native-goal",
+            ThreadLifecycleState.ARCHIVING,
+        )
+        cases = (
+            ((turn, goal, True, lifecycle), "archiving"),
+            ((turn, goal, True, None), "running"),
+            ((None, goal, True, None), "compacting"),
+            ((None, goal, False, None), "goal-running"),
+            ((None, None, False, None), "goal-paused"),
+        )
+
+        for (active, active_goal, compacting, active_lifecycle), expected in cases:
+            with self.subTest(expected=expected):
+                status = _project_binding_status(
+                    binding=binding,
+                    snapshot=BindingRuntimeSnapshot(
+                        binding.id,
+                        1,
+                        active,
+                        active_goal,
+                        compacting,
+                        active_lifecycle,
+                        None,
+                        None,
+                    ),
+                    persisted_goal=persisted,
+                    persisted_goal_resolved=True,
+                )
+                self.assertEqual(status.primary_status, expected)
+
+        idle = _project_binding_status(
+            binding=binding,
+            snapshot=BindingRuntimeSnapshot(
+                binding.id,
+                1,
+                None,
+                None,
+                False,
+                None,
+                None,
+                None,
+            ),
+            persisted_goal_resolved=True,
+        )
+        self.assertEqual(idle.primary_status, "idle")
+
+    async def test_exact_status_resolves_persisted_goal_and_release_policy(
+        self,
+    ) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-goal")
+        binding = self.store.get(binding.id)
+        self.runtime.runtime_snapshots[binding.id] = BindingRuntimeSnapshot(
+            binding.id,
+            3,
+            None,
+            None,
+            False,
+            None,
+            ThreadSubscriptionSnapshot(
+                binding.id,
+                "native-goal",
+                ThreadSubscriptionState.SUBSCRIBED,
+                None,
+            ),
+            None,
+        )
+        self.runtime.goal_snapshots[binding.id] = GoalSnapshot(
+            "native-goal",
+            "ship it",
+            GoalStatus.PAUSED,
+            None,
+            10,
+            2,
+            1,
+            2,
+        )
+
+        status = await self.service.binding_status_exact(
+            binding.id,
+            catalog_state=NativeThreadCatalogState.ACTIVE,
+        )
+
+        self.assertEqual(status.primary_status, "goal-paused")
+        self.assertEqual(status.primary_status_resolution.value, "resolved")
+        self.assertFalse(status.can_stop)
+        self.assertTrue(status.can_release)
+        self.assertIn(("goal-snapshot", binding.id), self.runtime.calls)
+
+    async def test_exact_status_reprojects_post_read_local_state(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-goal")
+        binding = self.store.get(binding.id)
+        persisted = GoalSnapshot(
+            "native-goal",
+            "external",
+            GoalStatus.ACTIVE,
+            None,
+            1,
+            1,
+            1,
+            2,
+        )
+        self.runtime.goal_snapshots[binding.id] = persisted
+        self.runtime.goal_snapshot_after[binding.id] = BindingRuntimeSnapshot(
+            binding.id,
+            4,
+            None,
+            ActiveGoalSnapshot(
+                binding.id,
+                "native-goal",
+                None,
+                "external",
+                GoalOperationState.EXTERNAL_ACTIVE,
+                persisted,
+            ),
+            False,
+            None,
+            None,
+            None,
+        )
+
+        status = await self.service.binding_status_exact(
+            binding.id,
+            catalog_state=NativeThreadCatalogState.ACTIVE,
+        )
+
+        self.assertEqual(status.primary_status, "externally-active-goal")
+        self.assertEqual(status.primary_status_resolution.value, "local")
+        self.assertEqual(status.snapshot.activity_revision, 4)
+
+    async def test_exact_status_batch_isolates_goal_read_failure(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-goal")
+        binding = self.store.get(binding.id)
+        self.runtime.goal_snapshot_errors.add(binding.id)
+
+        (status,) = await self.service.binding_statuses_exact(
+            binding_ids=(binding.id,),
+            catalog_states={binding.id: NativeThreadCatalogState.ACTIVE},
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+
+        self.assertIsNone(status.primary_status)
+        self.assertEqual(status.primary_status_resolution.value, "unavailable")
+
+    async def test_exact_status_batch_bounds_native_goal_reads(self) -> None:
+        self.store._id_factory = lambda: str(uuid.uuid4())
+        bindings = []
+        for index in range(18):
+            binding = await self._create()
+            self.store.assign_native_thread_id(binding.id, f"native-{index}")
+            bindings.append(self.store.get(binding.id))
+        self.runtime.goal_snapshot_gate = asyncio.Event()
+        resolving = tuple(
+            asyncio.create_task(
+                self.service.binding_statuses_exact(
+                    binding_ids=tuple(item.id for item in batch),
+                    catalog_states={
+                        item.id: NativeThreadCatalogState.ACTIVE for item in batch
+                    },
+                    deadline=asyncio.get_running_loop().time() + 1,
+                )
+            )
+            for batch in (bindings[:9], bindings[9:])
+        )
+        deadline = asyncio.get_running_loop().time() + 0.2
+        while self.runtime.goal_snapshot_max_concurrency < 8:
+            if asyncio.get_running_loop().time() >= deadline:
+                self.fail("bounded Goal reads did not reach the expected concurrency")
+            await asyncio.sleep(0)
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+        self.assertEqual(self.runtime.goal_snapshot_max_concurrency, 8)
+        self.assertEqual(
+            sum(call[0] == "goal-snapshot" for call in self.runtime.calls),
+            8,
+        )
+        self.runtime.goal_snapshot_gate.set()
+        statuses = await asyncio.gather(*resolving)
+        self.assertEqual(sum(map(len, statuses)), 18)
+        self.assertEqual(self.runtime.goal_snapshot_max_concurrency, 8)
+
+    async def test_archived_status_still_resolves_persisted_goal(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-archived")
+        binding = self.store.get(binding.id)
+        self.runtime.goal_snapshots[binding.id] = GoalSnapshot(
+            "native-archived",
+            "keep this goal",
+            GoalStatus.PAUSED,
+            None,
+            10,
+            2,
+            1,
+            2,
+        )
+
+        status = await self.service.binding_status_exact(
+            binding.id,
+            catalog_state=NativeThreadCatalogState.ARCHIVED,
+        )
+
+        self.assertEqual(status.primary_status, "goal-paused")
+        self.assertIn(("goal-snapshot", binding.id), self.runtime.calls)
+
+    async def test_missing_status_resolves_idle_without_goal_read(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-missing")
+        binding = self.store.get(binding.id)
+
+        status = await self.service.binding_status_exact(
+            binding.id,
+            catalog_state=NativeThreadCatalogState.MISSING,
+        )
+
+        self.assertEqual(status.primary_status, "idle")
+        self.assertNotIn(("goal-snapshot", binding.id), self.runtime.calls)
+
+    def test_native_catalog_classification_is_shared_with_archived_precedence(
+        self,
+    ) -> None:
+        active = {
+            "active": NativeThreadMetadata("active", "Active", "preview")
+        }
+        archived = {
+            "archived": NativeThreadMetadata("archived", "Old", "preview")
+        }
+
+        self.assertIs(
+            classify_native_thread_view(
+                "active", active=active, archived=archived
+            ).state,
+            NativeThreadCatalogState.ACTIVE,
+        )
+        self.assertIs(
+            classify_native_thread_view(
+                "archived", active=active, archived=archived
+            ).state,
+            NativeThreadCatalogState.ARCHIVED,
+        )
+        self.assertIs(
+            classify_native_thread_view(
+                "missing", active=active, archived=archived
+            ).state,
+            NativeThreadCatalogState.MISSING,
+        )
+        overlap = classify_native_thread_view(
+            "active",
+            active=active,
+            archived={"active": active["active"]},
+        )
+        self.assertIs(overlap.state, NativeThreadCatalogState.ARCHIVED)
 
     async def test_exact_stop_rejects_a_new_runtime_revision(self) -> None:
         binding = await self._create()
