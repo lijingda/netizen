@@ -106,9 +106,16 @@ from netizen.sdk_gap_adapter import (
     ThreadUnsubscribeStatus,
 )
 from netizen.turn_plan_observer import (
-    TurnPlanObservation,
+    TurnActivityObservation,
     TurnPlanStepSnapshot,
     TurnPlanStepState,
+)
+from netizen.turn_activity import (
+    SIDE_ACTIVITY_QUEUE_HIGH_WATER,
+    TurnActivityEvent,
+    TurnActivityKind,
+    TurnActivityNotificationProjection,
+    TurnActivityStatus,
 )
 
 
@@ -654,6 +661,8 @@ class FakeGoalHandle:
         self.pause_started = asyncio.Event()
         self.pause_gate: asyncio.Event | None = None
         self.terminal_logical_turn_id: str | None = None
+        self.activity_sink = None
+        self.activity_updates: list[TurnActivityNotificationProjection] = []
         self.record = SimpleNamespace(
             id=turn_id,
             status=FakeStatus("inProgress"),
@@ -668,13 +677,30 @@ class FakeGoalHandle:
     def current_physical_turn_id(self) -> str | None:
         return self.id if self.record.status.value == "inProgress" else None
 
-    async def wait_terminal(self) -> GoalStreamTerminal:
+    async def wait_terminal(self, activity_sink=None) -> GoalStreamTerminal:
+        self.activity_sink = activity_sink
+        if activity_sink is not None:
+            activity_sink(
+                TurnActivityNotificationProjection(
+                    turn_id=self.id,
+                    turn_started=True,
+                )
+            )
+            for update in self.activity_updates:
+                activity_sink(update)
         await self.terminal.wait()
         return GoalStreamTerminal(
             self.terminal_logical_turn_id or self.id,
-            self.id,
+            self.record.id,
             self.record.status.value,
         )
+
+    def emit_activity(self, update: TurnActivityNotificationProjection) -> None:
+        sink = self.activity_sink
+        if sink is None:
+            self.activity_updates.append(update)
+        else:
+            sink(update)
 
     async def pause(self) -> GoalPauseAck:
         self.pause_calls += 1
@@ -690,7 +716,7 @@ class FakeGoalHandle:
         self.record.status.value = "interrupted"
         self.record.completed_at = 2
         self.terminal.set()
-        return GoalPauseAck(self.control.persisted, self.id, True)
+        return GoalPauseAck(self.control.persisted, self.record.id, True)
 
     async def aclose(self) -> None:
         self.closed = True
@@ -719,6 +745,20 @@ class FakeGoalHandle:
             )
         ]
         self.terminal.set()
+
+    def rollover(self, turn_id: str) -> None:
+        self.record.status.value = "completed"
+        self.record.completed_at = 2
+        self.record = SimpleNamespace(
+            id=turn_id,
+            status=FakeStatus("inProgress"),
+            error=None,
+            started_at=2,
+            completed_at=None,
+            duration_ms=None,
+            items=[],
+        )
+        self.control.codex.goal_turns.append((self.thread_id, self.record))
 
 
 class FakeGoalControl:
@@ -775,12 +815,10 @@ class FakeThreadDeleteControl:
 
 class FakeTurnPlanObserver:
     def __init__(self) -> None:
-        self.events: dict[
-            str,
-            list[tuple[str, tuple[TurnPlanStepSnapshot, ...]]],
-        ] = {}
+        self.events: dict[str, list[tuple[str, str, object]]] = {}
         self.calls: list[tuple[str, str, int]] = []
         self.error: BaseException | None = None
+        self.next_cursor_override: int | None = None
 
     def append(
         self,
@@ -789,7 +827,19 @@ class FakeTurnPlanObserver:
         turn_id: str,
         steps: tuple[TurnPlanStepSnapshot, ...],
     ) -> None:
-        self.events.setdefault(turn_id, []).append((thread_id, steps))
+        self.events.setdefault(turn_id, []).append((thread_id, "plan", steps))
+
+    def append_activity(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        event: TurnActivityEvent,
+    ) -> None:
+        self.events.setdefault(turn_id, []).append((thread_id, "activity", event))
+
+    def complete(self, *, thread_id: str, turn_id: str) -> None:
+        self.events.setdefault(turn_id, []).append((thread_id, "terminal", None))
 
     def observe(
         self,
@@ -797,23 +847,36 @@ class FakeTurnPlanObserver:
         thread_id: str,
         turn_id: str,
         after_cursor: int,
-    ) -> TurnPlanObservation:
+    ) -> TurnActivityObservation:
         self.calls.append((thread_id, turn_id, after_cursor))
         if self.error is not None:
             raise self.error
         events = self.events.get(turn_id, [])
         latest_steps: tuple[TurnPlanStepSnapshot, ...] = ()
         latest_cursor: int | None = None
-        for cursor, (event_thread_id, steps) in enumerate(events, start=1):
+        activity_events: list[TurnActivityEvent] = []
+        turn_completed = False
+        for cursor, (event_thread_id, kind, value) in enumerate(events, start=1):
             if cursor <= after_cursor or event_thread_id != thread_id:
                 continue
-            latest_steps = steps
-            latest_cursor = cursor
-        return TurnPlanObservation(
-            next_cursor=len(events),
+            if kind == "plan":
+                latest_steps = value
+                latest_cursor = cursor
+            elif kind == "activity":
+                activity_events.append(value)
+            elif kind == "terminal":
+                turn_completed = True
+        return TurnActivityObservation(
+            next_cursor=(
+                len(events)
+                if self.next_cursor_override is None
+                else self.next_cursor_override
+            ),
             plan_updated=latest_cursor is not None,
             plan_cursor=latest_cursor,
             steps=latest_steps,
+            events=tuple(activity_events),
+            turn_completed=turn_completed,
         )
 
 
@@ -860,11 +923,16 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.store.close()
         self.cwd_context.cleanup()
 
-    def materialized_binding(self):
+    def materialized_binding(
+        self,
+        *,
+        task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
+    ):
         binding = self.store.create_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_owner",
+            task_feedback=task_feedback,
         )
         self.store.assign_native_thread_id(binding.id, "native-parent")
         return self.store.get(binding.id)
@@ -941,6 +1009,9 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             if handle.id == submission.turn_id
         )
         handle.complete(response=response)
+        observer = self.runtime._turn_plan_observer
+        if isinstance(observer, FakeTurnPlanObserver):
+            observer.complete(thread_id=handle.thread_id, turn_id=handle.id)
         release = submission.release_receipt_attempt
         assert release is not None
         release()
@@ -1083,7 +1154,12 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self.runtime.capture_side_submission_admission(record.id)
 
     async def test_stop_cleans_current_turn_but_side_accepts_another_turn(self) -> None:
-        _binding, record, snapshot = await self.open_side()
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.materialized_binding(
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+        )
+        _binding, record, snapshot = await self.open_side_for_binding(binding)
         first = await self.runtime.submit_side(
             side_id=record.id,
             input="first",
@@ -1092,12 +1168,21 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         assert first.release_receipt_attempt is not None
         first.release_receipt_attempt()
+        handle = self.codex.handles[-1]
+        await asyncio.sleep(0)
+        self.assertEqual(handle.run_calls, 0)
 
         self.assertEqual(
             await self.runtime.stop_side(record.id),
             StopDisposition.REQUESTED,
         )
+        self.assertEqual(handle.run_calls, 0)
+        observer.complete(
+            thread_id=snapshot.thread_id,
+            turn_id=first.turn_id,
+        )
         self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertEqual(handle.run_calls, 1)
         self.assertEqual(self.cleanup.calls, [snapshot.thread_id])
         self.assertIsNone(self.runtime.side_snapshot(record.id).turn_id)
 
@@ -1218,7 +1303,12 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.side_snapshot(record.id)
 
     async def test_close_drain_timeout_keeps_native_turn_and_route_open(self) -> None:
-        _binding, record, _snapshot = await self.open_side()
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.materialized_binding(
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+        )
+        _binding, record, snapshot = await self.open_side_for_binding(binding)
         submission = await self.runtime.submit_side(
             side_id=record.id,
             input="still running",
@@ -1244,10 +1334,16 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.side_snapshot(record.id).state,
             SideSessionState.CLOSING,
         )
+        self.assertEqual(handle.run_calls, 0)
 
         handle.complete(status="interrupted")
+        observer.complete(
+            thread_id=snapshot.thread_id,
+            turn_id=submission.turn_id,
+        )
         outcome = await self.runtime.close_side(record.id)
         self.assertEqual(outcome.state, SideTopicState.CLOSED)
+        self.assertEqual(handle.run_calls, 1)
 
     async def test_close_takes_over_stop_cleanup_debt(self) -> None:
         _binding, record, snapshot = await self.open_side()
@@ -1682,6 +1778,9 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             owner_id="ou_owner",
             origin=SimpleNamespace(message_id="om-first"),
         )
+        handle = self.codex.handles[-1]
+        await asyncio.sleep(0)
+        self.assertEqual(handle.run_calls, 0)
         initial = self.runtime.side_turn_activity(
             record.id,
             thread_id=started.thread_id,
@@ -1731,6 +1830,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
         await self.finish_side_turn(started)
+        self.assertEqual(handle.run_calls, 1)
 
         outcome = next(
             item
@@ -1766,6 +1866,59 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(outcome.task_feedback, BindingTaskFeedback())
         self.assertIsNone(outcome.activity)
+
+    async def test_side_activity_observer_failure_and_high_water_fall_back(
+        self,
+    ) -> None:
+        for mode in ("failure", "high-water"):
+            with self.subTest(mode=mode):
+                observer = FakeTurnPlanObserver()
+                if mode == "failure":
+                    observer.error = RuntimeError("observer unavailable")
+                else:
+                    observer.next_cursor_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
+                self.runtime._turn_plan_observer = observer
+                feedback = BindingTaskFeedback(progress_card_enabled=True)
+                binding = self.store.create_binding(
+                    scope=FeishuScope(
+                        "cli_test",
+                        f"oc_{mode}",
+                        ScopeKind.DIRECT,
+                    ),
+                    project_alias="test",
+                    creator_id="ou_owner",
+                    task_feedback=feedback,
+                )
+                self.store.assign_native_thread_id(
+                    binding.id,
+                    f"native-parent-{mode}",
+                )
+                binding = self.store.get(binding.id)
+                _binding, record, _snapshot = await self.open_side_for_binding(
+                    binding,
+                    source=f"om-{mode}",
+                )
+
+                if mode == "failure":
+                    with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+                        started = await self.runtime.submit_side(
+                            side_id=record.id,
+                            input="work",
+                            owner_id="ou_owner",
+                            origin=object(),
+                        )
+                        await asyncio.sleep(0)
+                else:
+                    started = await self.runtime.submit_side(
+                        side_id=record.id,
+                        input="work",
+                        owner_id="ou_owner",
+                        origin=object(),
+                    )
+                    await asyncio.sleep(0)
+                handle = self.codex.handles[-1]
+                self.assertEqual(handle.run_calls, 1)
+                await self.finish_side_turn(started)
 
     async def test_multiple_sides_on_one_parent_run_without_cross_side_lock(self) -> None:
         binding = self.materialized_binding()
@@ -2629,6 +2782,50 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(discarded.thread_id, submission.thread_id)
         self.assertEqual(discarded.turn_id, submission.turn_id)
         self.assertFalse(any(isinstance(item, TurnOutcome) for item in self.outcomes))
+
+    async def test_archive_intent_stops_activity_reads_before_native_mutation(
+        self,
+    ) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        self.codex.read_gate = asyncio.Event()
+        binding = self.store.create_binding(
+            scope=self.scope,
+            project_alias="test",
+            creator_id="ou_user",
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+        )
+        submission = await self.submit(binding)
+        await asyncio.sleep(0)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def gated_archive(thread_id: str) -> object:
+            self.codex.archive_calls.append(thread_id)
+            entered.set()
+            await release.wait()
+            return object()
+
+        self.codex.thread_archive = gated_archive  # type: ignore[method-assign]
+        archiving = asyncio.create_task(self.runtime.archive_exact(binding.id))
+        await entered.wait()
+        calls_at_intent = len(observer.calls)
+        observer.append_activity(
+            thread_id=submission.thread_id,
+            turn_id=submission.turn_id,
+            event=TurnActivityEvent(
+                item_id="late-command",
+                kind=TurnActivityKind.COMMAND,
+                status=TurnActivityStatus.IN_PROGRESS,
+            ),
+        )
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+        self.assertEqual(len(observer.calls), calls_at_intent)
+        release.set()
+        archived = await archiving
+        self.assertFalse(archived.active)
 
     async def test_archive_reserves_binding_until_presenters_are_discarded(
         self,
@@ -4705,20 +4902,22 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         submission.release_receipt_attempt()
         self.assertTrue(submission.task_feedback.progress_card_enabled)
-        observer.append(
-            thread_id=submission.thread_id,
-            turn_id=submission.logical_turn_id,
-            steps=(
-                TurnPlanStepSnapshot("inspect", TurnPlanStepState.IN_PROGRESS),
-            ),
+        control.handles[0].emit_activity(
+            TurnActivityNotificationProjection(
+                turn_id=submission.logical_turn_id,
+                plan_updated=True,
+                steps=(
+                    TurnPlanStepSnapshot("inspect", TurnPlanStepState.IN_PROGRESS),
+                ),
+            )
         )
+        await asyncio.sleep(0)
 
         self.assertIsNone(
             self.runtime.goal_activity(
                 binding.id,
                 thread_id="another-thread",
                 logical_turn_id=submission.logical_turn_id,
-                refresh_plan=True,
             )
         )
         self.assertEqual(observer.calls, [])
@@ -4726,7 +4925,6 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             binding.id,
             thread_id=submission.thread_id,
             logical_turn_id=submission.logical_turn_id,
-            refresh_plan=True,
         )
 
         assert activity is not None
@@ -4744,7 +4942,9 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ["inspect"],
         )
 
-    async def test_disabled_goal_progress_adds_no_plan_observation(self) -> None:
+    async def test_disabled_goal_progress_adds_no_activity_tap_or_observation(
+        self,
+    ) -> None:
         observer = FakeTurnPlanObserver()
         self.runtime._turn_plan_observer = observer
         control = FakeGoalControl(self.codex)
@@ -4763,9 +4963,94 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await self.runtime.wait_idle()
 
         self.assertEqual(observer.calls, [])
+        self.assertIsNone(control.handles[0].activity_sink)
         outcome = self.outcomes[-1]
         self.assertIsInstance(outcome, GoalOutcome)
         self.assertIsNone(outcome.activity)
+
+    async def test_goal_activity_resets_on_physical_turn_rollover(self) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.store.create_binding(
+            scope=self.scope,
+            project_alias="test",
+            creator_id="ou_user",
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+        )
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="roll over safely",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+        handle = control.handles[0]
+        await asyncio.sleep(0)
+        handle.emit_activity(
+            TurnActivityNotificationProjection(
+                turn_id=submission.logical_turn_id,
+                plan_updated=True,
+                steps=(
+                    TurnPlanStepSnapshot("old plan", TurnPlanStepState.IN_PROGRESS),
+                ),
+            )
+        )
+        handle.emit_activity(
+            TurnActivityNotificationProjection(
+                turn_id=submission.logical_turn_id,
+                event=TurnActivityEvent(
+                    item_id="old-commentary",
+                    kind=TurnActivityKind.COMMENTARY,
+                    status=TurnActivityStatus.COMPLETED,
+                    text="old progress",
+                ),
+            )
+        )
+
+        handle.rollover("physical-turn-2")
+        handle.emit_activity(
+            TurnActivityNotificationProjection(
+                turn_id="physical-turn-2",
+                turn_started=True,
+            )
+        )
+        handle.emit_activity(
+            TurnActivityNotificationProjection(
+                turn_id="physical-turn-2",
+                event=TurnActivityEvent(
+                    item_id="new-command",
+                    kind=TurnActivityKind.COMMAND,
+                    status=TurnActivityStatus.IN_PROGRESS,
+                ),
+            )
+        )
+        handle.emit_activity(
+            TurnActivityNotificationProjection(
+                turn_id=submission.logical_turn_id,
+                event=TurnActivityEvent(
+                    item_id="late-old-commentary",
+                    kind=TurnActivityKind.COMMENTARY,
+                    status=TurnActivityStatus.COMPLETED,
+                    text="late old progress",
+                ),
+            )
+        )
+
+        activity = self.runtime.goal_activity(binding.id)
+        assert activity is not None
+        self.assertEqual(activity.physical_turn_id, "physical-turn-2")
+        self.assertFalse(activity.plan_generated)
+        self.assertEqual(activity.commentary, ())
+        self.assertEqual(len(activity.operations), 1)
+
+        handle.finish(response="final physical result")
+        await self.runtime.wait_idle()
+        outcome = self.outcomes[-1]
+        assert isinstance(outcome, GoalOutcome)
+        self.assertEqual(outcome.final_physical_turn_id, "physical-turn-2")
+        self.assertEqual(outcome.final_response, "final physical result")
+        self.assertEqual(outcome.activity.commentary, ())
 
     async def test_goal_cleanup_failure_keeps_slot_and_repeat_stop_retries(self) -> None:
         control = FakeGoalControl(self.codex)
@@ -5813,6 +6098,27 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             turn_id=first.turn_id,
             steps=(TurnPlanStepSnapshot("inspect", TurnPlanStepState.IN_PROGRESS),),
         )
+        for index in range(4):
+            observer.append_activity(
+                thread_id=first.thread_id,
+                turn_id=first.turn_id,
+                event=TurnActivityEvent(
+                    item_id=f"commentary-{index}",
+                    kind=TurnActivityKind.COMMENTARY,
+                    status=TurnActivityStatus.COMPLETED,
+                    text=f"progress {index}",
+                ),
+            )
+        for index in range(10):
+            observer.append_activity(
+                thread_id=first.thread_id,
+                turn_id=first.turn_id,
+                event=TurnActivityEvent(
+                    item_id=f"operation-{index}",
+                    kind=TurnActivityKind.COMMAND,
+                    status=TurnActivityStatus.COMPLETED,
+                ),
+            )
         with_plan = self.runtime.turn_activity(
             binding.id,
             thread_id=first.thread_id,
@@ -5823,6 +6129,11 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         assert with_plan is not None
         self.assertEqual(with_plan.revision, 2)
         self.assertEqual([step.step for step in with_plan.steps], ["inspect"])
+        self.assertEqual(
+            with_plan.commentary,
+            ("progress 1", "progress 2", "progress 3"),
+        )
+        self.assertEqual(len(with_plan.operations), 8)
         unchanged = self.runtime.turn_activity(
             binding.id,
             thread_id=first.thread_id,
@@ -5880,6 +6191,39 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         assert outcome.activity is not None
         self.assertFalse(outcome.activity.plan_generated)
 
+    async def test_activity_aggregates_subtasks_by_status(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.binding()
+        submission = await self.submit(binding, "aggregate subtasks")
+        for item_id, status, count in (
+            ("running-one", TurnActivityStatus.IN_PROGRESS, 2),
+            ("running-two", TurnActivityStatus.IN_PROGRESS, 3),
+            ("completed-one", TurnActivityStatus.COMPLETED, 4),
+        ):
+            observer.append_activity(
+                thread_id=submission.thread_id,
+                turn_id=submission.turn_id,
+                event=TurnActivityEvent(
+                    item_id=item_id,
+                    kind=TurnActivityKind.SUBAGENT,
+                    status=status,
+                    count=count,
+                ),
+            )
+
+        activity = self.runtime.turn_activity(binding.id, refresh_plan=True)
+
+        assert activity is not None
+        self.assertEqual(
+            [(item.status, item.count) for item in activity.operations],
+            [
+                (TurnActivityStatus.IN_PROGRESS, 5),
+                (TurnActivityStatus.COMPLETED, 4),
+            ],
+        )
+        await self.finish(self.codex.handles[0], submission)
+
     async def test_progress_feedback_and_final_activity_are_exact_turn_snapshots(
         self,
     ) -> None:
@@ -5905,7 +6249,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             observer.calls,
-            [(submission.thread_id, submission.turn_id, 0)],
+            [
+                (submission.thread_id, submission.turn_id, 0),
+                (submission.thread_id, submission.turn_id, 1),
+            ],
         )
         outcome = self.outcomes[-1]
         assert isinstance(outcome, TurnOutcome)
@@ -6120,10 +6467,19 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await self.finish(self.codex.handles[0], first)
 
     async def test_stopping_rejects_prompt_and_stop_uses_interrupt(self) -> None:
-        binding = self.binding()
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.store.create_binding(
+            scope=self.scope,
+            project_alias="test",
+            creator_id="ou_user",
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+        )
         submission = await self.submit(binding)
         handle = self.codex.handles[0]
         handle.complete_on_interrupt = False
+        await asyncio.sleep(0)
+        self.assertTrue(observer.calls)
 
         self.assertEqual(
             await self.runtime.stop(binding.id),

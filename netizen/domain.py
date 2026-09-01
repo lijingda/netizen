@@ -237,6 +237,14 @@ class TurnProgressManifestStep:
 
 
 @dataclass(frozen=True, slots=True)
+class TurnActivityManifestEntry:
+    kind: str
+    status: str
+    text: str | None = None
+    count: int = 1
+
+
+@dataclass(frozen=True, slots=True)
 class TurnProgressManifest:
     """Sanitized, self-contained progress panel carried by file pagination."""
 
@@ -246,6 +254,8 @@ class TurnProgressManifest:
     plan_generated: bool
     plan_may_be_stale: bool
     steps: tuple[TurnProgressManifestStep, ...] = ()
+    commentary: tuple[str, ...] = ()
+    operations: tuple[TurnActivityManifestEntry, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

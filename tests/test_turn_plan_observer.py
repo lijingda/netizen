@@ -6,18 +6,29 @@ from unittest.mock import patch
 import openai_codex
 from openai_codex import AsyncCodex
 from openai_codex.generated.v2_all import (
+    AgentMessageThreadItem,
+    CommandExecutionStatus,
+    CommandExecutionThreadItem,
+    ItemCompletedNotification,
+    ItemStartedNotification,
+    MessagePhase,
+    ThreadItem,
+    Turn,
+    TurnCompletedNotification,
     TurnPlanStep,
     TurnPlanStepStatus,
     TurnPlanUpdatedNotification,
+    TurnStatus,
 )
 from openai_codex.models import Notification, UnknownNotification
 
 from netizen import turn_plan_observer
 from netizen.turn_plan_observer import (
-    PinnedTurnPlanObserver,
-    TurnPlanObservationUnavailable,
+    PinnedTurnActivityObserver,
+    TurnActivityObservationUnavailable,
     TurnPlanStepState,
 )
+from netizen.turn_activity import TurnActivityKind, TurnActivityStatus
 
 
 def _plan(
@@ -41,13 +52,13 @@ def _plan(
     )
 
 
-class PinnedTurnPlanObserverTest(unittest.TestCase):
+class PinnedTurnActivityObserverTest(unittest.TestCase):
     def setUp(self) -> None:
         self.codex = AsyncCodex()
         self.codex._initialized = True
         self.router = self.codex._client._sync._router
         self.router.register_turn("turn-one")
-        self.observer = PinnedTurnPlanObserver(self.codex)
+        self.observer = PinnedTurnActivityObserver(self.codex)
 
     def test_snapshot_is_non_consuming_and_maps_exact_native_plan(self) -> None:
         first = _plan()
@@ -104,6 +115,79 @@ class PinnedTurnPlanObserverTest(unittest.TestCase):
         self.assertEqual(second.steps[0].step, "ship")
         self.assertIs(second.steps[0].status, TurnPlanStepState.COMPLETED)
 
+    def test_allowlisted_activity_is_sanitized_and_terminal_is_only_a_signal(
+        self,
+    ) -> None:
+        commentary = AgentMessageThreadItem(
+            id="commentary-one",
+            phase=MessagePhase.commentary,
+            text="Checked `/Users/user/private.py` with api_key=do-not-show",
+            type="agentMessage",
+        )
+        command = CommandExecutionThreadItem(
+            id="command-one",
+            command="cat /Users/user/private.py",
+            commandActions=[],
+            cwd="/Users/user",
+            status=CommandExecutionStatus.in_progress,
+            type="commandExecution",
+        )
+        self.router.route_notification(
+            Notification(
+                method="item/started",
+                payload=ItemStartedNotification(
+                    item=ThreadItem(root=command),
+                    startedAtMs=1,
+                    threadId="thread-one",
+                    turnId="turn-one",
+                ),
+            )
+        )
+        self.router.route_notification(
+            Notification(
+                method="item/completed",
+                payload=ItemCompletedNotification(
+                    completedAtMs=2,
+                    item=ThreadItem(root=commentary),
+                    threadId="thread-one",
+                    turnId="turn-one",
+                ),
+            )
+        )
+        self.router.route_notification(
+            Notification(
+                method="turn/completed",
+                payload=TurnCompletedNotification(
+                    threadId="thread-one",
+                    turn=Turn(
+                        id="turn-one",
+                        items=[],
+                        status=TurnStatus.completed,
+                    ),
+                ),
+            )
+        )
+
+        observation = self.observer.observe(
+            thread_id="thread-one",
+            turn_id="turn-one",
+            after_cursor=0,
+        )
+
+        self.assertTrue(observation.turn_completed)
+        self.assertEqual(len(observation.events), 2)
+        self.assertEqual(
+            (observation.events[0].kind, observation.events[0].status),
+            (TurnActivityKind.COMMAND, TurnActivityStatus.IN_PROGRESS),
+        )
+        self.assertIsNone(observation.events[0].text)
+        self.assertEqual(
+            observation.events[1].text,
+            "[敏感内容已隐藏]",
+        )
+        self.assertNotIn("cat", repr(observation.events))
+        self.assertNotIn("private.py", repr(observation.events))
+
     def test_mismatched_thread_and_turn_payloads_cannot_update_exact_turn(self) -> None:
         turn_queue = self.router._turn_notifications["turn-one"]
         turn_queue.put(_plan(thread_id="thread-other"))
@@ -130,7 +214,7 @@ class PinnedTurnPlanObserverTest(unittest.TestCase):
             )
         )
         with self.assertRaisesRegex(
-            TurnPlanObservationUnavailable,
+            TurnActivityObservationUnavailable,
             "payload shape changed",
         ):
             self.observer.observe(
@@ -141,7 +225,7 @@ class PinnedTurnPlanObserverTest(unittest.TestCase):
 
         turn_queue.get_nowait()
         with self.assertRaisesRegex(
-            TurnPlanObservationUnavailable,
+            TurnActivityObservationUnavailable,
             "consumed unexpectedly",
         ):
             self.observer.observe(
@@ -153,24 +237,24 @@ class PinnedTurnPlanObserverTest(unittest.TestCase):
     def test_version_fingerprint_and_queue_shape_changes_fail_closed(self) -> None:
         with patch.object(openai_codex, "__version__", "0.147.1"):
             with self.assertRaisesRegex(
-                TurnPlanObservationUnavailable,
+                TurnActivityObservationUnavailable,
                 "supports only openai-codex==0.147.0",
             ):
-                PinnedTurnPlanObserver(self.codex)
+                PinnedTurnActivityObserver(self.codex)
         with patch.object(
             turn_plan_observer,
             "_PACKAGE_SOURCE_FINGERPRINT",
             "0" * 64,
         ):
             with self.assertRaisesRegex(
-                TurnPlanObservationUnavailable,
+                TurnActivityObservationUnavailable,
                 "package source fingerprint changed",
             ):
-                PinnedTurnPlanObserver(self.codex)
+                PinnedTurnActivityObserver(self.codex)
 
         self.router._turn_notifications["turn-one"] = object()  # type: ignore[assignment]
         with self.assertRaisesRegex(
-            TurnPlanObservationUnavailable,
+            TurnActivityObservationUnavailable,
             "queue is unavailable",
         ):
             self.observer.observe(

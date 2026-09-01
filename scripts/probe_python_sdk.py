@@ -42,7 +42,10 @@ from netizen.sdk_gap_adapter import (
     facade_migration_requirements,
 )
 from netizen.terminal_cleanup import PinnedExperimentalTerminalCleanup, TerminalCleanup
-from netizen.turn_plan_observer import PinnedTurnPlanObserver, TurnPlanObservation
+from netizen.turn_plan_observer import (
+    PinnedTurnActivityObserver,
+    TurnActivityObservation,
+)
 
 
 _NOT_MATERIALIZED_SUFFIX = (
@@ -862,13 +865,14 @@ async def _steer(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
 
 
 async def _wait_for_plan_observation(
-    observer: PinnedTurnPlanObserver,
+    observer: PinnedTurnActivityObserver,
     *,
     thread_id: str,
     turn_id: str,
     after_cursor: int,
     timeout: float,
-) -> TurnPlanObservation:
+    require_activity: bool = False,
+) -> TurnActivityObservation:
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
         observation = observer.observe(
@@ -876,7 +880,9 @@ async def _wait_for_plan_observation(
             turn_id=turn_id,
             after_cursor=after_cursor,
         )
-        if observation.plan_updated:
+        if observation.plan_updated and (
+            not require_activity or observation.events
+        ):
             return observation
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError("native turn/plan/updated was not observed")
@@ -884,11 +890,11 @@ async def _wait_for_plan_observation(
 
 
 async def _turn_plan_live(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
-    """Observe a native checklist and its post-steer full replacement."""
+    """Observe safe Activity and a checklist's post-steer full replacement."""
 
     from openai_codex.generated.v2_all import TurnPlanUpdatedNotification
 
-    observer = PinnedTurnPlanObserver(codex)
+    observer = PinnedTurnActivityObserver(codex)
     thread = await codex.thread_start(cwd=str(cwd))
     handle = await thread.turn(
         "First call update_plan with exactly these three steps: "
@@ -905,6 +911,7 @@ async def _turn_plan_live(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
             turn_id=handle.id,
             after_cursor=0,
             timeout=45,
+            require_activity=True,
         )
         steered = await handle.steer(
             "Replace the complete checklist by calling update_plan with exactly "
@@ -940,6 +947,15 @@ async def _turn_plan_live(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
         raise AssertionError(
             "public terminal stream did not retain the observed plan notifications"
         )
+    observed_activity_kinds = sorted(
+        {
+            event.kind.value
+            for observation in (initial, refreshed)
+            for event in observation.events
+        }
+    )
+    if not observed_activity_kinds:
+        raise AssertionError("Activity probe observed no safe item lifecycle")
     return {
         "thread_id": thread.id,
         "turn_id": handle.id,
@@ -947,6 +963,7 @@ async def _turn_plan_live(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
         "initial_plan": [item.step for item in initial.steps],
         "refreshed_plan": [item.step for item in refreshed.steps],
         "streamed_plan_notifications": streamed_plan_count,
+        "activity_kinds": observed_activity_kinds,
         "status": _status_value(terminal),
         "final_response": final_response,
     }

@@ -54,10 +54,17 @@ from .sdk_gap_adapter import (
     ThreadUnsubscribeStateUnknown,
 )
 from .terminal_cleanup import BackgroundTerminalInspector, TerminalCleanup
-from .turn_plan_observer import (
-    TurnPlanObserver,
+from .turn_activity import (
+    ACTIVITY_COMMENTARY_LIMIT,
+    ACTIVITY_OPERATION_LIMIT,
+    SIDE_ACTIVITY_QUEUE_HIGH_WATER,
+    TurnActivityEntrySnapshot,
+    TurnActivityEvent,
+    TurnActivityKind,
+    TurnActivityNotificationProjection,
     TurnPlanStepSnapshot,
 )
+from .turn_plan_observer import TurnActivityObservation, TurnActivityObserver
 
 
 logger = logging.getLogger(__name__)
@@ -441,9 +448,9 @@ class TurnProgressSnapshot:
 class TurnActivitySnapshot:
     """Latest bounded display projection for one exact active Turn.
 
-    The projection keeps only the current state and latest full plan
-    replacement. It is process-local display data, not a Turn history or a
-    second terminal-state authority.
+    The projection keeps only bounded, allowlisted activity and the latest full
+    plan replacement. It is process-local display data, not a Turn history or
+    a second terminal-state authority.
     """
 
     binding_id: str
@@ -456,6 +463,8 @@ class TurnActivitySnapshot:
     plan_generated: bool
     plan_may_be_stale: bool
     steps: tuple[TurnPlanStepSnapshot, ...]
+    commentary: tuple[str, ...] = ()
+    operations: tuple[TurnActivityEntrySnapshot, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.binding_id or not self.thread_id or not self.turn_id:
@@ -480,6 +489,8 @@ class SideTurnActivitySnapshot:
     plan_generated: bool
     plan_may_be_stale: bool
     steps: tuple[TurnPlanStepSnapshot, ...]
+    commentary: tuple[str, ...] = ()
+    operations: tuple[TurnActivityEntrySnapshot, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.side_id or not self.thread_id or not self.turn_id:
@@ -505,6 +516,8 @@ class GoalActivitySnapshot:
     plan_available: bool
     plan_generated: bool
     steps: tuple[TurnPlanStepSnapshot, ...]
+    commentary: tuple[str, ...] = ()
+    operations: tuple[TurnActivityEntrySnapshot, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.binding_id or not self.thread_id or not self.logical_turn_id:
@@ -848,6 +861,7 @@ class _ActiveTurn:
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
     activity_revision: int = 1
+    activity_observation_enabled: bool = True
     steer_count: int = 0
     plan_cursor: int = 0
     plan_generated: bool = False
@@ -856,6 +870,10 @@ class _ActiveTurn:
     plan_stale_after_cursor: int | None = None
     plan_last_update_cursor: int | None = None
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
+    activity_commentary: dict[str, str] = field(default_factory=dict)
+    activity_commentary_order: list[str] = field(default_factory=list)
+    activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
+    activity_operation_order: list[str] = field(default_factory=list)
     task: asyncio.Task[None] | None = None
 
 
@@ -899,11 +917,16 @@ class _ActiveGoal:
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
     activity_revision: int = 1
+    activity_observation_enabled: bool = True
     activity_turn_id: str | None = None
     plan_cursor: int = 0
     plan_generated: bool = False
     plan_available: bool = True
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
+    activity_commentary: dict[str, str] = field(default_factory=dict)
+    activity_commentary_order: list[str] = field(default_factory=list)
+    activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
+    activity_operation_order: list[str] = field(default_factory=list)
     pause_attempted: bool = False
     interrupt_acknowledged: bool = False
     cleanup_required: bool = False
@@ -969,6 +992,7 @@ class _ActiveSideTurn:
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
     activity_revision: int = 1
+    activity_observation_enabled: bool = True
     steer_count: int = 0
     plan_cursor: int = 0
     plan_generated: bool = False
@@ -977,6 +1001,10 @@ class _ActiveSideTurn:
     plan_stale_after_cursor: int | None = None
     plan_last_update_cursor: int | None = None
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
+    activity_commentary: dict[str, str] = field(default_factory=dict)
+    activity_commentary_order: list[str] = field(default_factory=list)
+    activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
+    activity_operation_order: list[str] = field(default_factory=list)
     task: asyncio.Task[None] | None = None
 
 
@@ -1020,7 +1048,7 @@ class CodexRuntime:
         thread_subscription_control: ThreadSubscriptionControl | None = None,
         background_terminal_inspector: BackgroundTerminalInspector | None = None,
         thread_delete_control: ThreadDeleteControl | None = None,
-        turn_plan_observer: TurnPlanObserver | None = None,
+        turn_plan_observer: TurnActivityObserver | None = None,
         on_completion: CompletionHandler = _ignore_completion,
         poll_interval_seconds: float = 0.5,
         compaction_timeout_seconds: float = _COMPACTION_TERMINAL_TIMEOUT_SECONDS,
@@ -1895,7 +1923,7 @@ class CodexRuntime:
                         "当前 Side Turn 正在停止，暂不接受新消息。"
                     )
                 if active.task_feedback.progress_card_enabled:
-                    self._refresh_turn_plan(active)
+                    self._refresh_turn_activity(active)
                 stale_after_cursor = active.plan_cursor
                 try:
                     await active.handle.steer(native_input)
@@ -1974,6 +2002,7 @@ class CodexRuntime:
                         receipt_attempted=receipt_attempted,
                         task_feedback=session.task_feedback,
                         feedback_revision=session.feedback_revision,
+                        plan_available=self._turn_plan_observer is not None,
                     )
                     session.active = active
                     session.last_activity = asyncio.get_running_loop().time()
@@ -3291,7 +3320,7 @@ class CodexRuntime:
             self._advance_admission_revision(binding.id)
             if active is not None:
                 self._mark_thread_subscribed_locked(binding, active.thread)
-                self._refresh_turn_plan(active)
+                self._refresh_turn_activity(active)
                 stale_after_cursor = active.plan_cursor
                 try:
                     await active.handle.steer(native_input)
@@ -3543,11 +3572,10 @@ class CodexRuntime:
         if turn_id is not None and active.handle.id != turn_id:
             return None
         if refresh_plan:
-            self._refresh_turn_plan(active)
+            self._refresh_turn_activity(active)
         return self._turn_activity_snapshot(active)
 
-    @staticmethod
-    def _turn_activity_snapshot(active: _ActiveTurn) -> TurnActivitySnapshot:
+    def _turn_activity_snapshot(self, active: _ActiveTurn) -> TurnActivitySnapshot:
         return TurnActivitySnapshot(
             binding_id=active.binding_id,
             thread_id=active.handle.thread_id,
@@ -3559,6 +3587,8 @@ class CodexRuntime:
             plan_generated=active.plan_generated,
             plan_may_be_stale=active.plan_may_be_stale,
             steps=active.plan_steps,
+            commentary=self._activity_commentary(active),
+            operations=self._activity_operations(active),
         )
 
     def side_turn_activity(
@@ -3582,11 +3612,11 @@ class CodexRuntime:
         if turn_id is not None and active.handle.id != turn_id:
             return None
         if refresh_plan:
-            self._refresh_turn_plan(active)
+            self._refresh_turn_activity(active)
         return self._side_turn_activity_snapshot(side_id, active)
 
-    @staticmethod
     def _side_turn_activity_snapshot(
+        self,
         side_id: str,
         active: _ActiveSideTurn,
     ) -> SideTurnActivitySnapshot:
@@ -3601,10 +3631,12 @@ class CodexRuntime:
             plan_generated=active.plan_generated,
             plan_may_be_stale=active.plan_may_be_stale,
             steps=active.plan_steps,
+            commentary=self._activity_commentary(active),
+            operations=self._activity_operations(active),
         )
 
-    @staticmethod
     def _turn_activity_visible_state(
+        self,
         active: _ActiveTurn | _ActiveSideTurn,
     ) -> tuple[object, ...]:
         return (
@@ -3614,19 +3646,23 @@ class CodexRuntime:
             active.plan_generated,
             active.plan_may_be_stale,
             active.plan_steps,
+            self._activity_commentary(active),
+            self._activity_operations(active),
         )
 
-    def _refresh_turn_plan(
+    def _refresh_turn_activity(
         self,
         active: _ActiveTurn | _ActiveSideTurn,
-    ) -> None:
+    ) -> TurnActivityObservation | None:
         before = self._turn_activity_visible_state(active)
+        if not active.activity_observation_enabled:
+            return None
         observer = self._turn_plan_observer
         if observer is None:
             active.plan_available = False
             if self._turn_activity_visible_state(active) != before:
                 active.activity_revision += 1
-            return
+            return None
         try:
             observation = observer.observe(
                 thread_id=active.handle.thread_id,
@@ -3638,34 +3674,124 @@ class CodexRuntime:
             if self._turn_activity_visible_state(active) != before:
                 active.activity_revision += 1
             logger.warning(
-                "native Turn plan observation unavailable",
+                "native Turn activity observation unavailable",
                 extra={
                     "thread_id": active.handle.thread_id,
                     "turn_id": active.handle.id,
                     "error_type": type(error).__name__,
                 },
             )
-            return
+            return None
         active.plan_available = True
         active.plan_cursor = observation.next_cursor
-        if not observation.plan_updated:
-            if self._turn_activity_visible_state(active) != before:
-                active.activity_revision += 1
-            return
-        active.plan_steps = observation.steps
-        active.plan_generated = True
-        active.plan_last_update_cursor = observation.plan_cursor
-        stale_after = active.plan_stale_after_cursor
-        if (
-            active.plan_may_be_stale
-            and stale_after is not None
-            and observation.plan_cursor is not None
-            and observation.plan_cursor > stale_after
-        ):
-            active.plan_may_be_stale = False
-            active.plan_stale_after_cursor = None
+        self._apply_activity_events(active, observation.events)
+        if observation.plan_updated:
+            active.plan_steps = observation.steps
+            active.plan_generated = True
+            active.plan_last_update_cursor = observation.plan_cursor
+            stale_after = active.plan_stale_after_cursor
+            if (
+                active.plan_may_be_stale
+                and stale_after is not None
+                and observation.plan_cursor is not None
+                and observation.plan_cursor > stale_after
+            ):
+                active.plan_may_be_stale = False
+                active.plan_stale_after_cursor = None
         if self._turn_activity_visible_state(active) != before:
             active.activity_revision += 1
+        return observation
+
+    @staticmethod
+    def _activity_commentary(
+        active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
+    ) -> tuple[str, ...]:
+        return tuple(
+            active.activity_commentary[item_id]
+            for item_id in active.activity_commentary_order
+            if item_id in active.activity_commentary
+        )
+
+    @staticmethod
+    def _activity_operations(
+        active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
+    ) -> tuple[TurnActivityEntrySnapshot, ...]:
+        ordered: list[tuple[int, TurnActivityEntrySnapshot]] = []
+        subagents: dict[TurnActivityStatus, tuple[int, int]] = {}
+        for position, item_id in enumerate(active.activity_operation_order):
+            event = active.activity_operations.get(item_id)
+            if event is None:
+                continue
+            if event.kind is TurnActivityKind.SUBAGENT:
+                _previous_position, previous_count = subagents.get(
+                    event.status,
+                    (position, 0),
+                )
+                subagents[event.status] = (
+                    position,
+                    previous_count + event.count,
+                )
+                continue
+            ordered.append(
+                (
+                    position,
+                    TurnActivityEntrySnapshot(
+                        kind=event.kind,
+                        status=event.status,
+                        text=event.text,
+                        count=event.count,
+                    ),
+                )
+            )
+        ordered.extend(
+            (
+                position,
+                TurnActivityEntrySnapshot(
+                    kind=TurnActivityKind.SUBAGENT,
+                    status=status,
+                    count=count,
+                ),
+            )
+            for status, (position, count) in subagents.items()
+        )
+        ordered.sort(key=lambda item: item[0])
+        return tuple(item for _position, item in ordered)
+
+    @staticmethod
+    def _apply_activity_events(
+        active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
+        events: tuple[TurnActivityEvent, ...],
+    ) -> None:
+        for event in events:
+            item_id = event.item_id
+            if event.kind is TurnActivityKind.COMMENTARY:
+                if event.text is None:
+                    continue
+                active.activity_commentary[item_id] = event.text
+                if item_id in active.activity_commentary_order:
+                    active.activity_commentary_order.remove(item_id)
+                active.activity_commentary_order.append(item_id)
+                while len(active.activity_commentary_order) > ACTIVITY_COMMENTARY_LIMIT:
+                    discarded = active.activity_commentary_order.pop(0)
+                    active.activity_commentary.pop(discarded, None)
+                continue
+            active.activity_operations[item_id] = event
+            if item_id in active.activity_operation_order:
+                active.activity_operation_order.remove(item_id)
+            active.activity_operation_order.append(item_id)
+            while len(active.activity_operation_order) > ACTIVITY_OPERATION_LIMIT:
+                discarded = active.activity_operation_order.pop(0)
+                active.activity_operations.pop(discarded, None)
+
+    @staticmethod
+    def _reset_activity(active: _ActiveGoal) -> None:
+        active.plan_cursor = 0
+        active.plan_generated = False
+        active.plan_steps = ()
+        active.activity_commentary.clear()
+        active.activity_commentary_order.clear()
+        active.activity_operations.clear()
+        active.activity_operation_order.clear()
 
     def is_compacting(self, binding_id: str) -> bool:
         return binding_id in self._compacting
@@ -3689,9 +3815,8 @@ class CodexRuntime:
         *,
         thread_id: str | None = None,
         logical_turn_id: str | None = None,
-        refresh_plan: bool = False,
     ) -> GoalActivitySnapshot | None:
-        """Return one exact in-process Goal run's bounded display projection."""
+        """Return Goal Activity maintained by its unique stream consumer."""
 
         active = self._goals.get(binding_id)
         handle = active.handle if active is not None else None
@@ -3703,12 +3828,9 @@ class CodexRuntime:
             return None
         if logical_turn_id is not None and handle.id != logical_turn_id:
             return None
-        if refresh_plan:
-            self._refresh_goal_plan(active)
         return self._goal_activity_snapshot(active)
 
-    @staticmethod
-    def _goal_activity_snapshot(active: _ActiveGoal) -> GoalActivitySnapshot:
+    def _goal_activity_snapshot(self, active: _ActiveGoal) -> GoalActivitySnapshot:
         handle = active.handle
         assert handle is not None and handle.id is not None
         return GoalActivitySnapshot(
@@ -3721,89 +3843,50 @@ class CodexRuntime:
             plan_available=active.plan_available,
             plan_generated=active.plan_generated,
             steps=active.plan_steps,
+            commentary=self._activity_commentary(active),
+            operations=self._activity_operations(active),
         )
 
-    @staticmethod
-    def _goal_activity_visible_state(active: _ActiveGoal) -> tuple[object, ...]:
+    def _goal_activity_visible_state(self, active: _ActiveGoal) -> tuple[object, ...]:
         return (
             active.state,
             active.activity_turn_id,
             active.plan_available,
             active.plan_generated,
             active.plan_steps,
+            self._activity_commentary(active),
+            self._activity_operations(active),
         )
 
-    def _refresh_goal_plan(
+    def _apply_goal_activity_projection(
         self,
         active: _ActiveGoal,
-        *,
-        physical_turn_id: str | None = None,
+        projection: TurnActivityNotificationProjection | None,
     ) -> None:
+        if not active.activity_observation_enabled:
+            return
         before = self._goal_activity_visible_state(active)
-        handle = active.handle
-        observer = self._turn_plan_observer
-        assert handle is not None
-        try:
-            current_turn_id = (
-                physical_turn_id
-                if physical_turn_id is not None
-                else handle.current_physical_turn_id()
-            )
-        except Exception as error:
-            active.plan_available = False
-            if self._goal_activity_visible_state(active) != before:
-                active.activity_revision += 1
-            logger.warning(
-                "native Goal physical Turn observation unavailable",
-                extra={
-                    "thread_id": active.thread_id,
-                    "logical_turn_id": handle.id,
-                    "error_type": type(error).__name__,
-                },
-            )
-            return
-        if current_turn_id is not None and (
-            not isinstance(current_turn_id, str) or not current_turn_id
-        ):
+        if projection is None:
             active.plan_available = False
             if self._goal_activity_visible_state(active) != before:
                 active.activity_revision += 1
             return
-        if current_turn_id != active.activity_turn_id:
-            active.activity_turn_id = current_turn_id
-            active.plan_cursor = 0
-            active.plan_generated = False
-            active.plan_steps = ()
-        active.plan_available = observer is not None
-        if observer is None or current_turn_id is None:
-            if self._goal_activity_visible_state(active) != before:
-                active.activity_revision += 1
-            return
-        try:
-            observation = observer.observe(
-                thread_id=active.thread_id,
-                turn_id=current_turn_id,
-                after_cursor=active.plan_cursor,
-            )
-        except Exception as error:
-            active.plan_available = False
-            if self._goal_activity_visible_state(active) != before:
-                active.activity_revision += 1
-            logger.warning(
-                "native Goal plan observation unavailable",
-                extra={
-                    "thread_id": active.thread_id,
-                    "logical_turn_id": handle.id,
-                    "turn_id": current_turn_id,
-                    "error_type": type(error).__name__,
-                },
-            )
+        turn_id = projection.turn_id
+        if turn_id is None:
             return
         active.plan_available = True
-        active.plan_cursor = observation.next_cursor
-        if observation.plan_updated:
-            active.plan_steps = observation.steps
+        if projection.turn_started and turn_id != active.activity_turn_id:
+            active.activity_turn_id = turn_id
+            self._reset_activity(active)
+        if turn_id != active.activity_turn_id:
+            # A late event from an earlier physical Turn can never repopulate
+            # the new Turn's Activity Module.
+            return
+        if projection.plan_updated:
+            active.plan_steps = projection.steps
             active.plan_generated = True
+        if projection.event is not None:
+            self._apply_activity_events(active, (projection.event,))
         if self._goal_activity_visible_state(active) != before:
             active.activity_revision += 1
 
@@ -3931,7 +4014,7 @@ class CodexRuntime:
                 persisted=persisted,
                 task_feedback=binding.task_feedback,
                 feedback_revision=binding.feedback_revision,
-                plan_available=self._turn_plan_observer is not None,
+                plan_available=True,
             )
             self._goals[binding.id] = active
             self._advance_admission_revision(binding.id)
@@ -4057,7 +4140,7 @@ class CodexRuntime:
                 generation_token_budget=persisted.token_budget,
                 task_feedback=binding.task_feedback,
                 feedback_revision=binding.feedback_revision,
-                plan_available=self._turn_plan_observer is not None,
+                plan_available=True,
             )
             self._goals[binding.id] = active
             self._advance_admission_revision(binding.id)
@@ -4370,6 +4453,13 @@ class CodexRuntime:
             state=state,
         )
         self._lifecycles[binding.id] = active
+        if state in {ThreadLifecycleState.ARCHIVING, ThreadLifecycleState.DELETING}:
+            running = self._active.get(binding.id)
+            if running is not None:
+                running.activity_observation_enabled = False
+            goal = self._goals.get(binding.id)
+            if goal is not None:
+                goal.activity_observation_enabled = False
         self._advance_admission_revision(binding.id)
         return active
 
@@ -4412,6 +4502,12 @@ class CodexRuntime:
                 "native Thread lifecycle ownership changed"
             )
         self._lifecycles.pop(active.binding_id, None)
+        running = self._active.get(active.binding_id)
+        if running is not None:
+            running.activity_observation_enabled = True
+        goal = self._goals.get(active.binding_id)
+        if goal is not None:
+            goal.activity_observation_enabled = True
         self._advance_admission_revision(active.binding_id)
 
     def _retain_unknown_lifecycle(
@@ -4428,7 +4524,7 @@ class CodexRuntime:
         binding_id: str,
         thread_id: str,
     ) -> ThreadActivityDiscardedOutcome:
-        """Forget observers only after native archive/delete is confirmed."""
+        """Forget local execution state after native archive/delete is confirmed."""
 
         changed = False
         turn_id: str | None = None
@@ -5231,6 +5327,32 @@ class CodexRuntime:
         try:
             # Side Threads are ephemeral. Intentionally use the normal SDK
             # handle path and do not apply persisted-thread completion recovery.
+            # When Activity is enabled, only peek until exact completion is
+            # queued; ``handle.run()`` remains the sole consumer and terminal
+            # authority.
+            if active.task_feedback.progress_card_enabled:
+                while True:
+                    observation = self._refresh_turn_activity(active)
+                    if observation is None:
+                        break
+                    if observation.next_cursor >= SIDE_ACTIVITY_QUEUE_HIGH_WATER:
+                        before = self._turn_activity_visible_state(active)
+                        active.plan_available = False
+                        active.activity_observation_enabled = False
+                        if self._turn_activity_visible_state(active) != before:
+                            active.activity_revision += 1
+                        logger.warning(
+                            "Side Turn activity queue reached the fixed high water; "
+                            "falling back to the unique consumer",
+                            extra={
+                                "thread_id": active.handle.thread_id,
+                                "turn_id": active.handle.id,
+                            },
+                        )
+                        break
+                    if observation.turn_completed:
+                        break
+                    await asyncio.sleep(self._poll_interval_seconds)
             result = await active.handle.run()
             active.terminal_observed = True
         except asyncio.CancelledError:
@@ -5255,7 +5377,6 @@ class CodexRuntime:
                     and session.active is active
                 ):
                     if active.task_feedback.progress_card_enabled:
-                        self._refresh_turn_plan(active)
                         activity = self._side_turn_activity_snapshot(
                             session.side_id,
                             active,
@@ -5874,6 +5995,8 @@ class CodexRuntime:
             while error is None and unavailable_error is None:
                 if self._active.get(active.binding_id) is not active:
                     return
+                if active.task_feedback.progress_card_enabled:
+                    self._refresh_turn_activity(active)
                 if observation is None:
                     try:
                         observation = await self._read_terminal_result(active)
@@ -5923,7 +6046,7 @@ class CodexRuntime:
         finally:
             try:
                 if active.task_feedback.progress_card_enabled:
-                    self._refresh_turn_plan(active)
+                    self._refresh_turn_activity(active)
                 activity = self._turn_activity_snapshot(active)
                 if active.terminal_observed:
                     observed_usage = False
@@ -6130,7 +6253,15 @@ class CodexRuntime:
         handle = active.handle
         assert handle is not None
         try:
-            active.stream_terminal = await handle.wait_terminal()
+            if active.task_feedback.progress_card_enabled:
+                active.stream_terminal = await handle.wait_terminal(
+                    lambda projection: self._apply_goal_activity_projection(
+                        active,
+                        projection,
+                    )
+                )
+            else:
+                active.stream_terminal = await handle.wait_terminal()
             if active.stream_terminal.logical_turn_id != handle.id:
                 raise RuntimeError("Goal stream terminal identity mismatch")
             async with asyncio.timeout(_COMPACTION_TERMINAL_TIMEOUT_SECONDS):
@@ -6369,11 +6500,6 @@ class CodexRuntime:
             active.final_turn_status = turn_status
             active.final_items = items
             active.final_response = final_response
-            if active.task_feedback.progress_card_enabled:
-                self._refresh_goal_plan(
-                    active,
-                    physical_turn_id=terminal.final_physical_turn_id,
-                )
             return persisted
 
     async def _read_terminal_result(

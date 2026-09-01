@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synthetic gate for ADR 0020's non-consuming active-Turn plan observer."""
+"""Synthetic gate for the pinned non-consuming active-Turn Activity observer."""
 
 from __future__ import annotations
 
@@ -60,6 +60,40 @@ def _fake_server() -> None:
                     "result": {
                         "userAgent": "netizen-plan-probe/1",
                         "serverInfo": {"name": "plan-probe", "version": "1"},
+                    },
+                }
+            )
+            _send(
+                {
+                    "method": "item/started",
+                    "params": {
+                        "threadId": _THREAD_ID,
+                        "turnId": _TURN_ID,
+                        "startedAtMs": 1,
+                        "item": {
+                            "type": "commandExecution",
+                            "id": "command-one",
+                            "command": "cat /Users/user/private.txt",
+                            "commandActions": [],
+                            "cwd": "/Users/user",
+                            "status": "inProgress",
+                        },
+                    },
+                }
+            )
+            _send(
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": _THREAD_ID,
+                        "turnId": _TURN_ID,
+                        "completedAtMs": 2,
+                        "item": {
+                            "type": "agentMessage",
+                            "id": "commentary-one",
+                            "phase": "commentary",
+                            "text": "checked api_key=do-not-show",
+                        },
                     },
                 }
             )
@@ -145,9 +179,10 @@ async def _client() -> None:
     from openai_codex.generated.v2_all import TurnPlanUpdatedNotification
 
     from netizen.turn_plan_observer import (
-        PinnedTurnPlanObserver,
+        PinnedTurnActivityObserver,
         TurnPlanStepState,
     )
+    from netizen.turn_activity import TurnActivityKind, TurnActivityStatus
 
     config = CodexConfig(
         launch_args_override=(
@@ -157,7 +192,7 @@ async def _client() -> None:
         )
     )
     async with AsyncCodex(config) as codex:
-        observer = PinnedTurnPlanObserver(codex)
+        observer = PinnedTurnActivityObserver(codex)
         thread = await codex.thread_start(cwd="/tmp")
         handle = await thread.turn("publish a checklist")
         for _ in range(100):
@@ -172,12 +207,18 @@ async def _client() -> None:
         else:
             raise AssertionError("plan notification did not reach the exact Turn queue")
 
-        assert observation.next_cursor == 1
+        assert observation.next_cursor == 3
         assert tuple((item.step, item.status) for item in observation.steps) == (
             ("inspect", TurnPlanStepState.COMPLETED),
             ("verify", TurnPlanStepState.IN_PROGRESS),
             ("ship", TurnPlanStepState.PENDING),
         )
+        assert tuple((item.kind, item.status) for item in observation.events) == (
+            (TurnActivityKind.COMMAND, TurnActivityStatus.IN_PROGRESS),
+            (TurnActivityKind.COMMENTARY, TurnActivityStatus.COMPLETED),
+        )
+        assert "do-not-show" not in repr(observation.events)
+        assert "/Users/user" not in repr(observation.events)
         turn_queue = codex._client._sync._router._turn_notifications[handle.id]
         with turn_queue.mutex:
             before = tuple(turn_queue.queue)
@@ -193,7 +234,15 @@ async def _client() -> None:
             for notification in streamed
             if isinstance(notification.payload, TurnPlanUpdatedNotification)
         )
-        assert plan is before[0]
+        assert tuple(id(item) for item in streamed[: len(before)]) == tuple(
+            id(item) for item in before
+        )
+        plan_before = next(
+            item
+            for item in before
+            if isinstance(item.payload, TurnPlanUpdatedNotification)
+        )
+        assert plan is plan_before
         assert plan.payload.turn_id == handle.id
 
 
@@ -209,20 +258,20 @@ def _driver(timeout: float) -> int:
         )
     except subprocess.TimeoutExpired:
         print(
-            "FAIL: Turn plan observer or subsequent public stream drain blocked.",
+            "FAIL: Turn Activity observer or subsequent public stream drain blocked.",
             file=sys.stderr,
         )
         return 1
     except subprocess.CalledProcessError as error:
         detail = (error.stderr or "").strip()
         print(
-            "ERROR: Turn plan observer probe failed"
+            "ERROR: Turn Activity observer probe failed"
             + (f": {detail[-1000:]}" if detail else "."),
             file=sys.stderr,
         )
         return 2
     print(
-        "PASS: native plan was observed without consuming the exact Turn queue; "
+        "PASS: native Activity was projected without consuming the exact Turn queue; "
         "the public stream then drained it to completion."
     )
     return 0

@@ -3,6 +3,7 @@ status: accepted
 date: 2026-08-30
 amends: 0008, 0010, 0017, 0036, 0037, 0038
 related: 0031, 0047
+amended_by: 0052
 ---
 
 # 有界处理 Turn 观测故障，并委托 App Server 移除 Thread

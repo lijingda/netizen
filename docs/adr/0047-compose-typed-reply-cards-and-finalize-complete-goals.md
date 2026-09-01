@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-28
 amends: 0014, 0024, 0027, 0046
-amended_by: 0048
+amended_by: 0048, 0052
 ---
 
 # 组合类型化回复卡并只自动收尾完成的 Goal

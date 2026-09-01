@@ -35,6 +35,7 @@ from .domain import (
     SESSION_IDLE_STATE,
     SESSION_STOP_ACTION_STATES,
     ScopeKind,
+    TurnActivityManifestEntry,
     TurnFileActionIntent,
     TurnFileActionName,
     TurnFileManifestItem,
@@ -51,6 +52,15 @@ from .turn_files import (
     inspect_turn_file_path,
     paginate_turn_files,
 )
+from .turn_activity import (
+    ACTIVITY_COMMENTARY_LIMIT,
+    ACTIVITY_OPERATION_LIMIT,
+    ACTIVITY_PLAN_LIMIT,
+    ACTIVITY_TEXT_LIMIT,
+    TurnActivityKind,
+    TurnActivityStatus,
+    sanitize_activity_text,
+)
 
 
 ACTION_VERSION = 4
@@ -63,8 +73,8 @@ _TURN_ANSWER_ELEMENT_ID = "turnanswerv1"
 _TURN_FILES_ELEMENT_ID = "turnfilesv4"
 _TURN_PROGRESS_ELEMENT_ID = "turnprogressv1"
 _GOAL_ELEMENT_ID = "goalmodulev1"
-_TURN_PROGRESS_MAX_STEPS = 12
-_TURN_PROGRESS_STEP_MAX_CHARS = 160
+_TURN_PROGRESS_MAX_STEPS = ACTIVITY_PLAN_LIMIT
+_TURN_PROGRESS_STEP_MAX_CHARS = ACTIVITY_TEXT_LIMIT
 MAX_THREAD_NAME_CHARS = 120
 MAX_MODEL_ID_CHARS = 256
 MAX_ENCODED_MODEL_ID_CHARS = 1368
@@ -89,54 +99,6 @@ _CONTEXT_MODE_REFERENCE = re.compile(
     r"context-mode:v1:(current-only|catch-up)"
 )
 _TASK_FEEDBACK_REFERENCE = re.compile(r"task-feedback:v2:(off|on)")
-_PROGRESS_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)(?:api[ _-]?key|access[ _-]?token|"
-    r"auth(?:entication|orization)?|bearer|cookie|credential|password|"
-    r"passwd|secret|session[ _-]?token|密码|口令|密钥|令牌|凭据|授权|认证)"
-    r"\s*(?:=|:|：|(?<![A-Za-z0-9_])is(?![A-Za-z0-9_]))"
-    r"\s*[^\s,;，；]+"
-)
-_PROGRESS_BEARER_TOKEN = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])bearer(?![A-Za-z0-9_])\s+\S+"
-)
-_PROGRESS_PEM = re.compile(
-    r"-----BEGIN [^-]+-----",
-    re.IGNORECASE,
-)
-_PROGRESS_URL_CREDENTIAL = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9+.-]*://"
-    r"[^\s/@:]*:[^\s/@]+@"
-)
-_PROGRESS_KNOWN_TOKEN = re.compile(
-    r"(?<![A-Za-z0-9_])(?:AKIA[0-9A-Z]{16}|"
-    r"(?:sk|gh[pousr])[-_][A-Za-z0-9_-]{16,}|"
-    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
-    r"(?![A-Za-z0-9_])"
-)
-_PROGRESS_LONG_TOKEN = re.compile(
-    r"(?<![A-Za-z0-9_])[A-Za-z0-9_+/=-]{32,}(?![A-Za-z0-9_])"
-)
-_PROGRESS_EMAIL = re.compile(
-    r"(?<![A-Za-z0-9_])[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
-    r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?![A-Za-z0-9_])"
-)
-_PROGRESS_HOME_PATH = re.compile(
-    r"(?i)(?:~[/\\]|/(?:Users|home)/[^\s/\\]+[/\\]|"
-    r"[A-Z]:\\Users\\[^\s\\]+\\)[^\s,;]*"
-)
-_PROGRESS_INLINE_CODE = re.compile(r"`[^`]*`")
-_PROGRESS_ELAPSED = re.compile(
-    r"(?i)(?:(?<![A-Za-z0-9_])(?:elapsed|worked\s+for)"
-    r"(?![A-Za-z0-9_])|(?:耗时|用时))"
-    r"\s*[:=：]?\s*[^,;，。；]*"
-)
-_PROGRESS_PERCENT = re.compile(
-    r"(?<!\d)\d{1,3}(?:[.．]\d+)?\s*[%％]"
-)
-_PROGRESS_ETA = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])ETA(?![A-Za-z0-9_])"
-    r"(?:\s*[:=：]?\s*[^,;，。；]*)?"
-)
 _RENAME_NAME_FIELD = re.compile(
     r"rename_name_v1__([A-Za-z0-9][A-Za-z0-9-]{0,127})"
 )
@@ -174,6 +136,13 @@ class _TurnPlanStepLike(Protocol):
     status: object
 
 
+class _TurnActivityEntryLike(Protocol):
+    kind: object
+    status: object
+    text: str | None
+    count: int
+
+
 class _TurnActivitySnapshotLike(Protocol):
     state: object
     steer_count: int
@@ -181,6 +150,8 @@ class _TurnActivitySnapshotLike(Protocol):
     plan_generated: bool
     plan_may_be_stale: bool
     steps: tuple[_TurnPlanStepLike, ...]
+    commentary: tuple[str, ...]
+    operations: tuple[_TurnActivityEntryLike, ...]
 
 
 class CardActionError(ValueError):
@@ -500,8 +471,9 @@ def turn_progress_card(
 ) -> OutboundCard:
     """Render one replaceable Phase 1 Turn progress card.
 
-    The activity panel deliberately reads only the bounded status/checklist
-    projection.  It never inspects reasoning, tool arguments, or tool output.
+    The activity panel reads only the bounded, safety-projected status,
+    commentary, generic operations, and checklist.  It never inspects
+    reasoning, tool arguments, or tool output.
     A terminal render always collapses that panel and appends the authoritative
     final response plus the existing optional Turn-file controls.
     """
@@ -587,6 +559,36 @@ def _turn_progress_manifest(
         )
         for item in snapshot.steps[:_TURN_PROGRESS_MAX_STEPS]
     )
+    snapshot_commentary = tuple(getattr(snapshot, "commentary", ()))
+    snapshot_operations = tuple(getattr(snapshot, "operations", ()))
+    commentary = tuple(
+        sanitized
+        for value in snapshot_commentary[-ACTIVITY_COMMENTARY_LIMIT:]
+        if (sanitized := sanitize_activity_text(value)) is not None
+    )
+    operations = tuple(
+        TurnActivityManifestEntry(
+            kind=(
+                getattr(item.kind, "value", item.kind)
+                if getattr(item.kind, "value", item.kind)
+                in {kind.value for kind in TurnActivityKind if kind is not TurnActivityKind.COMMENTARY}
+                else TurnActivityKind.TOOL.value
+            ),
+            status=(
+                getattr(item.status, "value", item.status)
+                if getattr(item.status, "value", item.status)
+                in {status.value for status in TurnActivityStatus}
+                else TurnActivityStatus.IN_PROGRESS.value
+            ),
+            text=(
+                sanitize_activity_text(item.text)
+                if item.text is not None
+                else None
+            ),
+            count=max(0, item.count),
+        )
+        for item in snapshot_operations[-ACTIVITY_OPERATION_LIMIT:]
+    )
     return TurnProgressManifest(
         state=state,
         steer_count=max(0, snapshot.steer_count),
@@ -594,6 +596,8 @@ def _turn_progress_manifest(
         plan_generated=bool(snapshot.plan_generated),
         plan_may_be_stale=bool(snapshot.plan_may_be_stale),
         steps=steps,
+        commentary=commentary,
+        operations=operations,
     )
 
 
@@ -973,8 +977,22 @@ def _turn_activity_elements(
     elements = [_plain(f"状态：{status_label}")]
     if snapshot.steer_count:
         elements.append(_plain(f"已接收调整：{snapshot.steer_count} 次"))
+    commentary = tuple(getattr(snapshot, "commentary", ()))[
+        -ACTIVITY_COMMENTARY_LIMIT:
+    ]
+    if commentary:
+        elements.append(_plain("最近进展"))
+        for text in commentary:
+            elements.append(_plain(f"• {activity_step_display(text)}"))
+    operations = tuple(getattr(snapshot, "operations", ()))[
+        -ACTIVITY_OPERATION_LIMIT:
+    ]
+    if operations:
+        elements.append(_plain("最近操作"))
+        for item in operations:
+            elements.append(_plain(_activity_operation_display(item)))
     if not snapshot.plan_available:
-        elements.append(_plain("任务清单：暂不可用"))
+        elements.append(_plain("过程信息：暂不可用"))
         return elements
     if not snapshot.plan_generated:
         suffix = (
@@ -1007,38 +1025,42 @@ def _turn_activity_elements(
     return elements
 
 
+def _activity_operation_display(item: _TurnActivityEntryLike) -> str:
+    kind = getattr(item.kind, "value", item.kind)
+    status = getattr(item.status, "value", item.status)
+    labels = {
+        TurnActivityKind.COMMAND.value: "执行命令",
+        TurnActivityKind.TOOL.value: "调用工具",
+        TurnActivityKind.FILE_CHANGE.value: "修改文件",
+        TurnActivityKind.WEB_SEARCH.value: "搜索网页",
+        TurnActivityKind.IMAGE.value: "处理图片",
+        TurnActivityKind.SUBAGENT.value: "子任务",
+        TurnActivityKind.REVIEW.value: "代码审查",
+        TurnActivityKind.COMPACTION.value: "压缩上下文",
+    }
+    icons = {
+        TurnActivityStatus.IN_PROGRESS.value: "→",
+        TurnActivityStatus.COMPLETED.value: "✓",
+        TurnActivityStatus.FAILED.value: "×",
+        TurnActivityStatus.DECLINED.value: "×",
+        TurnActivityStatus.INTERRUPTED.value: "×",
+    }
+    label = labels.get(kind, "执行操作")
+    count = item.count
+    if kind in {
+        TurnActivityKind.FILE_CHANGE.value,
+        TurnActivityKind.SUBAGENT.value,
+    } and count != 1:
+        label += f"（{max(0, count)} 项）"
+    if item.text:
+        label += f"：{activity_step_display(item.text)}"
+    return f"{icons.get(status, '→')} {label}"
+
+
 def activity_step_display(value: str) -> str:
     """Return bounded display text with conservative credential redaction."""
 
-    normalized = " ".join(
-        "".join(character if character.isprintable() else "�" for character in value)
-        .split()
-    )
-    if not normalized:
-        return "未命名步骤"
-    # A secret assignment can be quoted or contain arbitrary whitespace, so
-    # token-level replacement is not a safe boundary. Hide the whole model-
-    # generated step instead of guessing where the credential ends.
-    if (
-        _PROGRESS_SECRET_ASSIGNMENT.search(normalized)
-        or _PROGRESS_BEARER_TOKEN.search(normalized)
-        or _PROGRESS_PEM.search(normalized)
-        or _PROGRESS_URL_CREDENTIAL.search(normalized)
-    ):
-        return "[敏感内容已隐藏]"
-    redacted = normalized
-    redacted = _PROGRESS_KNOWN_TOKEN.sub("[敏感内容已隐藏]", redacted)
-    redacted = _PROGRESS_LONG_TOKEN.sub("[敏感内容已隐藏]", redacted)
-    redacted = _PROGRESS_EMAIL.sub("[敏感内容已隐藏]", redacted)
-    redacted = _PROGRESS_HOME_PATH.sub("[路径已隐藏]", redacted)
-    redacted = _PROGRESS_INLINE_CODE.sub("[代码或参数已隐藏]", redacted)
-    redacted = _PROGRESS_ELAPSED.sub("[时间信息已隐藏]", redacted)
-    redacted = _PROGRESS_PERCENT.sub("[百分比已隐藏]", redacted)
-    redacted = _PROGRESS_ETA.sub("[时间估算已隐藏]", redacted)
-    redacted = " ".join(redacted.split()) or "内容已隐藏"
-    if len(redacted) > _TURN_PROGRESS_STEP_MAX_CHARS:
-        return redacted[: _TURN_PROGRESS_STEP_MAX_CHARS - 1].rstrip() + "…"
-    return redacted
+    return sanitize_activity_text(value) or "未命名步骤"
 
 
 def turn_files_card_from_manifest(
@@ -1298,6 +1320,8 @@ def _decode_turn_progress_manifest(value: Any) -> TurnProgressManifest:
         "plan_generated",
         "plan_may_be_stale",
         "steps",
+        "commentary",
+        "operations",
     }
     if set(payload) != expected:
         raise CardActionError("进度卡过程字段不完整或包含未知字段。")
@@ -1342,6 +1366,62 @@ def _decode_turn_progress_manifest(value: Any) -> TurnProgressManifest:
         )
     if not flags["plan_generated"] and steps:
         raise CardActionError("未生成计划的进度卡不能携带步骤。")
+    raw_commentary = payload["commentary"]
+    if (
+        not isinstance(raw_commentary, list)
+        or len(raw_commentary) > ACTIVITY_COMMENTARY_LIMIT
+    ):
+        raise CardActionError("进度卡进展摘要无效。")
+    commentary: list[str] = []
+    for raw in raw_commentary:
+        text = _required_string(raw, "progress.commentary")
+        sanitized = sanitize_activity_text(text)
+        if sanitized is None or len(text) > _TURN_PROGRESS_STEP_MAX_CHARS:
+            raise CardActionError("进度卡进展摘要内容无效。")
+        commentary.append(sanitized)
+    raw_operations = payload["operations"]
+    if (
+        not isinstance(raw_operations, list)
+        or len(raw_operations) > ACTIVITY_OPERATION_LIMIT
+    ):
+        raise CardActionError("进度卡操作清单无效。")
+    operations: list[TurnActivityManifestEntry] = []
+    allowed_kinds = {
+        kind.value for kind in TurnActivityKind if kind is not TurnActivityKind.COMMENTARY
+    }
+    allowed_statuses = {status.value for status in TurnActivityStatus}
+    for raw in raw_operations:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "kind",
+            "status",
+            "text",
+            "count",
+        }:
+            raise CardActionError("进度卡操作字段无效。")
+        kind = _required_string(raw["kind"], "progress.operation.kind")
+        status = _required_string(raw["status"], "progress.operation.status")
+        if kind not in allowed_kinds or status not in allowed_statuses:
+            raise CardActionError("进度卡操作类型或状态无效。")
+        text_value = raw["text"]
+        text: str | None
+        if text_value is None:
+            text = None
+        else:
+            text = _required_string(text_value, "progress.operation.text")
+            text = sanitize_activity_text(text)
+            if text is None:
+                raise CardActionError("进度卡操作内容无效。")
+        count = raw["count"]
+        if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 1_000_000:
+            raise CardActionError("进度卡操作数量无效。")
+        operations.append(
+            TurnActivityManifestEntry(
+                kind=kind,
+                status=status,
+                text=text,
+                count=count,
+            )
+        )
     return TurnProgressManifest(
         state=state,
         steer_count=steer_count,
@@ -1349,6 +1429,8 @@ def _decode_turn_progress_manifest(value: Any) -> TurnProgressManifest:
         plan_generated=flags["plan_generated"],
         plan_may_be_stale=flags["plan_may_be_stale"],
         steps=tuple(steps),
+        commentary=tuple(commentary),
+        operations=tuple(operations),
     )
 
 
@@ -4130,6 +4212,16 @@ def _encode_turn_progress_manifest(
         "steps": [
             {"step": item.step, "status": item.status}
             for item in progress.steps
+        ],
+        "commentary": list(progress.commentary),
+        "operations": [
+            {
+                "kind": item.kind,
+                "status": item.status,
+                "text": item.text,
+                "count": item.count,
+            }
+            for item in progress.operations
         ],
     }
 

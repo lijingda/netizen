@@ -293,7 +293,7 @@ class DeploymentAssetsTest(unittest.TestCase):
 
         self.assertRegex(deployment, r"for phase in [^\n]*\bplan\b")
         self.assertIn("async def _turn_plan_live", probe)
-        self.assertIn("PinnedTurnPlanObserver", probe)
+        self.assertIn("PinnedTurnActivityObserver", probe)
         self.assertIn("async for notification in handle.stream()", probe)
 
     def test_live_suite_includes_ephemeral_multi_turn_side_probe(self) -> None:

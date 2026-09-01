@@ -130,7 +130,7 @@ contributors must know before starting related work.
   terminal cleanup and ADR 0014's removable capability-specific Goal/Skills
   adapters, ADR 0021's fixed Side boundary adapter, ADR 0028's reusable fixed
   Thread unsubscribe adapter, ADR 0037's fixed Thread Delete adapter, plus ADR
-  0020/0046's version/fingerprint-gated, non-consuming plan observer. The Delete
+  0020/0052's version/fingerprint-gated, non-consuming Activity observer. The Delete
   adapter is production-permitted only through ADR 0037's exact method and
   Runtime reconciliation contract. Do not parse
   CLI output, add a generic/private RPC gateway, patch SDK internals, copy
