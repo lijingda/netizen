@@ -179,7 +179,9 @@ from .image_inputs import (
     ImageReference,
     compose_multimodal_input,
     current_message_image_references,
+    image_prompt_references,
     image_references,
+    localize_image_markers,
     normalized_message_type,
     prepare_images,
 )
@@ -4247,18 +4249,30 @@ class ChannelApplication:
                 for image in prepared_images
                 if image.reference.source == "quoted_message"
             )
-            prompt_text = render_plain_prompt(current)
+            prompt_image_refs = image_prompt_references(prepared_images)
+            rendered_current = replace(
+                current,
+                request_text=localize_image_markers(
+                    current.request_text,
+                    source="current_message",
+                    message_id=current.message_id,
+                    image_prompt_refs=prompt_image_refs,
+                ),
+            )
+            prompt_text = render_plain_prompt(rendered_current)
             if quoted is not None:
                 prompt_text = compose_quoted_prompt(
                     quoted,
-                    current,
+                    rendered_current,
                     interactive_fallback_text=fallback_text,
                     read_image_keys=quoted_read_keys,
+                    image_prompt_refs=prompt_image_refs,
                 )
 
             return compose_multimodal_input(
                 prompt_text,
                 images=prepared_images,
+                image_prompt_refs=prompt_image_refs,
             )
         except (QuotedMessageError, ImageInputError, PromptProjectionError):
             raise
@@ -4462,13 +4476,28 @@ class ChannelApplication:
                 ),
             )
 
+        prompt_image_refs = image_prompt_references(prepared_images)
+        rendered_current = replace(
+            current,
+            request_text=localize_image_markers(
+                current.request_text,
+                source="current_message",
+                message_id=current.message_id,
+                image_prompt_refs=prompt_image_refs,
+            ),
+        )
         context = compose_message_context_prompt(
             supplemental_selection=selection,
             quoted_message=final_quoted_projection,
-            current=current,
+            current=rendered_current,
+            image_prompt_refs=prompt_image_refs,
         )
         return (
-            compose_multimodal_input(context.text, images=prepared_images),
+            compose_multimodal_input(
+                context.text,
+                images=prepared_images,
+                image_prompt_refs=prompt_image_refs,
+            ),
             ContextCursorCommit(
                 expected_context_revision=expected_context_revision,
                 anchor=window.upper,

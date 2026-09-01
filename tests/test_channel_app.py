@@ -2444,10 +2444,22 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         submitted = self.runtime.submit_calls[0]
         envelope = json.loads(submitted["input"])
         self.assertEqual(envelope["kind"], "feishu_message_context_prompt")
+        self.assertEqual(envelope["version"], 2)
+        self.assertEqual(envelope["supplemental_messages"][0]["ref"], "h1")
+        self.assertEqual(
+            envelope["supplemental_messages"][0]["created_at"],
+            "1970-01-01T00:00:02.000Z",
+        )
         self.assertEqual(
             envelope["supplemental_messages"][0]["sender"]["display_name"],
             "Directory Alice",
         )
+        self.assertEqual(
+            envelope["context_status"],
+            {"omitted_count": 0, "truncated": False},
+        )
+        self.assertNotIn("supplemental_stats", envelope)
+        self.assertNotIn("om_history", submitted["input"])
         self.assertEqual(envelope["current_message"]["request_text"], "请总结")
         self.assertIn("\\u0024danger", submitted["input"])
         commit = submitted["context_commit"]
@@ -2532,6 +2544,162 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             envelope["supplemental_messages"][0]["sender"]["display_name"],
             "List Alice",
         )
+
+    async def test_catch_up_uses_one_local_ref_space_for_all_image_sources(
+        self,
+    ) -> None:
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        lower = MessageContextAnchor("om_lower", 1_000)
+        created = await self.app._management.create_current_binding(
+            scope=scope,
+            creator_id="ou_user",
+            project_alias="test",
+            message_context_mode=MentionContextMode.CATCH_UP,
+            context_anchor=lower,
+        )
+        binding = created.binding
+        history_ref = MessageHistoryRef(
+            message_id="om_history_image",
+            create_time_ms=2_000,
+            sender_id="ou_alice",
+            message_type="post",
+            sender_name="Alice",
+        )
+        upper = MessageContextAnchor("om_prompt_image", 3_000)
+        self.message_history.window = MessageHistoryWindow(
+            lower=lower,
+            upper=upper,
+            candidates=(history_ref,),
+            stats=MessageHistoryStats(
+                pages_scanned=1,
+                raw_messages_scanned=2,
+                duplicate_messages=0,
+                ignored_after_upper=0,
+                omitted_messages=0,
+                truncated_before=False,
+                scan_limit_hit=False,
+            ),
+        )
+        self.channel.inbound_messages[history_ref.message_id] = FakeMessage(
+            "history ![image](img_history)",
+            message_id=history_ref.message_id,
+            sender_id=history_ref.sender_id,
+            display_name="Alice",
+            chat_id=scope.chat_id,
+            chat_type="group",
+            raw_content_type="post",
+            content=PostContent(
+                post={
+                    "zh_cn": {
+                        "content_v2": [[
+                            {"tag": "text", "text": "history "},
+                            {"tag": "img", "image_key": "img_history"},
+                        ]]
+                    }
+                }
+            ),
+            resources=[
+                ResourceDescriptor(type="image", file_key="img_history")
+            ],
+            create_time=history_ref.create_time_ms,
+        )
+        self.channel.inbound_messages["om_quote_image"] = FakeMessage(
+            "![image](img_quote)",
+            message_id="om_quote_image",
+            sender_id="ou_carol",
+            display_name="Carol",
+            chat_id=scope.chat_id,
+            chat_type="group",
+            raw_content_type="image",
+            content=ImageContent(image_key="img_quote"),
+            resources=[ResourceDescriptor(type="image", file_key="img_quote")],
+            create_time=2_500,
+        )
+        for message_id, file_key in (
+            ("om_history_image", "img_history"),
+            ("om_quote_image", "img_quote"),
+            ("om_prompt_image", "img_current"),
+        ):
+            self.channel.resource_bodies[(message_id, file_key)] = PNG
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED,
+            binding.id,
+            "native-one",
+            "turn-one",
+            lambda: None,
+        )
+        prompt = FakeMessage(
+            "compare ![image](img_current)",
+            message_id=upper.message_id,
+            sender_id="ou_bob",
+            display_name="Bob",
+            chat_id=scope.chat_id,
+            chat_type="group",
+            raw_content_type="post",
+            content=PostContent(
+                post={
+                    "zh_cn": {
+                        "content_v2": [[
+                            {"tag": "text", "text": "compare "},
+                            {"tag": "img", "image_key": "img_current"},
+                        ]]
+                    }
+                }
+            ),
+            resources=[
+                ResourceDescriptor(type="image", file_key="img_current")
+            ],
+            reply_id="om_quote_image",
+            raw={"parent_id": "om_quote_image", "root_id": "om_root"},
+            create_time=upper.create_time_ms,
+        )
+
+        await self.app.handle_message(prompt)
+
+        native_input = self.runtime.submit_calls[0]["input"]
+        self.assertIsInstance(native_input, list)
+        labels = [json.loads(native_input[index].text) for index in (0, 2, 4)]
+        self.assertEqual(
+            [(label["source"], label["ref"]) for label in labels],
+            [
+                ("supplemental_message", "img1"),
+                ("quoted_message", "img2"),
+                ("current_message", "img3"),
+            ],
+        )
+        self.assertTrue(
+            all(
+                "file_key" not in label and "message_id" not in label
+                for label in labels
+            )
+        )
+        envelope = json.loads(native_input[-1].text)
+        self.assertEqual(envelope["version"], 2)
+        self.assertEqual(
+            envelope["supplemental_messages"][0]["attachments"],
+            [{"type": "image", "ref": "img1"}],
+        )
+        self.assertEqual(
+            envelope["supplemental_messages"][0]["text"],
+            "history ![image](img1)",
+        )
+        self.assertEqual(envelope["quoted_message"]["ref"], "h2")
+        self.assertEqual(
+            envelope["quoted_message"]["attachments"],
+            [{"type": "image", "ref": "img2"}],
+        )
+        self.assertEqual(
+            envelope["current_message"]["request_text"],
+            "compare ![image](img3)",
+        )
+        for raw_identifier in (
+            "om_history_image",
+            "om_quote_image",
+            "img_history",
+            "img_quote",
+            "img_current",
+        ):
+            self.assertNotIn(raw_identifier, native_input[-1].text)
 
     def test_history_candidate_keeps_stable_sender_identity_gate(self) -> None:
         scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
@@ -7208,16 +7376,18 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(native_input[1], ImageInput)
         label = json.loads(native_input[0].text)
         self.assertEqual(label["source"], "current_message")
-        self.assertEqual(label["file_key"], "img_current")
+        self.assertEqual(label["ref"], "img1")
+        self.assertNotIn("file_key", label)
+        self.assertNotIn("message_id", label)
         request_text, current_context = plain_prompt_projection(native_input)
-        self.assertEqual(request_text, "![image](img_current)")
+        self.assertEqual(request_text, "![image](img1)")
         self.assertEqual(current_context["message_id"], "om_image")
         self.assertEqual(current_context["message_type"], "image")
         self.assertEqual(current_context["content_fidelity"], "full_multimodal")
         self.assertEqual(current_context["sender"]["open_id"], "ou_user")
         self.assertEqual(
             sum(
-                item.text.count("![image](img_current)")
+                item.text.count("![image](img1)")
                 for item in native_input
                 if isinstance(item, TextInput)
             ),
@@ -7312,31 +7482,38 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(native_input, list)
         labels = [json.loads(native_input[index].text) for index in (0, 2)]
         self.assertEqual(
-            [(label["source"], label["file_key"]) for label in labels],
+            [(label["source"], label["ref"]) for label in labels],
             [
-                ("quoted_message", "img_quoted"),
-                ("current_message", "img_current"),
+                ("quoted_message", "img1"),
+                ("current_message", "img2"),
             ],
+        )
+        self.assertTrue(
+            all(
+                "file_key" not in label and "message_id" not in label
+                for label in labels
+            )
         )
         envelope = json.loads(native_input[-1].text)
         self.assertEqual(envelope["kind"], "feishu_quoted_prompt")
+        self.assertEqual(envelope["version"], 4)
         self.assertEqual(
             envelope["current_message"]["request_text"],
-            "compare quoted ![image](img_current)",
+            "compare quoted ![image](img2)",
         )
         self.assertEqual(
             envelope["current_message"]["content_fidelity"],
             "full_multimodal",
         )
+        self.assertEqual(envelope["quoted_message"]["ref"], "h1")
         self.assertEqual(
-            envelope["quoted_message"]["content_fidelity"],
-            "full_multimodal",
+            envelope["quoted_message"]["attachments"],
+            [{"type": "image", "ref": "img1"}],
         )
-        self.assertTrue(envelope["quoted_message"]["content_read"])
-        self.assertTrue(
-            envelope["quoted_message"]["resources"][0]["content_read"]
-        )
-        current_text = "compare quoted ![image](img_current)"
+        self.assertNotIn("content_fidelity", envelope["quoted_message"])
+        self.assertNotIn("content_read", envelope["quoted_message"])
+        self.assertNotIn("resources", envelope["quoted_message"])
+        current_text = "compare quoted ![image](img2)"
         self.assertEqual(
             sum(
                 item.text.count(current_text)
@@ -7406,8 +7583,21 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         labels = [json.loads(native_input[index].text) for index in (0, 2)]
         self.assertEqual([label["index"] for label in labels], [1, 2])
         self.assertEqual([label["count"] for label in labels], [2, 2])
+        self.assertEqual([label["ref"] for label in labels], ["img1", "img2"])
         envelope = json.loads(native_input[-1].text)
         self.assertEqual(envelope["kind"], "feishu_quoted_prompt")
+        self.assertEqual(envelope["version"], 4)
+        self.assertEqual(
+            envelope["quoted_message"]["text"],
+            "before ![image](img1) after ![image](img2)",
+        )
+        self.assertEqual(
+            envelope["quoted_message"]["attachments"],
+            [
+                {"type": "image", "ref": "img1"},
+                {"type": "image", "ref": "img2"},
+            ],
+        )
         self.assertEqual(
             envelope["current_message"]["request_text"],
             "summarize the post",
@@ -7548,7 +7738,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(submitted["admission"].binding_id, binding.id)
         envelope = json.loads(submitted["input"])
         self.assertEqual(envelope["kind"], "feishu_quoted_prompt")
-        self.assertEqual(envelope["version"], 3)
+        self.assertEqual(envelope["version"], 4)
         self.assertEqual(
             envelope["current_message"]["request_text"],
             "what does this mean?",
@@ -7559,11 +7749,11 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("quoted account", envelope["quoted_message"]["text"])
         self.assertIn("ou_secret", submitted["input"])
-        self.assertEqual(envelope["quoted_message"]["message_id"], "om_quoted")
-        self.assertEqual(
-            envelope["quoted_message"]["conversation"]["chat_id"],
-            "oc_direct",
-        )
+        self.assertEqual(envelope["quoted_message"]["ref"], "h1")
+        self.assertNotIn("message_id", envelope["quoted_message"])
+        self.assertNotIn("conversation", envelope["quoted_message"])
+        self.assertNotIn("om_quoted", submitted["input"])
+        self.assertNotIn("oc_direct", submitted["input"])
         self.assertEqual(
             envelope["quoted_message"]["sender"]["open_id"],
             "ou_quoted",
@@ -8958,9 +9148,11 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             json.loads(native_input[0].text)["source"],
             "current_message",
         )
+        self.assertEqual(json.loads(native_input[0].text)["ref"], "img1")
+        self.assertNotIn("file_key", json.loads(native_input[0].text))
         self.assertIsInstance(native_input[1], ImageInput)
         request_text, current_context = plain_prompt_projection(native_input)
-        self.assertEqual(request_text, "inspect ![image](img_group)")
+        self.assertEqual(request_text, "inspect ![image](img1)")
         self.assertEqual(current_context["message_type"], "post")
         self.assertEqual(current_context["content_fidelity"], "full_multimodal")
         self.assertEqual(

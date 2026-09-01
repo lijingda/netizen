@@ -10,6 +10,9 @@ date: 2026-08-09
 > Codex 原生视觉输入；引用关系、其他消息类型和 exact-Turn 语义仍以本文为准。
 > [ADR 0029](0029-project-current-message-provenance-into-prompts.md) 再把 envelope
 > 升为 v3：被引用消息类型矩阵不变，最后的当前消息改为带发送者归属的结构化对象。
+> 2026-09-01 的 wire 收敛把 quote envelope 升为 v4：内部仍保留本文的 rich
+> projection，但模型可见的 `quoted_message` 改用与 ADR 0039 supplemental message
+> 共享的 compact Historical Message；已有 v2/v3 原生历史不迁移。
 
 ## 背景
 
@@ -75,23 +78,29 @@ SDK 私有对象或修改 `site-packages`。版本变化或边界异常时 fail 
 
 | 引用类型 | 处理 |
 | --- | --- |
-| `text`, `post` | SDK 归一化文本；图片/文件节点保留 SDK 公开资源 key 与元数据 |
+| `text`, `post` | SDK 归一化文本；图片/文件节点的 exact key 与元数据保留在内部 rich projection，模型可见 wire 只保留必要附件关联 |
 | `interactive` | SDK 可见文本；占位符走上述公开 fallback，1.2.0 空文本 CardKit 2.0 再走有界、版本门禁的公共 `raw` 可见文本投影 |
 | `calendar`, `general_calendar`, `share_calendar_event`, `location`, `video_chat`, `todo`, `vote`, `hongbao` | SDK 归一化的结构化可见文本 |
 | `merge_forward` | SDK 现有 3 层/50 条边界内的展开文本，显式保留 truncated 标记 |
-| `image`, `file`, `folder`, `audio`, `media`, `sticker` | 公开资源 key、类型、文件名、时长、封面 key 等元数据；本版本不读二进制内容 |
-| `share_chat`, `share_user` | 说明引用了群/个人名片，并保留 SDK 公开的 chat/user ID；不额外读取对象详情 |
+| `image`, `file`, `folder`, `audio`, `media`, `sticker` | exact 资源 key、类型、文件名、时长、封面 key 等保留在内部 rich projection；compact wire 只保留可用于推理的类型、名称、时长或本地图片引用 |
+| `share_chat`, `share_user` | 说明引用了群/个人名片；exact chat/user ID 只留在内部投影，不额外读取对象详情 |
 | `system`, `unknown` 或新类型 | 显式拒绝本次提交 |
 
 投影只包含一层被引用消息，不递归追溯它自己的引用。输入为版本化 JSON
-envelope：被引用内容明确标记为用户选中的上下文，当前请求放在最后。历史 v2 保留
-Channel SDK 公共类型中的消息与会话 ID、发送者身份、mention 身份与 key、
-逐条 reply 关系 ID、共享对象 ID 和资源 key，也携带创建时间、消息类型、内容
-保真度/是否实际读取及截断状态。引用文本最多 16,000 字符，mention 和资源描述
-各最多 64 项并分别标记是否截断。
-不透明 ID 不做额外脱敏，但 raw 事件、raw 卡片 JSON 和引用关系中的历史文本不会
-整体复制进 prompt。现行 v3 的被引用消息字段保持相同，另按 ADR 0029 投影当前消息
-来源；逐条 reply 只保留一层公开关系元数据，不继续 fetch。
+envelope：被引用内容明确标记为背景，当前请求放在最后。v4 的模型可见
+`quoted_message` 使用 compact Historical Message：固定包含 prompt-local `ref`、
+`message_type`、`sender.display_name/open_id`、UTC ISO 8601 `created_at` 和 `text`；只有确实存在时
+才加入 `reply_to`、精简为 `key/name` 的 `mentions`、`attachments` 和值为 true 的
+`truncated`。单独 quote 的 ref 为 `h1`；其 reply target 不在同一 envelope 时不输出
+`reply_to`。Channel SDK 的 public `Mention.name` 是 optional；真实归一化输入缺少 key/name
+任一映射时不输出不可解释的 mention 对象，并显式标记 Historical Message truncated。
+
+exact message/chat/reply/shared-object ID、资源 key、content fidelity/read 状态和详细截断
+原因仍保留在进程内 rich projection，用于校验、去重、图片下载与 fail-closed 决策，
+但不再复制到模型可见历史消息。`open_id` 暂时保留用于同名发送者归属；用户可见正文中
+本来就出现的 ID-like 文本不做改写。引用文本最多 16,000 字符，mention 和资源描述
+各最多 64 项；raw 事件和 raw 卡片 JSON 不进入 prompt。`current_message` 继续按
+ADR 0029 保持独立结构，只有它的 `request_text` 表示本次要执行的请求。
 
 本版本不下载资源。[获取消息中的资源文件](https://open.feishu.cn/document/server-docs/im-v1/message/get-2?lang=zh-CN)
 最大可返回 100 MB 二进制流，而当前 Channel SDK 高层方法在下载前不提供可验证的
@@ -128,8 +137,10 @@ admission 失效都只回复一条可操作错误，不调用 Codex start/steer�
 
 飞书应用可用范围、当前会话成员关系以及“被引用消息必须与当前消息属于同一
 chat”的精确校验共同构成可见性边界。按产品权限决定，凡能在该 Scope 使用机器人的
-参与者，都可以把上述 SDK 公共类型化 ID 作为引用上下文交给 Codex；Netizen 不再
-另设 ID 脱敏层。这不放宽 bot 的 OpenAPI 权限，也不表示仅凭资源 key 已读取资源正文。
+参与者，都可以把上述 SDK 公共类型化内容作为引用上下文交给 Codex；exact ID 仍在
+Channel 内部参与校验和资源读取，模型可见 wire 只保留 compact 字段与 app-scoped
+sender `open_id`。这不放宽 bot 的 OpenAPI 权限，也不表示仅凭内部资源 key 已读取资源
+正文；用户可见正文中本来存在的 ID-like 文本不另行改写。
 
 ## 验证
 
@@ -137,7 +148,7 @@ chat”的精确校验共同构成可见性边界。按产品权限决定，凡�
   Card 1.0/2.0 可见文本差异。
 - Channel 测试覆盖首层引用、应用卡片 fallback、无 Binding/命令/话题零查询，
   以及查询失败零提交。
-- 内容测试覆盖全部已分类消息类型、公共类型化 ID 保留、raw payload 不复制、
+- 内容测试覆盖全部已分类消息类型、内部 exact ID 保留而 compact wire 不暴露、raw payload 不复制、
   CardKit 2.0 只投影可见文本、隐藏交互值不泄漏、版本门禁、单层投影和有界截断。
 - Runtime 测试覆盖空闲/运行正常兑付、双 token、普通 steer、stop、completion、
   idle ABA、Turn A -> B、跨 Binding 和关闭 admission。
@@ -150,9 +161,10 @@ chat”的精确校验共同构成可见性边界。按产品权限决定，凡�
 每条重新 @ 机器人的准入规则。代价是每条逐条引用执行一次归一化读取；该读取内部
 可能触发卡片再取或 3 层/50 条以内的合并转发展开。若卡片结果仍只有占位符，
 再执行一次可见文本 fallback；每次 SDK 网络请求分别受 10 秒预算约束。读取期间任何
-exact-Turn 状态变化都要求用户重发。公开类型化 ID
-会作为 native Codex 输入的一部分进入其原生 Thread 历史；这是上述飞书准入边界下
-有意接受的可见性，而不是脱敏遗漏。
+exact-Turn 状态变化都要求用户重发。v4 compact Historical Message、sender
+`display_name/open_id` 和用户可见正文会作为 native Codex 输入进入其原生 Thread 历史；
+exact message/chat/reply/resource ID 只在 Channel 内部使用，不进入历史 wire。这是上述
+飞书准入边界下有意接受的可见性，而不是脱敏遗漏。
 
 上游修复仍是长期路径：当官方 Channel SDK 发布版在“非话题且首层
 `parent_id == root_id`”上正确产生 `ReplyRef`，并通过本 ADR 的 typed fetch/Card 契约后：

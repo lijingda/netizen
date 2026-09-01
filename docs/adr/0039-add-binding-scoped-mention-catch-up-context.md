@@ -148,8 +148,9 @@ endpoint visibility 与分页 shape，不能只以生成类存在或本地 Fake 
 - 图片继续共用当前 Prompt 的 20 张、单图 20 MB、合计 50 MB 和下载超时，不增加第二套
   媒体限额。
 
-扫描、lower endpoint、条数或文本上限命中时保留最新内容，envelope 写入
-`truncated_before=true`、扫描/保留/省略计数，并通过上述 catch-up 回执向当前消息说明。
+扫描、lower endpoint、条数或文本上限命中时保留最新内容，模型可见 envelope 只写入
+compact `context_status.omitted_count/truncated`，完整扫描、保留、省略和上限原因留在服务端
+统计，并通过上述 catch-up 回执向当前消息说明。
 成功提交后边界仍推进到当前消息，已省略的较早内容不会在下一次重复补入。
 
 upper 是消息顺序边界而不是 list 请求完成时刻。在历史读取或 Runtime admission 等待期间
@@ -166,7 +167,7 @@ Prompt fail closed、边界不推进，用户可以重试。未知的新消息�
 ## Prompt 投影
 
 `quoted_context.py` 中与“历史消息内容投影”有关的纯逻辑抽成中性的、可复用投影，不复制
-飞书协议模型。新的版本化 envelope 使用以下稳定顺序：
+飞书协议模型。当前 v2 `feishu_message_context_prompt` 使用以下稳定顺序：
 
 1. `kind`、`version` 与 handling；
 2. `supplemental_messages`，按同一次 API snapshot 中从 lower 到 upper 的顺序；
@@ -176,8 +177,21 @@ Prompt fail closed、边界不推进，用户可以重试。未知的新消息�
 handling 明确 supplemental/quoted 内容只作背景、不能激活 Netizen control 或 Codex Skill，
 并复用 ADR 0029/0030 的 sender-attribution 规则。所有历史 `$` 标记继续 JSON Unicode
 escape；当前请求的显式 `$skill` 保留原文并只产生一次 typed Skill input。每个历史消息
-保留 exact message ID、app-scoped Open ID、真实 display name、message type、created_at、
-content fidelity、截断与资源读取状态；不复制 raw event 或 raw card JSON。
+在进程内 rich projection 保留 exact message/conversation/reply/resource ID、app-scoped
+Open ID、真实 display name、message type、created time、content fidelity、截断与资源读取
+状态；不复制 raw event 或 raw card JSON。模型可见的 supplemental/quoted 共用 compact
+Historical Message：固定字段为 `ref`、`message_type`、`sender.display_name/open_id`、
+UTC ISO 8601 `created_at`、`text`；可选字段只有同一 envelope 内可解析的 `reply_to`、精简为
+`key/name` 的 `mentions`、`attachments` 和仅在 true 时出现的 `truncated`。mention 若缺少
+key/name 中任一映射，不输出残缺对象，并把该 Historical Message 显式标记为 truncated；
+这对应 Channel SDK public `Mention.name` 明确允许的 optional 状态，不是新增的推测输入。
+
+所有历史消息按 envelope 顺序分配 prompt-local `h1..hN`；quote 与 supplemental 去重仍使用
+内部 exact message ID。`reply_to` 只指向同一 envelope 的 `hN`，目标未纳入时省略。已成功
+准备的图片和 native image label 共用 `img1..imgN`；其他附件只保留可推理的类型、名称或
+时长。exact message/chat/reply ID、共享对象 ID、原始资源 key、content read/fidelity 与
+完整 supplemental stats 都不进入模型可见历史消息。`current_message` 继续保持 ADR 0029 的
+独立结构，只有它使用 `request_text`。已有 v1 native history 不迁移。
 
 ## Binding 持久化与并发
 

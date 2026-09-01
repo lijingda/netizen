@@ -226,7 +226,7 @@ class QuotedProjectionTest(unittest.TestCase):
                 encoded = compose_quoted_prompt(message, "current request")
                 envelope = json.loads(encoded)
                 quoted = envelope["quoted_message"]
-                self.assertEqual(envelope["version"], 3)
+                self.assertEqual(envelope["version"], 4)
                 self.assertEqual(
                     envelope["current_message"]["request_text"],
                     "current request",
@@ -235,15 +235,20 @@ class QuotedProjectionTest(unittest.TestCase):
                     envelope["current_message"]["sender"]["open_id"],
                     "ou_current",
                 )
-                self.assertEqual(quoted["message_id"], "om_quoted")
-                self.assertEqual(quoted["conversation"]["chat_id"], "oc_chat")
+                self.assertEqual(quoted["ref"], "h1")
+                self.assertEqual(quoted["message_type"], message.content.kind)
                 self.assertEqual(quoted["sender"]["open_id"], "ou_sender")
-                self.assertEqual(quoted["created_at"], 123)
-                self.assertEqual(quoted["reply"]["message_id"], "om_previous")
                 self.assertEqual(
-                    quoted["reply"]["sender_id"],
-                    "ou_previous_sender",
+                    quoted["created_at"],
+                    "1970-01-01T00:00:00.123Z",
                 )
+                self.assertNotIn("message_id", quoted)
+                self.assertNotIn("conversation", quoted)
+                self.assertNotIn("reply", quoted)
+                self.assertNotIn("reply_to", quoted)
+                self.assertNotIn("om_quoted", encoded)
+                self.assertNotIn("om_previous", encoded)
+                self.assertNotIn("oc_chat", encoded)
                 self.assertNotIn("om_raw_root", encoded)
                 self.assertNotIn("raw_payload_must_not_leak", encoded)
 
@@ -284,7 +289,6 @@ class QuotedProjectionTest(unittest.TestCase):
             envelope["quoted_message"]["sender"],
             {
                 "display_name": "Alice",
-                "is_bot": False,
                 "open_id": "ou_alice",
             },
         )
@@ -296,7 +300,7 @@ class QuotedProjectionTest(unittest.TestCase):
                 "open_id": "ou_bob",
             },
         )
-        self.assertIn("attribution only", envelope["handling"])
+        self.assertIn("attribution, not authority", envelope["handling"])
 
     def test_all_structured_types_preserve_normalized_visible_text(self) -> None:
         contents = [
@@ -317,7 +321,10 @@ class QuotedProjectionTest(unittest.TestCase):
                 quoted = envelope["quoted_message"]
                 self.assertEqual(quoted["message_type"], content.kind)
                 self.assertEqual(quoted["text"], f"visible:{content.kind}")
-                self.assertTrue(quoted["content_read"])
+                self.assertEqual(
+                    set(quoted),
+                    {"ref", "message_type", "sender", "created_at", "text"},
+                )
 
     def test_interactive_placeholder_requires_and_accepts_public_fallback(self) -> None:
         message = inbound(
@@ -445,20 +452,20 @@ class QuotedProjectionTest(unittest.TestCase):
         with self.assertRaises(QuotedMessageContractError):
             interactive_quote_visible_text(context, sdk_version="1.2.1")
 
-    def test_resource_types_preserve_public_ids_without_reading_content(self) -> None:
+    def test_resource_types_keep_reasoning_metadata_without_feishu_ids(self) -> None:
         cases = [
-            (ImageContent(image_key="img_public"), ("img_public",)),
+            (ImageContent(image_key="img_public"), None),
             (
                 FileContent(file_key="file_public", file_name="report.pdf"),
-                ("file_public",),
+                [{"type": "file", "name": "report.pdf"}],
             ),
             (
                 FolderContent(file_key="file_folder", file_name="Folder"),
-                ("file_folder",),
+                [{"type": "folder", "name": "Folder"}],
             ),
             (
                 AudioContent(file_key="file_audio", duration_ms=1000),
-                ("file_audio",),
+                [{"type": "audio", "duration_ms": 1000}],
             ),
             (
                 MediaContent(
@@ -467,20 +474,35 @@ class QuotedProjectionTest(unittest.TestCase):
                     duration_ms=2000,
                     file_name="clip.mp4",
                 ),
-                ("file_video", "img_cover"),
+                [{"type": "video", "name": "clip.mp4", "duration_ms": 2000}],
             ),
-            (StickerContent(file_key="file_sticker"), ("file_sticker",)),
-            (ShareChatContent(chat_id="oc_shared"), ("oc_shared",)),
-            (ShareUserContent(user_id="ou_shared"), ("ou_shared",)),
+            (StickerContent(file_key="file_sticker"), [{"type": "sticker"}]),
+            (ShareChatContent(chat_id="oc_shared"), None),
+            (ShareUserContent(user_id="ou_shared"), None),
         ]
-        for content, expected_ids in cases:
+        hidden_ids = (
+            "img_public",
+            "file_public",
+            "file_folder",
+            "file_audio",
+            "file_video",
+            "img_cover",
+            "file_sticker",
+            "oc_shared",
+            "ou_shared",
+            "file_or_img_public",
+        )
+        for content, expected_attachments in cases:
             with self.subTest(kind=content.kind):
                 resources = []
                 if content.kind in {"image", "file", "audio", "media", "sticker"}:
                     resources = [
                         ResourceDescriptor(
                             type="video" if content.kind == "media" else content.kind,
-                            file_key="file_or_img_public",
+                            file_key=(
+                                getattr(content, "file_key", None)
+                                or getattr(content, "image_key", None)
+                            ),
                             file_name=getattr(content, "file_name", None),
                             duration_ms=getattr(content, "duration_ms", None),
                             cover_image_key=getattr(content, "image_key", None),
@@ -491,14 +513,47 @@ class QuotedProjectionTest(unittest.TestCase):
                     "current request",
                 )
                 quoted = json.loads(encoded)["quoted_message"]
-                self.assertEqual(quoted["content_fidelity"], "metadata_only")
-                self.assertFalse(quoted["content_read"])
-                for identifier in expected_ids:
-                    self.assertIn(identifier, encoded)
-                for resource in quoted["resources"]:
-                    self.assertFalse(resource["content_read"])
-                if resources:
-                    self.assertIn("file_or_img_public", encoded)
+                self.assertNotIn("content_fidelity", quoted)
+                self.assertNotIn("content_read", quoted)
+                self.assertNotIn("resources", quoted)
+                if expected_attachments is None:
+                    self.assertNotIn("attachments", quoted)
+                else:
+                    self.assertEqual(quoted["attachments"], expected_attachments)
+                for identifier in hidden_ids:
+                    self.assertNotIn(identifier, encoded)
+
+    def test_distinct_same_name_attachments_preserve_their_count(self) -> None:
+        encoded = compose_quoted_prompt(
+            inbound(
+                TextContent(text="two files"),
+                content_text="two files",
+                resources=[
+                    ResourceDescriptor(
+                        type="file",
+                        file_key="file_one",
+                        file_name="report.pdf",
+                    ),
+                    ResourceDescriptor(
+                        type="file",
+                        file_key="file_two",
+                        file_name="report.pdf",
+                    ),
+                ],
+            ),
+            "current request",
+        )
+        attachments = json.loads(encoded)["quoted_message"]["attachments"]
+
+        self.assertEqual(
+            attachments,
+            [
+                {"type": "file", "name": "report.pdf"},
+                {"type": "file", "name": "report.pdf"},
+            ],
+        )
+        self.assertNotIn("file_one", encoded)
+        self.assertNotIn("file_two", encoded)
 
     def test_image_and_post_mark_successfully_supplied_pixels_as_read(self) -> None:
         image = self.render(
@@ -508,6 +563,9 @@ class QuotedProjectionTest(unittest.TestCase):
                 resources=[ResourceDescriptor(type="image", file_key="img_one")],
             ),
             read_image_keys={"img_one"},
+            image_prompt_refs={
+                ("quoted_message", "om_quoted", "img_one"): "img1"
+            },
         )["quoted_message"]
         post = self.render(
             inbound(
@@ -518,16 +576,27 @@ class QuotedProjectionTest(unittest.TestCase):
                     ResourceDescriptor(type="image", file_key="img_two"),
                 ],
             ),
-            read_image_keys={"img_one", "img_two"},
+            # Rich resource discovery order is not the wire order; imgN is.
+            read_image_keys=("img_two", "img_one"),
+            image_prompt_refs={
+                ("quoted_message", "om_quoted", "img_one"): "img1",
+                ("quoted_message", "om_quoted", "img_two"): "img2",
+            },
         )["quoted_message"]
 
-        self.assertEqual(image["content_fidelity"], "full_multimodal")
-        self.assertTrue(image["content_read"])
         self.assertIn("像素已作为原生视觉输入", image["text"])
-        self.assertTrue(image["resources"][0]["content_read"])
-        self.assertEqual(post["content_fidelity"], "full_multimodal")
-        self.assertTrue(post["content_read"])
-        self.assertTrue(all(item["content_read"] for item in post["resources"]))
+        self.assertEqual(image["attachments"], [{"type": "image", "ref": "img1"}])
+        self.assertEqual(
+            post["text"],
+            "before ![image](img1) after ![image](img2)",
+        )
+        self.assertEqual(
+            post["attachments"],
+            [
+                {"type": "image", "ref": "img1"},
+                {"type": "image", "ref": "img2"},
+            ],
+        )
 
         content_v2_gap = self.render(
             inbound(
@@ -539,18 +608,15 @@ class QuotedProjectionTest(unittest.TestCase):
                 ],
             ),
             read_image_keys=["img_v2"],
+            image_prompt_refs={
+                ("quoted_message", "om_quoted", "img_v2"): "img1"
+            },
         )["quoted_message"]
-        self.assertEqual(content_v2_gap["content_fidelity"], "full_multimodal")
         self.assertEqual(
-            content_v2_gap["resources"],
-            [
-                {
-                    "type": "image",
-                    "content_read": True,
-                    "file_key": "img_v2",
-                }
-            ],
+            content_v2_gap["attachments"],
+            [{"type": "image", "ref": "img1"}],
         )
+        self.assertEqual(content_v2_gap["text"], "visible ![image](img1)")
 
     def test_sdk_video_alias_projects_as_media(self) -> None:
         envelope = self.render(
@@ -562,10 +628,7 @@ class QuotedProjectionTest(unittest.TestCase):
         )
 
         self.assertEqual(envelope["quoted_message"]["message_type"], "media")
-        self.assertEqual(
-            envelope["quoted_message"]["content_fidelity"],
-            "metadata_only",
-        )
+        self.assertNotIn("content_fidelity", envelope["quoted_message"])
 
     def test_merge_forward_is_bounded_aggregate(self) -> None:
         envelope = self.render(
@@ -576,8 +639,8 @@ class QuotedProjectionTest(unittest.TestCase):
         )
 
         quoted = envelope["quoted_message"]
-        self.assertEqual(quoted["content_fidelity"], "bounded_aggregate")
         self.assertTrue(quoted["truncated"])
+        self.assertNotIn("content_fidelity", quoted)
 
     def test_sender_ids_are_minimized_without_redacting_message_metadata(self) -> None:
         message = inbound(
@@ -611,6 +674,18 @@ class QuotedProjectionTest(unittest.TestCase):
             ),
         )
 
+        rich_projection = project_quoted_message(message).to_json_object()
+        self.assertEqual(rich_projection["message_id"], "om_quoted")
+        self.assertEqual(rich_projection["conversation"]["chat_id"], "oc_chat")
+        self.assertEqual(
+            rich_projection["mentions"][0]["open_id"],
+            "ou_mentioned",
+        )
+        self.assertEqual(
+            rich_projection["resources"][0]["file_key"],
+            "file_asset",
+        )
+
         encoded = compose_quoted_prompt(message, "current request")
         quoted = json.loads(encoded)["quoted_message"]
         self.assertEqual(
@@ -621,45 +696,43 @@ class QuotedProjectionTest(unittest.TestCase):
             quoted["sender"],
             {
                 "display_name": "ou_sender",
-                "is_bot": False,
                 "open_id": "ou_sender",
-                "sender_type": "user",
             },
         )
         self.assertEqual(
             quoted["mentions"],
             [
                 {
-                    "is_bot": False,
                     "key": "@_user_1",
                     "name": "Bob",
-                    "open_id": "ou_mentioned",
-                    "union_id": "on_mentioned",
-                    "user_id": "user_mentioned",
-                    "tenant_key": "tenant_public",
                 }
             ],
         )
         self.assertEqual(
-            quoted["resources"],
+            quoted["attachments"],
             [
                 {
                     "type": "file",
-                    "content_read": False,
-                    "file_key": "file_asset",
-                    "file_name": "ou_sender-report.txt",
+                    "name": "ou_sender-report.txt",
                 }
             ],
         )
-        self.assertNotIn("identifiers_redacted", quoted)
+        self.assertNotIn("content_metadata", quoted)
 
     def test_mentions_and_resources_have_explicit_envelope_limits(self) -> None:
         message = inbound(
             TextContent(text="quoted"),
             content_text="quoted",
-            mentions=[Mention(f"@_user_{index}") for index in range(65)],
+            mentions=[
+                Mention(f"@_user_{index}", name=f"User {index}")
+                for index in range(65)
+            ],
             resources=[
-                ResourceDescriptor(type="file", file_key=f"file_{index}")
+                ResourceDescriptor(
+                    type="file",
+                    file_key=f"file_{index}",
+                    file_name=f"File {index}",
+                )
                 for index in range(65)
             ],
         )
@@ -667,12 +740,12 @@ class QuotedProjectionTest(unittest.TestCase):
         quoted = self.render(message)["quoted_message"]
 
         self.assertEqual(len(quoted["mentions"]), 64)
-        self.assertTrue(quoted["mentions_truncated"])
-        self.assertEqual(len(quoted["resources"]), 64)
-        self.assertTrue(quoted["resources_truncated"])
+        self.assertEqual(len(quoted["attachments"]), 64)
         self.assertTrue(quoted["truncated"])
         self.assertEqual(quoted["mentions"][-1]["key"], "@_user_63")
-        self.assertEqual(quoted["resources"][-1]["file_key"], "file_63")
+        self.assertEqual(quoted["attachments"][-1]["name"], "File 63")
+        self.assertNotIn("mentions_truncated", quoted)
+        self.assertNotIn("resources_truncated", quoted)
 
     def test_quoted_text_truncates_but_current_request_remains_last_and_complete(self) -> None:
         encoded = compose_quoted_prompt(
@@ -767,6 +840,53 @@ class SupplementalProjectionTest(unittest.TestCase):
                 with self.assertRaises(HistoricalMessageUnavailable):
                     project_supplemental_message(inbound(sender=sender))
 
+    def test_empty_history_keeps_a_compact_complete_context_status(self) -> None:
+        result = compose_message_context_prompt(
+            supplemental_messages=(),
+            quoted_message=None,
+            current=current("now"),
+        )
+        envelope = json.loads(result.text)
+
+        self.assertEqual(envelope["version"], 2)
+        self.assertEqual(envelope["supplemental_messages"], [])
+        self.assertEqual(
+            envelope["context_status"],
+            {"omitted_count": 0, "truncated": False},
+        )
+        self.assertNotIn("quoted_message", envelope)
+        self.assertEqual(envelope["current_message"]["request_text"], "now")
+        self.assertEqual(list(envelope)[-1], "current_message")
+
+    def test_sdk_optional_mention_name_is_explicitly_incomplete(self) -> None:
+        mention = Mention("@_user_1", open_id="ou_mentioned")
+        self.assertIsNone(mention.name)
+        message = inbound(
+            TextContent(text="ask @_user_1"),
+            message_id="om_mention",
+            content_text="ask @_user_1",
+            mentions=[mention],
+        )
+        message.create_time = 100
+        projected = project_supplemental_message(message)
+        assert not isinstance(projected, SupplementalMessageOmission)
+
+        result = compose_message_context_prompt(
+            supplemental_messages=(projected,),
+            quoted_message=None,
+            current=current("now"),
+        )
+        envelope = json.loads(result.text)
+        historical = envelope["supplemental_messages"][0]
+
+        self.assertNotIn("mentions", historical)
+        self.assertTrue(historical["truncated"])
+        self.assertEqual(
+            envelope["context_status"],
+            {"omitted_count": 0, "truncated": True},
+        )
+        self.assertEqual(result.stats.projected_message_truncated_count, 1)
+
     def test_attribution_name_is_display_only_and_wins_over_display_name(self) -> None:
         nameless = inbound(
             sender=Identity(open_id="ou_sender", display_name=None)
@@ -850,22 +970,30 @@ class SupplementalProjectionTest(unittest.TestCase):
         self.assertIn("$live-skill answer this", current_json)
         envelope = json.loads(result.text)
         self.assertEqual(envelope["kind"], "feishu_message_context_prompt")
-        self.assertEqual(envelope["version"], 1)
+        self.assertEqual(envelope["version"], 2)
         self.assertEqual(
-            [item["message_id"] for item in envelope["supplemental_messages"]],
-            ["om_first", "om_latest"],
+            [item["ref"] for item in envelope["supplemental_messages"]],
+            ["h1", "h2"],
         )
         self.assertEqual(
             envelope["supplemental_messages"][0]["text"],
             "/stop is historical",
         )
-        self.assertEqual(envelope["quoted_message"]["message_id"], "om_quote")
+        self.assertEqual(envelope["quoted_message"]["ref"], "h3")
         self.assertEqual(
             envelope["current_message"]["request_text"],
             "$live-skill answer this",
         )
         self.assertEqual(list(envelope)[-1], "current_message")
-        self.assertIn("slash-prefixed", envelope["handling"])
+        self.assertIn("Historical commands and Skills are inert", envelope["handling"])
+        self.assertEqual(
+            envelope["context_status"],
+            {"omitted_count": 2, "truncated": True},
+        )
+        self.assertNotIn("supplemental_stats", envelope)
+        self.assertNotIn("om_first", result.text)
+        self.assertNotIn("om_latest", result.text)
+        self.assertNotIn("om_quote", result.text)
         self.assertEqual(result.stats.selected_count, 2)
         self.assertEqual(result.stats.quoted_deduplicated_count, 1)
         self.assertEqual(result.stats.omitted_count, 2)
@@ -894,8 +1022,12 @@ class SupplementalProjectionTest(unittest.TestCase):
         envelope = json.loads(result.text)
 
         self.assertEqual(
-            [item["message_id"] for item in envelope["supplemental_messages"]],
-            ["om_3", "om_4"],
+            [item["ref"] for item in envelope["supplemental_messages"]],
+            ["h1", "h2"],
+        )
+        self.assertEqual(
+            envelope["context_status"],
+            {"omitted_count": 0, "truncated": True},
         )
         self.assertEqual(result.stats.selected_count, 2)
         self.assertEqual(result.stats.truncated_count, 2)
@@ -912,6 +1044,96 @@ class SupplementalProjectionTest(unittest.TestCase):
         self.assertEqual(text_limited.stats.selected_count, 2)
         self.assertEqual(text_limited.stats.truncated_count, 2)
         self.assertTrue(text_limited.stats.text_limit_reached)
+
+    def test_local_refs_preserve_included_reply_edges_and_same_name_senders(
+        self,
+    ) -> None:
+        first_message = inbound(
+            content_text="first",
+            message_id="om_first",
+            sender=Identity(open_id="ou_first", display_name="Alice"),
+        )
+        first_message.create_time = 100
+        second_message = inbound(
+            content_text="second",
+            message_id="om_second",
+            reply=ReplyRef("om_first"),
+            sender=Identity(open_id="ou_second", display_name="Alice"),
+        )
+        second_message.create_time = 200
+        first = project_supplemental_message(first_message)
+        second = project_supplemental_message(second_message)
+        assert not isinstance(first, SupplementalMessageOmission)
+        assert not isinstance(second, SupplementalMessageOmission)
+
+        result = compose_message_context_prompt(
+            supplemental_messages=(first, second),
+            quoted_message=None,
+            current=current("now"),
+        )
+        messages = json.loads(result.text)["supplemental_messages"]
+
+        self.assertEqual([message["ref"] for message in messages], ["h1", "h2"])
+        self.assertNotIn("reply_to", messages[0])
+        self.assertEqual(messages[1]["reply_to"], "h1")
+        self.assertEqual(
+            [message["sender"]["open_id"] for message in messages],
+            ["ou_first", "ou_second"],
+        )
+        self.assertNotIn("om_first", result.text)
+        self.assertNotIn("om_second", result.text)
+
+    def test_reply_target_outside_envelope_is_omitted_and_duplicates_fail_closed(
+        self,
+    ) -> None:
+        external_reply = inbound(
+            content_text="reply",
+            message_id="om_reply",
+            reply=ReplyRef("om_not_in_context"),
+        )
+        external_reply.create_time = 100
+        projected = project_supplemental_message(external_reply)
+        assert not isinstance(projected, SupplementalMessageOmission)
+
+        result = compose_message_context_prompt(
+            supplemental_messages=(projected,),
+            quoted_message=None,
+            current=current("now"),
+        )
+        self.assertNotIn(
+            "reply_to",
+            json.loads(result.text)["supplemental_messages"][0],
+        )
+        self.assertNotIn("om_not_in_context", result.text)
+
+        with self.assertRaises(HistoricalMessageContractError):
+            compose_message_context_prompt(
+                supplemental_messages=(projected, projected),
+                quoted_message=None,
+                current=current("now"),
+            )
+
+    def test_quoted_reply_can_target_an_included_supplemental_message(self) -> None:
+        first = self.project("background", message_id="om_first", create_time=100)
+        quoted_message = inbound(
+            content_text="selected quote",
+            message_id="om_quote",
+            reply=ReplyRef("om_first"),
+        )
+        quoted_message.create_time = 200
+        quoted = project_quoted_message(quoted_message)
+        assert not isinstance(first, SupplementalMessageOmission)
+
+        result = compose_message_context_prompt(
+            supplemental_messages=(first,),
+            quoted_message=quoted,
+            current=current("now"),
+        )
+        envelope = json.loads(result.text)
+
+        self.assertEqual(envelope["supplemental_messages"][0]["ref"], "h1")
+        self.assertEqual(envelope["quoted_message"]["ref"], "h2")
+        self.assertEqual(envelope["quoted_message"]["reply_to"], "h1")
 
     def test_decreasing_snapshot_order_fails_closed(self) -> None:
         newer = self.project("newer", message_id="om_new", create_time=2)
