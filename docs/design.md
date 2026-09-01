@@ -459,9 +459,11 @@ SQLite，且 v5 文件 callback 自包含，所以服务/App Server 重启后已
 ephemeral Side 明确不复用上述持久 history recovery。Progress Card 关闭时 consumer 立即
 调用公开 `AsyncTurnHandle.run()`；开启时按 ADR 0052 只读观察 exact queue，直到
 `turn/completed` 已入队，再由同一个 `handle.run()` 唯一 drain 并确认终态。observer
-不可用、cursor 回退、allowlisted shape 异常或 queue 达到固定 high water 时立即回退直接
-`run()`。Side 不轮询 history、不增加 release gate，也不让 observer 成为终态权威；这个
-边界不删除或放宽普通持久 Thread 的现有恢复和 release probe。
+不可用、cursor 回退、allowlisted shape 异常或 exact queue 的原始通知条数（包括被投影忽略
+的 delta）达到固定 4096 high water 时立即回退直接 `run()`。该阈值只限制原始通知条数，
+不提供 wall-clock timeout 或 notification payload 的 byte 上界。Side 不轮询 history、不增加
+release gate，也不让 observer 成为终态权威；这个边界不删除或放宽普通持久 Thread 的现有
+恢复和 release probe。
 
 普通 Binding 每个新 Turn，以及 Goal start/resume，在 exact admission 中捕获当时的 Binding
 Task Feedback；Side 则在创建时一次性冻结 Parent 当时的 Task Feedback 并供所有 Side Turn

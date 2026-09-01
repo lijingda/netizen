@@ -923,11 +923,16 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.store.close()
         self.cwd_context.cleanup()
 
-    def materialized_binding(self):
+    def materialized_binding(
+        self,
+        *,
+        task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
+    ):
         binding = self.store.create_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_owner",
+            task_feedback=task_feedback,
         )
         self.store.assign_native_thread_id(binding.id, "native-parent")
         return self.store.get(binding.id)
@@ -1149,7 +1154,12 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self.runtime.capture_side_submission_admission(record.id)
 
     async def test_stop_cleans_current_turn_but_side_accepts_another_turn(self) -> None:
-        _binding, record, snapshot = await self.open_side()
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.materialized_binding(
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+        )
+        _binding, record, snapshot = await self.open_side_for_binding(binding)
         first = await self.runtime.submit_side(
             side_id=record.id,
             input="first",
@@ -1158,12 +1168,21 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         assert first.release_receipt_attempt is not None
         first.release_receipt_attempt()
+        handle = self.codex.handles[-1]
+        await asyncio.sleep(0)
+        self.assertEqual(handle.run_calls, 0)
 
         self.assertEqual(
             await self.runtime.stop_side(record.id),
             StopDisposition.REQUESTED,
         )
+        self.assertEqual(handle.run_calls, 0)
+        observer.complete(
+            thread_id=snapshot.thread_id,
+            turn_id=first.turn_id,
+        )
         self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertEqual(handle.run_calls, 1)
         self.assertEqual(self.cleanup.calls, [snapshot.thread_id])
         self.assertIsNone(self.runtime.side_snapshot(record.id).turn_id)
 
@@ -1284,7 +1303,12 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.side_snapshot(record.id)
 
     async def test_close_drain_timeout_keeps_native_turn_and_route_open(self) -> None:
-        _binding, record, _snapshot = await self.open_side()
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.materialized_binding(
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+        )
+        _binding, record, snapshot = await self.open_side_for_binding(binding)
         submission = await self.runtime.submit_side(
             side_id=record.id,
             input="still running",
@@ -1310,10 +1334,16 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.side_snapshot(record.id).state,
             SideSessionState.CLOSING,
         )
+        self.assertEqual(handle.run_calls, 0)
 
         handle.complete(status="interrupted")
+        observer.complete(
+            thread_id=snapshot.thread_id,
+            turn_id=submission.turn_id,
+        )
         outcome = await self.runtime.close_side(record.id)
         self.assertEqual(outcome.state, SideTopicState.CLOSED)
+        self.assertEqual(handle.run_calls, 1)
 
     async def test_close_takes_over_stop_cleanup_debt(self) -> None:
         _binding, record, snapshot = await self.open_side()
@@ -6437,10 +6467,19 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await self.finish(self.codex.handles[0], first)
 
     async def test_stopping_rejects_prompt_and_stop_uses_interrupt(self) -> None:
-        binding = self.binding()
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.store.create_binding(
+            scope=self.scope,
+            project_alias="test",
+            creator_id="ou_user",
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+        )
         submission = await self.submit(binding)
         handle = self.codex.handles[0]
         handle.complete_on_interrupt = False
+        await asyncio.sleep(0)
+        self.assertTrue(observer.calls)
 
         self.assertEqual(
             await self.runtime.stop(binding.id),

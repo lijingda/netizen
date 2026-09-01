@@ -75,8 +75,11 @@ Side 仍是 ADR 0021 的 ephemeral 容器，根卡、两小时 expiry、close、
 Progress Card 开启时，Runtime 暂不调用 `handle.run()`，而是每个既有 poll interval 只读
 观察 exact Side Turn queue。观察到 exact `turn/completed` 只表示“可以开始 drain”，随后立即
 调用同一个 `handle.run()`；只有其返回值确认 terminal、Result 与 Files。observer 不可用、
-cursor 回退、allowlisted shape 变化或 queue 达到固定 4096 high water 时，停止 Activity
-观察并立即回退原 `handle.run()` 路径。observer 永远不是第二消费者或 Side 终态权威。
+cursor 回退、allowlisted shape 变化或 exact queue 的原始通知条数（包含 Activity 投影明确
+忽略的 delta）达到固定 4096 high water 时，停止 Activity 观察并立即回退原
+`handle.run()` 路径。该阈值只限制等待唯一 consumer 期间的原始通知条数，不提供 wall-clock
+timeout 或 notification payload 的 byte 上界；不得改为只统计白名单 Activity event，否则
+无法约束被忽略 delta 对原始队列的增长。observer 永远不是第二消费者或 Side 终态权威。
 
 ### Goal Tap 位于唯一 logical stream 内
 
@@ -126,5 +129,5 @@ RPC/notification gateway。
 
 长任务能在 checklist 之外看到安全、低噪声的真实进展，普通、Side 与 Goal 复用同一模块和
 渲染器。代价是 ADR 0020 的严格私有只读例外覆盖更多固定 generated notification 类型，且
-Side 开启 Progress Card 时会暂存通知至 exact completion；固定 high water 保证观察失败或
-异常增长时立即回到既有唯一消费路径。
+Side 开启 Progress Card 时会暂存通知至 exact completion。observer 失败或原始通知条数达到
+high water 时都会立即回到既有唯一消费路径；该阈值不构成时间或 byte 级资源上界。
