@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, NoReturn
@@ -48,14 +48,19 @@ from ..codex_runtime import (
     SideSessionNotFound,
     StopAcknowledger,
     StopDisposition,
+    ThreadSubscriptionState,
     ThreadArchived,
     ThreadCatalogIdentityMissing,
     ThreadDeleteTargetChanged,
+    ThreadLifecycleError,
 )
 from ..domain import (
     FeishuScope,
+    GoalStatus,
     MessageContextAnchor,
     MentionContextMode,
+    SESSION_IDLE_STATE,
+    session_stop_available,
 )
 from ..projects import (
     Project,
@@ -64,6 +69,10 @@ from ..projects import (
     StaleProject,
     UnknownProject,
 )
+from ..sdk_gap_adapter import GoalControlError, GoalSnapshot
+
+
+_BINDING_STATUS_RESOLUTION_CONCURRENCY = 8
 
 
 class ManagementError(RuntimeError):
@@ -106,6 +115,130 @@ class RuntimeStateChanged(ManagementError):
 class NativeThreadView:
     state: NativeThreadCatalogState
     metadata: NativeThreadMetadata | None
+
+
+def classify_native_thread_view(
+    thread_id: str | None,
+    *,
+    active: Mapping[str, NativeThreadMetadata],
+    archived: Mapping[str, NativeThreadMetadata],
+) -> NativeThreadView | None:
+    """Classify raw native metadata, preferring archived on overlap.
+
+    Active and archived catalogs are separate native reads.  The Channel display
+    path can therefore observe an archive between them; archived precedence avoids
+    briefly presenting that Thread as active.
+    """
+
+    if thread_id is None:
+        return None
+    archived_metadata = archived.get(thread_id)
+    if archived_metadata is not None:
+        return NativeThreadView(
+            NativeThreadCatalogState.ARCHIVED,
+            archived_metadata,
+        )
+    active_metadata = active.get(thread_id)
+    if active_metadata is not None:
+        return NativeThreadView(NativeThreadCatalogState.ACTIVE, active_metadata)
+    return NativeThreadView(NativeThreadCatalogState.MISSING, None)
+
+
+class BindingPrimaryStatusResolution(str, Enum):
+    LOCAL = "local"
+    RESOLVED = "resolved"
+    DEFERRED = "deferred"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class BindingStatusProjection:
+    snapshot: BindingRuntimeSnapshot
+    primary_status: str | None
+    primary_status_resolution: BindingPrimaryStatusResolution
+    persisted_goal_status: GoalStatus | None
+    subscription_state: ThreadSubscriptionState | None
+    pointer_state: str
+    catalog_state: NativeThreadCatalogState | None
+    can_stop: bool
+    can_release: bool
+
+    @property
+    def binding_id(self) -> str:
+        return self.snapshot.binding_id
+
+
+def _project_binding_status(
+    *,
+    binding: ThreadBinding,
+    snapshot: BindingRuntimeSnapshot,
+    persisted_goal: GoalSnapshot | None = None,
+    persisted_goal_resolved: bool = False,
+    primary_status_unavailable: bool = False,
+    catalog_state: NativeThreadCatalogState | None = None,
+) -> BindingStatusProjection:
+    """Project one ordinary Binding without letting deferred Goal reads mean idle."""
+
+    if snapshot.binding_id != binding.id:
+        raise ValueError("Binding status projection identity mismatch")
+    persisted_status = (
+        persisted_goal.status if persisted_goal is not None else None
+    )
+    if snapshot.lifecycle is not None:
+        primary_status = snapshot.lifecycle.state.value
+        resolution = BindingPrimaryStatusResolution.LOCAL
+    elif snapshot.turn is not None:
+        primary_status = snapshot.turn.state.value
+        resolution = BindingPrimaryStatusResolution.LOCAL
+    elif snapshot.compacting:
+        primary_status = "compacting"
+        resolution = BindingPrimaryStatusResolution.LOCAL
+    elif snapshot.goal is not None:
+        primary_status = snapshot.goal.state.value
+        resolution = BindingPrimaryStatusResolution.LOCAL
+    elif primary_status_unavailable:
+        primary_status = None
+        resolution = BindingPrimaryStatusResolution.UNAVAILABLE
+    elif persisted_goal_resolved:
+        primary_status = (
+            SESSION_IDLE_STATE
+            if persisted_status is None
+            else f"goal-{persisted_status.value}"
+        )
+        resolution = BindingPrimaryStatusResolution.RESOLVED
+    else:
+        primary_status = None
+        resolution = BindingPrimaryStatusResolution.DEFERRED
+    subscription_state = (
+        snapshot.subscription.state
+        if snapshot.subscription is not None
+        else None
+    )
+    can_release = (
+        binding.native_thread_id is not None
+        and resolution is BindingPrimaryStatusResolution.RESOLVED
+        and subscription_state
+        in {
+            ThreadSubscriptionState.SUBSCRIBED,
+            ThreadSubscriptionState.RELEASE_PENDING,
+        }
+        and snapshot.lifecycle is None
+        and snapshot.turn is None
+        and not snapshot.compacting
+        and snapshot.goal is None
+        and persisted_status is not GoalStatus.ACTIVE
+    )
+    return BindingStatusProjection(
+        snapshot=snapshot,
+        primary_status=primary_status,
+        primary_status_resolution=resolution,
+        persisted_goal_status=persisted_status,
+        subscription_state=subscription_state,
+        pointer_state="current" if binding.active else "inactive",
+        catalog_state=catalog_state,
+        can_stop=session_stop_available(primary_status),
+        can_release=can_release,
+    )
 
 
 class SessionInventoryState(str, Enum):
@@ -161,7 +294,7 @@ class ProjectInventoryPage:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeSnapshots:
-    bindings: tuple[BindingRuntimeSnapshot, ...]
+    bindings: tuple[BindingStatusProjection, ...]
     sides: tuple[SideSessionSnapshot, ...]
     missing_side_ids: tuple[str, ...]
 
@@ -433,6 +566,12 @@ class ManagementRuntimePort:
     def runtime_snapshot_exact(self, binding_id: str) -> BindingRuntimeSnapshot:
         return self.__runtime.binding_runtime_snapshot(binding_id)
 
+    async def goal_snapshot_exact(
+        self,
+        binding: ThreadBinding,
+    ) -> GoalSnapshot | None:
+        return await self.__runtime.goal_snapshot(binding)
+
     def side_snapshot_exact(self, side_id: str) -> SideSessionSnapshot | None:
         try:
             return self.__runtime.side_snapshot(side_id)
@@ -489,6 +628,9 @@ class InstanceManagementService:
         self._blocking_io = blocking_io or BoundedBlockingIOExecutor(
             max_workers=1,
             capacity=2,
+        )
+        self._goal_status_read_limiter = asyncio.Semaphore(
+            _BINDING_STATUS_RESOLUTION_CONCURRENCY
         )
 
     @property
@@ -700,6 +842,101 @@ class InstanceManagementService:
             next_cursor=page.next_cursor,
         )
 
+    async def binding_status_exact(
+        self,
+        binding_id: str,
+        *,
+        snapshot: BindingRuntimeSnapshot | None = None,
+        catalog_state: NativeThreadCatalogState | None = None,
+    ) -> BindingStatusProjection:
+        binding = self._bindings.get(binding_id)
+        before = snapshot or self._runtime.runtime_snapshot_exact(binding.id)
+        local = _project_binding_status(
+            binding=binding,
+            snapshot=before,
+            catalog_state=catalog_state,
+        )
+        if local.primary_status_resolution is BindingPrimaryStatusResolution.LOCAL:
+            return local
+        if (
+            binding.native_thread_id is None
+            or catalog_state is NativeThreadCatalogState.MISSING
+        ):
+            return _project_binding_status(
+                binding=binding,
+                snapshot=before,
+                persisted_goal_resolved=True,
+                catalog_state=catalog_state,
+            )
+        try:
+            async with self._goal_status_read_limiter:
+                persisted_goal = await self._runtime.goal_snapshot_exact(binding)
+        except asyncio.CancelledError:
+            raise
+        except (GoalControlError, ThreadLifecycleError):
+            after = self._runtime.runtime_snapshot_exact(binding.id)
+            local_after = _project_binding_status(
+                binding=binding,
+                snapshot=after,
+                catalog_state=catalog_state,
+            )
+            if (
+                local_after.primary_status_resolution
+                is BindingPrimaryStatusResolution.LOCAL
+            ):
+                return local_after
+            raise
+        after = self._runtime.runtime_snapshot_exact(binding.id)
+        return _project_binding_status(
+            binding=binding,
+            snapshot=after,
+            persisted_goal=persisted_goal,
+            persisted_goal_resolved=True,
+            catalog_state=catalog_state,
+        )
+
+    async def binding_statuses_exact(
+        self,
+        *,
+        binding_ids: Sequence[str],
+        catalog_states: Mapping[
+            str, NativeThreadCatalogState | None
+        ] | None = None,
+        deadline: float | None = None,
+    ) -> tuple[BindingStatusProjection, ...]:
+        binding_ids = self._validated_snapshot_ids(binding_ids, "Binding")
+        if len(binding_ids) > 50:
+            raise ValueError("Binding status request accepts at most 50 IDs")
+        resolved_catalog_states = catalog_states or {}
+        if not resolved_catalog_states.keys() <= set(binding_ids):
+            raise ValueError("catalog states must target requested Bindings")
+        async def resolve(binding_id: str) -> BindingStatusProjection:
+            catalog_state = resolved_catalog_states.get(binding_id)
+            try:
+                if deadline is None:
+                    return await self.binding_status_exact(
+                        binding_id,
+                        catalog_state=catalog_state,
+                    )
+                async with asyncio.timeout_at(deadline):
+                    return await self.binding_status_exact(
+                        binding_id,
+                        catalog_state=catalog_state,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except (GoalControlError, ThreadLifecycleError, TimeoutError):
+                binding = self._bindings.get(binding_id)
+                snapshot = self._runtime.runtime_snapshot_exact(binding_id)
+                return _project_binding_status(
+                    binding=binding,
+                    snapshot=snapshot,
+                    primary_status_unavailable=True,
+                    catalog_state=catalog_state,
+                )
+
+        return tuple(await asyncio.gather(*(resolve(item) for item in binding_ids)))
+
     def runtime_snapshots(
         self,
         *,
@@ -710,10 +947,15 @@ class InstanceManagementService:
         side_ids = self._validated_snapshot_ids(side_ids, "Side")
         if len(binding_ids) + len(side_ids) > 50:
             raise ValueError("runtime snapshot request accepts at most 50 IDs")
-        binding_snapshots = tuple(
-            self._runtime.runtime_snapshot_exact(self._bindings.get(binding_id).id)
-            for binding_id in binding_ids
-        )
+        binding_snapshots = []
+        for binding_id in binding_ids:
+            binding = self._bindings.get(binding_id)
+            binding_snapshots.append(
+                _project_binding_status(
+                    binding=binding,
+                    snapshot=self._runtime.runtime_snapshot_exact(binding.id),
+                )
+            )
         sides: list[SideSessionSnapshot] = []
         missing: list[str] = []
         for side_id in side_ids:
@@ -723,7 +965,7 @@ class InstanceManagementService:
             else:
                 sides.append(snapshot)
         return RuntimeSnapshots(
-            bindings=binding_snapshots,
+            bindings=tuple(binding_snapshots),
             sides=tuple(sides),
             missing_side_ids=tuple(missing),
         )
@@ -1246,15 +1488,10 @@ class InstanceManagementService:
         )
         self._require_disjoint_native_catalogs(active, archived)
         return {
-            thread_id: (
-                NativeThreadView(NativeThreadCatalogState.ACTIVE, active[thread_id])
-                if thread_id in active
-                else NativeThreadView(
-                    NativeThreadCatalogState.ARCHIVED,
-                    archived[thread_id],
-                )
-                if thread_id in archived
-                else NativeThreadView(NativeThreadCatalogState.MISSING, None)
+            thread_id: classify_native_thread_view(
+                thread_id,
+                active=active,
+                archived=archived,
             )
             for thread_id in thread_ids
         }
@@ -1305,7 +1542,7 @@ class InstanceManagementService:
         thread_id = binding.native_thread_id
         if thread_id is None:
             return None
-        return active.get(thread_id) or archived.get(thread_id) or NativeThreadView(
+        return archived.get(thread_id) or active.get(thread_id) or NativeThreadView(
             NativeThreadCatalogState.MISSING,
             None,
         )

@@ -54,6 +54,7 @@ tr:last-child td { border-bottom: 0; }
 .chat-link:hover { text-decoration: underline; }
 .meta-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
 .preview { max-width: 380px; margin-top: 4px; color: var(--muted); line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.runtime-subscription { color: var(--muted); }
 .badge { display: inline-block; border-radius: 999px; padding: 3px 7px; background: #edf1f6; font-size: 11px; }
 .badge.on { background: #e5f6ed; color: #136c3c; }
 .badge.warn { background: #fff2df; color: #925400; }

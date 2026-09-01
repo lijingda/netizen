@@ -51,8 +51,10 @@ async function mutate(path, envelope, extra = {}) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(actionPayload(envelope, extra)),
     });
-    setStatus("操作完成，已按服务端事实刷新。");
-    await refresh(state.tab);
+    const refreshed = await refresh(state.tab);
+    if (refreshed) {
+      setStatus(result?.message || "操作完成，已按服务端事实刷新。");
+    }
     return result;
   } catch (error) {
     const message = error.message;
@@ -138,12 +140,28 @@ function formQuery(form, defaultPageSize = "25") {
 }
 
 function runtimeLabel(runtime) {
-  if (runtime.turn) return `Turn ${runtime.turn.state}`;
-  if (runtime.goal) return `Goal ${runtime.goal.state}`;
-  if (runtime.compacting) return "Compacting";
-  if (runtime.lifecycle) return runtime.lifecycle.state;
-  if (runtime.subscription) return runtime.subscription.state;
-  return "Idle";
+  if (runtime.primaryStatus != null) {
+    return runtime.primaryStatusResolution === "unavailable"
+      || runtime.primaryStatusResolution === "deferred"
+      ? `${runtime.primaryStatus}（待确认）`
+      : runtime.primaryStatus;
+  }
+  return runtime.primaryStatusResolution === "deferred"
+    ? "状态待确认"
+    : "状态暂不可用";
+}
+
+function updateRuntimeCell(target, runtime) {
+  const primary = document.createElement("span");
+  primary.className = "runtime-primary";
+  primary.textContent = runtimeLabel(runtime);
+  target.replaceChildren(primary);
+  if (runtime.subscriptionState) {
+    const subscription = document.createElement("small");
+    subscription.className = "runtime-subscription";
+    subscription.textContent = `订阅：${runtime.subscriptionState}`;
+    target.append(document.createElement("br"), subscription);
+  }
 }
 
 function chatModeLabel(mode, scopeKind = null) {
@@ -154,13 +172,18 @@ function chatModeLabel(mode, scopeKind = null) {
   return "飞书会话";
 }
 
-function sessionStateLabel(value) {
+function pointerStateLabel(value) {
   return {
     current: "当前",
-    "non-current": "非当前",
+    inactive: "非当前",
+  }[value] || value;
+}
+
+function catalogStateLabel(value) {
+  return {
+    active: "Active",
     archived: "已归档",
-    "lazy-current": "Lazy · 当前",
-    "lazy-non-current": "Lazy · 非当前",
+    lazy: "Lazy",
     missing: "原生会话缺失",
   }[value] || value;
 }
@@ -208,7 +231,7 @@ function sessionIdentityCell(row, session) {
   const td = document.createElement("td");
   const title = document.createElement("strong");
   title.textContent = session.nativeTitle
-    || (session.nativeState === "lazy" ? "Lazy Session" : "未命名 Session");
+    || (session.catalogState === "lazy" ? "Lazy Session" : "未命名 Session");
   td.append(title);
   if (session.nativePreview) {
     const preview = document.createElement("div");
@@ -265,13 +288,19 @@ async function loadSessions(cursor = state.sessionPage.cursor) {
     sessionIdentityCell(row, session);
     const sessionState = document.createElement("td");
     sessionState.append(badge(
-      sessionStateLabel(session.sessionState),
-      session.sessionState === "current" || session.sessionState === "lazy-current",
-      session.sessionState === "missing",
+      pointerStateLabel(session.pointerState),
+      session.pointerState === "current",
+    ));
+    sessionState.append(document.createTextNode(" "), badge(
+      catalogStateLabel(session.catalogState),
+      session.catalogState === "active",
+      session.catalogState === "missing",
     ));
     row.append(sessionState);
-    const runtime = cell(row, runtimeLabel(session.runtime));
+    const runtime = document.createElement("td");
     runtime.className = "runtime-state";
+    updateRuntimeCell(runtime, session.runtime);
+    row.append(runtime);
     cell(row, session.projectAlias);
     const settings = session.turnSettings;
     const model = settings ? `${settings.modelId} / ${settings.effortId} / ${settings.serviceTierId}` : "继承 Codex";
@@ -387,15 +416,62 @@ function rowByIdentity(selector, key, value) {
   return null;
 }
 
-function applyRuntimeSnapshots(payload) {
+function mergeDeferredBindingRuntime(incoming, previous) {
+  const needsResolution = !previous
+    || incoming.activityRevision !== previous.activityRevision
+    || previous.primaryStatusResolution === "deferred"
+    || previous.primaryStatusResolution === "unavailable";
+  if (!needsResolution) {
+    return {
+      runtime: {
+        ...incoming,
+        primaryStatus: previous.primaryStatus,
+        primaryStatusResolution: previous.primaryStatusResolution,
+      },
+      needsResolution: false,
+    };
+  }
+  return {
+    runtime: {
+      ...incoming,
+      // Commit a new revision only after its exact projection succeeds. This
+      // leaves a failed/timeout follow-up eligible for the next bounded poll.
+      activityRevision: previous?.activityRevision ?? incoming.activityRevision,
+      primaryStatus: previous?.primaryStatus ?? null,
+      primaryStatusResolution: "deferred",
+    },
+    needsResolution: true,
+  };
+}
+
+function applyRuntimeSnapshots(payload, resolveChanges = true) {
   const bindings = new Map(payload.bindings.map((item) => [item.bindingId, item]));
+  const changedBindings = [];
   for (const session of state.sessions?.items || []) {
-    const runtime = bindings.get(session.bindingId);
-    if (!runtime) continue;
+    const incoming = bindings.get(session.bindingId);
+    if (!incoming) continue;
+    const previous = session.runtime;
+    let runtime = incoming;
+    if (incoming.primaryStatusResolution === "deferred") {
+      const merged = mergeDeferredBindingRuntime(incoming, previous);
+      runtime = merged.runtime;
+      if (resolveChanges && merged.needsResolution) {
+        changedBindings.push(session.bindingId);
+      }
+    } else if (
+      incoming.primaryStatusResolution === "unavailable"
+      && previous?.primaryStatus != null
+    ) {
+      runtime = {
+        ...incoming,
+        activityRevision: previous.activityRevision,
+        primaryStatus: previous.primaryStatus,
+      };
+    }
     session.runtime = runtime;
     const row = rowByIdentity("#sessions-body", "bindingId", session.bindingId);
-    const node = row?.querySelector(".runtime-state span");
-    if (node) node.textContent = runtimeLabel(runtime);
+    const node = row?.querySelector(".runtime-state");
+    if (node) updateRuntimeCell(node, runtime);
   }
 
   const sides = new Map(payload.sides.map((item) => [item.sideId, item]));
@@ -407,6 +483,7 @@ function applyRuntimeSnapshots(payload) {
     const node = row?.querySelector(".runtime-state span");
     if (node) node.textContent = sideRuntimeLabel(side.runtime);
   }
+  return changedBindings;
 }
 
 async function refresh(tab, cursor = undefined) {
@@ -485,17 +562,23 @@ function chunkValues(values, size = 50) {
   return chunks;
 }
 
-async function fetchRuntimeSnapshots(bindingIds, sideIds) {
-  const requests = [];
+async function fetchRuntimeSnapshots(bindingIds, sideIds, resolvePrimary = false) {
+  const paths = [];
   for (const ids of chunkValues(bindingIds)) {
     const query = new URLSearchParams({ bindingIds: ids.join(",") });
-    requests.push(api(`/api/v1/runtime-snapshots?${query}`));
+    if (resolvePrimary) query.set("resolvePrimary", "true");
+    paths.push(`/api/v1/runtime-snapshots?${query}`);
   }
   for (const ids of chunkValues(sideIds)) {
     const query = new URLSearchParams({ sideIds: ids.join(",") });
-    requests.push(api(`/api/v1/runtime-snapshots?${query}`));
+    paths.push(`/api/v1/runtime-snapshots?${query}`);
   }
-  const payloads = await Promise.all(requests);
+  const payloads = [];
+  if (resolvePrimary) {
+    for (const path of paths) payloads.push(await api(path));
+  } else {
+    payloads.push(...await Promise.all(paths.map((path) => api(path))));
+  }
   return {
     bindings: payloads.flatMap((payload) => payload.bindings),
     sides: payloads.flatMap((payload) => payload.sides),
@@ -503,8 +586,15 @@ async function fetchRuntimeSnapshots(bindingIds, sideIds) {
   };
 }
 
+let runtimePollInFlight = false;
+
 setInterval(async () => {
-  if (document.hidden || (state.tab !== "sessions" && state.tab !== "side-topics")) return;
+  if (
+    (runtimePollInFlight && state.tab === "sessions")
+    || document.hidden
+    || (state.tab !== "sessions" && state.tab !== "side-topics")
+  ) return;
+  const sessionPage = state.sessions;
   const bindingIds = state.tab === "sessions"
     ? state.sessions?.items?.map((item) => item.bindingId) || []
     : [];
@@ -512,11 +602,20 @@ setInterval(async () => {
     ? state.sides?.items?.map((item) => item.sideId) || []
     : [];
   if (!bindingIds.length && !sideIds.length) return;
+  if (bindingIds.length) runtimePollInFlight = true;
   try {
     const snapshots = await fetchRuntimeSnapshots(bindingIds, sideIds);
-    applyRuntimeSnapshots(snapshots);
+    if (bindingIds.length && state.sessions !== sessionPage) return;
+    const changedBindings = applyRuntimeSnapshots(snapshots);
+    if (changedBindings.length) {
+      const resolved = await fetchRuntimeSnapshots(changedBindings, [], true);
+      if (state.sessions !== sessionPage) return;
+      applyRuntimeSnapshots(resolved, false);
+    }
   } catch (error) {
     setStatus(error.message, true);
+  } finally {
+    if (bindingIds.length) runtimePollInFlight = false;
   }
 }, 5000);
 

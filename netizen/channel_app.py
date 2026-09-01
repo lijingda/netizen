@@ -84,6 +84,7 @@ from .codex_runtime import (
     GoalOutcome,
     GoalSubmission,
     GoalStateUnknown,
+    NativeThreadCatalogState,
     NativeThreadMetadata,
     ReleaseDisposition,
     RuntimeClosed,
@@ -147,11 +148,9 @@ from .domain import (
     ReplyCardManifest,
     ReplyCardProjection,
     ReplyCardResultModule,
-    SESSION_IDLE_STATE,
     TurnActivityManifestEntry,
     TurnProgressManifest,
     TurnProgressManifestStep,
-    persisted_goal_session_state,
 )
 from .experience import (
     InvalidInteraction,
@@ -172,6 +171,7 @@ from .management import (
     RuntimePrecondition,
     ScopeCoordinator,
     SideIdentityMismatch,
+    classify_native_thread_view,
 )
 from .image_inputs import (
     ImageInputError,
@@ -6578,24 +6578,12 @@ class ChannelApplication:
         *,
         snapshot: BindingRuntimeSnapshot | None = None,
     ) -> str:
-        snapshot = snapshot or self._runtime.binding_runtime_snapshot(binding.id)
-        lifecycle = snapshot.lifecycle
-        if lifecycle is not None:
-            return lifecycle.state.value
-        active = snapshot.turn
-        if active is not None:
-            return active.state.value
-        if snapshot.compacting:
-            return "compacting"
-        active_goal = snapshot.goal
-        if active_goal is not None:
-            return active_goal.state.value
-        persisted = await self._runtime.goal_snapshot(binding)
-        return (
-            SESSION_IDLE_STATE
-            if persisted is None
-            else persisted_goal_session_state(persisted.status)
+        projection = await self._management.binding_status_exact(
+            binding.id,
+            snapshot=snapshot,
         )
+        assert projection.primary_status is not None
+        return projection.primary_status
 
     async def _read_thread_metadata(
         self,
@@ -6648,13 +6636,32 @@ class ChannelApplication:
         )
         sessions: list[SessionCardItem] = []
         for binding in bindings:
-            if binding.native_thread_id in archived_metadata:
+            native = classify_native_thread_view(
+                binding.native_thread_id,
+                active=metadata,
+                archived=archived_metadata,
+            )
+            if (
+                native is not None
+                and native.state is NativeThreadCatalogState.ARCHIVED
+            ):
                 continue
             snapshot = self._runtime.binding_runtime_snapshot(binding.id)
-            state = await self._binding_state(binding, snapshot=snapshot)
+            projection = await self._management.binding_status_exact(
+                binding.id,
+                snapshot=snapshot,
+                catalog_state=(
+                    NativeThreadCatalogState.ACTIVE
+                    if native is not None
+                    and native.state is NativeThreadCatalogState.ACTIVE
+                    else None
+                ),
+            )
+            assert projection.primary_status is not None
+            snapshot = projection.snapshot
             title = _session_title(
                 binding,
-                metadata.get(binding.native_thread_id),
+                native.metadata if native is not None else None,
             )
             sessions.append(
                 SessionCardItem(
@@ -6663,7 +6670,7 @@ class ChannelApplication:
                     project_alias=binding.project_alias,
                     native_thread_id=binding.native_thread_id,
                     title=title,
-                    state=state,
+                    state=projection.primary_status,
                     active=binding.active,
                     activity_revision=snapshot.activity_revision,
                     turn_id=(
@@ -6704,12 +6711,19 @@ class ChannelApplication:
                 native_thread_id=binding.native_thread_id,
                 title=_session_title(
                     binding,
-                    metadata[binding.native_thread_id],
+                    native.metadata,
                 ),
             )
             for binding in bindings
-            if binding.native_thread_id is not None
-            and binding.native_thread_id in metadata
+            if (
+                (native := classify_native_thread_view(
+                    binding.native_thread_id,
+                    active={},
+                    archived=metadata,
+                ))
+                is not None
+                and native.state is NativeThreadCatalogState.ARCHIVED
+            )
         )
         return archived_sessions_card(
             scope=scope,

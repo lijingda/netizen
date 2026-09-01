@@ -33,7 +33,6 @@ from .domain import (
     ReplyCardResultModule,
     SettingsSection,
     SESSION_IDLE_STATE,
-    SESSION_STOP_ACTION_STATES,
     ScopeKind,
     TurnActivityManifestEntry,
     TurnFileActionIntent,
@@ -41,6 +40,7 @@ from .domain import (
     TurnFileManifestItem,
     TurnProgressManifest,
     TurnProgressManifestStep,
+    session_stop_available,
 )
 from .model_settings import ModelCatalog, TurnModelSettings
 from .projects import Project
@@ -2643,7 +2643,7 @@ def _session_row(
                 style="danger",
             )
         )
-    if session.state in SESSION_STOP_ACTION_STATES:
+    if session_stop_available(session.state):
         controls.append(
             _callback_button(
                 label="停止",
