@@ -25,6 +25,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class NetizenInstallerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._real_require_codex_cli_login = installer.require_codex_cli_login
+        codex_preflight = patch.object(installer, "require_codex_cli_login")
+        self.require_codex_cli_login = codex_preflight.start()
+        self.addCleanup(codex_preflight.stop)
+
     def _layout(self, root: Path) -> installer.Layout:
         home = root / "home"
         home.mkdir(parents=True, exist_ok=True)
@@ -122,6 +128,166 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertRaises(SystemExit),
         ):
             installer.parse_args(["install"])
+
+    def test_codex_cli_preflight_uses_global_cli_and_install_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            calls: list[tuple[list[str], dict[str, object]]] = []
+
+            def fake_runner(
+                argv: list[object],
+                **kwargs: object,
+            ) -> subprocess.CompletedProcess[str]:
+                rendered = [os.fspath(value) for value in argv]
+                calls.append((rendered, kwargs))
+                return subprocess.CompletedProcess(rendered, 0, "", "")
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "HOME": "/wrong/home",
+                        "CODEX_HOME": "/wrong/codex",
+                        "VIRTUAL_ENV": "/temporary/venv",
+                        "PATH": "/temporary/venv/bin:/opt/codex/bin:/usr/bin",
+                    },
+                    clear=True,
+                ),
+                patch.object(
+                    installer.shutil,
+                    "which",
+                    return_value="/opt/codex/bin/codex",
+                ) as which,
+            ):
+                self._real_require_codex_cli_login(
+                    layout,
+                    rerun_instruction="rerun ./dev-install.sh",
+                    runner=fake_runner,
+                )
+
+            which.assert_called_once_with(
+                "codex",
+                path="/opt/codex/bin:/usr/bin",
+            )
+            self.assertEqual(len(calls), 1)
+            command, kwargs = calls[0]
+            self.assertEqual(
+                command,
+                ["/opt/codex/bin/codex", "login", "status"],
+            )
+            self.assertEqual(kwargs["cwd"], layout.home)
+            self.assertEqual(kwargs["timeout"], 30.0)
+            self.assertIs(kwargs["capture_output"], True)
+            environment = kwargs["env"]
+            self.assertIsInstance(environment, dict)
+            self.assertEqual(environment["HOME"], str(layout.home))
+            self.assertEqual(environment["CODEX_HOME"], str(layout.codex_home))
+            self.assertNotIn("VIRTUAL_ENV", environment)
+
+    def test_codex_cli_preflight_explains_missing_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            runner = MagicMock()
+            with (
+                patch.object(installer.shutil, "which", return_value=None),
+                self.assertRaisesRegex(
+                    installer.InstallError,
+                    r"Codex CLI is required.*codex login.*rerun ./dev-install.sh",
+                ),
+            ):
+                self._real_require_codex_cli_login(
+                    layout,
+                    rerun_instruction="rerun ./dev-install.sh",
+                    runner=runner,
+                )
+
+            runner.assert_not_called()
+
+    def test_codex_cli_preflight_explains_invalid_login_without_raw_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            runner = MagicMock(
+                return_value=subprocess.CompletedProcess(
+                    ["codex", "login", "status"],
+                    1,
+                    "",
+                    "raw auth detail",
+                )
+            )
+            with (
+                patch.object(
+                    installer.shutil,
+                    "which",
+                    return_value="/usr/local/bin/codex",
+                ),
+                self.assertRaises(installer.InstallError) as raised,
+            ):
+                self._real_require_codex_cli_login(
+                    layout,
+                    rerun_instruction="rerun ./dev-install.sh",
+                    runner=runner,
+                )
+
+            message = str(raised.exception)
+            self.assertIn("does not report a valid login", message)
+            self.assertIn("codex login status", message)
+            self.assertIn("rerun ./dev-install.sh", message)
+            self.assertNotIn("raw auth detail", message)
+
+    def test_codex_cli_preflight_fails_before_managed_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            self.require_codex_cli_login.side_effect = installer.InstallError(
+                "Codex CLI is required"
+            )
+            with (
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer.SystemdServiceBackend, "preflight") as backend,
+                self.assertRaisesRegex(installer.InstallError, "Codex CLI is required"),
+            ):
+                installer.install_source(
+                    source_root=ROOT,
+                    layout=layout,
+                    interactive=False,
+                )
+
+            self.require_codex_cli_login.assert_called_once_with(
+                layout,
+                rerun_instruction="rerun ./dev-install.sh",
+                runner=installer.run_command,
+            )
+            backend.assert_called_once_with()
+            self.assertFalse(layout.product_root.exists())
+
+    def test_published_install_uses_the_same_codex_cli_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout = self._layout(root)
+            source = root / "published"
+            manifest = self._published_source(source)
+            self.require_codex_cli_login.side_effect = installer.InstallError(
+                "Codex login is required"
+            )
+            with (
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer.SystemdServiceBackend, "preflight"),
+                self.assertRaisesRegex(installer.InstallError, "Codex login is required"),
+            ):
+                installer.install_published(
+                    source_root=source,
+                    layout=layout,
+                    interactive=False,
+                )
+
+            self.require_codex_cli_login.assert_called_once_with(
+                layout,
+                rerun_instruction=(
+                    f"rerun the official Netizen v{manifest.version} installer from "
+                    f"{installer.OFFICIAL_RELEASE_DOWNLOADS}/v{manifest.version}/install.sh"
+                ),
+                runner=installer.run_command,
+            )
+            self.assertFalse(layout.product_root.exists())
 
     def test_layout_rejects_uninstall_targets_that_overlap_preserved_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
