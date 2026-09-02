@@ -3559,6 +3559,29 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_status_shows_git_branch_header_for_current_project(self) -> None:
+        await self.new()
+
+        with patch(
+            "netizen.channel_app.git_branch_status",
+            return_value="main...origin/main [ahead 2]",
+        ) as read_branch:
+            await self.app.handle_message(
+                FakeMessage("/status", message_id="om_git_status")
+            )
+
+        lines = self.channel.replies[-1][1].splitlines()
+        project_index = lines.index("Project：test")
+        self.assertEqual(
+            lines[project_index : project_index + 3],
+            [
+                "Project：test",
+                "Git Branch：main...origin/main [ahead 2]",
+                "Native Thread：pending（首条消息后创建）",
+            ],
+        )
+        read_branch.assert_awaited_once_with(self.project.resolve())
+
     async def test_status_shows_transient_subscription_without_writer_claim(self) -> None:
         await self.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
@@ -11088,16 +11111,20 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         assert record is not None
 
-        await self.app.handle_message(
-            FakeMessage(
-                "/status",
-                message_id="om-status",
-                chat_id="oc-direct",
-                chat_type="p2p",
-                thread_id="omt-side",
-                mentioned_bot=False,
+        with patch(
+            "netizen.channel_app.git_branch_status",
+            return_value="HEAD (no branch)",
+        ) as read_branch:
+            await self.app.handle_message(
+                FakeMessage(
+                    "/status",
+                    message_id="om-status",
+                    chat_id="oc-direct",
+                    chat_type="p2p",
+                    thread_id="omt-side",
+                    mentioned_bot=False,
+                )
             )
-        )
         await self.app.handle_message(
             FakeMessage(
                 "/new",
@@ -11109,6 +11136,13 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertTrue(any("当前 Side" in str(content) for _mid, content in self.channel.replies))
+        self.assertTrue(
+            any(
+                "Git Branch：HEAD (no branch)" in str(content)
+                for _mid, content in self.channel.replies
+            )
+        )
+        read_branch.assert_awaited_once_with(self.project.resolve())
         self.assertTrue(any("Side 中不可用" in str(content) for _mid, content in self.channel.replies))
 
         open_card = self.channel.updates[-1][1]

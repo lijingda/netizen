@@ -169,7 +169,10 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   用量不可用时会明确提示并在下一次可观测 Turn 完成后更新。快照不写入 Channel 数据库。
   存在 Netizen 会话配置时显示其动态解析值；没有时三项明确显示“继承 Codex”。
   这表示客户端配置来源，不冒充公开 SDK 无法反查的原生有效值；还会显示本 Netizen
-  进程的瞬态 Thread 订阅状态，但“已取消订阅”不代表 writer 已立即释放。
+  进程的瞬态 Thread 订阅状态，但“已取消订阅”不代表 writer 已立即释放。若 Project
+  cwd 位于 Git work tree 中，还会显示 Git 的 porcelain branch header；普通分支、
+  upstream、detached HEAD 与空仓库文本均由 Git 决定。非 Git 目录或有界只读探测失败时
+  省略该行，不影响其余状态。Side 的 `/status` 复用同一 Git 信息。
 - `/release`：显式取消当前 active 普通会话在本 Netizen 连接上的 Thread 订阅；不删除
   Binding、native Thread、历史、会话配置或 Task Feedback，下一条消息仍 resume 同一
   native ID。运行中、
