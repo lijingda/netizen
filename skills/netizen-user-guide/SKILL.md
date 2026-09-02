@@ -33,9 +33,11 @@ Netizen 是通过官方 Codex SDK 将飞书接入原生 Codex 的 Channel，不�
    当时的两项选择，后续 Parent 配置不传播；Reaction Pulse 只控制 `THINKING`，Goal 不使用
    Lifecycle Reaction；Progress Card 决定普通/Side Turn 是否使用 Activity 卡，以及 Goal
    的单张组合卡是否加入 Activity
-   模块。Activity 只逐步展示状态、最近完成的 commentary、安全操作类别、子任务聚合和
-   checklist；可见文本经过常见敏感模式过滤，不显示工具名、参数、输出、路径、耗时、
-   百分比、ETA 或 reasoning。Progress Card 关闭时普通/Side Turn 仍是无文件
+   模块。Activity 只逐步展示状态、最近完成的 commentary、受限操作信息、子任务聚合和
+   checklist；最近进展和操作显示到分钟的原生事件时间，由飞书客户端按查看者时区与语言本地化。命令只按
+   typed action 显示语义类别，MCP/dynamic tool 显示工具名；工具名只做 Markdown 转义，
+   commentary 等自由文本经过常见敏感模式过滤。不显示命令正文、参数、输出、server、路径、
+   耗时、百分比、ETA 或 reasoning。Progress Card 关闭时普通/Side Turn 仍是无文件
    富文本/静态文本、有文件完成卡；Goal 卡本身始终存在。展示失败不会改变 Codex execution。
 
 ## 边界

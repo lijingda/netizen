@@ -248,7 +248,8 @@ terminal status 与 final agent message；若 App Server 短暂先暴露 complet
 
 `make check` 会运行 `probe_sdk_turn_plan.py`：真实安装 SDK 连接 fake App Server，
 `PinnedTurnActivityObserver` 先从 exact active Turn 非消费地投影 plan、completed commentary
-和 command lifecycle，证明队列长度、顺序和对象身份未变且原始命令/敏感文本未进入投影，
+和 command lifecycle，证明 exact `startedAtMs`/`completedAtMs`、typed command action 语义、
+队列长度、顺序和对象身份未变，且原始命令/路径/查询/敏感文本未进入投影，
 最后由公开 stream 收到同一对象并排空 completion。`plan` live phase 会要求模型先生成
 checklist 和至少一种安全 Activity item，在有界延迟 Turn 中接受一次 steer，再观察完整 plan
 replacement、最终 steered 回复和终态后公开 stream 中仍存在这些通知。相关 SDK/Activity
@@ -925,7 +926,11 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    顶部过程区展开；status 与
    原生 checklist（`✓/→/○`）变化必须更新同一个 message ID，无 plan 时显示“Codex 尚未
    生成”，observer unavailable 时显示“暂不可用”。卡片不显示耗时、百分比、ETA、
-   reasoning、raw command/tool output 或 tool arguments。成功 steer 后旧 checklist 在新
+   reasoning、raw command/tool output、tool arguments、MCP server、路径或查询。最近进展和
+   最近操作必须各验证至少一条 Card 2.0 本地化事件日期和分钟；started 操作完成后时间切换为
+   exact completion 时间，checklist 不显示时间。命令须按 typed action 显示受限语义；MCP/dynamic
+   tool 须显示 exact 工具名，并用含 Markdown 控制字符的测试名确认只影响文本、不注入标签。
+   成功 steer 后旧 checklist 在新
    plan 到达前标记可能过期，之后整体替换。终态在同一卡片折叠过程并显示结果；有文件时
    同卡保留既有 v4 文件分页/callback。分别使 initial、中间和终态 card update 失败，native
    Turn 都必须继续，终态回退标准投递且不重试风暴。最后同时开启两项，确认两套 presenter
@@ -975,7 +980,8 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
 7. 在已通过 zero-Turn live gate 的环境发送 `/goal <objective>`，只出现一张组合卡，并与
    `/status`、`/sessions` 一致显示 Goal 状态；同一 Binding 的普通 Prompt、`/config`、
    `/compact` 被拒绝。Progress Card 关闭时该卡只有 Goal/终态 Result/可选 Files，开启时
-   增加 Activity，且 start、rollover、pause、resume、terminal 都更新同一个 message ID。
+   增加 Activity，且 start、rollover、pause、resume、terminal 都更新同一个 message ID；
+   rollover 后 Activity 只显示新物理 Turn 的原生事件时间和操作信息。
    `/goal pause` 与 `/stop` 都先暂停 Goal、中断 exact 物理 Turn 并请求 terminal cleanup，
    随后卡片或 `/goal resume` 可继续；paused、blocked、usage/budget limited 都不得自动
    clear，并保留“结束 Goal”。只有 logical stream、persisted Goal、exact final Turn 与

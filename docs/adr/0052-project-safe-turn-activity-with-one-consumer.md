@@ -30,6 +30,7 @@ Turn 可以在终态前只读窥视 exact queue，并由公开 `thread.read()` �
 - 最新原生 checklist full replacement 及 freshness；
 - 最近三条 completed commentary；
 - 最近八个 identity-free 操作及状态；
+- 每条 commentary/操作对应的 exact SDK item lifecycle 毫秒时间戳；
 - 子任务和文件修改的安全数量聚合；
 - 只在可见内容变化时递增的 revision。
 
@@ -49,15 +50,38 @@ started/completed 合并为同一操作；交给 Channel 的 snapshot 与 manife
 
 - `turn/plan/updated`：完整替换 checklist；
 - completed commentary `agentMessage`：保守脱敏并限长；
-- command、MCP、dynamic tool：只显示“执行命令”或“调用工具”及状态；
+- commentary 的 CRLF/CR 统一为 LF、tab 展开为四个空格并保留内部换行；其他不可展示控制
+  字符替换为 Unicode replacement character，不折叠合法 Markdown 空白；
+- command：不读取正文；只根据 typed `commandActions` 显示固定语义。零个或未知 action
+  使用“执行命令”，单个 read/list/search action 分别显示“读取文件”“列出文件”“搜索内容”，
+  多个 action 显示“执行复合命令”；
+- MCP tool：显示 SDK `tool` 原值及状态；dynamic tool 显示非空 `namespace.tool`，namespace
+  为空时显示 `tool`；名称不做字符白名单、合规判定或单独截断，只在 Markdown 渲染边界转义；
 - `fileChange`：只显示状态和 change 数量；
 - web search、image view/generation、review mode、context compaction：只显示固定类别；
 - collab/sub-agent：只显示运行、完成、失败等聚合数量。
 
-明确忽略 reasoning、user/final message、`agentMessage/delta`、command input/output、工具名、
-server、参数、结果、搜索词、URL、路径、diff、token usage、sleep 时长、hook prompt 和未知
+明确忽略 reasoning、user/final message、`agentMessage/delta`、command input/output、command
+action 的正文/路径/查询、MCP server、工具参数/结果、搜索词、URL、文件路径、diff、token usage、
+sleep 时长、hook prompt 和未知
 事件。Activity 不显示 raw output、elapsed time、百分比或 ETA；`final_answer` 只进入 Result
 Module。白名单 method 的 generated payload 形状变化会 fail closed，未知 method 则忽略。
+
+### 使用原生事件时间并由飞书本地化
+
+Activity 不生成服务端“当前时间”。`item/started` 行使用 SDK 的 exact `startedAtMs`，
+`item/completed` 行使用 exact `completedAtMs`；同一 item 完成时以完成事件及其时间替换运行中
+行。completed commentary 同样使用其 `completedAtMs`。checklist 没有 item lifecycle 时间，
+因此不增加时间标签。
+
+Channel 把同一个毫秒时间戳原样写入 Card 2.0 Markdown 的 `date_num` 和 `time` 两个
+`local_datetime` 标签，组合显示本地化日期和分钟；由每位飞书客户端按自己的语言和时区
+渲染，服务端不查询、推断或保存用户时区，也不保证固定的日期时间文本格式。
+该时间是事件发生时间，不是 elapsed time、ETA 或持续时间。标签由 Renderer 生成，commentary
+和工具名等动态内容在拼入 Markdown 前转义，不能注入标签或 Markdown 结构。
+
+v4/v5 文件分页 manifest 携带同一毫秒时间戳，分页后保持原始事件时间。已有不含该字段的
+manifest 仍可解码并按无时间行渲染，不用 callback 时间伪造历史事件时间。
 
 ### 普通 Turn 保持公开终态权威
 
@@ -114,7 +138,8 @@ Side close、Goal finalization 或 native outcome。
 
 ## 验证与兼容门禁
 
-synthetic tests/probe 必须覆盖白名单/拒绝列表、脱敏与上限、exact ID、full plan replacement、
+synthetic tests/probe 必须覆盖白名单/拒绝列表、脱敏与上限、exact lifecycle 时间、命令
+action 语义、直接工具名与 Markdown 注入转义、旧 manifest 兼容、exact ID、full plan replacement、
 非消费对象身份、cursor 回退与 shape/fingerprint fail closed。Runtime 门禁必须覆盖 ordinary
 持续刷新及 terminal authority、Progress Card 关闭零观察、Side completion-before-drain、
 observer/high-water fallback、stop/steer/close、Goal Tap 唯一消费与 physical Turn reset/late
@@ -128,6 +153,8 @@ RPC/notification gateway。
 ## 后果
 
 长任务能在 checklist 之外看到安全、低噪声的真实进展，普通、Side 与 Goal 复用同一模块和
-渲染器。代价是 ADR 0020 的严格私有只读例外覆盖更多固定 generated notification 类型，且
+渲染器；用户还能看到按自己客户端时区本地化的事件时间和可辨认的工具名。代价是 ADR 0020
+的严格私有只读例外覆盖更多固定 generated notification 类型，Activity manifest 增加原生
+时间字段，且
 Side 开启 Progress Card 时会暂存通知至 exact completion。observer 失败或原始通知条数达到
 high water 时都会立即回到既有唯一消费路径；该阈值不构成时间或 byte 级资源上界。

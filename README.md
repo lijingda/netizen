@@ -37,8 +37,10 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
 - Progress Card 开启后，普通或 Side native Turn 接受时回复一张运行卡；Goal 则无论该
   选项是否开启都只使用一张 Goal 回复卡，开启时在其中增加 Activity 模块。顶部展开区只按
   状态、最近完成的 commentary、安全操作类别、子任务聚合和原生 checklist 的变化逐步更新；
-  不显示工具名、参数、输出、路径、耗时、百分比、ETA 或 reasoning，所有可见文本还经过
-  有界的常见敏感模式过滤。终态在同一卡片折叠过程并
+  最近进展和最近操作显示到分钟的 SDK 原生事件时间，由飞书客户端按查看者时区与语言本地化；命令按
+  typed action 显示读取/列出/搜索/复合等类别，MCP/dynamic tool 直接显示工具名。仍不显示
+  命令正文、参数、输出、server、路径、耗时、百分比、ETA 或 reasoning；自由文本经过有界的
+  常见敏感模式过滤，工具名只做 Markdown 转义。终态在同一卡片折叠过程并
   呈现回答和可用文件，翻页后仍保留全部模块。任一卡片展示失败都不影响原生执行。
 - 普通 Turn 成功完成，且 latest native Turn diff 或 completed `fileChange` /
   `imageGeneration` item 指向当前普通文件时，最终回复与“本轮文件”合成一张卡片；Goal
@@ -203,8 +205,9 @@ ADR 0020/0052 另行批准一个精确版本/源码指纹门禁的只读 Activit
 快照 current exact Turn 已登记的通知队列，不消费、注册或修改通知，不新建 worker/RPC/
 App Server；Goal Activity 只在现有 logical stream 的唯一消费链内安全 tap。关闭 Progress
 Card 时没有后台 Activity observation。投影只包含 checklist、脱敏 completed commentary
-和命令/工具/文件/搜索/图片/子任务/review/compaction 的通用状态，不含 reasoning、原始
-参数/输出、路径、耗时、百分比或 ETA。公开接口可替代后必须删除，且不得扩展为任意通知
+和命令/工具/文件/搜索/图片/子任务/review/compaction 的受限状态；commentary/操作携带原生
+事件时间，命令只投影 typed action 类别，工具只投影 exact 名称。不含 reasoning、原始命令、
+参数/输出、server、路径、耗时、百分比或 ETA。公开接口可替代后必须删除，且不得扩展为任意通知
 浏览器。
 按 ADR 0018，Skills discovery 只服务于普通消息的显式 `$skill-name` 校验，不再注册
 `/skills` 浏览 control。

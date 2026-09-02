@@ -1798,6 +1798,17 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
         )
+        observer.append_activity(
+            thread_id=snapshot.thread_id,
+            turn_id=started.turn_id,
+            event=TurnActivityEvent(
+                item_id="side-tool",
+                kind=TurnActivityKind.TOOL,
+                status=TurnActivityStatus.COMPLETED,
+                event_timestamp_ms=40,
+                text="side.search",
+            ),
+        )
         with_plan = self.runtime.side_turn_activity(
             record.id,
             thread_id=started.thread_id,
@@ -1806,6 +1817,13 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         assert with_plan is not None
         self.assertEqual([item.step for item in with_plan.steps], ["inspect"])
+        self.assertEqual(
+            [
+                (item.text, item.event_timestamp_ms)
+                for item in with_plan.operations
+            ],
+            [("side.search", 40)],
+        )
 
         steered = await self.runtime.submit_side(
             side_id=record.id,
@@ -2817,6 +2835,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 item_id="late-command",
                 kind=TurnActivityKind.COMMAND,
                 status=TurnActivityStatus.IN_PROGRESS,
+                event_timestamp_ms=1,
             ),
         )
         for _ in range(3):
@@ -5003,6 +5022,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     item_id="old-commentary",
                     kind=TurnActivityKind.COMMENTARY,
                     status=TurnActivityStatus.COMPLETED,
+                    event_timestamp_ms=1,
                     text="old progress",
                 ),
             )
@@ -5022,6 +5042,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     item_id="new-command",
                     kind=TurnActivityKind.COMMAND,
                     status=TurnActivityStatus.IN_PROGRESS,
+                    event_timestamp_ms=2,
                 ),
             )
         )
@@ -5032,6 +5053,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     item_id="late-old-commentary",
                     kind=TurnActivityKind.COMMENTARY,
                     status=TurnActivityStatus.COMPLETED,
+                    event_timestamp_ms=3,
                     text="late old progress",
                 ),
             )
@@ -5043,6 +5065,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(activity.plan_generated)
         self.assertEqual(activity.commentary, ())
         self.assertEqual(len(activity.operations), 1)
+        self.assertEqual(activity.operations[0].event_timestamp_ms, 2)
 
         handle.finish(response="final physical result")
         await self.runtime.wait_idle()
@@ -6106,6 +6129,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     item_id=f"commentary-{index}",
                     kind=TurnActivityKind.COMMENTARY,
                     status=TurnActivityStatus.COMPLETED,
+                    event_timestamp_ms=100 + index,
                     text=f"progress {index}",
                 ),
             )
@@ -6117,6 +6141,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     item_id=f"operation-{index}",
                     kind=TurnActivityKind.COMMAND,
                     status=TurnActivityStatus.COMPLETED,
+                    event_timestamp_ms=200 + index,
                 ),
             )
         with_plan = self.runtime.turn_activity(
@@ -6130,8 +6155,8 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(with_plan.revision, 2)
         self.assertEqual([step.step for step in with_plan.steps], ["inspect"])
         self.assertEqual(
-            with_plan.commentary,
-            ("progress 1", "progress 2", "progress 3"),
+            [(item.text, item.event_timestamp_ms) for item in with_plan.commentary],
+            [("progress 1", 101), ("progress 2", 102), ("progress 3", 103)],
         )
         self.assertEqual(len(with_plan.operations), 8)
         unchanged = self.runtime.turn_activity(
@@ -6196,10 +6221,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.runtime._turn_plan_observer = observer
         binding = self.binding()
         submission = await self.submit(binding, "aggregate subtasks")
-        for item_id, status, count in (
-            ("running-one", TurnActivityStatus.IN_PROGRESS, 2),
-            ("running-two", TurnActivityStatus.IN_PROGRESS, 3),
-            ("completed-one", TurnActivityStatus.COMPLETED, 4),
+        for item_id, status, count, event_timestamp_ms in (
+            ("running-one", TurnActivityStatus.IN_PROGRESS, 2, 10),
+            ("running-two", TurnActivityStatus.IN_PROGRESS, 3, 20),
+            ("completed-one", TurnActivityStatus.COMPLETED, 4, 30),
         ):
             observer.append_activity(
                 thread_id=submission.thread_id,
@@ -6208,6 +6233,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     item_id=item_id,
                     kind=TurnActivityKind.SUBAGENT,
                     status=status,
+                    event_timestamp_ms=event_timestamp_ms,
                     count=count,
                 ),
             )
@@ -6216,12 +6242,47 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         assert activity is not None
         self.assertEqual(
-            [(item.status, item.count) for item in activity.operations],
             [
-                (TurnActivityStatus.IN_PROGRESS, 5),
-                (TurnActivityStatus.COMPLETED, 4),
+                (item.status, item.count, item.event_timestamp_ms)
+                for item in activity.operations
+            ],
+            [
+                (TurnActivityStatus.IN_PROGRESS, 5, 20),
+                (TurnActivityStatus.COMPLETED, 4, 30),
             ],
         )
+        await self.finish(self.codex.handles[0], submission)
+
+    async def test_activity_operation_completion_replaces_status_and_event_time(
+        self,
+    ) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.binding()
+        submission = await self.submit(binding, "track operation lifecycle")
+        for status, event_timestamp_ms in (
+            (TurnActivityStatus.IN_PROGRESS, 10),
+            (TurnActivityStatus.COMPLETED, 20),
+        ):
+            observer.append_activity(
+                thread_id=submission.thread_id,
+                turn_id=submission.turn_id,
+                event=TurnActivityEvent(
+                    item_id="same-command",
+                    kind=TurnActivityKind.COMMAND,
+                    status=status,
+                    event_timestamp_ms=event_timestamp_ms,
+                    text="搜索内容",
+                ),
+            )
+
+        activity = self.runtime.turn_activity(binding.id, refresh_plan=True)
+
+        assert activity is not None
+        self.assertEqual(len(activity.operations), 1)
+        self.assertIs(activity.operations[0].status, TurnActivityStatus.COMPLETED)
+        self.assertEqual(activity.operations[0].event_timestamp_ms, 20)
+        self.assertEqual(activity.operations[0].text, "搜索内容")
         await self.finish(self.codex.handles[0], submission)
 
     async def test_progress_feedback_and_final_activity_are_exact_turn_snapshots(

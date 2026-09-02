@@ -19,8 +19,11 @@ from openai_codex.generated.v2_all import (
     ImageViewThreadItem,
     ItemCompletedNotification,
     ItemStartedNotification,
+    ListFilesCommandAction,
     MessagePhase,
     McpToolCallThreadItem,
+    ReadCommandAction,
+    SearchCommandAction,
     SubAgentActivityThreadItem,
     ThreadItem,
     TurnCompletedNotification,
@@ -37,7 +40,12 @@ ACTIVITY_COMMENTARY_LIMIT = 3
 ACTIVITY_OPERATION_LIMIT = 8
 ACTIVITY_PLAN_LIMIT = 12
 ACTIVITY_TEXT_LIMIT = 160
+ACTIVITY_TAB_SPACES = 4
 SIDE_ACTIVITY_QUEUE_HIGH_WATER = 4_096
+
+COMMAND_ACTIVITY_SUMMARIES = frozenset(
+    {"读取文件", "列出文件", "搜索内容", "执行复合命令"}
+)
 
 _ITEM_STARTED_METHOD = "item/started"
 _ITEM_COMPLETED_METHOD = "item/completed"
@@ -141,17 +149,14 @@ class TurnActivityEvent:
     item_id: str
     kind: TurnActivityKind
     status: TurnActivityStatus
+    event_timestamp_ms: int
     text: str | None = None
     count: int = 1
 
     def __post_init__(self) -> None:
         _validate_exact_id(self.item_id, label="item")
-        if self.text is not None and (
-            not isinstance(self.text, str)
-            or not self.text
-            or len(self.text) > ACTIVITY_TEXT_LIMIT
-        ):
-            raise ValueError("activity text must be non-empty and bounded")
+        _validate_timestamp_ms(self.event_timestamp_ms)
+        _validate_activity_text(self.kind, self.text)
         if isinstance(self.count, bool) or not isinstance(self.count, int) or self.count < 0:
             raise ValueError("activity count must be a non-negative integer")
 
@@ -162,16 +167,13 @@ class TurnActivityEntrySnapshot:
 
     kind: TurnActivityKind
     status: TurnActivityStatus
+    event_timestamp_ms: int
     text: str | None = None
     count: int = 1
 
     def __post_init__(self) -> None:
-        if self.text is not None and (
-            not isinstance(self.text, str)
-            or not self.text
-            or len(self.text) > ACTIVITY_TEXT_LIMIT
-        ):
-            raise ValueError("activity text must be non-empty and bounded")
+        _validate_timestamp_ms(self.event_timestamp_ms)
+        _validate_activity_text(self.kind, self.text)
         if isinstance(self.count, bool) or not isinstance(self.count, int) or self.count < 0:
             raise ValueError("activity count must be a non-negative integer")
 
@@ -265,9 +267,22 @@ def project_turn_activity_notification(
         return TurnActivityNotificationProjection()
     if type(payload.item) is not ThreadItem:
         raise TurnActivityProjectionUnavailable("native Thread item shape changed")
+    completed = method == _ITEM_COMPLETED_METHOD
+    event_timestamp_ms = (
+        payload.completed_at_ms if completed else payload.started_at_ms
+    )
+    if (
+        isinstance(event_timestamp_ms, bool)
+        or not isinstance(event_timestamp_ms, int)
+        or event_timestamp_ms < 0
+    ):
+        raise TurnActivityProjectionUnavailable(
+            "native Turn item lifecycle timestamp changed"
+        )
     event = _project_item(
         payload.item.root,
-        completed=method == _ITEM_COMPLETED_METHOD,
+        completed=completed,
+        event_timestamp_ms=event_timestamp_ms,
     )
     return TurnActivityNotificationProjection(turn_id=turn_id, event=event)
 
@@ -299,13 +314,8 @@ def project_plan_steps(items: object) -> tuple[TurnPlanStepSnapshot, ...]:
 def sanitize_activity_text(value: str) -> str | None:
     """Return conservative, bounded display text or ``None`` for empty input."""
 
-    if not isinstance(value, str):
-        raise TurnActivityProjectionUnavailable("activity text shape changed")
-    normalized = " ".join(
-        "".join(character if character.isprintable() else "�" for character in value)
-        .split()
-    )
-    if not normalized:
+    normalized = normalize_activity_text_layout(value)
+    if not normalized.strip():
         return None
     if (
         _SECRET_ASSIGNMENT.search(normalized)
@@ -326,13 +336,37 @@ def sanitize_activity_text(value: str) -> str | None:
     redacted = _ELAPSED.sub("[时间信息已隐藏]", redacted)
     redacted = _PERCENT.sub("[百分比已隐藏]", redacted)
     redacted = _ETA.sub("[时间估算已隐藏]", redacted)
-    redacted = " ".join(redacted.split()) or "内容已隐藏"
+    if not redacted.strip():
+        redacted = "内容已隐藏"
     if len(redacted) > ACTIVITY_TEXT_LIMIT:
         return redacted[: ACTIVITY_TEXT_LIMIT - 1].rstrip() + "…"
     return redacted
 
 
-def _project_item(item: object, *, completed: bool) -> TurnActivityEvent | None:
+def normalize_activity_text_layout(value: str) -> str:
+    """Preserve supported Markdown layout and replace other controls."""
+
+    if not isinstance(value, str):
+        raise TurnActivityProjectionUnavailable("activity text shape changed")
+    canonical = (
+        value.replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\t", " " * ACTIVITY_TAB_SPACES)
+    )
+    return "".join(
+        character
+        if character == "\n" or character.isprintable()
+        else "�"
+        for character in canonical
+    )
+
+
+def _project_item(
+    item: object,
+    *,
+    completed: bool,
+    event_timestamp_ms: int,
+) -> TurnActivityEvent | None:
     lifecycle_status = (
         TurnActivityStatus.COMPLETED
         if completed
@@ -348,25 +382,66 @@ def _project_item(item: object, *, completed: bool) -> TurnActivityEvent | None:
             item_id=item.id,
             kind=TurnActivityKind.COMMENTARY,
             status=TurnActivityStatus.COMPLETED,
+            event_timestamp_ms=event_timestamp_ms,
             text=text,
         )
     if type(item) is CommandExecutionThreadItem:
-        return _status_event(item.id, TurnActivityKind.COMMAND, item.status, lifecycle_status)
-    if type(item) in {McpToolCallThreadItem, DynamicToolCallThreadItem}:
-        return _status_event(item.id, TurnActivityKind.TOOL, item.status, lifecycle_status)
+        return _status_event(
+            item.id,
+            TurnActivityKind.COMMAND,
+            item.status,
+            lifecycle_status,
+            event_timestamp_ms=event_timestamp_ms,
+            text=_command_activity_summary(item),
+        )
+    if type(item) is McpToolCallThreadItem:
+        return _status_event(
+            item.id,
+            TurnActivityKind.TOOL,
+            item.status,
+            lifecycle_status,
+            event_timestamp_ms=event_timestamp_ms,
+            text=_tool_name(item.tool),
+        )
+    if type(item) is DynamicToolCallThreadItem:
+        tool = _tool_name(item.tool)
+        namespace = item.namespace
+        if namespace:
+            namespace = _tool_name(namespace)
+            tool = f"{namespace}.{tool}"
+        return _status_event(
+            item.id,
+            TurnActivityKind.TOOL,
+            item.status,
+            lifecycle_status,
+            event_timestamp_ms=event_timestamp_ms,
+            text=tool,
+        )
     if type(item) is FileChangeThreadItem:
         return _status_event(
             item.id,
             TurnActivityKind.FILE_CHANGE,
             item.status,
             lifecycle_status,
+            event_timestamp_ms=event_timestamp_ms,
             count=len(item.changes),
         )
     if type(item) is WebSearchThreadItem:
-        return TurnActivityEvent(item.id, TurnActivityKind.WEB_SEARCH, lifecycle_status)
+        return TurnActivityEvent(
+            item.id,
+            TurnActivityKind.WEB_SEARCH,
+            lifecycle_status,
+            event_timestamp_ms,
+        )
     if type(item) in {ImageViewThreadItem, ImageGenerationThreadItem}:
         status = item.status if type(item) is ImageGenerationThreadItem else None
-        return _status_event(item.id, TurnActivityKind.IMAGE, status, lifecycle_status)
+        return _status_event(
+            item.id,
+            TurnActivityKind.IMAGE,
+            status,
+            lifecycle_status,
+            event_timestamp_ms=event_timestamp_ms,
+        )
     if type(item) is CollabAgentToolCallThreadItem:
         count = max(len(item.receiver_thread_ids), len(item.agents_states), 1)
         return _status_event(
@@ -374,6 +449,7 @@ def _project_item(item: object, *, completed: bool) -> TurnActivityEvent | None:
             TurnActivityKind.SUBAGENT,
             item.status,
             lifecycle_status,
+            event_timestamp_ms=event_timestamp_ms,
             count=count,
         )
     if type(item) is SubAgentActivityThreadItem:
@@ -382,11 +458,26 @@ def _project_item(item: object, *, completed: bool) -> TurnActivityEvent | None:
             if getattr(item.kind, "value", None) == "interrupted"
             else lifecycle_status
         )
-        return TurnActivityEvent(item.id, TurnActivityKind.SUBAGENT, status)
+        return TurnActivityEvent(
+            item.id,
+            TurnActivityKind.SUBAGENT,
+            status,
+            event_timestamp_ms,
+        )
     if type(item) in {EnteredReviewModeThreadItem, ExitedReviewModeThreadItem}:
-        return TurnActivityEvent(item.id, TurnActivityKind.REVIEW, lifecycle_status)
+        return TurnActivityEvent(
+            item.id,
+            TurnActivityKind.REVIEW,
+            lifecycle_status,
+            event_timestamp_ms,
+        )
     if type(item) is ContextCompactionThreadItem:
-        return TurnActivityEvent(item.id, TurnActivityKind.COMPACTION, lifecycle_status)
+        return TurnActivityEvent(
+            item.id,
+            TurnActivityKind.COMPACTION,
+            lifecycle_status,
+            event_timestamp_ms,
+        )
     return None
 
 
@@ -396,6 +487,8 @@ def _status_event(
     native_status: object,
     lifecycle_status: TurnActivityStatus,
     *,
+    event_timestamp_ms: int,
+    text: str | None = None,
     count: int = 1,
 ) -> TurnActivityEvent:
     value = getattr(native_status, "value", native_status)
@@ -403,7 +496,70 @@ def _status_event(
         status = TurnActivityStatus(value)
     except (TypeError, ValueError):
         status = lifecycle_status
-    return TurnActivityEvent(item_id, kind, status, count=count)
+    return TurnActivityEvent(
+        item_id,
+        kind,
+        status,
+        event_timestamp_ms,
+        text=text,
+        count=count,
+    )
+
+
+def _command_activity_summary(item: CommandExecutionThreadItem) -> str | None:
+    if len(item.command_actions) > 1:
+        return "执行复合命令"
+    kinds: set[str] = set()
+    for action in item.command_actions:
+        root = action.root
+        if type(root) is ReadCommandAction:
+            kinds.add("read")
+        elif type(root) is ListFilesCommandAction:
+            kinds.add("listFiles")
+        elif type(root) is SearchCommandAction:
+            kinds.add("search")
+        else:
+            kinds.add("unknown")
+    if not kinds or kinds == {"unknown"}:
+        return None
+    if len(kinds) > 1:
+        return "执行复合命令"
+    return {
+        "read": "读取文件",
+        "listFiles": "列出文件",
+        "search": "搜索内容",
+    }[next(iter(kinds))]
+
+
+def _tool_name(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        raise TurnActivityProjectionUnavailable("native tool name shape changed")
+    return value
+
+
+def _validate_timestamp_ms(value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("activity timestamp must be a non-negative integer")
+
+
+def _validate_activity_text(
+    kind: TurnActivityKind,
+    value: str | None,
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or not value:
+        raise ValueError("activity text must be a non-empty string")
+    if kind is TurnActivityKind.COMMENTARY and len(value) > ACTIVITY_TEXT_LIMIT:
+        raise ValueError("activity commentary must be bounded")
+    if kind is TurnActivityKind.COMMAND and value not in COMMAND_ACTIVITY_SUMMARIES:
+        raise ValueError("activity command summary must use a fixed category")
+    if kind not in {
+        TurnActivityKind.COMMENTARY,
+        TurnActivityKind.COMMAND,
+        TurnActivityKind.TOOL,
+    }:
+        raise ValueError("activity text is unsupported for this kind")
 
 
 def _turn_identity(

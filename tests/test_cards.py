@@ -59,6 +59,8 @@ from netizen.domain import (
     ReplyCardResultModule,
     SettingsSection,
     ScopeKind,
+    TurnActivityManifestEntry,
+    TurnCommentaryManifestEntry,
     TurnFileActionName,
     TurnFileManifestItem,
     TurnProgressManifest,
@@ -1123,11 +1125,17 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertIn("状态：正在执行", visible)
         self.assertIn("已接收调整：2 次", visible)
-        self.assertIn("可能尚未反映最近一次调整", visible)
         self.assertIn("✓ 检查当前实现", visible)
         self.assertIn("→ 步骤 1", visible)
         self.assertIn("… 另有 2 项未展示", visible)
         self.assertNotIn("步骤 12", visible)
+        markdown_visible = tuple(
+            item["content"] for item in _elements(panel, "markdown")
+        )
+        self.assertIn(
+            "**任务清单**（可能尚未反映最近一次调整）",
+            markdown_visible,
+        )
         serialized = json.dumps(outbound.card, ensure_ascii=False)
         for forbidden in (
             "SECRET_REASONING",
@@ -1152,24 +1160,48 @@ class CardRendererTest(unittest.TestCase):
             plan_may_be_stale=False,
             steps=(),
             commentary=(
-                "first",
-                "second",
-                "third",
-                "checked `/Users/user/private.py`",
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.COMMENTARY,
+                    TurnActivityStatus.COMPLETED,
+                    1,
+                    text="first",
+                ),
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.COMMENTARY,
+                    TurnActivityStatus.COMPLETED,
+                    2,
+                    text="second",
+                ),
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.COMMENTARY,
+                    TurnActivityStatus.COMPLETED,
+                    3,
+                    text="third",
+                ),
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.COMMENTARY,
+                    TurnActivityStatus.COMPLETED,
+                    4,
+                    text="checked `/Users/user/private.py`",
+                ),
             ),
             operations=(
                 TurnActivityEntrySnapshot(
                     TurnActivityKind.COMMAND,
                     TurnActivityStatus.IN_PROGRESS,
+                    5,
+                    text="搜索内容",
                 ),
                 TurnActivityEntrySnapshot(
                     TurnActivityKind.FILE_CHANGE,
                     TurnActivityStatus.COMPLETED,
+                    6,
                     count=3,
                 ),
                 TurnActivityEntrySnapshot(
                     TurnActivityKind.SUBAGENT,
                     TurnActivityStatus.FAILED,
+                    7,
                     count=2,
                 ),
             ),
@@ -1181,11 +1213,23 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("first", serialized)
         self.assertIn("second", serialized)
         self.assertIn("third", serialized)
-        self.assertIn("[路径已隐藏]", serialized)
-        self.assertIn("执行命令", serialized)
+        self.assertIn("路径已隐藏", serialized)
+        self.assertIn("搜索内容", serialized)
         self.assertIn("修改文件（3 项）", serialized)
         self.assertIn("子任务（2 项）", serialized)
         self.assertNotIn("private.py", serialized)
+        self.assertEqual(serialized.count("<local_datetime"), 12)
+        self.assertEqual(serialized.count("format_type='date_num'"), 6)
+        self.assertEqual(serialized.count("format_type='time'"), 6)
+        for timestamp in range(2, 8):
+            self.assertEqual(serialized.count(f"millisecond='{timestamp}'"), 2)
+        markdown_visible = tuple(
+            item["content"]
+            for item in _elements(outbound.card, "markdown")
+        )
+        self.assertIn("**最近进展**", markdown_visible)
+        self.assertIn("**最近操作**", markdown_visible)
+        self.assertIn("**任务清单**：Codex 尚未生成", markdown_visible)
 
     def test_activity_steps_filter_chinese_adjacent_sensitive_patterns(self) -> None:
         fully_hidden = (
@@ -1206,6 +1250,71 @@ class CardRendererTest(unittest.TestCase):
                     "[敏感内容已隐藏]",
                 )
 
+    def test_activity_markdown_keeps_only_generated_time_tags_active(self) -> None:
+        injected = (
+            "**bold** [link](not-a-url) "
+            "<local_datetime millisecond='999' format_type='date_num'>"
+            "</local_datetime>"
+        )
+        snapshot = SimpleNamespace(
+            state=SimpleNamespace(value="running"),
+            steer_count=0,
+            plan_available=True,
+            plan_generated=False,
+            plan_may_be_stale=False,
+            steps=(),
+            commentary=(
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.COMMENTARY,
+                    TurnActivityStatus.COMPLETED,
+                    100,
+                    text=injected,
+                ),
+            ),
+            operations=(
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.TOOL,
+                    TurnActivityStatus.COMPLETED,
+                    200,
+                    text=injected,
+                ),
+            ),
+        )
+
+        outbound = turn_progress_card(snapshot=snapshot)
+        markdown_elements = _elements(outbound.card, "markdown")
+        rows = [
+            item
+            for item in markdown_elements
+            if "<local_datetime" in item["content"]
+        ]
+
+        self.assertEqual(len(rows), 2)
+        self.assertIn(
+            "**最近进展**",
+            {item["content"] for item in markdown_elements},
+        )
+        self.assertIn(
+            "**最近操作**",
+            {item["content"] for item in markdown_elements},
+        )
+        for timestamp, row in zip((100, 200), rows, strict=True):
+            content = row["content"]
+            self.assertTrue(
+                content.startswith(
+                    f"<local_datetime millisecond='{timestamp}' "
+                    "format_type='date_num'></local_datetime> "
+                    f"<local_datetime millisecond='{timestamp}' "
+                    "format_type='time'></local_datetime> · "
+                )
+            )
+            self.assertEqual(content.count("<local_datetime"), 2)
+            self.assertEqual(content.count("format_type='date_num'"), 1)
+            self.assertEqual(content.count("format_type='time'"), 1)
+            self.assertIn(r"&lt;local\_datetime", content)
+            self.assertIn("\\*\\*bold\\*\\*", content)
+            self.assertIn("\\[link\\]\\(not-a-url\\)", content)
+
         partially_hidden = {
             "联系alice@example.com后继续": "alice@example.com",
             "使用sk-proj-abcdefghijklmnopqrstuvwx继续": (
@@ -1225,6 +1334,39 @@ class CardRendererTest(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertNotIn(forbidden, activity_step_display(value))
 
+    def test_activity_markdown_preserves_commentary_layout(self) -> None:
+        snapshot = SimpleNamespace(
+            state=SimpleNamespace(value="running"),
+            steer_count=0,
+            plan_available=True,
+            plan_generated=False,
+            plan_may_be_stale=False,
+            steps=(),
+            commentary=(
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.COMMENTARY,
+                    TurnActivityStatus.COMPLETED,
+                    100,
+                    text="第一行\r\n\r第二行\t缩进 **原样**",
+                ),
+            ),
+            operations=(),
+        )
+
+        outbound = turn_progress_card(snapshot=snapshot)
+        rows = [
+            item["content"]
+            for item in _elements(outbound.card, "markdown")
+            if "<local_datetime" in item["content"]
+        ]
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn(
+            "• 第一行\n\n第二行    缩进 \\*\\*原样\\*\\*",
+            rows[0],
+        )
+        self.assertNotIn("�", rows[0])
+
     def test_progress_file_pagination_preserves_sanitized_collapsed_panel(
         self,
     ) -> None:
@@ -1239,6 +1381,22 @@ class CardRendererTest(unittest.TestCase):
                 SimpleNamespace(
                     step=f"读取 secret: {secret} 后生成报告",
                     status=SimpleNamespace(value="completed"),
+                ),
+            ),
+            commentary=(
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.COMMENTARY,
+                    TurnActivityStatus.COMPLETED,
+                    111,
+                    text="finished review",
+                ),
+            ),
+            operations=(
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.TOOL,
+                    TurnActivityStatus.COMPLETED,
+                    222,
+                    text="github.get_file_contents",
                 ),
             ),
         )
@@ -1268,6 +1426,18 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertIn("progress", page_value)
         self.assertNotIn(secret, json.dumps(page_value, ensure_ascii=False))
+        self.assertEqual(
+            page_value["progress"]["commentary"],
+            [{"text": "finished review", "event_timestamp_ms": 111}],
+        )
+        self.assertEqual(
+            page_value["progress"]["operations"][0]["event_timestamp_ms"],
+            222,
+        )
+        self.assertEqual(
+            page_value["progress"]["operations"][0]["text"],
+            "github.get_file_contents",
+        )
 
         intent = decode_turn_file_action(
             app_id="cli_test",
@@ -1312,6 +1482,29 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("敏感内容已隐藏", serialized)
         self.assertNotIn(secret, serialized)
         self.assertIn("result-08.txt", serialized)
+        self.assertIn("millisecond='111'", serialized)
+        self.assertIn("millisecond='222'", serialized)
+        self.assertIn("github.get", serialized)
+        self.assertIn("file", serialized)
+
+        legacy_value = json.loads(json.dumps(page_value))
+        legacy_value["progress"]["commentary"] = ["finished review"]
+        legacy_value["progress"]["operations"][0].pop("event_timestamp_ms")
+        legacy_intent = decode_turn_file_action(
+            app_id="cli_test",
+            message_id="om_card",
+            callback_chat_id=self.scope.chat_id,
+            sender_id="ou_user",
+            tag="button",
+            value=legacy_value,
+        )
+        assert legacy_intent.progress is not None
+        self.assertIsNone(
+            legacy_intent.progress.commentary[0].event_timestamp_ms
+        )
+        self.assertIsNone(
+            legacy_intent.progress.operations[0].event_timestamp_ms
+        )
 
     def test_v4_progress_file_pages_preserve_existing_step_truncation(self) -> None:
         snapshot = SimpleNamespace(
@@ -2384,6 +2577,20 @@ class CardRendererTest(unittest.TestCase):
                             "password: do-not-leak", "completed"
                         ),
                     ),
+                    commentary=(
+                        TurnCommentaryManifestEntry(
+                            text="goal progress",
+                            event_timestamp_ms=333,
+                        ),
+                    ),
+                    operations=(
+                        TurnActivityManifestEntry(
+                            kind=TurnActivityKind.TOOL.value,
+                            status=TurnActivityStatus.COMPLETED.value,
+                            event_timestamp_ms=444,
+                            text="drive.search",
+                        ),
+                    ),
                 ),
                 terminal_status="completed",
                 collapsed=True,
@@ -2409,6 +2616,10 @@ class CardRendererTest(unittest.TestCase):
         encoded = json.dumps(page_value, ensure_ascii=False)
         self.assertNotIn("do-not-leak", encoded)
         self.assertIn("敏感内容已隐藏", encoded)
+        progress = page_value["reply"]["activity"]["progress"]
+        self.assertEqual(progress["commentary"][0]["event_timestamp_ms"], 333)
+        self.assertEqual(progress["operations"][0]["event_timestamp_ms"], 444)
+        self.assertEqual(progress["operations"][0]["text"], "drive.search")
 
         intent = decode_turn_file_action(
             app_id="cli_test",
@@ -2439,6 +2650,9 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("result-00.txt", rebuilt_visible)
         self.assertIn("结束 Goal", rebuilt_text)
         self.assertNotIn("**Time**", rebuilt_text)
+        self.assertIn("millisecond='333'", rebuilt_text)
+        self.assertIn("millisecond='444'", rebuilt_text)
+        self.assertIn("drive.search", rebuilt_text)
 
         retargeted = json.loads(json.dumps(page_value))
         retargeted["binding_id"] = "binding:v1:binding-other"

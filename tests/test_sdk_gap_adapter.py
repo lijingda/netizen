@@ -498,6 +498,7 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(command.kind, TurnActivityKind.COMMAND)
         self.assertIs(command.status, TurnActivityStatus.IN_PROGRESS)
+        self.assertEqual(command.event_timestamp_ms, 1)
         self.assertNotIn("private.txt", repr(command))
         methods = [item.get("method") for item in messages if "id" in item]
         self.assertEqual(

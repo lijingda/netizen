@@ -240,8 +240,15 @@ class TurnProgressManifestStep:
 class TurnActivityManifestEntry:
     kind: str
     status: str
+    event_timestamp_ms: int | None = None
     text: str | None = None
     count: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class TurnCommentaryManifestEntry:
+    text: str
+    event_timestamp_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,7 +261,7 @@ class TurnProgressManifest:
     plan_generated: bool
     plan_may_be_stale: bool
     steps: tuple[TurnProgressManifestStep, ...] = ()
-    commentary: tuple[str, ...] = ()
+    commentary: tuple[TurnCommentaryManifestEntry, ...] = ()
     operations: tuple[TurnActivityManifestEntry, ...] = ()
 
 
