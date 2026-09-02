@@ -62,6 +62,17 @@ class DeploymentAssetsTest(unittest.TestCase):
         ):
             self.assertIn(expected, local_development)
 
+    def test_managed_install_auth_gate_is_client_and_platform_agnostic(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+
+        for document in (readme, deployment):
+            self.assertIn("Codex CLI 或 Codex App", document)
+            self.assertIn("bundled Codex runtime", document)
+            self.assertNotIn("同一 Unix 用户安装官方 Codex CLI", document)
+            self.assertNotIn("当前 Unix 用户的登录有效", document)
+            self.assertNotIn("`PATH` 中已安装的官方 Codex CLI", document)
+
     def test_macos_launchagent_contract_is_public_and_platform_bounded(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")

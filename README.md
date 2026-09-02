@@ -286,10 +286,11 @@ Agent 才应代用户承载交互浏览器初始化；具体交接流程见
 
 `install.sh`、`dev-install.sh` 和 `uninstall.sh` 不接收参数；`service.sh` 只接收
 `start|stop|restart|status` 中的一个动作。这些公开脚本都不会执行 `git pull`。
-安装前必须为运行 Netizen 的同一 Unix 用户安装官方 Codex CLI，并在相同 `CODEX_HOME` 下
-完成 `codex login`；安装器会在任何受管文件或服务状态变更前执行全局
-`codex login status`，缺失或未登录时输出官方安装地址和精确重试步骤。运行时仍使用 release
-内由 Python SDK 固定的 bundled Codex CLI，全局 CLI 只承担显式的用户登录前置门禁。
+运行 Netizen 的账户必须有 release 内 bundled Codex runtime 可识别的有效登录态；它可以由
+Codex CLI 或 Codex App 建立。安装器不要求系统 `PATH` 中存在全局 Codex CLI，也不根据
+Linux/macOS 或客户端来源判断登录是否有效。候选 release 准备完成后，安装器以目标
+account home 和 `${CODEX_HOME:-~/.codex}` 执行固定 runtime 的 `login status`；未识别到
+登录时会同时输出 Codex CLI、Codex App 的官方地址和精确重试步骤，且不会激活候选服务。
 正式 bootstrap 下载自己固定 tag 的
 项目构建 tarball，校验内嵌 SHA-256 和 Published Release manifest 后安装；
 该 tag 的 exact main commit 已在 Python 3.11/3.12 CI 通过统一代码门禁；
@@ -376,8 +377,8 @@ fail closed；先修复账号 login shell 的启动文件再 restart。Bash 仍�
 cgroup 之外额外执行一次任意 profile。
 
 安装器在候选 release 中新建 venv；源码候选运行完整本地门禁，正式候选运行每台主机必需
-的 package、compile、依赖和 SDK probes。两路都验证配置、固定 Codex CLI 登录、飞书权限
-和已安装包一致性后才切换。profile 只在真实 user service 的 cgroup 内执行；首次
+的 package、compile、依赖和 SDK probes。两路都验证配置、固定 Codex runtime 可见登录态、
+飞书权限和已安装包一致性后才切换。profile 只在真实 user service 的 cgroup 内执行；首次
 安装自动 enable 并启动，升级前服务若在运行则
 切换后启动并等待 ready，若已停止则保持当前会话停止。Linux 保持原 enabled/disabled
 意图；macOS 保证 plist 已安装并清除 sticky disabled 状态，使它在下次登录自动启动。
