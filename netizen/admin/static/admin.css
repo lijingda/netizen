@@ -12,6 +12,7 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; color: var(--ink); background: var(--wash); }
+body.time-range-modal-open { overflow: hidden; }
 button, input, select { font: inherit; }
 button { cursor: pointer; }
 .topbar { display: flex; justify-content: space-between; align-items: center; padding: 24px clamp(20px, 4vw, 56px); background: #10213f; color: white; }
@@ -33,8 +34,44 @@ main { max-width: 1500px; margin: 0 auto; padding: 24px clamp(14px, 3vw, 42px) 5
 .card-form label, .filter-bar label { display: grid; gap: 5px; color: var(--muted); font-size: 13px; }
 input, select { min-width: 0; border: 1px solid #bac3d0; border-radius: 7px; padding: 8px 9px; background: white; color: var(--ink); }
 .card-form input { width: 100%; margin: 5px 0 12px; }
-.card-form button, .filter-bar button, .action { border: 0; border-radius: 7px; padding: 8px 11px; background: var(--blue); color: white; }
+.card-form button, .filter-bar > button[type="submit"], .action { border: 0; border-radius: 7px; padding: 8px 11px; background: var(--blue); color: white; }
 .filter-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); align-items: end; gap: 10px; margin: 20px 0; }
+.time-range-filter { position: relative; min-width: 0; margin: 0; padding: 0; border: 0; grid-column: span 2; }
+.time-range-filter legend { margin-bottom: 5px; padding: 0; color: var(--muted); font-size: 13px; }
+.time-range-control { position: relative; }
+.time-range-trigger { width: 100%; min-height: 36px; display: flex; align-items: center; gap: 9px; border: 1px solid #bac3d0; border-radius: 7px; padding: 8px 10px; background: white; color: var(--ink); text-align: left; }
+.time-range-trigger:hover { border-color: #8290a3; }
+.time-range-trigger[aria-expanded="true"] { border-color: var(--blue); box-shadow: 0 0 0 2px rgb(24 88 215 / 12%); }
+.time-range-trigger.has-value { padding-right: 58px; }
+.time-range-calendar-icon { position: relative; width: 15px; height: 14px; flex: 0 0 auto; border: 1.5px solid currentColor; border-radius: 3px; color: var(--muted); }
+.time-range-calendar-icon::before { content: ""; position: absolute; left: -1.5px; right: -1.5px; top: 3px; border-top: 1.5px solid currentColor; }
+.time-range-calendar-icon::after { content: ""; position: absolute; width: 2px; height: 2px; left: 3px; top: 7px; border-radius: 50%; background: currentColor; box-shadow: 4px 0 currentColor, 8px 0 currentColor; }
+.time-range-summary { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.time-range-chevron { flex: 0 0 auto; color: var(--muted); font-size: 16px; line-height: 1; }
+.time-range-quick-clear { position: absolute; z-index: 1; top: 50%; right: 30px; width: 24px; height: 24px; transform: translateY(-50%); border: 0; border-radius: 50%; padding: 0; background: transparent; color: var(--muted); font-size: 18px; line-height: 22px; }
+.time-range-quick-clear:hover { background: #edf1f6; color: var(--ink); }
+.time-range-popover[hidden], .time-range-backdrop[hidden] { display: none; }
+.time-range-popover { position: absolute; z-index: 101; top: calc(100% + 8px); right: 0; width: min(620px, calc(100vw - 48px)); display: grid; grid-template-columns: 172px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: white; box-shadow: 0 18px 48px rgb(23 39 68 / 20%); color: var(--ink); }
+.time-range-presets { padding: 18px 14px; border-right: 1px solid var(--line); background: #f7f9fc; }
+.time-range-presets h3, .time-range-custom h3 { margin: 0; font-size: 14px; }
+.time-range-presets > p { margin: 14px 4px 7px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .05em; }
+.time-range-preset-list { display: grid; gap: 3px; }
+.time-range-preset-list button { width: 100%; border: 0; border-radius: 6px; padding: 8px 9px; background: transparent; color: var(--ink); text-align: left; }
+.time-range-preset-list button:hover { background: #e9edf4; }
+.time-range-preset-list button[aria-pressed="true"] { background: var(--blue-soft); color: var(--blue); font-weight: 700; }
+.time-range-custom { min-width: 0; padding: 18px; }
+.time-range-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 15px; }
+.time-range-fields input { width: 100%; }
+.time-range-hint, .time-range-zone, .time-range-error { margin: 9px 0 0; font-size: 12px; line-height: 1.4; }
+.time-range-hint, .time-range-zone { color: var(--muted); }
+.time-range-error { min-height: 17px; color: var(--danger); }
+.time-range-footer { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+.time-range-footer-spacer { flex: 1; }
+.time-range-footer button { border: 1px solid var(--line); border-radius: 7px; padding: 7px 11px; background: white; color: var(--ink); }
+.time-range-footer .time-range-clear { border-color: transparent; color: var(--muted); }
+.time-range-footer .time-range-done { border-color: var(--blue); background: var(--blue); color: white; }
+.time-range-footer button:disabled { opacity: .48; }
+.time-range-backdrop { display: none; }
 .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 9px; }
 table { width: 100%; border-collapse: collapse; min-width: 900px; }
 #sessions table { min-width: 1100px; table-layout: fixed; }
@@ -71,4 +108,17 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .login-card label { display: grid; gap: 7px; }
 .login-card input { margin-bottom: 14px; }
 .login-card button { width: 100%; border: 0; border-radius: 8px; padding: 10px; background: var(--blue); color: white; }
-@media (max-width: 650px) { .topbar { padding: 18px; } .tabs { overflow-x: auto; padding: 10px 14px; } main { padding: 14px 8px 40px; } .panel { border-radius: 9px; padding: 12px; } }
+@media (max-width: 650px) {
+  .topbar { padding: 18px; }
+  .tabs { overflow-x: auto; padding: 10px 14px; }
+  main { padding: 14px 8px 40px; }
+  .panel { border-radius: 9px; padding: 12px; }
+  .time-range-filter { grid-column: 1 / -1; }
+  .time-range-backdrop { position: fixed; z-index: 100; inset: 0; display: block; background: rgb(16 33 63 / 38%); }
+  .time-range-popover { position: fixed; z-index: 101; top: auto; right: 10px; bottom: 10px; left: 10px; width: auto; max-height: calc(100dvh - 20px); display: block; overflow-y: auto; border-radius: 14px; }
+  .time-range-presets { border-right: 0; border-bottom: 1px solid var(--line); padding: 16px; }
+  .time-range-presets > p { margin-top: 11px; }
+  .time-range-preset-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
+  .time-range-custom { padding: 16px; }
+  .time-range-fields { grid-template-columns: 1fr; }
+}

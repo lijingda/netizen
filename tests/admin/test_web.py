@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import secrets
+import shutil
+import subprocess
 import tempfile
 import unittest
 from html.parser import HTMLParser
@@ -17,6 +20,7 @@ from netizen.admin.web import (
     AdminWebRunner,
     _batches,
     _chat_open_url,
+    _created_range_query,
     _session_inventory_state,
     _session_page_size,
     _release_disposition_message,
@@ -78,6 +82,7 @@ class FakeManagement:
     def __init__(self, root: Path) -> None:
         self.calls: list[tuple[str, object]] = []
         self.query_session_calls: list[dict[str, object]] = []
+        self.query_side_topic_calls: list[dict[str, object]] = []
         self.snapshot_batches: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
         self.session_items_override: tuple[SessionInventoryItem, ...] | None = None
         self.persisted_goals: dict[str, GoalSnapshot] = {}
@@ -249,6 +254,7 @@ class FakeManagement:
         return SessionInventoryPage(records, None)
 
     async def query_side_topics(self, **_kwargs):
+        self.query_side_topic_calls.append(dict(_kwargs))
         item = SideTopicInventoryItem(
             SideTopicInventoryRecord(self.side_record, "test"),
             ChatLabel(
@@ -424,6 +430,47 @@ class AdminSessionPresentationTest(unittest.TestCase):
             _chat_open_url(ChatLabel("oc_group", "Engineering", "group")),
             "https://applink.feishu.cn/client/chat/open?openChatId=oc_group",
         )
+
+    def test_created_range_is_strict_and_normalized_to_canonical_utc(self) -> None:
+        self.assertEqual(
+            _created_range_query(
+                {
+                    "createdFrom": ["2030-01-02T08:30+08:00"],
+                    "createdBefore": ["2030-01-03T00:00:00Z"],
+                }
+            ),
+            (
+                "2030-01-02T00:30:00.000000+00:00",
+                "2030-01-03T00:00:00.000000+00:00",
+            ),
+        )
+        self.assertEqual(
+            _created_range_query(
+                {"createdFrom": ["2030-01-02T00:00:00.1234+00:00"]}
+            ),
+            ("2030-01-02T00:00:00.123400+00:00", None),
+        )
+        for values, code in (
+            ({"createdFrom": ["2030-01-02T00:00"]}, "invalid_time"),
+            ({"createdBefore": ["2030-02-30T00:00Z"]}, "invalid_time"),
+            (
+                {
+                    "createdFrom": ["2030-01-03T00:00Z"],
+                    "createdBefore": ["2030-01-03T00:00+00:00"],
+                },
+                "invalid_time_range",
+            ),
+            (
+                {
+                    "createdFrom": ["2030-01-04T00:00Z"],
+                    "createdBefore": ["2030-01-03T00:00Z"],
+                },
+                "invalid_time_range",
+            ),
+        ):
+            with self.subTest(values=values), self.assertRaises(AdminWebError) as caught:
+                _created_range_query(values)
+            self.assertEqual(caught.exception.code, code)
 
 
 class AdminWebTest(unittest.IsolatedAsyncioTestCase):
@@ -971,6 +1018,46 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 400)
         self.assertEqual(error["code"], "invalid_query")
 
+    async def test_time_ranges_are_normalized_for_session_and_side_queries(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        encoded = urlencode(
+            {
+                "createdFrom": "2030-01-02T08:30+08:00",
+                "createdBefore": "2030-01-03T08:45+08:00",
+            }
+        )
+
+        status, _headers, payload = await self.json_get(
+            f"/api/v1/sessions?{encoded}", session
+        )
+        self.assertEqual(status, 200, payload)
+        local = self.management.query_session_calls[-1]["query"].local
+        self.assertEqual(local.created_from, "2030-01-02T00:30:00.000000+00:00")
+        self.assertEqual(local.created_before, "2030-01-03T00:45:00.000000+00:00")
+
+        status, _headers, payload = await self.json_get(
+            f"/api/v1/side-topics?{encoded}", session
+        )
+        self.assertEqual(status, 200, payload)
+        side_query = self.management.query_side_topic_calls[-1]["query"]
+        self.assertEqual(
+            side_query.created_from,
+            "2030-01-02T00:30:00.000000+00:00",
+        )
+        self.assertEqual(
+            side_query.created_before,
+            "2030-01-03T00:45:00.000000+00:00",
+        )
+
+        status, _headers, error = await self.json_get(
+            "/api/v1/sessions?createdFrom=2030-01-03T00%3A00Z"
+            "&createdBefore=2030-01-02T00%3A00Z",
+            session,
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(error["code"], "invalid_time_range")
+
     async def test_subscription_state_does_not_replace_idle_primary_status(
         self,
     ) -> None:
@@ -1237,6 +1324,203 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertIn('state.tab === "sessions"', javascript)
         self.assertIn('state.tab === "side-topics"', javascript)
         self.assertRegex(javascript, r"setInterval\([\s\S]+?,\s*5000\s*\)")
+
+    def test_time_range_filter_is_shared_accessible_and_uses_utc_bounds(self) -> None:
+        root = Path(__file__).resolve().parents[2] / "netizen/admin/static"
+        html = (root / "index.html").read_text(encoding="utf-8")
+        javascript = (root / "admin.js").read_text(encoding="utf-8")
+        stylesheet = (root / "admin.css").read_text(encoding="utf-8")
+
+        self.assertEqual(html.count('class="time-range-filter" data-time-range'), 2)
+        self.assertIn('id="time-range-template"', html)
+        self.assertIn('name="createdFrom" data-time-range-from', html)
+        self.assertIn('name="createdBefore" data-time-range-before', html)
+        self.assertEqual(html.count('type="datetime-local"'), 2)
+        self.assertIn('role="dialog"', html)
+        self.assertIn('role="alert" aria-live="polite"', html)
+        self.assertNotIn("ISO-8601", html)
+        for preset in (
+            "all",
+            "today",
+            "yesterday",
+            "last-24-hours",
+            "last-7-days",
+            "last-30-days",
+        ):
+            self.assertIn(f'data-time-range-preset="{preset}"', html)
+        for label in ("清除", "取消", "完成"):
+            self.assertIn(f">{label}</button>", html)
+
+        self.assertIn('document.querySelectorAll("[data-time-range]")', javascript)
+        self.assertIn("initializeTimeRangeFilter(root)", javascript)
+        self.assertIn("Intl.DateTimeFormat().resolvedOptions().timeZone", javascript)
+        self.assertIn("function canonicalUtc(value)", javascript)
+        self.assertIn('000+00:00`', javascript)
+        self.assertIn("function customTimeRange(startValue, endValue)", javascript)
+        self.assertIn("parsedEnd.date.getTime() + 60 * 1000", javascript)
+        self.assertIn('popover.setAttribute("aria-modal", "true")', javascript)
+        self.assertIn("function setTimeRangeModalIsolation", javascript)
+        self.assertIn('sibling.setAttribute("inert", "")', javascript)
+        self.assertIn("timeRangeModalOwner !== controller", javascript)
+        self.assertIn('event.key === "Escape"', javascript)
+        self.assertIn('trigger.setAttribute("aria-expanded", "false")', javascript)
+        self.assertIn('zone.id = `${identity}-zone`', javascript)
+        self.assertIn(
+            'start.setAttribute("aria-describedby", `${help.id} ${zone.id} ${error.id}`)',
+            javascript,
+        )
+        self.assertIn(
+            'end.setAttribute("aria-describedby", `${help.id} ${zone.id} ${error.id}`)',
+            javascript,
+        )
+        self.assertIn("cursor === null", javascript)
+        self.assertIn("root.getBoundingClientRect()", javascript)
+        self.assertIn("window.innerWidth - margin - width", javascript)
+
+        self.assertIn(".time-range-popover", stylesheet)
+        self.assertIn(".time-range-backdrop", stylesheet)
+        self.assertIn("@media (max-width: 650px)", stylesheet)
+        self.assertIn("position: fixed", stylesheet)
+
+    def test_time_range_javascript_behavior_across_timezones(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is unavailable for the Admin JavaScript behavior test")
+        javascript = (
+            Path(__file__).resolve().parents[2] / "netizen/admin/static/admin.js"
+        ).read_text(encoding="utf-8")
+        start = javascript.index("let timeRangeModalOwner")
+        end = javascript.index("function initializeTimeRangeFilter")
+        core = javascript[start:end]
+        harness = "const document = { body: null };\n" + core + r"""
+const now = new Date("2026-09-02T08:20:30.456Z");
+const today = presetTimeRange("today", now);
+const rolling = presetTimeRange("last-24-hours", now);
+const custom = customTimeRange("2026-08-27T00:00", "2026-09-02T23:59");
+const reversed = customTimeRange("2026-09-02T10:00", "2026-09-02T09:59");
+const gap = customTimeRange("2026-03-08T02:30", "2026-03-08T03:30");
+const fold = customTimeRange("2026-11-01T01:30", "2026-11-01T02:30");
+
+function fakeNode(name, isBackdrop = false) {
+  const attributes = new Set();
+  return {
+    name,
+    isBackdrop,
+    attributes,
+    children: [],
+    parentElement: null,
+    matches(selector) {
+      return selector === "[data-time-range-backdrop]" && this.isBackdrop;
+    },
+    hasAttribute(attribute) { return attributes.has(attribute); },
+    setAttribute(attribute) { attributes.add(attribute); },
+    removeAttribute(attribute) { attributes.delete(attribute); },
+  };
+}
+function append(parent, ...children) {
+  parent.children.push(...children);
+  for (const child of children) child.parentElement = parent;
+}
+const bodyClasses = new Set();
+const body = fakeNode("body");
+body.classList = {
+  toggle(name, enabled) {
+    if (enabled) bodyClasses.add(name);
+    else bodyClasses.delete(name);
+  },
+};
+document.body = body;
+const preexisting = fakeNode("preexisting");
+preexisting.setAttribute("inert", "");
+const header = fakeNode("header");
+const main = fakeNode("main");
+const root = fakeNode("root");
+const otherRoot = fakeNode("other-root");
+const trigger = fakeNode("trigger");
+const backdrop = fakeNode("backdrop", true);
+const popover = fakeNode("popover");
+append(body, preexisting, header, main);
+append(main, root, otherRoot);
+append(root, trigger, backdrop, popover);
+const firstController = {};
+const secondController = {};
+setTimeRangeModalIsolation(firstController, popover, true);
+const modalAfterOpen = bodyClasses.has("time-range-modal-open");
+const isolatedAfterOpen = [header, otherRoot, trigger]
+  .every((node) => node.hasAttribute("inert"));
+const dialogPathAvailable = !main.hasAttribute("inert")
+  && !root.hasAttribute("inert")
+  && !popover.hasAttribute("inert")
+  && !backdrop.hasAttribute("inert");
+setTimeRangeModalIsolation(secondController, popover, false);
+const unaffectedByClosedPeer = bodyClasses.has("time-range-modal-open")
+  && trigger.hasAttribute("inert");
+setTimeRangeModalIsolation(firstController, popover, false);
+const restoredAfterClose = !bodyClasses.has("time-range-modal-open")
+  && [header, otherRoot, trigger].every((node) => !node.hasAttribute("inert"))
+  && preexisting.hasAttribute("inert");
+
+process.stdout.write(JSON.stringify({
+  today,
+  rolling,
+  custom,
+  reversed,
+  gap,
+  fold,
+  modalAfterOpen,
+  isolatedAfterOpen,
+  dialogPathAvailable,
+  unaffectedByClosedPeer,
+  restoredAfterClose,
+}));
+"""
+
+        def run(timezone: str) -> dict:
+            completed = subprocess.run(
+                [node, "-e", harness],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "TZ": timezone},
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            return json.loads(completed.stdout)
+
+        shanghai = run("Asia/Shanghai")
+        self.assertEqual(
+            (shanghai["today"]["from"], shanghai["today"]["before"]),
+            (
+                "2026-09-01T16:00:00.000000+00:00",
+                "2026-09-02T16:00:00.000000+00:00",
+            ),
+        )
+        self.assertEqual(
+            (shanghai["rolling"]["from"], shanghai["rolling"]["before"]),
+            (
+                "2026-09-01T08:20:30.456000+00:00",
+                "2026-09-02T08:20:30.456000+00:00",
+            ),
+        )
+        self.assertEqual(
+            (shanghai["custom"]["range"]["from"], shanghai["custom"]["range"]["before"]),
+            (
+                "2026-08-26T16:00:00.000000+00:00",
+                "2026-09-02T16:00:00.000000+00:00",
+            ),
+        )
+        self.assertEqual(shanghai["reversed"]["invalid"], "end")
+        for key in (
+            "modalAfterOpen",
+            "isolatedAfterOpen",
+            "dialogPathAvailable",
+            "unaffectedByClosedPeer",
+            "restoredAfterClose",
+        ):
+            self.assertTrue(shanghai[key], key)
+
+        new_york = run("America/New_York")
+        self.assertIn("不存在", new_york["gap"]["error"])
+        self.assertIn("重复", new_york["fold"]["error"])
 
 
 def _cookie_value(headers: list[tuple[str, str]], name: str) -> str:
