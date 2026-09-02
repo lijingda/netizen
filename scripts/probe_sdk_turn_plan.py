@@ -74,7 +74,14 @@ def _fake_server() -> None:
                             "type": "commandExecution",
                             "id": "command-one",
                             "command": "cat /Users/user/private.txt",
-                            "commandActions": [],
+                            "commandActions": [
+                                {
+                                    "type": "search",
+                                    "command": "rg secret /Users/user/private.txt",
+                                    "path": "/Users/user/private.txt",
+                                    "query": "secret",
+                                }
+                            ],
                             "cwd": "/Users/user",
                             "status": "inProgress",
                         },
@@ -217,6 +224,8 @@ async def _client() -> None:
             (TurnActivityKind.COMMAND, TurnActivityStatus.IN_PROGRESS),
             (TurnActivityKind.COMMENTARY, TurnActivityStatus.COMPLETED),
         )
+        assert tuple(item.event_timestamp_ms for item in observation.events) == (1, 2)
+        assert observation.events[0].text == "搜索内容"
         assert "do-not-show" not in repr(observation.events)
         assert "/Users/user" not in repr(observation.events)
         turn_queue = codex._client._sync._router._turn_notifications[handle.id]

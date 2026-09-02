@@ -463,7 +463,7 @@ class TurnActivitySnapshot:
     plan_generated: bool
     plan_may_be_stale: bool
     steps: tuple[TurnPlanStepSnapshot, ...]
-    commentary: tuple[str, ...] = ()
+    commentary: tuple[TurnActivityEntrySnapshot, ...] = ()
     operations: tuple[TurnActivityEntrySnapshot, ...] = ()
 
     def __post_init__(self) -> None:
@@ -489,7 +489,7 @@ class SideTurnActivitySnapshot:
     plan_generated: bool
     plan_may_be_stale: bool
     steps: tuple[TurnPlanStepSnapshot, ...]
-    commentary: tuple[str, ...] = ()
+    commentary: tuple[TurnActivityEntrySnapshot, ...] = ()
     operations: tuple[TurnActivityEntrySnapshot, ...] = ()
 
     def __post_init__(self) -> None:
@@ -516,7 +516,7 @@ class GoalActivitySnapshot:
     plan_available: bool
     plan_generated: bool
     steps: tuple[TurnPlanStepSnapshot, ...]
-    commentary: tuple[str, ...] = ()
+    commentary: tuple[TurnActivityEntrySnapshot, ...] = ()
     operations: tuple[TurnActivityEntrySnapshot, ...] = ()
 
     def __post_init__(self) -> None:
@@ -870,7 +870,7 @@ class _ActiveTurn:
     plan_stale_after_cursor: int | None = None
     plan_last_update_cursor: int | None = None
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
-    activity_commentary: dict[str, str] = field(default_factory=dict)
+    activity_commentary: dict[str, TurnActivityEvent] = field(default_factory=dict)
     activity_commentary_order: list[str] = field(default_factory=list)
     activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
     activity_operation_order: list[str] = field(default_factory=list)
@@ -923,7 +923,7 @@ class _ActiveGoal:
     plan_generated: bool = False
     plan_available: bool = True
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
-    activity_commentary: dict[str, str] = field(default_factory=dict)
+    activity_commentary: dict[str, TurnActivityEvent] = field(default_factory=dict)
     activity_commentary_order: list[str] = field(default_factory=list)
     activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
     activity_operation_order: list[str] = field(default_factory=list)
@@ -1001,7 +1001,7 @@ class _ActiveSideTurn:
     plan_stale_after_cursor: int | None = None
     plan_last_update_cursor: int | None = None
     plan_steps: tuple[TurnPlanStepSnapshot, ...] = ()
-    activity_commentary: dict[str, str] = field(default_factory=dict)
+    activity_commentary: dict[str, TurnActivityEvent] = field(default_factory=dict)
     activity_commentary_order: list[str] = field(default_factory=list)
     activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
     activity_operation_order: list[str] = field(default_factory=list)
@@ -3705,11 +3705,17 @@ class CodexRuntime:
     @staticmethod
     def _activity_commentary(
         active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
-    ) -> tuple[str, ...]:
+    ) -> tuple[TurnActivityEntrySnapshot, ...]:
         return tuple(
-            active.activity_commentary[item_id]
+            TurnActivityEntrySnapshot(
+                kind=event.kind,
+                status=event.status,
+                event_timestamp_ms=event.event_timestamp_ms,
+                text=event.text,
+                count=event.count,
+            )
             for item_id in active.activity_commentary_order
-            if item_id in active.activity_commentary
+            if (event := active.activity_commentary.get(item_id)) is not None
         )
 
     @staticmethod
@@ -3717,19 +3723,20 @@ class CodexRuntime:
         active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
     ) -> tuple[TurnActivityEntrySnapshot, ...]:
         ordered: list[tuple[int, TurnActivityEntrySnapshot]] = []
-        subagents: dict[TurnActivityStatus, tuple[int, int]] = {}
+        subagents: dict[TurnActivityStatus, tuple[int, int, int]] = {}
         for position, item_id in enumerate(active.activity_operation_order):
             event = active.activity_operations.get(item_id)
             if event is None:
                 continue
             if event.kind is TurnActivityKind.SUBAGENT:
-                _previous_position, previous_count = subagents.get(
+                _previous_position, previous_count, _previous_timestamp = subagents.get(
                     event.status,
-                    (position, 0),
+                    (position, 0, event.event_timestamp_ms),
                 )
                 subagents[event.status] = (
                     position,
                     previous_count + event.count,
+                    event.event_timestamp_ms,
                 )
                 continue
             ordered.append(
@@ -3738,6 +3745,7 @@ class CodexRuntime:
                     TurnActivityEntrySnapshot(
                         kind=event.kind,
                         status=event.status,
+                        event_timestamp_ms=event.event_timestamp_ms,
                         text=event.text,
                         count=event.count,
                     ),
@@ -3749,10 +3757,11 @@ class CodexRuntime:
                 TurnActivityEntrySnapshot(
                     kind=TurnActivityKind.SUBAGENT,
                     status=status,
+                    event_timestamp_ms=event_timestamp_ms,
                     count=count,
                 ),
             )
-            for status, (position, count) in subagents.items()
+            for status, (position, count, event_timestamp_ms) in subagents.items()
         )
         ordered.sort(key=lambda item: item[0])
         return tuple(item for _position, item in ordered)
@@ -3767,7 +3776,7 @@ class CodexRuntime:
             if event.kind is TurnActivityKind.COMMENTARY:
                 if event.text is None:
                     continue
-                active.activity_commentary[item_id] = event.text
+                active.activity_commentary[item_id] = event
                 if item_id in active.activity_commentary_order:
                     active.activity_commentary_order.remove(item_id)
                 active.activity_commentary_order.append(item_id)

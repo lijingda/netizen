@@ -180,7 +180,9 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
             (observation.events[0].kind, observation.events[0].status),
             (TurnActivityKind.COMMAND, TurnActivityStatus.IN_PROGRESS),
         )
+        self.assertEqual(observation.events[0].event_timestamp_ms, 1)
         self.assertIsNone(observation.events[0].text)
+        self.assertEqual(observation.events[1].event_timestamp_ms, 2)
         self.assertEqual(
             observation.events[1].text,
             "[敏感内容已隐藏]",

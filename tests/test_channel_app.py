@@ -116,6 +116,11 @@ from netizen.message_history import (
 )
 from netizen.projects import ProjectRegistry
 from netizen.sdk_gap_adapter import GoalSnapshot, GoalStatus
+from netizen.turn_activity import (
+    TurnActivityEntrySnapshot,
+    TurnActivityKind,
+    TurnActivityStatus,
+)
 from netizen.turn_plan_observer import (
     TurnPlanStepSnapshot,
     TurnPlanStepState,
@@ -552,6 +557,8 @@ def goal_activity_snapshot(
     binding_id: str,
     revision: int = 1,
     steps: tuple[TurnPlanStepSnapshot, ...] = (),
+    commentary: tuple[TurnActivityEntrySnapshot, ...] = (),
+    operations: tuple[TurnActivityEntrySnapshot, ...] = (),
 ) -> GoalActivitySnapshot:
     return GoalActivitySnapshot(
         binding_id=binding_id,
@@ -563,6 +570,8 @@ def goal_activity_snapshot(
         plan_available=True,
         plan_generated=bool(steps),
         steps=steps,
+        commentary=commentary,
+        operations=operations,
     )
 
 
@@ -6510,6 +6519,22 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 )
                 for index in range(13)
             ),
+            commentary=(
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.COMMENTARY,
+                    TurnActivityStatus.COMPLETED,
+                    555,
+                    text="goal progress",
+                ),
+            ),
+            operations=(
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.TOOL,
+                    TurnActivityStatus.COMPLETED,
+                    666,
+                    text="github.get_file_contents",
+                ),
+            ),
         )
         self.runtime.goal_activity_values[binding.id] = activity
         self.runtime.goal_snapshot_value = native_goal(GoalStatus.ACTIVE)
@@ -6568,6 +6593,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("另有 1 项未展示", rendered)
         self.assertIn("goal files ready", rendered)
         self.assertIn("goal-result-00.txt", rendered)
+        self.assertIn("millisecond='555'", rendered)
+        self.assertIn("millisecond='666'", rendered)
+        self.assertIn("github.get", rendered)
+        self.assertIn("file", rendered)
         self.assertNotIn("结束 Goal", rendered)
         panel = next(iter(_elements(terminal, "collapsible_panel")))
         self.assertFalse(panel["expanded"])
@@ -6592,6 +6621,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("generate outputs", paged)
         self.assertIn("goal files ready", paged)
         self.assertIn("goal-result-08.txt", paged)
+        self.assertIn("millisecond='555'", paged)
+        self.assertIn("millisecond='666'", paged)
+        self.assertIn("github.get", paged)
+        self.assertIn("file", paged)
         # The cleared G1 card remains a frozen result even after G2 exists.
         # Paging G1 updates only G1's exact source message.
         self.runtime.goal_snapshot_value = native_goal(

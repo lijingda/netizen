@@ -485,10 +485,15 @@ Runtime 为 exact Ordinary Active Turn 维护带 revision 的 Turn Activity Proj
 Goal 当前 exact 物理 Turn 与 exact active Side Turn 暴露同样受限的 Activity Snapshot。
 投影包含 accepted 后的 running/stopping/pausing 状态、steer 次数、ADR 0020 的完整
 plan/checklist、最近三条 completed commentary、最近八个通用操作，以及文件修改和子任务
-的安全数量聚合。命令、MCP/dynamic tool、搜索、图片、review 与 compaction 只显示固定类别
-和状态；不显示 reasoning、final answer、delta、工具名/server、参数、输入输出、搜索词、
-URL、路径、diff、token usage、elapsed time、百分比或 ETA。commentary 在进入 Runtime 前
-已经过同一套有界脱敏。它不是原生终态事实或历史记录。
+的安全数量聚合。每条 commentary 和通用操作还携带 exact SDK item lifecycle 毫秒时间戳。
+commentary 保留内部换行；CRLF/CR 统一为 LF，tab 展开为四个空格，其他不可展示控制字符
+替换为 Unicode replacement character。该布局规范化不折叠合法 Markdown 空白。
+命令不显示正文，只根据 typed `commandActions` 区分读取文件、列出文件、搜索内容、复合命令
+或通用执行命令；MCP 显示 exact `tool`，dynamic tool 显示非空 `namespace.tool` 或 `tool`。
+工具名不做字符白名单、合规判定或单独截断，只在卡片 Markdown 边界转义。不显示 reasoning、
+final answer、delta、MCP server、参数、输入输出、action 路径/查询、搜索词、URL、文件路径、
+diff、token usage、elapsed time、百分比或 ETA。commentary 在进入 Runtime 前已经过同一套
+有界脱敏。它不是原生终态事实或历史记录。
 
 Progress Card 开启时，Runtime 的既有 consumer/poll loop 更新快照，Channel Presenter 每秒
 只读取 projection 并在 revision 变化时重绘；关闭时普通/Side Turn 不创建 Activity 卡、
@@ -500,8 +505,10 @@ closed，不能扩展成任意通知或私有 RPC gateway。
 唯一 Reply Card Presenter 接受固定顺序的 Goal、Activity、Result、Files typed modules，
 每次变化都重绘完整 Projection，模块不能各自持有或更新飞书消息。Goal、Activity 或 Files
 任一存在时使用卡片；三者都不存在的 Result 继续走富文本/静态文本。Activity 运行时顶部
-`collapsible_panel` 展开并显示状态、进展、通用操作与 checklist，终态折叠；Goal 从 start 到
-pause/resume/terminal 复用同一张卡并更新其控制按钮。初始发送、任一中间更新、终态更新或
+`collapsible_panel` 展开并显示状态、进展、通用操作与 checklist；进展和操作行使用同一
+毫秒时间戳的 Card 2.0 Markdown `date_num` 与 `time` 两个 `local_datetime` 标签，由查看者
+客户端按本地语言与时区呈现日期和分钟，终态折叠。Goal 从
+start 到 pause/resume/terminal 复用同一张卡并更新其控制按钮。初始发送、任一中间更新、终态更新或
 容量校验失败时停止对应 presenter；展示失败不阻断、取消、重试或改写 native execution，
 终态按可用模块回退为新的自包含卡或既有文本。只有 Goal + Files 使用的 v5 callback
 携带完整、裁剪且有界的 Reply Card manifest，翻页不丢 Goal/Activity/Result；普通文件卡
@@ -844,11 +851,17 @@ usage stream 仍按原顺序排空同一队列。`/status` 只在用户请求时
 关闭时没有后台 Activity polling。
 
 completed commentary 最多保留最近三条，通用操作最多保留最近八个；同一 item ID 的 started/
-completed 只更新一个 identity-free 行。所有文本在进度卡、`/status` 与分页 callback 进入同一
-套有界的 common secret/token、邮箱、用户目录、内联代码/参数、百分比和 ETA 过滤，未经处理
-的原值不进入展示载体。命令正文/输出、工具参数/结果、server/tool 名称、搜索词/URL、路径、
-diff、reasoning、delta 和 token usage 从不进入 Activity。Activity 观察或展示失败不能改变
-Turn、steer、stop、终态和最终回复。
+completed 只更新一个 identity-free 行，并把 `startedAtMs` 替换为 `completedAtMs`。commentary
+使用 exact `completedAtMs`；checklist 没有 item lifecycle 时间，不显示时间。时间戳不是服务端
+当前时间或 elapsed time，而是原样进入 v4/v5 manifest，并通过 Card 2.0 `local_datetime`
+的 `date_num` 与 `time` 组合交给飞书客户端按查看者时区和语言渲染到分钟；旧 manifest 没有
+时间字段时保持无时间展示，不补造。
+
+commentary、plan step 等自由文本在进度卡、`/status` 与分页 callback 进入同一套有界的 common
+secret/token、邮箱、用户目录、内联代码/参数、百分比和 ETA 过滤。工具名是 SDK 已提供的名称，
+按原值投影并仅做 Markdown 转义。命令正文/输出、command action 的正文/路径/查询、工具参数/
+结果、MCP server、搜索词/URL、文件路径、diff、reasoning、delta 和 token usage 从不进入
+Activity。Activity 观察或展示失败不能改变 Turn、steer、stop、终态和最终回复。
 
 若 Binding 有配置，三项通过 live 模型目录重新解析并标记为“Netizen 会话配置”；目录暂
 不可用时回退显示已保存的精确 ID，不让只读状态查询整体失败；目录可用但选项已下线时明确

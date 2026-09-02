@@ -149,6 +149,7 @@ from .domain import (
     ReplyCardProjection,
     ReplyCardResultModule,
     TurnActivityManifestEntry,
+    TurnCommentaryManifestEntry,
     TurnProgressManifest,
     TurnProgressManifestStep,
 )
@@ -529,11 +530,19 @@ def _reply_activity_module(
                 )
                 for item in visible_steps
             ),
-            commentary=tuple(snapshot.commentary),
+            commentary=tuple(
+                TurnCommentaryManifestEntry(
+                    text=item.text or "",
+                    event_timestamp_ms=item.event_timestamp_ms,
+                )
+                for item in snapshot.commentary
+                if item.text is not None
+            ),
             operations=tuple(
                 TurnActivityManifestEntry(
                     kind=getattr(item.kind, "value", item.kind),
                     status=getattr(item.status, "value", item.status),
+                    event_timestamp_ms=item.event_timestamp_ms,
                     text=item.text,
                     count=item.count,
                 )

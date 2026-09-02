@@ -242,8 +242,9 @@ native 终态到达即释放，均不持久化。
 
 **Turn Activity Projection / Turn 活动投影**：一个 exact Ordinary、Side 或 Goal physical
 Turn 的有界、瞬态展示视图，只包含状态、原生 checklist、最近 completed commentary、
-通用操作类别/状态及子任务、文件修改数量。它不包含工具名、参数、输出、路径、reasoning，
-也不是 Turn 历史或终态事实源。
+受限操作类别/状态、exact SDK item lifecycle 时间及子任务、文件修改数量。命令只投影 typed
+action 的语义类别；MCP/dynamic tool 可投影 exact 工具名。它不包含命令正文、工具参数/结果、
+MCP server、路径或查询、输出、reasoning，也不是 Turn 历史、elapsed time 或终态事实源。
 
 **Side Turn**：以 Side ID 为键、在同一 ephemeral Side Thread 上串行开始或 steer 的
 当前 Turn。它使用普通 `AsyncTurnHandle.run()` 完成路径，不使用持久 Thread history
@@ -268,8 +269,9 @@ Activity、Result 与 Files 四种。模块只投影已经确认的领域状态�
 
 **Progress Card / 进度卡**：Binding 可选开启 Activity Module 的用户设置。普通 Turn 或
 Goal 执行中展开有界活动投影；Side Turn 使用 Side 创建时冻结的选择。终态在同一 Reply
-Card 折叠过程；所有可见 commentary、plan step 和随分页携带的过程 manifest 都经过同一套
-有界敏感模式过滤。它不保存执行历史，也不是终态事实源。
+Card 折叠过程；最近进展和操作的原生事件时间由 Card 2.0 客户端按查看者时区与语言本地化。
+commentary、plan step 等自由文本及随分页携带的过程 manifest 经过同一套有界敏感模式过滤；
+工具名按原值显示并在 Markdown 边界转义。它不保存执行历史，也不是终态事实源。
 
 **Standard CODEX_HOME**：服务 effective user 的原生 Codex 状态根；显式
 `CODEX_HOME` 优先，否则为该账号的 `$HOME/.codex`。Netizen 不修改其内部
