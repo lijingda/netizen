@@ -10,10 +10,12 @@ import importlib.resources
 import ipaddress
 import json
 import logging
+import re
 import socket
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -124,6 +126,10 @@ _MAX_JSON_FIELDS = 20
 _MAX_TEXT_BYTES = 4_096
 _SESSION_PAGE_SIZES = frozenset((10, 20, 50, 100))
 _RUNTIME_SNAPSHOT_BATCH_SIZE = 50
+_ISO_INSTANT_PATTERN = re.compile(
+    r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}"
+    r"(?::[0-9]{2}(?:\.[0-9]{1,6})?)?(?:Z|[+-][0-9]{2}:[0-9]{2})\Z"
+)
 
 _SECURITY_HEADERS = (
     (b"Cache-Control", b"no-store"),
@@ -556,6 +562,7 @@ class AdminWebApplication:
         }
         _require_query_keys(context.query, allowed)
         page_size = _session_page_size(context.query)
+        created_from, created_before = _created_range_query(context.query)
         local = BindingQuery(
             project_alias=_optional_text_query(context.query, "project"),
             scope_kind=_optional_scope_kind(context.query),
@@ -563,8 +570,8 @@ class AdminWebApplication:
             topic_id=_optional_text_query(context.query, "topicId"),
             identity=_optional_text_query(context.query, "identity"),
             current=_optional_bool_query(context.query, "current"),
-            created_from=_optional_text_query(context.query, "createdFrom"),
-            created_before=_optional_text_query(context.query, "createdBefore"),
+            created_from=created_from,
+            created_before=created_before,
         )
         inventory_state = _session_inventory_state(context.query)
         filter_values = {
@@ -805,6 +812,7 @@ class AdminWebApplication:
             state = SideTopicState(state_value) if state_value is not None else None
         except ValueError:
             raise AdminWebError(400, "invalid_state", "Side 状态筛选无效。") from None
+        created_from, created_before = _created_range_query(context.query)
         query = SideTopicQuery(
             project_alias=_optional_text_query(context.query, "project"),
             parent_binding_id=_optional_text_query(context.query, "parentBindingId"),
@@ -813,8 +821,8 @@ class AdminWebApplication:
             topic_id=_optional_text_query(context.query, "topicId"),
             root_message_id=_optional_text_query(context.query, "rootMessageId"),
             state=state,
-            created_from=_optional_text_query(context.query, "createdFrom"),
-            created_before=_optional_text_query(context.query, "createdBefore"),
+            created_from=created_from,
+            created_before=created_before,
         )
         fingerprint = _fingerprint(
             "side-topics",
@@ -1757,6 +1765,50 @@ def _optional_text_query(
     if len(value.encode("utf-8")) > maximum or value.strip() != value:
         raise AdminWebError(400, "invalid_query", f"查询参数 {name} 无效。")
     return value
+
+
+def _created_range_query(
+    values: Mapping[str, list[str]],
+) -> tuple[str | None, str | None]:
+    created_from = _optional_created_time_query(values, "createdFrom")
+    created_before = _optional_created_time_query(values, "createdBefore")
+    if (
+        created_from is not None
+        and created_before is not None
+        and created_from >= created_before
+    ):
+        raise AdminWebError(
+            400,
+            "invalid_time_range",
+            "创建时间的开始时间必须早于结束时间。",
+        )
+    return created_from, created_before
+
+
+def _optional_created_time_query(
+    values: Mapping[str, list[str]],
+    name: str,
+) -> str | None:
+    raw = _optional_text_query(values, name, maximum=64)
+    if raw is None:
+        return None
+    if _ISO_INSTANT_PATTERN.fullmatch(raw) is None:
+        raise AdminWebError(
+            400,
+            "invalid_time",
+            f"查询参数 {name} 必须是带时区的 ISO-8601 时间。",
+        )
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.utcoffset() is None:
+            raise ValueError("timezone is required")
+        return parsed.astimezone(UTC).isoformat(timespec="microseconds")
+    except (OverflowError, ValueError):
+        raise AdminWebError(
+            400,
+            "invalid_time",
+            f"查询参数 {name} 必须是带时区的 ISO-8601 时间。",
+        ) from None
 
 
 def _optional_bool_query(

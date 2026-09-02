@@ -706,8 +706,13 @@ Host 只接受启动时发现的本机地址/名称和 exact port，带 body 的
 OIDC、多管理员或 RBAC。
 
 Projects、Sessions、Side Topics 都使用服务端 keyset cursor。Binding 查询先在 Channel-owned
-索引中过滤 Project、Scope kind、chat/topic/Binding/native ID、current 和时间。Sessions
-把原来的 materialized/native 两个条件合并成一个清单状态：`Active`（默认）、`Lazy`、
+索引中过滤 Project、Scope kind、chat/topic/Binding/native ID、current 和时间。Sessions 与
+Side Topics 的创建时间筛选复用同一个范围组件：收起态显示当前范围，展开后提供本地
+时区的快捷范围与 `datetime-local` 自定义起止分钟，只有“完成”提交字段草稿，页面“筛选”
+才请求服务端。自定义结束分钟对用户包含，并转换为下一分钟的排他上界。`createdFrom` 与
+`createdBefore` API 只接受带时区的 ISO-8601，先规范化为固定微秒的 UTC `+00:00`，再要求
+`createdFrom < createdBefore` 并进入 cursor fingerprint 与 SQLite 的 `[from, before)` 比较。
+Sessions 把原来的 materialized/native 两个条件合并成一个清单状态：`Active`（默认）、`Lazy`、
 `Archived`、`Missing`、`全部`；current 仍是独立条件。`Active` 只读取公开
 `thread_list(archived=False)` 完整目录，`Archived` 只读取
 `thread_list(archived=True)` 完整目录，`Lazy` 不访问原生目录，`Missing` 才读取并对比两个
