@@ -76,6 +76,7 @@ _TURN_ANSWER_ELEMENT_ID = "turnanswerv1"
 _TURN_FILES_ELEMENT_ID = "turnfilesv4"
 _TURN_PROGRESS_ELEMENT_ID = "turnprogressv1"
 _GOAL_ELEMENT_ID = "goalmodulev1"
+_GOAL_OBJECTIVE_PREVIEW_CHARS = 200
 _TURN_PROGRESS_MAX_STEPS = ACTIVITY_PLAN_LIMIT
 _TURN_PROGRESS_STEP_MAX_CHARS = ACTIVITY_TEXT_LIMIT
 MAX_THREAD_NAME_CHARS = 120
@@ -815,12 +816,13 @@ def _reply_goal_block(
     else:
         state = goal.runtime_state or f"goal-{goal.status}"
         budget = "未设置" if goal.token_budget is None else str(goal.token_budget)
+        objective = _goal_objective_preview(goal.objective or "")
         elements.append(
             {
                 "tag": "markdown",
                 "content": (
                     f"**状态**：`{_md_code(state)}`\n"
-                    f"**Objective**：{_md_code(goal.objective or '')}\n"
+                    f"**Objective**：{_md_code(objective)}\n"
                     f"**Tokens**：{goal.tokens_used} / {budget}"
                 ),
             }
@@ -899,6 +901,12 @@ def _reply_goal_block(
             }
         ],
     }
+
+
+def _goal_objective_preview(objective: str) -> str:
+    if len(objective) <= _GOAL_OBJECTIVE_PREVIEW_CHARS:
+        return objective
+    return f"{objective[:_GOAL_OBJECTIVE_PREVIEW_CHARS]}…"
 
 
 def _goal_control_button(
