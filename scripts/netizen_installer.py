@@ -65,6 +65,7 @@ RELEASE_METADATA = ".release.json"
 PUBLISHED_RELEASE_MANIFEST = ".netizen-release.json"
 PUBLISHED_RELEASE_QUALIFICATION = "github-release"
 OFFICIAL_RELEASE_DOWNLOADS = "https://github.com/lijingda/netizen/releases/download"
+CODEX_CLI_INSTALL_URL = "https://developers.openai.com/codex/cli/"
 ACTIVATION_INTENT = ".activation-intent.json"
 MANAGED_DIRECTORY_MARKER = ".netizen-managed"
 MANAGED_DIRECTORY_MARKER_CONTENT = b"netizen-installer-managed-directory-v1\n"
@@ -515,6 +516,46 @@ def require_supported_platform(
         if require_definition_validation and shutil.which("plutil") is None:
             raise InstallError("plutil is required for LaunchAgent validation")
     return selected
+
+
+def require_codex_cli_login(
+    layout: Layout,
+    *,
+    rerun_instruction: str,
+    runner: Runner | None = None,
+) -> None:
+    """Require a global Codex CLI with a valid login for the install identity."""
+
+    execute = run_command if runner is None else runner
+    environment = _clean_subprocess_environment()
+    environment["HOME"] = str(layout.home)
+    environment["CODEX_HOME"] = str(layout.codex_home)
+    codex_path = shutil.which("codex", path=environment.get("PATH"))
+    identity = f"Unix user {layout.username} with CODEX_HOME {layout.codex_home}"
+    if codex_path is None:
+        raise InstallError(
+            "Codex CLI is required before installing Netizen. "
+            f"Install it from {CODEX_CLI_INSTALL_URL}, then as {identity} run "
+            "`codex login` and `codex login status`; "
+            f"after login succeeds, {rerun_instruction}."
+        )
+    codex_path = os.path.abspath(codex_path)
+    try:
+        result = execute(
+            [codex_path, "login", "status"],
+            capture_output=True,
+            cwd=layout.home,
+            env=environment,
+            timeout=30.0,
+        )
+        if result.returncode != 0:
+            raise InstallError("Codex login status returned a nonzero exit status")
+    except InstallError as error:
+        raise InstallError(
+            f"Codex CLI does not report a valid login for {identity}. "
+            "Run `codex login`, confirm `codex login status` succeeds, then "
+            f"{rerun_instruction}."
+        ) from error
 
 
 def prepare_directories(layout: Layout) -> None:
@@ -3561,10 +3602,15 @@ def _install(
         require_definition_validation=True,
     )
     execute = run_command if runner is None else runner
-    backend = _service_backend(selected_layout, execute)
     is_interactive = sys.stdin.isatty() if interactive is None else interactive
     _validate_source_location(source_root, selected_layout)
+    backend = _service_backend(selected_layout, execute)
     backend.preflight()
+    require_codex_cli_login(
+        selected_layout,
+        rerun_instruction=rerun_instruction,
+        runner=execute,
+    )
     with installation_lock(selected_layout):
         prepare_directories(selected_layout)
         configuration_ready = True

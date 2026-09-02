@@ -75,13 +75,19 @@ macOS 则在任何配置、release 或服务文件 mutation 前检查当前 GUI 
 
 ## 前置门禁
 
-先确认 CLI 登录有效：
+先安装官方 Codex CLI，并确认当前 Unix 用户的登录有效：
 
 ```bash
+codex login
 codex login status
 codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
 ```
 
+受管安装器不会安装 Codex CLI 或代用户登录。它会在取得安装锁以及创建配置、release 或
+服务状态之前，从安装调用者经清理的 `PATH` 定位全局 `codex`，再以 effective user 的
+account home 和 `${CODEX_HOME:-~/.codex}` 执行 `codex login status`。CLI 缺失或登录无效时，
+安装器会输出官方安装地址、`codex login` / `codex login status` 和精确重试入口后退出；
+候选 venv 中随 SDK 固定的 Codex CLI 仍会在后续 Host Validation 再验证一次同一登录态。
 不要把一次登录成功当作持久前提。若命令出现认证错误，应先独立验证登录，不要用服务
 失败掩盖认证问题。
 
@@ -451,7 +457,8 @@ Validation。若要升级为离线或 wheel 字节级认证，应另行引入 ha
 
 ## 安装
 
-需要 Python 3.11 或 3.12、`venv` 和有效的当前用户 Codex 登录。Linux 还需要
+需要 Python 3.11 或 3.12、`venv`、`PATH` 中已安装的官方 Codex CLI 和有效的当前用户
+Codex 登录。Linux 还需要
 systemd/logind；macOS 需要系统自带 `launchctl`、`plutil` 和当前用户的 GUI 登录会话。
 服务内的 HTTPS/WebSocket 在 macOS 上直接使用系统钥匙串信任；企业根证书应由管理员安装并
 标记为受信任。Netizen 不生成或维护单独的 CA bundle，Linux 的证书路径不受此行为影响。

@@ -286,6 +286,10 @@ Agent 才应代用户承载交互浏览器初始化；具体交接流程见
 
 `install.sh`、`dev-install.sh` 和 `uninstall.sh` 不接收参数；`service.sh` 只接收
 `start|stop|restart|status` 中的一个动作。这些公开脚本都不会执行 `git pull`。
+安装前必须为运行 Netizen 的同一 Unix 用户安装官方 Codex CLI，并在相同 `CODEX_HOME` 下
+完成 `codex login`；安装器会在任何受管文件或服务状态变更前执行全局
+`codex login status`，缺失或未登录时输出官方安装地址和精确重试步骤。运行时仍使用 release
+内由 Python SDK 固定的 bundled Codex CLI，全局 CLI 只承担显式的用户登录前置门禁。
 正式 bootstrap 下载自己固定 tag 的
 项目构建 tarball，校验内嵌 SHA-256 和 Published Release manifest 后安装；
 该 tag 的 exact main commit 已在 Python 3.11/3.12 CI 通过统一代码门禁；
