@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netizen"
-version = "0.4.4"
+version = "0.4.5"
 description = "Use native Codex threads through a Feishu Channel."
 requires-python = ">=3.11,<3.13"
 dependencies = [
