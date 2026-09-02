@@ -132,7 +132,7 @@ COMMAND_SPECS = (
         ControlName.STATUS,
         CommandOwner.HYBRID,
         "/status",
-        "查看 Project、原生 Thread、任务状态和上下文窗口用量",
+        "查看 Project、Git Branch、原生 Thread、任务状态和上下文窗口用量",
     ),
     CommandSpec(
         "release",

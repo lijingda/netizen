@@ -9,6 +9,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
+from pathlib import Path
 from typing import Any, Protocol
 
 from lark_channel import MediaSource, OutboundCard, OutboundFile, OutboundImage, SendOpts
@@ -174,6 +175,7 @@ from .management import (
     SideIdentityMismatch,
     classify_native_thread_view,
 )
+from .git_status import git_branch_status
 from .image_inputs import (
     ImageInputError,
     ImageInputUnavailable,
@@ -354,6 +356,13 @@ def _thread_metadata_status_lines(
         f"名称：{name or '未设置'}",
         f"会话预览：{preview or '暂无'}",
     )
+
+
+async def _git_branch_status_lines(cwd: Path) -> tuple[str, ...]:
+    status = await git_branch_status(cwd)
+    if status is None:
+        return ()
+    return (f"Git Branch：{status}",)
 
 
 def _context_window_status_line(
@@ -3657,14 +3666,20 @@ class ChannelApplication:
                 if snapshot.turn_state is not None
                 else "idle"
             )
+            git_branch_lines = await _git_branch_status_lines(snapshot.cwd)
             await self._reply(
                 message,
-                "当前 Side\n"
-                f"Side：{record.short_id}\n"
-                f"Parent 会话：{record.parent_binding_id[:8]}\n"
-                f"状态：{snapshot.state.value}\n"
-                f"当前 Turn：{turn_state}\n"
-                "空闲 2 小时后自动结束；运行中的 Turn 不计入空闲时间。",
+                "\n".join(
+                    (
+                        "当前 Side",
+                        f"Side：{record.short_id}",
+                        f"Parent 会话：{record.parent_binding_id[:8]}",
+                        *git_branch_lines,
+                        f"状态：{snapshot.state.value}",
+                        f"当前 Turn：{turn_state}",
+                        "空闲 2 小时后自动结束；运行中的 Turn 不计入空闲时间。",
+                    )
+                ),
             )
             return
         if intent.name is ControlName.STOP:
@@ -5361,6 +5376,12 @@ class ChannelApplication:
                 binding,
                 metadata.get(binding.native_thread_id),
             )
+            try:
+                project = self._projects.resolve_for_binding(binding.project_alias)
+            except ProjectError:
+                git_branch_lines = ()
+            else:
+                git_branch_lines = await _git_branch_status_lines(project.cwd)
             context_window_line = _context_window_status_line(
                 binding,
                 self._runtime.context_window_usage(binding.id),
@@ -5390,6 +5411,7 @@ class ChannelApplication:
                         f"会话：{binding.short_id}",
                         *thread_metadata_lines,
                         f"Project：{binding.project_alias}",
+                        *git_branch_lines,
                         f"Native Thread：{native}",
                         f"状态：{state}",
                         subscription_line,
