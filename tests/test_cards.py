@@ -2443,6 +2443,86 @@ class CardRendererTest(unittest.TestCase):
             goal_generation(different_objective),
         )
 
+    def test_goal_card_truncates_only_the_visible_objective(self) -> None:
+        exact_objective = "x" * 200
+        exact_goal = GoalSnapshot(
+            thread_id="native-one",
+            objective=exact_objective,
+            status=GoalStatus.ACTIVE,
+            token_budget=None,
+            tokens_used=10,
+            time_used_seconds=2,
+            created_at=1,
+            updated_at=2,
+        )
+        exact = goal_card(
+            scope=self.scope,
+            binding_id="11111111-0000-0000-0000-000000000001",
+            short_id="11111111",
+            project_alias="test",
+            goal=exact_goal,
+            runtime_state="goal-running",
+        )
+        exact_visible = next(
+            element["content"]
+            for element in _elements(exact.card, "markdown")
+            if "**Objective**" in element["content"]
+        )
+        self.assertIn(f"**Objective**：{exact_objective}\n", exact_visible)
+        self.assertNotIn(f"{exact_objective}…", exact_visible)
+
+        full_objective = f"{'y' * 198} \nkeep this whitespace and hidden tail"
+        goal_module = ReplyCardGoalModule(
+            binding_id="binding-123",
+            short_id="binding1",
+            project_alias="test",
+            goal_generation="g" * 43,
+            status="active",
+            runtime_state="goal-running",
+            objective=full_objective,
+            token_budget=None,
+            tokens_used=10,
+        )
+        files = tuple(
+            ReplyCardFileItem(
+                path=f"/tmp/result-{index:02}.txt",
+                label=f"result-{index:02}.txt",
+                size=1,
+                media_kind="file",
+            )
+            for index in range(10)
+        )
+        truncated = reply_card(
+            ReplyCardProjection(
+                scope=self.scope,
+                goal=goal_module,
+                result=ReplyCardResultModule("done"),
+                files=ReplyCardFilesModule(
+                    binding_id="binding-123",
+                    turn_id="turn-123",
+                    items=files,
+                ),
+            )
+        )
+        truncated_visible = next(
+            element["content"]
+            for element in _elements(truncated.card, "markdown")
+            if "**Objective**" in element["content"]
+        )
+        self.assertIn(f"**Objective**：{'y' * 198} \n…\n", truncated_visible)
+        self.assertNotIn("hidden tail", truncated_visible)
+
+        page_value = next(
+            behavior["value"]
+            for button in _elements(truncated.card, "button")
+            for behavior in button.get("behaviors", ())
+            if behavior["value"]["intent"] == "turn-file.page"
+        )
+        self.assertEqual(
+            page_value["reply"]["goal"]["objective"],
+            full_objective,
+        )
+
     def test_reply_card_closed_modules_render_legal_combinations(self) -> None:
         progress = TurnProgressManifest(
             state="running",
