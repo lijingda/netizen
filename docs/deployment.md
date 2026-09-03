@@ -223,9 +223,9 @@ stdout；异常路径的二次 interrupt、terminal cleanup 和 task drain 都�
 
 `make check` 还固定验证公开 `AsyncTurnHandle.stream()` 的 exact
 `turn/diff/updated` latest aggregate snapshot、公开 `ThreadItem.root` 的 completed
-`fileChange` / `imageGeneration.saved_path` fallback、unified diff metadata parser、v3
-过期拒绝、v4 兼容解码、v5 完整 Reply Card manifest 循环分页、100/500 完整 manifest、
-1000 明确拒绝，以及 Lark
+`fileChange` / `imageGeneration.saved_path` fallback、窄定义的 unified diff path/hunk 行数 parser、v3
+过期拒绝、当前 v4/v5 完整 Reply Card manifest 循环分页、100/400 完整统计 manifest、
+401 明确拒绝，以及 Lark
 `OutboundImage`/`OutboundFile`/`SendOpts` 合同。任一固定 SDK/Channel shape 变化都必须先
 更新兼容性结论，不能把本轮文件降级成工作区扫描、最终文本解析、私有 RPC 或静默截断。
 
@@ -1120,7 +1120,10 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     以单元测试替代。
 20. 在普通持久 Turn 中分别用 native Turn diff 和结构化 items 生成 Project 内普通文件、
     Project 外普通文件、Codex 原生 generated-images 目录中的 PNG/JPEG/GIF/WebP 图片和
-    至少 18 个文件；另对 100、500 个 synthetic manifest 发真实目标应用卡片，确认平台
+    至少 18 个文件；native diff 还须覆盖 multi-hunk、非空新增/删除、纯 rename、binary、
+    copy/mode-only/空文件 metadata 与异常 hunk，确认完整 hunk 和纯 rename 的整轮、逐文件
+    `+N -M`，并确认图片/binary/其他 metadata-only/异常不显示伪造数字。另对 100、400
+    个带逐文件 `a/d` 的 synthetic manifest 发真实目标应用卡片，确认平台
     完整 create/update。在源码 checkout、目标部署账号的 login 环境中，以目标应用配置和
     专用测试群执行真实容量 probe；任一 count 非零即不通过：
 
@@ -1132,31 +1135,34 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     test -s "$FEISHU_APP_SECRET_FILE"
     test -s "$NETIZEN_ADMIN_SECRET_FILE"
     probe_chat_id=${NETIZEN_FILE_PROBE_CHAT_ID:?set target Feishu chat ID}
-    for count in 100 500; do
+    for count in 100 400; do
       .venv/bin/python scripts/probe_feishu_turn_file_card.py \
         --config "$HOME/.netizen/config.yaml" \
         --chat-id "$probe_chat_id" --count "$count"
     done
     ```
 
-    1000 个必须在本地门禁中明确拒绝且不截断，并保留目标应用
+    401 个必须在本地门禁中明确拒绝且不截断，并保留目标应用
     96.9 KB 请求返回 230099/200800 的容量证据。Progress Card 关闭时，无文件 Turn 必须仍
     只有富文本/静态文本最终回复；有文件 Turn 必须只有一张同时包含最终回复和本轮文件的
     现有完成卡。Progress Card 开启时，两种结果都更新最初的同一张运行卡，有文件时继续
     包含既有 v4 manifest。再验证 Goal exact 最终物理 Turn completed 的文件进入同一张
     Goal 卡并使用 v5 完整 Reply Card manifest，而更早 rollover Turn 的文件不会被猜测
     聚合；Side exact completed Turn 的 structured items 进入普通 v4 完成/进度卡，而
-    aggregate diff、先前 Side Turn 和未进入 structured items 的文件不会被补齐。Project
-    内文件显示相对路径，Project 外文件显示脱敏逻辑位置；
-    所有条目显示大小，
-    按 8 个一页完整翻页，可见正文不出现绝对路径、预览、diff 或发送全部；v5 callback
-    payload 则必须逐项携带明文 absolute path，并在翻页后完整保留 Goal/Activity/Result。
+    aggregate diff、先前 Side Turn 和未进入 structured items 的文件不会被补齐，且 Side
+    不显示行数。Goal live phase 必须让 resumed exact final physical Turn 创建一个临时文件，
+    并从同一唯一 Goal notification stream 返回的 latest aggregate diff 验证该文件及行数；
+    更早 physical Turn 的 snapshot 不得泄漏。Project 内文件显示相对路径，Project 外文件
+    显示脱敏逻辑位置；所有条目隐藏大小、按钮统一为“发送”，按 8 个一页完整翻页，可见正文
+    不出现绝对路径、预览、diff 正文或发送全部；v5 callback payload 则必须逐项携带明文
+    absolute path，并对已知统计携带成对 `a/d`，翻页后完整保留整轮统计与
+    Goal/Activity/Result。
     依次在 P2P 平面消息、
-    群主线和已有话题点击普通文件与“发送原图到话题”：平面卡片必须出现以该卡片为锚点的话题，记录真实
+    群主线和已有话题点击普通文件或图片的“发送”：平面卡片必须出现以该卡片为锚点的话题，记录真实
     root/parent/thread 返回；已有话题必须保持原 thread ID，飞书能正常预览/下载实际文件。
     切换到另一 Binding 后旧卡仍能翻页和发送；正常重启 Netizen/App Server 后，再点击
     重启前的 v5 卡，必须只从 callback 内的完整 Reply Card manifest 恢复，且不读取 source
-    card、Binding 或 completed Turn；再抽样一张升级前 v4 卡确认兼容。升级前 v3 卡必须
+    card、Binding 或 completed Turn。正式推广前的旧测试卡不做兼容验收；升级前 v3 卡仍须
     明确提示已过期且不发送文件、不读取 history。
     重复点击同一按钮不产生重复文件消息。再分别在点击前删除文件、改成目录、把同一上报
     路径重新绑定到另一个普通文件和删除原卡片：前两类不可用目标应失败，重绑路径发送点击

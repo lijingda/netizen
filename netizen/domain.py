@@ -228,6 +228,8 @@ class TurnFileActionName(str, Enum):
 class TurnFileManifestItem:
     path: str
     label: str
+    additions: int | None = None
+    deletions: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,12 +301,14 @@ class ReplyCardResultModule:
 
 @dataclass(frozen=True, slots=True)
 class ReplyCardFileItem:
-    """One current file view; callbacks carry only path and display label."""
+    """One current file view plus optional exact-Turn line statistics."""
 
     path: str
     label: str
     size: int | None
     media_kind: str | None
+    additions: int | None = None
+    deletions: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +318,8 @@ class ReplyCardFilesModule:
     items: tuple[ReplyCardFileItem, ...]
     page: int = 0
     action_version: int = 5
+    additions: int | None = None
+    deletions: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,6 +356,8 @@ class TurnFileActionIntent:
     answer: str | None = None
     progress: TurnProgressManifest | None = None
     reply: ReplyCardManifest | None = None
+    additions: int | None = None
+    deletions: int | None = None
 
 
 ChannelInteraction = PromptInput | ControlIntent

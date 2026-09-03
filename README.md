@@ -44,15 +44,17 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   呈现回答和可用文件，翻页后仍保留全部模块。任一卡片展示失败都不影响原生执行。
 - 普通 Turn 成功完成，且 latest native Turn diff 或 completed `fileChange` /
   `imageGeneration` item 指向当前普通文件时，最终回复与“本轮文件”合成一张卡片；Goal
-  首期只使用四项终态证据中 exact 最终成功物理 Turn 的 completed structured items，
-  Side 也只使用 exact completed Side Turn 的 structured items；两者都不猜测 aggregate
-  diff 或更早 Turn 的文件。
+  只使用四项终态证据中 exact 最终成功 physical Turn 的 latest aggregate diff 与
+  completed structured items；Side 只使用 exact completed Side Turn 的 structured
+  items，不读取 aggregate diff 或更早 Turn 的文件。
   Project 只解析相对路径，不过滤 exact Turn 明确报告的外部文件；文件每页 8 个，最多
-  500 个完整循环分页，点击后以原图或文件消息回复到卡片话题。可见正文只显示脱敏逻辑位置；
+  400 个完整循环分页，点击“发送”后以图片或文件消息回复到卡片话题。可见正文只显示脱敏
+  逻辑位置，不显示文件大小；Ordinary/Goal 的完整可验证文本 hunk 与纯 100% rename 显示
+  整轮和逐文件 `+N -M`，其他 metadata-only 变化省略数字，Side 暂不显示行数；
   普通完成/进度文件卡继续使用 v4 callback；Goal 与 Files 同卡时使用 v5，并在飞书
   callback payload 中明文自带绝对路径、完整清单和有界回复卡模块。因此服务重启后仍可
   翻页和发送，无需保存快照或 card session；v5 翻页会保留 Goal、Activity 与 Result，
-  既有 v4 卡继续兼容。不会自动上传，也不会扫描/解析最终回复来补齐
+  正式推广前的测试卡不承诺跨版本兼容。不会自动上传，也不会扫描/解析最终回复来补齐
   未进入 Turn diff/items 的输出。Progress Card 关闭且不是 Goal 时
   严格保持现有行为：没有文件用富文本/静态文本回复，有文件才使用完成卡。
 - 服务以执行安装的当前用户身份复用其标准 `$CODEX_HOME`（默认 `~/.codex`），因此

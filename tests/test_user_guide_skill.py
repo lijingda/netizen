@@ -348,9 +348,11 @@ class UserGuideSkillContentTest(unittest.TestCase):
 
         self.assertIn("本轮文件", skill)
         for phrase in (
-            "发送原图到话题",
-            "发送文件到话题",
+            "按钮都显示“发送”",
             "每页显示 8 个文件",
+            "最多完整承载 400 个",
+            "顶部显示整轮 `+N -M`",
+            "Side 暂不显示行数",
             "不是快照",
             "不会被扫描补齐",
             "Project 不是额外的文件权限边界",

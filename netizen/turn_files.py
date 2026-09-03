@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import stat
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -25,6 +26,8 @@ class TurnFile:
     resolved_path: Path
     size: int | None
     media_kind: Literal["image", "file"] | None
+    additions: int | None = None
+    deletions: int | None = None
 
     @property
     def available(self) -> bool:
@@ -40,9 +43,43 @@ class TurnFilePage:
 
 
 @dataclass(frozen=True, slots=True)
+class TurnDiffFileStats:
+    """Line counts for one current-side path in an aggregate Turn diff."""
+
+    path: str
+    additions: int | None = None
+    deletions: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TurnDiffSummary:
+    """Display-safe line counts derived from one aggregate Turn diff."""
+
+    additions: int | None = None
+    deletions: int | None = None
+    files: tuple[TurnDiffFileStats, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class _ReportedTurnPath:
     item_type: Literal["turnDiff", "fileChange", "imageGeneration"]
     value: str
+    additions: int | None = None
+    deletions: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedDiffBlock:
+    path: str | None
+    deleted: bool
+    binary: bool
+    counts: tuple[int, int] | None
+    malformed: bool
+
+
+_HUNK_HEADER = re.compile(
+    r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@(?:.*)$"
+)
 
 
 def extract_turn_files(
@@ -50,6 +87,7 @@ def extract_turn_files(
     project_cwd: Path,
     *,
     turn_diff: str | None = None,
+    diff_summary: TurnDiffSummary | None = None,
     home_directory: Path | None = None,
 ) -> tuple[TurnFile, ...]:
     """Return current regular files named by supported completed Turn items.
@@ -76,7 +114,11 @@ def extract_turn_files(
 
     results: list[TurnFile] = []
     seen: set[Path] = set()
-    for reported in _reported_paths(items, turn_diff=turn_diff):
+    for reported in _reported_paths(
+        items,
+        turn_diff=turn_diff,
+        diff_summary=diff_summary,
+    ):
         turn_file = _resolve_turn_file(reported, root, home)
         if turn_file is None or turn_file.resolved_path in seen:
             continue
@@ -89,82 +131,243 @@ def has_turn_file_references(
     items: Sequence[object],
     *,
     turn_diff: str | None = None,
+    diff_summary: TurnDiffSummary | None = None,
 ) -> bool:
     """Return whether supported structured items name at least one output path."""
 
-    return next(iter(_reported_paths(items, turn_diff=turn_diff)), None) is not None
+    return next(
+        _reported_paths(
+            items,
+            turn_diff=turn_diff,
+            diff_summary=diff_summary,
+        ),
+        None,
+    ) is not None
 
 
 def turn_diff_paths(diff: str | None) -> tuple[str, ...]:
     """Return current-side paths from a Git-style aggregate unified diff.
 
     App Server's ``turn/diff/updated`` payload is an aggregate snapshot.  This
-    parser reads only file-level metadata and never interprets hunk contents.
-    Deleted targets are excluded; rename destinations and binary-file headers
-    are supported.
+    is the compatibility wrapper for callers that only need paths. Deleted
+    targets are excluded; rename destinations and binary-file headers remain
+    supported.
+    """
+
+    return tuple(item.path for item in turn_diff_summary(diff).files)
+
+
+def turn_diff_summary(diff: str | None) -> TurnDiffSummary:
+    """Parse paths and line counts from the latest aggregate unified diff.
+
+    A malformed hunk invalidates all numeric statistics while preserving any
+    independently parseable current-side paths. Binary blocks keep their path
+    but never receive line counts. Aggregate totals include valid deleted-file
+    hunks even though deleted targets cannot appear in the current file list.
     """
 
     if not isinstance(diff, str) or not diff:
-        return ()
+        return TurnDiffSummary()
 
-    results: list[str] = []
-    header_target: str | None = None
-    target: str | None = None
-    rename_target: str | None = None
-    binary_target: str | None = None
-    target_deleted = False
-    in_hunk = False
-    have_block = False
+    first_header = re.search(r"(?m)^diff --git ", diff)
+    malformed_prelude = (
+        first_header is not None
+        and bool(diff[: first_header.start()].strip())
+    )
+    blocks = tuple(_parse_diff_block(lines) for lines in _diff_blocks(diff))
+    merged: list[TurnDiffFileStats] = []
+    positions: dict[str, int] = {}
+    for block in blocks:
+        if block.deleted or block.path is None:
+            continue
+        item = TurnDiffFileStats(
+            block.path,
+            *(block.counts or (None, None)),
+        )
+        position = positions.get(item.path)
+        if position is None:
+            positions[item.path] = len(merged)
+            merged.append(item)
+            continue
+        previous = merged[position]
+        if (
+            previous.additions is None
+            or previous.deletions is None
+            or item.additions is None
+            or item.deletions is None
+        ):
+            merged[position] = TurnDiffFileStats(item.path)
+        else:
+            merged[position] = TurnDiffFileStats(
+                item.path,
+                previous.additions + item.additions,
+                previous.deletions + item.deletions,
+            )
+    if malformed_prelude or any(block.malformed for block in blocks):
+        return TurnDiffSummary(
+            files=tuple(TurnDiffFileStats(item.path) for item in merged)
+        )
+    numeric = tuple(block.counts for block in blocks if block.counts is not None)
+    totals_known = bool(numeric) and all(
+        block.counts is not None or block.binary for block in blocks
+    )
+    return TurnDiffSummary(
+        additions=sum(counts[0] for counts in numeric) if totals_known else None,
+        deletions=sum(counts[1] for counts in numeric) if totals_known else None,
+        files=tuple(merged),
+    )
 
-    def finish_block() -> None:
-        nonlocal header_target, target, rename_target, binary_target
-        nonlocal target_deleted, in_hunk, have_block
-        if have_block and not target_deleted:
-            selected = rename_target or target or binary_target or header_target
-            normalized = _normalize_diff_path(selected)
-            if normalized is not None:
-                results.append(normalized)
-        header_target = None
-        target = None
-        rename_target = None
-        binary_target = None
-        target_deleted = False
-        in_hunk = False
-        have_block = False
 
+def _diff_blocks(diff: str) -> Iterable[tuple[str, ...]]:
+    current: list[str] = []
     for line in diff.splitlines():
         if line.startswith("diff --git "):
-            finish_block()
-            have_block = True
-            header_paths = _git_header_paths(line[len("diff --git ") :])
-            if header_paths is not None:
-                header_target = header_paths[1]
-            continue
-        if line.startswith("--- ") and not in_hunk:
-            if not have_block:
-                have_block = True
-            continue
-        if line.startswith("@@"):
-            in_hunk = True
-            continue
-        if not have_block or in_hunk:
-            continue
-        if line.startswith("+++ "):
-            parsed = _metadata_path(line[4:])
-            target_deleted = parsed == "/dev/null"
-            if not target_deleted:
-                target = parsed
-            continue
-        if line.startswith("rename to "):
-            rename_target = _metadata_path(line[len("rename to ") :])
-            continue
-        if line.startswith("Binary files ") and line.endswith(" differ"):
-            pair = line[len("Binary files ") : -len(" differ")]
-            if " and " in pair:
-                binary_target = _metadata_path(pair.rsplit(" and ", 1)[1])
+            if current:
+                yield tuple(current)
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        yield tuple(current)
 
-    finish_block()
-    return tuple(results)
+
+def _parse_diff_block(lines: Sequence[str]) -> _ParsedDiffBlock:
+    header = _git_header_paths(lines[0][len("diff --git ") :])
+    header_target = header[1] if header is not None else None
+    source_header = False
+    target_header = False
+    target: str | None = None
+    rename_source: str | None = None
+    rename_target: str | None = None
+    copy_target: str | None = None
+    deleted = False
+    binary = False
+    rename_only = True
+    similarity_seen = False
+    additions = 0
+    deletions = 0
+    saw_hunk = False
+    malformed = False
+    old_expected: int | None = None
+    new_expected: int | None = None
+    old_seen = 0
+    new_seen = 0
+
+    for line in lines[1:]:
+        if line.startswith("@@"):
+            if old_expected is not None and (
+                old_seen != old_expected or new_seen != new_expected
+            ):
+                malformed = True
+            saw_hunk = True
+            rename_only = False
+            match = _HUNK_HEADER.fullmatch(line)
+            if match is None:
+                malformed = True
+                old_expected = new_expected = None
+                continue
+            old_expected = int(match.group(1) or "1")
+            new_expected = int(match.group(2) or "1")
+            old_seen = new_seen = 0
+            continue
+        if old_expected is not None:
+            if line.startswith("+"):
+                additions += 1
+                new_seen += 1
+            elif line.startswith("-"):
+                deletions += 1
+                old_seen += 1
+            elif line.startswith(" "):
+                old_seen += 1
+                new_seen += 1
+            elif line != r"\ No newline at end of file":
+                malformed = True
+            if old_seen > old_expected or new_seen > new_expected:
+                malformed = True
+            continue
+        if line.startswith("--- "):
+            parsed = _metadata_path(line[4:])
+            malformed = malformed or source_header or parsed is None
+            source_header = True
+            rename_only = False
+        elif line.startswith("+++ "):
+            parsed = _metadata_path(line[4:])
+            malformed = malformed or target_header or parsed is None
+            target_header = True
+            rename_only = False
+            if parsed == "/dev/null":
+                deleted = True
+            elif parsed is not None:
+                target = parsed
+        elif line.startswith("rename from "):
+            parsed = _metadata_path(line[len("rename from ") :])
+            if rename_source is not None or parsed is None:
+                rename_only = False
+            else:
+                rename_source = parsed
+        elif line.startswith("rename to "):
+            parsed = _metadata_path(line[len("rename to ") :])
+            if rename_target is not None or parsed is None:
+                rename_only = False
+            else:
+                rename_target = parsed
+        elif line == "similarity index 100%" and not similarity_seen:
+            similarity_seen = True
+        elif line.startswith("copy to "):
+            copy_target = _metadata_path(line[len("copy to ") :])
+            rename_only = False
+        elif line.startswith("deleted file mode "):
+            deleted = True
+            rename_only = False
+        elif line.startswith("Binary files ") and line.endswith(" differ"):
+            binary = True
+            rename_only = False
+            deleted = deleted or line.endswith(" and /dev/null differ")
+        elif line == "GIT binary patch":
+            binary = True
+            rename_only = False
+        elif (
+            line.startswith(("+", "-", " "))
+            or line == r"\ No newline at end of file"
+        ):
+            malformed = True
+            rename_only = False
+        elif line:
+            rename_only = False
+
+    if old_expected is not None and (
+        old_seen != old_expected or new_seen != new_expected
+    ):
+        malformed = True
+    if (source_header or target_header) and not saw_hunk:
+        malformed = True
+    if saw_hunk and (
+        binary
+        or not source_header
+        or not target_header
+        or (not deleted and target is None)
+    ):
+        malformed = True
+    if saw_hunk and target is not None:
+        path = _normalize_diff_path(target)
+    elif rename_target is not None:
+        path = None if rename_target == "/dev/null" else rename_target
+    elif copy_target is not None:
+        path = None if copy_target == "/dev/null" else copy_target
+    else:
+        path = _normalize_diff_path(header_target)
+    pure_rename = (
+        rename_only
+        and similarity_seen
+        and rename_source is not None
+        and rename_target is not None
+    )
+    counts = (
+        (additions, deletions)
+        if not malformed and (saw_hunk or pure_rename)
+        else None
+    )
+    return _ParsedDiffBlock(path, deleted, binary, counts, malformed)
 
 
 def paginate_turn_files(
@@ -230,26 +433,20 @@ def require_turn_file_path(path: str, display_path: str = "") -> TurnFile:
     return turn_file
 
 
-def format_file_size(size: int) -> str:
-    if size < 0:
-        raise ValueError("file size must be non-negative")
-    if size < 1024:
-        return f"{size} B"
-    value = float(size)
-    for unit in ("KB", "MB", "GB"):
-        value /= 1024
-        if value < 1024:
-            return f"{value:.1f} {unit}"
-    return f"{value / 1024:.1f} TB"
-
-
 def _reported_paths(
     items: Sequence[object],
     *,
     turn_diff: str | None = None,
+    diff_summary: TurnDiffSummary | None = None,
 ) -> Iterable[_ReportedTurnPath]:
-    for path in turn_diff_paths(turn_diff):
-        yield _ReportedTurnPath("turnDiff", path)
+    summary = diff_summary if diff_summary is not None else turn_diff_summary(turn_diff)
+    for file_stats in summary.files:
+        yield _ReportedTurnPath(
+            "turnDiff",
+            file_stats.path,
+            file_stats.additions,
+            file_stats.deletions,
+        )
     for item in items:
         root = getattr(item, "root", item)
         item_type = getattr(root, "type", None)
@@ -294,11 +491,16 @@ def _resolve_turn_file(
         project_root=root,
         home=home,
     )
+    media_kind: Literal["image", "file"] = (
+        "image" if _is_supported_image(resolved) else "file"
+    )
     return TurnFile(
         display_path=display_path,
         resolved_path=resolved,
         size=metadata.st_size,
-        media_kind="image" if _is_supported_image(resolved) else "file",
+        media_kind=media_kind,
+        additions=(reported.additions if media_kind == "file" else None),
+        deletions=(reported.deletions if media_kind == "file" else None),
     )
 
 def _display_path(
@@ -379,9 +581,13 @@ def _git_header_paths(value: str) -> tuple[str, str] | None:
         if token is None:
             return None
         tokens.append(token)
-    if len(tokens) != 2:
+    if len(tokens) == 2:
+        return tokens[0], tokens[1]
+    same_path = re.fullmatch(r"a/(.+) b/\1", value)
+    if same_path is None:
         return None
-    return tokens[0], tokens[1]
+    path = same_path.group(1)
+    return f"a/{path}", f"b/{path}"
 
 
 def _metadata_path(value: str) -> str | None:
