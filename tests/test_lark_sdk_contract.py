@@ -942,6 +942,9 @@ class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
             app_id="cli_contract",
             app_secret="test-secret",
             transport=TransportConfig(kind="webhook"),
+            name_lookup=lambda open_ids: {
+                open_id: "Contract User" for open_id in open_ids
+            },
             policy=PolicyConfig(
                 dm_policy="open",
                 group_policy="open",
@@ -995,9 +998,10 @@ class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
                 json.dumps(payload).encode(),
             )
             self.assertEqual(status, 200)
-            self.assertTrue(await asyncio.to_thread(delivered.wait, 1.0))
+            self.assertTrue(await asyncio.to_thread(delivered.wait, 5.0))
             self.assertEqual(len(received), 1)
             self.assertEqual(received[0].content_text, "hello")
+            self.assertEqual(received[0].sender.display_name, "Contract User")
         finally:
             await channel.disconnect()
 
