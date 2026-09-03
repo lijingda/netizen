@@ -25,6 +25,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class NetizenInstallerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._real_require_codex_login = installer.require_codex_login
+        codex_preflight = patch.object(installer, "require_codex_login")
+        self.require_codex_login = codex_preflight.start()
+        self.addCleanup(codex_preflight.stop)
+
     def _layout(self, root: Path) -> installer.Layout:
         home = root / "home"
         home.mkdir(parents=True, exist_ok=True)
@@ -122,6 +128,241 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertRaises(SystemExit),
         ):
             installer.parse_args(["install"])
+
+    def test_codex_login_gate_uses_bundled_runtime_on_linux_and_macos(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            for platform_name in ("linux", "darwin"):
+                with self.subTest(platform_name=platform_name):
+                    root = Path(directory) / platform_name
+                    home = root / "home"
+                    home.mkdir(parents=True)
+                    layout = installer.resolve_layout(
+                        environ={"PATH": "/usr/bin"},
+                        account_home=home,
+                        uid=os.geteuid(),
+                        username="current-account",
+                        platform_name=platform_name,
+                    )
+                    release = installer.Release(
+                        digest="a" * 64,
+                        root=root / "release",
+                        source=root / "release/source",
+                        venv=root / "release/venv",
+                    )
+                    calls: list[tuple[list[str], dict[str, object]]] = []
+
+                    def fake_runner(
+                        argv: list[object],
+                        **kwargs: object,
+                    ) -> subprocess.CompletedProcess[str]:
+                        rendered = [os.fspath(value) for value in argv]
+                        calls.append((rendered, kwargs))
+                        return subprocess.CompletedProcess(rendered, 0, "", "")
+
+                    with (
+                        patch.dict(
+                            os.environ,
+                            {
+                                "HOME": "/wrong/home",
+                                "CODEX_HOME": "/wrong/codex",
+                                "VIRTUAL_ENV": "/temporary/venv",
+                                "PATH": "/usr/bin",
+                            },
+                            clear=True,
+                        ),
+                        patch.object(
+                            installer.shutil,
+                            "which",
+                            side_effect=AssertionError(
+                                "the login gate must not look for a global CLI"
+                            ),
+                        ),
+                    ):
+                        self._real_require_codex_login(
+                            release,
+                            layout,
+                            rerun_instruction="rerun ./dev-install.sh",
+                            runner=fake_runner,
+                        )
+
+                    self.assertEqual(len(calls), 1)
+                    command, kwargs = calls[0]
+                    self.assertEqual(
+                        command[:4],
+                        [str(release.venv / "bin/python"), "-E", "-B", "-c"],
+                    )
+                    self.assertIn("bundled_codex_path", command[4])
+                    self.assertIn("'login', 'status'", command[4])
+                    self.assertEqual(kwargs["cwd"], layout.home)
+                    self.assertEqual(kwargs["timeout"], 30.0)
+                    self.assertIs(kwargs["check"], False)
+                    self.assertIs(kwargs["capture_output"], True)
+                    environment = kwargs["env"]
+                    self.assertIsInstance(environment, dict)
+                    self.assertEqual(environment["HOME"], str(layout.home))
+                    self.assertEqual(
+                        environment["CODEX_HOME"],
+                        str(layout.codex_home),
+                    )
+                    self.assertNotIn("VIRTUAL_ENV", environment)
+
+    def test_codex_login_gate_explains_missing_state_without_raw_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout = self._layout(root)
+            release = installer.Release(
+                digest="b" * 64,
+                root=root / "release",
+                source=root / "release/source",
+                venv=root / "release/venv",
+            )
+            runner = MagicMock(
+                return_value=subprocess.CompletedProcess(
+                    ["bundled-codex", "login", "status"],
+                    1,
+                    "",
+                    "raw auth detail",
+                )
+            )
+            with self.assertRaises(installer.InstallError) as raised:
+                self._real_require_codex_login(
+                    release,
+                    layout,
+                    rerun_instruction="rerun ./dev-install.sh",
+                    runner=runner,
+                )
+
+            message = str(raised.exception)
+            self.assertIn("No valid Codex login", message)
+            self.assertIn("Codex CLI", message)
+            self.assertIn(installer.CODEX_CLI_INSTALL_URL, message)
+            self.assertIn("Codex App", message)
+            self.assertIn(installer.CODEX_APP_INSTALL_URL, message)
+            self.assertIn("rerun ./dev-install.sh", message)
+            self.assertNotIn("raw auth detail", message)
+            self.assertNotIn("Unix", message)
+
+    def test_codex_login_gate_distinguishes_candidate_runtime_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout = self._layout(root)
+            release = installer.Release(
+                digest="b" * 64,
+                root=root / "release",
+                source=root / "release/source",
+                venv=root / "release/venv",
+            )
+            runner = MagicMock(
+                side_effect=installer.InstallError("raw candidate failure")
+            )
+
+            with self.assertRaises(installer.InstallError) as raised:
+                self._real_require_codex_login(
+                    release,
+                    layout,
+                    rerun_instruction="rerun ./dev-install.sh",
+                    runner=runner,
+                )
+
+            message = str(raised.exception)
+            self.assertIn("candidate Codex runtime could not check", message)
+            self.assertIn("rerun ./dev-install.sh", message)
+            self.assertNotIn("Install and sign in", message)
+            self.assertNotIn("raw candidate failure", message)
+
+    def test_source_install_checks_login_on_the_prepared_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            release = installer.Release(
+                digest="c" * 64,
+                root=layout.releases / ("c" * 64),
+                source=layout.releases / ("c" * 64) / "source",
+                venv=layout.releases / ("c" * 64) / "venv",
+            )
+            self.require_codex_login.side_effect = installer.InstallError(
+                "Codex login is required"
+            )
+            with (
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer.SystemdServiceBackend, "preflight") as backend,
+                patch.object(installer, "prepare_configuration"),
+                patch.object(
+                    installer,
+                    "prepare_source_release",
+                    return_value=release,
+                ) as prepare_candidate,
+                patch.object(installer, "activate_release") as activate,
+                self.assertRaisesRegex(installer.InstallError, "Codex login is required"),
+            ):
+                installer.install_source(
+                    source_root=ROOT,
+                    layout=layout,
+                    interactive=False,
+                )
+
+            prepare_candidate.assert_called_once_with(
+                layout,
+                source_root=ROOT,
+                runner=installer.run_command,
+            )
+            self.require_codex_login.assert_called_once_with(
+                release,
+                layout,
+                rerun_instruction="rerun ./dev-install.sh",
+                runner=installer.run_command,
+            )
+            backend.assert_called_once_with()
+            activate.assert_not_called()
+
+    def test_published_install_checks_login_on_the_prepared_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout = self._layout(root)
+            source = root / "published"
+            manifest = self._published_source(source)
+            release = installer.Release(
+                digest="d" * 64,
+                root=layout.releases / ("d" * 64),
+                source=layout.releases / ("d" * 64) / "source",
+                venv=layout.releases / ("d" * 64) / "venv",
+            )
+            self.require_codex_login.side_effect = installer.InstallError(
+                "Codex login is required"
+            )
+            with (
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(installer, "prepare_configuration"),
+                patch.object(
+                    installer,
+                    "prepare_published_release",
+                    return_value=release,
+                ) as prepare_candidate,
+                patch.object(installer, "activate_release") as activate,
+                self.assertRaisesRegex(installer.InstallError, "Codex login is required"),
+            ):
+                installer.install_published(
+                    source_root=source,
+                    layout=layout,
+                    interactive=False,
+                )
+
+            prepare_candidate.assert_called_once_with(
+                layout,
+                source_root=source,
+                manifest=manifest,
+                runner=installer.run_command,
+            )
+            self.require_codex_login.assert_called_once_with(
+                release,
+                layout,
+                rerun_instruction=(
+                    f"rerun the official Netizen v{manifest.version} installer from "
+                    f"{installer.OFFICIAL_RELEASE_DOWNLOADS}/v{manifest.version}/install.sh"
+                ),
+                runner=installer.run_command,
+            )
+            activate.assert_not_called()
 
     def test_layout_rejects_uninstall_targets_that_overlap_preserved_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2451,7 +2692,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertIn(str(layout.home / ".local/bin"), entries)
             self.assertIn("/usr/bin", entries)
 
-    def test_runtime_validation_uses_the_candidate_bundled_codex_binary(self) -> None:
+    def test_runtime_validation_checks_candidate_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             layout = self._layout(root)
@@ -2492,17 +2733,13 @@ class NetizenInstallerTest(unittest.TestCase):
                 validation.admin_bind,
                 installer.AdminBind(True, "0.0.0.0", 8787),
             )
-            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][0], str(release.venv / "bin/python"))
             self.assertEqual(calls[0][1:4], ["-E", "-B", "-c"])
             compile(calls[0][4], "<configuration-validation>", "exec")
             self.assertIn("configured directories do not exist", calls[0][4])
             self.assertIn("inside an uninstall target", calls[0][4])
             self.assertEqual(calls[0][-2:], [str(layout.releases), str(layout.cache_dir)])
-            self.assertEqual(calls[1][0], str(release.venv / "bin/python"))
-            self.assertEqual(calls[1][1:4], ["-E", "-B", "-c"])
-            self.assertIn("bundled_codex_path", calls[1][4])
-            self.assertNotIn(str(release.venv / "bin/codex"), calls[1])
             for environment in environments:
                 self.assertEqual(environment["HOME"], str(layout.home))
                 self.assertEqual(environment["CODEX_HOME"], str(layout.codex_home))

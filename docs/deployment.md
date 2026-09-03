@@ -75,13 +75,21 @@ macOS 则在任何配置、release 或服务文件 mutation 前检查当前 GUI 
 
 ## 前置门禁
 
-先确认 CLI 登录有效：
+先在将运行 Netizen 的账户中，通过 Codex CLI 或 Codex App 完成登录。若选择 CLI，可以
+独立确认：
 
 ```bash
+codex login
 codex login status
 codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
 ```
 
+受管安装器不会安装 Codex CLI/Codex App 或代用户登录，也不要求系统 `PATH` 中存在全局
+`codex`。候选 release 准备完成后，它会使用 venv 中随 SDK 固定的 bundled Codex runtime，
+以将运行 Netizen 的账户 home 和 `${CODEX_HOME:-~/.codex}` 执行 `login status`。该检查不区分
+Linux/macOS，也不区分登录由 CLI 还是 App 建立；只要固定 runtime 能识别有效状态就继续。
+未识别到登录时，安装器会输出 Codex CLI 与 Codex App 的官方安装地址和精确重试入口后退出，
+不会激活候选服务；已完成验证的候选 release 可以在登录后重试时复用。
 不要把一次登录成功当作持久前提。若命令出现认证错误，应先独立验证登录，不要用服务
 失败掩盖认证问题。
 
@@ -451,7 +459,8 @@ Validation。若要升级为离线或 wheel 字节级认证，应另行引入 ha
 
 ## 安装
 
-需要 Python 3.11 或 3.12、`venv` 和有效的当前用户 Codex 登录。Linux 还需要
+需要 Python 3.11 或 3.12、`venv`，以及 bundled Codex runtime 能识别的有效账户登录。
+登录可以由 Codex CLI 或 Codex App 建立；全局 CLI 不是安装前提。Linux 还需要
 systemd/logind；macOS 需要系统自带 `launchctl`、`plutil` 和当前用户的 GUI 登录会话。
 服务内的 HTTPS/WebSocket 在 macOS 上直接使用系统钥匙串信任；企业根证书应由管理员安装并
 标记为受信任。Netizen 不生成或维护单独的 CA bundle，Linux 的证书路径不受此行为影响。
@@ -465,7 +474,7 @@ systemd/logind；macOS 需要系统自带 `launchctl`、`plutil` 和当前用户
 curl -fsSL https://github.com/lijingda/netizen/releases/latest/download/install.sh | sh
 
 # 指定版本（示例）
-curl -fsSL https://github.com/lijingda/netizen/releases/download/v0.4.4/install.sh | sh
+curl -fsSL https://github.com/lijingda/netizen/releases/download/v0.4.5/install.sh | sh
 ```
 
 仓库根的零参数 `./install.sh` 只是同一 latest 正式入口。它不会安装当前 checkout；开发、

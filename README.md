@@ -171,7 +171,10 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   用量不可用时会明确提示并在下一次可观测 Turn 完成后更新。快照不写入 Channel 数据库。
   存在 Netizen 会话配置时显示其动态解析值；没有时三项明确显示“继承 Codex”。
   这表示客户端配置来源，不冒充公开 SDK 无法反查的原生有效值；还会显示本 Netizen
-  进程的瞬态 Thread 订阅状态，但“已取消订阅”不代表 writer 已立即释放。
+  进程的瞬态 Thread 订阅状态，但“已取消订阅”不代表 writer 已立即释放。若 Project
+  cwd 位于 Git work tree 中，还会显示 Git 的 porcelain branch header；普通分支、
+  upstream、detached HEAD 与空仓库文本均由 Git 决定。非 Git 目录或有界只读探测失败时
+  省略该行，不影响其余状态。Side 的 `/status` 复用同一 Git 信息。
 - `/release`：显式取消当前 active 普通会话在本 Netizen 连接上的 Thread 订阅；不删除
   Binding、native Thread、历史、会话配置或 Task Feedback，下一条消息仍 resume 同一
   native ID。运行中、
@@ -275,7 +278,7 @@ curl -fsSL https://github.com/lijingda/netizen/releases/latest/download/install.
 ```
 
 需要固定版本时，直接下载该 tag 的 `install.sh`，例如
-`https://github.com/lijingda/netizen/releases/download/v0.4.4/install.sh`。Agent、CI 或后台
+`https://github.com/lijingda/netizen/releases/download/v0.4.5/install.sh`。Agent、CI 或后台
 shell 不使用 pipe：先把 latest 或 exact-tag `install.sh` 下载到文件，再运行
 `sh install.sh </dev/null`。凭据缺失时它会生成文件和精确后续步骤，不等待交互。
 
@@ -285,6 +288,11 @@ Agent 才应代用户承载交互浏览器初始化；具体交接流程见
 
 `install.sh`、`dev-install.sh` 和 `uninstall.sh` 不接收参数；`service.sh` 只接收
 `start|stop|restart|status` 中的一个动作。这些公开脚本都不会执行 `git pull`。
+运行 Netizen 的账户必须有 release 内 bundled Codex runtime 可识别的有效登录态；它可以由
+Codex CLI 或 Codex App 建立。安装器不要求系统 `PATH` 中存在全局 Codex CLI，也不根据
+Linux/macOS 或客户端来源判断登录是否有效。候选 release 准备完成后，安装器以目标
+account home 和 `${CODEX_HOME:-~/.codex}` 执行固定 runtime 的 `login status`；未识别到
+登录时会同时输出 Codex CLI、Codex App 的官方地址和精确重试步骤，且不会激活候选服务。
 正式 bootstrap 下载自己固定 tag 的
 项目构建 tarball，校验内嵌 SHA-256 和 Published Release manifest 后安装；
 该 tag 的 exact main commit 已在 Python 3.11/3.12 CI 通过统一代码门禁；
@@ -371,8 +379,8 @@ fail closed；先修复账号 login shell 的启动文件再 restart。Bash 仍�
 cgroup 之外额外执行一次任意 profile。
 
 安装器在候选 release 中新建 venv；源码候选运行完整本地门禁，正式候选运行每台主机必需
-的 package、compile、依赖和 SDK probes。两路都验证配置、固定 Codex CLI 登录、飞书权限
-和已安装包一致性后才切换。profile 只在真实 user service 的 cgroup 内执行；首次
+的 package、compile、依赖和 SDK probes。两路都验证配置、固定 Codex runtime 可见登录态、
+飞书权限和已安装包一致性后才切换。profile 只在真实 user service 的 cgroup 内执行；首次
 安装自动 enable 并启动，升级前服务若在运行则
 切换后启动并等待 ready，若已停止则保持当前会话停止。Linux 保持原 enabled/disabled
 意图；macOS 保证 plist 已安装并清除 sticky disabled 状态，使它在下次登录自动启动。

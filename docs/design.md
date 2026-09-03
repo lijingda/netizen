@@ -834,7 +834,13 @@ persisted root。成功删除 root 时 spawned descendants 由 App Server 级联
 
 `/status` 以一项一行展示当前 Binding、原生 `name`、首条消息 `preview`、Project、完整
 native Thread ID、运行状态、当前 active Turn checklist、已接受 steer 次数、上下文窗口
-用量、Model、Effort、Speed 和配置来源。名称与
+用量、Model、Effort、Speed 和配置来源。若 Project cwd 位于 Git work tree 中，普通与
+Side `/status` 还会即时显示 Git `status --porcelain=v1 --branch` 的 branch header 内容；
+Netizen 只移除稳定的 `## ` 格式前缀，不自行解释普通分支、upstream、detached HEAD 或空
+仓库。探测禁用 optional locks 和 repository-configured filesystem monitor，不读取
+untracked 或 submodule 状态，只限定 `.git` pathspec，并有独立短超时；非 Git、Git 不可
+用、超时、非零退出或异常输出均省略该行，不能使 `/status` 失败。结果只服务当次展示，
+不缓存、不持久化。名称与
 预览中的换行和多余空白会折叠，过长内容有界截断。普通 Turn 保留公开
 `thread.read()` 终态恢复；仅当公开 read 确认 exact Turn 曾处于 `inProgress`，才会在
 持久化终态确认后通过公开 `AsyncTurnHandle.stream()` 排空该 Turn 已缓存的通知。每次

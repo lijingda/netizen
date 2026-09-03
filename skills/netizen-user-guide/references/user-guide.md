@@ -251,14 +251,15 @@ Turn Settings、重命名、归档、恢复或恢复并设为当前、删除 Laz
 `/status` 是只读快照，通常包含：
 
 - 当前会话短 ID、名称和首条消息预览；
-- Project、完整原生 Thread ID 和运行状态；
+- Project、完整原生 Thread ID 和运行状态；Project 位于 Git work tree 时还显示 Git
+  决定的 branch header，Side 状态也使用同一信息；
 - 当前 Turn 的原生 checklist 与已接受 steer 次数；
 - 最近可观测完成 Turn 的上下文窗口用量；窗口大小可用时同时显示上限和已用百分比；
 - Model、Effort、Speed 以及它们来自 Netizen 会话配置还是继承 Codex；群聊会话还显示
   @ 时读取的消息范围。
 - 本 Netizen 进程当前观察到的 Thread 订阅状态及自动释放倒计时。
 
-Checklist 可能尚未生成或因兼容门禁暂不可用；上下文用量也可能要等到可观测 Turn 完成后才更新。`/status` 不展示内部推理、完整工具日志或 ETA。
+Checklist 可能尚未生成或因兼容门禁暂不可用；上下文用量也可能要等到可观测 Turn 完成后才更新。Git 行来自一次有界只读探测，非 Git 目录或探测失败时会省略，不影响其他状态。`/status` 不展示内部推理、完整工具日志或 ETA。
 
 订阅状态是当前进程的瞬态投影，不是 Thread 或 writer 的生命周期证明。取消最后一个订阅
 后，App Server 还要求连续三十分钟没有订阅和活动才会卸载 Thread；`/release` 因此不会
