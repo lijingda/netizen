@@ -1,12 +1,12 @@
 ---
 status: accepted
 date: 2026-08-09
-amended_by: 0054
+amended_by: 0055
 ---
 
 # 支持飞书逐条引用消息上下文
 
-> [ADR 0054](0054-upgrade-and-requalify-lark-channel-sdk-140.md) 将精确依赖升级到
+> [ADR 0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md) 将精确依赖升级到
 > 1.4.0，并重新确认首层 `ReplyRef` 与 CardKit 2.0 quote flattener 两个缺口仍存在；
 > 运行时版本门禁已相应收窄到精确 1.4.0。下文的 1.2.0 叙述保留为原决定的历史证据。
 
@@ -172,7 +172,7 @@ exact message/chat/reply/resource ID 只在 Channel 内部使用，不进入历�
 飞书准入边界下有意接受的可见性，而不是脱敏遗漏。
 
 上游修复仍是长期路径，当前精确版本门禁和独立移除触发器以
-[ADR 0054](0054-upgrade-and-requalify-lark-channel-sdk-140.md) 为准：
+[ADR 0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md) 为准：
 
 1. 同时更新 `pyproject.toml` 和 `requirements.lock` 的 exact pin；
 2. 当官方发布版在“非话题且首层 `parent_id == root_id`”上正确产生 `ReplyRef`，并通过

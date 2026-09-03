@@ -31,6 +31,18 @@ INSTANCE_EXECUTION_RECORD = re.compile(
 
 
 class RepositoryHygieneTest(unittest.TestCase):
+    def test_adr_numeric_identifiers_are_unique(self) -> None:
+        by_identifier: dict[str, list[str]] = {}
+        for path in sorted((ROOT / "docs/adr").glob("[0-9][0-9][0-9][0-9]-*.md")):
+            by_identifier.setdefault(path.name[:4], []).append(path.name)
+
+        duplicates = {
+            identifier: names
+            for identifier, names in by_identifier.items()
+            if len(names) > 1
+        }
+        self.assertEqual({}, duplicates)
+
     def test_local_operator_profile_is_ignored_and_public_template_is_shipped(
         self,
     ) -> None:
