@@ -7,10 +7,12 @@ import json
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from lark_channel import (
     BotIdentity,
+    CardActionPayload,
     CardActionEvent,
     ChatInfo,
     ChatQueueConfig,
@@ -36,6 +38,7 @@ from lark_channel import (
     TextContent,
     TransportConfig,
 )
+from lark_channel.channel.channel import _card_action_identity
 from lark_channel.channel.normalize.pipeline import PipelineConfig, PipelineDeps
 from lark_channel.channel.quote import QuoteResolver
 from lark_oapi.api.im.v1 import (
@@ -47,6 +50,8 @@ from lark_oapi.api.im.v1 import (
 from openai_codex import ImageInput, TextInput
 
 from netizen import channel_app
+from netizen.cards import settings_card, turn_files_card
+from netizen.domain import FeishuScope, ScopeKind
 from netizen.image_inputs import (
     UnsupportedPromptMedia,
     current_message_image_references,
@@ -56,9 +61,174 @@ from netizen.quoted_context import (
     interactive_quote_visible_text,
     quoted_message_id,
 )
+from netizen.turn_files import TurnFile
+
+
+def _elements(value: object, tag: str) -> list[dict[str, object]]:
+    found: list[dict[str, object]] = []
+    if isinstance(value, dict):
+        if value.get("tag") == tag:
+            found.append(value)
+        for child in value.values():
+            found.extend(_elements(child, tag))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(_elements(child, tag))
+    return found
+
+
+def _callback_value(card: dict[str, object], intent: str) -> dict[str, object]:
+    return next(
+        value
+        for button in _elements(card, "button")
+        for behavior in button.get("behaviors", ())
+        if isinstance(behavior, dict)
+        and isinstance((value := behavior.get("value")), dict)
+        and value.get("intent") == intent
+    )
+
+
+def _project_mode_value(card: dict[str, object], mode: str) -> str:
+    labels = {"create": "创建空目录", "existing": "登记已有目录"}
+    create_form = next(
+        form
+        for form in _elements(card, "form")
+        if form.get("name") == "project_create_v1"
+    )
+    mode_field = next(
+        element
+        for element in create_form["elements"]
+        if isinstance(element, dict) and element.get("name") == "project_mode"
+    )
+    return next(
+        option["value"]
+        for option in mode_field["options"]
+        if option["text"]["content"] == labels[mode]
+    )
 
 
 class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
+    async def _assert_redelivery_dedup_and_redraw_distinct(
+        self,
+        first_action: CardActionPayload,
+        second_action: CardActionPayload,
+    ) -> None:
+        def identity(action: CardActionPayload) -> str:
+            return (
+                "card:om_card:ou_user:"
+                f"{_card_action_identity(action)}"
+            )
+
+        first_identity = identity(first_action)
+        second_identity = identity(second_action)
+        self.assertNotEqual(first_identity, second_identity)
+
+        pipeline = SafetyPipeline(
+            loop=asyncio.get_running_loop(),
+            on_message=lambda _message: None,
+            policy=PolicyConfig(group_policy="open", require_mention=False),
+            batch_config=TextBatchConfig(delay_ms=0, long_delay_ms=0),
+            queue_config=ChatQueueConfig(enabled=False, merge_while_busy=False),
+        )
+        calls: list[str] = []
+        called = asyncio.Event()
+
+        async def dispatch(render: str) -> None:
+            calls.append(render)
+            called.set()
+
+        try:
+            await pipeline.push_action(
+                first_identity,
+                "oc_group",
+                lambda: dispatch("first"),
+            )
+            await asyncio.wait_for(called.wait(), timeout=0.1)
+            called.clear()
+
+            await pipeline.push_action(
+                first_identity,
+                "oc_group",
+                lambda: dispatch("duplicate"),
+            )
+            await asyncio.sleep(0.01)
+            self.assertEqual(calls, ["first"])
+
+            await pipeline.push_action(
+                second_identity,
+                "oc_group",
+                lambda: dispatch("second"),
+            )
+            await asyncio.wait_for(called.wait(), timeout=0.1)
+            self.assertEqual(calls, ["first", "second"])
+        finally:
+            await pipeline.dispose()
+
+    async def test_file_page_nonce_preserves_sdk_redelivery_dedup(self) -> None:
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        files = tuple(
+            TurnFile(
+                display_path=f"result-{index:02}.txt",
+                resolved_path=Path(f"/srv/work/result-{index:02}.txt"),
+                size=index + 1,
+                media_kind="file",
+            )
+            for index in range(9)
+        )
+        cards = tuple(
+            turn_files_card(
+                scope=scope,
+                binding_id="binding-123",
+                turn_id="turn-123",
+                final_response="done",
+                files=files,
+            )
+            for _ in range(2)
+        )
+        first_value, second_value = (
+            _callback_value(card.card, "turn-file.page") for card in cards
+        )
+        self.assertEqual(
+            {key: value for key, value in first_value.items() if key != "nonce"},
+            {key: value for key, value in second_value.items() if key != "nonce"},
+        )
+        self.assertNotEqual(first_value["nonce"], second_value["nonce"])
+        await self._assert_redelivery_dedup_and_redraw_distinct(
+            CardActionPayload(tag="button", value=first_value),
+            CardActionPayload(tag="button", value=second_value),
+        )
+
+    async def test_project_form_nonce_participates_in_sdk_identity(self) -> None:
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        cards = tuple(
+            settings_card(scope=scope, projects=(), project_root="/srv/projects")
+            for _ in range(2)
+        )
+        first_mode, second_mode = (
+            _project_mode_value(card.card, "create") for card in cards
+        )
+        self.assertEqual(
+            first_mode.rsplit(":", 1)[0],
+            second_mode.rsplit(":", 1)[0],
+        )
+        self.assertNotEqual(first_mode, second_mode)
+
+        def action(mode: str) -> CardActionPayload:
+            return CardActionPayload(
+                tag="button",
+                value={},
+                form_value={
+                    "project_alias": "same-input",
+                    "project_mode": mode,
+                    "project_path": "",
+                },
+            )
+
+        await self._assert_redelivery_dedup_and_redraw_distinct(
+            action(first_mode),
+            action(second_mode),
+        )
+
     async def test_lark_oapi_message_history_generated_contract(self) -> None:
         self.assertEqual(importlib.metadata.version("lark-oapi"), "1.7.2")
 

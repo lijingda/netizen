@@ -227,7 +227,8 @@ stdout；异常路径的二次 interrupt、terminal cleanup 和 task drain 都�
 `turn/diff/updated` latest aggregate snapshot、公开 `ThreadItem.root` 的 completed
 `fileChange` / `imageGeneration.saved_path` fallback、窄定义的 unified diff path/hunk 行数 parser、v3
 过期拒绝、当前 v4/v5 完整 Reply Card manifest 循环分页、100/400 完整统计 manifest、
-401 明确拒绝，以及 Lark
+401 明确拒绝、可重复 Card Action 的 per-render nonce、transport-only decoder 与同一 render
+重投递去重，以及 Lark
 `OutboundImage`/`OutboundFile`/`SendOpts` 合同。任一固定 SDK/Channel shape 变化都必须先
 更新兼容性结论，不能把本轮文件降级成工作区扫描、最终文本解析、私有 RPC 或静默截断。
 
@@ -1172,8 +1173,11 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     root/parent/thread 返回；已有话题必须保持原 thread ID，飞书能正常预览/下载实际文件。
     切换到另一 Binding 后旧卡仍能翻页和发送；正常重启 Netizen/App Server 后，再点击
     重启前的 v5 卡，必须只从 callback 内的完整 Reply Card manifest 恢复，且不读取 source
-    card、Binding 或 completed Turn。正式推广前的旧测试卡不做兼容验收；升级前 v3 卡仍须
-    明确提示已过期且不发送文件、不读取 history。
+    card、Binding 或 completed Turn。文件分页至少完成“第一页 → 下一页 → 第一页 →
+    再次下一页”的完整回环，最后一次点击必须仍生效；同一份已渲染 callback 的重复投递仍
+    只能处理一次。缺少或带畸形 nonce 的当前版本 payload 仍须只按业务字段解码；正式推广前
+    的其他旧测试 schema 不做兼容验收，升级前 v3 卡仍须明确提示已过期且不发送文件、不读取
+    history。
     重复点击同一按钮不产生重复文件消息。再分别在点击前删除文件、改成目录、把同一上报
     路径重新绑定到另一个普通文件和删除原卡片：前两类不可用目标应失败，重绑路径发送点击
     时当前内容，删除卡片失败；所有失败均保持原卡且没有文件掉入主聊天。翻页还必须确认
