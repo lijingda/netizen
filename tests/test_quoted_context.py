@@ -117,13 +117,13 @@ def compose_quoted_prompt(
 
 
 class QuotedRelationTest(unittest.TestCase):
-    def test_sdk_120_first_level_gap_is_recovered(self) -> None:
+    def test_sdk_140_first_level_gap_is_recovered(self) -> None:
         message = inbound(
             raw={"parent_id": "om_parent", "root_id": "om_parent"}
         )
 
         self.assertEqual(
-            quoted_message_id(message, sdk_version="1.2.0"),
+            quoted_message_id(message, sdk_version="1.4.0"),
             "om_parent",
         )
 
@@ -150,7 +150,7 @@ class QuotedRelationTest(unittest.TestCase):
         )
 
         with self.assertRaises(QuotedMessageContractError):
-            quoted_message_id(message, sdk_version="1.2.0")
+            quoted_message_id(message, sdk_version="1.4.0")
 
     def test_changed_sdk_version_requires_compatibility_review(self) -> None:
         message = inbound(
@@ -158,7 +158,7 @@ class QuotedRelationTest(unittest.TestCase):
         )
 
         with self.assertRaises(QuotedMessageContractError):
-            quoted_message_id(message, sdk_version="1.2.1")
+            quoted_message_id(message, sdk_version="1.4.1")
 
     def test_topic_relation_is_never_a_per_message_quote(self) -> None:
         message = inbound(
@@ -167,7 +167,7 @@ class QuotedRelationTest(unittest.TestCase):
             raw={"parent_id": "om_parent", "root_id": "om_parent"},
         )
 
-        self.assertIsNone(quoted_message_id(message, sdk_version="1.2.0"))
+        self.assertIsNone(quoted_message_id(message, sdk_version="1.4.0"))
 
     def test_plain_message_has_no_quote(self) -> None:
         self.assertIsNone(quoted_message_id(inbound()))
@@ -401,7 +401,7 @@ class QuotedProjectionTest(unittest.TestCase):
             raw={"body": {"content": json.dumps(card)}},
         )
 
-        text = interactive_quote_visible_text(context, sdk_version="1.2.0")
+        text = interactive_quote_visible_text(context, sdk_version="1.4.0")
 
         self.assertEqual(
             text,
@@ -450,7 +450,7 @@ class QuotedProjectionTest(unittest.TestCase):
         )
 
         with self.assertRaises(QuotedMessageContractError):
-            interactive_quote_visible_text(context, sdk_version="1.2.1")
+            interactive_quote_visible_text(context, sdk_version="1.4.1")
 
     def test_resource_types_keep_reasoning_metadata_without_feishu_ids(self) -> None:
         cases = [
@@ -603,7 +603,7 @@ class QuotedProjectionTest(unittest.TestCase):
                 PostContent(text="visible v2"),
                 content_text="visible ![image](img_v2)",
                 resources=[
-                    # SDK 1.2.0 may expose an unrendered content-v1 image here.
+                    # SDK 1.4.0 may expose an unrendered content-v1 image here.
                     ResourceDescriptor(type="image", file_key="img_hidden_v1")
                 ],
             ),

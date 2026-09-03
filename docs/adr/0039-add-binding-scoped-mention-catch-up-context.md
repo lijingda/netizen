@@ -94,7 +94,7 @@ Channel SDK 的 `require_mention=True` 和应用层 mention gate 保持不变。
 以及 generated `GetMessageRequest`，并提供异步 `client.im.v1.message.alist()`/`aget()`；
 固定的 standalone Channel SDK 也明确建议 Channel
 workflow 继续使用 `lark-channel-sdk`、需要完整 OpenAPI surface 时并存使用
-[`lark-oapi`](https://github.com/larksuite/channel-sdk-python/tree/v1.2.0#migration-from-lark_oapichannel)。
+[`lark-oapi`](https://github.com/larksuite/channel-sdk-python/tree/v1.4.0#migration-from-lark_oapichannel)。
 因此实现增加一个窄、只读、进程内 `FeishuMessageHistoryReader`：
 
 - 只构造一个 official `lark_oapi.Client`，复用同一 App ID/Secret；不注册事件、不发送

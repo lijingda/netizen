@@ -137,7 +137,9 @@ preview 仍以 A 的真实请求开头，而不是 attribution 元数据。此�
 Prompt；恢复并发布权限后同一成员应重新解析出真实姓名。
 图片用例还要覆盖：单聊普通图片、群聊 @机器人富文本多图、文字引用图片、当前图文
 引用另一条图文。确认图片以原生视觉输入提交；任一资源删除/保密/无权时零
-start/steer。观察进程 RSS：固定 Channel SDK 在 20 MB 应用层门禁前可能完整读取
+start/steer。另发送 locale 正文与顶层 `post.files` 并存的真实文件和文件夹；两者都必须
+明确提示附件不受支持且零 start/steer，文件夹不能因 SDK 不生成资源描述符而绕过。
+观察进程 RSS：固定 Channel SDK 在 20 MB 应用层门禁前可能完整读取
 飞书允许的最大 100 MB 单资源，data URL 和 native RPC JSON 还会产生额外副本。
 不同 Binding 的图片准备保持并发，没有全局容量 gate；asyncio 超时也不能停止已经进入
 worker thread 的阻塞读取。Pilot 依赖受控用户范围、低频小图，并需持续观察并发图片时
@@ -1056,7 +1058,9 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     且正确区分 supplemental/当前/引用来源；检查最终 native input 使用连续 `hN/imgN`
     本地引用，历史消息和图片 label 不包含 exact message ID 或 `file_key`，当前请求仍是
     唯一 `request_text`；
-    删除其中一张资源后重试必须零提交。连续发送的多条独立图片不要求自动合并。
+    删除其中一张资源后重试必须零提交。再分别发送 locale 正文与顶层 `post.files`
+    并存的真实文件、文件夹，两者都必须明确拒绝且零提交。连续发送的多条独立图片不要求
+    自动合并。
 16. 在单聊、群聊、话题分别发送 `/settings` 和零参数 `/new`；卡片必须留在原
     Scope。Settings 只显示已实现分区，Projects 使用下拉管理且新增表单留在同一卡片；
     创建/登记/启停或业务错误后仍显示原 Projects 分区。重启服务后 Registry 仍存在；

@@ -1,7 +1,7 @@
 """Feishu quoted-message selection and prompt projection.
 
 This module is deliberately the only Netizen boundary that knows about the
-version-pinned lark-channel-sdk 1.2.0 quote gaps. Quoted content is otherwise
+version-pinned lark-channel-sdk 1.4.0 quote gaps. Quoted content is otherwise
 consumed through the SDK's public normalized message types; public ``raw`` is
 used only for the relation gate, best-effort deletion-state validation, and a
 bounded CardKit 2.0 visible-text adapter when the SDK returns empty text.
@@ -28,7 +28,7 @@ from .message_projection import (
 from .prompt_projection import CurrentMessageProjection, render_current_message_json
 
 
-_SDK_120_RAW_COMPAT_VERSION = "1.2.0"
+_SDK_RAW_COMPAT_VERSION = "1.4.0"
 _PROMPT_KIND = "feishu_quoted_prompt"
 _PROMPT_VERSION = 4
 _DEFAULT_TEXT_LIMIT = 16_000
@@ -53,7 +53,7 @@ def quoted_message_id(message: Any, *, sdk_version: str | None = None) -> str | 
 
     A real topic is structural context rather than a per-message quote. The
     normal path trusts the SDK's public ``ReplyRef``. The raw fallback is
-    intentionally restricted to the one proven 1.2.0 defect: a first-level
+    intentionally restricted to the defect revalidated on 1.4.0: a first-level
     ordinary reply where ``parent_id == root_id``.
     """
 
@@ -83,7 +83,7 @@ def quoted_message_id(message: Any, *, sdk_version: str | None = None) -> str | 
         )
 
     installed = sdk_version or _installed_sdk_version()
-    if installed != _SDK_120_RAW_COMPAT_VERSION:
+    if installed != _SDK_RAW_COMPAT_VERSION:
         raise QuotedMessageContractError(
             "Channel SDK 版本已经变化，但引用关系兼容适配尚未复核；"
             "本条消息未执行。"
@@ -133,7 +133,7 @@ def interactive_quote_visible_text(
 ) -> str | None:
     """Return public quote text or recover visible CardKit 2.0 text.
 
-    ``lark-channel-sdk==1.2.0`` exposes the exact fetched message item through
+    ``lark-channel-sdk==1.4.0`` exposes the exact fetched message item through
     ``QuotedContext.raw`` but its public quote flattener does not descend into
     CardKit 2.0 ``header`` and ``body``. The fallback below is deliberately
     version-gated, bounded, and only visits rendered text nodes. Interaction
@@ -148,7 +148,7 @@ def interactive_quote_visible_text(
     if card is None:
         return None
     installed = sdk_version or _installed_sdk_version()
-    if installed != _SDK_120_RAW_COMPAT_VERSION:
+    if installed != _SDK_RAW_COMPAT_VERSION:
         raise QuotedMessageContractError(
             "Channel SDK 版本已经变化，但应用卡片引用兼容适配尚未复核；"
             "本条消息未执行。"

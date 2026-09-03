@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from lark_channel import (
     Conversation,
+    FeishuChannelErrorCode,
     Identity,
     ImageContent,
     InboundMessage,
@@ -23,6 +24,8 @@ from lark_channel import (
     PostContent,
     QuotedContext,
     ResourceDescriptor,
+    SendError,
+    SendResult,
     TextContent,
 )
 from openai_codex import ImageInput, TextInput
@@ -460,12 +463,18 @@ def card_action_lock_result(
     outer_code: int = 230099,
     inner_code: int = 11310,
 ) -> object:
-    return failed_reply_result(
-        code=outer_code,
-        message=(
-            "Failed to create card content, "
-            f"ext=ErrCode: {inner_code}; ErrMsg: 可变平台文案;"
+    message = (
+        "Failed to create card content, "
+        f"ext=ErrCode: {inner_code}; ErrMsg: 可变平台文案;"
+    )
+    return SendResult.fail(
+        SendError(
+            code=FeishuChannelErrorCode.FORMAT_ERROR,
+            retryable=False,
+            raw_code=outer_code,
+            hint=message,
         ),
+        raw={"code": outer_code, "msg": message, "data": None},
     )
 
 
@@ -7670,7 +7679,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             content_text="before ![image](img_one) after ![image](img_two)",
             raw_content_type="post",
             resources=[
-                # SDK 1.2.0 can omit content_v2 images and expose an
+                # SDK 1.4.0 can omit content_v2 images and expose an
                 # unrendered content-v1 resource instead.
                 ResourceDescriptor(type="image", file_key="img_hidden_v1"),
             ],
@@ -9356,6 +9365,49 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             [
                 (
                     "om_topic_with_resource",
+                    "当前消息还包含暂不支持的附件；"
+                    "目前仅支持普通图片和富文本图片。",
+                )
+            ],
+        )
+
+    async def test_post_top_level_folder_with_body_is_rejected(self) -> None:
+        message = FakeMessage(
+            "/new",
+            message_id="om_topic_with_folder",
+            chat_id="oc_group",
+            chat_type="group",
+            thread_id="omt_with_folder",
+            raw_content_type="post",
+            content=PostContent(
+                post={
+                    "zh_cn": {
+                        "content_v2": [[
+                            {"tag": "text", "text": "/new"},
+                        ]]
+                    },
+                    "files": [
+                        {
+                            "file_key": "folder_specs",
+                            "file_name": "Specs",
+                            "is_folder": True,
+                        }
+                    ],
+                }
+            ),
+        )
+
+        await self.app.handle_message(message)
+
+        scope = FeishuScope(
+            "cli_test", "oc_group", ScopeKind.TOPIC, "omt_with_folder"
+        )
+        self.assertIsNone(self.store.active_binding(scope.key))
+        self.assertEqual(
+            self.channel.replies,
+            [
+                (
+                    "om_topic_with_folder",
                     "当前消息还包含暂不支持的附件；"
                     "目前仅支持普通图片和富文本图片。",
                 )

@@ -257,7 +257,7 @@ _THINKING_REACTION = "THINKING"
 _THINKING_VISIBLE_SECONDS = 2.0
 _THINKING_HIDDEN_SECONDS = 13.0
 _REACTION_OPERATION_TIMEOUT_SECONDS = 3.0
-# lark-channel-sdk 1.2.0 exposes the nested transient lock only in SendError.hint.
+# lark-channel-sdk 1.4.0 exposes the nested transient lock only in SendError.hint.
 # Remove this retry after card-action dispatch is ordered behind its Feishu ack.
 _FEISHU_CARD_ACTION_LOCK_OUTER_CODE = 230099
 _FEISHU_CARD_ACTION_LOCK_INNER_CODE = 11310
@@ -7450,7 +7450,7 @@ def _repair_leading_post_bot_mention(
     *,
     bot_open_id: str | None,
 ) -> str:
-    """Repair lark-channel-sdk 1.2.0's post mention placeholder mismatch.
+    """Repair lark-channel-sdk 1.4.0's post mention placeholder mismatch.
 
     Feishu topic-root posts encode the leading at-node's ``user_id`` as a
     placeholder such as ``@_user_1``.  The pinned SDK tries to remove it by
