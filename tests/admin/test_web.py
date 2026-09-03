@@ -13,6 +13,7 @@ from html.parser import HTMLParser
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 from netizen.admin.web import (
@@ -482,6 +483,21 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.secret_path.write_text(self.credential, encoding="ascii")
         self.secret_path.chmod(0o600)
         self.management = FakeManagement(self.root)
+
+        def loopback_authorities(_host, _port, addresses):
+            address = addresses[0]
+            assert isinstance(address, tuple)
+            return (f"127.0.0.1:{address[1]}",)
+
+        # These cases exercise the HTTP application, while authority discovery
+        # has focused coverage below. Keep every case independent of host DNS,
+        # which can take about a minute on a macOS CI runner.
+        self.authority_builder_patch = patch(
+            "netizen.admin.web.accepted_authorities",
+            side_effect=loopback_authorities,
+        )
+        self.authority_builder_patch.start()
+        self.addCleanup(self.authority_builder_patch.stop)
         self.runner = AdminWebRunner(
             host="127.0.0.1",
             port=0,
@@ -1222,9 +1238,16 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(hasattr(owner, name), f"{owner.__name__}.{name}")
 
     def test_authority_builder_uses_canonical_bracketed_ipv6(self) -> None:
-        authorities = accepted_authorities("::", 8787, (("::1", 8787, 0, 0),))
+        with (
+            patch("netizen.admin.web.socket.gethostname", return_value="host.test"),
+            patch("netizen.admin.web.socket.getfqdn", return_value="host.example"),
+            patch("netizen.admin.web.socket.getaddrinfo", return_value=[]),
+        ):
+            authorities = accepted_authorities("::", 8787, (("::1", 8787, 0, 0),))
         self.assertIn("[::1]:8787", authorities)
         self.assertIn("127.0.0.1:8787", authorities)
+        self.assertIn("host.test:8787", authorities)
+        self.assertIn("host.example:8787", authorities)
 
 
 class _AdminAssetParser(HTMLParser):

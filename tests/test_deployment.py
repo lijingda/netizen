@@ -16,6 +16,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeploymentAssetsTest(unittest.TestCase):
+    def test_package_metadata_declares_the_supported_python_range(self) -> None:
+        project = tomllib.loads(
+            (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        requirements_header = (ROOT / "requirements.lock").read_text(
+            encoding="utf-8"
+        ).splitlines()[0]
+
+        self.assertEqual(project["project"]["requires-python"], ">=3.11,<3.15")
+        self.assertEqual(
+            requirements_header,
+            "# Exact runtime constraints for the supported standard CPython "
+            "3.11-3.14 Pilot.",
+        )
+
     def test_admin_static_assets_are_packaged_with_admin_module(self) -> None:
         project = tomllib.loads(
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -50,7 +65,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         )
 
         for expected in (
-            "Python 3.11 或 3.12",
+            "Python 3.11-3.14",
             "macOS 和 Linux",
             "macOS LaunchAgent",
             "Linux systemd",
@@ -203,7 +218,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         for document in (deployment, readme):
             self.assertIn("Published Release", document)
             self.assertIn("dev-install.sh", document)
-            self.assertIn("Python 3.11/3.12", document)
+            self.assertIn("Python 3.11-3.14", document)
         self.assertIn("releases/latest/download/install.sh", deployment)
         self.assertIn("install-release <source-root>", deployment)
         self.assertIn("不重复运行", deployment)

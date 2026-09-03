@@ -19,10 +19,11 @@ fail() {
 }
 
 command -v curl >/dev/null 2>&1 || fail "curl is required"
-command -v python3 >/dev/null 2>&1 || fail "Python 3.11 or 3.12 is required"
+command -v python3 >/dev/null 2>&1 || \
+    fail "Python 3.11, 3.12, 3.13, or 3.14 is required"
 python3 -E -B -c \
-    'import sys; raise SystemExit(sys.version_info[:2] not in {(3, 11), (3, 12)})' || \
-    fail "Python 3.11 or 3.12 is required"
+    'import sys; raise SystemExit(sys.version_info[:2] not in {(3, 11), (3, 12), (3, 13), (3, 14)})' || \
+    fail "Python 3.11, 3.12, 3.13, or 3.14 is required"
 
 temporary_base=${TMPDIR:-/tmp}
 temporary_directory=$(mktemp -d "$temporary_base/netizen-install.XXXXXX") || \

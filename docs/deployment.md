@@ -151,9 +151,12 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 
 ### 代码门禁与按需实时兼容性验证
 
-所有面向 `main` 的代码先通过 `make check`；PR 和 main push 的 GitHub CI 都在
-Python 3.11/3.12 执行这一个统一本地门禁。正式 Release 复用 exact main commit 的成功 CI
-结论，不重新执行本节测试。
+所有面向 `main` 的代码先通过 `make check`；PR 和 main push 的 GitHub CI 都在 Linux x64
+标准 CPython 3.11-3.14，以及 macOS arm64 标准 CPython 3.13/3.14 执行这一个统一本地门禁。
+正式 Release 复用 exact main commit 的成功 CI 结论，不重新执行本节测试。
+macOS job 还会从安装后的 wheel 实际初始化系统钥匙串 truststore；CI 没有真实应用凭据与
+用户 GUI 会话，因此 Python 支持矩阵扩展仍须在正式发布前完成一次 macOS arm64 当前用户的
+LaunchAgent 安装、启动和 ready 冒烟，不能用 CI 代替。
 
 真实账号 live probes 是开发阶段按变更触发的兼容性工具，不是普通 merge 或正式 Release
 门禁。升级 pinned SDK/App Server 时运行完整集合；修改 SDK Gap Adapter、相关原生生命周期、
@@ -403,9 +406,10 @@ phase，以新结果为准。
 ## 发布正式 Release
 
 `.github/workflows/ci.yml` 在面向 `main` 的 pull request 和每次 push 到 `main` 时，分别用
-Python 3.11、3.12 安装固定版本依赖并运行 `make check`。公开仓库的 `Protect main` ruleset
-禁止删除和 force-push、要求所有变更经过 pull request，并把这两个 job 配置为 required
-status checks；仓库所有者也不在绕过名单中。
+Linux x64 标准 CPython 3.11、3.12、3.13、3.14，以及 macOS arm64 标准 CPython 3.13、3.14
+安装固定版本依赖并运行 `make check`。公开仓库的 `Protect main` ruleset 禁止删除和
+force-push、要求所有变更经过 pull request；这六个 job 均须配置为 required status checks，
+仓库所有者也不在绕过名单中。
 
 正式发布的时机由维护者决定；指令后由 `scripts/release.py`（ADR 0050）一次执行发布全链，
 项目不因 main push 或 tag push 自动发布。GitHub 仓库必须启用
@@ -459,7 +463,8 @@ Validation。若要升级为离线或 wheel 字节级认证，应另行引入 ha
 
 ## 安装
 
-需要 Python 3.11 或 3.12、`venv`，以及 bundled Codex runtime 能识别的有效账户登录。
+需要 Python 3.11-3.14、`venv`，以及 bundled Codex runtime 能识别的有效账户登录。
+CI 使用标准 CPython 构建；free-threaded 变体未单独验证，但安装器不会主动拒绝。
 登录可以由 Codex CLI 或 Codex App 建立；全局 CLI 不是安装前提。Linux 还需要
 systemd/logind；macOS 需要系统自带 `launchctl`、`plutil` 和当前用户的 GUI 登录会话。
 服务内的 HTTPS/WebSocket 在 macOS 上直接使用系统钥匙串信任；企业根证书应由管理员安装并
