@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from lark_channel import OutboundCard
 
+import netizen.cards as cards
 from netizen.cards import (
     ArchivedSessionCardItem,
     CardActionError,
@@ -84,6 +85,8 @@ from netizen.turn_files import TurnFile
 
 
 class CardCodecTest(unittest.TestCase):
+    CALLBACK_NONCE = "0123456789abcdef0123456789abcdef"
+
     def setUp(self) -> None:
         self.scope = FeishuScope(
             "cli_test",
@@ -98,6 +101,7 @@ class CardCodecTest(unittest.TestCase):
             "scope_kind": "topic",
             "topic_id": "omt_topic",
             "settings_section": "projects",
+            "nonce": self.CALLBACK_NONCE,
         }
 
     def decode(self, value=None):
@@ -116,6 +120,92 @@ class CardCodecTest(unittest.TestCase):
         self.assertEqual(intent.scope, self.scope)
         self.assertEqual(intent.settings_section, SettingsSection.PROJECTS)
 
+    def test_callback_nonce_is_transport_only_during_decode(self) -> None:
+        for value in (
+            {key: item for key, item in self.value.items() if key != "nonce"},
+            {**self.value, "nonce": "too-short"},
+            {**self.value, "nonce": True},
+        ):
+            with self.subTest(value=value):
+                intent = self.decode(value)
+                self.assertEqual(intent.name, CardControlName.REFRESH_SETTINGS)
+                self.assertEqual(intent.scope, self.scope)
+
+        archive = self.decode(
+            {
+                "v": 4,
+                "intent": "binding.archive",
+                "chat_id": "oc_group",
+                "scope_kind": "topic",
+                "topic_id": "omt_topic",
+                "binding_id": "binding:v1:binding-123",
+                "nonce": {"malformed": True},
+            }
+        )
+        self.assertEqual(archive.name, CardControlName.ARCHIVE_BINDING)
+
+        with self.assertRaisesRegex(CardActionError, "未知字段"):
+            self.decode(
+                {**self.value, "unexpected": "still-strict"}
+            )
+
+    def test_callback_retry_policy_exhaustively_classifies_all_intents(
+        self,
+    ) -> None:
+        repeatable_buttons = {
+            CardControlName.OPEN_SETTINGS_SECTION,
+            CardControlName.REFRESH_SETTINGS,
+            CardControlName.PREPARE_EXACT_DELETE_BINDING,
+            CardControlName.PREPARE_ARCHIVED_DELETE_BINDING,
+            CardControlName.ACTIVATE_BINDING,
+            CardControlName.RECHECK_EXACT_TURN,
+            CardControlName.SESSIONS_PAGE,
+            CardControlName.REFRESH_ARCHIVED_SESSIONS,
+            CardControlName.GOAL_PAUSE,
+            CardControlName.GOAL_RESUME,
+            CardControlName.SIDE_CLOSE,
+        }
+        repeatable_forms = {CardControlName.REGISTER_PROJECT}
+        revision_bearing = {
+            CardControlName.SET_PROJECT_ENABLED,
+            CardControlName.CONFIGURE_BINDING,
+            CardControlName.STOP_EXACT_BINDING,
+        }
+        one_shot = {
+            CardControlName.CREATE_BINDING,
+            CardControlName.RENAME_BINDING,
+            CardControlName.ARCHIVE_BINDING,
+            CardControlName.DELETE_BINDING,
+            CardControlName.DELETE_EXACT_BINDING,
+            CardControlName.DELETE_ARCHIVED_BINDING,
+            CardControlName.UNARCHIVE_BINDING,
+            CardControlName.ARCHIVE_EXACT_BINDING,
+            CardControlName.GOAL_CLEAR,
+        }
+        categories = (
+            repeatable_buttons,
+            repeatable_forms,
+            revision_bearing,
+            one_shot,
+        )
+        for index, category in enumerate(categories):
+            for other in categories[index + 1 :]:
+                self.assertTrue(category.isdisjoint(other))
+        self.assertEqual(set().union(*categories), set(CardControlName))
+        self.assertEqual(
+            cards._REPEATABLE_CARD_CONTROL_NAMES,
+            repeatable_buttons,
+        )
+        self.assertEqual(
+            cards._REPEATABLE_CALLBACK_INTENTS,
+            {name.value for name in repeatable_buttons}
+            | {TurnFileActionName.PAGE.value},
+        )
+        self.assertEqual(
+            set(TurnFileActionName),
+            {TurnFileActionName.PAGE, TurnFileActionName.SEND},
+        )
+
     def test_direct_and_group_buttons_round_trip_without_topic_field(self) -> None:
         for kind in (ScopeKind.DIRECT, ScopeKind.GROUP):
             value = {
@@ -124,6 +214,7 @@ class CardCodecTest(unittest.TestCase):
                 "chat_id": "oc_chat",
                 "scope_kind": kind.value,
                 "settings_section": "projects",
+                "nonce": self.CALLBACK_NONCE,
             }
             with self.subTest(kind=kind):
                 intent = decode_button_action(
@@ -148,6 +239,7 @@ class CardCodecTest(unittest.TestCase):
             "binding_id": "binding:v1:binding-123",
             "goal_generation": "a" * 43,
             "expected_goal_status": "active",
+            "nonce": self.CALLBACK_NONCE,
         }
 
         intent = self.decode(value)
@@ -194,6 +286,7 @@ class CardCodecTest(unittest.TestCase):
             "scope_kind": "topic",
             "topic_id": "omt_topic",
             "side_id": "side:v1:side-123",
+            "nonce": self.CALLBACK_NONCE,
         }
 
         intent = self.decode(value)
@@ -293,6 +386,7 @@ class CardCodecTest(unittest.TestCase):
             "scope_kind": "topic",
             "topic_id": "omt_topic",
             "binding_id": "binding:v1:binding-123",
+            "nonce": self.CALLBACK_NONCE,
         }
         intent = self.decode(value)
         self.assertEqual(intent.name, CardControlName.ACTIVATE_BINDING)
@@ -355,6 +449,8 @@ class CardCodecTest(unittest.TestCase):
                 "expected_native_thread_id": "native-thread:v1:thread-123",
                 "page": 2,
             }
+            if raw_intent == "binding.delete.exact.prepare":
+                value["nonce"] = self.CALLBACK_NONCE
 
             with self.subTest(raw_intent=raw_intent):
                 intent = self.decode(value)
@@ -404,9 +500,12 @@ class CardCodecTest(unittest.TestCase):
         stop = self.decode(
             {**runtime_common, "intent": "binding.stop.exact"}
         )
-        recheck = self.decode(
-            {**runtime_common, "intent": "binding.turn.recheck"}
-        )
+        recheck_value = {
+            **runtime_common,
+            "intent": "binding.turn.recheck",
+            "nonce": self.CALLBACK_NONCE,
+        }
+        recheck = self.decode(recheck_value)
         self.assertEqual(stop.name, CardControlName.STOP_EXACT_BINDING)
         self.assertEqual(recheck.name, CardControlName.RECHECK_EXACT_TURN)
         self.assertEqual(recheck.expected_activity_revision, 9)
@@ -414,8 +513,7 @@ class CardCodecTest(unittest.TestCase):
         with self.assertRaises(CardActionError):
             self.decode(
                 {
-                    **runtime_common,
-                    "intent": "binding.turn.recheck",
+                    **recheck_value,
                     "expected_turn_id": None,
                 }
             )
@@ -439,16 +537,18 @@ class CardCodecTest(unittest.TestCase):
             ),
         ):
             with self.subTest(raw_intent=raw_intent):
+                value = {**archived_common, "intent": raw_intent}
+                if raw_intent == "binding.delete.archived.prepare":
+                    value["nonce"] = self.CALLBACK_NONCE
                 intent = self.decode(
-                    {**archived_common, "intent": raw_intent}
+                    value
                 )
                 self.assertEqual(intent.name, expected)
                 self.assertEqual(intent.expected_native_thread_id, "thread-123")
                 with self.assertRaises(CardActionError):
                     self.decode(
                         {
-                            **archived_common,
-                            "intent": raw_intent,
+                            **value,
                             "page": 0,
                         }
                     )
@@ -461,6 +561,7 @@ class CardCodecTest(unittest.TestCase):
             "scope_kind": "topic",
             "topic_id": "omt_topic",
             "page": 1,
+            "nonce": self.CALLBACK_NONCE,
         }
         intent = self.decode(value)
         self.assertEqual(intent.name, CardControlName.SESSIONS_PAGE)
@@ -552,6 +653,7 @@ class CardCodecTest(unittest.TestCase):
                 "answer": "analysis complete",
                 "a": 12,
                 "d": 3,
+                "nonce": self.CALLBACK_NONCE,
             },
         )
         sent = decode_turn_file_action(
@@ -586,6 +688,35 @@ class CardCodecTest(unittest.TestCase):
             ),
         )
         self.assertEqual(sent.path, "/srv/work/report.xlsx")
+
+        for value in (
+            {
+                **common,
+                "intent": "turn-file.page",
+                "page": 1,
+                "files": manifest,
+                "answer": "analysis complete",
+            },
+            {
+                **common,
+                "intent": "turn-file.page",
+                "page": 1,
+                "files": manifest,
+                "answer": "analysis complete",
+                "nonce": "malformed",
+            },
+        ):
+            decoded = decode_turn_file_action(
+                app_id="cli_test",
+                message_id="om_card",
+                callback_chat_id="oc_group",
+                sender_id="ou_user",
+                tag="button",
+                value=value,
+            )
+            self.assertEqual(decoded.page, page.page)
+            self.assertEqual(decoded.files, page.files)
+            self.assertEqual(decoded.answer, page.answer)
 
         invalid = (
             {**common, "intent": "turn-file.send", "path": "relative.txt"},
@@ -651,7 +782,10 @@ class CardCodecTest(unittest.TestCase):
             tag="button",
             form_value={
                 "project_alias": "demo",
-                "project_mode": "create",
+                "project_mode": (
+                    "project-mode:v2:create:"
+                    + self.CALLBACK_NONCE
+                ),
                 "project_path": "",
             },
         )
@@ -685,8 +819,46 @@ class CardCodecTest(unittest.TestCase):
                 tag="button",
                 form_value={
                     "project_alias": "demo",
-                    "project_mode": "create",
+                    "project_mode": (
+                        "project-mode:v2:create:"
+                        + self.CALLBACK_NONCE
+                    ),
                     "unexpected": "value",
+                },
+            )
+
+        for project_mode in (
+            "create",
+            "project-mode:v2:create",
+            "project-mode:v2:create:malformed-transport-nonce",
+        ):
+            legacy = decode_settings_form(
+                scope=self.scope,
+                message_id="om_card",
+                sender_id="ou_user",
+                tag="button",
+                form_value={
+                    "project_alias": "legacy",
+                    "project_mode": project_mode,
+                    "project_path": "",
+                },
+            )
+            self.assertEqual(legacy.name, CardControlName.REGISTER_PROJECT)
+            self.assertTrue(legacy.create_directory)
+
+        with self.assertRaisesRegex(
+            SettingsCardActionError,
+            "未知 Project 创建模式",
+        ):
+            decode_settings_form(
+                scope=self.scope,
+                message_id="om_card",
+                sender_id="ou_user",
+                tag="button",
+                form_value={
+                    "project_alias": "invalid",
+                    "project_mode": "project-mode:v2:destroy:ignored",
+                    "project_path": "",
                 },
             )
 
@@ -1068,8 +1240,10 @@ class CardRendererTest(unittest.TestCase):
         send_values = [value for value in values if value["intent"] == "turn-file.send"]
         page_values = [value for value in values if value["intent"] == "turn-file.page"]
         self.assertEqual(len(send_values), 8)
+        self.assertTrue(all("nonce" not in value for value in send_values))
         self.assertTrue(all(value["path"].startswith("/server/private/") for value in send_values))
         self.assertEqual(len(page_values), 1)
+        self.assertRegex(page_values[0]["nonce"], r"^[0-9a-f]{32}$")
         self.assertEqual(len(page_values[0]["files"]), 18)
         self.assertEqual(page_values[0]["a"], 38)
         self.assertEqual(page_values[0]["d"], 14)
@@ -2000,6 +2174,114 @@ class CardRendererTest(unittest.TestCase):
             "状态会立即更新",
             manage_submit["confirm"]["text"]["content"],
         )
+
+    def test_repeatable_callbacks_change_nonce_on_every_render(self) -> None:
+        first = settings_card(
+            scope=self.scope,
+            projects=self.projects,
+            project_root="/home/user/projects",
+        )
+        second = settings_card(
+            scope=self.scope,
+            projects=self.projects,
+            project_root="/home/user/projects",
+        )
+
+        def callback_values(card: OutboundCard) -> dict[str, dict[str, object]]:
+            return {
+                value["intent"]: value
+                for button in _elements(card.card, "button")
+                for behavior in button.get("behaviors", ())
+                if isinstance((value := behavior.get("value")), dict)
+            }
+
+        first_values = callback_values(first)
+        second_values = callback_values(second)
+        self.assertEqual(
+            set(first_values),
+            {"settings.section.open", "settings.refresh"},
+        )
+        for intent, first_value in first_values.items():
+            second_value = second_values[intent]
+            self.assertEqual(len(first_value["nonce"]), 32)
+            int(first_value["nonce"], 16)
+            self.assertNotEqual(first_value["nonce"], second_value["nonce"])
+            self.assertEqual(
+                {
+                    key: value
+                    for key, value in first_value.items()
+                    if key != "nonce"
+                },
+                {
+                    key: value
+                    for key, value in second_value.items()
+                    if key != "nonce"
+                },
+            )
+
+        def project_modes(card: OutboundCard) -> set[str]:
+            create_form = next(
+                form
+                for form in _elements(card.card, "form")
+                if form["name"] == "project_create_v1"
+            )
+            mode = next(
+                element
+                for element in create_form["elements"]
+                if element.get("name") == "project_mode"
+            )
+            return {option["value"] for option in mode["options"]}
+
+        self.assertTrue(project_modes(first).isdisjoint(project_modes(second)))
+
+        archive = archive_binding_card(
+            scope=self.scope,
+            binding_id="binding-123",
+            short_id="binding1",
+            project_alias="test",
+            title="One shot",
+        )
+        archive_value = next(
+            behavior["value"]
+            for button in _elements(archive.card, "button")
+            for behavior in button.get("behaviors", ())
+        )
+        self.assertNotIn("nonce", archive_value)
+
+    def test_callback_builder_enforces_transport_nonce_policy(self) -> None:
+        repeatable = {"intent": CardControlName.REFRESH_SETTINGS.value}
+        for value in (
+            repeatable,
+            {**repeatable, "nonce": "malformed"},
+        ):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError,
+                "valid nonce",
+            ):
+                cards._callback_button(label="刷新", value=value)
+
+        rendered = cards._repeatable_callback_button(
+            label="刷新",
+            value=repeatable,
+        )
+        nonce = rendered["behaviors"][0]["value"]["nonce"]
+        self.assertRegex(nonce, r"^[0-9a-f]{32}$")
+
+        with self.assertRaisesRegex(ValueError, "already contains"):
+            cards._repeatable_callback_button(
+                label="刷新",
+                value={**repeatable, "nonce": self.scope.chat_id},
+            )
+        with self.assertRaisesRegex(ValueError, "valid nonce"):
+            cards._callback_button(
+                label="归档",
+                value={
+                    "intent": CardControlName.ARCHIVE_BINDING.value,
+                    "nonce": "0" * 32,
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "invalid Project mode"):
+            cards._project_mode_reference("create", "malformed")
 
     def test_project_forms_share_settings_card_and_use_native_form_contract(self) -> None:
         outbound = settings_card(

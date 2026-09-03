@@ -455,7 +455,8 @@ manifest；已知的条目统计用短字段 `a/d` 成对携带，未知时成�
 或 session；非 cleared Goal 只为当前进程控制面有界保留终态 Projection。两者都不写入
 SQLite，且 v5 文件 callback 自包含，所以服务/App Server 重启后已发送卡仍可翻页和发送，
 但旧 Goal 控制按钮会过期。该 manifest schema 在正式推广前原位收敛，action version 不变，
-不承诺升级前 pilot 测试卡兼容；旧 v3 opaque-ref 卡片点击时明确提示已过期，不再重读历史。
+不承诺升级前其他 pilot schema 的测试卡兼容；transport nonce 缺失或格式异常不影响业务
+payload 解码。旧 v3 opaque-ref 卡片点击时明确提示已过期，不再重读历史。
 
 每次翻页和发送都从 payload path 重新 resolve/stat；不可用文件在分页中保留位置并取消
 发送按钮。图片白名单为 PNG/JPEG/GIF/WebP，点击后用 `OutboundImage`；其他普通文件用
@@ -781,6 +782,23 @@ callback value，因此提交时通过 Channel SDK 的公开
 card-session 状态。管理表单把 alias 与 revision 编码进静态下拉选项，不依赖固定
 Channel SDK 尚未透传的单选 change option，也不读取原始回调。Projects 卡片动作只
 执行短 SQLite 事务，不获取 Codex Turn 锁。
+
+固定 Channel SDK 当前用 source message、operator 和 action payload 组成 Card Action
+去重 identity；同一消息原地重绘后，如果可重复动作再次生成完全相同的 payload，会在
+SDK safety 层被当成旧投递。Netizen 因此只在可重复动作的公共按钮出口加入每次渲染新建的
+32 位十六进制 `nonce`：Settings 分区导航/刷新、普通与归档会话列表的翻页/返回、会话切换、
+两类删除确认页导航、exact Turn 重新检查、Goal 暂停/恢复、Side 关闭重试和文件分页均走
+这一出口。新增 Project 的 submit 没有 callback value，因此把同一类 nonce 编入必填的
+Project mode option value。decoder 只移除 transport nonce，不要求它存在，也不校验其格式；
+Project mode 同样先恢复业务 mode，再忽略可选 transport 后缀。因此 nonce 不进入 typed
+intent、SQLite、业务 precondition 或 outbound UUID，缺失或畸形也不改变业务 payload 的
+有效性。同一份已渲染按钮的飞书重复投递仍共享 nonce，继续由 SDK 去重；卡片成功重绘后相同
+业务动作获得新 nonce。Project 启停、Binding 配置和 exact stop 已有递增 revision；归档、
+删除、恢复、新建/重命名、Goal clear 是一次性 mutation；文件“发送”继续使用稳定 outbound
+UUID 保证重复点击不重复发消息，这些动作不加 nonce。SDK 改为使用原生唯一投递 identity 后，
+应从这个公共生成出口整体下调该 workaround，不需要迁移业务 decoder。若第一次卡片更新本身
+失败而旧按钮留在原消息，nonce 也无法让同一份已消费 payload 再次通过 SDK，应重新发送原
+命令，不增加历史恢复状态。
 
 `/new` 卡片只有一个创建 form：一个包含全部 enabled Projects 的 Project 下拉框，以及
 Model、Effort、Speed、Reaction Pulse 和 Progress Card；群聊和群话题再增加 Mention

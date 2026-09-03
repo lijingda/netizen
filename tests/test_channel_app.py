@@ -5468,6 +5468,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "chat_id": "oc_direct",
             "scope_kind": "direct",
             "page": 99,
+            "nonce": next_value["nonce"],
         }
         await self.app.handle_card_action(
             self.direct_button_event(out_of_range_value, message_id="om_sessions")
@@ -6716,6 +6717,31 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("millisecond='666'", paged)
         self.assertIn("github.get", paged)
         self.assertIn("file", paged)
+        return_value = next(
+            behavior["value"]
+            for button in _elements(self.channel.updates[-1][1], "button")
+            for behavior in button.get("behaviors", ())
+            if behavior["value"]["intent"] == "turn-file.page"
+        )
+        self.assertEqual(return_value["page"], 0)
+        self.assertNotEqual(return_value["nonce"], page_value["nonce"])
+        await self.app.handle_card_action(
+            self.direct_button_event(
+                return_value,
+                message_id="om_goal_composed",
+            )
+        )
+        next_value = next(
+            behavior["value"]
+            for button in _elements(self.channel.updates[-1][1], "button")
+            for behavior in button.get("behaviors", ())
+            if behavior["value"]["intent"] == "turn-file.page"
+        )
+        self.assertEqual(
+            {key: value for key, value in next_value.items() if key != "nonce"},
+            {key: value for key, value in page_value.items() if key != "nonce"},
+        )
+        self.assertNotEqual(next_value["nonce"], page_value["nonce"])
         # The cleared G1 card remains a frozen result even after G2 exists.
         # Paging G1 updates only G1's exact source message.
         self.runtime.goal_snapshot_value = native_goal(
@@ -6725,7 +6751,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         update_count = len(self.channel.updates)
         await self.app.handle_card_action(
             self.direct_button_event(
-                page_value,
+                next_value,
                 message_id="om_goal_composed",
             )
         )
@@ -8691,6 +8717,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         settings = self.channel.replies[-1][1]
         self.assertIn("project_create_v1", str(settings.card))
         self.assertIn("project_manage_v1", str(settings.card))
+        create_mode = _project_mode_value(settings, "create")
 
         self.channel.fetched_messages["om_card"] = {
             "data": {
@@ -8709,7 +8736,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     value={},
                     form_value={
                         "project_alias": "demo",
-                        "project_mode": "create",
+                        "project_mode": create_mode,
                         "project_path": "",
                     },
                 ),
@@ -8797,34 +8824,64 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_project_create_validation_error_stays_in_settings(self) -> None:
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        existing_mode = _project_mode_value(
+            self.app._settings_card(scope),
+            "existing",
+        )
         self.channel.fetched_messages["om_card"] = {
             "data": {"items": [{"chat_id": "oc_direct", "thread_id": None}]}
         }
         self.channel.chat_types["oc_direct"] = "p2p"
 
-        await self.app.handle_card_action(
-            SimpleNamespace(
-                message_id="om_card",
-                chat_id="oc_direct",
-                operator=SimpleNamespace(open_id="ou_user"),
-                action=SimpleNamespace(
-                    tag="button",
-                    value={},
-                    form_value={
-                        "project_alias": "missing_path",
-                        "project_mode": "existing",
-                        "project_path": "",
-                    },
-                ),
+        async def submit(mode: str) -> None:
+            await self.app.handle_card_action(
+                SimpleNamespace(
+                    message_id="om_card",
+                    chat_id="oc_direct",
+                    operator=SimpleNamespace(open_id="ou_user"),
+                    action=SimpleNamespace(
+                        tag="button",
+                        value={},
+                        form_value={
+                            "project_alias": "missing_path",
+                            "project_mode": mode,
+                            "project_path": "",
+                        },
+                    ),
+                )
             )
-        )
+
+        await submit(existing_mode)
 
         rendered = str(self.channel.updates[-1][1])
         self.assertIn("登记已有目录时必须填写绝对路径", rendered)
         self.assertIn("project_manage_v1", rendered)
         self.assertIn("project_create_v1", rendered)
+        redrawn_mode = _project_mode_value(
+            self.channel.updates[-1][1],
+            "existing",
+        )
+        self.assertEqual(
+            existing_mode.rsplit(":", 1)[0],
+            redrawn_mode.rsplit(":", 1)[0],
+        )
+        self.assertNotEqual(existing_mode, redrawn_mode)
+
+        update_count = len(self.channel.updates)
+        await submit(redrawn_mode)
+        self.assertEqual(len(self.channel.updates), update_count + 1)
+        self.assertIn(
+            "登记已有目录时必须填写绝对路径",
+            str(self.channel.updates[-1][1]),
+        )
 
     async def test_committed_project_is_not_misreported_when_card_update_fails(self) -> None:
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        create_mode = _project_mode_value(
+            self.app._settings_card(scope),
+            "create",
+        )
         self.channel.fetched_messages["om_card"] = {
             "data": {"items": [{"chat_id": "oc_direct", "thread_id": None}]}
         }
@@ -8842,7 +8899,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                         value={},
                         form_value={
                             "project_alias": "committed",
-                            "project_mode": "create",
+                            "project_mode": create_mode,
                             "project_path": "",
                         },
                     ),
@@ -11639,3 +11696,26 @@ def _card_button_values(card: OutboundCard, label: str) -> list[dict[str, object
                     if isinstance(value, dict):
                         values.append(value)
     return values
+
+
+def _project_mode_value(
+    card: OutboundCard | dict[str, object],
+    mode: str,
+) -> str:
+    labels = {"create": "创建空目录", "existing": "登记已有目录"}
+    content = card.card if isinstance(card, OutboundCard) else card
+    create_form = next(
+        form
+        for form in _elements(content, "form")
+        if form.get("name") == "project_create_v1"
+    )
+    mode_field = next(
+        element
+        for element in create_form["elements"]
+        if element.get("name") == "project_mode"
+    )
+    return next(
+        option["value"]
+        for option in mode_field["options"]
+        if option["text"]["content"] == labels[mode]
+    )

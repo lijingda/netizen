@@ -7,6 +7,7 @@ import hashlib
 import html
 import json
 import re
+import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -102,6 +103,10 @@ _CONTEXT_MODE_REFERENCE = re.compile(
     r"context-mode:v1:(current-only|catch-up)"
 )
 _TASK_FEEDBACK_REFERENCE = re.compile(r"task-feedback:v2:(off|on)")
+_CALLBACK_NONCE = re.compile(r"[0-9a-f]{32}")
+_PROJECT_MODE_REFERENCE = re.compile(
+    r"project-mode:v2:(create|existing):([0-9a-f]{32})"
+)
 _RENAME_NAME_FIELD = re.compile(
     r"rename_name_v1__([A-Za-z0-9][A-Za-z0-9-]{0,127})"
 )
@@ -110,6 +115,27 @@ _TURN_REFERENCE = re.compile(
     r"turn:v1:([A-Za-z0-9][A-Za-z0-9._-]{0,191})"
 )
 _GOAL_GENERATION = re.compile(r"[A-Za-z0-9_-]{43}")
+
+_REPEATABLE_CARD_CONTROL_NAMES = frozenset(
+    {
+        CardControlName.OPEN_SETTINGS_SECTION,
+        CardControlName.REFRESH_SETTINGS,
+        CardControlName.PREPARE_EXACT_DELETE_BINDING,
+        CardControlName.PREPARE_ARCHIVED_DELETE_BINDING,
+        CardControlName.ACTIVATE_BINDING,
+        CardControlName.RECHECK_EXACT_TURN,
+        CardControlName.SESSIONS_PAGE,
+        CardControlName.REFRESH_ARCHIVED_SESSIONS,
+        CardControlName.GOAL_PAUSE,
+        CardControlName.GOAL_RESUME,
+        CardControlName.SIDE_CLOSE,
+    }
+)
+# These actions can legitimately reappear with the same semantic payload on
+# one updated message. Revision-bearing and one-shot actions stay excluded.
+_REPEATABLE_CALLBACK_INTENTS = frozenset(
+    name.value for name in _REPEATABLE_CARD_CONTROL_NAMES
+) | {TurnFileActionName.PAGE.value}
 
 
 @dataclass(frozen=True, slots=True)
@@ -985,7 +1011,12 @@ def _goal_control_button(
     style: str | None = None,
     confirm: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
-    return _callback_button(
+    button = (
+        _repeatable_callback_button
+        if name in _REPEATABLE_CARD_CONTROL_NAMES
+        else _callback_button
+    )
+    return button(
         label=label,
         value=_envelope(
             scope,
@@ -1352,6 +1383,7 @@ def decode_turn_file_action(
     if not isinstance(value, Mapping):
         raise CardActionError("本轮文件动作 value 必须是对象。")
     payload = dict(value)
+    payload.pop("nonce", None)
     try:
         name = TurnFileActionName(payload.get("intent"))
     except (TypeError, ValueError) as error:
@@ -1933,7 +1965,7 @@ def _render_projects_settings(
         builder.markdown("当前没有可管理的 Project，请在下方新增。")
 
     builder.raw(
-        _callback_button(
+        _repeatable_callback_button(
             label="刷新当前配置",
             value=_envelope(
                 scope,
@@ -1958,7 +1990,7 @@ def _settings_navigation(
 ) -> dict[str, Any]:
     return _button_row(
         *(
-            _callback_button(
+            _repeatable_callback_button(
                 label=_settings_section_label(section),
                 value=_envelope(
                     scope,
@@ -2028,6 +2060,7 @@ def _project_management_form(projects: tuple[Project, ...]) -> dict[str, Any]:
 
 
 def _project_create_form(project_root: str) -> dict[str, Any]:
+    callback_nonce = _new_callback_nonce()
     return {
         "tag": "form",
         "name": "project_create_v1",
@@ -2048,10 +2081,25 @@ def _project_create_form(project_root: str) -> dict[str, Any]:
                 "tag": "select_static",
                 "name": "project_mode",
                 "required": True,
-                "initial_option": "create",
+                "initial_option": _project_mode_reference(
+                    "create",
+                    callback_nonce,
+                ),
                 "options": [
-                    {"text": _plain_text("创建空目录"), "value": "create"},
-                    {"text": _plain_text("登记已有目录"), "value": "existing"},
+                    {
+                        "text": _plain_text("创建空目录"),
+                        "value": _project_mode_reference(
+                            "create",
+                            callback_nonce,
+                        ),
+                    },
+                    {
+                        "text": _plain_text("登记已有目录"),
+                        "value": _project_mode_reference(
+                            "existing",
+                            callback_nonce,
+                        ),
+                    },
                 ],
             },
             {
@@ -2662,7 +2710,7 @@ def sessions_delete_binding_card(
                 style="danger",
                 confirm=("永久删除且无法恢复", confirm_body),
             ),
-            _callback_button(
+            _repeatable_callback_button(
                 label="返回会话列表",
                 value=_sessions_page_envelope(scope=scope, target=page),
             ),
@@ -2737,7 +2785,7 @@ def archived_sessions_delete_binding_card(
                     "原生会话、派生会话与本地 Binding 都将永久删除。",
                 ),
             ),
-            _callback_button(
+            _repeatable_callback_button(
                 label="返回归档列表",
                 value=_envelope(
                     scope,
@@ -2833,7 +2881,7 @@ def _session_row(
     controls: list[dict[str, Any]] = []
     if not session.active:
         controls.append(
-            _callback_button(
+            _repeatable_callback_button(
                 label="设为当前",
                 value=_envelope(
                     scope,
@@ -2873,7 +2921,7 @@ def _session_row(
         )
     ):
         controls.append(
-            _callback_button(
+            _repeatable_callback_button(
                 label="删除",
                 value=_envelope(
                     scope,
@@ -2913,7 +2961,7 @@ def _session_row(
         and session.turn_id is not None
     ):
         controls.append(
-            _callback_button(
+            _repeatable_callback_button(
                 label="重新检查",
                 value=_envelope(
                     scope,
@@ -2986,7 +3034,7 @@ def _sessions_pagination(
                 "tag": "column",
                 "width": "auto",
                 "elements": [
-                    _callback_button(
+                    _repeatable_callback_button(
                         label="上一页",
                         value=_sessions_page_envelope(
                             scope=scope,
@@ -3002,7 +3050,7 @@ def _sessions_pagination(
                 "tag": "column",
                 "width": "auto",
                 "elements": [
-                    _callback_button(
+                    _repeatable_callback_button(
                         label="下一页",
                         value=_sessions_page_envelope(
                             scope=scope,
@@ -3125,7 +3173,7 @@ def side_topic_card(
         creating = state is SideTopicState.CREATING
         builder.raw(
             _button_row(
-                _callback_button(
+                _repeatable_callback_button(
                     label="取消 Side" if creating else "结束 Side",
                     value=_envelope(
                         scope,
@@ -3228,7 +3276,7 @@ def error_card(message: str, *, scope: FeishuScope | None = None) -> OutboundCar
     builder.raw(_notice(message, error=True))
     if scope is not None:
         builder.raw(
-            _callback_button(
+            _repeatable_callback_button(
                 label="刷新设置",
                 value=_envelope(
                     scope,
@@ -3257,6 +3305,7 @@ def decode_button_action(
     if not isinstance(value, Mapping):
         raise CardActionError("卡片动作 value 必须是对象。")
     payload = dict(value)
+    payload.pop("nonce", None)
     raw_intent = payload.get("intent")
     try:
         name = CardControlName(raw_intent)
@@ -3272,7 +3321,6 @@ def decode_button_action(
     }
     if name in form_only:
         raise CardActionError("该操作只能通过对应表单提交。")
-
     common = {"v", "intent", "chat_id", "scope_kind"}
     extra_by_name = {
         CardControlName.OPEN_SETTINGS_SECTION: {"settings_section"},
@@ -3827,9 +3875,9 @@ def _decode_settings_form(
     if not required.issubset(payload) or not set(payload).issubset(allowed):
         raise CardActionError("未知、字段不完整或包含额外字段的 Settings 表单。")
     alias = _required_string(payload["project_alias"], "project_alias").strip()
-    mode = _required_string(payload["project_mode"], "project_mode")
-    if mode not in {"create", "existing"}:
-        raise CardActionError("未知 Project 创建模式。")
+    mode = _decode_project_mode_reference(
+        _required_string(payload["project_mode"], "project_mode")
+    )
     raw_path = payload.get("project_path", "")
     if not isinstance(raw_path, str):
         raise CardActionError("project_path 必须是字符串。")
@@ -3989,6 +4037,24 @@ def _decode_project_reference(value: str) -> tuple[str, int]:
     if match is None:
         raise CardActionError("Project 选择值无效，请刷新卡片后重试。")
     return match.group(1), int(match.group(2))
+
+
+def _project_mode_reference(mode: str, callback_nonce: str) -> str:
+    value = f"project-mode:v2:{mode}:{callback_nonce}"
+    if _PROJECT_MODE_REFERENCE.fullmatch(value) is None:
+        raise ValueError("invalid Project mode callback reference")
+    return value
+
+
+def _decode_project_mode_reference(value: str) -> str:
+    if value in {"create", "existing"}:
+        return value
+    prefix = "project-mode:v2:"
+    if value.startswith(prefix):
+        mode = value[len(prefix) :].split(":", 1)[0]
+        if mode in {"create", "existing"}:
+            return mode
+    raise CardActionError("未知 Project 创建模式。")
 
 
 def _binding_reference(binding_id: str) -> str:
@@ -4442,7 +4508,7 @@ def _turn_file_pagination(
             "tag": "column",
             "width": "auto",
             "elements": [
-                _callback_button(
+                _repeatable_callback_button(
                     label=label,
                     value=_turn_file_envelope(
                         scope,
@@ -4622,7 +4688,7 @@ def _archived_session_row(
     ]
     if native_delete_available:
         controls.append(
-            _callback_button(
+            _repeatable_callback_button(
                 label="删除",
                 value=_envelope(
                     scope,
@@ -4682,6 +4748,31 @@ def _button_row(*buttons: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _new_callback_nonce() -> str:
+    return secrets.token_hex(16)
+
+
+def _valid_callback_nonce(value: Any) -> bool:
+    return isinstance(value, str) and _CALLBACK_NONCE.fullmatch(value) is not None
+
+
+def _repeatable_callback_button(
+    *,
+    label: str,
+    value: dict[str, Any],
+    style: str = "default",
+    confirm: tuple[str, str] | None = None,
+) -> dict[str, Any]:
+    if "nonce" in value:
+        raise ValueError("callback value already contains a nonce")
+    return _callback_button(
+        label=label,
+        value={**value, "nonce": _new_callback_nonce()},
+        style=style,
+        confirm=confirm,
+    )
+
+
 def _callback_button(
     *,
     label: str,
@@ -4689,6 +4780,15 @@ def _callback_button(
     style: str = "default",
     confirm: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
+    intent = value.get("intent")
+    is_repeatable = intent in _REPEATABLE_CALLBACK_INTENTS
+    has_valid_nonce = _valid_callback_nonce(value.get("nonce"))
+    if (is_repeatable and not has_valid_nonce) or (
+        not is_repeatable and "nonce" in value
+    ):
+        raise ValueError(
+            "repeatable callback values must carry exactly one valid nonce"
+        )
     button: dict[str, Any] = {
         "tag": "button",
         "text": _plain_text(label),
