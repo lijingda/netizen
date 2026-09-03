@@ -2012,7 +2012,14 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_message(prompt)
         self.channel.fail_card_updates = True
 
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with (
+            self.assertLogs("netizen.channel_app", level="ERROR"),
+            patch.object(
+                channel_app,
+                "turn_diff_summary",
+                wraps=channel_app.turn_diff_summary,
+            ) as parse_diff,
+        ):
             await self.app.handle_completion(
                 TurnOutcome(
                     binding_id=binding.id,
@@ -2020,12 +2027,15 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     turn_id="turn-one",
                     owner_id="ou_user",
                     origin=prompt,
-                    result=completed_turn_result(final_response="answer survives"),
+                    result=completed_turn_result(
+                        final_response="answer survives"
+                    ),
                     task_feedback=feedback,
                     activity=activity,
                 )
             )
 
+        self.assertEqual(parse_diff.call_count, 1)
         self.assertEqual(self.channel.replies[-1], (prompt.id, "answer survives"))
         self.assertEqual(self.channel.updates[-1][0], "om_progress")
 
@@ -2813,7 +2823,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("analysis complete", rendered)
         self.assertIn("reports/sales.xlsx", rendered)
-        self.assertIn("发送文件到话题", rendered)
+        self.assertIn("点击“发送”后", rendered)
         self.assertNotIn(str(self.project.resolve()), visible)
         self.assertEqual(self.channel.send_calls, [])
 
@@ -2825,22 +2835,34 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         report = self.project / "research.md"
         report.write_text("research", encoding="utf-8")
 
-        await self.app.handle_completion(
-            TurnOutcome(
-                binding_id=binding.id,
-                thread_id="native-files",
-                turn_id="turn-diff-only",
-                owner_id="ou_user",
-                origin=origin,
-                result=completed_turn_result(final_response="research complete"),
-                turn_diff=(
-                    "diff --git a/research.md b/research.md\n"
-                    "new file mode 100644\n"
-                    "--- /dev/null\n"
-                    "+++ b/research.md\n"
-                ),
+        with patch.object(
+            channel_app,
+            "turn_diff_summary",
+            wraps=channel_app.turn_diff_summary,
+        ) as parse_diff:
+            await self.app.handle_completion(
+                TurnOutcome(
+                    binding_id=binding.id,
+                    thread_id="native-files",
+                    turn_id="turn-diff-only",
+                    owner_id="ou_user",
+                    origin=origin,
+                    result=completed_turn_result(
+                        final_response="research complete"
+                    ),
+                    turn_diff=(
+                        "diff --git a/research.md b/research.md\n"
+                        "new file mode 100644\n"
+                        "--- /dev/null\n"
+                        "+++ b/research.md\n"
+                        "@@ -0,0 +1,2 @@\n"
+                        "+research\n"
+                        "+notes\n"
+                    ),
+                )
             )
-        )
+
+        self.assertEqual(parse_diff.call_count, 1)
 
         card = self.channel.replies[-1][1]
         self.assertIsInstance(card, OutboundCard)
@@ -2848,7 +2870,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         rendered = json.dumps(card.card, ensure_ascii=False)
         self.assertIn("research complete", rendered)
         self.assertIn("research.md", rendered)
-        self.assertEqual(_card_button_value(card, "发送文件到话题")["v"], 4)
+        self.assertIn("+2", rendered)
+        self.assertIn("-0", rendered)
+        self.assertNotIn("8 B", rendered)
+        self.assertEqual(_card_button_value(card, "发送")["v"], 4)
 
     async def test_generated_image_outside_project_gets_artifact_aware_card(
         self,
@@ -2892,7 +2917,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("任务已完成，已生成以下文件", rendered)
         self.assertIn("生成图片/generated.png", rendered)
-        self.assertIn("发送原图到话题", rendered)
+        self.assertIn("点击“发送”后", rendered)
         self.assertNotIn(str(image.parent), visible)
 
     async def test_file_card_delivery_failure_falls_back_to_plain_answer(
@@ -3047,8 +3072,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         card = self.channel.replies[-1][1]
         assert isinstance(card, OutboundCard)
-        send_file = _card_button_value(card, "发送文件到话题")
-        send_image = _card_button_value(card, "发送原图到话题")
+        send_values = _card_button_values(card, "发送")
+        send_file = next(
+            value for value in send_values if str(value.get("path", "")).endswith("report.pdf")
+        )
+        send_image = next(
+            value for value in send_values if str(value.get("path", "")).endswith("trend.png")
+        )
         self.channel.send_results.extend(
             (
                 sent_result(
@@ -3131,7 +3161,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         card = self.channel.replies[-1][1]
         assert isinstance(card, OutboundCard)
-        send_file = _card_button_value(card, "发送文件到话题")
+        send_file = _card_button_value(card, "发送")
         report.unlink()
         self.channel.send_results.append(
             sent_result(
@@ -3174,7 +3204,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         card = self.channel.replies[-1][1]
         assert isinstance(card, OutboundCard)
-        send_file = _card_button_value(card, "发送文件到话题")
+        send_file = _card_button_value(card, "发送")
         self.channel.send_results.extend(
             (
                 sent_result(
@@ -6566,6 +6596,24 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(tuple(_elements(initial.card, "collapsible_panel"))), 1)
 
         final_item = file_change_item(*paths)
+        final_diff = "".join(
+            (
+                f"diff --git a/{path} b/{path}\n"
+                f"--- a/{path}\n"
+                f"+++ b/{path}\n"
+                "@@ -1 +1 @@\n"
+                "-old\n"
+                "+new\n"
+            )
+            for path in paths
+        ) + (
+            "diff --git a/deleted.txt b/deleted.txt\n"
+            "--- a/deleted.txt\n"
+            "+++ /dev/null\n"
+            "@@ -1,2 +0,0 @@\n"
+            "-deleted one\n"
+            "-deleted two\n"
+        )
         await self.app.handle_completion(
             GoalOutcome(
                 binding_id=binding.id,
@@ -6578,6 +6626,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 final_turn_status="completed",
                 final_items=(final_item,),
                 final_response="goal files ready",
+                turn_diff=final_diff,
                 task_feedback=feedback,
                 activity=activity,
                 finalization=GoalFinalizationStatus.CLEARED,
@@ -6593,6 +6642,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("另有 1 项未展示", rendered)
         self.assertIn("goal files ready", rendered)
         self.assertIn("goal-result-00.txt", rendered)
+        self.assertIn("+10", rendered)
+        self.assertIn("-12", rendered)
         self.assertIn("millisecond='555'", rendered)
         self.assertIn("millisecond='666'", rendered)
         self.assertIn("github.get", rendered)
@@ -6607,6 +6658,11 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             if behavior["value"]["intent"] == "turn-file.page"
         )
         self.assertEqual(page_value["v"], 5)
+        self.assertEqual((page_value["a"], page_value["d"]), (10, 12))
+        self.assertEqual(
+            (page_value["files"][8]["a"], page_value["files"][8]["d"]),
+            (1, 1),
+        )
         self.runtime.goal_snapshot_value = None
 
         await self.app.handle_card_action(
@@ -6621,6 +6677,9 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("generate outputs", paged)
         self.assertIn("goal files ready", paged)
         self.assertIn("goal-result-08.txt", paged)
+        self.assertIn("+10", paged)
+        self.assertIn("-12", paged)
+        self.assertIn("+1", paged)
         self.assertIn("millisecond='555'", paged)
         self.assertIn("millisecond='666'", paged)
         self.assertIn("github.get", paged)
@@ -10039,7 +10098,9 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("side file ready", visible)
         self.assertIn("side-output.txt", visible)
         self.assertNotIn("collapsible_panel", visible)
-        send_value = _card_button_value(card, "发送文件到话题")
+        self.assertNotIn("<font color='green'>+", visible)
+        self.assertNotIn("4 B", visible)
+        send_value = _card_button_value(card, "发送")
         self.assertEqual(send_value["v"], 4)
         self.assertEqual(send_value["binding_id"], f"binding:v1:{binding.id}")
         self.assertEqual(send_value["topic_id"], record.topic_id)
@@ -11473,6 +11534,14 @@ def _elements(value: object, tag: str) -> list[dict[str, object]]:
 
 
 def _card_button_value(card: OutboundCard, label: str) -> dict[str, object]:
+    values = _card_button_values(card, label)
+    if values:
+        return values[0]
+    raise AssertionError(f"button not found: {label}")
+
+
+def _card_button_values(card: OutboundCard, label: str) -> list[dict[str, object]]:
+    values: list[dict[str, object]] = []
     for button in _elements(card.card, "button"):
         text = button.get("text")
         if isinstance(text, dict) and text.get("content") == label:
@@ -11482,5 +11551,5 @@ def _card_button_value(card: OutboundCard, label: str) -> dict[str, object]:
                 if isinstance(behavior, dict):
                     value = behavior.get("value")
                     if isinstance(value, dict):
-                        return value
-    raise AssertionError(f"button not found: {label}")
+                        values.append(value)
+    return values

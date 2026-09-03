@@ -3,7 +3,7 @@ status: accepted
 date: 2026-08-19
 amends: 0024, 0025, 0026
 related: 0008, 0015, 0021
-amended_by: 0047
+amended_by: 0047, 0053
 ---
 
 # 以 Turn diff 补全本轮文件，并让新卡片自带文件清单
@@ -11,6 +11,10 @@ amended_by: 0047
 > 修订说明：[ADR 0047](0047-compose-typed-reply-cards-and-finalize-complete-goals.md) 保留
 > 自包含 callback 边界；Goal + Files 使用 v5 完整 Reply Card manifest，使 Goal、Activity、
 > Result 与 Files 在分页后仍能整体重建，普通完成/进度文件卡继续使用 v4。
+>
+> [ADR 0053](0053-show-exact-turn-line-statistics-in-files.md) 进一步以完整 hunk 和窄定义的
+> 纯 rename 展示行数，将完整分页上限调整为 400，并在 pilot 内原位收敛 callback manifest；
+> 下文“不解释 hunk 正文”仅保留为被修订前的历史决定。
 
 ## 背景
 

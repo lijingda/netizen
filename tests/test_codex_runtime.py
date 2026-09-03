@@ -661,6 +661,7 @@ class FakeGoalHandle:
         self.pause_started = asyncio.Event()
         self.pause_gate: asyncio.Event | None = None
         self.terminal_logical_turn_id: str | None = None
+        self.turn_diff: str | None = None
         self.activity_sink = None
         self.activity_updates: list[TurnActivityNotificationProjection] = []
         self.record = SimpleNamespace(
@@ -693,6 +694,7 @@ class FakeGoalHandle:
             self.terminal_logical_turn_id or self.id,
             self.record.id,
             self.record.status.value,
+            self.turn_diff,
         )
 
     def emit_activity(self, update: TurnActivityNotificationProjection) -> None:
@@ -5029,6 +5031,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
 
         handle.rollover("physical-turn-2")
+        handle.turn_diff = "final physical aggregate diff"
         handle.emit_activity(
             TurnActivityNotificationProjection(
                 turn_id="physical-turn-2",
@@ -5073,6 +5076,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         assert isinstance(outcome, GoalOutcome)
         self.assertEqual(outcome.final_physical_turn_id, "physical-turn-2")
         self.assertEqual(outcome.final_response, "final physical result")
+        self.assertEqual(outcome.turn_diff, "final physical aggregate diff")
         self.assertEqual(outcome.activity.commentary, ())
 
     async def test_goal_cleanup_failure_keeps_slot_and_repeat_stop_retries(self) -> None:

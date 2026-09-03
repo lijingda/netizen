@@ -530,7 +530,12 @@ class CardCodecTest(unittest.TestCase):
             "turn_id": "turn:v1:turn-123",
         }
         manifest = [
-            {"path": "/srv/work/report.xlsx", "label": "report.xlsx"},
+            {
+                "path": "/srv/work/report.xlsx",
+                "label": "report.xlsx",
+                "a": 12,
+                "d": 3,
+            },
             {"path": "/tmp/trend.png", "label": "生成图片/trend.png"},
         ]
         page = decode_turn_file_action(
@@ -545,6 +550,8 @@ class CardCodecTest(unittest.TestCase):
                 "page": 1,
                 "files": manifest,
                 "answer": "analysis complete",
+                "a": 12,
+                "d": 3,
             },
         )
         sent = decode_turn_file_action(
@@ -562,10 +569,16 @@ class CardCodecTest(unittest.TestCase):
 
         self.assertEqual(page.page, 1)
         self.assertEqual(page.answer, "analysis complete")
+        self.assertEqual((page.additions, page.deletions), (12, 3))
         self.assertEqual(
             page.files,
             (
-                TurnFileManifestItem("/srv/work/report.xlsx", "report.xlsx"),
+                TurnFileManifestItem(
+                    "/srv/work/report.xlsx",
+                    "report.xlsx",
+                    12,
+                    3,
+                ),
                 TurnFileManifestItem(
                     "/tmp/trend.png",
                     "生成图片/trend.png",
@@ -602,6 +615,21 @@ class CardCodecTest(unittest.TestCase):
                 "page": 0,
                 "files": [{"path": "/tmp/a", "label": "a", "extra": 1}],
                 "answer": "done",
+            },
+            {
+                **common,
+                "intent": "turn-file.page",
+                "page": 0,
+                "files": [{"path": "/tmp/a", "label": "a", "a": 1}],
+                "answer": "done",
+            },
+            {
+                **common,
+                "intent": "turn-file.page",
+                "page": 0,
+                "files": manifest,
+                "answer": "done",
+                "a": 1,
             },
         )
         for value in invalid:
@@ -982,6 +1010,8 @@ class CardRendererTest(unittest.TestCase):
                 resolved_path=Path(f"/server/private/src/file-{index:02}.txt"),
                 size=1024 + index,
                 media_kind="image" if index == 0 else "file",
+                additions=index + 1,
+                deletions=index,
             )
             for index in range(18)
         )
@@ -992,6 +1022,8 @@ class CardRendererTest(unittest.TestCase):
             turn_id="turn-123",
             final_response="**分析完成**：退款率下降。",
             files=files,
+            additions=38,
+            deletions=14,
         )
         last = turn_files_card(
             scope=self.scope,
@@ -1000,6 +1032,8 @@ class CardRendererTest(unittest.TestCase):
             final_response="**分析完成**：退款率下降。",
             files=files,
             page=2,
+            additions=38,
+            deletions=14,
         )
 
         serialized = json.dumps(first.card, ensure_ascii=False)
@@ -1015,8 +1049,15 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("/server/private", visible)
         self.assertNotIn("查看差异", serialized)
         self.assertNotIn("预览", serialized)
-        self.assertIn("发送原图到话题", serialized)
-        self.assertIn("发送文件到话题", serialized)
+        self.assertNotIn("1.0 KB", serialized)
+        self.assertNotIn("发送原图到话题", serialized)
+        self.assertNotIn("发送文件到话题", serialized)
+        self.assertIn("点击“发送”后", visible)
+        self.assertIn("+38", visible)
+        self.assertIn("-14", visible)
+        self.assertNotIn("+1", visible)
+        self.assertIn("+2", visible)
+        self.assertIn("-1", visible)
         values = [
             behavior["value"]
             for button in _elements(first.card, "button")
@@ -1030,6 +1071,20 @@ class CardRendererTest(unittest.TestCase):
         self.assertTrue(all(value["path"].startswith("/server/private/") for value in send_values))
         self.assertEqual(len(page_values), 1)
         self.assertEqual(len(page_values[0]["files"]), 18)
+        self.assertEqual(page_values[0]["a"], 38)
+        self.assertEqual(page_values[0]["d"], 14)
+        self.assertEqual(
+            set(page_values[0]["files"][0]),
+            {"path", "label"},
+        )
+        self.assertEqual(
+            page_values[0]["files"][1]["a"],
+            2,
+        )
+        self.assertEqual(
+            page_values[0]["files"][1]["d"],
+            1,
+        )
         self.assertEqual(page_values[0]["answer"], "**分析完成**：退款率下降。")
         self.assertTrue(
             all(
@@ -1058,6 +1113,7 @@ class CardRendererTest(unittest.TestCase):
             element["content"] for element in _elements(last.card, "markdown")
         )
         self.assertIn("src/file-16.txt", last_visible)
+        self.assertIn("+17", last_visible)
         self.assertIn("src/file-17.txt", last_visible)
         self.assertNotIn("下一页", json.dumps(last.card, ensure_ascii=False))
         self.assertIn("回到第一页", json.dumps(last.card, ensure_ascii=False))
@@ -1709,6 +1765,8 @@ class CardRendererTest(unittest.TestCase):
                     ),
                     size=2,
                     media_kind="file",
+                    additions=index + 1,
+                    deletions=index,
                 )
                 for index in range(10)
             )
@@ -1718,6 +1776,8 @@ class CardRendererTest(unittest.TestCase):
                 turn_id="turn-123",
                 final_response="**不可替换的回答**",
                 files=files,
+                additions=55,
+                deletions=45,
             )
             next_value = next(
                 value
@@ -1740,6 +1800,8 @@ class CardRendererTest(unittest.TestCase):
                 final_response=decoded.answer or "",
                 manifest=decoded.files,
                 page=decoded.page or 0,
+                additions=decoded.additions,
+                deletions=decoded.deletions,
             )
         finally:
             existing.unlink(missing_ok=True)
@@ -1751,10 +1813,14 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("result-08.txt", visible)
         self.assertIn("result-09.txt", visible)
         self.assertIn("文件当前不可用", visible)
+        self.assertIn("+55", visible)
+        self.assertIn("-45", visible)
+        self.assertIn("+9", visible)
+        self.assertIn("-8", visible)
         self.assertEqual(len(_elements(updated.card, "button")), 2)
 
-    def test_v4_manifest_capacity_is_complete_through_five_hundred(self) -> None:
-        for count in (100, 500):
+    def test_v4_manifest_capacity_is_complete_through_four_hundred(self) -> None:
+        for count in (100, 400):
             with self.subTest(count=count):
                 files = tuple(
                     TurnFile(
@@ -1762,6 +1828,8 @@ class CardRendererTest(unittest.TestCase):
                         resolved_path=Path(f"/srv/work/src/file-{index:04}.txt"),
                         size=index,
                         media_kind="file",
+                        additions=12,
+                        deletions=3,
                     )
                     for index in range(count)
                 )
@@ -1771,6 +1839,8 @@ class CardRendererTest(unittest.TestCase):
                     turn_id="turn-123",
                     final_response="done",
                     files=files,
+                    additions=count * 12,
+                    deletions=count * 3,
                 )
                 next_value = next(
                     value
@@ -1780,6 +1850,12 @@ class CardRendererTest(unittest.TestCase):
                     == "turn-file.page"
                 )
                 self.assertEqual(len(next_value["files"]), count)
+                self.assertTrue(
+                    all(
+                        set(item) == {"path", "label", "a", "d"}
+                        for item in next_value["files"]
+                    )
+                )
                 self.assertLess(len(_tagged_elements(card.card)), 200)
 
         too_many = tuple(
@@ -1788,8 +1864,10 @@ class CardRendererTest(unittest.TestCase):
                 resolved_path=Path(f"/srv/work/file-{index}.txt"),
                 size=0,
                 media_kind="file",
+                additions=1,
+                deletions=1,
             )
-            for index in range(1000)
+            for index in range(401)
         )
         with self.assertRaisesRegex(TurnFileCardLimitError, "未截断"):
             turn_files_card(
@@ -1826,6 +1904,46 @@ class CardRendererTest(unittest.TestCase):
                 final_response="done",
                 files=short + long_later_page,
             )
+
+    def test_v5_stats_manifest_fits_four_hundred_files(self) -> None:
+        files = tuple(
+            ReplyCardFileItem(
+                path=f"/srv/work/src/file-{index:04}.txt",
+                label=f"src/file-{index:04}.txt",
+                size=index,
+                media_kind="file",
+                additions=12,
+                deletions=3,
+            )
+            for index in range(400)
+        )
+
+        card = reply_card(
+            ReplyCardProjection(
+                scope=self.scope,
+                result=ReplyCardResultModule("done"),
+                files=ReplyCardFilesModule(
+                    binding_id="binding-123",
+                    turn_id="turn-123",
+                    items=files,
+                    additions=4_800,
+                    deletions=1_200,
+                ),
+            )
+        )
+
+        page_value = next(
+            behavior["value"]
+            for button in _elements(card.card, "button")
+            for behavior in button.get("behaviors", ())
+            if behavior["value"]["intent"] == "turn-file.page"
+        )
+        self.assertEqual(len(page_value["files"]), 400)
+        self.assertEqual((page_value["a"], page_value["d"]), (4_800, 1_200))
+        self.assertLess(
+            len(json.dumps(card.card, ensure_ascii=False).encode("utf-8")),
+            55_000,
+        )
 
     def test_settings_card_is_v2_shared_and_uses_callback_behaviors(self) -> None:
         outbound = settings_card(
@@ -2489,6 +2607,8 @@ class CardRendererTest(unittest.TestCase):
                 label=f"result-{index:02}.txt",
                 size=1,
                 media_kind="file",
+                additions=index + 1,
+                deletions=index,
             )
             for index in range(10)
         )
@@ -2680,6 +2800,8 @@ class CardRendererTest(unittest.TestCase):
                 binding_id="binding-123",
                 turn_id="turn-123",
                 items=files,
+                additions=55,
+                deletions=45,
             ),
         )
         first = reply_card(projection)
@@ -2690,6 +2812,7 @@ class CardRendererTest(unittest.TestCase):
             if behavior["value"]["intent"] == "turn-file.page"
         )
         self.assertEqual(page_value["v"], 5)
+        self.assertEqual((page_value["a"], page_value["d"]), (55, 45))
         self.assertEqual(
             set(page_value["reply"]), {"goal", "activity", "result"}
         )
@@ -2717,6 +2840,8 @@ class CardRendererTest(unittest.TestCase):
             manifest=intent.files,
             reply=intent.reply,
             page=intent.page or 0,
+            additions=intent.additions,
+            deletions=intent.deletions,
         )
         rebuilt_text = json.dumps(rebuilt.card, ensure_ascii=False)
         self.assertIn("generate reports", rebuilt_text)
@@ -2727,6 +2852,8 @@ class CardRendererTest(unittest.TestCase):
             for element in _elements(rebuilt.card, "markdown")
         )
         self.assertIn("result-08.txt", rebuilt_visible)
+        self.assertIn("+55", rebuilt_visible)
+        self.assertIn("-45", rebuilt_visible)
         self.assertNotIn("result-00.txt", rebuilt_visible)
         self.assertIn("结束 Goal", rebuilt_text)
         self.assertNotIn("**Time**", rebuilt_text)
