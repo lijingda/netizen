@@ -482,7 +482,7 @@ systemd/logind；macOS 需要系统自带 `launchctl`、`plutil` 和当前用户
 curl -fsSL https://github.com/lijingda/netizen/releases/latest/download/install.sh | sh
 
 # 指定版本（示例）
-curl -fsSL https://github.com/lijingda/netizen/releases/download/v0.4.5/install.sh | sh
+curl -fsSL https://github.com/lijingda/netizen/releases/download/v0.4.6/install.sh | sh
 ```
 
 仓库根的零参数 `./install.sh` 只是同一 latest 正式入口。它不会安装当前 checkout；开发、
