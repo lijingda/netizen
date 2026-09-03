@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-03
 supersedes: 0007
-amended_by: 0009, 0010, 0012, 0013, 0014, 0026, 0049, 0054
+amended_by: 0009, 0010, 0012, 0013, 0014, 0026, 0049, 0055
 ---
 
 # 使用官方 Python SDK 获得原生 Turn 控制

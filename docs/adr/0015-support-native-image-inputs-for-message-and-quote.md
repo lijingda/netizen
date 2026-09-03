@@ -1,12 +1,12 @@
 ---
 status: accepted
 date: 2026-08-10
-amended_by: 0054
+amended_by: 0055
 ---
 
 # 支持普通消息与逐条引用中的原生图片输入
 
-> [ADR 0054](0054-upgrade-and-requalify-lark-channel-sdk-140.md) 将 Channel SDK
+> [ADR 0055](0055-upgrade-and-requalify-lark-channel-sdk-140.md) 将 Channel SDK
 > 升级到 1.4.0；`content_v2` 图片资源差异仍在，同时新增的顶层 `post.files`
 > 附件区必须独立于 locale 图片 AST 失败关闭。下文的 1.2.0 叙述保留为历史背景。
 
