@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-21
 amends: 0017, 0021, 0028
-amended_by: 0037, 0049
+amended_by: 0037, 0049, 0054
 related: 0016, 0019
 ---
 
@@ -10,7 +10,8 @@ related: 0016, 0019
 
 > **修订：** [ADR 0049](0049-bound-turn-observation-and-delegate-thread-removal.md)
 > 删除 Admin exact archive 的 idle 与 Runtime activity 前置条件；它与飞书入口一样只占用
-> exact Binding 后直接委托 App Server。Admin materialized Delete 仍不开放。
+> exact Binding 后直接委托 App Server。[ADR 0054](0054-allow-admin-to-delete-exact-materialized-sessions.md)
+> 进一步允许单一实例管理员经二次确认删除 exact active 或 archived materialized 会话。
 
 ## 背景
 
@@ -164,7 +165,7 @@ credential、CSRF、name、preview、cwd 或 Prompt 内容。
 | Binding | 恢复归档 | exact Binding 必须在 live archived catalog；公开 unarchive 后 exact resume 验证同一 native ID，保留原 Binding/Turn Settings 和 Scope pointer，并立即按 inactive 策略尝试释放新订阅。 |
 | Binding | 恢复并设为当前 | 满足恢复条件；公开 unarchive 和 exact resume 成功后在同一 Scope coordinator 中设置 exact active pointer，并按 current warm-window 策略保留订阅。 |
 | Binding | 删除 Lazy 会话 | exact Binding 仍没有 native Thread 且没有 Runtime 活动；原子删除 Binding，并仅在它 active 时清空 pointer。 |
-| Binding | 删除 materialized 会话 | 不提供。ADR 0037 只恢复飞书 current `/delete`；Admin 不调用该 Adapter，也不只删本地 Binding。 |
+| Binding | 删除 materialized 会话 | Delete capability 可用且 exact Binding 位于 active 或 archived native catalog；浏览器二次确认展示目标与永久级联后果，最终 grant 固定 Scope/Binding/native identity；直接复用 ADR 0037/0049 的 shared delete primitive。 |
 | Binding | Stop | exact Binding 当前存在本进程可控的普通 Turn 或 Goal 物理 Turn；复用现有 interrupt、Goal pause 和 terminal cleanup 语义。Stop 中的 Goal pause 是停止既有工作的一部分，不开放 Goal start/resume/clear。 |
 | Binding | Release | exact active 或 inactive materialized Binding 已 idle，且满足 ADR 0028 除“当前 active”外的无活动/后台 terminal 前置条件；只取消本连接订阅，下一次消息仍 resume 同一 Thread。 |
 | Binding | Compact / Goal mutation | 不提供。它们会发起或推进 Codex 工作，继续从当前飞书会话控制；Web 只展示状态。 |
@@ -204,15 +205,17 @@ Channel Participant 仍只能管理消息所在 Scope 的 Binding 或 exact Side
   inactive rename/archive、恢复是否激活、active archive/delete pointer 提交和双击去重；
 - Web 与飞书并发操作同一 Scope/Binding 的锁序、running/Goal/compaction/lifecycle 互斥、
   response loss、cancel 和 lifecycle-unknown admission close；
-- materialized delete、Prompt/Turn、Goal mutation、批量 mutation 与 Side tombstone delete
-  在 Admin HTTP route/controller 不可达。ADR 0037 为共享 current-Binding application
-  service 与窄化 Runtime port 增加 exact delete primitive，但 Admin Web 不调用它；完整
-  Runtime 继续保留飞书所需能力及 fixed-method Delete boundary。
+- materialized delete 只从 active/archived 单行经浏览器二次确认可达，并复用共享 exact
+  primitive；Lazy 保留既有 delete-lazy，capability unavailable、Missing、Side 与批量路径
+  不签发 materialized delete action。
+  Prompt/Turn、Goal mutation、批量 mutation 与 Side tombstone delete 仍在 Admin HTTP
+  route/controller 不可达。
 
 候选部署必须从另一台受信内网主机直接打开 `http://<server-ip>:<port>`，验证未登录根路径
 重定向、其他 endpoint 拒绝、登录、CSRF、Project mutation、跨 Scope ordinary Binding 的
 允许操作、Side close、服务重启注销和 journald 脱敏。真实 lifecycle probe 仍使用既有公开
-SDK 门禁；Admin Web 产品面不获得 materialized Delete route。
+SDK 门禁；Admin Web 的 materialized Delete 还必须验证 active/archived、能力门禁、二次确认、
+exact native identity、双击/断线与 pointer 保留语义。
 
 ## 后果
 

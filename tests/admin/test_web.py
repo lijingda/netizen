@@ -81,6 +81,7 @@ from netizen.sdk_gap_adapter import GoalSnapshot
 
 class FakeManagement:
     def __init__(self, root: Path) -> None:
+        self.native_delete_available = True
         self.calls: list[tuple[str, object]] = []
         self.query_session_calls: list[dict[str, object]] = []
         self.query_side_topic_calls: list[dict[str, object]] = []
@@ -364,6 +365,10 @@ class FakeManagement:
     async def delete_exact_lazy_binding(self, **values):
         self.calls.append(("delete-lazy", values))
         return self.lazy
+
+    async def delete_exact_binding(self, **values):
+        self.calls.append(("delete-materialized", values))
+        return self._binding(values["target"].binding_id)
 
     async def stop_exact_binding(self, **values):
         self.calls.append(("stop", values))
@@ -801,10 +806,12 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             ("binding-lazy", "deleteLazy", "/api/v1/sessions/delete-lazy", {}),
             ("binding-native", "rename", "/api/v1/sessions/rename", {"name": "Renamed"}),
             ("binding-native", "archive", "/api/v1/sessions/archive", {}),
+            ("binding-native", "deleteMaterialized", "/api/v1/sessions/delete-materialized", {}),
             ("binding-native", "stop", "/api/v1/sessions/stop", {}),
             ("binding-native", "release", "/api/v1/sessions/release", {}),
             ("binding-archived", "unarchive", "/api/v1/sessions/unarchive", {"actionKind": "sessions.unarchive"}),
             ("binding-archived", "unarchiveCurrent", "/api/v1/sessions/unarchive", {"actionKind": "sessions.unarchive-current"}),
+            ("binding-archived", "deleteMaterialized", "/api/v1/sessions/delete-materialized", {}),
         ]
         for binding_id, key, route, extra in cases:
             if key == "release":
@@ -827,6 +834,18 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(
             archive_call["target"].expected_active_binding_id
+        )
+        delete_calls = [
+            values
+            for name, values in self.management.calls
+            if name == "delete-materialized"
+        ]
+        self.assertEqual(
+            [item["expected_native_thread_id"] for item in delete_calls],
+            ["native-active", "native-archived"],
+        )
+        self.assertTrue(
+            all(item["target"].expected_active_binding_id is None for item in delete_calls)
         )
 
         items = await fresh_items()
@@ -988,6 +1007,9 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             by_id["binding-native"]["runtime"]["subscriptionState"],
             "subscribed",
         )
+        self.assertIn("deleteMaterialized", by_id["binding-native"]["actions"])
+        self.assertIn("deleteMaterialized", by_id["binding-archived"]["actions"])
+        self.assertNotIn("deleteMaterialized", by_id["binding-lazy"]["actions"])
 
         status, _headers, page = await self.json_get(
             "/api/v1/sessions?pageSize=100",
@@ -1033,6 +1055,81 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 400)
         self.assertEqual(error["code"], "invalid_query")
+
+    async def test_materialized_delete_action_requires_capability_and_live_catalog(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+
+        self.management.native_delete_available = False
+        status, _headers, page = await self.json_get(
+            "/api/v1/sessions?inventoryState=all",
+            session,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(
+            all(
+                "deleteMaterialized" not in item["actions"]
+                for item in page["items"]
+            )
+        )
+
+        self.management.native_delete_available = True
+        missing = replace(
+            self.management.native,
+            id="missing-binding",
+            native_thread_id="native-missing",
+            active=False,
+        )
+        self.management.runtime_by_id[missing.id] = self.management._runtime(
+            missing.id,
+            11,
+        )
+        self.management.session_items_override = (
+            SessionInventoryItem(
+                BindingInventoryRecord(missing, self.management.scope),
+                NativeThreadView(NativeThreadCatalogState.MISSING, None),
+                ChatLabel("oc_chat", "Demo Chat", "p2p", True, "ou_partner"),
+            ),
+        )
+        status, _headers, page = await self.json_get(
+            "/api/v1/sessions?inventoryState=all",
+            session,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertNotIn("deleteMaterialized", page["items"][0]["actions"])
+
+    async def test_materialized_delete_action_is_one_shot(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        status, _headers, page = await self.json_get(
+            "/api/v1/sessions?inventoryState=all",
+            session,
+        )
+        self.assertEqual(status, 200)
+        item = next(
+            value for value in page["items"] if value["bindingId"] == "binding-native"
+        )
+        action = item["actions"]["deleteMaterialized"]
+        status, _headers, payload = await self.json_post(
+            "/api/v1/sessions/delete-materialized",
+            session,
+            _action_payload(action),
+        )
+
+        self.assertEqual(status, 200, payload)
+        calls_after_delete = tuple(self.management.calls)
+        self.assertEqual(calls_after_delete[-1][0], "delete-materialized")
+
+        status, _headers, replay = await self.json_post(
+            "/api/v1/sessions/delete-materialized",
+            session,
+            _action_payload(action),
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(replay["code"], "stale_or_consumed")
+        self.assertEqual(tuple(self.management.calls), calls_after_delete)
 
     async def test_time_ranges_are_normalized_for_session_and_side_queries(self) -> None:
         self.runner.open_admission()
@@ -1207,7 +1304,6 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             "/api/v1/sessions/history",
             "/api/v1/sessions/compact",
             "/api/v1/sessions/goal",
-            "/api/v1/sessions/delete-materialized",
             "/api/v1/side-topics/resume",
             "/api/v1/batch",
         )
@@ -1342,6 +1438,16 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertNotIn("if (runtime.goal)", javascript)
         self.assertIn("resetSessionPagination", javascript)
         self.assertIn("sessionLocationCell", javascript)
+        self.assertIn(
+            'confirmMaterializedDelete(session) && mutate("/api/v1/sessions/delete-materialized"',
+            javascript,
+        )
+        self.assertIn(
+            'window.confirm("永久删除这个 Lazy Binding？") && mutate("/api/v1/sessions/delete-lazy"',
+            javascript,
+        )
+        self.assertIn("spawned descendants", javascript)
+        self.assertNotIn("delete-session-confirmation", html)
         self.assertIn('link.rel = "noopener noreferrer"', javascript)
         self.assertIn("await refresh(state.tab)", javascript)
         self.assertIn('state.tab === "sessions"', javascript)

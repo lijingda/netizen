@@ -92,6 +92,14 @@ function actionsCell(row) {
   return wrap;
 }
 
+function confirmMaterializedDelete(session) {
+  const name = session.nativeTitle || "未命名 Session";
+  return window.confirm(
+    `确认永久删除这个会话？\n\n会话：${name}\nScope：${session.scopeKey}\nShort ID：${session.shortId}`
+    + "\n\n原生 Thread、spawned descendants、Codex App/CLI 历史和本地 Binding 都会永久消失，无法恢复。",
+  );
+}
+
 function badge(value, active = false, warning = false) {
   const node = document.createElement("span");
   node.className = `badge${active ? " on" : ""}${warning ? " warn" : ""}`;
@@ -798,6 +806,7 @@ function wireSessionActions(actions, session) {
   if (a.unarchive) actions.append(actionButton("恢复", () => mutate("/api/v1/sessions/unarchive", a.unarchive, { actionKind: a.unarchive.actionKind })));
   if (a.unarchiveCurrent) actions.append(actionButton("恢复并设为当前", () => mutate("/api/v1/sessions/unarchive", a.unarchiveCurrent, { actionKind: a.unarchiveCurrent.actionKind })));
   if (a.deleteLazy) actions.append(actionButton("删除 Lazy", () => window.confirm("永久删除这个 Lazy Binding？") && mutate("/api/v1/sessions/delete-lazy", a.deleteLazy), true));
+  if (a.deleteMaterialized) actions.append(actionButton("删除", () => confirmMaterializedDelete(session) && mutate("/api/v1/sessions/delete-materialized", a.deleteMaterialized), true));
   if (a.stop) actions.append(actionButton("停止", () => window.confirm("停止这个 exact 会话的当前运行？") && mutate("/api/v1/sessions/stop", a.stop), true));
   if (a.release) actions.append(actionButton("释放订阅", () => window.confirm("释放本进程订阅？历史不会删除。") && mutate("/api/v1/sessions/release", a.release)));
 }

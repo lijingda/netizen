@@ -757,8 +757,13 @@ archived/missing/Lazy 与运行态。Chat 名称使用飞书 AppLink；话题只
 一次性的 action/CSRF grant，以及 active pointer、Project/settings/activity revision、native
 identity 或 Side route identity 等 typed precondition；提交后在锁内重读事实。Admin 可直接
 管理 inactive/cross-Scope exact Binding，不靠临时 activate 绕过前置条件；只有显式 activate
-或“恢复并设为当前”改变 pointer。Web 不注册 Prompt/Turn、完整 history、Goal mutation、
-Compact、materialized delete、Side resume 或批量 native mutation route。
+或“恢复并设为当前”改变 pointer。Delete capability 可用时，active/archived materialized
+普通行签发只绑定 Scope/Binding/native identity 的删除 action；点击后以浏览器二次确认展示
+会话/Scope/short ID 和永久级联后果，确认后 POST 才复用 ADR 0037/0049 的 delete primitive。
+它不绑定 pointer、Runtime activity 或 active/archived 状态，不先切换、恢复或 Stop；Lazy
+继续使用既有 `delete-lazy` 二次确认，Missing、Side 和批量路径不获得 materialized delete
+action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact、Side resume 或批量
+native mutation route。
 
 `/settings` 和零参数 `/new` 使用 Card 2.0。Settings 是可扩展的分区界面，当前只
 显示已实现的 Projects 分区；分区由版本化回调选择，不保存当前分区或卡片 session。

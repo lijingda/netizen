@@ -33,6 +33,7 @@ from netizen.domain import (
     FeishuScope,
     GoalOperationState,
     GoalStatus,
+    NativeCapability,
     ScopeKind,
 )
 from netizen.management import (
@@ -60,6 +61,7 @@ from netizen.management.service import _project_binding_status
 
 class FakeManagementRuntime:
     def __init__(self, store: BindingStore) -> None:
+        self.native_delete_available = True
         self.store = store
         self.calls: list[tuple[object, ...]] = []
         self.archived: set[str] = set()
@@ -352,6 +354,13 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                 project_alias="test",
             )
         ).binding
+
+    async def test_native_delete_availability_uses_the_narrow_runtime_projection(
+        self,
+    ) -> None:
+        self.assertTrue(self.service.native_delete_available)
+        self.runtime.native_delete_available = False
+        self.assertFalse(self.service.native_delete_available)
 
     async def test_current_target_rejects_stale_binding_before_runtime(self) -> None:
         first = await self._create()
@@ -1297,6 +1306,19 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ManagementRuntimePortSurfaceTest(unittest.TestCase):
+    def test_native_delete_availability_is_projected_without_exposing_runtime(self) -> None:
+        available = ManagementRuntimePort(
+            SimpleNamespace(
+                available_capabilities=frozenset({NativeCapability.DELETE})
+            )
+        )
+        unavailable = ManagementRuntimePort(
+            SimpleNamespace(available_capabilities=frozenset())
+        )
+
+        self.assertTrue(available.native_delete_available)
+        self.assertFalse(unavailable.native_delete_available)
+
     def test_forbidden_runtime_capabilities_are_not_exposed(self) -> None:
         port = ManagementRuntimePort(object())  # type: ignore[arg-type]
 
