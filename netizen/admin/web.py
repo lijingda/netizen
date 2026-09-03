@@ -468,6 +468,9 @@ class AdminWebApplication:
             "/api/v1/sessions/archive": self._session_archive,
             "/api/v1/sessions/unarchive": self._session_unarchive,
             "/api/v1/sessions/delete-lazy": self._session_delete_lazy,
+            "/api/v1/sessions/delete-materialized": (
+                self._session_delete_materialized
+            ),
             "/api/v1/sessions/stop": self._session_stop,
             "/api/v1/sessions/release": self._session_release,
             "/api/v1/side-topics/close": self._side_close,
@@ -659,6 +662,9 @@ class AdminWebApplication:
             ),
         )
         lifecycle_preconditions = _empty_preconditions()
+        delete_preconditions = _empty_preconditions(
+            native_thread_id=native_expected,
+        )
         actions: dict[str, object] = {
             "configure": self._grant(
                 context, "sessions.configure", target, preconditions
@@ -702,6 +708,20 @@ class AdminWebApplication:
                 actions["unarchiveCurrent"] = self._grant(
                     context, "sessions.unarchive-current", target, preconditions
                 )
+        if (
+            self._management.native_delete_available
+            and native_state
+            in {
+                NativeThreadCatalogState.ACTIVE,
+                NativeThreadCatalogState.ARCHIVED,
+            }
+        ):
+            actions["deleteMaterialized"] = self._grant(
+                context,
+                "sessions.delete-materialized",
+                target,
+                delete_preconditions,
+            )
         if status.can_stop:
             actions["stop"] = self._grant(
                 context, "sessions.stop", target, preconditions
@@ -1139,6 +1159,31 @@ class AdminWebApplication:
             grant.target.target_id,
             self._management.delete_exact_lazy_binding(
                 target=_binding_target(grant)
+            ),
+        )
+        return _json_response(200, _binding_result(context, binding))
+
+    async def _session_delete_materialized(
+        self,
+        context: _RequestContext,
+    ) -> Response:
+        _payload, grant = self._redeem(
+            context,
+            "sessions.delete-materialized",
+            expected_resource="binding",
+        )
+        target = _lifecycle_binding_target(grant)
+        expected_native_thread_id = _expected_value(
+            _grant_preconditions(grant).native_thread_id,
+            "native Thread",
+        )
+        binding = await self._mutation(
+            context,
+            "sessions.delete-materialized",
+            target.binding_id,
+            self._management.delete_exact_binding(
+                target=target,
+                expected_native_thread_id=expected_native_thread_id,
             ),
         )
         return _json_response(200, _binding_result(context, binding))

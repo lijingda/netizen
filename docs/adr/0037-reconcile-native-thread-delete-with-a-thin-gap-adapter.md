@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-24
 amends: 0017, 0031
-amended_by: 0038, 0049
+amended_by: 0038, 0049, 0054
 supersedes: 0019
 related: 0014, 0026
 ---
@@ -14,7 +14,9 @@ related: 0014, 0026
 > `/delete` 文本命令仍为 current-only。[ADR 0049](0049-bound-turn-observation-and-delegate-thread-removal.md)
 > 覆盖本 ADR 的 idle/read 前置与进程级 unknown：active 或 archived persisted Thread 都直接
 > 调用 App Server Delete，本地不先停止活动；对账无法完成时只保留 Binding-local
-> `lifecycle-unknown`。
+> `lifecycle-unknown`。[ADR 0054](0054-allow-admin-to-delete-exact-materialized-sessions.md)
+> 复用同一 primitive，为单一实例管理员开放 exact active/archived 删除；Adapter 和失败
+> 语义不变。
 
 ## 背景
 

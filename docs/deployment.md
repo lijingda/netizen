@@ -900,8 +900,14 @@ cleanup 和 exact-ID resume probes；fake launchctl/systemctl 单测不能替代
 register/create/enable/disable，
 两个 Scope 中 active/inactive、Lazy/materialized/archived Binding 的 create/activate/
 configure/rename/archive/两种 unarchive/delete-lazy/Stop/Release，以及一个 open Side 的 exact
-Close。双击同一 action 应返回 stale/consumed；与飞书并发操作同一目标时只允许符合 exact
-precondition 的一方提交。重启服务后旧 Admin session 必须失效，持久 Binding/设置/Side
+Close。再创建两个 disposable materialized Binding，分别保持 active catalog 与 archived
+catalog：两行仅在 Delete capability 可用时显示删除；点击后浏览器二次确认必须显示会话、
+Scope、short ID 与完整永久级联后果，取消必须零 mutation，确认后才删除对应
+Thread/descendants 与 Binding。删除 inactive 行不得改变其他 active pointer，删除 current 行
+才清空 pointer；不得先 activate、unarchive 或 Stop。Lazy 行仍通过既有二次确认删除本地
+Binding。
+双击同一 action 应返回 stale/consumed；与飞书并发操作同一目标时只允许符合 exact native
+identity 的一方提交。重启服务后旧 Admin session 必须失效，持久 Binding/设置/Side
 墓碑不变；journal 不得出现 credential、cookie/action token、cwd、name/preview 或 body。
 最后占用 configured port 再执行一次候选激活，确认它在数据库快照/current 切换前失败且旧
 release 恢复；释放端口后再部署。以上真实浏览器、跨主机与端口回滚属于 Admin Web 首次

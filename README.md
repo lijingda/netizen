@@ -236,14 +236,15 @@ App Secret，也不写入 YAML。登录后：
   `Active` 以及 `Lazy`、`Archived`、`Missing`、`全部`。页面以 10/20/50/100 条 keyset
   分页查看当前页的单聊、群聊或话题群名称，并从名称打开对应飞书会话；页面区分消息/话题、
   当前/非当前与独立运行态。可管理创建、切换、配置、
-  重命名、归档、两种恢复、Lazy 删除、exact Stop 和 Release；名称仅使用有界进程缓存，
-  不写入 Channel 数据库；
+  重命名、归档、两种恢复、Lazy 删除、active/archived materialized 删除、exact Stop 和
+  Release；两类删除都需二次确认，materialized 确认文案会说明永久级联后果，名称仅使用
+  有界进程缓存，不写入 Channel 数据库；
 - **Side Topics** 可按 Project、chat 和 route 状态筛选，并结束当前进程仍可控的 exact Side。
 
 每个写操作都使用一次性 action/CSRF token，并在共享锁内重读 exact target；页面断线后只
 能刷新对账，不会自动重放。服务重启或合法轮换 credential 会立即使旧 session 失效。V1
-有意使用受信内网 HTTP，不提供 TLS、OIDC、多管理员、RBAC、批量 native mutation、Prompt
-入口或 materialized Thread Delete；若地址暴露到不受信网络，应先增加独立的安全架构。
+有意使用受信内网 HTTP，不提供 TLS、OIDC、多管理员、RBAC、批量 native mutation 或 Prompt
+入口；若地址暴露到不受信网络，应先增加独立的安全架构。
 
 ## 用户指南 Skill
 

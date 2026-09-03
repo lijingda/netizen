@@ -188,8 +188,10 @@ credential，不会因为某人是 Channel 参与者或 Binding 创建者而自�
 
 Admin Web 可以管理 inactive/cross-Scope exact Binding，包括创建 Lazy、设为当前、修改
 Turn Settings、重命名、归档、恢复或恢复并设为当前、删除 Lazy、Stop 和 Release，也可
-结束当前进程仍可控的 Side。它不能发送 Prompt、查看完整历史、启动/推进 Goal、Compact、
-删除已有原生历史的 Thread 或执行批量 native mutation。Admin 可查看 @ 时读取的消息
+在 Delete capability 可用时删除 active 或 archived 的原生 Thread。两类删除都需二次确认；
+materialized 删除的确认文案会显示会话、Scope、short ID，并说明原生 Thread、spawned
+descendants、Codex App/CLI 历史与本地 Binding 都会永久消失。它不能发送 Prompt、查看完整
+历史、启动/推进 Goal、Compact、删除 Side 或执行批量 native mutation。Admin 可查看 @ 时读取的消息
 范围；但不能在没有 exact 飞书消息边界时新启用 catch-up，也不能把 catch-up 会话从后台
 直接设为 current。页面操作结果未知时应刷新对账，
 不要重放；服务重启或 credential 轮换会注销原 session。

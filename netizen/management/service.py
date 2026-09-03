@@ -59,6 +59,7 @@ from ..domain import (
     GoalStatus,
     MessageContextAnchor,
     MentionContextMode,
+    NativeCapability,
     SESSION_IDLE_STATE,
     session_stop_available,
 )
@@ -390,6 +391,10 @@ class ManagementRuntimePort:
     def __init__(self, runtime: CodexRuntime) -> None:
         self.__runtime = runtime
 
+    @property
+    def native_delete_available(self) -> bool:
+        return NativeCapability.DELETE in self.__runtime.available_capabilities
+
     async def configure_exact(
         self,
         *,
@@ -636,6 +641,10 @@ class InstanceManagementService:
     @property
     def scope_coordinator(self) -> ScopeCoordinator:
         return self._scope_coordinator
+
+    @property
+    def native_delete_available(self) -> bool:
+        return self._runtime.native_delete_available
 
     async def close(self, *, deadline: float | None = None) -> None:
         if self._chat_labels is not None:
