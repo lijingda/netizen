@@ -501,8 +501,8 @@ def require_supported_platform(
     require_definition_validation: bool = False,
 ) -> str:
     selected = _supported_platform_name(platform_name)
-    if sys.version_info[:2] not in {(3, 11), (3, 12)}:
-        raise InstallError("Python 3.11 or 3.12 is required")
+    if sys.version_info[:2] not in {(3, 11), (3, 12), (3, 13), (3, 14)}:
+        raise InstallError("Python 3.11, 3.12, 3.13, or 3.14 is required")
     if selected == "linux":
         if shutil.which("systemctl") is None:
             raise InstallError("systemctl is required for the Linux installer")

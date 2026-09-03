@@ -293,7 +293,8 @@ account home 和 `${CODEX_HOME:-~/.codex}` 执行固定 runtime 的 `login statu
 登录时会同时输出 Codex CLI、Codex App 的官方地址和精确重试步骤，且不会激活候选服务。
 正式 bootstrap 下载自己固定 tag 的
 项目构建 tarball，校验内嵌 SHA-256 和 Published Release manifest 后安装；
-该 tag 的 exact main commit 已在 Python 3.11/3.12 CI 通过统一代码门禁；
+该 tag 的 exact main commit 已在 Linux x64 标准 CPython 3.11-3.14，以及 macOS arm64
+标准 CPython 3.13/3.14 CI 通过统一代码门禁；
 发布流水线复用该 exact SHA 并验证
 同一次构建制品的身份和摘要，因此目标机不重复运行完整 unittest。`dev-install.sh` 则把当前
 工作区做成隔离的内容寻址候选，并在本机运行完整门禁。
@@ -427,7 +428,8 @@ Codex 原生历史。Linux 上不会关闭 linger，因为同一用户的其他 
 
 ## 本地开发
 
-源码开发需要 Python 3.11 或 3.12 和 `venv`。macOS 和 Linux 都可以运行下面的源码开发、安全
+源码开发需要 Python 3.11-3.14 和 `venv`；CI 使用标准 CPython 构建，未单独覆盖
+free-threaded 变体。macOS 和 Linux 都可以运行下面的源码开发、安全
 本地门禁以及相同的安装/服务命令；正式服务分别使用 macOS LaunchAgent 与 Linux systemd
 user manager。`make check` 不创建真实 Codex Thread，也不要求 Codex 登录：SDK 合同测试主要
 使用 fake App Server，受管 Skill discovery 另启动真实 bundled App Server 做只读发现。

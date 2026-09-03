@@ -1,4 +1,4 @@
-# Exact runtime constraints for the supported CPython 3.11/3.12 Pilot.
+# Exact runtime constraints for the supported standard CPython 3.11-3.14 Pilot.
 # Update this file together with pyproject.toml and rerun every release gate.
 annotated-types==0.8.0
 anyio==4.14.2

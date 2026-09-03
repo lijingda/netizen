@@ -266,7 +266,8 @@ class ReleaseArtifactTests(unittest.TestCase):
             self.assertIn("ARCHIVE_NAME='netizen-v0.3.0.tar.gz'", bootstrap)
             self.assertIn(f"ARCHIVE_SHA256='{first.archive_sha256}'", bootstrap)
             self.assertIn(
-                "sys.version_info[:2] not in {(3, 11), (3, 12)}", bootstrap
+                "sys.version_info[:2] not in {(3, 11), (3, 12), (3, 13), (3, 14)}",
+                bootstrap,
             )
 
             extracted = temporary_path / "extracted"
@@ -617,7 +618,10 @@ class ReleaseArtifactTests(unittest.TestCase):
         self.assertNotIn("live_probe_evidence", workflow)
         self.assertNotIn("confirm_publish", workflow)
         self.assertNotIn("qualify-artifact", workflow)
-        self.assertNotIn("python: [\"3.11\", \"3.12\"]", workflow)
+        self.assertNotIn(
+            'python: ["3.11", "3.12", "3.13", "3.14"]', workflow
+        )
+        self.assertNotIn('python: ["3.13", "3.14"]', workflow)
         self.assertIn("verify-artifact:\n", workflow)
         self.assertIn("needs: [build-artifact, verify-artifact]", workflow)
         self.assertEqual(workflow.count("python scripts/build_release_artifact.py"), 1)
@@ -638,12 +642,21 @@ class ReleaseArtifactTests(unittest.TestCase):
         workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
         self.assertTrue(workflow_path.is_file())
         workflow = workflow_path.read_text(encoding="utf-8")
+        linux_job, macos_job = workflow.split("  macos-arm64-check:\n", 1)
         self.assertIn("pull_request:\n    branches: [main]", workflow)
         self.assertIn("push:\n    branches: [main]", workflow)
-        self.assertIn('python: ["3.11", "3.12"]', workflow)
+        self.assertIn(
+            'python: ["3.11", "3.12", "3.13", "3.14"]', linux_job
+        )
+        self.assertIn('python: ["3.13", "3.14"]', macos_job)
+        self.assertIn("runs-on: macos-15", macos_job)
+        self.assertIn('test "$(uname -m)" = arm64', macos_job)
+        self.assertNotIn("Verify macOS system trust integration", linux_job)
+        self.assertIn("Verify macOS system trust integration", macos_job)
+        self.assertIn("_configure_platform_trust", macos_job)
         self.assertIn("permissions:\n  contents: read", workflow)
         self.assertIn("--constraint requirements.lock", workflow)
-        self.assertIn("run: make check", workflow)
+        self.assertEqual(workflow.count("run: make check"), 2)
 
 
 if __name__ == "__main__":

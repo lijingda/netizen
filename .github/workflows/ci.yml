@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.12"]
+        python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -41,6 +41,52 @@ jobs:
             --no-input \
             --constraint requirements.lock \
             .
+
+      - name: Run the repository gate
+        run: make check
+
+  macos-arm64-check:
+    name: macOS arm64 Python ${{ matrix.python }}
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.13", "3.14"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up supported Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+
+      - name: Confirm the standard arm64 runtime
+        run: |
+          test "$(uname -m)" = arm64
+          python - <<'PY'
+          import sys
+
+          assert sys.implementation.name == "cpython"
+          assert sys.version_info[:2] in {(3, 13), (3, 14)}
+          PY
+
+      - name: Install the locked dependency set
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install \
+            --disable-pip-version-check \
+            --no-input \
+            --constraint requirements.lock \
+            .
+
+      - name: Verify macOS system trust integration
+        run: >-
+          .venv/bin/python -I -B -c
+          'from netizen.main import _configure_platform_trust;
+          _configure_platform_trust()'
 
       - name: Run the repository gate
         run: make check
