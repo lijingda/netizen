@@ -8,7 +8,7 @@ h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
 idna==3.18
-lark-channel-sdk==1.2.0
+lark-channel-sdk==1.4.0
 lark-oapi==1.7.2
 openai-codex==0.147.0
 openai-codex-cli-bin==0.147.0

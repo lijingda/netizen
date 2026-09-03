@@ -1,9 +1,14 @@
 ---
 status: accepted
 date: 2026-08-09
+amended_by: 0054
 ---
 
 # 支持飞书逐条引用消息上下文
+
+> [ADR 0054](0054-upgrade-and-requalify-lark-channel-sdk-140.md) 将精确依赖升级到
+> 1.4.0，并重新确认首层 `ReplyRef` 与 CardKit 2.0 quote flattener 两个缺口仍存在；
+> 运行时版本门禁已相应收窄到精确 1.4.0。下文的 1.2.0 叙述保留为原决定的历史证据。
 
 > 后续 [ADR 0015](0015-support-native-image-inputs-for-message-and-quote.md)
 > 取代本文“不下载资源”的决定：普通 `image` 与 `post` 图片会在有界准备后作为
@@ -166,13 +171,15 @@ exact-Turn 状态变化都要求用户重发。v4 compact Historical Message、s
 exact message/chat/reply/resource ID 只在 Channel 内部使用，不进入历史 wire。这是上述
 飞书准入边界下有意接受的可见性，而不是脱敏遗漏。
 
-上游修复仍是长期路径：当官方 Channel SDK 发布版在“非话题且首层
-`parent_id == root_id`”上正确产生 `ReplyRef`，并通过本 ADR 的 typed fetch/Card 契约后：
+上游修复仍是长期路径，当前精确版本门禁和独立移除触发器以
+[ADR 0054](0054-upgrade-and-requalify-lark-channel-sdk-140.md) 为准：
 
 1. 同时更新 `pyproject.toml` 和 `requirements.lock` 的 exact pin；
-2. 验证公开 `QuotedContext.text` 能覆盖真实 CardKit 2.0 `header`/`body` 后，删除
-   1.2.0 raw relation fallback 及公共 `QuotedContext.raw` 卡片适配器；
-3. 保留话题 `thread_id` 分流和 exact-Turn admission；
-4. 重跑话题根 mention 契约和全部发布探针。
+2. 当官方发布版在“非话题且首层 `parent_id == root_id`”上正确产生 `ReplyRef`，并通过
+   本 ADR 的 typed fetch 契约后，独立删除 raw relation fallback；
+3. 当公开 `QuotedContext.text` 能覆盖真实 CardKit 2.0 `header`/`body` 后，独立删除
+   公共 `QuotedContext.raw` 卡片适配器；
+4. 保留话题 `thread_id` 分流和 exact-Turn admission，并重跑话题根 mention 契约和全部
+   发布探针。
 
 在官方修复发布前，不将未合并 fork、未发布 commit 或本地 wheel 作为生产依赖。

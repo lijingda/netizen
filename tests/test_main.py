@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from lark_channel import DedupStore
 from openai_codex import CodexConfig
 
 from netizen.bindings import BindingStore, SideTopicState
@@ -120,6 +121,7 @@ class MainConfigurationTest(unittest.TestCase):
             application.handle_card_action,
         )
         self.assertIn("error", registered)
+        self.assertNotIn("meetingInvited", registered)
 
     def test_channel_preserves_steer_delivery_policy_and_persistent_dedup(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -143,6 +145,7 @@ class MainConfigurationTest(unittest.TestCase):
         self.assertIsNone(channel.config.policy.group_allowlist)
         self.assertEqual(channel.config.security.mode, "audit")
         self.assertIs(channel._deduper._store, store)
+        self.assertIsInstance(store, DedupStore)
 
     def test_channel_environment_scrub_is_hygiene_not_custom_codex_env(self) -> None:
         with patch.dict(

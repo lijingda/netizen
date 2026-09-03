@@ -615,7 +615,7 @@ Channel SDK 自带的 `ChatQueue` 只按 `chat_id` 串行，会把同一个话�
 错误地互相阻塞，因此 Pilot 明确关闭它。消息到达后由 Binding 锁决定 start、steer 或
 stopping reject；不同 topic/Binding 不互锁，也不增加 prompt queue。
 
-固定 `lark-channel-sdk==1.2.0` 的 `reply()` 对平面消息不会自动创建话题，且
+固定 `lark-channel-sdk==1.4.0` 的 `reply()` 对平面消息不会自动创建话题，且
 `SendOpts.reply_target_gone` 默认是 `fresh`。Side 因此只使用公开 `send()`：先 fresh
 root，再按需以 `reply_in_thread=True` promotion；promotion 固定 `fail`，防止根消息消失
 时假成功地降级为主线新消息。未知发送结果只用相同 UUID 做一次有界对账；P2P 建话题、
@@ -633,11 +633,14 @@ UUID 由卡片、sender、Binding、Turn、动作和 v4/v5 absolute path 确定�
 Database 或进程内保存 card session。删除卡片、错误 230071 或任何关系不一致
 都不允许 fresh fallthrough。
 
-固定 `lark-channel-sdk==1.2.0` 对纯文本话题根消息的 `post` AST 会保留一个渲染后的
+固定 `lark-channel-sdk==1.4.0` 对纯文本话题根消息的 `post` AST 会保留一个渲染后的
 机器人 mention，导致命令前多出机器人名称。Channel 边界只修复这个可精确证明的
 情况：事件已标记 `mentioned_bot`，公开 bot identity 与首个 AST mention 节点一致，
 且当前资源已通过普通/富文本图片准入；不能按名称猜测或剥离其他人的 mention。
-文件、音视频等其他附件仍在进入该适配前拒绝。升级 Channel SDK 时必须
+1.4.0 新增的顶层 `post.files` 位于 locale AST 之外；普通文件会进入资源描述符，
+文件夹只渲染可见标签而没有资源描述符。当前消息因此直接检查公开
+`PostContent.post` 的顶层附件区，任何非空或无法解释的附件区都在进入 prompt 前
+失败关闭。文件、音视频等其他附件仍在进入 mention 适配前拒绝。升级 Channel SDK 时必须
 重跑根消息契约测试，原生行为修复后删除这段兼容逻辑。
 
 同一固定 SDK 还会丢掉非话题首层引用的 `ReplyRef`，因为它用
@@ -649,7 +652,7 @@ Channel SDK 公开 typed fetch 读取：文本/富文本/卡片/结构化类型�
 其他资源类型在内部 rich projection 保留公开 exact key 与元数据，模型可见 wire 只保留
 类型、名称、时长等可推理信息，
 `system`/未知类型 fail closed。卡片归一化只剩占位符时，才使用 SDK 公开
-quote-context fallback。锁定 SDK 1.2.0 若对 CardKit 2.0 返回空文本，只在精确
+quote-context fallback。锁定 SDK 1.4.0 若对 CardKit 2.0 返回空文本，只在精确
 版本门禁和结构/大小/深度边界内，从公共 `QuotedContext.raw` 投影 header/body 的
 可见文本节点；按钮值、确认弹窗、选项及事件不进入 prompt。两次 SDK 网络读取
 各自具有 10 秒单次请求预算，避免健康请求因共享总预算产生假超时。

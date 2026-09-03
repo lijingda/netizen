@@ -4,29 +4,37 @@ import asyncio
 import importlib.metadata
 import inspect
 import json
+import threading
 import time
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from lark_channel import (
+    BotIdentity,
     CardActionEvent,
     ChatInfo,
     ChatQueueConfig,
     Conversation,
+    DedupStore,
     Events,
     FeishuChannel,
+    FeishuChannelErrorCode,
     Identity,
     InboundConfig,
     InboundPipeline,
     InboundMessage,
     MediaSource,
+    OutboundCard,
     OutboundFile,
     OutboundImage,
     PolicyConfig,
     SafetyPipeline,
+    SendError,
     SendOpts,
     SendResult,
     TextBatchConfig,
     TextContent,
+    TransportConfig,
 )
 from lark_channel.channel.normalize.pipeline import PipelineConfig, PipelineDeps
 from lark_channel.channel.quote import QuoteResolver
@@ -38,7 +46,12 @@ from lark_oapi.api.im.v1 import (
 )
 from openai_codex import ImageInput, TextInput
 
-from netizen.image_inputs import image_references
+from netizen import channel_app
+from netizen.image_inputs import (
+    UnsupportedPromptMedia,
+    current_message_image_references,
+    image_references,
+)
 from netizen.quoted_context import (
     interactive_quote_visible_text,
     quoted_message_id,
@@ -196,6 +209,88 @@ class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(file_message.file_name, "report.xlsx")
         self.assertIs(image_message.source, source)
 
+    async def test_card_send_update_resource_download_and_error_contract(
+        self,
+    ) -> None:
+        channel = FeishuChannel(
+            app_id="cli_contract",
+            app_secret="test-secret",
+        )
+        sent: list[tuple[object, dict[str, object]]] = []
+
+        class Sender:
+            async def send(self, outbound: object, **kwargs: object) -> SendResult:
+                sent.append((outbound, kwargs))
+                return SendResult.ok(message_id="om_card")
+
+        channel._sender = Sender()
+        card = {"schema": "2.0", "body": {"elements": []}}
+        send_result = await channel.send(
+            "oc_chat",
+            OutboundCard(card=card),
+            SendOpts(receive_id_type="chat_id", uuid="card-contract"),
+        )
+
+        self.assertTrue(send_result.success)
+        self.assertEqual(send_result.message_id, "om_card")
+        self.assertIsInstance(sent[0][0], OutboundCard)
+        self.assertEqual(sent[0][0].card, card)
+        self.assertEqual(sent[0][1]["uuid_"], "card-contract")
+
+        patched: list[tuple[str, dict[str, object]]] = []
+
+        async def patch_card(
+            message_id: str,
+            updated_card: dict[str, object],
+        ) -> dict[str, object]:
+            patched.append((message_id, updated_card))
+            return {"code": 0, "data": {"message_id": message_id}}
+
+        channel._patch_card = patch_card
+        update_result = await channel.update_card("om_card", card)
+        self.assertTrue(update_result.success)
+        self.assertEqual(patched, [("om_card", card)])
+
+        downloader = AsyncMock(return_value=b"image-bytes")
+        with patch(
+            "lark_channel.channel.channel._api_helpers.download_media",
+            new=downloader,
+        ):
+            downloaded = await channel.download_resource(
+                "img_key",
+                "image",
+                message_id="om_source",
+            )
+        self.assertEqual(downloaded, b"image-bytes")
+        downloader.assert_awaited_once_with(
+            channel._client,
+            message_id="om_source",
+            file_key="img_key",
+            resource_type="image",
+        )
+
+        lock_error = SendError(
+            code=FeishuChannelErrorCode.FORMAT_ERROR,
+            retryable=False,
+            hint="Failed to create card content, ext=ErrCode: 11310;",
+            raw_code=230099,
+        )
+        self.assertTrue(
+            channel_app._is_feishu_card_action_lock(
+                SendResult.fail(lock_error)
+            )
+        )
+
+    def test_dedup_store_protocol_remains_frozen(self) -> None:
+        self.assertEqual(
+            tuple(inspect.signature(DedupStore.seen).parameters),
+            ("self", "key"),
+        )
+        self.assertEqual(
+            tuple(inspect.signature(DedupStore.mark).parameters),
+            ("self", "key", "ttl_seconds"),
+        )
+
     async def test_p2p_topic_normalization_retains_underlying_chat_type(self) -> None:
         pipeline = InboundPipeline(
             PipelineConfig(inbound=InboundConfig(include_raw=True)),
@@ -318,6 +413,42 @@ class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
                 }
             },
         )
+        post_file = await normalize(
+            "om_post_file",
+            "post",
+            {
+                "files": [
+                    {
+                        "file_key": "file_report",
+                        "file_name": "report.pdf",
+                        "is_folder": False,
+                    }
+                ],
+                "zh_cn": {
+                    "content_v2": [[
+                        {"tag": "text", "text": "body with file"},
+                    ]]
+                },
+            },
+        )
+        post_folder = await normalize(
+            "om_post_folder",
+            "post",
+            {
+                "zh_cn": {
+                    "content_v2": [[
+                        {"tag": "text", "text": "body with folder"},
+                    ]]
+                },
+                "files": [
+                    {
+                        "file_key": "folder_specs",
+                        "file_name": "Specs",
+                        "is_folder": True,
+                    }
+                ],
+            },
+        )
         literal_text = await normalize(
             "om_post_literal_text",
             "post",
@@ -371,7 +502,7 @@ class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("![image](img_one)", post.content_text)
         self.assertIn("![image](img_two)", post.content_text)
-        # Pinned SDK 1.2.0 renders content_v2's image marker but omits its
+        # Pinned SDK 1.4.0 renders content_v2's image marker but omits its
         # ResourceDescriptor. Netizen recovers only that public rendered key;
         # remove this assertion when the upstream resources contract is fixed.
         self.assertEqual(post_v2.resources, [])
@@ -385,6 +516,25 @@ class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
             ],
             ["img_v2_only"],
         )
+        self.assertIn("body with file", post_file.content_text)
+        self.assertIn(
+            '<file key="file_report" name="report.pdf"/>',
+            post_file.content_text,
+        )
+        self.assertEqual(
+            [(resource.type, resource.file_key) for resource in post_file.resources],
+            [("file", "file_report")],
+        )
+        with self.assertRaisesRegex(UnsupportedPromptMedia, "暂不支持的附件"):
+            current_message_image_references(post_file)
+        self.assertIn("body with folder", post_folder.content_text)
+        self.assertIn(
+            '<folder key="folder_specs" name="Specs"/>',
+            post_folder.content_text,
+        )
+        self.assertEqual(post_folder.resources, [])
+        with self.assertRaisesRegex(UnsupportedPromptMedia, "暂不支持的附件"):
+            current_message_image_references(post_folder)
         # Literal Markdown-looking text and fenced code are rendered into
         # content_text but are not downloadable post image nodes.
         self.assertIn("img_text", literal_text.content_text)
@@ -399,7 +549,7 @@ class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
             image_references(fenced_markdown, source="current_message"),
             (),
         )
-        # SDK 1.2.0 treats an unmatched opening fence as ordinary Markdown
+        # SDK 1.4.0 treats an unmatched opening fence as ordinary Markdown
         # and emits a descriptor. Netizen follows fenced-code semantics and
         # refuses to turn a code sample into a pixel download.
         self.assertEqual(
@@ -534,7 +684,7 @@ class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
     async def test_version_pinned_reply_relation_gap_and_compatibility_boundary(
         self,
     ) -> None:
-        self.assertEqual(importlib.metadata.version("lark-channel-sdk"), "1.2.0")
+        self.assertEqual(importlib.metadata.version("lark-channel-sdk"), "1.4.0")
         pipeline = InboundPipeline(
             PipelineConfig(
                 inbound=InboundConfig(
@@ -587,16 +737,61 @@ class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
         )
 
         # Removal trigger: when this becomes non-None in a fixed SDK, delete
-        # the 1.2.0 raw relation adapter instead of updating the assertion.
+        # the 1.4.0 raw relation adapter instead of updating the assertion.
         self.assertIsNone(first_level.reply)
         self.assertEqual(
-            quoted_message_id(first_level, sdk_version="1.2.0"),
+            quoted_message_id(first_level),
             "om_parent",
         )
         self.assertEqual(nested.reply.message_id, "om_parent")
         self.assertEqual(quoted_message_id(nested), "om_parent")
         self.assertIsNone(topic.reply)
-        self.assertIsNone(quoted_message_id(topic, sdk_version="1.2.0"))
+        self.assertIsNone(quoted_message_id(topic))
+
+    async def test_post_bot_mention_gap_and_compatibility_boundary(self) -> None:
+        pipeline = InboundPipeline(
+            PipelineConfig(inbound=InboundConfig(include_raw=True)),
+            PipelineDeps(),
+        )
+        pipeline.set_bot_open_id("ou_bot")
+        message = await pipeline.normalize(
+            message_event={
+                "message_id": "om_post_mention",
+                "chat_id": "oc_chat",
+                "chat_type": "group",
+                "message_type": "post",
+                "content": json.dumps(
+                    {
+                        "zh_cn": {
+                            "content_v2": [[
+                                {
+                                    "tag": "at",
+                                    "user_id": "@_user_1",
+                                    "user_name": "Netizen",
+                                },
+                                {"tag": "text", "text": " /new"},
+                            ]]
+                        }
+                    }
+                ),
+                "mentions": [
+                    {
+                        "key": "@_user_1",
+                        "id": {"open_id": "ou_bot"},
+                        "name": "Netizen",
+                    }
+                ],
+            },
+            sender={"sender_id": {"open_id": "ou_user"}},
+        )
+
+        assert message is not None
+        self.assertTrue(message.mentioned_bot)
+        self.assertEqual(message.body_text, "@Netizen /new")
+        self.assertEqual(
+            channel_app._body_text(message, bot_open_id="ou_bot"),
+            "/new",
+        )
 
     async def test_interactive_v1_gap_and_v2_visible_text_contract(self) -> None:
         pipeline = InboundPipeline(
@@ -734,9 +929,81 @@ class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
         # delete the raw CardKit adapter instead of weakening this assertion.
         self.assertEqual(context.text, "")
         self.assertEqual(
-            interactive_quote_visible_text(context, sdk_version="1.2.0"),
+            interactive_quote_visible_text(context),
             "Card title\nVisible body",
         )
+
+    async def test_webhook_start_and_message_dispatch_ignore_meeting_features(
+        self,
+    ) -> None:
+        delivered = threading.Event()
+        received: list[InboundMessage] = []
+        channel = FeishuChannel(
+            app_id="cli_contract",
+            app_secret="test-secret",
+            transport=TransportConfig(kind="webhook"),
+            name_lookup=lambda open_ids: {
+                open_id: "Contract User" for open_id in open_ids
+            },
+            policy=PolicyConfig(
+                dm_policy="open",
+                group_policy="open",
+                require_mention=False,
+            ),
+        )
+
+        def on_message(message: InboundMessage) -> None:
+            received.append(message)
+            delivered.set()
+
+        channel.on(Events.MESSAGE, on_message)
+        now_ms = str(int(time.time() * 1000))
+        payload = {
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt_contract",
+                "event_type": "im.message.receive_v1",
+                "create_time": now_ms,
+                "token": "",
+                "app_id": "cli_contract",
+                "tenant_key": "tenant",
+            },
+            "event": {
+                "sender": {
+                    "sender_id": {"open_id": "ou_user"},
+                    "sender_type": "user",
+                    "tenant_key": "tenant",
+                },
+                "message": {
+                    "message_id": "om_contract",
+                    "chat_id": "oc_contract",
+                    "chat_type": "p2p",
+                    "message_type": "text",
+                    "content": json.dumps({"text": "hello"}),
+                    "create_time": now_ms,
+                },
+            },
+        }
+        identity = BotIdentity(open_id="ou_bot", name="Netizen")
+
+        try:
+            with patch(
+                "lark_channel.channel.channel.fetch_bot_identity",
+                new=AsyncMock(return_value=identity),
+            ):
+                await channel.connect()
+            self.assertTrue(channel.is_ready)
+            status, _body = await channel.handle_webhook_request(
+                {},
+                json.dumps(payload).encode(),
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(await asyncio.to_thread(delivered.wait, 5.0))
+            self.assertEqual(len(received), 1)
+            self.assertEqual(received[0].content_text, "hello")
+            self.assertEqual(received[0].sender.display_name, "Contract User")
+        finally:
+            await channel.disconnect()
 
 
 if __name__ == "__main__":

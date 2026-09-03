@@ -295,6 +295,68 @@ class ImageReferenceTest(unittest.TestCase):
         with self.assertRaisesRegex(UnsupportedPromptMedia, "media"):
             current_message_image_references(video)
 
+    def test_top_level_post_files_and_folders_are_rejected_with_locale_body(
+        self,
+    ) -> None:
+        cases = (
+            (
+                {
+                    "file_key": "file_report",
+                    "file_name": "report.pdf",
+                    "is_folder": False,
+                },
+                [resource("file", "file_report")],
+            ),
+            (
+                {
+                    "file_key": "folder_specs",
+                    "file_name": "Specs",
+                    "is_folder": True,
+                },
+                [],
+            ),
+        )
+        for attachment, resources in cases:
+            with self.subTest(is_folder=attachment["is_folder"]):
+                post = message(
+                    "post",
+                    post={
+                        "files": [attachment],
+                        "zh_cn": {
+                            "content_v2": [[
+                                {"tag": "text", "text": "inspect "},
+                                {"tag": "img", "image_key": "img_visible"},
+                            ]]
+                        },
+                    },
+                    resources=resources,
+                )
+
+                with self.assertRaisesRegex(
+                    UnsupportedPromptMedia,
+                    "暂不支持的附件",
+                ):
+                    current_message_image_references(post)
+
+        image_only = message(
+            "post",
+            post={
+                "files": [],
+                "zh_cn": {
+                    "content_v2": [[
+                        {"tag": "img", "image_key": "img_visible"},
+                    ]]
+                },
+            },
+        )
+        self.assertEqual(
+            [
+                reference.file_key
+                for reference in current_message_image_references(image_only)
+            ],
+            ["img_visible"],
+        )
+
 
 class ImagePreparationTest(unittest.IsolatedAsyncioTestCase):
     async def test_png_jpeg_gif_and_webp_are_admitted_by_magic_bytes(self) -> None:

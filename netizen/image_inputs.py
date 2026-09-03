@@ -109,6 +109,7 @@ def current_message_image_references(message: Any) -> tuple[ImageReference, ...]
     if message_type == "post":
         elements = _selected_post_elements(message)
         visible_types = _post_visible_resource_types(elements or ())
+        has_top_level_attachments = _post_has_top_level_attachments(message)
         has_unsupported_visible_resource = any(
             resource_type != "image" for resource_type in visible_types
         )
@@ -116,11 +117,16 @@ def current_message_image_references(message: Any) -> tuple[ImageReference, ...]
         # a conservative fallback for rejecting unsupported attachments.  If
         # the AST exists, it is authoritative for the same document/version
         # that the SDK rendered; descriptors can belong to a hidden locale or
-        # the unselected content-v1 variant in SDK 1.2.0.
+        # the unselected content-v1 variant in SDK 1.4.0. Top-level post.files
+        # is outside that locale AST and is rejected independently above.
         has_unsupported_fallback_resource = elements is None and any(
             _resource_type(resource) != "image" for resource in resources
         )
-        if has_unsupported_visible_resource or has_unsupported_fallback_resource:
+        if (
+            has_top_level_attachments
+            or has_unsupported_visible_resource
+            or has_unsupported_fallback_resource
+        ):
             raise UnsupportedPromptMedia(
                 "当前消息还包含暂不支持的附件；目前仅支持普通图片和富文本图片。"
             )
@@ -160,7 +166,7 @@ def image_references(
     if message_type == "post":
         # The typed PostContent AST is the only reliable way to distinguish a
         # real image node from a literal Markdown-looking string in a text or
-        # code node.  Match SDK 1.2.0's public rendering choice: first locale,
+        # code node.  Match SDK 1.4.0's public rendering choice: first locale,
         # non-empty content_v2 before content.  This also avoids descriptors
         # from hidden locales or an unselected content-v1 variant.
         elements = _selected_post_elements(message)
@@ -488,6 +494,27 @@ def _selected_post_elements(message: Any) -> tuple[dict[str, Any], ...] | None:
         for element in paragraph
         if isinstance(element, dict)
     )
+
+
+def _post_has_top_level_attachments(message: Any) -> bool:
+    """Return whether the public post AST declares a top-level files zone.
+
+    SDK 1.4.0 renders ``post.files`` beside the locale documents. Files also
+    receive a resource descriptor, but folders intentionally do not, so the
+    locale AST and ``resources`` cannot enforce the current-input policy on
+    their own. Treat a malformed non-null zone as present and fail closed.
+    """
+
+    content = getattr(message, "content", None)
+    post = getattr(content, "post", None)
+    if not isinstance(post, dict) or "files" not in post:
+        return False
+    files = post.get("files")
+    if files is None:
+        return False
+    if isinstance(files, list):
+        return bool(files)
+    return True
 
 
 def _post_image_keys(elements: tuple[dict[str, Any], ...]) -> tuple[str, ...]:
