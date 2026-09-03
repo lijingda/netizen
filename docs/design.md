@@ -415,38 +415,47 @@ message 都来自 SDK 的公开 native Turn 模型，不创建外层 Turn 记录
 普通 Turn completed 后，按
 [ADR 0024](adr/0024-send-structured-turn-files-from-completion-cards.md)、
 [ADR 0025](adr/0025-use-turn-provenance-not-project-containment-for-files.md) 与
-[ADR 0027](adr/0027-use-turn-diff-and-self-contained-file-cards.md)，优先解析该 exact Turn
+[ADR 0027](adr/0027-use-turn-diff-and-self-contained-file-cards.md)、
+[ADR 0053](adr/0053-show-exact-turn-line-statistics-in-files.md)，优先解析该 exact Turn
 最新公开 `turn/diff/updated.diff` aggregate snapshot，再用 completed `fileChange`
-add/update/move 与 `imageGeneration.saved_path` 补充。unified diff 只读 file metadata，
-支持 delete 排除、rename、binary 和 Git quoted path，不读 hunk 正文。Project 仅作为
+add/update/move 与 `imageGeneration.saved_path` 补充。unified diff 读取 file metadata 与
+完整可验证的 hunk 正文，支持常见的多 hunk、非空新增/删除、带内容的 rename、binary 和
+Git quoted path，同时产出整轮及 current-side path 的新增/删除行数；无 hunk 时仅把窄定义
+的纯 100% rename 认定为 `+0 -0`。整轮总计包含 deleted path；binary 不阻断其他已验证
+文本总计，copy、mode-only、空文件增删等其他 metadata-only 变化仅保留可解析路径并省略
+数字，图片和异常 diff 也不伪造数字。Project 仅作为
 相对路径解析基准，不是文件授权边界；absolute 或 `..` 路径当前解析为普通文件时同样
 可用。访问权限仍由原生 Codex sandbox/approval 决定。canonical 重复、缺失、目录和设备
 文件被忽略；不扫描目录、不解析最终文本，也不推断没有进入 Turn diff/items 的
 shell/MCP/第三方工具输出。非 Goal 且 Progress Card 关闭时，没有可用文件仍发送原
 富文本/静态文本；存在文件时只发送一张包含最终回复与“本轮文件”的 Card 2.0。Progress
 Card 开启时，completed 结果与可用文件进入已发送的同一张卡。Goal 始终使用组合卡，但
-满足四项终态证据后，只从 exact 最终成功物理 Turn 的 completed structured items
-提取文件，并只用该 Turn 的 final agent answer；Goal adapter 不提供对应 aggregate diff，
-也不扫描、回退或聚合更早 rollover Turn。最终物理 Turn 没有文本/文件时使用既有空结果
-语义，不用上一轮填充。
+满足四项终态证据后，只从 exact 最终成功 physical Turn 的 latest aggregate diff 与
+completed structured items 提取文件，并只用该 Turn 的 final agent answer。现有唯一 Goal
+notification Tap 在 rollover 时清空旧 snapshot，只把 final physical Turn 的 latest diff
+交给 completion；不增加 consumer，不从 history 事后补抓，也不扫描、回退或聚合更早
+rollover Turn。最终 physical Turn 没有文本/文件时使用既有空结果语义，不用上一轮填充。
 成功 Side Turn 同样只从 exact completed Turn 的 completed structured items 提取，不读取
-aggregate diff/history 或更早 Side Turn；compaction、失败和中断终态不进入本轮文件路径。
+aggregate diff/history 或更早 Side Turn，因此不显示行数；其 observer、唯一 `handle.run()`
+consumer 和 4096 high-water 保持不变。compaction、失败和中断终态不进入本轮文件路径。
 
 普通 Result + Files 与 Activity + Result + Files 卡继续使用 v4 callback；Goal 与 Files
-同卡时使用 v5 完整组合 manifest。两版每页 8 个，最多 500 个完整循环分页，展示总数、页码、
-脱敏逻辑位置与当次读取的
-大小；Project 内文件使用 Project 相对路径，Project 外原生生成图使用
+同卡时使用 v5 完整组合 manifest。两版每页 8 个，最多 400 个完整循环分页，展示总数、
+页码、可用时的 exact Turn 整轮 `+N -M`、脱敏逻辑位置与逐文件 `+N -M`；图片和统计未知的
+文件不显示数字，也不显示文件大小。Project 内文件使用 Project 相对路径，Project 外原生生成图使用
 `生成图片/<文件名>`，账号 home 内其他文件使用 `~/...`，其余位置只显示有界路径尾部。
-不使用表格、预览、diff、发送全部或静默截断；超过 500 个或完整 JSON 超过 55,000 bytes
-时明确说明平台边界。可见正文不显示绝对路径，但每个发送 callback 明文携带该文件
+所有条目按钮统一为“发送”，顶部说明点击后会把当前图片或文件发送到卡片话题。不使用
+表格、预览、diff 正文、发送全部或静默截断；超过 400 个或完整 JSON 超过 55,000 bytes
+时明确说明平台边界并省略整个 Files 模块。可见正文不显示绝对路径，但每个发送 callback 明文携带该文件
 canonical absolute path；每页唯一的“下一页/回到第一页”循环 callback 明文携带完整文件
-manifest 和有界冻结的 Goal/Activity/Result 模块。Binding/Turn 只保留 provenance 和
+manifest；已知的条目统计用短字段 `a/d` 成对携带，未知时成对省略，整轮统计也以顶层
+`a/d` 携带。v5 另外携带有界冻结的 Goal/Activity/Result 模块。Binding/Turn 只保留 provenance 和
 幂等 identity；v5 callback 不读取飞书原卡、Binding、Project 或 completed Turn，直接重建
 并更新完整 Card 2.0，翻页不会丢失其他模块。cleared 卡不在进程内保留文件清单、Projection
 或 session；非 cleared Goal 只为当前进程控制面有界保留终态 Projection。两者都不写入
 SQLite，且 v5 文件 callback 自包含，所以服务/App Server 重启后已发送卡仍可翻页和发送，
-但旧 Goal 控制按钮会过期。既有 v4 自包含文件卡保持兼容；旧 v3 opaque-ref 卡片点击时
-明确提示已过期，不再重读历史。
+但旧 Goal 控制按钮会过期。该 manifest schema 在正式推广前原位收敛，action version 不变，
+不承诺升级前 pilot 测试卡兼容；旧 v3 opaque-ref 卡片点击时明确提示已过期，不再重读历史。
 
 每次翻页和发送都从 payload path 重新 resolve/stat；不可用文件在分页中保留位置并取消
 发送按钮。图片白名单为 PNG/JPEG/GIF/WebP，点击后用 `OutboundImage`；其他普通文件用

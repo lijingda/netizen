@@ -49,7 +49,6 @@ from .sdk_gap_adapter import GoalSnapshot
 from .turn_files import (
     TurnFile,
     TurnFilePage,
-    format_file_size,
     inspect_turn_file_path,
     paginate_turn_files,
 )
@@ -70,7 +69,7 @@ ACTION_VERSION = 4
 TURN_FILE_ACTION_VERSION = 4
 REPLY_CARD_ACTION_VERSION = 5
 SESSIONS_PAGE_SIZE = 10
-TURN_FILE_MANIFEST_LIMIT = 500
+TURN_FILE_MANIFEST_LIMIT = 400
 TURN_FILE_CARD_JSON_LIMIT_BYTES = 55_000
 _TURN_ANSWER_ELEMENT_ID = "turnanswerv1"
 _TURN_FILES_ELEMENT_ID = "turnfilesv4"
@@ -240,6 +239,8 @@ def reply_card_from_manifest(
     manifest: tuple[TurnFileManifestItem, ...],
     reply: ReplyCardManifest,
     page: int,
+    additions: int | None = None,
+    deletions: int | None = None,
 ) -> OutboundCard:
     """Rebuild a v5 Reply Card from one strict self-contained page callback."""
 
@@ -250,9 +251,7 @@ def reply_card_from_manifest(
             f"本轮文件共 {len(manifest)} 个，超过卡片完整分页上限 "
             f"{TURN_FILE_MANIFEST_LIMIT} 个；未截断文件清单。"
         )
-    inspected = tuple(
-        inspect_turn_file_path(entry.path, entry.label) for entry in manifest
-    )
+    inspected = tuple(_inspect_manifest_file(entry) for entry in manifest)
     return reply_card(
         ReplyCardProjection(
             scope=scope,
@@ -265,6 +264,8 @@ def reply_card_from_manifest(
                 items=tuple(_reply_file_item(item) for item in inspected),
                 page=page,
                 action_version=REPLY_CARD_ACTION_VERSION,
+                additions=additions,
+                deletions=deletions,
             ),
         )
     )
@@ -309,7 +310,16 @@ def _normalize_reply_projection(
             raise ValueError("a Goal + Files Reply Card requires v5 callbacks")
         if goal is not None and goal.binding_id != files.binding_id:
             raise ValueError("Goal and Files modules require the same binding_id")
-        _reply_turn_files(files.items)
+        _optional_line_counts(
+            files.additions,
+            files.deletions,
+            field="files",
+        )
+        normalized_files = _reply_turn_files(files.items)
+        files = replace(
+            files,
+            items=tuple(_reply_file_item(item) for item in normalized_files),
+        )
     if goal is not None and projection.scope is None:
         raise ValueError("a Goal module requires scope")
     if activity is not None:
@@ -326,6 +336,7 @@ def _normalize_reply_projection(
         projection,
         goal=goal,
         activity=activity,
+        files=files,
     )
 
 
@@ -438,12 +449,41 @@ def _bounded_nonnegative_int(value: Any, field: str) -> int:
     return value
 
 
+def _optional_line_counts(
+    additions: Any,
+    deletions: Any,
+    *,
+    field: str,
+) -> tuple[int | None, int | None]:
+    if additions is None and deletions is None:
+        return None, None
+    if additions is None or deletions is None:
+        raise ValueError(f"{field} line counts must be present together")
+    return (
+        _bounded_nonnegative_int(additions, f"{field}.additions"),
+        _bounded_nonnegative_int(deletions, f"{field}.deletions"),
+    )
+
+
+def _inspect_manifest_file(entry: TurnFileManifestItem) -> TurnFile:
+    inspected = inspect_turn_file_path(entry.path, entry.label)
+    if not inspected.available or inspected.media_kind == "image":
+        return inspected
+    return replace(
+        inspected,
+        additions=entry.additions,
+        deletions=entry.deletions,
+    )
+
+
 def _reply_file_item(turn_file: TurnFile) -> ReplyCardFileItem:
     return ReplyCardFileItem(
         path=str(turn_file.resolved_path),
         label=turn_file.display_path,
         size=turn_file.size,
         media_kind=turn_file.media_kind,
+        additions=turn_file.additions,
+        deletions=turn_file.deletions,
     )
 
 
@@ -466,12 +506,22 @@ def _reply_turn_files(
             _bounded_nonnegative_int(size, "file.size")
             if media_kind not in {"image", "file"}:
                 raise ValueError("file.media_kind is invalid")
+        additions, deletions = _optional_line_counts(
+            item.additions,
+            item.deletions,
+            field="file",
+        )
+        if media_kind != "file":
+            additions = None
+            deletions = None
         results.append(
             TurnFile(
                 display_path=label,
                 resolved_path=Path(path),
                 size=size,
                 media_kind=media_kind,
+                additions=additions,
+                deletions=deletions,
             )
         )
     return tuple(results)
@@ -485,6 +535,8 @@ def turn_files_card(
     final_response: str,
     files: tuple[TurnFile, ...],
     page: int = 0,
+    additions: int | None = None,
+    deletions: int | None = None,
 ) -> OutboundCard:
     return reply_card(
         ReplyCardProjection(
@@ -496,6 +548,8 @@ def turn_files_card(
                 items=tuple(_reply_file_item(item) for item in files),
                 page=page,
                 action_version=TURN_FILE_ACTION_VERSION,
+                additions=additions,
+                deletions=deletions,
             ),
         )
     )
@@ -511,6 +565,8 @@ def turn_progress_card(
     scope: FeishuScope | None = None,
     binding_id: str | None = None,
     turn_id: str | None = None,
+    additions: int | None = None,
+    deletions: int | None = None,
 ) -> OutboundCard:
     """Render one replaceable Phase 1 Turn progress card.
 
@@ -556,6 +612,8 @@ def turn_progress_card(
             turn_id=turn_id,
             items=tuple(_reply_file_item(item) for item in files),
             action_version=TURN_FILE_ACTION_VERSION,
+            additions=additions,
+            deletions=deletions,
         )
     result = None
     if normalized_terminal_status is not None:
@@ -579,6 +637,8 @@ def _turn_file_manifest(
         TurnFileManifestItem(
             path=str(turn_file.resolved_path),
             label=turn_file.display_path,
+            additions=turn_file.additions,
+            deletions=turn_file.deletions,
         )
         for turn_file in files
     )
@@ -697,7 +757,12 @@ def _render_reply_card_page(projection: ReplyCardProjection) -> OutboundCard:
                 turn_id=files.turn_id,
                 page=visible,
                 manifest=tuple(
-                    TurnFileManifestItem(item.path, item.label)
+                    TurnFileManifestItem(
+                        item.path,
+                        item.label,
+                        item.additions,
+                        item.deletions,
+                    )
                     for item in files.items
                 ),
                 final_response=(
@@ -712,6 +777,8 @@ def _render_reply_card_page(projection: ReplyCardProjection) -> OutboundCard:
                 ),
                 reply=_reply_card_manifest(projection),
                 action_version=files.action_version,
+                additions=files.additions,
+                deletions=files.deletions,
             )
         )
     card = builder.to_dict()
@@ -1172,6 +1239,8 @@ def turn_files_card_from_manifest(
     final_response: str,
     manifest: tuple[TurnFileManifestItem, ...],
     page: int,
+    additions: int | None = None,
+    deletions: int | None = None,
 ) -> OutboundCard:
     """Rebuild a v4 card using only state carried by its page callback."""
 
@@ -1182,9 +1251,7 @@ def turn_files_card_from_manifest(
             f"本轮文件共 {len(manifest)} 个，超过卡片完整分页上限 "
             f"{TURN_FILE_MANIFEST_LIMIT} 个；未截断文件清单。"
         )
-    files = tuple(
-        inspect_turn_file_path(entry.path, entry.label) for entry in manifest
-    )
+    files = tuple(_inspect_manifest_file(entry) for entry in manifest)
     return reply_card(
         ReplyCardProjection(
             scope=scope,
@@ -1195,6 +1262,8 @@ def turn_files_card_from_manifest(
                 items=tuple(_reply_file_item(item) for item in files),
                 page=page,
                 action_version=TURN_FILE_ACTION_VERSION,
+                additions=additions,
+                deletions=deletions,
             ),
         )
     )
@@ -1209,6 +1278,8 @@ def turn_progress_card_from_manifest(
     manifest: tuple[TurnFileManifestItem, ...],
     progress: TurnProgressManifest,
     page: int,
+    additions: int | None = None,
+    deletions: int | None = None,
 ) -> OutboundCard:
     """Rebuild a completed progress card from its self-contained callback."""
 
@@ -1219,9 +1290,7 @@ def turn_progress_card_from_manifest(
             f"本轮文件共 {len(manifest)} 个，超过卡片完整分页上限 "
             f"{TURN_FILE_MANIFEST_LIMIT} 个；未截断文件清单。"
         )
-    files = tuple(
-        inspect_turn_file_path(entry.path, entry.label) for entry in manifest
-    )
+    files = tuple(_inspect_manifest_file(entry) for entry in manifest)
     return reply_card(
         ReplyCardProjection(
             scope=scope,
@@ -1237,6 +1306,8 @@ def turn_progress_card_from_manifest(
                 items=tuple(_reply_file_item(item) for item in files),
                 page=page,
                 action_version=TURN_FILE_ACTION_VERSION,
+                additions=additions,
+                deletions=deletions,
             ),
         )
     )
@@ -1311,10 +1382,18 @@ def decode_turn_file_action(
     if name is TurnFileActionName.PAGE:
         if version == TURN_FILE_ACTION_VERSION:
             action_fields = {"page", "files", "answer"}
-            allowed_action_fields = (action_fields, action_fields | {"progress"})
+            allowed_action_fields = (
+                action_fields,
+                action_fields | {"a", "d"},
+                action_fields | {"progress"},
+                action_fields | {"progress", "a", "d"},
+            )
         else:
             action_fields = {"page", "files", "reply"}
-            allowed_action_fields = (action_fields,)
+            allowed_action_fields = (
+                action_fields,
+                action_fields | {"a", "d"},
+            )
     if not any(
         set(payload) == common | scope_fields | fields
         for fields in allowed_action_fields
@@ -1340,6 +1419,8 @@ def decode_turn_file_action(
     answer = None
     progress = None
     reply = None
+    additions = None
+    deletions = None
     if name is TurnFileActionName.PAGE:
         raw_page = payload["page"]
         if (
@@ -1350,6 +1431,15 @@ def decode_turn_file_action(
             raise CardActionError("本轮文件页码必须是非负整数。")
         page = raw_page
         files = _decode_turn_file_manifest(payload["files"])
+        if "a" in payload:
+            try:
+                additions, deletions = _optional_line_counts(
+                    payload["a"],
+                    payload["d"],
+                    field="files",
+                )
+            except ValueError as error:
+                raise CardActionError("本轮文件总行数统计无效。") from error
         if version == TURN_FILE_ACTION_VERSION:
             answer = _required_string(payload["answer"], "answer")
             if len(answer) > 100_000 or "\x00" in answer:
@@ -1382,6 +1472,8 @@ def decode_turn_file_action(
         answer=answer,
         progress=progress,
         reply=reply,
+        additions=additions,
+        deletions=deletions,
     )
 
 
@@ -1397,7 +1489,10 @@ def _decode_turn_file_manifest(value: Any) -> tuple[TurnFileManifestItem, ...]:
     results: list[TurnFileManifestItem] = []
     seen: set[str] = set()
     for item in value:
-        if not isinstance(item, Mapping) or set(item) != {"path", "label"}:
+        if not isinstance(item, Mapping) or set(item) not in (
+            {"path", "label"},
+            {"path", "label", "a", "d"},
+        ):
             raise CardActionError("本轮文件清单条目字段无效。")
         path = _decode_turn_file_path(item["path"])
         label = _required_string(item["label"], "label")
@@ -1406,7 +1501,25 @@ def _decode_turn_file_manifest(value: Any) -> tuple[TurnFileManifestItem, ...]:
         if path in seen:
             raise CardActionError("本轮文件清单包含重复路径。")
         seen.add(path)
-        results.append(TurnFileManifestItem(path=path, label=label))
+        additions = None
+        deletions = None
+        if "a" in item:
+            try:
+                additions, deletions = _optional_line_counts(
+                    item["a"],
+                    item["d"],
+                    field="file",
+                )
+            except ValueError as error:
+                raise CardActionError("本轮文件行数统计无效。") from error
+        results.append(
+            TurnFileManifestItem(
+                path=path,
+                label=label,
+                additions=additions,
+                deletions=deletions,
+            )
+        )
     return tuple(results)
 
 
@@ -4110,14 +4223,24 @@ def _turn_files_block(
     progress: TurnProgressManifest | None = None,
     reply: ReplyCardManifest | None = None,
     action_version: int = TURN_FILE_ACTION_VERSION,
+    additions: int | None = None,
+    deletions: int | None = None,
 ) -> dict[str, Any]:
+    line_counts = ""
+    if additions is not None and deletions is not None:
+        line_counts = (
+            "\n"
+            f"<font color='green'>+{additions}</font> "
+            f"<font color='red'>-{deletions}</font>"
+        )
     elements: list[dict[str, Any]] = [
         {
             "tag": "markdown",
             "content": (
                 f"**本轮文件** · 共 {page.total_items} 个 · "
-                f"第 {page.page + 1}/{page.total_pages} 页\n"
-                "<font color='grey'>点击后以图片或文件消息发送到本卡片话题。</font>"
+                f"第 {page.page + 1}/{page.total_pages} 页"
+                f"{line_counts}\n"
+                "<font color='grey'>点击“发送”后，文件将以图片或文件消息发送到本卡片话题。</font>"
             ),
         }
     ]
@@ -4144,6 +4267,8 @@ def _turn_files_block(
                 progress=progress,
                 reply=reply,
                 action_version=action_version,
+                additions=additions,
+                deletions=deletions,
             )
         )
     return {
@@ -4199,11 +4324,17 @@ def _turn_file_row(
     assert turn_file.size is not None
     assert turn_file.media_kind is not None
     icon = "🖼️" if turn_file.media_kind == "image" else "📄"
-    label = (
-        "发送原图到话题"
-        if turn_file.media_kind == "image"
-        else "发送文件到话题"
-    )
+    line_counts = ""
+    if (
+        turn_file.media_kind == "file"
+        and turn_file.additions is not None
+        and turn_file.deletions is not None
+    ):
+        line_counts = (
+            "  "
+            f"<font color='green'>+{turn_file.additions}</font> "
+            f"<font color='red'>-{turn_file.deletions}</font>"
+        )
     return {
         "tag": "column_set",
         "flex_mode": "none",
@@ -4218,10 +4349,7 @@ def _turn_file_row(
                 "elements": [
                     {
                         "tag": "markdown",
-                        "content": (
-                            f"{icon} `{_turn_file_label(turn_file.display_path)}`\n"
-                            f"<font color='grey'>{format_file_size(turn_file.size)}</font>"
-                        ),
+                        "content": f"{icon} `{_turn_file_label(turn_file.display_path)}`{line_counts}",
                     }
                 ],
             },
@@ -4232,7 +4360,7 @@ def _turn_file_row(
                 "padding": "8px",
                 "elements": [
                     _callback_button(
-                        label=label,
+                        label="发送",
                         value=_turn_file_envelope(
                             scope,
                             TurnFileActionName.SEND,
@@ -4248,6 +4376,16 @@ def _turn_file_row(
     }
 
 
+def _encode_turn_file_manifest_item(
+    item: TurnFileManifestItem,
+) -> dict[str, Any]:
+    encoded: dict[str, Any] = {"path": item.path, "label": item.label}
+    if item.additions is not None and item.deletions is not None:
+        encoded["a"] = item.additions
+        encoded["d"] = item.deletions
+    return encoded
+
+
 def _turn_file_pagination(
     *,
     scope: FeishuScope,
@@ -4260,6 +4398,8 @@ def _turn_file_pagination(
     progress: TurnProgressManifest | None,
     reply: ReplyCardManifest | None,
     action_version: int,
+    additions: int | None,
+    deletions: int | None,
 ) -> dict[str, Any]:
     columns: list[dict[str, Any]] = [
         {
@@ -4282,10 +4422,13 @@ def _turn_file_pagination(
         "turn_id": _turn_reference(turn_id),
         "page": target,
         "files": [
-            {"path": item.path, "label": item.label}
+            _encode_turn_file_manifest_item(item)
             for item in manifest
         ],
     }
+    if additions is not None and deletions is not None:
+        page_value["a"] = additions
+        page_value["d"] = deletions
     if action_version == TURN_FILE_ACTION_VERSION:
         page_value["answer"] = final_response
         if progress is not None:

@@ -46,6 +46,7 @@ from netizen.turn_plan_observer import (
     PinnedTurnActivityObserver,
     TurnActivityObservation,
 )
+from netizen.turn_files import turn_diff_summary
 
 
 _NOT_MATERIALIZED_SUFFIX = (
@@ -1768,10 +1769,15 @@ async def _goal_live(cwd: Path) -> dict[str, Any]:
                 "Goal must remain disabled"
             )
 
+        goal_file_name = f"netizen-goal-diff-{time.time_ns()}.txt"
+        goal_file = cwd / goal_file_name
+        goal_file_content = "NETIZEN-GOAL-DIFF-LIVE"
         handle = await control.start(
             thread.id,
             "Run /bin/sleep 12 as a bounded first step. After any resume, "
-            "reply exactly GOAL-LIVE-DONE and complete this Goal.",
+            f"create {goal_file_name} in the current working directory with exact "
+            f"content {goal_file_content}, then reply exactly "
+            "GOAL-LIVE-DONE and complete this Goal.",
         )
         await asyncio.sleep(1)
         try:
@@ -1802,6 +1808,29 @@ async def _goal_live(cwd: Path) -> dict[str, Any]:
             terminal_goal = await control.get(thread.id)
             if terminal_goal is None or not terminal_goal.status.terminal_or_paused:
                 raise AssertionError("resumed Goal did not reach a terminal status")
+            if resumed_terminal.turn_diff is None:
+                raise AssertionError(
+                    "resumed Goal final physical Turn omitted its aggregate diff"
+                )
+            summary = turn_diff_summary(resumed_terminal.turn_diff)
+            file_stats = next(
+                (
+                    item
+                    for item in summary.files
+                    if item.path == goal_file_name
+                ),
+                None,
+            )
+            if (
+                file_stats is None
+                or file_stats.additions != 1
+                or file_stats.deletions != 0
+                or not goal_file.is_file()
+                or goal_file.read_text(encoding="utf-8").strip() != goal_file_content
+            ):
+                raise AssertionError(
+                    "resumed Goal diff did not identify the exact generated file"
+                )
         except BaseException:
             for candidate in (locals().get("resumed"), handle):
                 if candidate is None:
@@ -1836,6 +1865,9 @@ async def _goal_live(cwd: Path) -> dict[str, Any]:
             "external_active_read_only_reconcile": True,
             "resumed_logical_turn_id": resumed.id,
             "resumed_physical_terminal_id": resumed_terminal.final_physical_turn_id,
+            "resumed_diff_file": goal_file_name,
+            "resumed_diff_additions": file_stats.additions,
+            "resumed_diff_deletions": file_stats.deletions,
             "terminal_status": terminal_goal.status.value,
             "observed_turn_ids": goal_turn_ids,
             "same_thread_followup_turn_id": followup.id,

@@ -760,6 +760,10 @@ class GoalOutcome:
     final_turn_status: str | None = None
     final_items: tuple[object, ...] = ()
     final_response: str | None = None
+    # Latest aggregate diff captured for the exact final physical Turn by the
+    # existing Goal notification consumer. It is never reconstructed from
+    # persisted Turn history or stored by Netizen.
+    turn_diff: str | None = None
     error: BaseException | None = None
     background_cleanup_requested: bool = False
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
@@ -6388,6 +6392,11 @@ class CodexRuntime:
                 final_turn_status=active.final_turn_status,
                 final_items=active.final_items,
                 final_response=active.final_response,
+                turn_diff=(
+                    active.stream_terminal.turn_diff
+                    if active.stream_terminal is not None
+                    else None
+                ),
                 error=error,
                 background_cleanup_requested=active.cleanup_succeeded,
                 task_feedback=active.task_feedback,

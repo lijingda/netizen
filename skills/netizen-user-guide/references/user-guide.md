@@ -144,23 +144,28 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
   Project 不是额外的文件权限边界，只作为相对路径的解析基准，不会过滤 exact Turn
   明确报告的其他目录文件。
 - 每页显示 8 个文件、总数和页码；列表不会用 Markdown 表格撑长，也不会静默截断。
-  单张卡片最多完整承载 500 个；通过“下一页/回到第一页”循环覆盖全部页面。超过文件数或
+  单张卡片最多完整承载 400 个；通过“下一页/回到第一页”循环覆盖全部页面。超过文件数或
   卡片编码容量时会明确提示，不发送残缺清单。
-- 图片点击“发送原图到话题”，其他文件点击“发送文件到话题”。文件会作为真实飞书
-  图片或文件消息回复该卡片；平面卡片由此形成话题，原本就在话题中的卡片仍留在原话题。
-- 卡片的本轮文件区显示脱敏逻辑位置和大小：Project 内是相对路径，原生生成图显示为
+- 图片和其他文件的按钮都显示“发送”。点击后，文件会作为真实飞书图片或文件消息回复该
+  卡片；平面卡片由此形成话题，原本就在话题中的卡片仍留在原话题。
+- 卡片的本轮文件区显示脱敏逻辑位置，不显示文件大小：Project 内是相对路径，原生生成图显示为
   `生成图片/<文件名>`，账号 home 内的其他文件显示 `~/...`，不会显示云主机绝对路径。
   不会自动上传全部文件，也没有预览、diff 或“一键发送全部”。
+- Ordinary Turn 和 Goal 的 exact 最终 physical Turn 只有完整可验证的文本 hunk 和纯 100%
+  rename 显示数字：顶部显示整轮 `+N -M`，普通非图片文件行显示各自的 `+N -M`；顶部可能
+  包含已删除文件的行数。binary、图片、缺失文件、copy/mode-only/空文件等其他
+  metadata-only 变化和异常 diff 不显示相应数字。Side 暂不显示行数。
 - 本轮文件不是快照。点击时会重新读取卡片记录的路径并发送当前内容；文件若已删除、变成
   目录或卡片已失效，会明确失败且原卡片保持不变。同一路径后来被替换或重绑时，发送的是
   点击时当前普通文件。
-- 普通完成/进度文件卡继续使用 v4 callback；Goal 与 Files 同卡时使用 v5，把有界的
+- 普通/Side 完成或进度文件卡使用 v4 callback；Goal 与 Files 同卡时使用 v5，把有界的
   Goal/Activity/Result 投影与完整文件清单保存在飞书 callback payload 中，因此翻页不会
   丢失其他模块。Netizen 服务或 App Server 正常重启后，已发送卡片仍可翻页和发送，不会
-  为此保存本地 card session。两版文件卡都可用。
+  为此保存本地 card session。正式推广前的测试卡不承诺跨版本兼容。
 - 普通 Turn 文件来源优先采用 latest aggregate diff，并用 completed `fileChange` 和
-  `imageGeneration` 补充；Side 与 Goal 只读取各自 exact 成功终态 Turn 的 completed
-  structured items，不读取 aggregate diff 或更早 Turn。shell、MCP 或第三方工具的输出若
+  `imageGeneration` 补充；Goal 只采用 exact 最终 physical Turn 的 latest aggregate diff 与
+  completed structured items，Side 只采用 exact 成功终态 Turn 的 completed structured
+  items。两者都不读取更早 Turn。shell、MCP 或第三方工具的输出若
   没有进入这些 native 事实，不会被扫描补齐；最终答复里写出路径也不会自动把它变成卡片文件。
 
 ## 会话与 Project 管理
@@ -410,10 +415,10 @@ Side 可能因空闲两小时、服务重启或关闭流程进入终态而过期
 ### “为什么任务生成了文件，却没有出现‘本轮文件’？”
 
 当前版本为普通成功 Turn 读取原生 latest aggregate diff，并用 completed `fileChange` /
-`imageGeneration` 记录补充；Side 与 Goal 只读取各自 exact 最终成功 Turn 的这两类
-completed structured items，不提供 aggregate diff，也不聚合更早 Turn。三者都不解析最终
-回复中的路径，也不扫描 Project。shell、MCP 或第三方工具生成但未进入这些 native 事实的
-文件，以及压缩输出，都不会进入卡片。文件必须仍存在且是普通文件；Project
+`imageGeneration` 记录补充；Goal 读取 exact 最终成功 physical Turn 的同类事实，Side 只读
+exact completed Side Turn 的 structured items。Goal 与 Side 都不聚合更早 Turn，Side 也不
+读取 aggregate diff。三者都不解析最终回复中的路径，也不扫描 Project。shell、MCP 或第三方
+工具生成但未进入这些 native 事实的文件，以及压缩输出，都不会进入卡片。文件必须仍存在且是普通文件；Project
 不是额外的文件权限边界，exact Turn 明确报告的其他目录文件仍可出现。
 
 ### “点击本轮文件后，拿到的是任务完成时的版本吗？”

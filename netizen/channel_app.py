@@ -226,11 +226,13 @@ from .sdk_gap_adapter import SkillCatalogError
 from .sdk_gap_adapter import GoalControlError, GoalSnapshot
 from .skill_references import InvalidSkillReference, parse_skill_references
 from .turn_files import (
+    TurnDiffSummary,
     TurnFile,
     TurnFileError,
     extract_turn_files,
     has_turn_file_references,
     require_turn_file_path,
+    turn_diff_summary,
 )
 
 
@@ -569,6 +571,8 @@ def _reply_files_module(
     binding_id: str,
     turn_id: str,
     files: tuple[TurnFile, ...],
+    additions: int | None = None,
+    deletions: int | None = None,
 ) -> ReplyCardFilesModule:
     return ReplyCardFilesModule(
         binding_id=binding_id,
@@ -579,10 +583,14 @@ def _reply_files_module(
                 label=item.display_path,
                 size=item.size,
                 media_kind=item.media_kind,
+                additions=item.additions,
+                deletions=item.deletions,
             )
             for item in files
         ),
         action_version=REPLY_CARD_ACTION_VERSION,
+        additions=additions,
+        deletions=deletions,
     )
 
 
@@ -2682,9 +2690,17 @@ class ChannelApplication:
         await self._reactions.freeze(outcome.turn_id)
         await self._safe_add_reaction(outcome.origin, terminal_reaction)
         await self._reactions.stop(outcome.turn_id)
+        diff_summary = (
+            turn_diff_summary(self._task_turn_diff(outcome))
+            if outcome.error is None and outcome.status == "completed"
+            else TurnDiffSummary()
+        )
         if outcome.task_feedback.progress_card_enabled:
             try:
-                progress_delivered = await self._complete_task_progress_card(outcome)
+                progress_delivered = await self._complete_task_progress_card(
+                    outcome,
+                    diff_summary,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -2722,17 +2738,20 @@ class ChannelApplication:
             detail = outcome.final_response or f"Codex Turn 状态为 {outcome.status!r}。"
             await self._reply(outcome.origin, f"任务未完成：{detail[:500]}")
             return
-        await self._complete_task_with_files(outcome)
+        await self._complete_task_with_files(outcome, diff_summary)
 
     async def _complete_task_progress_card(
         self,
         outcome: TurnOutcome | SideTurnOutcome,
+        diff_summary: TurnDiffSummary,
     ) -> bool:
         terminal_status = "failed"
         final_response: str
         files: tuple[TurnFile, ...] = ()
         scope: FeishuScope | None = None
         file_provenance_id: str | None = None
+        file_additions: int | None = None
+        file_deletions: int | None = None
         if outcome.error is not None:
             detail = str(outcome.error).strip() or type(outcome.error).__name__
             final_response = f"任务未完成：{detail[:500]}"
@@ -2756,12 +2775,14 @@ class ChannelApplication:
             final_response = outcome.final_response or "任务已结束，未产生文本回复。"
             if has_turn_file_references(
                 tuple(getattr(outcome.result, "items", ())),
-                turn_diff=self._task_turn_diff(outcome),
+                diff_summary=diff_summary,
             ):
                 try:
                     scope, files, file_provenance_id = (
-                        self._task_completion_files(outcome)
+                        self._task_completion_files(outcome, diff_summary)
                     )
+                    file_additions = diff_summary.additions
+                    file_deletions = diff_summary.deletions
                 except Exception:
                     logger.exception(
                         "failed to prepare terminal progress-card files",
@@ -2786,6 +2807,8 @@ class ChannelApplication:
                 scope=scope,
                 binding_id=(file_provenance_id if files else None),
                 turn_id=(outcome.turn_id if files else None),
+                additions=file_additions,
+                deletions=file_deletions,
             )
 
         if isinstance(outcome, TurnOutcome):
@@ -2828,6 +2851,7 @@ class ChannelApplication:
     def _completion_files(
         self,
         outcome: TurnOutcome,
+        diff_summary: TurnDiffSummary,
     ) -> tuple[FeishuScope, tuple[TurnFile, ...]]:
         binding = self._bindings.get(outcome.binding_id)
         scope = self._scope(outcome.origin)
@@ -2840,12 +2864,13 @@ class ChannelApplication:
         return scope, extract_turn_files(
             tuple(getattr(outcome.result, "items", ())),
             project.cwd,
-            turn_diff=outcome.turn_diff,
+            diff_summary=diff_summary,
         )
 
     def _side_completion_files(
         self,
         outcome: SideTurnOutcome,
+        diff_summary: TurnDiffSummary,
     ) -> tuple[FeishuScope, tuple[TurnFile, ...]]:
         record = self._bindings.get_side_topic(outcome.side_id)
         scope = self._scope(outcome.origin)
@@ -2859,16 +2884,18 @@ class ChannelApplication:
         return scope, extract_turn_files(
             tuple(getattr(outcome.result, "items", ())),
             outcome.cwd,
+            diff_summary=diff_summary,
         )
 
     def _task_completion_files(
         self,
         outcome: TurnOutcome | SideTurnOutcome,
+        diff_summary: TurnDiffSummary,
     ) -> tuple[FeishuScope, tuple[TurnFile, ...], str]:
         if isinstance(outcome, TurnOutcome):
-            scope, files = self._completion_files(outcome)
+            scope, files = self._completion_files(outcome, diff_summary)
             return scope, files, outcome.binding_id
-        scope, files = self._side_completion_files(outcome)
+        scope, files = self._side_completion_files(outcome, diff_summary)
         # v4 callbacks are self-contained. The captured Parent Binding is
         # provenance and deterministic-action identity only; paging and send
         # never read its current state or reinterpret the Side as a Binding.
@@ -2877,17 +2904,21 @@ class ChannelApplication:
     async def _complete_task_with_files(
         self,
         outcome: TurnOutcome | SideTurnOutcome,
+        diff_summary: TurnDiffSummary,
     ) -> None:
         final_response = outcome.final_response or "任务已结束，未产生文本回复。"
         items = tuple(getattr(outcome.result, "items", ()))
         if not has_turn_file_references(
             items,
-            turn_diff=self._task_turn_diff(outcome),
+            diff_summary=diff_summary,
         ):
             await self._reply(outcome.origin, final_response)
             return
         try:
-            scope, files, file_provenance_id = self._task_completion_files(outcome)
+            scope, files, file_provenance_id = self._task_completion_files(
+                outcome,
+                diff_summary,
+            )
             if not files:
                 await self._reply(outcome.origin, final_response)
                 return
@@ -2899,6 +2930,8 @@ class ChannelApplication:
                     outcome.final_response or _TURN_FILES_WITHOUT_FINAL_RESPONSE
                 ),
                 files=files,
+                additions=diff_summary.additions,
+                deletions=diff_summary.deletions,
             )
             result = await self._channel.reply(outcome.origin, card)
             if getattr(result, "success", True) is False:
@@ -3060,10 +3093,14 @@ class ChannelApplication:
                 collapsed=True,
             )
         files: tuple[TurnFile, ...] = ()
+        goal_diff_summary = turn_diff_summary(outcome.turn_diff)
         if (
             outcome.final_turn_status == "completed"
             and outcome.final_physical_turn_id is not None
-            and has_turn_file_references(outcome.final_items)
+            and has_turn_file_references(
+                outcome.final_items,
+                diff_summary=goal_diff_summary,
+            )
         ):
             try:
                 if binding is not None and (
@@ -3074,7 +3111,11 @@ class ChannelApplication:
                 project = self._projects.resolve_for_binding(
                     identity_project_alias
                 )
-                files = extract_turn_files(outcome.final_items, project.cwd)
+                files = extract_turn_files(
+                    outcome.final_items,
+                    project.cwd,
+                    diff_summary=goal_diff_summary,
+                )
             except Exception:
                 logger.exception(
                     "failed to prepare terminal Goal Reply Card files",
@@ -3103,6 +3144,8 @@ class ChannelApplication:
                     binding_id=identity_binding_id,
                     turn_id=outcome.final_physical_turn_id,
                     files=files,
+                    additions=goal_diff_summary.additions,
+                    deletions=goal_diff_summary.deletions,
                 )
                 if files and outcome.final_physical_turn_id is not None
                 and result_text is not None
@@ -5557,13 +5600,25 @@ class ChannelApplication:
                                 or current_files.binding_id != intent.binding_id
                                 or current_files.turn_id != intent.turn_id
                                 or tuple(
-                                    (item.path, item.label)
+                                    (
+                                        item.path,
+                                        item.label,
+                                        item.additions,
+                                        item.deletions,
+                                    )
                                     for item in current_files.items
                                 )
                                 != tuple(
-                                    (item.path, item.label)
+                                    (
+                                        item.path,
+                                        item.label,
+                                        item.additions,
+                                        item.deletions,
+                                    )
                                     for item in intent.files
                                 )
+                                or current_files.additions != intent.additions
+                                or current_files.deletions != intent.deletions
                             ):
                                 raise CardActionError(
                                     "Goal 结果或文件已变化，本次翻页未执行。"
@@ -5580,6 +5635,8 @@ class ChannelApplication:
                             manifest=intent.files,
                             reply=reply,
                             page=intent.page,
+                            additions=intent.additions,
+                            deletions=intent.deletions,
                         )
 
                     updated = await self._progress_cards.update_goal_page(
@@ -5599,6 +5656,8 @@ class ChannelApplication:
                     manifest=intent.files,
                     reply=intent.reply,
                     page=intent.page,
+                    additions=intent.additions,
+                    deletions=intent.deletions,
                 )
             elif intent.progress is None:
                 card = turn_files_card_from_manifest(
@@ -5608,6 +5667,8 @@ class ChannelApplication:
                     final_response=intent.answer,
                     manifest=intent.files,
                     page=intent.page,
+                    additions=intent.additions,
+                    deletions=intent.deletions,
                 )
             else:
                 card = turn_progress_card_from_manifest(
@@ -5618,6 +5679,8 @@ class ChannelApplication:
                     manifest=intent.files,
                     progress=intent.progress,
                     page=intent.page,
+                    additions=intent.additions,
+                    deletions=intent.deletions,
                 )
             updated = await self._safe_update_card(intent.source_id, card)
             if not updated:

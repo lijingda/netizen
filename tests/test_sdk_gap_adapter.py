@@ -72,6 +72,16 @@ def turn(turn_id, status):
 def notify(method, params):
     send({"method": method, "params": params})
 
+def unified_diff(path, old, new):
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n"
+        f"+++ b/{path}\n"
+        "@@ -1 +1 @@\n"
+        f"-{old}\n"
+        f"+{new}\n"
+    )
+
 def thread(include_turns=False):
     return {
         "id": "thread-goal",
@@ -159,6 +169,14 @@ for line in sys.stdin:
                 "turn/started",
                 {"threadId": "thread-goal", "turn": turn(first, "inProgress")},
             )
+            notify(
+                "turn/diff/updated",
+                {
+                    "threadId": "thread-goal",
+                    "turnId": first,
+                    "diff": unified_diff("first.txt", "old", "first-latest"),
+                },
+            )
             if mode == "goal":
                 notify(
                     "item/started",
@@ -180,6 +198,14 @@ for line in sys.stdin:
                 sys.exit(0)
             send({"id": request_id, "result": {"goal": goal("active")}})
             if mode == "resume":
+                notify(
+                    "turn/diff/updated",
+                    {
+                        "threadId": "thread-goal",
+                        "turnId": first,
+                        "diff": unified_diff("resume.txt", "old", "resume-latest"),
+                    },
+                )
                 goal_status = "complete"
                 notify(
                     "thread/goal/updated",
@@ -197,6 +223,30 @@ for line in sys.stdin:
                 notify(
                     "turn/started",
                     {"threadId": "thread-goal", "turn": turn("turn-2", "inProgress")},
+                )
+                notify(
+                    "turn/diff/updated",
+                    {
+                        "threadId": "thread-goal",
+                        "turnId": "turn-2",
+                        "diff": unified_diff("final.txt", "old", "final-initial"),
+                    },
+                )
+                notify(
+                    "turn/diff/updated",
+                    {
+                        "threadId": "thread-goal",
+                        "turnId": "turn-1",
+                        "diff": unified_diff("stale.txt", "old", "stale"),
+                    },
+                )
+                notify(
+                    "turn/diff/updated",
+                    {
+                        "threadId": "thread-goal",
+                        "turnId": "turn-2",
+                        "diff": unified_diff("final.txt", "old", "final-latest"),
+                    },
                 )
                 goal_status = "complete"
                 notify(
@@ -478,6 +528,12 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal.logical_turn_id, "turn-1")
         self.assertEqual(terminal.final_physical_turn_id, "turn-2")
         self.assertEqual(terminal.turn_status, "completed")
+        self.assertIsNotNone(terminal.turn_diff)
+        assert terminal.turn_diff is not None
+        self.assertIn("final-latest", terminal.turn_diff)
+        self.assertNotIn("final-initial", terminal.turn_diff)
+        self.assertNotIn("stale.txt", terminal.turn_diff)
+        self.assertNotIn("first.txt", terminal.turn_diff)
         self.assertEqual(
             [
                 (item.turn_id, item.turn_started, item.turn_completed)
@@ -539,6 +595,9 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(terminal.logical_turn_id, "turn-1")
         self.assertEqual(terminal.final_physical_turn_id, "turn-2")
+        self.assertIsNotNone(terminal.turn_diff)
+        assert terminal.turn_diff is not None
+        self.assertIn("final-latest", terminal.turn_diff)
 
     async def test_goal_resume_registers_route_without_clearing_goal(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -557,6 +616,9 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(before.status, GoalStatus.PAUSED)
         self.assertEqual(handle.id, "turn-resume")
         self.assertEqual(terminal.final_physical_turn_id, "turn-resume")
+        self.assertIsNotNone(terminal.turn_diff)
+        assert terminal.turn_diff is not None
+        self.assertIn("resume-latest", terminal.turn_diff)
         methods = [item.get("method") for item in messages if "id" in item]
         self.assertNotIn("thread/goal/clear", methods)
         self.assertEqual(methods.count("thread/goal/set"), 1)
@@ -739,6 +801,16 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                 with patch.object(
                     type(codex._client),
                     "cancel_goal_operation",
+                    None,
+                ):
+                    with self.assertRaises(SdkGapCapabilityUnavailable):
+                        AppServerGoalControl(codex)
+                    self.assertIsInstance(
+                        AppServerSkillCatalog(codex),
+                        AppServerSkillCatalog,
+                    )
+                with patch(
+                    "netizen.sdk_gap_adapter._generated.TurnDiffUpdatedNotification",
                     None,
                 ):
                     with self.assertRaises(SdkGapCapabilityUnavailable):

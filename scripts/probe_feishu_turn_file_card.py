@@ -53,12 +53,12 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--chat-id", required=True)
-    parser.add_argument("--count", type=int, default=500)
+    parser.add_argument("--count", type=int, default=400)
     args = parser.parse_args()
     if not args.chat_id.startswith("oc_"):
         parser.error("--chat-id must be a Feishu chat ID")
-    if not 9 <= args.count <= 500:
-        parser.error("--count must be between 9 and 500")
+    if not 9 <= args.count <= 400:
+        parser.error("--count must be between 9 and 400")
     return args
 
 
@@ -76,6 +76,8 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
             resolved_path=Path(f"/tmp/netizen-card-capacity/file-{index:04}.txt"),
             size=index,
             media_kind="file",
+            additions=12,
+            deletions=3,
         )
         for index in range(args.count)
     )
@@ -95,9 +97,13 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
                         label=item.display_path,
                         size=item.size,
                         media_kind=item.media_kind,
+                        additions=item.additions,
+                        deletions=item.deletions,
                     )
                     for item in files
                 ),
+                additions=args.count * 12,
+                deletions=args.count * 3,
             ),
         )
     )
@@ -122,6 +128,18 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
         )
         if page_intent.reply is None:
             raise RuntimeError("capacity card page callback omitted its Reply manifest")
+        if (
+            page_intent.additions != args.count * 12
+            or page_intent.deletions != args.count * 3
+            or len(page_intent.files) != args.count
+            or any(
+                item.additions != 12 or item.deletions != 3
+                for item in page_intent.files
+            )
+        ):
+            raise RuntimeError(
+                "capacity card page callback lost exact line statistics"
+            )
         updated = reply_card_from_manifest(
             scope=scope,
             binding_id="capacity-probe",
@@ -129,6 +147,8 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
             manifest=page_intent.files,
             reply=page_intent.reply,
             page=1,
+            additions=page_intent.additions,
+            deletions=page_intent.deletions,
         )
         update_result = await channel.update_card(sent.message_id, updated.card)
         if not update_result.success:
@@ -151,6 +171,7 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
             ),
             "send_success": True,
             "self_contained_callback_success": True,
+            "line_statistics_round_trip_success": True,
             "full_card_update_success": True,
             "updated_message_refetch_success": True,
         }

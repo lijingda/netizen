@@ -20,6 +20,7 @@ from typing import Any, AsyncIterator, Protocol
 from openai_codex import AsyncCodex
 from openai_codex import _goal as _sdk_goal
 from openai_codex.generated import v2_all as _generated
+from openai_codex.models import Notification
 
 from .domain import GoalStatus
 from .turn_activity import (
@@ -129,6 +130,7 @@ class GoalStreamTerminal:
     logical_turn_id: str
     final_physical_turn_id: str
     turn_status: str
+    turn_diff: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,6 +490,10 @@ class AppServerGoalControl:
             capability="goal",
         )
         status_model = _generated_type("ThreadGoalStatus", capability="goal")
+        diff_notification_model = _generated_type(
+            "TurnDiffUpdatedNotification",
+            capability="goal",
+        )
         _require_model_fields(
             get_params_model,
             capability="goal",
@@ -497,6 +503,15 @@ class AppServerGoalControl:
             get_response_model,
             capability="goal",
             aliases={"goal": "goal"},
+        )
+        _require_model_fields(
+            diff_notification_model,
+            capability="goal",
+            aliases={
+                "diff": "diff",
+                "thread_id": "threadId",
+                "turn_id": "turnId",
+            },
         )
         if {member.value for member in status_model} != {
             status.value for status in GoalStatus
@@ -655,13 +670,23 @@ class AppServerGoalControl:
 
 
 class _GoalActivityTap:
-    """Project activity inside the existing Goal notification consumer."""
+    """Project activity and final-Turn diff in the one Goal consumer."""
 
-    __slots__ = ("_thread_id", "_turn_id", "_sink")
+    __slots__ = (
+        "_thread_id",
+        "_turn_id",
+        "_completed_turn_id",
+        "_turn_diff",
+        "_diff_enabled",
+        "_sink",
+    )
 
     def __init__(self, thread_id: str) -> None:
         self._thread_id = thread_id
         self._turn_id: str | None = None
+        self._completed_turn_id: str | None = None
+        self._turn_diff: str | None = None
+        self._diff_enabled = True
         self._sink: Callable[
             [TurnActivityNotificationProjection | None], None
         ] | None = None
@@ -674,6 +699,7 @@ class _GoalActivityTap:
 
     async def next_notification(self, client: Any, state: Any) -> Any:
         notification = await client.next_goal_notification(state)
+        self._capture_turn_diff(notification)
         sink = self._sink
         if sink is None:
             return notification
@@ -706,6 +732,67 @@ class _GoalActivityTap:
             # itself but must never interrupt the one Goal notification stream.
             self._sink = None
         return notification
+
+    def final_turn_diff(self, physical_turn_id: str) -> str | None:
+        if (
+            self._diff_enabled
+            and self._turn_id == physical_turn_id
+            and self._completed_turn_id == physical_turn_id
+        ):
+            return self._turn_diff
+        return None
+
+    def _capture_turn_diff(self, notification: Any) -> None:
+        if not self._diff_enabled:
+            return
+        if type(notification) is not Notification:
+            self._disable_diff()
+            return
+        payload = notification.payload
+        if notification.method == "turn/started":
+            if type(payload) is not _generated.TurnStartedNotification:
+                self._disable_diff()
+                return
+            turn_id = getattr(payload.turn, "id", None)
+            if (
+                payload.thread_id != self._thread_id
+                or not isinstance(turn_id, str)
+                or not turn_id
+            ):
+                self._disable_diff()
+                return
+            self._turn_id = turn_id
+            self._completed_turn_id = None
+            self._turn_diff = None
+            return
+        if notification.method == "turn/diff/updated":
+            if type(payload) is not _generated.TurnDiffUpdatedNotification:
+                self._disable_diff()
+                return
+            if payload.thread_id != self._thread_id:
+                self._disable_diff()
+                return
+            if self._turn_id is None:
+                self._disable_diff()
+                return
+            if payload.turn_id == self._turn_id:
+                self._turn_diff = payload.diff
+            return
+        if notification.method == "turn/completed":
+            if type(payload) is not _generated.TurnCompletedNotification:
+                self._disable_diff()
+                return
+            turn_id = getattr(payload.turn, "id", None)
+            if payload.thread_id != self._thread_id:
+                self._disable_diff()
+                return
+            if turn_id == self._turn_id:
+                self._completed_turn_id = turn_id
+
+    def _disable_diff(self) -> None:
+        self._diff_enabled = False
+        self._turn_diff = None
+        self._completed_turn_id = None
 
 
 class _AppServerGoalHandle:
@@ -773,7 +860,12 @@ class _AppServerGoalHandle:
         status = getattr(getattr(final_turn, "status", None), "value", None)
         if not isinstance(physical_turn_id, str) or not isinstance(status, str):
             raise GoalControlError("Goal 通知流结束但缺少最终物理 Turn。")
-        return GoalStreamTerminal(logical_turn_id, physical_turn_id, status)
+        return GoalStreamTerminal(
+            logical_turn_id,
+            physical_turn_id,
+            status,
+            self._activity_tap.final_turn_diff(physical_turn_id),
+        )
 
     async def pause(self) -> GoalPauseAck:
         try:
