@@ -414,9 +414,8 @@ async def run(settings: Settings, *, ready_file: Path | None = None) -> None:
     try:
         projects = ProjectRegistry(
             store=store,
-            default_cwd=settings.default_cwd,
-            projects=settings.projects,
             project_root=settings.project_root,
+            projects=settings.projects,
         )
         channel = build_channel(settings, store)
     except BaseException:

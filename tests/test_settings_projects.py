@@ -27,16 +27,16 @@ class SettingsTest(unittest.TestCase):
         }
 
     def write_config(self, directory: Path) -> Path:
-        default = directory / "default"
+        project_root = directory / "projects"
         project = directory / "project"
-        default.mkdir()
+        project_root.mkdir()
         project.mkdir()
         path = directory / "config.yaml"
         path.write_text(
             "instance:\n"
             "  appId: cli_test\n"
             f"  dataDir: {directory / 'data'}\n"
-            f"  defaultCwd: {default}\n"
+            f"  projectRoot: {project_root}\n"
             "projects:\n"
             f"  test: {project}\n"
             "channel:\n"
@@ -56,30 +56,27 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings.app_id, "cli_test")
         self.assertEqual(settings.app_secret, "secret")
         self.assertEqual(settings.projects["test"].name, "project")
-        self.assertEqual(settings.project_root, settings.default_cwd.parent)
+        self.assertEqual(settings.project_root.name, "projects")
         self.assertEqual(settings.admin_web.host, "0.0.0.0")
         self.assertEqual(settings.admin_web.port, 8787)
         self.assertTrue(settings.admin_web.enabled)
 
-    def test_explicit_project_root_is_loaded(self) -> None:
+    def test_project_root_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
-            project_root = directory / "managed-projects"
-            project_root.mkdir()
             config = self.write_config(directory)
             config.write_text(
                 config.read_text(encoding="utf-8").replace(
-                    "projects:\n",
-                    f"  projectRoot: {project_root}\nprojects:\n",
+                    f"  projectRoot: {directory / 'projects'}\n",
+                    "",
                 ),
                 encoding="utf-8",
             )
-            settings = Settings.from_file(
-                config,
-                self.environment(directory, FEISHU_APP_SECRET="secret"),
-            )
-
-        self.assertEqual(settings.project_root, project_root)
+            with self.assertRaisesRegex(SettingsError, "projectRoot"):
+                Settings.from_file(
+                    config,
+                    self.environment(directory, FEISHU_APP_SECRET="secret"),
+                )
 
     def test_secret_file_must_be_private_regular_file(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -233,50 +230,42 @@ class SettingsTest(unittest.TestCase):
 
 
 class ProjectRegistryTest(unittest.TestCase):
-    def test_none_and_named_projects_resolve_to_canonical_shared_cwds(self) -> None:
+    def test_only_named_projects_resolve_to_canonical_shared_cwds(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            default = root / "default"
             project = root / "project"
-            default.mkdir()
             project.mkdir()
             store = BindingStore()
             try:
                 registry = ProjectRegistry(
                     store=store,
-                    default_cwd=default,
+                    project_root=root,
                     projects={"test": project},
                 )
 
-                self.assertEqual(registry.resolve("none").cwd, default.resolve())
                 self.assertEqual(registry.resolve("test").cwd, project.resolve())
-                self.assertEqual(registry.aliases(), ("none", "test"))
+                self.assertEqual(registry.aliases(), ("test",))
             finally:
                 store.close()
 
-    def test_registry_rejects_reserved_unknown_and_relative_projects(self) -> None:
+    def test_registry_accepts_empty_and_rejects_unknown_or_relative_projects(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             root.chmod(0o700)
             store = BindingStore()
             try:
-                with self.assertRaisesRegex(ValueError, "保留"):
-                    ProjectRegistry(
-                        store=store,
-                        default_cwd=root,
-                        projects={"none": root},
-                    )
                 with self.assertRaisesRegex(ValueError, "绝对路径"):
                     ProjectRegistry(
                         store=store,
-                        default_cwd=root,
+                        project_root=root,
                         projects={"test": Path("relative")},
                     )
                 registry = ProjectRegistry(
                     store=store,
-                    default_cwd=root,
+                    project_root=root,
                     projects={},
                 )
+                self.assertEqual(registry.aliases(), ())
                 with self.assertRaises(UnknownProject):
                     registry.resolve("missing")
             finally:
@@ -296,26 +285,25 @@ class ProjectRegistryTest(unittest.TestCase):
             try:
                 registry = ProjectRegistry(
                     store=store,
-                    default_cwd=alias,
+                    project_root=alias,
                     projects={},
                 )
 
-                self.assertEqual(registry.resolve("none").cwd, real.resolve())
+                self.assertEqual(registry.project_root, real.resolve())
+                self.assertEqual(registry.aliases(), ())
             finally:
                 store.close()
 
     def test_disabled_project_blocks_new_but_existing_binding_resolution_works(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            default = root / "default"
             project = root / "project"
-            default.mkdir()
             project.mkdir()
             store = BindingStore()
             try:
                 registry = ProjectRegistry(
                     store=store,
-                    default_cwd=default,
+                    project_root=root,
                     projects={"test": project},
                 )
                 original = registry.resolve_for_new("test")
@@ -349,15 +337,13 @@ class ProjectRegistryTest(unittest.TestCase):
     def test_feishu_managed_projects_survive_restart_and_yaml_does_not_reenable(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            default = root / "default"
             seed = root / "seed"
             state = root / "channel.sqlite3"
-            default.mkdir()
             seed.mkdir()
             first_store = BindingStore(state)
             first = ProjectRegistry(
                 store=first_store,
-                default_cwd=default,
+                project_root=root,
                 projects={"seed": seed},
             )
             seeded = first.resolve_for_new("seed")
@@ -372,7 +358,7 @@ class ProjectRegistryTest(unittest.TestCase):
             try:
                 second = ProjectRegistry(
                     store=second_store,
-                    default_cwd=default,
+                    project_root=root,
                     projects={"seed": root / "now-missing"},
                 )
                 self.assertFalse(
@@ -384,17 +370,14 @@ class ProjectRegistryTest(unittest.TestCase):
     def test_create_is_confined_to_project_root_and_existing_paths_can_be_registered(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            default = root / "default"
             project_root = root / "projects"
             outside = root / "outside"
-            default.mkdir()
             project_root.mkdir()
             outside.mkdir()
             store = BindingStore()
             try:
                 registry = ProjectRegistry(
                     store=store,
-                    default_cwd=default,
                     project_root=project_root,
                     projects={},
                 )

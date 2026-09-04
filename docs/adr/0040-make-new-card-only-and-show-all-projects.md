@@ -10,7 +10,7 @@ related: 0039
 ## 背景
 
 当前普通 Binding 有两条创建路径：零参数 `/new` 打开 Project、Model、Effort、Speed
-表单，`/new <project|none>` 则绕过表单快速创建并继承 Codex。后者曾为模型目录不可用、
+表单，`/new <project>` 则绕过表单快速创建并继承 Codex。后者曾为模型目录不可用、
 Project 超过卡片中人为截取的前 12 项提供兜底，但新会话需要选择的 Binding-scoped 选项
 继续增加，两条路径已经产生不同的配置能力和帮助语义。
 
@@ -19,15 +19,17 @@ Project 本来就在一个 CardKit `select_static` 中；12 项是 Netizen 自�
 
 ## 决定
 
-1. 只保留 exact `/new` control。任何参数，包括 `/new none`、`/new alias` 和引号形式，
+1. 只保留 exact `/new` control。任何参数，包括 `/new alias` 和引号形式，
    都零 mutation 地回复“快捷创建已下线，请发送 `/new` 并在卡片中选择”。`/help`、空
    Scope 引导、README、Skill 用户手册和部署验收统一只展示 `/new`。
 2. `/new` 仍只创建并切换 lazy Binding，不创建 native Thread 或 Turn。群聊和群话题仍
    必须在 `/new` 消息中 @ 机器人；卡片回调继续从 exact source card 恢复 Scope，不从
    chat ID 猜 topic。
 3. Project 使用现有单个静态下拉框，按 Registry 稳定顺序渲染全部 enabled Projects，
-   包含保留 alias `none`。删除 `MAX_PROJECT_ROWS`、截断 slice 和 `/new alias` 提示；不实现
-   Project 分页。option 继续编码 alias + revision，提交时原子校验 enabled/revision/cwd。
+   不提供默认或系统 Project。`/new` 可以基于同 Scope 现有 Binding 元数据预选当前或
+   最近使用且仍 enabled 的 Project，但不另存 recent 状态；没有可用偏好时保持未选。
+   删除 `MAX_PROJECT_ROWS`、截断 slice 和 `/new alias` 提示；不实现 Project 分页。
+   option 继续编码 alias + revision，提交时原子校验 enabled/revision/cwd。
 4. 在 ADR 0039 的 schema v6 增量中，群聊主线和普通群话题的表单增加 Mention Context
    Mode，默认 `current-only`，可选 `catch-up`。P2P 不显示该字段并固定 `current-only`；
    Side 内仍不支持 `/new`。选项与创建成功卡必须明确提示 catch-up 会把同 Scope 中未 @
@@ -89,7 +91,8 @@ v5 丢弃选择。
 
 - `/new` 唯一合法，所有带参数形式零创建并返回迁移提示；`//new alias` 仍是字面 Prompt；
 - 0、1、12、13 和大量 enabled Projects 全部出现在同一下拉框，disabled 项不出现，
-  `none` 始终可选且无分页元素；另在查明飞书当前 option/Card payload 硬限制后，以接近并
+  无可用偏好时不预选，current/recent 只从现有 Binding 元数据推导，且无分页元素；
+  另在查明飞书当前 option/Card payload 硬限制后，以接近并
   超过该限制的契约或 live case 验证平台拒绝会产生明确错误，且不会静默截断、分页或回退
   到命令旁路；
 - catalog success 下 inherit/explicit、catalog failure 下 inherit、伪造混合字段与 live

@@ -4,8 +4,6 @@
 instance:
   appId: cli_example
   dataDir: /home/your-user/.netizen/state
-  # `none` maps to this one native cwd; it is not a per-session workspace.
-  defaultCwd: /home/your-user
   # Empty Projects created from Feishu are confined below this directory.
   projectRoot: /home/your-user/projects
 

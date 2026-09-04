@@ -52,20 +52,13 @@ class ProjectRegistry:
         self,
         *,
         store: BindingStore,
-        default_cwd: Path,
+        project_root: Path,
         projects: dict[str, Path],
-        project_root: Path | None = None,
     ) -> None:
         self._store = store
-        root = project_root if project_root is not None else default_cwd.parent
-        self._project_root = _canonical_directory(root, "projectRoot")
-        self._bootstrap(alias="none", configured_path=default_cwd, reserved=True)
+        self._project_root = _canonical_directory(project_root, "projectRoot")
         for alias, configured_path in projects.items():
-            self._bootstrap(
-                alias=alias,
-                configured_path=configured_path,
-                reserved=False,
-            )
+            self._bootstrap(alias=alias, configured_path=configured_path)
 
     @property
     def project_root(self) -> Path:
@@ -110,7 +103,7 @@ class ProjectRegistry:
         create_directory: bool,
     ) -> Project:
         alias = alias.strip()
-        _validate_alias(alias, reserved=False)
+        _validate_alias(alias)
         try:
             self._store.get_project(alias)
         except StoredProjectNotFound:
@@ -166,8 +159,6 @@ class ProjectRegistry:
         enabled: bool,
         expected_revision: int,
     ) -> Project:
-        if alias == "none" and not enabled:
-            raise ProjectError("保留 Project none 不能停用。")
         try:
             record = self._store.set_project_enabled(
                 alias=alias,
@@ -193,9 +184,8 @@ class ProjectRegistry:
         *,
         alias: str,
         configured_path: Path,
-        reserved: bool,
     ) -> None:
-        _validate_alias(alias, reserved=reserved)
+        _validate_alias(alias)
         try:
             self._store.get_project(alias)
         except StoredProjectNotFound:
@@ -230,14 +220,9 @@ class ProjectRegistry:
         return target
 
 
-def _validate_alias(alias: str, *, reserved: bool) -> None:
+def _validate_alias(alias: str) -> None:
     if not _ALIAS.fullmatch(alias):
         raise ProjectError(f"无效 Project alias：{alias}")
-    if reserved:
-        if alias != "none":
-            raise ProjectError(f"无效保留 Project alias：{alias}")
-    elif alias == "none":
-        raise ProjectError("Project alias none 为系统保留。")
 
 
 def _project(record: ProjectRecord) -> Project:

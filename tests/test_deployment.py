@@ -454,7 +454,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("Manual-development example", config)
         self.assertIn("managed installers do not copy this file", config)
         self.assertIn("`projects: {}`", config)
-        self.assertIn("defaultCwd:", config)
+        self.assertNotIn("defaultCwd:", config)
         self.assertIn("projectRoot:", config)
         self.assertIn("test: /home/your-user/projects/test", config)
         self.assertIn("adminWeb:", config)

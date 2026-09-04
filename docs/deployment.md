@@ -779,8 +779,8 @@ cat "$HOME/.netizen/credentials/admin-web-secret"
 admission，修复文件后仍需 `./service.sh restart`，不会自动重新开放。V1 使用不加密的内网
 HTTP；不得把该端口直接暴露到不受信网络。
 
-`instance.projectRoot` 用于限制从飞书自动创建的空 Project；未配置时回退为
-`defaultCwd.parent`。Channel Database 只接受当前 schema v7，不在服务启动时自动迁移旧
+`instance.projectRoot` 是必填的绝对路径，用于限制从飞书自动创建的空 Project；它不是
+Binding 的默认 cwd。Channel Database 只接受当前 schema v7，不在服务启动时自动迁移旧
 schema。v7 在 v6 的 Mention Context Mode、exact Context Boundary 与独立 revision 上，
 为 Binding 增加两个 Task Feedback 布尔值和 feedback revision；不保存任何补充消息正文、Turn
 Activity Projection 或 Reply Card session。v6 -> v7 cutover 必须在 release transaction
@@ -932,7 +932,7 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    `/unarchive`，不包含
    `/compact`、`/skills`、`/model`、`/effort`、`/fast` 或当前不可用的
    `/plan`、`/apps`；`/copy`、`/vim`、`/theme`、`/exit` 也不展示。
-   另发送 `/new test`、`/new none`、带引号和坏引号的 `/new ...`，都必须得到同一迁移提示、
+   另发送 `/new test`、`/new demo`、带引号和坏引号的 `/new ...`，都必须得到同一迁移提示、
    零 Binding mutation；`//new test` 仍作为字面 prompt。
 2. 通过 `/new` 卡片选择 `test` Project、inherit Codex，并保持 Reaction Pulse 与 Progress
    Card 默认关闭后发送首条 prompt：native accepted 后原消息常驻 `Typing`，但整轮零
@@ -965,9 +965,12 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    并标注“上一轮完成时”的快照；本轮完成后覆盖为新值。固定 SDK 若丢失即时完成通知，
    则终态后明确显示暂不可用并在下一次可观测 Turn 完成后更新。该继承路径不得读取模型
    目录或向 SDK 传 Model/Effort/Speed override。
-3. 零参数 `/new` 只显示一个创建 form，不显示任务输入或快速按钮。Project 使用现有单个
-   静态下拉框，并展示 Registry 中全部 enabled 项和 `none`；准备 13 个以上 enabled
-   Projects 验证没有 12 项截断、分页控件或命令兜底，disabled 项不出现。P2P 表单不显示
+3. 零参数 `/new` 在存在 enabled Project 时只显示一个创建 form，不显示任务输入或快速按钮。
+   Project 使用现有单个静态下拉框，并展示 Registry 中全部 enabled 项；同 Scope 当前或
+   最近使用且仍 enabled 的 Project 可基于现有 Binding 记录预选，不新增 recent 状态；没有
+   该记录时下拉保持未选。零 enabled Project 时不显示 form，只引导 `/settings`，且零 Binding
+   mutation。准备 13 个以上 enabled Projects 验证没有 12 项截断、分页控件或命令兜底，
+   disabled 项不出现。P2P 表单不显示
    @ 时读取的消息范围；群主线和普通群话题显示“仅这条 @ 消息（默认）”与“自动带上期间
    的群聊讨论”，下拉框下方有灰色说明。两个 Task Feedback 控件在所有普通 Scope 都显示
    且默认关闭。选择 inherit Codex 时不保存 Model/Effort/Speed override；选择实际 Model

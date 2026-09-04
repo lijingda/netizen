@@ -28,9 +28,8 @@ class AdminWebSettings:
 class Settings:
     app_id: str
     app_secret: str = field(repr=False)
+    project_root: Path
     data_dir: Path = Path(".netizen-data")
-    default_cwd: Path = Path.cwd()
-    project_root: Path = Path.cwd()
     projects: dict[str, Path] = field(default_factory=dict)
     security_mode: str = "audit"
     admin_web: AdminWebSettings = AdminWebSettings()
@@ -66,12 +65,7 @@ class Settings:
         if not app_id.startswith("cli_"):
             raise SettingsError("instance.appId must be a Feishu cli_ identifier")
         data_dir = _absolute_path(instance, "dataDir")
-        default_cwd = _absolute_path(instance, "defaultCwd")
-        project_root = (
-            _absolute_path(instance, "projectRoot")
-            if "projectRoot" in instance
-            else default_cwd.parent
-        )
+        project_root = _absolute_path(instance, "projectRoot")
         projects: dict[str, Path] = {}
         for alias, value in raw_projects.items():
             if not isinstance(alias, str) or not isinstance(value, str):
@@ -93,7 +87,6 @@ class Settings:
             app_id=app_id,
             app_secret=_load_secret(env),
             data_dir=data_dir,
-            default_cwd=default_cwd,
             project_root=project_root,
             projects=projects,
             security_mode=security_mode,

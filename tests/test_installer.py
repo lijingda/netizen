@@ -418,7 +418,10 @@ class NetizenInstallerTest(unittest.TestCase):
             ):
                 installer.prepare_configuration(layout, interactive=False)
 
-            self.assertIn("cli_REPLACE_ME", layout.config_file.read_text())
+            generated_config = layout.config_file.read_text()
+            self.assertIn("cli_REPLACE_ME", generated_config)
+            self.assertIn("projectRoot:", generated_config)
+            self.assertNotIn("defaultCwd:", generated_config)
             self.assertEqual(layout.secret_file.read_bytes(), b"")
             generated_admin_secret = layout.admin_secret_file.read_bytes()
             self.assertEqual(len(generated_admin_secret), 43)

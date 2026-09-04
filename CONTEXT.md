@@ -233,13 +233,11 @@ Binding 的新 mutation；当前不猜测重挂或替用户暂停。
 当前 Goal、Skills、Side 与 Native Thread Delete 已通过独立口接入，Plan control 与 Apps
 仍是显式 gap。
 
-**Project**：Channel alias 对应的一个 canonical 真实 cwd。多个 native Thread 可
-同时共享和修改它；不是 clone、worktree 或快照。
+**Project**：Project Registry 中显式登记的 Channel alias 及其 canonical 真实 cwd。
+多个 native Thread 可同时共享和修改它；它不是 clone、worktree 或快照。
 
 **Project Registry**：整个 Netizen 实例共享的 Project 目录。它保存 Project 的
 alias、canonical cwd 和是否可用于新会话；停用不影响已有会话，也不删除目录。
-
-**none**：映射到服务级 `defaultCwd` 的保留 Project alias。
 
 **Ordinary Active Turn**：以 Binding ID 为键的内存记录：handle、owner、origin、状态、
 task、receipt Event，以及只读 Activity cursor/checklist/commentary/安全操作、成功 steer count

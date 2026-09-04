@@ -863,7 +863,6 @@ class CardCodecTest(unittest.TestCase):
             )
 
         for target, operation in (
-            ("project:v1:none:1", "disable"),
             ("project:v1:test:0", "enable"),
             ("project:v1:test:3", "toggle"),
         ):
@@ -1146,7 +1145,7 @@ class CardRendererTest(unittest.TestCase):
     def setUp(self) -> None:
         self.scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
         self.projects = (
-            Project("none", Path("/home/user"), True, 1),
+            Project("alpha", Path("/home/user/alpha"), True, 1),
             Project("test", Path("/home/user/test"), True, 2),
             Project("off", Path("/home/user/off"), False, 4),
         )
@@ -2162,7 +2161,11 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertEqual(
             [option["value"] for option in target["options"]],
-            ["project:v1:test:2", "project:v1:off:4"],
+            [
+                "project:v1:alpha:1",
+                "project:v1:test:2",
+                "project:v1:off:4",
+            ],
         )
         manage_submit = next(
             button
@@ -2338,7 +2341,7 @@ class CardRendererTest(unittest.TestCase):
             for element in manage["elements"]
             if element.get("name") == "project_manage_target"
         )
-        self.assertEqual(len(target["options"]), 50)
+        self.assertEqual(len(target["options"]), 51)
 
     def test_new_card_has_one_form_with_inherit_explicit_and_context_mode(
         self,
@@ -2350,7 +2353,7 @@ class CardRendererTest(unittest.TestCase):
             allow_context_mode=True,
         )
         serialized = str(outbound.card)
-        self.assertIn("none · /home/user", serialized)
+        self.assertIn("alpha · /home/user/alpha", serialized)
         self.assertIn("test · /home/user/test", serialized)
         self.assertNotIn("off · /home/user/off", serialized)
         self.assertIn("new_binding_v6", serialized)
@@ -2387,6 +2390,7 @@ class CardRendererTest(unittest.TestCase):
             for item in form["elements"]
             if "name" in item
         }
+        self.assertNotIn("initial_option", fields["new_project"])
         self.assertEqual(
             fields["new_model"]["initial_option"],
             "new-model:v1:explicit:ZnV0dXJlLW1vZGVs",
@@ -2429,13 +2433,35 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("cost", serialized.lower())
         self.assertNotIn("费用", serialized)
 
+        preferred = new_binding_card(
+            scope=self.scope,
+            projects=tuple(project for project in self.projects if project.enabled),
+            initial_project_alias="test",
+            catalog=self.catalog,
+            allow_context_mode=True,
+        )
+        preferred_form = next(
+            item
+            for item in _elements(preferred.card, "form")
+            if item["name"] == "new_binding_v6"
+        )
+        preferred_project = next(
+            item
+            for item in preferred_form["elements"]
+            if item.get("name") == "new_project"
+        )
+        self.assertEqual(
+            preferred_project["initial_option"],
+            "project:v1:test:2",
+        )
+
     def test_new_card_shows_every_project_without_pagination_or_truncation(
         self,
     ) -> None:
         for count in (0, 1, 12, 13, 80):
             projects = tuple(
                 Project(
-                    "none" if index == 0 else f"project_{index}",
+                    f"project_{index}",
                     Path(f"/home/user/project_{index}"),
                     True,
                     index + 1,
@@ -2521,7 +2547,7 @@ class CardRendererTest(unittest.TestCase):
             sender_id="ou_user",
             tag="button",
             form_value={
-                "new_project": p2p_fields["new_project"]["initial_option"],
+                "new_project": p2p_fields["new_project"]["options"][0]["value"],
                 "new_model": "new-model:v1:inherit",
                 "new_task_reactions": p2p_fields["new_task_reactions"][
                     "initial_option"

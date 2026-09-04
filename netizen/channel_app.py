@@ -5187,6 +5187,20 @@ class ChannelApplication:
             return
         if intent.name is ControlName.NEW:
             projects = self._projects.list(enabled_only=True)
+            enabled_aliases = {project.alias for project in projects}
+            current = self._bindings.active_binding(intent.scope.key)
+            if current is not None and current.project_alias in enabled_aliases:
+                initial_project_alias = current.project_alias
+            else:
+                initial_project_alias = next(
+                    (
+                        binding.project_alias
+                        for binding in self._bindings.list_bindings(intent.scope.key)
+                        if binding.activated_at is not None
+                        if binding.project_alias in enabled_aliases
+                    ),
+                    None,
+                )
             catalog = None
             catalog_error = None
             try:
@@ -5200,6 +5214,7 @@ class ChannelApplication:
             card = new_binding_card(
                 scope=intent.scope,
                 projects=projects,
+                initial_project_alias=initial_project_alias,
                 catalog=catalog,
                 catalog_error=catalog_error,
                 allow_context_mode=(_message_chat_type(message) == "group"),
