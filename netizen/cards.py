@@ -1947,20 +1947,9 @@ def _render_projects_settings(
         "**实例级 Project Registry**\n"
         "Project 对整个 Netizen 实例共享。"
     )
-    system_project = next(
-        (project for project in projects if project.alias == "none"),
-        None,
-    )
-    if system_project is not None:
-        builder.markdown(
-            "**系统 Project**\n"
-            f"`none` · 始终启用 · `{_md_code(str(system_project.cwd))}`"
-        )
-
-    manageable = tuple(project for project in projects if project.alias != "none")
     builder.markdown("**管理 Project**")
-    if manageable:
-        builder.raw(_project_management_form(manageable))
+    if projects:
+        builder.raw(_project_management_form(projects))
     else:
         builder.markdown("当前没有可管理的 Project，请在下方新增。")
 
@@ -2125,10 +2114,19 @@ def _new_binding_form(
     projects: tuple[Project, ...],
     catalog: ModelCatalog | None,
     *,
+    initial_project_alias: str | None,
     allow_context_mode: bool,
     message_context_mode: MentionContextMode,
     task_feedback: BindingTaskFeedback,
 ) -> dict[str, Any]:
+    initial_project = next(
+        (
+            project
+            for project in projects
+            if project.alias == initial_project_alias
+        ),
+        None,
+    )
     elements = [
         _form_label("Project"),
         _static_select(
@@ -2141,7 +2139,11 @@ def _new_binding_form(
                 )
                 for project in projects
             ),
-            initial_option=_project_reference(projects[0]),
+            initial_option=(
+                _project_reference(initial_project)
+                if initial_project is not None
+                else None
+            ),
         ),
     ]
     if catalog is None:
@@ -2415,19 +2417,21 @@ def _static_select(
     name: str,
     placeholder: str,
     options: tuple[tuple[str, str], ...],
-    initial_option: str,
+    initial_option: str | None,
 ) -> dict[str, Any]:
-    return {
+    select = {
         "tag": "select_static",
         "name": name,
         "required": True,
         "placeholder": _plain_text(placeholder),
-        "initial_option": initial_option,
         "options": [
             {"text": _plain_text(label), "value": value}
             for label, value in options
         ],
     }
+    if initial_option is not None:
+        select["initial_option"] = initial_option
+    return select
 
 
 def _form_submit_button(*, name: str, label: str) -> dict[str, Any]:
@@ -2445,6 +2449,7 @@ def new_binding_card(
     *,
     scope: FeishuScope,
     projects: tuple[Project, ...],
+    initial_project_alias: str | None = None,
     catalog: ModelCatalog | None = None,
     catalog_error: str | None = None,
     allow_context_mode: bool = True,
@@ -2471,6 +2476,7 @@ def new_binding_card(
             _new_binding_form(
                 projects,
                 catalog,
+                initial_project_alias=initial_project_alias,
                 allow_context_mode=allow_context_mode,
                 message_context_mode=message_context_mode,
                 task_feedback=task_feedback or BindingTaskFeedback(),
@@ -3916,8 +3922,6 @@ def _decode_project_management_form(
         enabled = False
     else:
         raise CardActionError("未知 Project 操作。")
-    if alias == "none":
-        raise CardActionError("系统 Project none 不参与启停操作。")
     return CardControlIntent(
         scope=scope,
         source_id=message_id,

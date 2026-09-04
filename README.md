@@ -461,9 +461,10 @@ python3 -m venv .venv
 make check
 ```
 
-复制 `config.example.yaml`，设置绝对 `defaultCwd` 和 `projectRoot`；旧
-`projects` mapping 仍会在首次启动时导入，此后可在飞书 `/settings` 完成 Project
-管理。飞书应用所需的 tenant 权限、消息事件与卡片回调契约只在
+复制 `config.example.yaml`，设置绝对 `projectRoot`；`projects` mapping 会在首次启动时
+导入，此后可在飞书 `/settings` 完成 Project 管理。未登记或启用任何 Project 时，
+`/new` 会引导先打开 `/settings`，不会使用服务工作目录兜底。飞书应用所需的 tenant
+权限、消息事件与卡片回调契约只在
 [部署与验收](docs/deployment.md#前置门禁)中逐项维护；受管安装器会自动请求该契约，
 本地手工准备应用时需在飞书应用后台逐项配置。两种路径都还要完成租户审批/发布、配置
 可用用户和群并把机器人加入目标群；权限变更必须随应用版本发布。开发可用 `FEISHU_APP_SECRET`；两种受管服务都使用 `FEISHU_APP_SECRET_FILE` 指向 0600 的纯

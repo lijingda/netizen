@@ -311,9 +311,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
-        default = root / "default"
         project = root / "project"
-        default.mkdir()
         project.mkdir()
         ids = iter(
             (
@@ -327,7 +325,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         self.store = BindingStore(id_factory=lambda: next(ids))
         self.projects = ProjectRegistry(
             store=self.store,
-            default_cwd=default,
+            project_root=root,
             projects={"test": project},
         )
         self.runtime = FakeManagementRuntime(self.store)
@@ -873,7 +871,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
 
         by_alias = {item.aggregate.project.alias: item for item in page.items}
         self.assertEqual(by_alias["test"].archived_binding_count, 1)
-        self.assertEqual(by_alias["none"].archived_binding_count, 0)
+        self.assertEqual(set(by_alias), {"test"})
 
     async def test_runtime_snapshot_request_is_bounded_and_reports_missing_side(
         self,

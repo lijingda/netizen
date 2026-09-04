@@ -515,14 +515,14 @@ class AdminWebApplication:
             preconditions = _empty_preconditions(
                 project_revision=ExpectedValue.expect(project.revision)
             )
-            project_actions: dict[str, object] = {}
-            if project.alias != "none" or not project.enabled:
-                project_actions["setEnabled"] = self._grant(
+            project_actions: dict[str, object] = {
+                "setEnabled": self._grant(
                     context,
                     "projects.set-enabled",
                     project_target,
                     preconditions,
                 )
+            }
             items.append(
                 {
                     "alias": project.alias,

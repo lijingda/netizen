@@ -1313,9 +1313,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
-        self.default = root / "default"
+        self.project_root = root
         self.project = root / "project"
-        self.default.mkdir()
         self.project.mkdir()
         ids = iter(
             [
@@ -1331,7 +1330,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.runtime.binding_store = self.store
         self.projects = ProjectRegistry(
             store=self.store,
-            default_cwd=self.default,
+            project_root=root,
             projects={"test": self.project},
         )
         self.app = ChannelApplication(
@@ -8335,6 +8334,102 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "cli_test", "oc_group", ScopeKind.TOPIC, "omt_settings"
         )
         self.assertIsNone(self.store.active_binding(scope.key))
+        form = next(
+            item
+            for item in _elements(picker.card, "form")
+            if item["name"] == "new_binding_v6"
+        )
+        project_select = next(
+            item
+            for item in form["elements"]
+            if item.get("name") == "new_project"
+        )
+        self.assertNotIn("initial_option", project_select)
+
+    async def test_new_reuses_scope_binding_history_without_new_storage(self) -> None:
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        other_path = self.project_root / "other"
+        unused_path = self.project_root / "unused"
+        other_path.mkdir()
+        unused_path.mkdir()
+        other = self.projects.register(
+            alias="other",
+            path=str(other_path),
+            create_directory=False,
+        )
+        unused = self.projects.register(
+            alias="unused",
+            path=str(unused_path),
+            create_directory=False,
+        )
+        first = (await self.create_binding(scope)).binding
+        current = (
+            await self.app._management.create_current_binding(
+                scope=scope,
+                creator_id="ou_user",
+                project_alias="other",
+                expected_project_revision=other.revision,
+            )
+        ).binding
+        await self.app._management.create_exact_lazy_binding(
+            scope_key=scope.key,
+            project_alias="unused",
+            expected_project_revision=unused.revision,
+            expected_active_binding_id=current.id,
+            activate=False,
+        )
+
+        async def render(message_id: str) -> tuple[OutboundCard, str | None]:
+            await self.app.handle_message(FakeMessage("/new", message_id=message_id))
+            card = self.channel.replies[-1][1]
+            forms = _elements(card.card, "form")
+            if not forms:
+                return card, None
+            form = next(item for item in forms if item["name"] == "new_binding_v6")
+            project_select = next(
+                item
+                for item in form["elements"]
+                if item.get("name") == "new_project"
+            )
+            return card, project_select.get("initial_option")
+
+        _card, selected = await render("om_current")
+        self.assertEqual(selected, f"project:v1:other:{other.revision}")
+        self.assertEqual(len(self.store.list_bindings(scope.key)), 3)
+
+        self.store.deactivate(scope_key=scope.key, binding_id=current.id)
+        _card, selected = await render("om_recent")
+        self.assertEqual(selected, f"project:v1:other:{other.revision}")
+
+        other = self.projects.set_enabled(
+            alias="other",
+            enabled=False,
+            expected_revision=other.revision,
+        )
+        test = self.projects.resolve_for_new("test")
+        _card, selected = await render("om_older_enabled")
+        self.assertEqual(selected, f"project:v1:test:{test.revision}")
+
+        self.projects.set_enabled(
+            alias="test",
+            enabled=False,
+            expected_revision=test.revision,
+        )
+        _card, selected = await render("om_never_activated")
+        self.assertIsNone(selected)
+
+        self.projects.set_enabled(
+            alias="unused",
+            enabled=False,
+            expected_revision=unused.revision,
+        )
+        disabled_picker, selected = await render("om_no_projects")
+        self.assertIsNone(selected)
+        self.assertEqual(_elements(disabled_picker.card, "form"), [])
+        self.assertIn("/settings", str(disabled_picker.card))
+        self.assertEqual(len(self.store.list_bindings(scope.key)), 3)
+        self.assertEqual(first.project_alias, "test")
+        self.assertFalse(other.enabled)
 
     async def test_new_model_configuration_creates_only_lazy_binding(self) -> None:
         await self.app.handle_message(FakeMessage("/new", message_id="om_picker"))
@@ -8744,7 +8839,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
         project = self.projects.resolve_for_new("demo")
-        self.assertEqual(project.cwd, (self.default.parent / "demo").resolve())
+        self.assertEqual(project.cwd, (self.project_root / "demo").resolve())
         self.assertTrue(project.cwd.is_dir())
         self.assertIn("已登记 Project demo", str(self.channel.updates[-1][1]))
         self.assertIn("project_create_v1", str(self.channel.updates[-1][1]))
@@ -9943,9 +10038,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
-        self.default = root / "default"
         self.project = root / "project"
-        self.default.mkdir()
         self.project.mkdir()
         self.next_id = 0
 
@@ -9960,7 +10053,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.runtime.available_capabilities = frozenset({NativeCapability.SIDE})
         self.projects = ProjectRegistry(
             store=self.store,
-            default_cwd=self.default,
+            project_root=root,
             projects={"test": self.project},
         )
         self.app = ChannelApplication(

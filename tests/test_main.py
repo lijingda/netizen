@@ -33,15 +33,12 @@ from netizen.settings import AdminWebSettings, Settings
 
 
 def settings(root: Path) -> Settings:
-    default = root / "default"
     project = root / "project"
-    default.mkdir(exist_ok=True)
     project.mkdir(exist_ok=True)
     return Settings(
         app_id="cli_test",
         app_secret="secret",
         data_dir=root / "data",
-        default_cwd=default,
         project_root=root,
         projects={"test": project},
         security_mode="audit",
@@ -293,7 +290,6 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 app_id=configured.app_id,
                 app_secret=configured.app_secret,
                 data_dir=configured.data_dir,
-                default_cwd=configured.default_cwd,
                 project_root=configured.project_root,
                 projects=configured.projects,
                 security_mode=configured.security_mode,
@@ -315,7 +311,6 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 store=store,
                 projects=ProjectRegistry(
                     store=store,
-                    default_cwd=configured.default_cwd,
                     projects=configured.projects,
                     project_root=configured.project_root,
                 ),
@@ -367,7 +362,6 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 app_id=configured.app_id,
                 app_secret=configured.app_secret,
                 data_dir=configured.data_dir,
-                default_cwd=configured.default_cwd,
                 project_root=configured.project_root,
                 projects=configured.projects,
                 security_mode=configured.security_mode,
@@ -382,7 +376,6 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 store=store,
                 projects=ProjectRegistry(
                     store=store,
-                    default_cwd=configured.default_cwd,
                     projects=configured.projects,
                     project_root=configured.project_root,
                 ),
@@ -594,7 +587,6 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 store=store,
                 projects=ProjectRegistry(
                     store=store,
-                    default_cwd=configured.default_cwd,
                     projects=configured.projects,
                     project_root=configured.project_root,
                 ),
@@ -712,7 +704,6 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 store=store,
                 projects=ProjectRegistry(
                     store=store,
-                    default_cwd=configured.default_cwd,
                     projects=configured.projects,
                     project_root=configured.project_root,
                 ),

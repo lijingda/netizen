@@ -25,8 +25,8 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 ### Scope、会话与 Project
 
 - 一个普通单聊、群聊主线或普通话题各自形成一个 Scope。每个 Scope 可以有多个会话，但同一时刻只有一个当前会话。
-- 会话绑定一个 Project，也就是 Codex 实际工作的目录。实例默认目录作为 `none` 选项
-  出现在 `/new` 的 Project 下拉框中。
+- 会话必须绑定一个已登记且启用的 Project，也就是 Codex 实际工作的目录；Netizen 不使用
+  实例或服务工作目录作为默认兜底。
 - `/new` 只创建并切换到一个 Lazy 会话；首条真实任务才创建原生 Thread。
 - 原生 Thread 和历史由 Codex 保存，能够在 Codex App/CLI 中继续使用。CLI/App 中新增的消息不会自动回填到飞书。
 - 每条真实任务或 steer 都会把当前飞书消息的公开发送者信息交给 Codex，并随原生输入进入
@@ -175,8 +175,9 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 - `/new`：打开唯一的新建卡片。Project 下拉框展示全部 enabled Projects，不由 Netizen
   截断或分页；Model 可继承 Codex，也可显式选择 Model、Effort 和 Speed。Reaction Pulse
   与 Progress Card 可独立选择且默认关闭；群聊和群话题还可选择 @ 时读取的消息范围。
-  提交后创建并切换 Lazy 会话。
-- 任何带参数的 `/new ...` 快捷创建都已下线；请在卡片中选择，包括默认目录 `none`。
+  同 Scope 当前或最近使用且仍 enabled 的 Project 可能被预选；没有历史偏好时需要明确
+  选择。提交后创建并切换 Lazy 会话；没有 enabled Project 时会引导先打开 `/settings`。
+- 任何带参数的 `/new ...` 快捷创建都已下线；请在卡片中选择。
 - `/settings`：打开实例设置卡片。当前可在 Projects 分区启用、停用、创建或登记 Project。
 - 停用 Project 只阻止用它创建新会话，已有会话仍可继续；Netizen 不会删除 Project 目录。
 

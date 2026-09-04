@@ -693,9 +693,12 @@ RPC 可能仍在工作；不能把取消误判为无副作用。
 prompt 会线性放大该风险。Pilot 基于受控用户、低频小图接受这一限制，完整风险和迁移
 条件记录在 ADR 0015。群聊/话题 @准入和连续媒体不合并的语义保持不变。
 
-Project 是持久化的 `alias -> canonical absolute cwd`；`none` 映射一个
-`defaultCwd`。旧 YAML mapping 只做 `INSERT OR IGNORE` bootstrap；飞书卡片可登记
-已有绝对路径，或只在 `projectRoot` 内创建空目录。停用只阻止新 Binding，已有
+Project 是持久化的 `alias -> canonical absolute cwd`；每个 Binding 必须显式绑定
+Registry 中的一个 Project，不存在 default/unbound 或服务 cwd fallback。YAML mapping
+只做 `INSERT OR IGNORE` bootstrap；飞书卡片可登记已有绝对路径，或只在必填的
+`projectRoot` 内创建空目录。`/new` 可以从同 Scope 的现有 Binding 记录预选当前或最近
+使用且仍 enabled 的 Project，不另存 recent 状态；没有可推导偏好时必须由用户选择，
+没有 enabled Project 时引导 `/settings` 且不创建 Binding。停用只阻止新 Binding，已有
 Binding 仍能继续；Netizen 从不删除目录。它不做 workspace clone 或 Project ACL。
 用户和群的准入由飞书应用权限负责；Netizen 和 Channel SDK 不再配置
 user/chat/role allowlist。每个被投递到 Scope 的参与者都能管理 Binding、Project 和
