@@ -14,7 +14,9 @@ from openai_codex.types import (
 )
 
 from openai_codex.generated.v2_all import (
+    CollabAgentTool,
     CollabAgentToolCallThreadItem,
+    SubAgentActivityKind,
     SubAgentActivityThreadItem,
     Thread,
     ThreadSpawnSubAgentSource,
@@ -59,6 +61,16 @@ class CodexSdkCapabilityContractTest(unittest.TestCase):
         )
 
     def test_typed_child_provenance_and_both_agent_item_shapes_are_available(self) -> None:
+        # New enum values require a deliberate decision about child provenance,
+        # including the currently ignored close/interrupt operations.
+        self.assertEqual(
+            {tool.value for tool in CollabAgentTool},
+            {"spawnAgent", "sendInput", "resumeAgent", "wait", "closeAgent"},
+        )
+        self.assertEqual(
+            {kind.value for kind in SubAgentActivityKind},
+            {"started", "interacted", "interrupted"},
+        )
         collab = ThreadItem.model_validate(
             {
                 "type": "collabAgentToolCall",

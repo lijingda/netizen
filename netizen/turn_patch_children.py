@@ -157,11 +157,9 @@ async def collect_turn_patch_children(
             root_ids = [turn.id for turn in root.turns]
             # A newer root Turn may already have sent another task to the same
             # child. Its child Turn identity is not exposed by this SDK.
-            if (
-                not root_ids
-                or root_ids[-1] != turn_id
-                or any(_value(turn.items_view) != "full" for turn in root.turns)
-            ):
+            # Root items are already frozen by the caller. Here only Turn IDs
+            # are used; items_view describes item contents, not those identities.
+            if not root_ids or root_ids[-1] != turn_id:
                 return TaskPatchChildren(complete=False)
             enqueue(spawned, thread_id, frozenset(root_ids))
             while pending:

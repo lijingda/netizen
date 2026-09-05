@@ -306,7 +306,6 @@ class TurnPatchChildrenTest(unittest.IsolatedAsyncioTestCase):
             _view("root", _turn("different-turn")),
             _view("wrong-root", _turn("root-turn")),
             _view("root", _turn("root-turn"), _turn("new-turn")),
-            _view("root", _turn("root-turn", items_view="summary")),
             _view("root", _turn("root-turn"), _turn("root-turn")),
         ]
         for root in cases:
@@ -315,6 +314,32 @@ class TurnPatchChildrenTest(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result.complete)
                 self.assertEqual(result.batches, ())
                 self.assertEqual(calls, ["root"])
+
+    async def test_root_item_views_do_not_limit_identity_only_reads(self) -> None:
+        spawn = _collab("child")
+        for items_view in ("summary", "notLoaded"):
+            with self.subTest(items_view=items_view):
+                history = _turn("old-root-turn", items_view=items_view)
+                current = _turn("root-turn", items_view=items_view)
+                success = _patch("child-patch")
+                result, calls = await self._collect(
+                    [spawn],
+                    {
+                        "root": _view("root", history, current),
+                        "child": _view(
+                            "child",
+                            _turn(history.id, _patch("inherited-old")),
+                            _turn(current.id, _patch("inherited-current")),
+                            _turn("child-turn", success),
+                            parent="root",
+                        ),
+                    },
+                )
+                self.assertTrue(result.complete)
+                self.assertEqual(calls, ["root", "child", "root"])
+                self.assertEqual(len(result.batches), 1)
+                self.assertEqual(result.batches[0].turn_id, "child-turn")
+                self.assertEqual(result.batches[0].items, (success.root,))
 
     async def test_root_read_does_not_expand_the_supplied_turn_items(self) -> None:
         spawn = _collab("child")
@@ -390,7 +415,12 @@ class TurnPatchChildrenTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.batches), 1)
 
     async def test_running_or_partial_child_preserves_successful_patches(self) -> None:
-        for status, items_view in [("inProgress", "full"), ("completed", "summary")]:
+        for status, items_view, pending in [
+            ("inProgress", "full", False),
+            ("completed", "summary", False),
+            ("completed", "notLoaded", False),
+            ("completed", "full", True),
+        ]:
             with self.subTest(status=status, items_view=items_view):
                 result, _ = await self._collect(
                     [_collab("child")],
@@ -401,7 +431,7 @@ class TurnPatchChildrenTest(unittest.IsolatedAsyncioTestCase):
                             _turn(
                                 "child-turn",
                                 _patch(),
-                                _patch("pending", status="inProgress"),
+                                *([_patch("pending", status="inProgress")] if pending else []),
                                 status=status,
                                 items_view=items_view,
                             ),
