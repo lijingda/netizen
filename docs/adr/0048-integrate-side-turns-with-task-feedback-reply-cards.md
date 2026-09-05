@@ -81,9 +81,11 @@ Turn、由 native persisted state 驱动的生命周期；Side 是不可恢复�
 叠加会制造重启、自动 clear、暂停和控制身份无法证明的状态。需要 Goal 时必须回到普通
 Binding。
 
-所有 reaction/card 操作仍为尽力展示：初始或更新失败不影响 native execution，终态回退到
-同一 Side Turn 在 Progress Card 关闭时的文本/文件路径。Side 根卡只由 Side lifecycle
-更新，Turn presenter 不修改它。
+所有 reaction/card 操作仍为尽力展示：初始或更新失败不影响 native execution。运行卡
+投递失败沿用 ADR 0047 的轮询重试，连续三次失败停止；终态仍对身份有效的原卡独立
+尝试一次更新。原卡不可用、终态渲染或更新失败时，回退到同一 Side Turn 在
+Progress Card 关闭时的文本/文件路径。Side 根卡只由
+Side lifecycle 更新，Turn presenter 不修改它。
 
 ## 验证
 

@@ -35,8 +35,12 @@ Activity + Result + 可选 Files。Task Reaction 仍只属于 ordinary Turn；Pr
 为有界的完整 Reply Card manifest，携带有界冻结的 Goal/Activity/Result 模块；翻页不得
 丢失其他模块。普通 Result + Files 与 Activity + Result + Files 继续生成 v4 callback；
 只有 Goal 与 Files 同卡时使用 v5 完整组合 manifest。两版都按 500 项、每页 8 项和
-55,000-byte 上限校验。展示失败停止 Presenter，原生执行不受影响；Goal 初始卡失败必须
-提供可见文字回执，终态在有界 handoff 内回退到新的自包含卡或既有文本。
+55,000-byte 上限校验。运行卡每轮最多更新一次，成功才推进已送达 revision 并清零失败
+计数；投递失败由既有轮询读取最新快照重试，新 revision 不重置计数，连续三次失败停止。
+读取或渲染异常立即停止，既有身份校验继续拒绝失配投影，原生执行不受影响。终态在旧
+轮询退出后，对身份仍有效的原卡独立尝试一次更新，沿用既有超时。原卡不可用、终态渲染
+或更新失败时才回退到新的自包含卡或既有文本，Goal 的整个 handoff 仍有界。Goal 初始卡
+失败必须提供可见文字回执。
 
 Goal 活动卡从 start 到 pause/resume/terminal 复用同一条机器人消息。按钮携带 exact Scope、
 Binding、SDK 已公开不可变字段组成的最强 Goal fingerprint 与预期状态；Presenter 还要求

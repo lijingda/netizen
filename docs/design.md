@@ -528,9 +528,16 @@ closed，不能扩展成任意通知或私有 RPC gateway。
 `collapsible_panel` 展开并显示状态、进展、通用操作与 checklist；进展和操作行使用同一
 毫秒时间戳的 Card 2.0 Markdown `date_num` 与 `time` 两个 `local_datetime` 标签，由查看者
 客户端按本地语言与时区呈现日期和分钟，终态折叠。Goal 从
-start 到 pause/resume/terminal 复用同一张卡并更新其控制按钮。初始发送、任一中间更新、终态更新或
-容量校验失败时停止对应 presenter；展示失败不阻断、取消、重试或改写 native execution，
-终态按可用模块回退为新的自包含卡或既有文本。只有 Goal + Files 使用的 v5 callback
+start 到 pause/resume/terminal 复用同一张卡并更新其控制按钮。普通 Turn、Side 与 Goal
+每轮最多尝试一次运行卡更新，只在成功后推进已送达 revision 并清零连续失败计数。
+投递失败留到下一次既有轮询重试，直接读取最新快照以合并变化；新 revision 不重置计数，
+连续三次投递失败后停止轮询。初始已送达 revision 对应实际发出的卡片；读取或渲染异常
+仍立即停止，既有身份校验继续拒绝失配投影。暂时无快照时保持等待，不清零失败计数。
+当前投递接口只返回成功与否，因此永久 API 错误也最多尝试三次，
+不新增错误分类、待发送队列或调度器。终态先等待旧轮询退出，再对身份仍有效的原卡
+独立尝试一次更新，沿用既有超时，不受中间失败影响。原卡不可用、终态渲染或更新失败时，
+才按可用模块回退为新的自包含卡或既有文本。展示失败不阻断、取消、重试或改写 native
+execution。只有 Goal + Files 使用的 v5 callback
 携带完整、裁剪且有界的 Reply Card manifest，翻页不丢 Goal/Activity/Result；普通文件卡
 继续使用 v4；Side 只组合 Activity/Result/Files，也使用 v4。进程内在 active lifecycle
 保留 updater，并为非 cleared Goal 有界保留终态
