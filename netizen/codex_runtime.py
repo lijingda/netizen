@@ -54,6 +54,12 @@ from .sdk_gap_adapter import (
     ThreadUnsubscribeStateUnknown,
 )
 from .terminal_cleanup import BackgroundTerminalInspector, TerminalCleanup
+from .task_diff import TaskDiffComposition
+from .task_diff_observer import (
+    TaskDiffCapture,
+    TaskDiffObserver,
+    UnavailableTaskDiffObserver,
+)
 from .turn_activity import (
     ACTIVITY_COMMENTARY_LIMIT,
     ACTIVITY_OPERATION_LIMIT,
@@ -65,6 +71,7 @@ from .turn_activity import (
     TurnPlanStepSnapshot,
 )
 from .turn_plan_observer import TurnActivityObservation, TurnActivityObserver
+from .turn_files import TurnDiffSummary
 
 
 logger = logging.getLogger(__name__)
@@ -75,6 +82,7 @@ _NOT_MATERIALIZED_SUFFIX = (
 _STOP_ACK_ATTEMPT_TIMEOUT_SECONDS = 5.0
 _COMPACTION_TERMINAL_TIMEOUT_SECONDS = 600.0
 _GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS = 20.0
+_TASK_DIFF_COMPOSITION_TIMEOUT_SECONDS = 2.0
 _THREAD_LIST_PAGE_LIMIT = 100
 _THREAD_CATALOG_MAX_PAGES = 1_000
 _THREAD_CATALOG_MAX_ITEMS = 100_000
@@ -689,6 +697,9 @@ class TurnOutcome:
     # ``turn/diff/updated`` notification for this exact Turn.  It is carried
     # only through completion delivery and is never persisted by Netizen.
     turn_diff: str | None = None
+    # When set, this verified root-task summary replaces the physical-Turn
+    # summary. An empty value is an intentional fail-closed override.
+    task_diff_summary: TurnDiffSummary | None = None
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
     activity: TurnActivitySnapshot | None = None
@@ -764,6 +775,7 @@ class GoalOutcome:
     # existing Goal notification consumer. It is never reconstructed from
     # persisted Turn history or stored by Netizen.
     turn_diff: str | None = None
+    task_diff_summary: TurnDiffSummary | None = None
     error: BaseException | None = None
     background_cleanup_requested: bool = False
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
@@ -853,6 +865,8 @@ class _ActiveTurn:
     owner_id: str
     origin: object
     receipt_attempted: asyncio.Event
+    cwd: Path
+    task_diff_capture: TaskDiffCapture | None = None
     state: ActiveState = ActiveState.RUNNING
     interrupt_attempted: bool = False
     interrupt_succeeded: bool = False
@@ -911,6 +925,8 @@ class _ActiveGoal:
     objective: str
     receipt_attempted: asyncio.Event
     state: GoalOperationState
+    cwd: Path | None = None
+    task_diff_capture: TaskDiffCapture | None = None
     persisted: GoalSnapshot | None = None
     generation_created_at: int | None = None
     generation_token_budget: int | None = None
@@ -1053,6 +1069,7 @@ class CodexRuntime:
         background_terminal_inspector: BackgroundTerminalInspector | None = None,
         thread_delete_control: ThreadDeleteControl | None = None,
         turn_plan_observer: TurnActivityObserver | None = None,
+        task_diff_observer: TaskDiffObserver | None = None,
         on_completion: CompletionHandler = _ignore_completion,
         poll_interval_seconds: float = 0.5,
         compaction_timeout_seconds: float = _COMPACTION_TERMINAL_TIMEOUT_SECONDS,
@@ -1075,6 +1092,7 @@ class CodexRuntime:
         self._background_terminal_inspector = background_terminal_inspector
         self._thread_delete_control = thread_delete_control
         self._turn_plan_observer = turn_plan_observer
+        self._task_diff_observer = task_diff_observer or UnavailableTaskDiffObserver()
         self._on_completion = on_completion
         self._poll_interval_seconds = poll_interval_seconds
         self._compaction_timeout_seconds = compaction_timeout_seconds
@@ -3416,6 +3434,7 @@ class CodexRuntime:
                         "effort": resolved_settings.effort,
                         "service_tier": resolved_settings.service_tier_id,
                     }
+                task_diff_capture = self._begin_task_diff_capture()
                 handle = await thread.turn(native_input, **turn_kwargs)
             except asyncio.CancelledError:
                 self._invalidate_context_window_usage(binding.id)
@@ -3446,6 +3465,8 @@ class CodexRuntime:
                 owner_id=owner_id,
                 origin=origin,
                 receipt_attempted=receipt_attempted,
+                cwd=cwd,
+                task_diff_capture=task_diff_capture,
                 task_feedback=binding.task_feedback,
                 feedback_revision=binding.feedback_revision,
                 plan_available=self._turn_plan_observer is not None,
@@ -4024,6 +4045,7 @@ class CodexRuntime:
                 objective=objective,
                 receipt_attempted=receipt_attempted,
                 state=GoalOperationState.STARTING,
+                cwd=cwd,
                 persisted=persisted,
                 task_feedback=binding.task_feedback,
                 feedback_revision=binding.feedback_revision,
@@ -4033,6 +4055,7 @@ class CodexRuntime:
             self._advance_admission_revision(binding.id)
             self._invalidate_context_window_usage(binding.id)
 
+        active.task_diff_capture = self._begin_task_diff_capture()
         try:
             handle = await control.start(thread.id, objective)
         except asyncio.CancelledError as error:
@@ -4102,6 +4125,7 @@ class CodexRuntime:
         self,
         *,
         binding: ThreadBinding,
+        cwd: Path,
         owner_id: str,
         origin: object,
         expected_created_at: int | None = None,
@@ -4148,6 +4172,7 @@ class CodexRuntime:
                 objective=persisted.objective,
                 receipt_attempted=receipt_attempted,
                 state=GoalOperationState.STARTING,
+                cwd=cwd,
                 persisted=persisted,
                 generation_created_at=persisted.created_at,
                 generation_token_budget=persisted.token_budget,
@@ -4158,6 +4183,7 @@ class CodexRuntime:
             self._goals[binding.id] = active
             self._advance_admission_revision(binding.id)
             self._invalidate_context_window_usage(binding.id)
+        active.task_diff_capture = self._begin_task_diff_capture()
         try:
             handle = await control.resume(thread.id)
         except asyncio.CancelledError as error:
@@ -5975,6 +6001,80 @@ class CodexRuntime:
             )
         return observed_usage
 
+    def _begin_task_diff_capture(self) -> TaskDiffCapture | None:
+        observer = self._task_diff_observer
+        if observer is None:
+            return None
+        try:
+            capture = observer.begin()
+            if type(capture) is not TaskDiffCapture:
+                raise TypeError("task diff observer returned an invalid capture")
+            return capture
+        except Exception:
+            logger.warning("task diff capture could not start", exc_info=True)
+            return TaskDiffCapture(0, available=False)
+
+    async def _finish_task_diff_capture(
+        self,
+        capture: TaskDiffCapture | None,
+        *,
+        root_thread_id: str,
+        root_turn_id: str,
+        cwd: Path | None,
+        include_prior_root_turns: bool = False,
+    ) -> TurnDiffSummary | None:
+        observer = self._task_diff_observer
+        if capture is None:
+            return None
+        if not capture.available:
+            return TurnDiffSummary()
+        if cwd is None:
+            logger.warning(
+                "task diff capture has no Project cwd",
+                extra={"thread_id": root_thread_id, "turn_id": root_turn_id},
+            )
+            return TurnDiffSummary()
+        try:
+            async with asyncio.timeout(_TASK_DIFF_COMPOSITION_TIMEOUT_SECONDS):
+                composition = await asyncio.to_thread(
+                    observer.finish,
+                    capture,
+                    root_thread_id=root_thread_id,
+                    root_turn_id=root_turn_id,
+                    cwd=cwd,
+                    include_prior_root_turns=include_prior_root_turns,
+                )
+            if type(composition) is not TaskDiffComposition:
+                raise TypeError("task diff observer returned an invalid result")
+            if not composition.complete:
+                logger.warning(
+                    "root task diff is unavailable; line statistics omitted",
+                    extra={
+                        "thread_id": root_thread_id,
+                        "turn_id": root_turn_id,
+                        "reason": composition.reason,
+                    },
+                )
+                return TurnDiffSummary()
+            if composition.descendant_turns and composition.override is None:
+                raise TypeError("descendant task diff is missing its summary")
+            return composition.override
+        except TimeoutError:
+            logger.warning(
+                "root task diff composition timed out; line statistics omitted",
+                extra={"thread_id": root_thread_id, "turn_id": root_turn_id},
+            )
+            return TurnDiffSummary()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "root task diff composition failed; line statistics omitted",
+                exc_info=True,
+                extra={"thread_id": root_thread_id, "turn_id": root_turn_id},
+            )
+            return TurnDiffSummary()
+
     async def _consume(
         self,
         active: _ActiveTurn,
@@ -5985,6 +6085,7 @@ class CodexRuntime:
         error: BaseException | None = None
         unavailable_error: BaseException | None = None
         activity: TurnActivitySnapshot | None = None
+        task_diff_summary: TurnDiffSummary | None = None
         retain_active = False
         try:
             observation: TurnResult | _TurnObservation | None = None
@@ -6071,6 +6172,12 @@ class CodexRuntime:
                     finally:
                         if not observed_usage:
                             self._invalidate_context_window_usage(active.binding_id)
+                    task_diff_summary = await self._finish_task_diff_capture(
+                        active.task_diff_capture,
+                        root_thread_id=active.handle.thread_id,
+                        root_turn_id=active.handle.id,
+                        cwd=active.cwd,
+                    )
             finally:
                 while not retain_active:
                     if self._active.get(active.binding_id) is not active:
@@ -6126,6 +6233,7 @@ class CodexRuntime:
             error=error,
             background_cleanup_requested=active.cleanup_succeeded,
             turn_diff=active.latest_diff,
+            task_diff_summary=task_diff_summary,
             task_feedback=active.task_feedback,
             feedback_revision=active.feedback_revision,
             activity=activity,
@@ -6259,6 +6367,7 @@ class CodexRuntime:
     async def _consume_goal(self, active: _ActiveGoal) -> None:
         error: BaseException | None = None
         persisted: GoalSnapshot | None = None
+        task_diff_summary: TurnDiffSummary | None = None
         retain_active = False
         defer_slot_release_until_delivery = False
         finalization = GoalFinalizationStatus.NOT_APPLICABLE
@@ -6285,6 +6394,13 @@ class CodexRuntime:
                 await active.cleanup_ready.wait()
                 if not active.cleanup_succeeded:
                     active.cleanup_ready.clear()
+            task_diff_summary = await self._finish_task_diff_capture(
+                active.task_diff_capture,
+                root_thread_id=active.thread_id,
+                root_turn_id=active.stream_terminal.final_physical_turn_id,
+                cwd=active.cwd,
+                include_prior_root_turns=True,
+            )
             if (
                 persisted.status is GoalStatus.COMPLETE
                 and active.final_turn_status == "completed"
@@ -6397,6 +6513,7 @@ class CodexRuntime:
                     if active.stream_terminal is not None
                     else None
                 ),
+                task_diff_summary=task_diff_summary,
                 error=error,
                 background_cleanup_requested=active.cleanup_succeeded,
                 task_feedback=active.task_feedback,

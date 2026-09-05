@@ -1411,6 +1411,10 @@ def _run_host_release_checks(
     )
     runner([python, "-m", "pip", "check"], env=environment)
     runner(
+        [python, source / "scripts" / "probe_sdk_task_diff.py", "--timeout", "5"],
+        env=environment,
+    )
+    runner(
         [python, source / "scripts" / "probe_sdk_turn_plan.py", "--timeout", "5"],
         env=environment,
     )

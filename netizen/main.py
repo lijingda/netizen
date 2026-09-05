@@ -66,6 +66,11 @@ from .sdk_gap_adapter import (
 )
 from .settings import Settings
 from .terminal_cleanup import PinnedExperimentalTerminalCleanup
+from .task_diff_observer import (
+    PinnedTaskDiffObserver,
+    TaskDiffObservationUnavailable,
+    UnavailableTaskDiffObserver,
+)
 from .turn_plan_observer import (
     PinnedTurnActivityObserver,
     TurnActivityObservationUnavailable,
@@ -178,6 +183,11 @@ class ServiceCore:
                 CodexConfig(config_overrides=_CODEX_SERVICE_CONFIG_OVERRIDES)
             )
             await self._codex.__aenter__()
+            try:
+                task_diff_observer = PinnedTaskDiffObserver(self._codex)
+            except TaskDiffObservationUnavailable as error:
+                logger.warning("native root-task diff unavailable: %s", error)
+                task_diff_observer = UnavailableTaskDiffObserver()
             terminal_cleanup = PinnedExperimentalTerminalCleanup(self._codex)
             thread_subscription_control = AppServerThreadSubscriptionControl(
                 self._codex
@@ -221,6 +231,7 @@ class ServiceCore:
                 background_terminal_inspector=terminal_cleanup,
                 thread_delete_control=thread_delete_control,
                 turn_plan_observer=turn_plan_observer,
+                task_diff_observer=task_diff_observer,
             )
             scope_coordinator = ScopeCoordinator()
             self._management = InstanceManagementService(

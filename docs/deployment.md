@@ -223,6 +223,14 @@ live probe 会创建原生 Thread，只在已登录的目标部署账号
 stdout；异常路径的二次 interrupt、terminal cleanup 和 task drain 都有界，外层
 `timeout` 是整个 phase 的最后兜底。
 
+`make check` 还固定运行 `scripts/probe_sdk_task_diff.py`：真实安装的 pinned Python SDK
+连接 fake App Server，在任何 Turn 启动前安装 pre-router observer，发送 root/child lifecycle、
+两次 child `fileChange`、一次 parent `fileChange` 和三份 aggregate snapshot，证明 child
+completion 后 SDK 虽清除其 pending queue，旁路 capture 仍保留完整证据；同一 child Turn
+先 Add、再 Update 成 337 行，父 Turn 经 `+32 -27` 得到 342 行时必须合成为 `+342 -0`。
+这个 probe 同时进入安装期 host qualification；版本、runtime、source fingerprint 或 router
+seam 任一变化都必须 fail closed。
+
 `make check` 还固定验证公开 `AsyncTurnHandle.stream()` 的 exact
 `turn/diff/updated` latest aggregate snapshot、公开 `ThreadItem.root` 的 completed
 `fileChange` / `imageGeneration.saved_path` fallback、窄定义的 unified diff path/hunk 行数 parser、v3
@@ -1161,12 +1169,15 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     只有富文本/静态文本最终回复；有文件 Turn 必须只有一张同时包含最终回复和本轮文件的
     现有完成卡。Progress Card 开启时，两种结果都更新最初的同一张运行卡，有文件时继续
     包含既有 v4 manifest。再验证 Goal exact 最终物理 Turn completed 的文件进入同一张
-    Goal 卡并使用 v5 完整 Reply Card manifest，而更早 rollover Turn 的文件不会被猜测
-    聚合；Side exact completed Turn 的 structured items 进入普通 v4 完成/进度卡，而
+    Goal 卡并使用 v5 完整 Reply Card manifest；Side exact completed Turn 的 structured items
+    进入普通 v4 完成/进度卡，而
     aggregate diff、先前 Side Turn 和未进入 structured items 的文件不会被补齐，且 Side
-    不显示行数。Goal live phase 必须让 resumed exact final physical Turn 创建一个临时文件，
-    并从同一唯一 Goal notification stream 返回的 latest aggregate diff 验证该文件及行数；
-    更早 physical Turn 的 snapshot 不得泄漏。Project 内文件显示相对路径，Project 外文件
+    不显示行数。Goal live phase 必须让 causal child 或较早 root physical Turn 创建临时文件，
+    再由 exact final root Turn 修改，使 parent-only diff 与整次 run 的净变化不同；验证 Goal 卡
+    使用 pre-router task observation 的全部 OID checkpoints 证明唯一历史，并只用 per-Turn
+    final snapshot hunks 得到 baseline→final 净行数，而 final response 与 structured
+    item fallback 仍只取 exact final physical Turn。另以同路径非因果 Turn 或缺失 snapshot
+    验证统计明确省略，不能回退为 parent-only 数字。Project 内文件显示相对路径，Project 外文件
     显示脱敏逻辑位置；所有条目隐藏大小、按钮统一为“发送”，按 8 个一页完整翻页，可见正文
     不出现绝对路径、预览、diff 正文或发送全部；v5 callback payload 则必须逐项携带明文
     absolute path，并对已知统计携带成对 `a/d`，翻页后完整保留整轮统计与

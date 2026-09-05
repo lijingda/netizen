@@ -114,13 +114,17 @@ contributors must know before starting related work.
   With no Goal, Activity, or files, preserve rich/static terminal text. Never
   expose reasoning, raw tool/command output, tool arguments, elapsed time,
   percentage, or ETA. Display failures never alter native execution.
-- ADR 0053 derives Files line counts only from an Ordinary Turn's latest exact
-  aggregate diff or a Goal's exact final physical Turn diff captured in the
-  existing unique notification stream. Side does not observe aggregate diff.
-  Only complete validated hunks and a narrow pure 100% rename case produce
-  counts. Binary, image, missing, malformed, or other metadata-only evidence
-  omits counts; self-contained manifests use paired short `a/d` fields and fail
-  closed without truncation at 400 files or 55,000 encoded bytes.
+- ADR 0053/0056 derive Files line counts from the exact physical Turn only for a
+  single-root-Turn task with no causal child. With child Agents or a multi-Turn
+  Goal run, pair every completed `fileChange` with its aggregate snapshot, use
+  every snapshot as a path OID checkpoint, and use only each physical Turn's
+  final hunks for baseline reconstruction. All checkpoints and final edges must
+  prove one branchless chain anchored to the current file. Never add parent/child
+  counts or fall back to parent-only numbers when proof is unavailable. Observer
+  projection and terminal composition remain bounded display work. Side does not
+  observe aggregate diff; unsupported evidence omits task counts. Self-contained
+  manifests use paired short `a/d` fields and fail closed without truncation at
+  400 files or 55,000 encoded bytes.
 - ADR 0047 auto-clears only a four-proof complete Goal whose exact final Turn
   completed. Hold its Runtime slot through the bounded terminal display handoff;
   paused/blocked/limited/unknown Goals never auto-clear. Goal controls require
@@ -137,7 +141,10 @@ contributors must know before starting related work.
   terminal cleanup and ADR 0014's removable capability-specific Goal/Skills
   adapters, ADR 0021's fixed Side boundary adapter, ADR 0028's reusable fixed
   Thread unsubscribe adapter, ADR 0037's fixed Thread Delete adapter, plus ADR
-  0020/0052's version/fingerprint-gated, non-consuming Activity observer. The Delete
+  0020/0052's version/fingerprint-gated, non-consuming Activity observer, and ADR
+  0056's exact-pinned pre-router Task Diff observer. The Task Diff seam may only
+  copy its semantic allowlist before routing and must invoke the original router
+  once with the identical object; it must never consume or mutate SDK queues. The Delete
   adapter is production-permitted only through ADR 0037's exact method and
   Runtime reconciliation contract. Do not parse
   CLI output, add a generic/private RPC gateway, patch SDK internals, copy

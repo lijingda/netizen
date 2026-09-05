@@ -128,6 +128,7 @@ from netizen.turn_plan_observer import (
     TurnPlanStepSnapshot,
     TurnPlanStepState,
 )
+from netizen.turn_files import TurnDiffFileStats, TurnDiffSummary
 PNG = b"\x89PNG\r\n\x1a\nchannel-test"
 PULSE_ON = BindingTaskFeedback(reaction_pulse_enabled=True)
 
@@ -2882,6 +2883,80 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("-0", rendered)
         self.assertNotIn("8 B", rendered)
         self.assertEqual(_card_button_value(card, "发送")["v"], 4)
+
+    async def test_verified_root_task_summary_overrides_parent_turn_diff(self) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-files")
+        (self.project / "research.md").write_text("final", encoding="utf-8")
+        task_summary = TurnDiffSummary(
+            342,
+            0,
+            (TurnDiffFileStats("research.md", 342, 0),),
+        )
+
+        with patch.object(channel_app, "turn_diff_summary") as parse_diff:
+            await self.app.handle_completion(
+                TurnOutcome(
+                    binding_id=binding.id,
+                    thread_id="native-files",
+                    turn_id="turn-with-child",
+                    owner_id="ou_user",
+                    origin=origin,
+                    result=completed_turn_result(final_response="research complete"),
+                    turn_diff=(
+                        "diff --git a/research.md b/research.md\n"
+                        "@@ -1 +1 @@\n-old\n+new\n"
+                    ),
+                    task_diff_summary=task_summary,
+                )
+            )
+
+        parse_diff.assert_not_called()
+        card = self.channel.replies[-1][1]
+        self.assertIsInstance(card, OutboundCard)
+        rendered = json.dumps(card.card, ensure_ascii=False)
+        self.assertIn("+342", rendered)
+        self.assertIn("-0", rendered)
+        self.assertNotIn("+1 / -1", rendered)
+
+    async def test_unavailable_root_task_summary_keeps_structured_file_without_stats(
+        self,
+    ) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-files")
+        (self.project / "research.md").write_text("final", encoding="utf-8")
+
+        with patch.object(channel_app, "turn_diff_summary") as parse_diff:
+            await self.app.handle_completion(
+                TurnOutcome(
+                    binding_id=binding.id,
+                    thread_id="native-files",
+                    turn_id="turn-with-incomplete-proof",
+                    owner_id="ou_user",
+                    origin=origin,
+                    result=completed_turn_result(
+                        file_change_item("research.md"),
+                        final_response="research complete",
+                    ),
+                    turn_diff=(
+                        "diff --git a/research.md b/research.md\n"
+                        "@@ -1 +1 @@\n-old\n+new\n"
+                    ),
+                    task_diff_summary=TurnDiffSummary(),
+                )
+            )
+
+        parse_diff.assert_not_called()
+        card = self.channel.replies[-1][1]
+        self.assertIsInstance(card, OutboundCard)
+        rendered = json.dumps(card.card, ensure_ascii=False)
+        self.assertIn("research.md", rendered)
+        self.assertNotIn("+1", rendered)
+        self.assertNotIn("-1", rendered)
 
     async def test_generated_image_outside_project_gets_artifact_aware_card(
         self,
@@ -6562,6 +6637,49 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Goal 已暂停", rendered)
         self.assertIn("goal-paused", rendered)
         self.assertIn("前台工具进程不受此接口保证，可能仍在运行", rendered)
+
+    async def test_goal_task_summary_overrides_final_physical_turn_diff(self) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        (self.project / "research.md").write_text("final", encoding="utf-8")
+        task_summary = TurnDiffSummary(
+            342,
+            0,
+            (TurnDiffFileStats("research.md", 342, 0),),
+        )
+
+        with patch.object(channel_app, "turn_diff_summary") as parse_diff:
+            await self.app.handle_completion(
+                GoalOutcome(
+                    binding_id=binding.id,
+                    thread_id="native-one",
+                    logical_turn_id="goal-one",
+                    owner_id="ou_user",
+                    origin=origin,
+                    goal=native_goal(GoalStatus.COMPLETE),
+                    final_physical_turn_id="goal-turn-final",
+                    final_turn_status="completed",
+                    final_items=(file_change_item("research.md"),),
+                    final_response="goal research complete",
+                    turn_diff=(
+                        "diff --git a/research.md b/research.md\n"
+                        "@@ -1 +1 @@\n-old\n+new\n"
+                    ),
+                    task_diff_summary=task_summary,
+                    finalization=GoalFinalizationStatus.CLEARED,
+                )
+            )
+
+        parse_diff.assert_not_called()
+        card = self.channel.replies[-1][1]
+        self.assertIsInstance(card, OutboundCard)
+        rendered = json.dumps(card.card, ensure_ascii=False)
+        self.assertIn("research.md", rendered)
+        self.assertIn("+342", rendered)
+        self.assertIn("-0", rendered)
+        self.assertNotIn("+1 / -1", rendered)
 
     async def test_goal_uses_one_composed_card_through_result_files_and_paging(
         self,

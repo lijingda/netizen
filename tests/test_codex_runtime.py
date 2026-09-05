@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,6 +106,8 @@ from netizen.sdk_gap_adapter import (
     ThreadUnsubscribeStateUnknown,
     ThreadUnsubscribeStatus,
 )
+from netizen.task_diff import TaskDiffComposition
+from netizen.task_diff_observer import TaskDiffCapture
 from netizen.turn_plan_observer import (
     TurnActivityObservation,
     TurnPlanStepSnapshot,
@@ -117,6 +120,7 @@ from netizen.turn_activity import (
     TurnActivityNotificationProjection,
     TurnActivityStatus,
 )
+from netizen.turn_files import TurnDiffFileStats, TurnDiffSummary
 
 
 @dataclass
@@ -880,6 +884,45 @@ class FakeTurnPlanObserver:
             events=tuple(activity_events),
             turn_completed=turn_completed,
         )
+
+
+class FakeTaskDiffObserver:
+    def __init__(self, composition: TaskDiffComposition) -> None:
+        self.composition = composition
+        self.begin_calls = 0
+        self.finish_calls: list[dict[str, object]] = []
+        self.begin_probe = lambda: None
+        self.finish_started = threading.Event()
+        self.finish_gate: threading.Event | None = None
+
+    def begin(self) -> TaskDiffCapture:
+        self.begin_probe()
+        capture = TaskDiffCapture(self.begin_calls)
+        self.begin_calls += 1
+        return capture
+
+    def finish(
+        self,
+        capture: TaskDiffCapture,
+        *,
+        root_thread_id: str,
+        root_turn_id: str,
+        cwd: Path,
+        include_prior_root_turns: bool = False,
+    ) -> TaskDiffComposition:
+        self.finish_started.set()
+        if self.finish_gate is not None:
+            self.finish_gate.wait()
+        self.finish_calls.append(
+            {
+                "capture": capture,
+                "root_thread_id": root_thread_id,
+                "root_turn_id": root_turn_id,
+                "cwd": cwd,
+                "include_prior_root_turns": include_prior_root_turns,
+            }
+        )
+        return self.composition
 
 
 class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
@@ -3956,6 +3999,65 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.outcomes[0].turn_diff, latest)
         self.assertEqual(handle.stream_calls, 1)
 
+    async def test_verified_task_diff_replaces_physical_turn_summary_in_outcome(
+        self,
+    ) -> None:
+        summary = TurnDiffSummary(
+            342,
+            0,
+            (TurnDiffFileStats("research.md", 342, 0),),
+        )
+        observer = FakeTaskDiffObserver(TaskDiffComposition(summary, True, 1))
+        observer.begin_probe = lambda: self.assertEqual(self.codex.turn_calls, [])
+        self.runtime._task_diff_observer = observer
+        binding = self.binding()
+
+        submission = await self.submit(binding)
+        await self.finish(self.codex.handles[0], submission)
+
+        self.assertEqual(observer.begin_calls, 1)
+        self.assertEqual(
+            observer.finish_calls,
+            [
+                {
+                    "capture": TaskDiffCapture(0),
+                    "root_thread_id": "native-1",
+                    "root_turn_id": "turn-1",
+                    "cwd": self.cwd,
+                    "include_prior_root_turns": False,
+                }
+            ],
+        )
+        self.assertEqual(self.outcomes[0].task_diff_summary, summary)
+
+    async def test_task_diff_timeout_omits_stats_and_releases_ordinary_slot(
+        self,
+    ) -> None:
+        summary = TurnDiffSummary(1, 0, (TurnDiffFileStats("file.txt", 1, 0),))
+        observer = FakeTaskDiffObserver(TaskDiffComposition(summary, True, 1))
+        gate = threading.Event()
+        observer.finish_gate = gate
+        self.runtime._task_diff_observer = observer
+        binding = self.binding()
+        submission = await self.submit(binding)
+
+        try:
+            with (
+                patch(
+                    "netizen.codex_runtime._TASK_DIFF_COMPOSITION_TIMEOUT_SECONDS",
+                    0.1,
+                ),
+                self.assertLogs("netizen.codex_runtime", level="WARNING") as logs,
+            ):
+                await self.finish(self.codex.handles[0], submission)
+
+            self.assertTrue(observer.finish_started.is_set())
+            self.assertIsNone(self.runtime.active_turn(binding.id))
+            self.assertEqual(self.outcomes[0].task_diff_summary, TurnDiffSummary())
+            self.assertTrue(any("timed out" in line for line in logs.output))
+        finally:
+            gate.set()
+
     async def test_usage_stream_failure_does_not_override_persisted_terminal(
         self,
     ) -> None:
@@ -4259,6 +4361,76 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(outcome.finalization_error)
         self.assertEqual(control.clear_calls, ["native-1"])
         self.assertIsNone(control.persisted)
+
+    async def test_goal_task_diff_captures_before_start_and_uses_final_physical_turn(
+        self,
+    ) -> None:
+        summary = TurnDiffSummary(4, 1, (TurnDiffFileStats("goal.md", 4, 1),))
+        observer = FakeTaskDiffObserver(TaskDiffComposition(summary, True, 1))
+        control = FakeGoalControl(self.codex)
+        observer.begin_probe = lambda: self.assertEqual(control.start_calls, [])
+        self.runtime._task_diff_observer = observer
+        self.runtime._goal_control = control
+        binding = self.binding()
+
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="track child files",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+        handle = control.handles[0]
+        handle.rollover("physical-turn-2")
+        handle.finish()
+        await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertEqual(outcome.task_diff_summary, summary)
+        self.assertEqual(observer.begin_calls, 1)
+        self.assertEqual(observer.finish_calls[0]["root_turn_id"], "physical-turn-2")
+        self.assertEqual(observer.finish_calls[0]["cwd"], self.cwd)
+        self.assertIs(observer.finish_calls[0]["include_prior_root_turns"], True)
+
+    async def test_goal_task_diff_timeout_still_allows_terminal_auto_clear(
+        self,
+    ) -> None:
+        summary = TurnDiffSummary(1, 0, (TurnDiffFileStats("goal.md", 1, 0),))
+        observer = FakeTaskDiffObserver(TaskDiffComposition(summary, True, 1))
+        gate = threading.Event()
+        observer.finish_gate = gate
+        control = FakeGoalControl(self.codex)
+        self.runtime._task_diff_observer = observer
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="bounded task diff",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+
+        try:
+            with (
+                patch(
+                    "netizen.codex_runtime._TASK_DIFF_COMPOSITION_TIMEOUT_SECONDS",
+                    0.1,
+                ),
+                self.assertLogs("netizen.codex_runtime", level="WARNING"),
+            ):
+                control.handles[0].finish()
+                self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+            self.assertTrue(observer.finish_started.is_set())
+            self.assertIsNone(self.runtime.active_goal(binding.id))
+            self.assertEqual(control.clear_calls, ["native-1"])
+            self.assertEqual(self.outcomes[-1].task_diff_summary, TurnDiffSummary())
+        finally:
+            gate.set()
 
     async def test_paused_goal_holds_slot_until_terminal_delivery_finishes(
         self,
@@ -5156,6 +5328,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         resumed = await self.runtime.resume_goal(
             binding=self.store.get(binding.id),
+            cwd=self.cwd,
             owner_id="ou_user",
             origin=object(),
         )
@@ -5169,6 +5342,44 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cleared)
         self.assertEqual(control.clear_calls, ["native-1", "native-1"])
         self.assertIsNone(control.persisted)
+
+    async def test_goal_resume_captures_before_mutation_and_uses_final_turn(
+        self,
+    ) -> None:
+        binding = self.binding()
+        first = await self.submit(binding, "materialize")
+        await self.finish(self.codex.handles[0], first)
+        control = FakeGoalControl(self.codex)
+        control.persisted = goal_snapshot(GoalStatus.PAUSED)
+        summary = TurnDiffSummary(
+            5,
+            2,
+            (TurnDiffFileStats("goal.md", 5, 2),),
+        )
+        observer = FakeTaskDiffObserver(TaskDiffComposition(summary, True, 1))
+        observer.begin_probe = lambda: self.assertEqual(control.resume_calls, [])
+        self.runtime._goal_control = control
+        self.runtime._task_diff_observer = observer
+
+        resumed = await self.runtime.resume_goal(
+            binding=self.store.get(binding.id),
+            cwd=self.cwd,
+            owner_id="ou_user",
+            origin=object(),
+        )
+        resumed.release_receipt_attempt()
+        handle = control.handles[0]
+        handle.rollover("resume-physical-2")
+        handle.finish()
+        await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertEqual(outcome.task_diff_summary, summary)
+        self.assertEqual(observer.begin_calls, 1)
+        self.assertEqual(observer.finish_calls[0]["root_turn_id"], "resume-physical-2")
+        self.assertEqual(observer.finish_calls[0]["cwd"], self.cwd)
+        self.assertIs(observer.finish_calls[0]["include_prior_root_turns"], True)
 
     async def test_cancelled_goal_resume_keeps_route_owned_without_second_cleanup(
         self,
@@ -5193,6 +5404,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await self.runtime.resume_goal(
                 binding=self.store.get(binding.id),
+                cwd=self.cwd,
                 owner_id="ou_user",
                 origin=object(),
             )
@@ -5241,6 +5453,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         resume = asyncio.create_task(
             self.runtime.resume_goal(
                 binding=self.store.get(binding.id),
+                cwd=self.cwd,
                 owner_id="ou_user",
                 origin=object(),
             )

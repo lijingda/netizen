@@ -416,9 +416,22 @@ message 都来自 SDK 的公开 native Turn 模型，不创建外层 Turn 记录
 [ADR 0024](adr/0024-send-structured-turn-files-from-completion-cards.md)、
 [ADR 0025](adr/0025-use-turn-provenance-not-project-containment-for-files.md) 与
 [ADR 0027](adr/0027-use-turn-diff-and-self-contained-file-cards.md)、
-[ADR 0053](adr/0053-show-exact-turn-line-statistics-in-files.md)，优先解析该 exact Turn
-最新公开 `turn/diff/updated.diff` aggregate snapshot，再用 completed `fileChange`
-add/update/move 与 `imageGeneration.saved_path` 补充。unified diff 读取 file metadata 与
+[ADR 0053](adr/0053-show-exact-turn-line-statistics-in-files.md)、
+[ADR 0056](adr/0056-compose-causal-root-task-file-statistics.md)，优先使用 task diff
+observation。只有一个 root physical Turn 且没有 causal child 时，它保留该 exact Turn 最新
+公开 `turn/diff/updated.diff` aggregate snapshot；存在 child Agent 或一次 Goal run 发生
+physical-Turn rollover 时，服务在 SDK router 前
+不消费地复制 root/child lifecycle、collab item、completed `fileChange` 与每一份 aggregate
+snapshot，严格建立本次 root task 因果树。每个 fileChange 必须与唯一非空后继 snapshot
+对得上；同一 Turn/path 的第一份 snapshot 记录 Turn baseline→current checkpoint，后续记录
+previous current→current checkpoint。所有 checkpoint 必须形成唯一线性 blob OID 链，阻断
+跨 Turn re-entry 被最终 aggregate snapshot 隐藏。只有每个 Turn 的最终 snapshot 保留 hunk
+用于内容链；最终 regular UTF-8 文件匹配链尾并逐 edge 反向验证后，才按 baseline→final
+重算净行数。缺失、分叉/断链、同路径非因果 Turn、unsupported evidence 或资源上限都用空
+summary，绝不退回父 Turn 局部数字。observer 单事件投影有前置上限，终态合成有 display-only
+deadline。随后再用 final physical Turn 的 completed `fileChange`
+add/update/move 与 `imageGeneration.saved_path` 补充。single-physical-Turn fallback 的现有
+unified diff parser 读取 file metadata 与
 完整可验证的 hunk 正文，支持常见的多 hunk、非空新增/删除、带内容的 rename、binary 和
 Git quoted path，同时产出整轮及 current-side path 的新增/删除行数；无 hunk 时仅把窄定义
 的纯 100% rename 认定为 `+0 -0`。整轮总计包含 deleted path；binary 不阻断其他已验证
@@ -429,19 +442,20 @@ Git quoted path，同时产出整轮及 current-side path 的新增/删除行数
 文件被忽略；不扫描目录、不解析最终文本，也不推断没有进入 Turn diff/items 的
 shell/MCP/第三方工具输出。非 Goal 且 Progress Card 关闭时，没有可用文件仍发送原
 富文本/静态文本；存在文件时只发送一张包含最终回复与“本轮文件”的 Card 2.0。Progress
-Card 开启时，completed 结果与可用文件进入已发送的同一张卡。Goal 始终使用组合卡，但
-满足四项终态证据后，只从 exact 最终成功 physical Turn 的 latest aggregate diff 与
-completed structured items 提取文件，并只用该 Turn 的 final agent answer。现有唯一 Goal
-notification Tap 在 rollover 时清空旧 snapshot，只把 final physical Turn 的 latest diff
-交给 completion；不增加 consumer，不从 history 事后补抓，也不扫描、回退或聚合更早
-rollover Turn。最终 physical Turn 没有文本/文件时使用既有空结果语义，不用上一轮填充。
+Card 开启时，completed 结果与可用文件进入已发送的同一张卡。Goal 始终使用组合卡；满足
+四项终态证据后，一次 start/resume run 的 task diff capture 纳入直到 exact final physical
+Turn 的所有父 Thread physical Turns 与 causal descendants，但 final response 与 structured
+items 仍只取 final physical Turn。现有 Goal notification Tap 继续是逻辑 Goal stream 的唯一
+consumer；pre-router observer 只复制 notification，不从 history 事后补抓、不扫描工作区，
+也不持久化 diff。最终 physical Turn 没有文本/文件时使用既有空结果语义，不用上一轮填充。
 成功 Side Turn 同样只从 exact completed Turn 的 completed structured items 提取，不读取
 aggregate diff/history 或更早 Side Turn，因此不显示行数；其 observer、唯一 `handle.run()`
 consumer 和 4096 high-water 保持不变。compaction、失败和中断终态不进入本轮文件路径。
 
 普通 Result + Files 与 Activity + Result + Files 卡继续使用 v4 callback；Goal 与 Files
 同卡时使用 v5 完整组合 manifest。两版每页 8 个，最多 400 个完整循环分页，展示总数、
-页码、可用时的 exact Turn 整轮 `+N -M`、脱敏逻辑位置与逐文件 `+N -M`；图片和统计未知的
+页码、可用时的 exact Turn 或 verified root task 整体 `+N -M`、脱敏逻辑位置与逐文件
+`+N -M`；图片和统计未知的
 文件不显示数字，也不显示文件大小。Project 内文件使用 Project 相对路径，Project 外原生生成图使用
 `生成图片/<文件名>`，账号 home 内其他文件使用 `~/...`，其余位置只显示有界路径尾部。
 所有条目按钮统一为“发送”，顶部说明点击后会把当前图片或文件发送到卡片话题。不使用
@@ -874,8 +888,10 @@ untracked 或 submodule 状态，只限定 `.git` pathspec，并有独立短超�
 `thread.read()` 终态恢复；仅当公开 read 确认 exact Turn 曾处于 `inProgress`，才会在
 持久化终态确认后通过公开 `AsyncTurnHandle.stream()` 排空该 Turn 已缓存的通知。每次
 `thread/tokenUsage/updated` 用 `last.total_tokens` 表示当前窗口已用量，并配合
-`model_context_window` 展示上限与百分比；每次 exact `turn/diff/updated` 则整体替换该
-Turn 的 latest aggregate diff，只携带到 completion 文件提取。`total.total_tokens` 是累计量，不能冒充当前
+`model_context_window` 展示上限与百分比；公开 exact Turn stream 中的每次
+`turn/diff/updated` 整体替换该 Turn 的 latest aggregate diff，作为 single-root 且无 causal
+child 时的 physical-Turn fallback。独立的 pre-router task observer 同时按 ADR 0056 复制父子证据，不能
+从这条 completion 后才排空的 stream 补抓 child diff。`total.total_tokens` 是累计量，不能冒充当前
 窗口。快照只存在于服务内存，不进入 Channel SQLite；lazy Thread、服务重启、固定 SDK
 丢失即时完成通知或通知尚未出现时明确显示暂不可用，下一次可观测普通 Turn 完成后更新。
 普通后续 Turn 执行期间保留最近完成 Turn 的快照，并在 `/status` 中明确标为“上一轮完成时”；

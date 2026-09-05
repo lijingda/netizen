@@ -499,6 +499,8 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
     async def test_one_asynccodex_uses_the_captured_service_environment(self) -> None:
         constructed: list[tuple[tuple[object, ...], dict[str, object]]] = []
         cleanup_codex: list[object] = []
+        task_diff_codex: list[object] = []
+        task_diff_observers: list[object] = []
         boundary_codex: list[object] = []
         subscription_codex: list[object] = []
         delete_codex: list[object] = []
@@ -528,6 +530,11 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
 
             async def has_running(self, _thread_id: str) -> bool:
                 return False
+
+        class FakeTaskDiffObserver:
+            def __init__(self, codex: object) -> None:
+                task_diff_codex.append(codex)
+                task_diff_observers.append(self)
 
         class FakeBoundaryControl:
             def __init__(self, codex: object) -> None:
@@ -595,6 +602,10 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 with (
                     patch("netizen.main.AsyncCodex", FakeAsyncCodex),
                     patch(
+                        "netizen.main.PinnedTaskDiffObserver",
+                        FakeTaskDiffObserver,
+                    ),
+                    patch(
                         "netizen.main.PinnedExperimentalTerminalCleanup",
                         FakeCleanup,
                     ),
@@ -625,6 +636,10 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                         core._runtime._thread_subscription_control.codex,
                         subscription_codex[0],
                     )
+                    self.assertIs(
+                        core._runtime._task_diff_observer,
+                        task_diff_observers[0],
+                    )
                     self.assertEqual(
                         store.get_side_topic(side.id).state,
                         SideTopicState.EXPIRED,
@@ -646,6 +661,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(config.codex_bin)
         self.assertIsNone(config.env)
         self.assertEqual(len(cleanup_codex), 1)
+        self.assertEqual(task_diff_codex, [cleanup_codex[0]])
         self.assertEqual(boundary_codex, [cleanup_codex[0]])
         self.assertEqual(subscription_codex, [cleanup_codex[0]])
         self.assertEqual(side_card_updates[0][0], "om_root")

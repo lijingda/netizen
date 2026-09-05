@@ -322,6 +322,15 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("PinnedTurnActivityObserver", probe)
         self.assertIn("async for notification in handle.stream()", probe)
 
+    def test_installer_and_deployment_gate_root_task_diff_observation(self) -> None:
+        deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+        installer = (ROOT / "scripts" / "netizen_installer.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("probe_sdk_task_diff.py", installer)
+        self.assertIn("probe_sdk_task_diff.py", deployment)
+
     def test_live_suite_includes_ephemeral_multi_turn_side_probe(self) -> None:
         deployment = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
         probe = (ROOT / "scripts" / "probe_python_sdk.py").read_text(
@@ -392,6 +401,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("unittest discover -s tests -v", makefile)
         self.assertIn("compileall -q netizen scripts tests", makefile)
         self.assertIn("pip check", makefile)
+        self.assertIn("probe_sdk_task_diff.py --timeout 5", makefile)
         self.assertIn("probe_sdk_turn_plan.py --timeout 5", makefile)
         self.assertIn(
             "probe_sdk_completion_race.py --read-recovery --attempts 20 --timeout 3",

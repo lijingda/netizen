@@ -3,6 +3,7 @@ status: accepted
 date: 2026-09-02
 amends: 0024, 0027, 0047
 related: 0014, 0048, 0052
+amended-by: 0056
 ---
 
 # 在 Files 模块展示 exact Turn 行数统计
@@ -27,7 +28,8 @@ metadata-only block 仅保留可解析的 current-side path，不显示逐文件
 每条 completion 路径只解析一次 snapshot，并把同一份 summary 复用于引用判断、文件提取、
 整轮统计和 Progress Card 失败回退，避免对大型 diff 重复做相同工作。
 
-Ordinary Turn 继续使用现有 completion-only `TurnOutcome.turn_diff`。Goal 不增加第二
+在只有一个 root physical Turn 且不存在 causal child 时，Ordinary Turn 继续使用现有
+completion-only `TurnOutcome.turn_diff`。本 ADR 原定义的 single-physical-Turn Goal 不增加第二
 notification consumer：现有 Goal notification Tap 无论 Activity 是否开启都观察 exact
 `turn/started`、`turn/diff/updated` 和 `turn/completed`，在 physical Turn rollover 时清空旧
 snapshot，只覆盖当前 physical Turn 的 latest diff，并仅在 SDK 确认的 final physical Turn
@@ -35,10 +37,16 @@ snapshot，只覆盖当前 physical Turn 的 latest diff，并仅在 SDK 确认�
 Goal 的唯一逻辑通知流。持久 history 不能事后补抓 diff。ADR 0014 的 Goal shape、synthetic
 harness 与 live probe 必须覆盖该字段。
 
+ADR 0056 修正了含子 Agent 时的统计范围：服务在 SDK router 前复制父子 lifecycle、completed
+`fileChange` 与 diff snapshots，以全部 snapshot 的 OID checkpoint 证明唯一历史，只用每个
+physical Turn 的最终 hunk 反向得到 root task baseline。只有完整证明的 task summary 才覆盖
+本 ADR 的 physical-Turn summary；否则省略数字，不能退回只含父 Turn 的数字。现有 Goal Tap
+仍是 Goal 逻辑流的唯一 consumer；新 observer 只作不消费队列的旁路复制。
+
 Side 本期不获取 aggregate diff，也不修改 observer、`handle.run()`、4096 high-water 或
 ADR 0048/0052 的唯一消费者边界；它只复用下面的公共 UI 精简，因此不显示行数。
 
-Files 模块顶部在统计已知时显示 exact physical Turn 的 `+N -M`，当前可发送的非图片文件行
+Files 模块顶部在统计已知时显示 exact physical Turn 或 verified root task 的 `+N -M`，当前可发送的非图片文件行
 显示自己的 `+N -M`。可见文件大小删除，但 `size` 仍只在内存中用于 availability 判断；所有
 文件和图片按钮统一为“发送”，顶部集中说明点击后会把当前路径内容作为图片或文件消息发送
 到本卡片话题。

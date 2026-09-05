@@ -2691,7 +2691,7 @@ class ChannelApplication:
         await self._safe_add_reaction(outcome.origin, terminal_reaction)
         await self._reactions.stop(outcome.turn_id)
         diff_summary = (
-            turn_diff_summary(self._task_turn_diff(outcome))
+            self._task_diff_summary(outcome)
             if outcome.error is None and outcome.status == "completed"
             else TurnDiffSummary()
         )
@@ -2847,6 +2847,14 @@ class ChannelApplication:
     @staticmethod
     def _task_turn_diff(outcome: TurnOutcome | SideTurnOutcome) -> str | None:
         return outcome.turn_diff if isinstance(outcome, TurnOutcome) else None
+
+    @staticmethod
+    def _task_diff_summary(
+        outcome: TurnOutcome | SideTurnOutcome,
+    ) -> TurnDiffSummary:
+        if isinstance(outcome, TurnOutcome) and outcome.task_diff_summary is not None:
+            return outcome.task_diff_summary
+        return turn_diff_summary(ChannelApplication._task_turn_diff(outcome))
 
     def _completion_files(
         self,
@@ -3093,7 +3101,11 @@ class ChannelApplication:
                 collapsed=True,
             )
         files: tuple[TurnFile, ...] = ()
-        goal_diff_summary = turn_diff_summary(outcome.turn_diff)
+        goal_diff_summary = (
+            outcome.task_diff_summary
+            if outcome.task_diff_summary is not None
+            else turn_diff_summary(outcome.turn_diff)
+        )
         if (
             outcome.final_turn_status == "completed"
             and outcome.final_physical_turn_id is not None
@@ -4991,6 +5003,7 @@ class ChannelApplication:
                 )
                 submission = await self._runtime.resume_goal(
                     binding=binding,
+                    cwd=self._projects.resolve_for_binding(binding.project_alias).cwd,
                     owner_id=intent.sender_id,
                     origin=origin,
                     expected_created_at=goal_before_resume.created_at,
@@ -6606,6 +6619,9 @@ class ChannelApplication:
                     )
                     submission = await self._runtime.resume_goal(
                         binding=binding,
+                        cwd=self._projects.resolve_for_binding(
+                            binding.project_alias
+                        ).cwd,
                         owner_id=intent.sender_id,
                         origin=origin,
                         expected_created_at=goal_before.created_at,

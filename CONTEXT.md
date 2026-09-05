@@ -100,11 +100,14 @@ physical Turn，通过其受支持的原生事实指向的当前文件。Project
 _Avoid_：“产物快照”“Turn 完成时版本”，因为 Netizen 不保存内容、摘要或修改检测，
 点击时发送的是该路径当前仍可访问的普通文件。
 
-**Turn Diff Statistics / 本轮行数统计**：从一个 exact physical Turn 的 latest aggregate
-unified diff 得到的新增/删除文本行数，包括整轮总计和 current-side Turn File 的逐文件
-计数。它不是工作区当前差异或文件内容快照；只有完整可验证的文本 hunk 和窄定义的纯
-100% rename 产生数字，Side、binary、图片、缺失文件、其他 metadata-only 变化和无法完整
-验证的 diff 不产生相应数字。
+**Task Diff Statistics / 任务行数统计**：由 Codex diff 证据证明的 root task
+baseline→final 净新增/删除文本行数。它不是父子数字之和、工作区当前差异或内容快照；证据
+不能形成唯一历史时省略数字，Side 没有此统计。
+_Avoid_：“子 Agent diff 汇总”“workspace diff”。
+
+**Task Diff Observer / 任务 Diff 观察器**：ADR 0056 批准的 exact-version/fingerprint-gated
+SDK 私有 seam，在 SDK 路由前只读投影 Task Diff Statistics 所需的瞬态原生事实。它不拥有
+或消费 SDK 队列；不可用时也不能退回可能漏掉 child Turn 的父 Turn 数字。
 
 **Steer**：运行中 Binding 的下一条普通消息，固定映射为同一 handle 的
 `steer()`，不是 queue 或新 Turn。
