@@ -1307,6 +1307,302 @@ class StubRuntime:
         return await self.close_side(side_id, state=state)
 
 
+class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
+    async def start_card(self, kind, *, revision_during_reply=None):
+        self.kind = kind
+        self.channel = FakeChannel()
+        self.runtime = StubRuntime()
+        self.presenter = channel_app._ProgressCardController(
+            self.channel,
+            self.runtime,  # type: ignore[arg-type]
+            poll_seconds=0.01,
+        )
+        self.addAsyncCleanup(self.presenter.close)
+        self.scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        self.goal = native_goal()
+        self.generation = goal_generation(self.goal)
+        prompt = FakeMessage("work", message_id="om_origin")
+        self.origin = channel_app.GoalCardOrigin(
+            message_id=None,
+            scope=self.scope,
+            binding_id="binding-one",
+            short_id="one",
+            project_alias="test",
+            fallback_origin=prompt,
+        )
+        self.publish_revision(1)
+
+        async def reply(message, content):
+            self.channel.replies.append((message.id, content))
+            if revision_during_reply is not None:
+                self.publish_revision(revision_during_reply)
+            return sent_result("om_progress", chat_id="oc_direct")
+
+        async def refresh():
+            return (self.latest_revision,), self.projection(self.latest_revision)
+
+        with patch.object(self.channel, "reply", side_effect=reply):
+            if kind == "ordinary":
+                started = await self.presenter.start(
+                    binding_id="binding-one", thread_id="native-one",
+                    turn_id="turn-one", origin=prompt,
+                )
+                self.session = self.presenter._sessions[
+                    ("binding-one", "native-one", "turn-one")
+                ]
+            elif kind == "side":
+                started = await self.presenter.start_side(
+                    side_id="side-one", thread_id="native-side-1",
+                    turn_id="side-turn-1", origin=prompt,
+                )
+                self.session = self.presenter._side_sessions[
+                    ("side-one", "native-side-1", "side-turn-1")
+                ]
+            else:
+                started = await self.presenter.start_goal(
+                    binding_id="binding-one", thread_id="native-one",
+                    logical_turn_id="goal-one", generation=self.generation,
+                    origin=self.origin, projection=self.projection(1),
+                    revision=(1,), refresh=refresh,
+                )
+                self.session = self.presenter._goal_sessions[
+                    ("binding-one", "native-one", self.generation)
+                ]
+        self.assertTrue(started)
+
+    def publish_revision(self, revision):
+        self.latest_revision = revision
+        steps = (
+            TurnPlanStepSnapshot(f"revision {revision}", TurnPlanStepState.IN_PROGRESS),
+        )
+        if self.kind == "ordinary":
+            self.runtime.turn_activity_values["binding-one"] = turn_activity_snapshot(
+                binding_id="binding-one", revision=revision, steps=steps,
+            )
+        elif self.kind == "side":
+            self.runtime.side_turn_activity_values["side-one"] = side_turn_activity_snapshot(
+                side_id="side-one", revision=revision, steps=steps,
+            )
+
+    def projection(self, revision):
+        return ReplyCardProjection(
+            scope=self.scope,
+            goal=channel_app._reply_goal_module_for_identity(
+                binding_id="binding-one", short_id="one", project_alias="test",
+                goal=self.goal, runtime_state=GoalOperationState.RUNNING.value,
+                notice=f"revision {revision}",
+            ),
+        )
+
+    def assert_delivered_revision(self, revision):
+        if self.kind != "goal":
+            self.assertEqual(self.session.snapshot.revision, revision)
+            return
+        self.assertEqual(self.session.revision, (revision,))
+        self.assertEqual(self.session.projection, self.projection(revision))
+        self.assertEqual(
+            self.presenter.goal_projection(
+                source_id="om_progress", generation=self.generation,
+            ),
+            self.projection(revision),
+        )
+        self.assertTrue(self.presenter.owns_goal_card(
+            source_id="om_progress", binding_id="binding-one",
+            thread_id="native-one", generation=self.generation,
+        ))
+
+    async def finish_card(self):
+        def render(snapshot):
+            return channel_app.turn_progress_card(
+                snapshot=snapshot, final_response="terminal answer",
+                terminal_status="completed", collapsed=True,
+            )
+
+        if self.kind == "ordinary":
+            return await self.presenter.finish(
+                binding_id="binding-one", thread_id="native-one",
+                turn_id="turn-one", activity=None, render=render,
+            )
+        if self.kind == "side":
+            return await self.presenter.finish_side(
+                side_id="side-one", thread_id="native-side-1",
+                turn_id="side-turn-1", activity=None, render=render,
+            )
+        result = await self.presenter.finish_goal(
+            binding_id="binding-one", thread_id="native-one",
+            logical_turn_id="goal-one", generation=self.generation,
+            origin=self.origin,
+            projection=replace(
+                self.session.projection, result=ReplyCardResultModule("terminal answer"),
+            ),
+            retain_session=False,
+        )
+        return result is channel_app._GoalCardDelivery.DELIVERED
+
+    async def test_polling_recovers_same_revision_and_coalesces_new_revisions(self):
+        for kind in ("ordinary", "side", "goal"):
+            for coalesce in (False, True):
+                with self.subTest(kind=kind, coalesce=coalesce):
+                    await self.start_card(kind)
+                    requests, responses, returned = (
+                        asyncio.Queue(), asyncio.Queue(), asyncio.Queue()
+                    )
+
+                    async def update(message_id, card):
+                        self.channel.updates.append((message_id, card))
+                        requests.put_nowait(card)
+                        result = await responses.get()
+                        returned.put_nowait(None)
+                        return result
+
+                    with (
+                        patch.object(self.channel, "update_card", side_effect=update),
+                        self.assertLogs("netizen.channel_app", level="ERROR"),
+                    ):
+                        self.publish_revision(2)
+                        first = await asyncio.wait_for(requests.get(), timeout=1)
+                        self.assertIn("revision 2", str(first))
+                        self.assert_delivered_revision(1)
+                        if coalesce:
+                            self.publish_revision(3)
+                            self.publish_revision(4)
+                        responses.put_nowait(failed_reply_result(
+                            code=2200, message="Internal Error",
+                        ))
+                        await asyncio.wait_for(returned.get(), timeout=1)
+                        second = await asyncio.wait_for(requests.get(), timeout=1)
+                        self.assert_delivered_revision(1)
+                        expected = 4 if coalesce else 2
+                        self.assertIn(f"revision {expected}", str(second))
+                        responses.put_nowait(SimpleNamespace(success=True))
+                        await asyncio.wait_for(returned.get(), timeout=1)
+                        self.assert_delivered_revision(expected)
+                        self.assertFalse(self.session.failed)
+                        await self.presenter.close()
+                    self.assertEqual(len(self.channel.updates), 2)
+                    self.assertEqual(len(self.channel.replies), 1)
+
+    async def test_success_resets_failure_limit_but_new_revisions_do_not(self):
+        for kind in ("ordinary", "side", "goal"):
+            with self.subTest(kind=kind):
+                await self.start_card(kind)
+                failed = failed_reply_result(code=2200, message="Internal Error")
+                self.channel.card_update_results.extend((
+                    failed, TimeoutError("timed out"), SimpleNamespace(success=True),
+                    failed, failed, failed,
+                ))
+                update_card = self.channel.update_card
+
+                async def update(message_id, card):
+                    self.publish_revision(len(self.channel.updates) + 3)
+                    return await update_card(message_id, card)
+
+                with (
+                    patch.object(self.channel, "update_card", side_effect=update),
+                    self.assertLogs("netizen.channel_app", level="ERROR"),
+                ):
+                    self.publish_revision(2)
+                    await asyncio.wait_for(self.session.task, timeout=1)
+                self.assertTrue(self.session.failed)
+                self.assertEqual(len(self.channel.updates), 6)
+                for revision, (_, card) in enumerate(self.channel.updates, start=2):
+                    self.assertIn(f"revision {revision}", str(card))
+                self.assert_delivered_revision(4)
+                await self.presenter.close()
+
+    async def test_terminal_and_close_stop_pending_retries(self):
+        for kind in ("ordinary", "side", "goal"):
+            for operation in ("finish-waiting", "finish-inflight", "close-waiting"):
+                with self.subTest(kind=kind, operation=operation):
+                    await self.start_card(kind)
+                    entered, release, returned = (
+                        asyncio.Event(), asyncio.Event(), asyncio.Event()
+                    )
+
+                    async def update(message_id, card):
+                        self.channel.updates.append((message_id, card))
+                        if len(self.channel.updates) == 1:
+                            self.presenter._poll_seconds = 60
+                            entered.set()
+                            await release.wait()
+                            returned.set()
+                            return failed_reply_result(code=2200, message="Internal Error")
+                        return SimpleNamespace(success=True)
+
+                    with (
+                        patch.object(self.channel, "update_card", side_effect=update),
+                        self.assertLogs("netizen.channel_app", level="ERROR"),
+                    ):
+                        self.publish_revision(2)
+                        await asyncio.wait_for(entered.wait(), timeout=1)
+                        if operation == "finish-inflight":
+                            finishing = asyncio.create_task(self.finish_card())
+                            await asyncio.sleep(0)
+                            self.assertTrue(self.session.stopped.is_set())
+                            self.assertFalse(finishing.done())
+                            release.set()
+                            self.assertTrue(await asyncio.wait_for(finishing, timeout=1))
+                        else:
+                            release.set()
+                            await asyncio.wait_for(returned.wait(), timeout=1)
+                            if operation == "finish-waiting":
+                                self.assertTrue(await asyncio.wait_for(
+                                    self.finish_card(), timeout=1,
+                                ))
+                            else:
+                                await asyncio.wait_for(self.presenter.close(), timeout=1)
+                    self.assertTrue(self.session.task.done())
+                    self.assertFalse(self.session.failed)
+                    expected = 1 if operation == "close-waiting" else 2
+                    self.assertEqual(len(self.channel.updates), expected)
+                    if expected == 2:
+                        self.assertIn("terminal answer", str(self.channel.updates[-1][1]))
+                    await self.presenter.close()
+
+    async def test_initial_reply_keeps_the_revision_actually_sent(self):
+        await self.start_card("ordinary", revision_during_reply=2)
+        self.assertIn("revision 1", str(self.channel.replies[0][1].card))
+        self.assert_delivered_revision(1)
+        updated = asyncio.Event()
+        update_card = self.channel.update_card
+
+        async def update(message_id, card):
+            result = await update_card(message_id, card)
+            updated.set()
+            return result
+
+        with patch.object(self.channel, "update_card", side_effect=update):
+            await asyncio.wait_for(updated.wait(), timeout=1)
+            self.assert_delivered_revision(2)
+            await self.presenter.close()
+        self.assertEqual(len(self.channel.updates), 1)
+        self.assertIn("revision 2", str(self.channel.updates[0][1]))
+
+    async def test_read_and_render_errors_stop_without_delivery_retries(self):
+        for kind in ("ordinary", "side", "goal"):
+            for stage in ("read", "render"):
+                with self.subTest(kind=kind, stage=stage):
+                    await self.start_card(kind)
+                    if stage == "render":
+                        target = channel_app
+                        method = "reply_card" if kind == "goal" else "turn_progress_card"
+                    elif kind == "goal":
+                        target, method = self, "projection"
+                    else:
+                        target = self.runtime
+                        method = "turn_activity" if kind == "ordinary" else "side_turn_activity"
+                    with (
+                        patch.object(target, method, side_effect=RuntimeError("broken projection")),
+                        self.assertLogs("netizen.channel_app", level="ERROR"),
+                    ):
+                        self.publish_revision(2)
+                        await asyncio.wait_for(self.session.task, timeout=1)
+                    self.assertTrue(self.session.failed)
+                    self.assertEqual(self.channel.updates, [])
+                    self.assert_delivered_revision(1)
+                    await self.presenter.close()
+
+
 class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     def test_quote_fetch_timeout_is_ten_seconds_per_sdk_request(self) -> None:
         self.assertEqual(channel_app._QUOTE_FETCH_TIMEOUT_SECONDS, 10.0)
@@ -2048,8 +2344,20 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.replies[-1], (prompt.id, "answer survives"))
         self.assertEqual(self.channel.updates[-1][0], "om_progress")
 
-    async def test_intermediate_progress_failure_stops_updates_and_falls_back(
+    async def test_intermediate_progress_failure_recovers_at_terminal(self) -> None:
+        await self._assert_intermediate_progress_failure_terminal_delivery(
+            terminal_succeeds=True,
+        )
+
+    async def test_intermediate_and_terminal_progress_failures_fall_back(self) -> None:
+        await self._assert_intermediate_progress_failure_terminal_delivery(
+            terminal_succeeds=False,
+        )
+
+    async def _assert_intermediate_progress_failure_terminal_delivery(
         self,
+        *,
+        terminal_succeeds: bool,
     ) -> None:
         await self.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
@@ -2075,7 +2383,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         prompt = FakeMessage("hello", message_id="om_progress_origin")
         await self.app.handle_message(prompt)
-        self.channel.fail_card_updates = True
+        self.channel.card_update_results.extend(
+            failed_reply_result(code=2200, message="Internal Error")
+            for _ in range(3)
+        )
         updated = turn_activity_snapshot(
             binding_id=binding.id,
             revision=2,
@@ -2085,29 +2396,38 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.runtime.turn_activity_values[binding.id] = updated
         key = (binding.id, "native-one", "turn-one")
+        session = self.app._progress_cards._sessions[key]
 
         with self.assertLogs("netizen.channel_app", level="ERROR"):
-            async with asyncio.timeout(1):
-                while not self.app._progress_cards._sessions[key].failed:
-                    await asyncio.sleep(0.01)
-        attempts = len(self.channel.updates)
-        await asyncio.sleep(0.03)
-        self.assertEqual(len(self.channel.updates), attempts)
+            await asyncio.wait_for(session.task, timeout=1)
+            self.assertTrue(session.failed)
+            self.assertTrue(session.task.done())
+            self.assertEqual(len(self.channel.updates), 3)
+            if not terminal_succeeds:
+                self.channel.card_update_results.append(
+                    failed_reply_result(code=2200, message="Internal Error")
+                )
 
-        await self.app.handle_completion(
-            TurnOutcome(
-                binding_id=binding.id,
-                thread_id="native-one",
-                turn_id="turn-one",
-                owner_id="ou_user",
-                origin=prompt,
-                result=completed_turn_result(final_response="answer survives"),
-                task_feedback=feedback,
-                activity=updated,
+            await self.app.handle_completion(
+                TurnOutcome(
+                    binding_id=binding.id,
+                    thread_id="native-one",
+                    turn_id="turn-one",
+                    owner_id="ou_user",
+                    origin=prompt,
+                    result=completed_turn_result(final_response="answer survives"),
+                    task_feedback=feedback,
+                    activity=updated,
+                )
             )
-        )
 
-        self.assertEqual(self.channel.replies[-1], (prompt.id, "answer survives"))
+        self.assertEqual(len(self.channel.updates), 4)
+        self.assertEqual(self.channel.updates[-1][0], "om_progress")
+        self.assertIn("answer survives", str(self.channel.updates[-1][1]))
+        self.assertNotIn(key, self.app._progress_cards._sessions)
+        self.assertEqual(len(self.channel.replies), 1 if terminal_succeeds else 2)
+        if not terminal_succeeds:
+            self.assertEqual(self.channel.replies[-1], (prompt.id, "answer survives"))
 
     async def test_pulse_off_steer_keeps_lifecycle_confirmation(self) -> None:
         await self.new()
@@ -6261,6 +6581,113 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "resumed run",
             json.dumps(self.channel.updates[-1][1], ensure_ascii=False),
         )
+
+    async def test_goal_intermediate_card_failure_recovers_at_terminal(self) -> None:
+        await self._assert_goal_intermediate_card_failure_terminal_delivery(
+            terminal_succeeds=True,
+        )
+
+    async def test_goal_intermediate_and_terminal_card_failures_fall_back(self) -> None:
+        await self._assert_goal_intermediate_card_failure_terminal_delivery(
+            terminal_succeeds=False,
+        )
+
+    async def _assert_goal_intermediate_card_failure_terminal_delivery(
+        self,
+        *,
+        terminal_succeeds: bool,
+    ) -> None:
+        await self.new()
+        self.app._progress_cards = channel_app._ProgressCardController(
+            self.channel,
+            self.runtime,  # type: ignore[arg-type]
+            poll_seconds=0.01,
+        )
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        goal = native_goal(GoalStatus.ACTIVE)
+        generation = goal_generation(goal)
+        projection = ReplyCardProjection(
+            scope=scope,
+            goal=channel_app._reply_goal_module(
+                binding=binding,
+                goal=goal,
+                runtime_state=GoalOperationState.RUNNING.value,
+            ),
+        )
+        prompt = FakeMessage("/goal ship safely", message_id="om_goal_origin")
+        origin = channel_app.GoalCardOrigin(
+            message_id=None,
+            scope=scope,
+            binding_id=binding.id,
+            short_id=binding.short_id,
+            project_alias=binding.project_alias,
+            fallback_origin=prompt,
+        )
+
+        async def refresh():
+            return (2,), projection
+
+        self.channel.reply_results.append(
+            sent_result("om_goal_progress", chat_id="oc_direct")
+        )
+        self.assertTrue(
+            await self.app._progress_cards.start_goal(
+                binding_id=binding.id,
+                thread_id="native-one",
+                logical_turn_id="goal-one",
+                generation=generation,
+                origin=origin,
+                projection=projection,
+                revision=(1,),
+                refresh=refresh,
+            )
+        )
+        self.channel.card_update_results.extend(
+            failed_reply_result(code=2200, message="Internal Error")
+            for _ in range(3)
+        )
+        key = (binding.id, "native-one", generation)
+        session = self.app._progress_cards._goal_sessions[key]
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await asyncio.wait_for(session.task, timeout=1)
+            self.assertTrue(session.failed)
+            self.assertTrue(session.task.done())
+            self.assertEqual(len(self.channel.updates), 3)
+            if not terminal_succeeds:
+                self.channel.card_update_results.append(
+                    failed_reply_result(code=2200, message="Internal Error")
+                )
+                self.channel.reply_results.append(
+                    sent_result("om_goal_fallback", chat_id="oc_direct")
+                )
+            await self.app.handle_completion(
+                GoalOutcome(
+                    binding_id=binding.id,
+                    thread_id="native-one",
+                    logical_turn_id="goal-one",
+                    owner_id="ou_user",
+                    origin=origin,
+                    goal=native_goal(GoalStatus.COMPLETE),
+                    final_physical_turn_id="goal-turn-final",
+                    final_turn_status="completed",
+                    final_response="goal answer survives",
+                    finalization=GoalFinalizationStatus.CLEARED,
+                )
+            )
+
+        self.assertEqual(len(self.channel.updates), 4)
+        self.assertEqual(self.channel.updates[-1][0], "om_goal_progress")
+        self.assertIn("goal answer survives", str(self.channel.updates[-1][1]))
+        self.assertNotIn(key, self.app._progress_cards._goal_sessions)
+        self.assertEqual(len(self.channel.replies), 1 if terminal_succeeds else 2)
+        if not terminal_succeeds:
+            self.assertEqual(self.channel.replies[-1][0], prompt.id)
+            fallback = self.channel.replies[-1][1]
+            self.assertIsInstance(fallback, OutboundCard)
+            self.assertIn("goal answer survives", str(fallback.card))
 
     async def test_goal_finish_does_not_deadlock_with_refresh_in_flight(self) -> None:
         await self.new()
@@ -10459,6 +10886,85 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("side-progress.txt", visible)
         self.assertIn("create side file", visible)
         self.assertIn((prompt.id, "DONE"), self.channel.reactions)
+
+    async def test_side_intermediate_progress_failure_recovers_at_terminal(self) -> None:
+        await self._assert_side_intermediate_progress_failure_terminal_delivery(
+            terminal_succeeds=True,
+        )
+
+    async def test_side_intermediate_and_terminal_progress_failures_fall_back(self) -> None:
+        await self._assert_side_intermediate_progress_failure_terminal_delivery(
+            terminal_succeeds=False,
+        )
+
+    async def _assert_side_intermediate_progress_failure_terminal_delivery(
+        self,
+        *,
+        terminal_succeeds: bool,
+    ) -> None:
+        feedback = BindingTaskFeedback(progress_card_enabled=True)
+        binding, record = await self.open_direct_side(task_feedback=feedback)
+        self.runtime.side_turn_activity_values[record.id] = (
+            side_turn_activity_snapshot(side_id=record.id)
+        )
+        self.app._progress_cards = channel_app._ProgressCardController(
+            self.channel,
+            self.runtime,  # type: ignore[arg-type]
+            poll_seconds=0.01,
+        )
+        self.channel.reply_results.append(
+            sent_result("om-side-progress", chat_id="oc-direct", thread_id=record.topic_id)
+        )
+        prompt = FakeMessage(
+            "survive display failure",
+            message_id="om-side-progress-prompt",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            thread_id=record.topic_id,
+            mentioned_bot=False,
+        )
+        await self.app.handle_message(prompt)
+        initial_updates = len(self.channel.updates)
+        self.channel.card_update_results.extend(
+            failed_reply_result(code=2200, message="Internal Error")
+            for _ in range(3)
+        )
+        updated = side_turn_activity_snapshot(side_id=record.id, revision=2)
+        self.runtime.side_turn_activity_values[record.id] = updated
+        key = (record.id, "native-side-1", "side-turn-1")
+        session = self.app._progress_cards._side_sessions[key]
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await asyncio.wait_for(session.task, timeout=1)
+            self.assertTrue(session.failed)
+            self.assertTrue(session.task.done())
+            self.assertEqual(len(self.channel.updates), initial_updates + 3)
+            if not terminal_succeeds:
+                self.channel.card_update_results.append(
+                    failed_reply_result(code=2200, message="Internal Error")
+                )
+            await self.app.handle_completion(
+                SideTurnOutcome(
+                    side_id=record.id,
+                    parent_binding_id=binding.id,
+                    thread_id="native-side-1",
+                    turn_id="side-turn-1",
+                    owner_id="ou_user",
+                    origin=prompt,
+                    cwd=self.project,
+                    result=completed_turn_result(final_response="side answer survives"),
+                    task_feedback=feedback,
+                    activity=updated,
+                )
+            )
+
+        self.assertEqual(len(self.channel.updates), initial_updates + 4)
+        self.assertEqual(self.channel.updates[-1][0], "om-side-progress")
+        self.assertIn("side answer survives", str(self.channel.updates[-1][1]))
+        self.assertNotIn(key, self.app._progress_cards._side_sessions)
+        self.assertEqual(len(self.channel.replies), 1 if terminal_succeeds else 2)
+        if not terminal_succeeds:
+            self.assertEqual(self.channel.replies[-1], (prompt.id, "side answer survives"))
 
     async def test_side_progress_start_failure_falls_back_at_terminal(self) -> None:
         feedback = BindingTaskFeedback(progress_card_enabled=True)

@@ -264,6 +264,7 @@ _FEISHU_CARD_ACTION_LOCK_INNER_CODE = 11310
 _CARD_ACTION_LOCK_RETRY_DELAYS_SECONDS = (0.2, 0.5)
 _PROGRESS_CARD_POLL_SECONDS = 1.0
 _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS = 5.0
+_PROGRESS_CARD_MAX_CONSECUTIVE_FAILURES = 3
 _GOAL_REPLY_CARD_CACHE_LIMIT = 256
 _SESSION_TITLE_MAX_CHARS = 48
 _STATUS_THREAD_NAME_MAX_CHARS = 120
@@ -823,7 +824,6 @@ class _ReplyCardPresenter:
             or self._runtime.lifecycle_state(binding_id) is not None
         ):
             return False
-        snapshot = current
         key = (binding_id, thread_id, turn_id)
         previous = self._sessions.pop(key, None)
         if previous is not None:
@@ -856,8 +856,6 @@ class _ReplyCardPresenter:
         if session is None:
             return False
         await self._stop_session(session)
-        if session.failed:
-            return False
         snapshot = activity or session.snapshot
         if (
             snapshot.binding_id != session.binding_id
@@ -1069,8 +1067,6 @@ class _ReplyCardPresenter:
         if session is None:
             return False
         await self._stop_session(session)
-        if session.failed:
-            return False
         snapshot = activity or session.snapshot
         if (
             snapshot.side_id != session.side_id
@@ -1366,8 +1362,6 @@ class _ReplyCardPresenter:
             self._goal_sessions.pop(key, None)
         if session is not None:
             await self._stop_session(session)
-            if session.failed:
-                return _GoalCardDelivery.FAILED
             message_id = session.message_id
         else:
             message_id = origin.message_id
@@ -1744,6 +1738,7 @@ class _ReplyCardPresenter:
         )
 
     async def _poll(self, session: _TurnProgressCardSession) -> None:
+        failures = 0
         while not session.stopped.is_set():
             try:
                 await asyncio.wait_for(
@@ -1753,6 +1748,8 @@ class _ReplyCardPresenter:
                 return
             except TimeoutError:
                 pass
+            if session.stopped.is_set():
+                return
             try:
                 snapshot = self._runtime.turn_activity(
                     session.binding_id,
@@ -1774,7 +1771,6 @@ class _ReplyCardPresenter:
                 continue
             if snapshot.revision == session.snapshot.revision:
                 continue
-            session.snapshot = snapshot
             try:
                 card = turn_progress_card(snapshot=snapshot)
             except Exception:
@@ -1788,10 +1784,16 @@ class _ReplyCardPresenter:
                 session.failed = True
                 return
             if not await self._update(session, card):
-                session.failed = True
-                return
+                failures += 1
+                if failures >= _PROGRESS_CARD_MAX_CONSECUTIVE_FAILURES:
+                    session.failed = True
+                    return
+                continue
+            session.snapshot = snapshot
+            failures = 0
 
     async def _poll_side(self, session: _SideTurnProgressCardSession) -> None:
+        failures = 0
         while not session.stopped.is_set():
             try:
                 await asyncio.wait_for(
@@ -1801,6 +1803,8 @@ class _ReplyCardPresenter:
                 return
             except TimeoutError:
                 pass
+            if session.stopped.is_set():
+                return
             try:
                 snapshot = self._runtime.side_turn_activity(
                     session.side_id,
@@ -1822,7 +1826,6 @@ class _ReplyCardPresenter:
                 continue
             if snapshot.revision == session.snapshot.revision:
                 continue
-            session.snapshot = snapshot
             try:
                 card = turn_progress_card(snapshot=snapshot)
             except Exception:
@@ -1836,13 +1839,19 @@ class _ReplyCardPresenter:
                 session.failed = True
                 return
             if not await self._update_side(session, card):
-                session.failed = True
-                return
+                failures += 1
+                if failures >= _PROGRESS_CARD_MAX_CONSECUTIVE_FAILURES:
+                    session.failed = True
+                    return
+                continue
+            session.snapshot = snapshot
+            failures = 0
 
     async def _poll_goal(self, session: _GoalReplyCardSession) -> None:
         refresh = session.refresh
         if refresh is None:
             return
+        failures = 0
         while not session.stopped.is_set():
             try:
                 await asyncio.wait_for(
@@ -1852,6 +1861,8 @@ class _ReplyCardPresenter:
                 return
             except TimeoutError:
                 pass
+            if session.stopped.is_set():
+                return
             try:
                 async with asyncio.timeout(self._operation_timeout_seconds):
                     refreshed = await refresh()
@@ -1885,8 +1896,6 @@ class _ReplyCardPresenter:
                     return
                 if revision == session.revision:
                     continue
-                session.revision = revision
-                session.projection = projection
                 try:
                     card = reply_card(projection)
                 except Exception:
@@ -1902,8 +1911,14 @@ class _ReplyCardPresenter:
                     binding_id=session.binding_id,
                     operation_id=session.logical_turn_id,
                 ):
-                    session.failed = True
-                    return
+                    failures += 1
+                    if failures >= _PROGRESS_CARD_MAX_CONSECUTIVE_FAILURES:
+                        session.failed = True
+                        return
+                    continue
+                session.revision = revision
+                session.projection = projection
+                failures = 0
                 self._remember_goal_projection(
                     session.message_id,
                     session.goal_generation,
