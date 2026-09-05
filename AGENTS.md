@@ -114,13 +114,14 @@ contributors must know before starting related work.
   With no Goal, Activity, or files, preserve rich/static terminal text. Never
   expose reasoning, raw tool/command output, tool arguments, elapsed time,
   percentage, or ETA. Display failures never alter native execution.
-- ADR 0053 derives Files line counts only from an Ordinary Turn's latest exact
-  aggregate diff or a Goal's exact final physical Turn diff captured in the
-  existing unique notification stream. Side does not observe aggregate diff.
-  Only complete validated hunks and a narrow pure 100% rename case produce
-  counts. Binary, image, missing, malformed, or other metadata-only evidence
-  omits counts; self-contained manifests use paired short `a/d` fields and fail
-  closed without truncation at 400 files or 55,000 encoded bytes.
+- ADR 0056 derives Files line counts from successful `fileChange` patches in the
+  exact Ordinary/Side Turn or Goal's final physical Turn and its newly spawned
+  descendants. Counts accumulate edits, including reversions; they are not a
+  final net diff. Use bounded public Thread reads for child provenance, never
+  workspace scans or another observer. Incomplete evidence omits the total but
+  preserves independently known file counts. Aggregate diff discovers files
+  only. ADR 0053's self-contained manifests retain paired short `a/d` fields and
+  fail closed without truncation at 400 files or 55,000 encoded bytes.
 - ADR 0047 auto-clears only a four-proof complete Goal whose exact final Turn
   completed. Hold its Runtime slot through the bounded terminal display handoff;
   paused/blocked/limited/unknown Goals never auto-clear. Goal controls require

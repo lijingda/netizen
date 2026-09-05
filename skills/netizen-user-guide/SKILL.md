@@ -39,6 +39,8 @@ Netizen 是通过官方 Codex SDK 将飞书接入原生 Codex 的 Channel，不�
    commentary 等自由文本经过常见敏感模式过滤。不显示命令正文、参数、输出、server、路径、
    耗时、百分比、ETA 或 reasoning。Progress Card 关闭时普通/Side Turn 仍是无文件
    富文本/静态文本、有文件完成卡；Goal 卡本身始终存在。展示失败不会改变 Codex execution。
+8. 解释文件区 `+N -M` 时称为成功修改的累计行数；反复修改或改回原文仍累计，不承诺最终
+   净差异。范围包括本轮新建的子任务；证据不足时可能只显示已知文件的数字而没有总计。
 
 ## 边界
 

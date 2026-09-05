@@ -65,6 +65,7 @@ from .turn_activity import (
     TurnPlanStepSnapshot,
 )
 from .turn_plan_observer import TurnActivityObservation, TurnActivityObserver
+from .turn_patch_children import TaskPatchChildren, collect_turn_patch_children
 
 
 logger = logging.getLogger(__name__)
@@ -692,6 +693,7 @@ class TurnOutcome:
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
     activity: TurnActivitySnapshot | None = None
+    patch_children: TaskPatchChildren = TaskPatchChildren()
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:
@@ -771,6 +773,7 @@ class GoalOutcome:
     activity: GoalActivitySnapshot | None = None
     finalization: GoalFinalizationStatus = GoalFinalizationStatus.NOT_APPLICABLE
     finalization_error: BaseException | None = None
+    patch_children: TaskPatchChildren = TaskPatchChildren()
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:
@@ -798,6 +801,7 @@ class SideTurnOutcome:
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
     activity: SideTurnActivitySnapshot | None = None
+    patch_children: TaskPatchChildren = TaskPatchChildren()
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:
@@ -5428,6 +5432,14 @@ class CodexRuntime:
             task_feedback=active.task_feedback,
             feedback_revision=active.feedback_revision,
             activity=activity,
+            patch_children=(
+                await self._completion_patch_children(
+                    session.thread.id, active.handle.id,
+                    tuple(getattr(result, "items", ())),
+                )
+                if error is None and _enum_value(getattr(result, "status", None)) == "completed"
+                else TaskPatchChildren()
+            ),
         )
         try:
             await self._on_completion(outcome)
@@ -5886,6 +5898,19 @@ class CodexRuntime:
                     )
                 await asyncio.sleep(self._poll_interval_seconds)
 
+    async def _completion_patch_children(
+        self, thread_id: str, turn_id: str, items: tuple[object, ...],
+    ) -> TaskPatchChildren:
+        # Completion-only, bounded, public reads. Display evidence never changes
+        # native terminal authority, admission, or the notification consumer.
+        try:
+            return await collect_turn_patch_children(
+                self._codex, thread_id=thread_id, turn_id=turn_id, items=items,
+            )
+        except Exception:
+            logger.warning("child patch evidence unavailable", exc_info=True)
+            return TaskPatchChildren(complete=False)
+
     async def _drain_terminal_turn_stream(self, active: _ActiveTurn) -> bool:
         observed_usage = False
         try:
@@ -6129,6 +6154,14 @@ class CodexRuntime:
             task_feedback=active.task_feedback,
             feedback_revision=active.feedback_revision,
             activity=activity,
+            patch_children=(
+                await self._completion_patch_children(
+                    active.handle.thread_id, active.handle.id,
+                    tuple(getattr(result, "items", ())),
+                )
+                if error is None and _enum_value(getattr(result, "status", None)) == "completed"
+                else TaskPatchChildren()
+            ),
         )
         try:
             await self._on_completion(outcome)
@@ -6408,6 +6441,16 @@ class CodexRuntime:
                 ),
                 finalization=finalization,
                 finalization_error=finalization_error,
+                patch_children=(
+                    await self._completion_patch_children(
+                        active.thread_id,
+                        active.stream_terminal.final_physical_turn_id,
+                        active.final_items,
+                    )
+                    if active.final_turn_status == "completed"
+                    and active.stream_terminal is not None
+                    else TaskPatchChildren()
+                ),
             )
             try:
                 async with asyncio.timeout(

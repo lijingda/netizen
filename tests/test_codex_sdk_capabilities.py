@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import unittest
+from unittest.mock import MagicMock
 
 import openai_codex
 import openai_codex.types as public_types
@@ -10,6 +11,16 @@ from openai_codex.types import (
     ThreadItem,
     ThreadTokenUsage,
     ThreadTokenUsageUpdatedNotification,
+)
+
+from openai_codex.generated.v2_all import (
+    CollabAgentTool,
+    CollabAgentToolCallThreadItem,
+    SubAgentActivityKind,
+    SubAgentActivityThreadItem,
+    Thread,
+    ThreadSpawnSubAgentSource,
+    Turn,
 )
 
 from netizen.sdk_gap_adapter import facade_migration_requirements
@@ -32,6 +43,71 @@ class CodexSdkCapabilityContractTest(unittest.TestCase):
             "include_turns",
             inspect.signature(AsyncThread.read).parameters,
         )
+
+    def test_public_read_handle_construction_does_not_resume_or_subscribe(self) -> None:
+        codex = MagicMock(spec=AsyncCodex)
+        thread = AsyncThread(codex, "child-thread")
+        self.assertEqual(thread.id, "child-thread")
+        self.assertEqual(codex.mock_calls, [])
+        self.assertEqual(
+            tuple(inspect.signature(AsyncThread).parameters), ("_codex", "id")
+        )
+        self.assertTrue(inspect.iscoroutinefunction(AsyncThread.read))
+        parameters = inspect.signature(AsyncThread.read).parameters
+        self.assertEqual(tuple(parameters), ("self", "include_turns"))
+        self.assertIs(parameters["include_turns"].default, False)
+        self.assertEqual(
+            parameters["include_turns"].kind, inspect.Parameter.KEYWORD_ONLY
+        )
+
+    def test_typed_child_provenance_and_both_agent_item_shapes_are_available(self) -> None:
+        # New enum values require a deliberate decision about child provenance,
+        # including the currently ignored close/interrupt operations.
+        self.assertEqual(
+            {tool.value for tool in CollabAgentTool},
+            {"spawnAgent", "sendInput", "resumeAgent", "wait", "closeAgent"},
+        )
+        self.assertEqual(
+            {kind.value for kind in SubAgentActivityKind},
+            {"started", "interacted", "interrupted"},
+        )
+        collab = ThreadItem.model_validate(
+            {
+                "type": "collabAgentToolCall",
+                "id": "spawn",
+                "senderThreadId": "parent",
+                "receiverThreadIds": ["child"],
+                "agentsStates": {},
+                "tool": "spawnAgent",
+                "status": "completed",
+            }
+        ).root
+        activity = ThreadItem.model_validate(
+            {
+                "type": "subAgentActivity",
+                "id": "started",
+                "agentThreadId": "child",
+                "agentPath": "/root/child",
+                "kind": "started",
+            }
+        ).root
+        source = ThreadSpawnSubAgentSource.model_validate(
+            {"thread_spawn": {"parent_thread_id": "parent", "depth": 1}}
+        )
+        self.assertIsInstance(collab, CollabAgentToolCallThreadItem)
+        self.assertEqual(collab.sender_thread_id, "parent")
+        self.assertEqual(collab.receiver_thread_ids, ["child"])
+        self.assertEqual(collab.tool.value, "spawnAgent")
+        self.assertIsInstance(activity, SubAgentActivityThreadItem)
+        self.assertEqual(activity.agent_thread_id, "child")
+        self.assertEqual(activity.kind.value, "started")
+        self.assertEqual(source.thread_spawn.parent_thread_id.root, "parent")
+        self.assertTrue(
+            {"parent_thread_id", "forked_from_id", "source", "turns"}.issubset(
+                Thread.model_fields
+            )
+        )
+        self.assertTrue({"id", "status", "items", "items_view"}.issubset(Turn.model_fields))
 
     def test_public_thread_list_supports_native_title_display(self) -> None:
         self.assertTrue(callable(AsyncCodex.thread_list))

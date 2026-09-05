@@ -94,17 +94,17 @@ exact Turn 仍为 `inProgress`，或确认它已进入 Confirmed Turn Terminal�
 Binding-local 情形。它不表示 Thread 历史损坏，也不改变持久 Thread 的归档或删除资格。
 
 **Turn File / 本轮文件**：一个已完成的 Ordinary/Side Turn，或 Goal 的 exact 最终
-physical Turn，通过其受支持的原生事实指向的当前文件。Project 只是相对路径解析基准，
+physical Turn 及其本轮新建子任务，通过受支持的原生事实指向的当前文件。
+Project 只是相对路径解析基准，
 不是文件授权边界；自包含卡片在 callback payload 中携带 absolute path 与完整 manifest，
 切换 active Binding 或服务重启不改变已发送卡片的操作来源。
 _Avoid_：“产物快照”“Turn 完成时版本”，因为 Netizen 不保存内容、摘要或修改检测，
 点击时发送的是该路径当前仍可访问的普通文件。
 
-**Turn Diff Statistics / 本轮行数统计**：从一个 exact physical Turn 的 latest aggregate
-unified diff 得到的新增/删除文本行数，包括整轮总计和 current-side Turn File 的逐文件
-计数。它不是工作区当前差异或文件内容快照；只有完整可验证的文本 hunk 和窄定义的纯
-100% rename 产生数字，Side、binary、图片、缺失文件、其他 metadata-only 变化和无法完整
-验证的 diff 不产生相应数字。
+**Turn Diff Statistics / 本轮行数统计**：一个已完成 physical Turn 及其本轮新建子任务
+成功文本修改的累计新增/删除行数，包括逐文件计数和证据完整时的总计；重复修改及改回原文
+仍累计，不表示最终净差异或工作区当前差异。
+_Avoid_：“最终净 diff”“文件快照”“代码贡献量”。
 
 **Steer**：运行中 Binding 的下一条普通消息，固定映射为同一 handle 的
 `steer()`，不是 queue 或新 Turn。

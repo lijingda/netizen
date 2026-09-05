@@ -32,6 +32,7 @@ from openai_codex import ImageInput, TextInput
 from openai_codex.types import ThreadItem
 
 from netizen import channel_app
+from netizen.turn_patch_children import TaskPatchChildren, TurnPatchBatch
 from netizen.bindings import (
     BindingNotFound,
     BindingStore,
@@ -2024,8 +2025,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.assertLogs("netizen.channel_app", level="ERROR"),
             patch.object(
                 channel_app,
-                "turn_diff_summary",
-                wraps=channel_app.turn_diff_summary,
+                "turn_patch_summary",
+                wraps=channel_app.turn_patch_summary,
             ) as parse_diff,
         ):
             await self.app.handle_completion(
@@ -2845,8 +2846,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             channel_app,
-            "turn_diff_summary",
-            wraps=channel_app.turn_diff_summary,
+            "turn_patch_summary",
+            wraps=channel_app.turn_patch_summary,
         ) as parse_diff:
             await self.app.handle_completion(
                 TurnOutcome(
@@ -2878,10 +2879,42 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         rendered = json.dumps(card.card, ensure_ascii=False)
         self.assertIn("research complete", rendered)
         self.assertIn("research.md", rendered)
-        self.assertIn("+2", rendered)
-        self.assertIn("-0", rendered)
+        self.assertNotIn("+2", rendered)
+        self.assertNotIn("累计修改", rendered)
         self.assertNotIn("8 B", rendered)
         self.assertEqual(_card_button_value(card, "发送")["v"], 4)
+
+    async def test_completed_patch_card_accumulates_parent_and_child_and_preserves_partial_rows(self) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-files")
+        (self.project / "shared.txt").write_text("child\nparent\n")
+        own = ThreadItem.model_validate({
+            "type": "fileChange", "id": "patch", "status": "completed",
+            "changes": [{"path": "shared.txt", "kind": {"type": "update"},
+                         "diff": "@@ -1 +1,2 @@\n child\n+parent\n"}],
+        })
+        child = ThreadItem.model_validate({
+            "type": "fileChange", "id": "patch", "status": "completed",
+            "changes": [{"path": "shared.txt", "kind": {"type": "add"},
+                         "diff": "child\n"}],
+        })
+        batch = TurnPatchBatch("child", "child-turn", self.project, (child,))
+        for complete in (True, False):
+            with self.subTest(complete=complete):
+                await self.app.handle_completion(TurnOutcome(
+                    binding_id=binding.id, thread_id="native-files", turn_id="root-turn",
+                    owner_id="ou_user", origin=origin,
+                    result=completed_turn_result(own, final_response="done"),
+                    patch_children=TaskPatchChildren((batch,), complete),
+                ))
+                card = self.channel.replies[-1][1]
+                self.assertIsInstance(card, OutboundCard)
+                visible = "\n".join(e["content"] for e in _elements(card.card, "markdown"))
+                self.assertIn("<font color='green'>+2", visible)
+                self.assertEqual("累计修改" in visible, complete)
+                self.assertNotIn(str(self.project), visible)
 
     async def test_generated_image_outside_project_gets_artifact_aware_card(
         self,
@@ -6627,7 +6660,15 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         assert isinstance(initial, OutboundCard)
         self.assertEqual(len(tuple(_elements(initial.card, "collapsible_panel"))), 1)
 
-        final_item = file_change_item(*paths)
+        final_item = ThreadItem.model_validate({
+            "type": "fileChange", "id": "final-patches", "status": "completed",
+            "changes": [
+                {"path": path, "kind": {"type": "update"},
+                 "diff": "@@ -1 +1 @@\n-old\n+new\n"}
+                for path in paths
+            ] + [{"path": "deleted.txt", "kind": {"type": "delete"},
+                  "diff": "deleted one\ndeleted two\n"}],
+        })
         final_diff = "".join(
             (
                 f"diff --git a/{path} b/{path}\n"
@@ -10323,7 +10364,8 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("side file ready", visible)
         self.assertIn("side-output.txt", visible)
         self.assertNotIn("collapsible_panel", visible)
-        self.assertNotIn("<font color='green'>+", visible)
+        self.assertIn("<font color='green'>+0", visible)
+        self.assertIn("累计修改", visible)
         self.assertNotIn("4 B", visible)
         send_value = _card_button_value(card, "发送")
         self.assertEqual(send_value["v"], 4)

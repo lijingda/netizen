@@ -224,8 +224,10 @@ stdout；异常路径的二次 interrupt、terminal cleanup 和 task drain 都�
 `timeout` 是整个 phase 的最后兜底。
 
 `make check` 还固定验证公开 `AsyncTurnHandle.stream()` 的 exact
-`turn/diff/updated` latest aggregate snapshot、公开 `ThreadItem.root` 的 completed
-`fileChange` / `imageGeneration.saved_path` fallback、窄定义的 unified diff path/hunk 行数 parser、v3
+`turn/diff/updated` latest aggregate 文件发现、公开 `ThreadItem.root` 的 completed
+`fileChange` 累计统计和 `imageGeneration.saved_path`、完整 add/delete 正文及 validated
+update hunk、rename、重复改动与改回原文、缺失 patch 的逐文件降级、跨 Project 路径，
+以及公开 child Thread 读取的 v1/v2 关系、递归归属、继承历史排除、去重和有界降级。另覆盖 v3
 过期拒绝、当前 v4/v5 完整 Reply Card manifest 循环分页、100/400 完整统计 manifest、
 401 明确拒绝、可重复 Card Action 的 per-render nonce、transport-only decoder 与同一 render
 重投递去重，以及 Lark
@@ -1162,11 +1164,16 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     现有完成卡。Progress Card 开启时，两种结果都更新最初的同一张运行卡，有文件时继续
     包含既有 v4 manifest。再验证 Goal exact 最终物理 Turn completed 的文件进入同一张
     Goal 卡并使用 v5 完整 Reply Card manifest，而更早 rollover Turn 的文件不会被猜测
-    聚合；Side exact completed Turn 的 structured items 进入普通 v4 完成/进度卡，而
-    aggregate diff、先前 Side Turn 和未进入 structured items 的文件不会被补齐，且 Side
-    不显示行数。Goal live phase 必须让 resumed exact final physical Turn 创建一个临时文件，
-    并从同一唯一 Goal notification stream 返回的 latest aggregate diff 验证该文件及行数；
-    更早 physical Turn 的 snapshot 不得泄漏。Project 内文件显示相对路径，Project 外文件
+    聚合；Side exact completed Turn 的 structured items 进入普通 v4 完成/进度卡，并显示
+    成功 patch 的累计行数；Side aggregate diff、先前 Side Turn 和未进入受支持 native
+    事实的文件不会被补齐。Goal live phase 必须让 resumed exact final physical Turn 创建
+    一个临时文件，从成功 `fileChange` 验证累计行数；同一唯一 Goal notification stream
+    的 latest aggregate diff 只验证文件发现，更早 physical Turn 的 snapshot 不得泄漏。
+    修改 child/fileChange SDK 合同时，在已登录环境另验证真实新建子任务：child 创建文件、
+    parent 随后修改，确认累计两者成功 patch、排除继承历史，并保留 child 的原生 parent
+    与 Turn/item 归属证据；不能把累计结果当作最终净 diff。子任务运行中或无法读取时只
+    省略总计，已知文件数字保留，completion 不等待子任务终态。没有 live 条件时明确报告
+    未验证，不能以 synthetic 代替。Project 内文件显示相对路径，Project 外文件
     显示脱敏逻辑位置；所有条目隐藏大小、按钮统一为“发送”，按 8 个一页完整翻页，可见正文
     不出现绝对路径、预览、diff 正文或发送全部；v5 callback payload 则必须逐项携带明文
     absolute path，并对已知统计携带成对 `a/d`，翻页后完整保留整轮统计与
