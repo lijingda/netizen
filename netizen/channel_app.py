@@ -232,7 +232,7 @@ from .turn_files import (
     extract_turn_files,
     has_turn_file_references,
     require_turn_file_path,
-    turn_diff_summary,
+    turn_patch_summary,
 )
 
 
@@ -2691,7 +2691,7 @@ class ChannelApplication:
         await self._safe_add_reaction(outcome.origin, terminal_reaction)
         await self._reactions.stop(outcome.turn_id)
         diff_summary = (
-            turn_diff_summary(self._task_turn_diff(outcome))
+            self._task_patch_summary(outcome)
             if outcome.error is None and outcome.status == "completed"
             else TurnDiffSummary()
         )
@@ -2844,9 +2844,24 @@ class ChannelApplication:
             turn_id=outcome.turn_id,
         )
 
-    @staticmethod
-    def _task_turn_diff(outcome: TurnOutcome | SideTurnOutcome) -> str | None:
-        return outcome.turn_diff if isinstance(outcome, TurnOutcome) else None
+    def _task_patch_summary(
+        self, outcome: TurnOutcome | SideTurnOutcome,
+    ) -> TurnDiffSummary:
+        try:
+            if isinstance(outcome, TurnOutcome):
+                binding = self._bindings.get(outcome.binding_id)
+                cwd = self._projects.resolve_for_binding(binding.project_alias).cwd
+            else:
+                cwd = outcome.cwd
+            return turn_patch_summary(
+                tuple(getattr(outcome.result, "items", ())),
+                cwd,
+                children=outcome.patch_children,
+                turn_diff=outcome.turn_diff if isinstance(outcome, TurnOutcome) else None,
+            )
+        except Exception:
+            logger.exception("failed to prepare completed patch statistics")
+            return TurnDiffSummary()
 
     def _completion_files(
         self,
@@ -3093,7 +3108,18 @@ class ChannelApplication:
                 collapsed=True,
             )
         files: tuple[TurnFile, ...] = ()
-        goal_diff_summary = turn_diff_summary(outcome.turn_diff)
+        goal_diff_summary = TurnDiffSummary()
+        if outcome.final_turn_status == "completed":
+            try:
+                project = self._projects.resolve_for_binding(identity_project_alias)
+                goal_diff_summary = turn_patch_summary(
+                    outcome.final_items,
+                    project.cwd,
+                    children=outcome.patch_children,
+                    turn_diff=outcome.turn_diff,
+                )
+            except Exception:
+                logger.exception("failed to prepare final Goal patch statistics")
         if (
             outcome.final_turn_status == "completed"
             and outcome.final_physical_turn_id is not None

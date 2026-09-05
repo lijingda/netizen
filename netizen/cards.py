@@ -4299,7 +4299,7 @@ def _turn_files_block(
     line_counts = ""
     if additions is not None and deletions is not None:
         line_counts = (
-            "\n"
+            "\n累计修改 "
             f"<font color='green'>+{additions}</font> "
             f"<font color='red'>-{deletions}</font>"
         )
@@ -4310,6 +4310,8 @@ def _turn_files_block(
                 f"**本轮文件** · 共 {page.total_items} 个 · "
                 f"第 {page.page + 1}/{page.total_pages} 页"
                 f"{line_counts}\n"
+                "<font color='grey'>行数累计成功的文件修改，重复修改会重复计数；"
+                "统计不完整时省略总计或相应文件的数字。</font>\n"
                 "<font color='grey'>点击“发送”后，文件将以图片或文件消息发送到本卡片话题。</font>"
             ),
         }

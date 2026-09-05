@@ -6,7 +6,7 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from openai_codex import (
     ImageInput,
@@ -105,6 +105,7 @@ from netizen.sdk_gap_adapter import (
     ThreadUnsubscribeStateUnknown,
     ThreadUnsubscribeStatus,
 )
+from netizen.turn_patch_children import TaskPatchChildren, TurnPatchBatch
 from netizen.turn_plan_observer import (
     TurnActivityObservation,
     TurnPlanStepSnapshot,
@@ -195,6 +196,7 @@ class FakeTurnHandle:
                 return SimpleNamespace(
                     status=self.record.status,
                     final_response=final_response,
+                    items=list(self.record.items),
                 )
             if isinstance(notification, BaseException):
                 raise notification
@@ -275,6 +277,23 @@ def turn_diff_notification(
             turn_id=turn_id,
             diff=diff,
         ),
+    )
+
+
+def completed_file_change(item_id: str) -> ThreadItem:
+    return ThreadItem.model_validate(
+        {
+            "type": "fileChange",
+            "id": item_id,
+            "status": "completed",
+            "changes": [
+                {
+                    "path": f"{item_id}.txt",
+                    "diff": "added line\n",
+                    "kind": {"type": "add"},
+                }
+            ],
+        }
     )
 
 
@@ -1865,6 +1884,86 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.activity.steer_count, 1)
         self.assertFalse(outcome.activity.plan_may_be_stale)
         self.assertEqual(outcome.activity.steps[0].status, TurnPlanStepState.COMPLETED)
+
+    async def test_side_patch_children_use_completed_items_without_progress(self) -> None:
+        _binding, record, _snapshot = await self.open_side()
+        started = await self.runtime.submit_side(
+            side_id=record.id,
+            input="edit with children",
+            owner_id="ou_owner",
+            origin=object(),
+        )
+        handle = self.codex.handles[-1]
+        root_patch = completed_file_change("side-root")
+        children = TaskPatchChildren(
+            batches=(TurnPatchBatch("child", "child-turn", self.cwd, (root_patch,)),)
+        )
+        with patch(
+            "netizen.codex_runtime.collect_turn_patch_children",
+            new_callable=AsyncMock,
+            return_value=children,
+        ) as collect:
+            handle.complete(response="side final")
+            handle.record.items.insert(0, root_patch)
+            started.release_receipt_attempt()
+            self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, SideTurnOutcome)
+        self.assertIs(outcome.patch_children, children)
+        self.assertFalse(outcome.task_feedback.progress_card_enabled)
+        self.assertIsNone(outcome.activity)
+        self.assertIsNone(outcome.error)
+        collect.assert_awaited_once_with(
+            self.codex,
+            thread_id=started.thread_id,
+            turn_id=started.turn_id,
+            items=tuple(handle.record.items),
+        )
+        self.assertEqual(handle.run_calls, 1)
+        self.assertEqual(handle.stream_calls, 0)
+
+    async def test_side_patch_collection_failure_preserves_completed_result(self) -> None:
+        _binding, record, _snapshot = await self.open_side()
+        started = await self.runtime.submit_side(
+            side_id=record.id,
+            input="edit with children",
+            owner_id="ou_owner",
+            origin=object(),
+        )
+        with patch(
+            "netizen.codex_runtime.collect_turn_patch_children",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("child read unavailable"),
+        ) as collect, self.assertLogs("netizen.codex_runtime", level="WARNING"):
+            await self.finish_side_turn(started, response="side final")
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, SideTurnOutcome)
+        self.assertEqual(outcome.result.final_response, "side final")
+        self.assertIsNone(outcome.error)
+        self.assertFalse(outcome.patch_children.complete)
+        collect.assert_awaited_once()
+        self.assertEqual(self.runtime.side_snapshot(record.id).state, SideSessionState.OPEN)
+
+    async def test_noncompleted_side_turns_do_not_collect_patch_children(self) -> None:
+        _binding, record, _snapshot = await self.open_side()
+        for status in ("failed", "interrupted"):
+            with self.subTest(status=status), patch(
+                "netizen.codex_runtime.collect_turn_patch_children",
+                new_callable=AsyncMock,
+            ) as collect:
+                started = await self.runtime.submit_side(
+                    side_id=record.id,
+                    input=f"finish {status}",
+                    owner_id="ou_owner",
+                    origin=object(),
+                )
+                self.codex.handles[-1].complete(status=status)
+                started.release_receipt_attempt()
+                self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+                collect.assert_not_awaited()
+                self.assertEqual(self.outcomes[-1].result.status.value, status)
 
     async def test_disabled_side_progress_never_observes_plan(self) -> None:
         observer = FakeTurnPlanObserver()
@@ -3936,6 +4035,83 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.codex.finish_compaction()
         await self.runtime.wait_idle()
 
+    async def test_patch_children_use_exact_completed_turn_without_progress(self) -> None:
+        binding = self.binding()
+        first = await self.submit(binding)
+        await self.finish(self.codex.handles[-1], first)
+        submission = await self.submit(self.store.get(binding.id), "second edit")
+        handle = self.codex.handles[-1]
+        root_patch = completed_file_change("current-root")
+        children = TaskPatchChildren(
+            batches=(TurnPatchBatch("child", "child-turn", self.cwd, (root_patch,)),)
+        )
+        async with asyncio.timeout(0.2):
+            while not self.runtime._active[binding.id].terminal_stream_safe:
+                await asyncio.sleep(0)
+        with patch(
+            "netizen.codex_runtime.collect_turn_patch_children",
+            new_callable=AsyncMock,
+            return_value=children,
+        ) as collect:
+            handle.complete(response="current result")
+            handle.record.items.insert(0, root_patch)
+            submission.release_receipt_attempt()
+            await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, TurnOutcome)
+        self.assertIs(outcome.patch_children, children)
+        self.assertFalse(outcome.task_feedback.progress_card_enabled)
+        self.assertEqual(outcome.final_response, "current result")
+        collect.assert_awaited_once_with(
+            self.codex,
+            thread_id=submission.thread_id,
+            turn_id=submission.turn_id,
+            items=tuple(handle.record.items),
+        )
+        self.assertEqual(handle.stream_calls, 1)
+        self.assertEqual(handle.run_calls, 0)
+        self.assertIsNone(self.runtime.active_turn(binding.id))
+
+    async def test_patch_collection_failure_preserves_completed_result(self) -> None:
+        binding = self.binding()
+        submission = await self.submit(binding)
+        with patch(
+            "netizen.codex_runtime.collect_turn_patch_children",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("child read unavailable"),
+        ) as collect, self.assertLogs("netizen.codex_runtime", level="WARNING"):
+            await self.finish(self.codex.handles[-1], submission)
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, TurnOutcome)
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.final_response, "done:turn-1")
+        self.assertFalse(outcome.patch_children.complete)
+        collect.assert_awaited_once()
+        self.assertIsNone(self.runtime.active_turn(binding.id))
+        next_turn = await self.submit(self.store.get(binding.id), "still usable")
+        await self.finish(self.codex.handles[-1], next_turn)
+
+    async def test_noncompleted_turns_do_not_collect_patch_children(self) -> None:
+        binding = self.binding()
+        for status in ("failed", "interrupted"):
+            with self.subTest(status=status), patch(
+                "netizen.codex_runtime.collect_turn_patch_children",
+                new_callable=AsyncMock,
+            ) as collect:
+                submission = await self.submit(self.store.get(binding.id))
+                self.codex.handles[-1].complete(status=status)
+                submission.release_receipt_attempt()
+                await self.runtime.wait_idle()
+                collect.assert_not_awaited()
+                outcome = self.outcomes[-1]
+                if status == "failed":
+                    self.assertIsInstance(outcome.error, RuntimeError)
+                    self.assertIsNone(outcome.result)
+                else:
+                    self.assertEqual(outcome.result.status.value, status)
+
     async def test_public_turn_stream_carries_only_latest_aggregate_diff(
         self,
     ) -> None:
@@ -4576,11 +4752,16 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     origin=object(),
                 )
                 submission.release_receipt_attempt()
-                control.handles[-1].finish(
-                    goal_status=GoalStatus.COMPLETE,
-                    turn_status=turn_status,
-                )
-                await self.runtime.wait_idle()
+                with patch(
+                    "netizen.codex_runtime.collect_turn_patch_children",
+                    new_callable=AsyncMock,
+                ) as collect:
+                    control.handles[-1].finish(
+                        goal_status=GoalStatus.COMPLETE,
+                        turn_status=turn_status,
+                    )
+                    await self.runtime.wait_idle()
+                    collect.assert_not_awaited()
 
                 outcome = self.outcomes[-1]
                 self.assertIsInstance(outcome, GoalOutcome)
@@ -4988,6 +5169,81 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         outcome = self.outcomes[-1]
         self.assertIsInstance(outcome, GoalOutcome)
         self.assertIsNone(outcome.activity)
+
+    async def test_goal_patch_children_use_only_final_physical_turn_without_progress(
+        self,
+    ) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="edit across physical turns",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        handle = control.handles[-1]
+        handle.record.items = [completed_file_change("previous-root")]
+        handle.rollover("physical-final")
+        root_patch = completed_file_change("final-root")
+        children = TaskPatchChildren(
+            batches=(TurnPatchBatch("child", "child-turn", self.cwd, (root_patch,)),)
+        )
+        with patch(
+            "netizen.codex_runtime.collect_turn_patch_children",
+            new_callable=AsyncMock,
+            return_value=children,
+        ) as collect:
+            handle.finish(response="goal final")
+            handle.record.items.insert(0, root_patch)
+            submission.release_receipt_attempt()
+            await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertIs(outcome.patch_children, children)
+        self.assertFalse(outcome.task_feedback.progress_card_enabled)
+        self.assertIsNone(outcome.activity)
+        self.assertEqual(outcome.final_physical_turn_id, "physical-final")
+        self.assertEqual(outcome.final_items, tuple(handle.record.items))
+        collect.assert_awaited_once_with(
+            self.codex,
+            thread_id=submission.thread_id,
+            turn_id="physical-final",
+            items=tuple(handle.record.items),
+        )
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.CLEARED)
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+
+    async def test_goal_patch_collection_failure_preserves_completed_result(self) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="finish despite unavailable display evidence",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        with patch(
+            "netizen.codex_runtime.collect_turn_patch_children",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("child read unavailable"),
+        ) as collect, self.assertLogs("netizen.codex_runtime", level="WARNING"):
+            control.handles[-1].finish(response="goal final")
+            submission.release_receipt_attempt()
+            await self.runtime.wait_idle()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, GoalOutcome)
+        self.assertEqual(outcome.final_response, "goal final")
+        self.assertIsNone(outcome.error)
+        self.assertFalse(outcome.patch_children.complete)
+        collect.assert_awaited_once()
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.CLEARED)
+        self.assertIsNone(self.runtime.active_goal(binding.id))
 
     async def test_goal_activity_resets_on_physical_turn_rollover(self) -> None:
         control = FakeGoalControl(self.codex)

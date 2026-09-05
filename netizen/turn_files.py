@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from openai_codex.generated.v2_all import FileChangeThreadItem
 from openai_codex.types import ThreadItem
+
+from .turn_patch_children import TaskPatchChildren, TurnPatchBatch
 
 
 TURN_FILE_PAGE_SIZE = 8
@@ -44,7 +47,7 @@ class TurnFilePage:
 
 @dataclass(frozen=True, slots=True)
 class TurnDiffFileStats:
-    """Line counts for one current-side path in an aggregate Turn diff."""
+    """Optional line counts associated with one reported file path."""
 
     path: str
     additions: int | None = None
@@ -53,7 +56,7 @@ class TurnDiffFileStats:
 
 @dataclass(frozen=True, slots=True)
 class TurnDiffSummary:
-    """Display-safe line counts derived from one aggregate Turn diff."""
+    """Display-safe paths and optional paired line counts."""
 
     additions: int | None = None
     deletions: int | None = None
@@ -80,6 +83,147 @@ class _ParsedDiffBlock:
 _HUNK_HEADER = re.compile(
     r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@(?:.*)$"
 )
+
+
+def turn_patch_summary(
+    items: Sequence[object],
+    project_cwd: Path,
+    *,
+    children: TaskPatchChildren = TaskPatchChildren(),
+    turn_diff: str | None = None,
+) -> TurnDiffSummary:
+    """Count successful patch operations, including proven new descendants.
+
+    Repeated edits accumulate; this is not a final net diff. Native aggregate
+    diffs supplement paths only, so their overlapping counts are never added.
+    Unreadable children or patches omit the total, retaining known file counts.
+    """
+    counts: dict[str, tuple[int, int] | None] = {}
+    additions = deletions = 0
+    complete = children.complete
+    saw_counts = False
+    root_paths: set[str] = set()
+    seen: set[tuple[str, str, str]] = set()
+    batches = (TurnPatchBatch("", "", project_cwd, tuple(items)), *children.batches)
+    for batch in batches:
+        # Final item views replace earlier lifecycle views of the same item.
+        patches: dict[str, FileChangeThreadItem] = {}
+        conflicting: set[str] = set()
+        for wrapped in batch.items:
+            item = getattr(wrapped, "root", wrapped)
+            if type(item) is not FileChangeThreadItem:
+                continue
+            previous_item = patches.get(item.id)
+            if (
+                previous_item is not None
+                and _enum_value(previous_item.status) == "completed"
+                and _enum_value(item.status) == "completed"
+                and previous_item != item
+            ):
+                conflicting.add(item.id)
+            patches[item.id] = item
+        for item in patches.values():
+            identity = (batch.thread_id, batch.turn_id, item.id)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if _enum_value(item.status) != "completed":
+                if _enum_value(item.status) == "inProgress":
+                    complete = False
+                continue
+            for change in item.changes:
+                kind = change.kind.root
+                raw_path = getattr(kind, "move_path", None) or change.path
+                try:
+                    path = _patch_path(raw_path, batch.cwd)
+                except (OSError, RuntimeError, ValueError):
+                    complete = False
+                    continue
+                if not batch.thread_id:
+                    root_paths.add(path)
+                value = (
+                    None if item.id in conflicting else _file_change_counts(
+                        change.diff, kind.type, getattr(kind, "move_path", None),
+                    )
+                )
+                if value is None:
+                    complete = False
+                else:
+                    additions += value[0]
+                    deletions += value[1]
+                    saw_counts = True
+                if path not in counts:
+                    counts[path] = value
+                elif counts[path] is None or value is None:
+                    counts[path] = None
+                else:
+                    previous = counts[path]
+                    assert previous is not None
+                    counts[path] = (previous[0] + value[0], previous[1] + value[1])
+
+    # Preserve aggregate-only file discovery without mixing two count metrics.
+    for lines in _diff_blocks(turn_diff or ""):
+        block = _parse_diff_block(lines)
+        if block.path is None:
+            complete = False
+            continue
+        try:
+            path = _patch_path(block.path, project_cwd)
+        except (OSError, RuntimeError, ValueError):
+            complete = False
+            continue
+        if path not in root_paths:
+            complete = False
+            if not block.deleted or path in counts:
+                counts[path] = None
+    return TurnDiffSummary(
+        additions if complete and saw_counts else None,
+        deletions if complete and saw_counts else None,
+        tuple(
+            TurnDiffFileStats(path, *(value or (None, None)))
+            for path, value in counts.items()
+        ),
+    )
+
+
+def _patch_path(value: str, cwd: Path) -> str:
+    if not value or "\0" in value:
+        raise ValueError("invalid patch path")
+    path = Path(value)
+    return str((path if path.is_absolute() else cwd / path).resolve())
+
+
+def _file_change_counts(
+    diff: str, kind: str, move_path: str | None,
+) -> tuple[int, int] | None:
+    if "\0" in diff:
+        return None
+    if kind in {"add", "delete"}:
+        # SDK add/delete contain whole text, not a unified diff. Count LF only;
+        # a final newline terminates the last line rather than adding a line.
+        lines = diff.count("\n") + int(bool(diff) and not diff.endswith("\n"))
+        return (lines, 0) if kind == "add" else (0, lines)
+    if kind != "update":
+        return None
+    if move_path:
+        suffix = f"\n\nMoved to: {move_path}"
+        if diff.endswith(suffix):
+            diff = diff[:-len(suffix)]
+        if not diff:
+            return (0, 0)
+    # Generated update patches can have file headers or start directly with a
+    # hunk. Reuse the validated hunk parser; paths come from the typed change.
+    lines = [line.removesuffix("\r") for line in diff.split("\n")]
+    if lines and not lines[-1]:
+        lines.pop()
+    if diff.startswith("@@ "):
+        lines = ["--- a/file", "+++ b/file", *lines]
+    if not diff.startswith("diff --git "):
+        lines.insert(0, "diff --git a/file b/file")
+    if sum(line.startswith("diff --git ") for line in lines) != 1:
+        return None
+    block = _parse_diff_block(lines)
+    return block.counts if not block.binary else None
 
 
 def extract_turn_files(
