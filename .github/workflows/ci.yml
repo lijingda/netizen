@@ -26,6 +26,11 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Set up Node.js for Admin JavaScript behavior tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Set up supported Python
         uses: actions/setup-python@v5
         with:
@@ -55,6 +60,11 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Set up Node.js for Admin JavaScript behavior tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
       - name: Set up supported Python
         uses: actions/setup-python@v5

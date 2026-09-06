@@ -1284,23 +1284,26 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(tuple(self.runtime.calls), before)
 
-    async def test_channel_rejects_a_different_scope_coordinator(self) -> None:
+    async def test_channel_uses_shared_management_scope_coordinator(self) -> None:
         class RuntimeWithCompletion(FakeManagementRuntime):
             def set_completion_handler(self, _handler) -> None:
                 pass
 
         runtime = RuntimeWithCompletion(self.store)
 
-        with self.assertRaisesRegex(ValueError, "share one ScopeCoordinator"):
-            ChannelApplication(
-                app_id="cli_test",
-                channel=object(),  # type: ignore[arg-type]
-                runtime=runtime,  # type: ignore[arg-type]
-                bindings=self.store,
-                projects=self.projects,
-                scope_coordinator=ScopeCoordinator(),
-                management=self.service,
-            )
+        application = ChannelApplication(
+            app_id="cli_test",
+            channel=object(),  # type: ignore[arg-type]
+            runtime=runtime,  # type: ignore[arg-type]
+            bindings=self.store,
+            projects=self.projects,
+            management=self.service,
+        )
+        try:
+            self.assertIs(application._management, self.service)
+            self.assertIs(application._scope_coordinator, self.service.scope_coordinator)
+        finally:
+            await application.close()
 
 
 class ManagementRuntimePortSurfaceTest(unittest.TestCase):

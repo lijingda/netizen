@@ -5,6 +5,7 @@ const state = {
   projects: null,
   sessions: null,
   sides: null,
+  updates: null,
   projectCursor: null,
   sideCursor: null,
   sessionPage: {
@@ -26,12 +27,254 @@ async function api(path, options = {}) {
   const response = await fetch(path, { cache: "no-store", ...options });
   if (response.status === 401) {
     window.location.assign("/login");
-    throw new Error("登录已失效");
+    const error = new Error("登录已失效，请重新登录。");
+    error.status = 401;
+    throw error;
   }
   if (response.status === 204) return null;
   const data = await response.json();
-  if (!response.ok) throw new Error(data.message || `请求失败 (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(data.message || `请求失败 (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
   return data;
+}
+
+const updateTerminalPhases = new Set([
+  "succeeded", "failed", "rolled_back", "requires_action", "recovery_required", "recovered",
+]);
+const updatePhaseLabels = {
+  accepted: "升级已受理",
+  downloading: "正在下载更新",
+  preparing: "正在准备并验证新版本",
+  installing: "正在安装",
+  restarting: "正在重启",
+  succeeded: "升级成功",
+  failed: "升级失败",
+  rolled_back: "升级失败，已回滚",
+  requires_action: "需要处理后重试",
+  recovery_required: "升级结果未确认，需要修复",
+  recovered: "已通过安装器恢复",
+};
+const updateCodeMessages = {
+  download_failed: "下载失败，请检查网络后重新检查更新。",
+  installer_invalid: "安装器校验失败，请重新检查更新。",
+  preparation_failed: "新版本准备失败，旧版本未切换。请通过官方安装器重试以查看具体原因。",
+  configuration_required: "升级需要补全配置或凭据，请按部署文档完成配置后重试。",
+  permissions_required: "升级需要处理飞书应用权限，请按部署文档完成授权后重试。",
+  activation_failed: "新版本未能完成启动，请查看回滚结果，检查服务日志并用官方安装器恢复。",
+  rollback_incomplete: "回滚未完成，请使用官方安装器修复，当前结果不能确认为成功。",
+  installer_failed: "安装器未成功完成，请通过官方安装器重试以查看具体原因。",
+  worker_interrupted: "升级进程已中断，请使用官方安装器检查并恢复安装。",
+  lock_busy: "已有安装操作正在执行，请稍后刷新升级状态。",
+  operation_invalid: "升级记录无法验证，请使用官方安装器检查并修复。",
+  dispatch_failed: "未能启动升级进程，请检查服务管理器后重新检查更新。",
+  dispatch_unknown: "升级进程的启动结果未确认，请使用官方安装器检查并修复。",
+  worker_lost: "升级进程未能完成，请使用官方安装器检查并恢复安装。",
+  previous_release_changed: "当前安装版本已变化，请重新检查更新。",
+  profile_failed: "无法读取账户运行环境，请检查登录 Shell 配置后重试。",
+  manual_recovery: "安装器已恢复部署，请以当前版本为准；原升级操作不标记为成功。",
+};
+const updatePollLimitMs = 5 * 60 * 1000;
+let updatePollTimer = null;
+let updatePollStarted = null;
+let updatePollDelay = 2000;
+let updatePollExpired = false;
+let updateSubmitting = false;
+let updateExpectedTarget = null;
+let updatePriorOperationId = null;
+let updateDisconnected = false;
+let updateReading = false;
+
+function sameUpdateTarget(left, right) {
+  return left != null && right != null
+    && ["version", "releaseId", "installerSha256", "archiveSha256"]
+      .every((key) => left[key] === right[key]);
+}
+
+function updateNeedsPolling() {
+  const operation = state.updates?.operation;
+  return updateExpectedTarget != null
+    || (operation != null && !updateTerminalPhases.has(operation.phase));
+}
+
+function renderUpdates() {
+  const data = state.updates;
+  if (!data) return;
+  document.querySelector("#update-current").textContent = data.current.version;
+  document.querySelector("#update-source").textContent = {
+    published: "官方发布版本", source: "源码安装", unmanaged: "非受管安装",
+  }[data.current.source] || "安装来源未知";
+  document.querySelector("#update-latest").textContent = data.latest?.version || "尚未检查";
+  const versionMessage = !data.latest ? "点击检查更新，获取最新官方版本。"
+    : data.current.version === data.latest.version ? "当前已是最新版本。"
+      : data.available ? "发现新版本。" : "当前暂不可升级，请查看升级状态或安装说明。";
+  document.querySelector("#update-message").textContent = data.checkingError
+    || data.message || versionMessage;
+  document.querySelector("#update-notes").textContent = data.latest?.notes || "暂无发布说明。";
+  const releaseLink = document.querySelector("#update-release-link");
+  releaseLink.hidden = !data.latest?.url;
+  if (data.latest?.url) releaseLink.href = data.latest.url;
+  const operation = data.operation;
+  let phase = operation
+    ? (updatePhaseLabels[operation.phase] || "升级结果未确认")
+    : "尚未执行升级";
+  let detail = operation
+    ? `目标版本 ${operation.target.version}。${updateCodeMessages[operation.code] || ""}`
+    : "升级开始后，关闭页面不会取消安装。";
+  if (operation?.phase === "succeeded") detail += " 安装器已确认升级完成。";
+  if (updateExpectedTarget) {
+    phase = updateSubmitting ? "正在提交升级" : "升级提交结果尚未确认";
+    detail = "正在查询服务端记录，请勿重复提交升级。";
+  }
+  if (updateDisconnected) {
+    phase = "连接暂时中断，正在查询升级结果";
+    detail = "服务可能正在重启；重新连接后将读取安装器记录。";
+  }
+  if (updatePollExpired) {
+    phase = "升级结果尚未确认";
+    detail = "自动查询已停止；请点击“刷新升级状态”手动检查。请勿据此认定升级失败或重复提交。";
+  }
+  document.querySelector("#update-phase").textContent = phase;
+  document.querySelector("#update-detail").textContent = detail;
+  document.querySelector("#update-check").disabled = updateSubmitting || updateReading
+    || !data.actions?.check || updateNeedsPolling();
+  document.querySelector("#update-install").disabled = updateSubmitting || updateReading
+    || !data.supported || !data.available || !data.actions?.install
+    || updateNeedsPolling() || updatePollExpired || updateDisconnected;
+}
+
+async function updateApi(path, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    return await api(path, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function acceptUpdateStatus(data) {
+  state.updates = data;
+  if (sameUpdateTarget(updateExpectedTarget, data.operation?.target)
+      && data.operation.operationId !== updatePriorOperationId) {
+    updateExpectedTarget = null;
+  }
+  updateDisconnected = false;
+  updatePollDelay = 2000;
+  renderUpdates();
+}
+
+function stopUpdatePolling() {
+  clearTimeout(updatePollTimer);
+  updatePollTimer = null;
+}
+
+function scheduleUpdatePoll() {
+  stopUpdatePolling();
+  if (state.tab !== "updates" || updatePollExpired || !updateNeedsPolling()) return;
+  if (updatePollStarted == null) updatePollStarted = Date.now();
+  if (Date.now() - updatePollStarted >= updatePollLimitMs) {
+    updatePollExpired = true;
+    renderUpdates();
+    return;
+  }
+  updatePollTimer = setTimeout(pollUpdateStatus, updatePollDelay);
+}
+
+async function pollUpdateStatus() {
+  updatePollTimer = null;
+  if (state.tab !== "updates") return;
+  if (updateReading) {
+    scheduleUpdatePoll();
+    return;
+  }
+  updateReading = true;
+  try {
+    acceptUpdateStatus(await updateApi("/api/v1/updates"));
+  } catch (error) {
+    if (error.status === 401) return;
+    updateDisconnected = true;
+    updatePollDelay = Math.min(updatePollDelay * 2, 15000);
+  } finally {
+    updateReading = false;
+    renderUpdates();
+  }
+  scheduleUpdatePoll();
+}
+
+async function loadUpdates() {
+  if (updateReading) return;
+  stopUpdatePolling();
+  updatePollStarted = Date.now();
+  updatePollExpired = false;
+  updateReading = true;
+  renderUpdates();
+  try {
+    acceptUpdateStatus(await updateApi("/api/v1/updates"));
+  } finally {
+    updateReading = false;
+    renderUpdates();
+    scheduleUpdatePoll();
+  }
+}
+
+async function checkUpdate() {
+  if (updateSubmitting || updateReading || updateNeedsPolling()) return;
+  const envelope = state.updates?.actions?.check;
+  if (!envelope) return;
+  updateSubmitting = true;
+  renderUpdates();
+  setStatus("正在检查官方发布版本…");
+  try {
+    acceptUpdateStatus(await updateApi("/api/v1/updates/check", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actionPayload(envelope)),
+    }));
+    setStatus(state.updates.checkingError || "检查完成。", Boolean(state.updates.checkingError));
+  } catch (error) {
+    // The check grant is one-shot even when its HTTP response is lost.
+    if (state.updates?.actions) state.updates.actions.check = null;
+    setStatus(`${error.message} 请刷新升级状态后重试。`, true);
+  } finally {
+    updateSubmitting = false;
+    renderUpdates();
+    scheduleUpdatePoll();
+  }
+}
+
+async function installUpdate() {
+  if (updateSubmitting || updateReading || updateNeedsPolling()
+      || updatePollExpired || updateDisconnected) return;
+  const envelope = state.updates?.actions?.install;
+  if (!envelope || !state.updates.supported || !state.updates.available) return;
+  updateSubmitting = true;
+  updateExpectedTarget = envelope.target;
+  updatePriorOperationId = state.updates.operation?.operationId || null;
+  updatePollStarted = Date.now();
+  state.updates.actions.install = null;
+  renderUpdates();
+  try {
+    const result = await updateApi("/api/v1/updates/install", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actionPayload(envelope)),
+    });
+    acceptUpdateStatus({ ...state.updates, operation: result.operation });
+    setStatus("升级已受理，正在查询安装器结果。重启后可能需要重新登录。");
+  } catch (error) {
+    if (error.status === 401) return;
+    if (error.status >= 400 && error.status < 500) {
+      updateExpectedTarget = null;
+      setStatus(`${error.message} 请刷新升级状态。`, true);
+    } else {
+      setStatus("升级提交结果未确认，正在查询服务端记录；请勿重复提交。", true);
+    }
+  } finally {
+    updateSubmitting = false;
+    renderUpdates();
+    scheduleUpdatePoll();
+  }
 }
 
 function actionPayload(envelope, extra = {}) {
@@ -957,6 +1200,7 @@ async function refresh(tab, cursor = undefined) {
       else await loadSessions(cursor);
     }
     if (tab === "side-topics") await loadSides(cursor || null);
+    if (tab === "updates") await loadUpdates();
     setStatus("已更新。");
     return true;
   } catch (error) {
@@ -965,21 +1209,30 @@ async function refresh(tab, cursor = undefined) {
   }
 }
 
+function selectTab(name) {
+  state.tab = name;
+  stopUpdatePolling();
+  // Only a navigation preference survives re-login; operation facts always
+  // come from the server, and no credential or session token is stored here.
+  try {
+    if (name === "updates") sessionStorage.setItem("netizen-admin-updates-view", "1");
+    else sessionStorage.removeItem("netizen-admin-updates-view");
+  } catch (_error) { /* Storage may be disabled by browser policy. */ }
+  for (const item of document.querySelectorAll(".tab")) {
+    const active = item.dataset.tab === name;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-selected", String(active));
+  }
+  for (const panel of document.querySelectorAll(".panel")) {
+    const active = panel.id === name;
+    panel.hidden = !active;
+    panel.classList.toggle("active", active);
+  }
+  refresh(name);
+}
+
 for (const tab of document.querySelectorAll(".tab")) {
-  tab.addEventListener("click", () => {
-    state.tab = tab.dataset.tab;
-    for (const item of document.querySelectorAll(".tab")) {
-      const active = item === tab;
-      item.classList.toggle("active", active);
-      item.setAttribute("aria-selected", String(active));
-    }
-    for (const panel of document.querySelectorAll(".panel")) {
-      const active = panel.id === state.tab;
-      panel.hidden = !active;
-      panel.classList.toggle("active", active);
-    }
-    refresh(state.tab);
-  });
+  tab.addEventListener("click", () => selectTab(tab.dataset.tab));
 }
 
 for (const button of document.querySelectorAll("[data-refresh]")) {
@@ -1014,6 +1267,8 @@ document.querySelector("#projects-next").addEventListener("click", () => refresh
 document.querySelector("#sessions-previous").addEventListener("click", () => moveSessionPage("previous"));
 document.querySelector("#sessions-next").addEventListener("click", () => moveSessionPage("next"));
 document.querySelector("#sides-next").addEventListener("click", () => refresh("side-topics", state.sideCursor));
+document.querySelector("#update-check").addEventListener("click", checkUpdate);
+document.querySelector("#update-install").addEventListener("click", installUpdate);
 document.querySelector("#logout").addEventListener("click", async () => { await api("/logout", { method: "POST" }); window.location.assign("/login"); });
 
 function chunkValues(values, size = 50) {
@@ -1081,4 +1336,8 @@ setInterval(async () => {
   }
 }, 5000);
 
-refresh("projects");
+let initialTab = "projects";
+try {
+  if (sessionStorage.getItem("netizen-admin-updates-view") === "1") initialTab = "updates";
+} catch (_error) { /* The update page remains available without storage. */ }
+selectTab(initialTab);

@@ -10,10 +10,12 @@ import pty
 import select
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import textwrap
 import time
+import tomllib
 import unittest
 
 from scripts.build_release_artifact import (
@@ -284,6 +286,26 @@ class ReleaseArtifactTests(unittest.TestCase):
         self.assertIn("deploy/install-release.sh.in", names)
         self.assertIn("tests/test_release_artifact.py", names)
 
+    def test_deployment_package_ships_and_source_entrypoints_need_no_project_dependencies(self) -> None:
+        version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            artifacts = build_release_artifacts(
+                ROOT, directory / "artifacts", tag=f"v{version}",
+                commit=COMMIT, repository=REPOSITORY,
+            )
+            _extract_trusted_test_archive(artifacts.archive, directory / "extracted")
+            source = directory / "extracted" / f"netizen-v{version}"
+            for name in ("__init__.py", "update_protocol.py", "update_executor.py"):
+                self.assertTrue((source / "netizen" / "deployment" / name).is_file())
+            for script in ("netizen_installer.py", "netizen_updater.py"):
+                result = subprocess.run(
+                    [sys.executable, "-I", "-S", str(source / "scripts" / script), "--help"],
+                    cwd=directory, capture_output=True, text=True, timeout=15,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("usage:", result.stdout)
+
     def test_bootstrap_downloads_exact_asset_and_invokes_release_installer(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)
@@ -333,6 +355,73 @@ class ReleaseArtifactTests(unittest.TestCase):
                 "v0.3.0/netizen-v0.3.0.tar.gz",
             )
             self.assertEqual(list(temp_root.iterdir()), [])
+
+    def test_admin_bootstrap_binds_target_and_relays_exact_lock_descriptor(self) -> None:
+        from netizen.deployment.update_protocol import install_lock
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            self._source_fixture(source)
+            (source / "scripts/netizen_installer.py").write_text(textwrap.dedent("""\
+                import fcntl
+                import json
+                import os
+                from pathlib import Path
+                import sys
+
+                descriptor = int(os.environ["NETIZEN_UPDATE_LOCK_FD"])
+                inherited = os.fstat(descriptor)
+                os.set_inheritable(descriptor, False)
+                probe = os.open(os.environ["TEST_LOCK_FILE"], os.O_RDWR)
+                try:
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    held = True
+                else:
+                    held = False
+                os.close(probe)
+                Path(os.environ["RESULT_PATH"]).write_text(json.dumps({
+                    "held": held, "inode": inherited.st_ino,
+                    "stdinIsTty": sys.stdin.isatty(), "argv": sys.argv[1:],
+                }))
+                """), encoding="utf-8")
+            artifacts = build_release_artifacts(source, root / "dist", tag=TAG,
+                                                commit=COMMIT, repository=REPOSITORY)
+            fake_bin = self._fake_curl(root)
+            product = root / ".netizen"
+            (product / "state").mkdir(parents=True, mode=0o700)
+            result_file = root / "result.json"
+            curl_result = root / "curl.json"
+            environment = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                           "FAKE_ARCHIVE": str(artifacts.archive), "CURL_RESULT_PATH": str(curl_result),
+                           "RESULT_PATH": str(result_file), "TEST_LOCK_FILE": str(product / "state/.install.lock"),
+                           "NETIZEN_UPDATE_OPERATION_ID": "a" * 32,
+                           "NETIZEN_UPDATE_VERSION": "0.3.0",
+                           "NETIZEN_UPDATE_ARCHIVE_SHA256": artifacts.archive_sha256}
+            with install_lock(product) as descriptor:
+                environment["NETIZEN_UPDATE_LOCK_FD"] = str(descriptor)
+                completed = subprocess.run(["/bin/sh", str(artifacts.bootstrap)],
+                                           env=environment, stdin=subprocess.DEVNULL,
+                                           capture_output=True, pass_fds=(descriptor,))
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                invocation = json.loads(result_file.read_text())
+                self.assertTrue(invocation["held"])
+                self.assertEqual(invocation["inode"], os.fstat(descriptor).st_ino)
+                self.assertFalse(invocation["stdinIsTty"])
+                self.assertEqual(invocation["argv"][0], "install-release")
+            for key, wrong_value in (("NETIZEN_UPDATE_VERSION", "9.0.0"),
+                                     ("NETIZEN_UPDATE_ARCHIVE_SHA256", "b" * 64)):
+                with self.subTest(key=key):
+                    result_file.unlink(missing_ok=True)
+                    curl_result.unlink(missing_ok=True)
+                    completed = subprocess.run(["/bin/sh", str(artifacts.bootstrap)],
+                                               env={**environment, key: wrong_value},
+                                               stdin=subprocess.DEVNULL, capture_output=True)
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertFalse(result_file.exists())
+                    self.assertFalse(curl_result.exists())
 
     def test_repository_installer_resolves_latest_to_an_exact_bootstrap(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

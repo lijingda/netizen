@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from lark_channel import DedupStore
 from openai_codex import CodexConfig
@@ -21,6 +21,7 @@ from netizen.main import (
     ServiceCore,
     _adopt_lifetime_lock,
     _clear_ready_marker,
+    _cleanup_step,
     _configure_platform_trust,
     _publish_ready_marker,
     _register_channel_handlers,
@@ -476,6 +477,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         core._codex = FakeCodex()  # type: ignore[assignment]
 
         await core.close()
+        await core.close()
 
         self.assertEqual(_SHUTDOWN_BUDGET_SECONDS, 60.0)
         expected = (
@@ -495,6 +497,92 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             "store:close",
         )
         self.assertEqual(tuple(events), expected)
+
+    async def test_shutdown_retries_unfinished_management_close_with_same_deadline(self) -> None:
+        for failure in ("timeout", "cancel", "error"):
+            with self.subTest(failure=failure):
+                started = asyncio.Event()
+                deadlines: list[float | None] = []
+                completed = False
+
+                async def close_management(*, deadline: float | None = None) -> None:
+                    nonlocal completed
+                    deadlines.append(deadline)
+                    if len(deadlines) == 1:
+                        started.set()
+                        if failure == "error":
+                            raise OSError("management close failed")
+                        await asyncio.Future()
+                    completed = True
+
+                async def bounded_step(label, operation, *, timeout):
+                    if label == "management I/O drain" and failure == "timeout":
+                        timeout = min(timeout, 0.01)
+                    return await _cleanup_step(label, operation, timeout=timeout)
+
+                store = SimpleNamespace(aclose=AsyncMock())
+                core = ServiceCore(
+                    settings=SimpleNamespace(),  # type: ignore[arg-type]
+                    channel=SimpleNamespace(update_policy=lambda **_kwargs: None),  # type: ignore[arg-type]
+                    store=store,  # type: ignore[arg-type]
+                    projects=SimpleNamespace(),  # type: ignore[arg-type]
+                )
+                core._management = SimpleNamespace(close=close_management)  # type: ignore[assignment]
+                core.application = SimpleNamespace(close=AsyncMock())  # type: ignore[assignment]
+                core._codex = SimpleNamespace(close=AsyncMock())  # type: ignore[assignment]
+                core._runtime = SimpleNamespace(  # type: ignore[assignment]
+                    close_admission=lambda: None,
+                    interrupt_all=AsyncMock(),
+                    wait_idle=AsyncMock(return_value=True),
+                    cancel_tasks=AsyncMock(),
+                )
+                if failure == "error":
+                    core.application.close.side_effect = RuntimeError("presentation close failed")
+
+                with patch("netizen.main._cleanup_step", bounded_step):
+                    if failure == "cancel":
+                        closing = asyncio.create_task(core.close())
+                        await asyncio.wait_for(started.wait(), timeout=1)
+                        closing.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await asyncio.wait_for(closing, timeout=1)
+                    else:
+                        with self.assertLogs("netizen.main", level="WARNING"):
+                            await asyncio.wait_for(core.close(), timeout=1)
+
+                self.assertTrue(completed)
+                self.assertEqual(len(deadlines), 2)
+                self.assertIsNotNone(deadlines[0])
+                self.assertEqual(deadlines[0], deadlines[1])
+                core.application.close.assert_awaited_once()
+                core._codex.close.assert_awaited_once()
+                core._runtime.cancel_tasks.assert_awaited_once()
+                store.aclose.assert_awaited_once()
+
+    async def test_shutdown_does_not_retry_management_after_total_budget_expires(self) -> None:
+        async def pending_close(*, deadline: float | None = None) -> None:
+            await asyncio.Future()
+
+        management = SimpleNamespace(close=AsyncMock(side_effect=pending_close))
+        core = ServiceCore(
+            settings=SimpleNamespace(),  # type: ignore[arg-type]
+            channel=SimpleNamespace(update_policy=lambda **_kwargs: None),  # type: ignore[arg-type]
+            store=SimpleNamespace(aclose=AsyncMock()),  # type: ignore[arg-type]
+            projects=SimpleNamespace(),  # type: ignore[arg-type]
+        )
+        core._management = management  # type: ignore[assignment]
+        with (
+            patch("netizen.main._SHUTDOWN_BUDGET_SECONDS", 0.01),
+            self.assertLogs("netizen.main", level="WARNING") as logs,
+        ):
+            await asyncio.wait_for(core.close(), timeout=1)
+
+        management.close.assert_awaited_once()
+        self.assertTrue(any(
+            "management I/O final cleanup skipped because the shutdown budget was exhausted"
+            in message
+            for message in logs.output
+        ))
 
     async def test_one_asynccodex_uses_the_captured_service_environment(self) -> None:
         constructed: list[tuple[tuple[object, ...], dict[str, object]]] = []

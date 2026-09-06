@@ -12,6 +12,7 @@ from typing import Any, NoReturn
 from .blocking_io import BoundedBlockingIOExecutor
 from .chat_labels import ChatLabel, ChatLabelProvider, ChatLabelResolver
 from .coordination import ScopeCoordinator
+from .updates import UpdateService
 from ..bindings import (
     BindingCursor,
     BindingInventoryRecord,
@@ -35,10 +36,10 @@ from ..bindings import (
     SideTopicState,
     ThreadBinding,
 )
-from ..codex_runtime import (
+from ..codex_runtime import CodexRuntime
+from ..runtime.contracts import (
     ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
-    CodexRuntime,
     NativeThreadCatalog,
     NativeThreadCatalogState,
     NativeThreadMetadata,
@@ -622,11 +623,13 @@ class InstanceManagementService:
         scope_coordinator: ScopeCoordinator,
         blocking_io: BoundedBlockingIOExecutor | None = None,
         chat_labels: ChatLabelProvider | None = None,
+        updates: UpdateService | None = None,
     ) -> None:
         self._bindings = bindings
         self._projects = projects
         self._runtime = runtime
         self._scope_coordinator = scope_coordinator
+        self._updates = updates or UpdateService()
         self._chat_labels = (
             ChatLabelResolver(chat_labels) if chat_labels is not None else None
         )
@@ -647,9 +650,19 @@ class InstanceManagementService:
         return self._runtime.native_delete_available
 
     async def close(self, *, deadline: float | None = None) -> None:
+        await self._updates.close(deadline=deadline)
         if self._chat_labels is not None:
             await self._chat_labels.aclose()
         await self._blocking_io.aclose(deadline=deadline)
+
+    async def update_status(self) -> dict[str, Any]:
+        return await self._updates.status()
+
+    async def check_update(self) -> dict[str, Any]:
+        return await self._updates.check()
+
+    async def start_update(self, *, target: dict[str, Any]) -> dict[str, Any]:
+        return await self._updates.start(target=target)
 
     async def register_project(
         self,

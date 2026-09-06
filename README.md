@@ -239,7 +239,15 @@ App Secret，也不写入 YAML。登录后：
   重命名、归档、两种恢复、Lazy 删除、active/archived materialized 删除、exact Stop 和
   Release；两类删除都需二次确认，materialized 确认文案会说明永久级联后果，名称仅使用
   有界进程缓存，不写入 Channel 数据库；
-- **Side Topics** 可按 Project、chat 和 route 状态筛选，并结束当前进程仍可控的 exact Side。
+- **Side Topics** 可按 Project、chat 和 route 状态筛选，并结束当前进程仍可控的 exact Side；
+- **Updates** 显示运行版本、安装来源与官方更新说明；受管 Published Release 可手动检查
+  更新并点击“升级并重启”。所选版本由服务端固定，由独立的一次性进程调用现有安装器。
+
+升级不检测任务忙闲，也不等待任务结束：准备候选期间继续服务，切换时中断普通 Turn、
+暂停 Goal，并结束临时 Side 会话；升级后不会自动续跑。浏览器关闭不取消安装，服务重启后
+需重新登录查看结果。页面区分成功、准备失败、已回滚、需要处理与结果未确认；重新连通不
+等于升级成功。源码安装继续使用 `./dev-install.sh`，首个包含管理页升级能力的版本仍需
+通过已有安装入口安装。流程与异常恢复见[部署手册](docs/deployment.md#从-admin-升级)。
 
 每个写操作都使用一次性 action/CSRF token，并在共享锁内重读 exact target；页面断线后只
 能刷新对账，不会自动重放。服务重启或合法轮换 credential 会立即使旧 session 失效。V1
@@ -416,7 +424,8 @@ admission 开放后发布了私有 ready marker 才返回成功。profile 超时
 就绪会直接返回非零；macOS `status` 会显示 installed、loaded、ready 与两个日志路径。
 
 仓库删除后仍可从已安装 release 调用
-`$HOME/.netizen/current/source/service.sh`。正式升级重新运行 latest 或 exact-tag installer；
+`$HOME/.netizen/current/source/service.sh`。正式升级可在 Admin 的 Updates 页发起，或重新运行
+latest 或 exact-tag installer；
 开发目录升级运行 `./dev-install.sh`。卸载同样不接收参数：
 
 ```bash
@@ -436,6 +445,10 @@ free-threaded 变体。macOS 和 Linux 都可以运行下面的源码开发、�
 本地门禁以及相同的安装/服务命令；正式服务分别使用 macOS LaunchAgent 与 Linux systemd
 user manager。`make check` 不创建真实 Codex Thread，也不要求 Codex 登录：SDK 合同测试主要
 使用 fake App Server，受管 Skill discovery 另启动真实 bundled App Server 做只读发现。
+Admin JavaScript 行为测试使用 Node.js 22，请在运行完整开发门禁前确认 `node --version`。
+Node.js 只用于开发和 CI 测试，不是生产运行或 Source Install 的新增前置依赖，也不参与前端构建。
+本地缺少 Node.js 时，该项测试会明确跳过；此时 `make check` 通过不代表 JavaScript 测试已完成。
+CI 会安装 Node.js 并强制执行该项测试。
 启动 Netizen、执行真实 Turn 或运行 live probe 前，先确认当前账号的 Codex 登录有效：
 
 ```bash

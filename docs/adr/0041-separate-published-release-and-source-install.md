@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-25
 amends: 0033, 0034
-amended_by: 0042
+amended_by: 0042, 0057
 related: 0032, 0035
 ---
 
@@ -12,6 +12,9 @@ related: 0032, 0035
 > 的代码资格改为复用 exact main push CI，并把 live probes 改为相关边界变更时的开发验证；
 > 发布流水线不再重复运行完整测试矩阵或 live probes。本文的双安装入口与共享激活事务保持
 > 不变。
+> [ADR 0057](0057-run-manual-admin-upgrades-through-the-shared-installer.md) 允许管理员明确
+> 提交后一次性下载并调用 exact 官方安装器，修订本文“无自动更新/后台下载器”的非目标；
+> 零参数公开入口、双候选来源与唯一安装事务继续保留。
 
 ## 背景
 

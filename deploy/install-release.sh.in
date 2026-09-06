@@ -18,6 +18,15 @@ fail() {
     exit 1
 }
 
+# The Admin worker binds the download to what the administrator selected. This
+# private handoff never changes the public zero-argument installer interface.
+if [ -n "${NETIZEN_UPDATE_OPERATION_ID:-}" ]; then
+    [ "${NETIZEN_UPDATE_VERSION:-}" = "$VERSION" ] || \
+        fail "Admin update version does not match this exact installer"
+    [ "${NETIZEN_UPDATE_ARCHIVE_SHA256:-}" = "$ARCHIVE_SHA256" ] || \
+        fail "Admin update archive does not match this exact installer"
+fi
+
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v python3 >/dev/null 2>&1 || \
     fail "Python 3.11, 3.12, 3.13, or 3.14 is required"

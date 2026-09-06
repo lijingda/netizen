@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from lark_channel import OutboundCard
 
-import netizen.cards as cards
+from netizen.cards import callbacks
 from netizen.cards import (
     ArchivedSessionCardItem,
     CardActionError,
@@ -193,11 +193,11 @@ class CardCodecTest(unittest.TestCase):
                 self.assertTrue(category.isdisjoint(other))
         self.assertEqual(set().union(*categories), set(CardControlName))
         self.assertEqual(
-            cards._REPEATABLE_CARD_CONTROL_NAMES,
+            callbacks._REPEATABLE_CARD_CONTROL_NAMES,
             repeatable_buttons,
         )
         self.assertEqual(
-            cards._REPEATABLE_CALLBACK_INTENTS,
+            callbacks._REPEATABLE_CALLBACK_INTENTS,
             {name.value for name in repeatable_buttons}
             | {TurnFileActionName.PAGE.value},
         )
@@ -2261,9 +2261,9 @@ class CardRendererTest(unittest.TestCase):
                 ValueError,
                 "valid nonce",
             ):
-                cards._callback_button(label="刷新", value=value)
+                callbacks._callback_button(label="刷新", value=value)
 
-        rendered = cards._repeatable_callback_button(
+        rendered = callbacks._repeatable_callback_button(
             label="刷新",
             value=repeatable,
         )
@@ -2271,12 +2271,12 @@ class CardRendererTest(unittest.TestCase):
         self.assertRegex(nonce, r"^[0-9a-f]{32}$")
 
         with self.assertRaisesRegex(ValueError, "already contains"):
-            cards._repeatable_callback_button(
+            callbacks._repeatable_callback_button(
                 label="刷新",
                 value={**repeatable, "nonce": self.scope.chat_id},
             )
         with self.assertRaisesRegex(ValueError, "valid nonce"):
-            cards._callback_button(
+            callbacks._callback_button(
                 label="归档",
                 value={
                     "intent": CardControlName.ARCHIVE_BINDING.value,
@@ -2284,7 +2284,7 @@ class CardRendererTest(unittest.TestCase):
                 },
             )
         with self.assertRaisesRegex(ValueError, "invalid Project mode"):
-            cards._project_mode_reference("create", "malformed")
+            callbacks._project_mode_reference("create", "malformed")
 
     def test_project_forms_share_settings_card_and_use_native_form_contract(self) -> None:
         outbound = settings_card(

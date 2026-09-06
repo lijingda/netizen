@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
+from netizen.deployment import launchd, service_backend, systemd
 from scripts import netizen_installer as installer
 
 
@@ -284,7 +285,7 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             with (
                 patch.object(installer, "require_supported_platform"),
-                patch.object(installer.SystemdServiceBackend, "preflight") as backend,
+                patch.object(systemd.SystemdServiceBackend, "preflight") as backend,
                 patch.object(installer, "prepare_configuration"),
                 patch.object(
                     installer,
@@ -331,7 +332,7 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             with (
                 patch.object(installer, "require_supported_platform"),
-                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(systemd.SystemdServiceBackend, "preflight"),
                 patch.object(installer, "prepare_configuration"),
                 patch.object(
                     installer,
@@ -886,9 +887,9 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(installer, "require_supported_platform"),
-                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(systemd.SystemdServiceBackend, "preflight"),
                 patch.object(
-                    installer.SystemdServiceBackend, "prepare_host"
+                    systemd.SystemdServiceBackend, "prepare_host"
                 ) as prepare_host,
                 patch.object(installer, "prepare_source_release", return_value=release),
                 patch.object(
@@ -954,9 +955,9 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(installer, "require_supported_platform"),
-                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(systemd.SystemdServiceBackend, "preflight"),
                 patch.object(
-                    installer.SystemdServiceBackend, "prepare_host"
+                    systemd.SystemdServiceBackend, "prepare_host"
                 ) as prepare_host,
                 patch.object(installer, "prepare_source_release", return_value=release),
                 patch.object(
@@ -1029,9 +1030,9 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(installer, "require_supported_platform"),
-                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(systemd.SystemdServiceBackend, "preflight"),
                 patch.object(
-                    installer.SystemdServiceBackend, "prepare_host"
+                    systemd.SystemdServiceBackend, "prepare_host"
                 ) as prepare_host,
                 patch.object(installer, "prepare_source_release", return_value=release),
                 patch.object(
@@ -1097,9 +1098,9 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(installer, "require_supported_platform"),
-                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(systemd.SystemdServiceBackend, "preflight"),
                 patch.object(
-                    installer.SystemdServiceBackend, "prepare_host"
+                    systemd.SystemdServiceBackend, "prepare_host"
                 ) as prepare_host,
                 patch.object(installer, "prepare_source_release", return_value=release),
                 patch.object(
@@ -1187,7 +1188,7 @@ class NetizenInstallerTest(unittest.TestCase):
             layout = self._layout(Path(directory))
             with (
                 patch.object(installer, "require_supported_platform"),
-                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(systemd.SystemdServiceBackend, "preflight"),
                 patch.object(installer, "prepare_source_release") as prepare_release,
                 patch.object(installer, "info") as installer_info,
                 self.assertRaises(installer.ConfigurationRequired),
@@ -1242,8 +1243,8 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(installer, "require_supported_platform"),
-                patch.object(installer.SystemdServiceBackend, "preflight"),
-                patch.object(installer.SystemdServiceBackend, "prepare_host"),
+                patch.object(systemd.SystemdServiceBackend, "preflight"),
+                patch.object(systemd.SystemdServiceBackend, "prepare_host"),
                 patch.object(
                     installer,
                     "prepare_source_release",
@@ -1486,9 +1487,9 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(installer, "require_supported_platform"),
-                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(systemd.SystemdServiceBackend, "preflight"),
                 patch.object(
-                    installer.SystemdServiceBackend,
+                    systemd.SystemdServiceBackend,
                     "prepare_host",
                 ) as prepare_host,
                 patch.object(
@@ -1881,7 +1882,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 venv=ROOT / ".venv",
             )
 
-            unit = installer.render_systemd_service(release, layout)
+            unit = systemd.render_systemd_service(release, layout)
 
             self.assertNotIn("User=", unit)
             self.assertNotIn("Group=", unit)
@@ -1944,7 +1945,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     installer.InstallError,
                     r"sudo loginctl enable-linger current-user",
                 ):
-                    installer.ensure_linger(
+                    systemd.ensure_linger(
                         layout,
                         interactive=False,
                         runner=fake_runner,
@@ -1960,7 +1961,7 @@ class NetizenInstallerTest(unittest.TestCase):
             layout = self._layout(Path(directory))
             installer.prepare_directories(layout)
             layout.service_file.write_text(
-                installer.SYSTEMD_SERVICE_MARKER
+                systemd.SYSTEMD_SERVICE_MARKER
                 + "\nEnvironment=NETIZEN_READY_FILE=/managed/service.ready\n",
                 encoding="utf-8",
             )
@@ -1973,8 +1974,8 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(installer, "require_supported_platform"),
-                patch.object(installer.SystemdServiceBackend, "preflight"),
-                patch.object(installer, "_wait_for_systemd_ready") as wait_for_ready,
+                patch.object(systemd.SystemdServiceBackend, "preflight"),
+                patch.object(systemd, "_wait_for_systemd_ready") as wait_for_ready,
             ):
                 code = installer.service_action(
                     "restart",
@@ -2002,7 +2003,7 @@ class NetizenInstallerTest(unittest.TestCase):
             layout = self._layout(Path(directory))
             installer.prepare_directories(layout)
             layout.service_file.write_text(
-                installer.SYSTEMD_SERVICE_MARKER
+                systemd.SYSTEMD_SERVICE_MARKER
                 + "\nEnvironment=NETIZEN_READY_FILE=/managed/service.ready\n",
                 encoding="utf-8",
             )
@@ -2018,9 +2019,9 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(installer, "require_supported_platform"),
-                patch.object(installer.SystemdServiceBackend, "preflight"),
+                patch.object(systemd.SystemdServiceBackend, "preflight"),
                 patch.object(
-                    installer,
+                    systemd,
                     "_wait_for_systemd_ready",
                     side_effect=installer.InstallError("profile failed"),
                 ),
@@ -2045,10 +2046,10 @@ class NetizenInstallerTest(unittest.TestCase):
             layout = self._layout(Path(directory))
             installer.prepare_directories(layout)
             layout.service_file.write_text(
-                installer.SYSTEMD_SERVICE_MARKER,
+                systemd.SYSTEMD_SERVICE_MARKER,
                 encoding="utf-8",
             )
-            layout.ready_file.write_bytes(installer.READY_MARKER_CONTENT)
+            layout.ready_file.write_bytes(service_backend.READY_MARKER_CONTENT)
             layout.ready_file.chmod(0o600)
             calls: list[list[str]] = []
 
@@ -2062,8 +2063,8 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(installer, "require_supported_platform"),
-                patch.object(installer.SystemdServiceBackend, "preflight"),
-                patch.object(installer, "_wait_for_systemd_ready") as wait_for_ready,
+                patch.object(systemd.SystemdServiceBackend, "preflight"),
+                patch.object(systemd, "_wait_for_systemd_ready") as wait_for_ready,
             ):
                 code = installer.service_action(
                     "start",
@@ -2099,7 +2100,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 )
 
             self.assertEqual(
-                installer._user_service_state(layout, fake_runner),
+                systemd._user_service_state(layout, fake_runner),
                 (False, False),
             )
             self.assertEqual(calls[0][2], "show-environment")
@@ -2110,19 +2111,19 @@ class NetizenInstallerTest(unittest.TestCase):
             layout = self._layout(root)
 
             with self.assertRaisesRegex(installer.InstallError, "XDG_CONFIG_HOME"):
-                installer._validate_user_unit_search_path(
+                systemd._validate_user_unit_search_path(
                     layout,
                     f"XDG_CONFIG_HOME={root / 'custom-config'}\n",
                 )
 
-            installer._validate_user_unit_search_path(
+            systemd._validate_user_unit_search_path(
                 layout,
                 "XDG_CONFIG_HOME=/custom\n"
                 f"SYSTEMD_UNIT_PATH={layout.service_dir}\n",
             )
 
     def test_systemd_manager_environment_escapes_are_decoded_without_a_shell(self) -> None:
-        environment = installer._parse_systemd_manager_environment(
+        environment = systemd._parse_systemd_manager_environment(
             "PLAIN=value\n"
             "EQUAL=a=b=c\n"
             "SPACE=$'hello world'\n"
@@ -2141,7 +2142,7 @@ class NetizenInstallerTest(unittest.TestCase):
         self.assertEqual(environment["HEX"], "a b")
 
         with self.assertRaisesRegex(installer.InstallError, "invalid escaped"):
-            installer._parse_systemd_manager_environment("TOKEN=$'unterminated\n")
+            systemd._parse_systemd_manager_environment("TOKEN=$'unterminated\n")
 
     def test_service_action_refuses_an_unrecognized_same_name_unit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2167,7 +2168,7 @@ class NetizenInstallerTest(unittest.TestCase):
             candidate = self._release(layout, "c" * 64)
 
             with patch.object(
-                installer,
+                systemd,
                 "_user_service_state",
                 return_value=(True, True),
             ):
@@ -2188,7 +2189,7 @@ class NetizenInstallerTest(unittest.TestCase):
             old = self._release(layout, "1" * 64)
             candidate = self._release(layout, "2" * 64)
             installer._set_release_link(layout.current, old.root, layout)
-            old_unit_text = installer.SYSTEMD_SERVICE_MARKER + "\n# old unit\n"
+            old_unit_text = systemd.SYSTEMD_SERVICE_MARKER + "\n# old unit\n"
             layout.service_file.write_text(old_unit_text, encoding="utf-8")
             old_skill = layout.codex_home / "skills/netizen-user-guide"
             old_skill.mkdir(parents=True)
@@ -2205,7 +2206,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     return subprocess.CompletedProcess(
                         rendered,
                         0,
-                        installer.LEGACY_SYSTEMD_READY_LOG + "\n",
+                        systemd.LEGACY_SYSTEMD_READY_LOG + "\n",
                         "",
                     )
                 return subprocess.CompletedProcess(rendered, 0, "active\n", "")
@@ -2218,10 +2219,10 @@ class NetizenInstallerTest(unittest.TestCase):
                     raise installer.InstallError("candidate failed")
 
             with (
-                patch.object(installer, "_user_service_state", return_value=(True, True)),
-                patch.object(installer, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
+                patch.object(systemd, "_user_service_state", return_value=(True, True)),
+                patch.object(systemd, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
                 patch.object(
-                    installer,
+                    systemd,
                     "_wait_for_systemd_ready",
                     side_effect=fail_candidate_once,
                 ),
@@ -2377,7 +2378,7 @@ class NetizenInstallerTest(unittest.TestCase):
             candidate = self._release(layout, "8" * 64)
             installer._set_release_link(layout.current, old.root, layout)
             layout.service_file.write_text(
-                installer.SYSTEMD_SERVICE_MARKER,
+                systemd.SYSTEMD_SERVICE_MARKER,
                 encoding="utf-8",
             )
             old_skill = layout.codex_home / "skills/netizen-user-guide"
@@ -2389,10 +2390,10 @@ class NetizenInstallerTest(unittest.TestCase):
                 return subprocess.CompletedProcess(rendered, 0, "active\n", "")
 
             with (
-                patch.object(installer, "_user_service_state", return_value=(True, True)),
-                patch.object(installer, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
+                patch.object(systemd, "_user_service_state", return_value=(True, True)),
+                patch.object(systemd, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
                 patch.object(
-                    installer,
+                    systemd,
                     "_wait_for_systemd_ready",
                     side_effect=installer.InstallError("candidate failed"),
                 ),
@@ -2426,7 +2427,7 @@ class NetizenInstallerTest(unittest.TestCase):
             candidate = self._release(layout, "4" * 64)
             installer._set_release_link(layout.current, old.root, layout)
             layout.service_file.write_text(
-                installer.SYSTEMD_SERVICE_MARKER,
+                systemd.SYSTEMD_SERVICE_MARKER,
                 encoding="utf-8",
             )
             calls: list[list[str]] = []
@@ -2437,8 +2438,8 @@ class NetizenInstallerTest(unittest.TestCase):
                 return subprocess.CompletedProcess(rendered, 0, "inactive\n", "")
 
             with (
-                patch.object(installer, "_user_service_state", return_value=(False, True)),
-                patch.object(installer, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
+                patch.object(systemd, "_user_service_state", return_value=(False, True)),
+                patch.object(systemd, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
             ):
                 installer.activate_release(
                     candidate,
@@ -2473,8 +2474,8 @@ class NetizenInstallerTest(unittest.TestCase):
                 return subprocess.CompletedProcess(rendered, 0, "inactive\n", "")
 
             with (
-                patch.object(installer, "_user_service_state", return_value=(False, False)),
-                patch.object(installer, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
+                patch.object(systemd, "_user_service_state", return_value=(False, False)),
+                patch.object(systemd, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
             ):
                 installer.activate_release(
                     candidate,
@@ -2500,9 +2501,9 @@ class NetizenInstallerTest(unittest.TestCase):
                 return subprocess.CompletedProcess(rendered, 0, "inactive\n", "")
 
             with (
-                patch.object(installer, "_user_service_state", return_value=(False, False)),
-                patch.object(installer, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
-                patch.object(installer, "_wait_for_systemd_ready"),
+                patch.object(systemd, "_user_service_state", return_value=(False, False)),
+                patch.object(systemd, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
+                patch.object(systemd, "_wait_for_systemd_ready"),
             ):
                 installer.activate_release(
                     candidate,
@@ -2527,7 +2528,7 @@ class NetizenInstallerTest(unittest.TestCase):
             candidate = self._release(layout, "d" * 64)
             installer._set_release_link(layout.current, candidate.root, layout)
             layout.service_file.write_text(
-                installer.SYSTEMD_SERVICE_MARKER,
+                systemd.SYSTEMD_SERVICE_MARKER,
                 encoding="utf-8",
             )
             installer._write_activation_intent(
@@ -2547,13 +2548,13 @@ class NetizenInstallerTest(unittest.TestCase):
                 return subprocess.CompletedProcess(rendered, 0, "inactive\n", "")
 
             with (
-                patch.object(installer, "_user_service_state", return_value=(False, False)),
+                patch.object(systemd, "_user_service_state", return_value=(False, False)),
                 patch.object(
-                    installer,
+                    systemd,
                     "inspect_legacy_service",
                     return_value=installer.LegacyServiceState(),
                 ),
-                patch.object(installer, "_wait_for_systemd_ready"),
+                patch.object(systemd, "_wait_for_systemd_ready"),
             ):
                 installer.activate_release(
                     candidate,
@@ -2583,7 +2584,7 @@ class NetizenInstallerTest(unittest.TestCase):
             installer._set_release_link(layout.current, interrupted.root, layout)
             installer._set_release_link(layout.previous, old.root, layout)
             layout.service_file.write_text(
-                installer.SYSTEMD_SERVICE_MARKER,
+                systemd.SYSTEMD_SERVICE_MARKER,
                 encoding="utf-8",
             )
             installer._write_activation_intent(
@@ -2602,13 +2603,13 @@ class NetizenInstallerTest(unittest.TestCase):
                 return subprocess.CompletedProcess(rendered, 0, "inactive\n", "")
 
             with (
-                patch.object(installer, "_user_service_state", return_value=(False, False)),
+                patch.object(systemd, "_user_service_state", return_value=(False, False)),
                 patch.object(
-                    installer,
+                    systemd,
                     "inspect_legacy_service",
                     return_value=installer.LegacyServiceState(),
                 ),
-                patch.object(installer, "_wait_for_systemd_ready"),
+                patch.object(systemd, "_wait_for_systemd_ready"),
             ):
                 installer.activate_release(
                     newer,
@@ -2686,7 +2687,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     ),
                 },
             ):
-                path_value = installer._service_bootstrap_path(layout)
+                path_value = service_backend._service_bootstrap_path(layout)
 
             entries = path_value.split(os.pathsep)
             self.assertNotIn(str(development_venv / "bin"), entries)
@@ -2754,7 +2755,7 @@ class NetizenInstallerTest(unittest.TestCase):
             layout = self._layout(root)
             installer.prepare_directories(layout)
             layout.service_file.write_text(
-                installer.SYSTEMD_SERVICE_MARKER,
+                systemd.SYSTEMD_SERVICE_MARKER,
                 encoding="utf-8",
             )
             (layout.cache_dir / "artifact").write_text("cached", encoding="utf-8")
@@ -2817,7 +2818,7 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             installer.prepare_directories(layout)
             layout.service_file.write_text(
-                installer.SYSTEMD_SERVICE_MARKER,
+                systemd.SYSTEMD_SERVICE_MARKER,
                 encoding="utf-8",
             )
             unrelated = root / "drift-data/netizen/keep"
@@ -2859,7 +2860,7 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(installer, "require_supported_platform"),
-                patch.object(installer, "_user_service_state", return_value=(True, False)),
+                patch.object(systemd, "_user_service_state", return_value=(True, False)),
             ):
                 with self.assertRaisesRegex(installer.InstallError, "active/enabled"):
                     installer.uninstall(layout=layout)
@@ -2882,8 +2883,8 @@ class NetizenInstallerTest(unittest.TestCase):
                 return subprocess.CompletedProcess(rendered, 0, "inactive\n", "")
 
             with (
-                patch.object(installer, "_user_service_state", return_value=(False, False)),
-                patch.object(installer, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
+                patch.object(systemd, "_user_service_state", return_value=(False, False)),
+                patch.object(systemd, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
             ):
                 with self.assertRaisesRegex(installer.InstallError, "rolled back"):
                     installer.activate_release(
@@ -3011,10 +3012,10 @@ class NetizenInstallerTest(unittest.TestCase):
             release = self._release(layout, "a" * 64)
             layout.secret_file.write_text("must-not-enter-plist", encoding="utf-8")
 
-            content = installer.render_launch_agent(release, layout)
+            content = launchd.render_launch_agent(release, layout)
             payload = plistlib.loads(content)
             installer._write_atomic(layout.service_file, content, mode=0o600)
-            installer._require_managed_launch_agent(layout.service_file, layout)
+            launchd._require_managed_launch_agent(layout.service_file, layout)
 
             self.assertEqual(layout.platform, "darwin")
             self.assertEqual(
@@ -3022,10 +3023,10 @@ class NetizenInstallerTest(unittest.TestCase):
                 layout.home
                 / "Library/LaunchAgents/io.github.lijingda.netizen.plist",
             )
-            self.assertEqual(payload["Label"], installer.LAUNCH_AGENT_LABEL)
+            self.assertEqual(payload["Label"], launchd.LAUNCH_AGENT_LABEL)
             self.assertEqual(
                 payload["ProgramArguments"],
-                installer._launch_agent_program_arguments(layout),
+                launchd._launch_agent_program_arguments(layout),
             )
             self.assertEqual(payload["WorkingDirectory"], str(layout.home))
             self.assertIs(payload["RunAtLoad"], True)
@@ -3039,8 +3040,8 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             environment = payload["EnvironmentVariables"]
             self.assertEqual(
-                environment[installer.LAUNCH_AGENT_SENTINEL_NAME],
-                installer.LAUNCH_AGENT_SENTINEL_VALUE,
+                environment[launchd.LAUNCH_AGENT_SENTINEL_NAME],
+                launchd.LAUNCH_AGENT_SENTINEL_VALUE,
             )
             self.assertIn("/opt/homebrew/bin", environment["PATH"].split(":"))
             self.assertNotIn("must-not-enter-plist", content.decode())
@@ -3065,7 +3066,7 @@ class NetizenInstallerTest(unittest.TestCase):
             release = self._release(layout, "8" * 64)
             installer._write_atomic(
                 layout.service_file,
-                installer.render_launch_agent(release, layout),
+                launchd.render_launch_agent(release, layout),
                 mode=0o600,
             )
             layout.service_file.chmod(0o620)
@@ -3074,7 +3075,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 installer.InstallError,
                 "group/world writable",
             ):
-                installer._require_managed_launch_agent(
+                launchd._require_managed_launch_agent(
                     layout.service_file,
                     layout,
                 )
@@ -3096,7 +3097,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 runner=runner,
             )
 
-            target = f"gui/{layout.uid}/{installer.LAUNCH_AGENT_LABEL}"
+            target = f"gui/{layout.uid}/{launchd.LAUNCH_AGENT_LABEL}"
             self.assertIn(["launchctl", "enable", target], calls)
             self.assertIn(
                 [
@@ -3154,19 +3155,19 @@ class NetizenInstallerTest(unittest.TestCase):
             release = self._release(layout, "b" * 64)
             installer._write_atomic(
                 layout.service_file,
-                installer.render_launch_agent(release, layout),
+                launchd.render_launch_agent(release, layout),
                 mode=0o600,
             )
             runner, _state, calls = self._launchd_runner(
                 layout,
                 ready_on_bootstrap=True,
             )
-            backend = installer.LaunchAgentServiceBackend(layout, runner)
+            backend = launchd.LaunchAgentServiceBackend(layout, runner)
 
             backend.preflight()
             backend.start_and_wait(timeout=0.1)
 
-            target = f"gui/{layout.uid}/{installer.LAUNCH_AGENT_LABEL}"
+            target = f"gui/{layout.uid}/{launchd.LAUNCH_AGENT_LABEL}"
             enable = ["launchctl", "enable", target]
             bootstrap = [
                 "launchctl",
@@ -3186,7 +3187,7 @@ class NetizenInstallerTest(unittest.TestCase):
             release = self._release(layout, "a" * 64)
             installer._write_atomic(
                 layout.service_file,
-                installer.render_launch_agent(release, layout),
+                launchd.render_launch_agent(release, layout),
                 mode=0o600,
             )
             runner, _state, calls = self._launchd_runner(
@@ -3195,11 +3196,11 @@ class NetizenInstallerTest(unittest.TestCase):
                 initially_ready=True,
                 ready_on_bootstrap=True,
             )
-            backend = installer.LaunchAgentServiceBackend(layout, runner)
+            backend = launchd.LaunchAgentServiceBackend(layout, runner)
 
             self.assertEqual(backend.service_action("restart"), 0)
 
-            target = f"gui/{layout.uid}/{installer.LAUNCH_AGENT_LABEL}"
+            target = f"gui/{layout.uid}/{launchd.LAUNCH_AGENT_LABEL}"
             bootout = ["launchctl", "bootout", target]
             enable = ["launchctl", "enable", target]
             bootstrap = [
@@ -3218,14 +3219,14 @@ class NetizenInstallerTest(unittest.TestCase):
             release = self._release(layout, "c" * 64)
             installer._write_atomic(
                 layout.service_file,
-                installer.render_launch_agent(release, layout),
+                launchd.render_launch_agent(release, layout),
                 mode=0o600,
             )
             runner, _state, calls = self._launchd_runner(
                 layout,
                 initially_loaded=True,
             )
-            backend = installer.LaunchAgentServiceBackend(layout, runner)
+            backend = launchd.LaunchAgentServiceBackend(layout, runner)
 
             with self.assertRaisesRegex(installer.InstallError, "did not become ready"):
                 backend.start_and_wait(timeout=0.01)
@@ -3241,7 +3242,7 @@ class NetizenInstallerTest(unittest.TestCase):
             release = self._release(layout, "d" * 64)
             installer._write_atomic(
                 layout.service_file,
-                installer.render_launch_agent(release, layout),
+                launchd.render_launch_agent(release, layout),
                 mode=0o600,
             )
             runner, state, _calls = self._launchd_runner(
@@ -3249,12 +3250,12 @@ class NetizenInstallerTest(unittest.TestCase):
                 ready_on_bootstrap=True,
                 lose_bootstrap_response=True,
             )
-            backend = installer.LaunchAgentServiceBackend(layout, runner)
+            backend = launchd.LaunchAgentServiceBackend(layout, runner)
 
             backend.start_and_wait(timeout=0.1)
 
             self.assertIs(state["loaded"], True)
-            self.assertTrue(installer._ready_marker_present(layout))
+            self.assertTrue(service_backend._ready_marker_present(layout))
 
     def test_macos_refuses_unmanaged_plist_and_orphan_loaded_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3264,17 +3265,17 @@ class NetizenInstallerTest(unittest.TestCase):
             layout.service_file.write_bytes(
                 plistlib.dumps(
                     {
-                        "Label": installer.LAUNCH_AGENT_LABEL,
+                        "Label": launchd.LAUNCH_AGENT_LABEL,
                         "ProgramArguments": ["/bin/other"],
                         "EnvironmentVariables": {
-                            installer.LAUNCH_AGENT_SENTINEL_NAME:
-                                installer.LAUNCH_AGENT_SENTINEL_VALUE,
+                            launchd.LAUNCH_AGENT_SENTINEL_NAME:
+                                launchd.LAUNCH_AGENT_SENTINEL_VALUE,
                         },
                     }
                 )
             )
             runner, _state, _calls = self._launchd_runner(layout)
-            backend = installer.LaunchAgentServiceBackend(layout, runner)
+            backend = launchd.LaunchAgentServiceBackend(layout, runner)
             with self.assertRaisesRegex(installer.InstallError, "unrecognized LaunchAgent"):
                 backend.capture_definition()
 
@@ -3301,7 +3302,7 @@ class NetizenInstallerTest(unittest.TestCase):
             installer._set_release_link(layout.current, old.root, layout)
             installer._write_atomic(
                 layout.service_file,
-                installer.render_launch_agent(old, layout),
+                launchd.render_launch_agent(old, layout),
                 mode=0o600,
             )
             runner, _state, calls = self._launchd_runner(
@@ -3319,7 +3320,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 data_dir=layout.state_dir,
             )
 
-            target = f"gui/{layout.uid}/{installer.LAUNCH_AGENT_LABEL}"
+            target = f"gui/{layout.uid}/{launchd.LAUNCH_AGENT_LABEL}"
             bootout = ["launchctl", "bootout", target]
             bootstrap = [
                 "launchctl",
@@ -3348,7 +3349,7 @@ class NetizenInstallerTest(unittest.TestCase):
             installer._set_release_link(layout.current, old.root, layout)
             installer._write_atomic(
                 layout.service_file,
-                installer.render_launch_agent(old, layout),
+                launchd.render_launch_agent(old, layout),
                 mode=0o600,
             )
             runner, state, calls = self._launchd_runner(layout)
@@ -3360,7 +3361,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 runner=runner,
             )
 
-            target = f"gui/{layout.uid}/{installer.LAUNCH_AGENT_LABEL}"
+            target = f"gui/{layout.uid}/{launchd.LAUNCH_AGENT_LABEL}"
             self.assertIn(["launchctl", "enable", target], calls)
             self.assertNotIn("bootstrap", [argument for call in calls for argument in call])
             self.assertIs(state["loaded"], False)
@@ -3376,7 +3377,7 @@ class NetizenInstallerTest(unittest.TestCase):
             release = self._release(layout, "5" * 64)
             installer._write_atomic(
                 layout.service_file,
-                installer.render_launch_agent(release, layout),
+                launchd.render_launch_agent(release, layout),
                 mode=0o600,
             )
             descriptor = os.open(
@@ -3389,7 +3390,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 layout,
                 initially_loaded=True,
             )
-            backend = installer.LaunchAgentServiceBackend(layout, runner)
+            backend = launchd.LaunchAgentServiceBackend(layout, runner)
             try:
                 with self.assertRaisesRegex(
                     installer.InstallError,
@@ -3415,7 +3416,7 @@ class NetizenInstallerTest(unittest.TestCase):
             )
 
             def fail_ready(
-                _backend: installer.LaunchAgentServiceBackend,
+                _backend: launchd.LaunchAgentServiceBackend,
                 *,
                 timeout: float,
             ) -> None:
@@ -3425,13 +3426,13 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(
-                    installer.LaunchAgentServiceBackend,
+                    launchd.LaunchAgentServiceBackend,
                     "_wait_for_ready",
                     autospec=True,
                     side_effect=fail_ready,
                 ),
                 patch.object(
-                    installer.LaunchAgentServiceBackend,
+                    launchd.LaunchAgentServiceBackend,
                     "stop_and_confirm",
                     side_effect=installer.InstallError("candidate still alive"),
                 ),
@@ -3462,7 +3463,7 @@ class NetizenInstallerTest(unittest.TestCase):
             installer._set_release_link(layout.current, release.root, layout)
             installer._write_atomic(
                 layout.service_file,
-                installer.render_launch_agent(release, layout),
+                launchd.render_launch_agent(release, layout),
                 mode=0o600,
             )
             preserved = layout.state_dir / "channel.sqlite3"
@@ -3475,7 +3476,7 @@ class NetizenInstallerTest(unittest.TestCase):
             with patch.object(installer, "require_supported_platform"):
                 installer.uninstall(layout=layout, runner=runner)
 
-            target = f"gui/{layout.uid}/{installer.LAUNCH_AGENT_LABEL}"
+            target = f"gui/{layout.uid}/{launchd.LAUNCH_AGENT_LABEL}"
             self.assertIn(["launchctl", "bootout", target], calls)
             self.assertIn(["launchctl", "disable", target], calls)
             self.assertFalse(layout.service_file.exists())
@@ -3512,13 +3513,13 @@ class NetizenInstallerTest(unittest.TestCase):
         state = {"loaded": initially_loaded}
         calls: list[list[str]] = []
         domain = f"gui/{layout.uid}"
-        target = f"{domain}/{installer.LAUNCH_AGENT_LABEL}"
+        target = f"{domain}/{launchd.LAUNCH_AGENT_LABEL}"
         if initially_ready:
-            layout.ready_file.write_bytes(installer.READY_MARKER_CONTENT)
+            layout.ready_file.write_bytes(service_backend.READY_MARKER_CONTENT)
             layout.ready_file.chmod(0o600)
 
         def mark_ready() -> None:
-            layout.ready_file.write_bytes(installer.READY_MARKER_CONTENT)
+            layout.ready_file.write_bytes(service_backend.READY_MARKER_CONTENT)
             layout.ready_file.chmod(0o600)
 
         def fake_runner(

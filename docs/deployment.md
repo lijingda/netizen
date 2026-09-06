@@ -39,6 +39,8 @@ SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕�
   state/
     channel.sqlite3[-wal|-shm]                  # Binding/Turn settings/Task feedback/Registry/Dedup
     .install.lock / .activation-intent.json     # 跨卸载锁与异常中断恢复意图
+    update.json                                # 最近一次 Admin 升级的有界 typed 结果，0600
+    netizen-update-<operationId>.plist          # macOS 一次性升级提交文件，终态后清理
     service.lifetime.lock / service.ready       # 精确退出与 readiness 契约
     netizen.log / launchd.stderr.log            # macOS 有界服务日志/launcher 错误
     rollback-recovery-*                         # 回滚恢复材料
@@ -158,6 +160,11 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 所有面向 `main` 的代码先通过 `make check`；PR 和 main push 的 GitHub CI 都在 Linux x64
 标准 CPython 3.11-3.14，以及 macOS arm64 标准 CPython 3.13/3.14 执行这一个统一本地门禁。
 正式 Release 复用 exact main commit 的成功 CI 结论，不重新执行本节测试。
+Main Qualification 的 Linux 与 macOS jobs 均显式安装 Node.js 22，执行 Admin JavaScript
+行为测试；在 `CI=true` 时缺少 Node.js 会使测试失败。Node.js 是开发和 CI 的测试工具，
+不参与前端构建，也不增加生产运行或 Source Install 的前置依赖。本地（包括 Source Install）
+缺少 Node.js 时该项测试会明确跳过，门禁通过不代表 JavaScript 行为测试已完成；其必跑保证
+由 Main Qualification CI 提供。
 macOS job 还会从安装后的 wheel 实际初始化系统钥匙串 truststore；CI 没有真实应用凭据与
 用户 GUI 会话，因此 Python 支持矩阵扩展仍须在正式发布前完成一次 macOS arm64 当前用户的
 LaunchAgent 安装、启动和 ready 冒烟，不能用 CI 代替。
@@ -705,7 +712,8 @@ netizen.service`；无 TTY 时打印同一条预备命令。候选失败会尽�
 
 ### 升级、启停和卸载
 
-正式升级重新运行 latest 或选定 exact-tag installer；更新任意开发目录后运行源码入口：
+正式升级可使用下面的 Admin 入口，或重新运行 latest/选定 exact-tag installer；更新任意
+开发目录后运行源码入口：
 
 ```bash
 ./dev-install.sh
@@ -739,6 +747,58 @@ SQLite 的 `state`、Project 目录、其他 Codex Skills 及原生 Thread/Turn 
 不能拿单独的 service-manager `active` 替代 installer 成功。只有 installer 返回非零、进程
 中断导致结果不明确、本轮变更的安装/服务/持久化/SDK 兼容边界要求重新验收，或用户明确
 要求时，才展开对应检查。
+
+### 从 Admin 升级
+
+首个包含 Updates 页的版本需要先通过已有官方安装器安装一次。之后由实例管理员登录
+Admin，打开 **Updates**，点击“检查更新”，查看当前版本、官方候选版本和发布说明，再
+点击“升级并重启”。仅受管 Published Release 支持此操作；Source Install 显示源码安装
+说明，继续在相应工作区运行 `./dev-install.sh`。服务未运行时使用原有 CLI 入口。
+
+每次点击固定服务端检查到的 exact 官方稳定版本、Release ID、installer 与 tarball 的
+SHA-256，不会在安装中途跟随 latest 换版本。候选必须是 immutable Release 且提供完整
+资产摘要；查询失败显示无法检查，不降级到未校验下载。此入口未增加自定义签名，继续
+信任官方 HTTPS、不可变资产与安装器 manifest 验证。更新检查由用户显式触发，短期缓存
+60 秒，不后台定时检查或下载。
+
+升级不检测忙闲、不等待现有会话结束、不进入维护状态。准备候选期间继续服务；安装器
+实际切换时按已有正常停机流程中断普通 Turn、暂停 Goal、结束临时 Side Session，升级后
+不自动续跑。执行者独立于主服务生命周期运行，只有安装器能停止主服务、判断原启停意图、
+切换、等待 ready 和回滚；不能先手动停止服务再期待页面完成重启。
+
+提交后页面展示阶段并有界读取结果。浏览器关闭、页面等待到期、网络断线不取消安装；
+提交响应丢失时先刷新查看，不能再次 POST 猜测补交。主服务重启后需要重新登录查看结果。
+正常结果来自 `~/.netizen/state/update.json` 的 typed 安装摘要；重新连通、manager active、
+当前版本或 ready 均不能单独证明升级成功。
+
+| 页面结果 | 含义与下一步 |
+| --- | --- |
+| 升级成功 | 所选安装事务成功完成；常规升级不重复整套主机验收。 |
+| 升级失败 | 下载、校验、环境或候选准备未完成，旧版本未切换；根据固定错误提示处理后，显式重新检查与提交。 |
+| 升级失败，已回滚 | 安装器确认完整恢复旧状态；处理候选启动等原因后再显式提交。 |
+| 需要处理后重试 | 补全配置/凭据或 exact 飞书应用权限；应用授权、审批与发布完成后再检查和提交。Admin worker 不开启授权浏览器；需要 CLI repair 时继续按本文原有 exact-App 流程。 |
+| 升级结果未确认，需要修复 | worker 被中断、失联或回滚不完整，不能继续从 Admin 提交；保留状态与 recovery snapshot，用既有官方安装入口恢复。 |
+| 已通过安装器恢复 | 后续显式 CLI 安装已成功修复旧未知记录；原 operation/target 保留，实际运行版本单独显示，不表示原页面点击成功。 |
+
+遇到需要修复的结果，以同一安装用户下载官方 installer 到文件后执行，例如：
+
+```bash
+netizen_recovery_dir=$(mktemp -d)
+curl -fL --proto '=https' --proto-redir '=https' \
+  https://github.com/lijingda/netizen/releases/latest/download/install.sh \
+  -o "$netizen_recovery_dir/install.sh"
+sh "$netizen_recovery_dir/install.sh" </dev/null
+```
+
+需要固定原目标时将下载地址改为所选 exact tag 的 `install.sh`；不要修改 `update.json`
+伪造成功，也不要删除 `.activation-intent.json` 或 recovery snapshot。CLI 在同一安装锁
+内恢复既有 activation intent 并完成事务后，才把旧未知/非终态记录标为
+`recovered/manual_recovery`；失败保留原记录。Source Install 成功也可完成该恢复，但其
+运行来源仍不允许 Admin 升级。若恢复需要 exact-App 浏览器修复，继续遵循本文 Agent
+relay 规则，不把 App Secret 发到聊天。机器掉电不会自动执行恢复，须重新运行安装入口。
+
+一次性执行者的下载与安装输出不进入 Admin API；页面只显示固定阶段与错误码。排障按
+安装器的显式执行结果和现有主服务日志确定原因，不从页面失败文案推测是否已回滚。
 
 首次上线验收或相关产品边界发生变化时，按本文对应门禁核对 ready 日志，并在飞书发送
 “运行中的任务再发一条消息会怎样？”确认自然语言回答包含 steer 且明确不排队；再用
@@ -885,6 +945,83 @@ Turns/task-feedback presenters、Codex transport 和 Store。systemd `TimeoutSto
 唯一兼容例外是候选失败后恢复本机制上线前的旧 Linux unit：旧 release 的重启仍按其原有
 journal ready 日志确认；候选和所有新 service definition 只接受私有 marker。
 
+## 管理页升级验收
+
+以下是 ADR 0057 首次交付及之后改变升级边界时的门禁，不是已通过的运行记录；具体 host、
+exact commit/Release、命令、退出码和故障注入结果保存在 checkout 的私有验收记录或本次
+交付报告中。只运行 fake manager/unit tests 不能声称 Linux/macOS 实机升级通过。
+
+先运行聚焦测试，再完成仓库门禁：
+
+```bash
+.venv/bin/python -m unittest tests.management.test_updates tests.test_updater \
+  tests.test_update_executor tests.test_admin_update_executor_probe \
+  tests.admin.test_update_ui tests.admin.test_web \
+  tests.test_installer tests.test_release_artifact -v
+make check
+```
+
+这些自动化检查必须覆盖：仅受管 Published 运行可升级；stable/immutable/资产 identity
+与双 digest 完整校验；更高版本比较、latest 变化与 stale action；POST-only/session/
+CSRF/Origin/Host；源码提示；页面发布说明按纯文本渲染；重复点击、提交响应丢失、断线、
+401 重登、有界 polling；共享安装锁交接、FD identity 与 CLOEXEC；官方零参数 bootstrap
+和 manifest 检查；prepare/activate/ready/rollback 的 typed 结果；worker/manager 观察未知
+不重复 dispatch；损坏/越权/超限状态文件失败关闭；CLI 成功恢复未知结果且失败不清理。
+还必须证明 ready 或新版本可访问不能单独得到 `succeeded`。
+
+独立执行边界还可先在两平台运行实机探针：
+
+```bash
+.venv/bin/python scripts/probe_admin_update_executor.py --timeout 60
+```
+
+探针用真实服务管理器启动随机命名的临时父任务，再由父任务调用生产
+`UpdateExecutor` 启动一次性执行者。执行者停止该父任务后继续完成，验证父任务
+生命周期锁未被继承、物理 release 路径与特殊字符传递正确；Linux 另检查 cgroup
+不同。它不读取产品凭据、不操作 `netizen.service` 或正式 LaunchAgent，结束后清理
+自己的任务和临时目录。结果 `scope=executor-isolation` 只证明进程隔离；它不执行安装、
+切换或回滚，不能替代下面的正式渠道和故障恢复验收。
+
+然后在明确指定的可恢复测试账号上分别验证 Linux systemd user manager 和 macOS 14+
+实际 GUI 用户；两者都使用固定 `~/.netizen` 产品根，不用 XDG override 伪造第二实例。
+准备旧版与候选版的 exact identity、合法现有凭据和原安装状态。端到端正式渠道用例必须有
+两个包含该升级协议的真实官方 immutable Releases；本地夹具不能替代这一项，正式发布
+仍按 ADR 0050 由维护者明确决定。不得为了测试修改正式同名 Release 资产。
+
+1. **运行中升级与停机影响。** 通过真实 Admin 登录提交更新；在准备阶段让普通 Turn、
+   Goal 或 Side 继续收到输入，确认没有 busy 拒绝或维护门禁。切换时确认既有停机语义，
+   新服务不恢复这些执行。记录主服务停止前后 exact update job 存活的证据、installer
+   零退出和 `succeeded` 结果，确认新运行版本与所选 exact 目标相符。
+2. **隔离与清理。** Linux 读取 `systemctl --user show netizen.service` 及 exact
+   `netizen-update-<operationId>.service` 的结构化 `ControlGroup`/`ActiveState`，确认不同
+   cgroup、`Restart=no`，主服务 stop 不杀掉执行者。macOS 仅用
+   `launchctl print gui/<uid>/netizen-update-<operationId>` 的退出码确认 job 已加载，
+   结合安装锁与最终结果证明实际执行；不解析其文本。完成后刷新 Admin，确认临时 plist/job
+   已清理且下次登录不重放。macOS logout/login 与 Linux manager 中止按中断用例处理。
+3. **重复与交错。** 双击、第二个浏览器、刷新、在途 CLI 安装/卸载只允许同一安装锁下
+   一个操作执行。提交后关闭页面再重新打开，不追加第二个 operation；改变 latest 后仍
+   安装原目标。准备期间仍能正常访问其他 Admin 页面，不因网络下载阻塞唯一事件循环。
+4. **准备失败与需要处理。** 在可控故障夹具中注入下载失败、installer/archive 摘要错误、
+   候选验证失败，确认在停止服务之前退出。使用测试应用缺失权限的场景，确认显示
+   `requires_action`、无后台授权浏览器；授权修复后显式重试可以继续。检查 API、结果文件、
+   worker argv/plist 与服务日志没有凭据、session/action token 或任务正文。
+5. **激活回滚。** 用本地候选夹具分别注入配置端口冲突和候选 ready 失败，核对安装器
+   已恢复旧 `current`、服务定义、数据库、受管 Skill 和原服务意图，结果为 `rolled_back`。
+   恢复后 Admin 可连通仍必须显示升级失败已回滚，不能显示成功。故意使 rollback 不完整时
+   只能显示 `recovery_required`，保留恢复材料。
+6. **中断与恢复。** 在受控测试进程中分别于 `accepted`、下载/准备、停止旧服务后、切换
+   `current` 后中断 exact worker job；manager 查询超时单独测试，不能重派。释放安装锁后
+   对账得到未知恢复状态；仍持锁时不能当作 worker 已消失。按上文官方文件入口恢复，确认
+   activation intent 和数据库/Skill 恢复条件沿用现有事务，成功才得到 `recovered`。
+   失败重跑不得清旧记录；原 operation/target 与实际运行版本各自正确。
+7. **浏览器重连。** 在另一台受信内网主机验证重启期间的断线、恢复后的 401 与重新登录，
+   只读回最近一次结果。准备失败不注销原登录；等待到期仅停止 polling，不制造终态或
+   自动提交。重登后仍可查看正确的升级页，源码/非受管运行始终不给安装 action。
+
+上述升级门禁之外，安装器、launcher 与 ready 变更仍须完成下一节已有的 fresh/active/
+stopped 安装、原生 SDK 生命周期及两平台服务资格检查；已由 exact 候选运行过的同一检查
+可复用结果，不以历史版本绿灯替代。
+
 ## 验收顺序
 
 每次改动安装器、launcher、主进程 ready 时，先完成两套平台门禁：Linux 重跑 systemd
@@ -899,7 +1036,7 @@ cleanup 和 exact-ID resume probes；fake launchctl/systemctl 单测不能替代
 先从另一台受信内网主机直接访问 `http://<服务器 IP>:8787`：未登录的 `/` 返回 303
 重定向到 `/login`（不返回 HTML 或状态），未知 route 和 API 必须返回 401，只有登录页复用的
 无状态 CSS 可匿名读取，`/health/ready` 只返回无细节状态；
-使用独立 credential 登录后，检查三个一级
+使用独立 credential 登录后，检查四个一级
 页面、筛选、分页和五秒 runtime polling。Sessions 分别选择 10/20/50/100，确认前后翻页、
 页码与当前页条数正确；在 P2P、普通群和话题群 Binding 上确认显示真人/群名称与正确类型，
 重复刷新命中缓存，名称链接能打开对应飞书会话，话题行只承诺打开所在会话。100 条页面的
