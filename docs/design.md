@@ -46,6 +46,22 @@ flowchart LR
 background loop，且只构造一个 Store、Project Registry、Runtime 与 `AsyncCodex`。App
 Server 是 `AsyncCodex` 的子进程，不是第二套业务服务。
 
+代码按职责归属组织，目录拆分不新增运行实例或状态所有者：
+
+| 位置 | 职责 |
+| --- | --- |
+| `netizen/main.py` | ServiceCore 装配并负责共享管理服务、Runtime、SDK 和 Store 的生命周期；管理服务注入两个客户端适配器。 |
+| `netizen/channel_app.py`、`netizen/channel/` | ChannelApplication 负责输入和完成事件编排，并装配、关闭同一表情控制器和回复卡片呈现器；展示会话留在各自对象内。 |
+| `netizen/cards/` | `controls.py` 负责管理卡片和表单，`reply.py` 负责回复、Activity、Files，`callbacks.py` 集中共享回调协议及基础组件；包入口显式导出公共接口。 |
+| `netizen/admin/` | `web.py` 集中路由、认证、一次性授权与请求任务生命周期；`queries.py` 负责查询和分页游标，`presentation.py` 负责响应转换。 |
+| `netizen/management/` | 两个客户端共用的应用管理边界，包括 `updates.py` 中的升级查询和发起编排。 |
+| `netizen/deployment/` | 升级记录与安装锁协议、独立升级进程调度，以及安装器共享基础和现有 ServiceBackend 的两平台实现。 |
+| `netizen/runtime/contracts.py`、`netizen/codex_runtime.py` | 前者唯一定义公共协议、异常、输入输出和快照；后者继续独占任务、Goal、Side、订阅和锁，并保留原公共类型导入路径。 |
+
+`scripts/netizen_installer.py` 保留唯一的安装、激活和回滚事务。
+它与 `scripts/netizen_updater.py`、`scripts/netizen_service_launcher.py` 的入口路径保持固定；
+部署支持模块可在候选虚拟环境建立前从展开源码导入，不依赖 Runtime 或项目第三方依赖。
+
 ## 核心模型
 
 Scope 分为 P2P、群聊主线和真实 topic。Binding 保存本地 UUID、Scope、Project
@@ -601,8 +617,9 @@ audit record。
 首次交互安装的飞书应用初始化是 release 外的安装期流程，不是第二个运行时认证层；服务
 运行时不进入该流程，也不申请或持久化 user token。成功后只把 App ID 与 Secret 写入
 `~/.netizen/config.yaml` 与 `0600` `credentials/feishu-app-secret`，不向 Channel
-Database、Codex state、环境或日志写入凭据。缺失权限的已有完整凭据不依赖 TTY，始终执行
-一次有界的 exact-App 官方修复并重新查询一次。App ID 改变后新消息进入新的 Scope
+Database、Codex state、环境或日志写入凭据。CLI 安装时，缺失权限的已有完整凭据不依赖 TTY，
+执行一次有界的 exact-App 官方修复并重新查询一次；Admin Upgrade 则返回 `requires_action`，
+不在一次性升级进程中开启交互授权。App ID 改变后新消息进入新的 Scope
 namespace；旧 Binding 与原生历史保留但不迁移。device flow、凭据文件交接与安装期权限
 门禁的完整流程见 [部署文档](deployment.md)。
 
@@ -621,6 +638,30 @@ launcher 清理旧 marker，主进程仅在 Feishu background、Runtime 与 admi
 发布 `0600 state/service.ready`，正常退出尽力删除。
 macOS 应用入口通过精确锁定的 `truststore` 使用 Security.framework 的系统钥匙串验证 TLS；
 它不导出证书、不生成 CA bundle，也不增加 Netizen 环境配置。Linux TLS 行为保持不变。
+
+ADR 0057 的 Admin Upgrade 是上述安装事务的显式手动入口。管理 application 只持有一个
+有界 blocking-I/O worker，用于官方 Release 查询、部署状态读取和一次性进程提交；它不
+依赖 Runtime 的忙闲投影或 Scope/Binding lock。候选准备期间服务照常接收输入，切换时由
+安装器停止主服务，沿用普通 Turn 中断、Goal 暂停和 Side 结束语义，不增加维护状态或
+任务续跑。Admin 不提前退出，也不复制安装器的 active/enabled 意图判断、退出确认或回滚。
+
+一次性执行者来自当前运行的物理 release，由同用户独立 systemd transient service 或
+临时 LaunchAgent 启动。macOS 提交文件位于 state，显式 bootstrap 到当前 GUI domain，
+不进入登录自动发现目录；两平台均不自动重启该 job。它按 ADR 0022 的有界 shell 装载器
+取得本次账号环境，不新增环境文件，并持有现有 `state/.install.lock` 完成 exact installer
+下载、校验与调用。Admin 记录操作后释放同一锁，执行者取得锁时重读 exact operation 与
+旧 `current` identity；候选安装器验证继承锁 FD、恢复 CLOEXEC 后复用该锁，其他 CLI
+安装和卸载继续与同一锁互斥。平台适配器只拥有临时 job 的提交、观察和清理。
+
+安装器/执行者以 `0600 state/update.json` 原子保存最近一次 typed 部署摘要，最多 4096
+bytes，只含 schema、operation ID、目标版本/Release ID/两项 SHA-256、旧 release digest、
+阶段/固定错误码与时间。下载说明只在查询缓存中存在，凭据、action/CSRF token、任务正文、
+命令输出不进入该文件或 Channel SQLite。`accepted/downloading/preparing/installing/restarting`
+表示安装阶段；`succeeded/failed/rolled_back/requires_action/recovery_required/recovered`
+区分结果。它不成为 Runtime 状态、队列或历史记录。完整回滚才能报告 `rolled_back`；已有
+异常 activation intent 或恢复不完整只能报告 `recovery_required`。后续显式 CLI 安装在
+同一锁内成功完成事务后，可把旧未知记录改为 `recovered/manual_recovery`，保留原 operation
+与目标；这只证明后续部署恢复，不把原操作改报成功，实际运行版本另行显示。
 
 文件数据库使用 WAL、`synchronous=FULL` 和有界 writer busy timeout。Admin 的 keyset
 分页查询只通过 Store-owned `query_only` connection 与单 worker executor 执行，SQL 有
@@ -729,6 +770,27 @@ absolute deadline 5 秒、keep-alive 15 秒、request/header line 8 KiB、header
 64 KiB，并拒绝 pipelining 和 upload。未认证可读取的内容只有 login、登录页复用的无状态
 CSS 与无细节 readiness；未认证 GET `/` 只返回 303 重定向到 `/login`，不返回任何 HTML、
 JavaScript 或状态。HTML、JavaScript、API 和其他资源仍要求 session 并返回 401。
+
+Updates 是 ADR 0057 的实例部署页面。`GET /api/v1/updates` 读取当前安装来源、检查缓存
+与最近操作；`POST /api/v1/updates/check` 显式检查固定官方 GitHub latest API，
+`POST /api/v1/updates/install` 提交所选 exact Release。两个 POST 复用同源认证与一次性
+action/CSRF grant；安装 grant 绑定 version、Release ID、installer SHA-256 和 archive
+SHA-256。API 不接受 URL、命令、任意路径、source checkout 或强制跳过验证参数。
+
+只允许当前解释器/包位于受管物理 release、Published metadata/manifest 与运行版本一致且
+`current` 仍指向它时升级。候选必须为官方 immutable、stable、完整提供两项资产 digest 的
+更高版本；检查缓存有界并保留 60 秒，不定时检查。执行时只下载已选 exact tag 的
+`install.sh`，先验证其 SHA-256，再由 bootstrap 验证绑定的 tarball SHA-256 和 manifest。
+信任官方 HTTPS 与 immutable Release，未增加自定义签名。源码/非受管实例显示来源和
+现有 CLI 安装方式，不能从页面改造成另一种安装来源。
+
+提交后浏览器只做有界状态 polling，不等待 HTTP 请求跨越服务重启；断线不会取消安装，
+也不隐式重发 POST。重启使旧 session 失效，重新登录后读持久的同一操作摘要。页面只按
+typed 安装结果显示成功/回滚；ready、连通和正在运行的版本不能独立证明完整事务结果。
+非终态记录在执行锁仍被持有时保留；锁已释放时，accepted 操作还有有界 manager handoff
+核验，已失去执行者的记录则转为 `recovery_required`。manager 观察失败仍保持未知，不能
+据此重新 dispatch；macOS 清理只在终态且锁已释放后进行。页面等待到期仅停止自动读取，
+提示手动查看，不篡改安装终态或排队重试。
 
 Admin credential 来自绝对路径 `NETIZEN_ADMIN_SECRET_FILE`，解码后必须恰好 32 bytes；
 最终路径不得是 symlink，文件必须为普通文件且 mode 精确为 0600。认证状态完全在内存：
@@ -1019,6 +1081,8 @@ interrupt cleanup、CLI resume 与 Linux compatibility；高层 surface 出现�
   admission，再在一个 60 秒 monotonic absolute budget 内排空 handlers/blocking I/O，最后
   interrupt/清理 Runtime、Codex 和 Store；systemd `TimeoutStopSec` 与 LaunchAgent
   `ExitTimeOut` 都以 75 秒外层 deadline 兜底，安装器再以 90 秒完成精确退出确认。
+  共享管理服务由 ServiceCore 统一关闭，ChannelApplication 只关闭自己的展示资源；
+  首次管理 I/O 排空未完成时，ServiceCore 在同一总时限内再做一次有界补充清理。
 - Admin mutation 发出后遇到 response loss/cancellation 不自动重试。一次性 grant 已消费，
   页面只能刷新对账；若 native lifecycle 结果未知，只保留目标 Binding-local
   `lifecycle-unknown`，不扩大为全局 admission 关闭。结构化日志不含 credential、cookie/token、cwd、

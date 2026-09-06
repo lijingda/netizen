@@ -249,7 +249,6 @@ class ServiceCore:
                 message_history=FeishuMessageHistoryReader(
                     self._message_history_client
                 ),
-                scope_coordinator=scope_coordinator,
                 management=self._management,
             )
             if expired_sides:
@@ -309,6 +308,7 @@ class ServiceCore:
             return
         self._closed = True
         deadline = asyncio.get_running_loop().time() + _SHUTDOWN_BUDGET_SECONDS
+        management_closed = self._management is None
         try:
             if self._admin is not None:
                 self._admin.close_admission()
@@ -344,7 +344,7 @@ class ServiceCore:
                     cap=_SHUTDOWN_BUDGET_SECONDS,
                 )
             if self._management is not None:
-                await _cleanup_with_budget(
+                management_closed = await _cleanup_with_budget(
                     "management I/O drain",
                     lambda: self._management.close(deadline=deadline),
                     deadline=deadline,
@@ -373,13 +373,24 @@ class ServiceCore:
                     )
         finally:
             try:
-                if self.application is not None:
-                    await _cleanup_with_budget(
-                        "Feishu reaction cleanup",
-                        self.application.close,
-                        deadline=deadline,
-                        cap=4,
-                    )
+                try:
+                    if self.application is not None:
+                        await _cleanup_with_budget(
+                            "Feishu presentation cleanup",
+                            self.application.close,
+                            deadline=deadline,
+                            cap=4,
+                        )
+                finally:
+                    # A cancelled or timed-out drain leaves submitted I/O running.
+                    # Give it one final bounded join within the same shutdown budget.
+                    if not management_closed and self._management is not None:
+                        await _cleanup_with_budget(
+                            "management I/O final cleanup",
+                            lambda: self._management.close(deadline=deadline),
+                            deadline=deadline,
+                            cap=4,
+                        )
             finally:
                 try:
                     if self._codex is not None:

@@ -21,6 +21,12 @@ contributors must know before starting related work.
 - Formal releases follow ADR 0050: the maintainer decides timing, then
   `scripts/release.py` executes the whole chain; nothing auto-releases on
   main or tag pushes.
+- ADR 0057 permits an explicit Admin upgrade to an exact immutable official
+  Release through a same-user, one-shot process outside the main service.
+  Reuse the installer transaction and shared install lock; keep its bounded
+  result in deployment state, never Channel SQLite. Do not add Runtime busy
+  checks, maintenance state, task continuation, scheduled updates, or implicit
+  mutation retries; readiness alone never proves the upgrade succeeded.
 - Public Published Release deployment uses the zero-argument official
   `install.sh`; a repository checkout's zero-argument `./install.sh` downloads
   the latest stable official installer, while `./dev-install.sh` installs the
@@ -83,9 +89,10 @@ contributors must know before starting related work.
 - Keep one long-lived Python service, one `FeishuChannel`, one Channel database,
   and one shared `AsyncCodex`. ADR 0031 authorizes exactly one additional
   client protocol: an in-process Admin Web that must remain a
-  management-only adapter over that same application/runtime boundary. Do not
-  add another service, agent runtime, scheduler, history model, configuration
-  layer, or permission system.
+  management-only adapter over that same application/runtime boundary. ADR
+  0057's one-shot installer process is the sole deployment exception. Do not
+  add another long-lived service, agent runtime, scheduler, history model,
+  configuration layer, or permission system.
 - Preserve the Scope/Binding-to-native-Thread semantics in `docs/design.md`.
   Running input steers the exact Turn; it is never queued, merged, or silently
   converted into another Turn. Unknown side effects fail closed.

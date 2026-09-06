@@ -15,6 +15,10 @@ tag/commit，且构建后的 manifest、摘要和不可变 Release 资产保持�
 **Source Install / 源码安装**：把当前工作区（包括本地未提交修改）作为未获发布者认证的
 候选进行安装。它与 Published Release 安装共享激活事务，但必须自行通过完整本地门禁。
 
+**Admin Upgrade / 管理页升级**：实例管理员在管理页明确选择一个更新的 Published Release
+后发起的一次安装与重启操作。它允许打断现有工作，不承诺任务续跑，也不是定时自动更新。
+_Avoid_：热升级、无感升级、自动更新。
+
 **Host Validation / 主机验证**：每次安装都对目标账号、解释器、依赖、配置、原生 SDK、
 飞书权限，以及按原服务意图需要启动时的 ready 条件执行的验证。它不替代 Published
 Release 的 Main Qualification / Release Integrity，也不替代 Source Install 的完整本地
@@ -150,9 +154,9 @@ _Avoid_: 话题根引用、引用消息回复
 管理员使用的 Admin Control Plane。
 
 **Admin Control Plane / 管理控制面**：实例级浏览器管理界面，用于集中查看和管理
-Project、普通 Binding 与 Side Topic。它与飞书入口共享同一个 application service、Scope
-coordinator、Runtime、Store 和 Codex client；不是 Prompt Channel，也不拥有第二份历史或
-配置事实。
+Project、普通 Binding、Side Topic 与 Admin Upgrade。它与飞书入口共享同一个 application
+service、Scope coordinator、Runtime、Store 和 Codex client；不是 Prompt Channel，也不
+拥有第二份历史或配置事实。
 
 **Instance Administrator / 实例管理员**：Admin Control Plane 的单一运维身份，凭独立
 credential 跨 Scope 管理当前 Netizen 实例。它不同于 Channel

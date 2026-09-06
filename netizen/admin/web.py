@@ -3,24 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import html
 import importlib.resources
 import ipaddress
 import json
 import logging
-import re
 import socket
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, is_dataclass
-from datetime import UTC, datetime
-from enum import Enum
+from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, TypeVar
-from urllib.parse import parse_qs, quote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from .auth import (
     ActionCsrfRejected,
@@ -35,10 +30,40 @@ from .auth import (
     SessionRejected,
     StaleActionGrant,
 )
+from .errors import AdminWebError
+from .presentation import (
+    _binding_result,
+    _chat_open_url,
+    _jsonable,
+    _project_result,
+    _release_disposition_message,
+    _runtime_binding_json,
+    _runtime_side_json,
+    _settings_json,
+    _stop_disposition_message,
+)
+from .queries import (
+    _created_range_query,
+    _decode_binding_cursor,
+    _decode_project_cursor,
+    _decode_side_cursor,
+    _encode_binding_cursor,
+    _encode_project_cursor,
+    _encode_side_cursor,
+    _fingerprint,
+    _id_query,
+    _optional_bool_query,
+    _optional_one,
+    _optional_scope_kind,
+    _optional_text_query,
+    _page_size,
+    _require_query_keys,
+    _session_inventory_state,
+    _session_page_size,
+)
 from .transport import AdminHttpTransport, Request, Response
 from ..bindings import (
     AmbiguousBinding,
-    BindingCursor,
     BindingNotFound,
     BindingQuery,
     BindingQueryBusy,
@@ -48,7 +73,6 @@ from ..bindings import (
     BindingTurnSettings,
     ProjectConflict as StoredProjectConflict,
     ScopeNotFound,
-    SideTopicCursor,
     SideTopicNotFound,
     SideTopicQuery,
     SideTopicState,
@@ -61,9 +85,9 @@ from ..management.blocking_io import (
     BlockingIOResultUnknown,
     BlockingIOShutdownTimeout,
 )
-from ..codex_runtime import (
+from ..management.updates import UpdateError
+from ..runtime.contracts import (
     NativeThreadCatalogState,
-    ReleaseDisposition,
     RuntimeClosed,
     SideCloseFailed,
     SideSessionConflict,
@@ -82,14 +106,12 @@ from ..codex_runtime import (
     ThreadReleaseError,
     ThreadReleaseStateUnknown,
     ThreadRunningConfiguration,
-    StopDisposition,
 )
 from ..domain import MentionContextMode, ScopeKind
 from ..management import (
     ActivePointerChanged,
     BindingStatusProjection,
     BindingScopeMismatch,
-    ChatLabel,
     CurrentSideTarget,
     ExactBindingTarget,
     InstanceManagementService,
@@ -98,7 +120,6 @@ from ..management import (
     RuntimePrecondition,
     RuntimeStateChanged,
     SessionInventoryItem,
-    SessionInventoryState,
     SessionQuery,
     SideIdentityMismatch,
 )
@@ -109,6 +130,7 @@ from ..projects import (
     StaleProject,
     UnknownProject,
 )
+from ..deployment.update_protocol import UpdateProtocolError, validate_target
 
 
 logger = logging.getLogger(__name__)
@@ -123,13 +145,7 @@ _SESSION_QUERY_DEADLINE_SECONDS = 10.0
 _MUTATION_DEADLINE_SECONDS = 15.0
 _MAX_QUERY_FIELDS = 24
 _MAX_JSON_FIELDS = 20
-_MAX_TEXT_BYTES = 4_096
-_SESSION_PAGE_SIZES = frozenset((10, 20, 50, 100))
 _RUNTIME_SNAPSHOT_BATCH_SIZE = 50
-_ISO_INSTANT_PATTERN = re.compile(
-    r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}"
-    r"(?::[0-9]{2}(?:\.[0-9]{1,6})?)?(?:Z|[+-][0-9]{2}:[0-9]{2})\Z"
-)
 
 _SECURITY_HEADERS = (
     (b"Cache-Control", b"no-store"),
@@ -148,14 +164,6 @@ _SECURITY_HEADERS = (
 )
 
 
-class AdminWebError(RuntimeError):
-    def __init__(self, status: int, code: str, message: str) -> None:
-        super().__init__(message)
-        self.status = status
-        self.code = code
-        self.message = message
-
-
 class AdminMutationDrainTimeout(TimeoutError):
     pass
 
@@ -165,6 +173,18 @@ class AdminActionTarget:
     resource: str
     target_id: str
     scope_key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AdminUpdateTarget:
+    version: str
+    release_id: int
+    installer_sha256: str
+    archive_sha256: str
+
+    @property
+    def resource(self) -> str:
+        return "published-release"
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,8 +476,15 @@ class AdminWebApplication:
             return await self._runtime_snapshots(context)
         if route == ("GET", "/api/v1/side-topics"):
             return await self._side_topics(context)
+        if route == ("GET", "/api/v1/updates"):
+            _require_query_keys(context.query, set())
+            return self._updates_response(
+                context, await self._management.update_status()
+            )
 
         mutations: dict[str, Callable[[_RequestContext], Awaitable[Response]]] = {
+            "/api/v1/updates/check": self._updates_check,
+            "/api/v1/updates/install": self._updates_install,
             "/api/v1/projects/register": self._project_register,
             "/api/v1/projects/create-directory": self._project_create_directory,
             "/api/v1/projects/set-enabled": self._project_set_enabled,
@@ -479,6 +506,88 @@ class AdminWebApplication:
         if handler is not None:
             return await handler(context)
         raise AdminWebError(404, "not_found", "管理接口不存在。")
+
+    def _updates_response(
+        self, context: _RequestContext, status: dict[str, Any]
+    ) -> Response:
+        payload = dict(status)
+        checking_error_code = payload.pop("checkingErrorCode")
+        source = status["current"]["source"]
+        if source == "source":
+            message = "当前是源码安装；请在源码工作区运行 ./dev-install.sh。"
+        elif source != "published":
+            message = "当前不属于受管正式安装；请使用官方 install.sh 安装正式版本。"
+        elif not status["supported"]:
+            message = "当前运行版本与安装指针不一致，请重新连接或检查安装结果。"
+        else:
+            message = ""
+        payload["message"] = message
+        payload["checkingError"] = (
+            "暂时无法取得完整的官方更新信息，请稍后重新检查。"
+            if checking_error_code is not None else None
+        )
+        actions: dict[str, object] = {
+            "check": self._grant(
+                context,
+                "updates.check",
+                AdminActionTarget("instance-update", "latest"),
+                _empty_preconditions(),
+            ),
+            "install": None,
+        }
+        latest = status.get("latest")
+        operation = status.get("operation")
+        if (
+            status.get("supported")
+            and status.get("available")
+            and latest is not None
+            and (
+                operation is None
+                or operation.get("phase") in {
+                    "succeeded", "failed", "rolled_back", "requires_action", "recovered",
+                }
+            )
+        ):
+            target = _update_target(
+                {key: latest[key] for key in _UPDATE_TARGET_KEYS}
+            )
+            actions["install"] = self._grant(
+                context, "updates.install", target, _empty_preconditions()
+            )
+        return _json_response(
+            200,
+            {**payload, "requestId": context.request.request_id, "actions": actions},
+        )
+
+    async def _updates_check(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        self._redeem(context, "updates.check", expected_resource="instance-update")
+        status = await self._mutation(
+            context, "updates.check", "latest", self._management.check_update()
+        )
+        return self._updates_response(context, status)
+
+    async def _updates_install(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        payload = _parse_json(context.request)
+        _require_body_keys(payload, _ACTION_KEYS)
+        target = _update_target(payload.get("target"))
+        grant = self._redeem_parsed(
+            context,
+            payload,
+            "updates.install",
+            target,
+            expected_resource="published-release",
+        )
+        operation = await self._mutation(
+            context,
+            "updates.install",
+            target.version,
+            self._management.start_update(target=_action_target_json(grant.target)),
+        )
+        return _json_response(
+            202, {"requestId": context.request.request_id, "operation": operation}
+        )
 
     async def _projects(self, context: _RequestContext) -> Response:
         allowed = {"cursor", "pageSize"}
@@ -936,7 +1045,10 @@ class AdminWebApplication:
                 + _MUTATION_DEADLINE_SECONDS,
             ),
         )
-        return _json_response(200, _project_result(context, project))
+        return _json_response(
+            200,
+            _project_result(context.request.request_id, project),
+        )
 
     async def _project_create_directory(
         self,
@@ -962,7 +1074,10 @@ class AdminWebApplication:
                 + _MUTATION_DEADLINE_SECONDS,
             ),
         )
-        return _json_response(200, _project_result(context, project))
+        return _json_response(
+            200,
+            _project_result(context.request.request_id, project),
+        )
 
     async def _project_set_enabled(self, context: _RequestContext) -> Response:
         payload, grant = self._redeem(
@@ -984,7 +1099,10 @@ class AdminWebApplication:
                 expected_revision=revision,
             ),
         )
-        return _json_response(200, _project_result(context, project))
+        return _json_response(
+            200,
+            _project_result(context.request.request_id, project),
+        )
 
     async def _session_create_lazy(self, context: _RequestContext) -> Response:
         payload, grant = self._redeem(
@@ -1046,7 +1164,10 @@ class AdminWebApplication:
                 target=_binding_target(grant)
             ),
         )
-        return _json_response(200, _binding_result(context, binding))
+        return _json_response(
+            200,
+            _binding_result(context.request.request_id, binding),
+        )
 
     async def _session_configure(self, context: _RequestContext) -> Response:
         payload, grant = self._redeem(
@@ -1071,7 +1192,10 @@ class AdminWebApplication:
                 settings=settings,
             ),
         )
-        return _json_response(200, _binding_result(context, binding))
+        return _json_response(
+            200,
+            _binding_result(context.request.request_id, binding),
+        )
 
     async def _session_rename(self, context: _RequestContext) -> Response:
         payload, grant = self._redeem(
@@ -1113,7 +1237,10 @@ class AdminWebApplication:
                 target=_lifecycle_binding_target(grant),
             ),
         )
-        return _json_response(200, _binding_result(context, binding))
+        return _json_response(
+            200,
+            _binding_result(context.request.request_id, binding),
+        )
 
     async def _session_unarchive(self, context: _RequestContext) -> Response:
         payload = _parse_json(context.request)
@@ -1145,7 +1272,10 @@ class AdminWebApplication:
             grant.target.target_id,
             operation,
         )
-        return _json_response(200, _binding_result(context, binding))
+        return _json_response(
+            200,
+            _binding_result(context.request.request_id, binding),
+        )
 
     async def _session_delete_lazy(self, context: _RequestContext) -> Response:
         _payload, grant = self._redeem(
@@ -1161,7 +1291,10 @@ class AdminWebApplication:
                 target=_binding_target(grant)
             ),
         )
-        return _json_response(200, _binding_result(context, binding))
+        return _json_response(
+            200,
+            _binding_result(context.request.request_id, binding),
+        )
 
     async def _session_delete_materialized(
         self,
@@ -1186,7 +1319,10 @@ class AdminWebApplication:
                 expected_native_thread_id=expected_native_thread_id,
             ),
         )
-        return _json_response(200, _binding_result(context, binding))
+        return _json_response(
+            200,
+            _binding_result(context.request.request_id, binding),
+        )
 
     async def _session_stop(self, context: _RequestContext) -> Response:
         _payload, grant = self._redeem(
@@ -1292,7 +1428,7 @@ class AdminWebApplication:
         self,
         context: _RequestContext,
         action_kind: str,
-        target: AdminActionTarget,
+        target: AdminActionTarget | AdminUpdateTarget,
         preconditions: AdminActionPreconditions,
     ) -> dict[str, object]:
         try:
@@ -1340,7 +1476,7 @@ class AdminWebApplication:
         context: _RequestContext,
         payload: Mapping[str, object],
         action_kind: str,
-        target: AdminActionTarget,
+        target: AdminActionTarget | AdminUpdateTarget,
         *,
         expected_resource: str,
     ):
@@ -1733,54 +1869,6 @@ def _one(values: Mapping[str, list[str]], name: str) -> str:
     return items[0]
 
 
-def _optional_one(values: Mapping[str, list[str]], name: str) -> str | None:
-    items = values.get(name)
-    if items is None:
-        return None
-    if len(items) != 1 or not items[0]:
-        raise AdminWebError(400, "invalid_query", f"查询参数 {name} 无效。")
-    return items[0]
-
-
-def _require_query_keys(
-    values: Mapping[str, list[str]],
-    allowed: set[str],
-) -> None:
-    unknown = values.keys() - allowed
-    if unknown:
-        raise AdminWebError(400, "invalid_query", "包含未知查询参数。")
-
-
-def _page_size(values: Mapping[str, list[str]]) -> int:
-    raw = _optional_one(values, "pageSize")
-    if raw is None:
-        return 25
-    try:
-        value = int(raw, 10)
-    except ValueError:
-        raise AdminWebError(400, "invalid_page_size", "分页大小无效。") from None
-    if not 1 <= value <= 50:
-        raise AdminWebError(400, "invalid_page_size", "分页大小必须为 1 到 50。")
-    return value
-
-
-def _session_page_size(values: Mapping[str, list[str]]) -> int:
-    raw = _optional_one(values, "pageSize")
-    if raw is None:
-        return 20
-    try:
-        value = int(raw, 10)
-    except ValueError:
-        raise AdminWebError(400, "invalid_page_size", "分页大小无效。") from None
-    if value not in _SESSION_PAGE_SIZES:
-        raise AdminWebError(
-            400,
-            "invalid_page_size",
-            "Sessions 分页大小必须为 10、20、50 或 100。",
-        )
-    return value
-
-
 def _batches(values: Sequence[str], size: int) -> tuple[tuple[str, ...], ...]:
     if size < 1:
         raise ValueError("batch size must be positive")
@@ -1788,125 +1876,6 @@ def _batches(values: Sequence[str], size: int) -> tuple[tuple[str, ...], ...]:
         tuple(values[index : index + size])
         for index in range(0, len(values), size)
     )
-
-
-def _chat_open_url(chat: ChatLabel) -> str:
-    if chat.chat_mode == "p2p" and chat.p2p_target_open_id is not None:
-        query = urlencode({"openId": chat.p2p_target_open_id})
-    else:
-        query = urlencode({"openChatId": chat.chat_id})
-    return f"https://applink.feishu.cn/client/chat/open?{query}"
-
-
-def _optional_text_query(
-    values: Mapping[str, list[str]],
-    name: str,
-    *,
-    maximum: int = _MAX_TEXT_BYTES,
-) -> str | None:
-    value = _optional_one(values, name)
-    if value is None:
-        return None
-    if len(value.encode("utf-8")) > maximum or value.strip() != value:
-        raise AdminWebError(400, "invalid_query", f"查询参数 {name} 无效。")
-    return value
-
-
-def _created_range_query(
-    values: Mapping[str, list[str]],
-) -> tuple[str | None, str | None]:
-    created_from = _optional_created_time_query(values, "createdFrom")
-    created_before = _optional_created_time_query(values, "createdBefore")
-    if (
-        created_from is not None
-        and created_before is not None
-        and created_from >= created_before
-    ):
-        raise AdminWebError(
-            400,
-            "invalid_time_range",
-            "创建时间的开始时间必须早于结束时间。",
-        )
-    return created_from, created_before
-
-
-def _optional_created_time_query(
-    values: Mapping[str, list[str]],
-    name: str,
-) -> str | None:
-    raw = _optional_text_query(values, name, maximum=64)
-    if raw is None:
-        return None
-    if _ISO_INSTANT_PATTERN.fullmatch(raw) is None:
-        raise AdminWebError(
-            400,
-            "invalid_time",
-            f"查询参数 {name} 必须是带时区的 ISO-8601 时间。",
-        )
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        if parsed.utcoffset() is None:
-            raise ValueError("timezone is required")
-        return parsed.astimezone(UTC).isoformat(timespec="microseconds")
-    except (OverflowError, ValueError):
-        raise AdminWebError(
-            400,
-            "invalid_time",
-            f"查询参数 {name} 必须是带时区的 ISO-8601 时间。",
-        ) from None
-
-
-def _optional_bool_query(
-    values: Mapping[str, list[str]],
-    name: str,
-) -> bool | None:
-    value = _optional_one(values, name)
-    if value is None:
-        return None
-    if value == "true":
-        return True
-    if value == "false":
-        return False
-    raise AdminWebError(400, "invalid_query", f"查询参数 {name} 必须是布尔值。")
-
-
-def _optional_scope_kind(values: Mapping[str, list[str]]) -> ScopeKind | None:
-    raw = _optional_one(values, "scopeKind")
-    if raw is None:
-        return None
-    try:
-        return ScopeKind(raw)
-    except ValueError:
-        raise AdminWebError(400, "invalid_scope_kind", "Scope 类型无效。") from None
-
-
-def _session_inventory_state(
-    values: Mapping[str, list[str]],
-) -> SessionInventoryState | None:
-    raw = _optional_one(values, "inventoryState")
-    if raw is None:
-        return SessionInventoryState.ACTIVE
-    if raw == "all":
-        return None
-    try:
-        return SessionInventoryState(raw)
-    except ValueError:
-        raise AdminWebError(
-            400,
-            "invalid_inventory_state",
-            "会话状态无效。",
-        ) from None
-
-
-def _id_query(values: Mapping[str, list[str]], name: str) -> tuple[str, ...]:
-    raw_values = values.get(name, [])
-    result: list[str] = []
-    for raw in raw_values:
-        for value in raw.split(","):
-            if not value or value.strip() != value or len(value.encode("utf-8")) > 256:
-                raise AdminWebError(400, "invalid_ids", f"{name} 包含无效 ID。")
-            result.append(value)
-    return tuple(result)
 
 
 def _required_text(
@@ -1982,7 +1951,30 @@ def _action_target(payload: Mapping[str, object]) -> AdminActionTarget:
     return AdminActionTarget(resource, target_id, scope_key)
 
 
-def _action_target_json(target: AdminActionTarget) -> dict[str, object]:
+_UPDATE_TARGET_KEYS = {"version", "releaseId", "installerSha256", "archiveSha256"}
+
+
+def _update_target(raw: object) -> AdminUpdateTarget:
+    try:
+        value = validate_target(raw)
+    except UpdateProtocolError:
+        raise AdminWebError(400, "invalid_target", "升级版本或制品标识无效。") from None
+    return AdminUpdateTarget(
+        value["version"], value["releaseId"],
+        value["installerSha256"], value["archiveSha256"],
+    )
+
+
+def _action_target_json(
+    target: AdminActionTarget | AdminUpdateTarget,
+) -> dict[str, object]:
+    if isinstance(target, AdminUpdateTarget):
+        return {
+            "version": target.version,
+            "releaseId": target.release_id,
+            "installerSha256": target.installer_sha256,
+            "archiveSha256": target.archive_sha256,
+        }
     return {
         "resource": target.resource,
         "targetId": target.target_id,
@@ -2079,294 +2071,39 @@ def _runtime_precondition(grant: object) -> RuntimePrecondition:
     return RuntimePrecondition(activity_revision, physical_turn_id)
 
 
-def _fingerprint(route: str, filters: object) -> str:
-    canonical = json.dumps(
-        {"route": route, "filters": filters},
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()[:32]
-
-
-def _encode_cursor(kind: str, values: Sequence[str], fingerprint: str) -> str:
-    payload = json.dumps(
-        {"v": 1, "t": kind, "k": list(values), "f": fingerprint},
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
-
-
-def _decode_cursor(
-    encoded: str | None,
-    *,
-    kind: str,
-    length: int,
-    fingerprint: str,
-) -> tuple[str, ...] | None:
-    if encoded is None:
-        return None
-    if len(encoded) > 2_048:
-        raise AdminWebError(400, "invalid_cursor", "分页游标无效。")
-    try:
-        padding = "=" * (-len(encoded) % 4)
-        raw = base64.b64decode(
-            encoded + padding,
-            altchars=b"-_",
-            validate=True,
-        )
-        payload = json.loads(raw)
-    except (ValueError, json.JSONDecodeError):
-        raise AdminWebError(400, "invalid_cursor", "分页游标无效。") from None
-    if (
-        not isinstance(payload, dict)
-        or set(payload) != {"v", "t", "k", "f"}
-        or payload["v"] != 1
-        or payload["t"] != kind
-        or payload["f"] != fingerprint
-        or not isinstance(payload["k"], list)
-        or len(payload["k"]) != length
-        or any(not isinstance(value, str) or not value for value in payload["k"])
-    ):
-        raise AdminWebError(400, "invalid_cursor", "分页游标与当前筛选不匹配。")
-    canonical = _encode_cursor(kind, payload["k"], fingerprint)
-    if canonical != encoded:
-        raise AdminWebError(400, "invalid_cursor", "分页游标无效。")
-    return tuple(payload["k"])
-
-
-def _encode_binding_cursor(
-    cursor: BindingCursor | None,
-    fingerprint: str,
-) -> str | None:
-    if cursor is None:
-        return None
-    return _encode_cursor(
-        "binding",
-        (cursor.created_at, cursor.binding_id),
-        fingerprint,
-    )
-
-
-def _decode_binding_cursor(
-    encoded: str | None,
-    fingerprint: str,
-) -> BindingCursor | None:
-    values = _decode_cursor(
-        encoded,
-        kind="binding",
-        length=2,
-        fingerprint=fingerprint,
-    )
-    return BindingCursor(*values) if values is not None else None
-
-
-def _encode_side_cursor(
-    cursor: SideTopicCursor | None,
-    fingerprint: str,
-) -> str | None:
-    if cursor is None:
-        return None
-    return _encode_cursor("side", (cursor.created_at, cursor.side_id), fingerprint)
-
-
-def _decode_side_cursor(
-    encoded: str | None,
-    fingerprint: str,
-) -> SideTopicCursor | None:
-    values = _decode_cursor(
-        encoded,
-        kind="side",
-        length=2,
-        fingerprint=fingerprint,
-    )
-    return SideTopicCursor(*values) if values is not None else None
-
-
-def _encode_project_cursor(cursor: str | None, fingerprint: str) -> str | None:
-    if cursor is None:
-        return None
-    return _encode_cursor("project", (cursor,), fingerprint)
-
-
-def _decode_project_cursor(encoded: str | None, fingerprint: str) -> str | None:
-    values = _decode_cursor(
-        encoded,
-        kind="project",
-        length=1,
-        fingerprint=fingerprint,
-    )
-    return values[0] if values is not None else None
-
-
-def _jsonable(value: object) -> object:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Enum):
-        return value.value
-    if is_dataclass(value):
-        return {
-            key: _jsonable(item)
-            for key, item in asdict(value).items()
-        }
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_jsonable(item) for item in value]
-    raise TypeError(f"unsupported JSON projection: {type(value).__name__}")
-
-
-def _settings_json(settings: BindingTurnSettings | None) -> dict[str, str] | None:
-    if settings is None:
-        return None
-    return {
-        "modelId": settings.model_id,
-        "effortId": settings.effort_id,
-        "serviceTierId": settings.service_tier_id,
-    }
-
-
-def _runtime_binding_json(status: BindingStatusProjection) -> dict[str, object]:
-    snapshot = status.snapshot
-    turn = snapshot.turn
-    goal = snapshot.goal
-    lifecycle = snapshot.lifecycle
-    subscription = snapshot.subscription
-    usage = snapshot.context_window_usage
-    return {
-        "bindingId": snapshot.binding_id,
-        "activityRevision": snapshot.activity_revision,
-        "primaryStatus": status.primary_status,
-        "primaryStatusResolution": status.primary_status_resolution.value,
-        "subscriptionState": (
-            status.subscription_state.value
-            if status.subscription_state is not None
-            else None
-        ),
-        "turn": (
-            {
-                "threadId": turn.thread_id,
-                "turnId": turn.turn_id,
-                "state": turn.state.value,
-            }
-            if turn is not None
-            else None
-        ),
-        "goal": (
-            {
-                "threadId": goal.thread_id,
-                "logicalTurnId": goal.logical_turn_id,
-                "state": goal.state.value,
-            }
-            if goal is not None
-            else None
-        ),
-        "compacting": snapshot.compacting,
-        "lifecycle": (
-            {
-                "threadId": lifecycle.thread_id,
-                "state": lifecycle.state.value,
-            }
-            if lifecycle is not None
-            else None
-        ),
-        "subscription": (
-            {
-                "threadId": subscription.thread_id,
-                "state": subscription.state.value,
-                "releaseInSeconds": subscription.release_in_seconds,
-            }
-            if subscription is not None
-            else None
-        ),
-        "contextWindow": (
-            {
-                "usedTokens": usage.used_tokens,
-                "contextWindowTokens": usage.context_window_tokens,
-            }
-            if usage is not None
-            else None
-        ),
-    }
-
-
-def _stop_disposition_message(disposition: StopDisposition) -> str:
-    return {
-        StopDisposition.NOT_RUNNING: "该会话当前没有运行任务。",
-        StopDisposition.REQUESTED: (
-            "已请求中断 exact Codex Turn；确认终态前仍会显示为停止中。"
-        ),
-        StopDisposition.STOPPING: (
-            "该会话正在停止；已再次尝试完成中断与终端清理。"
-        ),
-        StopDisposition.COMPACTING: (
-            "该会话正在压缩，当前没有已验证的安全取消能力。"
-        ),
-        StopDisposition.GOAL_REQUESTED: (
-            "已请求暂停 Goal 并中断当前物理 Turn。"
-        ),
-        StopDisposition.GOAL_STOPPING: "该 Goal 正在暂停。",
-        StopDisposition.EXTERNAL_GOAL: (
-            "这是外部 active Goal，当前无法安全重挂并暂停。"
-        ),
-    }[disposition]
-
-
-def _release_disposition_message(disposition: ReleaseDisposition) -> str:
-    return {
-        ReleaseDisposition.NOT_MATERIALIZED: (
-            "该会话尚未物化，没有原生 Thread 订阅可释放。"
-        ),
-        ReleaseDisposition.NOT_SUBSCRIBED: (
-            "本进程当前没有该 Thread 的订阅；Binding 与原生历史均保留。"
-        ),
-        ReleaseDisposition.RELEASED: (
-            "已取消本进程对该 Thread 的订阅；Binding 与原生历史均保留，"
-            "下次消息仍会 resume 同一 Thread。"
-        ),
-    }[disposition]
-
-
-def _runtime_side_json(snapshot: Any) -> dict[str, object]:
-    return {
-        "sideId": snapshot.side_id,
-        "parentBindingId": snapshot.parent_binding_id,
-        "threadId": snapshot.thread_id,
-        "state": snapshot.state.value,
-        "turnId": snapshot.turn_id,
-        "turnState": (
-            snapshot.turn_state.value if snapshot.turn_state is not None else None
-        ),
-    }
-
-
-def _project_result(context: _RequestContext, project: Any) -> dict[str, object]:
-    return {
-        "requestId": context.request.request_id,
-        "alias": project.alias,
-        "cwd": str(project.cwd),
-        "enabled": project.enabled,
-        "revision": project.revision,
-    }
-
-
-def _binding_result(context: _RequestContext, binding: Any) -> dict[str, object]:
-    return {
-        "requestId": context.request.request_id,
-        "bindingId": binding.id,
-        "scopeKey": binding.scope_key,
-        "current": binding.active,
-        "nativeThreadId": binding.native_thread_id,
-        "settingsRevision": binding.settings_revision,
-        "messageContextMode": binding.message_context_mode.value,
-        "contextRevision": binding.context_revision,
-    }
+_UPDATE_HTTP_ERRORS = {
+    "invalid_update_target": (400, "invalid_update_target", "升级目标无效。"),
+    "update_unsupported": (409, "update_unsupported", "仅当前受管正式版本支持 Admin 升级。"),
+    "update_target_changed": (409, "update_target_changed", "升级目标已变化，请重新检查更新。"),
+    "update_busy": (409, "update_busy", "另一个安装或升级正在执行，请稍后查看结果。"),
+    "update_state_unavailable": (
+        503, "update_state_unavailable", "升级状态无法确认，请检查安装器状态文件。",
+    ),
+    "update_lock_unavailable": (
+        503, "update_state_unavailable", "无法取得安装锁，请检查安装状态。",
+    ),
+    "update_installation_changed": (
+        409, "update_target_changed", "当前安装已变化，请重新连接。",
+    ),
+    "update_already_submitted": (409, "update_busy", "升级已提交，请查看已有升级结果。"),
+    "update_recovery_required": (
+        409, "update_recovery_required", "上次升级结果未确认，请使用官方安装器恢复。",
+    ),
+    "update_cleanup_unavailable": (
+        503, "update_cleanup_unavailable", "暂时无法清理上次升级任务，请稍后重试。",
+    ),
+    "update_submission_unknown": (
+        503, "update_state_unavailable", "升级提交结果无法确认，请刷新查看；不要重复提交。",
+    ),
+}
 
 
 def _map_error(error: BaseException) -> AdminWebError | None:
     if isinstance(error, AdminWebError):
         return error
+    if isinstance(error, UpdateError):
+        mapped = _UPDATE_HTTP_ERRORS.get(error.code)
+        return AdminWebError(*mapped) if mapped is not None else None
     if isinstance(
         error,
         (

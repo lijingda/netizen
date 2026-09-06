@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-21
 amends: 0017, 0021, 0028
-amended_by: 0037, 0049, 0054
+amended_by: 0037, 0049, 0054, 0057
 related: 0016, 0019
 ---
 
@@ -12,6 +12,8 @@ related: 0016, 0019
 > 删除 Admin exact archive 的 idle 与 Runtime activity 前置条件；它与飞书入口一样只占用
 > exact Binding 后直接委托 App Server。[ADR 0054](0054-allow-admin-to-delete-exact-materialized-sessions.md)
 > 进一步允许单一实例管理员经二次确认删除 exact active 或 archived materialized 会话。
+> [ADR 0057](0057-run-manual-admin-upgrades-through-the-shared-installer.md) 增加 Updates 页，
+> 仅为显式手动部署允许同用户一次性安装进程；不增加长期 Web 服务或第二个 Runtime。
 
 ## 背景
 

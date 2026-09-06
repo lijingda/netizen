@@ -1,10 +1,15 @@
 ---
 status: accepted
 date: 2026-08-23
+amended_by: 0057
 related: 0022, 0023, 0032, 0033
 ---
 
 # 使用用户级 LaunchAgent 支持 macOS
+
+> [ADR 0057](0057-run-manual-admin-upgrades-through-the-shared-installer.md) 对“无自动更新、
+> 只有一个用户服务”增加显式手动 Admin 升级的窄例外：临时同用户 LaunchAgent 只运行一次
+> 共享安装器，不成为长期服务，也不在下次登录重放。
 
 ## 背景
 

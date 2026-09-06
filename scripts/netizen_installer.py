@@ -16,14 +16,12 @@ import getpass
 import hashlib
 import json
 import os
-import plistlib
 import pwd
 import re
 import secrets
 import shutil
 import socket
 import stat
-import subprocess
 import sys
 import tempfile
 import time
@@ -49,18 +47,51 @@ from scripts.install_user_guide_skill import (  # noqa: E402
 from netizen.bindings import (  # noqa: E402
     migrate_channel_database_v6_to_v7,
 )
+from netizen.deployment.update_protocol import (  # noqa: E402
+    ENV_ARCHIVE_SHA256,
+    ENV_LOCK_FD,
+    ENV_OPERATION_ID,
+    ENV_VERSION,
+    UpdateProtocolError,
+    advance_operation,
+    install_lock,
+    read_operation,
+    terminal_phase,
+    validate_inherited_lock,
+)
+from netizen.deployment.installer_support import (  # noqa: E402
+    InstallError,
+    Layout,
+    Release,
+    FileSnapshot,
+    Runner,
+    info,
+    run_command,
+    _ensure_real_directory,
+    _require_regular_file,
+    _write_atomic,
+    _capture_file,
+    _restore_file,
+    _path_exists,
+    _clean_subprocess_environment,
+)
+from netizen.deployment.service_backend import (  # noqa: E402
+    ServiceBackend,
+    ServiceState,
+    LegacyServiceState,
+    SERVICE_READY_TIMEOUT_SECONDS,
+    _service_environment,
+)
+from netizen.deployment.systemd import (  # noqa: E402
+    SYSTEMD_SERVICE_NAME,
+    SystemdServiceBackend,
+)
+from netizen.deployment.launchd import (  # noqa: E402
+    LAUNCH_AGENT_LABEL,
+    LaunchAgentServiceBackend,
+)
 
 
-SYSTEMD_SERVICE_NAME = "netizen.service"
-SYSTEMD_SERVICE_MARKER = "# Managed by Netizen install.sh"
-LAUNCH_AGENT_LABEL = "io.github.lijingda.netizen"
-LAUNCH_AGENT_SENTINEL_NAME = "NETIZEN_MANAGED_LAUNCH_AGENT"
-LAUNCH_AGENT_SENTINEL_VALUE = "io.github.lijingda.netizen/v1"
-READY_MARKER_CONTENT = b"netizen service ready\n"
-LEGACY_SYSTEMD_READY_LOG = "netizen service ready"
-SYSTEMD_READY_ENVIRONMENT_TOKEN = b"NETIZEN_READY_FILE="
-SERVICE_READY_TIMEOUT_SECONDS = 45.0
-SERVICE_STOP_TIMEOUT_SECONDS = 90.0
 RELEASE_METADATA = ".release.json"
 PUBLISHED_RELEASE_MANIFEST = ".netizen-release.json"
 PUBLISHED_RELEASE_QUALIFICATION = "github-release"
@@ -103,8 +134,6 @@ IGNORED_SOURCE_NAMES = {
     "__pycache__",
 }
 RELEASE_NAME = re.compile(r"^[0-9a-f]{64}$")
-ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-RUNNING_UNIT_STATES = {"active", "activating", "reloading", "deactivating"}
 CONFIGURED_APP_ID = re.compile(
     r"(?m)^[ \t]*appId:[ \t]*(?:\"(?P<double>cli_[A-Za-z0-9_-]+)\"|"
     r"'(?P<single>cli_[A-Za-z0-9_-]+)'|(?P<plain>cli_[A-Za-z0-9_-]+))"
@@ -112,46 +141,94 @@ CONFIGURED_APP_ID = re.compile(
 )
 
 
-class InstallError(RuntimeError):
-    """The requested lifecycle operation cannot be completed safely."""
-
-
 class ConfigurationRequired(InstallError):
     """A non-interactive install prepared files that the caller must fill."""
 
 
-@dataclass(frozen=True, slots=True)
-class Layout:
-    platform: str
-    uid: int
-    username: str
-    home: Path
-    config_home: Path
-    codex_home: Path
+class FeishuPermissionsRequired(InstallError):
+    """The exact app needs an explicit tenant-permission repair."""
+
+
+@dataclass(slots=True)
+class InstallerUpdate:
     product_root: Path
-    releases: Path
-    current: Path
-    previous: Path
-    config_file: Path
-    credentials_dir: Path
-    secret_file: Path
-    admin_secret_file: Path
-    state_dir: Path
-    cache_dir: Path
-    service_dir: Path
-    service_file: Path
-    ready_file: Path
-    lifetime_lock_file: Path
-    log_file: Path
-    service_error_log: Path
+    operation_id: str
+    lock_fd: int
+    phase: str = "downloading"
+
+    def report(self, phase: str, code: str = "none") -> None:
+        try:
+            advance_operation(self.product_root, self.operation_id, phase, code)
+        except UpdateProtocolError as error:
+            raise InstallError("could not record Admin upgrade result") from error
+        self.phase = phase
 
 
-@dataclass(frozen=True, slots=True)
-class Release:
-    digest: str
-    root: Path
-    source: Path
-    venv: Path
+def _installer_update(layout: Layout, manifest: PublishedReleaseManifest) -> InstallerUpdate | None:
+    keys = (ENV_OPERATION_ID, ENV_LOCK_FD, ENV_VERSION, ENV_ARCHIVE_SHA256)
+    if not any(key in os.environ for key in keys):
+        return None
+    try:
+        if not all(os.environ.get(key) for key in keys):
+            raise UpdateProtocolError("incomplete Admin upgrade handoff")
+        descriptor = int(os.environ[ENV_LOCK_FD])
+        if descriptor < 3:
+            raise UpdateProtocolError("invalid Admin upgrade descriptor")
+        validate_inherited_lock(layout.product_root, descriptor)
+        operation = read_operation(layout.product_root)
+        if (
+            operation is None
+            or operation["operationId"] != os.environ[ENV_OPERATION_ID]
+            or operation["phase"] != "downloading"
+            or operation["target"]["version"] != manifest.version
+            or os.environ[ENV_VERSION] != manifest.version
+            or operation["target"]["archiveSha256"] != os.environ[ENV_ARCHIVE_SHA256]
+        ):
+            raise UpdateProtocolError("Admin upgrade target changed")
+        update = InstallerUpdate(layout.product_root, operation["operationId"], descriptor)
+        for key in keys:
+            os.environ.pop(key, None)
+        return update
+    except (ValueError, OSError, UpdateProtocolError) as error:
+        raise InstallError("invalid Admin upgrade handoff") from error
+
+
+@contextlib.contextmanager
+def _report_install_update(update: InstallerUpdate | None) -> Iterator[None]:
+    try:
+        if update is not None:
+            update.report("preparing")
+        yield
+    except BaseException as error:
+        if update is not None and not terminal_phase(update.phase):
+            if isinstance(error, ConfigurationRequired):
+                phase, code = "requires_action", "configuration_required"
+            elif isinstance(error, FeishuPermissionsRequired):
+                phase, code = "requires_action", "permissions_required"
+            elif update.phase in {"installing", "restarting"}:
+                phase, code = "recovery_required", "worker_interrupted"
+            else:
+                phase, code = "failed", "preparation_failed"
+            try:
+                update.report(phase, code)
+            except InstallError:
+                pass  # Preserve the original failure; an unreadable result is unknown.
+        raise
+    # The worker owns success: the outer official bootstrap must also exit zero
+    # before Admin can present the installation as complete.
+
+
+def _record_manual_update_recovery(layout: Layout) -> None:
+    """A successful CLI activation resolves an abandoned update, not its target."""
+    try:
+        operation = read_operation(layout.product_root)
+        if operation is None or (terminal_phase(operation["phase"]) and operation["phase"] != "recovery_required"):
+            return
+        if _path_exists(layout.state_dir / ACTIVATION_INTENT):
+            return
+        advance_operation(layout.product_root, operation["operationId"], "recovered", "manual_recovery")
+    except (OSError, UpdateProtocolError):
+        info("warning: installation succeeded but the prior Admin update result could not be reconciled")
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,21 +237,6 @@ class PublishedReleaseManifest:
     commit: str
     source_digest: str
     requirements_digest: str
-
-
-@dataclass(frozen=True, slots=True)
-class LegacyServiceState:
-    present: bool = False
-    recognized: bool = False
-    active: bool = False
-    enabled: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class FileSnapshot:
-    existed: bool
-    content: bytes = b""
-    mode: int = 0o600
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,66 +280,6 @@ class RuntimeValidation:
     admin_bind: AdminBind
 
 
-@dataclass(frozen=True, slots=True)
-class ServiceState:
-    loaded: bool
-    enabled: bool
-
-
-class ServiceBackend(Protocol):
-    """Transition-level boundary around one per-user service manager."""
-
-    layout: Layout
-
-    def preflight(self) -> None: ...
-
-    def prepare_host(self, *, interactive: bool) -> None: ...
-
-    def inspect_state(self) -> ServiceState: ...
-
-    def capture_definition(self) -> FileSnapshot: ...
-
-    def render_definition(self, release: Release) -> bytes: ...
-
-    def stop_and_confirm(
-        self,
-        *,
-        timeout: float = SERVICE_STOP_TIMEOUT_SECONDS,
-    ) -> None: ...
-
-    def publish_definition(self, content: bytes, *, should_enable: bool) -> None: ...
-
-    def restore_definition(
-        self,
-        snapshot: FileSnapshot,
-        *,
-        should_enable: bool,
-    ) -> None: ...
-
-    def start_and_wait(self, *, timeout: float) -> None: ...
-
-    def service_action(self, action: str) -> int: ...
-
-    def uninstall_definition(self) -> None: ...
-
-    def inspect_legacy(self) -> LegacyServiceState: ...
-
-    def disable_legacy(
-        self,
-        state: LegacyServiceState,
-        *,
-        interactive: bool,
-    ) -> None: ...
-
-    def restore_legacy(
-        self,
-        state: LegacyServiceState,
-        *,
-        interactive: bool,
-    ) -> None: ...
-
-
-Runner = Callable[..., subprocess.CompletedProcess[str]]
 AppRegistrar = Callable[[str | None], FeishuAppCredentials]
 
 
@@ -299,10 +301,6 @@ class CandidatePreparer(Protocol):
         source_root: Path,
         runner: Runner,
     ) -> Release: ...
-
-
-def info(message: str) -> None:
-    print(f"[netizen] {message}", flush=True)
 
 
 def resolve_layout(
@@ -457,44 +455,6 @@ def _validate_source_location(source_root: Path, layout: Layout) -> None:
         )
 
 
-def run_command(
-    argv: Sequence[str | os.PathLike[str]],
-    *,
-    check: bool = True,
-    capture_output: bool = False,
-    capture_stdout: bool = False,
-    cwd: Path | None = None,
-    env: Mapping[str, str] | None = None,
-    timeout: float | None = None,
-) -> subprocess.CompletedProcess[str]:
-    rendered = [os.fspath(value) for value in argv]
-    if capture_output and capture_stdout:
-        raise InstallError("capture_output and capture_stdout are mutually exclusive")
-    try:
-        return subprocess.run(
-            rendered,
-            check=check,
-            capture_output=capture_output,
-            stdout=subprocess.PIPE if capture_stdout else None,
-            cwd=cwd,
-            env=None if env is None else dict(env),
-            text=True,
-            timeout=timeout,
-        )
-    except FileNotFoundError as error:
-        raise InstallError(f"required command was not found: {rendered[0]}") from error
-    except subprocess.CalledProcessError as error:
-        command = " ".join(rendered)
-        detail = (error.stderr or error.stdout or "").strip()
-        suffix = f": {detail}" if detail else ""
-        raise InstallError(f"command failed ({error.returncode}): {command}{suffix}") from error
-    except subprocess.TimeoutExpired as error:
-        duration = f"{error.timeout:g}" if error.timeout is not None else "configured"
-        raise InstallError(
-            f"command timed out after {duration} seconds: {rendered[0]}"
-        ) from error
-
-
 def require_supported_platform(
     platform_name: str | None = None,
     *,
@@ -611,40 +571,16 @@ def _ensure_managed_netizen_directory(path: Path) -> None:
         raise InstallError(f"managed directory marker is not recognized: {marker}")
 
 
-def _ensure_real_directory(
-    path: Path,
-    *,
-    mode: int,
-    enforce_mode: bool = True,
-) -> None:
-    existed = path.exists()
-    if path.is_symlink():
-        raise InstallError(f"managed directory must not be a symlink: {path}")
-    try:
-        path.mkdir(mode=mode, parents=True, exist_ok=True)
-    except OSError as error:
-        raise InstallError(f"could not create directory {path}: {error}") from error
-    if not path.is_dir():
-        raise InstallError(f"managed path is not a directory: {path}")
-    if enforce_mode or not existed:
-        try:
-            path.chmod(mode)
-        except OSError as error:
-            raise InstallError(f"could not protect directory {path}: {error}") from error
-
-
 @contextlib.contextmanager
 def installation_lock(layout: Layout) -> Iterator[None]:
     # The lock must outlive uninstall. Deleting a locked file would let a new
     # process create a second inode and enter concurrently with an old waiter.
     _ensure_real_directory(layout.product_root, mode=0o700)
     _ensure_real_directory(layout.state_dir, mode=0o700)
-    lock_path = layout.state_dir / ".install.lock"
     try:
-        with lock_path.open("a+", encoding="utf-8") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        with install_lock(layout.product_root, blocking=True):
             yield
-    except OSError as error:
+    except (OSError, UpdateProtocolError) as error:
         raise InstallError(f"could not lock Netizen installation: {error}") from error
 
 
@@ -981,34 +917,6 @@ def _ensure_project_directory(path: Path) -> None:
         path.mkdir(mode=0o700, parents=True)
     except OSError as error:
         raise InstallError(f"could not create default projectRoot {path}: {error}") from error
-
-
-def _require_regular_file(path: Path, label: str) -> None:
-    try:
-        metadata = path.lstat()
-    except OSError as error:
-        raise InstallError(f"could not inspect {label} file {path}: {error}") from error
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise InstallError(f"{label} must be a regular non-symlink file: {path}")
-
-
-def _write_atomic(path: Path, content: bytes, *, mode: int) -> None:
-    _ensure_real_directory(path.parent, mode=0o700, enforce_mode=False)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(descriptor, mode)
-        with os.fdopen(descriptor, "wb") as output:
-            output.write(content)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.close(descriptor)
-        with contextlib.suppress(OSError):
-            temporary.unlink()
-        raise
 
 
 def source_manifest(source_root: Path) -> dict[str, tuple[str, bool]]:
@@ -1640,7 +1548,7 @@ def require_feishu_permissions(
             rerun_instruction=rerun_instruction,
         )
     if missing:
-        raise InstallError(
+        raise FeishuPermissionsRequired(
             _missing_feishu_permissions_message(
                 missing,
                 rerun_instruction=rerun_instruction,
@@ -1837,485 +1745,6 @@ def preflight_admin_bind(binding: AdminBind) -> None:
             candidate.close()
 
 
-def render_systemd_service(release: Release, layout: Layout) -> str:
-    template_path = release.source / "deploy" / "netizen.service"
-    try:
-        template = template_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
-        raise InstallError(f"could not read systemd template: {template_path}") from error
-    values = {
-        "@HOME_ENV@": _systemd_quote(f"HOME={layout.home}"),
-        "@CODEX_HOME_ENV@": _systemd_quote(f"CODEX_HOME={layout.codex_home}"),
-        "@PATH_ENV@": _systemd_quote(
-            f"PATH={_service_bootstrap_path(layout)}"
-        ),
-        "@CONFIG_ENV@": _systemd_quote(f"NETIZEN_CONFIG_PATH={layout.config_file}"),
-        "@SECRET_ENV@": _systemd_quote(
-            f"FEISHU_APP_SECRET_FILE={layout.secret_file}"
-        ),
-        "@ADMIN_SECRET_ENV@": _systemd_quote(
-            f"NETIZEN_ADMIN_SECRET_FILE={layout.admin_secret_file}"
-        ),
-        "@READY_FILE_ENV@": _systemd_quote(
-            f"NETIZEN_READY_FILE={layout.ready_file}"
-        ),
-        "@LIFETIME_LOCK_FILE_ENV@": _systemd_quote(
-            f"NETIZEN_LIFETIME_LOCK_FILE={layout.lifetime_lock_file}"
-        ),
-        "@EXEC_START@": " ".join(
-            (
-                _systemd_quote(str(layout.current / "venv" / "bin" / "python")),
-                "-E",
-                "-B",
-                "-u",
-                _systemd_quote(
-                    str(
-                        layout.current
-                        / "source"
-                        / "scripts"
-                        / "netizen_service_launcher.py"
-                    )
-                ),
-            )
-        ),
-    }
-    template_tokens = set(re.findall(r"@[A-Z_]+@", template))
-    missing = sorted(values.keys() - template_tokens)
-    unknown = sorted(template_tokens - values.keys())
-    if missing:
-        raise InstallError(f"systemd template is missing placeholders: {missing}")
-    if unknown:
-        raise InstallError(f"systemd template has unknown placeholders: {unknown}")
-    return re.sub(r"@[A-Z_]+@", lambda match: values[match.group()], template)
-
-
-def _systemd_quote(value: str) -> str:
-    if any(character in value for character in "\r\n\0"):
-        raise InstallError("systemd values must not contain control characters")
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
-    return f'"{escaped}"'
-
-
-def _service_environment(layout: Layout) -> dict[str, str]:
-    environment = _clean_subprocess_environment()
-    environment["HOME"] = str(layout.home)
-    environment["CODEX_HOME"] = str(layout.codex_home)
-    environment["NETIZEN_CONFIG_PATH"] = str(layout.config_file)
-    environment["FEISHU_APP_SECRET_FILE"] = str(layout.secret_file)
-    environment["NETIZEN_ADMIN_SECRET_FILE"] = str(layout.admin_secret_file)
-    if layout.platform == "linux":
-        environment.setdefault("XDG_RUNTIME_DIR", f"/run/user/{layout.uid}")
-        environment.setdefault(
-            "DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{layout.uid}/bus"
-        )
-    else:
-        environment.pop("XDG_RUNTIME_DIR", None)
-        environment.pop("DBUS_SESSION_BUS_ADDRESS", None)
-    return environment
-
-
-def _clean_subprocess_environment() -> dict[str, str]:
-    environment = dict(os.environ)
-    virtual_environment = environment.get("VIRTUAL_ENV", "").strip()
-    if virtual_environment:
-        virtual_bin = (Path(virtual_environment) / "bin").resolve(strict=False)
-        environment["PATH"] = os.pathsep.join(
-            entry
-            for entry in environment.get("PATH", "").split(os.pathsep)
-            if entry
-            and (
-                not Path(entry).is_absolute()
-                or Path(entry).resolve(strict=False) != virtual_bin
-            )
-        )
-    for name in (
-        "FEISHU_APP_SECRET",
-        "FEISHU_APP_SECRET_FILE",
-        "NETIZEN_ADMIN_SECRET",
-        "NETIZEN_ADMIN_SECRET_FILE",
-        "NETIZEN_CONFIG_PATH",
-        "PYTHONHOME",
-        "PYTHONPATH",
-        "VIRTUAL_ENV",
-        "__PYVENV_LAUNCHER__",
-        "XDG_DATA_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_STATE_HOME",
-        "XDG_CACHE_HOME",
-    ):
-        environment.pop(name, None)
-    return environment
-
-
-def _service_bootstrap_path(layout: Layout) -> str:
-    """Provide only enough PATH to load the account profile and launcher."""
-
-    entries = [str(layout.home / ".local" / "bin")]
-    if layout.platform == "darwin":
-        entries.extend(("/opt/homebrew/sbin", "/opt/homebrew/bin"))
-    entries.extend(
-        (
-            "/usr/local/sbin",
-            "/usr/local/bin",
-            "/usr/sbin",
-            "/usr/bin",
-            "/sbin",
-            "/bin",
-        )
-    )
-    return os.pathsep.join(entries)
-
-
-def systemctl_user(
-    layout: Layout,
-    *arguments: str,
-    runner: Runner | None = None,
-    check: bool = True,
-    capture_output: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    execute = run_command if runner is None else runner
-    return execute(
-        ["systemctl", "--user", *arguments],
-        check=check,
-        capture_output=capture_output,
-        env=_service_environment(layout),
-    )
-
-
-def _user_service_state(layout: Layout, runner: Runner) -> tuple[bool, bool]:
-    # Prove that the user manager is reachable first. Some systemd releases
-    # report a missing unit only on stderr for the two state queries below;
-    # that is a normal first-install state, not a bus failure.
-    manager_environment = systemctl_user(
-        layout,
-        "show-environment",
-        runner=runner,
-        capture_output=True,
-    )
-    _validate_user_unit_search_path(layout, manager_environment.stdout)
-    active_result = systemctl_user(
-        layout,
-        "is-active",
-        SYSTEMD_SERVICE_NAME,
-        runner=runner,
-        check=False,
-        capture_output=True,
-    )
-    enabled_result = systemctl_user(
-        layout,
-        "is-enabled",
-        SYSTEMD_SERVICE_NAME,
-        runner=runner,
-        check=False,
-        capture_output=True,
-    )
-    active = active_result.stdout.strip() in RUNNING_UNIT_STATES
-    enabled = enabled_result.stdout.strip() in {"enabled", "enabled-runtime"}
-    return active, enabled
-
-
-def _validate_user_unit_search_path(layout: Layout, output: str) -> None:
-    manager_environment = _parse_systemd_manager_environment(output)
-
-    fixed_unit_dir = layout.service_dir.resolve(strict=False)
-    configured_unit_path = manager_environment.get("SYSTEMD_UNIT_PATH", "")
-    explicit_fixed_path = False
-    defaults_appended = not configured_unit_path or configured_unit_path.endswith(":")
-    if configured_unit_path:
-        explicit_fixed_path = any(
-            Path(entry).is_absolute()
-            and Path(entry).resolve(strict=False) == fixed_unit_dir
-            for entry in configured_unit_path.split(os.pathsep)
-            if entry
-        )
-    if not explicit_fixed_path and not defaults_appended:
-        raise InstallError(
-            "the systemd user manager replaces SYSTEMD_UNIT_PATH without Netizen's "
-            f"fixed unit directory {layout.service_dir}"
-        )
-
-    configured_xdg = manager_environment.get("XDG_CONFIG_HOME", "").strip()
-    if configured_xdg and not explicit_fixed_path:
-        path = Path(configured_xdg)
-        if (
-            not path.is_absolute()
-            or path.resolve(strict=False) != layout.config_home.resolve(strict=False)
-        ):
-            raise InstallError(
-                "the systemd user manager uses XDG_CONFIG_HOME="
-                f"{configured_xdg}, but Netizen requires the fixed user-unit directory "
-                f"{layout.service_dir}; remove that manager override or add the fixed "
-                "directory to SYSTEMD_UNIT_PATH"
-            )
-
-
-def _decode_systemd_environment_value(value: str) -> str:
-    """Decode systemctl's documented shell-compatible $'...' representation."""
-
-    if not value.startswith("$'"):
-        return value
-    if len(value) < 3 or not value.endswith("'"):
-        raise ValueError("unterminated dollar-single-quoted value")
-
-    body = value[2:-1]
-    decoded = bytearray()
-    simple_escapes = {
-        "a": 0x07,
-        "b": 0x08,
-        "e": 0x1B,
-        "E": 0x1B,
-        "f": 0x0C,
-        "n": 0x0A,
-        "r": 0x0D,
-        "t": 0x09,
-        "v": 0x0B,
-        "\\": 0x5C,
-        "'": 0x27,
-        '"': 0x22,
-        "?": 0x3F,
-    }
-    index = 0
-    while index < len(body):
-        character = body[index]
-        if character == "'":
-            raise ValueError("unescaped quote in dollar-single-quoted value")
-        if character != "\\":
-            decoded.extend(os.fsencode(character))
-            index += 1
-            continue
-        index += 1
-        if index >= len(body):
-            raise ValueError("trailing escape in dollar-single-quoted value")
-        escaped = body[index]
-        if escaped in simple_escapes:
-            decoded.append(simple_escapes[escaped])
-            index += 1
-            continue
-        if escaped == "x":
-            digits = body[index + 1 : index + 3]
-            if len(digits) != 2 or not all(
-                character in "0123456789abcdefABCDEF" for character in digits
-            ):
-                raise ValueError("invalid hexadecimal escape")
-            decoded.append(int(digits, 16))
-            index += 3
-            continue
-        if escaped in "01234567":
-            end = index + 1
-            while end < min(index + 3, len(body)) and body[end] in "01234567":
-                end += 1
-            decoded.append(int(body[index:end], 8))
-            index = end
-            continue
-        if escaped in {"u", "U"}:
-            width = 4 if escaped == "u" else 8
-            digits = body[index + 1 : index + 1 + width]
-            if len(digits) != width or not all(
-                character in "0123456789abcdefABCDEF" for character in digits
-            ):
-                raise ValueError("invalid Unicode escape")
-            codepoint = int(digits, 16)
-            if codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
-                raise ValueError("invalid Unicode codepoint")
-            decoded.extend(os.fsencode(chr(codepoint)))
-            index += 1 + width
-            continue
-        raise ValueError("unsupported dollar-single-quote escape")
-    if b"\0" in decoded:
-        raise ValueError("environment value contains NUL")
-    return os.fsdecode(bytes(decoded))
-
-
-def _parse_systemd_manager_environment(output: str) -> dict[str, str]:
-    environment: dict[str, str] = {}
-    for line_number, line in enumerate(output.splitlines(), start=1):
-        name, separator, value = line.partition("=")
-        if not separator or ENVIRONMENT_NAME.fullmatch(name) is None:
-            raise InstallError(
-                "systemd user manager returned an invalid environment entry "
-                f"on line {line_number}"
-            )
-        try:
-            environment[name] = _decode_systemd_environment_value(value)
-        except ValueError as error:
-            raise InstallError(
-                "systemd user manager returned an invalid escaped environment "
-                f"value for {name}"
-            ) from error
-    return environment
-
-
-def ensure_linger(
-    layout: Layout,
-    *,
-    interactive: bool,
-    runner: Runner | None = None,
-) -> None:
-    execute = run_command if runner is None else runner
-    result = execute(
-        ["loginctl", "show-user", str(layout.uid), "--property=Linger", "--value"],
-        capture_output=True,
-        env=_clean_subprocess_environment(),
-    )
-    if result.stdout.strip().lower() == "yes":
-        return
-    command = ["loginctl", "enable-linger", layout.username]
-    if os.geteuid() != 0:
-        if not interactive:
-            raise InstallError(
-                "user lingering is disabled; run "
-                f"sudo loginctl enable-linger {layout.username} once, then rerun the installer"
-            )
-        command.insert(0, "sudo")
-    info("enabling systemd user lingering (one-time host authorization may be requested)")
-    execute(command, env=_clean_subprocess_environment())
-
-
-def inspect_legacy_service(runner: Runner | None = None) -> LegacyServiceState:
-    execute = run_command if runner is None else runner
-    legacy_path = Path("/etc/systemd/system") / SYSTEMD_SERVICE_NAME
-    if not _path_exists(legacy_path):
-        return LegacyServiceState()
-    recognized = False
-    if legacy_path.is_file() and not legacy_path.is_symlink():
-        with contextlib.suppress(OSError, UnicodeError):
-            recognized = "Netizen Feishu Codex channel" in legacy_path.read_text(
-                encoding="utf-8"
-            )
-    active_result = execute(
-        ["systemctl", "is-active", SYSTEMD_SERVICE_NAME],
-        check=False,
-        capture_output=True,
-        env=_clean_subprocess_environment(),
-    )
-    enabled_result = execute(
-        ["systemctl", "is-enabled", SYSTEMD_SERVICE_NAME],
-        check=False,
-        capture_output=True,
-        env=_clean_subprocess_environment(),
-    )
-    for label, result in (
-        ("active state", active_result),
-        ("enable state", enabled_result),
-    ):
-        if result.returncode != 0 and not result.stdout.strip() and result.stderr.strip():
-            raise InstallError(
-                f"could not query legacy system service {label}: {result.stderr.strip()}"
-            )
-    return LegacyServiceState(
-        present=True,
-        recognized=recognized,
-        active=active_result.stdout.strip() in RUNNING_UNIT_STATES,
-        enabled=enabled_result.stdout.strip() in {"enabled", "enabled-runtime"},
-    )
-
-
-def disable_legacy_service(
-    state: LegacyServiceState,
-    *,
-    layout: Layout,
-    interactive: bool,
-    runner: Runner,
-) -> None:
-    if not state.present or not (state.active or state.enabled):
-        return
-    if not state.recognized:
-        raise InstallError(
-            f"an unrecognized system-level {SYSTEMD_SERVICE_NAME} is active or enabled; disable it manually"
-        )
-    command = ["systemctl", "disable", "--now", SYSTEMD_SERVICE_NAME]
-    if layout.uid != 0:
-        if not interactive:
-            raise InstallError(
-                "legacy system service migration needs one-time authorization; run "
-                f"sudo systemctl disable --now {SYSTEMD_SERVICE_NAME}, then rerun the installer"
-            )
-        command.insert(0, "sudo")
-    info("disabling the recognized legacy system-level Netizen service")
-    runner(command, env=_clean_subprocess_environment())
-
-
-def restore_legacy_service(
-    state: LegacyServiceState,
-    *,
-    layout: Layout,
-    interactive: bool,
-    runner: Runner,
-) -> None:
-    if not state.present or not (state.active or state.enabled):
-        return
-    commands: list[list[str]] = []
-    if state.enabled:
-        commands.append(["systemctl", "enable", SYSTEMD_SERVICE_NAME])
-    if state.active:
-        commands.append(["systemctl", "start", SYSTEMD_SERVICE_NAME])
-    for command in commands:
-        if layout.uid != 0:
-            if not interactive:
-                raise InstallError(
-                    "automatic rollback needs authorization to restore the legacy service"
-                )
-            command.insert(0, "sudo")
-        runner(command, env=_clean_subprocess_environment())
-
-
-def _clear_ready_marker(layout: Layout) -> None:
-    path = layout.ready_file
-    if not _path_exists(path):
-        return
-    if path.is_dir() and not path.is_symlink():
-        raise InstallError(f"service ready marker is a directory: {path}")
-    try:
-        path.unlink()
-    except OSError as error:
-        raise InstallError(f"could not clear service ready marker {path}: {error}") from error
-
-
-def _ready_marker_present(layout: Layout) -> bool:
-    path = layout.ready_file
-    if path.is_symlink() or not path.is_file():
-        return False
-    try:
-        metadata = path.stat()
-        return (
-            metadata.st_uid == layout.uid
-            and stat.S_IMODE(metadata.st_mode) == 0o600
-            and path.read_bytes() == READY_MARKER_CONTENT
-        )
-    except OSError:
-        return False
-
-
-def _lifetime_lock_available(layout: Layout) -> bool:
-    """Probe the stable service-lifetime lock without replacing its inode."""
-
-    path = layout.lifetime_lock_file
-    flags = os.O_RDWR | os.O_CREAT
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except OSError as error:
-        raise InstallError(f"could not open service lifetime lock {path}: {error}") from error
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != layout.uid:
-            raise InstallError(
-                f"service lifetime lock is not a current-user regular file: {path}"
-            )
-        os.fchmod(descriptor, 0o600)
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return False
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-        return True
-    except OSError as error:
-        raise InstallError(f"could not inspect service lifetime lock {path}: {error}") from error
-    finally:
-        os.close(descriptor)
-
-
 @contextlib.contextmanager
 def _hold_service_lifetime_lock(layout: Layout) -> Iterator[None]:
     """Exclude service startup while rollback-protected state is migrated."""
@@ -2355,541 +1784,6 @@ def _hold_service_lifetime_lock(layout: Layout) -> Iterator[None]:
         if locked:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
-
-
-def _wait_for_stop_confirmation(
-    layout: Layout,
-    *,
-    is_loaded: Callable[[], bool],
-    timeout: float,
-) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not is_loaded() and _lifetime_lock_available(layout):
-            _clear_ready_marker(layout)
-            return
-        time.sleep(0.25)
-    raise InstallError(
-        "service did not fully exit within "
-        f"{timeout:g}s; refusing to mutate rollback-protected state"
-    )
-
-
-def _log_excerpt(path: Path) -> str:
-    if path.is_symlink() or not path.is_file():
-        return ""
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return ""
-    return " | ".join(lines[-5:])
-
-
-class SystemdServiceBackend:
-    def __init__(self, layout: Layout, runner: Runner) -> None:
-        self.layout = layout
-        self._runner = runner
-        self._known_stopped = False
-        self._ready_marker_required = True
-
-    def preflight(self) -> None:
-        _user_service_state(self.layout, self._runner)
-
-    def prepare_host(self, *, interactive: bool) -> None:
-        ensure_linger(self.layout, interactive=interactive, runner=self._runner)
-
-    def inspect_state(self) -> ServiceState:
-        active, enabled = _user_service_state(self.layout, self._runner)
-        return ServiceState(loaded=active, enabled=enabled)
-
-    def capture_definition(self) -> FileSnapshot:
-        if _path_exists(self.layout.service_file):
-            _require_managed_systemd_service(self.layout.service_file)
-        snapshot = _capture_file(
-            self.layout.service_file,
-            label="managed systemd service",
-        )
-        if snapshot.existed:
-            # Preserve the readiness contract of the definition being captured
-            # so a failed upgrade can restart a pre-marker release safely.
-            self._ready_marker_required = (
-                SYSTEMD_READY_ENVIRONMENT_TOKEN in snapshot.content
-            )
-        return snapshot
-
-    def render_definition(self, release: Release) -> bytes:
-        return render_systemd_service(release, self.layout).encode()
-
-    def _is_loaded(self) -> bool:
-        result = systemctl_user(
-            self.layout,
-            "is-active",
-            SYSTEMD_SERVICE_NAME,
-            runner=self._runner,
-            check=False,
-            capture_output=True,
-        )
-        return result.stdout.strip() in RUNNING_UNIT_STATES
-
-    def stop_and_confirm(
-        self,
-        *,
-        timeout: float = SERVICE_STOP_TIMEOUT_SECONDS,
-    ) -> None:
-        # Issue the idempotent stop even when the last state observation was
-        # inactive: a prior start response may have been lost after creating
-        # the process.
-        systemctl_user(
-            self.layout,
-            "stop",
-            SYSTEMD_SERVICE_NAME,
-            runner=self._runner,
-        )
-        # systemctl stop is itself a synchronous manager transition.  The
-        # lifetime lock independently proves that the Python process released
-        # rollback-protected state; unlike launchd, no second manager poll is
-        # needed here.
-        _wait_for_stop_confirmation(
-            self.layout,
-            is_loaded=lambda: False,
-            timeout=timeout,
-        )
-        self._known_stopped = True
-
-    def publish_definition(self, content: bytes, *, should_enable: bool) -> None:
-        _write_atomic(self.layout.service_file, content, mode=0o600)
-        self._ready_marker_required = True
-        systemd_analyze = shutil.which(
-            "systemd-analyze",
-            path=_service_bootstrap_path(self.layout),
-        )
-        if systemd_analyze is not None:
-            self._runner(
-                [systemd_analyze, "--user", "verify", self.layout.service_file],
-                env=_service_environment(self.layout),
-            )
-        systemctl_user(self.layout, "daemon-reload", runner=self._runner)
-        systemctl_user(
-            self.layout,
-            "enable" if should_enable else "disable",
-            SYSTEMD_SERVICE_NAME,
-            runner=self._runner,
-            check=should_enable,
-        )
-
-    def restore_definition(
-        self,
-        snapshot: FileSnapshot,
-        *,
-        should_enable: bool,
-    ) -> None:
-        _restore_file(
-            self.layout.service_file,
-            snapshot,
-            label="managed systemd service",
-        )
-        self._ready_marker_required = (
-            not snapshot.existed
-            or SYSTEMD_READY_ENVIRONMENT_TOKEN in snapshot.content
-        )
-        systemctl_user(self.layout, "daemon-reload", runner=self._runner)
-        systemctl_user(
-            self.layout,
-            "enable" if should_enable else "disable",
-            SYSTEMD_SERVICE_NAME,
-            runner=self._runner,
-            check=should_enable,
-        )
-
-    def start_and_wait(self, *, timeout: float) -> None:
-        loaded = False if self._known_stopped else self._is_loaded()
-        if loaded:
-            if not self._ready_marker_required or _ready_marker_present(self.layout):
-                return
-        started_at = time.time()
-        if not loaded:
-            _clear_ready_marker(self.layout)
-            self._known_stopped = False
-            systemctl_user(
-                self.layout,
-                "start",
-                SYSTEMD_SERVICE_NAME,
-                runner=self._runner,
-            )
-        if self._ready_marker_required:
-            _wait_for_systemd_ready(self.layout, timeout=timeout, runner=self._runner)
-        else:
-            _wait_for_legacy_systemd_ready(
-                self.layout,
-                since=started_at,
-                timeout=timeout,
-                runner=self._runner,
-            )
-
-    def service_action(self, action: str) -> int:
-        if action == "start":
-            self.start_and_wait(timeout=SERVICE_READY_TIMEOUT_SECONDS)
-            return 0
-        if action == "stop":
-            self.stop_and_confirm()
-            return 0
-        if action == "restart":
-            self.stop_and_confirm()
-            self.start_and_wait(timeout=SERVICE_READY_TIMEOUT_SECONDS)
-            return 0
-        result = systemctl_user(
-            self.layout,
-            "--no-pager",
-            "--full",
-            "status",
-            SYSTEMD_SERVICE_NAME,
-            runner=self._runner,
-            check=False,
-        )
-        return result.returncode
-
-    def uninstall_definition(self) -> None:
-        if _path_exists(self.layout.service_file):
-            _require_managed_systemd_service(self.layout.service_file)
-            self.stop_and_confirm()
-            systemctl_user(
-                self.layout,
-                "disable",
-                SYSTEMD_SERVICE_NAME,
-                runner=self._runner,
-                check=False,
-            )
-            self.layout.service_file.unlink()
-            systemctl_user(self.layout, "daemon-reload", runner=self._runner)
-            systemctl_user(
-                self.layout,
-                "reset-failed",
-                SYSTEMD_SERVICE_NAME,
-                runner=self._runner,
-                check=False,
-            )
-            return
-        state = self.inspect_state()
-        if state.loaded or state.enabled:
-            raise InstallError(
-                "the managed user service file is missing but systemd still has an "
-                "active/enabled netizen.service; inspect it before uninstalling"
-            )
-        systemctl_user(self.layout, "daemon-reload", runner=self._runner)
-
-    def inspect_legacy(self) -> LegacyServiceState:
-        return inspect_legacy_service(self._runner)
-
-    def disable_legacy(
-        self,
-        state: LegacyServiceState,
-        *,
-        interactive: bool,
-    ) -> None:
-        disable_legacy_service(
-            state,
-            layout=self.layout,
-            interactive=interactive,
-            runner=self._runner,
-        )
-
-    def restore_legacy(
-        self,
-        state: LegacyServiceState,
-        *,
-        interactive: bool,
-    ) -> None:
-        restore_legacy_service(
-            state,
-            layout=self.layout,
-            interactive=interactive,
-            runner=self._runner,
-        )
-
-
-def _launchctl(
-    layout: Layout,
-    *arguments: str | os.PathLike[str],
-    runner: Runner,
-    check: bool = True,
-    capture_output: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    return runner(
-        ["launchctl", *arguments],
-        check=check,
-        capture_output=capture_output,
-        env=_service_environment(layout),
-    )
-
-
-def _launch_agent_program_arguments(layout: Layout) -> list[str]:
-    return [
-        str(layout.current / "venv" / "bin" / "python"),
-        "-E",
-        "-B",
-        "-u",
-        str(
-            layout.current
-            / "source"
-            / "scripts"
-            / "netizen_service_launcher.py"
-        ),
-    ]
-
-
-def render_launch_agent(release: Release, layout: Layout) -> bytes:
-    del release  # The stable current pointer is the LaunchAgent activation boundary.
-    payload = {
-        "Label": LAUNCH_AGENT_LABEL,
-        "ProgramArguments": _launch_agent_program_arguments(layout),
-        "WorkingDirectory": str(layout.home),
-        "RunAtLoad": True,
-        "KeepAlive": {"SuccessfulExit": False},
-        "ExitTimeOut": 75,
-        "ThrottleInterval": 3,
-        "Umask": 0o077,
-        "EnvironmentVariables": {
-            "HOME": str(layout.home),
-            "CODEX_HOME": str(layout.codex_home),
-            "PATH": _service_bootstrap_path(layout),
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONUNBUFFERED": "1",
-            "NETIZEN_CONFIG_PATH": str(layout.config_file),
-            "FEISHU_APP_SECRET_FILE": str(layout.secret_file),
-            "NETIZEN_ADMIN_SECRET_FILE": str(layout.admin_secret_file),
-            "NETIZEN_READY_FILE": str(layout.ready_file),
-            "NETIZEN_LIFETIME_LOCK_FILE": str(layout.lifetime_lock_file),
-            "NETIZEN_LOG_FILE": str(layout.log_file),
-            LAUNCH_AGENT_SENTINEL_NAME: LAUNCH_AGENT_SENTINEL_VALUE,
-        },
-        "StandardOutPath": "/dev/null",
-        "StandardErrorPath": str(layout.service_error_log),
-    }
-    return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=True)
-
-
-def _require_managed_launch_agent(path: Path, layout: Layout) -> None:
-    if path.is_symlink():
-        raise InstallError(f"managed LaunchAgent must not be a symlink: {path}")
-    try:
-        metadata = path.stat()
-    except OSError as error:
-        raise InstallError(f"could not inspect managed LaunchAgent {path}: {error}") from error
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != layout.uid:
-        raise InstallError(
-            f"managed LaunchAgent is not a current-user regular file: {path}"
-        )
-    if stat.S_IMODE(metadata.st_mode) & 0o022:
-        raise InstallError(f"managed LaunchAgent is group/world writable: {path}")
-    try:
-        payload = plistlib.loads(path.read_bytes())
-    except (OSError, plistlib.InvalidFileException, ValueError, TypeError) as error:
-        raise InstallError(f"managed LaunchAgent is unreadable: {path}: {error}") from error
-    environment = payload.get("EnvironmentVariables") if isinstance(payload, dict) else None
-    if (
-        not isinstance(environment, dict)
-        or payload.get("Label") != LAUNCH_AGENT_LABEL
-        or payload.get("ProgramArguments") != _launch_agent_program_arguments(layout)
-        or environment.get(LAUNCH_AGENT_SENTINEL_NAME)
-        != LAUNCH_AGENT_SENTINEL_VALUE
-    ):
-        raise InstallError(f"refusing to operate on an unrecognized LaunchAgent: {path}")
-
-
-class LaunchAgentServiceBackend:
-    def __init__(self, layout: Layout, runner: Runner) -> None:
-        self.layout = layout
-        self._runner = runner
-        self._domain = f"gui/{layout.uid}"
-        self._target = f"{self._domain}/{LAUNCH_AGENT_LABEL}"
-
-    def preflight(self) -> None:
-        domain = _launchctl(
-            self.layout,
-            "print",
-            self._domain,
-            runner=self._runner,
-            check=False,
-            capture_output=True,
-        )
-        if domain.returncode != 0:
-            raise InstallError(
-                "the current macOS GUI launchd domain is unavailable; log in to a "
-                "graphical user session before installing or controlling Netizen"
-            )
-
-    def prepare_host(self, *, interactive: bool) -> None:
-        del interactive
-
-    def _is_loaded(self) -> bool:
-        result = _launchctl(
-            self.layout,
-            "print",
-            self._target,
-            runner=self._runner,
-            check=False,
-            capture_output=True,
-        )
-        return result.returncode == 0
-
-    def inspect_state(self) -> ServiceState:
-        return ServiceState(
-            loaded=self._is_loaded(),
-            enabled=_path_exists(self.layout.service_file),
-        )
-
-    def capture_definition(self) -> FileSnapshot:
-        if _path_exists(self.layout.service_file):
-            _require_managed_launch_agent(self.layout.service_file, self.layout)
-        return _capture_file(self.layout.service_file, label="managed LaunchAgent")
-
-    def render_definition(self, release: Release) -> bytes:
-        return render_launch_agent(release, self.layout)
-
-    def stop_and_confirm(
-        self,
-        *,
-        timeout: float = SERVICE_STOP_TIMEOUT_SECONDS,
-    ) -> None:
-        if self._is_loaded():
-            try:
-                _launchctl(
-                    self.layout,
-                    "bootout",
-                    self._target,
-                    runner=self._runner,
-                )
-            except InstallError:
-                if self._is_loaded():
-                    raise
-        _wait_for_stop_confirmation(
-            self.layout,
-            is_loaded=self._is_loaded,
-            timeout=timeout,
-        )
-
-    def _set_enabled(self, enabled: bool) -> None:
-        _launchctl(
-            self.layout,
-            "enable" if enabled else "disable",
-            self._target,
-            runner=self._runner,
-            check=enabled,
-        )
-
-    def _validate_definition(self) -> None:
-        _require_managed_launch_agent(self.layout.service_file, self.layout)
-        self._runner(
-            ["plutil", "-lint", self.layout.service_file],
-            env=_service_environment(self.layout),
-        )
-
-    def publish_definition(self, content: bytes, *, should_enable: bool) -> None:
-        _write_atomic(self.layout.service_file, content, mode=0o600)
-        self._validate_definition()
-        self._set_enabled(should_enable)
-
-    def restore_definition(
-        self,
-        snapshot: FileSnapshot,
-        *,
-        should_enable: bool,
-    ) -> None:
-        _restore_file(
-            self.layout.service_file,
-            snapshot,
-            label="managed LaunchAgent",
-        )
-        if snapshot.existed:
-            self._validate_definition()
-        self._set_enabled(should_enable)
-
-    def _wait_for_ready(self, *, timeout: float) -> None:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not self._is_loaded():
-                break
-            if _ready_marker_present(self.layout):
-                return
-            time.sleep(0.25)
-        excerpt = _log_excerpt(self.layout.service_error_log)
-        suffix = f"; recent launchd stderr: {excerpt}" if excerpt else ""
-        raise InstallError(
-            f"{LAUNCH_AGENT_LABEL} did not become ready within {timeout:g}s{suffix}"
-        )
-
-    def start_and_wait(self, *, timeout: float) -> None:
-        loaded = self._is_loaded()
-        if loaded and _ready_marker_present(self.layout):
-            return
-        if not loaded:
-            _clear_ready_marker(self.layout)
-            self._set_enabled(True)
-            try:
-                _launchctl(
-                    self.layout,
-                    "bootstrap",
-                    self._domain,
-                    self.layout.service_file,
-                    runner=self._runner,
-                )
-            except InstallError:
-                if not self._is_loaded():
-                    raise
-        self._wait_for_ready(timeout=timeout)
-
-    def service_action(self, action: str) -> int:
-        if action == "start":
-            self.start_and_wait(timeout=SERVICE_READY_TIMEOUT_SECONDS)
-            return 0
-        if action == "stop":
-            self.stop_and_confirm()
-            return 0
-        if action == "restart":
-            self.stop_and_confirm()
-            self.start_and_wait(timeout=SERVICE_READY_TIMEOUT_SECONDS)
-            return 0
-        loaded = self._is_loaded()
-        ready = loaded and _ready_marker_present(self.layout)
-        info("LaunchAgent status:")
-        info(f"  installed: {'yes' if _path_exists(self.layout.service_file) else 'no'}")
-        info(f"  loaded: {'yes' if loaded else 'no'}")
-        info(f"  ready: {'yes' if ready else 'no'}")
-        info(f"  log: {self.layout.log_file}")
-        info(f"  launchd stderr: {self.layout.service_error_log}")
-        return 0 if ready else 3
-
-    def uninstall_definition(self) -> None:
-        if _path_exists(self.layout.service_file):
-            _require_managed_launch_agent(self.layout.service_file, self.layout)
-            self.stop_and_confirm()
-            self._set_enabled(False)
-            self.layout.service_file.unlink()
-            return
-        if self._is_loaded():
-            raise InstallError(
-                "the managed LaunchAgent plist is missing but the launchd target is "
-                "still loaded; inspect it before uninstalling"
-            )
-
-    def inspect_legacy(self) -> LegacyServiceState:
-        return LegacyServiceState()
-
-    def disable_legacy(
-        self,
-        state: LegacyServiceState,
-        *,
-        interactive: bool,
-    ) -> None:
-        del state, interactive
-
-    def restore_legacy(
-        self,
-        state: LegacyServiceState,
-        *,
-        interactive: bool,
-    ) -> None:
-        del state, interactive
 
 
 def _service_backend(
@@ -3026,6 +1920,7 @@ def activate_release(
     ready_timeout: float = SERVICE_READY_TIMEOUT_SECONDS,
     data_dir: Path | None = None,
     admin_bind: AdminBind | None = None,
+    update: InstallerUpdate | None = None,
 ) -> None:
     execute = run_command if runner is None else runner
     backend = _service_backend(layout, execute)
@@ -3065,6 +1960,8 @@ def activate_release(
             and (legacy.active or legacy.enabled)
             and (layout.uid == 0 or interactive)
         )
+        if update is not None:
+            update.report("installing")
         _write_activation_intent(
             layout,
             release,
@@ -3125,6 +2022,8 @@ def activate_release(
             if should_start:
                 # A failed start request can still have created a process.
                 changed_service = True
+                if update is not None:
+                    update.report("restarting")
                 backend.start_and_wait(timeout=ready_timeout)
 
             if pending_intent is not None:
@@ -3236,6 +2135,17 @@ def activate_release(
                         f"clear activation intent: {rollback_error}"
                     )
             detail = f"; rollback issues: {'; '.join(rollback_errors)}" if rollback_errors else ""
+            if update is not None:
+                # A pending interrupted activation is not a proof that the
+                # original installation has now been fully restored.
+                incomplete = bool(rollback_errors) or pending_intent is not None
+                try:
+                    update.report(
+                        "recovery_required" if incomplete else "rolled_back",
+                        "rollback_incomplete" if incomplete else "activation_failed",
+                    )
+                except InstallError:
+                    pass
             raise InstallError(
                 f"activation failed and was rolled back: {error}{detail}"
             ) from error
@@ -3243,101 +2153,6 @@ def activate_release(
         _prune_releases(layout)
     except (InstallError, OSError) as error:
         info(f"warning: release activated but obsolete release cleanup failed: {error}")
-
-
-def _wait_for_systemd_ready(
-    layout: Layout,
-    *,
-    timeout: float,
-    runner: Runner,
-) -> None:
-    deadline = time.monotonic() + timeout
-    last_journal = ""
-    while time.monotonic() < deadline:
-        active = systemctl_user(
-            layout,
-            "is-active",
-            SYSTEMD_SERVICE_NAME,
-            runner=runner,
-            check=False,
-            capture_output=True,
-        )
-        if active.stdout.strip() == "failed":
-            break
-        if _ready_marker_present(layout) and active.stdout.strip() == "active":
-            return
-        journal = runner(
-            [
-                "journalctl",
-                "--user",
-                "--unit",
-                SYSTEMD_SERVICE_NAME,
-                "--lines=5",
-                "--output=cat",
-                "--no-pager",
-            ],
-            check=False,
-            capture_output=True,
-            env=_service_environment(layout),
-        )
-        last_journal = journal.stdout
-        time.sleep(0.5)
-    excerpt = " | ".join(line for line in last_journal.strip().splitlines()[-5:])
-    suffix = f"; recent journal: {excerpt}" if excerpt else ""
-    raise InstallError(
-        f"{SYSTEMD_SERVICE_NAME} did not become ready within {timeout:g}s{suffix}"
-    )
-
-
-def _wait_for_legacy_systemd_ready(
-    layout: Layout,
-    *,
-    since: float,
-    timeout: float,
-    runner: Runner,
-) -> None:
-    """Wait for a pre-ready-marker release during failed-upgrade rollback."""
-
-    deadline = time.monotonic() + timeout
-    last_journal = ""
-    while time.monotonic() < deadline:
-        active = systemctl_user(
-            layout,
-            "is-active",
-            SYSTEMD_SERVICE_NAME,
-            runner=runner,
-            check=False,
-            capture_output=True,
-        )
-        if active.stdout.strip() == "failed":
-            break
-        journal = runner(
-            [
-                "journalctl",
-                "--user",
-                "--unit",
-                SYSTEMD_SERVICE_NAME,
-                "--since",
-                f"@{since:.6f}",
-                "--output=cat",
-                "--no-pager",
-            ],
-            check=False,
-            capture_output=True,
-            env=_service_environment(layout),
-        )
-        last_journal = journal.stdout
-        if (
-            LEGACY_SYSTEMD_READY_LOG in last_journal
-            and active.stdout.strip() == "active"
-        ):
-            return
-        time.sleep(0.5)
-    excerpt = " | ".join(line for line in last_journal.strip().splitlines()[-5:])
-    suffix = f"; recent journal: {excerpt}" if excerpt else ""
-    raise InstallError(
-        f"legacy {SYSTEMD_SERVICE_NAME} did not become ready within {timeout:g}s{suffix}"
-    )
 
 
 def _capture_database(data_dir: Path, temporary_root: Path) -> DatabaseSnapshot:
@@ -3408,33 +2223,6 @@ def _stream_digest(path: Path) -> bytes:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.digest()
-
-
-def _capture_file(path: Path, *, label: str = "managed unit") -> FileSnapshot:
-    if not _path_exists(path):
-        return FileSnapshot(existed=False)
-    _require_regular_file(path, label)
-    metadata = path.stat()
-    return FileSnapshot(
-        existed=True,
-        content=path.read_bytes(),
-        mode=stat.S_IMODE(metadata.st_mode),
-    )
-
-
-def _restore_file(
-    path: Path,
-    snapshot: FileSnapshot,
-    *,
-    label: str = "managed unit",
-) -> None:
-    if snapshot.existed:
-        _write_atomic(path, snapshot.content, mode=snapshot.mode)
-    elif _path_exists(path):
-        if path.is_symlink() or path.is_file():
-            path.unlink()
-        else:
-            raise InstallError(f"refusing to remove unexpected {label} path: {path}")
 
 
 def _capture_skill(layout: Layout, temporary_root: Path) -> SkillSnapshot:
@@ -3551,6 +2339,8 @@ def install_published(
     interactive: bool | None = None,
 ) -> Release:
     manifest = read_published_release_manifest(source_root)
+    selected_layout = resolve_layout() if layout is None else layout
+    update = _installer_update(selected_layout, manifest)
 
     def prepare_candidate(
         candidate_layout: Layout,
@@ -3565,17 +2355,19 @@ def install_published(
             runner=runner,
         )
 
-    return _install(
-        source_root=source_root,
-        prepare_candidate=prepare_candidate,
-        rerun_instruction=(
-            f"rerun the official Netizen v{manifest.version} installer from "
-            f"{OFFICIAL_RELEASE_DOWNLOADS}/v{manifest.version}/install.sh"
-        ),
-        layout=layout,
-        runner=runner,
-        interactive=interactive,
-    )
+    with _report_install_update(update):
+        return _install(
+            source_root=source_root,
+            prepare_candidate=prepare_candidate,
+            rerun_instruction=(
+                f"rerun the official Netizen v{manifest.version} installer from "
+                f"{OFFICIAL_RELEASE_DOWNLOADS}/v{manifest.version}/install.sh"
+            ),
+            layout=selected_layout,
+            runner=runner,
+            interactive=False if update is not None else interactive,
+            update=update,
+        )
 
 
 def _install(
@@ -3586,6 +2378,7 @@ def _install(
     layout: Layout | None,
     runner: Runner | None,
     interactive: bool | None,
+    update: InstallerUpdate | None = None,
 ) -> Release:
     selected_layout = resolve_layout() if layout is None else layout
     require_supported_platform(
@@ -3597,7 +2390,8 @@ def _install(
     _validate_source_location(source_root, selected_layout)
     backend = _service_backend(selected_layout, execute)
     backend.preflight()
-    with installation_lock(selected_layout):
+    lock_context = installation_lock(selected_layout) if update is None else contextlib.nullcontext()
+    with lock_context:
         prepare_directories(selected_layout)
         configuration_ready = True
         try:
@@ -3642,7 +2436,7 @@ def _install(
         require_feishu_permissions(
             release,
             selected_layout,
-            repair_existing_app=configuration_ready,
+            repair_existing_app=configuration_ready and update is None,
             rerun_instruction=rerun_instruction,
             runner=execute,
         )
@@ -3654,7 +2448,10 @@ def _install(
             runner=execute,
             data_dir=validation.data_dir,
             admin_bind=validation.admin_bind,
+            **({"update": update} if update is not None else {}),
         )
+        if update is None:
+            _record_manual_update_recovery(selected_layout)
     info(f"installed release {release.digest[:12]} at {release.root}")
     info(f"configuration: {selected_layout.config_file}")
     info("service environment: account shell profile (reloaded on every start)")
@@ -3777,22 +2574,6 @@ def _require_managed_netizen_directory(path: Path, layout: Layout) -> None:
         raise InstallError(f"could not read managed directory marker {marker}: {error}") from error
     if content != MANAGED_DIRECTORY_MARKER_CONTENT:
         raise InstallError(f"managed directory marker is not recognized: {marker}")
-
-
-def _require_managed_systemd_service(path: Path) -> None:
-    _require_regular_file(path, "managed systemd service")
-    try:
-        content = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
-        raise InstallError(f"could not read managed systemd service {path}: {error}") from error
-    if SYSTEMD_SERVICE_MARKER not in content:
-        raise InstallError(
-            f"refusing to operate on an unrecognized systemd user service: {path}"
-        )
-
-
-def _path_exists(path: Path) -> bool:
-    return path.exists() or path.is_symlink()
 
 
 def _remove_path(path: Path) -> None:
