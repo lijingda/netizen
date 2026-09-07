@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from email.message import Message
+from http.client import IncompleteRead
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError, URLError
 
 from netizen.management.updates import (
     InstalledRelease, UpdateError, UpdateService, installed_release, parse_release,
+    fetch_latest_release, LATEST_API, MAX_RELEASE_BYTES,
 )
 from netizen.deployment.update_executor import UpdateDispatchUnknown, UpdateExecutorError
 from netizen.deployment.update_protocol import (
@@ -431,10 +436,95 @@ class UpdateServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service._fetch = fail
         status = await self.service.check()
         self.assertFalse(status["available"])
-        self.assertEqual(status["checkingErrorCode"], "release_check_failed")
+        self.assertEqual(status["checkingErrorCode"], "release_network_error")
         self.assertNotIn("checkingError", status)
         self.assertNotIn("SECRET", json.dumps(status))
         self.assertIsNone(read_operation(self.root))
+
+
+    async def test_release_failures_are_classified_cached_and_recover_without_dispatch(self):
+        def http_error(code, headers=None, body=b'{"message":"SECRET remote text"}'):
+            message = Message()
+            for key, value in (headers or {}).items():
+                message[key] = value
+            return HTTPError(LATEST_API, code, "SECRET reason", message, io.BytesIO(body))
+
+        cases = [
+            (http_error(403, {"X-RateLimit-Remaining": "0"}), "release_rate_limited"),
+            (http_error(403, {"Retry-After": "120"}), "release_rate_limited"),
+            (http_error(403, {"X-RateLimit-Remaining": "5"},
+                        b'{"message":"You have exceeded a secondary rate limit. SECRET"}'),
+             "release_rate_limited"),
+            (http_error(429), "release_rate_limited"),
+            (http_error(403, {"X-RateLimit-Remaining": "5"}), "release_access_denied"),
+            (http_error(403, body=b"<html>SECRET forbidden</html>"), "release_access_denied"),
+            (http_error(403, body=b'{"message":"' + b"x" * 8192 + b'rate limit"}'),
+             "release_access_denied"),
+            (http_error(404), "release_not_found"),
+            (http_error(502), "release_service_unavailable"),
+            (http_error(401), "release_http_error"),
+            (URLError("SECRET network"), "release_network_error"),
+            (TimeoutError("SECRET timeout"), "release_check_timeout"),
+            (URLError(TimeoutError("SECRET connect timeout")), "release_check_timeout"),
+            (IncompleteRead(b"SECRET truncated"), "release_network_error"),
+        ]
+        for failure, expected in cases:
+            with self.subTest(failure=failure, expected=expected):
+                self.service._fetch = self.fetch
+                self.assertTrue((await self.service.check())["available"])
+                self.now += 60
+                self.service._fetch = fetch_latest_release
+                with patch("netizen.management.updates.urllib.request.urlopen",
+                           side_effect=failure) as opener:
+                    status = await self.service.check()
+                    self.assertEqual(status["checkingErrorCode"], expected)
+                    self.assertIsNone(status["latest"])
+                    self.assertFalse(status["available"])
+                    self.assertTrue(status["restartAvailable"])
+                    self.assertNotIn("SECRET", json.dumps(status))
+                    self.assertEqual(await self.service.status(), status)
+                    self.now += 59
+                    self.assertEqual(await self.service.check(), status)
+                    self.assertEqual(opener.call_count, 1)
+                    with self.assertRaises(UpdateError) as rejected:
+                        await self.service.start(target=TARGET)
+                    self.assertEqual(rejected.exception.code, "update_target_changed")
+                if isinstance(failure, HTTPError):
+                    self.assertTrue(failure.closed)
+                self.service._fetch = self.fetch
+                self.now += 1
+                recovered = await self.service.check()
+                self.assertTrue(recovered["available"])
+                self.assertIsNone(recovered["checkingErrorCode"])
+        self.assertEqual(self.executor.launched, [])
+        self.assertIsNone(read_operation(self.root))
+
+    async def test_invalid_release_responses_are_distinct_from_network_failures(self):
+        incomplete = release_response()
+        incomplete["assets"].pop()
+        invalid_target = release_response()
+        invalid_target["id"] = True
+        for payload, url in (
+            (b"SECRET invalid JSON", LATEST_API),
+            (b"x" * (MAX_RELEASE_BYTES + 1), LATEST_API),
+            (json.dumps(incomplete).encode(), LATEST_API),
+            (json.dumps(invalid_target).encode(), LATEST_API),
+            (json.dumps(release_response()).encode(), "https://example.com/SECRET"),
+        ):
+            with self.subTest(url=url, size=len(payload)):
+                response = MagicMock()
+                response.__enter__.return_value = response
+                response.geturl.return_value = url
+                response.read.return_value = payload
+                self.service._fetch = fetch_latest_release
+                self.now += 60
+                with patch("netizen.management.updates.urllib.request.urlopen", return_value=response):
+                    status = await self.service.check()
+                self.assertEqual(status["checkingErrorCode"], "release_invalid_response")
+                self.assertFalse(status["available"])
+                self.assertIsNone(status["latest"])
+                self.assertNotIn("SECRET", json.dumps(status))
+                self.assertTrue(response.__exit__.called)
 
 
 if __name__ == "__main__":

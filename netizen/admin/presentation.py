@@ -15,6 +15,40 @@ from ..runtime.contracts import (
 from ..management import BindingStatusProjection, ChatLabel
 
 
+def _release_check_message(code: str | None) -> str | None:
+    if code is None:
+        return None
+    return {
+        "release_rate_limited": "GitHub 更新查询已触发限流，请稍后重试。",
+        "release_access_denied": (
+            "更新查询被拒绝（HTTP 403）。请检查服务所在机器的网络访问策略或代理配置；"
+            "若持续出现，请联系维护者。"
+        ),
+        "release_not_found": (
+            "未找到可访问的官方发布版本（HTTP 404）。请稍后重试；"
+            "若持续出现，请联系维护者检查仓库与 Release 状态。"
+        ),
+        "release_service_unavailable": (
+            "更新服务暂时异常（HTTP 5xx）。请稍后重新检查。"
+        ),
+        "release_http_error": (
+            "更新查询收到异常 HTTP 响应。请稍后重试；"
+            "若持续出现，请联系维护者检查更新接口或网络代理。"
+        ),
+        "release_check_timeout": (
+            "查询 GitHub 更新服务超时。请稍后重试；"
+            "若持续出现，请检查服务所在机器的网络或代理配置。"
+        ),
+        "release_network_error": (
+            "访问 GitHub 更新服务时发生网络错误。请检查服务所在机器的网络、代理和 HTTPS 证书配置后再试。"
+        ),
+        "release_invalid_response": (
+            "官方更新信息格式异常，或发布资产不完整、未通过校验。"
+            "请稍后重试；若持续出现，请联系维护者检查 Release。"
+        ),
+    }.get(code, "检查更新失败，原因暂未识别。请稍后重试；若持续出现，请联系维护者。")
+
+
 def _chat_open_url(chat: ChatLabel) -> str:
     if chat.chat_mode == "p2p" and chat.p2p_target_open_id is not None:
         query = urlencode({"openId": chat.p2p_target_open_id})
