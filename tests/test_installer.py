@@ -1342,6 +1342,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertFalse((first / "LOCAL_ENVIRONMENT.md").exists())
             self.assertTrue((first / "scripts/netizen_installer.py").is_file())
             self.assertTrue((first / "scripts/netizen_service_launcher.py").is_file())
+            self.assertTrue((first / "scripts/check_sdk.py").is_file())
             self.assertFalse(any(path.name == "__pycache__" for path in first.rglob("*")))
 
     def test_published_manifest_binds_version_source_and_dependency_lock(self) -> None:
@@ -1436,6 +1437,17 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             self.assertFalse(any("unittest" in command for command in calls))
             self.assertTrue(any(command[-2:] == ["pip", "check"] for command in calls))
+            for release, commands in (
+                (source_release, source_commands),
+                (published_release, calls),
+            ):
+                self.assertEqual(
+                    commands[-1],
+                    [
+                        str(release.venv / "bin" / "python"),
+                        str(release.source / "scripts" / "check_sdk.py"),
+                    ],
+                )
             self.assertEqual(
                 installer.read_published_release_manifest(published_release.source),
                 published_manifest,
@@ -1452,6 +1464,13 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertFalse(any(command[1:3] == ["-m", "venv"] for command in calls))
             self.assertFalse(any("unittest" in command for command in calls))
             self.assertTrue(any(command[-2:] == ["pip", "check"] for command in calls))
+            self.assertEqual(
+                calls[-1],
+                [
+                    str(published_release.venv / "bin" / "python"),
+                    str(published_release.source / "scripts" / "check_sdk.py"),
+                ],
+            )
             self.assertEqual(
                 installer.read_published_release_manifest(published_release.source),
                 published_manifest,

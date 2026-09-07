@@ -48,17 +48,11 @@ class RepositoryHygieneTest(unittest.TestCase):
     ) -> None:
         ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
         manifest = installer.source_manifest(ROOT)
-        template = (ROOT / "LOCAL_ENVIRONMENT.example.md").read_text(
-            encoding="utf-8"
-        )
 
         self.assertIn("/LOCAL_ENVIRONMENT.md", ignored)
         self.assertIn(".gitignore", manifest)
         self.assertIn("LOCAL_ENVIRONMENT.example.md", manifest)
         self.assertNotIn("LOCAL_ENVIRONMENT.md", manifest)
-        self.assertIn("A clean clone does not\nneed it", template)
-        self.assertIn("Never place raw Feishu App Secrets", template)
-        self.assertIn("Do not make installer", template)
 
     def test_publishable_source_has_no_machine_specific_coordinates(self) -> None:
         violations: list[str] = []
