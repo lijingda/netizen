@@ -19,6 +19,9 @@ tag/commit，且构建后的 manifest、摘要和不可变 Release 资产保持�
 后发起的一次安装与重启操作。它允许打断现有工作，不承诺任务续跑，也不是定时自动更新。
 _Avoid_：热升级、无感升级、自动更新。
 
+**Admin Restart / 管理页重启**：实例管理员在管理页明确发起、保持当前安装版本的一次
+服务重启，允许打断现有工作且不承诺任务续跑。
+
 **Host Validation / 主机验证**：每次安装都对目标账号、解释器、依赖、配置、原生 SDK、
 飞书权限，以及按原服务意图需要启动时的 ready 条件执行的验证。它不替代 Published
 Release 的 Main Qualification / Release Integrity，也不替代 Source Install 的完整本地
@@ -154,8 +157,8 @@ _Avoid_: 话题根引用、引用消息回复
 管理员使用的 Admin Control Plane。
 
 **Admin Control Plane / 管理控制面**：实例级浏览器管理界面，用于集中查看和管理
-Project、普通 Binding、Side Topic 与 Admin Upgrade。它与飞书入口共享同一个 application
-service、Scope coordinator、Runtime、Store 和 Codex client；不是 Prompt Channel，也不
+Project、普通 Binding、Side Topic、Admin Upgrade 与 Admin Restart。它与飞书入口共享同一个
+application service、Scope coordinator、Runtime、Store 和 Codex client；不是 Prompt Channel，也不
 拥有第二份历史或配置事实。
 
 **Instance Administrator / 实例管理员**：Admin Control Plane 的单一运维身份，凭独立

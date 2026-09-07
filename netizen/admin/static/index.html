@@ -20,7 +20,7 @@
     <button class="tab active" data-tab="projects" aria-selected="true">Projects</button>
     <button class="tab" data-tab="sessions" aria-selected="false">Sessions</button>
     <button class="tab" data-tab="side-topics" aria-selected="false">Side Topics</button>
-    <button class="tab" data-tab="updates" aria-selected="false">系统更新</button>
+    <button class="tab" data-tab="updates" aria-selected="false">系统维护</button>
   </nav>
 
   <main>
@@ -114,8 +114,8 @@
     </section>
     <section id="updates" class="panel" aria-labelledby="updates-heading" hidden>
       <div class="section-head">
-        <div><p class="eyebrow">NETIZEN</p><h2 id="updates-heading">系统更新</h2></div>
-        <button id="updates-refresh" class="refresh" data-refresh="updates">刷新升级状态</button>
+        <div><p class="eyebrow">NETIZEN</p><h2 id="updates-heading">系统维护</h2></div>
+        <button id="updates-refresh" class="refresh" data-refresh="updates">刷新维护状态</button>
       </div>
       <div class="update-versions">
         <div><p>当前版本</p><strong id="update-current">—</strong><p id="update-source"></p></div>
@@ -131,6 +131,13 @@
         <button id="update-check" class="refresh" disabled>检查更新</button>
         <button id="update-install" class="action" aria-describedby="update-warning" disabled>升级并重启</button>
       </div>
+      <section class="service-restart" aria-labelledby="restart-heading">
+        <h3 id="restart-heading">服务重启</h3>
+        <p>保持当前版本，重新启动 Netizen 及其 Codex 运行环境。修改需要重启生效的配置后，可在这里重启。</p>
+        <p id="restart-warning" class="update-warning">重启会中断正在执行的任务、暂停 Goal，并结束临时 Side 会话。重启后不会自动续跑，管理页需要重新登录。</p>
+        <button id="service-restart" class="refresh" aria-describedby="restart-warning restart-message" disabled>重启服务</button>
+        <p id="restart-message" class="update-warning"></p>
+      </section>
       <p class="update-help"><a href="https://github.com/lijingda/netizen/blob/main/docs/deployment.md" target="_blank" rel="noopener noreferrer">部署与恢复说明</a></p>
       <section class="update-notes" aria-labelledby="update-notes-heading">
         <h3 id="update-notes-heading">更新说明</h3>

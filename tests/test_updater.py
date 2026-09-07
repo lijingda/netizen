@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import shlex
 import stat
 import subprocess
 import sys
@@ -43,6 +44,19 @@ class UpdateProtocolTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(protocol.UpdateProtocolError):
                 protocol.write_operation(self.root, {**self.operation, **changes})
         self.assertEqual(protocol.read_operation(self.root), self.operation)
+
+    def test_restart_schema_is_exact_and_does_not_invent_release_assets(self) -> None:
+        operation = protocol.new_restart_operation("0.5.0", "b" * 64)
+        protocol.write_operation(self.root, operation)
+        self.assertEqual(protocol.read_operation(self.root), operation)
+        for changes in (
+            {"schema": 1}, {"kind": "install"}, {"phase": "installing"},
+            {"target": {"version": "0.5.0", "releaseDigest": "c" * 64}},
+            {"target": {**operation["target"], "command": "restart"}},
+            {"target": TARGET},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(protocol.UpdateProtocolError):
+                protocol.write_operation(self.root, {**operation, **changes})
 
     def test_rejects_symlink_hardlink_public_and_oversized_state(self) -> None:
         path = self.root / "state/update.json"
@@ -262,6 +276,101 @@ class UpdateWorkerTests(unittest.TestCase):
         self.assertFalse(any(key.startswith("NETIZEN_") for key in environment))
         self.assertNotIn("FEISHU_APP_SECRET", environment)
         self.assertNotIn("PYTHONPATH", environment)
+
+
+class RestartWorkerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve() / ".netizen"
+        (self.root / "state").mkdir(parents=True, mode=0o700)
+        self.release = self.root / "releases" / ("b" * 64)
+        (self.release / "source").mkdir(parents=True)
+        (self.root / "current").symlink_to(self.release)
+        self.service = self.release / "source/service.sh"
+        self.service.write_text("#!/bin/sh\nexit 0\n")
+        self.operation = protocol.new_restart_operation("0.5.0", self.release.name)
+        protocol.write_operation(self.root, self.operation)
+
+    def run_restart(self, runner):
+        return updater.run_update(
+            self.operation["operationId"], product_root=self.root, runner=runner,
+            environment_loader=lambda: {"PATH": "/usr/bin:/bin"},
+        )
+
+    def test_exact_restart_retains_lock_without_downloading_or_inheriting_it(self) -> None:
+        def restart(command, **kwargs):
+            self.assertEqual(command, ["/bin/sh", str(self.service), "restart"])
+            self.assertTrue(kwargs["close_fds"])
+            self.assertNotIn("pass_fds", kwargs)
+            self.assertFalse(any(key.startswith("NETIZEN_UPDATE_") for key in kwargs["env"]))
+            with self.assertRaises(BlockingIOError):
+                protocol.acquire_install_lock(self.root)
+            self.assertEqual(protocol.read_operation(self.root)["phase"], "restarting")
+            return subprocess.CompletedProcess(command, 0)
+        self.assertEqual(self.run_restart(restart), 0)
+        self.assertEqual(protocol.read_operation(self.root)["phase"], "succeeded")
+        self.assertEqual((self.root / "current").resolve(), self.release)
+        with protocol.install_lock(self.root):
+            pass
+
+    def test_failure_timeout_and_changed_pointer_never_claim_success(self) -> None:
+        for failure in (1, subprocess.TimeoutExpired("restart", 180), OSError("SECRET"), "changed"):
+            with self.subTest(failure=failure):
+                protocol.write_operation(self.root, self.operation)
+                def restart(command, **kwargs):
+                    if isinstance(failure, Exception):
+                        raise failure
+                    if failure == "changed":
+                        (self.root / "current").unlink()
+                        (self.root / "current").symlink_to("missing")
+                        return subprocess.CompletedProcess(command, 0)
+                    return subprocess.CompletedProcess(command, failure)
+                self.assertEqual(self.run_restart(restart), 1)
+                result = protocol.read_operation(self.root)
+                self.assertEqual(result["phase"], "recovery_required")
+                self.assertNotIn("SECRET", str(result))
+
+    def test_pending_activation_stale_claim_and_changed_release_do_not_restart(self) -> None:
+        runner = MagicMock()
+        intent = self.root / "state/.activation-intent.json"
+        intent.touch()
+        self.assertEqual(self.run_restart(runner), 1)
+        self.assertEqual(protocol.read_operation(self.root)["phase"], "recovery_required")
+        intent.unlink()
+        # A late worker cannot claim an operation already reconciled by Admin.
+        self.assertEqual(self.run_restart(runner), 1)
+        protocol.write_operation(self.root, self.operation)
+        (self.root / "current").unlink()
+        self.assertEqual(self.run_restart(runner), 1)
+        runner.assert_not_called()
+
+    def test_service_path_must_remain_in_exact_physical_release(self) -> None:
+        self.service.unlink()
+        self.service.symlink_to("/bin/sh")
+        runner = MagicMock()
+        self.assertEqual(self.run_restart(runner), 1)
+        runner.assert_not_called()
+        self.assertEqual(protocol.read_operation(self.root)["phase"], "failed")
+
+    def test_real_child_observes_pending_result_and_held_install_lock(self) -> None:
+        fixture = self.root / "restart_fixture.py"
+        fixture.write_text(
+            "import sys\nfrom pathlib import Path\n"
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})\n"
+            "from netizen.deployment.update_protocol import acquire_install_lock, read_operation\n"
+            f"root = Path({str(self.root)!r})\n"
+            "assert read_operation(root)['phase'] == 'restarting'\n"
+            "try:\n    acquire_install_lock(root)\nexcept BlockingIOError:\n    pass\n"
+            "else:\n    raise SystemExit(98)\n",
+        )
+        self.service.write_text(
+            f"#!/bin/sh\nexec {shlex.quote(sys.executable)} -E -B {shlex.quote(str(fixture))}\n"
+        )
+        self.assertEqual(self.run_restart(subprocess.run), 0)
+        self.assertEqual(protocol.read_operation(self.root)["phase"], "succeeded")
+        with protocol.install_lock(self.root):
+            pass
 
 
 class InstallerUpdateTests(unittest.TestCase):

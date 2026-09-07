@@ -111,6 +111,8 @@ button:disabled { cursor: default; opacity: .48; }
 .update-actions { gap: 10px; }
 .update-actions .action { padding: 8px 13px; font-size: inherit; }
 .update-help { margin-top: 16px; font-size: 13px; }
+.service-restart { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--line); }
+.service-restart p { line-height: 1.6; }
 #updates a { color: var(--blue); }
 .update-notes { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--line); }
 #update-notes { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }

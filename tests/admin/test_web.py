@@ -253,6 +253,19 @@ class FakeManagement:
         }
         return self.update_data["operation"]
 
+    async def restart_service(self, *, release_digest):
+        self.calls.append(("restart_service", release_digest))
+        self.update_data["restartAvailable"] = False
+        self.update_data["operation"] = {
+            "schema": 2, "kind": "restart", "operationId": "d" * 32,
+            "target": {
+                "version": self.update_data["current"]["version"],
+                "releaseDigest": release_digest,
+            },
+            "phase": "accepted", "code": "none",
+        }
+        return self.update_data["operation"]
+
     async def query_projects(self, **_kwargs):
         aggregate = ProjectAggregate(self.project_record, 3, 1, 2, "2030-01-02")
         return ProjectInventoryPage((ProjectInventoryItem(aggregate, 1),), None)
@@ -692,40 +705,91 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         _, _, status_data = await self.json_get("/api/v1/updates", session)
         self.assertIsNone(status_data["actions"]["install"])
 
-    async def test_update_install_rejects_target_tampering_and_untrusted_origin(self) -> None:
+    async def test_maintenance_rejects_tampering_and_untrusted_requests(self) -> None:
+        self.runner.open_admission()
+        self.management.update_data.update(restartSupported=True, restartAvailable=True)
+        session = await self.login()
+        other_session = await self.login()
+        targets = {
+            "install": ({"version": "1.2.0"}, {"releaseId": 999},
+                        {"installerSha256": "d" * 64}, {"archiveSha256": "e" * 64},
+                        {"url": "https://example.com/evil.sh"}, {"releaseId": True}),
+            "restart": ({"targetId": "d" * 64}, {"resource": "instance-update"},
+                        {"scopeKey": "foreign-scope"}, {"command": "sh malicious.sh"}),
+        }
+        for action, alterations in targets.items():
+            with self.subTest(action=action):
+                path = f"/api/v1/updates/{action}"
+                for alteration in alterations:
+                    _, _, data = await self.json_get("/api/v1/updates", session)
+                    payload = _action_payload(data["actions"][action])
+                    payload["target"] = {**payload["target"], **alteration}
+                    status, _, _ = await self.json_post(path, session, payload)
+                    self.assertIn(status, (400, 409), alteration)
+                _, _, data = await self.json_get("/api/v1/updates", session)
+                payload = _action_payload(data["actions"][action])
+                status, _, _ = await self.request("POST", path, headers=[
+                    ("Cookie", f"netizen_admin_session={session}"),
+                    ("Content-Type", "application/json"), ("Origin", "https://untrusted.example"),
+                ], body=json.dumps(payload).encode())
+                self.assertEqual(status, 403)
+                for extra, expected in (({"csrfToken": "invalid"}, 403), ({"command": "restart"}, 400)):
+                    status, _, _ = await self.json_post(path, session, {**payload, **extra})
+                    self.assertEqual(status, expected)
+                status, _, _ = await self.json_post(path + "?command=restart", session, payload)
+                self.assertEqual(status, 400)
+                status, _, _ = await self.json_post(path, other_session, payload)
+                self.assertIn(status, (403, 409))
+        self.assertFalse(any(call[0] in {"start_update", "restart_service"} for call in self.management.calls))
+
+    async def test_restart_requires_auth_and_binds_exact_current_release_once(self) -> None:
+        self.runner.open_admission()
+        status, _, _ = await self.request("POST", "/api/v1/updates/restart")
+        self.assertEqual(status, 401)
+        self.management.update_data.update(restartSupported=True, restartAvailable=True)
+        session = await self.login()
+        _, _, data = await self.json_get("/api/v1/updates", session)
+        grant = data["actions"]["restart"]
+        self.assertEqual(grant["target"], {
+            "resource": "instance-restart", "targetId": "a" * 64, "scopeKey": None,
+        })
+        # Forward the granted identity even if a later read sees another release.
+        # UpdateService must reject that stale identity inside the install lock.
+        self.management.update_data["current"]["releaseDigest"] = "f" * 64
+        status, _, result = await self.json_post(
+            "/api/v1/updates/restart", session, _action_payload(grant)
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(result["operation"]["kind"], "restart")
+        self.assertEqual(result["operation"]["phase"], "accepted")
+        self.assertEqual(result["operation"]["target"]["releaseDigest"], "a" * 64)
+        self.assertEqual(self.management.calls[-1], ("restart_service", "a" * 64))
+        status, _, _ = await self.json_post(
+            "/api/v1/updates/restart", session, _action_payload(grant)
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(self.management.calls.count(("restart_service", "a" * 64)), 1)
+        _, _, data = await self.json_get("/api/v1/updates", session)
+        self.assertIsNone(data["actions"]["restart"])
+        self.assertIsNone(data["actions"]["install"])
+
+    async def test_restart_grants_do_not_require_published_install_or_version_check(self) -> None:
         self.runner.open_admission()
         session = await self.login()
-        for alteration in (
-            {"version": "1.2.0"}, {"releaseId": 999},
-            {"installerSha256": "d" * 64}, {"archiveSha256": "e" * 64},
-            {"url": "https://example.com/evil.sh"}, {"releaseId": True},
-        ):
+        self.management.update_data.update(
+            restartSupported=True, restartAvailable=True, available=False,
+            latest=None, checkedAt=None,
+        )
+        for source in ("published", "source"):
+            self.management.update_data["current"]["source"] = source
+            self.management.update_data["supported"] = source == "published"
             _, _, data = await self.json_get("/api/v1/updates", session)
-            payload = _action_payload(data["actions"]["install"])
-            payload["target"] = {**payload["target"], **alteration}
-            status, _, _ = await self.json_post("/api/v1/updates/install", session, payload)
-            self.assertIn(status, (400, 409), alteration)
+            self.assertIsNotNone(data["actions"]["restart"])
+            self.assertIsNone(data["actions"]["install"])
+        self.assertFalse(any(call[0] == "check_update" for call in self.management.calls))
+        self.management.update_data["restartAvailable"] = False
         _, _, data = await self.json_get("/api/v1/updates", session)
-        payload = _action_payload(data["actions"]["install"])
-        status, _, _ = await self.request(
-            "POST", "/api/v1/updates/install",
-            headers=[
-                ("Cookie", f"netizen_admin_session={session}"),
-                ("Content-Type", "application/json"),
-                ("Origin", "https://untrusted.example"),
-            ],
-            body=json.dumps(payload).encode(),
-        )
-        self.assertEqual(status, 403)
-        wrong_csrf = {**payload, "csrfToken": "invalid"}
-        status, _, _ = await self.json_post(
-            "/api/v1/updates/install", session, wrong_csrf
-        )
-        self.assertEqual(status, 403)
-        payload["command"] = "sh malicious.sh"
-        status, _, _ = await self.json_post("/api/v1/updates/install", session, payload)
-        self.assertEqual(status, 400)
-        self.assertFalse(any(call[0] == "start_update" for call in self.management.calls))
+        self.assertIsNone(data["actions"]["restart"])
 
     async def test_update_history_survives_source_and_recovery_disablement(self) -> None:
         self.runner.open_admission()
@@ -754,27 +818,30 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_update_errors_keep_stable_http_code_and_message(self) -> None:
         self.runner.open_admission()
+        self.management.update_data.update(restartSupported=True, restartAvailable=True)
         session = await self.login()
         cases = (
+            ("restart_unsupported", 409, "restart_unsupported", "仅当前受管安装支持 Admin 重启。"),
             ("invalid_update_target", 400, "invalid_update_target", "升级目标无效。"),
             ("update_unsupported", 409, "update_unsupported", "仅当前受管正式版本支持 Admin 升级。"),
             ("update_target_changed", 409, "update_target_changed", "升级目标已变化，请重新检查更新。"),
-            ("update_busy", 409, "update_busy", "另一个安装或升级正在执行，请稍后查看结果。"),
-            ("update_state_unavailable", 503, "update_state_unavailable", "升级状态无法确认，请检查安装器状态文件。"),
+            ("update_busy", 409, "update_busy", "另一个安装或维护操作正在执行，请稍后查看结果。"),
+            ("update_state_unavailable", 503, "update_state_unavailable", "维护状态无法确认，请检查安装器状态文件。"),
             ("update_lock_unavailable", 503, "update_state_unavailable", "无法取得安装锁，请检查安装状态。"),
             ("update_installation_changed", 409, "update_target_changed", "当前安装已变化，请重新连接。"),
-            ("update_already_submitted", 409, "update_busy", "升级已提交，请查看已有升级结果。"),
-            ("update_recovery_required", 409, "update_recovery_required", "上次升级结果未确认，请使用官方安装器恢复。"),
-            ("update_cleanup_unavailable", 503, "update_cleanup_unavailable", "暂时无法清理上次升级任务，请稍后重试。"),
-            ("update_submission_unknown", 503, "update_state_unavailable", "升级提交结果无法确认，请刷新查看；不要重复提交。"),
+            ("update_already_submitted", 409, "update_busy", "维护操作已提交，请查看已有操作结果。"),
+            ("update_recovery_required", 409, "update_recovery_required", "上次维护结果未确认，请使用安装器恢复。"),
+            ("update_cleanup_unavailable", 503, "update_cleanup_unavailable", "暂时无法清理上次维护任务，请稍后重试。"),
+            ("update_submission_unknown", 503, "update_state_unavailable", "维护操作提交结果无法确认，请刷新查看；不要重复提交。"),
         )
         for reason, expected_status, code, message in cases:
             with self.subTest(reason=reason):
                 _, _, data = await self.json_get("/api/v1/updates", session)
-                with patch.object(self.management, "start_update", side_effect=UpdateError(reason)):
+                restarting = reason == "restart_unsupported"
+                action, method = ("restart", "restart_service") if restarting else ("install", "start_update")
+                with patch.object(self.management, method, side_effect=UpdateError(reason)):
                     status, _, result = await self.json_post(
-                        "/api/v1/updates/install", session,
-                        _action_payload(data["actions"]["install"]),
+                        f"/api/v1/updates/{action}", session, _action_payload(data["actions"][action]),
                     )
                 self.assertEqual(status, expected_status)
                 self.assertEqual(result["code"], code)

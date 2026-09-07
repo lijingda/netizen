@@ -38,6 +38,7 @@ CODES = frozenset({
     "rollback_incomplete", "installer_failed", "worker_interrupted", "lock_busy",
     "operation_invalid", "dispatch_failed", "dispatch_unknown", "worker_lost",
     "previous_release_changed", "profile_failed", "manual_recovery",
+    "restart_failed",
 })
 ENV_OPERATION_ID = "NETIZEN_UPDATE_OPERATION_ID"
 ENV_LOCK_FD = "NETIZEN_UPDATE_LOCK_FD"
@@ -68,13 +69,17 @@ def validate_target(value: object) -> dict[str, Any]:
 
 
 def validate_operation(value: object) -> dict[str, Any]:
+    restart = isinstance(value, dict) and value.get("schema") == 2
+    keys = {
+        "schema", "operationId", "target", "previousRelease", "phase", "code",
+        "createdAt", "updatedAt",
+    }
+    if restart:
+        keys.add("kind")
     if (
         not isinstance(value, dict)
-        or set(value) != {
-            "schema", "operationId", "target", "previousRelease", "phase", "code",
-            "createdAt", "updatedAt",
-        }
-        or type(value.get("schema")) is not int or value["schema"] != 1
+        or set(value) != keys
+        or type(value.get("schema")) is not int or value["schema"] not in {1, 2}
         or not _matches(OPERATION_ID, value.get("operationId"))
         or not _matches(SHA256, value.get("previousRelease"))
         or not isinstance(value.get("phase"), str) or value["phase"] not in PHASES
@@ -84,6 +89,17 @@ def validate_operation(value: object) -> dict[str, Any]:
         or not 0 <= value["createdAt"] <= value["updatedAt"] < 2**63
     ):
         raise UpdateProtocolError("invalid update operation")
+    if restart:
+        target = value["target"]
+        if (value["kind"] != "restart" or not isinstance(target, dict)
+                or set(target) != {"version", "releaseDigest"}
+                or not _matches(VERSION, target.get("version"))
+                or target.get("releaseDigest") != value["previousRelease"]
+                or value["phase"] not in {
+                    "accepted", "restarting", "succeeded", "failed", "recovery_required", "recovered",
+                }):
+            raise UpdateProtocolError("invalid restart operation")
+        return {**value, "target": dict(target)}
     return {**value, "target": validate_target(value["target"])}
 
 
@@ -96,8 +112,27 @@ def new_operation(target: object, previous_release: str) -> dict[str, Any]:
     })
 
 
+def new_restart_operation(version: str, release_digest: str) -> dict[str, Any]:
+    now = int(time.time())
+    return validate_operation({
+        "schema": 2, "kind": "restart", "operationId": secrets.token_hex(16),
+        "target": {"version": version, "releaseDigest": release_digest},
+        "previousRelease": release_digest, "phase": "accepted", "code": "none",
+        "createdAt": now, "updatedAt": now,
+    })
+
+
 def terminal_phase(phase: str) -> bool:
     return phase in TERMINAL_PHASES
+
+
+def activation_requires_recovery(product_root: Path) -> bool:
+    """An interrupted installer must reconcile its transaction before restart."""
+    try:
+        (product_root / "state" / ".activation-intent.json").lstat()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def _state_directory(product_root: Path) -> Path:

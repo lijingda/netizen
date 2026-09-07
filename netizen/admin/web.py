@@ -485,6 +485,7 @@ class AdminWebApplication:
         mutations: dict[str, Callable[[_RequestContext], Awaitable[Response]]] = {
             "/api/v1/updates/check": self._updates_check,
             "/api/v1/updates/install": self._updates_install,
+            "/api/v1/updates/restart": self._updates_restart,
             "/api/v1/projects/register": self._project_register,
             "/api/v1/projects/create-directory": self._project_create_directory,
             "/api/v1/projects/set-enabled": self._project_set_enabled,
@@ -534,6 +535,7 @@ class AdminWebApplication:
                 _empty_preconditions(),
             ),
             "install": None,
+            "restart": None,
         }
         latest = status.get("latest")
         operation = status.get("operation")
@@ -553,6 +555,13 @@ class AdminWebApplication:
             )
             actions["install"] = self._grant(
                 context, "updates.install", target, _empty_preconditions()
+            )
+        if status.get("restartAvailable") is True:
+            actions["restart"] = self._grant(
+                context,
+                "updates.restart",
+                AdminActionTarget("instance-restart", status["current"]["releaseDigest"]),
+                _empty_preconditions(),
             )
         return _json_response(
             200,
@@ -584,6 +593,21 @@ class AdminWebApplication:
             "updates.install",
             target.version,
             self._management.start_update(target=_action_target_json(grant.target)),
+        )
+        return _json_response(
+            202, {"requestId": context.request.request_id, "operation": operation}
+        )
+
+    async def _updates_restart(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        _, grant = self._redeem(
+            context, "updates.restart", expected_resource="instance-restart"
+        )
+        operation = await self._mutation(
+            context,
+            "updates.restart",
+            grant.target.target_id,
+            self._management.restart_service(release_digest=grant.target.target_id),
         )
         return _json_response(
             202, {"requestId": context.request.request_id, "operation": operation}
@@ -2074,10 +2098,11 @@ def _runtime_precondition(grant: object) -> RuntimePrecondition:
 _UPDATE_HTTP_ERRORS = {
     "invalid_update_target": (400, "invalid_update_target", "升级目标无效。"),
     "update_unsupported": (409, "update_unsupported", "仅当前受管正式版本支持 Admin 升级。"),
+    "restart_unsupported": (409, "restart_unsupported", "仅当前受管安装支持 Admin 重启。"),
     "update_target_changed": (409, "update_target_changed", "升级目标已变化，请重新检查更新。"),
-    "update_busy": (409, "update_busy", "另一个安装或升级正在执行，请稍后查看结果。"),
+    "update_busy": (409, "update_busy", "另一个安装或维护操作正在执行，请稍后查看结果。"),
     "update_state_unavailable": (
-        503, "update_state_unavailable", "升级状态无法确认，请检查安装器状态文件。",
+        503, "update_state_unavailable", "维护状态无法确认，请检查安装器状态文件。",
     ),
     "update_lock_unavailable": (
         503, "update_state_unavailable", "无法取得安装锁，请检查安装状态。",
@@ -2085,15 +2110,15 @@ _UPDATE_HTTP_ERRORS = {
     "update_installation_changed": (
         409, "update_target_changed", "当前安装已变化，请重新连接。",
     ),
-    "update_already_submitted": (409, "update_busy", "升级已提交，请查看已有升级结果。"),
+    "update_already_submitted": (409, "update_busy", "维护操作已提交，请查看已有操作结果。"),
     "update_recovery_required": (
-        409, "update_recovery_required", "上次升级结果未确认，请使用官方安装器恢复。",
+        409, "update_recovery_required", "上次维护结果未确认，请使用安装器恢复。",
     ),
     "update_cleanup_unavailable": (
-        503, "update_cleanup_unavailable", "暂时无法清理上次升级任务，请稍后重试。",
+        503, "update_cleanup_unavailable", "暂时无法清理上次维护任务，请稍后重试。",
     ),
     "update_submission_unknown": (
-        503, "update_state_unavailable", "升级提交结果无法确认，请刷新查看；不要重复提交。",
+        503, "update_state_unavailable", "维护操作提交结果无法确认，请刷新查看；不要重复提交。",
     ),
 }
 

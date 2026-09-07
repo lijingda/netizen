@@ -15,6 +15,7 @@ from netizen.management.updates import (
 from netizen.deployment.update_executor import UpdateDispatchUnknown, UpdateExecutorError
 from netizen.deployment.update_protocol import (
     acquire_install_lock, advance_operation, new_operation, read_operation, write_operation,
+    new_restart_operation,
 )
 
 
@@ -178,6 +179,88 @@ class UpdateServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(error.exception.code, "update_unsupported")
         self.assertEqual(self.fetches, 0)
         self.assertEqual(self.executor.launched, [])
+
+    async def test_restart_needs_no_release_check_and_supports_managed_source(self):
+        for source in ("published", "source"):
+            with self.subTest(source=source):
+                self.service._current = InstalledRelease("0.4.6", source, self.release)
+                self.assertTrue((await self.service.status())["restartAvailable"])
+                operation = await self.service.restart(release_digest=self.release.name)
+                self.assertEqual(operation["kind"], "restart")
+                self.assertEqual(operation["target"], {
+                    "version": "0.4.6", "releaseDigest": self.release.name,
+                })
+                self.assertEqual(read_operation(self.root), operation)
+                advance_operation(self.root, operation["operationId"], "succeeded")
+        self.assertEqual(self.fetches, 0)
+        self.assertEqual(len(self.executor.launched), 2)
+
+    async def test_restart_is_unavailable_for_unmanaged_or_changed_installation(self):
+        for source, digest in (("unmanaged", self.release.name), ("published", "a" * 64)):
+            self.service._current = InstalledRelease("0.4.6", source, self.release)
+            with self.assertRaises(UpdateError):
+                await self.service.restart(release_digest=digest)
+        self.assertEqual(self.executor.launched, [])
+        self.assertIsNone(read_operation(self.root))
+        with patch.object(self.service, "_restart_supported", side_effect=[True, False]), \
+                self.assertRaises(UpdateError) as error:
+            await self.service.restart(release_digest=self.release.name)
+        self.assertEqual(error.exception.code, "update_installation_changed")
+
+    async def test_restart_and_upgrade_block_each_other_and_recovery(self):
+        await self.service.check()
+        for restart in (False, True):
+            for phase in ("accepted", "restarting", "recovery_required"):
+                with self.subTest(restart=restart, phase=phase):
+                    operation = (new_restart_operation("0.4.6", self.release.name) if restart
+                                 else new_operation(TARGET, self.release.name))
+                    write_operation(self.root, operation)
+                    advance_operation(self.root, operation["operationId"], phase)
+                    self.now = operation["createdAt"]
+                    descriptor = acquire_install_lock(self.root)
+                    try:
+                        status = await self.service.status()
+                        self.assertFalse(status["available"])
+                        self.assertFalse(status["restartAvailable"])
+                    finally:
+                        os.close(descriptor)
+                    for submit in (lambda: self.service.start(target=TARGET),
+                                   lambda: self.service.restart(release_digest=self.release.name)):
+                        with self.assertRaises(UpdateError):
+                            await submit()
+        self.assertEqual(self.executor.launched, [])
+
+    async def test_restart_respects_install_lock_and_interrupted_activation(self):
+        descriptor = acquire_install_lock(self.root)
+        try:
+            with self.assertRaises(UpdateError) as error:
+                await self.service.restart(release_digest=self.release.name)
+            self.assertEqual(error.exception.code, "update_busy")
+        finally:
+            os.close(descriptor)
+        # Even a dangling intent symlink must fail closed before dispatch.
+        (self.root / "state/.activation-intent.json").symlink_to("missing")
+        self.assertFalse((await self.service.status())["restartAvailable"])
+        with self.assertRaises(UpdateError) as error:
+            await self.service.restart(release_digest=self.release.name)
+        self.assertEqual(error.exception.code, "update_recovery_required")
+        self.assertIsNone(read_operation(self.root))
+        self.assertEqual(self.executor.launched, [])
+
+    async def test_ambiguous_restart_and_lost_worker_never_resubmit(self):
+        self.executor.error = UpdateDispatchUnknown("SECRET")
+        operation = await self.service.restart(release_digest=self.release.name)
+        self.assertEqual(operation["phase"], "accepted")
+        self.now = operation["createdAt"]
+        self.assertFalse((await self.service.status())["restartAvailable"])
+        with self.assertRaises(UpdateError):
+            await self.service.restart(release_digest=self.release.name)
+        self.executor.active = False
+        status = await self.service.status()
+        self.assertEqual(status["operation"]["phase"], "recovery_required")
+        self.assertEqual(status["operation"]["kind"], "restart")
+        self.assertFalse(status["restartAvailable"])
+        self.assertEqual(len(self.executor.launched), 1)
 
     async def test_target_tampering_and_nonforward_versions_fail_before_dispatch(self):
         await self.service.check()

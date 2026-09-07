@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from netizen.deployment.update_protocol import CODES, PHASES, TERMINAL_PHASES
+from netizen.admin.web import AdminActionTarget, _action_target_json
 
 
 class UpdateUiTest(unittest.TestCase):
@@ -25,6 +26,11 @@ class UpdateUiTest(unittest.TestCase):
         core = source[source.index("async function api("):source.index("async function mutate(")]
         harness = Path(__file__).with_name("update_ui_harness.js").read_text(encoding="utf-8")
         before, after = harness.split("// SHIPPED_UPDATE_CONTROLLER\n")
+        # Use the HTTP serializer's real target shape for browser reconciliation.
+        # A handwritten `id` fixture would conceal a `targetId` integration bug.
+        before = "const restartTarget = " + json.dumps(_action_target_json(
+            AdminActionTarget("instance-restart", "c" * 64)
+        )) + ";\n" + before
         contract = (
             "assert.deepEqual(Object.keys(updatePhaseLabels).sort(), "
             + json.dumps(sorted(PHASES)) + ");\n"
