@@ -48,7 +48,8 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   completed structured items；Side 只使用 exact completed Side Turn 的 structured
   items，不读取 aggregate diff 或更早 Turn 的文件。
   Project 只解析相对路径，不过滤 exact Turn 明确报告的外部文件；文件每页 8 个，最多
-  400 个完整循环分页，点击“发送”后以图片或文件消息回复到卡片话题。可见正文只显示脱敏
+  400 个完整分页；多页卡片统一选择页码后点击“跳转”，可直接查看任意页。
+  点击“发送”后以图片或文件消息回复到卡片话题。可见正文只显示脱敏
   逻辑位置，不显示文件大小；Ordinary/Goal 的完整可验证文本 hunk 与纯 100% rename 显示
   整轮和逐文件 `+N -M`，其他 metadata-only 变化省略数字，Side 暂不显示行数；
   普通完成/进度文件卡继续使用 v4 callback；Goal 与 Files 同卡时使用 v5，并在飞书

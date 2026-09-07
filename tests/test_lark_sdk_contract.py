@@ -41,6 +41,7 @@ from lark_channel import (
 from lark_channel.channel.channel import _card_action_identity
 from lark_channel.channel.normalize.pipeline import PipelineConfig, PipelineDeps
 from lark_channel.channel.quote import QuoteResolver
+from lark_channel.event.callback.model.p2_card_action_trigger import P2CardActionTrigger
 from lark_oapi.api.im.v1 import (
     GetMessageRequest,
     GetMessageResponse,
@@ -50,8 +51,8 @@ from lark_oapi.api.im.v1 import (
 from openai_codex import ImageInput, TextInput
 
 from netizen import channel_app
-from netizen.cards import settings_card, turn_files_card
-from netizen.domain import FeishuScope, ScopeKind
+from netizen.cards import settings_card, turn_files_card, turn_files_card_from_manifest
+from netizen.domain import FeishuScope, ScopeKind, TurnFileManifestItem
 from netizen.image_inputs import (
     UnsupportedPromptMedia,
     current_message_image_references,
@@ -194,9 +195,55 @@ class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotEqual(first_value["nonce"], second_value["nonce"])
         await self._assert_redelivery_dedup_and_redraw_distinct(
-            CardActionPayload(tag="button", value=first_value),
-            CardActionPayload(tag="button", value=second_value),
+            CardActionPayload(
+                tag="button", value=first_value, form_value={"turn_file_page": "1"},
+            ),
+            CardActionPayload(
+                tag="button", value=second_value, form_value={"turn_file_page": "1"},
+            ),
         )
+
+    async def test_file_selector_form_survives_sdk_event_and_deduplicates_exact_submission(self) -> None:
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        manifest = tuple(
+            TurnFileManifestItem(f"/srv/work/result-{index:02}.txt", f"result-{index:02}.txt")
+            for index in range(17)
+        )
+        card = turn_files_card_from_manifest(
+            scope=scope,
+            binding_id="binding-123",
+            turn_id="turn-123",
+            final_response="done",
+            manifest=manifest,
+            page=0,
+        )
+        first_value = _callback_value(card.card, "turn-file.page")
+        first_action = CardActionPayload(
+            tag="button", value=first_value, form_value={"turn_file_page": "1"},
+        )
+        await self._assert_redelivery_dedup_and_redraw_distinct(
+            first_action,
+            CardActionPayload(
+                tag="button", value=first_value, form_value={"turn_file_page": "2"},
+            ),
+        )
+        channel = FeishuChannel(app_id="cli_contract", app_secret="test-secret")
+        received: list[CardActionEvent] = []
+        channel.on(Events.CARD_ACTION, received.append)
+        await channel._handle_interaction_event(P2CardActionTrigger({
+            "event": {
+                "operator": {"open_id": "ou_user"},
+                "context": {"open_message_id": "om_card", "open_chat_id": "oc_group"},
+                "action": {
+                    "tag": "button", "value": first_value,
+                    "form_value": {"turn_file_page": "1"},
+                },
+            },
+        }))
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0].action.value, first_value)
+        self.assertEqual(received[0].action.form_value, {"turn_file_page": "1"})
+        self.assertEqual(_card_action_identity(received[0].action), _card_action_identity(first_action))
 
     async def test_project_form_nonce_participates_in_sdk_identity(self) -> None:
         scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)

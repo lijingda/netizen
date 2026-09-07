@@ -648,7 +648,7 @@ class CardCodecTest(unittest.TestCase):
             value={
                 **common,
                 "intent": "turn-file.page",
-                "page": 1,
+                "page": 0,
                 "files": manifest,
                 "answer": "analysis complete",
                 "a": 12,
@@ -669,7 +669,7 @@ class CardCodecTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(page.page, 1)
+        self.assertEqual(page.page, 0)
         self.assertEqual(page.answer, "analysis complete")
         self.assertEqual((page.additions, page.deletions), (12, 3))
         self.assertEqual(
@@ -693,14 +693,14 @@ class CardCodecTest(unittest.TestCase):
             {
                 **common,
                 "intent": "turn-file.page",
-                "page": 1,
+                "page": 0,
                 "files": manifest,
                 "answer": "analysis complete",
             },
             {
                 **common,
                 "intent": "turn-file.page",
-                "page": 1,
+                "page": 0,
                 "files": manifest,
                 "answer": "analysis complete",
                 "nonce": "malformed",
@@ -1289,7 +1289,9 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("+17", last_visible)
         self.assertIn("src/file-17.txt", last_visible)
         self.assertNotIn("下一页", json.dumps(last.card, ensure_ascii=False))
-        self.assertIn("回到第一页", json.dumps(last.card, ensure_ascii=False))
+        self.assertIn("跳转", json.dumps(last.card, ensure_ascii=False))
+        self.assertEqual(_elements(last.card, "select_static")[0]["initial_option"], "2")
+        self.assertNotIn("回到第一页", json.dumps(last.card, ensure_ascii=False))
 
     def test_running_progress_card_is_expanded_bounded_and_projection_only(
         self,
@@ -1674,6 +1676,7 @@ class CardRendererTest(unittest.TestCase):
             callback_chat_id=self.scope.chat_id,
             sender_id="ou_user",
             tag="button",
+            form_value={"turn_file_page": "1"},
             value=page_value,
         )
         self.assertIsNotNone(intent.progress)
@@ -1688,6 +1691,7 @@ class CardRendererTest(unittest.TestCase):
             callback_chat_id=self.scope.chat_id,
             sender_id="ou_user",
             tag="button",
+            form_value={"turn_file_page": "1"},
             value=tampered_value,
         )
         assert tampered_intent.progress is not None
@@ -1725,6 +1729,7 @@ class CardRendererTest(unittest.TestCase):
             callback_chat_id=self.scope.chat_id,
             sender_id="ou_user",
             tag="button",
+            form_value={"turn_file_page": "1"},
             value=legacy_value,
         )
         assert legacy_intent.progress is not None
@@ -1781,6 +1786,7 @@ class CardRendererTest(unittest.TestCase):
             callback_chat_id=self.scope.chat_id,
             sender_id="ou_user",
             tag="button",
+            form_value={"turn_file_page": "1"},
             value=value,
         )
         assert intent.progress is not None
@@ -1964,6 +1970,7 @@ class CardRendererTest(unittest.TestCase):
                 callback_chat_id="oc_group",
                 sender_id="ou_user",
                 tag="button",
+                form_value={"turn_file_page": "1"},
                 value=next_value,
             )
             updated = turn_files_card_from_manifest(
@@ -3138,6 +3145,7 @@ class CardRendererTest(unittest.TestCase):
             callback_chat_id=self.scope.chat_id,
             sender_id="ou_user",
             tag="button",
+            form_value={"turn_file_page": "1"},
             value=page_value,
         )
         assert intent.reply is not None
@@ -3178,6 +3186,7 @@ class CardRendererTest(unittest.TestCase):
                 callback_chat_id=self.scope.chat_id,
                 sender_id="ou_user",
                 tag="button",
+                form_value={"turn_file_page": "1"},
                 value=retargeted,
             )
 

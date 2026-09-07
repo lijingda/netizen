@@ -466,15 +466,20 @@ final physical Turn 的 latest diff 用于文件发现。最终 physical Turn �
 本轮文件路径。
 
 普通 Result + Files 与 Activity + Result + Files 卡继续使用 v4 callback；Goal 与 Files
-同卡时使用 v5 完整组合 manifest。两版每页 8 个，最多 400 个完整循环分页，展示总数、
+同卡时使用 v5 完整组合 manifest。两版每页 8 个，最多 400 个完整分页，展示总数、
 页码、证据完整时的本轮累计 `+N -M`、脱敏逻辑位置与逐文件 `+N -M`；图片和统计未知的
 文件不显示数字，也不显示文件大小。Project 内文件使用 Project 相对路径，Project 外原生生成图使用
 `生成图片/<文件名>`，账号 home 内其他文件使用 `~/...`，其余位置只显示有界路径尾部。
 所有条目按钮统一为“发送”，顶部说明点击后会把当前图片或文件发送到卡片话题。不使用
-表格、预览、diff 正文、发送全部或静默截断；超过 400 个或完整 JSON 超过 55,000 bytes
-时明确说明平台边界并省略整个 Files 模块。可见正文不显示绝对路径，但每个发送 callback 明文携带该文件
-canonical absolute path；每页唯一的“下一页/回到第一页”循环 callback 明文携带完整文件
-manifest；已知的条目统计用短字段 `a/d` 成对携带，未知时成对省略，整轮统计也以顶层
+表格、预览、diff 正文、发送全部或静默截断。按
+[ADR 0058](adr/0058-use-page-selection-for-file-cards.md)，多页卡片统一使用根级表单中的
+页码下拉框与唯一“跳转”提交按钮，仅一页时无导航。按固定 SDK 实际发送的完整
+Card 2.0 JSON UTF-8 bytes 逐页检查，包含完整 manifest、其他模块和 transport nonce；
+超过 400 个或任一页超过 55,000 bytes 时，明确说明平台边界并省略整个 Files 模块。
+可见正文不显示绝对路径，但每个发送 callback 明文携带该文件 canonical absolute path；
+只有分页表单的提交按钮携带完整 manifest，选项仅传从零开始的页码字符串，通过公开 `form_value`
+读取并验证范围；固定 Channel SDK 丢失独立 select callback 的 `option`，不为此新增
+私有适配。已知的条目统计用短字段 `a/d` 成对携带，未知时成对省略，整轮统计也以顶层
 `a/d` 携带。v5 另外携带有界冻结的 Goal/Activity/Result 模块。Binding/Turn 只保留 provenance 和
 幂等 identity；v5 callback 不读取飞书原卡、Binding、Project 或 completed Turn，直接重建
 并更新完整 Card 2.0，翻页不会丢失其他模块。cleared 卡不在进程内保留文件清单、Projection
@@ -482,7 +487,10 @@ manifest；已知的条目统计用短字段 `a/d` 成对携带，未知时成�
 SQLite，且 v5 文件 callback 自包含，所以服务/App Server 重启后已发送卡仍可翻页和发送，
 但旧 Goal 控制按钮会过期。该 manifest schema 在正式推广前原位收敛，action version 不变，
 不承诺升级前其他 pilot schema 的测试卡兼容；transport nonce 缺失或格式异常不影响业务
-payload 解码。旧 v3 opaque-ref 卡片点击时明确提示已过期，不再重读历史。
+payload 解码。新 PAGE callback 固定携带 `pagination: select`，要求从 `form_value`
+读取目标页；旧的无标记 PAGE 仍按按钮携带的页码解码，重绘时统一使用页码选择表单。
+该标记仅用于回调解码，不增加领域字段、导航状态、缓存或持久记录。旧 v3 opaque-ref
+卡片点击时明确提示已过期，不再重读历史。
 
 每次翻页和发送都从 payload path 重新 resolve/stat；不可用文件在分页中保留位置并取消
 发送按钮。图片白名单为 PNG/JPEG/GIF/WebP，点击后用 `OutboundImage`；其他普通文件用

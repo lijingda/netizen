@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send and round-trip one real v5 composed Reply Card at file capacity."""
+"""Create/update a capacity card; does not attest real client form submission."""
 
 from __future__ import annotations
 
@@ -27,23 +27,22 @@ from netizen.settings import Settings
 from netizen.turn_files import TurnFile
 
 
-def _next_page_value(value: object) -> dict[str, object] | None:
+def _page_value(value: object) -> dict[str, object] | None:
     if isinstance(value, dict):
         if value.get("type") == "callback":
             candidate = value.get("value")
             if (
                 isinstance(candidate, dict)
                 and candidate.get("intent") == "turn-file.page"
-                and candidate.get("page") == 1
             ):
                 return candidate
         for child in value.values():
-            found = _next_page_value(child)
+            found = _page_value(child)
             if found is not None:
                 return found
     elif isinstance(value, list):
         for child in value:
-            found = _next_page_value(child)
+            found = _page_value(child)
             if found is not None:
                 return found
     return None
@@ -115,9 +114,9 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
         )
         if not sent.success or not sent.message_id:
             raise RuntimeError(f"capacity card send failed: {sent.raw!r}")
-        page_value = _next_page_value(card.card)
+        page_value = _page_value(card.card)
         if page_value is None:
-            raise RuntimeError("capacity card is missing its next-page callback")
+            raise RuntimeError("capacity card is missing its page-selection callback")
         page_intent = decode_turn_file_action(
             app_id=settings.app_id,
             message_id=sent.message_id,
@@ -125,8 +124,9 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
             sender_id="capacity-probe",
             tag="button",
             value=page_value,
+            form_value={"turn_file_page": "1"},
         )
-        if page_intent.reply is None:
+        if page_intent.reply is None or page_intent.page != 1:
             raise RuntimeError("capacity card page callback omitted its Reply manifest")
         if (
             page_intent.additions != args.count * 12
@@ -146,7 +146,7 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
             turn_id="capacity-probe",
             manifest=page_intent.files,
             reply=page_intent.reply,
-            page=1,
+            page=page_intent.page,
             additions=page_intent.additions,
             deletions=page_intent.deletions,
         )
@@ -166,6 +166,7 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
             raise RuntimeError("updated capacity card could not be refetched exactly")
         return {
             "count": args.count,
+            "pagination": page_value["pagination"],
             "card_json_bytes": len(
                 json.dumps(card.card, ensure_ascii=False).encode("utf-8")
             ),
@@ -174,6 +175,7 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
             "line_statistics_round_trip_success": True,
             "full_card_update_success": True,
             "updated_message_refetch_success": True,
+            "live_client_callback_verified": False,
         }
     finally:
         await asyncio.to_thread(channel.stop)
