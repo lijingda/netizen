@@ -1319,31 +1319,7 @@ def _run_host_release_checks(
     )
     runner([python, "-m", "pip", "check"], env=environment)
     runner(
-        [python, source / "scripts" / "probe_sdk_turn_plan.py", "--timeout", "5"],
-        env=environment,
-    )
-    runner(
-        [
-            python,
-            source / "scripts" / "probe_sdk_completion_race.py",
-            "--read-recovery",
-            "--attempts",
-            "20",
-            "--timeout",
-            "3",
-        ],
-        env=environment,
-    )
-    runner(
-        [
-            python,
-            source / "scripts" / "probe_sdk_completion_race.py",
-            "--usage-drain",
-            "--attempts",
-            "40",
-            "--timeout",
-            "10",
-        ],
+        [python, source / "scripts" / "check_sdk.py"],
         env=environment,
     )
 

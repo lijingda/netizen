@@ -160,6 +160,8 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 所有面向 `main` 的代码先通过 `make check`；PR 和 main push 的 GitHub CI 都在 Linux x64
 标准 CPython 3.11-3.14，以及 macOS arm64 标准 CPython 3.13/3.14 执行这一个统一本地门禁。
 正式 Release 复用 exact main commit 的成功 CI 结论，不重新执行本节测试。
+固定 SDK synthetic probes 的命令、参数和执行顺序统一由 `scripts/check_sdk.py` 维护；
+`make check` 与安装器的目标机 Host Validation 都调用该入口，失败即停止后续探针。
 Main Qualification 的 Linux 与 macOS jobs 均显式安装 Node.js 22，执行 Admin JavaScript
 行为测试；在 `CI=true` 时缺少 Node.js 会使测试失败。Node.js 是开发和 CI 的测试工具，
 不参与前端构建，也不增加生产运行或 Source Install 的前置依赖。本地（包括 Source Install）

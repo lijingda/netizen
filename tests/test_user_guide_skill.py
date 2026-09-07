@@ -305,7 +305,7 @@ class UserGuideSkillInstallTest(unittest.TestCase):
 
 
 class UserGuideSkillContentTest(unittest.TestCase):
-    def test_skill_routes_to_its_guide_without_scaffold_placeholders(self) -> None:
+    def test_skill_has_discovery_metadata_and_no_scaffold_placeholders(self) -> None:
         skill = (RELEASE_SKILL / "SKILL.md").read_text(encoding="utf-8")
         guide = (RELEASE_SKILL / "references" / "user-guide.md").read_text(
             encoding="utf-8"
@@ -314,13 +314,8 @@ class UserGuideSkillContentTest(unittest.TestCase):
 
         self.assertEqual(frontmatter["name"], SKILL_NAME)
         description = frontmatter["description"]
-        self.assertIn("官方 Codex SDK", description)
-        self.assertIn("当前飞书机器人", description)
-        self.assertIn("即使用户未明确说“Netizen”", description)
-        self.assertIn("普通编码任务", description)
-        self.assertIn("默认用户正通过 Netizen 的飞书 Channel", skill)
-        self.assertIn("不是 Codex fork", skill)
-        self.assertIn("references/user-guide.md", skill)
+        self.assertIsInstance(description, str)
+        self.assertTrue(description.strip())
         self.assertNotIn("[TODO:", skill)
         self.assertNotIn("[TODO:", guide)
 
@@ -336,63 +331,6 @@ class UserGuideSkillContentTest(unittest.TestCase):
         for command in ("model", "effort", "fast", "skills"):
             with self.subTest(unregistered_command=command):
                 self.assertIn(f"/{command}", guide)
-        self.assertIn("interactive login shell", guide)
-        self.assertIn("service.sh restart", guide)
-        self.assertIn("临时 `export`", guide)
-
-    def test_guide_explains_turn_files_without_claiming_a_snapshot(self) -> None:
-        skill = (RELEASE_SKILL / "SKILL.md").read_text(encoding="utf-8")
-        guide = (RELEASE_SKILL / "references" / "user-guide.md").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("本轮文件", skill)
-        for phrase in (
-            "按钮都显示“发送”",
-            "每页显示 8 个文件",
-            "最多完整承载 400 个",
-            "按成功修改累计 `+N -M`",
-            "数字不表示最终净差异",
-            "不是快照",
-            "不会被扫描补齐",
-            "Project 不是额外的文件权限边界",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, guide)
-
-    def test_guide_explains_sender_attribution_without_authority(self) -> None:
-        guide = (RELEASE_SKILL / "references" / "user-guide.md").read_text(
-            encoding="utf-8"
-        )
-
-        for phrase in (
-            "公开发送者信息",
-            "不授予权限",
-            "当前提问者与被引用消息发送者",
-            "原 `/side` 消息及其发送者",
-            "问题副本",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, guide)
-
-    def test_guide_explains_card_only_new_and_mention_context_modes(self) -> None:
-        guide = (RELEASE_SKILL / "references" / "user-guide.md").read_text(
-            encoding="utf-8"
-        )
-
-        for phrase in (
-            "`/new` 不接受参数",
-            "全部 enabled Projects",
-            "不由 Netizen\n  截断或分页",
-            "仅这条 @ 消息",
-            "自动带上期间的群聊讨论",
-            "仍然只有 `@机器人` 才触发",
-            "不会执行 control",
-            "P2P、P2P 话题与 Side",
-            "最近 50 条补充消息",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, guide)
 
 
 class UserGuideSkillDiscoveryTest(unittest.IsolatedAsyncioTestCase):

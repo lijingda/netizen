@@ -1,51 +1,33 @@
 ---
 name: netizen-user-guide
 description: >-
-  Netizen 用户指南。Netizen 是通过官方 Codex SDK 将飞书接入原生 Codex 的 Channel。
-  用户询问当前飞书机器人或会话如何使用，或询问 Netizen 的命令、会话、Side、Goal、
-  Skills、配置、生命周期表情、执行中表情闪烁、进度卡、状态、引用、图片、本轮文件、
-  与 Codex App/CLI 的差异
-  及常见限制时使用；
-  即使用户未明确说“Netizen”，只要问题指向当前飞书交互或这些 Channel 能力也应触发。
-  仅用于使用咨询；普通编码任务以及 Netizen 工程实现、架构、部署、调试或代码修改不应触发。
+  解答 Netizen 飞书 Channel 的使用问题，包括命令、会话、执行反馈、消息与文件，
+  以及与 Codex App/CLI 的差异。用户未说“Netizen”但在询问当前飞书机器人或会话
+  如何使用时也适用。仅用于使用咨询；普通编码及工程实现、架构、部署、调试不适用。
 ---
 
 # Netizen 用户指南
 
-Netizen 是通过官方 Codex SDK 将飞书接入原生 Codex 的 Channel，不是 Codex fork 或
-另一个 Agent Runtime。本 Skill 被调用时，默认用户正通过 Netizen 的飞书 Channel 与
-原生 Codex 交互；用户未明确说出“Netizen”时，不要因此改按 Codex App/CLI 场景回答。
-若用户明确指定其他宿主，则按其指定场景解释或比较。
+Netizen 通过官方 Codex SDK 将飞书接入原生 Codex。默认按当前 Netizen 飞书场景解答；
+用户明确指定其他宿主时，按其指定场景解释或比较。
 
-使用本 Skill 解答 Netizen 的用户使用问题，不把它当作工程实现文档。
+## 查阅
 
-## 回答方式
+回答前阅读 [用户手册](references/user-guide.md) 的相关章节；入门、完整能力说明或横向
+比较需阅读全文。常用入口：
 
-1. 回答前阅读 [用户手册](references/user-guide.md) 中与问题相关的章节；用户要求入门介绍、完整能力说明或横向比较时阅读全文。
-2. 先直接回答用户的问题，再给出必要的命令和注意事项。不要无关地倾倒整份命令清单。
-3. 准确区分飞书 Channel control、原生 Codex 能力和 Codex App/CLI 宿主命令；不要臆造可用命令，也不要把命令文本说成已经执行。
-4. 手册用于解释稳定语义。命令是否在当前实例开放、当前会话状态和动态 Model/Effort/Speed 选项，以运行时 `/help`、`/status`、卡片或明确错误为准。
-5. 若运行时结果与手册冲突，优先相信运行时证据，并说明可能存在版本差异；不要猜测隐藏状态。
-6. 使用用户的语言，优先采用场景化、易懂的表达。涉及 `/stop`、`/release`、并发 Project、Side 过期、原生历史删除或本轮文件时必须保留关键风险：materialized `/delete` 会永久删除原生 Thread、spawned descendants、Codex App/CLI 历史与 Binding；`/release` 只取消当前连接订阅，不删除历史，也不证明 writer 已立即释放；本轮文件按需发送当前内容，不是 Turn 完成时快照，也不会扫描未进入 native Turn diff/items 的输出。
-7. 用户询问执行反馈时，明确普通与 Side Turn 的 accepted、成功 steer 和终态
-   Lifecycle Reaction 始终尽力展示。Reaction Pulse 与 Progress Card 是会话的两个独立
-   选项，可在 `/new` 或 idle 时的 `/config` 开启，默认都关闭。Side 创建时冻结 Parent
-   当时的两项选择，后续 Parent 配置不传播；Reaction Pulse 只控制 `THINKING`，Goal 不使用
-   Lifecycle Reaction；Progress Card 决定普通/Side Turn 是否使用 Activity 卡，以及 Goal
-   的单张组合卡是否加入 Activity
-   模块。Activity 只逐步展示状态、最近完成的 commentary、受限操作信息、子任务聚合和
-   checklist；最近进展和操作显示到分钟的原生事件时间，由飞书客户端按查看者时区与语言本地化。命令只按
-   typed action 显示语义类别，MCP/dynamic tool 显示工具名；工具名只做 Markdown 转义，
-   commentary 等自由文本经过常见敏感模式过滤。不显示命令正文、参数、输出、server、路径、
-   耗时、百分比、ETA 或 reasoning。Progress Card 关闭时普通/Side Turn 仍是无文件
-   富文本/静态文本、有文件完成卡；Goal 卡本身始终存在。展示失败不会改变 Codex execution。
-8. 解释文件区 `+N -M` 时称为成功修改的累计行数；反复修改或改回原文仍累计，不承诺最终
-   净差异。范围包括本轮新建的子任务；证据不足时可能只显示已知文件的数字而没有总计。
+- [会话与 Project](references/user-guide.md#会话与-project-管理)、
+  [停止](references/user-guide.md#stop)、[Side](references/user-guide.md#side-临时话题)、
+  [Goal](references/user-guide.md#goal)：说明对应的并发、失效或历史删除后果。
+- [运行反馈](references/user-guide.md#飞书中的运行反馈)、
+  [本轮文件](references/user-guide.md#查看和发送本轮文件)：按手册解释开关、展示范围和统计口径。
 
-## 边界
+## 回答与边界
 
-- `/help` 是当前命令清单，本 Skill 是自然语言说明和场景咨询的补充。
-- 本 Skill 不修改 Netizen、会话、Project、Codex 配置或任何文件。普通使用者需要操作时，
-  说明应在飞书中发送的命令或打开的卡片；实例管理员询问跨 Scope 管理时，可说明 Admin
-  Web 的入口和边界，但不能读取、展示或代填 credential。
-- 工程架构、部署、SDK Gap Adapter、代码调试或贡献流程应查看 Netizen 仓库文档和源码，而不是以本用户手册代替。
+- 使用用户的语言，先回答问题，再给必要的命令和注意事项。区分 Channel control、
+  原生 Codex 能力和 App/CLI 宿主命令；不要把命令示例说成已经执行。
+- 手册解释稳定语义；当前能力、会话状态和 Model/Effort/Speed 以运行时 `/help`、
+  `/status`、卡片或明确错误为准。冲突时说明版本差异，不猜测隐藏状态。
+- 本 Skill 只提供使用咨询：说明应发送的飞书命令或应打开的卡片，不代为修改会话、
+  Project、Codex 配置或文件。可解释 Admin Web 入口，但不读取、展示或代填 credential。
+  工程任务应回到仓库文档和源码。
