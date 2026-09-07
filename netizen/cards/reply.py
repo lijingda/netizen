@@ -35,6 +35,7 @@ from ..domain import (
     TurnProgressManifestStep,
 )
 from ..turn_files import (
+    TURN_FILE_PAGE_SIZE,
     TurnFile,
     TurnFilePage,
     inspect_turn_file_path,
@@ -67,6 +68,7 @@ from .callbacks import (
     _md_code,
     _notice,
     _plain,
+    _plain_text,
     _repeatable_callback_button,
     _required_string,
     _scope_from_envelope,
@@ -661,37 +663,36 @@ def _render_reply_card_page(projection: ReplyCardProjection) -> OutboundCard:
         files = projection.files
         turn_files = _reply_turn_files(files.items)
         visible = paginate_turn_files(turn_files, files.page)
-        builder.raw(
-            _turn_files_block(
-                scope=projection.scope,
-                binding_id=files.binding_id,
-                turn_id=files.turn_id,
-                page=visible,
-                manifest=tuple(
-                    TurnFileManifestItem(
-                        item.path,
-                        item.label,
-                        item.additions,
-                        item.deletions,
-                    )
-                    for item in files.items
-                ),
-                final_response=(
-                    projection.result.content
-                    if projection.result is not None
-                    else ""
-                ),
-                progress=(
-                    projection.activity.progress
-                    if projection.activity is not None
-                    else None
-                ),
-                reply=_reply_card_manifest(projection),
-                action_version=files.action_version,
-                additions=files.additions,
-                deletions=files.deletions,
-            )
-        )
+        for block in _turn_files_blocks(
+            scope=projection.scope,
+            binding_id=files.binding_id,
+            turn_id=files.turn_id,
+            page=visible,
+            manifest=tuple(
+                TurnFileManifestItem(
+                    item.path,
+                    item.label,
+                    item.additions,
+                    item.deletions,
+                )
+                for item in files.items
+            ),
+            final_response=(
+                projection.result.content
+                if projection.result is not None
+                else ""
+            ),
+            progress=(
+                projection.activity.progress
+                if projection.activity is not None
+                else None
+            ),
+            reply=_reply_card_manifest(projection),
+            action_version=files.action_version,
+            additions=files.additions,
+            deletions=files.deletions,
+        ):
+            builder.raw(block)
     card = builder.to_dict()
     body = card.get("body")
     if isinstance(body, dict):
@@ -1260,6 +1261,7 @@ def decode_turn_file_action(
     sender_id: str,
     tag: str,
     value: Any,
+    form_value: Any = None,
 ) -> TurnFileActionIntent:
     if tag != "button":
         raise CardActionError(f"不支持的本轮文件组件：{tag or 'unknown'}")
@@ -1273,6 +1275,11 @@ def decode_turn_file_action(
         name = TurnFileActionName(payload.get("intent"))
     except (TypeError, ValueError) as error:
         raise CardActionError("未知本轮文件动作。") from error
+    select_page = name is TurnFileActionName.PAGE and "pagination" in payload
+    if select_page and payload.pop("pagination") != "select":
+        raise CardActionError("本轮文件分页方式无效。")
+    if not select_page and form_value is not None:
+        raise CardActionError("本轮文件动作不接受表单字段。")
     version = payload.get("v")
     if (
         isinstance(version, bool)
@@ -1348,6 +1355,23 @@ def decode_turn_file_action(
             raise CardActionError("本轮文件页码必须是非负整数。")
         page = raw_page
         files = _decode_turn_file_manifest(payload["files"])
+        total_pages = (len(files) + TURN_FILE_PAGE_SIZE - 1) // TURN_FILE_PAGE_SIZE
+        if raw_page >= total_pages:
+            raise CardActionError("本轮文件页码超出范围。")
+        if select_page:
+            if (
+                not isinstance(form_value, Mapping)
+                or set(form_value) != {"turn_file_page"}
+            ):
+                raise CardActionError("本轮文件选页表单字段无效。")
+            selection = form_value["turn_file_page"]
+            # Match the exact advertised ASCII values; reject coercion,
+            # oversized numbers and options outside this complete manifest.
+            if not isinstance(selection, str) or selection not in {
+                str(index) for index in range(total_pages)
+            }:
+                raise CardActionError("本轮文件页码超出范围。")
+            page = int(selection)
         if "a" in payload:
             try:
                 additions, deletions = _optional_line_counts(
@@ -1805,7 +1829,7 @@ def _turn_answer_block(final_response: str) -> dict[str, Any]:
     }
 
 
-def _turn_files_block(
+def _turn_files_blocks(
     *,
     scope: FeishuScope,
     binding_id: str,
@@ -1818,7 +1842,7 @@ def _turn_files_block(
     action_version: int = TURN_FILE_ACTION_VERSION,
     additions: int | None = None,
     deletions: int | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], ...]:
     line_counts = ""
     if additions is not None and deletions is not None:
         line_counts = (
@@ -1849,24 +1873,23 @@ def _turn_files_block(
         )
         for turn_file in page.items
     )
+    navigation = None
     if page.total_pages > 1:
-        elements.append(
-            _turn_file_pagination(
-                scope=scope,
-                binding_id=binding_id,
-                turn_id=turn_id,
-                page=page.page,
-                total_pages=page.total_pages,
-                manifest=manifest,
-                final_response=final_response,
-                progress=progress,
-                reply=reply,
-                action_version=action_version,
-                additions=additions,
-                deletions=deletions,
-            )
+        navigation = _turn_file_pagination(
+            scope=scope,
+            binding_id=binding_id,
+            turn_id=turn_id,
+            page=page.page,
+            total_pages=page.total_pages,
+            manifest=manifest,
+            final_response=final_response,
+            progress=progress,
+            reply=reply,
+            action_version=action_version,
+            additions=additions,
+            deletions=deletions,
         )
-    return {
+    block = {
         "tag": "column_set",
         "element_id": _TURN_FILES_ELEMENT_ID,
         "flex_mode": "none",
@@ -1882,6 +1905,11 @@ def _turn_files_block(
             }
         ],
     }
+    # Feishu only permits forms at the card root. Keep file SEND buttons
+    # outside the form so they do not submit or validate its page selector.
+    if navigation is not None:
+        return block, navigation
+    return (block,)
 
 
 def _turn_file_row(
@@ -1996,26 +2024,10 @@ def _turn_file_pagination(
     additions: int | None,
     deletions: int | None,
 ) -> dict[str, Any]:
-    columns: list[dict[str, Any]] = [
-        {
-            "tag": "column",
-            "width": "weighted",
-            "weight": 1,
-            "vertical_align": "center",
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": f"<font color='grey'>第 {page + 1}/{total_pages} 页</font>",
-                }
-            ],
-        }
-    ]
-    target = 0 if page + 1 >= total_pages else page + 1
-    label = "回到第一页" if target == 0 else "下一页"
     page_value: dict[str, Any] = {
         "binding_id": _binding_reference(binding_id),
         "turn_id": _turn_reference(turn_id),
-        "page": target,
+        "pagination": "select",
         "files": [
             _encode_turn_file_manifest_item(item)
             for item in manifest
@@ -2032,24 +2044,39 @@ def _turn_file_pagination(
         if reply is None:
             raise ValueError("v5 pagination requires a Reply Card manifest")
         page_value["reply"] = _encode_reply_card_manifest(reply)
-    columns.append(
+    button = _repeatable_callback_button(
+        label="跳转",
+        value=_turn_file_envelope(
+            scope, TurnFileActionName.PAGE,
+            version=action_version, page=page, **page_value,
+        ),
+    )
+    button.update(name="turn_file_jump", form_action_type="submit")
+    # The Files header already shows current/total pages. Use the selector
+    # itself as the footer's current-page label, preserving capacity.
+    columns = [
         {
             "tag": "column",
             "width": "auto",
-            "elements": [
-                _repeatable_callback_button(
-                    label=label,
-                    value=_turn_file_envelope(
-                        scope,
-                        TurnFileActionName.PAGE,
-                        version=action_version,
-                        **page_value,
-                    ),
-                )
-            ],
-        }
-    )
-    return {"tag": "column_set", "flex_mode": "none", "columns": columns}
+            "elements": [{
+                "tag": "select_static",
+                "name": "turn_file_page",
+                "required": True,
+                "initial_option": str(page),
+                "placeholder": _plain_text("选择页码"),
+                "options": [
+                    {"text": _plain_text(f"第{index + 1}页"), "value": str(index)}
+                    for index in range(total_pages)
+                ],
+            }],
+        },
+        {"tag": "column", "width": "auto", "elements": [button]},
+    ]
+    return {
+        "tag": "form",
+        "name": "turn_file_pagination",
+        "elements": [{"tag": "column_set", "flex_mode": "none", "columns": columns}],
+    }
 
 
 def _turn_file_envelope(

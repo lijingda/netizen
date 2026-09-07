@@ -1785,6 +1785,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         value: dict[str, object],
         *,
         message_id: str = "om_card",
+        form_value: dict[str, object] | None = None,
     ) -> object:
         return SimpleNamespace(
             message_id=message_id,
@@ -1793,7 +1794,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             action=SimpleNamespace(
                 tag="button",
                 value=value,
-                form_value=None,
+                form_value=form_value,
             ),
         )
 
@@ -2317,7 +2318,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             if behavior["value"]["intent"] == "turn-file.page"
         )
         await self.app.handle_card_action(
-            self.direct_button_event(page_value, message_id="om_progress")
+            self.direct_button_event(
+                page_value, message_id="om_progress",
+                form_value={"turn_file_page": "1"},
+            )
         )
 
         paged = self.channel.updates[-1][1]
@@ -3406,7 +3410,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         card = self.channel.replies[-1][1]
         assert isinstance(card, OutboundCard)
-        next_page = _card_button_value(card, "下一页")
+        next_page = _card_button_value(card, "跳转")
 
         await self.new(message_id="om_switched")
         self.assertNotEqual(self.store.active_binding(scope.key).id, binding.id)
@@ -3430,7 +3434,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(restarted_app.close)
         changes_before_callback = self.store._connection.total_changes
         await restarted_app.handle_card_action(
-            self.direct_button_event(next_page, message_id="om_file_card")
+            self.direct_button_event(
+                next_page, message_id="om_file_card",
+                form_value={"turn_file_page": "1"},
+            )
         )
 
         self.assertEqual(len(self.channel.updates), 1)
@@ -3446,6 +3453,74 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.store._connection.total_changes,
             changes_before_callback,
         )
+
+    async def test_file_selector_survives_restart_and_invalid_forms_never_update_card(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        files = tuple(
+            ReplyCardFileItem(
+                path=str(self.project / f"result-{index:02}.txt"),
+                label=f"result-{index:02}.txt", size=1, media_kind="file",
+            )
+            for index in range(17)
+        )
+        cards = [
+            reply_card(ReplyCardProjection(
+                scope=scope,
+                result=ReplyCardResultModule("frozen answer"),
+                files=ReplyCardFilesModule(
+                    binding_id=binding.id, turn_id="turn-files", items=files,
+                    action_version=version,
+                ),
+            ))
+            for version in (4, 5)
+        ]
+        restarted_runtime = StubRuntime()
+        restarted_runtime.binding_store = self.store
+        restarted_management = InstanceManagementService(
+            bindings=self.store,
+            projects=self.projects,
+            runtime=ManagementRuntimePort(restarted_runtime),  # type: ignore[arg-type]
+            scope_coordinator=ScopeCoordinator(),
+        )
+        self.addAsyncCleanup(restarted_management.close)
+        restarted_app = ChannelApplication(
+            app_id="cli_test", channel=self.channel,
+            runtime=restarted_runtime,  # type: ignore[arg-type]
+            bindings=self.store, projects=self.projects, management=restarted_management,
+        )
+        self.addAsyncCleanup(restarted_app.close)
+        changes_before_callback = self.store._connection.total_changes
+        for card in cards:
+            value = _card_button_value(card, "跳转")
+            event = self.direct_button_event(value, message_id="om_select_card")
+            event.action.form_value = {"turn_file_page": "2"}
+            before = len(self.channel.updates)
+            await restarted_app.handle_card_action(event)
+            self.assertEqual(len(self.channel.updates), before + 1)
+            updated = self.channel.updates[-1][1]
+            visible = "\n".join(item["content"] for item in _elements(updated, "markdown"))
+            self.assertIn("frozen answer", visible)
+            self.assertIn("result-16.txt", visible)
+            self.assertNotIn("result-00.txt", visible)
+            self.assertEqual(_elements(updated, "select_static")[0]["initial_option"], "2")
+            redrawn = _card_button_value(OutboundCard(card=updated), "跳转")
+            self.assertEqual(redrawn["pagination"], "select")
+            self.assertNotEqual(redrawn["nonce"], value["nonce"])
+            for form in (None, {}, {"turn_file_page": "3"}, {"turn_file_page": "01"},
+                         {"turn_file_page": "1", "extra": "field"}):
+                with self.subTest(version=value["v"], form=form):
+                    event.action.form_value = form
+                    before = len(self.channel.updates)
+                    self.channel.send_results.append(
+                        sent_result("om_invalid_form", chat_id="oc_direct")
+                    )
+                    await restarted_app.handle_card_action(event)
+                    self.assertEqual(len(self.channel.updates), before)
+        self.assertEqual(self.store._connection.total_changes, changes_before_callback)
+        self.assertEqual(restarted_runtime.submit_calls, [])
+        self.assertEqual(restarted_runtime.thread_metadata_calls, [])
 
     async def test_file_buttons_send_file_and_original_image_to_card_topic(
         self,
@@ -7211,6 +7286,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.direct_button_event(
                 page_value,
                 message_id="om_goal_composed",
+                form_value={"turn_file_page": "1"},
             )
         )
 
@@ -7232,12 +7308,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             for behavior in button.get("behaviors", ())
             if behavior["value"]["intent"] == "turn-file.page"
         )
-        self.assertEqual(return_value["page"], 0)
+        self.assertEqual(return_value["page"], 1)
         self.assertNotEqual(return_value["nonce"], page_value["nonce"])
         await self.app.handle_card_action(
             self.direct_button_event(
                 return_value,
                 message_id="om_goal_composed",
+                form_value={"turn_file_page": "0"},
             )
         )
         next_value = next(
@@ -7262,6 +7339,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.direct_button_event(
                 next_value,
                 message_id="om_goal_composed",
+                form_value={"turn_file_page": "1"},
             )
         )
         self.assertEqual(len(self.channel.updates), update_count + 1)
@@ -7556,6 +7634,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.direct_button_event(
                 page_value,
                 message_id="om_goal_clear_page",
+                form_value={"turn_file_page": "1"},
             )
         )
         await self.app.handle_message(
@@ -7663,6 +7742,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             callback_chat_id="oc_direct",
             sender_id="ou_user",
             tag="button",
+            form_value={"turn_file_page": "1"},
             value=page_value,
         )
         self.runtime.goal_snapshot_value = None
@@ -7717,6 +7797,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             callback_chat_id="oc_direct",
             sender_id="ou_user",
             tag="button",
+            form_value={"turn_file_page": "1"},
             value=page_value,
         )
         replacement = self.project / "replacement.txt"

@@ -239,8 +239,10 @@ stdout；异常路径的二次 interrupt、terminal cleanup 和 task drain 都�
 `fileChange` 累计统计和 `imageGeneration.saved_path`、完整 add/delete 正文及 validated
 update hunk、rename、重复改动与改回原文、缺失 patch 的逐文件降级、跨 Project 路径，
 以及公开 child Thread 读取的 v1/v2 关系、递归归属、继承历史排除、去重和有界降级。另覆盖 v3
-过期拒绝、当前 v4/v5 完整 Reply Card manifest 循环分页、100/400 完整统计 manifest、
-401 明确拒绝、可重复 Card Action 的 per-render nonce、transport-only decoder 与同一 render
+过期拒绝、当前 v4/v5 完整 Reply Card manifest 的页码表单跳转、固定 SDK 实际
+JSON UTF-8 bytes 的逐页容量检查、规范页码验证、单页无导航、无标记的旧 PAGE 解码后
+统一重绘页码表单、重启后完整模块和统计保留、100/400 完整统计 manifest、401 明确拒绝、超限时省略
+整个 Files 模块、可重复 Card Action 的 per-render nonce、transport-only decoder 与同一 render
 重投递去重，以及 Lark
 `OutboundImage`/`OutboundFile`/`SendOpts` 合同。任一固定 SDK/Channel shape 变化都必须先
 更新兼容性结论，不能把本轮文件降级成工作区扫描、最终文本解析、私有 RPC 或静默截断。
@@ -1328,16 +1330,24 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     root/parent/thread 返回；已有话题必须保持原 thread ID，飞书能正常预览/下载实际文件。
     切换到另一 Binding 后旧卡仍能翻页和发送；正常重启 Netizen/App Server 后，再点击
     重启前的 v5 卡，必须只从 callback 内的完整 Reply Card manifest 恢复，且不读取 source
-    card、Binding 或 completed Turn。文件分页至少完成“第一页 → 下一页 → 第一页 →
-    再次下一页”的完整回环，最后一次点击必须仍生效；同一份已渲染 callback 的重复投递仍
+    card、Binding 或 completed Turn。页码表单至少使用三页文件，依次选择第二页、第一页、
+    再次选择第二页并提交，最后一次点击必须仍生效；再直接选择末页，确认每次都只更新原卡。
+    同一份已渲染 callback 的重复投递仍
     只能处理一次。缺少或带畸形 nonce 的当前版本 payload 仍须只按业务字段解码；正式推广前
     的其他旧测试 schema 不做兼容验收，升级前 v3 卡仍须明确提示已过期且不发送文件、不读取
     history。
     重复点击同一按钮不产生重复文件消息。再分别在点击前删除文件、改成目录、把同一上报
     路径重新绑定到另一个普通文件和删除原卡片：前两类不可用目标应失败，重绑路径发送点击
     时当前内容，删除卡片失败；所有失败均保持原卡且没有文件掉入主聊天。翻页还必须确认
-    最终回复区逐字保留、缺失条目在原页显示不可用，并按单个“下一页/回到第一页”按钮循环
-    覆盖全部页面。
+    最终回复区逐字保留、缺失条目在原页显示不可用。另准备 100 和 400 个文件的大卡片，
+    确认所有多页卡片都显示页码下拉框和一个“跳转”按钮，单页卡片不显示导航。
+    完成真实 create/update；在飞书实际选择末页、中间页和首页并
+    点击“跳转”，确认 submit callback 同时保留完整 `value` manifest 与所选页码的
+    `form_value`，每次更新后仍能再次跳转，且只在提交按钮中出现完整 manifest。重启前后
+    同卡必须保留 Goal/Activity/Result、整轮与逐文件统计；不能只用合成回调证明
+    表单点击可用。记录实际序列化容量与平台返回，检查各页都不超过 55,000 bytes；
+    任一页无法完整容纳时应明确省略 Files，不截断。没有 live 条件时明确记录这部分
+    未验证，不能宣称真实表单兼容或容量验收通过。
     P2P 若返回 230071 必须记录为
     本轮文件 live gate 未通过，不得用 FakeChannel 或普通主线发送替代。最后确认这些操作不
     改变 schema v7 表、Binding、Turn settings、Task Feedback、Context Boundary 或 Side

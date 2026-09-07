@@ -3909,6 +3909,7 @@ class ChannelApplication:
                 sender_id=sender_id,
                 tag=str(getattr(action, "tag", "") or ""),
                 value=getattr(action, "value", None),
+                form_value=getattr(action, "form_value", None),
             )
             if (
                 intent.name is TurnFileActionName.PAGE
