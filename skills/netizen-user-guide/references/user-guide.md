@@ -193,10 +193,19 @@ Turn Settings、重命名、归档、恢复或恢复并设为当前、删除 Laz
 在 Delete capability 可用时删除 active 或 archived 的原生 Thread。两类删除都需二次确认；
 materialized 删除的确认文案会显示会话、Scope、short ID，并说明原生 Thread、spawned
 descendants、Codex App/CLI 历史与本地 Binding 都会永久消失。它不能发送 Prompt、查看完整
-历史、启动/推进 Goal、Compact、删除 Side 或执行批量 native mutation。Admin 可查看 @ 时读取的消息
+历史、启动/推进 Goal、Compact、删除 Side 墓碑或执行任意选择的批量 native mutation。Admin 可查看 @ 时读取的消息
 范围；但不能在没有 exact 飞书消息边界时新启用 catch-up，也不能把 catch-up 会话从后台
 直接设为 current。页面操作结果未知时应刷新对账，
 不要重放；服务重启或 credential 轮换会注销原 session。
+
+Sessions 页的 Project、Scope、会话状态和当前指针均支持多选；同一项取“或”，不同项
+取“且”。默认显示 Active + Lazy；Project 可搜索并包含停用项目。“重置”恢复默认
+筛选、创建时间和每页数量。列表保留 ID 供排查。
+
+Projects 页可“删除 Project 及关联 Sessions”。确认范围包含该项目的全部关联会话
+（含归档会话）与仍需关闭的 Side，不受 Sessions 筛选影响；磁盘代码目录保留。
+全部成功后项目才从列表移除。部分失败、结果未知或 Side 尚在创建时，项目保持停用并
+展示剩余项；已成功删除的会话不会恢复。后续操作须刷新清单并重新确认，不会自动续删。
 
 Admin Web 的“系统更新”页可检查官方正式版本，并点击“升级并重启”。该操作不检查
 任务忙闲：准备版本时服务照常运行，切换时按正常停机流程中断普通任务、暂停 Goal、

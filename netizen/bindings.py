@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
+import json
 import os
 import sqlite3
 import threading
@@ -25,8 +27,8 @@ from .domain import (
 )
 
 
-SCHEMA_VERSION = 7
-PREVIOUS_SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
+PROJECT_DELETE_LIMIT = 1000
 
 
 _CONTEXT_INTEGRITY_TRIGGERS = (
@@ -176,6 +178,18 @@ class ProjectDisabled(ProjectConflict):
     pass
 
 
+class ProjectDeleting(ProjectDisabled):
+    pass
+
+
+class ProjectInventoryConflict(ProjectConflict):
+    pass
+
+
+class ProjectDeleteLimitExceeded(ProjectConflict):
+    pass
+
+
 class SideTopicConflict(RuntimeError):
     pass
 
@@ -265,6 +279,7 @@ class ProjectRecord:
     revision: int
     created_at: str
     updated_at: str
+    deleted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +323,8 @@ class BindingQuery:
     current: bool | None = None
     created_from: str | None = None
     created_before: str | None = None
+    project_aliases: tuple[str, ...] | None = None
+    scope_kinds: tuple[ScopeKind, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,6 +425,14 @@ class SideTopicRecord:
         return self.id[:8]
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectDeleteSnapshot:
+    project: ProjectRecord
+    bindings: tuple[BindingInventoryRecord, ...]
+    sides: tuple[SideTopicRecord, ...]
+    fingerprint: str
+
+
 def migrate_channel_database_v6_to_v7(path: str | Path) -> bool:
     """Upgrade a stopped v6 database inside the installer transaction.
 
@@ -436,10 +461,10 @@ def migrate_channel_database_v6_to_v7(path: str | Path) -> bool:
         if len(version_rows) != 1:
             raise RuntimeError("Channel database must contain one schema version")
         version = version_rows[0]["version"]
-        if version == SCHEMA_VERSION:
+        if version == 7:
             _require_v7_feedback_columns(connection)
             return False
-        if version != PREVIOUS_SCHEMA_VERSION:
+        if version != 6:
             raise RuntimeError(
                 "unsupported Channel database migration source version: "
                 f"{version!r}"
@@ -549,7 +574,7 @@ def migrate_channel_database_v6_to_v7(path: str | Path) -> bool:
             )
             updated = connection.execute(
                 "UPDATE schema_version SET version = ? WHERE version = ?",
-                (SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION),
+                (7, 6),
             )
             if updated.rowcount != 1:
                 raise RuntimeError(
@@ -594,6 +619,135 @@ def migrate_channel_database_v6_to_v7(path: str | Path) -> bool:
         raise RuntimeError(
             f"Channel database migration failed: {error}"
         ) from error
+    finally:
+        connection.close()
+
+
+def migrate_channel_database(path: str | Path) -> bool:
+    """Bring a stopped database to the current schema under installer rollback."""
+    database = Path(path)
+    if not database.exists():
+        return False
+    if database.is_symlink() or not database.is_file():
+        raise RuntimeError(
+            "Channel database migration target must be a regular file"
+        )
+    connection = sqlite3.connect(database)
+    try:
+        versions = connection.execute("SELECT version FROM schema_version").fetchall()
+    except sqlite3.Error as error:
+        raise RuntimeError(f"Channel database migration failed: {error}") from error
+    finally:
+        connection.close()
+    if len(versions) != 1:
+        raise RuntimeError("Channel database must contain one schema version")
+    migrated = False
+    if versions[0][0] == 6:
+        migrated = migrate_channel_database_v6_to_v7(database)
+    return migrate_channel_database_v7_to_v8(database) or migrated
+
+
+def migrate_channel_database_v7_to_v8(path: str | Path) -> bool:
+    """Add Project tombstones without losing stopped-service metadata."""
+    database = Path(path)
+    if not database.exists():
+        return False
+    if database.is_symlink() or not database.is_file():
+        raise RuntimeError(
+            "Channel database migration target must be a regular file"
+        )
+    connection = sqlite3.connect(database, isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 0")
+        versions = connection.execute("SELECT version FROM schema_version").fetchall()
+        if len(versions) != 1:
+            raise RuntimeError("Channel database must contain one schema version")
+        version = versions[0]["version"]
+        if version not in {7, 8}:
+            raise RuntimeError(
+                "unsupported Channel database migration source version: "
+                f"{version!r}"
+            )
+        required_tables = {
+            "schema_version", "scopes", "bindings", "projects",
+            "dedup_keys", "side_topics",
+        }
+        actual_tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if required_tables - actual_tables:
+            raise RuntimeError(
+                "Channel database is missing required tables: "
+                + ", ".join(sorted(required_tables - actual_tables))
+            )
+        _require_v7_feedback_columns(connection)
+        project_schema = {
+            row["name"]: row
+            for row in connection.execute("PRAGMA table_info(projects)").fetchall()
+        }
+        project_columns = project_schema.keys()
+        required = {"alias", "cwd", "enabled", "revision", "created_at", "updated_at"}
+        if not required.issubset(project_columns):
+            raise RuntimeError("Channel database is missing required Project columns")
+        if version == 8:
+            if "deleted" not in project_columns:
+                raise RuntimeError("schema v8 Channel database is missing Project tombstones")
+            deleted = project_schema["deleted"]
+            if (
+                deleted["type"].upper() != "INTEGER"
+                or deleted["notnull"] != 1
+                or deleted["dflt_value"] != "0"
+            ):
+                raise RuntimeError("schema v8 Project tombstone column has invalid shape")
+            invalid = connection.execute(
+                "SELECT 1 FROM projects WHERE typeof(deleted) != 'integer' "
+                "OR deleted NOT IN (0, 1) LIMIT 1"
+            ).fetchone()
+            if invalid is not None:
+                raise RuntimeError("schema v8 Project tombstone values are invalid")
+            _require_database_integrity(connection)
+            return False
+        if "deleted" in project_columns:
+            raise RuntimeError("unexpected Project tombstone column in schema v7")
+        _require_database_integrity(connection)
+        tables = ("scopes", "bindings", "projects", "dedup_keys", "side_topics")
+        counts = tuple(
+            connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in tables
+        )
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(
+                """
+                ALTER TABLE projects
+                ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0
+                    CHECK(typeof(deleted) = 'integer' AND deleted IN (0, 1))
+                """
+            )
+            updated = connection.execute(
+                "UPDATE schema_version SET version = 8 WHERE version = 7"
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("Channel database schema version changed during migration")
+            _require_database_integrity(connection)
+            migrated_counts = tuple(
+                connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in tables
+            )
+            if migrated_counts != counts:
+                raise RuntimeError("Metadata count changed during Channel database migration")
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        return True
+    except sqlite3.Error as error:
+        raise RuntimeError(f"Channel database migration failed: {error}") from error
     finally:
         connection.close()
 
@@ -669,6 +823,7 @@ class BindingStore:
         self._id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self._wall_clock = wall_clock
         self._lock = threading.RLock()
+        self._project_delete_intents: dict[str, ProjectDeleteSnapshot] = {}
         self._query_state_lock = threading.Lock()
         self._query_admission = threading.Lock()
         self._query_futures: set[concurrent.futures.Future[object]] = set()
@@ -846,6 +1001,8 @@ class BindingStore:
                         alias TEXT PRIMARY KEY,
                         cwd TEXT NOT NULL,
                         enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+                        deleted INTEGER NOT NULL DEFAULT 0
+                            CHECK(typeof(deleted) = 'integer' AND deleted IN (0, 1)),
                         revision INTEGER NOT NULL CHECK(revision >= 1),
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
@@ -1134,9 +1291,10 @@ class BindingStore:
                     )
 
             project_row = self._connection.execute(
-                _PROJECT_SELECT + " WHERE alias = ?",
+                _PROJECT_SELECT + " WHERE alias = ? AND deleted = 0",
                 (project_alias,),
             ).fetchone()
+            self.require_project_not_deleting(project_alias)
             if project_row is None and allow_empty_project_registry:
                 any_project = self._connection.execute(
                     "SELECT 1 FROM projects LIMIT 1"
@@ -1651,28 +1809,38 @@ class BindingStore:
                 """,
                 (alias, cwd, now, now),
             )
-        return self.get_project(alias)
+        return self.get_project(alias, include_deleted=True)
 
     def register_project(self, *, alias: str, cwd: str) -> ProjectRecord:
         now = _now()
         try:
             with self._transaction():
-                self._connection.execute(
+                self.require_project_not_deleting(alias)
+                inserted = self._connection.execute(
                     """
                     INSERT INTO projects(
                         alias, cwd, enabled, revision, created_at, updated_at
                     ) VALUES (?, ?, 1, 1, ?, ?)
+                    ON CONFLICT(alias) DO UPDATE SET
+                        cwd = excluded.cwd, enabled = 1, deleted = 0,
+                        revision = projects.revision + 1,
+                        created_at = excluded.created_at,
+                        updated_at = excluded.updated_at
+                    WHERE projects.deleted = 1
                     """,
                     (alias, cwd, now, now),
                 )
+                if inserted.rowcount != 1:
+                    raise ProjectConflict(alias)
         except sqlite3.IntegrityError as error:
             raise ProjectConflict(alias) from error
         return self.get_project(alias)
 
-    def get_project(self, alias: str) -> ProjectRecord:
+    def get_project(self, alias: str, *, include_deleted: bool = False) -> ProjectRecord:
         with self._lock:
             row = self._connection.execute(
-                _PROJECT_SELECT + " WHERE alias = ?",
+                _PROJECT_SELECT + " WHERE alias = ?"
+                + ("" if include_deleted else " AND deleted = 0"),
                 (alias,),
             ).fetchone()
         if row is None:
@@ -1682,7 +1850,7 @@ class BindingStore:
     def list_projects(self) -> list[ProjectRecord]:
         with self._lock:
             rows = self._connection.execute(
-                _PROJECT_SELECT + " ORDER BY alias"
+                _PROJECT_SELECT + " WHERE deleted = 0 ORDER BY alias"
             ).fetchall()
         return [_project_record(row) for row in rows]
 
@@ -1694,8 +1862,9 @@ class BindingStore:
         expected_revision: int,
     ) -> ProjectRecord:
         with self._transaction():
+            self.require_project_not_deleting(alias)
             row = self._connection.execute(
-                _PROJECT_SELECT + " WHERE alias = ?",
+                _PROJECT_SELECT + " WHERE alias = ? AND deleted = 0",
                 (alias,),
             ).fetchone()
             if row is None:
@@ -1713,6 +1882,192 @@ class BindingStore:
                 (int(enabled), _now(), alias, expected_revision),
             )
         return self.get_project(alias)
+
+    def project_delete_in_progress(self, alias: str) -> bool:
+        with self._lock:
+            return alias in self._project_delete_intents
+
+    def require_project_not_deleting(self, alias: str) -> None:
+        with self._lock:
+            if alias in self._project_delete_intents:
+                raise ProjectDeleting(f"Project {alias} 正在删除，请稍后刷新。")
+
+    def preview_project_delete(
+        self,
+        alias: str,
+        *,
+        limit: int = PROJECT_DELETE_LIMIT,
+        extra_side_ids: tuple[str, ...] = (),
+    ) -> ProjectDeleteSnapshot:
+        with self._lock:
+            self.require_project_not_deleting(alias)
+            return self._project_delete_snapshot(
+                alias, limit=limit, extra_side_ids=extra_side_ids,
+            )
+
+    def _project_delete_snapshot(
+        self, alias: str, *, limit: int, extra_side_ids: tuple[str, ...] = ()
+    ) -> ProjectDeleteSnapshot:
+        if type(limit) is not int or not 1 <= limit <= PROJECT_DELETE_LIMIT:
+            raise ValueError(
+                f"Project deletion limit must be between 1 and {PROJECT_DELETE_LIMIT}"
+            )
+        limit_message = (
+            f"Project {alias} 超过单次删除上限（{limit} Sessions / {limit} Side Topics）；"
+            "请先分次清理会话。"
+        )
+        if not isinstance(extra_side_ids, tuple) or any(
+            not isinstance(side_id, str) or not side_id for side_id in extra_side_ids
+        ):
+            raise ValueError("Extra Side IDs must be a tuple of exact IDs")
+        if len(extra_side_ids) > limit:
+            raise ProjectDeleteLimitExceeded(limit_message)
+        project = self.get_project(alias)
+        binding_rows = self._connection.execute(
+            _BINDING_INVENTORY_SELECT
+            + " WHERE b.project_alias = ? LIMIT ?",
+            (alias, limit + 1),
+        ).fetchall()
+        if len(binding_rows) > limit:
+            raise ProjectDeleteLimitExceeded(limit_message)
+        side_rows = self._connection.execute(
+            _SIDE_TOPIC_SELECT
+            + " WHERE parent_binding_id IN "
+            "(SELECT binding_id FROM bindings WHERE project_alias = ?) LIMIT ?",
+            (alias, limit + 1),
+        ).fetchall()
+        if len(side_rows) > limit:
+            raise ProjectDeleteLimitExceeded(limit_message)
+        side_by_id = {row["side_id"]: _side_topic(row) for row in side_rows}
+        for side_id in extra_side_ids:
+            if side_id in side_by_id:
+                continue
+            row = self._connection.execute(
+                _SIDE_INVENTORY_SELECT + " WHERE st.side_id = ?", (side_id,)
+            ).fetchone()
+            if row is None or row["parent_project_alias"] not in {None, alias}:
+                raise ProjectInventoryConflict(
+                    f"Project {alias} 的关联 Side 已改变，请刷新后重新确认。"
+                )
+            side_by_id[side_id] = _side_topic(row)
+            if len(side_by_id) > limit:
+                raise ProjectDeleteLimitExceeded(limit_message)
+        bindings = tuple(
+            sorted(
+                (_binding_inventory(row) for row in binding_rows),
+                key=lambda item: item.binding.id,
+            )
+        )
+        sides = tuple(
+            sorted(side_by_id.values(), key=lambda side: side.id)
+        )
+        identity = {
+            "project_alias": alias,
+            "bindings": [
+                [
+                    item.binding.id, item.scope.scope_key, item.scope.app_id,
+                    item.scope.chat_id, item.scope.kind.value, item.scope.topic_id,
+                    item.binding.native_thread_id,
+                ]
+                for item in bindings
+            ],
+            "sides": [
+                [
+                    side.id, side.app_id, side.chat_id, side.topic_id,
+                    side.root_message_id, side.parent_binding_id,
+                ]
+                for side in sides
+            ],
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode()
+        ).hexdigest()
+        return ProjectDeleteSnapshot(project, bindings, sides, fingerprint)
+
+    def begin_project_delete(
+        self,
+        *,
+        alias: str,
+        expected_revision: int,
+        expected_inventory_fingerprint: str,
+        limit: int = PROJECT_DELETE_LIMIT,
+        extra_side_ids: tuple[str, ...] = (),
+    ) -> ProjectDeleteSnapshot:
+        with self._lock:
+            with self._transaction():
+                self.require_project_not_deleting(alias)
+                snapshot = self._project_delete_snapshot(
+                    alias, limit=limit, extra_side_ids=extra_side_ids,
+                )
+                if snapshot.project.revision != expected_revision:
+                    raise ProjectRevisionConflict(alias)
+                if snapshot.fingerprint != expected_inventory_fingerprint:
+                    raise ProjectInventoryConflict(
+                        f"Project {alias} 的关联会话已改变，请刷新后重新确认。"
+                    )
+                self._connection.execute(
+                    "UPDATE projects SET enabled = 0, revision = revision + 1, "
+                    "updated_at = ? WHERE alias = ? AND revision = ? AND deleted = 0",
+                    (_now(), alias, expected_revision),
+                )
+                reserved = ProjectDeleteSnapshot(
+                    self.get_project(alias), snapshot.bindings, snapshot.sides,
+                    snapshot.fingerprint,
+                )
+            self._project_delete_intents[alias] = reserved
+            return reserved
+
+    def release_project_delete(self, *, alias: str, expected_revision: int) -> None:
+        with self._lock:
+            intent = self._project_delete_intents.get(alias)
+            if intent is None:
+                return
+            if intent.project.revision != expected_revision:
+                raise ProjectRevisionConflict(alias)
+            del self._project_delete_intents[alias]
+
+    def finish_project_delete(
+        self,
+        *,
+        alias: str,
+        expected_revision: int,
+        expected_inventory_fingerprint: str,
+    ) -> None:
+        with self._lock:
+            with self._transaction():
+                intent = self._project_delete_intents.get(alias)
+                if intent is None:
+                    raise ProjectInventoryConflict(f"Project {alias} 没有进行中的删除。")
+                project = self.get_project(alias)
+                if (
+                    project.revision != expected_revision
+                    or intent.project.revision != expected_revision
+                ):
+                    raise ProjectRevisionConflict(alias)
+                if intent.fingerprint != expected_inventory_fingerprint:
+                    raise ProjectInventoryConflict(alias)
+                if self._connection.execute(
+                    "SELECT 1 FROM bindings WHERE project_alias = ? LIMIT 1", (alias,)
+                ).fetchone() is not None:
+                    raise ProjectInventoryConflict(f"Project {alias} 仍有关联 Sessions。")
+                for item in intent.bindings:
+                    if self._connection.execute(
+                        "SELECT 1 FROM side_topics WHERE parent_binding_id = ? "
+                        "AND state IN ('creating', 'open') LIMIT 1",
+                        (item.binding.id,),
+                    ).fetchone() is not None:
+                        raise ProjectInventoryConflict(f"Project {alias} 仍有未关闭的 Side Topics。")
+                for side in intent.sides:
+                    if not self.get_side_topic(side.id).state.terminal:
+                        raise ProjectInventoryConflict(
+                            f"Project {alias} 仍有未关闭的 Side Topics。"
+                        )
+                self._connection.execute(
+                    "UPDATE projects SET deleted = 1, enabled = 0, "
+                    "revision = revision + 1, updated_at = ? WHERE alias = ?",
+                    (_now(), alias),
+                )
+            del self._project_delete_intents[alias]
 
     def create_side_topic(
         self,
@@ -1752,6 +2107,24 @@ class BindingStore:
         now = _now()
         try:
             with self._transaction():
+                parent = self._connection.execute(
+                    "SELECT project_alias FROM bindings WHERE binding_id = ?",
+                    (parent_binding_id,),
+                ).fetchone()
+                if parent is not None:
+                    self.require_project_not_deleting(parent["project_alias"])
+                else:
+                    for intent in self._project_delete_intents.values():
+                        if any(
+                            item.binding.id == parent_binding_id
+                            for item in intent.bindings
+                        ) or any(
+                            side.parent_binding_id == parent_binding_id
+                            for side in intent.sides
+                        ):
+                            raise ProjectDeleting(
+                                f"Project {intent.project.alias} 正在删除，请稍后刷新。"
+                            )
                 self._connection.execute(
                     """
                     INSERT INTO side_topics(
@@ -2088,12 +2461,12 @@ class BindingStore:
         """Read Project rows with Channel-owned Binding aggregates."""
 
         page_limit = _validate_page_limit(limit)
-        where = ""
+        where = " WHERE p.deleted = 0"
         parameters: list[object] = []
         if cursor is not None:
             if not cursor:
                 raise ValueError("Project cursor must not be empty")
-            where = " WHERE p.alias > ?"
+            where += " AND p.alias > ?"
             parameters.append(cursor)
         parameters.append(page_limit + 1)
         rows = await self._read_rows(
@@ -2423,7 +2796,7 @@ _SCOPE_SELECT = """
 
 
 _PROJECT_SELECT = """
-    SELECT alias, cwd, enabled, revision, created_at, updated_at
+    SELECT alias, cwd, enabled, revision, created_at, updated_at, deleted
     FROM projects
 """
 
@@ -2475,9 +2848,10 @@ _SIDE_INVENTORY_SELECT = """
 
 _PROJECT_AGGREGATE_SELECT = """
     SELECT
-        p.alias, p.cwd, p.enabled, p.revision, p.created_at, p.updated_at,
+        p.alias, p.cwd, p.enabled, p.revision, p.created_at, p.updated_at, p.deleted,
         COUNT(b.binding_id) AS binding_count,
-        COALESCE(SUM(CASE WHEN b.native_thread_id IS NULL THEN 1 ELSE 0 END), 0)
+        COALESCE(SUM(CASE WHEN b.binding_id IS NOT NULL
+                         AND b.native_thread_id IS NULL THEN 1 ELSE 0 END), 0)
             AS lazy_binding_count,
         COALESCE(SUM(CASE WHEN b.native_thread_id IS NOT NULL THEN 1 ELSE 0 END), 0)
             AS materialized_binding_count,
@@ -2667,6 +3041,7 @@ def _project_record(row: sqlite3.Row) -> ProjectRecord:
         revision=row["revision"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        deleted=bool(row["deleted"]),
     )
 
 
@@ -2721,6 +3096,24 @@ def _binding_inventory_statement(
             raise ValueError("Scope kind is invalid")
         clauses.append("s.kind = ?")
         parameters.append(query.scope_kind.value)
+    if query.project_aliases is not None:
+        if not query.project_aliases:
+            raise ValueError("Project alias filter must not be empty")
+        for alias in query.project_aliases:
+            _require_query_value("Project alias", alias)
+        clauses.append(
+            "b.project_alias IN (" + ",".join("?" for _ in query.project_aliases) + ")"
+        )
+        parameters.extend(query.project_aliases)
+    if query.scope_kinds is not None:
+        if not query.scope_kinds or any(
+            not isinstance(kind, ScopeKind) for kind in query.scope_kinds
+        ):
+            raise ValueError("Scope kinds filter is invalid")
+        clauses.append(
+            "s.kind IN (" + ",".join("?" for _ in query.scope_kinds) + ")"
+        )
+        parameters.extend(kind.value for kind in query.scope_kinds)
     if query.chat_id is not None:
         _require_query_value("chat ID", query.chat_id)
         clauses.append("s.chat_id = ?")

@@ -24,8 +24,11 @@ from netizen.admin.presentation import (
 )
 from netizen.admin.queries import (
     _created_range_query,
-    _session_inventory_state,
+    _current_query,
+    _scope_kinds_query,
+    _session_inventory_states,
     _session_page_size,
+    _text_set_query,
 )
 from netizen.admin.web import (
     AdminWebRunner,
@@ -33,6 +36,7 @@ from netizen.admin.web import (
     accepted_authorities,
 )
 from netizen.bindings import (
+    BindingCursor,
     BindingInventoryRecord,
     BindingTurnSettings,
     ProjectAggregate,
@@ -266,6 +270,10 @@ class FakeManagement:
         }
         return self.update_data["operation"]
 
+    async def query_project_options(self, **_kwargs):
+        aggregate = ProjectAggregate(self.project_record, 3, 1, 2, "2030-01-02")
+        return ProjectAggregatePage((aggregate,), None)
+
     async def query_projects(self, **_kwargs):
         aggregate = ProjectAggregate(self.project_record, 3, 1, 2, "2030-01-02")
         return ProjectInventoryPage((ProjectInventoryItem(aggregate, 1),), None)
@@ -447,19 +455,51 @@ class AdminSessionPresentationTest(unittest.TestCase):
             all(_release_disposition_message(item) for item in ReleaseDisposition)
         )
 
-    def test_session_inventory_state_defaults_to_active_and_accepts_all(self) -> None:
-        self.assertIs(
-            _session_inventory_state({}),
-            SessionInventoryState.ACTIVE,
+    def test_session_inventory_states_default_to_active_lazy_and_normalize_sets(self) -> None:
+        self.assertEqual(
+            _session_inventory_states({}),
+            (SessionInventoryState.ACTIVE, SessionInventoryState.LAZY),
         )
         for state in SessionInventoryState:
-            self.assertIs(
-                _session_inventory_state({"inventoryState": [state.value]}),
-                state,
+            self.assertEqual(
+                _session_inventory_states({"inventoryState": [state.value]}),
+                (state,),
             )
-        self.assertIsNone(_session_inventory_state({"inventoryState": ["all"]}))
+        self.assertEqual(
+            _session_inventory_states({"inventoryState": ["lazy", "active", "lazy"]}),
+            (SessionInventoryState.ACTIVE, SessionInventoryState.LAZY),
+        )
+        self.assertIsNone(_session_inventory_states({"inventoryState": ["all"]}))
+        self.assertIsNone(_session_inventory_states({
+            "inventoryState": [state.value for state in SessionInventoryState]
+        }))
+        for values in (["materialized"], ["all", "lazy"], [""], []):
+            with self.subTest(values=values), self.assertRaises(AdminWebError):
+                _session_inventory_states({"inventoryState": values})
+
+    def test_session_multiselect_values_are_exact_and_canonical(self) -> None:
+        self.assertEqual(
+            _text_set_query({"project": ["beta", "alpha", "beta"]}, "project"),
+            ("alpha", "beta"),
+        )
+        self.assertIsNone(_text_set_query({}, "project"))
+        self.assertEqual(
+            _scope_kinds_query({"scopeKind": ["topic", "direct", "topic"]}),
+            (ScopeKind.DIRECT, ScopeKind.TOPIC),
+        )
+        self.assertIsNone(_scope_kinds_query({
+            "scopeKind": [kind.value for kind in ScopeKind]
+        }))
+        self.assertIsNone(_current_query({"current": ["true", "false", "true"]}))
+        self.assertIs(_current_query({"current": ["true", "true"]}), True)
+        self.assertIs(_current_query({"current": ["false"]}), False)
+        for values in ([""], [" alpha"], []):
+            with self.subTest(values=values), self.assertRaises(AdminWebError):
+                _text_set_query({"project": values}, "project")
         with self.assertRaises(AdminWebError):
-            _session_inventory_state({"inventoryState": ["materialized"]})
+            _scope_kinds_query({"scopeKind": ["direct", "other"]})
+        with self.assertRaises(AdminWebError):
+            _current_query({"current": ["true", "yes"]})
 
     def test_sessions_page_sizes_are_exact_and_default_to_twenty(self) -> None:
         self.assertEqual(_session_page_size({}), 20)
@@ -1253,6 +1293,115 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 400)
         self.assertEqual(error["code"], "invalid_cursor")
 
+    async def test_session_multiselect_cursor_uses_normalized_filter_sets(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        native_cursor = BindingCursor("2030-01-01", "binding-last")
+        with patch.object(
+            self.management,
+            "query_sessions",
+            return_value=SessionInventoryPage((), native_cursor),
+        ) as query:
+            status, _, page = await self.json_get(
+                "/api/v1/sessions?project=beta&project=alpha&project=beta"
+                "&scopeKind=topic&scopeKind=direct&current=true&current=false"
+                "&inventoryState=lazy&inventoryState=active&inventoryState=lazy",
+                session,
+            )
+            self.assertEqual(status, 200, page)
+            filters = query.call_args.kwargs["query"]
+            self.assertEqual(filters.local.project_aliases, ("alpha", "beta"))
+            self.assertEqual(filters.local.scope_kinds, (ScopeKind.DIRECT, ScopeKind.TOPIC))
+            self.assertIsNone(filters.local.current)
+            self.assertEqual(filters.inventory_states, (
+                SessionInventoryState.ACTIVE, SessionInventoryState.LAZY,
+            ))
+            cursor = page["nextCursor"]
+            equivalent = (
+                "/api/v1/sessions?project=alpha&project=beta"
+                "&scopeKind=direct&scopeKind=topic"
+            )
+            status, _, page = await self.json_get(f"{equivalent}&cursor={cursor}", session)
+            self.assertEqual(status, 200, page)
+            self.assertEqual(query.call_args.kwargs["cursor"], native_cursor)
+            for change in (
+                "&project=gamma", "&scopeKind=group", "&current=true",
+                "&inventoryState=lazy", "&pageSize=50",
+            ):
+                with self.subTest(change=change):
+                    status, _, error = await self.json_get(
+                        f"{equivalent}{change}&cursor={cursor}", session
+                    )
+                    self.assertEqual(status, 400, error)
+                    self.assertEqual(error["code"], "invalid_cursor")
+
+            status, _, page = await self.json_get(
+                "/api/v1/sessions?scopeKind=direct&scopeKind=group&scopeKind=topic"
+                "&current=false&current=true&inventoryState=active&inventoryState=lazy"
+                "&inventoryState=archived&inventoryState=missing",
+                session,
+            )
+            self.assertEqual(status, 200, page)
+            status, _, page = await self.json_get(
+                f"/api/v1/sessions?inventoryState=all&cursor={page['nextCursor']}", session
+            )
+            self.assertEqual(status, 200, page)
+
+    async def test_session_multiselect_query_count_remains_bounded(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        projects = tuple(f"project-{index:03d}" for index in range(40))
+        query = urlencode([("project", alias) for alias in projects])
+        status, _, page = await self.json_get(f"/api/v1/sessions?{query}", session)
+        self.assertEqual(status, 200, page)
+        self.assertEqual(
+            self.management.query_session_calls[-1]["query"].local.project_aliases,
+            projects,
+        )
+        with patch.object(self.management, "query_sessions") as sessions:
+            overflow = urlencode([("project", "x")] * 257)
+            status, _, error = await self.json_get(
+                f"/api/v1/sessions?{overflow}", session
+            )
+            self.assertEqual(status, 400, error)
+            sessions.assert_not_awaited()
+
+    async def test_project_options_are_authenticated_paginated_and_issue_no_actions(self) -> None:
+        self.runner.open_admission()
+        status, _, _ = await self.request("GET", "/api/v1/projects/options")
+        self.assertEqual(status, 401)
+        session = await self.login()
+        disabled = replace(self.management.project_record, alias="disabled", enabled=False)
+        aggregate = ProjectAggregate(disabled, 0, 0, 0, None)
+        before = self.runner.application._auth.state_counts().actions
+        with patch.object(
+            self.management,
+            "query_project_options",
+            return_value=ProjectAggregatePage((aggregate,), "disabled"),
+        ) as query, patch.object(self.management, "query_projects") as inventory:
+            status, _, page = await self.json_get(
+                "/api/v1/projects/options?pageSize=1", session
+            )
+            self.assertEqual(status, 200, page)
+            self.assertEqual(page["items"], [{"alias": "disabled", "enabled": False}])
+            self.assertNotIn("actions", page)
+            self.assertEqual(query.call_args.kwargs["limit"], 1)
+            cursor = page["nextCursor"]
+            status, _, page = await self.json_get(
+                f"/api/v1/projects/options?pageSize=1&cursor={cursor}", session
+            )
+            self.assertEqual(status, 200, page)
+            self.assertEqual(query.call_args.kwargs["cursor"], "disabled")
+            inventory.assert_not_awaited()
+            for target in (
+                f"/api/v1/projects/options?pageSize=2&cursor={cursor}",
+                f"/api/v1/projects?pageSize=1&cursor={cursor}",
+            ):
+                status, _, error = await self.json_get(target, session)
+                self.assertEqual(status, 400, error)
+                self.assertEqual(error["code"], "invalid_cursor")
+        self.assertEqual(before, self.runner.application._auth.state_counts().actions)
+
     async def test_sessions_api_exposes_page_size_presentation_and_state(self) -> None:
         self.runner.open_admission()
         session = await self.login()
@@ -1265,9 +1414,9 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page["pageSize"], 20)
         call = self.management.query_session_calls[-1]
         self.assertEqual(call["limit"], 20)
-        self.assertIs(
-            call["query"].inventory_state,
-            SessionInventoryState.ACTIVE,
+        self.assertEqual(
+            call["query"].inventory_states,
+            (SessionInventoryState.ACTIVE, SessionInventoryState.LAZY),
         )
         self.assertGreaterEqual(call["deadline"], started + 10.0)
         self.assertLessEqual(call["deadline"], finished + 10.0)
@@ -1318,9 +1467,9 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             session,
         )
         self.assertEqual(status, 200)
-        self.assertIs(
-            self.management.query_session_calls[-1]["query"].inventory_state,
-            SessionInventoryState.LAZY,
+        self.assertEqual(
+            self.management.query_session_calls[-1]["query"].inventory_states,
+            (SessionInventoryState.LAZY,),
         )
         status, _headers, _page = await self.json_get(
             "/api/v1/sessions?inventoryState=all",
@@ -1328,7 +1477,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 200)
         self.assertIsNone(
-            self.management.query_session_calls[-1]["query"].inventory_state
+            self.management.query_session_calls[-1]["query"].inventory_states
         )
         status, _headers, error = await self.json_get(
             "/api/v1/sessions?inventoryState=materialized",
@@ -1685,12 +1834,6 @@ class AdminStaticAssetsTest(unittest.TestCase):
         )
         for option in ('value="10"', 'value="20" selected', 'value="50"', 'value="100"'):
             self.assertIn(option, html)
-        self.assertIn('name="inventoryState"', html)
-        self.assertIn('<option value="active" selected>Active</option>', html)
-        self.assertIn('<option value="lazy">Lazy</option>', html)
-        self.assertIn('<option value="archived">Archived</option>', html)
-        self.assertIn('<option value="missing">Missing</option>', html)
-        self.assertIn('<option value="all">全部</option>', html)
         self.assertNotIn('name="materialized"', html)
         self.assertNotIn('name="nativeState"', html)
         for unsafe in (

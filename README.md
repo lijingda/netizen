@@ -233,8 +233,13 @@ slash control 串联；`$skill` 使用 Codex 原生语义，不占用飞书的 `
 App Secret，也不写入 YAML。登录后：
 
 - **Projects** 可查看会话聚合、登记已有目录、在 `projectRoot` 内创建空目录及启停；
-- **Sessions** 可按 Project、Scope、chat/topic、当前指针和统一会话状态筛选；状态包括默认
-  `Active` 以及 `Lazy`、`Archived`、`Missing`、`全部`。页面以 10/20/50/100 条 keyset
+  “删除 Project 及关联 Sessions”经二次确认清理全部关联会话（包含归档），结束关联 Side，
+  保留磁盘代码目录。部分失败或结果未知时保留停用的 Project，并展示剩余项，需重新确认；
+- **Sessions** 的 Project、Scope、会话状态、当前指针均为多选；Project 可搜索并包含已停用
+  项目，其余选项为单聊/群聊/话题、`Active`/`Lazy`/`Archived`/`Missing`、当前/非当前。
+  默认显示 `Active` + `Lazy`，其他条件默认全部；同项选择取“或”，不同条件取“且”。
+  ID 输入筛选已移除，列表仍显示 ID；保留创建时间和每页数量，“重置”恢复默认条件。
+  页面以 10/20/50/100 条 keyset
   分页查看当前页的单聊、群聊或话题群名称，并从名称打开对应飞书会话；页面区分消息/话题、
   当前/非当前与独立运行态。可管理创建、切换、配置、
   重命名、归档、两种恢复、Lazy 删除、active/archived materialized 删除、exact Stop 和
@@ -254,7 +259,7 @@ App Secret，也不写入 YAML。登录后：
 
 每个写操作都使用一次性 action/CSRF token，并在共享锁内重读 exact target；页面断线后只
 能刷新对账，不会自动重放。服务重启或合法轮换 credential 会立即使旧 session 失效。V1
-有意使用受信内网 HTTP，不提供 TLS、OIDC、多管理员、RBAC、批量 native mutation 或 Prompt
+有意使用受信内网 HTTP，不提供 TLS、OIDC、多管理员、RBAC、任意筛选结果的批量 mutation 或 Prompt
 入口；若地址暴露到不受信网络，应先增加独立的安全架构。
 
 ## 用户指南 Skill

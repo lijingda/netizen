@@ -85,6 +85,23 @@ def _optional_text_query(
     return value
 
 
+def _text_set_query(
+    values: Mapping[str, list[str]],
+    name: str,
+) -> tuple[str, ...] | None:
+    items = values.get(name)
+    if items is None:
+        return None
+    if not items or any(
+        not item
+        or item.strip() != item
+        or len(item.encode("utf-8")) > _MAX_TEXT_BYTES
+        for item in items
+    ):
+        raise AdminWebError(400, "invalid_query", f"查询参数 {name} 无效。")
+    return tuple(sorted(set(items)))
+
+
 def _created_range_query(
     values: Mapping[str, list[str]],
 ) -> tuple[str | None, str | None]:
@@ -143,32 +160,45 @@ def _optional_bool_query(
     raise AdminWebError(400, "invalid_query", f"查询参数 {name} 必须是布尔值。")
 
 
-def _optional_scope_kind(values: Mapping[str, list[str]]) -> ScopeKind | None:
-    raw = _optional_one(values, "scopeKind")
+def _scope_kinds_query(
+    values: Mapping[str, list[str]],
+) -> tuple[ScopeKind, ...] | None:
+    raw = _text_set_query(values, "scopeKind")
     if raw is None:
         return None
     try:
-        return ScopeKind(raw)
+        kinds = tuple(ScopeKind(value) for value in raw)
     except ValueError:
         raise AdminWebError(400, "invalid_scope_kind", "Scope 类型无效。") from None
+    return None if set(kinds) == set(ScopeKind) else kinds
 
 
-def _session_inventory_state(
-    values: Mapping[str, list[str]],
-) -> SessionInventoryState | None:
-    raw = _optional_one(values, "inventoryState")
+def _current_query(values: Mapping[str, list[str]]) -> bool | None:
+    raw = _text_set_query(values, "current")
     if raw is None:
-        return SessionInventoryState.ACTIVE
-    if raw == "all":
+        return None
+    if any(value not in {"true", "false"} for value in raw):
+        raise AdminWebError(400, "invalid_query", "查询参数 current 必须是布尔值。")
+    return raw[0] == "true" if len(raw) == 1 else None
+
+
+def _session_inventory_states(
+    values: Mapping[str, list[str]],
+) -> tuple[SessionInventoryState, ...] | None:
+    raw = _text_set_query(values, "inventoryState")
+    if raw is None:
+        return (SessionInventoryState.ACTIVE, SessionInventoryState.LAZY)
+    if raw == ("all",):
         return None
     try:
-        return SessionInventoryState(raw)
+        states = tuple(SessionInventoryState(value) for value in raw)
     except ValueError:
         raise AdminWebError(
             400,
             "invalid_inventory_state",
             "会话状态无效。",
         ) from None
+    return None if set(states) == set(SessionInventoryState) else states
 
 
 def _id_query(values: Mapping[str, list[str]], name: str) -> tuple[str, ...]:

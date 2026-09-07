@@ -44,6 +44,7 @@ from .presentation import (
 )
 from .queries import (
     _created_range_query,
+    _current_query,
     _decode_binding_cursor,
     _decode_project_cursor,
     _decode_side_cursor,
@@ -54,12 +55,13 @@ from .queries import (
     _id_query,
     _optional_bool_query,
     _optional_one,
-    _optional_scope_kind,
     _optional_text_query,
     _page_size,
     _require_query_keys,
-    _session_inventory_state,
+    _scope_kinds_query,
+    _session_inventory_states,
     _session_page_size,
+    _text_set_query,
 )
 from .transport import AdminHttpTransport, Request, Response
 from ..bindings import (
@@ -117,6 +119,7 @@ from ..management import (
     InstanceManagementService,
     NativeCatalogInconsistent,
     NativeThreadMissing,
+    ProjectDeletionResult,
     RuntimePrecondition,
     RuntimeStateChanged,
     SessionInventoryItem,
@@ -143,7 +146,7 @@ _FORM_TYPE = "application/x-www-form-urlencoded"
 _QUERY_DEADLINE_SECONDS = 5.0
 _SESSION_QUERY_DEADLINE_SECONDS = 10.0
 _MUTATION_DEADLINE_SECONDS = 15.0
-_MAX_QUERY_FIELDS = 24
+_MAX_QUERY_FIELDS = 256
 _MAX_JSON_FIELDS = 20
 _RUNTIME_SNAPSHOT_BATCH_SIZE = 50
 
@@ -199,6 +202,7 @@ class AdminActionPreconditions:
     side_chat_id: ExpectedValue[str]
     side_topic_id: ExpectedValue[str]
     side_root_message_id: ExpectedValue[str]
+    inventory_fingerprint: ExpectedValue[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -472,6 +476,8 @@ class AdminWebApplication:
             return await self._projects(context)
         if route == ("GET", "/api/v1/sessions"):
             return await self._sessions(context)
+        if route == ("GET", "/api/v1/projects/options"):
+            return await self._project_options(context)
         if route == ("GET", "/api/v1/runtime-snapshots"):
             return await self._runtime_snapshots(context)
         if route == ("GET", "/api/v1/side-topics"):
@@ -489,6 +495,8 @@ class AdminWebApplication:
             "/api/v1/projects/register": self._project_register,
             "/api/v1/projects/create-directory": self._project_create_directory,
             "/api/v1/projects/set-enabled": self._project_set_enabled,
+            "/api/v1/projects/delete-preview": self._project_delete_preview,
+            "/api/v1/projects/delete": self._project_delete,
             "/api/v1/sessions/create-lazy": self._session_create_lazy,
             "/api/v1/sessions/activate": self._session_activate,
             "/api/v1/sessions/configure": self._session_configure,
@@ -654,13 +662,22 @@ class AdminWebApplication:
                     "projects.set-enabled",
                     project_target,
                     preconditions,
-                )
+                ),
+                "previewDelete": self._grant(
+                    context,
+                    "projects.delete-preview",
+                    project_target,
+                    preconditions,
+                ),
             }
+            if item.deleting:
+                project_actions = {}
             items.append(
                 {
                     "alias": project.alias,
                     "cwd": project.cwd,
                     "enabled": project.enabled,
+                    "deleting": item.deleting,
                     "revision": project.revision,
                     "createdAt": project.created_at,
                     "updatedAt": project.updated_at,
@@ -682,6 +699,28 @@ class AdminWebApplication:
             },
         )
 
+    async def _project_options(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, {"cursor", "pageSize"})
+        page_size = _page_size(context.query)
+        fingerprint = _fingerprint("project-options", {"pageSize": page_size})
+        cursor = _decode_project_cursor(_optional_one(context.query, "cursor"), fingerprint)
+        page = await self._management.query_project_options(
+            cursor=cursor,
+            limit=page_size,
+            deadline=asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS,
+        )
+        return _json_response(
+            200,
+            {
+                "requestId": context.request.request_id,
+                "items": [
+                    {"alias": item.project.alias, "enabled": item.project.enabled}
+                    for item in page.items
+                ],
+                "nextCursor": _encode_project_cursor(page.next_cursor, fingerprint),
+            },
+        )
+
     async def _sessions(self, context: _RequestContext) -> Response:
         allowed = {
             "cursor",
@@ -700,21 +739,23 @@ class AdminWebApplication:
         page_size = _session_page_size(context.query)
         created_from, created_before = _created_range_query(context.query)
         local = BindingQuery(
-            project_alias=_optional_text_query(context.query, "project"),
-            scope_kind=_optional_scope_kind(context.query),
+            project_aliases=_text_set_query(context.query, "project"),
+            scope_kinds=_scope_kinds_query(context.query),
             chat_id=_optional_text_query(context.query, "chatId"),
             topic_id=_optional_text_query(context.query, "topicId"),
             identity=_optional_text_query(context.query, "identity"),
-            current=_optional_bool_query(context.query, "current"),
+            current=_current_query(context.query),
             created_from=created_from,
             created_before=created_before,
         )
-        inventory_state = _session_inventory_state(context.query)
+        inventory_states = _session_inventory_states(context.query)
         filter_values = {
             "pageSize": page_size,
             "local": _jsonable(local),
             "inventoryState": (
-                inventory_state.value if inventory_state is not None else "all"
+                tuple(state.value for state in inventory_states)
+                if inventory_states is not None
+                else "all"
             ),
         }
         fingerprint = _fingerprint("sessions", filter_values)
@@ -725,7 +766,7 @@ class AdminWebApplication:
         page = await self._management.query_sessions(
             query=SessionQuery(
                 local=local,
-                inventory_state=inventory_state,
+                inventory_states=inventory_states,
             ),
             cursor=cursor,
             limit=page_size,
@@ -1127,6 +1168,84 @@ class AdminWebApplication:
             200,
             _project_result(context.request.request_id, project),
         )
+
+    async def _project_delete_preview(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        _, grant = self._redeem(
+            context, "projects.delete-preview", expected_resource="project",
+        )
+        snapshot = await self._management.preview_project_delete(
+            alias=grant.target.target_id,
+            expected_revision=_expected_value(
+                _grant_preconditions(grant).project_revision, "Project revision",
+            ),
+            deadline=asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS,
+        )
+        project = snapshot.project
+        lazy_count = sum(item.binding.native_thread_id is None for item in snapshot.bindings)
+        return _json_response(200, {
+            "requestId": context.request.request_id,
+            "project": {"alias": project.alias, "cwd": project.cwd, "revision": project.revision},
+            "sessionCount": len(snapshot.bindings),
+            "lazySessionCount": lazy_count,
+            "materializedSessionCount": len(snapshot.bindings) - lazy_count,
+            "sideCount": len(snapshot.sides),
+            "actions": {"delete": self._grant(
+                context, "projects.delete", AdminActionTarget("project", project.alias),
+                _empty_preconditions(
+                    project_revision=ExpectedValue.expect(project.revision),
+                    inventory_fingerprint=ExpectedValue.expect(snapshot.fingerprint),
+                ),
+            )},
+        })
+
+    async def _project_delete(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        _, grant = self._redeem(context, "projects.delete", expected_resource="project")
+        preconditions = _grant_preconditions(grant)
+        result = await self._mutation(
+            context, "projects.delete", grant.target.target_id,
+            self._management.delete_project(
+                alias=grant.target.target_id,
+                expected_revision=_expected_value(preconditions.project_revision, "Project revision"),
+                expected_inventory_fingerprint=_expected_value(
+                    preconditions.inventory_fingerprint, "Project inventory",
+                ),
+            ),
+        )
+        messages = {
+            "outcome_unknown": "有会话的删除结果未确认，请先对账；本次操作不会自动重试。",
+            "deadline_exceeded": "删除等待已到期，正在处理的目标可能尚未确认；请先查看剩余会话状态。",
+            "inventory_changed": "关联会话在执行期间发生变化，请查看剩余项后重新确认。",
+            "side_close_failed": "关联 Side 的关闭未完成，请先处理该 Side。",
+            "side_creation_in_progress": "关联 Side 正在创建飞书话题，请等待创建完成后刷新并重新确认。",
+            "delete_failed": "删除未全部完成，请查看剩余会话状态后重新确认。",
+        }
+        if result.deleted:
+            message = f"已删除 Project {result.project_alias} 及关联 Sessions，代码目录已保留。"
+        else:
+            message = (
+                f"Project {result.project_alias} 已保留并停用。"
+                f"已清理 {result.deleted_session_count} 个 Sessions，"
+                f"剩余 {len(result.remaining_sessions)} 个 Sessions、{result.remaining_side_count} 个 Side。"
+                + messages[result.code]
+            )
+        return _json_response(200, {
+            "requestId": context.request.request_id,
+            "deleted": result.deleted,
+            "projectAlias": result.project_alias,
+            "deletedSessionCount": result.deleted_session_count,
+            "remainingSessionCount": len(result.remaining_sessions),
+            "remainingSessions": [
+                {"bindingId": binding.id, "shortId": binding.short_id, "scopeKey": binding.scope_key}
+                for binding in result.remaining_sessions
+            ],
+            "remainingSideCount": result.remaining_side_count,
+            "failedBindingId": result.failed_binding_id,
+            "failedSideId": result.failed_side_id,
+            "code": result.code,
+            "message": message,
+        })
 
     async def _session_create_lazy(self, context: _RequestContext) -> Response:
         payload, grant = self._redeem(
@@ -1539,7 +1658,11 @@ class AdminWebApplication:
             terminal = "success"
             error_name: str | None = None
             try:
-                return await operation
+                result = await operation
+                if isinstance(result, ProjectDeletionResult) and not result.deleted:
+                    terminal = "incomplete"
+                    error_name = result.code
+                return result
             except BaseException as error:
                 terminal = "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
                 error_name = type(error).__name__
@@ -2018,6 +2141,7 @@ def _empty_preconditions(
     side_chat_id: ExpectedValue[str] | None = None,
     side_topic_id: ExpectedValue[str] | None = None,
     side_root_message_id: ExpectedValue[str] | None = None,
+    inventory_fingerprint: ExpectedValue[str] | None = None,
 ) -> AdminActionPreconditions:
     return AdminActionPreconditions(
         active_binding_id or ExpectedValue.dont_check(),
@@ -2030,6 +2154,7 @@ def _empty_preconditions(
         side_chat_id or ExpectedValue.dont_check(),
         side_topic_id or ExpectedValue.dont_check(),
         side_root_message_id or ExpectedValue.dont_check(),
+        inventory_fingerprint or ExpectedValue.dont_check(),
     )
 
 
@@ -2129,13 +2254,7 @@ def _map_error(error: BaseException) -> AdminWebError | None:
     if isinstance(error, UpdateError):
         mapped = _UPDATE_HTTP_ERRORS.get(error.code)
         return AdminWebError(*mapped) if mapped is not None else None
-    if isinstance(
-        error,
-        (
-            ValueError,
-            AmbiguousBinding,
-        ),
-    ):
+    if isinstance(error, (ValueError, AmbiguousBinding)) and not isinstance(error, ProjectError):
         return AdminWebError(400, "invalid_input", "请求参数无效。")
     if isinstance(
         error,

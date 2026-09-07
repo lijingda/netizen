@@ -22,10 +22,12 @@ from openai_codex import (
 from openai_codex.types import ThreadTokenUsageUpdatedNotification
 
 from .bindings import (
+    PROJECT_DELETE_LIMIT,
     BindingStore,
     BindingTaskFeedback,
     BindingTurnSettings,
     SideTopicConflict,
+    SideTopicNotFound,
     SideTopicState,
     ThreadBinding,
 )
@@ -959,6 +961,7 @@ class CodexRuntime:
             raise ValueError("Side identity must not be empty")
         if not self._accepting:
             raise RuntimeClosed("服务正在停止，暂不能创建 Side。")
+        self._require_side_creation_allowed(binding, side_id)
         if side_id in self._sides:
             return self.side_snapshot(side_id)
 
@@ -985,6 +988,7 @@ class CodexRuntime:
         async with self._lock(binding.id):
             if not self._accepting:
                 raise RuntimeClosed("服务正在停止，暂不能创建 Side。")
+            self._require_side_creation_allowed(binding, side_id)
             self._guard_no_lifecycle_locked(binding.id)
             if binding.id in self._compacting:
                 raise ThreadCompacting(
@@ -1068,6 +1072,9 @@ class CodexRuntime:
                     raise SideStartFailed(
                         "无法确认父 Codex Thread 处于可 fork 状态，本次 Side 未创建。"
                     ) from error
+            # Project deletion can reserve admission while the parent is being
+            # resumed/read. Recheck immediately before the native fork.
+            self._require_side_creation_allowed(current, side_id)
             try:
                 thread = await self._codex.thread_fork(
                     current.native_thread_id,
@@ -1157,6 +1164,31 @@ class CodexRuntime:
             self._sides[side_id] = session
             return self._side_snapshot(session)
 
+    def _require_side_creation_allowed(
+        self,
+        binding: ThreadBinding,
+        side_id: str,
+    ) -> None:
+        self._bindings.require_project_not_deleting(binding.project_alias)
+        try:
+            route = self._bindings.get_side_topic(side_id)
+        except SideTopicNotFound:
+            # Standalone Runtime callers may create before reserving a route.
+            return
+        if route.parent_binding_id != binding.id or route.state.terminal:
+            raise SideSessionConflict("Side 路由已结束或父会话已变化，本次未创建。")
+
+    async def drain_project_side_creation(self, binding_id: str) -> None:
+        """Wait for an admitted Side fork to publish its exact local session.
+
+        The caller first fences Project admission and bounds this wait. Taking
+        only the parent Binding lock also drains setup without native I/O or
+        blocking unrelated Bindings, before an absent Side session is terminal.
+        """
+
+        async with self._lock(binding_id):
+            pass
+
     async def attach_side_topic(
         self,
         *,
@@ -1196,6 +1228,30 @@ class CodexRuntime:
 
     def side_snapshot(self, side_id: str) -> SideSessionSnapshot:
         return self._side_snapshot(self._require_side(side_id))
+
+    def project_side_snapshots(
+        self,
+        alias: str,
+        *,
+        limit: int = PROJECT_DELETE_LIMIT,
+    ) -> tuple[SideSessionSnapshot, ...]:
+        """Project live Sides, including those whose Parent Binding was deleted."""
+
+        if not isinstance(alias, str) or not alias:
+            raise ValueError("Project alias must not be empty")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= PROJECT_DELETE_LIMIT
+        ):
+            raise ValueError("Project Side snapshot limit is invalid")
+        snapshots = []
+        for session in self._sides.values():
+            if session.project_alias == alias:
+                if len(snapshots) >= limit:
+                    raise ValueError("Project Side snapshot exceeds the limit")
+                snapshots.append(self._side_snapshot(session))
+        return tuple(snapshots)
 
     async def capture_side_submission_admission(
         self,

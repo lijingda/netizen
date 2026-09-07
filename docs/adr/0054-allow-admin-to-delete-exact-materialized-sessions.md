@@ -3,9 +3,14 @@ status: accepted
 date: 2026-09-03
 amends: 0031, 0037
 related: 0038, 0049
+amended_by: 0060
 ---
 
 # 允许 Admin 删除 exact materialized 会话
+
+> [ADR 0060](0060-delete-projects-with-exact-session-inventory.md) 增加完整清单确认的
+> Project 及关联 Sessions 删除，复用本文的 exact primitive；下文禁止任意批量删除、
+> Project 目录删除和 Side 墓碑删除的边界继续成立。
 
 ## 背景
 

@@ -244,7 +244,13 @@ Binding 的新 mutation；当前不猜测重挂或替用户暂停。
 多个 native Thread 可同时共享和修改它；它不是 clone、worktree 或快照。
 
 **Project Registry**：整个 Netizen 实例共享的 Project 目录。它保存 Project 的
-alias、canonical cwd 和是否可用于新会话；停用不影响已有会话，也不删除目录。
+alias、canonical cwd、是否可用于新会话及删除记录；停用不影响已有会话，也不删除目录。
+
+**Project Deletion / Project 删除**：实例管理员明确确认的 Project 登记与其完整关联普通
+会话的永久清理，包含归档会话和关联 Side 的结束；不包含磁盘代码目录。
+
+**Project Tombstone / Project 墓碑**：已删除 Project 留下的 alias 登记记录，防止配置在
+重启后恢复它；显式重新登记同名 Project 才开始新的有效登记。
 
 **Ordinary Active Turn**：以 Binding ID 为键的内存记录：handle、owner、origin、状态、
 task、receipt Event，以及只读 Activity cursor/checklist/commentary/安全操作、成功 steer count
