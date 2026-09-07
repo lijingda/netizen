@@ -39,8 +39,8 @@ SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕�
   state/
     channel.sqlite3[-wal|-shm]                  # Binding/Turn settings/Task feedback/Registry/Dedup
     .install.lock / .activation-intent.json     # 跨卸载锁与异常中断恢复意图
-    update.json                                # 最近一次 Admin 升级的有界 typed 结果，0600
-    netizen-update-<operationId>.plist          # macOS 一次性升级提交文件，终态后清理
+    update.json                                # 最近一次 Admin 升级/重启的有界 typed 结果，0600
+    netizen-update-<operationId>.plist          # macOS 一次性部署提交文件，终态后清理
     service.lifetime.lock / service.ready       # 精确退出与 readiness 契约
     netizen.log / launchd.stderr.log            # macOS 有界服务日志/launcher 错误
     rollback-recovery-*                         # 回滚恢复材料
@@ -403,7 +403,8 @@ interrupt，并为 exact Thread 请求清理 App Server 已登记的后台 termi
 Project config 重载后自动清理；它不会读写全局 `config.toml`。实测结果为
 `CONFIG-A -> CONFIG-B`，当前固定 `0.147.0` 分类为 `hot-reloaded`。升级后若输出
 `restart-required` 仍是受支持结果，但必须更新兼容性判断并按重启语义验收。用户级
-`~/.codex/config.toml` 不由 Netizen 监听；修改官方要求重启的键后先执行：
+`~/.codex/config.toml` 不由 Netizen 监听；修改官方要求重启的键后，可在 Admin 系统维护页
+点击“重启服务”，或执行下列命令。重启不保证所有配置作用于已有 Thread：
 
 ```bash
 "$HOME/.netizen/current/source/service.sh" restart
@@ -754,8 +755,8 @@ SQLite 的 `state`、Project 目录、其他 Codex Skills 及原生 Thread/Turn 
 
 ### 从 Admin 升级
 
-首个包含 Updates 页的版本需要先通过已有官方安装器安装一次。之后由实例管理员登录
-Admin，打开 **Updates**，点击“检查更新”，查看当前版本、官方候选版本和发布说明，再
+首个包含管理页维护能力的版本需要先通过已有安装入口安装一次。之后由实例管理员登录
+Admin，打开 **系统维护**，点击“检查更新”，查看当前版本、官方候选版本和发布说明，再
 点击“升级并重启”。仅受管 Published Release 支持此操作；Source Install 显示源码安装
 说明，继续在相应工作区运行 `./dev-install.sh`。服务未运行时使用原有 CLI 入口。
 
@@ -803,6 +804,16 @@ relay 规则，不把 App Secret 发到聊天。机器掉电不会自动执行�
 
 一次性执行者的下载与安装输出不进入 Admin API；页面只显示固定阶段与错误码。排障按
 安装器的显式执行结果和现有主服务日志确定原因，不从页面失败文案推测是否已回滚。
+
+### 从 Admin 重启
+
+受管 Published Release 和 Source Install 可在 **系统维护** 页直接点击“重启服务”，
+无需检查更新，保持当前版本。确认后会中断 Turn、暂停 Goal、结束临时 Side，任务不会自动
+续跑；重启后重新登录查看结果。服务已停止时使用 CLI `service.sh restart`。
+
+重启沿用上述升级的互斥、断线对账与显式 CLI 恢复流程。执行失败可能需要处理，不会回滚
+用户修改的 Codex 配置；重新连通不能证明成功。准入与执行差异见
+[ADR 0059](adr/0059-support-explicit-admin-service-restart.md)。
 
 首次上线验收或相关产品边界发生变化时，按本文对应门禁核对 ready 日志，并在飞书发送
 “运行中的任务再发一条消息会怎样？”确认自然语言回答包含 steer 且明确不排队；再用
@@ -1025,6 +1036,21 @@ CSRF/Origin/Host；源码提示；页面发布说明按纯文本渲染；重复�
 上述升级门禁之外，安装器、launcher 与 ready 变更仍须完成下一节已有的 fresh/active/
 stopped 安装、原生 SDK 生命周期及两平台服务资格检查；已由 exact 候选运行过的同一检查
 可复用结果，不以历史版本绿灯替代。
+
+### 管理页重启验收
+
+ADR 0059 首次交付或改变重启准入、执行隔离、安装锁、停机/ready、对账或登录边界时，
+执行 `make check`，并在上述两平台可恢复测试账号上验证真实主服务生命周期。复用管理页
+升级验收中的隔离与清理、停机影响、重复与交错、中断恢复和浏览器重连检查，增加以下差异：
+
+- Published Release 与 Source Install 均无需检查更新即可重启；版本与 `current` 不变，
+  无 Release 查询、下载、安装或配置写入；非受管及 stale pointer 拒绝提交。
+- 服务脚本完成 stop-confirm/start-ready 并零退出才成功；停止未确认、启动失败和 ready
+  超时都不得推断成功或回滚。执行者持锁至结果写入，锁不被服务或 Codex 子进程继承。
+- 重启与升级、CLI 安装/卸载互斥；pending、未知结果、未恢复 activation intent、迟到
+  accepted worker 或 manager 观察未知不造成重派；CLI 恢复保留原操作并只报告 `recovered`。
+
+同一候选已有的共享检查结果可复用；隔离探针及 fake manager 测试不能替代两平台实机证据。
 
 ## 验收顺序
 

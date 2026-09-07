@@ -178,6 +178,7 @@ def _installer_update(layout: Layout, manifest: PublishedReleaseManifest) -> Ins
         operation = read_operation(layout.product_root)
         if (
             operation is None
+            or operation.get("kind") == "restart"
             or operation["operationId"] != os.environ[ENV_OPERATION_ID]
             or operation["phase"] != "downloading"
             or operation["target"]["version"] != manifest.version

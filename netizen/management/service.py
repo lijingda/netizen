@@ -664,6 +664,9 @@ class InstanceManagementService:
     async def start_update(self, *, target: dict[str, Any]) -> dict[str, Any]:
         return await self._updates.start(target=target)
 
+    async def restart_service(self, *, release_digest: str) -> dict[str, Any]:
+        return await self._updates.restart(release_digest=release_digest)
+
     async def register_project(
         self,
         *,

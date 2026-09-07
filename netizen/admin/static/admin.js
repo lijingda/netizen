@@ -58,6 +58,7 @@ const updatePhaseLabels = {
   recovered: "已通过安装器恢复",
 };
 const updateCodeMessages = {
+  restart_failed: "服务未能确认重启完成，请检查服务日志并按部署说明恢复。",
   download_failed: "下载失败，请检查网络后重新检查更新。",
   installer_invalid: "安装器校验失败，请重新检查更新。",
   preparation_failed: "新版本准备失败，旧版本未切换。请通过官方安装器重试以查看具体原因。",
@@ -66,15 +67,15 @@ const updateCodeMessages = {
   activation_failed: "新版本未能完成启动，请查看回滚结果，检查服务日志并用官方安装器恢复。",
   rollback_incomplete: "回滚未完成，请使用官方安装器修复，当前结果不能确认为成功。",
   installer_failed: "安装器未成功完成，请通过官方安装器重试以查看具体原因。",
-  worker_interrupted: "升级进程已中断，请使用官方安装器检查并恢复安装。",
-  lock_busy: "已有安装操作正在执行，请稍后刷新升级状态。",
-  operation_invalid: "升级记录无法验证，请使用官方安装器检查并修复。",
-  dispatch_failed: "未能启动升级进程，请检查服务管理器后重新检查更新。",
-  dispatch_unknown: "升级进程的启动结果未确认，请使用官方安装器检查并修复。",
-  worker_lost: "升级进程未能完成，请使用官方安装器检查并恢复安装。",
-  previous_release_changed: "当前安装版本已变化，请重新检查更新。",
+  worker_interrupted: "维护进程已中断，请按部署说明检查并恢复。",
+  lock_busy: "已有维护操作正在执行，请稍后刷新维护状态。",
+  operation_invalid: "维护记录无法验证，请按部署说明检查并修复。",
+  dispatch_failed: "未能启动维护进程，请检查服务管理器后刷新维护状态。",
+  dispatch_unknown: "维护进程的启动结果未确认，请按部署说明检查并修复。",
+  worker_lost: "维护进程未能完成，请按部署说明检查并恢复。",
+  previous_release_changed: "当前安装版本已变化，请刷新维护状态。",
   profile_failed: "无法读取账户运行环境，请检查登录 Shell 配置后重试。",
-  manual_recovery: "安装器已恢复部署，请以当前版本为准；原升级操作不标记为成功。",
+  manual_recovery: "安装器已恢复部署，请以当前版本为准；原操作不标记为成功。",
 };
 const updatePollLimitMs = 5 * 60 * 1000;
 let updatePollTimer = null;
@@ -83,11 +84,16 @@ let updatePollDelay = 2000;
 let updatePollExpired = false;
 let updateSubmitting = false;
 let updateExpectedTarget = null;
+let updateExpectedKind = null;
 let updatePriorOperationId = null;
 let updateDisconnected = false;
 let updateReading = false;
 
-function sameUpdateTarget(left, right) {
+function sameUpdateTarget(left, right, kind) {
+  if (kind === "restart") {
+    return left?.resource === "instance-restart" && typeof left.targetId === "string"
+      && left.targetId === right?.releaseDigest;
+  }
   return left != null && right != null
     && ["version", "releaseId", "installerSha256", "archiveSha256"]
       .every((key) => left[key] === right[key]);
@@ -117,24 +123,29 @@ function renderUpdates() {
   releaseLink.hidden = !data.latest?.url;
   if (data.latest?.url) releaseLink.href = data.latest.url;
   const operation = data.operation;
+  const restarting = (updateExpectedKind || operation?.kind) === "restart";
+  const operationName = restarting ? "重启" : "升级";
   let phase = operation
-    ? (updatePhaseLabels[operation.phase] || "升级结果未确认")
-    : "尚未执行升级";
+    ? (updatePhaseLabels[operation.phase] || "维护结果未确认").replace("升级", operationName)
+    : "尚未执行维护操作";
   let detail = operation
-    ? `目标版本 ${operation.target.version}。${updateCodeMessages[operation.code] || ""}`
-    : "升级开始后，关闭页面不会取消安装。";
-  if (operation?.phase === "succeeded") detail += " 安装器已确认升级完成。";
+    ? `${restarting ? "保持版本" : "目标版本"} ${operation.target.version}。${
+      updateCodeMessages[operation.code] || ""}`
+    : "升级或重启开始后，关闭页面不会取消操作。";
+  if (operation?.phase === "succeeded") {
+    detail += restarting ? " 服务管理器已完成重启，服务就绪已确认。" : " 安装器已确认升级完成。";
+  }
   if (updateExpectedTarget) {
-    phase = updateSubmitting ? "正在提交升级" : "升级提交结果尚未确认";
-    detail = "正在查询服务端记录，请勿重复提交升级。";
+    phase = updateSubmitting ? `正在提交${operationName}` : `${operationName}提交结果尚未确认`;
+    detail = "正在查询服务端记录，请勿重复提交升级或重启。";
   }
   if (updateDisconnected) {
-    phase = "连接暂时中断，正在查询升级结果";
-    detail = "服务可能正在重启；重新连接后将读取安装器记录。";
+    phase = `连接暂时中断，正在查询${operationName}结果`;
+    detail = "服务可能正在重启；重新连接后将读取维护记录。";
   }
   if (updatePollExpired) {
-    phase = "升级结果尚未确认";
-    detail = "自动查询已停止；请点击“刷新升级状态”手动检查。请勿据此认定升级失败或重复提交。";
+    phase = `${operationName}结果尚未确认`;
+    detail = "自动查询已停止；请点击“刷新维护状态”手动检查。请勿据此认定操作失败或重复提交。";
   }
   document.querySelector("#update-phase").textContent = phase;
   document.querySelector("#update-detail").textContent = detail;
@@ -143,6 +154,13 @@ function renderUpdates() {
   document.querySelector("#update-install").disabled = updateSubmitting || updateReading
     || !data.supported || !data.available || !data.actions?.install
     || updateNeedsPolling() || updatePollExpired || updateDisconnected;
+  document.querySelector("#service-restart").disabled = updateSubmitting || updateReading
+    || !data.restartSupported || !data.restartAvailable || !data.actions?.restart
+    || updateNeedsPolling() || updatePollExpired || updateDisconnected;
+  document.querySelector("#restart-message").textContent = !data.restartSupported
+    ? "当前安装不支持从管理页重启，请按部署说明管理服务。"
+    : !data.restartAvailable && !updateNeedsPolling()
+      ? "当前暂不可重启，请查看维护状态或部署说明。" : "";
 }
 
 async function updateApi(path, options = {}) {
@@ -157,9 +175,11 @@ async function updateApi(path, options = {}) {
 
 function acceptUpdateStatus(data) {
   state.updates = data;
-  if (sameUpdateTarget(updateExpectedTarget, data.operation?.target)
+  if ((data.operation?.kind || "upgrade") === updateExpectedKind
+      && sameUpdateTarget(updateExpectedTarget, data.operation?.target, updateExpectedKind)
       && data.operation.operationId !== updatePriorOperationId) {
     updateExpectedTarget = null;
+    updateExpectedKind = null;
   }
   updateDisconnected = false;
   updatePollDelay = 2000;
@@ -236,7 +256,7 @@ async function checkUpdate() {
   } catch (error) {
     // The check grant is one-shot even when its HTTP response is lost.
     if (state.updates?.actions) state.updates.actions.check = null;
-    setStatus(`${error.message} 请刷新升级状态后重试。`, true);
+    setStatus(`${error.message} 请刷新维护状态后重试。`, true);
   } finally {
     updateSubmitting = false;
     renderUpdates();
@@ -245,35 +265,60 @@ async function checkUpdate() {
 }
 
 async function installUpdate() {
+  return submitMaintenance("upgrade");
+}
+
+async function restartService() {
+  return submitMaintenance("restart");
+}
+
+async function submitMaintenance(kind) {
   if (updateSubmitting || updateReading || updateNeedsPolling()
       || updatePollExpired || updateDisconnected) return;
-  const envelope = state.updates?.actions?.install;
-  if (!envelope || !state.updates.supported || !state.updates.available) return;
+  const restarting = kind === "restart";
+  const action = restarting ? "restart" : "install";
+  const envelope = state.updates?.actions?.[action];
+  if (!envelope || (restarting
+    ? !state.updates.restartSupported || !state.updates.restartAvailable
+    : !state.updates.supported || !state.updates.available)) return;
+  if (restarting && !window.confirm(
+    "确认重启服务？将保持当前版本，重新启动 Netizen 及其 Codex 运行环境。\n\n"
+      + "重启会中断正在执行的任务、暂停 Goal，并结束临时 Side 会话。"
+      + "重启后不会自动续跑，管理页需要重新登录。",
+  )) return;
   updateSubmitting = true;
   updateExpectedTarget = envelope.target;
+  updateExpectedKind = kind;
   updatePriorOperationId = state.updates.operation?.operationId || null;
   updatePollStarted = Date.now();
   state.updates.actions.install = null;
+  state.updates.actions.restart = null;
   renderUpdates();
+  let sessionExpired = false;
   try {
-    const result = await updateApi("/api/v1/updates/install", {
+    const result = await updateApi(`/api/v1/updates/${action}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(actionPayload(envelope)),
     });
     acceptUpdateStatus({ ...state.updates, operation: result.operation });
-    setStatus("升级已受理，正在查询安装器结果。重启后可能需要重新登录。");
+    setStatus(restarting ? "重启已受理，正在查询服务重启结果。重启后需要重新登录。"
+      : "升级已受理，正在查询安装器结果。重启后可能需要重新登录。");
   } catch (error) {
-    if (error.status === 401) return;
+    if (error.status === 401) {
+      sessionExpired = true;
+      return;
+    }
     if (error.status >= 400 && error.status < 500) {
       updateExpectedTarget = null;
-      setStatus(`${error.message} 请刷新升级状态。`, true);
+      updateExpectedKind = null;
+      setStatus(`${error.message} 请刷新维护状态。`, true);
     } else {
-      setStatus("升级提交结果未确认，正在查询服务端记录；请勿重复提交。", true);
+      setStatus(`${restarting ? "重启" : "升级"}提交结果未确认，正在查询服务端记录；请勿重复提交。`, true);
     }
   } finally {
     updateSubmitting = false;
     renderUpdates();
-    scheduleUpdatePoll();
+    if (!sessionExpired) scheduleUpdatePoll();
   }
 }
 
@@ -1269,6 +1314,7 @@ document.querySelector("#sessions-next").addEventListener("click", () => moveSes
 document.querySelector("#sides-next").addEventListener("click", () => refresh("side-topics", state.sideCursor));
 document.querySelector("#update-check").addEventListener("click", checkUpdate);
 document.querySelector("#update-install").addEventListener("click", installUpdate);
+document.querySelector("#service-restart").addEventListener("click", restartService);
 document.querySelector("#logout").addEventListener("click", async () => { await api("/logout", { method: "POST" }); window.location.assign("/login"); });
 
 function chunkValues(values, size = 50) {

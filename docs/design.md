@@ -54,8 +54,8 @@ Server 是 `AsyncCodex` 的子进程，不是第二套业务服务。
 | `netizen/channel_app.py`、`netizen/channel/` | ChannelApplication 负责输入和完成事件编排，并装配、关闭同一表情控制器和回复卡片呈现器；展示会话留在各自对象内。 |
 | `netizen/cards/` | `controls.py` 负责管理卡片和表单，`reply.py` 负责回复、Activity、Files，`callbacks.py` 集中共享回调协议及基础组件；包入口显式导出公共接口。 |
 | `netizen/admin/` | `web.py` 集中路由、认证、一次性授权与请求任务生命周期；`queries.py` 负责查询和分页游标，`presentation.py` 负责响应转换。 |
-| `netizen/management/` | 两个客户端共用的应用管理边界，包括 `updates.py` 中的升级查询和发起编排。 |
-| `netizen/deployment/` | 升级记录与安装锁协议、独立升级进程调度，以及安装器共享基础和现有 ServiceBackend 的两平台实现。 |
+| `netizen/management/` | 两个客户端共用的应用管理边界，包括 `updates.py` 中的升级查询与升级/重启发起编排。 |
+| `netizen/deployment/` | 部署记录与安装锁协议、独立升级/重启进程调度，以及安装器共享基础和现有 ServiceBackend 的两平台实现。 |
 | `netizen/runtime/contracts.py`、`netizen/codex_runtime.py` | 前者唯一定义公共协议、异常、输入输出和快照；后者继续独占任务、Goal、Side、订阅和锁，并保留原公共类型导入路径。 |
 
 `scripts/netizen_installer.py` 保留唯一的安装、激活和回滚事务。
@@ -652,6 +652,8 @@ ADR 0057 的 Admin Upgrade 是上述安装事务的显式手动入口。管理 a
 依赖 Runtime 的忙闲投影或 Scope/Binding lock。候选准备期间服务照常接收输入，切换时由
 安装器停止主服务，沿用普通 Turn 中断、Goal 暂停和 Side 结束语义，不增加维护状态或
 任务续跑。Admin 不提前退出，也不复制安装器的 active/enabled 意图判断、退出确认或回滚。
+[ADR 0059](adr/0059-support-explicit-admin-service-restart.md) 增加同一执行者的 Admin Restart，
+直接调用已安装的 `source/service.sh restart`；准入、停机证据与失败边界见该 ADR。
 
 一次性执行者来自当前运行的物理 release，由同用户独立 systemd transient service 或
 临时 LaunchAgent 启动。macOS 提交文件位于 state，显式 bootstrap 到当前 GUI domain，
@@ -662,9 +664,10 @@ ADR 0057 的 Admin Upgrade 是上述安装事务的显式手动入口。管理 a
 安装和卸载继续与同一锁互斥。平台适配器只拥有临时 job 的提交、观察和清理。
 
 安装器/执行者以 `0600 state/update.json` 原子保存最近一次 typed 部署摘要，最多 4096
-bytes，只含 schema、operation ID、目标版本/Release ID/两项 SHA-256、旧 release digest、
-阶段/固定错误码与时间。下载说明只在查询缓存中存在，凭据、action/CSRF token、任务正文、
-命令输出不进入该文件或 Channel SQLite。`accepted/downloading/preparing/installing/restarting`
+bytes。升级保留 schema 1 的目标版本/Release ID/两项 SHA-256；重启使用 schema 2、
+`kind=restart` 和目标 `{version, releaseDigest}`，不构造不存在的 Release ID 或资产摘要。
+其余字段只含 operation ID、旧 release digest、阶段/固定错误码与时间。下载说明只在查询
+缓存中存在，凭据、action/CSRF token、任务正文、命令输出不进入该文件或 Channel SQLite。`accepted/downloading/preparing/installing/restarting`
 表示安装阶段；`succeeded/failed/rolled_back/requires_action/recovery_required/recovered`
 区分结果。它不成为 Runtime 状态、队列或历史记录。完整回滚才能报告 `rolled_back`；已有
 异常 activation intent 或恢复不完整只能报告 `recovery_required`。后续显式 CLI 安装在
@@ -779,18 +782,21 @@ absolute deadline 5 秒、keep-alive 15 秒、request/header line 8 KiB、header
 CSS 与无细节 readiness；未认证 GET `/` 只返回 303 重定向到 `/login`，不返回任何 HTML、
 JavaScript 或状态。HTML、JavaScript、API 和其他资源仍要求 session 并返回 401。
 
-Updates 是 ADR 0057 的实例部署页面。`GET /api/v1/updates` 读取当前安装来源、检查缓存
-与最近操作；`POST /api/v1/updates/check` 显式检查固定官方 GitHub latest API，
-`POST /api/v1/updates/install` 提交所选 exact Release。两个 POST 复用同源认证与一次性
+系统维护是 ADR 0057/0059 的实例部署页面，保留 `updates` 路由。`GET /api/v1/updates`
+读取当前安装来源、检查缓存与最近操作；`POST /api/v1/updates/check` 显式检查固定官方 GitHub latest API，
+`POST /api/v1/updates/install` 提交所选 exact Release，
+`POST /api/v1/updates/restart` 提交当前安装的重启。三个 POST 复用同源认证与一次性
 action/CSRF grant；安装 grant 绑定 version、Release ID、installer SHA-256 和 archive
-SHA-256。API 不接受 URL、命令、任意路径、source checkout 或强制跳过验证参数。
+SHA-256；独立的重启 grant 绑定标识当前安装的 release digest，无需检查更新。API 不接受 URL、
+命令、任意路径、source checkout 或强制跳过验证参数。
 
 只允许当前解释器/包位于受管物理 release、Published metadata/manifest 与运行版本一致且
 `current` 仍指向它时升级。候选必须为官方 immutable、stable、完整提供两项资产 digest 的
 更高版本；检查缓存有界并保留 60 秒，不定时检查。执行时只下载已选 exact tag 的
 `install.sh`，先验证其 SHA-256，再由 bootstrap 验证绑定的 tarball SHA-256 和 manifest。
 信任官方 HTTPS 与 immutable Release，未增加自定义签名。源码/非受管实例显示来源和
-现有 CLI 安装方式，不能从页面改造成另一种安装来源。
+现有 CLI 安装方式，不能从页面改造成另一种安装来源。重启另允许满足 ADR 0059 准入的
+受管 Source Install，无需官方候选。
 
 提交后浏览器只做有界状态 polling，不等待 HTTP 请求跨越服务重启；断线不会取消安装，
 也不隐式重发 POST。重启使旧 session 失效，重新登录后读持久的同一操作摘要。页面只按
@@ -798,7 +804,8 @@ typed 安装结果显示成功/回滚；ready、连通和正在运行的版本�
 非终态记录在执行锁仍被持有时保留；锁已释放时，accepted 操作还有有界 manager handoff
 核验，已失去执行者的记录则转为 `recovery_required`。manager 观察失败仍保持未知，不能
 据此重新 dispatch；macOS 清理只在终态且锁已释放后进行。页面等待到期仅停止自动读取，
-提示手动查看，不篡改安装终态或排队重试。
+提示手动查看，不篡改部署终态或排队重试。升级与重启共享上述最近操作和安装锁；
+任一未完成或 `recovery_required` 记录都阻止两类提交。
 
 Admin credential 来自绝对路径 `NETIZEN_ADMIN_SECRET_FILE`，解码后必须恰好 32 bytes；
 最终路径不得是 symlink，文件必须为普通文件且 mode 精确为 0600。认证状态完全在内存：
@@ -1067,7 +1074,8 @@ ID intent。固定 `0.147.0` 的 Linux compatibility probe 用
 A 改为 B，下一条新 Thread 直接返回 `CONFIG-B`，重启后仍为 B；全局
 `config.toml` 未修改。这是锁定版本的观测值，升级后探针可能分类为
 `restart-required`，不泛化为所有用户级键；官方或探针要求重启的设置通过
-已安装 release 的 `service.sh restart` 生效。
+已安装 release 的 `service.sh restart` 或管理页“重启服务”重新加载；不保证所有配置
+作用于已有 Thread。
 
 仓库锁定的 `openai-codex==0.147.0` 已公开 `models()`、Turn 级三项 override、
 `compact()`、persisted Thread read、Thread rename/archive/unarchive 与 `SkillInput`，但

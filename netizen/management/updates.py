@@ -19,7 +19,8 @@ import urllib.request
 from .blocking_io import BoundedBlockingIOExecutor
 from ..deployment.update_executor import UpdateExecutor, UpdateDispatchUnknown, UpdateExecutorError
 from ..deployment.update_protocol import (
-    UpdateProtocolError, acquire_install_lock, advance_operation, new_operation,
+    UpdateProtocolError, acquire_install_lock, activation_requires_recovery,
+    advance_operation, new_operation, new_restart_operation,
     read_operation, terminal_phase, validate_target, write_operation,
 )
 
@@ -193,6 +194,9 @@ class UpdateService:
     async def start(self, *, target: dict[str, Any]) -> dict[str, Any]:
         return await self._io.submit(self._start, target=copy.deepcopy(target))
 
+    async def restart(self, *, release_digest: str) -> dict[str, Any]:
+        return await self._io.submit(self._restart, release_digest=release_digest)
+
     def _installation(self) -> InstalledRelease:
         if self._current is None:
             self._current = installed_release(self.home)
@@ -204,7 +208,11 @@ class UpdateService:
         return self._executor
 
     def _supported(self, current: InstalledRelease) -> bool:
-        if current.source != "published" or current.root is None:
+        return current.source == "published" and self._restart_supported(current)
+
+    def _restart_supported(self, current: InstalledRelease) -> bool:
+        if (current.source not in {"published", "source"} or current.root is None
+                or _VERSION.fullmatch(current.version) is None):
             return False
         try:
             return (self.product_root / "current").is_symlink() and (
@@ -258,10 +266,18 @@ class UpdateService:
         operation = self._operation()
         available = bool(supported and self._latest and not self._checking_error_code
                          and _newer(self._latest["version"], current.version))
-        if operation is not None and (not terminal_phase(operation["phase"])
-                                      or operation["phase"] == "recovery_required"):
+        busy = operation is not None and (not terminal_phase(operation["phase"])
+                                         or operation["phase"] == "recovery_required")
+        if busy:
             available = False
+        restart_supported = self._restart_supported(current)
+        try:
+            recovery = activation_requires_recovery(self.product_root)
+        except OSError as error:
+            raise UpdateError("update_state_unavailable") from error
         return {"current": current.as_dict(), "supported": supported,
+                "restartSupported": restart_supported,
+                "restartAvailable": restart_supported and not busy and not recovery,
                 "latest": copy.deepcopy(self._latest), "available": available,
                 "operation": operation, "checkingErrorCode": self._checking_error_code,
                 "checkedAt": self._checked_at}
@@ -293,6 +309,18 @@ class UpdateService:
                 or target != _target(self._latest)
                 or not _newer(target["version"], current.version)):
             raise UpdateError("update_target_changed")
+        return self._submit(current, target=target)
+
+    def _restart(self, *, release_digest: str) -> dict[str, Any]:
+        current = self._installation()
+        if not self._restart_supported(current):
+            raise UpdateError("restart_unsupported")
+        assert current.root is not None
+        if release_digest != current.root.name:
+            raise UpdateError("update_installation_changed")
+        return self._submit(current, target=None)
+
+    def _submit(self, current: InstalledRelease, *, target: dict[str, Any] | None) -> dict[str, Any]:
         assert current.root is not None
         try:
             descriptor = acquire_install_lock(self.product_root)
@@ -301,8 +329,11 @@ class UpdateService:
         except (OSError, UpdateProtocolError) as error:
             raise UpdateError("update_lock_unavailable") from error
         try:
-            if not self._supported(current):
+            supported = self._supported if target is not None else self._restart_supported
+            if not supported(current):
                 raise UpdateError("update_installation_changed")
+            if target is None and activation_requires_recovery(self.product_root):
+                raise UpdateError("update_recovery_required")
             previous = read_operation(self.product_root)
             if previous is not None:
                 if not terminal_phase(previous["phase"]):
@@ -313,7 +344,8 @@ class UpdateService:
                     self._manager().cleanup(previous["operationId"])
                 except UpdateExecutorError as error:
                     raise UpdateError("update_cleanup_unavailable") from error
-            operation = new_operation(target, current.root.name)
+            operation = (new_operation(target, current.root.name) if target is not None
+                         else new_restart_operation(current.version, current.root.name))
             write_operation(self.product_root, operation)
             try:
                 self._manager().launch(operation["operationId"], current.root)

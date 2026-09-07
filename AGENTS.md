@@ -34,9 +34,10 @@ their cited ADRs before changing that boundary.
   `AsyncCodex`. The Channel SDK owns messaging; the official `openai-codex`
   SDK owns native Threads, Turns, history, tools, configuration, and permissions.
 - The in-process Admin Web is a management-only adapter over that same
-  application/runtime boundary (ADR 0031). The one-shot Admin upgrade process
-  is the sole deployment exception (ADR 0057). Do not add another runtime,
-  long-lived service, scheduler, history model, or configuration layer.
+  application/runtime boundary (ADR 0031). The one-shot Admin deployment process
+  for upgrades and explicit restarts is the sole deployment exception
+  (ADR 0057/0059). Do not add another runtime, long-lived service, scheduler,
+  history model, or configuration layer.
 - Preserve exact Scope/Binding-to-native-Thread identity. Running input steers
   the exact Turn; it is never queued, merged, or converted into another Turn.
   Unknown side effects fail closed at the documented operation-specific scope.
@@ -94,7 +95,9 @@ their cited ADRs before changing that boundary.
 - The maintainer chooses formal release timing; `scripts/release.py` executes
   the chain (ADR 0050). Nothing auto-releases on main or tag pushes. Admin upgrades
   target an exact immutable official Release through the shared installer/lock;
-  their bounded result belongs in deployment state, never SQLite (ADR 0057).
+  Admin restarts use the exact installed service script without installation. Both
+  share that lock and keep bounded results in deployment state, never SQLite
+  (ADR 0057/0059).
 - Use the official `install.sh` for Published Releases and `./dev-install.sh`
   for the exact workspace. Agents download the official installer to a file;
   follow the deployment handoff procedure and never request an App Secret in chat.

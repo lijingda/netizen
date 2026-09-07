@@ -241,14 +241,16 @@ App Secret，也不写入 YAML。登录后：
   Release；两类删除都需二次确认，materialized 确认文案会说明永久级联后果，名称仅使用
   有界进程缓存，不写入 Channel 数据库；
 - **Side Topics** 可按 Project、chat 和 route 状态筛选，并结束当前进程仍可控的 exact Side；
-- **Updates** 显示运行版本、安装来源与官方更新说明；受管 Published Release 可手动检查
-  更新并点击“升级并重启”。所选版本由服务端固定，由独立的一次性进程调用现有安装器。
+- **系统维护** 显示运行版本、安装来源与官方更新说明；受管 Published Release 可手动检查
+  更新并点击“升级并重启”。受管 Published Release 和 Source Install 都可独立点击
+  “重启服务”，保持当前版本，无需检查更新。两种操作互斥，由同一独立的一次性进程执行。
 
 升级不检测任务忙闲，也不等待任务结束：准备候选期间继续服务，切换时中断普通 Turn、
-暂停 Goal，并结束临时 Side 会话；升级后不会自动续跑。浏览器关闭不取消安装，服务重启后
-需重新登录查看结果。页面区分成功、准备失败、已回滚、需要处理与结果未确认；重新连通不
-等于升级成功。源码安装继续使用 `./dev-install.sh`，首个包含管理页升级能力的版本仍需
-通过已有安装入口安装。流程与异常恢复见[部署手册](docs/deployment.md#从-admin-升级)。
+暂停 Goal，并结束临时 Side 会话；直接重启也有相同影响，操作前需确认，重启后不会自动续跑。
+浏览器关闭不取消操作，服务重启后需重新登录查看结果。页面区分成功、准备失败、已回滚、
+需要处理与结果未确认；重新连通不等于操作成功。源码安装升级继续使用 `./dev-install.sh`，
+首个包含管理页升级能力的版本仍需通过已有安装入口安装。流程与异常恢复见
+[管理页升级](docs/deployment.md#从-admin-升级)及[管理页重启](docs/deployment.md#从-admin-重启)。
 
 每个写操作都使用一次性 action/CSRF token，并在共享锁内重读 exact target；页面断线后只
 能刷新对账，不会自动重放。服务重启或合法轮换 credential 会立即使旧 session 失效。V1
@@ -425,8 +427,8 @@ admission 开放后发布了私有 ready marker 才返回成功。profile 超时
 就绪会直接返回非零；macOS `status` 会显示 installed、loaded、ready 与两个日志路径。
 
 仓库删除后仍可从已安装 release 调用
-`$HOME/.netizen/current/source/service.sh`。正式升级可在 Admin 的 Updates 页发起，或重新运行
-latest 或 exact-tag installer；
+`$HOME/.netizen/current/source/service.sh`。Admin 系统维护页也可发起重启或正式升级；
+正式升级还可重新运行 latest 或 exact-tag installer；
 开发目录升级运行 `./dev-install.sh`。卸载同样不接收参数：
 
 ```bash

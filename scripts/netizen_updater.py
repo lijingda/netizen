@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot Admin update worker, dispatched outside the main service lifetime."""
+"""One-shot Admin maintenance worker outside the main service lifetime."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from netizen.deployment.update_protocol import (  # noqa: E402
     ENV_ARCHIVE_SHA256, ENV_LOCK_FD, ENV_OPERATION_ID, ENV_VERSION,
     OPERATION_ID, SHA256, UpdateProtocolError, acquire_install_lock,
-    advance_operation, read_operation, terminal_phase,
+    activation_requires_recovery, advance_operation, read_operation, terminal_phase,
 )
 from scripts.netizen_service_launcher import (  # noqa: E402
     ServiceLaunchError, capture_profile_environment,
@@ -32,6 +32,7 @@ from scripts.netizen_service_launcher import (  # noqa: E402
 OFFICIAL_DOWNLOADS = "https://github.com/lijingda/netizen/releases/download"
 LOCK_HANDOFF_TIMEOUT_SECONDS = 15.0
 MAX_INSTALLER_BYTES = 1024 * 1024
+RESTART_TIMEOUT_SECONDS = 180
 
 
 def _worker_environment() -> dict[str, str]:
@@ -79,6 +80,41 @@ def _matches_previous_release(product_root: Path, previous: str) -> bool:
     )
 
 
+def _restart_service(
+    root: Path, operation: dict, environment: Mapping[str, str], runner: Callable,
+) -> int:
+    """The parent retains the deployment lock; service children never inherit it."""
+    operation_id = operation["operationId"]
+    if activation_requires_recovery(root):
+        advance_operation(root, operation_id, "recovery_required", "operation_invalid")
+        return 1
+    service = root / "releases" / operation["previousRelease"] / "source" / "service.sh"
+    if not service.is_file() or service.resolve() != service:
+        advance_operation(root, operation_id, "failed", "restart_failed")
+        return 1
+    advance_operation(root, operation_id, "restarting")
+    try:
+        result = runner(
+            ["/bin/sh", str(service), "restart"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=environment, cwd=root.parent, close_fds=True, check=False,
+            timeout=RESTART_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        advance_operation(root, operation_id, "recovery_required", "restart_failed")
+        return 1
+    if result.returncode != 0:
+        advance_operation(root, operation_id, "recovery_required", "restart_failed")
+        return 1
+    if not _matches_previous_release(root, operation["previousRelease"]):
+        advance_operation(root, operation_id, "recovery_required", "previous_release_changed")
+        return 1
+    # service.sh exits zero only after stop-confirm and a fresh ready proof.
+    # A reachable Admin page or the unchanged version alone proves neither.
+    advance_operation(root, operation_id, "succeeded")
+    return 0
+
+
 def run_update(
     operation_id: str,
     *,
@@ -108,6 +144,8 @@ def run_update(
         except (ServiceLaunchError, OSError, KeyError):
             advance_operation(root, operation_id, "failed", "profile_failed")
             return 1
+        if operation.get("kind") == "restart":
+            return _restart_service(root, operation, environment, runner)
         target = operation["target"]
         environment.update({
             ENV_OPERATION_ID: operation_id, ENV_LOCK_FD: str(descriptor),
