@@ -916,12 +916,44 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                         })
                         self.assertEqual(response["message"], message)
                         self.assertEqual(response["checkingError"], (
-                            "暂时无法取得完整的官方更新信息，请稍后重新检查。"
+                            "检查更新失败，原因暂未识别。请稍后重试；若持续出现，请联系维护者。"
                             if error_code else None
                         ))
                         self.assertEqual(response["current"], self.management.update_data["current"])
                         self.assertEqual(response["latest"], self.management.update_data["latest"])
                         self.assertEqual(response["available"], supported and error_code is None)
+
+    async def test_update_check_failures_explain_the_cause_and_next_step(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        cases = (
+            ("release_rate_limited", "限流", "请稍后重试"),
+            ("release_access_denied", "HTTP 403", "网络访问策略"),
+            ("release_not_found", "HTTP 404", "Release 状态"),
+            ("release_service_unavailable", "HTTP 5xx", "稍后重新检查"),
+            ("release_http_error", "异常 HTTP 响应", "联系维护者"),
+            ("release_check_timeout", "超时", "网络或代理"),
+            ("release_network_error", "网络错误", "HTTPS 证书"),
+            ("release_invalid_response", "未通过校验", "联系维护者"),
+            ("SECRET unknown", "原因暂未识别", "联系维护者"),
+        )
+        for code, cause, next_step in cases:
+            with self.subTest(code=code):
+                self.management.update_data.update(
+                    checkingErrorCode=code, latest=None, available=False,
+                )
+                get_status, _, data = await self.json_get("/api/v1/updates", session)
+                post_status, _, checked = await self.json_post(
+                    "/api/v1/updates/check", session, _action_payload(data["actions"]["check"]),
+                )
+                self.assertEqual((get_status, post_status), (200, 200))
+                self.assertEqual(data["checkingError"], checked["checkingError"])
+                for response in (data, checked):
+                    self.assertIn(cause, response["checkingError"])
+                    self.assertIn(next_step, response["checkingError"])
+                    self.assertNotIn("checkingErrorCode", response)
+                    self.assertNotIn("SECRET", json.dumps(response))
+                    self.assertIsNone(response["actions"]["install"])
 
     async def test_unknown_update_failure_does_not_expose_internal_details(self) -> None:
         self.runner.open_admission()

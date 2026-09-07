@@ -256,6 +256,25 @@ const restartOperation = (phase, id = "new-restart") => ({
   assert.equal(elements.get("#service-restart").disabled, true);
   assert.match(elements.get("#restart-message").textContent, /暂不可重启/);
 
+  // Both the persistent panel and the check result use the server's explanation.
+  acceptUpdateStatus(freshStatus());
+  const limited = freshStatus();
+  limited.latest = null;
+  limited.available = false;
+  limited.actions.install = null;
+  limited.checkingError = "GitHub 更新查询已触发限流，请稍后重试。";
+  answer = async () => response(limited);
+  await checkUpdate();
+  assert.equal(elements.get("#update-message").textContent, limited.checkingError);
+  assert.equal(status, limited.checkingError);
+  assert.equal(elements.get("#update-install").disabled, true);
+  assert.equal(elements.get("#service-restart").disabled, false);
+  answer = async () => response(freshStatus());
+  await checkUpdate();
+  assert.equal(elements.get("#update-message").textContent, "发现新版本。");
+  assert.equal(status, "检查完成。");
+  assert.equal(elements.get("#update-install").disabled, false);
+
   acceptUpdateStatus(freshStatus());
   redirected = null;
   answer = async () => response({ message: "登录失效" }, 401);

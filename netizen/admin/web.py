@@ -36,6 +36,7 @@ from .presentation import (
     _chat_open_url,
     _jsonable,
     _project_result,
+    _release_check_message,
     _release_disposition_message,
     _runtime_binding_json,
     _runtime_side_json,
@@ -531,10 +532,7 @@ class AdminWebApplication:
         else:
             message = ""
         payload["message"] = message
-        payload["checkingError"] = (
-            "暂时无法取得完整的官方更新信息，请稍后重新检查。"
-            if checking_error_code is not None else None
-        )
+        payload["checkingError"] = _release_check_message(checking_error_code)
         actions: dict[str, object] = {
             "check": self._grant(
                 context,

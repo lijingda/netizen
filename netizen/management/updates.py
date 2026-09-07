@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+from http.client import HTTPException
 import importlib.metadata
 import json
 import os
@@ -14,6 +15,7 @@ import stat
 import sys
 import time
 from typing import Callable, Any
+from urllib.error import HTTPError, URLError
 import urllib.request
 
 from .blocking_io import BoundedBlockingIOExecutor
@@ -119,6 +121,35 @@ def fetch_latest_release() -> dict[str, Any]:
     if len(payload) > MAX_RELEASE_BYTES:
         raise ValueError("release response exceeds limit")
     return parse_release(json.loads(payload))
+
+
+def _release_http_error_code(error: HTTPError) -> str:
+    # HTTPError is also an OSError; classify the response before network failures.
+    # GitHub documents both 403 and 429 for rate limits. A plain 403 is not proof.
+    with error:
+        if error.code == 429:
+            return "release_rate_limited"
+        if error.code == 403:
+            headers = error.headers or {}
+            if (headers.get("x-ratelimit-remaining") == "0"
+                    or headers.get("retry-after") is not None):
+                return "release_rate_limited"
+            # Secondary limits can be identified only in the response body.
+            # Consume a bounded diagnostic, but never expose remote text to Admin.
+            try:
+                payload = error.read(8193)
+                body = json.loads(payload) if len(payload) <= 8192 else None
+                message = body.get("message") if isinstance(body, dict) else None
+                if isinstance(message, str) and "rate limit" in message.lower():
+                    return "release_rate_limited"
+            except (OSError, ValueError, HTTPException, RecursionError):
+                pass
+            return "release_access_denied"
+        if error.code == 404:
+            return "release_not_found"
+        if 500 <= error.code <= 599:
+            return "release_service_unavailable"
+        return "release_http_error"
 
 
 def parse_release(value: object) -> dict[str, Any]:
@@ -292,9 +323,18 @@ class UpdateService:
                 self._latest = self._fetch()
                 _target(self._latest)
                 self._checking_error_code = None
-            except (OSError, ValueError, UpdateProtocolError):
+            except HTTPError as error:
+                self._checking_error_code = _release_http_error_code(error)
+            except (OSError, HTTPException) as error:
+                reason = error.reason if isinstance(error, URLError) else error
+                self._checking_error_code = (
+                    "release_check_timeout" if isinstance(reason, TimeoutError)
+                    else "release_network_error"
+                )
+            except (ValueError, UpdateProtocolError, RecursionError):
+                self._checking_error_code = "release_invalid_response"
+            if self._checking_error_code is not None:
                 self._latest = None
-                self._checking_error_code = "release_check_failed"
         return self._status()
 
     def _start(self, *, target: dict[str, Any]) -> dict[str, Any]:
