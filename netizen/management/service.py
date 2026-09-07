@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -16,6 +17,7 @@ from .updates import UpdateService
 from ..bindings import (
     BindingCursor,
     BindingInventoryRecord,
+    BindingNotFound,
     BindingPage,
     BindingQuery,
     BindingStore,
@@ -23,6 +25,7 @@ from ..bindings import (
     BindingTurnSettings,
     ProjectAggregate,
     ProjectAggregatePage,
+    ProjectDeleteSnapshot,
     ProjectDisabled as StoredProjectDisabled,
     ProjectNotFound as StoredProjectNotFound,
     ProjectRevisionConflict as StoredProjectRevisionConflict,
@@ -45,6 +48,7 @@ from ..runtime.contracts import (
     NativeThreadMetadata,
     ReleaseDisposition,
     SideLifecycleOutcome,
+    SideCloseFailed,
     SideSessionSnapshot,
     SideSessionNotFound,
     StopAcknowledger,
@@ -53,7 +57,9 @@ from ..runtime.contracts import (
     ThreadArchived,
     ThreadCatalogIdentityMissing,
     ThreadDeleteTargetChanged,
+    ThreadDeleteUnavailable,
     ThreadLifecycleError,
+    ThreadLifecycleStateUnknown,
 )
 from ..domain import (
     FeishuScope,
@@ -75,6 +81,9 @@ from ..sdk_gap_adapter import GoalControlError, GoalSnapshot
 
 
 _BINDING_STATUS_RESOLUTION_CONCURRENCY = 8
+_PROJECT_DELETE_SECONDS = 120.0
+_PROJECT_DELETE_STEP_SECONDS = 30.0
+logger = logging.getLogger(__name__)
 
 
 class ManagementError(RuntimeError):
@@ -110,6 +119,10 @@ class NativeCatalogInconsistent(ManagementError):
 
 
 class RuntimeStateChanged(ManagementError):
+    pass
+
+
+class SidePublicationInProgress(ManagementError):
     pass
 
 
@@ -253,7 +266,7 @@ class SessionInventoryState(str, Enum):
 @dataclass(frozen=True, slots=True)
 class SessionQuery:
     local: BindingQuery = BindingQuery()
-    inventory_state: SessionInventoryState | None = None
+    inventory_states: tuple[SessionInventoryState, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,12 +299,25 @@ class SideTopicInventoryPage:
 class ProjectInventoryItem:
     aggregate: ProjectAggregate
     archived_binding_count: int
+    deleting: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class ProjectInventoryPage:
     items: tuple[ProjectInventoryItem, ...]
     next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectDeletionResult:
+    project_alias: str
+    deleted: bool
+    deleted_session_count: int
+    remaining_sessions: tuple[ThreadBinding, ...]
+    remaining_side_count: int
+    failed_binding_id: str | None = None
+    failed_side_id: str | None = None
+    code: str = "deleted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,6 +576,9 @@ class ManagementRuntimePort:
     ) -> SideLifecycleOutcome:
         return await self.__runtime.close_side_exact(side_id, state=state)
 
+    async def drain_project_side_creation(self, binding_id: str) -> None:
+        await self.__runtime.drain_project_side_creation(binding_id)
+
     async def binding_pointer_changed(
         self,
         previous_binding_id: str | None,
@@ -583,6 +612,9 @@ class ManagementRuntimePort:
             return self.__runtime.side_snapshot(side_id)
         except SideSessionNotFound:
             return None
+
+    def project_side_snapshots(self, alias: str) -> tuple[SideSessionSnapshot, ...]:
+        return self.__runtime.project_side_snapshots(alias)
 
     async def thread_metadata_exact(
         self,
@@ -696,6 +728,21 @@ class InstanceManagementService:
             expected_revision=expected_revision,
         )
 
+    async def query_project_options(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 25,
+        deadline: float,
+    ) -> ProjectAggregatePage:
+        """Read registered Projects without native catalog hydration."""
+
+        return await self._bindings.query_project_aggregates(
+            cursor=cursor,
+            limit=limit,
+            deadline_seconds=self._query_seconds(deadline),
+        )
+
     async def query_projects(
         self,
         *,
@@ -722,11 +769,190 @@ class InstanceManagementService:
                 ProjectInventoryItem(
                     aggregate=item,
                     archived_binding_count=counts[item.project.alias],
+                    deleting=self._bindings.project_delete_in_progress(item.project.alias),
                 )
                 for item in page.items
             ),
             next_cursor=page.next_cursor,
         )
+
+    async def preview_project_delete(
+        self,
+        *,
+        alias: str,
+        expected_revision: int,
+        deadline: float,
+    ) -> ProjectDeleteSnapshot:
+        snapshot = await self._blocking_io.submit(
+            self._projects.preview_delete, alias,
+            extra_side_ids=self._project_side_ids(alias), deadline=deadline,
+        )
+        if snapshot.project.revision != expected_revision:
+            raise StaleProject("Project 已改变，请刷新后重新确认。")
+        self._require_project_delete_capability(snapshot)
+        return snapshot
+
+    def _require_project_delete_capability(self, snapshot: ProjectDeleteSnapshot) -> None:
+        if not self.native_delete_available and any(
+            item.binding.native_thread_id is not None for item in snapshot.bindings
+        ):
+            raise ThreadDeleteUnavailable("原生会话删除能力不可用，Project 未删除。")
+
+    def _project_side_ids(self, alias: str) -> tuple[str, ...]:
+        return tuple(side.side_id for side in self._runtime.project_side_snapshots(alias))
+
+    async def delete_project(
+        self,
+        *,
+        alias: str,
+        expected_revision: int,
+        expected_inventory_fingerprint: str,
+        deadline: float | None = None,
+    ) -> ProjectDeletionResult:
+        """Delete one confirmed inventory through the existing exact operations.
+
+        Only short Registry transactions reserve admission.  Native operations
+        hold their own Binding/Side lifecycle slots; neither a Project execution
+        lock nor a durable batch job is introduced.  Partial work is never rolled
+        back or automatically retried.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = min(
+            deadline if deadline is not None else float("inf"),
+            loop.time() + _PROJECT_DELETE_SECONDS,
+        )
+        if deadline <= loop.time():
+            raise TimeoutError("Project deletion deadline elapsed")
+        extra_side_ids = self._project_side_ids(alias)
+        self._require_project_delete_capability(self._projects.preview_delete(
+            alias, extra_side_ids=extra_side_ids,
+        ))
+        snapshot = self._projects.begin_delete(
+            alias=alias,
+            expected_revision=expected_revision,
+            expected_inventory_fingerprint=expected_inventory_fingerprint,
+            extra_side_ids=extra_side_ids,
+        )
+        failed_binding_id: str | None = None
+        failed_side_id: str | None = None
+        code = "deleted"
+        deleted = False
+        try:
+            bindings_by_id = {item.binding.id: item.binding for item in snapshot.bindings}
+            parent_ids = tuple(dict.fromkeys([
+                *bindings_by_id,
+                *(side.parent_binding_id for side in snapshot.sides),
+            ]))
+            for parent_id in parent_ids:
+                binding = bindings_by_id.get(parent_id)
+                failed_binding_id = binding.id if binding is not None else None
+                failed_side_id = None
+                sides = tuple(
+                    side for side in snapshot.sides if side.parent_binding_id == parent_id
+                )
+                if sides:
+                    if loop.time() >= deadline:
+                        raise TimeoutError("Project deletion deadline elapsed")
+                    async with asyncio.timeout_at(min(deadline, loop.time() + _PROJECT_DELETE_STEP_SECONDS)):
+                        await self._runtime.drain_project_side_creation(parent_id)
+                    for side in sides:
+                        failed_side_id = side.id
+                        if self._bindings.get_side_topic(side.id).state is SideTopicState.CREATING:
+                            # Native setup may be done while Feishu is still
+                            # publishing the root/topic.  Closing now could
+                            # strand a late message without its route tombstone.
+                            raise SidePublicationInProgress(side.id)
+                        if loop.time() >= deadline:
+                            raise TimeoutError("Project deletion deadline elapsed")
+                        async with asyncio.timeout_at(min(deadline, loop.time() + _PROJECT_DELETE_STEP_SECONDS)):
+                            closed = await self.close_side(target=CurrentSideTarget(
+                                side_id=side.id,
+                                app_id=side.app_id,
+                                chat_id=side.chat_id,
+                                topic_id=side.topic_id,
+                                root_message_id=side.root_message_id,
+                            ))
+                            if (
+                                not closed.record.state.terminal
+                                or (closed.outcome is not None and closed.outcome.error is not None)
+                                or self._runtime.side_snapshot_exact(side.id) is not None
+                            ):
+                                raise SideCloseFailed("关联 Side 的关闭尚未确认。")
+                failed_side_id = None
+                if binding is None:
+                    continue
+                if loop.time() >= deadline:
+                    raise TimeoutError("Project deletion deadline elapsed")
+                try:
+                    async with asyncio.timeout_at(min(deadline, loop.time() + _PROJECT_DELETE_STEP_SECONDS)):
+                        await self.delete_exact_binding(
+                            target=ExactBindingTarget(binding.scope_key, binding.id, None),
+                            expected_native_thread_id=binding.native_thread_id,
+                        )
+                except BindingNotFound:
+                    # Another exact deletion may have completed since preview.
+                    # Only absence of this same local identity can be skipped.
+                    try:
+                        self._bindings.get(binding.id)
+                    except BindingNotFound:
+                        pass
+                    else:
+                        raise
+            failed_binding_id = None
+            if self._runtime.project_side_snapshots(alias):
+                raise SideCloseFailed("Project 仍有未完成关闭的 Side。")
+            self._projects.finish_delete(
+                alias=alias,
+                expected_revision=snapshot.project.revision,
+                expected_inventory_fingerprint=snapshot.fingerprint,
+            )
+            deleted = True
+        except Exception as error:
+            logger.warning(
+                "project_delete_incomplete project_alias=%s binding_id=%s side_id=%s error_type=%s",
+                alias, failed_binding_id, failed_side_id, type(error).__name__,
+            )
+            if isinstance(error, ThreadLifecycleStateUnknown):
+                code = "outcome_unknown"
+            elif isinstance(error, TimeoutError):
+                code = "deadline_exceeded"
+            elif isinstance(error, (ThreadDeleteTargetChanged, SideIdentityMismatch)):
+                code = "inventory_changed"
+            elif isinstance(error, SideCloseFailed):
+                code = "side_close_failed"
+            elif isinstance(error, SidePublicationInProgress):
+                code = "side_creation_in_progress"
+            else:
+                code = "delete_failed"
+        finally:
+            # Cancellation or process shutdown leaves a disabled Project.  A
+            # new explicit confirmation reads fresh identities; no loop resumes.
+            self._projects.release_delete(
+                alias=alias, expected_revision=snapshot.project.revision,
+            )
+        remaining = self._project_delete_remaining(snapshot, alias)
+        remaining_side_count = sum(
+            not self._bindings.get_side_topic(side.id).state.terminal
+            or self._runtime.side_snapshot_exact(side.id) is not None
+            for side in snapshot.sides
+        )
+        return ProjectDeletionResult(
+            alias, deleted, len(snapshot.bindings) - len(remaining), remaining,
+            remaining_side_count, failed_binding_id, failed_side_id, code,
+        )
+
+    def _project_delete_remaining(
+        self, snapshot: ProjectDeleteSnapshot, alias: str,
+    ) -> tuple[ThreadBinding, ...]:
+        remaining = []
+        for item in snapshot.bindings:
+            try:
+                binding = self._bindings.get(item.binding.id)
+            except BindingNotFound:
+                continue
+            if binding.project_alias == alias:
+                remaining.append(binding)
+        return tuple(remaining)
 
     async def query_sessions(
         self,
@@ -742,13 +968,21 @@ class InstanceManagementService:
             or not 1 <= limit <= 100
         ):
             raise ValueError("page size must be between 1 and 100")
-        inventory_state = query.inventory_state
-        if inventory_state is not None and not isinstance(
-            inventory_state,
-            SessionInventoryState,
+        if query.inventory_states is not None and (
+            not isinstance(query.inventory_states, tuple)
+            or not query.inventory_states
+            or any(
+                not isinstance(state, SessionInventoryState)
+                for state in query.inventory_states
+            )
         ):
-            raise ValueError("Session inventory state filter is invalid")
-        if inventory_state is None:
+            raise ValueError("Session inventory states filter is invalid")
+        states = (
+            frozenset(query.inventory_states)
+            if query.inventory_states is not None
+            else frozenset(SessionInventoryState)
+        )
+        if states == frozenset(SessionInventoryState):
             page = await self._bindings.query_bindings(
                 query=query.local,
                 cursor=cursor,
@@ -763,7 +997,7 @@ class InstanceManagementService:
                 deadline=deadline,
             )
 
-        if inventory_state is SessionInventoryState.LAZY:
+        if states == {SessionInventoryState.LAZY}:
             page = await self._bindings.query_bindings(
                 query=replace(query.local, materialized=False),
                 cursor=cursor,
@@ -777,16 +1011,22 @@ class InstanceManagementService:
                 deadline=deadline,
             )
 
-        local = replace(query.local, materialized=True)
-        if inventory_state is SessionInventoryState.MISSING:
+        local = replace(
+            query.local,
+            materialized=None if SessionInventoryState.LAZY in states else True,
+        )
+        if SessionInventoryState.MISSING in states or {
+            SessionInventoryState.ACTIVE,
+            SessionInventoryState.ARCHIVED,
+        }.issubset(states):
             active, archived = await self._complete_native_views(deadline=deadline)
-        elif inventory_state is SessionInventoryState.ACTIVE:
+        elif SessionInventoryState.ACTIVE in states:
             active = await self._native_catalog_views(
                 archived=False,
                 deadline=deadline,
             )
             archived = {}
-        elif inventory_state is SessionInventoryState.ARCHIVED:
+        elif SessionInventoryState.ARCHIVED in states:
             active = {}
             archived = await self._native_catalog_views(
                 archived=True,
@@ -795,7 +1035,6 @@ class InstanceManagementService:
         else:  # pragma: no cover - exhaustive after the validated enum branches
             raise AssertionError("unhandled Session inventory state")
         native = {**active, **archived}
-        native_state = NativeThreadCatalogState(inventory_state.value)
         selected: list[BindingInventoryRecord] = []
         scan_cursor = cursor
         next_cursor: BindingCursor | None = None
@@ -813,7 +1052,12 @@ class InstanceManagementService:
                 binding = record.binding
                 scan_cursor = BindingCursor(binding.created_at, binding.id)
                 view = self._native_view(binding, active=active, archived=archived)
-                if view is None or view.state is not native_state:
+                state = (
+                    SessionInventoryState.LAZY
+                    if view is None
+                    else SessionInventoryState(view.state.value)
+                )
+                if state not in states:
                     continue
                 selected.append(record)
                 if len(selected) == limit:
@@ -1450,13 +1694,14 @@ class InstanceManagementService:
     ) -> ClosedSide:
         record = self._bindings.get_side_topic(target.side_id)
         self._require_side_identity(record, target)
-        if record.state.terminal:
+        if record.state.terminal and self._runtime.side_snapshot_exact(record.id) is None:
             return ClosedSide(record=record, outcome=None)
-        state = (
-            SideTopicState.FAILED
-            if record.state is SideTopicState.CREATING
-            else SideTopicState.CLOSED
-        )
+        if record.state.terminal:
+            state = record.state
+        elif record.state is SideTopicState.CREATING:
+            state = SideTopicState.FAILED
+        else:
+            state = SideTopicState.CLOSED
         try:
             outcome = await self._runtime.close_side_exact(record.id, state=state)
         except SideSessionNotFound:

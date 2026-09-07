@@ -45,6 +45,10 @@
           <button type="submit">创建</button>
         </form>
       </div>
+      <section id="project-delete-result" class="project-delete-result" aria-live="polite" aria-atomic="true" hidden>
+        <p id="project-delete-message"></p>
+        <ul id="project-delete-remaining"></ul>
+      </section>
       <div class="table-wrap"><table><thead><tr>
         <th>Project</th><th>路径</th><th>状态</th><th>会话</th><th>归档</th><th>最近激活</th><th>操作</th>
       </tr></thead><tbody id="projects-body"></tbody></table></div>
@@ -57,19 +61,10 @@
         <button class="refresh" data-refresh="sessions">刷新</button>
       </div>
       <form id="session-filter" class="filter-bar">
-        <label>Project<input name="project" maxlength="64"></label>
-        <label>Scope
-          <select name="scopeKind"><option value="">全部</option><option value="direct">单聊</option><option value="group">群聊</option><option value="topic">话题</option></select>
-        </label>
-        <label>Chat ID<input name="chatId" maxlength="512"></label>
-        <label>Topic ID<input name="topicId" maxlength="512"></label>
-        <label>Binding / Thread ID<input name="identity" maxlength="512"></label>
-        <label>会话状态
-          <select name="inventoryState"><option value="active" selected>Active</option><option value="lazy">Lazy</option><option value="archived">Archived</option><option value="missing">Missing</option><option value="all">全部</option></select>
-        </label>
-        <label>当前指针
-          <select name="current"><option value="">全部</option><option value="true">当前</option><option value="false">非当前</option></select>
-        </label>
+        <fieldset class="multi-filter" data-session-multi="project"><legend>Project</legend></fieldset>
+        <fieldset class="multi-filter" data-session-multi="scopeKind"><legend>Scope</legend></fieldset>
+        <fieldset class="multi-filter" data-session-multi="inventoryState"><legend>会话状态</legend></fieldset>
+        <fieldset class="multi-filter" data-session-multi="current"><legend>当前指针</legend></fieldset>
         <fieldset class="time-range-filter" data-time-range data-time-range-id="session-created">
           <legend>创建时间</legend>
         </fieldset>
@@ -77,6 +72,7 @@
           <select id="session-page-size" name="pageSize"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select>
         </label>
         <button type="submit">筛选</button>
+        <button type="button" id="session-filter-reset" class="refresh">重置</button>
       </form>
       <div class="table-wrap"><table><thead><tr>
         <th>飞书位置</th><th>类型</th><th>Session</th><th>会话状态</th><th>运行态</th><th>Project</th><th>配置</th><th>操作</th>

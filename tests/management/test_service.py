@@ -6,6 +6,7 @@ import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from netizen.bindings import BindingQuery, BindingStore, SideTopicState
 from netizen.channel_app import ChannelApplication
@@ -45,6 +46,7 @@ from netizen.management import (
     ExactBindingTarget,
     InstanceManagementService,
     ManagementRuntimePort,
+    NativeCatalogInconsistent,
     NativeThreadMissing,
     RuntimePrecondition,
     RuntimeStateChanged,
@@ -289,6 +291,16 @@ class FakeManagementRuntime:
     def side_snapshot_exact(self, side_id: str):
         self.calls.append(("side-snapshot", side_id))
         return self.side_snapshots.get(side_id)
+
+    def project_side_snapshots(self, alias: str, *, limit: int = 1000):
+        self.calls.append(("project-side-snapshots", alias))
+        snapshots = tuple(
+            snapshot for snapshot in self.side_snapshots.values()
+            if getattr(snapshot, "project_alias", None) == alias
+        )
+        if len(snapshots) > limit:
+            raise ValueError("Project Side snapshot exceeds the limit")
+        return snapshots
 
 
 class FakeChatLabels:
@@ -836,7 +848,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                 page = await self.service.query_sessions(
                     query=SessionQuery(
                         local=BindingQuery(project_alias="test"),
-                        inventory_state=state,
+                        inventory_states=(state,),
                     ),
                     deadline=asyncio.get_running_loop().time() + 1,
                 )
@@ -857,6 +869,98 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(
                         any(call[0] == "metadata" for call in self.runtime.calls)
                     )
+
+    async def test_session_multiselect_combines_native_and_lazy_without_extra_catalogs(self) -> None:
+        active = await self._create()
+        self.store.assign_native_thread_id(active.id, "native-active")
+        archived = await self._create()
+        self.store.assign_native_thread_id(archived.id, "native-archived")
+        missing = await self._create()
+        self.store.assign_native_thread_id(missing.id, "native-missing")
+        lazy = await self._create()
+        self.runtime.active_metadata["native-active"] = NativeThreadMetadata(
+            "native-active", "Active", "active"
+        )
+        self.runtime.archived_metadata["native-archived"] = NativeThreadMetadata(
+            "native-archived", "Archived", "archived"
+        )
+        cases = (
+            (("active", "lazy"), {active.id, lazy.id}, (False,)),
+            (("lazy", "archived"), {lazy.id, archived.id}, (True,)),
+            (("active", "archived"), {active.id, archived.id}, (False, True)),
+            (("lazy", "missing"), {lazy.id, missing.id}, (False, True)),
+            (("active", "archived", "missing"), {active.id, archived.id, missing.id}, (False, True)),
+            (("active", "lazy", "archived", "missing"), {active.id, archived.id, missing.id, lazy.id}, ()),
+        )
+        for states, expected, catalogs in cases:
+            with self.subTest(states=states):
+                self.runtime.calls.clear()
+                page = await self.service.query_sessions(
+                    query=SessionQuery(inventory_states=tuple(SessionInventoryState(s) for s in states)),
+                    deadline=asyncio.get_running_loop().time() + 1,
+                )
+                self.assertEqual({item.record.binding.id for item in page.items}, expected)
+                self.assertEqual(
+                    tuple(call[1] for call in self.runtime.calls if call[0] == "catalog"),
+                    catalogs,
+                )
+                for item in page.items:
+                    if item.record.binding.id == lazy.id:
+                        self.assertIsNone(item.native)
+                    elif item.record.binding.id == missing.id:
+                        self.assertEqual(item.native.state, NativeThreadCatalogState.MISSING)
+                    else:
+                        self.assertIsNotNone(item.native.metadata)
+
+        self.runtime.archived_metadata["native-active"] = self.runtime.active_metadata["native-active"]
+        with self.assertRaises(NativeCatalogInconsistent):
+            await self.service.query_sessions(
+                query=SessionQuery(inventory_states=(SessionInventoryState.ACTIVE, SessionInventoryState.ARCHIVED)),
+                deadline=asyncio.get_running_loop().time() + 1,
+            )
+        with patch.object(self.runtime, "thread_catalog_exact", side_effect=TimeoutError("incomplete")):
+            with self.assertRaises(TimeoutError):
+                await self.service.query_sessions(
+                    query=SessionQuery(inventory_states=(SessionInventoryState.LAZY, SessionInventoryState.MISSING)),
+                    deadline=asyncio.get_running_loop().time() + 1,
+                )
+
+    async def test_session_multiselect_paginates_across_excluded_materialized_rows(self) -> None:
+        first = await self._create()
+        excluded = await self._create()
+        self.store.assign_native_thread_id(excluded.id, "not-active")
+        second = await self._create()
+        self.store.assign_native_thread_id(second.id, "native-active")
+        self.runtime.active_metadata["native-active"] = NativeThreadMetadata("native-active", "Active", "active")
+        third = await self._create()
+        query = SessionQuery(inventory_states=(SessionInventoryState.ACTIVE, SessionInventoryState.LAZY))
+        first_page = await self.service.query_sessions(
+            query=query, limit=2, deadline=asyncio.get_running_loop().time() + 1,
+        )
+        self.assertEqual([item.record.binding.id for item in first_page.items], [third.id, second.id])
+        self.assertIsNotNone(first_page.next_cursor)
+        second_page = await self.service.query_sessions(
+            query=query, limit=2, cursor=first_page.next_cursor,
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+        self.assertEqual([item.record.binding.id for item in second_page.items], [first.id])
+        self.assertIsNone(second_page.next_cursor)
+
+    async def test_project_options_include_disabled_and_paginate_without_native_reads(self) -> None:
+        project = self.projects.register(alias="disabled", path=None, create_directory=True)
+        self.projects.set_enabled(alias=project.alias, enabled=False, expected_revision=project.revision)
+        self.runtime.calls.clear()
+        first = await self.service.query_project_options(
+            limit=1, deadline=asyncio.get_running_loop().time() + 1,
+        )
+        self.assertEqual([item.project.alias for item in first.items], ["disabled"])
+        self.assertFalse(first.items[0].project.enabled)
+        second = await self.service.query_project_options(
+            limit=1, cursor=first.next_cursor, deadline=asyncio.get_running_loop().time() + 1,
+        )
+        self.assertEqual([item.project.alias for item in second.items], ["test"])
+        self.assertIsNone(second.next_cursor)
+        self.assertEqual(self.runtime.calls, [])
 
     async def test_project_query_merges_complete_archived_catalog_counts(self) -> None:
         archived = await self._create()
@@ -1232,7 +1336,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(closed.missing_runtime_session)
         self.assertEqual(closed.record.state, SideTopicState.EXPIRED)
 
-    async def test_terminal_side_close_is_idempotent_without_runtime_call(self) -> None:
+    async def test_terminal_side_close_only_checks_local_runtime_snapshot(self) -> None:
         parent = await self._create()
         side = self.store.create_side_topic(
             app_id="cli_test",
@@ -1257,7 +1361,10 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(closed.outcome)
         self.assertEqual(closed.record.state, SideTopicState.FAILED)
-        self.assertEqual(tuple(self.runtime.calls), before)
+        self.assertEqual(
+            tuple(self.runtime.calls),
+            (*before, ("side-snapshot", side.id)),
+        )
 
     async def test_side_close_rejects_exact_identity_mismatch(self) -> None:
         parent = await self._create()

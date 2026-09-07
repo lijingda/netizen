@@ -36,6 +36,7 @@ from netizen.bindings import (
     _side_inventory_statement,
     _Transaction,
     migrate_channel_database_v6_to_v7,
+    migrate_channel_database_v7_to_v8,
 )
 from netizen.domain import (
     FeishuScope,
@@ -1131,6 +1132,7 @@ class BindingStoreManagementSchemaTest(unittest.TestCase):
             finally:
                 connection.close()
 
+            self.assertTrue(migrate_channel_database_v7_to_v8(path))
             migrated = BindingStore(path)
             try:
                 binding = migrated.get("legacy-binding")
@@ -1493,6 +1495,44 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
             await self.store.query_bindings(limit=101)
         with self.assertRaises(ValueError):
             await self.store.query_bindings(query=BindingQuery(chat_id=""))
+
+    async def test_binding_multiselect_is_or_within_filters_and_and_across(self) -> None:
+        first = self.create_binding(
+            scope=self.direct, project="alpha", created_at="2030-01-01T00:00:00+00:00",
+        )
+        second = self.create_binding(
+            scope=self.topic, project="beta", created_at="2030-01-02T00:00:00+00:00",
+        )
+        third = self.create_binding(
+            scope=self.topic, project="alpha", created_at="2030-01-03T00:00:00+00:00",
+        )
+        self.create_binding(
+            scope=FeishuScope("cli_test", "oc_group", ScopeKind.GROUP),
+            project="beta", created_at="2030-01-04T00:00:00+00:00",
+        )
+        self.store.set_project_enabled(alias="beta", enabled=False, expected_revision=1)
+        filters = BindingQuery(
+            project_aliases=("alpha", "beta"),
+            scope_kinds=(ScopeKind.DIRECT, ScopeKind.TOPIC),
+        )
+        first_page = await self.store.query_bindings(query=filters, limit=2)
+        self.assertEqual([item.binding.id for item in first_page.items], [third.id, second.id])
+        second_page = await self.store.query_bindings(
+            query=filters, limit=2, cursor=first_page.next_cursor,
+        )
+        self.assertEqual([item.binding.id for item in second_page.items], [first.id])
+        self.assertIsNone(second_page.next_cursor)
+        current = await self.store.query_bindings(query=BindingQuery(
+            project_aliases=("alpha", "beta"),
+            scope_kinds=(ScopeKind.DIRECT, ScopeKind.TOPIC), current=True,
+            created_from="2030-01-02T00:00:00+00:00",
+        ))
+        self.assertEqual([item.binding.id for item in current.items], [third.id])
+        inactive = await self.store.query_bindings(query=BindingQuery(
+            project_aliases=("alpha", "beta"),
+            scope_kinds=(ScopeKind.DIRECT, ScopeKind.TOPIC), current=False,
+        ))
+        self.assertEqual([item.binding.id for item in inactive.items], [second.id])
 
     async def test_side_keyset_project_filters_and_project_aggregates(self) -> None:
         alpha = self.create_binding(

@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .bindings import (
+    PROJECT_DELETE_LIMIT,
     BindingStore,
     ProjectConflict as StoredProjectConflict,
+    ProjectDeleteSnapshot,
     ProjectNotFound as StoredProjectNotFound,
     ProjectRecord,
     ProjectRevisionConflict as StoredProjectRevisionConflict,
@@ -171,7 +173,77 @@ class ProjectRegistry:
             raise StaleProject(
                 f"Project {alias} 已被其他操作修改，请刷新卡片后重试。"
             ) from error
+        except StoredProjectConflict as error:
+            raise ProjectError(str(error)) from error
         return _project(record)
+
+    def preview_delete(
+        self,
+        alias: str,
+        *,
+        limit: int = PROJECT_DELETE_LIMIT,
+        extra_side_ids: tuple[str, ...] = (),
+    ) -> ProjectDeleteSnapshot:
+        try:
+            return self._store.preview_project_delete(
+                alias, limit=limit, extra_side_ids=extra_side_ids,
+            )
+        except StoredProjectNotFound as error:
+            raise UnknownProject(alias) from error
+        except StoredProjectConflict as error:
+            raise ProjectError(str(error)) from error
+
+    def begin_delete(
+        self,
+        *,
+        alias: str,
+        expected_revision: int,
+        expected_inventory_fingerprint: str,
+        limit: int = PROJECT_DELETE_LIMIT,
+        extra_side_ids: tuple[str, ...] = (),
+    ) -> ProjectDeleteSnapshot:
+        try:
+            return self._store.begin_project_delete(
+                alias=alias,
+                expected_revision=expected_revision,
+                expected_inventory_fingerprint=expected_inventory_fingerprint,
+                limit=limit,
+                extra_side_ids=extra_side_ids,
+            )
+        except StoredProjectNotFound as error:
+            raise UnknownProject(alias) from error
+        except StoredProjectRevisionConflict as error:
+            raise StaleProject(f"Project {alias} 已改变，请刷新后重新确认。") from error
+        except StoredProjectConflict as error:
+            raise ProjectError(str(error)) from error
+
+    def finish_delete(
+        self,
+        *,
+        alias: str,
+        expected_revision: int,
+        expected_inventory_fingerprint: str,
+    ) -> None:
+        try:
+            self._store.finish_project_delete(
+                alias=alias,
+                expected_revision=expected_revision,
+                expected_inventory_fingerprint=expected_inventory_fingerprint,
+            )
+        except StoredProjectNotFound as error:
+            raise UnknownProject(alias) from error
+        except StoredProjectRevisionConflict as error:
+            raise StaleProject(f"Project {alias} 已改变，请刷新后重新确认。") from error
+        except StoredProjectConflict as error:
+            raise ProjectError(str(error)) from error
+
+    def release_delete(self, *, alias: str, expected_revision: int) -> None:
+        try:
+            self._store.release_project_delete(
+                alias=alias, expected_revision=expected_revision
+            )
+        except StoredProjectRevisionConflict as error:
+            raise StaleProject(f"Project {alias} 已改变，请刷新后重新确认。") from error
 
     def _resolve(self, alias: str) -> Project:
         try:
@@ -187,7 +259,7 @@ class ProjectRegistry:
     ) -> None:
         _validate_alias(alias)
         try:
-            self._store.get_project(alias)
+            self._store.get_project(alias, include_deleted=True)
         except StoredProjectNotFound:
             cwd = _canonical_directory(configured_path, alias)
             self._store.bootstrap_project(alias=alias, cwd=str(cwd))

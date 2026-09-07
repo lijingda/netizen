@@ -13,6 +13,7 @@ const state = {
     nextCursor: null,
     previousCursors: [],
     number: 1,
+    query: null,
   },
 };
 
@@ -395,6 +396,98 @@ function badge(value, active = false, warning = false) {
   return node;
 }
 
+const pendingProjectDeletes = new Set();
+
+function showProjectDeleteResult(message, details = [], isError = false) {
+  const panel = document.querySelector("#project-delete-result");
+  panel.hidden = false;
+  panel.classList.toggle("error", isError);
+  document.querySelector("#project-delete-message").textContent = message;
+  const remaining = document.querySelector("#project-delete-remaining");
+  remaining.replaceChildren();
+  for (const detail of details) {
+    const item = document.createElement("li");
+    item.textContent = detail;
+    remaining.append(item);
+  }
+  remaining.hidden = details.length === 0;
+}
+
+function confirmProjectDelete(preview) {
+  return window.confirm(
+    `删除 Project「${preview.project.alias}」及关联 Sessions？`
+    + `\n\n关联 Sessions：${preview.sessionCount}（Lazy ${preview.lazySessionCount}，已创建 Thread ${preview.materializedSessionCount}）`
+    + "\n范围包含所有归档会话，不受 Sessions 页面筛选影响。"
+    + `\n关联 Side：${preview.sideCount}，将结束并移除。`
+    + "\n\n原生会话、派生子会话、Codex App/CLI 历史和本地会话登记将永久删除，无法恢复。"
+    + "\n全部会话删除确认成功后，才会删除 Project 登记；部分失败时会保留 Project 和剩余会话。"
+    + `\n\n磁盘代码目录保留：${preview.project.cwd}`,
+  );
+}
+
+async function deleteProject(project) {
+  const envelope = project.actions.previewDelete;
+  if (!envelope || pendingProjectDeletes.has(project.alias)) return;
+  pendingProjectDeletes.add(project.alias);
+  project.actions.previewDelete = null;
+  for (const row of document.querySelectorAll("#projects-body tr")) {
+    if (row.dataset.projectAlias !== project.alias) continue;
+    for (const button of row.querySelectorAll("button")) button.disabled = true;
+  }
+  let submitted = false;
+  let message = `正在读取 Project「${project.alias}」的删除范围…`;
+  let details = [];
+  let isError = false;
+  showProjectDeleteResult(message);
+  setStatus(message);
+  try {
+    const preview = await api("/api/v1/projects/delete-preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actionPayload(envelope)),
+    });
+    if (!confirmProjectDelete(preview)) {
+      message = `已取消删除 Project「${project.alias}」，未提交删除。`;
+      return;
+    }
+    submitted = true;
+    showProjectDeleteResult(`正在删除 Project「${project.alias}」及关联 Sessions，请等待服务端确认…`);
+    const result = await api("/api/v1/projects/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actionPayload(preview.actions.delete)),
+    });
+    if (result.deleted === true) {
+      message = `Project「${result.projectAlias}」及关联 Sessions 已删除，已删除 ${result.deletedSessionCount} 个 Session。磁盘代码目录保留。`;
+    } else {
+      isError = true;
+      message = `Project「${result.projectAlias}」仍保留，删除尚未全部完成。`
+        + `\n已删除 ${result.deletedSessionCount} 个 Session；剩余 ${result.remainingSessionCount} 个 Session、${result.remainingSideCount} 个 Side。`
+        + (result.message ? `\n${result.message}` : "");
+      details = (result.remainingSessions || []).map((session) =>
+        `Session ${session.shortId} · Scope ${session.scopeKey} · Binding ${session.bindingId}`);
+      if (result.failedBindingId) details.push(`未确认删除的 Binding：${result.failedBindingId}`);
+      if (result.failedSideId) details.push(`未确认收尾的 Side：${result.failedSideId}`);
+    }
+    return result;
+  } catch (error) {
+    isError = true;
+    if (submitted && (error.status == null || error.status >= 500)) {
+      message = `Project「${project.alias}」的删除结果未确认，服务端可能仍在处理。请手动刷新 Projects 查看事实；不要重复提交删除。`;
+    } else {
+      message = submitted
+        ? `Project「${project.alias}」的删除请求未完成。${error.message}`
+        : `无法读取 Project「${project.alias}」的删除范围，未提交删除。${error.status ? error.message : "请检查连接后刷新 Projects。"}`;
+    }
+  } finally {
+    pendingProjectDeletes.delete(project.alias);
+    const refreshed = await refresh("projects");
+    if (!refreshed) message += "\nProjects 刷新失败，请手动刷新查看最新状态。";
+    showProjectDeleteResult(message, details, isError);
+    setStatus(message, isError);
+  }
+}
+
 async function loadProjects(cursor = null) {
   const query = new URLSearchParams({ pageSize: "25" });
   if (cursor) query.set("cursor", cursor);
@@ -405,10 +498,15 @@ async function loadProjects(cursor = null) {
   body.replaceChildren();
   for (const project of data.items) {
     const row = document.createElement("tr");
+    row.dataset.projectAlias = project.alias;
     cell(row, project.alias);
     cell(row, project.cwd, "id");
     const status = document.createElement("td");
-    status.append(badge(project.enabled ? "Enabled" : "Disabled", project.enabled));
+    status.append(badge(
+      project.deleting ? "正在删除" : project.enabled ? "Enabled" : "Disabled",
+      !project.deleting && project.enabled,
+      project.deleting,
+    ));
     row.append(status);
     cell(row, `${project.bindingCount}（Lazy ${project.lazyBindingCount}）`);
     cell(row, project.archivedBindingCount);
@@ -421,12 +519,216 @@ async function loadProjects(cursor = null) {
         project.enabled,
       ));
     }
+    if (project.actions.previewDelete) {
+      actions.append(actionButton(
+        "删除 Project 及关联 Sessions", () => deleteProject(project), true,
+      ));
+    }
+    if (project.deleting || pendingProjectDeletes.has(project.alias)) {
+      for (const button of actions.querySelectorAll("button")) button.disabled = true;
+    }
     body.append(row);
   }
   document.querySelector("#projects-next").hidden = !data.nextCursor;
 }
 
 const timeRangeControllers = new WeakMap();
+const sessionMultiFilters = new Map();
+let openSessionMultiFilter = null;
+
+const sessionFilterOptions = {
+  project: [],
+  scopeKind: [["direct", "单聊"], ["group", "群聊"], ["topic", "话题"]],
+  inventoryState: [["active", "Active"], ["lazy", "Lazy"], ["archived", "Archived"], ["missing", "Missing"]],
+  current: [["true", "当前"], ["false", "非当前"]],
+};
+
+function initializeSessionMultiFilter(root) {
+  const name = root.dataset.sessionMulti;
+  const legend = root.querySelector("legend");
+  legend.id = `session-${name}-label`;
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "multi-filter-trigger";
+  trigger.setAttribute("aria-expanded", "false");
+  const summary = document.createElement("span");
+  summary.className = "multi-filter-summary";
+  const chevron = document.createElement("span");
+  chevron.textContent = "⌄";
+  chevron.setAttribute("aria-hidden", "true");
+  trigger.append(summary, chevron);
+  const popover = document.createElement("div");
+  popover.className = "multi-filter-popover";
+  popover.id = `session-${name}-options`;
+  popover.hidden = true;
+  popover.setAttribute("role", "group");
+  popover.setAttribute("aria-labelledby", legend.id);
+  trigger.setAttribute("aria-controls", popover.id);
+  const search = document.createElement("input");
+  search.type = "search";
+  search.className = "multi-filter-search";
+  search.placeholder = "搜索 Project";
+  search.setAttribute("aria-label", "搜索 Project");
+  if (name === "project") popover.append(search);
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "multi-filter-clear";
+  clear.textContent = "清除筛选（全部）";
+  const choices = document.createElement("div");
+  choices.className = "multi-filter-options";
+  const empty = document.createElement("p");
+  empty.className = "multi-filter-empty";
+  empty.textContent = "没有匹配的 Project";
+  empty.hidden = true;
+  popover.append(clear, choices, empty);
+  root.append(trigger, popover);
+  let options = sessionFilterOptions[name];
+  let selected = new Set(name === "inventoryState" ? ["active", "lazy"] : []);
+
+  function renderSummary() {
+    const labels = options.filter(([value]) => selected.has(value)).map(([, label]) => label);
+    summary.textContent = selected.size === 0 ? "全部" : labels.join("、");
+    trigger.title = summary.textContent;
+    trigger.setAttribute("aria-label", `${legend.textContent}：${summary.textContent}`);
+  }
+
+  function filterChoices() {
+    const term = search.value.trim().toLocaleLowerCase();
+    let visible = 0;
+    for (const label of choices.children) {
+      label.hidden = !label.textContent.toLocaleLowerCase().includes(term);
+      if (!label.hidden) visible += 1;
+    }
+    empty.hidden = visible !== 0;
+  }
+
+  function renderChoices() {
+    choices.replaceChildren();
+    for (const [value, labelText] of options) {
+      const label = document.createElement("label");
+      label.className = "multi-filter-option";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = value;
+      input.checked = selected.has(value);
+      input.addEventListener("change", () => {
+        if (input.checked) selected.add(value);
+        else selected.delete(value);
+        renderSummary();
+      });
+      label.append(input, document.createTextNode(labelText));
+      choices.append(label);
+    }
+    filterChoices();
+    renderSummary();
+  }
+
+  function close({ restoreFocus = false } = {}) {
+    popover.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    if (openSessionMultiFilter === controller) openSessionMultiFilter = null;
+    if (restoreFocus) trigger.focus();
+  }
+
+  function visibleInputs() {
+    return [...choices.children].filter((label) => !label.hidden)
+      .map((label) => label.querySelector("input"));
+  }
+
+  function open() {
+    openSessionMultiFilter?.close();
+    openTimeRangeFilter?.cancel({ restoreFocus: false });
+    openSessionMultiFilter = controller;
+    search.value = "";
+    filterChoices();
+    popover.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    // Keep the dropdown inside the viewport even in the last grid column.
+    const bounds = root.getBoundingClientRect();
+    const width = popover.getBoundingClientRect().width;
+    popover.style.left = `${Math.min(0, window.innerWidth - 20 - bounds.left - width)}px`;
+    (name === "project" ? search : visibleInputs()[0] || clear).focus();
+  }
+
+  const controller = {
+    close,
+    values: () => [...selected],
+    reset() {
+      selected = new Set(name === "inventoryState" ? ["active", "lazy"] : []);
+      search.value = "";
+      close();
+      renderChoices();
+    },
+    setOptions(nextOptions) {
+      // A selection remains visible if its Project was removed in another view.
+      const known = new Set(nextOptions.map(([value]) => value));
+      options = [...nextOptions, ...[...selected].filter((value) => !known.has(value))
+        .map((value) => [value, `${value}（已不可用）`])];
+      renderChoices();
+    },
+  };
+  trigger.addEventListener("click", () => {
+    if (popover.hidden) open();
+    else close({ restoreFocus: true });
+  });
+  trigger.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      open();
+    }
+  });
+  search.addEventListener("input", filterChoices);
+  clear.addEventListener("click", () => {
+    selected.clear();
+    renderChoices();
+  });
+  root.addEventListener("keydown", (event) => {
+    if (popover.hidden) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close({ restoreFocus: true });
+    } else if (event.key === "Enter" && event.target === search) {
+      event.preventDefault();
+    } else if (event.target !== trigger && ["ArrowDown", "ArrowUp"].includes(event.key)) {
+      const inputs = visibleInputs();
+      if (!inputs.length) return;
+      event.preventDefault();
+      const index = inputs.indexOf(document.activeElement);
+      const next = index < 0 ? 0 : (index + (event.key === "ArrowDown" ? 1 : -1) + inputs.length) % inputs.length;
+      inputs[next].focus();
+    }
+  });
+  root.addEventListener("focusout", (event) => {
+    if (!root.contains(event.relatedTarget)) close();
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!root.contains(event.target)) close();
+  });
+  renderChoices();
+  return controller;
+}
+
+for (const root of document.querySelectorAll("[data-session-multi]")) {
+  sessionMultiFilters.set(root.dataset.sessionMulti, initializeSessionMultiFilter(root));
+}
+
+async function loadSessionProjectOptions() {
+  const options = [];
+  const seenCursors = new Set();
+  let cursor = null;
+  do {
+    const query = new URLSearchParams({ pageSize: "50" });
+    if (cursor) query.set("cursor", cursor);
+    const data = await api(`/api/v1/projects/options?${query}`);
+    options.push(...data.items.map((project) => [
+      project.alias, project.enabled ? project.alias : `${project.alias}（已停用）`,
+    ]));
+    cursor = data.nextCursor;
+    if (cursor && seenCursors.has(cursor)) throw new Error("Project 列表分页异常，请刷新重试。");
+    if (cursor) seenCursors.add(cursor);
+  } while (cursor);
+  sessionMultiFilters.get("project").setOptions(options);
+}
 
 function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
   for (const root of form.querySelectorAll("[data-time-range]")) {
@@ -434,7 +736,13 @@ function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
   }
   const query = new URLSearchParams();
   for (const [key, value] of new FormData(form)) {
-    if (String(value)) query.set(key, String(value));
+    if (String(value)) query.append(key, String(value));
+  }
+  for (const root of form.querySelectorAll("[data-session-multi]")) {
+    const name = root.dataset.sessionMulti;
+    const values = sessionMultiFilters.get(name).values();
+    for (const value of values) query.append(name, value);
+    if (name === "inventoryState" && values.length === 0) query.set(name, "all");
   }
   if (!query.has("pageSize")) query.set("pageSize", defaultPageSize);
   return query;
@@ -788,6 +1096,7 @@ function initializeTimeRangeFilter(root) {
   }
 
   function openPopover() {
+    openSessionMultiFilter?.close();
     if (openTimeRangeFilter && openTimeRangeFilter !== controller) {
       openTimeRangeFilter.cancel({ restoreFocus: false });
     }
@@ -803,7 +1112,16 @@ function initializeTimeRangeFilter(root) {
     (selected || start).focus();
   }
 
-  const controller = { cancel: cancelDraft, prepareQuery };
+  const controller = {
+    cancel: cancelDraft,
+    prepareQuery,
+    reset() {
+      applied = allTimeRange();
+      draft = allTimeRange();
+      closePopover({ restoreFocus: false });
+      renderApplied();
+    },
+  };
 
   trigger.addEventListener("click", () => {
     if (popover.hidden) openPopover();
@@ -1007,20 +1325,33 @@ function resetSessionPagination() {
     nextCursor: null,
     previousCursors: [],
     number: 1,
+    query: null,
   };
 }
 
+function resetSessionFilters() {
+  const form = document.querySelector("#session-filter");
+  form.reset();
+  for (const controller of sessionMultiFilters.values()) controller.reset();
+  for (const root of form.querySelectorAll("[data-time-range]")) {
+    timeRangeControllers.get(root)?.reset();
+  }
+  resetSessionPagination();
+  return refresh("sessions");
+}
+
 async function loadSessions(cursor = state.sessionPage.cursor) {
-  const query = formQuery(
-    document.querySelector("#session-filter"),
-    "20",
-    cursor === null,
-  );
+  const query = state.sessionPage.query == null
+    ? formQuery(document.querySelector("#session-filter"), "20")
+    : new URLSearchParams(state.sessionPage.query);
+  const appliedQuery = query.toString();
+  await loadSessionProjectOptions();
   if (cursor) query.set("cursor", cursor);
   const data = await api(`/api/v1/sessions?${query}`);
   state.sessions = data;
   state.sessionPage.cursor = cursor;
   state.sessionPage.nextCursor = data.nextCursor;
+  state.sessionPage.query = appliedQuery;
   const body = document.querySelector("#sessions-body");
   body.replaceChildren();
   for (const session of data.items) {
@@ -1136,6 +1467,7 @@ async function moveSessionPage(direction) {
     nextCursor: page.nextCursor,
     previousCursors: [...page.previousCursors],
     number: page.number,
+    query: page.query,
   };
   if (direction === "next") {
     if (!page.nextCursor) return;
@@ -1303,6 +1635,7 @@ document.querySelector("#session-filter").addEventListener("submit", (event) => 
   resetSessionPagination();
   refresh("sessions");
 });
+document.querySelector("#session-filter-reset").addEventListener("click", resetSessionFilters);
 document.querySelector("#session-page-size").addEventListener("change", () => {
   resetSessionPagination();
   refresh("sessions");

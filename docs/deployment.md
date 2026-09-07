@@ -310,6 +310,14 @@ descendant cascade 由 0.147.0 固定源码契约和 ADR 0037 已记录的真实
 实测约束；routine phase 不依赖模型临时生成一棵非确定性 agent tree。探针不触碰任何既有
 Thread；delete 响应失败时也不得自动重发。
 
+Project 级联删除边界变更还应运行 `.venv/bin/python scripts/probe_project_delete.py`。
+该探针在临时 cwd/数据库中创建自己的 Lazy、active、archived 会话和 OPEN Side，并验证
+Parent 已被单独删除时的孤立 Runtime Side；检查原生四视图消失、每个 ID 至多一次 delete、
+目录保留，以及数据库重开和 YAML bootstrap 后 Project/Side 墓碑仍有效。它只清理自己创建
+的样本，不使用既有 Project。应记录运行账户、SDK 版本与模型；必要时可用 `--model`
+为探针自己的 Binding/Thread 选择该账户支持的模型，不修改共享配置。此探针不包含真实
+飞书 topic 发布或跨主机浏览器传输验收，不能代替这些入口的独立证据。
+
 `release` phase 是普通持久 Thread 空闲订阅释放的原生兼容性探针。它先在 App Server A 创建
 并完成一个 Thread，确认 `thread/backgroundTerminals/list(limit=1)` 为空后取消当前连接
 订阅，再在同一连接按 exact ID resume 并完成后续 Turn。关闭 A 后，App Server B 必须按
@@ -859,16 +867,17 @@ admission，修复文件后仍需 `./service.sh restart`，不会自动重新开
 HTTP；不得把该端口直接暴露到不受信网络。
 
 `instance.projectRoot` 是必填的绝对路径，用于限制从飞书自动创建的空 Project；它不是
-Binding 的默认 cwd。Channel Database 只接受当前 schema v7，不在服务启动时自动迁移旧
-schema。v7 在 v6 的 Mention Context Mode、exact Context Boundary 与独立 revision 上，
-为 Binding 增加两个 Task Feedback 布尔值和 feedback revision；不保存任何补充消息正文、Turn
-Activity Projection 或 Reply Card session。v6 -> v7 cutover 必须在 release transaction
-中完成，把所有现有 Binding 的历史 Task Reaction（现 Reaction Pulse）与 Progress Card
-初始化为关闭，并保留现有
-Scope/Binding/Project、去重记录和 `side_topics` 永久路由墓碑；迁移失败时恢复旧数据库与
-旧 release。不得归档后创建空数据库，否则旧 Side 话题可能重新落入普通 Binding 路由。
-配置文件中的 `projects` mapping 会在启动时以 `INSERT OR IGNORE` 导入，数据库里已经停用
-或由飞书创建的条目始终优先。不要手工编辑 `projects` 或 `bindings` 表。
+Binding 的默认 cwd。Channel Database 只接受当前 schema v8，不在服务启动时自动迁移旧
+schema。v8 在现有 Project metadata 中增加 `deleted` 墓碑，防止删除后被 YAML bootstrap
+恢复。v7 -> v8 必须由安装器在卸载服务目标、取得 lifetime lock 和 rollback snapshot 后，
+于同一 activation/rollback transaction 中完成。v6 先通过原 v6 -> v7 迁移，把现有 Binding
+的 Reaction Pulse 与 Progress Card 初始化为关闭，再进入 v8。迁移保留全部
+Scope/Binding/Project、去重记录和 `side_topics` 永久墓碑；旧 Project 默认未删除，失败
+恢复旧数据库与旧 release。不得创建空数据库，否则旧 Side 话题可能重新落入普通 Binding。
+配置的 `projects` mapping 启动时仍只做 `INSERT OR IGNORE`，停用、动态登记和已删除记录
+始终优先；已删除 alias 只有显式重新登记才能复用，revision 继续递增。Project 删除保留
+磁盘代码目录。删除确认、进度和结果不写入 SQLite；部分失败或结果未知后 Project 保持
+停用，管理员应刷新查看剩余项并重新确认，不会在重启后自动续删。不要手工编辑表。
 
 浏览器初始化会请求 `card.action.trigger`；手工准备应用时，使用卡片前须在飞书开发者后台
 打开“事件与回调 → 回调配置”。回调仍走现有 WebSocket 长连接，不需要公网 callback URL；
@@ -1067,7 +1076,9 @@ cleanup 和 exact-ID resume probes；fake launchctl/systemctl 单测不能替代
 重定向到 `/login`（不返回 HTML 或状态），未知 route 和 API 必须返回 401，只有登录页复用的
 无状态 CSS 可匿名读取，`/health/ready` 只返回无细节状态；
 使用独立 credential 登录后，检查四个一级
-页面、筛选、分页和五秒 runtime polling。Sessions 分别选择 10/20/50/100，确认前后翻页、
+页面、筛选、分页和五秒 runtime polling。Sessions 默认显示 Active + Lazy，Project 可搜索
+并包含停用项；Project/Scope/状态/current 的多选应满足同项“或”、跨项“且”，无 ID 输入框，
+列表 ID 仍可见。验证重置恢复默认状态、全部时间和每页 20 条。分别选择 10/20/50/100，确认前后翻页、
 页码与当前页条数正确；在 P2P、普通群和话题群 Binding 上确认显示真人/群名称与正确类型，
 重复刷新命中缓存，名称链接能打开对应飞书会话，话题行只承诺打开所在会话。100 条页面的
 首屏和 polling 都不得向单次 runtime snapshot 请求发送超过 50 个 ID。依次验收 Project
@@ -1080,6 +1091,13 @@ Scope、short ID 与完整永久级联后果，取消必须零 mutation，确认
 Thread/descendants 与 Binding。删除 inactive 行不得改变其他 active pointer，删除 current 行
 才清空 pointer；不得先 activate、unarchive 或 Stop。Lazy 行仍通过既有二次确认删除本地
 Binding。
+另以 disposable Project 关联 Lazy、active、archived 会话和一个 open Side，确认 Project
+删除窗口计入所有关联项，不受 Sessions 筛选影响；取消零 mutation，确认后关闭 Side 并
+逐个删除会话，磁盘标记文件保留，Project 消失而 Side 墓碑仍在。执行期间从另一入口尝试
+新建关联会话、Side 或重新启用，均应拒绝。验证部分失败/断线后 Project 仍停用且显示
+剩余项，不把结果未知显示为整体成功。重启时 YAML 不应恢复已删除 Project；显式复用
+alias 后旧 revision/action 必须失效。迁移边界变更还应针对候选验证 v6/v7 升至 v8 后的
+metadata 保留，以及失败时恢复原数据库/release，记录与此边界相关的真实结果。
 双击同一 action 应返回 stale/consumed；与飞书并发操作同一目标时只允许符合 exact native
 identity 的一方提交。重启服务后旧 Admin session 必须失效，持久 Binding/设置/Side
 墓碑不变；journal 不得出现 credential、cookie/action token、cwd、name/preview 或 body。
@@ -1376,7 +1394,7 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     未验证，不能宣称真实表单兼容或容量验收通过。
     P2P 若返回 230071 必须记录为
     本轮文件 live gate 未通过，不得用 FakeChannel 或普通主线发送替代。最后确认这些操作不
-    改变 schema v7 表、Binding、Turn settings、Task Feedback、Context Boundary 或 Side
+    改变 schema v8 表、Binding、Turn settings、Task Feedback、Context Boundary 或 Side
     route 行数。
 
 CLI 中新增的消息不要求回填飞书；验证目标是共享原生后端和可接续性，不是两个 UI

@@ -602,7 +602,7 @@ handle 回报不同 ID，关闭 admission 且不对不可信 handle 执行 inter
 
 `channel.sqlite3` 只有 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`。最后一张表直接实现 Channel SDK 冻结的 `seen/mark`
-DedupStore 协议。Schema v7 的 `bindings` 保存全空或全有的三个 Binding-scoped catalog
+DedupStore 协议。Schema v8 的 `bindings` 保存全空或全有的三个 Binding-scoped catalog
 ID、settings revision、两个默认关闭的 Binding Task Feedback 布尔值及 feedback revision、
 `current-only|catch-up`、全空或全有的 exact Context Boundary、context revision，以及
 rollback-compatible `ever_activated` 标记；旧行/default 仍为 1，Admin 仅创建且从未设为
@@ -611,10 +611,13 @@ rollback-compatible `ever_activated` 标记；旧行/default 仍为 1，Admin �
 更新和 Runtime 接受后的 cursor CAS 都由数据库约束保护。`side_topics` 保存
 app/chat/topic/root/source、Parent Binding
 ID、creator、mention policy、creating/open/closed/expired/failed 和时间，不保存
-ephemeral native Thread ID 或内容。服务只接受当前 schema，不承担旧 Channel Database 的自动迁移；
-v6 -> v7 必须由 release transaction 原子迁移，保留 Scope/Binding/Project/Dedup/Side
-Topic 行并把现有 Binding 两项 Task Feedback 设为关闭；不能按通用重建流程把旧 Side 话题
-重新开放为普通 Binding。它不保存解析后的 wire value 或已生效配置。
+ephemeral native Thread ID 或内容。`projects.deleted` 保留已删除 Project 的 Registry 墓碑，
+阻止 YAML bootstrap 复活；正常查询隐藏墓碑，显式重新登记继续递增 alias 的 revision。
+服务只接受当前 schema，不承担启动时迁移；安装器在同一 release transaction 内执行
+v7 -> v8，v6 先经原 v6 -> v7 迁移并把现有 Binding 两项 Task Feedback 设为关闭。
+迁移保留 Scope/Binding/Project/Dedup/Side Topic 行，旧 Project 默认未删除，失败恢复
+原数据库与 release；不能重建空库并把旧 Side 话题重新开放为普通 Binding。删除 intent、
+确认清单、fingerprint 和结果只在进程内，不保存解析后的 wire value 或已生效配置。
 数据库没有 prompt、补充消息正文/发送者投影、当前消息发送者投影、回复、ephemeral
 native Thread ID、Turn、Goal、
 Skill catalog、plan/checklist、Turn Activity Projection、reaction、Reply Card identity、cwd
@@ -768,7 +771,9 @@ Registry 中的一个 Project，不存在 default/unbound 或服务 cwd fallback
 `projectRoot` 内创建空目录。`/new` 可以从同 Scope 的现有 Binding 记录预选当前或最近
 使用且仍 enabled 的 Project，不另存 recent 状态；没有可推导偏好时必须由用户选择，
 没有 enabled Project 时引导 `/settings` 且不创建 Binding。停用只阻止新 Binding，已有
-Binding 仍能继续；Netizen 从不删除目录。它不做 workspace clone 或 Project ACL。
+Binding 仍能继续。Admin 可按 [ADR 0060](adr/0060-delete-projects-with-exact-session-inventory.md)
+明确删除 Project 及完整关联 Sessions，成功后保留 Registry 墓碑；Netizen 从不删除目录。
+它不做 workspace clone 或 Project ACL。
 用户和群的准入由飞书应用权限负责；Netizen 和 Channel SDK 不再配置
 user/chat/role allowlist。每个被投递到 Scope 的参与者都能管理 Binding、Project 和
 停止 active Turn，群聊/话题的消息命令仍逐条要求 @机器人。
@@ -816,17 +821,23 @@ Host 只接受启动时发现的本机地址/名称和 exact port，带 body 的
 OIDC、多管理员或 RBAC。
 
 Projects、Sessions、Side Topics 都使用服务端 keyset cursor。Binding 查询先在 Channel-owned
-索引中过滤 Project、Scope kind、chat/topic/Binding/native ID、current 和时间。Sessions 与
+索引中过滤 Project、Scope kind、chat/topic/Binding/native ID、current 和时间。Sessions 页面
+移除 Chat/Topic/Binding/Thread ID 输入框，列表仍展示 ID，API 保留精确 ID 查询。Project、
+Scope、会话状态和当前指针均多选：同一项取“或”，不同项取“且”。Project 是可搜索下拉，
+通过独立分页 options 查询包含已停用的全部未删除 Project，不读取 native archived aggregate；
+Scope 为单聊/群聊/话题，current 为当前/非当前，两者及 Project 默认全部。重复值和选择
+顺序归一化后进入 cursor fingerprint，改变筛选时回到第一页。
+Sessions 与
 Side Topics 的创建时间筛选复用同一个范围组件：收起态显示当前范围，展开后提供本地
 时区的快捷范围与 `datetime-local` 自定义起止分钟，只有“完成”提交字段草稿，页面“筛选”
 才请求服务端。自定义结束分钟对用户包含，并转换为下一分钟的排他上界。`createdFrom` 与
 `createdBefore` API 只接受带时区的 ISO-8601，先规范化为固定微秒的 UTC `+00:00`，再要求
 `createdFrom < createdBefore` 并进入 cursor fingerprint 与 SQLite 的 `[from, before)` 比较。
-Sessions 把原来的 materialized/native 两个条件合并成一个清单状态：`Active`（默认）、`Lazy`、
-`Archived`、`Missing`、`全部`；current 仍是独立条件。`Active` 只读取公开
-`thread_list(archived=False)` 完整目录，`Archived` 只读取
-`thread_list(archived=True)` 完整目录，`Lazy` 不访问原生目录，`Missing` 才读取并对比两个
-完整目录，`全部`只为当前 Binding 页从两个目录查找 title/preview。原生读取均保留
+会话状态为 `Active`、`Lazy`、`Archived`、`Missing`，默认同时选择 `Active` + `Lazy`；
+重置恢复这些默认条件、全部创建时间和每页 20 条。只选 `Lazy` 不访问原生目录；包含
+`Active` 或 `Archived` 时读取对应公开 `thread_list` 完整目录，包含 `Missing` 时必须
+读取并对比两个完整目录。选全部状态时只为当前 Binding 页从两个目录查找 title/preview。
+多个状态合并后去重并分页，current 始终是独立条件。原生读取均保留
 deadline/页数/条目上限，Sessions 的请求预算为 10 秒，失败时整次失败；Project archived
 aggregate 仍需要归档完整目录。Sessions 每页只接受 10/20/50/100，默认 20；浏览器用 cursor
 栈提供前后翻页，不计算总数或支持随机页码。Runtime snapshot primitive 仍只接受最多 50 个
@@ -863,8 +874,21 @@ identity 或 Side route identity 等 typed precondition；提交后在锁内重�
 会话/Scope/short ID 和永久级联后果，确认后 POST 才复用 ADR 0037/0049 的 delete primitive。
 它不绑定 pointer、Runtime activity 或 active/archived 状态，不先切换、恢复或 Stop；Lazy
 继续使用既有 `delete-lazy` 二次确认，Missing、Side 和批量路径不获得 materialized delete
-action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact、Side resume 或批量
-native mutation route。
+action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact、Side resume 或
+任意筛选结果的批量 native mutation route。
+
+Project 删除是 ADR 0060 的独立 action：二次确认展示 alias、完整关联 Sessions/Side 数量、
+永久删除原生历史和保留 cwd 的后果，一次性 grant 固定 Project revision 与 exact 清单
+fingerprint。短 Store transaction 校验清单并停用 Project；进程内 intent 阻止新 Binding、
+新 Side、重复删除与重新启用，不持有 Project execution lock。清单最多 1000 个 Binding
+和 1000 条 Side route，超限拒绝；操作总预算 120 秒，每个对象最多 30 秒。
+Application service 先完成 Side close/创建交接，再逐个进入既有 exact Binding delete；
+Missing 也必须经共享原生删除/四视图对账证明，不能凭缺失投影删除本地行。部分失败、
+超时、结果未知或取消保留停用 Project 与剩余项，已删对象不回滚、不自动续跑。仅当所有
+Binding 和清单中的非终态 Side 均已移除、Runtime Side 交接完成，才提交 Project 墓碑。
+清单也包括 Runtime 仍持有的 orphan Side，其 Project 归属不依赖 Parent Binding 仍存在。
+仍为 `creating` 的 Side 可能正在发布飞书 root/seed，本次操作报告创建未完成，保留停用
+Project，不能提前把 route 标成终态；发布/补偿完成后的清理必须重新预览并确认。
 
 `/settings` 和零参数 `/new` 使用 Card 2.0。Settings 是可扩展的分区界面，当前只
 显示已实现的 Projects 分区；分区由版本化回调选择，不保存当前分区或卡片 session。
@@ -1103,6 +1127,8 @@ interrupt cleanup、CLI resume 与 Linux compatibility；高层 surface 出现�
   页面只能刷新对账；若 native lifecycle 结果未知，只保留目标 Binding-local
   `lifecycle-unknown`，不扩大为全局 admission 关闭。结构化日志不含 credential、cookie/token、cwd、
   name/preview 或 request body。
+- Project 删除部分失败、超时或取消后保留停用 Project，展示已完成与剩余项，不恢复已删
+  会话，也不在重启后自动续删；原生结果未知继续限制在 exact Binding/Side 边界。
 - 没有 durable prompt/final-delivery queue；崩溃后原生历史仍在，但飞书最终回复
   可能丢失。
 - CLI 新增消息不回填飞书；飞书 Thread 必须能在 CLI 原生 resume。

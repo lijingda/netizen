@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-21
 amends: 0017, 0021, 0028
-amended_by: 0037, 0049, 0054, 0057
+amended_by: 0037, 0049, 0054, 0057, 0060
 related: 0016, 0019
 ---
 
@@ -14,6 +14,9 @@ related: 0016, 0019
 > 进一步允许单一实例管理员经二次确认删除 exact active 或 archived materialized 会话。
 > [ADR 0057](0057-run-manual-admin-upgrades-through-the-shared-installer.md) 增加 Updates 页，
 > 仅为显式手动部署允许同用户一次性安装进程；不增加长期 Web 服务或第二个 Runtime。
+> [ADR 0060](0060-delete-projects-with-exact-session-inventory.md) 增加经完整清单确认的
+> Project 及关联 Sessions 删除，修订下文 Project 删除禁令；其逐对象失败边界不变，
+> 不开放任意筛选结果的批量 native mutation。当前筛选交互见设计文档。
 
 ## 背景
 

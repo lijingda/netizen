@@ -17,6 +17,8 @@ their cited ADRs before changing that boundary.
   ADRs' exact identity, context, display, and file-evidence contracts.
 - SQLite, configuration, service environment, and Admin Web:
   [data and configuration](docs/design.md#数据与配置).
+  Project deletion uses the exact inventory, tombstone and lifecycle boundaries
+  in [ADR 0060](docs/adr/0060-delete-projects-with-exact-session-inventory.md).
 - Installation, release, permissions, and platform service management:
   [deployment](docs/deployment.md). Read its Agent relay procedure before
   installation or permission repair, and its relevant acceptance gates before

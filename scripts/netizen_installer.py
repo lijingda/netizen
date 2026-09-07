@@ -45,7 +45,7 @@ from scripts.install_user_guide_skill import (  # noqa: E402
     remove_user_guide_skill,
 )
 from netizen.bindings import (  # noqa: E402
-    migrate_channel_database_v6_to_v7,
+    migrate_channel_database,
 )
 from netizen.deployment.update_protocol import (  # noqa: E402
     ENV_ARCHIVE_SHA256,
@@ -1973,12 +1973,11 @@ def activate_release(
                     _set_release_link(layout.current, release.root, layout)
                     if (
                         _has_sqlite_database_header(channel_database)
-                        and migrate_channel_database_v6_to_v7(channel_database)
+                        and migrate_channel_database(channel_database)
                     ):
                         info(
-                            "migrated Channel database from schema v6 to v7 "
-                            "with task feedback disabled for existing Bindings "
-                            "and Side Topic tombstones preserved"
+                            "migrated Channel database to schema v8 "
+                            "with existing metadata and Side Topic tombstones preserved"
                         )
             else:
                 if should_start:

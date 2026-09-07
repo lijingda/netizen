@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
+from netizen.bindings import migrate_channel_database_v6_to_v7
 from netizen.deployment import launchd, service_backend, systemd
 from scripts import netizen_installer as installer
 
@@ -2270,123 +2271,138 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             self.assertTrue(any(call[0] == "journalctl" for call in calls))
 
-    def test_stopped_upgrade_migrates_v6_database_without_losing_side_routes(
+    def test_stopped_upgrade_migrates_v6_or_v7_without_losing_side_routes(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            layout = self._layout(root)
-            installer.prepare_directories(layout)
-            old = self._release(layout, "1" * 64)
-            candidate = self._release(layout, "2" * 64)
-            installer._set_release_link(layout.current, old.root, layout)
-            database = layout.state_dir / "channel.sqlite3"
-            _write_v6_channel_database(database)
-            backend = _stopped_backend()
+        for version in (6, 7):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                layout = self._layout(root)
+                installer.prepare_directories(layout)
+                old = self._release(layout, "1" * 64)
+                candidate = self._release(layout, "2" * 64)
+                installer._set_release_link(layout.current, old.root, layout)
+                database = layout.state_dir / "channel.sqlite3"
+                _write_v6_channel_database(database)
+                if version == 7:
+                    migrate_channel_database_v6_to_v7(database)
+                backend = _stopped_backend()
 
-            with patch.object(
-                installer,
-                "_service_backend",
-                return_value=backend,
-            ):
-                installer.activate_release(
-                    candidate,
-                    layout,
-                    interactive=False,
-                    data_dir=layout.state_dir,
-                )
-
-            connection = sqlite3.connect(database)
-            try:
-                self.assertEqual(
-                    connection.execute(
-                        "SELECT version FROM schema_version"
-                    ).fetchone()[0],
-                    7,
-                )
-                self.assertEqual(
-                    connection.execute(
-                        """
-                        SELECT message_context_mode,
-                               context_anchor_message_id,
-                               context_anchor_create_time_ms,
-                               context_revision,
-                               task_reactions_enabled,
-                               progress_card_enabled,
-                               feedback_revision
-                        FROM bindings
-                        """
-                    ).fetchall(),
-                    [("current-only", None, None, 1, 0, 0, 1)],
-                )
-                self.assertEqual(
-                    connection.execute(
-                        "SELECT side_id, state FROM side_topics"
-                    ).fetchall(),
-                    [("side-legacy", "closed")],
-                )
-            finally:
-                connection.close()
-            self.assertEqual(
-                installer._read_release_link(layout.current, layout),
-                candidate.root.resolve(),
-            )
-            backend.start_and_wait.assert_not_called()
-
-    def test_failed_publish_rolls_back_v6_database_migration(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            layout = self._layout(root)
-            installer.prepare_directories(layout)
-            old = self._release(layout, "3" * 64)
-            candidate = self._release(layout, "4" * 64)
-            installer._set_release_link(layout.current, old.root, layout)
-            database = layout.state_dir / "channel.sqlite3"
-            _write_v6_channel_database(database)
-            before = database.read_bytes()
-            backend = _stopped_backend()
-            backend.publish_definition.side_effect = installer.InstallError(
-                "publish failed"
-            )
-
-            with (
-                patch.object(
+                with patch.object(
                     installer,
                     "_service_backend",
                     return_value=backend,
-                ),
-                self.assertRaisesRegex(installer.InstallError, "rolled back"),
-            ):
-                installer.activate_release(
-                    candidate,
-                    layout,
-                    interactive=False,
-                    data_dir=layout.state_dir,
+                ):
+                    installer.activate_release(
+                        candidate,
+                        layout,
+                        interactive=False,
+                        data_dir=layout.state_dir,
+                    )
+
+                connection = sqlite3.connect(database)
+                try:
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT version FROM schema_version"
+                        ).fetchone()[0],
+                        8,
+                    )
+                    self.assertEqual(
+                        connection.execute(
+                            """
+                            SELECT message_context_mode,
+                                   context_anchor_message_id,
+                                   context_anchor_create_time_ms,
+                                   context_revision,
+                                   task_reactions_enabled,
+                                   progress_card_enabled,
+                                   feedback_revision
+                            FROM bindings
+                            """
+                        ).fetchall(),
+                        [("current-only", None, None, 1, 0, 0, 1)],
+                    )
+                    self.assertEqual(
+                        connection.execute("SELECT deleted FROM projects").fetchall(),
+                        [(0,)],
+                    )
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT side_id, state FROM side_topics"
+                        ).fetchall(),
+                        [("side-legacy", "closed")],
+                    )
+                finally:
+                    connection.close()
+                self.assertEqual(
+                    installer._read_release_link(layout.current, layout),
+                    candidate.root.resolve(),
+                )
+                backend.start_and_wait.assert_not_called()
+
+    def test_failed_publish_rolls_back_v6_or_v7_database_migration(self) -> None:
+        for version in (6, 7):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                layout = self._layout(root)
+                installer.prepare_directories(layout)
+                old = self._release(layout, "3" * 64)
+                candidate = self._release(layout, "4" * 64)
+                installer._set_release_link(layout.current, old.root, layout)
+                database = layout.state_dir / "channel.sqlite3"
+                _write_v6_channel_database(database)
+                if version == 7:
+                    migrate_channel_database_v6_to_v7(database)
+                before = database.read_bytes()
+                backend = _stopped_backend()
+                backend.publish_definition.side_effect = installer.InstallError(
+                    "publish failed"
                 )
 
-            self.assertEqual(database.read_bytes(), before)
-            connection = sqlite3.connect(database)
-            try:
+                with (
+                    patch.object(
+                        installer,
+                        "_service_backend",
+                        return_value=backend,
+                    ),
+                    self.assertRaisesRegex(installer.InstallError, "rolled back"),
+                ):
+                    installer.activate_release(
+                        candidate,
+                        layout,
+                        interactive=False,
+                        data_dir=layout.state_dir,
+                    )
+
+                self.assertEqual(database.read_bytes(), before)
+                connection = sqlite3.connect(database)
+                try:
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT version FROM schema_version"
+                        ).fetchone()[0],
+                        version,
+                    )
+                    columns = {
+                        row[1]
+                        for row in connection.execute(
+                            "PRAGMA table_info(bindings)"
+                        ).fetchall()
+                    }
+                    self.assertIn("message_context_mode", columns)
+                    self.assertEqual("task_reactions_enabled" in columns, version == 7)
+                    project_columns = {
+                        row[1]
+                        for row in connection.execute("PRAGMA table_info(projects)")
+                    }
+                    self.assertNotIn("deleted", project_columns)
+                finally:
+                    connection.close()
                 self.assertEqual(
-                    connection.execute(
-                        "SELECT version FROM schema_version"
-                    ).fetchone()[0],
-                    6,
+                    installer._read_release_link(layout.current, layout),
+                    old.root.resolve(),
                 )
-                columns = {
-                    row[1]
-                    for row in connection.execute(
-                        "PRAGMA table_info(bindings)"
-                    ).fetchall()
-                }
-                self.assertIn("message_context_mode", columns)
-                self.assertNotIn("task_reactions_enabled", columns)
-            finally:
-                connection.close()
-            self.assertEqual(
-                installer._read_release_link(layout.current, layout),
-                old.root.resolve(),
-            )
 
     def test_failed_skill_rollback_preserves_a_recovery_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
