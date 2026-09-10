@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import tempfile
 import tomllib
 import unittest
@@ -12,6 +11,7 @@ from scripts.verify_installed_release import (
     InstalledReleaseMismatch,
     verify_installed_release,
 )
+from tests.documentation_links import local_link_errors
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,7 +90,7 @@ class DeploymentAssetsTest(unittest.TestCase):
                     runtime_prefix=runtime_prefix,
                 )
 
-    def test_local_markdown_links_resolve(self) -> None:
+    def test_local_documentation_links_and_anchors_resolve(self) -> None:
         documents = [
             ROOT / "README.md",
             ROOT / "AGENTS.md",
@@ -99,16 +99,7 @@ class DeploymentAssetsTest(unittest.TestCase):
             *sorted((ROOT / "skills").rglob("*.md")),
         ]
 
-        for document in documents:
-            text = document.read_text(encoding="utf-8")
-            for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", text):
-                if "://" in target or target.startswith(("#", "mailto:")):
-                    continue
-                path = target.split("#", 1)[0]
-                if not path:
-                    continue
-                with self.subTest(document=document.relative_to(ROOT), target=target):
-                    self.assertTrue((document.parent / path).resolve().exists())
+        self.assertEqual(local_link_errors(ROOT, documents), [])
 
     def test_unit_template_is_for_one_per_user_python_service(self) -> None:
         unit = (ROOT / "deploy/netizen.service").read_text(encoding="utf-8")

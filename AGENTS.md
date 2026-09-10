@@ -6,8 +6,12 @@ their cited ADRs before changing that boundary.
 
 ## Task navigation
 
-- Product and commands: [README.md](README.md). Domain vocabulary:
-  [CONTEXT.md](CONTEXT.md).
+- Product introduction and first use: [README.md](README.md). Complete commands
+  and user-visible behavior: [user guide](skills/netizen-user-guide/references/user-guide.md).
+  Local development and contribution: [CONTRIBUTING.md](docs/CONTRIBUTING.md).
+  For a system overview, see [engineering overview](docs/design.md#工程概览);
+  domain vocabulary is in [CONTEXT.md](CONTEXT.md). The task-specific contracts
+  and ADRs below remain the direct entry points for related changes.
 - Runtime, Scope/Binding identity, concurrency, Goal/Side lifecycle, and SDK
   adapters: [runtime semantics](docs/design.md#运行与锁) and
   [failure semantics](docs/design.md#失败语义).

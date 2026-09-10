@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80" role="img" aria-labelledby="title desc">
+  <title id="title">Netizen</title>
+  <desc id="desc">蓝色对话框中的终端符号，代表从聊天连接到 Codex。</desc>
+  <rect width="80" height="80" rx="22" fill="#2458e6"/>
+  <path d="M20 22h40v29H37L26 61V51h-6z" fill="none" stroke="#fff" stroke-width="3.5" stroke-linejoin="round"/>
+  <path d="m29 31 7 6-7 6m14 0h8" fill="none" stroke="#fff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

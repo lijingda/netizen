@@ -18,6 +18,7 @@ from scripts.install_user_guide_skill import (
     install_user_guide_skill,
     remove_user_guide_skill,
 )
+from tests.documentation_links import local_link_errors
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -305,6 +306,16 @@ class UserGuideSkillInstallTest(unittest.TestCase):
 
 
 class UserGuideSkillContentTest(unittest.TestCase):
+    def test_installed_guide_navigation_is_self_contained(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            installed = install_user_guide_skill(
+                source_skill=RELEASE_SKILL,
+                codex_home=Path(directory) / "codex-home",
+            )
+            skill = Path(installed.target)
+
+            self.assertEqual(local_link_errors(skill, skill.rglob("*.md")), [])
+
     def test_skill_has_discovery_metadata_and_no_scaffold_placeholders(self) -> None:
         skill = (RELEASE_SKILL / "SKILL.md").read_text(encoding="utf-8")
         guide = (RELEASE_SKILL / "references" / "user-guide.md").read_text(
