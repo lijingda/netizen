@@ -9070,7 +9070,9 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             binding.turn_settings,
             BindingTurnSettings("future-model", "ultra", "priority-v2"),
         )
-        self.assertEqual(binding.task_feedback, BindingTaskFeedback())
+        self.assertEqual(
+            binding.task_feedback, BindingTaskFeedback(progress_card_enabled=True)
+        )
         self.assertEqual(self.runtime.submit_calls, [])
         rendered = str(self.channel.updates[-1][1])
         self.assertIn("Project 选择成功", rendered)
@@ -9261,6 +9263,23 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         binding = self.store.active_binding(scope.key)
         self.assertIsNotNone(binding)
         self.assertIsNone(binding.turn_settings)
+        self.assertEqual(
+            binding.task_feedback, BindingTaskFeedback(progress_card_enabled=True)
+        )
+
+    async def test_new_can_explicitly_disable_progress_card(self) -> None:
+        await self.app.handle_message(FakeMessage("/new", message_id="om_picker"))
+        values = self.new_form_values(self.channel.replies[-1][1])
+        self.assertEqual(values["new_progress_card"], "task-feedback:v2:on")
+        values["new_progress_card"] = "task-feedback:v2:off"
+
+        await self.app.handle_card_action(self.direct_card_event(values))
+
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.assertEqual(binding.task_feedback, BindingTaskFeedback())
+        self.assertIsNone(binding.native_thread_id)
+        self.assertEqual(self.runtime.submit_calls, [])
 
     async def test_new_form_creates_lazy_configured_binding_in_exact_topic(self) -> None:
         await self.app.handle_message(

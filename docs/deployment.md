@@ -1218,8 +1218,8 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    `/plan`、`/apps`；`/copy`、`/vim`、`/theme`、`/exit` 也不展示。
    另发送 `/new test`、`/new demo`、带引号和坏引号的 `/new ...`，都必须得到同一迁移提示、
    零 Binding mutation；`//new test` 仍作为字面 prompt。
-2. 通过 `/new` 卡片选择 `test` Project、inherit Codex，并保持 Reaction Pulse 与 Progress
-   Card 默认关闭后发送首条 prompt：native accepted 后原消息常驻 `Typing`，但整轮零
+2. 通过 `/new` 卡片选择 `test` Project、inherit Codex，保持 Reaction Pulse 关闭并手动关闭
+   Progress Card 后发送首条 prompt：native accepted 后原消息常驻 `Typing`，但整轮零
    `THINKING`、零进度卡和零心跳回复；成功 steer 的消息添加 `OnIt`，原任务锚点不迁移。
    终态先添加 completed/failed/interrupted 对应的 `DONE`/`ERROR`/`CrossMark`，再移除
    `Typing`。无文件终态仍是富文本/静态文本，有文件终态仍只有现有“最终回复 +
@@ -1261,8 +1261,9 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    disabled 项不出现。P2P 表单不显示
    @ 时读取的消息范围；群主线和普通群话题显示“仅这条 @ 消息（默认）”与“自动带上期间
    的群聊讨论”，下拉框下方有灰色说明。两个 Task Feedback 控件在所有普通 Scope 都显示
-   且默认关闭。选择 inherit Codex 时不保存 Model/Effort/Speed override；选择实际 Model
-   时三项必须与本机 `models` phase 一致并全部保存。模型目录不可用时仍显示可提交的
+   且 Reaction Pulse 默认关闭、Progress Card 默认开启。选择 inherit Codex 时不保存
+   Model/Effort/Speed override；选择实际 Model 时三项必须与本机 `models` phase 一致并
+   全部保存。模型目录不可用时仍显示可提交的
    Project + inherit + Task Feedback 表单。成功卡片显示 Project、会话短 ID、Model 来源、
    两项 Task Feedback 与 @ 时读取的消息范围；即使原卡更新失败，同一 Scope 也应收到等价
    兜底回复。再用足够大的 Registry 触发真实平台容量错误，必须明确说明没有截断、分页或
@@ -1410,7 +1411,7 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     对 root 与 seed 各重放一次相同 UUID，必须返回原消息的 exact message/chat/root/thread
     identity，且只产生一个话题；不同 root/seed UUID 必须互异。这个对账门禁失败时 Side
     必须保持 unavailable，因为 FakeChannel 只能证明本地复用了 UUID，不能证明飞书的响应
-    形状。创建一个默认关闭两项反馈的 Side，确认无文件终态为富文本/静态文本，
+    形状。在 Parent 关闭两项反馈后创建 Side，确认无文件终态为富文本/静态文本，
     accepted/steer/终态 Lifecycle Reaction 与 ordinary Turn 相同，且零 `THINKING`/plan
     observation；再创建同时开启两项的 Side，确认 Reaction Pulse 与 ordinary Turn
     相同，Activity/Result/Files 始终更新同一个回复卡 message ID。随后修改 Parent 的

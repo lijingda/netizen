@@ -19,7 +19,7 @@ Netizen 把飞书单聊、群聊主线和话题接入原生 Codex。飞书负责
 Project，先通过 `/settings` 登记已有工作目录或创建项目并启用，再开始下面的步骤。
 
 1. 发送 exact `/new`，在卡片的单个下拉框中选择 Project，并选择继承 Codex 或显式
-   Model、Effort 和 Speed；还可按需开启 Reaction Pulse 和 Progress Card，两项默认关闭。
+   Model、Effort 和 Speed；Progress Card 默认开启，Reaction Pulse 默认关闭，可分别调整。
    群聊和群话题还可选择 @ 时读取的消息范围。`/new` 不接受参数。
 2. 直接发送任务描述。第一次真实任务才会创建原生 Codex Thread；单独 `/new` 不会产生空白 Turn。
 3. 普通 Turn 运行时继续发送普通消息，会 steer 当前精确 Turn，不会排队成下一轮；
@@ -109,8 +109,9 @@ Side 仅接受其[命令白名单](#side-临时话题)，不能把上表所有�
 ### 飞书中的运行反馈
 
 - 每个普通会话有两个独立的任务反馈选项，可在 `/new` 创建时或空闲时通过 `/config`
-  修改；Reaction Pulse 与 Progress Card 默认都关闭。两项都关闭时仍会显示稀疏的生命周期
-  表情，但没有 `THINKING` 闪烁或进度卡，最终结果仍会正常回复。
+  修改；新建时 Progress Card 默认开启，Reaction Pulse 默认关闭，已有会话保留原设置。
+  两项都关闭时仍会显示稀疏的生命周期表情，但没有 `THINKING` 闪烁或进度卡，最终结果
+  仍会正常回复。
 - 普通或 Side Turn 在 accepted 后始终在原任务消息上尽力使用 `Typing`；steer 成功后在
   steer 消息上使用 `OnIt`，原任务消息仍是运行状态锚点。完成、失败或中断时先使用
   相应终态表情，再清理运行态表情。`OnIt` 失败时，已成功的 steer 会回退文字确认。
@@ -229,7 +230,7 @@ Side 仅接受其[命令白名单](#side-临时话题)，不能把上表所有�
 
 - `/new`：打开唯一的新建卡片。Project 下拉框展示全部 enabled Projects，不由 Netizen
   截断或分页；Model 可继承 Codex，也可显式选择 Model、Effort 和 Speed。Reaction Pulse
-  与 Progress Card 可独立选择且默认关闭；群聊和群话题还可选择 @ 时读取的消息范围。
+  默认关闭，Progress Card 默认开启，可独立选择；群聊和群话题还可选择 @ 时读取的消息范围。
   同 Scope 当前或最近使用且仍 enabled 的 Project 可能被预选；没有历史偏好时需要明确
   选择。提交后创建并切换 Lazy 会话；没有 enabled Project 时会引导先打开 `/settings`。
 - 任何带参数的 `/new ...` 快捷创建都已下线；请在卡片中选择。
@@ -344,7 +345,7 @@ Projects 页可“删除 Project 及关联 Sessions”。确认范围包含该�
 ## Model、Effort、Speed、Task Feedback 与 @ 时读取的消息范围
 
 - `/new` 卡片可以为新会话选择继承 Codex 或显式 Model、Effort 和 Speed；群聊和群话题
-  还可选择 @ 时读取的消息范围；Reaction Pulse 与 Progress Card 默认关闭、可独立开启。
+  还可选择 @ 时读取的消息范围；Reaction Pulse 默认关闭，Progress Card 默认开启，可独立调整。
 - `/config` 原子修改当前会话后续新 Turn 的三项设置、两个 Task Feedback，以及群聊 @ 时
   读取的消息范围。它不创建 Turn，也不能直接配置另一个会话；应先 `/resume`。
 - 当前 Turn 运行、停止中或正在压缩时不能修改配置。运行时的普通消息仍只会 steer 当前 Turn。
@@ -545,8 +546,9 @@ Goal、停止或压缩状态会直接拒绝普通消息。等待状态回到空�
 
 ### “为什么没有执行中表情闪烁或进度卡？”
 
-Reaction Pulse 和 Progress Card 默认都关闭。请在新建会话的 `/new` 卡片中开启，或等
-当前会话空闲后通过 `/config` 修改；两项互不依赖。即使 Reaction Pulse 关闭，任务
+新建会话的 Progress Card 默认开启，Reaction Pulse 默认关闭；已有会话保留原设置。
+可在 `/new` 卡片中选择，或等当前会话空闲后通过 `/config` 修改；两项互不依赖。
+即使 Reaction Pulse 关闭，任务
 accepted、成功 steer 和终态仍会尽力显示生命周期表情。Progress Card 关闭并不影响普通 Turn 的
 最终回复：没有文件时仍回复富文本/静态文本，有文件时仍使用完成卡。Goal 始终有一张状态
 与控制卡，关闭该选项只会隐藏 Activity 过程模块。Side 使用创建瞬间冻结的 Parent 选项；
