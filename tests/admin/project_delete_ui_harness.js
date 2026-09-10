@@ -20,7 +20,7 @@ const projectFixture = () => ({
 });
 const preview = {
   project: { alias: "example", cwd: "/workspace/example", revision: 7 },
-  sessionCount: 3, lazySessionCount: 1, materializedSessionCount: 2, sideCount: 2,
+  sessionCount: 3, lazySessionCount: 1, materializedSessionCount: 2, sideCount: 2, scheduledPlanCount: 2, scheduledRunCount: 1,
   actions: { delete: deleteEnvelope },
 };
 let projects = [projectFixture()];
@@ -62,6 +62,8 @@ const deletionButton = () => document.querySelector("#projects-body").querySelec
   assert(confirmations[0].includes("关联 Sessions：3（Lazy 1，已创建 Thread 2）"));
   assert.match(confirmations[0], /所有归档会话.*不受 Sessions 页面筛选影响/);
   assert.match(confirmations[0], /关联 Side：2/);
+  assert.match(confirmations[0], /关联定时计划：2.*未决的定时执行：1/);
+  assert.match(confirmations[0], /会话清理失败也不会恢复计划/);
   assert.match(confirmations[0], /派生子会话.*永久删除.*无法恢复/);
   assert.match(confirmations[0], /磁盘代码目录保留：\/workspace\/example/);
   const previewRequest = requests.find((request) => request.path.endsWith("delete-preview"));

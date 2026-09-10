@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -20,6 +22,7 @@ from netizen.bindings import (
     BindingQueryTimeout,
     BindingSettingsRevisionConflict,
     BindingStore,
+    validate_channel_database,
     BindingTaskFeedback,
     BindingTurnSettings,
     ProjectConflict,
@@ -35,8 +38,6 @@ from netizen.bindings import (
     _binding_inventory_statement,
     _side_inventory_statement,
     _Transaction,
-    migrate_channel_database_v6_to_v7,
-    migrate_channel_database_v7_to_v8,
 )
 from netizen.domain import (
     FeishuScope,
@@ -788,7 +789,7 @@ class BindingStoreTest(unittest.TestCase):
             finally:
                 second.close()
 
-    def test_schema_contains_only_binding_scoped_configuration_intent(
+    def test_schema_preserves_native_history_boundary_with_schedule_metadata(
         self,
     ) -> None:
         connection = self.store._connection  # Architecture contract.
@@ -813,6 +814,9 @@ class BindingStoreTest(unittest.TestCase):
                 "projects",
                 "dedup_keys",
                 "side_topics",
+                "schedule_plans",
+                "schedule_runs",
+                "schedule_requests",
             },
         )
         self.assertTrue(
@@ -828,6 +832,21 @@ class BindingStoreTest(unittest.TestCase):
                 "effective_service_tier",
             }.isdisjoint(columns)
         )
+        for column, owning_table in (
+            ("instructions", "schedule_plans"),
+            ("initial_turn_id", "schedule_runs"),
+        ):
+            self.assertEqual(
+                {
+                    table
+                    for table in tables
+                    if column in {
+                        row[1]
+                        for row in connection.execute(f"PRAGMA table_info({table})")
+                    }
+                },
+                {owning_table},
+            )
         self.assertTrue(
             {
                 "model_id",
@@ -884,39 +903,132 @@ class BindingStoreTest(unittest.TestCase):
                 expected_revision=project.revision,
             )
 
-    def test_obsolete_schema_is_rejected_instead_of_migrated(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            path = Path(raw) / "channel.sqlite3"
-            connection = sqlite3.connect(path)
-            connection.executescript(
-                """
-                CREATE TABLE schema_version (version INTEGER NOT NULL);
-                INSERT INTO schema_version(version) VALUES (3);
-                """
-            )
-            connection.close()
-
-            with self.assertRaisesRegex(RuntimeError, "recreate"):
-                BindingStore(path)
-
-            connection = sqlite3.connect(path)
-            try:
-                version = connection.execute(
-                    "SELECT version FROM schema_version"
-                ).fetchone()[0]
-                self.assertEqual(version, 3)
-                tables = {
-                    row[0]
-                    for row in connection.execute(
-                        "SELECT name FROM sqlite_master WHERE type = 'table'"
-                    ).fetchall()
-                }
-                self.assertEqual(tables, {"schema_version"})
-            finally:
-                connection.close()
-
 
 class BindingStoreManagementSchemaTest(unittest.TestCase):
+    def test_unsupported_database_versions_are_rejected_without_changes(self) -> None:
+        for version in (3, 6, 7, 8, 9, 11):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as raw:
+                path = Path(raw) / "channel.sqlite3"
+                with sqlite3.connect(path) as connection:
+                    connection.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+                    connection.execute("INSERT INTO schema_version VALUES (?)", (version,))
+                    connection.execute("CREATE TABLE retained (value TEXT)")
+                    connection.execute("INSERT INTO retained VALUES ('keep this data')")
+                before = path.read_bytes()
+                for opener in (validate_channel_database, BindingStore):
+                    with self.subTest(opener=opener.__name__), self.assertRaisesRegex(RuntimeError, "unsupported.*schema version"):
+                        opener(path)
+                    self.assertEqual(path.read_bytes(), before)
+                    self.assertFalse(Path(str(path) + "-wal").exists())
+                    self.assertFalse(Path(str(path) + "-shm").exists())
+
+    def test_nonempty_database_without_version_is_rejected_without_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "channel.sqlite3"
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE retained (value TEXT)")
+                connection.execute("INSERT INTO retained VALUES ('keep this data')")
+            before = path.read_bytes()
+            for opener in (validate_channel_database, BindingStore):
+                with self.assertRaises(RuntimeError):
+                    opener(path)
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_old_schema_with_hot_wal_is_rejected_without_checkpointing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "channel.sqlite3"
+            subprocess.run(
+                [sys.executable, "-c", """
+import os
+import sys
+from netizen.bindings import BindingStore
+store = BindingStore(sys.argv[1])
+store._connection.execute("PRAGMA wal_autocheckpoint = 0")
+store.register_project(alias="retained", cwd="/tmp/retained")
+store._connection.execute("UPDATE schema_version SET version = 9")
+os._exit(0)
+""", str(path)],
+                check=True, capture_output=True, timeout=10,
+            )
+            wal = Path(str(path) + "-wal")
+            before, before_wal = path.read_bytes(), wal.read_bytes()
+            self.assertTrue(before_wal)
+            for opener in (validate_channel_database, BindingStore):
+                with self.subTest(opener=opener.__name__), self.assertRaisesRegex(RuntimeError, "unsupported.*schema version"):
+                    opener(path)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(wal.read_bytes(), before_wal)
+
+    def test_current_schema_with_hot_wal_reopens_committed_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "channel.sqlite3"
+            subprocess.run(
+                [sys.executable, "-c", """
+import os
+import sys
+from netizen.bindings import BindingStore
+store = BindingStore(sys.argv[1])
+store._connection.execute("PRAGMA wal_autocheckpoint = 0")
+store.register_project(alias="retained", cwd="/tmp/retained")
+os._exit(0)
+""", str(path)],
+                check=True, capture_output=True, timeout=10,
+            )
+            self.assertTrue(Path(str(path) + "-wal").is_file())
+            store = BindingStore(path)
+            try:
+                self.assertEqual(store.get_project("retained").cwd, "/tmp/retained")
+            finally:
+                store.close()
+
+    def test_empty_file_or_empty_sqlite_database_can_be_initialized(self) -> None:
+        for sqlite_header in (False, True):
+            with self.subTest(sqlite_header=sqlite_header), tempfile.TemporaryDirectory() as raw:
+                path = Path(raw) / "channel.sqlite3"
+                path.touch()
+                if sqlite_header:
+                    with sqlite3.connect(path) as connection:
+                        connection.execute("VACUUM")
+                    self.assertGreater(path.stat().st_size, 0)
+                store = BindingStore(path)
+                store.close()
+                validate_channel_database(path)
+
+    def test_current_database_missing_activation_column_is_rejected_without_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "channel.sqlite3"
+            BindingStore(path).close()
+            with sqlite3.connect(path) as connection:
+                connection.execute("DROP TRIGGER scopes_activate_binding")
+                connection.execute("ALTER TABLE bindings DROP COLUMN ever_activated")
+            before = path.read_bytes()
+            for opener in (validate_channel_database, BindingStore):
+                with self.subTest(opener=opener.__name__), self.assertRaisesRegex(RuntimeError, "missing Binding columns: ever_activated"):
+                    opener(path)
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_current_database_read_only_validation_preserves_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "channel.sqlite3"
+            store = BindingStore(path)
+            project = store.register_project(alias="p", cwd="/tmp/project")
+            binding = store.create_channel_binding(
+                scope=FeishuScope("app", "chat", ScopeKind.DIRECT),
+                project_alias="p", creator_id="user",
+            )
+            store.close()
+            before = path.read_bytes()
+            validate_channel_database(path)
+            validate_channel_database(path)
+            self.assertEqual(path.read_bytes(), before)
+            restarted = BindingStore(path)
+            try:
+                self.assertEqual(restarted.get_project("p"), project)
+                self.assertEqual(restarted.get(binding.id), binding)
+            finally:
+                restarted.close()
+
+
     def test_atomic_create_variants_enforce_project_and_scope_facts(self) -> None:
         next_id = 0
 
@@ -1031,133 +1143,6 @@ class BindingStoreManagementSchemaTest(unittest.TestCase):
         finally:
             store.close()
 
-    def test_v6_database_is_rejected_without_mutation(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            path = Path(raw) / "channel.sqlite3"
-            _create_frozen_v6_database(path)
-            before_bytes = path.read_bytes()
-            before = sqlite3.connect(path)
-            try:
-                before_schema = before.execute(
-                    "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
-                ).fetchall()
-                before_rows = before.execute(
-                    "SELECT alias, cwd, enabled, revision FROM projects"
-                ).fetchall()
-            finally:
-                before.close()
-
-            with self.assertRaisesRegex(RuntimeError, "recreate"):
-                BindingStore(path)
-
-            self.assertEqual(path.read_bytes(), before_bytes)
-            self.assertFalse(Path(str(path) + "-wal").exists())
-            self.assertFalse(Path(str(path) + "-shm").exists())
-            after = sqlite3.connect(path)
-            try:
-                self.assertEqual(
-                    after.execute(
-                        "SELECT type, name, sql FROM sqlite_master "
-                        "ORDER BY type, name"
-                    ).fetchall(),
-                    before_schema,
-                )
-                self.assertEqual(
-                    after.execute(
-                        "SELECT alias, cwd, enabled, revision FROM projects"
-                    ).fetchall(),
-                    before_rows,
-                )
-                self.assertEqual(
-                    after.execute("SELECT version FROM schema_version").fetchone()[0],
-                    6,
-                )
-            finally:
-                after.close()
-
-    def test_explicit_v6_to_v7_migration_preserves_rows_and_is_idempotent(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            path = Path(raw) / "channel.sqlite3"
-            _create_migratable_v6_database(path)
-
-            self.assertTrue(migrate_channel_database_v6_to_v7(path))
-            self.assertFalse(migrate_channel_database_v6_to_v7(path))
-
-            connection = sqlite3.connect(path)
-            try:
-                self.assertEqual(
-                    connection.execute(
-                        "SELECT version FROM schema_version"
-                    ).fetchone()[0],
-                    7,
-                )
-                self.assertEqual(
-                    connection.execute(
-                        """
-                        SELECT binding_id, message_context_mode,
-                               context_anchor_message_id,
-                               context_anchor_create_time_ms,
-                               context_revision,
-                               task_reactions_enabled,
-                               progress_card_enabled,
-                               feedback_revision
-                        FROM bindings
-                        """
-                    ).fetchall(),
-                    [
-                        (
-                            "legacy-binding",
-                            "current-only",
-                            None,
-                            None,
-                            4,
-                            0,
-                            0,
-                            1,
-                        )
-                    ],
-                )
-                self.assertEqual(
-                    connection.execute(
-                        "SELECT side_id, state FROM side_topics"
-                    ).fetchall(),
-                    [("legacy-side", "closed")],
-                )
-                with self.assertRaises(sqlite3.IntegrityError):
-                    connection.execute(
-                        "UPDATE bindings SET task_reactions_enabled = 2"
-                    )
-            finally:
-                connection.close()
-
-            self.assertTrue(migrate_channel_database_v7_to_v8(path))
-            migrated = BindingStore(path)
-            try:
-                binding = migrated.get("legacy-binding")
-                self.assertEqual(
-                    binding.message_context_mode,
-                    MentionContextMode.CURRENT_ONLY,
-                )
-                self.assertEqual(binding.settings_revision, 3)
-                self.assertIsNone(binding.context_anchor)
-                self.assertEqual(binding.context_revision, 4)
-                self.assertEqual(binding.task_feedback, BindingTaskFeedback())
-                self.assertEqual(binding.feedback_revision, 1)
-            finally:
-                migrated.close()
-
-    def test_explicit_migration_rejects_partial_v6_without_mutation(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            path = Path(raw) / "channel.sqlite3"
-            _create_frozen_v6_database(path)
-            before = path.read_bytes()
-
-            with self.assertRaisesRegex(RuntimeError, "missing required tables"):
-                migrate_channel_database_v6_to_v7(path)
-
-            self.assertEqual(path.read_bytes(), before)
 
     def test_file_database_uses_bounded_full_wal_writer_and_hot_wal_is_legacy_readable(
         self,
@@ -1761,199 +1746,3 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("side_topics_state_created", side_plan)
         self.assertNotIn("USE TEMP B-TREE", side_plan)
-
-
-def _create_migratable_v6_database(path: Path) -> None:
-    scope = FeishuScope("cli_test", "oc_legacy", ScopeKind.DIRECT)
-    connection = sqlite3.connect(path)
-    try:
-        connection.executescript(
-            """
-            PRAGMA foreign_keys = ON;
-            CREATE TABLE schema_version (version INTEGER NOT NULL);
-            INSERT INTO schema_version(version) VALUES (6);
-            CREATE TABLE scopes (
-                scope_key TEXT PRIMARY KEY,
-                app_id TEXT NOT NULL,
-                chat_id TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                topic_id TEXT,
-                active_binding_id TEXT,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE bindings (
-                binding_id TEXT PRIMARY KEY,
-                scope_key TEXT NOT NULL REFERENCES scopes(scope_key),
-                project_alias TEXT NOT NULL,
-                native_thread_id TEXT UNIQUE,
-                model_id TEXT,
-                effort_id TEXT,
-                service_tier_id TEXT,
-                settings_revision INTEGER NOT NULL DEFAULT 1,
-                message_context_mode TEXT NOT NULL DEFAULT 'current-only',
-                context_anchor_message_id TEXT,
-                context_anchor_create_time_ms INTEGER,
-                context_revision INTEGER NOT NULL DEFAULT 1,
-                creator_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                activated_at TEXT NOT NULL,
-                ever_activated INTEGER NOT NULL DEFAULT 1
-            );
-            CREATE TABLE projects (
-                alias TEXT PRIMARY KEY,
-                cwd TEXT NOT NULL,
-                enabled INTEGER NOT NULL,
-                revision INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE dedup_keys (
-                dedup_key TEXT PRIMARY KEY,
-                expires_at REAL NOT NULL
-            );
-            CREATE TABLE side_topics (
-                side_id TEXT PRIMARY KEY,
-                app_id TEXT NOT NULL,
-                chat_id TEXT NOT NULL,
-                topic_id TEXT,
-                root_message_id TEXT,
-                source_message_id TEXT NOT NULL,
-                parent_binding_id TEXT NOT NULL,
-                creator_id TEXT NOT NULL,
-                requires_mention INTEGER NOT NULL,
-                state TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(app_id, source_message_id)
-            );
-            INSERT INTO projects(
-                alias, cwd, enabled, revision, created_at, updated_at
-            ) VALUES (
-                'legacy', '/tmp/legacy', 1, 1,
-                '2029-01-01T00:00:00+00:00',
-                '2029-01-01T00:00:00+00:00'
-            );
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO scopes(
-                scope_key, app_id, chat_id, kind, topic_id,
-                active_binding_id, updated_at
-            ) VALUES (?, ?, ?, ?, NULL, 'legacy-binding', ?)
-            """,
-            (
-                scope.key,
-                scope.app_id,
-                scope.chat_id,
-                scope.kind.value,
-                "2029-01-01T00:00:00+00:00",
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO bindings(
-                binding_id, scope_key, project_alias, native_thread_id,
-                model_id, effort_id, service_tier_id, settings_revision,
-                message_context_mode, context_anchor_message_id,
-                context_anchor_create_time_ms, context_revision,
-                creator_id, created_at, activated_at, ever_activated
-            ) VALUES (
-                ?, ?, 'legacy', 'thread-legacy', NULL, NULL, NULL, 3,
-                'current-only', NULL, NULL, 4, 'ou_legacy', ?, ?, 1
-            )
-            """,
-            (
-                "legacy-binding",
-                scope.key,
-                "2029-01-01T00:00:00+00:00",
-                "2029-01-01T00:00:00+00:00",
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO side_topics(
-                side_id, app_id, chat_id, topic_id, root_message_id,
-                source_message_id, parent_binding_id, creator_id,
-                requires_mention, state, created_at, updated_at
-            ) VALUES (
-                'legacy-side', 'cli_test', 'oc_legacy', 'omt_side',
-                'om_root', 'om_source', 'legacy-binding', 'ou_legacy',
-                1, 'closed',
-                '2029-01-02T00:00:00+00:00',
-                '2029-01-02T00:00:00+00:00'
-            )
-            """
-        )
-        connection.execute(
-            "INSERT INTO dedup_keys(dedup_key, expires_at) VALUES ('event', 1.0)"
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-
-def _create_frozen_v6_database(path: Path) -> None:
-    scope = FeishuScope("cli_test", "oc_legacy", ScopeKind.DIRECT)
-    connection = sqlite3.connect(path)
-    try:
-        connection.executescript(
-            """
-            CREATE TABLE schema_version (version INTEGER NOT NULL);
-            INSERT INTO schema_version(version) VALUES (6);
-            CREATE TABLE scopes (
-                scope_key TEXT PRIMARY KEY,
-                app_id TEXT NOT NULL,
-                chat_id TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                topic_id TEXT,
-                active_binding_id TEXT,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE bindings (
-                binding_id TEXT PRIMARY KEY,
-                scope_key TEXT NOT NULL REFERENCES scopes(scope_key),
-                project_alias TEXT NOT NULL,
-                native_thread_id TEXT UNIQUE,
-                model_id TEXT,
-                effort_id TEXT,
-                service_tier_id TEXT,
-                settings_revision INTEGER NOT NULL DEFAULT 1,
-                creator_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                activated_at TEXT NOT NULL
-            );
-            CREATE TABLE projects (
-                alias TEXT PRIMARY KEY,
-                cwd TEXT NOT NULL,
-                enabled INTEGER NOT NULL,
-                revision INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            INSERT INTO projects(
-                alias, cwd, enabled, revision, created_at, updated_at
-            ) VALUES (
-                'legacy', '/tmp/legacy', 1, 1,
-                '2029-01-01T00:00:00+00:00', '2029-01-01T00:00:00+00:00'
-            );
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO scopes(
-                scope_key, app_id, chat_id, kind, topic_id,
-                active_binding_id, updated_at
-            ) VALUES (?, ?, ?, ?, NULL, NULL, ?)
-            """,
-            (
-                scope.key,
-                scope.app_id,
-                scope.chat_id,
-                scope.kind.value,
-                "2029-01-01T00:00:00+00:00",
-            ),
-        )
-        connection.commit()
-    finally:
-        connection.close()

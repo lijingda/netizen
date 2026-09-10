@@ -154,6 +154,18 @@ class TurnObservationUnavailable(ThreadLifecycleError):
     pass
 
 
+class ScheduledInitialStartConflict(ThreadLifecycleError):
+    """An initial scheduled submission can no longer start its exact Binding."""
+
+
+class ScheduledTurnReadError(ThreadLifecycleError):
+    """One bounded read could not establish the scheduled exact Turn state."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class ContextAnchorRequired(ThreadLifecycleError):
     pass
 

@@ -30,6 +30,7 @@ from ..domain import (
 )
 from ..model_settings import ModelCatalog, TurnModelSettings
 from ..projects import Project
+from ..session_settings import SessionSettings
 from ..sdk_gap_adapter import GoalSnapshot
 from .callbacks import (
     ACTION_VERSION,
@@ -598,6 +599,96 @@ def _task_feedback_form_elements(
             "完成后执行过程自动折叠。"
         ),
     ]
+
+
+def session_settings_form_elements(
+    *,
+    prefix: str,
+    settings: SessionSettings,
+    catalog: ModelCatalog | None,
+    catalog_error: str | None = None,
+    allow_context_mode: bool,
+) -> list[dict[str, Any]]:
+    """Use ordinary controls while preserving unavailable explicit intent."""
+    usable_catalog = catalog
+    if catalog is not None:
+        try:
+            settings.validate_catalog(catalog)
+        except ValueError:
+            usable_catalog = None
+            catalog_error = "已有 Model / Effort / Speed 暂不可用，当前选择完整保留。"
+    elements: list[dict[str, Any]] = []
+    if usable_catalog is not None:
+        elements.extend(_model_settings_form_elements(
+            prefix=prefix, catalog=usable_catalog, turn_settings=settings.turn_settings,
+            model_value_encoder=_new_model_reference, inherit_initial_when_unset=True,
+        ))
+    else:
+        elements.append(_notice(catalog_error or "模型目录暂不可用；可以保留原配置或明确选择继承 Codex。"))
+        options = [("继承 Codex", _new_model_reference(None))]
+        turn = settings.turn_settings
+        if turn is not None:
+            options.append(("保留已有显式配置", _new_model_reference(turn.model_id)))
+        elements.extend([
+            _form_label("Model"),
+            _static_select(name=f"{prefix}_model", placeholder="选择 Model 来源", options=tuple(options),
+                initial_option=_new_model_reference(turn.model_id if turn else None)),
+        ])
+        if turn is not None:
+            for field, label, value in (("effort", "Effort", turn.effort_id), ("speed", "Speed", turn.service_tier_id)):
+                elements.extend([
+                    _form_label(label),
+                    _static_select(name=f"{prefix}_{field}", placeholder=label,
+                        options=((value, value),), initial_option=value),
+                ])
+    if allow_context_mode:
+        elements.extend(_context_mode_form_elements(prefix=prefix, initial_mode=settings.message_context_mode))
+    elements.extend(_task_feedback_form_elements(prefix=prefix, initial=settings.task_feedback))
+    return elements
+
+
+def session_settings_summary(settings: SessionSettings, *, allow_context_mode: bool = True) -> str:
+    turn = settings.turn_settings
+    model = "Model：继承 Codex" if turn is None else (
+        f"Model：{turn.model_id}\nEffort：{turn.effort_id}\nSpeed：{turn.service_tier_id}"
+    )
+    context = "\n" + _context_mode_summary(settings.message_context_mode) if allow_context_mode else ""
+    return model + context + "\n" + _task_feedback_summary(settings.task_feedback)
+
+
+def decode_session_settings_fields(
+    payload: Mapping[str, Any], *, prefix: str, model_id: str | None,
+) -> SessionSettings:
+    """Shared value validation for ordinary and scheduled session forms."""
+    context_field = f"{prefix}_context_mode"
+    context_mode = _decode_context_mode_reference(_required_string(
+        payload.get(context_field, _context_mode_reference(MentionContextMode.CURRENT_ONLY)), context_field,
+    ))
+    feedback = BindingTaskFeedback(
+        _decode_task_feedback_reference(payload[f"{prefix}_task_reactions"], f"{prefix}_task_reactions"),
+        _decode_task_feedback_reference(payload[f"{prefix}_progress_card"], f"{prefix}_progress_card"),
+    )
+    catalog_fields = {f"{prefix}_effort", f"{prefix}_speed"}
+    has_catalog_fields = catalog_fields.issubset(payload)
+    turn = None
+    if model_id is not None and not has_catalog_fields:
+        raise CardActionError("显式 Model 必须同时选择 Effort 与 Speed，请重新打开卡片。")
+    if has_catalog_fields:
+        effort_id = _bounded_string(payload[f"{prefix}_effort"], f"{prefix}_effort", max_chars=MAX_SETTING_ID_CHARS)
+        speed_id = _bounded_string(payload[f"{prefix}_speed"], f"{prefix}_speed", max_chars=MAX_SETTING_ID_CHARS)
+        if model_id is not None:
+            turn = BindingTurnSettings(model_id, effort_id, speed_id)
+    return SessionSettings(turn, feedback, context_mode)
+
+
+def decode_session_settings_form(payload: Mapping[str, Any], *, prefix: str) -> SessionSettings:
+    fields = {f"{prefix}_{name}" for name in ("model", "task_reactions", "progress_card")}
+    context = {f"{prefix}_context_mode"} if f"{prefix}_context_mode" in payload else set()
+    catalog = {f"{prefix}_effort", f"{prefix}_speed"}
+    if frozenset(payload) not in {frozenset(fields | context), frozenset(fields | context | catalog)}:
+        raise CardActionError("会话配置表单字段不完整或包含未知字段。")
+    model_id = _decode_new_model_reference(_required_string(payload[f"{prefix}_model"], f"{prefix}_model"))
+    return decode_session_settings_fields(payload, prefix=prefix, model_id=model_id)
 
 
 def _form_label(label: str) -> dict[str, Any]:
@@ -1830,55 +1921,8 @@ def _decode_new_binding_form(
     model_id = _decode_new_model_reference(
         _required_string(payload["new_model"], "new_model")
     )
-    message_context_mode = _decode_context_mode_reference(
-        _required_string(
-            payload.get(
-                "new_context_mode",
-                _context_mode_reference(MentionContextMode.CURRENT_ONLY),
-            ),
-            "new_context_mode",
-        )
-    )
-    reaction_pulse_enabled = _decode_task_feedback_reference(
-        payload["new_task_reactions"],
-        "new_task_reactions",
-    )
-    progress_card_enabled = _decode_task_feedback_reference(
-        payload["new_progress_card"],
-        "new_progress_card",
-    )
-    effort_id = None
-    service_tier_id = None
-    has_catalog_fields = catalog_fields.issubset(payload)
-    if model_id is None:
-        if has_catalog_fields:
-            # A catalog-backed card renders these fields even when inherit is
-            # selected. Validate their bounds, then deliberately discard them.
-            _bounded_string(
-                payload["new_effort"],
-                "new_effort",
-                max_chars=MAX_SETTING_ID_CHARS,
-            )
-            _bounded_string(
-                payload["new_speed"],
-                "new_speed",
-                max_chars=MAX_SETTING_ID_CHARS,
-            )
-    else:
-        if not has_catalog_fields:
-            raise CardActionError(
-                "显式 Model 必须同时选择 Effort 与 Speed，请重新打开卡片。"
-            )
-        effort_id = _bounded_string(
-            payload["new_effort"],
-            "new_effort",
-            max_chars=MAX_SETTING_ID_CHARS,
-        )
-        service_tier_id = _bounded_string(
-            payload["new_speed"],
-            "new_speed",
-            max_chars=MAX_SETTING_ID_CHARS,
-        )
+    settings = decode_session_settings_fields(payload, prefix="new", model_id=model_id)
+    turn = settings.turn_settings
     return CardControlIntent(
         scope=scope,
         source_id=message_id,
@@ -1887,11 +1931,11 @@ def _decode_new_binding_form(
         project_alias=project_alias,
         expected_revision=expected_revision,
         model_id=model_id,
-        effort_id=effort_id,
-        service_tier_id=service_tier_id,
-        message_context_mode=message_context_mode,
-        reaction_pulse_enabled=reaction_pulse_enabled,
-        progress_card_enabled=progress_card_enabled,
+        effort_id=turn.effort_id if turn else None,
+        service_tier_id=turn.service_tier_id if turn else None,
+        message_context_mode=settings.message_context_mode,
+        reaction_pulse_enabled=settings.task_feedback.reaction_pulse_enabled,
+        progress_card_enabled=settings.task_feedback.progress_card_enabled,
     )
 
 
@@ -1929,53 +1973,8 @@ def _decode_config_form(
     ) = _decode_config_model_reference(
         _required_string(payload["config_model"], "config_model")
     )
-    message_context_mode = _decode_context_mode_reference(
-        _required_string(
-            payload.get(
-                "config_context_mode",
-                _context_mode_reference(MentionContextMode.CURRENT_ONLY),
-            ),
-            "config_context_mode",
-        )
-    )
-    reaction_pulse_enabled = _decode_task_feedback_reference(
-        payload["config_task_reactions"],
-        "config_task_reactions",
-    )
-    progress_card_enabled = _decode_task_feedback_reference(
-        payload["config_progress_card"],
-        "config_progress_card",
-    )
-    effort_id = None
-    service_tier_id = None
-    has_catalog_fields = catalog_fields.issubset(payload)
-    if model_id is None:
-        if has_catalog_fields:
-            _bounded_string(
-                payload["config_effort"],
-                "config_effort",
-                max_chars=MAX_SETTING_ID_CHARS,
-            )
-            _bounded_string(
-                payload["config_speed"],
-                "config_speed",
-                max_chars=MAX_SETTING_ID_CHARS,
-            )
-    else:
-        if not has_catalog_fields:
-            raise CardActionError(
-                "显式 Model 必须同时选择 Effort 与 Speed，请重新打开卡片。"
-            )
-        effort_id = _bounded_string(
-            payload["config_effort"],
-            "config_effort",
-            max_chars=MAX_SETTING_ID_CHARS,
-        )
-        service_tier_id = _bounded_string(
-            payload["config_speed"],
-            "config_speed",
-            max_chars=MAX_SETTING_ID_CHARS,
-        )
+    settings = decode_session_settings_fields(payload, prefix="config", model_id=model_id)
+    turn = settings.turn_settings
     return CardControlIntent(
         scope=scope,
         source_id=message_id,
@@ -1986,11 +1985,11 @@ def _decode_config_form(
         feedback_revision=feedback_revision,
         binding_id=binding_id,
         model_id=model_id,
-        effort_id=effort_id,
-        service_tier_id=service_tier_id,
-        message_context_mode=message_context_mode,
-        reaction_pulse_enabled=reaction_pulse_enabled,
-        progress_card_enabled=progress_card_enabled,
+        effort_id=turn.effort_id if turn else None,
+        service_tier_id=turn.service_tier_id if turn else None,
+        message_context_mode=settings.message_context_mode,
+        reaction_pulse_enabled=settings.task_feedback.reaction_pulse_enabled,
+        progress_card_enabled=settings.task_feedback.progress_card_enabled,
     )
 
 

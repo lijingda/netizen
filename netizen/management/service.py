@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, NoReturn
 
-from .blocking_io import BoundedBlockingIOExecutor
+from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
 from .chat_labels import ChatLabel, ChatLabelProvider, ChatLabelResolver
 from .coordination import ScopeCoordinator
 from .updates import UpdateService
@@ -78,6 +78,8 @@ from ..projects import (
     UnknownProject,
 )
 from ..sdk_gap_adapter import GoalControlError, GoalSnapshot
+from ..schedules.service import ScheduleService
+from ..model_settings import ModelCatalog
 
 
 _BINDING_STATUS_RESOLUTION_CONCURRENCY = 8
@@ -123,6 +125,10 @@ class RuntimeStateChanged(ManagementError):
 
 
 class SidePublicationInProgress(ManagementError):
+    pass
+
+
+class SchedulePublicationInProgress(ManagementError):
     pass
 
 
@@ -318,6 +324,8 @@ class ProjectDeletionResult:
     failed_binding_id: str | None = None
     failed_side_id: str | None = None
     code: str = "deleted"
+    deleted_plan_count: int = 0
+    remaining_scheduled_run_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,6 +426,11 @@ class ManagementRuntimePort:
     def __init__(self, runtime: CodexRuntime) -> None:
         self.__runtime = runtime
 
+    async def read_scheduled_turn(
+        self, binding_id: str, turn_id: str, *, deadline: float | None = None,
+    ) -> str:
+        return await self.__runtime.read_scheduled_turn(binding_id, turn_id, deadline=deadline)
+
     @property
     def native_delete_available(self) -> bool:
         return NativeCapability.DELETE in self.__runtime.available_capabilities
@@ -468,6 +481,9 @@ class ManagementRuntimePort:
             binding_id,
             context_anchor=context_anchor,
         )
+
+    async def model_catalog(self) -> ModelCatalog:
+        return await self.__runtime.model_catalog()
 
     async def resolve_turn_settings(
         self,
@@ -672,6 +688,23 @@ class InstanceManagementService:
         self._goal_status_read_limiter = asyncio.Semaphore(
             _BINDING_STATUS_RESOLUTION_CONCURRENCY
         )
+        self.schedules: ScheduleService | None = None
+        self._schedule_creation_drain: Callable[[str, float], Awaitable[bool]] | None = None
+
+    def enable_schedules(self, *, app_id: str, chat_info: Any = None) -> ScheduleService:
+        if self.schedules is None:
+            self.schedules = ScheduleService(
+                bindings=self._bindings, runtime=self._runtime,
+                app_id=app_id, chat_info=chat_info,
+            )
+        elif self.schedules.app_id != app_id:
+            raise ValueError("schedule management App identity cannot change")
+        return self.schedules
+
+    def set_schedule_creation_drain(
+        self, callback: Callable[[str, float], Awaitable[bool]],
+    ) -> None:
+        self._schedule_creation_drain = callback
 
     @property
     def scope_coordinator(self) -> ScopeCoordinator:
@@ -682,6 +715,8 @@ class InstanceManagementService:
         return self._runtime.native_delete_available
 
     async def close(self, *, deadline: float | None = None) -> None:
+        if self.schedules is not None:
+            self.schedules.close_admission()
         await self._updates.close(deadline=deadline)
         if self._chat_labels is not None:
             await self._chat_labels.aclose()
@@ -714,6 +749,25 @@ class InstanceManagementService:
             create_directory=create_directory,
             deadline=deadline,
         )
+
+    async def resolve_new_project(
+        self, alias: str, *, deadline: float,
+    ) -> Project:
+        """Validate a creation cwd without blocking the shared event loop."""
+
+        async with asyncio.timeout_at(deadline):
+            while True:
+                try:
+                    return await self._blocking_io.submit(
+                        self._projects.resolve_for_new,
+                        alias,
+                        deadline=deadline,
+                    )
+                except BlockingIOExecutorSaturated:
+                    # Several plans commonly share a due minute. Wait within
+                    # this short creation budget for existing filesystem I/O;
+                    # no native execution is queued or concurrency-limited.
+                    await self._blocking_io.drain(deadline=deadline)
 
     async def set_project_enabled(
         self,
@@ -838,6 +892,21 @@ class InstanceManagementService:
         code = "deleted"
         deleted = False
         try:
+            if self._schedule_creation_drain is not None:
+                drained = await self._schedule_creation_drain(
+                    alias, min(deadline, loop.time() + _PROJECT_DELETE_STEP_SECONDS),
+                )
+                if not drained:
+                    raise SchedulePublicationInProgress(alias)
+            # Frozen plans cannot issue another claim. A publication with no
+            # complete native identity remains in the exact remaining inventory;
+            # do not pretend deleting its definition undid an external call.
+            if any(
+                run.phase in {"claimed", "publishing_topic", "binding_ready", "starting_turn"}
+                or run.error_code == "publishing_unknown"
+                for run in self._bindings.schedules.project_pending_runs(alias)
+            ):
+                raise SchedulePublicationInProgress(alias)
             bindings_by_id = {item.binding.id: item.binding for item in snapshot.bindings}
             parent_ids = tuple(dict.fromkeys([
                 *bindings_by_id,
@@ -922,6 +991,8 @@ class InstanceManagementService:
                 code = "side_close_failed"
             elif isinstance(error, SidePublicationInProgress):
                 code = "side_creation_in_progress"
+            elif isinstance(error, SchedulePublicationInProgress):
+                code = "schedule_creation_in_progress"
             else:
                 code = "delete_failed"
         finally:
@@ -939,6 +1010,8 @@ class InstanceManagementService:
         return ProjectDeletionResult(
             alias, deleted, len(snapshot.bindings) - len(remaining), remaining,
             remaining_side_count, failed_binding_id, failed_side_id, code,
+            len(snapshot.scheduled_plans),
+            len(self._bindings.schedules.project_pending_runs(alias)),
         )
 
     def _project_delete_remaining(
@@ -1095,7 +1168,7 @@ class InstanceManagementService:
             limit=limit,
             deadline_seconds=self._query_seconds(deadline),
         )
-        labels = await self._chat_label_map(
+        labels = await self.resolve_chat_labels(
             (item.side_topic.chat_id for item in page.items),
             deadline=deadline,
         )
@@ -1825,7 +1898,7 @@ class InstanceManagementService:
         next_cursor: BindingCursor | None,
         deadline: float,
     ) -> SessionInventoryPage:
-        labels = await self._chat_label_map(
+        labels = await self.resolve_chat_labels(
             (record.scope.chat_id for record in records),
             deadline=deadline,
         )
@@ -1847,12 +1920,13 @@ class InstanceManagementService:
             )
         return SessionInventoryPage(tuple(items), next_cursor)
 
-    async def _chat_label_map(
+    async def resolve_chat_labels(
         self,
         chat_ids: Iterable[str],
         *,
         deadline: float,
     ) -> dict[str, ChatLabel]:
+        """Enrich a bounded management result page using the shared label cache."""
         unique = tuple(dict.fromkeys(chat_ids))
         resolver = self._chat_labels
         if resolver is None:

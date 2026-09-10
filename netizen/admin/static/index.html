@@ -20,6 +20,7 @@
     <button class="tab active" data-tab="projects" aria-selected="true">Projects</button>
     <button class="tab" data-tab="sessions" aria-selected="false">Sessions</button>
     <button class="tab" data-tab="side-topics" aria-selected="false">Side Topics</button>
+    <button class="tab" data-tab="schedules" aria-selected="false">定时任务</button>
     <button class="tab" data-tab="updates" aria-selected="false">系统维护</button>
   </nav>
 
@@ -108,6 +109,86 @@
       </tr></thead><tbody id="sides-body"></tbody></table></div>
       <button id="sides-next" class="next" hidden>下一页</button>
     </section>
+    <section id="schedules" class="panel" aria-labelledby="schedules-heading" hidden>
+      <div class="section-head">
+        <div><p class="eyebrow">SCHEDULED TASKS</p><h2 id="schedules-heading">定时任务</h2></div>
+        <div class="actions"><button id="schedule-new" class="action">创建计划</button><button class="refresh" data-refresh="schedules">刷新</button></div>
+      </div>
+      <p class="schedule-help">每次触发会在目标会话的新话题中开启独立任务。暂停或删除计划影响后续触发，已认领的执行可以继续。</p>
+      <form id="schedule-filter" class="filter-bar">
+        <label>Project<select id="schedule-filter-project" name="project"><option value="">全部 Project</option></select></label>
+        <label>启停状态<select id="schedule-filter-enabled" name="enabled"><option value="">全部</option><option value="true">已启用</option><option value="false">已暂停</option></select></label>
+        <label>结束状态<select id="schedule-filter-ended" name="ended"><option value="">全部</option><option value="false" selected>未结束</option><option value="true">已结束</option></select></label>
+        <button type="submit">筛选</button>
+      </form>
+      <p class="meta-line">未结束包含仍有触发机会的计划，以及最后一次正在启动、执行或结果待确认的计划。暂停不会停止本次执行。</p>
+      <div class="table-wrap"><table><thead><tr><th>计划</th><th>Project</th><th>目标会话</th><th>时间安排</th><th>计划状态</th><th>执行情况</th><th>操作</th></tr></thead><tbody id="schedules-body"></tbody></table></div>
+      <button id="schedules-next" class="next" hidden>下一页</button>
+      <section id="schedule-detail" class="schedule-detail" hidden aria-labelledby="schedule-detail-title">
+        <h3 id="schedule-detail-title"></h3>
+        <p id="schedule-detail-state"></p>
+        <p id="schedule-detail-settings"></p>
+        <p id="schedule-detail-rule"></p>
+        <pre id="schedule-detail-instructions"></pre>
+        <ol id="schedule-detail-preview"></ol>
+        <h3>最近触发记录</h3>
+        <p>执行状态以普通会话为准；停止和继续任务请使用话题或 Sessions 中的现有能力。</p>
+        <div class="table-wrap"><table><thead><tr><th>计划触发时间</th><th>调度状态</th><th>执行入口</th></tr></thead><tbody id="schedule-runs-body"></tbody></table></div>
+        <button id="schedule-runs-next" class="next" hidden>下一页记录</button>
+      </section>
+    </section>
+    <dialog id="schedule-drawer" aria-labelledby="schedule-editor-title">
+      <form id="schedule-editor" class="card-form" hidden>
+        <div class="schedule-editor-head"><div><p class="eyebrow">SCHEDULED TASK</p><h3 id="schedule-editor-title">创建计划</h3></div><button id="schedule-close" type="button" aria-label="关闭计划表单">×</button></div>
+        <fieldset id="schedule-fields">
+          <div class="schedule-editor-body">
+            <div class="schedule-form-grid">
+              <label>名称<input id="schedule-name" maxlength="128" required></label>
+              <label>Project<select id="schedule-project" required><option value="">选择 Project</option></select></label>
+              <label>目标会话 ID<input id="schedule-chat" maxlength="512" required></label>
+            </div>
+            <label>任务指令<textarea id="schedule-instructions" rows="5" maxlength="16000" required placeholder="说明每次执行需要完成什么，以及何时需要用户关注。"></textarea></label>
+            <h4>触发规则</h4>
+            <div class="schedule-form-grid">
+              <label>时区<input id="schedule-timezone" placeholder="例如 Asia/Shanghai" maxlength="128" required></label>
+              <label>时间规则<select id="schedule-kind"><option value="daily">每天</option><option value="weekly">每周</option><option value="interval">固定间隔</option><option value="once">一次性</option></select></label>
+              <label data-schedule-rule="daily weekly">当地时间<input id="schedule-time" type="time" step="60" value="09:00"></label>
+              <label data-schedule-rule="once" hidden>触发日期与时间<input id="schedule-at" type="datetime-local" step="60" aria-describedby="schedule-timezone-note"></label>
+              <label id="schedule-offset-field" hidden>选择这一天的哪一次时间<select id="schedule-offset"></select></label>
+              <label data-schedule-rule="interval" hidden>间隔分钟<input id="schedule-every" type="number" min="1" step="1" value="60"></label>
+            </div>
+            <p id="schedule-timezone-note" class="meta-line">日期和时间均按上方时区解释。</p>
+            <fieldset id="schedule-weekdays" data-schedule-rule="weekly" hidden><legend>每周重复</legend>
+              <label><input type="checkbox" value="0">周一</label><label><input type="checkbox" value="1">周二</label><label><input type="checkbox" value="2">周三</label><label><input type="checkbox" value="3">周四</label><label><input type="checkbox" value="4">周五</label><label><input type="checkbox" value="5">周六</label><label><input type="checkbox" value="6">周日</label>
+            </fieldset>
+            <fieldset id="schedule-end-condition" data-schedule-rule="daily weekly interval">
+              <legend>截止时间（可选）</legend>
+              <div class="schedule-form-grid">
+                <label>截止日期与时间<input id="schedule-end-at" type="datetime-local" step="60" aria-describedby="schedule-timezone-note schedule-end-note"></label>
+                <label id="schedule-end-offset-field" hidden>选择截止时间的哪一次<select id="schedule-end-offset"></select></label>
+              </div>
+              <p id="schedule-end-note" class="meta-line">留空则不设截止时间，截止时刻仍可触发。</p>
+            </fieldset>
+            <details id="schedule-session-settings" class="schedule-session-settings">
+              <summary>会话配置 · <span id="schedule-session-summary">继承 Codex · 当前消息</span></summary>
+              <p id="schedule-session-note" role="status" aria-live="polite"></p>
+              <div class="schedule-form-grid">
+                <label>模型<select id="schedule-model"><option value="">继承 Codex</option></select></label>
+                <label>思考强度<select id="schedule-effort" disabled></select></label>
+                <label>速度<select id="schedule-tier" disabled></select></label>
+                <label>消息上下文<select id="schedule-context"><option value="current-only">当前消息</option><option value="catch-up">补齐未读上下文</option></select></label>
+              </div>
+              <label class="schedule-checkbox"><input id="schedule-reactions" type="checkbox">任务表情反馈</label>
+              <label class="schedule-checkbox"><input id="schedule-progress" type="checkbox">进度卡片</label>
+            </details>
+            <label class="schedule-checkbox"><input id="schedule-enabled" type="checkbox" checked>启用计划</label>
+            <p id="schedule-preview-message" role="status" aria-live="polite">保存前请预览触发时间。</p>
+            <ol id="schedule-preview-times"></ol>
+          </div>
+          <div class="schedule-editor-footer"><button id="schedule-preview" type="button">预览触发时间</button><div class="actions"><button id="schedule-cancel" type="button">取消</button><button id="schedule-save" type="submit" disabled>保存计划</button></div></div>
+        </fieldset>
+      </form>
+    </dialog>
     <section id="updates" class="panel" aria-labelledby="updates-heading" hidden>
       <div class="section-head">
         <div><p class="eyebrow">NETIZEN</p><h2 id="updates-heading">系统维护</h2></div>

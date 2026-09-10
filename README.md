@@ -1,7 +1,7 @@
 # Netizen
 
 Netizen 把飞书单聊、群聊和话题接成 Codex 的一个消息 Channel。它不是另一套
-Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 Python
+Agent Runtime：飞书侧负责消息、会话绑定和定时计划，Agent 过程由官方 Python
 `openai-codex` SDK 管理的原生 App Server/CLI 完成。
 
 仓库唯一的生产实现是 `netizen/` 下的 Python 包，以 `pyproject.toml` 构建和安装；
@@ -21,7 +21,7 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   Thread 登记的后台 terminal；当前接口不保证前台工具进程退出。
 - 普通持久 Thread 精确回到 idle 后，当前 active Binding 保留十五分钟 warm window；
   切换到其他 Binding 后立即尝试取消旧 idle Thread 的当前连接订阅。Binding、native ID
-  和历史都保留，下一条消息仍 resume exact ID。服务重启不扫描或恢复旧 timer，也没有
+  和历史都保留，下一条消息仍 resume exact ID。服务重启不扫描或恢复旧订阅 timer，也没有
   Thread 数量上限或 LRU。
 - `/side [首轮问题]` 从当前已物化 Parent Thread 创建一个 ephemeral fork，并在同一
   chat 新开 sibling 话题。Side 在同一 fork 上支持多轮：idle 开新 Turn、running
@@ -29,6 +29,13 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   多个 Side 可并发，但共享同一个真实 Project cwd，文件改动彼此可见。创建时冻结 Parent
   当时的 Model/Effort/Speed、Reaction Pulse 与 Progress Card，Parent 后续配置不传播；
   Side 内仍不允许 Goal。
+- 定时任务可通过自然语言、`/cron` 卡片和 Admin 管理。会话配置与 `/new` 共用，创建时
+  默认复制当前会话的模型、思考强度、速度、表情闪烁、过程卡和消息读取范围，之后独立。
+  支持一次性、每天、每周或固定间隔；重复计划可设截止时间，
+  到期后，在目标会话（群聊或私聊）新建独立话题和普通持久会话；继续交流、停止、归档和删除沿用普通
+  会话能力，不切换来源聊天的当前会话。暂停或删除计划不停止已认领的本次执行。
+  行为见 [定时任务设计](docs/design.md#定时任务)，兼容性范围及发布前验收要求见
+  [部署文档](docs/deployment.md#定时任务兼容性与验收)。
 - Binding 有两个相互独立、默认关闭的 Task Feedback 选项，可在 `/new` 或 `/config`
   按需开启。普通与 Side Turn 始终尽力显示 Lifecycle Reaction：accepted 时使用
   `Typing`，steer 成功使用 `OnIt`，终态使用 `DONE`/`ERROR`/`CrossMark`。
@@ -65,12 +72,13 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
 - Channel SQLite 只保存 Scope/Binding/Project Registry/去重 TTL、可选的
   Binding-scoped Model/Effort/Speed 选择 ID、两个 Task Feedback 布尔值及 revision、群聊
   Binding 的 Mention Context Mode 与 exact Context Boundary metadata，以及不含 native
-  ID/content 的 Side Topic 路由墓碑；不保存 prompt、补充消息正文、回复、cwd 副本、
+  ID/content 的 Side Topic 路由墓碑。定时任务另保存当前计划指令、最小交接记录、初始
+  Turn 引用和管理请求去重；不保存其他 prompt、补充消息正文、回复、cwd 副本、
   Turn Activity Projection、回复卡 identity/session、解析后的 wire value、Codex 已生效
   配置或 Turn 历史。
 - 同一进程默认在 `0.0.0.0:8787` 提供单管理员 Admin Web。它与飞书共用唯一的
   application service、Scope coordinator、SQLite、Runtime 和 `AsyncCodex`，集中分页管理
-  Projects、普通 Sessions 和 Side Topics；它不能发送 Prompt、浏览完整历史或调用任意
+  Projects、普通 Sessions、Side Topics 和定时计划；它不能发送即时 Prompt、浏览完整历史或调用任意
   Codex RPC。`/settings` 仍保留给当前飞书 Scope 的普通使用者。
 - 群聊和群话题中，每条触发机器人的输入仍必须重新 `@机器人`；P2P 及 P2P Side
   话题无需 @。普通群聊 Binding 可选择默认的 `current-only`（只提交当前 @ 消息和显式
@@ -135,6 +143,10 @@ Agent Runtime：飞书侧只负责消息和会话绑定，Agent 过程由官方 
   可建立当前进程可校验的新控制卡。
 - `/settings`：在当前单聊、群聊或话题打开 Netizen 设置卡片。当前 Projects 分区可
   通过下拉表单启停 Project，并在同一卡片内创建或登记 Project。
+- `/cron`：打开定时任务管理卡，默认当前会话已启用且未结束的任务。用下拉框筛选范围与启停状态，选择任务后在
+  原卡片刷新详情、编辑、启停、删除或查看最近执行。新建入口独立放在底部，新建和编辑均在一张完整表单中直接提交；群聊和私聊创建
+  均默认使用当前会话，也可显式填写目标 chat_id。也可直接说“每天北京时间九点，在当前群总结 test 项目的进展”。
+  自然语言管理工具由 Netizen 临时接入，无需用户安装 MCP 或额外 Skill。
 - `/sessions`：用分页卡片列出当前 Scope 的会话。当前会话置顶显示，其他会话可直接点击
   “设为当前”；切换只改变 Scope 的 active Binding，不会停止其他会话正在运行的任务。
   所有 persisted materialized 行无论是 idle、running、stopping、Turn 观测不可用、Goal

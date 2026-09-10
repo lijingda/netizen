@@ -1,7 +1,7 @@
 ---
 name: netizen-user-guide
 description: >-
-  解答 Netizen 飞书 Channel 的使用问题，包括命令、会话、执行反馈、消息与文件，
+  解答 Netizen 飞书 Channel 的使用问题，包括命令、会话、定时任务、执行反馈、消息与文件，
   以及与 Codex App/CLI 的差异。用户未说“Netizen”但在询问当前飞书机器人或会话
   如何使用时也适用。仅用于使用咨询；普通编码及工程实现、架构、部署、调试不适用。
 ---
@@ -21,6 +21,8 @@ Netizen 通过官方 Codex SDK 将飞书接入原生 Codex。默认按当前 Net
   [Goal](references/user-guide.md#goal)：说明对应的并发、失效或历史删除后果。
 - [运行反馈](references/user-guide.md#飞书中的运行反馈)、
   [本轮文件](references/user-guide.md#查看和发送本轮文件)：按手册解释开关、展示范围和统计口径。
+- [定时任务](references/user-guide.md#定时任务)：区分定时计划与一次普通执行，解释
+  `/cron`、自然语言管理、时间规则，以及暂停计划和停止任务的不同后果。
 
 ## 回答与边界
 

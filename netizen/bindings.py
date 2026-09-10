@@ -25,9 +25,14 @@ from .domain import (
     MessageContextAnchor,
     ScopeKind,
 )
+from .schedules.models import Run, ScheduleConflict
+from .schedules.store import (
+    ScheduleStore, create_schema, require_schema,
+)
+from .session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 PROJECT_DELETE_LIMIT = 1000
 
 
@@ -219,36 +224,6 @@ class ScopeNotFound(LookupError):
 
 
 @dataclass(frozen=True, slots=True)
-class BindingTurnSettings:
-    """Catalog selection to apply to every new Turn started by Netizen."""
-
-    model_id: str
-    effort_id: str
-    service_tier_id: str
-
-    def __post_init__(self) -> None:
-        values = (self.model_id, self.effort_id, self.service_tier_id)
-        if not all(isinstance(value, str) and value for value in values):
-            raise ValueError("Binding Turn settings IDs must not be empty")
-
-
-@dataclass(frozen=True, slots=True)
-class BindingTaskFeedback:
-    """Binding-scoped, opt-in pulse/card feedback for Turns."""
-
-    reaction_pulse_enabled: bool = False
-    progress_card_enabled: bool = False
-
-    def __post_init__(self) -> None:
-        values = (
-            self.reaction_pulse_enabled,
-            self.progress_card_enabled,
-        )
-        if not all(type(value) is bool for value in values):
-            raise ValueError("Binding task feedback values must be booleans")
-
-
-@dataclass(frozen=True, slots=True)
 class ThreadBinding:
     id: str
     scope_key: str
@@ -431,328 +406,84 @@ class ProjectDeleteSnapshot:
     bindings: tuple[BindingInventoryRecord, ...]
     sides: tuple[SideTopicRecord, ...]
     fingerprint: str
+    scheduled_plans: tuple[tuple[str, int], ...] = ()
+    scheduled_runs: tuple[Run, ...] = ()
 
 
-def migrate_channel_database_v6_to_v7(path: str | Path) -> bool:
-    """Upgrade a stopped v6 database inside the installer transaction.
-
-    ``BindingStore`` deliberately remains current-schema-only. The installer
-    calls this one-step migration only after the service target is unloaded,
-    the stable lifetime lock is held, and rollback files have been captured.
-    Existing Bindings receive both task-feedback options disabled.
-    """
-
+def validate_channel_database(path: str | Path, *, allow_empty: bool = False) -> None:
+    """Validate an existing current database without opening a writer or repairing it."""
     database = Path(path)
-    if not database.exists():
-        return False
     if database.is_symlink() or not database.is_file():
-        raise RuntimeError(
-            "Channel database migration target must be a regular file"
-        )
-
-    connection = sqlite3.connect(database, isolation_level=None)
+        raise RuntimeError("Channel database must be a regular file")
+    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 0")
-        version_rows = connection.execute(
-            "SELECT version FROM schema_version"
+        connection.execute("PRAGMA query_only = ON")
+        if allow_empty and connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone() is None:
+            return
+        _require_current_schema(connection)
+        _require_database_integrity(connection)
+    except sqlite3.Error as error:
+        raise RuntimeError(f"Channel database validation failed: {error}") from error
+    finally:
+        connection.close()
+
+
+def _require_current_schema(connection: sqlite3.Connection) -> None:
+    versions = connection.execute("SELECT version FROM schema_version").fetchall()
+    if len(versions) != 1 or versions[0]["version"] != SCHEMA_VERSION:
+        raise RuntimeError(
+            "unsupported channel database schema version; "
+            "only the current schema is supported; existing data was not changed"
+        )
+    _require_project_metadata_schema(connection)
+    require_schema(connection)
+
+
+def _require_project_metadata_schema(
+    connection: sqlite3.Connection,
+) -> dict[str, sqlite3.Row]:
+    """Validate the current permanent metadata tables."""
+    required_tables = {
+        "schema_version", "scopes", "bindings", "projects", "dedup_keys", "side_topics",
+    }
+    actual_tables = {
+        row["name"] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
-        if len(version_rows) != 1:
-            raise RuntimeError("Channel database must contain one schema version")
-        version = version_rows[0]["version"]
-        if version == 7:
-            _require_v7_feedback_columns(connection)
-            return False
-        if version != 6:
-            raise RuntimeError(
-                "unsupported Channel database migration source version: "
-                f"{version!r}"
-            )
-
-        required_tables = {
-            "schema_version",
-            "scopes",
-            "bindings",
-            "projects",
-            "dedup_keys",
-            "side_topics",
-        }
-        actual_tables = {
-            row["name"]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
-        }
-        missing_tables = required_tables - actual_tables
-        if missing_tables:
-            raise RuntimeError(
-                "v6 Channel database is missing required tables: "
-                + ", ".join(sorted(missing_tables))
-            )
-        legacy_columns = {
-            row["name"]
-            for row in connection.execute(
-                "PRAGMA table_info(bindings)"
-            ).fetchall()
-        }
-        required_legacy_columns = {
-            "binding_id",
-            "scope_key",
-            "project_alias",
-            "native_thread_id",
-            "model_id",
-            "effort_id",
-            "service_tier_id",
-            "settings_revision",
-            "creator_id",
-            "created_at",
-            "activated_at",
-            "ever_activated",
-            "message_context_mode",
-            "context_anchor_message_id",
-            "context_anchor_create_time_ms",
-            "context_revision",
-        }
-        missing_columns = required_legacy_columns - legacy_columns
-        feedback_columns = {
-            "task_reactions_enabled",
-            "progress_card_enabled",
-            "feedback_revision",
-        }
-        if missing_columns or legacy_columns & feedback_columns:
-            details: list[str] = []
-            if missing_columns:
-                details.append("missing " + ", ".join(sorted(missing_columns)))
-            if legacy_columns & feedback_columns:
-                details.append(
-                    "unexpected "
-                    + ", ".join(sorted(legacy_columns & feedback_columns))
-                )
-            raise RuntimeError(
-                "unexpected v6 bindings schema: " + "; ".join(details)
-            )
-        _require_database_integrity(connection)
-        binding_count = connection.execute(
-            "SELECT COUNT(*) FROM bindings"
-        ).fetchone()[0]
-        side_count = connection.execute(
-            "SELECT COUNT(*) FROM side_topics"
-        ).fetchone()[0]
-
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            connection.execute(
-                """
-                ALTER TABLE bindings
-                ADD COLUMN task_reactions_enabled INTEGER NOT NULL DEFAULT 0
-                    CHECK(
-                        typeof(task_reactions_enabled) = 'integer'
-                        AND task_reactions_enabled IN (0, 1)
-                    )
-                """
-            )
-            connection.execute(
-                """
-                ALTER TABLE bindings
-                ADD COLUMN progress_card_enabled INTEGER NOT NULL DEFAULT 0
-                    CHECK(
-                        typeof(progress_card_enabled) = 'integer'
-                        AND progress_card_enabled IN (0, 1)
-                    )
-                """
-            )
-            connection.execute(
-                """
-                ALTER TABLE bindings
-                ADD COLUMN feedback_revision INTEGER NOT NULL DEFAULT 1
-                    CHECK(
-                        typeof(feedback_revision) = 'integer'
-                        AND feedback_revision >= 1
-                    )
-                """
-            )
-            updated = connection.execute(
-                "UPDATE schema_version SET version = ? WHERE version = ?",
-                (7, 6),
-            )
-            if updated.rowcount != 1:
-                raise RuntimeError(
-                    "Channel database schema version changed during migration"
-                )
-            _require_database_integrity(connection)
-            migrated_binding_count = connection.execute(
-                "SELECT COUNT(*) FROM bindings"
-            ).fetchone()[0]
-            migrated_side_count = connection.execute(
-                "SELECT COUNT(*) FROM side_topics"
-            ).fetchone()[0]
-            if migrated_binding_count != binding_count:
-                raise RuntimeError(
-                    "Binding count changed during Channel database migration"
-                )
-            if migrated_side_count != side_count:
-                raise RuntimeError(
-                    "Side Topic count changed during Channel database migration"
-                )
-            invalid_feedback_rows = connection.execute(
-                """
-                SELECT COUNT(*)
-                FROM bindings
-                WHERE task_reactions_enabled != 0
-                   OR progress_card_enabled != 0
-                   OR feedback_revision != 1
-                """
-            ).fetchone()[0]
-            if invalid_feedback_rows:
-                raise RuntimeError(
-                    "legacy Bindings did not receive disabled feedback defaults"
-                )
-            connection.commit()
-        except BaseException:
-            connection.rollback()
-            raise
-        _require_v7_feedback_columns(connection)
-        _require_database_integrity(connection)
-        return True
-    except sqlite3.Error as error:
+    }
+    if required_tables - actual_tables:
         raise RuntimeError(
-            f"Channel database migration failed: {error}"
-        ) from error
-    finally:
-        connection.close()
-
-
-def migrate_channel_database(path: str | Path) -> bool:
-    """Bring a stopped database to the current schema under installer rollback."""
-    database = Path(path)
-    if not database.exists():
-        return False
-    if database.is_symlink() or not database.is_file():
-        raise RuntimeError(
-            "Channel database migration target must be a regular file"
+            "Channel database is missing required tables: "
+            + ", ".join(sorted(required_tables - actual_tables))
         )
-    connection = sqlite3.connect(database)
-    try:
-        versions = connection.execute("SELECT version FROM schema_version").fetchall()
-    except sqlite3.Error as error:
-        raise RuntimeError(f"Channel database migration failed: {error}") from error
-    finally:
-        connection.close()
-    if len(versions) != 1:
-        raise RuntimeError("Channel database must contain one schema version")
-    migrated = False
-    if versions[0][0] == 6:
-        migrated = migrate_channel_database_v6_to_v7(database)
-    return migrate_channel_database_v7_to_v8(database) or migrated
+    _require_binding_columns(connection)
+    project_schema = {
+        row["name"]: row
+        for row in connection.execute("PRAGMA table_info(projects)").fetchall()
+    }
+    required = {"alias", "cwd", "enabled", "revision", "created_at", "updated_at"}
+    if not required.issubset(project_schema):
+        raise RuntimeError("Channel database is missing required Project columns")
+    if "deleted" not in project_schema:
+        raise RuntimeError("current Channel database is missing Project tombstones")
+    deleted = project_schema["deleted"]
+    if (
+        deleted["type"].upper() != "INTEGER"
+        or deleted["notnull"] != 1
+        or deleted["dflt_value"] != "0"
+    ):
+        raise RuntimeError("current Project tombstone column has invalid shape")
+    invalid = connection.execute(
+        "SELECT 1 FROM projects WHERE typeof(deleted) != 'integer' "
+        "OR deleted NOT IN (0, 1) LIMIT 1"
+    ).fetchone()
+    if invalid is not None:
+        raise RuntimeError("current Project tombstone values are invalid")
+    return project_schema
 
 
-def migrate_channel_database_v7_to_v8(path: str | Path) -> bool:
-    """Add Project tombstones without losing stopped-service metadata."""
-    database = Path(path)
-    if not database.exists():
-        return False
-    if database.is_symlink() or not database.is_file():
-        raise RuntimeError(
-            "Channel database migration target must be a regular file"
-        )
-    connection = sqlite3.connect(database, isolation_level=None)
-    connection.row_factory = sqlite3.Row
-    try:
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 0")
-        versions = connection.execute("SELECT version FROM schema_version").fetchall()
-        if len(versions) != 1:
-            raise RuntimeError("Channel database must contain one schema version")
-        version = versions[0]["version"]
-        if version not in {7, 8}:
-            raise RuntimeError(
-                "unsupported Channel database migration source version: "
-                f"{version!r}"
-            )
-        required_tables = {
-            "schema_version", "scopes", "bindings", "projects",
-            "dedup_keys", "side_topics",
-        }
-        actual_tables = {
-            row["name"]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
-        }
-        if required_tables - actual_tables:
-            raise RuntimeError(
-                "Channel database is missing required tables: "
-                + ", ".join(sorted(required_tables - actual_tables))
-            )
-        _require_v7_feedback_columns(connection)
-        project_schema = {
-            row["name"]: row
-            for row in connection.execute("PRAGMA table_info(projects)").fetchall()
-        }
-        project_columns = project_schema.keys()
-        required = {"alias", "cwd", "enabled", "revision", "created_at", "updated_at"}
-        if not required.issubset(project_columns):
-            raise RuntimeError("Channel database is missing required Project columns")
-        if version == 8:
-            if "deleted" not in project_columns:
-                raise RuntimeError("schema v8 Channel database is missing Project tombstones")
-            deleted = project_schema["deleted"]
-            if (
-                deleted["type"].upper() != "INTEGER"
-                or deleted["notnull"] != 1
-                or deleted["dflt_value"] != "0"
-            ):
-                raise RuntimeError("schema v8 Project tombstone column has invalid shape")
-            invalid = connection.execute(
-                "SELECT 1 FROM projects WHERE typeof(deleted) != 'integer' "
-                "OR deleted NOT IN (0, 1) LIMIT 1"
-            ).fetchone()
-            if invalid is not None:
-                raise RuntimeError("schema v8 Project tombstone values are invalid")
-            _require_database_integrity(connection)
-            return False
-        if "deleted" in project_columns:
-            raise RuntimeError("unexpected Project tombstone column in schema v7")
-        _require_database_integrity(connection)
-        tables = ("scopes", "bindings", "projects", "dedup_keys", "side_topics")
-        counts = tuple(
-            connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in tables
-        )
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            connection.execute(
-                """
-                ALTER TABLE projects
-                ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0
-                    CHECK(typeof(deleted) = 'integer' AND deleted IN (0, 1))
-                """
-            )
-            updated = connection.execute(
-                "UPDATE schema_version SET version = 8 WHERE version = 7"
-            )
-            if updated.rowcount != 1:
-                raise RuntimeError("Channel database schema version changed during migration")
-            _require_database_integrity(connection)
-            migrated_counts = tuple(
-                connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                for table in tables
-            )
-            if migrated_counts != counts:
-                raise RuntimeError("Metadata count changed during Channel database migration")
-            connection.commit()
-        except BaseException:
-            connection.rollback()
-            raise
-        return True
-    except sqlite3.Error as error:
-        raise RuntimeError(f"Channel database migration failed: {error}") from error
-    finally:
-        connection.close()
-
-
-def _require_v6_context_columns(connection: sqlite3.Connection) -> None:
+def _require_binding_columns(connection: sqlite3.Connection) -> None:
     columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(bindings)").fetchall()
@@ -762,30 +493,15 @@ def _require_v6_context_columns(connection: sqlite3.Connection) -> None:
         "context_anchor_message_id",
         "context_anchor_create_time_ms",
         "context_revision",
-    }
-    missing = required - columns
-    if missing:
-        raise RuntimeError(
-            "schema v6 Channel database is missing context columns: "
-            + ", ".join(sorted(missing))
-        )
-
-
-def _require_v7_feedback_columns(connection: sqlite3.Connection) -> None:
-    _require_v6_context_columns(connection)
-    columns = {
-        row["name"]
-        for row in connection.execute("PRAGMA table_info(bindings)").fetchall()
-    }
-    required = {
         "task_reactions_enabled",
         "progress_card_enabled",
         "feedback_revision",
+        "ever_activated",
     }
     missing = required - columns
     if missing:
         raise RuntimeError(
-            "schema v7 Channel database is missing feedback columns: "
+            "current Channel database is missing Binding columns: "
             + ", ".join(sorted(missing))
         )
 
@@ -820,6 +536,10 @@ class BindingStore:
         self._path = path
         self._path_string = str(path)
         self._is_memory = self._path_string == ":memory:"
+        if not self._is_memory and Path(path).exists():
+            # Reject unsupported data before a writer can recover/checkpoint a
+            # previous process's WAL, even while closing after an open failure.
+            validate_channel_database(path, allow_empty=True)
         self._id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self._wall_clock = wall_clock
         self._lock = threading.RLock()
@@ -843,6 +563,7 @@ class BindingStore:
             check_same_thread=False,
         )
         self._connection.row_factory = sqlite3.Row
+        self.schedules = ScheduleStore(self)
         try:
             self._initialize()
             if not self._is_memory:
@@ -858,24 +579,19 @@ class BindingStore:
 
     def _initialize(self) -> None:
         with self._lock:
-            self._connection.executescript(
-                """
-                PRAGMA foreign_keys = ON;
-                CREATE TABLE IF NOT EXISTS schema_version (
-                    version INTEGER NOT NULL
-                );
-                """
-            )
-            rows = self._connection.execute(
-                "SELECT version FROM schema_version"
-            ).fetchall()
-            if len(rows) > 1 or (
-                rows and rows[0]["version"] != SCHEMA_VERSION
-            ):
-                raise RuntimeError(
-                    "unsupported channel database schema version; "
-                    "recreate the Channel database"
+            tables = {
+                row["name"] for row in self._connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
                 )
+            }
+            if tables:
+                if "schema_version" not in tables:
+                    raise RuntimeError("Channel database is missing its schema version; existing data was not changed")
+                _require_current_schema(self._connection)
+                rows = True
+            else:
+                self._connection.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+                rows = False
             if not self._is_memory:
                 journal_mode = self._connection.execute(
                     "PRAGMA journal_mode = WAL"
@@ -1009,19 +725,6 @@ class BindingStore:
                     )
                     """
                 )
-                binding_columns = {
-                    row["name"]
-                    for row in self._connection.execute(
-                        "PRAGMA table_info(bindings)"
-                    ).fetchall()
-                }
-                if "ever_activated" not in binding_columns:
-                    self._connection.execute(
-                        """
-                        ALTER TABLE bindings
-                        ADD COLUMN ever_activated INTEGER NOT NULL DEFAULT 1
-                        """
-                    )
                 self._connection.execute(
                     """
                     CREATE TRIGGER IF NOT EXISTS bindings_turn_settings_insert
@@ -1091,6 +794,10 @@ class BindingStore:
                 )
                 for statement in _COMPATIBLE_INDEXES:
                     self._connection.execute(statement)
+                if rows:
+                    require_schema(self._connection)
+                else:
+                    create_schema(self._connection)
                 if not rows:
                     self._connection.execute(
                         "INSERT INTO schema_version(version) VALUES (?)",
@@ -1152,7 +859,7 @@ class BindingStore:
         """Compatibility entry point for older callers.
 
         Production ingress should use :meth:`create_channel_binding`, whose
-        Project check is unconditional.  Existing test and migration callers
+        Project check is unconditional.  Existing direct callers
         that have an entirely empty Project registry retain the historical
         construction seam; once any Project exists, this method applies the
         same enabled-Project requirement as production.
@@ -1245,6 +952,7 @@ class BindingStore:
         activate: bool,
         allow_scope_insert: bool,
         allow_empty_project_registry: bool,
+        scheduled_run_id: str | None = None,
     ) -> ThreadBinding:
         if not project_alias or not creator_id:
             raise ValueError("Binding Project and creator must not be empty")
@@ -1259,6 +967,25 @@ class BindingStore:
         feedback_values = _feedback_values(task_feedback)
         context_values = _context_values(context_anchor)
         with self._transaction():
+            if scheduled_run_id is not None:
+                run = self.schedules.get_run(scheduled_run_id)
+                if (
+                    run.barrier != "held" or run.phase != "publishing_topic"
+                    or run.binding_id is not None
+                    or run.project_alias != project_alias
+                    or scope.kind is not ScopeKind.TOPIC
+                    or (run.app_id, run.chat_id, run.topic_id)
+                    != (scope.app_id, scope.chat_id, scope.topic_id)
+                    or not run.root_message_id or not run.origin_message_id
+                ):
+                    raise ScheduleConflict("定时话题交接身份不匹配。")
+                side_route = self._connection.execute(
+                    "SELECT 1 FROM side_topics WHERE app_id=? AND chat_id=? "
+                    "AND (topic_id=? OR root_message_id=?) LIMIT 1",
+                    (scope.app_id, scope.chat_id, scope.topic_id, run.root_message_id),
+                ).fetchone()
+                if side_route is not None:
+                    raise ScheduleConflict("定时话题与已有 Side 路由冲突，本次未创建普通会话。")
             scope_row = self._connection.execute(
                 _SCOPE_SELECT + " WHERE scope_key = ?",
                 (scope.key,),
@@ -1284,6 +1011,13 @@ class BindingStore:
                 )
             else:
                 _require_exact_scope(scope_row, scope)
+                if scheduled_run_id is not None and (
+                    scope_row["active_binding_id"] is not None
+                    or self._connection.execute(
+                        "SELECT 1 FROM bindings WHERE scope_key=? LIMIT 1", (scope.key,)
+                    ).fetchone() is not None
+                ):
+                    raise ScopeConflict("话题已经建立会话，请继续使用该会话。")
                 if allow_scope_insert:
                     self._connection.execute(
                         "UPDATE scopes SET updated_at = ? WHERE scope_key = ?",
@@ -1349,6 +1083,99 @@ class BindingStore:
                     """,
                     (binding_id, now, scope.key),
                 )
+            if scheduled_run_id is not None:
+                self.schedules._set_run(
+                    scheduled_run_id, phase="binding_ready", binding_id=binding_id,
+                )
+        return self.get(binding_id)
+
+    def create_scheduled_binding(
+        self, *, run_id: str, scope: FeishuScope,
+        creator_id: str = "scheduled_plan",
+        session_settings: SessionSettings = SessionSettings(),
+        context_anchor: MessageContextAnchor | None = None,
+    ) -> ThreadBinding:
+        if not isinstance(session_settings, SessionSettings):
+            raise ValueError("scheduled session_settings must be SessionSettings")
+        run = self.schedules.get_run(run_id)
+        return self._create_binding(
+            scope=scope, project_alias=run.project_alias, creator_id=creator_id,
+            turn_settings=session_settings.turn_settings,
+            task_feedback=session_settings.task_feedback,
+            message_context_mode=session_settings.message_context_mode,
+            context_anchor=context_anchor, expected_project_revision=None, activate=True,
+            allow_scope_insert=True, allow_empty_project_registry=False,
+            scheduled_run_id=run_id,
+        )
+
+    def find_by_native_thread_id(self, native_thread_id: str) -> ThreadBinding | None:
+        with self._lock:
+            row = self._connection.execute(
+                _BINDING_SELECT + " WHERE b.native_thread_id=?", (native_thread_id,),
+            ).fetchone()
+            return _binding(row) if row is not None else None
+
+    def scheduled_initial_reservation(self, binding_id: str) -> str | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT run_id FROM schedule_runs WHERE binding_id=? "
+                "AND phase IN ('binding_ready','starting_turn') AND barrier != 'released'",
+                (binding_id,),
+            ).fetchone()
+            return row["run_id"] if row is not None else None
+
+    def require_scheduled_initial(self, run_id: str, binding_id: str) -> Run:
+        with self._lock:
+            run = self.schedules.get_run(run_id)
+            binding = self.get(binding_id)
+            scope = self.get_scope(binding.scope_key)
+            self.require_project_not_deleting(run.project_alias)
+            if not self.get_project(run.project_alias).enabled:
+                raise ProjectDisabled(run.project_alias)
+            if (
+                run.binding_id != binding_id or run.barrier != "held"
+                or run.phase != "binding_ready" or run.initial_turn_id is not None
+                or binding.native_thread_id is not None or not binding.active
+                or binding.project_alias != run.project_alias
+                or (scope.app_id, scope.chat_id, scope.topic_id)
+                != (run.app_id, run.chat_id, run.topic_id)
+            ):
+                raise ScheduleConflict("定时初轮只能启动认领的初始会话。")
+            return run
+
+    def begin_scheduled_initial(self, run_id: str, binding_id: str) -> Run:
+        with self._transaction():
+            self.require_scheduled_initial(run_id, binding_id)
+            return self.schedules._set_run(run_id, phase="starting_turn")
+
+    def mark_scheduled_turn_started(self, run_id: str, binding_id: str, turn_id: str) -> Run:
+        with self._transaction():
+            run = self.schedules.get_run(run_id)
+            if run.binding_id != binding_id or run.phase not in {"starting_turn", "handed_off", "released"}:
+                raise ScheduleConflict("定时初轮交接不匹配。")
+            return self.schedules._set_run(run_id, initial_turn_id=turn_id, phase="handed_off")
+
+    def release_scheduled_initial_turn(self, binding_id: str, turn_id: str) -> None:
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT run_id FROM schedule_runs WHERE binding_id=? AND barrier != 'released' "
+                "AND (initial_turn_id=? OR (initial_turn_id IS NULL AND phase='starting_turn'))",
+                (binding_id, turn_id),
+            ).fetchone()
+            if row is not None:
+                run = self.schedules._set_run(row["run_id"], initial_turn_id=turn_id, barrier="released")
+                self.schedules._prune(run.plan_id)
+
+    def archive_binding(self, binding_id: str) -> ThreadBinding:
+        """Apply a proven native archive and release its scheduling barrier."""
+        with self._transaction():
+            binding = self.get(binding_id)
+            self._connection.execute(
+                "UPDATE scopes SET active_binding_id=NULL, updated_at=? "
+                "WHERE scope_key=? AND active_binding_id=?",
+                (_now(), binding.scope_key, binding_id),
+            )
+            self.schedules._release_binding(binding_id, binding_removed=False)
         return self.get(binding_id)
 
     def set_turn_settings(
@@ -1717,6 +1544,7 @@ class BindingStore:
             )
             if cursor.rowcount != 1:
                 raise BindingNotFound(binding.id)
+            self.schedules._release_binding(binding.id, binding_removed=True)
         return binding
 
     def assign_native_thread_id(self, binding_id: str, native_thread_id: str) -> None:
@@ -1961,6 +1789,21 @@ class BindingStore:
         sides = tuple(
             sorted(side_by_id.values(), key=lambda side: side.id)
         )
+        plan_rows = self._connection.execute(
+            "SELECT plan_id, revision FROM schedule_plans WHERE project_alias=? "
+            "AND deleted=0 ORDER BY plan_id LIMIT ?", (alias, limit + 1),
+        ).fetchall()
+        run_rows = self._connection.execute(
+            "SELECT run_id FROM schedule_runs WHERE project_alias=? "
+            "AND (barrier != 'released' OR error_code='publishing_unknown') "
+            "ORDER BY run_id LIMIT ?", (alias, limit + 1),
+        ).fetchall()
+        if len(plan_rows) > limit or len(run_rows) > limit:
+            raise ProjectDeleteLimitExceeded(
+                f"Project {alias} 的计划或未决调度交接超过单次上限 {limit}。"
+            )
+        scheduled_plans = tuple((row["plan_id"], row["revision"]) for row in plan_rows)
+        scheduled_runs = tuple(self.schedules.get_run(row["run_id"]) for row in run_rows)
         identity = {
             "project_alias": alias,
             "bindings": [
@@ -1978,11 +1821,20 @@ class BindingStore:
                 ]
                 for side in sides
             ],
+            "scheduled_plans": scheduled_plans,
+            "scheduled_runs": [
+                [run.id, run.plan_id, run.plan_revision, run.app_id, run.chat_id,
+                 run.project_alias, run.phase, run.root_message_id, run.topic_id,
+                 run.origin_message_id, run.binding_id, run.initial_turn_id]
+                for run in scheduled_runs
+            ],
         }
         fingerprint = hashlib.sha256(
             json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode()
         ).hexdigest()
-        return ProjectDeleteSnapshot(project, bindings, sides, fingerprint)
+        return ProjectDeleteSnapshot(
+            project, bindings, sides, fingerprint, scheduled_plans, scheduled_runs,
+        )
 
     def begin_project_delete(
         self,
@@ -2010,9 +1862,13 @@ class BindingStore:
                     "updated_at = ? WHERE alias = ? AND revision = ? AND deleted = 0",
                     (_now(), alias, expected_revision),
                 )
+                self.schedules._tombstone(
+                    "project_alias = ?", (alias,), self._wall_clock(),
+                )
                 reserved = ProjectDeleteSnapshot(
                     self.get_project(alias), snapshot.bindings, snapshot.sides,
-                    snapshot.fingerprint,
+                    snapshot.fingerprint, snapshot.scheduled_plans,
+                    snapshot.scheduled_runs,
                 )
             self._project_delete_intents[alias] = reserved
             return reserved
@@ -2050,6 +1906,14 @@ class BindingStore:
                     "SELECT 1 FROM bindings WHERE project_alias = ? LIMIT 1", (alias,)
                 ).fetchone() is not None:
                     raise ProjectInventoryConflict(f"Project {alias} 仍有关联 Sessions。")
+                if self._connection.execute(
+                    "SELECT 1 FROM schedule_runs WHERE project_alias=? "
+                    "AND (barrier != 'released' OR error_code='publishing_unknown') "
+                    "LIMIT 1", (alias,),
+                ).fetchone() is not None:
+                    raise ProjectInventoryConflict(
+                        f"Project {alias} 仍有未完成或未知的定时创建交接。"
+                    )
                 for item in intent.bindings:
                     if self._connection.execute(
                         "SELECT 1 FROM side_topics WHERE parent_binding_id = ? "

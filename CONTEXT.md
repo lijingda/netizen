@@ -86,7 +86,25 @@ start/resume 持有的、面向一个普通持久 Thread 的事件订阅。取�
 订阅的生命周期动作。它不是 Stop、Archive 或 Delete；下一条消息仍恢复同一个原生 Thread。
 
 **Turn**：`AsyncThread.turn()` 创建、由 `AsyncTurnHandle` 控制的一轮原生执行。
-Netizen 只在内存保留当前 handle，不持久化 Turn。
+它的历史和终态由原生 Codex 拥有。
+
+**Scheduled Plan / 定时计划**：用户要求按时间规则在指定 Project 执行工作、
+并在指定飞书会话（群聊或私聊）交付结果的可维护计划。计划带有独立的会话配置，默认采用
+创建时当前会话的选择。每次触发都创建独立话题，不依附创建者后续选择或修改的会话。
+_Avoid_：Goal、原生 plan/checklist（它们不是按时间触发的计划）。
+
+**Scheduled Plan Enablement / 计划启停状态**：用户是否允许计划继续自动触发的选择，分为已启用和已暂停。
+暂停不停止已经触发的执行，也不意味着计划已结束。
+
+**Scheduled Plan Cutoff / 计划截止时间**：重复计划允许触发的最后一个时刻，可以不设置。
+截止时刻包含在允许范围内，截止不停止已经触发的执行。
+
+**Scheduled Plan Completion / 计划结束状态**：当前规则已经没有后续或仍可处理的触发机会，且所有已触发执行均已明确收尾时，计划才为已结束。
+启动中、执行中或结果待确认的最后一次执行仍属于未结束；后续人工对话不计入这次定时执行。
+_Avoid_：已完成（容易与单次执行成功混淆）、状态（未说明是启停、结束还是执行情况）。
+
+**Scheduled Run / 定时执行**：一次定时触发的交接记录，以及成功交接后创建的普通持久
+会话。该会话在独立飞书话题中接受后续交流和普通管理；停止这次执行不等于暂停定时计划。
 
 **Confirmed Turn Terminal / 已确认 Turn 终态**：exact Turn 已由原生事实源确认为
 `completed`、`interrupted` 或 `failed`。三者都结束该 Turn，而不会结束或损坏承载它的

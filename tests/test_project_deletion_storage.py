@@ -10,6 +10,7 @@ from pathlib import Path
 
 from netizen.bindings import (
     BindingStore,
+    validate_channel_database,
     ProjectDeleteLimitExceeded,
     ProjectDeleting,
     ProjectDisabled,
@@ -17,13 +18,9 @@ from netizen.bindings import (
     ProjectNotFound,
     ProjectRevisionConflict,
     SideTopicState,
-    migrate_channel_database,
-    migrate_channel_database_v6_to_v7,
-    migrate_channel_database_v7_to_v8,
 )
 from netizen.domain import FeishuScope, ScopeKind
 from netizen.projects import ProjectError, ProjectRegistry, StaleProject, UnknownProject
-from tests.test_bindings import _create_migratable_v6_database
 
 
 class ProjectDeletionStoreTest(unittest.TestCase):
@@ -310,72 +307,30 @@ class ProjectDeletionRegistryTest(unittest.TestCase):
                 store.close()
 
 
-class ProjectTombstoneMigrationTest(unittest.TestCase):
-    def test_current_migration_preserves_v6_or_v7_rows_and_is_idempotent(self):
-        for version in (6, 7):
-            with self.subTest(version=version), tempfile.TemporaryDirectory() as raw:
-                path = Path(raw) / "channel.sqlite3"
-                _create_migratable_v6_database(path)
-                if version == 7:
-                    migrate_channel_database_v6_to_v7(path)
-                self.assertTrue(migrate_channel_database(path))
-                self.assertFalse(migrate_channel_database(path))
-                store = BindingStore(path)
-                try:
-                    project = store.get_project("legacy")
-                    self.assertFalse(project.deleted)
-                    self.assertEqual(project.revision, 1)
-                    self.assertEqual(store.get("legacy-binding").context_revision, 4)
-                    self.assertEqual(store.get_side_topic("legacy-side").state, SideTopicState.CLOSED)
-                    self.assertEqual(store._connection.execute("SELECT version FROM schema_version").fetchone()[0], 8)
-                    with self.assertRaises(sqlite3.IntegrityError):
-                        store._connection.execute("UPDATE projects SET deleted = 2")
-                finally:
-                    store.close()
-
-    def test_v7_start_rejected_without_mutation_and_malformed_migration_fails_closed(self):
-        with tempfile.TemporaryDirectory() as raw:
-            path = Path(raw) / "channel.sqlite3"
-            _create_migratable_v6_database(path)
-            migrate_channel_database_v6_to_v7(path)
-            before = path.read_bytes()
-            with self.assertRaisesRegex(RuntimeError, "recreate"):
-                BindingStore(path)
-            self.assertEqual(path.read_bytes(), before)
-            connection = sqlite3.connect(path)
-            connection.execute("ALTER TABLE projects ADD COLUMN deleted INTEGER DEFAULT 0")
-            connection.commit()
-            connection.close()
-            before = path.read_bytes()
-            with self.assertRaisesRegex(RuntimeError, "unexpected Project tombstone"):
-                migrate_channel_database_v7_to_v8(path)
-            self.assertEqual(path.read_bytes(), before)
-
+class ProjectTombstoneSchemaTest(unittest.TestCase):
     def test_current_schema_missing_routes_is_rejected_without_recreating_them(self):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "channel.sqlite3"
-            _create_migratable_v6_database(path)
-            migrate_channel_database(path)
+            BindingStore(path).close()
             connection = sqlite3.connect(path)
             connection.execute("DROP TABLE side_topics")
             connection.commit()
             connection.close()
             before = path.read_bytes()
             with self.assertRaisesRegex(RuntimeError, "missing required tables: side_topics"):
-                migrate_channel_database(path)
+                validate_channel_database(path)
             self.assertEqual(path.read_bytes(), before)
 
     def test_current_schema_wrong_tombstone_shape_is_rejected_without_mutation(self):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "channel.sqlite3"
-            _create_migratable_v6_database(path)
-            migrate_channel_database_v6_to_v7(path)
+            BindingStore(path).close()
             connection = sqlite3.connect(path)
+            connection.execute("ALTER TABLE projects DROP COLUMN deleted")
             connection.execute("ALTER TABLE projects ADD COLUMN deleted TEXT DEFAULT '0'")
-            connection.execute("UPDATE schema_version SET version = 8")
             connection.commit()
             connection.close()
             before = path.read_bytes()
             with self.assertRaisesRegex(RuntimeError, "tombstone column has invalid shape"):
-                migrate_channel_database(path)
+                validate_channel_database(path)
             self.assertEqual(path.read_bytes(), before)

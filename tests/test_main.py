@@ -230,9 +230,180 @@ class MainConfigurationTest(unittest.TestCase):
             self.assertFalse(path.exists())
 
 
+class FakeScheduleMcpRunner:
+    config_overrides = (
+        'mcp_servers.netizen_scheduler_test={url="http://127.0.0.1:32123/mcp", '
+        'bearer_token_env_var="NETIZEN_SCHEDULE_MCP_TOKEN_TEST", enabled=true}',
+    )
+    app_server_env = {"NETIZEN_SCHEDULE_MCP_TOKEN_TEST": "temporary-test-token"}
+
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.bind_error: BaseException | None = None
+        self.callback = None
+        events.append("mcp:init")
+
+    async def bind(self) -> None:
+        self.events.append("mcp:bind")
+        if self.bind_error is not None:
+            raise self.bind_error
+
+    def attach(self, callback: object) -> None:
+        self.callback = callback
+        self.events.append("mcp:attach")
+
+    def open_admission(self) -> None:
+        if self.callback is None:
+            raise AssertionError("MCP admission opened without management")
+        self.events.append("mcp:open")
+
+    def close_admission(self) -> None:
+        self.events.append("mcp:admission")
+
+    async def drain(self, deadline: float) -> None:
+        self.deadline = deadline
+        self.events.append("mcp:drain")
+
+    async def close(self) -> None:
+        self.events.append("mcp:close")
+
+
+class FakeScheduler:
+    def __init__(self, events: list[str], **options: object) -> None:
+        self.events = events
+        self.options = options
+        self.recovery_error: BaseException | None = None
+        events.append("scheduler:init")
+
+    async def recover(self) -> None:
+        self.events.append("scheduler:recover")
+        if self.recovery_error is not None:
+            raise self.recovery_error
+
+    def start(self) -> None:
+        self.events.append("scheduler:start")
+
+    def wake(self) -> None:
+        self.events.append("scheduler:wake")
+
+    async def refresh(self, plan_id: str) -> None:
+        self.events.append("scheduler:refresh")
+
+    def close_admission(self) -> None:
+        self.events.append("scheduler:admission")
+
+    async def close(self) -> None:
+        self.events.append("scheduler:close")
+
+    async def drain(self, deadline: float) -> None:
+        self.deadline = deadline
+        self.events.append("scheduler:drain")
+
+    async def drain_project_creation(self, alias: str, deadline: float) -> bool:
+        return True
+
+
 class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.schedule_events: list[str] = []
+        self.mcp_runners: list[FakeScheduleMcpRunner] = []
+        self.schedulers: list[FakeScheduler] = []
+        self.mcp_bind_error: BaseException | None = None
+        self.schedule_recovery_error: BaseException | None = None
+
+        def make_mcp() -> FakeScheduleMcpRunner:
+            runner = FakeScheduleMcpRunner(self.schedule_events)
+            runner.bind_error = self.mcp_bind_error
+            self.mcp_runners.append(runner)
+            return runner
+
+        def make_scheduler(**kwargs: object) -> FakeScheduler:
+            scheduler = FakeScheduler(self.schedule_events, **kwargs)
+            scheduler.recovery_error = self.schedule_recovery_error
+            self.schedulers.append(scheduler)
+            return scheduler
+
+        self.enterContext(patch("netizen.main.ScheduleMcpRunner", make_mcp))
+        self.enterContext(patch("netizen.main.Scheduler", make_scheduler))
+
+    def _make_core(self, root: Path) -> ServiceCore:
+        configured = settings(root)
+        store = BindingStore()
+        self.addCleanup(store.close)
+        return ServiceCore(
+            settings=configured,
+            channel=SimpleNamespace(  # type: ignore[arg-type]
+                safety=None, update_policy=lambda **_kwargs: None,
+            ),
+            store=store,
+            projects=ProjectRegistry(
+                store=store, projects=configured.projects,
+                project_root=configured.project_root,
+            ),
+        )
+
+    async def test_schedule_mcp_bind_failure_stops_before_codex(self) -> None:
+        self.mcp_bind_error = OSError("schedule listener failed")
+        with tempfile.TemporaryDirectory() as raw:
+            core = self._make_core(Path(raw))
+            with patch("netizen.main.AsyncCodex") as codex_constructor:
+                with self.assertRaisesRegex(OSError, "schedule listener failed"):
+                    await core.start()
+                codex_constructor.assert_not_called()
+            with self.assertRaisesRegex(RuntimeError, "not ready"):
+                core.open_admission()
+
+        self.assertEqual(len(self.mcp_runners), 1)
+        self.assertEqual(self.schedulers, [])
+        self.assertEqual(self.schedule_events.count("mcp:close"), 1)
+        self.assertNotIn("mcp:open", self.schedule_events)
+
+    async def test_recovery_failure_closes_schedule_components_and_native_transport(self) -> None:
+        self.schedule_recovery_error = RuntimeError("recovery failed")
+        events = self.schedule_events
+        codex = SimpleNamespace(
+            close=AsyncMock(side_effect=lambda: events.append("codex:close")),
+        )
+        codex.__aenter__ = AsyncMock(return_value=codex)
+        cleanup = SimpleNamespace(
+            clean_thread=AsyncMock(), has_running=AsyncMock(return_value=False),
+            unsubscribe=AsyncMock(return_value="unsubscribed"),
+        )
+
+        class FakeApplication:
+            def __init__(self, **_kwargs: object) -> None:
+                events.append("application:init")
+
+            async def dispatch_scheduled_run(self, claim: object) -> None:
+                raise AssertionError("recovery cannot dispatch a new occurrence")
+
+        with tempfile.TemporaryDirectory() as raw:
+            core = self._make_core(Path(raw))
+            with (
+                patch("netizen.main.AsyncCodex", return_value=codex) as constructor,
+                patch("netizen.main.PinnedExperimentalTerminalCleanup", return_value=cleanup),
+                patch("netizen.main.AppServerThreadSubscriptionControl", return_value=cleanup),
+                patch("netizen.main.ChannelApplication", FakeApplication),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "recovery failed"):
+                    await core.start()
+                constructor.assert_called_once()
+                codex.close.assert_awaited_once()
+            with self.assertRaisesRegex(RuntimeError, "not ready"):
+                core.open_admission()
+
+        self.assertEqual(events.count("mcp:close"), 1)
+        self.assertEqual(events.count("scheduler:close"), 1)
+        self.assertEqual(events.count("scheduler:drain"), 1)
+        self.assertLess(events.index("scheduler:admission"), events.index("scheduler:close"))
+        self.assertLess(events.index("scheduler:drain"), events.index("codex:close"))
+        self.assertLess(events.index("mcp:close"), events.index("codex:close"))
+        self.assertNotIn("mcp:open", events)
+        self.assertNotIn("scheduler:start", events)
+
     async def test_admin_listener_binds_before_codex_and_opens_explicitly(self) -> None:
         events: list[str] = []
+        self.schedule_events = events
 
         class FakeAdminRunner:
             def __init__(self, **_kwargs: object) -> None:
@@ -324,10 +495,36 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             ):
                 await core.start()
                 self.assertLess(events.index("admin:bind"), events.index("codex:init"))
+                self.assertLess(events.index("mcp:bind"), events.index("codex:init"))
                 self.assertLess(events.index("codex:enter"), events.index("admin:attach"))
                 self.assertNotIn("admin:open", events)
+                self.assertNotIn("mcp:open", events)
+                self.assertNotIn("scheduler:start", events)
+                self.assertIn("scheduler:recover", events)
+                self.assertIs(self.schedulers[0].options["bindings"], store)
+                self.assertIs(self.schedulers[0].options["runtime"], core._runtime)
+                self.assertEqual(self.schedulers[0].options["app_id"], configured.app_id)
+                self.assertEqual(
+                    self.schedulers[0].options["dispatch"],
+                    core.application.dispatch_scheduled_run,
+                )
+                with patch.object(
+                    core._management.schedules, "manage",
+                    new=AsyncMock(return_value={"ok": True}),
+                ) as manage:
+                    result = await self.mcp_runners[0].callback(
+                        {"mode": "list"}, "exact-calling-thread",
+                    )
+                    self.assertEqual(result, {"ok": True})
+                    manage.assert_awaited_once_with(
+                        {"mode": "list"}, native_thread_id="exact-calling-thread",
+                    )
                 core.open_admission()
-                self.assertEqual(events[-1], "admin:open")
+                self.assertIn("admin:open", events)
+                self.assertIn("mcp:open", events)
+                self.assertIn("scheduler:start", events)
+                self.assertLess(events.index("scheduler:recover"), events.index("mcp:open"))
+                self.assertLess(events.index("scheduler:recover"), events.index("scheduler:start"))
                 await core.close()
 
         self.assertIn("admin:close-listener", events)
@@ -471,10 +668,13 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             projects=SimpleNamespace(),  # type: ignore[arg-type]
         )
         core._admin = FakeAdmin()  # type: ignore[assignment]
+        core._schedule_mcp = FakeScheduleMcpRunner(events)  # type: ignore[assignment]
+        core._scheduler = FakeScheduler(events)  # type: ignore[assignment]
         core._runtime = FakeRuntime()  # type: ignore[assignment]
         core._management = FakeManagement()  # type: ignore[assignment]
         core.application = FakeApplication()  # type: ignore[assignment]
         core._codex = FakeCodex()  # type: ignore[assignment]
+        events.clear()
 
         await core.close()
         await core.close()
@@ -496,7 +696,23 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             "admin:auth",
             "store:close",
         )
-        self.assertEqual(tuple(events), expected)
+        self.assertEqual(
+            tuple(event for event in events if not event.startswith(("mcp:", "scheduler:"))),
+            expected,
+        )
+        for first, second in (
+            ("mcp:admission", "mcp:drain"),
+            ("scheduler:admission", "scheduler:close"),
+            ("scheduler:close", "scheduler:drain"),
+            ("mcp:drain", "runtime:interrupt"),
+            ("mcp:close", "store:close"),
+            ("scheduler:drain", "runtime:interrupt"),
+        ):
+            self.assertLess(events.index(first), events.index(second))
+        for event in ("mcp:close", "scheduler:close", "scheduler:drain"):
+            self.assertEqual(events.count(event), 1)
+        self.assertEqual(core._schedule_mcp.deadline, core._scheduler.deadline)
+        self.assertEqual(core._scheduler.deadline, core._management.deadline)
 
     async def test_shutdown_retries_unfinished_management_close_with_same_deadline(self) -> None:
         for failure in ("timeout", "cancel", "error"):
@@ -681,6 +897,14 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             )
             try:
                 with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "PATH": "/inherited/tools:/usr/bin",
+                            "CODEX_HOME": "/inherited/codex",
+                            "NETIZEN_TEST_EXPORTED": "keep this exact value",
+                        },
+                    ),
                     patch("netizen.main.AsyncCodex", FakeAsyncCodex),
                     patch(
                         "netizen.main.PinnedExperimentalTerminalCleanup",
@@ -699,7 +923,9 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                         FakeDeleteControl,
                     ),
                 ):
+                    captured_environment = dict(os.environ)
                     await core.start()
+                    self.assertEqual(os.environ, captured_environment)
                     assert core._runtime is not None
                     self.assertIs(
                         core._runtime._thread_delete_control.codex,
@@ -729,10 +955,13 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(config, CodexConfig)
         self.assertEqual(
             config.config_overrides,
-            ("allow_login_shell=false",),
+            ("allow_login_shell=false",) + FakeScheduleMcpRunner.config_overrides,
         )
         self.assertIsNone(config.codex_bin)
-        self.assertIsNone(config.env)
+        self.assertEqual(
+            config.env,
+            captured_environment | FakeScheduleMcpRunner.app_server_env,
+        )
         self.assertEqual(len(cleanup_codex), 1)
         self.assertEqual(boundary_codex, [cleanup_codex[0]])
         self.assertEqual(subscription_codex, [cleanup_codex[0]])
@@ -817,3 +1046,6 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(transport_closed)
         self.assertTrue(tasks_cancelled)
+        self.assertEqual(self.schedule_events.count("mcp:close"), 1)
+        self.assertEqual(self.schedule_events.count("scheduler:close"), 1)
+        self.assertEqual(self.schedule_events.count("scheduler:drain"), 1)

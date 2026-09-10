@@ -29,6 +29,20 @@ _PROGRESS_CARD_MAX_CONSECUTIVE_FAILURES = 3
 _GOAL_REPLY_CARD_CACHE_LIMIT = 256
 
 
+@dataclass(frozen=True, slots=True)
+class _CardUpdateAttempt:
+    """One public update call, retaining its response for terminal handoff."""
+
+    message_id: str
+    result: object | None
+
+    @property
+    def updated(self) -> bool:
+        # This is the existing presentation success projection, not proof of
+        # an exact destination or of a failed request having no side effects.
+        return self.result is not None and getattr(self.result, "success", True) is not False
+
+
 @dataclass(slots=True)
 class GoalCardOrigin:
     message_id: str | None
@@ -136,6 +150,8 @@ class _ReplyCardPresenter:
         thread_id: str,
         turn_id: str,
         origin: object,
+        reply: Callable[[OutboundCard], Awaitable[object]] | None = None,
+        validate_reply: Callable[[object], Awaitable[bool]] | None = None,
     ) -> bool:
         if self._closed:
             return False
@@ -165,7 +181,13 @@ class _ReplyCardPresenter:
         try:
             card = turn_progress_card(snapshot=snapshot)
             async with asyncio.timeout(self._operation_timeout_seconds):
-                result = await self._channel.reply(origin, card)
+                result = (
+                    await self._channel.reply(origin, card)
+                    if reply is None
+                    else await reply(card)
+                )
+                if validate_reply is not None and not await validate_reply(result):
+                    return False
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -219,10 +241,10 @@ class _ReplyCardPresenter:
         turn_id: str,
         activity: TurnActivitySnapshot | None,
         render: Callable[[TurnActivitySnapshot], OutboundCard],
-    ) -> bool:
+    ) -> _CardUpdateAttempt | None:
         session = self._sessions.pop((binding_id, thread_id, turn_id), None)
         if session is None:
-            return False
+            return None
         await self._stop_session(session)
         snapshot = activity or session.snapshot
         if (
@@ -237,10 +259,9 @@ class _ReplyCardPresenter:
                     "turn_id": session.turn_id,
                 },
             )
-            return False
+            return None
         try:
             card = render(snapshot)
-            return await self._update(session, card)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -251,7 +272,13 @@ class _ReplyCardPresenter:
                     "turn_id": session.turn_id,
                 },
             )
-            return False
+            return None
+        return await self._attempt_update_message(
+            session.message_id,
+            card,
+            binding_id=session.binding_id,
+            operation_id=session.turn_id,
+        )
 
     async def abandon(
         self,
@@ -1325,6 +1352,19 @@ class _ReplyCardPresenter:
         binding_id: str,
         operation_id: str,
     ) -> bool:
+        attempt = await self._attempt_update_message(
+            message_id, card, binding_id=binding_id, operation_id=operation_id,
+        )
+        return attempt.updated
+
+    async def _attempt_update_message(
+        self,
+        message_id: str,
+        card: OutboundCard,
+        *,
+        binding_id: str,
+        operation_id: str,
+    ) -> _CardUpdateAttempt:
         try:
             async with asyncio.timeout(self._operation_timeout_seconds):
                 result = await self._channel.update_card(
@@ -1342,8 +1382,9 @@ class _ReplyCardPresenter:
                     "message_id": message_id,
                 },
             )
-            return False
-        if getattr(result, "success", True) is False:
+            return _CardUpdateAttempt(message_id, None)
+        attempt = _CardUpdateAttempt(message_id, result)
+        if not attempt.updated:
             logger.error(
                 "failed to update progress card: unsuccessful result",
                 extra={
@@ -1352,8 +1393,7 @@ class _ReplyCardPresenter:
                     "message_id": message_id,
                 },
             )
-            return False
-        return True
+        return attempt
 
     @staticmethod
     async def _stop_session(

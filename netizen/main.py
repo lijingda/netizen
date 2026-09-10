@@ -65,6 +65,8 @@ from .sdk_gap_adapter import (
     SdkGapCapabilityUnavailable,
 )
 from .settings import Settings
+from .schedules.mcp import ScheduleMcpRunner
+from .schedules.scheduler import Scheduler
 from .terminal_cleanup import PinnedExperimentalTerminalCleanup
 from .turn_plan_observer import (
     PinnedTurnActivityObserver,
@@ -147,6 +149,8 @@ class ServiceCore:
         self._management: InstanceManagementService | None = None
         self._message_history_client: Any | None = None
         self._admin: AdminWebRunner | None = None
+        self._schedule_mcp: ScheduleMcpRunner | None = None
+        self._scheduler: Scheduler | None = None
         self.application: ChannelApplication | None = None
         self._started = False
         self._closed = False
@@ -168,6 +172,11 @@ class ServiceCore:
                 )
                 await self._admin.bind()
 
+            # Bind the native MCP transport before App Server initializes its
+            # catalog. Calls remain closed until the shared application is ready.
+            self._schedule_mcp = ScheduleMcpRunner()
+            await self._schedule_mcp.bind()
+
             expired_sides = self._store.expire_live_side_topics()
             if expired_sides:
                 logger.info(
@@ -175,7 +184,13 @@ class ServiceCore:
                     extra={"count": len(expired_sides)},
                 )
             self._codex = AsyncCodex(
-                CodexConfig(config_overrides=_CODEX_SERVICE_CONFIG_OVERRIDES)
+                CodexConfig(
+                    config_overrides=(
+                        *_CODEX_SERVICE_CONFIG_OVERRIDES,
+                        *self._schedule_mcp.config_overrides,
+                    ),
+                    env={**os.environ, **self._schedule_mcp.app_server_env},
+                )
             )
             await self._codex.__aenter__()
             terminal_cleanup = PinnedExperimentalTerminalCleanup(self._codex)
@@ -230,6 +245,14 @@ class ServiceCore:
                 scope_coordinator=scope_coordinator,
                 chat_labels=self._channel,
             )
+            schedules = self._management.enable_schedules(
+                app_id=self._settings.app_id, chat_info=self._channel,
+            )
+
+            async def manage_schedule(request: dict[str, Any], thread_id: str | None) -> dict[str, Any]:
+                return await schedules.manage(request, native_thread_id=thread_id)
+
+            self._schedule_mcp.attach(manage_schedule)
             if self._admin is not None:
                 self._admin.attach_management(self._management)
             self._message_history_client = (
@@ -251,6 +274,15 @@ class ServiceCore:
                 ),
                 management=self._management,
             )
+            self._scheduler = Scheduler(
+                bindings=self._store, runtime=self._runtime,
+                app_id=self._settings.app_id,
+                dispatch=self.application.dispatch_scheduled_run,
+            )
+            schedules.set_wake_handler(self._scheduler.wake)
+            schedules.set_refresh_handler(self._scheduler.refresh)
+            self._management.set_schedule_creation_drain(self._scheduler.drain_project_creation)
+            await self._scheduler.recover()
             if expired_sides:
                 await self.application.refresh_expired_side_cards(expired_sides)
             self._started = True
@@ -263,9 +295,29 @@ class ServiceCore:
             raise RuntimeError("service core is not ready for admission")
         if self._admin is not None:
             self._admin.open_admission()
+        if self._schedule_mcp is not None:
+            self._schedule_mcp.open_admission()
+        if self._scheduler is not None:
+            self._scheduler.start()
 
     async def _close_partial_start(self) -> None:
         deadline = asyncio.get_running_loop().time() + _SHUTDOWN_BUDGET_SECONDS
+        if self._scheduler is not None:
+            self._scheduler.close_admission()
+            await _cleanup_with_budget(
+                "partial Scheduler close", self._scheduler.close,
+                deadline=deadline, cap=5,
+            )
+            await _cleanup_with_budget(
+                "partial scheduled dispatch drain", lambda: self._scheduler.drain(deadline),
+                deadline=deadline, cap=10,
+            )
+        if self._schedule_mcp is not None:
+            self._schedule_mcp.close_admission()
+            await _cleanup_with_budget(
+                "partial schedule MCP close", self._schedule_mcp.close,
+                deadline=deadline, cap=5,
+            )
         if self._admin is not None:
             await _cleanup_with_budget(
                 "partial Admin listener close",
@@ -310,6 +362,10 @@ class ServiceCore:
         deadline = asyncio.get_running_loop().time() + _SHUTDOWN_BUDGET_SECONDS
         management_closed = self._management is None
         try:
+            if self._scheduler is not None:
+                self._scheduler.close_admission()
+            if self._schedule_mcp is not None:
+                self._schedule_mcp.close_admission()
             if self._admin is not None:
                 self._admin.close_admission()
             try:
@@ -321,6 +377,11 @@ class ServiceCore:
                 logger.exception("failed to disable Feishu admission")
             if self._runtime is not None:
                 self._runtime.close_admission()
+            if self._scheduler is not None:
+                await _cleanup_with_budget(
+                    "Scheduler timer close", self._scheduler.close,
+                    deadline=deadline, cap=3,
+                )
             if self._admin is not None:
                 await _cleanup_with_budget(
                     "Admin listener close",
@@ -342,6 +403,16 @@ class ServiceCore:
                     lambda: self._admin.drain(deadline),
                     deadline=deadline,
                     cap=_SHUTDOWN_BUDGET_SECONDS,
+                )
+            if self._schedule_mcp is not None:
+                await _cleanup_with_budget(
+                    "schedule MCP handler drain", lambda: self._schedule_mcp.drain(deadline),
+                    deadline=deadline, cap=10,
+                )
+            if self._scheduler is not None:
+                await _cleanup_with_budget(
+                    "scheduled dispatch drain", lambda: self._scheduler.drain(deadline),
+                    deadline=deadline, cap=10,
                 )
             if self._management is not None:
                 management_closed = await _cleanup_with_budget(
@@ -410,6 +481,11 @@ class ServiceCore:
                         )
                     if self._admin is not None:
                         self._admin.close_auth()
+                    if self._schedule_mcp is not None:
+                        await _cleanup_with_budget(
+                            "schedule MCP transport close", self._schedule_mcp.close,
+                            deadline=deadline, cap=5,
+                        )
                     await _cleanup_with_budget(
                         "Binding Store close",
                         self._store.aclose,

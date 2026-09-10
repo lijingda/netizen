@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import importlib.resources
 import ipaddress
@@ -40,6 +41,7 @@ from .presentation import (
     _release_disposition_message,
     _runtime_binding_json,
     _runtime_side_json,
+    _schedule_plan_json,
     _settings_json,
     _stop_disposition_message,
 )
@@ -114,6 +116,7 @@ from ..domain import MentionContextMode, ScopeKind
 from ..management import (
     ActivePointerChanged,
     BindingStatusProjection,
+    ChatLabel,
     BindingScopeMismatch,
     CurrentSideTarget,
     ExactBindingTarget,
@@ -135,6 +138,7 @@ from ..projects import (
     UnknownProject,
 )
 from ..deployment.update_protocol import UpdateProtocolError, validate_target
+from ..schedules.models import AmbiguousLocalTime, ScheduleError, resolve_once_local
 
 
 logger = logging.getLogger(__name__)
@@ -204,6 +208,7 @@ class AdminActionPreconditions:
     side_topic_id: ExpectedValue[str]
     side_root_message_id: ExpectedValue[str]
     inventory_fingerprint: ExpectedValue[str]
+    schedule_revision: ExpectedValue[int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -475,6 +480,8 @@ class AdminWebApplication:
             )
         if route == ("GET", "/api/v1/projects"):
             return await self._projects(context)
+        if route == ("GET", "/api/v1/schedules"):
+            return await self._schedules(context)
         if route == ("GET", "/api/v1/sessions"):
             return await self._sessions(context)
         if route == ("GET", "/api/v1/projects/options"):
@@ -490,6 +497,9 @@ class AdminWebApplication:
             )
 
         mutations: dict[str, Callable[[_RequestContext], Awaitable[Response]]] = {
+            "/api/v1/schedules/create": self._schedule_create,
+            "/api/v1/schedules/update": self._schedule_update,
+            "/api/v1/schedules/delete": self._schedule_delete,
             "/api/v1/updates/check": self._updates_check,
             "/api/v1/updates/install": self._updates_install,
             "/api/v1/updates/restart": self._updates_restart,
@@ -618,6 +628,157 @@ class AdminWebApplication:
         return _json_response(
             202, {"requestId": context.request.request_id, "operation": operation}
         )
+
+    async def _schedules(self, context: _RequestContext) -> Response:
+        mode = _optional_one(context.query, "mode") or "list"
+        allowed = {
+            "list": {"mode", "chat_id", "project", "enabled", "ended", "cursor"},
+            "view": {"mode", "plan_id"},
+            "runs": {"mode", "plan_id", "cursor"},
+            "preview": {"mode", "schedule", "plan_id", "chat_id", "session_settings", "local_at", "utc_offset", "local_end_at", "end_utc_offset"},
+            "options": {"mode", "chat_id"},
+        }
+        if mode not in allowed:
+            raise AdminWebError(400, "invalid_query", "定时任务查询类型无效。")
+        _require_query_keys(context.query, allowed[mode])
+        request: dict[str, object] = {"mode": mode}
+        for key in allowed[mode] - {"mode", "enabled", "ended", "schedule", "session_settings"}:
+            value = _optional_text_query(context.query, key)
+            if value is not None:
+                request[key] = value
+        if mode == "list":
+            request["all"] = True
+            for key in ("enabled", "ended"):
+                value = _optional_bool_query(context.query, key)
+                if value is not None:
+                    request[key] = value
+        if mode == "preview":
+            raw = _optional_text_query(context.query, "schedule", maximum=2048)
+            try:
+                schedule = json.loads(raw or "null")
+            except ValueError:
+                raise AdminWebError(400, "invalid_query", "时间规则无效。") from None
+            if not isinstance(schedule, dict):
+                raise AdminWebError(400, "invalid_query", "时间规则无效。")
+            preview_request = {key: value for key, value in request.items() if key != "mode"}
+            local_at = preview_request.pop("local_at", None)
+            utc_offset = preview_request.pop("utc_offset", None)
+            local_end_at = preview_request.pop("local_end_at", None)
+            end_utc_offset = preview_request.pop("end_utc_offset", None)
+            local_fields = (("at", local_at, utc_offset), ("end_at", local_end_at, end_utc_offset))
+            previous = None
+            if any(local is not None or offset is not None for _, local, offset in local_fields) and "plan_id" in preview_request:
+                current = await self._management.schedules.manage(
+                    {"mode": "view", "plan_id": preview_request["plan_id"]}, source="admin",
+                )
+                _require_schedule_success(current)
+                previous = current["plan"]["schedule"]
+            for field, local, offset in local_fields:
+                if local is None and offset is None:
+                    continue
+                supported = schedule.get("kind") == "once" if field == "at" else schedule.get("kind") in {"daily", "weekly", "interval"}
+                if not supported or local is None or field in schedule:
+                    raise AdminWebError(400, "invalid_input", "当地执行时间仅用于一次性规则，截止时间仅用于重复规则，且不能与带偏移时间同时指定。")
+                original_at = previous.get(field) if previous and previous["timezone"] == schedule.get("timezone") else None
+                try:
+                    schedule[field] = resolve_once_local(
+                        local, schedule.get("timezone"), original_at=original_at, utc_offset=offset,
+                    )
+                except AmbiguousLocalTime as error:
+                    return _json_response(400, {"requestId": context.request.request_id,
+                        "code": "ambiguous_end_time" if field == "end_at" else error.code,
+                        "message": str(error), "choices": error.choices})
+                except ScheduleError as error:
+                    raise AdminWebError(400, error.code, str(error)) from error
+            preview_request["schedule"] = schedule
+            settings_raw = _optional_text_query(context.query, "session_settings", maximum=4096)
+            if settings_raw is not None:
+                try:
+                    settings = json.loads(settings_raw)
+                except ValueError:
+                    raise AdminWebError(400, "invalid_query", "会话配置无效。") from None
+                if not isinstance(settings, dict):
+                    raise AdminWebError(400, "invalid_query", "会话配置无效。")
+                preview_request["session_settings"] = settings
+            result = await self._management.schedules.preview(preview_request)
+        else:
+            result = await self._management.schedules.manage(request, source="admin")
+        _require_schedule_success(result)
+        if mode == "list":
+            chats = await self._management.resolve_chat_labels(
+                (plan["chat_id"] for plan in result["plans"]),
+                deadline=asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS,
+            )
+            result = {
+                **result,
+                "plans": [self._schedule_plan(context, plan, chats[plan["chat_id"]]) for plan in result["plans"]],
+                "actions": {"create": self._grant(
+                    context, "schedules.create", AdminActionTarget("schedule-registry", "schedules"),
+                    _empty_preconditions(),
+                )},
+            }
+        elif mode == "view":
+            plan = result["plan"]
+            chats = await self._management.resolve_chat_labels(
+                (plan["chat_id"],), deadline=asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS,
+            )
+            result = {**result, "plan": self._schedule_plan(context, plan, chats[plan["chat_id"]])}
+        return _json_response(200, {**result, "requestId": context.request.request_id})
+
+    def _schedule_plan(self, context: _RequestContext, plan: dict[str, Any], chat: ChatLabel) -> dict[str, Any]:
+        target = AdminActionTarget("schedule", plan["id"])
+        preconditions = _empty_preconditions(
+            schedule_revision=ExpectedValue.expect(plan["revision"]),
+        )
+        return {**_schedule_plan_json(plan, chat), "actions": {
+            mode: self._grant(context, f"schedules.{mode}", target, preconditions)
+            for mode in ("update", "delete")
+        }}
+
+    async def _schedule_create(self, context: _RequestContext) -> Response:
+        return await self._schedule_mutate(context, "create")
+
+    async def _schedule_update(self, context: _RequestContext) -> Response:
+        return await self._schedule_mutate(context, "update")
+
+    async def _schedule_delete(self, context: _RequestContext) -> Response:
+        return await self._schedule_mutate(context, "delete")
+
+    async def _schedule_mutate(self, context: _RequestContext, mode: str) -> Response:
+        _require_query_keys(context.query, set())
+        payload, grant = self._redeem(
+            context, f"schedules.{mode}",
+            expected_resource="schedule-registry" if mode == "create" else "schedule",
+            allowed_extra={"definition"} if mode != "delete" else set(),
+        )
+        definition = payload.get("definition", {})
+        if not isinstance(definition, dict) or set(definition) - {
+            "name", "instructions", "project", "chat_id", "schedule", "enabled", "session_settings",
+        }:
+            raise AdminWebError(400, "invalid_input", "定时任务定义字段无效。")
+        request: dict[str, object] = {
+            **definition,
+            "mode": mode,
+            # Only an opaque digest crosses into durable management deduplication;
+            # browser authentication/action credentials remain process-local.
+            "request_id": hashlib.sha256(str(payload["actionToken"]).encode()).hexdigest(),
+        }
+        if mode != "create":
+            request["plan_id"] = grant.target.target_id
+            request["expected_revision"] = _expected_value(
+                _grant_preconditions(grant).schedule_revision, "Schedule revision",
+            )
+
+        async def operate() -> dict[str, Any]:
+            result = await self._management.schedules.manage(request, source="admin")
+            _require_schedule_success(result)
+            return result
+
+        result = await self._mutation(
+            context, f"schedules.{mode}", grant.target.target_id,
+            operate(),
+        )
+        return _json_response(200, {**result, "requestId": context.request.request_id})
 
     async def _projects(self, context: _RequestContext) -> Response:
         allowed = {"cursor", "pageSize"}
@@ -1188,6 +1349,8 @@ class AdminWebApplication:
             "lazySessionCount": lazy_count,
             "materializedSessionCount": len(snapshot.bindings) - lazy_count,
             "sideCount": len(snapshot.sides),
+            "scheduledPlanCount": len(snapshot.scheduled_plans),
+            "scheduledRunCount": len(snapshot.scheduled_runs),
             "actions": {"delete": self._grant(
                 context, "projects.delete", AdminActionTarget("project", project.alias),
                 _empty_preconditions(
@@ -1217,6 +1380,7 @@ class AdminWebApplication:
             "inventory_changed": "关联会话在执行期间发生变化，请查看剩余项后重新确认。",
             "side_close_failed": "关联 Side 的关闭未完成，请先处理该 Side。",
             "side_creation_in_progress": "关联 Side 正在创建飞书话题，请等待创建完成后刷新并重新确认。",
+            "schedule_creation_in_progress": "关联定时任务仍在创建话题或执行交接结果未决，请查看剩余记录后重新确认。",
             "delete_failed": "删除未全部完成，请查看剩余会话状态后重新确认。",
         }
         if result.deleted:
@@ -1228,6 +1392,8 @@ class AdminWebApplication:
                 f"剩余 {len(result.remaining_sessions)} 个 Sessions、{result.remaining_side_count} 个 Side。"
                 + messages[result.code]
             )
+        if result.deleted_plan_count:
+            message += f"已删除 {result.deleted_plan_count} 个定时计划；后续会话清理失败也不会恢复计划。"
         return _json_response(200, {
             "requestId": context.request.request_id,
             "deleted": result.deleted,
@@ -1239,6 +1405,8 @@ class AdminWebApplication:
                 for binding in result.remaining_sessions
             ],
             "remainingSideCount": result.remaining_side_count,
+            "deletedPlanCount": result.deleted_plan_count,
+            "remainingScheduledRunCount": result.remaining_scheduled_run_count,
             "failedBindingId": result.failed_binding_id,
             "failedSideId": result.failed_side_id,
             "code": result.code,
@@ -2083,6 +2251,17 @@ def _require_body_keys(payload: Mapping[str, object], allowed: set[str]) -> None
 _ACTION_KEYS = {"csrfToken", "actionToken", "target"}
 
 
+def _require_schedule_success(result: dict[str, Any]) -> None:
+    if result.get("ok") is False:
+        error = result["error"]
+        code = error["code"]
+        status = {
+            "revision_conflict": 409, "request_conflict": 409,
+            "not_found": 404, "unavailable": 503,
+        }.get(code, 400)
+        raise AdminWebError(status, code, error["message"])
+
+
 def _action_target(payload: Mapping[str, object]) -> AdminActionTarget:
     raw = payload.get("target")
     if not isinstance(raw, dict):
@@ -2140,6 +2319,7 @@ def _empty_preconditions(
     side_topic_id: ExpectedValue[str] | None = None,
     side_root_message_id: ExpectedValue[str] | None = None,
     inventory_fingerprint: ExpectedValue[str] | None = None,
+    schedule_revision: ExpectedValue[int] | None = None,
 ) -> AdminActionPreconditions:
     return AdminActionPreconditions(
         active_binding_id or ExpectedValue.dont_check(),
@@ -2153,6 +2333,7 @@ def _empty_preconditions(
         side_topic_id or ExpectedValue.dont_check(),
         side_root_message_id or ExpectedValue.dont_check(),
         inventory_fingerprint or ExpectedValue.dont_check(),
+        schedule_revision or ExpectedValue.dont_check(),
     )
 
 

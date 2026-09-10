@@ -19,6 +19,9 @@ their cited ADRs before changing that boundary.
   [data and configuration](docs/design.md#数据与配置).
   Project deletion uses the exact inventory, tombstone and lifecycle boundaries
   in [ADR 0060](docs/adr/0060-delete-projects-with-exact-session-inventory.md).
+- Scheduled Plans, dispatch, ordinary topic Threads, and the dedicated MCP
+  management entry: [scheduled tasks](docs/design.md#定时任务) and
+  [ADR 0061](docs/adr/0061-schedule-ordinary-threads-in-feishu-topics.md).
 - Installation, release, permissions, and platform service management:
   [deployment](docs/deployment.md). Read its Agent relay procedure before
   installation or permission repair, and its relevant acceptance gates before
@@ -38,8 +41,10 @@ their cited ADRs before changing that boundary.
 - The in-process Admin Web is a management-only adapter over that same
   application/runtime boundary (ADR 0031). The one-shot Admin deployment process
   for upgrades and explicit restarts is the sole deployment exception
-  (ADR 0057/0059). Do not add another runtime, long-lived service, scheduler,
-  history model, or configuration layer.
+  (ADR 0057/0059). The sole in-process Scheduler shares that boundary; Admin
+  may maintain Scheduled Plans but cannot submit immediate Prompts (ADR 0061).
+  Do not add another runtime, long-lived service, scheduler, history model, or
+  configuration layer.
 - Preserve exact Scope/Binding-to-native-Thread identity. Running input steers
   the exact Turn; it is never queued, merged, or converted into another Turn.
   Unknown side effects fail closed at the documented operation-specific scope.
@@ -48,9 +53,12 @@ their cited ADRs before changing that boundary.
   `CODEX_HOME`, or cross-Thread execution limit.
 - Channel SQLite owns only the documented Scope/Binding/Project metadata,
   schema version, deduplication TTL keys, explicit Binding choices/revisions,
-  and Side routes/tombstones. Never store prompts, message bodies, responses,
-  Turn history/activity, card sessions, effective Codex configuration, or Admin
-  sessions/tokens/indexes/audit records. Side routes never store native Thread IDs.
+  and Side routes/tombstones. ADR 0061 narrowly adds current Scheduled Plan
+  instructions, minimal dispatch/Run metadata, exact initial Turn references,
+  and bounded management-request deduplication. Never store other prompts,
+  message bodies, responses, Turn history/activity, card sessions, effective
+  Codex configuration, or Admin sessions/tokens/indexes/audit records.
+  Side routes never store native Thread IDs.
 - Use exact-pinned official SDKs and public high-level APIs. Approved narrow
   adapters are terminal cleanup (ADR 0009), Goal/Skills (0014), Side boundary
   (0021), Thread unsubscribe (0028), Thread Delete (0037), and non-consuming
@@ -77,8 +85,11 @@ their cited ADRs before changing that boundary.
   single Instance Administrator is separate Admin Web authority, not multi-user
   RBAC, a Netizen allowlist, or Project ACLs. Native Codex controls model, tools,
   Skills, MCP, sandboxing, and environment policy except the documented Binding
-  Model/Effort/Speed intent and non-login tool boundary. New Threads use the
-  public SDK's `auto_review` default; Ask/Custom approval is not inherited.
+  Model/Effort/Speed intent, non-login tool boundary, and dedicated temporary
+  Scheduler MCP server entry (ADR 0061). This public process override must not
+  write user configuration, replace user MCP entries, or override developer/base
+  instructions. New Threads use the public SDK's `auto_review` default;
+  Ask/Custom approval is not inherited.
 - Unsupported native capabilities remain explicit gaps. Keep product non-goals
   in [design.md](docs/design.md#目标与边界); do not simulate them with prompts or
   local state.

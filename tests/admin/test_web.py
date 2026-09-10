@@ -65,6 +65,7 @@ from netizen.domain import GoalStatus, ScopeKind
 from netizen.management import (
     BindingStatusProjection,
     ChatLabel,
+    ChatLabelResolver,
     ClosedSide,
     CreatedBinding,
     InstanceManagementService,
@@ -89,6 +90,9 @@ from netizen.sdk_gap_adapter import GoalSnapshot
 
 
 class FakeManagement:
+    async def resolve_chat_labels(self, chat_ids, *, deadline):
+        return {chat_id: ChatLabelResolver.fallback(chat_id) for chat_id in chat_ids}
+
     def __init__(self, root: Path) -> None:
         self.native_delete_available = True
         self.calls: list[tuple[str, object]] = []
@@ -1927,7 +1931,8 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertIn('id="time-range-template"', html)
         self.assertIn('name="createdFrom" data-time-range-from', html)
         self.assertIn('name="createdBefore" data-time-range-before', html)
-        self.assertEqual(html.count('type="datetime-local"'), 2)
+        time_range_template = html.split('<template id="time-range-template">', 1)[1].split("</template>", 1)[0]
+        self.assertEqual(time_range_template.count('type="datetime-local"'), 2)
         self.assertIn('role="dialog"', html)
         self.assertIn('role="alert" aria-live="polite"', html)
         self.assertNotIn("ISO-8601", html)
