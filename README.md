@@ -80,8 +80,16 @@ sh /tmp/netizen-install.sh
 [当前版本安装器](https://github.com/lijingda/netizen/releases/download/v0.6.1/install.sh)；
 已有应用的权限也会在激活前检查。
 
-由 Agent 代装时，先阅读[Agent 安装流程](docs/deployment.md#agent-驱动首次安装)，
-按工具能力选择浏览器或凭据文件交接；不要把 App Secret 发到聊天里。
+由 Agent 代装时，直接执行以下命令，再按安装器输出的提示继续：
+
+```sh
+curl -fsSL https://github.com/lijingda/netizen/releases/latest/download/install.sh -o /tmp/netizen-install.sh
+sh /tmp/netizen-install.sh </dev/null
+```
+
+缺少凭据时，按提示通过受保护文件补全后重跑，不要把 App Secret 发到聊天里。
+若出现浏览器验证链接，Agent 应把链接交给用户确认，并保留安装进程、继续读取输出。
+特殊交互方式与排障见[Agent 安装说明](docs/deployment.md#agent-驱动首次安装)。
 
 ### 3. 在飞书开始第一次对话
 

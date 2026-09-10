@@ -76,8 +76,9 @@ Admin 默认监听 `0.0.0.0:8787`，面向受信内网中的单一实例管理�
 
 要把当前工作区安装为服务，使用 `./dev-install.sh`，包括未提交修改；`./install.sh`
 安装的是最新正式 Release。两者使用相同激活和回滚事务，不执行 `git pull`。首次安装、
-服务环境与启停流程见[部署文档](deployment.md#安装)，Agent 执行时还需遵循其
-[交接流程](deployment.md#agent-驱动首次安装)。
+服务环境与启停流程见[部署文档](deployment.md#安装)。Agent 安装当前工作区可直接执行
+`./dev-install.sh </dev/null` 并按输出继续；其他交互方式与排障见
+[Agent 安装说明](deployment.md#agent-驱动首次安装)。
 
 ## 私有运维记录
 
