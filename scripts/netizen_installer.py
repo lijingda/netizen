@@ -45,7 +45,7 @@ from scripts.install_user_guide_skill import (  # noqa: E402
     remove_user_guide_skill,
 )
 from netizen.bindings import (  # noqa: E402
-    migrate_channel_database,
+    validate_channel_database,
 )
 from netizen.deployment.update_protocol import (  # noqa: E402
     ENV_ARCHIVE_SHA256,
@@ -107,7 +107,6 @@ CHANNEL_DATABASE_FILES = (
     "channel.sqlite3-shm",
     "channel.sqlite3-wal",
 )
-SQLITE_DATABASE_HEADER = b"SQLite format 3\x00"
 SOURCE_DIRECTORIES = ("netizen", "scripts", "skills", "deploy", "docs", "tests")
 SOURCE_FILES = (
     ".github/workflows/ci.yml",
@@ -1724,7 +1723,7 @@ def preflight_admin_bind(binding: AdminBind) -> None:
 
 @contextlib.contextmanager
 def _hold_service_lifetime_lock(layout: Layout) -> Iterator[None]:
-    """Exclude service startup while rollback-protected state is migrated."""
+    """Exclude service startup while rollback-protected state is inspected."""
 
     path = layout.lifetime_lock_file
     flags = os.O_RDWR | os.O_CREAT
@@ -1748,7 +1747,7 @@ def _hold_service_lifetime_lock(layout: Layout) -> Iterator[None]:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise InstallError(
-                "service lifetime lock is still held; refusing to migrate "
+                "service lifetime lock is still held; refusing to inspect "
                 "the Channel database"
             ) from error
         locked = True
@@ -1963,22 +1962,15 @@ def activate_release(
             if _path_exists(channel_database):
                 # The old service is already confirmed stopped above. Holding
                 # its stable lifetime lock closes the race with an external
-                # service start while the rollback snapshot and one-step
-                # schema migration are in progress.
+                # service start while capturing the rollback snapshot and
+                # validating the database.
                 with _hold_service_lifetime_lock(layout):
                     database_snapshot = _capture_database(
                         channel_data_dir,
                         Path(temp),
                     )
+                    validate_channel_database(channel_database)
                     _set_release_link(layout.current, release.root, layout)
-                    if (
-                        _has_sqlite_database_header(channel_database)
-                        and migrate_channel_database(channel_database)
-                    ):
-                        info(
-                            "migrated Channel database to schema v8 "
-                            "with existing metadata and Side Topic tombstones preserved"
-                        )
             else:
                 if should_start:
                     database_snapshot = _capture_database(
@@ -2156,15 +2148,6 @@ def _capture_database(data_dir: Path, temporary_root: Path) -> DatabaseSnapshot:
         saved_root=saved_root,
         existing_files=tuple(existing),
     )
-
-
-def _has_sqlite_database_header(path: Path) -> bool:
-    _require_regular_file(path, "Channel database")
-    try:
-        with path.open("rb") as database:
-            return database.read(len(SQLITE_DATABASE_HEADER)) == SQLITE_DATABASE_HEADER
-    except OSError as error:
-        raise InstallError(f"could not inspect Channel database {path}: {error}") from error
 
 
 def _restore_database(snapshot: DatabaseSnapshot | None) -> None:

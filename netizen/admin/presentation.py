@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from enum import Enum
 from typing import Any
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 from ..bindings import BindingTurnSettings
 from ..runtime.contracts import (
@@ -55,6 +57,28 @@ def _chat_open_url(chat: ChatLabel) -> str:
     else:
         query = urlencode({"openChatId": chat.chat_id})
     return f"https://applink.feishu.cn/client/chat/open?{query}"
+
+
+def _schedule_plan_json(plan: dict[str, Any], chat: ChatLabel) -> dict[str, Any]:
+    rule = plan.get("schedule")
+    local_at = None
+    local_end_at = None
+    if rule and rule["kind"] == "once":
+        local_at = datetime.fromisoformat(rule["at"]).astimezone(
+            ZoneInfo(rule["timezone"]),
+        ).replace(tzinfo=None).isoformat(timespec="minutes")
+    if rule and rule.get("end_at"):
+        local_end_at = datetime.fromisoformat(rule["end_at"]).astimezone(
+            ZoneInfo(rule["timezone"]),
+        ).replace(tzinfo=None).isoformat(timespec="minutes")
+    return {**plan, "once_local_at": local_at, "end_local_at": local_end_at, "chat": {
+        "chatId": chat.chat_id,
+        "chatLabel": chat.display_name,
+        "chatLabelResolved": chat.resolved,
+        "chatMode": chat.chat_mode,
+        "chatType": chat.chat_type,
+        "chatOpenUrl": _chat_open_url(chat),
+    }}
 
 
 def _jsonable(value: object) -> object:

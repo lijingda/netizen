@@ -6,6 +6,7 @@ const state = {
   sessions: null,
   sides: null,
   updates: null,
+  schedules: null,
   projectCursor: null,
   sideCursor: null,
   sessionPage: {
@@ -37,6 +38,8 @@ async function api(path, options = {}) {
   if (!response.ok) {
     const error = new Error(data.message || `请求失败 (${response.status})`);
     error.status = response.status;
+    error.code = data.code;
+    error.choices = data.choices;
     throw error;
   }
   return data;
@@ -419,6 +422,8 @@ function confirmProjectDelete(preview) {
     + `\n\n关联 Sessions：${preview.sessionCount}（Lazy ${preview.lazySessionCount}，已创建 Thread ${preview.materializedSessionCount}）`
     + "\n范围包含所有归档会话，不受 Sessions 页面筛选影响。"
     + `\n关联 Side：${preview.sideCount}，将结束并移除。`
+    + `\n关联定时计划：${preview.scheduledPlanCount || 0}；正在交接或未决的定时执行：${preview.scheduledRunCount || 0}。`
+    + "\n定时计划将被删除；后续会话清理失败也不会恢复计划。"
     + "\n\n原生会话、派生子会话、Codex App/CLI 历史和本地会话登记将永久删除，无法恢复。"
     + "\n全部会话删除确认成功后，才会删除 Project 登记；部分失败时会保留 Project 和剩余会话。"
     + `\n\n磁盘代码目录保留：${preview.project.cwd}`,
@@ -468,6 +473,12 @@ async function deleteProject(project) {
         `Session ${session.shortId} · Scope ${session.scopeKey} · Binding ${session.bindingId}`);
       if (result.failedBindingId) details.push(`未确认删除的 Binding：${result.failedBindingId}`);
       if (result.failedSideId) details.push(`未确认收尾的 Side：${result.failedSideId}`);
+    }
+    if (result.deletedPlanCount) {
+      message += `\n已删除 ${result.deletedPlanCount} 个定时计划；后续会话清理失败也不会恢复计划。`;
+    }
+    if (result.remainingScheduledRunCount) {
+      details.push(`仍有 ${result.remainingScheduledRunCount} 条定时执行的交接或清理未确认。`);
     }
     return result;
   } catch (error) {
@@ -712,7 +723,7 @@ for (const root of document.querySelectorAll("[data-session-multi]")) {
   sessionMultiFilters.set(root.dataset.sessionMulti, initializeSessionMultiFilter(root));
 }
 
-async function loadSessionProjectOptions() {
+async function queryProjectOptions() {
   const options = [];
   const seenCursors = new Set();
   let cursor = null;
@@ -720,14 +731,19 @@ async function loadSessionProjectOptions() {
     const query = new URLSearchParams({ pageSize: "50" });
     if (cursor) query.set("cursor", cursor);
     const data = await api(`/api/v1/projects/options?${query}`);
-    options.push(...data.items.map((project) => [
-      project.alias, project.enabled ? project.alias : `${project.alias}（已停用）`,
-    ]));
+    options.push(...data.items);
     cursor = data.nextCursor;
     if (cursor && seenCursors.has(cursor)) throw new Error("Project 列表分页异常，请刷新重试。");
     if (cursor) seenCursors.add(cursor);
   } while (cursor);
-  sessionMultiFilters.get("project").setOptions(options);
+  return options;
+}
+
+async function loadSessionProjectOptions() {
+  const projects = await queryProjectOptions();
+  sessionMultiFilters.get("project").setOptions(projects.map((project) => [
+    project.alias, project.enabled ? project.alias : `${project.alias}（已停用）`,
+  ]));
 }
 
 function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
@@ -1498,6 +1514,593 @@ function rowByIdentity(selector, key, value) {
   return null;
 }
 
+function scheduleDate(value) {
+  if (value == null) return "—";
+  if (typeof value === "number") return new Date(value * 1000).toISOString();
+  return String(value);
+}
+
+function scheduleRuleLabel(rule) {
+  const kinds = { once: "一次性", daily: "每天", weekly: "每周", interval: "固定间隔" };
+  const days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+  const when = rule.kind === "interval" ? `每 ${rule.every_minutes} 分钟`
+    : rule.kind === "weekly" ? `${(rule.weekdays || []).map((day) => days[day]).join("、")} ${rule.at}`
+      : rule.kind === "once" ? String(rule.at).replace("T", " ") : rule.at;
+  const labels = [`${kinds[rule.kind] || rule.kind} · ${when} · ${rule.timezone}`];
+  if (rule.end_at) labels.push(`截止 ${scheduleLocalTime(rule.end_at)}（含）`);
+  return labels.join(" · ");
+}
+
+function scheduleLocalTime(value) {
+  return value ? String(value).replace("T", " ").replace(/(\d{2}:\d{2}):00(?=[+-]\d{2}:\d{2}$)/, "$1") : "—";
+}
+
+function schedulePlanState(plan) {
+  return `启停：${plan.enabled ? "已启用" : "已暂停"}\n结束：${plan.lifecycle.ended ? "已结束" : "未结束"}`;
+}
+
+function scheduleRunStatus(status) {
+  return { completed: "已完成", failed: "失败", interrupted: "已停止", inProgress: "执行中",
+    starting: "启动中", unknown: "结果待确认", unavailable: "结果暂不可用",
+    not_started: "尚未执行", expired: "已过期，未执行", missed: "已错过",
+    skipped_busy: "上次仍在执行，本次跳过", blocked_unknown: "上次结果待确认，本次跳过",
+    project_disabled: "Project 已停用，本次未执行", project_unavailable: "Project 不可用，本次未执行",
+    released: "调度已收尾", recovery_no_start: "服务恢复，本次未启动",
+    publishing_unknown: "话题投递待确认", deleted: "执行会话已删除",
+    initial_start_rejected: "启动被拒绝", publishing_failed: "话题发布失败",
+    scope_conflict: "话题已有会话，未启动", dispatch_rejected: "未启动" }[status] || "结果暂不可用";
+}
+
+function scheduleExecutionLabel(execution) {
+  const label = scheduleRunStatus(execution.status);
+  if (execution.kind === "none") return label;
+  if (execution.status === "deleted") return label;
+  if (execution.kind === "current") return `${execution.is_last ? "最后一次" : "本次"}${label}`;
+  if (["skipped_busy", "blocked_unknown", "project_disabled", "project_unavailable"].includes(execution.status)) return label;
+  return `上次${label}`;
+}
+
+function scheduleBlockedLabel(plan) {
+  return { blocked_unknown: "执行结果待确认", project_disabled: "Project 已停用",
+    project_unavailable: "Project 不可用" }[plan.blocked_reason] || "";
+}
+
+function scheduleNote(parent, value) {
+  const note = document.createElement("span");
+  note.className = "schedule-note";
+  note.textContent = value;
+  parent.append(note);
+}
+
+let scheduleEditor = null;
+let scheduleEditorSerial = 0;
+let schedulePrepared = null;
+let schedulePreviewSerial = 0;
+let scheduleDetailSerial = 0;
+let scheduleDetailId = null;
+let scheduleRunsCursor = null;
+let scheduleListCursor = null;
+let scheduleListQuery = null;
+let scheduleProjects = [];
+const pendingScheduleMutations = new Set();
+
+function scheduleInput(id) { return document.querySelector(`#schedule-${id}`); }
+
+function renderScheduleProjects() {
+  scheduleSelectOptions(scheduleInput("filter-project"), [["", "全部 Project"],
+    ...scheduleProjects.map((project) => [project.alias,
+      project.enabled ? project.alias : `${project.alias}（已停用）`])], scheduleInput("filter-project").value);
+  if (!scheduleEditor) return;
+  const selected = scheduleInput("project").value || scheduleEditor.plan?.project_alias || "";
+  const available = scheduleProjects.filter((project) => project.enabled || project.alias === selected);
+  scheduleSelectOptions(scheduleInput("project"), [["", "选择 Project"],
+    ...available.map((project) => [project.alias,
+      project.enabled ? project.alias : `${project.alias}（已停用）`])], selected);
+}
+
+function closeScheduleEditor({ saved = false } = {}) {
+  if (scheduleInput("fields").disabled && !saved) return;
+  scheduleEditorSerial += 1;
+  scheduleEditor = null;
+  invalidateSchedulePreview();
+  scheduleInput("editor").hidden = true;
+  scheduleInput("drawer").close();
+  document.body.classList.toggle("schedule-drawer-open", false);
+}
+
+function scheduleRuleFingerprint() {
+  return JSON.stringify({ rule: readScheduleRule(),
+    utc_offset: scheduleInput("kind").value === "once" ? scheduleInput("offset").value : "",
+    end_utc_offset: scheduleInput("kind").value !== "once" ? scheduleInput("end-offset").value : "" });
+}
+
+function resetScheduleOffset() {
+  scheduleInput("offset-field").hidden = true;
+  scheduleInput("offset").replaceChildren();
+  scheduleInput("offset").value = "";
+}
+
+function resetScheduleEndOffset() {
+  scheduleInput("end-offset-field").hidden = true;
+  scheduleInput("end-offset").replaceChildren();
+  scheduleInput("end-offset").value = "";
+}
+
+function defaultScheduleSessionSettings() {
+  return { turn_settings: null, reaction_pulse_enabled: false, progress_card_enabled: false,
+    message_context_mode: "current-only" };
+}
+
+function scheduleSessionSummary(settings) {
+  const model = settings.turn_settings;
+  const labels = [model ? `${model.model_id} / ${model.effort_id} / ${model.service_tier_id}` : "继承 Codex",
+    settings.message_context_mode === "catch-up" ? "补齐未读上下文" : "当前消息"];
+  if (settings.reaction_pulse_enabled) labels.push("表情反馈");
+  if (settings.progress_card_enabled) labels.push("进度卡片");
+  return labels.join(" · ");
+}
+
+function scheduleSelectOptions(node, choices, selected) {
+  node.replaceChildren();
+  for (const [value, label] of choices) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    node.append(option);
+  }
+  if (selected && !choices.some(([value]) => value === selected)) {
+    const option = document.createElement("option");
+    option.value = selected;
+    option.textContent = `${selected}（保留已存设置，当前目录不可用）`;
+    node.append(option);
+  }
+  node.value = selected || "";
+}
+
+function renderScheduleSessionSettings() {
+  const editor = scheduleEditor;
+  if (!editor) return;
+  const settings = editor.sessionDraft;
+  const current = settings.turn_settings;
+  const model = editor.models.find((item) => item.id === current?.model_id);
+  scheduleSelectOptions(scheduleInput("model"), [["", "继承 Codex"],
+    ...editor.models.map((item) => [item.id, item.display_name])], current?.model_id);
+  scheduleSelectOptions(scheduleInput("effort"), (model?.efforts || []).map((item) => [item.id, item.id]), current?.effort_id);
+  scheduleSelectOptions(scheduleInput("tier"), (model?.service_tiers || []).map((item) => [item.id, item.name || item.id]), current?.service_tier_id);
+  scheduleInput("effort").disabled = !model;
+  scheduleInput("tier").disabled = !model;
+  scheduleInput("context").value = settings.message_context_mode;
+  for (const option of scheduleInput("context").querySelectorAll("option")) {
+    option.disabled = option.value === "catch-up" && editor.contextAvailable === false;
+  }
+  scheduleInput("reactions").checked = settings.reaction_pulse_enabled;
+  scheduleInput("progress").checked = settings.progress_card_enabled;
+  scheduleInput("session-summary").textContent = scheduleSessionSummary(settings);
+  const notes = [];
+  if (editor.catalogMessage) notes.push(editor.catalogMessage);
+  if (current && !model && !editor.catalogMessage) notes.push("已保存的模型当前不可用，原配置保持不变。可调整其他配置，或显式选择新模型。");
+  if (editor.contextAvailable === false) notes.push("私聊目标不支持补齐未读上下文；请选择当前消息后保存。");
+  scheduleInput("session-note").textContent = notes.join(" ");
+}
+
+async function loadScheduleSessionOptions() {
+  const editor = scheduleEditor;
+  if (!editor) return;
+  const chatId = scheduleInput("chat").value.trim();
+  const serial = ++editor.optionsSerial;
+  const query = new URLSearchParams({ mode: "options" });
+  if (chatId) query.set("chat_id", chatId);
+  try {
+    const data = await api(`/api/v1/schedules?${query}`);
+    if (scheduleEditor !== editor || serial !== editor.optionsSerial) return;
+    editor.models = data.models;
+    editor.contextAvailable = data.context_mode_available;
+    editor.catalogMessage = data.model_catalog_error
+      ? `${data.model_catalog_error.message} 已有配置保持不变，仍可调整其他项目。` : "";
+    if (!editor.plan && !editor.settingsTouched) {
+      if (JSON.stringify(editor.sessionDraft) !== JSON.stringify(data.session_settings)) invalidateSchedulePreview();
+      editor.sessionBase = structuredClone(data.session_settings);
+      editor.sessionDraft = structuredClone(data.session_settings);
+    }
+    renderScheduleSessionSettings();
+  } catch (error) {
+    if (scheduleEditor !== editor || serial !== editor.optionsSerial) return;
+    editor.models = [];
+    editor.contextAvailable = null;
+    editor.catalogMessage = `${error.message} 可选配置暂未刷新，已有选择保持不变。`;
+    renderScheduleSessionSettings();
+  }
+}
+
+function changeScheduleSessionSettings(field) {
+  const editor = scheduleEditor;
+  if (!editor) return;
+  const settings = editor.sessionDraft;
+  editor.settingsTouched = true;
+  if (field === "model") {
+    const id = scheduleInput("model").value;
+    const selected = editor.models.find((item) => item.id === id);
+    if (!id) settings.turn_settings = null;
+    else if (selected) settings.turn_settings = { model_id: selected.id,
+      effort_id: selected.default_effort_id, service_tier_id: selected.default_service_tier_id };
+    else if (id === editor.sessionBase.turn_settings?.model_id) settings.turn_settings = structuredClone(editor.sessionBase.turn_settings);
+  } else if (field === "effort" && settings.turn_settings) {
+    settings.turn_settings.effort_id = scheduleInput("effort").value;
+  } else if (field === "tier" && settings.turn_settings) {
+    settings.turn_settings.service_tier_id = scheduleInput("tier").value;
+  } else if (field === "context") settings.message_context_mode = scheduleInput("context").value;
+  else if (field === "reactions") settings.reaction_pulse_enabled = scheduleInput("reactions").checked;
+  else if (field === "progress") settings.progress_card_enabled = scheduleInput("progress").checked;
+  invalidateSchedulePreview();
+  renderScheduleSessionSettings();
+}
+
+function scheduleSessionPatch() {
+  const patch = {};
+  if (!scheduleEditor) return patch;
+  if (!scheduleEditor.plan) return structuredClone(scheduleEditor.sessionDraft);
+  for (const [key, value] of Object.entries(scheduleEditor.sessionDraft)) {
+    if (JSON.stringify(value) !== JSON.stringify(scheduleEditor.sessionBase[key])) patch[key] = value;
+  }
+  return patch;
+}
+
+function readScheduleRule() {
+  const kind = scheduleInput("kind").value;
+  const rule = { kind, timezone: scheduleInput("timezone").value.trim() };
+  if (kind === "once") rule.at = scheduleInput("at").value.trim();
+  if (kind === "daily" || kind === "weekly") rule.at = scheduleInput("time").value;
+  if (kind === "weekly") rule.weekdays = Array.from(scheduleInput("weekdays").querySelectorAll("input"))
+    .filter((input) => input.checked).map((input) => Number(input.value));
+  if (kind === "interval") {
+    rule.every_minutes = Number(scheduleInput("every").value);
+    const previous = scheduleEditor?.plan?.schedule;
+    if (previous?.kind === "interval") {
+      rule.anchor = previous.anchor;
+    }
+  }
+  if (kind !== "once") {
+    const endAt = scheduleInput("end-at").value.trim();
+    if (endAt) rule.end_at = endAt;
+  }
+  return rule;
+}
+
+function invalidateSchedulePreview() {
+  schedulePrepared = null;
+  schedulePreviewSerial += 1;
+  scheduleInput("save").disabled = true;
+  scheduleInput("preview-times").replaceChildren();
+  scheduleInput("preview-message").textContent = "保存前请预览触发时间。";
+  for (const node of document.querySelectorAll("[data-schedule-rule]")) {
+    node.hidden = !node.dataset.scheduleRule.split(" ").includes(scheduleInput("kind").value);
+  }
+  scheduleInput("end-condition").disabled = scheduleInput("kind").value === "once";
+}
+
+function renderSchedulePreview(selector, preview) {
+  const list = document.querySelector(selector);
+  list.replaceChildren();
+  for (const item of preview || []) {
+    const li = document.createElement("li");
+    li.textContent = `${item.local}（UTC ${item.utc}）`;
+    list.append(li);
+  }
+}
+
+async function previewSchedule() {
+  const serial = ++schedulePreviewSerial;
+  schedulePrepared = null;
+  scheduleInput("save").disabled = true;
+  scheduleInput("preview-message").textContent = "正在计算触发时间…";
+  scheduleInput("preview-message").classList.toggle("error", false);
+  try {
+    const rule = readScheduleRule();
+    const fingerprint = scheduleRuleFingerprint();
+    const query = new URLSearchParams({ mode: "preview" });
+    if (rule.kind === "once") {
+      query.set("local_at", rule.at);
+      delete rule.at;
+      if (scheduleInput("offset").value) query.set("utc_offset", scheduleInput("offset").value);
+    }
+    if (rule.kind !== "once" && rule.end_at) {
+      query.set("local_end_at", rule.end_at);
+      delete rule.end_at;
+      if (scheduleInput("end-offset").value) query.set("end_utc_offset", scheduleInput("end-offset").value);
+    }
+    query.set("schedule", JSON.stringify(rule));
+    if (scheduleEditor?.plan) query.set("plan_id", scheduleEditor.plan.id);
+    const chatId = scheduleInput("chat").value.trim();
+    if (chatId) query.set("chat_id", chatId);
+    const settings = scheduleSessionPatch();
+    if (Object.keys(settings).length) query.set("session_settings", JSON.stringify(settings));
+    const data = await api(`/api/v1/schedules?${query}`);
+    if (serial !== schedulePreviewSerial || fingerprint !== scheduleRuleFingerprint()) return;
+    schedulePrepared = { fingerprint, schedule: data.schedule, hasFuture: Boolean(data.preview.length) };
+    renderSchedulePreview("#schedule-preview-times", data.preview);
+    scheduleInput("preview-message").textContent = data.preview.length
+      ? `预计触发时间 · ${data.schedule.timezone}`
+      : scheduleEditor?.plan ? "没有后续触发时间。仍可保存计划修改；已认领的执行可以继续。" : "没有后续触发时间，请调整规则。";
+    scheduleInput("save").disabled = (!data.preview.length && !scheduleEditor?.plan) || !scheduleEditor?.action;
+  } catch (error) {
+    if (serial !== schedulePreviewSerial) return;
+    if (["ambiguous_local_time", "ambiguous_end_time"].includes(error.code) && Array.isArray(error.choices)) {
+      const field = error.code === "ambiguous_end_time" ? "end-offset" : "offset";
+      scheduleSelectOptions(scheduleInput(field), [["", field === "end-offset" ? "选择截止时刻" : "选择触发时刻"],
+        ...error.choices.map((choice, index) => [choice.utc_offset,
+          `第 ${index + 1} 次 · UTC${choice.utc_offset}`])], "");
+      scheduleInput(`${field}-field`).hidden = false;
+    }
+    scheduleInput("preview-message").textContent = error.message;
+    scheduleInput("preview-message").classList.toggle("error", true);
+  }
+}
+
+function openScheduleEditor(plan = null) {
+  if (scheduleInput("fields").disabled) return;
+  scheduleEditorSerial += 1;
+  const action = plan ? plan.actions.update : state.schedules?.actions.create;
+  if (!action) return;
+  const settings = plan?.session_settings || defaultScheduleSessionSettings();
+  scheduleEditor = { plan, action, sessionBase: structuredClone(settings), sessionDraft: structuredClone(settings),
+    models: [], contextAvailable: null, optionsSerial: 0, settingsTouched: false, catalogMessage: "正在读取模型目录…" };
+  const rule = plan?.schedule || { kind: "daily", at: "09:00", timezone: state.schedules.default_timezone || "" };
+  scheduleInput("editor").hidden = false;
+  scheduleInput("editor-title").textContent = plan ? `编辑计划 · ${plan.name}` : "创建计划";
+  scheduleInput("name").value = plan?.name || "";
+  scheduleInput("project").value = plan?.project_alias || "";
+  renderScheduleProjects();
+  scheduleInput("chat").value = plan?.chat_id || "";
+  scheduleInput("instructions").value = plan?.instructions || "";
+  scheduleInput("enabled").checked = plan?.enabled ?? true;
+  scheduleInput("timezone").value = rule.timezone;
+  scheduleInput("kind").value = rule.kind;
+  scheduleInput("time").value = ["daily", "weekly"].includes(rule.kind) ? rule.at : "09:00";
+  scheduleInput("at").value = plan?.once_local_at || "";
+  resetScheduleOffset();
+  scheduleInput("end-at").value = plan?.end_local_at || "";
+  resetScheduleEndOffset();
+  scheduleInput("every").value = String(rule.every_minutes || 60);
+  for (const input of scheduleInput("weekdays").querySelectorAll("input")) {
+    input.checked = (rule.weekdays || []).includes(Number(input.value));
+  }
+  invalidateSchedulePreview();
+  scheduleInput("session-settings").open = true;
+  renderScheduleSessionSettings();
+  scheduleInput("preview-message").classList.toggle("error", false);
+  scheduleInput("close").disabled = false;
+  if (!scheduleInput("drawer").open) scheduleInput("drawer").showModal();
+  document.body.classList.toggle("schedule-drawer-open", true);
+  scheduleInput("name").focus();
+  scheduleInput("editor").querySelector(".schedule-editor-body").scrollTop = 0;
+  return loadScheduleSessionOptions();
+}
+
+async function editSchedule(plan) {
+  const serial = ++scheduleEditorSerial;
+  try {
+    const data = await api(`/api/v1/schedules?${new URLSearchParams({ mode: "view", plan_id: plan.id })}`);
+    if (serial !== scheduleEditorSerial) return;
+    await openScheduleEditor(data.plan);
+  } catch (error) { setStatus(error.message, true); }
+}
+
+async function saveSchedule(event) {
+  event.preventDefault();
+  if (!scheduleEditor?.action || !schedulePrepared
+      || schedulePrepared.fingerprint !== scheduleRuleFingerprint()) return;
+  const editor = scheduleEditor;
+  scheduleEditorSerial += 1;
+  const action = editor.action;
+  const hasFuture = schedulePrepared.hasFuture;
+  const definition = {
+    name: scheduleInput("name").value.trim(),
+    project: scheduleInput("project").value.trim(),
+    chat_id: scheduleInput("chat").value.trim(),
+    instructions: scheduleInput("instructions").value.trim(),
+    schedule: schedulePrepared.schedule,
+    enabled: scheduleInput("enabled").checked,
+  };
+  const settings = scheduleSessionPatch();
+  if (Object.keys(settings).length) definition.session_settings = settings;
+  scheduleEditor.action = null;
+  scheduleInput("fields").disabled = true;
+  scheduleInput("close").disabled = true;
+  let saved = false;
+  try {
+    await api(`/api/v1/schedules/${editor.plan ? "update" : "create"}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actionPayload(action, { definition })),
+    });
+    saved = true;
+    closeScheduleEditor({ saved: true });
+  } catch (error) {
+    scheduleInput("preview-message").textContent = `${error.message} 请刷新列表并重新打开编辑，核查后再操作。`;
+    scheduleInput("preview-message").classList.toggle("error", true);
+    setStatus(error.message, true);
+    await refresh("schedules");
+    setStatus(error.message, true);
+  } finally {
+    scheduleInput("fields").disabled = false;
+    scheduleInput("close").disabled = false;
+    scheduleInput("save").disabled = true;
+  }
+  if (saved) {
+    try {
+      await loadSchedules(scheduleListCursor, scheduleListQuery);
+      const trigger = Array.from(document.querySelectorAll("[data-schedule-edit]"))
+        .find((button) => button.dataset.scheduleEdit === editor.plan?.id);
+      (trigger || scheduleInput("new")).focus();
+      setStatus(hasFuture ? "已保存计划。执行会话将在计划触发时创建。"
+        : "已保存计划。当前没有后续触发，已认领的执行可以继续。");
+    } catch (error) {
+      scheduleInput("new").focus();
+      setStatus(`计划已保存，但列表刷新失败：${error.message} 请刷新列表查看。`, true);
+    }
+  }
+}
+
+async function changeSchedule(plan, mode) {
+  if (pendingScheduleMutations.has(plan.id)) return;
+  if (mode === "delete" && !window.confirm(
+    `删除计划「${plan.name}」？\n\n后续不再触发。已认领的执行可以继续，历史话题和普通会话保留。`,
+  )) return;
+  const action = plan.actions[mode];
+  if (!action) return;
+  pendingScheduleMutations.add(plan.id);
+  plan.actions[mode] = null;
+  const definition = mode === "update" ? { definition: { enabled: !plan.enabled } } : {};
+  try {
+    await api(`/api/v1/schedules/${mode}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actionPayload(action, definition)),
+    });
+    if (scheduleDetailId === plan.id) {
+      scheduleDetailSerial += 1;
+      scheduleDetailId = null;
+      scheduleInput("detail").hidden = true;
+    }
+    pendingScheduleMutations.delete(plan.id);
+    await loadSchedules();
+    setStatus(mode === "delete" ? "计划已删除，历史会话保留。" : plan.enabled ? "计划已暂停。" : "计划已启用。");
+  } catch (error) {
+    pendingScheduleMutations.delete(plan.id);
+    await refresh("schedules");
+    setStatus(`${error.message} 请先核查最新状态。`, true);
+  } finally { pendingScheduleMutations.delete(plan.id); }
+}
+
+async function loadSchedules(cursor = null, appliedQuery = cursor ? scheduleListQuery : null) {
+  const query = new URLSearchParams(appliedQuery || "");
+  if (appliedQuery === null) {
+    for (const [name, value] of new FormData(scheduleInput("filter"))) {
+      if (String(value).trim()) query.set(name, String(value).trim());
+    }
+  }
+  const queryIdentity = query.toString();
+  if (cursor) query.set("cursor", cursor);
+  const [data, projects] = await Promise.all([
+    api(`/api/v1/schedules?${query}`), queryProjectOptions(),
+  ]);
+  state.schedules = data;
+  scheduleProjects = projects;
+  scheduleListCursor = cursor;
+  scheduleListQuery = queryIdentity;
+  renderScheduleProjects();
+  const body = document.querySelector("#schedules-body");
+  body.replaceChildren();
+  for (const plan of data.plans) {
+    const row = document.createElement("tr");
+    cell(row, plan.name);
+    cell(row, plan.project_alias);
+    const target = document.createElement("td");
+    target.className = "schedule-target";
+    const link = document.createElement("a");
+    link.className = "chat-link";
+    link.href = plan.chat.chatOpenUrl;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = plan.chat.chatLabelResolved && plan.chat.chatLabel?.trim() && plan.chat.chatLabel !== "?"
+      ? plan.chat.chatLabel : "会话名称暂不可用";
+    link.title = `打开飞书会话 · ${plan.chat_id}`;
+    target.append(link);
+    row.append(target);
+    const timing = document.createElement("td");
+    timing.className = "schedule-time";
+    timing.textContent = scheduleRuleLabel(plan.schedule);
+    scheduleNote(timing, !plan.lifecycle.has_trigger ? "无后续触发"
+      : plan.next_due_local ? `下次：${scheduleLocalTime(plan.next_due_local)}`
+        : plan.enabled ? "下次：等待触发" : "下次：已暂停");
+    row.append(timing);
+    const planState = document.createElement("td");
+    planState.className = "schedule-state";
+    planState.textContent = schedulePlanState(plan);
+    const blocked = scheduleBlockedLabel(plan);
+    if (blocked) scheduleNote(planState, blocked);
+    row.append(planState);
+    const execution = document.createElement("td");
+    execution.className = "schedule-execution";
+    execution.textContent = scheduleExecutionLabel(plan.execution);
+    if (plan.execution.due_local) scheduleNote(execution, scheduleLocalTime(plan.execution.due_local));
+    row.append(execution);
+    const actions = actionsCell(row);
+    actions.append(actionButton("详情 / 最近记录", () => showSchedule(plan.id)));
+    const edit = actionButton("编辑", () => editSchedule(plan));
+    edit.setAttribute("data-schedule-edit", plan.id);
+    actions.append(edit);
+    if (plan.lifecycle.has_trigger) {
+      actions.append(actionButton(plan.enabled ? "暂停" : "启用", () => changeSchedule(plan, "update")));
+    }
+    actions.append(actionButton("删除", () => changeSchedule(plan, "delete"), true));
+    for (const button of actions.querySelectorAll("button")) button.disabled = pendingScheduleMutations.has(plan.id);
+    body.append(row);
+  }
+  if (!data.plans.length) {
+    const row = document.createElement("tr");
+    const empty = document.createElement("td");
+    empty.colSpan = 7;
+    empty.textContent = "没有符合筛选条件的计划。可调整结束状态查看历史计划，或创建新计划。";
+    row.append(empty);
+    body.append(row);
+  }
+  document.querySelector("#schedules-next").hidden = !data.next_cursor;
+}
+
+async function showSchedule(planId) {
+  const serial = ++scheduleDetailSerial;
+  scheduleDetailId = planId;
+  try {
+    const data = await api(`/api/v1/schedules?${new URLSearchParams({ mode: "view", plan_id: planId })}`);
+    if (serial !== scheduleDetailSerial) return;
+    scheduleInput("detail").hidden = false;
+    scheduleInput("detail-title").textContent = `${data.plan.name} · ${data.plan.id} · 修订 ${data.plan.revision}`;
+    scheduleInput("detail-state").textContent = `${schedulePlanState(data.plan).replace("\n", " · ")} · ${scheduleExecutionLabel(data.plan.execution)}`
+      + (scheduleBlockedLabel(data.plan) ? ` · ${scheduleBlockedLabel(data.plan)}` : "")
+      + ` · 目标会话 ID：${data.plan.chat_id}`
+      + (data.inflight ? "。编辑、暂停或删除不会取消本次执行。" : "");
+    scheduleInput("detail-instructions").textContent = data.plan.instructions;
+    scheduleInput("detail-settings").textContent = scheduleSessionSummary(data.plan.session_settings || defaultScheduleSessionSettings());
+    scheduleInput("detail-rule").textContent = scheduleRuleLabel(data.plan.schedule);
+    renderSchedulePreview("#schedule-detail-preview", data.preview);
+    await loadScheduleRuns();
+  } catch (error) { if (serial === scheduleDetailSerial) setStatus(error.message, true); }
+}
+
+async function loadScheduleRuns(cursor = null) {
+  const planId = scheduleDetailId;
+  const query = new URLSearchParams({ mode: "runs", plan_id: planId });
+  if (cursor) query.set("cursor", cursor);
+  try {
+    const data = await api(`/api/v1/schedules?${query}`);
+    if (planId !== scheduleDetailId) return;
+    const body = scheduleInput("runs-body");
+    body.replaceChildren();
+    for (const run of data.runs) {
+      const row = document.createElement("tr");
+      cell(row, scheduleDate(run.due_at));
+      cell(row, scheduleRunStatus(run.status || run.stage));
+      const links = actionsCell(row);
+      if (run.feishu_url) {
+        const link = document.createElement("a");
+        link.href = run.feishu_url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = "打开飞书话题";
+        links.append(link);
+      }
+      if (run.binding_id && !run.binding_removed) {
+        const link = document.createElement("a");
+        link.href = `/?${new URLSearchParams({ binding_id: run.binding_id })}`;
+        link.textContent = "打开 Session";
+        links.append(link);
+      }
+      body.append(row);
+    }
+    scheduleRunsCursor = data.next_cursor;
+    scheduleInput("runs-next").hidden = !scheduleRunsCursor;
+  } catch (error) { setStatus(error.message, true); }
+}
+
 function mergeDeferredBindingRuntime(incoming, previous) {
   const needsResolution = !previous
     || incoming.activityRevision !== previous.activityRevision
@@ -1578,6 +2181,7 @@ async function refresh(tab, cursor = undefined) {
     }
     if (tab === "side-topics") await loadSides(cursor || null);
     if (tab === "updates") await loadUpdates();
+    if (tab === "schedules") await loadSchedules(cursor || null);
     setStatus("已更新。");
     return true;
   } catch (error) {
@@ -1645,6 +2249,30 @@ document.querySelector("#projects-next").addEventListener("click", () => refresh
 document.querySelector("#sessions-previous").addEventListener("click", () => moveSessionPage("previous"));
 document.querySelector("#sessions-next").addEventListener("click", () => moveSessionPage("next"));
 document.querySelector("#sides-next").addEventListener("click", () => refresh("side-topics", state.sideCursor));
+scheduleInput("filter").addEventListener("submit", (event) => { event.preventDefault(); refresh("schedules"); });
+scheduleInput("new").addEventListener("click", () => openScheduleEditor());
+scheduleInput("preview").addEventListener("click", previewSchedule);
+scheduleInput("editor").addEventListener("input", invalidateSchedulePreview);
+scheduleInput("kind").addEventListener("change", invalidateSchedulePreview);
+scheduleInput("editor").addEventListener("submit", saveSchedule);
+scheduleInput("chat").addEventListener("change", loadScheduleSessionOptions);
+for (const field of ["model", "effort", "tier", "context", "reactions", "progress"]) {
+  scheduleInput(field).addEventListener("change", () => changeScheduleSessionSettings(field));
+}
+scheduleInput("cancel").addEventListener("click", () => closeScheduleEditor());
+scheduleInput("close").addEventListener("click", () => closeScheduleEditor());
+scheduleInput("drawer").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeScheduleEditor();
+});
+for (const field of ["at", "timezone", "kind"]) {
+  scheduleInput(field).addEventListener("input", resetScheduleOffset);
+}
+for (const field of ["end-at", "timezone", "kind"]) {
+  scheduleInput(field).addEventListener("input", resetScheduleEndOffset);
+}
+document.querySelector("#schedules-next").addEventListener("click", () => refresh("schedules", state.schedules.next_cursor));
+scheduleInput("runs-next").addEventListener("click", () => loadScheduleRuns(scheduleRunsCursor));
 document.querySelector("#update-check").addEventListener("click", checkUpdate);
 document.querySelector("#update-install").addEventListener("click", installUpdate);
 document.querySelector("#service-restart").addEventListener("click", restartService);
@@ -1719,4 +2347,10 @@ let initialTab = "projects";
 try {
   if (sessionStorage.getItem("netizen-admin-updates-view") === "1") initialTab = "updates";
 } catch (_error) { /* The update page remains available without storage. */ }
+const linkedBindingId = new URLSearchParams(window.location.search).get("binding_id");
+if (linkedBindingId) {
+  resetSessionPagination();
+  state.sessionPage.query = new URLSearchParams({ identity: linkedBindingId, pageSize: "20" }).toString();
+  initialTab = "sessions";
+}
 selectTab(initialTab);

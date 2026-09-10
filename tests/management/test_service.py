@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -81,6 +82,7 @@ class FakeManagementRuntime:
         self.goal_snapshot_after: dict[str, BindingRuntimeSnapshot] = {}
         self.goal_snapshot_errors: set[str] = set()
         self.goal_snapshot_gate: asyncio.Event | None = None
+        self.goal_snapshot_eight_entered: asyncio.Event | None = None
         self.goal_snapshot_concurrency = 0
         self.goal_snapshot_max_concurrency = 0
 
@@ -278,6 +280,8 @@ class FakeManagementRuntime:
             self.goal_snapshot_max_concurrency,
             self.goal_snapshot_concurrency,
         )
+        if self.goal_snapshot_concurrency == 8 and self.goal_snapshot_eight_entered is not None:
+            self.goal_snapshot_eight_entered.set()
         try:
             if self.goal_snapshot_gate is not None:
                 await self.goal_snapshot_gate.wait()
@@ -364,6 +368,30 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                 project_alias="test",
             )
         ).binding
+
+    async def test_simultaneous_scheduled_cwd_checks_wait_for_bounded_io(self):
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        release = threading.Event()
+        original = self.projects.resolve_for_new
+
+        def resolve(alias):
+            loop.call_soon_threadsafe(entered.set)
+            if not release.wait(2):
+                raise TimeoutError("test filesystem gate")
+            return original(alias)
+
+        with patch.object(self.projects, "resolve_for_new", side_effect=resolve):
+            tasks = [asyncio.create_task(self.service.resolve_new_project(
+                "test", deadline=loop.time() + 3,
+            )) for _ in range(3)]
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                self.assertTrue(all(not task.done() for task in tasks))
+            finally:
+                release.set()
+                results = await asyncio.gather(*tasks)
+        self.assertEqual([project.alias for project in results], ["test"] * 3)
 
     async def test_native_delete_availability_uses_the_narrow_runtime_projection(
         self,
@@ -1182,6 +1210,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
             self.store.assign_native_thread_id(binding.id, f"native-{index}")
             bindings.append(self.store.get(binding.id))
         self.runtime.goal_snapshot_gate = asyncio.Event()
+        self.runtime.goal_snapshot_eight_entered = asyncio.Event()
         resolving = tuple(
             asyncio.create_task(
                 self.service.binding_statuses_exact(
@@ -1189,28 +1218,33 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                     catalog_states={
                         item.id: NativeThreadCatalogState.ACTIVE for item in batch
                     },
-                    deadline=asyncio.get_running_loop().time() + 1,
+                    deadline=asyncio.get_running_loop().time() + 10,
                 )
             )
             for batch in (bindings[:9], bindings[9:])
         )
-        deadline = asyncio.get_running_loop().time() + 0.2
-        while self.runtime.goal_snapshot_max_concurrency < 8:
-            if asyncio.get_running_loop().time() >= deadline:
-                self.fail("bounded Goal reads did not reach the expected concurrency")
-            await asyncio.sleep(0)
-        for _ in range(20):
-            await asyncio.sleep(0)
-
-        self.assertEqual(self.runtime.goal_snapshot_max_concurrency, 8)
-        self.assertEqual(
-            sum(call[0] == "goal-snapshot" for call in self.runtime.calls),
-            8,
-        )
-        self.runtime.goal_snapshot_gate.set()
-        statuses = await asyncio.gather(*resolving)
-        self.assertEqual(sum(map(len, statuses)), 18)
-        self.assertEqual(self.runtime.goal_snapshot_max_concurrency, 8)
+        try:
+            await asyncio.wait_for(self.runtime.goal_snapshot_eight_entered.wait(), timeout=5)
+            self.assertEqual(self.runtime.goal_snapshot_max_concurrency, 8)
+            self.assertEqual(
+                sum(call[0] == "goal-snapshot" for call in self.runtime.calls),
+                8,
+            )
+            self.runtime.goal_snapshot_gate.set()
+            statuses = await asyncio.wait_for(asyncio.gather(*resolving), timeout=5)
+            self.assertEqual(sum(map(len, statuses)), 18)
+            self.assertEqual(
+                sum(call[0] == "goal-snapshot" for call in self.runtime.calls),
+                18,
+            )
+            self.assertEqual(self.runtime.goal_snapshot_max_concurrency, 8)
+            self.assertEqual(self.runtime.goal_snapshot_concurrency, 0)
+        finally:
+            self.runtime.goal_snapshot_gate.set()
+            for task in resolving:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*resolving, return_exceptions=True)
 
     async def test_archived_status_still_resolves_persisted_goal(self) -> None:
         binding = await self._create()

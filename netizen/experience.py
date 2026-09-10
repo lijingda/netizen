@@ -85,6 +85,13 @@ COMMAND_SPECS = (
         "打开 Netizen 实例级设置卡片",
     ),
     CommandSpec(
+        "cron",
+        ControlName.CRON,
+        CommandOwner.CHANNEL,
+        "/cron",
+        "管理定时任务：新建、修改、启停、删除和最近执行",
+    ),
+    CommandSpec(
         "sessions",
         ControlName.SESSIONS,
         CommandOwner.HYBRID,
@@ -329,6 +336,7 @@ def _validate_arguments(name: ControlName, arguments: tuple[str, ...]) -> None:
         ControlName.CONFIG: 0,
         ControlName.COMPACT: 0,
         ControlName.SETTINGS: 0,
+        ControlName.CRON: 0,
         ControlName.SESSIONS: None,
         ControlName.RESUME: 1,
         ControlName.RENAME: None,

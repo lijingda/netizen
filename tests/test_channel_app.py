@@ -1425,10 +1425,11 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
             )
 
         if self.kind == "ordinary":
-            return await self.presenter.finish(
+            attempt = await self.presenter.finish(
                 binding_id="binding-one", thread_id="native-one",
                 turn_id="turn-one", activity=None, render=render,
             )
+            return attempt is not None and attempt.updated
         if self.kind == "side":
             return await self.presenter.finish_side(
                 side_id="side-one", thread_id="native-side-1",
@@ -2250,7 +2251,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        self.assertTrue(delivered)
+        self.assertTrue(delivered.updated)
         self.assertEqual(self.channel.updates[-1][0], "om_progress_one")
         self.assertEqual(len(controller._sessions), 1)
         self.assertIn(

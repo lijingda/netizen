@@ -371,6 +371,52 @@ interrupt，并为 exact Thread 请求清理 App Server 已登记的后台 termi
 证明，也不是硬门禁。phase 必须观察 native `interrupted`、有界等待自己的 marker
 自然退出而不留孤儿，并在同一 native Thread 上完成 `AFTER-CLEANUP` 新 Turn。
 
+### 定时任务兼容性与验收
+
+定时任务的行为与失败边界见[设计文档](design.md#定时任务)。相关变更先通过 `make check`，
+再按触及的边界选择 disposable SDK、真实飞书、跨主机 Admin 和安装回滚验收；普通安装
+不自动创建计划或发消息。源码检查、传输替身、API 接受和客户端点击分别记录，不互相
+替代，也不把旧候选结果当作后来修改边界的验收结果。
+
+固定 `openai-codex==0.147.0` 的开发验收已确认以下兼容性范围：
+
+- 生产 MCP 框架的真实 CRUD、同 cwd 不同 Thread 的调用身份，以及服务端地址/凭据
+  轮换后的冷恢复与 fork。`params._meta.threadId` 可用于 exact Binding 默认值映射，
+  不依赖 HTTP header 一定存在。`scripts/probe_scheduled_tasks.py` 提供 mcp、mcp-recovery
+  和 dispatch 阶段；它使用隔离资源和显式模型，只测试原生执行，不发送飞书消息。
+- 五类来源（私聊主线、普通群主线、话题群、私聊转话题、群聊转话题）的自然语言请求
+  已验证默认目标与 Project。私聊、普通群、话题群的真实 Scheduler → Channel → Runtime
+  首轮已执行，并通过飞书消息读取核对结果的 chat/thread/root 和来源 pointer 保持不变。
+  这不代表任意自然语言都无歧义，也不承诺模型发现与生成能即时完成。
+- 普通原生首轮、同 Thread 续聊、停止、归档与删除已在隔离探针中通过。曾出现原生已完成
+  而 Runtime 进入 `turn-observation-unavailable`，后续成功未解释此前原因；仍遵循
+  ADR 0049 的有界恢复及人工 `/sessions` 重检，不另加后台重试。
+
+尚未完整覆盖客户端全部点击路径、移动端布局、原生权限和网络故障组合，以及目标主机
+真实失败回滚。当前证据未直接观察 deferred search；固定版本的跨会话 MCP catalog cache
+仅适用于 stdio，不给本 HTTP adapter 添加相应兼容层。压缩组合继续受下节
+`COMPACT-AFTER` 缺口限制，不标为通过，不借此修改用户配置或升级 SDK。
+
+触及对应边界时，候选须完成以下验收：
+
+| 边界 | 验证内容 |
+| --- | --- |
+| MCP 接入 | 生产传输鉴别、Host/Origin、大小/超时、无 Admin 可用、同 cwd 身份隔离、缺失/冲突元数据、用户 MCP 和指令继承、冷恢复/fork/服务重启与原生权限组合 |
+| 调度与存储 | 四类规则、时区/DST、截止、高水位、宽限/missed、同计划 busy/unknown、不同计划并发、CAS/幂等、记录裁剪及每个交接断点的重启行为 |
+| 飞书与普通生命周期 | 五类来源的自然语言和 /cron；真实 root/seed、结果严格话题归属、卡片完整表单/重试/分页、Activity/Files、后续对话、停止/归档/删除及极快终态顺序 |
+| Admin 与安装 | 跨主机认证/CSRF、三个入口一致性、Project 删除与在途交接、App 切换、当前库重装、旧库只读拒绝、数据库/release/Skill 失败回滚 |
+
+服务只新增同一 background loop 内的 Scheduler 和 loopback 动态端口 MCP；无需用户安装
+新 Skill、手动配置 MCP 或启动另一个服务。公开 CodexConfig 只追加本次进程专属随机
+MCP entry，环境完整继承后仅增加一个随机名称的临时 bearer key；不改用户 config.toml
+和其他 MCP。端点先于 App Server 初始化，管理与调度在 shared application ready 后开放，
+Admin 关闭时 MCP 仍可用。停止先关闭认领和管理 admission、排空在途交接，再执行既有
+普通 Turn shutdown 并关闭传输；重启不补跑错过的时间，也不重发结果未知的执行。
+
+安装边界验收包括当前 schema 完整初始化与重装、旧版本库只读拒绝、当前元数据与
+Side/Project 墓碑保留，以及失败后原数据库/release/Skill 恢复；manager target 未卸载或 lifetime lock
+仍被占用时，既有回滚禁止条件保持不变。
+
 ### 已验证的兼容性结论
 
 实例专属的主机、账号、PID、native ID、release/备份路径、数据库行数和私网访问结果不属于
@@ -657,10 +703,12 @@ Zsh、Fish 和其他支持的 shell 同样遵循各自原生 startup 顺序。
 解释器都显式使用 `-E -B -u`（非交互校验省略 `-u`），因此其他 `PYTHON*` 变量可以继续
 作为工具环境存在，却不能改变受管 release Python 的 import、优化、pyc 或缓冲行为。
 Codex 工具子进程的继承、过滤和显式 set 仍由同一份用户级
-`~/.codex/config.toml` 的原生 `shell_environment_policy` 决定。Netizen 只通过公开
+`~/.codex/config.toml` 的原生 `shell_environment_policy` 决定。Netizen 通过公开
 `CodexConfig` 固定 `allow_login_shell=false`：工具默认直接继承 launcher 已取得的环境，
 不会再由 Codex 的 non-interactive login shell/snapshot 把 NVM PATH 覆盖回系统 PATH；
-不写死 PATH，也不维护第二份变量策略。修改持久 profile 后执行 `./service.sh restart`
+不写死 PATH，也不维护第二份变量策略。定时管理仅另加
+[ADR 0061](adr/0061-schedule-ordinary-threads-in-feishu-topics.md) 规定的进程临时 MCP entry
+与 bearer 环境变量。修改持久 profile 后执行 `./service.sh restart`
 即可；某个已有终端里的临时 `export`、alias、未导出的 shell function 和真实 TTY 状态
 不会被后台服务继承。
 
@@ -871,16 +919,17 @@ admission，修复文件后仍需 `./service.sh restart`，不会自动重新开
 HTTP；不得把该端口直接暴露到不受信网络。
 
 `instance.projectRoot` 是必填的绝对路径，用于限制从飞书自动创建的空 Project；它不是
-Binding 的默认 cwd。Channel Database 只接受当前 schema v8，不在服务启动时自动迁移旧
-schema。v8 在现有 Project metadata 中增加 `deleted` 墓碑，防止删除后被 YAML bootstrap
-恢复。v7 -> v8 必须由安装器在卸载服务目标、取得 lifetime lock 和 rollback snapshot 后，
-于同一 activation/rollback transaction 中完成。v6 先通过原 v6 -> v7 迁移，把现有 Binding
-的 Reaction Pulse 与 Progress Card 初始化为关闭，再进入 v8。迁移保留全部
-Scope/Binding/Project、去重记录和 `side_topics` 永久墓碑；旧 Project 默认未删除，失败
-恢复旧数据库与旧 release。不得创建空数据库，否则旧 Side 话题可能重新落入普通 Binding。
+Binding 的默认 cwd。Channel Database 只支持当前 schema v10，安装器和服务都不迁移历史
+版本。新库直接创建完整表结构；已有库须先只读通过版本、结构和完整性校验。
+`schedule_plans`、`schedule_runs` 和 `schedule_requests` 仅保存当前计划指令与会话配置、
+最小调度交接/initial Turn 引用及有界管理请求去重，不复制原生历史。
+当前库重装保留 Scope/Binding/Project、去重记录及 `side_topics` 永久墓碑；激活仍在
+lifetime lock 与快照保护下完成，失败恢复原数据库与旧 release。
+旧版本或损坏数据库明确拒绝，不自动删除、转换或重建空库。
 配置的 `projects` mapping 启动时仍只做 `INSERT OR IGNORE`，停用、动态登记和已删除记录
 始终优先；已删除 alias 只有显式重新登记才能复用，revision 继续递增。Project 删除保留
-磁盘代码目录。删除确认、进度和结果不写入 SQLite；部分失败或结果未知后 Project 保持
+磁盘代码目录。Project 删除清单同时纳入定时计划和在途定时创建；提交后删除关联计划，
+即使后续部分失败或同名重登记也不复活计划。删除确认、进度和结果不写入 SQLite；部分失败或结果未知后 Project 保持
 停用，管理员应刷新查看剩余项并重新确认，不会在重启后自动续删。不要手工编辑表。
 
 浏览器初始化会请求 `card.action.trigger`；手工准备应用时，使用卡片前须在飞书开发者后台
@@ -1100,8 +1149,8 @@ Binding。
 逐个删除会话，磁盘标记文件保留，Project 消失而 Side 墓碑仍在。执行期间从另一入口尝试
 新建关联会话、Side 或重新启用，均应拒绝。验证部分失败/断线后 Project 仍停用且显示
 剩余项，不把结果未知显示为整体成功。重启时 YAML 不应恢复已删除 Project；显式复用
-alias 后旧 revision/action 必须失效。迁移边界变更还应针对候选验证 v6/v7 升至 v8 后的
-metadata 保留，以及失败时恢复原数据库/release，记录与此边界相关的真实结果。
+alias 后旧 revision/action 必须失效。数据库边界变更还应针对候选验证旧版本只读拒绝、
+当前库重装的 metadata 保留，以及失败时恢复原数据库/release，记录与此边界相关的真实结果。
 双击同一 action 应返回 stale/consumed；与飞书并发操作同一目标时只允许符合 exact native
 identity 的一方提交。重启服务后旧 Admin session 必须失效，持久 Binding/设置/Side
 墓碑不变；journal 不得出现 credential、cookie/action token、cwd、name/preview 或 body。
@@ -1398,7 +1447,7 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     未验证，不能宣称真实表单兼容或容量验收通过。
     P2P 若返回 230071 必须记录为
     本轮文件 live gate 未通过，不得用 FakeChannel 或普通主线发送替代。最后确认这些操作不
-    改变 schema v8 表、Binding、Turn settings、Task Feedback、Context Boundary 或 Side
+    改变 schema v10 表、Binding、Turn settings、Task Feedback、Context Boundary 或 Side
     route 行数。
 
 CLI 中新增的消息不要求回填飞书；验证目标是共享原生后端和可接续性，不是两个 UI

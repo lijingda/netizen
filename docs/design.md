@@ -2,6 +2,10 @@
 
 ## 目标与边界
 
+定时任务的行为见[定时任务](#定时任务)，架构决策见
+[ADR 0061](adr/0061-schedule-ordinary-threads-in-feishu-topics.md)，兼容性范围及发布前验收
+要求见[部署文档](deployment.md#定时任务兼容性与验收)。
+
 目标是让少量受信用户在一台受支持的 Linux 或 macOS 主机上，通过飞书单聊、群聊和话题使用原生 Codex。
 飞书只是新的 Channel；历史、工具、Skills、MCP、配置、sandbox 和认证仍由 Codex
 管理。Project Registry 可通过飞书设置卡片或 Admin Web 管理；当前仍不实现审批卡、Codex 原生配置
@@ -19,8 +23,10 @@ flowchart LR
     Channel["FeishuChannel"]
     UX["Prompt / typed Control / Card 映射"]
     Management["InstanceManagementService"]
+    Schedules["ScheduleService / Scheduler"]
+    MCP["临时 cron_manage MCP"]
     Coordinator["ScopeCoordinator"]
-    DB[("Scope / Binding / Project / Side Route / Dedup SQLite")]
+    DB[("Channel metadata / Scheduled Plans & Runs SQLite")]
     Runtime["CodexRuntime"]
     SDK["一个 AsyncCodex"]
     Backend["SDK pinned App Server / CLI"]
@@ -34,27 +40,33 @@ flowchart LR
     Management --> Coordinator
     Management <--> DB
     Management --> Runtime
+    Management --> Schedules
+    Schedules <--> DB
+    Schedules --> UX
     UX <--> DB
     UX --> Runtime
     Runtime --> SDK
     SDK --> Backend
+    Backend --> MCP
+    MCP --> Management
     Backend <--> Home
     Backend <--> Cwd
 ```
 
-业务只有一个 Python 服务。Admin listener 和 `FeishuChannel` handlers 都运行在 Channel
-background loop，且只构造一个 Store、Project Registry、Runtime 与 `AsyncCodex`。App
+业务只有一个 Python 服务。Admin/MCP listener、唯一 Scheduler 和 `FeishuChannel` handlers
+都运行在 Channel background loop，且只构造一个 Store、Project Registry、Runtime 与 `AsyncCodex`。App
 Server 是 `AsyncCodex` 的子进程，不是第二套业务服务。
 
 代码按职责归属组织，目录拆分不新增运行实例或状态所有者：
 
 | 位置 | 职责 |
 | --- | --- |
-| `netizen/main.py` | ServiceCore 装配并负责共享管理服务、Runtime、SDK 和 Store 的生命周期；管理服务注入两个客户端适配器。 |
+| `netizen/main.py` | ServiceCore 装配并负责共享管理服务、Scheduler、Runtime、SDK 和 Store 的生命周期；管理服务注入各入口适配器。 |
 | `netizen/channel_app.py`、`netizen/channel/` | ChannelApplication 负责输入和完成事件编排，并装配、关闭同一表情控制器和回复卡片呈现器；展示会话留在各自对象内。 |
 | `netizen/cards/` | `controls.py` 负责管理卡片和表单，`reply.py` 负责回复、Activity、Files，`callbacks.py` 集中共享回调协议及基础组件；包入口显式导出公共接口。 |
 | `netizen/admin/` | `web.py` 集中路由、认证、一次性授权与请求任务生命周期；`queries.py` 负责查询和分页游标，`presentation.py` 负责响应转换。 |
-| `netizen/management/` | 两个客户端共用的应用管理边界，包括 `updates.py` 中的升级查询与升级/重启发起编排。 |
+| `netizen/management/` | 各管理入口共用的应用边界，包括 `updates.py` 中的升级查询与升级/重启发起编排。 |
+| `netizen/schedules/` | 当前计划、时间规则、最小交接记录、唯一调度器和单工具 MCP 入口；复用同一个 BindingStore writer 与普通 Runtime。 |
 | `netizen/deployment/` | 部署记录与安装锁协议、独立升级/重启进程调度，以及安装器共享基础和现有 ServiceBackend 的两平台实现。 |
 | `netizen/runtime/contracts.py`、`netizen/codex_runtime.py` | 前者唯一定义公共协议、异常、输入输出和快照；后者继续独占任务、Goal、Side、订阅和锁，并保留原公共类型导入路径。 |
 
@@ -84,6 +96,13 @@ Mode 的 lazy Binding，不要求任务、不创建 native Thread；完整表单
 3. `thread.turn(prompt, **override)`，没有 Binding 配置时 kwargs 为空；
 4. native handle 返回并完成 ID 校验后保存内存 active Thread/Handle，随后后台轮询公开
    `thread.read()` 的原生状态；Binding 配置不清除，供后续新 Turn 重复使用。
+
+定时触发按 ADR 0061 增加显式的普通会话入口：先认领到期点，在目标会话创建独立 topic，
+原子登记新 Scope/Binding，再用仅允许初始 start 的 Runtime 入口执行计划。它不 fork、
+不创建 Side、不继承来源聊天历史，也不修改来源 active pointer。计划创建时复制来源的会话
+配置意图并独立保存；每次认领冻结配置，交接时应用到新 Binding。自动首轮使用
+Scheduled Plan 来源，不伪造真人 Current Prompt Message；新话题的机器人 seed 是完成
+投递锚点。后续消息、停止、归档、删除和反馈使用普通会话语义。
 
 已有 native ID 时只调用 `thread_resume(exact_id)`，不传 cwd、approval、sandbox、
 model、config 或 env override。
@@ -560,7 +579,10 @@ start 到 pause/resume/terminal 复用同一张卡并更新其控制按钮。普
 当前投递接口只返回成功与否，因此永久 API 错误也最多尝试三次，
 不新增错误分类、待发送队列或调度器。终态先等待旧轮询退出，再对身份仍有效的原卡
 独立尝试一次更新，沿用既有超时，不受中间失败影响。原卡不可用、终态渲染或更新失败时，
-才按可用模块回退为新的自包含卡或既有文本。展示失败不阻断、取消、重试或改写 native
+才按可用模块回退为新的自包含卡或既有文本。定时首轮另需区分发送前失败与已尝试投递：
+发送或终态更新已尝试时保留原回执，不补发第二份结果；只有尚未调用发送接口时才可回退。
+终态 Presenter 保留 SDK 的原始更新结果供 Channel 判定，运行中轮询仍沿用上述有界行为。
+展示失败不阻断、取消、重试或改写 native
 execution。只有 Goal + Files 使用的 v5 callback
 携带完整、裁剪且有界的 Reply Card manifest，翻页不丢 Goal/Activity/Result；普通文件卡
 继续使用 v4；Side 只组合 Activity/Result/Files，也使用 v4。进程内在 active lifecycle
@@ -598,14 +620,137 @@ Channel 按 exact native Turn ID 在内存管理普通/Side Turn 的 Lifecycle R
 会核对 handle Thread ID、`AsyncThread.id` 与 Binding 的 write-once native ID；若
 handle 回报不同 ID，关闭 admission 且不对不可信 handle 执行 interrupt/cleanup。
 
+## 定时任务
+
+Scheduled Plan 保存用户明确指定的执行指令、Project、目标飞书会话、时间规则及会话
+配置。每次触发在目标会话中新建真实话题和普通持久 Thread；单聊、普通群、话题群及
+已有话题来源使用相同语义。已有话题的计划在所属 chat 新建 sibling 话题，不切换来源
+Scope 的 active Binding，不 fork 来源历史，也不隔离 Project 文件目录。
+执行话题的继续交流、配置、停止、归档、删除和 Files 均复用普通会话能力。
+
+### 计划、时间与状态
+
+时间计算统一由 `netizen/schedules/models.py` 提供，查询预览与调度使用同一规则：
+
+| 规则 | 行为 |
+| --- | --- |
+| 一次性 | 一个带明确 UTC 偏移的未来时刻，精度为分钟 |
+| 每天、每周 | IANA 时区的当地 HH:mm；每周使用非空星期集合 |
+| 固定间隔 | 从持久 anchor 起每 N 分钟，N 至少为 1，按 UTC elapsed time 计算 |
+
+新计划默认采用服务启动时解析到的本机 IANA 时区，无法可靠解析则要求显式填写；保存后
+不随主机时区改变。每天/每周跳过 DST 不存在的时刻，重复时刻只取第一次；一次性和截止
+时间的当地歧义时刻须明确偏移，编辑未改时间时保留原偏移。间隔默认首次在创建后 N 分钟，
+暂停再启用保留 anchor。当前不支持任意 cron/RRULE、每月、调休/节假日日历或执行次数上限。
+
+重复规则可设置 `schedule.end_at`，按应触发时刻判断且包含截止点；默认无截止，一次性
+不使用此字段。更新中省略整个 schedule 保留原规则；提供 schedule 则完整替换，须带上
+要保留的字段及截止时间。替换规则中省略 end_at 或传 null 表示取消截止。
+新建至少须有一次未来机会；已有计划可以调整截止使后续触发立即结束。
+
+每个计划的 processed-through 高水位与调度游标在同一事务推进，时钟回拨、编辑和历史
+裁剪不使其回退。实质时间变更、重新启用或重启从 max(当前时间, 高水位) 之后取候选；
+只改名称、指令或配置保留未处理的到期点。停机错过的时间不补跑，正常运行提供一分钟
+迟到宽限，仅认领最新仍在宽限内的到期点；更早时间合并为 missed，不建立历史队列。
+
+启停意图、是否结束和执行结果独立展示。`enabled` 只代表启停；当前规则既无未来机会、
+也无宽限内可处理机会，且没有尚未收尾的 Run，才算已结束。最后一次启动中、运行中或
+结果待确认仍为未结束；已结束不表示执行成功。筛选与列表共用一次时钟快照，`ended`
+在 SQL LIMIT 前过滤；不同条件合取并纳入分页游标，不在取页后丢弃已结束项。
+
+| 操作 | 对调度和普通会话的影响 |
+| --- | --- |
+| 暂停、修改、删除计划 | 影响后续认领；已经认领的一次继续使用快照，已有会话保留 |
+| 启用计划 | 取下一未来时间点，不重跑旧触发；过去的一次性须先重新安排 |
+| 普通 /stop、归档、删除会话 | 处理所选普通任务，不暂停计划，不重放该次触发 |
+| 停用 Project | 跳过新触发但保留 enabled 意图，不停止已有执行；恢复后不补跑 |
+| 删除 Project | 冻结新交接并删除关联计划，在途创建仍纳入 ADR 0060 的精确清单 |
+
+计划固定 App ID，换应用不迁移或投递旧命名空间计划。删除计划清除定义并保留不可复用
+ID 的墓碑；Project 同名重登记不复活计划。单独删除计划不使在途 Run 或已知话题从管理
+清单消失，Project 部分删除失败也不回滚已完成的计划删除。
+
+### 管理入口与会话配置
+
+自然语言沿普通 Prompt/Steer 进入 Codex，由单一 `cron_manage` 工具调用 ScheduleService；
+不增加前置意图分类或独立 Runtime。工具提供 options/list/view/create/update/delete/runs，
+启停使用 update 的 enabled。参数以 `netizen/schedules/mcp.py` 的 schema 为准。
+模型先按名称定位再用 exact ID；重名有歧义才澄清，指令须明确资源，不依赖创建聊天历史。
+工具说明由 MCP instructions 和 description 提供，不覆盖原生 developer/base instructions。
+
+显式 chat_id、project 优先；省略时从本次原生 `params._meta.threadId` 查 exact
+Thread → Binding → Scope。可选 header 身份存在时须核对一致，不从 cwd、工具参数或
+全局 current 猜测。不具有普通 Binding 映射的 Side/子代理须显式给出所需默认值。
+显式换 chat 不隐式换 Project，update 省略字段保留原值。身份只用于默认值解析，不新增
+创建者权限、群白名单或 Project ACL；目标须满足飞书应用可用性和机器人可达性。
+
+会话配置与 `/new` 共用 Model/Effort/Speed、Reaction Pulse、Progress Card 和 Mention
+Context Mode。创建时复制 exact 来源 Binding 的选择，显式覆盖后独立保存；继承仍存 null，
+不复制有效 Codex 配置。无来源采用 `/new` 默认值，每次认领冻结设置用于新 Binding。
+私聊及私聊话题固定 current-only；群话题 catch-up 从本次真实 root/seed 建立边界，自动
+首轮不读取来源增量或伪造真人 cursor。模型目录不可用不静默替换已选模型，原生 start
+仍按普通 Runtime 重新验证；修改不相关字段不要求重选原模型。
+
+`/cron` 用一张管理卡，默认当前会话已启用且未结束，筛选和任务各用下拉框确认。
+选择任务后原卡展开详情和操作，最近记录按需展开；刷新仅作用于所选任务，新建入口独立
+放在底部。新建/编辑各用一张完整表单，频率不触发多级页面跳转，只校验对应时间字段。
+卡片默认每批最多 50 个计划、5 条执行记录；更长指令通过 Admin/自然语言编辑。
+筛选、选择和导航留在回调中，后台不存卡片 session 或草稿。提交以本次完整表单为准，
+经业务校验保存；出错恢复正常输入、exact revision、时间偏移和业务 request_id，每次
+重绘更换传输 nonce。损坏的原生控件值明确拒绝，恢复的 Scope 不替代下次真实消息位置校验。
+
+Admin 默认全部 Project、全部启停状态、未结束；不提供会话 ID 筛选。列表分别展示计划
+状态和执行情况，优先展示尚未收尾的 Run，避免后续 skipped 记录遮住仍在运行的一次。
+Project 使用可选目录，目标会话复用 Sessions 的名称与聊天链接；创建仍填写 chat_id。
+创建/编辑在独立侧边表单完成，时间选择器按计划时区解释，关闭后保留列表筛选和位置。
+Admin 沿用认证、CSRF 和 action grant，只编辑未来计划，不提供“立即运行”或即时 Prompt。
+
+三个入口共用写事务：稳定 request_id 去重，相同 ID 和规范 payload 返回原标识，内容
+不同则冲突；修改/删除以 expected_revision 做 CAS，不擅自递增。凭据保留七天，响应未知
+复用原 ID 核查，过期后先查询再决定。计划指令最多 32,000 字符且 JSON 字符串 UTF-8 不超过
+48 KiB；卡片输入最多 1,000 字符，并受实际编码容量限制。
+
+### 调度交接与结果
+
+唯一 Scheduler 在短事务中检查 App、Project、计划 revision、到期点与未决 barrier，
+以 `(plan_id, due_at_utc)` 唯一认领并推进游标；revision 只标记快照，不进入去重键。
+同计划首轮未结束时跳过并推进时间，不排队；unknown 阻塞该计划，不靠启停清除。
+首轮结束后人工续聊不阻塞下一次。不同计划和 Binding 仍可并行，不加 Project 执行锁。
+
+交接阶段依次为 claimed、publishing_topic、binding_ready、starting_turn、handed_off；
+独立的 barrier 表示 held、unknown 或 released。每次外部调用前标记可能发生的副作用，
+返回后保存 exact identity。root/seed
+使用各自稳定 UUID，只允许既有发送原语的一次同 UUID 对账；仍未知不重新发布或搜索历史猜测。
+真实 topic 建立后原子创建 Scope/Binding、关联 Run，只设置新 Scope 的 pointer；用户已抢先
+创建或切换时记录冲突。短交接槽内普通消息要求稍后重发；专用 initial-start 入口只允许
+启动新 Binding，不能退化为 steer。首轮引用写入和极快终态通过单调 CAS 交接，不复活 barrier。
+
+自动首轮使用显式 Scheduled Plan 来源及保存的完整指令，真人消息路径保持不变。
+完成结果严格回复本次 Completion Origin，使用 reply_in_thread=true、reply_target_gone=fail；
+不降级发到主线。文本、Files 或过程卡终态一旦尝试投递，不因失败/超时另发第二份；仅发送前
+准备失败允许文本回退。sent 须有明确成功及 exact chat/topic 证据，分段须逐段核实；否则
+保留 failed/unknown。投递结果独立于 native barrier，不重跑任务，也不建立持久投递队列。
+
+Run 只保存交接阶段、exact initial Turn 引用和投递回执；native Thread ID 从普通 Binding
+获取，原生运行结果按 exact initial Turn 有界读取，不缓存正文/终态或将后续人工 Turn 当成本次。
+解除 barrier 要有 exact 原生终态或可靠生命周期移除证据；普通 Binding 删除与关联 barrier
+释放须原子提交。已 released 不因历史暂不可读重新占用 barrier。每计划保留最近 100 条已释放
+记录，未决及路由证据不按数量裁剪，裁剪不删除普通会话。
+
+恢复只检查未决 Run，不重发启动/结果、不恢复全量 stream。缺少 exact 身份保持 unknown；
+确认仍在运行的一次只在下一到期点前或显式刷新时有界重查，观测失败不无限自动轮询。
+thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admission，遵守既有恢复边界。
+关闭先停认领和管理 admission、有界排空交接，再由普通 Runtime shutdown，最后关闭传输和 Store。
+
 ## 数据与配置
 
-`channel.sqlite3` 只有 `schema_version`、`scopes`、`bindings`、`projects`、
-`side_topics`、`dedup_keys`。最后一张表直接实现 Channel SDK 冻结的 `seen/mark`
-DedupStore 协议。Schema v8 的 `bindings` 保存全空或全有的三个 Binding-scoped catalog
+`channel.sqlite3` 的 schema v10 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+`side_topics`、`dedup_keys`，以及 `schedule_plans`、`schedule_runs`、`schedule_requests`。
+`dedup_keys` 直接实现 Channel SDK 冻结的 `seen/mark` DedupStore 协议。
+`bindings` 保存全空或全有的三个 Binding-scoped catalog
 ID、settings revision、两个默认关闭的 Binding Task Feedback 布尔值及 feedback revision、
 `current-only|catch-up`、全空或全有的 exact Context Boundary、context revision，以及
-rollback-compatible `ever_activated` 标记；旧行/default 仍为 1，Admin 仅创建且从未设为
+`ever_activated` 标记；默认值为 1，Admin 仅创建且从未设为
 当前的 Lazy Binding 为 0，第一次 active-pointer 提交由 trigger 原子改为 1。
 `current-only` 不得有 boundary，group/topic 的 catch-up 必须有完整 boundary；模式/边界
 更新和 Runtime 接受后的 cursor CAS 都由数据库约束保护。`side_topics` 保存
@@ -613,14 +758,17 @@ app/chat/topic/root/source、Parent Binding
 ID、creator、mention policy、creating/open/closed/expired/failed 和时间，不保存
 ephemeral native Thread ID 或内容。`projects.deleted` 保留已删除 Project 的 Registry 墓碑，
 阻止 YAML bootstrap 复活；正常查询隐藏墓碑，显式重新登记继续递增 alias 的 revision。
-服务只接受当前 schema，不承担启动时迁移；安装器在同一 release transaction 内执行
-v7 -> v8，v6 先经原 v6 -> v7 迁移并把现有 Binding 两项 Task Feedback 设为关闭。
-迁移保留 Scope/Binding/Project/Dedup/Side Topic 行，旧 Project 默认未删除，失败恢复
-原数据库与 release；不能重建空库并把旧 Side 话题重新开放为普通 Binding。删除 intent、
+服务和安装器只支持当前完整 schema，不保留历史版本迁移。新库直接创建完整结构，
+已有库先只读校验版本与结构；旧版本或损坏结构明确拒绝，不转换或重建空库。
+安装事务仍保留数据库快照，失败时按既有 lifetime lock 边界恢复原数据库与 release。
+Project 删除 intent、
 确认清单、fingerprint 和结果只在进程内，不保存解析后的 wire value 或已生效配置。
-数据库没有 prompt、补充消息正文/发送者投影、当前消息发送者投影、回复、ephemeral
+ADR 0061 的窄例外仅保存当前计划指令、时间规则与游标、最小调度交接证据、exact initial
+Turn ID 引用和有界管理请求去重。Run 通过 Binding 获取 native Thread ID，不保存第二份
+映射或原生终态历史。计划删除清空指令并保留不可复活墓碑；最近已释放 Run 有界保留。
+除此以外，数据库没有 prompt、补充消息正文/发送者投影、当前消息发送者投影、回复、ephemeral
 native Thread ID、Turn、Goal、
-Skill catalog、plan/checklist、Turn Activity Projection、reaction、Reply Card identity、cwd
+Skill catalog、原生 plan/checklist、Turn Activity Projection、reaction、Reply Card identity、cwd
 副本、本轮文件清单/快照/摘要、card session、Codex config、Thread name/archive 状态或
 queue 表，也不保存 Admin credential、session、action/CSRF token、native metadata 索引或
 audit record。
@@ -770,9 +918,11 @@ Registry 中的一个 Project，不存在 default/unbound 或服务 cwd fallback
 只做 `INSERT OR IGNORE` bootstrap；飞书卡片可登记已有绝对路径，或只在必填的
 `projectRoot` 内创建空目录。`/new` 可以从同 Scope 的现有 Binding 记录预选当前或最近
 使用且仍 enabled 的 Project，不另存 recent 状态；没有可推导偏好时必须由用户选择，
-没有 enabled Project 时引导 `/settings` 且不创建 Binding。停用只阻止新 Binding，已有
+没有 enabled Project 时引导 `/settings` 且不创建 Binding。停用阻止新 Binding 和定时触发，已有
 Binding 仍能继续。Admin 可按 [ADR 0060](adr/0060-delete-projects-with-exact-session-inventory.md)
 明确删除 Project 及完整关联 Sessions，成功后保留 Registry 墓碑；Netizen 从不删除目录。
+ADR 0061 将关联定时计划和仍在创建会话的定时执行纳入同一清单；提交即删除关联计划，
+后续部分失败或同名重新登记均不复活它们。
 它不做 workspace clone 或 Project ACL。
 用户和群的准入由飞书应用权限负责；Netizen 和 Channel SDK 不再配置
 user/chat/role allowlist。每个被投递到 Scope 的参与者都能管理 Binding、Project 和
@@ -877,15 +1027,24 @@ identity 或 Side route identity 等 typed precondition；提交后在锁内重�
 action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact、Side resume 或
 任意筛选结果的批量 native mutation route。
 
-Project 删除是 ADR 0060 的独立 action：二次确认展示 alias、完整关联 Sessions/Side 数量、
+定时管理是 ADR 0061 的计划定义编辑例外。`/cron` 卡片、Admin“定时任务”页和自然语言
+`cron_manage` 共用 ScheduleService，提供分页查询、创建、编辑、启停、删除和最近执行。
+显式 chat ID 优先；MCP 默认值只从 `params._meta.threadId` 的 exact Binding/Scope 解析，
+无映射时要求显式目标，不按 cwd 猜测或新增 ACL。卡片写操作携带 revision 和稳定请求 ID，
+Admin 继续使用既有认证与 action/CSRF grant。四类时间规则、时区、漏跑、同计划忙碌跳过、
+未知状态阻塞及删除语义见[定时任务](#定时任务)；原生 Goal/plan/checklist
+不是定时计划。Side 保持原有 slash 白名单。
+
+Project 删除是 ADR 0060/0061 的独立 action：二次确认展示 alias、完整关联 Sessions/Side、
+定时计划与在途定时创建数量、
 永久删除原生历史和保留 cwd 的后果，一次性 grant 固定 Project revision 与 exact 清单
-fingerprint。短 Store transaction 校验清单并停用 Project；进程内 intent 阻止新 Binding、
-新 Side、重复删除与重新启用，不持有 Project execution lock。清单最多 1000 个 Binding
+fingerprint。短 Store transaction 校验清单、停用 Project 并删除关联计划；进程内 intent 阻止新 Binding、
+新 Side、新调度认领、重复删除与重新启用，不持有 Project execution lock。清单最多 1000 个 Binding
 和 1000 条 Side route，超限拒绝；操作总预算 120 秒，每个对象最多 30 秒。
 Application service 先完成 Side close/创建交接，再逐个进入既有 exact Binding delete；
 Missing 也必须经共享原生删除/四视图对账证明，不能凭缺失投影删除本地行。部分失败、
 超时、结果未知或取消保留停用 Project 与剩余项，已删对象不回滚、不自动续跑。仅当所有
-Binding 和清单中的非终态 Side 均已移除、Runtime Side 交接完成，才提交 Project 墓碑。
+Binding 和清单中的非终态 Side 均已移除、Side 与定时创建交接完成，才提交 Project 墓碑。
 清单也包括 Runtime 仍持有的 orphan Side，其 Project 归属不依赖 Parent Binding 仍存在。
 仍为 `creating` 的 Side 可能正在发布飞书 root/seed，本次操作报告创建未完成，保留停用
 Project，不能提前把 route 标成终态；发布/补偿完成后的清理必须重新预览并确认。
@@ -899,7 +1058,9 @@ Projects 不逐行渲染 Registry，而是在一个表单中选择 Project 和�
 callback value，因此提交时通过 Channel SDK 的公开
 `fetch_message()` 读取原卡片的 `thread_id`，无 topic 时再用公开 `get_chat_info()`
 区分单聊和群聊。固定 SDK 在 P2P 上可能返回 `chat_type=unknown`、
-`chat_mode=p2p`，因此只从这两个公开字段归一化；查询失败即 fail closed，不增加
+`chat_mode=p2p`；`chat_type=private/public` 是群可见性，不能当作私聊。公开
+`chat_mode=group/topic` 均归一化为群聊，`p2p` 才是私聊；定时管理与 Channel 共用
+这一判断。查询失败或模式未知即 fail closed，不增加
 card-session 状态。管理表单把 alias 与 revision 编码进静态下拉选项，不依赖固定
 Channel SDK 尚未透传的单选 change option，也不读取原始回调。Projects 卡片动作只
 执行短 SQLite 事务，不获取 Codex Turn 锁。
@@ -1080,8 +1241,12 @@ catalog 重新校验。`/goal`、`/goal <objective>`、`pause/resume/clear` 与�
 服务使用 effective user 的账号 `HOME` 与 Standard CODEX_HOME（显式 `CODEX_HOME`
 优先，否则为 `$HOME/.codex`），并只创建一个 `AsyncCodex`。按 ADR 0023，它通过公开
 `CodexConfig` 固定 `allow_login_shell=false`，让工具使用 ADR 0022 已捕获的账号环境，
-而不是再以 non-interactive login shell 覆盖 PATH；不传 custom binary/env，也不复制或
-修改用户的 `shell_environment_policy`。新 Thread 的公开 API 默认 `auto_review`，不能完整继承
+而不是再以 non-interactive login shell 覆盖 PATH。ADR 0061 另加入本进程专属随机 namespace
+的 MCP server entry：在 `127.0.0.1` 动态端口提供一个 `cron_manage` 工具，端点先于
+AsyncCodex 绑定，业务 admission 在完整初始化与调度恢复后开放。CodexConfig.env 完整保留
+已捕获环境，只增加随机名称的临时 bearer key；不写 config.toml、持久环境文件或用户 MCP，
+不传 custom binary、developer/base instructions，也不修改 `shell_environment_policy`。
+MCP namespace instructions 与工具 description 提供管理指引；新 Thread 的公开 API 默认 `auto_review`，不能完整继承
 Ask/Custom；其余配置不由 Netizen 覆盖。
 
 release 自带一个原生 `netizen-user-guide` Skill，用于回答飞书中的 Netizen 使用咨询，
@@ -1105,7 +1270,7 @@ A 改为 B，下一条新 Thread 直接返回 `CONFIG-B`，重启后仍为 B；�
 `compact()`、persisted Thread read、Thread rename/archive/unarchive 与 `SkillInput`，但
 没有公开 Thread delete、idle Thread settings read/update、完整 Goal、Plan collaboration
 control、Skills/Apps discovery、Side boundary inject、Thread unsubscribe、config 或 MCP
-的高层方法。
+的高层管理方法；这不妨碍通过公开 CodexConfig 启动配置接入标准 MCP。
 生产兼容面仅限上文列出的 capability-specific Adapter、experimental cleanup 与
 Observer；Plan 与 Apps
 仍显式 unavailable，`$app` 不被包装成
@@ -1117,8 +1282,9 @@ interrupt cleanup、CLI resume 与 Linux compatibility；高层 surface 出现�
 ## 失败语义
 
 - Admin Web 默认开启；credential 非法、静态资源缺失或 bind 失败会使整个服务启动失败，
-  不会只保留飞书入口。shutdown 先关闭 Admin listener、Feishu admission 和 Runtime
-  admission，再在一个 60 秒 monotonic absolute budget 内排空 handlers/blocking I/O，最后
+  不会只保留飞书入口。Scheduler/MCP 部分初始化失败也必须关闭已创建组件，不开放业务。
+  shutdown 先关闭调度认领、MCP/Admin/Feishu 和 Runtime admission，停止 Scheduler timer，
+  再在一个 60 秒 monotonic absolute budget 内排空 handlers、定时交接与 blocking I/O，最后
   interrupt/清理 Runtime、Codex 和 Store；systemd `TimeoutStopSec` 与 LaunchAgent
   `ExitTimeOut` 都以 75 秒外层 deadline 兜底，安装器再以 90 秒完成精确退出确认。
   共享管理服务由 ServiceCore 统一关闭，ChannelApplication 只关闭自己的展示资源；

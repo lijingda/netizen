@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
-from netizen.bindings import migrate_channel_database_v6_to_v7
+from netizen.bindings import BindingStore
 from netizen.deployment import launchd, service_backend, systemd
 from scripts import netizen_installer as installer
 
@@ -27,6 +27,77 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class NetizenInstallerTest(unittest.TestCase):
+    def test_stopped_upgrade_rejects_old_schema_without_modifying_database(self) -> None:
+        for version in (6, 7, 8, 9):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                layout = self._layout(Path(directory))
+                installer.prepare_directories(layout)
+                old = self._release(layout, "1" * 64)
+                candidate = self._release(layout, "2" * 64)
+                installer._set_release_link(layout.current, old.root, layout)
+                database = layout.state_dir / "channel.sqlite3"
+                with sqlite3.connect(database) as connection:
+                    connection.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+                    connection.execute("INSERT INTO schema_version VALUES (?)", (version,))
+                    connection.execute("CREATE TABLE retained (value TEXT)")
+                    connection.execute("INSERT INTO retained VALUES ('keep this data')")
+                before = database.read_bytes()
+                backend = _stopped_backend()
+                with patch.object(installer, "_service_backend", return_value=backend):
+                    with self.assertRaisesRegex(installer.InstallError, "unsupported.*schema version"):
+                        installer.activate_release(candidate, layout, interactive=False, data_dir=layout.state_dir)
+                self.assertEqual(database.read_bytes(), before)
+                self.assertEqual(installer._read_release_link(layout.current, layout), old.root.resolve())
+                backend.publish_definition.assert_not_called()
+                backend.start_and_wait.assert_not_called()
+
+    def test_stopped_upgrade_preserves_current_schema_and_user_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            old = self._release(layout, "1" * 64)
+            candidate = self._release(layout, "2" * 64)
+            installer._set_release_link(layout.current, old.root, layout)
+            database = layout.state_dir / "channel.sqlite3"
+            store = BindingStore(database)
+            store.register_project(alias="p", cwd="/tmp/project")
+            store.close()
+            before = database.read_bytes()
+            config = layout.codex_home / "config.toml"
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text('[mcp_servers.user_owned]\ncommand = "user-server"\n')
+            before_config = config.read_bytes()
+            backend = _stopped_backend()
+            with patch.object(installer, "_service_backend", return_value=backend):
+                installer.activate_release(candidate, layout, interactive=False, data_dir=layout.state_dir)
+                installer.activate_release(candidate, layout, interactive=False, data_dir=layout.state_dir)
+            self.assertEqual(database.read_bytes(), before)
+            self.assertEqual(config.read_bytes(), before_config)
+            self.assertEqual(installer._read_release_link(layout.current, layout), candidate.root.resolve())
+            backend.start_and_wait.assert_not_called()
+
+    def test_failed_publish_rolls_back_current_database_and_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            old = self._release(layout, "3" * 64)
+            candidate = self._release(layout, "4" * 64)
+            installer._set_release_link(layout.current, old.root, layout)
+            database = layout.state_dir / "channel.sqlite3"
+            BindingStore(database).close()
+            before = database.read_bytes()
+            backend = _stopped_backend()
+            def fail_publish(*_args, **_kwargs):
+                database.write_bytes(b"candidate changed database")
+                raise installer.InstallError("publish failed")
+            backend.publish_definition.side_effect = fail_publish
+            with patch.object(installer, "_service_backend", return_value=backend):
+                with self.assertRaisesRegex(installer.InstallError, "rolled back"):
+                    installer.activate_release(candidate, layout, interactive=False, data_dir=layout.state_dir)
+            self.assertEqual(database.read_bytes(), before)
+            self.assertEqual(installer._read_release_link(layout.current, layout), old.root.resolve())
+
+
     def setUp(self) -> None:
         self._real_require_codex_login = installer.require_codex_login
         codex_preflight = patch.object(installer, "require_codex_login")
@@ -2215,7 +2286,8 @@ class NetizenInstallerTest(unittest.TestCase):
             old_skill.mkdir(parents=True)
             (old_skill / "SKILL.md").write_text("old skill\n", encoding="utf-8")
             database = layout.state_dir / "channel.sqlite3"
-            database.write_text("old database", encoding="utf-8")
+            BindingStore(database).close()
+            before_database = database.read_bytes()
             calls: list[list[str]] = []
             ready_attempts = 0
 
@@ -2259,7 +2331,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(installer._read_release_link(layout.current, layout), old.root.resolve())
             self.assertEqual(layout.service_file.read_text(), old_unit_text)
             self.assertEqual((old_skill / "SKILL.md").read_text(), "old skill\n")
-            self.assertEqual(database.read_text(), "old database")
+            self.assertEqual(database.read_bytes(), before_database)
             self.assertFalse((layout.state_dir / installer.ACTIVATION_INTENT).exists())
             self.assertGreaterEqual(
                 sum(call[:3] == ["systemctl", "--user", "stop"] for call in calls),
@@ -2271,138 +2343,6 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             self.assertTrue(any(call[0] == "journalctl" for call in calls))
 
-    def test_stopped_upgrade_migrates_v6_or_v7_without_losing_side_routes(
-        self,
-    ) -> None:
-        for version in (6, 7):
-            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                layout = self._layout(root)
-                installer.prepare_directories(layout)
-                old = self._release(layout, "1" * 64)
-                candidate = self._release(layout, "2" * 64)
-                installer._set_release_link(layout.current, old.root, layout)
-                database = layout.state_dir / "channel.sqlite3"
-                _write_v6_channel_database(database)
-                if version == 7:
-                    migrate_channel_database_v6_to_v7(database)
-                backend = _stopped_backend()
-
-                with patch.object(
-                    installer,
-                    "_service_backend",
-                    return_value=backend,
-                ):
-                    installer.activate_release(
-                        candidate,
-                        layout,
-                        interactive=False,
-                        data_dir=layout.state_dir,
-                    )
-
-                connection = sqlite3.connect(database)
-                try:
-                    self.assertEqual(
-                        connection.execute(
-                            "SELECT version FROM schema_version"
-                        ).fetchone()[0],
-                        8,
-                    )
-                    self.assertEqual(
-                        connection.execute(
-                            """
-                            SELECT message_context_mode,
-                                   context_anchor_message_id,
-                                   context_anchor_create_time_ms,
-                                   context_revision,
-                                   task_reactions_enabled,
-                                   progress_card_enabled,
-                                   feedback_revision
-                            FROM bindings
-                            """
-                        ).fetchall(),
-                        [("current-only", None, None, 1, 0, 0, 1)],
-                    )
-                    self.assertEqual(
-                        connection.execute("SELECT deleted FROM projects").fetchall(),
-                        [(0,)],
-                    )
-                    self.assertEqual(
-                        connection.execute(
-                            "SELECT side_id, state FROM side_topics"
-                        ).fetchall(),
-                        [("side-legacy", "closed")],
-                    )
-                finally:
-                    connection.close()
-                self.assertEqual(
-                    installer._read_release_link(layout.current, layout),
-                    candidate.root.resolve(),
-                )
-                backend.start_and_wait.assert_not_called()
-
-    def test_failed_publish_rolls_back_v6_or_v7_database_migration(self) -> None:
-        for version in (6, 7):
-            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                layout = self._layout(root)
-                installer.prepare_directories(layout)
-                old = self._release(layout, "3" * 64)
-                candidate = self._release(layout, "4" * 64)
-                installer._set_release_link(layout.current, old.root, layout)
-                database = layout.state_dir / "channel.sqlite3"
-                _write_v6_channel_database(database)
-                if version == 7:
-                    migrate_channel_database_v6_to_v7(database)
-                before = database.read_bytes()
-                backend = _stopped_backend()
-                backend.publish_definition.side_effect = installer.InstallError(
-                    "publish failed"
-                )
-
-                with (
-                    patch.object(
-                        installer,
-                        "_service_backend",
-                        return_value=backend,
-                    ),
-                    self.assertRaisesRegex(installer.InstallError, "rolled back"),
-                ):
-                    installer.activate_release(
-                        candidate,
-                        layout,
-                        interactive=False,
-                        data_dir=layout.state_dir,
-                    )
-
-                self.assertEqual(database.read_bytes(), before)
-                connection = sqlite3.connect(database)
-                try:
-                    self.assertEqual(
-                        connection.execute(
-                            "SELECT version FROM schema_version"
-                        ).fetchone()[0],
-                        version,
-                    )
-                    columns = {
-                        row[1]
-                        for row in connection.execute(
-                            "PRAGMA table_info(bindings)"
-                        ).fetchall()
-                    }
-                    self.assertIn("message_context_mode", columns)
-                    self.assertEqual("task_reactions_enabled" in columns, version == 7)
-                    project_columns = {
-                        row[1]
-                        for row in connection.execute("PRAGMA table_info(projects)")
-                    }
-                    self.assertNotIn("deleted", project_columns)
-                finally:
-                    connection.close()
-                self.assertEqual(
-                    installer._read_release_link(layout.current, layout),
-                    old.root.resolve(),
-                )
 
     def test_failed_skill_rollback_preserves_a_recovery_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3444,7 +3384,8 @@ class NetizenInstallerTest(unittest.TestCase):
             installer.prepare_directories(layout)
             candidate = self._release(layout, "6" * 64)
             database = layout.state_dir / "channel.sqlite3"
-            database.write_text("old database", encoding="utf-8")
+            BindingStore(database).close()
+            before_database = database.read_bytes()
             runner, _state, _calls = self._launchd_runner(
                 layout,
                 ready_on_bootstrap=False,
@@ -3489,6 +3430,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 (layout.codex_home / "skills/netizen-user-guide/SKILL.md").is_file()
             )
             self.assertTrue(list(layout.state_dir.glob("rollback-recovery-*")))
+
 
     def test_macos_uninstall_removes_only_managed_artifacts_and_preserves_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3628,113 +3570,6 @@ def _stopped_backend() -> MagicMock:
     backend.inspect_legacy.return_value = installer.LegacyServiceState()
     backend.render_definition.return_value = b"candidate service definition"
     return backend
-
-
-def _write_v6_channel_database(path: Path) -> None:
-    connection = sqlite3.connect(path)
-    try:
-        connection.executescript(
-            """
-            PRAGMA foreign_keys = ON;
-            CREATE TABLE schema_version (version INTEGER NOT NULL);
-            INSERT INTO schema_version(version) VALUES (6);
-            CREATE TABLE scopes (
-                scope_key TEXT PRIMARY KEY,
-                app_id TEXT NOT NULL,
-                chat_id TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                topic_id TEXT,
-                active_binding_id TEXT,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE bindings (
-                binding_id TEXT PRIMARY KEY,
-                scope_key TEXT NOT NULL REFERENCES scopes(scope_key),
-                project_alias TEXT NOT NULL,
-                native_thread_id TEXT UNIQUE,
-                model_id TEXT,
-                effort_id TEXT,
-                service_tier_id TEXT,
-                settings_revision INTEGER NOT NULL DEFAULT 1,
-                message_context_mode TEXT NOT NULL DEFAULT 'current-only',
-                context_anchor_message_id TEXT,
-                context_anchor_create_time_ms INTEGER,
-                context_revision INTEGER NOT NULL DEFAULT 1,
-                creator_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                activated_at TEXT NOT NULL,
-                ever_activated INTEGER NOT NULL DEFAULT 1
-            );
-            CREATE TABLE projects (
-                alias TEXT PRIMARY KEY,
-                cwd TEXT NOT NULL,
-                enabled INTEGER NOT NULL,
-                revision INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE dedup_keys (
-                dedup_key TEXT PRIMARY KEY,
-                expires_at REAL NOT NULL
-            );
-            CREATE TABLE side_topics (
-                side_id TEXT PRIMARY KEY,
-                app_id TEXT NOT NULL,
-                chat_id TEXT NOT NULL,
-                topic_id TEXT,
-                root_message_id TEXT,
-                source_message_id TEXT NOT NULL,
-                parent_binding_id TEXT NOT NULL,
-                creator_id TEXT NOT NULL,
-                requires_mention INTEGER NOT NULL,
-                state TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(app_id, source_message_id)
-            );
-            INSERT INTO projects(
-                alias, cwd, enabled, revision, created_at, updated_at
-            ) VALUES (
-                'legacy', '/tmp/legacy', 1, 1,
-                '2029-01-01T00:00:00+00:00',
-                '2029-01-01T00:00:00+00:00'
-            );
-            INSERT INTO scopes(
-                scope_key, app_id, chat_id, kind, topic_id,
-                active_binding_id, updated_at
-            ) VALUES (
-                'cli_test:direct:oc_legacy', 'cli_test', 'oc_legacy',
-                'direct', NULL, 'binding-legacy',
-                '2029-01-01T00:00:00+00:00'
-            );
-            INSERT INTO bindings(
-                binding_id, scope_key, project_alias, native_thread_id,
-                model_id, effort_id, service_tier_id, settings_revision,
-                message_context_mode, context_anchor_message_id,
-                context_anchor_create_time_ms, context_revision,
-                creator_id, created_at, activated_at, ever_activated
-            ) VALUES (
-                'binding-legacy', 'cli_test:direct:oc_legacy', 'legacy',
-                'thread-legacy', NULL, NULL, NULL, 1,
-                'current-only', NULL, NULL, 1, 'ou_legacy',
-                '2029-01-01T00:00:00+00:00',
-                '2029-01-01T00:00:00+00:00', 1
-            );
-            INSERT INTO side_topics(
-                side_id, app_id, chat_id, topic_id, root_message_id,
-                source_message_id, parent_binding_id, creator_id,
-                requires_mention, state, created_at, updated_at
-            ) VALUES (
-                'side-legacy', 'cli_test', 'oc_legacy', 'omt_side',
-                'om_root', 'om_source', 'binding-legacy', 'ou_legacy', 1,
-                'closed', '2029-01-02T00:00:00+00:00',
-                '2029-01-02T00:00:00+00:00'
-            );
-            """
-        )
-        connection.commit()
-    finally:
-        connection.close()
 
 
 if __name__ == "__main__":

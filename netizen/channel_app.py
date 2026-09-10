@@ -4,24 +4,31 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from lark_channel import MediaSource, OutboundCard, OutboundFile, OutboundImage, SendOpts
 
 from .bindings import (
     AmbiguousBinding,
     BindingContextRevisionConflict,
+    BindingConflict,
     BindingFeedbackRevisionConflict,
     BindingNotFound,
     BindingSettingsRevisionConflict,
     BindingStore,
     BindingTaskFeedback,
     BindingTurnSettings,
+    ProjectConflict,
+    ProjectNotFound,
+    ScopeConflict,
     SideTopicConflict,
     SideTopicNotFound,
     SideTopicRecord,
@@ -68,8 +75,18 @@ from .cards import (
     reply_card,
     reply_card_from_manifest,
 )
-from .channel.messages import _nonempty_field, _object_field
+from .channel.messages import _nonempty_field, _object_field, public_chat_kind as _public_chat_kind
 from .channel.ports import ReplyChannel
+from .channel.topics import TopicPublishError, send_topic_message, validate_topic_message
+from .cards.scheduled import (
+    decode_schedule_action,
+    is_schedule_card_action,
+    schedule_form_card,
+    schedule_manager_card,
+    schedule_navigation,
+    schedule_query,
+    schedule_retry_card,
+)
 from .channel.reactions import _REACTION_OPERATION_TIMEOUT_SECONDS, _ReactionController
 from .channel.reply_presenter import (
     GoalCardOrigin,
@@ -108,6 +125,7 @@ from .runtime.contracts import (
     SkillReferenceError,
     SteerRace,
     StopDisposition,
+    Submission,
     SubmitDisposition,
     TerminalCleanupFailed,
     ThreadCompactStartFailed,
@@ -145,6 +163,8 @@ from .domain import (
     MentionContextMode,
     NativeCapability,
     PromptInput,
+    ScheduledConversation,
+    ScheduledOrigin,
     SettingsSection,
     ScopeKind,
     TurnFileActionIntent,
@@ -239,6 +259,7 @@ from .turn_files import (
     require_turn_file_path,
     turn_patch_summary,
 )
+from .schedules.models import Claim, ScheduleConflict, ScheduleError, ScheduleNotFound
 
 
 logger = logging.getLogger(__name__)
@@ -636,7 +657,9 @@ class ChannelApplication:
         self._projects = projects
         self._message_history = message_history
         self._management = management
+        self._management.enable_schedules(app_id=app_id, chat_info=channel)
         self._scope_coordinator = management.scope_coordinator
+        self._scheduled_completions: set[str] = set()
         self._reactions = _ReactionController(channel)
         self._progress_cards = _ProgressCardController(channel, runtime)
         runtime.set_completion_handler(self.handle_completion)
@@ -647,6 +670,374 @@ class ChannelApplication:
             await self._progress_cards.close()
         finally:
             await self._reactions.close()
+
+    async def dispatch_scheduled_run(self, claim: Claim) -> None:
+        """Publish one claimed occurrence and hand it to the ordinary Runtime."""
+        plan, run = claim.plan, claim.run
+        store = self._bindings.schedules
+        native_submission = False
+        publication_owned = False
+        publishing_started = False
+        origin: ScheduledOrigin | None = None
+        try:
+            if run.app_id != self._app_id or plan.app_id != self._app_id:
+                raise ScheduleError("计划所属飞书应用不一致。")
+            store.begin_publication(run.id)
+            publication_owned = True
+            project = await self._management.resolve_new_project(
+                run.project_alias,
+                deadline=asyncio.get_running_loop().time() + 10.0,
+            )
+            chat_kind = _public_chat_kind(await self._channel.get_chat_info(run.chat_id))
+            if chat_kind not in {"group", "p2p"}:
+                raise ScheduleError("无法确认目标是可访问的飞书会话，本次定时任务未启动。")
+            if plan.session_settings.message_context_mode is MentionContextMode.CATCH_UP and chat_kind != "group":
+                raise ScheduleError("私聊不支持读取群聊增量，请修改计划的消息读取范围。")
+            skill_names = parse_skill_references(plan.instructions)
+            self._bindings.require_project_not_deleting(run.project_alias)
+            if not self._bindings.get_project(run.project_alias).enabled:
+                raise ProjectConflict("Project 已停用，本次未启动。")
+            local_due = datetime.fromtimestamp(run.due_at, ZoneInfo(plan.schedule.timezone)).isoformat(timespec="minutes")
+            # Plain text prevents instructions from manufacturing mentions in the card.
+            description = _FEISHU_AT_TAG_START.sub("‹", plan.instructions)
+            root_content = OutboundCard(card={
+                "schema": "2.0", "config": {"width_mode": "default", "update_multi": True},
+                "header": {"title": {"tag": "plain_text", "content": "定时任务 · " + plan.name}, "template": "blue"},
+                "body": {"elements": [{"tag": "div", "text": {"tag": "plain_text", "content":
+                    f"自动触发 · {local_due} · {plan.schedule.timezone}\n\n"
+                    + description[:3000] + ("…" if len(description) > 3000 else "")
+                    + "\n\n本次使用独立普通会话，可在话题中继续交流或使用 /stop。"}}]},
+            })
+            publishing_started = True
+            root = await send_topic_message(self._channel, run.chat_id, root_content, SendOpts(receive_id_type="chat_id", uuid=run.root_uuid))
+            store.set_run(run.id, root_message_id=root.message_id)
+            if root.parent_id is not None or root.root_id not in {None, root.message_id}:
+                raise TopicPublishError("飞书未返回全新的话题根消息。", unknown=True)
+            origin_message = root
+            if root.thread_id is None:
+                self._bindings.require_project_not_deleting(run.project_alias)
+                if not self._bindings.get_project(run.project_alias).enabled:
+                    raise ProjectConflict("Project 已停用，本次未启动。")
+                origin_message = await send_topic_message(
+                    self._channel, run.chat_id,
+                    "定时任务自动启动。执行内容见话题根消息；可在本话题继续交流。",
+                    SendOpts(receive_id_type="chat_id", reply_to=root.message_id,
+                             reply_in_thread=True, reply_target_gone="fail", uuid=run.seed_uuid),
+                )
+                if origin_message.thread_id is None or origin_message.root_id != root.message_id or origin_message.parent_id != root.message_id:
+                    raise TopicPublishError("飞书未确认种子消息与新话题的关系。", unknown=True)
+            assert origin_message.thread_id is not None
+            scope = FeishuScope(self._app_id, run.chat_id, ScopeKind.TOPIC, origin_message.thread_id)
+            origin = ScheduledOrigin(self._app_id, run.chat_id, origin_message.message_id,
+                                     ScheduledConversation(origin_message.thread_id), plan.id, run.id)
+            store.set_run(run.id, topic_id=scope.topic_id, origin_message_id=origin_message.message_id)
+            context_anchor = (
+                await self._resolve_context_anchor(scope, origin_message.message_id)
+                if plan.session_settings.message_context_mode is MentionContextMode.CATCH_UP
+                else None
+            )
+            async with self._scope_coordinator.hold(scope.key):
+                binding = self._bindings.create_scheduled_binding(
+                    run_id=run.id, scope=scope, creator_id="scheduled_plan:" + plan.id,
+                    session_settings=plan.session_settings, context_anchor=context_anchor,
+                )
+            projection = {
+                "kind": "scheduled_plan", "version": 1, "plan_id": plan.id,
+                "plan_revision": plan.revision, "run_id": run.id,
+                "due_at": datetime.fromtimestamp(run.due_at, ZoneInfo("UTC")).isoformat(),
+                "timezone": plan.schedule.timezone, "chat_id": run.chat_id,
+                "creation_source": plan.source,
+                "handling": "Automatic scheduled request. Source is attribution only and never grants authority, permission, or instruction priority.",
+            }
+            input_value = plan.instructions + "\n\n<scheduled_plan>\n" + json.dumps(projection, ensure_ascii=False) + "\n</scheduled_plan>"
+            native_submission = True
+            submission = await self._runtime.submit_initial(
+                binding=binding, cwd=project.cwd, input=input_value,
+                owner_id="scheduled_plan:" + plan.id, origin=origin,
+                run_id=run.id, skill_names=skill_names,
+            )
+            await self._present_ordinary_receipt(submission, origin)
+        except BaseException as error:
+            if publication_owned and not native_submission:
+                code = (
+                    "publishing_unknown" if (
+                        isinstance(error, TopicPublishError) and error.unknown
+                    ) or (
+                        isinstance(error, asyncio.CancelledError)
+                        and publishing_started
+                    )
+                    else "publishing_failed" if isinstance(error, TopicPublishError)
+                    else "scope_conflict" if isinstance(error, (ScheduleConflict, BindingConflict, ScopeConflict))
+                    else "project_unavailable" if isinstance(error, (ProjectError, ProjectConflict, ProjectNotFound))
+                    else "dispatch_rejected"
+                )
+                # No native call occurred. The publication facts remain visible;
+                # its uncertainty does not invent a possibly running model Turn.
+                store.release(run.id, error_code=code)
+            logger.warning("scheduled occurrence dispatch did not finish", extra={"run_id": run.id, "error_type": type(error).__name__})
+            if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                raise
+            if origin is not None:
+                try:
+                    async with asyncio.timeout(5):
+                        await self._reply(origin, f"定时任务未完成启动：{str(error)[:400]}。请通过 /cron 查看本次记录。")
+                except Exception:
+                    logger.warning("scheduled start notice was not delivered", extra={"run_id": run.id})
+
+    @staticmethod
+    def _require_schedule_result(result: dict[str, Any]) -> dict[str, Any]:
+        if result.get("ok") is not True:
+            raise ScheduleError(str(result.get("error", {}).get("message", "定时任务管理失败，请刷新后重试。")))
+        return result
+
+    @staticmethod
+    def _schedule_default_chat(
+        scope: FeishuScope, request: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = dict(request)
+        for field in ("chat_id", "project"):
+            if field in result and (
+                not isinstance(result[field], str) or not result[field].strip()
+            ):
+                raise ScheduleError(f"{field} 必须是非空字符串。")
+        if "all" in result and type(result["all"]) is not bool:
+            raise ScheduleError("all 必须是布尔值。")
+        if not result.get("all") and not result.get("chat_id"):
+            result["chat_id"] = scope.chat_id
+        return result
+
+    async def _schedule_manager_card(
+        self, scope: FeishuScope, *, navigation: dict[str, Any] | None = None,
+        selected: dict[str, Any] | None = None, notice: str | None = None,
+        show_runs: bool = False, runs_cursor: str | None = None,
+    ) -> OutboundCard:
+        """Rebuild the current management view from service facts and card navigation."""
+        navigation = schedule_navigation(navigation)
+        service = self._management.schedules
+        if selected is not None:
+            if selected.get("deleted"):
+                navigation.pop("plan_id", None)
+                selected = None
+                notice = "该请求已处理；计划之后已被删除，不会重新创建。"
+            else:
+                navigation["plan_id"] = selected["plan"]["id"]
+        if selected is None and navigation.get("plan_id"):
+            result = await service.manage(
+                {"mode": "view", "plan_id": navigation["plan_id"]}, scope_key=scope.key, source="card",
+            )
+            if result.get("error", {}).get("code") == "not_found":
+                navigation.pop("plan_id", None)
+                notice = "所选计划已删除，请选择其他任务。"
+            else:
+                selected = self._require_schedule_result(result)
+        filters = self._schedule_default_chat(scope, schedule_query(navigation))
+        if selected is not None:
+            plan = selected["plan"]
+            if ((filters.get("chat_id") is not None and plan["chat_id"] != filters["chat_id"])
+                    or ("enabled" in filters and plan["enabled"] != filters["enabled"])
+                    or ("ended" in filters and plan["lifecycle"]["ended"] != filters["ended"])):
+                navigation.pop("plan_id", None)
+                selected = None
+                notice = (notice + " " if notice else "") + "所选计划不符合当前筛选，已清除选择。"
+        listed = self._require_schedule_result(await service.manage(
+            {"mode": "list", "limit": 50, **filters}, scope_key=scope.key, source="card",
+        ))
+        runs = None
+        if selected is not None and show_runs:
+            runs = self._require_schedule_result(await service.manage(
+                {"mode": "runs", "plan_id": selected["plan"]["id"], "limit": 5,
+                 **({"cursor": runs_cursor} if runs_cursor else {})}, scope_key=scope.key, source="card",
+            ))
+        return schedule_manager_card(scope, listed, navigation=navigation, selected=selected, runs=runs, notice=notice)
+
+    async def _handle_schedule_card_action(self, event: Any) -> None:
+        message_id = str(getattr(event, "message_id", "") or "")
+        chat_id = str(getattr(event, "chat_id", "") or "")
+        action = getattr(event, "action", None)
+        scope: FeishuScope | None = None
+        try:
+            sender_id = getattr(getattr(event, "operator", None), "open_id", None)
+            if getattr(action, "tag", None) != "button" or not message_id or not chat_id or not sender_id:
+                raise CardActionError("定时任务卡片回调缺少消息或操作者。")
+            fetched = await self._channel.fetch_message(message_id)
+            topic_id = fetched_card_topic_id(callback_chat_id=chat_id, fetched_message=fetched)
+            chat_kind = None if topic_id is not None else _public_chat_kind(await self._channel.get_chat_info(chat_id))
+            scope = scope_from_fetched_card(app_id=self._app_id, callback_chat_id=chat_id, fetched_message=fetched, chat_type=chat_kind)
+            decoded = decode_schedule_action(scope=scope, value=getattr(action, "value", None), form=getattr(action, "form_value", None))
+            payload = decoded.payload
+            navigation = decoded.navigation
+            service = self._management.schedules
+            if decoded.action in {"new", "edit"}:
+                plan = None
+                if decoded.action == "edit":
+                    result = self._require_schedule_result(await service.manage({"mode": "view", "plan_id": payload.get("plan_id")}, scope_key=scope.key, source="card"))
+                    plan = result["plan"]
+                    if plan["revision"] != payload.get("expected_revision"):
+                        raise ScheduleError("计划已修改，请刷新详情后重新编辑。")
+                binding = self._bindings.active_binding(scope.key)
+                target = (plan or {}).get("chat_id") or scope.chat_id
+                options, catalog = await service.form_options(scope_key=scope.key, chat_id=target)
+                self._require_schedule_result(options)
+                catalog_error = options.get("model_catalog_error")
+                card = schedule_form_card(scope, projects=self._projects.list(enabled_only=True),
+                    default_timezone=service.default_timezone, plan=plan,
+                    initial_project=binding.project_alias if binding else None,
+                    session_settings=options["session_settings"], catalog=catalog,
+                    catalog_error=catalog_error.get("message") if catalog_error else None,
+                    allow_context_mode=options["context_mode_available"] is True, navigation=navigation)
+            elif decoded.action == "save":
+                draft = self._schedule_default_chat(scope, payload)
+                request = {**draft, "mode": "update" if draft.get("plan_id") else "create", "request_id": decoded.request_id}
+                result = self._require_schedule_result(await service.manage(request, scope_key=scope.key, source="card"))
+                card = await self._schedule_manager_card(scope, navigation=navigation, selected=result, notice="计划已保存。")
+            elif decoded.action == "enabled":
+                result = self._require_schedule_result(await service.manage({"mode": "update", **payload, "request_id": decoded.request_id}, scope_key=scope.key, source="card"))
+                card = await self._schedule_manager_card(scope, navigation=navigation, selected=result,
+                    notice="计划已启用。" if payload.get("enabled") else "计划已暂停。")
+            elif decoded.action == "delete":
+                deleted = self._require_schedule_result(await service.manage({"mode": "delete", **payload, "request_id": decoded.request_id}, scope_key=scope.key, source="card"))
+                notice = "计划已删除，已有会话保留。" + ("本次已触发的交接仍可能继续。" if deleted.get("inflight") else "")
+                navigation = {key: value for key, value in navigation.items() if key != "plan_id"}
+                card = await self._schedule_manager_card(scope, navigation=navigation, notice=notice)
+            elif decoded.action == "runs":
+                card = await self._schedule_manager_card(scope, navigation={**navigation, "plan_id": payload["plan_id"]},
+                    show_runs=True, runs_cursor=payload.get("cursor"))
+            elif decoded.action == "view":
+                card = await self._schedule_manager_card(scope, navigation={**navigation, "plan_id": payload["plan_id"]})
+            else:
+                card = await self._schedule_manager_card(scope, navigation=navigation)
+            if not await self._safe_update_card(message_id, card):
+                raise ScheduleError("卡片刷新失败；刚才的操作可能已生效。可原样重试确认，同一请求不会重复创建计划。")
+        except (CardActionError, ScheduleError, ProjectError) as error:
+            await self._recover_schedule_card_action(event, scope=scope, notice=str(error))
+        except Exception as error:
+            logger.exception("scheduled card operation failed", extra={"error_type": type(error).__name__})
+            await self._recover_schedule_card_action(event, scope=scope,
+                notice="定时任务操作未确认。可原样重试确认，同一请求不会重复创建计划；修改前请先确认上次保存结果。")
+
+    async def _recover_schedule_card_action(self, event: Any, *, scope: FeishuScope | None, notice: str) -> None:
+        """Renew only the UI nonce; never turn display metadata into authority."""
+        message_id = str(getattr(event, "message_id", "") or "")
+        chat_id = str(getattr(event, "chat_id", "") or "")
+        action = getattr(event, "action", None)
+        try:
+            if not message_id or not chat_id or not getattr(getattr(event, "operator", None), "open_id", None):
+                raise CardActionError("卡片回调缺少消息或操作者。")
+            display_scope, card = schedule_retry_card(app_id=self._app_id, chat_id=chat_id,
+                value=getattr(action, "value", None), form=getattr(action, "form_value", None),
+                notice=notice, projects=self._projects.list(enabled_only=True), scope=scope)
+            if await self._safe_update_card(message_id, card):
+                return
+            scope = scope or display_scope
+        except Exception:
+            logger.exception("failed to restore scheduled card for retry")
+        # One bounded feedback attempt after the normal bounded card update.
+        # Do not replace the original form with a dead error card, allocate a
+        # new business request, or loop while transport remains unavailable.
+        if scope is not None and message_id:
+            target = _CardReplyTarget(id=message_id, message_id=message_id, chat_id=scope.chat_id,
+                conversation=_CardReplyConversation(thread_id=scope.topic_id))
+            try:
+                async with asyncio.timeout(5):
+                    await self._reply(target, notice + " 输入仍保留，但重试卡片未能恢复；请稍后通过 /cron 查看最新状态。")
+            except Exception:
+                logger.exception("failed to send scheduled retry feedback")
+
+    async def _reply_to_origin(self, message: Any, content: Any) -> object:
+        if isinstance(message, ScheduledOrigin):
+            # A scheduled result belongs to this exact execution topic. The
+            # SDK's default target-gone fallback would create a main-chat message.
+            return await self._channel.reply(message, content, SendOpts(
+                receive_id_type="chat_id", reply_to=message.message_id,
+                reply_in_thread=True, reply_target_gone="fail",
+            ))
+        return await self._channel.reply(message, content)
+
+    @staticmethod
+    def _scheduled_message_matches(message: ScheduledOrigin, data: object, message_id: str | None) -> bool:
+        return bool(message_id) and (
+            _nonempty_field(data, "message_id") == message_id
+            and _nonempty_field(data, "chat_id") == message.chat_id
+            and _nonempty_field(data, "thread_id") == message.conversation.thread_id
+        )
+
+    async def _scheduled_message_confirmed(self, origin: ScheduledOrigin, message_id: str) -> bool:
+        response = await self._channel.fetch_message(message_id)
+        items = _object_field(_object_field(response, "data"), "items")
+        return (
+            _object_field(response, "code") == 0
+            and isinstance(items, list) and len(items) == 1
+            and self._scheduled_message_matches(origin, items[0], message_id)
+        )
+
+    async def _record_scheduled_card_delivery(self, origin: ScheduledOrigin, message_id: str, result: object) -> None:
+        # Updating a card acknowledges content only; fetch its exact destination
+        # before declaring the scheduled result delivered. Unknown is not a retry.
+        state = "unknown"
+        try:
+            code = _send_result_error_code(result)
+            raw_code = _object_field(_object_field(result, "raw"), "code")
+            if getattr(result, "success", None) is False and code is not None and code > 0:
+                state = "failed"
+            elif getattr(result, "success", None) is True and type(raw_code) is int and raw_code == 0:
+                async with asyncio.timeout(5):
+                    if await self._scheduled_message_confirmed(origin, message_id):
+                        state = "sent"
+        except Exception:
+            logger.warning("scheduled result card destination was not confirmed", extra={"run_id": origin.run_id})
+        finally:
+            self._bindings.schedules.set_run(origin.run_id, delivery_state=state)
+
+    async def _scheduled_reply_confirmed(self, message: ScheduledOrigin, result: object) -> bool:
+
+        raw = _object_field(result, "raw")
+        raw_code = _object_field(raw, "code")
+        if type(raw_code) is not int or raw_code != 0:
+            return False
+        chunks = getattr(result, "chunk_ids", None)
+        if not chunks:
+            return self._scheduled_message_matches(message, _object_field(raw, "data"), _nonempty_field(result, "message_id"))
+        # The SDK returns only the final chunk's raw response. Confirm every
+        # exact chunk instead of treating that last response as proof of all.
+        try:
+            async with asyncio.timeout(5):
+                for chunk_id in chunks:
+                    if not isinstance(chunk_id, str) or not chunk_id:
+                        return False
+                    if not await self._scheduled_message_confirmed(message, chunk_id):
+                        return False
+        except Exception:
+            return False
+        return True
+
+    async def _send_completion_reply(self, message: Any, content: Any) -> object:
+        scheduled = isinstance(message, ScheduledOrigin) and message.run_id in self._scheduled_completions
+        try:
+            result = await self._reply_to_origin(message, content)
+            if scheduled:
+                success = getattr(result, "success", None)
+                # The SDK also returns success=False for transport exceptions.
+                # An explicit rejection describes a failed result, not proof
+                # that earlier SDK chunks/retries had no side effects.
+                code = _send_result_error_code(result)
+                state = "failed" if success is False and code is not None and code > 0 else "unknown"
+                if success is True:
+                    raw = _object_field(result, "raw")
+                    data = _object_field(raw, "data")
+                    if await self._scheduled_reply_confirmed(message, result):
+                        state = "sent"
+                    else:
+                        logger.warning("scheduled reply destination was not confirmed", extra={
+                            "run_id": message.run_id,
+                            "expected_topic_id": message.conversation.thread_id,
+                            "returned_topic_id": _nonempty_field(data, "thread_id"),
+                        })
+                self._bindings.schedules.set_run(message.run_id, delivery_state=state)
+        except BaseException:
+            if scheduled:
+                self._bindings.schedules.set_run(message.run_id, delivery_state="unknown")
+            raise
+        return result
 
     async def refresh_expired_side_cards(
         self,
@@ -680,6 +1071,15 @@ class ChannelApplication:
             direct = _message_chat_type(message) == "p2p"
             if not direct and not bool(getattr(message, "mentioned_bot", False)):
                 return
+            pending = self._bindings.schedules.pending_route(
+                app_id=self._app_id,
+                chat_id=scope.chat_id,
+                topic_id=scope.topic_id,
+                root_message_id=_inbound_root_message_id(message),
+            )
+            if pending is not None:
+                await self._reply(message, "定时任务正在启动，请稍后重发。")
+                return
             current_images = current_message_image_references(message)
             interaction = parse_message(
                 scope=scope,
@@ -701,7 +1101,7 @@ class ChannelApplication:
                 if current_images:
                     raise InvalidInteraction("控制命令不能携带图片，请拆分后重试。")
                 await self._control(message, interaction)
-        except InvalidInteraction as error:
+        except (InvalidInteraction, ScheduleError) as error:
             await self._reply(message, str(error))
         except UnknownProject as error:
             await self._reply(message, f"未知 Project：{error.args[0]}。")
@@ -761,6 +1161,11 @@ class ChannelApplication:
 
     async def handle_card_action(self, event: Any) -> None:
         action = getattr(event, "action", None)
+        if is_schedule_card_action(
+            getattr(action, "value", None), getattr(action, "form_value", None),
+        ):
+            await self._handle_schedule_card_action(event)
+            return
         if is_turn_file_action(getattr(action, "value", None)):
             await self._handle_turn_file_card_action(event)
             return
@@ -950,6 +1355,32 @@ class ChannelApplication:
             | SideLifecycleOutcome
         ),
     ) -> None:
+        origin = getattr(outcome, "origin", None)
+        scheduled = isinstance(outcome, TurnOutcome) and isinstance(origin, ScheduledOrigin)
+        if scheduled:
+            self._scheduled_completions.add(origin.run_id)
+        try:
+            await self._handle_completion(outcome)
+        finally:
+            if scheduled:
+                self._scheduled_completions.discard(origin.run_id)
+                # Keep an undelivered terminal Run until the final I/O attempt
+                # finishes; setting a receipt earlier would allow retention
+                # pruning to delete it while the result card is still updating.
+                try:
+                    if self._bindings.schedules.get_run(origin.run_id).delivery_state is None:
+                        self._bindings.schedules.set_run(origin.run_id, delivery_state="unknown")
+                except ScheduleNotFound:
+                    pass  # A completed receipt may have allowed normal pruning.
+
+    async def _handle_completion(
+        self,
+        outcome: (
+            TurnOutcome | TurnObservationUnavailableOutcome
+            | ThreadActivityDiscardedOutcome | CompactionOutcome | GoalOutcome
+            | SideTurnOutcome | SideLifecycleOutcome
+        ),
+    ) -> None:
         if isinstance(outcome, ThreadActivityDiscardedOutcome):
             await self._progress_cards.abandon_thread(
                 binding_id=outcome.binding_id,
@@ -1022,7 +1453,7 @@ class ChannelApplication:
         )
         if outcome.task_feedback.progress_card_enabled:
             try:
-                progress_delivered = await self._complete_task_progress_card(
+                progress_handled = await self._complete_task_progress_card(
                     outcome,
                     diff_summary,
                 )
@@ -1038,8 +1469,10 @@ class ChannelApplication:
                     },
                 )
                 await self._abandon_task_progress_card(outcome)
-                progress_delivered = False
-            if progress_delivered:
+                # A failure after the terminal update/receipt may be uncertain.
+                # Never publish a second scheduled result on that uncertainty.
+                progress_handled = isinstance(outcome.origin, ScheduledOrigin)
+            if progress_handled:
                 return
         if outcome.error is not None:
             detail = str(outcome.error).strip() or type(outcome.error).__name__
@@ -1137,13 +1570,20 @@ class ChannelApplication:
             )
 
         if isinstance(outcome, TurnOutcome):
-            return await self._progress_cards.finish(
+            attempt = await self._progress_cards.finish(
                 binding_id=outcome.binding_id,
                 thread_id=outcome.thread_id,
                 turn_id=outcome.turn_id,
                 activity=outcome.activity,
                 render=render,
             )
+            if attempt is None:
+                return False
+            if isinstance(outcome.origin, ScheduledOrigin):
+                await self._record_scheduled_card_delivery(outcome.origin, attempt.message_id, attempt.result)
+                # An attempted update can have succeeded despite a lost response.
+                return True
+            return attempt.updated
         return await self._progress_cards.finish_side(
             side_id=outcome.side_id,
             thread_id=outcome.thread_id,
@@ -1259,9 +1699,6 @@ class ChannelApplication:
                 outcome,
                 diff_summary,
             )
-            if not files:
-                await self._reply(outcome.origin, final_response)
-                return
             card = turn_files_card(
                 scope=scope,
                 binding_id=file_provenance_id,
@@ -1272,10 +1709,7 @@ class ChannelApplication:
                 files=files,
                 additions=diff_summary.additions,
                 deletions=diff_summary.deletions,
-            )
-            result = await self._channel.reply(outcome.origin, card)
-            if getattr(result, "success", True) is False:
-                raise TurnFileError("飞书未确认本轮文件卡片发送成功。")
+            ) if files else None
         except asyncio.CancelledError:
             raise
         except TurnFileCardLimitError as error:
@@ -1291,15 +1725,36 @@ class ChannelApplication:
                 outcome.origin,
                 f"{final_response}\n\n⚠️ 本轮文件卡片未生成：{error}",
             )
+            return
         except Exception:
             logger.exception(
-                "failed to deliver completed Turn file card",
+                "failed to prepare completed Turn file card",
                 extra={
                     "binding_id": getattr(outcome, "binding_id", None),
                     "side_id": getattr(outcome, "side_id", None),
                     "turn_id": outcome.turn_id,
                 },
             )
+            await self._reply(outcome.origin, final_response)
+            return
+
+        # Only preparation failures are known to precede any publication.
+        # Do not catch a text fallback's own failure and send it a second time.
+        if card is None:
+            await self._reply(outcome.origin, final_response)
+            return
+        try:
+            result = await self._send_completion_reply(outcome.origin, card)
+            if getattr(result, "success", True) is not False:
+                return
+            logger.warning("completed Turn file card was not confirmed", extra={"turn_id": outcome.turn_id})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("failed to deliver completed Turn file card", extra={"turn_id": outcome.turn_id})
+        # SendResult.failure can hide a timeout, retry, or partial publication.
+        # Keep the scheduled receipt and never replace it with a fallback's ack.
+        if not isinstance(outcome.origin, ScheduledOrigin):
             await self._reply(outcome.origin, final_response)
 
     async def _complete_side_lifecycle(
@@ -1853,25 +2308,36 @@ class ChannelApplication:
                 await self._reply(message, "已接收调整。")
             return
 
+        await self._present_ordinary_receipt(submission, message)
+
+    async def _present_ordinary_receipt(self, submission: Submission, origin: Any) -> None:
+        """Ordinary input and scheduled initial Turns share feedback and receipt ordering."""
         release = submission.release_receipt_attempt
         assert release is not None
         try:
             presenters: list[Awaitable[bool]] = [
                 self._reactions.start(
                     submission.turn_id,
-                    _message_id(message),
+                    _message_id(origin),
                     pulse_enabled=(
                         submission.task_feedback.reaction_pulse_enabled
                     ),
                 )
             ]
             if submission.task_feedback.progress_card_enabled:
+                delivery_options = {}
+                if isinstance(origin, ScheduledOrigin):
+                    delivery_options = {
+                        "reply": lambda card: self._reply_to_origin(origin, card),
+                        "validate_reply": lambda result: self._scheduled_reply_confirmed(origin, result),
+                    }
                 presenters.append(
                     self._progress_cards.start(
                         binding_id=submission.binding_id,
                         thread_id=submission.thread_id,
                         turn_id=submission.turn_id,
-                        origin=message,
+                        origin=origin,
+                        **delivery_options,
                     )
                 )
             if presenters:
@@ -2526,39 +2992,11 @@ class ChannelApplication:
         content: Any,
         opts: SendOpts,
     ) -> _SentMessage:
-        if not opts.uuid:
-            raise SideTopicCreateFailed("Side 话题消息缺少确定性发送 UUID。")
-        unknowns: list[BaseException] = []
-        for attempt in range(2):
-            try:
-                result = await self._channel.send(chat_id, content, opts)
-            except Exception as error:
-                unknowns.append(error)
-                if attempt == 0:
-                    continue
-                raise SideTopicCreateFailed(
-                    "飞书 Side 话题消息发送结果未确认；同 UUID 对账重试也失败。"
-                ) from BaseExceptionGroup(
-                    "Side message send attempts failed",
-                    unknowns,
-                )
-            if _retryable_send_result(result):
-                unknowns.append(
-                    SideTopicCreateFailed(
-                        "飞书返回了可重试的 Side 消息发送结果。"
-                    )
-                )
-                if attempt == 0:
-                    continue
-                raise SideTopicCreateFailed(
-                    "飞书 Side 话题消息发送结果未确认；"
-                    "同 UUID 对账重试仍返回可重试失败。"
-                ) from BaseExceptionGroup(
-                    "Side message send attempts were retryable",
-                    unknowns,
-                )
-            return _validated_sent_message(result, expected_chat_id=chat_id)
-        raise AssertionError("unreachable Side message attempt budget")
+        try:
+            sent = await send_topic_message(self._channel, chat_id, content, opts)
+        except TopicPublishError as error:
+            raise SideTopicCreateFailed("Side " + str(error)) from error
+        return _SentMessage(sent.message_id, sent.chat_id, sent.thread_id, sent.root_id, sent.parent_id)
 
     def _side_scope(self, record: SideTopicRecord) -> FeishuScope:
         if record.topic_id is None:
@@ -3131,6 +3569,9 @@ class ChannelApplication:
             return
         if intent.name is ControlName.SETTINGS:
             await self._reply(message, self._settings_card(intent.scope))
+            return
+        if intent.name is ControlName.CRON:
+            await self._reply(message, await self._schedule_manager_card(intent.scope))
             return
         if intent.name is ControlName.GOAL:
             binding = self._bindings.active_binding(intent.scope.key)
@@ -5396,7 +5837,7 @@ class ChannelApplication:
         )
 
     async def _reply(self, message: Any, content: Any) -> None:
-        result = await self._channel.reply(message, content)
+        result = await self._send_completion_reply(message, content)
         failure_notice = _reply_failure_notice(result)
         if failure_notice is None:
             return
@@ -5409,7 +5850,7 @@ class ChannelApplication:
             },
         )
         try:
-            fallback_result = await self._channel.reply(message, failure_notice)
+            fallback_result = await self._reply_to_origin(message, failure_notice)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -5509,17 +5950,6 @@ class ChannelApplication:
             command_help(self._runtime.available_capabilities)
             + "\n普通图片和富文本图片可直接发送，也可随逐条引用一起交给 Codex。"
         )
-
-
-def _public_chat_kind(chat_info: Any) -> str | None:
-    """Normalize only the public chat type fields exposed by Channel SDK."""
-    if chat_info is None:
-        return None
-    chat_type = str(getattr(chat_info, "chat_type", "") or "")
-    if chat_type in {"p2p", "group"}:
-        return chat_type
-    chat_mode = str(getattr(chat_info, "chat_mode", "") or "")
-    return chat_mode if chat_mode in {"p2p", "group"} else None
 
 
 def _side_send_uuid(prefix: str, side_id: str) -> str:
@@ -5629,39 +6059,12 @@ def _validated_sent_message(
     *,
     expected_chat_id: str,
 ) -> _SentMessage:
-    raw = getattr(result, "raw", None)
-    code = _object_field(raw, "code")
-    if code == 230071:
-        raise SideTopicCreateFailed(
-            "当前飞书会话不支持创建 Side 话题（230071）；本次未创建。"
-        )
-    if getattr(result, "success", None) is not True:
-        raise SideTopicCreateFailed(
-            f"飞书未确认 Side 消息发送成功（code={code!r}）。"
-        )
-    chunk_ids = getattr(result, "chunk_ids", None)
-    if chunk_ids:
-        raise SideTopicCreateFailed("Side 卡片或种子消息被意外拆分。")
-    if code != 0:
-        raise SideTopicCreateFailed(
-            f"飞书 Side 消息响应 code 异常：{code!r}。"
-        )
-    data = _object_field(raw, "data")
-    if data is None:
-        raise SideTopicCreateFailed("飞书 Side 消息响应缺少 data。")
-    message_id = _nonempty_field(result, "message_id")
-    data_message_id = _nonempty_field(data, "message_id")
-    if message_id is None or data_message_id != message_id:
-        raise SideTopicCreateFailed("飞书 Side 消息标识不一致。")
-    chat_id = _nonempty_field(data, "chat_id")
-    if chat_id != expected_chat_id:
-        raise SideTopicCreateFailed("飞书 Side 消息返回了其他 chat_id。")
+    try:
+        sent = validate_topic_message(result, expected_chat_id)
+    except TopicPublishError as error:
+        raise SideTopicCreateFailed("Side " + str(error)) from error
     return _SentMessage(
-        message_id=message_id,
-        chat_id=chat_id,
-        thread_id=_nonempty_field(data, "thread_id"),
-        root_id=_nonempty_field(data, "root_id"),
-        parent_id=_nonempty_field(data, "parent_id"),
+        sent.message_id, sent.chat_id, sent.thread_id, sent.root_id, sent.parent_id,
     )
 
 
@@ -5682,12 +6085,6 @@ def _is_feishu_card_action_lock(result: object) -> bool:
         is not None
     )
 
-
-def _retryable_send_result(result: object) -> bool:
-    if getattr(result, "success", None) is True:
-        return False
-    error = getattr(result, "error", None)
-    return getattr(error, "retryable", None) is True
 
 
 def _reply_failure_notice(result: object) -> str | None:

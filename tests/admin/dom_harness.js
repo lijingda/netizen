@@ -17,6 +17,7 @@ class Element {
     this.name = attrs.name || "";
     this.type = attrs.type || "";
     this.id = attrs.id || "";
+    this.className = attrs.class || "";
     this.style = { removeProperty() {} };
     this.classList = { toggle() {} };
   }
@@ -26,10 +27,13 @@ class Element {
       else { node.parentElement = this; this.children.push(node); }
     }
   }
-  replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
-  get textContent() { return this.text || this.children.map((node) => node.textContent).join(""); }
+  replaceChildren(...nodes) { this.children = []; this.text = ""; this.append(...nodes); }
+  get textContent() { return (this.text || "") + this.children.map((node) => node.textContent).join(""); }
   set textContent(value) { this.children = []; this.text = value; }
-  setAttribute(key, value) { this.attrs[key] = value; }
+  setAttribute(key, value) {
+    this.attrs[key] = value;
+    if (key.startsWith("data-")) this.dataset[key.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
+  }
   getAttribute(key) { return this.attrs[key] ?? null; }
   removeAttribute(key) { delete this.attrs[key]; }
   contains(target) { return target === this || this.children.some((child) => child.contains(target)); }
@@ -87,6 +91,8 @@ class Element {
     result.append(...this.children.map((child) => child.cloneNode(true)));
     return result;
   }
+  showModal() { this.open = true; this.returnFocus = document.activeElement; }
+  close() { this.open = false; this.returnFocus?.focus(); }
   reset() {
     for (const input of this.querySelectorAll("input, select")) {
       input.value = input.tagName === "select"

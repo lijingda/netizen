@@ -68,6 +68,27 @@ class PromptInput:
     skill_names: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduledConversation:
+    thread_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledOrigin:
+    """Automatic attribution and a real bot-message completion destination."""
+
+    app_id: str
+    chat_id: str
+    message_id: str
+    conversation: ScheduledConversation
+    plan_id: str
+    run_id: str
+
+    @property
+    def id(self) -> str:
+        return self.message_id
+
+
 class NativeCapability(str, Enum):
     SKILLS = "skills"
     GOAL = "goal"
@@ -133,6 +154,7 @@ class ControlName(str, Enum):
     CONFIG = "config"
     COMPACT = "compact"
     SETTINGS = "settings"
+    CRON = "cron"
     SESSIONS = "sessions"
     RESUME = "resume"
     RENAME = "rename"

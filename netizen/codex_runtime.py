@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from openai_codex import (
+    AsyncThread,
     ImageInput,
     InternalRpcError,
     InvalidRequestError,
@@ -26,6 +27,7 @@ from .bindings import (
     BindingStore,
     BindingTaskFeedback,
     BindingTurnSettings,
+    ProjectDisabled,
     SideTopicConflict,
     SideTopicNotFound,
     SideTopicState,
@@ -67,6 +69,8 @@ from .runtime.contracts import (
     GoalStateUnknown,
     ThreadLifecycleError,
     TurnObservationUnavailable,
+    ScheduledInitialStartConflict,
+    ScheduledTurnReadError,
     ContextAnchorRequired,
     ThreadLifecycleStateUnknown,
     ThreadArchived,
@@ -185,6 +189,12 @@ class _TurnResumeRequired(_TurnViewUnverified):
 
 async def _ignore_completion(_outcome: RuntimeOutcome) -> None:
     return None
+
+
+@dataclass(slots=True)
+class _ScheduledInitialSubmission:
+    run_id: str
+    begun: bool = False
 
 
 @dataclass(slots=True)
@@ -2042,10 +2052,7 @@ class CodexRuntime:
                 thread_id,
             )
             try:
-                archived = self._bindings.deactivate_if_active(
-                    scope_key=binding.scope_key,
-                    binding_id=binding.id,
-                )
+                archived = self._bindings.archive_binding(binding.id)
             except Exception as error:
                 self._retain_unknown_lifecycle(operation)
                 local_commit_error = error
@@ -2507,10 +2514,12 @@ class CodexRuntime:
 
         if not self._accepting:
             raise RuntimeClosed("服务正在停止，暂不接受新任务。")
+        self._guard_no_scheduled_initial(binding_id)
         async with self._lock(binding_id):
             if not self._accepting:
                 raise RuntimeClosed("服务正在停止，暂不接受新任务。")
             self._guard_no_lifecycle_locked(binding_id)
+            self._guard_no_scheduled_initial(binding_id)
             if binding_id in self._compacting:
                 raise ThreadCompacting(
                     "当前会话正在压缩上下文，完成前暂不接受新消息。"
@@ -2562,6 +2571,75 @@ class CodexRuntime:
         context_commit: ContextCursorCommit | None = None,
         skill_names: tuple[str, ...] = (),
     ) -> Submission:
+        return await self._submit(
+            binding=binding, cwd=cwd, input=input, owner_id=owner_id,
+            origin=origin, admission=admission, context_commit=context_commit,
+            skill_names=skill_names,
+        )
+
+    async def submit_initial(
+        self,
+        *,
+        run_id: str,
+        binding: ThreadBinding,
+        cwd: Path,
+        input: Any,
+        owner_id: str,
+        origin: object,
+        skill_names: tuple[str, ...] = (),
+    ) -> Submission:
+        """Start a claimed occurrence on its exact fresh ordinary Binding.
+
+        The persisted reservation blocks ordinary input during preparation.
+        Reusing the ordinary start branch preserves native admission, receipt,
+        completion, and skill behavior without allowing resume or steer.
+        """
+        if not run_id:
+            raise ValueError("scheduled Run ID must not be empty")
+        initial = _ScheduledInitialSubmission(run_id)
+        try:
+            return await self._submit(
+                binding=binding, cwd=cwd, input=input, owner_id=owner_id,
+                origin=origin, skill_names=skill_names, initial=initial,
+            )
+        except BaseException:
+            run = self._bindings.schedules.get_run(run_id)
+            if run.binding_id == binding.id and run.barrier != "released":
+                if run.phase == "binding_ready":
+                    # No native mutation has been attempted by this claim.
+                    self._bindings.schedules.release(
+                        run_id, error_code="initial_start_rejected",
+                    )
+                elif initial.begun and run.phase == "starting_turn":
+                    # A lost start response must never be retried. The ordinary
+                    # mutation path independently closes global admission.
+                    self._bindings.schedules.set_run(
+                        run_id, barrier="unknown", error_code="initial_start_unknown",
+                    )
+            raise
+
+    def _guard_no_scheduled_initial(self, binding_id: str) -> None:
+        if self._bindings.scheduled_initial_reservation(binding_id) is not None:
+            raise ScheduledInitialStartConflict("定时任务正在启动，请稍后重发。")
+
+    async def _submit(
+        self,
+        *,
+        binding: ThreadBinding,
+        cwd: Path,
+        input: Any,
+        owner_id: str,
+        origin: object,
+        admission: SubmissionAdmission | None = None,
+        context_commit: ContextCursorCommit | None = None,
+        skill_names: tuple[str, ...] = (),
+        initial: _ScheduledInitialSubmission | None = None,
+    ) -> Submission:
+        initial_run_id = initial.run_id if initial is not None else None
+        if initial_run_id is None:
+            self._guard_no_scheduled_initial(binding.id)
+        else:
+            self._bindings.require_scheduled_initial(initial_run_id, binding.id)
         if admission is not None and admission.binding_id != binding.id:
             raise ValueError("submission admission belongs to another Binding")
         prepared_binding = self._bindings.get(binding.id)
@@ -2592,16 +2670,24 @@ class CodexRuntime:
                 "准备本条消息期间任务反馈配置已变化，本条消息未执行，请重新发送。"
             )
         if prepared_binding.message_context_mode is MentionContextMode.CATCH_UP:
-            if admission is None or context_commit is None:
-                raise ValueError("catch-up submission requires admission and cursor commit")
-            if (
-                context_commit.expected_context_revision
-                != admission.context_revision
-            ):
-                raise ValueError("context cursor commit does not match admission")
+            if initial_run_id is None:
+                if admission is None or context_commit is None:
+                    raise ValueError("catch-up submission requires admission and cursor commit")
+                if (
+                    context_commit.expected_context_revision
+                    != admission.context_revision
+                ):
+                    raise ValueError("context cursor commit does not match admission")
+            # A reserved scheduled first Turn has no current human message or
+            # history window. Its new topic anchor was verified at Binding
+            # creation and remains the boundary for ordinary follow-up input.
         elif context_commit is not None:
             raise ValueError("current-only submission cannot commit a context cursor")
-        if configured_settings is not None and admission is None:
+        if (
+            configured_settings is not None
+            and admission is None
+            and initial_run_id is None
+        ):
             admission = await self.capture_submission_admission(binding.id)
             prepared_binding = self._bindings.get(binding.id)
             if admission.settings_revision != prepared_binding.settings_revision:
@@ -2639,7 +2725,7 @@ class CodexRuntime:
             )
         native_input = input
         if skill_names:
-            if admission is None:
+            if admission is None and initial_run_id is None:
                 admission = await self.capture_submission_admission(binding.id)
             native_input = await self._compile_skill_input(
                 cwd=cwd,
@@ -2673,6 +2759,8 @@ class CodexRuntime:
             if not self._accepting:
                 raise RuntimeClosed("服务正在停止，暂不接受新任务。")
             self._guard_no_lifecycle_locked(binding.id)
+            if initial_run_id is None:
+                self._guard_no_scheduled_initial(binding.id)
             if binding.id in self._compacting:
                 raise ThreadCompacting(
                     "当前会话正在压缩上下文，完成前暂不接受新消息。"
@@ -2701,6 +2789,14 @@ class CodexRuntime:
                     "准备本条消息期间 active 会话已切换，本条消息未执行，请重新发送。"
                 )
             active = self._active.get(binding.id)
+            if initial_run_id is not None:
+                if active is not None or binding.native_thread_id is not None:
+                    raise ScheduledInitialStartConflict(
+                        "定时任务的首次执行会话已改变，本次未启动。"
+                    )
+                self._bindings.begin_scheduled_initial(initial_run_id, binding.id)
+                assert initial is not None
+                initial.begun = True
             if active is not None:
                 if active.state is ActiveState.STOPPING:
                     raise ThreadStopping(
@@ -2804,6 +2900,20 @@ class CodexRuntime:
                 thread,
             )
 
+            if initial_run_id is not None:
+                # A Project deletion may freeze creation while thread/start
+                # is in flight. Its exact native identity is now retained, but
+                # no first Turn may begin after that freeze.
+                try:
+                    self._bindings.require_project_not_deleting(binding.project_alias)
+                    if not self._bindings.get_project(binding.project_alias).enabled:
+                        raise ProjectDisabled(binding.project_alias)
+                except Exception:
+                    self._bindings.schedules.release(
+                        initial_run_id, error_code="project_unavailable",
+                    )
+                    raise
+
             try:
                 turn_kwargs: dict[str, object] = {}
                 if resolved_settings is not None:
@@ -2846,6 +2956,21 @@ class CodexRuntime:
                 feedback_revision=binding.feedback_revision,
                 plan_available=self._turn_plan_observer is not None,
             )
+            if initial_run_id is not None:
+                try:
+                    self._bindings.mark_scheduled_turn_started(
+                        initial_run_id, binding.id, handle.id,
+                    )
+                except BaseException as error:
+                    # Native accepted the Turn. Keep its sole observer alive
+                    # even when its scheduling handoff cannot be committed.
+                    self._track(active)
+                    receipt_attempted.set()
+                    self.close_admission()
+                    raise TurnStartFailed(
+                        "Codex 已接受本次定时任务，但首次 Turn 引用未能持久化；"
+                        "服务已停止接收新任务，请重启后对账。"
+                    ) from error
             self._track(active)
             try:
                 self._commit_context_cursor_locked(
@@ -4272,6 +4397,88 @@ class CodexRuntime:
                 owner_id=active.owner_id,
                 state=active.state,
             )
+
+    async def read_scheduled_turn(
+        self,
+        binding_id: str,
+        turn_id: str,
+        *,
+        deadline: float | None = None,
+    ) -> str:
+        """Read one exact persisted Turn without loading or resuming a Thread.
+
+        This is a bounded restart/refresh observation, not another consumer.
+        Later manual Turns may be active in the same Thread and do not change
+        the state of the scheduled initial Turn.
+        """
+        if not turn_id:
+            raise ValueError("scheduled Turn ID must not be empty")
+        loop = asyncio.get_running_loop()
+        deadline = min(
+            deadline if deadline is not None else float("inf"),
+            loop.time() + _TURN_OBSERVATION_RECOVERY_TIMEOUT_SECONDS,
+        )
+        try:
+            async with asyncio.timeout_at(deadline):
+                async with self._lock(binding_id):
+                    binding = self._scheduled_read_binding_locked(binding_id)
+                    thread_id = binding.native_thread_id
+                    if thread_id is None:
+                        raise ScheduledTurnReadError(
+                            "thread_unavailable", "定时执行尚无原生 Thread 引用。",
+                        )
+                try:
+                    response = await AsyncThread(self._codex, thread_id).read(
+                        include_turns=True,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    raise ScheduledTurnReadError(
+                        "read_unavailable", "暂时无法读取本次定时执行的原生状态。",
+                    ) from error
+                async with self._lock(binding_id):
+                    current = self._scheduled_read_binding_locked(binding_id)
+                    if current.native_thread_id != thread_id:
+                        raise ScheduledTurnReadError(
+                            "identity_changed", "定时执行的原生 Thread 引用已变化。",
+                        )
+                    native = getattr(response, "thread", None)
+                    if getattr(native, "id", None) != thread_id:
+                        raise ScheduledTurnReadError(
+                            "identity_mismatch", "原生读取返回了其他 Thread。",
+                        )
+                    exact = [
+                        turn for turn in getattr(native, "turns", ())
+                        if getattr(turn, "id", None) == turn_id
+                    ]
+                    if len(exact) != 1:
+                        raise ScheduledTurnReadError(
+                            "turn_unavailable", "原生历史无法确认本次 exact Turn。",
+                        )
+                    status = _enum_value(getattr(exact[0], "status", None))
+                    if status not in {"inProgress", "completed", "interrupted", "failed"}:
+                        raise ScheduledTurnReadError(
+                            "status_unavailable", "原生 Turn 状态无法确认。",
+                        )
+                    if status == "inProgress" and _thread_status_type(native) != "active":
+                        raise ScheduledTurnReadError(
+                            "status_conflict", "原生 Thread 与本次 Turn 状态不一致。",
+                        )
+                    return status
+        except TimeoutError as error:
+            raise ScheduledTurnReadError(
+                "read_timeout", "读取本次定时执行状态超时，请稍后刷新。",
+            ) from error
+
+    def _scheduled_read_binding_locked(self, binding_id: str) -> ThreadBinding:
+        self._guard_no_lifecycle_locked(binding_id)
+        active = self._active.get(binding_id)
+        if active is not None and active.state is ActiveState.OBSERVATION_UNAVAILABLE:
+            raise TurnObservationUnavailable(
+                "当前会话的 Turn 观测已停止，请先在 /sessions 中重新检查。"
+            )
+        return self._bindings.get(binding_id)
 
     async def _stop_goal_locked(
         self,
@@ -6034,6 +6241,7 @@ class CodexRuntime:
                 f"unexpected native Turn status: {turn_status!r}"
             )
         active.terminal_observed = True
+        self._bindings.release_scheduled_initial_turn(active.binding_id, active.handle.id)
         return turn
 
     async def _materialize_terminal_turn(
