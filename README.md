@@ -87,8 +87,9 @@ curl -fsSL https://github.com/lijingda/netizen/releases/latest/download/install.
 sh /tmp/netizen-install.sh </dev/null
 ```
 
-缺少凭据时，按提示通过受保护文件补全后重跑，不要把 App Secret 发到聊天里。
-若出现浏览器验证链接，Agent 应把链接交给用户确认，并保留安装进程、继续读取输出。
+首次缺少飞书凭据时，安装器在环境准备完成后会输出验证链接，由用户在官方页面创建或选择机器人。
+Agent 应转交链接、保留同一个安装进程并继续读取输出；确认后凭据自动保存，安装继续。
+已有应用也会按需补权。不要把 App Secret 发到聊天里；手工配置仅作为备用方式。
 特殊交互方式与排障见[Agent 安装说明](docs/deployment.md#agent-驱动首次安装)。
 
 ### 3. 在飞书开始第一次对话

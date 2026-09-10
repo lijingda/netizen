@@ -587,16 +587,20 @@ SHA-256，再用拒绝绝对路径、`..`、重复成员、链接、特殊文件
 后汇入同一个配置、凭据、Service Backend、数据库/Skill snapshot、activation intent、
 `current`/`previous`、ready 和 rollback 事务。
 
-首次有 TTY 且飞书凭据不完整时，安装器先构建、验证候选 release，再提供两种方式：默认
-使用候选 venv 中固定的官方 `lark-oapi` device flow，显示 URL 与终端二维码；或手工输入
-`cli_...` App ID 和隐藏 App Secret。全新骨架由官方页面选择创建新 Bot 应用或复用已有
+公开安装入口在首次飞书凭据不完整时，先构建、验证候选 release 并检查 Codex 登录，再使用
+候选 venv 中固定的官方 `lark-oapi` device flow，通过 stderr 显示 URL 与终端二维码。
+无 TTY 时直接进入该流程，不读取 stdin；有 TTY 时保留安装方式菜单，默认浏览器，另可选择
+手工输入 `cli_...` App ID 和隐藏 App Secret。全新骨架由官方页面选择创建新 Bot 应用或复用已有
 应用；已有 `appId` 且 Secret 文件存在但内容为空时只更新该 exact 应用。已有有效 App ID
 但 Secret 文件不存在时则视为显式飞书应用绑定重置：官方页面重新创建或选择应用，并允许
 结果替换旧 App ID。它使用
 `addons.preset=false`，只声明前置门禁
 列出的 tenant scopes、`im.message.receive_v1` tenant event 和 `card.action.trigger`
 callback；不安装/调用 Lark CLI，不申请 user scope/event，不保存 user token/info。确认成功
-后 App ID 与 Secret 直接写入现有受保护文件；失败会显示手工回退，Ctrl-C 中止安装。
+后 App ID 与 Secret 直接写入现有受保护文件。浏览器失败时仅有 TTY 的安装提供手工回退；
+无 TTY 时失败、取消或最多 660 秒超时都明确终止，不转入终端输入或激活候选；Ctrl-C 中止安装。
+已有完整凭据且权限满足的升级不打开浏览器。Admin 后台升级不承载授权，缺配置或权限时
+仍返回 `requires_action`（[ADR 0062](adr/0062-decouple-initial-app-onboarding-from-terminal-input.md)）。
 
 ### 维护飞书权限契约
 
@@ -637,7 +641,7 @@ API 能接受的历史或替代 scope，与特定应用类型、租户策略和�
 
 取得完整凭据后，安装器使用候选 release 的官方 SDK 查询租户授权状态；tenant 权限能力
 契约中的精确 scope 或官方等价 scope 组必须满足，才能准备 host 或进入 release activation。
-已有完整凭据的安装发现缺失项时，无论是否有 TTY 都只对 exact App 运行一次官方浏览器修复
+已有完整凭据的公开安装发现缺失项时，无论是否有 TTY 都只对 exact App 运行一次官方浏览器修复
 并重新查询；
 该流程通过 stderr 输出验证 URL/二维码并有界等待最多约 660 秒，不读取 stdin。本轮刚完成
 首次初始化时不重复打开修复流程；二次查询仍缺失或查询不可验证时直接退出。旧 `current`、
@@ -654,37 +658,47 @@ API 能接受的历史或替代 scope，与特定应用类型、租户策略和�
 常规代装直接执行 [README 中的 Agent 命令](../README.md#快速开始)，按安装器输出继续，
 无需预先阅读本节。以下说明非交互安装的行为、可选的交互方式和异常交接，供按需查阅。
 
-Agent 不得使用 `curl | sh`，因为脚本内容和安装器输入会争用同一 stdin。先把 latest 或
-exact-tag 正式 `install.sh` 下载到文件，再运行 `sh install.sh </dev/null`；源码安装则运行
-`./dev-install.sh </dev/null`。无 TTY 时安装器绝不 prompt：若飞书凭据缺失，脚本创建带
-`cli_REPLACE_ME` 的配置骨架、空的 `0600` Feishu Secret 和已经可用的 `0600` Admin
-credential 后退出。Agent 按错误中打印的精确路径完成 App ID/Feishu Secret，再重新运行
-同一个文件或开发入口。已有完整凭据但 tenant scope 未全部授权时是唯一的浏览器例外：候选
-release 自动对 exact App 启动一次官方 device flow，通过 stderr 输出 URL/二维码并等待确认，
-不读取 stdin；确认后重新查询有效权限，通过才继续，不通过则在切换 release 前退出。已有
-有效配置、Secret 和完整授权的升级仍天然非交互。
-若有效 App ID 对应的 Secret 文件被显式删除，无 TTY 安装会保留“文件不存在”这一重置
-信号，立即退出并提示改用交互安装，或由 Agent 同时写入目标 App ID 与 Secret 后重跑；它
-不会创建空文件、启动浏览器或等待输入。
-不要让用户把 App Secret 粘贴到聊天、命令参数、仓库或 YAML 中。
+Agent 先把 latest 或 exact-tag 正式 `install.sh` 下载到文件，再运行
+`sh install.sh </dev/null`；源码安装运行 `./dev-install.sh </dev/null`。不要使用
+`curl | sh`，因为脚本内容和安装器输入会争用同一 stdin。`</dev/null` 只关闭终端输入，
+不禁止浏览器确认。安装器在候选验证与 Codex 登录检查通过后，缺少飞书凭据时自动发起一次
+官方流程；已有完整凭据但 tenant scope 缺失时则自动进入 exact-App 修复。两者均通过 stderr
+输出 URL/二维码并等待页面确认，无需 PTY、菜单输入或预先填写 Secret。
 
-Agent 代用户承载浏览器流程时，命令工具必须能保持同一个长运行进程跨越对话轮次，并在进程
-退出前读取中间 stderr。已有完整凭据的 exact-App 权限修复不需要 PTY 或可写 stdin；首次
-凭据初始化若要使用浏览器而不是 credential-file handoff，才额外需要持久 PTY 和 stdin 来
-选择安装方式。满足对应能力时：
+1. 使用能保留长运行进程、在退出前读取中间 stderr 的命令工具执行安装命令。
+2. 收到验证 URL 后原样交给用户，说明在官方页面创建或选择应用、确认配置。保留同一个
+   进程与会话；不要取消后重跑，也不要把链接留到进程结束后才转交。helper 的凭据 stdout
+   由安装器私下捕获，Agent 不应尝试读取或展示。
+3. 用户完成页面确认后继续读取同一进程，安装器自动保存凭据、检查有效权限并继续。只有
+   安装器成功退出才算安装完成；页面“配置成功”不能替代最终结果。
 
-1. 首次凭据初始化在持久 PTY 中运行下载到文件的正式 installer 或 `./dev-install.sh`，等
-   安装方式菜单出现后选择 `1`（直接回车也会选择默认项）；已有应用权限修复则照常使用
-   `</dev/null`，安装器发现缺失项后会自动进入 exact-App flow。
-2. 等待 helper 在继承的 stderr 中打印验证 URL、终端二维码和进度；将 URL 原样及可用的
-   二维码交给用户，明确请用户在浏览器完成确认后回复。helper 的 credential stdout 由
-   安装器私下捕获，Agent 不应尝试读取或展示凭据。
-3. 把对话控制权交还用户，同时保留该进程；用户确认后继续读取同一个会话，直至安装完成或
-   有效权限复查明确失败。父进程最多等待约 660 秒，过期后应重新发起，不保存或复用旧链接。
+每次安装最多发起一次浏览器流程，父进程最多等待 660 秒。无 TTY 时失败、取消或超时会明确
+退出，不转入手工输入，也不自动重发链接。确认旧进程已退出后可重跑同一命令，使用新链接；
+不要复用已结束流程的链接。页面确认后若仍缺租户权限，先完成审批、发布或租户安装再重跑，
+不要循环申请。已有有效配置、Secret 和完整授权的升级不需要页面确认。
 
-不能保留进程或转交中间输出时，不要让 Agent 承载浏览器确认：首次安装继续使用凭据文件交接；
-已有应用可由管理员在飞书后台完成权限申请、审批、发布和安装后重跑。首次凭据浏览器流程失败后，
-安装器只在有 TTY 时提供手工凭据回退；Agent 不要通过聊天收集 Secret。
+首次未绑定时可在官方页面新建或复用；已有有效 App ID 且 Secret 文件为空时锁定 exact
+应用。若有效 App ID 对应的 Secret 文件被显式删除，无 TTY 也会进入上述应用绑定重置；
+成功前保持文件不存在，取消或失败不能丢失重置意图。成功保存新凭据后的两阶段激活与恢复
+规则见[更换飞书应用与权限修复](#更换飞书应用与权限修复)。
+
+命令工具不能保留进程或转交中间输出时，可让用户直接在自己的终端运行同一个安装器。
+手工配置仍是备用方式：用户自行将 App ID 与 Secret 写入错误提示中的受保护文件后重跑，
+或在有 TTY 的安装菜单中选择手工输入；已有应用也可先在飞书后台补全权限。不要让用户把
+App Secret 粘贴到聊天、命令参数、仓库或 YAML 中。Admin 后台升级的 `requires_action`
+需要在公开安装入口完成配置或权限修复后，由管理员显式重试。
+
+### 浏览器安装路径验收
+
+修改首次配置、绑定重置、官方 onboarding 或调用端交接边界时，先以隔离测试覆盖无 TTY 的
+完整路径：首次缺凭据能输出链接且不读取 stdin，确认后自动保存与继续，exact-App 不串号，
+删除 Secret 的重置可在取消后重试，失败或超时不激活、不重复发起。另确认有 TTY 菜单与手工
+回退、已有应用一次补权和 Admin `requires_action` 边界保持。
+
+改变此路径后，在正式发布前用可控的真实应用与隔离账号或主机验证
+“Agent 执行 → 及时转交链接 → 页面新建或复用 → 同一进程继续”，核对页面预填权限、事件与
+回调、实际 tenant 授权，以及凭据未进入输出。若无法完成页面或租户审批，明确记录未通过
+的步骤，不能用模拟 SDK 或普通 `make check` 冒充现场验收。以上是验收要求，不是通过记录。
 
 ### 服务环境
 

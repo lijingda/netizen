@@ -358,7 +358,7 @@ class NetizenInstallerTest(unittest.TestCase):
             with (
                 patch.object(installer, "require_supported_platform"),
                 patch.object(systemd.SystemdServiceBackend, "preflight") as backend,
-                patch.object(installer, "prepare_configuration"),
+                patch.object(installer, "_register_feishu_app_from_release") as register,
                 patch.object(
                     installer,
                     "prepare_source_release",
@@ -385,6 +385,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 runner=installer.run_command,
             )
             backend.assert_called_once_with()
+            register.assert_not_called()
             activate.assert_not_called()
 
     def test_published_install_checks_login_on_the_prepared_candidate(self) -> None:
@@ -405,7 +406,7 @@ class NetizenInstallerTest(unittest.TestCase):
             with (
                 patch.object(installer, "require_supported_platform"),
                 patch.object(systemd.SystemdServiceBackend, "preflight"),
-                patch.object(installer, "prepare_configuration"),
+                patch.object(installer, "_register_feishu_app_from_release") as register,
                 patch.object(
                     installer,
                     "prepare_published_release",
@@ -435,6 +436,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 ),
                 runner=installer.run_command,
             )
+            register.assert_not_called()
             activate.assert_not_called()
 
     def test_layout_rejects_uninstall_targets_that_overlap_preserved_state(self) -> None:
@@ -589,6 +591,91 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(layout.secret_file.read_text(), "browser-secret")
             self.assertEqual(stat.S_IMODE(layout.config_file.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(layout.secret_file.stat().st_mode), 0o600)
+
+    def test_noninteractive_browser_configuration_preserves_binding_intent(self) -> None:
+        for state, expected_app_id, resulting_app_id in (
+            ("fresh", None, "cli_created"),
+            ("empty-secret", "cli_existing", "cli_existing"),
+            ("deleted-secret", None, "cli_replacement"),
+        ):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                layout = self._layout(Path(directory))
+                installer.prepare_directories(layout)
+                if state != "fresh":
+                    with self.assertRaises(installer.ConfigurationRequired):
+                        installer.prepare_configuration(layout, interactive=False)
+                    layout.config_file.write_text(
+                        layout.config_file.read_text().replace(
+                            "cli_REPLACE_ME", "cli_existing"
+                        ),
+                        encoding="utf-8",
+                    )
+                    if state == "deleted-secret":
+                        layout.secret_file.unlink()
+                register = MagicMock(
+                    return_value=installer.FeishuAppCredentials(
+                        app_id=resulting_app_id,
+                        app_secret="browser-secret",
+                    )
+                )
+                source = MagicMock()
+                source.readline.side_effect = AssertionError("stdin was read")
+                secret_prompt = MagicMock(
+                    side_effect=AssertionError("manual secret prompt was used")
+                )
+
+                installer.prepare_configuration(
+                    layout,
+                    interactive=False,
+                    input_stream=source,
+                    secret_prompt=secret_prompt,
+                    app_registrar=register,
+                )
+
+                register.assert_called_once_with(expected_app_id)
+                source.readline.assert_not_called()
+                secret_prompt.assert_not_called()
+                self.assertEqual(
+                    installer._configured_app_id(layout.config_file.read_text()),
+                    resulting_app_id,
+                )
+                self.assertNotIn("browser-secret", layout.config_file.read_text())
+                self.assertEqual(layout.secret_file.read_text(), "browser-secret")
+                self.assertEqual(stat.S_IMODE(layout.config_file.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(layout.secret_file.stat().st_mode), 0o600)
+
+    def test_noninteractive_browser_failure_or_cancellation_never_prompts(self) -> None:
+        for failure in (installer.InstallError("private-secret"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as directory:
+                layout = self._layout(Path(directory))
+                installer.prepare_directories(layout)
+                source = MagicMock()
+                source.readline.side_effect = AssertionError("stdin was read")
+                secret_prompt = MagicMock(
+                    side_effect=AssertionError("manual secret prompt was used")
+                )
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (
+                    patch("sys.stdout", new=stdout),
+                    patch("sys.stderr", new=stderr),
+                    self.assertRaises(type(failure)) as raised,
+                ):
+                    installer.prepare_configuration(
+                        layout,
+                        interactive=False,
+                        input_stream=source,
+                        secret_prompt=secret_prompt,
+                        app_registrar=MagicMock(side_effect=failure),
+                    )
+
+                source.readline.assert_not_called()
+                secret_prompt.assert_not_called()
+                self.assertIn("cli_REPLACE_ME", layout.config_file.read_text())
+                self.assertEqual(layout.secret_file.read_bytes(), b"")
+                self.assertNotIn("private-secret", str(raised.exception))
+                self.assertNotIn("private-secret", stdout.getvalue() + stderr.getvalue())
+                if isinstance(failure, installer.InstallError):
+                    self.assertIn("rerun ./dev-install.sh", str(raised.exception))
 
     def test_browser_setup_updates_an_existing_app_with_a_missing_secret(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -810,6 +897,66 @@ class NetizenInstallerTest(unittest.TestCase):
                 )
 
             self.assertEqual(layout.config_file.read_bytes(), original_config)
+            self.assertFalse(layout.secret_file.exists())
+
+    def test_noninteractive_rebind_preserves_credential_rollback_failure_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            with self.assertRaises(installer.ConfigurationRequired):
+                installer.prepare_configuration(layout, interactive=False)
+            layout.config_file.write_text(
+                layout.config_file.read_text().replace("cli_REPLACE_ME", "cli_existing"),
+                encoding="utf-8",
+            )
+            layout.secret_file.unlink()
+            source = MagicMock()
+            source.readline.side_effect = AssertionError("stdin was read")
+            secret_prompt = MagicMock(
+                side_effect=AssertionError("manual secret prompt was used")
+            )
+            real_write = installer._write_atomic
+
+            def fail_new_secret(path: Path, content: bytes, *, mode: int) -> None:
+                if path == layout.secret_file and content == b"returned-secret":
+                    raise OSError("simulated write failure")
+                real_write(path, content, mode=mode)
+
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                patch.object(installer, "_write_atomic", side_effect=fail_new_secret),
+                patch.object(
+                    installer, "_restore_file", side_effect=OSError("rollback failed")
+                ) as restore,
+                patch("sys.stdout", new=stdout),
+                patch("sys.stderr", new=stderr),
+                self.assertRaises(installer.InstallError) as raised,
+            ):
+                installer.prepare_configuration(
+                    layout,
+                    interactive=False,
+                    input_stream=source,
+                    secret_prompt=secret_prompt,
+                    app_registrar=lambda _app_id: installer.FeishuAppCredentials(
+                        app_id="cli_replacement",
+                        app_secret="returned-secret",
+                    ),
+                )
+
+            message = str(raised.exception)
+            self.assertIn("could not roll back", message)
+            self.assertIn("inspect", message)
+            self.assertIn(str(layout.config_file), message)
+            self.assertIn(str(layout.secret_file), message)
+            self.assertNotIn("new verification link", message)
+            self.assertNotIn("returned-secret", message + stdout.getvalue() + stderr.getvalue())
+            source.readline.assert_not_called()
+            secret_prompt.assert_not_called()
+            self.assertEqual(
+                [call.args[0] for call in restore.call_args_list],
+                [layout.config_file, layout.secret_file],
+            )
+            self.assertIn("cli_replacement", layout.config_file.read_text())
             self.assertFalse(layout.secret_file.exists())
 
     def test_release_app_registrar_keeps_secret_out_of_command_and_errors(self) -> None:
@@ -1078,21 +1225,25 @@ class NetizenInstallerTest(unittest.TestCase):
             prepare_host.assert_not_called()
             activate.assert_not_called()
 
-    def test_interactive_rebind_permission_failure_prevents_activation(self) -> None:
+    def test_new_browser_binding_permission_failure_prevents_activation(self) -> None:
+        for rebind in (False, True):
+            with self.subTest(rebind=rebind):
+                self._assert_browser_binding_permission_failure(rebind)
+
+    def _assert_browser_binding_permission_failure(self, rebind: bool) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
-            installer.prepare_directories(layout)
-            with self.assertRaises(installer.ConfigurationRequired):
-                installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace(
-                    "cli_REPLACE_ME",
-                    "cli_existing",
-                ),
-                encoding="utf-8",
-            )
-            layout.secret_file.write_text("old-secret", encoding="utf-8")
-            layout.secret_file.unlink()
+            if rebind:
+                installer.prepare_directories(layout)
+                with self.assertRaises(installer.ConfigurationRequired):
+                    installer.prepare_configuration(layout, interactive=False)
+                layout.config_file.write_text(
+                    layout.config_file.read_text().replace(
+                        "cli_REPLACE_ME", "cli_existing"
+                    ),
+                    encoding="utf-8",
+                )
+                layout.secret_file.unlink()
             release = installer.Release(
                 digest="9" * 64,
                 root=ROOT,
@@ -1127,9 +1278,8 @@ class NetizenInstallerTest(unittest.TestCase):
                     installer,
                     "_query_missing_feishu_permissions_from_release",
                     return_value=("im:chat:read",),
-                ),
+                ) as query,
                 patch.object(installer, "activate_release") as activate,
-                patch("sys.stdin", new=io.StringIO("\n")),
                 self.assertRaisesRegex(
                     installer.InstallError,
                     "im:chat:read.*rerun ./dev-install.sh",
@@ -1138,10 +1288,11 @@ class NetizenInstallerTest(unittest.TestCase):
                 installer.install_source(
                     source_root=ROOT,
                     layout=layout,
-                    interactive=True,
+                    interactive=False,
                 )
 
             register.assert_called_once_with(release, None, runner=ANY)
+            query.assert_called_once()
             self.assertIn("cli_replacement", layout.config_file.read_text())
             self.assertEqual(layout.secret_file.read_text(), "replacement-secret")
             prepare_host.assert_not_called()
@@ -1255,28 +1406,80 @@ class NetizenInstallerTest(unittest.TestCase):
 
             register.assert_not_called()
 
-    def test_noninteractive_install_does_not_build_before_credentials_are_ready(self) -> None:
+    def test_noninteractive_install_browser_failure_prevents_activation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
+            release = installer.Release(
+                digest="b" * 64,
+                root=ROOT,
+                source=ROOT,
+                venv=ROOT / ".venv",
+            )
+            with (
+                patch.object(installer, "require_supported_platform"),
+                patch.object(systemd.SystemdServiceBackend, "preflight"),
+                patch.object(systemd.SystemdServiceBackend, "prepare_host") as prepare_host,
+                patch.object(installer, "prepare_source_release", return_value=release),
+                patch.object(
+                    installer,
+                    "_register_feishu_app_from_release",
+                    side_effect=installer.InstallError("private-secret"),
+                ) as register,
+                patch.object(installer, "validate_runtime") as validate,
+                patch.object(installer, "activate_release") as activate,
+                self.assertRaises(installer.InstallError) as raised,
+            ):
+                installer.install_source(source_root=ROOT, layout=layout, interactive=False)
+
+            register.assert_called_once_with(release, None, runner=ANY)
+            validate.assert_not_called()
+            prepare_host.assert_not_called()
+            activate.assert_not_called()
+            self.assertNotIn("private-secret", str(raised.exception))
+            self.assertIn("cli_REPLACE_ME", layout.config_file.read_text())
+            self.assertEqual(layout.secret_file.read_bytes(), b"")
+
+    def test_admin_update_missing_credentials_requires_action_before_build_or_browser(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            update = MagicMock(spec=installer.InstallerUpdate)
+            update.phase = "preparing"
             with (
                 patch.object(installer, "require_supported_platform"),
                 patch.object(systemd.SystemdServiceBackend, "preflight"),
                 patch.object(installer, "prepare_source_release") as prepare_release,
-                patch.object(installer, "info") as installer_info,
+                patch.object(installer, "_register_feishu_app_from_release") as register,
+                patch.object(installer, "activate_release") as activate,
                 self.assertRaises(installer.ConfigurationRequired),
+                installer._report_install_update(update),
             ):
-                installer.install_source(
+                installer._install(
                     source_root=ROOT,
+                    prepare_candidate=prepare_release,
+                    rerun_instruction="rerun official installer",
                     layout=layout,
+                    runner=None,
                     interactive=False,
+                    update=update,
                 )
 
             prepare_release.assert_not_called()
-            installer_info.assert_not_called()
+            self.require_codex_login.assert_not_called()
+            register.assert_not_called()
+            activate.assert_not_called()
+            self.assertEqual(
+                update.report.call_args_list[-1].args,
+                ("requires_action", "configuration_required"),
+            )
             self.assertIn("cli_REPLACE_ME", layout.config_file.read_text())
             self.assertEqual(layout.secret_file.read_bytes(), b"")
 
-    def test_interactive_install_builds_candidate_before_browser_setup(self) -> None:
+    def test_install_prepares_candidate_and_checks_login_before_browser_setup(self) -> None:
+        for interactive in (False, True):
+            with self.subTest(interactive=interactive):
+                self._assert_install_prepares_candidate_before_browser(interactive)
+
+    def _assert_install_prepares_candidate_before_browser(self, interactive: bool) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
             release = installer.Release(
@@ -1287,17 +1490,18 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             events: list[str] = []
             messages: list[str] = []
-            expected_warning = (
-                "Feishu/Lark credentials are incomplete; interactive setup follows "
-                "release preparation. Agent/CI callers should cancel now and rerun "
-                "the selected installer with </dev/null."
-            )
+            source = io.StringIO("\n") if interactive else MagicMock()
+            if not interactive:
+                source.isatty.return_value = False
+                source.readline.side_effect = AssertionError("stdin was read")
 
             def prepare_release(*_args: object, **_kwargs: object) -> installer.Release:
                 self.assertIn("cli_REPLACE_ME", layout.config_file.read_text())
-                self.assertEqual(messages, [expected_warning])
+                self.assertTrue(messages)
                 events.append("release")
                 return release
+
+            self.require_codex_login.side_effect = lambda *_args, **_kwargs: events.append("login")
 
             def register_app(
                 selected_release: installer.Release,
@@ -1306,7 +1510,7 @@ class NetizenInstallerTest(unittest.TestCase):
             ) -> installer.FeishuAppCredentials:
                 self.assertEqual(selected_release, release)
                 self.assertIsNone(app_id)
-                self.assertEqual(events, ["release"])
+                self.assertEqual(events, ["release", "login"])
                 events.append("register")
                 return installer.FeishuAppCredentials(
                     app_id="cli_installed",
@@ -1340,19 +1544,19 @@ class NetizenInstallerTest(unittest.TestCase):
                     "_query_missing_feishu_permissions_from_release",
                     return_value=(),
                 ),
-                patch.object(installer, "activate_release"),
+                patch.object(installer, "activate_release") as activate,
                 patch.object(installer, "info", side_effect=messages.append),
-                patch("sys.stdin", new=io.StringIO("\n")),
+                patch("sys.stdin", new=source),
             ):
                 installed = installer.install_source(
                     source_root=ROOT,
                     layout=layout,
-                    interactive=True,
+                    interactive=True if interactive else None,
                 )
 
             self.assertEqual(installed, release)
-            self.assertEqual(events, ["release", "register"])
-            self.assertEqual(messages[0], expected_warning)
+            self.assertEqual(events, ["release", "login", "register"])
+            activate.assert_called_once()
             self.assertIn("cli_installed", layout.config_file.read_text())
             self.assertEqual(layout.secret_file.read_text(), "installed-secret")
 
@@ -1578,6 +1782,7 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(installer, "require_supported_platform"),
+                patch.object(installer, "_register_feishu_app_from_release") as register,
                 patch.object(systemd.SystemdServiceBackend, "preflight"),
                 patch.object(
                     systemd.SystemdServiceBackend,
@@ -1605,6 +1810,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(installed, release)
             prepare_candidate.assert_called_once()
             permissions.assert_called_once()
+            register.assert_not_called()
             prepare_host.assert_called_once_with(interactive=False)
             activate.assert_called_once()
 

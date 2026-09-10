@@ -2,10 +2,16 @@
 status: accepted
 date: 2026-08-22
 related: 0022, 0023, 0032
-amended_by: 0035, 0044, 0045
+amended_by: 0035, 0044, 0045, 0062
 ---
 
 # 使用官方 SDK 完成飞书应用初始化
+
+> 修订说明：[ADR 0035](0035-gate-activation-on-effective-feishu-permissions.md) 扩展官方页面
+> 新建/复用选择及绑定重置；[ADR 0044](0044-decouple-existing-app-repair-from-terminal-input.md)
+> 允许已有应用无 TTY 补权；[ADR 0062](0062-decouple-initial-app-onboarding-from-terminal-input.md)
+> 进一步允许公开入口无 TTY 首次初始化与重绑定。下文保留最初的 TTY 和创建限制作为历史，
+> 不作为当前 Agent 安装要求。
 
 ## 背景
 
