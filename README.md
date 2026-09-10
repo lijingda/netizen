@@ -77,7 +77,7 @@ sh /tmp/netizen-install.sh
 ```
 
 按安装器引导完成飞书应用配置。需要固定版本时，使用
-[当前版本安装器](https://github.com/lijingda/netizen/releases/download/v0.6.0/install.sh)；
+[当前版本安装器](https://github.com/lijingda/netizen/releases/download/v0.6.1/install.sh)；
 已有应用的权限也会在激活前检查。
 
 由 Agent 代装时，先阅读[Agent 安装流程](docs/deployment.md#agent-驱动首次安装)，
