@@ -6,6 +6,18 @@ Netizen 以执行正式 `install.sh` 或源码 `dev-install.sh` 的当前用户�
 Apple Silicon 与 Intel Mac 均在支持范围内。macOS 注销后停止、下次登录自动启动；不提供
 LaunchDaemon。
 
+## 按任务查阅
+
+| 要完成的任务 | 阅读入口 |
+| --- | --- |
+| 首次安装 | [选择部署目标](#选择部署目标) → [前置门禁](#前置门禁) → [安装](#安装)；Agent 还须遵循[首次安装交接](#agent-驱动首次安装)。 |
+| 更换飞书应用或补齐权限 | [更换飞书应用与权限修复](#更换飞书应用与权限修复)；新增权限契约先看[维护飞书权限契约](#维护飞书权限契约)。 |
+| 升级、启停或卸载 | [脚本操作与成功判据](#升级启停和卸载)、[管理页升级](#从-admin-升级)、[管理页重启](#从-admin-重启)。 |
+| 调整工具环境、代理或证书 | [服务环境](#服务环境)及[安装前提](#安装)；修改账号 profile 后重启服务。 |
+| 配置项目、访问或轮换 Admin 凭据 | [配置与管理页访问](#配置与管理页访问)。 |
+| 排查启动失败、未知状态或回滚 | [候选验证与切换](#候选验证与切换)、[Fail-closed 运维语义](#fail-closed-运维语义)、[平台服务管理器与日志](#平台服务管理器)。 |
+| 开发与发布 | [本地开发](CONTRIBUTING.md)、[代码门禁与 live 触发条件](#代码门禁与按需实时兼容性验证)、[兼容性结论](#已验证的兼容性结论)、[正式发布](#发布正式-release)。 |
+
 ## 选择部署目标
 
 仓库不定义默认服务器、SSH alias、账号或远端 checkout。选择满足本文前置条件的 Linux
@@ -606,6 +618,8 @@ API 能接受的历史或替代 scope，与特定应用类型、租户策略和�
 **开通权限** 选择页搜索结果为零，因此不能作为该应用的 onboarding addon。浏览器页面成功
 始终不能替代安装器已有的有效 tenant scope 二次门禁。
 
+### 更换飞书应用与权限修复
+
 部署后更换应用不要求卸载程序。如需保留人工回退能力，先成对备份固定路径
 `~/.netizen/config.yaml` 与 `~/.netizen/credentials/feishu-app-secret`，再删除 Secret 文件并
 执行原来的正式或源码安装入口即可进入上述绑定重置；正常升级不要删除该文件，只需直接
@@ -668,6 +682,8 @@ Agent 代用户承载浏览器流程时，命令工具必须能保持同一个�
 不能保留进程或转交中间输出时，不要让 Agent 承载浏览器确认：首次安装继续使用凭据文件交接；
 已有应用可由管理员在飞书后台完成权限申请、审批、发布和安装后重跑。首次凭据浏览器流程失败后，
 安装器只在有 TTY 时提供手工凭据回退；Agent 不要通过聊天收集 Secret。
+
+### 服务环境
 
 systemd 与 launchd 都不会替服务读取完整的 `.bashrc`、`.profile` 等账号工具环境。渲染的
 service definition 只给 profile loader 一条固定基础 `PATH`；macOS 额外包含标准
@@ -789,6 +805,13 @@ netizen.service`；无 TTY 时打印同一条预备命令。候选失败会尽�
 ./service.sh status
 ```
 
+`service.sh` 只接受上述一个动作，不执行 `git pull`。`start` 在服务已 loaded 且 ready 时
+幂等返回；loaded 但尚未 ready 时只做有界等待，不另起进程。`start` 和 `restart` 的启动
+阶段最多等待 45 秒，只有服务管理器保持 loaded 且主进程在 admission 开放后发布私有 ready marker 才
+成功；profile 超时、shell 失败或主服务未就绪均返回非零。macOS `status` 分别显示
+installed、loaded、ready 和日志路径，不能用 loaded 代替 ready。具体日志入口见
+[平台服务管理器](#平台服务管理器)。
+
 若原 checkout 已删除，从安装目录使用完全相同的入口：
 
 ```bash
@@ -878,6 +901,8 @@ relay 规则，不把 App Secret 发到聊天。机器掉电不会自动执行�
 首次上线验收或相关产品边界发生变化时，按本文对应门禁核对 ready 日志，并在飞书发送
 “运行中的任务再发一条消息会怎样？”确认自然语言回答包含 steer 且明确不排队；再用
 `$netizen-user-guide 如何切换会话？` 验证显式调用能说明 `/sessions` 和 `/resume`。
+
+## 配置与管理页访问
 
 `config.yaml` 采用仓库示例的 mapping 形态。Feishu Secret 文件只含 raw value，权限必须是
 `0600` 或更严格；Admin credential 必须是 `token_urlsafe(32)` 的 canonical base64url 单行、

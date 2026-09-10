@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="364" viewBox="0 0 1080 364" role="img" aria-labelledby="title desc">
+  <title id="title">从一句话，到可用的结果</title>
+  <desc id="desc">普通任务交互示意：在飞书描述任务，执行中补充要求，完成后收到回答，并按需发送有本轮原生记录的当前文件。此图不是飞书界面截图。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="m2 2 5 3-5 3" fill="none" stroke="#8d9ab4" stroke-width="1.5"/></marker>
+  </defs>
+  <rect x="1" y="1" width="1078" height="362" rx="20" fill="#f6f8fc" stroke="#e3e8f2"/>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <text x="36" y="49" font-size="23" font-weight="650" fill="#18243e">从一句话，到可用的结果</text>
+    <text x="1044" y="46" text-anchor="end" font-size="13" fill="#63708a">NETIZEN · 交互示意</text>
+    <rect x="36" y="78" width="310" height="228" rx="14" fill="#fff" stroke="#e0e6f0"/>
+    <rect x="385" y="78" width="310" height="228" rx="14" fill="#fff" stroke="#e0e6f0"/>
+    <rect x="734" y="78" width="310" height="228" rx="14" fill="#fff" stroke="#e0e6f0"/>
+    <path d="M353 193h24m325 0h24" stroke="#8d9ab4" stroke-width="2" marker-end="url(#arrow)"/>
+    <circle cx="71" cy="114" r="15" fill="#edf2ff"/>
+    <text x="71" y="120" text-anchor="middle" font-size="16" font-weight="650" fill="#2458e6">1</text>
+    <text x="97" y="120" font-size="18" font-weight="650" fill="#18243e">在飞书描述任务</text>
+    <rect x="57" y="146" width="268" height="98" rx="9" fill="#f1f5ff"/>
+    <text x="73" y="179" font-size="16" fill="#30425f">梳理这个项目的结构，</text>
+    <text x="73" y="205" font-size="16" fill="#30425f">生成一份入门说明。</text>
+    <text x="58" y="281" font-size="13" fill="#63708a">选择项目，开始原生 Codex 会话</text>
+    <circle cx="420" cy="114" r="15" fill="#edf2ff"/>
+    <text x="420" y="120" text-anchor="middle" font-size="16" font-weight="650" fill="#2458e6">2</text>
+    <text x="446" y="120" font-size="18" font-weight="650" fill="#18243e">执行中补充要求</text>
+    <rect x="406" y="146" width="268" height="98" rx="9" fill="#f1f5ff"/>
+    <text x="422" y="179" font-size="16" fill="#30425f">也把安装步骤写进去，</text>
+    <text x="422" y="205" font-size="16" fill="#30425f">让新同事能直接上手。</text>
+    <text x="407" y="281" font-size="13" fill="#63708a">调整当前普通任务，保持上下文</text>
+    <circle cx="769" cy="114" r="15" fill="#e8f5ef"/>
+    <path d="m763 114 4 4 8-9" fill="none" stroke="#238763" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="795" y="120" font-size="18" font-weight="650" fill="#18243e">收到回答与文件</text>
+    <text x="757" y="176" font-size="16" fill="#30425f">项目结构与安装步骤已整理。</text>
+    <rect x="755" y="193" width="268" height="51" rx="9" fill="#f3f7f5"/>
+    <path d="M774 205h13l5 5v21h-18zm13 0v6h5m-13 5h8m-8 5h8" fill="none" stroke="#438269" stroke-width="1.5" stroke-linejoin="round"/>
+    <text x="805" y="224" font-size="15" fill="#30425f">入门说明.md</text>
+    <text x="756" y="281" font-size="13" fill="#63708a">按需发送本轮文件的当前内容</text>
+    <text x="540" y="337" text-anchor="middle" font-size="13" fill="#63708a">群聊每条请求需 @机器人 · 过程卡可选开启 · 文件不会自动上传</text>
+  </g>
+</svg>

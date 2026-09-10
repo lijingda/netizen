@@ -1,5 +1,66 @@
 # Netizen Python Pilot 设计
 
+## 工程概览
+
+Netizen 把飞书单聊、群聊和话题接成 Codex 的消息 Channel。仓库唯一的生产实现是
+`netizen/` 下的 Python 包，由 `pyproject.toml` 构建和安装；没有 Node.js/TypeScript
+运行时、构建面或 fallback。Node.js 仅用于 Admin JavaScript 行为测试，开发步骤见
+[贡献指南](CONTRIBUTING.md)。完整用户行为见[用户手册](../skills/netizen-user-guide/references/user-guide.md)。
+
+### 职责与对象关系
+
+一个常驻 Python 服务内只有一个 `FeishuChannel`、Store、Runtime、Scheduler 和共享
+`AsyncCodex`。Channel SDK 负责飞书消息与卡片；Netizen 负责 Scope/Binding 路由、项目
+登记、展示和定时交接；官方 `openai-codex` SDK 管理原生 App Server/CLI 上的 Thread、
+Turn、历史、工具与权限。Admin Web 是同一应用边界上的管理入口，不能提交即时 Prompt
+或浏览完整历史。升级、重启的一次性部署进程是限定例外，见[架构](#架构)与
+[数据与配置](#数据与配置)。
+
+普通单聊、群聊主线或话题各是一个 Scope，可关联多个 Binding 和一个当前指针。
+Binding 选择一个 Project 的 canonical cwd，并在物化后精确绑定一个 native Thread；
+Thread 内可以有多个 Turn。`/new` 先创建 lazy Binding，第一条真实请求才物化 Thread。
+切换当前 Binding 不停止其他 Binding 的执行。Side 是从已物化 Parent Thread 创建的
+ephemeral fork，依靠独立话题 route 保留身份，不是普通 Scope/Binding；Goal 则在同一个
+普通 Thread 内驱动多个物理 Turn。详细身份与生命周期见[核心模型](#核心模型)及
+[运行与锁](#运行与锁)。
+
+### 三条主要执行路径
+
+| 入口 | 执行过程与结果归属 |
+| --- | --- |
+| 空闲会话收到普通消息 | 验证消息归属、引用、图片和所选上下文，校验显式 Skill 与会话配置，创建或恢复 exact Thread，启动一个新 Turn；结果回到原请求的投递锚点。 |
+| 运行中的会话收到普通消息 | 经输入准备与身份校验后，steer 当前 exact Turn；不排队、不拼接成下一轮，不改变原任务的结果投递锚点。 |
+| 定时计划到期 | 唯一 Scheduler 认领到期点，在目标聊天创建独立话题与普通持久 Binding，提交一次初始 Turn；配置取自本次认领快照，不切换来源聊天的当前会话。 |
+
+输入准备不能把历史消息变成新的控制指令或 Skill 调用；群聊每次触发仍需重新 @机器人。
+定时初始输入保留 Scheduled Plan 来源，后续交流沿用普通会话语义。具体准入、消息归属与
+重试边界见[核心模型](#核心模型)、[运行与锁](#运行与锁)和[定时任务](#定时任务)。
+
+### 状态归属与维护原则
+
+| 所有者 | 负责的状态 |
+| --- | --- |
+| Codex 原生状态 | 登录、Thread/Turn 历史、Goal、工具、Skills、MCP 与原生配置；Netizen 复用 effective user 的标准 `$CODEX_HOME`。 |
+| Channel SQLite | Scope/Binding/Project 元数据、显式配置意图与 revision、去重 TTL、上下文边界及不含 native ID 的 Side 路由墓碑；定时任务窄扩展保存当前计划指令与最小交接记录。 |
+| 当前进程内存 | 活动 Turn/Goal/Side、锁与准入、订阅计时、Activity/usage 展示、Admin session 与一次性控制凭据；重启不自动重建这些执行或展示状态。 |
+| 部署状态目录 | 安装锁、激活意图、ready/lifetime 标记与有界升级/重启结果；不进入 Channel SQLite。 |
+
+持久化清单和各项例外以[数据与配置](#数据与配置)、[定时任务](#定时任务)及
+[部署事务](deployment.md#候选验证与切换)为准。普通 Prompt、回复、Turn 历史、已生效
+Codex 配置与卡片 session 不复制到 Channel 数据库。安装器只管理随 release 发布的
+`netizen-user-guide` Skill，其他用户 Skill 保持原生管理。
+
+不同 Binding、Parent 与 Side 可以并发使用同一个真实 Project cwd，文件改动彼此可见；
+不能以全局 semaphore、Project lock、目录副本或独立 `CODEX_HOME` 隔离它们。飞书展示
+尽力完成，失败不改变原生执行；文件必须来自 exact Turn 证据，不能靠扫描目录补齐。
+未知副作用按各操作规定的范围 fail closed，不能把观测失败当成任务已结束。停止、
+归档、删除与 Goal 完成各有独立契约，修改前直接读[运行与锁](#运行与锁)和
+[失败语义](#失败语义)及其引用的 ADR。
+
+SDK 使用精确固定的官方版本与公开高层 API。已批准的能力缺口 Adapter 各自保留
+capability 或版本/指纹门禁及移除条件，不扩展成通用 RPC 层；兼容事实与按需 live
+验证入口在[部署文档](deployment.md#代码门禁与按需实时兼容性验证)。
+
 ## 目标与边界
 
 定时任务的行为见[定时任务](#定时任务)，架构决策见
