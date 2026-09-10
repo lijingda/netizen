@@ -587,8 +587,8 @@ def _task_feedback_form_elements(
             name=f"{prefix}_progress_card",
             placeholder="选择是否使用进度卡",
             options=(
-                ("关闭（默认）", _task_feedback_reference(False)),
-                ("开启", _task_feedback_reference(True)),
+                ("关闭", _task_feedback_reference(False)),
+                ("开启（默认）", _task_feedback_reference(True)),
             ),
             initial_option=_task_feedback_reference(
                 initial.progress_card_enabled
@@ -769,7 +769,9 @@ def new_binding_card(
                 initial_project_alias=initial_project_alias,
                 allow_context_mode=allow_context_mode,
                 message_context_mode=message_context_mode,
-                task_feedback=task_feedback or BindingTaskFeedback(),
+                task_feedback=(
+                    task_feedback or SessionSettings.new_defaults(catalog).task_feedback
+                ),
             )
         )
     return OutboundCard(card=builder.to_dict())

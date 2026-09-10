@@ -462,7 +462,7 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
         defaults = created["plan"]["session_settings"]
         self.assertEqual(defaults, {
             "turn_settings": {"model_id": "native-model", "effort_id": "medium", "service_tier_id": "default"},
-            "reaction_pulse_enabled": False, "progress_card_enabled": False, "message_context_mode": "current-only",
+            "reaction_pulse_enabled": False, "progress_card_enabled": True, "message_context_mode": "current-only",
         })
         plan = (await self.page(session))["plans"][0]
         status, _, updated = await self.json_post("/api/v1/schedules/update", session, {
@@ -480,10 +480,10 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
         plan = (await self.page(session))["plans"][0]
         status, _, configured = await self.json_post("/api/v1/schedules/update", session, {
             **fixture._action_payload(plan["actions"]["update"]),
-            "definition": {"session_settings": {"progress_card_enabled": True}},
+            "definition": {"session_settings": {"progress_card_enabled": False}},
         })
         self.assertEqual(status, 200, configured)
-        self.assertEqual(configured["plan"]["session_settings"], {**defaults, "progress_card_enabled": True})
+        self.assertEqual(configured["plan"]["session_settings"], {**defaults, "progress_card_enabled": False})
         plan = (await self.page(session))["plans"][0]
         status, _, deleted = await self.json_post("/api/v1/schedules/delete", session,
                                                 fixture._action_payload(plan["actions"]["delete"]))

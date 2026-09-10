@@ -2432,7 +2432,7 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertEqual(
             fields["new_progress_card"]["initial_option"],
-            "task-feedback:v2:off",
+            "task-feedback:v2:on",
         )
         self.assertNotIn("new_prompt", fields)
         self.assertEqual(len(_elements(outbound.card, "form")), 1)
@@ -2569,7 +2569,7 @@ class CardRendererTest(unittest.TestCase):
             MentionContextMode.CURRENT_ONLY,
         )
         self.assertFalse(decoded.reaction_pulse_enabled)
-        self.assertFalse(decoded.progress_card_enabled)
+        self.assertTrue(decoded.progress_card_enabled)
 
     def test_config_card_targets_exact_binding_and_uses_live_catalog_options(
         self,

@@ -222,13 +222,14 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.catalog_calls, 0)
         anonymous = await self.create(native_thread_id=None, chat_id="explicit-chat", project="p")
         self.assertEqual(anonymous["session_settings"], SessionSettings.new_defaults(catalog).to_dict())
+        self.assertTrue(anonymous["session_settings"]["progress_card_enabled"])
         self.assertEqual(self.runtime.catalog_calls, 1)
         native = await self.create(native_thread_id=None, chat_id="explicit-chat", project="p", session_settings={"turn_settings": None})
-        self.assertEqual(native["session_settings"], SessionSettings().to_dict())
+        self.assertEqual(native["session_settings"], SessionSettings.new_defaults(None).to_dict())
         self.assertEqual(self.runtime.catalog_calls, 1)
         self.runtime.catalog = None
         fallback = await self.create(native_thread_id=None, chat_id="explicit-chat", project="p")
-        self.assertEqual(fallback["session_settings"], SessionSettings().to_dict())
+        self.assertEqual(fallback["session_settings"], SessionSettings.new_defaults(None).to_dict())
         self.assertEqual(self.runtime.catalog_calls, 2)
 
     async def test_partial_settings_update_preserves_plan_and_null_explicitly_resets_model(self):

@@ -285,7 +285,7 @@ class ScheduleService:
             catalog, catalog_error = await self._catalog()
             base = SessionSettings.new_defaults(catalog)
         else:
-            base = SessionSettings()
+            base = SessionSettings.new_defaults(None)
         settings = base.merge(patch)
         if chat_kind == "p2p" and settings.message_context_mode.value == "catch-up":
             if "message_context_mode" in patch:

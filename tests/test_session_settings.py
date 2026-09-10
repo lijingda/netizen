@@ -52,8 +52,10 @@ class SessionSettingsTest(unittest.TestCase):
         catalog = self.catalog()
         defaults = SessionSettings.new_defaults(catalog)
         self.assertEqual(defaults.turn_settings, BindingTurnSettings("model-a", "low", "priority"))
+        self.assertEqual(defaults.task_feedback, BindingTaskFeedback(False, True))
         defaults.validate_catalog(catalog)
-        self.assertEqual(SessionSettings.new_defaults(None), SessionSettings())
+        self.assertEqual(SessionSettings.new_defaults(None), SessionSettings(task_feedback=BindingTaskFeedback(False, True)))
+        self.assertEqual(defaults.merge({"progress_card_enabled": False}).task_feedback, BindingTaskFeedback(False, False))
         with self.assertRaises(ModelCatalogError):
             defaults.merge({"turn_settings": {"model_id": "unavailable", "effort_id": "low", "service_tier_id": "priority"}}).validate_catalog(catalog)
         store = BindingStore()

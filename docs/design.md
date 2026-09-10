@@ -593,8 +593,9 @@ release gate，也不让 observer 成为终态权威；这个边界不删除或�
 
 普通 Binding 每个新 Turn，以及 Goal start/resume，在 exact admission 中捕获当时的 Binding
 Task Feedback；Side 则在创建时一次性冻结 Parent 当时的 Task Feedback 并供所有 Side Turn
-沿用。运行中或 Side 创建后修改 Parent 配置不会改变已经捕获的 operation。两个选项默认均
-关闭：Reaction Pulse 只控制普通/Side Turn 的 `THINKING` 执行中闪烁，Progress Card
+沿用。运行中或 Side 创建后修改 Parent 配置不会改变已经捕获的 operation。新建会话默认
+关闭 Reaction Pulse、开启 Progress Card，已有会话保留保存的选择。Reaction Pulse
+只控制普通/Side Turn 的 `THINKING` 执行中闪烁，Progress Card
 控制普通/Side Turn 是否产生 Activity 运行卡，以及 Goal 组合卡是否加入 Activity 模块。
 普通与 Side Turn 的 Lifecycle Reaction 始终尽力展示；两项都关闭时仍有 accepted、成功
 steer 和终态表情，但没有 `THINKING` pulse 或 Activity 过程卡。Goal 模块本身始终存在且不
@@ -809,7 +810,7 @@ thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admis
 `side_topics`、`dedup_keys`，以及 `schedule_plans`、`schedule_runs`、`schedule_requests`。
 `dedup_keys` 直接实现 Channel SDK 冻结的 `seen/mark` DedupStore 协议。
 `bindings` 保存全空或全有的三个 Binding-scoped catalog
-ID、settings revision、两个默认关闭的 Binding Task Feedback 布尔值及 feedback revision、
+ID、settings revision、两个显式保存的 Binding Task Feedback 布尔值及 feedback revision、
 `current-only|catch-up`、全空或全有的 exact Context Boundary、context revision，以及
 `ever_activated` 标记；默认值为 1，Admin 仅创建且从未设为
 当前的 Lazy Binding 为 0，第一次 active-pointer 提交由 trigger 原子改为 1。
@@ -1149,8 +1150,10 @@ UUID 保证重复点击不重复发消息，这些动作不加 nonce。SDK 改�
 
 `/new` 卡片只有一个创建 form：一个包含全部 enabled Projects 的 Project 下拉框，以及
 Model、Effort、Speed、Reaction Pulse 和 Progress Card；群聊和群话题再增加 Mention
-Context Mode。两个 Task Feedback 选项默认关闭，默认 mode 是 `current-only`，P2P 不显示
-mode 字段。Model 下拉包含稳定的 `inherit Codex` sentinel；选择实际模型时三项必须完整并经
+Context Mode。Reaction Pulse 默认关闭，Progress Card 默认开启，两项可独立修改；这项
+新建默认值取代 ADR 0046 最初的两项默认关闭，不迁移已有 Binding。默认 mode 是
+`current-only`，P2P 不显示 mode 字段。Model 下拉包含稳定的 `inherit Codex` sentinel；
+选择实际模型时三项必须完整并经
 live catalog resolve。模型目录不可用时仍展示 Project、Task Feedback、Context Mode 和
 inherit 的 minimal form，不要求用户改走命令。提交后只创建 lazy Binding，并把原卡重绘为
 包含 Project、会话短 ID、Model 来源、Task Feedback、Mention Context Mode 和下一步的绿色

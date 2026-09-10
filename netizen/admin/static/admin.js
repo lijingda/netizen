@@ -1627,7 +1627,7 @@ function resetScheduleEndOffset() {
 }
 
 function defaultScheduleSessionSettings() {
-  return { turn_settings: null, reaction_pulse_enabled: false, progress_card_enabled: false,
+  return { turn_settings: null, reaction_pulse_enabled: false, progress_card_enabled: true,
     message_context_mode: "current-only" };
 }
 

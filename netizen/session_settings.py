@@ -32,7 +32,7 @@ class BindingTurnSettings:
 
 @dataclass(frozen=True, slots=True)
 class BindingTaskFeedback:
-    """Binding-scoped, opt-in pulse/card feedback for Turns."""
+    """Binding-scoped pulse/card feedback choices for Turns."""
 
     reaction_pulse_enabled: bool = False
     progress_card_enabled: bool = False
@@ -105,12 +105,13 @@ class SessionSettings:
 
     @classmethod
     def new_defaults(cls, catalog: ModelCatalog | None) -> SessionSettings:
+        feedback = BindingTaskFeedback(progress_card_enabled=True)
         if catalog is None:
-            return cls()
+            return cls(task_feedback=feedback)
         model = catalog.default_model
         return cls(turn_settings=BindingTurnSettings(
             model.id, model.default_effort_id, model.default_service_tier_id,
-        ))
+        ), task_feedback=feedback)
 
     def validate_catalog(self, catalog: ModelCatalog) -> None:
         if self.turn_settings is not None:

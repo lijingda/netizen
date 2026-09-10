@@ -116,7 +116,7 @@ class _SessionSettingsArguments(BaseModel):
 
     turn_settings: _TurnSettingsArguments | None = Field(default=None, description="Omit to keep copied/current model settings; null explicitly inherits native Codex; an object must provide all three IDs returned by options.")
     reaction_pulse_enabled: bool = False
-    progress_card_enabled: bool = False
+    progress_card_enabled: bool = True
     message_context_mode: Literal["current-only", "catch-up"] = "current-only"
 
 
