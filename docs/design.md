@@ -834,12 +834,16 @@ Skill catalog、原生 plan/checklist、Turn Activity Projection、reaction、Re
 queue 表，也不保存 Admin credential、session、action/CSRF token、native metadata 索引或
 audit record。
 
-首次交互安装的飞书应用初始化是 release 外的安装期流程，不是第二个运行时认证层；服务
+飞书应用初始化是 release 外的安装期流程，不是第二个运行时认证层；服务
 运行时不进入该流程，也不申请或持久化 user token。成功后只把 App ID 与 Secret 写入
 `~/.netizen/config.yaml` 与 `0600` `credentials/feishu-app-secret`，不向 Channel
-Database、Codex state、环境或日志写入凭据。CLI 安装时，缺失权限的已有完整凭据不依赖 TTY，
-执行一次有界的 exact-App 官方修复并重新查询一次；Admin Upgrade 则返回 `requires_action`，
-不在一次性升级进程中开启交互授权。App ID 改变后新消息进入新的 Scope
+Database、Codex state、环境或日志写入凭据。公开安装入口在候选验证和 Codex 登录检查通过后，
+凭据不完整时默认走官方浏览器初始化；首次配置、显式重绑定与已有应用补权都不依赖 TTY。
+TTY 只决定是否显示安装方式菜单与允许手工输入。无 TTY 的浏览器失败、取消或 660 秒超时
+直接退出，不转入终端输入等待；同一次安装最多发起一次流程，成功后仍校验有效 tenant
+权限才允许激活（[ADR 0062](adr/0062-decouple-initial-app-onboarding-from-terminal-input.md)）。
+Admin Upgrade 缺配置或权限时仍返回 `requires_action`，不在一次性升级进程中开启授权。
+App ID 改变后新消息进入新的 Scope
 namespace；旧 Binding 与原生历史保留但不迁移。device flow、凭据文件交接与安装期权限
 门禁的完整流程见 [部署文档](deployment.md)。
 

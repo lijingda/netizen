@@ -2,10 +2,15 @@
 status: accepted
 date: 2026-08-26
 amends: 0033, 0035
+amended_by: 0062
 related: 0041
 ---
 
 # 将已有飞书应用补权与终端输入解耦
+
+> [ADR 0062](0062-decouple-initial-app-onboarding-from-terminal-input.md) 将公开入口的无 TTY
+> 浏览器流程扩展到首次初始化与显式重绑定；下文第 3 项“缺凭据生成骨架后退出”保留为历史。
+> 本文的 exact-App 补权、一次流程、有界等待与有效权限复查约束继续保留。
 
 ADR 0033/0035 用 stdin 是否连接 TTY 同时判断安装器能否提示凭据和能否运行官方
 `register_app`。但 exact-App 修复只通过 callback 把验证 URL/二维码写到 stderr，在最多

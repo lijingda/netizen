@@ -2,11 +2,16 @@
 status: accepted
 date: 2026-08-24
 amends: 0033
-amended_by: 0044, 0045
+amended_by: 0044, 0045, 0062
 related: 0032, 0034
 ---
 
 # 激活前校验飞书租户权限并复用官方已有应用选择
+
+> 终端交互修订：[ADR 0044](0044-decouple-existing-app-repair-from-terminal-input.md) 允许已有
+> 应用无 TTY 补权；[ADR 0062](0062-decouple-initial-app-onboarding-from-terminal-input.md)
+> 允许公开入口无 TTY 首次初始化与重绑定。下文无 TTY 直接退出的描述为历史；exact-App、
+> 删除 Secret 的重置意图、有效权限门禁与两阶段凭据/激活语义继续保留。
 
 > 2026-08-27 权限契约更正：飞书 reaction create/delete API 接受 `im:message` 或更窄的
 > `im:message.reactions:write_only`。当前契约已经独立要求 `im:message`，因此后者不再作为

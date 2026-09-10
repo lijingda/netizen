@@ -3,7 +3,7 @@ status: accepted
 date: 2026-09-06
 amends: 0031, 0034, 0041
 amended-by: 0059
-related: 0022, 0032, 0035, 0042, 0044, 0050
+related: 0022, 0032, 0035, 0042, 0044, 0050, 0062
 ---
 
 # 通过共享安装器执行管理页手动升级
@@ -13,6 +13,8 @@ Admin 需要在管理员点击后完成正式版本安装、重启与结果展�
 Runtime 维护状态，也不做任务无感续跑，以免为部署入口另造一套执行生命周期。
 
 [ADR 0059](0059-support-explicit-admin-service-restart.md) 补充同一执行者的独立重启，页面改称“系统维护”。
+[ADR 0062](0062-decouple-initial-app-onboarding-from-terminal-input.md) 扩展公开 CLI 的无 TTY
+浏览器初始化；本 ADR 的后台 `requires_action` 与不承载授权浏览器边界保持不变。
 
 ## 边界与取舍
 

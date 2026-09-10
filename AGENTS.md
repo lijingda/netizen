@@ -29,7 +29,7 @@ their cited ADRs before changing that boundary.
 - Installation, release, permissions, and platform service management:
   [deployment](docs/deployment.md). Routine Agent installation starts with the
   README command and follows installer output; consult the relay procedure for
-  interactive setup or troubleshooting. Read the relevant acceptance gates
+  alternate setup or troubleshooting. Read the relevant acceptance gates
   before changing deployment behavior.
 - End-user usage consultation:
   [netizen-user-guide](skills/netizen-user-guide/SKILL.md). Its reference manual
@@ -118,9 +118,12 @@ their cited ADRs before changing that boundary.
   (ADR 0057/0059).
 - Use the official `install.sh` for Published Releases and `./dev-install.sh`
   for the exact workspace. Agents download the official installer to a file;
-  run it with `</dev/null` and follow its output. Relay any verification URL to
-  the user while retaining the installer process and reading its progress;
-  never request an App Secret in chat. Other interaction modes are documented
+  run it with `</dev/null` and follow its output. Public installation can perform
+  initial browser setup and exact-App repair without a TTY (ADR 0062); Admin
+  upgrades still return `requires_action` without browser authorization.
+  Relay any verification URL to the user while retaining the same installer
+  process and reading its stderr progress; credentials are saved privately.
+  Never request an App Secret in chat. Other interaction modes are documented
   in the deployment handoff procedure.
   A successful official installer exit completes routine upgrade verification;
   expand checks only for an ambiguous result, changed boundary, or user request.

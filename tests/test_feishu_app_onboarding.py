@@ -8,7 +8,7 @@ import types
 import unittest
 from collections.abc import Mapping
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from scripts import feishu_app_onboarding as onboarding
 
@@ -46,6 +46,7 @@ class FeishuAppOnboardingTest(unittest.TestCase):
         captured: dict[str, Any] = {}
         stdout = io.StringIO()
         stderr = io.StringIO()
+        stderr.flush = MagicMock()
 
         def register_app(**kwargs: Any) -> Mapping[str, Any]:
             captured.update(kwargs)
@@ -55,6 +56,9 @@ class FeishuAppOnboardingTest(unittest.TestCase):
                     "expire_in": 600,
                 }
             )
+            self.assertIn("https://accounts.feishu.cn/device/example", stderr.getvalue())
+            stderr.flush.assert_called()
+            self.assertEqual(stdout.getvalue(), "")
             kwargs["on_status_change"]({"status": "polling"})
             return {
                 "client_id": "cli_created",
@@ -173,6 +177,23 @@ class FeishuAppOnboardingTest(unittest.TestCase):
         )
 
         self.assertIn("use the URL above", stderr.getvalue())
+
+    def test_main_cancellation_exits_without_emitting_credentials(self) -> None:
+        fake_sdk = types.SimpleNamespace(
+            register_app=MagicMock(side_effect=KeyboardInterrupt())
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            patch.dict(sys.modules, {"lark_oapi": fake_sdk}),
+            patch("sys.stdout", new=stdout),
+            patch("sys.stderr", new=stderr),
+        ):
+            code = onboarding.main([])
+
+        self.assertEqual(code, 130)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("interrupted", stderr.getvalue())
 
     def test_main_keeps_sdk_failure_and_credentials_out_of_stdout(self) -> None:
         fake_sdk = types.SimpleNamespace(

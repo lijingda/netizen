@@ -124,6 +124,16 @@ def run_registration(
                 "(QR rendering is unavailable; use the URL above.)",
                 file=progress_output,
             )
+        print(
+            "Keep this installer running while completing the browser confirmation. "
+            "Agents: send the verification URL to the user, retain this process, "
+            "and continue reading its output after confirmation. "
+            "The link expires after about 10 minutes; rerun the installer if it expires. "
+            "App credentials are saved automatically; do not request or send the "
+            "App Secret in chat.",
+            file=progress_output,
+        )
+        progress_output.flush()
 
     def on_status_change(info: Mapping[str, Any]) -> None:
         status = info.get("status")

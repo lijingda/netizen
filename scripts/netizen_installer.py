@@ -593,7 +593,7 @@ def prepare_configuration(
     secret_prompt: Callable[[str], str] = getpass.getpass,
     app_registrar: AppRegistrar | None = None,
 ) -> None:
-    """Create or complete config without ever waiting on a non-TTY caller."""
+    """Prepare config; a supplied registrar can complete it without terminal input."""
 
     source = sys.stdin if input_stream is None else input_stream
     config_missing = not _path_exists(layout.config_file)
@@ -634,7 +634,7 @@ def prepare_configuration(
                 f"could not read Feishu secret file {layout.secret_file}: {error}"
             ) from error
 
-    if interactive and (needs_app_id or needs_secret):
+    if (interactive or app_registrar is not None) and (needs_app_id or needs_secret):
         if rebind_requested:
             assert configured_app_id is not None
             info(
@@ -648,9 +648,9 @@ def prepare_configuration(
         can_register = app_registrar is not None and (
             needs_app_id or rebind_requested or configured_app_id is not None
         )
-        use_browser = can_register and _prompt_feishu_setup_method(
-            source,
-            app_id=registration_app_id,
+        use_browser = can_register and (
+            not interactive
+            or _prompt_feishu_setup_method(source, app_id=registration_app_id)
         )
         if use_browser:
             info(
@@ -659,6 +659,20 @@ def prepare_configuration(
             )
             try:
                 credentials = app_registrar(registration_app_id)
+            except InstallError:
+                if not interactive:
+                    raise InstallError(
+                        "official Feishu/Lark browser setup did not complete; "
+                        f"{rerun_instruction} for a new verification link, or run it "
+                        "in an interactive terminal to choose manual setup. "
+                        "Do not send the App Secret in chat."
+                    ) from None
+                print(
+                    "Browser setup did not complete. Enter an existing App ID and "
+                    "App Secret manually instead.",
+                    file=sys.stderr,
+                )
+            else:
                 config_text = _store_registered_feishu_credentials(
                     layout,
                     config_text=config_text,
@@ -668,13 +682,6 @@ def prepare_configuration(
                     ),
                     credentials=credentials,
                 )
-            except InstallError:
-                print(
-                    "Browser setup did not complete. Enter an existing App ID and "
-                    "App Secret manually instead.",
-                    file=sys.stderr,
-                )
-            else:
                 needs_app_id = False
                 needs_secret = False
                 rebind_requested = False
@@ -688,7 +695,7 @@ def prepare_configuration(
                     "set availability, and add the bot to target chats"
                 )
 
-        if needs_app_id or rebind_requested:
+        if interactive and (needs_app_id or rebind_requested):
             app_id = _prompt_app_id(source)
             if rebind_requested:
                 assert configured_app_id is not None
@@ -704,7 +711,7 @@ def prepare_configuration(
             rebind_requested = False
             configured_app_id = app_id
 
-        if needs_secret:
+        if interactive and needs_secret:
             try:
                 secret = secret_prompt("Feishu App Secret: ").strip()
             except EOFError as error:
@@ -2361,13 +2368,13 @@ def _install(
             )
         except ConfigurationRequired:
             configuration_ready = False
-            if not is_interactive:
+            if update is not None:
                 raise
         if not configuration_ready:
             info(
-                "Feishu/Lark credentials are incomplete; interactive setup follows "
-                "release preparation. Agent/CI callers should cancel now and rerun "
-                "the selected installer with </dev/null."
+                "Feishu/Lark credentials are incomplete; preparing the release "
+                "and verifying Codex login before browser setup. Keep this installer "
+                "running and read its output for the verification link."
             )
         release = prepare_candidate(
             selected_layout,
@@ -2383,7 +2390,7 @@ def _install(
         if not configuration_ready:
             prepare_configuration(
                 selected_layout,
-                interactive=True,
+                interactive=is_interactive,
                 rerun_instruction=rerun_instruction,
                 app_registrar=lambda app_id: _register_feishu_app_from_release(
                     release,

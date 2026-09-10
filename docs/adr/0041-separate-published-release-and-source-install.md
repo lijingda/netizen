@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-25
 amends: 0033, 0034
-amended_by: 0042, 0057
+amended_by: 0042, 0057, 0062
 related: 0032, 0035
 ---
 
@@ -15,6 +15,9 @@ related: 0032, 0035
 > [ADR 0057](0057-run-manual-admin-upgrades-through-the-shared-installer.md) 允许管理员明确
 > 提交后一次性下载并调用 exact 官方安装器，修订本文“无自动更新/后台下载器”的非目标；
 > 零参数公开入口、双候选来源与唯一安装事务继续保留。
+> [ADR 0062](0062-decouple-initial-app-onboarding-from-terminal-input.md) 允许公开入口在关闭
+> stdin 时完成首次浏览器配置；第 6 项中的“非交互不进入浏览器”限制保留为历史，Agent
+> 仍下载脚本到文件并使用 `</dev/null`，收到链接后保留同一进程完成确认。
 
 ## 背景
 
