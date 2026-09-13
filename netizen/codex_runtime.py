@@ -215,7 +215,7 @@ class _ActiveTurn:
     cleanup_succeeded: bool = False
     terminal_observed: bool = False
     cleanup_ready: asyncio.Event = field(default_factory=asyncio.Event)
-    terminal_stream_safe: bool = False
+    in_progress_observed: bool = False
     latest_diff: str | None = None
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
@@ -5529,10 +5529,9 @@ class CodexRuntime:
         observed_usage = False
         try:
             # This handle is the sole consumer of its retained notifications.
-            # Drain completion metadata only after observing the exact Turn
-            # in progress and then proving its persisted terminal state.
-            # Immediate completions retain the conservative read-only path;
-            # native terminal authority never depends on this metadata stream.
+            # The SDK retains notifications from the start request, including
+            # immediate completions. Drain only after persisted terminal proof;
+            # this metadata stream never supplies native terminal authority.
             async for notification in active.handle.stream():
                 payload = getattr(notification, "payload", None)
                 if getattr(notification, "method", None) == "turn/diff/updated":
@@ -5703,10 +5702,9 @@ class CodexRuntime:
                 if active.terminal_observed:
                     observed_usage = False
                     try:
-                        if active.terminal_stream_safe:
-                            observed_usage = await self._drain_terminal_turn_stream(
-                                active
-                            )
+                        observed_usage = await self._drain_terminal_turn_stream(
+                            active
+                        )
                     finally:
                         if not observed_usage:
                             self._invalidate_context_window_usage(active.binding_id)
@@ -6195,7 +6193,7 @@ class CodexRuntime:
         )
         self._require_exact_observation_thread(active, native_thread)
         thread_status = _thread_status_type(native_thread)
-        if thread_status == "active" and active.terminal_stream_safe:
+        if thread_status == "active" and active.in_progress_observed:
             return _TurnObservation.ACTIVE
         if thread_status in {"notLoaded", "systemError"}:
             raise _TurnResumeRequired(
@@ -6249,7 +6247,7 @@ class CodexRuntime:
                 raise _TurnViewUnverified(
                     "idle native Thread still reported the exact Turn inProgress"
                 )
-            active.terminal_stream_safe = True
+            active.in_progress_observed = True
             return _TurnObservation.EXACT_IN_PROGRESS
         if turn_status not in {"completed", "interrupted", "failed"}:
             raise RuntimeError(

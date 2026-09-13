@@ -1231,8 +1231,8 @@ untracked 或 submodule 状态，只限定 `.git` pathspec，并有独立短超�
 用、超时、非零退出或异常输出均省略该行，不能使 `/status` 失败。结果只服务当次展示，
 不缓存、不持久化。名称与
 预览中的换行和多余空白会折叠，过长内容有界截断。普通 Turn 保留公开
-`thread.read()` 终态恢复；仅当公开 read 确认 exact Turn 曾处于 `inProgress`，才会在
-持久化终态确认后通过公开 `AsyncTurnHandle.stream()` 排空该 Turn 已缓存的通知。每次
+`thread.read()` 终态恢复；持久化终态确认后，通过原始 handle 的公开
+`AsyncTurnHandle.stream()` 唯一一次排空该 Turn 已保留的通知，包括首次读取就已完成的 Turn。每次
 `thread/tokenUsage/updated` 用 `last.total_tokens` 表示当前窗口已用量，并配合
 `model_context_window` 展示上限与百分比；每次 exact `turn/diff/updated` 则整体替换该
 Turn 的 latest aggregate diff，只携带到 completion 文件发现，不参与 patch 行数累计。`total.total_tokens` 是累计量，不能冒充当前
@@ -1242,9 +1242,8 @@ Turn 的 latest aggregate diff，只携带到 completion 文件发现，不参�
 终态确认后用该 exact Turn 的 usage 通知覆盖；排空结束或失败但没有新 usage 时才使旧快照
 失效，因此旧值不会冒充最新完成 Turn。显式压缩、启动/恢复 Goal 或发现外部 active Goal
 时仍立即使快照失效，因为这些路径都会改变上下文，却没有同一公开高层 usage 消费面。
-终态后排空避免为每条 running Turn 长期占用 SDK 的阻塞 worker；
-极快 Turn 采用保守的仅 read 路径，终态后的 metadata stream 只用于已观察 exact
-inProgress 的 Turn。stream 失败只影响 usage 展示和 diff 补充；structured items
+终态后排空避免为每条 running Turn 长期占用 SDK 的阻塞 worker。
+stream 失败只影响 usage 展示和 diff 补充；structured items
 仍可作为文件 fallback，且 stream 不能取代或削弱 `thread.read()` 的 exact Turn 终态确认。
 
 checklist 来自 App Server 的完整 `turn/plan/updated`，每个有效事件整体替换旧计划，

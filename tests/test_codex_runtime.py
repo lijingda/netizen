@@ -332,6 +332,8 @@ class FakeThread:
         if self.codex.turn_errors_after_start:
             raise self.codex.turn_errors_after_start.pop(0)
         if self.codex.complete_immediately:
+            for notification in self.codex.immediate_notifications:
+                handle.notifications.put_nowait(notification)
             handle.complete()
         return handle
 
@@ -440,6 +442,7 @@ class FakeCodex:
         self.turn_calls: list[tuple[str, object, dict[str, object]]] = []
         self.handles: list[FakeTurnHandle] = []
         self.complete_immediately = False
+        self.immediate_notifications: list[object] = []
         self.read_calls: list[tuple[str, bool]] = []
         self.read_errors: list[BaseException] = []
         self.read_errors_by_call: dict[int, BaseException] = {}
@@ -4110,7 +4113,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         handle = self.codex.handles[0]
 
         async with asyncio.timeout(0.1):
-            while not self.runtime._active[binding.id].terminal_stream_safe:
+            while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
         handle.notifications.put_nowait(token_usage_notification())
         self.assertIsNone(self.runtime.context_window_usage(binding.id))
@@ -4146,7 +4149,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             batches=(TurnPatchBatch("child", "child-turn", self.cwd, (root_patch,)),)
         )
         async with asyncio.timeout(0.2):
-            while not self.runtime._active[binding.id].terminal_stream_safe:
+            while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
         with patch(
             "netizen.codex_runtime.collect_turn_patch_children",
@@ -4219,7 +4222,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         submission = await self.submit(binding)
         handle = self.codex.handles[0]
         async with asyncio.timeout(0.1):
-            while not self.runtime._active[binding.id].terminal_stream_safe:
+            while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
 
         handle.notifications.put_nowait(
@@ -4239,7 +4242,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         submission = await self.submit(binding)
         handle = self.codex.handles[0]
         async with asyncio.timeout(0.1):
-            while not self.runtime._active[binding.id].terminal_stream_safe:
+            while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
 
         observed = "diff --git a/report.md b/report.md\n"
@@ -4262,7 +4265,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         submission = await self.submit(binding)
         handle = self.codex.handles[0]
         async with asyncio.timeout(0.1):
-            while not self.runtime._active[binding.id].terminal_stream_safe:
+            while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
 
         handle.notifications.put_nowait(
@@ -4286,14 +4289,14 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(self.outcomes[0].turn_diff)
 
-    async def test_followup_keeps_previous_usage_until_unobserved_terminal(
+    async def test_immediate_followup_without_usage_invalidates_previous_snapshot(
         self,
     ) -> None:
         binding = self.binding()
         first = await self.submit(binding)
         first_handle = self.codex.handles[0]
         async with asyncio.timeout(0.1):
-            while not self.runtime._active[binding.id].terminal_stream_safe:
+            while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
         first_handle.notifications.put_nowait(token_usage_notification())
         await self.finish(first_handle, first)
@@ -4305,9 +4308,44 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         second.release_receipt_attempt()
         await self.runtime.wait_idle()
 
-        self.assertEqual(self.codex.handles[1].stream_calls, 0)
+        self.assertEqual(self.codex.handles[1].stream_calls, 1)
         self.assertIsNone(self.runtime.context_window_usage(binding.id))
         self.assertIsNone(self.outcomes[1].turn_diff)
+
+    async def test_immediate_followup_retains_usage_and_latest_diff(self) -> None:
+        binding = self.binding()
+        first = await self.submit(binding)
+        first_handle = self.codex.handles[0]
+        async with asyncio.timeout(0.1):
+            while not self.runtime._active[binding.id].in_progress_observed:
+                await asyncio.sleep(0)
+        first_handle.notifications.put_nowait(token_usage_notification())
+        await self.finish(first_handle, first)
+
+        latest_diff = "diff --git a/report.md b/report.md\n"
+        self.codex.complete_immediately = True
+        self.codex.immediate_notifications = [
+            token_usage_notification(turn_id="turn-2", used_tokens=40_000),
+            turn_diff_notification("diff --git a/old.txt b/old.txt\n", turn_id="turn-2"),
+            turn_diff_notification(latest_diff, turn_id="turn-2"),
+        ]
+        second = await self.submit(self.store.get(binding.id), "instant")
+        self.assertEqual(
+            self.runtime.context_window_usage(binding.id),
+            ContextWindowUsage(25_000, 100_000),
+        )
+        second.release_receipt_attempt()
+        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+
+        self.assertEqual(
+            self.runtime.context_window_usage(binding.id),
+            ContextWindowUsage(40_000, 100_000),
+        )
+        self.assertEqual(self.outcomes[1].turn_diff, latest_diff)
+        self.assertEqual(self.outcomes[1].final_response, "done:turn-2")
+        self.assertIsNone(self.outcomes[1].error)
+        self.assertEqual(self.codex.handles[1].stream_calls, 1)
+        self.assertEqual(self.codex.handles[1].run_calls, 0)
 
     async def test_followup_replaces_previous_usage_at_observed_terminal(
         self,
@@ -4316,7 +4354,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         first = await self.submit(binding)
         first_handle = self.codex.handles[0]
         async with asyncio.timeout(0.1):
-            while not self.runtime._active[binding.id].terminal_stream_safe:
+            while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
         first_handle.notifications.put_nowait(token_usage_notification())
         await self.finish(first_handle, first)
@@ -4328,7 +4366,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         second_handle = self.codex.handles[1]
         async with asyncio.timeout(0.1):
-            while not self.runtime._active[binding.id].terminal_stream_safe:
+            while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
         second_handle.notifications.put_nowait(
             token_usage_notification(turn_id="turn-2", used_tokens=40_000)
@@ -4345,7 +4383,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         first = await self.submit(binding)
         first_handle = self.codex.handles[0]
         async with asyncio.timeout(0.1):
-            while not self.runtime._active[binding.id].terminal_stream_safe:
+            while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
         first_handle.notifications.put_nowait(token_usage_notification())
         await self.finish(first_handle, first)
@@ -7369,7 +7407,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         submission.release_receipt_attempt()
         await self.runtime.wait_idle()
         self.assertEqual(len(self.outcomes), 1)
-        self.assertEqual(self.codex.handles[0].stream_calls, 0)
+        self.assertEqual(self.codex.handles[0].stream_calls, 1)
         self.assertIsNone(self.runtime.context_window_usage(binding.id))
 
     async def test_transient_empty_rollout_read_is_retried(self) -> None:
@@ -7561,7 +7599,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         async def initial_exact_view_ready() -> bool:
             active = self.runtime._active.get(binding.id)
-            return active is not None and active.terminal_stream_safe
+            return active is not None and active.in_progress_observed
 
         while not await initial_exact_view_ready():
             await asyncio.sleep(0)

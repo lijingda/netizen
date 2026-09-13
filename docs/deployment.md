@@ -175,7 +175,8 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 固定 SDK synthetic probes 的命令、参数和执行顺序统一由 `scripts/check_sdk.py` 维护；
 `make check` 与安装器的目标机 Host Validation 都调用该入口，失败即停止后续探针。
 SDK synthetic 门禁还要求 20 次快速完成通过原生 handle、20 次公开 read 恢复和
-40 次 usage/diff drain，以覆盖开始请求窗口内的通知保留与终态后唯一消费。
+40 次 usage/diff drain，交替覆盖先观察到运行中和启动响应前已经完成的 Turn，
+验证开始请求窗口内的通知保留与终态后唯一消费。
 Main Qualification 的 Linux 与 macOS jobs 均显式安装 Node.js 22，执行 Admin JavaScript
 行为测试；在 `CI=true` 时缺少 Node.js 会使测试失败。Node.js 是开发和 CI 的测试工具，
 不参与前端构建，也不增加生产运行或 Source Install 的前置依赖。本地（包括 Source Install）
@@ -282,7 +283,8 @@ Runtime/SQLite 测试负责。
 `usage` phase 先通过公开 `thread/read(include_turns=True)` 观察 exact Turn 为
 `inProgress`，再用公开 read 确认持久化终态，最后排空该 handle 的公开 stream。它必须
 收到 identity 匹配的 `thread/tokenUsage/updated`，且 `last.total_tokens` 非负、
-`model_context_window` 为正数。这个 probe 验证 `/status` 的生产时序；外层进程 `timeout`
+`model_context_window` 为正数。这个 probe 验证 `/status` 的先运行后完成时序；首次读取
+就已完成的 Turn 由 SDK synthetic 门禁覆盖。外层进程 `timeout`
 负责 SDK/App Server 违约时的最终隔离，不在进程内取消阻塞 stream。
 
 所有依赖普通 Turn final response 的 live phase 都必须在公开 full-history 中同时看到
@@ -1279,8 +1281,8 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    running 时 `/status` 仍出现完整 native ID、已接受 steer 次数和同一 checklist。在可观测
    Turn 完成、公开 usage 通知已排空后 `/status` 显示当前
    窗口已用 tokens、窗口上限和百分比。再启动一个普通 Turn 时，running `/status` 保留
-   并标注“上一轮完成时”的快照；本轮完成后覆盖为新值。固定 SDK 若丢失即时完成通知，
-   则终态后明确显示暂不可用并在下一次可观测 Turn 完成后更新。该继承路径不得读取模型
+   并标注“上一轮完成时”的快照；本轮完成后覆盖为新值，快速完成的 Turn 也读取原始
+   handle 保留的通知。没有可用的新 usage 时清除旧值并显示暂不可用。该继承路径不得读取模型
    目录或向 SDK 传 Model/Effort/Speed override。
 3. 零参数 `/new` 在存在 enabled Project 时只显示一个创建 form，不显示任务输入或快速按钮。
    Project 使用现有单个静态下拉框，并展示 Registry 中全部 enabled 项；同 Scope 当前或
