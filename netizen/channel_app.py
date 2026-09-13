@@ -1108,9 +1108,18 @@ class ChannelApplication:
         except ProjectError as error:
             await self._reply(message, str(error))
         except BindingNotFound as error:
-            await self._reply(message, f"当前 Scope 找不到会话：{error.args[0]}。")
+            await self._reply(
+                message,
+                f"当前聊天或话题找不到会话：{error.args[0]}。"
+                "发送 /sessions 查看会话短 ID；已归档会话用 /sessions archived 查找。"
+                "发送 /help 查看用法。",
+            )
         except AmbiguousBinding as error:
-            await self._reply(message, f"会话短 ID 不唯一：{error.args[0]}。")
+            await self._reply(
+                message,
+                f"会话短 ID 不唯一：{error.args[0]}。"
+                "发送 /sessions 查看并选择目标会话，或使用更长的 ID 重试。",
+            )
         except (
             QuotedMessageError,
             MessageHistoryError,
@@ -2229,6 +2238,42 @@ class ChannelApplication:
 
         return refresh
 
+    async def _reply_no_current_binding(
+        self,
+        message: Any,
+        scope: FeishuScope,
+        *,
+        task_not_executed: bool = False,
+    ) -> None:
+        has_sessions = bool(self._bindings.list_bindings(scope.key))
+        has_projects = bool(self._projects.list(enabled_only=True))
+        lines = [
+            "当前聊天或话题尚未选择会话。"
+            if has_sessions
+            else "当前聊天或话题还没有会话。"
+        ]
+        if has_sessions:
+            lines.append(
+                "发送 /sessions 查看并切换已有会话；"
+                "已归档的会话可用 /sessions archived 查找并恢复。"
+            )
+        if has_projects:
+            lines.append(
+                ("如需新建会话，" if has_sessions else "")
+                + "发送 /new，在卡片中选择项目并创建会话。"
+            )
+        else:
+            lines.append(
+                "新建会话需要一个已启用的项目（Codex 工作的目录）。"
+                "发送 /settings 创建、登记或启用项目，再发送 /new 创建会话。"
+            )
+        if task_not_executed:
+            lines.append("这条任务尚未执行；准备好会话后，请重新发送刚才的任务。")
+        if _message_chat_type(message) == "group":
+            lines.append("本群中的每条消息都需要 @机器人，包括命令。")
+        lines.append("发送 /help 查看快速开始和全部可用命令。")
+        await self._reply(message, "\n".join(lines))
+
     async def _prompt(
         self,
         message: Any,
@@ -2238,9 +2283,8 @@ class ChannelApplication:
     ) -> None:
         binding = self._bindings.active_binding(prompt.scope.key)
         if binding is None:
-            await self._reply(
-                message,
-                "当前聊天或话题还没有会话，请先发送 /new。",
+            await self._reply_no_current_binding(
+                message, prompt.scope, task_not_executed=True,
             )
             return
         project = self._projects.resolve_for_binding(binding.project_alias)
@@ -2753,10 +2797,7 @@ class ChannelApplication:
             if existing is not None:
                 await self._reply_existing_side(message, existing)
                 return
-            await self._reply(
-                message,
-                "当前聊天或话题还没有会话，请先发送 /new。",
-            )
+            await self._reply_no_current_binding(message, intent.scope)
             return
         record = existing
         root: _SentMessage | None = None
@@ -3576,10 +3617,7 @@ class ChannelApplication:
         if intent.name is ControlName.GOAL:
             binding = self._bindings.active_binding(intent.scope.key)
             if binding is None:
-                await self._reply(
-                    message,
-                    "当前聊天或话题还没有会话，请先发送 /new。",
-                )
+                await self._reply_no_current_binding(message, intent.scope)
                 return
             project = self._projects.resolve_for_binding(binding.project_alias)
             argument = intent.arguments[0] if intent.arguments else None
@@ -3885,10 +3923,7 @@ class ChannelApplication:
         if intent.name is ControlName.CONFIG:
             binding = self._bindings.active_binding(intent.scope.key)
             if binding is None:
-                await self._reply(
-                    message,
-                    "当前聊天或话题还没有会话，请先发送 /new。",
-                )
+                await self._reply_no_current_binding(message, intent.scope)
                 return
             goal = await self._runtime.goal_snapshot(binding)
             active_goal = self._runtime.active_goal(binding.id)
@@ -3958,10 +3993,7 @@ class ChannelApplication:
         if intent.name is ControlName.COMPACT:
             binding = self._bindings.active_binding(intent.scope.key)
             if binding is None:
-                await self._reply(
-                    message,
-                    "当前聊天或话题还没有会话，请先发送 /new。",
-                )
+                await self._reply_no_current_binding(message, intent.scope)
                 return
             submission = await self._runtime.compact(
                 binding=binding,
@@ -4090,7 +4122,7 @@ class ChannelApplication:
         if intent.name is ControlName.RENAME:
             binding = self._bindings.active_binding(intent.scope.key)
             if binding is None:
-                await self._reply(message, "当前 Scope 没有 active 会话。")
+                await self._reply_no_current_binding(message, intent.scope)
                 return
             if binding.native_thread_id is None:
                 raise ThreadNotMaterialized(
@@ -4131,7 +4163,7 @@ class ChannelApplication:
         if intent.name is ControlName.ARCHIVE:
             binding = self._bindings.active_binding(intent.scope.key)
             if binding is None:
-                await self._reply(message, "当前 Scope 没有 active 会话。")
+                await self._reply_no_current_binding(message, intent.scope)
                 return
             if binding.native_thread_id is None:
                 raise ThreadNotMaterialized(
@@ -4155,7 +4187,7 @@ class ChannelApplication:
         if intent.name is ControlName.DELETE:
             binding = self._bindings.active_binding(intent.scope.key)
             if binding is None:
-                await self._reply(message, "当前 Scope 没有 active 会话。")
+                await self._reply_no_current_binding(message, intent.scope)
                 return
             if (
                 binding.native_thread_id is not None
@@ -4189,7 +4221,7 @@ class ChannelApplication:
         if intent.name is ControlName.RELEASE:
             binding = self._bindings.active_binding(intent.scope.key)
             if binding is None:
-                await self._reply(message, "当前 Scope 没有 active 会话。")
+                await self._reply_no_current_binding(message, intent.scope)
                 return
             try:
                 released = await self._management.release_current_binding(
@@ -4217,7 +4249,7 @@ class ChannelApplication:
         if intent.name is ControlName.STATUS:
             binding = self._bindings.active_binding(intent.scope.key)
             if binding is None:
-                await self._reply(message, "当前 Scope 没有 active 会话。")
+                await self._reply_no_current_binding(message, intent.scope)
                 return
             state = await self._binding_state(binding)
             native = binding.native_thread_id or "pending（首条消息后创建）"
@@ -4276,7 +4308,7 @@ class ChannelApplication:
         if intent.name is ControlName.STOP:
             binding = self._bindings.active_binding(intent.scope.key)
             if binding is None:
-                await self._reply(message, "当前没有 active 会话。")
+                await self._reply_no_current_binding(message, intent.scope)
                 return
             active = self._runtime.active_turn(binding.id)
             active_goal = self._runtime.active_goal(binding.id)
@@ -4662,7 +4694,10 @@ class ChannelApplication:
                 self._settings_card(
                     intent.scope,
                     section=SettingsSection.PROJECTS,
-                    notice=f"已登记 Project {project.alias}：{project.cwd}",
+                    notice=(
+                        f"已登记项目 {project.alias}：{project.cwd}。"
+                        "下一步：发送 /new，选择这个项目创建会话。"
+                    ),
                 ),
             )
             return
@@ -4681,8 +4716,12 @@ class ChannelApplication:
                     intent.scope,
                     section=SettingsSection.PROJECTS,
                     notice=(
-                        f"已{'启用' if project.enabled else '停用'} Project "
+                        f"已{'启用' if project.enabled else '停用'}项目 "
                         f"{project.alias}。"
+                        + (
+                            "下一步：发送 /new，选择这个项目创建会话。"
+                            if project.enabled else "已有会话仍可继续使用。"
+                        )
                     ),
                 ),
             )
@@ -4730,7 +4769,7 @@ class ChannelApplication:
             if not updated:
                 await self._safe_reply_to_card(
                     intent,
-                    f"✅ Project 选择成功：已选择 `{project.alias}`，"
+                    f"✅ 会话创建成功：已选择项目 `{project.alias}`，"
                     f"并创建、切换到会话 `{binding.short_id}`。"
                     f"Model 来源：{'继承 Codex' if settings is None else '显式配置'}；"
                     f"@ 时读取的消息范围："
@@ -4738,7 +4777,9 @@ class ChannelApplication:
                     f"执行中表情闪烁："
                     f"{'开启' if binding.task_feedback.reaction_pulse_enabled else '关闭'}；"
                     f"进度卡：{'开启' if binding.task_feedback.progress_card_enabled else '关闭'}。"
-                    "现在可以直接发送任务。",
+                    "现在可以直接发送任务，例如：梳理这个项目的结构。"
+                    "如果刚才的任务因没有会话而未执行，请重新发送。"
+                    "在群聊和群话题中，每条消息都需要 @机器人。",
                 )
             return
         if intent.name is CardControlName.CONFIGURE_BINDING:

@@ -1302,6 +1302,17 @@ prompt，未知 slash command fail closed，不增加任意 `/`/`@` 链式解释
 映射为零参数 native control，只作用于当前有历史且空闲的普通会话；
 CLI/App 的 `/copy`、`/vim`、`/theme`、`/exit` 等纯宿主命令同样明确不可用且不进入帮助。
 
+首次使用引导只读取现有 Project 与当前 Scope 的 Binding 元数据，不记录用户是否已读
+教程。普通消息和需要当前会话的 control 在没有 active Binding 时共用下一步提示：无
+enabled Project 引导 `/settings` 后 `/new`，有 enabled Project 引导 `/new`；当前 Scope
+有 Binding 记录时优先提示 `/sessions`，并提供 `/sessions archived` 查找归档的入口。
+这些记录只用于导航，不推断原生会话是否可恢复，不触发 native read 或 mutation。普通
+消息还明确告知任务未执行、准备后需重新发送；群消息按公开 chat type 提醒逐条 @，
+不把单聊话题当成群话题。不暂存或自动重放 Prompt，也不自动创建 Project/Binding。
+`/help` 提供快速开始并按统一注册表的用途分类展示当前可用命令；少量明确误用（如
+`/project`）只给出正确入口，不注册别名或模糊执行。Project 登记/启用和会话创建成功的
+反馈继续指明下一步，新建表单及回调 identity、版本、能力门禁保持原有契约。
+
 `/rename`、`/archive`、`/delete` 命令只作用于当前 active Binding，不接受目标 ID；管理
 另一普通会话的 rename 仍应先 `/resume`。`/sessions` 中按 ADR 0036/0049 对
 exact materialized 行归档，以及按 ADR 0038/0049 经独立红色确认卡删除 exact active-catalog

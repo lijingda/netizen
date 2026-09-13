@@ -16,6 +16,8 @@ from netizen.domain import (
     session_stop_available,
 )
 from netizen.experience import (
+    COMMAND_SPECS,
+    CommandGroup,
     InvalidInteraction,
     command_help,
     parse_message,
@@ -154,6 +156,28 @@ class ExperienceTest(unittest.TestCase):
             ):
                 self.parse(command)
 
+    def test_project_mistakes_explain_settings_without_registering_controls(self) -> None:
+        for command in ("/project", "/projects", "/PROJECT demo", '/projects "demo"'):
+            with self.subTest(command=command), self.assertRaises(
+                InvalidInteraction
+            ) as raised:
+                self.parse(command)
+            error = str(raised.exception)
+            self.assertIn("/settings", error)
+            self.assertIn("/new", error)
+            self.assertIn("/help", error)
+            self.assertIn("未执行", error)
+
+        escaped = self.parse("//project demo")
+        self.assertIsInstance(escaped, PromptInput)
+        self.assertEqual(escaped.text, "/project demo")
+        self.assertNotIn("/project", command_help())
+
+    def test_empty_message_points_to_help(self) -> None:
+        with self.assertRaises(InvalidInteraction) as raised:
+            self.parse("  ")
+        self.assertIn("/help", str(raised.exception))
+
     def test_unavailable_native_commands_fail_closed(self) -> None:
         for command in ("/goal ship it",):
             with self.subTest(command=command), self.assertRaisesRegex(
@@ -279,6 +303,36 @@ class ExperienceTest(unittest.TestCase):
         self.assertNotIn("/skills", help_text)
         self.assertNotIn("/plan", help_text)
 
+    def test_help_starts_with_project_session_and_task_steps(self) -> None:
+        first_section = command_help().split("\n\n", maxsplit=1)[0]
+        self.assertLess(first_section.index("/settings"), first_section.index("/new"))
+        self.assertLess(first_section.index("/new"), first_section.index("直接发送任务"))
+        self.assertIn("/sessions", first_section)
+
+    def test_grouped_help_lists_each_available_command_once(self) -> None:
+        for capabilities in (frozenset(), frozenset(NativeCapability)):
+            with self.subTest(capabilities=capabilities):
+                help_text = command_help(capabilities)
+                command_lines = [
+                    line for line in help_text.splitlines() if line.startswith("/")
+                ]
+                expected = [
+                    spec
+                    for spec in COMMAND_SPECS
+                    if spec.intent is not None
+                    and (spec.requires is None or spec.requires in capabilities)
+                ]
+                self.assertCountEqual(
+                    [line.split("：", maxsplit=1)[0] for line in command_lines],
+                    [spec.usage for spec in expected],
+                )
+                for group in CommandGroup:
+                    section = help_text.split(f"{group.value}：\n", maxsplit=1)[1]
+                    section = section.split("\n\n", maxsplit=1)[0]
+                    for spec in expected:
+                        if spec.group is group:
+                            self.assertIn(f"{spec.usage}：", section)
+
     def test_host_only_commands_are_explicitly_rejected_and_hidden(self) -> None:
         for command in ("/copy", "/vim", "/theme", "/exit", "/quit"):
             with self.subTest(command=command), self.assertRaisesRegex(
@@ -291,25 +345,52 @@ class ExperienceTest(unittest.TestCase):
         self.assertNotIn("/exit", help_text)
 
     def test_unknown_command_never_becomes_a_prompt(self) -> None:
-        with self.assertRaisesRegex(InvalidInteraction, "未知命令"):
+        with self.assertRaisesRegex(InvalidInteraction, "未知命令") as raised:
             self.parse("/unknown")
+        self.assertIn("/help", str(raised.exception))
+        self.assertIn("未执行", str(raised.exception))
 
-    def test_argument_counts_are_strict(self) -> None:
-        with self.assertRaisesRegex(InvalidInteraction, "快捷创建已下线"):
-            self.parse("/new one two")
-        with self.assertRaisesRegex(InvalidInteraction, "不接受参数"):
-            self.parse("/status extra")
-        with self.assertRaisesRegex(InvalidInteraction, "不接受参数"):
-            self.parse("/config extra")
-        with self.assertRaisesRegex(InvalidInteraction, "不接受参数"):
-            self.parse("/compact extra")
-        with self.assertRaisesRegex(InvalidInteraction, "不接受参数"):
-            self.parse("/release extra", NativeCapability.RELEASE)
-        with self.assertRaisesRegex(InvalidInteraction, "/sessions"):
-            self.parse("/sessions unknown")
-        with self.assertRaisesRegex(InvalidInteraction, "不接受参数"):
-            self.parse("/archive extra")
-        with self.assertRaisesRegex(InvalidInteraction, "/unarchive"):
-            self.parse("/unarchive")
-        with self.assertRaisesRegex(InvalidInteraction, "120"):
-            self.parse("/rename " + "x" * 121)
+    def test_invalid_quotes_offer_correct_usage_and_help(self) -> None:
+        for command, usage in (
+            ('/rename "Release review', "/rename [名称]"),
+            ('/resume "abcdef12', "/resume <会话短 ID>"),
+            ('/threads "archived', "/sessions [archived]"),
+            ("/status \\", "/status"),
+        ):
+            with self.subTest(command=command), self.assertRaises(
+                InvalidInteraction
+            ) as raised:
+                self.parse(command)
+            error = str(raised.exception)
+            self.assertIn("命令格式错误", error)
+            self.assertIn(f"用法：{usage}", error)
+            self.assertIn("/help", error)
+            self.assertNotIn("No closing quotation", error)
+            self.assertNotIn("No escaped character", error)
+
+        with self.assertRaises(InvalidInteraction) as raised:
+            self.parse('/unknown "')
+        self.assertIn("/help", str(raised.exception))
+
+    def test_invalid_arguments_offer_usage_and_help(self) -> None:
+        for command, usage, reason in (
+            ("/status extra", "/status", "不接受参数"),
+            ("/config extra", "/config", "不接受参数"),
+            ("/compact extra", "/compact", "不接受参数"),
+            ("/release extra", "/release", "不接受参数"),
+            ("/archive extra", "/archive", "不接受参数"),
+            ("/resume", "/resume <会话短 ID>", "参数不正确"),
+            ("/sessions unknown", "/sessions [archived]", "参数不正确"),
+            ("/threads unknown", "/sessions [archived]", "参数不正确"),
+            ("/unarchive", "/unarchive <会话短 ID>", "参数不正确"),
+            ('/rename ""', "/rename [名称]", "不能为空"),
+            ("/rename " + "x" * 121, "/rename [名称]", "120"),
+        ):
+            with self.subTest(command=command), self.assertRaises(
+                InvalidInteraction
+            ) as raised:
+                self.parse(command, NativeCapability.RELEASE)
+            error = str(raised.exception)
+            self.assertIn(reason, error)
+            self.assertIn(f"用法：{usage}", error)
+            self.assertIn("/help", error)
