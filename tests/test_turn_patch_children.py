@@ -31,19 +31,20 @@ def _patch(item_id: str = "patch", *, status: str = "completed") -> ThreadItem:
 
 
 def _collab(
-    child_id: str,
+    child_id: str | None,
     *,
     parent: str = "root",
     tool: str = "spawnAgent",
     status: str = "completed",
+    states: dict[str, object] | None = None,
 ) -> ThreadItem:
     return ThreadItem.model_validate(
         {
             "type": "collabAgentToolCall",
             "id": f"{parent}-{tool}-{child_id}",
             "senderThreadId": parent,
-            "receiverThreadIds": [child_id],
-            "agentsStates": {},
+            "receiverThreadIds": [child_id] if child_id is not None else [],
+            "agentsStates": states or {},
             "tool": tool,
             "status": status,
             "prompt": "private task prompt must not be retained in the result",
@@ -228,7 +229,9 @@ class TurnPatchChildrenTest(unittest.IsolatedAsyncioTestCase):
             spawn,
             _activity("child"),
             _collab("child", tool="sendInput"),
+            _collab("child", tool="followupTask"),
             _activity("child", kind="interacted"),
+            _activity("child", kind="completed"),
             _collab("other"),
         ]
         repeated_patch = _patch("first")
@@ -242,7 +245,7 @@ class TurnPatchChildrenTest(unittest.IsolatedAsyncioTestCase):
                         "first-turn",
                         repeated_patch,
                         repeated_patch,
-                        _collab("other", parent="child", tool="sendInput"),
+                        _collab("other", parent="child", tool="sendMessage"),
                     ),
                     _turn("followup-turn", _patch("second")),
                     parent="root",
@@ -262,7 +265,10 @@ class TurnPatchChildrenTest(unittest.IsolatedAsyncioTestCase):
             _collab("old", tool="sendInput"),
             _collab("old", tool="wait"),
             _collab("old", tool="resumeAgent"),
+            _collab("old", tool="sendMessage"),
+            _collab("old", tool="followupTask"),
             _activity("old", kind="interacted"),
+            _activity("old", kind="completed"),
         ]
         for edge in edges:
             with self.subTest(edge=edge):
@@ -284,6 +290,106 @@ class TurnPatchChildrenTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.complete)
         self.assertEqual(len(result.batches), 1)
         self.assertEqual(calls, ["root", "child", "root"])
+
+    async def test_child_reply_to_root_is_known_only_while_the_exact_root_turn_holds(
+        self,
+    ) -> None:
+        spawn = _collab("child")
+        root_turn = _turn("root-turn", spawn, _patch("frozen-root"))
+        root = _view("root", _turn("old-root-turn", _patch("old-root")), root_turn)
+        child = _view(
+            "child",
+            _turn(
+                "child-turn",
+                _patch("child"),
+                _collab("root", parent="child", tool="sendMessage"),
+                _activity("root", kind="interacted"),
+            ),
+            parent="root",
+        )
+        for same_turn in (True, False):
+            with self.subTest(same_turn=same_turn):
+                result, calls = await self._collect(
+                    [spawn],
+                    {"root": root, "child": child},
+                    root_final=(
+                        root
+                        if same_turn
+                        else _view("root", root_turn, _turn("new-root-turn"))
+                    ),
+                )
+                self.assertEqual(result.complete, same_turn)
+                self.assertEqual(calls, ["root", "child", "root"])
+                self.assertEqual(
+                    [item.id for batch in result.batches for item in batch.items],
+                    ["child"] if same_turn else [],
+                )
+
+    async def test_agent_controls_and_listing_do_not_import_or_obscure_files(self) -> None:
+        edges = [
+            _collab("old", tool="closeAgent"),
+            _collab("old", tool="interruptAgent"),
+            _activity("old", kind="interrupted"),
+            _collab(None, tool="listAgents"),
+            _collab("unrelated", tool="listAgents"),
+        ]
+        result, calls = await self._collect(edges, {})
+        self.assertEqual(result, TaskPatchChildren())
+        self.assertEqual(calls, [])
+
+        items = [_collab("child"), *edges]
+        success = _patch()
+        result, calls = await self._collect(
+            items,
+            {
+                "root": _view("root", _turn("root-turn", *items)),
+                "child": _view(
+                    "child", _turn("child-turn", success), parent="root"
+                ),
+            },
+        )
+        self.assertTrue(result.complete)
+        self.assertEqual(calls, ["root", "child", "root"])
+        self.assertEqual(result.batches[0].items, (success.root,))
+
+    async def test_completed_v2_mailbox_wait_has_no_child_work_reference(self) -> None:
+        wait = _collab(None, tool="wait")
+        result, calls = await self._collect([wait], {})
+        self.assertEqual(result, TaskPatchChildren())
+        self.assertEqual(calls, [])
+
+        items = [_collab("child"), wait, _activity("child", kind="completed")]
+        success = _patch()
+        result, calls = await self._collect(
+            items,
+            {
+                "root": _view("root", _turn("root-turn", *items)),
+                "child": _view(
+                    "child", _turn("child-turn", success), parent="root"
+                ),
+            },
+        )
+        self.assertTrue(result.complete)
+        self.assertEqual(calls, ["root", "child", "root"])
+        self.assertEqual(result.batches[0].items, (success.root,))
+
+    async def test_mailbox_wait_exception_does_not_admit_other_incomplete_edges(self) -> None:
+        for edge in (
+            _collab(None, parent="wrong-parent", tool="wait"),
+            _collab(None, tool="wait", states={"old": {"status": "completed"}}),
+            _collab("", tool="wait"),
+            _collab("old", tool="wait"),
+            _collab(None, tool="wait", status="inProgress"),
+            _collab(None, tool="wait", status="interrupted"),
+            _collab(None, tool="spawnAgent"),
+            _collab(None, tool="sendMessage"),
+            _collab(None, tool="followupTask"),
+        ):
+            with self.subTest(edge=edge):
+                result, calls = await self._collect([edge], {})
+                self.assertFalse(result.complete)
+                self.assertEqual(result.batches, ())
+                self.assertEqual(calls, [])
 
     async def test_read_failure_preserves_other_children(self) -> None:
         items = [_collab("a"), _collab("b")]
@@ -480,12 +586,17 @@ class TurnPatchChildrenTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.complete)
         self.assertEqual([item.id for item in result.batches[0].items], ["known"])
 
-    async def test_failed_spawn_is_not_read_and_pending_spawn_is_partial(self) -> None:
-        for status, complete in [("failed", True), ("inProgress", False)]:
-            with self.subTest(status=status):
-                result, calls = await self._collect([_collab("child", status=status)], {})
-                self.assertEqual(result.complete, complete)
-                self.assertEqual(calls, [])
+    async def test_unconfirmed_work_is_not_read_and_interruption_is_partial(self) -> None:
+        for tool in ("spawnAgent", "sendMessage", "followupTask"):
+            for status, complete in (
+                ("failed", True), ("inProgress", False), ("interrupted", False)
+            ):
+                with self.subTest(tool=tool, status=status):
+                    result, calls = await self._collect(
+                        [_collab("child", tool=tool, status=status)], {}
+                    )
+                    self.assertEqual(result.complete, complete)
+                    self.assertEqual(calls, [])
 
     async def test_cycle_and_conflicting_parent_do_not_read_a_thread_twice(self) -> None:
         items = [_collab("a"), _collab("b")]

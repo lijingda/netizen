@@ -6,9 +6,13 @@ amends: 0008
 
 # 安全映射原生会话压缩
 
+> SDK `0.154.0` 修订：匹配的 Python SDK/bundled CLI 支持压缩终态确认及同一连接、
+> 同一 Thread 的后续 Turn，`/compact` 恢复可用。以下保留原始决策依据；SDK 升级
+> 仍须通过完整 compact phase，唯一候选、终态确认与未知结果的失败边界不变。
+
 > 2026-08-27 兼容性更正：固定 `openai-codex 0.147.0` 的 live probe 能确认
 > `contextCompaction` 终态，但未能成功完成同一连接的后续普通 Turn。由于本 ADR 的验收
-> 明确包含压缩后继续 Turn，当前 `/compact` 保持 unavailable、不进入帮助且不执行 native
+> 明确包含压缩后继续 Turn，当时 `/compact` 保持 unavailable、不进入帮助且不执行 native
 > mutation。底层 controller 与探针保留；只有匹配 SDK/App Server 的完整 compact phase
 > 通过后才重新开放。以下正文保留决策形成时的历史依据。
 
@@ -32,7 +36,10 @@ command 当作 Prompt。`openai-codex==0.144.4` 的公开 `AsyncThread.compact()
    lazy Binding 没有原生 Thread，或当前普通 Turn 正在 running/stopping 时明确拒绝。
 2. 开始前通过 exact native ID `thread_resume()`，用
    `thread.read(include_turns=True)` 记录已有 Turn ID 集合，并确认原生 Thread idle。
-   然后调用一次公开 `thread.compact()`。
+   baseline 读取使用独立的 5 秒、至多 3 次 read 预算；持续 `InternalRpcError`、
+   `notLoaded` 或单次 read 悬挂都不能无限占用 Binding 锁。预算耗尽时尚未发送
+   compact，安全失败并释放锁，保持已有的全局 admission 状态。
+   baseline 确认成功后才调用一次公开 `thread.compact()`。
 3. 从请求开始到终态确认期间，内存中以 Binding ID 保留 `compacting` 槽位。普通
    Prompt、引用消息准备、`/config` 和再次 `/compact` 都明确拒绝；`/status` /
    `/sessions` 显示 `compacting`。`/stop` 只控制普通 Turn，不声称能中断压缩。
@@ -55,16 +62,16 @@ command 当作 Prompt。`openai-codex==0.144.4` 的公开 `AsyncThread.compact()
 ## 验证
 
 `scripts/probe_python_sdk.py --phase compact` 使用同一个固定公开 facade 创建一条短
-会话、压缩并继续下一 Turn。2026-08-09 本地真实探针观察到：compact request 在
-约 1ms 返回；随后公开 read 的状态序列为 `idle -> active -> idle`；新增 Turn 为
-`completed`，唯一 item 类型是 `contextCompaction`；同一 Thread 随后正常回复
-`COMPACT-AFTER`。首个 `idle` 证明只等 Thread 状态会形成提前释放竞态，因而必须使用
-上述 exact Turn/item 条件。
+会话、压缩并继续下一 Turn。原生请求的 acknowledgement 后，首次公开 read 仍可能
+为 `idle`；只等 Thread 状态会提前释放 Binding，因此必须确认 baseline 后新增唯一
+completed `contextCompaction` Turn，并验证同一连接、同一 Thread 能继续正常对话。
 
 单元测试覆盖 lazy/running 拒绝、exact-ID resume、压缩期间 Prompt 与 `/stop` 边界、
 receipt 先于终态、terminal failure 释放、idle 但缺少 item、候选歧义、终态超时，
 以及 compact start 结果未知时全局 fail-closed。SDK capability contract 固定
 `compact()` 和 `read(include_turns=...)` 都在公开高层 surface。
+baseline 的独立门禁还须覆盖持续 Internal、持续 `notLoaded` 和悬挂 read：到达预算后
+零 compact 调用、Binding 锁可再次取得，且不改变全局 admission。
 
 ## 后果与移除触发器
 

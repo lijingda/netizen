@@ -19,6 +19,10 @@ amended_by: 0047, 0053, 0058
 > [ADR 0058](0058-use-page-selection-for-file-cards.md) 替换下文单按钮循环导航的决定：
 > 多页卡片统一使用页码表单与一个携带完整清单的跳转按钮，支持直接查看任意页。
 
+> SDK 0.154.0 的请求窗口通知保留契约解除下文“须先观察 in-progress”的限制：
+> 普通 Turn 在公开历史确认终态后，统一排空原始 handle 的通知，包括快速完成的 Turn。
+> 通知读取失败仍只影响 usage/diff 补充，不改变持久化终态与 structured items 的权威边界。
+
 ## 背景
 
 ADR 0024 只从 completed `fileChange` 与 `imageGeneration` item 提取本轮文件，并让

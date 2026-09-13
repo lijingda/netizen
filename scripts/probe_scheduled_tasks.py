@@ -2,7 +2,8 @@
 """Disposable real-SDK scheduling compatibility probe; never sends to Feishu.
 
 Run only after reviewing this script, e.g. ``python -m
-scripts.probe_scheduled_tasks --phase all --model gpt-5.5``.
+scripts.probe_scheduled_tasks --phase all --model <compatible-native-model>``.
+The model must support the account's inherited reasoning effort.
 Each phase uses a new disposable Git cwd and read-only native sandbox startup
 intent. If native Codex adds trust metadata, cleanup removes only the exact new
 fixture Project entries, preserving other configuration text and values.
@@ -379,29 +380,56 @@ async def _mcp_phase(codex: AsyncCodex, cwd: Path, store: BindingStore, recorder
             "natural_language_crud": True, "only_paused_plans": True, "scheduler_never_started": True}
 
 
+def _cleanup_error(error: Exception, *, operation: str, thread_id: str | None = None) -> None:
+    evidence: dict[str, Any] = {"operation": operation, "error_type": type(error).__name__}
+    if thread_id is not None:
+        evidence["thread_id"] = thread_id
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(seen) < 8:
+        seen.add(id(current))
+        if isinstance(current, JsonRpcError):
+            evidence.update(
+                rpc_code=current.code,
+                fork_history_referenced="forked history still references it" in current.message.lower(),
+                active_writer="already has an active writer" in current.message.lower(),
+            )
+            break
+        current = current.__cause__ or current.__context__
+    print(json.dumps({"probe_cleanup_failure": evidence}), file=sys.stderr, flush=True)
+
+
 async def _close_probe_client(codex: AsyncCodex | None, runner: ScheduleMcpRunner | None,
-                              owned: _DeleteOnce | None, *, delete_threads: bool = True) -> bool:
+                              owned: _DeleteOnce | None, *, delete_threads: bool = True,
+                              delete_order: tuple[str, ...] = ()) -> bool:
     """Bound cleanup of only this probe's client, listener and native IDs."""
     cleanup_ok = True
     if runner:
         runner.close_admission()
     if owned is not None and delete_threads:
-        for thread_id in owned.owned - owned.attempted:
+        for thread_id in dict.fromkeys((*delete_order, *sorted(owned.owned - owned.attempted))):
+            if thread_id not in owned.owned or thread_id in owned.attempted:
+                continue
+            operation = "delete"
             try:
                 await asyncio.wait_for(owned.delete(thread_id), 15)
+                operation = "confirm_absent"
                 await asyncio.wait_for(_prove_thread_absent_from_all_catalogs(codex, thread_id), 15)
-            except Exception:
+            except Exception as error:
+                _cleanup_error(error, operation=operation, thread_id=thread_id)
                 cleanup_ok = False
     if codex is not None:
         try:
             # Ephemeral Threads are scoped to this dedicated App Server.
             await asyncio.wait_for(codex.__aexit__(None, None, None), 10)
-        except Exception:
+        except Exception as error:
+            _cleanup_error(error, operation="client_close")
             cleanup_ok = False
     if runner:
         try:
             await runner.close()
-        except Exception:
+        except Exception as error:
+            _cleanup_error(error, operation="listener_close")
             cleanup_ok = False
     return cleanup_ok
 
@@ -413,6 +441,7 @@ async def _mcp_recovery_phase(cwd: Path, model: str, store: BindingStore) -> dic
     ))
     native_ids: set[str] = set()
     attempted: set[str] = set()
+    delete_order: tuple[str, ...] = ()
     previous_endpoint = None
     parent_id = None
     parent_plan = None
@@ -438,6 +467,7 @@ async def _mcp_recovery_phase(cwd: Path, model: str, store: BindingStore) -> dic
                 thread = await codex.thread_start(cwd=str(cwd), ephemeral=False)
                 parent_id = thread.id
                 native_ids.add(parent_id)
+                delete_order = (parent_id,)
                 binding = store.create_channel_binding(
                     scope=FeishuScope("probe", "probe-recovery-parent", ScopeKind.GROUP),
                     project_alias="probe", creator_id="probe",
@@ -454,7 +484,9 @@ async def _mcp_recovery_phase(cwd: Path, model: str, store: BindingStore) -> dic
                 _require((await thread.read()).thread.ephemeral is False, "recovery_parent_not_persistent")
                 preserve_for_resume = True
             else:
-                thread = await codex.thread_resume(parent_id, cwd=str(cwd))
+                thread = await codex.thread_resume(
+                    parent_id, cwd=str(cwd), include_turns=False
+                )
                 _require(thread.id == parent_id, "recovery_resume_identity_mismatch")
                 recorder.successful_modes[parent_id].clear()
                 await _run_text(thread,
@@ -466,9 +498,15 @@ async def _mcp_recovery_phase(cwd: Path, model: str, store: BindingStore) -> dic
                 _require(not updated.enabled and updated.revision > parent_plan.revision
                          and updated.chat_id == "probe-recovery-parent"
                          and "RECOVERY-PROBE-RESUMED" in updated.instructions, "recovery_update_not_persisted")
-                fork = await codex.thread_fork(parent_id, cwd=str(cwd), ephemeral=False)
+                fork = await codex.thread_fork(
+                    parent_id, cwd=str(cwd), ephemeral=False, include_turns=False
+                )
                 _require(fork.id != parent_id, "recovery_fork_identity_not_independent")
                 native_ids.add(fork.id)
+                # A persisted fork references its parent's paginated history.
+                # Remove this known fixture fork before its parent; never retry
+                # an uncertain parent delete to work around native protection.
+                delete_order = (fork.id, parent_id)
                 binding = store.create_channel_binding(
                     scope=FeishuScope("probe", "probe-recovery-fork", ScopeKind.GROUP),
                     project_alias="probe", creator_id="probe",
@@ -488,7 +526,10 @@ async def _mcp_recovery_phase(cwd: Path, model: str, store: BindingStore) -> dic
                 for plan in (updated, fork_plan):
                     _require(not store.schedules.list_runs(plan.id), "recovery_probe_created_a_run")
         finally:
-            cleanup_ok = await _close_probe_client(codex, runner, owned, delete_threads=not preserve_for_resume)
+            cleanup_ok = await _close_probe_client(
+                codex, runner, owned, delete_threads=not preserve_for_resume,
+                delete_order=delete_order,
+            )
             if native_ids - attempted and (not preserve_for_resume or not cleanup_ok):
                 # A failed first shutdown cannot proceed to resume; a second
                 # startup may fail before acquiring its delete controller.
@@ -501,7 +542,9 @@ async def _mcp_recovery_phase(cwd: Path, model: str, store: BindingStore) -> dic
                     cleanup_owned.owned = native_ids
                     cleanup_owned.attempted = attempted
                 finally:
-                    cleanup_ok = await _close_probe_client(cleanup_client, None, cleanup_owned) and cleanup_ok
+                    cleanup_ok = await _close_probe_client(
+                        cleanup_client, None, cleanup_owned, delete_order=delete_order,
+                    ) and cleanup_ok
             _require(cleanup_ok, "owned_native_cleanup_not_confirmed")
     return {"passed": True, "cold_resume_exact_identity": True, "same_store_retained": True,
             "namespace_url_token_rotated": True, "cold_resume_list_update": True,
@@ -606,7 +649,7 @@ async def _dispatch_phase(codex: AsyncCodex, cwd: Path, store: BindingStore, own
 
 
 async def probe(*, phase: str, model: str, timeout: float) -> dict[str, Any]:
-    _require(openai_codex.__version__ == "0.147.0", "sdk_pin_mismatch")
+    _require(openai_codex.__version__ == "0.154.0", "sdk_pin_mismatch")
     config_path = _user_config_path()
     before = _read_config(config_path)
     result: dict[str, Any] = {"passed": False, "read_only_startup_override": True, "real_feishu_calls": False}

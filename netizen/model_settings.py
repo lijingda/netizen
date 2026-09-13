@@ -10,7 +10,7 @@ from typing import Any
 # Standard processing instead of inheriting a previous accelerated tier.  It
 # is not a model capability; accelerated/alternative tiers still come only
 # from ``codex.models()``.  Keep this aligned with the exact release source:
-# https://github.com/openai/codex/blob/rust-v0.147.0/codex-rs/protocol/src/config_types.rs
+# https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/protocol/src/config_types.rs
 STANDARD_SERVICE_TIER_ID = "default"
 
 

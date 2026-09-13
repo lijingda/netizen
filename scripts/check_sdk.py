@@ -14,6 +14,10 @@ def main() -> int:
         ("probe_sdk_turn_plan.py", "--timeout", "5"),
         (
             "probe_sdk_completion_race.py",
+            "--attempts", "20", "--timeout", "3",
+        ),
+        (
+            "probe_sdk_completion_race.py",
             "--read-recovery", "--attempts", "20", "--timeout", "3",
         ),
         (

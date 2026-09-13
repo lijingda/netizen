@@ -63,6 +63,26 @@ def _fake_server() -> None:
                     },
                 }
             )
+        elif method == "thread/start":
+            _send(
+                {
+                    "id": request_id,
+                    "result": {
+                        "thread": _thread_payload(
+                            active=False,
+                            include_turns=False,
+                        ),
+                        "model": "test-model",
+                        "modelProvider": "openai",
+                        "cwd": "/tmp",
+                        "approvalPolicy": "untrusted",
+                        "approvalsReviewer": "auto_review",
+                        "sandbox": {"type": "readOnly"},
+                    },
+                }
+            )
+        elif method == "turn/start":
+            active = True
             _send(
                 {
                     "method": "item/started",
@@ -104,26 +124,6 @@ def _fake_server() -> None:
                     },
                 }
             )
-        elif method == "thread/start":
-            _send(
-                {
-                    "id": request_id,
-                    "result": {
-                        "thread": _thread_payload(
-                            active=False,
-                            include_turns=False,
-                        ),
-                        "model": "test-model",
-                        "modelProvider": "openai",
-                        "cwd": "/tmp",
-                        "approvalPolicy": "untrusted",
-                        "approvalsReviewer": "auto_review",
-                        "sandbox": {"type": "readOnly"},
-                    },
-                }
-            )
-        elif method == "turn/start":
-            active = True
             _send(
                 {
                     "id": request_id,
@@ -212,9 +212,10 @@ async def _client() -> None:
                 break
             await asyncio.sleep(0.01)
         else:
-            raise AssertionError("plan notification did not reach the exact Turn queue")
+            raise AssertionError("plan notification did not reach the exact Turn store")
 
         assert observation.next_cursor == 3
+        assert observation.retained_count == 3
         assert tuple((item.step, item.status) for item in observation.steps) == (
             ("inspect", TurnPlanStepState.COMPLETED),
             ("verify", TurnPlanStepState.IN_PROGRESS),
@@ -228,9 +229,27 @@ async def _client() -> None:
         assert observation.events[0].text == "搜索内容"
         assert "do-not-show" not in repr(observation.events)
         assert "/Users/user" not in repr(observation.events)
-        turn_queue = codex._client._sync._router._turn_notifications[handle.id]
-        with turn_queue.mutex:
-            before = tuple(turn_queue.queue)
+        router = codex._client._sync._router
+        assert handle.id not in router._turn_notifications
+        with router._lock:
+            state = router._turn_states[handle.id]
+            before = tuple(state.events.values())
+            subscribers_before = dict(state.subscribers)
+            cursors_before = (state.first_event, state.next_event)
+        unchanged = observer.observe(
+            thread_id=thread.id,
+            turn_id=handle.id,
+            after_cursor=observation.next_cursor,
+        )
+        assert unchanged.events == ()
+        assert not unchanged.plan_updated
+        assert unchanged.retained_count == 3
+        with router._lock:
+            assert tuple(id(item) for item in state.events.values()) == tuple(
+                id(item) for item in before
+            )
+            assert state.subscribers == subscribers_before
+            assert (state.first_event, state.next_event) == cursors_before
 
         terminal = await thread.read(include_turns=True)
         exact = next(turn for turn in terminal.thread.turns if turn.id == handle.id)
@@ -253,6 +272,8 @@ async def _client() -> None:
         )
         assert plan is plan_before
         assert plan.payload.turn_id == handle.id
+        with router._lock:
+            assert handle.id not in router._turn_states
 
 
 def _driver(timeout: float) -> int:
@@ -280,7 +301,7 @@ def _driver(timeout: float) -> int:
         )
         return 2
     print(
-        "PASS: native Activity was projected without consuming the exact Turn queue; "
+        "PASS: native Activity was projected without consuming the exact Turn store; "
         "the public stream then drained it to completion."
     )
     return 0

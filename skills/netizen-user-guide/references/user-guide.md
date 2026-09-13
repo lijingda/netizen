@@ -52,6 +52,7 @@ control 或一个 prompt，不能串联多个命令。群聊中的命令同样�
 | `/unarchive <短 ID>` | 恢复归档会话并切换到它 | [归档与恢复](#归档恢复和删除) |
 | `/delete` | 二次确认后永久删除当前会话；已有原生历史时会级联删除其子任务 | [删除后果](#归档恢复和删除) |
 | `/status` | 查看会话、原生任务步骤、上下文窗口和配置来源 | [状态快照](#status) |
+| `/compact` | 压缩当前空闲普通会话的上下文 | [压缩说明](#compact) |
 | `/release` | 取消当前空闲会话的本连接订阅，保留历史；不保证立即释放 writer | [订阅释放](#查找切换和命名会话) |
 | `/stop` | 中断当前任务；Goal 先暂停，不保证所有工具进程退出 | [停止语义](#stop) |
 | `/side [首轮问题]` | 从已有历史创建临时分支话题，与 Parent 共享项目目录 | [Side](#side-临时话题) |
@@ -62,7 +63,7 @@ control 或一个 prompt，不能串联多个命令。群聊中的命令同样�
 | `$skill-name ...` | 在普通消息开头显式调用一个或多个 Codex Skills | [Skills](#codex-skills) |
 | `/help`、`/` | 查看当前实例开放的帮助 | [能力差异](#与-codex-appcli-的差异) |
 
-`/compact` 当前因兼容门禁不可用，见[压缩说明](#compact)。`/model`、`/effort`、`/fast`
+`/model`、`/effort`、`/fast`
 使用 `/new` 或 `/config` 替代；查询可用 Skill 直接用自然语言，不提供 `/skills`。
 `/plan`、`/apps`、`$app` 及 CLI/App 宿主命令的限制见[能力差异](#与-codex-appcli-的差异)。
 Side 仅接受其[命令白名单](#side-临时话题)，不能把上表所有普通会话操作用于 Side。
@@ -374,6 +375,10 @@ Projects 页可“删除 Project 及关联 Sessions”。确认范围包含该�
 
 Checklist 可能尚未生成或因兼容门禁暂不可用；上下文用量也可能要等到可观测 Turn 完成后才更新。Git 行来自一次有界只读探测，非 Git 目录或探测失败时会省略，不影响其他状态。`/status` 不展示内部推理、完整工具日志或 ETA。
 
+当前固定 Codex 版本默认关闭生成 checklist 的 `update_plan` 工具。需要任务步骤时，可在
+Codex 原生配置中将 `tools.update_plan.enabled` 设为 `true`；Netizen 继承该配置，不会
+自动开启工具。工具开启后，checklist 仍需等原生任务实际生成，其他 Activity 展示不受此开关影响。
+
 Checklist 使用 `✓ completed`、`→ inProgress`、`○ pending`。成功 steer 后，旧计划会
 标记为可能尚未反映最近调整；收到下一次完整原生 plan 更新后整体替换并清除标记。
 后续普通 Turn 运行时，上下文用量保留并标为“上一轮完成时”，本轮可观测完成后再更新；
@@ -385,9 +390,10 @@ Checklist 使用 `✓ completed`、`→ inProgress`、`○ pending`。成功 ste
 
 ### `/compact`
 
-- 当前固定 `openai-codex 0.147.0` 中 `/compact` 暂不可用，也不会出现在 `/help`。
-- 输入 `/compact` 会收到兼容验证未通过的明确说明；Netizen 不会调用原生压缩或改变会话状态。
-- 底层兼容探针会继续验证压缩终态和同一 Thread 的后续 Turn；完整序列通过后才会重新开放。
+- 输入 `/compact` 压缩当前普通会话的上下文，不接受额外参数；会话须已有任务历史且处于空闲。
+- 若启动前读取会话历史超时或多次失败，会明确回复压缩未启动，并释放本次操作的占用。
+- 开始后状态显示为 `compacting`，完成前不能提交新任务、修改配置或再次压缩。完成后可以在同一会话继续提问。
+- `/stop` 不会中断压缩。压缩结果无法确认时，按回复中的提示处理，不要把开始回执当作完成。
 
 ### `/stop`
 

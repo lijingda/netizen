@@ -15,6 +15,7 @@ from openai_codex.types import (
 
 from openai_codex.generated.v2_all import (
     CollabAgentTool,
+    CollabAgentToolCallStatus,
     CollabAgentToolCallThreadItem,
     SubAgentActivityKind,
     SubAgentActivityThreadItem,
@@ -28,7 +29,7 @@ from netizen.sdk_gap_adapter import facade_migration_requirements
 
 class CodexSdkCapabilityContractTest(unittest.TestCase):
     def test_pinned_public_surface_supports_dynamic_turn_model_settings(self) -> None:
-        self.assertEqual(openai_codex.__version__, "0.147.0")
+        self.assertEqual(openai_codex.__version__, "0.154.0")
         self.assertTrue(callable(AsyncCodex.models))
         parameters = inspect.signature(AsyncThread.turn).parameters
         self.assertTrue({"model", "effort", "service_tier"}.issubset(parameters))
@@ -60,16 +61,30 @@ class CodexSdkCapabilityContractTest(unittest.TestCase):
             parameters["include_turns"].kind, inspect.Parameter.KEYWORD_ONLY
         )
 
+    def test_public_resume_and_fork_allow_omitting_returned_history(self) -> None:
+        for method in (AsyncCodex.thread_resume, AsyncCodex.thread_fork):
+            with self.subTest(method=method.__name__):
+                parameter = inspect.signature(method).parameters["include_turns"]
+                self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+                self.assertIsNone(parameter.default)
+
     def test_typed_child_provenance_and_both_agent_item_shapes_are_available(self) -> None:
         # New enum values require a deliberate decision about child provenance,
-        # including the currently ignored close/interrupt operations.
+        # including controls that do not establish file provenance.
         self.assertEqual(
             {tool.value for tool in CollabAgentTool},
-            {"spawnAgent", "sendInput", "resumeAgent", "wait", "closeAgent"},
+            {
+                "spawnAgent", "sendInput", "resumeAgent", "wait", "closeAgent",
+                "sendMessage", "followupTask", "interruptAgent", "listAgents",
+            },
+        )
+        self.assertEqual(
+            {status.value for status in CollabAgentToolCallStatus},
+            {"inProgress", "completed", "failed", "interrupted"},
         )
         self.assertEqual(
             {kind.value for kind in SubAgentActivityKind},
-            {"started", "interacted", "interrupted"},
+            {"started", "interacted", "interrupted", "completed"},
         )
         collab = ThreadItem.model_validate(
             {

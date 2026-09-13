@@ -20,6 +20,10 @@ class CheckSdkTest(unittest.TestCase):
             ["probe_sdk_turn_plan.py", "--timeout", "5"],
             [
                 "probe_sdk_completion_race.py",
+                "--attempts", "20", "--timeout", "3",
+            ],
+            [
+                "probe_sdk_completion_race.py",
                 "--read-recovery", "--attempts", "20", "--timeout", "3",
             ],
             [
@@ -46,7 +50,7 @@ with log.open("a") as output:
 print(f"probe {index}")
 sys.exit(17 if index == int(os.environ["NETIZEN_TEST_PROBE_FAIL_AT"]) else 0)
 """
-        for fail_at in (0, 1, 2, 3):
+        for fail_at in range(len(expected) + 1):
             with (
                 self.subTest(fail_at=fail_at),
                 tempfile.TemporaryDirectory() as directory,
@@ -71,7 +75,7 @@ sys.exit(17 if index == int(os.environ["NETIZEN_TEST_PROBE_FAIL_AT"]) else 0)
                     timeout=10,
                 )
                 records = [json.loads(line) for line in log.read_text().splitlines()]
-                count = fail_at or 3
+                count = fail_at or len(expected)
                 self.assertEqual(result.returncode, 17 if fail_at else 0, result.stderr)
                 self.assertEqual(
                     [record["argv"] for record in records], expected[:count]
