@@ -8152,6 +8152,122 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("观测不可用", str(self.channel.replies[-1][1]))
         self.assertNotIn("Codex 后端处理失败", str(self.channel.replies[-1][1]))
 
+    async def test_prompt_without_enabled_project_explains_complete_setup(self) -> None:
+        project = self.projects.resolve_for_new("test")
+        self.projects.set_enabled(
+            alias=project.alias, enabled=False, expected_revision=project.revision,
+        )
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        projects_before = self.projects.list()
+
+        await self.app.handle_message(FakeMessage("帮我整理文件", message_id="om_first"))
+
+        guidance = self.channel.replies[-1][1]
+        self.assertLess(guidance.index("/settings"), guidance.index("/new"))
+        self.assertIn("/help", guidance)
+        self.assertIn("尚未执行", guidance)
+        self.assertIn("重新发送", guidance)
+        self.assertNotIn("/sessions", guidance)
+        self.assertEqual(self.projects.list(), projects_before)
+        self.assertEqual(self.store.list_bindings(scope.key), [])
+        self.assertEqual(self.runtime.capture_calls, [])
+        self.assertEqual(self.runtime.submit_calls, [])
+
+    async def test_first_prompt_guidance_does_not_replay_task_after_setup(self) -> None:
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        await self.app.handle_message(FakeMessage("帮我整理文件", message_id="om_first"))
+        guidance = self.channel.replies[-1][1]
+        self.assertIn("/new", guidance)
+        self.assertNotIn("/settings", guidance)
+        self.assertIn("尚未执行", guidance)
+        self.assertEqual(self.store.list_bindings(scope.key), [])
+
+        await self.app.handle_message(FakeMessage("/new", message_id="om_new"))
+        picker = self.channel.replies[-1][1]
+        await self.app.handle_card_action(
+            self.direct_card_event(self.new_form_values(picker))
+        )
+
+        binding = self.store.active_binding(scope.key)
+        self.assertIsNotNone(binding)
+        self.assertIsNone(binding.native_thread_id)
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertIn("重新发送", str(self.channel.updates[-1][1]))
+
+    async def test_no_current_guidance_offers_existing_sessions_even_if_project_disabled(
+        self,
+    ) -> None:
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        await self.create_binding(scope)
+        binding = self.store.active_binding(scope.key)
+        self.store.deactivate(scope_key=scope.key, binding_id=binding.id)
+        project = self.projects.resolve_for_new("test")
+        self.projects.set_enabled(
+            alias=project.alias, enabled=False, expected_revision=project.revision,
+        )
+        bindings_before = self.store.list_bindings(scope.key)
+
+        await self.app.handle_message(FakeMessage("继续", message_id="om_return"))
+
+        guidance = self.channel.replies[-1][1]
+        self.assertIn("/sessions archived", guidance)
+        self.assertLess(guidance.index("/sessions"), guidance.index("/settings"))
+        self.assertNotIn("还没有会话", guidance)
+        self.assertIsNone(self.store.active_binding(scope.key))
+        self.assertEqual(self.store.list_bindings(scope.key), bindings_before)
+        self.assertEqual(self.runtime.submit_calls, [])
+
+    async def test_no_current_guidance_uses_exact_scope_and_chat_mention_requirement(
+        self,
+    ) -> None:
+        other_scope = FeishuScope("cli_test", "oc_other", ScopeKind.DIRECT)
+        await self.create_binding(other_scope)
+        for chat_type in ("p2p", "group"):
+            for topic in (None, "omt_new"):
+                with self.subTest(chat_type=chat_type, topic=topic):
+                    await self.app.handle_message(FakeMessage(
+                        "开始", message_id=f"om_{chat_type}_{topic}",
+                        chat_id="oc_fresh", chat_type=chat_type, thread_id=topic,
+                    ))
+                    guidance = self.channel.replies[-1][1]
+                    self.assertIn("/new", guidance)
+                    self.assertNotIn("/sessions", guidance)
+                    self.assertEqual("@机器人" in guidance, chat_type == "group")
+        self.assertEqual(self.runtime.submit_calls, [])
+
+    async def test_binding_controls_without_current_session_share_setup_guidance(self) -> None:
+        self.runtime.available_capabilities = frozenset({
+            NativeCapability.GOAL, NativeCapability.SIDE, NativeCapability.RELEASE,
+        })
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        for command in (
+            "/config", "/compact", "/status", "/stop", "/rename", "/archive",
+            "/delete", "/release", "/goal", "/side",
+        ):
+            with self.subTest(command=command):
+                await self.app.handle_message(FakeMessage(command, message_id=f"om_{command}"))
+                guidance = self.channel.replies[-1][1]
+                self.assertIn("/new", guidance)
+                self.assertIn("/help", guidance)
+                self.assertNotIn("刚才的任务", guidance)
+        self.assertEqual(self.store.list_bindings(scope.key), [])
+        self.assertEqual(self.store.list_side_topics(), [])
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(self.runtime.model_catalog_calls, 0)
+
+    async def test_unknown_session_reference_points_to_session_list(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        current = self.store.active_binding(scope.key)
+
+        await self.app.handle_message(FakeMessage("/resume missing", message_id="om_missing"))
+
+        guidance = self.channel.replies[-1][1]
+        self.assertIn("/sessions", guidance)
+        self.assertIn("/help", guidance)
+        self.assertEqual(self.store.active_binding(scope.key), current)
+        self.assertEqual(self.runtime.submit_calls, [])
+
     async def test_image_without_binding_does_not_download(self) -> None:
         image = FakeMessage(
             "![image](img_current)",
@@ -8890,7 +9006,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         projects_tab = next(
             element
             for element in _elements(settings_reply[1].card, "button")
-            if element["text"]["content"] == "Projects"
+            if element["text"]["content"] == "项目"
         )
         await self.app.handle_card_action(
             SimpleNamespace(
@@ -9075,8 +9191,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.runtime.submit_calls, [])
         rendered = str(self.channel.updates[-1][1])
-        self.assertIn("Project 选择成功", rendered)
-        self.assertIn("后续新 Turn 将使用", rendered)
+        self.assertIn("会话创建成功", rendered)
+        self.assertIn("后续新任务将使用", rendered)
         self.assertIn("Fast v2", rendered)
         self.assertEqual(self.runtime.model_catalog_calls, 1)
         self.assertEqual(len(self.runtime.resolve_model_settings_calls), 1)
@@ -9102,7 +9218,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.submit_calls, [])
         self.assertEqual(len(self.runtime.configure_settings_calls), 1)
         self.assertIn("会话配置已保存", str(self.channel.updates[-1][1]))
-        self.assertIn("后续新 Turn 将使用", str(self.channel.updates[-1][1]))
+        self.assertIn("后续新任务将使用", str(self.channel.updates[-1][1]))
 
     async def test_config_enables_pulse_and_progress_without_starting_turn(
         self,
@@ -9171,7 +9287,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.configure_settings_calls[-1]["settings"],
             BindingTurnSettings("future-model", "low", "default"),
         )
-        self.assertIn("后续新 Turn 将使用", str(self.channel.updates[-1][1]))
+        self.assertIn("后续新任务将使用", str(self.channel.updates[-1][1]))
 
     async def test_second_config_card_is_rejected_by_settings_revision(self) -> None:
         await self.new()
@@ -9325,7 +9441,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.runtime.resolve_model_settings_calls), 1)
         self.assertEqual(self.channel.updates[-1][0], "om_card")
         rendered = str(self.channel.updates[-1][1])
-        self.assertIn("Project 选择成功", rendered)
+        self.assertIn("会话创建成功", rendered)
         self.assertIn(binding.short_id, rendered)
         self.assertIn("现在可以直接发送任务", rendered)
 
@@ -9375,7 +9491,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         fallback = next(
             text
             for message_id, text in self.channel.replies
-            if message_id == "om_card" and "Project 选择成功" in str(text)
+            if message_id == "om_card" and "会话创建成功" in str(text)
         )
         self.assertIn("`test`", fallback)
         self.assertIn(binding.short_id, fallback)
@@ -9452,7 +9568,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         project = self.projects.resolve_for_new("demo")
         self.assertEqual(project.cwd, (self.project_root / "demo").resolve())
         self.assertTrue(project.cwd.is_dir())
-        self.assertIn("已登记 Project demo", str(self.channel.updates[-1][1]))
+        self.assertIn("已登记项目 demo", str(self.channel.updates[-1][1]))
+        self.assertIn("/new", str(self.channel.updates[-1][1]))
         self.assertIn("project_create_v1", str(self.channel.updates[-1][1]))
         self.assertIn("demo · 已启用", str(self.channel.updates[-1][1]))
         self.assertEqual(self.channel.chat_info_calls, [])
@@ -9513,7 +9630,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             project for project in self.projects.list() if project.alias == "test"
         )
         self.assertFalse(project.enabled)
-        self.assertIn("已停用 Project test", str(self.channel.updates[-1][1]))
+        self.assertIn("已停用项目 test", str(self.channel.updates[-1][1]))
         self.assertIn("project_create_v1", str(self.channel.updates[-1][1]))
 
         await submit(project_reference, "enable")
@@ -9528,6 +9645,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 if project.alias == "test"
             ).enabled
         )
+
+        await submit(f"project:v1:test:{project.revision}", "enable")
+        self.assertTrue(self.projects.resolve_for_new("test").enabled)
+        self.assertIn("/new", str(self.channel.updates[-1][1]))
 
     async def test_project_create_validation_error_stays_in_settings(self) -> None:
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
@@ -9843,10 +9964,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.store.active_binding(scope.key))
         self.assertTrue(
             any(
-                message_id == "om_group_card" and "Project 选择成功" in str(text)
+                message_id == "om_group_card" and "会话创建成功" in str(text)
                 for message_id, text in self.channel.replies
             )
-            or "Project 选择成功" in str(self.channel.updates[-1][1])
+            or "会话创建成功" in str(self.channel.updates[-1][1])
         )
 
     async def test_group_and_topics_require_mention_and_have_distinct_scopes(self) -> None:
@@ -9972,10 +10093,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(
                 message_id == "om_topic_root_card"
-                and "Project 选择成功" in str(text)
+                and "会话创建成功" in str(text)
                 for message_id, text in self.channel.replies
             )
-            or "Project 选择成功" in str(self.channel.updates[-1][1])
+            or "会话创建成功" in str(self.channel.updates[-1][1])
         )
 
     async def test_group_post_with_image_repairs_bot_mention_and_submits_pixels(
@@ -10096,15 +10217,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "cli_test", "oc_group", ScopeKind.TOPIC, "omt_other_mention_first"
         )
         self.assertIsNone(self.store.active_binding(scope.key))
-        self.assertEqual(
-            self.channel.replies,
-            [
-                (
-                    "om_other_mention_first",
-                    "当前聊天或话题还没有会话，请先发送 /new。",
-                )
-            ],
-        )
+        self.assertEqual(len(self.channel.replies), 1)
+        reply_id, guidance = self.channel.replies[0]
+        self.assertEqual(reply_id, "om_other_mention_first")
+        self.assertIn("/new", guidance)
+        self.assertIn("尚未执行", guidance)
+        self.assertIn("重新发送", guidance)
+        self.assertEqual(self.runtime.submit_calls, [])
 
     async def test_post_with_unsupported_resource_is_rejected(self) -> None:
         message = FakeMessage(
@@ -10191,7 +10310,9 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_message(message)
 
         self.assertEqual(self.runtime.submit_calls, [])
-        self.assertIn((message.id, "消息内容为空。"), self.channel.replies)
+        self.assertEqual(self.channel.replies[-1][0], message.id)
+        self.assertIn("消息内容为空", self.channel.replies[-1][1])
+        self.assertIn("/help", self.channel.replies[-1][1])
 
     async def test_resume_switches_binding_while_old_runtime_can_remain_active(self) -> None:
         await self.new(message_id="om_new_1")

@@ -118,7 +118,7 @@ def settings_card(
     builder = _builder("Netizen 设置", _settings_section_label(section))
     builder.raw(_settings_navigation(scope=scope, active=section))
     builder.markdown(
-        "当前 Scope 的参与者均可操作；实例级设置会影响其他 Scope。"
+        "当前聊天的参与者均可管理项目；修改会影响使用这个机器人的其他聊天。"
     )
     if notice:
         builder.raw(_notice(notice, error=notice_is_error))
@@ -144,14 +144,15 @@ def _render_projects_settings(
     project_root: str,
 ) -> None:
     builder.markdown(
-        "**实例级 Project Registry**\n"
-        "Project 对整个 Netizen 实例共享。"
+        "**项目工作目录**\n"
+        "项目是 Codex 实际工作的目录，使用这个机器人的会话共享这些项目。"
+        "可创建空目录，或登记机器人所在机器上的已有目录。"
     )
-    builder.markdown("**管理 Project**")
+    builder.markdown("**管理项目**")
     if projects:
         builder.raw(_project_management_form(projects))
     else:
-        builder.markdown("当前没有可管理的 Project，请在下方新增。")
+        builder.markdown("还没有项目，请在下方新增，然后发送 `/new` 创建会话。")
 
     builder.raw(
         _repeatable_callback_button(
@@ -164,11 +165,11 @@ def _render_projects_settings(
         )
     )
     builder.divider()
-    builder.markdown("**新增 Project**")
+    builder.markdown("**新增项目**")
     builder.raw(_project_create_form(project_root))
     builder.markdown(
-        f"<font color='grey'>空 Project 默认创建在 `{_md_code(project_root)}`；"
-        "Netizen 从不删除 Project 目录。</font>"
+        f"<font color='grey'>空项目默认创建在 `{_md_code(project_root)}`；"
+        "Netizen 从不删除项目目录。</font>"
     )
 
 
@@ -195,7 +196,7 @@ def _settings_navigation(
 
 def _settings_section_label(section: SettingsSection) -> str:
     if section is SettingsSection.PROJECTS:
-        return "Projects"
+        return "项目"
     raise ValueError(f"unsupported settings section: {section}")
 
 
@@ -208,7 +209,7 @@ def _project_management_form(projects: tuple[Project, ...]) -> dict[str, Any]:
                 "tag": "select_static",
                 "name": "project_manage_target",
                 "required": True,
-                "placeholder": _plain_text("选择 Project"),
+                "placeholder": _plain_text("选择项目"),
                 "options": [
                     {
                         "text": _plain_text(
@@ -233,12 +234,12 @@ def _project_management_form(projects: tuple[Project, ...]) -> dict[str, Any]:
             {
                 "tag": "button",
                 "name": "project_manage_submit_v1",
-                "text": _plain_text("应用到所选 Project"),
+                "text": _plain_text("应用到所选项目"),
                 "type": "primary",
                 "width": "fill",
                 "form_action_type": "submit",
                 "confirm": {
-                    "title": _plain_text("确认修改 Project？"),
+                    "title": _plain_text("确认修改项目？"),
                     "text": _plain_text(
                         "状态会立即更新；停用只阻止创建新会话，已有会话仍可继续。"
                     ),
@@ -258,7 +259,7 @@ def _project_create_form(project_root: str) -> dict[str, Any]:
                 "tag": "input",
                 "name": "project_alias",
                 "required": True,
-                "label": _plain_text("Alias"),
+                "label": _plain_text("项目标识（小写字母或数字开头，可含 _ 和 -）"),
                 "placeholder": _plain_text("例如：demo_project"),
                 "max_length": 64,
             },
@@ -301,7 +302,7 @@ def _project_create_form(project_root: str) -> dict[str, Any]:
             {
                 "tag": "button",
                 "name": "project_submit_v1",
-                "text": _plain_text("保存 Project"),
+                "text": _plain_text("保存项目"),
                 "type": "primary_filled",
                 "width": "fill",
                 "form_action_type": "submit",
@@ -328,10 +329,10 @@ def _new_binding_form(
         None,
     )
     elements = [
-        _form_label("Project"),
+        _form_label("项目工作目录"),
         _static_select(
             name="new_project",
-            placeholder="选择 Project",
+            placeholder="选择项目",
             options=tuple(
                 (
                     f"{project.alias} · {project.cwd}",
@@ -746,19 +747,27 @@ def new_binding_card(
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
     task_feedback: BindingTaskFeedback | None = None,
 ) -> OutboundCard:
-    builder = _builder("新建会话", "选择 Project 与会话配置")
+    builder = _builder("新建会话", "选择项目，开始一次对话")
     builder.markdown(
-        "只创建 lazy Binding，不会立即启动任务。Model 可继承 Codex；"
-        "显式选择的 Model / Effort / Speed 会应用于后续每条新 Turn。"
+        "项目是 Codex 实际工作的目录。选择项目并创建会话后，直接发送任务即可开始。"
+        "创建会话本身不会启动任务。"
     )
     if not projects:
-        builder.markdown("当前没有可用 Project。请先发送 `/settings` 新增或启用。")
+        builder.markdown(
+            "还没有已启用的项目。请先发送 `/settings` 创建、登记或启用项目，"
+            "再发送 `/new`。发送 `/help` 查看快速开始。"
+        )
     else:
+        builder.markdown(
+            "不确定模型配置时，可选择“继承 Codex”；"
+            "也可选择 Model（模型）、Effort（思考强度）和 Speed（速度），"
+            "应用于这个会话后续的新任务。空闲时可通过 `/config` 调整。"
+        )
         if catalog is None:
             builder.raw(
                 _notice(
                     (catalog_error or "Model / Effort / Speed 暂不可用。")
-                    + " 当前仍可选择 Project 并继承 Codex 创建会话。",
+                    + " 当前仍可选择项目并继承 Codex 创建会话。",
                     error=True,
                 )
             )
@@ -796,7 +805,7 @@ def config_card(
     builder = _builder("当前会话配置", f"{short_id} · {project_alias}")
     builder.markdown(
         "Model 可继承 Codex，也可显式选择 Model / Effort / Speed；"
-        "保存不会启动任务。"
+        "保存不会启动任务。Model 是模型，Effort 是思考强度，Speed 是速度。"
     )
     if catalog is None:
         builder.raw(
@@ -1033,7 +1042,10 @@ def archived_sessions_card(
         "删除会永久移除原生 Thread、其 spawned descendants 与本地 Binding。"
     )
     if not sessions:
-        builder.markdown("当前 Scope 没有已归档会话。")
+        builder.markdown(
+            "当前聊天或话题没有已归档会话。发送 `/sessions` 查看普通会话，"
+            "或发送 `/new` 新建会话。"
+        )
         return OutboundCard(card=builder.to_dict())
     for session in sessions:
         builder.raw(
@@ -1114,7 +1126,8 @@ def sessions_card(
     )
     if not sessions:
         builder.markdown(
-            "当前 Scope 没有普通会话；发送 `/sessions archived` 查看归档。"
+            "当前聊天或话题没有普通会话。发送 `/new` 新建会话，"
+            "或发送 `/sessions archived` 查找已归档会话。"
         )
         return OutboundCard(card=builder.to_dict())
 
@@ -1502,16 +1515,18 @@ def binding_created_card(
     task_feedback: BindingTaskFeedback | None = None,
 ) -> OutboundCard:
     builder = _builder(
-        "Project 选择成功",
+        "会话创建成功",
         f"{project_alias} · {short_id}",
         template="green",
     )
     builder.markdown(
-        f"✅ 已选择 Project `{_md_code(project_alias)}`，"
+        f"✅ 已选择项目 `{_md_code(project_alias)}`，"
         f"并创建、切换到会话 **{short_id}**。"
     )
     builder.markdown(
-        "现在可以直接发送任务；首条普通消息将创建原生 Codex Thread。"
+        "现在可以直接发送任务，例如：**梳理这个项目的结构。**\n"
+        "如果刚才的任务因没有会话而未执行，请重新发送。\n"
+        "在群聊和群话题中，每条消息都需要 @机器人。"
     )
     builder.markdown(_model_source_summary(settings))
     builder.markdown(_context_mode_summary(message_context_mode))
@@ -1544,9 +1559,9 @@ def binding_configured_card(
 
 def _model_source_summary(settings: TurnModelSettings | None) -> str:
     if settings is None:
-        return "Model 来源：继承 Codex（不发送 Model / Effort / Speed override）。"
+        return "Model 来源：继承 Codex，使用 Codex 自身的模型配置。"
     return (
-        "Model 来源：Netizen 会话显式配置。后续新 Turn 将使用："
+        "Model 来源：Netizen 会话显式配置。后续新任务将使用："
         f"Model=`{_md_code(settings.model)}` · "
         f"Effort=`{_md_code(settings.effort_id)}` · "
         f"Speed=`{_md_code(settings.service_tier_name)}`"
