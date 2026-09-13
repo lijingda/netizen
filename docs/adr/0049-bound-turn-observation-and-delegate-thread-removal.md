@@ -16,7 +16,7 @@ Netizen 已把原生 `completed`、`interrupted` 和 `failed` 都视为 Ordinary
 background-terminal cleanup、exact Turn terminal 等待和 native idle 证明。这使观测故障既
 阻止同一 Thread 继续对话，又可能夺走用户归档或删除它的出口。
 
-锁定的 Codex/App Server 0.147.0 已原生拥有这个边界：
+本 ADR 决策时锁定的 Codex/App Server 0.147.0 已原生拥有这个边界：
 
 - [`thread/archive`](https://github.com/openai/codex/blob/rust-v0.147.0/codex-rs/app-server/src/request_processors/thread_processor.rs#L855-L874)
   和 [`thread/delete`](https://github.com/openai/codex/blob/rust-v0.147.0/codex-rs/app-server/src/request_processors/thread_delete.rs#L44-L123)
@@ -44,6 +44,18 @@ Netizen 拿不到 exact Turn 的权威视图时，才进行一次最多 5 秒、
 的尝试；其中最多重新 `thread_resume` 一次。已知可收敛的 transport/RPC、
 `notLoaded`、暂时缺少 exact Turn 或视图不一致可进入该尝试；identity/contract/
 programming 错误直接失败，不冒充为值得重试的 I/O。
+
+`InternalRpcError` 先在原连接重读 exact Thread，不直接触发 resume：收到原生 RPC
+错误本身不证明订阅已丢失。后续读到 `notLoaded` 或发生 transport 故障时，才使用
+同一预算内的至多一次 resume。新 Thread 的 session metadata rollout 尚为空时，
+metadata read 可暂时返回 Internal；立即 resume 不能保证恢复权威视图。
+
+`0.154.0` 的 full read 内部先从 rollout 判断分页模式，再查询 SQLite 分页投影；两者
+可短暂不一致。仅在 `include_turns=True` 时，把 `MethodNotFoundError`、code `-32601`
+和精确消息 `list_turns is not supported yet` / `list_items is not supported yet` 的组合
+归为视图暂不可用，使用同一有界 read 预算。永久缺少分页能力仍会在预算耗尽后停止；
+metadata read、其他方法名或其他 code 不进入此分类。此修正不扩大恢复预算，也不降低
+exact Turn 运行/终态的证明要求。
 
 尝试若恢复 exact `active/inProgress`，Runtime 继续普通轮询并恢复 steer；若确认终态，
 走唯一的终态交付路径。仍不可验证时，公开状态只投影为
@@ -119,6 +131,6 @@ App Server 整体不可达、原生存储损坏或 ephemeral root 拒绝是能�
   `turn-observation-unavailable`、Goal、Compaction 上的直接 archive/delete，并证明本地
   不 interrupt、pause、cleanup、等待 terminal 或读取 idle。
 - 锁定 SDK 的 live lifecycle probe 直接删除 running disposable Thread，不先做本地安静化。
-  spawned descendant cascade 继续由 0.147.0 固定源码契约、ADR 0037 已记录的真实
+  spawned descendant cascade 由当前 0.154.0 源码复核、ADR 0037 已记录的真实
   root→child→grandchild 实测和 root-only Adapter contract 约束；routine probe 不让模型临时
   生成一棵非确定性 agent tree。

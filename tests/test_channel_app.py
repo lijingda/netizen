@@ -10219,24 +10219,38 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             (second.id, first.id),
         )
 
-    async def test_compact_is_unavailable_without_native_mutation(self) -> None:
+    async def test_compact_routes_exact_binding_and_releases_receipt_after_reply(self) -> None:
         await self.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
         self.store.assign_native_thread_id(binding.id, "native-one")
-        command = FakeMessage("/compact", message_id="om_compact")
+        for reply_fails in (False, True):
+            with self.subTest(reply_fails=reply_fails):
+                command = FakeMessage("/compact", message_id=f"om_compact_{reply_fails}")
+                released = []
+                receipt = (
+                    command.id,
+                    "已开始压缩当前 Codex 会话；完成前该会话暂不接受新任务。",
+                )
 
-        await self.app.handle_message(command)
+                def release_after_reply() -> None:
+                    self.assertIn(receipt, self.channel.replies)
+                    released.append(True)
 
-        self.assertEqual(self.runtime.compact_calls, [])
-        self.assertIn(
-            (
-                "om_compact",
-                "/compact 尚未开放：固定 openai-codex 0.147.0 的压缩后同连接"
-                "继续 Turn 兼容验证未通过，本条消息未执行。",
-            ),
-            self.channel.replies,
-        )
+                self.runtime.compact_calls.clear()
+                self.runtime.compact_submission = CompactSubmission(
+                    binding.id, "native-one", release_after_reply
+                )
+                if reply_fails:
+                    self.channel.reply_results.append(RuntimeError("reply failed"))
+
+                await self.app.handle_message(command)
+
+                self.assertEqual(len(self.runtime.compact_calls), 1)
+                call = self.runtime.compact_calls[0]
+                self.assertEqual(call["binding"].id, binding.id)
+                self.assertIs(call["origin"], command)
+                self.assertEqual(released, [True])
 
     async def test_compacting_state_blocks_config_and_stop_does_not_fake_interrupt(
         self,

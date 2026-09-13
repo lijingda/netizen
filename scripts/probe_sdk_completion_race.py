@@ -11,6 +11,31 @@ import sys
 from pathlib import Path
 
 
+_CLIENT_STAGE_PREFIX = "SDK_COMPLETION_STAGE="
+_CLIENT_STAGES = frozenset({
+    "sdk_import", "client_start", "thread_start", "turn_start",
+    "handle_run", "thread_read", "client_close", "complete",
+})
+
+
+def _client_stage(stage: str) -> None:
+    if stage not in _CLIENT_STAGES:
+        raise ValueError("unknown completion probe stage")
+    print(_CLIENT_STAGE_PREFIX + stage, file=sys.stderr, flush=True)
+
+
+def _last_client_stage(stderr: str | bytes | None) -> str:
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    last = "unreported"
+    for line in (stderr or "").splitlines():
+        if line.startswith(_CLIENT_STAGE_PREFIX):
+            stage = line[len(_CLIENT_STAGE_PREFIX):]
+            if stage in _CLIENT_STAGES:
+                last = stage
+    return last
+
+
 def _send(payload: object) -> None:
     sys.stdout.write(json.dumps(payload) + "\n")
 
@@ -261,6 +286,7 @@ def _fake_server(*, usage_mode: bool = False) -> None:
 
 
 async def _public_client() -> None:
+    _client_stage("sdk_import")
     from openai_codex import AsyncCodex, CodexConfig
 
     config = CodexConfig(
@@ -270,15 +296,23 @@ async def _public_client() -> None:
             "--server",
         )
     )
+    _client_stage("client_start")
     async with AsyncCodex(config) as codex:
-        thread = await codex.thread_start(cwd="/tmp")
-        turn = await thread.turn("fast completion")
-        result = await turn.run()
-        assert result.id == "turn-race"
-        assert result.status.value == "completed"
+        try:
+            _client_stage("thread_start")
+            thread = await codex.thread_start(cwd="/tmp")
+            _client_stage("turn_start")
+            turn = await thread.turn("fast completion")
+            _client_stage("handle_run")
+            result = await turn.run()
+            assert result.id == "turn-race"
+            assert result.status.value == "completed"
+        finally:
+            _client_stage("client_close")
 
 
 async def _public_read_client() -> None:
+    _client_stage("sdk_import")
     from openai_codex import AsyncCodex, CodexConfig
 
     config = CodexConfig(
@@ -288,18 +322,25 @@ async def _public_read_client() -> None:
             "--server",
         )
     )
+    _client_stage("client_start")
     async with AsyncCodex(config) as codex:
-        thread = await codex.thread_start(cwd="/tmp")
-        handle = await thread.turn("fast completion")
-        snapshot = await thread.read(include_turns=True)
-        exact = next(turn for turn in snapshot.thread.turns if turn.id == handle.id)
-        assert exact.status.value == "completed"
-        final = next(
-            item.root.text
-            for item in exact.items
-            if getattr(item.root, "type", None) == "agentMessage"
-        )
-        assert final == "READ-RECOVERED"
+        try:
+            _client_stage("thread_start")
+            thread = await codex.thread_start(cwd="/tmp")
+            _client_stage("turn_start")
+            handle = await thread.turn("fast completion")
+            _client_stage("thread_read")
+            snapshot = await thread.read(include_turns=True)
+            exact = next(turn for turn in snapshot.thread.turns if turn.id == handle.id)
+            assert exact.status.value == "completed"
+            final = next(
+                item.root.text
+                for item in exact.items
+                if getattr(item.root, "type", None) == "agentMessage"
+            )
+            assert final == "READ-RECOVERED"
+        finally:
+            _client_stage("client_close")
 
 
 async def _usage_drain_client(*, attempts: int) -> None:
@@ -394,13 +435,12 @@ def _driver(*, attempts: int, timeout: float, read_recovery: bool) -> int:
                 stderr=subprocess.PIPE,
                 text=True,
             )
-        except subprocess.TimeoutExpired:
-            detail = (
-                "public thread.read did not recover immediate completion"
-                if read_recovery
-                else "AsyncTurnHandle.run() lost immediate completion"
+        except subprocess.TimeoutExpired as error:
+            print(
+                "FAIL: completion probe client subprocess timed out "
+                f"(attempt {attempt}; stage={_last_client_stage(error.stderr)}).",
+                file=sys.stderr,
             )
-            print(f"FAIL: {detail} (attempt {attempt}).", file=sys.stderr)
             return 1
         except subprocess.CalledProcessError as error:
             detail = (error.stderr or "").strip()
@@ -486,9 +526,11 @@ def main() -> int:
         return 0
     if args.client:
         asyncio.run(_public_client())
+        _client_stage("complete")
         return 0
     if args.read_client:
         asyncio.run(_public_read_client())
+        _client_stage("complete")
         return 0
     if args.usage_client:
         asyncio.run(_usage_drain_client(attempts=args.attempts))

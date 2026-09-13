@@ -1,4 +1,4 @@
-"""Pinned, non-consuming observation of one active Turn's activity queue.
+"""Pinned, non-consuming observation of one active Turn's retained activity.
 
 This is the complete private-SDK exception approved by ADR 0020 and extended
 by ADR 0052.  It never registers, consumes, or mutates notifications and
@@ -7,17 +7,14 @@ exposes no generic queue or RPC access.
 
 from __future__ import annotations
 
-import itertools
-import queue
 import threading
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 import openai_codex
 from openai_codex import AsyncCodex
-from openai_codex._message_router import MessageRouter
+from openai_codex._message_router import MessageRouter, _TurnState
 from openai_codex.async_client import AsyncCodexClient
 from openai_codex.client import CodexClient
 from openai_codex.generated.v2_all import (
@@ -41,11 +38,11 @@ from .turn_activity import (
 )
 
 
-SUPPORTED_SDK_VERSION = "0.147.0"
+SUPPORTED_SDK_VERSION = "0.154.0"
 _PACKAGE_SOURCE_FINGERPRINT = (
-    "35ec9419cb9f42577080f9bf410e81cb5a97ae64e5297c4302878c73749d39eb"
+    "9db021b08bbcc75f18206d64ecf8a7d5ba63b380d91181718a3c9153ed4a053f"
 )
-_LOCK_TYPE = type(threading.Lock())
+_LOCK_TYPE = type(threading.RLock())
 
 
 class TurnActivityObservationUnavailable(RuntimeError):
@@ -60,10 +57,16 @@ class TurnActivityObservation:
     steps: tuple[TurnPlanStepSnapshot, ...] = ()
     events: tuple[TurnActivityEvent, ...] = ()
     turn_completed: bool = False
+    retained_count: int = 0
 
     def __post_init__(self) -> None:
         if self.next_cursor < 0:
             raise ValueError("plan observation cursor must be non-negative")
+        if (
+            type(self.retained_count) is not int
+            or not 0 <= self.retained_count <= self.next_cursor
+        ):
+            raise ValueError("retained notification count must fall within the cursor")
         if self.plan_updated != (self.plan_cursor is not None):
             raise ValueError("plan cursor must identify exactly one plan update")
         if self.plan_cursor is not None and not 0 < self.plan_cursor <= self.next_cursor:
@@ -102,7 +105,9 @@ class PinnedTurnActivityObserver:
         if after_cursor < 0:
             raise ValueError("activity cursor must be non-negative")
 
-        items, next_cursor = self._snapshot_queue(turn_id, after_cursor)
+        items, next_cursor, retained_count = self._snapshot_events(
+            thread_id, turn_id, after_cursor
+        )
         latest_steps: tuple[TurnPlanStepSnapshot, ...] = ()
         latest_cursor: int | None = None
         events: list[TurnActivityEvent] = []
@@ -110,7 +115,7 @@ class PinnedTurnActivityObserver:
         for item_cursor, item in enumerate(items, start=after_cursor + 1):
             if isinstance(item, BaseException):
                 raise TurnActivityObservationUnavailable(
-                    "native Turn notification queue contains a transport failure"
+                    "native Turn event store contains a transport failure"
                 )
             if type(item) is not Notification:
                 raise TurnActivityObservationUnavailable(
@@ -138,42 +143,76 @@ class PinnedTurnActivityObserver:
             steps=latest_steps,
             events=tuple(events),
             turn_completed=turn_completed,
+            retained_count=retained_count,
         )
 
-    def _snapshot_queue(
+    def _snapshot_events(
         self,
+        thread_id: str,
         turn_id: str,
         after_cursor: int,
-    ) -> tuple[tuple[object, ...], int]:
+    ) -> tuple[tuple[object, ...], int, int]:
         router = self._router
         lock = getattr(router, "_lock", None)
-        notifications = getattr(router, "_turn_notifications", None)
-        if type(lock) is not _LOCK_TYPE or type(notifications) is not dict:
+        states = getattr(router, "_turn_states", None)
+        if type(lock) is not _LOCK_TYPE or type(states) is not dict:
             raise TurnActivityObservationUnavailable(
                 "native notification router shape changed"
             )
         with lock:
-            turn_queue = notifications.get(turn_id)
-            if type(turn_queue) is not queue.Queue:
+            state = states.get(turn_id)
+            if type(state) is not _TurnState:
                 raise TurnActivityObservationUnavailable(
-                    "exact native Turn notification queue is unavailable"
+                    "exact native Turn event store is unavailable"
                 )
-            mutex = getattr(turn_queue, "mutex", None)
-            raw_items = getattr(turn_queue, "queue", None)
-            if type(mutex) is not _LOCK_TYPE or type(raw_items) is not deque:
+            if (
+                getattr(state, "id", None) != turn_id
+                or getattr(state, "thread_id", None) != thread_id
+            ):
                 raise TurnActivityObservationUnavailable(
-                    "native Turn notification queue shape changed"
+                    "native Turn event store identity changed"
                 )
-            with mutex:
-                next_cursor = len(raw_items)
-                if after_cursor > next_cursor:
-                    raise TurnActivityObservationUnavailable(
-                        "native Turn notification queue was consumed unexpectedly"
-                    )
-                items = tuple(
-                    itertools.islice(raw_items, after_cursor, next_cursor)
+            raw_items = getattr(state, "events", None)
+            first_cursor = getattr(state, "first_event", None)
+            next_cursor = getattr(state, "next_event", None)
+            subscribers = getattr(state, "subscribers", None)
+            if (
+                type(raw_items) is not dict
+                or type(first_cursor) is not int
+                or type(next_cursor) is not int
+                or not 0 <= first_cursor <= next_cursor
+                or type(getattr(state, "completed", None)) is not bool
+                or type(subscribers) is not dict
+                or not subscribers
+                or any(
+                    type(cursor) is not int
+                    or not first_cursor <= cursor <= next_cursor
+                    for cursor in subscribers.values()
                 )
-        return items, next_cursor
+            ):
+                raise TurnActivityObservationUnavailable(
+                    "native Turn event store shape changed"
+                )
+            retained_count = len(raw_items)
+            if retained_count != next_cursor - first_cursor or any(
+                type(cursor) is not int or not first_cursor <= cursor < next_cursor
+                for cursor in raw_items
+            ):
+                raise TurnActivityObservationUnavailable(
+                    "native Turn event store has a cursor gap"
+                )
+            if after_cursor < first_cursor:
+                raise TurnActivityObservationUnavailable(
+                    "native Turn events were pruned before the observation cursor"
+                )
+            if after_cursor > next_cursor:
+                raise TurnActivityObservationUnavailable(
+                    "native Turn event cursor moved backwards"
+                )
+            # Cursor positions are absolute event indices. Copy only references;
+            # the SDK subscriptions retain exclusive consumption/pruning rights.
+            items = tuple(raw_items[cursor] for cursor in range(after_cursor, next_cursor))
+        return items, next_cursor, retained_count
 
 
 def _validate_contract(codex: AsyncCodex) -> MessageRouter:
@@ -201,7 +240,7 @@ def _validate_contract(codex: AsyncCodex) -> MessageRouter:
         raise TurnActivityObservationUnavailable("Codex notification router shape changed")
     if type(getattr(router, "_lock", None)) is not _LOCK_TYPE:
         raise TurnActivityObservationUnavailable("Codex notification router lock changed")
-    if type(getattr(router, "_turn_notifications", None)) is not dict:
+    if type(getattr(router, "_turn_states", None)) is not dict:
         raise TurnActivityObservationUnavailable("Codex Turn route catalog shape changed")
 
     _validate_generated_models()

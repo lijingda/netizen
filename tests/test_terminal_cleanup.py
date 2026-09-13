@@ -75,7 +75,7 @@ def _messages(log_path: Path) -> list[dict[str, object]]:
 
 
 def _close_probe_pipes(process: object) -> None:
-    # Pinned SDK 0.147.0 terminates its probe subprocess but leaves the local
+    # Pinned SDK 0.154.0 terminates its probe subprocess but leaves the local
     # stdout/stderr wrappers for GC. Close those test-only handles explicitly
     # so ResourceWarning does not obscure the contract result.
     for name in ("stdout", "stderr"):
@@ -169,7 +169,7 @@ class ExperimentalTerminalCleanupContractTest(unittest.IsolatedAsyncioTestCase):
                 with patch.object(openai_codex, "__version__", "0.147.1"):
                     with self.assertRaisesRegex(
                         UnsupportedCleanupSdk,
-                        "supports only openai-codex==0.147.0",
+                        "supports only openai-codex==0.154.0",
                     ):
                         PinnedExperimentalTerminalCleanup(codex)
 

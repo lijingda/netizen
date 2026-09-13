@@ -273,8 +273,8 @@ async def _scenario(
 
 
 async def probe(*, model: str | None = None) -> dict[str, Any]:
-    if openai_codex.__version__ != "0.147.0":
-        raise RuntimeError("this candidate probe requires pinned openai-codex==0.147.0")
+    if openai_codex.__version__ != "0.154.0":
+        raise RuntimeError("this candidate probe requires pinned openai-codex==0.154.0")
     with tempfile.TemporaryDirectory(prefix="netizen-project-delete-probe-") as temporary:
         async with AsyncCodex() as codex:
             root = Path(temporary)

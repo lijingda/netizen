@@ -26,6 +26,20 @@ parent 再确认归属，并排除祖先继承的 Turn IDs，按 `(thread, turn,
 读取前后都确认根 Thread 的最新 Turn 仍为本轮；新一轮开始、收尾校验失败或总超时则
 丢弃子任务快照，只保留已经冻结的根 Turn 记录，不为展示延长原生执行槽的占用。
 
+SDK 0.154.0 的 `sendMessage`、`followupTask`、v2 `interacted`/`completed` 仅建立
+Thread 引用，不从事件 ID 猜 child Turn。完成遍历后，本轮新子任务和前后核验仍为本轮
+的 root 都可解析为已知引用；不重复导入 root patch。`listAgents`、`interruptAgent` 和
+`closeAgent` 不建立工作归属边。工作调用状态为 `interrupted` 时无法证明已做的工作，
+总计仍为未知；纯列表或控制操作不因此导入旧历史或制造空 receiver 错误。
+新版 v2 mailbox `wait` 也没有工作目标：仅当 completed、sender 为当前 parent，且
+receivers 与 agents states 都为空时忽略其归属边。有 receivers 的 wait 仍保留引用语义，
+其他空目标或矛盾身份继续使总计未知。
+
+`0.154.0` 中继承上下文的 child，其公开分页 Turn 列表可以只含自己的 Turn；该列表
+不能证明模型上下文是否完整。来源仍按原生关系核验，公开历史若包含祖先 Turn，继续
+按祖先 Turn IDs 排除。对应 live probe 验证来源与祖先 patch 排除，不声称证明了完整
+模型上下文的继承；已有 synthetic 排除覆盖保留。
+
 成功 add/delete 的完整正文按 LF 计行，update 只累计完整可验证的 hunks，识别固定 SDK
 的 `Moved to:` 后缀以归入目标路径。路径按所属 Thread cwd 解析为规范 absolute path，
 Project 不构成过滤边界。缺失或畸形 patch 只使对应文件数字及总计未知，不使其他文件

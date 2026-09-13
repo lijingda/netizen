@@ -240,13 +240,14 @@ discovery 期间不持有 Binding 锁，返回后用 admission revision 防止�
 被引用历史中的 `$` 会在版本化 quote envelope 中编码为非激活文本，不能把历史内容
 变成当前 Skill 调用。
 
-Runtime 保留基于公开 `AsyncThread.compact()` 和 history read 的压缩 controller，供兼容
-重验使用。它先记录已有 Turn ID，再保留 Binding 的 `compacting` 槽位，直到
+`/compact` 使用基于公开 `AsyncThread.compact()` 和 history read 的压缩 controller。
+它先在独立 5 秒、至多 3 次 read 预算内记录已有 Turn ID 并确认 idle；持续 Internal、
+`notLoaded` 或悬挂 read 耗尽预算时，尚未启动压缩，安全失败并释放 Binding 锁，保持
+已有的全局 admission 状态。随后保留 Binding 的 `compacting` 槽位，直到
 `thread.read(include_turns=True)` 出现且仅出现一个新的 terminal
 `contextCompaction` Turn 且 Thread 回到 idle；首次 idle read 不能单独证明完成。固定
-`0.147.0` 的真实探针虽能确认该终态，却未能成功完成同一连接的后续普通 Turn。当前
-`/compact` 因此注册为 unavailable、不进入 `/help`，输入时明确失败且不调用 controller；
-不增加临时 workaround。完整决定见 ADR 0013，当前兼容性结论见
+`0.154.0` 支持压缩后同一连接、同一 Thread 续聊，命令可用并进入 `/help`。
+完整决定见 ADR 0013，当前兼容性结论见
 `docs/deployment.md`。
 
 `/goal <objective>` 在当前 Binding 上启动原生 persisted Goal。lazy Binding 先创建并
@@ -394,7 +395,7 @@ cleanup，但不把 interrupt RPC 伪装成成功；否则 terminal child 与原
 若公开 native read 已经观察到终态而 Binding 仍是 running，则 stop 返回已结束，不
 再做 Thread cleanup，避免自然完成竞态误杀后台 terminal。
 
-保留的 compaction controller 进入 `compacting` 时，普通 Prompt、引用消息准备、
+compaction controller 进入 `compacting` 时，普通 Prompt、引用消息准备、
 `/config` 和再次压缩都会明确拒绝，不会 steer、queue 或自动重放。`/stop` 只中断普通
 Turn，不声称能终止原生压缩；`/status` 和 `/sessions` 显示 `compacting`。压缩请求响应
 或终态未知时保留槽位并关闭进程级 admission；只有唯一 compaction candidate 的
@@ -453,11 +454,12 @@ migration sentinel 阻止继续永久保留 shim，并要求逐项切回公开 p
 `ThreadDeleteControl` 同样只暴露固定 `thread/delete`，生产服务在独立
 shape/synthetic 门禁通过时构造；Runtime 而非 Adapter 负责失败后的有界四视图对账。
 ADR 0020/0052 的 `PinnedTurnActivityObserver` 精确校验 SDK 版本、整包源码指纹、generated
-payload、内部持有类型与 queue shape；它只在 Progress Card 开启的 exact ordinary/Side
-Turn、显式 `/status` 或 steer freshness bookkeeping 中，在 router lock 与 exact Queue mutex
-下复制 cursor 后的通知引用，不调用 RPC、不注册/注销、不 `get`/`put`、不新建 worker。
+payload、内部持有类型与 retained event-store shape；它只在 Progress Card 开启的 exact ordinary/Side
+Turn、显式 `/status` 或 steer freshness bookkeeping 中，在 router RLock
+下复制绝对 cursor 后的通知引用；校验 exact Turn 的保留区间及序号连续性，不调用 RPC、
+不注册/关闭订阅、不消费/裁剪事件、不改订阅者游标、不新建 worker。
 它只向 Runtime 交付 sanitized Activity event；event 的 opaque item identity 仅用于进程内
-lifecycle 合并，Channel Snapshot 会移除它。Goal 不读取该 queue，而是在现有 logical stream
+lifecycle 合并，Channel Snapshot 会移除它。Goal 不读取该 event store，而是在现有 logical stream
 的唯一 `next_notification` 消费链内 tap 同一安全投影。rename/archive/
 unarchive 全部使用高层公开 API。原生名称、归档状态、plan 与终态仍以 Codex 为事实源，不
 增加本地 lifecycle 或 progress 状态列。
@@ -467,7 +469,7 @@ non-ephemeral Thread，而不是当前 Runtime activity 或 native idle。提交
 内只确认 Binding/native identity 并占用 lifecycle intent，然后释放 Binding/Scope lock，直接
 调用 `thread/archive` 或固定 `thread/delete`。archive/delete intent 建立时先禁止该 Binding
 继续读取或采纳 Activity；不在本地先 interrupt Ordinary Turn、pause Goal、
-cleanup terminal、恢复观测、等待 exact terminal 或重读 idle；App Server 0.147.0 负责从
+cleanup terminal、恢复观测、等待 exact terminal 或重读 idle；App Server 负责从
 ThreadManager 移除、有界 shutdown 和 descendant cascade。原生成功后才取消并丢弃本地
 Turn/Goal/Compaction 观察者，更新或删除 Binding，并通过不代表 Turn 终态的内部 discard
 事件停止 Reaction/Progress/Goal presenter。lifecycle intent 保留到展示清理交接结束，
@@ -499,6 +501,11 @@ identity/slot、阻止重复 start/steer，并停止全部周期性 I/O。“重
 停止，已记录的 `Typing` 与当时可见的 `THINKING` 尽力清理，已有卡片一次更新为观测
 不可用，但不添加伪造的终态表情。后续确认终态时仍可走普通回复兜底。不建立长预算、
 指数退避或背景唤醒循环，也不伪造 terminal。
+`InternalRpcError` 先在同一连接重读；它只证明本次原生读取失败，不代表需要重新订阅。
+后续 `notLoaded`、transport 等故障仍可在同一预算内触发唯一一次 resume。
+`0.154.0` full read 的内部分页投影尚未就绪时，精确 `-32601` 消息
+`list_turns is not supported yet` / `list_items is not supported yet` 也只进入同一有界
+read 恢复；其他 MethodNotFound 保持失败关闭，见 ADR 0049。
 completed 状态还可能短暂先于 final agent message 可见；
 普通 Turn 最多再做 4 次 full-history 读取（默认约 2 秒），期间已标记 terminal 以避免
 `/stop` 误中断，之后的读取失败也不再进入观测尝试，仍无文本时保留显式无文本兜底。
@@ -527,6 +534,9 @@ binary、图片不伪造数字。未进入成功 patch 的 aggregate-only 文件
 异常、超限，或交互了不能定位本轮 child Turn 的旧子任务时，总计未知，仍保留已知的
 逐文件数字。读取只是当时可用的快照，不保证整棵任务树原子一致；没有新增 observer、
 consumer、私有 SDK 调用或持久状态，展示失败不改变 Turn 生命周期。
+SDK `0.154.0` 的合法空目标 mailbox wait 不建立工作归属边；有目标的 wait 和旧子任务
+交互仍保留引用语义。原生上下文继承不要求 child 的公开 Turn 列表包含祖先；若包含，
+仍按祖先 Turn IDs 排除。具体形状与验证边界见 ADR 0056。
 
 Project 仅作为相对路径解析基准，不是文件授权边界；子任务使用自己的 cwd，absolute
 或 `..` 路径同样规范化，其他 Project 的任务内修改同样计入。访问权限仍由原生 Codex
@@ -583,10 +593,13 @@ payload 解码。新 PAGE callback 固定携带 `pagination: select`，要求从
 话题回复错误，不降级到主聊天。
 
 ephemeral Side 明确不复用上述持久 history recovery。Progress Card 关闭时 consumer 立即
-调用公开 `AsyncTurnHandle.run()`；开启时按 ADR 0052 只读观察 exact queue，直到
-`turn/completed` 已入队，再由同一个 `handle.run()` 唯一 drain 并确认终态。observer
-不可用、cursor 回退、allowlisted shape 异常或 exact queue 的原始通知条数（包括被投影忽略
-的 delta）达到固定 4096 high water 时立即回退直接 `run()`。该阈值只限制原始通知条数，
+调用公开 `AsyncTurnHandle.run()`；开启时按 ADR 0052 只读观察 exact Turn 的 retained
+events。任一次 Activity 刷新（包括 steer 前刷新）观察到 `turn/completed` 后，在该
+active Turn 保留 `completion_notification_seen`，即使其他刷新已推进 cursor，consumer
+仍进入同一个 `handle.run()` 唯一 drain。
+该标记只触发 drain，终态仍由 `run()` 返回值确认。observer 不可用、cursor 回退、
+allowlisted shape 异常或原始通知保留数（包括被投影忽略的 delta）达到固定 4096 high
+water 时立即回退直接 `run()`。该阈值只限制原始通知保留数，
 不提供 wall-clock timeout 或 notification payload 的 byte 上界。Side 不轮询 history、不增加
 release gate，也不让 observer 成为终态权威；这个边界不删除或放宽普通持久 Thread 的现有
 恢复和 release probe。
@@ -623,7 +636,7 @@ diff、token usage、elapsed time、百分比或 ETA。commentary 在进入 Runt
 Progress Card 开启时，Runtime 的既有 consumer/poll loop 更新快照，Channel Presenter 每秒
 只读取 projection 并在 revision 变化时重绘；关闭时普通/Side Turn 不创建 Activity 卡、
 不增加 observer polling，Goal 也不启用 Activity Tap，但仍更新 Goal 模块。pinned observer
-保持版本/源码指纹、generated shape、exact `thread_id + turn_id`、非消费 queue 和完整 plan
+保持版本/源码指纹、generated shape、exact `thread_id + turn_id`、非消费 event store 和完整 plan
 replacement 门禁；只接受 ADR 0052 的事件白名单，未知事件忽略，白名单 shape 变化 fail
 closed，不能扩展成任意通知或私有 RPC gateway。
 
@@ -1223,15 +1236,15 @@ untracked 或 submodule 状态，只限定 `.git` pathspec，并有独立短超�
 `thread/tokenUsage/updated` 用 `last.total_tokens` 表示当前窗口已用量，并配合
 `model_context_window` 展示上限与百分比；每次 exact `turn/diff/updated` 则整体替换该
 Turn 的 latest aggregate diff，只携带到 completion 文件发现，不参与 patch 行数累计。`total.total_tokens` 是累计量，不能冒充当前
-窗口。快照只存在于服务内存，不进入 Channel SQLite；lazy Thread、服务重启、固定 SDK
-丢失即时完成通知或通知尚未出现时明确显示暂不可用，下一次可观测普通 Turn 完成后更新。
+窗口。快照只存在于服务内存，不进入 Channel SQLite；lazy Thread、服务重启或尚无
+可读取的 usage 通知时明确显示暂不可用，下一次可观测普通 Turn 完成后更新。
 普通后续 Turn 执行期间保留最近完成 Turn 的快照，并在 `/status` 中明确标为“上一轮完成时”；
 终态确认后用该 exact Turn 的 usage 通知覆盖；排空结束或失败但没有新 usage 时才使旧快照
 失效，因此旧值不会冒充最新完成 Turn。显式压缩、启动/恢复 Goal 或发现外部 active Goal
 时仍立即使快照失效，因为这些路径都会改变上下文，却没有同一公开高层 usage 消费面。
 终态后排空避免为每条 running Turn 长期占用 SDK 的阻塞 worker；
-固定 SDK 可能在通知队列建立前丢失极快 Turn 的 completion，此时不会进入无法安全取消的
-stream。terminal metadata stream 失败只影响 usage 展示和 diff 补充；structured items
+极快 Turn 采用保守的仅 read 路径，终态后的 metadata stream 只用于已观察 exact
+inProgress 的 Turn。stream 失败只影响 usage 展示和 diff 补充；structured items
 仍可作为文件 fallback，且 stream 不能取代或削弱 `thread.read()` 的 exact Turn 终态确认。
 
 checklist 来自 App Server 的完整 `turn/plan/updated`，每个有效事件整体替换旧计划，
@@ -1245,6 +1258,9 @@ steer 请求开始后到达的下一次 exact plan update 清除标记，失败 
 usage stream 仍按原顺序排空同一队列。`/status` 只在用户请求时刷新；Progress Card 开启时，
 同一个 Turn Activity Projection 由 Runtime 按既有节奏更新，Presenter 本身不访问 queue；
 关闭时没有后台 Activity polling。
+SDK `0.154.0` 的 `update_plan` 工具默认关闭；需要原生 checklist 时由用户在 Codex
+配置中开启 `tools.update_plan.enabled`。Netizen 继续继承工具配置，不自动开启或用提示词
+模拟计划。其他 Activity item 不依赖这一工具。
 
 completed commentary 最多保留最近三条，通用操作最多保留最近八个；同一 item ID 的 started/
 completed 只更新一个 identity-free 行，并把 `startedAtMs` 替换为 `completedAtMs`。commentary
@@ -1284,7 +1300,7 @@ reaction/progress presenter 与终态路径。
 状态，`/help` 只从可用条目生成。Model/Effort/Speed 只由 `/new` 和 `/config`
 管理；`/model`、`/effort`、`/fast` 不注册。每条飞书消息只解析一个 control 或
 prompt，未知 slash command fail closed，不增加任意 `/`/`@` 链式解释器。`/compact`
-保留为带原因的 unavailable 条目，不映射 native control、不调用压缩并且不进入帮助；
+映射为零参数 native control，只作用于当前有历史且空闲的普通会话；
 CLI/App 的 `/copy`、`/vim`、`/theme`、`/exit` 等纯宿主命令同样明确不可用且不进入帮助。
 
 `/rename`、`/archive`、`/delete` 命令只作用于当前 active Binding，不接受目标 ID；管理
@@ -1321,20 +1337,23 @@ release 自带一个原生 `netizen-user-guide` Skill，用于回答飞书中的
 不进入 Channel command router，也不替代动态 `/help`。部署只拥有并全量替换
 `$CODEX_HOME/skills/netizen-user-guide`；该目录以外的用户 Skill 仍完全由用户维护。
 候选 venv 安装不产生这项外部副作用，只有 release 切换时的显式安装步骤会更新全局
-Skill，随后重启长期运行的 `AsyncCodex`。固定 `0.147.0` 的黑盒兼容测试必须通过公开
+Skill，随后重启长期运行的 `AsyncCodex`。每次 SDK 升级的黑盒兼容测试必须通过公开
 `skills/list(forceReload)` 发现该 `$CODEX_HOME/skills` 路径；SDK 升级不能只根据最新版
 文档假定用户 Skill 根目录未变。
 
 Netizen 不监听或复制 Codex 已生效配置；Binding 上只允许 ADR 0016 的持久客户端目录
-ID intent。固定 `0.147.0` 的 Linux compatibility probe 用
-临时受信任 Project 实测：同一个 `AsyncCodex` 中把 project fallback instruction 从
-A 改为 B，下一条新 Thread 直接返回 `CONFIG-B`，重启后仍为 B；全局
-`config.toml` 未修改。这是锁定版本的观测值，升级后探针可能分类为
-`restart-required`，不泛化为所有用户级键；官方或探针要求重启的设置通过
+ID intent。Project config 的重载能力由锁定 SDK 的 compatibility probe 分类，当前
+结论见 `docs/deployment.md`。`hot-reloaded` 与 `restart-required` 都是受支持结果，
+不能泛化为所有用户级键；官方或探针要求重启的设置通过
 已安装 release 的 `service.sh restart` 或管理页“重启服务”重新加载；不保证所有配置
 作用于已有 Thread。
 
-仓库锁定的 `openai-codex==0.147.0` 已公开 `models()`、Turn 级三项 override、
+Runtime 的公开 resume/fork 显式使用 `include_turns=False`，省略仅供返回展示的历史，
+不修改模型上下文；需要终态、Files 或 Goal 证据时仍公开 read 完整历史。
+这也是新版 paginated Parent 创建 ephemeral Side 的必要参数。模型 Effort 继续取自
+实时目录，SDK 的 `max`/`ultra` 仅在对应模型实际支持时可选。
+
+仓库锁定的 `openai-codex==0.154.0` 已公开 `models()`、Turn 级三项 override、
 `compact()`、persisted Thread read、Thread rename/archive/unarchive 与 `SkillInput`，但
 没有公开 Thread delete、idle Thread settings read/update、完整 Goal、Plan collaboration
 control、Skills/Apps discovery、Side boundary inject、Thread unsubscribe、config 或 MCP
@@ -1367,10 +1386,10 @@ interrupt cleanup、CLI resume 与 Linux compatibility；高层 surface 出现�
   可能丢失。
 - CLI 新增消息不回填飞书；飞书 Thread 必须能在 CLI 原生 resume。
 - 同用户 Full Access 能读取 Channel DB 和 Secret 文件，这是已接受的 Pilot 风险。
-- Python SDK 原生 `handle.run()` 即时 completion race 仍可复现；公开
-  `thread.read` recovery 已通过 synthetic 20/20 和真实 Linux 验证，不再阻断部署。
-  ephemeral Side 有意只使用 `handle.run()` 并接受同一极快通知竞态，不增加 Side
-  recovery；这不改变普通持久 Thread 的门禁。
+- 原生 `handle.run()` 的请求窗口 completion 通知保留与公开 `thread.read` recovery
+  均有 synthetic 门禁。普通持久 Thread
+  继续以公开 read 确认 exact Turn 终态；ephemeral Side 使用唯一 `handle.run()`，
+  不增加持久 history recovery。当前兼容性证据见部署文档。
 - Ordinary Turn 因可恢复 I/O 或可收敛视图暂时无法取得 exact `active/inProgress` 或 terminal
   权威观测时，只做一次最多 5 秒/三次原生 I/O 的短恢复。exact `active/inProgress` 回到
   普通无时限轮询；仍不可验证则进入无周期 I/O 的 Binding-local
@@ -1391,9 +1410,6 @@ interrupt cleanup、CLI resume 与 Linux compatibility；高层 surface 出现�
 - `compact()` 的空响应不是终态；若公开 history 无法确认唯一的新
   `contextCompaction` candidate、出现多个 candidate 或 10 分钟内没有终态，运行时
   保持 Binding reserved 并关闭新 admission，不能把可能仍在压缩的 Thread 当作 idle。
-- 固定 `0.147.0` 虽能确认压缩终态，但 live probe 未能成功完成同一连接的后续普通 Turn；
-  `/compact` 当前不可用且零 native mutation。当前不增加临时 workaround，待匹配的
-  Python SDK/App Server `0.149` 组合发布后重新验收完整序列。
 - Goal mutation、通知流、四重终态证据或 complete-only clear 无法确认时保留 Goal slot；
   可能发生副作用的 start/resume/clear 会关闭进程级 admission，绝不自动重试。paused、
   blocked 与额度限制不自动 clear；权威结果即使在收尾不确定时仍通过 Goal 卡展示。重启后发现外部 active

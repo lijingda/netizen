@@ -4,6 +4,9 @@
 The probe intentionally constructs ``AsyncCodex`` without a custom binary,
 environment, model, sandbox, or config override.  Run it as the same OS user
 and with the same HOME/CODEX_HOME that the service will use.
+The plan fixture explicitly enables ``tools.update_plan.enabled`` through
+``thread_start(config=...)`` because 0.154.0 defaults that tool off; this
+Thread-scoped override never writes user configuration.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from openai_codex import (
 import openai_codex
 from openai_codex.types import ThreadTokenUsageUpdatedNotification
 
+from netizen.codex_runtime import _is_paginated_turn_read_unavailable
 from netizen.model_settings import ModelCatalog, STANDARD_SERVICE_TIER_ID
 from netizen.prompt_projection import CurrentMessageProjection, render_plain_prompt
 from netizen.sdk_gap_adapter import (
@@ -92,6 +96,8 @@ def _is_transient_read_error(
     include_turns: bool,
 ) -> bool:
     if isinstance(error, InternalRpcError) or is_retryable_error(error):
+        return True
+    if include_turns and _is_paginated_turn_read_unavailable(error):
         return True
     return (
         include_turns
@@ -296,7 +302,7 @@ async def _smoke(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
     thread = await codex.thread_start(cwd=str(cwd))
     handle = await thread.turn(prompt)
     result = await _public_terminal_turn(thread, handle.id)
-    resumed = await codex.thread_resume(thread.id)
+    resumed = await codex.thread_resume(thread.id, include_turns=False)
     listed = await codex.thread_list(limit=100)
     listed_thread = next(
         (item for item in listed.data if item.id == thread.id),
@@ -736,7 +742,9 @@ async def _side_live(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
         # Fork while the materialized Parent has an exact active Turn.  Starting
         # the first Side Turn before re-checking the marker proves the two native
         # Turns overlap instead of merely proving that the fork RPC is accepted.
-        side = await codex.thread_fork(parent.id, ephemeral=True)
+        side = await codex.thread_fork(
+            parent.id, ephemeral=True, include_turns=False
+        )
         if side.id == parent.id:
             raise AssertionError("ephemeral fork reused the parent Thread ID")
         view = await side.read(include_turns=False)
@@ -896,7 +904,9 @@ async def _turn_plan_live(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
     from openai_codex.generated.v2_all import TurnPlanUpdatedNotification
 
     observer = PinnedTurnActivityObserver(codex)
-    thread = await codex.thread_start(cwd=str(cwd))
+    thread = await codex.thread_start(
+        cwd=str(cwd), config={"tools.update_plan.enabled": True}
+    )
     handle = await thread.turn(
         "First call update_plan with exactly these three steps: "
         "Publish the initial checklist; Wait for the bounded delay; "
@@ -962,6 +972,7 @@ async def _turn_plan_live(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
         "turn_id": handle.id,
         "steer_turn_id": getattr(steered, "turn_id", None),
         "initial_plan": [item.step for item in initial.steps],
+        "update_plan_enabled_for_fixture": True,
         "refreshed_plan": [item.step for item in refreshed.steps],
         "streamed_plan_notifications": streamed_plan_count,
         "activity_kinds": observed_activity_kinds,
@@ -1149,7 +1160,7 @@ async def _compact(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
         for item in getattr(compact_turn, "items", ())
     ]
 
-    resumed = await codex.thread_resume(thread.id)
+    resumed = await codex.thread_resume(thread.id, include_turns=False)
     after_handle = await resumed.turn("Reply exactly: COMPACT-AFTER")
     after_turn = await _public_terminal_turn(resumed, after_handle.id)
     after_response = _final_response_from_turn(after_turn)
@@ -1495,7 +1506,7 @@ async def _interrupt_orphan(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
     orphan_pids = _matching_processes(marker)
     if orphan_pids:
         raise AssertionError(f"cleanup left marker processes: {orphan_pids}")
-    resumed = await codex.thread_resume(thread.id)
+    resumed = await codex.thread_resume(thread.id, include_turns=False)
     if resumed.id != thread.id:
         raise AssertionError("thread_resume returned a different native Thread ID")
     resume_handle = await resumed.turn("Reply exactly: AFTER-CLEANUP")
@@ -1900,7 +1911,7 @@ async def _model_catalog(codex: AsyncCodex) -> dict[str, Any]:
 
 
 async def _turn_settings(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
-    """Exercise the same dynamic override on consecutive same-Thread Turns."""
+    """Exercise settings and metadata-only resume without losing model context."""
 
     catalog = ModelCatalog.from_response(await codex.models())
     model = catalog.default_model
@@ -1910,8 +1921,9 @@ async def _turn_settings(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
         if option.id == model.default_effort_id
     )
     thread = await codex.thread_start(cwd=str(cwd))
+    configured_marker = f"TURN-SETTINGS-CONFIGURED-{time.time_ns()}"
     configured = await thread.turn(
-        "Reply exactly: TURN-SETTINGS-CONFIGURED",
+        f"Reply exactly: {configured_marker}",
         model=model.model,
         effort=effort.wire_value,
         service_tier=STANDARD_SERVICE_TIER_ID,
@@ -1920,16 +1932,19 @@ async def _turn_settings(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
     configured_final = _final_response_from_turn(configured_terminal) or ""
     if (
         _status_value(configured_terminal) != "completed"
-        or "TURN-SETTINGS-CONFIGURED" not in configured_final
+        or configured_final.strip() != configured_marker
     ):
         raise AssertionError(
             "dynamic Turn settings override did not complete: "
             f"{configured_final!r}"
         )
 
-    resumed = await codex.thread_resume(thread.id)
+    resumed = await codex.thread_resume(thread.id, include_turns=False)
+    if resumed.id != thread.id:
+        raise AssertionError("metadata-only resume changed Thread identity")
     reapplied = await resumed.turn(
-        "Reply exactly: TURN-SETTINGS-REAPPLIED",
+        "Reply with the exact marker you returned in your previous answer, "
+        "followed by :REAPPLIED. Do not add anything else.",
         model=model.model,
         effort=effort.wire_value,
         service_tier=STANDARD_SERVICE_TIER_ID,
@@ -1938,7 +1953,7 @@ async def _turn_settings(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
     reapplied_final = _final_response_from_turn(reapplied_terminal) or ""
     if (
         _status_value(reapplied_terminal) != "completed"
-        or "TURN-SETTINGS-REAPPLIED" not in reapplied_final
+        or reapplied_final.strip() != f"{configured_marker}:REAPPLIED"
     ):
         raise AssertionError(
             "same Thread rejected the reapplied Turn settings override: "
@@ -1953,6 +1968,7 @@ async def _turn_settings(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
         "effort": effort.id,
         "speed": STANDARD_SERVICE_TIER_ID,
         "followup_reapplied_overrides": True,
+        "metadata_only_resume_preserved_context": True,
     }
 
 

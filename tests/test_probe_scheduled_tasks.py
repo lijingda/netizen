@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import json
+import io
 import tomllib
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -17,11 +19,26 @@ from netizen.schedules.service import ScheduleService
 from scripts.probe_scheduled_tasks import (
     FakeFeishu, McpRecorder, ProbeCompletionFailure, ProbeFailure, ProbeStopFailure, _mcp_phase,
     _mcp_recovery_phase, _record_completion, _remove_fixture_trust, _safe_traceback,
-    _wait_for_completion, _wait_for_exact_active,
+    _wait_for_completion, _wait_for_exact_active, _cleanup_error,
 )
 
 
 class FixtureTrustCleanupTest(unittest.TestCase):
+    def test_cleanup_diagnostic_identifies_owned_resource_without_native_error_text(self):
+        error = InvalidRequestError(
+            code=-32600,
+            message="cannot delete thread owned-parent: forked history still references it; private-secret",
+        )
+        output = io.StringIO()
+        with redirect_stderr(output):
+            _cleanup_error(error, operation="delete", thread_id="owned-parent")
+        self.assertNotIn("private-secret", output.getvalue())
+        self.assertEqual(json.loads(output.getvalue()), {"probe_cleanup_failure": {
+            "operation": "delete", "error_type": "InvalidRequestError",
+            "thread_id": "owned-parent", "rpc_code": -32600,
+            "fork_history_referenced": True, "active_writer": False,
+        }})
+
     def test_diagnostics_expose_locations_without_error_values_or_locals(self):
         private_value = "do-not-print-this-secret"
         try:
@@ -232,11 +249,13 @@ class FakeMcpProbeTest(unittest.IsolatedAsyncioTestCase):
 
             async def thread_resume(self, thread_id, **kwargs):
                 case.assertEqual((thread_id, self.generation), ("owned-parent", 1))
+                case.assertFalse(kwargs["include_turns"])
                 return Thread(self, thread_id)
 
             async def thread_fork(self, thread_id, **kwargs):
                 case.assertEqual(thread_id, "owned-parent")
                 case.assertFalse(kwargs["ephemeral"])
+                case.assertFalse(kwargs["include_turns"])
                 return Thread(self, "owned-fork")
 
         class Delete:
@@ -249,6 +268,11 @@ class FakeMcpProbeTest(unittest.IsolatedAsyncioTestCase):
                 case.assertEqual(self.client.generation, 1)
                 case.assertIn(thread_id, self.owned)
                 case.assertNotIn(thread_id, self.attempted)
+                if thread_id == "owned-parent" and "owned-fork" in self.owned:
+                    # Native 0.154 rejects deleting history referenced by an
+                    # external persisted fork. The probe must order its own
+                    # fixtures, rather than retry a rejected/unknown delete.
+                    case.assertIn("owned-fork", self.attempted)
                 self.attempted.add(thread_id)
 
         with tempfile.TemporaryDirectory() as directory:

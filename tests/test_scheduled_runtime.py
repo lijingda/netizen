@@ -145,7 +145,7 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get(binding.id).context_anchor, upper)
         self.assertEqual(self.store.schedules.get_run(run_id).initial_turn_id, initial.turn_id)
         self.assertEqual(self.store.schedules.get_run(run_id).barrier, "released")
-        self.assertEqual(self.codex.resume_calls, [(initial.thread_id, {})])
+        self.assertEqual(self.codex.resume_calls, [(initial.thread_id, {"include_turns": False})])
 
     async def test_initial_model_and_feedback_settings_apply_and_followup_uses_ordinary_configuration(self):
         effort = SimpleNamespace(value="dynamic-effort")
@@ -182,7 +182,7 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.turn_calls[-1][2], native_settings)
         self.assertEqual(followup.task_feedback, BindingTaskFeedback())
         self.assertEqual(self.codex.model_calls, 2)
-        self.assertEqual(self.codex.resume_calls, [(initial.thread_id, {})])
+        self.assertEqual(self.codex.resume_calls, [(initial.thread_id, {"include_turns": False})])
         self.assertEqual(self.store.schedules.get_run(run_id).barrier, "released")
 
     async def test_model_unavailable_at_trigger_releases_without_native_start(self):

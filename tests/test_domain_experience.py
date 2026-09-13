@@ -167,8 +167,9 @@ class ExperienceTest(unittest.TestCase):
                 "高层 SDK 缺少",
             ):
                 self.parse(command)
-        with self.assertRaisesRegex(InvalidInteraction, "0.147.0"):
-            self.parse("/compact")
+
+    def test_compact_is_a_native_control(self) -> None:
+        self.assertEqual(self.parse("/compact").name, ControlName.COMPACT)
 
     def test_goal_is_a_capability_gated_typed_control(self) -> None:
         goal = self.parse("/goal ship it", NativeCapability.GOAL)
@@ -265,7 +266,7 @@ class ExperienceTest(unittest.TestCase):
     def test_help_is_generated_from_the_registered_command_surface(self) -> None:
         help_text = command_help()
         self.assertIn("/config", help_text)
-        self.assertNotIn("/compact", help_text)
+        self.assertIn("/compact", help_text)
         self.assertIn("/new：", help_text)
         self.assertNotIn("/new [", help_text)
         self.assertIn("/rename [名称]", help_text)
@@ -300,7 +301,7 @@ class ExperienceTest(unittest.TestCase):
             self.parse("/status extra")
         with self.assertRaisesRegex(InvalidInteraction, "不接受参数"):
             self.parse("/config extra")
-        with self.assertRaisesRegex(InvalidInteraction, "0.147.0"):
+        with self.assertRaisesRegex(InvalidInteraction, "不接受参数"):
             self.parse("/compact extra")
         with self.assertRaisesRegex(InvalidInteraction, "不接受参数"):
             self.parse("/release extra", NativeCapability.RELEASE)

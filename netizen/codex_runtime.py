@@ -14,6 +14,7 @@ from openai_codex import (
     ImageInput,
     InternalRpcError,
     InvalidRequestError,
+    MethodNotFoundError,
     SkillInput,
     TextInput,
     TransportClosedError,
@@ -166,6 +167,8 @@ _NOT_MATERIALIZED_SUFFIX = (
 )
 _STOP_ACK_ATTEMPT_TIMEOUT_SECONDS = 5.0
 _COMPACTION_TERMINAL_TIMEOUT_SECONDS = 600.0
+_COMPACTION_BASELINE_TIMEOUT_SECONDS = 5.0
+_COMPACTION_BASELINE_MAX_READS = 3
 _GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS = 20.0
 _THREAD_LIST_PAGE_LIMIT = 100
 _THREAD_CATALOG_MAX_PAGES = 1_000
@@ -344,6 +347,7 @@ class _ActiveSideTurn:
     cleanup_required: bool = False
     cleanup_succeeded: bool = False
     terminal_observed: bool = False
+    completion_notification_seen: bool = False
     cleanup_ready: asyncio.Event = field(default_factory=asyncio.Event)
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
@@ -1042,7 +1046,7 @@ class CodexRuntime:
             if parent_active is None:
                 try:
                     parent_thread = await self._codex.thread_resume(
-                        current.native_thread_id
+                        current.native_thread_id, include_turns=False
                     )
                     if parent_thread.id != current.native_thread_id:
                         self.close_admission()
@@ -1089,6 +1093,7 @@ class CodexRuntime:
                 thread = await self._codex.thread_fork(
                     current.native_thread_id,
                     ephemeral=True,
+                    include_turns=False,
                 )
             except asyncio.CancelledError:
                 self.close_admission()
@@ -2317,7 +2322,9 @@ class CodexRuntime:
                     raise RuntimeError(
                         "thread_unarchive returned a different native ID"
                     )
-                thread = await self._codex.thread_resume(binding.native_thread_id)
+                thread = await self._codex.thread_resume(
+                    binding.native_thread_id, include_turns=False
+                )
                 if thread.id != binding.native_thread_id:
                     raise RuntimeError(
                         "thread_resume returned a different unarchived native ID"
@@ -2867,7 +2874,7 @@ class CodexRuntime:
                     # Do not override cwd, sandbox, model, approval, config, or
                     # env while resuming an existing native Thread.
                     thread = await self._codex.thread_resume(
-                        binding.native_thread_id
+                        binding.native_thread_id, include_turns=False
                     )
                     if thread.id != binding.native_thread_id:
                         raise RuntimeError(
@@ -3209,6 +3216,10 @@ class CodexRuntime:
             return None
         active.plan_available = True
         active.plan_cursor = observation.next_cursor
+        if isinstance(active, _ActiveSideTurn) and observation.turn_completed:
+            # Steer freshness reads can see completion before the Side loop.
+            # Preserve the drain trigger; only handle.run() proves terminal.
+            active.completion_notification_seen = True
         self._apply_activity_events(active, observation.events)
         if observation.plan_updated:
             active.plan_steps = observation.steps
@@ -3849,7 +3860,9 @@ class CodexRuntime:
                 thread = await self._codex.thread_start(cwd=str(cwd))
                 self._bindings.assign_native_thread_id(binding.id, thread.id)
             else:
-                thread = await self._codex.thread_resume(binding.native_thread_id)
+                thread = await self._codex.thread_resume(
+                    binding.native_thread_id, include_turns=False
+                )
                 if thread.id != binding.native_thread_id:
                     raise RuntimeError("thread_resume returned a different native ID")
             current = self._bindings.get(binding.id)
@@ -4149,7 +4162,7 @@ class CodexRuntime:
             thread = goal.thread
         else:
             try:
-                thread = await self._codex.thread_resume(thread_id)
+                thread = await self._codex.thread_resume(thread_id, include_turns=False)
             except BaseException:
                 self._schedule_known_subscription_locked(binding.id, thread_id)
                 raise
@@ -4201,7 +4214,9 @@ class CodexRuntime:
                     "请先发送一条真实任务，再使用 /compact。"
                 )
             try:
-                thread = await self._codex.thread_resume(binding.native_thread_id)
+                thread = await self._codex.thread_resume(
+                    binding.native_thread_id, include_turns=False
+                )
                 if thread.id != binding.native_thread_id:
                     raise RuntimeError(
                         "thread_resume returned a different native ID"
@@ -4951,7 +4966,7 @@ class CodexRuntime:
                     observation = self._refresh_turn_activity(active)
                     if observation is None:
                         break
-                    if observation.next_cursor >= SIDE_ACTIVITY_QUEUE_HIGH_WATER:
+                    if observation.retained_count >= SIDE_ACTIVITY_QUEUE_HIGH_WATER:
                         before = self._turn_activity_visible_state(active)
                         active.plan_available = False
                         active.activity_observation_enabled = False
@@ -4966,7 +4981,7 @@ class CodexRuntime:
                             },
                         )
                         break
-                    if observation.turn_completed:
+                    if active.completion_notification_seen:
                         break
                     await asyncio.sleep(self._poll_interval_seconds)
             result = await active.handle.run()
@@ -5291,34 +5306,34 @@ class CodexRuntime:
         return StopDisposition.REQUESTED
 
     async def _read_compaction_baseline(self, thread: NativeThread) -> object:
-        failures = 0
-        while True:
-            try:
-                response = await thread.read(include_turns=True)
-                native_thread = getattr(response, "thread", None)
-            except Exception as error:
-                if not _is_transient_thread_read_error(
-                    error,
-                    thread_id=thread.id,
-                    include_turns=True,
-                ):
-                    raise
-                failures += 1
-                if failures == 1 or failures % 120 == 0:
+        # No compact mutation has occurred. Bound this read-only preparation
+        # so an unavailable baseline cannot retain the Binding lock forever.
+        async with asyncio.timeout(_COMPACTION_BASELINE_TIMEOUT_SECONDS):
+            for attempt in range(_COMPACTION_BASELINE_MAX_READS):
+                try:
+                    response = await thread.read(include_turns=True)
+                    native_thread = getattr(response, "thread", None)
+                except Exception as error:
+                    if not _is_transient_thread_read_error(
+                        error,
+                        thread_id=thread.id,
+                        include_turns=True,
+                    ):
+                        raise
                     logger.warning(
-                        "native Thread unavailable before compaction; retrying",
+                        "native Thread unavailable before compaction",
                         extra={
                             "thread_id": thread.id,
-                            "failures": failures,
+                            "attempt": attempt + 1,
                             "error_type": type(error).__name__,
                         },
                     )
-                await asyncio.sleep(self._poll_interval_seconds)
-                continue
-            if _thread_status_type(native_thread) == "notLoaded":
-                await asyncio.sleep(self._poll_interval_seconds)
-                continue
-            return native_thread
+                else:
+                    if _thread_status_type(native_thread) != "notLoaded":
+                        return native_thread
+                if attempt + 1 < _COMPACTION_BASELINE_MAX_READS:
+                    await asyncio.sleep(self._poll_interval_seconds)
+        raise TimeoutError("native Thread baseline remained unavailable before compaction")
 
     async def _consume_compaction(self, active: _ActiveCompaction) -> None:
         error: BaseException | None = None
@@ -5513,11 +5528,11 @@ class CodexRuntime:
     async def _drain_terminal_turn_stream(self, active: _ActiveTurn) -> bool:
         observed_usage = False
         try:
-            # turn_start registers the exact Turn queue before returning the
-            # handle, so a Turn observed active afterwards can be drained only
-            # after its persisted terminal state is known. Never enter this
-            # stream for an immediate Turn that may have completed before the
-            # queue was registered by the pinned SDK.
+            # This handle is the sole consumer of its retained notifications.
+            # Drain completion metadata only after observing the exact Turn
+            # in progress and then proving its persisted terminal state.
+            # Immediate completions retain the conservative read-only path;
+            # native terminal authority never depends on this metadata stream.
             async for notification in active.handle.stream():
                 payload = getattr(notification, "payload", None)
                 if getattr(notification, "method", None) == "turn/diff/updated":
@@ -5791,7 +5806,7 @@ class CodexRuntime:
                         io_count += 1
                         try:
                             thread = await self._codex.thread_resume(
-                                active.handle.thread_id
+                                active.handle.thread_id, include_turns=False
                             )
                         except asyncio.CancelledError:
                             raise
@@ -6168,10 +6183,10 @@ class CodexRuntime:
     ) -> TurnResult | _TurnObservation:
         """Read one authoritative persisted Thread observation.
 
-        ``openai-codex==0.147.0`` can lose an immediate ``turn/completed``
-        before ``AsyncTurnHandle.run()`` registers its notification queue.
-        ``AsyncThread.read()`` is public, reads the same native App Server
-        state, and remains usable for steer/interrupt Turns.
+        The 0.147.0 immediate-completion race originally required this path.
+        Although 0.154.0 retains those notifications, public persisted history
+        remains the exact Turn's terminal authority, including steer/interrupt
+        and resumed observation after a transport interruption.
         """
 
         native_thread = await self._read_native_thread(
@@ -6360,6 +6375,20 @@ class CodexRuntime:
                     "error_type": type(error).__name__,
                 },
             )
+            if isinstance(error, InternalRpcError):
+                # A server-side read error does not imply a lost attachment.
+                # Retry the exact persisted view before requesting resume;
+                # new Thread metadata may still be materializing. Both paths
+                # share the same bounded recovery budget.
+                raise _TurnViewUnverified("native Thread read failed") from error
+            if include_turns and _is_paginated_turn_read_unavailable(error):
+                # In 0.154.0 the rollout can advertise paginated history before
+                # its SQLite metadata is visible to the internal list readers.
+                # Retry this exact public read within the existing budget;
+                # other missing methods remain contract failures.
+                raise _TurnViewUnverified(
+                    "native Thread paginated history is unavailable"
+                ) from error
             if _is_recoverable_turn_observation_io_error(error):
                 raise _TurnResumeRequired("native Thread read failed") from error
             if (
@@ -6556,6 +6585,17 @@ def _is_recoverable_turn_observation_io_error(error: BaseException) -> bool:
         error,
         (InternalRpcError, TransportClosedError, TimeoutError, ConnectionError, OSError),
     ) or is_retryable_error(error)
+
+
+def _is_paginated_turn_read_unavailable(error: BaseException) -> bool:
+    return (
+        isinstance(error, MethodNotFoundError)
+        and error.code == -32601
+        and error.message in {
+            "list_turns is not supported yet",
+            "list_items is not supported yet",
+        }
+    )
 
 
 def _is_transient_thread_rpc_error(error: BaseException) -> bool:

@@ -14,9 +14,9 @@ commentary、命令、工具、文件修改、搜索、图片、子任务、审�
 直接成为通用事件渲染器。
 
 普通持久 Turn、ephemeral Side Turn 与 Goal logical stream 的通知所有权并不相同：普通
-Turn 可以在终态前只读窥视 exact queue，并由公开 `thread.read()` 确认终态；Side 的公开
+Turn 可以在终态前只读窥视 exact Turn 的 retained events，并由公开 `thread.read()` 确认终态；Side 的公开
 `thread.read(include_turns=True)` 不能读取 exact ephemeral Turn，且现有
-`handle.run()` 会消费同一队列；Goal 则由 SDK 的 logical stream 唯一消费并在内部 rollover
+`handle.run()` 会消费该 Turn 的通知；Goal 则由 SDK 的 logical stream 唯一消费并在内部 rollover
 物理 Turn。展示层必须复用一份 Activity 投影，同时不能产生第二消费者或取得生命周期所有权。
 
 ## 决定
@@ -35,15 +35,16 @@ Turn 可以在终态前只读窥视 exact queue，并由公开 `thread.read()` �
 - 只在可见内容变化时递增的 revision。
 
 运行中展开 Activity，终态在同一张 Reply Card 中折叠，并与 Result、Files 及可选 Goal
-Module 一起完整重绘。Presenter 每秒只比较 revision，不读取 SDK 队列。Activity、cursor、
+Module 一起完整重绘。Presenter 每秒只比较 revision，不读取 SDK 事件存储。Activity、cursor、
 message identity 与 Presenter session 都不写入 SQLite 或 Codex history。
 
 ### 只接受安全事件白名单
 
 ADR 0020 的 pinned observer 扩展为 `PinnedTurnActivityObserver`，继续固定 SDK 版本、整包
-源码指纹、对象持有关系、generated notification shape、router lock 与 exact Queue shape。
-它在 router lock -> Queue mutex 顺序下复制 cursor 后的对象引用，不调用 RPC、不注册路由、
-不消费或修改队列，只返回已脱敏的内部事件。opaque item identity 仅留在 Runtime 内用于把
+源码指纹、对象持有关系、generated notification shape、router RLock 与 exact Turn state shape。
+SDK 0.154.0 的 observer 在同一 RLock 下复制绝对 cursor 后的 retained event 引用，校验
+Thread/Turn identity、保留区间与序号连续性。不调用 RPC、不注册订阅、不消费、裁剪或
+修改事件/订阅者游标，只返回已脱敏的内部事件。opaque item identity 仅留在 Runtime 内用于把
 started/completed 合并为同一操作；交给 Channel 的 snapshot 与 manifest 都移除该 identity。
 
 白名单及展示语义如下：
@@ -97,17 +98,20 @@ Side 仍是 ADR 0021 的 ephemeral 容器，根卡、两小时 expiry、close、
 与 tombstone 全部不变。Progress Card 关闭时继续立即调用 `handle.run()`。
 
 Progress Card 开启时，Runtime 暂不调用 `handle.run()`，而是每个既有 poll interval 只读
-观察 exact Side Turn queue。观察到 exact `turn/completed` 只表示“可以开始 drain”，随后立即
-调用同一个 `handle.run()`；只有其返回值确认 terminal、Result 与 Files。observer 不可用、
-cursor 回退、allowlisted shape 变化或 exact queue 的原始通知条数（包含 Activity 投影明确
-忽略的 delta）达到固定 4096 high water 时，停止 Activity 观察并立即回退原
+观察 exact Side Turn 的 retained events。任一次 Activity 刷新（包括 steer 前刷新）
+观察到 exact `turn/completed` 后，都须保留这一事实直至唯一 consumer 调用同一个
+`handle.run()`，不能因其他入口推进 cursor 而漏掉触发。该事实仅在当前 Turn 有效；
+通知本身不证明终态，只有 `run()` 返回值确认 terminal、Result 与 Files。
+observer 不可用、cursor 回退、漏读/序号缺口、allowlisted shape 变化或 exact event store
+的原始通知保留数（包含 Activity 投影明确忽略的 delta）达到固定 4096 high water 时，
+停止 Activity 观察并立即回退原
 `handle.run()` 路径。该阈值只限制等待唯一 consumer 期间的原始通知条数，不提供 wall-clock
 timeout 或 notification payload 的 byte 上界；不得改为只统计白名单 Activity event，否则
-无法约束被忽略 delta 对原始队列的增长。observer 永远不是第二消费者或 Side 终态权威。
+无法约束被忽略 delta 对原始事件存储的增长。observer 永远不是第二消费者或 Side 终态权威。
 
 ### Goal Tap 位于唯一 logical stream 内
 
-Goal 不再通过普通 queue observer 读取物理 Turn。Goal adapter 在现有
+Goal 不再通过普通 event-store observer 读取物理 Turn。Goal adapter 在现有
 `next_goal_notification -> logical stream` 唯一消费链内加入窄 Activity Tap：原始通知先投影
 为安全 Activity update，再原样交给 SDK logical stream。Tap 或 sink 失败只关闭 Activity，
 不能打断 `wait_terminal()`。
@@ -142,12 +146,13 @@ synthetic tests/probe 必须覆盖白名单/拒绝列表、脱敏与上限、exa
 action 语义、直接工具名与 Markdown 注入转义、旧 manifest 兼容、exact ID、full plan replacement、
 非消费对象身份、cursor 回退与 shape/fingerprint fail closed。Runtime 门禁必须覆盖 ordinary
 持续刷新及 terminal authority、Progress Card 关闭零观察、Side completion-before-drain、
-observer/high-water fallback、stop/steer/close、Goal Tap 唯一消费与 physical Turn reset/late
+steer 前刷新先观察 completion 后仍由唯一 consumer drain、observer/high-water
+fallback、stop/steer/close、Goal Tap 唯一消费与 physical Turn reset/late
 event、final-only Result/Files，以及 lifecycle intent 不等待展示。
 
 SDK 升级必须运行 synthetic probe 和目标环境 live `plan`/Activity、Side、Goal、lifecycle
 phase。若官方 SDK 提供公开、可多路复用且不改变消费时机的 Activity callback/snapshot，则用
-同一组行为门禁迁移并删除 pinned queue reach-through；不得把现有 adapter 扩展为通用私有
+同一组行为门禁迁移并删除 pinned event-store reach-through；不得把现有 adapter 扩展为通用私有
 RPC/notification gateway。
 
 ## 后果
@@ -157,4 +162,5 @@ RPC/notification gateway。
 的严格私有只读例外覆盖更多固定 generated notification 类型，Activity manifest 增加原生
 时间字段，且
 Side 开启 Progress Card 时会暂存通知至 exact completion。observer 失败或原始通知条数达到
-high water 时都会立即回到既有唯一消费路径；该阈值不构成时间或 byte 级资源上界。
+high water 时都会立即回到既有唯一消费路径；该阈值比较原始通知保留量，不能使用绝对
+cursor 或白名单投影数量，也不构成时间或 byte 级资源上界。

@@ -453,11 +453,13 @@ def _project_item(
             count=count,
         )
     if type(item) is SubAgentActivityThreadItem:
-        status = (
-            TurnActivityStatus.INTERRUPTED
-            if getattr(item.kind, "value", None) == "interrupted"
-            else lifecycle_status
-        )
+        # The SDK emits started/completed item envelopes for these activity
+        # records. A completed child must not briefly appear to be running
+        # when its activity record first arrives.
+        status = {
+            "interrupted": TurnActivityStatus.INTERRUPTED,
+            "completed": TurnActivityStatus.COMPLETED,
+        }.get(getattr(item.kind, "value", None), lifecycle_status)
         return TurnActivityEvent(
             item.id,
             TurnActivityKind.SUBAGENT,

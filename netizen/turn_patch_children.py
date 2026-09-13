@@ -60,27 +60,40 @@ def _child_edges(
     for wrapped in items:
         item = _item(wrapped)
         if type(item) is CollabAgentToolCallThreadItem:
+            tool = _value(item.tool)
+            # These controls neither create work nor identify a child Turn.
+            # listAgents can legitimately have no receivers at all.
+            if tool in {"closeAgent", "interruptAgent", "listAgents"}:
+                continue
             if item.sender_thread_id != parent_id:
                 complete = False
                 continue
             if _value(item.status) != "completed":
-                if _value(item.status) == "inProgress":
+                if _value(item.status) in {"inProgress", "interrupted"}:
                     complete = False
                 continue
             receivers = set(item.receiver_thread_ids)
+            # V2 wait_agent observes mailbox activity without targeting any
+            # Thread. V1 waits with receivers still carry those references.
+            if tool == "wait" and not receivers and not item.agents_states:
+                continue
             if not receivers or any(not receiver for receiver in receivers):
                 complete = False
                 continue
-            if _value(item.tool) == "spawnAgent":
+            if tool == "spawnAgent":
                 spawned.update(receivers)
-            elif _value(item.tool) in {"sendInput", "resumeAgent", "wait"}:
+            elif tool in {
+                "sendInput", "resumeAgent", "wait", "sendMessage", "followupTask"
+            }:
                 referenced.update(receivers)
         elif type(item) is SubAgentActivityThreadItem:
             if not item.agent_thread_id:
                 complete = False
             elif _value(item.kind) == "started":
                 spawned.add(item.agent_thread_id)
-            elif _value(item.kind) == "interacted":
+            elif _value(item.kind) in {"interacted", "completed"}:
+                # Completion may belong to a follow-up on an existing child.
+                # Its opaque item ID is not a public child Turn identity.
                 referenced.add(item.agent_thread_id)
     return spawned, referenced, complete
 
@@ -233,7 +246,9 @@ async def collect_turn_patch_children(
         return TaskPatchChildren(complete=False)
     # Resolve references after the traversal: siblings may communicate before
     # their spawn item is encountered in another member of this task tree.
+    # A reply to this root is also known: both root reads proved the exact Turn,
+    # whose patches the caller already froze. Never import root history here.
     return TaskPatchChildren(
         batches=tuple(batches),
-        complete=complete and references.issubset(parents.keys() - {thread_id}),
+        complete=complete and references.issubset(parents),
     )

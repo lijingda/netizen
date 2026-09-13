@@ -36,7 +36,7 @@ Goal/Skills、ADR 0021 的 Side 与 ADR 0037 的 Thread Delete Adapter 不做运
 allowlist；修改 pinned SDK/App Server 或这些 Adapter 时，开发迭代必须对实际 resolved
 组合运行受影响的 capability harness。Delete 能力变更还必须覆盖 disposable lifecycle
 live probe 与 Runtime 四视图对账测试。ADR 0020/0052 的 active-Turn Activity observer
-另行精确锁定 SDK 版本、源码指纹、generated shape 和非消费 queue contract；门禁失败只
+另行精确锁定 SDK 版本、源码指纹、generated shape 和非消费 event-store contract；门禁失败只
 关闭 checklist/Activity 展示，不关闭普通 Turn。这个降级以 ADR 0009 独立的 service-wide
 SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕过该门禁。
 
@@ -174,6 +174,8 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 正式 Release 复用 exact main commit 的成功 CI 结论，不重新执行本节测试。
 固定 SDK synthetic probes 的命令、参数和执行顺序统一由 `scripts/check_sdk.py` 维护；
 `make check` 与安装器的目标机 Host Validation 都调用该入口，失败即停止后续探针。
+SDK synthetic 门禁还要求 20 次快速完成通过原生 handle、20 次公开 read 恢复和
+40 次 usage/diff drain，以覆盖开始请求窗口内的通知保留与终态后唯一消费。
 Main Qualification 的 Linux 与 macOS jobs 均显式安装 Node.js 22，执行 Admin JavaScript
 行为测试；在 `CI=true` 时缺少 Node.js 会使测试失败。Node.js 是开发和 CI 的测试工具，
 不参与前端构建，也不增加生产运行或 Source Install 的前置依赖。本地（包括 Source Install）
@@ -271,8 +273,9 @@ Turn 正常完成、exact ID 可 resume 外，还要求 `thread_list.preview` �
 
 `turn-settings` phase 从同一 live catalog 选择默认 Model/Effort，显式提交 Standard
 Service Tier 的 configured Turn，再按 exact Thread ID resume 并重复提交同一组三项
-override；两轮都必须完成。它是 SDK/App Server 升级时对持久 Binding 配置重复应用的
-端到端 shape/连续性验证，不声称能读取或证明 Thread 内部当前值。SQLite 持久化、每轮
+override；两轮都必须完成，并在 `include_turns=False` 恢复后要求模型回忆前一轮随机
+marker，验证省略返回历史时的上下文连续性。它是 SDK/App Server 升级时对持久 Binding
+配置重复应用的端到端 shape/连续性验证，不声称能读取或证明 Thread 内部当前值。SQLite 持久化、每轮
 live revalidation、admission revision 和 steer 不应用由 `make check` 的 synthetic
 Runtime/SQLite 测试负责。
 
@@ -290,8 +293,10 @@ terminal status 与 final agent message；若 App Server 短暂先暴露 complet
 `make check` 会运行 `probe_sdk_turn_plan.py`：真实安装 SDK 连接 fake App Server，
 `PinnedTurnActivityObserver` 先从 exact active Turn 非消费地投影 plan、completed commentary
 和 command lifecycle，证明 exact `startedAtMs`/`completedAtMs`、typed command action 语义、
-队列长度、顺序和对象身份未变，且原始命令/路径/查询/敏感文本未进入投影，
-最后由公开 stream 收到同一对象并排空 completion。`plan` live phase 会要求模型先生成
+保留区间、顺序、对象身份及订阅者游标未变，且原始命令/路径/查询/敏感文本未进入投影，
+最后由公开 stream 收到同一对象并排空 completion。SDK `0.154.0` 默认关闭原生
+`update_plan` 工具；`plan` live phase 只对测试 Thread 通过公开 `thread_start(config=...)`
+显式开启 `tools.update_plan.enabled`，不写用户配置，也不改变生产 Thread。随后要求模型先生成
 checklist 和至少一种安全 Activity item，在有界延迟 Turn 中接受一次 steer，再观察完整 plan
 replacement、最终 steered 回复和终态后公开 stream 中仍存在这些通知。相关 SDK/Activity
 迭代必须在合入前解释并处理任一步失败。
@@ -318,9 +323,15 @@ steer 前失败；结果不能复制成生产静态目录。
 全部 absent。该 phase 还创建两个独立 disposable fixture：一个在 archived catalog 中直接
 Delete、不先恢复；另一个在 marker Turn 仍为 running 时直接 Delete，不先 interrupt、cleanup、
 等待 terminal 或读取 idle。running fixture 的 marker 必须随 App Server removal 退出。
-descendant cascade 由 0.147.0 固定源码契约和 ADR 0037 已记录的真实 root→child→grandchild
+descendant cascade 由 0.154.0 源码复核和 ADR 0037 已记录的真实 root→child→grandchild
 实测约束；routine phase 不依赖模型临时生成一棵非确定性 agent tree。探针不触碰任何既有
 Thread；delete 响应失败时也不得自动重发。
+
+`0.154.0` 源码契约还会拒绝删除由其它 App Server 持有 writer 的 Thread，或仍被
+外部持久 fork 引用的历史。Netizen 不扩大 Project 的 Binding/Side 清单去删除这些外部
+对象，也不绕过拒绝；保留现有四视图对账和 remaining/unknown 结果。MCP 冷恢复探针
+只对自己显式创建的已知 fork 先执行 delete，再删除 parent，以遵守该历史依赖；失败
+输出安全分类及自有 ID，不能通过重试未知 delete 取得通过结果。
 
 Project 级联删除边界变更还应运行 `.venv/bin/python scripts/probe_project_delete.py`。
 该探针在临时 cwd/数据库中创建自己的 Lazy、active、archived 会话和 OPEN Side，并验证
@@ -339,13 +350,16 @@ Parent 已被单独删除时的孤立 Runtime Side；检查原生四视图消失
 响应未知的阻断/重试由真实 SDK fake-server harness 和 Runtime 测试作为本地代码门禁。
 
 `side` phase 是 Side 上线的原生硬门禁：先创建并物化 Parent，再启动一个可观察的普通
-Parent Turn；在该 Turn 仍 running 时用公开 `thread_fork(..., ephemeral=True)` 验证 exact
+Parent Turn；在该 Turn 仍 running 时用公开 `thread_fork(..., ephemeral=True, include_turns=False)` 验证 exact
 ID、ephemeral 与 parent shape，通过固定 Adapter 注入 boundary，并在 Parent marker 仍存活
 时启动 Side Turn，证明 Parent/Side 真并发。随后在同一 Side Thread 连续完成至少两轮，
 请求 terminal cleanup 和 unsubscribe，最后证明 Parent 仍能继续并将 Parent 归档。Parent
 的 seed、并发 Turn 和 after Turn 都使用公开 full-history 终态恢复；只有 ephemeral Side
 使用 `handle.run()`。它不增加 Side 专项 completion-race gate；普通持久 Thread 的
 read-recovery 门禁仍由 `make check` 保留。
+Runtime synthetic 门禁须覆盖 steer 前刷新先读取 exact completion 并推进 cursor
+后，active Turn 保留的 `completion_notification_seen` 仍触发唯一 `handle.run()`；
+该标记不能代替 `run()` 的终态返回值。
 飞书 topic 能力另做下文五入口 live 验收，尤其不能用 FakeChannel 宣称 P2P Topic 已支持。
 
 `goal` phase 是 Goal 上线的硬门禁。它首先创建零 Turn Thread，并用公开 read 证明该
@@ -360,8 +374,11 @@ Turn，并由第二个无本地 route 的 SDK client 只读确认 persisted acti
 `compact` phase 创建一条短原生会话，要求公开 `compact()` 的立即 acknowledgement
 之后，公开 `thread.read(include_turns=True)` 能观察到 baseline 之后新增的 completed
 `contextCompaction` Turn，并在同一 Thread 完成 `COMPACT-AFTER`。只看到空响应或
-Thread idle 不算通过；phase 会记录实际状态序列和 compact Turn/item 类型。重新开放
+Thread idle 不算通过；phase 会记录实际状态序列和 compact Turn/item 类型。
 生产命令还要求 baseline 后候选唯一，多个候选或 10 分钟无终态均 fail closed。
+启动前 baseline 另有独立 5 秒、至多 3 次公开 read 预算；持续 Internal、`notLoaded`
+和悬挂 read 的本地门禁必须证明耗尽预算后零 compact 调用、释放 Binding 锁，并保持
+已有的全局 admission 状态。这与 compact 已发出后结果未知的失败边界分开验证。
 
 ADR 0009 的 fail-closed 门禁会校验整个 pinned `openai_codex` Python 源码树的
 确定性聚合指纹；部署包必须保留 `.py` 源文件。只有 `.pyc`、无法读取源码或任一源码
@@ -373,8 +390,9 @@ Adapter 按 ADR 0037 使用 capability shape + synthetic + live harness，不得
 运行时版本白名单。Delete 的生产调用还必须固定为一个 method，并由 Runtime 承担
 present/absent/unknown 对账；同样不得删除 ADR 0009 的既有门禁来“统一”两类 Adapter。
 
-原生 `handle.run()` completion 探针在 `openai-codex==0.147.0` 第 1 次复现失败。
-普通持久 Thread 的生产 completion 路径不使用它；ephemeral Side 是明确例外，并由
+SDK `0.154.0` 保留请求窗口内快速完成 Turn 的通知；原生 `handle.run()` completion
+synthetic 探针须验证这一契约。普通持久 Thread 仍以公开 read
+核验终态；ephemeral Side 是明确例外，并由
 `side` phase 的多 Turn live gate 覆盖。普通持久 Thread 带 `--read-recovery` 的公开 polling
 门禁必须通过。
 interrupt phase 按 ADR 0010 精确等待 `argv[0] == marker`，执行 exact Turn
@@ -390,24 +408,26 @@ interrupt，并为 exact Thread 请求清理 App Server 已登记的后台 termi
 不自动创建计划或发消息。源码检查、传输替身、API 接受和客户端点击分别记录，不互相
 替代，也不把旧候选结果当作后来修改边界的验收结果。
 
-固定 `openai-codex==0.147.0` 的开发验收已确认以下兼容性范围：
+固定 SDK/CLI `0.154.0` 的原生兼容性覆盖 MCP、冷恢复/fork 与 dispatch；
+真实飞书链路的已验证版本仍为 `0.147.0`，不代表 `0.154.0` 的端到端验收：
 
 - 生产 MCP 框架的真实 CRUD、同 cwd 不同 Thread 的调用身份，以及服务端地址/凭据
   轮换后的冷恢复与 fork。`params._meta.threadId` 可用于 exact Binding 默认值映射，
   不依赖 HTTP header 一定存在。`scripts/probe_scheduled_tasks.py` 提供 mcp、mcp-recovery
   和 dispatch 阶段；它使用隔离资源和显式模型，只测试原生执行，不发送飞书消息。
-- 五类来源（私聊主线、普通群主线、话题群、私聊转话题、群聊转话题）的自然语言请求
-  已验证默认目标与 Project。私聊、普通群、话题群的真实 Scheduler → Channel → Runtime
-  首轮已执行，并通过飞书消息读取核对结果的 chat/thread/root 和来源 pointer 保持不变。
+- 真实飞书链路的覆盖范围包括五类来源（私聊主线、普通群主线、话题群、私聊转话题、
+  群聊转话题）的自然语言默认目标与 Project，以及私聊、普通群、话题群的
+  Scheduler → Channel → Runtime 首轮、结果 chat/thread/root 和来源 pointer。
   这不代表任意自然语言都无歧义，也不承诺模型发现与生成能即时完成。
-- 普通原生首轮、同 Thread 续聊、停止、归档与删除已在隔离探针中通过。曾出现原生已完成
-  而 Runtime 进入 `turn-observation-unavailable`，后续成功未解释此前原因；仍遵循
-  ADR 0049 的有界恢复及人工 `/sessions` 重检，不另加后台重试。
+- dispatch 探针覆盖普通原生首轮、exact initial Turn 读取、首次屏障释放、同 Thread
+  续聊、停止、归档与删除，并核验用户 MCP 与 Project trust 配置不变。
+  新 Thread metadata 尚为空及 full read 内部分页列表暂不可用时，读取按 ADR 0049
+  使用 5 秒/3 次 I/O 预算，失败后停止自动读取。
 
 尚未完整覆盖客户端全部点击路径、移动端布局、原生权限和网络故障组合，以及目标主机
 真实失败回滚。当前证据未直接观察 deferred search；固定版本的跨会话 MCP catalog cache
-仅适用于 stdio，不给本 HTTP adapter 添加相应兼容层。压缩组合继续受下节
-`COMPACT-AFTER` 缺口限制，不标为通过，不借此修改用户配置或升级 SDK。
+仅适用于 stdio，不给本 HTTP adapter 添加相应兼容层。`0.154.0` 支持普通会话压缩后
+续聊，但压缩后的 MCP 管理组合尚未覆盖，不标为通过。
 
 触及对应边界时，候选须完成以下验收：
 
@@ -433,25 +453,34 @@ Side/Project 墓碑保留，以及失败后原数据库/release/Skill 恢复；m
 
 实例专属的主机、账号、PID、native ID、release/备份路径、数据库行数和私网访问结果不属于
 公共部署契约；维护者应把这类记录保存在被忽略的 `LOCAL_ENVIRONMENT.md` 或自己的运维
-系统中。下列记录用于判断何时需要重新运行相关 live probe，不属于每个正式 Release 的资格
-输入，也不能拿某次实例验收替代目标主机自己的 Host Validation：
+系统中。下列结论用于维护当前兼容边界和选择受影响的 live probe，不能替代具体候选的
+验收或目标主机自己的 Host Validation。变更原因和验证摘要保留在 commit/PR 说明中，
+单次运行的日志、失败诊断和复验过程留在验证产物中。
 
-- 固定 `openai-codex==0.147.0` 与 bundled CLI `0.147.0` 已保留 models、Turn settings、
-  smoke、usage、steer、plan、polling、concurrency、interrupt、Skills、lifecycle、Side、
-  release、config、Goal 和 sandbox 的开发验证记录；普通新候选不重跑完整集合。
-- `0.147.0` 的同连接 `COMPACT-AFTER` 在 2026-08-25 重新验证时未能成功完成；隔离使用
-  App Server `0.149.0` 的同一探针已通过。当前不增加临时 workaround，待匹配的 Python
-  SDK/App Server `0.149` 组合发布后，在依赖升级迭代中重跑 compact 及相关 phase；在此
-  之前 `/compact` 保持 unavailable、隐藏于帮助且零 native mutation。
-- 精确 SDK 源码指纹为
-  `35ec9419cb9f42577080f9bf410e81cb5a97ae64e5297c4302878c73749d39eb`。
+- SDK/CLI `0.154.0` 支持公开压缩终态确认及同连接、同 Thread 后续 Turn，`/compact`
+  可用。唯一候选、启动前有界 baseline 与结果未知时的失败边界见 ADR 0013。
+- child/fileChange 支持新子任务 patch 归属、child→root 消息和 v2 空目标 wait；祖先
+  patch 不混入本轮统计，无法定位本轮 Turn 的旧 child 使总计保持未知，见 ADR 0056。
+  root 归档由 App Server 级联处理后代。fixture trust 清理的成功、失败和取消分支
+  有 synthetic 覆盖；原生自动新增 trust 后再移除的 live 路径尚未验证。
+- `include_turns=False` 的 resume 保持 exact Thread 和模型上下文连续性；该选项仅省略
+  返回历史。普通持久 Thread 需要终态或 Files 证据时另做公开 read；ephemeral Side
+  fork 同样使用此选项，但仍由唯一 `handle.run()` 确认终态。
+- 原生 `update_plan` 默认关闭，plan fixture 显式开启；生产 Thread 继承用户工具配置。
+  checklist 整体替换与非消费 Activity 观察必须保留同一公开 stream 的原始通知。
+- Project 删除的原生兼容性覆盖 mixed-sessions 与 orphan-Side；四视图 absent、
+  Side 关闭、跨重启 tombstone 和 cwd 保留是验收要求。真实飞书 topic 与浏览器传输
+  不在这项原生探针的覆盖范围内。
+- 当前 SDK `0.154.0` 的精确源码指纹为
+  `9db021b08bbcc75f18206d64ecf8a7d5ba63b380d91181718a3c9153ed4a053f`。
   该值属于 ADR 0009/0020 的版本兼容门禁，不是某台主机的环境配置。
 - foreground tool process 不属于 background-terminal registry；
   `interrupt` 和 terminal cleanup 成功不证明前台进程已退出。
   `foreground_process_exited_within_5s=false` 是受支持分类，但 native Turn 必须进入
   `interrupted`、same-Thread resume 必须成功，probe 自己不得遗留 marker。
-- 固定 SDK 的 Project config 观测分类为 `hot-reloaded`；升级后
-  `restart-required` 仍可接受，但必须按新版本实际结果更新兼容性判断。
+- 当前 `0.154.0` 的 Project config 观测分类为 `hot-reloaded`：同进程及重启后均读取
+  新配置，探针不修改用户全局配置。未来版本的 `restart-required` 仍可接受，但须更新
+  兼容性结论。
 - sandbox probe 只报告 `workspace-write-or-full` 或 `read-only-or-denied` 的端到端
   体感分类，不识别配置来源，也不能替代目标账号的真实权限验收。
 - Admin Web 首次上线或相关边界变更时，必须从另一台受信内网主机直接验证 readiness、
@@ -466,9 +495,9 @@ Side/Project 墓碑保留，以及失败后原数据库/release/Skill 恢复；m
   官方 installer 的零退出为准，不重复整套验收。
 
 `--phase config` 只在给定测试 cwd 下创建临时 Project，验证同一 App Server 的
-Project config 重载后自动清理；它不会读写全局 `config.toml`。实测结果为
-`CONFIG-A -> CONFIG-B`，当前固定 `0.147.0` 分类为 `hot-reloaded`。升级后若输出
-`restart-required` 仍是受支持结果，但必须更新兼容性判断并按重启语义验收。用户级
+Project config 重载后自动清理；它不会读写全局 `config.toml`。分类为
+`hot-reloaded` 时表示同进程可读取新配置；`restart-required` 也是受支持结果，但必须
+更新兼容性判断并按重启语义验收。用户级
 `~/.codex/config.toml` 不由 Netizen 监听；修改官方要求重启的键后，可在 Admin 系统维护页
 点击“重启服务”，或执行下列命令。重启不保证所有配置作用于已有 Thread：
 
@@ -1281,12 +1310,14 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    catch-up 时 exact card anchor 读取失败必须同时保持旧 Model、旧 Task Feedback 与旧 mode；
    running Turn 上 `/config` 必须拒绝，running steer 不得解析或应用 Binding 配置，已经
    开始的 Turn 也不得被后来保存的反馈开关改变。
-5. 当前固定 `0.147.0` 上发送 `/compact`，必须收到包含兼容验证原因的明确 unavailable
-   回复；无论 Binding 是否已有历史或处于 idle，都不得调用 native compact、改变运行状态
-   或使上下文用量快照失效，帮助中也不得展示该命令。底层 controller 的单元测试继续覆盖
-   `compacting` admission 和终态不确定时的 fail-closed 行为；只有匹配的 Python SDK/App
-   Server 升级后，`compact` live phase 连同同一 Thread 的 `COMPACT-AFTER` 全部通过，才
-   重新验收并开放命令。当前不增加临时 workaround。
+5. `/compact` 出现在帮助中；对有历史且空闲的普通会话提交后，必须显示开始回执和
+   `compacting`，完成唯一新 `contextCompaction` Turn 的终态确认后才能继续普通任务。
+   lazy、running/stopping、Goal 或 Side 上不得启动压缩，额外参数必须拒绝；回执发送失败
+   不改变原生压缩进程，也不能阻止终态交付。底层测试继续覆盖候选歧义和终态不确定时的
+   fail-closed 行为，以及启动前 baseline 的独立 5 秒/3 次 read 上限；未发出 compact
+   时读取失败应释放 Binding 锁，保持已有的全局 admission。不能只以 ACK 或首次 idle
+   判定完成。匹配 SDK/CLI `0.154.0` 已通过
+   compact phase 及同一 Thread 的 `COMPACT-AFTER`；后续 SDK 升级须重验完整序列。
 6. `/skills` 必须作为未知命令拒绝且零 Codex mutation；用自然语言询问当前可用 Skill
    必须按普通 Prompt 启动或 steer。在消息开头连续输入两个 `$skill-name`，只启动一个
    原生 Turn；running 时同样只 steer exact Turn 一次。未知、
@@ -1460,7 +1491,20 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     parent 随后修改，确认累计两者成功 patch、排除继承历史，并保留 child 的原生 parent
     与 Turn/item 归属证据；不能把累计结果当作最终净 diff。子任务运行中或无法读取时只
     省略总计，已知文件数字保留，completion 不等待子任务终态。没有 live 条件时明确报告
-    未验证，不能以 synthetic 代替。Project 内文件显示相对路径，Project 外文件
+    未验证，不能以 synthetic 代替。可在服务账号的已登录环境运行
+    `timeout --signal=INT --kill-after=10s 900s .venv/bin/python scripts/probe_child_files.py --live`
+    （macOS 用 `gtimeout`；可加 `--model <native-model>`）。该独立探针不包含在常规 SDK
+    phases 中：它在唯一临时 Git 目录验证继承历史排除、真实 child→root 消息、父子 patch
+    累计 `+4/-1`，再对旧 child 追问，要求总计未知且不导入旧 child 历史。它消耗模型用量，
+    只对本探针创建的 exact root Thread 请求一次归档，由 App Server 负责子任务树的
+    shutdown/归档，不随后重复归档 child；临时文件移除，归档历史保留。根 Thread 创建
+    响应丢失或归档失败时可能留下未归档测试历史，不声称全部清理成功。探针不发送飞书消息，
+    原生 Codex 可能自动把临时 Git Project 的 trust 写入用户配置。探针在 finally 中仅
+    清理本次新增的 exact fixture trust 条目，保留原有条目及其他配置；无法确认清理则失败。
+    JSON 只记录身份、事件类别、计数和验证结果；任一步
+    证据不足即失败，原生调用失去响应时仍需外层进程 timeout 兜底。
+    强制终止进程可能阻止 finally 执行，不能据此声称配置已恢复。
+    Project 内文件显示相对路径，Project 外文件
     显示脱敏逻辑位置；所有条目隐藏大小、按钮统一为“发送”，按 8 个一页完整翻页，可见正文
     不出现绝对路径、预览、diff 正文或发送全部；v5 callback payload 则必须逐项携带明文
     absolute path，并对已知统计携带成对 `a/d`，翻页后完整保留整轮统计与

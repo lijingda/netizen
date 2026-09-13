@@ -12,6 +12,7 @@ from openai_codex import (
     ImageInput,
     InternalRpcError,
     InvalidRequestError,
+    MethodNotFoundError,
     ServerBusyError,
     SkillInput,
     TextInput,
@@ -840,6 +841,7 @@ class FakeTurnPlanObserver:
         self.calls: list[tuple[str, str, int]] = []
         self.error: BaseException | None = None
         self.next_cursor_override: int | None = None
+        self.retained_count_override: int | None = None
 
     def append(
         self,
@@ -898,6 +900,11 @@ class FakeTurnPlanObserver:
             steps=latest_steps,
             events=tuple(activity_events),
             turn_completed=turn_completed,
+            retained_count=(
+                len(events)
+                if self.retained_count_override is None
+                else self.retained_count_override
+            ),
         )
 
 
@@ -1043,7 +1050,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             self.codex.fork_calls,
-            [(binding.native_thread_id, {"ephemeral": True})],
+            [(binding.native_thread_id, {"ephemeral": True, "include_turns": False})],
         )
         self.assertEqual(self.side_control.inject_calls, [snapshot.thread_id])
         self.assertEqual(snapshot.parent_binding_id, binding.id)
@@ -1885,6 +1892,71 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(outcome.activity.plan_may_be_stale)
         self.assertEqual(outcome.activity.steps[0].status, TurnPlanStepState.COMPLETED)
 
+    async def test_side_completion_seen_before_rejected_steer_still_delivers_once(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.materialized_binding(
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True)
+        )
+        _, record, _ = await self.open_side_for_binding(binding)
+        started = await self.runtime.submit_side(
+            side_id=record.id, input="first", owner_id="ou_owner", origin=object()
+        )
+        started.release_receipt_attempt()
+        handle = self.codex.handles[-1]
+        await asyncio.sleep(0)
+        self.assertEqual(handle.run_calls, 0)
+
+        # Completion arrives between consumer polls; the user's next input
+        # observes it first, then native steer rejects the completed Turn.
+        handle.complete(response="first result")
+        observer.complete(thread_id=started.thread_id, turn_id=started.turn_id)
+        handle.steer_error = InvalidRequestError(-32600, "already completed")
+        with self.assertRaises(SteerRace):
+            await self.runtime.submit_side(
+                side_id=record.id, input="next", owner_id="ou_owner", origin=object()
+            )
+        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertEqual(handle.run_calls, 1)
+        self.assertEqual(len(self.outcomes), 1)
+        self.assertEqual(self.outcomes[0].result.final_response, "first result")
+
+        # The remembered notification belongs only to that physical Turn.
+        following = await self.runtime.submit_side(
+            side_id=record.id, input="next", owner_id="ou_owner", origin=object()
+        )
+        following_handle = self.codex.handles[-1]
+        await asyncio.sleep(0)
+        self.assertEqual(following_handle.run_calls, 0)
+        await self.finish_side_turn(following)
+        self.assertEqual(following_handle.run_calls, 1)
+        self.assertEqual(len(self.outcomes), 2)
+
+    async def test_side_observed_completion_only_triggers_the_unique_consumer(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.materialized_binding(
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True)
+        )
+        _, record, _ = await self.open_side_for_binding(binding)
+        started = await self.runtime.submit_side(
+            side_id=record.id, input="work", owner_id="ou_owner", origin=object()
+        )
+        started.release_receipt_attempt()
+        handle = self.codex.handles[-1]
+        observer.complete(thread_id=started.thread_id, turn_id=started.turn_id)
+        self.runtime.side_turn_activity(record.id, refresh_plan=True)
+        await asyncio.sleep(0)
+        self.assertEqual(handle.run_calls, 1)
+        self.assertEqual(self.outcomes, [])
+        self.assertIsNotNone(self.runtime._sides[record.id].active)
+        self.assertFalse(self.runtime._sides[record.id].active.terminal_observed)
+
+        handle.complete(response="authoritative result")
+        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertEqual(handle.run_calls, 1)
+        self.assertEqual(self.outcomes[0].result.final_response, "authoritative result")
+
     async def test_side_patch_children_use_completed_items_without_progress(self) -> None:
         _binding, record, _snapshot = await self.open_side()
         started = await self.runtime.submit_side(
@@ -1995,6 +2067,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 if mode == "failure":
                     observer.error = RuntimeError("observer unavailable")
                 else:
+                    observer.retained_count_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
                     observer.next_cursor_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
                 self.runtime._turn_plan_observer = observer
                 feedback = BindingTaskFeedback(progress_card_enabled=True)
@@ -2028,16 +2101,43 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                         )
                         await asyncio.sleep(0)
                 else:
-                    started = await self.runtime.submit_side(
-                        side_id=record.id,
-                        input="work",
-                        owner_id="ou_owner",
-                        origin=object(),
-                    )
-                    await asyncio.sleep(0)
+                    with self.assertLogs("netizen.codex_runtime", level="WARNING") as logs:
+                        started = await self.runtime.submit_side(
+                            side_id=record.id,
+                            input="work",
+                            owner_id="ou_owner",
+                            origin=object(),
+                        )
+                        await asyncio.sleep(0)
+                    self.assertTrue(any("fixed high water" in line for line in logs.output))
+                    self.assertFalse(any("observation unavailable" in line for line in logs.output))
                 handle = self.codex.handles[-1]
                 self.assertEqual(handle.run_calls, 1)
                 await self.finish_side_turn(started)
+
+    async def test_side_absolute_cursor_is_not_the_retained_notification_count(self) -> None:
+        observer = FakeTurnPlanObserver()
+        observer.next_cursor_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER + 10
+        observer.retained_count_override = 1
+        self.runtime._turn_plan_observer = observer
+        binding = self.materialized_binding(
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True)
+        )
+        _binding, record, _snapshot = await self.open_side_for_binding(binding)
+        started = await self.runtime.submit_side(
+            side_id=record.id,
+            input="work",
+            owner_id="ou_owner",
+            origin=object(),
+        )
+        handle = self.codex.handles[-1]
+        await asyncio.sleep(0)
+        self.assertTrue(observer.calls)
+        self.assertEqual(handle.run_calls, 0)
+        # Let the normal observer-failure fallback finish this test's stream.
+        observer.error = RuntimeError("observation ended")
+        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+            await self.finish_side_turn(started)
 
     async def test_multiple_sides_on_one_parent_run_without_cross_side_lock(self) -> None:
         binding = self.materialized_binding()
@@ -3651,7 +3751,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         restored = await self.runtime.unarchive_binding(binding)
 
         self.assertEqual(self.codex.unarchive_calls, ["native-1"])
-        self.assertEqual(self.codex.resume_calls, [("native-1", {})])
+        self.assertEqual(self.codex.resume_calls, [("native-1", {"include_turns": False})])
         self.assertTrue(restored.active)
         self.assertEqual(self.store.active_binding(self.scope.key).id, binding.id)
 
@@ -3671,7 +3771,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(restored.active)
         self.assertEqual(self.store.active_binding(self.scope.key).id, other.id)
         self.assertEqual(self.codex.unarchive_calls, ["native-1"])
-        self.assertEqual(self.codex.resume_calls, [("native-1", {})])
+        self.assertEqual(self.codex.resume_calls, [("native-1", {"include_turns": False})])
 
     async def test_exact_stop_targets_running_inactive_binding(self) -> None:
         binding = self.binding()
@@ -3721,7 +3821,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self.runtime.unarchive_binding(binding)
 
         self.assertEqual(self.codex.unarchive_calls, ["native-1"])
-        self.assertEqual(self.codex.resume_calls, [("native-1", {})])
+        self.assertEqual(self.codex.resume_calls, [("native-1", {"include_turns": False})])
         self.assertFalse(self.store.get(binding.id).active)
         self.assertIsNone(self.store.active_binding(self.scope.key))
         self.assertEqual(
@@ -5555,7 +5655,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         followup = await self.submit(persisted, "ordinary followup")
 
         self.assertEqual(self.codex.model_calls, 2)
-        self.assertEqual(self.codex.resume_calls, [("native-1", {})])
+        self.assertEqual(self.codex.resume_calls, [("native-1", {"include_turns": False})])
         self.assertEqual(
             self.codex.turn_calls[-1],
             (
@@ -5590,7 +5690,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(configured.turn_settings, settings)
         self.assertEqual(configured.settings_revision, 2)
         second = await self.submit(configured, "configured next prompt")
-        self.assertEqual(self.codex.resume_calls, [("native-1", {})])
+        self.assertEqual(self.codex.resume_calls, [("native-1", {"include_turns": False})])
         self.assertEqual(
             self.codex.turn_calls[-1],
             (
@@ -5799,7 +5899,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(compact.thread_id, "native-1")
-        self.assertEqual(self.codex.resume_calls, [("native-1", {})])
+        self.assertEqual(self.codex.resume_calls, [("native-1", {"include_turns": False})])
         self.assertEqual(self.codex.compact_calls, ["native-1"])
         self.assertTrue(self.runtime.is_compacting(binding.id))
         with self.assertRaisesRegex(ThreadCompacting, "正在压缩"):
@@ -5844,6 +5944,94 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(self.codex.compact_calls, [])
         await self.finish(self.codex.handles[0], first)
+
+    async def test_compact_baseline_exhaustion_preserves_lifecycle_access(self) -> None:
+        for mode in ("internal", "not-loaded"):
+            with self.subTest(mode=mode):
+                binding = self.binding()
+                first = await self.submit(binding, "before compact")
+                await self.finish(self.codex.handles[-1], first)
+                reads_before = len(self.codex.read_calls)
+                if mode == "internal":
+                    self.codex.read_errors.extend([
+                        InternalRpcError(-32603, "metadata unavailable")
+                        for _ in range(4)
+                    ])
+                else:
+                    self.codex.read_statuses.extend(["notLoaded"] * 4)
+                unexpected = None
+                try:
+                    with self.assertRaisesRegex(ThreadCompactStartFailed, "未开始压缩"):
+                        unexpected = await asyncio.wait_for(self.runtime.compact(
+                            binding=self.store.get(binding.id),
+                            owner_id="ou_user", origin=object(),
+                        ), timeout=0.2)
+                finally:
+                    # If this regresses, drain the unexpected mutation before
+                    # the next case rather than hanging the test itself.
+                    if unexpected is not None:
+                        unexpected.release_receipt_attempt()
+                        self.codex.finish_compaction()
+                        await self.runtime.wait_idle(timeout=0.2)
+                self.assertEqual(len(self.codex.read_calls) - reads_before, 3)
+                self.assertEqual(self.codex.compact_calls, [])
+                self.assertFalse(self.runtime.is_compacting(binding.id))
+                self.assertFalse(self.runtime._lock(binding.id).locked())
+                await self.runtime.capture_submission_admission(binding.id)
+                self.codex.read_errors.clear()
+                self.codex.read_statuses.clear()
+                await self.runtime.delete_exact(
+                    binding.id, expected_native_thread_id=first.thread_id
+                )
+                self.assertEqual(self.delete_control.calls[-1], first.thread_id)
+
+    async def test_hung_compact_baseline_times_out_and_unblocks_waiting_delete(self) -> None:
+        binding = self.binding()
+        first = await self.submit(binding, "before compact")
+        await self.finish(self.codex.handles[-1], first)
+        reads_before = len(self.codex.read_calls)
+        self.codex.read_gate = asyncio.Event()
+        with patch("netizen.codex_runtime._COMPACTION_BASELINE_TIMEOUT_SECONDS", 0.02):
+            compact = asyncio.create_task(self.runtime.compact(
+                binding=self.store.get(binding.id), owner_id="ou_user", origin=object()
+            ))
+            deletion = None
+            try:
+                async with asyncio.timeout(0.5):
+                    while len(self.codex.read_calls) == reads_before:
+                        await asyncio.sleep(0)
+                    deletion = asyncio.create_task(self.runtime.delete_exact(
+                        binding.id, expected_native_thread_id=first.thread_id
+                    ))
+                    with self.assertRaisesRegex(ThreadCompactStartFailed, "未开始压缩"):
+                        await compact
+                    await deletion
+                self.assertEqual(self.codex.compact_calls, [])
+                self.assertEqual(self.delete_control.calls, [first.thread_id])
+                self.assertFalse(self.runtime._lock(binding.id).locked())
+                self.assertTrue(self.runtime._accepting)
+            finally:
+                tasks = [task for task in (compact, deletion) if task is not None]
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                self.codex.read_gate = None
+
+    async def test_compact_baseline_can_recover_within_its_read_budget(self) -> None:
+        binding = self.binding()
+        first = await self.submit(binding, "before compact")
+        await self.finish(self.codex.handles[-1], first)
+        reads_before = len(self.codex.read_calls)
+        self.codex.read_errors.append(InternalRpcError(-32603, "metadata unavailable"))
+        self.codex.read_statuses.append("notLoaded")
+        compact = await self.runtime.compact(
+            binding=self.store.get(binding.id), owner_id="ou_user", origin=object()
+        )
+        self.assertEqual(len(self.codex.read_calls) - reads_before, 3)
+        self.assertEqual(self.codex.compact_calls, [first.thread_id])
+        compact.release_receipt_attempt()
+        self.codex.finish_compaction()
+        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
 
     async def test_compact_terminal_failure_releases_binding(self) -> None:
         binding = self.binding()
@@ -6137,7 +6325,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(TurnStartFailed, "启动或恢复结果未确认"):
             await self.submit(binding, "next")
 
-        self.assertEqual(self.codex.resume_calls, [("native-existing", {})])
+        self.assertEqual(self.codex.resume_calls, [("native-existing", {"include_turns": False})])
         self.assertEqual(self.codex.handles, [])
         with self.assertRaisesRegex(RuntimeError, "服务正在停止"):
             await self.submit(binding, "must not retry")
@@ -6151,7 +6339,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         persisted = self.store.get(binding.id)
         second = await self.submit(persisted, "second")
 
-        self.assertEqual(self.codex.resume_calls, [("native-1", {})])
+        self.assertEqual(self.codex.resume_calls, [("native-1", {"include_turns": False})])
         self.assertEqual(self.codex.turn_inputs[-1], ("native-1", "second"))
         await self.finish(self.codex.handles[1], second)
         self.assertEqual(self.outcomes[-1].turn_id, second.turn_id)
@@ -6167,7 +6355,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         second = await self.submit(stale_binding, "second")
 
         self.assertEqual(self.codex.start_kwargs, [{"cwd": str(self.cwd)}])
-        self.assertEqual(self.codex.resume_calls, [("native-1", {})])
+        self.assertEqual(self.codex.resume_calls, [("native-1", {"include_turns": False})])
         self.assertEqual(second.thread_id, "native-1")
         await self.finish(self.codex.handles[1], second)
 
@@ -7194,10 +7382,175 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             submission.release_receipt_attempt()
             await self.runtime.wait_idle()
 
-        self.assertGreaterEqual(len(self.codex.read_calls), 2)
+        self.assertEqual(
+            self.codex.read_calls,
+            [(submission.thread_id, False), (submission.thread_id, True)],
+        )
+        self.assertEqual(self.codex.resume_calls, [])
         self.assertIn("native Thread read unavailable", logs.output[0])
         self.assertIsNone(self.outcomes[0].error)
         self.assertEqual(self.outcomes[0].final_response, "done:turn-1")
+
+    async def test_internal_read_errors_exhaust_three_reads_without_resume_or_background_io(
+        self,
+    ) -> None:
+        self.codex.read_errors.extend(
+            InternalRpcError(-32603, f"metadata unavailable {index}")
+            for index in range(4)
+        )
+        binding = self.binding()
+        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+            submission = await self.submit(binding)
+            submission.release_receipt_attempt()
+            await self.runtime.wait_idle()
+
+        self.assertEqual(
+            self.codex.read_calls,
+            [(submission.thread_id, False)] + [(submission.thread_id, True)] * 3,
+        )
+        self.assertEqual(self.codex.resume_calls, [])
+        self.assertEqual(
+            self.runtime.active_turn(binding.id).state,
+            ActiveState.OBSERVATION_UNAVAILABLE,
+        )
+        self.assertEqual(len(self.outcomes), 1)
+        self.assertIsInstance(self.outcomes[0], TurnObservationUnavailableOutcome)
+        with self.assertRaises(TurnObservationUnavailable):
+            await self.runtime.capture_submission_admission(binding.id)
+        reads = list(self.codex.read_calls)
+        await asyncio.sleep(0.01)
+        self.assertEqual(self.codex.read_calls, reads)
+        self.assertEqual(self.codex.resume_calls, [])
+
+    async def test_internal_read_then_not_loaded_uses_one_resume_within_three_recovery_io(
+        self,
+    ) -> None:
+        self.codex.complete_immediately = True
+        self.codex.read_errors.append(InternalRpcError(-32603, "metadata unavailable"))
+        self.codex.read_statuses.append("notLoaded")
+        binding = self.binding()
+        operations = []
+        native_read = FakeThread.read
+        native_resume = self.codex.thread_resume
+
+        async def read(thread, *, include_turns=False):
+            operations.append("read_full" if include_turns else "read_metadata")
+            return await native_read(thread, include_turns=include_turns)
+
+        async def resume(thread_id, **kwargs):
+            operations.append("resume")
+            return await native_resume(thread_id, **kwargs)
+
+        with (
+            patch.object(FakeThread, "read", read),
+            patch.object(self.codex, "thread_resume", resume),
+            self.assertLogs("netizen.codex_runtime", level="WARNING"),
+        ):
+            submission = await self.submit(binding)
+            submission.release_receipt_attempt()
+            await self.runtime.wait_idle()
+
+        self.assertEqual(
+            operations, ["read_metadata", "read_full", "resume", "read_full"]
+        )
+        self.assertEqual(
+            self.codex.resume_calls,
+            [(submission.thread_id, {"include_turns": False})],
+        )
+        self.assertIsNone(self.runtime.active_turn(binding.id))
+        self.assertEqual(len(self.outcomes), 1)
+        self.assertIsNone(self.outcomes[0].error)
+        self.assertEqual(self.outcomes[0].turn_id, submission.turn_id)
+        self.assertEqual(self.outcomes[0].final_response, "done:turn-1")
+
+    async def test_paginated_full_read_retries_known_materialization_errors_without_resume(
+        self,
+    ) -> None:
+        self.codex.complete_immediately = True
+        for operation in ("list_turns", "list_items"):
+            with self.subTest(operation=operation):
+                self.codex.read_calls.clear()
+                self.codex.full_read_errors.clear()
+                self.codex.full_read_errors.append(
+                    MethodNotFoundError(-32601, f"{operation} is not supported yet")
+                )
+                binding = self.binding()
+                with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+                    submission = await self.submit(binding)
+                    submission.release_receipt_attempt()
+                    await self.runtime.wait_idle()
+
+                self.assertEqual(
+                    self.codex.read_calls,
+                    [(submission.thread_id, False)] + [(submission.thread_id, True)] * 2,
+                )
+                self.assertEqual(self.codex.resume_calls, [])
+                self.assertIsNone(self.runtime.active_turn(binding.id))
+                self.assertIsInstance(self.outcomes[-1], TurnOutcome)
+                self.assertIsNone(self.outcomes[-1].error)
+                self.assertEqual(self.outcomes[-1].turn_id, submission.turn_id)
+
+    async def test_paginated_full_read_errors_exhaust_bounded_recovery_and_stop_io(
+        self,
+    ) -> None:
+        for operation in ("list_turns", "list_items"):
+            with self.subTest(operation=operation):
+                self.codex.read_calls.clear()
+                self.codex.full_read_errors.clear()
+                self.codex.full_read_errors.extend(
+                    MethodNotFoundError(-32601, f"{operation} is not supported yet")
+                    for _ in range(4)
+                )
+                binding = self.binding()
+                with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+                    submission = await self.submit(binding)
+                    submission.release_receipt_attempt()
+                    await self.runtime.wait_idle()
+
+                self.assertEqual(
+                    self.codex.read_calls,
+                    [(submission.thread_id, False)] + [(submission.thread_id, True)] * 4,
+                )
+                self.assertEqual(self.codex.resume_calls, [])
+                self.assertEqual(
+                    self.runtime.active_turn(binding.id).state,
+                    ActiveState.OBSERVATION_UNAVAILABLE,
+                )
+                self.assertIsInstance(self.outcomes[-1], TurnObservationUnavailableOutcome)
+                reads = list(self.codex.read_calls)
+                await asyncio.sleep(0.01)
+                self.assertEqual(self.codex.read_calls, reads)
+                self.assertEqual(self.codex.resume_calls, [])
+
+    async def test_unclassified_method_missing_read_errors_fail_without_retry_or_resume(
+        self,
+    ) -> None:
+        cases = (
+            (False, -32601, "list_turns is not supported yet"),
+            (True, -32601, "thread/items/list is not supported yet"),
+            (True, -32602, "list_items is not supported yet"),
+        )
+        for include_turns, code, message in cases:
+            with self.subTest(include_turns=include_turns, code=code, message=message):
+                self.codex.read_calls.clear()
+                errors = self.codex.full_read_errors if include_turns else self.codex.read_errors
+                errors.append(MethodNotFoundError(code, message))
+                binding = self.binding()
+                with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+                    submission = await self.submit(binding)
+                    submission.release_receipt_attempt()
+                    await self.runtime.wait_idle()
+
+                expected = [(submission.thread_id, False)]
+                if include_turns:
+                    expected.append((submission.thread_id, True))
+                self.assertEqual(self.codex.read_calls, expected)
+                self.assertEqual(self.codex.resume_calls, [])
+                self.assertEqual(
+                    self.runtime.active_turn(binding.id).state,
+                    ActiveState.OBSERVATION_UNAVAILABLE,
+                )
+                self.assertIsInstance(self.outcomes[-1], TurnObservationUnavailableOutcome)
 
     async def test_single_read_failure_recovers_without_public_state_change(
         self,

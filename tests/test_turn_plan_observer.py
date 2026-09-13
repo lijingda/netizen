@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -57,15 +58,30 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
         self.codex = AsyncCodex()
         self.codex._initialized = True
         self.router = self.codex._client._sync._router
-        self.router.register_turn("turn-one")
+        with self.router.pending_turn("thread-one") as cursors:
+            self.subscription = self.router.prepare_turn(
+                "turn-one", "thread-one", cursors, for_handle=True
+            )
+        self.assertIsNotNone(self.subscription)
+        self.state = self.router._turn_states["turn-one"]
         self.observer = PinnedTurnActivityObserver(self.codex)
+
+    def tearDown(self) -> None:
+        self.subscription.close()
+
+    def _append_raw(self, item: object) -> None:
+        with self.router._lock:
+            self.state.events[self.state.next_event] = item
+            self.state.next_event += 1
 
     def test_snapshot_is_non_consuming_and_maps_exact_native_plan(self) -> None:
         first = _plan()
         self.router.route_notification(first)
-        turn_queue = self.router._turn_notifications["turn-one"]
-        with turn_queue.mutex:
-            before = tuple(turn_queue.queue)
+        self.assertNotIn("turn-one", self.router._turn_notifications)
+        with self.router._lock:
+            before = tuple(self.state.events.items())
+            subscribers_before = dict(self.state.subscribers)
+            cursors_before = (self.state.first_event, self.state.next_event)
 
         observation = self.observer.observe(
             thread_id="thread-one",
@@ -73,15 +89,19 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
             after_cursor=0,
         )
 
-        with turn_queue.mutex:
-            after = tuple(turn_queue.queue)
-        self.assertEqual(len(after), len(before))
+        with self.router._lock:
+            after = tuple(self.state.events.items())
+            self.assertEqual(self.state.subscribers, subscribers_before)
+            self.assertEqual(
+                (self.state.first_event, self.state.next_event), cursors_before
+            )
         self.assertEqual(
-            tuple(id(item) for item in after),
-            tuple(id(item) for item in before),
+            tuple((cursor, id(item)) for cursor, item in after),
+            tuple((cursor, id(item)) for cursor, item in before),
         )
         self.assertEqual(observation.next_cursor, 1)
         self.assertEqual(observation.plan_cursor, 1)
+        self.assertEqual(observation.retained_count, 1)
         self.assertEqual(
             tuple((item.step, item.status) for item in observation.steps),
             (
@@ -191,9 +211,8 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
         self.assertNotIn("private.py", repr(observation.events))
 
     def test_mismatched_thread_and_turn_payloads_cannot_update_exact_turn(self) -> None:
-        turn_queue = self.router._turn_notifications["turn-one"]
-        turn_queue.put(_plan(thread_id="thread-other"))
-        turn_queue.put(_plan(turn_id="turn-other"))
+        self._append_raw(_plan(thread_id="thread-other"))
+        self._append_raw(_plan(turn_id="turn-other"))
 
         observation = self.observer.observe(
             thread_id="thread-one",
@@ -205,9 +224,8 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
         self.assertFalse(observation.plan_updated)
         self.assertEqual(observation.steps, ())
 
-    def test_invalid_plan_payload_and_consumed_cursor_fail_closed(self) -> None:
-        turn_queue = self.router._turn_notifications["turn-one"]
-        turn_queue.put(
+    def test_invalid_plan_payload_fails_closed(self) -> None:
+        self._append_raw(
             Notification(
                 method="turn/plan/updated",
                 payload=UnknownNotification(
@@ -225,22 +243,144 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
                 after_cursor=0,
             )
 
-        turn_queue.get_nowait()
+    def test_pruning_observed_events_preserves_absolute_cursor(self) -> None:
+        first = _plan()
+        self.router.route_notification(first)
+        observed = self.observer.observe(
+            thread_id="thread-one", turn_id="turn-one", after_cursor=0
+        )
+        self.assertIs(self.subscription.next(), first)
+        self.assertEqual(self.state.first_event, 1)
+        self.router.route_notification(_plan(steps=(("ship", TurnPlanStepStatus.completed),)))
+
+        next_observed = self.observer.observe(
+            thread_id="thread-one",
+            turn_id="turn-one",
+            after_cursor=observed.next_cursor,
+        )
+
+        self.assertEqual(next_observed.next_cursor, 2)
+        self.assertEqual(next_observed.plan_cursor, 2)
+        self.assertEqual(next_observed.retained_count, 1)
+        self.assertEqual(next_observed.steps[0].step, "ship")
+        self.subscription.next()
+        empty = self.observer.observe(
+            thread_id="thread-one", turn_id="turn-one", after_cursor=2
+        )
+        self.assertEqual(empty.next_cursor, 2)
+        self.assertEqual(empty.retained_count, 0)
+        self.assertFalse(empty.plan_updated)
+
+    def test_pruning_unobserved_events_and_cursor_rewind_fail_closed(self) -> None:
+        self.router.route_notification(_plan())
+        self.subscription.next()
         with self.assertRaisesRegex(
             TurnActivityObservationUnavailable,
-            "consumed unexpectedly",
+            "pruned before the observation cursor",
         ):
             self.observer.observe(
-                thread_id="thread-one",
-                turn_id="turn-one",
-                after_cursor=1,
+                thread_id="thread-one", turn_id="turn-one", after_cursor=0
+            )
+        with self.assertRaisesRegex(
+            TurnActivityObservationUnavailable, "cursor moved backwards"
+        ):
+            self.observer.observe(
+                thread_id="thread-one", turn_id="turn-one", after_cursor=2
             )
 
-    def test_version_fingerprint_and_queue_shape_changes_fail_closed(self) -> None:
-        with patch.object(openai_codex, "__version__", "0.147.1"):
+    def test_retained_count_includes_ignored_notifications_before_cursor(self) -> None:
+        ignored = Notification(
+            method="item/agentMessage/delta",
+            payload=UnknownNotification({"threadId": "thread-one", "turnId": "turn-one"}),
+        )
+        for _ in range(4096):
+            self.router.route_notification(ignored)
+        observation = self.observer.observe(
+            thread_id="thread-one", turn_id="turn-one", after_cursor=4096
+        )
+        self.assertEqual(observation.retained_count, 4096)
+        self.assertEqual(observation.next_cursor, 4096)
+        self.assertEqual(observation.events, ())
+        self.assertFalse(observation.plan_updated)
+
+    def test_event_cursor_gap_fails_closed_without_consuming_other_events(self) -> None:
+        self.router.route_notification(_plan())
+        self.router.route_notification(_plan())
+        before = dict(self.state.events)
+        for broken_events in ({1: before[1]}, {0: before[0], 2: before[1]}):
+            with self.subTest(events=broken_events):
+                with patch.object(self.state, "events", broken_events):
+                    with self.assertRaisesRegex(
+                        TurnActivityObservationUnavailable, "cursor gap"
+                    ):
+                        self.observer.observe(
+                            thread_id="thread-one", turn_id="turn-one", after_cursor=1
+                        )
+        self.assertEqual(self.state.events, before)
+        self.assertIs(self.subscription.next(), before[0])
+        self.assertIs(self.subscription.next(), before[1])
+
+    def test_completion_keeps_events_until_handle_closes(self) -> None:
+        completed = Notification(
+            method="turn/completed",
+            payload=TurnCompletedNotification(
+                threadId="thread-one",
+                turn=Turn(id="turn-one", items=[], status=TurnStatus.completed),
+            ),
+        )
+        self.router.route_notification(completed)
+        observation = self.observer.observe(
+            thread_id="thread-one", turn_id="turn-one", after_cursor=0
+        )
+        self.assertTrue(observation.turn_completed)
+        self.assertIs(self.subscription.next(), completed)
+        self.subscription.close()
+        self.assertNotIn("turn-one", self.router._turn_states)
+        with self.assertRaisesRegex(TurnActivityObservationUnavailable, "store is unavailable"):
+            self.observer.observe(
+                thread_id="thread-one", turn_id="turn-one", after_cursor=1
+            )
+
+    def test_transport_failure_is_observation_only_and_remains_for_consumer(self) -> None:
+        failure = RuntimeError("transport stopped")
+        self.router.fail_all(failure)
+        with self.assertRaisesRegex(TurnActivityObservationUnavailable, "transport failure"):
+            self.observer.observe(
+                thread_id="thread-one", turn_id="turn-one", after_cursor=0
+            )
+        with self.assertRaises(RuntimeError) as caught:
+            self.subscription.next()
+        self.assertIs(caught.exception, failure)
+
+    def test_concurrent_turns_have_independent_state_and_cursors(self) -> None:
+        with self.router.pending_turn("thread-two") as cursors:
+            second_subscription = self.router.prepare_turn(
+                "turn-two", "thread-two", cursors, for_handle=True
+            )
+        try:
+            self.router.route_notification(_plan())
+            self.router.route_notification(
+                _plan(thread_id="thread-two", turn_id="turn-two", steps=())
+            )
+            first = self.observer.observe(
+                thread_id="thread-one", turn_id="turn-one", after_cursor=0
+            )
+            second = self.observer.observe(
+                thread_id="thread-two", turn_id="turn-two", after_cursor=0
+            )
+            self.assertEqual(first.next_cursor, 1)
+            self.assertEqual(second.next_cursor, 1)
+            self.assertEqual(len(first.steps), 2)
+            self.assertEqual(second.steps, ())
+            self.assertTrue(second.plan_updated)
+        finally:
+            second_subscription.close()
+
+    def test_version_fingerprint_and_router_shape_changes_fail_closed(self) -> None:
+        with patch.object(openai_codex, "__version__", "0.154.1"):
             with self.assertRaisesRegex(
                 TurnActivityObservationUnavailable,
-                "supports only openai-codex==0.147.0",
+                "supports only openai-codex==0.154.0",
             ):
                 PinnedTurnActivityObserver(self.codex)
         with patch.object(
@@ -254,16 +394,31 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
             ):
                 PinnedTurnActivityObserver(self.codex)
 
-        self.router._turn_notifications["turn-one"] = object()  # type: ignore[assignment]
-        with self.assertRaisesRegex(
-            TurnActivityObservationUnavailable,
-            "queue is unavailable",
+        with patch.object(self.router, "_lock", threading.Lock()):
+            with self.assertRaisesRegex(TurnActivityObservationUnavailable, "router lock changed"):
+                PinnedTurnActivityObserver(self.codex)
+        with patch.dict(self.router._turn_states, {"turn-one": object()}):
+            with self.assertRaisesRegex(TurnActivityObservationUnavailable, "store is unavailable"):
+                self.observer.observe(
+                    thread_id="thread-one", turn_id="turn-one", after_cursor=0
+                )
+
+    def test_state_identity_and_shape_changes_fail_closed(self) -> None:
+        for field, value, error in (
+            ("id", "turn-other", "identity changed"),
+            ("thread_id", "thread-other", "identity changed"),
+            ("events", [], "shape changed"),
+            ("first_event", True, "shape changed"),
+            ("next_event", -1, "shape changed"),
+            ("completed", None, "shape changed"),
+            ("subscribers", {}, "shape changed"),
         ):
-            self.observer.observe(
-                thread_id="thread-one",
-                turn_id="turn-one",
-                after_cursor=0,
-            )
+            with self.subTest(field=field):
+                with patch.object(self.state, field, value):
+                    with self.assertRaisesRegex(TurnActivityObservationUnavailable, error):
+                        self.observer.observe(
+                            thread_id="thread-one", turn_id="turn-one", after_cursor=0
+                        )
 
 
 if __name__ == "__main__":

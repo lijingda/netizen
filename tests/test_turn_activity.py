@@ -277,6 +277,66 @@ class TurnActivityProjectionTest(unittest.TestCase):
                 self.assertNotIn("raw command", repr(event))
                 self.assertNotIn("/Users/user", repr(event))
 
+    def test_new_collab_tools_preserve_safe_operation_status_and_counts(self) -> None:
+        for tool in ("sendMessage", "followupTask", "interruptAgent", "listAgents"):
+            for native_status, expected_status in (
+                ("inProgress", TurnActivityStatus.IN_PROGRESS),
+                ("completed", TurnActivityStatus.COMPLETED),
+                ("failed", TurnActivityStatus.FAILED),
+                ("interrupted", TurnActivityStatus.INTERRUPTED),
+            ):
+                with self.subTest(tool=tool, status=native_status):
+                    event = _project_item(
+                        {
+                            "type": "collabAgentToolCall",
+                            "id": "operation",
+                            "agentsStates": {},
+                            "prompt": "private message or task",
+                            "receiverThreadIds": (
+                                [] if tool == "listAgents" else ["private-child"]
+                            ),
+                            "senderThreadId": "private-parent",
+                            "status": native_status,
+                            "tool": tool,
+                        },
+                        completed=native_status != "inProgress",
+                    )
+                    assert event is not None
+                    self.assertIs(event.kind, TurnActivityKind.SUBAGENT)
+                    self.assertIs(event.status, expected_status)
+                    self.assertEqual(event.count, 1)
+                    self.assertIsNone(event.text)
+                    self.assertNotIn("private", repr(event))
+
+    def test_child_completion_and_interruption_are_terminal_in_both_envelopes(
+        self,
+    ) -> None:
+        for kind, status in (
+            ("completed", TurnActivityStatus.COMPLETED),
+            ("interrupted", TurnActivityStatus.INTERRUPTED),
+        ):
+            for completed in (False, True):
+                with self.subTest(kind=kind, completed=completed):
+                    event = _project_item(
+                        {
+                            "type": "subAgentActivity",
+                            "id": "activity",
+                            "agentThreadId": "private-child",
+                            "agentPath": "/root/private-child",
+                            "kind": kind,
+                        },
+                        completed=completed,
+                        started_at_ms=100,
+                        completed_at_ms=101,
+                    )
+                    assert event is not None
+                    self.assertIs(event.kind, TurnActivityKind.SUBAGENT)
+                    self.assertIs(event.status, status)
+                    self.assertEqual(event.count, 1)
+                    self.assertEqual(event.event_timestamp_ms, 101 if completed else 100)
+                    self.assertIsNone(event.text)
+                    self.assertNotIn("private", repr(event))
+
     def test_tool_names_are_direct_and_not_subject_to_commentary_limit(self) -> None:
         long_name = "tool_" + "x" * (ACTIVITY_TEXT_LIMIT + 40)
         mcp = _project_item(

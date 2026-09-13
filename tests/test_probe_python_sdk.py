@@ -10,10 +10,36 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
 
+from openai_codex import MethodNotFoundError
+
 from scripts import probe_python_sdk
 
 
 class ProcessProbeTest(unittest.IsolatedAsyncioTestCase):
+    def test_paginated_history_error_retry_is_limited_to_exact_full_read_templates(self) -> None:
+        for operation in ("list_turns", "list_items"):
+            for include_turns in (False, True):
+                with self.subTest(operation=operation, include_turns=include_turns):
+                    error = MethodNotFoundError(-32601, f"{operation} is not supported yet")
+                    self.assertEqual(
+                        probe_python_sdk._is_transient_read_error(
+                            error, thread_id="thread-1", include_turns=include_turns,
+                        ),
+                        include_turns,
+                    )
+        for error in (
+            MethodNotFoundError(-32601, "thread/items/list is not supported yet"),
+            MethodNotFoundError(-32601, "list_turns is not supported yet; unrelated error"),
+            MethodNotFoundError(-32602, "list_items is not supported yet"),
+            RuntimeError("list_turns is not supported yet"),
+        ):
+            with self.subTest(error=error):
+                self.assertFalse(
+                    probe_python_sdk._is_transient_read_error(
+                        error, thread_id="thread-1", include_turns=True,
+                    )
+                )
+
     async def test_usage_probe_retries_transient_initial_active_read(self) -> None:
         class Handle:
             id = "turn-1"
