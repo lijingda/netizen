@@ -62,7 +62,7 @@ COMMAND_SPECS = (
         ControlName.SIDE,
         CommandOwner.HYBRID,
         "/side [首轮问题]",
-        "从当前会话另开临时 Side 话题；话题内用 /side close 结束",
+        "从当前会话另开临时 Side 话题；话题内用 `/side close` 结束",
         requires=NativeCapability.SIDE,
         unavailable_reason=(
             "当前 SDK/App Server 的 Side Thread 兼容契约未通过"
@@ -112,7 +112,7 @@ COMMAND_SPECS = (
         ControlName.RESUME,
         CommandOwner.HYBRID,
         "/resume <会话短 ID>",
-        "切换到已有会话；短 ID 可在 /sessions 查看",
+        "切换到已有会话；短 ID 可在 `/sessions` 查看",
         group=CommandGroup.SESSION,
     ),
     CommandSpec(
@@ -451,22 +451,29 @@ def command_help(
         and (spec.requires is None or spec.requires in capabilities)
     )
     lines = [
-        "快速开始：",
-        "1. 还没有项目：发送 /settings 添加或启用项目（任务使用的工作目录）。",
-        "2. 发送 /new，在卡片中选择项目并创建会话。",
-        "3. 创建成功后，直接发送任务，例如：介绍一下这个项目。",
-        "已有会话：发送 /sessions 查看并切换，继续之前的工作。",
+        "### 快速开始",
+        "",
+        "1. **准备项目**：发送 `/settings`，添加或启用项目（任务使用的工作目录）。",
+        "2. **创建会话**：发送 `/new`，在卡片中选择项目并创建会话。",
+        "3. **发送任务**：创建成功后，直接发送任务，例如：介绍一下这个项目。",
+        "",
+        "**已有会话？** 发送 `/sessions` 查看并切换，继续之前的工作。",
     ]
     for group in CommandGroup:
         entries = tuple(spec for spec in available if spec.group is group)
         if entries:
-            lines.extend(("", f"{group.value}："))
-            lines.extend(f"{spec.usage}：{spec.summary}" for spec in entries)
+            lines.extend(("", "---", "", f"### {group.value}", ""))
+            lines.extend(f"- `{spec.usage}` — {spec.summary}" for spec in entries)
     lines.extend(
         (
             "",
-            "群主线和群话题中的每条消息都需要 @机器人；单聊及单聊话题无需 @。",
-            "用 // 开头可把首个 / 作为普通消息发送。",
+            "---",
+            "",
+            "### 使用提示",
+            "",
+            "- **群聊**：群主线和群话题中的每条消息都需要 @机器人；单聊及单聊话题无需 @。",
+            "- **发送斜杠**：用 `//` 开头可把首个 `/` 作为普通消息发送。",
+            "- **发送图片**：普通图片和富文本图片可直接发送，也可随逐条引用一起交给 Codex。",
         )
     )
     return "\n".join(lines)
@@ -474,16 +481,28 @@ def command_help(
 
 def side_command_help(*, requires_mention: bool) -> str:
     lines = [
-        "当前是多轮 Side 话题。可用操作：",
-        "直接发送消息：开始新任务；任务执行中发送的消息会补充到当前任务。",
-        "/status：查看 Side 状态",
-        "/stop：只中断当前 Side 任务，Side 仍可继续",
-        "/side close：结束当前 Side 话题，结束后不能继续",
-        "/help 或 /：显示本帮助",
-        "用 // 开头可把首个 / 作为普通消息发送。",
+        "### Side 话题帮助",
+        "",
+        "当前是多轮 Side 话题。**直接发送消息**即可开始新任务；"
+        "任务执行中发送的消息会补充到当前任务。",
+        "",
+        "---",
+        "",
+        "### 可用操作",
+        "",
+        "- `/status` — 查看 Side 状态",
+        "- `/stop` — 只中断当前 Side 任务，Side 仍可继续",
+        "- `/side close` — 结束当前 Side 话题，结束后不能继续",
+        "- `/help` 或 `/` — 显示本帮助",
+        "",
+        "---",
+        "",
+        "### 使用提示",
+        "",
     ]
     if requires_mention:
-        lines.append("本群 Side 话题中的每条消息都需要 @机器人。")
+        lines.append("- **群聊**：本群 Side 话题中的每条消息都需要 @机器人。")
     else:
-        lines.append("本单聊 Side 话题无需 @机器人。")
+        lines.append("- **单聊**：本单聊 Side 话题无需 @机器人。")
+    lines.append("- **发送斜杠**：用 `//` 开头可把首个 `/` 作为普通消息发送。")
     return "\n".join(lines)

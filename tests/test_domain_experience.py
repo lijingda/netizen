@@ -291,7 +291,7 @@ class ExperienceTest(unittest.TestCase):
         help_text = command_help()
         self.assertIn("/config", help_text)
         self.assertIn("/compact", help_text)
-        self.assertIn("/new：", help_text)
+        self.assertIn("`/new`", help_text)
         self.assertNotIn("/new [", help_text)
         self.assertIn("/rename [名称]", help_text)
         self.assertIn("/sessions [archived]", help_text)
@@ -304,7 +304,7 @@ class ExperienceTest(unittest.TestCase):
         self.assertNotIn("/plan", help_text)
 
     def test_help_starts_with_project_session_and_task_steps(self) -> None:
-        first_section = command_help().split("\n\n", maxsplit=1)[0]
+        first_section = command_help().split("\n---\n", maxsplit=1)[0]
         self.assertLess(first_section.index("/settings"), first_section.index("/new"))
         self.assertLess(first_section.index("/new"), first_section.index("直接发送任务"))
         self.assertIn("/sessions", first_section)
@@ -314,7 +314,7 @@ class ExperienceTest(unittest.TestCase):
             with self.subTest(capabilities=capabilities):
                 help_text = command_help(capabilities)
                 command_lines = [
-                    line for line in help_text.splitlines() if line.startswith("/")
+                    line for line in help_text.splitlines() if line.startswith("- `/")
                 ]
                 expected = [
                     spec
@@ -323,15 +323,15 @@ class ExperienceTest(unittest.TestCase):
                     and (spec.requires is None or spec.requires in capabilities)
                 ]
                 self.assertCountEqual(
-                    [line.split("：", maxsplit=1)[0] for line in command_lines],
+                    [line.split("`", maxsplit=2)[1] for line in command_lines],
                     [spec.usage for spec in expected],
                 )
                 for group in CommandGroup:
-                    section = help_text.split(f"{group.value}：\n", maxsplit=1)[1]
-                    section = section.split("\n\n", maxsplit=1)[0]
+                    section = help_text.split(f"### {group.value}\n", maxsplit=1)[1]
+                    section = section.split("\n---\n", maxsplit=1)[0]
                     for spec in expected:
                         if spec.group is group:
-                            self.assertIn(f"{spec.usage}：", section)
+                            self.assertIn(f"`{spec.usage}`", section)
 
     def test_host_only_commands_are_explicitly_rejected_and_hidden(self) -> None:
         for command in ("/copy", "/vim", "/theme", "/exit", "/quit"):

@@ -5987,10 +5987,7 @@ class ChannelApplication:
             logger.exception("failed to send card action fallback feedback")
 
     def _help(self) -> str:
-        return (
-            command_help(self._runtime.available_capabilities)
-            + "\n普通图片和富文本图片可直接发送，也可随逐条引用一起交给 Codex。"
-        )
+        return command_help(self._runtime.available_capabilities)
 
 
 def _side_send_uuid(prefix: str, side_id: str) -> str:
