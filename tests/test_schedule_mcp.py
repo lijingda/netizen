@@ -143,7 +143,7 @@ class ScheduleMcpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_partial_session_settings_preserve_explicit_null_and_options_identity(self):
         self.runner.open_admission()
-        for settings in ({}, {"turn_settings": None}, {"progress_card_enabled": False}, {
+        for settings in ({}, {"turn_settings": None}, {"progress_card_enabled": False}, {"completion_mention_enabled": False}, {
             "turn_settings": {"model_id": "model-a", "effort_id": "low", "service_tier_id": "default"},
             "reaction_pulse_enabled": True, "message_context_mode": "catch-up",
         }):
@@ -349,12 +349,13 @@ class ScheduleMcpSchemaTests(unittest.TestCase):
 
     def test_session_settings_schema_requires_strict_values_and_complete_model_triple(self):
         validator = Draft202012Validator(_tool_schema())
-        for settings in ({}, {"turn_settings": None}, {"progress_card_enabled": False}, {
+        for settings in ({}, {"turn_settings": None}, {"progress_card_enabled": False}, {"completion_mention_enabled": False}, {
             "turn_settings": {"model_id": "model-a", "effort_id": "low", "service_tier_id": "default"},
             "message_context_mode": "catch-up",
         }):
             validator.validate({**CREATE_EXAMPLE, "session_settings": settings})
         for settings in (None, {"progress_card_enabled": None}, {"reaction_pulse_enabled": 1},
+                         {"completion_mention_enabled": "false"}, {"completion_mention_enabled": 1},
                          {"message_context_mode": "all-history"}, {"turn_settings": {"model_id": "model-a"}},
                          {"native_thread_id": "untrusted"}):
             request = {**CREATE_EXAMPLE, "session_settings": settings}

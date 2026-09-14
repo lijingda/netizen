@@ -14,7 +14,15 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from lark_channel import MediaSource, OutboundCard, OutboundFile, OutboundImage, SendOpts
+from lark_channel import (
+    Identity,
+    MediaSource,
+    OutboundCard,
+    OutboundFile,
+    OutboundImage,
+    OutboundPost,
+    SendOpts,
+)
 
 from .bindings import (
     AmbiguousBinding,
@@ -90,10 +98,12 @@ from .cards.scheduled import (
 from .channel.reactions import _REACTION_OPERATION_TIMEOUT_SECONDS, _ReactionController
 from .channel.reply_presenter import (
     GoalCardOrigin,
+    _CardUpdateAttempt,
     _GoalCardDelivery,
     _ReplyCardPresenter,
 )
 from .codex_runtime import CodexRuntime
+from .completion_mention import valid_completion_mention_user_id
 from .runtime.contracts import (
     BindingRuntimeSnapshot,
     CompactionOutcome,
@@ -1463,12 +1473,19 @@ class ChannelApplication:
             if outcome.error is None and outcome.status == "completed"
             else TurnDiffSummary()
         )
+        allow_completion_mention = True
         if outcome.task_feedback.progress_card_enabled:
             try:
-                progress_handled = await self._complete_task_progress_card(
+                attempt = await self._complete_task_progress_card(
                     outcome,
                     diff_summary,
                 )
+                if attempt is not None:
+                    # The original card may have updated even if its response
+                    # was lost. Preserve result recovery without another @.
+                    allow_completion_mention = False
+                    if attempt.updated or isinstance(outcome.origin, ScheduledOrigin):
+                        return
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1483,12 +1500,15 @@ class ChannelApplication:
                 await self._abandon_task_progress_card(outcome)
                 # A failure after the terminal update/receipt may be uncertain.
                 # Never publish a second scheduled result on that uncertainty.
-                progress_handled = isinstance(outcome.origin, ScheduledOrigin)
-            if progress_handled:
-                return
+                allow_completion_mention = False
+                if isinstance(outcome.origin, ScheduledOrigin):
+                    return
         if outcome.error is not None:
             detail = str(outcome.error).strip() or type(outcome.error).__name__
-            await self._reply(outcome.origin, f"任务未完成：{detail[:500]}")
+            await self._reply_task_result(
+                outcome, f"任务未完成：{detail[:500]}",
+                allow_completion_mention=allow_completion_mention,
+            )
             return
         if outcome.status == "interrupted":
             if outcome.background_cleanup_requested:
@@ -1506,15 +1526,20 @@ class ChannelApplication:
             return
         if outcome.status != "completed":
             detail = outcome.final_response or f"Codex Turn 状态为 {outcome.status!r}。"
-            await self._reply(outcome.origin, f"任务未完成：{detail[:500]}")
+            await self._reply_task_result(
+                outcome, f"任务未完成：{detail[:500]}",
+                allow_completion_mention=allow_completion_mention,
+            )
             return
-        await self._complete_task_with_files(outcome, diff_summary)
+        await self._complete_task_with_files(
+            outcome, diff_summary, allow_completion_mention=allow_completion_mention,
+        )
 
     async def _complete_task_progress_card(
         self,
         outcome: TurnOutcome | SideTurnOutcome,
         diff_summary: TurnDiffSummary,
-    ) -> bool:
+    ) -> _CardUpdateAttempt | None:
         terminal_status = "failed"
         final_response: str
         files: tuple[TurnFile, ...] = ()
@@ -1563,7 +1588,7 @@ class ChannelApplication:
                         },
                     )
                     await self._abandon_task_progress_card(outcome)
-                    return False
+                    return None
 
         def render(
             snapshot: TurnActivitySnapshot | SideTurnActivitySnapshot,
@@ -1579,6 +1604,7 @@ class ChannelApplication:
                 turn_id=(outcome.turn_id if files else None),
                 additions=file_additions,
                 deletions=file_deletions,
+                completion_mention_user_id=_outcome_completion_mention_user_id(outcome),
             )
 
         if isinstance(outcome, TurnOutcome):
@@ -1589,13 +1615,9 @@ class ChannelApplication:
                 activity=outcome.activity,
                 render=render,
             )
-            if attempt is None:
-                return False
-            if isinstance(outcome.origin, ScheduledOrigin):
+            if attempt is not None and isinstance(outcome.origin, ScheduledOrigin):
                 await self._record_scheduled_card_delivery(outcome.origin, attempt.message_id, attempt.result)
-                # An attempted update can have succeeded despite a lost response.
-                return True
-            return attempt.updated
+            return attempt
         return await self._progress_cards.finish_side(
             side_id=outcome.side_id,
             thread_id=outcome.thread_id,
@@ -1697,6 +1719,8 @@ class ChannelApplication:
         self,
         outcome: TurnOutcome | SideTurnOutcome,
         diff_summary: TurnDiffSummary,
+        *,
+        allow_completion_mention: bool = True,
     ) -> None:
         final_response = outcome.final_response or "任务已结束，未产生文本回复。"
         items = tuple(getattr(outcome.result, "items", ()))
@@ -1704,7 +1728,9 @@ class ChannelApplication:
             items,
             diff_summary=diff_summary,
         ):
-            await self._reply(outcome.origin, final_response)
+            await self._reply_task_result(
+                outcome, final_response, allow_completion_mention=allow_completion_mention,
+            )
             return
         try:
             scope, files, file_provenance_id = self._task_completion_files(
@@ -1721,6 +1747,10 @@ class ChannelApplication:
                 files=files,
                 additions=diff_summary.additions,
                 deletions=diff_summary.deletions,
+                completion_mention_user_id=(
+                    _outcome_completion_mention_user_id(outcome)
+                    if allow_completion_mention else None
+                ),
             ) if files else None
         except asyncio.CancelledError:
             raise
@@ -1733,9 +1763,10 @@ class ChannelApplication:
                     "turn_id": outcome.turn_id,
                 },
             )
-            await self._reply(
-                outcome.origin,
+            await self._reply_task_result(
+                outcome,
                 f"{final_response}\n\n⚠️ 本轮文件卡片未生成：{error}",
+                allow_completion_mention=allow_completion_mention,
             )
             return
         except Exception:
@@ -1747,13 +1778,17 @@ class ChannelApplication:
                     "turn_id": outcome.turn_id,
                 },
             )
-            await self._reply(outcome.origin, final_response)
+            await self._reply_task_result(
+                outcome, final_response, allow_completion_mention=allow_completion_mention,
+            )
             return
 
         # Only preparation failures are known to precede any publication.
         # Do not catch a text fallback's own failure and send it a second time.
         if card is None:
-            await self._reply(outcome.origin, final_response)
+            await self._reply_task_result(
+                outcome, final_response, allow_completion_mention=allow_completion_mention,
+            )
             return
         try:
             result = await self._send_completion_reply(outcome.origin, card)
@@ -1953,7 +1988,10 @@ class ChannelApplication:
             ),
             activity=activity,
             result=(
-                ReplyCardResultModule(result_text)
+                ReplyCardResultModule(
+                    result_text,
+                    completion_mention_user_id=_outcome_completion_mention_user_id(outcome),
+                )
                 if result_text is not None
                 else None
             ),
@@ -2042,7 +2080,7 @@ class ChannelApplication:
             goal is not None
             and outcome.finalization is not GoalFinalizationStatus.CLEARED
         )
-        delivery = _GoalCardDelivery.FAILED
+        delivery = _GoalCardDelivery.NOT_ATTEMPTED
         if generation is not None:
             origin.goal_generation = generation
             if terminal_card is not None:
@@ -2077,15 +2115,32 @@ class ChannelApplication:
             return
         if delivery is _GoalCardDelivery.DELIVERED:
             if plain_result_required:
-                await self._reply(target, result_text or notice)
+                await self._reply_task_result(outcome, result_text or notice, origin=target)
             return
+        allow_completion_mention = True
+        if (
+            delivery is _GoalCardDelivery.FAILED
+            and projection.result is not None
+            and projection.result.completion_mention_user_id is not None
+        ):
+            # An applied update can lose its response. Only the result body
+            # follows the existing fallback chain after that mention attempt.
+            allow_completion_mention = False
+            projection = replace(
+                projection,
+                result=replace(projection.result, completion_mention_user_id=None),
+            )
+            terminal_card = reply_card(projection)
         if terminal_card is None:
-            await self._reply(target, result_text or notice)
+            await self._reply_task_result(
+                outcome, result_text or notice, origin=target,
+                allow_completion_mention=allow_completion_mention,
+            )
             return
         if generation is None:
             await self._reply(target, terminal_card)
             if plain_result_required:
-                await self._reply(target, result_text or notice)
+                await self._reply_task_result(outcome, result_text or notice, origin=target)
             return
         fallback_delivery = await self._progress_cards.reply_goal_fallback(
             binding_id=identity_binding_id,
@@ -2100,11 +2155,20 @@ class ChannelApplication:
         )
         if fallback_delivery is _GoalCardDelivery.SUPERSEDED:
             return
-        if fallback_delivery is _GoalCardDelivery.FAILED:
-            await self._reply(target, result_text or notice)
+        if fallback_delivery in {_GoalCardDelivery.FAILED, _GoalCardDelivery.NOT_ATTEMPTED}:
+            if (
+                fallback_delivery is _GoalCardDelivery.FAILED
+                and projection.result is not None
+                and projection.result.completion_mention_user_id is not None
+            ):
+                allow_completion_mention = False
+            await self._reply_task_result(
+                outcome, result_text or notice, origin=target,
+                allow_completion_mention=allow_completion_mention,
+            )
             return
         if plain_result_required:
-            await self._reply(target, result_text or notice)
+            await self._reply_task_result(outcome, result_text or notice, origin=target)
 
     async def _present_running_goal(
         self,
@@ -4734,6 +4798,7 @@ class ChannelApplication:
             assert intent.expected_revision is not None
             assert intent.reaction_pulse_enabled is not None
             assert intent.progress_card_enabled is not None
+            assert intent.completion_mention_enabled is not None
             message_context_mode = (
                 intent.message_context_mode or MentionContextMode.CURRENT_ONLY
             )
@@ -4748,6 +4813,7 @@ class ChannelApplication:
             task_feedback = BindingTaskFeedback(
                 reaction_pulse_enabled=bool(intent.reaction_pulse_enabled),
                 progress_card_enabled=bool(intent.progress_card_enabled),
+                completion_mention_enabled=bool(intent.completion_mention_enabled),
             )
             project, binding = await self._create_binding(
                 scope=intent.scope,
@@ -4779,7 +4845,8 @@ class ChannelApplication:
                     f"{context_mode_display(binding.message_context_mode)}。"
                     f"执行中表情闪烁："
                     f"{'开启' if binding.task_feedback.reaction_pulse_enabled else '关闭'}；"
-                    f"进度卡：{'开启' if binding.task_feedback.progress_card_enabled else '关闭'}。"
+                    f"进度卡：{'开启' if binding.task_feedback.progress_card_enabled else '关闭'}；"
+                    f"结束时 @ 提醒：{'开启' if binding.task_feedback.completion_mention_enabled else '关闭'}。"
                     "现在可以直接发送任务，例如：梳理这个项目的结构。"
                     "如果刚才的任务因没有会话而未执行，请重新发送。"
                     "在群聊和群话题中，每条消息都需要 @机器人。",
@@ -4793,10 +4860,12 @@ class ChannelApplication:
             assert intent.message_context_mode is not None
             assert intent.reaction_pulse_enabled is not None
             assert intent.progress_card_enabled is not None
+            assert intent.completion_mention_enabled is not None
             settings = await self._resolve_card_model_settings(intent)
             task_feedback = BindingTaskFeedback(
                 reaction_pulse_enabled=bool(intent.reaction_pulse_enabled),
                 progress_card_enabled=bool(intent.progress_card_enabled),
+                completion_mention_enabled=bool(intent.completion_mention_enabled),
             )
             before = self._bindings.get(intent.binding_id)
             context_anchor = None
@@ -4857,7 +4926,8 @@ class ChannelApplication:
                     f"{context_mode_display(binding.message_context_mode)}。"
                     f"执行中表情闪烁："
                     f"{'开启' if binding.task_feedback.reaction_pulse_enabled else '关闭'}；"
-                    f"进度卡：{'开启' if binding.task_feedback.progress_card_enabled else '关闭'}。"
+                    f"进度卡：{'开启' if binding.task_feedback.progress_card_enabled else '关闭'}；"
+                    f"结束时 @ 提醒：{'开启' if binding.task_feedback.completion_mention_enabled else '关闭'}。"
                     "会话后续每条新 Turn 都会应用。",
                 )
             return
@@ -5880,7 +5950,35 @@ class ChannelApplication:
             topic_id=str(topic_id) if topic_id else None,
         )
 
-    async def _reply(self, message: Any, content: Any) -> None:
+    async def _reply_task_result(
+        self,
+        outcome: TurnOutcome | SideTurnOutcome | GoalOutcome,
+        content: str,
+        *,
+        origin: object | None = None,
+        allow_completion_mention: bool = True,
+    ) -> None:
+        await self._reply(
+            outcome.origin if origin is None else origin,
+            content,
+            completion_mention_user_id=(
+                _outcome_completion_mention_user_id(outcome)
+                if allow_completion_mention else None
+            ),
+        )
+
+    async def _reply(
+        self,
+        message: Any,
+        content: Any,
+        *,
+        completion_mention_user_id: str | None = None,
+    ) -> None:
+        if isinstance(content, str) and completion_mention_user_id is not None:
+            content = OutboundPost(
+                markdown=content,
+                mentions=[Identity(open_id=completion_mention_user_id)],
+            )
         result = await self._send_completion_reply(message, content)
         failure_notice = _reply_failure_notice(result)
         if failure_notice is None:
@@ -5894,6 +5992,9 @@ class ChannelApplication:
             },
         )
         try:
+            # A long reply may already have delivered its first, mentioned
+            # chunk before another chunk fails audit. The SDK failure does not
+            # prove zero publication, so this recovery must not mention again.
             fallback_result = await self._reply_to_origin(message, failure_notice)
         except asyncio.CancelledError:
             raise
@@ -6299,6 +6400,42 @@ def _first_post_node(message: Any) -> dict[str, Any] | None:
             if isinstance(node, dict):
                 return node
     return None
+
+
+def _outcome_completion_mention_user_id(
+    outcome: TurnOutcome | SideTurnOutcome | GoalOutcome,
+) -> str | None:
+    """Mention the captured task initiator once, only on a known task ending.
+
+    Completion origins may be bot-authored Side seeds or Goal cards. The native
+    operation's owner is captured at admission and is unchanged by steer.
+    Scheduled initial Turns have an automatic owner, not a human addressee.
+    """
+    if (
+        not outcome.task_feedback.completion_mention_enabled
+        or isinstance(outcome.origin, ScheduledOrigin)
+        or outcome.background_cleanup_requested
+    ):
+        return None
+    if isinstance(outcome, GoalOutcome):
+        if (
+            outcome.error is not None
+            or outcome.goal is None
+            or outcome.goal.status in {GoalStatus.ACTIVE, GoalStatus.PAUSED}
+            or outcome.final_turn_status not in {"completed", "failed"}
+        ):
+            return None
+    elif isinstance(outcome, SideTurnOutcome) and (
+        outcome.error is not None or outcome.stop_requested
+    ):
+        # Side's public handle.run() failure has no persistent-history proof
+        # of a terminal; Runtime retains an unknown Side slot in this case.
+        return None
+    elif outcome.status == "interrupted" or (
+        outcome.error is None and outcome.status not in {"completed", "failed"}
+    ):
+        return None
+    return valid_completion_mention_user_id(outcome.owner_id)
 
 
 def _raw_content_type(message: Any) -> str:

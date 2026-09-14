@@ -21,6 +21,7 @@ from lark_channel import (
     OutboundCard,
     OutboundFile,
     OutboundImage,
+    OutboundPost,
     PostContent,
     QuotedContext,
     ResourceDescriptor,
@@ -138,6 +139,10 @@ from netizen.turn_plan_observer import (
 )
 PNG = b"\x89PNG\r\n\x1a\nchannel-test"
 PULSE_ON = BindingTaskFeedback(reaction_pulse_enabled=True)
+
+
+def completion_post(markdown: str, user_id: str = "ou_user") -> OutboundPost:
+    return OutboundPost(markdown=markdown, mentions=[Identity(open_id=user_id)])
 
 
 class FakeMessage:
@@ -1432,10 +1437,11 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
             )
             return attempt is not None and attempt.updated
         if self.kind == "side":
-            return await self.presenter.finish_side(
+            attempt = await self.presenter.finish_side(
                 side_id="side-one", thread_id="native-side-1",
                 turn_id="side-turn-1", activity=None, render=render,
             )
+            return attempt is not None and attempt.updated
         result = await self.presenter.finish_goal(
             binding_id="binding-one", thread_id="native-one",
             logical_turn_id="goal-one", generation=self.generation,
@@ -1847,6 +1853,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "new_speed",
             "new_task_reactions",
             "new_progress_card",
+            "new_completion_mention",
         ):
             if name in fields:
                 values[name] = fields[name]["initial_option"]
@@ -1861,6 +1868,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         inherit: bool = False,
         reaction_pulse_enabled: bool | None = None,
         progress_card_enabled: bool | None = None,
+        completion_mention_enabled: bool | None = None,
     ) -> dict[str, object]:
         form = next(
             item
@@ -1890,9 +1898,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         values["config_progress_card"] = fields["config_progress_card"][
             "initial_option"
         ]
+        values["config_completion_mention"] = fields["config_completion_mention"][
+            "initial_option"
+        ]
         for name, enabled in (
             ("config_task_reactions", reaction_pulse_enabled),
             ("config_progress_card", progress_card_enabled),
+            ("config_completion_mention", completion_mention_enabled),
         ):
             if enabled is not None:
                 suffix = ":on" if enabled else ":off"
@@ -2012,7 +2024,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 ("remove", "om_prompt", "reaction-1"),
             ],
         )
-        self.assertIn(("om_prompt", "done"), self.channel.replies)
+        self.assertIn(("om_prompt", completion_post("done", "ou_alice")), self.channel.replies)
 
     async def test_default_feedback_keeps_lifecycle_reactions_without_pulse_or_card(
         self,
@@ -2061,7 +2073,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.channel.reaction_removals,
             [("om_silent", "reaction-1")],
         )
-        self.assertEqual(self.channel.replies, [("om_silent", "done")])
+        self.assertEqual(self.channel.replies, [("om_silent", completion_post("done"))])
         self.assertEqual(self.channel.updates, [])
 
     async def test_progress_card_updates_same_message_and_collapses_at_terminal(
@@ -2197,7 +2209,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(self.channel.replies[-1], (prompt.id, "answer survives"))
+        self.assertEqual(self.channel.replies[-1], (prompt.id, completion_post("answer survives")))
         self.assertEqual(self.channel.updates, [])
 
     async def test_progress_sessions_are_isolated_by_exact_turn_identity(self) -> None:
@@ -2567,7 +2579,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.channel.replies,
             [
-                (origin.id, sensitive_response),
+                (origin.id, completion_post(sensitive_response)),
                 (
                     origin.id,
                     "消息发送失败：飞书内容审核认为回复中包含邮箱地址。"
@@ -3383,9 +3395,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(self.channel.replies), 1)
         fallback = self.channel.replies[-1][1]
-        self.assertIsInstance(fallback, str)
-        self.assertIn("answer survives", fallback)
-        self.assertIn("未截断文件清单", fallback)
+        self.assertIsInstance(fallback, OutboundPost)
+        self.assertIn("answer survives", fallback.markdown)
+        self.assertIn("未截断文件清单", fallback.markdown)
+        self.assertEqual(fallback.mentions, [Identity(open_id="ou_user")])
         self.assertNotIsInstance(fallback, OutboundCard)
 
     async def test_v4_file_card_pages_survive_restart_without_turn_read(self) -> None:
@@ -7719,7 +7732,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "结果正文无法完整放入卡片",
             json.dumps(self.channel.updates[-1][1], ensure_ascii=False),
         )
-        self.assertEqual(self.channel.replies[-1][1], oversized)
+        self.assertEqual(self.channel.replies[-1][1], completion_post(oversized))
 
     async def test_stale_goal_file_page_cannot_overwrite_cleared_card(self) -> None:
         await self.new()
@@ -9207,6 +9220,9 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 "new_progress_card": fields["new_progress_card"][
                     "initial_option"
                 ],
+                "new_completion_mention": fields["new_completion_mention"][
+                    "initial_option"
+                ],
             }
         )
 
@@ -10466,7 +10482,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
         await self.app.handle_completion(outcome)
-        self.assertIn((origin.id, "done"), self.channel.replies)
+        self.assertIn((origin.id, completion_post("done", "ou_originator")), self.channel.replies)
         self.assertIn((origin.id, "DONE"), self.channel.reactions)
 
     async def test_turn_observation_unavailable_notice_preserves_exit_paths(
@@ -10535,7 +10551,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 activity=unavailable,
             )
         )
-        self.assertIn((origin.id, "recovered terminal"), self.channel.replies)
+        self.assertIn((origin.id, completion_post("recovered terminal")), self.channel.replies)
 
     async def test_thread_activity_discard_stops_presenters_without_terminal(self) -> None:
         origin = await self.new()
@@ -10815,7 +10831,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn((origin.id, "ERROR"), self.channel.reactions)
-        self.assertIn((origin.id, "任务未完成：native failure"), self.channel.replies)
+        self.assertIn((origin.id, completion_post("任务未完成：native failure")), self.channel.replies)
 
 
 class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
@@ -10976,7 +10992,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(self.channel.replies, [(prompt.id, "side answer")])
+        self.assertEqual(self.channel.replies, [(prompt.id, completion_post("side answer"))])
         self.assertEqual(
             self.channel.reactions,
             [
@@ -11329,7 +11345,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             self.channel.replies[-1],
-            (prompt.id, "side answer survives"),
+            (prompt.id, completion_post("side answer survives")),
         )
         self.assertEqual(len(self.channel.updates), root_updates)
 
@@ -11562,8 +11578,8 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 task_feedback=PULSE_ON,
             )
         )
-        self.assertIn(("om-seed", "side answer"), self.channel.replies)
-        self.assertNotIn(("om-source", "side answer"), self.channel.replies)
+        self.assertIn(("om-seed", completion_post("side answer")), self.channel.replies)
+        self.assertNotIn(("om-source", completion_post("side answer")), self.channel.replies)
 
     async def test_initial_prompt_missing_sender_name_reports_permission(self) -> None:
         source = FakeMessage(

@@ -117,6 +117,7 @@ class _SessionSettingsArguments(BaseModel):
     turn_settings: _TurnSettingsArguments | None = Field(default=None, description="Omit to keep copied/current model settings; null explicitly inherits native Codex; an object must provide all three IDs returned by options.")
     reaction_pulse_enabled: bool = False
     progress_card_enabled: bool = True
+    completion_mention_enabled: bool = True
     message_context_mode: Literal["current-only", "catch-up"] = "current-only"
 
 
@@ -187,12 +188,13 @@ _FIELD_HINTS = {
     "cursor": "Use the cursor string returned by the previous page, or omit it for the first page.",
     "limit": "Use an integer page size from 1 to 50 for list/runs, or omit it to use 20.",
     "all": "Use the boolean true or false; true lists plans across this instance.",
-    "session_settings": "Supply a partial object containing only turn_settings, reaction_pulse_enabled, progress_card_enabled and message_context_mode. Omitted fields keep their defaults/current values.",
+    "session_settings": "Supply a partial object containing only turn_settings, reaction_pulse_enabled, progress_card_enabled, completion_mention_enabled and message_context_mode. Omitted fields keep their defaults/current values.",
     "session_settings.turn_settings": "Use null to inherit native Codex, or supply all three nonempty model_id, effort_id and service_tier_id from options.",
     "session_settings.turn_settings.model_id": "Supply the exact nonempty model_id from options and all three model-setting IDs.",
     "session_settings.turn_settings.effort_id": "Supply a supported nonempty effort_id from options and all three model-setting IDs.",
     "session_settings.turn_settings.service_tier_id": "Supply a supported nonempty service_tier_id from options and all three model-setting IDs.",
     "session_settings.reaction_pulse_enabled": "Use the boolean true or false for reaction pulse.",
+    "session_settings.completion_mention_enabled": "Use the boolean true or false to mention the human task initiator at completion. Automatic scheduled first turns have no human initiator and do not mention anyone.",
     "session_settings.progress_card_enabled": "Use the boolean true or false for progress cards.",
     "session_settings.message_context_mode": "Use current-only or catch-up. Private chat targets support only current-only.",
     "schedule.kind": "Set schedule.kind to once, daily, weekly or interval.",

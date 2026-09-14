@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from lark_channel import OutboundCard, new_card
 
+from ..completion_mention import valid_completion_mention_user_id
 from ..domain import (
     ACTIVE_STATE_VALUES,
     ActiveState,
@@ -196,6 +197,13 @@ def _normalize_reply_projection(
     result = projection.result
     if result is not None:
         _bounded_card_text(result.content, "result", 100_000)
+        if (
+            result.completion_mention_user_id is not None
+            and valid_completion_mention_user_id(
+                result.completion_mention_user_id
+            ) is None
+        ):
+            raise ValueError("a completion mention requires one valid user open_id")
     files = projection.files
     if files is not None:
         if projection.scope is None:
@@ -450,11 +458,15 @@ def turn_files_card(
     page: int = 0,
     additions: int | None = None,
     deletions: int | None = None,
+    completion_mention_user_id: str | None = None,
 ) -> OutboundCard:
     return reply_card(
         ReplyCardProjection(
             scope=scope,
-            result=ReplyCardResultModule(final_response),
+            result=ReplyCardResultModule(
+                final_response,
+                completion_mention_user_id=completion_mention_user_id,
+            ),
             files=ReplyCardFilesModule(
                 binding_id=binding_id,
                 turn_id=turn_id,
@@ -480,6 +492,7 @@ def turn_progress_card(
     turn_id: str | None = None,
     additions: int | None = None,
     deletions: int | None = None,
+    completion_mention_user_id: str | None = None,
 ) -> OutboundCard:
     """Render one replaceable Phase 1 Turn progress card.
 
@@ -492,6 +505,8 @@ def turn_progress_card(
 
     normalized_terminal_status = _terminal_progress_status(terminal_status)
     if normalized_terminal_status is None:
+        if completion_mention_user_id is not None:
+            raise ValueError("a running progress card cannot contain a completion mention")
         if collapsed:
             raise ValueError("a running progress card must remain expanded")
         if final_response is not None or files:
@@ -531,7 +546,8 @@ def turn_progress_card(
     result = None
     if normalized_terminal_status is not None:
         result = ReplyCardResultModule(
-            final_response or _default_terminal_response(normalized_terminal_status)
+            final_response or _default_terminal_response(normalized_terminal_status),
+            completion_mention_user_id=completion_mention_user_id,
         )
     return reply_card(
         ReplyCardProjection(
@@ -657,7 +673,7 @@ def _render_reply_card_page(projection: ReplyCardProjection) -> OutboundCard:
             )
         )
     if projection.result is not None:
-        builder.raw(_turn_answer_block(projection.result.content))
+        builder.raw(_turn_answer_block(projection.result))
     if projection.files is not None:
         assert projection.scope is not None
         files = projection.files
@@ -920,7 +936,11 @@ def _reply_card_manifest(projection: ReplyCardProjection) -> ReplyCardManifest:
     return ReplyCardManifest(
         goal=projection.goal,
         activity=projection.activity,
-        result=projection.result,
+        result=(
+            None
+            if projection.result is None
+            else replace(projection.result, completion_mention_user_id=None)
+        ),
     )
 
 
@@ -1808,7 +1828,15 @@ def _decode_turn_file_path(value: Any) -> str:
     return path
 
 
-def _turn_answer_block(final_response: str) -> dict[str, Any]:
+def _turn_answer_block(result: ReplyCardResultModule) -> dict[str, Any]:
+    elements: list[dict[str, Any]] = [
+        {"tag": "markdown", "content": result.content},
+    ]
+    if result.completion_mention_user_id is not None:
+        elements.append({
+            "tag": "markdown",
+            "content": f"<at id={result.completion_mention_user_id}></at>",
+        })
     return {
         "tag": "column_set",
         "element_id": _TURN_ANSWER_ELEMENT_ID,
@@ -1821,9 +1849,7 @@ def _turn_answer_block(final_response: str) -> dict[str, Any]:
                 "weight": 1,
                 "padding": "12px",
                 "vertical_spacing": "4px",
-                "elements": [
-                    {"tag": "markdown", "content": final_response},
-                ],
+                "elements": elements,
             }
         ],
     }

@@ -1127,6 +1127,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             if isinstance(outcome, SideTurnOutcome)
         ]
         self.assertEqual([item.final_response for item in side_outcomes], ["one", "two", "three"])
+        self.assertTrue(all(not item.stop_requested for item in side_outcomes))
         self.assertTrue(all(handle.run_calls == 1 for handle in self.codex.handles))
         self.assertTrue(all(handle.stream_calls == 0 for handle in self.codex.handles))
 
@@ -1421,6 +1422,44 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             [snapshot.thread_id, snapshot.thread_id],
         )
         self.assertEqual(self.side_control.unsubscribe_calls, [snapshot.thread_id])
+
+    async def test_close_captures_stop_intent_when_turn_wins_interrupt_race(self) -> None:
+        binding = self.materialized_binding()
+        for status in ("completed", "failed"):
+            with self.subTest(status=status):
+                _binding, record, snapshot = await self.open_side_for_binding(binding)
+                submission = await self.runtime.submit_side(
+                    side_id=record.id,
+                    input="first",
+                    owner_id="ou_initiator",
+                    origin=SimpleNamespace(message_id=f"om-{status}"),
+                )
+                assert submission.release_receipt_attempt is not None
+                submission.release_receipt_attempt()
+                handle = self.codex.handles[-1]
+
+                async def complete_during_interrupt() -> object:
+                    # A successful interrupt RPC cannot guarantee which
+                    # terminal status the concurrently ending Turn reports.
+                    handle.complete(status=status)
+                    return object()
+
+                handle.interrupt = complete_during_interrupt
+                lifecycle = await self.runtime.close_side(record.id)
+                outcome = next(
+                    item for item in reversed(self.outcomes)
+                    if isinstance(item, SideTurnOutcome) and item.side_id == record.id
+                )
+
+                self.assertEqual(lifecycle.state, SideTopicState.CLOSED)
+                self.assertEqual(outcome.status, status)
+                self.assertEqual(outcome.owner_id, "ou_initiator")
+                self.assertTrue(outcome.stop_requested)
+                # close still drains delivery before cleanup. Do not overload
+                # its existing exact-RPC-success field with the stop intent.
+                self.assertFalse(outcome.background_cleanup_requested)
+                self.assertIn(snapshot.thread_id, self.cleanup.calls)
+                self.assertIn(snapshot.thread_id, self.side_control.unsubscribe_calls)
 
     async def test_cleanup_and_unsubscribe_failures_remain_retryable(self) -> None:
         _binding, record, snapshot = await self.open_side()

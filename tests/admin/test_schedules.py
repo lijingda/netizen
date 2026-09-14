@@ -58,7 +58,7 @@ class FakeSchedules:
         if mode == "options":
             return {"ok": True, "models": [], "session_settings": {
                 "turn_settings": None, "reaction_pulse_enabled": False,
-                "progress_card_enabled": False, "message_context_mode": "current-only",
+                "progress_card_enabled": False, "completion_mention_enabled": True, "message_context_mode": "current-only",
             }, "context_mode_available": False, "model_catalog_error": {
                 "code": "model_catalog_unavailable", "message": "模型目录暂不可用。",
             }}
@@ -462,7 +462,7 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
         defaults = created["plan"]["session_settings"]
         self.assertEqual(defaults, {
             "turn_settings": {"model_id": "native-model", "effort_id": "medium", "service_tier_id": "default"},
-            "reaction_pulse_enabled": False, "progress_card_enabled": True, "message_context_mode": "current-only",
+            "reaction_pulse_enabled": False, "progress_card_enabled": True, "completion_mention_enabled": True, "message_context_mode": "current-only",
         })
         plan = (await self.page(session))["plans"][0]
         status, _, updated = await self.json_post("/api/v1/schedules/update", session, {

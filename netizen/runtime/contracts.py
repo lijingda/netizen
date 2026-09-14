@@ -737,6 +737,9 @@ class SideTurnOutcome:
     result: object | None = None
     error: BaseException | None = None
     background_cleanup_requested: bool = False
+    # Captures stop/close intent even when the Turn wins the interrupt race.
+    # Unlike background_cleanup_requested, this does not attest cleanup success.
+    stop_requested: bool = False
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
     activity: SideTurnActivitySnapshot | None = None

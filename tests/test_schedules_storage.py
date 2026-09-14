@@ -494,12 +494,12 @@ class ScheduleStorageTest(unittest.TestCase):
     def test_claimed_session_settings_are_independent_of_later_plan_and_binding_edits(self):
         copied = SessionSettings(
             BindingTurnSettings("model-a", "high", "priority"),
-            BindingTaskFeedback(True, True), MentionContextMode.CATCH_UP,
+            BindingTaskFeedback(True, True, False), MentionContextMode.CATCH_UP,
         )
         plan = self.create(session_settings=copied)
         claim = self.claim(plan.plan_id)
         self.schedules.update(plan.plan_id, expected_revision=1, request_id=self.request(), changes={
-            "session_settings": {"turn_settings": None, "reaction_pulse_enabled": False, "message_context_mode": "current-only"},
+            "session_settings": {"turn_settings": None, "reaction_pulse_enabled": False, "completion_mention_enabled": True, "message_context_mode": "current-only"},
         })
         changed = self.schedules.get(plan.plan_id)
         self.assertIsNone(changed.session_settings.turn_settings)

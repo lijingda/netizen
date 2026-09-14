@@ -617,12 +617,16 @@ release gate，也不让 observer 成为终态权威；这个边界不删除或�
 普通 Binding 每个新 Turn，以及 Goal start/resume，在 exact admission 中捕获当时的 Binding
 Task Feedback；Side 则在创建时一次性冻结 Parent 当时的 Task Feedback 并供所有 Side Turn
 沿用。运行中或 Side 创建后修改 Parent 配置不会改变已经捕获的 operation。新建会话默认
-关闭 Reaction Pulse、开启 Progress Card，已有会话保留保存的选择。Reaction Pulse
+关闭 Reaction Pulse、开启 Progress Card 与 Completion Mention，已有表情/进度卡选择保留。Reaction Pulse
 只控制普通/Side Turn 的 `THINKING` 执行中闪烁，Progress Card
 控制普通/Side Turn 是否产生 Activity 运行卡，以及 Goal 组合卡是否加入 Activity 模块。
 普通与 Side Turn 的 Lifecycle Reaction 始终尽力展示；两项都关闭时仍有 accepted、成功
 steer 和终态表情，但没有 `THINKING` pulse 或 Activity 过程卡。Goal 模块本身始终存在且不
-使用 Lifecycle Reaction。compaction 不使用这两个选项。完整边界见
+使用 Lifecycle Reaction。Completion Mention 在普通/Side 终态和 Goal 逻辑终态的结果中
+提及 admission 捕获的发起人；停止、暂停、状态未知和自动定时首轮不提及。提及只随
+终态投递，不进入运行卡、文件分页或保留的 Goal 控制投影；两种回复形态都不为提醒
+额外发送消息。客户端通知效果需要实测，完整边界见
+[ADR 0063](adr/0063-mention-task-initiators-in-terminal-results.md)。compaction 不使用这些选项。完整边界见
 [ADR 0046](adr/0046-add-opt-in-binding-task-feedback.md) 与
 [ADR 0047](adr/0047-compose-typed-reply-cards-and-finalize-complete-goals.md)，Side 扩展见
 [ADR 0048](adr/0048-integrate-side-turns-with-task-feedback-reply-cards.md)，表情语义修订见
@@ -769,7 +773,7 @@ Thread → Binding → Scope。可选 header 身份存在时须核对一致，�
 显式换 chat 不隐式换 Project，update 省略字段保留原值。身份只用于默认值解析，不新增
 创建者权限、群白名单或 Project ACL；目标须满足飞书应用可用性和机器人可达性。
 
-会话配置与 `/new` 共用 Model/Effort/Speed、Reaction Pulse、Progress Card 和 Mention
+会话配置与 `/new` 共用 Model/Effort/Speed、Reaction Pulse、Progress Card、Completion Mention 和 Mention
 Context Mode。创建时复制 exact 来源 Binding 的选择，显式覆盖后独立保存；继承仍存 null，
 不复制有效 Codex 配置。无来源采用 `/new` 默认值，每次认领冻结设置用于新 Binding。
 私聊及私聊话题固定 current-only；群话题 catch-up 从本次真实 root/seed 建立边界，自动
@@ -829,11 +833,11 @@ thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admis
 
 ## 数据与配置
 
-`channel.sqlite3` 的 schema v10 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+`channel.sqlite3` 的 schema v11 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`，以及 `schedule_plans`、`schedule_runs`、`schedule_requests`。
 `dedup_keys` 直接实现 Channel SDK 冻结的 `seen/mark` DedupStore 协议。
 `bindings` 保存全空或全有的三个 Binding-scoped catalog
-ID、settings revision、两个显式保存的 Binding Task Feedback 布尔值及 feedback revision、
+ID、settings revision、三个显式保存的 Binding Task Feedback 布尔值及 feedback revision、
 `current-only|catch-up`、全空或全有的 exact Context Boundary、context revision，以及
 `ever_activated` 标记；默认值为 1，Admin 仅创建且从未设为
 当前的 Lazy Binding 为 0，第一次 active-pointer 提交由 trigger 原子改为 1。
@@ -843,8 +847,10 @@ app/chat/topic/root/source、Parent Binding
 ID、creator、mention policy、creating/open/closed/expired/failed 和时间，不保存
 ephemeral native Thread ID 或内容。`projects.deleted` 保留已删除 Project 的 Registry 墓碑，
 阻止 YAML bootstrap 复活；正常查询隐藏墓碑，显式重新登记继续递增 alias 的 revision。
-服务和安装器只支持当前完整 schema，不保留历史版本迁移。新库直接创建完整结构，
-已有库先只读校验版本与结构；旧版本或损坏结构明确拒绝，不转换或重建空库。
+服务只支持当前完整 schema，新库直接创建完整结构。安装器只允许
+[ADR 0063](adr/0063-mention-task-initiators-in-terminal-results.md) 的 v10 → v11 原子迁移，
+为 Binding 和当前计划设置补齐默认开启的结束提及；其他旧版本或损坏结构明确拒绝，
+不重建空库。迁移必须在 manager target 已卸载、持有 lifetime lock 和完成数据库快照后执行。
 安装事务仍保留数据库快照，失败时按既有 lifetime lock 边界恢复原数据库与 release。
 Project 删除 intent、
 确认清单、fingerprint 和结果只在进程内，不保存解析后的 wire value 或已生效配置。
@@ -1198,9 +1204,10 @@ UUID 保证重复点击不重复发消息，这些动作不加 nonce。SDK 改�
 命令，不增加历史恢复状态。
 
 `/new` 卡片只有一个创建 form：一个包含全部 enabled Projects 的 Project 下拉框，以及
-Model、Effort、Speed、Reaction Pulse 和 Progress Card；群聊和群话题再增加 Mention
-Context Mode。Reaction Pulse 默认关闭，Progress Card 默认开启，两项可独立修改；这项
-新建默认值取代 ADR 0046 最初的两项默认关闭，不迁移已有 Binding。默认 mode 是
+Model、Effort、Speed、Reaction Pulse、Progress Card 和 Completion Mention；群聊和群话题再增加 Mention
+Context Mode。Reaction Pulse 默认关闭，Progress Card 和 Completion Mention 默认开启，三项可独立修改；这项
+进度卡新建默认值取代 ADR 0046 最初的关闭，不修改已有 Binding 的进度卡选择；
+结束提及的默认值与升级见 ADR 0063。默认 mode 是
 `current-only`，P2P 不显示 mode 字段。Model 下拉包含稳定的 `inherit Codex` sentinel；
 选择实际模型时三项必须完整并经
 live catalog resolve。模型目录不可用时仍展示 Project、Task Feedback、Context Mode 和
@@ -1213,7 +1220,7 @@ inherit 的 minimal form，不要求用户改走命令。提交后只创建 lazy
 
 `/config` 是独立的会话卡片，不属于实例级 `/settings` Projects 分区；它用同一组
 Model inherit/explicit 语义更新当前 active Binding 的持久设置，并允许独立切换
-Reaction Pulse 与 Progress Card；群聊/群话题还可切换 Mention Context Mode。不要求任务、不创建
+Reaction Pulse、Progress Card 与 Completion Mention；群聊/群话题还可切换 Mention Context Mode。不要求任务、不创建
 Turn。配置其他 Binding 必须先 `/resume` 切换。完整 Binding ID、settings revision、
 feedback revision 与 context revision 编码在版本化 option reference 中；三类设置在一笔
 Store transaction 内校验和保存，即使 active Binding 已切换、另一张卡先提交或 catch-up

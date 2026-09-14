@@ -879,6 +879,29 @@ class CardCodecTest(unittest.TestCase):
                         },
                     )
 
+    def test_completion_mention_form_values_and_old_cards_are_explicit(self) -> None:
+        for prefix in ("new", "config"):
+            form = {
+                f"{prefix}_model": "new-model:v1:inherit" if prefix == "new" else (
+                    "config-model:v4:11111111-0000-0000-0000-000000000001:1:1:1:inherit"
+                ),
+                f"{prefix}_task_reactions": "task-feedback:v2:off",
+                f"{prefix}_progress_card": "task-feedback:v2:off",
+            }
+            if prefix == "new":
+                form["new_project"] = "project:v1:test:3"
+            def decode(values):
+                return decode_card_form(scope=self.scope, message_id="om_card", sender_id="ou_user", tag="button", form_value=values)
+            with self.subTest(prefix=prefix), self.assertRaisesRegex(CardActionError, "已过期"):
+                decode(form)
+            for enabled in (False, True):
+                values = {**form, f"{prefix}_completion_mention": "task-feedback:v2:" + ("on" if enabled else "off")}
+                result = decode(values)
+                self.assertEqual(result.completion_mention_enabled, enabled)
+                self.assertFalse(result.progress_card_enabled)
+            with self.assertRaises(CardActionError):
+                decode({**form, f"{prefix}_completion_mention": True})
+
     def test_binding_settings_forms_decode_explicit_and_context_revisions(
         self,
     ) -> None:
@@ -895,6 +918,7 @@ class CardCodecTest(unittest.TestCase):
                 "new_speed": "priority-v2",
                 "new_task_reactions": "task-feedback:v2:on",
                 "new_progress_card": "task-feedback:v2:off",
+                "new_completion_mention": "task-feedback:v2:on",
             },
         )
         self.assertEqual(created.name, CardControlName.CREATE_BINDING)
@@ -926,6 +950,7 @@ class CardCodecTest(unittest.TestCase):
                 "config_speed": "default",
                 "config_task_reactions": "task-feedback:v2:off",
                 "config_progress_card": "task-feedback:v2:on",
+                "config_completion_mention": "task-feedback:v2:on",
             },
         )
         self.assertEqual(configured.name, CardControlName.CONFIGURE_BINDING)
@@ -960,6 +985,7 @@ class CardCodecTest(unittest.TestCase):
                 "new_model": "new-model:v1:inherit",
                 "new_task_reactions": "task-feedback:v2:off",
                 "new_progress_card": "task-feedback:v2:off",
+                "new_completion_mention": "task-feedback:v2:on",
             },
         )
         catalog = decode_card_form(
@@ -975,6 +1001,7 @@ class CardCodecTest(unittest.TestCase):
                 "new_speed": "rendered-speed",
                 "new_task_reactions": "task-feedback:v2:on",
                 "new_progress_card": "task-feedback:v2:on",
+                "new_completion_mention": "task-feedback:v2:on",
             },
         )
         configured = decode_card_form(
@@ -990,6 +1017,7 @@ class CardCodecTest(unittest.TestCase):
                 "config_context_mode": "context-mode:v1:catch-up",
                 "config_task_reactions": "task-feedback:v2:off",
                 "config_progress_card": "task-feedback:v2:on",
+                "config_completion_mention": "task-feedback:v2:on",
             },
         )
 
@@ -1067,12 +1095,14 @@ class CardCodecTest(unittest.TestCase):
                 "new_model": "new-model:v1:inherit",
                 "new_task_reactions": "task-feedback:v1:off",
                 "new_progress_card": "task-feedback:v1:off",
+                "new_completion_mention": "task-feedback:v2:on",
             },
             {
                 "new_project": "project:v1:test:3",
                 "new_model": "new-model:v1:inherit",
                 "new_task_reactions": True,
                 "new_progress_card": "task-feedback:v2:off",
+                "new_completion_mention": "task-feedback:v2:on",
             },
             {
                 "config_model": (
@@ -1081,6 +1111,7 @@ class CardCodecTest(unittest.TestCase):
                 ),
                 "config_task_reactions": "task-feedback:v2:off",
                 "config_progress_card": "on",
+                "config_completion_mention": "task-feedback:v2:on",
             },
         )
         for form_value in invalid_forms:
@@ -2389,6 +2420,7 @@ class CardRendererTest(unittest.TestCase):
                 "new_context_mode",
                 "new_task_reactions",
                 "new_progress_card",
+                "new_completion_mention",
                 "new_binding_submit_v6",
             ],
         )
@@ -2562,6 +2594,7 @@ class CardRendererTest(unittest.TestCase):
                 "new_progress_card": p2p_fields["new_progress_card"][
                     "initial_option"
                 ],
+                "new_completion_mention": p2p_fields["new_completion_mention"]["initial_option"],
             },
         )
         self.assertEqual(
@@ -2570,6 +2603,7 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertFalse(decoded.reaction_pulse_enabled)
         self.assertTrue(decoded.progress_card_enabled)
+        self.assertTrue(decoded.completion_mention_enabled)
 
     def test_config_card_targets_exact_binding_and_uses_live_catalog_options(
         self,
@@ -2592,6 +2626,7 @@ class CardRendererTest(unittest.TestCase):
             task_feedback=BindingTaskFeedback(
                 reaction_pulse_enabled=True,
                 progress_card_enabled=False,
+                completion_mention_enabled=False,
             ),
             allow_context_mode=True,
         )
@@ -2609,6 +2644,7 @@ class CardRendererTest(unittest.TestCase):
                 "config_context_mode",
                 "config_task_reactions",
                 "config_progress_card",
+                "config_completion_mention",
                 "binding_config_submit_v6",
             ],
         )
@@ -2643,6 +2679,7 @@ class CardRendererTest(unittest.TestCase):
             fields["config_progress_card"]["initial_option"],
             "task-feedback:v2:off",
         )
+        self.assertEqual(fields["config_completion_mention"]["initial_option"], "task-feedback:v2:off")
         self.assertNotIn("config_prompt", fields)
         self.assertIn("不会启动任务", str(outbound.card))
         self.assertNotIn("目标会话", str(outbound.card))
@@ -2755,6 +2792,7 @@ class CardRendererTest(unittest.TestCase):
                 "new_model",
                 "new_task_reactions",
                 "new_progress_card",
+                "new_completion_mention",
                 "new_binding_submit_v6",
             },
         )
@@ -2792,6 +2830,7 @@ class CardRendererTest(unittest.TestCase):
                 "config_model",
                 "config_task_reactions",
                 "config_progress_card",
+                "config_completion_mention",
                 "binding_config_submit_v6",
             },
         )

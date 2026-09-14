@@ -22,12 +22,12 @@ class SessionSettingsTest(unittest.TestCase):
     def test_full_wire_roundtrip_and_partial_null_reset(self):
         settings = SessionSettings(
             BindingTurnSettings("model-a", "low", "priority"),
-            BindingTaskFeedback(True, True), MentionContextMode.CATCH_UP,
+            BindingTaskFeedback(True, True, False), MentionContextMode.CATCH_UP,
         )
         self.assertEqual(SessionSettings.from_dict(settings.to_dict()), settings)
         reset = settings.merge({"turn_settings": None, "progress_card_enabled": False})
         self.assertIsNone(reset.turn_settings)
-        self.assertEqual(reset.task_feedback, BindingTaskFeedback(True, False))
+        self.assertEqual(reset.task_feedback, BindingTaskFeedback(True, False, False))
         self.assertEqual(reset.message_context_mode, MentionContextMode.CATCH_UP)
         self.assertEqual(settings.merge({}), settings)
         self.assertEqual(settings.turn_settings.model_id, "model-a")
@@ -40,6 +40,7 @@ class SessionSettingsTest(unittest.TestCase):
             {"turn_settings": {}}, {"turn_settings": {"model_id": "m"}},
             {"turn_settings": {"model_id": "m", "effort_id": "low", "service_tier_id": 2}},
             {"reaction_pulse_enabled": 1}, {"progress_card_enabled": "false"},
+            {"completion_mention_enabled": 1}, {"completion_mention_enabled": None},
             {"message_context_mode": "all-history"}, {"message_context_mode": None},
             {"sandbox": "none"}, {"context_anchor": {"message_id": "old"}},
         ):
@@ -47,12 +48,18 @@ class SessionSettingsTest(unittest.TestCase):
                 default.merge(partial)
         with self.assertRaises(SessionSettingsError):
             SessionSettings.from_dict({"turn_settings": None})
+        legacy = default.to_dict()
+        del legacy["completion_mention_enabled"]
+        with self.assertRaises(SessionSettingsError):
+            SessionSettings.from_dict(legacy)
 
     def test_new_defaults_resolve_catalog_but_source_inherit_remains_inherit(self):
         catalog = self.catalog()
         defaults = SessionSettings.new_defaults(catalog)
         self.assertEqual(defaults.turn_settings, BindingTurnSettings("model-a", "low", "priority"))
         self.assertEqual(defaults.task_feedback, BindingTaskFeedback(False, True))
+        self.assertTrue(defaults.task_feedback.completion_mention_enabled)
+        self.assertFalse(defaults.merge({"completion_mention_enabled": False}).task_feedback.completion_mention_enabled)
         defaults.validate_catalog(catalog)
         self.assertEqual(SessionSettings.new_defaults(None), SessionSettings(task_feedback=BindingTaskFeedback(False, True)))
         self.assertEqual(defaults.merge({"progress_card_enabled": False}).task_feedback, BindingTaskFeedback(False, False))

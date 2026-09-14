@@ -395,7 +395,7 @@ class ScheduleCardsTest(unittest.TestCase):
         self.plan["schedule"] = {"kind": "interval", "timezone": "America/New_York", "every_minutes": 45,
             "anchor": 1900000000.123456, "end_at": "2030-11-03T01:30-05:00"}
         self.plan["session_settings"] = SessionSettings.from_dict({"turn_settings": {"model_id": "missing-model", "effort_id": "high", "service_tier_id": "default"},
-            "reaction_pulse_enabled": True, "progress_card_enabled": True, "message_context_mode": "catch-up"}).to_dict()
+            "reaction_pulse_enabled": True, "progress_card_enabled": True, "completion_mention_enabled": True, "message_context_mode": "catch-up"}).to_dict()
         navigation = {"filter": "all", "plan_id": self.plan["id"], "cursor": "page-two"}
         original = form_values(schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC", plan=self.plan,
             allow_context_mode=True, navigation=navigation))
@@ -503,7 +503,7 @@ class ScheduleCardsTest(unittest.TestCase):
 
     def test_session_settings_copy_current_and_edit_keeps_all_settings_on_frequency_change(self):
         copied = SessionSettings.from_dict({"turn_settings": {"model_id": "future-model", "effort_id": "low", "service_tier_id": "default"},
-            "reaction_pulse_enabled": True, "progress_card_enabled": True, "message_context_mode": "catch-up"})
+            "reaction_pulse_enabled": True, "progress_card_enabled": True, "completion_mention_enabled": False, "message_context_mode": "catch-up"})
         card = schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC",
             session_settings=copied, catalog=self.catalog, allow_context_mode=True)
         form = form_values(card)
@@ -525,7 +525,7 @@ class ScheduleCardsTest(unittest.TestCase):
 
     def test_explicit_settings_survive_catalog_failure_or_removal_until_inherit_selected(self):
         original = SessionSettings.from_dict({"turn_settings": {"model_id": "removed-model", "effort_id": "removed-effort", "service_tier_id": "removed-tier"},
-            "reaction_pulse_enabled": True, "progress_card_enabled": False, "message_context_mode": "current-only"})
+            "reaction_pulse_enabled": True, "progress_card_enabled": False, "completion_mention_enabled": True, "message_context_mode": "current-only"})
         self.plan["session_settings"] = original.to_dict()
         for catalog in (None, self.catalog):
             with self.subTest(catalog_available=catalog is not None):
@@ -543,7 +543,7 @@ class ScheduleCardsTest(unittest.TestCase):
 
     def test_private_form_hides_context_choice_and_explicit_inherit_is_not_catalog_default(self):
         inherited = SessionSettings.from_dict({"turn_settings": None, "reaction_pulse_enabled": False,
-            "progress_card_enabled": True, "message_context_mode": "current-only"})
+            "progress_card_enabled": True, "completion_mention_enabled": True, "message_context_mode": "current-only"})
         self.plan["session_settings"] = inherited.to_dict()
         private = FeishuScope("app", "oc_private", ScopeKind.TOPIC, "omt_private")
         card = schedule_form_card(private, projects=[self.project], default_timezone="UTC",
@@ -563,6 +563,8 @@ class ScheduleCardsTest(unittest.TestCase):
         partial = dict(form)
         partial.pop("cron_session_speed")
         malformed.append(partial)
+        malformed.append({key: value for key, value in form.items() if key != "cron_session_completion_mention"})
+        malformed.append({**form, "cron_session_completion_mention": False})
         for values in malformed:
             with self.subTest(fields=values), self.assertRaises(CardActionError):
                 decode_schedule_action(scope=self.scope, value=None, form=values)
@@ -776,7 +778,7 @@ class ScheduleCardCapacityTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("app", "oc_group", ScopeKind.TOPIC, "omt_topic")
         project = Project("work", Path("/tmp"), True, 1)
         settings = SessionSettings.from_dict({"turn_settings": {"model_id": "m" * 128, "effort_id": "e" * 128, "service_tier_id": "s" * 128},
-            "reaction_pulse_enabled": True, "progress_card_enabled": True, "message_context_mode": "catch-up"}).to_dict()
+            "reaction_pulse_enabled": True, "progress_card_enabled": True, "completion_mention_enabled": True, "message_context_mode": "catch-up"}).to_dict()
         for instructions in ("a" * 1000, "汉" * 1000, "😀" * 1000, "\x01" * 1000):
             with self.subTest(utf8_bytes=len(instructions.encode("utf-8"))):
                 plan = {"id": "plan-one", "revision": 1, "name": "名称" * 100,

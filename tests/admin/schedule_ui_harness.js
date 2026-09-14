@@ -10,7 +10,7 @@ const envelope = (mode) => ({
   target: { resource: mode === "create" ? "schedule-registry" : "schedule", targetId: "plan-exact" },
 });
 const defaultSessionSettings = { turn_settings: { model_id: "native-default", effort_id: "medium", service_tier_id: "default" },
-  reaction_pulse_enabled: false, progress_card_enabled: false, message_context_mode: "current-only" };
+  reaction_pulse_enabled: false, progress_card_enabled: false, completion_mention_enabled: true, message_context_mode: "current-only" };
 const models = [{ id: "native-default", display_name: "Native default", default_effort_id: "medium", default_service_tier_id: "default",
   efforts: [{ id: "medium", description: "Medium" }, { id: "high", description: "High" }],
   service_tiers: [{ id: "default", name: "Standard" }, { id: "priority", name: "Fast" }] }];
@@ -389,13 +389,15 @@ async function refresh() { await loadSchedules(); return true; }
   changeScheduleSessionSettings("reactions");
   scheduleInput("progress").checked = true;
   changeScheduleSessionSettings("progress");
+  scheduleInput("completion-mention").checked = false;
+  changeScheduleSessionSettings("completion-mention");
   scheduleInput("context").value = "catch-up";
   changeScheduleSessionSettings("context");
   assert.equal(scheduleInput("save").disabled, true);
   await previewSchedule();
   const previewQuery = new URL(gets.at(-1), "http://localhost").searchParams;
   const selectedSettings = { turn_settings: { model_id: "native-default", effort_id: "high", service_tier_id: "priority" },
-    reaction_pulse_enabled: true, progress_card_enabled: true, message_context_mode: "catch-up" };
+    reaction_pulse_enabled: true, progress_card_enabled: true, completion_mention_enabled: false, message_context_mode: "catch-up" };
   assert.deepEqual(JSON.parse(previewQuery.get("session_settings")), selectedSettings);
   await saveSchedule({ preventDefault() {} });
   assert.deepEqual(posts.at(-1).body.definition.session_settings, selectedSettings);

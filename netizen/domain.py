@@ -234,6 +234,7 @@ class CardControlIntent:
     service_tier_id: str | None = None
     reaction_pulse_enabled: bool | None = None
     progress_card_enabled: bool | None = None
+    completion_mention_enabled: bool | None = None
     message_context_mode: MentionContextMode | None = None
     side_id: str | None = None
     page: int | None = None
@@ -319,6 +320,8 @@ class ReplyCardActivityModule:
 @dataclass(frozen=True, slots=True)
 class ReplyCardResultModule:
     content: str
+    # One terminal delivery only; never retained in file-page callbacks.
+    completion_mention_user_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
