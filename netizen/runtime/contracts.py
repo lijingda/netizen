@@ -72,6 +72,10 @@ class ThreadStopping(RuntimeError):
     pass
 
 
+class ThreadOccupied(RuntimeError):
+    """The exact Thread resume was rejected because another writer owns it."""
+
+
 class ThreadRunningConfiguration(RuntimeError):
     pass
 

@@ -80,6 +80,7 @@ from netizen.codex_runtime import (
     ThreadLifecycleStateUnknown,
     ThreadNotArchived,
     ThreadNotMaterialized,
+    ThreadOccupied,
     ThreadReleaseError,
     ThreadRunningConfiguration,
     ThreadSubscriptionState,
@@ -1060,6 +1061,27 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.parent_binding_id, binding.id)
         self.assertEqual(snapshot.topic_id, record.topic_id)
         self.assertEqual(snapshot.state, SideSessionState.OPEN)
+
+    async def test_occupied_parent_rejects_side_before_fork_without_closing_service(
+        self,
+    ) -> None:
+        binding = self.materialized_binding()
+        self.codex.resume_errors.append(InvalidRequestError(
+            -32600, "thread native-parent already has an active writer",
+        ))
+
+        with self.assertRaises(ThreadOccupied):
+            await self.open_side_for_binding(binding)
+
+        self.assertEqual(self.codex.resume_calls, [
+            ("native-parent", {"include_turns": False}),
+        ])
+        self.assertEqual(self.codex.fork_calls, [])
+        self.assertEqual(self.side_control.inject_calls, [])
+        self.assertEqual(self.cleanup.calls, [])
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-parent")
+        self.assertEqual(self.store.active_binding(self.scope.key).id, binding.id)
+        self.assertTrue(self.runtime._accepting)
 
     async def test_three_turns_reuse_one_thread_and_running_input_steers(self) -> None:
         _binding, record, snapshot = await self.open_side()
@@ -3858,6 +3880,53 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self.runtime.capture_submission_admission(binding.id)
         self.assertTrue(self.runtime._accepting)
 
+    async def test_occupied_thread_after_unarchive_retains_unknown_lifecycle(self) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        self.store.deactivate(scope_key=self.scope.key, binding_id=binding.id)
+        self.codex.thread_list_pages = [SimpleNamespace(
+            data=[SimpleNamespace(id="native-1", name=None, preview="archived")],
+            next_cursor=None,
+        )]
+        self.codex.resume_errors.append(InvalidRequestError(
+            -32600, "thread native-1 already has an active writer",
+        ))
+
+        with self.assertRaises(ThreadLifecycleStateUnknown):
+            await self.runtime.restore_as_current_exact(binding.id)
+
+        self.assertEqual(self.codex.unarchive_calls, ["native-1"])
+        self.assertEqual(self.codex.resume_calls, [
+            ("native-1", {"include_turns": False}),
+        ])
+        self.assertEqual(self.runtime.lifecycle_state(binding.id).state,
+                         ThreadLifecycleState.UNKNOWN)
+        self.assertFalse(self.store.get(binding.id).active)
+        self.assertIsNone(self.store.active_binding(self.scope.key))
+        self.assertTrue(self.runtime._accepting)
+
+    async def test_occupied_thread_releases_rename_reservation_for_later_retry(
+        self,
+    ) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        self.codex.resume_errors.append(InvalidRequestError(
+            -32600, "thread native-1 already has an active writer",
+        ))
+
+        with self.assertRaises(ThreadOccupied):
+            await self.runtime.rename_exact(binding.id, "new name")
+
+        self.assertEqual(self.codex.set_name_calls, [])
+        self.assertIsNone(self.runtime.lifecycle_state(binding.id))
+        self.assertTrue(self.runtime._accepting)
+        self.assertEqual(self.cleanup.calls, [])
+        self.assertEqual(await self.runtime.rename_exact(binding.id, "new name"), "new name")
+        self.assertEqual(self.codex.set_name_calls, [("native-1", "new name")])
+        self.assertEqual(self.codex.resume_calls, [
+            ("native-1", {"include_turns": False}),
+        ] * 2)
+
     async def test_thread_metadata_rejects_repeated_pagination_cursor(self) -> None:
         self.codex.thread_list_pages = [
             SimpleNamespace(data=[], next_cursor="repeat"),
@@ -5602,6 +5671,47 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(control.clear_calls, ["native-1", "native-1"])
         self.assertIsNone(control.persisted)
 
+    async def test_occupied_thread_rejects_goal_controls_before_mutation(self) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        binding = self.store.get(binding.id)
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+
+        for operation in ("start", "resume", "clear"):
+            with self.subTest(operation=operation):
+                control.persisted = (
+                    None if operation == "start" else goal_snapshot(GoalStatus.PAUSED)
+                )
+                persisted = control.persisted
+                self.codex.resume_errors.append(InvalidRequestError(
+                    -32600, "thread native-1 already has an active writer",
+                ))
+                with self.assertRaises(ThreadOccupied):
+                    if operation == "start":
+                        await self.runtime.start_goal(
+                            binding=binding, cwd=self.cwd, objective="new goal",
+                            owner_id="ou_user", origin=object(),
+                        )
+                    elif operation == "resume":
+                        await self.runtime.resume_goal(
+                            binding=binding, owner_id="ou_user", origin=object(),
+                        )
+                    else:
+                        await self.runtime.clear_goal(binding)
+                self.assertIs(control.persisted, persisted)
+                self.assertIsNone(self.runtime.active_goal(binding.id))
+                self.assertTrue(self.runtime._accepting)
+
+        self.assertEqual(control.start_calls, [])
+        self.assertEqual(control.resume_calls, [])
+        self.assertEqual(control.clear_calls, [])
+        self.assertEqual(self.codex.turn_inputs, [])
+        self.assertEqual(self.cleanup.calls, [])
+        self.assertEqual(self.codex.resume_calls, [
+            ("native-1", {"include_turns": False}),
+        ] * 3)
+
     async def test_cancelled_goal_resume_keeps_route_owned_without_second_cleanup(
         self,
     ) -> None:
@@ -6200,6 +6310,27 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self.submit(self.store.get(binding.id), "must fail closed")
         await self.runtime.cancel_tasks()
 
+    async def test_occupied_thread_rejects_compaction_before_reserving_or_mutating(
+        self,
+    ) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-1")
+        self.codex.resume_errors.append(InvalidRequestError(
+            -32600, "thread native-1 already has an active writer",
+        ))
+
+        with self.assertRaises(ThreadOccupied):
+            await self.runtime.compact(
+                binding=self.store.get(binding.id),
+                owner_id="ou_user", origin=object(),
+            )
+
+        self.assertEqual(self.codex.compact_calls, [])
+        self.assertEqual(self.codex.read_calls, [])
+        self.assertEqual(self.cleanup.calls, [])
+        self.assertFalse(self.runtime.is_compacting(binding.id))
+        self.assertTrue(self.runtime._accepting)
+
     async def test_unknown_compact_terminal_retains_binding_and_closes_admission(
         self,
     ) -> None:
@@ -6406,6 +6537,117 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "服务正在停止"):
             await self.submit(binding, "must not retry")
         self.assertEqual(len(self.codex.resume_calls), 1)
+
+    async def test_occupied_thread_preserves_binding_and_other_work_then_resumes_same_id(
+        self,
+    ) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-existing")
+        self.codex.resume_errors.append(InvalidRequestError(
+            -32600, "thread native-existing already has an active writer",
+        ))
+
+        with self.assertRaises(ThreadOccupied):
+            await self.submit(binding, "blocked input")
+
+        self.assertEqual(self.codex.resume_calls, [
+            ("native-existing", {"include_turns": False}),
+        ])
+        self.assertEqual(self.codex.start_kwargs, [])
+        self.assertEqual(self.codex.turn_inputs, [])
+        self.assertEqual(self.cleanup.calls, [])
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-existing")
+        self.assertEqual(self.store.active_binding(self.scope.key).id, binding.id)
+        self.assertTrue(self.runtime._accepting)
+
+        self.install_model_catalog()
+        await self.runtime.model_catalog()
+        self.assertEqual(self.codex.model_calls, 1)
+        other = self.binding(FeishuScope("cli_test", "oc_other", ScopeKind.DIRECT))
+        other_submission = await self.submit(other, "independent input")
+        await self.finish(self.codex.handles[0], other_submission)
+
+        resumed = await self.submit(self.store.get(binding.id), "retry explicitly")
+        self.assertEqual(resumed.thread_id, "native-existing")
+        self.assertEqual(self.codex.resume_calls, [
+            ("native-existing", {"include_turns": False}),
+            ("native-existing", {"include_turns": False}),
+        ])
+        self.assertEqual(self.codex.turn_inputs, [
+            (other_submission.thread_id, "independent input"),
+            ("native-existing", "retry explicitly"),
+        ])
+        await self.finish(self.codex.handles[-1], resumed)
+
+    async def test_unverified_writer_errors_still_close_service_admission(self) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "native-existing")
+        message = "thread native-existing already has an active writer"
+        errors = (
+            InvalidRequestError(-32600, "thread different already has an active writer"),
+            InvalidRequestError(-32603, message),
+            InternalRpcError(-32603, message),
+            RuntimeError(message),
+            InvalidRequestError(-32600, f"{message}; additional failure"),
+        )
+        for error in errors:
+            with self.subTest(error_type=type(error).__name__, error=str(error)):
+                codex = FakeCodex()
+                codex.resume_errors.append(error)
+                runtime = CodexRuntime(
+                    codex=codex,
+                    bindings=self.store,
+                    terminal_cleanup=self.cleanup,
+                    on_completion=AsyncMock(),
+                    poll_interval_seconds=0,
+                )
+                with self.assertRaises(TurnStartFailed):
+                    await runtime.submit(
+                        binding=binding, cwd=self.cwd, input="must fail closed",
+                        owner_id="ou_user", origin=object(),
+                    )
+                self.assertFalse(runtime._accepting)
+                self.assertEqual(codex.resume_calls, [
+                    ("native-existing", {"include_turns": False}),
+                ])
+                self.assertEqual(codex.turn_inputs, [])
+
+    async def test_writer_error_from_start_or_turn_is_not_a_safe_resume_rejection(
+        self,
+    ) -> None:
+        binding = self.binding()
+        for stage in ("thread_start", "turn_start"):
+            with self.subTest(stage=stage):
+                codex = FakeCodex()
+                error = InvalidRequestError(
+                    -32600, "thread native-existing already has an active writer",
+                )
+                if stage == "thread_start":
+                    codex.start_errors.append(error)
+                else:
+                    self.store.assign_native_thread_id(binding.id, "native-existing")
+                    codex.turn_errors_after_start.append(error)
+                runtime = CodexRuntime(
+                    codex=codex,
+                    bindings=self.store,
+                    terminal_cleanup=self.cleanup,
+                    on_completion=AsyncMock(),
+                    poll_interval_seconds=0,
+                )
+                with self.assertRaises(TurnStartFailed):
+                    await runtime.submit(
+                        binding=binding, cwd=self.cwd, input="uncertain operation",
+                        owner_id="ou_user", origin=object(),
+                    )
+                self.assertFalse(runtime._accepting)
+                with self.assertRaises(RuntimeClosed):
+                    await runtime.submit(
+                        binding=binding, cwd=self.cwd, input="must not repeat",
+                        owner_id="ou_user", origin=object(),
+                    )
+                self.assertEqual(len(codex.start_kwargs), stage == "thread_start")
+                self.assertEqual(len(codex.turn_inputs), stage == "turn_start")
+                self.assertEqual(self.cleanup.calls, [])
 
     async def test_later_turn_resumes_exact_id_without_overrides(self) -> None:
         binding = self.binding()
@@ -7538,6 +7780,38 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.outcomes[0].error)
         self.assertEqual(self.outcomes[0].turn_id, submission.turn_id)
         self.assertEqual(self.outcomes[0].final_response, "done:turn-1")
+
+    async def test_occupied_thread_during_turn_recovery_preserves_active_identity(
+        self,
+    ) -> None:
+        binding = self.binding()
+        self.codex.complete_immediately = True
+        self.codex.read_errors.append(InternalRpcError(-32603, "metadata unavailable"))
+        self.codex.read_statuses.append("notLoaded")
+        self.codex.resume_errors.append(InvalidRequestError(
+            -32600, "thread native-1 already has an active writer",
+        ))
+
+        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+            submission = await self.submit(binding)
+            submission.release_receipt_attempt()
+            await self.runtime.wait_idle()
+
+        active = self.runtime.active_turn(binding.id)
+        self.assertEqual(active.state, ActiveState.OBSERVATION_UNAVAILABLE)
+        self.assertEqual(active.turn_id, submission.turn_id)
+        self.assertEqual(active.thread_id, submission.thread_id)
+        self.assertEqual(self.codex.resume_calls, [
+            (submission.thread_id, {"include_turns": False}),
+        ])
+        self.assertEqual(len(self.codex.handles), 1)
+        self.assertEqual(len(self.outcomes), 1)
+        self.assertIsInstance(self.outcomes[0], TurnObservationUnavailableOutcome)
+        self.assertEqual(self.outcomes[0].turn_id, submission.turn_id)
+        self.assertTrue(self.runtime._accepting)
+        self.assertEqual(self.cleanup.calls, [])
+        with self.assertRaises(TurnObservationUnavailable):
+            await self.runtime.capture_submission_admission(binding.id)
 
     async def test_paginated_full_read_retries_known_materialization_errors_without_resume(
         self,

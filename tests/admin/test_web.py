@@ -60,6 +60,7 @@ from netizen.codex_runtime import (
     StopDisposition,
     ThreadSubscriptionSnapshot,
     ThreadSubscriptionState,
+    ThreadOccupied,
 )
 from netizen.domain import GoalStatus, ScopeKind
 from netizen.management import (
@@ -1154,6 +1155,30 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(name == "set-enabled" for name, _values in self.management.calls)
         )
+
+    async def test_occupied_thread_returns_conflict_and_keeps_management_available(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        status, _headers, page = await self.json_get(
+            "/api/v1/sessions?inventoryState=all", session,
+        )
+        self.assertEqual(status, 200)
+        item = next(row for row in page["items"] if row["bindingId"] == "binding-native")
+        message = "该会话正被其他 Codex 实例占用，请从占用方归档后回飞书恢复。"
+        with patch.object(
+            self.management, "rename_exact_binding", side_effect=ThreadOccupied(message),
+        ):
+            status, _headers, payload = await self.json_post(
+                "/api/v1/sessions/rename", session,
+                _action_payload(item["actions"]["rename"], name="Renamed"),
+            )
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["code"], "thread_occupied")
+        self.assertEqual(payload["message"], message)
+        status, _headers, _page = await self.json_get(
+            "/api/v1/sessions?inventoryState=all", session,
+        )
+        self.assertEqual(status, 200)
 
     async def test_all_session_and_side_mutation_routes_are_reachable(self) -> None:
         self.runner.open_admission()

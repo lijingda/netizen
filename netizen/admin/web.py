@@ -108,6 +108,7 @@ from ..runtime.contracts import (
     ThreadLifecycleStateUnknown,
     ThreadNotArchived,
     ThreadNotMaterialized,
+    ThreadOccupied,
     ThreadReleaseError,
     ThreadReleaseStateUnknown,
     ThreadRunningConfiguration,
@@ -2428,6 +2429,8 @@ _UPDATE_HTTP_ERRORS = {
 def _map_error(error: BaseException) -> AdminWebError | None:
     if isinstance(error, AdminWebError):
         return error
+    if isinstance(error, ThreadOccupied):
+        return AdminWebError(409, "thread_occupied", str(error))
     if isinstance(error, UpdateError):
         mapped = _UPDATE_HTTP_ERRORS.get(error.code)
         return AdminWebError(*mapped) if mapped is not None else None

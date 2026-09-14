@@ -167,6 +167,16 @@ Scheduled Plan 来源，不伪造真人 Current Prompt Message；新话题的机
 
 已有 native ID 时只调用 `thread_resume(exact_id)`，不传 cwd、approval、sandbox、
 model、config 或 env override。
+开始普通 Turn、Goal、compaction、Side fork 或 rename 前，若这一 exact resume RPC
+返回公开 SDK `InvalidRequestError`，且 code 为 `-32600`、message 精确等于
+`thread <exact_id> already has an active writer`，视为明确的占用拒绝：只拒绝本次操作，
+不关闭全局 admission，不建立活动槽或改变 Binding/native identity，不自动重试、归档、
+清理或转移会话。提示用户在持锁的 Codex App 或 CLI 内归档，再从飞书
+`/sessions archived` 恢复并切换。其他会话和管理功能仍可使用；占用释放后用户可重新提交。
+错误类型、code、Thread ID 或完整 message 不匹配，以及取消、响应丢失、start/turn/fork
+等其他 mutation 的错误，继续遵守原操作的未知副作用规则。这一窄分类只在 resume RPC
+边界生效，不检查异常链或其他操作抛出的同名消息。已经 unarchive 后的 resume 失败仍保留
+Binding-local lifecycle-unknown；已启动 Turn 的观测恢复也保留原 exact Turn 与观测状态。
 `thread.turn()` 若没有返回 handle，其副作用结果无法确认：服务立即关闭全部新
 admission 并要求重启，不能把 Binding 当 idle 再启动第二轮。
 
