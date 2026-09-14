@@ -142,6 +142,7 @@ from .runtime.contracts import (
     ThreadSubscriptionSnapshot,
     ThreadSubscriptionState,
     ThreadStopping,
+    ThreadOccupied,
     TurnProgressSnapshot,
     TurnActivitySnapshot,
     TurnInterruptFailed,
@@ -1155,6 +1156,7 @@ class ChannelApplication:
             ThreadNotMaterialized,
             ThreadRunningConfiguration,
             ThreadStopping,
+            ThreadOccupied,
             SteerRace,
             TerminalCleanupFailed,
             TurnInterruptFailed,
@@ -1238,6 +1240,7 @@ class ChannelApplication:
             ThreadLifecycleError,
             ThreadRunningConfiguration,
             ThreadStopping,
+            ThreadOccupied,
             TurnStartFailed,
         ) as error:
             if (

@@ -92,6 +92,7 @@ from netizen.codex_runtime import (
     ThreadLifecycleError,
     ThreadReleaseStateUnknown,
     ThreadRunningConfiguration,
+    ThreadOccupied,
     ThreadSubscriptionSnapshot,
     ThreadSubscriptionState,
     TurnProgressSnapshot,
@@ -4382,6 +4383,29 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("会话已重命名", str(self.channel.updates[-1][1]))
 
+    async def test_occupied_thread_keeps_actionable_card_error(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
+            "native-one", "Old name", "first task",
+        )
+        await self.app.handle_message(
+            FakeMessage("/rename", message_id="om_occupied_rename_card")
+        )
+        field = _elements(self.channel.replies[-1][1].card, "input")[0]["name"]
+        message = "该会话正被其他 Codex 实例占用，请从占用方归档后回飞书恢复。"
+        with patch.object(self.runtime, "rename_exact", side_effect=ThreadOccupied(message)):
+            await self.app.handle_card_action(
+                self.direct_card_event(
+                    {field: "New title"}, message_id="om_occupied_rename_result",
+                )
+            )
+
+        self.assertIn(message, str(self.channel.updates[-1][1]))
+        self.assertEqual(self.runtime.rename_binding_calls, [])
+
     async def test_archive_confirmation_retains_binding_and_clears_current(self) -> None:
         await self.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
@@ -8134,6 +8158,20 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ),
             1,
         )
+
+    async def test_occupied_thread_keeps_actionable_message(self) -> None:
+        await self.new()
+        message = (
+            "该会话正被其他 Codex 实例占用。请在占用方归档，"
+            "再通过 /sessions archived 恢复并切换。"
+        )
+        with patch.object(self.runtime, "submit", side_effect=ThreadOccupied(message)):
+            await self.app.handle_message(
+                FakeMessage("continue", message_id="om_occupied_prompt")
+            )
+
+        self.assertEqual(self.channel.replies[-1][1], message)
+        self.assertEqual(self.runtime.submit_calls, [])
 
     async def test_observation_unavailable_rejection_keeps_actionable_message(
         self,

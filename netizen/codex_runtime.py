@@ -50,6 +50,7 @@ from .runtime.contracts import (
     NativeCodex,
     RuntimeClosed,
     ThreadStopping,
+    ThreadOccupied,
     ThreadRunningConfiguration,
     ThreadCompacting,
     ThreadNotMaterialized,
@@ -1045,8 +1046,8 @@ class CodexRuntime:
                 )
             if parent_active is None:
                 try:
-                    parent_thread = await self._codex.thread_resume(
-                        current.native_thread_id, include_turns=False
+                    parent_thread = await self._resume_thread_for_operation(
+                        current.native_thread_id
                     )
                     if parent_thread.id != current.native_thread_id:
                         self.close_admission()
@@ -1074,7 +1075,7 @@ class CodexRuntime:
                         )
                     if getattr(native_parent, "ephemeral", None) is not False:
                         raise RuntimeError("parent Thread persistence shape changed")
-                except ThreadRunningConfiguration:
+                except (ThreadRunningConfiguration, ThreadOccupied):
                     raise
                 except asyncio.CancelledError:
                     raise
@@ -1991,6 +1992,9 @@ class CodexRuntime:
                 thread = await self._lifecycle_thread_locked(binding)
                 mutation_attempted = True
                 await thread.set_name(normalized)
+            except ThreadOccupied:
+                self._finish_lifecycle_locked(operation)
+                raise
             except asyncio.CancelledError:
                 if mutation_attempted:
                     self._retain_unknown_lifecycle(operation)
@@ -2903,13 +2907,15 @@ class CodexRuntime:
                 else:
                     # Do not override cwd, sandbox, model, approval, config, or
                     # env while resuming an existing native Thread.
-                    thread = await self._codex.thread_resume(
-                        binding.native_thread_id, include_turns=False
+                    thread = await self._resume_thread_for_operation(
+                        binding.native_thread_id
                     )
                     if thread.id != binding.native_thread_id:
                         raise RuntimeError(
                             "thread_resume returned a different native ID"
                         )
+            except ThreadOccupied:
+                raise
             except asyncio.CancelledError:
                 self.close_admission()
                 raise
@@ -3875,6 +3881,31 @@ class CodexRuntime:
             self._schedule_known_subscription_locked(binding.id, thread.id)
             return True
 
+    async def _resume_thread_for_operation(self, thread_id: str) -> NativeThread:
+        """Recognize only an exact writer rejection before a new operation.
+
+        A timeout, another invalid request, or the same text from a different
+        operation is not proof that the requested operation had no side effects.
+        Post-mutation restore and active-Turn recovery retain their own rules.
+        """
+
+        try:
+            return await self._codex.thread_resume(thread_id, include_turns=False)
+        except InvalidRequestError as error:
+            if (
+                error.code == -32600
+                and error.message == f"thread {thread_id} already has an active writer"
+            ):
+                raise ThreadOccupied(
+                    "该会话正被其他 Codex 实例占用，本次操作未执行。"
+                    "请在占用该会话的 Codex App 中归档，或在占用它的 CLI 会话中执行 /archive；"
+                    "然后回到飞书发送 /sessions archived，选择“恢复并切换”后重发消息。"
+                    "其他会话和管理功能可继续使用。\n\n"
+                    "归档会结束目标会话及其子会话的运行活动；"
+                    "App 托管的 worktree 还可能被清理。"
+                ) from error
+            raise
+
     async def _open_goal_thread(
         self,
         *,
@@ -3890,8 +3921,8 @@ class CodexRuntime:
                 thread = await self._codex.thread_start(cwd=str(cwd))
                 self._bindings.assign_native_thread_id(binding.id, thread.id)
             else:
-                thread = await self._codex.thread_resume(
-                    binding.native_thread_id, include_turns=False
+                thread = await self._resume_thread_for_operation(
+                    binding.native_thread_id
                 )
                 if thread.id != binding.native_thread_id:
                     raise RuntimeError("thread_resume returned a different native ID")
@@ -3899,7 +3930,7 @@ class CodexRuntime:
             record = self._mark_thread_subscribed_locked(current, thread)
             self._schedule_subscription_release_locked(record)
             return thread
-        except GoalNotMaterialized:
+        except (GoalNotMaterialized, ThreadOccupied):
             raise
         except asyncio.CancelledError:
             self.close_admission()
@@ -4192,7 +4223,9 @@ class CodexRuntime:
             thread = goal.thread
         else:
             try:
-                thread = await self._codex.thread_resume(thread_id, include_turns=False)
+                thread = await self._resume_thread_for_operation(thread_id)
+            except ThreadOccupied:
+                raise
             except BaseException:
                 self._schedule_known_subscription_locked(binding.id, thread_id)
                 raise
@@ -4244,8 +4277,8 @@ class CodexRuntime:
                     "请先发送一条真实任务，再使用 /compact。"
                 )
             try:
-                thread = await self._codex.thread_resume(
-                    binding.native_thread_id, include_turns=False
+                thread = await self._resume_thread_for_operation(
+                    binding.native_thread_id
                 )
                 if thread.id != binding.native_thread_id:
                     raise RuntimeError(
@@ -4253,6 +4286,8 @@ class CodexRuntime:
                     )
                 record = self._mark_thread_subscribed_locked(binding, thread)
                 self._schedule_subscription_release_locked(record)
+            except ThreadOccupied:
+                raise
             except asyncio.CancelledError:
                 self.close_admission()
                 raise
