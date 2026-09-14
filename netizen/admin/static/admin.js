@@ -2229,16 +2229,18 @@ for (const button of document.querySelectorAll("[data-refresh]")) {
 
 document.querySelector("#register-project").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
   await mutate("/api/v1/projects/register", state.projects.actions.register, { alias: form.get("alias"), path: form.get("path") });
-  event.currentTarget.reset();
+  formElement.reset();
 });
 
 document.querySelector("#create-project").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
   await mutate("/api/v1/projects/create-directory", state.projects.actions.createDirectory, { alias: form.get("alias"), path: form.get("path") || null });
-  event.currentTarget.reset();
+  formElement.reset();
 });
 
 document.querySelector("#session-filter").addEventListener("submit", (event) => {
