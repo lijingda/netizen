@@ -2751,9 +2751,12 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 self.runtime._subscriptions[second.id],
                 delay=0.01,
             )
+            inactive_timer = self.runtime._subscriptions[second.id].idle_task
+            assert inactive_timer is not None
         self.store.activate(scope_key=self.scope.key, binding_id=second.id)
 
-        await asyncio.sleep(0.03)
+        # This timer rechecks the pointer and schedules a separate idle window.
+        await asyncio.wait_for(asyncio.shield(inactive_timer), timeout=1.0)
 
         snapshot = self.runtime.thread_subscription_snapshot(second.id)
         assert snapshot is not None
