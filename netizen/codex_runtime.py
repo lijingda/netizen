@@ -1740,6 +1740,7 @@ class CodexRuntime:
         deadline: float,
         max_pages: int = _THREAD_CATALOG_MAX_PAGES,
         max_items: int = _THREAD_CATALOG_MAX_ITEMS,
+        use_state_db_only: bool | None = None,
     ) -> NativeThreadCatalog:
         """Read one complete bounded native catalog for a request-scoped view."""
 
@@ -1747,6 +1748,8 @@ class CodexRuntime:
             raise ValueError("archived must be boolean")
         if max_pages < 1 or max_items < 1:
             raise ValueError("native catalog limits must be positive")
+        if use_state_db_only is not None and not isinstance(use_state_db_only, bool):
+            raise ValueError("use_state_db_only must be boolean or None")
         loop = asyncio.get_running_loop()
         if deadline <= loop.time():
             raise ThreadCatalogDeadlineExceeded("native Thread catalog deadline elapsed")
@@ -1763,12 +1766,15 @@ class CodexRuntime:
                         raise ThreadCatalogLimitExceeded(
                             "native Thread catalog exceeded the page limit"
                         )
-                    response = await self._codex.thread_list(
-                        archived=archived,
-                        cursor=cursor,
-                        limit=_THREAD_LIST_PAGE_LIMIT,
-                        model_providers=[],
-                    )
+                    list_kwargs: dict[str, object] = {
+                        "archived": archived,
+                        "cursor": cursor,
+                        "limit": _THREAD_LIST_PAGE_LIMIT,
+                        "model_providers": [],
+                    }
+                    if use_state_db_only is not None:
+                        list_kwargs["use_state_db_only"] = use_state_db_only
+                    response = await self._codex.thread_list(**list_kwargs)
                     page_count += 1
                     data = getattr(response, "data", None)
                     if not isinstance(data, list):
