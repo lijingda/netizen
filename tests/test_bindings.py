@@ -150,6 +150,31 @@ class BindingStoreTest(unittest.TestCase):
             )
         self.assertIsNone(self.store.get(binding.id).turn_settings)
 
+    def test_completion_mention_defaults_on_and_changes_only_feedback_revision(self) -> None:
+        binding = self.create()
+        self.assertTrue(binding.task_feedback.completion_mention_enabled)
+        arguments = dict(
+            binding_id=binding.id, expected_settings_revision=1,
+            expected_context_revision=1, expected_feedback_revision=1,
+            settings=None, message_context_mode=MentionContextMode.CURRENT_ONLY,
+            context_anchor=None,
+        )
+        changed = self.store.set_configuration(
+            **arguments, task_feedback=BindingTaskFeedback(completion_mention_enabled=False),
+        )
+        self.assertEqual(changed.task_feedback, BindingTaskFeedback(False, False, False))
+        self.assertEqual((changed.settings_revision, changed.context_revision, changed.feedback_revision), (1, 1, 2))
+        with self.assertRaises(BindingFeedbackRevisionConflict):
+            self.store.set_configuration(**arguments, task_feedback=BindingTaskFeedback())
+        self.assertEqual(self.store.get(binding.id), changed)
+        for value in (2, -1, "invalid", None):
+            with self.subTest(value=value), self.assertRaises(sqlite3.IntegrityError):
+                self.store._connection.execute(
+                    "UPDATE bindings SET completion_mention_enabled=? WHERE binding_id=?", (value, binding.id),
+                )
+        with self.assertRaises(ValueError):
+            BindingTaskFeedback(completion_mention_enabled=1)  # type: ignore[arg-type]
+
     def test_task_feedback_is_persistent_atomic_and_revision_guarded(self) -> None:
         binding = self.create()
         enabled = BindingTaskFeedback(
@@ -906,7 +931,7 @@ class BindingStoreTest(unittest.TestCase):
 
 class BindingStoreManagementSchemaTest(unittest.TestCase):
     def test_unsupported_database_versions_are_rejected_without_changes(self) -> None:
-        for version in (3, 6, 7, 8, 9, 11):
+        for version in (3, 6, 7, 8, 9, 10, 12):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as raw:
                 path = Path(raw) / "channel.sqlite3"
                 with sqlite3.connect(path) as connection:

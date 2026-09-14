@@ -5108,6 +5108,7 @@ class CodexRuntime:
             result=result,
             error=error,
             background_cleanup_requested=active.cleanup_succeeded,
+            stop_requested=active.state is ActiveState.STOPPING,
             task_feedback=active.task_feedback,
             feedback_revision=active.feedback_revision,
             activity=activity,

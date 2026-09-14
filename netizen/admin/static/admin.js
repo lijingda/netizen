@@ -1634,7 +1634,7 @@ function resetScheduleEndOffset() {
 }
 
 function defaultScheduleSessionSettings() {
-  return { turn_settings: null, reaction_pulse_enabled: false, progress_card_enabled: true,
+  return { turn_settings: null, reaction_pulse_enabled: false, progress_card_enabled: true, completion_mention_enabled: true,
     message_context_mode: "current-only" };
 }
 
@@ -1644,6 +1644,7 @@ function scheduleSessionSummary(settings) {
     settings.message_context_mode === "catch-up" ? "补齐未读上下文" : "当前消息"];
   if (settings.reaction_pulse_enabled) labels.push("表情反馈");
   if (settings.progress_card_enabled) labels.push("进度卡片");
+  if (settings.completion_mention_enabled) labels.push("结束时 @ 提醒");
   return labels.join(" · ");
 }
 
@@ -1682,6 +1683,7 @@ function renderScheduleSessionSettings() {
   }
   scheduleInput("reactions").checked = settings.reaction_pulse_enabled;
   scheduleInput("progress").checked = settings.progress_card_enabled;
+  scheduleInput("completion-mention").checked = settings.completion_mention_enabled;
   scheduleInput("session-summary").textContent = scheduleSessionSummary(settings);
   const notes = [];
   if (editor.catalogMessage) notes.push(editor.catalogMessage);
@@ -1738,6 +1740,7 @@ function changeScheduleSessionSettings(field) {
   } else if (field === "context") settings.message_context_mode = scheduleInput("context").value;
   else if (field === "reactions") settings.reaction_pulse_enabled = scheduleInput("reactions").checked;
   else if (field === "progress") settings.progress_card_enabled = scheduleInput("progress").checked;
+  else if (field === "completion-mention") settings.completion_mention_enabled = scheduleInput("completion-mention").checked;
   invalidateSchedulePreview();
   renderScheduleSessionSettings();
 }
@@ -2265,7 +2268,7 @@ scheduleInput("editor").addEventListener("input", invalidateSchedulePreview);
 scheduleInput("kind").addEventListener("change", invalidateSchedulePreview);
 scheduleInput("editor").addEventListener("submit", saveSchedule);
 scheduleInput("chat").addEventListener("change", loadScheduleSessionOptions);
-for (const field of ["model", "effort", "tier", "context", "reactions", "progress"]) {
+for (const field of ["model", "effort", "tier", "context", "reactions", "progress", "completion-mention"]) {
   scheduleInput(field).addEventListener("change", () => changeScheduleSessionSettings(field));
 }
 scheduleInput("cancel").addEventListener("click", () => closeScheduleEditor());

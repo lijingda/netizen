@@ -29,6 +29,18 @@ _PROGRESS_CARD_MAX_CONSECUTIVE_FAILURES = 3
 _GOAL_REPLY_CARD_CACHE_LIMIT = 256
 
 
+def _retained_goal_projection(projection: ReplyCardProjection) -> ReplyCardProjection:
+    """Keep the delivered content without replaying its one-shot mention."""
+
+    result = projection.result
+    if result is None or result.completion_mention_user_id is None:
+        return projection
+    return replace(
+        projection,
+        result=replace(result, completion_mention_user_id=None),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _CardUpdateAttempt:
     """One public update call, retaining its response for terminal handoff."""
@@ -95,8 +107,12 @@ class _GoalReplyCardSession:
     failed: bool = False
     task: asyncio.Task[None] | None = None
 
+    def __post_init__(self) -> None:
+        self.projection = _retained_goal_projection(self.projection)
+
 
 class _GoalCardDelivery(Enum):
+    NOT_ATTEMPTED = "not-attempted"
     DELIVERED = "delivered"
     SUPERSEDED = "superseded"
     FAILED = "failed"
@@ -457,10 +473,10 @@ class _ReplyCardPresenter:
         turn_id: str,
         activity: SideTurnActivitySnapshot | None,
         render: Callable[[SideTurnActivitySnapshot], OutboundCard],
-    ) -> bool:
+    ) -> _CardUpdateAttempt | None:
         session = self._side_sessions.pop((side_id, thread_id, turn_id), None)
         if session is None:
-            return False
+            return None
         await self._stop_session(session)
         snapshot = activity or session.snapshot
         if (
@@ -472,9 +488,9 @@ class _ReplyCardPresenter:
                 "failed to finish Side progress card: activity identity mismatch",
                 extra={"side_id": session.side_id, "turn_id": session.turn_id},
             )
-            return False
+            return None
         try:
-            return await self._update_side(session, render(snapshot))
+            card = render(snapshot)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -482,7 +498,13 @@ class _ReplyCardPresenter:
                 "failed to render terminal Side progress card",
                 extra={"side_id": session.side_id, "turn_id": session.turn_id},
             )
-            return False
+            return None
+        return await self._attempt_update_message(
+            session.message_id,
+            card,
+            binding_id=f"side:{session.side_id}",
+            operation_id=session.turn_id,
+        )
 
     async def abandon_side(
         self,
@@ -660,7 +682,7 @@ class _ReplyCardPresenter:
 
         async with self._goal_lock:
             if self._closed:
-                return _GoalCardDelivery.FAILED
+                return _GoalCardDelivery.NOT_ATTEMPTED
             key = (binding_id, thread_id, generation)
             latest_run = self._goal_latest_runs.get(key)
             if latest_run is not None and latest_run != logical_turn_id:
@@ -761,7 +783,7 @@ class _ReplyCardPresenter:
         else:
             message_id = origin.message_id
         if message_id is None:
-            return _GoalCardDelivery.FAILED
+            return _GoalCardDelivery.NOT_ATTEMPTED
         try:
             card = reply_card(projection)
         except Exception:
@@ -769,7 +791,7 @@ class _ReplyCardPresenter:
                 "failed to render terminal Goal Reply Card",
                 extra={"binding_id": binding_id},
             )
-            return _GoalCardDelivery.FAILED
+            return _GoalCardDelivery.NOT_ATTEMPTED
         async with self._goal_card_lock:
             delivered = await self._update_message(
                 message_id,
@@ -1085,7 +1107,7 @@ class _ReplyCardPresenter:
             len(self._goal_cards) >= _GOAL_REPLY_CARD_CACHE_LIMIT
         ):
             self._goal_cards.pop(next(iter(self._goal_cards)))
-        self._goal_cards[key] = projection
+        self._goal_cards[key] = _retained_goal_projection(projection)
 
     def goal_message_id(
         self,
@@ -1312,7 +1334,7 @@ class _ReplyCardPresenter:
                         return
                     continue
                 session.revision = revision
-                session.projection = projection
+                session.projection = _retained_goal_projection(projection)
                 failures = 0
                 self._remember_goal_projection(
                     session.message_id,

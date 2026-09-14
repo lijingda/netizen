@@ -599,6 +599,17 @@ def _task_feedback_form_elements(
             "开启后会逐步更新任务状态与清单；"
             "完成后执行过程自动折叠。"
         ),
+        _form_label("结束时 @ 提醒"),
+        _static_select(
+            name=f"{prefix}_completion_mention",
+            placeholder="选择是否在任务结束时 @ 提醒",
+            options=(
+                ("关闭", _task_feedback_reference(False)),
+                ("开启（默认）", _task_feedback_reference(True)),
+            ),
+            initial_option=_task_feedback_reference(initial.completion_mention_enabled),
+        ),
+        _form_hint("任务完成或失败时 @ 本轮发起人；主动停止不提醒。定时任务自动首轮不提醒。"),
     ]
 
 
@@ -668,6 +679,7 @@ def decode_session_settings_fields(
     feedback = BindingTaskFeedback(
         _decode_task_feedback_reference(payload[f"{prefix}_task_reactions"], f"{prefix}_task_reactions"),
         _decode_task_feedback_reference(payload[f"{prefix}_progress_card"], f"{prefix}_progress_card"),
+        _decode_task_feedback_reference(payload[f"{prefix}_completion_mention"], f"{prefix}_completion_mention"),
     )
     catalog_fields = {f"{prefix}_effort", f"{prefix}_speed"}
     has_catalog_fields = catalog_fields.issubset(payload)
@@ -682,8 +694,14 @@ def decode_session_settings_fields(
     return SessionSettings(turn, feedback, context_mode)
 
 
+def _require_completion_mention_field(payload: Mapping[str, Any], *, prefix: str) -> None:
+    if f"{prefix}_completion_mention" not in payload:
+        raise CardActionError("会话配置卡片已过期，请重新打开配置卡片。")
+
+
 def decode_session_settings_form(payload: Mapping[str, Any], *, prefix: str) -> SessionSettings:
-    fields = {f"{prefix}_{name}" for name in ("model", "task_reactions", "progress_card")}
+    _require_completion_mention_field(payload, prefix=prefix)
+    fields = {f"{prefix}_{name}" for name in ("model", "task_reactions", "progress_card", "completion_mention")}
     context = {f"{prefix}_context_mode"} if f"{prefix}_context_mode" in payload else set()
     catalog = {f"{prefix}_effort", f"{prefix}_speed"}
     if frozenset(payload) not in {frozenset(fields | context), frozenset(fields | context | catalog)}:
@@ -1581,7 +1599,8 @@ def _context_mode_summary(mode: MentionContextMode) -> str:
 def _task_feedback_summary(feedback: BindingTaskFeedback) -> str:
     pulse = "开启" if feedback.reaction_pulse_enabled else "关闭"
     progress = "开启" if feedback.progress_card_enabled else "关闭"
-    return f"执行中表情闪烁：{pulse}\n进度卡：{progress}"
+    mention = "开启" if feedback.completion_mention_enabled else "关闭"
+    return f"执行中表情闪烁：{pulse}\n进度卡：{progress}\n结束时 @ 提醒：{mention}"
 
 
 def error_card(message: str, *, scope: FeishuScope | None = None) -> OutboundCard:
@@ -1916,11 +1935,13 @@ def _decode_new_binding_form(
     if tag != "button" or not message_id or not sender_id:
         raise CardActionError("会话配置表单回调不完整。")
     payload = dict(form_value)
+    _require_completion_mention_field(payload, prefix="new")
     base_fields = {
         "new_project",
         "new_model",
         "new_task_reactions",
         "new_progress_card",
+        "new_completion_mention",
     }
     context_fields = (
         {"new_context_mode"} if "new_context_mode" in payload else set()
@@ -1953,6 +1974,7 @@ def _decode_new_binding_form(
         message_context_mode=settings.message_context_mode,
         reaction_pulse_enabled=settings.task_feedback.reaction_pulse_enabled,
         progress_card_enabled=settings.task_feedback.progress_card_enabled,
+        completion_mention_enabled=settings.task_feedback.completion_mention_enabled,
     )
 
 
@@ -1967,10 +1989,12 @@ def _decode_config_form(
     if tag != "button" or not message_id or not sender_id:
         raise CardActionError("会话配置表单回调不完整。")
     payload = dict(form_value)
+    _require_completion_mention_field(payload, prefix="config")
     base_fields = {
         "config_model",
         "config_task_reactions",
         "config_progress_card",
+        "config_completion_mention",
     }
     context_fields = (
         {"config_context_mode"} if "config_context_mode" in payload else set()
@@ -2007,6 +2031,7 @@ def _decode_config_form(
         message_context_mode=settings.message_context_mode,
         reaction_pulse_enabled=settings.task_feedback.reaction_pulse_enabled,
         progress_card_enabled=settings.task_feedback.progress_card_enabled,
+        completion_mention_enabled=settings.task_feedback.completion_mention_enabled,
     )
 
 

@@ -196,9 +196,13 @@ Binding-scoped intent。Netizen 后续每次启动新 Turn 前都按 live 模型
 Turn 上重复应用的客户端意图，不是 Codex 已生效配置、默认值快照或可反查的原生状态。
 模型目录失效或读取失败时保留；running Turn 的 steer 不解析也不应用。
 
-**Binding Task Feedback / 会话任务反馈**：Binding 上对 Reaction Pulse 与 Progress Card
-的两个独立选择及 revision，两项默认关闭。Side 创建时冻结 Parent 当时的
-两项选择；它们不是 Codex 原生设置或 Turn/Goal 状态事实。
+**Binding Task Feedback / 会话任务反馈**：Binding 上对 Reaction Pulse、Progress Card
+与 Completion Mention 的独立展示选择。Side 创建时冻结 Parent 当时的选择；
+它们不是 Codex 原生设置或 Turn/Goal 状态事实。
+
+**Completion Mention / 结束提及**：最终结果中对本轮任务发起人的一次真实 @，与进度
+展示独立。发起人由任务开始时确定，执行中追加消息不改变对象；它不等同于客户端
+已展示通知的证明。
 
 **Native Compaction / 原生压缩**：`/compact` 对已有历史的 idle Binding 调用公开
 Codex compaction。start 空响应不是完成；Netizen 临时保留 `compacting` 槽位，直到

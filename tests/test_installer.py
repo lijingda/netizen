@@ -21,12 +21,44 @@ from unittest.mock import ANY, MagicMock, patch
 from netizen.bindings import BindingStore
 from netizen.deployment import launchd, service_backend, systemd
 from scripts import netizen_installer as installer
+from tests.test_database_migration import create_v10_database
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class NetizenInstallerTest(unittest.TestCase):
+    def test_stopped_upgrade_migrates_v10_after_snapshot_and_rolls_back_failed_activation(self) -> None:
+        for fail_publish in (False, True):
+            with self.subTest(fail_publish=fail_publish), tempfile.TemporaryDirectory() as directory:
+                layout = self._layout(Path(directory))
+                installer.prepare_directories(layout)
+                old = self._release(layout, "1" * 64)
+                candidate = self._release(layout, "2" * 64)
+                installer._set_release_link(layout.current, old.root, layout)
+                database = layout.state_dir / "channel.sqlite3"
+                binding_id, _ = create_v10_database(database)
+                before = database.read_bytes()
+                backend = _stopped_backend()
+                if fail_publish:
+                    def fail_after_migration(*_args, **_kwargs):
+                        store = BindingStore(database)
+                        self.assertTrue(store.get(binding_id).task_feedback.completion_mention_enabled)
+                        store.close()
+                        raise installer.InstallError("publish failed")
+                    backend.publish_definition.side_effect = fail_after_migration
+                with patch.object(installer, "_service_backend", return_value=backend):
+                    if fail_publish:
+                        with self.assertRaisesRegex(installer.InstallError, "rolled back"):
+                            installer.activate_release(candidate, layout, interactive=False, data_dir=layout.state_dir)
+                        self.assertEqual(database.read_bytes(), before)
+                    else:
+                        installer.activate_release(candidate, layout, interactive=False, data_dir=layout.state_dir)
+                        store = BindingStore(database)
+                        self.assertTrue(store.get(binding_id).task_feedback.completion_mention_enabled)
+                        store.close()
+                self.assertEqual(installer._read_release_link(layout.current, layout), (old if fail_publish else candidate).root.resolve())
+
     def test_stopped_upgrade_rejects_old_schema_without_modifying_database(self) -> None:
         for version in (6, 7, 8, 9):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:

@@ -45,7 +45,7 @@ from scripts.install_user_guide_skill import (  # noqa: E402
     remove_user_guide_skill,
 )
 from netizen.bindings import (  # noqa: E402
-    validate_channel_database,
+    migrate_channel_database,
 )
 from netizen.deployment.update_protocol import (  # noqa: E402
     ENV_ARCHIVE_SHA256,
@@ -1970,13 +1970,13 @@ def activate_release(
                 # The old service is already confirmed stopped above. Holding
                 # its stable lifetime lock closes the race with an external
                 # service start while capturing the rollback snapshot and
-                # validating the database.
+                # upgrading or validating the database.
                 with _hold_service_lifetime_lock(layout):
                     database_snapshot = _capture_database(
                         channel_data_dir,
                         Path(temp),
                     )
-                    validate_channel_database(channel_database)
+                    migrate_channel_database(channel_database)
                     _set_release_link(layout.current, release.root, layout)
             else:
                 if should_start:

@@ -32,7 +32,7 @@ from .schedules.store import (
 from .session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 PROJECT_DELETE_LIMIT = 1000
 
 
@@ -429,6 +429,73 @@ def validate_channel_database(path: str | Path, *, allow_empty: bool = False) ->
         connection.close()
 
 
+def migrate_channel_database(path: str | Path) -> None:
+    """Installer-only v10 -> v11 upgrade, after unload, lifetime lock and snapshot.
+
+    Runtime startup remains read-only for unsupported versions. Current databases
+    are validated without opening a writer; every legacy change shares one SQLite
+    transaction so malformed metadata cannot leave a partially upgraded database.
+    """
+    database = Path(path)
+    if database.is_symlink() or not database.is_file():
+        raise RuntimeError("Channel database must be a regular file")
+    reader = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+    reader.row_factory = sqlite3.Row
+    try:
+        versions = reader.execute("SELECT version FROM schema_version").fetchall()
+        if len(versions) != 1 or versions[0]["version"] != 10:
+            _require_current_schema(reader)
+            _require_database_integrity(reader)
+            return
+        _require_database_integrity(reader)
+    except sqlite3.Error as error:
+        raise RuntimeError(f"Channel database validation failed: {error}") from error
+    finally:
+        reader.close()
+
+    connection = sqlite3.connect(database, isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA synchronous = FULL")
+        connection.execute("BEGIN IMMEDIATE")
+        versions = connection.execute("SELECT version FROM schema_version").fetchall()
+        if len(versions) != 1 or versions[0]["version"] != 10:
+            raise RuntimeError("Channel database schema changed during installation")
+        connection.execute("""
+            ALTER TABLE bindings ADD COLUMN completion_mention_enabled
+                INTEGER NOT NULL DEFAULT 1 CHECK(
+                    typeof(completion_mention_enabled) = 'integer'
+                    AND completion_mention_enabled IN (0, 1)
+                )
+        """)
+        legacy_fields = {
+            "turn_settings", "reaction_pulse_enabled", "progress_card_enabled",
+            "message_context_mode",
+        }
+        for row in connection.execute(
+            "SELECT plan_id, session_settings_json FROM schedule_plans WHERE deleted = 0"
+        ).fetchall():
+            raw = json.loads(row["session_settings_json"])
+            if not isinstance(raw, dict) or set(raw) != legacy_fields:
+                raise RuntimeError("v10 scheduled session settings are invalid")
+            settings = SessionSettings.from_dict({**raw, "completion_mention_enabled": True})
+            connection.execute(
+                "UPDATE schedule_plans SET session_settings_json = ? WHERE plan_id = ?",
+                (json.dumps(settings.to_dict(), separators=(",", ":")), row["plan_id"]),
+            )
+        connection.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+        _require_current_schema(connection)
+        _require_database_integrity(connection)
+        connection.execute("COMMIT")
+    except BaseException:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+    finally:
+        connection.close()
+
+
 def _require_current_schema(connection: sqlite3.Connection) -> None:
     versions = connection.execute("SELECT version FROM schema_version").fetchall()
     if len(versions) != 1 or versions[0]["version"] != SCHEMA_VERSION:
@@ -485,7 +552,7 @@ def _require_project_metadata_schema(
 
 def _require_binding_columns(connection: sqlite3.Connection) -> None:
     columns = {
-        row["name"]
+        row["name"]: row
         for row in connection.execute("PRAGMA table_info(bindings)").fetchall()
     }
     required = {
@@ -495,15 +562,23 @@ def _require_binding_columns(connection: sqlite3.Connection) -> None:
         "context_revision",
         "task_reactions_enabled",
         "progress_card_enabled",
+        "completion_mention_enabled",
         "feedback_revision",
         "ever_activated",
     }
-    missing = required - columns
+    missing = required - columns.keys()
     if missing:
         raise RuntimeError(
             "current Channel database is missing Binding columns: "
             + ", ".join(sorted(missing))
         )
+    mention = columns["completion_mention_enabled"]
+    if (
+        mention["type"].upper() != "INTEGER"
+        or mention["notnull"] != 1
+        or mention["dflt_value"] != "1"
+    ):
+        raise RuntimeError("current Binding completion mention column has invalid shape")
 
 
 def _require_database_integrity(connection: sqlite3.Connection) -> None:
@@ -642,6 +717,11 @@ class BindingStore:
                         CHECK(
                             typeof(progress_card_enabled) = 'integer'
                             AND progress_card_enabled IN (0, 1)
+                        ),
+                    completion_mention_enabled INTEGER NOT NULL DEFAULT 1
+                        CHECK(
+                            typeof(completion_mention_enabled) = 'integer'
+                            AND completion_mention_enabled IN (0, 1)
                         ),
                     feedback_revision INTEGER NOT NULL DEFAULT 1
                         CHECK(
@@ -1054,10 +1134,11 @@ class BindingStore:
                     message_context_mode, context_anchor_message_id,
                     context_anchor_create_time_ms, context_revision,
                     task_reactions_enabled, progress_card_enabled,
+                    completion_mention_enabled,
                     feedback_revision,
                     creator_id, created_at, activated_at, ever_activated
                 ) VALUES (
-                    ?, ?, ?, NULL, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, 1, ?, ?, ?, ?
+                    ?, ?, ?, NULL, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -1259,6 +1340,7 @@ class BindingStore:
                     b.context_anchor_message_id,
                     b.context_anchor_create_time_ms, b.context_revision,
                     b.task_reactions_enabled, b.progress_card_enabled,
+                    b.completion_mention_enabled,
                     b.feedback_revision,
                     s.kind AS scope_kind
                 FROM bindings b
@@ -1307,6 +1389,7 @@ class BindingStore:
             current_feedback = (
                 row["task_reactions_enabled"],
                 row["progress_card_enabled"],
+                row["completion_mention_enabled"],
             )
             feedback_changed = current_feedback != tuple(
                 int(value) for value in feedback_values
@@ -1329,6 +1412,7 @@ class BindingStore:
                     context_revision = context_revision + ?,
                     task_reactions_enabled = ?,
                     progress_card_enabled = ?,
+                    completion_mention_enabled = ?,
                     feedback_revision = feedback_revision + ?
                 WHERE binding_id = ?
                   AND settings_revision = ?
@@ -2655,6 +2739,7 @@ _BINDING_SELECT = """
         b.context_revision,
         b.task_reactions_enabled,
         b.progress_card_enabled,
+        b.completion_mention_enabled,
         b.feedback_revision,
         b.creator_id,
         b.created_at,
@@ -2696,6 +2781,7 @@ _BINDING_INVENTORY_SELECT = """
         b.context_revision,
         b.task_reactions_enabled,
         b.progress_card_enabled,
+        b.completion_mention_enabled,
         b.feedback_revision,
         b.creator_id,
         b.created_at,
@@ -2786,6 +2872,7 @@ def _binding(row: sqlite3.Row) -> ThreadBinding:
     feedback_values = (
         row["task_reactions_enabled"],
         row["progress_card_enabled"],
+        row["completion_mention_enabled"],
     )
     if not all(
         isinstance(value, int) and value in {0, 1}
@@ -2795,6 +2882,7 @@ def _binding(row: sqlite3.Row) -> ThreadBinding:
     task_feedback = BindingTaskFeedback(
         reaction_pulse_enabled=bool(feedback_values[0]),
         progress_card_enabled=bool(feedback_values[1]),
+        completion_mention_enabled=bool(feedback_values[2]),
     )
     feedback_revision = row["feedback_revision"]
     if not isinstance(feedback_revision, int) or feedback_revision < 1:
@@ -2850,12 +2938,13 @@ def _settings_values(
 
 def _feedback_values(
     feedback: BindingTaskFeedback,
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, bool]:
     if not isinstance(feedback, BindingTaskFeedback):
         raise ValueError("task feedback must be a BindingTaskFeedback")
     return (
         feedback.reaction_pulse_enabled,
         feedback.progress_card_enabled,
+        feedback.completion_mention_enabled,
     )
 
 

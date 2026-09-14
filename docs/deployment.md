@@ -447,9 +447,30 @@ MCP entry，环境完整继承后仅增加一个随机名称的临时 bearer key
 Admin 关闭时 MCP 仍可用。停止先关闭认领和管理 admission、排空在途交接，再执行既有
 普通 Turn shutdown 并关闭传输；重启不补跑错过的时间，也不重发结果未知的执行。
 
-安装边界验收包括当前 schema 完整初始化与重装、旧版本库只读拒绝、当前元数据与
+安装边界验收包括当前 schema 完整初始化与重装、ADR 0063 的 v10 → v11 原子迁移、其他旧版本库只读拒绝、当前元数据与
 Side/Project 墓碑保留，以及失败后原数据库/release/Skill 恢复；manager target 未卸载或 lifetime lock
 仍被占用时，既有回滚禁止条件保持不变。
+
+### 结束提及的客户端验收
+
+结束提及见 [ADR 0063](adr/0063-mention-task-initiators-in-terminal-results.md)。候选需要
+分别验证私聊、群主线和话题：原运行卡不含 @，终态更新首次加入 @，用户切离聊天后
+收到提及通知；文件翻页和 Goal 控制重绘不再次通知；关闭进度卡时最终富文本/文件卡
+也正确提及任务发起人。现有本地测试和 SDK 出站序列化只能证明真实 at 节点与同卡更新，
+不能证明客户端通知。当前这项客户端通知验收尚未执行。
+
+可先运行无网络、无凭据读取的预览，再在明确的测试会话运行同一探针：
+
+```bash
+.venv/bin/python scripts/probe_feishu_completion_mention.py \
+  --config /absolute/path/config.yaml --chat-id oc_test --user-id ou_test --dry-run
+```
+
+去掉 `--dry-run` 后，探针会发送一张明确标记的验收卡，默认等待 15 秒，再更新同一张
+卡片加入 @。可通过 `--reply-to-message-id` 与 `--reply-in-thread` 指定已有话题的精确
+回复锚点；`--delay-seconds` 可在 0–60 秒间调整。API 成功时仍输出
+`client_notification_verified: false`，需要被提及的测试者确认客户端效果。普通升级不自动
+运行这个会发消息的探针，测试目标和通知观察结果按实例私有验收记录保存。
 
 ### 已验证的兼容性结论
 
@@ -992,13 +1013,14 @@ admission，修复文件后仍需 `./service.sh restart`，不会自动重新开
 HTTP；不得把该端口直接暴露到不受信网络。
 
 `instance.projectRoot` 是必填的绝对路径，用于限制从飞书自动创建的空 Project；它不是
-Binding 的默认 cwd。Channel Database 只支持当前 schema v10，安装器和服务都不迁移历史
-版本。新库直接创建完整表结构；已有库须先只读通过版本、结构和完整性校验。
+Binding 的默认 cwd。Channel 服务只支持当前 schema v11；安装器在卸载、lifetime lock
+与快照保护下执行唯一 v10 → v11 原子迁移，其他旧版本拒绝。新库直接创建完整表结构；
+已有库须通过版本、结构和完整性校验。
 `schedule_plans`、`schedule_runs` 和 `schedule_requests` 仅保存当前计划指令与会话配置、
 最小调度交接/initial Turn 引用及有界管理请求去重，不复制原生历史。
 当前库重装保留 Scope/Binding/Project、去重记录及 `side_topics` 永久墓碑；激活仍在
 lifetime lock 与快照保护下完成，失败恢复原数据库与旧 release。
-旧版本或损坏数据库明确拒绝，不自动删除、转换或重建空库。
+除上述 v10 迁移外的旧版本或损坏数据库明确拒绝，不自动删除或重建空库。
 配置的 `projects` mapping 启动时仍只做 `INSERT OR IGNORE`，停用、动态登记和已删除记录
 始终优先；已删除 alias 只有显式重新登记才能复用，revision 继续递增。Project 删除保留
 磁盘代码目录。Project 删除清单同时纳入定时计划和在途定时创建；提交后删除关联计划，
@@ -1291,15 +1313,15 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    mutation。准备 13 个以上 enabled Projects 验证没有 12 项截断、分页控件或命令兜底，
    disabled 项不出现。P2P 表单不显示
    @ 时读取的消息范围；群主线和普通群话题显示“仅这条 @ 消息（默认）”与“自动带上期间
-   的群聊讨论”，下拉框下方有灰色说明。两个 Task Feedback 控件在所有普通 Scope 都显示
-   且 Reaction Pulse 默认关闭、Progress Card 默认开启。选择 inherit Codex 时不保存
+   的群聊讨论”，下拉框下方有灰色说明。三个 Task Feedback 控件在所有普通 Scope 都显示
+   且 Reaction Pulse 默认关闭、Progress Card 和结束提及默认开启。选择 inherit Codex 时不保存
    Model/Effort/Speed override；选择实际 Model 时三项必须与本机 `models` phase 一致并
    全部保存。模型目录不可用时仍显示可提交的
    Project + inherit + Task Feedback 表单。成功卡片显示 Project、会话短 ID、Model 来源、
-   两项 Task Feedback 与 @ 时读取的消息范围；即使原卡更新失败，同一 Scope 也应收到等价
+   三项 Task Feedback 与 @ 时读取的消息范围；即使原卡更新失败，同一 Scope 也应收到等价
    兜底回复。再用足够大的 Registry 触发真实平台容量错误，必须明确说明没有截断、分页或
    快捷创建，且零 Binding mutation。
-4. 在 idle active Binding 上发送 `/config`，选择三项、两个 Task Feedback 和群聊 @ 时读取
+4. 在 idle active Binding 上发送 `/config`，选择三项、三个 Task Feedback 和群聊 @ 时读取
    的消息范围后原子保存；
    不得要求任务或立即启动 Turn，也不得显示目标会话；配置其他会话必须先 `/resume`。
    后续每条需要启动新 Turn 的普通消息都在 exact native Thread 重新校验并显式应用，
@@ -1444,11 +1466,11 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     对 root 与 seed 各重放一次相同 UUID，必须返回原消息的 exact message/chat/root/thread
     identity，且只产生一个话题；不同 root/seed UUID 必须互异。这个对账门禁失败时 Side
     必须保持 unavailable，因为 FakeChannel 只能证明本地复用了 UUID，不能证明飞书的响应
-    形状。在 Parent 关闭两项反馈后创建 Side，确认无文件终态为富文本/静态文本，
+    形状。在 Parent 关闭三项反馈后创建 Side，确认无文件终态为富文本/静态文本，
     accepted/steer/终态 Lifecycle Reaction 与 ordinary Turn 相同，且零 `THINKING`/plan
-    observation；再创建同时开启两项的 Side，确认 Reaction Pulse 与 ordinary Turn
+    observation；再创建同时开启三项的 Side，确认 Reaction Pulse 与 ordinary Turn
     相同，Activity/Result/Files 始终更新同一个回复卡 message ID。随后修改 Parent 的
-    Model/Effort/Speed 与两项 Task Feedback，既有 Side 后续 Turn 必须继续使用创建时快照；
+    Model/Effort/Speed 与三项 Task Feedback，既有 Side 后续 Turn 必须继续使用创建时快照；
     新建 Side 才使用新值。Side 内 `/goal` 必须零 mutation 拒绝，根卡 close/expiry 更新仍
     独立于 Turn 回复。重启服务后旧 Side 明确 expired 且不创建 Binding；再验证 idle 两小时
     过期。若
@@ -1536,7 +1558,7 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     未验证，不能宣称真实表单兼容或容量验收通过。
     P2P 若返回 230071 必须记录为
     本轮文件 live gate 未通过，不得用 FakeChannel 或普通主线发送替代。最后确认这些操作不
-    改变 schema v10 表、Binding、Turn settings、Task Feedback、Context Boundary 或 Side
+    改变 schema v11 表、Binding、Turn settings、Task Feedback、Context Boundary 或 Side
     route 行数。
 
 CLI 中新增的消息不要求回填飞书；验证目标是共享原生后端和可接续性，不是两个 UI
