@@ -1622,6 +1622,30 @@ class CodexRuntime:
         response = await self._codex.models()
         return ModelCatalog.from_response(response)
 
+    async def thread_summary(
+        self, thread_id: str,
+    ) -> NativeThreadMetadata:
+        """Read one exact summary without resuming a Thread or requesting history.
+
+        The public response does not establish archive membership. Callers must
+        not infer Active or Missing from a successful read or a read exception.
+        Bound the caller's wait without cancelling this SDK worker: cancellation
+        of its async wrapper does not stop the underlying synchronous request.
+        """
+        if not isinstance(thread_id, str) or not thread_id:
+            raise ValueError("native Thread ID must be a non-empty string")
+        response = await AsyncThread(self._codex, thread_id).read(include_turns=False)
+        thread = getattr(response, "thread", None)
+        name = getattr(thread, "name", None)
+        preview = getattr(thread, "preview", None)
+        if (
+            getattr(thread, "id", None) != thread_id
+            or (name is not None and not isinstance(name, str))
+            or not isinstance(preview, str)
+        ):
+            raise ThreadCatalogError("thread/read returned an invalid Thread summary")
+        return NativeThreadMetadata(thread_id, name, preview)
+
     async def thread_metadata(
         self,
         thread_ids: tuple[str, ...],

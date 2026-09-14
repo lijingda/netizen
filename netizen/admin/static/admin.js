@@ -520,7 +520,11 @@ async function loadProjects(cursor = null) {
     ));
     row.append(status);
     cell(row, `${project.bindingCount}（Lazy ${project.lazyBindingCount}）`);
-    cell(row, project.archivedBindingCount);
+    cell(row, project.archivedBindingCount == null
+      ? "未确认"
+      : project.unconfirmedBindingCount > 0
+        ? `已确认 ${project.archivedBindingCount}；另有 ${project.unconfirmedBindingCount} 个会话状态未确认`
+        : project.archivedBindingCount);
     cell(row, project.lastActivatedAt);
     const actions = actionsCell(row);
     if (project.actions.setEnabled) {
@@ -550,7 +554,7 @@ let openSessionMultiFilter = null;
 const sessionFilterOptions = {
   project: [],
   scopeKind: [["direct", "单聊"], ["group", "群聊"], ["topic", "话题"]],
-  inventoryState: [["active", "Active"], ["lazy", "Lazy"], ["archived", "Archived"], ["missing", "Missing"]],
+  inventoryState: [["active", "Active"], ["lazy", "Lazy"], ["unknown", "状态未确认"], ["archived", "Archived"], ["missing", "Missing"]],
   current: [["true", "当前"], ["false", "非当前"]],
 };
 
@@ -594,7 +598,7 @@ function initializeSessionMultiFilter(root) {
   popover.append(clear, choices, empty);
   root.append(trigger, popover);
   let options = sessionFilterOptions[name];
-  let selected = new Set(name === "inventoryState" ? ["active", "lazy"] : []);
+  let selected = new Set(name === "inventoryState" ? ["active", "lazy", "unknown"] : []);
 
   function renderSummary() {
     const labels = options.filter(([value]) => selected.has(value)).map(([, label]) => label);
@@ -665,7 +669,7 @@ function initializeSessionMultiFilter(root) {
     close,
     values: () => [...selected],
     reset() {
-      selected = new Set(name === "inventoryState" ? ["active", "lazy"] : []);
+      selected = new Set(name === "inventoryState" ? ["active", "lazy", "unknown"] : []);
       search.value = "";
       close();
       renderChoices();
@@ -1259,6 +1263,7 @@ function catalogStateLabel(value) {
     active: "Active",
     archived: "已归档",
     lazy: "Lazy",
+    unknown: "状态未确认",
     missing: "原生会话缺失",
   }[value] || value;
 }
@@ -1368,6 +1373,8 @@ async function loadSessions(cursor = state.sessionPage.cursor) {
   state.sessionPage.cursor = cursor;
   state.sessionPage.nextCursor = data.nextCursor;
   state.sessionPage.query = appliedQuery;
+  document.querySelector("#sessions-catalog-notice").hidden = data.catalogAvailable !== false
+    && !data.items.some((session) => session.catalogState === "unknown");
   const body = document.querySelector("#sessions-body");
   body.replaceChildren();
   for (const session of data.items) {

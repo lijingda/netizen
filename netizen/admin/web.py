@@ -844,6 +844,7 @@ class AdminWebApplication:
                     "lazyBindingCount": item.aggregate.lazy_binding_count,
                     "materializedBindingCount": item.aggregate.materialized_binding_count,
                     "archivedBindingCount": item.archived_binding_count,
+                    "unconfirmedBindingCount": item.unconfirmed_binding_count,
                     "lastActivatedAt": item.aggregate.last_activated_at,
                     "actions": project_actions,
                 }
@@ -959,6 +960,7 @@ class AdminWebApplication:
                 "items": items,
                 "nextCursor": _encode_binding_cursor(page.next_cursor, fingerprint),
                 "pageSize": page_size,
+                "catalogAvailable": page.catalog_available,
             },
         )
 
@@ -1083,11 +1085,7 @@ class AdminWebApplication:
                 "topic" if scope.kind is ScopeKind.TOPIC else "message"
             ),
             "pointerState": status.pointer_state,
-            "catalogState": (
-                status.catalog_state.value
-                if status.catalog_state is not None
-                else "lazy"
-            ),
+            "catalogState": item.inventory_state.value,
             "projectAlias": binding.project_alias,
             "nativeThreadId": binding.native_thread_id,
             "nativeTitle": metadata.name if metadata is not None else None,

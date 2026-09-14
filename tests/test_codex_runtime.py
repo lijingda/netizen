@@ -2826,6 +2826,28 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             context_anchor=MessageContextAnchor("om-lower", 1_000),
         )
 
+    async def test_thread_summary_reads_exact_id_without_history_or_resume(self) -> None:
+        read = AsyncMock(return_value=SimpleNamespace(thread=SimpleNamespace(
+            id="native-1", name="Existing empty Thread", preview="",
+        )))
+        with patch("netizen.codex_runtime.AsyncThread", return_value=SimpleNamespace(read=read)) as thread:
+            metadata = await self.runtime.thread_summary("native-1")
+        thread.assert_called_once_with(self.codex, "native-1")
+        read.assert_awaited_once_with(include_turns=False)
+        self.assertEqual(metadata, NativeThreadMetadata("native-1", "Existing empty Thread", ""))
+        self.assertEqual(self.codex.thread_list_calls, [])
+
+    async def test_thread_summary_rejects_wrong_identity_and_invalid_metadata(self) -> None:
+        for row in (
+            SimpleNamespace(id="wrong", name=None, preview="preview"),
+            SimpleNamespace(id="native-1", name=10, preview="preview"),
+            SimpleNamespace(id="native-1", name=None, preview=None),
+        ):
+            with self.subTest(row=row), patch("netizen.codex_runtime.AsyncThread") as thread:
+                thread.return_value.read = AsyncMock(return_value=SimpleNamespace(thread=row))
+                with self.assertRaises(ThreadCatalogError):
+                    await self.runtime.thread_summary("native-1")
+
     async def test_thread_metadata_uses_paginated_public_history_list(self) -> None:
         self.codex.thread_list_pages = [
             SimpleNamespace(

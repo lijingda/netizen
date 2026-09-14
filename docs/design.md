@@ -1062,15 +1062,37 @@ Side Topics 的创建时间筛选复用同一个范围组件：收起态显示�
 才请求服务端。自定义结束分钟对用户包含，并转换为下一分钟的排他上界。`createdFrom` 与
 `createdBefore` API 只接受带时区的 ISO-8601，先规范化为固定微秒的 UTC `+00:00`，再要求
 `createdFrom < createdBefore` 并进入 cursor fingerprint 与 SQLite 的 `[from, before)` 比较。
-会话状态为 `Active`、`Lazy`、`Archived`、`Missing`，默认同时选择 `Active` + `Lazy`；
-重置恢复这些默认条件、全部创建时间和每页 20 条。只选 `Lazy` 不访问原生目录；包含
-`Active` 或 `Archived` 时读取对应公开 `thread_list` 完整目录，包含 `Missing` 时必须
-读取并对比两个完整目录。选全部状态时只为当前 Binding 页从两个目录查找 title/preview。
-多个状态合并后去重并分页，current 始终是独立条件。原生读取均保留
-deadline/页数/条目上限，Sessions 的请求预算为 10 秒，失败时整次失败；Project archived
-aggregate 使用公开 `thread_list(use_state_db_only=True)` 完整分页读取索引归档目录，
-沿用原生 source/preview 筛选，避免把同一 Thread 回退后保留的多份 rollout 重复计数。
-此选择只用于 Projects 统计，不改变 Sessions 的 Missing 判定或生命周期四视图对账。
+会话状态支持 `Active`、`Lazy`、`Archived`、`Missing` 和 `Unknown`（状态未确认），
+默认同时选择 `Active` + `Lazy` + `Unknown`，保留未能确认原生状态的已绑定会话；
+重置恢复这些默认条件、全部创建时间和每页 20 条。只选 `Lazy` 不访问原生目录；筛选条件
+包含其他状态时通过公开 `thread_list(use_state_db_only=True)` 完整分页读取 active 与
+archived 索引目录；选全部状态时只为当前 Binding 页从两个索引目录查找 title/preview。
+索引中的当前 Thread 记录优先，旧 rollout 不得覆盖其标题或归档状态。索引未命中或
+同一 ID 同时出现在 active/archived 时，该 Binding 标为 `Unknown`；索引失败或超时则
+本次已物化 Binding 均未确认，保留本地行与分页，页面明确提示目录不可用。未知分类参与
+状态筛选后再分页；显式只选 `Active` 等其他状态不会把未知行伪装成命中。`Missing`
+输入保持兼容，但管理列表不再通过目录缺项推断原生不存在；索引和扫描目录都可能因
+source/preview 过滤而漏列真实 Thread，不能自动退回 rollout 扫描来“证明”存在性。
+多个状态合并后去重并分页，current 始终是独立条件。
+
+Sessions 只为当前展示页未确认且缺 metadata 的 Thread，通过公开
+`AsyncThread.read(include_turns=False)` 按精确 ID 尽力读取标题/摘要：覆盖当前页全部待补读
+会话，随页面大小最多 100 条；实例共享最多 4 个补读并发，排队与读取共用现有请求总预算，
+不另设 20 条截断或 1 秒子预算。单条读取失败只保留该条 ID，不影响其他会话补读与列表展示。
+已发出的 SDK 读取在页面等待超时后仍占用并发名额，直到实际返回；服务关闭时停止新补读，
+剩余读取由同一 SDK transport 收尾，不因反复刷新而累积未计数的 SDK 工作线程。
+读取成功不证明归档状态，失败也不证明不存在，均保持 `Unknown`，不新增 native mutation
+资格。查询不创建/恢复 Thread 或启动 Turn，不请求完整 Turns、不持久化摘要或增加后台重试。
+管理目录查询只读索引，保留完整分页与合计最多 100000 个 ID 的上限，索引阶段最多 3 秒，
+且占剩余请求预算不超过一半，为本地分页和投影留出时间；Sessions 总请求预算仍为 10 秒。
+
+Projects 同样读取 active/archived 索引。归档数只统计索引确认的本地 Binding，待确认数为
+已物化 Binding 数减去索引确认的 active 与 archived 数；冲突 ID 不计为已确认，Lazy 不计
+入待确认。显示“已确认 N”与另有多少会话待确认，不能把部分计数冒充精确归档总数。
+关联映射在同一只读事务内核对本页本地聚合，查询期间本地统计变化则放弃原生计数。
+目录、关联映射失败或快照变化时归档数为 null 并显示“未确认”，本地 Project 列表、会话总数和操作
+继续可用；当前 Project 页没有已物化 Binding 时不读原生目录。Projects 不逐条读取摘要。
+这些管理投影不改变 Channel 的既有分类或原生生命周期四视图对账，也不作为删除清单来源。
 Sessions 每页只接受 10/20/50/100，默认 20；浏览器用 cursor
 栈提供前后翻页，不计算总数或支持随机页码。Runtime snapshot primitive 仍只接受最多 50 个
 完整 ID；100 行 Sessions 首屏由 Web adapter 分两批读取，浏览器五秒 polling 同样分片后
@@ -1085,6 +1107,7 @@ Lazy 或已确认 missing 才能跳过。单行无法确认时显示状态不可
 polling 默认只投影 process-local 快照且不发起 `goal/get`；没有本地活动时返回 typed
 deferred，浏览器保留上次已解析值，并在 `activity_revision` 变化后补读对应 Binding；补读
 失败不提交该 revision，后续轮询继续有界重试直至 exact 投影或新的本地活动可见。
+首屏预算已耗尽时保留本地运行态与 Lazy 投影，不再发起新的原生 Goal 读取。
 Stop 与 Release 的可见资格消费这份投影，Runtime exact primitive 仍是 mutation 的最终
 安全检查；Admin 的结果文案直接消费共享 `StopDisposition`/`ReleaseDisposition`。
 
