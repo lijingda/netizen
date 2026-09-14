@@ -652,10 +652,12 @@ class ManagementRuntimePort:
         *,
         archived: bool,
         deadline: float,
+        use_state_db_only: bool | None = None,
     ) -> NativeThreadCatalog:
         return await self.__runtime.thread_catalog(
             archived=archived,
             deadline=deadline,
+            use_state_db_only=use_state_db_only,
         )
 
 
@@ -812,6 +814,9 @@ class InstanceManagementService:
         archived = await self._runtime.thread_catalog_exact(
             archived=True,
             deadline=deadline,
+            # Like Codex's archive UI, count indexed Threads rather than every
+            # immutable rollout left by thread/revert for the same Thread ID.
+            use_state_db_only=True,
         )
         project_by_thread = await self._bindings.project_aliases_for_native_threads(
             tuple(thread.thread_id for thread in archived.threads),

@@ -73,6 +73,7 @@ from netizen.codex_runtime import (
     ThreadGoalActive,
     ThreadBackgroundTerminalsActive,
     ThreadCatalogDeadlineExceeded,
+    ThreadCatalogError,
     ThreadCatalogLimitExceeded,
     ThreadLifecycleError,
     ThreadLifecycleState,
@@ -3890,6 +3891,21 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 deadline=asyncio.get_running_loop().time() + 1,
                 max_items=1,
             )
+
+    async def test_complete_native_catalog_rejects_duplicate_ids_in_both_read_modes(self) -> None:
+        thread = SimpleNamespace(id="native-1", name=None, preview="one")
+        for mode in (None, True):
+            with self.subTest(use_state_db_only=mode):
+                self.codex.thread_list_pages = [
+                    SimpleNamespace(data=[thread], next_cursor="page-two"),
+                    SimpleNamespace(data=[thread], next_cursor=None),
+                ]
+                with self.assertRaisesRegex(ThreadCatalogError, "repeated a native Thread ID"):
+                    await self.runtime.thread_catalog(
+                        archived=True,
+                        deadline=asyncio.get_running_loop().time() + 1,
+                        use_state_db_only=mode,
+                    )
 
     async def submit(
         self,

@@ -1068,7 +1068,10 @@ Side Topics 的创建时间筛选复用同一个范围组件：收起态显示�
 读取并对比两个完整目录。选全部状态时只为当前 Binding 页从两个目录查找 title/preview。
 多个状态合并后去重并分页，current 始终是独立条件。原生读取均保留
 deadline/页数/条目上限，Sessions 的请求预算为 10 秒，失败时整次失败；Project archived
-aggregate 仍需要归档完整目录。Sessions 每页只接受 10/20/50/100，默认 20；浏览器用 cursor
+aggregate 使用公开 `thread_list(use_state_db_only=True)` 完整分页读取索引归档目录，
+沿用原生 source/preview 筛选，避免把同一 Thread 回退后保留的多份 rollout 重复计数。
+此选择只用于 Projects 统计，不改变 Sessions 的 Missing 判定或生命周期四视图对账。
+Sessions 每页只接受 10/20/50/100，默认 20；浏览器用 cursor
 栈提供前后翻页，不计算总数或支持随机页码。Runtime snapshot primitive 仍只接受最多 50 个
 完整 ID；100 行 Sessions 首屏由 Web adapter 分两批读取，浏览器五秒 polling 同样分片后
 合并，既不查 native catalog，也不签发 action token。

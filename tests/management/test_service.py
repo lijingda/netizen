@@ -7,7 +7,7 @@ import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from netizen.bindings import BindingQuery, BindingStore, SideTopicState
 from netizen.channel_app import ChannelApplication
@@ -15,6 +15,7 @@ from netizen.codex_runtime import (
     ActiveGoalSnapshot,
     ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
+    CodexRuntime,
     NativeThreadCatalogState,
     NativeThreadCatalog,
     NativeThreadMetadata,
@@ -27,6 +28,7 @@ from netizen.codex_runtime import (
     ThreadSubscriptionSnapshot,
     ThreadSubscriptionState,
     ThreadArchived,
+    ThreadCatalogError,
     ThreadCatalogIdentityMissing,
     ThreadDeleteTargetChanged,
 )
@@ -250,8 +252,10 @@ class FakeManagementRuntime:
         source = self.archived_metadata if archived else self.active_metadata
         return {thread_id: source[thread_id] for thread_id in thread_ids if thread_id in source}
 
-    async def thread_catalog_exact(self, *, archived: bool, deadline: float):
-        self.calls.append(("catalog", archived, deadline))
+    async def thread_catalog_exact(
+        self, *, archived: bool, deadline: float, use_state_db_only=None,
+    ):
+        self.calls.append(("catalog", archived, deadline, use_state_db_only))
         source = self.archived_metadata if archived else self.active_metadata
         return NativeThreadCatalog(archived, tuple(source.values()))
 
@@ -932,6 +936,9 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                     tuple(call[1] for call in self.runtime.calls if call[0] == "catalog"),
                     catalogs,
                 )
+                self.assertTrue(all(
+                    call[3] is None for call in self.runtime.calls if call[0] == "catalog"
+                ))
                 for item in page.items:
                     if item.record.binding.id == lazy.id:
                         self.assertIsNone(item.native)
@@ -990,20 +997,45 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(second.next_cursor)
         self.assertEqual(self.runtime.calls, [])
 
-    async def test_project_query_merges_complete_archived_catalog_counts(self) -> None:
+    async def test_project_query_counts_indexed_threads_with_multiple_rollouts(self) -> None:
         archived = await self._create()
         self.store.assign_native_thread_id(archived.id, "native-archived")
-        self.runtime.archived_metadata["native-archived"] = NativeThreadMetadata(
-            "native-archived", "Old", "archived"
-        )
+        current = SimpleNamespace(id="native-archived", name="Current", preview="current")
+        old = SimpleNamespace(id=current.id, name="Old", preview="old rollout")
+        unrelated = SimpleNamespace(id="unrelated", name=None, preview="other project")
 
-        page = await self.service.query_projects(
-            deadline=asyncio.get_running_loop().time() + 1,
+        async def list_threads(**kwargs):
+            if not kwargs.get("use_state_db_only"):
+                return SimpleNamespace(data=[old, current], next_cursor=None)
+            if kwargs["cursor"] is None:
+                return SimpleNamespace(data=[unrelated], next_cursor="second-page")
+            self.assertEqual(kwargs["cursor"], "second-page")
+            return SimpleNamespace(data=[current], next_cursor=None)
+
+        codex = SimpleNamespace(thread_list=AsyncMock(side_effect=list_threads))
+        runtime = CodexRuntime(
+            codex=codex,
+            bindings=self.store,
+            terminal_cleanup=SimpleNamespace(),
         )
+        port = ManagementRuntimePort(runtime)
+
+        with patch.object(self.runtime, "thread_catalog_exact", port.thread_catalog_exact):
+            page = await self.service.query_projects(
+                deadline=asyncio.get_running_loop().time() + 1,
+            )
 
         by_alias = {item.aggregate.project.alias: item for item in page.items}
         self.assertEqual(by_alias["test"].archived_binding_count, 1)
         self.assertEqual(set(by_alias), {"test"})
+        self.assertEqual(codex.thread_list.await_count, 2)
+
+        # The same port's default read still validates the scan view, including
+        # callers that use it to classify missing Sessions.
+        with self.assertRaisesRegex(ThreadCatalogError, "repeated a native Thread ID"):
+            await port.thread_catalog_exact(
+                archived=True, deadline=asyncio.get_running_loop().time() + 1,
+            )
 
     async def test_runtime_snapshot_request_is_bounded_and_reports_missing_side(
         self,
