@@ -49,7 +49,6 @@ from netizen.management import (
     ExactBindingTarget,
     InstanceManagementService,
     ManagementRuntimePort,
-    NativeCatalogInconsistent,
     NativeThreadMissing,
     RuntimePrecondition,
     RuntimeStateChanged,
@@ -78,6 +77,7 @@ class FakeManagementRuntime:
         self.side_missing = False
         self.active_metadata: dict[str, NativeThreadMetadata] = {}
         self.archived_metadata: dict[str, NativeThreadMetadata] = {}
+        self.summary_metadata: dict[str, NativeThreadMetadata] = {}
         self.side_snapshots: dict[str, object] = {}
         self.runtime_snapshots: dict[str, BindingRuntimeSnapshot] = {}
         self.goal_snapshots: dict[str, GoalSnapshot | None] = {}
@@ -247,10 +247,17 @@ class FakeManagementRuntime:
         *,
         archived: bool,
         deadline: float,
+        use_state_db_only: bool | None = None,
     ):
-        self.calls.append(("metadata", archived, thread_ids, deadline))
+        self.calls.append(("metadata", archived, thread_ids, deadline, use_state_db_only))
         source = self.archived_metadata if archived else self.active_metadata
         return {thread_id: source[thread_id] for thread_id in thread_ids if thread_id in source}
+
+    async def thread_summary_exact(self, thread_id: str):
+        self.calls.append(("summary", thread_id))
+        if thread_id not in self.summary_metadata:
+            raise RuntimeError("summary unavailable")
+        return self.summary_metadata[thread_id]
 
     async def thread_catalog_exact(
         self, *, archived: bool, deadline: float, use_state_db_only=None,
@@ -852,7 +859,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                 deadline=asyncio.get_running_loop().time() + 1,
             )
 
-    async def test_session_state_filter_reads_only_required_native_catalogs(
+    async def test_session_state_filter_uses_both_indexed_native_catalogs(
         self,
     ) -> None:
         active = await self._create()
@@ -869,10 +876,10 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
             "native-archived", None, "archived"
         )
         cases = (
-            (SessionInventoryState.ACTIVE, active.id, (False,)),
+            (SessionInventoryState.ACTIVE, active.id, (False, True)),
             (SessionInventoryState.LAZY, lazy.id, ()),
-            (SessionInventoryState.ARCHIVED, archived.id, (True,)),
-            (SessionInventoryState.MISSING, missing.id, (False, True)),
+            (SessionInventoryState.ARCHIVED, archived.id, (False, True)),
+            (SessionInventoryState.UNKNOWN, missing.id, (False, True)),
         )
         for state, expected_id, expected_catalogs in cases:
             with self.subTest(state=state):
@@ -902,7 +909,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                         any(call[0] == "metadata" for call in self.runtime.calls)
                     )
 
-    async def test_session_multiselect_combines_native_and_lazy_without_extra_catalogs(self) -> None:
+    async def test_session_multiselect_combines_native_and_lazy_with_indexed_catalogs(self) -> None:
         active = await self._create()
         self.store.assign_native_thread_id(active.id, "native-active")
         archived = await self._create()
@@ -917,12 +924,13 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
             "native-archived", "Archived", "archived"
         )
         cases = (
-            (("active", "lazy"), {active.id, lazy.id}, (False,)),
-            (("lazy", "archived"), {lazy.id, archived.id}, (True,)),
+            (("active", "lazy"), {active.id, lazy.id}, (False, True)),
+            (("lazy", "archived"), {lazy.id, archived.id}, (False, True)),
             (("active", "archived"), {active.id, archived.id}, (False, True)),
-            (("lazy", "missing"), {lazy.id, missing.id}, (False, True)),
-            (("active", "archived", "missing"), {active.id, archived.id, missing.id}, (False, True)),
-            (("active", "lazy", "archived", "missing"), {active.id, archived.id, missing.id, lazy.id}, ()),
+            (("lazy", "unknown"), {lazy.id, missing.id}, (False, True)),
+            (("active", "archived", "unknown"), {active.id, archived.id, missing.id}, (False, True)),
+            (("missing",), set(), (False, True)),
+            (("active", "lazy", "archived", "missing", "unknown"), {active.id, archived.id, missing.id, lazy.id}, ()),
         )
         for states, expected, catalogs in cases:
             with self.subTest(states=states):
@@ -937,28 +945,15 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                     catalogs,
                 )
                 self.assertTrue(all(
-                    call[3] is None for call in self.runtime.calls if call[0] == "catalog"
+                    call[3] is True for call in self.runtime.calls if call[0] == "catalog"
                 ))
                 for item in page.items:
                     if item.record.binding.id == lazy.id:
                         self.assertIsNone(item.native)
                     elif item.record.binding.id == missing.id:
-                        self.assertEqual(item.native.state, NativeThreadCatalogState.MISSING)
+                        self.assertIsNone(item.native.state)
                     else:
                         self.assertIsNotNone(item.native.metadata)
-
-        self.runtime.archived_metadata["native-active"] = self.runtime.active_metadata["native-active"]
-        with self.assertRaises(NativeCatalogInconsistent):
-            await self.service.query_sessions(
-                query=SessionQuery(inventory_states=(SessionInventoryState.ACTIVE, SessionInventoryState.ARCHIVED)),
-                deadline=asyncio.get_running_loop().time() + 1,
-            )
-        with patch.object(self.runtime, "thread_catalog_exact", side_effect=TimeoutError("incomplete")):
-            with self.assertRaises(TimeoutError):
-                await self.service.query_sessions(
-                    query=SessionQuery(inventory_states=(SessionInventoryState.LAZY, SessionInventoryState.MISSING)),
-                    deadline=asyncio.get_running_loop().time() + 1,
-                )
 
     async def test_session_multiselect_paginates_across_excluded_materialized_rows(self) -> None:
         first = await self._create()
@@ -997,6 +992,345 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(second.next_cursor)
         self.assertEqual(self.runtime.calls, [])
 
+    async def test_sessions_use_indexed_identity_despite_duplicate_and_stale_rollouts(self) -> None:
+        active = await self._create()
+        self.store.assign_native_thread_id(active.id, "native-active")
+        archived = await self._create()
+        self.store.assign_native_thread_id(archived.id, "native-archived")
+        missing = await self._create()
+        self.store.assign_native_thread_id(missing.id, "native-missing")
+        lazy = await self._create()
+        active_row = SimpleNamespace(id="native-active", name="Current active", preview="active")
+        archived_row = SimpleNamespace(id="native-archived", name="Current archived", preview="archived")
+        old = SimpleNamespace(id=archived_row.id, name="Old", preview="old rollout")
+
+        async def list_threads(**kwargs):
+            if not kwargs.get("use_state_db_only"):
+                # A reverted Thread has multiple rollouts, including an old
+                # active copy of the currently archived Thread.
+                return SimpleNamespace(data=[old, old], next_cursor=None)
+            if kwargs["cursor"] is None:
+                return SimpleNamespace(
+                    data=[SimpleNamespace(id="unrelated", name=None, preview="other")]
+                    if not kwargs["archived"] else [],
+                    next_cursor="selected-thread",
+                )
+            self.assertEqual(kwargs["cursor"], "selected-thread")
+            return SimpleNamespace(
+                data=[archived_row if kwargs["archived"] else active_row],
+                next_cursor=None,
+            )
+
+        codex = SimpleNamespace(thread_list=AsyncMock(side_effect=list_threads))
+        port = ManagementRuntimePort(CodexRuntime(
+            codex=codex, bindings=self.store, terminal_cleanup=SimpleNamespace(),
+        ))
+        cases = (
+            ((SessionInventoryState.ACTIVE, SessionInventoryState.LAZY), {active.id, lazy.id}),
+            ((SessionInventoryState.ARCHIVED,), {archived.id}),
+            ((SessionInventoryState.UNKNOWN,), {missing.id}),
+            (None, {active.id, archived.id, missing.id, lazy.id}),
+        )
+        with (
+            patch.object(self.runtime, "thread_catalog_exact", port.thread_catalog_exact),
+            patch.object(self.runtime, "thread_metadata_exact", port.thread_metadata_exact),
+        ):
+            for states, expected in cases:
+                with self.subTest(states=states):
+                    page = await self.service.query_sessions(
+                        query=SessionQuery(inventory_states=states),
+                        deadline=asyncio.get_running_loop().time() + 1,
+                    )
+                    by_id = {item.record.binding.id: item for item in page.items}
+                    self.assertEqual(set(by_id), expected)
+                    if active.id in by_id:
+                        self.assertEqual(by_id[active.id].native.metadata.name, active_row.name)
+                    if archived.id in by_id:
+                        self.assertEqual(by_id[archived.id].native.metadata.name, archived_row.name)
+                        self.assertEqual(by_id[archived.id].native.state, NativeThreadCatalogState.ARCHIVED)
+                    if missing.id in by_id:
+                        self.assertIsNone(by_id[missing.id].native.state)
+
+    async def test_sessions_keep_unindexed_bindings_and_only_read_visible_summaries(self) -> None:
+        indexed = await self._create()
+        self.store.assign_native_thread_id(indexed.id, "indexed-active")
+        unindexed = await self._create()
+        self.store.assign_native_thread_id(unindexed.id, "unindexed")
+        lazy = await self._create()
+        self.runtime.active_metadata["indexed-active"] = NativeThreadMetadata("indexed-active", "Indexed", "active")
+        # A stored Thread with an empty preview is readable but absent from both lists.
+        self.runtime.summary_metadata["unindexed"] = NativeThreadMetadata("unindexed", "Existing", "")
+        cases = (
+            ((SessionInventoryState.ACTIVE, SessionInventoryState.LAZY, SessionInventoryState.UNKNOWN), [lazy.id, unindexed.id, indexed.id]),
+            ((SessionInventoryState.ACTIVE,), [indexed.id]),
+            ((SessionInventoryState.UNKNOWN,), [unindexed.id]),
+            ((SessionInventoryState.MISSING,), []),
+            (None, [lazy.id, unindexed.id, indexed.id]),
+        )
+        for states, expected in cases:
+            with self.subTest(states=states):
+                cursor = None
+                items = []
+                for _ in range(4):
+                    self.runtime.calls.clear()
+                    page = await self.service.query_sessions(
+                        query=SessionQuery(inventory_states=states),
+                        limit=1, cursor=cursor,
+                        deadline=asyncio.get_running_loop().time() + 1,
+                    )
+                    visible_unknown = [
+                        item.record.binding.native_thread_id for item in page.items
+                        if item.inventory_state is SessionInventoryState.UNKNOWN
+                    ]
+                    self.assertEqual([call[1] for call in self.runtime.calls if call[0] == "summary"], visible_unknown)
+                    self.assertTrue(all(
+                        call[-1] is True for call in self.runtime.calls
+                        if call[0] in {"metadata", "catalog"}
+                    ))
+                    for item in page.items:
+                        if item.record.binding.id == unindexed.id:
+                            self.assertIsNone(item.native.state)
+                            self.assertEqual(item.native.metadata.name, "Existing")
+                    items.extend(page.items)
+                    cursor = page.next_cursor
+                    if cursor is None:
+                        break
+                self.assertIsNone(cursor)
+                self.assertEqual([item.record.binding.id for item in items], expected)
+
+    async def test_session_index_conflicts_and_failures_preserve_unknown_rows(self) -> None:
+        active = await self._create()
+        self.store.assign_native_thread_id(active.id, "active")
+        conflict = await self._create()
+        self.store.assign_native_thread_id(conflict.id, "conflict")
+        lazy = await self._create()
+        self.runtime.active_metadata = {
+            item: NativeThreadMetadata(item, item, "preview") for item in ("active", "conflict")
+        }
+        self.runtime.archived_metadata["conflict"] = self.runtime.active_metadata["conflict"]
+        page = await self.service.query_sessions(deadline=asyncio.get_running_loop().time() + 1)
+        self.assertTrue(page.catalog_available)
+        self.assertEqual(
+            {item.record.binding.id: item.inventory_state for item in page.items},
+            {active.id: SessionInventoryState.ACTIVE, conflict.id: SessionInventoryState.UNKNOWN, lazy.id: SessionInventoryState.LAZY},
+        )
+        for states in (None, (SessionInventoryState.ACTIVE, SessionInventoryState.LAZY, SessionInventoryState.UNKNOWN)):
+            with (
+                self.subTest(states=states),
+                patch.object(self.runtime, "thread_catalog_exact", side_effect=TimeoutError("incomplete")),
+                patch.object(self.runtime, "thread_metadata_exact", side_effect=RuntimeError("unavailable")),
+            ):
+                first = await self.service.query_sessions(
+                    query=SessionQuery(inventory_states=states), limit=2,
+                    deadline=asyncio.get_running_loop().time() + 1,
+                )
+                self.assertFalse(first.catalog_available)
+                self.assertEqual([item.record.binding.id for item in first.items], [lazy.id, conflict.id])
+                second = await self.service.query_sessions(
+                    query=SessionQuery(inventory_states=states), limit=2, cursor=first.next_cursor,
+                    deadline=asyncio.get_running_loop().time() + 1,
+                )
+                self.assertEqual([item.record.binding.id for item in second.items], [active.id])
+                self.assertIsNone(second.items[0].native.state)
+                self.assertIsNone(second.items[0].native.metadata)
+
+    async def test_summary_enrichment_covers_large_pages_with_shared_concurrency(self) -> None:
+        self.store._id_factory = lambda: str(uuid.uuid4())
+        for index in range(100):
+            binding = await self._create()
+            self.store.assign_native_thread_id(binding.id, f"unindexed-{index}")
+        concurrency = 0
+        maximum = 0
+        reads = []
+
+        async def read(thread_id):
+            nonlocal concurrency, maximum
+            reads.append(thread_id)
+            concurrency += 1
+            maximum = max(maximum, concurrency)
+            try:
+                await asyncio.sleep(0)
+                return NativeThreadMetadata(thread_id, "Summary", "")
+            finally:
+                concurrency -= 1
+
+        for page_size in (50, 100):
+            records = await self.store.query_bindings(limit=page_size)
+            reads.clear()
+            with (
+                self.subTest(page_size=page_size),
+                patch.object(self.runtime, "thread_summary_exact", side_effect=read),
+                patch.object(self.store, "query_bindings", return_value=records),
+            ):
+                pages = await asyncio.gather(*(
+                    self.service.query_sessions(limit=page_size, deadline=asyncio.get_running_loop().time() + 2)
+                    for _ in range(2)
+                ))
+                self.assertEqual(len(reads), page_size * 2)
+                self.assertEqual(set(reads), {record.binding.native_thread_id for record in records.items})
+                self.assertLessEqual(maximum, 4)
+                for page in pages:
+                    self.assertEqual(len(page.items), page_size)
+                    self.assertTrue(all(item.inventory_state is SessionInventoryState.UNKNOWN for item in page.items))
+                    self.assertTrue(all(item.native.metadata is not None for item in page.items))
+
+    async def test_summary_uses_request_budget_and_isolates_individual_failures(self) -> None:
+        for thread_id in ("slow", "failed"):
+            binding = await self._create()
+            self.store.assign_native_thread_id(binding.id, thread_id)
+
+        async def read(thread_id):
+            if thread_id == "failed":
+                raise RuntimeError("summary unavailable")
+            # A healthy response after one second must still appear on the page.
+            await asyncio.sleep(1.1)
+            return NativeThreadMetadata(thread_id, "Slow summary", "")
+
+        with patch.object(self.runtime, "thread_summary_exact", side_effect=read):
+            page = await self.service.query_sessions(deadline=asyncio.get_running_loop().time() + 5)
+        items = {item.record.binding.native_thread_id: item for item in page.items}
+        self.assertEqual(set(items), {"slow", "failed"})
+        self.assertEqual(items["slow"].native.metadata.name, "Slow summary")
+        self.assertIsNone(items["failed"].native.metadata)
+        self.assertTrue(all(item.inventory_state is SessionInventoryState.UNKNOWN for item in page.items))
+
+    async def test_summary_timeouts_keep_sdk_workers_counted_until_completion(self) -> None:
+        self.store._id_factory = lambda: str(uuid.uuid4())
+        for index in range(10):
+            binding = await self._create()
+            self.store.assign_native_thread_id(binding.id, f"unindexed-{index}")
+        release = threading.Event()
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        reads = []
+
+        def blocking_read(thread_id):
+            release.wait()
+            return NativeThreadMetadata(thread_id, "Summary", "")
+
+        async def read(thread_id):
+            reads.append(thread_id)
+            if len(reads) == 4:
+                entered.set()
+            # Match the public SDK: cancelling this await cannot stop its worker.
+            return await asyncio.to_thread(blocking_read, thread_id)
+
+        try:
+            with patch.object(self.runtime, "thread_summary_exact", side_effect=read):
+                first = asyncio.create_task(self.service.query_sessions(deadline=loop.time() + 0.1))
+                await asyncio.wait_for(entered.wait(), 1)
+                for page in (
+                    await asyncio.wait_for(first, 0.5),
+                    await asyncio.wait_for(self.service.query_sessions(deadline=loop.time() + 0.1), 0.5),
+                ):
+                    self.assertEqual(len(page.items), 10)
+                    self.assertTrue(all(item.native.metadata is None for item in page.items))
+                self.assertEqual(len(reads), 4)
+                self.assertEqual(len(self.service._summary_reads), 4)
+                release.set()
+                await asyncio.wait_for(asyncio.gather(*self.service._summary_reads), 1)
+                page = await self.service.query_sessions(deadline=loop.time() + 1)
+                self.assertTrue(all(item.native.metadata is not None for item in page.items))
+
+                # Shutdown closes admission even when an already-issued read is pending.
+                release.clear()
+                page = await self.service.query_sessions(deadline=loop.time() + 0.1)
+                count_before_close = len(reads)
+                await asyncio.wait_for(self.service.close(deadline=loop.time() + 0.01), 0.5)
+                await self.service.query_sessions(deadline=loop.time() + 0.1)
+                self.assertEqual(len(reads), count_before_close)
+        finally:
+            release.set()
+            if self.service._summary_reads:
+                await asyncio.wait_for(asyncio.gather(*self.service._summary_reads), 1)
+
+    async def test_project_counts_distinguish_confirmed_unknown_and_unavailable(self) -> None:
+        for thread_id in ("active", "archived", "unindexed"):
+            binding = await self._create()
+            self.store.assign_native_thread_id(binding.id, thread_id)
+        await self._create()  # Lazy never adds uncertainty to archive counts.
+        self.runtime.active_metadata["active"] = NativeThreadMetadata("active", None, "active")
+        self.runtime.archived_metadata["archived"] = NativeThreadMetadata("archived", None, "archived")
+        page = await self.service.query_projects(deadline=asyncio.get_running_loop().time() + 1)
+        item = page.items[0]
+        self.assertEqual(item.archived_binding_count, 1)
+        self.assertEqual(item.unconfirmed_binding_count, 1)
+        self.assertEqual(item.aggregate.binding_count, 4)
+        self.assertFalse(any(call[0] == "summary" for call in self.runtime.calls))
+        self.runtime.archived_metadata["active"] = self.runtime.active_metadata["active"]
+        page = await self.service.query_projects(deadline=asyncio.get_running_loop().time() + 1)
+        self.assertEqual(page.items[0].archived_binding_count, 1)
+        self.assertEqual(page.items[0].unconfirmed_binding_count, 2)
+        for target, attribute in ((self.runtime, "thread_catalog_exact"), (self.store, "project_aliases_for_native_threads")):
+            with self.subTest(attribute=attribute), patch.object(target, attribute, side_effect=TimeoutError("unavailable")):
+                page = await self.service.query_projects(deadline=asyncio.get_running_loop().time() + 1)
+                self.assertIsNone(page.items[0].archived_binding_count)
+                self.assertEqual(page.items[0].unconfirmed_binding_count, 3)
+                self.assertEqual(page.items[0].aggregate.binding_count, 4)
+
+    async def test_project_archive_counts_fail_closed_if_local_inventory_changes(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "original")
+        self.runtime.archived_metadata["original"] = NativeThreadMetadata("original", None, "")
+        original_catalog = self.runtime.thread_catalog_exact
+
+        for operation in ("create", "delete"):
+            mutated = False
+
+            async def catalog(**kwargs):
+                nonlocal mutated
+                if not mutated:
+                    mutated = True
+                    if operation == "create":
+                        added = await self._create()
+                        self.store.assign_native_thread_id(added.id, "added")
+                        self.runtime.archived_metadata["added"] = NativeThreadMetadata("added", None, "")
+                    else:
+                        self.store.delete_binding(binding.id)
+                return await original_catalog(**kwargs)
+
+            with self.subTest(operation=operation), patch.object(self.runtime, "thread_catalog_exact", side_effect=catalog):
+                page = await self.service.query_projects(deadline=asyncio.get_running_loop().time() + 1)
+                item = page.items[0]
+                self.assertEqual(item.aggregate.binding_count, 1 if operation == "create" else 2)
+                self.assertIsNone(item.archived_binding_count)
+                self.assertEqual(item.unconfirmed_binding_count, item.aggregate.materialized_binding_count)
+            # The failed read transaction must not poison subsequent queries.
+            page = await self.service.query_projects(deadline=asyncio.get_running_loop().time() + 1)
+            self.assertEqual(page.items[0].archived_binding_count, 2 if operation == "create" else 1)
+            self.assertEqual(page.items[0].unconfirmed_binding_count, 0)
+
+    async def test_projects_without_materialized_bindings_do_not_read_native_catalogs(self) -> None:
+        await self._create()
+        self.runtime.calls.clear()
+        page = await self.service.query_projects(deadline=asyncio.get_running_loop().time() + 1)
+        self.assertEqual(page.items[0].archived_binding_count, 0)
+        self.assertEqual(page.items[0].unconfirmed_binding_count, 0)
+        self.assertFalse(self.runtime.calls)
+
+    async def test_stalled_index_leaves_budget_for_local_sessions_and_projects(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "unindexed")
+
+        async def stalled_catalog(**_kwargs):
+            await asyncio.sleep(10)
+
+        with (
+            patch.object(self.runtime, "thread_catalog_exact", side_effect=stalled_catalog),
+            patch("netizen.management.service._NATIVE_INDEX_READ_SECONDS", 0.01),
+        ):
+            sessions = await asyncio.wait_for(self.service.query_sessions(
+                query=SessionQuery(inventory_states=(SessionInventoryState.UNKNOWN,)),
+                deadline=asyncio.get_running_loop().time() + 1,
+            ), 0.5)
+            self.assertFalse(sessions.catalog_available)
+            self.assertEqual(sessions.items[0].record.binding.id, binding.id)
+            projects = await asyncio.wait_for(self.service.query_projects(
+                deadline=asyncio.get_running_loop().time() + 1,
+            ), 0.5)
+            self.assertIsNone(projects.items[0].archived_binding_count)
+            self.assertEqual(projects.items[0].unconfirmed_binding_count, 1)
+
     async def test_project_query_counts_indexed_threads_with_multiple_rollouts(self) -> None:
         archived = await self._create()
         self.store.assign_native_thread_id(archived.id, "native-archived")
@@ -1007,6 +1341,8 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         async def list_threads(**kwargs):
             if not kwargs.get("use_state_db_only"):
                 return SimpleNamespace(data=[old, current], next_cursor=None)
+            if not kwargs["archived"]:
+                return SimpleNamespace(data=[], next_cursor=None)
             if kwargs["cursor"] is None:
                 return SimpleNamespace(data=[unrelated], next_cursor="second-page")
             self.assertEqual(kwargs["cursor"], "second-page")
@@ -1028,10 +1364,9 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         by_alias = {item.aggregate.project.alias: item for item in page.items}
         self.assertEqual(by_alias["test"].archived_binding_count, 1)
         self.assertEqual(set(by_alias), {"test"})
-        self.assertEqual(codex.thread_list.await_count, 2)
+        self.assertEqual(codex.thread_list.await_count, 3)
 
-        # The same port's default read still validates the scan view, including
-        # callers that use it to classify missing Sessions.
+        # The same port's default read still validates the complete scan view.
         with self.assertRaisesRegex(ThreadCatalogError, "repeated a native Thread ID"):
             await port.thread_catalog_exact(
                 archived=True, deadline=asyncio.get_running_loop().time() + 1,
@@ -1233,6 +1568,25 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(status.primary_status)
         self.assertEqual(status.primary_status_resolution.value, "unavailable")
+
+    async def test_expired_status_budget_preserves_local_states_without_native_reads(self) -> None:
+        native = await self._create()
+        self.store.assign_native_thread_id(native.id, "native-goal")
+        lazy = await self._create()
+        compacting = await self._create()
+        self.store.assign_native_thread_id(compacting.id, "native-compacting")
+        self.runtime.runtime_snapshots[compacting.id] = BindingRuntimeSnapshot(
+            compacting.id, 1, None, None, True, None, None, None,
+        )
+        statuses = await self.service.binding_statuses_exact(
+            binding_ids=(native.id, lazy.id, compacting.id),
+            deadline=asyncio.get_running_loop().time() - 1,
+        )
+        self.assertEqual(
+            [(status.primary_status, status.primary_status_resolution.value) for status in statuses],
+            [(None, "unavailable"), ("idle", "resolved"), ("compacting", "local")],
+        )
+        self.assertFalse(any(call[0] == "goal-snapshot" for call in self.runtime.calls))
 
     async def test_exact_status_batch_bounds_native_goal_reads(self) -> None:
         self.store._id_factory = lambda: str(uuid.uuid4())

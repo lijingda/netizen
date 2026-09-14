@@ -187,7 +187,11 @@ def _session_inventory_states(
 ) -> tuple[SessionInventoryState, ...] | None:
     raw = _text_set_query(values, "inventoryState")
     if raw is None:
-        return (SessionInventoryState.ACTIVE, SessionInventoryState.LAZY)
+        return (
+            SessionInventoryState.ACTIVE,
+            SessionInventoryState.LAZY,
+            SessionInventoryState.UNKNOWN,
+        )
     if raw == ("all",):
         return None
     try:

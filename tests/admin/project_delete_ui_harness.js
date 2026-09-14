@@ -15,7 +15,7 @@ const previewEnvelope = envelope("preview");
 const deleteEnvelope = envelope("delete");
 const projectFixture = () => ({
   alias: "example", cwd: "/workspace/example", enabled: true, deleting: false,
-  bindingCount: 3, lazyBindingCount: 1, archivedBindingCount: 1, lastActivatedAt: null,
+  bindingCount: 3, lazyBindingCount: 1, archivedBindingCount: 1, unconfirmedBindingCount: 0, lastActivatedAt: null,
   actions: { setEnabled: envelope("enable"), previewDelete: structuredClone(previewEnvelope) },
 });
 const preview = {
@@ -45,6 +45,18 @@ const deletionButton = () => document.querySelector("#projects-body").querySelec
   .find((button) => button.textContent === "删除 Project 及关联 Sessions");
 // SHIPPED_PROJECT_CONTROLLER
 (async () => {
+  // Local inventory and actions remain available when native aggregate evidence is incomplete.
+  for (const [archivedBindingCount, unconfirmedBindingCount, expected] of [
+    [0, 0, "0"], [1, 1, "已确认 1；另有 1 个会话状态未确认"], [null, 2, "未确认"],
+  ]) {
+    projects = [{ ...projectFixture(), archivedBindingCount, unconfirmedBindingCount }];
+    await loadProjects();
+    const cells = document.querySelector("#projects-body").querySelectorAll("td");
+    assert.equal(cells[3].textContent, "3（Lazy 1）");
+    assert.equal(cells[4].textContent, expected);
+    assert(deletionButton());
+  }
+  projects = [projectFixture()];
   await loadProjects();
   assert(deletionButton());
   assert.equal(document.querySelector("#project-delete-result").getAttribute("aria-live"), "polite");

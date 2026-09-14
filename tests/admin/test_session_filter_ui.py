@@ -46,9 +46,13 @@ class SessionFilterUiTest(unittest.TestCase):
             source.index("const timeRangeControllers ="):
             source.index("function runtimeLabel(")
         ]
+        presentation = source[
+            source.index("function cell("):
+            source.index("const pendingProjectDeletes =")
+        ]
         pagination = source[
-            source.index("function renderSessionPagination("):
-            source.index("function wireSessionActions(")
+            source.index("function runtimeLabel("):
+            source.index("async function loadSides(")
         ] + source[
             source.index("async function moveSessionPage("):
             source.index("function sideRuntimeLabel(")
@@ -60,7 +64,7 @@ class SessionFilterUiTest(unittest.TestCase):
         dom = Path(__file__).with_name("dom_harness.js").read_text(encoding="utf-8")
         result = subprocess.run(
             [node, "-e", "const htmlTree = " + json.dumps(tree.root) + ";\n"
-             + dom + before + filters + pagination + after],
+             + dom + before + filters + presentation + pagination + after],
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

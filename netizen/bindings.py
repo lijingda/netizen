@@ -2350,6 +2350,7 @@ class BindingStore:
         self,
         thread_ids: Sequence[str],
         *,
+        expected_projects: Sequence[ProjectAggregate] = (),
         deadline_seconds: float = 0.5,
     ) -> dict[str, str]:
         """Map a bounded native catalog snapshot back to Channel Projects."""
@@ -2363,19 +2364,33 @@ class BindingStore:
             return {}
 
         def operation(connection: sqlite3.Connection) -> dict[str, str]:
-            result: dict[str, str] = {}
-            for offset in range(0, len(unique), 500):
-                chunk = unique[offset : offset + 500]
-                placeholders = ",".join("?" for _ in chunk)
-                rows = connection.execute(
-                    "SELECT native_thread_id, project_alias FROM bindings "
-                    f"WHERE native_thread_id IN ({placeholders})",
-                    chunk,
-                ).fetchall()
-                result.update(
-                    (row["native_thread_id"], row["project_alias"]) for row in rows
-                )
-            return result
+            connection.execute("BEGIN")
+            try:
+                # Counts and native-ID membership must describe the same local
+                # snapshot, including across lookup chunks and concurrent writes.
+                for expected in expected_projects:
+                    row = connection.execute(
+                        _PROJECT_AGGREGATE_SELECT
+                        + " WHERE p.deleted = 0 AND p.alias = ? GROUP BY p.alias",
+                        (expected.project.alias,),
+                    ).fetchone()
+                    if row is None or _project_aggregate(row) != expected:
+                        raise ValueError("Project inventory changed during native lookup")
+                result: dict[str, str] = {}
+                for offset in range(0, len(unique), 500):
+                    chunk = unique[offset : offset + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows = connection.execute(
+                        "SELECT native_thread_id, project_alias FROM bindings "
+                        f"WHERE native_thread_id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                    result.update(
+                        (row["native_thread_id"], row["project_alias"]) for row in rows
+                    )
+                return result
+            finally:
+                connection.rollback()
 
         return await self._submit_query(
             operation,

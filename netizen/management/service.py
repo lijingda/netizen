@@ -83,6 +83,8 @@ from ..model_settings import ModelCatalog
 
 
 _BINDING_STATUS_RESOLUTION_CONCURRENCY = 8
+_NATIVE_INDEX_READ_SECONDS = 3.0
+_SESSION_SUMMARY_READ_CONCURRENCY = 4
 _PROJECT_DELETE_SECONDS = 120.0
 _PROJECT_DELETE_STEP_SECONDS = 30.0
 logger = logging.getLogger(__name__)
@@ -134,7 +136,9 @@ class SchedulePublicationInProgress(ManagementError):
 
 @dataclass(frozen=True, slots=True)
 class NativeThreadView:
-    state: NativeThreadCatalogState
+    # None means the management catalog could not classify a materialized Thread.
+    # An absent NativeThreadView, rather than an absent state, represents Lazy.
+    state: NativeThreadCatalogState | None
     metadata: NativeThreadMetadata | None
 
 
@@ -267,6 +271,7 @@ class SessionInventoryState(str, Enum):
     LAZY = "lazy"
     ARCHIVED = "archived"
     MISSING = "missing"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,11 +286,20 @@ class SessionInventoryItem:
     native: NativeThreadView | None
     chat: ChatLabel
 
+    @property
+    def inventory_state(self) -> SessionInventoryState:
+        if self.record.binding.native_thread_id is None:
+            return SessionInventoryState.LAZY
+        if self.native is None or self.native.state is None:
+            return SessionInventoryState.UNKNOWN
+        return SessionInventoryState(self.native.state.value)
+
 
 @dataclass(frozen=True, slots=True)
 class SessionInventoryPage:
     items: tuple[SessionInventoryItem, ...]
     next_cursor: BindingCursor | None
+    catalog_available: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,8 +318,9 @@ class SideTopicInventoryPage:
 @dataclass(frozen=True, slots=True)
 class ProjectInventoryItem:
     aggregate: ProjectAggregate
-    archived_binding_count: int
+    archived_binding_count: int | None
     deleting: bool = False
+    unconfirmed_binding_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -638,6 +653,7 @@ class ManagementRuntimePort:
         *,
         archived: bool,
         deadline: float,
+        use_state_db_only: bool | None = None,
     ) -> dict[str, NativeThreadMetadata]:
         return await self.__runtime.thread_metadata(
             thread_ids,
@@ -645,7 +661,13 @@ class ManagementRuntimePort:
             deadline=deadline,
             max_pages=1_000,
             max_items=100_000,
+            use_state_db_only=use_state_db_only,
         )
+
+    async def thread_summary_exact(
+        self, thread_id: str,
+    ) -> NativeThreadMetadata:
+        return await self.__runtime.thread_summary(thread_id)
 
     async def thread_catalog_exact(
         self,
@@ -690,6 +712,11 @@ class InstanceManagementService:
         self._goal_status_read_limiter = asyncio.Semaphore(
             _BINDING_STATUS_RESOLUTION_CONCURRENCY
         )
+        self._summary_read_limiter = asyncio.Semaphore(
+            _SESSION_SUMMARY_READ_CONCURRENCY
+        )
+        self._summary_reads: set[asyncio.Task[NativeThreadMetadata]] = set()
+        self._summary_reads_closed = False
         self.schedules: ScheduleService | None = None
         self._schedule_creation_drain: Callable[[str, float], Awaitable[bool]] | None = None
 
@@ -717,12 +744,21 @@ class InstanceManagementService:
         return self._runtime.native_delete_available
 
     async def close(self, *, deadline: float | None = None) -> None:
+        self._summary_reads_closed = True
         if self.schedules is not None:
             self.schedules.close_admission()
         await self._updates.close(deadline=deadline)
         if self._chat_labels is not None:
             await self._chat_labels.aclose()
         await self._blocking_io.aclose(deadline=deadline)
+        if self._summary_reads:
+            remaining = (
+                1.0 if deadline is None
+                else min(1.0, max(0.0, deadline - asyncio.get_running_loop().time()))
+            )
+            # Do not cancel SDK wrappers and lose accounting for their workers.
+            # Any remaining reads finish when the shared Codex transport closes.
+            await asyncio.wait(tuple(self._summary_reads), timeout=remaining)
 
     async def update_status(self) -> dict[str, Any]:
         return await self._updates.status()
@@ -811,24 +847,42 @@ class InstanceManagementService:
             limit=limit,
             deadline_seconds=self._query_seconds(deadline),
         )
-        archived = await self._runtime.thread_catalog_exact(
-            archived=True,
-            deadline=deadline,
-            # Like Codex's archive UI, count indexed Threads rather than every
-            # immutable rollout left by thread/revert for the same Thread ID.
-            use_state_db_only=True,
+        native = (
+            await self._indexed_native_views(deadline=deadline)
+            if any(item.materialized_binding_count for item in page.items)
+            else {}
         )
-        project_by_thread = await self._bindings.project_aliases_for_native_threads(
-            tuple(thread.thread_id for thread in archived.threads),
-            deadline_seconds=self._query_seconds(deadline),
+        confirmed = {
+            thread_id: view for thread_id, view in (native or {}).items()
+            if view.state is not None
+        }
+        try:
+            project_by_thread = await self._bindings.project_aliases_for_native_threads(
+                tuple(confirmed), expected_projects=page.items,
+                deadline_seconds=self._query_seconds(deadline),
+            )
+        except Exception as error:
+            logger.warning("project catalog counts unavailable error_type=%s", type(error).__name__)
+            native = None
+            project_by_thread = {}
+        known_counts = Counter(project_by_thread.values())
+        archived_counts = Counter(
+            alias for thread_id, alias in project_by_thread.items()
+            if confirmed[thread_id].state is NativeThreadCatalogState.ARCHIVED
         )
-        counts = Counter(project_by_thread.values())
         return ProjectInventoryPage(
             items=tuple(
                 ProjectInventoryItem(
                     aggregate=item,
-                    archived_binding_count=counts[item.project.alias],
+                    archived_binding_count=(
+                        archived_counts[item.project.alias]
+                        if native is not None or item.materialized_binding_count == 0
+                        else None
+                    ),
                     deleting=self._bindings.project_delete_in_progress(item.project.alias),
+                    unconfirmed_binding_count=max(
+                        0, item.materialized_binding_count - known_counts[item.project.alias],
+                    ),
                 )
                 for item in page.items
             ),
@@ -1067,7 +1121,13 @@ class InstanceManagementService:
                 limit=limit,
                 deadline_seconds=self._query_seconds(deadline),
             )
-            native = await self._targeted_native_views(page.items, deadline=deadline)
+            thread_ids = tuple(dict.fromkeys(
+                record.binding.native_thread_id for record in page.items
+                if record.binding.native_thread_id is not None
+            ))
+            native = await self._indexed_native_views(
+                thread_ids=thread_ids, deadline=deadline,
+            )
             return await self._session_page(
                 page.items,
                 native=native,
@@ -1093,26 +1153,7 @@ class InstanceManagementService:
             query.local,
             materialized=None if SessionInventoryState.LAZY in states else True,
         )
-        if SessionInventoryState.MISSING in states or {
-            SessionInventoryState.ACTIVE,
-            SessionInventoryState.ARCHIVED,
-        }.issubset(states):
-            active, archived = await self._complete_native_views(deadline=deadline)
-        elif SessionInventoryState.ACTIVE in states:
-            active = await self._native_catalog_views(
-                archived=False,
-                deadline=deadline,
-            )
-            archived = {}
-        elif SessionInventoryState.ARCHIVED in states:
-            active = {}
-            archived = await self._native_catalog_views(
-                archived=True,
-                deadline=deadline,
-            )
-        else:  # pragma: no cover - exhaustive after the validated enum branches
-            raise AssertionError("unhandled Session inventory state")
-        native = {**active, **archived}
+        native = await self._indexed_native_views(deadline=deadline)
         selected: list[BindingInventoryRecord] = []
         scan_cursor = cursor
         next_cursor: BindingCursor | None = None
@@ -1129,10 +1170,12 @@ class InstanceManagementService:
             for index, record in enumerate(page.items):
                 binding = record.binding
                 scan_cursor = BindingCursor(binding.created_at, binding.id)
-                view = self._native_view(binding, active=active, archived=archived)
+                view = (native or {}).get(binding.native_thread_id)
                 state = (
                     SessionInventoryState.LAZY
-                    if view is None
+                    if binding.native_thread_id is None
+                    else SessionInventoryState.UNKNOWN
+                    if view is None or view.state is None
                     else SessionInventoryState(view.state.value)
                 )
                 if state not in states:
@@ -1195,6 +1238,7 @@ class InstanceManagementService:
         *,
         snapshot: BindingRuntimeSnapshot | None = None,
         catalog_state: NativeThreadCatalogState | None = None,
+        deadline: float | None = None,
     ) -> BindingStatusProjection:
         binding = self._bindings.get(binding_id)
         before = snapshot or self._runtime.runtime_snapshot_exact(binding.id)
@@ -1217,6 +1261,8 @@ class InstanceManagementService:
             )
         try:
             async with self._goal_status_read_limiter:
+                if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                    raise TimeoutError("management query deadline elapsed")
                 persisted_goal = await self._runtime.goal_snapshot_exact(binding)
         except asyncio.CancelledError:
             raise
@@ -1269,6 +1315,7 @@ class InstanceManagementService:
                     return await self.binding_status_exact(
                         binding_id,
                         catalog_state=catalog_state,
+                        deadline=deadline,
                     )
             except asyncio.CancelledError:
                 raise
@@ -1809,121 +1856,112 @@ class InstanceManagementService:
             outcome=outcome,
         )
 
-    async def _targeted_native_views(
-        self,
-        records: Sequence[BindingInventoryRecord],
-        *,
-        deadline: float,
-    ) -> dict[str, NativeThreadView]:
-        thread_ids = tuple(
-            dict.fromkeys(
-                record.binding.native_thread_id
-                for record in records
-                if record.binding.native_thread_id is not None
-            )
-        )
-        if not thread_ids:
-            return {}
-        active = await self._runtime.thread_metadata_exact(
-            thread_ids,
-            archived=False,
-            deadline=deadline,
-        )
-        archived = await self._runtime.thread_metadata_exact(
-            thread_ids,
-            archived=True,
-            deadline=deadline,
-        )
-        self._require_disjoint_native_catalogs(active, archived)
-        return {
-            thread_id: classify_native_thread_view(
-                thread_id,
-                active=active,
-                archived=archived,
-            )
-            for thread_id in thread_ids
-        }
-
-    async def _complete_native_views(
-        self,
-        *,
-        deadline: float,
-    ) -> tuple[dict[str, NativeThreadView], dict[str, NativeThreadView]]:
-        active = await self._native_catalog_views(
-            archived=False,
-            deadline=deadline,
-        )
-        archived = await self._native_catalog_views(
-            archived=True,
-            deadline=deadline,
-        )
-        self._require_disjoint_native_catalogs(active, archived)
-        return active, archived
-
-    async def _native_catalog_views(
-        self,
-        *,
-        archived: bool,
-        deadline: float,
-    ) -> dict[str, NativeThreadView]:
-        catalog = await self._runtime.thread_catalog_exact(
-            archived=archived,
-            deadline=deadline,
-        )
-        state = (
-            NativeThreadCatalogState.ARCHIVED
-            if archived
-            else NativeThreadCatalogState.ACTIVE
-        )
-        return {
-            thread_id: NativeThreadView(state, metadata)
-            for thread_id, metadata in catalog.by_id().items()
-        }
-
     @staticmethod
-    def _native_view(
-        binding: ThreadBinding,
+    def _enrichment_deadline(deadline: float, seconds: float) -> float:
+        # Keep time for local rows, labels and Runtime projections if native I/O stalls.
+        now = asyncio.get_running_loop().time()
+        return now + min(seconds, max(0.0, (deadline - now) / 2))
+
+    async def _indexed_native_views(
+        self,
         *,
-        active: dict[str, NativeThreadView],
-        archived: dict[str, NativeThreadView],
-    ) -> NativeThreadView | None:
-        thread_id = binding.native_thread_id
-        if thread_id is None:
+        deadline: float,
+        thread_ids: tuple[str, ...] | None = None,
+    ) -> dict[str, NativeThreadView] | None:
+        if thread_ids == ():
+            return {}
+        native_deadline = self._enrichment_deadline(deadline, _NATIVE_INDEX_READ_SECONDS)
+        try:
+            catalogs = []
+            async with asyncio.timeout_at(native_deadline):
+                for archived in (False, True):
+                    if thread_ids is None:
+                        catalog = await self._runtime.thread_catalog_exact(
+                            archived=archived, deadline=native_deadline,
+                            use_state_db_only=True,
+                        )
+                        catalogs.append(catalog.by_id())
+                    else:
+                        catalogs.append(await self._runtime.thread_metadata_exact(
+                            thread_ids, archived=archived, deadline=native_deadline,
+                            use_state_db_only=True,
+                        ))
+            active, archived = catalogs
+            if len(active.keys() | archived.keys()) > 100_000:
+                raise ValueError("management index exceeds the catalog limit")
+        except Exception as error:
+            # Native catalog enrichment cannot hide Channel-owned rows. Never
+            # fall back to rollout scans or infer Missing from an unavailable list.
+            logger.warning("management index unavailable error_type=%s", type(error).__name__)
             return None
-        return archived.get(thread_id) or active.get(thread_id) or NativeThreadView(
-            NativeThreadCatalogState.MISSING,
-            None,
-        )
+        return {
+            thread_id: (
+                NativeThreadView(None, None)
+                if thread_id in active and thread_id in archived
+                else classify_native_thread_view(thread_id, active=active, archived=archived)
+            )
+            for thread_id in active.keys() | archived.keys()
+        }
 
     async def _session_page(
         self,
         records: Sequence[BindingInventoryRecord],
         *,
-        native: dict[str, NativeThreadView],
+        native: dict[str, NativeThreadView] | None,
         next_cursor: BindingCursor | None,
         deadline: float,
     ) -> SessionInventoryPage:
-        labels = await self.resolve_chat_labels(
-            (record.scope.chat_id for record in records),
-            deadline=deadline,
+        views = {
+            record.binding.native_thread_id: (native or {}).get(
+                record.binding.native_thread_id, NativeThreadView(None, None),
+            )
+            for record in records if record.binding.native_thread_id is not None
+        }
+        # Only visible, unclassified rows need a summary. Reading one exact ID
+        # neither proves archive membership nor turns a read failure into Missing.
+        # Use the existing request deadline for the whole page, including queuing.
+
+        async def hydrate(thread_id: str) -> None:
+            try:
+                async with asyncio.timeout_at(deadline):
+                    await self._summary_read_limiter.acquire()
+                    if self._summary_reads_closed or asyncio.get_running_loop().time() >= deadline:
+                        self._summary_read_limiter.release()
+                        return
+                    task = asyncio.create_task(self._runtime.thread_summary_exact(thread_id))
+                    self._summary_reads.add(task)
+                    task.add_done_callback(self._summary_read_finished)
+                    metadata = await asyncio.shield(task)
+                views[thread_id] = NativeThreadView(None, metadata)
+            except Exception:
+                pass  # The exact row remains visible with unknown state and its ID.
+
+        unresolved = tuple(
+            thread_id for thread_id, view in views.items()
+            if view.state is None and view.metadata is None
         )
-        items: list[SessionInventoryItem] = []
-        for record in records:
-            thread_id = record.binding.native_thread_id
-            view = None
-            if thread_id is not None:
-                view = native.get(thread_id) or NativeThreadView(
-                    NativeThreadCatalogState.MISSING,
-                    None,
-                )
-            items.append(
+        await asyncio.gather(*(hydrate(thread_id) for thread_id in unresolved))
+        labels = await self.resolve_chat_labels(
+            (record.scope.chat_id for record in records), deadline=deadline,
+        )
+        return SessionInventoryPage(
+            items=tuple(
                 SessionInventoryItem(
                     record=record,
-                    native=view,
+                    native=views.get(record.binding.native_thread_id),
                     chat=labels[record.scope.chat_id],
                 )
-            )
-        return SessionInventoryPage(tuple(items), next_cursor)
+                for record in records
+            ),
+            next_cursor=next_cursor,
+            catalog_available=native is not None,
+        )
+
+    def _summary_read_finished(self, task: asyncio.Task[NativeThreadMetadata]) -> None:
+        self._summary_reads.discard(task)
+        self._summary_read_limiter.release()
+        if not task.cancelled():
+            task.exception()  # Consume failures even after the page wait expired.
 
     async def resolve_chat_labels(
         self,
@@ -1940,17 +1978,6 @@ class InstanceManagementService:
                 for chat_id in unique
             }
         return await resolver.resolve_many(unique, deadline=deadline)
-
-    @staticmethod
-    def _require_disjoint_native_catalogs(
-        active: dict[str, object],
-        archived: dict[str, object],
-    ) -> None:
-        overlap = active.keys() & archived.keys()
-        if overlap:
-            raise NativeCatalogInconsistent(
-                "原生会话同时出现在 active 和 archived catalog；本次查询已取消。"
-            )
 
     @staticmethod
     def _query_seconds(deadline: float) -> float:

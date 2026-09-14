@@ -459,10 +459,14 @@ class AdminSessionPresentationTest(unittest.TestCase):
             all(_release_disposition_message(item) for item in ReleaseDisposition)
         )
 
-    def test_session_inventory_states_default_to_active_lazy_and_normalize_sets(self) -> None:
+    def test_session_inventory_states_default_includes_unknown_and_normalizes_sets(self) -> None:
         self.assertEqual(
             _session_inventory_states({}),
-            (SessionInventoryState.ACTIVE, SessionInventoryState.LAZY),
+            (
+                SessionInventoryState.ACTIVE,
+                SessionInventoryState.LAZY,
+                SessionInventoryState.UNKNOWN,
+            ),
         )
         for state in SessionInventoryState:
             self.assertEqual(
@@ -1341,7 +1345,8 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             status, _, page = await self.json_get(
                 "/api/v1/sessions?project=beta&project=alpha&project=beta"
                 "&scopeKind=topic&scopeKind=direct&current=true&current=false"
-                "&inventoryState=lazy&inventoryState=active&inventoryState=lazy",
+                "&inventoryState=unknown&inventoryState=lazy&inventoryState=active"
+                "&inventoryState=lazy",
                 session,
             )
             self.assertEqual(status, 200, page)
@@ -1351,6 +1356,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(filters.local.current)
             self.assertEqual(filters.inventory_states, (
                 SessionInventoryState.ACTIVE, SessionInventoryState.LAZY,
+                SessionInventoryState.UNKNOWN,
             ))
             cursor = page["nextCursor"]
             equivalent = (
@@ -1362,7 +1368,8 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(query.call_args.kwargs["cursor"], native_cursor)
             for change in (
                 "&project=gamma", "&scopeKind=group", "&current=true",
-                "&inventoryState=lazy", "&pageSize=50",
+                "&inventoryState=lazy", "&inventoryState=active&inventoryState=lazy",
+                "&inventoryState=unknown", "&pageSize=50",
             ):
                 with self.subTest(change=change):
                     status, _, error = await self.json_get(
@@ -1374,7 +1381,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             status, _, page = await self.json_get(
                 "/api/v1/sessions?scopeKind=direct&scopeKind=group&scopeKind=topic"
                 "&current=false&current=true&inventoryState=active&inventoryState=lazy"
-                "&inventoryState=archived&inventoryState=missing",
+                "&inventoryState=archived&inventoryState=missing&inventoryState=unknown",
                 session,
             )
             self.assertEqual(status, 200, page)
@@ -1452,8 +1459,13 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call["limit"], 20)
         self.assertEqual(
             call["query"].inventory_states,
-            (SessionInventoryState.ACTIVE, SessionInventoryState.LAZY),
+            (
+                SessionInventoryState.ACTIVE,
+                SessionInventoryState.LAZY,
+                SessionInventoryState.UNKNOWN,
+            ),
         )
+        self.assertTrue(page["catalogAvailable"])
         self.assertGreaterEqual(call["deadline"], started + 10.0)
         self.assertLessEqual(call["deadline"], finished + 10.0)
         by_id = {item["bindingId"]: item for item in page["items"]}
@@ -1527,6 +1539,91 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 400)
         self.assertEqual(error["code"], "invalid_query")
+
+    async def test_unknown_session_state_preserves_identity_and_stop_without_native_grants(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        unknown = replace(
+            self.management.native,
+            id="binding-unknown",
+            native_thread_id="native-unlisted",
+            active=False,
+        )
+        self.management.runtime_by_id[unknown.id] = self.management._runtime(
+            unknown.id, 5, running=True,
+        )
+        label = ChatLabelResolver.fallback("oc_chat")
+        for metadata in (None, NativeThreadMetadata("native-unlisted", "Read title", "preview")):
+            with self.subTest(metadata=metadata):
+                self.management.session_items_override = (
+                    SessionInventoryItem(
+                        BindingInventoryRecord(unknown, self.management.scope),
+                        NativeThreadView(None, metadata),
+                        label,
+                    ),
+                    SessionInventoryItem(
+                        BindingInventoryRecord(self.management.lazy, self.management.scope),
+                        None,
+                        label,
+                    ),
+                )
+                status, _, page = await self.json_get(
+                    "/api/v1/sessions?inventoryState=unknown", session,
+                )
+                self.assertEqual(status, 200, page)
+                self.assertEqual(
+                    self.management.query_session_calls[-1]["query"].inventory_states,
+                    (SessionInventoryState.UNKNOWN,),
+                )
+                item = page["items"][0]
+                self.assertEqual(item["catalogState"], "unknown")
+                self.assertEqual(item["nativeThreadId"], "native-unlisted")
+                self.assertEqual(item["pointerState"], "inactive")
+                self.assertEqual(item["nativeTitle"], metadata.name if metadata else None)
+                self.assertEqual(item["runtime"]["primaryStatus"], "running")
+                self.assertEqual(
+                    set(item["actions"]), {"configure", "createLazy", "stop"},
+                )
+                self.assertEqual(page["items"][1]["catalogState"], "lazy")
+                self.assertIn("deleteLazy", page["items"][1]["actions"])
+
+        with patch.object(
+            self.management,
+            "query_sessions",
+            return_value=SessionInventoryPage((), None, catalog_available=False),
+        ):
+            status, _, page = await self.json_get(
+                "/api/v1/sessions?inventoryState=active", session,
+            )
+            self.assertEqual(status, 200, page)
+            self.assertEqual(page["items"], [])
+            self.assertFalse(page["catalogAvailable"])
+
+    async def test_projects_api_keeps_local_inventory_when_catalog_is_unconfirmed(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        aggregate = ProjectAggregate(self.management.project_record, 3, 1, 2, "2030-01-02")
+        for archived_count, unconfirmed_count in ((0, 0), (1, 1), (None, 2)):
+            with self.subTest(archived=archived_count), patch.object(
+                self.management,
+                "query_projects",
+                return_value=ProjectInventoryPage((
+                    ProjectInventoryItem(
+                        aggregate,
+                        archived_count,
+                        unconfirmed_binding_count=unconfirmed_count,
+                    ),
+                ), None),
+            ):
+                status, _, page = await self.json_get("/api/v1/projects", session)
+                self.assertEqual(status, 200, page)
+                item = page["items"][0]
+                self.assertEqual(item["bindingCount"], 3)
+                self.assertEqual(item["lazyBindingCount"], 1)
+                self.assertEqual(item["archivedBindingCount"], archived_count)
+                self.assertEqual(item["unconfirmedBindingCount"], unconfirmed_count)
+                self.assertIn("setEnabled", item["actions"])
+                self.assertIn("previewDelete", item["actions"])
 
     async def test_materialized_delete_action_requires_capability_and_live_catalog(self) -> None:
         self.runner.open_admission()

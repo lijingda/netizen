@@ -19,7 +19,7 @@ async function refresh(tab) {
   const checkbox = (name, value) => roots.get(name).querySelectorAll("input")
     .find((input) => input.type === "checkbox" && input.value === value);
   const query = () => formQuery(form, "20");
-  assert.deepEqual(query().getAll("inventoryState"), ["active", "lazy"]);
+  assert.deepEqual(query().getAll("inventoryState"), ["active", "lazy", "unknown"]);
   assert.equal(query().get("pageSize"), "20");
   assert(!query().has("project"));
   assert(!query().has("scopeKind"));
@@ -67,7 +67,7 @@ async function refresh(tab) {
   checkbox("inventoryState", "archived").click();
   checkbox("current", "false").click();
   assert.deepEqual(query().getAll("scopeKind"), ["direct", "topic"]);
-  assert.deepEqual(query().getAll("inventoryState"), ["active", "lazy", "archived"]);
+  assert.deepEqual(query().getAll("inventoryState"), ["active", "lazy", "unknown", "archived"]);
   assert.deepEqual(query().getAll("current"), ["false"]);
   control("inventoryState", "multi-filter-clear").click();
   assert.deepEqual(query().getAll("inventoryState"), ["all"]);
@@ -100,7 +100,7 @@ async function refresh(tab) {
   state.sessionPage = { cursor: "later", nextCursor: "next", previousCursors: [null], number: 2 };
   await resetSessionFilters();
   assert.equal(refreshed, "sessions");
-  assert.deepEqual(query().getAll("inventoryState"), ["active", "lazy"]);
+  assert.deepEqual(query().getAll("inventoryState"), ["active", "lazy", "unknown"]);
   assert.equal(query().get("pageSize"), "20");
   for (const key of ["project", "scopeKind", "current", "createdFrom", "createdBefore"]) {
     assert(!query().has(key), `${key} should be reset`);
@@ -148,12 +148,12 @@ async function refresh(tab) {
   checkbox("project", "netizen").click();
   checkbox("scopeKind", "topic").click();
   applyTimePreset("yesterday");
-  assert.deepEqual(query().getAll("inventoryState"), ["lazy", "archived"]);
+  assert.deepEqual(query().getAll("inventoryState"), ["lazy", "unknown", "archived"]);
   assert.notEqual(query().get("createdFrom"), bounds);
   loadOnRefresh = true;
   await moveSessionPage("next");
   assert.equal(sessionQueries.at(-1).get("cursor"), "page-two");
-  assert.deepEqual(sessionQueries.at(-1).getAll("inventoryState"), ["active", "lazy"]);
+  assert.deepEqual(sessionQueries.at(-1).getAll("inventoryState"), ["active", "lazy", "unknown"]);
   assert.equal(sessionQueries.at(-1).get("createdFrom"), bounds);
   assert(!sessionQueries.at(-1).has("project"));
   assert(!sessionQueries.at(-1).has("scopeKind"));
@@ -171,8 +171,41 @@ async function refresh(tab) {
   failNextPage = false;
   resetSessionPagination();
   await loadSessions();
-  assert.deepEqual(sessionQueries.at(-1).getAll("inventoryState"), ["lazy", "archived"]);
+  assert.deepEqual(sessionQueries.at(-1).getAll("inventoryState"), ["lazy", "unknown", "archived"]);
   assert.deepEqual(sessionQueries.at(-1).getAll("project"), ["netizen"]);
   assert.deepEqual(sessionQueries.at(-1).getAll("scopeKind"), ["topic"]);
   assert.notEqual(sessionQueries.at(-1).get("createdFrom"), bounds);
+
+  // Unknown native state keeps the row distinct from Lazy and does not hide runtime control.
+  const unknown = {
+    bindingId: "binding-unknown", shortId: "unknown", nativeThreadId: "native-unlisted",
+    scopeKind: "direct", chatId: "oc-chat", chatMode: "p2p", chatLabelResolved: false,
+    chatOpenUrl: "https://applink.feishu.cn/client/chat/open?chatId=oc-chat",
+    sessionType: "message", pointerState: "inactive", catalogState: "unknown",
+    nativeTitle: "Read summary", nativePreview: "", projectAlias: "netizen",
+    messageContextMode: "current_only", runtime: { primaryStatus: "running", primaryStatusResolution: "local" },
+    actions: { stop: {} },
+  };
+  let sessionResponse = { items: [unknown], nextCursor: null, catalogAvailable: true };
+  answer = (path) => path.startsWith("/api/v1/projects/options?")
+    ? { items: [], nextCursor: null } : sessionResponse;
+  resetSessionPagination();
+  await loadSessions();
+  const notice = document.querySelector("#sessions-catalog-notice");
+  const rows = document.querySelector("#sessions-body");
+  assert.equal(notice.hidden, false);
+  assert.equal(notice.getAttribute("role"), "status");
+  assert.match(notice.textContent, /无法确认.*刷新/);
+  assert.match(rows.textContent, /Read summary.*状态未确认.*running/);
+  assert.doesNotMatch(rows.textContent, /Lazy Session|原生会话缺失/);
+  assert.deepEqual(rows.querySelectorAll("button").map((button) => button.textContent), ["停止"]);
+
+  // An empty filtered page still discloses a failed catalog read; a healthy refresh clears it.
+  sessionResponse = { items: [], nextCursor: null, catalogAvailable: false };
+  await loadSessions();
+  assert.equal(notice.hidden, false);
+  assert.equal(rows.querySelectorAll("tr").length, 0);
+  sessionResponse = { items: [], nextCursor: null, catalogAvailable: true };
+  await loadSessions();
+  assert.equal(notice.hidden, true);
 })().catch((error) => { console.error(error); process.exitCode = 1; });
