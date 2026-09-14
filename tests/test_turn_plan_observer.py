@@ -148,6 +148,7 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
             id="command-one",
             command="cat /Users/user/private.py",
             commandActions=[],
+            aggregatedOutput="COMMAND_OUTPUT_NOT_FOR_ACTIVITY",
             cwd="/Users/user",
             status=CommandExecutionStatus.in_progress,
             type="commandExecution",
@@ -201,14 +202,17 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
             (TurnActivityKind.COMMAND, TurnActivityStatus.IN_PROGRESS),
         )
         self.assertEqual(observation.events[0].event_timestamp_ms, 1)
-        self.assertIsNone(observation.events[0].text)
+        self.assertEqual(
+            observation.events[0].text,
+            "执行命令 · cat /Users/user/private.py",
+        )
         self.assertEqual(observation.events[1].event_timestamp_ms, 2)
         self.assertEqual(
             observation.events[1].text,
             "[敏感内容已隐藏]",
         )
-        self.assertNotIn("cat", repr(observation.events))
-        self.assertNotIn("private.py", repr(observation.events))
+        self.assertNotIn("do-not-show", repr(observation.events))
+        self.assertNotIn("COMMAND_OUTPUT_NOT_FOR_ACTIVITY", repr(observation.events))
 
     def test_mismatched_thread_and_turn_payloads_cannot_update_exact_turn(self) -> None:
         self._append_raw(_plan(thread_id="thread-other"))

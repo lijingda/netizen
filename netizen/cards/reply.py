@@ -44,13 +44,14 @@ from ..turn_files import (
 )
 from ..turn_activity import (
     ACTIVITY_COMMENTARY_LIMIT,
+    ACTIVITY_DETAIL_KINDS,
     ACTIVITY_OPERATION_LIMIT,
     ACTIVITY_PLAN_LIMIT,
     ACTIVITY_TEXT_LIMIT,
-    COMMAND_ACTIVITY_SUMMARIES,
     TurnActivityKind,
     TurnActivityStatus,
     normalize_activity_text_layout,
+    sanitize_activity_operation_text,
     sanitize_activity_text,
 )
 from .callbacks import (
@@ -344,10 +345,10 @@ def _activity_operation_text(kind: object, value: object) -> str | None:
         return None
     if not isinstance(value, str) or not value:
         raise ValueError("activity operation text is invalid")
-    if kind == TurnActivityKind.COMMAND.value:
-        if value not in COMMAND_ACTIVITY_SUMMARIES:
-            raise ValueError("activity command summary is invalid")
-        return value
+    if kind in ACTIVITY_DETAIL_KINDS:
+        if len(value) > ACTIVITY_TEXT_LIMIT:
+            raise ValueError("activity operation text must be bounded")
+        return sanitize_activity_operation_text(value)
     if kind == TurnActivityKind.TOOL.value:
         return value
     raise ValueError("activity text is unsupported for this operation")
@@ -1121,7 +1122,7 @@ def _activity_operation_display(item: _TurnActivityEntryLike) -> str:
         TurnActivityStatus.INTERRUPTED.value: "×",
     }
     label = labels.get(kind, "执行操作")
-    if kind == TurnActivityKind.COMMAND.value and item.text:
+    if kind in ACTIVITY_DETAIL_KINDS and item.text:
         label = item.text
     count = item.count
     if kind in {

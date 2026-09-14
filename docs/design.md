@@ -640,12 +640,16 @@ plan/checklist、最近三条 completed commentary、最近八个通用操作，
 的安全数量聚合。每条 commentary 和通用操作还携带 exact SDK item lifecycle 毫秒时间戳。
 commentary 保留内部换行；CRLF/CR 统一为 LF，tab 展开为四个空格，其他不可展示控制字符
 替换为 Unicode replacement character。该布局规范化不折叠合法 Markdown 空白。
-命令不显示正文，只根据 typed `commandActions` 区分读取文件、列出文件、搜索内容、复合命令
-或通用执行命令；MCP 显示 exact `tool`，dynamic tool 显示非空 `namespace.tool` 或 `tool`。
-工具名不做字符白名单、合规判定或单独截断，只在卡片 Markdown 边界转义。不显示 reasoning、
-final answer、delta、MCP server、参数、输入输出、action 路径/查询、搜索词、URL、文件路径、
-diff、token usage、elapsed time、百分比或 ETA。commentary 在进入 Runtime 前已经过同一套
-有界脱敏。它不是原生终态事实或历史记录。
+命令使用 typed `commandActions` 的读取/列举路径或搜索查询和范围；原生分类未知、复合或
+对象字段为空时显示 `command` 预览，不新增本地命令解析。存在非零 `exitCode` 时附加原生
+退出码。文件修改显示 change kind/path，网页操作显示 typed query/queries/url/pattern，
+均为最多 160 字符的单行预览，文件和多查询最多预览前三项。MCP 显示 exact `tool`，dynamic
+tool 显示非空 `namespace.tool` 或 `tool`；不解释任意工具参数。工具名不做字符白名单、合规
+判定或单独截断，只在卡片 Markdown 边界转义。commentary 和预览先过滤明确凭据再限长，
+保留普通路径、链接、邮箱、内联代码和长标识符，卡片/manifest 解码再次过滤并转义。
+不显示 reasoning、final answer、delta、MCP server、工具参数/结果、命令输出、diff 或 token
+usage；不生成 elapsed time、百分比或 ETA，commentary/checklist 沿用估算过滤，原生命令/
+查询中的同名字面内容不作估算解释。它不是原生终态事实或历史记录。
 
 Progress Card 开启时，Runtime 的既有 consumer/poll loop 更新快照，Channel Presenter 每秒
 只读取 projection 并在 revision 变化时重绘；关闭时普通/Side Turn 不创建 Activity 卡、

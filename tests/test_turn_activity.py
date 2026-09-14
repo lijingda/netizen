@@ -64,10 +64,11 @@ class TurnActivityProjectionTest(unittest.TestCase):
                     "commandActions": [],
                     "cwd": "/Users/user",
                     "status": "inProgress",
+                    "aggregatedOutput": "private command output",
                 },
                 TurnActivityKind.COMMAND,
                 1,
-                None,
+                "执行命令 · cat /Users/user/private.txt",
             ),
             (
                 {
@@ -110,11 +111,12 @@ class TurnActivityProjectionTest(unittest.TestCase):
                 {
                     "type": "webSearch",
                     "id": "search-one",
-                    "query": "private search terms",
+                    "query": "Codex SDK",
+                    "results": [{"text": "private search results"}],
                 },
                 TurnActivityKind.WEB_SEARCH,
                 1,
-                None,
+                "搜索网页 · Codex SDK",
             ),
             (
                 {
@@ -197,18 +199,19 @@ class TurnActivityProjectionTest(unittest.TestCase):
 
         safe = repr(projected)
         for forbidden in (
-            "private search terms",
+            "private command output",
+            "private search results",
             "private prompt",
             "private-server",
-            "/Users/user",
             "do-not-show",
             "private-thread",
         ):
             self.assertNotIn(forbidden, safe)
 
-    def test_command_actions_map_without_exposing_command_details(self) -> None:
+    def test_command_summaries_use_native_details_with_raw_command_fallback(self) -> None:
+        fallback = "执行命令 · pytest tests/test_forms.py -q"
         cases = (
-            ([], None),
+            ([], fallback),
             (
                 [
                     {
@@ -218,7 +221,7 @@ class TurnActivityProjectionTest(unittest.TestCase):
                         "path": "/Users/user/private.txt",
                     }
                 ],
-                "读取文件",
+                "读取文件 · /Users/user/private.txt",
             ),
             (
                 [
@@ -228,7 +231,7 @@ class TurnActivityProjectionTest(unittest.TestCase):
                         "path": "/Users/user/private",
                     }
                 ],
-                "列出文件",
+                "列出文件 · /Users/user/private",
             ),
             (
                 [
@@ -239,9 +242,9 @@ class TurnActivityProjectionTest(unittest.TestCase):
                         "query": "secret",
                     }
                 ],
-                "搜索内容",
+                "搜索内容 · secret · /Users/user/private",
             ),
-            ([{"type": "unknown", "command": "printenv SECRET"}], None),
+            ([{"type": "unknown", "command": "another action command"}], fallback),
             (
                 [
                     {
@@ -257,8 +260,22 @@ class TurnActivityProjectionTest(unittest.TestCase):
                         "path": "second",
                     },
                 ],
-                "执行复合命令",
+                fallback,
             ),
+            (
+                [{"type": "read", "command": "cat x", "name": "x", "path": ""}],
+                fallback,
+            ),
+            ([{"type": "listFiles", "command": "ls"}], fallback),
+            (
+                [{"type": "search", "command": "rg reset", "query": "reset"}],
+                "搜索内容 · reset",
+            ),
+            (
+                [{"type": "search", "command": "rg reset src", "path": "src"}],
+                "搜索内容 · src",
+            ),
+            ([{"type": "search", "command": "rg reset"}], fallback),
         )
         for index, (actions, expected) in enumerate(cases):
             with self.subTest(expected=expected):
@@ -266,7 +283,7 @@ class TurnActivityProjectionTest(unittest.TestCase):
                     {
                         "type": "commandExecution",
                         "id": f"command-{index}",
-                        "command": "raw command must not appear",
+                        "command": "pytest tests/test_forms.py -q",
                         "commandActions": actions,
                         "cwd": "/Users/user/private",
                         "status": "inProgress",
@@ -274,8 +291,181 @@ class TurnActivityProjectionTest(unittest.TestCase):
                 )
                 assert event is not None
                 self.assertEqual(event.text, expected)
-                self.assertNotIn("raw command", repr(event))
-                self.assertNotIn("/Users/user", repr(event))
+                self.assertEqual(event.item_id, f"command-{index}")
+                self.assertIs(event.status, TurnActivityStatus.IN_PROGRESS)
+                self.assertNotIn("another action command", repr(event))
+
+    def test_command_preview_is_bounded_and_preserves_native_exit_code(self) -> None:
+        for exit_code in (None, 0, 1, -9):
+            with self.subTest(exit_code=exit_code):
+                event = _project_item(
+                    {
+                        "type": "commandExecution",
+                        "id": "command-long",
+                        "command": "pytest " + "tests/test_form.py " * 30,
+                        "commandActions": [],
+                        "cwd": "/tmp",
+                        "status": "completed",
+                        "exitCode": exit_code,
+                        "aggregatedOutput": "FAILURE must not infer a failed status",
+                    },
+                    completed=True,
+                    completed_at_ms=1234,
+                )
+                assert event is not None and event.text is not None
+                self.assertLessEqual(len(event.text), ACTIVITY_TEXT_LIMIT)
+                self.assertIn("…", event.text)
+                self.assertTrue(event.text.startswith("执行命令 · pytest "))
+                if exit_code:
+                    self.assertTrue(event.text.endswith(f" · 退出码 {exit_code}"))
+                else:
+                    self.assertNotIn("退出码", event.text)
+                self.assertEqual(event.item_id, "command-long")
+                self.assertEqual(event.event_timestamp_ms, 1234)
+                self.assertIs(event.status, TurnActivityStatus.COMPLETED)
+                self.assertNotIn("FAILURE", repr(event))
+
+    def test_command_details_preserve_literal_time_and_progress_terms(self) -> None:
+        command = "rg 'ETA|elapsed|73%' tests/test_timing.py"
+        event = _project_item(
+            {
+                "type": "commandExecution",
+                "id": "literal-search",
+                "command": command,
+                "commandActions": [],
+                "cwd": "/tmp",
+                "status": "inProgress",
+            }
+        )
+        assert event is not None
+        self.assertEqual(event.text, f"执行命令 · {command}")
+
+    def test_file_changes_show_native_kinds_and_paths_without_diffs(self) -> None:
+        changes = [
+            {"path": path, "kind": {"type": kind}, "diff": "private file diff"}
+            for path, kind in (
+                ("src/new.py", "add"),
+                ("src/old.py", "delete"),
+                ("src/form.py", "update"),
+                ("src/omitted.py", "update"),
+            )
+        ]
+        for count in (3, 4):
+            with self.subTest(count=count):
+                event = _project_item(
+                    {
+                        "type": "fileChange",
+                        "id": "files-one",
+                        "changes": changes[:count],
+                        "status": "declined",
+                    },
+                    completed=True,
+                )
+                assert event is not None and event.text is not None
+                expected = "修改文件 · 新增 src/new.py、删除 src/old.py、更新 src/form.py"
+                if count == 3:
+                    self.assertEqual(event.text, expected)
+                else:
+                    self.assertEqual(event.text, expected + "、…")
+                    self.assertNotIn("src/omitted.py", event.text)
+                self.assertIs(event.status, TurnActivityStatus.DECLINED)
+                self.assertEqual(event.count, count)
+                self.assertLessEqual(len(event.text), ACTIVITY_TEXT_LIMIT)
+                self.assertNotIn("private file diff", repr(event))
+
+    def test_web_actions_show_only_native_query_url_and_pattern(self) -> None:
+        cases = (
+            (None, "搜索网页 · fallback query"),
+            ({"type": "search", "query": "Codex SDK"}, "搜索网页 · Codex SDK"),
+            (
+                {
+                    "type": "search",
+                    "queries": ["Codex SDK", "Turn events"],
+                    "query": "unused singular query",
+                },
+                "搜索网页 · Codex SDK、Turn events",
+            ),
+            (
+                {"type": "search", "queries": ["one", "two", "three", "four"]},
+                "搜索网页 · one、two、three、…",
+            ),
+            (
+                {"type": "search", "queries": [], "query": "singular query"},
+                "搜索网页 · singular query",
+            ),
+            ({"type": "search"}, "搜索网页 · fallback query"),
+            (
+                {"type": "openPage", "url": "https://example.com/docs"},
+                "打开网页 · https://example.com/docs",
+            ),
+            (
+                {
+                    "type": "findInPage",
+                    "pattern": "CommandExecution",
+                    "url": "https://example.com/docs",
+                },
+                "查找网页内容 · CommandExecution · https://example.com/docs",
+            ),
+            ({"type": "openPage"}, "打开网页 · fallback query"),
+            ({"type": "findInPage"}, "查找网页内容 · fallback query"),
+            ({"type": "other"}, "搜索网页 · fallback query"),
+        )
+        for action, expected in cases:
+            with self.subTest(action=action):
+                event = _project_item(
+                    {
+                        "type": "webSearch",
+                        "id": "web-one",
+                        "action": action,
+                        "query": "fallback query",
+                        "results": [{"text": "private page content"}],
+                    },
+                    completed=True,
+                )
+                assert event is not None
+                self.assertEqual(event.text, expected)
+                self.assertNotIn("private page content", repr(event))
+
+    def test_detailed_operations_are_bounded_and_redact_explicit_credentials(self) -> None:
+        for detail, expected in (
+            ("src/" + "a" * 200, None),
+            ("https://user:credential-value@example.com/docs", "credential-value"),
+            ("api_key=credential-value", "credential-value"),
+            ('{"api_key": "credential-value"}', "credential-value"),
+            ("curl --password credential-value", "credential-value"),
+            ("client --token credential-value", "credential-value"),
+            ("https://example.com/?token=credential-value", "credential-value"),
+            ("https://example.com/?key=credential-value", "credential-value"),
+            ("https://example.com/?signature=credential-value", "credential-value"),
+            ("a" * 200 + " --password credential-value", "credential-value"),
+            ("sk-" + "a" * 40, "sk-"),
+        ):
+            for payload in (
+                {
+                    "type": "commandExecution",
+                    "id": "operation",
+                    "command": detail,
+                    "commandActions": [],
+                    "cwd": "/tmp",
+                    "status": "inProgress",
+                },
+                {
+                    "type": "fileChange",
+                    "id": "operation",
+                    "changes": [{"path": detail, "kind": {"type": "add"}, "diff": ""}],
+                    "status": "inProgress",
+                },
+                {"type": "webSearch", "id": "operation", "query": detail},
+            ):
+                with self.subTest(detail=detail, kind=payload["type"]):
+                    event = _project_item(payload)
+                    assert event is not None and event.text is not None
+                    self.assertLessEqual(len(event.text), ACTIVITY_TEXT_LIMIT)
+                    if expected is None:
+                        self.assertIn("…", event.text)
+                    else:
+                        self.assertNotIn(expected, event.text)
+                        self.assertIn("[敏感内容已隐藏]", event.text)
 
     def test_new_collab_tools_preserve_safe_operation_status_and_counts(self) -> None:
         for tool in ("sendMessage", "followupTask", "interruptAgent", "listAgents"):
@@ -408,10 +598,23 @@ class TurnActivityProjectionTest(unittest.TestCase):
         self.assertIs(commentary.kind, TurnActivityKind.COMMENTARY)
         self.assertIs(commentary.status, TurnActivityStatus.COMPLETED)
         self.assertEqual(commentary.event_timestamp_ms, 2)
-        self.assertNotIn("secret", commentary.text or "")
+        self.assertIn("`secret --flag`", commentary.text or "")
         self.assertNotIn("ETA", commentary.text or "")
-        self.assertNotIn("user@example.com", commentary.text or "")
+        self.assertIn("user@example.com", commentary.text or "")
         self.assertIsNone(final_answer)
+
+    def test_reasoning_content_and_summary_are_not_projected(self) -> None:
+        self.assertIsNone(
+            _project_item(
+                {
+                    "type": "reasoning",
+                    "id": "reasoning-one",
+                    "content": ["private reasoning"],
+                    "summary": ["private reasoning summary"],
+                },
+                completed=True,
+            )
+        )
 
     def test_unknown_notifications_are_ignored_but_allowlisted_shape_drift_fails(self) -> None:
         ignored = project_turn_activity_notification(
@@ -444,9 +647,57 @@ class TurnActivityProjectionTest(unittest.TestCase):
         self.assertNotIn("18m", value)
         self.assertNotIn("ETA", value)
         self.assertNotIn("73%", value)
-        self.assertNotIn("private.example", value)
-        self.assertNotIn("/etc/private.conf", value)
-        self.assertNotIn("src/private/file.py", value)
+        self.assertIn("https://private.example/x", value)
+        self.assertIn("/etc/private.conf", value)
+        self.assertIn("src/private/file.py", value)
+
+    def test_text_sanitization_keeps_normal_working_information(self) -> None:
+        for value in (
+            "已复现 `TypeError`，检查 /Users/user/app.py 和 src/forms.py。",
+            "修复 `elapsed` 字段并检查 tests/test_forms.py",
+            "读取 /tmp/ETA.md 并继续修复",
+            "参考 https://example.com/ETA 和 src/elapsed.py",
+            "参考 https://example.com/docs，联系 user@example.com。",
+            "提交 " + "abcdef0123456789" * 3,
+            "读取 ~/project/form.py 和 C:\\Users\\user\\form.py。",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(sanitize_activity_text(value), value)
+
+    def test_time_estimate_filter_keeps_the_following_working_information(self) -> None:
+        self.assertEqual(
+            sanitize_activity_text("本步耗时 18m 继续检查 tests/test_forms.py"),
+            "本步[时间信息已隐藏] 继续检查 tests/test_forms.py",
+        )
+        self.assertEqual(
+            sanitize_activity_text("ETA：5m，正在修复 `TypeError`"),
+            "[时间估算已隐藏]，正在修复 `TypeError`",
+        )
+
+    def test_text_sanitization_still_hides_explicit_credentials(self) -> None:
+        for value in (
+            "password: credential-value",
+            "Bearer credential-value",
+            "https://user:credential-value@example.com/docs",
+            "-----BEGIN PRIVATE KEY-----\ncredential-value",
+            "api_key=credential-value",
+            '{"api_key": "credential-value"}',
+            "curl --password credential-value",
+            "client --token credential-value",
+            "https://example.com/?token=credential-value",
+            "https://example.com/?key=credential-value",
+            "https://example.com/?signature=credential-value",
+            "a" * 200 + " password: credential-value",
+            "a" * 200 + " --token credential-value",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(sanitize_activity_text(value), "[敏感内容已隐藏]")
+        for token in ("sk-" + "a" * 40, "ghp_" + "a" * 40, "AKIA" + "A" * 16):
+            with self.subTest(token=token):
+                self.assertEqual(
+                    sanitize_activity_text(f"credential {token}"),
+                    "credential [敏感内容已隐藏]",
+                )
 
     def test_text_sanitization_preserves_layout_and_replaces_other_controls(
         self,
@@ -465,18 +716,25 @@ class TurnActivityProjectionTest(unittest.TestCase):
             "[敏感内容已隐藏]",
         )
 
-    def test_plan_projection_sanitizes_before_runtime_receives_it(self) -> None:
+    def test_plan_projection_preserves_details_but_redacts_credentials(self) -> None:
         steps = project_plan_steps(
             [
                 TurnPlanStep(
                     step="Inspect https://private.example/x and /etc/private.conf",
                     status=TurnPlanStepStatus.in_progress,
-                )
+                ),
+                TurnPlanStep(
+                    step="Run request with api_key=credential-value",
+                    status=TurnPlanStepStatus.pending,
+                ),
             ]
         )
 
-        self.assertNotIn("private.example", steps[0].step)
-        self.assertNotIn("/etc/private.conf", steps[0].step)
+        self.assertEqual(
+            steps[0].step,
+            "Inspect https://private.example/x and /etc/private.conf",
+        )
+        self.assertEqual(steps[1].step, "[敏感内容已隐藏]")
 
 
 if __name__ == "__main__":

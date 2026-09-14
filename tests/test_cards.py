@@ -1389,6 +1389,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("已接收调整：2 次", visible)
         self.assertIn("✓ 检查当前实现", visible)
         self.assertIn("→ 步骤 1", visible)
+        self.assertIn("alice@example.com", visible)
         self.assertIn("… 另有 2 项未展示", visible)
         self.assertNotIn("步骤 12", visible)
         markdown_visible = tuple(
@@ -1404,14 +1405,13 @@ class CardRendererTest(unittest.TestCase):
             "SECRET_ARGUMENTS",
             "SECRET_RAW_OUTPUT",
             "SECRET_PLAN_VALUE",
-            "alice@example.com",
             "耗时",
             "ETA",
             "%",
         ):
             self.assertNotIn(forbidden, serialized)
 
-    def test_activity_card_renders_bounded_commentary_and_generic_operations(
+    def test_activity_card_renders_bounded_commentary_and_native_operation_details(
         self,
     ) -> None:
         snapshot = SimpleNamespace(
@@ -1452,18 +1452,25 @@ class CardRendererTest(unittest.TestCase):
                     TurnActivityKind.COMMAND,
                     TurnActivityStatus.IN_PROGRESS,
                     5,
-                    text="搜索内容",
+                    text="搜索内容 · reset · netizen/",
                 ),
                 TurnActivityEntrySnapshot(
                     TurnActivityKind.FILE_CHANGE,
                     TurnActivityStatus.COMPLETED,
                     6,
+                    text="修改文件 · 更新 netizen/cards/reply.py",
                     count=3,
+                ),
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.WEB_SEARCH,
+                    TurnActivityStatus.COMPLETED,
+                    7,
+                    text="搜索网页 · Codex SDK",
                 ),
                 TurnActivityEntrySnapshot(
                     TurnActivityKind.SUBAGENT,
                     TurnActivityStatus.FAILED,
-                    7,
+                    8,
                     count=2,
                 ),
             ),
@@ -1475,15 +1482,16 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("first", serialized)
         self.assertIn("second", serialized)
         self.assertIn("third", serialized)
-        self.assertIn("路径已隐藏", serialized)
-        self.assertIn("搜索内容", serialized)
-        self.assertIn("修改文件（3 项）", serialized)
+        self.assertIn("/Users/user/private.py", serialized)
+        self.assertIn("搜索内容 · reset · netizen/", serialized)
+        self.assertIn("修改文件 · 更新 netizen/cards/reply.py（3 项）", serialized)
+        self.assertIn("搜索网页 · Codex SDK", serialized)
         self.assertIn("子任务（2 项）", serialized)
-        self.assertNotIn("private.py", serialized)
-        self.assertEqual(serialized.count("<local_datetime"), 12)
-        self.assertEqual(serialized.count("format_type='date_num'"), 6)
-        self.assertEqual(serialized.count("format_type='time'"), 6)
-        for timestamp in range(2, 8):
+        self.assertNotIn("路径已隐藏", serialized)
+        self.assertEqual(serialized.count("<local_datetime"), 14)
+        self.assertEqual(serialized.count("format_type='date_num'"), 7)
+        self.assertEqual(serialized.count("format_type='time'"), 7)
+        for timestamp in range(2, 9):
             self.assertEqual(serialized.count(f"millisecond='{timestamp}'"), 2)
         markdown_visible = tuple(
             item["content"]
@@ -1533,13 +1541,22 @@ class CardRendererTest(unittest.TestCase):
                     text=injected,
                 ),
             ),
-            operations=(
+            operations=tuple(
                 TurnActivityEntrySnapshot(
-                    TurnActivityKind.TOOL,
+                    kind,
                     TurnActivityStatus.COMPLETED,
-                    200,
+                    timestamp,
                     text=injected,
-                ),
+                )
+                for timestamp, kind in enumerate(
+                    (
+                        TurnActivityKind.TOOL,
+                        TurnActivityKind.COMMAND,
+                        TurnActivityKind.FILE_CHANGE,
+                        TurnActivityKind.WEB_SEARCH,
+                    ),
+                    start=200,
+                )
             ),
         )
 
@@ -1551,7 +1568,7 @@ class CardRendererTest(unittest.TestCase):
             if "<local_datetime" in item["content"]
         ]
 
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 5)
         self.assertIn(
             "**最近进展**",
             {item["content"] for item in markdown_elements},
@@ -1560,7 +1577,7 @@ class CardRendererTest(unittest.TestCase):
             "**最近操作**",
             {item["content"] for item in markdown_elements},
         )
-        for timestamp, row in zip((100, 200), rows, strict=True):
+        for timestamp, row in zip((100, 200, 201, 202, 203), rows, strict=True):
             content = row["content"]
             self.assertTrue(
                 content.startswith(
@@ -1578,7 +1595,6 @@ class CardRendererTest(unittest.TestCase):
             self.assertIn("\\[link\\]\\(not-a-url\\)", content)
 
         partially_hidden = {
-            "联系alice@example.com后继续": "alice@example.com",
             "使用sk-proj-abcdefghijklmnopqrstuvwx继续": (
                 "sk-proj-abcdefghijklmnopqrstuvwx"
             ),
@@ -1586,6 +1602,18 @@ class CardRendererTest(unittest.TestCase):
         for value, forbidden in partially_hidden.items():
             with self.subTest(value=value):
                 self.assertNotIn(forbidden, activity_step_display(value))
+
+    def test_activity_steps_preserve_ordinary_work_details(self) -> None:
+        values = (
+            "已修复 `TypeError`，继续检查 `git diff --check`",
+            "读取 /Users/user/project/a.py 和 tests/test_cards.py",
+            "查看 https://example.com/docs?topic=cards#activity",
+            "联系alice@example.com后继续",
+            "确认提交 0123456789abcdef0123456789abcdef01234567",
+        )
+        for value in values:
+            with self.subTest(value=value):
+                self.assertEqual(activity_step_display(value), value)
 
         for value, forbidden in (
             ("已完成50%", "%"),
@@ -1633,6 +1661,7 @@ class CardRendererTest(unittest.TestCase):
         self,
     ) -> None:
         secret = "foo bar baz"
+        commentary = "修复 `TypeError`：/Users/user/project/a.py"
         snapshot = SimpleNamespace(
             state=SimpleNamespace(value="running"),
             steer_count=1,
@@ -1650,7 +1679,7 @@ class CardRendererTest(unittest.TestCase):
                     TurnActivityKind.COMMENTARY,
                     TurnActivityStatus.COMPLETED,
                     111,
-                    text="finished review",
+                    text=commentary,
                 ),
             ),
             operations=(
@@ -1659,6 +1688,25 @@ class CardRendererTest(unittest.TestCase):
                     TurnActivityStatus.COMPLETED,
                     222,
                     text="github.get_file_contents",
+                ),
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.COMMAND,
+                    TurnActivityStatus.COMPLETED,
+                    223,
+                    text="执行命令 · make check",
+                ),
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.FILE_CHANGE,
+                    TurnActivityStatus.COMPLETED,
+                    224,
+                    text="修改文件 · 更新 a.py",
+                    count=2,
+                ),
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.WEB_SEARCH,
+                    TurnActivityStatus.COMPLETED,
+                    225,
+                    text="打开网页 · https://example.com",
                 ),
             ),
         )
@@ -1690,7 +1738,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(page_value, ensure_ascii=False))
         self.assertEqual(
             page_value["progress"]["commentary"],
-            [{"text": "finished review", "event_timestamp_ms": 111}],
+            [{"text": commentary, "event_timestamp_ms": 111}],
         )
         self.assertEqual(
             page_value["progress"]["operations"][0]["event_timestamp_ms"],
@@ -1712,6 +1760,11 @@ class CardRendererTest(unittest.TestCase):
         )
         self.assertIsNotNone(intent.progress)
         assert intent.progress is not None
+        self.assertEqual(intent.progress.commentary[0].text, commentary)
+        self.assertEqual(
+            [(item.text, item.event_timestamp_ms) for item in intent.progress.operations],
+            [(item.text, item.event_timestamp_ms) for item in snapshot.operations],
+        )
         tampered_value = json.loads(json.dumps(page_value))
         tampered_value["progress"]["steps"][0]["step"] = (
             'password: "correct horse battery staple"'
@@ -1750,6 +1803,11 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("millisecond='222'", serialized)
         self.assertIn("github.get", serialized)
         self.assertIn("file", serialized)
+        self.assertIn("TypeError", serialized)
+        self.assertIn("/Users/user/project/a.py", serialized)
+        for item in snapshot.operations[1:]:
+            self.assertIn(item.text, serialized)
+            self.assertIn(f"millisecond='{item.event_timestamp_ms}'", serialized)
 
         legacy_value = json.loads(json.dumps(page_value))
         legacy_value["progress"]["commentary"] = ["finished review"]
@@ -1770,6 +1828,181 @@ class CardRendererTest(unittest.TestCase):
         self.assertIsNone(
             legacy_intent.progress.operations[0].event_timestamp_ms
         )
+
+        for old_summary in (None, "读取文件", "列出文件", "搜索内容", "执行复合命令"):
+            with self.subTest(old_summary=old_summary):
+                legacy_value["progress"]["operations"] = [
+                    {
+                        "kind": TurnActivityKind.COMMAND.value,
+                        "status": TurnActivityStatus.COMPLETED.value,
+                        "text": old_summary,
+                        "count": 1,
+                    },
+                ]
+                legacy_intent = decode_turn_file_action(
+                    app_id="cli_test",
+                    message_id="om_card",
+                    callback_chat_id=self.scope.chat_id,
+                    sender_id="ou_user",
+                    tag="button",
+                    form_value={"turn_file_page": "1"},
+                    value=legacy_value,
+                )
+                assert legacy_intent.progress is not None
+                self.assertEqual(
+                    legacy_intent.progress.operations[0].text, old_summary
+                )
+                self.assertIsNone(
+                    legacy_intent.progress.operations[0].event_timestamp_ms
+                )
+
+    def test_activity_operation_page_payloads_resanitize_and_bound_details(self) -> None:
+        kinds = (
+            TurnActivityKind.COMMAND,
+            TurnActivityKind.FILE_CHANGE,
+            TurnActivityKind.WEB_SEARCH,
+        )
+        operations = tuple(
+            TurnActivityEntrySnapshot(
+                kind,
+                TurnActivityStatus.COMPLETED,
+                100 + index,
+                text="操作 · API_KEY=do-not-leak",
+            )
+            for index, kind in enumerate(kinds)
+        )
+        snapshot = SimpleNamespace(
+            state=SimpleNamespace(value="running"),
+            steer_count=0,
+            plan_available=True,
+            plan_generated=False,
+            plan_may_be_stale=False,
+            steps=(),
+            commentary=(),
+            operations=operations,
+        )
+        files = tuple(
+            TurnFile(
+                display_path=f"result-{index:02}.txt",
+                resolved_path=Path(f"/tmp/result-{index:02}.txt"),
+                size=1,
+                media_kind="file",
+            )
+            for index in range(10)
+        )
+        cards = (
+            turn_progress_card(
+                snapshot=snapshot,
+                final_response="done",
+                files=files,
+                terminal_status="completed",
+                scope=self.scope,
+                binding_id="binding-123",
+                turn_id="turn-123",
+            ),
+            reply_card(
+                ReplyCardProjection(
+                    scope=self.scope,
+                    activity=ReplyCardActivityModule(
+                        progress=TurnProgressManifest(
+                            state="running",
+                            steer_count=0,
+                            plan_available=True,
+                            plan_generated=False,
+                            plan_may_be_stale=False,
+                            steps=(),
+                            operations=tuple(
+                                TurnActivityManifestEntry(
+                                    kind=item.kind.value,
+                                    status=item.status.value,
+                                    event_timestamp_ms=item.event_timestamp_ms,
+                                    text=item.text,
+                                )
+                                for item in operations
+                            ),
+                        ),
+                        terminal_status="completed",
+                        collapsed=True,
+                    ),
+                    result=ReplyCardResultModule("done"),
+                    files=ReplyCardFilesModule(
+                        binding_id="binding-123",
+                        turn_id="turn-123",
+                        items=tuple(
+                            ReplyCardFileItem(
+                                path=str(item.resolved_path),
+                                label=item.display_path,
+                                size=item.size,
+                                media_kind=item.media_kind,
+                            )
+                            for item in files
+                        ),
+                    ),
+                )
+            ),
+        )
+
+        def decode(value) -> TurnProgressManifest:
+            intent = decode_turn_file_action(
+                app_id="cli_test",
+                message_id="om_card",
+                callback_chat_id=self.scope.chat_id,
+                sender_id="ou_user",
+                tag="button",
+                form_value={"turn_file_page": "1"},
+                value=value,
+            )
+            if intent.progress is not None:
+                return intent.progress
+            assert intent.reply is not None
+            assert intent.reply.activity is not None
+            return intent.reply.activity.progress
+
+        for version, card in zip((4, 5), cards, strict=True):
+            self.assertNotIn("do-not-leak", json.dumps(card.card))
+            page_value = next(
+                behavior["value"]
+                for button in _elements(card.card, "button")
+                for behavior in button.get("behaviors", ())
+                if behavior["value"]["intent"] == "turn-file.page"
+            )
+            self.assertEqual(page_value["v"], version)
+            for index, kind in enumerate(kinds):
+                for text, expected in (
+                    ("操作 · API_KEY=do-not-leak", "[敏感内容已隐藏]"),
+                    (
+                        "执行命令 · printf '50%'\n\tmake check",
+                        "执行命令 · printf '50%' make check",
+                    ),
+                    ("x" * 160, "x" * 160),
+                    ("x" * 161, None),
+                ):
+                    with self.subTest(version=version, kind=kind, text=text):
+                        value = json.loads(json.dumps(page_value))
+                        progress = (
+                            value["progress"]
+                            if version == 4
+                            else value["reply"]["activity"]["progress"]
+                        )
+                        progress["operations"][index]["text"] = text
+                        if expected is None:
+                            with self.assertRaises(CardActionError):
+                                decode(value)
+                        else:
+                            decoded = decode(value).operations[index]
+                            self.assertEqual(decoded.text, expected)
+                            self.assertEqual(decoded.event_timestamp_ms, 100 + index)
+
+            tool_name = "namespace." + "x" * 200 + ".call"
+            value = json.loads(json.dumps(page_value))
+            progress = (
+                value["progress"]
+                if version == 4
+                else value["reply"]["activity"]["progress"]
+            )
+            progress["operations"][0]["kind"] = TurnActivityKind.TOOL.value
+            progress["operations"][0]["text"] = tool_name
+            self.assertEqual(decode(value).operations[0].text, tool_name)
 
     def test_v4_progress_file_pages_preserve_existing_step_truncation(self) -> None:
         snapshot = SimpleNamespace(
@@ -3133,7 +3366,7 @@ class CardRendererTest(unittest.TestCase):
                     ),
                     commentary=(
                         TurnCommentaryManifestEntry(
-                            text="goal progress",
+                            text="goal progress: `TypeError` in /tmp/a.py",
                             event_timestamp_ms=333,
                         ),
                     ),
@@ -3143,6 +3376,25 @@ class CardRendererTest(unittest.TestCase):
                             status=TurnActivityStatus.COMPLETED.value,
                             event_timestamp_ms=444,
                             text="drive.search",
+                        ),
+                        TurnActivityManifestEntry(
+                            kind=TurnActivityKind.COMMAND.value,
+                            status=TurnActivityStatus.COMPLETED.value,
+                            event_timestamp_ms=445,
+                            text="执行命令 · git diff --check",
+                        ),
+                        TurnActivityManifestEntry(
+                            kind=TurnActivityKind.FILE_CHANGE.value,
+                            status=TurnActivityStatus.COMPLETED.value,
+                            event_timestamp_ms=446,
+                            text="修改文件 · 更新 a.py",
+                            count=2,
+                        ),
+                        TurnActivityManifestEntry(
+                            kind=TurnActivityKind.WEB_SEARCH.value,
+                            status=TurnActivityStatus.COMPLETED.value,
+                            event_timestamp_ms=447,
+                            text="搜索网页 · Codex SDK",
                         ),
                     ),
                 ),
@@ -3188,6 +3440,23 @@ class CardRendererTest(unittest.TestCase):
             value=page_value,
         )
         assert intent.reply is not None
+        assert intent.reply.activity is not None
+        self.assertEqual(
+            intent.reply.activity.progress.commentary[0].text,
+            "goal progress: `TypeError` in /tmp/a.py",
+        )
+        self.assertEqual(
+            [
+                (item.text, item.event_timestamp_ms)
+                for item in intent.reply.activity.progress.operations
+            ],
+            [
+                ("drive.search", 444),
+                ("执行命令 · git diff --check", 445),
+                ("修改文件 · 更新 a.py", 446),
+                ("搜索网页 · Codex SDK", 447),
+            ],
+        )
         rebuilt = reply_card_from_manifest(
             scope=intent.scope,
             binding_id=intent.binding_id,
@@ -3215,6 +3484,11 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("millisecond='333'", rebuilt_text)
         self.assertIn("millisecond='444'", rebuilt_text)
         self.assertIn("drive.search", rebuilt_text)
+        self.assertIn("TypeError", rebuilt_text)
+        self.assertIn("/tmp/a.py", rebuilt_text)
+        for item in intent.reply.activity.progress.operations[1:]:
+            self.assertIn(item.text, rebuilt_text)
+            self.assertIn(f"millisecond='{item.event_timestamp_ms}'", rebuilt_text)
 
         retargeted = json.loads(json.dumps(page_value))
         retargeted["binding_id"] = "binding:v1:binding-other"
