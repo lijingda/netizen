@@ -226,9 +226,10 @@ async def _client() -> None:
             (TurnActivityKind.COMMENTARY, TurnActivityStatus.COMPLETED),
         )
         assert tuple(item.event_timestamp_ms for item in observation.events) == (1, 2)
-        assert observation.events[0].text == "搜索内容"
+        assert observation.events[0].text == (
+            "搜索内容 · secret · /Users/user/private.txt"
+        )
         assert "do-not-show" not in repr(observation.events)
-        assert "/Users/user" not in repr(observation.events)
         router = codex._client._sync._router
         assert handle.id not in router._turn_notifications
         with router._lock:

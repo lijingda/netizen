@@ -280,10 +280,9 @@ task、receipt Event，以及只读 Activity cursor/checklist/commentary/安全�
 native 终态到达即释放，均不持久化。
 
 **Turn Activity Projection / Turn 活动投影**：一个 exact Ordinary、Side 或 Goal physical
-Turn 的有界、瞬态展示视图，只包含状态、原生 checklist、最近 completed commentary、
-受限操作类别/状态、exact SDK item lifecycle 时间及子任务、文件修改数量。命令只投影 typed
-action 的语义类别；MCP/dynamic tool 可投影 exact 工具名。它不包含命令正文、工具参数/结果、
-MCP server、路径或查询、输出、reasoning，也不是 Turn 历史、elapsed time 或终态事实源。
+Turn 的有界、瞬态展示视图，包含状态、原生 checklist、最近 completed commentary、原生
+操作字段的受限预览、事件时间及子任务和文件修改数量。它不包含工具参数/结果、命令输出或
+reasoning，也不是 Turn 历史或终态事实源；操作预览不代表对命令意图或结果的推断。
 
 **Side Turn**：以 Side ID 为键、在同一 ephemeral Side Thread 上串行开始或 steer 的
 当前 Turn。它使用普通 `AsyncTurnHandle.run()` 完成路径，不使用持久 Thread history

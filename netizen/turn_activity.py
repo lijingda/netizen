@@ -15,6 +15,7 @@ from openai_codex.generated.v2_all import (
     EnteredReviewModeThreadItem,
     ExitedReviewModeThreadItem,
     FileChangeThreadItem,
+    FindInPageWebSearchAction,
     ImageGenerationThreadItem,
     ImageViewThreadItem,
     ItemCompletedNotification,
@@ -22,8 +23,10 @@ from openai_codex.generated.v2_all import (
     ListFilesCommandAction,
     MessagePhase,
     McpToolCallThreadItem,
+    OpenPageWebSearchAction,
     ReadCommandAction,
     SearchCommandAction,
+    SearchWebSearchAction,
     SubAgentActivityThreadItem,
     ThreadItem,
     TurnCompletedNotification,
@@ -43,10 +46,6 @@ ACTIVITY_TEXT_LIMIT = 160
 ACTIVITY_TAB_SPACES = 4
 SIDE_ACTIVITY_QUEUE_HIGH_WATER = 4_096
 
-COMMAND_ACTIVITY_SUMMARIES = frozenset(
-    {"读取文件", "列出文件", "搜索内容", "执行复合命令"}
-)
-
 _ITEM_STARTED_METHOD = "item/started"
 _ITEM_COMPLETED_METHOD = "item/completed"
 _PLAN_METHOD = "turn/plan/updated"
@@ -54,11 +53,19 @@ _TURN_STARTED_METHOD = "turn/started"
 _TURN_COMPLETED_METHOD = "turn/completed"
 
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)(?:api[ _-]?key|access[ _-]?token|"
+    r"(?i)(?:api[ _-]?key|access[ _-]?token|refresh[ _-]?token|"
     r"auth(?:entication|orization)?|bearer|cookie|credential|password|"
     r"passwd|secret|session[ _-]?token|密码|口令|密钥|令牌|凭据|授权|认证)"
-    r"\s*(?:=|:|：|(?<![A-Za-z0-9_])is(?![A-Za-z0-9_]))"
+    r"[\"']?\s*(?:=|:|：|(?<![A-Za-z0-9_])is(?![A-Za-z0-9_]))"
     r"\s*[^\s,;，；]+"
+)
+_SECRET_FLAG = re.compile(
+    r"(?i)(?<!\S)--(?:api[ _-]?key|access[ _-]?token|refresh[ _-]?token|"
+    r"session[ _-]?token|token|password|passwd|secret|credential|cookie)"
+    r"(?:\s+|=)\S+"
+)
+_URL_SECRET_QUERY = re.compile(
+    r"(?i)[?&](?:token|key|signature|sig|x-amz-signature)=[^\s&#]+"
 )
 _BEARER_TOKEN = re.compile(
     r"(?i)(?<![A-Za-z0-9_])bearer(?![A-Za-z0-9_])\s+\S+"
@@ -68,43 +75,25 @@ _URL_CREDENTIAL = re.compile(
     r"(?i)(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9+.-]*://"
     r"[^\s/@:]*:[^\s/@]+@"
 )
-_URL = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9+.-]*://[^\s,;，；]+"
-)
 _KNOWN_TOKEN = re.compile(
     r"(?<![A-Za-z0-9_])(?:AKIA[0-9A-Z]{16}|"
     r"(?:sk|gh[pousr])[-_][A-Za-z0-9_-]{16,}|"
     r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
     r"(?![A-Za-z0-9_])"
 )
-_LONG_TOKEN = re.compile(
-    r"(?<![A-Za-z0-9_])[A-Za-z0-9_+/=-]{32,}(?![A-Za-z0-9_])"
+_TIME_VALUE = (
+    r"\d+(?:\.\d+)?\s*(?:milliseconds?|seconds?|minutes?|hours?|"
+    r"ms|s|m|h|毫秒|秒钟?|分钟?|小时)(?![A-Za-z0-9_])"
 )
-_EMAIL = re.compile(
-    r"(?<![A-Za-z0-9_])[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
-    r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?![A-Za-z0-9_])"
-)
-_HOME_PATH = re.compile(
-    r"(?i)(?:~[/\\]|/(?:Users|home)/[^\s/\\]+[/\\]|"
-    r"[A-Z]:\\Users\\[^\s\\]+\\)[^\s,;]*"
-)
-_ABSOLUTE_PATH = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])(?:/(?:[^\s/]+/?)+|[A-Z]:\\[^\s,;，；]+)"
-)
-_RELATIVE_PATH = re.compile(
-    r"(?<![A-Za-z0-9_])(?:(?:\.\.?/)+|[A-Za-z0-9_.-]+/)"
-    r"[A-Za-z0-9_./-]+"
-)
-_INLINE_CODE = re.compile(r"`[^`]*`")
 _ELAPSED = re.compile(
     r"(?i)(?:(?<![A-Za-z0-9_])(?:elapsed|worked\s+for)"
     r"(?![A-Za-z0-9_])|(?:耗时|用时))"
-    r"\s*[:=：]?\s*[^,;，。；]*"
+    r"\s*[:=：]?\s*" + _TIME_VALUE
 )
 _PERCENT = re.compile(r"(?<!\d)\d{1,3}(?:[.．]\d+)?\s*[%％]")
 _ETA = re.compile(
     r"(?i)(?<![A-Za-z0-9_])ETA(?![A-Za-z0-9_])"
-    r"(?:\s*[:=：]?\s*[^,;，。；]*)?"
+    r"\s*[:=：]?\s*" + _TIME_VALUE
 )
 
 
@@ -128,6 +117,11 @@ class TurnActivityKind(str, Enum):
     SUBAGENT = "subagent"
     REVIEW = "review"
     COMPACTION = "compaction"
+
+
+ACTIVITY_DETAIL_KINDS = frozenset(
+    {TurnActivityKind.COMMAND, TurnActivityKind.FILE_CHANGE, TurnActivityKind.WEB_SEARCH}
+)
 
 
 class TurnActivityStatus(str, Enum):
@@ -312,35 +306,46 @@ def project_plan_steps(items: object) -> tuple[TurnPlanStepSnapshot, ...]:
 
 
 def sanitize_activity_text(value: str) -> str | None:
-    """Return conservative, bounded display text or ``None`` for empty input."""
+    """Retain useful commentary/checklist text while filtering credentials and estimates."""
 
     normalized = normalize_activity_text_layout(value)
     if not normalized.strip():
         return None
-    if (
-        _SECRET_ASSIGNMENT.search(normalized)
-        or _BEARER_TOKEN.search(normalized)
-        or _PEM.search(normalized)
-        or _URL_CREDENTIAL.search(normalized)
-    ):
-        return "[敏感内容已隐藏]"
-    redacted = normalized
-    redacted = _KNOWN_TOKEN.sub("[敏感内容已隐藏]", redacted)
-    redacted = _LONG_TOKEN.sub("[敏感内容已隐藏]", redacted)
-    redacted = _EMAIL.sub("[敏感内容已隐藏]", redacted)
-    redacted = _HOME_PATH.sub("[路径已隐藏]", redacted)
-    redacted = _URL.sub("[链接已隐藏]", redacted)
-    redacted = _ABSOLUTE_PATH.sub("[路径已隐藏]", redacted)
-    redacted = _RELATIVE_PATH.sub("[路径已隐藏]", redacted)
-    redacted = _INLINE_CODE.sub("[代码或参数已隐藏]", redacted)
+    redacted = _redact_activity_credentials(normalized)
     redacted = _ELAPSED.sub("[时间信息已隐藏]", redacted)
     redacted = _PERCENT.sub("[百分比已隐藏]", redacted)
     redacted = _ETA.sub("[时间估算已隐藏]", redacted)
-    if not redacted.strip():
-        redacted = "内容已隐藏"
-    if len(redacted) > ACTIVITY_TEXT_LIMIT:
-        return redacted[: ACTIVITY_TEXT_LIMIT - 1].rstrip() + "…"
-    return redacted
+    return _bounded_activity_text(redacted)
+
+
+def sanitize_activity_operation_text(value: str) -> str | None:
+    """Bound a literal native-field preview without interpreting command syntax."""
+
+    normalized = normalize_activity_text_layout(value)
+    if not normalized.strip():
+        return None
+    # Filter before truncation so a clipped credential never becomes visible.
+    redacted = _redact_activity_credentials(normalized)
+    return _bounded_activity_text(" ".join(redacted.split()))
+
+
+def _redact_activity_credentials(value: str) -> str:
+    if (
+        _SECRET_ASSIGNMENT.search(value)
+        or _SECRET_FLAG.search(value)
+        or _URL_SECRET_QUERY.search(value)
+        or _BEARER_TOKEN.search(value)
+        or _PEM.search(value)
+        or _URL_CREDENTIAL.search(value)
+    ):
+        return "[敏感内容已隐藏]"
+    return _KNOWN_TOKEN.sub("[敏感内容已隐藏]", value)
+
+
+def _bounded_activity_text(value: str, limit: int = ACTIVITY_TEXT_LIMIT) -> str:
+    if len(value) > limit:
+        return value[: limit - 1].rstrip() + "…"
+    return value
 
 
 def normalize_activity_text_layout(value: str) -> str:
@@ -424,6 +429,7 @@ def _project_item(
             item.status,
             lifecycle_status,
             event_timestamp_ms=event_timestamp_ms,
+            text=_file_change_activity_summary(item),
             count=len(item.changes),
         )
     if type(item) is WebSearchThreadItem:
@@ -432,6 +438,7 @@ def _project_item(
             TurnActivityKind.WEB_SEARCH,
             lifecycle_status,
             event_timestamp_ms,
+            text=_web_search_activity_summary(item),
         )
     if type(item) in {ImageViewThreadItem, ImageGenerationThreadItem}:
         status = item.status if type(item) is ImageGenerationThreadItem else None
@@ -508,29 +515,79 @@ def _status_event(
     )
 
 
-def _command_activity_summary(item: CommandExecutionThreadItem) -> str | None:
-    if len(item.command_actions) > 1:
-        return "执行复合命令"
-    kinds: set[str] = set()
-    for action in item.command_actions:
-        root = action.root
-        if type(root) is ReadCommandAction:
-            kinds.add("read")
-        elif type(root) is ListFilesCommandAction:
-            kinds.add("listFiles")
-        elif type(root) is SearchCommandAction:
-            kinds.add("search")
-        else:
-            kinds.add("unknown")
-    if not kinds or kinds == {"unknown"}:
+def _operation_summary(label: str, *details: str | None) -> str:
+    # Sanitize each native field before combining it with display labels.
+    parts = [label]
+    for detail in details:
+        if detail is not None:
+            safe = sanitize_activity_operation_text(detail)
+            if safe:
+                parts.append(safe)
+    return _bounded_activity_text(" · ".join(parts))
+
+
+def _command_activity_summary(item: CommandExecutionThreadItem) -> str:
+    summary = None
+    # commandActions is Codex's best-effort classification. Do not build a
+    # second shell parser, infer purposes, or summarize composite commands.
+    if len(item.command_actions) == 1:
+        action = item.command_actions[0].root
+        if type(action) is ReadCommandAction and action.path.root.strip():
+            summary = _operation_summary("读取文件", action.path.root)
+        elif (
+            type(action) is ListFilesCommandAction
+            and action.path
+            and action.path.strip()
+        ):
+            summary = _operation_summary("列出文件", action.path)
+        elif type(action) is SearchCommandAction and (
+            (action.query and action.query.strip()) or (action.path and action.path.strip())
+        ):
+            summary = _operation_summary("搜索内容", action.query, action.path)
+    if summary is None:
+        summary = _operation_summary("执行命令", item.command)
+    if item.exit_code is not None and item.exit_code != 0:
+        suffix = f" · 退出码 {item.exit_code}"
+        summary = (
+            _bounded_activity_text(summary, ACTIVITY_TEXT_LIMIT - len(suffix)) + suffix
+        )
+    return summary
+
+
+def _file_change_activity_summary(item: FileChangeThreadItem) -> str | None:
+    if not item.changes:
         return None
-    if len(kinds) > 1:
-        return "执行复合命令"
-    return {
-        "read": "读取文件",
-        "listFiles": "列出文件",
-        "search": "搜索内容",
-    }[next(iter(kinds))]
+    labels = {"add": "新增", "delete": "删除", "update": "更新"}
+    changes = []
+    for change in item.changes[:3]:
+        kind = change.kind.root
+        label = labels.get(kind.type, "修改")
+        path = change.path
+        if kind.type == "update" and kind.move_path:
+            path += f" → {kind.move_path}"
+        safe_path = sanitize_activity_operation_text(path)
+        changes.append(f"{label} {safe_path}" if safe_path else label)
+    detail = "、".join(changes) + ("、…" if len(item.changes) > 3 else "")
+    return _operation_summary("修改文件", detail)
+
+
+def _web_search_activity_summary(item: WebSearchThreadItem) -> str:
+    action = item.action.root if item.action is not None else None
+    if type(action) is OpenPageWebSearchAction:
+        return _operation_summary("打开网页", action.url or item.query)
+    if type(action) is FindInPageWebSearchAction:
+        return _operation_summary(
+            "查找网页内容", action.pattern, action.url or item.query
+        )
+    if type(action) is SearchWebSearchAction:
+        queries = [query for query in (action.queries or ()) if query.strip()]
+        if queries:
+            detail = "、".join(
+                sanitize_activity_operation_text(query) or "" for query in queries[:3]
+            ) + ("、…" if len(queries) > 3 else "")
+            return _operation_summary("搜索网页", detail)
+        return _operation_summary("搜索网页", action.query or item.query)
+    return _operation_summary("搜索网页", item.query)
 
 
 def _tool_name(value: object) -> str:
@@ -552,14 +609,15 @@ def _validate_activity_text(
         return
     if not isinstance(value, str) or not value:
         raise ValueError("activity text must be a non-empty string")
-    if kind is TurnActivityKind.COMMENTARY and len(value) > ACTIVITY_TEXT_LIMIT:
-        raise ValueError("activity commentary must be bounded")
-    if kind is TurnActivityKind.COMMAND and value not in COMMAND_ACTIVITY_SUMMARIES:
-        raise ValueError("activity command summary must use a fixed category")
+    if (
+        kind in {TurnActivityKind.COMMENTARY, *ACTIVITY_DETAIL_KINDS}
+        and len(value) > ACTIVITY_TEXT_LIMIT
+    ):
+        raise ValueError("activity text must be bounded")
     if kind not in {
         TurnActivityKind.COMMENTARY,
-        TurnActivityKind.COMMAND,
         TurnActivityKind.TOOL,
+        *ACTIVITY_DETAIL_KINDS,
     }:
         raise ValueError("activity text is unsupported for this kind")
 

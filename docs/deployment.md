@@ -294,8 +294,8 @@ terminal status 与 final agent message；若 App Server 短暂先暴露 complet
 
 `make check` 会运行 `probe_sdk_turn_plan.py`：真实安装 SDK 连接 fake App Server，
 `PinnedTurnActivityObserver` 先从 exact active Turn 非消费地投影 plan、completed commentary
-和 command lifecycle，证明 exact `startedAtMs`/`completedAtMs`、typed command action 语义、
-保留区间、顺序、对象身份及订阅者游标未变，且原始命令/路径/查询/敏感文本未进入投影，
+和 command lifecycle，证明 exact `startedAtMs`/`completedAtMs`、typed command action 的
+路径/查询预览、保留区间、顺序、对象身份及订阅者游标未变，且凭据文本未进入投影，
 最后由公开 stream 收到同一对象并排空 completion。SDK `0.154.0` 默认关闭原生
 `update_plan` 工具；`plan` live phase 只对测试 Thread 通过公开 `thread_start(config=...)`
 显式开启 `tools.update_plan.enabled`，不写用户配置，也不改变生产 Thread。随后要求模型先生成
@@ -1285,11 +1285,15 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    再只开启 Progress Card：native accepted 后除 Lifecycle Reaction 外只出现一张运行卡，
    顶部过程区展开；status 与
    原生 checklist（`✓/→/○`）变化必须更新同一个 message ID，无 plan 时显示“Codex 尚未
-   生成”，observer unavailable 时显示“暂不可用”。卡片不显示耗时、百分比、ETA、
-   reasoning、raw command/tool output、tool arguments、MCP server、路径或查询。最近进展和
+   生成”，observer unavailable 时显示“暂不可用”。卡片不生成耗时、百分比或 ETA，
+   不显示 reasoning、raw command/tool output、tool arguments 或 MCP server。最近进展和
    最近操作必须各验证至少一条 Card 2.0 本地化事件日期和分钟；started 操作完成后时间切换为
-   exact completion 时间，checklist 不显示时间。命令须按 typed action 显示受限语义；MCP/dynamic
-   tool 须显示 exact 工具名，并用含 Markdown 控制字符的测试名确认只影响文本、不注入标签。
+   exact completion 时间，checklist 不显示时间。命令须展示原生 action 的路径/查询，分类
+   未知、复合或对象字段为空时显示原命令预览，存在非零退出码时保留该值；不猜测命令意图。
+   文件修改和网页操作须展示原生对象信息，进展文字须保留普通路径、链接和代码片段，明确
+   凭据仍隐藏。验证操作单行和 160 字符限制、文件/多查询最多前三项、分页后详情不丢失。
+   MCP/dynamic tool 须显示 exact 工具名，动态文本中的 Markdown 控制字符只影响文本、
+   不注入标签。
    成功 steer 后旧 checklist 在新
    plan 到达前标记可能过期，之后整体替换。终态在同一卡片折叠过程并显示结果；有文件时
    同卡保留既有 v4 文件分页/callback。分别使 initial、中间和终态 card update 失败，native

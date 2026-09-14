@@ -7,6 +7,10 @@ related: 0021, 0046, 0051
 
 # 用单一消费链投影安全的 Turn Activity
 
+2026-09-14 展示修订：命令、文件和网页操作直接投影原生字段的有界预览；commentary 保留
+普通路径、链接和代码片段。原生 `commandActions` 是 best-effort 分类，缺少可展示信息时
+回退原命令预览，不新增本地命令解析或工具语义规则。事件来源、消费链和生命周期边界不变。
+
 Progress Card 已能显示运行状态、steer 次数和原生 checklist，但真实长任务中 checklist
 可能很晚才出现，用户仍会长时间只看到“Codex 尚未生成”。App Server 的 Turn 通知还包含
 commentary、命令、工具、文件修改、搜索、图片、子任务、审查与上下文压缩等生命周期，适合
@@ -50,22 +54,34 @@ started/completed 合并为同一操作；交给 Channel 的 snapshot 与 manife
 白名单及展示语义如下：
 
 - `turn/plan/updated`：完整替换 checklist；
-- completed commentary `agentMessage`：保守脱敏并限长；
+- completed commentary `agentMessage`：过滤明确凭据并限长，保留普通路径、链接、邮箱、
+  内联代码和长标识符；不再把这些格式本身视为敏感信息；
 - commentary 的 CRLF/CR 统一为 LF、tab 展开为四个空格并保留内部换行；其他不可展示控制
   字符替换为 Unicode replacement character，不折叠合法 Markdown 空白；
-- command：不读取正文；只根据 typed `commandActions` 显示固定语义。零个或未知 action
-  使用“执行命令”，单个 read/list/search action 分别显示“读取文件”“列出文件”“搜索内容”，
-  多个 action 显示“执行复合命令”；
+- command：单个 typed read/list/search action 直接使用原生路径、查询显示“读取文件”、
+  “列出文件”或“搜索内容”及其操作对象。零个、未知、多个 action 或对象字段为空时使用
+  “执行命令”及原生 `command` 的预览；不解析 shell、不猜测测试/部署等意图，不从输出推断
+  结果。存在非零原生 `exitCode` 时附加退出码，长命令裁剪时仍保留该后缀；
 - MCP tool：显示 SDK `tool` 原值及状态；dynamic tool 显示非空 `namespace.tool`，namespace
   为空时显示 `tool`；名称不做字符白名单、合规判定或单独截断，只在 Markdown 渲染边界转义；
-- `fileChange`：只显示状态和 change 数量；
-- web search、image view/generation、review mode、context compaction：只显示固定类别；
+- `fileChange`：显示原生 change kind、path（update 携带 move_path 时显示两端）和状态；
+  最多预览前三项，更多项显示省略号，完整 change 数量继续单独保留；不读取 diff 正文；
+- web search：直接使用 typed action 的 query/queries、url、pattern，显示搜索网页、打开网页
+  或查找网页内容；缺少 action 时回退原生 query。queries 优先于单个 query，最多预览前三项；
+- image view/generation、review mode、context compaction：只显示固定类别；
 - collab/sub-agent：只显示运行、完成、失败等聚合数量。
 
-明确忽略 reasoning、user/final message、`agentMessage/delta`、command input/output、command
-action 的正文/路径/查询、MCP server、工具参数/结果、搜索词、URL、文件路径、diff、token usage、
-sleep 时长、hook prompt 和未知
-事件。Activity 不显示 raw output、elapsed time、百分比或 ETA；`final_answer` 只进入 Result
+commentary/checklist 与上述操作预览沿用 160 字符上限。操作预览按单行格式化，字段合并前
+过滤明确凭据（包括已知 token 格式、凭据赋值/命令行选项、URL 认证信息和签名/令牌参数、
+私钥标记），先过滤再裁剪。普通路径、链接和代码片段直接保留；格式化不执行内容。
+操作文本沿用 manifest 的 `text` 字段，进入卡片和 callback 解码时再次过滤并校验上限，
+旧卡的空文本或固定命令类别仍可解码。没有新增原始字段、历史存储或参数识别注册表。
+
+明确忽略 reasoning、user/final message、`agentMessage/delta`、command output、MCP server、
+工具参数/结果、diff、token usage、sleep 时长、hook prompt 和未知事件。
+Activity 不生成 elapsed time、百分比或 ETA，commentary/checklist 沿用这些估算信息的过滤；
+时长/ETA 只匹配带数值和单位的表达，不按 `elapsed`、`ETA` 关键字吞掉后续工作信息。
+命令/查询等原生操作预览中的同名字面内容不作为估算解释或过滤。`final_answer` 只进入 Result
 Module。白名单 method 的 generated payload 形状变化会 fail closed，未知 method 则忽略。
 
 ### 使用原生事件时间并由飞书本地化
@@ -142,8 +158,9 @@ Side close、Goal finalization 或 native outcome。
 
 ## 验证与兼容门禁
 
-synthetic tests/probe 必须覆盖白名单/拒绝列表、脱敏与上限、exact lifecycle 时间、命令
-action 语义、直接工具名与 Markdown 注入转义、旧 manifest 兼容、exact ID、full plan replacement、
+synthetic tests/probe 必须覆盖白名单/拒绝列表、凭据过滤与上限、普通工作信息保留、exact
+lifecycle 时间、原生 action 字段和原命令 fallback、文件/网页预览、直接工具名与 Markdown
+注入转义、旧 manifest 兼容和 v4/v5 翻页后的文本/时间保留、exact ID、full plan replacement、
 非消费对象身份、cursor 回退与 shape/fingerprint fail closed。Runtime 门禁必须覆盖 ordinary
 持续刷新及 terminal authority、Progress Card 关闭零观察、Side completion-before-drain、
 steer 前刷新先观察 completion 后仍由唯一 consumer drain、observer/high-water
