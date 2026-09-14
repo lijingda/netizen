@@ -292,7 +292,9 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.reader.gate = asyncio.Event()
         self.now = 200
         with patch("netizen.schedules.scheduler.RECOVERY_TIMEOUT_SECONDS", 0.01):
-            async with asyncio.timeout(0.2):
+            # The ceiling only guards against a true hang; the shared 0.01s
+            # budget drives the outcome, so keep headroom for runner jitter.
+            async with asyncio.timeout(2.0):
                 await self.scheduler.recover()
         self.assertEqual(self.store.get_run(first.id).barrier, "unknown")
         self.assertEqual(self.store.get_run(second.id).barrier, "unknown")
