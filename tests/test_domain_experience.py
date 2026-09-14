@@ -303,10 +303,10 @@ class ExperienceTest(unittest.TestCase):
         self.assertNotIn("/skills", help_text)
         self.assertNotIn("/plan", help_text)
 
-    def test_help_starts_with_project_session_and_task_steps(self) -> None:
+    def test_help_starts_with_session_and_task_steps(self) -> None:
         first_section = command_help().split("\n---\n", maxsplit=1)[0]
-        self.assertLess(first_section.index("/settings"), first_section.index("/new"))
         self.assertLess(first_section.index("/new"), first_section.index("直接发送任务"))
+        self.assertIn("/settings", first_section)
         self.assertIn("/sessions", first_section)
 
     def test_grouped_help_lists_each_available_command_once(self) -> None:
