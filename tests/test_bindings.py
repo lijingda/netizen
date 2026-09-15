@@ -1634,58 +1634,62 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
             {alpha.native_thread_id: "alpha"},
         )
 
-    async def test_query_deadline_does_not_stall_loop_and_admission_is_bounded(
+    async def test_query_deadline_interrupts_sql_and_reader_recovers(self) -> None:
+        with self.assertRaises(BindingQueryTimeout):
+            await self.store._read_rows(
+                """
+                WITH RECURSIVE numbers(value) AS (
+                    VALUES(1) UNION ALL
+                    SELECT value + 1 FROM numbers WHERE value < 1000000
+                )
+                SELECT SUM(left_side.value * right_side.value)
+                FROM numbers left_side, numbers right_side
+                """,
+                deadline_seconds=0.002,
+            )
+        rows = await self.store._read_rows("SELECT 1", deadline_seconds=2)
+        self.assertEqual([row[0] for row in rows], [1])
+
+    async def test_query_worker_does_not_stall_loop_and_admission_is_bounded(
         self,
     ) -> None:
-        heartbeats = 0
-        running = True
-
-        async def heartbeat() -> None:
-            nonlocal heartbeats
-            while running:
-                heartbeats += 1
-                await asyncio.sleep(0)
-
-        heartbeat_task = asyncio.create_task(heartbeat())
-        try:
-            with self.assertRaises(BindingQueryTimeout):
-                await self.store._read_rows(
-                    """
-                    WITH RECURSIVE numbers(value) AS (
-                        VALUES(1) UNION ALL
-                        SELECT value + 1 FROM numbers WHERE value < 1000000
-                    )
-                    SELECT SUM(left_side.value * right_side.value)
-                    FROM numbers left_side, numbers right_side
-                    """,
-                    deadline_seconds=0.002,
-                )
-        finally:
-            running = False
-            await heartbeat_task
-        self.assertGreater(heartbeats, 1)
-
-        entered = threading.Event()
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
         release = threading.Event()
+        worker_exited = threading.Event()
 
         def blocked_query(connection: sqlite3.Connection) -> int:
-            entered.set()
-            release.wait(1)
-            return connection.execute("SELECT 1").fetchone()[0]
+            try:
+                loop.call_soon_threadsafe(entered.set)
+                if not release.wait(5):
+                    raise AssertionError("event loop did not release the query worker")
+                return connection.execute("SELECT 1").fetchone()[0]
+            finally:
+                worker_exited.set()
 
         first = asyncio.create_task(
-            self.store._submit_query(blocked_query, deadline_seconds=2)
+            self.store._submit_query(blocked_query, deadline_seconds=10)
         )
-        while not entered.is_set():
-            await asyncio.sleep(0)
-        with self.assertRaises(BindingQueryBusy):
-            await self.store.query_bindings()
-        first.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await first
-        self.assertTrue(self.store._query_futures)
-        release.set()
-        await self.store.drain_queries()
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            # The worker stays blocked until this coroutine explicitly releases it;
+            # correctness does not depend on heartbeats fitting inside a deadline.
+            self.assertFalse(worker_exited.is_set())
+            self.assertFalse(first.done())
+            with self.assertRaises(BindingQueryBusy):
+                await self.store.query_bindings()
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            self.assertFalse(worker_exited.is_set())
+            with self.assertRaises(BindingQueryBusy):
+                await self.store.query_bindings()
+            self.assertTrue(self.store._query_futures)
+        finally:
+            release.set()
+            await asyncio.gather(first, return_exceptions=True)
+            await asyncio.wait_for(self.store.drain_queries(), timeout=5)
+        self.assertTrue(worker_exited.is_set())
         self.assertFalse(self.store._query_futures)
 
     async def test_wal_reader_does_not_block_real_writer_commit(self) -> None:
