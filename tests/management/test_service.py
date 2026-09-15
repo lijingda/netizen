@@ -25,6 +25,7 @@ from netizen.codex_runtime import (
     StopDisposition,
     ThreadLifecycleSnapshot,
     ThreadLifecycleState,
+    ThreadLifecycleError,
     ThreadSubscriptionSnapshot,
     ThreadSubscriptionState,
     ThreadArchived,
@@ -846,6 +847,176 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             await service.close()
+
+    async def test_scope_sessions_share_index_classification_with_instance_query(self) -> None:
+        bindings = {}
+        for name in ("active", "archived", "unindexed", "conflict", "lazy"):
+            binding = await self._create()
+            bindings[name] = binding
+            if name != "lazy":
+                self.store.assign_native_thread_id(binding.id, name)
+        self.runtime.active_metadata = {
+            name: NativeThreadMetadata(name, name, "preview")
+            for name in ("active", "conflict")
+        }
+        self.runtime.archived_metadata = {
+            name: NativeThreadMetadata(name, name, "preview")
+            for name in ("archived", "conflict")
+        }
+        self.runtime.summary_metadata["unindexed"] = NativeThreadMetadata(
+            "unindexed", "Recovered title", "",
+        )
+        self.runtime.calls.clear()
+        instance = await self.service.query_sessions(
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+        ordinary = await self.service.query_scope_sessions(
+            scope=self.scope, deadline=asyncio.get_running_loop().time() + 1,
+        )
+        archived = await self.service.query_scope_sessions(
+            scope=self.scope, archived=True, limit=None,
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+
+        expected = {
+            bindings[name].id: state for name, state in (
+                ("active", SessionInventoryState.ACTIVE),
+                ("archived", SessionInventoryState.ARCHIVED),
+                ("unindexed", SessionInventoryState.UNKNOWN),
+                ("conflict", SessionInventoryState.UNKNOWN),
+                ("lazy", SessionInventoryState.LAZY),
+            )
+        }
+        self.assertEqual(
+            {item.record.binding.id: item.inventory_state for item in instance.items},
+            expected,
+        )
+        self.assertEqual(
+            {item.record.binding.id: item.inventory_state
+             for item in (*ordinary.items, *archived.items)},
+            expected,
+        )
+        self.assertEqual([item.record.binding.id for item in archived.items], [bindings["archived"].id])
+        self.assertEqual(ordinary.total_count, 4)
+        self.assertEqual(archived.total_count, 1)
+        self.assertEqual(ordinary.unconfirmed_count, 2)
+        self.assertEqual(archived.unconfirmed_count, 2)
+        ordinary_by_id = {item.record.binding.id: item for item in ordinary.items}
+        self.assertEqual(ordinary_by_id[bindings["unindexed"].id].native.metadata.name, "Recovered title")
+        self.assertIsNone(ordinary_by_id[bindings["conflict"].id].native.metadata)
+        self.assertTrue(all(call[-1] is True for call in self.runtime.calls if call[0] in {"metadata", "catalog"}))
+        self.assertTrue(all(call[0] in {"metadata", "catalog", "summary"} for call in self.runtime.calls))
+
+    async def test_scope_session_pages_pin_current_preserve_activation_order_and_only_hydrate_visible(self) -> None:
+        bindings = []
+        for index in range(4):
+            with patch("netizen.bindings._now", return_value=f"2026-01-0{index + 1}T00:00:00+00:00"):
+                binding = await self._create()
+            self.store.assign_native_thread_id(binding.id, f"native-{index}")
+            self.runtime.summary_metadata[f"native-{index}"] = NativeThreadMetadata(
+                f"native-{index}", f"Title {index}", "",
+            )
+            bindings.append(binding)
+        outside = await self._create(self.other_scope)
+        self.store.assign_native_thread_id(outside.id, "native-outside")
+        with patch("netizen.bindings._now", return_value="2030-01-01T00:00:00+00:00"):
+            self.store.activate(scope_key=self.scope.key, binding_id=bindings[1].id)
+        # A wall-clock rollback must not put the current Binding on a later page.
+        with patch("netizen.bindings._now", return_value="2020-01-01T00:00:00+00:00"):
+            self.store.activate(scope_key=self.scope.key, binding_id=bindings[0].id)
+
+        for requested_page, expected_indices in ((0, (0, 1)), (1, (3, 2)), (99, (3, 2))):
+            with self.subTest(page=requested_page):
+                self.runtime.calls.clear()
+                result = await self.service.query_scope_sessions(
+                    scope=self.scope, page=requested_page, limit=2,
+                    deadline=asyncio.get_running_loop().time() + 1,
+                )
+                self.assertEqual([item.record.binding.id for item in result.items], [bindings[index].id for index in expected_indices])
+                self.assertEqual(result.page, min(requested_page, 1))
+                self.assertEqual(result.total_count, 4)
+                self.assertEqual(result.active_binding_id, bindings[0].id)
+                self.assertEqual(
+                    [call[1] for call in self.runtime.calls if call[0] == "summary"],
+                    [f"native-{index}" for index in expected_indices],
+                )
+                self.assertTrue(all(item.native.metadata.name == f"Title {index}" for item, index in zip(result.items, expected_indices)))
+                metadata_calls = [call for call in self.runtime.calls if call[0] == "metadata"]
+                self.assertEqual(len(metadata_calls), 2)
+                self.assertTrue(all(set(call[2]) == {f"native-{index}" for index in range(4)} and call[-1] is True for call in metadata_calls))
+
+        self.runtime.archived_metadata = {
+            f"native-{index}": NativeThreadMetadata(f"native-{index}", "Archived", "")
+            for index in (1, 2, 3)
+        }
+        self.runtime.calls.clear()
+        clamped = await self.service.query_scope_sessions(
+            scope=self.scope, page=99, limit=2,
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+        self.assertEqual(clamped.page, 0)
+        self.assertEqual(clamped.total_count, 1)
+        self.assertEqual([item.record.binding.id for item in clamped.items], [bindings[0].id])
+        self.assertEqual([call[1] for call in self.runtime.calls if call[0] == "summary"], ["native-0"])
+
+    async def test_scope_index_failure_preserves_ordinary_rows_but_rejects_archived_query(self) -> None:
+        active = await self._create()
+        self.store.assign_native_thread_id(active.id, "active")
+        archived = await self._create()
+        self.store.assign_native_thread_id(archived.id, "archived")
+        lazy = await self._create()
+        self.runtime.active_metadata["active"] = NativeThreadMetadata("active", "Active", "")
+        self.runtime.archived_metadata["archived"] = NativeThreadMetadata("archived", "Archived", "")
+        read_metadata = self.runtime.thread_metadata_exact
+
+        for error in (RuntimeError("unavailable"), TimeoutError("incomplete")):
+            async def fail_archived(*args, **kwargs):
+                if kwargs["archived"]:
+                    raise error
+                return await read_metadata(*args, **kwargs)
+
+            with self.subTest(error=type(error).__name__), patch.object(
+                self.runtime, "thread_metadata_exact", side_effect=fail_archived,
+            ):
+                ordinary = await self.service.query_scope_sessions(
+                    scope=self.scope, deadline=asyncio.get_running_loop().time() + 1,
+                )
+                self.assertFalse(ordinary.catalog_available)
+                self.assertEqual(ordinary.total_count, 3)
+                self.assertEqual(ordinary.unconfirmed_count, 2)
+                self.assertEqual(
+                    {item.record.binding.id: item.inventory_state for item in ordinary.items},
+                    {active.id: SessionInventoryState.UNKNOWN, archived.id: SessionInventoryState.UNKNOWN, lazy.id: SessionInventoryState.LAZY},
+                )
+                with self.assertRaises(ThreadLifecycleError):
+                    await self.service.query_scope_sessions(
+                        scope=self.scope, archived=True, limit=None,
+                        deadline=asyncio.get_running_loop().time() + 1,
+                    )
+
+    async def test_empty_and_lazy_scope_sessions_need_no_native_reads(self) -> None:
+        self.runtime.calls.clear()
+        empty = await self.service.query_scope_sessions(
+            scope=self.scope, page=99,
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+        self.assertEqual(empty.items, ())
+        self.assertEqual(empty.total_count, 0)
+        self.assertEqual(empty.page, 0)
+        self.assertIsNone(empty.active_binding_id)
+        self.assertEqual(self.runtime.calls, [])
+        lazy = await self._create()
+        self.runtime.calls.clear()
+        for archived in (False, True):
+            result = await self.service.query_scope_sessions(
+                scope=self.scope, archived=archived,
+                deadline=asyncio.get_running_loop().time() + 1,
+            )
+            self.assertEqual(result.total_count, 0 if archived else 1)
+            self.assertTrue(result.catalog_available)
+            self.assertEqual(result.unconfirmed_count, 0)
+            self.assertEqual(result.active_binding_id, lazy.id)
+        self.assertEqual(self.runtime.calls, [])
 
     async def test_session_query_accepts_one_hundred_only(self) -> None:
         page = await self.service.query_sessions(

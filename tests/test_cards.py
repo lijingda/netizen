@@ -3637,7 +3637,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("恢复并切换", str(archived.card))
         self.assertIn("binding.delete.archived.prepare", str(archived.card))
 
-    def test_sessions_card_pins_active_and_offers_activate_for_others(self) -> None:
+    def test_sessions_card_preserves_page_order_and_offers_activate_for_others(self) -> None:
         active = SessionCardItem(
             binding_id="11111111-0000-0000-0000-000000000001",
             short_id="11111111",
@@ -3669,12 +3669,14 @@ class CardRendererTest(unittest.TestCase):
         )
         card = sessions_card(
             scope=self.scope,
-            sessions=(other, lazy, active),
+            sessions=(active, other, lazy),
+            total_count=3,
+            active_binding_id=active.binding_id,
             native_delete_available=True,
             page=0,
         )
         text = str(card.card)
-        # Active is pinned to the top.
+        # The application supplies the current-first page.
         self.assertLess(text.index("Active work"), text.index("Other work"))
         self.assertLess(text.index("Active work"), text.index("新会话"))
         self.assertIn("● 当前", text)
@@ -3789,6 +3791,8 @@ class CardRendererTest(unittest.TestCase):
         card = sessions_card(
             scope=self.scope,
             sessions=sessions,
+            total_count=len(sessions),
+            active_binding_id=sessions[0].binding_id,
             native_delete_available=True,
         )
         archive_buttons = [
@@ -3843,6 +3847,8 @@ class CardRendererTest(unittest.TestCase):
     ) -> None:
         card = sessions_card(
             scope=self.scope,
+            total_count=1,
+            active_binding_id="11111111-0000-0000-0000-000000000001",
             sessions=(
                 SessionCardItem(
                     binding_id="11111111-0000-0000-0000-000000000001",
@@ -3896,6 +3902,8 @@ class CardRendererTest(unittest.TestCase):
         card = sessions_card(
             scope=self.scope,
             sessions=sessions,
+            total_count=len(sessions),
+            active_binding_id=sessions[0].binding_id,
             native_delete_available=False,
         )
         delete_values = [
@@ -4006,7 +4014,7 @@ class CardRendererTest(unittest.TestCase):
             "sessions.archived.refresh",
         )
 
-    def test_sessions_card_paginates_and_clamps_page(self) -> None:
+    def test_sessions_card_renders_supplied_pages_and_total(self) -> None:
         sessions = tuple(
             SessionCardItem(
                 binding_id=f"{i:08d}-0000-0000-0000-000000000000",
@@ -4021,7 +4029,9 @@ class CardRendererTest(unittest.TestCase):
         )
         card = sessions_card(
             scope=self.scope,
-            sessions=sessions,
+            sessions=sessions[:10],
+            total_count=25,
+            active_binding_id=sessions[0].binding_id,
             native_delete_available=True,
             page=0,
         )
@@ -4032,7 +4042,9 @@ class CardRendererTest(unittest.TestCase):
 
         card = sessions_card(
             scope=self.scope,
-            sessions=sessions,
+            sessions=sessions[10:20],
+            total_count=25,
+            active_binding_id=sessions[0].binding_id,
             native_delete_available=True,
             page=1,
         )
@@ -4041,12 +4053,14 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("上一页", text)
         self.assertIn("下一页", text)
 
-        # Out-of-range page is clamped to the last valid page.
+        # The application has clamped to the last valid page.
         card = sessions_card(
             scope=self.scope,
-            sessions=sessions,
+            sessions=sessions[20:],
+            total_count=25,
+            active_binding_id=sessions[0].binding_id,
             native_delete_available=True,
-            page=99,
+            page=2,
         )
         text = str(card.card)
         self.assertIn("第 3/3 页", text)
@@ -4057,6 +4071,8 @@ class CardRendererTest(unittest.TestCase):
         card = sessions_card(
             scope=self.scope,
             sessions=(),
+            total_count=0,
+            active_binding_id=None,
             native_delete_available=False,
             page=0,
         )

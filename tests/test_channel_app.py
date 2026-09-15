@@ -8,7 +8,7 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from lark_channel import (
     Conversation,
@@ -656,6 +656,9 @@ class StubRuntime:
         self.thread_metadata_calls: list[tuple[str, ...]] = []
         self.archived_thread_metadata_calls: list[tuple[str, ...]] = []
         self.thread_metadata_error: Exception | None = None
+        self.thread_metadata_options: list[dict] = []
+        self.thread_summary_calls: list[str] = []
+        self.thread_summary_values: dict[str, NativeThreadMetadata] = {}
         self.context_window_usage_values: dict[str, ContextWindowUsage] = {}
         self.context_window_usage_calls: list[str] = []
         self.turn_progress_values: dict[str, TurnProgressSnapshot] = {}
@@ -778,7 +781,9 @@ class StubRuntime:
         thread_ids: tuple[str, ...],
         *,
         archived: bool = False,
+        **options,
     ) -> dict[str, NativeThreadMetadata]:
+        self.thread_metadata_options.append(options)
         calls = (
             self.archived_thread_metadata_calls
             if archived
@@ -797,6 +802,10 @@ class StubRuntime:
             for thread_id in thread_ids
             if thread_id in values
         }
+
+    async def thread_summary(self, thread_id: str) -> NativeThreadMetadata:
+        self.thread_summary_calls.append(thread_id)
+        return self.thread_summary_values[thread_id]
 
     def context_window_usage(self, binding_id: str) -> ContextWindowUsage | None:
         self.context_window_usage_calls.append(binding_id)
@@ -4339,6 +4348,79 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("没有普通会话", str(card.card))
         self.assertEqual(self.runtime.thread_metadata_calls, [])
 
+    async def test_sessions_enrich_only_visible_page_and_keep_exact_off_page_current(self) -> None:
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        self.store._id_factory = lambda: str(uuid.uuid4())
+        for i in range(12):
+            await self.new(message_id=f"om_page_{i}")
+            binding = self.store.active_binding(scope.key)
+            self.store.assign_native_thread_id(binding.id, f"native-page-{i}")
+            self.runtime.thread_summary_values[f"native-page-{i}"] = NativeThreadMetadata(
+                f"native-page-{i}", f"Unindexed {i}", "",
+            )
+        bindings = self.store.list_bindings(scope.key)
+        current = self.store.active_binding(scope.key)
+        recovering = bindings[-1]
+        self.runtime.active[recovering.id] = ActiveTurnSnapshot(
+            recovering.id, recovering.native_thread_id, "turn-recovering", "ou_user",
+            ActiveState.OBSERVATION_UNAVAILABLE,
+        )
+        self.runtime.activity_revisions[recovering.id] = 17
+        self.runtime.goal_snapshot_calls.clear()
+        self.runtime.available_capabilities = frozenset({NativeCapability.DELETE})
+
+        first = await self.app._sessions_card(scope=scope)
+        self.assertEqual(set(self.runtime.goal_snapshot_calls), {b.id for b in bindings[:10]})
+        self.assertEqual(set(self.runtime.thread_summary_calls), {b.native_thread_id for b in bindings[:10]})
+        self.assertIn("第 1/2 页", str(first.card))
+        self.assertIn("归档状态：未确认", str(first.card))
+        self.assertIn("Unindexed", str(first.card))
+        self.assertEqual(len(_elements(first.card, "button")), 30)  # 9 switch + 10 archive + 10 delete + next
+        self.runtime.goal_snapshot_calls.clear()
+        self.runtime.thread_summary_calls.clear()
+
+        second = await self.app._sessions_card(scope=scope, page=1)
+        self.assertEqual(self.runtime.goal_snapshot_calls, [bindings[-2].id])
+        self.assertEqual(set(self.runtime.thread_summary_calls), {b.native_thread_id for b in bindings[10:]})
+        for label in ("停止", "重新检查"):
+            action = next(
+                b["behaviors"][0]["value"] for b in _elements(second.card, "button")
+                if b["text"]["content"] == label
+            )
+            self.assertEqual(action["binding_id"], f"binding:v1:{recovering.id}")
+            self.assertEqual(action["expected_active_binding_id"], f"binding:v1:{current.id}")
+            self.assertEqual(action["expected_turn_id"], "turn:v1:turn-recovering")
+            self.assertEqual(action["expected_activity_revision"], 17)
+            self.assertEqual(action["page"], 1)
+        self.assertTrue(self.runtime.thread_metadata_options)
+        self.assertTrue(all(option["use_state_db_only"] is True for option in self.runtime.thread_metadata_options))
+
+    async def test_sessions_goal_timeout_keeps_row_and_lifecycle_controls(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata("native-one", "Title", "task")
+        self.runtime.available_capabilities = frozenset({NativeCapability.DELETE})
+        entered = asyncio.Event()
+
+        async def stalled_goal(_binding):
+            entered.set()
+            await asyncio.Event().wait()
+
+        with (
+            patch.object(self.runtime, "goal_snapshot", stalled_goal),
+            patch("netizen.channel_app._SESSION_QUERY_TIMEOUT_SECONDS", 0.05),
+        ):
+            card = await asyncio.wait_for(self.app._sessions_card(scope=scope), 0.5)
+        self.assertTrue(entered.is_set())
+        self.assertIn("状态：暂不可用", str(card.card))
+        self.assertNotIn("状态：idle", str(card.card))
+        self.assertEqual(
+            {button["text"]["content"] for button in _elements(card.card, "button")},
+            {"归档", "删除"},
+        )
+
     async def test_status_and_sessions_share_persisted_goal_projection(self) -> None:
         await self.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
@@ -4952,7 +5034,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             if b["text"]["content"] == "设为当前"
         )
 
-        self.runtime.thread_metadata_error = RuntimeError("history down")
+        self.app._sessions_card = AsyncMock(side_effect=RuntimeError("card unavailable"))
         await self.app.handle_card_action(
             self.direct_button_event(
                 activate["behaviors"][0]["value"],
@@ -5503,7 +5585,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             for button in _elements(confirmation, "button")
             if button["text"]["content"] == "永久删除此会话"
         )
-        self.runtime.thread_metadata_error = RuntimeError("history down")
+        self.app._sessions_card = AsyncMock(side_effect=RuntimeError("card unavailable"))
 
         with self.assertLogs("netizen.channel_app", level="WARNING"):
             await self.app.handle_card_action(
@@ -5868,7 +5950,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             for button in _elements(card.card, "button")
             if button["text"]["content"] == "归档"
         )
-        self.runtime.thread_metadata_error = RuntimeError("history down")
+        self.app._sessions_card = AsyncMock(side_effect=RuntimeError("card unavailable"))
 
         with self.assertLogs("netizen.channel_app", level="WARNING"):
             await self.app.handle_card_action(
@@ -5963,6 +6045,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         # Shrink the live list to one page by archiving 8 bindings (7 remain).
         for i in range(8):
+            self.runtime.thread_metadata_values.pop(f"native-{i}")
             self.runtime.archived_thread_metadata_values[f"native-{i}"] = (
                 NativeThreadMetadata(f"native-{i}", "Archived", "old")
             )
@@ -6139,7 +6222,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("名称：未设置", lines)
         self.assertIn("会话预览：First task", lines)
 
-    async def test_thread_metadata_failure_keeps_status_but_sessions_fail_closed(
+    async def test_thread_metadata_failure_keeps_status_and_sessions_but_archived_fails(
         self,
     ) -> None:
         await self.new()
@@ -6161,7 +6244,17 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             FakeMessage("/sessions", message_id="om_sessions")
         )
         sessions_reply = self.channel.replies[-1][1]
-        self.assertIn("无法读取 Codex 归档会话列表", sessions_reply)
+        self.assertIsInstance(sessions_reply, OutboundCard)
+        self.assertIn("会话目录暂不可用", str(sessions_reply.card))
+        self.assertIn(binding.short_id, str(sessions_reply.card))
+        self.assertIn("归档状态：未确认", str(sessions_reply.card))
+        labels = {button["text"]["content"] for button in _elements(sessions_reply.card, "button")}
+        self.assertIn("归档", labels)
+
+        await self.app.handle_message(
+            FakeMessage("/sessions archived", message_id="om_archived_unavailable")
+        )
+        self.assertIn("无法读取 Codex 归档会话列表", self.channel.replies[-1][1])
 
     async def test_status_resolves_exact_persistent_turn_settings(self) -> None:
         await self.new()

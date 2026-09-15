@@ -148,11 +148,10 @@ def classify_native_thread_view(
     active: Mapping[str, NativeThreadMetadata],
     archived: Mapping[str, NativeThreadMetadata],
 ) -> NativeThreadView | None:
-    """Classify raw native metadata, preferring archived on overlap.
+    """Classify raw catalog membership, preferring archived on overlap.
 
-    Active and archived catalogs are separate native reads.  The Channel display
-    path can therefore observe an archive between them; archived precedence avoids
-    briefly presenting that Thread as active.
+    Inventory readers resolve overlap to Unknown before calling this helper;
+    raw catalog absence alone does not establish inventory Missing.
     """
 
     if thread_id is None:
@@ -280,6 +279,16 @@ class SessionQuery:
     inventory_states: tuple[SessionInventoryState, ...] | None = None
 
 
+def _session_inventory_state(
+    binding: ThreadBinding, native: NativeThreadView | None,
+) -> SessionInventoryState:
+    if binding.native_thread_id is None:
+        return SessionInventoryState.LAZY
+    if native is None or native.state is None:
+        return SessionInventoryState.UNKNOWN
+    return SessionInventoryState(native.state.value)
+
+
 @dataclass(frozen=True, slots=True)
 class SessionInventoryItem:
     record: BindingInventoryRecord
@@ -288,11 +297,7 @@ class SessionInventoryItem:
 
     @property
     def inventory_state(self) -> SessionInventoryState:
-        if self.record.binding.native_thread_id is None:
-            return SessionInventoryState.LAZY
-        if self.native is None or self.native.state is None:
-            return SessionInventoryState.UNKNOWN
-        return SessionInventoryState(self.native.state.value)
+        return _session_inventory_state(self.record.binding, self.native)
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,6 +305,16 @@ class SessionInventoryPage:
     items: tuple[SessionInventoryItem, ...]
     next_cursor: BindingCursor | None
     catalog_available: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeSessionPage:
+    items: tuple[SessionInventoryItem, ...]
+    total_count: int
+    page: int
+    active_binding_id: str | None
+    catalog_available: bool
+    unconfirmed_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1174,13 +1189,7 @@ class InstanceManagementService:
                 binding = record.binding
                 scan_cursor = BindingCursor(binding.created_at, binding.id)
                 view = (native or {}).get(binding.native_thread_id)
-                state = (
-                    SessionInventoryState.LAZY
-                    if binding.native_thread_id is None
-                    else SessionInventoryState.UNKNOWN
-                    if view is None or view.state is None
-                    else SessionInventoryState(view.state.value)
-                )
+                state = _session_inventory_state(binding, view)
                 if state not in states:
                     continue
                 selected.append(record)
@@ -1203,6 +1212,67 @@ class InstanceManagementService:
             native=native,
             next_cursor=next_cursor,
             deadline=deadline,
+        )
+
+    async def query_scope_sessions(
+        self,
+        *,
+        scope: FeishuScope,
+        archived: bool = False,
+        page: int = 0,
+        limit: int | None = 10,
+        deadline: float,
+    ) -> ScopeSessionPage:
+        """Use the shared inventory for a Scope's stateless numbered cards.
+
+        Preserve activation order, current-first ordering and page clamping.
+        The existing archived card is unpaged (limit=None); confirmed archived
+        rows already have metadata and never need Goal or summary enrichment.
+        """
+        if limit is None:
+            if not archived or page != 0:
+                raise ValueError("only the archived list can be unpaged")
+        elif isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("page size must be between 1 and 100")
+        self._query_seconds(deadline)
+        bindings = self._bindings.list_bindings(scope.key)
+        thread_ids = tuple(dict.fromkeys(
+            binding.native_thread_id for binding in bindings
+            if binding.native_thread_id is not None
+        ))
+        native = await self._indexed_native_views(thread_ids=thread_ids, deadline=deadline)
+        if archived and native is None:
+            raise ThreadLifecycleError("无法读取 Codex 归档会话列表，请稍后重试。")
+        selected = []
+        unconfirmed_count = 0
+        for binding in bindings:
+            state = _session_inventory_state(binding, (native or {}).get(binding.native_thread_id))
+            unconfirmed_count += state is SessionInventoryState.UNKNOWN
+            if (state is SessionInventoryState.ARCHIVED) == archived:
+                selected.append(binding)
+        if not archived:
+            selected.sort(key=lambda binding: not binding.active)
+        total_count = len(selected)
+        active_binding_id = next((binding.id for binding in bindings if binding.active), None)
+        if limit is not None:
+            page = max(0, min(page, max(0, (total_count - 1) // limit)))
+            selected = selected[page * limit:(page + 1) * limit]
+        views = await self._session_native_views(selected, native=native, deadline=deadline)
+        scope_record = self._bindings.get_scope(scope.key) if bindings else None
+        return ScopeSessionPage(
+            items=tuple(
+                SessionInventoryItem(
+                    record=BindingInventoryRecord(binding, scope_record),
+                    native=views.get(binding.native_thread_id),
+                    chat=ChatLabelResolver.fallback(scope.chat_id),
+                )
+                for binding in selected
+            ),
+            total_count=total_count,
+            page=page,
+            active_binding_id=active_binding_id,
+            catalog_available=native is not None,
+            unconfirmed_count=unconfirmed_count,
         )
 
     async def query_side_topics(
@@ -1914,11 +1984,37 @@ class InstanceManagementService:
         next_cursor: BindingCursor | None,
         deadline: float,
     ) -> SessionInventoryPage:
+        views = await self._session_native_views(
+            tuple(record.binding for record in records), native=native, deadline=deadline,
+        )
+        labels = await self.resolve_chat_labels(
+            (record.scope.chat_id for record in records), deadline=deadline,
+        )
+        return SessionInventoryPage(
+            items=tuple(
+                SessionInventoryItem(
+                    record=record,
+                    native=views.get(record.binding.native_thread_id),
+                    chat=labels[record.scope.chat_id],
+                )
+                for record in records
+            ),
+            next_cursor=next_cursor,
+            catalog_available=native is not None,
+        )
+
+    async def _session_native_views(
+        self,
+        bindings: Sequence[ThreadBinding],
+        *,
+        native: dict[str, NativeThreadView] | None,
+        deadline: float,
+    ) -> dict[str, NativeThreadView]:
         views = {
-            record.binding.native_thread_id: (native or {}).get(
-                record.binding.native_thread_id, NativeThreadView(None, None),
+            binding.native_thread_id: (native or {}).get(
+                binding.native_thread_id, NativeThreadView(None, None),
             )
-            for record in records if record.binding.native_thread_id is not None
+            for binding in bindings if binding.native_thread_id is not None
         }
         # Only visible, unclassified rows need a summary. Reading one exact ID
         # neither proves archive membership nor turns a read failure into Missing.
@@ -1944,21 +2040,7 @@ class InstanceManagementService:
             if view.state is None and view.metadata is None
         )
         await asyncio.gather(*(hydrate(thread_id) for thread_id in unresolved))
-        labels = await self.resolve_chat_labels(
-            (record.scope.chat_id for record in records), deadline=deadline,
-        )
-        return SessionInventoryPage(
-            items=tuple(
-                SessionInventoryItem(
-                    record=record,
-                    native=views.get(record.binding.native_thread_id),
-                    chat=labels[record.scope.chat_id],
-                )
-                for record in records
-            ),
-            next_cursor=next_cursor,
-            catalog_available=native is not None,
-        )
+        return views
 
     def _summary_read_finished(self, task: asyncio.Task[NativeThreadMetadata]) -> None:
         self._summary_reads.discard(task)
