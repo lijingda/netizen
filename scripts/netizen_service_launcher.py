@@ -417,12 +417,19 @@ def _launch_with_lifetime_lock(
         ) from error
     home = Path(account.pw_dir)
     shell = Path(account.pw_shell)
+    profile_started_at = time.monotonic()
     captured = capture_profile_environment(
         shell=shell,
         home=home,
         username=account.pw_name,
         python_executable=Path(sys.executable),
     )
+    with contextlib.suppress(OSError):
+        print(
+            f"netizen startup: shell environment loaded in {time.monotonic() - profile_started_at:.3f}s",
+            file=sys.stderr,
+            flush=True,
+        )
     environment = service_environment(
         captured,
         home=home,

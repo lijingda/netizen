@@ -23,6 +23,7 @@ from netizen.main import (
     _clear_ready_marker,
     _cleanup_step,
     _configure_platform_trust,
+    _open_core_admission,
     _publish_ready_marker,
     _register_channel_handlers,
     _scrub_channel_environment,
@@ -342,6 +343,35 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    async def test_restart_recovery_proof_requires_admission_and_managed_ready_publication(self) -> None:
+        for outcome in ("ready", "unmanaged", "admission_failed", "marker_failed"):
+            with self.subTest(outcome=outcome):
+                events = []
+
+                def open_admission():
+                    events.append("admission")
+                    if outcome == "admission_failed":
+                        raise RuntimeError("admission failed")
+
+                def publish(_path):
+                    events.append("marker")
+                    if outcome == "marker_failed":
+                        raise RuntimeError("marker failed")
+
+                core = SimpleNamespace(
+                    open_admission=open_admission,
+                    _management=SimpleNamespace(set_service_ready=lambda ready: events.append(ready)),
+                )
+                with patch("netizen.main._publish_ready_marker", side_effect=publish):
+                    ready_file = None if outcome == "unmanaged" else Path("/unused/service.ready")
+                    if outcome.endswith("failed"):
+                        with self.assertRaises(RuntimeError):
+                            await _open_core_admission(core, ready_file=ready_file)
+                        self.assertNotIn(True, events)
+                    else:
+                        await _open_core_admission(core, ready_file=ready_file)
+                        self.assertEqual(events, ["admission"] if outcome == "unmanaged" else ["admission", "marker", True])
+
     async def test_schedule_mcp_bind_failure_stops_before_codex(self) -> None:
         self.mcp_bind_error = OSError("schedule listener failed")
         with tempfile.TemporaryDirectory() as raw:
@@ -637,6 +667,9 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 events.append("runtime:tasks")
 
         class FakeManagement:
+            def set_service_ready(self, ready: bool) -> None:
+                events.append(f"management:ready={ready}")
+
             async def close(self, *, deadline: float | None = None) -> None:
                 self.deadline = deadline
                 events.append("management:close")
@@ -681,6 +714,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(_SHUTDOWN_BUDGET_SECONDS, 60.0)
         expected = (
+            "management:ready=False",
             "admin:admission",
             "feishu:admission",
             "runtime:admission",
@@ -743,7 +777,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                     store=store,  # type: ignore[arg-type]
                     projects=SimpleNamespace(),  # type: ignore[arg-type]
                 )
-                core._management = SimpleNamespace(close=close_management)  # type: ignore[assignment]
+                core._management = SimpleNamespace(close=close_management, set_service_ready=lambda _ready: None)  # type: ignore[assignment]
                 core.application = SimpleNamespace(close=AsyncMock())  # type: ignore[assignment]
                 core._codex = SimpleNamespace(close=AsyncMock())  # type: ignore[assignment]
                 core._runtime = SimpleNamespace(  # type: ignore[assignment]
@@ -779,7 +813,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         async def pending_close(*, deadline: float | None = None) -> None:
             await asyncio.Future()
 
-        management = SimpleNamespace(close=AsyncMock(side_effect=pending_close))
+        management = SimpleNamespace(close=AsyncMock(side_effect=pending_close), set_service_ready=lambda _ready: None)
         core = ServiceCore(
             settings=SimpleNamespace(),  # type: ignore[arg-type]
             channel=SimpleNamespace(update_policy=lambda **_kwargs: None),  # type: ignore[arg-type]

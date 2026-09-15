@@ -760,6 +760,9 @@ class InstanceManagementService:
             # Any remaining reads finish when the shared Codex transport closes.
             await asyncio.wait(tuple(self._summary_reads), timeout=remaining)
 
+    def set_service_ready(self, ready: bool) -> None:
+        self._updates.set_service_ready(ready)
+
     async def update_status(self) -> dict[str, Any]:
         return await self._updates.status()
 

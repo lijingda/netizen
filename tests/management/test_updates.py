@@ -20,7 +20,7 @@ from netizen.management.updates import (
 from netizen.deployment.update_executor import UpdateDispatchUnknown, UpdateExecutorError
 from netizen.deployment.update_protocol import (
     acquire_install_lock, advance_operation, new_operation, read_operation, write_operation,
-    new_restart_operation,
+    new_restart_operation, UpdateProtocolError,
 )
 
 
@@ -150,6 +150,144 @@ class UpdateServiceTests(unittest.IsolatedAsyncioTestCase):
     def fetch(self):
         self.fetches += 1
         return parse_release(release_response())
+
+    def startup_service(self):
+        service = UpdateService(home=self.home, current=self.service._current,
+                                executor=self.executor, fetch=self.fetch, clock=lambda: self.now)
+        self.addAsyncCleanup(service.close)
+        return service
+
+    def restart_record(self, phase="restarting", code="none"):
+        operation = new_restart_operation("0.4.6", self.release.name)
+        write_operation(self.root, operation)
+        return advance_operation(self.root, operation["operationId"], phase, code)
+
+    async def test_late_ready_recovers_on_refresh_and_cached_update_check(self):
+        for entry in ("status", "check"):
+            for startup_phase in ("restarting", "recovery_required"):
+                with self.subTest(entry=entry, startup_phase=startup_phase):
+                    operation = self.restart_record(startup_phase, "restart_failed" if startup_phase == "recovery_required" else "none")
+                    service = self.startup_service()
+                    descriptor = acquire_install_lock(self.root)
+                    try:
+                        self.assertFalse((await service.check())["restartAvailable"])
+                        service.set_service_ready(True)
+                        advance_operation(self.root, operation["operationId"], "recovery_required", "restart_failed")
+                    finally:
+                        os.close(descriptor)
+                    fetches = self.fetches
+                    status = await getattr(service, entry)()
+                    self.assertEqual(self.fetches, fetches)
+                    self.assertEqual(status["operation"]["phase"], "recovered")
+                    self.assertEqual(status["operation"]["code"], "service_ready")
+                    for key in ("operationId", "target", "previousRelease", "createdAt"):
+                        self.assertEqual(status["operation"][key], operation[key])
+                    self.assertTrue(status["available"])
+                    self.assertTrue(status["restartAvailable"])
+                    self.assertEqual((await service.status())["operation"], status["operation"])
+                    self.assertEqual(self.executor.launched, [])
+
+    async def test_recovery_requires_the_exact_operation_at_process_startup(self):
+        for startup in ("missing", "accepted", "other_operation", "unreadable"):
+            with self.subTest(startup=startup):
+                operation = self.restart_record("accepted")
+                if startup == "missing":
+                    (self.root / "state/update.json").unlink()
+                if startup == "other_operation":
+                    self.restart_record()
+                if startup == "unreadable":
+                    with patch("netizen.management.updates.read_operation", side_effect=UpdateProtocolError("unreadable")):
+                        service = self.startup_service()
+                else:
+                    service = self.startup_service()
+                write_operation(self.root, operation)
+                expected = advance_operation(self.root, operation["operationId"], "recovery_required", "restart_failed")
+                service.set_service_ready(True)
+                status = await service.status()
+                self.assertEqual(status["operation"], expected)
+                self.assertFalse(status["restartAvailable"])
+
+    async def test_recovery_requires_ready_matching_installation_and_restart_failure(self):
+        for blocked in ("not_ready", "upgrade", "worker_lost", "previous_release_changed",
+                        "operation_invalid", "version", "digest", "unmanaged", "activation"):
+            with self.subTest(blocked=blocked):
+                operation = self.restart_record("recovery_required", "restart_failed")
+                if blocked == "upgrade":
+                    write_operation(self.root, new_operation(TARGET, self.release.name))
+                    operation = read_operation(self.root)
+                    operation = advance_operation(self.root, operation["operationId"], "recovery_required", "restart_failed")
+                elif blocked in {"worker_lost", "previous_release_changed", "operation_invalid"}:
+                    operation = advance_operation(self.root, operation["operationId"], "recovery_required", blocked)
+                service = self.startup_service()
+                service.set_service_ready(blocked != "not_ready")
+                if blocked in {"version", "digest", "unmanaged"}:
+                    service._current = InstalledRelease(
+                        "0.4.7" if blocked == "version" else "0.4.6",
+                        "unmanaged" if blocked == "unmanaged" else "published",
+                        self.release.parent / ("d" * 64) if blocked == "digest" else self.release,
+                    )
+                intent = self.root / "state/.activation-intent.json"
+                if blocked == "activation":
+                    intent.symlink_to("missing")
+                try:
+                    status = await service.status()
+                    self.assertEqual(status["operation"], operation)
+                    self.assertFalse(status["restartAvailable"])
+                finally:
+                    intent.unlink(missing_ok=True)
+
+    async def test_recovery_waits_for_install_lock_and_successful_worker_cleanup(self):
+        operation = self.restart_record("recovery_required", "restart_failed")
+        service = self.startup_service()
+        service.set_service_ready(True)
+        descriptor = acquire_install_lock(self.root)
+        try:
+            self.assertEqual((await service.status())["operation"], operation)
+            self.assertEqual(self.executor.cleaned, [])
+        finally:
+            os.close(descriptor)
+        self.executor.cleanup_error = UpdateExecutorError("manager observation unknown")
+        self.assertEqual((await service.status())["operation"], operation)
+        self.assertEqual(read_operation(self.root), operation)
+        self.executor.cleanup_error = None
+        self.assertEqual((await service.status())["operation"]["phase"], "recovered")
+
+    async def test_recovery_rechecks_conditions_after_worker_cleanup(self):
+        for change in ("closing", "pointer", "activation"):
+            with self.subTest(change=change):
+                operation = self.restart_record("recovery_required", "restart_failed")
+                service = self.startup_service()
+                service.set_service_ready(True)
+                intent = self.root / "state/.activation-intent.json"
+
+                def cleanup(_operation_id):
+                    with self.assertRaises(BlockingIOError):
+                        acquire_install_lock(self.root)
+                    if change == "closing":
+                        service.set_service_ready(False)
+                    elif change == "pointer":
+                        (self.root / "current").unlink()
+                    else:
+                        intent.touch()
+
+                try:
+                    with patch.object(self.executor, "cleanup", side_effect=cleanup):
+                        self.assertEqual((await service.status())["operation"], operation)
+                finally:
+                    intent.unlink(missing_ok=True)
+                    if not (self.root / "current").exists():
+                        (self.root / "current").symlink_to(self.release)
+
+    async def test_managed_source_recovers_restart_without_enabling_updates(self):
+        self.restart_record("recovery_required", "restart_failed")
+        self.service._current = InstalledRelease("0.4.6", "source", self.release)
+        service = self.startup_service()
+        service.set_service_ready(True)
+        status = await service.check()
+        self.assertEqual(status["operation"]["phase"], "recovered")
+        self.assertTrue(status["restartAvailable"])
+        self.assertFalse(status["available"])
+        self.assertEqual(self.fetches, 0)
 
     async def test_check_is_explicit_cached_and_start_uses_exact_target(self):
         self.assertFalse((await self.service.status())["available"])

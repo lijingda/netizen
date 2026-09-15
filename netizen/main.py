@@ -16,6 +16,10 @@ if _EARLY_LIFETIME_DESCRIPTOR.isdecimal():
         pass
 del _EARLY_LIFETIME_DESCRIPTOR
 
+import time
+
+_IMPORT_STARTED_AT = time.monotonic()
+
 import asyncio
 import concurrent.futures
 import contextlib
@@ -73,6 +77,8 @@ from .turn_plan_observer import (
     TurnActivityObservationUnavailable,
 )
 
+_IMPORT_SECONDS = time.monotonic() - _IMPORT_STARTED_AT
+
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +88,12 @@ _SHUTDOWN_BUDGET_SECONDS = 60.0
 _READY_MARKER_CONTENT = b"netizen service ready\n"
 _LOG_MAX_BYTES = 5 * 1024 * 1024
 _LOG_BACKUP_COUNT = 2
+
+
+def _log_startup_timing(stage: str, started_at: float) -> float:
+    now = time.monotonic()
+    logger.info("netizen startup: %s completed in %.3fs", stage, now - started_at)
+    return now
 
 
 def _configure_platform_trust() -> None:
@@ -156,6 +168,7 @@ class ServiceCore:
         self._closed = False
 
     async def start(self) -> None:
+        stage_started_at = time.monotonic()
         try:
             if self._settings.admin_web.enabled:
                 credential_path = self._settings.admin_web.credential_path
@@ -171,11 +184,13 @@ class ServiceCore:
                     credential_path=credential_path,
                 )
                 await self._admin.bind()
+                stage_started_at = _log_startup_timing("Admin listener", stage_started_at)
 
             # Bind the native MCP transport before App Server initializes its
             # catalog. Calls remain closed until the shared application is ready.
             self._schedule_mcp = ScheduleMcpRunner()
             await self._schedule_mcp.bind()
+            stage_started_at = _log_startup_timing("Schedule MCP listener", stage_started_at)
 
             expired_sides = self._store.expire_live_side_topics()
             if expired_sides:
@@ -193,6 +208,7 @@ class ServiceCore:
                 )
             )
             await self._codex.__aenter__()
+            stage_started_at = _log_startup_timing("Codex connection", stage_started_at)
             terminal_cleanup = PinnedExperimentalTerminalCleanup(self._codex)
             thread_subscription_control = AppServerThreadSubscriptionControl(
                 self._codex
@@ -286,6 +302,7 @@ class ServiceCore:
             if expired_sides:
                 await self.application.refresh_expired_side_cards(expired_sides)
             self._started = True
+            _log_startup_timing("runtime recovery", stage_started_at)
         except BaseException:
             await self._close_partial_start()
             raise
@@ -359,6 +376,8 @@ class ServiceCore:
         if self._closed:
             return
         self._closed = True
+        if self._management is not None:
+            self._management.set_service_ready(False)
         deadline = asyncio.get_running_loop().time() + _SHUTDOWN_BUDGET_SECONDS
         management_closed = self._management is None
         try:
@@ -495,9 +514,11 @@ class ServiceCore:
 
 
 async def run(settings: Settings, *, ready_file: Path | None = None) -> None:
+    stage_started_at = time.monotonic()
     settings.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(settings.data_dir, 0o700)
     store = BindingStore(settings.data_dir / "channel.sqlite3")
+    stage_started_at = _log_startup_timing("database", stage_started_at)
     try:
         projects = ProjectRegistry(
             store=store,
@@ -514,6 +535,7 @@ async def run(settings: Settings, *, ready_file: Path | None = None) -> None:
         store=store,
         projects=projects,
     )
+    _log_startup_timing("Projects and Channel construction", stage_started_at)
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signal_name in (signal.SIGINT, signal.SIGTERM):
@@ -527,11 +549,11 @@ async def run(settings: Settings, *, ready_file: Path | None = None) -> None:
         await _await_channel_future(channel.schedule(core.start()))
         core_started = True
         assert core.application is not None
+        stage_started_at = time.monotonic()
         _register_channel_handlers(channel, core.application)
         await channel.start_background()
-        await _await_channel_future(channel.schedule(_open_core_admission(core)))
-        if ready_file is not None:
-            _publish_ready_marker(ready_file)
+        _log_startup_timing("Feishu connection", stage_started_at)
+        await _await_channel_future(channel.schedule(_open_core_admission(core, ready_file=ready_file)))
         logger.info(
             "netizen service ready",
             extra={"projects": len(projects.list())},
@@ -551,8 +573,12 @@ async def run(settings: Settings, *, ready_file: Path | None = None) -> None:
                     _clear_ready_marker(ready_file)
 
 
-async def _open_core_admission(core: ServiceCore) -> None:
+async def _open_core_admission(core: ServiceCore, *, ready_file: Path | None = None) -> None:
     core.open_admission()
+    if ready_file is not None:
+        _publish_ready_marker(ready_file)
+        assert core._management is not None
+        core._management.set_service_ready(True)
 
 
 async def _await_channel_future(
@@ -727,6 +753,7 @@ def _configure_logging() -> None:
 def main() -> None:
     lifetime_descriptor = _adopt_lifetime_lock()
     try:
+        stage_started_at = time.monotonic()
         _configure_platform_trust()
         raw_ready_file = os.environ.get("NETIZEN_READY_FILE", "").strip()
         if lifetime_descriptor is not None and not raw_ready_file:
@@ -737,9 +764,11 @@ def main() -> None:
             else None
         )
         _configure_logging()
+        logger.info("netizen startup: module imports completed in %.3fs", _IMPORT_SECONDS)
         config_path = Path(os.environ.get("NETIZEN_CONFIG_PATH", "config.yaml"))
         settings = Settings.from_file(config_path)
         _scrub_channel_environment()
+        _log_startup_timing("configuration", stage_started_at)
         asyncio.run(run(settings, ready_file=ready_file))
     finally:
         if lifetime_descriptor is not None:

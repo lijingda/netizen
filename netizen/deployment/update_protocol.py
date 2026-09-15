@@ -38,7 +38,7 @@ CODES = frozenset({
     "rollback_incomplete", "installer_failed", "worker_interrupted", "lock_busy",
     "operation_invalid", "dispatch_failed", "dispatch_unknown", "worker_lost",
     "previous_release_changed", "profile_failed", "manual_recovery",
-    "restart_failed",
+    "restart_failed", "service_ready",
 })
 ENV_OPERATION_ID = "NETIZEN_UPDATE_OPERATION_ID"
 ENV_LOCK_FD = "NETIZEN_UPDATE_LOCK_FD"
@@ -89,6 +89,8 @@ def validate_operation(value: object) -> dict[str, Any]:
         or not 0 <= value["createdAt"] <= value["updatedAt"] < 2**63
     ):
         raise UpdateProtocolError("invalid update operation")
+    if value["code"] == "service_ready" and (not restart or value["phase"] != "recovered"):
+        raise UpdateProtocolError("service readiness only recovers a restart")
     if restart:
         target = value["target"]
         if (value["kind"] != "restart" or not isinstance(target, dict)
