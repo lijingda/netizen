@@ -558,51 +558,74 @@ class AdminAuthTest(unittest.TestCase):
         with self.assertRaises(SessionRejected):
             second.authenticate(session.token)
 
-    def test_session_idle_touch_absolute_expiry_and_logout(self) -> None:
+    def test_sessions_survive_inactivity_and_continued_use_without_time_expiry(
+        self,
+    ) -> None:
         auth = self.auth()
-        session = self.login(auth)
-        self.clock.advance((2 * 60 * 60) - 1)
-        touched = auth.authenticate(session.token)
-        self.assertEqual(touched.idle_expires_at, self.clock.now + (2 * 60 * 60))
-        self.clock.advance((2 * 60 * 60) - 1)
-        auth.authenticate(session.token)
+        idle = self.login(auth)
+        active = self.login(auth)
+        for _ in range(13):
+            self.clock.advance(60 * 60)
+            self.assertEqual(
+                auth.authenticate(active.token).log_handle, active.log_handle
+            )
+        self.assertEqual(auth.authenticate(idle.token).log_handle, idle.log_handle)
 
-        while self.clock.now < (12 * 60 * 60) - 1:
-            self.clock.advance(min(60 * 60, (12 * 60 * 60) - 1 - self.clock.now))
-            auth.authenticate(session.token)
-        self.clock.advance(1)
-        with self.assertRaises(SessionRejected):
-            auth.authenticate(session.token)
+        self.clock.advance(30 * 24 * 60 * 60)
+        self.assertEqual(auth.state_counts().sessions, 2)
+        for session in (idle, active):
+            with self.subTest(session=session.log_handle):
+                authenticated = auth.authenticate(session.token)
+                self.assertEqual(authenticated.log_handle, session.log_handle)
+                self.assertEqual(authenticated.generation, session.generation)
+        target = ExactTarget("binding", "binding-1")
+        grant = auth.issue_action(
+            idle.token,
+            action_kind="binding.rename",
+            target=target,
+            preconditions=self.preconditions(),
+        )
+        redeemed = auth.redeem_action(
+            idle.token,
+            csrf_token=grant.csrf_token,
+            action_token=grant.action_token,
+            action_kind="binding.rename",
+            target=target,
+        )
+        self.assertEqual(redeemed.session_log_handle, idle.log_handle)
 
-        second = self.login(auth, source="192.0.2.11")
+    def test_logout_revokes_session_and_its_actions_only(self) -> None:
+        auth = self.auth()
+        first = self.login(auth)
+        second = self.login(auth)
+        target = ExactTarget("binding", "binding-2")
         grant = auth.issue_action(
             second.token,
             action_kind="binding.rename",
-            target=ExactTarget("binding", "binding-2"),
+            target=target,
             preconditions=self.preconditions(),
         )
         self.assertTrue(auth.logout(second.token))
         self.assertFalse(auth.logout(second.token))
         with self.assertRaises(SessionRejected):
             auth.authenticate(second.token)
+        with self.assertRaises(SessionRejected):
+            auth.redeem_action(
+                second.token,
+                csrf_token=grant.csrf_token,
+                action_token=grant.action_token,
+                action_kind="binding.rename",
+                target=target,
+            )
+        self.assertEqual(auth.state_counts().actions, 0)
+        self.assertEqual(auth.authenticate(first.token).log_handle, first.log_handle)
         self.assertNotIn(grant.action_token, repr(auth))
 
-    def test_session_idle_expiry_is_exact_and_touch_false_does_not_extend(self) -> None:
-        auth = self.auth()
-        session = self.login(auth)
-        self.clock.advance(60 * 60)
-        auth.authenticate(session.token, touch=False)
-        self.clock.advance(60 * 60)
-        with self.assertRaises(SessionRejected):
-            auth.authenticate(session.token)
-
-    def test_nonce_session_and_action_capacity_are_strict_and_ttl_reclaims(
+    def test_nonce_and_action_capacity_are_strict_and_ttl_reclaims(
         self,
     ) -> None:
         limits = AuthLimits(
             preauth_ttl=10,
-            session_idle_ttl=20,
-            session_absolute_ttl=30,
             action_ttl=10,
             max_preauth=2,
             max_preauth_per_source=1,
@@ -622,11 +645,7 @@ class AdminAuthTest(unittest.TestCase):
         auth.issue_preauth("192.0.2.3")
 
         first = self.login(auth, source="192.0.2.10")
-        with self.assertRaises(LoginRejected):
-            self.login(auth, source="192.0.2.10")
         second = self.login(auth, source="192.0.2.11")
-        with self.assertRaises(LoginRejected):
-            self.login(auth, source="192.0.2.12")
         auth.issue_action(
             first.token,
             action_kind="binding.stop",
@@ -654,23 +673,89 @@ class AdminAuthTest(unittest.TestCase):
             preconditions=self.preconditions(),
         )
 
-    def test_full_session_capacity_does_not_reveal_valid_credential(self) -> None:
+    def test_verified_login_replaces_oldest_session_at_source_or_global_capacity(
+        self,
+    ) -> None:
+        auth = self.auth(limits=AuthLimits(max_sessions=3, max_sessions_per_source=2))
+        other_source = self.login(auth, source="192.0.2.11")
+        oldest_at_source = self.login(auth)
+        retained = self.login(auth)
+        for session in (other_source, oldest_at_source):
+            auth.issue_action(
+                session.token,
+                action_kind="binding.stop",
+                target=ExactTarget("binding", "binding-1"),
+                preconditions=self.preconditions(),
+            )
+
+        replacement = self.login(auth)
+        with self.assertRaises(SessionRejected):
+            auth.authenticate(oldest_at_source.token)
+        self.assertEqual(
+            auth.authenticate(other_source.token).log_handle, other_source.log_handle
+        )
+        self.assertEqual(auth.state_counts().sessions, 3)
+        self.assertEqual(auth.state_counts().actions, 1)
+
+        newest = self.login(auth, source="192.0.2.12")
+        with self.assertRaises(SessionRejected):
+            auth.authenticate(other_source.token)
+        for session in (retained, replacement, newest):
+            self.assertEqual(
+                auth.authenticate(session.token).log_handle, session.log_handle
+            )
+        self.assertEqual(auth.state_counts().sessions, 3)
+        self.assertEqual(auth.state_counts().actions, 0)
+
+    def test_failed_logins_at_capacity_preserve_existing_session_and_actions(
+        self,
+    ) -> None:
         limits = AuthLimits(max_sessions=1, max_sessions_per_source=1)
         auth = self.auth(limits=limits)
-        self.login(auth, source="192.0.2.10")
+        session = self.login(auth)
+        target = ExactTarget("binding", "binding-1")
+        grant = auth.issue_action(
+            session.token,
+            action_kind="binding.stop",
+            target=target,
+            preconditions=self.preconditions(),
+        )
         errors: list[tuple[type[BaseException], str]] = []
-        for credential in (self.credential, secrets.token_urlsafe(32)):
+        for invalid_field in ("credential", "nonce"):
             challenge = auth.issue_preauth("192.0.2.11")
             with self.assertRaises(LoginRejected) as caught:
                 auth.login(
                     source_ip="192.0.2.11",
                     cookie_token=challenge.cookie_token,
-                    form_nonce=challenge.form_nonce,
-                    credential=credential,
+                    form_nonce=(
+                        secrets.token_urlsafe(32) if invalid_field == "nonce"
+                        else challenge.form_nonce
+                    ),
+                    credential=(
+                        secrets.token_urlsafe(32) if invalid_field == "credential"
+                        else self.credential
+                    ),
                 )
             errors.append((type(caught.exception), str(caught.exception)))
         self.assertEqual(errors[0], errors[1])
         self.assertEqual(auth.state_counts().global_failures, 2)
+        for _ in range(3):
+            with self.assertRaises(LoginRejected):
+                self.login(
+                    auth, source="192.0.2.11", credential=secrets.token_urlsafe(32)
+                )
+        # Even correct credentials cannot evict a session while rate-limited.
+        with self.assertRaises(LoginRejected):
+            self.login(auth, source="192.0.2.11")
+        self.assertEqual(auth.authenticate(session.token).log_handle, session.log_handle)
+        redeemed = auth.redeem_action(
+            session.token,
+            csrf_token=grant.csrf_token,
+            action_token=grant.action_token,
+            action_kind="binding.stop",
+            target=target,
+        )
+        self.assertEqual(redeemed.session_log_handle, session.log_handle)
 
     def test_action_binds_session_kind_target_generation_and_exact_preconditions(
         self,

@@ -120,8 +120,6 @@ class AuthLimits:
     """Resource and lifetime limits for process-local authentication state."""
 
     preauth_ttl: float = 10 * 60
-    session_idle_ttl: float = 2 * 60 * 60
-    session_absolute_ttl: float = 12 * 60 * 60
     action_ttl: float = 10 * 60
     login_window: float = 5 * 60
     login_failures_per_source: int = 5
@@ -140,8 +138,6 @@ class AuthLimits:
     def __post_init__(self) -> None:
         durations = (
             self.preauth_ttl,
-            self.session_idle_ttl,
-            self.session_absolute_ttl,
             self.action_ttl,
             self.login_window,
         )
@@ -153,8 +149,6 @@ class AuthLimits:
             for value in durations
         ):
             raise ValueError("authentication TTLs must be positive finite numbers")
-        if self.session_idle_ttl > self.session_absolute_ttl:
-            raise ValueError("session idle TTL cannot exceed absolute TTL")
         capacities = (
             self.login_failures_per_source,
             self.login_failures_global,
@@ -209,16 +203,12 @@ class IssuedSession:
     token: str = field(repr=False)
     log_handle: str
     generation: int
-    idle_expires_at: float
-    absolute_expires_at: float
 
 
 @dataclass(frozen=True, slots=True)
 class AuthenticatedSession:
     log_handle: str
     generation: int
-    idle_expires_at: float
-    absolute_expires_at: float
 
 
 class ExpectationMode(str, Enum):
@@ -303,8 +293,6 @@ class _SessionRecord:
     source: str
     log_handle: str
     generation: int
-    last_seen_at: float
-    absolute_expires_at: float
 
 
 @dataclass(slots=True, repr=False)
@@ -557,59 +545,45 @@ class AdminAuth:
                 _DUMMY_DIGEST if expected_digest is None else expected_digest,
             )
             credential_valid = candidate_digest is not None and digest_matches
-            source_session_count = sum(
-                record.source == source for record in self._sessions.values()
-            )
-            session_capacity_available = (
-                len(self._sessions) < self._limits.max_sessions
-                and source_session_count < self._limits.max_sessions_per_source
-            )
-            if not (
-                rate_allowed
-                and nonce_valid
-                and credential_valid
-                and session_capacity_available
-            ):
+            if not (rate_allowed and nonce_valid and credential_valid):
                 if rate_allowed:
                     self._record_login_failure_locked(source, now)
                 raise LoginRejected()
+            # Sessions do not expire with time. A verified new login reclaims
+            # the oldest session at capacity, including abandoned browser cookies.
+            source_sessions = [
+                digest
+                for digest, record in self._sessions.items()
+                if record.source == source
+            ]
+            if len(source_sessions) >= self._limits.max_sessions_per_source:
+                self._drop_session_locked(source_sessions[0])
+            elif len(self._sessions) >= self._limits.max_sessions:
+                self._drop_session_locked(next(iter(self._sessions)))
             token, token_digest = self._unique_token_locked(self._sessions)
             log_handle = secrets.token_hex(16)
-            absolute_expires_at = now + self._limits.session_absolute_ttl
-            idle_expires_at = min(
-                now + self._limits.session_idle_ttl,
-                absolute_expires_at,
-            )
             self._sessions[token_digest] = _SessionRecord(
                 source=source,
                 log_handle=log_handle,
                 generation=self._generation,
-                last_seen_at=now,
-                absolute_expires_at=absolute_expires_at,
             )
             return IssuedSession(
                 token=token,
                 log_handle=log_handle,
                 generation=self._generation,
-                idle_expires_at=idle_expires_at,
-                absolute_expires_at=absolute_expires_at,
             )
 
     def authenticate(
         self,
         session_token: object,
-        *,
-        touch: bool = True,
     ) -> AuthenticatedSession:
+        """Authenticate a process-local session until it is explicitly revoked."""
+
         with self._lock:
             self._refresh_credential_locked()
             now = self._now_locked()
             self._prune_locked(now)
-            _, record = self._authenticate_session_locked(
-                session_token,
-                now=now,
-                touch=touch,
-            )
+            _, record = self._authenticate_session_locked(session_token)
             return self._authenticated_session(record)
 
     def logout(self, session_token: object) -> bool:
@@ -640,11 +614,7 @@ class AdminAuth:
             self._refresh_credential_locked()
             now = self._now_locked()
             self._prune_locked(now)
-            session_digest, _ = self._authenticate_session_locked(
-                session_token,
-                now=now,
-                touch=True,
-            )
+            session_digest, _ = self._authenticate_session_locked(session_token)
             if len(self._actions) >= self._limits.max_actions:
                 raise AuthCapacityExceeded()
             session_count = sum(
@@ -692,8 +662,6 @@ class AdminAuth:
             self._prune_locked(now)
             session_digest, session = self._authenticate_session_locked(
                 session_token,
-                now=now,
-                touch=True,
             )
             action_digest = _token_digest(action_token)
             if action_digest is None:
@@ -803,13 +771,6 @@ class AdminAuth:
         ]
         for digest in expired_preauth:
             self._preauth.pop(digest, None)
-        expired_sessions = [
-            digest
-            for digest, record in self._sessions.items()
-            if self._session_expired(record, now)
-        ]
-        for digest in expired_sessions:
-            self._drop_session_locked(digest)
         expired_actions = [
             digest
             for digest, record in self._actions.items()
@@ -875,31 +836,16 @@ class AdminAuth:
     def _authenticate_session_locked(
         self,
         session_token: object,
-        *,
-        now: float,
-        touch: bool,
     ) -> tuple[bytes, _SessionRecord]:
         digest = _token_digest(session_token)
         if digest is None:
             raise SessionRejected()
         record = self._sessions.get(digest)
-        if (
-            record is None
-            or record.generation != self._generation
-            or self._session_expired(record, now)
-        ):
+        if record is None or record.generation != self._generation:
             if record is not None:
                 self._drop_session_locked(digest)
             raise SessionRejected()
-        if touch:
-            record.last_seen_at = now
         return digest, record
-
-    def _session_expired(self, record: _SessionRecord, now: float) -> bool:
-        return (
-            now >= record.absolute_expires_at
-            or now >= record.last_seen_at + self._limits.session_idle_ttl
-        )
 
     def _authenticated_session(
         self,
@@ -908,11 +854,6 @@ class AdminAuth:
         return AuthenticatedSession(
             log_handle=record.log_handle,
             generation=record.generation,
-            idle_expires_at=min(
-                record.last_seen_at + self._limits.session_idle_ttl,
-                record.absolute_expires_at,
-            ),
-            absolute_expires_at=record.absolute_expires_at,
         )
 
     def _drop_session_locked(self, session_digest: bytes) -> None:
