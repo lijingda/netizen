@@ -200,7 +200,7 @@ Turn 上重复应用的客户端意图，不是 Codex 已生效配置、默认�
 与 Completion Mention 的独立展示选择。Side 创建时冻结 Parent 当时的选择；
 它们不是 Codex 原生设置或 Turn/Goal 状态事实。
 
-**Completion Mention / 结束提及**：最终结果中对本轮任务发起人的一次真实 @，与进度
+**Completion Mention / 结束提及**：任务结束时对本轮任务发起人的一次真实 @，与进度
 展示独立。发起人由任务开始时确定，执行中追加消息不改变对象；它不等同于客户端
 已展示通知的证明。
 

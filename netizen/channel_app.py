@@ -84,6 +84,7 @@ from .cards import (
     reply_card_from_manifest,
 )
 from .channel.messages import _nonempty_field, _object_field, public_chat_kind as _public_chat_kind
+from .channel.completion_mentions import send_completion_mention
 from .channel.ports import ReplyChannel
 from .channel.topics import TopicPublishError, send_topic_message, validate_topic_message
 from .cards.scheduled import (
@@ -100,6 +101,7 @@ from .channel.reply_presenter import (
     GoalCardOrigin,
     _CardUpdateAttempt,
     _GoalCardDelivery,
+    _GoalCardReceipt,
     _ReplyCardPresenter,
 )
 from .codex_runtime import CodexRuntime
@@ -1473,7 +1475,6 @@ class ChannelApplication:
             if outcome.error is None and outcome.status == "completed"
             else TurnDiffSummary()
         )
-        allow_completion_mention = True
         if outcome.task_feedback.progress_card_enabled:
             try:
                 attempt = await self._complete_task_progress_card(
@@ -1481,10 +1482,11 @@ class ChannelApplication:
                     diff_summary,
                 )
                 if attempt is not None:
-                    # The original card may have updated even if its response
-                    # was lost. Preserve result recovery without another @.
-                    allow_completion_mention = False
-                    if attempt.updated or isinstance(outcome.origin, ScheduledOrigin):
+                    if attempt.updated:
+                        if attempt.confirmed:
+                            await self._remind_task_completion(outcome, attempt.message_id)
+                        return
+                    if isinstance(outcome.origin, ScheduledOrigin):
                         return
             except asyncio.CancelledError:
                 raise
@@ -1500,14 +1502,12 @@ class ChannelApplication:
                 await self._abandon_task_progress_card(outcome)
                 # A failure after the terminal update/receipt may be uncertain.
                 # Never publish a second scheduled result on that uncertainty.
-                allow_completion_mention = False
                 if isinstance(outcome.origin, ScheduledOrigin):
                     return
         if outcome.error is not None:
             detail = str(outcome.error).strip() or type(outcome.error).__name__
             await self._reply_task_result(
                 outcome, f"任务未完成：{detail[:500]}",
-                allow_completion_mention=allow_completion_mention,
             )
             return
         if outcome.status == "interrupted":
@@ -1528,12 +1528,9 @@ class ChannelApplication:
             detail = outcome.final_response or f"Codex Turn 状态为 {outcome.status!r}。"
             await self._reply_task_result(
                 outcome, f"任务未完成：{detail[:500]}",
-                allow_completion_mention=allow_completion_mention,
             )
             return
-        await self._complete_task_with_files(
-            outcome, diff_summary, allow_completion_mention=allow_completion_mention,
-        )
+        await self._complete_task_with_files(outcome, diff_summary)
 
     async def _complete_task_progress_card(
         self,
@@ -1604,7 +1601,6 @@ class ChannelApplication:
                 turn_id=(outcome.turn_id if files else None),
                 additions=file_additions,
                 deletions=file_deletions,
-                completion_mention_user_id=_outcome_completion_mention_user_id(outcome),
             )
 
         if isinstance(outcome, TurnOutcome):
@@ -1719,8 +1715,6 @@ class ChannelApplication:
         self,
         outcome: TurnOutcome | SideTurnOutcome,
         diff_summary: TurnDiffSummary,
-        *,
-        allow_completion_mention: bool = True,
     ) -> None:
         final_response = outcome.final_response or "任务已结束，未产生文本回复。"
         items = tuple(getattr(outcome.result, "items", ()))
@@ -1729,7 +1723,7 @@ class ChannelApplication:
             diff_summary=diff_summary,
         ):
             await self._reply_task_result(
-                outcome, final_response, allow_completion_mention=allow_completion_mention,
+                outcome, final_response,
             )
             return
         try:
@@ -1747,10 +1741,7 @@ class ChannelApplication:
                 files=files,
                 additions=diff_summary.additions,
                 deletions=diff_summary.deletions,
-                completion_mention_user_id=(
-                    _outcome_completion_mention_user_id(outcome)
-                    if allow_completion_mention else None
-                ),
+                completion_mention_user_id=_outcome_completion_mention_user_id(outcome),
             ) if files else None
         except asyncio.CancelledError:
             raise
@@ -1766,7 +1757,6 @@ class ChannelApplication:
             await self._reply_task_result(
                 outcome,
                 f"{final_response}\n\n⚠️ 本轮文件卡片未生成：{error}",
-                allow_completion_mention=allow_completion_mention,
             )
             return
         except Exception:
@@ -1779,7 +1769,7 @@ class ChannelApplication:
                 },
             )
             await self._reply_task_result(
-                outcome, final_response, allow_completion_mention=allow_completion_mention,
+                outcome, final_response,
             )
             return
 
@@ -1787,7 +1777,7 @@ class ChannelApplication:
         # Do not catch a text fallback's own failure and send it a second time.
         if card is None:
             await self._reply_task_result(
-                outcome, final_response, allow_completion_mention=allow_completion_mention,
+                outcome, final_response,
             )
             return
         try:
@@ -2080,17 +2070,24 @@ class ChannelApplication:
             goal is not None
             and outcome.finalization is not GoalFinalizationStatus.CLEARED
         )
-        delivery = _GoalCardDelivery.NOT_ATTEMPTED
+        delivery = _GoalCardReceipt(_GoalCardDelivery.NOT_ATTEMPTED)
         if generation is not None:
             origin.goal_generation = generation
             if terminal_card is not None:
+                update_projection = projection
+                if outcome.task_feedback.progress_card_enabled and projection.result is not None:
+                    # Keep the ordinary mentioned card for fresh replies;
+                    # only updates to the running card use a separate reminder.
+                    update_projection = replace(
+                        projection, result=replace(projection.result, completion_mention_user_id=None),
+                    )
                 delivery = await self._progress_cards.finish_goal(
                     binding_id=identity_binding_id,
                     thread_id=outcome.thread_id,
                     logical_turn_id=outcome.logical_turn_id,
                     generation=generation,
                     origin=origin,
-                    projection=projection,
+                    projection=update_projection,
                     retain_session=retain_terminal_session,
                 )
             else:
@@ -2111,15 +2108,18 @@ class ChannelApplication:
         if target is None:
             logger.error("cannot deliver terminal Goal card without reply target")
             return
-        if delivery is _GoalCardDelivery.SUPERSEDED:
+        if delivery.status is _GoalCardDelivery.SUPERSEDED:
             return
-        if delivery is _GoalCardDelivery.DELIVERED:
+        if delivery.status is _GoalCardDelivery.DELIVERED:
             if plain_result_required:
                 await self._reply_task_result(outcome, result_text or notice, origin=target)
+            else:
+                await self._remind_task_completion(outcome, delivery.message_id, scope=scope)
             return
         allow_completion_mention = True
         if (
-            delivery is _GoalCardDelivery.FAILED
+            delivery.status is _GoalCardDelivery.FAILED
+            and not outcome.task_feedback.progress_card_enabled
             and projection.result is not None
             and projection.result.completion_mention_user_id is not None
         ):
@@ -2138,6 +2138,7 @@ class ChannelApplication:
             )
             return
         if generation is None:
+            # No known Goal generation can satisfy completion-mention eligibility.
             await self._reply(target, terminal_card)
             if plain_result_required:
                 await self._reply_task_result(outcome, result_text or notice, origin=target)
@@ -5948,6 +5949,27 @@ class ChannelApplication:
             chat_id=_chat_id(message),
             kind=kind,
             topic_id=str(topic_id) if topic_id else None,
+        )
+
+    async def _remind_task_completion(
+        self,
+        outcome: TurnOutcome | SideTurnOutcome | GoalOutcome,
+        card_message_id: str | None,
+        *,
+        scope: FeishuScope | None = None,
+    ) -> None:
+        if not outcome.task_feedback.progress_card_enabled or card_message_id is None:
+            return
+        user_id = _outcome_completion_mention_user_id(outcome)
+        if user_id is None:
+            return
+        await send_completion_mention(
+            self._channel, scope=scope or self._scope(outcome.origin),
+            card_message_id=card_message_id, user_id=user_id,
+            operation_id=(
+                outcome.logical_turn_id or outcome.final_physical_turn_id or "goal"
+                if isinstance(outcome, GoalOutcome) else outcome.turn_id
+            ),
         )
 
     async def _reply_task_result(

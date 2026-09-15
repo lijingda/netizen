@@ -17,7 +17,7 @@ from ..runtime.contracts import (
     TurnActivitySnapshot,
 )
 from ..domain import FeishuScope, GoalStatus, ReplyCardGoalModule, ReplyCardProjection
-from .messages import _progress_card_message_id
+from .messages import _object_field, _progress_card_message_id
 from .ports import ReplyChannel
 
 
@@ -53,6 +53,12 @@ class _CardUpdateAttempt:
         # This is the existing presentation success projection, not proof of
         # an exact destination or of a failed request having no side effects.
         return self.result is not None and getattr(self.result, "success", True) is not False
+
+    @property
+    def confirmed(self) -> bool:
+        raw = _object_field(self.result, "raw")
+        code = _object_field(raw, "code")
+        return getattr(self.result, "success", None) is True and (code is None or code == 0)
 
 
 @dataclass(slots=True)
@@ -116,6 +122,12 @@ class _GoalCardDelivery(Enum):
     DELIVERED = "delivered"
     SUPERSEDED = "superseded"
     FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class _GoalCardReceipt:
+    status: _GoalCardDelivery
+    message_id: str | None = None
 
 
 class _ReplyCardPresenter:
@@ -653,7 +665,7 @@ class _ReplyCardPresenter:
         origin: GoalCardOrigin,
         projection: ReplyCardProjection,
         retain_session: bool,
-    ) -> _GoalCardDelivery:
+    ) -> _GoalCardReceipt:
         async with self._goal_lock:
             return await self._finish_goal_locked(
                 binding_id=binding_id,
@@ -752,13 +764,13 @@ class _ReplyCardPresenter:
         origin: GoalCardOrigin,
         projection: ReplyCardProjection,
         retain_session: bool,
-    ) -> _GoalCardDelivery:
+    ) -> _GoalCardReceipt:
         key = (binding_id, thread_id, generation)
         latest_run = self._goal_latest_runs.get(key)
         if latest_run is not None and latest_run != logical_turn_id:
             # The exact Goal generation has already advanced to a newer
             # logical run, even if that newer run has also reached terminal.
-            return _GoalCardDelivery.SUPERSEDED
+            return _GoalCardReceipt(_GoalCardDelivery.SUPERSEDED)
         session = self._goal_sessions.get(key)
         if (
             session is not None
@@ -766,7 +778,7 @@ class _ReplyCardPresenter:
         ):
             # A resumed run already owns this Goal generation and card.  The
             # previous run's delayed terminal projection must not overwrite it.
-            return _GoalCardDelivery.SUPERSEDED
+            return _GoalCardReceipt(_GoalCardDelivery.SUPERSEDED)
         retired_key = (
             origin.message_id or "",
             generation,
@@ -774,7 +786,7 @@ class _ReplyCardPresenter:
         )
         if session is None and retired_key in self._retired_goal_runs:
             self._retired_goal_runs.discard(retired_key)
-            return _GoalCardDelivery.SUPERSEDED
+            return _GoalCardReceipt(_GoalCardDelivery.SUPERSEDED)
         if session is not None:
             self._goal_sessions.pop(key, None)
         if session is not None:
@@ -783,7 +795,7 @@ class _ReplyCardPresenter:
         else:
             message_id = origin.message_id
         if message_id is None:
-            return _GoalCardDelivery.NOT_ATTEMPTED
+            return _GoalCardReceipt(_GoalCardDelivery.NOT_ATTEMPTED)
         try:
             card = reply_card(projection)
         except Exception:
@@ -791,14 +803,15 @@ class _ReplyCardPresenter:
                 "failed to render terminal Goal Reply Card",
                 extra={"binding_id": binding_id},
             )
-            return _GoalCardDelivery.NOT_ATTEMPTED
+            return _GoalCardReceipt(_GoalCardDelivery.NOT_ATTEMPTED)
         async with self._goal_card_lock:
-            delivered = await self._update_message(
+            attempt = await self._attempt_update_message(
                 message_id,
                 card,
                 binding_id=binding_id,
                 operation_id=origin.goal_generation or generation,
             )
+            delivered = attempt.updated
             if delivered and retain_session:
                 self._remember_goal_projection(
                     message_id,
@@ -824,10 +837,9 @@ class _ReplyCardPresenter:
             )
         elif delivered:
             self._retired_goal_runs.discard(retired_key)
-        return (
-            _GoalCardDelivery.DELIVERED
-            if delivered
-            else _GoalCardDelivery.FAILED
+        return _GoalCardReceipt(
+            _GoalCardDelivery.DELIVERED if delivered else _GoalCardDelivery.FAILED,
+            message_id if attempt.confirmed else None,
         )
 
     async def update_goal(
