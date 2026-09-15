@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preview or send one card whose completion update first mentions a user.
+"""Preview or send one card and a separate completion mention in its topic.
 
 An accepted API update does not verify a notification in the Feishu client.
 """
@@ -8,15 +8,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import re
 import sys
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from lark_channel import FeishuChannel, LogLevel, OutboundCard, SendOpts
+from lark_channel import (
+    FeishuChannel, Identity, LogLevel, OutboundCard, OutboundConfig,
+    OutboundText, RetryConfig, SendOpts,
+)
 
 from netizen.cards import reply_card
+from netizen.channel.topics import validate_topic_message
 from netizen.completion_mention import valid_completion_mention_user_id
 from netizen.domain import (
     ReplyCardActivityModule,
@@ -78,8 +83,7 @@ def _cards(user_id: str) -> tuple[OutboundCard, OutboundCard, OutboundCard]:
             progress, terminal_status="completed", collapsed=True,
         ),
         result=ReplyCardResultModule(
-            "通知验收：本卡片已完成更新。请由被 @ 的用户检查是否收到新通知。",
-            completion_mention_user_id=user_id,
+            "通知验收：本卡片已完成更新，结束提醒会单独回复到本卡片的话题。",
         ),
     )
     redraw = replace(
@@ -87,6 +91,21 @@ def _cards(user_id: str) -> tuple[OutboundCard, OutboundCard, OutboundCard]:
         result=replace(completed.result, completion_mention_user_id=None),
     )
     return reply_card(initial), reply_card(completed), reply_card(redraw)
+
+
+def _mention(args: argparse.Namespace, message_id: str) -> tuple[OutboundText, SendOpts]:
+    identity = repr((args.chat_id, message_id, args.user_id)).encode("utf-8")
+    return (
+        OutboundText(
+            text="通知验收：本轮已结束，结果见卡片。请检查是否收到新提及通知。",
+            mentions=[Identity(open_id=args.user_id)],
+        ),
+        SendOpts(
+            receive_id_type="chat_id", reply_to=message_id, reply_in_thread=True,
+            reply_target_gone="fail",
+            uuid="completion-probe-" + hashlib.sha256(identity).hexdigest()[:32],
+        ),
+    )
 
 
 async def _probe(args: argparse.Namespace) -> dict[str, object]:
@@ -99,10 +118,15 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
         reply_target_gone="fail",
     )
     if args.dry_run:
+        mention, mention_opts = _mention(args, "<sent.message_id>")
         return {
             "dry_run": True,
             "send": {"chat_id": args.chat_id, "opts": asdict(opts), "card": initial.card},
             "completion_update": {"message_id": "<sent.message_id>", "card": completed.card},
+            "completion_mention": {
+                "chat_id": args.chat_id, "opts": asdict(mention_opts),
+                "text": mention.text, "mentions": [asdict(user) for user in mention.mentions],
+            },
             "redraw_preview": {"message_id": "<sent.message_id>", "card": redraw.card},
             "client_notification_verified": False,
         }
@@ -111,19 +135,24 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
     channel = FeishuChannel(
         app_id=settings.app_id, app_secret=settings.app_secret,
         log_level=LogLevel.WARNING,
+        outbound=OutboundConfig(retry=RetryConfig(max_attempts=1)),
     )
     result: dict[str, object] = {
         "message_id": None, "send_success": False,
-        "completion_update_success": False, "client_notification_verified": False,
+        "completion_update_success": False, "completion_mention_success": False,
+        "completion_mention_message_id": None, "client_notification_verified": False,
     }
     phase = "reply target validation"
     try:
+        target_thread_id = None
+        target_root_id = None
         if args.reply_to_message_id is not None:
             fetched = await channel.fetch_message(args.reply_to_message_id)
             data = fetched.get("data") if isinstance(fetched, dict) else None
             items = data.get("items") if isinstance(data, dict) else None
             if (
-                not isinstance(items, list) or len(items) != 1
+                not isinstance(fetched, dict) or fetched.get("code") != 0
+                or not isinstance(items, list) or len(items) != 1
                 or not isinstance(items[0], dict)
                 or items[0].get("message_id") != args.reply_to_message_id
                 or items[0].get("chat_id") != args.chat_id
@@ -133,14 +162,20 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
             if items[0].get("thread_id") and not args.reply_in_thread:
                 result["error"] = "reply target is in a topic; --reply-in-thread is required"
                 return result
+            target_thread_id = items[0].get("thread_id") or None
+            target_root_id = items[0].get("root_id") or args.reply_to_message_id
         phase = "initial card send"
         sent = await channel.send(args.chat_id, initial, opts)
-        message_id = getattr(sent, "message_id", None)
+        card_message = validate_topic_message(sent, args.chat_id)
+        message_id = card_message.message_id
         if (
-            getattr(sent, "success", None) is not True
-            or not isinstance(message_id, str)
-            or re.fullmatch(r"om_[A-Za-z0-9_]{1,125}", message_id) is None
-            or getattr(sent, "chunk_ids", None)
+            re.fullmatch(r"om_[A-Za-z0-9_]{1,125}", message_id) is None
+            or card_message.parent_id != args.reply_to_message_id
+            or (not args.reply_in_thread and card_message.thread_id is not None)
+            or (args.reply_in_thread and (
+                not card_message.thread_id or card_message.root_id != target_root_id
+                or (target_thread_id is not None and card_message.thread_id != target_thread_id)
+            ))
         ):
             result["error"] = "initial card send did not confirm one exact message"
             return result
@@ -156,6 +191,22 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
             result["error"] = "completion card update was not confirmed"
             return result
         result["completion_update_success"] = True
+        phase = "completion mention send"
+        mention, mention_opts = _mention(args, message_id)
+        mentioned = await channel.send(args.chat_id, mention, mention_opts)
+        notification = validate_topic_message(mentioned, args.chat_id)
+        if (
+            notification.message_id == message_id or not notification.thread_id
+            or not notification.root_id or not notification.parent_id
+            or (card_message.thread_id is None and notification.parent_id != message_id)
+            or (card_message.thread_id is not None and notification.thread_id != card_message.thread_id)
+        ):
+            result["error"] = "completion mention did not confirm the exact card topic"
+            return result
+        result.update(
+            completion_mention_success=True,
+            completion_mention_message_id=notification.message_id,
+        )
         return result
     except Exception:
         # Do not print raw SDK errors, response bodies, or credentials.
@@ -175,7 +226,7 @@ def main() -> int:
             "client_notification_verified": False,
         }
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if result.get("dry_run") or result.get("completion_update_success") else 1
+    return 0 if result.get("dry_run") or result.get("completion_mention_success") else 1
 
 
 if __name__ == "__main__":

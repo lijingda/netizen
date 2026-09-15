@@ -1451,7 +1451,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
             ),
             retain_session=False,
         )
-        return result is reply_presenter._GoalCardDelivery.DELIVERED
+        return result.status is reply_presenter._GoalCardDelivery.DELIVERED
 
     async def test_polling_recovers_same_revision_and_coalesces_new_revisions(self):
         for kind in ("ordinary", "side", "goal"):
@@ -2392,7 +2392,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(parse_diff.call_count, 1)
-        self.assertEqual(self.channel.replies[-1], (prompt.id, "answer survives"))
+        self.assertEqual(self.channel.replies[-1], (prompt.id, completion_post("answer survives")))
         self.assertEqual(self.channel.updates[-1][0], "om_progress")
 
     async def test_intermediate_progress_failure_recovers_at_terminal(self) -> None:
@@ -2478,7 +2478,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(key, self.app._progress_cards._sessions)
         self.assertEqual(len(self.channel.replies), 1 if terminal_succeeds else 2)
         if not terminal_succeeds:
-            self.assertEqual(self.channel.replies[-1], (prompt.id, "answer survives"))
+            self.assertEqual(self.channel.replies[-1], (prompt.id, completion_post("answer survives")))
 
     async def test_pulse_off_steer_keeps_lifecycle_confirmation(self) -> None:
         await self.new()
@@ -6689,7 +6689,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             retain_session=True,
         )
 
-        self.assertTrue(delivered)
+        self.assertIs(delivered.status, reply_presenter._GoalCardDelivery.SUPERSEDED)
         self.assertEqual(len(self.channel.updates), update_count)
         session = self.app._progress_cards._goal_sessions[
             (binding.id, "native-one", generation)
@@ -6697,7 +6697,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.logical_turn_id, "goal-new")
 
         self.assertIs(
-            await self.app._progress_cards.finish_goal(
+            (await self.app._progress_cards.finish_goal(
                 binding_id=binding.id,
                 thread_id="native-one",
                 logical_turn_id="goal-new",
@@ -6705,7 +6705,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 origin=origin,
                 projection=resumed,
                 retain_session=False,
-            ),
+            )).status,
             reply_presenter._GoalCardDelivery.DELIVERED,
         )
         update_count = len(self.channel.updates)
@@ -6715,7 +6715,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIs(
-            await self.app._progress_cards.finish_goal(
+            (await self.app._progress_cards.finish_goal(
                 binding_id=binding.id,
                 thread_id="native-one",
                 logical_turn_id="goal-old",
@@ -6723,7 +6723,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 origin=origin,
                 projection=first,
                 retain_session=True,
-            ),
+            )).status,
             reply_presenter._GoalCardDelivery.SUPERSEDED,
         )
         self.assertEqual(len(self.channel.updates), update_count)
@@ -6916,7 +6916,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         async with asyncio.timeout(1):
             self.assertIs(
-                await finishing,
+                (await finishing).status,
                 reply_presenter._GoalCardDelivery.DELIVERED,
             )
         self.assertEqual(self.channel.updates[-1][0], "om_goal_gate_card")
@@ -11306,7 +11306,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(key, self.app._progress_cards._side_sessions)
         self.assertEqual(len(self.channel.replies), 1 if terminal_succeeds else 2)
         if not terminal_succeeds:
-            self.assertEqual(self.channel.replies[-1], (prompt.id, "side answer survives"))
+            self.assertEqual(self.channel.replies[-1], (prompt.id, completion_post("side answer survives")))
 
     async def test_side_progress_start_failure_falls_back_at_terminal(self) -> None:
         feedback = BindingTaskFeedback(progress_card_enabled=True)

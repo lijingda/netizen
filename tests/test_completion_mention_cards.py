@@ -240,7 +240,7 @@ class CompletionMentionPresenterTest(unittest.IsolatedAsyncioTestCase):
                 else:
                     result = await presenter.finish_goal(**arguments)
                     delivered = channel.update_card.call_args.args[1]
-                self.assertIs(result, _GoalCardDelivery.DELIVERED)
+                self.assertIs(result if fallback else result.status, _GoalCardDelivery.DELIVERED)
                 self.assertEqual(visible_markdown(delivered).count(MENTION), 1)
                 retained = presenter.goal_projection(
                     source_id="om_card", generation=GOAL.goal_generation,
