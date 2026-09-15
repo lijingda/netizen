@@ -104,6 +104,7 @@ class SessionCardItem:
     active: bool
     activity_revision: int = 0
     turn_id: str | None = None
+    catalog_unconfirmed: bool = False
 
 
 def settings_card(
@@ -1051,6 +1052,7 @@ def archived_sessions_card(
     native_delete_available: bool,
     notice: str | None = None,
     notice_is_error: bool = False,
+    unconfirmed_count: int = 0,
 ) -> OutboundCard:
     builder = _builder("已归档会话", "恢复后自动切换")
     if notice:
@@ -1061,7 +1063,8 @@ def archived_sessions_card(
     )
     if not sessions:
         builder.markdown(
-            "当前聊天或话题没有已归档会话。发送 `/sessions` 查看普通会话，"
+            ("当前未确认到已归档会话。" if unconfirmed_count else "当前聊天或话题没有已归档会话。")
+            + "发送 `/sessions` 查看普通会话，"
             "或发送 `/new` 新建会话。"
         )
         return OutboundCard(card=builder.to_dict())
@@ -1130,11 +1133,18 @@ def sessions_card(
     scope: FeishuScope,
     sessions: tuple[SessionCardItem, ...],
     native_delete_available: bool,
+    total_count: int,
+    active_binding_id: str | None,
     page: int = 0,
+    unconfirmed_count: int = 0,
     notice: str | None = None,
     notice_is_error: bool = False,
 ) -> OutboundCard:
-    builder = _builder("会话", f"{len(sessions)} 个普通会话")
+    subtitle = (
+        f"{total_count} 个会话（含 {unconfirmed_count} 个归档状态未确认）"
+        if unconfirmed_count else f"{total_count} 个普通会话"
+    )
+    builder = _builder("会话", subtitle)
     if notice:
         builder.raw(_notice(notice, error=notice_is_error))
     builder.markdown(
@@ -1149,27 +1159,18 @@ def sessions_card(
         )
         return OutboundCard(card=builder.to_dict())
 
-    ordered = sorted(sessions, key=lambda item: (not item.active,))
     total_pages = max(
         1,
-        (len(ordered) + SESSIONS_PAGE_SIZE - 1) // SESSIONS_PAGE_SIZE,
-    )
-    clamped_page = max(0, min(page, total_pages - 1))
-    start = clamped_page * SESSIONS_PAGE_SIZE
-    end = start + SESSIONS_PAGE_SIZE
-    visible = ordered[start:end]
-    expected_active_binding_id = next(
-        (session.binding_id for session in ordered if session.active),
-        None,
+        (total_count + SESSIONS_PAGE_SIZE - 1) // SESSIONS_PAGE_SIZE,
     )
 
-    for session in visible:
+    for session in sessions:
         builder.raw(
             _session_row(
                 scope=scope,
                 session=session,
-                page=clamped_page,
-                expected_active_binding_id=expected_active_binding_id,
+                page=page,
+                expected_active_binding_id=active_binding_id,
                 native_delete_available=native_delete_available,
             )
         )
@@ -1178,7 +1179,7 @@ def sessions_card(
         builder.raw(
             _sessions_pagination(
                 scope=scope,
-                page=clamped_page,
+                page=page,
                 total_pages=total_pages,
             )
         )
@@ -1207,6 +1208,8 @@ def _session_row(
         f"会话：{session.short_id} · Project：{session.project_alias} · "
         f"Native：{native} · 状态：{session.state}"
     )
+    if session.catalog_unconfirmed:
+        text += " · 归档状态：未确认"
     controls: list[dict[str, Any]] = []
     if not session.active:
         controls.append(

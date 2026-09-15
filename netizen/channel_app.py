@@ -47,6 +47,7 @@ from .cards import (
     ArchivedSessionCardItem,
     CardActionError,
     SessionCardItem,
+    SESSIONS_PAGE_SIZE,
     SettingsCardActionError,
     TURN_FILE_ACTION_VERSION,
     REPLY_CARD_ACTION_VERSION,
@@ -121,7 +122,6 @@ from .runtime.contracts import (
     GoalOutcome,
     GoalSubmission,
     GoalStateUnknown,
-    NativeThreadCatalogState,
     NativeThreadMetadata,
     ReleaseDisposition,
     RuntimeClosed,
@@ -211,7 +211,7 @@ from .management import (
     NoCurrentBinding,
     RuntimePrecondition,
     SideIdentityMismatch,
-    classify_native_thread_view,
+    SessionInventoryState,
 )
 from .git_status import git_branch_status
 from .image_inputs import (
@@ -281,6 +281,7 @@ _TURN_FILES_WITHOUT_FINAL_RESPONSE = "任务已完成，已生成以下文件。
 
 _TEXTUAL_CONTENT_TYPES = frozenset({"text", "post"})
 _QUOTE_FETCH_TIMEOUT_SECONDS = 10.0
+_SESSION_QUERY_TIMEOUT_SECONDS = 10.0
 _CONTEXT_PREPARATION_TIMEOUT_SECONDS = 60.0
 _CONTEXT_FETCH_TIMEOUT_SECONDS = 10.0
 _CONTEXT_FETCH_CONCURRENCY = 4
@@ -5673,41 +5674,25 @@ class ChannelApplication:
         page: int = 0,
         notice: str | None = None,
     ) -> OutboundCard:
-        bindings = self._bindings.list_bindings(scope.key)
-        metadata = await self._read_thread_metadata(bindings)
-        archived_metadata = await self._read_thread_metadata(
-            bindings,
-            archived=True,
-            strict=True,
+        deadline = asyncio.get_running_loop().time() + _SESSION_QUERY_TIMEOUT_SECONDS
+        inventory = await self._management.query_scope_sessions(
+            scope=scope, page=page, limit=SESSIONS_PAGE_SIZE, deadline=deadline,
+        )
+        projections = await self._management.binding_statuses_exact(
+            binding_ids=tuple(item.record.binding.id for item in inventory.items),
+            catalog_states={
+                item.record.binding.id: item.native.state if item.native else None
+                for item in inventory.items
+            },
+            deadline=deadline,
         )
         sessions: list[SessionCardItem] = []
-        for binding in bindings:
-            native = classify_native_thread_view(
-                binding.native_thread_id,
-                active=metadata,
-                archived=archived_metadata,
-            )
-            if (
-                native is not None
-                and native.state is NativeThreadCatalogState.ARCHIVED
-            ):
-                continue
-            snapshot = self._runtime.binding_runtime_snapshot(binding.id)
-            projection = await self._management.binding_status_exact(
-                binding.id,
-                snapshot=snapshot,
-                catalog_state=(
-                    NativeThreadCatalogState.ACTIVE
-                    if native is not None
-                    and native.state is NativeThreadCatalogState.ACTIVE
-                    else None
-                ),
-            )
-            assert projection.primary_status is not None
+        for item, projection in zip(inventory.items, projections, strict=True):
+            binding = item.record.binding
             snapshot = projection.snapshot
             title = _session_title(
                 binding,
-                native.metadata if native is not None else None,
+                item.native.metadata if item.native is not None else None,
             )
             sessions.append(
                 SessionCardItem(
@@ -5716,7 +5701,8 @@ class ChannelApplication:
                     project_alias=binding.project_alias,
                     native_thread_id=binding.native_thread_id,
                     title=title,
-                    state=projection.primary_status,
+                    state=projection.primary_status or "暂不可用",
+                    catalog_unconfirmed=item.inventory_state is SessionInventoryState.UNKNOWN,
                     active=binding.active,
                     activity_revision=snapshot.activity_revision,
                     turn_id=(
@@ -5732,8 +5718,15 @@ class ChannelApplication:
             native_delete_available=(
                 NativeCapability.DELETE in self._runtime.available_capabilities
             ),
-            page=page,
-            notice=notice,
+            page=inventory.page,
+            total_count=inventory.total_count,
+            active_binding_id=inventory.active_binding_id,
+            unconfirmed_count=inventory.unconfirmed_count,
+            notice="\n".join(filter(None, (
+                notice,
+                "会话目录暂不可用，已保留本地会话；归档状态未确认。"
+                if not inventory.catalog_available else None,
+            ))) or None,
         )
 
     async def _archived_sessions_card(
@@ -5743,33 +5736,22 @@ class ChannelApplication:
         notice: str | None = None,
         notice_is_error: bool = False,
     ) -> OutboundCard:
-        bindings = self._bindings.list_bindings(scope.key)
-        metadata = await self._read_thread_metadata(
-            bindings,
-            archived=True,
-            strict=True,
+        inventory = await self._management.query_scope_sessions(
+            scope=scope, archived=True, limit=None,
+            deadline=asyncio.get_running_loop().time() + _SESSION_QUERY_TIMEOUT_SECONDS,
         )
         sessions = tuple(
             ArchivedSessionCardItem(
-                binding_id=binding.id,
-                short_id=binding.short_id,
-                project_alias=binding.project_alias,
-                native_thread_id=binding.native_thread_id,
+                binding_id=item.record.binding.id,
+                short_id=item.record.binding.short_id,
+                project_alias=item.record.binding.project_alias,
+                native_thread_id=item.record.binding.native_thread_id,
                 title=_session_title(
-                    binding,
-                    native.metadata,
+                    item.record.binding,
+                    item.native.metadata,
                 ),
             )
-            for binding in bindings
-            if (
-                (native := classify_native_thread_view(
-                    binding.native_thread_id,
-                    active={},
-                    archived=metadata,
-                ))
-                is not None
-                and native.state is NativeThreadCatalogState.ARCHIVED
-            )
+            for item in inventory.items
         )
         return archived_sessions_card(
             scope=scope,
@@ -5777,8 +5759,14 @@ class ChannelApplication:
             native_delete_available=(
                 NativeCapability.DELETE in self._runtime.available_capabilities
             ),
-            notice=notice,
+            notice="\n".join(filter(None, (
+                notice,
+                f"另有 {inventory.unconfirmed_count} 个会话归档状态未确认，"
+                "可在 /sessions 中查看。"
+                if inventory.unconfirmed_count else None,
+            ))) or None,
             notice_is_error=notice_is_error,
+            unconfirmed_count=inventory.unconfirmed_count,
         )
 
     async def _binding_model_status_lines(

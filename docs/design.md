@@ -1125,7 +1125,15 @@ Projects 同样读取 active/archived 索引。归档数只统计索引确认的
 关联映射在同一只读事务内核对本页本地聚合，查询期间本地统计变化则放弃原生计数。
 目录、关联映射失败或快照变化时归档数为 null 并显示“未确认”，本地 Project 列表、会话总数和操作
 继续可用；当前 Project 页没有已物化 Binding 时不读原生目录。Projects 不逐条读取摘要。
-这些管理投影不改变 Channel 的既有分类或原生生命周期四视图对账，也不作为删除清单来源。
+飞书 `/sessions` 与 `/sessions archived` 通过同一 Management 应用边界复用上述索引读取、
+Unknown 分类和按页摘要补读；Channel 不再自行扫描目录或判断归档优先级。Scope 列表保留
+本地激活顺序、当前会话置顶、每页 10 行和越界页码夹取；分类、排序和分页先完成，仅当前页
+通过共享状态投影批量读取 Goal，目录、摘要和状态共用 10 秒请求预算。翻页与操作后的刷新
+重新查询，不缓存卡片 session。页外当前 Binding ID 仍进入停止/重新检查的 exact 前置条件。
+目录不可用时普通列表保留本地行并提示归档状态未确认，单条状态读取超时则只显示暂不可用，
+不能伪装 idle。归档列表保留原有不分页交互，只列确认归档的行；目录不可用时明确失败，
+缺项或冲突时提示另有未确认会话，不能声称完整空列表。飞书列表不查询 Admin 专用 chat label。
+这些展示投影不改变原生生命周期四视图对账，也不作为删除清单来源。
 Sessions 每页只接受 10/20/50/100，默认 20；浏览器用 cursor
 栈提供前后翻页，不计算总数或支持随机页码。Runtime snapshot primitive 仍只接受最多 50 个
 完整 ID；100 行 Sessions 首屏由 Web adapter 分两批读取，浏览器五秒 polling 同样分片后
@@ -1244,8 +1252,8 @@ Store transaction 内校验和保存，即使 active Binding 已切换、另一�
 anchor 读取失败，旧卡也会零 mutation 地失败，不会部分保存。running Turn 仍明确拒绝
 `/config`；已开始 Turn 沿用 admission 时捕获的 Task Feedback。
 
-`/sessions` 通过公开、只读且支持分页的
-`codex.thread_list(model_providers=[])` 跨 provider 批量读取原生 Thread
+`/sessions` 通过共享 Management 查询调用公开、只读且支持分页的
+`codex.thread_list(model_providers=[], use_state_db_only=True)` 跨 provider 读取原生 Thread 索引
 元数据；每项优先显示 `name`，未设置时回退到首条用户消息 `preview`，并把短 Binding
 ID 保留为 `/resume` 的稳定引用。普通列表呈现为无持久状态的分页卡片：active Binding
 置顶并明确标记，其他行用携带完整 Binding ID 和 Scope envelope 的
