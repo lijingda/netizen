@@ -39,10 +39,11 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 
 
-ACTIVITY_COMMENTARY_LIMIT = 3
+ACTIVITY_COMMENTARY_LIMIT = 4
 ACTIVITY_OPERATION_LIMIT = 8
 ACTIVITY_PLAN_LIMIT = 12
 ACTIVITY_TEXT_LIMIT = 160
+ACTIVITY_OPERATION_TEXT_LIMIT = 120
 ACTIVITY_TAB_SPACES = 4
 SIDE_ACTIVITY_QUEUE_HIGH_WATER = 4_096
 
@@ -318,7 +319,9 @@ def sanitize_activity_text(value: str) -> str | None:
     return _bounded_activity_text(redacted)
 
 
-def sanitize_activity_operation_text(value: str) -> str | None:
+def sanitize_activity_operation_text(
+    value: str, *, limit: int = ACTIVITY_OPERATION_TEXT_LIMIT
+) -> str | None:
     """Bound a literal native-field preview without interpreting command syntax."""
 
     normalized = normalize_activity_text_layout(value)
@@ -326,7 +329,7 @@ def sanitize_activity_operation_text(value: str) -> str | None:
         return None
     # Filter before truncation so a clipped credential never becomes visible.
     redacted = _redact_activity_credentials(normalized)
-    return _bounded_activity_text(" ".join(redacted.split()))
+    return _bounded_activity_text(" ".join(redacted.split()), limit)
 
 
 def _redact_activity_credentials(value: str) -> str:
@@ -523,7 +526,7 @@ def _operation_summary(label: str, *details: str | None) -> str:
             safe = sanitize_activity_operation_text(detail)
             if safe:
                 parts.append(safe)
-    return _bounded_activity_text(" · ".join(parts))
+    return _bounded_activity_text(" · ".join(parts), ACTIVITY_OPERATION_TEXT_LIMIT)
 
 
 def _command_activity_summary(item: CommandExecutionThreadItem) -> str:
@@ -549,7 +552,8 @@ def _command_activity_summary(item: CommandExecutionThreadItem) -> str:
     if item.exit_code is not None and item.exit_code != 0:
         suffix = f" · 退出码 {item.exit_code}"
         summary = (
-            _bounded_activity_text(summary, ACTIVITY_TEXT_LIMIT - len(suffix)) + suffix
+            _bounded_activity_text(summary, ACTIVITY_OPERATION_TEXT_LIMIT - len(suffix))
+            + suffix
         )
     return summary
 
@@ -609,10 +613,9 @@ def _validate_activity_text(
         return
     if not isinstance(value, str) or not value:
         raise ValueError("activity text must be a non-empty string")
-    if (
-        kind in {TurnActivityKind.COMMENTARY, *ACTIVITY_DETAIL_KINDS}
-        and len(value) > ACTIVITY_TEXT_LIMIT
-    ):
+    if kind == TurnActivityKind.COMMENTARY and len(value) > ACTIVITY_TEXT_LIMIT:
+        raise ValueError("activity text must be bounded")
+    if kind in ACTIVITY_DETAIL_KINDS and len(value) > ACTIVITY_OPERATION_TEXT_LIMIT:
         raise ValueError("activity text must be bounded")
     if kind not in {
         TurnActivityKind.COMMENTARY,

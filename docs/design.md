@@ -636,15 +636,16 @@ steer 和终态表情，但没有 `THINKING` pulse 或 Activity 过程卡。Goal
 Runtime 为 exact Ordinary Active Turn 维护带 revision 的 Turn Activity Projection，并为
 Goal 当前 exact 物理 Turn 与 exact active Side Turn 暴露同样受限的 Activity Snapshot。
 投影包含 accepted 后的 running/stopping/pausing 状态、steer 次数、ADR 0020 的完整
-plan/checklist、最近三条 completed commentary、最近八个通用操作，以及文件修改和子任务
+plan/checklist、最近四条 completed commentary、最近八个通用操作，以及文件修改和子任务
 的安全数量聚合。每条 commentary 和通用操作还携带 exact SDK item lifecycle 毫秒时间戳。
 commentary 保留内部换行；CRLF/CR 统一为 LF，tab 展开为四个空格，其他不可展示控制字符
 替换为 Unicode replacement character。该布局规范化不折叠合法 Markdown 空白。
 命令使用 typed `commandActions` 的读取/列举路径或搜索查询和范围；原生分类未知、复合或
 对象字段为空时显示 `command` 预览，不新增本地命令解析。存在非零 `exitCode` 时附加原生
 退出码。文件修改显示 change kind/path，网页操作显示 typed query/queries/url/pattern，
-均为最多 160 字符的单行预览，文件和多查询最多预览前三项。MCP 显示 exact `tool`，dynamic
-tool 显示非空 `namespace.tool` 或 `tool`；不解释任意工具参数。工具名不做字符白名单、合规
+均为最多 120 字符的单行预览，文件和多查询最多预览前三项。commentary/checklist 仍最多
+160 字符。MCP 显示 exact `tool`，dynamic tool 显示非空 `namespace.tool` 或 `tool`；不解释
+任意工具参数。工具名不做字符白名单、合规
 判定或单独截断，只在卡片 Markdown 边界转义。commentary 和预览先过滤明确凭据再限长，
 保留普通路径、链接、邮箱、内联代码和长标识符，卡片/manifest 解码再次过滤并转义。
 不显示 reasoning、final answer、delta、MCP server、工具参数/结果、命令输出、diff 或 token
@@ -663,8 +664,9 @@ closed，不能扩展成任意通知或私有 RPC gateway。
 任一存在时使用卡片；三者都不存在的 Result 继续走富文本/静态文本。Activity 运行时顶部
 `collapsible_panel` 展开并显示状态、进展、通用操作与 checklist；进展和操作行使用同一
 毫秒时间戳的 Card 2.0 Markdown `date_num` 与 `time` 两个 `local_datetime` 标签，由查看者
-客户端按本地语言与时区呈现日期和分钟，终态折叠。Goal 从
-start 到 pause/resume/terminal 复用同一张卡并更新其控制按钮。普通 Turn、Side 与 Goal
+客户端按本地语言与时区呈现日期和分钟；进展正文直接跟在时间分隔符 `·` 后，不增加 `•`。
+终态折叠。Goal 从 start 到 pause/resume/terminal 复用同一张卡并更新其控制按钮。
+普通 Turn、Side 与 Goal
 每轮最多尝试一次运行卡更新，只在成功后推进已送达 revision 并清零连续失败计数。
 投递失败留到下一次既有轮询重试，直接读取最新快照以合并变化；新 revision 不重置计数，
 连续三次投递失败后停止轮询。初始已送达 revision 对应实际发出的卡片；读取或渲染异常
@@ -1308,7 +1310,7 @@ SDK `0.154.0` 的 `update_plan` 工具默认关闭；需要原生 checklist 时�
 配置中开启 `tools.update_plan.enabled`。Netizen 继续继承工具配置，不自动开启或用提示词
 模拟计划。其他 Activity item 不依赖这一工具。
 
-completed commentary 最多保留最近三条，通用操作最多保留最近八个；同一 item ID 的 started/
+completed commentary 最多保留最近四条，通用操作最多保留最近八个；同一 item ID 的 started/
 completed 只更新一个 identity-free 行，并把 `startedAtMs` 替换为 `completedAtMs`。commentary
 使用 exact `completedAtMs`；checklist 没有 item lifecycle 时间，不显示时间。时间戳不是服务端
 当前时间或 elapsed time，而是原样进入 v4/v5 manifest，并通过 Card 2.0 `local_datetime`

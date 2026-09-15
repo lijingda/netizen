@@ -12,6 +12,7 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification, UnknownNotification
 
 from netizen.turn_activity import (
+    ACTIVITY_OPERATION_TEXT_LIMIT,
     ACTIVITY_TEXT_LIMIT,
     TurnActivityKind,
     TurnActivityProjectionUnavailable,
@@ -313,7 +314,7 @@ class TurnActivityProjectionTest(unittest.TestCase):
                     completed_at_ms=1234,
                 )
                 assert event is not None and event.text is not None
-                self.assertLessEqual(len(event.text), ACTIVITY_TEXT_LIMIT)
+                self.assertLessEqual(len(event.text), ACTIVITY_OPERATION_TEXT_LIMIT)
                 self.assertIn("…", event.text)
                 self.assertTrue(event.text.startswith("执行命令 · pytest "))
                 if exit_code:
@@ -370,7 +371,7 @@ class TurnActivityProjectionTest(unittest.TestCase):
                     self.assertNotIn("src/omitted.py", event.text)
                 self.assertIs(event.status, TurnActivityStatus.DECLINED)
                 self.assertEqual(event.count, count)
-                self.assertLessEqual(len(event.text), ACTIVITY_TEXT_LIMIT)
+                self.assertLessEqual(len(event.text), ACTIVITY_OPERATION_TEXT_LIMIT)
                 self.assertNotIn("private file diff", repr(event))
 
     def test_web_actions_show_only_native_query_url_and_pattern(self) -> None:
@@ -460,8 +461,9 @@ class TurnActivityProjectionTest(unittest.TestCase):
                 with self.subTest(detail=detail, kind=payload["type"]):
                     event = _project_item(payload)
                     assert event is not None and event.text is not None
-                    self.assertLessEqual(len(event.text), ACTIVITY_TEXT_LIMIT)
+                    self.assertLessEqual(len(event.text), ACTIVITY_OPERATION_TEXT_LIMIT)
                     if expected is None:
+                        self.assertEqual(len(event.text), 120)
                         self.assertIn("…", event.text)
                     else:
                         self.assertNotIn(expected, event.text)
@@ -643,7 +645,7 @@ class TurnActivityProjectionTest(unittest.TestCase):
             "/etc/private.conf; src/private/file.py " + "x" * 500
         )
         assert value is not None
-        self.assertLessEqual(len(value), ACTIVITY_TEXT_LIMIT)
+        self.assertEqual(len(value), 160)
         self.assertNotIn("18m", value)
         self.assertNotIn("ETA", value)
         self.assertNotIn("73%", value)

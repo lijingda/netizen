@@ -1425,6 +1425,12 @@ class CardRendererTest(unittest.TestCase):
                 TurnActivityEntrySnapshot(
                     TurnActivityKind.COMMENTARY,
                     TurnActivityStatus.COMPLETED,
+                    0,
+                    text="oldest",
+                ),
+                TurnActivityEntrySnapshot(
+                    TurnActivityKind.COMMENTARY,
+                    TurnActivityStatus.COMPLETED,
                     1,
                     text="first",
                 ),
@@ -1479,7 +1485,8 @@ class CardRendererTest(unittest.TestCase):
         outbound = turn_progress_card(snapshot=snapshot)
         serialized = json.dumps(outbound.card, ensure_ascii=False)
 
-        self.assertNotIn("first", serialized)
+        self.assertNotIn("oldest", serialized)
+        self.assertIn("first", serialized)
         self.assertIn("second", serialized)
         self.assertIn("third", serialized)
         self.assertIn("/Users/user/private.py", serialized)
@@ -1488,10 +1495,10 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("搜索网页 · Codex SDK", serialized)
         self.assertIn("子任务（2 项）", serialized)
         self.assertNotIn("路径已隐藏", serialized)
-        self.assertEqual(serialized.count("<local_datetime"), 14)
-        self.assertEqual(serialized.count("format_type='date_num'"), 7)
-        self.assertEqual(serialized.count("format_type='time'"), 7)
-        for timestamp in range(2, 9):
+        self.assertEqual(serialized.count("<local_datetime"), 16)
+        self.assertEqual(serialized.count("format_type='date_num'"), 8)
+        self.assertEqual(serialized.count("format_type='time'"), 8)
+        for timestamp in range(1, 9):
             self.assertEqual(serialized.count(f"millisecond='{timestamp}'"), 2)
         markdown_visible = tuple(
             item["content"]
@@ -1652,9 +1659,10 @@ class CardRendererTest(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertIn(
-            "• 第一行\n\n第二行    缩进 \\*\\*原样\\*\\*",
+            "</local_datetime> · 第一行\n\n第二行    缩进 \\*\\*原样\\*\\*",
             rows[0],
         )
+        self.assertNotIn("•", rows[0])
         self.assertNotIn("�", rows[0])
 
     def test_progress_file_pagination_preserves_sanitized_collapsed_panel(
@@ -1975,6 +1983,7 @@ class CardRendererTest(unittest.TestCase):
                         "执行命令 · printf '50%' make check",
                     ),
                     ("x" * 160, "x" * 160),
+                    ("x" * 150 + " · 退出码 1", "x" * 150 + " · 退出码 1"),
                     ("x" * 161, None),
                 ):
                     with self.subTest(version=version, kind=kind, text=text):
