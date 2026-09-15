@@ -817,6 +817,9 @@ sticky disabled 状态。
 ### 候选验证与切换
 
 安装器先在新 release 创建全新 venv，并以 `requirements.lock` 约束安装依赖。
+pip 安装使用 `--no-compile`；随后由候选 venv 的 Python 以 4 个 worker 并行预编译
+该 venv 内的字节码，再进入原有校验。预编译失败会取消并清理候选，不切换现役版本；
+已验证 release 的复用不重复执行此步骤。
 Source Install 额外执行完整 unittest；两路都在目标机运行 `compileall`、`pip check`、固定
 SDK synthetic probes 和 `scripts/verify_installed_release.py`（逐一比较 Python 与 Admin
 HTML/CSS/JS 等所有普通 package files，并做 `importlib.resources` smoke）、配置解析和候选
