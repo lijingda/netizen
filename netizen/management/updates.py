@@ -207,6 +207,17 @@ class UpdateService:
         self._current = current
         self._executor = executor
         self._fetch, self._clock = fetch, clock
+        self._service_ready = False
+        self._startup_restart_id: str | None = None
+        # Constructed before Admin admission. Never refresh this snapshot: an
+        # operation submitted to this already-running process is not startup proof.
+        try:
+            operation = read_operation(self.product_root)
+            if (operation is not None and operation.get("kind") == "restart"
+                    and operation["phase"] in {"restarting", "recovery_required"}):
+                self._startup_restart_id = operation["operationId"]
+        except (UpdateProtocolError, OSError):
+            pass  # Maintenance state must not prevent the service from starting.
         self._latest: dict[str, Any] | None = None
         self._checked_at: float | None = None
         self._checking_error_code: str | None = None
@@ -214,7 +225,12 @@ class UpdateService:
                                            thread_name_prefix="netizen-update-io")
 
     async def close(self, *, deadline: float | None = None) -> None:
+        self.set_service_ready(False)
         await self._io.aclose(deadline=deadline)
+
+    def set_service_ready(self, ready: bool) -> None:
+        """Set only after managed ready publication; revoke before shutdown drains."""
+        self._service_ready = ready
 
     async def status(self) -> dict[str, Any]:
         return await self._io.submit(self._status)
@@ -270,8 +286,8 @@ class UpdateService:
                     try:
                         self._manager().cleanup(operation["operationId"])
                     except UpdateExecutorError:
-                        pass  # Cleanup cannot erase the installer's result.
-                    return operation
+                        return operation  # Cleanup cannot erase the installer's result.
+                    return self._recover_ready_restart(operation)
                 if operation["phase"] == "accepted":
                     active = self._manager().is_active(operation["operationId"])
                     if active and self._clock() - operation["createdAt"] < START_HANDOFF_SECONDS:
@@ -290,6 +306,23 @@ class UpdateService:
                 os.close(descriptor)
         except (UpdateProtocolError, OSError, UpdateExecutorError) as error:
             raise UpdateError("update_state_unavailable") from error
+
+    def _recover_ready_restart(self, operation: dict[str, Any]) -> dict[str, Any]:
+        # Called under the install lock, after worker cleanup. A ready marker on
+        # disk or a reachable old Admin process alone cannot establish recovery.
+        if (operation.get("kind") != "restart"
+                or operation["phase"] != "recovery_required"
+                or operation["code"] != "restart_failed"
+                or operation["operationId"] != self._startup_restart_id
+                or not self._service_ready):
+            return operation
+        current = self._installation()
+        if (not self._restart_supported(current) or current.root is None
+                or operation["target"] != {"version": current.version, "releaseDigest": current.root.name}
+                or activation_requires_recovery(self.product_root)):
+            return operation
+        return advance_operation(self.product_root, operation["operationId"],
+                                 "recovered", "service_ready")
 
     def _status(self) -> dict[str, Any]:
         current = self._installation()

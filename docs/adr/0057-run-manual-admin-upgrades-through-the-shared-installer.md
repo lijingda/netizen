@@ -82,7 +82,7 @@ history、audit log 或 durable job queue。阶段属于安装流程，不能投
 建立相应证据后对账；不凭页面等待超时猜测终态或重复发起操作。
 
 浏览器断开不取消安装；重启后旧 Admin session 失效，用户重新登录读取同一结果。
-`recovery_required` 阻止再次从 Admin 提交，管理员通过已有官方安装入口恢复 activation
+升级的 `recovery_required` 阻止再次从 Admin 提交，管理员通过已有官方安装入口恢复 activation
 intent。后续显式 CLI 安装在同一锁内成功完成事务后，把旧未知/非终态记录标为
 `recovered/manual_recovery`，保留原 operation 与目标，仅证明后续部署已恢复；实际运行版本
 另行显示，不能把原点击改报为 `succeeded`。失败不得清理旧未知结果；Source Install 成功

@@ -13,7 +13,7 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from netizen.deployment import update_protocol as protocol
+from netizen.deployment import service_backend, update_protocol as protocol
 from scripts import netizen_installer as installer
 from scripts import netizen_updater as updater
 
@@ -57,6 +57,16 @@ class UpdateProtocolTests(unittest.TestCase):
         ):
             with self.subTest(changes=changes), self.assertRaises(protocol.UpdateProtocolError):
                 protocol.write_operation(self.root, {**operation, **changes})
+
+    def test_service_ready_result_only_recovers_a_restart(self) -> None:
+        restart = protocol.new_restart_operation("0.5.0", "b" * 64)
+        recovered = {**restart, "phase": "recovered", "code": "service_ready"}
+        protocol.write_operation(self.root, recovered)
+        self.assertEqual(protocol.read_operation(self.root), recovered)
+        for operation in ({**recovered, "phase": "succeeded"},
+                          {**self.operation, "phase": "recovered", "code": "service_ready"}):
+            with self.subTest(operation=operation), self.assertRaises(protocol.UpdateProtocolError):
+                protocol.write_operation(self.root, operation)
 
     def test_rejects_symlink_hardlink_public_and_oversized_state(self) -> None:
         path = self.root / "state/update.json"
@@ -301,6 +311,11 @@ class RestartWorkerTests(unittest.TestCase):
     def test_exact_restart_retains_lock_without_downloading_or_inheriting_it(self) -> None:
         def restart(command, **kwargs):
             self.assertEqual(command, ["/bin/sh", str(self.service), "restart"])
+            self.assertGreater(
+                kwargs["timeout"],
+                service_backend.SERVICE_STOP_TIMEOUT_SECONDS
+                + service_backend.SERVICE_READY_TIMEOUT_SECONDS,
+            )
             self.assertTrue(kwargs["close_fds"])
             self.assertNotIn("pass_fds", kwargs)
             self.assertFalse(any(key.startswith("NETIZEN_UPDATE_") for key in kwargs["env"]))
@@ -315,7 +330,7 @@ class RestartWorkerTests(unittest.TestCase):
             pass
 
     def test_failure_timeout_and_changed_pointer_never_claim_success(self) -> None:
-        for failure in (1, subprocess.TimeoutExpired("restart", 180), OSError("SECRET"), "changed"):
+        for failure in (1, subprocess.TimeoutExpired("restart", updater.RESTART_TIMEOUT_SECONDS), OSError("SECRET"), "changed"):
             with self.subTest(failure=failure):
                 protocol.write_operation(self.root, self.operation)
                 def restart(command, **kwargs):

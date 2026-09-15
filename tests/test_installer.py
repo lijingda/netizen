@@ -3448,6 +3448,45 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertNotIn("bootstrap", flattened)
             self.assertNotIn("kickstart", flattened)
 
+    def test_service_ready_allows_slow_start_but_still_rejects_missing_proof(self) -> None:
+        for platform in ("darwin", "linux"):
+            for ready_after in (70.0, 130.0):
+                with self.subTest(platform=platform, ready_after=ready_after), tempfile.TemporaryDirectory() as directory:
+                    layout = (self._darwin_layout(Path(directory)) if platform == "darwin"
+                              else self._layout(Path(directory)))
+                    elapsed = 0.0
+
+                    def advance(seconds):
+                        nonlocal elapsed
+                        elapsed += seconds
+
+                    def runner(argv, **_kwargs):
+                        return subprocess.CompletedProcess(argv, 0, "active", "")
+
+                    module = launchd if platform == "darwin" else systemd
+                    backend = launchd.LaunchAgentServiceBackend(layout, runner)
+                    with (
+                        patch.object(module.time, "monotonic", side_effect=lambda: elapsed),
+                        patch.object(module.time, "sleep", side_effect=advance),
+                        patch.object(module, "_ready_marker_present", side_effect=lambda _layout: elapsed >= ready_after),
+                        patch.object(backend, "_is_loaded", return_value=True),
+                    ):
+                        def wait():
+                            if platform == "darwin":
+                                backend._wait_for_ready(timeout=service_backend.SERVICE_READY_TIMEOUT_SECONDS)
+                            else:
+                                systemd._wait_for_systemd_ready(
+                                    layout, timeout=service_backend.SERVICE_READY_TIMEOUT_SECONDS, runner=runner,
+                                )
+
+                        if ready_after == 70.0:
+                            wait()
+                            self.assertEqual(elapsed, ready_after)
+                        else:
+                            with self.assertRaisesRegex(installer.InstallError, "did not become ready"):
+                                wait()
+                            self.assertEqual(elapsed, service_backend.SERVICE_READY_TIMEOUT_SECONDS)
+
     def test_macos_bootstrap_response_loss_reconciles_by_loaded_and_ready(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._darwin_layout(Path(directory))

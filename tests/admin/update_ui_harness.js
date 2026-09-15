@@ -240,7 +240,10 @@ const restartOperation = (phase, id = "new-restart") => ({
   assert.equal(elements.get("#update-phase").textContent, "重启失败");
   assert.match(elements.get("#update-detail").textContent, /检查服务日志/);
   acceptUpdateStatus(freshStatus({ ...restartOperation("recovered"), code: "manual_recovery" }));
+  assert.equal(elements.get("#update-phase").textContent, "已通过安装器恢复");
   assert.match(elements.get("#update-detail").textContent, /原操作不标记为成功/);
+  assert.equal(elements.get("#service-restart").disabled, false);
+  assert.equal(elements.get("#update-install").disabled, false);
 
   const unsupportedRestart = freshStatus();
   unsupportedRestart.restartSupported = false;
@@ -250,11 +253,31 @@ const restartOperation = (phase, id = "new-restart") => ({
   assert.equal(elements.get("#service-restart").disabled, true);
   assert.equal(requests.length, beforeUnsupported);
   const blockedRestart = freshStatus(restartOperation("recovery_required"));
+  blockedRestart.available = false;
+  blockedRestart.actions.install = null;
   blockedRestart.restartAvailable = false;
   blockedRestart.actions.restart = null;
   acceptUpdateStatus(blockedRestart);
+  assert.equal(elements.get("#update-install").disabled, true);
   assert.equal(elements.get("#service-restart").disabled, true);
   assert.match(elements.get("#restart-message").textContent, /暂不可重启/);
+
+  // Refresh and release checks may confirm service readiness without rewriting a failed restart as success.
+  for (const refresh of [loadUpdates, checkUpdate]) {
+    acceptUpdateStatus(blockedRestart);
+    answer = async () => response(freshStatus({
+      ...restartOperation("recovered"), code: "service_ready",
+    }));
+    await refresh();
+    assert.equal(elements.get("#update-phase").textContent, "服务已恢复");
+    assert.match(elements.get("#update-detail").textContent, /当前服务已就绪.*可继续维护/);
+    assert.match(elements.get("#update-detail").textContent, /原重启操作不标记为成功/);
+    assert.doesNotMatch(elements.get("#update-phase").textContent, /成功|安装器/);
+    assert.equal(elements.get("#update-check").disabled, false);
+    assert.equal(elements.get("#service-restart").disabled, false);
+    assert.equal(elements.get("#update-install").disabled, false);
+    assert.equal(updateNeedsPolling(), false);
+  }
 
   // Both the persistent panel and the check result use the server's explanation.
   acceptUpdateStatus(freshStatus());

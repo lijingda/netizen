@@ -21,7 +21,7 @@ from .installer_support import (
 
 
 READY_MARKER_CONTENT = b"netizen service ready\n"
-SERVICE_READY_TIMEOUT_SECONDS = 45.0
+SERVICE_READY_TIMEOUT_SECONDS = 120.0
 SERVICE_STOP_TIMEOUT_SECONDS = 90.0
 
 

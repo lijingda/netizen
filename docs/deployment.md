@@ -817,7 +817,7 @@ HTML/CSS/JS 等所有普通 package files，并做 `importlib.resources` smoke�
 venv 中固定 Codex CLI 的 `login status`。这些安全检查使用安装调用者经清理的环境；安装器不会在 service cgroup
 之外执行任意账号 profile，因为 profile 可以产生不可逆副作用或自行 daemonize。真实
 profile 只在候选 service 启动时加载：首次安装和原本 active 的升级会等待 ready，失败时
-回滚；原本停止的升级保持停止，之后 `service.sh start/restart` 会等待最多 45 秒确认 ready
+回滚；原本停止的升级保持停止，之后 `service.sh start/restart` 会等待最多 120 秒确认 ready
 并直接暴露 shell/profile 启动错误；对已经 loaded 且已有有效 ready marker 的服务，
 `start` 幂等返回，loaded 但未 ready 则只做有界等待。任意具体 MCP/工具是否可用仍取决于其自身配置，不能
 由安装器枚举。真实 Thread capability phases 只在相关 SDK/Adapter/环境开发变更时按前文
@@ -876,7 +876,7 @@ netizen.service`；无 TTY 时打印同一条预备命令。候选失败会尽�
 
 `service.sh` 只接受上述一个动作，不执行 `git pull`。`start` 在服务已 loaded 且 ready 时
 幂等返回；loaded 但尚未 ready 时只做有界等待，不另起进程。`start` 和 `restart` 的启动
-阶段最多等待 45 秒，只有服务管理器保持 loaded 且主进程在 admission 开放后发布私有 ready marker 才
+阶段最多等待 120 秒，只有服务管理器保持 loaded 且主进程在 admission 开放后发布私有 ready marker 才
 成功；profile 超时、shell 失败或主服务未就绪均返回非零。macOS `status` 分别显示
 installed、loaded、ready 和日志路径，不能用 loaded 代替 ready。具体日志入口见
 [平台服务管理器](#平台服务管理器)。
@@ -964,7 +964,14 @@ relay 规则，不把 App Secret 发到聊天。机器掉电不会自动执行�
 续跑；重启后重新登录查看结果。服务已停止时使用 CLI `service.sh restart`。
 
 重启沿用上述升级的互斥、断线对账与显式 CLI 恢复流程。执行失败可能需要处理，不会回滚
-用户修改的 Codex 配置；重新连通不能证明成功。准入与执行差异见
+用户修改的 Codex 配置；重新连通不能证明成功。
+
+单纯重启超时后，点击“刷新维护状态”或“检查更新”会复核当前服务。只有该进程启动时已
+观察到同一重启操作，随后完成受管就绪，且执行者已收尾、运行版本/目标/`current` 一致、
+没有未完成安装事务，才显示“服务已恢复”并重新开放维护按钮。原操作与目标保留为
+`recovered/service_ready`，不改报原重启成功。此能力只读取少量本地状态，不添加后台轮询
+或状态文件，也不探测每个组件的网络健康。升级或回滚中断等其他未知结果继续通过安装器恢复。
+准入与执行差异见
 [ADR 0059](adr/0059-support-explicit-admin-service-restart.md)。
 
 首次上线验收或相关产品边界发生变化时，按本文对应门禁核对 ready 日志，并在飞书发送
@@ -1105,6 +1112,12 @@ lifetime lock，`restart` 是完整 stop-confirm 后再 bootstrap，不使用 `k
 日志由标准库 rotating handler 保留为最多 5 MiB × 3 个文件；launcher/exec 失败单独进入
 `launchd.stderr.log`，两者都不得含 Secret。
 
+每次启动记录 shell 环境加载、Python 模块导入、配置、数据库、Projects/Channel 构造、
+Admin/MCP listener、Codex 连接、Runtime 恢复与飞书连接的 monotonic 耗时；只记录固定阶段名
+和耗时，不记录环境或凭据。shell 阶段进入服务 stderr，其余阶段进入应用日志。
+Admin 重启执行者的外层上限按停止确认等待 90 秒、就绪等待 120 秒及额外余量 30 秒设为
+240 秒；脚本和 manager 命令也占用这个总上限。服务一旦就绪就立即返回，不会固定等待整个窗口。
+
 ready marker 只有在 Admin credential/closed bind、唯一 Codex Runtime、Store、Channel
 application、Feishu ingress 和 Admin admission 全部成功后才以原子 `0600` 文件发布。
 installer 每次启动前权威删除旧 marker，launcher 每次进程启动再次清理，正常退出也尽力
@@ -1206,6 +1219,10 @@ ADR 0059 首次交付或改变重启准入、执行隔离、安装锁、停机/r
   超时都不得推断成功或回滚。执行者持锁至结果写入，锁不被服务或 Codex 子进程继承。
 - 重启与升级、CLI 安装/卸载互斥；pending、未知结果、未恢复 activation intent、迟到
   accepted worker 或 manager 观察未知不造成重派；CLI 恢复保留原操作并只报告 `recovered`。
+- 重启迟到就绪后的刷新和检查更新可得到 `recovered/service_ready` 并恢复维护按钮；
+  旧进程、缺失或错误启动快照、未确认 ready、关闭中、锁忙、执行者清理失败、目标或
+  `current` 变化、activation intent、升级及其他未知原因均不得自动恢复。执行者收尾
+  期间变化的 ready/版本/intent 必须重新核对；无新增后台轮询或持久状态文件。
 
 同一候选已有的共享检查结果可复用；隔离探针及 fake manager 测试不能替代两平台实机证据。
 

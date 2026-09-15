@@ -80,6 +80,7 @@ const updateCodeMessages = {
   previous_release_changed: "当前安装版本已变化，请刷新维护状态。",
   profile_failed: "无法读取账户运行环境，请检查登录 Shell 配置后重试。",
   manual_recovery: "安装器已恢复部署，请以当前版本为准；原操作不标记为成功。",
+  service_ready: "当前服务已就绪，可继续维护；原重启操作不标记为成功。",
 };
 const updatePollLimitMs = 5 * 60 * 1000;
 let updatePollTimer = null;
@@ -136,6 +137,10 @@ function renderUpdates() {
     ? `${restarting ? "保持版本" : "目标版本"} ${operation.target.version}。${
       updateCodeMessages[operation.code] || ""}`
     : "升级或重启开始后，关闭页面不会取消操作。";
+  if (operation?.kind === "restart" && operation.phase === "recovered"
+      && operation.code === "service_ready") {
+    phase = "服务已恢复";
+  }
   if (operation?.phase === "succeeded") {
     detail += restarting ? " 服务管理器已完成重启，服务就绪已确认。" : " 安装器已确认升级完成。";
   }

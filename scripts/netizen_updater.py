@@ -24,6 +24,9 @@ from netizen.deployment.update_protocol import (  # noqa: E402
     OPERATION_ID, SHA256, UpdateProtocolError, acquire_install_lock,
     activation_requires_recovery, advance_operation, read_operation, terminal_phase,
 )
+from netizen.deployment.service_backend import (  # noqa: E402
+    SERVICE_READY_TIMEOUT_SECONDS, SERVICE_STOP_TIMEOUT_SECONDS,
+)
 from scripts.netizen_service_launcher import (  # noqa: E402
     ServiceLaunchError, capture_profile_environment,
 )
@@ -32,7 +35,9 @@ from scripts.netizen_service_launcher import (  # noqa: E402
 OFFICIAL_DOWNLOADS = "https://github.com/lijingda/netizen/releases/download"
 LOCK_HANDOFF_TIMEOUT_SECONDS = 15.0
 MAX_INSTALLER_BYTES = 1024 * 1024
-RESTART_TIMEOUT_SECONDS = 180
+# Include both confirmation windows and a margin for script/manager commands.
+# Commands consume this outer cap too; a stalled manager still fails closed.
+RESTART_TIMEOUT_SECONDS = SERVICE_STOP_TIMEOUT_SECONDS + SERVICE_READY_TIMEOUT_SECONDS + 30
 
 
 def _worker_environment() -> dict[str, str]:
