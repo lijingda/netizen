@@ -454,7 +454,7 @@ class InstallerUpdateTests(unittest.TestCase):
                 with (
                     protocol.install_lock(self.layout.product_root) as descriptor,
                     patch.object(installer, "_service_backend", return_value=backend),
-                    patch.object(installer, "install_user_guide_skill"),
+                    patch.object(installer, "install_skill"),
                 ):
                     update = installer.InstallerUpdate(self.layout.product_root, self.operation["operationId"], descriptor)
                     with self.assertRaises(installer.InstallError):

@@ -242,6 +242,14 @@ messages、可选且去重的 quoted message、最后的 current message，且
 Message，并与 current message 保持 `text`/`request_text` 的语义边界。这些输入都会进入 Codex 原生历史，
 但不写 Channel Database。来源消息 ID/sender 与同次解析冲突时整条 fail closed。
 
+安装器随版本提供 [netizen-feishu Skill](../skills/netizen-feishu/SKILL.md)，让 Agent 按当前
+`message_id` 主动查询飞书聊天／话题历史。配套脚本只读取同账号 Netizen 的现有配置，
+通过固定官方 SDK 获取并返回临时机器人凭据；Agent 在同次工具执行中接收，再按上游
+lark Skills 调用 CLI。查询、分页和结果处理不在脚本中封装，凭据不进入 Prompt 或持久
+CLI 配置。上游 CLI 与 lark Skills 由用户另行安装，缺失不影响 Channel。该路径不改变
+当前消息投影、Scope/Binding、SQLite 或 catch-up reader，也不增加原生 MCP entry；见
+[README](../README.md#按需读取飞书历史)。
+
 普通消息开头的连续 `$skill-name` 引用由 Prompt compiler 在当前消息上解析。Runtime
 先捕获 exact admission，再按 canonical Project cwd 调用 live `skills/list`；每个名称
 必须唯一、enabled 且来自该 cwd 的目录，随后保留原文本并追加公开
@@ -1392,9 +1400,10 @@ AsyncCodex 绑定，业务 admission 在完整初始化与调度恢复后开放�
 MCP namespace instructions 与工具 description 提供管理指引；新 Thread 的公开 API 默认 `auto_review`，不能完整继承
 Ask/Custom；其余配置不由 Netizen 覆盖。
 
-release 自带一个原生 `netizen-user-guide` Skill，用于回答飞书中的 Netizen 使用咨询，
-不进入 Channel command router，也不替代动态 `/help`。部署只拥有并全量替换
-`$CODEX_HOME/skills/netizen-user-guide`；该目录以外的用户 Skill 仍完全由用户维护。
+release 自带 `netizen-user-guide` 和 `netizen-feishu` 两个原生 Skill，分别提供 Netizen
+使用咨询和飞书机器人凭据／当前消息入口，不进入 Channel command router，也不替代
+动态 `/help`。部署只拥有并全量替换 `$CODEX_HOME/skills` 下这两个目录；其他用户 Skill
+仍完全由用户维护。两者共同参与安装前快照、失败回滚和卸载。
 候选 venv 安装不产生这项外部副作用，只有 release 切换时的显式安装步骤会更新全局
 Skill，随后重启长期运行的 `AsyncCodex`。每次 SDK 升级的黑盒兼容测试必须通过公开
 `skills/list(forceReload)` 发现该 `$CODEX_HOME/skills` 路径；SDK 升级不能只根据最新版

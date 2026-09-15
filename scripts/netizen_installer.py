@@ -38,11 +38,11 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from scripts.feishu_app_onboarding import REQUIRED_TENANT_SCOPES  # noqa: E402
-from scripts.install_user_guide_skill import (  # noqa: E402
-    SKILL_NAME,
+from scripts.install_managed_skill import (  # noqa: E402
+    SKILL_NAMES,
     SkillInstallError,
-    install_user_guide_skill,
-    remove_user_guide_skill,
+    install_skill,
+    remove_skill,
 )
 from netizen.bindings import (  # noqa: E402
     migrate_channel_database,
@@ -326,7 +326,7 @@ def resolve_layout(
     if not home.is_absolute() or home == Path(home.anchor):
         raise InstallError(f"current user's home must be an absolute non-root path: {home}")
 
-    # Netizen has one product root, one user unit, and one managed global Skill
+    # Netizen has one product root, one user unit, and a fixed set of managed Skills
     # per Unix user. Keep their deployment identity stable across shells,
     # agents, and sudo environments instead of allowing XDG overrides to
     # select another root.
@@ -1933,7 +1933,9 @@ def activate_release(
     definition = backend.render_definition(release)
 
     with tempfile.TemporaryDirectory(prefix=".rollback-", dir=layout.state_dir) as temp:
-        skill_snapshot = _capture_skill(layout, Path(temp))
+        skill_snapshots = {
+            name: _capture_skill(layout, Path(temp), name) for name in SKILL_NAMES
+        }
         database_snapshot: DatabaseSnapshot | None = None
         changed_service = False
         definition_publish_attempted = False
@@ -1985,10 +1987,11 @@ def activate_release(
                         Path(temp),
                     )
                 _set_release_link(layout.current, release.root, layout)
-            install_user_guide_skill(
-                source_skill=release.source / "skills" / SKILL_NAME,
-                codex_home=layout.codex_home,
-            )
+            for name in SKILL_NAMES:
+                install_skill(
+                    source_skill=release.source / "skills" / name,
+                    codex_home=layout.codex_home,
+                )
             definition_publish_attempted = True
             backend.publish_definition(
                 definition,
@@ -2043,14 +2046,10 @@ def activate_release(
                         ),
                     )
                 )
+            rollback_actions.append(("database", lambda: _restore_database(database_snapshot)))
             rollback_actions.extend(
-                (
-                    (
-                        "database",
-                        lambda: _restore_database(database_snapshot),
-                    ),
-                    ("Skill", lambda: _restore_skill(layout, skill_snapshot)),
-                )
+                ("Skill", lambda name=name, snapshot=snapshot: _restore_skill(layout, snapshot, name))
+                for name, snapshot in skill_snapshots.items()
             )
             for label, action in rollback_actions:
                 if label in {"database", "Skill"} and not candidate_stopped:
@@ -2191,13 +2190,13 @@ def _stream_digest(path: Path) -> bytes:
     return digest.digest()
 
 
-def _capture_skill(layout: Layout, temporary_root: Path) -> SkillSnapshot:
-    target = layout.codex_home / "skills" / SKILL_NAME
+def _capture_skill(layout: Layout, temporary_root: Path, skill_name: str) -> SkillSnapshot:
+    target = layout.codex_home / "skills" / skill_name
     if not _path_exists(target):
         return SkillSnapshot(kind="absent")
     if target.is_symlink():
         return SkillSnapshot(kind="symlink", link_target=os.readlink(target))
-    saved = temporary_root / SKILL_NAME
+    saved = temporary_root / skill_name
     if target.is_dir():
         shutil.copytree(target, saved, symlinks=True)
         return SkillSnapshot(kind="directory", saved_path=saved)
@@ -2207,9 +2206,9 @@ def _capture_skill(layout: Layout, temporary_root: Path) -> SkillSnapshot:
     raise InstallError(f"managed Skill has an unsupported filesystem type: {target}")
 
 
-def _restore_skill(layout: Layout, snapshot: SkillSnapshot) -> None:
+def _restore_skill(layout: Layout, snapshot: SkillSnapshot, skill_name: str) -> None:
     skills_root = layout.codex_home / "skills"
-    target = skills_root / SKILL_NAME
+    target = skills_root / skill_name
     if _path_exists(target):
         _remove_path(target)
     if snapshot.kind == "absent":
@@ -2470,7 +2469,7 @@ def uninstall(
     if _path_exists(selected_layout.service_file):
         backend.capture_definition()
     backend.preflight()
-    managed_skill = selected_layout.codex_home / "skills" / SKILL_NAME
+    managed_skills = [selected_layout.codex_home / "skills" / name for name in SKILL_NAMES]
     with installation_lock(selected_layout):
         if not any(
             _path_exists(path)
@@ -2480,7 +2479,7 @@ def uninstall(
                 selected_layout.current,
                 selected_layout.previous,
                 selected_layout.service_file,
-                managed_skill,
+                *managed_skills,
                 activation_intent,
             )
         ):
@@ -2501,7 +2500,8 @@ def uninstall(
         backend.uninstall_definition()
         if selected_layout.codex_home.exists():
             try:
-                remove_user_guide_skill(codex_home=selected_layout.codex_home)
+                for name in SKILL_NAMES:
+                    remove_skill(codex_home=selected_layout.codex_home, skill_name=name)
             except SkillInstallError as error:
                 raise InstallError(str(error)) from error
         _clear_activation_intent(selected_layout)
@@ -2509,7 +2509,7 @@ def uninstall(
             _set_release_link(link, None, selected_layout)
         _remove_managed_netizen_directory(selected_layout.cache_dir, selected_layout)
         _remove_managed_netizen_directory(selected_layout.releases, selected_layout)
-    info("uninstalled Netizen program, user service, and managed user-guide Skill")
+    info("uninstalled Netizen program, user service, and managed Skills")
     info(
         "preserved configuration and credentials: "
         f"{selected_layout.config_file}, {selected_layout.credentials_dir}"
