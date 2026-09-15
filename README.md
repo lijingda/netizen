@@ -176,6 +176,20 @@ Side 会在同一聊天中新建话题，可继续多轮讨论。它与原会话
 [用户指南 Skill](skills/netizen-user-guide/SKILL.md)，支持自然语言咨询；
 需要显式调用时，发送 `$netizen-user-guide 你的问题`。
 
+### 按需读取飞书历史
+
+安装器同时提供 [netizen-feishu Skill](skills/netizen-feishu/SKILL.md)。Agent 可以从当前消息的
+`message_id` 定位聊天／话题，再以 **本机 Netizen 的机器人身份**按需读取相关历史。
+例如：“看看这个话题之前的讨论，再回答我的问题。”已有逐条引用和 catch-up 不依赖此能力。
+
+要使用这项能力，推荐在运行 Netizen 的同一主机、同一账号下，按
+[飞书 CLI 与 Skills 的官方安装说明](https://github.com/larksuite/cli)安装
+`lark-cli` 及 `lark-im` / `lark-shared` Skills；已有安装可以复用。
+
+`netizen-feishu` 只负责提供现有机器人的临时凭据和当前消息入口，查询与结果处理由 lark Skills 指导。
+凭据在工具调用内部传递，不占用模型上下文，也不修改用户的 CLI 凭据配置。
+机器人仍受已有权限和聊天可见性约束；历史只在任务需要时读取。
+
 <a id="本地开发"></a>
 <a id="开发与兼容性验证"></a>
 

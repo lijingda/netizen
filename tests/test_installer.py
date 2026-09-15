@@ -2523,6 +2523,9 @@ class NetizenInstallerTest(unittest.TestCase):
             old_skill = layout.codex_home / "skills/netizen-user-guide"
             old_skill.mkdir(parents=True)
             (old_skill / "SKILL.md").write_text("old skill\n", encoding="utf-8")
+            old_feishu = layout.codex_home / "skills/netizen-feishu"
+            old_feishu.mkdir()
+            (old_feishu / "SKILL.md").write_text("old feishu\n", encoding="utf-8")
             database = layout.state_dir / "channel.sqlite3"
             BindingStore(database).close()
             before_database = database.read_bytes()
@@ -2569,6 +2572,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(installer._read_release_link(layout.current, layout), old.root.resolve())
             self.assertEqual(layout.service_file.read_text(), old_unit_text)
             self.assertEqual((old_skill / "SKILL.md").read_text(), "old skill\n")
+            self.assertEqual((old_feishu / "SKILL.md").read_text(), "old feishu\n")
             self.assertEqual(database.read_bytes(), before_database)
             self.assertFalse((layout.state_dir / installer.ACTIVATION_INTENT).exists())
             self.assertGreaterEqual(
@@ -2581,6 +2585,44 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             self.assertTrue(any(call[0] == "journalctl" for call in calls))
 
+
+    def test_second_skill_install_failure_restores_both_previous_states(self) -> None:
+        for had_feishu in (False, True):
+            with self.subTest(had_feishu=had_feishu), tempfile.TemporaryDirectory() as directory:
+                layout = self._layout(Path(directory))
+                installer.prepare_directories(layout)
+                old = self._release(layout, "5" * 64)
+                candidate = self._release(layout, "6" * 64)
+                installer._set_release_link(layout.current, old.root, layout)
+                guide = layout.codex_home / "skills/netizen-user-guide"
+                guide.mkdir(parents=True)
+                (guide / "SKILL.md").write_text("old guide")
+                feishu = layout.codex_home / "skills/netizen-feishu"
+                if had_feishu:
+                    feishu.mkdir()
+                    (feishu / "SKILL.md").write_text("old feishu")
+                real_install = installer.install_skill
+
+                def fail_second(*, source_skill: Path, codex_home: Path):
+                    if source_skill.name == "netizen-feishu":
+                        self.assertNotEqual((guide / "SKILL.md").read_text(), "old guide")
+                        raise installer.SkillInstallError("second Skill failed")
+                    return real_install(source_skill=source_skill, codex_home=codex_home)
+
+                backend = _stopped_backend()
+                with (
+                    patch.object(installer, "_service_backend", return_value=backend),
+                    patch.object(installer, "install_skill", side_effect=fail_second),
+                    self.assertRaisesRegex(installer.InstallError, "rolled back"),
+                ):
+                    installer.activate_release(candidate, layout, interactive=False)
+
+                self.assertEqual((guide / "SKILL.md").read_text(), "old guide")
+                self.assertEqual(feishu.exists(), had_feishu)
+                if had_feishu:
+                    self.assertEqual((feishu / "SKILL.md").read_text(), "old feishu")
+                self.assertEqual(installer._read_release_link(layout.current, layout), old.root.resolve())
+                backend.publish_definition.assert_not_called()
 
     def test_failed_skill_rollback_preserves_a_recovery_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2597,6 +2639,9 @@ class NetizenInstallerTest(unittest.TestCase):
             old_skill = layout.codex_home / "skills/netizen-user-guide"
             old_skill.mkdir(parents=True)
             (old_skill / "SKILL.md").write_text("recovery content", encoding="utf-8")
+            old_feishu = layout.codex_home / "skills/netizen-feishu"
+            old_feishu.mkdir()
+            (old_feishu / "SKILL.md").write_text("feishu recovery", encoding="utf-8")
 
             def fake_runner(argv: list[object], **_kwargs: object) -> subprocess.CompletedProcess[str]:
                 rendered = [os.fspath(value) for value in argv]
@@ -2629,6 +2674,10 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(
                 (recoveries[0] / "netizen-user-guide/SKILL.md").read_text(),
                 "recovery content",
+            )
+            self.assertEqual(
+                (recoveries[0] / "netizen-feishu/SKILL.md").read_text(),
+                "feishu recovery",
             )
 
     def test_stopped_upgrade_stays_stopped_and_retains_previous_release(self) -> None:
@@ -2670,6 +2719,12 @@ class NetizenInstallerTest(unittest.TestCase):
                 old.root.resolve(),
             )
             self.assertNotIn(["systemctl", "--user", "start", "netizen.service"], calls)
+
+            for name in installer.SKILL_NAMES:
+                self.assertEqual(
+                    (layout.codex_home / "skills" / name / "SKILL.md").read_bytes(),
+                    (candidate.source / "skills" / name / "SKILL.md").read_bytes(),
+                )
 
     def test_disabled_stopped_upgrade_remains_disabled_and_stopped(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2988,6 +3043,9 @@ class NetizenInstallerTest(unittest.TestCase):
             managed_skill = layout.codex_home / "skills/netizen-user-guide"
             managed_skill.mkdir(parents=True)
             (managed_skill / "SKILL.md").write_text("managed", encoding="utf-8")
+            feishu_skill = layout.codex_home / "skills/netizen-feishu"
+            feishu_skill.mkdir()
+            (feishu_skill / "SKILL.md").write_text("managed", encoding="utf-8")
             other_skill = layout.codex_home / "skills/other"
             other_skill.mkdir()
             (other_skill / "SKILL.md").write_text("other", encoding="utf-8")
@@ -3006,6 +3064,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertFalse(layout.previous.exists())
             self.assertFalse(layout.service_file.exists())
             self.assertFalse(managed_skill.exists())
+            self.assertFalse(feishu_skill.exists())
             self.assertTrue(layout.config_file.exists())
             self.assertEqual(layout.admin_secret_file.read_text(), "A" * 43)
             self.assertTrue((layout.state_dir / "channel.sqlite3").exists())
@@ -3112,6 +3171,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertIsNone(installer._read_release_link(layout.current, layout))
             self.assertFalse(layout.service_file.exists())
             self.assertFalse((layout.codex_home / "skills/netizen-user-guide").exists())
+            self.assertFalse((layout.codex_home / "skills/netizen-feishu").exists())
 
     def test_managed_directory_removal_never_follows_a_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3706,6 +3766,9 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertTrue(
                 (layout.codex_home / "skills/netizen-user-guide/SKILL.md").is_file()
             )
+            self.assertTrue(
+                (layout.codex_home / "skills/netizen-feishu/SKILL.md").is_file()
+            )
             self.assertTrue(list(layout.state_dir.glob("rollback-recovery-*")))
 
 
@@ -3829,12 +3892,8 @@ class NetizenInstallerTest(unittest.TestCase):
         deploy = source / "deploy"
         deploy.mkdir()
         shutil.move(source / "deploy.service", deploy / "netizen.service")
-        skill = source / "skills/netizen-user-guide"
-        skill.mkdir(parents=True)
-        shutil.copy2(ROOT / "skills/netizen-user-guide/SKILL.md", skill / "SKILL.md")
-        references = ROOT / "skills/netizen-user-guide/references"
-        if references.exists():
-            shutil.copytree(references, skill / "references")
+        for name in installer.SKILL_NAMES:
+            shutil.copytree(ROOT / "skills" / name, source / "skills" / name)
         venv = root / "venv"
         venv.mkdir()
         return installer.Release(digest=digest, root=root, source=source, venv=venv)

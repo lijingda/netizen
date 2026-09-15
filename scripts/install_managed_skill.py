@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replace the release-managed global Netizen user-guide Skill."""
+"""Replace one of the release-managed global Netizen Skills."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
-SKILL_NAME = "netizen-user-guide"
+SKILL_NAMES = ("netizen-user-guide", "netizen-feishu")
 
 
 class SkillInstallError(RuntimeError):
@@ -34,8 +34,8 @@ class RemovedSkill:
     removed: bool
 
 
-def release_skill_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "skills" / SKILL_NAME
+def release_skill_path(skill_name: str) -> Path:
+    return Path(__file__).resolve().parents[1] / "skills" / skill_name
 
 
 def default_codex_home() -> Path:
@@ -43,12 +43,12 @@ def default_codex_home() -> Path:
     return Path(configured) if configured else Path.home() / ".codex"
 
 
-def install_user_guide_skill(
+def install_skill(
     *,
     source_skill: Path,
     codex_home: Path,
 ) -> InstalledSkill:
-    """Fully replace only ``$CODEX_HOME/skills/netizen-user-guide``.
+    """Fully replace one explicitly managed ``$CODEX_HOME/skills`` directory.
 
     The source is copied and verified in a sibling staging directory before the
     old target is moved aside. If publishing the staged directory fails, the
@@ -62,9 +62,10 @@ def install_user_guide_skill(
         source = raw_source.resolve(strict=True)
     except OSError as error:
         raise SkillInstallError(f"release Skill is unavailable: {raw_source}") from error
-    if source.name != SKILL_NAME:
+    skill_name = source.name
+    if skill_name not in SKILL_NAMES:
         raise SkillInstallError(
-            f"release Skill directory must be named {SKILL_NAME!r}: {source}"
+            f"release Skill directory is not managed by Netizen: {source}"
         )
     try:
         source_manifest = _skill_manifest(source)
@@ -96,12 +97,12 @@ def install_user_guide_skill(
     if not skills_root.is_dir():
         raise SkillInstallError(f"Skills path is not a directory: {skills_root}")
 
-    target = skills_root / SKILL_NAME
+    target = skills_root / skill_name
     if _same_or_nested_path(source, target.resolve(strict=False)):
         raise SkillInstallError("release Skill source and managed target must be separate")
 
     staging = Path(
-        tempfile.mkdtemp(prefix=f".{SKILL_NAME}.staging-", dir=skills_root)
+        tempfile.mkdtemp(prefix=f".{skill_name}.staging-", dir=skills_root)
     )
     backup_parent: Path | None = None
     backup: Path | None = None
@@ -120,9 +121,9 @@ def install_user_guide_skill(
 
         if _path_exists(target):
             backup_parent = Path(
-                tempfile.mkdtemp(prefix=f".{SKILL_NAME}.backup-", dir=skills_root)
+                tempfile.mkdtemp(prefix=f".{skill_name}.backup-", dir=skills_root)
             )
-            backup = backup_parent / SKILL_NAME
+            backup = backup_parent / skill_name
             os.replace(target, backup)
             original_moved = True
 
@@ -153,7 +154,7 @@ def install_user_guide_skill(
             installed_manifest = None
         if installed_manifest != source_manifest:
             if original_moved and backup is not None:
-                failed = backup.parent / f"{SKILL_NAME}.failed"
+                failed = backup.parent / f"{skill_name}.failed"
                 try:
                     os.replace(target, failed)
                     os.replace(backup, target)
@@ -187,7 +188,7 @@ def install_user_guide_skill(
     except SkillInstallError:
         raise
     except OSError as error:
-        raise SkillInstallError(f"failed to install {SKILL_NAME}: {error}") from error
+        raise SkillInstallError(f"failed to install {skill_name}: {error}") from error
     finally:
         if _path_exists(staging):
             _remove_path(staging)
@@ -199,9 +200,11 @@ def install_user_guide_skill(
             _remove_path(backup_parent)
 
 
-def remove_user_guide_skill(*, codex_home: Path) -> RemovedSkill:
-    """Remove only the release-managed Skill for a pre-feature rollback."""
+def remove_skill(*, codex_home: Path, skill_name: str) -> RemovedSkill:
+    """Remove only the named release-managed Skill."""
 
+    if skill_name not in SKILL_NAMES:
+        raise SkillInstallError(f"Skill is not managed by Netizen: {skill_name}")
     raw_codex_home = codex_home.expanduser()
     try:
         resolved_codex_home = raw_codex_home.resolve(strict=True)
@@ -217,13 +220,13 @@ def remove_user_guide_skill(*, codex_home: Path) -> RemovedSkill:
         raise SkillInstallError(f"Skills directory must not be a symlink: {skills_root}")
     if not skills_root.exists():
         return RemovedSkill(
-            target=str(skills_root / SKILL_NAME),
+            target=str(skills_root / skill_name),
             removed=False,
         )
     if not skills_root.is_dir():
         raise SkillInstallError(f"Skills path is not a directory: {skills_root}")
 
-    target = skills_root / SKILL_NAME
+    target = skills_root / skill_name
     removed = _path_exists(target)
     if removed:
         try:
@@ -282,10 +285,11 @@ def _remove_path(path: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Fully replace $CODEX_HOME/skills/netizen-user-guide with the "
+            "Fully replace one managed global Skill with the "
             "Skill shipped by this Netizen release."
         )
     )
+    parser.add_argument("--skill", choices=SKILL_NAMES, required=True)
     parser.add_argument(
         "--codex-home",
         type=Path,
@@ -296,8 +300,7 @@ def parse_args() -> argparse.Namespace:
         "--remove",
         action="store_true",
         help=(
-            "remove only the managed Skill instead of installing it; use only "
-            "when rolling back to a release from before the Skill existed"
+            "remove only the selected managed Skill instead of installing it"
         ),
     )
     return parser.parse_args()
@@ -306,10 +309,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     if args.remove:
-        result = remove_user_guide_skill(codex_home=args.codex_home)
+        result = remove_skill(codex_home=args.codex_home, skill_name=args.skill)
     else:
-        result = install_user_guide_skill(
-            source_skill=release_skill_path(),
+        result = install_skill(
+            source_skill=release_skill_path(args.skill),
             codex_home=args.codex_home,
         )
     print(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))

@@ -68,6 +68,7 @@ SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕�
   io.github.lijingda.netizen.plist              # macOS 渲染后的 LaunchAgent
 ${CODEX_HOME:-~/.codex}/
   skills/netizen-user-guide/                    # release 全量管理的用户咨询 Skill
+  skills/netizen-feishu/                        # release 全量管理的飞书接入 Skill
 ```
 
 配置、Channel 状态和 Codex 原生状态都在 release 之外。ProjectRegistry 仍会解析并保存
@@ -75,7 +76,7 @@ canonical cwd；安装器不复制 Project，也不会创建 per-Binding workspa
 
 Netizen 产品根固定为 effective user 的账号 home 下的 `~/.netizen`，安装器有意忽略
 `XDG_DATA_HOME`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME` 和 `XDG_CACHE_HOME`。这是单一
-user service、单一全局用户指南 Skill 的固定安装身份，不是可用来运行多实例的 profile。
+user service 和两个内置全局 Skill 的固定安装身份，不是可用来运行多实例的 profile。
 `CODEX_HOME` 仍遵循 Codex 原生覆盖。开发源码位置与安装位置解耦：任意 checkout、文件
 同步或云上直接修改仍可部署到同一套 release；需要隔离安装器黑盒测试时使用临时 Unix
 用户、容器或 VM，而不是改 XDG 变量。
@@ -829,8 +830,9 @@ profile 只在候选 service 启动时加载：首次安装和原本 active 的�
 则在数据库快照、service definition 和 `current` 切换之前失败并进入既有 activation rollback。runtime
 bind 仍是最终事实。预检通过后才渲染并验证平台 service definition，原子切换
 `current`，再用候选 release 完整替换
-`${CODEX_HOME:-~/.codex}/skills/netizen-user-guide`。这一个 Skill 内的人工修改会在升级
-时丢失；其他 Skill 不会被读取或修改。首次安装会 enable 并启动服务；升级前若服务在
+`${CODEX_HOME:-~/.codex}/skills` 下的 `netizen-user-guide` 和 `netizen-feishu`。
+这两个 Skill 内的人工修改会在升级时丢失；其他 Skill 不会被读取或修改。
+首次安装会 enable 并启动服务；升级前若服务在
 运行，新版本会启动并等待主进程发布 `0600` ready marker；若原本停止则保持当前会话停止。
 Linux 延续原 enabled/disabled 意图；macOS 保证 plist 已安装/enabled，供下次登录自动启动。
 
@@ -842,7 +844,8 @@ sidecar；任一步失败都会停止候选并恢复旧 release 指针、service
 和 enable/active 状态。launcher 启动时在稳定的 `state/service.lifetime.lock` inode 上持有
 独占锁；主进程接管同一 FD 后立即恢复 CLOEXEC，Codex 工具与后台 terminal 不会继承。
 安装器只有在服务管理器目标已卸载且该锁可取得时才恢复数据库或 Skill；若无法确认，跳过
-两项恢复并保留 recovery snapshot，避免仍存活的候选写入旧状态。即使回滚点来自该 Skill 上线前，也会按安装前快照恢复“原本不存在”
+两项恢复并保留 recovery snapshot，避免仍存活的候选写入旧状态。每个受管 Skill 都按
+安装前快照独立恢复；上线前不存在的 Skill 会恢复为“原本不存在”
 的状态，不要求旧 release 提供新脚本。若数据库或 Skill 恢复本身失败，受保留的 state
 目录会保存 recovery snapshot，并在错误里打印精确路径。
 
@@ -889,7 +892,7 @@ installed、loaded、ready 和日志路径，不能用 loaded 代替 ready。具
 ```
 
 `uninstall.sh` 无参数，停止/disable user service，并删除渲染的 unit/plist、程序 releases、
-安装 cache 和精确的受管用户指南 Skill。它明确保留 `config.yaml`、`credentials`、含 Channel
+安装 cache 和两个精确的受管 Skill。它明确保留 `config.yaml`、`credentials`、含 Channel
 SQLite 的 `state`、Project 目录、其他 Codex Skills 及原生 Thread/Turn 历史。若用户也
 要删除这些数据，应在确认备份和影响后另行处理，不能扩张卸载器的默认删除范围。
 

@@ -12,41 +12,64 @@ from openai_codex import AsyncCodex, CodexConfig
 
 from netizen.experience import COMMAND_SPECS
 from netizen.sdk_gap_adapter import AppServerSkillCatalog
-from scripts.install_user_guide_skill import (
-    SKILL_NAME,
+from scripts.install_managed_skill import (
     SkillInstallError,
-    install_user_guide_skill,
-    remove_user_guide_skill,
+    install_skill,
+    remove_skill,
 )
 from tests.documentation_links import local_link_errors
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SKILL_NAME = "netizen-user-guide"
 RELEASE_SKILL = ROOT / "skills" / SKILL_NAME
 
 
 class UserGuideSkillInstallTest(unittest.TestCase):
-    def test_release_skill_installs_as_an_exact_global_copy(self) -> None:
+    def test_release_skills_install_as_exact_global_copies(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             codex_home = Path(directory) / "codex-home"
-
-            result = install_user_guide_skill(
-                source_skill=RELEASE_SKILL,
-                codex_home=codex_home,
-            )
-
-            target = codex_home / "skills" / SKILL_NAME
-            source_files = sorted(
-                path for path in RELEASE_SKILL.rglob("*") if path.is_file()
-            )
-            self.assertEqual(result.file_count, len(source_files))
-            for source_file in source_files:
-                relative = source_file.relative_to(RELEASE_SKILL)
-                with self.subTest(relative=str(relative)):
-                    self.assertEqual(
-                        (target / relative).read_bytes(),
-                        source_file.read_bytes(),
+            for skill_name in (SKILL_NAME, "netizen-feishu"):
+                with self.subTest(skill=skill_name):
+                    source = ROOT / "skills" / skill_name
+                    result = install_skill(
+                        source_skill=source,
+                        codex_home=codex_home,
                     )
+                    target = codex_home / "skills" / skill_name
+                    source_files = sorted(
+                        path for path in source.rglob("*") if path.is_file()
+                    )
+                    self.assertEqual(result.file_count, len(source_files))
+                    for source_file in source_files:
+                        relative = source_file.relative_to(source)
+                        with self.subTest(relative=str(relative)):
+                            self.assertEqual(
+                                (target / relative).read_bytes(),
+                                source_file.read_bytes(),
+                            )
+
+    def test_install_and_remove_reject_unmanaged_skill_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "release" / "other-skill"
+            _write_skill(source, marker="unmanaged-release")
+            codex_home = root / "codex-home"
+            existing = codex_home / "skills" / "other-skill"
+            _write_skill(existing, marker="user-owned")
+
+            with self.assertRaises(SkillInstallError):
+                install_skill(source_skill=source, codex_home=codex_home)
+            for skill_name in ("other-skill", "../other-skill", str(existing)):
+                with self.subTest(skill=skill_name):
+                    with self.assertRaises(SkillInstallError):
+                        remove_skill(codex_home=codex_home, skill_name=skill_name)
+
+            self.assertEqual((existing / "SKILL.md").read_text(), "user-owned\n")
+            self.assertEqual(
+                sorted(path.name for path in (codex_home / "skills").iterdir()),
+                ["other-skill"],
+            )
 
     def test_install_fully_replaces_only_the_managed_skill(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -61,11 +84,11 @@ class UserGuideSkillInstallTest(unittest.TestCase):
             other_skill.parent.mkdir(parents=True)
             other_skill.write_text("other\n", encoding="utf-8")
 
-            first = install_user_guide_skill(
+            first = install_skill(
                 source_skill=source,
                 codex_home=codex_home,
             )
-            second = install_user_guide_skill(
+            second = install_skill(
                 source_skill=source,
                 codex_home=codex_home,
             )
@@ -104,14 +127,14 @@ class UserGuideSkillInstallTest(unittest.TestCase):
                 real_replace(source_path, target_path)
 
             with patch(
-                "scripts.install_user_guide_skill.os.replace",
+                "scripts.install_managed_skill.os.replace",
                 side_effect=fail_publish,
             ):
                 with self.assertRaisesRegex(
                     SkillInstallError,
                     "previous Skill was restored",
                 ):
-                    install_user_guide_skill(
+                    install_skill(
                         source_skill=source,
                         codex_home=codex_home,
                     )
@@ -135,14 +158,14 @@ class UserGuideSkillInstallTest(unittest.TestCase):
             target = codex_home / "skills" / SKILL_NAME
 
             with patch(
-                "scripts.install_user_guide_skill.os.replace",
+                "scripts.install_managed_skill.os.replace",
                 side_effect=OSError("synthetic publish failure"),
             ):
                 with self.assertRaisesRegex(
                     SkillInstallError,
                     "no managed Skill was installed",
                 ):
-                    install_user_guide_skill(
+                    install_skill(
                         source_skill=source,
                         codex_home=codex_home,
                     )
@@ -164,7 +187,7 @@ class UserGuideSkillInstallTest(unittest.TestCase):
                     SkillInstallError,
                     "previous Skill was restored",
                 ):
-                    install_user_guide_skill(
+                    install_skill(
                         source_skill=source,
                         codex_home=codex_home,
                     )
@@ -188,7 +211,7 @@ class UserGuideSkillInstallTest(unittest.TestCase):
                     SkillInstallError,
                     "unverified Skill was removed",
                 ):
-                    install_user_guide_skill(
+                    install_skill(
                         source_skill=source,
                         codex_home=codex_home,
                     )
@@ -206,7 +229,7 @@ class UserGuideSkillInstallTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(SkillInstallError, "contains a symlink"):
-                install_user_guide_skill(
+                install_skill(
                     source_skill=source,
                     codex_home=root / "codex-home",
                 )
@@ -226,7 +249,7 @@ class UserGuideSkillInstallTest(unittest.TestCase):
                 SkillInstallError,
                 "Skills directory must not be a symlink",
             ):
-                install_user_guide_skill(
+                install_skill(
                     source_skill=source,
                     codex_home=codex_home,
                 )
@@ -240,12 +263,12 @@ class UserGuideSkillInstallTest(unittest.TestCase):
             _write_skill(source, marker="release")
 
             with self.assertRaisesRegex(SkillInstallError, "filesystem root"):
-                install_user_guide_skill(
+                install_skill(
                     source_skill=source,
                     codex_home=Path(Path.cwd().anchor),
                 )
             with self.assertRaisesRegex(SkillInstallError, "filesystem root"):
-                remove_user_guide_skill(codex_home=Path(Path.cwd().anchor))
+                remove_skill(codex_home=Path(Path.cwd().anchor), skill_name=SKILL_NAME)
 
     def test_pre_feature_rollback_removes_only_the_managed_skill(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -256,8 +279,8 @@ class UserGuideSkillInstallTest(unittest.TestCase):
             other_skill.parent.mkdir(parents=True)
             other_skill.write_text("other\n", encoding="utf-8")
 
-            first = remove_user_guide_skill(codex_home=codex_home)
-            second = remove_user_guide_skill(codex_home=codex_home)
+            first = remove_skill(codex_home=codex_home, skill_name=SKILL_NAME)
+            second = remove_skill(codex_home=codex_home, skill_name=SKILL_NAME)
 
             self.assertTrue(first.removed)
             self.assertFalse(second.removed)
@@ -278,7 +301,7 @@ class UserGuideSkillInstallTest(unittest.TestCase):
                 SkillInstallError,
                 "Skills directory must not be a symlink",
             ):
-                remove_user_guide_skill(codex_home=codex_home)
+                remove_skill(codex_home=codex_home, skill_name=SKILL_NAME)
 
             self.assertEqual(external_skill.read_text(), "external\n")
 
@@ -295,7 +318,7 @@ class UserGuideSkillInstallTest(unittest.TestCase):
             target = skills_root / SKILL_NAME
             target.symlink_to(external_skill, target_is_directory=True)
 
-            result = remove_user_guide_skill(codex_home=codex_home)
+            result = remove_skill(codex_home=codex_home, skill_name=SKILL_NAME)
 
             self.assertTrue(result.removed)
             self.assertFalse(target.is_symlink())
@@ -308,7 +331,7 @@ class UserGuideSkillInstallTest(unittest.TestCase):
 class UserGuideSkillContentTest(unittest.TestCase):
     def test_installed_guide_navigation_is_self_contained(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            installed = install_user_guide_skill(
+            installed = install_skill(
                 source_skill=RELEASE_SKILL,
                 codex_home=Path(directory) / "codex-home",
             )
@@ -345,7 +368,7 @@ class UserGuideSkillContentTest(unittest.TestCase):
 
 
 class UserGuideSkillDiscoveryTest(unittest.IsolatedAsyncioTestCase):
-    async def test_pinned_codex_discovers_the_managed_global_skill(self) -> None:
+    async def test_pinned_codex_discovers_both_managed_global_skills(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             codex_home = root / "codex-home"
@@ -353,10 +376,13 @@ class UserGuideSkillDiscoveryTest(unittest.IsolatedAsyncioTestCase):
             project = root / "project"
             user_home.mkdir()
             project.mkdir()
-            installed = install_user_guide_skill(
-                source_skill=RELEASE_SKILL,
-                codex_home=codex_home,
-            )
+            installed = {
+                skill_name: install_skill(
+                    source_skill=ROOT / "skills" / skill_name,
+                    codex_home=codex_home,
+                )
+                for skill_name in (SKILL_NAME, "netizen-feishu")
+            }
             env = dict(os.environ)
             env.update(
                 {
@@ -377,17 +403,18 @@ class UserGuideSkillDiscoveryTest(unittest.IsolatedAsyncioTestCase):
                 if process is not None:
                     _close_process_pipes(process)
 
-            matches = [
-                skill
-                for skill in snapshot.skills
-                if skill.name == SKILL_NAME and skill.enabled
-            ]
             self.assertEqual(snapshot.errors, ())
-            self.assertEqual(len(matches), 1)
-            self.assertEqual(
-                Path(matches[0].path),
-                Path(installed.target) / "SKILL.md",
-            )
+            for skill_name, result in installed.items():
+                with self.subTest(skill=skill_name):
+                    matches = [
+                        skill for skill in snapshot.skills
+                        if skill.name == skill_name and skill.enabled
+                    ]
+                    self.assertEqual(len(matches), 1)
+                    self.assertEqual(
+                        Path(matches[0].path),
+                        Path(result.target) / "SKILL.md",
+                    )
 
 
 def _write_skill(root: Path, *, marker: str) -> None:
@@ -401,7 +428,7 @@ def _write_skill(root: Path, *, marker: str) -> None:
 
 
 def _fail_installed_manifest():
-    from scripts import install_user_guide_skill as installer
+    from scripts import install_managed_skill as installer
 
     real_manifest = installer._skill_manifest
     calls = 0
@@ -414,7 +441,7 @@ def _fail_installed_manifest():
         return real_manifest(root)
 
     return patch(
-        "scripts.install_user_guide_skill._skill_manifest",
+        "scripts.install_managed_skill._skill_manifest",
         side_effect=fail_third_call,
     )
 
