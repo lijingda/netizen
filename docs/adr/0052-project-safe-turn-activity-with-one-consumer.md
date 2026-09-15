@@ -11,6 +11,9 @@ related: 0021, 0046, 0051
 普通路径、链接和代码片段。原生 `commandActions` 是 best-effort 分类，缺少可展示信息时
 回退原命令预览，不新增本地命令解析或工具语义规则。事件来源、消费链和生命周期边界不变。
 
+2026-09-15 展示修订：操作预览上限改为 120 字符，最近进展保留四条，以缩短操作行并多保留
+一条进展上下文。进展正文去掉重复的 `•`，直接跟在时间分隔符 `·` 后。
+
 Progress Card 已能显示运行状态、steer 次数和原生 checklist，但真实长任务中 checklist
 可能很晚才出现，用户仍会长时间只看到“Codex 尚未生成”。App Server 的 Turn 通知还包含
 commentary、命令、工具、文件修改、搜索、图片、子任务、审查与上下文压缩等生命周期，适合
@@ -32,7 +35,7 @@ Turn 可以在终态前只读窥视 exact Turn 的 retained events，并由公�
 
 - 运行或停止状态与已确认 steer 次数；
 - 最新原生 checklist full replacement 及 freshness；
-- 最近三条 completed commentary；
+- 最近四条 completed commentary；
 - 最近八个 identity-free 操作及状态；
 - 每条 commentary/操作对应的 exact SDK item lifecycle 毫秒时间戳；
 - 子任务和文件修改的安全数量聚合；
@@ -71,11 +74,13 @@ started/completed 合并为同一操作；交给 Channel 的 snapshot 与 manife
 - image view/generation、review mode、context compaction：只显示固定类别；
 - collab/sub-agent：只显示运行、完成、失败等聚合数量。
 
-commentary/checklist 与上述操作预览沿用 160 字符上限。操作预览按单行格式化，字段合并前
-过滤明确凭据（包括已知 token 格式、凭据赋值/命令行选项、URL 认证信息和签名/令牌参数、
+commentary/checklist 沿用 160 字符上限，上述操作预览最多 120 字符。操作预览按单行格式化，
+字段合并前过滤明确凭据（包括已知 token 格式、凭据赋值/命令行选项、URL 认证信息和签名/令牌参数、
 私钥标记），先过滤再裁剪。普通路径、链接和代码片段直接保留；格式化不执行内容。
 操作文本沿用 manifest 的 `text` 字段，进入卡片和 callback 解码时再次过滤并校验上限，
-旧卡的空文本或固定命令类别仍可解码。没有新增原始字段、历史存储或参数识别注册表。
+旧卡的空文本、固定命令类别或不超过旧 160 字符上限的操作文本仍可解码；分页时继续过滤
+凭据，但保留已冻结摘要和退出码后缀。新原生投影统一受 120 字符上限约束。
+没有新增原始字段、历史存储或参数识别注册表。
 
 明确忽略 reasoning、user/final message、`agentMessage/delta`、command output、MCP server、
 工具参数/结果、diff、token usage、sleep 时长、hook prompt 和未知事件。

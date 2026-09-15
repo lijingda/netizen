@@ -346,9 +346,11 @@ def _activity_operation_text(kind: object, value: object) -> str | None:
     if not isinstance(value, str) or not value:
         raise ValueError("activity operation text is invalid")
     if kind in ACTIVITY_DETAIL_KINDS:
+        # Preserve frozen summaries from older 160-character manifests on
+        # pagination, including exit-code suffixes. New native previews use 120.
         if len(value) > ACTIVITY_TEXT_LIMIT:
             raise ValueError("activity operation text must be bounded")
-        return sanitize_activity_operation_text(value)
+        return sanitize_activity_operation_text(value, limit=ACTIVITY_TEXT_LIMIT)
     if kind == TurnActivityKind.TOOL.value:
         return value
     raise ValueError("activity text is unsupported for this operation")
@@ -1047,7 +1049,7 @@ def _turn_activity_elements(
             elements.append(
                 _activity_markdown_row(
                     item.event_timestamp_ms,
-                    f"• {activity_step_display(item.text)}",
+                    activity_step_display(item.text),
                 )
             )
     operations = tuple(getattr(snapshot, "operations", ()))[

@@ -6929,7 +6929,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             turn_id=first.turn_id,
             steps=(TurnPlanStepSnapshot("inspect", TurnPlanStepState.IN_PROGRESS),),
         )
-        for index in range(4):
+        for index in range(5):
             observer.append_activity(
                 thread_id=first.thread_id,
                 turn_id=first.turn_id,
@@ -6964,7 +6964,12 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([step.step for step in with_plan.steps], ["inspect"])
         self.assertEqual(
             [(item.text, item.event_timestamp_ms) for item in with_plan.commentary],
-            [("progress 1", 101), ("progress 2", 102), ("progress 3", 103)],
+            [
+                ("progress 1", 101),
+                ("progress 2", 102),
+                ("progress 3", 103),
+                ("progress 4", 104),
+            ],
         )
         self.assertEqual(len(with_plan.operations), 8)
         unchanged = self.runtime.turn_activity(
