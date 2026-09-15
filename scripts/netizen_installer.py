@@ -1204,9 +1204,18 @@ def _prepare_release(
                 "install",
                 "--disable-pip-version-check",
                 "--no-input",
+                "--no-compile",
                 "--constraint",
                 release.source / "requirements.lock",
                 release.source,
+            ],
+            env=environment,
+        )
+        info("precompiling installed packages with 4 workers")
+        execute(
+            [
+                python, "-E", "-B", "-m", "compileall", "-q", "-j", "4",
+                "-e", release.venv, release.venv,
             ],
             env=environment,
         )

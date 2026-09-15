@@ -1749,6 +1749,23 @@ class NetizenInstallerTest(unittest.TestCase):
                 (source_release, source_commands),
                 (published_release, calls),
             ):
+                install_index = next(
+                    index for index, command in enumerate(commands)
+                    if command[1:4] == ["-m", "pip", "install"]
+                )
+                self.assertIn("--no-compile", commands[install_index])
+                self.assertEqual(
+                    commands[install_index + 1],
+                    [
+                        str(release.venv / "bin" / "python"),
+                        "-E", "-B", "-m", "compileall", "-q", "-j", "4",
+                        "-e", str(release.venv), str(release.venv),
+                    ],
+                )
+                self.assertIn(
+                    str(release.source / "scripts" / "verify_installed_release.py"),
+                    commands[install_index + 2],
+                )
                 self.assertEqual(
                     commands[-1],
                     [
@@ -1770,6 +1787,7 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             self.assertEqual(reused_published_release, published_release)
             self.assertFalse(any(command[1:3] == ["-m", "venv"] for command in calls))
+            self.assertFalse(any("-j" in command for command in calls))
             self.assertFalse(any("unittest" in command for command in calls))
             self.assertTrue(any(command[-2:] == ["pip", "check"] for command in calls))
             self.assertEqual(
@@ -1783,6 +1801,52 @@ class NetizenInstallerTest(unittest.TestCase):
                 installer.read_published_release_manifest(published_release.source),
                 published_manifest,
             )
+
+    def test_bytecode_failure_discards_candidate_before_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            old = self._release(layout, "1" * 64)
+            previous = self._release(layout, "2" * 64)
+            installer._set_release_link(layout.current, old.root, layout)
+            installer._set_release_link(layout.previous, previous.root, layout)
+            candidate_roots: list[Path] = []
+            backend = _stopped_backend()
+
+            def fail_compilation(argv: list[object], **_kwargs: object):
+                rendered = [os.fspath(value) for value in argv]
+                if rendered[1:3] == ["-m", "venv"]:
+                    venv = Path(rendered[3])
+                    venv.mkdir()
+                    candidate_roots.append(venv.parent)
+                if "compileall" in rendered:
+                    raise installer.InstallError("bytecode compilation failed")
+                return subprocess.CompletedProcess(rendered, 0, "", "")
+
+            with (
+                patch.object(installer, "require_supported_platform"),
+                patch.object(installer, "_service_backend", return_value=backend),
+                patch.object(installer, "prepare_configuration"),
+                patch.object(installer, "_verify_installed_package") as verify,
+                patch.object(installer, "_run_source_release_checks") as checks,
+                patch.object(installer, "activate_release") as activate,
+            ):
+                with self.assertRaisesRegex(installer.InstallError, "bytecode compilation failed"):
+                    installer.install_source(
+                        source_root=ROOT, layout=layout, runner=fail_compilation,
+                        interactive=False,
+                    )
+
+            self.assertEqual(len(candidate_roots), 1)
+            self.assertFalse(candidate_roots[0].exists())
+            verify.assert_not_called()
+            checks.assert_not_called()
+            activate.assert_not_called()
+            self.require_codex_login.assert_not_called()
+            self.assertEqual(installer._read_release_link(layout.current, layout), old.root.resolve())
+            self.assertEqual(installer._read_release_link(layout.previous, layout), previous.root.resolve())
+            self.assertTrue(old.venv.is_dir())
+            self.assertTrue(previous.venv.is_dir())
 
     def test_published_install_uses_the_shared_activation_orchestration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
