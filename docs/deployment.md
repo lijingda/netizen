@@ -1025,6 +1025,11 @@ adminWeb:
 cat "$HOME/.netizen/credentials/admin-web-secret"
 ```
 
+Admin 登录会话不设闲置或绝对时间过期；退出登录、服务重启或凭据轮换会使其失效。
+浏览器仍使用会话 Cookie，清除 Cookie 后需重新登录。同一来源最多保留 16 个、全局最多
+256 个登录会话；验证成功的新登录在达到上限时替换最早会话，优先在已满的同一来源内
+替换，并撤销旧会话的操作凭据。
+
 轮换时用安全的原子文件写入替换同一路径并保持 0600，然后刷新页面；运行中 auth 会在下一
 认证边界检测到合法 identity/content 变化并立即注销全部旧 session。非法替换会锁闭 Admin
 admission，修复文件后仍需 `./service.sh restart`，不会自动重新开放。V1 使用不加密的内网

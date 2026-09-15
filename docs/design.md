@@ -1076,8 +1076,12 @@ typed 安装结果显示成功/回滚；ready、连通和正在运行的版本�
 
 Admin credential 来自绝对路径 `NETIZEN_ADMIN_SECRET_FILE`，解码后必须恰好 32 bytes；
 最终路径不得是 symlink，文件必须为普通文件且 mode 精确为 0600。认证状态完全在内存：
-pre-auth nonce、两小时 idle/十二小时 absolute session、一次性 action/CSRF grant 均有 TTL、
-全局/逐来源容量与登录限速；每次认证边界都会检测合法 credential 轮换并清空旧 bearer。
+session 不设闲置或绝对时间过期，退出登录、服务重启或合法 credential 轮换使其失效；
+浏览器 cookie 保持会话 cookie，不设 `Expires` / `Max-Age`。session 保留全局/逐来源容量
+上限，验证成功的新登录在逐来源已满时替换该来源最早签发的 session，否则在全局已满时
+替换全局最早签发的 session，并撤销其关联 action grants；失败登录不得驱逐已有 session。
+pre-auth nonce 与一次性 action/CSRF grant 保留 TTL 和容量限制，登录继续限速；每次认证
+边界都会检测合法 credential 轮换并清空旧 bearer。
 Host 只接受启动时发现的本机地址/名称和 exact port，带 body 的 login 及所有 mutation 还要求
 同源 `Origin`，不信任 forwarded header。页面和 API 直接使用受信内网 HTTP，不实现 TLS、
 OIDC、多管理员或 RBAC。

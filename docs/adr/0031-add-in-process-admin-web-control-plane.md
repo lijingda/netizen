@@ -80,7 +80,9 @@ credential，不得进入 YAML、URL、cookie、页面源码、命令参数或�
 
 `GET /login` 先签发一次性 pre-auth CSRF nonce，登录 POST 必须同时验证该 nonce、`Origin`
 和 `Host`，成功后用 secret 换取进程内、至少 256 bit 随机的 opaque session。session 使用
-两小时 idle TTL 和十二小时 absolute TTL；cookie 必须 `HttpOnly`、`SameSite=Strict`。因为
+显式撤销生命周期，不设 idle 或 absolute TTL，避免每天只访问几次的管理员反复登录；
+退出登录、服务重启和 credential 轮换仍会使对应 session 失效。cookie 仍为不设置
+`Expires` / `Max-Age` 的浏览器会话 cookie，必须 `HttpOnly`、`SameSite=Strict`。因为
 已决定直接使用 HTTP，它有意不设置只适用于 HTTPS 的 `Secure`。登录以后所有 mutation
 必须校验 authenticated session、一次性 CSRF token、`Origin` 和 `Host`，且只接受 POST。
 Host 必须是启动时发现的本机 interface IP 或 localhost，Origin 必须与 exact scheme、Host
@@ -89,7 +91,12 @@ Host 必须是启动时发现的本机 interface IP 或 localhost，Origin 必�
 form POST 的真实 `Origin`；不能改成会把该 `Origin` 序列化为 `null` 的 `no-referrer`。
 
 登录失败按 source IP 每五分钟最多五次、全进程每五分钟最多二十次，超限只返回统一错误，
-不泄漏 credential 是否接近或存在。所有 HTTP header、URL、form body、JSON body、并发连接
+不泄漏 credential 是否接近或存在。session 保留每来源 16 个、全局 256 个容量上限；
+只有 nonce、credential 和限速全部验证通过的新登录才能回收名额：逐来源已满时替换该
+来源最早签发的 session，否则全局已满时替换全局最早签发的 session，并撤销其关联
+action grants。失败登录不得驱逐已有 session；浏览器丢失 cookie 后的遗留记录不能永久
+阻止合法新登录。pre-auth nonce 和一次性 action/CSRF grant 仍各有十分钟 TTL。
+所有 HTTP header、URL、form body、JSON body、并发连接
 和处理时间都有硬上限，Web 不接受文件上传。服务重启使全部 Admin session 失效。实现不得
 把登录 session、CSRF token 或 audit record 写入 Channel Database。
 
@@ -200,7 +207,8 @@ Channel Participant 仍只能管理消息所在 Scope 的 Binding 或 exact Side
 - 默认 enabled / `0.0.0.0:8787` 配置、显式 override/disable、端口冲突启动失败、半初始化
   endpoint 拒绝、双 ingress close、在途 handler drain，以及 ready/shutdown 顺序；
 - Admin secret 熵、普通文件、权限和非复用约束，pre-auth nonce、constant-time 校验、双层
-  登录限速、idle/absolute session expiry、rotation/restart invalidation、Cookie、CSRF、
+  登录限速、跨多日闲置及持续使用的 session 保持、logout/rotation/restart invalidation、
+  成功登录的逐来源/全局容量回收及关联 grant 撤销、失败登录不驱逐、Cookie、CSRF、
   Origin/Host、POST-only、请求资源上限、日志脱敏；未认证 GET `/` 只以 303 重定向到
   `/login`（不返回 HTML 或状态），除 login、登录页使用的无状态 CSS、无细节 readiness
   和该重定向外的所有未认证 endpoint 返回 401；
@@ -227,7 +235,7 @@ exact native identity、双击/断线与 pointer 保留语义。
 Netizen 有两个客户端控制面，但仍只有一个业务服务、一个 Channel Database 和一个原生
 Codex Runtime。管理员获得明确的实例级 authority，普通飞书参与者的 Scope 权限不扩大。
 默认 `0.0.0.0` 和无 TLS 以受信内网为部署前提，换取直接 URL 的低运维成本；独立 secret、
-短期 session 和浏览器请求防护承担最低成本的误访问防线。
+可撤销的进程内 session 和浏览器请求防护承担最低成本的误访问防线。
 
 Admin credential 同时保护 Project Registry 中“登记任意可用 absolute directory”的现有
 能力；一旦泄漏，攻击者可把服务账号可访问的目录暴露为后续会话 cwd，并读取全实例的会话

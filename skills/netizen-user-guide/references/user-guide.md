@@ -276,6 +276,10 @@ credential，不会因为某人是 Channel 参与者或 Binding 创建者而自�
 该凭据不是飞书 App Secret，不应发送到聊天。Admin 默认监听 `0.0.0.0:8787`，使用受信
 内网 HTTP，不提供 TLS、OIDC、多管理员或 RBAC；不应直接暴露到不受信网络。
 
+登录状态不会因闲置或使用时长自动过期。退出登录、服务重启或管理员轮换凭据后需重新
+登录；浏览器清除会话 Cookie 后也需重新登录。登录会话数量达到上限时，新登录会替换
+最早的会话（同一来源达到上限时优先替换该来源的会话）。
+
 Admin Web 可以管理 inactive/cross-Scope exact Binding，包括创建 Lazy、设为当前、修改
 Turn Settings、重命名、归档、恢复或恢复并设为当前、删除 Lazy、Stop 和 Release，也可
 在 Delete capability 可用时删除 active 或 archived 的原生 Thread。两类删除都需二次确认；
