@@ -249,11 +249,12 @@ Message，并与 current message 保持 `text`/`request_text` 的语义边界。
 材料置于现有 `request_text` 内并中和 `$`，外层 current v1/quote v4/context v2 的版本、
 字段与顺序不变。原 text/post/image 的正文、命令、图片和附件准入保持原语义。
 
-安装器随版本提供 [netizen-feishu Skill](../skills/netizen-feishu/SKILL.md)，让 Agent 按当前
-`message_id` 主动查询飞书聊天／话题历史。配套脚本只读取同账号 Netizen 的现有配置，
-通过固定官方 SDK 获取并返回临时机器人凭据；Agent 在同次工具执行中接收，再按上游
-lark Skills 调用 CLI。查询、分页和结果处理不在脚本中封装，凭据不进入 Prompt 或持久
-CLI 配置。上游 CLI 与 lark Skills 由用户另行安装，缺失不影响 Channel。该路径不改变
+安装器随版本提供 [netizen-lark Skill](../skills/netizen-lark/SKILL.md)，让 Agent 按当前
+`message_id` 主动查询飞书聊天／话题历史。Skill 无配套脚本，只说明如何让可选的 CLI
+选择 `~/.netizen/lark-app/config.json` 中的固定 `netizen` profile 并使用机器人身份；
+CLI 自行换取令牌，查询、分页和结果处理按上游 lark Skills 执行。应用凭据不进入 Prompt，
+无需修改用户默认 CLI 配置。上游 CLI 与 lark Skills 由用户另行安装，缺失不影响 Channel。
+当前消息不额外投影聊天或话题定位字段，需要时从 `message_id` 查询。该路径不改变
 当前消息投影、Scope/Binding、SQLite 或 catch-up reader，也不增加原生 MCP entry；见
 [README](../README.md#按需读取飞书历史)。
 
@@ -900,9 +901,16 @@ queue 表，也不保存 Admin credential、session、action/CSRF token、native
 audit record。
 
 飞书应用初始化是 release 外的安装期流程，不是第二个运行时认证层；服务
-运行时不进入该流程，也不申请或持久化 user token。成功后只把 App ID 与 Secret 写入
-`~/.netizen/config.yaml` 与 `0600` `credentials/feishu-app-secret`，不向 Channel
-Database、Codex state、环境或日志写入凭据。公开安装入口在候选验证和 Codex 登录检查通过后，
+运行时不进入该流程，也不申请或持久化 user token。App ID 与 raw App Secret 的唯一来源为
+`~/.netizen/lark-app/config.json` 中固定名为 `netizen` 的 profile，目录为 `0700`，文件为
+当前用户拥有的普通非 symlink 文件，权限为 `0600` 或更严格。它采用官方 Lark CLI 的
+`apps` 格式；Netizen 通过标准库直接读取，不依赖 CLI 或它的 `currentApp` 选择。
+YAML 不再拥有 App ID，服务只传递绝对路径 `NETIZEN_LARK_APP_CONFIG`，不向 Channel
+Database、Codex state、环境或日志写入凭据。源码手工运行未设置该变量时，使用 YAML
+所在目录下的 `lark-app/config.json`；旧 Secret 环境来源明确拒绝。
+安装器只初始化、读取并原子写入该 profile；成功保存的应用身份不随候选激活失败而撤销。
+详见 [ADR 0066](adr/0066-share-lark-app-credentials-with-optional-cli.md)。
+公开安装入口在候选验证和 Codex 登录检查通过后，
 凭据不完整时默认走官方浏览器初始化；首次配置、显式重绑定与已有应用补权都不依赖 TTY。
 TTY 只决定是否显示安装方式菜单与允许手工输入。无 TTY 的浏览器失败、取消或 660 秒超时
 直接退出，不转入终端输入等待；同一次安装最多发起一次流程，成功后仍校验有效 tenant
@@ -1446,8 +1454,8 @@ AsyncCodex 绑定，业务 admission 在完整初始化与调度恢复后开放�
 MCP namespace instructions 与工具 description 提供管理指引；新 Thread 的公开 API 默认 `auto_review`，不能完整继承
 Ask/Custom；其余配置不由 Netizen 覆盖。
 
-release 自带 `netizen-user-guide` 和 `netizen-feishu` 两个原生 Skill，分别提供 Netizen
-使用咨询和飞书机器人凭据／当前消息入口，不进入 Channel command router，也不替代
+release 自带 `netizen-user-guide` 和 `netizen-lark` 两个原生 Skill，分别提供 Netizen
+使用咨询和应用 profile／当前消息入口，不进入 Channel command router，也不替代
 动态 `/help`。部署只拥有并全量替换 `$CODEX_HOME/skills` 下这两个目录；其他用户 Skill
 仍完全由用户维护。两者共同参与安装前快照、失败回滚和卸载。
 候选 venv 安装不产生这项外部副作用，只有 release 切换时的显式安装步骤会更新全局

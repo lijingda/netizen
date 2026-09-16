@@ -97,7 +97,7 @@ def _service_environment(layout: Layout) -> dict[str, str]:
     environment["HOME"] = str(layout.home)
     environment["CODEX_HOME"] = str(layout.codex_home)
     environment["NETIZEN_CONFIG_PATH"] = str(layout.config_file)
-    environment["FEISHU_APP_SECRET_FILE"] = str(layout.secret_file)
+    environment["NETIZEN_LARK_APP_CONFIG"] = str(layout.lark_app_file)
     environment["NETIZEN_ADMIN_SECRET_FILE"] = str(layout.admin_secret_file)
     if layout.platform == "linux":
         environment.setdefault("XDG_RUNTIME_DIR", f"/run/user/{layout.uid}")

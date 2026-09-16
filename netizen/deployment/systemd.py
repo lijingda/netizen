@@ -59,8 +59,8 @@ def render_systemd_service(release: Release, layout: Layout) -> str:
             f"PATH={_service_bootstrap_path(layout)}"
         ),
         "@CONFIG_ENV@": _systemd_quote(f"NETIZEN_CONFIG_PATH={layout.config_file}"),
-        "@SECRET_ENV@": _systemd_quote(
-            f"FEISHU_APP_SECRET_FILE={layout.secret_file}"
+        "@LARK_APP_CONFIG_ENV@": _systemd_quote(
+            f"NETIZEN_LARK_APP_CONFIG={layout.lark_app_file}"
         ),
         "@ADMIN_SECRET_ENV@": _systemd_quote(
             f"NETIZEN_ADMIN_SECRET_FILE={layout.admin_secret_file}"

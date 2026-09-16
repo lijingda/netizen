@@ -260,6 +260,7 @@ printf 'logout-noise=ignored'
                 "CUSTOM_TOKEN": "available-to-codex",
                 "FEISHU_APP_SECRET": "must-be-removed",
                 "FEISHU_APP_SECRET_FILE": "/wrong/feishu-file",
+                "NETIZEN_LARK_APP_CONFIG": "/wrong/lark-config",
                 "NETIZEN_ADMIN_SECRET": "must-also-be-removed",
                 "NETIZEN_ADMIN_SECRET_FILE": "/wrong/admin-file",
                 "PATH": "/home/service-user/.nvm/current/bin:/usr/bin",
@@ -272,7 +273,7 @@ printf 'logout-noise=ignored'
             shell=Path("/bin/bash"),
             codex_home="/home/service-user/.codex",
             config_path="/home/service-user/.netizen/config.yaml",
-            secret_file="/home/service-user/.netizen/credentials/feishu-app-secret",
+            lark_app_config="/home/service-user/.netizen/lark-app/config.json",
             admin_secret_file=(
                 "/home/service-user/.netizen/credentials/admin-web-secret"
             ),
@@ -294,10 +295,11 @@ printf 'logout-noise=ignored'
         )
         self.assertEqual(environment["CODEX_HOME"], "/home/service-user/.codex")
         self.assertNotIn("FEISHU_APP_SECRET", environment)
+        self.assertNotIn("FEISHU_APP_SECRET_FILE", environment)
         self.assertNotIn("NETIZEN_ADMIN_SECRET", environment)
         self.assertEqual(
-            environment["FEISHU_APP_SECRET_FILE"],
-            "/home/service-user/.netizen/credentials/feishu-app-secret",
+            environment["NETIZEN_LARK_APP_CONFIG"],
+            "/home/service-user/.netizen/lark-app/config.json",
         )
         self.assertEqual(
             environment["NETIZEN_ADMIN_SECRET_FILE"],
@@ -314,8 +316,8 @@ printf 'logout-noise=ignored'
         )
         managed = {
             "CODEX_HOME": "/home/service-user/.codex",
-            "FEISHU_APP_SECRET_FILE": (
-                "/home/service-user/.netizen/credentials/feishu-app-secret"
+            "NETIZEN_LARK_APP_CONFIG": (
+                "/home/service-user/.netizen/lark-app/config.json"
             ),
             "NETIZEN_ADMIN_SECRET_FILE": (
                 "/home/service-user/.netizen/credentials/admin-web-secret"

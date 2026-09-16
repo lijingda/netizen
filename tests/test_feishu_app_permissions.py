@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from scripts import feishu_app_permissions as permissions
 from scripts.feishu_app_onboarding import REQUIRED_TENANT_SCOPES
+from netizen.lark_app import encode_lark_app
 
 
 def _response(*scope_states: tuple[str, int], success: bool = True) -> SimpleNamespace:
@@ -134,7 +135,7 @@ class FeishuAppPermissionsTest(unittest.TestCase):
     def test_main_uses_app_secret_without_disclosing_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             secret_file = Path(directory) / "secret"
-            secret_file.write_text("private-secret", encoding="utf-8")
+            secret_file.write_bytes(encode_lark_app("cli_existing", "private-secret"))
             secret_file.chmod(0o600)
             observed: list[tuple[str, str]] = []
 
@@ -160,9 +161,7 @@ class FeishuAppPermissionsTest(unittest.TestCase):
             ):
                 code = permissions.main(
                     [
-                        "--app-id",
-                        "cli_existing",
-                        "--secret-file",
+                        "--lark-app-config",
                         str(secret_file),
                     ],
                     client_factory=client_factory,
@@ -176,7 +175,8 @@ class FeishuAppPermissionsTest(unittest.TestCase):
     def test_main_preserves_interrupt_exit_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             secret_file = Path(directory) / "secret"
-            secret_file.write_text("private-secret", encoding="utf-8")
+            secret_file.write_bytes(encode_lark_app("cli_existing", "private-secret"))
+            secret_file.chmod(0o600)
 
             def client_factory(_app_id: str, _secret: str) -> SimpleNamespace:
                 return SimpleNamespace(
@@ -193,9 +193,7 @@ class FeishuAppPermissionsTest(unittest.TestCase):
 
             code = permissions.main(
                 [
-                    "--app-id",
-                    "cli_existing",
-                    "--secret-file",
+                    "--lark-app-config",
                     str(secret_file),
                 ],
                 client_factory=client_factory,

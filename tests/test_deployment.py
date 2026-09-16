@@ -113,7 +113,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn("Environment=@HOME_ENV@", unit)
         self.assertIn("Environment=@CODEX_HOME_ENV@", unit)
         self.assertIn("ExecStart=@EXEC_START@", unit)
-        self.assertIn("Environment=@SECRET_ENV@", unit)
+        self.assertIn("Environment=@LARK_APP_CONFIG_ENV@", unit)
         self.assertIn("Environment=@ADMIN_SECRET_ENV@", unit)
         self.assertIn("NETIZEN_ADMIN_SECRET", unit)
         self.assertIn("TimeoutStopSec=75s", unit)
@@ -131,7 +131,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         )
 
         self.assertEqual(set(config), {"instance", "projects", "channel", "adminWeb"})
-        self.assertEqual(set(config["instance"]), {"appId", "dataDir", "projectRoot"})
+        self.assertEqual(set(config["instance"]), {"dataDir", "projectRoot"})
         self.assertEqual(config["instance"]["projectRoot"], "/home/your-user/projects")
         self.assertEqual(config["projects"], {"test": "/home/your-user/projects/test"})
         self.assertEqual(config["channel"], {"securityMode": "audit"})

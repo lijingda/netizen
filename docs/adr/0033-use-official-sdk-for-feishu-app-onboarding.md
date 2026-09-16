@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-22
 related: 0022, 0023, 0032
-amended_by: 0035, 0044, 0045, 0062
+amended_by: 0035, 0044, 0045, 0062, 0066
 ---
 
 # 使用官方 SDK 完成飞书应用初始化
@@ -12,6 +12,10 @@ amended_by: 0035, 0044, 0045, 0062
 > 允许已有应用无 TTY 补权；[ADR 0062](0062-decouple-initial-app-onboarding-from-terminal-input.md)
 > 进一步允许公开入口无 TTY 首次初始化与重绑定。下文保留最初的 TTY 和创建限制作为历史，
 > 不作为当前 Agent 安装要求。
+
+> 凭据存储修订：[ADR 0066](0066-share-lark-app-credentials-with-optional-cli.md) 将下文的
+> YAML App ID 与独立 Secret 合并到唯一应用 profile，允许可选 CLI 直接使用该文件；
+> 官方 SDK 初始化、无 CLI 安装依赖及不泄露 Secret 的边界继续保留。
 
 ## 背景
 

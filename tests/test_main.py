@@ -152,6 +152,7 @@ class MainConfigurationTest(unittest.TestCase):
             {
                 "FEISHU_APP_SECRET": "secret",
                 "FEISHU_APP_SECRET_FILE": "/secret-file",
+                "NETIZEN_LARK_APP_CONFIG": "/managed/lark-app/config.json",
                 "NETIZEN_ADMIN_SECRET": "admin-secret",
                 "NETIZEN_ADMIN_SECRET_FILE": "/admin-secret-file",
                 "NETIZEN_CONFIG_PATH": "/managed/config.yaml",
@@ -167,6 +168,7 @@ class MainConfigurationTest(unittest.TestCase):
 
             self.assertNotIn("FEISHU_APP_SECRET", os.environ)
             self.assertNotIn("FEISHU_APP_SECRET_FILE", os.environ)
+            self.assertNotIn("NETIZEN_LARK_APP_CONFIG", os.environ)
             self.assertNotIn("NETIZEN_ADMIN_SECRET", os.environ)
             self.assertNotIn("NETIZEN_ADMIN_SECRET_FILE", os.environ)
             self.assertNotIn("NETIZEN_CONFIG_PATH", os.environ)

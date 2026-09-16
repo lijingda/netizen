@@ -97,7 +97,7 @@ def render_launch_agent(release: Release, layout: Layout) -> bytes:
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONUNBUFFERED": "1",
             "NETIZEN_CONFIG_PATH": str(layout.config_file),
-            "FEISHU_APP_SECRET_FILE": str(layout.secret_file),
+            "NETIZEN_LARK_APP_CONFIG": str(layout.lark_app_file),
             "NETIZEN_ADMIN_SECRET_FILE": str(layout.admin_secret_file),
             "NETIZEN_READY_FILE": str(layout.ready_file),
             "NETIZEN_LIFETIME_LOCK_FILE": str(layout.lifetime_lock_file),

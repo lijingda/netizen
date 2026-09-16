@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from netizen.bindings import BindingStore
+from netizen.lark_app import encode_lark_app
 from netizen.projects import (
     ProjectDisabled,
     ProjectError,
@@ -27,6 +28,10 @@ class SettingsTest(unittest.TestCase):
         }
 
     def write_config(self, directory: Path) -> Path:
+        lark_app = directory / "lark-app" / "config.json"
+        lark_app.parent.mkdir(mode=0o700)
+        lark_app.write_bytes(encode_lark_app("cli_test", "secret"))
+        lark_app.chmod(0o600)
         project_root = directory / "projects"
         project = directory / "project"
         project_root.mkdir()
@@ -34,7 +39,6 @@ class SettingsTest(unittest.TestCase):
         path = directory / "config.yaml"
         path.write_text(
             "instance:\n"
-            "  appId: cli_test\n"
             f"  dataDir: {directory / 'data'}\n"
             f"  projectRoot: {project_root}\n"
             "projects:\n"
@@ -45,12 +49,12 @@ class SettingsTest(unittest.TestCase):
         )
         return path
 
-    def test_loads_yaml_and_direct_development_secret(self) -> None:
+    def test_loads_yaml_and_fixed_lark_app_profile(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             settings = Settings.from_file(
                 self.write_config(directory),
-                self.environment(directory, FEISHU_APP_SECRET="secret"),
+                self.environment(directory),
             )
 
         self.assertEqual(settings.app_id, "cli_test")
@@ -75,22 +79,23 @@ class SettingsTest(unittest.TestCase):
             with self.assertRaisesRegex(SettingsError, "projectRoot"):
                 Settings.from_file(
                     config,
-                    self.environment(directory, FEISHU_APP_SECRET="secret"),
+                    self.environment(directory),
                 )
 
-    def test_secret_file_must_be_private_regular_file(self) -> None:
+    def test_profile_override_must_be_private_regular_file(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             config = self.write_config(directory)
-            secret = directory / "secret"
-            secret.write_text("protected\n", encoding="utf-8")
+            secret = directory / "alternate-profile.json"
+            secret.write_bytes(encode_lark_app("cli_alternate", "protected"))
             secret.chmod(0o600)
 
             settings = Settings.from_file(
                 config,
-                self.environment(directory, FEISHU_APP_SECRET_FILE=str(secret)),
+                self.environment(directory, NETIZEN_LARK_APP_CONFIG=str(secret)),
             )
             self.assertEqual(settings.app_secret, "protected")
+            self.assertEqual(settings.app_id, "cli_alternate")
 
             secret.chmod(0o644)
             with self.assertRaisesRegex(SettingsError, "0600"):
@@ -98,7 +103,7 @@ class SettingsTest(unittest.TestCase):
                     config,
                     self.environment(
                         directory,
-                        FEISHU_APP_SECRET_FILE=str(secret),
+                        NETIZEN_LARK_APP_CONFIG=str(secret),
                     ),
                 )
 
@@ -118,7 +123,7 @@ class SettingsTest(unittest.TestCase):
             ):
                 Settings.from_file(
                     config,
-                    self.environment(directory, FEISHU_APP_SECRET="secret"),
+                    self.environment(directory),
                 )
 
     def test_channel_section_must_be_a_mapping_when_present(self) -> None:
@@ -136,10 +141,10 @@ class SettingsTest(unittest.TestCase):
             with self.assertRaisesRegex(SettingsError, "channel must be a mapping"):
                 Settings.from_file(
                     config,
-                    self.environment(directory, FEISHU_APP_SECRET="secret"),
+                    self.environment(directory),
                 )
 
-    def test_missing_secret_file_is_a_settings_error(self) -> None:
+    def test_missing_profile_is_a_settings_error(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             config = self.write_config(directory)
@@ -149,7 +154,7 @@ class SettingsTest(unittest.TestCase):
                     config,
                     self.environment(
                         directory,
-                        FEISHU_APP_SECRET_FILE=str(directory / "missing"),
+                        NETIZEN_LARK_APP_CONFIG=str(directory / "missing"),
                     ),
                 )
 
@@ -164,7 +169,7 @@ class SettingsTest(unittest.TestCase):
             )
             loaded = Settings.from_file(
                 config,
-                self.environment(directory, FEISHU_APP_SECRET="secret"),
+                self.environment(directory),
             )
             self.assertEqual(
                 loaded.admin_web,
@@ -184,7 +189,7 @@ class SettingsTest(unittest.TestCase):
             )
             disabled = Settings.from_file(
                 config,
-                {"FEISHU_APP_SECRET": "secret"},
+                {},
             )
             self.assertFalse(disabled.admin_web.enabled)
             self.assertIsNone(disabled.admin_web.credential_path)
@@ -202,7 +207,7 @@ class SettingsTest(unittest.TestCase):
                     with self.assertRaisesRegex(SettingsError, message):
                         Settings.from_file(
                             config,
-                            {"FEISHU_APP_SECRET": "secret"},
+                            {},
                         )
 
     def test_enabled_admin_requires_absolute_path_and_rejects_raw_secret(self) -> None:
@@ -210,12 +215,11 @@ class SettingsTest(unittest.TestCase):
             directory = Path(raw)
             config = self.write_config(directory)
             with self.assertRaisesRegex(SettingsError, "required"):
-                Settings.from_file(config, {"FEISHU_APP_SECRET": "secret"})
+                Settings.from_file(config, {})
             with self.assertRaisesRegex(SettingsError, "must be an absolute path"):
                 Settings.from_file(
                     config,
                     {
-                        "FEISHU_APP_SECRET": "secret",
                         "NETIZEN_ADMIN_SECRET_FILE": "relative",
                     },
                 )
@@ -223,10 +227,27 @@ class SettingsTest(unittest.TestCase):
                 Settings.from_file(
                     config,
                     {
-                        "FEISHU_APP_SECRET": "secret",
                         "NETIZEN_ADMIN_SECRET": "raw-secret",
                     },
                 )
+
+    def test_profile_is_authoritative_over_legacy_yaml_and_cli_selectors(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            config = self.write_config(directory)
+            config.write_text(config.read_text().replace("instance:\n", "instance:\n  appId: cli_legacy\n"))
+            settings = Settings.from_file(config, self.environment(
+                directory, LARKSUITE_CLI_APP_ID="cli_other", LARKSUITE_CLI_PROFILE="other",
+            ))
+            self.assertEqual(settings.app_id, "cli_test")
+
+    def test_legacy_secret_environment_sources_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            config = self.write_config(directory)
+            for name in ("FEISHU_APP_SECRET", "FEISHU_APP_SECRET_FILE"):
+                with self.subTest(name=name), self.assertRaisesRegex(SettingsError, "NETIZEN_LARK_APP_CONFIG"):
+                    Settings.from_file(config, self.environment(directory, **{name: "old-source"}))
 
 
 class ProjectRegistryTest(unittest.TestCase):

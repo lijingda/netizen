@@ -277,7 +277,7 @@ def service_environment(
     shell: Path,
     codex_home: str,
     config_path: str,
-    secret_file: str,
+    lark_app_config: str,
     admin_secret_file: str,
     ready_file: str,
     lifetime_lock_file: str,
@@ -289,6 +289,7 @@ def service_environment(
     environment = dict(captured)
     environment.pop("FEISHU_APP_SECRET", None)
     environment.pop("FEISHU_APP_SECRET_FILE", None)
+    environment.pop("NETIZEN_LARK_APP_CONFIG", None)
     environment.pop("NETIZEN_ADMIN_SECRET", None)
     environment.pop("NETIZEN_ADMIN_SECRET_FILE", None)
     environment.pop("NETIZEN_LIFETIME_LOCK_FD", None)
@@ -301,7 +302,7 @@ def service_environment(
     environment.update(
         {
             "CODEX_HOME": codex_home,
-            "FEISHU_APP_SECRET_FILE": secret_file,
+            "NETIZEN_LARK_APP_CONFIG": lark_app_config,
             "HOME": str(home),
             "LOGNAME": username,
             "NETIZEN_CONFIG_PATH": config_path,
@@ -437,7 +438,7 @@ def _launch_with_lifetime_lock(
         shell=shell,
         codex_home=_required_environment("CODEX_HOME"),
         config_path=_required_environment("NETIZEN_CONFIG_PATH"),
-        secret_file=_required_environment("FEISHU_APP_SECRET_FILE"),
+        lark_app_config=_required_environment("NETIZEN_LARK_APP_CONFIG"),
         admin_secret_file=_required_environment("NETIZEN_ADMIN_SECRET_FILE"),
         ready_file=str(ready_path),
         lifetime_lock_file=str(lifetime_lock_path),

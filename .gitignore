@@ -10,6 +10,7 @@ __pycache__/
 .env
 deploy/netizen.env
 config.yaml
+/lark-app/
 /LOCAL_ENVIRONMENT.md
 *.db
 *.db-shm

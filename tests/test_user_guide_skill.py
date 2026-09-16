@@ -13,6 +13,7 @@ from openai_codex import AsyncCodex, CodexConfig
 from netizen.experience import COMMAND_SPECS
 from netizen.sdk_gap_adapter import AppServerSkillCatalog
 from scripts.install_managed_skill import (
+    SKILL_NAMES,
     SkillInstallError,
     install_skill,
     remove_skill,
@@ -29,7 +30,7 @@ class UserGuideSkillInstallTest(unittest.TestCase):
     def test_release_skills_install_as_exact_global_copies(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             codex_home = Path(directory) / "codex-home"
-            for skill_name in (SKILL_NAME, "netizen-feishu"):
+            for skill_name in SKILL_NAMES:
                 with self.subTest(skill=skill_name):
                     source = ROOT / "skills" / skill_name
                     result = install_skill(
@@ -331,13 +332,15 @@ class UserGuideSkillInstallTest(unittest.TestCase):
 class UserGuideSkillContentTest(unittest.TestCase):
     def test_installed_guide_navigation_is_self_contained(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            installed = install_skill(
-                source_skill=RELEASE_SKILL,
-                codex_home=Path(directory) / "codex-home",
-            )
-            skill = Path(installed.target)
+            for skill_name in SKILL_NAMES:
+                with self.subTest(skill=skill_name):
+                    installed = install_skill(
+                        source_skill=ROOT / "skills" / skill_name,
+                        codex_home=Path(directory) / "codex-home",
+                    )
+                    skill = Path(installed.target)
 
-            self.assertEqual(local_link_errors(skill, skill.rglob("*.md")), [])
+                    self.assertEqual(local_link_errors(skill, skill.rglob("*.md")), [])
 
     def test_skill_has_discovery_metadata_and_no_scaffold_placeholders(self) -> None:
         skill = (RELEASE_SKILL / "SKILL.md").read_text(encoding="utf-8")
@@ -381,7 +384,7 @@ class UserGuideSkillDiscoveryTest(unittest.IsolatedAsyncioTestCase):
                     source_skill=ROOT / "skills" / skill_name,
                     codex_home=codex_home,
                 )
-                for skill_name in (SKILL_NAME, "netizen-feishu")
+                for skill_name in SKILL_NAMES
             }
             env = dict(os.environ)
             env.update(

@@ -106,6 +106,10 @@ their cited ADRs before changing that boundary.
   LaunchDaemon, root helper, persistent Netizen environment file, or PATH snapshot.
   Reload the exported interactive-login-shell environment at each start; Codex
   tool shells must not replace it (ADR 0022/0023).
+- The fixed `netizen` profile in `~/.netizen/lark-app/config.json` is the sole
+  application credential source (ADR 0066). Share its documented Lark CLI file
+  format without adding a CLI installation/runtime dependency. Preserve exact-App
+  repair versus whole-file deletion for rebinding and atomic credential writes.
 - Published Release and Source Install share one activation/rollback transaction.
   Keep database/Skill rollback gated by both unloaded manager target and released
   lifetime lock; restore CLOEXEC before Codex children start. Loaded/active is

@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-24
 amends: 0033
-amended_by: 0044, 0045, 0062
+amended_by: 0044, 0045, 0062, 0066
 related: 0032, 0034
 ---
 
@@ -12,6 +12,10 @@ related: 0032, 0034
 > 应用无 TTY 补权；[ADR 0062](0062-decouple-initial-app-onboarding-from-terminal-input.md)
 > 允许公开入口无 TTY 首次初始化与重绑定。下文无 TTY 直接退出的描述为历史；exact-App、
 > 删除 Secret 的重置意图、有效权限门禁与两阶段凭据/激活语义继续保留。
+
+> 凭据表示修订：[ADR 0066](0066-share-lark-app-credentials-with-optional-cli.md) 改为同一
+> profile 中空 `appSecret` 表示 exact-App 修复，删除整个应用凭据文件表示重绑定。
+> 下文旧路径与文件存在性描述保留为历史，不再作为当前配置格式。
 
 > 2026-08-27 权限契约更正：飞书 reaction create/delete API 接受 `im:message` 或更窄的
 > `im:message.reactions:write_only`。当前契约已经独立要求 `im:message`，因此后者不再作为
