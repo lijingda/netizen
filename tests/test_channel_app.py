@@ -8820,7 +8820,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.new()
         self.channel.inbound_messages["om_card"] = quoted_inbound(
             message_id="om_card",
-            content=InteractiveContent(card={}, card_version="v1"),
+            content=InteractiveContent(card={"schema": "2.0"}, card_version="v2"),
             content_text="[interactive]",
             raw_content_type="interactive",
         )
@@ -8930,7 +8930,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel.inbound_messages["om_card"] = quoted_inbound(
             message_id="om_card",
-            content=InteractiveContent(card={}, card_version="v1"),
+            content=InteractiveContent(card={"schema": "2.0"}, card_version="v2"),
             content_text="[interactive]",
             raw_content_type="interactive",
         )
@@ -8980,7 +8980,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.new()
         self.channel.inbound_messages["om_card"] = quoted_inbound(
             message_id="om_card",
-            content=InteractiveContent(card={}, card_version="v1"),
+            content=InteractiveContent(card={"schema": "2.0"}, card_version="v2"),
             content_text="[interactive]",
             raw_content_type="interactive",
         )

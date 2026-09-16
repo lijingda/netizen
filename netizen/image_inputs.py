@@ -18,6 +18,8 @@ from typing import Any, Literal, Protocol
 
 from openai_codex import ImageInput, TextInput
 
+from .message_content import MATERIAL_MESSAGE_TYPES, normalized_content_type
+
 
 _SUPPORTED_MESSAGE_TYPES = frozenset({"image", "post"})
 _IMAGE_MARKER_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
@@ -95,6 +97,10 @@ def current_message_image_references(message: Any) -> tuple[ImageReference, ...]
 
     message_type = normalized_message_type(message)
     resources = tuple(getattr(message, "resources", None) or ())
+    if message_type in MATERIAL_MESSAGE_TYPES:
+        # Material containers are projected by the shared content layer. Their
+        # resource descriptors are not proof of readable child image pixels.
+        return ()
     if message_type == "text":
         if resources:
             raise UnsupportedPromptMedia(
@@ -104,7 +110,7 @@ def current_message_image_references(message: Any) -> tuple[ImageReference, ...]
     if message_type not in _SUPPORTED_MESSAGE_TYPES:
         raise UnsupportedPromptMedia(
             f"暂不支持这种消息类型（{message_type or 'unknown'}）；"
-            "目前仅支持文本、普通图片和富文本图片。"
+            "目前支持文本、普通图片、富文本图片，以及卡片和合并转发材料。"
         )
     if message_type == "post":
         elements = _selected_post_elements(message)
@@ -441,22 +447,11 @@ def _replace_image_marker(
 
 
 def normalized_message_type(message: Any) -> str:
-    content = getattr(message, "content", None)
-    kind = _nonempty_string(getattr(content, "kind", None))
-    raw_kind = _nonempty_string(getattr(message, "raw_content_type", None))
-    normalized_raw_kind = "media" if raw_kind == "video" else raw_kind
-    if kind == "unknown" and raw_kind is not None:
-        return normalized_raw_kind or raw_kind
-    if (
-        kind is not None
-        and normalized_raw_kind is not None
-        and kind != normalized_raw_kind
-    ):
-        raise ImageInputContractError(
-            "Channel SDK 返回了相互冲突的消息类型，本条消息未执行；"
-            "请联系维护者检查 SDK 兼容性。"
-        )
-    return kind or normalized_raw_kind or "text"
+    return normalized_content_type(
+        message,
+        default="text",
+        conflict_error=ImageInputContractError,
+    )
 
 
 def _message_id(message: Any) -> str:
