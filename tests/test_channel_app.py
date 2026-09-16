@@ -3415,7 +3415,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn(expected, visible)
                     files = _card_button_values(OutboundCard(card=terminal), "发送")
                     self.assertEqual(len(files), 1)
-                    self.assertEqual((files[0]["path"], files[0]["turn_id"]), (str(image), f"turn:v1:{turn_id}"))
+                    self.assertEqual((files[0]["path"], files[0]["turn_id"]), (str(image.resolve()), f"turn:v1:{turn_id}"))
                     if delivery_fails:
                         fallback = self.channel.replies[-1][1]
                         self.assertIsInstance(fallback, str)
@@ -11392,7 +11392,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("累计修改", visible)
         self.assertNotIn("4 B", visible)
         send_values = _card_button_values(card, "发送")
-        self.assertEqual({value["path"] for value in send_values}, {str(artifact), str(image)})
+        self.assertEqual({value["path"] for value in send_values}, {str(artifact.resolve()), str(image.resolve())})
         send_value = send_values[0]
         self.assertEqual(send_value["v"], 4)
         self.assertEqual(send_value["binding_id"], f"binding:v1:{binding.id}")
