@@ -651,10 +651,11 @@ Task Feedback；Side 则在创建时一次性冻结 Parent 当时的 Task Feedba
 steer 和终态表情，但没有 `THINKING` pulse 或 Activity 过程卡。Goal 模块本身始终存在且不
 使用 Lifecycle Reaction。Completion Mention 在普通/Side 终态和 Goal 逻辑终态
 提及 admission 捕获的发起人；停止、暂停、状态未知和自动定时首轮不提及。提及只随
-终态投递，不进入运行卡、文件分页或保留的 Goal 控制投影。关闭进度卡时继续在最终
-回复内 @；开启时原卡更新不再 @，而是在确认更新的结果卡下另发一次话题 @ 回复。
-普通聊天以卡片而非用户消息建话题，已有话题保持原话题；新话题不继承原 Binding
-或 Codex 上下文。原卡不可用而另发最终回复（包括 Goal 超大正文）时，复用新回复内
+终态投递，不进入运行卡、文件分页或保留的 Goal 控制投影。新发送的最终回复在消息内 @；
+已有过程卡或 Goal 卡的更新不带 @，确认更新后另发一次引用结果卡的 @ 回复。
+Goal 即使关闭进度卡也复用卡片，因此其独立结束提醒不受进度开关影响。
+普通私聊和群主线使用普通引用回复，不创建话题；已有话题仍在原话题内发送新提醒。
+原卡不可用而另发最终回复（包括 Goal 超大正文）时，复用新回复内
 的 @，不为提醒造卡；已尝试提及后的回退不重复 @。客户端通知效果需要实测，完整边界见
 [ADR 0063](adr/0063-mention-task-initiators-in-terminal-results.md)。compaction 不使用这些选项。完整边界见
 [ADR 0046](adr/0046-add-opt-in-binding-task-feedback.md) 与

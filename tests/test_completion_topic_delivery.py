@@ -12,57 +12,67 @@ from netizen.domain import FeishuScope, ScopeKind
 
 
 class CompletionTopicDeliveryTest(unittest.IsolatedAsyncioTestCase):
-    async def test_public_sdk_serializes_real_at_in_a_card_topic_reply(self):
-        driver = SimpleNamespace(
-            reply_message=AsyncMock(return_value={
-                "code": 0,
-                "data": {
-                    "message_id": "om_reminder", "chat_id": "oc_chat",
-                    "thread_id": "omt_card", "root_id": "om_older_root",
-                    "parent_id": "om_result_card",
-                },
-            }),
-            create_message=AsyncMock(),
-        )
-        sender = OutboundSender(driver, OutboundConfig(retry=RetryConfig(max_attempts=1)))
+    async def test_public_sdk_serializes_real_at_reply_to_card_in_same_scope(self):
+        for kind in (ScopeKind.DIRECT, ScopeKind.GROUP, ScopeKind.TOPIC):
+            with self.subTest(kind=kind):
+                topic = kind is ScopeKind.TOPIC
+                driver = SimpleNamespace(
+                    reply_message=AsyncMock(return_value={
+                        "code": 0,
+                        "data": {
+                            "message_id": "om_reminder", "chat_id": "oc_chat",
+                            "thread_id": "omt_card" if topic else None,
+                            "root_id": "om_older_root", "parent_id": "om_result_card",
+                        },
+                    }),
+                    create_message=AsyncMock(),
+                )
+                sender = OutboundSender(driver, OutboundConfig(retry=RetryConfig(max_attempts=1)))
 
-        async def send(to, content, opts):
-            return await sender.send(
-                content, receive_id=to, receive_id_type=opts.receive_id_type,
-                reply_to=opts.reply_to, reply_in_thread=opts.reply_in_thread,
-                reply_target_gone=opts.reply_target_gone, uuid_=opts.uuid,
-            )
+                async def send(to, content, opts):
+                    return await sender.send(
+                        content, receive_id=to, receive_id_type=opts.receive_id_type,
+                        reply_to=opts.reply_to, reply_in_thread=opts.reply_in_thread,
+                        reply_target_gone=opts.reply_target_gone, uuid_=opts.uuid,
+                    )
 
-        confirmed = await send_completion_mention(
-            SimpleNamespace(send=send),
-            scope=FeishuScope("cli_app", "oc_chat", ScopeKind.GROUP),
-            card_message_id="om_result_card", user_id="ou_owner", operation_id="turn-one",
-        )
-        self.assertTrue(confirmed)
-        driver.reply_message.assert_awaited_once()
-        request = driver.reply_message.call_args.kwargs
-        self.assertEqual(request["message_id"], "om_result_card")
-        self.assertEqual(request["msg_type"], "text")
-        self.assertTrue(request["reply_in_thread"])
-        self.assertTrue(request["uuid"])
-        text = json.loads(request["content"])["text"]
-        self.assertEqual(text.count('<at user_id="ou_owner">'), 1)
-        self.assertIn("本轮任务已结束。", text)
-        driver.create_message.assert_not_awaited()
+                confirmed = await send_completion_mention(
+                    SimpleNamespace(send=send),
+                    scope=FeishuScope("cli_app", "oc_chat", kind, "omt_card" if topic else None),
+                    card_message_id="om_result_card", user_id="ou_owner", operation_id="turn-one",
+                )
+                self.assertTrue(confirmed)
+                driver.reply_message.assert_awaited_once()
+                request = driver.reply_message.call_args.kwargs
+                self.assertEqual(request["message_id"], "om_result_card")
+                self.assertEqual(request["msg_type"], "text")
+                self.assertIs(request["reply_in_thread"], topic)
+                self.assertTrue(request["uuid"])
+                text = json.loads(request["content"])["text"]
+                self.assertEqual(text.count('<at user_id="ou_owner">'), 1)
+                self.assertIn("本轮任务已结束。", text)
+                driver.create_message.assert_not_awaited()
 
-    async def test_receipts_must_confirm_the_expected_card_topic_without_resending(self):
+    async def test_receipts_must_confirm_the_expected_card_reply_without_resending(self):
         base = {
             "message_id": "om_reminder", "chat_id": "oc_chat",
-            "thread_id": "omt_topic", "root_id": "om_older_root", "parent_id": "om_card",
+            "thread_id": None, "root_id": "om_older_root", "parent_id": "om_card",
         }
         cases = (
+            (ScopeKind.DIRECT, {}, True),
             (ScopeKind.GROUP, {}, True),
+            (ScopeKind.GROUP, {"root_id": "om_card"}, True),
             (ScopeKind.GROUP, {"parent_id": "om_user"}, False),
-            (ScopeKind.TOPIC, {"parent_id": "om_topic_root"}, True),
+            (ScopeKind.GROUP, {"parent_id": None}, False),
+            (ScopeKind.TOPIC, {"thread_id": "omt_topic", "parent_id": "om_topic_root"}, True),
             (ScopeKind.TOPIC, {"thread_id": "omt_wrong"}, False),
+            (ScopeKind.TOPIC, {"thread_id": None}, False),
+            (ScopeKind.TOPIC, {"thread_id": "omt_topic", "root_id": None}, False),
+            (ScopeKind.TOPIC, {"thread_id": "omt_topic", "parent_id": None}, False),
             (ScopeKind.GROUP, {"chat_id": "oc_wrong"}, False),
             (ScopeKind.GROUP, {"root_id": None}, False),
-            (ScopeKind.GROUP, {"thread_id": None}, False),
+            (ScopeKind.DIRECT, {"thread_id": "omt_unexpected"}, False),
+            (ScopeKind.GROUP, {"thread_id": "omt_unexpected"}, False),
             (ScopeKind.GROUP, {"message_id": "om_mismatch"}, False),
         )
         for kind, changes, expected in cases:
