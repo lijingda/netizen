@@ -722,27 +722,56 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
             conversation=SimpleNamespace(thread_id="omt_task"),
         )
 
-    async def test_sdk_post_serialization_mentions_once_across_result_chunks(self):
-        driver = SimpleNamespace(
-            reply_message=AsyncMock(return_value={
-                "code": 0, "data": {"message_id": "om_result", "chat_id": "oc_direct"},
-            }),
-            create_message=AsyncMock(),
-        )
-        sdk_origin = self.use_sdk_reply(driver)
-        await self.app.handle_completion(self.outcome(
-            origin=sdk_origin,
-            result=fixtures.completed_turn_result(final_response="完整结果\n" * 2000),
-        ))
-        self.assertGreaterEqual(driver.reply_message.await_count, 2)
-        contents = [json.loads(call.kwargs["content"]) for call in driver.reply_message.call_args_list]
-        mentions = [node for content in contents for node in fixtures._elements(content, "at")]
-        self.assertEqual([mention["user_id"] for mention in mentions], ["ou_initiator"])
-        self.assertEqual(len(fixtures._elements(contents[0], "at")), 1)
-        for call in driver.reply_message.call_args_list:
-            self.assertEqual(call.kwargs["message_id"], self.origin.id)
-            self.assertEqual(call.kwargs["msg_type"], "post")
-        driver.create_message.assert_not_awaited()
+    async def test_sdk_post_images_keep_chunk_routes_and_first_chunk_mention(self):
+        (self.fixture.project / "result.png").write_bytes(fixtures.PNG)
+        answer = "完整结果\n" * 900 + "\n![图](result.png)\n\n" + "完整结果\n" * 1100
+        for topic in (False, True):
+            for mention in (False, True):
+                with self.subTest(topic=topic, mention=mention):
+                    requests = []
+
+                    async def sent(**kwargs):
+                        requests.append(kwargs)
+                        return {"code": 0, "data": {
+                            "message_id": f"om_result_{len(requests)}", "chat_id": "oc_direct",
+                        }}
+
+                    driver = SimpleNamespace(
+                        reply_message=AsyncMock(side_effect=sent),
+                        create_message=AsyncMock(side_effect=sent),
+                    )
+                    sdk_origin = self.use_sdk_reply(driver)
+                    sdk_origin.conversation.thread_id = "omt_task" if topic else None
+                    upload_count = len(self.channel.upload_calls)
+                    await self.app.handle_completion(self.outcome(
+                        origin=sdk_origin,
+                        result=fixtures.completed_turn_result(final_response=answer),
+                        task_feedback=BindingTaskFeedback(
+                            progress_card_enabled=False, completion_mention_enabled=mention,
+                        ),
+                    ))
+                    self.assertEqual(len(self.channel.upload_calls), upload_count + 1)
+                    self.assertGreaterEqual(len(requests), 2)
+                    contents = [json.loads(request["content"]) for request in requests]
+                    visible = "\n".join(
+                        node["text"] for content in contents
+                        for node in fixtures._elements(content, "md")
+                    )
+                    self.assertEqual(visible.count("完整结果"), 2000)
+                    self.assertEqual(visible.count(f"![图](img_uploaded_{upload_count + 1})"), 1)
+                    self.assertNotIn("result.png", visible)
+                    mentions = [node for content in contents for node in fixtures._elements(content, "at")]
+                    self.assertEqual([node["user_id"] for node in mentions], ["ou_initiator"] if mention else [])
+                    self.assertEqual(len(fixtures._elements(contents[0], "at")), int(mention))
+                    self.assertTrue(all(request["msg_type"] == "post" for request in requests))
+                    for call in driver.reply_message.call_args_list:
+                        self.assertEqual(call.kwargs["message_id"], self.origin.id)
+                        self.assertEqual(call.kwargs["reply_in_thread"], topic)
+                    if topic:
+                        driver.create_message.assert_not_awaited()
+                    else:
+                        driver.reply_message.assert_awaited_once()
+                        self.assertEqual(driver.create_message.await_count, len(requests) - 1)
 
     async def test_later_chunk_audit_failure_safe_notice_does_not_repeat_successful_mention(self):
         driver = SimpleNamespace(

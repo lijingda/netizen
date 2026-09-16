@@ -237,6 +237,7 @@ from .prompt_projection import (
     render_plain_prompt,
 )
 from .projects import ProjectError, ProjectRegistry, UnknownProject
+from .result_images import prepare_result_images
 from .quoted_context import (
     QuotedMessageError,
     QuotedMessageUnavailable,
@@ -1470,11 +1471,15 @@ class ChannelApplication:
             if outcome.error is None and outcome.status == "completed"
             else TurnDiffSummary()
         )
+        prepared_response = None
+        if outcome.error is None and outcome.status == "completed":
+            prepared_response = await self._prepare_task_result_images(outcome)
         if outcome.task_feedback.progress_card_enabled:
             try:
                 attempt = await self._complete_task_progress_card(
                     outcome,
                     diff_summary,
+                    prepared_response=prepared_response,
                 )
                 if attempt is not None:
                     if attempt.updated:
@@ -1525,12 +1530,45 @@ class ChannelApplication:
                 outcome, f"任务未完成：{detail[:500]}",
             )
             return
-        await self._complete_task_with_files(outcome, diff_summary)
+        await self._complete_task_with_files(
+            outcome, diff_summary, prepared_response=prepared_response,
+        )
+
+    async def _prepare_task_result_images(
+        self,
+        outcome: TurnOutcome | SideTurnOutcome,
+    ) -> str | None:
+        content = outcome.final_response
+        if not content or "![" not in content:
+            return content
+        cwd: Path | None = None
+        try:
+            if isinstance(outcome, SideTurnOutcome):
+                cwd = outcome.cwd
+            else:
+                binding = self._bindings.get(outcome.binding_id)
+                cwd = self._projects.resolve_for_binding(binding.project_alias).cwd
+        except Exception:
+            logger.warning("inline result images lack a relative-path base")
+        return await self._prepare_result_images(content, cwd=cwd)
+
+    async def _prepare_result_images(
+        self, content: str, *, cwd: Path | None,
+    ) -> str:
+        try:
+            return await prepare_result_images(self._channel, content, cwd=cwd)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("could not prepare inline result images; preserving answer")
+            return content
 
     async def _complete_task_progress_card(
         self,
         outcome: TurnOutcome | SideTurnOutcome,
         diff_summary: TurnDiffSummary,
+        *,
+        prepared_response: str | None = None,
     ) -> _CardUpdateAttempt | None:
         terminal_status = "failed"
         final_response: str
@@ -1559,7 +1597,7 @@ class ChannelApplication:
             final_response = f"任务未完成：{detail[:500]}"
         else:
             terminal_status = "completed"
-            final_response = outcome.final_response or "任务已结束，未产生文本回复。"
+            final_response = prepared_response or outcome.final_response or "任务已结束，未产生文本回复。"
             if has_turn_file_references(
                 tuple(getattr(outcome.result, "items", ())),
                 diff_summary=diff_summary,
@@ -1710,8 +1748,10 @@ class ChannelApplication:
         self,
         outcome: TurnOutcome | SideTurnOutcome,
         diff_summary: TurnDiffSummary,
+        *,
+        prepared_response: str | None = None,
     ) -> None:
-        final_response = outcome.final_response or "任务已结束，未产生文本回复。"
+        final_response = prepared_response or outcome.final_response or "任务已结束，未产生文本回复。"
         items = tuple(getattr(outcome.result, "items", ()))
         if not has_turn_file_references(
             items,
@@ -1731,7 +1771,7 @@ class ChannelApplication:
                 binding_id=file_provenance_id,
                 turn_id=outcome.turn_id,
                 final_response=(
-                    outcome.final_response or _TURN_FILES_WITHOUT_FINAL_RESPONSE
+                    prepared_response or outcome.final_response or _TURN_FILES_WITHOUT_FINAL_RESPONSE
                 ),
                 files=files,
                 additions=diff_summary.additions,
@@ -1921,9 +1961,11 @@ class ChannelApplication:
             )
         files: tuple[TurnFile, ...] = ()
         goal_diff_summary = TurnDiffSummary()
+        result_cwd: Path | None = None
         if outcome.final_turn_status == "completed":
             try:
                 project = self._projects.resolve_for_binding(identity_project_alias)
+                result_cwd = project.cwd
                 goal_diff_summary = turn_patch_summary(
                     outcome.final_items,
                     project.cwd,
@@ -1960,6 +2002,10 @@ class ChannelApplication:
                     extra={"binding_id": outcome.binding_id},
                 )
 
+        if result_text is not None and outcome.final_turn_status == "completed":
+            result_text = await self._prepare_result_images(
+                result_text, cwd=result_cwd,
+            )
         projection = ReplyCardProjection(
             scope=scope,
             goal=_reply_goal_module_for_identity(

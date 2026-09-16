@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
+
+from lark_channel import MediaSource
 
 
 class ReplyChannel(Protocol):
@@ -22,6 +24,15 @@ class ReplyChannel(Protocol):
     ) -> object: ...
 
     async def update_card(self, message_id: str, card: dict[str, Any]) -> object: ...
+
+    async def upload_media(
+        self,
+        source: MediaSource,
+        *,
+        kind: Literal["image", "file"],
+        file_name: str | None = None,
+        file_type: str | None = None,
+    ) -> str: ...
 
     async def fetch_message(self, message_id: str) -> dict[str, Any]: ...
 

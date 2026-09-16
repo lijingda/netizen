@@ -3,10 +3,13 @@ status: accepted
 date: 2026-08-19
 amends: 0024, 0025, 0026
 related: 0008, 0015, 0021
-amended_by: 0047, 0053, 0058
+amended_by: 0047, 0053, 0058, 0065
 ---
 
 # 以 Turn diff 补全本轮文件，并让新卡片自带文件清单
+
+> [ADR 0065](0065-preview-local-images-in-result-markdown.md) 允许最终正文明确引用的
+> 本地图片自动上传并预览，不要求属于本轮产物；Files 来源与按需发送规则保持不变。
 
 > 修订说明：[ADR 0047](0047-compose-typed-reply-cards-and-finalize-complete-goals.md) 保留
 > 自包含 callback 边界；Goal + Files 使用 v5 完整 Reply Card manifest，使 Goal、Activity、

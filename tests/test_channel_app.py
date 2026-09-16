@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 import uuid
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -204,6 +205,8 @@ class FakeChannel:
         self.reply_results: list[object | BaseException] = []
         self.send_calls: list[tuple[str, object, object]] = []
         self.send_results: list[object | BaseException] = []
+        self.upload_calls: list[tuple[MediaSource, str]] = []
+        self.upload_results: list[str | BaseException] = []
         self.reactions: list[tuple[str, str]] = []
         self.reaction_operations: list[tuple[str, str, str]] = []
         self.reaction_removals: list[tuple[str, str]] = []
@@ -260,6 +263,15 @@ class FakeChannel:
             success=True,
             raw={"data": {"reaction_id": reaction_id}},
         )
+
+    async def upload_media(self, source: MediaSource, *, kind: str) -> str:
+        self.upload_calls.append((source, kind))
+        if self.upload_results:
+            result = self.upload_results.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        return f"img_uploaded_{len(self.upload_calls)}"
 
     async def remove_reaction(
         self,
@@ -3341,6 +3353,121 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("点击“发送”后", rendered)
         self.assertNotIn(str(image.parent), visible)
 
+    async def test_inline_images_upload_once_with_progress_and_delivery_fallbacks(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-images")
+        image = self.project / "result.png"
+        image.write_bytes(PNG)
+        for progress in (False, True):
+            for delivery_fails in (False, True):
+                with self.subTest(progress=progress, delivery_fails=delivery_fails):
+                    feedback = BindingTaskFeedback(progress_card_enabled=progress)
+                    turn_id = f"turn-image-{progress}-{delivery_fails}"
+                    activity = turn_activity_snapshot(
+                        binding_id=binding.id, thread_id="native-images", turn_id=turn_id,
+                    )
+                    self.runtime.turn_activity_values[binding.id] = activity
+                    self.runtime.submission = Submission(
+                        SubmitDisposition.STARTED, binding.id, "native-images", turn_id,
+                        lambda: None, task_feedback=feedback,
+                    )
+                    if progress:
+                        self.channel.reply_results.append(
+                            sent_result("om_progress_images", chat_id="oc_direct")
+                        )
+                    origin = FakeMessage("draw", message_id=f"om_{turn_id}")
+                    await self.app.handle_message(origin)
+                    self.channel.fail_card_updates = delivery_fails
+                    if delivery_fails:
+                        self.channel.reply_results.extend((RuntimeError("card failed"), object()))
+                    uploaded_before = len(self.channel.upload_calls)
+                    key = f"img_uploaded_{uploaded_before + 1}"
+                    expected = f"before\n\n![first]({key})\n\nmiddle\n\n![second]({key})\n\nafter"
+                    with (
+                        patch.object(self.app, "_task_completion_files", wraps=self.app._task_completion_files) as collect_files,
+                        self.assertLogs("netizen", level="ERROR") if delivery_fails else nullcontext(),
+                    ):
+                        await self.app.handle_completion(TurnOutcome(
+                            binding_id=binding.id, thread_id="native-images", turn_id=turn_id,
+                            owner_id="ou_user", origin=origin,
+                            result=completed_turn_result(
+                                image_generation_item(image),
+                                final_response="before\n\n![first](result.png)\n\nmiddle\n\n![second](result.png)\n\nafter",
+                            ),
+                            task_feedback=feedback, activity=activity,
+                        ))
+
+                    if not (progress and delivery_fails):
+                        self.assertEqual(collect_files.call_count, 1)
+                    self.assertEqual(len(self.channel.upload_calls), uploaded_before + 1)
+                    source, kind = self.channel.upload_calls[-1]
+                    self.assertEqual((source.kind, source.buffer, kind), ("buffer", PNG, "image"))
+                    if progress and not delivery_fails:
+                        terminal = self.channel.updates[-1][1]
+                    else:
+                        terminal = next(
+                            content.card for _, content in reversed(self.channel.replies)
+                            if isinstance(content, OutboundCard)
+                        )
+                    visible = "\n".join(element["content"] for element in _elements(terminal, "markdown"))
+                    self.assertIn(expected, visible)
+                    files = _card_button_values(OutboundCard(card=terminal), "发送")
+                    self.assertEqual(len(files), 1)
+                    self.assertEqual((files[0]["path"], files[0]["turn_id"]), (str(image), f"turn:v1:{turn_id}"))
+                    if delivery_fails:
+                        fallback = self.channel.replies[-1][1]
+                        self.assertIsInstance(fallback, str)
+                        self.assertEqual(fallback, expected)
+                    self.channel.fail_card_updates = False
+
+    async def test_image_reference_without_turn_evidence_preserves_post_message_type(self) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-images")
+        image = self.project / "unrelated.png"
+        image.write_bytes(PNG)
+
+        before = len(self.channel.replies)
+        await self.app.handle_completion(TurnOutcome(
+            binding_id=binding.id, thread_id="native-images", turn_id="turn-images",
+            owner_id="ou_user", origin=origin,
+            result=completed_turn_result(final_response="before\n\n![unrelated](unrelated.png)\n\nafter"),
+        ))
+
+        self.assertEqual(len(self.channel.upload_calls), 1)
+        self.assertEqual(self.channel.upload_calls[0][0].buffer, PNG)
+        self.assertEqual(len(self.channel.replies) - before, 1)
+        post = self.channel.replies[-1][1]
+        self.assertIsInstance(post, OutboundPost)
+        self.assertEqual(post.markdown, "before\n\n![unrelated](img_uploaded_1)\n\nafter")
+        self.assertIsNone(post.post)
+        self.assertEqual(self.channel.send_calls, [])
+
+    async def test_missing_local_image_keeps_answer_without_upload_or_files(self) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-images")
+
+        await self.app.handle_completion(TurnOutcome(
+            binding_id=binding.id, thread_id="native-images", turn_id="turn-images",
+            owner_id="ou_user", origin=origin,
+            result=completed_turn_result(final_response="before\n\n![missing](missing.png)\n\nafter"),
+        ))
+
+        self.assertEqual(self.channel.upload_calls, [])
+        result = self.channel.replies[-1][1]
+        self.assertNotIsInstance(result, OutboundCard)
+        content = result.markdown if isinstance(result, OutboundPost) else result
+        self.assertIn("before", content)
+        self.assertIn("missing", content)
+        self.assertIn("after", content)
+        self.assertNotIn("![", content)
+        self.assertNotIn("missing.png", content)
+
     async def test_file_card_delivery_failure_falls_back_to_plain_answer(
         self,
     ) -> None:
@@ -3418,9 +3545,12 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         paths = tuple(f"result-{index:02}.txt" for index in range(10))
         for path in paths:
             (self.project / path).write_text(path, encoding="utf-8")
+        image = self.project / "result.png"
+        image.write_bytes(PNG)
         result = completed_turn_result(
             file_change_item(*paths),
-            final_response="ten files",
+            image_generation_item(image),
+            final_response="ten files\n\n![result](result.png)",
         )
         await self.app.handle_completion(
             TurnOutcome(
@@ -3435,6 +3565,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         card = self.channel.replies[-1][1]
         assert isinstance(card, OutboundCard)
         next_page = _card_button_value(card, "跳转")
+        self.assertEqual(len(self.channel.upload_calls), 1)
+        image.unlink()
 
         await self.new(message_id="om_switched")
         self.assertNotEqual(self.store.active_binding(scope.key).id, binding.id)
@@ -3473,6 +3605,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("result-08.txt", updated)
         self.assertIn("result-09.txt", updated)
         self.assertNotIn("result-00.txt", updated_visible)
+        self.assertIn("![result](img_uploaded_1)", updated_visible)
+        self.assertEqual(len(self.channel.upload_calls), 1)
         self.assertEqual(
             self.store._connection.total_changes,
             changes_before_callback,
@@ -3492,7 +3626,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         cards = [
             reply_card(ReplyCardProjection(
                 scope=scope,
-                result=ReplyCardResultModule("frozen answer"),
+                result=ReplyCardResultModule("frozen answer\n\n![result](img_frozen)"),
                 files=ReplyCardFilesModule(
                     binding_id=binding.id, turn_id="turn-files", items=files,
                     action_version=version,
@@ -3526,6 +3660,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             updated = self.channel.updates[-1][1]
             visible = "\n".join(item["content"] for item in _elements(updated, "markdown"))
             self.assertIn("frozen answer", visible)
+            self.assertIn("![result](img_frozen)", visible)
             self.assertIn("result-16.txt", visible)
             self.assertNotIn("result-00.txt", visible)
             self.assertEqual(_elements(updated, "select_static")[0]["initial_option"], "2")
@@ -3545,6 +3680,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store._connection.total_changes, changes_before_callback)
         self.assertEqual(restarted_runtime.submit_calls, [])
         self.assertEqual(restarted_runtime.thread_metadata_calls, [])
+        self.assertEqual(self.channel.upload_calls, [])
 
     async def test_file_buttons_send_file_and_original_image_to_card_topic(
         self,
@@ -7321,6 +7457,10 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         paths = tuple(f"goal-result-{index:02}.txt" for index in range(10))
         for path in paths:
             (self.project / path).write_text(path, encoding="utf-8")
+        image = self.project / "zz-goal-image.png"
+        image.write_bytes(PNG)
+        earlier_image = self.project / "earlier-turn.png"
+        earlier_image.write_bytes(PNG + b"earlier")
 
         await self.app.handle_message(
             FakeMessage("/goal ship safely", message_id="om_goal_composed_origin")
@@ -7372,8 +7512,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 goal=native_goal(GoalStatus.COMPLETE),
                 final_physical_turn_id="goal-turn-final",
                 final_turn_status="completed",
-                final_items=(final_item,),
-                final_response="goal files ready",
+                final_items=(final_item, image_generation_item(image)),
+                final_response="goal files ready\n\n![final](zz-goal-image.png)\n\n![earlier](earlier-turn.png)",
                 turn_diff=final_diff,
                 task_feedback=feedback,
                 activity=activity,
@@ -7389,6 +7529,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("generate outputs", rendered)
         self.assertIn("另有 1 项未展示", rendered)
         self.assertIn("goal files ready", rendered)
+        result_visible = "\n".join(element["content"] for element in _elements(terminal, "markdown"))
+        self.assertIn("![final](img_uploaded_1)", result_visible)
+        self.assertIn("![earlier](img_uploaded_2)", result_visible)
+        self.assertNotIn("earlier-turn.png", rendered)
+        self.assertEqual(len(self.channel.upload_calls), 2)
+        self.assertEqual(self.channel.upload_calls[0][0].buffer, PNG)
+        self.assertEqual(self.channel.upload_calls[1][0].buffer, PNG + b"earlier")
         self.assertIn("goal-result-00.txt", rendered)
         self.assertIn("+10", rendered)
         self.assertIn("-12", rendered)
@@ -7406,12 +7553,15 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             if behavior["value"]["intent"] == "turn-file.page"
         )
         self.assertEqual(page_value["v"], 5)
+        self.assertEqual(len(page_value["files"]), 11)
         self.assertEqual((page_value["a"], page_value["d"]), (10, 12))
         self.assertEqual(
             (page_value["files"][8]["a"], page_value["files"][8]["d"]),
             (1, 1),
         )
         self.runtime.goal_snapshot_value = None
+        image.unlink()
+        earlier_image.unlink()
 
         await self.app.handle_card_action(
             self.direct_button_event(
@@ -7425,6 +7575,9 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Goal 已完成并自动结束", paged)
         self.assertIn("generate outputs", paged)
         self.assertIn("goal files ready", paged)
+        self.assertIn("![final](img_uploaded_1)", paged)
+        self.assertIn("![earlier](img_uploaded_2)", paged)
+        self.assertEqual(len(self.channel.upload_calls), 2)
         self.assertIn("goal-result-08.txt", paged)
         self.assertIn("+10", paged)
         self.assertIn("-12", paged)
@@ -11191,8 +11344,13 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_side_turn_without_progress_uses_result_files_card(self) -> None:
         binding, record = await self.open_direct_side()
-        artifact = self.project / "side-output.txt"
+        side_cwd = self.project.parent / "side-cwd"
+        side_cwd.mkdir()
+        artifact = side_cwd / "side-output.txt"
         artifact.write_text("side", encoding="utf-8")
+        image = side_cwd / "side-image.png"
+        image.write_bytes(PNG)
+        (self.project / image.name).write_bytes(PNG + b"wrong-parent-cwd")
         prompt = FakeMessage(
             "create a file",
             message_id="om-side-file-prompt",
@@ -11211,10 +11369,11 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 turn_id="side-turn-1",
                 owner_id="ou_user",
                 origin=prompt,
-                cwd=self.project,
+                cwd=side_cwd,
                 result=completed_turn_result(
                     file_change_item("side-output.txt"),
-                    final_response="side file ready",
+                    image_generation_item(Path("side-image.png")),
+                    final_response="side file ready\n\n![side](side-image.png)",
                 ),
             )
         )
@@ -11225,14 +11384,55 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         visible = json.dumps(card.card, ensure_ascii=False)
         self.assertIn("side file ready", visible)
         self.assertIn("side-output.txt", visible)
+        self.assertIn("![side](img_uploaded_1)", visible)
+        self.assertEqual(len(self.channel.upload_calls), 1)
+        self.assertEqual(self.channel.upload_calls[0][0].buffer, PNG)
         self.assertNotIn("collapsible_panel", visible)
         self.assertIn("<font color='green'>+0", visible)
         self.assertIn("累计修改", visible)
         self.assertNotIn("4 B", visible)
-        send_value = _card_button_value(card, "发送")
+        send_values = _card_button_values(card, "发送")
+        self.assertEqual({value["path"] for value in send_values}, {str(artifact), str(image)})
+        send_value = send_values[0]
         self.assertEqual(send_value["v"], 4)
         self.assertEqual(send_value["binding_id"], f"binding:v1:{binding.id}")
         self.assertEqual(send_value["topic_id"], record.topic_id)
+
+    async def test_side_image_without_turn_evidence_uses_own_cwd_and_preserves_post_type(self) -> None:
+        binding, record = await self.open_direct_side()
+        sends_before = len(self.channel.send_calls)
+        side_cwd = self.project.parent / "side-images"
+        side_cwd.mkdir()
+        (side_cwd / "local.png").write_bytes(PNG)
+        (self.project / "local.png").write_bytes(PNG + b"wrong-parent-cwd")
+        prompt = FakeMessage(
+            "show the existing image",
+            message_id="om-side-existing-image",
+            chat_id="oc-direct",
+            chat_type="p2p",
+            thread_id=record.topic_id,
+            mentioned_bot=False,
+        )
+
+        await self.app.handle_completion(SideTurnOutcome(
+            side_id=record.id,
+            parent_binding_id=binding.id,
+            thread_id="native-side-1",
+            turn_id="side-turn-1",
+            owner_id="ou_user",
+            origin=prompt,
+            cwd=side_cwd,
+            result=completed_turn_result(final_response="side answer\n\n![local](local.png)"),
+        ))
+
+        post = self.channel.replies[-1][1]
+        self.assertIsInstance(post, OutboundPost)
+        self.assertEqual(post.markdown, "side answer\n\n![local](img_uploaded_1)")
+        self.assertIsNone(post.post)
+        self.assertEqual(len(self.channel.upload_calls), 1)
+        self.assertEqual(self.channel.upload_calls[0][0].buffer, PNG)
+        self.assertIs(self.channel.reply_targets[-1], prompt)
+        self.assertEqual(len(self.channel.send_calls), sends_before)
 
     async def test_side_turn_progress_updates_one_card_and_keeps_files(
         self,
@@ -11244,6 +11444,8 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         binding, record = await self.open_direct_side(task_feedback=feedback)
         artifact = self.project / "side-progress.txt"
         artifact.write_text("side", encoding="utf-8")
+        image = self.project / "side-progress.png"
+        image.write_bytes(PNG)
         initial = side_turn_activity_snapshot(side_id=record.id)
         self.runtime.side_turn_activity_values[record.id] = initial
         self.app._progress_cards = reply_presenter._ReplyCardPresenter(
@@ -11304,7 +11506,8 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 cwd=self.project,
                 result=completed_turn_result(
                     file_change_item("side-progress.txt"),
-                    final_response="side progress complete",
+                    image_generation_item(image),
+                    final_response="side progress complete\n\n![side](side-progress.png)",
                 ),
                 task_feedback=feedback,
                 activity=updated,
@@ -11318,6 +11521,8 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(panel["expanded"])
         visible = json.dumps(terminal, ensure_ascii=False)
         self.assertIn("side progress complete", visible)
+        self.assertIn("![side](img_uploaded_1)", visible)
+        self.assertEqual(len(self.channel.upload_calls), 1)
         self.assertIn("side-progress.txt", visible)
         self.assertIn("create side file", visible)
         self.assertIn((prompt.id, "DONE"), self.channel.reactions)

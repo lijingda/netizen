@@ -20,6 +20,7 @@ from lark_channel import (
     DedupStore,
     Events,
     FeishuChannel,
+    FeishuChannelError,
     FeishuChannelErrorCode,
     Identity,
     InboundConfig,
@@ -497,6 +498,18 @@ class LarkSdkContractTest(unittest.IsolatedAsyncioTestCase):
                 SendResult.fail(lock_error)
             )
         )
+
+    async def test_public_upload_media_returns_image_key_without_sending(self) -> None:
+        channel = FeishuChannel(app_id="cli_contract", app_secret="test-secret")
+        upload = AsyncMock(return_value={"code": 0, "data": {"image_key": "img_v3_inline"}})
+        source = MediaSource(kind="buffer", buffer=b"image bytes")
+        with patch.object(channel._sender._driver, "upload_image", upload):
+            key = await channel.upload_media(source, kind="image")
+            self.assertEqual(key, "img_v3_inline")
+            upload.assert_awaited_once_with(data=b"image bytes", file_name="upload")
+            upload.return_value = {"code": 0, "data": {}}
+            with self.assertRaises(FeishuChannelError):
+                await channel.upload_media(source, kind="image")
 
     def test_dedup_store_protocol_remains_frozen(self) -> None:
         self.assertEqual(
