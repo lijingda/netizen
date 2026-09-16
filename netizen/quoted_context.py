@@ -3,8 +3,8 @@
 This module is deliberately the only Netizen boundary that knows about the
 version-pinned lark-channel-sdk 1.4.0 quote gaps. Quoted content is otherwise
 consumed through the SDK's public normalized message types; public ``raw`` is
-used only for the relation gate, best-effort deletion-state validation, and a
-bounded CardKit 2.0 visible-text adapter when the SDK returns empty text.
+used only for the relation gate, best-effort deletion-state validation, card
+version validation, and a bounded CardKit 2.0 adapter when SDK text is empty.
 """
 
 from __future__ import annotations
@@ -14,7 +14,10 @@ from collections.abc import Iterable
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
+from lark_channel import parse_message_content
+
 from .image_inputs import ImagePromptReferences
+from .message_content import usable_text as _usable_text, validate_interactive_version
 from .message_projection import (
     HistoricalMessageContractError as QuotedMessageContractError,
     HistoricalMessageError as QuotedMessageError,
@@ -37,15 +40,6 @@ _CARD_NODE_LIMIT = 4_096
 _CARD_DEPTH_LIMIT = 32
 _CARD_PART_LIMIT = 512
 _CARD_TEXT_LIMIT = 64_000
-
-_PLACEHOLDER_TEXT = frozenset(
-    {
-        "",
-        "[interactive]",
-        "[unsupported message]",
-        "<forwarded_messages/>",
-    }
-)
 
 
 def quoted_message_id(message: Any, *, sdk_version: str | None = None) -> str | None:
@@ -140,12 +134,16 @@ def interactive_quote_visible_text(
     values, confirmation dialogs, and option payloads are never projected.
     """
 
+    card = _card_from_quote_raw(getattr(context, "raw", None))
+    if card is not None:
+        validate_interactive_version(parse_message_content("interactive", card))
     text = _usable_text(getattr(context, "text", None))
     if text is not None:
         return text
 
-    card = _cardkit_v2_from_quote_raw(getattr(context, "raw", None))
-    if card is None:
+    if card is None or card.get("schema") != "2.0":
+        return None
+    if not isinstance(card.get("header"), dict) and not isinstance(card.get("body"), dict):
         return None
     installed = sdk_version or _installed_sdk_version()
     if installed != _SDK_RAW_COMPAT_VERSION:
@@ -204,7 +202,7 @@ def _raw_message_dict(value: Any) -> dict[str, Any]:
     return nested if isinstance(nested, dict) else value
 
 
-def _cardkit_v2_from_quote_raw(value: Any) -> dict[str, Any] | None:
+def _card_from_quote_raw(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     data = value.get("data") if isinstance(value.get("data"), dict) else value
@@ -218,18 +216,14 @@ def _cardkit_v2_from_quote_raw(value: Any) -> dict[str, Any] | None:
     content = body.get("content")
     if isinstance(content, str):
         if len(content) > _CARD_RAW_LIMIT:
-            return None
+            raise QuotedMessageUnavailable(
+                "应用卡片内容超过可验证范围，本条消息未执行。"
+            )
         try:
             content = json.loads(content)
         except (RecursionError, ValueError):
             return None
-    if not isinstance(content, dict) or content.get("schema") != "2.0":
-        return None
-    if not isinstance(content.get("header"), dict) and not isinstance(
-        content.get("body"), dict
-    ):
-        return None
-    return content
+    return content if isinstance(content, dict) else None
 
 
 def _flatten_cardkit_v2_visible_text(card: dict[str, Any]) -> str | None:
@@ -303,13 +297,6 @@ def _flatten_cardkit_v2_visible_text(card: dict[str, Any]) -> str | None:
     except ProjectionLimit:
         return None
     return _usable_text("\n".join(parts))
-
-
-def _usable_text(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    text = value.strip()
-    return None if text in _PLACEHOLDER_TEXT else text
 
 
 def _nonempty_string(value: Any) -> str | None:

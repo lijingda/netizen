@@ -124,6 +124,7 @@ Server 是 `AsyncCodex` 的子进程，不是第二套业务服务。
 | --- | --- |
 | `netizen/main.py` | ServiceCore 装配并负责共享管理服务、Scheduler、Runtime、SDK 和 Store 的生命周期；管理服务注入各入口适配器。 |
 | `netizen/channel_app.py`、`netizen/channel/` | ChannelApplication 负责输入和完成事件编排，并装配、关闭同一表情控制器和回复卡片呈现器；展示会话留在各自对象内。 |
+| `netizen/message_content.py`、`netizen/message_preparation.py` | 前者统一当前、引用和补充消息的纯内容投影；后者共享公共 SDK 卡片补读。来源、请求意图、历史选取和 wire envelope 仍由调用入口负责。 |
 | `netizen/cards/` | `controls.py` 负责管理卡片和表单，`reply.py` 负责回复、Activity、Files，`callbacks.py` 集中共享回调协议及基础组件；包入口显式导出公共接口。 |
 | `netizen/admin/` | `web.py` 集中路由、认证、一次性授权与请求任务生命周期；`queries.py` 负责查询和分页游标，`presentation.py` 负责响应转换。 |
 | `netizen/management/` | 各管理入口共用的应用边界，包括 `updates.py` 中的升级查询与升级/重启发起编排。 |
@@ -228,7 +229,7 @@ probe 见 ADR 0039。
 
 每个真实普通或 Side Prompt 在进入 Runtime 前都按
 [ADR 0029](adr/0029-project-current-message-provenance-into-prompts.md) 投影 exact Current
-Prompt Message。投影使用 Channel SDK 公开的消息 ID、`text/image/post` 类型、内容保真度
+Prompt Message。投影使用 Channel SDK 公开的消息 ID、消息类型、内容保真度
 和 `Identity` 字段；发送者只作 attribution，不改变 owner、共享控制权、approval 或指令
 优先级。[ADR 0030](adr/0030-require-resolved-current-sender-names.md) 开启 SDK 公开的 chat
 member roster 姓名补全，并要求当前 sender 具有真实显示名；缺名时在引用读取或图片下载前
@@ -242,6 +243,12 @@ messages、可选且去重的 quoted message、最后的 current message，且
 Message，并与 current message 保持 `text`/`request_text` 的语义边界。这些输入都会进入 Codex 原生历史，
 但不写 Channel Database。来源消息 ID/sender 与同次解析冲突时整条 fail closed。
 
+[ADR 0064](adr/0064-share-card-and-forward-content-projection.md) 增加 Card 2.0 卡片 `interactive`
+和合并转发 `merge_forward` 的直接材料输入，转发话题复用后者。材料中的 slash/Skill
+不解析为当前指令；当前请求只要求结合已有明确任务处理，无明确任务则询问用途。
+材料置于现有 `request_text` 内并中和 `$`，外层 current v1/quote v4/context v2 的版本、
+字段与顺序不变。原 text/post/image 的正文、命令、图片和附件准入保持原语义。
+
 安装器随版本提供 [netizen-feishu Skill](../skills/netizen-feishu/SKILL.md)，让 Agent 按当前
 `message_id` 主动查询飞书聊天／话题历史。配套脚本只读取同账号 Netizen 的现有配置，
 通过固定官方 SDK 获取并返回临时机器人凭据；Agent 在同次工具执行中接收，再按上游
@@ -250,7 +257,7 @@ CLI 配置。上游 CLI 与 lark Skills 由用户另行安装，缺失不影响 
 当前消息投影、Scope/Binding、SQLite 或 catch-up reader，也不增加原生 MCP entry；见
 [README](../README.md#按需读取飞书历史)。
 
-普通消息开头的连续 `$skill-name` 引用由 Prompt compiler 在当前消息上解析。Runtime
+普通 text/post 请求开头的连续 `$skill-name` 引用由 Prompt compiler 在当前消息上解析。Runtime
 先捕获 exact admission，再按 canonical Project cwd 调用 live `skills/list`；每个名称
 必须唯一、enabled 且来自该 cwd 的目录，随后保留原文本并追加公开
 `SkillInput(name, path)`。多个 Skill 仍只对应一次 `turn()` 或一次 exact `steer()`；
@@ -981,17 +988,30 @@ Database 或进程内保存 card session。删除卡片、错误 230071 或任�
 用精确版本、公开 raw relation 和契约测试恢复这一种首层目标；任何非空
 `thread_id` 都优先解释为话题 Scope，不是逐条引用。被引用内容只通过
 Channel SDK 公开 typed fetch 读取：文本/富文本/卡片/结构化类型使用归一化
-可见文本，合并转发使用 SDK 有界展开；普通 `image` 与 `post` 图片读取真实像素，
+可见文本，合并转发使用 SDK 公共 typed 树和渲染，再施加 ADR 0064 的全包边界；
+普通 `image` 与 `post` 图片读取真实像素，
 其他资源类型在内部 rich projection 保留公开 exact key 与元数据，模型可见 wire 只保留
 类型、名称、时长等可推理信息，
-`system`/未知类型 fail closed。卡片归一化只剩占位符时，才使用 SDK 公开
+`system`/未知类型 fail closed。卡片只支持 Card 2.0，Card 1.0 在各来源及转发子项中
+均明确拒绝，不以部分可见文本兜底。受支持卡片归一化只剩占位符时，才使用 SDK 公开
 quote-context fallback。锁定 SDK 1.4.0 若对 CardKit 2.0 返回空文本，只在精确
 版本门禁和结构/大小/深度边界内，从公共 `QuotedContext.raw` 投影 header/body 的
 可见文本节点；按钮值、确认弹窗、选项及事件不进入 prompt。两次 SDK 网络读取
 各自具有 10 秒单次请求预算，避免健康请求因共享总预算产生假超时。
 
+当前、引用和补充来源共享纯内容投影与顶层卡片补读。合并转发统一从校验、裁剪后的
+typed 树调用 SDK 渲染及提及解析，不回用入站原文；转发富文本正文与资源描述使用
+同一首选 locale 及非空 `content_v2` 优先的可见 AST。全包最多保留 50 个子消息节点、
+最终文本 16,000 字符，条数或文本截断传播到外层。最大嵌套深度为 3，最外层为
+depth=0，允许内嵌 depth=1..3；depth>3 或 SDK `max_depth_exceeded` 整条拒绝。
+保留的未知或不可渲染子项、loading/error 和循环结构同样明确拒绝。混合子项只提供可见文字/附件描述，
+明确未读图片像素、文件正文和音视频，不逐项下载资源或补读卡片。固定 SDK 会把隐藏
+交互字段内的文本节点混入卡片渲染，内容层对可确认情况拒绝；普通 scalar value 和可见
+label 允许，上游修复且契约与真实卡片验收通过后移除此限制。完整范围与移除条件见
+[ADR 0064](adr/0064-share-card-and-forward-content-projection.md)。
+
 引用投影是单层、文本最多 16,000 字符且 mention/资源描述各最多 64 项的 v4
-JSON envelope；被引用消息保持 ADR 0011 的宽类型矩阵，当前 `text/image/post` 消息对象及
+JSON envelope；被引用消息保持 ADR 0011 的宽类型矩阵，当前消息对象及
 完整请求始终在最后。supplemental/quoted 的模型可见 Historical Message 固定为本地 `hN`、
 类型、发送者 `display_name/open_id`、UTC ISO 8601 `created_at` 与 `text`，按需增加可解析的
 `reply_to`、`key/name` mention、精简附件和 true-only `truncated`。飞书应用可用范围与

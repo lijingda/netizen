@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from lark_channel import (
@@ -217,6 +217,7 @@ from .git_status import git_branch_status
 from .image_inputs import (
     ImageInputError,
     ImageInputUnavailable,
+    ImagePromptReferences,
     ImageReference,
     compose_multimodal_input,
     current_message_image_references,
@@ -228,7 +229,10 @@ from .image_inputs import (
 )
 from .prompt_projection import (
     CurrentMessageProjection,
+    MATERIAL_MESSAGE_TYPES,
+    MATERIAL_REQUEST,
     PromptProjectionError,
+    project_current_content,
     project_current_message,
     render_plain_prompt,
 )
@@ -237,11 +241,10 @@ from .quoted_context import (
     QuotedMessageError,
     QuotedMessageUnavailable,
     compose_quoted_prompt,
-    interactive_quote_visible_text,
-    needs_interactive_fallback,
     quoted_message_id,
     validate_quoted_message,
 )
+from .message_preparation import MessagePreparationError, prepare_message_content
 from .message_history import (
     MessageHistoryError,
     MessageHistoryReader,
@@ -1095,16 +1098,7 @@ class ChannelApplication:
                 await self._reply(message, "定时任务正在启动，请稍后重发。")
                 return
             current_images = current_message_image_references(message)
-            interaction = parse_message(
-                scope=scope,
-                message_id=_message_id(message),
-                sender_id=sender_id,
-                text=_body_text(
-                    message,
-                    bot_open_id=_channel_bot_open_id(self._channel),
-                ),
-                available_capabilities=self._runtime.available_capabilities,
-            )
+            interaction = self._parse_current_interaction(message, scope)
             if isinstance(interaction, PromptInput):
                 await self._prompt(
                     message,
@@ -2470,22 +2464,33 @@ class ChannelApplication:
             root_message_id=_inbound_root_message_id(message),
         )
 
+    def _parse_current_interaction(
+        self, message: Any, scope: FeishuScope,
+    ) -> PromptInput | ControlIntent:
+        if normalized_message_type(message) in MATERIAL_MESSAGE_TYPES:
+            # Sharing a card/forward supplies material, not commands authored
+            # by its original senders. Do not run either slash or Skill parsing.
+            return PromptInput(
+                scope=scope,
+                source_id=_message_id(message),
+                sender_id=_sender_id(message),
+                text=MATERIAL_REQUEST,
+            )
+        return parse_message(
+            scope=scope,
+            message_id=_message_id(message),
+            sender_id=_sender_id(message),
+            text=_body_text(message, bot_open_id=_channel_bot_open_id(self._channel)),
+            available_capabilities=self._runtime.available_capabilities,
+        )
+
     async def _side_message(
         self,
         message: Any,
         record: SideTopicRecord,
     ) -> None:
         if record.state is SideTopicState.CREATING:
-            interaction = parse_message(
-                scope=self._scope(message),
-                message_id=_message_id(message),
-                sender_id=_sender_id(message),
-                text=_body_text(
-                    message,
-                    bot_open_id=_channel_bot_open_id(self._channel),
-                ),
-                available_capabilities=self._runtime.available_capabilities,
-            )
+            interaction = self._parse_current_interaction(message, self._scope(message))
             if (
                 isinstance(interaction, ControlIntent)
                 and interaction.name is ControlName.SIDE
@@ -2525,16 +2530,7 @@ class ChannelApplication:
             return
 
         current_images = current_message_image_references(message)
-        interaction = parse_message(
-            scope=self._side_scope(record),
-            message_id=_message_id(message),
-            sender_id=_sender_id(message),
-            text=_body_text(
-                message,
-                bot_open_id=_channel_bot_open_id(self._channel),
-            ),
-            available_capabilities=self._runtime.available_capabilities,
-        )
+        interaction = self._parse_current_interaction(message, self._side_scope(record))
         if isinstance(interaction, PromptInput):
             target_id = quoted_message_id(message)
             await self._side_prompt(
@@ -3162,6 +3158,9 @@ class ChannelApplication:
         current_images: tuple[ImageReference, ...],
     ) -> Any:
         try:
+            current_fallback = await self._prepare_message_content(
+                source_message, source="current",
+            )
             quoted = None
             fallback_text = None
             quoted_images: tuple[ImageReference, ...] = ()
@@ -3185,25 +3184,9 @@ class ChannelApplication:
                     source="quoted_message",
                 )
 
-                if needs_interactive_fallback(quoted):
-                    # This is a separate SDK request. Give each network operation
-                    # its own bounded timeout instead of turning two healthy calls
-                    # into a false shared-budget timeout.
-                    async with asyncio.timeout(_QUOTE_FETCH_TIMEOUT_SECONDS):
-                        fallback = await self._channel.fetch_quoted_context(
-                            quoted_target_id
-                        )
-                    if (
-                        fallback is None
-                        or getattr(fallback, "message_id", None)
-                        != quoted_target_id
-                        or getattr(fallback, "content_type", None) != "interactive"
-                    ):
-                        raise QuotedMessageUnavailable(
-                            "被引用的应用消息没有可验证的可见内容，"
-                            "请复制内容后重试。本条消息未执行。"
-                        )
-                    fallback_text = interactive_quote_visible_text(fallback)
+                fallback_text = await self._prepare_message_content(
+                    quoted, source="quoted",
+                )
 
             image_references_to_prepare = quoted_images + current_images
             prepared_images = await prepare_images(
@@ -3216,14 +3199,12 @@ class ChannelApplication:
                 if image.reference.source == "quoted_message"
             )
             prompt_image_refs = image_prompt_references(prepared_images)
-            rendered_current = replace(
+            rendered_current = self._render_current_content(
+                source_message,
                 current,
-                request_text=localize_image_markers(
-                    current.request_text,
-                    source="current_message",
-                    message_id=current.message_id,
-                    image_prompt_refs=prompt_image_refs,
-                ),
+                fallback_text=current_fallback,
+                images=prepared_images,
+                image_prompt_refs=prompt_image_refs,
             )
             prompt_text = render_plain_prompt(rendered_current)
             if quoted is not None:
@@ -3240,7 +3221,7 @@ class ChannelApplication:
                 images=prepared_images,
                 image_prompt_refs=prompt_image_refs,
             )
-        except (QuotedMessageError, ImageInputError, PromptProjectionError):
+        except (HistoricalMessageError, ImageInputError, PromptProjectionError):
             raise
         except TimeoutError as error:
             raise QuotedMessageUnavailable(
@@ -3281,6 +3262,9 @@ class ChannelApplication:
 
         try:
             async with asyncio.timeout(_CONTEXT_PREPARATION_TIMEOUT_SECONDS):
+                current_fallback = await self._prepare_message_content(
+                    source_message, source="current",
+                )
                 window = await reader.read_window(scope, lower, upper_id)
                 fetched = await self._fetch_history_candidates(
                     scope,
@@ -3301,7 +3285,12 @@ class ChannelApplication:
                     quoted_input = by_id.get(quoted_target_id)
                     if quoted_input is None:
                         quoted_input = await self._fetch_normalized_history_message(
-                            quoted_target_id
+                            quoted_target_id,
+                            validate=lambda message: validate_quoted_message(
+                                message,
+                                expected_message_id=quoted_target_id,
+                                expected_chat_id=scope.chat_id,
+                            ),
                         )
                     quoted_message, quoted_fallback = quoted_input
                     validate_quoted_message(
@@ -3443,14 +3432,12 @@ class ChannelApplication:
             )
 
         prompt_image_refs = image_prompt_references(prepared_images)
-        rendered_current = replace(
+        rendered_current = self._render_current_content(
+            source_message,
             current,
-            request_text=localize_image_markers(
-                current.request_text,
-                source="current_message",
-                message_id=current.message_id,
-                image_prompt_refs=prompt_image_refs,
-            ),
+            fallback_text=current_fallback,
+            images=prepared_images,
+            image_prompt_refs=prompt_image_refs,
         )
         context = compose_message_context_prompt(
             supplemental_selection=selection,
@@ -3483,9 +3470,11 @@ class ChannelApplication:
         ) -> tuple[Any, str | None]:
             async with semaphore:
                 value = await self._fetch_normalized_history_message(
-                    reference.message_id
+                    reference.message_id,
+                    validate=lambda message: self._validate_history_candidate(
+                        scope, reference, message,
+                    ),
                 )
-                self._validate_history_candidate(scope, reference, value[0])
                 return value
 
         tasks = tuple(asyncio.create_task(fetch(reference)) for reference in references)
@@ -3502,6 +3491,8 @@ class ChannelApplication:
     async def _fetch_normalized_history_message(
         self,
         message_id: str,
+        *,
+        validate: Callable[[Any], None] | None = None,
     ) -> tuple[Any, str | None]:
         try:
             async with asyncio.timeout(_CONTEXT_FETCH_TIMEOUT_SECONDS):
@@ -3519,29 +3510,60 @@ class ChannelApplication:
                 "补充上下文消息已不可读取，本条消息未执行；请重试。"
             )
 
-        fallback_text = None
-        if needs_interactive_fallback(message):
-            try:
-                async with asyncio.timeout(_CONTEXT_FETCH_TIMEOUT_SECONDS):
-                    fallback = await self._channel.fetch_quoted_context(message_id)
-            except TimeoutError as error:
-                raise MessageHistoryUnavailable(
-                    "读取历史应用消息可见内容超时，本条消息未执行；请重试。"
-                ) from error
-            except Exception as error:
-                raise MessageHistoryUnavailable(
-                    "无法读取历史应用消息可见内容，本条消息未执行；请重试。"
-                ) from error
-            if (
-                fallback is None
-                or getattr(fallback, "message_id", None) != message_id
-                or getattr(fallback, "content_type", None) != "interactive"
-            ):
-                raise MessageHistoryUnavailable(
-                    "历史应用消息没有可验证的可见内容，本条消息未执行；请重试。"
-                )
-            fallback_text = interactive_quote_visible_text(fallback)
+        if _message_id(message) != message_id:
+            raise MessageHistoryUnavailable(
+                "补充上下文 exact message ID 不一致，本条消息未执行。"
+            )
+        if validate is not None:
+            validate(message)
+        fallback_text = await self._prepare_message_content(message, source="historical")
         return message, fallback_text
+
+    async def _prepare_message_content(
+        self,
+        message: Any,
+        *,
+        source: Literal["current", "quoted", "historical"],
+    ) -> str | None:
+        """One preparation path; only user-facing failure attribution varies."""
+
+        try:
+            return await prepare_message_content(
+                self._channel,
+                message,
+                timeout_seconds=(
+                    _CONTEXT_FETCH_TIMEOUT_SECONDS
+                    if source == "historical" else _QUOTE_FETCH_TIMEOUT_SECONDS
+                ),
+            )
+        except MessagePreparationError as error:
+            if source == "historical":
+                labels = {
+                    "timeout": "读取历史应用消息可见内容超时",
+                    "unavailable": "无法读取历史应用消息可见内容",
+                    "identity": "历史应用消息没有可验证的可见内容",
+                }
+                raise MessageHistoryUnavailable(
+                    labels[error.reason] + "，本条消息未执行；请重试。"
+                ) from error
+            if source == "quoted":
+                if error.reason == "identity":
+                    raise QuotedMessageUnavailable(
+                        "被引用的应用消息没有可验证的可见内容，"
+                        "请复制内容后重试。本条消息未执行。"
+                    ) from error
+                if error.reason == "timeout":
+                    raise QuotedMessageUnavailable(
+                        "读取被引用消息超时，本条消息未执行；请重新发送。"
+                    ) from error
+                raise QuotedMessageUnavailable(
+                    "无法读取被引用的消息；它可能已撤回，"
+                    "或应用缺少消息读取权限。本条消息未执行。"
+                ) from error
+            raise PromptProjectionError(
+                "无法读取当前卡片的可见内容，本条消息未执行；"
+                "请复制内容或重新发送。"
+            ) from error
 
     @staticmethod
     def _validate_history_candidate(
@@ -3598,6 +3620,35 @@ class ChannelApplication:
             raise MessageHistoryUnavailable(
                 "补充上下文消息类型与历史索引不一致，本条消息未执行；请重试。"
             )
+
+    def _render_current_content(
+        self,
+        message: Any,
+        current: CurrentMessageProjection,
+        *,
+        fallback_text: str | None,
+        images: Sequence[Any],
+        image_prompt_refs: ImagePromptReferences,
+    ) -> CurrentMessageProjection:
+        current = project_current_content(
+            message,
+            current,
+            interactive_fallback_text=fallback_text,
+            read_image_keys=self._prepared_image_keys(
+                images,
+                source="current_message",
+                message_id=current.message_id,
+            ),
+        )
+        return replace(
+            current,
+            request_text=localize_image_markers(
+                current.request_text,
+                source="current_message",
+                message_id=current.message_id,
+                image_prompt_refs=image_prompt_refs,
+            ),
+        )
 
     @staticmethod
     def _prepared_image_keys(

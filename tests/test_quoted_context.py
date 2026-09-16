@@ -328,7 +328,7 @@ class QuotedProjectionTest(unittest.TestCase):
 
     def test_interactive_placeholder_requires_and_accepts_public_fallback(self) -> None:
         message = inbound(
-            InteractiveContent(card={}, card_version="v1"),
+            InteractiveContent(card={"schema": "2.0"}, card_version="v2"),
             content_text="[interactive]",
         )
         self.assertTrue(needs_interactive_fallback(message))
@@ -413,7 +413,7 @@ class QuotedProjectionTest(unittest.TestCase):
         self.assertNotIn("hidden option", text)
         self.assertNotIn("hidden_value", text)
 
-    def test_sdk_quote_text_is_preferred_without_reading_raw_card(self) -> None:
+    def test_sdk_quote_text_remains_preferred_without_a_parseable_raw_card(self) -> None:
         context = QuotedContext(
             message_id="om_card",
             content_type="interactive",
@@ -425,6 +425,24 @@ class QuotedProjectionTest(unittest.TestCase):
             interactive_quote_visible_text(context, sdk_version="9.9.9"),
             "SDK visible text",
         )
+
+    def test_legacy_quote_text_is_rejected_before_it_can_be_used(self) -> None:
+        context = QuotedContext(
+            message_id="om_legacy", content_type="interactive", text="Legacy body",
+            raw={"body": {"content": json.dumps({"elements": [{
+                "tag": "div", "text": {"tag": "plain_text", "content": "Legacy body"},
+            }]})}},
+        )
+        with self.assertRaisesRegex(UnsupportedQuotedMessage, "不支持飞书 1.0"):
+            interactive_quote_visible_text(context)
+
+    def test_oversized_raw_card_cannot_bypass_version_validation_with_sdk_text(self) -> None:
+        context = QuotedContext(
+            message_id="om_oversize", content_type="interactive", text="Legacy body",
+            raw={"body": {"content": json.dumps({"elements": [], "extra": "x" * 256_000})}},
+        )
+        with self.assertRaisesRegex(QuotedMessageUnavailable, "可验证范围"):
+            interactive_quote_visible_text(context)
 
     def test_cardkit_raw_adapter_requires_exact_sdk_version(self) -> None:
         context = QuotedContext(
@@ -619,21 +637,38 @@ class QuotedProjectionTest(unittest.TestCase):
         self.assertEqual(content_v2_gap["text"], "visible ![image](img1)")
 
     def test_sdk_video_alias_projects_as_media(self) -> None:
-        envelope = self.render(
-            inbound(
-                MediaContent(file_key="file_video"),
-                content_text="opaque",
-                raw_content_type="video",
-            )
-        )
-
-        self.assertEqual(envelope["quoted_message"]["message_type"], "media")
-        self.assertNotIn("content_fidelity", envelope["quoted_message"])
+        for content in (
+            MediaContent(file_key="file_video"),
+            UnknownContent(message_type="video"),
+        ):
+            with self.subTest(kind=content.kind):
+                envelope = self.render(
+                    inbound(
+                        content,
+                        content_text="opaque",
+                        raw_content_type="video",
+                    )
+                )
+                self.assertEqual(
+                    envelope["quoted_message"]["message_type"], "media"
+                )
+                self.assertNotIn(
+                    "content_fidelity", envelope["quoted_message"]
+                )
 
     def test_merge_forward_is_bounded_aggregate(self) -> None:
+        from lark_channel import MergeForwardItem
+
         envelope = self.render(
             inbound(
-                MergeForwardContent(loading=False, truncated=True),
+                MergeForwardContent(
+                    loading=False,
+                    truncated=True,
+                    items=[MergeForwardItem(
+                        message_id="om_child",
+                        content=TextContent(text="forwarded visible text"),
+                    )],
+                ),
                 content_text="forwarded visible text",
             )
         )

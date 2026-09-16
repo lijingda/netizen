@@ -1,8 +1,8 @@
 """Neutral projection of normalized Feishu messages used as history.
 
-Quoted messages and catch-up supplemental messages share the same normalized
-content, identity, mention, and resource matrix.  This module owns that matrix
-so callers do not need to inspect or copy Channel SDK protocol models.
+Quoted messages and catch-up supplemental messages share source-specific
+identity, selection, and envelope rules here. The common content matrix lives
+in message_content alongside current-input preparation.
 """
 
 from __future__ import annotations
@@ -15,6 +15,15 @@ from types import MappingProxyType
 from typing import Any, Literal
 
 from .image_inputs import ImagePromptReferences, localize_image_markers
+from .message_content import (
+    SUPPORTED_MESSAGE_TYPES,
+    HistoricalMessageContractError,
+    HistoricalMessageError,
+    HistoricalMessageUnavailable,
+    UnsupportedHistoricalMessage,
+    normalized_content_type,
+    project_message_content,
+)
 from .prompt_projection import (
     CurrentMessageProjection,
     project_identity,
@@ -38,57 +47,7 @@ _DEFAULT_METADATA_ITEM_LIMIT = 64
 _DEFAULT_SUPPLEMENTAL_MESSAGE_LIMIT = 50
 _DEFAULT_SUPPLEMENTAL_TEXT_LIMIT = 64_000
 
-_TEXT_TYPES = frozenset({"text", "post"})
-_STRUCTURED_TYPES = frozenset(
-    {
-        "interactive",
-        "calendar",
-        "general_calendar",
-        "share_calendar_event",
-        "location",
-        "video_chat",
-        "todo",
-        "vote",
-        "hongbao",
-    }
-)
-_METADATA_TYPES = frozenset(
-    {
-        "image",
-        "file",
-        "folder",
-        "audio",
-        "media",
-        "sticker",
-        "share_chat",
-        "share_user",
-    }
-)
 _UNSUPPORTED_TYPES = frozenset({"system", "unknown"})
-_PLACEHOLDER_TEXT = frozenset(
-    {
-        "",
-        "[interactive]",
-        "[unsupported message]",
-        "<forwarded_messages/>",
-    }
-)
-
-
-class HistoricalMessageError(RuntimeError):
-    """A historical-message failure that is safe to show to the user."""
-
-
-class HistoricalMessageUnavailable(HistoricalMessageError):
-    """A selected message could not be projected faithfully."""
-
-
-class UnsupportedHistoricalMessage(HistoricalMessageError):
-    """A selected message has no supported historical representation."""
-
-
-class HistoricalMessageContractError(HistoricalMessageError):
-    """Public normalized fields contradict each other."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,7 +319,7 @@ def project_supplemental_message(
             message_type=message_type,
             reason="system_message",
         )
-    if message_type == "unknown" or message_type not in _supported_types():
+    if message_type == "unknown" or message_type not in SUPPORTED_MESSAGE_TYPES:
         return SupplementalMessageOmission(
             message_id=message_id,
             message_type=message_type,
@@ -425,14 +384,14 @@ def project_historical_message(
     if text_limit <= 0:
         raise ValueError("historical text_limit must be positive")
     message_type = normalized_historical_message_type(message)
-    if message_type in _UNSUPPORTED_TYPES or message_type not in _supported_types():
+    if message_type in _UNSUPPORTED_TYPES or message_type not in SUPPORTED_MESSAGE_TYPES:
         raise UnsupportedHistoricalMessage(
             f"暂不支持这种历史消息类型（{message_type or 'unknown'}），"
             "本条消息未执行。"
         )
 
     ordered_read_image_keys = tuple(dict.fromkeys(read_image_keys or ()))
-    content = _project_content(
+    content = project_message_content(
         message,
         message_type=message_type,
         interactive_fallback_text=interactive_fallback_text,
@@ -658,22 +617,7 @@ def historical_projection_json(
 
 
 def normalized_historical_message_type(message: Any) -> str:
-    content = getattr(message, "content", None)
-    kind = _nonempty_string(getattr(content, "kind", None))
-    raw_kind = _nonempty_string(getattr(message, "raw_content_type", None))
-    normalized_raw_kind = "media" if raw_kind == "video" else raw_kind
-    if kind == "unknown" and raw_kind is not None:
-        return raw_kind
-    if (
-        kind is not None
-        and normalized_raw_kind is not None
-        and kind != normalized_raw_kind
-    ):
-        raise HistoricalMessageContractError(
-            "Channel SDK 返回了相互冲突的消息类型，"
-            "本条消息未执行；请联系维护者检查 SDK 兼容性。"
-        )
-    return kind or normalized_raw_kind or "unknown"
+    return normalized_content_type(message)
 
 
 def historical_message_deleted(message: Any) -> bool:
@@ -685,236 +629,6 @@ def historical_message_deleted(message: Any) -> bool:
         if isinstance(value, str) and value.lower() == "true":
             return True
     return False
-
-
-def _project_content(
-    message: Any,
-    *,
-    message_type: str,
-    interactive_fallback_text: str | None,
-    read_image_keys: tuple[str, ...],
-) -> dict[str, Any]:
-    content = getattr(message, "content", None)
-    read_image_key_set = frozenset(read_image_keys)
-    resources = _resource_metadata(message, read_image_keys=read_image_key_set)
-    if message_type == "post" and read_image_keys:
-        public_images = {
-            item.get("file_key"): item
-            for item in resources
-            if item.get("type") == "image"
-        }
-        visible_images = [
-            public_images.get(key)
-            or _resource_item("image", file_key=key, content_read=True)
-            for key in read_image_keys
-        ]
-        resources = visible_images + [
-            item for item in resources if item.get("type") != "image"
-        ]
-    truncated = bool(getattr(content, "truncated", False))
-
-    if message_type in _TEXT_TYPES:
-        text = _usable_text(getattr(message, "content_text", ""))
-        if text is None:
-            raise HistoricalMessageUnavailable(
-                "历史消息没有可读取的文本内容，请复制内容后重试。"
-            )
-        return {
-            "text": text,
-            "content_fidelity": (
-                "full_multimodal"
-                if resources and all(item["content_read"] for item in resources)
-                else "partial"
-                if resources
-                else "full_text"
-            ),
-            "content_read": True,
-            "content_metadata": {},
-            "resources": resources,
-            "truncated": truncated,
-        }
-
-    if message_type in _STRUCTURED_TYPES:
-        text = _usable_text(getattr(message, "content_text", ""))
-        if message_type == "interactive" and text is None:
-            text = _usable_text(interactive_fallback_text)
-        if text is None:
-            raise HistoricalMessageUnavailable(
-                "历史应用消息没有可提取的可见内容，"
-                "请复制内容后重试。"
-            )
-        return {
-            "text": text,
-            "content_fidelity": (
-                "visible_text" if message_type == "interactive" else "structured_text"
-            ),
-            "content_read": True,
-            "content_metadata": {},
-            "resources": resources,
-            "truncated": truncated,
-        }
-
-    if message_type == "merge_forward":
-        text = _usable_text(getattr(message, "content_text", ""))
-        if text is None:
-            raise HistoricalMessageUnavailable(
-                "合并转发消息没有可读取的内容，请复制内容后重试。"
-            )
-        return {
-            "text": text,
-            "content_fidelity": "bounded_aggregate",
-            "content_read": True,
-            "content_metadata": {},
-            "resources": resources,
-            "truncated": truncated,
-        }
-
-    text, content_metadata, intrinsic_resource = _metadata_projection(
-        message_type,
-        content,
-        read_image_keys=read_image_key_set,
-    )
-    if intrinsic_resource is not None and _resource_signature(
-        intrinsic_resource
-    ) not in {_resource_signature(item) for item in resources}:
-        resources.append(intrinsic_resource)
-    image_read = message_type == "image" and any(
-        item.get("type") == "image" and item.get("content_read") is True
-        for item in resources
-    )
-    return {
-        "text": text,
-        "content_fidelity": "full_multimodal" if image_read else "metadata_only",
-        "content_read": image_read,
-        "content_metadata": content_metadata,
-        "resources": resources,
-        "truncated": truncated,
-    }
-
-
-def _metadata_projection(
-    message_type: str,
-    content: Any,
-    *,
-    read_image_keys: frozenset[str],
-) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
-    if message_type == "image":
-        key = _nonempty_string(getattr(content, "image_key", None))
-        image_read = key is not None and key in read_image_keys
-        resource = _resource_item("image", file_key=key, content_read=image_read)
-        text = (
-            "引用了一张图片；图片像素已作为原生视觉输入提供。"
-            if image_read
-            else "引用了一张图片；当前版本未读取图片像素内容。"
-        )
-        return text, {}, resource
-    if message_type == "file":
-        name = _nonempty_string(getattr(content, "file_name", None))
-        key = _nonempty_string(getattr(content, "file_key", None))
-        suffix = f"，文件名：{name}" if name else ""
-        return (
-            f"引用了一个文件{suffix}；当前版本未读取文件正文。",
-            {},
-            _resource_item("file", file_key=key, file_name=name),
-        )
-    if message_type == "folder":
-        name = _nonempty_string(getattr(content, "file_name", None))
-        key = _nonempty_string(getattr(content, "file_key", None))
-        suffix = f"，文件夹名：{name}" if name else ""
-        return (
-            f"引用了一个文件夹{suffix}；当前版本未读取其中内容。",
-            {},
-            _resource_item("folder", file_key=key, file_name=name),
-        )
-    if message_type == "audio":
-        key = _nonempty_string(getattr(content, "file_key", None))
-        duration = _positive_int(getattr(content, "duration_ms", None))
-        suffix = f"，时长 {duration}ms" if duration is not None else ""
-        return (
-            f"引用了一段语音{suffix}；当前版本未转写音频。",
-            {},
-            _resource_item("audio", file_key=key, duration_ms=duration),
-        )
-    if message_type == "media":
-        key = _nonempty_string(getattr(content, "file_key", None))
-        cover = _nonempty_string(getattr(content, "image_key", None))
-        name = _nonempty_string(getattr(content, "file_name", None))
-        duration = _positive_int(getattr(content, "duration_ms", None))
-        details = []
-        if name:
-            details.append(f"文件名：{name}")
-        if duration is not None:
-            details.append(f"时长 {duration}ms")
-        suffix = f"，{'，'.join(details)}" if details else ""
-        return (
-            f"引用了一个视频{suffix}；当前版本未读取视频内容。",
-            {},
-            _resource_item(
-                "video",
-                file_key=key,
-                file_name=name,
-                duration_ms=duration,
-                cover_image_key=cover,
-            ),
-        )
-    if message_type == "sticker":
-        key = _nonempty_string(getattr(content, "file_key", None))
-        return (
-            "引用了一个表情包；当前版本未读取表情内容。",
-            {},
-            _resource_item("sticker", file_key=key),
-        )
-    if message_type == "share_chat":
-        chat_id = _nonempty_string(getattr(content, "chat_id", None))
-        return (
-            "引用了一个群名片；未额外读取群信息。",
-            {"chat_id": chat_id},
-            None,
-        )
-    if message_type == "share_user":
-        user_id = _nonempty_string(getattr(content, "user_id", None))
-        return (
-            "引用了一个个人名片；未额外读取联系人信息。",
-            {"user_id": user_id},
-            None,
-        )
-    raise UnsupportedHistoricalMessage(
-        f"暂不支持这种历史消息类型（{message_type}），"
-        "本条消息未执行。"
-    )
-
-
-def _resource_metadata(
-    message: Any,
-    *,
-    read_image_keys: frozenset[str],
-) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    seen: set[tuple[Any, ...]] = set()
-    for resource in getattr(message, "resources", None) or ():
-        resource_type = _nonempty_string(getattr(resource, "type", None))
-        if resource_type is None:
-            continue
-        item = _resource_item(
-            resource_type,
-            file_key=_nonempty_string(getattr(resource, "file_key", None)),
-            file_name=_nonempty_string(getattr(resource, "file_name", None)),
-            duration_ms=_positive_int(getattr(resource, "duration_ms", None)),
-            cover_image_key=_nonempty_string(
-                getattr(resource, "cover_image_key", None)
-            ),
-            content_read=(
-                resource_type == "image"
-                and _nonempty_string(getattr(resource, "file_key", None))
-                in read_image_keys
-            ),
-        )
-        signature = _resource_signature(item)
-        if signature in seen:
-            continue
-        seen.add(signature)
-        result.append(item)
-    return result
 
 
 def _conversation_metadata(message: Any) -> dict[str, Any]:
@@ -955,37 +669,6 @@ def _reply_metadata(message: Any) -> dict[str, Any] | None:
         if value is not None:
             result[target] = value
     return result or None
-
-
-def _resource_item(
-    resource_type: str,
-    *,
-    file_key: str | None = None,
-    file_name: str | None = None,
-    duration_ms: int | None = None,
-    cover_image_key: str | None = None,
-    content_read: bool = False,
-) -> dict[str, Any]:
-    result: dict[str, Any] = {"type": resource_type, "content_read": content_read}
-    if file_key is not None:
-        result["file_key"] = file_key
-    if file_name is not None:
-        result["file_name"] = file_name
-    if duration_ms is not None:
-        result["duration_ms"] = duration_ms
-    if cover_image_key is not None:
-        result["cover_image_key"] = cover_image_key
-    return result
-
-
-def _resource_signature(resource: dict[str, Any]) -> tuple[Any, ...]:
-    return (
-        resource.get("type"),
-        resource.get("file_key"),
-        resource.get("file_name"),
-        resource.get("duration_ms"),
-        resource.get("cover_image_key"),
-    )
 
 
 def _historical_prompt_objects(
@@ -1175,22 +858,11 @@ def _historical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2).replace("$", "\\u0024")
 
 
-def _supported_types() -> frozenset[str]:
-    return _TEXT_TYPES | _STRUCTURED_TYPES | _METADATA_TYPES | {"merge_forward"}
-
-
 def _raw_message_dict(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     nested = value.get("message")
     return nested if isinstance(nested, dict) else value
-
-
-def _usable_text(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    text = value.strip()
-    return None if text in _PLACEHOLDER_TEXT else text
 
 
 def _truncate(value: str, limit: int) -> tuple[str, bool]:
