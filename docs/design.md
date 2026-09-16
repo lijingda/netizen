@@ -566,7 +566,7 @@ SDK `0.154.0` 的合法空目标 mailbox wait 不建立工作归属边；有目�
 Project 仅作为相对路径解析基准，不是文件授权边界；子任务使用自己的 cwd，absolute
 或 `..` 路径同样规范化，其他 Project 的任务内修改同样计入。访问权限仍由原生 Codex
 sandbox/approval 决定。canonical 重复、缺失、目录和设备文件不进入发送列表；不扫描
-工作区、不解析最终文本，也不推断没有进入受支持 native 事实的 shell/MCP/第三方工具
+工作区、不从最终文本发现 Files 条目，也不推断没有进入受支持 native 事实的 shell/MCP/第三方工具
 输出。非 Goal 且 Progress Card 关闭时，没有可用文件仍发送原富文本/静态文本；存在
 文件时只发送一张包含最终回复与“本轮文件”的 Card 2.0。Progress Card 开启时，completed
 结果与可用文件进入已发送的同一张卡。
@@ -585,7 +585,7 @@ final physical Turn 的 latest diff 用于文件发现。最终 physical Turn �
 页码、证据完整时的本轮累计 `+N -M`、脱敏逻辑位置与逐文件 `+N -M`；图片和统计未知的
 文件不显示数字，也不显示文件大小。Project 内文件使用 Project 相对路径，Project 外原生生成图使用
 `生成图片/<文件名>`，账号 home 内其他文件使用 `~/...`，其余位置只显示有界路径尾部。
-所有条目按钮统一为“发送”，顶部说明点击后会把当前图片或文件发送到卡片话题。不使用
+所有条目按钮统一为“发送”，顶部说明点击后会把当前图片或文件发送到卡片话题。Files 不使用
 表格、预览、diff 正文、发送全部或静默截断。按
 [ADR 0058](adr/0058-use-page-selection-for-file-cards.md)，多页卡片统一使用根级表单中的
 页码下拉框与唯一“跳转”提交按钮，仅一页时无导航。按固定 SDK 实际发送的完整
@@ -616,6 +616,17 @@ payload 解码。新 PAGE callback 固定携带 `pagination: select`，要求从
 复用确定性 UUID。文件已变化或同一路径已重绑时发送点击时当前普通文件，不承诺 Turn
 完成瞬间版本；文件消失、变成非普通文件、关系异常或发送失败时保持原卡，并尽力在卡片
 话题回复错误，不降级到主聊天。
+
+按 [ADR 0065](adr/0065-preview-local-images-in-result-markdown.md)，成功终态的 Result
+用 markdown-it-py 识别图片 token，直接读取引用的本地图片，通过公开 `upload_media`
+取得 `image_key` 后用 mdformat 输出 Markdown。相对路径使用该结果的 cwd；不要求图片
+属于本轮文件，也不新增 Files 条目。代码示例和普通链接不触发上传；缺失、非图片、
+读取/上传失败或超限只替换为可读提示。接受 Markdown 写法规范化，不保留逐字符源码。
+图片处理只改变正文，不参与消息类型选择：无 Files 且进度卡关闭时仍走原富文本路径，
+由 SDK 默认 native `post/tag:md` 承载图片引用；原有卡片仍是卡片。每次 completion 有界去重；
+富文本回退和 v4/v5 分页复用含 image key 的正文，重启或本地文件删除不触发重传。
+不新增 post AST 转换或发送循环，分段、提及、话题路由与投递回执继续由原流程负责。
+Files 列表与“发送”不变：正文是上传时图片，按钮发送点击时内容。
 
 ephemeral Side 明确不复用上述持久 history recovery。Progress Card 关闭时 consumer 立即
 调用公开 `AsyncTurnHandle.run()`；开启时按 ADR 0052 只读观察 exact Turn 的 retained

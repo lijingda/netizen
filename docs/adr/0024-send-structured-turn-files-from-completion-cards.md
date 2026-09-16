@@ -1,11 +1,14 @@
 ---
 status: accepted
 date: 2026-08-19
-amended_by: 0027, 0047, 0053
+amended_by: 0027, 0047, 0053, 0065
 related: 0008, 0015, 0016, 0021, 0025
 ---
 
 # 从普通 Turn 终态卡片按需发送结构化本轮文件
+
+> [ADR 0065](0065-preview-local-images-in-result-markdown.md) 允许最终正文明确引用的
+> 本地图片自动上传并预览，不要求属于本轮产物；Files 来源与按需发送规则保持不变。
 
 > 修订说明：[ADR 0027](0027-use-turn-diff-and-self-contained-file-cards.md) 将文件来源改为
 > Turn diff 优先、结构化 items 补充，并让新卡片通过 callback 自带 manifest 独立于

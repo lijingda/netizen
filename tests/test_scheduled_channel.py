@@ -459,22 +459,72 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             owner_id=request["owner_id"], origin=request["origin"],
             result=completed_turn_result(final_response=content)))
 
-    async def finish_files_fixture(self, claim, request):
+    async def finish_files_fixture(self, claim, request, *, inline_image=False):
         (Path(self.tmp.name) / "report.pdf").write_bytes(b"pdf")
+        items = [file_change_item("report.pdf")]
+        response = "report complete"
+        if inline_image:
+            image = Path(self.tmp.name) / "preview.png"
+            image.write_bytes(PNG)
+            items.append(image_generation_item(image))
+            response += "\n\n![preview](preview.png)"
         await self.app.handle_completion(TurnOutcome(
             binding_id=request["binding"].id, thread_id="native-" + claim.run.id,
             turn_id="turn-initial", owner_id=request["owner_id"], origin=request["origin"],
-            result=completed_turn_result(file_change_item("report.pdf"), final_response="report complete")))
+            result=completed_turn_result(*items, final_response=response)))
 
     async def test_file_card_response_lost_does_not_publish_fallback_text(self):
         claim, request = await self.completion_fixture()
         self.channel.reply_results.append(TimeoutError("response lost after send"))
-        await self.finish_files_fixture(claim, request)
+        await self.finish_files_fixture(claim, request, inline_image=True)
         self.assertEqual(len(self.channel.replies), 1)
         self.assertIsInstance(self.channel.replies[0][1], OutboundCard)
+        self.assertIn("![preview](img_uploaded_1)", str(self.channel.replies[0][1].card))
+        self.assertEqual(len(self.channel.upload_calls), 1)
         run = self.store.schedules.get_run(claim.run.id)
         self.assertEqual(run.delivery_state, "unknown")
         self.assertEqual(run.barrier, "released")
+
+    async def test_inline_image_upload_failure_keeps_files_and_confirmed_delivery(self):
+        claim, request = await self.completion_fixture()
+        self.channel.upload_results.append(TimeoutError("upload response lost"))
+        self.channel.reply_results.append(sent_result("om_final", chat_id="oc_group", thread_id="omt_fresh"))
+        with self.assertLogs("netizen.result_images", level="WARNING"):
+            await self.finish_files_fixture(claim, request, inline_image=True)
+        self.assertEqual(len(self.channel.upload_calls), 1)
+        self.assertEqual(len(self.channel.replies), 1)
+        card = self.channel.replies[0][1]
+        self.assertIsInstance(card, OutboundCard)
+        visible = "\n".join(element["content"] for element in _elements(card.card, "markdown"))
+        self.assertIn("report complete", visible)
+        self.assertNotIn("![preview]", visible)
+        self.assertIn("preview", visible)
+        self.assertEqual(len(_card_button_values(card, "发送")), 2)
+        run = self.store.schedules.get_run(claim.run.id)
+        self.assertEqual((run.delivery_state, run.barrier), ("sent", "released"))
+
+    async def test_local_image_without_files_preserves_post_type_and_unknown_send_is_not_retried(self):
+        claim, request = await self.completion_fixture()
+        (Path(self.tmp.name) / "existing.png").write_bytes(PNG)
+        driver = self.use_sdk_reply(TimeoutError("response lost after send"))
+
+        await self.finish_fixture(claim, request, "existing image\n\n![preview](existing.png)")
+
+        driver.reply_message.assert_awaited_once()
+        driver.create_message.assert_not_awaited()
+        sent = driver.reply_message.call_args.kwargs
+        self.assertEqual(sent["msg_type"], "post")
+        self.assertEqual(sent["message_id"], "om_seed")
+        self.assertTrue(sent["reply_in_thread"])
+        post = json.loads(sent["content"])
+        nodes = [node for row in post["zh_cn"]["content"] for node in row]
+        self.assertEqual(
+            [node["text"] for node in nodes if node["tag"] == "md"],
+            ["existing image\n\n![preview](img_uploaded_1)"],
+        )
+        self.assertEqual(len(self.channel.upload_calls), 1)
+        run = self.store.schedules.get_run(claim.run.id)
+        self.assertEqual((run.delivery_state, run.barrier), ("unknown", "released"))
 
     async def test_sdk_file_card_timeout_is_unknown_without_fallback(self):
         claim, request = await self.completion_fixture()
@@ -622,7 +672,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_completion(TurnOutcome(
             binding_id=binding.id, thread_id=binding.native_thread_id, turn_id="turn-initial",
             owner_id=request["owner_id"], origin=origin,
-            result=completed_turn_result(file_change_item("report.pdf"), image_generation_item(image), final_response="scheduled report ready"),
+            result=completed_turn_result(file_change_item("report.pdf"), image_generation_item(image), final_response="scheduled report ready\n\n![trend](trend.png)"),
             activity=activity,
         ))
 
@@ -632,6 +682,8 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         card = self.channel.replies[-1][1]
         self.assertIsInstance(card, OutboundCard)
         self.assertIn("scheduled report ready", str(card.card))
+        self.assertIn("![trend](img_uploaded_1)", str(card.card))
+        self.assertEqual(len(self.channel.upload_calls), 1)
         self.assertNotIn("unreferenced-source.txt", str(card.card))
         self.assertNotIn("initial hidden activity", str(card.card))
         self.assertFalse(_elements(card.card, "collapsible_panel"))
@@ -668,6 +720,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store._connection.total_changes, changes_before)
         self.assertEqual(self.store.active_binding(group.key).id, source.id)
         self.assertEqual(self.channel.updates, [])
+        self.assertEqual(len(self.channel.upload_calls), 1)
 
     async def test_scheduled_topic_followup_activity_and_files_stay_ordinary_and_exact(self):
         group = FeishuScope("app", "oc_group", ScopeKind.GROUP)

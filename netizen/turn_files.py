@@ -683,6 +683,11 @@ def _is_supported_image(path: Path) -> bool:
             header = stream.read(12)
     except OSError:
         return False
+    return is_supported_image_header(header)
+
+
+def is_supported_image_header(header: bytes) -> bool:
+    """Use the same PNG/JPEG/GIF/WebP signature for file sending and previews."""
     return (
         header.startswith(b"\x89PNG\r\n\x1a\n")
         or header.startswith(b"\xff\xd8\xff")
