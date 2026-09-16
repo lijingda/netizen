@@ -38,8 +38,8 @@ paths only.
 - Probe cwd: `<absolute-test-project-cwd>`
 - Admin Web: `http://<server-address>:<port>`
 - Runtime config: `<remote-account-home>/.netizen/config.yaml`
-- Feishu credential path:
-  `<remote-account-home>/.netizen/credentials/feishu-app-secret`
+- Lark app credential profile:
+  `<remote-account-home>/.netizen/lark-app/config.json`
 - Admin credential path:
   `<remote-account-home>/.netizen/credentials/admin-web-secret`
 

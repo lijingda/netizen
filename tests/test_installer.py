@@ -136,6 +136,17 @@ class NetizenInstallerTest(unittest.TestCase):
         self.require_codex_login = codex_preflight.start()
         self.addCleanup(codex_preflight.stop)
 
+    def _write_credentials(self, layout: installer.Layout, app_id: str, secret: str) -> None:
+        installer._write_atomic(
+            layout.lark_app_file, installer.encode_lark_app(app_id, secret), mode=0o600
+        )
+
+    def _app_id(self, layout: installer.Layout) -> str:
+        return installer.load_lark_app(layout.lark_app_file, allow_incomplete=True).app_id
+
+    def _secret(self, layout: installer.Layout) -> str:
+        return installer.load_lark_app(layout.lark_app_file, allow_incomplete=True).app_secret
+
     def _layout(self, root: Path) -> installer.Layout:
         home = root / "home"
         home.mkdir(parents=True, exist_ok=True)
@@ -526,26 +537,23 @@ class NetizenInstallerTest(unittest.TestCase):
                 installer.prepare_configuration(layout, interactive=False)
 
             generated_config = layout.config_file.read_text()
-            self.assertIn("cli_REPLACE_ME", generated_config)
+            self.assertNotIn("appId:", generated_config)
             self.assertIn("projectRoot:", generated_config)
             self.assertNotIn("defaultCwd:", generated_config)
-            self.assertEqual(layout.secret_file.read_bytes(), b"")
+            self.assertEqual(self._secret(layout).encode(), b"")
             generated_admin_secret = layout.admin_secret_file.read_bytes()
             self.assertEqual(len(generated_admin_secret), 43)
             self.assertNotIn(b"\n", generated_admin_secret)
             self.assertTrue((layout.home / "projects").is_dir())
             self.assertEqual(stat.S_IMODE(layout.config_file.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(layout.secret_file.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(layout.lark_app_file.stat().st_mode), 0o600)
             self.assertEqual(
                 stat.S_IMODE(layout.admin_secret_file.stat().st_mode),
                 0o600,
             )
 
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace("cli_REPLACE_ME", "cli_agent"),
-                encoding="utf-8",
-            )
-            layout.secret_file.write_text("agent-secret", encoding="utf-8")
+            self._write_credentials(layout, "cli_agent", "")
+            self._write_credentials(layout, self._app_id(layout), "agent-secret")
             installer.prepare_configuration(layout, interactive=False)
             self.assertEqual(
                 layout.admin_secret_file.read_bytes(),
@@ -560,17 +568,14 @@ class NetizenInstallerTest(unittest.TestCase):
                 self.assertTrue((layout.state_dir / ".install.lock").is_file())
                 self.assertFalse((layout.product_root / ".install.lock").exists())
 
-    def test_whitespace_only_secret_is_still_treated_as_missing(self) -> None:
+    def test_empty_secret_profile_is_repaired_manually(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
             installer.prepare_directories(layout)
             with self.assertRaises(installer.ConfigurationRequired):
                 installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace("cli_REPLACE_ME", "cli_agent"),
-                encoding="utf-8",
-            )
-            layout.secret_file.write_text(" \n", encoding="utf-8")
+            self._write_credentials(layout, "cli_agent", "")
+            self._write_credentials(layout, self._app_id(layout), "")
 
             installer.prepare_configuration(
                 layout,
@@ -578,7 +583,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 secret_prompt=lambda _prompt: "real-secret",
             )
 
-            self.assertEqual(layout.secret_file.read_text(), "real-secret")
+            self.assertEqual(self._secret(layout), "real-secret")
 
     def test_interactive_configuration_reads_id_and_hidden_secret_provider(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -592,9 +597,9 @@ class NetizenInstallerTest(unittest.TestCase):
                 secret_prompt=lambda _prompt: "hidden-secret",
             )
 
-            self.assertIn("cli_valid", layout.config_file.read_text())
+            self.assertIn("cli_valid", layout.lark_app_file.read_text())
             self.assertNotIn("hidden-secret", layout.config_file.read_text())
-            self.assertEqual(layout.secret_file.read_text(), "hidden-secret")
+            self.assertEqual(self._secret(layout), "hidden-secret")
 
     def test_interactive_configuration_defaults_to_browser_app_setup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -618,11 +623,11 @@ class NetizenInstallerTest(unittest.TestCase):
             )
 
             self.assertEqual(requested_app_ids, [None])
-            self.assertIn("cli_browser", layout.config_file.read_text())
+            self.assertIn("cli_browser", layout.lark_app_file.read_text())
             self.assertNotIn("browser-secret", layout.config_file.read_text())
-            self.assertEqual(layout.secret_file.read_text(), "browser-secret")
+            self.assertEqual(self._secret(layout), "browser-secret")
             self.assertEqual(stat.S_IMODE(layout.config_file.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(layout.secret_file.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(layout.lark_app_file.stat().st_mode), 0o600)
 
     def test_noninteractive_browser_configuration_preserves_binding_intent(self) -> None:
         for state, expected_app_id, resulting_app_id in (
@@ -636,14 +641,9 @@ class NetizenInstallerTest(unittest.TestCase):
                 if state != "fresh":
                     with self.assertRaises(installer.ConfigurationRequired):
                         installer.prepare_configuration(layout, interactive=False)
-                    layout.config_file.write_text(
-                        layout.config_file.read_text().replace(
-                            "cli_REPLACE_ME", "cli_existing"
-                        ),
-                        encoding="utf-8",
-                    )
+                    self._write_credentials(layout, "cli_existing", "")
                     if state == "deleted-secret":
-                        layout.secret_file.unlink()
+                        layout.lark_app_file.unlink()
                 register = MagicMock(
                     return_value=installer.FeishuAppCredentials(
                         app_id=resulting_app_id,
@@ -668,13 +668,13 @@ class NetizenInstallerTest(unittest.TestCase):
                 source.readline.assert_not_called()
                 secret_prompt.assert_not_called()
                 self.assertEqual(
-                    installer._configured_app_id(layout.config_file.read_text()),
+                    self._app_id(layout),
                     resulting_app_id,
                 )
                 self.assertNotIn("browser-secret", layout.config_file.read_text())
-                self.assertEqual(layout.secret_file.read_text(), "browser-secret")
+                self.assertEqual(self._secret(layout), "browser-secret")
                 self.assertEqual(stat.S_IMODE(layout.config_file.stat().st_mode), 0o600)
-                self.assertEqual(stat.S_IMODE(layout.secret_file.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(layout.lark_app_file.stat().st_mode), 0o600)
 
     def test_noninteractive_browser_failure_or_cancellation_never_prompts(self) -> None:
         for failure in (installer.InstallError("private-secret"), KeyboardInterrupt()):
@@ -702,8 +702,8 @@ class NetizenInstallerTest(unittest.TestCase):
 
                 source.readline.assert_not_called()
                 secret_prompt.assert_not_called()
-                self.assertIn("cli_REPLACE_ME", layout.config_file.read_text())
-                self.assertEqual(layout.secret_file.read_bytes(), b"")
+                self.assertEqual(self._app_id(layout), "")
+                self.assertEqual(self._secret(layout).encode(), b"")
                 self.assertNotIn("private-secret", str(raised.exception))
                 self.assertNotIn("private-secret", stdout.getvalue() + stderr.getvalue())
                 if isinstance(failure, installer.InstallError):
@@ -715,13 +715,7 @@ class NetizenInstallerTest(unittest.TestCase):
             installer.prepare_directories(layout)
             with self.assertRaises(installer.ConfigurationRequired):
                 installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace(
-                    "cli_REPLACE_ME",
-                    "cli_existing",
-                ),
-                encoding="utf-8",
-            )
+            self._write_credentials(layout, "cli_existing", "")
             requested_app_ids: list[str | None] = []
 
             def register_app(app_id: str | None) -> installer.FeishuAppCredentials:
@@ -739,9 +733,9 @@ class NetizenInstallerTest(unittest.TestCase):
             )
 
             self.assertEqual(requested_app_ids, ["cli_existing"])
-            self.assertEqual(layout.secret_file.read_text(), "recovered-secret")
+            self.assertEqual(self._secret(layout), "recovered-secret")
             self.assertEqual(
-                layout.config_file.read_text().count("cli_existing"),
+                layout.lark_app_file.read_text().count("cli_existing"),
                 1,
             )
 
@@ -751,15 +745,9 @@ class NetizenInstallerTest(unittest.TestCase):
             installer.prepare_directories(layout)
             with self.assertRaises(installer.ConfigurationRequired):
                 installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace(
-                    "cli_REPLACE_ME",
-                    "cli_existing",
-                ),
-                encoding="utf-8",
-            )
-            layout.secret_file.write_text("old-secret", encoding="utf-8")
-            layout.secret_file.unlink()
+            self._write_credentials(layout, "cli_existing", "")
+            self._write_credentials(layout, self._app_id(layout), "old-secret")
+            layout.lark_app_file.unlink()
             requested_app_ids: list[str | None] = []
 
             def register_app(app_id: str | None) -> installer.FeishuAppCredentials:
@@ -778,10 +766,10 @@ class NetizenInstallerTest(unittest.TestCase):
             )
 
             self.assertEqual(requested_app_ids, [None])
-            self.assertIn("cli_replacement", layout.config_file.read_text())
-            self.assertNotIn("cli_existing", layout.config_file.read_text())
-            self.assertEqual(layout.secret_file.read_text(), "replacement-secret")
-            self.assertEqual(stat.S_IMODE(layout.secret_file.stat().st_mode), 0o600)
+            self.assertIn("cli_replacement", layout.lark_app_file.read_text())
+            self.assertNotIn("cli_existing", layout.lark_app_file.read_text())
+            self.assertEqual(self._secret(layout), "replacement-secret")
+            self.assertEqual(stat.S_IMODE(layout.lark_app_file.stat().st_mode), 0o600)
 
     def test_noninteractive_deleted_secret_preserves_rebind_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -789,23 +777,17 @@ class NetizenInstallerTest(unittest.TestCase):
             installer.prepare_directories(layout)
             with self.assertRaises(installer.ConfigurationRequired):
                 installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace(
-                    "cli_REPLACE_ME",
-                    "cli_existing",
-                ),
-                encoding="utf-8",
-            )
-            layout.secret_file.unlink()
+            self._write_credentials(layout, "cli_existing", "")
+            layout.lark_app_file.unlink()
 
             with self.assertRaisesRegex(
                 installer.ConfigurationRequired,
-                r"interactive terminal.*update instance\.appId",
+                r"complete the netizen profile",
             ):
                 installer.prepare_configuration(layout, interactive=False)
 
-            self.assertFalse(layout.secret_file.exists())
-            self.assertIn("cli_existing", layout.config_file.read_text())
+            self.assertEqual(self._app_id(layout), "")
+            self.assertEqual(self._secret(layout), "")
 
     def test_deleted_secret_manual_rebind_replaces_app_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -813,14 +795,8 @@ class NetizenInstallerTest(unittest.TestCase):
             installer.prepare_directories(layout)
             with self.assertRaises(installer.ConfigurationRequired):
                 installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace(
-                    "cli_REPLACE_ME",
-                    "cli_existing",
-                ),
-                encoding="utf-8",
-            )
-            layout.secret_file.unlink()
+            self._write_credentials(layout, "cli_existing", "")
+            layout.lark_app_file.unlink()
 
             installer.prepare_configuration(
                 layout,
@@ -830,10 +806,10 @@ class NetizenInstallerTest(unittest.TestCase):
                 app_registrar=lambda _app_id: self.fail("browser setup was used"),
             )
 
-            self.assertIn("cli_manual_replacement", layout.config_file.read_text())
-            self.assertNotIn("cli_existing", layout.config_file.read_text())
+            self.assertIn("cli_manual_replacement", layout.lark_app_file.read_text())
+            self.assertNotIn("cli_existing", layout.lark_app_file.read_text())
             self.assertEqual(
-                layout.secret_file.read_text(),
+                self._secret(layout),
                 "manual-replacement-secret",
             )
 
@@ -856,140 +832,45 @@ class NetizenInstallerTest(unittest.TestCase):
 
             self.assertIn("did not complete", stderr.getvalue())
             self.assertNotIn("private SDK detail", stderr.getvalue())
-            self.assertIn("cli_manual", layout.config_file.read_text())
-            self.assertEqual(layout.secret_file.read_text(), "manual-secret")
+            self.assertIn("cli_manual", layout.lark_app_file.read_text())
+            self.assertEqual(self._secret(layout), "manual-secret")
 
-    def test_browser_credentials_roll_back_both_files_on_write_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            layout = self._layout(Path(directory))
-            installer.prepare_directories(layout)
-            with self.assertRaises(installer.ConfigurationRequired):
-                installer.prepare_configuration(layout, interactive=False)
-            original_config = layout.config_file.read_bytes()
-            original_secret = layout.secret_file.read_bytes()
-            real_write = installer._write_atomic
+    def test_profile_atomic_write_failure_preserves_previous_repair_or_rebind_intent(self) -> None:
+        for original in (None, ("cli_existing", "")):
+            with self.subTest(original=original), tempfile.TemporaryDirectory() as directory:
+                layout = self._layout(Path(directory))
+                installer.prepare_directories(layout)
+                with self.assertRaises(installer.ConfigurationRequired):
+                    installer.prepare_configuration(layout, interactive=False)
+                if original is None:
+                    layout.lark_app_file.unlink()
+                else:
+                    self._write_credentials(layout, *original)
+                before = layout.lark_app_file.read_bytes() if original else None
+                config = layout.config_file.read_bytes()
+                real_write = installer._write_atomic
 
-            def fail_new_secret(path: Path, content: bytes, *, mode: int) -> None:
-                if path == layout.secret_file and content == b"new-secret":
-                    raise OSError("simulated write failure")
-                real_write(path, content, mode=mode)
+                def fail_profile(path: Path, content: bytes, *, mode: int) -> None:
+                    if path == layout.lark_app_file and b"returned-secret" in content:
+                        raise OSError("simulated profile write failure")
+                    real_write(path, content, mode=mode)
 
-            with (
-                patch.object(installer, "_write_atomic", side_effect=fail_new_secret),
-                self.assertRaisesRegex(OSError, "simulated write failure"),
-            ):
-                installer._store_registered_feishu_credentials(
-                    layout,
-                    config_text=original_config.decode(),
-                    expected_app_id=None,
-                    credentials=installer.FeishuAppCredentials(
-                        app_id="cli_new",
-                        app_secret="new-secret",
-                    ),
-                )
-
-            self.assertEqual(layout.config_file.read_bytes(), original_config)
-            self.assertEqual(layout.secret_file.read_bytes(), original_secret)
-
-    def test_rebind_credentials_roll_back_config_and_missing_secret(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            layout = self._layout(Path(directory))
-            installer.prepare_directories(layout)
-            with self.assertRaises(installer.ConfigurationRequired):
-                installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace(
-                    "cli_REPLACE_ME",
-                    "cli_existing",
-                ),
-                encoding="utf-8",
-            )
-            layout.secret_file.unlink()
-            original_config = layout.config_file.read_bytes()
-            real_write = installer._write_atomic
-
-            def fail_new_secret(path: Path, content: bytes, *, mode: int) -> None:
-                if path == layout.secret_file and content == b"new-secret":
-                    raise OSError("simulated write failure")
-                real_write(path, content, mode=mode)
-
-            with (
-                patch.object(installer, "_write_atomic", side_effect=fail_new_secret),
-                self.assertRaisesRegex(OSError, "simulated write failure"),
-            ):
-                installer._store_registered_feishu_credentials(
-                    layout,
-                    config_text=original_config.decode(),
-                    expected_app_id=None,
-                    replace_existing_app_id="cli_existing",
-                    credentials=installer.FeishuAppCredentials(
-                        app_id="cli_replacement",
-                        app_secret="new-secret",
-                    ),
-                )
-
-            self.assertEqual(layout.config_file.read_bytes(), original_config)
-            self.assertFalse(layout.secret_file.exists())
-
-    def test_noninteractive_rebind_preserves_credential_rollback_failure_guidance(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            layout = self._layout(Path(directory))
-            installer.prepare_directories(layout)
-            with self.assertRaises(installer.ConfigurationRequired):
-                installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace("cli_REPLACE_ME", "cli_existing"),
-                encoding="utf-8",
-            )
-            layout.secret_file.unlink()
-            source = MagicMock()
-            source.readline.side_effect = AssertionError("stdin was read")
-            secret_prompt = MagicMock(
-                side_effect=AssertionError("manual secret prompt was used")
-            )
-            real_write = installer._write_atomic
-
-            def fail_new_secret(path: Path, content: bytes, *, mode: int) -> None:
-                if path == layout.secret_file and content == b"returned-secret":
-                    raise OSError("simulated write failure")
-                real_write(path, content, mode=mode)
-
-            stdout, stderr = io.StringIO(), io.StringIO()
-            with (
-                patch.object(installer, "_write_atomic", side_effect=fail_new_secret),
-                patch.object(
-                    installer, "_restore_file", side_effect=OSError("rollback failed")
-                ) as restore,
-                patch("sys.stdout", new=stdout),
-                patch("sys.stderr", new=stderr),
-                self.assertRaises(installer.InstallError) as raised,
-            ):
-                installer.prepare_configuration(
-                    layout,
-                    interactive=False,
-                    input_stream=source,
-                    secret_prompt=secret_prompt,
-                    app_registrar=lambda _app_id: installer.FeishuAppCredentials(
-                        app_id="cli_replacement",
-                        app_secret="returned-secret",
-                    ),
-                )
-
-            message = str(raised.exception)
-            self.assertIn("could not roll back", message)
-            self.assertIn("inspect", message)
-            self.assertIn(str(layout.config_file), message)
-            self.assertIn(str(layout.secret_file), message)
-            self.assertNotIn("new verification link", message)
-            self.assertNotIn("returned-secret", message + stdout.getvalue() + stderr.getvalue())
-            source.readline.assert_not_called()
-            secret_prompt.assert_not_called()
-            self.assertEqual(
-                [call.args[0] for call in restore.call_args_list],
-                [layout.config_file, layout.secret_file],
-            )
-            self.assertIn("cli_replacement", layout.config_file.read_text())
-            self.assertFalse(layout.secret_file.exists())
+                with (
+                    patch.object(installer, "_write_atomic", side_effect=fail_profile),
+                    self.assertRaisesRegex(OSError, "simulated profile write failure"),
+                ):
+                    installer._store_registered_feishu_credentials(
+                        layout,
+                        expected_app_id="cli_existing" if original else None,
+                        credentials=installer.FeishuAppCredentials(
+                            app_id="cli_existing", app_secret="returned-secret"
+                        ),
+                    )
+                self.assertEqual(layout.config_file.read_bytes(), config)
+                if before is None:
+                    self.assertFalse(layout.lark_app_file.exists())
+                else:
+                    self.assertEqual(layout.lark_app_file.read_bytes(), before)
 
     def test_release_app_registrar_keeps_secret_out_of_command_and_errors(self) -> None:
         release = installer.Release(
@@ -1049,20 +930,14 @@ class NetizenInstallerTest(unittest.TestCase):
             )
         self.assertNotIn("sdk-secret", str(raised.exception))
 
-    def test_release_permission_query_uses_secret_file_and_contract_order(self) -> None:
+    def test_release_permission_query_uses_profile_and_contract_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
             installer.prepare_directories(layout)
             with self.assertRaises(installer.ConfigurationRequired):
                 installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace(
-                    "cli_REPLACE_ME",
-                    "cli_existing",
-                ),
-                encoding="utf-8",
-            )
-            layout.secret_file.write_text("private-secret", encoding="utf-8")
+            self._write_credentials(layout, "cli_existing", "")
+            self._write_credentials(layout, self._app_id(layout), "private-secret")
             release = installer.Release(
                 digest="c" * 64,
                 root=ROOT,
@@ -1103,12 +978,10 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             command, kwargs = calls[0]
             self.assertEqual(
-                command[-4:],
+                command[-2:],
                 [
-                    "--app-id",
-                    "cli_existing",
-                    "--secret-file",
-                    str(layout.secret_file),
+                    "--lark-app-config",
+                    str(layout.lark_app_file),
                 ],
             )
             self.assertNotIn("private-secret", command)
@@ -1121,14 +994,8 @@ class NetizenInstallerTest(unittest.TestCase):
             installer.prepare_directories(layout)
             with self.assertRaises(installer.ConfigurationRequired):
                 installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace(
-                    "cli_REPLACE_ME",
-                    "cli_existing",
-                ),
-                encoding="utf-8",
-            )
-            layout.secret_file.write_text("existing-secret", encoding="utf-8")
+            self._write_credentials(layout, "cli_existing", "")
+            self._write_credentials(layout, self._app_id(layout), "existing-secret")
             release = installer.Release(
                 digest="d" * 64,
                 root=ROOT,
@@ -1179,7 +1046,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 runner=ANY,
             )
             self.assertEqual(query.call_count, 2)
-            self.assertEqual(layout.secret_file.read_text(), "updated-secret")
+            self.assertEqual(self._secret(layout), "updated-secret")
             prepare_host.assert_called_once_with(interactive=False)
             activate.assert_called_once()
 
@@ -1189,14 +1056,8 @@ class NetizenInstallerTest(unittest.TestCase):
             installer.prepare_directories(layout)
             with self.assertRaises(installer.ConfigurationRequired):
                 installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace(
-                    "cli_REPLACE_ME",
-                    "cli_existing",
-                ),
-                encoding="utf-8",
-            )
-            layout.secret_file.write_text("existing-secret", encoding="utf-8")
+            self._write_credentials(layout, "cli_existing", "")
+            self._write_credentials(layout, self._app_id(layout), "existing-secret")
             release = installer.Release(
                 digest="d" * 64,
                 root=ROOT,
@@ -1253,7 +1114,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 runner=ANY,
             )
             self.assertEqual(query.call_count, 2)
-            self.assertEqual(layout.secret_file.read_text(), "updated-secret")
+            self.assertEqual(self._secret(layout), "updated-secret")
             prepare_host.assert_not_called()
             activate.assert_not_called()
 
@@ -1269,13 +1130,8 @@ class NetizenInstallerTest(unittest.TestCase):
                 installer.prepare_directories(layout)
                 with self.assertRaises(installer.ConfigurationRequired):
                     installer.prepare_configuration(layout, interactive=False)
-                layout.config_file.write_text(
-                    layout.config_file.read_text().replace(
-                        "cli_REPLACE_ME", "cli_existing"
-                    ),
-                    encoding="utf-8",
-                )
-                layout.secret_file.unlink()
+                self._write_credentials(layout, "cli_existing", "")
+                layout.lark_app_file.unlink()
             release = installer.Release(
                 digest="9" * 64,
                 root=ROOT,
@@ -1325,8 +1181,8 @@ class NetizenInstallerTest(unittest.TestCase):
 
             register.assert_called_once_with(release, None, runner=ANY)
             query.assert_called_once()
-            self.assertIn("cli_replacement", layout.config_file.read_text())
-            self.assertEqual(layout.secret_file.read_text(), "replacement-secret")
+            self.assertIn("cli_replacement", layout.lark_app_file.read_text())
+            self.assertEqual(self._secret(layout), "replacement-secret")
             prepare_host.assert_not_called()
             activate.assert_not_called()
 
@@ -1336,14 +1192,8 @@ class NetizenInstallerTest(unittest.TestCase):
             installer.prepare_directories(layout)
             with self.assertRaises(installer.ConfigurationRequired):
                 installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace(
-                    "cli_REPLACE_ME",
-                    "cli_existing",
-                ),
-                encoding="utf-8",
-            )
-            layout.secret_file.write_text("old-secret", encoding="utf-8")
+            self._write_credentials(layout, "cli_existing", "")
+            self._write_credentials(layout, self._app_id(layout), "old-secret")
             release = installer.Release(
                 digest="e" * 64,
                 root=ROOT,
@@ -1394,7 +1244,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 runner=ANY,
             )
             self.assertEqual(query.call_count, 2)
-            self.assertEqual(layout.secret_file.read_text(), "updated-secret")
+            self.assertEqual(self._secret(layout), "updated-secret")
             prepare_host.assert_called_once_with(interactive=True)
             activate.assert_called_once()
 
@@ -1404,14 +1254,8 @@ class NetizenInstallerTest(unittest.TestCase):
             installer.prepare_directories(layout)
             with self.assertRaises(installer.ConfigurationRequired):
                 installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace(
-                    "cli_REPLACE_ME",
-                    "cli_new",
-                ),
-                encoding="utf-8",
-            )
-            layout.secret_file.write_text("new-secret", encoding="utf-8")
+            self._write_credentials(layout, "cli_new", "")
+            self._write_credentials(layout, self._app_id(layout), "new-secret")
             release = installer.Release(
                 digest="f" * 64,
                 root=ROOT,
@@ -1468,8 +1312,8 @@ class NetizenInstallerTest(unittest.TestCase):
             prepare_host.assert_not_called()
             activate.assert_not_called()
             self.assertNotIn("private-secret", str(raised.exception))
-            self.assertIn("cli_REPLACE_ME", layout.config_file.read_text())
-            self.assertEqual(layout.secret_file.read_bytes(), b"")
+            self.assertEqual(self._app_id(layout), "")
+            self.assertEqual(self._secret(layout).encode(), b"")
 
     def test_admin_update_missing_credentials_requires_action_before_build_or_browser(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1503,8 +1347,8 @@ class NetizenInstallerTest(unittest.TestCase):
                 update.report.call_args_list[-1].args,
                 ("requires_action", "configuration_required"),
             )
-            self.assertIn("cli_REPLACE_ME", layout.config_file.read_text())
-            self.assertEqual(layout.secret_file.read_bytes(), b"")
+            self.assertEqual(self._app_id(layout), "")
+            self.assertEqual(self._secret(layout).encode(), b"")
 
     def test_install_prepares_candidate_and_checks_login_before_browser_setup(self) -> None:
         for interactive in (False, True):
@@ -1528,7 +1372,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 source.readline.side_effect = AssertionError("stdin was read")
 
             def prepare_release(*_args: object, **_kwargs: object) -> installer.Release:
-                self.assertIn("cli_REPLACE_ME", layout.config_file.read_text())
+                self.assertEqual(self._app_id(layout), "")
                 self.assertTrue(messages)
                 events.append("release")
                 return release
@@ -1589,8 +1433,8 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(installed, release)
             self.assertEqual(events, ["release", "login", "register"])
             activate.assert_called_once()
-            self.assertIn("cli_installed", layout.config_file.read_text())
-            self.assertEqual(layout.secret_file.read_text(), "installed-secret")
+            self.assertIn("cli_installed", layout.lark_app_file.read_text())
+            self.assertEqual(self._secret(layout), "installed-secret")
 
     def test_admin_secret_is_preserved_and_invalid_existing_file_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1599,13 +1443,8 @@ class NetizenInstallerTest(unittest.TestCase):
             with self.assertRaises(installer.ConfigurationRequired):
                 installer.prepare_configuration(layout, interactive=False)
             original = layout.admin_secret_file.read_bytes()
-            layout.config_file.write_text(
-                layout.config_file.read_text().replace(
-                    "cli_REPLACE_ME", "cli_agent"
-                ),
-                encoding="utf-8",
-            )
-            layout.secret_file.write_text("agent-secret", encoding="utf-8")
+            self._write_credentials(layout, "cli_agent", "")
+            self._write_credentials(layout, self._app_id(layout), "agent-secret")
 
             installer.prepare_configuration(layout, interactive=False)
             self.assertEqual(layout.admin_secret_file.read_bytes(), original)
@@ -1855,14 +1694,8 @@ class NetizenInstallerTest(unittest.TestCase):
             installer.prepare_directories(layout)
             with self.assertRaises(installer.ConfigurationRequired):
                 installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text(encoding="utf-8").replace(
-                    "cli_REPLACE_ME",
-                    "cli_existing",
-                ),
-                encoding="utf-8",
-            )
-            layout.secret_file.write_text("existing-secret", encoding="utf-8")
+            self._write_credentials(layout, "cli_existing", "")
+            self._write_credentials(layout, self._app_id(layout), "existing-secret")
             published_source = root / "published"
             self._published_source(published_source)
             release = installer.Release(
@@ -1917,14 +1750,8 @@ class NetizenInstallerTest(unittest.TestCase):
             installer.prepare_directories(layout)
             with self.assertRaises(installer.ConfigurationRequired):
                 installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text(encoding="utf-8").replace(
-                    "cli_REPLACE_ME",
-                    "cli_existing",
-                ),
-                encoding="utf-8",
-            )
-            layout.secret_file.write_text("existing-secret", encoding="utf-8")
+            self._write_credentials(layout, "cli_existing", "")
+            self._write_credentials(layout, self._app_id(layout), "existing-secret")
             published_source = root / "published"
             published_manifest = self._published_source(published_source)
             backend = _stopped_backend()
@@ -2030,14 +1857,8 @@ class NetizenInstallerTest(unittest.TestCase):
             installer.prepare_directories(layout)
             with self.assertRaises(installer.ConfigurationRequired):
                 installer.prepare_configuration(layout, interactive=False)
-            layout.config_file.write_text(
-                layout.config_file.read_text(encoding="utf-8").replace(
-                    "cli_REPLACE_ME",
-                    "cli_original",
-                ),
-                encoding="utf-8",
-            )
-            layout.secret_file.write_text("original-secret", encoding="utf-8")
+            self._write_credentials(layout, "cli_original", "")
+            self._write_credentials(layout, self._app_id(layout), "original-secret")
             published_source = root / "published"
             self._published_source(published_source)
             backend = _stopped_backend()
@@ -2077,7 +1898,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     interactive=False,
                 )
 
-            layout.secret_file.unlink()
+            layout.lark_app_file.unlink()
             backend.reset_mock()
             register = MagicMock(
                 return_value=installer.FeishuAppCredentials(
@@ -2126,9 +1947,9 @@ class NetizenInstallerTest(unittest.TestCase):
                 self.assertIsNone(
                     installer._read_release_link(layout.previous, layout)
                 )
-                self.assertIn("cli_published", layout.config_file.read_text())
+                self.assertIn("cli_published", layout.lark_app_file.read_text())
                 self.assertEqual(
-                    layout.secret_file.read_text(encoding="utf-8"),
+                    self._secret(layout),
                     "published-secret",
                 )
                 self.assertEqual(register.call_count, 1)
@@ -2169,9 +1990,9 @@ class NetizenInstallerTest(unittest.TestCase):
                 self.assertIsNone(
                     installer._read_release_link(layout.previous, layout)
                 )
-                self.assertIn("cli_published", layout.config_file.read_text())
+                self.assertIn("cli_published", layout.lark_app_file.read_text())
                 self.assertEqual(
-                    layout.secret_file.read_text(encoding="utf-8"),
+                    self._secret(layout),
                     "published-secret",
                 )
 
@@ -2191,7 +2012,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     source_release.root.resolve(),
                 )
 
-                layout.secret_file.unlink()
+                layout.lark_app_file.unlink()
                 register.return_value = installer.FeishuAppCredentials(
                     app_id="cli_source",
                     app_secret="source-secret",
@@ -2220,10 +2041,11 @@ class NetizenInstallerTest(unittest.TestCase):
                 published_release.root.resolve(),
             )
             config_text = layout.config_file.read_text(encoding="utf-8")
-            self.assertIn("cli_source", config_text)
+            self.assertEqual(self._app_id(layout), "cli_source")
+            self.assertNotIn("appId:", config_text)
             self.assertNotIn("cli_published", config_text)
             self.assertEqual(
-                layout.secret_file.read_text(encoding="utf-8"),
+                self._secret(layout),
                 "source-secret",
             )
 
@@ -2587,9 +2409,9 @@ class NetizenInstallerTest(unittest.TestCase):
             old_skill = layout.codex_home / "skills/netizen-user-guide"
             old_skill.mkdir(parents=True)
             (old_skill / "SKILL.md").write_text("old skill\n", encoding="utf-8")
-            old_feishu = layout.codex_home / "skills/netizen-feishu"
-            old_feishu.mkdir()
-            (old_feishu / "SKILL.md").write_text("old feishu\n", encoding="utf-8")
+            old_lark = layout.codex_home / "skills/netizen-lark"
+            old_lark.mkdir()
+            (old_lark / "SKILL.md").write_text("old lark\n", encoding="utf-8")
             database = layout.state_dir / "channel.sqlite3"
             BindingStore(database).close()
             before_database = database.read_bytes()
@@ -2636,7 +2458,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(installer._read_release_link(layout.current, layout), old.root.resolve())
             self.assertEqual(layout.service_file.read_text(), old_unit_text)
             self.assertEqual((old_skill / "SKILL.md").read_text(), "old skill\n")
-            self.assertEqual((old_feishu / "SKILL.md").read_text(), "old feishu\n")
+            self.assertEqual((old_lark / "SKILL.md").read_text(), "old lark\n")
             self.assertEqual(database.read_bytes(), before_database)
             self.assertFalse((layout.state_dir / installer.ACTIVATION_INTENT).exists())
             self.assertGreaterEqual(
@@ -2651,8 +2473,8 @@ class NetizenInstallerTest(unittest.TestCase):
 
 
     def test_second_skill_install_failure_restores_both_previous_states(self) -> None:
-        for had_feishu in (False, True):
-            with self.subTest(had_feishu=had_feishu), tempfile.TemporaryDirectory() as directory:
+        for had_lark in (False, True):
+            with self.subTest(had_lark=had_lark), tempfile.TemporaryDirectory() as directory:
                 layout = self._layout(Path(directory))
                 installer.prepare_directories(layout)
                 old = self._release(layout, "5" * 64)
@@ -2661,14 +2483,14 @@ class NetizenInstallerTest(unittest.TestCase):
                 guide = layout.codex_home / "skills/netizen-user-guide"
                 guide.mkdir(parents=True)
                 (guide / "SKILL.md").write_text("old guide")
-                feishu = layout.codex_home / "skills/netizen-feishu"
-                if had_feishu:
+                feishu = layout.codex_home / "skills/netizen-lark"
+                if had_lark:
                     feishu.mkdir()
-                    (feishu / "SKILL.md").write_text("old feishu")
+                    (feishu / "SKILL.md").write_text("old lark")
                 real_install = installer.install_skill
 
                 def fail_second(*, source_skill: Path, codex_home: Path):
-                    if source_skill.name == "netizen-feishu":
+                    if source_skill.name == "netizen-lark":
                         self.assertNotEqual((guide / "SKILL.md").read_text(), "old guide")
                         raise installer.SkillInstallError("second Skill failed")
                     return real_install(source_skill=source_skill, codex_home=codex_home)
@@ -2682,9 +2504,9 @@ class NetizenInstallerTest(unittest.TestCase):
                     installer.activate_release(candidate, layout, interactive=False)
 
                 self.assertEqual((guide / "SKILL.md").read_text(), "old guide")
-                self.assertEqual(feishu.exists(), had_feishu)
-                if had_feishu:
-                    self.assertEqual((feishu / "SKILL.md").read_text(), "old feishu")
+                self.assertEqual(feishu.exists(), had_lark)
+                if had_lark:
+                    self.assertEqual((feishu / "SKILL.md").read_text(), "old lark")
                 self.assertEqual(installer._read_release_link(layout.current, layout), old.root.resolve())
                 backend.publish_definition.assert_not_called()
 
@@ -2703,9 +2525,9 @@ class NetizenInstallerTest(unittest.TestCase):
             old_skill = layout.codex_home / "skills/netizen-user-guide"
             old_skill.mkdir(parents=True)
             (old_skill / "SKILL.md").write_text("recovery content", encoding="utf-8")
-            old_feishu = layout.codex_home / "skills/netizen-feishu"
-            old_feishu.mkdir()
-            (old_feishu / "SKILL.md").write_text("feishu recovery", encoding="utf-8")
+            old_lark = layout.codex_home / "skills/netizen-lark"
+            old_lark.mkdir()
+            (old_lark / "SKILL.md").write_text("feishu recovery", encoding="utf-8")
 
             def fake_runner(argv: list[object], **_kwargs: object) -> subprocess.CompletedProcess[str]:
                 rendered = [os.fspath(value) for value in argv]
@@ -2740,7 +2562,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 "recovery content",
             )
             self.assertEqual(
-                (recoveries[0] / "netizen-feishu/SKILL.md").read_text(),
+                (recoveries[0] / "netizen-lark/SKILL.md").read_text(),
                 "feishu recovery",
             )
 
@@ -2994,8 +2816,8 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertNotIn("XDG_CACHE_HOME", environment)
             self.assertEqual(environment["PATH"], "/usr/bin")
             self.assertEqual(
-                environment["FEISHU_APP_SECRET_FILE"],
-                str(layout.secret_file),
+                environment["NETIZEN_LARK_APP_CONFIG"],
+                str(layout.lark_app_file),
             )
             self.assertEqual(
                 environment["NETIZEN_ADMIN_SECRET_FILE"],
@@ -3107,9 +2929,9 @@ class NetizenInstallerTest(unittest.TestCase):
             managed_skill = layout.codex_home / "skills/netizen-user-guide"
             managed_skill.mkdir(parents=True)
             (managed_skill / "SKILL.md").write_text("managed", encoding="utf-8")
-            feishu_skill = layout.codex_home / "skills/netizen-feishu"
-            feishu_skill.mkdir()
-            (feishu_skill / "SKILL.md").write_text("managed", encoding="utf-8")
+            lark_skill = layout.codex_home / "skills/netizen-lark"
+            lark_skill.mkdir()
+            (lark_skill / "SKILL.md").write_text("managed", encoding="utf-8")
             other_skill = layout.codex_home / "skills/other"
             other_skill.mkdir()
             (other_skill / "SKILL.md").write_text("other", encoding="utf-8")
@@ -3128,7 +2950,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertFalse(layout.previous.exists())
             self.assertFalse(layout.service_file.exists())
             self.assertFalse(managed_skill.exists())
-            self.assertFalse(feishu_skill.exists())
+            self.assertFalse(lark_skill.exists())
             self.assertTrue(layout.config_file.exists())
             self.assertEqual(layout.admin_secret_file.read_text(), "A" * 43)
             self.assertTrue((layout.state_dir / "channel.sqlite3").exists())
@@ -3235,7 +3057,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertIsNone(installer._read_release_link(layout.current, layout))
             self.assertFalse(layout.service_file.exists())
             self.assertFalse((layout.codex_home / "skills/netizen-user-guide").exists())
-            self.assertFalse((layout.codex_home / "skills/netizen-feishu").exists())
+            self.assertFalse((layout.codex_home / "skills/netizen-lark").exists())
 
     def test_managed_directory_removal_never_follows_a_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3347,7 +3169,7 @@ class NetizenInstallerTest(unittest.TestCase):
             layout = self._darwin_layout(Path(directory))
             installer.prepare_directories(layout)
             release = self._release(layout, "a" * 64)
-            layout.secret_file.write_text("must-not-enter-plist", encoding="utf-8")
+            self._write_credentials(layout, "cli_existing", "must-not-enter-plist")
 
             content = launchd.render_launch_agent(release, layout)
             payload = plistlib.loads(content)
@@ -3831,7 +3653,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 (layout.codex_home / "skills/netizen-user-guide/SKILL.md").is_file()
             )
             self.assertTrue(
-                (layout.codex_home / "skills/netizen-feishu/SKILL.md").is_file()
+                (layout.codex_home / "skills/netizen-lark/SKILL.md").is_file()
             )
             self.assertTrue(list(layout.state_dir.glob("rollback-recovery-*")))
 
@@ -3947,6 +3769,39 @@ class NetizenInstallerTest(unittest.TestCase):
             raise AssertionError(f"unexpected command: {rendered}")
 
         return fake_runner, state, calls
+
+    def test_legacy_files_are_ignored_and_unchanged_by_profile_configuration(self) -> None:
+        for existing_profile in (False, True):
+            with self.subTest(existing_profile=existing_profile), tempfile.TemporaryDirectory() as directory:
+                layout = self._layout(Path(directory))
+                installer.prepare_directories(layout)
+                old_config = b'instance:\n  appId: "cli_legacy"\nprojects: {}\n'
+                old_secret = layout.credentials_dir / "feishu-app-secret"
+                installer._write_atomic(layout.config_file, old_config, mode=0o600)
+                installer._write_atomic(old_secret, b"legacy-secret", mode=0o600)
+                if existing_profile:
+                    self._write_credentials(layout, "cli_current", "current-secret")
+                else:
+                    with self.assertRaises(installer.ConfigurationRequired):
+                        installer.prepare_configuration(layout, interactive=False)
+                    self.assertEqual(self._app_id(layout), "")
+                    self.assertEqual(self._secret(layout), "")
+                register = MagicMock(
+                    return_value=installer.FeishuAppCredentials("cli_current", "current-secret")
+                )
+
+                installer.prepare_configuration(
+                    layout, interactive=False, app_registrar=register
+                )
+
+                if existing_profile:
+                    register.assert_not_called()
+                else:
+                    register.assert_called_once_with(None)
+                self.assertEqual(self._app_id(layout), "cli_current")
+                self.assertEqual(self._secret(layout), "current-secret")
+                self.assertEqual(layout.config_file.read_bytes(), old_config)
+                self.assertEqual(old_secret.read_bytes(), b"legacy-secret")
 
     def _release(self, layout: installer.Layout, digest: str) -> installer.Release:
         root = layout.releases / digest

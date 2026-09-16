@@ -2,10 +2,15 @@
 status: accepted
 date: 2026-09-10
 amends: 0033, 0035, 0041, 0044
+amended_by: 0066
 related: 0034, 0045, 0057
 ---
 
 # 将首次飞书应用初始化与终端输入解耦
+
+> [ADR 0066](0066-share-lark-app-credentials-with-optional-cli.md) 合并应用凭据到单一 profile，
+> 将空 Secret／删除文件的修复与重绑定意图移至该文件。
+> 下文终端交互、浏览器边界和成功凭据不随候选回滚的两阶段语义继续有效。
 
 公开安装入口已经要求 Agent 下载脚本后以 `</dev/null` 执行，但首次缺凭据仍因没有 TTY
 直接退出，迫使用户手工创建应用、交接 Secret；现有官方 `register_app` 并不读取 stdin。

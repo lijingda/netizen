@@ -636,6 +636,7 @@ def _scrub_channel_environment() -> None:
     # Codex can still read the protected secret file if explicitly instructed.
     os.environ.pop("FEISHU_APP_SECRET", None)
     os.environ.pop("FEISHU_APP_SECRET_FILE", None)
+    os.environ.pop("NETIZEN_LARK_APP_CONFIG", None)
     os.environ.pop("NETIZEN_ADMIN_SECRET", None)
     os.environ.pop("NETIZEN_ADMIN_SECRET_FILE", None)
     os.environ.pop("NETIZEN_CONFIG_PATH", None)

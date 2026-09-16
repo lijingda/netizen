@@ -1,15 +1,16 @@
-"""Small YAML configuration and protected Feishu secret loading."""
+"""Small YAML configuration and protected Lark application profile loading."""
 
 from __future__ import annotations
 
 import os
-import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from .lark_app import LARK_APP_RELATIVE_PATH, LarkAppConfigError, load_lark_app
 
 
 class SettingsError(ValueError):
@@ -61,9 +62,18 @@ class Settings:
         if not isinstance(raw_projects, dict):
             raise SettingsError("projects must map aliases to absolute paths")
 
-        app_id = _string(instance, "appId")
-        if not app_id.startswith("cli_"):
-            raise SettingsError("instance.appId must be a Feishu cli_ identifier")
+        if env.get("FEISHU_APP_SECRET") or env.get("FEISHU_APP_SECRET_FILE"):
+            raise SettingsError(
+                "Feishu secret environment sources are no longer supported; use NETIZEN_LARK_APP_CONFIG"
+            )
+        credential_path = env.get("NETIZEN_LARK_APP_CONFIG", "").strip()
+        try:
+            credentials = load_lark_app(
+                Path(credential_path) if credential_path
+                else config_path.parent / LARK_APP_RELATIVE_PATH
+            )
+        except LarkAppConfigError as error:
+            raise SettingsError(str(error)) from None
         data_dir = _absolute_path(instance, "dataDir")
         project_root = _absolute_path(instance, "projectRoot")
         projects: dict[str, Path] = {}
@@ -84,8 +94,8 @@ class Settings:
             raise SettingsError("channel.securityMode must be compat, audit, or strict")
 
         return cls(
-            app_id=app_id,
-            app_secret=_load_secret(env),
+            app_id=credentials.app_id,
+            app_secret=credentials.app_secret,
             data_dir=data_dir,
             project_root=project_root,
             projects=projects,
@@ -165,32 +175,3 @@ def _admin_web_settings(
         port=port,
         credential_path=credential_path,
     )
-
-
-def _load_secret(environment: Mapping[str, str]) -> str:
-    direct = environment.get("FEISHU_APP_SECRET", "").strip()
-    file_value = environment.get("FEISHU_APP_SECRET_FILE", "").strip()
-    if direct and file_value:
-        raise SettingsError("configure only one Feishu secret source")
-    if direct:
-        return direct
-    if not file_value:
-        raise SettingsError("FEISHU_APP_SECRET_FILE or FEISHU_APP_SECRET is required")
-    path = Path(file_value)
-    if not path.is_absolute():
-        raise SettingsError("FEISHU_APP_SECRET_FILE must be absolute")
-    try:
-        metadata = path.lstat()
-    except OSError as error:
-        raise SettingsError("Feishu secret file cannot be read") from error
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise SettingsError("Feishu secret must be a regular non-symlink file")
-    if metadata.st_mode & 0o077:
-        raise SettingsError("Feishu secret file permissions must be 0600 or stricter")
-    try:
-        secret = path.read_text(encoding="utf-8").strip()
-    except OSError as error:
-        raise SettingsError("Feishu secret file cannot be read") from error
-    if not secret:
-        raise SettingsError("Feishu secret file must not be empty")
-    return secret

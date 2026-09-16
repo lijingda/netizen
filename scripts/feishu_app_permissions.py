@@ -19,6 +19,7 @@ from scripts.feishu_app_onboarding import (  # noqa: E402
     REQUIRED_TENANT_SCOPES,
     TENANT_SCOPE_ALTERNATIVES,
 )
+from netizen.lark_app import load_lark_app  # noqa: E402
 
 
 class PermissionCheckError(RuntimeError):
@@ -77,22 +78,9 @@ def run_permission_check(
     )
 
 
-def _read_secret(path: Path) -> str:
-    if path.is_symlink() or not path.is_file():
-        raise PermissionCheckError("the App Secret file is not a regular file")
-    try:
-        secret = path.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeError) as error:
-        raise PermissionCheckError("the App Secret file could not be read") from error
-    if not secret or any(ord(character) < 0x20 for character in secret):
-        raise PermissionCheckError("the App Secret file is empty or invalid")
-    return secret
-
-
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--app-id", required=True)
-    parser.add_argument("--secret-file", type=Path, required=True)
+    parser.add_argument("--lark-app-config", type=Path, required=True)
     return parser.parse_args(argv)
 
 
@@ -102,29 +90,22 @@ def main(
     client_factory: Callable[[str, str], Any] | None = None,
 ) -> int:
     args = parse_args(argv)
-    if (
-        not args.app_id.startswith("cli_")
-        or args.app_id.strip() != args.app_id
-        or any(ord(character) < 0x20 for character in args.app_id)
-    ):
-        print("Feishu/Lark permission verification did not complete.", file=sys.stderr)
-        return 1
     try:
-        secret = _read_secret(args.secret_file)
+        credentials = load_lark_app(args.lark_app_config)
         if client_factory is None:
             import lark_oapi as lark
             from lark_oapi.api.application.v6 import ListScopeRequest
 
             client = (
                 lark.Client.builder()
-                .app_id(args.app_id)
-                .app_secret(secret)
+                .app_id(credentials.app_id)
+                .app_secret(credentials.app_secret)
                 .log_level(lark.LogLevel.ERROR)
                 .timeout(15)
                 .build()
             )
         else:
-            client = client_factory(args.app_id, secret)
+            client = client_factory(credentials.app_id, credentials.app_secret)
 
         def list_scopes() -> Any:
             if client_factory is None:

@@ -2,7 +2,6 @@
 # ~/.netizen/config.yaml with account-specific absolute paths and `projects: {}`.
 # Replace every /home/your-user path before running Netizen directly.
 instance:
-  appId: cli_example
   dataDir: /home/your-user/.netizen/state
   # Empty Projects created from Feishu are confined below this directory.
   projectRoot: /home/your-user/projects
@@ -23,10 +22,10 @@ adminWeb:
   host: 0.0.0.0
   port: 8787
 
-# Local development may use an environment value. Managed Linux and macOS
-# deployments use a regular, non-symlink 0600 raw-value file and
-# FEISHU_APP_SECRET_FILE.
-# FEISHU_APP_SECRET=...
-# FEISHU_APP_SECRET_FILE=/home/your-user/.netizen/credentials/feishu-app-secret
+# The app ID and secret live together in the protected netizen profile at
+# lark-app/config.json beside this YAML file (directory 0700, file 0600).
+# The installer prepares this file; see docs/deployment.md for its JSON format.
+# An explicit override must be an absolute path. Lark CLI is optional.
+# NETIZEN_LARK_APP_CONFIG=/home/your-user/.netizen/lark-app/config.json
 # Admin Web supports only a canonical 32-byte base64url credential file.
 # NETIZEN_ADMIN_SECRET_FILE=/home/your-user/.netizen/credentials/admin-web-secret

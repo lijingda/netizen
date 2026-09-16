@@ -45,8 +45,9 @@ SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕�
 ```text
 ~/.netizen/
   config.yaml                                   # Channel 配置，0600
+  lark-app/                                    # 应用凭据目录，0700
+    config.json                                # netizen profile：App ID 与 Secret，0600
   credentials/
-    feishu-app-secret                           # raw Secret，0600
     admin-web-secret                            # 独立 32-byte base64url credential，0600
   state/
     channel.sqlite3[-wal|-shm]                  # Binding/Turn settings/Task feedback/Registry/Dedup
@@ -68,7 +69,7 @@ SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕�
   io.github.lijingda.netizen.plist              # macOS 渲染后的 LaunchAgent
 ${CODEX_HOME:-~/.codex}/
   skills/netizen-user-guide/                    # release 全量管理的用户咨询 Skill
-  skills/netizen-feishu/                        # release 全量管理的飞书接入 Skill
+  skills/netizen-lark/                          # release 全量管理的 Lark 接入 Skill
 ```
 
 配置、Channel 状态和 Codex 原生状态都在 release 之外。ProjectRegistry 仍会解析并保存
@@ -659,13 +660,14 @@ SHA-256，再用拒绝绝对路径、`..`、重复成员、链接、特殊文件
 候选 venv 中固定的官方 `lark-oapi` device flow，通过 stderr 显示 URL 与终端二维码。
 无 TTY 时直接进入该流程，不读取 stdin；有 TTY 时保留安装方式菜单，默认浏览器，另可选择
 手工输入 `cli_...` App ID 和隐藏 App Secret。全新骨架由官方页面选择创建新 Bot 应用或复用已有
-应用；已有 `appId` 且 Secret 文件存在但内容为空时只更新该 exact 应用。已有有效 App ID
-但 Secret 文件不存在时则视为显式飞书应用绑定重置：官方页面重新创建或选择应用，并允许
-结果替换旧 App ID。它使用
+应用；`lark-app/config.json` 的 `netizen` profile 已有有效 `appId` 且 `appSecret` 为空时，
+只更新该 exact 应用。删除整个应用凭据文件则表示显式飞书应用绑定重置：官方页面重新
+创建或选择应用，并允许结果替换旧 App ID；失败或取消保持该重置意图。它使用
 `addons.preset=false`，只声明前置门禁
 列出的 tenant scopes、`im.message.receive_v1` tenant event 和 `card.action.trigger`
 callback；不安装/调用 Lark CLI，不申请 user scope/event，不保存 user token/info。确认成功
-后 App ID 与 Secret 直接写入现有受保护文件。浏览器失败时仅有 TTY 的安装提供手工回退；
+后 App ID 与 Secret 一起原子写入受保护的 `lark-app/config.json`。浏览器失败时仅有 TTY 的
+安装提供手工回退；
 无 TTY 时失败、取消或最多 660 秒超时都明确终止，不转入终端输入或激活候选；Ctrl-C 中止安装。
 已有完整凭据且权限满足的升级不打开浏览器。Admin 后台升级不承载授权，缺配置或权限时
 仍返回 `requires_action`（[ADR 0062](adr/0062-decouple-initial-app-onboarding-from-terminal-input.md)）。
@@ -692,9 +694,9 @@ API 能接受的历史或替代 scope，与特定应用类型、租户策略和�
 
 ### 更换飞书应用与权限修复
 
-部署后更换应用不要求卸载程序。如需保留人工回退能力，先成对备份固定路径
-`~/.netizen/config.yaml` 与 `~/.netizen/credentials/feishu-app-secret`，再删除 Secret 文件并
-执行原来的正式或源码安装入口即可进入上述绑定重置；正常升级不要删除该文件，只需直接
+部署后更换应用不要求卸载程序。如需保留人工回退能力，先安全备份固定路径
+`~/.netizen/lark-app/config.json`，再删除这个应用凭据文件并执行原来的正式或源码安装入口，
+即可进入上述绑定重置；正常升级不要删除该文件，只需直接
 再次安装。选择不同 App ID 后，旧应用的 Scope/Binding 和 Codex 原生历史仍保留，但
 不会迁移到新应用的飞书 Scope。
 
@@ -702,10 +704,14 @@ API 能接受的历史或替代 scope，与特定应用类型、租户策略和�
 这对凭据就是持久的用户配置意图；随后 tenant 权限门禁失败时不会进入 activation，候选启动
 失败时则回滚旧 `current`、服务定义、数据库和 Skill，但两种失败都不自动恢复旧应用凭据。
 完成管理员审批、应用发布和租户安装后重跑同一入口，会复用新绑定继续验证与激活，不重复
-打开应用选择流程。若用户决定放弃重绑定，必须成对恢复事先备份的 `config.yaml` 与
-`feishu-app-secret`；只恢复其中一个会形成不匹配凭据。权限门禁失败且旧进程未停止时，它
+打开应用选择流程。若用户决定放弃重绑定，恢复事先备份的整个应用凭据文件，并重新运行
+安装入口。权限门禁失败且旧进程未停止时，它
 继续使用启动时已加载的旧凭据；候选启动失败回滚或任何后续服务启动，都使用磁盘上的新绑定，
 因此不能把权限未就绪状态长期搁置。
+
+应用凭据只通过该 profile 初始化、读取和原子保存。项目尚未推广，不提供旧凭据格式迁移、
+旧 Skill 名清理或旧格式版本回滚兼容；见
+[ADR 0066](adr/0066-share-lark-app-credentials-with-optional-cli.md)。
 
 取得完整凭据后，安装器使用候选 release 的官方 SDK 查询租户授权状态；tenant 权限能力
 契约中的精确 scope 或官方等价 scope 组必须满足，才能准备 host 或进入 release activation。
@@ -745,9 +751,10 @@ Agent 先把 latest 或 exact-tag 正式 `install.sh` 下载到文件，再运�
 不要复用已结束流程的链接。页面确认后若仍缺租户权限，先完成审批、发布或租户安装再重跑，
 不要循环申请。已有有效配置、Secret 和完整授权的升级不需要页面确认。
 
-首次未绑定时可在官方页面新建或复用；已有有效 App ID 且 Secret 文件为空时锁定 exact
-应用。若有效 App ID 对应的 Secret 文件被显式删除，无 TTY 也会进入上述应用绑定重置；
-成功前保持文件不存在，取消或失败不能丢失重置意图。成功保存新凭据后的两阶段激活与恢复
+首次未绑定时可在官方页面新建或复用；profile 中已有有效 App ID 且 `appSecret` 为空时
+锁定 exact 应用。若整个应用凭据文件被显式删除，无 TTY 也会进入上述应用绑定重置；
+安装器可以生成空 profile 骨架，但取消或失败不能恢复旧 App ID 或丢失重置意图。
+成功保存新凭据后的两阶段激活与恢复
 规则见[更换飞书应用与权限修复](#更换飞书应用与权限修复)。
 
 命令工具不能保留进程或转交中间输出时，可让用户直接在自己的终端运行同一个安装器。
@@ -760,7 +767,7 @@ App Secret 粘贴到聊天、命令参数、仓库或 YAML 中。Admin 后台升
 
 修改首次配置、绑定重置、官方 onboarding 或调用端交接边界时，先以隔离测试覆盖无 TTY 的
 完整路径：首次缺凭据能输出链接且不读取 stdin，确认后自动保存与继续，exact-App 不串号，
-删除 Secret 的重置可在取消后重试，失败或超时不激活、不重复发起。另确认有 TTY 菜单与手工
+删除应用凭据文件的重置可在取消后重试，失败或超时不激活、不重复发起。另确认有 TTY 菜单与手工
 回退、已有应用一次补权和 Admin `requires_action` 边界保持。
 
 改变此路径后，在正式发布前用可控的真实应用与隔离账号或主机验证
@@ -798,9 +805,10 @@ Bash 的 interactive login shell 按原生规则读取 `.bash_profile` / `.bash_
 Zsh、Fish 和其他支持的 shell 同样遵循各自原生 startup 顺序。
 
 捕获结果保留 PATH、NVM、代理/CA、语言、XDG 和普通导出变量；随后重新覆盖账号身份、
-`HOME`、安装时选择的 `CODEX_HOME`、Netizen 配置/两个 Secret 路径，并清除 profile 中
-的 direct Feishu/Admin Secret、两条可能漂移的 Secret path，以及会污染 release Python
-的 venv/Python 变量；随后写回安装器固定路径。service definition 中的 launcher、环境探针和最终 Netizen
+`HOME`、安装时选择的 `CODEX_HOME`、Netizen 配置、应用 profile 与 Admin credential 路径，
+并清除 shell profile 中的旧 Feishu Secret 来源、direct Admin Secret、可能漂移的应用与
+Admin credential 路径，以及会污染 release Python 的 venv/Python 变量；随后写回安装器
+固定路径。service definition 中的 launcher、环境探针和最终 Netizen
 解释器都显式使用 `-E -B -u`（非交互校验省略 `-u`），因此其他 `PYTHON*` 变量可以继续
 作为工具环境存在，却不能改变受管 release Python 的 import、优化、pyc 或缓冲行为。
 Codex 工具子进程的继承、过滤和显式 set 仍由同一份用户级
@@ -848,8 +856,9 @@ profile 只在候选 service 启动时加载：首次安装和原本 active 的�
 则在数据库快照、service definition 和 `current` 切换之前失败并进入既有 activation rollback。runtime
 bind 仍是最终事实。预检通过后才渲染并验证平台 service definition，原子切换
 `current`，再用候选 release 完整替换
-`${CODEX_HOME:-~/.codex}/skills` 下的 `netizen-user-guide` 和 `netizen-feishu`。
-这两个 Skill 内的人工修改会在升级时丢失；其他 Skill 不会被读取或修改。
+`${CODEX_HOME:-~/.codex}/skills` 下的 `netizen-user-guide` 和 `netizen-lark`。
+这两个受管目录共同参与完整快照及失败回滚；人工修改会在升级时丢失，
+其他 Skill 不会被读取或修改。
 首次安装会 enable 并启动服务；升级前若服务在
 运行，新版本会启动并等待主进程发布 `0600` ready marker；若原本停止则保持当前会话停止。
 Linux 延续原 enabled/disabled 意图；macOS 保证 plist 已安装/enabled，供下次登录自动启动。
@@ -910,7 +919,8 @@ installed、loaded、ready 和日志路径，不能用 loaded 代替 ready。具
 ```
 
 `uninstall.sh` 无参数，停止/disable user service，并删除渲染的 unit/plist、程序 releases、
-安装 cache 和两个精确的受管 Skill。它明确保留 `config.yaml`、`credentials`、含 Channel
+安装 cache 和两个精确的受管 Skill。它明确保留
+`config.yaml`、`lark-app`、`credentials`、含 Channel
 SQLite 的 `state`、Project 目录、其他 Codex Skills 及原生 Thread/Turn 历史。若用户也
 要删除这些数据，应在确认备份和影响后另行处理，不能扩张卸载器的默认删除范围。
 
@@ -1001,14 +1011,45 @@ relay 规则，不把 App Secret 发到聊天。机器掉电不会自动执行�
 
 ## 配置与管理页访问
 
-`config.yaml` 采用仓库示例的 mapping 形态。Feishu Secret 文件只含 raw value，权限必须是
-`0600` 或更严格；Admin credential 必须是 `token_urlsafe(32)` 的 canonical base64url 单行、
+`config.yaml` 采用仓库示例的 mapping 形态，不再配置 `instance.appId`。
+飞书应用凭据统一位于 `~/.netizen/lark-app/config.json` 的固定 `netizen` profile：
+
+```json
+{
+  "currentApp": "netizen",
+  "apps": [{
+    "name": "netizen",
+    "appId": "cli_example",
+    "appSecret": "replace-locally",
+    "brand": "feishu",
+    "defaultAs": "bot",
+    "users": []
+  }]
+}
+```
+
+示例中的 ID 和 Secret 只是占位符，不要直接用于安装。目录由安装器设为 `0700`，文件为
+当前用户拥有的普通非 symlink 文件，权限为 `0600` 或更严格。Netizen 固定读取名为
+`netizen` 的 profile，忽略 `currentApp`，不解析 Secret 引用或用户 token；安装器原子保存
+raw App ID／Secret。重复 JSON 字段、重复的 `netizen` profile、错误品牌或不合法凭据会
+明确拒绝，报错不含 Secret。
+
+服务启动器设置绝对路径 `NETIZEN_LARK_APP_CONFIG`。手工运行未设置该变量时，使用
+`config.yaml` 同目录下的 `lark-app/config.json`；不再支持 `FEISHU_APP_SECRET` 或
+`FEISHU_APP_SECRET_FILE`。这一文件采用 Lark CLI profile 格式，Netizen 只用 Python
+标准库读取；安装、服务启动和消息处理都不需要 `lark-cli`。可选 CLI 按
+[netizen-lark Skill](../skills/netizen-lark/SKILL.md) 选择该目录和 `--profile netizen --as bot`，
+自行换取应用令牌；不要把 profile 内容输出到聊天或模型上下文。格式兼容基线为官方
+CLI `1.0.95`，需用不含真实凭据的隔离 profile 验证目录选择、固定 profile 和自动换令牌
+分支；这不能替代真实应用授权或飞书验收。
+
+Admin credential 仍独立保存，必须是 `token_urlsafe(32)` 的 canonical base64url 单行、
 无尾换行，且 mode 必须精确为 `0600`。若需要由 Agent 预配置，可安全地以文件写入 API/
-受控 stdin 写入；不要把 Secret 放在 CLI 参数或 shell history 中。示意路径可由安装器首次
-无 TTY 运行生成：
+受控 stdin 写入；不要把 Secret 放在 CLI 参数或 shell history 中。首次无 TTY 安装可以
+直接完成官方浏览器初始化：
 
 ```bash
-./dev-install.sh </dev/null  # 缺配置时生成骨架后明确退出
+./dev-install.sh </dev/null  # 按输出转交验证链接并保留同一进程
 ```
 
 从带 Netizen allowlist 的旧版本升级时，必须先从 live `config.yaml` 删除整个
@@ -1016,7 +1057,7 @@ relay 规则，不把 App Secret 发到聊天。机器掉电不会自动执行�
 启动，避免部署者误以为这些字段仍然生效。
 
 不要把 Secret 内容写入 YAML、仓库、shell 参数、shell profile、systemd `Environment=`
-或 LaunchAgent plist。service definition 只注入两个受保护文件的固定路径。
+或 LaunchAgent plist。服务只传递应用配置与 Admin credential 的受保护文件路径。
 
 `adminWeb` 默认等价于：
 
@@ -1535,10 +1576,10 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
 
     ```bash
     set -euo pipefail
-    unset FEISHU_APP_SECRET NETIZEN_ADMIN_SECRET
-    export FEISHU_APP_SECRET_FILE="${HOME}/.netizen/credentials/feishu-app-secret"
+    unset FEISHU_APP_SECRET FEISHU_APP_SECRET_FILE NETIZEN_ADMIN_SECRET
+    export NETIZEN_LARK_APP_CONFIG="${HOME}/.netizen/lark-app/config.json"
     export NETIZEN_ADMIN_SECRET_FILE="${HOME}/.netizen/credentials/admin-web-secret"
-    test -s "$FEISHU_APP_SECRET_FILE"
+    test -s "$NETIZEN_LARK_APP_CONFIG"
     test -s "$NETIZEN_ADMIN_SECRET_FILE"
     probe_chat_id=${NETIZEN_FILE_PROBE_CHAT_ID:?set target Feishu chat ID}
     for count in 100 400; do

@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
-SKILL_NAMES = ("netizen-user-guide", "netizen-feishu")
+SKILL_NAMES = ("netizen-user-guide", "netizen-lark")
 
 
 class SkillInstallError(RuntimeError):

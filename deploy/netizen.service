@@ -16,7 +16,7 @@ Environment=@PATH_ENV@
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 Environment=@CONFIG_ENV@
-Environment=@SECRET_ENV@
+Environment=@LARK_APP_CONFIG_ENV@
 Environment=@ADMIN_SECRET_ENV@
 Environment=@READY_FILE_ENV@
 Environment=@LIFETIME_LOCK_FILE_ENV@

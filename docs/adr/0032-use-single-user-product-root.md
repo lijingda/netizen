@@ -1,10 +1,14 @@
 ---
 status: accepted
 date: 2026-08-21
+amended_by: 0066
 related: 0022, 0023, 0031
 ---
 
 # 使用单一用户产品根
+
+> [ADR 0066](0066-share-lark-app-credentials-with-optional-cli.md) 在同一产品根中增加受保护的
+> `lark-app/config.json`，统一应用凭据并跨卸载保留；不增加多实例或 CLI 运行依赖。
 
 ## 背景
 

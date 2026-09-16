@@ -44,6 +44,12 @@ from scripts.install_managed_skill import (  # noqa: E402
     install_skill,
     remove_skill,
 )
+from netizen.lark_app import (  # noqa: E402
+    LarkAppConfigError,
+    LarkAppCredentials,
+    encode_lark_app,
+    load_lark_app,
+)
 from netizen.bindings import (  # noqa: E402
     migrate_channel_database,
 )
@@ -70,8 +76,6 @@ from netizen.deployment.installer_support import (  # noqa: E402
     _ensure_real_directory,
     _require_regular_file,
     _write_atomic,
-    _capture_file,
-    _restore_file,
     _path_exists,
     _clean_subprocess_environment,
 )
@@ -133,11 +137,6 @@ IGNORED_SOURCE_NAMES = {
     "__pycache__",
 }
 RELEASE_NAME = re.compile(r"^[0-9a-f]{64}$")
-CONFIGURED_APP_ID = re.compile(
-    r"(?m)^[ \t]*appId:[ \t]*(?:\"(?P<double>cli_[A-Za-z0-9_-]+)\"|"
-    r"'(?P<single>cli_[A-Za-z0-9_-]+)'|(?P<plain>cli_[A-Za-z0-9_-]+))"
-    r"[ \t]*(?:#.*)?$"
-)
 
 
 class ConfigurationRequired(InstallError):
@@ -362,7 +361,6 @@ def resolve_layout(
         previous=product_root / "previous",
         config_file=product_root / "config.yaml",
         credentials_dir=credentials_dir,
-        secret_file=credentials_dir / "feishu-app-secret",
         admin_secret_file=credentials_dir / "admin-web-secret",
         state_dir=product_root / "state",
         cache_dir=product_root / "cache",
@@ -400,6 +398,7 @@ def _validate_layout_safety(layout: Layout) -> None:
     preserved_roots = (
         layout.config_file,
         layout.credentials_dir,
+        layout.lark_app_file.parent,
         layout.state_dir,
         layout.codex_home,
     )
@@ -532,6 +531,7 @@ def prepare_directories(layout: Layout) -> None:
     _ensure_managed_netizen_directory(layout.releases)
     for path in (
         layout.credentials_dir,
+        layout.lark_app_file.parent,
         layout.state_dir,
     ):
         _ensure_real_directory(path, mode=0o700)
@@ -593,64 +593,27 @@ def prepare_configuration(
     secret_prompt: Callable[[str], str] = getpass.getpass,
     app_registrar: AppRegistrar | None = None,
 ) -> None:
-    """Prepare config; a supplied registrar can complete it without terminal input."""
+    """Prepare configuration and the single application credential profile."""
 
     source = sys.stdin if input_stream is None else input_stream
-    config_missing = not _path_exists(layout.config_file)
-    secret_missing = not _path_exists(layout.secret_file)
-    if config_missing:
-        _write_atomic(
-            layout.config_file,
-            _default_config(layout, app_id="cli_REPLACE_ME").encode(),
-            mode=0o600,
-        )
+    if not _path_exists(layout.config_file):
+        _write_atomic(layout.config_file, _default_config(layout).encode(), mode=0o600)
         _ensure_project_directory(layout.home / "projects")
     else:
         _require_regular_file(layout.config_file, "configuration")
         layout.config_file.chmod(0o600)
-
     _prepare_admin_secret(layout.admin_secret_file)
+    if not _path_exists(layout.lark_app_file):
+        _write_atomic(layout.lark_app_file, encode_lark_app("", ""), mode=0o600)
+    credentials = _read_lark_app(layout, allow_incomplete=True)
+    configured_app_id = credentials.app_id or None
+    if credentials.app_id and credentials.app_secret:
+        return
 
-    try:
-        config_text = layout.config_file.read_text(encoding="utf-8")
-    except UnicodeError as error:
-        raise InstallError(f"configuration is not valid UTF-8: {layout.config_file}") from error
-    needs_app_id = "cli_REPLACE_ME" in config_text
-    configured_app_id = None if needs_app_id else _configured_app_id(config_text)
-    rebind_requested = secret_missing and configured_app_id is not None
-
-    if secret_missing and not rebind_requested:
-        _write_atomic(layout.secret_file, b"", mode=0o600)
-    elif not secret_missing:
-        _require_regular_file(layout.secret_file, "Feishu secret")
-        layout.secret_file.chmod(0o600)
-    if rebind_requested:
-        needs_secret = True
-    else:
-        try:
-            needs_secret = not layout.secret_file.read_bytes().strip()
-        except OSError as error:
-            raise InstallError(
-                f"could not read Feishu secret file {layout.secret_file}: {error}"
-            ) from error
-
-    if (interactive or app_registrar is not None) and (needs_app_id or needs_secret):
-        if rebind_requested:
-            assert configured_app_id is not None
-            info(
-                "Feishu/Lark app binding reset requested because the App Secret "
-                f"file is missing; selecting a different app replaces {configured_app_id} "
-                "and does not migrate its Feishu sessions"
-            )
-        registration_app_id = (
-            None if needs_app_id or rebind_requested else configured_app_id
-        )
-        can_register = app_registrar is not None and (
-            needs_app_id or rebind_requested or configured_app_id is not None
-        )
-        use_browser = can_register and (
+    if interactive or app_registrar is not None:
+        use_browser = app_registrar is not None and (
             not interactive
-            or _prompt_feishu_setup_method(source, app_id=registration_app_id)
+            or _prompt_feishu_setup_method(source, app_id=configured_app_id)
         )
         if use_browser:
             info(
@@ -658,7 +621,7 @@ def prepare_configuration(
                 "the App Secret will not be displayed"
             )
             try:
-                credentials = app_registrar(registration_app_id)
+                credentials = app_registrar(configured_app_id)
             except InstallError:
                 if not interactive:
                     raise InstallError(
@@ -673,45 +636,22 @@ def prepare_configuration(
                     file=sys.stderr,
                 )
             else:
-                config_text = _store_registered_feishu_credentials(
+                _store_registered_feishu_credentials(
                     layout,
-                    config_text=config_text,
-                    expected_app_id=registration_app_id,
-                    replace_existing_app_id=(
-                        configured_app_id if rebind_requested else None
-                    ),
+                    expected_app_id=configured_app_id,
                     credentials=credentials,
                 )
-                needs_app_id = False
-                needs_secret = False
-                rebind_requested = False
-                configured_app_id = credentials.app_id
                 info(
                     f"Feishu/Lark app {credentials.app_id} configured; "
-                    f"credential saved to {layout.secret_file}"
+                    f"credential saved to {layout.lark_app_file}"
                 )
                 info(
                     "finish any tenant-admin approval/application publication, "
                     "set availability, and add the bot to target chats"
                 )
-
-        if interactive and (needs_app_id or rebind_requested):
-            app_id = _prompt_app_id(source)
-            if rebind_requested:
-                assert configured_app_id is not None
-                config_text = _replace_configured_app_id(
-                    config_text,
-                    expected_app_id=configured_app_id,
-                    replacement_app_id=app_id,
-                )
-            else:
-                config_text = config_text.replace("cli_REPLACE_ME", app_id, 1)
-            _write_atomic(layout.config_file, config_text.encode(), mode=0o600)
-            needs_app_id = False
-            rebind_requested = False
-            configured_app_id = app_id
-
-        if interactive and needs_secret:
+                return
+        if interactive:
+            app_id = configured_app_id or _prompt_app_id(source)
             try:
                 secret = secret_prompt("Feishu App Secret: ").strip()
             except EOFError as error:
@@ -720,53 +660,27 @@ def prepare_configuration(
                 ) from error
             if not secret:
                 raise InstallError("Feishu App Secret must not be empty")
-            _write_atomic(layout.secret_file, secret.encode(), mode=0o600)
-            needs_secret = False
-
-    if needs_app_id or needs_secret:
-        missing: list[str] = []
-        if rebind_requested:
-            missing.append(
-                f"{rerun_instruction} in an interactive terminal to create or select "
-                "a Feishu/Lark app, or update instance.appId in "
-                f"{layout.config_file} and write the raw App Secret to "
-                f"{layout.secret_file}"
+            _store_registered_feishu_credentials(
+                layout,
+                expected_app_id=configured_app_id,
+                credentials=FeishuAppCredentials(app_id=app_id, app_secret=secret),
             )
-        elif needs_app_id:
-            missing.append(f"replace cli_REPLACE_ME in {layout.config_file}")
-        if needs_secret and not rebind_requested:
-            missing.append(f"write the raw App Secret to {layout.secret_file}")
-        raise ConfigurationRequired(
-            "non-interactive install will not prompt for credentials; "
-            + "; ".join(missing)
-            + f"; then {rerun_instruction}"
-        )
+            return
 
-
-def _configured_app_id(config_text: str) -> str | None:
-    match = CONFIGURED_APP_ID.search(config_text)
-    if match is None:
-        return None
-    return next(value for value in match.groupdict().values() if value is not None)
-
-
-def _replace_configured_app_id(
-    config_text: str,
-    *,
-    expected_app_id: str,
-    replacement_app_id: str,
-) -> str:
-    matches = list(CONFIGURED_APP_ID.finditer(config_text))
-    if len(matches) != 1:
-        raise InstallError("configuration does not contain exactly one Feishu/Lark App ID")
-    match = matches[0]
-    matched_group = next(
-        name for name, value in match.groupdict().items() if value is not None
+    raise ConfigurationRequired(
+        "non-interactive install will not prompt for credentials; "
+        f"complete the netizen profile appId/appSecret in {layout.lark_app_file}; "
+        f"then {rerun_instruction}"
     )
-    if match.group(matched_group) != expected_app_id:
-        raise InstallError("configuration App ID changed during Feishu/Lark setup")
-    start, end = match.span(matched_group)
-    return config_text[:start] + replacement_app_id + config_text[end:]
+
+
+def _read_lark_app(
+    layout: Layout, *, allow_incomplete: bool = False
+) -> LarkAppCredentials:
+    try:
+        return load_lark_app(layout.lark_app_file, allow_incomplete=allow_incomplete)
+    except LarkAppConfigError as error:
+        raise InstallError(str(error)) from error
 
 
 def _prompt_feishu_setup_method(source: IO[str], *, app_id: str | None) -> bool:
@@ -805,73 +719,27 @@ def _prompt_app_id(source: IO[str]) -> str:
 def _store_registered_feishu_credentials(
     layout: Layout,
     *,
-    config_text: str,
     expected_app_id: str | None,
-    replace_existing_app_id: str | None = None,
     credentials: FeishuAppCredentials,
-) -> str:
-    app_id = credentials.app_id
-    app_secret = credentials.app_secret
-    if (
-        not app_id.startswith("cli_")
-        or app_id.strip() != app_id
-        or any(ord(character) < 0x20 for character in app_id)
-    ):
-        raise InstallError("browser setup returned an invalid App ID")
-    if (
-        not app_secret
-        or app_secret.strip() != app_secret
-        or any(ord(character) < 0x20 for character in app_secret)
-    ):
-        raise InstallError("browser setup returned an invalid App Secret")
-    if expected_app_id is not None and replace_existing_app_id is not None:
-        raise InstallError("Feishu/Lark setup has conflicting App ID expectations")
-    if expected_app_id is not None and app_id != expected_app_id:
+) -> None:
+    if expected_app_id is not None and credentials.app_id != expected_app_id:
         raise InstallError("browser setup returned a different App ID")
-    if replace_existing_app_id is not None:
-        updated_config = _replace_configured_app_id(
-            config_text,
-            expected_app_id=replace_existing_app_id,
-            replacement_app_id=app_id,
-        )
-    elif expected_app_id is None:
-        if "cli_REPLACE_ME" not in config_text:
-            raise InstallError("configuration has no App ID placeholder to update")
-        updated_config = config_text.replace("cli_REPLACE_ME", app_id, 1)
-    else:
-        updated_config = config_text
-
-    config_snapshot = _capture_file(layout.config_file, label="configuration")
-    secret_snapshot = _capture_file(layout.secret_file, label="Feishu secret")
     try:
-        if updated_config != config_text:
-            _write_atomic(layout.config_file, updated_config.encode(), mode=0o600)
-        _write_atomic(layout.secret_file, app_secret.encode(), mode=0o600)
-    except BaseException as error:
-        rollback_failed = False
-        for path, snapshot, label in (
-            (layout.config_file, config_snapshot, "configuration"),
-            (layout.secret_file, secret_snapshot, "Feishu secret"),
-        ):
-            try:
-                _restore_file(path, snapshot, label=label)
-            except (OSError, InstallError):
-                rollback_failed = True
-        if rollback_failed:
-            raise InstallError(
-                "could not roll back Feishu credential files; inspect "
-                f"{layout.config_file} and {layout.secret_file} before rerunning"
-            ) from error
-        raise
-    return updated_config
+        encoded = encode_lark_app(credentials.app_id, credentials.app_secret)
+    except LarkAppConfigError as error:
+        raise InstallError("browser setup returned invalid application credentials") from error
+    if not credentials.app_id or not credentials.app_secret:
+        raise InstallError("browser setup returned incomplete application credentials")
+    # One atomic replacement commits the complete pair, preserving previous
+    # repair/rebind intent if the write fails.
+    _write_atomic(layout.lark_app_file, encoded, mode=0o600)
 
 
-def _default_config(layout: Layout, *, app_id: str) -> str:
+def _default_config(layout: Layout) -> str:
     project_root = layout.home / "projects"
     return (
         "# Generated by Netizen. Edit this file before rerunning the installer.\n"
         "instance:\n"
-        f"  appId: {json.dumps(app_id)}\n"
         f"  dataDir: {json.dumps(str(layout.state_dir))}\n"
         f"  projectRoot: {json.dumps(str(project_root))}\n"
         "\n"
@@ -1407,19 +1275,6 @@ def _register_feishu_app_from_release(
     )
 
 
-def _configured_app_id_from_file(layout: Layout) -> tuple[str, str]:
-    try:
-        config_text = layout.config_file.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
-        raise InstallError(
-            f"could not read configuration {layout.config_file}: {error}"
-        ) from error
-    app_id = _configured_app_id(config_text)
-    if app_id is None:
-        raise InstallError("configuration does not contain one valid Feishu/Lark App ID")
-    return app_id, config_text
-
-
 def _query_missing_feishu_permissions_from_release(
     release: Release,
     layout: Layout,
@@ -1427,16 +1282,13 @@ def _query_missing_feishu_permissions_from_release(
     runner: Runner,
     rerun_instruction: str = "rerun ./dev-install.sh",
 ) -> tuple[str, ...]:
-    app_id, _ = _configured_app_id_from_file(layout)
     command: list[str | os.PathLike[str]] = [
         release.venv / "bin" / "python",
         "-E",
         "-B",
         release.source / "scripts" / "feishu_app_permissions.py",
-        "--app-id",
-        app_id,
-        "--secret-file",
-        layout.secret_file,
+        "--lark-app-config",
+        layout.lark_app_file,
     ]
     result = runner(
         command,
@@ -1507,7 +1359,7 @@ def require_feishu_permissions(
         rerun_instruction=rerun_instruction,
     )
     if missing and repair_existing_app:
-        app_id, config_text = _configured_app_id_from_file(layout)
+        app_id = _read_lark_app(layout).app_id
         info(
             "Feishu/Lark app is missing required tenant permissions; opening the "
             f"official browser flow to update exact app {app_id}: "
@@ -1521,7 +1373,6 @@ def require_feishu_permissions(
             )
             _store_registered_feishu_credentials(
                 layout,
-                config_text=config_text,
                 expected_app_id=app_id,
                 credentials=credentials,
             )
@@ -2521,7 +2372,7 @@ def uninstall(
     info("uninstalled Netizen program, user service, and managed Skills")
     info(
         "preserved configuration and credentials: "
-        f"{selected_layout.config_file}, {selected_layout.credentials_dir}"
+        f"{selected_layout.config_file}, {selected_layout.lark_app_file}, {selected_layout.credentials_dir}"
     )
     info(
         "preserved state and native Codex history: "

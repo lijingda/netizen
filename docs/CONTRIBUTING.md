@@ -44,7 +44,7 @@ codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
 [部署前置条件](deployment.md#前置门禁)。上述 `codex exec` 是真实执行，与无需登录的
 本地代码门禁不同。
 
-复制 [config.example.yaml](../config.example.yaml) 到本地配置文件，填写 App ID，并将
+复制 [config.example.yaml](../config.example.yaml) 到本地配置文件，并将
 `dataDir`、`projectRoot` 与 Project 目录示例替换为实际绝对路径。`projectRoot` 用来限制
 自动创建的空 Project，不是默认工作目录。`projects` mapping 启动时导入尚未登记的项；
 后续在飞书 `/settings` 管理 Project，已停用、动态登记或删除的记录不被配置文件覆盖。
@@ -55,17 +55,21 @@ codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
 受管安装器会自动请求该契约，但两种方式都需要完成租户审批、应用发布与安装，设置可用
 用户和群，并把机器人加入目标群；权限变更必须随应用版本发布。
 
-本地开发支持 `FEISHU_APP_SECRET`，也可像受管服务一样用 `FEISHU_APP_SECRET_FILE`
-指向权限为 `0600` 的 raw Secret 文件。不要将 Secret 写进仓库或命令历史。Admin Web
+本地开发与受管服务共用应用凭据文件：在 YAML 所在目录下的 `lark-app/config.json` 中
+准备固定名为 `netizen` 的 profile，格式见[配置与管理页访问](deployment.md#配置与管理页访问)。
+目录权限为 `0700`，文件为当前用户拥有的普通非 symlink 文件，权限为 `0600` 或更严格。
+也可用 `NETIZEN_LARK_APP_CONFIG` 指向其他绝对路径。App ID 不再从 YAML 读取，
+`FEISHU_APP_SECRET` 和 `FEISHU_APP_SECRET_FILE` 不再支持，已有 shell 设置需移除。
+不要将 Secret 写进仓库或命令历史；安装和运行无需安装 `lark-cli`。Admin Web
 仅支持凭据文件：启用时必须设置绝对的 `NETIZEN_ADMIN_SECRET_FILE`，不接受 raw secret
-环境变量。以下使用已安全准备的 Feishu Secret 文件，并生成独立 Admin credential；
+环境变量。以下使用已安全准备的应用凭据文件，并生成独立 Admin credential；
 所有 `/absolute/path/` 都需替换为本地路径：
 
 ```bash
 umask 077
 .venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(32), end="")' > /absolute/path/admin-web-secret
 export NETIZEN_CONFIG_PATH=/absolute/path/config.yaml
-export FEISHU_APP_SECRET_FILE=/absolute/path/feishu-app-secret
+export NETIZEN_LARK_APP_CONFIG=/absolute/path/lark-app/config.json
 export NETIZEN_ADMIN_SECRET_FILE=/absolute/path/admin-web-secret
 .venv/bin/python -m netizen.main
 ```

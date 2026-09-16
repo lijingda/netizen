@@ -45,7 +45,6 @@ class Layout:
     previous: Path
     config_file: Path
     credentials_dir: Path
-    secret_file: Path
     admin_secret_file: Path
     state_dir: Path
     cache_dir: Path
@@ -55,6 +54,10 @@ class Layout:
     lifetime_lock_file: Path
     log_file: Path
     service_error_log: Path
+
+    @property
+    def lark_app_file(self) -> Path:
+        return self.product_root / "lark-app" / "config.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +187,7 @@ def _clean_subprocess_environment() -> dict[str, str]:
     for name in (
         "FEISHU_APP_SECRET",
         "FEISHU_APP_SECRET_FILE",
+        "NETIZEN_LARK_APP_CONFIG",
         "NETIZEN_ADMIN_SECRET",
         "NETIZEN_ADMIN_SECRET_FILE",
         "NETIZEN_CONFIG_PATH",
