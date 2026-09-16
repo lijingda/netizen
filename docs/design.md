@@ -254,6 +254,8 @@ Message，并与 current message 保持 `text`/`request_text` 的语义边界。
 选择 `~/.netizen/lark-app/config.json` 中的固定 `netizen` profile 并使用机器人身份；
 CLI 自行换取令牌，查询、分页和结果处理按上游 lark Skills 执行。应用凭据不进入 Prompt，
 无需修改用户默认 CLI 配置。上游 CLI 与 lark Skills 由用户另行安装，缺失不影响 Channel。
+当前会话消息固定使用 Netizen 机器人；其他场景沿用原有 lark Skills 与用户 CLI 配置，
+失败后可酌情尝试 Netizen 机器人凭证，具体身份使用范围由该 Skill 说明。
 当前消息不额外投影聊天或话题定位字段，需要时从 `message_id` 查询。该路径不改变
 当前消息投影、Scope/Binding、SQLite 或 catch-up reader，也不增加原生 MCP entry；见
 [README](../README.md#按需读取飞书历史)。

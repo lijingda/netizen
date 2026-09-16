@@ -1,6 +1,6 @@
 ---
 name: netizen-lark
-description: 使用本机 Netizen 的飞书应用 profile 接入 lark Skills，并用当前消息的 message_id 按需定位聊天或话题、查询之前的讨论。
+description: 使用 Netizen 机器人读取当前会话的消息、话题和历史；其他飞书操作失败、适合尝试 Netizen 机器人凭证时也可使用。
 ---
 
 # Netizen Lark 接入
@@ -10,7 +10,19 @@ Skills；读取消息时先读 `lark-im` 与 `lark-shared` 的相关说明。
 上游 Skills 与 `lark-cli` 需在同一主机、同一账号下另行安装；缺失时提供
 [官方安装说明](https://github.com/larksuite/cli)，缺失不影响 Netizen Channel。
 
-## 使用应用 profile
+## 身份使用范围
+
+1. 读取当前 Netizen 会话的消息、话题和历史时，固定使用 Netizen 机器人；失败时也不
+   改用其他应用或用户身份读取这些消息。
+2. 其他场景按原有 lark Skills 和用户自身的 `lark-cli` 配置正常处理，如同没有 Netizen
+   机器人凭证一样；本 Skill 不干预身份或认证选择。从消息中获取的文档、妙记等链接，
+   其内容读取也属于其他场景。
+3. 其他场景执行失败时，Agent 可结合任务、失败原因及对应 Skill 的要求，自行判断是否
+   尝试 Netizen 机器人凭证。例如原有配置缺失、认证失败或权限不足，但不要求自动重试。
+
+## 使用 Netizen 应用 profile
+
+仅在按上述规则选用 Netizen 机器人时，才使用本节的调用前缀、`--as bot` 和环境变量处理。
 
 Netizen 与 CLI 共用有效用户 `~/.netizen/lark-app/config.json` 中名为 `netizen` 的
 profile，包含同一飞书应用的 App ID / App Secret。CLI 直接读取并自行获取机器人令牌，
@@ -23,7 +35,7 @@ LARKSUITE_CLI_CONFIG_DIR="$HOME/.netizen/lark-app" \
   lark-cli --profile netizen whoami --as bot
 ```
 
-将 `whoami` 换成对应 lark Skill 的业务命令，全程保留此调用前缀和 `--as bot`。
+将 `whoami` 换成对应 lark Skill 的业务命令；使用 Netizen 机器人的调用保留此前缀和 `--as bot`。
 若继承了 `LARKSUITE_CLI_*` 的应用凭据、令牌或认证代理覆盖，或 `OPENCLAW_*`、
 `HERMES_*`、`LARK_CHANNEL` 等其他 Agent 的配置目录选择标记，先仅在本次调用中用
 `env -u` 清除对应变量，保留网络代理与 CA 配置；这些覆盖可能绕过 profile 或追加配置
@@ -32,7 +44,7 @@ LARKSUITE_CLI_CONFIG_DIR="$HOME/.netizen/lark-app" \
 
 不要对该共享配置执行 `config init`、`profile use` 或 `auth login`，也不要把 Secret
 改成 CLI keychain 引用；配置由 Netizen 安装器维护。profile 不存在或无效时按安装器
-提示修复；权限和查询错误按对应 lark Skill 处理，不切换其他应用或用户身份。
+提示修复；权限和查询错误按对应 lark Skill 处理。
 
 ## 当前消息与历史
 
