@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preview or send one card and a separate completion mention in its topic.
+"""Preview or send one card and a separate completion mention replying to it.
 
 An accepted API update does not verify a notification in the Feishu client.
 """
@@ -83,7 +83,7 @@ def _cards(user_id: str) -> tuple[OutboundCard, OutboundCard, OutboundCard]:
             progress, terminal_status="completed", collapsed=True,
         ),
         result=ReplyCardResultModule(
-            "通知验收：本卡片已完成更新，结束提醒会单独回复到本卡片的话题。",
+            "通知验收：本卡片已完成更新，结束提醒会单独引用回复本卡片。",
         ),
     )
     redraw = replace(
@@ -101,7 +101,8 @@ def _mention(args: argparse.Namespace, message_id: str) -> tuple[OutboundText, S
             mentions=[Identity(open_id=args.user_id)],
         ),
         SendOpts(
-            receive_id_type="chat_id", reply_to=message_id, reply_in_thread=True,
+            receive_id_type="chat_id", reply_to=message_id,
+            reply_in_thread=args.reply_in_thread,
             reply_target_gone="fail",
             uuid="completion-probe-" + hashlib.sha256(identity).hexdigest()[:32],
         ),
@@ -196,12 +197,12 @@ async def _probe(args: argparse.Namespace) -> dict[str, object]:
         mentioned = await channel.send(args.chat_id, mention, mention_opts)
         notification = validate_topic_message(mentioned, args.chat_id)
         if (
-            notification.message_id == message_id or not notification.thread_id
+            notification.message_id == message_id
             or not notification.root_id or not notification.parent_id
             or (card_message.thread_id is None and notification.parent_id != message_id)
-            or (card_message.thread_id is not None and notification.thread_id != card_message.thread_id)
+            or notification.thread_id != card_message.thread_id
         ):
-            result["error"] = "completion mention did not confirm the exact card topic"
+            result["error"] = "completion mention did not confirm the exact card reply"
             return result
         result.update(
             completion_mention_success=True,

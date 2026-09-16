@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from dataclasses import replace
+from itertools import product
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -100,14 +101,14 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(content, str)
             self.assertIn(text, content)
 
-    def queue_reminder(self, card_id="om_progress", *, thread_id="omt_result"):
+    def queue_reminder(self, card_id="om_progress", *, thread_id=None):
         self.channel.send_results.append(fixtures.sent_result(
             "om_reminder", chat_id="oc_direct", thread_id=thread_id,
-            # Feishu can retain an older reply-tree root when promoting a card.
+            # Feishu can retain an older reply-tree root when replying to a card.
             root_id="om_older_root", parent_id=card_id,
         ))
 
-    def assert_reminder(self, *, enabled=True, card_id="om_progress"):
+    def assert_reminder(self, *, enabled=True, card_id="om_progress", topic=False):
         self.assertEqual(len(self.channel.send_calls), int(enabled))
         if not enabled:
             return
@@ -119,7 +120,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(opts.receive_id_type, "chat_id")
         self.assertEqual(opts.reply_to, card_id)
         self.assertNotEqual(opts.reply_to, self.origin.id)
-        self.assertIs(opts.reply_in_thread, True)
+        self.assertIs(opts.reply_in_thread, topic)
         self.assertEqual(opts.reply_target_gone, "fail")
         self.assertTrue(opts.uuid)
         self.assertEqual(self.channel.send_results, [])
@@ -200,7 +201,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(configured.native_thread_id)
         self.assertEqual(self.runtime.submit_calls, [])
 
-    async def test_progress_ordinary_and_side_send_one_topic_mention_after_terminal_card(self):
+    async def test_progress_ordinary_and_side_send_one_mention_after_terminal_card(self):
         for side in (False, True):
             for enabled in (False, True):
                 with self.subTest(side=side, enabled=enabled):
@@ -308,7 +309,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
         self.queue_reminder(thread_id="omt_existing")
         await self.app.handle_completion(outcome)
         self.assert_mention(self.channel.updates[-1][1], enabled=False)
-        self.assert_reminder()
+        self.assert_reminder(topic=True)
         self.assertEqual(self.fixture.store.list_bindings(self.app._scope(origin).key), [])
 
     async def test_reminder_failure_is_one_attempt_without_result_recovery(self):
@@ -316,7 +317,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
             TimeoutError("reminder response lost"),
             fixtures.retryable_sent_result(),
             fixtures.sent_result(
-                "om_wrong_parent", chat_id="oc_direct", thread_id="omt_result",
+                "om_wrong_parent", chat_id="oc_direct",
                 root_id="om_origin", parent_id="om_origin",
             ),
             fixtures.sent_result("om_main", chat_id="oc_direct"),
@@ -556,32 +557,73 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                         self.assert_mention(card, enabled=enabled, text="Goal 结果正文")
                     self.assert_reminder(enabled=False)
 
-    async def test_goal_original_card_terminal_update_preserves_toggle(self):
-        for enabled in (False, True):
-            with self.subTest(enabled=enabled):
-                running = fixtures.native_goal(created_at=1 + int(enabled))
-                await self.fixture.register_goal_card(
-                    scope=self.scope, binding=self.binding, goal=running,
-                    message_id=f"om_goal_{enabled}", runtime_state="goal-running",
-                    logical_turn_id=f"logical-{enabled}",
-                )
-                self.channel.replies.clear()
-                origin = reply_presenter.GoalCardOrigin(
-                    message_id=f"om_goal_{enabled}", scope=self.scope,
-                    binding_id=self.binding.id, short_id=self.binding.short_id,
-                    project_alias=self.binding.project_alias,
-                    fallback_origin=self.origin,
-                )
-                await self.app.handle_completion(self.goal_outcome(
-                    origin=origin, logical_turn_id=f"logical-{enabled}",
-                    goal=replace(running, status=GoalStatus.COMPLETE),
-                    task_feedback=BindingTaskFeedback(completion_mention_enabled=enabled),
-                    finalization=GoalFinalizationStatus.UNKNOWN,
-                    finalization_error=RuntimeError("clear reply lost"),
-                ))
-                self.assertEqual(self.channel.replies, [])
-                self.assertEqual(len(self.channel.updates), 1)
-                self.assert_mention(self.channel.updates[0][1], enabled=enabled, text="Goal 结果正文")
+    async def test_goal_card_reminder_respects_scope_and_all_feedback_combinations(self):
+        for kind in (ScopeKind.DIRECT, ScopeKind.GROUP, ScopeKind.TOPIC):
+            scope = FeishuScope(
+                "cli_test", "oc_direct", kind,
+                "omt_goal" if kind is ScopeKind.TOPIC else None,
+            )
+            binding = self.binding
+            if kind is not ScopeKind.DIRECT:
+                created = await self.fixture.create_binding(scope)
+                binding = created.binding
+            fallback_origin = fixtures.FakeMessage(
+                "run goal", message_id="om_goal_origin", sender_id="ou_other",
+                chat_type="p2p" if kind is ScopeKind.DIRECT else "group",
+                thread_id=scope.topic_id,
+            )
+            for index, (pulse, progress, enabled, update_fails) in enumerate(
+                product((False, True), repeat=4)
+            ):
+                with self.subTest(kind=kind, pulse=pulse, progress=progress, enabled=enabled, update_fails=update_fails):
+                    running = replace(
+                        fixtures.native_goal(created_at=index + 1),
+                        thread_id=binding.native_thread_id or f"native-{kind.value}",
+                    )
+                    card_id = f"om_goal_{kind.value}_{index}"
+                    await self.fixture.register_goal_card(
+                        scope=scope, binding=binding, goal=running,
+                        message_id=card_id, runtime_state="goal-running",
+                        logical_turn_id=f"logical-{index}",
+                    )
+                    binding = self.fixture.store.get(binding.id)
+                    self.channel.replies.clear()
+                    self.channel.send_calls.clear()
+                    origin = reply_presenter.GoalCardOrigin(
+                        message_id=card_id, scope=scope,
+                        binding_id=binding.id, short_id=binding.short_id,
+                        project_alias=binding.project_alias, fallback_origin=fallback_origin,
+                    )
+                    outcome = self.goal_outcome(
+                        binding_id=binding.id, thread_id=running.thread_id,
+                        origin=origin, logical_turn_id=f"logical-{index}",
+                        goal=replace(running, status=GoalStatus.COMPLETE),
+                        task_feedback=BindingTaskFeedback(pulse, progress, enabled),
+                        finalization=GoalFinalizationStatus.UNKNOWN,
+                        finalization_error=RuntimeError("clear reply lost"),
+                    )
+                    if update_fails:
+                        self.channel.card_update_results.append(TimeoutError("update reply lost"))
+                        self.channel.reply_results.append(fixtures.sent_result(
+                            "om_new_goal", chat_id=scope.chat_id, thread_id=scope.topic_id,
+                        ))
+                        with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+                            await self.app.handle_completion(outcome)
+                        self.assertEqual(len(self.channel.replies), 1)
+                        self.assertEqual(self.channel.replies[0][0], fallback_origin.id)
+                        self.assert_mention(self.channel.replies[0][1], enabled=enabled, text="Goal 结果正文")
+                    else:
+                        if enabled:
+                            self.queue_reminder(card_id, thread_id=scope.topic_id)
+                        await self.app.handle_completion(outcome)
+                        self.assertEqual(self.channel.replies, [])
+                    self.assertEqual(len(self.channel.updates), 1)
+                    self.assertEqual(self.channel.updates[0][0], card_id)
+                    self.assert_mention(self.channel.updates[0][1], enabled=False, text="Goal 结果正文")
+                    self.assert_reminder(
+                        enabled=enabled and not update_fails, card_id=card_id,
+                        topic=kind is ScopeKind.TOPIC,
+                    )
 
     async def test_uncertain_goal_update_and_card_fallback_only_mention_on_first_attempt(self):
         for progress in (False, True):
@@ -606,10 +648,10 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     ))
                 self.assertEqual(len(self.channel.updates), 1)
                 self.assertEqual(self.channel.updates[0][0], "om_goal")
-                self.assert_mention(self.channel.updates[0][1], enabled=not progress, text="Goal 结果正文")
+                self.assert_mention(self.channel.updates[0][1], enabled=False, text="Goal 结果正文")
                 self.assertEqual(len(self.channel.replies), 2)
                 self.assertIsInstance(self.channel.replies[0][1], OutboundCard)
-                self.assert_mention(self.channel.replies[0][1], enabled=progress, text="Goal 结果正文")
+                self.assert_mention(self.channel.replies[0][1], enabled=True, text="Goal 结果正文")
                 self.assert_mention(self.channel.replies[1][1], enabled=False, text="Goal 结果正文")
                 self.assert_reminder(enabled=False)
 

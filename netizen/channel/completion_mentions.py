@@ -24,13 +24,13 @@ async def send_completion_mention(
     user_id: str,
     operation_id: str,
 ) -> bool:
-    """Never fall back to the prompt, chat main, inline @, or another send."""
+    """Keep the result-card anchor and scope; never fall back or resend."""
     identity = json.dumps(
         [scope.key, operation_id, card_message_id, user_id], ensure_ascii=True,
     )
     opts = SendOpts(
         receive_id_type="chat_id", reply_to=card_message_id,
-        reply_in_thread=True, reply_target_gone="fail",
+        reply_in_thread=scope.kind is ScopeKind.TOPIC, reply_target_gone="fail",
         uuid="completion-" + hashlib.sha256(identity.encode()).hexdigest()[:32],
     )
     try:
@@ -42,11 +42,11 @@ async def send_completion_mention(
             )
         sent = validate_topic_message(result, scope.chat_id)
         if (
-            not sent.thread_id or not sent.root_id or not sent.parent_id
-            or (scope.kind is ScopeKind.TOPIC and sent.thread_id != scope.topic_id)
+            not sent.root_id or not sent.parent_id
+            or sent.thread_id != scope.topic_id
             or (scope.kind is not ScopeKind.TOPIC and sent.parent_id != card_message_id)
         ):
-            raise TopicPublishError("completion reminder topic was not confirmed", unknown=True)
+            raise TopicPublishError("completion reminder reply was not confirmed", unknown=True)
         return True
     except asyncio.CancelledError:
         raise
@@ -54,7 +54,7 @@ async def send_completion_mention(
         # The request may already have notified the user. Do not retry or
         # trigger result recovery; notification delivery never changes execution.
         logger.warning(
-            "completion topic reminder was not confirmed; not retrying",
+            "completion reminder reply was not confirmed; not retrying",
             extra={"message_id": card_message_id, "operation_id": operation_id},
         )
         return False

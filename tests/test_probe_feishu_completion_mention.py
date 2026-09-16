@@ -43,7 +43,7 @@ class CompletionMentionProbeTest(unittest.IsolatedAsyncioTestCase):
                     parent_id="om_source" if reply else None,
                 ),
                 self.sent(
-                    "om_mention", thread_id=thread_id or "omt_new",
+                    "om_mention", thread_id=thread_id,
                     root_id=root_id if topic else ("om_older_root" if reply else "om_probe"),
                     parent_id=root_id if topic else "om_probe",
                 ),
@@ -69,7 +69,7 @@ class CompletionMentionProbeTest(unittest.IsolatedAsyncioTestCase):
             result = await probe._probe(self.args(**overrides))
         return result, sleep
 
-    async def test_dry_run_previews_card_and_topic_mention_without_settings_or_network(self):
+    async def test_dry_run_previews_card_and_quoted_mention_without_settings_or_network(self):
         with (
             patch.object(probe.Settings, "from_file") as settings,
             patch.object(probe, "FeishuChannel") as channel,
@@ -85,7 +85,7 @@ class CompletionMentionProbeTest(unittest.IsolatedAsyncioTestCase):
         mention = result["completion_mention"]
         self.assertEqual([user["open_id"] for user in mention["mentions"]], ["ou_owner"])
         self.assertEqual(mention["opts"]["reply_to"], "<sent.message_id>")
-        self.assertTrue(mention["opts"]["reply_in_thread"])
+        self.assertIs(mention["opts"]["reply_in_thread"], False)
         self.assertEqual(mention["opts"]["reply_target_gone"], "fail")
         self.assertTrue(mention["opts"]["uuid"])
         self.assertNotIn("turn-file.", json.dumps(result))
@@ -93,7 +93,7 @@ class CompletionMentionProbeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await probe._probe(self.args(dry_run=True, user_id="all"))
 
-    async def test_success_mentions_in_card_topic_after_update_without_attesting_notification(self):
+    async def test_success_replies_to_card_in_same_scope_without_attesting_notification(self):
         for reply, topic, target_topic in (
             (False, False, False), (True, False, False),
             (True, True, False), (True, True, True),
@@ -133,7 +133,7 @@ class CompletionMentionProbeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIsInstance(mention, OutboundText)
                 self.assertEqual(mention.mentions, [Identity(open_id="ou_owner")])
                 self.assertEqual(opts.reply_to, "om_probe")
-                self.assertTrue(opts.reply_in_thread)
+                self.assertIs(opts.reply_in_thread, topic)
                 self.assertEqual(opts.reply_target_gone, "fail")
                 self.assertEqual(opts.uuid, probe._mention(self.args(), "om_probe")[1].uuid)
                 channel.stop.assert_called_once()
@@ -215,7 +215,7 @@ class CompletionMentionProbeTest(unittest.IsolatedAsyncioTestCase):
                         parent_id="om_source" if topic else None,
                     )
                     mentioned = self.sent(
-                        "om_mention", thread_id="omt_topic" if topic else "omt_new",
+                        "om_mention", thread_id="omt_topic" if topic else None,
                         root_id="om_root" if topic else "om_probe", parent_id="om_probe",
                     )
                     if mismatch == "chunks":
@@ -224,7 +224,6 @@ class CompletionMentionProbeTest(unittest.IsolatedAsyncioTestCase):
                         mentioned.raw["data"][mismatch] = (
                             None if (
                                 mismatch == "root_id" or (mismatch == "parent_id" and topic)
-                                or (mismatch == "thread_id" and not topic)
                             ) else "unexpected"
                         )
                     channel.send.side_effect = [sent, mentioned]

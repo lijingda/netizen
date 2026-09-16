@@ -2116,9 +2116,9 @@ class ChannelApplication:
             origin.goal_generation = generation
             if terminal_card is not None:
                 update_projection = projection
-                if outcome.task_feedback.progress_card_enabled and projection.result is not None:
+                if projection.result is not None:
                     # Keep the ordinary mentioned card for fresh replies;
-                    # only updates to the running card use a separate reminder.
+                    # Goal card updates use a separate reminder even without Activity.
                     update_projection = replace(
                         projection, result=replace(projection.result, completion_mention_user_id=None),
                     )
@@ -2158,20 +2158,6 @@ class ChannelApplication:
                 await self._remind_task_completion(outcome, delivery.message_id, scope=scope)
             return
         allow_completion_mention = True
-        if (
-            delivery.status is _GoalCardDelivery.FAILED
-            and not outcome.task_feedback.progress_card_enabled
-            and projection.result is not None
-            and projection.result.completion_mention_user_id is not None
-        ):
-            # An applied update can lose its response. Only the result body
-            # follows the existing fallback chain after that mention attempt.
-            allow_completion_mention = False
-            projection = replace(
-                projection,
-                result=replace(projection.result, completion_mention_user_id=None),
-            )
-            terminal_card = reply_card(projection)
         if terminal_card is None:
             await self._reply_task_result(
                 outcome, result_text or notice, origin=target,
@@ -6043,7 +6029,10 @@ class ChannelApplication:
         *,
         scope: FeishuScope | None = None,
     ) -> None:
-        if not outcome.task_feedback.progress_card_enabled or card_message_id is None:
+        if card_message_id is None or (
+            not isinstance(outcome, GoalOutcome)
+            and not outcome.task_feedback.progress_card_enabled
+        ):
             return
         user_id = _outcome_completion_mention_user_id(outcome)
         if user_id is None:
