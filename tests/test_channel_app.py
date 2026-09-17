@@ -1343,6 +1343,9 @@ class StubRuntime:
 
 
 class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.enterContext(patch.object(reply_presenter, "_TERMINAL_CARD_RETRY_SECONDS", 0.01))
+
     async def start_card(self, kind, *, revision_during_reply=None):
         self.kind = kind
         self.channel = FakeChannel()
@@ -1614,6 +1617,62 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
             await self.presenter.close()
         self.assertEqual(len(self.channel.updates), 1)
         self.assertIn("revision 2", str(self.channel.updates[0][1]))
+
+    async def test_terminal_retries_replace_same_card_until_success_or_exhaustion(self):
+        for kind in ("ordinary", "side", "goal"):
+            for succeeds in (False, True):
+                with self.subTest(kind=kind, succeeds=succeeds):
+                    await self.start_card(kind)
+                    rejected = failed_reply_result(code=2200, message="Internal Error")
+                    self.channel.card_update_results.extend((
+                        json.JSONDecodeError("Bad Gateway", "", 0), rejected,
+                        SimpleNamespace(success=True) if succeeds else rejected,
+                    ))
+                    with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+                        self.assertEqual(await self.finish_card(), succeeds)
+                    self.assertEqual(len(self.channel.updates), 3)
+                    self.assertTrue(all(
+                        update == self.channel.updates[0] for update in self.channel.updates
+                    ))
+                    self.assertEqual(self.channel.updates[0][0], "om_progress")
+                    self.assertIn("terminal answer", str(self.channel.updates[0][1]))
+                    self.assertEqual(len(self.channel.replies), 1)
+                    self.assertTrue(self.session.task.done())
+                    await self.presenter.close()
+
+    async def test_terminal_budget_and_cancellation_cover_request_and_retry_delay(self):
+        for kind in ("ordinary", "side", "goal"):
+            for stage in ("request", "delay"):
+                for cancel in (False, True):
+                    with self.subTest(kind=kind, stage=stage, cancel=cancel):
+                        await self.start_card(kind)
+                        self.presenter._operation_timeout_seconds = 1 if cancel else 0.02
+                        entered = asyncio.Event()
+
+                        async def update(message_id, card):
+                            self.channel.updates.append((message_id, card))
+                            entered.set()
+                            if stage == "request":
+                                await asyncio.Future()
+                            return failed_reply_result(code=2200, message="Internal Error")
+
+                        with (
+                            patch.object(self.channel, "update_card", side_effect=update),
+                            patch.object(reply_presenter, "_TERMINAL_CARD_RETRY_SECONDS", 60),
+                            self.assertLogs("netizen.channel.reply_presenter")
+                            if stage == "delay" or not cancel else nullcontext(),
+                        ):
+                            finishing = asyncio.create_task(self.finish_card())
+                            await asyncio.wait_for(entered.wait(), timeout=1)
+                            if cancel:
+                                finishing.cancel()
+                                with self.assertRaises(asyncio.CancelledError):
+                                    await finishing
+                            else:
+                                self.assertFalse(await asyncio.wait_for(finishing, timeout=0.5))
+                        self.assertEqual(len(self.channel.updates), 1)
+                        self.assertEqual(len(self.channel.replies), 1)
+                        await self.presenter.close()
 
     async def test_read_and_render_errors_stop_without_delivery_retries(self):
         for kind in ("ordinary", "side", "goal"):
@@ -2370,10 +2429,16 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_progress_update_failure_falls_back_to_plain_answer(
         self,
     ) -> None:
+        await self._assert_terminal_progress_update_retry(recovers=False)
+
+    async def test_terminal_progress_update_retry_keeps_card_and_mentions_once(self) -> None:
+        await self._assert_terminal_progress_update_retry(recovers=True)
+
+    async def _assert_terminal_progress_update_retry(self, *, recovers: bool) -> None:
         await self.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        feedback = BindingTaskFeedback(progress_card_enabled=True)
+        feedback = BindingTaskFeedback(progress_card_enabled=True, completion_mention_enabled=True)
         activity = turn_activity_snapshot(binding_id=binding.id)
         self.runtime.turn_activity_values[binding.id] = activity
         self.runtime.submission = Submission(
@@ -2389,7 +2454,12 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         prompt = FakeMessage("hello", message_id="om_progress_origin")
         await self.app.handle_message(prompt)
-        self.channel.fail_card_updates = True
+        self.channel.card_update_results.append(json.JSONDecodeError("Bad Gateway", "", 0))
+        self.channel.fail_card_updates = not recovers
+        if recovers:
+            self.channel.send_results.append(sent_result(
+                "om_reminder", chat_id="oc_direct", root_id="om_progress", parent_id="om_progress",
+            ))
 
         with (
             self.assertLogs("netizen.channel.reply_presenter", level="ERROR"),
@@ -2415,7 +2485,16 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(parse_diff.call_count, 1)
-        self.assertEqual(self.channel.replies[-1], (prompt.id, completion_post("answer survives")))
+        self.assertEqual(len(self.channel.updates), 2 if recovers else 3)
+        self.assertEqual(len(self.channel.replies), 1 if recovers else 2)
+        self.assertEqual(len(self.channel.send_calls), 1 if recovers else 0)
+        if recovers:
+            _, reminder, opts = self.channel.send_calls[0]
+            self.assertEqual(opts.reply_to, "om_progress")
+            self.assertIn("ou_user", str(reminder))
+            self.assertIn("answer survives", str(self.channel.updates[-1][1]))
+        else:
+            self.assertEqual(self.channel.replies[-1], (prompt.id, completion_post("answer survives", "ou_user")))
         self.assertEqual(self.channel.updates[-1][0], "om_progress")
 
     async def test_intermediate_progress_failure_recovers_at_terminal(self) -> None:
@@ -2478,9 +2557,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(session.task.done())
             self.assertEqual(len(self.channel.updates), 3)
             if not terminal_succeeds:
-                self.channel.card_update_results.append(
-                    failed_reply_result(code=2200, message="Internal Error")
-                )
+                self.channel.fail_card_updates = True
 
             await self.app.handle_completion(
                 TurnOutcome(
@@ -2495,7 +2572,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-        self.assertEqual(len(self.channel.updates), 4)
+        self.assertEqual(len(self.channel.updates), 4 if terminal_succeeds else 6)
         self.assertEqual(self.channel.updates[-1][0], "om_progress")
         self.assertIn("answer survives", str(self.channel.updates[-1][1]))
         self.assertNotIn(key, self.app._progress_cards._sessions)
@@ -7071,9 +7148,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(session.task.done())
             self.assertEqual(len(self.channel.updates), 3)
             if not terminal_succeeds:
-                self.channel.card_update_results.append(
-                    failed_reply_result(code=2200, message="Internal Error")
-                )
+                self.channel.fail_card_updates = True
                 self.channel.reply_results.append(
                     sent_result("om_goal_fallback", chat_id="oc_direct")
                 )
@@ -7092,7 +7167,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-        self.assertEqual(len(self.channel.updates), 4)
+        self.assertEqual(len(self.channel.updates), 4 if terminal_succeeds else 6)
         self.assertEqual(self.channel.updates[-1][0], "om_goal_progress")
         self.assertIn("goal answer survives", str(self.channel.updates[-1][1]))
         self.assertNotIn(key, self.app._progress_cards._goal_sessions)
@@ -11740,9 +11815,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(session.task.done())
             self.assertEqual(len(self.channel.updates), initial_updates + 3)
             if not terminal_succeeds:
-                self.channel.card_update_results.append(
-                    failed_reply_result(code=2200, message="Internal Error")
-                )
+                self.channel.fail_card_updates = True
             await self.app.handle_completion(
                 SideTurnOutcome(
                     side_id=record.id,
@@ -11758,7 +11831,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-        self.assertEqual(len(self.channel.updates), initial_updates + 4)
+        self.assertEqual(len(self.channel.updates), initial_updates + (4 if terminal_succeeds else 6))
         self.assertEqual(self.channel.updates[-1][0], "om-side-progress")
         self.assertIn("side answer survives", str(self.channel.updates[-1][1]))
         self.assertNotIn(key, self.app._progress_cards._side_sessions)

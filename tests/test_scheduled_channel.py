@@ -178,8 +178,10 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.app._progress_cards._sessions), 1)
         return claim, request
 
-    async def assert_progress_completion(self, *, topic):
+    async def assert_progress_completion(self, *, topic, retry=False):
         claim, request = await self.progress_fixture()
+        if retry:
+            self.channel.card_update_results.append(TimeoutError("response lost after patch"))
         self.channel.card_update_results.append(SimpleNamespace(success=True, raw={"code": 0}))
         self.channel.fetched_messages["om_progress"] = {"code": 0, "data": {"items": [
             {"message_id": "om_progress", "chat_id": "oc_group", "thread_id": topic}]}}
@@ -188,6 +190,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             thread_id="native-" + claim.run.id, turn_id="turn-initial", owner_id=request["owner_id"], origin=request["origin"],
             result=completed_turn_result(final_response="scheduled card result"), task_feedback=BindingTaskFeedback(True, True)))
         self.assertEqual(len(self.channel.replies), 1)
+        self.assertEqual(len(self.channel.updates), 2 if retry else 1)
         self.assertEqual(self.channel.updates[-1][0], "om_progress")
         self.assertIn("scheduled card result", str(self.channel.updates[-1][1]))
         run = self.store.schedules.get_run(claim.run.id)
@@ -200,17 +203,23 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
     async def test_progress_card_destination_unknown_does_not_duplicate_result(self):
         await self.assert_progress_completion(topic="omt_other")
 
-    async def assert_uncertain_progress_update(self, response, *, state="unknown"):
+    async def test_progress_card_retry_confirms_delivery_without_extra_reply(self):
+        await self.assert_progress_completion(topic="omt_fresh", retry=True)
+
+    async def assert_uncertain_progress_update(self, response, *, state="unknown", later=None):
         claim, request = await self.progress_fixture()
         self.store.schedules.release(claim.run.id)
-        self.channel.card_update_results.append(response)
+        responses = [response] if getattr(response, "success", False) else [response, response, response]
+        if later is not None:
+            responses[1:] = [later, later]
+        self.channel.card_update_results.extend(responses)
         await self.app.handle_completion(TurnOutcome(
             binding_id=request["binding"].id, thread_id="native-" + claim.run.id,
             turn_id="turn-initial", owner_id=request["owner_id"], origin=request["origin"],
             result=completed_turn_result(final_response="only one terminal result"),
             task_feedback=BindingTaskFeedback(True, True)))
         self.assertEqual(len(self.channel.replies), 1)  # initial progress card only
-        self.assertEqual(len(self.channel.updates), 1)
+        self.assertEqual(len(self.channel.updates), len(responses))
         run = self.store.schedules.get_run(claim.run.id)
         self.assertEqual(run.delivery_state, state)
         self.assertEqual(run.barrier, "released")
@@ -230,6 +239,12 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_update_explicit_rejection_does_not_resend_result(self):
         await self.assert_uncertain_progress_update(
             SimpleNamespace(success=False, raw={"code": 230017}), state="failed")
+
+    async def test_later_rejection_does_not_disprove_an_earlier_unknown_update(self):
+        await self.assert_uncertain_progress_update(
+            TimeoutError("response lost after patch"),
+            later=SimpleNamespace(success=False, raw={"code": 230017}),
+        )
 
     async def test_terminal_render_failure_before_update_can_fall_back(self):
         claim, request = await self.progress_fixture()
