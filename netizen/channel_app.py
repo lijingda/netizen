@@ -200,6 +200,7 @@ from .experience import (
     parse_message,
     side_command_help,
 )
+from .error_messages import describe_error, native_turn_failure
 from .model_settings import ModelCatalogError, TurnModelSettings
 from .management import (
     ActivePointerChanged,
@@ -1135,7 +1136,7 @@ class ChannelApplication:
             HistoricalMessageError,
             ContextBoundaryCommitFailed,
         ) as error:
-            await self._reply(message, str(error))
+            await self._reply(message, describe_error(error))
         except ImageInputError as error:
             await self._reply(message, str(error))
         except PromptProjectionError as error:
@@ -1170,13 +1171,18 @@ class ChannelApplication:
             TurnInterruptFailed,
             TurnStartFailed,
         ) as error:
-            await self._reply(message, str(error))
+            await self._reply(message, describe_error(error))
         except Exception as error:
             logger.exception(
                 "channel interaction failed",
                 extra={"error_type": type(error).__name__},
             )
-            await self._reply(message, "Codex 后端处理失败，请发送一条新消息重试。")
+            await self._reply(
+                message,
+                f"Codex 请求处理未完成：{describe_error(error)}。"
+                "请用 /status 或 /sessions 查看当前状态，再决定是否重试；"
+                "本提示不代表正在执行的任务已结束。",
+            )
 
     async def handle_card_action(self, event: Any) -> None:
         action = getattr(event, "action", None)
@@ -1251,6 +1257,7 @@ class ChannelApplication:
             ThreadOccupied,
             TurnStartFailed,
         ) as error:
+            detail = describe_error(error)
             if (
                 intent is not None
                 and intent.name
@@ -1260,18 +1267,18 @@ class ChannelApplication:
                     CardControlName.GOAL_CLEAR,
                 }
             ):
-                if not await self._update_goal_action_notice(intent, str(error)):
-                    await self._safe_reply_to_card(intent, str(error))
+                if not await self._update_goal_action_notice(intent, detail):
+                    await self._safe_reply_to_card(intent, detail)
                 return
             card = (
                 self._settings_card(
                     intent.scope,
                     section=intent.settings_section,
-                    notice=str(error),
+                    notice=detail,
                     notice_is_error=True,
                 )
                 if intent is not None and intent.settings_section is not None
-                else error_card(str(error))
+                else error_card(detail)
             )
             updated = await self._safe_update_card(message_id, card)
             if (
@@ -1298,13 +1305,14 @@ class ChannelApplication:
             ):
                 await self._safe_reply_to_card(
                     intent,
-                    f"❌ 会话操作失败：{str(error)[:500]}",
+                    f"❌ 会话操作失败：{detail}",
                 )
         except Exception as error:
             logger.exception(
                 "card interaction failed",
                 extra={"error_type": type(error).__name__},
             )
+            detail = describe_error(error)
             if (
                 intent is not None
                 and intent.name
@@ -1316,23 +1324,23 @@ class ChannelApplication:
             ):
                 if not await self._update_goal_action_notice(
                     intent,
-                    "卡片操作失败，请重新发送 /goal。",
+                    f"卡片操作未完成：{detail}。请发送 /goal 检查当前状态。",
                 ):
                     await self._safe_reply_to_card(
                         intent,
-                        "卡片操作失败，请重新发送 /goal。",
+                        f"卡片操作未完成：{detail}。请发送 /goal 检查当前状态。",
                     )
                 return
             card = (
                 self._settings_card(
                     intent.scope,
                     section=intent.settings_section,
-                    notice="设置操作失败，请重新发送 /settings。",
+                    notice=f"设置操作未完成：{detail}。请发送 /settings 检查当前设置。",
                     notice_is_error=True,
                 )
                 if intent is not None and intent.settings_section is not None
                 else error_card(
-                    "卡片操作失败，请重新发送原命令。",
+                    f"卡片操作未完成：{detail}。请发送 /sessions 检查当前状态。",
                 )
             )
             updated = await self._safe_update_card(message_id, card)
@@ -1360,7 +1368,7 @@ class ChannelApplication:
             ):
                 await self._safe_reply_to_card(
                     intent,
-                    "❌ 会话操作失败：请重新发送原命令。",
+                    f"❌ 会话操作未完成：{detail}。请发送 /sessions 检查当前状态。",
                 )
 
     async def handle_completion(
@@ -1428,9 +1436,11 @@ class ChannelApplication:
                     },
                 )
             message = (
-                "本次 Codex Turn 在短暂重试后仍无法确认状态，已停止后台读取。"
-                "当前会话及上下文仍保留；可发送 `/sessions` 重新检查、停止、"
-                "归档或删除这个会话。"
+                f"本次 Codex Turn 状态无法确认：{describe_error(outcome.error)}。"
+                "已停止后台读取，当前会话及上下文仍保留。"
+                "尚未确认本轮是否结束，暂不启动新一轮；可发送消息触发状态检查，"
+                "或发送 `/sessions` 重新检查、停止、归档或删除这个会话。"
+                "状态仍无法确认时，新消息不会执行。"
             )
             await self._reply(outcome.origin, message)
             return
@@ -1442,10 +1452,10 @@ class ChannelApplication:
             return
         if isinstance(outcome, CompactionOutcome):
             if outcome.error is not None:
-                detail = str(outcome.error).strip() or type(outcome.error).__name__
+                detail = describe_error(outcome.error)
                 await self._reply(
                     outcome.origin,
-                    f"会话上下文压缩未完成：{detail[:500]}",
+                    f"会话上下文压缩未完成：{detail}",
                 )
             elif outcome.status == "completed":
                 await self._reply(outcome.origin, "会话上下文压缩已完成。")
@@ -1505,9 +1515,8 @@ class ChannelApplication:
                 if isinstance(outcome.origin, ScheduledOrigin):
                     return
         if outcome.error is not None:
-            detail = str(outcome.error).strip() or type(outcome.error).__name__
             await self._reply_task_result(
-                outcome, f"任务未完成：{detail[:500]}",
+                outcome, _task_failure_text(outcome),
             )
             return
         if outcome.status == "interrupted":
@@ -1525,9 +1534,8 @@ class ChannelApplication:
                 )
             return
         if outcome.status != "completed":
-            detail = outcome.final_response or f"Codex Turn 状态为 {outcome.status!r}。"
             await self._reply_task_result(
-                outcome, f"任务未完成：{detail[:500]}",
+                outcome, _task_failure_text(outcome),
             )
             return
         await self._complete_task_with_files(
@@ -1578,8 +1586,7 @@ class ChannelApplication:
         file_additions: int | None = None
         file_deletions: int | None = None
         if outcome.error is not None:
-            detail = str(outcome.error).strip() or type(outcome.error).__name__
-            final_response = f"任务未完成：{detail[:500]}"
+            final_response = _task_failure_text(outcome)
         elif outcome.status == "interrupted":
             terminal_status = "interrupted"
             if outcome.background_cleanup_requested:
@@ -1593,8 +1600,7 @@ class ChannelApplication:
                     "前台工具进程可能仍在运行。"
                 )
         elif outcome.status != "completed":
-            detail = outcome.final_response or f"Codex Turn 状态为 {outcome.status!r}。"
-            final_response = f"任务未完成：{detail[:500]}"
+            final_response = _task_failure_text(outcome)
         else:
             terminal_status = "completed"
             final_response = prepared_response or outcome.final_response or "任务已结束，未产生文本回复。"
@@ -1847,10 +1853,10 @@ class ChannelApplication:
             }.get(record.state)
             await self._update_side_card(record, notice=notice)
             return
-        detail = str(outcome.error).strip() or type(outcome.error).__name__
+        detail = describe_error(outcome.error, limit=300)
         await self._update_side_card(
             record,
-            notice=f"Side 清理尚未确认，可再次结束重试：{detail[:300]}",
+            notice=f"Side 清理尚未确认，可再次结束重试：{detail}",
             notice_is_error=True,
         )
 
@@ -1902,18 +1908,18 @@ class ChannelApplication:
         goal = outcome.goal
         status = goal.status.value if goal is not None else "unknown"
         if outcome.error is not None:
-            detail = str(outcome.error).strip() or type(outcome.error).__name__
-            notice = f"Goal 未能确认终态：{detail[:500]}"
+            detail = describe_error(outcome.error)
+            notice = f"Goal 未能确认终态：{detail}"
             notice_is_error = True
             runtime_state = GoalOperationState.UNKNOWN.value
             result_text = None
         elif outcome.finalization is GoalFinalizationStatus.UNKNOWN:
             detail = (
-                str(outcome.finalization_error).strip()
+                describe_error(outcome.finalization_error)
                 if outcome.finalization_error is not None
                 else "自动结束结果未确认"
             )
-            notice = f"Goal 已完成，但自动结束结果未知：{detail[:500]}"
+            notice = f"Goal 已完成，但自动结束结果未知：{detail}"
             notice_is_error = True
             runtime_state = GoalOperationState.UNKNOWN.value
             result_text = (
@@ -5393,8 +5399,9 @@ class ChannelApplication:
                     "会话列表已变化，本次重新检查未执行；请刷新 /sessions。"
                 ) from error
             notice = (
-                "已启动一次有界的 exact Turn 状态重读；"
-                "成功后会恢复正常观察，仍不可验证则停止后台读取。"
+                "正在重新检查上一轮任务；确认已结束后会补发结果或失败原因，并恢复续聊。"
+                "若任务仍在执行，仅恢复状态检查，旧进度卡不再更新；"
+                "停止尚未完成时仍需等待或重试 /stop。仍无法确认时会返回具体原因。"
             )
             try:
                 refreshed = await self._safe_update_card(
@@ -6496,6 +6503,26 @@ def _first_post_node(message: Any) -> dict[str, Any] | None:
             if isinstance(node, dict):
                 return node
     return None
+
+
+def _task_failure_text(outcome: TurnOutcome | SideTurnOutcome) -> str:
+    error = outcome.error
+    if error is None:
+        native_error = getattr(outcome.result, "error", None)
+        error = (
+            native_turn_failure(native_error)
+            if native_error is not None
+            else RuntimeError(
+                outcome.final_response or f"Codex Turn 状态为 {outcome.status!r}。"
+            )
+        )
+    message = f"任务未完成：{describe_error(error)}"
+    if isinstance(outcome, TurnOutcome) and outcome.status == "failed":
+        message += (
+            "\n本轮已结束，原会话及上下文仍保留；"
+            "可发送“继续”或调整 /config 后重试。"
+        )
+    return message
 
 
 def _outcome_completion_mention_user_id(

@@ -8,6 +8,8 @@ import asyncio
 import json
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -168,6 +170,7 @@ def _fake_server(*, usage_mode: bool = False) -> None:
     usage_turn_id: str | None = None
     usage_active = False
     close_wake_turn = False
+    missing_completion_turn = False
     for line in sys.stdin:
         message = json.loads(line)
         method = message.get("method")
@@ -218,6 +221,7 @@ def _fake_server(*, usage_mode: bool = False) -> None:
                 usage_active = True
                 raw_input = message.get("params", {}).get("input", [])
                 close_wake_turn = "close-wake" in json.dumps(raw_input)
+                missing_completion_turn = "missing-completion" in json.dumps(raw_input)
                 if "immediate metadata" in json.dumps(raw_input):
                     _send_usage_notifications(
                         turn_id=usage_turn_id,
@@ -267,6 +271,9 @@ def _fake_server(*, usage_mode: bool = False) -> None:
             include_turns = bool(message.get("params", {}).get("includeTurns"))
             if usage_mode:
                 assert usage_turn_id is not None
+                was_active = usage_active
+                if missing_completion_turn:
+                    usage_active = False
                 _send(
                     {
                         "id": request_id,
@@ -280,11 +287,11 @@ def _fake_server(*, usage_mode: bool = False) -> None:
                     }
                 )
                 sys.stdout.flush()
-                if usage_active:
+                if was_active:
                     _send_usage_notifications(
                         turn_id=usage_turn_id,
                         turn_number=usage_turn_number,
-                        completed=not close_wake_turn,
+                        completed=not (close_wake_turn or missing_completion_turn),
                     )
                     if not close_wake_turn:
                         usage_active = False
@@ -366,6 +373,12 @@ async def _usage_drain_client(*, attempts: int) -> None:
         TurnCompletedNotification,
     )
 
+    # One worker can remain blocked in stream while another executes the public
+    # client.close used below. During the cancellation check we occupy the
+    # second worker ourselves, proving cancellation frees the stream worker.
+    # asyncio.run owns executor shutdown; no SDK private fields are inspected.
+    executor = ThreadPoolExecutor(max_workers=2)
+    asyncio.get_running_loop().set_default_executor(executor)
     config = CodexConfig(
         launch_args_override=(
             sys.executable,
@@ -424,6 +437,41 @@ async def _usage_drain_client(*, attempts: int) -> None:
             assert usage.last.total_tokens == 1_000 + attempt
             assert usage.total.total_tokens == (1_000 + attempt) * 2
             assert usage.model_context_window == 100_000
+
+        missing = await thread.turn("missing-completion")
+        terminal = await thread.read(include_turns=True)
+        exact = next(turn for turn in terminal.thread.turns if turn.id == missing.id)
+        assert terminal.thread.status.root.type == "idle"
+        assert exact.status.value == "completed"
+        methods: list[str] = []
+        occupied = threading.Event()
+        release_worker = threading.Event()
+
+        def occupy_worker() -> None:
+            occupied.set()
+            release_worker.wait()
+
+        blocker = executor.submit(occupy_worker)
+        try:
+            assert await asyncio.to_thread(occupied.wait, 1)
+            try:
+                async with asyncio.timeout(1):
+                    async for notification in missing.stream():
+                        methods.append(notification.method)
+            except TimeoutError:
+                pass
+            else:
+                raise AssertionError("missing completion did not leave a blocked stream")
+            assert methods == ["turn/diff/updated", "thread/tokenUsage/updated"]
+            # The client/transport is still open and one worker remains occupied.
+            # If cancellation abandoned its to_thread future without waking the
+            # stream worker, this marker would have no available worker.
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: "worker-released"), 1) == (
+                "worker-released"
+            )
+        finally:
+            release_worker.set()
+            await asyncio.wrap_future(blocker)
 
         waiting = await thread.turn("close-wake")
         active = await thread.read(include_turns=True)
@@ -526,7 +574,8 @@ def _usage_driver(*, attempts: int, timeout: float) -> int:
         )
     except subprocess.TimeoutExpired:
         print(
-            "FAIL: terminal usage drain or transport-close wake blocked the SDK "
+            "FAIL: terminal metadata drain, timed stream cancellation, or "
+            "transport-close wake blocked the SDK "
             f"executor ({attempts} turns).",
             file=sys.stderr,
         )
@@ -542,7 +591,8 @@ def _usage_driver(*, attempts: int, timeout: float) -> int:
     print(
         f"PASS: {attempts} terminal metadata drains "
         f"({attempts // 2} completed before the start response); "
-        "exact usage/diff/completion retained and transport close woke a blocked stream."
+        "exact usage/diff/completion retained, timed stream cancellation released "
+        "its worker, and transport close woke a blocked stream."
     )
     return 0
 

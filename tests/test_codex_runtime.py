@@ -22,6 +22,7 @@ from openai_codex.types import (
     Notification,
     ThreadItem,
     ThreadTokenUsageUpdatedNotification,
+    TurnError,
 )
 
 from netizen.bindings import (
@@ -229,9 +230,9 @@ class FakeTurnHandle:
             ]
         self.notifications.put_nowait(_STREAM_END)
 
-    def fail(self, message: str) -> None:
+    def fail(self, message: str, code: str | None = None) -> None:
         self.record.status.value = "failed"
-        self.record.error = SimpleNamespace(message=message)
+        self.record.error = TurnError.model_validate({"message": message, "codexErrorInfo": code})
         self.record.completed_at = 2
         self.notifications.put_nowait(_STREAM_END)
 
@@ -4360,9 +4361,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 outcome = self.outcomes[-1]
                 if status == "failed":
                     self.assertIsInstance(outcome.error, RuntimeError)
-                    self.assertIsNone(outcome.result)
-                else:
-                    self.assertEqual(outcome.result.status.value, status)
+                self.assertEqual(outcome.result.status.value, status)
 
     async def test_public_turn_stream_carries_only_latest_aggregate_diff(
         self,
@@ -7780,8 +7779,6 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(self.outcomes), 1)
         self.assertIsInstance(self.outcomes[0], TurnObservationUnavailableOutcome)
-        with self.assertRaises(TurnObservationUnavailable):
-            await self.runtime.capture_submission_admission(binding.id)
         reads = list(self.codex.read_calls)
         await asyncio.sleep(0.01)
         self.assertEqual(self.codex.read_calls, reads)
@@ -7790,7 +7787,6 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_internal_read_then_not_loaded_uses_one_resume_within_three_recovery_io(
         self,
     ) -> None:
-        self.codex.complete_immediately = True
         self.codex.read_errors.append(InternalRpcError(-32603, "metadata unavailable"))
         self.codex.read_statuses.append("notLoaded")
         binding = self.binding()
@@ -7804,7 +7800,9 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         async def resume(thread_id, **kwargs):
             operations.append("resume")
-            return await native_resume(thread_id, **kwargs)
+            thread = await native_resume(thread_id, **kwargs)
+            self.codex.handles[0].complete()
+            return thread
 
         with (
             patch.object(FakeThread, "read", read),
@@ -7832,7 +7830,6 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         binding = self.binding()
-        self.codex.complete_immediately = True
         self.codex.read_errors.append(InternalRpcError(-32603, "metadata unavailable"))
         self.codex.read_statuses.append("notLoaded")
         self.codex.resume_errors.append(InvalidRequestError(
@@ -7857,6 +7854,9 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.outcomes[0].turn_id, submission.turn_id)
         self.assertTrue(self.runtime._accepting)
         self.assertEqual(self.cleanup.calls, [])
+        self.codex.full_read_errors.extend(
+            InternalRpcError(-32603, "history remains unavailable") for _ in range(3)
+        )
         with self.assertRaises(TurnObservationUnavailable):
             await self.runtime.capture_submission_admission(binding.id)
 
@@ -8036,8 +8036,6 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.codex.read_calls), reads)
         self.assertEqual(len(self.codex.resume_calls), resumes)
         self.assertIsNotNone(self.runtime.active_turn(binding.id))
-        with self.assertRaises(TurnObservationUnavailable):
-            await self.runtime.capture_submission_admission(binding.id)
         notices = [
             outcome
             for outcome in self.outcomes
@@ -8149,6 +8147,405 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         follow_up.release_receipt_attempt()
         await self.runtime.wait_idle()
         self.assertEqual(self.outcomes[-1].final_response, "continued")
+
+    async def test_exact_terminals_are_authoritative_under_all_known_thread_states(self) -> None:
+        binding = self.binding()
+        for thread_status in ("systemError", "notLoaded", "idle", "active"):
+            for turn_status in ("failed", "completed", "interrupted"):
+                with self.subTest(thread=thread_status, turn=turn_status):
+                    submission = await self.submit(binding)
+                    handle = self.codex.handles[-1]
+                    if turn_status == "failed":
+                        handle.fail("backend unavailable", "serverOverloaded")
+                    else:
+                        handle.complete(status=turn_status)
+                    self.codex.read_statuses.extend([thread_status] * 2)
+                    submission.release_receipt_attempt()
+                    await self.runtime.wait_idle()
+
+                    outcome = self.outcomes[-1]
+                    self.assertIsInstance(outcome, TurnOutcome)
+                    self.assertEqual(outcome.status, turn_status)
+                    self.assertEqual(outcome.turn_id, submission.turn_id)
+                    self.assertIsNone(self.runtime.active_turn(binding.id))
+                    if turn_status == "failed":
+                        self.assertIn("backend unavailable", str(outcome.error))
+                        self.assertIn("serverOverloaded", str(outcome.error))
+                    else:
+                        self.assertIsNone(outcome.error)
+                    self.assertEqual(len(self.codex.start_kwargs), 1)
+
+    async def test_system_error_without_exact_terminal_stays_unavailable_with_reason(self) -> None:
+        self.codex.read_statuses.extend(["systemError"] * 5)
+        binding = self.binding()
+        submission = await self.submit(binding)
+        submission.release_receipt_attempt()
+        with self.assertLogs("netizen.codex_runtime", level="WARNING") as logs:
+            await self.runtime.wait_idle()
+        self.assertEqual(self.runtime.active_turn(binding.id).state, ActiveState.OBSERVATION_UNAVAILABLE)
+        self.assertIsInstance(self.outcomes[-1], TurnObservationUnavailableOutcome)
+        self.assertIn("systemError", str(self.outcomes[-1].error))
+        self.assertIn("inProgress", str(self.outcomes[-1].error))
+        self.assertIn(submission.turn_id, " ".join(logs.output))
+        self.assertEqual(self.codex.resume_calls, [])
+        self.assertEqual(len(self.codex.handles), 1)
+
+    async def _park_turn_for_recovery(self, binding):
+        self.codex.read_errors.extend(
+            InternalRpcError(-32603, "temporary history outage") for _ in range(4)
+        )
+        submission = await self.submit(binding)
+        submission.release_receipt_attempt()
+        await self.runtime.wait_idle()
+        self.assertEqual(self.runtime.active_turn(binding.id).state, ActiveState.OBSERVATION_UNAVAILABLE)
+        return submission
+
+    async def test_recheck_reports_original_failure_once_and_releases_same_thread(self) -> None:
+        binding = self.binding()
+        submission = await self._park_turn_for_recovery(binding)
+        self.codex.handles[0].fail("authentication expired", "unauthorized")
+        self.codex.read_statuses.append("systemError")
+        snapshot = self.runtime.binding_runtime_snapshot(binding.id)
+        await self.runtime.recheck_turn_exact(
+            binding.id, expected_activity_revision=snapshot.activity_revision,
+            expected_turn_id=submission.turn_id,
+        )
+        await self.runtime.wait_idle()
+        self.assertIsNone(self.runtime.active_turn(binding.id))
+        self.assertEqual(len(self.outcomes), 2)
+        self.assertEqual(self.outcomes[-1].status, "failed")
+        self.assertIn("authentication expired", str(self.outcomes[-1].error))
+        self.assertIn("unauthorized", str(self.outcomes[-1].error))
+        with self.assertRaises(ThreadActivityChanged):
+            await self.runtime.recheck_turn_exact(
+                binding.id, expected_activity_revision=snapshot.activity_revision,
+                expected_turn_id=submission.turn_id,
+            )
+        follow_up = await self.submit(binding, "continue")
+        self.assertEqual(follow_up.thread_id, submission.thread_id)
+        await self.finish(self.codex.handles[-1], follow_up)
+
+    async def test_new_message_recovers_failed_turn_and_starts_once_in_same_thread(self) -> None:
+        binding = self.binding()
+        original = await self._park_turn_for_recovery(binding)
+        self.codex.handles[0].fail("context limit exceeded")
+        self.codex.read_statuses.append("systemError")
+
+        follow_up = await self.submit(binding, "continue with a smaller task")
+        self.assertEqual(follow_up.disposition, SubmitDisposition.STARTED)
+        self.assertEqual(follow_up.thread_id, original.thread_id)
+        self.assertEqual(len(self.codex.handles), 2)
+        await self.finish(self.codex.handles[-1], follow_up)
+        failed = [o for o in self.outcomes if isinstance(o, TurnOutcome) and o.status == "failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertIn("context limit exceeded", str(failed[0].error))
+        self.assertEqual(failed[0].turn_id, original.turn_id)
+
+    async def test_new_message_recovers_running_turn_and_steers_exact_original(self) -> None:
+        binding = self.binding()
+        original = await self._park_turn_for_recovery(binding)
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        follow_up = await self.submit(binding, "continue", admission)
+        self.assertEqual(follow_up.disposition, SubmitDisposition.STEERED)
+        self.assertEqual(follow_up.turn_id, original.turn_id)
+        self.assertEqual(len(self.codex.handles), 1)
+        self.assertEqual(self.codex.handles[0].steers, ["continue"])
+        await self.finish(self.codex.handles[0], original)
+
+    async def test_new_message_still_unknown_reports_cause_without_replay_or_duplicate_notice(self) -> None:
+        binding = self.binding()
+        await self._park_turn_for_recovery(binding)
+        self.codex.full_read_errors.extend(
+            InternalRpcError(-32603, "history store offline") for _ in range(3)
+        )
+        with self.assertRaisesRegex(TurnObservationUnavailable, "history store offline"):
+            await self.submit(binding, "continue")
+        await self.runtime.wait_idle()
+        self.assertEqual(len(self.codex.handles), 1)
+        self.assertEqual(self.codex.handles[0].steers, [])
+        self.assertEqual(len(self.outcomes), 1)
+        reads = len(self.codex.read_calls)
+        await asyncio.sleep(0.01)
+        self.assertEqual(len(self.codex.read_calls), reads)
+
+    async def test_concurrent_message_checks_share_one_observer_and_cancellation_is_local(self) -> None:
+        binding = self.binding()
+        original = await self._park_turn_for_recovery(binding)
+        self.codex.read_gate = asyncio.Event()
+        reads = len(self.codex.read_calls)
+        first = asyncio.create_task(self.runtime.capture_submission_admission(binding.id))
+        while len(self.codex.read_calls) == reads:
+            await asyncio.sleep(0)
+        second = asyncio.create_task(self.runtime.capture_submission_admission(binding.id))
+        await asyncio.sleep(0)
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        self.codex.read_gate.set()
+        admission = await second
+        self.assertEqual(admission.turn_id, original.turn_id)
+        self.assertEqual(len(self.codex.handles), 1)
+        self.assertEqual(self.runtime.active_turn(binding.id).state, ActiveState.RUNNING)
+        await self.finish(self.codex.handles[0], original)
+
+    async def test_recovery_without_completion_notification_still_delivers_failure_and_continues(self) -> None:
+        binding = self.binding()
+        original = await self._park_turn_for_recovery(binding)
+        self.codex.handles[0].fail("backend disconnected", "serverOverloaded")
+        self.codex.handles[0].notifications.get_nowait()
+        self.codex.read_statuses.append("systemError")
+        with patch("netizen.codex_runtime._TERMINAL_STREAM_DRAIN_TIMEOUT_SECONDS", 0.01):
+            follow_up = await self.submit(binding, "continue")
+        self.assertEqual(follow_up.thread_id, original.thread_id)
+        self.assertEqual(len(self.outcomes), 2)
+        self.assertEqual(self.outcomes[-1].status, "failed")
+        self.assertIn("backend disconnected", str(self.outcomes[-1].error))
+        self.assertEqual(self.codex.handles[0].stream_calls, 1)
+        await self.finish(self.codex.handles[-1], follow_up)
+
+    async def test_recovered_running_turn_ending_before_admission_is_not_reinterpreted_as_start(self) -> None:
+        binding = self.binding()
+        original = await self._park_turn_for_recovery(binding)
+        recheck = self.runtime._recheck_before_submission
+
+        async def check_then_finish(binding_id):
+            revision = await recheck(binding_id)
+            self.codex.handles[0].complete()
+            await self.runtime.wait_idle()
+            return revision
+
+        with patch.object(self.runtime, "_recheck_before_submission", check_then_finish):
+            with self.assertRaises(SteerRace):
+                await self.runtime.capture_submission_admission(binding.id)
+        self.assertEqual(len(self.codex.handles), 1)
+        self.assertEqual(self.outcomes[-1].turn_id, original.turn_id)
+
+    async def test_delayed_message_cannot_adopt_a_later_recheck_of_the_same_turn(self) -> None:
+        binding = self.binding()
+        original = await self._park_turn_for_recovery(binding)
+        recovered = asyncio.Event()
+        release_waiter = asyncio.Event()
+        start_consumer = self.runtime._start_turn_consumer
+
+        def start_with_delayed_waiter(active, **kwargs):
+            start_consumer(active, **kwargs)
+            ready = active.recheck_ready
+            wait = ready.wait
+
+            async def delayed_wait():
+                await wait()
+                recovered.set()
+                await release_waiter.wait()
+
+            ready.wait = delayed_wait
+
+        with patch.object(self.runtime, "_start_turn_consumer", start_with_delayed_waiter):
+            pending = asyncio.create_task(self.runtime.capture_submission_admission(binding.id))
+            await asyncio.wait_for(recovered.wait(), 1)
+
+        try:
+            self.assertEqual(self.runtime.active_turn(binding.id).state, ActiveState.RUNNING)
+            self.codex.read_errors.extend(
+                InternalRpcError(-32603, "history unavailable again") for _ in range(4)
+            )
+            self.assertTrue(await self.runtime.wait_idle(timeout=1))
+            self.assertEqual(
+                self.runtime.active_turn(binding.id).state,
+                ActiveState.OBSERVATION_UNAVAILABLE,
+            )
+            self.codex.handles[0].fail("failed during the second observation outage")
+            snapshot = self.runtime.binding_runtime_snapshot(binding.id)
+            await self.runtime.recheck_turn_exact(
+                binding.id, expected_activity_revision=snapshot.activity_revision,
+                expected_turn_id=original.turn_id,
+            )
+            self.assertTrue(await self.runtime.wait_idle(timeout=1))
+            self.assertIsNone(self.runtime.active_turn(binding.id))
+            release_waiter.set()
+            with self.assertRaises(SteerRace):
+                await pending
+        finally:
+            release_waiter.set()
+            if not pending.done():
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+
+        self.assertEqual(len(self.codex.handles), 1)
+        self.assertEqual(self.codex.handles[0].steers, [])
+        self.assertEqual(self.outcomes[-1].turn_id, original.turn_id)
+        self.assertEqual(self.outcomes[-1].status, "failed")
+
+    async def test_archive_while_message_waits_for_recheck_never_starts_or_steers(self) -> None:
+        binding = self.binding()
+        original = await self._park_turn_for_recovery(binding)
+        self.codex.read_gate = asyncio.Event()
+        reads = len(self.codex.read_calls)
+        waiting = asyncio.create_task(self.runtime.capture_submission_admission(binding.id))
+        while len(self.codex.read_calls) == reads:
+            await asyncio.sleep(0)
+        await self.runtime.archive_exact(binding.id)
+        self.codex.read_gate.set()
+        with self.assertRaises((SteerRace, TurnObservationUnavailable)):
+            await waiting
+        self.assertEqual(len(self.codex.handles), 1)
+        self.assertEqual(self.codex.handles[0].steers, [])
+        self.assertEqual(self.codex.archive_calls, [original.thread_id])
+
+    async def test_stop_during_recheck_rejects_old_message_but_allows_later_input(self) -> None:
+        binding = self.binding()
+        original = await self._park_turn_for_recovery(binding)
+        self.codex.read_gate = asyncio.Event()
+        reads = len(self.codex.read_calls)
+        pending = asyncio.create_task(self.submit(binding, "sent before stop"))
+        try:
+            async with asyncio.timeout(1):
+                while len(self.codex.read_calls) == reads:
+                    await asyncio.sleep(0)
+            self.assertEqual(await self.runtime.stop(binding.id), StopDisposition.REQUESTED)
+            self.codex.read_gate.set()
+            with self.assertRaises(SteerRace):
+                await pending
+            self.assertTrue(await self.runtime.wait_idle(timeout=1))
+            self.assertEqual(len(self.codex.handles), 1)
+            self.assertEqual(self.codex.handles[0].steers, [])
+            self.assertEqual(self.outcomes[-1].status, "interrupted")
+
+            following = await self.submit(binding, "sent after stop completed")
+            self.assertEqual(following.disposition, SubmitDisposition.STARTED)
+            self.assertEqual(following.thread_id, original.thread_id)
+            await self.finish(self.codex.handles[-1], following)
+        finally:
+            self.codex.read_gate.set()
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+    async def test_switch_away_and_back_during_recheck_invalidates_waiting_message(self) -> None:
+        binding = self.binding()
+        for terminal in (False, True):
+            with self.subTest(terminal=terminal):
+                original = await self._park_turn_for_recovery(binding)
+                self.codex.read_gate = asyncio.Event()
+                reads = len(self.codex.read_calls)
+                handles = len(self.codex.handles)
+                pending = asyncio.create_task(self.submit(binding, "stale input"))
+                try:
+                    async with asyncio.timeout(1):
+                        while len(self.codex.read_calls) == reads:
+                            await asyncio.sleep(0)
+                    self.binding()  # Select another Binding in the same Scope.
+                    with patch.object(
+                        self.runtime, "thread_catalog_state", return_value=NativeThreadCatalogState.ACTIVE,
+                    ):
+                        await self.runtime.activate_exact(binding.id)
+                    if terminal:
+                        self.codex.handles[-1].fail("failed during recheck")
+                    self.codex.read_gate.set()
+                    with self.assertRaises(SteerRace):
+                        await pending
+                    self.assertEqual(len(self.codex.handles), handles)
+                    self.assertEqual(self.codex.handles[-1].steers, [])
+                    if not terminal:
+                        await self.finish(self.codex.handles[-1], original)
+                    self.assertTrue(await self.runtime.wait_idle(timeout=1))
+                finally:
+                    self.codex.read_gate.set()
+                    if not pending.done():
+                        pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+
+    async def test_recheck_restores_observation_without_undoing_stop_intent(self) -> None:
+        binding = self.binding()
+        for stop_result in ("interrupt_unknown", "cleanup_unknown", "acknowledged"):
+            for recovery in ("message", "manual"):
+                with self.subTest(stop_result=stop_result, recovery=recovery):
+                    original = await self.submit(binding)
+                    original.release_receipt_attempt()
+                    handle = self.codex.handles[-1]
+                    handle.complete_on_interrupt = False
+                    if stop_result == "interrupt_unknown":
+                        handle.interrupt_errors.append(RuntimeError("interrupt response lost"))
+                        with self.assertRaises(TurnInterruptFailed):
+                            await self.runtime.stop(binding.id)
+                    elif stop_result == "cleanup_unknown":
+                        self.cleanup.failures.append(RuntimeError("cleanup response lost"))
+                        with self.assertRaises(TerminalCleanupFailed):
+                            await self.runtime.stop(binding.id)
+                    else:
+                        await self.runtime.stop(binding.id)
+                    self.codex.read_errors.extend(
+                        InternalRpcError(-32603, "observation outage") for _ in range(4)
+                    )
+                    self.assertTrue(await self.runtime.wait_idle(timeout=1))
+                    snapshot = self.runtime.binding_runtime_snapshot(binding.id)
+                    self.assertEqual(snapshot.turn.state, ActiveState.OBSERVATION_UNAVAILABLE)
+                    cleanup_calls = list(self.cleanup.calls)
+
+                    if recovery == "manual":
+                        await self.runtime.recheck_turn_exact(
+                            binding.id, expected_activity_revision=snapshot.activity_revision,
+                            expected_turn_id=original.turn_id,
+                        )
+                        async with asyncio.timeout(1):
+                            while self.runtime.active_turn(binding.id).state is ActiveState.OBSERVATION_UNAVAILABLE:
+                                await asyncio.sleep(0)
+                    with self.assertRaises(ThreadStopping):
+                        await self.submit(binding, "must not steer until stopped")
+                    self.assertEqual(self.runtime.active_turn(binding.id).state, ActiveState.STOPPING)
+                    self.assertEqual(handle.steers, [])
+                    self.assertEqual(self.cleanup.calls, cleanup_calls)
+
+                    await self.runtime.stop(binding.id)
+                    handle.complete("interrupted")
+                    self.assertTrue(await self.runtime.wait_idle(timeout=1))
+                    self.assertIsNone(self.runtime.active_turn(binding.id))
+                    following = await self.submit(binding, "new input after confirmed stop")
+                    self.assertEqual(following.thread_id, original.thread_id)
+                    self.assertEqual(following.disposition, SubmitDisposition.STARTED)
+                    await self.finish(self.codex.handles[-1], following)
+
+    async def test_hung_message_recheck_is_bounded_and_does_not_accept_prompt(self) -> None:
+        binding = self.binding()
+        await self._park_turn_for_recovery(binding)
+        self.codex.read_gate = asyncio.Event()
+        with patch("netizen.codex_runtime._TURN_OBSERVATION_RECOVERY_TIMEOUT_SECONDS", 0.01):
+            with self.assertRaises(TurnObservationUnavailable):
+                await self.submit(binding, "continue")
+            await self.runtime.wait_idle()
+        self.assertEqual(len(self.codex.handles), 1)
+        self.assertEqual(self.codex.handles[0].steers, [])
+        self.assertEqual(len(self.outcomes), 1)
+        self.assertEqual(self.runtime.active_turn(binding.id).state, ActiveState.OBSERVATION_UNAVAILABLE)
+        self.assertIn("超时", self.runtime._active[binding.id].observation_error)
+        self.codex.read_gate.set()
+
+    async def test_unknown_thread_shape_or_wrong_exact_identity_never_releases_turn(self) -> None:
+        binding = self.binding()
+        read = FakeThread.read
+        for invalid in ("unknown_status", "wrong_thread", "missing_turn", "duplicate_turn"):
+            with self.subTest(invalid=invalid):
+                async def invalid_read(thread, *, include_turns=False):
+                    response = await read(thread, include_turns=include_turns)
+                    if invalid == "unknown_status":
+                        response.thread.status.root.type = "unexpected"
+                    elif invalid == "wrong_thread":
+                        response.thread.id = "another-thread"
+                    elif include_turns:
+                        if invalid == "missing_turn":
+                            response.thread.turns = []
+                        else:
+                            response.thread.turns += response.thread.turns[-1:]
+                    return response
+
+                with patch.object(FakeThread, "read", invalid_read):
+                    submission = await self.submit(binding)
+                    self.codex.handles[-1].fail("backend failure")
+                    submission.release_receipt_attempt()
+                    await self.runtime.wait_idle()
+                self.assertEqual(self.runtime.active_turn(binding.id).state, ActiveState.OBSERVATION_UNAVAILABLE)
+                self.assertIsInstance(self.outcomes[-1], TurnObservationUnavailableOutcome)
+                admission = await self.runtime.capture_submission_admission(binding.id)
+                self.assertIsNone(admission.turn_id)
 
     async def test_final_answer_wins_over_commentary_items(self) -> None:
         binding = self.binding()

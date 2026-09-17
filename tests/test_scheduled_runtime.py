@@ -231,7 +231,7 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.resume_calls, [])
         self.assertEqual(self.codex.turn_inputs, [])
 
-    async def test_failed_initial_releases_even_without_outcome_status(self):
+    async def test_failed_initial_releases_and_preserves_failure_status(self):
         run_id, binding = self.occurrence()
         submission = await self.start(run_id, binding)
         submission.release_receipt_attempt()
@@ -239,7 +239,8 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.runtime.wait_idle(timeout=1))
         self.assertEqual(self.store.schedules.get_run(run_id).barrier, "released")
         self.assertIsNotNone(self.outcomes[0].error)
-        self.assertIsNone(self.outcomes[0].status)
+        self.assertEqual(self.outcomes[0].status, "failed")
+        self.assertIn("business failure", str(self.outcomes[0].error))
 
     async def test_initial_uses_ordinary_steer_stop_and_later_turns(self):
         run_id, binding = self.occurrence()

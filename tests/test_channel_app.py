@@ -31,7 +31,8 @@ from lark_channel import (
     TextContent,
 )
 from openai_codex import ImageInput, TextInput
-from openai_codex.types import ThreadItem
+from openai_codex.errors import InternalRpcError
+from openai_codex.types import ThreadItem, TurnError
 
 from netizen import channel_app
 from netizen.channel import reactions, reply_presenter
@@ -102,6 +103,7 @@ from netizen.codex_runtime import (
     TurnOutcome,
     TurnObservationUnavailable,
     TurnObservationUnavailableOutcome,
+    TurnStartFailed,
 )
 from netizen.domain import (
     FeishuScope,
@@ -5918,9 +5920,11 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             [(binding.id, 12, "turn-unavailable")],
         )
         self.assertIn(
-            "已启动一次有界的 exact Turn 状态重读",
+            "确认已结束后会补发结果或失败原因",
             str(self.channel.updates[-1][1]),
         )
+        self.assertIn("旧进度卡不再更新", str(self.channel.updates[-1][1]))
+        self.assertNotIn("会恢复进度更新", str(self.channel.updates[-1][1]))
 
     async def test_sessions_archives_current_binding_and_clears_pointer(
         self,
@@ -8449,6 +8453,59 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("观测不可用", str(self.channel.replies[-1][1]))
         self.assertNotIn("Codex 后端处理失败", str(self.channel.replies[-1][1]))
 
+    async def test_generic_request_error_exposes_reason_without_claiming_terminal(self) -> None:
+        await self.new()
+        self.runtime.capture_error = InternalRpcError(
+            -32603, "provider connection failed", data={"request": "private body"},
+        )
+
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.app.handle_message(FakeMessage("继续", message_id="om_rpc_failure"))
+
+        reply = str(self.channel.replies[-1][1])
+        self.assertIn("provider connection failed", reply)
+        self.assertIn("-32603", reply)
+        self.assertIn("/sessions", reply)
+        self.assertIn("不代表正在执行的任务已结束", reply)
+        self.assertNotIn("private body", reply)
+        self.assertEqual(self.runtime.submit_calls, [])
+
+    async def test_runtime_wrapper_exposes_underlying_reason_and_preserves_unknown(self) -> None:
+        await self.new()
+        error = TurnStartFailed("Turn 启动结果未知，不能自动重试")
+        error.__cause__ = TimeoutError()
+        self.runtime.capture_error = error
+
+        await self.app.handle_message(FakeMessage("继续", message_id="om_start_unknown"))
+
+        reply = str(self.channel.replies[-1][1])
+        self.assertIn("启动结果未知", reply)
+        self.assertIn("不能自动重试", reply)
+        self.assertIn("请求超时", reply)
+        self.assertNotIn("可发送“继续”", reply)
+        self.assertEqual(self.runtime.submit_calls, [])
+
+    async def test_generic_card_failure_keeps_safe_reason_and_checks_status(self) -> None:
+        error = InternalRpcError(
+            -32603, "Authorization: Bearer private-credential", data={"raw": "private body"},
+        )
+        event = SimpleNamespace(
+            message_id="om_card_error", action=SimpleNamespace(value={}),
+        )
+
+        with (
+            patch.object(self.app, "_decode_card_event", side_effect=error),
+            self.assertLogs("netizen.channel_app", level="ERROR"),
+        ):
+            await self.app.handle_card_action(event)
+
+        card = str(self.channel.updates[-1][1])
+        self.assertIn("InternalRpcError", card)
+        self.assertIn("-32603", card)
+        self.assertIn("/sessions", card)
+        self.assertNotIn("private", card)
+        self.assertNotIn("可发送“继续”", card)
+
     async def test_prompt_without_enabled_project_explains_complete_setup(self) -> None:
         project = self.projects.resolve_for_new("test")
         self.projects.set_enabled(
@@ -10773,10 +10830,14 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_completion(outcome)
 
         notice = self.channel.replies[-1][1]
-        self.assertIn("短暂重试后仍无法确认状态", notice)
+        self.assertIn("状态无法确认", notice)
+        self.assertIn("bounded observation failed", notice)
+        self.assertNotIn("短暂重试后", notice)
         self.assertIn("已停止后台读取", notice)
         self.assertIn("当前会话及上下文仍保留", notice)
         self.assertIn("`/sessions`", notice)
+        self.assertIn("可发送消息触发状态检查", notice)
+        self.assertIn("状态仍无法确认时，新消息不会执行", notice)
         self.assertEqual(self.app._progress_cards._sessions, {})
         self.assertEqual(self.app._reactions._pulses, {})
         self.assertIn("Turn 观测不可用", str(self.channel.updates[-1][1]))
@@ -11077,7 +11138,80 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn((origin.id, "ERROR"), self.channel.reactions)
-        self.assertIn((origin.id, completion_post("任务未完成：native failure")), self.channel.replies)
+        reply = self.channel.replies[-1][1]
+        self.assertIsInstance(reply, OutboundPost)
+        self.assertIn("任务未完成：native failure", reply.markdown)
+        self.assertIn("本轮已结束", reply.markdown)
+        self.assertIn("可发送“继续”", reply.markdown)
+
+    async def test_failed_turn_card_and_fallback_keep_native_error_and_continuation(self) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        feedback = BindingTaskFeedback(progress_card_enabled=True)
+        activity = turn_activity_snapshot(binding_id=binding.id)
+        self.runtime.turn_activity_values[binding.id] = activity
+        native_error = TurnError.model_validate({
+            "message": "Selected model is at capacity. Please try a different model.",
+            "codexErrorInfo": "serverOverloaded",
+            "additionalDetails": "private server response",
+        })
+        outcome = TurnOutcome(
+            binding_id=binding.id,
+            thread_id="native-one",
+            turn_id="turn-one",
+            owner_id="ou_user",
+            origin=origin,
+            result=SimpleNamespace(status="failed", error=native_error),
+            task_feedback=feedback,
+            activity=activity,
+        )
+
+        for update_failed in (False, True):
+            with self.subTest(update_failed=update_failed):
+                self.channel.reply_results.append(sent_result("om_failure_progress", chat_id="oc_direct"))
+                await self.app._progress_cards.start(
+                    binding_id=binding.id, thread_id="native-one", turn_id="turn-one", origin=origin,
+                )
+                self.channel.fail_card_updates = update_failed
+                replies_before = len(self.channel.replies)
+                with self.assertLogs("netizen.channel.reply_presenter", level="ERROR") if update_failed else nullcontext():
+                    await self.app.handle_completion(outcome)
+
+                card = str(self.channel.updates[-1][1])
+                self.assertIn("serverOverloaded", card)
+                self.assertIn("Selected model is at capacity", card)
+                self.assertIn("可发送“继续”", card)
+                self.assertNotIn("private server response", card)
+                replies = self.channel.replies[replies_before:]
+                if update_failed:
+                    self.assertEqual(len(replies), 1)
+                    fallback = replies[0][1]
+                    self.assertIsInstance(fallback, OutboundPost)
+                    self.assertIn("serverOverloaded", fallback.markdown)
+                    self.assertIn("Selected model is at capacity", fallback.markdown)
+                    self.assertIn("可发送“继续”", fallback.markdown)
+                    self.assertNotIn("private server response", fallback.markdown)
+                else:
+                    self.assertEqual(replies, [])
+
+    async def test_unconfirmed_turn_error_never_promises_new_turn(self) -> None:
+        origin = await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        error = RuntimeError("cleanup status unknown")
+        error.__cause__ = ConnectionError()
+
+        await self.app.handle_completion(TurnOutcome(
+            binding_id=binding.id, thread_id="native-one", turn_id="turn-one",
+            owner_id="ou_user", origin=origin, error=error,
+        ))
+
+        reply = str(self.channel.replies[-1][1])
+        self.assertIn("cleanup status unknown", reply)
+        self.assertIn("连接中断", reply)
+        self.assertNotIn("本轮已结束", reply)
+        self.assertNotIn("可发送“继续”", reply)
 
 
 class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
