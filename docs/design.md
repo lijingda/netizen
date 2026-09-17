@@ -514,20 +514,30 @@ Binding-local `lifecycle-unknown`，不关闭其他 Binding 的 admission。调�
 
 普通持久 Binding 的终态不通过 pinned `handle.run()` 消费。运行时每 0.5 秒用
 `thread.read(include_turns=False)` 读取轻量 Thread status；普通稳态中，已曾确认 exact Turn
-后可用 `active` 继续等待；`idle` 时调用 `include_turns=True` 并选择 exact Turn ID。第一次
+后可用 `active` 继续等待；其他已知 Thread 状态调用 `include_turns=True` 并核对唯一的
+exact Turn ID。`systemError/notLoaded` 不遮蔽已经持久化的 Turn 终态。第一次
 观察运行或从恢复返回时，必须由同一个 full view 同时确认 exact Thread 为 `active` 且 exact
-Turn 为 `inProgress`，才是 Authoritative Turn Observation 并回到 `running`、恢复 steer。
+Turn 为 `inProgress`，才是 Authoritative Turn Observation；未请求停止时回到 `running`、
+恢复 steer，已有停止/清理要求时仍为 `stopping`，只恢复观察。
 合法长 Turn 此后继续无时长上限地轮询。
 
-可恢复的 RPC/transport/I/O、`notLoaded`、`systemError`、缺少 exact Turn、idle/inProgress 等
+可恢复的 RPC/transport/I/O、未取得终态的 `notLoaded`、缺少 exact Turn、
+idle/systemError 与 inProgress 冲突等
 预期可收敛的视图差异只启动一次短观测尝试：最多 5 秒、最多三次原生 I/O，
-其中最多 exact `thread_resume` 一次。尝试恢复 exact `active/inProgress` 就回到普通
-`running`/steer，确认 exact terminal 就走普通终态。仍不可验证或遇到明确 identity/
+其中最多 exact `thread_resume` 一次。尝试恢复 exact `active/inProgress` 就继续观察，
+没有 stop intent 才恢复 `running`/steer；确认 exact terminal 就走普通终态。仍不可验证或遇到明确 identity/
 contract/programming 错误时，转为 Binding-local `turn-observation-unavailable`：保留 exact
-identity/slot、阻止重复 start/steer，并停止全部周期性 I/O。“重新检查”只再启动同样
-有界的一次尝试；同一 Turn 的 Reaction session、Reaction Pulse 和 Progress Card 轮询也
+identity/slot、阻止重复 start/steer，并停止全部周期性 I/O。“重新检查”或新普通消息
+只再启动同样有界的一次尝试。消息在捕获 admission 前等待该检查：已终态则正常收尾并
+允许新 Turn，仍运行且无停止意图则 steer 原 Turn；仍未知则明确本条未执行并显示最近原因，不自动
+重放。并发消息共用一次检查，等待不持 Binding 锁，也不新增 prompt 队列；消息取消不
+取消共享观察者，后续仍遵守 exact identity 和 admission revision 校验。重检先冻结现有版本，
+只有本 consumer 的恢复运行/终态释放转换能在锁内按匹配的前版本推进它；中间的控制操作
+使等待消息失效，不因检查成功而采纳最新版本。旧结果尽力交付，不阻塞已确认终态后的新输入。
+同一 Turn 的 Reaction session、Reaction Pulse 和 Progress Card 轮询也
 停止，已记录的 `Typing` 与当时可见的 `THINKING` 尽力清理，已有卡片一次更新为观测
-不可用，但不添加伪造的终态表情。后续确认终态时仍可走普通回复兜底。不建立长预算、
+不可用，但不添加伪造的终态表情。后续确认终态时仍可走普通回复兜底。
+恢复观察不重建旧卡和 Pulse，新 Turn 仍使用普通展示流程。不建立长预算、
 指数退避或背景唤醒循环，也不伪造 terminal。
 `InternalRpcError` 先在同一连接重读；它只证明本次原生读取失败，不代表需要重新订阅。
 后续 `notLoaded`、transport 等故障仍可在同一预算内触发唯一一次 resume。
@@ -542,6 +552,11 @@ Confirmed Turn Terminal：三者都释放 Ordinary Turn slot 并保留同一 Nat
 `failed` 只把本轮显示为错误，后续消息仍在该 Thread 启动下一 Turn。终态和 final agent
 message 都来自 SDK 的公开 native Turn 模型，不创建外层 Turn 记录，也不以异常或超时
 伪造 terminal。
+失败和观测不可用均返回可用的具体原因；原生错误保留公开 message/error code，读取故障
+保留显式 cause 的有界摘要。统一过滤凭据、限制长度、不输出 raw RPC data/工具输出/
+traceback；日志同时记录 exact IDs 与该摘要。错误摘要仅在当前内存观察槽存活，不写 SQLite。
+已确认终态后的公开 stream 用量/diff 收尾最多等待一秒；缺少 completion 通知时正常释放
+本轮并交付已知结果，用量按未获得更新处理，不因展示元数据重新进入观测不可用。
 
 普通 Turn completed 后，按
 [ADR 0024](adr/0024-send-structured-turn-files-from-completion-cards.md)、

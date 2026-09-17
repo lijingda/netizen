@@ -297,7 +297,10 @@ Runtime/SQLite 测试负责。
 收到 identity 匹配的 `thread/tokenUsage/updated`，且 `last.total_tokens` 非负、
 `model_context_window` 为正数。这个 probe 验证 `/status` 的先运行后完成时序；首次读取
 就已完成的 Turn 由 SDK synthetic 门禁覆盖。外层进程 `timeout`
-负责 SDK/App Server 违约时的最终隔离，不在进程内取消阻塞 stream。
+负责 SDK/App Server 违约时的最终隔离。生产在已确认 persisted terminal 后，对纯元数据
+stream 收尾设一秒上限；completion 通知缺失不能阻止失败交付与原会话续聊。
+SDK synthetic completion/usage probe 另验证公开 async stream 超时取消会唤醒其阻塞
+worker，且不依赖关闭整个 client；这不允许取消尚未确认终态的执行并冒充任务结束。
 
 所有依赖普通 Turn final response 的 live phase 都必须在公开 full-history 中同时看到
 terminal status 与 final agent message；若 App Server 短暂先暴露 completed 状态，探针

@@ -37,6 +37,18 @@ exact Turn 的 `completed`、`interrupted` 和 `failed` 都是 **Confirmed Turn 
 Runtime 观测到任一终态就释放 Ordinary Turn 槽；`failed` 只影响本轮结果，不结束
 或损坏承载它的 Native Codex Thread。后续消息仍在同一 Thread 上开始新 Turn。
 
+Thread 的运行状态不替代 exact Turn 的持久化终态。轻量读取返回 `systemError` 或
+`notLoaded` 时，仍通过公开 full read 核对 exact Thread 与唯一的 exact Turn；已确认的
+`completed/failed/interrupted` 正常收尾，即使 Thread 仍保留错误标记或已卸载。未知
+Thread/Turn shape、身份不匹配或重复 exact Turn 不被当成终态；`inProgress` 仍要求同一
+full view 中 Thread 为 `active`。仅在未取得终态且 Thread 未加载或连接不可用时尝试 resume，
+不能把 `systemError` 当作“重读必然能消失”的连接错误。
+
+失败交付保留原生终态、可读错误与错误码；缺少说明时明确指出错误类型或无详情。
+错误展示仅投影公开说明、错误码及显式异常 cause，做凭据过滤和长度限制，不展示 raw
+RPC data、工具输出或 traceback。观测不可用也保留最后一次原因的有界内存摘要；日志
+记录 exact IDs 与该摘要，便于区分后端拒绝、连接问题和视图不一致。
+
 ### 观测故障只有一次短恢复
 
 稳态轮询保留原有语义：合法的长 Turn 可以无执行时长上限地等待终态。只有当
@@ -57,18 +69,35 @@ metadata read 可暂时返回 Internal；立即 resume 不能保证恢复权威�
 metadata read、其他方法名或其他 code 不进入此分类。此修正不扩大恢复预算，也不降低
 exact Turn 运行/终态的证明要求。
 
-尝试若恢复 exact `active/inProgress`，Runtime 继续普通轮询并恢复 steer；若确认终态，
+尝试若恢复 exact `active/inProgress`，Runtime 继续普通轮询；没有停止意图时恢复 steer，
+已有 stop intent 时仍保持 `stopping`，不能因观测恢复撤销停止或清理要求。若确认终态，
 走唯一的终态交付路径。仍不可验证时，公开状态只投影为
 `turn-observation-unavailable`：保留 exact Binding/Thread/Turn 槽，阻止该 Binding 重复
 start/steer，并结束所有周期性恢复 I/O。其他 Binding 和进程 admission 保持可用。
 
-用户的“重新检查”只启动同样有界的一次尝试。没有指数退避、长预算、背景 wake
+用户的“重新检查”和新普通消息都只触发同样有界的一次尝试。新消息先检查旧 Turn，
+确认终态并满足已有清理要求后释放槽，再捕获新的 admission；旧结果由原 consumer 唯一
+尽力交付，不要求飞书回执先于新任务启动。恢复运行且没有停止意图时仍 steer 同一 exact
+Turn。检查期间不持 Binding 锁，不保存待发 prompt、不重放旧输入。
+并发请求共用已有检查，取消一个消息的等待不取消共享 consumer；结束后仍按现有
+admission revision、Scope/Binding 和 lifecycle 校验，不能把消息转给变化后的目标。
+复用同一 admission revision：重检开始时冻结版本，只有本次 consumer 在 Binding 锁内
+确认“转换前版本仍匹配”，才允许把它推进到恢复运行或释放终态槽后的版本。停止、切换或
+其他控制操作使原版本失效；复查成功也不能重新授权旧消息。这样不新增控制 epoch、等待队列
+或第二套状态机。用户在停止完成后重新发送的消息仍走普通新 Turn 流程。
+仍不可验证时新消息明确未执行，并返回最近原因，不再向旧消息重复发送不可用回执。
+未知 start/steer 等副作用的既有隔离边界保持不变，不能只凭错误文字解除占用。
+没有指数退避、长预算、背景 wake
 flag 或无限 resume/read 循环。一旦 `terminal_observed=True`，final response materialization
 使用现有有界重读和无文本兜底，不再进入观测恢复。
+普通 Turn 终态后的唯一公开 stream 消费只补充用量和 diff，最多等待一秒；遗漏
+completion 通知或统计流中断不再阻止已确认终态的交付与槽释放。取消通过 SDK 的公开
+异步 stream 关闭订阅；synthetic 门禁验证阻塞 worker 被唤醒，不增加另一个通知消费者。
 
 进入 `turn-observation-unavailable` 时，同一 Turn 的 Reaction session、Reaction Pulse
 和 Progress Card 轮询全部停止；已记录的 `Typing` 与当时可见的 `THINKING` 会尽力清理，
 但不会添加任何伪造的终态表情。已有进度卡一次更新为“Turn 观测不可用”后退出 presenter。
+恢复观察不重建旧进度卡或 Reaction Pulse；提示明确旧卡不再更新，新 Turn 复用普通展示流程。
 之后若手动重检最终收敛，终态结果仍通过普通完成路径交付，不因旧 presenter 已停而丢失。
 
 Ordinary Turn 的公开状态集合因此只是 `running`、`stopping` 和
