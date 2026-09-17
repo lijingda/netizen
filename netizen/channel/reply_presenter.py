@@ -17,7 +17,7 @@ from ..runtime.contracts import (
     TurnActivitySnapshot,
 )
 from ..domain import FeishuScope, GoalStatus, ReplyCardGoalModule, ReplyCardProjection
-from .messages import _object_field, _progress_card_message_id
+from .messages import _object_field, _progress_card_message_id, _send_result_error_code
 from .ports import ReplyChannel
 
 
@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 _PROGRESS_CARD_POLL_SECONDS = 1.0
 _PROGRESS_CARD_OPERATION_TIMEOUT_SECONDS = 5.0
 _PROGRESS_CARD_MAX_CONSECUTIVE_FAILURES = 3
+_TERMINAL_CARD_UPDATE_ATTEMPTS = 3
+_TERMINAL_CARD_RETRY_SECONDS = 0.5
 _GOAL_REPLY_CARD_CACHE_LIMIT = 256
 
 
@@ -301,7 +303,7 @@ class _ReplyCardPresenter:
                 },
             )
             return None
-        return await self._attempt_update_message(
+        return await self._update_terminal_message(
             session.message_id,
             card,
             binding_id=session.binding_id,
@@ -511,7 +513,7 @@ class _ReplyCardPresenter:
                 extra={"side_id": session.side_id, "turn_id": session.turn_id},
             )
             return None
-        return await self._attempt_update_message(
+        return await self._update_terminal_message(
             session.message_id,
             card,
             binding_id=f"side:{session.side_id}",
@@ -805,7 +807,7 @@ class _ReplyCardPresenter:
             )
             return _GoalCardReceipt(_GoalCardDelivery.NOT_ATTEMPTED)
         async with self._goal_card_lock:
-            attempt = await self._attempt_update_message(
+            attempt = await self._update_terminal_message(
                 message_id,
                 card,
                 binding_id=binding_id,
@@ -1390,6 +1392,44 @@ class _ReplyCardPresenter:
             message_id, card, binding_id=binding_id, operation_id=operation_id,
         )
         return attempt.updated
+
+    async def _update_terminal_message(
+        self,
+        message_id: str,
+        card: OutboundCard,
+        *,
+        binding_id: str,
+        operation_id: str,
+    ) -> _CardUpdateAttempt:
+        # Retry only replacement of the same frozen card, never a new reply.
+        # All attempts and delays share the existing terminal update budget.
+        uncertain = False
+        try:
+            async with asyncio.timeout(self._operation_timeout_seconds):
+                for index in range(_TERMINAL_CARD_UPDATE_ATTEMPTS):
+                    if index:
+                        await asyncio.sleep(_TERMINAL_CARD_RETRY_SECONDS)
+                    attempt = await self._attempt_update_message(
+                        message_id, card,
+                        binding_id=binding_id, operation_id=operation_id,
+                    )
+                    if attempt.updated:
+                        return attempt
+                    code = _send_result_error_code(attempt.result)
+                    uncertain |= code is None or code <= 0
+                # A later rejection cannot disprove an earlier lost response.
+                return _CardUpdateAttempt(message_id, None) if uncertain else attempt
+        except TimeoutError:
+            logger.warning(
+                "terminal progress-card update budget exhausted",
+                extra={
+                    "binding_id": binding_id,
+                    "operation_id": operation_id,
+                    "message_id": message_id,
+                },
+            )
+            # The last request may have reached Feishu before cancellation.
+            return _CardUpdateAttempt(message_id, None)
 
     async def _attempt_update_message(
         self,

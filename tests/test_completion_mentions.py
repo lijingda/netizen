@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
 from itertools import product
 from types import SimpleNamespace
@@ -40,6 +41,7 @@ import test_channel_app as fixtures
 
 class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.enterContext(patch.object(reply_presenter, "_TERMINAL_CARD_RETRY_SECONDS", 0.01))
         self.fixture = fixtures.ChannelApplicationTest()
         await self.fixture.asyncSetUp()
         self.app = self.fixture.app
@@ -203,24 +205,28 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_progress_ordinary_and_side_send_one_mention_after_terminal_card(self):
         for side in (False, True):
-            for enabled in (False, True):
-                with self.subTest(side=side, enabled=enabled):
+            for enabled, retry in product((False, True), repeat=2):
+                with self.subTest(side=side, enabled=enabled, retry=retry):
                     self.channel.replies.clear()
                     self.channel.updates.clear()
                     self.channel.send_calls.clear()
                     outcome = await self.start_progress(self.outcome(
-                        side=side, turn_id=f"turn-{side}-{enabled}",
+                        side=side, turn_id=f"turn-{side}-{enabled}-{retry}",
                         task_feedback=BindingTaskFeedback(
                             progress_card_enabled=True, completion_mention_enabled=enabled,
                         ),
                     ))
                     if enabled:
                         self.queue_reminder()
-                    await self.app.handle_completion(outcome)
+                    if retry:
+                        self.channel.card_update_results.append(TimeoutError("update response lost"))
+                    with self.assertLogs("netizen.channel.reply_presenter", "ERROR") if retry else nullcontext():
+                        await self.app.handle_completion(outcome)
                     self.assertEqual(len(self.channel.replies), 1)
-                    self.assertEqual(len(self.channel.updates), 1)
-                    self.assertEqual(self.channel.updates[0][0], "om_progress")
-                    self.assert_mention(self.channel.updates[0][1], enabled=False)
+                    self.assertEqual(len(self.channel.updates), 2 if retry else 1)
+                    for message_id, card in self.channel.updates:
+                        self.assertEqual(message_id, "om_progress")
+                        self.assert_mention(card, enabled=False)
                     self.assert_reminder(enabled=enabled)
 
     async def test_uncertain_progress_update_mentions_new_text_fallback_once(self):
@@ -236,13 +242,14 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     ))
                     # FakeChannel records the applied payload before losing
                     # its response, just as a successful remote update can.
-                    self.channel.card_update_results.append(
+                    self.channel.card_update_results.extend(
                         TimeoutError("terminal update response lost")
                         if response_lost else fixtures.retryable_sent_result()
+                        for _ in range(3)
                     )
                     with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
                         await self.app.handle_completion(outcome)
-                    self.assertEqual(len(self.channel.updates), 1)
+                    self.assertEqual(len(self.channel.updates), 3)
                     self.assertEqual(self.channel.updates[0][0], "om_progress")
                     self.assert_mention(self.channel.updates[0][1], enabled=False)
                     self.assertEqual(len(self.channel.replies), 2)
@@ -572,10 +579,10 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                 chat_type="p2p" if kind is ScopeKind.DIRECT else "group",
                 thread_id=scope.topic_id,
             )
-            for index, (pulse, progress, enabled, update_fails) in enumerate(
-                product((False, True), repeat=4)
+            for index, (pulse, progress, enabled, update_state) in enumerate(
+                product((False, True), (False, True), (False, True), ("success", "retry", "failed"))
             ):
-                with self.subTest(kind=kind, pulse=pulse, progress=progress, enabled=enabled, update_fails=update_fails):
+                with self.subTest(kind=kind, pulse=pulse, progress=progress, enabled=enabled, update_state=update_state):
                     running = replace(
                         fixtures.native_goal(created_at=index + 1),
                         thread_id=binding.native_thread_id or f"native-{kind.value}",
@@ -602,24 +609,29 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                         finalization=GoalFinalizationStatus.UNKNOWN,
                         finalization_error=RuntimeError("clear reply lost"),
                     )
+                    update_fails = update_state == "failed"
+                    failures = 3 if update_fails else int(update_state == "retry")
+                    self.channel.card_update_results.extend(
+                        TimeoutError("update reply lost") for _ in range(failures)
+                    )
                     if update_fails:
-                        self.channel.card_update_results.append(TimeoutError("update reply lost"))
                         self.channel.reply_results.append(fixtures.sent_result(
                             "om_new_goal", chat_id=scope.chat_id, thread_id=scope.topic_id,
                         ))
-                        with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
-                            await self.app.handle_completion(outcome)
+                    elif enabled:
+                        self.queue_reminder(card_id, thread_id=scope.topic_id)
+                    with self.assertLogs("netizen.channel.reply_presenter", "ERROR") if failures else nullcontext():
+                        await self.app.handle_completion(outcome)
+                    if update_fails:
                         self.assertEqual(len(self.channel.replies), 1)
                         self.assertEqual(self.channel.replies[0][0], fallback_origin.id)
                         self.assert_mention(self.channel.replies[0][1], enabled=enabled, text="Goal 结果正文")
                     else:
-                        if enabled:
-                            self.queue_reminder(card_id, thread_id=scope.topic_id)
-                        await self.app.handle_completion(outcome)
                         self.assertEqual(self.channel.replies, [])
-                    self.assertEqual(len(self.channel.updates), 1)
-                    self.assertEqual(self.channel.updates[0][0], card_id)
-                    self.assert_mention(self.channel.updates[0][1], enabled=False, text="Goal 结果正文")
+                    self.assertEqual(len(self.channel.updates), 3 if update_fails else failures + 1)
+                    for message_id, card in self.channel.updates:
+                        self.assertEqual(message_id, card_id)
+                        self.assert_mention(card, enabled=False, text="Goal 结果正文")
                     self.assert_reminder(
                         enabled=enabled and not update_fails, card_id=card_id,
                         topic=kind is ScopeKind.TOPIC,
@@ -639,14 +651,16 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     binding_id=self.binding.id, short_id=self.binding.short_id,
                     project_alias=self.binding.project_alias, fallback_origin=self.origin,
                 )
-                self.channel.card_update_results.append(TimeoutError("terminal update response lost"))
+                self.channel.card_update_results.extend(
+                    TimeoutError("terminal update response lost") for _ in range(3)
+                )
                 self.channel.reply_results.append(TimeoutError("fallback card response lost"))
                 with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
                     await self.app.handle_completion(self.goal_outcome(
                         origin=origin, goal=replace(running, status=GoalStatus.COMPLETE),
                         task_feedback=BindingTaskFeedback(progress_card_enabled=progress),
                     ))
-                self.assertEqual(len(self.channel.updates), 1)
+                self.assertEqual(len(self.channel.updates), 3)
                 self.assertEqual(self.channel.updates[0][0], "om_goal")
                 self.assert_mention(self.channel.updates[0][1], enabled=False, text="Goal 结果正文")
                 self.assertEqual(len(self.channel.replies), 2)
@@ -698,7 +712,9 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     project_alias=self.binding.project_alias, fallback_origin=self.origin,
                 )
                 if update_fails:
-                    self.channel.card_update_results.append(TimeoutError("update reply lost"))
+                    self.channel.card_update_results.extend(
+                        TimeoutError("update reply lost") for _ in range(3)
+                    )
                     self.channel.reply_results.append(fixtures.sent_result(
                         "om_new_goal", chat_id="oc_direct",
                     ))
@@ -713,7 +729,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                         await self.app.handle_completion(outcome)
                 else:
                     await self.app.handle_completion(outcome)
-                self.assertEqual(len(self.channel.updates), 1)
+                self.assertEqual(len(self.channel.updates), 3 if update_fails else 1)
                 self.assertEqual(self.channel.updates[0][0], "om_current_goal")
                 self.assert_mention(self.channel.updates[0][1], enabled=False, text="Goal 结果正文")
                 self.assertEqual(len(self.channel.replies), int(update_fails))

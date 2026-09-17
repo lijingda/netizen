@@ -84,7 +84,7 @@ from .cards import (
     reply_card,
     reply_card_from_manifest,
 )
-from .channel.messages import _nonempty_field, _object_field, public_chat_kind as _public_chat_kind
+from .channel.messages import _nonempty_field, _object_field, _send_result_error_code, public_chat_kind as _public_chat_kind
 from .channel.completion_mentions import send_completion_mention
 from .channel.ports import ReplyChannel
 from .channel.topics import TopicPublishError, send_topic_message, validate_topic_message
@@ -6351,18 +6351,6 @@ def _reply_failure_notice(result: object) -> str | None:
                 f"{label}。（错误码 {code}）"
             )
     return f"消息发送失败：回复内容未通过飞书审核。（错误码 {code}）"
-
-
-def _send_result_error_code(result: object) -> int | None:
-    raw = _object_field(result, "raw")
-    code = _object_field(raw, "code")
-    if isinstance(code, int) and not isinstance(code, bool):
-        return code
-    error = _object_field(result, "error")
-    raw_code = _object_field(error, "raw_code")
-    if isinstance(raw_code, int) and not isinstance(raw_code, bool):
-        return raw_code
-    return None
 
 
 def _message_chat_type(message: Any) -> str:

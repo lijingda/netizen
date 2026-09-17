@@ -29,6 +29,18 @@ def _nonempty_field(value: object, name: str) -> str | None:
     return field if isinstance(field, str) and field else None
 
 
+def _send_result_error_code(result: object) -> int | None:
+    raw = _object_field(result, "raw")
+    code = _object_field(raw, "code")
+    if isinstance(code, int) and not isinstance(code, bool):
+        return code
+    error = _object_field(result, "error")
+    raw_code = _object_field(error, "raw_code")
+    if isinstance(raw_code, int) and not isinstance(raw_code, bool):
+        return raw_code
+    return None
+
+
 def _progress_card_message_id(result: object) -> str | None:
     """Return an exact reply ID only when Feishu did not report failure."""
 

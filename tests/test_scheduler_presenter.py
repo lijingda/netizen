@@ -14,6 +14,7 @@ from netizen.runtime.contracts import ActiveState, TurnActivitySnapshot
 
 class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        self.enterContext(patch("netizen.channel.reply_presenter._TERMINAL_CARD_RETRY_SECONDS", 0.01))
         self.identity = {
             "binding_id": "binding-scheduled",
             "thread_id": "native-scheduled",
@@ -146,21 +147,21 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
             poll.assert_not_called()
         self.assertTrue(entered.is_set())
 
-    async def test_terminal_update_retains_failed_or_unknown_single_attempt(self):
-        for error in (None, RuntimeError("update unavailable")):
-            with self.subTest(error=error):
+    async def test_terminal_retries_preserve_explicit_rejection_or_unknown_result(self):
+        rejected = SimpleNamespace(success=False, raw={"code": 230017})
+        for response in (rejected, SimpleNamespace(success=False), RuntimeError("update unavailable")):
+            with self.subTest(response=response):
                 self.assertTrue(await self.start())
                 self.channel.update_card.reset_mock()
-                self.channel.update_card.return_value = SimpleNamespace(success=False)
-                self.channel.update_card.side_effect = error
+                self.channel.update_card.side_effect = [response, response, response]
                 with self.assertLogs("netizen.channel.reply_presenter", "ERROR"):
                     attempt = await self.finish()
                 self.assertIsNotNone(attempt)
                 self.assertEqual(attempt.message_id, "om_progress")
                 self.assertFalse(attempt.updated)
-                self.assertIs(attempt.result, self.channel.update_card.return_value if error is None else None)
+                self.assertIs(attempt.result, rejected if response is rejected else None)
                 self.assertIsNone(await self.finish())
-                self.channel.update_card.assert_awaited_once()
+                self.assertEqual(self.channel.update_card.await_count, 3)
 
     async def test_render_failure_does_not_attempt_terminal_update(self):
         self.assertTrue(await self.start())
@@ -216,7 +217,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
 
         self.channel.update_card.side_effect = pending_update
-        with self.assertLogs("netizen.channel.reply_presenter", "ERROR"):
+        with self.assertLogs("netizen.channel.reply_presenter", "WARNING"):
             attempt = await self.finish()
         self.assertTrue(entered.is_set())
         self.assertIsNotNone(attempt)
