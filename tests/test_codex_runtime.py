@@ -940,6 +940,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             on_completion=capture,
             poll_interval_seconds=0,
             side_idle_seconds=60,
+            automatic_thread_naming=False,
         )
         self.cwd_context = tempfile.TemporaryDirectory()
         self.cwd = Path(self.cwd_context.name)
@@ -1693,6 +1694,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             on_completion=capture,
             poll_interval_seconds=0,
             side_idle_seconds=0.01,
+            automatic_thread_naming=False,
         )
         _binding, record, snapshot = await self.open_side()
 
@@ -2315,6 +2317,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
             background_terminal_inspector=self.inspector,
             poll_interval_seconds=0,
             ordinary_thread_idle_seconds=idle_seconds,
+            automatic_thread_naming=False,
         )
 
     async def asyncTearDown(self) -> None:

@@ -15,6 +15,8 @@ their cited ADRs before changing that boundary.
 - Runtime, Scope/Binding identity, concurrency, Goal/Side lifecycle, and SDK
   adapters: [runtime semantics](docs/design.md#运行与锁) and
   [failure semantics](docs/design.md#失败语义).
+  Background Thread naming has its own failure and cleanup boundary in
+  [ADR 0067](docs/adr/0067-name-threads-with-private-ephemeral-forks.md).
 - Message provenance, mention catch-up, Reply Cards, and Files:
   [core model](docs/design.md#核心模型) and
   [runtime projections](docs/design.md#运行与锁). Preserve the referenced

@@ -379,6 +379,18 @@ Runtime synthetic 门禁须覆盖 steer 前刷新先读取 exact completion 并�
 该标记不能代替 `run()` 的终态返回值。
 飞书 topic 能力另做下文五入口 live 验收，尤其不能用 FakeChannel 宣称 P2P Topic 已支持。
 
+自动命名边界或 SDK/App Server 变化时，另在同一 interactive login 环境运行
+`timeout --signal=INT --kill-after=10s 420s .venv/bin/python scripts/probe_thread_naming.py`
+（macOS 用 `gtimeout`）。它只在 disposable Git cwd 中创建自己的 Parent 和 ephemeral
+命名分支，直接通过生产 Runtime 默认入口验证后台补名：确认首轮输入可见后 fork 继承
+本轮唯一标记、命名输出无工具调用、临时分支在 active/archived × rollout/state-db
+四视图均 absent、成功和中断路径取消订阅，以及父会话
+续聊、历史和统计保持独立。独立的中断检查复用同一探针 Parent；不另建一套成功命名流程。
+`--runtime-only` 可用于只验证生产路径的局部修改，完整命名兼容门禁仍使用默认模式。
+固定 `0.154.0` 的原生验证已确认首轮 ACK 早于输入落盘的竞态；生产只在后台有界等待 exact Turn 输入，
+不把 `turn/start` ACK 或 `include_turns=False` 当作上下文已经可 fork 的证明。取消订阅
+不证明立即卸载，仍遵循 App Server 的 idle 宽限期。
+
 `goal` phase 是 Goal 上线的硬门禁。它首先创建零 Turn Thread，并用公开 read 证明该
 Thread 已是 idle、非 ephemeral 且有持久化 path；这一项失败时 Goal 必须保持 unavailable，
 不能用 dummy Turn 或 synthetic 结果替代。随后用有界、无破坏 objective 验证 start ->

@@ -4616,6 +4616,32 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("会话已重命名", str(self.channel.updates[-1][1]))
 
+    async def test_rename_reply_identifies_original_target_after_scope_switch(self) -> None:
+        await self.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        original = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(original.id, "native-one")
+        rename = self.runtime.rename_exact
+
+        async def rename_then_switch(binding_id, name):
+            result = await rename(binding_id, name)
+            self.store.create_binding(
+                scope=scope, project_alias=original.project_alias, creator_id="ou_user",
+            )
+            return result
+
+        with patch.object(self.runtime, "rename_exact", side_effect=rename_then_switch):
+            await self.app.handle_message(FakeMessage(
+                '/rename "Original title"', message_id="om_rename_switched",
+            ))
+
+        current = self.store.active_binding(scope.key)
+        reply = str(self.channel.replies[-1][1])
+        self.assertNotEqual(current.id, original.id)
+        self.assertIn(original.short_id, reply)
+        self.assertNotIn(current.short_id, reply)
+        self.assertIn("Original title", reply)
+
     async def test_occupied_thread_keeps_actionable_card_error(self) -> None:
         await self.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)

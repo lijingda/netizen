@@ -4315,7 +4315,7 @@ class ChannelApplication:
             name = renamed.name
             await self._reply(
                 message,
-                f"当前会话已重命名为：`{_markdown_code(name)}`",
+                f"会话 `{renamed.binding.short_id}` 已重命名为：`{_markdown_code(name)}`",
             )
             return
         if intent.name is ControlName.ARCHIVE:
@@ -5045,7 +5045,7 @@ class ChannelApplication:
                     short_id=binding.short_id,
                     project_alias=binding.project_alias,
                     message=(
-                        "✅ 当前会话名称已更新为："
+                        "✅ 会话名称已更新为："
                         f"`{_markdown_code(renamed.name)}`"
                     ),
                 ),
@@ -5053,7 +5053,7 @@ class ChannelApplication:
             if not updated:
                 await self._safe_reply_to_card(
                     intent,
-                    "✅ 当前会话已重命名为："
+                    f"✅ 会话 `{binding.short_id}` 已重命名为："
                     f"`{_markdown_code(renamed.name)}`",
                 )
             return

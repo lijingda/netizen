@@ -705,7 +705,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(self.store.active_binding(self.scope.key))
 
-    async def test_same_scope_waits_while_other_scope_can_mutate(self) -> None:
+    async def test_name_writer_wait_does_not_block_same_or_other_scope(self) -> None:
         first = await self._create()
         other = await self._create(self.other_scope)
         self.runtime.rename_entered = asyncio.Event()
@@ -726,10 +726,12 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         )
 
         await asyncio.wait_for(other_scope, timeout=1)
-        await asyncio.sleep(0)
-        self.assertFalse(same_scope.done())
+        replacement = await asyncio.wait_for(same_scope, timeout=1)
+        self.assertFalse(rename.done())
         self.runtime.rename_release.set()
-        await asyncio.gather(rename, same_scope)
+        renamed = await asyncio.wait_for(rename, timeout=1)
+        self.assertEqual(renamed.binding.id, first.id)
+        self.assertEqual(self.store.active_binding(self.scope.key).id, replacement.id)
 
     async def test_admin_lazy_create_supports_inactive_and_current_modes(self) -> None:
         current = await self._create()

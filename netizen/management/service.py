@@ -1611,11 +1611,10 @@ class InstanceManagementService:
     ) -> RenamedBinding:
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
-            normalized = await self._runtime.rename_exact(binding.id, name)
-            return RenamedBinding(
-                binding=self._bindings.get(binding.id),
-                name=normalized,
-            )
+        # Capture the exact target under Scope coordination, but never hold
+        # that lock while waiting for a previous name writer to finish.
+        normalized = await self._runtime.rename_exact(binding.id, name)
+        return RenamedBinding(binding=binding, name=normalized)
 
     async def archive_current_binding(
         self,
@@ -1740,8 +1739,8 @@ class InstanceManagementService:
     ) -> RenamedBinding:
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
-            normalized = await self._runtime.rename_exact(binding.id, name)
-            return RenamedBinding(self._bindings.get(binding.id), normalized)
+        normalized = await self._runtime.rename_exact(binding.id, name)
+        return RenamedBinding(binding=binding, name=normalized)
 
     async def archive_exact_binding(
         self,

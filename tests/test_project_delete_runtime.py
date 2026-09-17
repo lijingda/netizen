@@ -38,6 +38,7 @@ class ProjectDeleteSideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             thread_subscription_control=self.side_control,
             poll_interval_seconds=0,
             side_idle_seconds=60,
+            automatic_thread_naming=False,
         )
         self.scope = FeishuScope("cli_test", "oc_delete", ScopeKind.DIRECT)
         self.binding = self.store.create_binding(
