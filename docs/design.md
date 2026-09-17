@@ -302,6 +302,14 @@ Binding 仍为 Scope active。归档成功后只清空 active pointer 并保留 
 Settings。`/delete` 为 Lazy Binding 显示只删本地记录的确认卡；materialized Binding
 还把 exact native ID 固定进危险确认卡，只有原生正常返回或四视图明确 absent 后才删除
 本地 Binding。
+按 [ADR 0067](adr/0067-name-threads-with-private-ephemeral-forks.md)，新 Turn 成功启动后
+在后台为无名称且无在途命名任务的会话补名；steer 不触发。内部 ephemeral fork 使用
+原生上下文快照，不建立 Binding/Side route，不进入会话统计或任务反馈。生成失败不影响
+主线；失败已确认结束后，下一次新 Turn 可再尝试。所有名称写入共用每 Binding 一把名称锁：
+自动拿不到锁就退出，手动按顺序等待覆盖；等待不持 Scope/Binding 锁，不阻塞其他会话操作。
+管理入口固定 exact 目标后释放 Scope，后续切换不重定向已接受的请求。实际写入 worker
+拥有名称锁，外层取消不会提前释放；锁不持久化。归档/删除使旧生成结果失效，自动写入
+失败不产生 lifecycle UNKNOWN。
 普通 `/sessions` 显式读取 `thread_list(archived=False)`，`/sessions archived` 显式读取
 `archived=True`，归档状态与名称都不进 Channel Database。普通列表卡片的“设为当前”只
 切换 exact active Binding，不创建 Turn，也不停止其他 Binding 的运行。按

@@ -44,6 +44,8 @@ from .domain import (
 )
 from .model_settings import ModelCatalog, TurnModelSettings
 from .error_messages import describe_error, native_turn_failure
+from .runtime.name_writes import ThreadNameWrites
+from .runtime.thread_naming import NamingJob, ThreadNamer
 # Preserve existing public imports as aliases of the shared contract types.
 from .runtime.contracts import (
     NativeTurnHandle,
@@ -183,6 +185,7 @@ _TERMINAL_STREAM_DRAIN_TIMEOUT_SECONDS = 1.0
 _SIDE_CLOSE_DRAIN_TIMEOUT_SECONDS = 5.0
 _SIDE_IDLE_SECONDS = 2 * 60 * 60
 _ORDINARY_THREAD_IDLE_SECONDS = 15 * 60
+_NAMING_SHUTDOWN_WAIT_SECONDS = 1.0
 
 
 class _TurnViewUnverified(RuntimeError):
@@ -420,6 +423,7 @@ class CodexRuntime:
         compaction_timeout_seconds: float = _COMPACTION_TERMINAL_TIMEOUT_SECONDS,
         side_idle_seconds: float = _SIDE_IDLE_SECONDS,
         ordinary_thread_idle_seconds: float = _ORDINARY_THREAD_IDLE_SECONDS,
+        automatic_thread_naming: bool = True,
     ) -> None:
         if compaction_timeout_seconds <= 0:
             raise ValueError("compaction timeout must be positive")
@@ -455,7 +459,18 @@ class CodexRuntime:
         self._tasks: set[asyncio.Task[None]] = set()
         self._side_idle_tasks: set[asyncio.Task[None]] = set()
         self._subscription_idle_tasks: set[asyncio.Task[None]] = set()
+        self._name_writes = ThreadNameWrites()
         self._accepting = True
+        self._thread_namer = (
+            ThreadNamer(
+                codex=codex,
+                terminal_cleanup=terminal_cleanup,
+                subscription_control=thread_subscription_control,
+                commit=self._commit_automatic_thread_name,
+            )
+            if automatic_thread_naming and thread_subscription_control is not None
+            else None
+        )
 
     def set_completion_handler(self, handler: CompletionHandler) -> None:
         self._on_completion = handler
@@ -1207,6 +1222,7 @@ class CodexRuntime:
         blocking unrelated Bindings, before an absent Side session is terminal.
         """
 
+        self._invalidate_automatic_name(binding_id)
         async with self._lock(binding_id):
             pass
 
@@ -1978,6 +1994,17 @@ class CodexRuntime:
         if not self._accepting:
             raise RuntimeClosed("服务正在停止，暂不能重命名会话。")
 
+        result = await self._name_writes.write(
+            binding_id,
+            lambda: self._rename_exact_serialized(binding_id, normalized),
+            wait=True,
+        )
+        assert result is not None
+        return result
+
+    async def _rename_exact_serialized(
+        self, binding_id: str, normalized: str,
+    ) -> str:
         async with self._lock(binding_id):
             if not self._accepting:
                 raise RuntimeClosed("服务正在停止，暂不能重命名会话。")
@@ -2027,6 +2054,79 @@ class CodexRuntime:
                 binding.native_thread_id,
             )
             return normalized
+
+    def _start_automatic_name(
+        self,
+        binding_id: str,
+        thread: NativeThread,
+        turn_id: str,
+        settings: TurnModelSettings | None = None,
+    ) -> None:
+        if self._thread_namer is None or not self._accepting:
+            return
+        try:
+            self._thread_namer.start(binding_id, thread, turn_id, settings)
+        except Exception:
+            # Auxiliary setup must never turn an accepted user Turn into an
+            # apparent submission failure. Do not log user content or titles.
+            logger.warning("automatic naming setup failed", extra={"binding_id": binding_id})
+
+    def _invalidate_automatic_name(self, binding_id: str) -> None:
+        if self._thread_namer is not None:
+            self._thread_namer.invalidate(binding_id)
+
+    def _automatic_name_is_current(self, job: NamingJob) -> bool:
+        if (
+            not self._accepting
+            or self._thread_namer is None
+            or not self._thread_namer.is_current(job)
+            or job.binding_id in self._lifecycles
+        ):
+            return False
+        try:
+            binding = self._bindings.get(job.binding_id)
+            self._bindings.require_project_not_deleting(binding.project_alias)
+            project = self._bindings.get_project(binding.project_alias)
+        except (LookupError, ProjectDisabled):
+            return False
+        # A Scope pointer change is deliberately irrelevant: the result belongs
+        # to the original exact Thread, even when it is no longer current.
+        return project.enabled and binding.native_thread_id == job.parent.id
+
+    async def _commit_automatic_thread_name(self, job: NamingJob, name: str) -> None:
+        await self._name_writes.write(
+            job.binding_id,
+            lambda: self._write_automatic_thread_name(job, name),
+            wait=False,
+        )
+
+    async def _write_automatic_thread_name(self, job: NamingJob, name: str) -> None:
+        if not self._automatic_name_is_current(job):
+            return
+        # Read/check/write all run under the shared name lock. The background
+        # writer never waits behind an existing manual or automatic writer.
+        response = await job.parent.read(include_turns=False)
+        native = getattr(response, "thread", None)
+        current_name = getattr(native, "name", None)
+        if (
+            getattr(native, "id", None) != job.parent.id
+            or not hasattr(native, "name")
+            or (current_name is not None and not isinstance(current_name, str))
+            or (isinstance(current_name, str) and current_name.strip())
+        ):
+            return
+        try:
+            async with self._lock(job.binding_id):
+                if not self._automatic_name_is_current(job):
+                    return
+            # No Binding/Scope lock, lifecycle reservation, admission
+            # revision, ordinary task or user-visible result is involved.
+            await job.parent.set_name(name)
+        except Exception:
+            logger.warning(
+                "automatic name write unconfirmed",
+                extra={"binding_id": job.binding_id, "thread_id": job.parent.id},
+            )
 
     async def archive_binding(self, binding: ThreadBinding) -> ThreadBinding:
         """Compatibility wrapper for the exact Binding archive primitive."""
@@ -3035,6 +3135,7 @@ class CodexRuntime:
                 # persistence warning instead of a normal receipt callback.
                 receipt_attempted.set()
                 raise
+            self._start_automatic_name(binding.id, thread, handle.id, resolved_settings)
             return Submission(
                 disposition=SubmitDisposition.STARTED,
                 binding_id=binding.id,
@@ -4064,6 +4165,7 @@ class CodexRuntime:
         state: ThreadLifecycleState,
     ) -> _ActiveThreadLifecycle:
         self._guard_no_lifecycle_locked(binding.id)
+        self._invalidate_automatic_name(binding.id)
         active = _ActiveThreadLifecycle(
             binding_id=binding.id,
             thread_id=binding.native_thread_id,
@@ -4725,6 +4827,8 @@ class CodexRuntime:
 
     def close_admission(self) -> None:
         self._accepting = False
+        if self._thread_namer is not None:
+            self._thread_namer.close()
         for record in self._subscriptions.values():
             self._cancel_subscription_idle(record)
 
@@ -4888,6 +4992,16 @@ class CodexRuntime:
             await asyncio.gather(*subscription_idle_tasks, return_exceptions=True)
         self._side_idle_tasks.difference_update(side_idle_tasks)
         self._subscription_idle_tasks.difference_update(subscription_idle_tasks)
+        # Main task teardown is already complete. Naming was invalidated by
+        # close_admission and cleaned independently while native work drained;
+        # it cannot consume either the main interrupt or cancellation budget.
+        if self._thread_namer is not None:
+            try:
+                await asyncio.wait_for(
+                    self._thread_namer.shutdown(), _NAMING_SHUTDOWN_WAIT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning("automatic naming final cleanup still pending")
 
     async def _drain_subscription_idle_tasks(self) -> None:
         tasks = tuple(self._subscription_idle_tasks)
