@@ -252,7 +252,7 @@ class AdminAuthTest(unittest.TestCase):
         self.assertIsNone(caught.exception.__cause__)
         self.assertNotIn("raw detail", repr(caught.exception))
 
-    def test_preauth_nonce_is_source_bound_expiring_and_single_use(self) -> None:
+    def test_preauth_nonce_is_source_bound_and_single_use(self) -> None:
         auth = self.auth()
         challenge = auth.issue_preauth("192.0.2.10")
         with self.assertRaises(LoginRejected):
@@ -286,13 +286,23 @@ class AdminAuthTest(unittest.TestCase):
                 credential=self.credential,
             )
 
-        expiring = auth.issue_preauth("192.0.2.10")
-        self.clock.advance(10 * 60)
+    def test_preauth_nonce_survives_time_but_is_consumed_by_login(self) -> None:
+        auth = self.auth()
+        challenge = auth.issue_preauth("192.0.2.10")
+        self.clock.advance(30 * 24 * 60 * 60)
+        self.assertEqual(auth.state_counts().preauth, 1)
+        session = auth.login(
+            source_ip="192.0.2.10",
+            cookie_token=challenge.cookie_token,
+            form_nonce=challenge.form_nonce,
+            credential=self.credential,
+        )
+        auth.authenticate(session.token)
         with self.assertRaises(LoginRejected):
             auth.login(
                 source_ip="192.0.2.10",
-                cookie_token=expiring.cookie_token,
-                form_nonce=expiring.form_nonce,
+                cookie_token=challenge.cookie_token,
+                form_nonce=challenge.form_nonce,
                 credential=self.credential,
             )
 
@@ -551,12 +561,20 @@ class AdminAuthTest(unittest.TestCase):
             )
         self.assertEqual(auth.state_counts().global_failures, 5)
 
-    def test_restart_process_local_state_rejects_prior_session(self) -> None:
+    def test_restart_process_local_state_rejects_prior_session_and_preauth(self) -> None:
         first = self.auth()
         session = self.login(first)
+        challenge = first.issue_preauth("192.0.2.10")
         second = self.auth()
         with self.assertRaises(SessionRejected):
             second.authenticate(session.token)
+        with self.assertRaises(LoginRejected):
+            second.login(
+                source_ip="192.0.2.10",
+                cookie_token=challenge.cookie_token,
+                form_nonce=challenge.form_nonce,
+                credential=self.credential,
+            )
 
     def test_sessions_survive_inactivity_and_continued_use_without_time_expiry(
         self,
@@ -621,29 +639,88 @@ class AdminAuthTest(unittest.TestCase):
         self.assertEqual(auth.authenticate(first.token).log_handle, first.log_handle)
         self.assertNotIn(grant.action_token, repr(auth))
 
-    def test_nonce_and_action_capacity_are_strict_and_ttl_reclaims(
+    def test_preauth_capacity_replaces_oldest_with_source_priority(self) -> None:
+        for capacity, new_source, evicted_index in (
+            (4, "192.0.2.2", 1),  # Only the source is full.
+            (3, "192.0.2.2", 1),  # Both full: preserve the older other source.
+            (3, "192.0.2.3", 0),  # Only global capacity is full.
+        ):
+            with self.subTest(capacity=capacity, new_source=new_source):
+                auth = self.auth(limits=AuthLimits(
+                    max_preauth=capacity, max_preauth_per_source=2,
+                ))
+                session = self.login(auth)
+                target = ExactTarget("binding", "binding-1")
+                grant = auth.issue_action(
+                    session.token,
+                    action_kind="binding.stop",
+                    target=target,
+                    preconditions=self.preconditions(),
+                )
+                challenges = [
+                    (source, auth.issue_preauth(source))
+                    for source in ("192.0.2.1", "192.0.2.2", "192.0.2.2")
+                ]
+                challenges.append((new_source, auth.issue_preauth(new_source)))
+                self.assertEqual(auth.state_counts().preauth, 3)
+                for index, (source, challenge) in enumerate(challenges):
+                    login = dict(
+                        source_ip=source,
+                        cookie_token=challenge.cookie_token,
+                        form_nonce=challenge.form_nonce,
+                        credential=self.credential,
+                    )
+                    if index == evicted_index:
+                        with self.assertRaises(LoginRejected):
+                            auth.login(**login)
+                    else:
+                        auth.authenticate(auth.login(**login).token)
+                self.assertEqual(auth.state_counts().preauth, 0)
+                # Unauthenticated challenge issuance cannot revoke a session/action.
+                auth.authenticate(session.token)
+                auth.redeem_action(
+                    session.token,
+                    csrf_token=grant.csrf_token,
+                    action_token=grant.action_token,
+                    action_kind="binding.stop",
+                    target=target,
+                )
+
+    def test_rate_limited_preauth_issuance_does_not_evict_pending_challenge(self) -> None:
+        auth = self.auth(limits=AuthLimits(max_preauth=1, max_preauth_per_source=1))
+        source = "192.0.2.10"
+        challenge = auth.issue_preauth(source)
+        for _ in range(5):
+            with self.assertRaises(LoginRejected):
+                auth.login(
+                    source_ip=source,
+                    cookie_token=None,
+                    form_nonce=None,
+                    credential=self.credential,
+                )
+        with self.assertRaises(LoginRejected):
+            auth.issue_preauth(source)
+        self.assertEqual(auth.state_counts().preauth, 1)
+        self.clock.advance(5 * 60)
+        session = auth.login(
+            source_ip=source,
+            cookie_token=challenge.cookie_token,
+            form_nonce=challenge.form_nonce,
+            credential=self.credential,
+        )
+        auth.authenticate(session.token)
+
+    def test_action_capacity_is_strict_and_ttl_reclaims(
         self,
     ) -> None:
         limits = AuthLimits(
-            preauth_ttl=10,
             action_ttl=10,
-            max_preauth=2,
-            max_preauth_per_source=1,
             max_sessions=2,
             max_sessions_per_source=1,
             max_actions=2,
             max_actions_per_session=1,
         )
         auth = self.auth(limits=limits)
-        auth.issue_preauth("192.0.2.1")
-        with self.assertRaises(AuthCapacityExceeded):
-            auth.issue_preauth("192.0.2.1")
-        auth.issue_preauth("192.0.2.2")
-        with self.assertRaises(AuthCapacityExceeded):
-            auth.issue_preauth("192.0.2.3")
-        self.clock.advance(10)
-        auth.issue_preauth("192.0.2.3")
-
         first = self.login(auth, source="192.0.2.10")
         second = self.login(auth, source="192.0.2.11")
         auth.issue_action(
