@@ -62,6 +62,7 @@ class CurrentMessageProjection:
 
     def metadata(self) -> dict[str, Any]:
         return {
+            "execution_host": "netizen",
             "message_id": self.message_id,
             "message_type": self.message_type,
             "sender": dict(self.sender),

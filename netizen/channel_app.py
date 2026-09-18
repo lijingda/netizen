@@ -762,6 +762,7 @@ class ChannelApplication:
                 )
             projection = {
                 "kind": "scheduled_plan", "version": 1, "plan_id": plan.id,
+                "execution_host": "netizen",
                 "plan_revision": plan.revision, "run_id": run.id,
                 "due_at": datetime.fromtimestamp(run.due_at, ZoneInfo("UTC")).isoformat(),
                 "timezone": plan.schedule.timezone, "chat_id": run.chat_id,

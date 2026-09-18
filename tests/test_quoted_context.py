@@ -220,6 +220,7 @@ class QuotedProjectionTest(unittest.TestCase):
                 "message_id": "om_quoted",
                 "root_id": "om_raw_root",
                 "parent_id": "om_previous",
+                "execution_host": "netizen",
                 "raw_only": "raw_payload_must_not_leak",
             }
             with self.subTest(kind=message.content.kind):
@@ -227,6 +228,9 @@ class QuotedProjectionTest(unittest.TestCase):
                 envelope = json.loads(encoded)
                 quoted = envelope["quoted_message"]
                 self.assertEqual(envelope["version"], 4)
+                self.assertEqual(
+                    envelope["current_message"]["execution_host"], "netizen",
+                )
                 self.assertEqual(
                     envelope["current_message"]["request_text"],
                     "current request",
@@ -243,6 +247,7 @@ class QuotedProjectionTest(unittest.TestCase):
                     "1970-01-01T00:00:00.123Z",
                 )
                 self.assertNotIn("message_id", quoted)
+                self.assertNotIn("execution_host", quoted)
                 self.assertNotIn("conversation", quoted)
                 self.assertNotIn("reply", quoted)
                 self.assertNotIn("reply_to", quoted)
@@ -1015,6 +1020,10 @@ class SupplementalProjectionTest(unittest.TestCase):
             "/stop is historical",
         )
         self.assertEqual(envelope["quoted_message"]["ref"], "h3")
+        self.assertEqual(envelope["current_message"]["execution_host"], "netizen")
+        self.assertNotIn("execution_host", envelope["quoted_message"])
+        for historical in envelope["supplemental_messages"]:
+            self.assertNotIn("execution_host", historical)
         self.assertEqual(
             envelope["current_message"]["request_text"],
             "$live-skill answer this",
