@@ -38,6 +38,40 @@ async function refresh(tab) {
   assert(checkbox("project", "disabled-last-page"));
   assert.equal(control("project", "multi-filter-options").querySelectorAll("img").length, 0);
 
+  // Browsers blur the focused control to null before a label click activates its checkbox.
+  const clickOptionText = (name, input) => {
+    const label = input.parentElement;
+    label.dispatch("pointerdown");
+    label.dispatch("mousedown");
+    const previous = document.activeElement;
+    document.activeElement = document.body;
+    previous?.dispatch("focusout", { relatedTarget: null });
+    // Hiding the dropdown during blur prevents the remaining label activation.
+    if (control(name, "multi-filter-popover").hidden) return;
+    label.dispatch("mouseup");
+    label.dispatch("click");
+    input.focus();
+    input.click();
+  };
+  for (const [name, value] of [
+    ["project", "netizen"], ["scopeKind", "topic"],
+    ["inventoryState", "unknown"], ["current", "false"],
+  ]) {
+    const trigger = control(name, "multi-filter-trigger");
+    trigger.click();
+    const input = checkbox(name, value);
+    for (let click = 0; click < 2; click += 1) {
+      const before = input.checked;
+      clickOptionText(name, input);
+      assert.equal(input.checked, !before, `${name}: clicking option text must toggle once`);
+      assert.equal(query().getAll(name).includes(value), !before);
+      assert.equal(control(name, "multi-filter-popover").hidden, false);
+      assert.equal(trigger.getAttribute("aria-expanded"), "true");
+      assert.equal(document.activeElement, input);
+    }
+    trigger.click();
+  }
+
   control("project", "multi-filter-trigger").click();
   const search = control("project", "multi-filter-search");
   assert.equal(document.activeElement, search);
@@ -85,6 +119,12 @@ async function refresh(tab) {
   document.body.dispatch("pointerdown");
   assert.equal(control("current", "multi-filter-popover").hidden, true);
   scopeTrigger.click();
+  document.querySelector("#session-filter-reset").focus();
+  assert.equal(control("scopeKind", "multi-filter-popover").hidden, true);
+  scopeTrigger.click();
+  document.activeElement.dispatch("focusout", { relatedTarget: null });
+  document.activeElement = document.body;
+  assert.equal(control("scopeKind", "multi-filter-popover").hidden, false);
   document.querySelector("#session-filter-reset").focus();
   assert.equal(control("scopeKind", "multi-filter-popover").hidden, true);
 
