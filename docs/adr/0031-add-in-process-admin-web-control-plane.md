@@ -95,7 +95,14 @@ form POST 的真实 `Origin`；不能改成会把该 `Origin` 序列化为 `null
 只有 nonce、credential 和限速全部验证通过的新登录才能回收名额：逐来源已满时替换该
 来源最早签发的 session，否则全局已满时替换全局最早签发的 session，并撤销其关联
 action grants。失败登录不得驱逐已有 session；浏览器丢失 cookie 后的遗留记录不能永久
-阻止合法新登录。pre-auth nonce 和一次性 action/CSRF grant 仍各有十分钟 TTL。
+阻止合法新登录。
+
+pre-auth nonce 不设时间过期，避免管理员在登录页停留后用正确密钥仍被拒绝；它仍绑定
+来源、credential generation 和配对的 cookie/form，每次登录尝试只可消费一次，重启或
+credential 轮换也会使它失效。待提交 nonce 保留每来源 16 个、全局 1,024 个容量上限。
+新签发通过限速检查后，逐来源已满时替换该来源最早签发的 nonce，否则全局已满时替换
+全局最早签发的 nonce；这样未提交的页面不会永久占满名额。未认证的新签发只能回收
+待提交 nonce，不能撤销 session 或 action grants。一次性 action/CSRF grant 仍有十分钟 TTL。
 所有 HTTP header、URL、form body、JSON body、并发连接
 和处理时间都有硬上限，Web 不接受文件上传。服务重启使全部 Admin session 失效。实现不得
 把登录 session、CSRF token 或 audit record 写入 Channel Database。

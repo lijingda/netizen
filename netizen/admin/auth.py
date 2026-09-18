@@ -119,7 +119,6 @@ class InvalidActionPayload(ValueError):
 class AuthLimits:
     """Resource and lifetime limits for process-local authentication state."""
 
-    preauth_ttl: float = 10 * 60
     action_ttl: float = 10 * 60
     login_window: float = 5 * 60
     login_failures_per_source: int = 5
@@ -137,7 +136,6 @@ class AuthLimits:
 
     def __post_init__(self) -> None:
         durations = (
-            self.preauth_ttl,
             self.action_ttl,
             self.login_window,
         )
@@ -195,7 +193,6 @@ class CredentialSnapshot:
 class IssuedPreauthChallenge:
     cookie_token: str = field(repr=False)
     form_nonce: str = field(repr=False)
-    expires_at: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,7 +282,6 @@ class _PreauthRecord:
     form_digest: bytes = field(repr=False)
     source: str
     generation: int
-    expires_at: float
 
 
 @dataclass(slots=True, repr=False)
@@ -489,28 +485,29 @@ class AdminAuth:
             source = self._normalize_login_source(source_ip)
             if not self._rate_allowed_locked(source, now):
                 raise LoginRejected()
-            if len(self._preauth) >= self._limits.max_preauth:
-                raise AuthCapacityExceeded()
-            source_count = sum(
-                record.source == source for record in self._preauth.values()
-            )
-            if source_count >= self._limits.max_preauth_per_source:
-                raise AuthCapacityExceeded()
+            # Challenges do not expire with time. Reclaim the oldest at capacity
+            # so abandoned login pages cannot permanently prevent new logins.
+            source_challenges = [
+                digest
+                for digest, record in self._preauth.items()
+                if record.source == source
+            ]
+            if len(source_challenges) >= self._limits.max_preauth_per_source:
+                self._preauth.pop(source_challenges[0])
+            elif len(self._preauth) >= self._limits.max_preauth:
+                self._preauth.pop(next(iter(self._preauth)))
             cookie_token, cookie_digest = self._unique_token_locked(self._preauth)
             form_nonce, form_digest = _new_token()
             while hmac.compare_digest(cookie_digest, form_digest):
                 form_nonce, form_digest = _new_token()
-            expires_at = now + self._limits.preauth_ttl
             self._preauth[cookie_digest] = _PreauthRecord(
                 form_digest=form_digest,
                 source=source,
                 generation=self._generation,
-                expires_at=expires_at,
             )
             return IssuedPreauthChallenge(
                 cookie_token=cookie_token,
                 form_nonce=form_nonce,
-                expires_at=expires_at,
             )
 
     def login(
@@ -533,7 +530,6 @@ class AdminAuth:
                 source=source,
                 cookie_token=cookie_token,
                 form_nonce=form_nonce,
-                now=now,
             )
             candidate_digest = _token_digest(credential)
             supplied_digest = (
@@ -764,13 +760,6 @@ class AdminAuth:
             raise LoginRejected() from None
 
     def _prune_locked(self, now: float) -> None:
-        expired_preauth = [
-            digest
-            for digest, record in self._preauth.items()
-            if record.expires_at <= now
-        ]
-        for digest in expired_preauth:
-            self._preauth.pop(digest, None)
         expired_actions = [
             digest
             for digest, record in self._actions.items()
@@ -817,7 +806,6 @@ class AdminAuth:
         source: str,
         cookie_token: object,
         form_nonce: object,
-        now: float,
     ) -> bool:
         cookie_digest = _token_digest(cookie_token)
         form_digest = _token_digest(form_nonce)
@@ -827,8 +815,7 @@ class AdminAuth:
         if record is None:
             return False
         return (
-            record.expires_at > now
-            and record.generation == self._generation
+            record.generation == self._generation
             and record.source == source
             and hmac.compare_digest(record.form_digest, form_digest)
         )

@@ -305,6 +305,11 @@ credential，不会因为某人是 Channel 参与者或 Binding 创建者而自�
 登录；浏览器清除会话 Cookie 后也需重新登录。登录会话数量达到上限时，新登录会替换
 最早的会话（同一来源达到上限时优先替换该来源的会话）。
 
+登录页也不会仅因放置时间长而失效。它的一次性校验码提交后即失效，服务重启、凭据
+轮换或打开大量登录页后也可能失效；多个登录页还会共用 Cookie。遇到登录失败时，
+关闭其他登录页并重新访问 `/login`，不要后退重交旧表单。登录后的管理操作凭据仍有
+十分钟有效期，操作页面过期时需要刷新。
+
 Admin Web 可以管理 inactive/cross-Scope exact Binding，包括创建 Lazy、设为当前、修改
 Turn Settings、重命名、归档、恢复或恢复并设为当前、删除 Lazy、Stop 和 Release，也可
 在 Delete capability 可用时删除 active 或 archived 的原生 Thread。两类删除都需二次确认；

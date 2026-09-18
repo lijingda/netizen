@@ -1148,8 +1148,12 @@ session 不设闲置或绝对时间过期，退出登录、服务重启或合法
 浏览器 cookie 保持会话 cookie，不设 `Expires` / `Max-Age`。session 保留全局/逐来源容量
 上限，验证成功的新登录在逐来源已满时替换该来源最早签发的 session，否则在全局已满时
 替换全局最早签发的 session，并撤销其关联 action grants；失败登录不得驱逐已有 session。
-pre-auth nonce 与一次性 action/CSRF grant 保留 TTL 和容量限制，登录继续限速；每次认证
-边界都会检测合法 credential 轮换并清空旧 bearer。
+pre-auth nonce 不设时间过期，仍绑定来源、credential generation 和配对的 cookie/form，
+每次登录尝试只可消费一次。待提交 nonce 保留每来源 16 个、全局 1,024 个容量上限；
+新签发通过限速检查后，逐来源已满时替换该来源最早签发的 nonce，否则全局已满时替换
+全局最早签发的 nonce，避免遗留页面永久占满名额。该回收只影响待提交 nonce，不撤销
+session 或 action grants。一次性 action/CSRF grant 仍保留十分钟 TTL 和容量限制，登录
+继续限速；每次认证边界都会检测合法 credential 轮换并清空旧 bearer。
 Host 只接受启动时发现的本机地址/名称和 exact port，带 body 的 login 及所有 mutation 还要求
 同源 `Origin`，不信任 forwarded header。页面和 API 直接使用受信内网 HTTP，不实现 TLS、
 OIDC、多管理员或 RBAC。
