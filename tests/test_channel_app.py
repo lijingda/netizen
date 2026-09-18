@@ -10337,6 +10337,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         call = self.runtime.submit_calls[-1]
         request_text, current_context = plain_prompt_projection(call["input"])
         self.assertEqual(request_text, "new direction")
+        self.assertEqual(current_context["execution_host"], "netizen")
         self.assertEqual(call["owner_id"], "ou_bob")
         self.assertEqual(current_context["sender"]["display_name"], "Bob")
         self.assertEqual(current_context["sender"]["open_id"], "ou_bob")
@@ -12069,6 +12070,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         submission = self.runtime.submit_side_calls[0]
         request_text, current_context = plain_prompt_projection(submission["input"])
         self.assertEqual(request_text, "inspect this")
+        self.assertEqual(current_context["execution_host"], "netizen")
         self.assertEqual(current_context["message_id"], "om-source")
         self.assertEqual(current_context["sender"]["open_id"], "ou_user")
         self.assertEqual(self.channel.fetch_inbound_calls, [])
@@ -12631,6 +12633,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.submit_side_calls[-1]["input"]
         )
         self.assertEqual(request_text, "accepted without mention")
+        self.assertEqual(current_context["execution_host"], "netizen")
         self.assertEqual(current_context["message_id"], "om-direct-prompt")
         self.assertEqual(
             current_context["sender"]["open_id"],
@@ -12667,6 +12670,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.submit_calls[-1]["input"]
         )
         self.assertEqual(request_text, "ordinary p2p topic")
+        self.assertEqual(current_context["execution_host"], "netizen")
         self.assertEqual(current_context["message_id"], "om-ordinary")
 
     async def test_terminal_and_root_fallback_tombstones_never_become_bindings(self) -> None:

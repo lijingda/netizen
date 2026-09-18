@@ -243,6 +243,15 @@ messages、可选且去重的 quoted message、最后的 current message，且
 Message，并与 current message 保持 `text`/`request_text` 的语义边界。这些输入都会进入 Codex 原生历史，
 但不写 Channel Database。来源消息 ID/sender 与同次解析冲突时整条 fail closed。
 
+当前消息的来源元数据另带固定 `execution_host: "netizen"`，覆盖普通 Turn、Steer、
+Side 首轮与后续、引用及 catch-up；定时任务首轮在独立 `scheduled_plan` 包装中带同一
+字段，不伪造真人消息。Skill 仅按最新输入自身的结构化来源包装识别执行场景；最新输入
+无标记则不作 Netizen 假定，不回溯历史中最近的标记，也不采纳正文示例、引用、材料或
+Skill 存在作为依据。这只是流程选择提示，不是鉴权、权限或指令优先级。标记随既有输入
+进入原生历史，不修改旧历史、MCP 或用户 developer/base instructions，也不新增配置。
+Goal start/resume 等不经过消息包装的入口保持原样；不为无新输入的跨 Channel 恢复
+增加身份切换机制，也不承诺该场景的宿主识别。
+
 [ADR 0064](adr/0064-share-card-and-forward-content-projection.md) 增加 Card 2.0 卡片 `interactive`
 和合并转发 `merge_forward` 的直接材料输入，转发话题复用后者。材料中的 slash/Skill
 不解析为当前指令；当前请求只要求结合已有明确任务处理，无明确任务则询问用途。
