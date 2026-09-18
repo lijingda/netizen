@@ -74,6 +74,39 @@ class FeishuAppPermissionsTest(unittest.TestCase):
                     {"version": 1, "missingScopes": []},
                 )
 
+    def test_bot_mentions_require_an_effective_tenant_grant(self) -> None:
+        bot_scope = "im:message.group_at_msg.include_bot:readonly"
+        other_grants = [
+            (scope, 1) for scope in REQUIRED_TENANT_SCOPES if scope != bot_scope
+        ]
+        for scope_type, grant_status, missing in (
+            (None, None, [bot_scope]),
+            ("tenant", 2, [bot_scope]),
+            ("user", 1, [bot_scope]),
+            ("tenant", 1, []),
+        ):
+            with self.subTest(scope_type=scope_type, grant_status=grant_status):
+                response = _response(*other_grants)
+                if scope_type is not None:
+                    response.data.scopes.append(
+                        SimpleNamespace(
+                            scope_name=bot_scope,
+                            grant_status=grant_status,
+                            scope_type=scope_type,
+                        )
+                    )
+                output = io.StringIO()
+
+                permissions.run_permission_check(
+                    list_scopes=lambda: response,
+                    stdout=output,
+                )
+
+                self.assertEqual(
+                    json.loads(output.getvalue()),
+                    {"version": 1, "missingScopes": missing},
+                )
+
     def test_absent_and_unauthorized_scopes_are_reported_in_contract_order(self) -> None:
         granted = [
             (scope, 1)

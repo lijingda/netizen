@@ -121,6 +121,9 @@ token；手工准备的应用必须逐项配置。无论来源，飞书应用版
   支持的 `im:chat`、`im:chat:read`、`im:chat:readonly` 三者任一 tenant 授权都满足门禁；
 - 群聊回查额外具备 `im:message.group_msg`，不能只有接收 @ 消息的
   `im:message.group_at_msg`/readonly；
+- 接收群内其他机器人 @ Netizen 的消息具备
+  `im:message.group_at_msg.include_bot:readonly`，默认授权与安装期有效权限检查均包含它；
+  普通 `im:message.group_msg` 不包含机器人消息事件，不能替代这项权限；
 - 当前 Prompt 发送者姓名解析具备 `im:chat.members:read`；权限不足时 Channel SDK
   无法从 chat member roster 补全真实显示名，Netizen 会零 start/steer；
 - 补充上下文历史消息的发送者姓名使用消息 API 自带的 `sender_name` 投影，不需要
@@ -164,6 +167,9 @@ preview 仍以 A 的真实请求开头，而不是 attribution 元数据。此�
 不得把显示名或 ID 当作额外权限。临时撤销 `im:chat.members:read` 或使用未发布该权限的
 应用版本重试时，消息必须明确提示开通权限且零 start/steer，不能出现“未知发送者”
 Prompt；恢复并发布权限后同一成员应重新解析出真实姓名。
+机器人 @ 场景还须在目标应用确认新权限可申请、完成授权与发布后，以同群另一机器人
+发送真实 @ 消息验收：消息进入当前会话，发送者保留机器人身份和真实名称，未 @ 不触发；
+catch-up 仍只补充非机器人成员消息。权限清单与本地测试不代表这项平台验收已通过。
 图片用例还要覆盖：单聊普通图片、群聊 @机器人富文本多图、文字引用图片、当前图文
 引用另一条图文。确认图片以原生视觉输入提交；任一资源删除/保密/无权时零
 start/steer。另发送 locale 正文与顶层 `post.files` 并存的真实文件和文件夹；两者都必须

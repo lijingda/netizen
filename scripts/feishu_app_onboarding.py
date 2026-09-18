@@ -19,6 +19,7 @@ from typing import Any, IO
 REQUIRED_TENANT_SCOPES = (
     "im:message",
     "im:message.group_msg",
+    "im:message.group_at_msg.include_bot:readonly",
     "im:message.p2p_msg:readonly",
     "im:chat:read",
     "im:chat.members:read",
