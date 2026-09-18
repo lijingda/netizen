@@ -718,8 +718,10 @@ function initializeSessionMultiFilter(root) {
       inputs[next].focus();
     }
   });
-  root.addEventListener("focusout", (event) => {
-    if (!root.contains(event.relatedTarget)) close();
+  // Label clicks briefly blur to no target before focusing their checkbox.
+  // Close only when focus actually enters another part of the page.
+  document.addEventListener("focusin", (event) => {
+    if (!root.contains(event.target)) close();
   });
   document.addEventListener("pointerdown", (event) => {
     if (!root.contains(event.target)) close();

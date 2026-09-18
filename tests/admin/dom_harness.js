@@ -84,6 +84,7 @@ class Element {
     const previous = document.activeElement;
     document.activeElement = this;
     previous?.dispatch("focusout", { relatedTarget: this });
+    this.dispatch("focusin", { relatedTarget: previous });
   }
   cloneNode() {
     const result = new Element(this.tagName, this.attrs);
