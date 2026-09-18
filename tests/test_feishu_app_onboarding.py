@@ -95,6 +95,10 @@ class FeishuAppOnboardingTest(unittest.TestCase):
             {"tenant": list(onboarding.REQUIRED_TENANT_SCOPES)},
         )
         self.assertIn(
+            "im:message.group_at_msg.include_bot:readonly",
+            addons["scopes"]["tenant"],
+        )
+        self.assertIn(
             "im:message.p2p_msg:readonly",
             onboarding.REQUIRED_TENANT_SCOPES,
         )
@@ -140,6 +144,10 @@ class FeishuAppOnboardingTest(unittest.TestCase):
 
         self.assertEqual(captured["app_id"], "cli_existing")
         self.assertNotIn("create_only", captured)
+        self.assertIn(
+            "im:message.group_at_msg.include_bot:readonly",
+            captured["addons"]["scopes"]["tenant"],
+        )
         self.assertEqual(json.loads(stdout.getvalue())["appSecret"], "updated-secret")
 
         with self.assertRaisesRegex(onboarding.OnboardingError, "different App ID"):
