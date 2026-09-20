@@ -1516,7 +1516,8 @@ class NetizenInstallerTest(unittest.TestCase):
                             self.assertEqual((target / "SKILL.md").read_bytes(), user_content)
                         self.assertTrue((layout.current / "source/extensions/netizen-herdr/SKILL.md").is_file())
 
-                    installer.uninstall(layout=layout)
+                    with patch.object(installer, "require_supported_platform"):
+                        installer.uninstall(layout=layout)
 
                 self.assertEqual(target.exists(), manually_installed)
                 if manually_installed:
