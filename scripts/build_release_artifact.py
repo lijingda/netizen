@@ -33,7 +33,7 @@ OFFICIAL_REPOSITORY = "lijingda/netizen"
 
 # Keep this set in lockstep with scripts/netizen_installer.py.  A focused test
 # compares the two declarations so a source-boundary change fails closed.
-MANAGED_DIRECTORIES = ("netizen", "scripts", "skills", "deploy", "docs", "tests")
+MANAGED_DIRECTORIES = ("netizen", "scripts", "skills", "extensions", "deploy", "docs", "tests")
 MANAGED_FILES = (
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",

@@ -1490,7 +1490,37 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertTrue((first / "scripts/netizen_installer.py").is_file())
             self.assertTrue((first / "scripts/netizen_service_launcher.py").is_file())
             self.assertTrue((first / "scripts/check_sdk.py").is_file())
+            for name in ("SKILL.md", "README.md"):
+                relative = Path("extensions/netizen-herdr") / name
+                self.assertEqual((first / relative).read_bytes(), (ROOT / relative).read_bytes())
             self.assertFalse(any(path.name == "__pycache__" for path in first.rglob("*")))
+
+    def test_optional_extensions_are_not_installed_updated_or_removed(self) -> None:
+        for manually_installed in (False, True):
+            with self.subTest(manually_installed=manually_installed), tempfile.TemporaryDirectory() as directory:
+                layout = self._layout(Path(directory))
+                installer.prepare_directories(layout)
+                target = layout.codex_home / "skills/netizen-herdr"
+                user_content = b"user-managed optional skill\n"
+                if manually_installed:
+                    target.mkdir(parents=True)
+                    (target / "SKILL.md").write_bytes(user_content)
+
+                with patch.object(installer, "_service_backend", return_value=_stopped_backend()):
+                    for digest in ("1" * 64, "2" * 64):
+                        release = self._release(layout, digest)
+                        shutil.copytree(ROOT / "extensions", release.source / "extensions")
+                        installer.activate_release(release, layout, interactive=False)
+                        self.assertEqual(target.exists(), manually_installed)
+                        if manually_installed:
+                            self.assertEqual((target / "SKILL.md").read_bytes(), user_content)
+                        self.assertTrue((layout.current / "source/extensions/netizen-herdr/SKILL.md").is_file())
+
+                    installer.uninstall(layout=layout)
+
+                self.assertEqual(target.exists(), manually_installed)
+                if manually_installed:
+                    self.assertEqual((target / "SKILL.md").read_bytes(), user_content)
 
     def test_published_manifest_binds_version_source_and_dependency_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
