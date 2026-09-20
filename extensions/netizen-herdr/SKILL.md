@@ -1,9 +1,9 @@
 ---
 name: netizen-herdr
 description: >-
-  最新输入的结构化来源包装标明 execution_host=netizen、且不在 Herdr pane 内时，
+  最新输入的结构化来源包装标明 execution_host=netizen 时，
   在任务需要时通过 Herdr CLI 启动和协调其他 agent；
-  在 Herdr pane 内改用官方 herdr skill。
+  使用此入口，不同时加载官方 herdr skill。
 ---
 
 # Netizen Herdr
