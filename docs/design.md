@@ -1228,12 +1228,26 @@ Sessions 每页只接受 10/20/50/100，默认 20；浏览器用 cursor
 `lifecycle > Turn > compacting > process-local Goal > persisted Goal > idle`。Scope
 current/inactive、native active/archived/missing/Lazy 与进程订阅是独立事实轴；订阅状态不得
 替代主状态。persisted Goal 是异步原生输入：Sessions 首屏在同一 10 秒请求预算内按最多
-50 行分批，整个 management instance 共享最多 8 个并发读取；archived 仍读取 Goal，只有
-Lazy 或已确认 missing 才能跳过。单行无法确认时显示状态不可用而不伪造 `idle`。五秒
-polling 默认只投影 process-local 快照且不发起 `goal/get`；没有本地活动时返回 typed
-deferred，浏览器保留上次已解析值，并在 `activity_revision` 变化后补读对应 Binding；补读
-失败不提交该 revision，后续轮询继续有界重试直至 exact 投影或新的本地活动可见。
-首屏预算已耗尽时保留本地运行态与 Lazy 投影，不再发起新的原生 Goal 读取。
+50 行分批，整个 management instance 共享最多 8 个并发读取。已由原生目录确认 archived
+且没有上述 process-local 活动的会话不读取历史 Goal，主状态为 null，使用独立 typed
+`archived` resolution；Admin 运行态显示 `—`，说明“已归档，不查询运行态”，不表示
+`idle` 或不存在 Goal。归档中、lifecycle unknown、Turn、compaction 或本地 Goal 仍按既有
+优先级展示和核查；目录状态 unknown 也不能当作已归档跳过。Lazy 或已确认 missing
+沿用无需读取 Goal 的投影。单行无法确认时显示状态不可用而不伪造 `idle`。
+
+五秒 polling 默认只投影 process-local 快照且不发起 `goal/get`；`archived` resolution
+的行退出轮询，整页都是这类行时不发 runtime snapshot 请求。已确认归档但仍有本地活动
+的行继续轻量轮询，活动消失后按本页已确认的归档事实收敛到 `archived`，不补读 Goal。
+恢复归档后的列表刷新重新解析状态并恢复轮询；外部客户端改变目录状态仍需刷新列表确认。
+其余行没有本地活动时返回 typed deferred，浏览器保留上次已解析值，并在
+`activity_revision` 变化后补读对应 Binding；旧状态需重新确认时保留“待确认”标记。
+补读失败不提交该 revision，连续失败（包括 HTTP 失败）按 10/20/40/60 秒退避，之后
+以 60 秒为上限继续尝试；轻量本地观测仍为五秒。重试期间保留不可用文案，展示值不变
+时不替换 DOM。退避仅保存在当前页 Session 对象对应的浏览器内存中；新的 activity
+revision、本地活动或成功解析清除旧退避，手动刷新/翻页以新列表重新读取。
+页面隐藏或离开 Sessions/Side Topics 时不发起新轮询，已过时的页面响应不应用；同一
+浏览器页面最多一轮运行态请求在途。首屏预算已耗尽时仍保留本地运行态、Lazy 与已确认
+归档的投影，不再发起新的原生 Goal 读取。
 Stop 与 Release 的可见资格消费这份投影，Runtime exact primitive 仍是 mutation 的最终
 安全检查；Admin 的结果文案直接消费共享 `StopDisposition`/`ReleaseDisposition`。
 

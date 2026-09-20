@@ -1226,6 +1226,7 @@ for (const root of document.querySelectorAll("[data-time-range]")) {
 }
 
 function runtimeLabel(runtime) {
+  if (runtime.primaryStatusResolution === "archived") return "—";
   if (runtime.primaryStatus != null) {
     return runtime.primaryStatusResolution === "unavailable"
       || runtime.primaryStatusResolution === "deferred"
@@ -1238,14 +1239,26 @@ function runtimeLabel(runtime) {
 }
 
 function updateRuntimeCell(target, runtime) {
+  const archived = runtime.primaryStatusResolution === "archived";
+  const label = runtimeLabel(runtime);
+  const title = archived ? "已归档，不查询运行态" : "";
+  const subscriptionLabel = !archived && runtime.subscriptionState
+    ? `订阅：${runtime.subscriptionState}` : "";
+  const previous = target.querySelector(".runtime-primary");
+  if (
+    previous?.textContent === label
+    && previous.title === title
+    && (target.querySelector(".runtime-subscription")?.textContent || "") === subscriptionLabel
+  ) return;
   const primary = document.createElement("span");
   primary.className = "runtime-primary";
-  primary.textContent = runtimeLabel(runtime);
+  primary.textContent = label;
+  primary.title = title;
   target.replaceChildren(primary);
-  if (runtime.subscriptionState) {
+  if (subscriptionLabel) {
     const subscription = document.createElement("small");
     subscription.className = "runtime-subscription";
-    subscription.textContent = `订阅：${runtime.subscriptionState}`;
+    subscription.textContent = subscriptionLabel;
     target.append(document.createElement("br"), subscription);
   }
 }
@@ -2118,6 +2131,21 @@ async function loadScheduleRuns(cursor = null) {
   } catch (error) { setStatus(error.message, true); }
 }
 
+// Page-owned Session objects bound retry state to the current inventory. A
+// refresh (including unarchive) gets new objects and an immediate fresh read.
+const runtimeResolutionRetries = new WeakMap();
+
+function recordRuntimeResolutionFailure(session, activityRevision) {
+  const previous = runtimeResolutionRetries.get(session);
+  const failures = previous?.activityRevision === activityRevision
+    ? Math.min(previous.failures + 1, 4) : 1;
+  runtimeResolutionRetries.set(session, {
+    activityRevision,
+    failures,
+    nextAt: performance.now() + Math.min(10000 * 2 ** (failures - 1), 60000),
+  });
+}
+
 function mergeDeferredBindingRuntime(incoming, previous) {
   const needsResolution = !previous
     || incoming.activityRevision !== previous.activityRevision
@@ -2140,7 +2168,11 @@ function mergeDeferredBindingRuntime(incoming, previous) {
       // leaves a failed/timeout follow-up eligible for the next bounded poll.
       activityRevision: previous?.activityRevision ?? incoming.activityRevision,
       primaryStatus: previous?.primaryStatus ?? null,
-      primaryStatusResolution: "deferred",
+      // A background retry must not turn an unavailable result into a
+      // visible loading state on every poll. A changed known value remains
+      // explicitly unconfirmed until its exact projection succeeds.
+      primaryStatusResolution: previous?.primaryStatusResolution === "unavailable"
+        ? "unavailable" : "deferred",
     },
     needsResolution: true,
   };
@@ -2150,25 +2182,36 @@ function applyRuntimeSnapshots(payload, resolveChanges = true) {
   const bindings = new Map(payload.bindings.map((item) => [item.bindingId, item]));
   const changedBindings = [];
   for (const session of state.sessions?.items || []) {
-    const incoming = bindings.get(session.bindingId);
+    let incoming = bindings.get(session.bindingId);
     if (!incoming) continue;
+    // The inventory already confirmed archival. Keep local activity visible
+    // until it clears, then stop resolving/polling this row without inventing
+    // idle or reading a historical Goal.
+    if (session.catalogState === "archived" && incoming.primaryStatusResolution !== "local") {
+      incoming = { ...incoming, primaryStatus: null, primaryStatusResolution: "archived" };
+    }
     const previous = session.runtime;
     let runtime = incoming;
     if (incoming.primaryStatusResolution === "deferred") {
       const merged = mergeDeferredBindingRuntime(incoming, previous);
       runtime = merged.runtime;
-      if (resolveChanges && merged.needsResolution) {
+      let retry = runtimeResolutionRetries.get(session);
+      if (retry && retry.activityRevision !== incoming.activityRevision) {
+        runtimeResolutionRetries.delete(session);
+        retry = null;
+      }
+      if (resolveChanges && merged.needsResolution && (!retry || performance.now() >= retry.nextAt)) {
         changedBindings.push(session.bindingId);
       }
-    } else if (
-      incoming.primaryStatusResolution === "unavailable"
-      && previous?.primaryStatus != null
-    ) {
+    } else if (incoming.primaryStatusResolution === "unavailable") {
       runtime = {
         ...incoming,
-        activityRevision: previous.activityRevision,
-        primaryStatus: previous.primaryStatus,
+        activityRevision: previous?.activityRevision ?? incoming.activityRevision,
+        primaryStatus: previous?.primaryStatus ?? null,
       };
+      recordRuntimeResolutionFailure(session, incoming.activityRevision);
+    } else {
+      runtimeResolutionRetries.delete(session);
     }
     session.runtime = runtime;
     const row = rowByIdentity("#sessions-body", "bindingId", session.bindingId);
@@ -2333,32 +2376,48 @@ let runtimePollInFlight = false;
 
 setInterval(async () => {
   if (
-    (runtimePollInFlight && state.tab === "sessions")
+    runtimePollInFlight
     || document.hidden
     || (state.tab !== "sessions" && state.tab !== "side-topics")
   ) return;
-  const sessionPage = state.sessions;
+  const tab = state.tab;
+  const page = tab === "sessions" ? state.sessions : state.sides;
+  const isCurrentPage = () => state.tab === tab
+    && (tab === "sessions" ? state.sessions : state.sides) === page;
   const bindingIds = state.tab === "sessions"
-    ? state.sessions?.items?.map((item) => item.bindingId) || []
+    ? state.sessions?.items?.filter((item) => item.runtime.primaryStatusResolution !== "archived")
+      .map((item) => item.bindingId) || []
     : [];
   const sideIds = state.tab === "side-topics"
     ? state.sides?.items?.map((item) => item.sideId) || []
     : [];
   if (!bindingIds.length && !sideIds.length) return;
-  if (bindingIds.length) runtimePollInFlight = true;
+  runtimePollInFlight = true;
+  let resolving = [];
   try {
     const snapshots = await fetchRuntimeSnapshots(bindingIds, sideIds);
-    if (bindingIds.length && state.sessions !== sessionPage) return;
+    if (!isCurrentPage() || document.hidden) return;
     const changedBindings = applyRuntimeSnapshots(snapshots);
     if (changedBindings.length) {
+      const changed = new Set(changedBindings);
+      resolving = snapshots.bindings.filter((item) => changed.has(item.bindingId));
       const resolved = await fetchRuntimeSnapshots(changedBindings, [], true);
-      if (state.sessions !== sessionPage) return;
+      if (!isCurrentPage()) return;
       applyRuntimeSnapshots(resolved, false);
     }
   } catch (error) {
+    if (!isCurrentPage()) return;
+    if (resolving.length) {
+      applyRuntimeSnapshots({
+        bindings: resolving.map((item) => ({
+          ...item, primaryStatus: null, primaryStatusResolution: "unavailable",
+        })),
+        sides: [], missingSideIds: [],
+      }, false);
+    }
     setStatus(error.message, true);
   } finally {
-    if (bindingIds.length) runtimePollInFlight = false;
+    runtimePollInFlight = false;
   }
 }, 5000);
 

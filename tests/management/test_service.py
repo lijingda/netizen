@@ -1390,10 +1390,12 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
 
         try:
             with patch.object(self.runtime, "thread_summary_exact", side_effect=read):
-                first = asyncio.create_task(self.service.query_sessions(deadline=loop.time() + 0.1))
-                await asyncio.wait_for(entered.wait(), 1)
+                # Allow the local query and catalog lookup to start all four SDK
+                # workers on busy CI runners before testing deadline expiry.
+                first = asyncio.create_task(self.service.query_sessions(deadline=loop.time() + 1))
+                await asyncio.wait_for(entered.wait(), 2)
                 for page in (
-                    await asyncio.wait_for(first, 0.5),
+                    await asyncio.wait_for(first, 2),
                     await asyncio.wait_for(self.service.query_sessions(deadline=loop.time() + 0.1), 0.5),
                 ):
                     self.assertEqual(len(page.items), 10)
@@ -1733,14 +1735,18 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         binding = self.store.get(binding.id)
         self.runtime.goal_snapshot_errors.add(binding.id)
 
-        (status,) = await self.service.binding_statuses_exact(
-            binding_ids=(binding.id,),
-            catalog_states={binding.id: NativeThreadCatalogState.ACTIVE},
-            deadline=asyncio.get_running_loop().time() + 1,
-        )
+        for catalog_state in (NativeThreadCatalogState.ACTIVE, None):
+            with self.subTest(catalog_state=catalog_state):
+                self.runtime.calls.clear()
+                (status,) = await self.service.binding_statuses_exact(
+                    binding_ids=(binding.id,),
+                    catalog_states={binding.id: catalog_state},
+                    deadline=asyncio.get_running_loop().time() + 1,
+                )
 
-        self.assertIsNone(status.primary_status)
-        self.assertEqual(status.primary_status_resolution.value, "unavailable")
+                self.assertIsNone(status.primary_status)
+                self.assertEqual(status.primary_status_resolution.value, "unavailable")
+                self.assertIn(("goal-snapshot", binding.id), self.runtime.calls)
 
     async def test_expired_status_budget_preserves_local_states_without_native_reads(self) -> None:
         native = await self._create()
@@ -1751,13 +1757,21 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         self.runtime.runtime_snapshots[compacting.id] = BindingRuntimeSnapshot(
             compacting.id, 1, None, None, True, None, None, None,
         )
+        archived = await self._create()
+        self.store.assign_native_thread_id(archived.id, "native-archived")
         statuses = await self.service.binding_statuses_exact(
-            binding_ids=(native.id, lazy.id, compacting.id),
+            binding_ids=(native.id, lazy.id, compacting.id, archived.id),
+            catalog_states={archived.id: NativeThreadCatalogState.ARCHIVED},
             deadline=asyncio.get_running_loop().time() - 1,
         )
         self.assertEqual(
             [(status.primary_status, status.primary_status_resolution.value) for status in statuses],
-            [(None, "unavailable"), ("idle", "resolved"), ("compacting", "local")],
+            [
+                (None, "unavailable"),
+                ("idle", "resolved"),
+                ("compacting", "local"),
+                (None, "archived"),
+            ],
         )
         self.assertFalse(any(call[0] == "goal-snapshot" for call in self.runtime.calls))
 
@@ -1805,7 +1819,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                     task.cancel()
             await asyncio.gather(*resolving, return_exceptions=True)
 
-    async def test_archived_status_still_resolves_persisted_goal(self) -> None:
+    async def test_archived_status_skips_persisted_goal_until_restored(self) -> None:
         binding = await self._create()
         self.store.assign_native_thread_id(binding.id, "native-archived")
         binding = self.store.get(binding.id)
@@ -1825,8 +1839,84 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
             catalog_state=NativeThreadCatalogState.ARCHIVED,
         )
 
+        self.assertIsNone(status.primary_status)
+        self.assertIsNone(status.persisted_goal_status)
+        self.assertEqual(status.primary_status_resolution.value, "archived")
+        self.assertFalse(status.can_stop)
+        self.assertFalse(status.can_release)
+        self.assertNotIn(("goal-snapshot", binding.id), self.runtime.calls)
+
+        status = await self.service.binding_status_exact(
+            binding.id,
+            catalog_state=NativeThreadCatalogState.ACTIVE,
+        )
+
         self.assertEqual(status.primary_status, "goal-paused")
+        self.assertEqual(status.primary_status_resolution.value, "resolved")
         self.assertIn(("goal-snapshot", binding.id), self.runtime.calls)
+
+    async def test_archived_status_preserves_local_activity_without_goal_reads(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-archived")
+        self.runtime.goal_snapshot_errors.add(binding.id)
+        base = BindingRuntimeSnapshot(
+            binding.id, 1, None, None, False, None, None, None,
+        )
+        turn = ActiveTurnSnapshot(
+            binding.id, "native-archived", "turn-1", "ou_user", ActiveState.RUNNING,
+        )
+        goal = ActiveGoalSnapshot(
+            binding.id, "native-archived", "goal-1", "ou_user",
+            GoalOperationState.RUNNING, None,
+        )
+        lifecycle = ThreadLifecycleSnapshot(
+            binding.id, "native-archived", ThreadLifecycleState.ARCHIVING,
+        )
+        unknown = ThreadLifecycleSnapshot(
+            binding.id, "native-archived", ThreadLifecycleState.UNKNOWN,
+        )
+        cases = (
+            ((turn, goal, True, lifecycle), "archiving"),
+            ((turn, goal, True, unknown), "lifecycle-unknown"),
+            ((turn, goal, True, None), "running"),
+            ((None, goal, True, None), "compacting"),
+            ((None, goal, False, None), "goal-running"),
+        )
+        for (active, active_goal, compacting, active_lifecycle), expected in cases:
+            with self.subTest(expected=expected):
+                self.runtime.runtime_snapshots[binding.id] = BindingRuntimeSnapshot(
+                    binding.id, 1, active, active_goal, compacting, active_lifecycle,
+                    None, None,
+                )
+                status = await self.service.binding_status_exact(
+                    binding.id,
+                    catalog_state=NativeThreadCatalogState.ARCHIVED,
+                )
+                self.assertEqual(status.primary_status, expected)
+                self.assertEqual(status.primary_status_resolution.value, "local")
+
+        self.runtime.runtime_snapshots[binding.id] = base
+        status = await self.service.binding_status_exact(
+            binding.id, catalog_state=NativeThreadCatalogState.ARCHIVED,
+        )
+        self.assertIsNone(status.primary_status)
+        self.assertEqual(status.primary_status_resolution.value, "archived")
+        self.assertFalse(any(call[0] == "goal-snapshot" for call in self.runtime.calls))
+
+    async def test_archived_projection_is_not_an_unavailable_runtime_state(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-archived")
+        binding = self.store.get(binding.id)
+
+        status = _project_binding_status(
+            binding=binding,
+            snapshot=self.runtime.runtime_snapshot_exact(binding.id),
+            catalog_state=NativeThreadCatalogState.ARCHIVED,
+            primary_status_unavailable=True,
+        )
+
+        self.assertIsNone(status.primary_status)
+        self.assertEqual(status.primary_status_resolution.value, "archived")
 
     async def test_missing_status_resolves_idle_without_goal_read(self) -> None:
         binding = await self._create()
