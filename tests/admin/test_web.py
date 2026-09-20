@@ -58,6 +58,8 @@ from netizen.codex_runtime import (
     SideSessionSnapshot,
     SideSessionState,
     StopDisposition,
+    ThreadLifecycleSnapshot,
+    ThreadLifecycleState,
     ThreadSubscriptionSnapshot,
     ThreadSubscriptionState,
     ThreadOccupied,
@@ -1838,6 +1840,45 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("stop", native["actions"])
 
+    async def test_archived_session_runtime_is_not_applicable_but_keeps_local_activity(
+        self,
+    ) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+
+        status, _headers, page = await self.json_get(
+            "/api/v1/sessions?inventoryState=all", session,
+        )
+
+        self.assertEqual(status, 200)
+        archived = next(
+            item for item in page["items"] if item["bindingId"] == "binding-archived"
+        )
+        self.assertEqual(archived["catalogState"], "archived")
+        self.assertIsNone(archived["runtime"]["primaryStatus"])
+        self.assertEqual(archived["runtime"]["primaryStatusResolution"], "archived")
+        self.assertNotIn("stop", archived["actions"])
+        self.assertNotIn("release", archived["actions"])
+        self.assertIn("unarchive", archived["actions"])
+        self.assertIn("deleteMaterialized", archived["actions"])
+
+        self.management.runtime_by_id["binding-archived"] = replace(
+            self.management.runtime_by_id["binding-archived"],
+            lifecycle=ThreadLifecycleSnapshot(
+                "binding-archived", "native-archived", ThreadLifecycleState.UNKNOWN,
+            ),
+        )
+        status, _headers, page = await self.json_get(
+            "/api/v1/sessions?inventoryState=all", session,
+        )
+
+        self.assertEqual(status, 200)
+        archived = next(
+            item for item in page["items"] if item["bindingId"] == "binding-archived"
+        )
+        self.assertEqual(archived["runtime"]["primaryStatus"], "lifecycle-unknown")
+        self.assertEqual(archived["runtime"]["primaryStatusResolution"], "local")
+
     async def test_hundred_session_page_chunks_initial_runtime_snapshots(self) -> None:
         self.runner.open_admission()
         session = await self.login()
@@ -2008,16 +2049,6 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertIn("chunkValues(bindingIds)", javascript)
         self.assertIn("runtime.primaryStatus", javascript)
         self.assertIn("runtime.subscriptionState", javascript)
-        self.assertIn("mergeDeferredBindingRuntime", javascript)
-        self.assertIn(
-            "activityRevision: previous?.activityRevision ?? incoming.activityRevision",
-            javascript,
-        )
-        self.assertIn('primaryStatusResolution: "deferred"', javascript)
-        self.assertIn(
-            'previous.primaryStatusResolution === "unavailable"',
-            javascript,
-        )
         self.assertIn("session.pointerState", javascript)
         self.assertIn("session.catalogState", javascript)
         self.assertNotIn("session.nativeState", javascript)

@@ -170,6 +170,7 @@ def classify_native_thread_view(
 
 class BindingPrimaryStatusResolution(str, Enum):
     LOCAL = "local"
+    ARCHIVED = "archived"
     RESOLVED = "resolved"
     DEFERRED = "deferred"
     UNAVAILABLE = "unavailable"
@@ -220,6 +221,9 @@ def _project_binding_status(
     elif snapshot.goal is not None:
         primary_status = snapshot.goal.state.value
         resolution = BindingPrimaryStatusResolution.LOCAL
+    elif catalog_state is NativeThreadCatalogState.ARCHIVED:
+        primary_status = None
+        resolution = BindingPrimaryStatusResolution.ARCHIVED
     elif primary_status_unavailable:
         primary_status = None
         resolution = BindingPrimaryStatusResolution.UNAVAILABLE
@@ -1320,7 +1324,10 @@ class InstanceManagementService:
             snapshot=before,
             catalog_state=catalog_state,
         )
-        if local.primary_status_resolution is BindingPrimaryStatusResolution.LOCAL:
+        if local.primary_status_resolution in {
+            BindingPrimaryStatusResolution.LOCAL,
+            BindingPrimaryStatusResolution.ARCHIVED,
+        }:
             return local
         if (
             binding.native_thread_id is None
