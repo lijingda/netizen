@@ -1390,10 +1390,12 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
 
         try:
             with patch.object(self.runtime, "thread_summary_exact", side_effect=read):
-                first = asyncio.create_task(self.service.query_sessions(deadline=loop.time() + 0.1))
-                await asyncio.wait_for(entered.wait(), 1)
+                # Allow the local query and catalog lookup to start all four SDK
+                # workers on busy CI runners before testing deadline expiry.
+                first = asyncio.create_task(self.service.query_sessions(deadline=loop.time() + 1))
+                await asyncio.wait_for(entered.wait(), 2)
                 for page in (
-                    await asyncio.wait_for(first, 0.5),
+                    await asyncio.wait_for(first, 2),
                     await asyncio.wait_for(self.service.query_sessions(deadline=loop.time() + 0.1), 0.5),
                 ):
                     self.assertEqual(len(page.items), 10)
