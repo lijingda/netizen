@@ -111,7 +111,7 @@ CHANNEL_DATABASE_FILES = (
     "channel.sqlite3-shm",
     "channel.sqlite3-wal",
 )
-SOURCE_DIRECTORIES = ("netizen", "scripts", "skills", "deploy", "docs", "tests")
+SOURCE_DIRECTORIES = ("netizen", "scripts", "skills", "extensions", "deploy", "docs", "tests")
 SOURCE_FILES = (
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",

@@ -27,7 +27,7 @@ from scripts.build_release_artifact import (
     render_bootstrap,
     source_digest,
 )
-from scripts.netizen_installer import read_published_release_manifest
+from scripts.netizen_installer import InstallError, read_published_release_manifest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +83,9 @@ class ReleaseArtifactTests(unittest.TestCase):
             encoding="utf-8",
         )
         (root / "requirements.lock").write_bytes(b"example==1.0\n")
+        extension = root / "extensions" / "optional-skill"
+        extension.mkdir(parents=True)
+        (extension / "SKILL.md").write_bytes(b"optional skill\n")
         shutil.copy2(
             ROOT / "deploy" / "install-release.sh.in",
             root / "deploy" / "install-release.sh.in",
@@ -245,6 +248,10 @@ class ReleaseArtifactTests(unittest.TestCase):
                 manifest = json.load(
                     archive.extractfile("netizen-v0.3.0/.netizen-release.json")
                 )
+                self.assertEqual(
+                    archive.extractfile("netizen-v0.3.0/extensions/optional-skill/SKILL.md").read(),
+                    b"optional skill\n",
+                )
             self.assertIn("netizen-v0.3.0/tests", names)
             self.assertIn("netizen-v0.3.0/.github/workflows/ci.yml", names)
             self.assertIn("netizen-v0.3.0/scripts/netizen_installer.py", names)
@@ -278,6 +285,10 @@ class ReleaseArtifactTests(unittest.TestCase):
             self.assertEqual(parsed.version, "0.3.0")
             self.assertEqual(parsed.commit, COMMIT)
             self.assertEqual(parsed.source_digest, manifest["sourceDigest"])
+            extension = extracted / "netizen-v0.3.0/extensions/optional-skill/SKILL.md"
+            extension.write_bytes(b"tampered optional skill\n")
+            with self.assertRaisesRegex(InstallError, "source digest"):
+                read_published_release_manifest(extracted / "netizen-v0.3.0")
 
     def test_current_managed_snapshot_contains_release_build_resources(self) -> None:
         names = {source_file.relative for source_file in collect_source_files(ROOT)}
@@ -285,6 +296,8 @@ class ReleaseArtifactTests(unittest.TestCase):
         self.assertIn("scripts/build_release_artifact.py", names)
         self.assertIn("deploy/install-release.sh.in", names)
         self.assertIn("tests/test_release_artifact.py", names)
+        self.assertIn("extensions/netizen-herdr/SKILL.md", names)
+        self.assertIn("extensions/netizen-herdr/README.md", names)
 
     def test_deployment_package_ships_and_source_entrypoints_need_no_project_dependencies(self) -> None:
         version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]

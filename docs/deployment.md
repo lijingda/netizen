@@ -59,6 +59,7 @@ SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕�
     rollback-recovery-*                         # 回滚恢复材料
   releases/.netizen-managed                     # 删除前必须匹配的 ownership marker
   releases/<sha256>/source/                     # Published Release 或当前工作区快照
+  releases/<sha256>/source/extensions/          # 随版本提供、由用户手动安装的可选扩展
   releases/<sha256>/venv/                       # 与源码成对的 runtime
   current -> releases/<sha256>                  # 现役 release
   previous -> releases/<sha256>                 # 一个回滚点
@@ -74,6 +75,11 @@ ${CODEX_HOME:-~/.codex}/
 
 配置、Channel 状态和 Codex 原生状态都在 release 之外。ProjectRegistry 仍会解析并保存
 canonical cwd；安装器不复制 Project，也不会创建 per-Binding workspace。
+
+正式 Release archive 和 Source Install 快照都包含 `extensions/`。用户可以从解压后的
+版本包或 `~/.netizen/current/source/extensions/` 取用扩展，按各自说明手动安装，例如
+[netizen-herdr](../extensions/netizen-herdr/README.md)。扩展文件参与版本源码摘要校验，
+但不会自动安装到 Codex skills 目录；用户手动安装的副本不由 Netizen 升级或卸载管理。
 
 Netizen 产品根固定为 effective user 的账号 home 下的 `~/.netizen`，安装器有意忽略
 `XDG_DATA_HOME`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME` 和 `XDG_CACHE_HOME`。这是单一
