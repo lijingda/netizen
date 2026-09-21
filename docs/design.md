@@ -1275,8 +1275,13 @@ chat label 只解析当前页去重后的 `chat_id`。进程级 resolver 使用�
 SQLite，也不预取其他页。群聊和话题群使用公开 chat info 的 `name`/`chat_mode`，P2P 再使用
 公开 chat-members 取得唯一真人名称；任一步失败只把该行降级为 ID。UI 分开显示 Scope 的
 “消息/话题”、chat mode 的“单聊/群聊/话题群”、Binding 的“当前/非当前”以及 native
-archived/missing/Lazy 与运行态。Chat 名称使用飞书 AppLink；话题只打开所在会话，不猜测
-未公开的 exact-topic URL。名称与 AppLink 都是当次管理展示事实，不成为 Channel 持久状态。
+archived/missing/Lazy 与运行态。Sessions 的位置链接优先打开话题根消息：对有 `topic_id`
+的 topic Scope，按[飞书官方 CLI 的消息链接实现](https://github.com/larksuite/cli/blob/32d198896816e9416711468c20b14df3dbbc63f3/shortcuts/im/convert_lib/content_convert.go#L287)
+用现有 `chat_id` / `topic_id` 生成 `client/thread/open`，同时携带 `open_chat_id` /
+`openchatid`、`open_thread_id` / `openthreadid` 两套客户端参数，根消息位置为
+`thread_position=-1`。判断不依赖 chat mode 或名称解析；无话题链接时使用原聊天 AppLink。
+URL 只在 Admin 响应中生成，不增加消息查询、CLI 运行依赖或持久存储，也不改变
+Scope/Binding/native Thread 身份。名称与 AppLink 都是当次管理展示事实。
 
 所有 Web mutation 进入 `InstanceManagementService`，与飞书 controls 共用唯一
 `ScopeCoordinator` 和 Runtime exact primitive。每个列表 action 都携带 session-bound、短期、

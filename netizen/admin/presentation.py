@@ -59,6 +59,18 @@ def _chat_open_url(chat: ChatLabel) -> str:
     return f"https://applink.feishu.cn/client/chat/open?{query}"
 
 
+def _topic_open_url(chat_id: str, topic_id: str) -> str:
+    # Match the official Lark CLI's desktop/mobile ID spellings and root position.
+    query = urlencode({
+        "open_chat_id": chat_id,
+        "open_thread_id": topic_id,
+        "openchatid": chat_id,
+        "openthreadid": topic_id,
+        "thread_position": -1,
+    })
+    return f"https://applink.feishu.cn/client/thread/open?{query}"
+
+
 def _schedule_plan_json(plan: dict[str, Any], chat: ChatLabel) -> dict[str, Any]:
     rule = plan.get("schedule")
     local_at = None
