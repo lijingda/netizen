@@ -1301,14 +1301,14 @@ function sessionLocationCell(row, session) {
   const td = document.createElement("td");
   const link = document.createElement("a");
   link.className = "chat-link";
-  link.href = session.chatOpenUrl;
+  link.href = session.topicOpenUrl || session.chatOpenUrl;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
   link.textContent = session.chatLabelResolved
     ? session.chatLabel
     : locationFallback(session);
-  link.title = session.sessionType === "topic"
-    ? "打开所在飞书会话（暂不定位具体话题）"
+  link.title = session.topicOpenUrl
+    ? "打开飞书话题"
     : "打开飞书会话";
   const mode = document.createElement("div");
   mode.className = "meta-line";

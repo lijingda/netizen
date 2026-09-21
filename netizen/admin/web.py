@@ -44,6 +44,7 @@ from .presentation import (
     _schedule_plan_json,
     _settings_json,
     _stop_disposition_message,
+    _topic_open_url,
 )
 from .queries import (
     _created_range_query,
@@ -1086,6 +1087,11 @@ class AdminWebApplication:
             "chatMode": item.chat.chat_mode,
             "chatType": item.chat.chat_type,
             "chatOpenUrl": _chat_open_url(item.chat),
+            "topicOpenUrl": (
+                _topic_open_url(scope.chat_id, scope.topic_id)
+                if scope.kind is ScopeKind.TOPIC and scope.topic_id
+                else None
+            ),
             "topicId": scope.topic_id,
             "sessionType": (
                 "topic" if scope.kind is ScopeKind.TOPIC else "message"

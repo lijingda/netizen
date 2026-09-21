@@ -14,13 +14,14 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from netizen.admin.errors import AdminWebError
 from netizen.admin.presentation import (
     _chat_open_url,
     _release_disposition_message,
     _stop_disposition_message,
+    _topic_open_url,
 )
 from netizen.admin.queries import (
     _created_range_query,
@@ -537,6 +538,21 @@ class AdminSessionPresentationTest(unittest.TestCase):
             _chat_open_url(ChatLabel("oc_group", "Engineering", "group")),
             "https://applink.feishu.cn/client/chat/open?openChatId=oc_group",
         )
+
+    def test_topic_link_opens_root_with_encoded_desktop_and_mobile_ids(self) -> None:
+        chat_id = "oc_group+/?&="
+        topic_id = "omt_topic+/?&="
+        url = urlsplit(_topic_open_url(chat_id, topic_id))
+        self.assertEqual((url.scheme, url.netloc, url.path), (
+            "https", "applink.feishu.cn", "/client/thread/open",
+        ))
+        self.assertEqual(parse_qs(url.query), {
+            "open_chat_id": [chat_id],
+            "openchatid": [chat_id],
+            "open_thread_id": [topic_id],
+            "openthreadid": [topic_id],
+            "thread_position": ["-1"],
+        })
 
     def test_created_range_is_strict_and_normalized_to_canonical_utc(self) -> None:
         self.assertEqual(
@@ -1472,6 +1488,48 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(error["code"], "invalid_cursor")
         self.assertEqual(before, self.runner.application._auth.state_counts().actions)
 
+    async def test_session_topic_link_uses_scope_identity_independent_of_chat_mode(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        for kind, topic_id, mode in (
+            (ScopeKind.TOPIC, "omt_topic", "group"),
+            (ScopeKind.TOPIC, "omt_topic", "topic"),
+            (ScopeKind.TOPIC, "omt_topic", "p2p"),
+            (ScopeKind.TOPIC, "omt_topic", None),
+            (ScopeKind.GROUP, None, "topic"),
+            (ScopeKind.TOPIC, None, "group"),
+        ):
+            with self.subTest(kind=kind, topic_id=topic_id, mode=mode):
+                scope = replace(
+                    self.management.scope, kind=kind, topic_id=topic_id,
+                    scope_key=f"scope-{kind.value}-{topic_id}",
+                )
+                binding = replace(self.management.lazy, scope_key=scope.scope_key)
+                chat = ChatLabel(
+                    scope.chat_id, "Demo Chat", mode, resolved=mode is not None,
+                )
+                self.management.session_items_override = (
+                    SessionInventoryItem(
+                        BindingInventoryRecord(binding, scope), None, chat,
+                    ),
+                )
+                status, _, page = await self.json_get("/api/v1/sessions", session)
+                self.assertEqual(status, 200, page)
+                item, = page["items"]
+                self.assertEqual(
+                    item["chatOpenUrl"],
+                    "https://applink.feishu.cn/client/chat/open?openChatId=oc_chat",
+                )
+                if topic_id is None:
+                    self.assertIsNone(item["topicOpenUrl"])
+                else:
+                    url = urlsplit(item["topicOpenUrl"])
+                    self.assertEqual(url.path, "/client/thread/open")
+                    query = parse_qs(url.query)
+                    self.assertEqual(query["open_chat_id"], [scope.chat_id])
+                    self.assertEqual(query["open_thread_id"], [topic_id])
+                    self.assertEqual(query["thread_position"], ["-1"])
+
     async def test_sessions_api_exposes_page_size_presentation_and_state(self) -> None:
         self.runner.open_admission()
         session = await self.login()
@@ -1503,6 +1561,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             by_id["binding-native"]["chatOpenUrl"],
             "https://applink.feishu.cn/client/chat/open?openId=ou_partner",
         )
+        self.assertIsNone(by_id["binding-native"]["topicOpenUrl"])
         self.assertEqual(by_id["binding-native"]["pointerState"], "current")
         self.assertEqual(by_id["binding-native"]["catalogState"], "active")
         self.assertEqual(by_id["binding-lazy"]["pointerState"], "inactive")

@@ -220,7 +220,7 @@ async function refresh(tab) {
   const unknown = {
     bindingId: "binding-unknown", shortId: "unknown", nativeThreadId: "native-unlisted",
     scopeKind: "direct", chatId: "oc-chat", chatMode: "p2p", chatLabelResolved: false,
-    chatOpenUrl: "https://applink.feishu.cn/client/chat/open?chatId=oc-chat",
+    chatOpenUrl: "https://applink.feishu.cn/client/chat/open?openChatId=oc-chat",
     sessionType: "message", pointerState: "inactive", catalogState: "unknown",
     nativeTitle: "Read summary", nativePreview: "", projectAlias: "netizen",
     messageContextMode: "current_only", runtime: { primaryStatus: "running", primaryStatusResolution: "local" },
@@ -239,6 +239,28 @@ async function refresh(tab) {
   assert.match(rows.textContent, /Read summary.*状态未确认.*running/);
   assert.doesNotMatch(rows.textContent, /Lazy Session|原生会话缺失/);
   assert.deepEqual(rows.querySelectorAll("button").map((button) => button.textContent), ["停止"]);
+
+  // Location links use topic metadata even when the chat name could not be resolved.
+  const topicOpenUrl = "https://applink.feishu.cn/client/thread/open?open_chat_id=oc-chat&open_thread_id=omt-topic&openchatid=oc-chat&openthreadid=omt-topic&thread_position=-1";
+  for (const location of [
+    unknown,
+    { ...unknown, scopeKind: "topic", sessionType: "topic", topicId: "omt-topic",
+      chatMode: "group", chatLabelResolved: true, chatLabel: "Engineering", topicOpenUrl },
+    { ...unknown, scopeKind: "topic", sessionType: "topic", topicId: "omt-topic",
+      chatMode: null, topicOpenUrl },
+    { ...unknown, scopeKind: "topic", sessionType: "topic", topicOpenUrl: null },
+  ]) {
+    const row = document.createElement("tr");
+    sessionLocationCell(row, location);
+    const link = row.querySelector("a");
+    assert.equal(link.href, location.topicOpenUrl || location.chatOpenUrl);
+    assert.equal(link.title, location.topicOpenUrl ? "打开飞书话题" : "打开飞书会话");
+    assert.equal(link.target, "_blank");
+    assert.equal(link.rel, "noopener noreferrer");
+    assert.equal(link.textContent, location.chatLabelResolved
+      ? "Engineering" : locationFallback(location));
+    if (location.topicId) assert.match(row.textContent, /Topic omt-topic/);
+  }
 
   // An empty filtered page still discloses a failed catalog read; a healthy refresh clears it.
   sessionResponse = { items: [], nextCursor: null, catalogAvailable: false };
