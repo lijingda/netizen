@@ -398,12 +398,73 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.scheduler.drain_project_creation("q", deadline + 1))
         self.assertEqual(self.store.get_run(self.dispatched[0].run.id).phase, "handed_off")
 
+    async def test_timer_checks_each_minute_without_accumulating_delay(self):
+        self.plan(once=True)
+        waits = []
+
+        async def wait_until_next_minute(waiter, timeout):
+            waiter.close()
+            waits.append((self.now, timeout))
+            if len(waits) == 3:
+                self.scheduler.close_admission()
+                return
+            # Simulate timer jitter without waiting real minutes.
+            self.now += timeout + 0.25
+            await asyncio.sleep(0)
+            raise TimeoutError
+
+        with patch("netizen.schedules.scheduler.asyncio.wait_for", side_effect=wait_until_next_minute):
+            await self.start()
+            async with asyncio.timeout(1):
+                await self.scheduler._timer
+        await self.scheduler.drain(asyncio.get_running_loop().time() + 1)
+        self.assertEqual(waits, [(100, 20), (120.25, 59.75), (180.25, 59.75)])
+        self.assertEqual([claim.run.due_at for claim in self.dispatched], [180])
+
+    async def test_timer_drains_more_than_two_batches_without_waiting_a_minute(self):
+        plans = {self.plan(once=True) for _ in range(201)}
+        self.dispatch_gate = asyncio.Event()
+        await self.start()
+        self.now = 180.25
+        await self.until(lambda: len(self.dispatched) == len(plans))
+        self.assertEqual({claim.plan.id for claim in self.dispatched}, plans)
+        self.assertTrue(all(claim.run.due_at == 180 for claim in self.dispatched))
+        self.dispatch_gate.set()
+        self.assertTrue(await self.scheduler.drain(asyncio.get_running_loop().time() + 1))
+
+    async def test_scan_crossing_minute_boundary_rechecks_newly_due_plans(self):
+        self.plan(once=True)
+        due_plans = self.store.due_plans
+
+        def scan(**kwargs):
+            plans = due_plans(**kwargs)
+            if self.now == 179.75:
+                self.now = 180.25
+            return plans
+
+        await self.start()
+        self.now = 179.75
+        with patch.object(self.store, "due_plans", side_effect=scan):
+            await self.until(lambda: bool(self.dispatched))
+        self.assertEqual([claim.run.due_at for claim in self.dispatched], [180])
+
+    async def test_full_missed_batch_does_not_delay_the_following_due_plan(self):
+        missed = [self.plan(once=True) for _ in range(100)]
+        due = self.plan(schedule=ScheduleRule("once", "UTC", at="1970-01-01T00:04+00:00"))
+        await self.start()
+        self.now = 240.25
+        await self.until(lambda: bool(self.dispatched))
+        self.assertEqual([claim.plan.id for claim in self.dispatched], [due])
+        self.assertTrue(all(self.store.list_runs(plan_id)[0].error_code == "missed" for plan_id in missed))
+
     async def test_wake_runs_timer_and_close_stops_new_claims(self):
         self.plan()
         await self.start()
-        self.now = 160
-        self.scheduler.wake()
-        await self.until(lambda: bool(self.dispatched))
+        with patch.object(self.store, "due_plans", wraps=self.store.due_plans) as due_plans:
+            await self.until(lambda: due_plans.called)
+            self.now = 160
+            self.scheduler.wake()
+            await self.until(lambda: bool(self.dispatched))
         await self.scheduler.close()
         await self.scheduler.drain(asyncio.get_running_loop().time() + 1)
         self.now = 280
