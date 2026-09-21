@@ -41,6 +41,7 @@ _REQUIRED_FIELDS = {
     "create": ("name", "instructions", "schedule", "request_id"),
     "update": ("plan_id", "expected_revision", "request_id"),
     "delete": ("plan_id", "expected_revision", "request_id"),
+    "run_now": ("plan_id", "expected_revision", "request_id"),
     "runs": ("plan_id",),
 }
 _SCHEDULE_REQUIRED = {
@@ -52,17 +53,24 @@ CREATE_EXAMPLE = {
     "schedule": {"kind": "daily", "at": "09:00"}, "timezone": "Asia/Shanghai",
     "enabled": False, "request_id": "6d2c05a2-5da6-4f57-a433-c1ea5fbb2a6f",
 }
+RUN_NOW_EXAMPLE = {
+    "mode": "run_now", "plan_id": "<exact plan_id from list/view>",
+    "expected_revision": 1, "request_id": "6d2c05a2-5da6-4f57-a433-c1ea5fbb2a6f",
+}
+_RUN_NOW_FIELDS = frozenset({"mode", "plan_id", "expected_revision", "request_id"})
 
-INSTRUCTIONS = """Manage Netizen scheduled tasks with cron_manage: create, list, view, update, pause, enable, or delete plans for recurring work, reminders, monitoring, and follow-ups.
+INSTRUCTIONS = """Manage Netizen scheduled tasks with cron_manage: create, list, view, update, pause, enable, delete, or run an existing plan now for recurring work, reminders, monitoring, and follow-ups.
 
 When the user asks to manage scheduled tasks, use cron_manage and follow its schema. If the tool is deferred, find it through the available tool search first.
 
-Each scheduled occurrence starts an independent ordinary persistent Codex Thread in a new Feishu topic. Pausing or deleting a plan prevents new claims; an already claimed occurrence may continue. Stop or continue an existing occurrence through ordinary conversation controls. Write clear, reusable task instructions in the saved plan.
+Each scheduled occurrence starts an independent ordinary persistent Codex Thread in a new Feishu topic. Pausing prevents automatic claims; deleting prevents all new claims. An already claimed occurrence may continue. Stop or continue an existing occurrence through ordinary conversation controls. Write clear, reusable task instructions in the saved plan.
+When asked to run an existing plan once now, use run_now. Enabling a plan uses update and waits for its next scheduled time; changing its recurring time also uses update. Ordinary work without an existing-plan context remains an ordinary task.
 """
 
-TOOL_DESCRIPTION = """Manage Netizen scheduled tasks with cron_manage: options, list, view, create, update (including pause/enable), delete, and recent runs. Follow the schema and report success only from the returned result.
-Find candidates by name before using an exact plan_id; clarify ambiguous matches. Resolve relative times into a structured schedule and IANA timezone, and save reusable instructions with explicit resource references. New occurrences use independent ordinary Threads in new Feishu topics. Pausing/deleting prevents future claims; already claimed work may continue and uses ordinary stop/continue controls.
-For create/update/delete supply a UUID request_id; retry the same request with the same ID after a timeout. For update/delete copy the exact current revision from the latest list/view/create/update result into expected_revision; never increment it yourself. An existing current result does not require another view call. Omitted chat_id/project on create use the calling native Thread's Binding: the current Feishu conversation may be a group or a private chat; a topic uses its containing conversation. list defaults to that current conversation; all=true lists this instance's plans. update keeps omitted fields unchanged. No native Thread identity belongs in tool arguments.
+TOOL_DESCRIPTION = """Manage Netizen scheduled tasks with cron_manage: options, list, view, create, update (including pause/enable), delete, run_now, and recent runs. Follow the schema and report success only from the returned result.
+Find candidates by name before using an exact plan_id; clarify ambiguous matches. Resolve relative times into a structured schedule and IANA timezone, and save reusable instructions with explicit resource references. New occurrences use independent ordinary Threads in new Feishu topics. Pausing prevents automatic claims; deleting prevents all new claims. Already claimed work may continue and uses ordinary stop/continue controls.
+For create/update/delete/run_now supply a UUID request_id; retry the same request with the same ID after a timeout. For update/delete/run_now copy the exact current revision from the latest list/view/create/update result into expected_revision; never increment it yourself. An existing current result does not require another view call. Omitted chat_id/project on create use the calling native Thread's Binding: the current Feishu conversation may be a group or a private chat; a topic uses its containing conversation. list defaults to that current conversation; all=true lists this instance's plans. update keeps omitted fields unchanged. No native Thread identity belongs in tool arguments.
+run_now executes the saved plan once, including paused or ended plans, without changing its schedule, next due time or enabled state. Supply only mode, plan_id, expected_revision and request_id; instructions, settings and destination come from that saved version. The result is an acceptance receipt with run_id and current run information, not proof of completion. Results go to the plan's target in a new topic, not necessarily the calling chat; share the returned feishu_url when available. An unfinished or uncertain previous initial Turn blocks another run. Inspect view/runs when blocked; do not enable the plan, rewrite its time, copy it, or execute its instructions yourself as a workaround. After a timeout, reuse the original request_id; never generate a new one merely to retry an uncertain trigger.
 Create copies the calling Binding's session settings once; later Binding changes do not change the plan. session_settings is a partial override: turn_settings=null explicitly inherits native Codex settings; a model override supplies all three IDs. Other fields control reaction pulse, progress card and message context. Use options to discover current model/effort/service-tier IDs and defaults when choosing settings; ordinary creation needs no preliminary options call. A private target supports only current-only; an inherited catch-up default is normalized, but explicitly requesting catch-up is rejected. Updating unrelated fields retains the plan's settings even if its model is no longer available.
 Recurring daily/weekly/interval schedules have no cutoff by default. Optional schedule.end_at is an inclusive cutoff timestamp with an explicit UTC offset and minute precision; turn a requested cutoff date into a specific time and timezone. Once schedules cannot use end_at.
 Providing schedule on update replaces the whole rule: include unchanged kind/time/timezone and end_at to keep them. To remove end_at, omit it or set it to null in the replacement schedule. Omitting schedule entirely keeps the existing rule and cutoff.
@@ -124,7 +132,7 @@ class _SessionSettingsArguments(BaseModel):
 class _Arguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    mode: Literal["options", "list", "view", "create", "update", "delete", "runs"]
+    mode: Literal["options", "list", "view", "create", "update", "delete", "run_now", "runs"]
     plan_id: str | None = Field(default=None, min_length=1)
     name: str | None = Field(default=None, min_length=1)
     instructions: str | None = Field(default=None, min_length=1)
@@ -158,6 +166,8 @@ class _Arguments(BaseModel):
         required = _REQUIRED_FIELDS.get(self.mode, ())
         if any(getattr(self, key) is None for key in required):
             raise ValueError("Required fields are missing for this mode.")
+        if self.mode == "run_now" and self.model_fields_set - _RUN_NOW_FIELDS:
+            raise ValueError("run_now only accepts exact plan identity, revision and request_id.")
         return self
 
 
@@ -170,11 +180,17 @@ def _tool_schema() -> dict[str, Any]:
         }}
         for mode, fields in _REQUIRED_FIELDS.items()
     ]
+    schema["allOf"].append({
+        "if": {"properties": {"mode": {"const": "run_now"}}},
+        "then": {"properties": {
+            field: False for field in schema["properties"] if field not in _RUN_NOW_FIELDS
+        }},
+    })
     return schema
 
 
 _FIELD_HINTS = {
-    "mode": "Set mode to options, list, view, create, update, delete or runs.",
+    "mode": "Set mode to options, list, view, create, update, delete, run_now or runs.",
     "plan_id": "Supply the exact nonempty plan_id returned by list or create.",
     "name": "Supply a nonempty plan name.",
     "instructions": "Supply nonempty reusable task instructions in instructions.",
@@ -236,11 +252,14 @@ def _invalid_arguments(arguments: Any, error: ValidationError) -> CallToolResult
                 fields["schedule." + field] = _FIELD_HINTS["schedule." + field]
         if kind == "once" and schedule.get("end_at") is not None:
             fields["schedule.end_at"] = _FIELD_HINTS["schedule.end_at"]
+    manual = isinstance(arguments, dict) and arguments.get("mode") == "run_now"
+    if manual and set(arguments) - _RUN_NOW_FIELDS:
+        fields["arguments"] = "run_now only accepts mode, plan_id, expected_revision and request_id. Remove all other fields; it uses the saved plan without overrides."
     return _result({"ok": False, "error": {
         "code": "invalid_request",
         "message": "Correct the fields below and retry cron_manage, keeping the requested plan details and request_id. Do not use shell commands or list_mcp_resources to discover argument names.",
         "fields": [{"field": field, "message": hint} for field, hint in fields.items()],
-        "create_example": CREATE_EXAMPLE,
+        **({"run_now_example": RUN_NOW_EXAMPLE} if manual else {"create_example": CREATE_EXAMPLE}),
     }})
 
 

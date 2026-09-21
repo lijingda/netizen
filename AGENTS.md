@@ -28,6 +28,7 @@ their cited ADRs before changing that boundary.
 - Scheduled Plans, dispatch, ordinary topic Threads, and the dedicated MCP
   management entry: [scheduled tasks](docs/design.md#定时任务) and
   [ADR 0061](docs/adr/0061-schedule-ordinary-threads-in-feishu-topics.md).
+  Manual runs of saved plans follow [ADR 0068](docs/adr/0068-run-saved-scheduled-plans-manually.md).
 - Installation, release, permissions, and platform service management:
   [deployment](docs/deployment.md). Routine Agent installation starts with the
   README command and follows installer output; consult the relay procedure for
@@ -49,7 +50,8 @@ their cited ADRs before changing that boundary.
   application/runtime boundary (ADR 0031). The one-shot Admin deployment process
   for upgrades and explicit restarts is the sole deployment exception
   (ADR 0057/0059). The sole in-process Scheduler shares that boundary; Admin
-  may maintain Scheduled Plans but cannot submit immediate Prompts (ADR 0061).
+  may maintain Scheduled Plans and request manual runs of their saved versions,
+  but cannot submit arbitrary immediate Prompts (ADR 0061/0068).
   Do not add another runtime, long-lived service, scheduler, history model, or
   configuration layer.
 - Preserve exact Scope/Binding-to-native-Thread identity. Running input steers

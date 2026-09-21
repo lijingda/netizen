@@ -297,6 +297,7 @@ class ServiceCore:
             )
             schedules.set_wake_handler(self._scheduler.wake)
             schedules.set_refresh_handler(self._scheduler.refresh)
+            schedules.set_run_now_handler(self._scheduler.run_now)
             self._management.set_schedule_creation_drain(self._scheduler.drain_project_creation)
             await self._scheduler.recover()
             if expired_sides:

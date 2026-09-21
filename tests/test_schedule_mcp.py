@@ -69,7 +69,7 @@ class ScheduleMcpTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(tools[0]["annotations"]["readOnlyHint"])
         schema = tools[0]["inputSchema"]
         self.assertNotIn("thread_id", schema["properties"])
-        self.assertEqual(schema["properties"]["mode"]["enum"], ["options", "list", "view", "create", "update", "delete", "runs"])
+        self.assertEqual(schema["properties"]["mode"]["enum"], ["options", "list", "view", "create", "update", "delete", "run_now", "runs"])
         result = await self.call({"mode": "list"})
         self.assertTrue(result["isError"])
         self.assertEqual(result["structuredContent"]["error"]["code"], "unavailable")
@@ -122,6 +122,33 @@ class ScheduleMcpTests(unittest.IsolatedAsyncioTestCase):
             result = await self.call(request)
             self.assertEqual(result["structuredContent"]["error"]["code"], "invalid_request")
         self.assertEqual(self.requests, [])
+
+    async def test_manual_trigger_preserves_identity_and_rejects_overrides(self):
+        self.runner.open_admission()
+        request = {"mode": "run_now", "plan_id": "saved-plan", "expected_revision": 3,
+                   "request_id": "stable-trigger-request"}
+        result = await self.call(request, {"threadId": "calling-thread"})
+        self.assertFalse(result["isError"])
+        self.assertEqual(self.requests, [(request, "calling-thread")])
+        validator = Draft202012Validator(_tool_schema())
+        self.assertFalse(list(validator.iter_errors(request)))
+        for invalid in (
+            {key: value for key, value in request.items() if key != "expected_revision"},
+            {key: value for key, value in request.items() if key != "request_id"},
+            {**request, "expected_revision": True},
+            {**request, "instructions": "PRIVATE-OVERRIDE"},
+            {**request, "chat_id": "PRIVATE-CHAT"},
+            {**request, "session_settings": {}},
+            {**request, "enabled": True},
+            {**request, "schedule": None},
+        ):
+            with self.subTest(fields=set(invalid)):
+                self.assertTrue(list(validator.iter_errors(invalid)))
+                result = await self.call(invalid)
+                self.assertEqual(result["structuredContent"]["error"]["code"], "invalid_request")
+                self.assertIn("run_now_example", result["structuredContent"]["error"])
+                self.assertNotIn("PRIVATE-", json.dumps(result))
+        self.assertEqual(self.requests, [(request, "calling-thread")])
 
     async def test_real_misspelled_create_gets_field_corrections_then_succeeds(self):
         self.runner.open_admission()

@@ -32,6 +32,14 @@ class ScheduleRequestConflict(ScheduleConflict):
     code = "request_conflict"
 
 
+class ScheduleRunInProgress(ScheduleConflict):
+    code = "run_in_progress"
+
+
+class ScheduleBlockedUnknown(ScheduleConflict):
+    code = "blocked_unknown"
+
+
 class AmbiguousLocalTime(ScheduleError):
     code = "ambiguous_local_time"
 
@@ -365,6 +373,7 @@ class Run:
     missed_from: float | None = None
     missed_count: int = 0
     binding_removed: bool = False
+    trigger_source: str = "scheduled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,3 +387,4 @@ class MutationResult:
     plan_id: str
     revision: int
     replayed: bool = False
+    run_id: str | None = None

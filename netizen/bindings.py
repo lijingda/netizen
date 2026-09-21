@@ -32,7 +32,7 @@ from .schedules.store import (
 from .session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 PROJECT_DELETE_LIMIT = 1000
 
 
@@ -425,73 +425,6 @@ def validate_channel_database(path: str | Path, *, allow_empty: bool = False) ->
         _require_database_integrity(connection)
     except sqlite3.Error as error:
         raise RuntimeError(f"Channel database validation failed: {error}") from error
-    finally:
-        connection.close()
-
-
-def migrate_channel_database(path: str | Path) -> None:
-    """Installer-only v10 -> v11 upgrade, after unload, lifetime lock and snapshot.
-
-    Runtime startup remains read-only for unsupported versions. Current databases
-    are validated without opening a writer; every legacy change shares one SQLite
-    transaction so malformed metadata cannot leave a partially upgraded database.
-    """
-    database = Path(path)
-    if database.is_symlink() or not database.is_file():
-        raise RuntimeError("Channel database must be a regular file")
-    reader = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
-    reader.row_factory = sqlite3.Row
-    try:
-        versions = reader.execute("SELECT version FROM schema_version").fetchall()
-        if len(versions) != 1 or versions[0]["version"] != 10:
-            _require_current_schema(reader)
-            _require_database_integrity(reader)
-            return
-        _require_database_integrity(reader)
-    except sqlite3.Error as error:
-        raise RuntimeError(f"Channel database validation failed: {error}") from error
-    finally:
-        reader.close()
-
-    connection = sqlite3.connect(database, isolation_level=None)
-    connection.row_factory = sqlite3.Row
-    try:
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA synchronous = FULL")
-        connection.execute("BEGIN IMMEDIATE")
-        versions = connection.execute("SELECT version FROM schema_version").fetchall()
-        if len(versions) != 1 or versions[0]["version"] != 10:
-            raise RuntimeError("Channel database schema changed during installation")
-        connection.execute("""
-            ALTER TABLE bindings ADD COLUMN completion_mention_enabled
-                INTEGER NOT NULL DEFAULT 1 CHECK(
-                    typeof(completion_mention_enabled) = 'integer'
-                    AND completion_mention_enabled IN (0, 1)
-                )
-        """)
-        legacy_fields = {
-            "turn_settings", "reaction_pulse_enabled", "progress_card_enabled",
-            "message_context_mode",
-        }
-        for row in connection.execute(
-            "SELECT plan_id, session_settings_json FROM schedule_plans WHERE deleted = 0"
-        ).fetchall():
-            raw = json.loads(row["session_settings_json"])
-            if not isinstance(raw, dict) or set(raw) != legacy_fields:
-                raise RuntimeError("v10 scheduled session settings are invalid")
-            settings = SessionSettings.from_dict({**raw, "completion_mention_enabled": True})
-            connection.execute(
-                "UPDATE schedule_plans SET session_settings_json = ? WHERE plan_id = ?",
-                (json.dumps(settings.to_dict(), separators=(",", ":")), row["plan_id"]),
-            )
-        connection.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
-        _require_current_schema(connection)
-        _require_database_integrity(connection)
-        connection.execute("COMMIT")
-    except BaseException:
-        if connection.in_transaction:
-            connection.execute("ROLLBACK")
-        raise
     finally:
         connection.close()
 

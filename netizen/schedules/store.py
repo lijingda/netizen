@@ -12,9 +12,9 @@ from typing import TYPE_CHECKING, Any
 from ..session_settings import SessionSettings, SessionSettingsError
 
 from .models import (
-    Claim, MutationResult, Plan, Run, ScheduleConflict, ScheduleError,
+    Claim, MutationResult, Plan, Run, ScheduleBlockedUnknown, ScheduleConflict, ScheduleError,
     ScheduleNotFound, ScheduleRequestConflict, ScheduleRevisionConflict,
-    ScheduleRule, has_trigger_opportunity,
+    ScheduleRule, ScheduleRunInProgress, has_trigger_opportunity,
 )
 
 if TYPE_CHECKING:
@@ -24,6 +24,28 @@ if TYPE_CHECKING:
 MAX_INSTRUCTIONS_JSON_BYTES = 48 * 1024
 
 
+_RUN_TABLE = """CREATE TABLE schedule_runs (
+        run_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES schedule_plans(plan_id),
+        plan_revision INTEGER NOT NULL, due_at REAL NOT NULL,
+        project_alias TEXT NOT NULL, app_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+        phase TEXT NOT NULL CHECK(phase IN ('claimed','publishing_topic','binding_ready','starting_turn','handed_off','released')),
+        barrier TEXT NOT NULL CHECK(barrier IN ('held','unknown','released')),
+        root_uuid TEXT NOT NULL UNIQUE, seed_uuid TEXT NOT NULL UNIQUE,
+        root_message_id TEXT, topic_id TEXT, origin_message_id TEXT,
+        binding_id TEXT, initial_turn_id TEXT, error_code TEXT, delivery_state TEXT,
+        created_at REAL NOT NULL, updated_at REAL NOT NULL,
+        missed_from REAL, missed_count INTEGER NOT NULL DEFAULT 0,
+        binding_removed INTEGER NOT NULL DEFAULT 0 CHECK(binding_removed IN (0,1)),
+        trigger_source TEXT NOT NULL DEFAULT 'scheduled' CHECK(trigger_source IN ('scheduled','manual'))
+    )"""
+_RUN_INDEXES = (
+    "CREATE UNIQUE INDEX schedule_runs_due ON schedule_runs(plan_id, due_at) WHERE trigger_source = 'scheduled'",
+    "CREATE INDEX schedule_runs_plan ON schedule_runs(plan_id, due_at DESC, run_id DESC)",
+    "CREATE UNIQUE INDEX schedule_runs_binding ON schedule_runs(binding_id) WHERE binding_id IS NOT NULL",
+    "CREATE UNIQUE INDEX schedule_runs_root ON schedule_runs(app_id, chat_id, root_message_id) WHERE root_message_id IS NOT NULL",
+    "CREATE UNIQUE INDEX schedule_runs_topic ON schedule_runs(app_id, chat_id, topic_id) WHERE topic_id IS NOT NULL",
+    "CREATE UNIQUE INDEX schedule_runs_barrier ON schedule_runs(plan_id) WHERE barrier != 'released'",
+)
 SCHEMA = (
     """CREATE TABLE schedule_plans (
         plan_id TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision >= 1),
@@ -37,28 +59,12 @@ SCHEMA = (
     )""",
     "CREATE INDEX schedule_plans_due ON schedule_plans(app_id, enabled, next_due_at) WHERE deleted = 0",
     "CREATE INDEX schedule_plans_project ON schedule_plans(project_alias, deleted)",
-    """CREATE TABLE schedule_runs (
-        run_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES schedule_plans(plan_id),
-        plan_revision INTEGER NOT NULL, due_at REAL NOT NULL,
-        project_alias TEXT NOT NULL, app_id TEXT NOT NULL, chat_id TEXT NOT NULL,
-        phase TEXT NOT NULL CHECK(phase IN ('claimed','publishing_topic','binding_ready','starting_turn','handed_off','released')),
-        barrier TEXT NOT NULL CHECK(barrier IN ('held','unknown','released')),
-        root_uuid TEXT NOT NULL UNIQUE, seed_uuid TEXT NOT NULL UNIQUE,
-        root_message_id TEXT, topic_id TEXT, origin_message_id TEXT,
-        binding_id TEXT, initial_turn_id TEXT, error_code TEXT, delivery_state TEXT,
-        created_at REAL NOT NULL, updated_at REAL NOT NULL,
-        missed_from REAL, missed_count INTEGER NOT NULL DEFAULT 0,
-        binding_removed INTEGER NOT NULL DEFAULT 0 CHECK(binding_removed IN (0,1)),
-        UNIQUE(plan_id, due_at)
-    )""",
-    "CREATE INDEX schedule_runs_plan ON schedule_runs(plan_id, due_at DESC, run_id DESC)",
-    "CREATE UNIQUE INDEX schedule_runs_binding ON schedule_runs(binding_id) WHERE binding_id IS NOT NULL",
-    "CREATE UNIQUE INDEX schedule_runs_root ON schedule_runs(app_id, chat_id, root_message_id) WHERE root_message_id IS NOT NULL",
-    "CREATE UNIQUE INDEX schedule_runs_topic ON schedule_runs(app_id, chat_id, topic_id) WHERE topic_id IS NOT NULL",
-    "CREATE UNIQUE INDEX schedule_runs_barrier ON schedule_runs(plan_id) WHERE barrier != 'released'",
+    _RUN_TABLE,
+    *_RUN_INDEXES,
     """CREATE TABLE schedule_requests (
         request_id TEXT PRIMARY KEY, operation TEXT NOT NULL, payload_digest TEXT NOT NULL,
-        plan_id TEXT NOT NULL, revision INTEGER NOT NULL, expires_at REAL NOT NULL
+        plan_id TEXT NOT NULL, revision INTEGER NOT NULL, expires_at REAL NOT NULL,
+        run_id TEXT
     )""",
 )
 TABLE_COLUMNS = {
@@ -71,11 +77,12 @@ TABLE_COLUMNS = {
         "run_id", "plan_id", "plan_revision", "due_at", "project_alias", "app_id", "chat_id",
         "phase", "barrier", "root_uuid", "seed_uuid", "root_message_id", "topic_id",
         "origin_message_id", "binding_id", "initial_turn_id", "error_code", "delivery_state",
-        "created_at", "updated_at", "missed_from", "missed_count", "binding_removed",
+        "created_at", "updated_at", "missed_from", "missed_count", "binding_removed", "trigger_source",
     },
-    "schedule_requests": {"request_id", "operation", "payload_digest", "plan_id", "revision", "expires_at"},
+    "schedule_requests": {"request_id", "operation", "payload_digest", "plan_id", "revision", "expires_at", "run_id"},
 }
 _RUN_UNIQUE_INDEXES = {
+    "schedule_runs_due": (("plan_id", "due_at"), "trigger_source = 'scheduled'"),
     "schedule_runs_binding": (("binding_id",), "binding_id is not null"),
     "schedule_runs_root": (("app_id", "chat_id", "root_message_id"), "root_message_id is not null"),
     "schedule_runs_topic": (("app_id", "chat_id", "topic_id"), "topic_id is not null"),
@@ -91,6 +98,14 @@ def create_schema(connection: sqlite3.Connection) -> None:
 
 def require_schema(connection: sqlite3.Connection) -> None:
     _require_table_schema(connection)
+    trigger = next(row for row in connection.execute("PRAGMA table_info(schedule_runs)") if row["name"] == "trigger_source")
+    if trigger["type"].upper() != "TEXT" or trigger["notnull"] != 1 or trigger["dflt_value"] != "'scheduled'":
+        raise RuntimeError("current scheduling trigger source has invalid shape")
+    if connection.execute("SELECT 1 FROM schedule_runs WHERE trigger_source NOT IN ('scheduled','manual') LIMIT 1").fetchone():
+        raise RuntimeError("current scheduling trigger source values are invalid")
+    request_run = next(row for row in connection.execute("PRAGMA table_info(schedule_requests)") if row["name"] == "run_id")
+    if request_run["type"].upper() != "TEXT" or request_run["notnull"] != 0:
+        raise RuntimeError("current scheduling request Run reference has invalid shape")
     columns = {row["name"]: row for row in connection.execute("PRAGMA table_info(schedule_plans)")}
     if "session_settings_json" not in columns or columns["session_settings_json"]["type"].upper() != "TEXT":
         raise RuntimeError("current Channel database is missing scheduled session settings")
@@ -115,6 +130,14 @@ def _require_table_schema(connection: sqlite3.Connection) -> None:
             raise RuntimeError(f"current Channel database is missing {table} columns")
         if {row["name"] for row in schema if row["pk"]} != {primary_keys[table]}:
             raise RuntimeError(f"current scheduling primary key has invalid shape: {table}")
+    foreign_keys = connection.execute("PRAGMA foreign_key_list(schedule_runs)").fetchall()
+    if len(foreign_keys) != 1 or any(
+        foreign_keys[0][key] != value for key, value in {
+            "table": "schedule_plans", "from": "plan_id", "to": "plan_id",
+            "on_update": "NO ACTION", "on_delete": "NO ACTION",
+        }.items()
+    ):
+        raise RuntimeError("current scheduling plan foreign key has invalid shape")
     indexes = {
         row["name"]: row for row in connection.execute("PRAGMA index_list(schedule_runs)")
     }
@@ -135,7 +158,10 @@ def _require_table_schema(connection: sqlite3.Connection) -> None:
     missing = _RUN_UNIQUE_INDEXES.keys() - indexes.keys()
     if missing:
         raise RuntimeError("current scheduling identity indexes are missing: " + ", ".join(sorted(missing)))
-    if not {("run_id",), ("root_uuid",), ("seed_uuid",), ("plan_id", "due_at")} <= full_unique_keys:
+    required_unique = {("run_id",), ("root_uuid",), ("seed_uuid",)}
+    if ("plan_id", "due_at") in full_unique_keys:
+        raise RuntimeError("current scheduling occurrence uniqueness excludes manual runs")
+    if not required_unique <= full_unique_keys:
         raise RuntimeError("current scheduling occurrence or publication UUID uniqueness is missing")
 
 
@@ -206,13 +232,13 @@ class ScheduleStore:
         if row is not None:
             if row["operation"] != operation or row["payload_digest"] != digest:
                 raise ScheduleRequestConflict("request_id 已用于不同的操作，请核查原操作。")
-            return MutationResult(row["plan_id"], row["revision"], True)
+            return MutationResult(row["plan_id"], row["revision"], True, row["run_id"])
         return None
 
     def _remember(self, request_id: str, operation: str, payload: object, result: MutationResult, now: float) -> None:
         self._db.execute(
-            "INSERT INTO schedule_requests VALUES (?, ?, ?, ?, ?, ?)",
-            (request_id, operation, hashlib.sha256(_json(payload).encode()).hexdigest(), result.plan_id, result.revision, now + 7 * 86400),
+            "INSERT INTO schedule_requests(request_id,operation,payload_digest,plan_id,revision,expires_at,run_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (request_id, operation, hashlib.sha256(_json(payload).encode()).hexdigest(), result.plan_id, result.revision, now + 7 * 86400, result.run_id),
         )
 
     def lookup_request(self, request_id: str, operation: str, payload: object, *, now: float | None = None) -> MutationResult | None:
@@ -437,13 +463,39 @@ class ScheduleStore:
             ).fetchone()
             return _run(row) if row else None
 
-    def _insert_run(self, plan: Plan, due_at: float, now: float, *, reason: str | None = None, missed_from: float | None = None, missed_count: int = 0) -> Run:
+    def _insert_run(self, plan: Plan, due_at: float, now: float, *, reason: str | None = None, missed_from: float | None = None, missed_count: int = 0, trigger_source: str = "scheduled") -> Run:
         run_id = str(uuid.uuid4())
         self._db.execute(
-            "INSERT INTO schedule_runs(run_id,plan_id,plan_revision,due_at,project_alias,app_id,chat_id,phase,barrier,root_uuid,seed_uuid,error_code,created_at,updated_at,missed_from,missed_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (run_id, plan.id, plan.revision, due_at, plan.project_alias, plan.app_id, plan.chat_id, "released" if reason else "claimed", "released" if reason else "held", str(uuid.uuid4()), str(uuid.uuid4()), reason, now, now, missed_from, missed_count),
+            "INSERT INTO schedule_runs(run_id,plan_id,plan_revision,due_at,project_alias,app_id,chat_id,phase,barrier,root_uuid,seed_uuid,error_code,created_at,updated_at,missed_from,missed_count,trigger_source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (run_id, plan.id, plan.revision, due_at, plan.project_alias, plan.app_id, plan.chat_id, "released" if reason else "claimed", "released" if reason else "held", str(uuid.uuid4()), str(uuid.uuid4()), reason, now, now, missed_from, missed_count, trigger_source),
         )
         return self.get_run(run_id)
+
+    def claim_manual(self, plan_id: str, *, app_id: str, expected_revision: int, request_id: str, request_payload: object | None = None, now: float | None = None) -> tuple[MutationResult, Claim | None]:
+        """Claim the saved plan once without consuming a scheduled occurrence."""
+        now = self._now(now)
+        payload = request_payload if request_payload is not None else dict(
+            plan_id=plan_id, app_id=app_id, expected_revision=expected_revision,
+        )
+        with self.owner._transaction():
+            if result := self._request(request_id, "run_now", payload, now):
+                return result, None
+            plan = self.get(plan_id)
+            if plan.app_id != app_id:
+                raise ScheduleNotFound("定时计划不存在或已删除。")
+            if type(expected_revision) is not int or plan.revision != expected_revision:
+                raise ScheduleRevisionConflict("计划已经修改，请刷新后重试。")
+            self._project(plan.project_alias)
+            pending = self.pending_for_plan(plan.id)
+            if pending is not None:
+                if pending.barrier == "unknown":
+                    raise ScheduleBlockedUnknown("上次执行状态待确认，请先刷新核查后再运行。")
+                raise ScheduleRunInProgress("该计划已有一次执行尚未结束，请结束后再运行。")
+            run = self._insert_run(plan, now, now, trigger_source="manual")
+            result = MutationResult(plan.id, plan.revision, run_id=run.id)
+            self._remember(request_id, "run_now", payload, result, now)
+            self._prune(plan.id)
+            return result, Claim(run, plan)
 
     def claim_due(self, plan_id: str, *, app_id: str, now: float | None = None, recover: bool = False) -> Claim | None:
         now = self._now(now)

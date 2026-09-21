@@ -14,13 +14,15 @@ from openai_codex.errors import InvalidRequestError
 
 from netizen.bindings import BindingStore
 from netizen.channel_app import ChannelApplication
+from netizen.codex_runtime import CodexRuntime
 from netizen.domain import ActiveState, ScheduledConversation, ScheduledOrigin
 from netizen.schedules.service import ScheduleService
 from scripts.probe_scheduled_tasks import (
-    FakeFeishu, McpRecorder, ProbeCompletionFailure, ProbeFailure, ProbeStopFailure, _mcp_phase,
+    FakeFeishu, ManualMcpRecorder, McpRecorder, ProbeCompletionFailure, ProbeFailure, ProbeStopFailure, _manual_phase, _mcp_phase,
     _mcp_recovery_phase, _record_completion, _remove_fixture_trust, _safe_traceback,
     _wait_for_completion, _wait_for_exact_active, _cleanup_error,
 )
+from test_codex_runtime import FakeCodex, FakeTerminalCleanup, FakeThread, FakeThreadSubscriptionControl
 
 
 class FixtureTrustCleanupTest(unittest.TestCase):
@@ -89,6 +91,114 @@ class FixtureTrustCleanupTest(unittest.TestCase):
 
 
 class FakeMcpProbeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_recorder_only_forwards_owned_lookup_and_one_stable_run_request(self):
+        service = SimpleNamespace(manage=AsyncMock(return_value={"ok": True, "accepted": True, "run_id": "owned-run"}))
+        recorder = ManualMcpRecorder(service, "owned-plan")
+        request = {"mode": "run_now", "plan_id": "owned-plan", "expected_revision": 1, "request_id": "one-request"}
+        rejected = await recorder.manage(request, None)
+        self.assertEqual(rejected["error"]["code"], "probe_identity_missing")
+        recorder.thread_id = "owned-thread"
+        for bad, identity, code in (
+            (request, "other-thread", "probe_identity_missing"),
+            ({"mode": "update", "plan_id": "owned-plan", "enabled": True}, "owned-thread", "probe_manual_only"),
+            ({"mode": "list", "all": True}, "owned-thread", "probe_defaults_required"),
+            ({**request, "plan_id": "other-plan"}, "owned-thread", "probe_owned_plan_only"),
+            ({**request, "request_id": None}, "owned-thread", "probe_request_id_required"),
+        ):
+            rejected = await recorder.manage(bad, identity)
+            self.assertEqual(rejected["error"]["code"], code)
+        service.manage.assert_not_called()
+        await recorder.manage({"mode": "list"}, "owned-thread")
+        for _ in range(2):
+            self.assertTrue((await recorder.manage(request, "owned-thread"))["accepted"])
+        rejected = await recorder.manage({**request, "request_id": "second-request"}, "owned-thread")
+        self.assertEqual(rejected["error"]["code"], "probe_one_run_only")
+        self.assertEqual(service.manage.await_count, 3)
+        service.manage.assert_awaited_with(request, native_thread_id="owned-thread")
+        self.assertEqual(recorder.successful_modes, {"list", "run_now"})
+        self.assertEqual(len(recorder.receipts), 2)
+
+    async def test_manual_phase_uses_shared_dispatch_and_registers_result_thread_for_cleanup(self):
+        await self._exercise_manual_phase()
+
+    async def test_manual_phase_failure_still_registers_only_its_persistent_thread_for_cleanup(self):
+        await self._exercise_manual_phase(response="wrong-result")
+
+    async def _exercise_manual_phase(self, *, response="SCHEDULE-PROBE-MANUAL"):
+        runner = SimpleNamespace(callback=None, admission=False)
+
+        def attach(callback):
+            runner.callback = callback
+
+        runner.attach = attach
+        runner.open_admission = lambda: setattr(runner, "admission", True)
+        runner.close_admission = lambda: setattr(runner, "admission", False)
+        case = self
+
+        class ManagementThread:
+            id = "probe-management-thread"
+
+            async def run(self, prompt):
+                case.assertIn("现在跑一次", prompt)
+                case.assertTrue(runner.admission)
+                listed = await runner.callback({"mode": "list"}, self.id)
+                case.assertTrue(listed["ok"])
+                case.assertEqual(len(listed["plans"]), 1)
+                plan = listed["plans"][0]
+                case.assertIn(plan["name"], prompt)
+                request = {"mode": "run_now", "plan_id": plan["id"],
+                    "expected_revision": plan["revision"], "request_id": "probe-manual-request"}
+                receipt = await runner.callback(request, self.id)
+                case.assertTrue(receipt["ok"], receipt)
+                case.assertTrue(receipt["accepted"])
+                replay = await runner.callback(request, self.id)
+                case.assertTrue(replay["replayed"])
+                case.assertEqual(replay["run_id"], receipt["run_id"])
+                return SimpleNamespace(status="completed")
+
+        class ResultThread(FakeThread):
+            async def turn(self, input, **kwargs):
+                handle = await super().turn(input, **kwargs)
+                handle.complete(response=response)
+                return handle
+
+        class Codex(FakeCodex):
+            async def thread_start(self, **kwargs):
+                if kwargs.get("ephemeral"):
+                    return ManagementThread()
+                thread = await super().thread_start(**kwargs)
+                return ResultThread(thread.id, self)
+
+        codex = Codex()
+        owned = SimpleNamespace(owned=set())
+
+        def runtime(**kwargs):
+            return CodexRuntime(**kwargs, automatic_thread_naming=False)
+
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            store = BindingStore(cwd / "manual.sqlite3")
+            self.addCleanup(store.close)
+            store.register_project(alias="probe", cwd=str(cwd))
+            with patch("scripts.probe_scheduled_tasks.CodexRuntime", side_effect=runtime), \
+                 patch("scripts.probe_scheduled_tasks.PinnedExperimentalTerminalCleanup", return_value=FakeTerminalCleanup(codex.events)), \
+                 patch("scripts.probe_scheduled_tasks.AppServerThreadSubscriptionControl", return_value=FakeThreadSubscriptionControl()), \
+                 patch("scripts.probe_scheduled_tasks.AsyncThread", side_effect=lambda client, thread_id: FakeThread(thread_id, client)):
+                if response == "wrong-result":
+                    with self.assertRaisesRegex(ProbeFailure, "manual_initial_result_mismatch"):
+                        await _manual_phase(codex, cwd, store, owned, runner)
+                else:
+                    result = await _manual_phase(codex, cwd, store, owned, runner)
+                    self.assertTrue(result["natural_language_run_now"])
+                    self.assertTrue(result["paused_plan_and_cursors_unchanged"])
+                    self.assertTrue(result["independent_persistent_result_thread"])
+                    self.assertFalse(result["real_feishu_calls"])
+            self.assertEqual(owned.owned, {"native-1"})
+            self.assertFalse(runner.admission)
+            self.assertEqual(len(codex.turn_inputs), 1)
+            self.assertIn('"trigger_source": "manual"', codex.turn_inputs[0][1])
+            self.assertTrue(codex.turn_inputs[0][1].startswith("仅回复 SCHEDULE-PROBE-MANUAL"))
+
     async def test_completion_callback_exception_fails_fast_without_exposing_error_text(self):
         secret = "DO-NOT-EXPOSE-CALLBACK-DETAILS"
         application = SimpleNamespace(handle_completion=AsyncMock(side_effect=ValueError(secret)))

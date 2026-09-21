@@ -307,6 +307,59 @@ class ScheduleCardsTest(unittest.TestCase):
         self.assertNotIn("一次性计划已结束", text)
         self.assertIn("计划已结束", text)
 
+    def test_run_now_uses_saved_revision_and_preserves_navigation_for_paused_or_ended_plans(self):
+        navigation = {"filter": "all", "cursor": "page-two", "plan_id": self.plan["id"]}
+        for status, enabled in (("enabled", True), ("paused", False), ("ended", True)):
+            with self.subTest(status=status):
+                plan = {**self.plan, "status": status, "enabled": enabled}
+                card = schedule_manager_card(self.scope, {"plans": [plan]}, selected={"plan": plan}, navigation=navigation)
+                value = callback(card, "立即运行")
+                decoded = decode_schedule_action(scope=self.scope, value=value)
+                self.assertEqual(decoded.action, "run_now")
+                self.assertEqual(decoded.payload, {"plan_id": self.plan["id"], "expected_revision": self.plan["revision"]})
+                self.assertEqual(decoded.navigation, navigation)
+                self.assertIn("原定时安排保持不变", str(card.card))
+                with self.assertRaises(CardActionError):
+                    decode_schedule_action(scope=self.scope, value={**value, "payload": {**value["payload"], "instructions": "override"}})
+                redrawn = schedule_manager_card(self.scope, {"plans": [plan]}, selected={"plan": plan}, navigation=navigation)
+                self.assertNotEqual(callback(redrawn, "立即运行")["request_id"], decoded.request_id)
+
+    def test_run_now_blocked_plan_explains_reason_and_keeps_refresh_control(self):
+        for plan_fields, detail_fields, reason in (
+            ({}, {"inflight": True}, "上次首轮执行尚未确认结束"),
+            ({"inflight": True}, {}, "上次首轮执行尚未确认结束"),
+            ({"blocked_reason": "blocked_unknown"}, {}, "执行状态待确认"),
+            ({"blocked_reason": "project_disabled"}, {}, "Project 已停用"),
+            ({"blocked_reason": "project_unavailable"}, {}, "Project 不可用"),
+        ):
+            with self.subTest(reason=reason):
+                plan = {**self.plan, **plan_fields}
+                card = schedule_manager_card(self.scope, {"plans": [plan]}, selected={"plan": plan, **detail_fields})
+                self.assertNotIn("立即运行", [button.get("text", {}).get("content") for button in elements(card.card, "button")])
+                self.assertIn(reason, str(card.card))
+                self.assertEqual(callback(card, "刷新任务")["payload"], {"plan_id": self.plan["id"]})
+
+    def test_latest_and_run_history_identify_manual_and_scheduled_trigger_sources(self):
+        self.plan["latest_run"] = {"due_local": "2030-09-10T09:00+08:00", "trigger_source": "manual"}
+        card = schedule_manager_card(self.scope, {"plans": [self.plan]}, selected={"plan": self.plan}, runs={"runs": [
+            {"trigger_source": "manual", "status": "starting"},
+            {"trigger_source": "scheduled", "status": "completed"},
+        ]})
+        text = str(card.card)
+        self.assertIn("2030-09-10T09:00+08:00 · 手动触发", text)
+        self.assertIn("来源：手动触发", text)
+        self.assertIn("来源：定时触发", text)
+
+    def test_run_now_retry_preserves_exact_operation_and_renews_transport_identity(self):
+        detail = schedule_manager_card(self.scope, {"plans": [self.plan]}, selected={"plan": self.plan})
+        value = callback(detail, "立即运行")
+        recovered_scope, card = schedule_retry_card(app_id="app", chat_id=self.scope.chat_id,
+            value=value, form=None, notice="本次触发响应未知", projects=[self.project])
+        retry = callback(card, "重试刚才的操作")
+        self.assertEqual(recovered_scope, self.scope)
+        self.assertEqual(decode_schedule_action(scope=self.scope, value=retry), decode_schedule_action(scope=self.scope, value=value))
+        self.assertNotEqual(retry["nonce"], value["nonce"])
+
     def test_empty_form_value_on_navigation_still_decodes_button(self):
         value = callback(schedule_manager_card(self.scope, {"plans": []}), "新建定时任务")
         self.assertEqual(decode_schedule_action(scope=self.scope, value=value, form={}).action, "new")

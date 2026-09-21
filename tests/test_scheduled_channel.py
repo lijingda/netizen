@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -100,10 +101,38 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["kind"], "scheduled_plan")
         self.assertEqual(metadata["version"], 1)
         self.assertEqual(metadata["execution_host"], "netizen")
+        self.assertEqual(metadata["trigger_source"], "scheduled")
         self.assertIn("attribution only", metadata["handling"])
         self.assertNotIn("sender_id", metadata)
         self.assertEqual(self.receipts, [run.id])
         self.assertIsNone(self.channel.send_calls[0][2].reply_to)
+
+    async def test_manual_trigger_uses_same_topic_origin_and_saved_request_without_human_attribution(self):
+        claim = self.claim("$reports 使用已保存的明确资源")
+        claim = replace(claim, run=replace(claim.run, trigger_source="manual"))
+        group = FeishuScope("app", "oc_group", ScopeKind.GROUP)
+        previous = self.store.create_channel_binding(scope=group, project_alias="work", creator_id="ou_user")
+        self.queue_topic(promote=True)
+        await self.app.dispatch_scheduled_run(claim)
+        self.assertEqual(self.store.active_binding(group.key).id, previous.id)
+        root, seed = self.channel.send_calls
+        self.assertIn("手动触发", str(root[1].card))
+        self.assertIn("手动触发", seed[1])
+        self.assertNotIn("自动", str(root[1].card) + seed[1])
+        submission, = self.submissions
+        metadata = json.loads(submission["input"].split("<scheduled_plan>\n")[1].split("\n</scheduled_plan>")[0])
+        self.assertEqual(metadata["trigger_source"], "manual")
+        self.assertEqual(metadata["creation_source"], claim.plan.source)
+        self.assertIn("attribution only", metadata["handling"])
+        self.assertNotIn("feishu_current_message", submission["input"])
+        self.assertNotIn("sender", metadata)
+        self.assertNotIn("sender_id", metadata)
+        self.assertEqual(submission["skill_names"], ("reports",))
+        self.assertTrue(submission["input"].startswith(claim.plan.instructions))
+        self.assertEqual(submission["owner_id"], "scheduled_plan:" + claim.plan.id)
+        self.assertEqual(submission["origin"].message_id, "om_seed")
+        self.assertIsInstance(submission["origin"], ScheduledOrigin)
+        self.assertEqual(self.receipts, [claim.run.id])
 
     async def test_promotion_uses_distinct_stable_uuid_and_seed_completion_origin(self):
         claim = self.claim()
@@ -831,6 +860,58 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             schedule=ScheduleRule("interval", "UTC", every_minutes=60, anchor=100),
             request_id="manager-" + name, now=100)
         return created.plan_id
+
+    def enable_manual_claims(self):
+        claims = []
+        self.management.schedules._clock = lambda: 160.0
+
+        def claim_manual(plan_id, expected_revision, request_id, request_payload):
+            result, claim = self.store.schedules.claim_manual(plan_id, app_id="app",
+                expected_revision=expected_revision, request_id=request_id, request_payload=request_payload, now=160)
+            if claim is not None:
+                claims.append(claim)
+            return result
+
+        self.management.schedules.set_run_now_handler(claim_manual)
+        return claims
+
+    async def test_run_now_card_uses_saved_plan_and_refreshes_live_detail_after_receipt(self):
+        plan_id = self.manager_plan("手动运行已暂停任务", enabled=False)
+        before = self.store.schedules.get(plan_id)
+        claims = self.enable_manual_claims()
+        scope = FeishuScope("app", "oc_group", ScopeKind.TOPIC, "omt_current")
+        card = await self.app._schedule_manager_card(scope, navigation={"filter": "current_paused", "plan_id": plan_id})
+        value = callback(card, "立即运行")
+        manage = self.management.schedules.manage
+        calls = []
+
+        async def edit_after_receipt(request, **kwargs):
+            calls.append((request, kwargs))
+            result = await manage(request, **kwargs)
+            if request["mode"] == "run_now":
+                self.assertTrue(result["accepted"])
+                self.assertNotIn("plan", result)
+                self.store.schedules.update(plan_id, expected_revision=1, request_id="edit-after-run",
+                    changes={"instructions": "触发后更新的计划"}, now=160)
+            return result
+
+        self.management.schedules.manage = edit_after_receipt
+        rendered = await self.card_action(value=value, topic_id=scope.topic_id)
+        self.assertEqual(calls[0], ({"mode": "run_now", "plan_id": plan_id,
+            "expected_revision": 1, "request_id": value["request_id"]}, {"scope_key": scope.key, "source": "card"}))
+        self.assertEqual([request["mode"] for request, _kwargs in calls], ["run_now", "view", "list", "runs"])
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0].plan.instructions, before.instructions)
+        self.assertEqual(claims[0].run.trigger_source, "manual")
+        after = self.store.schedules.get(plan_id)
+        self.assertEqual((after.enabled, after.next_due_at, after.processed_through),
+            (before.enabled, before.next_due_at, before.processed_through))
+        self.assertIn("立即运行请求已受理", str(rendered.card))
+        self.assertIn("触发后更新的计划", str(rendered.card))
+        self.assertIn("来源：手动触发", str(rendered.card))
+        edit = callback(rendered, "编辑")
+        self.assertEqual(edit["payload"], {"plan_id": plan_id, "expected_revision": 2})
+        self.assertEqual(edit["navigation"], {"filter": "current_paused", "plan_id": plan_id})
 
     async def test_manager_defaults_to_enabled_unfinished_and_refreshes_exact_selection(self):
         active = self.manager_plan("可执行任务")
