@@ -18,7 +18,8 @@ from .models import Claim, MutationResult, Run, ScheduleError, ScheduleNotFound
 
 
 logger = logging.getLogger(__name__)
-TICK_INTERVAL_SECONDS = 1.0
+TICK_INTERVAL_SECONDS = 60.0
+DUE_BATCH_SIZE = 100
 RECOVERY_TIMEOUT_SECONDS = 10.0
 READ_TIMEOUT_SECONDS = 3.0
 DISPATCH_TIMEOUT_SECONDS = 30.0
@@ -151,6 +152,8 @@ class Scheduler:
     async def _run_timer(self) -> None:
         while self._admission:
             self._wake.clear()
+            now = self._wall_clock()
+            next_tick = now + TICK_INTERVAL_SECONDS - now % TICK_INTERVAL_SECONDS
             try:
                 await self.tick()
             except asyncio.CancelledError:
@@ -162,7 +165,10 @@ class Scheduler:
                 return
             if self._admission:
                 try:
-                    await asyncio.wait_for(self._wake.wait(), TICK_INTERVAL_SECONDS)
+                    # Keep the minute boundary chosen before work, so a scan
+                    # crossing that boundary does not postpone newly due plans.
+                    delay = min(TICK_INTERVAL_SECONDS, max(0.0, next_tick - self._wall_clock()))
+                    await asyncio.wait_for(self._wake.wait(), delay)
                 except TimeoutError:
                     pass
 
@@ -173,9 +179,10 @@ class Scheduler:
             return 0
         self._ticking = True
         claimed = 0
+        processed = 0
         try:
             deadline = loop.time() + RECOVERY_TIMEOUT_SECONDS
-            plans = self._store.due_plans(app_id=self._app_id, now=self._wall_clock())
+            plans = self._store.due_plans(app_id=self._app_id, now=self._wall_clock(), limit=DUE_BATCH_SIZE)
             for plan in plans:
                 if not self._admission:
                     break
@@ -190,9 +197,14 @@ class Scheduler:
                     claim = self._store.claim_due(plan.id, app_id=self._app_id, now=self._wall_clock())
                 except (ProjectDeleting, ScheduleNotFound):
                     continue
+                processed += 1
                 if claim is not None:
                     self._dispatch_claim(claim)
                     claimed += 1
+            # Drain full batches without another minute's delay, including
+            # skipped occurrences. Do not spin on frozen Project deletions.
+            if len(plans) == DUE_BATCH_SIZE and processed:
+                self.wake()
             return claimed
         finally:
             self._ticking = False
