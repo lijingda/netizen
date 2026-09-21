@@ -3,7 +3,9 @@ from __future__ import annotations
 import dataclasses
 import sqlite3
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -144,6 +146,135 @@ class ScheduleStorageTest(unittest.TestCase):
             self.schedules.get(plan_id), now=now,
             has_pending=self.schedules.pending_for_plan(plan_id) is not None,
         )
+
+    def manual(self, plan_id, *, request_id=None, expected_revision=1, now=110, app_id="app"):
+        return self.schedules.claim_manual(
+            plan_id, app_id=app_id, expected_revision=expected_revision,
+            request_id=request_id or self.request(), now=now,
+        )
+
+    def test_manual_claim_freezes_saved_plan_without_changing_schedule(self):
+        settings = SessionSettings(BindingTurnSettings("model", "high", "default"), BindingTaskFeedback(False, True))
+        plan_id = self.create(session_settings=settings).plan_id
+        before = self.schedules.get(plan_id)
+        result, claim = self.manual(plan_id, request_id="manual")
+        self.assertEqual((result.plan_id, result.revision, result.run_id, result.replayed), (plan_id, 1, claim.run.id, False))
+        self.assertEqual(claim.plan, before)
+        self.assertEqual(self.schedules.get(plan_id), before)
+        self.assertEqual((claim.run.trigger_source, claim.run.phase, claim.run.barrier, claim.run.due_at), ("manual", "claimed", "held", 110))
+        self.schedules.update(plan_id, expected_revision=1, request_id=self.request(), changes={"instructions": "changed", "session_settings": {"progress_card_enabled": False}})
+        self.assertEqual(claim.plan.instructions, before.instructions)
+        self.assertEqual(claim.plan.session_settings, settings)
+        replay, replay_claim = self.manual(plan_id, request_id="manual")
+        self.assertEqual(replay, dataclasses.replace(result, replayed=True))
+        self.assertIsNone(replay_claim)
+
+    def test_manual_claim_allows_paused_and_ended_plans_without_reenabling(self):
+        once = ScheduleRule("once", "UTC", at="1970-01-01T00:03Z")
+        for rule, enabled, consume in ((self.rule, False, False), (once, False, False), (once, True, True),
+                                      (dataclasses.replace(self.rule, end_at="1970-01-01T00:03Z"), True, True)):
+            with self.subTest(rule=rule, enabled=enabled, consume=consume):
+                plan_id = self.create(schedule=rule, enabled=enabled, now=100).plan_id
+                if consume:
+                    scheduled = self.schedules.claim_due(plan_id, app_id="app", now=180)
+                    self.schedules.release(scheduled.run.id)
+                before = self.schedules.get(plan_id)
+                _, claim = self.manual(plan_id, now=300)
+                self.assertEqual(claim.plan, before)
+                self.assertEqual(self.schedules.get(plan_id), before)
+                self.assertFalse(self.lifecycle(plan_id, now=300).ended)
+                self.schedules.release(claim.run.id)
+
+    def test_manual_rechecks_revision_app_and_project_without_writing_a_run(self):
+        plan_id = self.create().plan_id
+        for overrides, error in (({"expected_revision": 2}, ScheduleRevisionConflict),
+                                 ({"expected_revision": True}, ScheduleRevisionConflict),
+                                 ({"app_id": "other"}, ScheduleNotFound)):
+            with self.subTest(overrides=overrides), self.assertRaises(error):
+                self.manual(plan_id, **overrides)
+        project = self.store.get_project("p")
+        self.store.set_project_enabled(alias="p", enabled=False, expected_revision=project.revision)
+        with self.assertRaises(ProjectDisabled):
+            self.manual(plan_id)
+        self.assertEqual(self.schedules.list_runs(plan_id), ())
+        snapshot = self.store.preview_project_delete("p")
+        self.store.begin_project_delete(alias="p", expected_revision=snapshot.project.revision, expected_inventory_fingerprint=snapshot.fingerprint)
+        with self.assertRaises(ScheduleNotFound):
+            self.manual(plan_id)
+        self.assertEqual(self.schedules.list_runs(plan_id), ())
+
+    def test_manual_rejects_held_and_unknown_without_clearing_barrier(self):
+        plan_id = self.create().plan_id
+        _, first = self.manual(plan_id)
+        for barrier, expected in (("held", "run_in_progress"), ("unknown", "blocked_unknown")):
+            self.schedules.set_run(first.run.id, barrier=barrier)
+            before = self.schedules.get(plan_id)
+            with self.assertRaises(ScheduleError) as raised:
+                self.manual(plan_id)
+            self.assertEqual(raised.exception.code, expected)
+            self.assertEqual(self.schedules.get_run(first.run.id).barrier, barrier)
+            self.assertEqual(self.schedules.get(plan_id), before)
+            self.assertEqual(len(self.schedules.list_runs(plan_id)), 1)
+
+    def test_manual_request_conflicts_preserve_the_first_claim(self):
+        plan_id = self.create().plan_id
+        other = self.create().plan_id
+        result, claim = self.manual(plan_id, request_id="stable")
+        for target, revision in ((other, 1), (plan_id, 2)):
+            with self.assertRaises(ScheduleRequestConflict):
+                self.manual(target, request_id="stable", expected_revision=revision)
+        with self.assertRaises(ScheduleRequestConflict):
+            self.schedules.delete(plan_id, request_id="stable", expected_revision=1)
+        replay, duplicate = self.manual(plan_id, request_id="stable")
+        self.assertEqual(replay.run_id, result.run_id)
+        self.assertIsNone(duplicate)
+        self.assertEqual(self.schedules.pending_for_plan(plan_id), claim.run)
+
+    def test_manual_claims_can_share_a_timestamp_with_each_other_and_schedule(self):
+        plan_id = self.create().plan_id
+        for _ in range(2):
+            _, claim = self.manual(plan_id, now=160)
+            self.schedules.release(claim.run.id)
+        due = self.schedules.claim_due(plan_id, app_id="app", now=160)
+        runs = self.schedules.list_runs(plan_id)
+        self.assertEqual(len(runs), 3)
+        self.assertEqual({run.due_at for run in runs}, {160})
+        self.assertEqual(sorted(run.trigger_source for run in runs), ["manual", "manual", "scheduled"])
+        self.assertEqual(self.schedules.pending_for_plan(plan_id).id, due.run.id)
+        self.assertIsNone(self.schedules.claim_due(plan_id, app_id="app", now=160))
+
+    def test_concurrent_manual_and_scheduled_claims_share_one_plan_barrier(self):
+        for kind in ("scheduled", "different_request", "same_request"):
+            with self.subTest(kind=kind):
+                plan_id = self.create().plan_id
+                gate = threading.Barrier(2)
+
+                def trigger(index):
+                    gate.wait(timeout=5)
+                    try:
+                        if index == 1 and kind == "scheduled":
+                            return self.schedules.claim_due(plan_id, app_id="app", now=160)
+                        request_id = f"{plan_id}-{0 if kind == 'same_request' else index}"
+                        return self.manual(plan_id, request_id=request_id, now=160)
+                    except ScheduleError as error:
+                        return error
+
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    outputs = list(executor.map(trigger, (0, 1)))
+                pending = [run for run in self.schedules.list_runs(plan_id) if run.barrier != "released"]
+                self.assertEqual(len(pending), 1)
+                if kind == "same_request":
+                    self.assertEqual({result.run_id for result, _ in outputs}, {pending[0].id})
+                    self.assertEqual(sorted(result.replayed for result, _ in outputs), [False, True])
+                    self.assertEqual(sum(claim is not None for _, claim in outputs), 1)
+                else:
+                    claims = [value[1] if isinstance(value, tuple) else value for value in outputs]
+                    self.assertEqual(sum(value is not None and not isinstance(value, ScheduleError) for value in claims), 1)
+                    for value in outputs:
+                        if isinstance(value, ScheduleError):
+                            self.assertEqual(value.code, "run_in_progress")
+                    if kind == "scheduled":
+                        self.assertEqual(self.schedules.get(plan_id).next_due_at, 220)
 
     def test_last_cutoff_claim_waits_for_exact_terminal_before_ending(self):
         plan_id = self.create(schedule=dataclasses.replace(self.rule, end_at="1970-01-01T00:03Z")).plan_id
@@ -803,6 +934,42 @@ class ScheduleStorageTest(unittest.TestCase):
 
 
 class ScheduleMigrationTest(unittest.TestCase):
+    def test_manual_receipt_survives_run_pruning_edit_deletion_and_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "channel.db"
+            store = BindingStore(path, wall_clock=lambda: 100)
+            store.register_project(alias="p", cwd="/tmp/project")
+            plan_id = store.schedules.create(
+                name="manual", instructions="saved task", project_alias="p", app_id="app", chat_id="chat",
+                schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100), request_id="create",
+            ).plan_id
+            original = None
+            for index in range(102):
+                result, claim = store.schedules.claim_manual(
+                    plan_id, app_id="app", expected_revision=1, request_id=f"manual-{index}", now=110 + index,
+                )
+                original = original or result
+                store.schedules.release(claim.run.id, error_code="publication_failed")
+            with self.assertRaises(ScheduleNotFound):
+                store.schedules.get_run(original.run_id)
+            self.assertEqual(len(store.schedules.list_runs(plan_id, limit=1000)), 100)
+            store.schedules.update(plan_id, expected_revision=1, request_id="edit", changes={"instructions": "new instructions"}, now=250)
+            store.schedules.delete(plan_id, expected_revision=2, request_id="delete", now=251)
+            store.close()
+            restarted = BindingStore(path, wall_clock=lambda: 300)
+            try:
+                result, claim = restarted.schedules.claim_manual(plan_id, app_id="app", expected_revision=1, request_id="manual-0")
+                self.assertEqual(result, dataclasses.replace(original, replayed=True))
+                self.assertIsNone(claim)
+                self.assertEqual(len(restarted.schedules.list_runs(plan_id, limit=1000)), 100)
+                row = restarted._connection.execute("SELECT * FROM schedule_requests WHERE request_id='manual-0'").fetchone()
+                self.assertEqual(row["expires_at"], 110 + 7 * 86400)
+                self.assertEqual(set(row.keys()), {"request_id", "operation", "payload_digest", "plan_id", "revision", "expires_at", "run_id"})
+                with self.assertRaises(ScheduleNotFound):
+                    restarted.schedules.claim_manual(plan_id, app_id="app", expected_revision=1, request_id="manual-0", now=row["expires_at"])
+            finally:
+                restarted.close()
+
     def test_cutoff_survives_history_pruning_and_file_store_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "channel.db"
@@ -840,6 +1007,10 @@ class ScheduleMigrationTest(unittest.TestCase):
             ("CREATE TABLE requests_without_key AS SELECT * FROM schedule_requests", "DROP TABLE schedule_requests", "ALTER TABLE requests_without_key RENAME TO schedule_requests"),
             ("DROP INDEX schedule_runs_barrier", "CREATE UNIQUE INDEX schedule_runs_barrier ON schedule_runs(plan_id) WHERE barrier='held'"),
             ("ALTER TABLE schedule_plans DROP COLUMN session_settings_json",),
+            ("DROP INDEX schedule_runs_due",),
+            ("DROP INDEX schedule_runs_due", "CREATE UNIQUE INDEX schedule_runs_due ON schedule_runs(plan_id,due_at) WHERE trigger_source='manual'"),
+            ("CREATE UNIQUE INDEX legacy_occurrence ON schedule_runs(plan_id,due_at)",),
+            ("ALTER TABLE schedule_requests DROP COLUMN run_id",),
         )
         for statements in mutations:
             with self.subTest(statements=statements), tempfile.TemporaryDirectory() as directory:

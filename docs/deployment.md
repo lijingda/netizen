@@ -450,13 +450,13 @@ interrupt，并为 exact Thread 请求清理 App Server 已登记的后台 termi
 不自动创建计划或发消息。源码检查、传输替身、API 接受和客户端点击分别记录，不互相
 替代，也不把旧候选结果当作后来修改边界的验收结果。
 
-固定 SDK/CLI `0.154.0` 的原生兼容性覆盖 MCP、冷恢复/fork 与 dispatch；
+固定 SDK/CLI `0.154.0` 的原生兼容性覆盖 MCP、冷恢复/fork、dispatch 与手动触发；
 真实飞书链路的已验证版本仍为 `0.147.0`，不代表 `0.154.0` 的端到端验收：
 
 - 生产 MCP 框架的真实 CRUD、同 cwd 不同 Thread 的调用身份，以及服务端地址/凭据
   轮换后的冷恢复与 fork。`params._meta.threadId` 可用于 exact Binding 默认值映射，
-  不依赖 HTTP header 一定存在。`scripts/probe_scheduled_tasks.py` 提供 mcp、mcp-recovery
-  和 dispatch 阶段；它使用隔离资源和显式模型，只测试原生执行，不发送飞书消息。
+  不依赖 HTTP header 一定存在。`scripts/probe_scheduled_tasks.py` 提供 mcp、mcp-recovery、
+  dispatch 和 manual 阶段；它使用隔离资源和显式模型，只测试原生执行，不发送飞书消息。
 - 真实飞书链路的覆盖范围包括五类来源（私聊主线、普通群主线、话题群、私聊转话题、
   群聊转话题）的自然语言默认目标与 Project，以及私聊、普通群、话题群的
   Scheduler → Channel → Runtime 首轮、结果 chat/thread/root 和来源 pointer。
@@ -465,6 +465,15 @@ interrupt，并为 exact Thread 请求清理 App Server 已登记的后台 termi
   续聊、停止、归档与删除，并核验用户 MCP 与 Project trust 配置不变。
   新 Thread metadata 尚为空及 full read 内部分页列表暂不可用时，读取按 ADR 0049
   使用 5 秒/3 次 I/O 预算，失败后停止自动读取。
+- manual 探针验证真实模型从自然语言定位计划并调用 `run_now`、暂停计划及游标保持
+  不变、独立普通持久 Thread、exact initial Turn 完成与结果投递替身。它不代表真实
+  飞书点击或客户端渲染已经通过。
+
+2026-09-21 手动触发候选通过 `make check`（2025 项测试、编译、依赖和 SDK synthetic
+检查），并以 `gpt-5.6-sol`、SDK/CLI `0.154.0` 通过 `--phase manual`：一次自然语言
+请求只产生一个手动 Run，计划指令/配置、暂停意图与时间游标保持不变，独立持久 Thread
+的首轮完成、屏障释放及测试传输回执均确认。探针所属原生资源已清理，用户 MCP 与
+Project trust 配置不变；本次没有真实飞书投递、客户端点击或目标主机安装回滚验收。
 
 尚未完整覆盖客户端全部点击路径、移动端布局、原生权限和网络故障组合，以及目标主机
 真实失败回滚。当前证据未直接观察 deferred search；固定版本的跨会话 MCP catalog cache
@@ -476,7 +485,7 @@ interrupt，并为 exact Thread 请求清理 App Server 已登记的后台 termi
 | 边界 | 验证内容 |
 | --- | --- |
 | MCP 接入 | 生产传输鉴别、Host/Origin、大小/超时、无 Admin 可用、同 cwd 身份隔离、缺失/冲突元数据、用户 MCP 和指令继承、冷恢复/fork/服务重启与原生权限组合 |
-| 调度与存储 | 四类规则、时区/DST、截止、高水位、宽限/missed、同计划 busy/unknown、不同计划并发、CAS/幂等、记录裁剪及每个交接断点的重启行为 |
+| 调度与存储 | 四类规则、时区/DST、截止、高水位、宽限/missed、手动与定时共用 busy/unknown 屏障、手动不改时间游标、不同计划并发、CAS/幂等、裁剪后原 Run 回执及每个交接断点的重启行为 |
 | 飞书与普通生命周期 | 五类来源的自然语言和 /cron；真实 root/seed、结果严格话题归属、卡片完整表单/重试/分页、Activity/Files、后续对话、停止/归档/删除及极快终态顺序 |
 | Admin 与安装 | 跨主机认证/CSRF、三个入口一致性、Project 删除与在途交接、App 切换、当前库重装、旧库只读拒绝、数据库/release/Skill 失败回滚 |
 
@@ -487,7 +496,7 @@ MCP entry，环境完整继承后仅增加一个随机名称的临时 bearer key
 Admin 关闭时 MCP 仍可用。停止先关闭认领和管理 admission、排空在途交接，再执行既有
 普通 Turn shutdown 并关闭传输；重启不补跑错过的时间，也不重发结果未知的执行。
 
-安装边界验收包括当前 schema 完整初始化与重装、ADR 0063 的 v10 → v11 原子迁移、其他旧版本库只读拒绝、当前元数据与
+安装边界验收包括当前 schema 完整初始化与重装、旧版本库只读拒绝、当前元数据与
 Side/Project 墓碑保留，以及失败后原数据库/release/Skill 恢复；manager target 未卸载或 lifetime lock
 仍被占用时，既有回滚禁止条件保持不变。
 
@@ -1124,14 +1133,14 @@ admission，修复文件后仍需 `./service.sh restart`，不会自动重新开
 HTTP；不得把该端口直接暴露到不受信网络。
 
 `instance.projectRoot` 是必填的绝对路径，用于限制从飞书自动创建的空 Project；它不是
-Binding 的默认 cwd。Channel 服务只支持当前 schema v11；安装器在卸载、lifetime lock
-与快照保护下执行唯一 v10 → v11 原子迁移，其他旧版本拒绝。新库直接创建完整表结构；
-已有库须通过版本、结构和完整性校验。
+Binding 的默认 cwd。Channel 服务与安装器只支持当前 schema v12，不保留历史版本
+自动迁移。新库直接创建完整表结构；已有库须通过只读的版本、结构和完整性校验。
 `schedule_plans`、`schedule_runs` 和 `schedule_requests` 仅保存当前计划指令与会话配置、
 最小调度交接/initial Turn 引用及有界管理请求去重，不复制原生历史。
 当前库重装保留 Scope/Binding/Project、去重记录及 `side_topics` 永久墓碑；激活仍在
 lifetime lock 与快照保护下完成，失败恢复原数据库与旧 release。
-除上述 v10 迁移外的旧版本或损坏数据库明确拒绝，不自动删除或重建空库。
+旧版本或损坏数据库明确拒绝，不自动删除或重建空库。本机旧数据的一次性转换需单独
+停服、备份并校验，不属于安装器自动升级流程。
 配置的 `projects` mapping 启动时仍只做 `INSERT OR IGNORE`，停用、动态登记和已删除记录
 始终优先；已删除 alias 只有显式重新登记才能复用，revision 继续递增。Project 删除保留
 磁盘代码目录。Project 删除清单同时纳入定时计划和在途定时创建；提交后删除关联计划，
@@ -1694,7 +1703,7 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
     live gate 尚须在真实目标应用执行；本地合成测试不声明已经通过。
     P2P 若返回 230071 必须记录为
     本轮文件 live gate 未通过，不得用 FakeChannel 或普通主线发送替代。最后确认这些操作不
-    改变 schema v11 表、Binding、Turn settings、Task Feedback、Context Boundary 或 Side
+    改变当前 schema 表、Binding、Turn settings、Task Feedback、Context Boundary 或 Side
     route 行数。
 
 CLI 中新增的消息不要求回填飞书；验证目标是共享原生后端和可接续性，不是两个 UI

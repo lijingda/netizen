@@ -292,6 +292,9 @@ class FakeScheduler:
     async def refresh(self, plan_id: str) -> None:
         self.events.append("scheduler:refresh")
 
+    def run_now(self, plan_id, expected_revision, request_id, request_payload):
+        self.events.append("scheduler:run-now")
+
     def close_admission(self) -> None:
         self.events.append("scheduler:admission")
 

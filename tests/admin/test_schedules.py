@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import unittest
 from types import SimpleNamespace
@@ -67,12 +68,18 @@ class FakeSchedules:
                     "next_cursor": "next-page", "default_timezone": "Asia/Shanghai"}
         if mode == "runs":
             return {"ok": True, "runs": [{"id": "run-id", "binding_id": "binding-exact",
-                    "due_at": 1893488400, "status": "released",
+                    "due_at": 1893488400, "status": "released", "trigger_source": "manual",
                     "feishu_url": "https://applink.feishu.cn/client/message/link?token=om_root"}],
                     "next_cursor": None}
         if mode == "view" and self.plans is not None:
             plan = next(item for item in self.plans if item["id"] == request["plan_id"])
             return {"ok": True, "plan": copy.deepcopy(plan), "preview": [], "inflight": False}
+        if mode == "run_now":
+            if request["expected_revision"] != self.plan["revision"]:
+                return {"ok": False, "error": {"code": "revision_conflict", "message": "计划已变化，请刷新。"}}
+            return {"ok": True, "accepted": True, "plan_id": self.plan["id"],
+                    "revision": self.plan["revision"], "run_id": "run-manual", "replayed": False,
+                    "run": {"id": "run-manual", "trigger_source": "manual", "status": "starting"}}
         if mode in {"create", "update", "delete"}:
             if mode != "create" and request["expected_revision"] != self.plan["revision"]:
                 return {"ok": False, "error": {"code": "revision_conflict", "message": "计划已变化，请刷新。"}}
@@ -109,7 +116,7 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
         for path in ("/api/v1/schedules", "/api/v1/schedules?mode=view&plan_id=plan-exact"):
             status, _, _ = await self.request("GET", path)
             self.assertEqual(status, 401)
-        for mode in ("create", "update", "delete"):
+        for mode in ("create", "update", "delete", "run-now"):
             status, _, _ = await self.json_post(f"/api/v1/schedules/{mode}", "invalid", {})
             self.assertEqual(status, 401)
         self.assertEqual(self.schedules.calls, [])
@@ -146,6 +153,69 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
         status, _, replay = await self.json_post("/api/v1/schedules/update", session, payload)
         self.assertEqual(status, 409, replay)
         self.assertEqual(len(self.schedules.calls), 3)
+
+    async def test_manual_run_uses_saved_revision_and_returns_acceptance_without_plan_mutation(self) -> None:
+        session = await self.login()
+        self.schedules.plan.update(enabled=False, lifecycle={"ended": True, "has_trigger": False})
+        previous = copy.deepcopy(self.schedules.plan)
+        action = (await self.page(session))["plans"][0]["actions"]["run_now"]
+        payload = fixture._action_payload(action)
+        status, _, _ = await self.json_post("/api/v1/schedules/run-now", session, {
+            **payload, "definition": {"instructions": "Unrelated prompt"},
+        })
+        self.assertEqual(status, 400)
+        self.assertEqual(len(self.schedules.calls), 1)
+        status, _, _ = await self.json_post("/api/v1/schedules/run-now", session,
+                                           {**payload, "csrfToken": "invalid"})
+        self.assertEqual(status, 403)
+        status, _, _ = await self.request("POST", "/api/v1/schedules/run-now", headers=[
+            ("Cookie", f"netizen_admin_session={session}"),
+            ("Origin", "https://foreign.example"), ("Content-Type", "application/json"),
+        ], body=json.dumps(payload).encode())
+        self.assertEqual(status, 403)
+        status, _, result = await self.json_post("/api/v1/schedules/run-now", session, payload)
+        self.assertEqual(status, 202, result)
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["run_id"], "run-manual")
+        self.assertEqual(result["run"]["status"], "starting")
+        self.assertNotIn("plan", result)
+        self.assertEqual(self.schedules.plan, previous)
+        self.assertEqual(self.schedules.calls[-1], ({
+            "mode": "run_now", "plan_id": "plan-exact", "expected_revision": 7,
+            "request_id": hashlib.sha256(action["actionToken"].encode()).hexdigest(),
+        }, "admin"))
+        count = len(self.schedules.calls)
+        status, _, result = await self.json_post("/api/v1/schedules/run-now", session, payload)
+        self.assertEqual(status, 409, result)
+        self.assertEqual(len(self.schedules.calls), count)
+
+    async def test_manual_run_grants_and_submit_enforce_current_readiness_and_revision(self) -> None:
+        session = await self.login()
+        for blocked in ({"inflight": True}, {"blocked_reason": "blocked_unknown"},
+                        {"blocked_reason": "project_disabled"}, {"blocked_reason": "project_unavailable"}):
+            self.schedules.plan.update(inflight=False, blocked_reason=None)
+            self.schedules.plan.update(blocked)
+            plan = (await self.page(session))["plans"][0]
+            self.assertIsNone(plan["actions"]["run_now"])
+            self.assertIsNotNone(plan["actions"]["update"])
+        self.schedules.plan.update(inflight=False, blocked_reason=None)
+        action = (await self.page(session))["plans"][0]["actions"]["run_now"]
+        self.schedules.plan["revision"] += 1
+        status, _, result = await self.json_post("/api/v1/schedules/run-now", session,
+                                                fixture._action_payload(action))
+        self.assertEqual(status, 409, result)
+        self.assertEqual(result["code"], "revision_conflict")
+        for code in ("run_in_progress", "blocked_unknown", "project_disabled", "project_unavailable"):
+            action = (await self.page(session))["plans"][0]["actions"]["run_now"]
+            self.schedules.error = {"code": code, "message": "当前无法运行。"}
+            status, _, result = await self.json_post("/api/v1/schedules/run-now", session,
+                                                    fixture._action_payload(action))
+            self.assertEqual(status, 409, result)
+            self.assertEqual(result["code"], code)
+            self.schedules.error = None
+        status, _, records = await self.json_get("/api/v1/schedules?mode=runs&plan_id=plan-exact", session)
+        self.assertEqual(status, 200, records)
+        self.assertEqual(records["runs"][0]["trigger_source"], "manual")
 
     async def test_queries_are_bounded_shared_service_calls_without_default_context(self) -> None:
         session = await self.login()

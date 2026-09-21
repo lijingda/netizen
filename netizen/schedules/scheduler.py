@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from ..bindings import BindingStore, ProjectDeleting
-from .models import Claim, Run, ScheduleNotFound
+from .models import Claim, MutationResult, Run, ScheduleError, ScheduleNotFound
 
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,10 @@ READ_TIMEOUT_SECONDS = 3.0
 DISPATCH_TIMEOUT_SECONDS = 30.0
 _TERMINAL = {"completed", "interrupted", "failed"}
 _PRE_NATIVE = {"claimed", "publishing_topic", "binding_ready"}
+
+
+class SchedulerUnavailable(ScheduleError):
+    code = "unavailable"
 
 
 class ScheduledTurnReader(Protocol):
@@ -114,6 +118,27 @@ class Scheduler:
         self._admission = False
         self.wake()
 
+    def run_now(
+        self, plan_id: str, expected_revision: int, request_id: str,
+        request_payload: object,
+    ) -> MutationResult:
+        """Claim and attach manual work without yielding or moving the timer cursor."""
+        self._own_loop()
+        if not self._admission:
+            raise SchedulerUnavailable("调度服务尚未就绪或正在停止，暂不能立即运行。")
+        result, claim = self._store.claim_manual(
+            plan_id, app_id=self._app_id, expected_revision=expected_revision,
+            request_id=request_id, request_payload=request_payload, now=self._wall_clock(),
+        )
+        if claim is not None:
+            self._dispatch_claim(claim)
+        return result
+
+    def _dispatch_claim(self, claim: Claim) -> None:
+        task = asyncio.create_task(self._dispatch_once(claim), name="schedule-dispatch:" + claim.run.id)
+        self._dispatches[claim.run.id] = (claim.run.project_alias, task)
+        task.add_done_callback(lambda done, run_id=claim.run.id: self._dispatch_done(run_id, done))
+
     async def close(self) -> None:
         """Stop the timer; shutdown dispatch draining remains a separate step."""
         self.close_admission()
@@ -166,9 +191,7 @@ class Scheduler:
                 except (ProjectDeleting, ScheduleNotFound):
                     continue
                 if claim is not None:
-                    task = asyncio.create_task(self._dispatch_once(claim), name="schedule-dispatch:" + claim.run.id)
-                    self._dispatches[claim.run.id] = (claim.run.project_alias, task)
-                    task.add_done_callback(lambda done, run_id=claim.run.id: self._dispatch_done(run_id, done))
+                    self._dispatch_claim(claim)
                     claimed += 1
             return claimed
         finally:

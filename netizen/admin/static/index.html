@@ -115,7 +115,8 @@
         <div><p class="eyebrow">SCHEDULED TASKS</p><h2 id="schedules-heading">定时任务</h2></div>
         <div class="actions"><button id="schedule-new" class="action">创建计划</button><button class="refresh" data-refresh="schedules">刷新</button></div>
       </div>
-      <p class="schedule-help">每次触发会在目标会话的新话题中开启独立任务。暂停或删除计划影响后续触发，已认领的执行可以继续。</p>
+      <p class="schedule-help">每次触发会在目标会话的新话题中开启独立任务。立即运行使用已保存的指令和配置，不改变定时安排；暂停或已结束的计划也可以运行一次。</p>
+      <p id="schedule-run-receipt" class="meta-line" role="status" hidden></p>
       <form id="schedule-filter" class="filter-bar">
         <label>Project<select id="schedule-filter-project" name="project"><option value="">全部 Project</option></select></label>
         <label>启停状态<select id="schedule-filter-enabled" name="enabled"><option value="">全部</option><option value="true">已启用</option><option value="false">已暂停</option></select></label>
@@ -134,7 +135,7 @@
         <ol id="schedule-detail-preview"></ol>
         <h3>最近触发记录</h3>
         <p>执行状态以普通会话为准；停止和继续任务请使用话题或 Sessions 中的现有能力。</p>
-        <div class="table-wrap"><table><thead><tr><th>计划触发时间</th><th>调度状态</th><th>执行入口</th></tr></thead><tbody id="schedule-runs-body"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>触发时间</th><th>触发来源</th><th>调度状态</th><th>执行入口</th></tr></thead><tbody id="schedule-runs-body"></tbody></table></div>
         <button id="schedule-runs-next" class="next" hidden>下一页记录</button>
       </section>
     </section>

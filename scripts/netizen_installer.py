@@ -51,7 +51,7 @@ from netizen.lark_app import (  # noqa: E402
     load_lark_app,
 )
 from netizen.bindings import (  # noqa: E402
-    migrate_channel_database,
+    validate_channel_database,
 )
 from netizen.deployment.update_protocol import (  # noqa: E402
     ENV_ARCHIVE_SHA256,
@@ -1832,13 +1832,13 @@ def activate_release(
                 # The old service is already confirmed stopped above. Holding
                 # its stable lifetime lock closes the race with an external
                 # service start while capturing the rollback snapshot and
-                # upgrading or validating the database.
+                # validating the current database without upgrading it.
                 with _hold_service_lifetime_lock(layout):
                     database_snapshot = _capture_database(
                         channel_data_dir,
                         Path(temp),
                     )
-                    migrate_channel_database(channel_database)
+                    validate_channel_database(channel_database)
                     _set_release_link(layout.current, release.root, layout)
             else:
                 if should_start:

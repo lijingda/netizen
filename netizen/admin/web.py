@@ -501,6 +501,7 @@ class AdminWebApplication:
             "/api/v1/schedules/create": self._schedule_create,
             "/api/v1/schedules/update": self._schedule_update,
             "/api/v1/schedules/delete": self._schedule_delete,
+            "/api/v1/schedules/run-now": self._schedule_run_now,
             "/api/v1/updates/check": self._updates_check,
             "/api/v1/updates/install": self._updates_install,
             "/api/v1/updates/restart": self._updates_restart,
@@ -733,7 +734,8 @@ class AdminWebApplication:
         )
         return {**_schedule_plan_json(plan, chat), "actions": {
             mode: self._grant(context, f"schedules.{mode}", target, preconditions)
-            for mode in ("update", "delete")
+            if mode != "run_now" or not (plan.get("inflight") or plan.get("blocked_reason")) else None
+            for mode in ("update", "delete", "run_now")
         }}
 
     async def _schedule_create(self, context: _RequestContext) -> Response:
@@ -745,12 +747,15 @@ class AdminWebApplication:
     async def _schedule_delete(self, context: _RequestContext) -> Response:
         return await self._schedule_mutate(context, "delete")
 
+    async def _schedule_run_now(self, context: _RequestContext) -> Response:
+        return await self._schedule_mutate(context, "run_now")
+
     async def _schedule_mutate(self, context: _RequestContext, mode: str) -> Response:
         _require_query_keys(context.query, set())
         payload, grant = self._redeem(
             context, f"schedules.{mode}",
             expected_resource="schedule-registry" if mode == "create" else "schedule",
-            allowed_extra={"definition"} if mode != "delete" else set(),
+            allowed_extra={"definition"} if mode in {"create", "update"} else set(),
         )
         definition = payload.get("definition", {})
         if not isinstance(definition, dict) or set(definition) - {
@@ -779,7 +784,7 @@ class AdminWebApplication:
             context, f"schedules.{mode}", grant.target.target_id,
             operate(),
         )
-        return _json_response(200, {**result, "requestId": context.request.request_id})
+        return _json_response(202 if mode == "run_now" else 200, {**result, "requestId": context.request.request_id})
 
     async def _projects(self, context: _RequestContext) -> Response:
         allowed = {"cursor", "pageSize"}
@@ -2256,6 +2261,8 @@ def _require_schedule_success(result: dict[str, Any]) -> None:
         code = error["code"]
         status = {
             "revision_conflict": 409, "request_conflict": 409,
+            "run_in_progress": 409, "blocked_unknown": 409,
+            "project_disabled": 409, "project_unavailable": 409,
             "not_found": 404, "unavailable": 503,
         }.get(code, 400)
         raise AdminWebError(status, code, error["message"])

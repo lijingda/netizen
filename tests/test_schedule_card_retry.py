@@ -163,6 +163,40 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.fixture.store.schedules.get(plan_id).enabled)
         self.assertEqual(self.fixture.store.schedules.get(plan_id).revision, 2)
 
+    async def test_run_now_unknown_response_retries_one_claim_through_real_sdk_gate(self):
+        plan_id = self.fixture.manager_plan("手动执行重试")
+        claims = self.fixture.enable_manual_claims()
+        manage = self.fixture.management.schedules.manage
+        result = await manage({"mode": "view", "plan_id": plan_id}, source="card")
+        value = callback(schedule_manager_card(self.scope, {"plans": [result["plan"]]}, selected=result), "立即运行")
+        lost = False
+
+        async def lose_first_trigger_response(request, **kwargs):
+            nonlocal lost
+            result = await manage(request, **kwargs)
+            if request["mode"] == "run_now" and not lost:
+                lost = True
+                raise OSError("response lost after manual claim")
+            return result
+
+        self.fixture.management.schedules.manage = lose_first_trigger_response
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            first_key = await self.push(value=value)
+        self.assertEqual(len(claims), 1)
+        retry = callback(SimpleNamespace(card=self.fixture.channel.updates[-1][1]), "重试刚才的操作")
+        self.assertNotEqual(retry["nonce"], value["nonce"])
+        self.assertEqual(retry["request_id"], value["request_id"])
+        self.assertEqual(retry["payload"], value["payload"])
+        await self.push(value=value)
+        self.assertEqual(self.handler_calls, 1)
+        second_key = await self.push(value=retry)
+        self.assertNotEqual(first_key, second_key)
+        self.assertEqual(self.handler_calls, 2)
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(len(self.fixture.store.schedules.list_runs(plan_id)), 1)
+        self.assertIn("立即运行请求已受理", str(self.fixture.channel.updates[-1]))
+        self.assertIn("同一请求未重复触发", str(self.fixture.channel.updates[-1]))
+
 
 if __name__ == "__main__":
     unittest.main()

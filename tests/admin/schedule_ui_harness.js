@@ -24,7 +24,7 @@ const fixturePlan = () => ({
   next_due_local: "2030-01-01T09:00:00+08:00", enabled: true,
   lifecycle: { ended: false, has_future: true, has_trigger: true },
   execution: { kind: "none", status: "not_started", is_last: false, due_local: null },
-  actions: { update: envelope("update"), delete: envelope("delete") },
+  actions: { update: envelope("update"), delete: envelope("delete"), run_now: envelope("run_now") },
   session_settings: structuredClone(defaultSessionSettings),
 });
 let plans = [fixturePlan()];
@@ -39,6 +39,8 @@ let canonicalEndAt = null;
 let previewTimes = null;
 let viewedPlan = null;
 let failList = false;
+let failView = false;
+let failRuns = false;
 const times = [{ utc: "2030-01-01T01:00:00Z", local: "2030-01-01T09:00:00+08:00" }];
 async function api(path, options = {}) {
   if (options.method === "POST") {
@@ -79,9 +81,11 @@ async function api(path, options = {}) {
     if (previewWait) return new Promise((resolve) => { previewResolve = () => resolve(result); });
     return result;
   }
+  if (mode === "view" && failView) throw new Error("详情刷新失败");
+  if (mode === "runs" && failRuns) throw new Error("记录刷新失败");
   if (mode === "view") return { ok: true, plan: viewedPlan || fixturePlan(), preview: previewTimes || times, inflight: true };
   if (mode === "runs") return { ok: true, runs: [
-    { id: "run-one", binding_id: "binding-exact", due_at: 1893459600, status: "released",
+    { id: "run-one", binding_id: "binding-exact", due_at: 1893459600, status: "released", trigger_source: "manual",
       feishu_url: "https://applink.feishu.cn/client/message/link?token=om_root" },
   ], next_cursor: "runs-page" };
   if (failList) throw new Error("列表暂不可用");
@@ -553,4 +557,113 @@ async function refresh() { await loadSchedules(); return true; }
   assert.equal(scheduleInput("end-at").value, "");
   await previewSchedule();
   assert.equal(scheduleInput("save").disabled, true);
+
+  // Manual execution stays available for paused/ended plans and displays its
+  // source independently from enablement, due time, and execution status.
+  closeScheduleEditor();
+  for (const scenario of [
+    { enabled: true, ended: false }, { enabled: false, ended: false },
+    { enabled: false, ended: true }, { enabled: true, ended: true },
+    { inflight: true }, { blocked_reason: "blocked_unknown" },
+    { blocked_reason: "project_disabled" }, { blocked_reason: "project_unavailable" },
+  ]) {
+    const manualPlan = { ...fixturePlan(), ...scenario };
+    manualPlan.lifecycle = { ended: scenario.ended || false, has_future: !scenario.ended, has_trigger: !scenario.ended };
+    manualPlan.execution = { kind: "latest", status: "completed", trigger_source: "manual" };
+    plans = [manualPlan];
+    await loadSchedules();
+    const row = document.querySelector("#schedules-body").querySelector("tr");
+    const button = row.querySelectorAll("button").find((item) => item.textContent === "立即运行");
+    assert(button);
+    assert.equal(button.disabled, Boolean(scenario.inflight || scenario.blocked_reason));
+    assert.match(row.querySelector(".schedule-execution").textContent, /手动触发/);
+    assert.match(row.querySelector(".schedule-execution").textContent, /上次已完成/);
+    const before = posts.length;
+    if (button.disabled) await runSchedule(state.schedules.plans[0], button);
+    assert.equal(posts.length, before);
+  }
+  assert.equal(scheduleTriggerSource("scheduled"), "定时触发");
+  plans = [fixturePlan()];
+  viewedPlan = fixturePlan();
+  viewedPlan.execution = { kind: "current", status: "starting", trigger_source: "manual" };
+  await showSchedule("plan-exact");
+  assert.match(scheduleInput("detail-state").textContent, /手动触发/);
+  assert.match(scheduleInput("runs-body").textContent, /手动触发/);
+
+  // One click starts an exact saved plan, without editing or confirmation.
+  // Duplicate clicks cannot race the outstanding request or its consumed grant.
+  await loadSchedules();
+  const manualPlan = state.schedules.plans[0];
+  const manualButton = document.querySelector("#schedules-body").querySelectorAll("button")
+    .find((item) => item.textContent === "立即运行");
+  const beforeManual = posts.length;
+  const beforeConfirm = confirmations.length;
+  let releaseRun;
+  respond = () => new Promise((resolve) => { releaseRun = resolve; });
+  const running = runSchedule(manualPlan, manualButton);
+  assert.equal(manualButton.disabled, true);
+  await runSchedule(manualPlan, manualButton);
+  assert.equal(posts.length, beforeManual + 1);
+  assert.equal(confirmations.length, beforeConfirm);
+  assert.deepEqual(posts.at(-1), { path: "/api/v1/schedules/run-now", body: actionPayload(envelope("run_now")) });
+  releaseRun({ ok: true, accepted: true, plan_id: "plan-exact", revision: 7,
+    run_id: "manual-exact", replayed: false,
+    run: { status: "starting", trigger_source: "manual", feishu_url: "https://applink.feishu.cn/client/message/link?token=om_manual" } });
+  await running;
+  assert.match(status, /已受理.*手动运行.*原定时安排保持不变/);
+  assert(!status.includes("已完成"));
+  assert.equal(scheduleInput("run-receipt").hidden, false);
+  assert.match(scheduleInput("run-receipt").textContent, /manual-exact/);
+  assert.equal(scheduleInput("run-receipt").querySelector("a").href,
+    "https://applink.feishu.cn/client/message/link?token=om_manual");
+  assert.equal(scheduleInput("run-receipt").querySelector("b"), null);
+
+  // Accepted work remains visibly accepted even if refreshing the list fails.
+  failList = true;
+  respond = () => ({ ok: true, accepted: true, run_id: "accepted-before-refresh", run: null });
+  await runSchedule(state.schedules.plans[0]);
+  assert.match(status, /已受理.*列表刷新失败/);
+  assert.equal(statusError, false);
+  assert.match(scheduleInput("run-receipt").textContent, /accepted-before-refresh/);
+  assert.equal(scheduleInput("run-receipt").querySelector("a"), null);
+
+  // Detail/history refresh failures remain visible beside the accepted receipt
+  // and never retry the accepted operation.
+  failList = false;
+  await showSchedule("plan-exact");
+  for (const mode of ["view", "runs"]) {
+    await loadSchedules();
+    const plan = state.schedules.plans[0];
+    const before = posts.length;
+    failView = mode === "view";
+    failRuns = mode === "runs";
+    const runId = `accepted-before-${mode}-failure`;
+    respond = () => ({ ok: true, accepted: true, run_id: runId, run: null });
+    await runSchedule(plan);
+    await runSchedule(plan);
+    assert.equal(posts.length, before + 1);
+    assert.equal(status, mode === "view" ? "详情刷新失败" : "记录刷新失败");
+    assert.equal(statusError, true);
+    assert.equal(scheduleInput("run-receipt").hidden, false);
+    assert.match(scheduleInput("run-receipt").textContent, /已受理/);
+    assert(scheduleInput("run-receipt").textContent.includes(runId));
+  }
+  failView = false;
+  failRuns = false;
+
+  // An unconfirmed response never obtains a fresh grant or automatically retries.
+  failList = false;
+  await loadSchedules();
+  const unknownPlan = state.schedules.plans[0];
+  const beforeUnknown = posts.length;
+  const queriesBeforeUnknown = gets.length;
+  respond = () => { throw new Error("请求超时，触发结果尚未确认。"); };
+  await runSchedule(unknownPlan);
+  await runSchedule(unknownPlan);
+  assert.equal(posts.length, beforeUnknown + 1);
+  assert.equal(gets.length, queriesBeforeUnknown);
+  assert.equal(unknownPlan.actions.run_now, null);
+  assert.match(status, /触发结果尚未确认.*查看最近记录/);
+  assert.equal(statusError, true);
+  assert.equal(scheduleInput("run-receipt").hidden, true);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

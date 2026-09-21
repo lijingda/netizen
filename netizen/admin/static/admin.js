@@ -1578,6 +1578,10 @@ function scheduleRunStatus(status) {
     scope_conflict: "话题已有会话，未启动", dispatch_rejected: "未启动" }[status] || "结果暂不可用";
 }
 
+function scheduleTriggerSource(source) {
+  return source === "manual" ? "手动触发" : source === "scheduled" ? "定时触发" : "";
+}
+
 function scheduleExecutionLabel(execution) {
   const label = scheduleRunStatus(execution.status);
   if (execution.kind === "none") return label;
@@ -2000,6 +2004,47 @@ async function changeSchedule(plan, mode) {
   } finally { pendingScheduleMutations.delete(plan.id); }
 }
 
+async function runSchedule(plan, button) {
+  const action = plan.actions.run_now;
+  if (!action || plan.inflight || plan.blocked_reason || pendingScheduleMutations.has(plan.id)) return;
+  pendingScheduleMutations.add(plan.id);
+  plan.actions.run_now = null;
+  if (button) button.disabled = true;
+  scheduleInput("run-receipt").hidden = true;
+  let receipt;
+  try {
+    receipt = await api("/api/v1/schedules/run-now", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actionPayload(action)),
+    });
+  } catch (error) {
+    setStatus(`${error.message} 请先查看最近记录核查触发结果，再决定是否重新运行。`, true);
+    return;
+  } finally { pendingScheduleMutations.delete(plan.id); }
+
+  const message = `已受理「${plan.name}」的手动运行，原定时安排保持不变。`;
+  const container = scheduleInput("run-receipt");
+  container.replaceChildren();
+  container.textContent = `${message} 执行 ID：${receipt.run_id}。`;
+  if (receipt.run?.feishu_url) {
+    const link = document.createElement("a");
+    link.href = receipt.run.feishu_url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = "打开执行话题";
+    container.append(link);
+  }
+  container.append(actionButton("查看最近记录", () => showSchedule(plan.id)));
+  container.hidden = false;
+  setStatus(message);
+  try {
+    await loadSchedules(scheduleListCursor, scheduleListQuery);
+    if (scheduleDetailId === plan.id) await showSchedule(plan.id);
+  } catch (error) {
+    setStatus(`${message} 列表刷新失败：${error.message} 请手动刷新查看执行进展。`);
+  }
+}
+
 async function loadSchedules(cursor = null, appliedQuery = cursor ? scheduleListQuery : null) {
   const query = new URLSearchParams(appliedQuery || "");
   if (appliedQuery === null) {
@@ -2051,6 +2096,8 @@ async function loadSchedules(cursor = null, appliedQuery = cursor ? scheduleList
     const execution = document.createElement("td");
     execution.className = "schedule-execution";
     execution.textContent = scheduleExecutionLabel(plan.execution);
+    const source = scheduleTriggerSource(plan.execution.trigger_source);
+    if (source) scheduleNote(execution, source);
     if (plan.execution.due_local) scheduleNote(execution, scheduleLocalTime(plan.execution.due_local));
     row.append(execution);
     const actions = actionsCell(row);
@@ -2058,11 +2105,15 @@ async function loadSchedules(cursor = null, appliedQuery = cursor ? scheduleList
     const edit = actionButton("编辑", () => editSchedule(plan));
     edit.setAttribute("data-schedule-edit", plan.id);
     actions.append(edit);
+    const run = actionButton("立即运行", () => runSchedule(plan, run));
+    run.disabled = !plan.actions.run_now || Boolean(plan.inflight || plan.blocked_reason);
+    run.title = scheduleBlockedLabel(plan) || (plan.inflight ? "本次执行尚未结束" : "按已保存的指令和配置运行一次，原定时安排保持不变");
+    actions.append(run);
     if (plan.lifecycle.has_trigger) {
       actions.append(actionButton(plan.enabled ? "暂停" : "启用", () => changeSchedule(plan, "update")));
     }
     actions.append(actionButton("删除", () => changeSchedule(plan, "delete"), true));
-    for (const button of actions.querySelectorAll("button")) button.disabled = pendingScheduleMutations.has(plan.id);
+    for (const button of actions.querySelectorAll("button")) button.disabled ||= pendingScheduleMutations.has(plan.id);
     body.append(row);
   }
   if (!data.plans.length) {
@@ -2085,6 +2136,7 @@ async function showSchedule(planId) {
     scheduleInput("detail").hidden = false;
     scheduleInput("detail-title").textContent = `${data.plan.name} · ${data.plan.id} · 修订 ${data.plan.revision}`;
     scheduleInput("detail-state").textContent = `${schedulePlanState(data.plan).replace("\n", " · ")} · ${scheduleExecutionLabel(data.plan.execution)}`
+      + (scheduleTriggerSource(data.plan.execution.trigger_source) ? ` · ${scheduleTriggerSource(data.plan.execution.trigger_source)}` : "")
       + (scheduleBlockedLabel(data.plan) ? ` · ${scheduleBlockedLabel(data.plan)}` : "")
       + ` · 目标会话 ID：${data.plan.chat_id}`
       + (data.inflight ? "。编辑、暂停或删除不会取消本次执行。" : "");
@@ -2108,6 +2160,7 @@ async function loadScheduleRuns(cursor = null) {
     for (const run of data.runs) {
       const row = document.createElement("tr");
       cell(row, scheduleDate(run.due_at));
+      cell(row, scheduleTriggerSource(run.trigger_source));
       cell(row, scheduleRunStatus(run.status || run.stage));
       const links = actionsCell(row);
       if (run.feishu_url) {

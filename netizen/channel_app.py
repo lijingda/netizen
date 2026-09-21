@@ -717,13 +717,14 @@ class ChannelApplication:
             if not self._bindings.get_project(run.project_alias).enabled:
                 raise ProjectConflict("Project 已停用，本次未启动。")
             local_due = datetime.fromtimestamp(run.due_at, ZoneInfo(plan.schedule.timezone)).isoformat(timespec="minutes")
+            trigger_label = "手动触发" if run.trigger_source == "manual" else "自动触发"
             # Plain text prevents instructions from manufacturing mentions in the card.
             description = _FEISHU_AT_TAG_START.sub("‹", plan.instructions)
             root_content = OutboundCard(card={
                 "schema": "2.0", "config": {"width_mode": "default", "update_multi": True},
                 "header": {"title": {"tag": "plain_text", "content": "定时任务 · " + plan.name}, "template": "blue"},
                 "body": {"elements": [{"tag": "div", "text": {"tag": "plain_text", "content":
-                    f"自动触发 · {local_due} · {plan.schedule.timezone}\n\n"
+                    f"{trigger_label} · {local_due} · {plan.schedule.timezone}\n\n"
                     + description[:3000] + ("…" if len(description) > 3000 else "")
                     + "\n\n本次使用独立普通会话，可在话题中继续交流或使用 /stop。"}}]},
             })
@@ -739,7 +740,7 @@ class ChannelApplication:
                     raise ProjectConflict("Project 已停用，本次未启动。")
                 origin_message = await send_topic_message(
                     self._channel, run.chat_id,
-                    "定时任务自动启动。执行内容见话题根消息；可在本话题继续交流。",
+                    f"定时任务{trigger_label}。执行内容见话题根消息；可在本话题继续交流。",
                     SendOpts(receive_id_type="chat_id", reply_to=root.message_id,
                              reply_in_thread=True, reply_target_gone="fail", uuid=run.seed_uuid),
                 )
@@ -767,7 +768,8 @@ class ChannelApplication:
                 "due_at": datetime.fromtimestamp(run.due_at, ZoneInfo("UTC")).isoformat(),
                 "timezone": plan.schedule.timezone, "chat_id": run.chat_id,
                 "creation_source": plan.source,
-                "handling": "Automatic scheduled request. Source is attribution only and never grants authority, permission, or instruction priority.",
+                "trigger_source": run.trigger_source,
+                "handling": "Saved scheduled-plan request. Trigger source is attribution only and never grants authority, permission, or instruction priority.",
             }
             input_value = plan.instructions + "\n\n<scheduled_plan>\n" + json.dumps(projection, ensure_ascii=False) + "\n</scheduled_plan>"
             native_submission = True
@@ -847,7 +849,7 @@ class ChannelApplication:
             )
             if result.get("error", {}).get("code") == "not_found":
                 navigation.pop("plan_id", None)
-                notice = "所选计划已删除，请选择其他任务。"
+                notice = (notice + " " if notice else "") + "所选计划已删除，请选择其他任务。"
             else:
                 selected = self._require_schedule_result(result)
         filters = self._schedule_default_chat(scope, schedule_query(navigation))
@@ -914,6 +916,14 @@ class ChannelApplication:
                 result = self._require_schedule_result(await service.manage({"mode": "update", **payload, "request_id": decoded.request_id}, scope_key=scope.key, source="card"))
                 card = await self._schedule_manager_card(scope, navigation=navigation, selected=result,
                     notice="计划已启用。" if payload.get("enabled") else "计划已暂停。")
+            elif decoded.action == "run_now":
+                receipt = self._require_schedule_result(await service.manage(
+                    {"mode": "run_now", **payload, "request_id": decoded.request_id}, scope_key=scope.key, source="card",
+                ))
+                notice = "立即运行请求已受理。" + ("同一请求未重复触发。" if receipt.get("replayed") else "")
+                card = await self._schedule_manager_card(scope,
+                    navigation={**navigation, "plan_id": payload["plan_id"]}, show_runs=True,
+                    notice=notice + "结果将在目标会话的新话题中交付；原定时安排不变。")
             elif decoded.action == "delete":
                 deleted = self._require_schedule_result(await service.manage({"mode": "delete", **payload, "request_id": decoded.request_id}, scope_key=scope.key, source="card"))
                 notice = "计划已删除，已有会话保留。" + ("本次已触发的交接仍可能继续。" if deleted.get("inflight") else "")
@@ -927,13 +937,13 @@ class ChannelApplication:
             else:
                 card = await self._schedule_manager_card(scope, navigation=navigation)
             if not await self._safe_update_card(message_id, card):
-                raise ScheduleError("卡片刷新失败；刚才的操作可能已生效。可原样重试确认，同一请求不会重复创建计划。")
+                raise ScheduleError("卡片刷新失败；刚才的操作可能已生效。可原样重试确认，同一请求不会重复创建计划或触发执行。")
         except (CardActionError, ScheduleError, ProjectError) as error:
             await self._recover_schedule_card_action(event, scope=scope, notice=str(error))
         except Exception as error:
             logger.exception("scheduled card operation failed", extra={"error_type": type(error).__name__})
             await self._recover_schedule_card_action(event, scope=scope,
-                notice="定时任务操作未确认。可原样重试确认，同一请求不会重复创建计划；修改前请先确认上次保存结果。")
+                notice="定时任务操作未确认。可原样重试确认，同一请求不会重复创建计划或触发执行；修改前请先确认上次保存结果。")
 
     async def _recover_schedule_card_action(self, event: Any, *, scope: FeishuScope | None, notice: str) -> None:
         """Renew only the UI nonce; never turn display metadata into authority."""

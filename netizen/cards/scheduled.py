@@ -35,7 +35,7 @@ _FILTERS = {
     "current_paused": "当前会话 · 已暂停", "all": "全部会话 · 全部任务",
     "all_enabled": "全部会话 · 已启用", "all_paused": "全部会话 · 已暂停",
 }
-_ACTIONS = {"list", "new", "view", "edit", "delete", "runs", "enabled"}
+_ACTIONS = {"list", "new", "view", "edit", "delete", "runs", "enabled", "run_now"}
 _FIELDS = {
     "list": (set(), set()),
     "new": (set(), set()),
@@ -44,6 +44,7 @@ _FIELDS = {
     "delete": ({"plan_id", "expected_revision"}, set()),
     "runs": ({"plan_id"}, {"cursor"}),
     "enabled": ({"plan_id", "expected_revision", "enabled"}, set()),
+    "run_now": ({"plan_id", "expected_revision"}, set()),
 }
 _MAX_INSTRUCTIONS = 8000
 _MAX_FORM_INSTRUCTIONS = 1000
@@ -67,6 +68,10 @@ _STATES = {
 
 def _display_state(value: Any) -> str:
     return _STATES.get(str(value), "状态待确认")
+
+
+def _trigger_source(value: Any) -> str:
+    return "手动触发" if value == "manual" else "定时触发"
 
 
 def _utc_time(value: Any) -> str:
@@ -314,7 +319,7 @@ def _plan_summary(plan: Mapping[str, Any]) -> str:
         f"状态：{status}" + (f" · {_display_state(blocked)}" if blocked else "")
         + deadline
         + f"\n下次：{plan.get('next_due_local') or '无'}"
-        + (f"\n最近触发：{plan['latest_run']['due_local']}" if plan.get("latest_run") else "")
+        + (f"\n最近触发：{plan['latest_run']['due_local']} · {_trigger_source(plan['latest_run'].get('trigger_source'))}" if plan.get("latest_run") else "")
     )
 
 
@@ -328,11 +333,21 @@ def _render_selected_plan(builder: Any, scope: FeishuScope, result: dict[str, An
         builder.raw(_plain("执行指令（内容节选）\n" + instructions[:2000] + "…"))
         builder.raw(_notice("完整指令较长，请通过 Admin 或自然语言查看、编辑。计划原文完整保留，仍可在此启停或删除。"))
     builder.raw(_fold("会话配置", _plain(session_settings_summary(_session_settings(plan.get("session_settings", SessionSettings()))))))
-    if result.get("inflight"):
+    inflight = result.get("inflight") or plan.get("inflight")
+    if inflight:
         builder.raw(_notice("本次已触发，修改、暂停或删除从后续触发生效；本次交接可以继续。"))
     exact = {"plan_id": plan["id"], "expected_revision": plan["revision"]}
-    builder.raw(_row(_button(scope, "编辑", "edit", exact, navigation=navigation, primary=True),
+    actions = []
+    if plan.get("blocked_reason"):
+        builder.raw(_plain("暂不能立即运行：" + _display_state(plan["blocked_reason"]) + "。请处理后刷新任务。"))
+    elif inflight:
+        builder.raw(_plain("上次首轮执行尚未确认结束，暂不能立即运行；可刷新任务查看最新状态。"))
+    else:
+        builder.raw(_plain("立即运行会按当前保存的内容执行一次，并新建话题；原定时安排保持不变。"))
+        actions.append(_button(scope, "立即运行", "run_now", exact, navigation=navigation, primary=True))
+    actions.extend((_button(scope, "编辑", "edit", exact, navigation=navigation),
         _button(scope, "暂停" if plan.get("enabled") else "启用", "enabled", {**exact, "enabled": not plan.get("enabled")}, navigation=navigation)))
+    builder.raw(_row(*actions))
     delete = _button(scope, "删除计划", "delete", exact, navigation=navigation, danger=True)
     delete["confirm"] = {"title": _plain_text("删除定时任务？"),
         "text": _plain_text("删除后停止后续触发，保留已有普通会话。已认领的本次交接仍可能继续。删除的计划不能恢复。")}
@@ -348,6 +363,7 @@ def _runs_panel(scope: FeishuScope, result: dict[str, Any], *, plan_id: str, nav
     for run in runs:
         items.append(_plain(
             f"时间：{run.get('due_local') or _utc_time(run.get('due_at'))}\n"
+            f"来源：{_trigger_source(run.get('trigger_source'))}\n"
             f"状态：{_display_state(run.get('status') or run.get('error_code') or run.get('phase'))}\n"
             f"结果投递：{ {'sent': '已投递', 'failed': '投递失败', 'unknown': '待确认'}.get(run.get('delivery_state'), '尚未投递')}"
             + (f"\n合并漏跑：{run['missed_count']} 次" if run.get("missed_count", 0) > 1 else "")

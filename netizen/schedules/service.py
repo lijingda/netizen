@@ -21,7 +21,7 @@ from ..bindings import BindingNotFound, BindingStore, ProjectConflict, ProjectDe
 from ..channel.messages import public_chat_kind
 from ..model_settings import ModelCatalog, ModelCatalogError, STANDARD_SERVICE_TIER_ID
 from ..session_settings import SessionSettings, SessionSettingsError
-from .models import Plan, Run, ScheduleError, ScheduleNotFound, ScheduleRule, plan_lifecycle
+from .models import MutationResult, Plan, Run, ScheduleError, ScheduleNotFound, ScheduleRule, plan_lifecycle
 
 
 _NATIVE_STATUSES = frozenset({"inProgress", "completed", "interrupted", "failed"})
@@ -35,6 +35,7 @@ _FIELDS = {
     "create": {"name", "instructions", "project", "chat_id", "schedule", "timezone", "enabled", "request_id", "session_settings"},
     "update": {"plan_id", "expected_revision", "request_id", "name", "instructions", "project", "chat_id", "schedule", "timezone", "enabled", "session_settings"},
     "delete": {"plan_id", "expected_revision", "request_id"},
+    "run_now": {"plan_id", "expected_revision", "request_id"},
     "runs": {"plan_id", "cursor", "limit"},
 }
 
@@ -83,6 +84,7 @@ class ScheduleService:
         self.default_timezone = default_timezone or local_timezone()
         self._wake: Callable[[], None] = lambda: None
         self._refresh: Callable[[str], Awaitable[str | None]] | None = None
+        self._run_now: Callable[[str, int, str, object], MutationResult] | None = None
         self._accepting = True
 
     def set_wake_handler(self, callback: Callable[[], None]) -> None:
@@ -90,6 +92,9 @@ class ScheduleService:
 
     def set_refresh_handler(self, callback: Callable[[str], Awaitable[str | None]]) -> None:
         self._refresh = callback
+
+    def set_run_now_handler(self, callback: Callable[[str, int, str, object], MutationResult]) -> None:
+        self._run_now = callback
 
     def close_admission(self) -> None:
         self._accepting = False
@@ -122,10 +127,11 @@ class ScheduleService:
                 raise ScheduleError("管理请求必须是对象。")
             mode = request.get("mode")
             if not isinstance(mode, str) or mode not in _FIELDS:
-                raise ScheduleError("请选择 options/list/view/create/update/delete/runs 操作。")
+                raise ScheduleError("请选择 options/list/view/create/update/delete/run_now/runs 操作。")
             # Optional arguments treat null as omission, except the settings
             # object. False remains a real pause/filter value.
-            data = {key: value for key, value in request.items() if value is not None or key == "session_settings"}
+            data = {key: value for key, value in request.items()
+                    if mode == "run_now" or value is not None or key == "session_settings"}
             if set(data) - (_FIELDS[mode] | {"mode"}):
                 raise ScheduleError("该操作包含不支持的字段。")
             now = self._clock()
@@ -137,10 +143,12 @@ class ScheduleService:
                 "context": [native_thread_id, scope_key],
                 "request": {key: value for key, value in data.items() if key != "request_id"},
             }
-            if mode in {"create", "update", "delete"}:
+            if mode in {"create", "update", "delete", "run_now"}:
                 request_id = _text(data.get("request_id"), "request_id")
                 replay = self._store.lookup_request(request_id, mode, request_payload, now=now)
                 if replay is not None:
+                    if mode == "run_now":
+                        return await self._run_receipt(replay)
                     return await self._mutation(replay, now)
             scope, binding = self._source(native_thread_id, scope_key)
             chat_default = scope.chat_id if scope else None
@@ -220,8 +228,15 @@ class ScheduleService:
                         "next_cursor": _encode_cursor(runs[size - 1].id, identity) if len(runs) > size else None}
             revision = data.get("expected_revision")
             if type(revision) is not int or revision < 1:
-                raise ScheduleError("修改/删除必须提供当前 expected_revision。")
+                raise ScheduleError("修改、删除或立即运行必须提供当前 expected_revision。")
             request_id = _text(data.get("request_id"), "request_id")
+            if mode == "run_now":
+                if self._run_now is None:
+                    raise _InputError("unavailable", "调度服务尚未就绪，暂不能立即运行。")
+                # The synchronous handler rechecks exact identity, revision and
+                # admission, then owns dispatch before this request can cancel.
+                result = self._run_now(plan.id, revision, request_id, request_payload)
+                return await self._run_receipt(result)
             if mode == "delete":
                 inflight = self._store.pending_for_plan(plan.id) is not None
                 result = self._store.delete(plan.id, expected_revision=revision, request_id=request_id, now=now, request_payload=request_payload)
@@ -367,6 +382,28 @@ class ScheduleService:
             raise _InputError("chat_kind_unknown", "无法确认目标会话类型，请稍后重试或检查 chat_id；这不代表当前会话是私聊。")
         return kind
 
+    async def _run_receipt(self, result: MutationResult) -> dict[str, Any]:
+        if not result.run_id:
+            raise ScheduleError("手动执行回执缺少 Run ID，请检查数据完整性；不能重新触发。")
+        receipt: dict[str, Any] = {
+            "ok": True, "accepted": True, "plan_id": result.plan_id,
+            "revision": result.revision, "run_id": result.run_id,
+            "replayed": result.replayed, "run": None,
+        }
+        try:
+            run = self._store.get_run(result.run_id)
+        except ScheduleNotFound:
+            # A bounded request receipt can outlive a released Run. It still
+            # proves acceptance of that exact run, never permission to rerun.
+            return receipt
+        plan = self._store.get(result.plan_id, include_deleted=True)
+        receipt["run"] = await self._run(
+            run, timezone=plan.schedule.timezone if plan.schedule else "UTC",
+            deadline=asyncio.get_running_loop().time() + _READ_TIMEOUT_SECONDS,
+            slots=asyncio.Semaphore(1),
+        )
+        return receipt
+
     async def _mutation(self, result: Any, now: float) -> dict[str, Any]:
         plan = self._store.get(result.plan_id, include_deleted=True)
         if plan.deleted:
@@ -420,6 +457,7 @@ class ScheduleService:
             run = latest[0]
             value["latest_run"] = {
                 "id": run.id, "due_at": run.due_at, "phase": run.phase,
+                "trigger_source": run.trigger_source,
                 "error_code": run.error_code, "binding_id": run.binding_id,
                 "due_local": _iso(run.due_at, timezone),
             }
@@ -429,6 +467,7 @@ class ScheduleService:
             "status": "expired" if lifecycle.ended else "not_started",
             "is_last": selected is not None and not lifecycle.has_trigger,
             "run_id": selected.id if selected else None,
+            "trigger_source": selected.trigger_source if selected else None,
             "due_at": selected.due_at if selected else None,
             "due_local": _iso(selected.due_at, timezone) if selected else None,
             "native_thread_id": None, "scope_key": None, "feishu_url": None,

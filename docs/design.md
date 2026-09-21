@@ -30,7 +30,7 @@ ephemeral fork，依靠独立话题 route 保留身份，不是普通 Scope/Bind
 | --- | --- |
 | 空闲会话收到普通消息 | 验证消息归属、引用、图片和所选上下文，校验显式 Skill 与会话配置，创建或恢复 exact Thread，启动一个新 Turn；结果回到原请求的投递锚点。 |
 | 运行中的会话收到普通消息 | 经输入准备与身份校验后，steer 当前 exact Turn；不排队、不拼接成下一轮，不改变原任务的结果投递锚点。 |
-| 定时计划到期 | 唯一 Scheduler 认领到期点，在目标聊天创建独立话题与普通持久 Binding，提交一次初始 Turn；配置取自本次认领快照，不切换来源聊天的当前会话。 |
+| 定时计划到期或手动触发 | 唯一 Scheduler 认领到期点或手动请求，在目标聊天创建独立话题与普通持久 Binding，提交一次初始 Turn；配置取自本次认领快照，不切换来源聊天的当前会话。 |
 
 输入准备不能把历史消息变成新的控制指令或 Skill 调用；群聊每次触发仍需重新 @机器人。
 定时初始输入保留 Scheduled Plan 来源，后续交流沿用普通会话语义。具体准入、消息归属与
@@ -159,10 +159,10 @@ Mode 的 lazy Binding，不要求任务、不创建 native Thread；完整表单
 4. native handle 返回并完成 ID 校验后保存内存 active Thread/Handle，随后后台轮询公开
    `thread.read()` 的原生状态；Binding 配置不清除，供后续新 Turn 重复使用。
 
-定时触发按 ADR 0061 增加显式的普通会话入口：先认领到期点，在目标会话创建独立 topic，
+计划触发按 ADR 0061/0068 增加显式的普通会话入口：先认领到期点或手动请求，在目标会话创建独立 topic，
 原子登记新 Scope/Binding，再用仅允许初始 start 的 Runtime 入口执行计划。它不 fork、
 不创建 Side、不继承来源聊天历史，也不修改来源 active pointer。计划创建时复制来源的会话
-配置意图并独立保存；每次认领冻结配置，交接时应用到新 Binding。自动首轮使用
+配置意图并独立保存；每次认领冻结配置，交接时应用到新 Binding。计划首轮使用
 Scheduled Plan 来源，不伪造真人 Current Prompt Message；新话题的机器人 seed 是完成
 投递锚点。后续消息、停止、归档、删除和反馈使用普通会话语义。
 
@@ -825,6 +825,7 @@ Scope 的 active Binding，不 fork 来源历史，也不隔离 Project 文件�
 | --- | --- |
 | 暂停、修改、删除计划 | 影响后续认领；已经认领的一次继续使用快照，已有会话保留 |
 | 启用计划 | 取下一未来时间点，不重跑旧触发；过去的一次性须先重新安排 |
+| 立即运行 | 按当前已保存版本认领一次手动执行，暂停及已结束计划也可运行；不改变启停、时间规则、游标、下次到期点或 revision |
 | 普通 /stop、归档、删除会话 | 处理所选普通任务，不暂停计划，不重放该次触发 |
 | 停用 Project | 跳过新触发但保留 enabled 意图，不停止已有执行；恢复后不补跑 |
 | 删除 Project | 冻结新交接并删除关联计划，在途创建仍纳入 ADR 0060 的精确清单 |
@@ -836,10 +837,15 @@ ID 的墓碑；Project 同名重登记不复活计划。单独删除计划不使
 ### 管理入口与会话配置
 
 自然语言沿普通 Prompt/Steer 进入 Codex，由单一 `cron_manage` 工具调用 ScheduleService；
-不增加前置意图分类或独立 Runtime。工具提供 options/list/view/create/update/delete/runs，
+不增加前置意图分类或独立 Runtime。工具提供 options/list/view/create/update/delete/run_now/runs，
 启停使用 update 的 enabled。参数以 `netizen/schedules/mcp.py` 的 schema 为准。
 模型先按名称定位再用 exact ID；重名有歧义才澄清，指令须明确资源，不依赖创建聊天历史。
 工具说明由 MCP instructions 和 description 提供，不覆盖原生 developer/base instructions。
+
+`run_now` 只接受 exact plan_id、expected_revision 与稳定 request_id，按已保存的指令、
+配置、Project 和目标会话执行，不接受临时覆盖。普通任务无计划语境时仍按普通 Prompt
+处理；立即运行、启用计划、修改时间分别选择对应操作。回执含 accepted、原 Run ID、
+当次可读的执行信息及可用话题链接；受理不代表任务完成，结果仍在计划目标话题交付。
 
 显式 chat_id、project 优先；省略时从本次原生 `params._meta.threadId` 查 exact
 Thread → Binding → Scope。可选 header 身份存在时须核对一致，不从 cwd、工具参数或
@@ -866,12 +872,17 @@ Admin 默认全部 Project、全部启停状态、未结束；不提供会话 ID
 状态和执行情况，优先展示尚未收尾的 Run，避免后续 skipped 记录遮住仍在运行的一次。
 Project 使用可选目录，目标会话复用 Sessions 的名称与聊天链接；创建仍填写 chat_id。
 创建/编辑在独立侧边表单完成，时间选择器按计划时区解释，关闭后保留列表筛选和位置。
-Admin 沿用认证、CSRF 和 action grant，只编辑未来计划，不提供“立即运行”或即时 Prompt。
+Admin 沿用认证、CSRF 和 action grant，提供“立即运行”已保存计划版本，不接受任意即时
+Prompt。它与 `/cron`、MCP 调用相同服务入口，首轮未结束或 Project 不可用时不提供有效
+运行操作。Admin 一次性 grant 响应未知后先查最近执行；卡片/MCP 原样重试保留请求 ID。
 
 三个入口共用写事务：稳定 request_id 去重，相同 ID 和规范 payload 返回原标识，内容
 不同则冲突；修改/删除以 expected_revision 做 CAS，不擅自递增。凭据保留七天，响应未知
 复用原 ID 核查，过期后先查询再决定。计划指令最多 32,000 字符且 JSON 字符串 UTF-8 不超过
 48 KiB；卡片输入最多 1,000 字符，并受实际编码容量限制。
+
+立即运行同样检查 exact revision，但不递增它。其七天去重回执保存原 Run ID；即使计划
+已删除或 Run 已按数量裁剪，重试仍返回原受理凭据，不重新启动或重新读取计划指令执行。
 
 ### 调度交接与结果
 
@@ -879,6 +890,14 @@ Admin 沿用认证、CSRF 和 action grant，只编辑未来计划，不提供�
 以 `(plan_id, due_at_utc)` 唯一认领并推进游标；revision 只标记快照，不进入去重键。
 同计划首轮未结束时跳过并推进时间，不排队；unknown 阻塞该计划，不靠启停清除。
 首轮结束后人工续聊不阻塞下一次。不同计划和 Binding 仍可并行，不加 Project 执行锁。
+
+手动请求在同一事务中校验 App、Project、revision 和同计划 barrier，以 request_id
+认领一次并标注 `trigger_source=manual`；定时认领标注 `scheduled`，到期点唯一约束
+仅作用于定时来源。手动认领不推进调度游标，不消费恰好同一时刻的到期点。首轮 held 或
+unknown 时手动请求明确拒绝；同时到期时按先成功认领者占用屏障，定时侧仍可记录 busy。
+认领和加入唯一 Scheduler 的交接任务集合之间不让出事件循环，HTTP/MCP 请求取消不取消
+已受理交接；停机排空与 Project 删除继续覆盖这些任务。详见
+[ADR 0068](adr/0068-run-saved-scheduled-plans-manually.md)。
 
 交接阶段依次为 claimed、publishing_topic、binding_ready、starting_turn、handed_off；
 独立的 barrier 表示 held、unknown 或 released。每次外部调用前标记可能发生的副作用，
@@ -888,7 +907,8 @@ Admin 沿用认证、CSRF 和 action grant，只编辑未来计划，不提供�
 创建或切换时记录冲突。短交接槽内普通消息要求稍后重发；专用 initial-start 入口只允许
 启动新 Binding，不能退化为 steer。首轮引用写入和极快终态通过单调 CAS 交接，不复活 barrier。
 
-自动首轮使用显式 Scheduled Plan 来源及保存的完整指令，真人消息路径保持不变。
+定时和手动首轮都使用显式 Scheduled Plan 来源、触发来源及保存的完整指令，不伪造真人
+当前消息或结束提及对象；真人消息路径保持不变。
 完成结果严格回复本次 Completion Origin，使用 reply_in_thread=true、reply_target_gone=fail；
 不降级发到主线。文本、Files 或过程卡终态一旦尝试投递，不因失败/超时另发第二份；仅发送前
 准备失败允许文本回退。sent 须有明确成功及 exact chat/topic 证据，分段须逐段核实；否则
@@ -907,7 +927,7 @@ thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admis
 
 ## 数据与配置
 
-`channel.sqlite3` 的 schema v11 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+`channel.sqlite3` 的 schema v12 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`，以及 `schedule_plans`、`schedule_runs`、`schedule_requests`。
 `dedup_keys` 直接实现 Channel SDK 冻结的 `seen/mark` DedupStore 协议。
 `bindings` 保存全空或全有的三个 Binding-scoped catalog
@@ -921,10 +941,9 @@ app/chat/topic/root/source、Parent Binding
 ID、creator、mention policy、creating/open/closed/expired/failed 和时间，不保存
 ephemeral native Thread ID 或内容。`projects.deleted` 保留已删除 Project 的 Registry 墓碑，
 阻止 YAML bootstrap 复活；正常查询隐藏墓碑，显式重新登记继续递增 alias 的 revision。
-服务只支持当前完整 schema，新库直接创建完整结构。安装器只允许
-[ADR 0063](adr/0063-mention-task-initiators-in-terminal-results.md) 的 v10 → v11 原子迁移，
-为 Binding 和当前计划设置补齐默认开启的结束提及；其他旧版本或损坏结构明确拒绝，
-不重建空库。迁移必须在 manager target 已卸载、持有 lifetime lock 和完成数据库快照后执行。
+服务与安装器只支持当前完整 schema，新库直接创建完整结构。按
+[ADR 0068](adr/0068-run-saved-scheduled-plans-manually.md)，项目尚未推广，不保留旧版
+自动迁移或旧字段兼容；已有库只读校验，旧版本或损坏结构明确拒绝，不重建空库。
 安装事务仍保留数据库快照，失败时按既有 lifetime lock 边界恢复原数据库与 release。
 Project 删除 intent、
 确认清单、fingerprint 和结果只在进程内，不保存解析后的 wire value 或已生效配置。
@@ -1272,8 +1291,9 @@ identity 或 Side route identity 等 typed precondition；提交后在锁内重�
 action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact、Side resume 或
 任意筛选结果的批量 native mutation route。
 
-定时管理是 ADR 0061 的计划定义编辑例外。`/cron` 卡片、Admin“定时任务”页和自然语言
-`cron_manage` 共用 ScheduleService，提供分页查询、创建、编辑、启停、删除和最近执行。
+定时管理是 ADR 0061/0068 的计划定义编辑与已保存计划手动执行例外。`/cron` 卡片、Admin
+“定时任务”页和自然语言 `cron_manage` 共用 ScheduleService，提供分页查询、创建、编辑、
+启停、删除、立即运行和最近执行。
 显式 chat ID 优先；MCP 默认值只从 `params._meta.threadId` 的 exact Binding/Scope 解析，
 无映射时要求显式目标，不按 cwd 猜测或新增 ACL。卡片写操作携带 revision 和稳定请求 ID，
 Admin 继续使用既有认证与 action/CSRF grant。四类时间规则、时区、漏跑、同计划忙碌跳过、
