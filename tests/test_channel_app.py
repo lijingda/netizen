@@ -5,7 +5,7 @@ import json
 import tempfile
 import unittest
 import uuid
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -9252,27 +9252,40 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         fetch_inbound = self.channel.fetch_inbound_message
         fetch_context = self.channel.fetch_quoted_context
+        active_timeouts = []
+        read_timeouts = []
 
-        async def delayed_inbound(message_id: str) -> object | None:
-            await asyncio.sleep(0.03)
+        # Observe each read's timeout scope and budget without relying on wall
+        # time. The adjacent timeout tests still exercise real cancellation.
+        @asynccontextmanager
+        async def observed_timeout(delay):
+            scope = (object(), delay)
+            active_timeouts.append(scope)
+            try:
+                yield
+            finally:
+                active_timeouts.pop()
+
+        async def observed_inbound(message_id: str) -> object | None:
+            read_timeouts.append(tuple(active_timeouts))
             return await fetch_inbound(message_id)
 
-        async def delayed_context(message_id: str) -> object | None:
-            await asyncio.sleep(0.03)
+        async def observed_context(message_id: str) -> object | None:
+            read_timeouts.append(tuple(active_timeouts))
             return await fetch_context(message_id)
 
         with (
             patch.object(
                 self.channel,
                 "fetch_inbound_message",
-                side_effect=delayed_inbound,
+                side_effect=observed_inbound,
             ),
             patch.object(
                 self.channel,
                 "fetch_quoted_context",
-                side_effect=delayed_context,
+                side_effect=observed_context,
             ),
-            patch("netizen.channel_app._QUOTE_FETCH_TIMEOUT_SECONDS", 0.05),
+            patch("netizen.channel_app.asyncio.timeout", side_effect=observed_timeout),
         ):
             await self.app.handle_message(
                 FakeMessage(
@@ -9283,6 +9296,15 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
+        self.assertEqual(len(read_timeouts), 2)
+        self.assertEqual([len(scopes) for scopes in read_timeouts], [1, 1])
+        inbound_scope, context_scope = (scopes[0] for scopes in read_timeouts)
+        self.assertIsNot(inbound_scope[0], context_scope[0])
+        self.assertEqual(
+            (inbound_scope[1], context_scope[1]),
+            (channel_app._QUOTE_FETCH_TIMEOUT_SECONDS,) * 2,
+        )
+        self.assertEqual(active_timeouts, [])
         self.assertEqual(len(self.runtime.submit_calls), 1)
         envelope = json.loads(self.runtime.submit_calls[0]["input"])
         self.assertEqual(envelope["quoted_message"]["text"], "Visible card")
