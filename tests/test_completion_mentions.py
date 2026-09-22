@@ -36,14 +36,32 @@ from netizen.domain import (
     ScopeKind,
 )
 
-import test_channel_app as fixtures
+from tests.support.channel_messages import FakeMessage, PNG
+from tests.support.channel_cards import (
+    _card_button_value,
+    _elements,
+    config_form_values,
+    direct_button_event,
+    direct_card_event,
+    new_form_values,
+)
+from tests.support.channel_results import (
+    completed_turn_result,
+    file_change_item,
+    goal_activity_snapshot,
+    native_goal,
+    retryable_sent_result,
+    sent_result,
+    side_turn_activity_snapshot,
+    turn_activity_snapshot,
+)
+from tests.support.channel_fixtures import channel_fixture
 
 
 class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.enterContext(patch.object(reply_presenter, "_TERMINAL_CARD_RETRY_SECONDS", 0.01))
-        self.fixture = fixtures.ChannelApplicationTest()
-        await self.fixture.asyncSetUp()
+        self.fixture = await self.enterAsyncContext(channel_fixture())
         self.app = self.fixture.app
         self.channel = self.fixture.channel
         self.runtime = self.fixture.runtime
@@ -52,18 +70,15 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
         binding = self.fixture.store.active_binding(self.scope.key)
         self.fixture.store.assign_native_thread_id(binding.id, "native-one")
         self.binding = self.fixture.store.get(binding.id)
-        self.origin = fixtures.FakeMessage(
+        self.origin = FakeMessage(
             "run task", message_id="om_origin", sender_id="ou_other",
         )
-
-    async def asyncTearDown(self):
-        await self.fixture.asyncTearDown()
 
     def outcome(self, *, side=False, **changes):
         values = dict(
             thread_id="native-one", turn_id="turn-one", owner_id="ou_initiator",
             origin=self.origin,
-            result=fixtures.completed_turn_result(final_response="结果正文"),
+            result=completed_turn_result(final_response="结果正文"),
         )
         values.update(changes)
         if side:
@@ -77,7 +92,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
         values = dict(
             binding_id=self.binding.id, thread_id="native-one",
             logical_turn_id="goal-one", owner_id="ou_initiator", origin=self.origin,
-            goal=fixtures.native_goal(GoalStatus.COMPLETE),
+            goal=native_goal(GoalStatus.COMPLETE),
             final_physical_turn_id="turn-final", final_turn_status="completed",
             final_response="Goal 结果正文",
         )
@@ -90,7 +105,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
         if isinstance(content, dict):
             visible = "\n".join(
                 element["content"]
-                for element in fixtures._elements(content, "markdown")
+                for element in _elements(content, "markdown")
             )
             self.assertIn(text, visible)
             self.assertEqual(visible.count('<at id=ou_initiator></at>'), int(enabled))
@@ -104,7 +119,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn(text, content)
 
     def queue_reminder(self, card_id="om_progress", *, thread_id=None):
-        self.channel.send_results.append(fixtures.sent_result(
+        self.channel.send_results.append(sent_result(
             "om_reminder", chat_id="oc_direct", thread_id=thread_id,
             # Feishu can retain an older reply-tree root when replying to a card.
             root_id="om_older_root", parent_id=card_id,
@@ -129,10 +144,10 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
 
     async def start_progress(self, outcome):
         self.channel.reply_results.append(
-            fixtures.sent_result("om_progress", chat_id="oc_direct"),
+            sent_result("om_progress", chat_id="oc_direct"),
         )
         if isinstance(outcome, SideTurnOutcome):
-            snapshot = fixtures.side_turn_activity_snapshot(
+            snapshot = side_turn_activity_snapshot(
                 side_id=outcome.side_id, thread_id=outcome.thread_id,
                 turn_id=outcome.turn_id,
             )
@@ -142,7 +157,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                 turn_id=outcome.turn_id, origin=outcome.origin,
             )
         else:
-            snapshot = fixtures.turn_activity_snapshot(
+            snapshot = turn_activity_snapshot(
                 binding_id=outcome.binding_id, thread_id=outcome.thread_id,
                 turn_id=outcome.turn_id,
             )
@@ -156,7 +171,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
         return replace(outcome, activity=snapshot)
 
     async def test_plain_ordinary_and_side_result_use_captured_owner_with_toggle(self):
-        bot_seed = fixtures.FakeMessage(
+        bot_seed = FakeMessage(
             "Side seed", message_id="om_seed", sender_id="ou_bot", is_bot=True,
         )
         for side in (False, True):
@@ -173,26 +188,26 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     self.assert_mention(self.channel.replies[0][1], enabled=enabled)
 
     async def test_new_defaults_on_and_config_can_change_only_completion_mention(self):
-        await self.app.handle_message(fixtures.FakeMessage("/new", message_id="om_new_form"))
+        await self.app.handle_message(FakeMessage("/new", message_id="om_new_form"))
         new_card = self.channel.replies[-1][1]
-        values = self.fixture.new_form_values(new_card)
+        values = new_form_values(new_card)
         self.assertTrue(values["new_completion_mention"].endswith(":on"))
         field = next(
-            node for node in fixtures._elements(new_card.card, "select_static")
+            node for node in _elements(new_card.card, "select_static")
             if node["name"] == "new_completion_mention"
         )
         values["new_completion_mention"] = next(
             option["value"] for option in field["options"]
             if option["value"].endswith(":off")
         )
-        await self.app.handle_card_action(self.fixture.direct_card_event(values))
+        await self.app.handle_card_action(direct_card_event(self.channel, values))
         created = self.fixture.store.active_binding(self.scope.key)
         self.assertFalse(created.task_feedback.completion_mention_enabled)
         before_feedback = created.task_feedback
-        await self.app.handle_message(fixtures.FakeMessage("/config", message_id="om_config_form"))
+        await self.app.handle_message(FakeMessage("/config", message_id="om_config_form"))
         config_card = self.channel.replies[-1][1]
-        await self.app.handle_card_action(self.fixture.direct_card_event(
-            self.fixture.config_form_values(config_card, completion_mention_enabled=True),
+        await self.app.handle_card_action(direct_card_event(self.channel,
+            config_form_values(config_card, completion_mention_enabled=True),
             message_id="om_config_card",
         ))
         configured = self.fixture.store.get(created.id)
@@ -244,7 +259,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     # its response, just as a successful remote update can.
                     self.channel.card_update_results.extend(
                         TimeoutError("terminal update response lost")
-                        if response_lost else fixtures.retryable_sent_result()
+                        if response_lost else retryable_sent_result()
                         for _ in range(3)
                     )
                     with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
@@ -306,7 +321,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     self.assert_reminder(enabled=False)
 
     async def test_progress_existing_topic_reminder_replies_to_card_in_same_topic(self):
-        origin = fixtures.FakeMessage(
+        origin = FakeMessage(
             "run task", message_id="om_user_topic", chat_type="group",
             thread_id="omt_existing", sender_id="ou_other",
         )
@@ -322,12 +337,12 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
     async def test_reminder_failure_is_one_attempt_without_result_recovery(self):
         receipts = (
             TimeoutError("reminder response lost"),
-            fixtures.retryable_sent_result(),
-            fixtures.sent_result(
+            retryable_sent_result(),
+            sent_result(
                 "om_wrong_parent", chat_id="oc_direct",
                 root_id="om_origin", parent_id="om_origin",
             ),
-            fixtures.sent_result("om_main", chat_id="oc_direct"),
+            sent_result("om_main", chat_id="oc_direct"),
         )
         for index, receipt in enumerate(receipts):
             with self.subTest(receipt=receipt):
@@ -371,12 +386,12 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     self.channel.replies.clear()
                     self.channel.reply_results.append(
                         TimeoutError("file card response lost")
-                        if response_lost else fixtures.retryable_sent_result()
+                        if response_lost else retryable_sent_result()
                     )
                     with self.assertLogs("netizen.channel_app", level="WARNING"):
                         await self.app.handle_completion(self.outcome(
-                            result=fixtures.completed_turn_result(
-                                fixtures.file_change_item("result.txt"), final_response="结果正文",
+                            result=completed_turn_result(
+                                file_change_item("result.txt"), final_response="结果正文",
                             ),
                             task_feedback=BindingTaskFeedback(progress_card_enabled=progress),
                         ))
@@ -394,8 +409,8 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
             self.assertLogs("netizen.channel_app", level="ERROR"),
         ):
             await self.app.handle_completion(self.outcome(
-                result=fixtures.completed_turn_result(
-                    fixtures.file_change_item("result.txt"), final_response="结果正文",
+                result=completed_turn_result(
+                    file_change_item("result.txt"), final_response="结果正文",
                 ),
                 task_feedback=BindingTaskFeedback(progress_card_enabled=False),
             ))
@@ -493,8 +508,8 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                 self.channel.send_calls.clear()
                 outcome = self.outcome(
                     turn_id=f"files-{progress}",
-                    result=fixtures.completed_turn_result(
-                        fixtures.file_change_item(*paths), final_response="结果正文",
+                    result=completed_turn_result(
+                        file_change_item(*paths), final_response="结果正文",
                     ),
                     task_feedback=BindingTaskFeedback(progress_card_enabled=progress),
                 )
@@ -505,8 +520,8 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                 card = self.channel.updates[-1][1] if progress else self.channel.replies[-1][1].card
                 self.assert_mention(card, enabled=not progress)
                 self.assert_reminder(enabled=progress)
-                page = fixtures._card_button_value(OutboundCard(card=card), "跳转")
-                await self.app.handle_card_action(self.fixture.direct_button_event(
+                page = _card_button_value(OutboundCard(card=card), "跳转")
+                await self.app.handle_card_action(direct_button_event(
                     page, message_id="om_progress" if progress else "om_result",
                     form_value={"turn_file_page": "1"},
                 ))
@@ -535,19 +550,19 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     self.channel.replies.clear()
                     self.channel.updates.clear()
                     self.channel.send_calls.clear()
-                    self.channel.reply_results.append(fixtures.sent_result(
+                    self.channel.reply_results.append(sent_result(
                         f"om_goal_{progress}_{index}", chat_id="oc_direct",
                     ))
                     outcome = self.goal_outcome(
                         logical_turn_id=f"goal-{progress}-{index}",
-                        goal=fixtures.native_goal(
+                        goal=native_goal(
                             status, created_at=index + 1 + 100 * int(progress),
                         ) if status else None,
                         final_turn_status=turn_status, error=error,
                         background_cleanup_requested=cleanup,
                         task_feedback=BindingTaskFeedback(progress_card_enabled=progress),
                         activity=replace(
-                            fixtures.goal_activity_snapshot(binding_id=self.binding.id),
+                            goal_activity_snapshot(binding_id=self.binding.id),
                             logical_turn_id=f"goal-{progress}-{index}",
                         ),
                     )
@@ -555,7 +570,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len(self.channel.replies), 1)
                     card = self.channel.replies[0][1]
                     self.assertEqual(
-                        bool(fixtures._elements(card.card, "collapsible_panel")),
+                        bool(_elements(card.card, "collapsible_panel")),
                         progress and turn_status in {"completed", "failed", "interrupted"},
                     )
                     if error is not None:
@@ -574,7 +589,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
             if kind is not ScopeKind.DIRECT:
                 created = await self.fixture.create_binding(scope)
                 binding = created.binding
-            fallback_origin = fixtures.FakeMessage(
+            fallback_origin = FakeMessage(
                 "run goal", message_id="om_goal_origin", sender_id="ou_other",
                 chat_type="p2p" if kind is ScopeKind.DIRECT else "group",
                 thread_id=scope.topic_id,
@@ -584,7 +599,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
             ):
                 with self.subTest(kind=kind, pulse=pulse, progress=progress, enabled=enabled, update_state=update_state):
                     running = replace(
-                        fixtures.native_goal(created_at=index + 1),
+                        native_goal(created_at=index + 1),
                         thread_id=binding.native_thread_id or f"native-{kind.value}",
                     )
                     card_id = f"om_goal_{kind.value}_{index}"
@@ -615,7 +630,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                         TimeoutError("update reply lost") for _ in range(failures)
                     )
                     if update_fails:
-                        self.channel.reply_results.append(fixtures.sent_result(
+                        self.channel.reply_results.append(sent_result(
                             "om_new_goal", chat_id=scope.chat_id, thread_id=scope.topic_id,
                         ))
                     elif enabled:
@@ -640,7 +655,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
     async def test_uncertain_goal_update_and_card_fallback_only_mention_on_first_attempt(self):
         for progress in (False, True):
             with self.subTest(progress=progress):
-                running = fixtures.native_goal(created_at=1 + int(progress))
+                running = native_goal(created_at=1 + int(progress))
                 await self.fixture.register_goal_card(
                     scope=self.scope, binding=self.binding, goal=running,
                     message_id="om_goal", runtime_state="goal-running",
@@ -672,7 +687,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
     async def test_oversized_goal_result_keeps_mention_when_only_goal_controls_were_updated(self):
         for progress in (False, True):
             with self.subTest(progress=progress):
-                running = fixtures.native_goal(created_at=1 + int(progress))
+                running = native_goal(created_at=1 + int(progress))
                 await self.fixture.register_goal_card(
                     scope=self.scope, binding=self.binding, goal=running,
                     message_id="om_goal", runtime_state="goal-running",
@@ -699,7 +714,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
     async def test_progress_goal_reminder_uses_delivered_card_not_stale_origin(self):
         for update_fails in (False, True):
             with self.subTest(update_fails=update_fails):
-                running = fixtures.native_goal(created_at=1 + int(update_fails))
+                running = native_goal(created_at=1 + int(update_fails))
                 await self.fixture.register_goal_card(
                     scope=self.scope, binding=self.binding, goal=running,
                     message_id="om_current_goal", runtime_state="goal-running",
@@ -715,7 +730,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     self.channel.card_update_results.extend(
                         TimeoutError("update reply lost") for _ in range(3)
                     )
-                    self.channel.reply_results.append(fixtures.sent_result(
+                    self.channel.reply_results.append(sent_result(
                         "om_new_goal", chat_id="oc_direct",
                     ))
                 if not update_fails:
@@ -781,7 +796,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_sdk_post_images_keep_chunk_routes_and_first_chunk_mention(self):
-        (self.fixture.project / "result.png").write_bytes(fixtures.PNG)
+        (self.fixture.project / "result.png").write_bytes(PNG)
         answer = "完整结果\n" * 900 + "\n![图](result.png)\n\n" + "完整结果\n" * 1100
         for topic in (False, True):
             for mention in (False, True):
@@ -803,7 +818,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     upload_count = len(self.channel.upload_calls)
                     await self.app.handle_completion(self.outcome(
                         origin=sdk_origin,
-                        result=fixtures.completed_turn_result(final_response=answer),
+                        result=completed_turn_result(final_response=answer),
                         task_feedback=BindingTaskFeedback(
                             progress_card_enabled=False, completion_mention_enabled=mention,
                         ),
@@ -813,14 +828,14 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     contents = [json.loads(request["content"]) for request in requests]
                     visible = "\n".join(
                         node["text"] for content in contents
-                        for node in fixtures._elements(content, "md")
+                        for node in _elements(content, "md")
                     )
                     self.assertEqual(visible.count("完整结果"), 2000)
                     self.assertEqual(visible.count(f"![图](img_uploaded_{upload_count + 1})"), 1)
                     self.assertNotIn("result.png", visible)
-                    mentions = [node for content in contents for node in fixtures._elements(content, "at")]
+                    mentions = [node for content in contents for node in _elements(content, "at")]
                     self.assertEqual([node["user_id"] for node in mentions], ["ou_initiator"] if mention else [])
-                    self.assertEqual(len(fixtures._elements(contents[0], "at")), int(mention))
+                    self.assertEqual(len(_elements(contents[0], "at")), int(mention))
                     self.assertTrue(all(request["msg_type"] == "post" for request in requests))
                     for call in driver.reply_message.call_args_list:
                         self.assertEqual(call.kwargs["message_id"], self.origin.id)
@@ -847,17 +862,17 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("netizen.channel_app", level="WARNING"):
             await self.app.handle_completion(self.outcome(
                 origin=sdk_origin,
-                result=fixtures.completed_turn_result(final_response="完整结果\n" * 2000),
+                result=completed_turn_result(final_response="完整结果\n" * 2000),
             ))
         self.assertEqual(driver.reply_message.await_count, 3)
         contents = [json.loads(call.kwargs["content"]) for call in driver.reply_message.call_args_list]
         # The SDK returns only the failed chunk's receipt, so the safe notice
         # must not infer that the first chunk's mention was never delivered.
         successful = [contents[0], contents[2]]
-        mentions = [node for content in successful for node in fixtures._elements(content, "at")]
+        mentions = [node for content in successful for node in _elements(content, "at")]
         self.assertEqual([mention["user_id"] for mention in mentions], ["ou_initiator"])
         self.assertIn("消息发送失败", str(contents[2]))
-        self.assertEqual(fixtures._elements(contents[2], "at"), [])
+        self.assertEqual(_elements(contents[2], "at"), [])
         driver.create_message.assert_not_awaited()
 
 

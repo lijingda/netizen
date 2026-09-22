@@ -2,66 +2,78 @@ from __future__ import annotations
 
 import asyncio
 import json
-import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from lark_channel import FeishuChannel, OutboundCard, OutboundFile, OutboundImage, OutboundPost, OutboundSender, OutboundConfig, RetryConfig
+from lark_channel import (
+    FeishuChannel,
+    OutboundCard,
+    OutboundFile,
+    OutboundImage,
+    OutboundPost,
+    OutboundSender,
+    OutboundConfig,
+    RetryConfig,
+)
 
-from netizen.bindings import BindingStore, BindingTaskFeedback, BindingTurnSettings
+from netizen.bindings import BindingTaskFeedback, BindingTurnSettings
 from netizen.cards import decode_turn_file_action
 from netizen.channel import reply_presenter
 from netizen.channel_app import ChannelApplication
-from netizen.domain import FeishuScope, ScopeKind, ScheduledOrigin, MentionContextMode, MessageContextAnchor
-from netizen.management import InstanceManagementService, ScopeCoordinator
-from netizen.projects import ProjectRegistry
-from netizen.runtime.contracts import ActiveState, ActiveTurnSnapshot, Submission, SubmitDisposition, TurnOutcome
-from netizen.management.service import ManagementRuntimePort
+from netizen.domain import (
+    FeishuScope,
+    ScopeKind,
+    ScheduledOrigin,
+    MentionContextMode,
+    MessageContextAnchor,
+)
+from netizen.runtime.contracts import (
+    ActiveState,
+    ActiveTurnSnapshot,
+    Submission,
+    SubmitDisposition,
+    TurnOutcome,
+)
 from netizen.schedules.models import ScheduleRule
 from netizen.session_settings import SessionSettings
 from netizen.turn_plan_observer import TurnPlanStepSnapshot, TurnPlanStepState
 
-from test_channel_app import (
-    PNG, FakeChannel, FakeMessage, FakeMessageHistory, StubRuntime, _card_button_values, _elements,
-    completed_turn_result, file_change_item, image_generation_item, sent_result,
+from tests.support.channel_messages import FakeMessage, PNG
+from tests.support.channel_cards import (
+    _card_button_values,
+    _elements,
+    callback,
+    form_values,
+    manager_form,
+)
+from tests.support.channel_results import (
+    completed_turn_result,
+    file_change_item,
+    image_generation_item,
+    sent_result,
     turn_activity_snapshot,
 )
-from test_schedule_cards import callback, form_values, manager_form
+
+
+from tests.support.channel_fixtures import scheduled_channel_fixture
 
 
 class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.store = BindingStore(wall_clock=lambda: 160.0)
-        self.projects = ProjectRegistry(store=self.store, project_root=Path(self.tmp.name), projects={"work": Path(self.tmp.name)})
-        self.runtime = StubRuntime()
-        self.runtime.binding_store = self.store
-        self.channel = FakeChannel()
-        self.history = FakeMessageHistory()
-        self.management = InstanceManagementService(bindings=self.store, projects=self.projects,
-            runtime=ManagementRuntimePort(self.runtime), scope_coordinator=ScopeCoordinator())
-        self.app = ChannelApplication(app_id="app", channel=self.channel, runtime=self.runtime, bindings=self.store,
-                                      projects=self.projects, management=self.management, message_history=self.history)
-        self.submissions = []
-        self.receipts = []
+    async def asyncSetUp(self) -> None:
+        self.fixture = await self.enterAsyncContext(scheduled_channel_fixture())
+        self.store = self.fixture.store
+        self.projects = self.fixture.projects
+        self.runtime = self.fixture.runtime
+        self.channel = self.fixture.channel
+        self.management = self.fixture.management
+        self.app = self.fixture.app
+        self.submissions = self.fixture.submissions
+        self.receipts = self.fixture.receipts
+        self.history = self.fixture.message_history
 
-        async def submit_initial(**kwargs):
-            self.submissions.append(kwargs)
-            binding = kwargs["binding"]
-            self.store.assign_native_thread_id(binding.id, "native-" + kwargs["run_id"])
-            self.store.schedules.set_run(kwargs["run_id"], phase="handed_off", initial_turn_id="turn-initial")
-            return Submission(SubmitDisposition.STARTED, binding.id, "native-" + kwargs["run_id"], "turn-initial", lambda: self.receipts.append(kwargs["run_id"]), task_feedback=binding.task_feedback)
-
-        self.runtime.submit_initial = submit_initial
-
-    async def asyncTearDown(self):
-        await self.app.close()
-        await self.management.close()
-        self.store.close()
-        self.tmp.cleanup()
 
     def claim(self, instructions="检查明确资源", *, session_settings=SessionSettings()):
         result = self.store.schedules.create(name="日报", instructions=instructions, project_alias="work", app_id="app", chat_id="oc_group",
@@ -507,11 +519,11 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             result=completed_turn_result(final_response=content)))
 
     async def finish_files_fixture(self, claim, request, *, inline_image=False):
-        (Path(self.tmp.name) / "report.pdf").write_bytes(b"pdf")
+        (self.fixture.project_root / "report.pdf").write_bytes(b"pdf")
         items = [file_change_item("report.pdf")]
         response = "report complete"
         if inline_image:
-            image = Path(self.tmp.name) / "preview.png"
+            image = self.fixture.project_root / "preview.png"
             image.write_bytes(PNG)
             items.append(image_generation_item(image))
             response += "\n\n![preview](preview.png)"
@@ -552,7 +564,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_local_image_without_files_preserves_post_type_and_unknown_send_is_not_retried(self):
         claim, request = await self.completion_fixture()
-        (Path(self.tmp.name) / "existing.png").write_bytes(PNG)
+        (self.fixture.project_root / "existing.png").write_bytes(PNG)
         driver = self.use_sdk_reply(TimeoutError("response lost after send"))
 
         await self.finish_fixture(claim, request, "existing image\n\n![preview](existing.png)")
@@ -704,11 +716,11 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         binding = self.store.get(request["binding"].id)
         origin = request["origin"]
         self.assertIsInstance(origin, ScheduledOrigin)
-        report = Path(self.tmp.name) / "report.pdf"
-        image = Path(self.tmp.name) / "trend.png"
+        report = self.fixture.project_root / "report.pdf"
+        image = self.fixture.project_root / "trend.png"
         report.write_bytes(b"pdf")
         image.write_bytes(PNG)
-        (Path(self.tmp.name) / "unreferenced-source.txt").write_text("source only", encoding="utf-8")
+        (self.fixture.project_root / "unreferenced-source.txt").write_text("source only", encoding="utf-8")
         activity = turn_activity_snapshot(
             binding_id=binding.id, thread_id=binding.native_thread_id, turn_id="turn-initial",
             steps=(TurnPlanStepSnapshot("initial hidden activity", TurnPlanStepState.COMPLETED),),
@@ -818,7 +830,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.schedules.get_run(claim.run.id), run_before)
         paths = tuple(f"followup-{index:02}.txt" for index in range(10))
         for path in paths:
-            (Path(self.tmp.name) / path).write_text(path, encoding="utf-8")
+            (self.fixture.project_root / path).write_text(path, encoding="utf-8")
         await self.app.handle_completion(TurnOutcome(binding_id=binding.id, thread_id=binding.native_thread_id, turn_id="turn-followup",
             owner_id="ou_user", origin=prompt, result=completed_turn_result(file_change_item(*paths), final_response="followup files ready"),
             task_feedback=feedback, activity=updated))
@@ -854,31 +866,11 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_card_action(event)
         return SimpleNamespace(card=self.channel.updates[-1][1])
 
-    def manager_plan(self, name, *, chat_id="oc_group", enabled=True):
-        created = self.store.schedules.create(name=name, instructions="独立指令：" + name,
-            project_alias="work", app_id="app", chat_id=chat_id, enabled=enabled,
-            schedule=ScheduleRule("interval", "UTC", every_minutes=60, anchor=100),
-            request_id="manager-" + name, now=100)
-        return created.plan_id
-
-    def enable_manual_claims(self):
-        claims = []
-        self.management.schedules._clock = lambda: 160.0
-
-        def claim_manual(plan_id, expected_revision, request_id, request_payload):
-            result, claim = self.store.schedules.claim_manual(plan_id, app_id="app",
-                expected_revision=expected_revision, request_id=request_id, request_payload=request_payload, now=160)
-            if claim is not None:
-                claims.append(claim)
-            return result
-
-        self.management.schedules.set_run_now_handler(claim_manual)
-        return claims
 
     async def test_run_now_card_uses_saved_plan_and_refreshes_live_detail_after_receipt(self):
-        plan_id = self.manager_plan("手动运行已暂停任务", enabled=False)
+        plan_id = self.fixture.manager_plan("手动运行已暂停任务", enabled=False)
         before = self.store.schedules.get(plan_id)
-        claims = self.enable_manual_claims()
+        claims = self.fixture.enable_manual_claims()
         scope = FeishuScope("app", "oc_group", ScopeKind.TOPIC, "omt_current")
         card = await self.app._schedule_manager_card(scope, navigation={"filter": "current_paused", "plan_id": plan_id})
         value = callback(card, "立即运行")
@@ -914,8 +906,8 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(edit["navigation"], {"filter": "current_paused", "plan_id": plan_id})
 
     async def test_manager_defaults_to_enabled_unfinished_and_refreshes_exact_selection(self):
-        active = self.manager_plan("可执行任务")
-        paused = self.manager_plan("暂停任务", enabled=False)
+        active = self.fixture.manager_plan("可执行任务")
+        paused = self.fixture.manager_plan("暂停任务", enabled=False)
         ended = self.store.schedules.create(name="已结束任务", instructions="曾经执行",
             project_alias="work", app_id="app", chat_id="oc_group",
             schedule=ScheduleRule("once", "UTC", at="1970-01-01T00:02+00:00"),
@@ -959,7 +951,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不符合当前筛选", str(card.card))
 
     async def test_single_form_can_cancel_change_frequency_and_reject_stale_save(self):
-        plan_id = self.manager_plan("编辑任务")
+        plan_id = self.fixture.manager_plan("编辑任务")
         scope = FeishuScope("app", "oc_group", ScopeKind.GROUP)
         detail = await self.app._schedule_manager_card(scope, navigation={"plan_id": plan_id})
         editor = await self.card_action(value=callback(detail, "编辑"))
@@ -985,9 +977,9 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.schedules.get(plan_id).instructions, "其他人已保存的内容")
 
     async def test_manager_selects_only_one_plan_and_preserves_filter_through_edit(self):
-        first = self.manager_plan("任务甲")
-        second = self.manager_plan("任务乙")
-        other = self.manager_plan("其他会话任务", chat_id="oc_other")
+        first = self.fixture.manager_plan("任务甲")
+        second = self.fixture.manager_plan("任务乙")
+        other = self.fixture.manager_plan("其他会话任务", chat_id="oc_other")
         await self.app.handle_message(FakeMessage("/cron", message_id="om_open", chat_id="oc_group", chat_type="group"))
         card = self.channel.replies[-1][1]
         self.assertNotIn("独立指令", str(card.card))
@@ -1010,7 +1002,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.schedules.get(first).revision, 1)
 
     async def test_topic_card_refresh_does_not_depend_on_an_unrelated_chat_lookup(self):
-        plan_id = self.manager_plan("话题内任务")
+        plan_id = self.fixture.manager_plan("话题内任务")
         scope = FeishuScope("app", "oc_group", ScopeKind.TOPIC, "omt_current")
         card = await self.app._schedule_manager_card(scope, navigation={"plan_id": plan_id})
         self.channel.get_chat_info = AsyncMock(side_effect=RuntimeError("chat lookup must not run"))
@@ -1025,7 +1017,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.channel.get_chat_info.assert_not_awaited()
 
     async def test_manager_pause_and_delete_clear_selection_without_changing_filter(self):
-        plan_id = self.manager_plan("唯一任务")
+        plan_id = self.fixture.manager_plan("唯一任务")
         scope = FeishuScope("app", "oc_group", ScopeKind.GROUP)
         card = await self.app._schedule_manager_card(scope, navigation={"filter": "current_enabled", "plan_id": plan_id})
         paused = await self.card_action(value=callback(card, "暂停"))
@@ -1044,8 +1036,8 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_manager_pagination_and_filter_change_use_independent_navigation(self):
         for index in range(51):
-            self.manager_plan(f"任务{index:02}")
-        self.manager_plan("其他会话", chat_id="oc_other")
+            self.fixture.manager_plan(f"任务{index:02}")
+        self.fixture.manager_plan("其他会话", chat_id="oc_other")
         scope = FeishuScope("app", "oc_group", ScopeKind.GROUP)
         card = await self.app._schedule_manager_card(scope)
         page_two = await self.card_action(value=callback(card, "下一页任务"))
@@ -1067,6 +1059,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         await self.app.close()
         self.app = ChannelApplication(app_id="app", channel=self.channel, runtime=self.runtime,
             bindings=self.store, projects=self.projects, management=self.management, message_history=self.history)
+        self.addAsyncCleanup(self.app.close)
         result = await self.card_action(form=values)
         plans = self.store.schedules.list(app_id="app")
         self.assertEqual(len(plans), 1)

@@ -14,7 +14,7 @@ Netizen 把飞书单聊、群聊和话题接成 Codex 的消息 Channel。仓库
 登记、展示和定时交接；官方 `openai-codex` SDK 管理原生 App Server/CLI 上的 Thread、
 Turn、历史、工具与权限。Admin Web 是同一应用边界上的管理入口，不能提交即时 Prompt
 或浏览完整历史。升级、重启的一次性部署进程是限定例外，见[架构](#架构)与
-[数据与配置](#数据与配置)。
+[系统维护 API](#系统维护-api)。
 
 普通单聊、群聊主线或话题各是一个 Scope，可关联多个 Binding 和一个当前指针。
 Binding 选择一个 Project 的 canonical cwd，并在物化后精确绑定一个 native Thread；
@@ -22,7 +22,8 @@ Thread 内可以有多个 Turn。`/new` 先创建 lazy Binding，第一条真实
 切换当前 Binding 不停止其他 Binding 的执行。Side 是从已物化 Parent Thread 创建的
 ephemeral fork，依靠独立话题 route 保留身份，不是普通 Scope/Binding；Goal 则在同一个
 普通 Thread 内驱动多个物理 Turn。详细身份与生命周期见[核心模型](#核心模型)及
-[运行与锁](#运行与锁)。
+[运行与锁](#运行与锁)；请求材料与投递展示分别见[消息输入准备](#消息输入准备)和
+[回复与活动展示](#回复与活动展示)。
 
 ### 三条主要执行路径
 
@@ -34,7 +35,8 @@ ephemeral fork，依靠独立话题 route 保留身份，不是普通 Scope/Bind
 
 输入准备不能把历史消息变成新的控制指令或 Skill 调用；群聊每次触发仍需重新 @机器人。
 定时初始输入保留 Scheduled Plan 来源，后续交流沿用普通会话语义。具体准入、消息归属与
-重试边界见[核心模型](#核心模型)、[运行与锁](#运行与锁)和[定时任务](#定时任务)。
+重试边界见[消息输入准备](#消息输入准备)、[锁与输入准入](#锁与输入准入)和
+[定时任务](#定时任务)。
 
 ### 状态归属与维护原则
 
@@ -47,8 +49,8 @@ ephemeral fork，依靠独立话题 route 保留身份，不是普通 Scope/Bind
 
 持久化清单和各项例外以[数据与配置](#数据与配置)、[定时任务](#定时任务)及
 [部署事务](deployment.md#候选验证与切换)为准。普通 Prompt、回复、Turn 历史、已生效
-Codex 配置与卡片 session 不复制到 Channel 数据库。安装器只管理随 release 发布的
-`netizen-user-guide` Skill，其他用户 Skill 保持原生管理。
+Codex 配置与卡片 session 不复制到 Channel 数据库。受管 Skill 的清单和安装回滚边界统一见
+[候选验证与切换](deployment.md#候选验证与切换)，其他用户 Skill 保持原生管理。
 
 不同 Binding、Parent 与 Side 可以并发使用同一个真实 Project cwd，文件改动彼此可见；
 不能以全局 semaphore、Project lock、目录副本或独立 `CODEX_HOME` 隔离它们。飞书展示
@@ -123,8 +125,9 @@ Server 是 `AsyncCodex` 的子进程，不是第二套业务服务。
 | 位置 | 职责 |
 | --- | --- |
 | `netizen/main.py` | ServiceCore 装配并负责共享管理服务、Scheduler、Runtime、SDK 和 Store 的生命周期；管理服务注入各入口适配器。 |
-| `netizen/channel_app.py`、`netizen/channel/` | ChannelApplication 负责输入和完成事件编排，并装配、关闭同一表情控制器和回复卡片呈现器；展示会话留在各自对象内。 |
-| `netizen/message_content.py`、`netizen/message_preparation.py` | 前者统一当前、引用和补充消息的纯内容投影；后者共享公共 SDK 卡片补读。来源、请求意图、历史选取和 wire envelope 仍由调用入口负责。 |
+| `netizen/channel_app.py`、`netizen/channel/` | ChannelApplication 负责准入、Runtime 提交和完成事件编排，并装配、关闭同一表情控制器和回复卡片呈现器；展示会话留在各自对象内。 |
+| `netizen/channel/input_preparation.py` | MessageInputPreparer 负责当前、引用和 catch-up 材料的读取、校验与图片准备，返回 typed PreparedInput；ChannelApplication 继续捕获 admission、组装 Context Boundary 提交参数并发送可见回执，Runtime 确认接受后才推进边界。 |
+| `netizen/message_content.py`、`netizen/message_preparation.py` | 前者统一当前、引用和补充消息的纯内容投影；后者共享公共 SDK 卡片补读，由消息准备组件复用。控制意图仍由 Channel 入口判定。 |
 | `netizen/cards/` | `controls.py` 负责管理卡片和表单，`reply.py` 负责回复、Activity、Files，`callbacks.py` 集中共享回调协议及基础组件；包入口显式导出公共接口。 |
 | `netizen/admin/` | `web.py` 集中路由、认证、一次性授权与请求任务生命周期；`queries.py` 负责查询和分页游标，`presentation.py` 负责响应转换。 |
 | `netizen/management/` | 各管理入口共用的应用边界，包括 `updates.py` 中的升级查询与升级/重启发起编排。 |
@@ -138,6 +141,8 @@ Server 是 `AsyncCodex` 的子进程，不是第二套业务服务。
 
 ## 核心模型
 
+### Scope、Binding 与会话配置
+
 Scope 分为 P2P、群聊主线和真实 topic。Binding 保存本地 UUID、Scope、Project
 alias、可空 write-once native Thread ID、可选的 Binding-scoped Model/Effort/Speed
 目录 ID、settings revision、Mention Context Mode、Context Boundary、context revision、
@@ -148,7 +153,8 @@ Feedback，之后独立，Mention Context Mode 固定为 current-only。
 
 exact `/new` 是普通用户创建会话的唯一入口；任何 `/new ...` 参数都零 mutation 地拒绝。
 它打开 Card 2.0，提交只写入包含 Project、可选 Turn Settings 和 Mention Context
-Mode 的 lazy Binding，不要求任务、不创建 native Thread；完整表单及目录降级语义见下文。
+Mode 的 lazy Binding，不要求任务、不创建 native Thread；完整表单及目录降级语义见
+[新建与配置表单](#新建与配置表单)。
 下一条需要启动新 Turn 的普通消息执行：
 
 1. 若有 Binding 配置，在进入 native mutation 前重新调用 live `codex.models()`，按所选
@@ -195,97 +201,23 @@ running Turn 的普通输入仍只调用 exact handle `steer()`：即使 Binding
 引用、补充历史、图片或 Skill 准备期间配置或 Context Boundary 发生变化时，本条消息不
 执行并要求重发。
 
-Mention Context Mode 按
-[ADR 0039](adr/0039-add-binding-scoped-mention-catch-up-context.md) 保持群聊逐条 @ 的准入不变：
+首个 real prompt 调用 `thread_start` 后，先把返回的 native ID 原子写入 Binding，再
+发送首 Turn；写入失败或冲突时关闭新 admission，且不发送 prompt。每次 cleanup 前还
+会核对 handle Thread ID、`AsyncThread.id` 与 Binding 的 write-once native ID；若
+handle 回报不同 ID，关闭 admission 且不对不可信 handle 执行 interrupt/cleanup。
 
-- `current-only` 只投影当前 @ 消息及用户显式选择的一条逐条引用；
-- `catch-up` 在收到有效 @ 消息后才按需读取同一 group-main 或 ordinary-topic Scope 中，
-  上一条已接受 Context Boundary 之后、当前消息之前的 eligible 非 bot 成员消息。历史中的
-  `/control` 和 `$skill` 都编码为 inert supplemental context，不会自动触发任何动作；
-- P2P 与 Side 不读取补充历史。未 @ 的消息不会直接 start/steer，也不会由 Channel 缓存或
-  写入 SQLite；只有最终 native input 进入 Codex 原生历史。
-
-Context Boundary 是 Binding-scoped exact 飞书消息 marker，不是机器人回复时间。`/new`
-创建 catch-up Binding、`/resume`、`/unarchive` 或从 current-only 切换为 catch-up 时，以
-exact control/card message 重置边界，避免补录 Binding 非 active 期间的讨论。start/steer
-被 native Runtime 确认接受后，Runtime 才在同一 Binding lock 内 CAS 推进边界；失败、竞态
-拒绝或准备超时不推进。若 native 已接受但 SQLite commit 失败，Runtime 保留 active tracking、
-关闭全局 admission，并明确报告任务已接受但边界未持久化。
-
-补充历史由一个进程内、只读的 official `lark-oapi` typed reader 按需读取；它复用同一
-App ID/Secret，不创建第二个 Channel/WebSocket。群主线使用 exact chat container 并排除
-topic replies，普通话题使用 exact thread container；lower/upper 都通过 exact message ID
-核验。一次读取最多 10 页/500 条 raw message/60 秒，最多保留最近 50 条 eligible message、
-64,000 字符 supplemental visible text，候选 exact fetch 最多 4 路并发。图片与当前/引用
-消息共用 20 张、单图 20 MB、总计 50 MB 的原有准入限制。模型可见 envelope 只用 compact
-`context_status` 披露省略数量与是否截断，完整扫描/筛选统计留在服务端；提交前可见回执仍
-披露带入与不完整状态。被选中消息的 Scope/identity/资源失败则整条 fail closed。候选
-identity 只用应用内 `open_id` 与 user/bot 类型交叉核验；Prompt attribution
-的发送者姓名优先使用历史列表同条消息内嵌的 `sender_name`（仅作展示，不参与身份一致性
-判断），exact message 经 Channel SDK 归一化的 `display_name` 只在其缺失时兜底，两个
-来源都不可验证时才整条 fail closed。`sender_name` 由消息 API 的 `with_sender_name`
-参数投影，不需要通讯录权限，也不受应用通讯录权限范围限制。完整历史语义与上线 live
-probe 见 ADR 0039。
-
-每个真实普通或 Side Prompt 在进入 Runtime 前都按
-[ADR 0029](adr/0029-project-current-message-provenance-into-prompts.md) 投影 exact Current
-Prompt Message。投影使用 Channel SDK 公开的消息 ID、消息类型、内容保真度
-和 `Identity` 字段；发送者只作 attribution，不改变 owner、共享控制权、approval 或指令
-优先级。[ADR 0030](adr/0030-require-resolved-current-sender-names.md) 开启 SDK 公开的 chat
-member roster 姓名补全，并要求当前 sender 具有真实显示名；缺名时在引用读取或图片下载前
-零 start/steer，明确提示 `im:chat.members:read`，不再生成“未知发送者”。sender 只投影
-`display_name`、应用内 `open_id`、`is_bot` 和 `sender_type`；不把跨应用 `union_id` 或
-租户级 `user_id` 写入 Codex 历史。无补充上下文且无逐条引用时，归一化请求正文位于最前，
-版本化 attribution trailer 位于末尾且不重复正文；只有引用时使用 v4 JSON envelope；
-catch-up 使用 v2 `feishu_message_context_prompt` envelope，顺序固定为 supplemental
-messages、可选且去重的 quoted message、最后的 current message，且
-`current_message.request_text` 保持完整。supplemental/quoted 共用 compact Historical
-Message，并与 current message 保持 `text`/`request_text` 的语义边界。这些输入都会进入 Codex 原生历史，
-但不写 Channel Database。来源消息 ID/sender 与同次解析冲突时整条 fail closed。
-
-当前消息的来源元数据另带固定 `execution_host: "netizen"`，覆盖普通 Turn、Steer、
-Side 首轮与后续、引用及 catch-up；定时任务首轮在独立 `scheduled_plan` 包装中带同一
-字段，不伪造真人消息。Skill 仅按最新输入自身的结构化来源包装识别执行场景；最新输入
-无标记则不作 Netizen 假定，不回溯历史中最近的标记，也不采纳正文示例、引用、材料或
-Skill 存在作为依据。这只是流程选择提示，不是鉴权、权限或指令优先级。标记随既有输入
-进入原生历史，不修改旧历史、MCP 或用户 developer/base instructions，也不新增配置。
-Goal start/resume 等不经过消息包装的入口保持原样；不为无新输入的跨 Channel 恢复
-增加身份切换机制，也不承诺该场景的宿主识别。
-
-[ADR 0064](adr/0064-share-card-and-forward-content-projection.md) 增加 Card 2.0 卡片 `interactive`
-和合并转发 `merge_forward` 的直接材料输入，转发话题复用后者。材料中的 slash/Skill
-不解析为当前指令；当前请求只要求结合已有明确任务处理，无明确任务则询问用途。
-材料置于现有 `request_text` 内并中和 `$`，外层 current v1/quote v4/context v2 的版本、
-字段与顺序不变。原 text/post/image 的正文、命令、图片和附件准入保持原语义。
-
-安装器随版本提供 [netizen-lark Skill](../skills/netizen-lark/SKILL.md)，让 Agent 按当前
-`message_id` 主动查询飞书聊天／话题历史。Skill 无配套脚本，只说明如何让可选的 CLI
-选择 `~/.netizen/lark-app/config.json` 中的固定 `netizen` profile 并使用机器人身份；
-CLI 自行换取令牌，查询、分页和结果处理按上游 lark Skills 执行。应用凭据不进入 Prompt，
-无需修改用户默认 CLI 配置。上游 CLI 与 lark Skills 由用户另行安装，缺失不影响 Channel。
-当前会话消息固定使用 Netizen 机器人；其他场景沿用原有 lark Skills 与用户 CLI 配置，
-失败后可酌情尝试 Netizen 机器人凭证，具体身份使用范围由该 Skill 说明。
-当前消息不额外投影聊天或话题定位字段，需要时从 `message_id` 查询。该路径不改变
-当前消息投影、Scope/Binding、SQLite 或 catch-up reader，也不增加原生 MCP entry；见
-[README](../README.md#按需读取飞书历史)。
-
-普通 text/post 请求开头的连续 `$skill-name` 引用由 Prompt compiler 在当前消息上解析。Runtime
-先捕获 exact admission，再按 canonical Project cwd 调用 live `skills/list`；每个名称
-必须唯一、enabled 且来自该 cwd 的目录，随后保留原文本并追加公开
-`SkillInput(name, path)`。多个 Skill 仍只对应一次 `turn()` 或一次 exact `steer()`；
-discovery 期间不持有 Binding 锁，返回后用 admission revision 防止任务状态被重解释。
-被引用历史中的 `$` 会在版本化 quote envelope 中编码为非激活文本，不能把历史内容
-变成当前 Skill 调用。
+### 原生压缩
 
 `/compact` 使用基于公开 `AsyncThread.compact()` 和 history read 的压缩 controller。
 它先在独立 5 秒、至多 3 次 read 预算内记录已有 Turn ID 并确认 idle；持续 Internal、
 `notLoaded` 或悬挂 read 耗尽预算时，尚未启动压缩，安全失败并释放 Binding 锁，保持
 已有的全局 admission 状态。随后保留 Binding 的 `compacting` 槽位，直到
 `thread.read(include_turns=True)` 出现且仅出现一个新的 terminal
-`contextCompaction` Turn 且 Thread 回到 idle；首次 idle read 不能单独证明完成。固定
-`0.154.0` 支持压缩后同一连接、同一 Thread 续聊，命令可用并进入 `/help`。
-完整决定见 ADR 0013，当前兼容性结论见
-`docs/deployment.md`。
+`contextCompaction` Turn 且 Thread 回到 idle；首次 idle read 不能单独证明完成。压缩完成后
+可在同一连接、同一 Thread 续聊，命令进入 `/help`。完整决定见 ADR 0013；已验证的版本
+和覆盖范围见[兼容性结论](deployment.md#已验证的兼容性结论)。
+
+### 原生 Goal
 
 `/goal <objective>` 在当前 Binding 上启动原生 persisted Goal。lazy Binding 先创建并
 write-once 绑定一个已持久化、idle、非 ephemeral 的零 Turn Thread；若公开 read 不能
@@ -301,6 +233,8 @@ Goal Activity 不通过普通 queue observer 读取；Adapter 在现有 logical 
 迟到旧 Turn 事件忽略。Goal Module 跨物理 Turn 继承，Activity 每轮重置，中间 Turn 不产生
 Result/Files；logical terminal 只用 exact 最终物理 Turn 的输出和 structured files，不回退、
 不拼接历史，也不扫描工作区。
+
+### 普通会话生命周期
 
 会话生命周期的命令入口按 [ADR 0017](adr/0017-manage-native-thread-lifecycle.md) 与
 [ADR 0037](adr/0037-reconcile-native-thread-delete-with-a-thin-gap-adapter.md) 管理当前 Binding，
@@ -331,6 +265,8 @@ materialized persisted 行都可确认后 exact archive/delete，不以本地 Tu
 提供独立两阶段 Delete，并与 active 列表共用同一原生 primitive；最终只把 root ID
 交给 App Server 级联删除 spawned descendants。归档恢复仍显式选择目标：
 `/unarchive <短 ID>` 或归档卡按钮恢复 exact native ID 并切换 Binding。
+
+### Side 创建与路由
 
 `/side [首轮问题]` 按 [ADR 0021](adr/0021-support-multi-turn-ephemeral-side-topics.md)
 从当前 exact active、materialized Parent Binding 创建
@@ -364,7 +300,186 @@ root ID 回退，只有未命中才进入普通 Scope/Binding。P2P/P2P topic �
 `chat_type=p2p` 免 @；群主线和各类群话题仍逐条要求 @。`closed/expired/failed`
 墓碑永不转成普通 Binding；open route 缺少内存 Session 时立即转 expired。
 
+固定 `lark-channel-sdk==1.4.0` 的 `reply()` 对平面消息不会自动创建话题，且
+`SendOpts.reply_target_gone` 默认是 `fresh`。Side 因此只使用公开 `send()`：先 fresh
+root，再按需以 `reply_in_thread=True` promotion；promotion 固定 `fail`，防止根消息消失
+时假成功地降级为主线新消息。未知发送结果只用相同 UUID 做一次有界对账；P2P 建话题、
+五类入口的真实返回 shape 以及重复 UUID 的 exact identity 都是部署 live gate。错误 230071
+显式失败，单元 Fake 不能替代该验收。
+
+## 消息输入准备
+
+MessageInputPreparer 只准备本次输入材料；ChannelApplication 在准备前捕获 admission，
+在提交时组装 Context Boundary commit 并调用 Runtime。准备期间不持 Binding 锁，精确身份
+与换轮拒绝规则见[锁与输入准入](#锁与输入准入)；读取失败的公共边界见[失败语义](#失败语义)。
+
+### 补充历史与上下文边界
+
+Mention Context Mode 按
+[ADR 0039](adr/0039-add-binding-scoped-mention-catch-up-context.md) 保持群聊逐条 @ 的准入不变：
+
+- `current-only` 只投影当前 @ 消息及用户显式选择的一条逐条引用；
+- `catch-up` 在收到有效 @ 消息后才按需读取同一 group-main 或 ordinary-topic Scope 中，
+  上一条已接受 Context Boundary 之后、当前消息之前的 eligible 非 bot 成员消息。历史中的
+  `/control` 和 `$skill` 都编码为 inert supplemental context，不会自动触发任何动作；
+- P2P 与 Side 不读取补充历史。未 @ 的消息不会直接 start/steer，也不会由 Channel 缓存或
+  写入 SQLite；只有最终 native input 进入 Codex 原生历史。
+
+Context Boundary 是 Binding-scoped exact 飞书消息 marker，不是机器人回复时间。`/new`
+创建 catch-up Binding、`/resume`、`/unarchive` 或从 current-only 切换为 catch-up 时，以
+exact control/card message 重置边界，避免补录 Binding 非 active 期间的讨论。start/steer
+被 native Runtime 确认接受后，Runtime 才在同一 Binding lock 内 CAS 推进边界；失败、竞态
+拒绝或准备超时不推进。若 native 已接受但 SQLite commit 失败，Runtime 保留 active tracking、
+关闭全局 admission，并明确报告任务已接受但边界未持久化。
+
+补充历史由一个进程内、只读的 official `lark-oapi` typed reader 按需读取；它复用同一
+App ID/Secret，不创建第二个 Channel/WebSocket。群主线使用 exact chat container 并排除
+topic replies，普通话题使用 exact thread container；lower/upper 都通过 exact message ID
+核验。一次读取最多 10 页/500 条 raw message/60 秒，最多保留最近 50 条 eligible message、
+64,000 字符 supplemental visible text，候选 exact fetch 最多 4 路并发。图片与当前/引用
+消息共用 20 张、单图 20 MB、总计 50 MB 的原有准入限制。模型可见 envelope 只用 compact
+`context_status` 披露省略数量与是否截断，完整扫描/筛选统计留在服务端；提交前可见回执仍
+披露带入与不完整状态。被选中消息的 Scope/identity/资源失败则整条 fail closed。候选
+identity 只用应用内 `open_id` 与 user/bot 类型交叉核验；Prompt attribution
+的发送者姓名优先使用历史列表同条消息内嵌的 `sender_name`（仅作展示，不参与身份一致性
+判断），exact message 经 Channel SDK 归一化的 `display_name` 只在其缺失时兜底，两个
+来源都不可验证时才整条 fail closed。`sender_name` 由消息 API 的 `with_sender_name`
+参数投影，不需要通讯录权限，也不受应用通讯录权限范围限制。完整历史语义与上线 live
+probe 见 ADR 0039。
+
+### 当前消息与来源投影
+
+每个真实普通或 Side Prompt 在进入 Runtime 前都按
+[ADR 0029](adr/0029-project-current-message-provenance-into-prompts.md) 投影 exact Current
+Prompt Message。投影使用 Channel SDK 公开的消息 ID、消息类型、内容保真度
+和 `Identity` 字段；发送者只作 attribution，不改变 owner、共享控制权、approval 或指令
+优先级。[ADR 0030](adr/0030-require-resolved-current-sender-names.md) 开启 SDK 公开的 chat
+member roster 姓名补全，并要求当前 sender 具有真实显示名；缺名时在引用读取或图片下载前
+零 start/steer，明确提示 `im:chat.members:read`，不再生成“未知发送者”。sender 只投影
+`display_name`、应用内 `open_id`、`is_bot` 和 `sender_type`；不把跨应用 `union_id` 或
+租户级 `user_id` 写入 Codex 历史。无补充上下文且无逐条引用时，归一化请求正文位于最前，
+版本化 attribution trailer 位于末尾且不重复正文；只有引用时使用 v4 JSON envelope；
+catch-up 使用 v2 `feishu_message_context_prompt` envelope，顺序固定为 supplemental
+messages、可选且去重的 quoted message、最后的 current message，且
+`current_message.request_text` 保持完整。supplemental/quoted 共用 compact Historical
+Message，并与 current message 保持 `text`/`request_text` 的语义边界。这些输入都会进入 Codex 原生历史，
+但不写 Channel Database。来源消息 ID/sender 与同次解析冲突时整条 fail closed。
+
+当前消息的来源元数据另带固定 `execution_host: "netizen"`，覆盖普通 Turn、Steer、
+Side 首轮与后续、引用及 catch-up；定时任务首轮在独立 `scheduled_plan` 包装中带同一
+字段，不伪造真人消息。Skill 仅按最新输入自身的结构化来源包装识别执行场景；最新输入
+无标记则不作 Netizen 假定，不回溯历史中最近的标记，也不采纳正文示例、引用、材料或
+Skill 存在作为依据。这只是流程选择提示，不是鉴权、权限或指令优先级。标记随既有输入
+进入原生历史，不修改旧历史、MCP 或用户 developer/base instructions，也不新增配置。
+Goal start/resume 等不经过消息包装的入口保持原样；不为无新输入的跨 Channel 恢复
+增加身份切换机制，也不承诺该场景的宿主识别。
+
+[ADR 0064](adr/0064-share-card-and-forward-content-projection.md) 增加 Card 2.0 卡片 `interactive`
+和合并转发 `merge_forward` 的直接材料输入，转发话题复用后者。材料中的 slash/Skill
+不解析为当前指令；当前请求只要求结合已有明确任务处理，无明确任务则询问用途。
+材料置于现有 `request_text` 内并中和 `$`，外层 current v1/quote v4/context v2 的版本、
+字段与顺序不变。原 text/post/image 的正文、命令、图片和附件准入保持原语义。
+
+当前、引用和补充来源共享纯内容投影与顶层卡片补读。合并转发统一从校验、裁剪后的
+typed 树调用 SDK 渲染及提及解析，不回用入站原文；转发富文本正文与资源描述使用
+同一首选 locale 及非空 `content_v2` 优先的可见 AST。全包最多保留 50 个子消息节点、
+最终文本 16,000 字符，条数或文本截断传播到外层。最大嵌套深度为 3，最外层为
+depth=0，允许内嵌 depth=1..3；depth>3 或 SDK `max_depth_exceeded` 整条拒绝。
+保留的未知或不可渲染子项、loading/error 和循环结构同样明确拒绝。混合子项只提供可见文字/附件描述，
+明确未读图片像素、文件正文和音视频，不逐项下载资源或补读卡片。固定 SDK 会把隐藏
+交互字段内的文本节点混入卡片渲染，内容层对可确认情况拒绝；普通 scalar value 和可见
+label 允许，上游修复且契约与真实卡片验收通过后移除此限制。完整范围与移除条件见
+[ADR 0064](adr/0064-share-card-and-forward-content-projection.md)。
+
+### 引用读取与 SDK 内容适配
+
+固定 `lark-channel-sdk==1.4.0` 对纯文本话题根消息的 `post` AST 会保留一个渲染后的
+机器人 mention，导致命令前多出机器人名称。Channel 边界只修复这个可精确证明的
+情况：事件已标记 `mentioned_bot`，公开 bot identity 与首个 AST mention 节点一致，
+且当前资源已通过普通/富文本图片准入；不能按名称猜测或剥离其他人的 mention。
+1.4.0 新增的顶层 `post.files` 位于 locale AST 之外；普通文件会进入资源描述符，
+文件夹只渲染可见标签而没有资源描述符。当前消息因此直接检查公开
+`PostContent.post` 的顶层附件区，任何非空或无法解释的附件区都在进入 prompt 前
+失败关闭。文件、音视频等其他附件仍在进入 mention 适配前拒绝。升级 Channel SDK 时必须
+重跑根消息契约测试，原生行为修复后删除这段兼容逻辑。
+
+同一固定 SDK 还会丢掉非话题首层引用的 `ReplyRef`，因为它用
+`parent_id != root_id` 区分引用。[ADR 0011](adr/0011-support-feishu-quoted-message-context.md)
+用精确版本、公开 raw relation 和契约测试恢复这一种首层目标；任何非空
+`thread_id` 都优先解释为话题 Scope，不是逐条引用。被引用内容只通过
+Channel SDK 公开 typed fetch 读取：文本/富文本/卡片/结构化类型使用归一化
+可见文本，合并转发使用 SDK 公共 typed 树和渲染，再施加 ADR 0064 的全包边界；
+普通 `image` 与 `post` 图片读取真实像素，
+其他资源类型在内部 rich projection 保留公开 exact key 与元数据，模型可见 wire 只保留
+类型、名称、时长等可推理信息，
+`system`/未知类型 fail closed。卡片只支持 Card 2.0，Card 1.0 在各来源及转发子项中
+均明确拒绝，不以部分可见文本兜底。受支持卡片归一化只剩占位符时，才使用 SDK 公开
+quote-context fallback。锁定 SDK 1.4.0 若对 CardKit 2.0 返回空文本，只在精确
+版本门禁和结构/大小/深度边界内，从公共 `QuotedContext.raw` 投影 header/body 的
+可见文本节点；按钮值、确认弹窗、选项及事件不进入 prompt。两次 SDK 网络读取
+各自具有 10 秒单次请求预算，避免健康请求因共享总预算产生假超时。
+
+引用投影是单层、文本最多 16,000 字符且 mention/资源描述各最多 64 项的 v4
+JSON envelope；被引用消息保持 ADR 0011 的宽类型矩阵，当前消息对象及
+完整请求始终在最后。supplemental/quoted 的模型可见 Historical Message 固定为本地 `hN`、
+类型、发送者 `display_name/open_id`、UTC ISO 8601 `created_at` 与 `text`，按需增加可解析的
+`reply_to`、`key/name` mention、精简附件和 true-only `truncated`。飞书应用可用范围与
+会话成员关系是准入边界；Channel SDK public `Mention.name` 为 optional，真实输入缺少
+key/name 映射时不输出残缺对象，并显式标记该历史消息 truncated；同名同类型但 exact
+身份不同的附件仍保留各自条目。exact
+message/chat/reply/shared-object ID、原始资源 key、读取
+状态和详细统计只留在内部 rich projection，不随历史 wire 进入 prompt。发送者身份仍保留
+app-scoped `open_id`，不投影 `union_id`/`user_id`；raw 事件/card JSON 不会整体复制。
+被引用消息自己的 reply 不递归读取，只有目标也在同一 envelope 时才投影为本地 `hN`；
+图片不保存到 SQLite、文件或长期 cache。超时、撤回、
+缺权限、返回 ID/chat 不一致和类型不支持都在 start/steer 前显式拒绝。
+引用、补充历史或图片准备期间若 `/resume`、`/new`、archive/unarchive 改变 Scope 的
+current Binding，已经捕获 admission 的消息也会明确失败并要求重发；它不会继续投递到旧
+Binding，更不会被重解释为新 current Binding 的 Turn/steer。
+
+### 图片收集与限制
+
+当前消息、被引用消息和被选中的补充消息只要类型为普通 `image` 或 `post`，Channel 边界都会从公开
+普通资源描述与 typed `PostContent.post` 当前渲染版本收集真实图片节点，并按
+“补充、引用、当前”的稳定来源顺序和 label 转成 Codex 原生
+`TextInput/ImageInput` 列表。全部图片共享 prompt-local `imgN`；Historical Message 的
+`attachments[].ref`、fenced code 外的真实 Markdown 图片 target 和图片 label 使用同一
+ref，label 不暴露 exact message/resource ID。总计最多 20 张、单图 20 MB、原始字节合计 50 MB；
+每条 prompt 内串行下载，单图 10 秒、整批 60 秒，只接受 PNG/JPEG/GIF/WebP magic
+bytes。不同 Binding 的图片准备保持并发，不增加全局 gate、semaphore 或 prompt queue。
+若 native steer 的等待被取消，Runtime 会先关闭 submission admission，因为底层同步
+RPC 可能仍在工作；不能把取消误判为无副作用。
+任一图片不可读或越界则整条不 start/steer。下载等待前捕获 submission admission，
+所以普通图片与引用查询一样不会在等待后改投另一个 Turn。固定 Channel SDK 会在
+调用方校验前完整读取飞书单资源（服务端最高 100 MB），data URL 与 native RPC JSON
+还会产生额外副本，且超时不能真正停止已经进入 worker thread 的阻塞读取；并发图片
+prompt 会线性放大该风险。Pilot 基于受控用户、低频小图接受这一限制，完整风险和迁移
+条件记录在 ADR 0015。群聊/话题 @准入和连续媒体不合并的语义保持不变。
+
+### 显式 Skill 调用与按需历史读取
+
+普通 text/post 请求开头的连续 `$skill-name` 引用由 Prompt compiler 在当前消息上解析。Runtime
+先捕获 exact admission，再按 canonical Project cwd 调用 live `skills/list`；每个名称
+必须唯一、enabled 且来自该 cwd 的目录，随后保留原文本并追加公开
+`SkillInput(name, path)`。多个 Skill 仍只对应一次 `turn()` 或一次 exact `steer()`；
+discovery 期间不持有 Binding 锁，返回后用 admission revision 防止任务状态被重解释。
+被引用历史中的 `$` 会在版本化 quote envelope 中编码为非激活文本，不能把历史内容
+变成当前 Skill 调用。
+
+安装器随版本提供 [netizen-lark Skill](../skills/netizen-lark/SKILL.md)，让 Agent 按当前
+`message_id` 主动查询飞书聊天／话题历史。Skill 无配套脚本，只说明如何让可选的 CLI
+选择 `~/.netizen/lark-app/config.json` 中的固定 `netizen` profile 并使用机器人身份；
+CLI 自行换取令牌，查询、分页和结果处理按上游 lark Skills 执行。应用凭据不进入 Prompt，
+无需修改用户默认 CLI 配置。上游 CLI 与 lark Skills 由用户另行安装，缺失不影响 Channel。
+当前会话消息固定使用 Netizen 机器人；其他场景沿用原有 lark Skills 与用户 CLI 配置，
+失败后可酌情尝试 Netizen 机器人凭证，具体身份使用范围由该 Skill 说明。
+当前消息不额外投影聊天或话题定位字段，需要时从 `message_id` 查询。该路径不改变
+当前消息投影、Scope/Binding、SQLite 或 catch-up reader，也不增加原生 MCP entry；见
+[README](../README.md#按需读取飞书历史)。
+
 ## 运行与锁
+
+### 锁与输入准入
 
 内存状态以 Binding ID 为键：普通 Turn 保存 handle、owner、origin message、
 running/stopping/turn-observation-unavailable 的单轴公开状态、completion task、receipt
@@ -376,6 +491,23 @@ persisted snapshot、cleanup barrier 与 receipt Event。Scope 锁只保护
 new/resume/active pointer 与 stale lifecycle 卡片校验；Binding 锁保护首次 start、
 steer、stop、compact、短暂的 rename/archive/delete/unarchive lifecycle 槽和 terminal
 cleanup。不同 Binding 不互锁，也没有全局/Project semaphore。
+
+Channel SDK 自带的 `ChatQueue` 只按 `chat_id` 串行，会把同一个话题群里的独立 topic
+错误地互相阻塞，因此 Pilot 明确关闭它。消息到达后由 Binding 锁决定 start、steer 或
+stopping reject；不同 topic/Binding 不互锁，也不增加 prompt queue。
+
+每条普通消息在调用 Codex 前都捕获 admission；逐条引用与图片消息随后再做有界 Channel
+读取。为避免准备期间丢失“running 消息 steer exact Turn”或 current Binding 语义，
+运行时在 Binding 锁内捕获
+`binding_id + admission_revision + exact thread/turn`，不持锁查询飞书，然后在提交
+时同锁校验并消费条件。revision 在 start/steer 前、每次 `/stop` 尝试、进入 stopping 和释放
+active Turn 时递增，因此 completion、stop、其他 prompt 以及 idle -> running -> idle
+ABA 都使延迟输入明确失败，不会转成新 Turn 或 steer 另一 Turn。
+Goal 启动、恢复和释放也推进 revision；原生 rollover 不依赖 Runtime revision，因此
+另校验 exact Thread 和 route 的物理 Turn。换轮按正常竞态拒绝，而不是关闭全服务。
+最终提交始终携带捕获的 expected Turn。
+
+### 普通会话订阅
 
 普通持久 Thread 的连接订阅按 [ADR 0028](adr/0028-release-idle-persistent-thread-subscriptions.md)
 由 Runtime 保存瞬态记录。当前 active Binding 每次原生操作精确回到 idle 后保留十五分钟
@@ -402,6 +534,8 @@ resume 返回的 handle 建立订阅记录。`/release` 只显式释放当前 ac
 也不表示 writer 立即释放：最后一个订阅者离开后，App Server 仍要求连续三十分钟没有订阅
 和活动才会卸载 Thread。
 
+### Side 运行与关闭
+
 Side 另有以 Side ID 为键的内存 Session registry 和独立锁/admission revision；它不占用
 Parent Binding 的 active 槽。idle 消息对同一 ephemeral `AsyncThread` 新建 Turn，running
 消息只 steer exact handle。引用、图片和 Skills 准备前捕获 Side revision，提交时防止
@@ -423,6 +557,20 @@ native admission，要求 transport 重启，且不得 cleanup/unsubscribe 后�
 Activity observer 和 Reply Card Presenter 只接收上述生命周期驱动的 best-effort 状态；
 卡片更新、折叠、删除或超时不进入 close 的 admission、interrupt、cleanup、unsubscribe 或
 tombstone 关键路径。Side 不进入 `/sessions`，不增加 archive/delete 语义。
+
+ephemeral Side 明确不复用[普通 Turn 的持久 history recovery](#普通-turn-终态与观测恢复)。Progress Card 关闭时 consumer 立即
+调用公开 `AsyncTurnHandle.run()`；开启时按 ADR 0052 只读观察 exact Turn 的 retained
+events。任一次 Activity 刷新（包括 steer 前刷新）观察到 `turn/completed` 后，在该
+active Turn 保留 `completion_notification_seen`，即使其他刷新已推进 cursor，consumer
+仍进入同一个 `handle.run()` 唯一 drain。
+该标记只触发 drain，终态仍由 `run()` 返回值确认。observer 不可用、cursor 回退、
+allowlisted shape 异常或原始通知保留数（包括被投影忽略的 delta）达到固定 4096 high
+water 时立即回退直接 `run()`。该阈值只限制原始通知保留数，
+不提供 wall-clock timeout 或 notification payload 的 byte 上界。Side 不轮询 history、不增加
+release gate，也不让 observer 成为终态权威；这个边界不删除或放宽普通持久 Thread 的现有
+恢复和 release probe。
+
+### 普通 Turn 停止与压缩
 
 running 时普通消息调用同一 handle 的 `steer()`；stopping 明确拒绝。steer 若恰好
 撞上完成，只提示重发。`/stop` 在 Binding 锁内先 interrupt 当前 active handle，再
@@ -447,6 +595,8 @@ Turn，不声称能终止原生压缩；`/status` 和 `/sessions` 显示 `compac
 completed/failed/interrupted 才释放。`compact()` 的公开 ACK 不含 Turn ID，因此同一
 native Thread 在该生命周期内不支持外部 CLI/App Server 并发写；检测到多个 candidate
 必须 fail closed。轮询只在 Thread idle 时读取完整 history，并以 10 分钟为终态上限。
+
+### Goal 物理 Turn 与逻辑终态
 
 Goal active 时，同一 Binding 的普通 Prompt 复用当前物理 Turn 的 exact steer
 （[ADR 0069](adr/0069-steer-the-current-physical-goal-turn.md)）；准备前捕获现有 revision
@@ -480,16 +630,7 @@ resume 只允许 persisted paused Goal，并固定执行 register route -> set a
 新物理 Turn。shutdown 不会对 `starting/unknown/external-active` 发起第二套 cleanup；
 最终 transport close 后才取消并关闭残留 consumer。
 
-每条普通消息在调用 Codex 前都捕获 admission；逐条引用与图片消息随后再做有界 Channel
-读取。为避免准备期间丢失“running 消息 steer exact Turn”或 current Binding 语义，
-运行时在 Binding 锁内捕获
-`binding_id + admission_revision + exact thread/turn`，不持锁查询飞书，然后在提交
-时同锁校验并消费条件。revision 在 start/steer 前、每次 `/stop` 尝试、进入 stopping 和释放
-active Turn 时递增，因此 completion、stop、其他 prompt 以及 idle -> running -> idle
-ABA 都使延迟输入明确失败，不会转成新 Turn 或 steer 另一 Turn。
-Goal 启动、恢复和释放也推进 revision；原生 rollover 不依赖 Runtime revision，因此
-另校验 exact Thread 和 route 的物理 Turn。换轮按正常竞态拒绝，而不是关闭全服务。
-最终提交始终携带捕获的 expected Turn。
+### SDK 适配边界
 
 穿透 `AsyncCodex` 高层 facade 的兼容边界分为三类，且都复用同一个 App Server，不
 启动第二客户端、不扫描或 signal 任意进程。ADR 0009 的 experimental terminal cleanup
@@ -515,6 +656,8 @@ lifecycle 合并，Channel Snapshot 会移除它。Goal 不读取该 event store
 unarchive 全部使用高层公开 API。原生名称、归档状态、plan 与终态仍以 Codex 为事实源，不
 增加本地 lifecycle 或 progress 状态列。
 
+### 原生归档与删除
+
 原生 archive 与 materialized delete 的准入事实是 Binding 指向 materialized、persisted、
 non-ephemeral Thread，而不是当前 Runtime activity 或 native idle。提交时在 exact Binding lock
 内只确认 Binding/native identity 并占用 lifecycle intent，然后释放 Binding/Scope lock，直接
@@ -534,6 +677,8 @@ intent。Delete 读取 rollout scan/state DB 的 active/archived 四视图；任
 Binding 并允许重新确认，全部 absent 才提交 Binding Delete。对账冲突、失败或超时只保留
 Binding-local `lifecycle-unknown`，不关闭其他 Binding 的 admission。调用取消不在已取消任务
 内追加目录 I/O，也直接进入相同的 Binding-local unknown。
+
+### 普通 Turn 终态与观测恢复
 
 普通持久 Binding 的终态不通过 pinned `handle.run()` 消费。运行时每 0.5 秒用
 `thread.read(include_turns=False)` 读取轻量 Thread status；普通稳态中，已曾确认 exact Turn
@@ -580,6 +725,10 @@ message 都来自 SDK 的公开 native Turn 模型，不创建外层 Turn 记录
 traceback；日志同时记录 exact IDs 与该摘要。错误摘要仅在当前内存观察槽存活，不写 SQLite。
 已确认终态后的公开 stream 用量/diff 收尾最多等待一秒；缺少 completion 通知时正常释放
 本轮并交付已知结果，用量按未获得更新处理，不因展示元数据重新进入观测不可用。
+
+## 回复与活动展示
+
+### 本轮文件证据与发送
 
 普通 Turn completed 后，按
 [ADR 0024](adr/0024-send-structured-turn-files-from-completion-cards.md)、
@@ -658,6 +807,19 @@ payload 解码。新 PAGE callback 固定携带 `pagination: select`，要求从
 完成瞬间版本；文件消失、变成非普通文件、关系异常或发送失败时保持原卡，并尽力在卡片
 话题回复错误，不降级到主聊天。
 
+本轮文件按钮也只使用公开 `send()`，但不创建或保存独立 Side route：它对 callback
+source card 固定 `reply_in_thread=True` 与 `reply_target_gone="fail"`。平面卡片响应必须
+返回非空 thread 且确认该卡片的 parent 关系；已有 topic 卡片必须返回同一个 thread ID，
+并接受飞书把 root/parent 归一到既有话题根。发送
+UUID 由卡片、sender、Binding、Turn、动作和 v4/v5 absolute path 确定，重复 callback
+不生成新的本地幂等状态。v5 分页只从 callback 恢复完整 Reply Card manifest 和目标页，
+既有 v4 分页仍从 callback 恢复回答与清单；两者都用公开 `update_card()` 写回完整 Card 2.0，
+不读取 source card，也不在 Channel
+Database 或进程内保存 card session。删除卡片、错误 230071 或任何关系不一致
+都不允许 fresh fallthrough。
+
+### 最终正文中的本地图片
+
 按 [ADR 0065](adr/0065-preview-local-images-in-result-markdown.md)，成功终态的 Result
 用 markdown-it-py 识别图片 token，直接读取引用的本地图片，通过公开 `upload_media`
 取得 `image_key` 后用 mdformat 输出 Markdown。相对路径使用该结果的 cwd；不要求图片
@@ -669,17 +831,7 @@ payload 解码。新 PAGE callback 固定携带 `pagination: select`，要求从
 不新增 post AST 转换或发送循环，分段、提及、话题路由与投递回执继续由原流程负责。
 Files 列表与“发送”不变：正文是上传时图片，按钮发送点击时内容。
 
-ephemeral Side 明确不复用上述持久 history recovery。Progress Card 关闭时 consumer 立即
-调用公开 `AsyncTurnHandle.run()`；开启时按 ADR 0052 只读观察 exact Turn 的 retained
-events。任一次 Activity 刷新（包括 steer 前刷新）观察到 `turn/completed` 后，在该
-active Turn 保留 `completion_notification_seen`，即使其他刷新已推进 cursor，consumer
-仍进入同一个 `handle.run()` 唯一 drain。
-该标记只触发 drain，终态仍由 `run()` 返回值确认。observer 不可用、cursor 回退、
-allowlisted shape 异常或原始通知保留数（包括被投影忽略的 delta）达到固定 4096 high
-water 时立即回退直接 `run()`。该阈值只限制原始通知保留数，
-不提供 wall-clock timeout 或 notification payload 的 byte 上界。Side 不轮询 history、不增加
-release gate，也不让 observer 成为终态权威；这个边界不删除或放宽普通持久 Thread 的现有
-恢复和 release probe。
+### 反馈设置与结束提及
 
 普通 Binding 每个新 Turn，以及 Goal start/resume，在 exact admission 中捕获当时的 Binding
 Task Feedback；Side 则在创建时一次性冻结 Parent 当时的 Task Feedback 并供所有 Side Turn
@@ -703,6 +855,8 @@ Goal 即使关闭进度卡也复用卡片，因此其独立结束提醒不受进
 [ADR 0048](adr/0048-integrate-side-turns-with-task-feedback-reply-cards.md)，表情语义修订见
 [ADR 0051](adr/0051-keep-lifecycle-reactions-and-make-pulse-optional.md)，Activity 事件所有权与
 安全投影见 [ADR 0052](adr/0052-project-safe-turn-activity-with-one-consumer.md)。
+
+### Activity 安全投影
 
 Runtime 为 exact Ordinary Active Turn 维护带 revision 的 Turn Activity Projection，并为
 Goal 当前 exact 物理 Turn 与 exact active Side Turn 暴露同样受限的 Activity Snapshot。
@@ -731,6 +885,8 @@ Progress Card 开启时，Runtime 的既有 consumer/poll loop 更新快照，Ch
 保持版本/源码指纹、generated shape、exact `thread_id + turn_id`、非消费 event store 和完整 plan
 replacement 门禁；只接受 ADR 0052 的事件白名单，未知事件忽略，白名单 shape 变化 fail
 closed，不能扩展成任意通知或私有 RPC gateway。
+
+### 回复卡片呈现
 
 唯一 Reply Card Presenter 接受固定顺序的 Goal、Activity、Result、Files typed modules，
 每次变化都重绘完整 Projection，模块不能各自持有或更新飞书消息。Goal、Activity 或 Files
@@ -762,6 +918,8 @@ execution。只有 Goal + Files 使用的 v5 callback
 `/goal` 只创建新的状态快照卡。Goal 初始卡失败提供可见文字回执；终态 Channel handoff
 整体有界，展示故障不能永久占住非 unknown Runtime slot。
 
+### 生命周期表情与终态投递
+
 Channel 按 exact native Turn ID 在内存管理普通/Side Turn 的 Lifecycle Reaction session。
 `Typing` 从 accepted 到终态常驻；只有 Reaction Pulse 开启时，`THINKING` 才首次显示
 2 秒、隐藏 13 秒后继续低频 pulse。每次
@@ -785,11 +943,6 @@ Channel 按 exact native Turn ID 在内存管理普通/Side Turn 的 Lifecycle R
 上游错误文本；它只将白名单审核类型（当前 `EMAIL_ADDRESS` 为“邮箱地址”）翻译为
 固定中文失败回执，并对同一 origin 补发一次。未知审核类型只说明“未通过飞书
 审核”；结果不确定或其他失败不自动补发，回执自身失败也只记录日志，不递归。
-
-首个 real prompt 调用 `thread_start` 后，先把返回的 native ID 原子写入 Binding，再
-发送首 Turn；写入失败或冲突时关闭新 admission，且不发送 prompt。每次 cleanup 前还
-会核对 handle Thread ID、`AsyncThread.id` 与 Binding 的 write-once native ID；若
-handle 回报不同 ID，关闭 admission 且不对不可信 handle 执行 interrupt/cleanup。
 
 ## 定时任务
 
@@ -939,6 +1092,8 @@ thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admis
 
 ## 数据与配置
 
+### Channel 数据库与结构校验
+
 `channel.sqlite3` 的 schema v12 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`，以及 `schedule_plans`、`schedule_runs`、`schedule_requests`。
 `dedup_keys` 直接实现 Channel SDK 冻结的 `seen/mark` DedupStore 协议。
@@ -969,6 +1124,32 @@ Skill catalog、原生 plan/checklist、Turn Activity Projection、reaction、Re
 queue 表，也不保存 Admin credential、session、action/CSRF token、native metadata 索引或
 audit record。
 
+文件数据库使用 WAL、`synchronous=FULL` 和有界 writer busy timeout。Admin 的 keyset
+分页查询只通过 Store-owned `query_only` connection 与单 worker executor 执行，SQL 有
+progress deadline 和提交前容量门禁；读事务不跨 `await`，也不会让 Web 自己成为第二个
+SQLite owner。Project 路径解析、存在性检查和建目录同样进入独立的有界 blocking-I/O
+executor。HTTP 断连只丢失响应，已经提交的 mutation/I/O 继续被跟踪到完成或 shutdown
+deadline，不据此声称回滚。
+
+### Project 登记与准入
+
+Project 是持久化的 `alias -> canonical absolute cwd`；每个 Binding 必须显式绑定
+Registry 中的一个 Project，不存在 default/unbound 或服务 cwd fallback。YAML mapping
+只做 `INSERT OR IGNORE` bootstrap；飞书卡片可登记已有绝对路径，或只在必填的
+`projectRoot` 内创建空目录。`/new` 可以从同 Scope 的现有 Binding 记录预选当前或最近
+使用且仍 enabled 的 Project，不另存 recent 状态；没有可推导偏好时必须由用户选择，
+没有 enabled Project 时引导 `/settings` 且不创建 Binding。停用阻止新 Binding 和定时触发，已有
+Binding 仍能继续。Admin 可按 [ADR 0060](adr/0060-delete-projects-with-exact-session-inventory.md)
+明确删除 Project 及完整关联 Sessions，成功后保留 Registry 墓碑；Netizen 从不删除目录。
+ADR 0061 将关联定时计划和仍在创建会话的定时执行纳入同一清单；提交即删除关联计划，
+后续部分失败或同名重新登记均不复活它们。
+它不做 workspace clone 或 Project ACL。
+用户和群的准入由飞书应用权限负责；Netizen 和 Channel SDK 不再配置
+user/chat/role allowlist。每个被投递到 Scope 的参与者都能管理 Binding、Project 和
+停止 active Turn，群聊/话题的消息命令仍逐条要求 @机器人。
+
+### 飞书应用凭据
+
 飞书应用初始化是 release 外的安装期流程，不是第二个运行时认证层；服务
 运行时不进入该流程，也不申请或持久化 user token。App ID 与 raw App Secret 的唯一来源为
 `~/.netizen/lark-app/config.json` 中固定名为 `netizen` 的 profile，目录为 `0700`，文件为
@@ -988,6 +1169,8 @@ Admin Upgrade 缺配置或权限时仍返回 `requires_action`，不在一次性
 App ID 改变后新消息进入新的 Scope
 namespace；旧 Binding 与原生历史保留但不迁移。device flow、凭据文件交接与安装期权限
 门禁的完整流程见 [部署文档](deployment.md)。
+
+### 部署事务与操作状态
 
 部署候选有两个显式来源：Published Release 携带发布流水线对 exact archive 的资格，Source
 Install 在目标机对当前工作区运行完整门禁。两者只在候选准备和本地 release identity 上
@@ -1032,121 +1215,9 @@ bytes。升级保留 schema 1 的目标版本/Release ID/两项 SHA-256；重启
 同一锁内成功完成事务后，可把旧未知记录改为 `recovered/manual_recovery`，保留原 operation
 与目标；这只证明后续部署恢复，不把原操作改报成功，实际运行版本另行显示。
 
-文件数据库使用 WAL、`synchronous=FULL` 和有界 writer busy timeout。Admin 的 keyset
-分页查询只通过 Store-owned `query_only` connection 与单 worker executor 执行，SQL 有
-progress deadline 和提交前容量门禁；读事务不跨 `await`，也不会让 Web 自己成为第二个
-SQLite owner。Project 路径解析、存在性检查和建目录同样进入独立的有界 blocking-I/O
-executor。HTTP 断连只丢失响应，已经提交的 mutation/I/O 继续被跟踪到完成或 shutdown
-deadline，不据此声称回滚。
+## 管理查询与操作
 
-Channel SDK 自带的 `ChatQueue` 只按 `chat_id` 串行，会把同一个话题群里的独立 topic
-错误地互相阻塞，因此 Pilot 明确关闭它。消息到达后由 Binding 锁决定 start、steer 或
-stopping reject；不同 topic/Binding 不互锁，也不增加 prompt queue。
-
-固定 `lark-channel-sdk==1.4.0` 的 `reply()` 对平面消息不会自动创建话题，且
-`SendOpts.reply_target_gone` 默认是 `fresh`。Side 因此只使用公开 `send()`：先 fresh
-root，再按需以 `reply_in_thread=True` promotion；promotion 固定 `fail`，防止根消息消失
-时假成功地降级为主线新消息。未知发送结果只用相同 UUID 做一次有界对账；P2P 建话题、
-五类入口的真实返回 shape 以及重复 UUID 的 exact identity 都是部署 live gate。错误 230071
-显式失败，单元 Fake 不能替代该验收。
-
-本轮文件按钮也只使用公开 `send()`，但不创建或保存独立 Side route：它对 callback
-source card 固定 `reply_in_thread=True` 与 `reply_target_gone="fail"`。平面卡片响应必须
-返回非空 thread 且确认该卡片的 parent 关系；已有 topic 卡片必须返回同一个 thread ID，
-并接受飞书把 root/parent 归一到既有话题根。发送
-UUID 由卡片、sender、Binding、Turn、动作和 v4/v5 absolute path 确定，重复 callback
-不生成新的本地幂等状态。v5 分页只从 callback 恢复完整 Reply Card manifest 和目标页，
-既有 v4 分页仍从 callback 恢复回答与清单；两者都用公开 `update_card()` 写回完整 Card 2.0，
-不读取 source card，也不在 Channel
-Database 或进程内保存 card session。删除卡片、错误 230071 或任何关系不一致
-都不允许 fresh fallthrough。
-
-固定 `lark-channel-sdk==1.4.0` 对纯文本话题根消息的 `post` AST 会保留一个渲染后的
-机器人 mention，导致命令前多出机器人名称。Channel 边界只修复这个可精确证明的
-情况：事件已标记 `mentioned_bot`，公开 bot identity 与首个 AST mention 节点一致，
-且当前资源已通过普通/富文本图片准入；不能按名称猜测或剥离其他人的 mention。
-1.4.0 新增的顶层 `post.files` 位于 locale AST 之外；普通文件会进入资源描述符，
-文件夹只渲染可见标签而没有资源描述符。当前消息因此直接检查公开
-`PostContent.post` 的顶层附件区，任何非空或无法解释的附件区都在进入 prompt 前
-失败关闭。文件、音视频等其他附件仍在进入 mention 适配前拒绝。升级 Channel SDK 时必须
-重跑根消息契约测试，原生行为修复后删除这段兼容逻辑。
-
-同一固定 SDK 还会丢掉非话题首层引用的 `ReplyRef`，因为它用
-`parent_id != root_id` 区分引用。[ADR 0011](adr/0011-support-feishu-quoted-message-context.md)
-用精确版本、公开 raw relation 和契约测试恢复这一种首层目标；任何非空
-`thread_id` 都优先解释为话题 Scope，不是逐条引用。被引用内容只通过
-Channel SDK 公开 typed fetch 读取：文本/富文本/卡片/结构化类型使用归一化
-可见文本，合并转发使用 SDK 公共 typed 树和渲染，再施加 ADR 0064 的全包边界；
-普通 `image` 与 `post` 图片读取真实像素，
-其他资源类型在内部 rich projection 保留公开 exact key 与元数据，模型可见 wire 只保留
-类型、名称、时长等可推理信息，
-`system`/未知类型 fail closed。卡片只支持 Card 2.0，Card 1.0 在各来源及转发子项中
-均明确拒绝，不以部分可见文本兜底。受支持卡片归一化只剩占位符时，才使用 SDK 公开
-quote-context fallback。锁定 SDK 1.4.0 若对 CardKit 2.0 返回空文本，只在精确
-版本门禁和结构/大小/深度边界内，从公共 `QuotedContext.raw` 投影 header/body 的
-可见文本节点；按钮值、确认弹窗、选项及事件不进入 prompt。两次 SDK 网络读取
-各自具有 10 秒单次请求预算，避免健康请求因共享总预算产生假超时。
-
-当前、引用和补充来源共享纯内容投影与顶层卡片补读。合并转发统一从校验、裁剪后的
-typed 树调用 SDK 渲染及提及解析，不回用入站原文；转发富文本正文与资源描述使用
-同一首选 locale 及非空 `content_v2` 优先的可见 AST。全包最多保留 50 个子消息节点、
-最终文本 16,000 字符，条数或文本截断传播到外层。最大嵌套深度为 3，最外层为
-depth=0，允许内嵌 depth=1..3；depth>3 或 SDK `max_depth_exceeded` 整条拒绝。
-保留的未知或不可渲染子项、loading/error 和循环结构同样明确拒绝。混合子项只提供可见文字/附件描述，
-明确未读图片像素、文件正文和音视频，不逐项下载资源或补读卡片。固定 SDK 会把隐藏
-交互字段内的文本节点混入卡片渲染，内容层对可确认情况拒绝；普通 scalar value 和可见
-label 允许，上游修复且契约与真实卡片验收通过后移除此限制。完整范围与移除条件见
-[ADR 0064](adr/0064-share-card-and-forward-content-projection.md)。
-
-引用投影是单层、文本最多 16,000 字符且 mention/资源描述各最多 64 项的 v4
-JSON envelope；被引用消息保持 ADR 0011 的宽类型矩阵，当前消息对象及
-完整请求始终在最后。supplemental/quoted 的模型可见 Historical Message 固定为本地 `hN`、
-类型、发送者 `display_name/open_id`、UTC ISO 8601 `created_at` 与 `text`，按需增加可解析的
-`reply_to`、`key/name` mention、精简附件和 true-only `truncated`。飞书应用可用范围与
-会话成员关系是准入边界；Channel SDK public `Mention.name` 为 optional，真实输入缺少
-key/name 映射时不输出残缺对象，并显式标记该历史消息 truncated；同名同类型但 exact
-身份不同的附件仍保留各自条目。exact
-message/chat/reply/shared-object ID、原始资源 key、读取
-状态和详细统计只留在内部 rich projection，不随历史 wire 进入 prompt。发送者身份仍保留
-app-scoped `open_id`，不投影 `union_id`/`user_id`；raw 事件/card JSON 不会整体复制。
-被引用消息自己的 reply 不递归读取，只有目标也在同一 envelope 时才投影为本地 `hN`；
-图片不保存到 SQLite、文件或长期 cache。超时、撤回、
-缺权限、返回 ID/chat 不一致和类型不支持都在 start/steer 前显式拒绝。
-引用、补充历史或图片准备期间若 `/resume`、`/new`、archive/unarchive 改变 Scope 的
-current Binding，已经捕获 admission 的消息也会明确失败并要求重发；它不会继续投递到旧
-Binding，更不会被重解释为新 current Binding 的 Turn/steer。
-
-当前消息、被引用消息和被选中的补充消息只要类型为普通 `image` 或 `post`，Channel 边界都会从公开
-普通资源描述与 typed `PostContent.post` 当前渲染版本收集真实图片节点，并按
-“补充、引用、当前”的稳定来源顺序和 label 转成 Codex 原生
-`TextInput/ImageInput` 列表。全部图片共享 prompt-local `imgN`；Historical Message 的
-`attachments[].ref`、fenced code 外的真实 Markdown 图片 target 和图片 label 使用同一
-ref，label 不暴露 exact message/resource ID。总计最多 20 张、单图 20 MB、原始字节合计 50 MB；
-每条 prompt 内串行下载，单图 10 秒、整批 60 秒，只接受 PNG/JPEG/GIF/WebP magic
-bytes。不同 Binding 的图片准备保持并发，不增加全局 gate、semaphore 或 prompt queue。
-若 native steer 的等待被取消，Runtime 会先关闭 submission admission，因为底层同步
-RPC 可能仍在工作；不能把取消误判为无副作用。
-任一图片不可读或越界则整条不 start/steer。下载等待前捕获 submission admission，
-所以普通图片与引用查询一样不会在等待后改投另一个 Turn。固定 Channel SDK 会在
-调用方校验前完整读取飞书单资源（服务端最高 100 MB），data URL 与 native RPC JSON
-还会产生额外副本，且超时不能真正停止已经进入 worker thread 的阻塞读取；并发图片
-prompt 会线性放大该风险。Pilot 基于受控用户、低频小图接受这一限制，完整风险和迁移
-条件记录在 ADR 0015。群聊/话题 @准入和连续媒体不合并的语义保持不变。
-
-Project 是持久化的 `alias -> canonical absolute cwd`；每个 Binding 必须显式绑定
-Registry 中的一个 Project，不存在 default/unbound 或服务 cwd fallback。YAML mapping
-只做 `INSERT OR IGNORE` bootstrap；飞书卡片可登记已有绝对路径，或只在必填的
-`projectRoot` 内创建空目录。`/new` 可以从同 Scope 的现有 Binding 记录预选当前或最近
-使用且仍 enabled 的 Project，不另存 recent 状态；没有可推导偏好时必须由用户选择，
-没有 enabled Project 时引导 `/settings` 且不创建 Binding。停用阻止新 Binding 和定时触发，已有
-Binding 仍能继续。Admin 可按 [ADR 0060](adr/0060-delete-projects-with-exact-session-inventory.md)
-明确删除 Project 及完整关联 Sessions，成功后保留 Registry 墓碑；Netizen 从不删除目录。
-ADR 0061 将关联定时计划和仍在创建会话的定时执行纳入同一清单；提交即删除关联计划，
-后续部分失败或同名重新登记均不复活它们。
-它不做 workspace clone 或 Project ACL。
-用户和群的准入由飞书应用权限负责；Netizen 和 Channel SDK 不再配置
-user/chat/role allowlist。每个被投递到 Scope 的参与者都能管理 Binding、Project 和
-停止 active Turn，群聊/话题的消息命令仍逐条要求 @机器人。
+### Admin HTTP 与认证
 
 Admin Web 是 ADR 0031 的单管理员、实例级控制面，默认监听 `0.0.0.0:8787`。socket 在
 Runtime 之前以 closed admission 绑定；Feishu、Store、Runtime 和管理 application 全部就绪
@@ -1156,6 +1227,24 @@ absolute deadline 5 秒、keep-alive 15 秒、request/header line 8 KiB、header
 64 KiB，并拒绝 pipelining 和 upload。未认证可读取的内容只有 login、登录页复用的无状态
 CSS 与无细节 readiness；未认证 GET `/` 只返回 303 重定向到 `/login`，不返回任何 HTML、
 JavaScript 或状态。HTML、JavaScript、API 和其他资源仍要求 session 并返回 401。
+
+Admin credential 来自绝对路径 `NETIZEN_ADMIN_SECRET_FILE`，解码后必须恰好 32 bytes；
+最终路径不得是 symlink，文件必须为普通文件且 mode 精确为 0600。认证状态完全在内存：
+session 不设闲置或绝对时间过期，退出登录、服务重启或合法 credential 轮换使其失效；
+浏览器 cookie 保持会话 cookie，不设 `Expires` / `Max-Age`。session 保留全局/逐来源容量
+上限，验证成功的新登录在逐来源已满时替换该来源最早签发的 session，否则在全局已满时
+替换全局最早签发的 session，并撤销其关联 action grants；失败登录不得驱逐已有 session。
+pre-auth nonce 不设时间过期，仍绑定来源、credential generation 和配对的 cookie/form，
+每次登录尝试只可消费一次。待提交 nonce 保留每来源 16 个、全局 1,024 个容量上限；
+新签发通过限速检查后，逐来源已满时替换该来源最早签发的 nonce，否则全局已满时替换
+全局最早签发的 nonce，避免遗留页面永久占满名额。该回收只影响待提交 nonce，不撤销
+session 或 action grants。一次性 action/CSRF grant 仍保留十分钟 TTL 和容量限制，登录
+继续限速；每次认证边界都会检测合法 credential 轮换并清空旧 bearer。
+Host 只接受启动时发现的本机地址/名称和 exact port，带 body 的 login 及所有 mutation 还要求
+同源 `Origin`，不信任 forwarded header。页面和 API 直接使用受信内网 HTTP，不实现 TLS、
+OIDC、多管理员或 RBAC。
+
+### 系统维护 API
 
 系统维护是 ADR 0057/0059 的实例部署页面，保留 `updates` 路由。`GET /api/v1/updates`
 读取当前安装来源、检查缓存与最近操作；`POST /api/v1/updates/check` 显式检查固定官方 GitHub latest API，
@@ -1182,21 +1271,7 @@ typed 安装结果显示成功/回滚；ready、连通和正在运行的版本�
 提示手动查看，不篡改部署终态或排队重试。升级与重启共享上述最近操作和安装锁；
 任一未完成或 `recovery_required` 记录都阻止两类提交。
 
-Admin credential 来自绝对路径 `NETIZEN_ADMIN_SECRET_FILE`，解码后必须恰好 32 bytes；
-最终路径不得是 symlink，文件必须为普通文件且 mode 精确为 0600。认证状态完全在内存：
-session 不设闲置或绝对时间过期，退出登录、服务重启或合法 credential 轮换使其失效；
-浏览器 cookie 保持会话 cookie，不设 `Expires` / `Max-Age`。session 保留全局/逐来源容量
-上限，验证成功的新登录在逐来源已满时替换该来源最早签发的 session，否则在全局已满时
-替换全局最早签发的 session，并撤销其关联 action grants；失败登录不得驱逐已有 session。
-pre-auth nonce 不设时间过期，仍绑定来源、credential generation 和配对的 cookie/form，
-每次登录尝试只可消费一次。待提交 nonce 保留每来源 16 个、全局 1,024 个容量上限；
-新签发通过限速检查后，逐来源已满时替换该来源最早签发的 nonce，否则全局已满时替换
-全局最早签发的 nonce，避免遗留页面永久占满名额。该回收只影响待提交 nonce，不撤销
-session 或 action grants。一次性 action/CSRF grant 仍保留十分钟 TTL 和容量限制，登录
-继续限速；每次认证边界都会检测合法 credential 轮换并清空旧 bearer。
-Host 只接受启动时发现的本机地址/名称和 exact port，带 body 的 login 及所有 mutation 还要求
-同源 `Origin`，不信任 forwarded header。页面和 API 直接使用受信内网 HTTP，不实现 TLS、
-OIDC、多管理员或 RBAC。
+### 会话目录与分页
 
 Projects、Sessions、Side Topics 都使用服务端 keyset cursor。Binding 查询先在 Channel-owned
 索引中过滤 Project、Scope kind、chat/topic/Binding/native ID、current 和时间。Sessions 页面
@@ -1255,6 +1330,8 @@ Sessions 每页只接受 10/20/50/100，默认 20；浏览器用 cursor
 完整 ID；100 行 Sessions 首屏由 Web adapter 分两批读取，浏览器五秒 polling 同样分片后
 合并，既不查 native catalog，也不签发 action token。
 
+### 运行态投影与轮询
+
 普通 Binding 的主状态由管理 application 的同一投影提供给飞书与 Admin：固定优先级为
 `lifecycle > Turn > compacting > process-local Goal > persisted Goal > idle`。Scope
 current/inactive、native active/archived/missing/Lazy 与进程订阅是独立事实轴；订阅状态不得
@@ -1282,6 +1359,8 @@ revision、本地活动或成功解析清除旧退避，手动刷新/翻页以�
 Stop 与 Release 的可见资格消费这份投影，Runtime exact primitive 仍是 mutation 的最终
 安全检查；Admin 的结果文案直接消费共享 `StopDisposition`/`ReleaseDisposition`。
 
+### 聊天名称与位置链接
+
 chat label 只解析当前页去重后的 `chat_id`。进程级 resolver 使用最多 4096 项的 LRU：成功
 结果保留 10 分钟，失败结果保留 30 秒，同 ID 并发请求合并且飞书查询并发最多 10；缓存不写
 SQLite，也不预取其他页。群聊和话题群使用公开 chat info 的 `name`/`chat_mode`，P2P 再使用
@@ -1294,6 +1373,8 @@ archived/missing/Lazy 与运行态。Sessions 的位置链接优先打开话题�
 `thread_position=-1`。判断不依赖 chat mode 或名称解析；无话题链接时使用原聊天 AppLink。
 URL 只在 Admin 响应中生成，不增加消息查询、CLI 运行依赖或持久存储，也不改变
 Scope/Binding/native Thread 身份。名称与 AppLink 都是当次管理展示事实。
+
+### 管理动作与确认
 
 所有 Web mutation 进入 `InstanceManagementService`，与飞书 controls 共用唯一
 `ScopeCoordinator` 和 Runtime exact primitive。每个列表 action 都携带 session-bound、短期、
@@ -1317,6 +1398,8 @@ Admin 继续使用既有认证与 action/CSRF grant。四类时间规则、时�
 未知状态阻塞及删除语义见[定时任务](#定时任务)；原生 Goal/plan/checklist
 不是定时计划。Side 保持原有 slash 白名单。
 
+### Project 删除与交接
+
 Project 删除是 ADR 0060/0061 的独立 action：二次确认展示 alias、完整关联 Sessions/Side、
 定时计划与在途定时创建数量、
 永久删除原生历史和保留 cwd 的后果，一次性 grant 固定 Project revision 与 exact 清单
@@ -1330,6 +1413,10 @@ Binding 和清单中的非终态 Side 均已移除、Side 与定时创建交接�
 清单也包括 Runtime 仍持有的 orphan Side，其 Project 归属不依赖 Parent Binding 仍存在。
 仍为 `creating` 的 Side 可能正在发布飞书 root/seed，本次操作报告创建未完成，保留停用
 Project，不能提前把 route 标成终态；发布/补偿完成后的清理必须重新预览并确认。
+
+## 飞书命令与控制卡片
+
+### Project 设置卡片
 
 `/settings` 和零参数 `/new` 使用 Card 2.0。Settings 是可扩展的分区界面，当前只
 显示已实现的 Projects 分区；分区由版本化回调选择，不保存当前分区或卡片 session。
@@ -1347,6 +1434,8 @@ card-session 状态。管理表单把 alias 与 revision 编码进静态下拉�
 Channel SDK 尚未透传的单选 change option，也不读取原始回调。Projects 卡片动作只
 执行短 SQLite 事务，不获取 Codex Turn 锁。
 
+### 可重复动作与传输去重
+
 固定 Channel SDK 当前用 source message、operator 和 action payload 组成 Card Action
 去重 identity；同一消息原地重绘后，如果可重复动作再次生成完全相同的 payload，会在
 SDK safety 层被当成旧投递。Netizen 因此只在可重复动作的公共按钮出口加入每次渲染新建的
@@ -1363,6 +1452,8 @@ UUID 保证重复点击不重复发消息，这些动作不加 nonce。SDK 改�
 应从这个公共生成出口整体下调该 workaround，不需要迁移业务 decoder。若第一次卡片更新本身
 失败而旧按钮留在原消息，nonce 也无法让同一份已消费 payload 再次通过 SDK，应重新发送原
 命令，不增加历史恢复状态。
+
+### 新建与配置表单
 
 `/new` 卡片只有一个创建 form：一个包含全部 enabled Projects 的 Project 下拉框，以及
 Model、Effort、Speed、Reaction Pulse、Progress Card 和 Completion Mention；群聊和群话题再增加 Mention
@@ -1387,6 +1478,8 @@ feedback revision 与 context revision 编码在版本化 option reference 中�
 Store transaction 内校验和保存，即使 active Binding 已切换、另一张卡先提交或 catch-up
 anchor 读取失败，旧卡也会零 mutation 地失败，不会部分保存。running Turn 仍明确拒绝
 `/config`；已开始 Turn 沿用 admission 时捕获的 Task Feedback。
+
+### 会话列表与生命周期控制
 
 `/sessions` 通过共享 Management 查询调用公开、只读且支持分页的
 `codex.thread_list(model_providers=[], use_state_db_only=True)` 跨 provider 读取原生 Thread 索引
@@ -1425,6 +1518,8 @@ persisted root。成功删除 root 时 spawned descendants 由 App Server 级联
 暂不可用，不会为了标题而 resume Thread。切换已成功但后续卡片刷新失败时发送等价成功
 反馈，不能把已提交 mutation 误报成失败。
 
+### 状态查询与用量
+
 `/status` 以一项一行展示当前 Binding、原生 `name`、首条消息 `preview`、Project、完整
 native Thread ID、运行状态、当前 active Turn checklist、已接受 steer 次数、上下文窗口
 用量、Model、Effort、Speed 和配置来源。若 Project cwd 位于 Git work tree 中，普通与
@@ -1450,6 +1545,8 @@ Turn 的 latest aggregate diff，只携带到 completion 文件发现，不参�
 stream 失败只影响 usage 展示和 diff 补充；structured items
 仍可作为文件 fallback，且 stream 不能取代或削弱 `thread.read()` 的 exact Turn 终态确认。
 
+### 状态查询中的 Activity
+
 checklist 来自 App Server 的完整 `turn/plan/updated`，每个有效事件整体替换旧计划，
 只接受同时匹配 current `thread_id + turn_id` 的 fixed generated payload。步骤映射为
 `✓ completed`、`→ inProgress`、`○ pending`，最多显示 12 项且单步折叠空白后最多 160
@@ -1472,11 +1569,10 @@ completed 只更新一个 identity-free 行，并把 `startedAtMs` 替换为 `co
 的 `date_num` 与 `time` 组合交给飞书客户端按查看者时区和语言渲染到分钟；旧 manifest 没有
 时间字段时保持无时间展示，不补造。
 
-commentary、plan step 等自由文本在进度卡、`/status` 与分页 callback 进入同一套有界的 common
-secret/token、邮箱、用户目录、内联代码/参数、百分比和 ETA 过滤。工具名是 SDK 已提供的名称，
-按原值投影并仅做 Markdown 转义。命令正文/输出、command action 的正文/路径/查询、工具参数/
-结果、MCP server、搜索词/URL、文件路径、diff、reasoning、delta 和 token usage 从不进入
-Activity。Activity 观察或展示失败不能改变 Turn、steer、stop、终态和最终回复。
+进度卡、`/status` 与分页 callback 共用[Activity 安全投影](#activity-安全投影)的内容边界与
+过滤规则。Activity 观察或展示失败不能改变 Turn、steer、stop、终态和最终回复。
+
+### 模型目录与配置校验
 
 若 Binding 有配置，三项通过 live 模型目录重新解析并标记为“Netizen 会话配置”；目录暂
 不可用时回退显示已保存的精确 ID，不让只读状态查询整体失败；目录可用但选项已下线时明确
@@ -1498,6 +1594,8 @@ Prompt 修改，本次操作失败。running/
 stopping Turn 同样拒绝，不转成 steer、queue 或延迟重放。卡片提交本身没有 Turn
 receipt/completion 生命周期；后续普通消息按该 Binding 保存的 Task Feedback 进入统一的
 reaction/progress presenter 与终态路径。
+
+### 命令注册与首次引导
 
 文本命令由统一注册表记录 owner（Channel/native/hybrid/host）、usage、alias 与能力
 状态，`/help` 只从可用条目生成。Model/Effort/Speed 只由 `/new` 和 `/config`
@@ -1536,6 +1634,10 @@ catalog 重新校验。`/goal`、`/goal <objective>`、`pause/resume/clear` 与�
 在 live probe 证明语义前明确拒绝。Plan collaboration control 与 Apps discovery 仍
 不可用且不进入帮助。
 
+## 原生环境与能力配置
+
+### 服务环境与受管 Skill
+
 服务使用 effective user 的账号 `HOME` 与 Standard CODEX_HOME（显式 `CODEX_HOME`
 优先，否则为 `$HOME/.codex`），并只创建一个 `AsyncCodex`。按 ADR 0023，它通过公开
 `CodexConfig` 固定 `allow_login_shell=false`，让工具使用 ADR 0022 已捕获的账号环境，
@@ -1547,14 +1649,16 @@ AsyncCodex 绑定，业务 admission 在完整初始化与调度恢复后开放�
 MCP namespace instructions 与工具 description 提供管理指引；新 Thread 的公开 API 默认 `auto_review`，不能完整继承
 Ask/Custom；其余配置不由 Netizen 覆盖。
 
-release 自带 `netizen-user-guide` 和 `netizen-lark` 两个原生 Skill，分别提供 Netizen
-使用咨询和应用 profile／当前消息入口，不进入 Channel command router，也不替代
-动态 `/help`。部署只拥有并全量替换 `$CODEX_HOME/skills` 下这两个目录；其他用户 Skill
-仍完全由用户维护。两者共同参与安装前快照、失败回滚和卸载。
+release 通过原生 Skill 提供 Netizen 使用咨询和应用 profile／当前消息入口，不进入
+Channel command router，也不替代动态 `/help`。受管目录由
+[安装清单](../scripts/install_managed_skill.py)定义，完整清单及快照、回滚和卸载边界统一见
+[部署文档](deployment.md#候选验证与切换)；其他用户 Skill 仍完全由用户维护。
 候选 venv 安装不产生这项外部副作用，只有 release 切换时的显式安装步骤会更新全局
 Skill，随后重启长期运行的 `AsyncCodex`。每次 SDK 升级的黑盒兼容测试必须通过公开
 `skills/list(forceReload)` 发现该 `$CODEX_HOME/skills` 路径；SDK 升级不能只根据最新版
 文档假定用户 Skill 根目录未变。
+
+### 原生配置与公开能力
 
 Netizen 不监听或复制 Codex 已生效配置；Binding 上只允许 ADR 0016 的持久客户端目录
 ID intent。Project config 的重载能力由锁定 SDK 的 compatibility probe 分类，当前
@@ -1568,7 +1672,9 @@ Runtime 的公开 resume/fork 显式使用 `include_turns=False`，省略仅供�
 这也是新版 paginated Parent 创建 ephemeral Side 的必要参数。模型 Effort 继续取自
 实时目录，SDK 的 `max`/`ultra` 仅在对应模型实际支持时可选。
 
-仓库锁定的 `openai-codex==0.154.0` 已公开 `models()`、Turn 级三项 override、
+SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和 [requirements.lock](../requirements.lock)
+为准；各版本的验证覆盖见[兼容性结论](deployment.md#已验证的兼容性结论)。当前接入使用公开
+`models()`、Turn 级三项 override、
 `compact()`、persisted Thread read、Thread rename/archive/unarchive 与 `SkillInput`，但
 没有公开 Thread delete、idle Thread settings read/update、完整 Goal、Plan collaboration
 control、Skills/Apps discovery、Side boundary inject、Thread unsubscribe、config 或 MCP
@@ -1577,9 +1683,9 @@ control、Skills/Apps discovery、Side boundary inject、Thread unsubscribe、co
 Observer；Plan 与 Apps
 仍显式 unavailable，`$app` 不被包装成
 结构化 attachment。不能增加通用 JSON-RPC gateway。
-每次 SDK/App Server 升级先运行 facade inventory、shape/synthetic harness 和
-Goal/Skills/Side/lifecycle/release live probes，再重跑 models、compact、completion、steer、
-interrupt cleanup、CLI resume 与 Linux compatibility；高层 surface 出现一项就迁移一项。
+SDK/App Server 升级的检查集合、触发条件和顺序统一见
+[代码门禁与按需实时兼容性验证](deployment.md#代码门禁与按需实时兼容性验证)；高层 surface
+出现一项就迁移一项。
 
 ## 失败语义
 

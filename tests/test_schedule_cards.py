@@ -21,59 +21,31 @@ from netizen.cards.scheduled import (
     SCHEDULE_CARD_JSON_LIMIT_BYTES,
 )
 from netizen.domain import FeishuScope, ScopeKind
-from netizen.model_settings import EffortOption, ModelCatalog, ModelOption, ServiceTierOption
+from netizen.model_settings import (
+    EffortOption,
+    ModelCatalog,
+    ModelOption,
+    ServiceTierOption,
+)
 from netizen.projects import Project
 from netizen.session_settings import SessionSettings
+from tests.support.channel_cards import (
+    callback,
+    elements,
+    form_values,
+    manager_form,
+    option_value,
+)
 
 
-def elements(value, tag):
-    found = []
-    if isinstance(value, dict):
-        if value.get("tag") == tag:
-            found.append(value)
-        for child in value.values():
-            found.extend(elements(child, tag))
-    elif isinstance(value, list):
-        for child in value:
-            found.extend(elements(child, tag))
-    return found
 
 
-def callback(card, label):
-    return next(button["behaviors"][0]["value"] for button in elements(card.card, "button")
-                if button.get("text", {}).get("content") == label)
 
 
-def form_values(card):
-    form = elements(card.card, "form")[0]
-    result = {}
-    for item in sum((elements(form, tag) for tag in ("input", "select_static", "multi_select_static", "date_picker", "picker_time")), []):
-        if item["tag"] == "input":
-            result[item["name"]] = item.get("default_value", "")
-        elif item["tag"] == "select_static":
-            result[item["name"]] = item.get("initial_option", "")
-        elif item["tag"] == "multi_select_static":
-            result[item["name"]] = item.get("selected_values", [])
-        elif item["tag"] == "date_picker":
-            result[item["name"]] = item.get("initial_date", "")
-        elif item["tag"] == "picker_time":
-            result[item["name"]] = item.get("initial_time", "")
-    return result
 
 
-def option_value(value):
-    return json.loads(base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)))
 
 
-def manager_form(card, form_name, *, option=None, plan_id=None):
-    form = next(item for item in elements(card.card, "form") if item["name"] == form_name)
-    select = elements(form, "select_static")[0]
-    value = select.get("initial_option", "")
-    if plan_id is not None:
-        value = next(item["value"] for item in select["options"] if option_value(item["value"]).get("plan_id") == plan_id)
-    elif option is not None:
-        value = next(item["value"] for item in select["options"] if item["value"] == option or option_value(item["value"]).get("filter") == option)
-    return {select["name"]: value}
 
 
 class ScheduleCardsTest(unittest.TestCase):

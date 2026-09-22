@@ -30,6 +30,25 @@ Admin JavaScript 行为测试使用 Node.js 22，请在完整开发门禁前确�
 不创建真实 Codex Thread，也不要求 Codex 登录。SDK 合同测试主要使用 fake App Server；
 受管 Skill discovery 另启动真实 bundled App Server 做只读发现。
 
+### 局部回归与共享测试支持
+
+局部回归使用与完整门禁相同的 discovery 根目录，通过文件名和用例名筛选：
+
+```bash
+.venv/bin/python -B -m unittest discover -s tests -p 'test_schedule_scope_matrix.py'
+.venv/bin/python -B -m unittest discover -s tests -p 'test_channel_app.py' -k quote
+```
+
+`-p` 选择测试文件，`-k` 进一步匹配用例名称；确认输出中的执行数量，避免筛选出零项。
+仓库尚有历史顶层测试导入，不将 `python -m unittest tests.<module>` 作为统一入口。
+局部回归用于快速验证受影响行为，提交前仍运行 `make check`。
+
+共享的 Channel 消息/Runtime fake、结果构造和场景装配归属 `tests/support/`，
+支持模块不反向导入 `test_*.py`。带资源的 fixture 通过 `async with` 或
+`IsolatedAsyncioTestCase.enterAsyncContext()` 交给调用者管理生命周期；测试之间不手工
+调用其他 TestCase 的 `asyncSetUp/asyncTearDown`。特定场景的故障注入和断言留在对应测试，
+已有支持代码按实际复用需要逐步迁入，不为单个用例建立通用框架。
+
 ## 本地运行
 
 启动 Netizen、执行真实 Turn 或运行 live probe 前，先确认运行账号的 Codex 登录有效。
