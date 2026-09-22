@@ -448,8 +448,11 @@ completed/failed/interrupted 才释放。`compact()` 的公开 ACK 不含 Turn I
 native Thread 在该生命周期内不支持外部 CLI/App Server 并发写；检测到多个 candidate
 必须 fail closed。轮询只在 Thread idle 时读取完整 history，并以 10 分钟为终态上限。
 
-Goal active 时同一 Binding 的普通 Prompt/steer、`/compact`、`/config` 和第二个 Goal
-都明确拒绝；其他 Binding 仍可并发。Goal pause 先确认 persisted status 为 paused，再
+Goal active 时，同一 Binding 的普通 Prompt 复用当前物理 Turn 的 exact steer
+（[ADR 0069](adr/0069-steer-the-current-physical-goal-turn.md)）；准备前捕获现有 revision
+与 exact Thread/物理 Turn，提交时换轮则明确拒绝，不改投、不排队。只允许本进程安全 route 上仍在
+RUNNING 的 Goal；启动、暂停、收尾、未知与外部 active 状态均拒绝。`/compact`、
+`/config` 和第二个 Goal 仍明确拒绝；其他 Binding 可并发。Goal pause 先确认 persisted status 为 paused，再
 中断 SDK route 当时给出的 exact 物理 Turn，最后复用 ADR 0009 的 exact-Thread terminal
 cleanup。pause、interrupt、cleanup 或 mutation 响应未知时槽位不释放，并按副作用范围
 fail closed。只有 SDK logical stream 正常终止、`goal/get` 为非 active、公开 Thread
@@ -484,6 +487,9 @@ resume 只允许 persisted paused Goal，并固定执行 register route -> set a
 时同锁校验并消费条件。revision 在 start/steer 前、每次 `/stop` 尝试、进入 stopping 和释放
 active Turn 时递增，因此 completion、stop、其他 prompt 以及 idle -> running -> idle
 ABA 都使延迟输入明确失败，不会转成新 Turn 或 steer 另一 Turn。
+Goal 启动、恢复和释放也推进 revision；原生 rollover 不依赖 Runtime revision，因此
+另校验 exact Thread 和 route 的物理 Turn。换轮按正常竞态拒绝，而不是关闭全服务。
+最终提交始终携带捕获的 expected Turn。
 
 穿透 `AsyncCodex` 高层 facade 的兼容边界分为三类，且都复用同一个 App Server，不
 启动第二客户端、不扫描或 signal 任意进程。ADR 0009 的 experimental terminal cleanup
@@ -700,9 +706,11 @@ Goal 即使关闭进度卡也复用卡片，因此其独立结束提醒不受进
 
 Runtime 为 exact Ordinary Active Turn 维护带 revision 的 Turn Activity Projection，并为
 Goal 当前 exact 物理 Turn 与 exact active Side Turn 暴露同样受限的 Activity Snapshot。
-投影包含 accepted 后的 running/stopping/pausing 状态、steer 次数、ADR 0020 的完整
-plan/checklist、最近四条 completed commentary、最近八个通用操作，以及文件修改和子任务
-的安全数量聚合。每条 commentary 和通用操作还携带 exact SDK item lifecycle 毫秒时间戳。
+投影包含 accepted 后的 running/stopping/pausing 状态、ADR 0020 的完整 plan/checklist、
+最近四条 completed commentary、最近八个通用操作，以及文件修改和子任务的安全数量聚合。
+steer 次数与动态清单过期提示仅用于普通/Side Turn；Goal 清单固定标明最近一次原生上报，
+可能尚未反映追加消息，不另行累计次数。每条 commentary 和通用操作还携带 exact SDK
+item lifecycle 毫秒时间戳。
 commentary 保留内部换行；CRLF/CR 统一为 LF，tab 展开为四个空格，其他不可展示控制字符
 替换为 Unicode replacement character。该布局规范化不折叠合法 Markdown 空白。
 命令使用 typed `commandActions` 的读取/列举路径或搜索查询和范围；原生分类未知、复合或

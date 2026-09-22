@@ -216,6 +216,22 @@ LaunchAgent 安装、启动和 ready 冒烟，不能用 CI 代替。
 模型提供方、飞书租户能力或服务环境时，只运行受影响的 phase。没有触及这些边界的迭代无需
 运行 live probe。
 
+2026-09-22 SDK/Goal 初版候选固定 SDK/CLI `0.155.1`，通过 `make check`（2045 项测试、
+编译、依赖检查和全部 SDK synthetic probes），以及下文 `probe_python_sdk.py` 的完整
+17 个原生 phase、Thread naming 和 Project delete probes。Goal phase 额外验证当前
+物理 Turn 可追加消息、resume 后旧 expected Turn 明确拒绝、新 Turn 的追加改变最终
+回复，同时保留原 Goal 文件 diff 与同 Thread 后续对话。两个 pinned adapter 的 SDK
+源码 fingerprint 不变，仅更新 exact version；其他能力仍按 shape 与行为门禁验收。
+最终卡片代码另通过全部 265 项 Channel 回归，覆盖未知追加回执保留已确认的最终回答，
+以及模型自行暂停时不误报已调用后台终端清理。
+随后精简 admission 的重复身份字段/校验与 Goal 展示状态，重新通过 `make check`
+（2040 项测试、编译、依赖检查及全部 SDK synthetic probes）。首次运行有一项既有
+普通 Turn 清理测试在 100ms 限制下超时，日志同时记录约 399ms 的事件循环延迟；
+未修改测试阈值，独立复跑及完整复跑均通过。此次收缩未改 SDK adapter 或原生生命周期，
+沿用上述 live 验证；Goal 清单静态说明及分页另通过全部 63 项卡片测试。
+本轮使用本机登录账号和隔离临时 Git cwd，不代表飞书客户端投递、目标主机安装或发布
+已经完成；没有部署或重启 Netizen 服务。
+
 macOS 系统不自带 GNU `timeout`；只在执行 live probes 时先用
 `brew install coreutils` 提供 `gtimeout`。最终用户安装和日常服务运行不依赖 Homebrew
 coreutils。下面的块会按平台选择命令，并在缺失时明确失败：
@@ -450,8 +466,10 @@ interrupt，并为 exact Thread 请求清理 App Server 已登记的后台 termi
 不自动创建计划或发消息。源码检查、传输替身、API 接受和客户端点击分别记录，不互相
 替代，也不把旧候选结果当作后来修改边界的验收结果。
 
-固定 SDK/CLI `0.154.0` 的原生兼容性覆盖 MCP、冷恢复/fork、dispatch 与手动触发；
-真实飞书链路的已验证版本仍为 `0.147.0`，不代表 `0.154.0` 的端到端验收：
+2026-09-22 SDK/CLI `0.155.1` 已通过 MCP、冷恢复/fork、dispatch 与手动触发四个
+原生 phase。四项均确认用户 MCP/Project trust 配置不变、自有原生资源已清理；
+未发送真实飞书消息。真实飞书链路的已验证版本仍为 `0.147.0`，不代表 `0.155.1`
+的端到端验收：
 
 - 生产 MCP 框架的真实 CRUD、同 cwd 不同 Thread 的调用身份，以及服务端地址/凭据
   轮换后的冷恢复与 fork。`params._meta.threadId` 可用于 exact Binding 默认值映射，
@@ -1484,8 +1502,11 @@ release 恢复；释放端口后再部署。以上真实浏览器、跨主机与
    disabled、重名或 stale 引用必须零 Codex mutation；引用消息历史里的 `$skill` 不得
    激活，当前消息的引用仍正常。
 7. 在已通过 zero-Turn live gate 的环境发送 `/goal <objective>`，只出现一张组合卡，并与
-   `/status`、`/sessions` 一致显示 Goal 状态；同一 Binding 的普通 Prompt、`/config`、
-   `/compact` 被拒绝。Progress Card 关闭时该卡只有 Goal/终态 Result/可选 Files，开启时
+   `/status`、`/sessions` 一致显示 Goal 状态；同一 Binding 的普通 Prompt steer 当前
+   exact 物理 Turn，`/config`、`/compact` 仍被拒绝。准备期间换轮必须明确拒绝旧目标，
+   不重投或新增 Turn；启动、暂停、收尾、unknown 与无安全 route 时仍拒绝。原生 Goal
+   phase 验证当前 Turn steer、resume 后旧 expected-ID 拒绝及新 Turn steer 改变结果。
+   Progress Card 关闭时该卡只有 Goal/终态 Result/可选 Files，开启时
    增加 Activity，且 start、rollover、pause、resume、terminal 都更新同一个 message ID；
    rollover 后 Activity 只显示新物理 Turn 的原生事件时间和操作信息。
    `/goal pause` 与 `/stop` 都先暂停 Goal、中断 exact 物理 Turn 并请求 terminal cleanup，

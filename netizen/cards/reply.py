@@ -673,6 +673,7 @@ def _render_reply_card_page(projection: ReplyCardProjection) -> OutboundCard:
                 terminal_status=activity.terminal_status,
                 expanded=not activity.collapsed,
                 hidden_steps=activity.hidden_steps,
+                goal=projection.goal is not None,
             )
         )
     if projection.result is not None:
@@ -980,6 +981,7 @@ def _turn_progress_panel(
     terminal_status: str | None,
     expanded: bool,
     hidden_steps: int = 0,
+    goal: bool = False,
 ) -> dict[str, Any]:
     status_label = _progress_status_label(snapshot, terminal_status)
     return {
@@ -1007,6 +1009,7 @@ def _turn_progress_panel(
             snapshot,
             status_label=status_label,
             hidden_steps=hidden_steps,
+            goal=goal,
         ),
     }
 
@@ -1034,6 +1037,7 @@ def _turn_activity_elements(
     *,
     status_label: str,
     hidden_steps: int = 0,
+    goal: bool = False,
 ) -> list[dict[str, Any]]:
     elements = [_plain(f"状态：{status_label}")]
     if snapshot.steer_count:
@@ -1082,7 +1086,9 @@ def _turn_activity_elements(
         return elements
 
     title = "**任务清单**"
-    if snapshot.plan_may_be_stale:
+    if goal:
+        title += "（最近一次原生上报，可能尚未反映追加消息）"
+    elif snapshot.plan_may_be_stale:
         title += "（可能尚未反映最近一次调整）"
     elements.append({"tag": "markdown", "content": title})
     visible = snapshot.steps[:_TURN_PROGRESS_MAX_STEPS]

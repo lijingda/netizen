@@ -19,6 +19,8 @@ from typing import Any, AsyncIterator, Protocol
 
 from openai_codex import AsyncCodex
 from openai_codex import _goal as _sdk_goal
+from openai_codex import _inputs as _sdk_inputs
+from openai_codex.errors import InvalidRequestError
 from openai_codex.generated import v2_all as _generated
 from openai_codex.models import Notification
 
@@ -148,6 +150,8 @@ class GoalHandle(Protocol):
     def thread_id(self) -> str: ...
 
     def current_physical_turn_id(self) -> str | None: ...
+
+    async def steer(self, input: Any, *, expected_turn_id: str) -> object: ...
 
     async def wait_terminal(
         self,
@@ -476,11 +480,30 @@ class AppServerGoalControl:
             "thread_goal_clear",
             "pause_goal",
             "turn_interrupt",
+            "turn_steer",
         ):
             if not callable(getattr(client, method_name, None)):
                 raise SdkGapCapabilityUnavailable(
                     f"goal SDK shape missing callable {method_name}"
                 )
+        if set(inspect.signature(client.turn_steer).parameters) != {
+            "thread_id", "expected_turn_id", "input_items"
+        }:
+            raise SdkGapCapabilityUnavailable("goal steer SDK signature changed")
+        for function_name in ("_normalize_run_input", "_to_wire_input"):
+            function = getattr(_sdk_inputs, function_name, None)
+            if not callable(function) or set(inspect.signature(function).parameters) != {
+                "input"
+            }:
+                raise SdkGapCapabilityUnavailable(
+                    f"goal input SDK shape changed for {function_name}"
+                )
+        steer_response_model = _generated_type("TurnSteerResponse", capability="goal")
+        _require_model_fields(
+            steer_response_model,
+            capability="goal",
+            aliases={"turn_id": "turnId"},
+        )
         get_response_model = _generated_type(
             "ThreadGoalGetResponse",
             capability="goal",
@@ -838,6 +861,35 @@ class _AppServerGoalHandle:
     def current_physical_turn_id(self) -> str | None:
         value = self._state.current_turn()
         return value if isinstance(value, str) and value else None
+
+    async def steer(self, input: Any, *, expected_turn_id: str) -> object:
+        """Steer only the captured physical Turn, without acquiring a stream."""
+
+        _trimmed_string(expected_turn_id, "expected physical Turn ID")
+        # Keep the facade's typed input conversion without constructing an
+        # AsyncTurnHandle: its constructor would acquire another subscription.
+        native_input = _sdk_inputs._to_wire_input(
+            _sdk_inputs._normalize_run_input(input)
+        )
+        try:
+            response = await self._client.turn_steer(
+                self.thread_id, expected_turn_id, native_input
+            )
+        except (asyncio.CancelledError, InvalidRequestError):
+            raise
+        except Exception as error:
+            raise GoalMutationStateUnknown(
+                "Codex Goal 追加消息结果未确认；不能自动重试。",
+                handle=self,
+                physical_turn_id=expected_turn_id,
+            ) from error
+        if getattr(response, "turn_id", None) != expected_turn_id:
+            raise GoalMutationStateUnknown(
+                "Codex Goal 追加消息响应的物理 Turn 无法确认。",
+                handle=self,
+                physical_turn_id=expected_turn_id,
+            )
+        return response
 
     async def wait_terminal(
         self,

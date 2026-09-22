@@ -2676,7 +2676,7 @@ class CodexRuntime:
                 raise SteerRace(
                     "准备本条消息期间 active 会话已切换，本条消息未执行，请重新发送。"
                 )
-            await self._guard_no_goal_locked(binding)
+            goal = await self._prompt_goal_locked(binding)
             binding = self._bindings.get(binding_id)
             if not binding.active:
                 raise SteerRace(
@@ -2701,8 +2701,14 @@ class CodexRuntime:
             return SubmissionAdmission(
                 binding_id=binding_id,
                 revision=self._admission_revision(binding_id),
-                thread_id=active.handle.thread_id if active is not None else None,
-                turn_id=active.handle.id if active is not None else None,
+                thread_id=(
+                    goal.thread_id if goal is not None
+                    else active.handle.thread_id if active is not None else None
+                ),
+                turn_id=(
+                    self._goal_steer_turn_id(goal) if goal is not None
+                    else active.handle.id if active is not None else None
+                ),
                 settings_revision=binding.settings_revision,
                 context_revision=binding.context_revision,
                 feedback_revision=binding.feedback_revision,
@@ -2798,6 +2804,8 @@ class CodexRuntime:
             self._bindings.require_scheduled_initial(initial_run_id, binding.id)
         if admission is not None and admission.binding_id != binding.id:
             raise ValueError("submission admission belongs to another Binding")
+        if admission is None and initial is None and binding.id in self._goals:
+            admission = await self.capture_submission_admission(binding.id)
         prepared_binding = self._bindings.get(binding.id)
         if not prepared_binding.active:
             raise SteerRace(
@@ -2894,8 +2902,6 @@ class CodexRuntime:
             raise ThreadCompacting(
                 "当前会话正在压缩上下文，完成前暂不接受新消息。"
             )
-        if binding.id in self._goals:
-            raise self._goal_slot_error(self._goals[binding.id])
         active = self._active.get(binding.id)
         if active is not None and active.state is ActiveState.STOPPING:
             raise ThreadStopping(
@@ -2935,7 +2941,11 @@ class CodexRuntime:
                 raise SteerRace(
                     "准备本条消息期间任务反馈配置已变化，本条消息未执行，请重新发送。"
                 )
-            await self._guard_no_goal_locked(binding)
+            if initial is not None:
+                await self._guard_no_goal_locked(binding)
+                goal = None
+            else:
+                goal = await self._prompt_goal_locked(binding)
             binding = self._bindings.get(binding.id)
             if not binding.active:
                 raise SteerRace(
@@ -2962,8 +2972,18 @@ class CodexRuntime:
                 binding_id=binding.id,
                 active=active,
                 admission=admission,
+                goal=goal,
             )
             self._advance_admission_revision(binding.id)
+            if goal is not None:
+                assert admission is not None and admission.turn_id is not None
+                return await self._steer_goal_locked(
+                    binding=binding,
+                    active=goal,
+                    expected_turn_id=admission.turn_id,
+                    input=native_input,
+                    context_commit=context_commit,
+                )
             if active is not None:
                 self._mark_thread_subscribed_locked(binding, active.thread)
                 self._refresh_turn_activity(active)
@@ -4077,6 +4097,65 @@ class CodexRuntime:
                 "原生 Thread 尚未持久化 path，当前不能启动或恢复 Goal。"
             )
 
+    async def _prompt_goal_locked(self, binding: ThreadBinding) -> _ActiveGoal | None:
+        active = self._goals.get(binding.id)
+        if active is None:
+            await self._guard_no_goal_locked(binding)
+            return None
+        return active
+
+    def _goal_steer_turn_id(self, active: _ActiveGoal) -> str:
+        if active.state is not GoalOperationState.RUNNING:
+            raise self._goal_slot_error(active)
+        if active.stream_terminal is not None or active.terminal_observed:
+            raise ThreadGoalActive("当前 Goal 正在收尾，本条消息未执行，请稍后重新发送。")
+        handle = active.handle
+        if handle is None or handle.id is None:
+            raise GoalStateUnknown("当前 Goal 缺少安全 route，本条消息未执行。")
+        turn_id = handle.current_physical_turn_id()
+        if turn_id is None:
+            raise SteerRace("Goal 当前物理 Turn 已结束或正在换轮，本条消息未执行，请重新发送。")
+        return turn_id
+
+    async def _steer_goal_locked(
+        self,
+        *,
+        binding: ThreadBinding,
+        active: _ActiveGoal,
+        expected_turn_id: str,
+        input: Any,
+        context_commit: ContextCursorCommit | None,
+    ) -> Submission:
+        handle = active.handle
+        assert handle is not None
+        try:
+            await handle.steer(input, expected_turn_id=expected_turn_id)
+        except asyncio.CancelledError:
+            # As with ordinary steer, cancelling the waiter cannot cancel the
+            # SDK's worker-thread mutation or prove non-delivery.
+            active.state = GoalOperationState.UNKNOWN
+            self.close_admission()
+            raise
+        except InvalidRequestError as error:
+            raise SteerRace(
+                "Goal 当前物理 Turn 已变化或不再接受输入，本条消息未执行，请重新发送。"
+            ) from error
+        except GoalMutationStateUnknown as error:
+            active.state = GoalOperationState.UNKNOWN
+            self.close_admission()
+            raise GoalStateUnknown(
+                "Goal 追加消息结果未确认；服务已停止接收新任务，不能自动重试。"
+            ) from error
+        self._commit_context_cursor_locked(binding=binding, commit=context_commit)
+        return Submission(
+            disposition=SubmitDisposition.STEERED,
+            binding_id=binding.id,
+            thread_id=active.thread_id,
+            turn_id=expected_turn_id,
+            task_feedback=active.task_feedback,
+            feedback_revision=active.feedback_revision,
+        )
+
     async def _guard_no_goal_locked(self, binding: ThreadBinding) -> None:
         active = self._goals.get(binding.id)
         if active is not None:
@@ -4133,7 +4212,7 @@ class CodexRuntime:
             )
         if active.state in {GoalOperationState.STARTING, GoalOperationState.RUNNING}:
             return ThreadGoalActive(
-                "当前 Goal 正在执行；普通 Prompt、/compact 和 /config 暂不可用。"
+                "当前 Goal 正在启动或执行；/compact、/config 和第二个 Goal 暂不可用。"
             )
         if active.state is GoalOperationState.PAUSING:
             return ThreadGoalActive("当前 Goal 正在暂停，完成前暂不接受新任务。")
@@ -6210,12 +6289,23 @@ class CodexRuntime:
                 persisted = await self._read_goal_terminal(active)
             active.persisted = persisted
             active.terminal_observed = True
+            async with self._lock(active.binding_id):
+                # The stream can finish before an in-flight steer RPC returns.
+                # Wait for its receipt before deciding whether this slot may
+                # be cleared/released; native terminal does not prove delivery.
+                if active.state is GoalOperationState.UNKNOWN:
+                    retain_active = True
+                    error = GoalStateUnknown(
+                        "Goal 消息或操作结果未确认；最终结果仍会展示，"
+                        "但会话保持占用，请重启后对账。"
+                    )
             while active.cleanup_required and not active.cleanup_succeeded:
                 await active.cleanup_ready.wait()
                 if not active.cleanup_succeeded:
                     active.cleanup_ready.clear()
             if (
-                persisted.status is GoalStatus.COMPLETE
+                not retain_active
+                and persisted.status is GoalStatus.COMPLETE
                 and active.final_turn_status == "completed"
             ):
                 try:
@@ -6724,8 +6814,11 @@ class CodexRuntime:
         binding_id: str,
         active: _ActiveTurn | None,
         admission: SubmissionAdmission | None,
+        goal: _ActiveGoal | None = None,
     ) -> None:
         if admission is None:
+            if goal is not None:
+                raise SteerRace("当前任务已变为 Goal，本条消息未执行，请重新发送。")
             return
         if admission.revision != self._admission_revision(binding_id):
             raise SteerRace(
@@ -6740,12 +6833,24 @@ class CodexRuntime:
             raise SteerRace(
                 "准备本条消息期间上下文边界已变化，本条消息未执行，请重新发送。"
             )
-        actual_thread_id = active.handle.thread_id if active is not None else None
-        actual_turn_id = active.handle.id if active is not None else None
+        actual_thread_id = (
+            goal.thread_id if goal is not None
+            else active.handle.thread_id if active is not None else None
+        )
+        actual_turn_id = (
+            self._goal_steer_turn_id(goal) if goal is not None
+            else active.handle.id if active is not None else None
+        )
         if (
             admission.thread_id != actual_thread_id
             or admission.turn_id != actual_turn_id
         ):
+            if goal is not None:
+                # Native Goal rollover is independent of Binding revisions.
+                # Reject the captured target, never rebase it to the new Turn.
+                raise SteerRace(
+                    "准备本条消息期间 Goal 物理 Turn 已变化，本条消息未执行，请重新发送。"
+                )
             self.close_admission()
             raise RuntimeError(
                 "submission admission state changed without a revision; "

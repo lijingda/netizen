@@ -1792,6 +1792,13 @@ async def _goal_live(cwd: Path) -> dict[str, Any]:
         )
         await asyncio.sleep(1)
         try:
+            first_steer_turn_id = handle.current_physical_turn_id()
+            if first_steer_turn_id is None:
+                raise AssertionError("Goal has no current physical Turn for steer")
+            await handle.steer(
+                "Continue the bounded first step; this is a supplemental user message.",
+                expected_turn_id=first_steer_turn_id,
+            )
             # A second SDK client has no local notification route for this
             # operation.  It must still observe the persisted active Goal
             # read-only, which is the live surface Runtime uses after restart
@@ -1812,6 +1819,23 @@ async def _goal_live(cwd: Path) -> dict[str, Any]:
             if paused is None or paused.status is not GoalStatus.PAUSED:
                 raise AssertionError("Goal pause was not persisted")
             resumed = await control.resume(thread.id)
+            resumed_steer_turn_id = resumed.current_physical_turn_id()
+            if resumed_steer_turn_id is None or resumed_steer_turn_id == first_steer_turn_id:
+                raise AssertionError("resumed Goal did not select a new physical Turn")
+            try:
+                await resumed.steer(
+                    "This stale input must not be delivered.",
+                    expected_turn_id=first_steer_turn_id,
+                )
+            except InvalidRequestError:
+                pass
+            else:
+                raise AssertionError("Goal steer silently accepted a stale expected Turn")
+            await resumed.steer(
+                "Keep the required file task, but replace the final reply with exactly "
+                "GOAL-LIVE-STEERED and complete the Goal.",
+                expected_turn_id=resumed_steer_turn_id,
+            )
             resumed_terminal = await asyncio.wait_for(
                 resumed.wait_terminal(),
                 timeout=300,
@@ -1862,6 +1886,12 @@ async def _goal_live(cwd: Path) -> dict[str, Any]:
 
         snapshot = await thread.read(include_turns=True)
         goal_turn_ids = [turn.id for turn in snapshot.thread.turns]
+        final_turn = next(
+            turn for turn in snapshot.thread.turns
+            if turn.id == resumed_terminal.final_physical_turn_id
+        )
+        if _final_response_from_turn(final_turn) != "GOAL-LIVE-STEERED":
+            raise AssertionError("Goal final response did not reflect supplemental input")
         followup = await thread.turn("Reply exactly: AFTER-GOAL-LIVE")
         followup_terminal = await _public_terminal_turn(thread, followup.id)
         followup_final = _final_response_from_turn(followup_terminal)
@@ -1873,6 +1903,10 @@ async def _goal_live(cwd: Path) -> dict[str, Any]:
             "first_logical_turn_id": handle.id,
             "first_physical_terminal_id": first_terminal.final_physical_turn_id,
             "pause_turn_id": pause.physical_turn_id,
+            "first_steer_turn_id": first_steer_turn_id,
+            "resumed_steer_turn_id": resumed_steer_turn_id,
+            "stale_steer_rejected": True,
+            "steer_changed_final_response": True,
             "external_active_read_only_reconcile": True,
             "resumed_logical_turn_id": resumed.id,
             "resumed_physical_terminal_id": resumed_terminal.final_physical_turn_id,
