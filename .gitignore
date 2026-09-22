@@ -12,6 +12,7 @@ deploy/netizen.env
 config.yaml
 /lark-app/
 /LOCAL_ENVIRONMENT.md
+/docs/research/
 *.db
 *.db-shm
 *.db-wal
