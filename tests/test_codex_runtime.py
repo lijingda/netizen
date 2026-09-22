@@ -101,6 +101,7 @@ from netizen.domain import (
 from netizen.model_settings import ModelCatalogError
 from netizen.sdk_gap_adapter import (
     DiscoveredSkill,
+    GoalMutationStateUnknown,
     GoalPauseAck,
     GoalSnapshot,
     GoalStatus,
@@ -690,6 +691,12 @@ class FakeGoalHandle:
         self.turn_diff: str | None = None
         self.activity_sink = None
         self.activity_updates: list[TurnActivityNotificationProjection] = []
+        self.steers: list[tuple[str, object]] = []
+        self.steer_error: BaseException | None = None
+        self.steer_gate: asyncio.Event | None = None
+        self.steer_started = asyncio.Event()
+        self.steer_accept_before_wait = False
+        self.wait_terminal_calls = 0
         self.record = SimpleNamespace(
             id=turn_id,
             status=FakeStatus("inProgress"),
@@ -702,9 +709,27 @@ class FakeGoalHandle:
         control.codex.goal_turns.append((self.thread_id, self.record))
 
     def current_physical_turn_id(self) -> str | None:
-        return self.id if self.record.status.value == "inProgress" else None
+        return self.record.id if self.record.status.value == "inProgress" else None
+
+    async def steer(self, input: object, *, expected_turn_id: str) -> object:
+        self.steers.append((expected_turn_id, input))
+        if self.steer_accept_before_wait:
+            if self.current_physical_turn_id() != expected_turn_id:
+                raise InvalidRequestError(-32600, "active Turn changed")
+        self.steer_started.set()
+        if self.steer_gate is not None:
+            await self.steer_gate.wait()
+        if self.steer_error is not None:
+            raise self.steer_error
+        if (
+            not self.steer_accept_before_wait
+            and self.current_physical_turn_id() != expected_turn_id
+        ):
+            raise InvalidRequestError(-32600, "active Turn changed")
+        return SimpleNamespace(turn_id=expected_turn_id)
 
     async def wait_terminal(self, activity_sink=None) -> GoalStreamTerminal:
+        self.wait_terminal_calls += 1
         self.activity_sink = activity_sink
         if activity_sink is not None:
             activity_sink(
@@ -4707,8 +4732,14 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         active = self.runtime.active_goal(binding.id)
         self.assertEqual(active.state, GoalOperationState.RUNNING)
         self.assertEqual(control.start_calls, [("native-1", "ship safely")])
-        with self.assertRaises(ThreadGoalActive):
-            await self.submit(self.store.get(binding.id), "ordinary prompt")
+        steered = await self.submit(self.store.get(binding.id), "ordinary prompt")
+        self.assertEqual(steered.disposition, SubmitDisposition.STEERED)
+        self.assertEqual(steered.turn_id, submission.logical_turn_id)
+        self.assertEqual(
+            control.handles[0].steers,
+            [(submission.logical_turn_id, "ordinary prompt")],
+        )
+        self.assertEqual(self.codex.turn_calls, [])
 
         control.handles[0].finish(response="goal final")
         await self.runtime.wait_idle()
@@ -4724,6 +4755,240 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(outcome.finalization_error)
         self.assertEqual(control.clear_calls, ["native-1"])
         self.assertIsNone(control.persisted)
+
+    async def start_fake_goal(self, binding=None):
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = binding or self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding,
+            cwd=self.cwd,
+            objective="keep working",
+            owner_id="ou_user",
+            origin=object(),
+        )
+        submission.release_receipt_attempt()
+        await asyncio.sleep(0)
+        return self.store.get(binding.id), control.handles[0], submission
+
+    async def test_goal_steer_after_rollover_reuses_typed_input_and_only_consumer(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        origin = self.runtime._goals[binding.id].origin
+        handle.rollover("physical-turn-2")
+        catalog = FakeSkillCatalog(fake_skills())
+        self.runtime._skill_catalog = catalog
+        inputs = [
+            TextInput("$code-review inspect"),
+            ImageInput("data:image/png;base64,AA=="),
+        ]
+        admission = await self.runtime.capture_submission_admission(binding.id)
+
+        steered = await self.runtime.submit(
+            binding=binding,
+            cwd=self.cwd,
+            input=inputs,
+            owner_id="another_user",
+            origin=object(),
+            admission=admission,
+            skill_names=("code-review",),
+        )
+
+        self.assertEqual(admission.turn_id, "physical-turn-2")
+        self.assertEqual(steered.disposition, SubmitDisposition.STEERED)
+        self.assertEqual(steered.turn_id, "physical-turn-2")
+        self.assertIsNone(steered.release_receipt_attempt)
+        self.assertEqual(handle.steers, [("physical-turn-2", [
+            *inputs, SkillInput("code-review", "/tmp/code-review/SKILL.md"),
+        ])])
+        self.assertEqual(handle.wait_terminal_calls, 1)
+        self.assertEqual(self.codex.turn_calls, [])
+        self.assertEqual(self.codex.model_calls, 0)
+        self.assertEqual(catalog.calls, [(self.cwd, True)])
+        handle.finish(response="same goal result")
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        self.assertEqual(len(self.outcomes), 1)
+        self.assertIs(self.outcomes[0].origin, origin)
+        self.assertEqual(self.outcomes[0].final_physical_turn_id, "physical-turn-2")
+
+    async def test_goal_prepared_input_rejects_rollover_and_between_turn_gap(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        for new_turn in (None, "physical-turn-2"):
+            with self.subTest(new_turn=new_turn):
+                admission = await self.runtime.capture_submission_admission(binding.id)
+                if new_turn is None:
+                    handle.record.status.value = "completed"
+                else:
+                    handle.rollover(new_turn)
+                with self.assertRaises(SteerRace):
+                    await self.submit(binding, "prepared text", admission)
+                if new_turn is None:
+                    with self.assertRaises(SteerRace):
+                        await self.runtime.capture_submission_admission(binding.id)
+                    handle.rollover("intermediate-turn")
+        self.assertEqual(handle.steers, [])
+        self.assertEqual(self.codex.turn_calls, [])
+        self.assertTrue(self.runtime._accepting)
+
+    async def test_goal_skill_preparation_does_not_retarget_next_physical_turn(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        catalog = FakeSkillCatalog(fake_skills())
+        catalog.gate = asyncio.Event()
+        self.runtime._skill_catalog = catalog
+        pending = asyncio.create_task(self.runtime.submit(
+            binding=binding, cwd=self.cwd, input="$code-review delayed",
+            owner_id="ou_user", origin=object(), skill_names=("code-review",),
+        ))
+        await asyncio.wait_for(catalog.called.wait(), timeout=1)
+        handle.rollover("physical-turn-2")
+        catalog.gate.set()
+        with self.assertRaises(SteerRace):
+            await pending
+        self.assertEqual(handle.steers, [])
+        self.assertEqual(self.codex.turn_calls, [])
+        self.assertTrue(self.runtime._accepting)
+
+    async def test_goal_native_steer_race_never_retries_or_starts_a_turn(self) -> None:
+        binding, handle, goal = await self.start_fake_goal()
+        handle.steer_gate = asyncio.Event()
+        pending = asyncio.create_task(self.submit(binding, "native race"))
+        await asyncio.wait_for(handle.steer_started.wait(), timeout=1)
+        handle.rollover("physical-turn-2")
+        handle.steer_gate.set()
+        with self.assertRaises(SteerRace):
+            await pending
+        self.assertEqual(handle.steers, [(goal.logical_turn_id, "native race")])
+        self.assertEqual(self.codex.turn_calls, [])
+        self.assertTrue(self.runtime._accepting)
+
+    async def test_goal_prepared_input_cannot_become_an_ordinary_turn_after_completion(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        handle.finish()
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        with self.assertRaises(SteerRace):
+            await self.submit(binding, "prepared before completion", admission)
+        self.assertEqual(handle.steers, [])
+        self.assertEqual(self.codex.turn_calls, [])
+        self.assertTrue(self.runtime._accepting)
+
+    async def test_goal_steer_catch_up_commits_only_after_native_acceptance(self) -> None:
+        binding, handle, _ = await self.start_fake_goal(self.catch_up_binding())
+        first_anchor = binding.context_anchor
+        handle.steer_error = InvalidRequestError(-32600, "already completed")
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        upper = MessageContextAnchor("om-goal-adjustment", 2_000)
+        with self.assertRaises(SteerRace):
+            await self.submit(binding, "rejected", admission, ContextCursorCommit(
+                admission.context_revision, upper,
+            ))
+        self.assertEqual(self.store.get(binding.id).context_anchor, first_anchor)
+        handle.steer_error = None
+        handle.steer_gate = asyncio.Event()
+        handle.steer_started.clear()
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        pending = asyncio.create_task(self.submit(
+            binding, "accepted", admission,
+            ContextCursorCommit(admission.context_revision, upper),
+        ))
+        await asyncio.wait_for(handle.steer_started.wait(), timeout=1)
+        self.assertEqual(self.store.get(binding.id).context_anchor, first_anchor)
+        handle.steer_gate.set()
+        await pending
+        self.assertEqual(self.store.get(binding.id).context_anchor, upper)
+        self.assertEqual(
+            self.store.get(binding.id).context_revision,
+            binding.context_revision + 1,
+        )
+
+    async def test_cancelled_goal_steer_closes_admission_without_replaying(self) -> None:
+        binding, handle, goal = await self.start_fake_goal()
+        handle.steer_gate = asyncio.Event()
+        pending = asyncio.create_task(self.submit(binding, "unknown acceptance"))
+        await asyncio.wait_for(handle.steer_started.wait(), timeout=1)
+        pending.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await pending
+        with self.assertRaises(RuntimeClosed):
+            await self.submit(binding, "must not retry")
+        self.assertEqual(handle.steers, [(goal.logical_turn_id, "unknown acceptance")])
+        self.assertEqual(self.codex.turn_calls, [])
+        handle.finish(
+            goal_status=GoalStatus.PAUSED, turn_status="interrupted",
+            response="authoritative paused response",
+        )
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        self.assertEqual(
+            self.runtime.active_goal(binding.id).state, GoalOperationState.UNKNOWN,
+        )
+        self.assertEqual(handle.control.clear_calls, [])
+        self.assertEqual(
+            self.outcomes[-1].final_response, "authoritative paused response",
+        )
+        self.assertIsInstance(self.outcomes[-1].error, GoalStateUnknown)
+
+    async def test_unconfirmed_goal_steer_retains_unknown_slot_without_retry(self) -> None:
+        binding, handle, goal = await self.start_fake_goal()
+        handle.steer_error = GoalMutationStateUnknown("response lost")
+        handle.steer_gate = asyncio.Event()
+        pending = asyncio.create_task(self.submit(binding, "unknown acceptance"))
+        await asyncio.wait_for(handle.steer_started.wait(), timeout=1)
+        handle.finish(response="authoritative complete response")
+        # Native completion may be observed while the mutation is still awaiting
+        # its receipt. It cannot clear or release the Goal past that in-flight RPC.
+        await asyncio.sleep(0)
+        self.assertEqual(handle.control.clear_calls, [])
+        handle.steer_gate.set()
+        with self.assertRaises(GoalStateUnknown):
+            await pending
+        self.assertEqual(
+            self.runtime.active_goal(binding.id).state, GoalOperationState.UNKNOWN,
+        )
+        self.assertFalse(self.runtime._accepting)
+        self.assertEqual(handle.steers, [(goal.logical_turn_id, "unknown acceptance")])
+        self.assertEqual(handle.pause_calls, 0)
+        self.assertEqual(self.codex.turn_calls, [])
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        self.assertEqual(
+            self.runtime.active_goal(binding.id).state, GoalOperationState.UNKNOWN,
+        )
+        self.assertEqual(handle.control.clear_calls, [])
+        self.assertEqual(
+            self.outcomes[-1].final_response, "authoritative complete response",
+        )
+        self.assertIsInstance(self.outcomes[-1].error, GoalStateUnknown)
+
+    async def test_goal_prepared_input_cannot_cross_pause_and_resume(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        self.assertEqual(
+            await self.runtime.stop(binding.id), StopDisposition.GOAL_REQUESTED,
+        )
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        resumed = await self.runtime.resume_goal(
+            binding=binding, owner_id="ou_user", origin=object(),
+        )
+        resumed.release_receipt_attempt()
+        with self.assertRaises(SteerRace):
+            await self.submit(binding, "old prepared input", admission)
+        self.assertEqual(handle.steers, [])
+        self.assertEqual(handle.control.handles[-1].steers, [])
+        self.assertEqual(self.codex.turn_calls, [])
+
+    async def test_goal_accepted_steer_receipt_keeps_original_turn_after_rollover(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        expected_turn_id = handle.current_physical_turn_id()
+        handle.steer_accept_before_wait = True
+        handle.steer_gate = asyncio.Event()
+        pending = asyncio.create_task(self.submit(binding, "accepted on original turn"))
+        await asyncio.wait_for(handle.steer_started.wait(), timeout=1)
+        handle.rollover("physical-turn-2")
+        handle.steer_gate.set()
+        steered = await pending
+        self.assertEqual(steered.disposition, SubmitDisposition.STEERED)
+        self.assertEqual(steered.turn_id, expected_turn_id)
+        self.assertEqual(handle.steers, [(expected_turn_id, "accepted on original turn")])
+        self.assertEqual(handle.current_physical_turn_id(), "physical-turn-2")
+        self.assertEqual(self.codex.turn_calls, [])
 
     async def test_paused_goal_holds_slot_until_terminal_delivery_finishes(
         self,
@@ -4757,6 +5022,9 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await delivery_entered.wait()
 
         self.assertIsNotNone(self.runtime.active_goal(binding.id))
+        with self.assertRaises(ThreadGoalActive):
+            await self.submit(self.store.get(binding.id), "during terminal handoff")
+        self.assertEqual(control.handles[0].steers, [])
         with self.assertRaises(ThreadGoalActive):
             await self.runtime.clear_goal(binding, expected_created_at=1)
         self.assertEqual(control.clear_calls, [])

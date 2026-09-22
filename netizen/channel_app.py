@@ -1920,10 +1920,23 @@ class ChannelApplication:
         status = goal.status.value if goal is not None else "unknown"
         if outcome.error is not None:
             detail = describe_error(outcome.error)
-            notice = f"Goal 未能确认终态：{detail}"
+            # Runtime fills these final fields only after its four-proof
+            # terminal check. An unknown steer receipt must not hide that
+            # confirmed answer or be mistaken for a successful receipt.
+            terminal_confirmed = (
+                goal is not None
+                and goal.status.terminal_or_paused
+                and outcome.final_physical_turn_id is not None
+                and outcome.final_turn_status in {"completed", "interrupted", "failed"}
+            )
+            notice = (
+                f"Goal 已结束，但操作结果未确认：{detail}"
+                if terminal_confirmed
+                else f"Goal 未能确认终态：{detail}"
+            )
             notice_is_error = True
             runtime_state = GoalOperationState.UNKNOWN.value
-            result_text = None
+            result_text = outcome.final_response if terminal_confirmed else None
         elif outcome.finalization is GoalFinalizationStatus.UNKNOWN:
             detail = (
                 describe_error(outcome.finalization_error)
@@ -1941,6 +1954,8 @@ class ChannelApplication:
             notice = (
                 "Goal 已暂停；已请求清理该 Thread 中已登记的后台终端。"
                 "前台工具进程不受此接口保证，可能仍在运行。"
+                if outcome.background_cleanup_requested
+                else "Goal 已暂停。"
             )
             notice_is_error = False
             runtime_state = f"goal-{status}"

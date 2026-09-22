@@ -15,6 +15,8 @@ their cited ADRs before changing that boundary.
 - Runtime, Scope/Binding identity, concurrency, Goal/Side lifecycle, and SDK
   adapters: [runtime semantics](docs/design.md#运行与锁) and
   [failure semantics](docs/design.md#失败语义).
+  Goal input retains exact physical-Turn admission across rollover
+  ([ADR 0069](docs/adr/0069-steer-the-current-physical-goal-turn.md)).
   Background Thread naming has its own failure and cleanup boundary in
   [ADR 0067](docs/adr/0067-name-threads-with-private-ephemeral-forks.md).
 - Message provenance, mention catch-up, Reply Cards, and Files:

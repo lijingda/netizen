@@ -7504,6 +7504,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 goal=self.runtime.goal_snapshot_after_stop,
                 final_physical_turn_id="turn-final",
                 final_turn_status="interrupted",
+                background_cleanup_requested=True,
             )
         )
 
@@ -7829,6 +7830,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         rendered = json.dumps(self.channel.updates[-1][1], ensure_ascii=False)
         self.assertIn("Goal 已暂停，未产生文本回复", rendered)
+        self.assertNotIn("已请求清理", rendered)
         self.assertIn(result_path, rendered)
 
     async def test_terminal_goal_fallback_card_clear_preserves_result_and_files(
@@ -8263,6 +8265,45 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("恢复 Goal", rendered)
         self.assertNotIn("结束 Goal", rendered)
         self.assertEqual(len(self.channel.replies), 1)
+
+    async def test_goal_steer_unknown_preserves_only_a_confirmed_final_answer(self) -> None:
+        await self.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        self.runtime.goal_snapshot_value = native_goal(GoalStatus.ACTIVE)
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id, "native-one", "goal-one", lambda: None,
+        )
+        self.channel.reply_results.append(
+            sent_result("om_goal_steer_unknown", chat_id="oc_direct")
+        )
+        await self.app.handle_message(
+            FakeMessage("/goal ship safely", message_id="om_goal_steer_origin")
+        )
+        origin = self.runtime.start_goal_calls[-1]["origin"]
+
+        for confirmed in (False, True):
+            with self.subTest(confirmed=confirmed):
+                await self.app.handle_completion(GoalOutcome(
+                    binding_id=binding.id,
+                    thread_id="native-one",
+                    logical_turn_id="goal-one",
+                    owner_id="ou_user",
+                    origin=origin,
+                    goal=native_goal(GoalStatus.COMPLETE),
+                    final_physical_turn_id="goal-turn-final",
+                    final_turn_status="completed" if confirmed else None,
+                    final_response="answer survives",
+                    error=GoalStateUnknown("steer response lost"),
+                ))
+                rendered = json.dumps(self.channel.updates[-1][1], ensure_ascii=False)
+                self.assertEqual("answer survives" in rendered, confirmed)
+                self.assertIn("goal-unknown", rendered)
+                self.assertIn("操作结果未确认" if confirmed else "未能确认终态", rendered)
+                self.assertNotIn("结束 Goal", rendered)
+                self.assertNotIn("恢复 Goal", rendered)
 
     async def test_goal_unknown_with_native_absent_keeps_frozen_status_and_rejects_clear(
         self,

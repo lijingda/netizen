@@ -11,7 +11,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 import openai_codex
-from openai_codex import AsyncCodex, CodexConfig
+from openai_codex import (
+    AsyncCodex,
+    CodexConfig,
+    ImageInput,
+    LocalImageInput,
+    SkillInput,
+    TextInput,
+)
+from openai_codex.errors import InvalidRequestError
 
 from netizen.sdk_gap_adapter import (
     AppServerGoalControl,
@@ -45,6 +53,7 @@ log_path = sys.argv[1]
 mode = sys.argv[2]
 goal_status = "paused" if mode in {"resume", "resume-loss", "clear", "clear-loss", "wrong-goal-thread"} else None
 objective = "existing objective"
+active_turn_id = "turn-1"
 
 def send(payload):
     sys.stdout.write(json.dumps(payload) + "\n")
@@ -215,7 +224,7 @@ for line in sys.stdin:
                     "turn/completed",
                     {"threadId": "thread-goal", "turn": turn(first, "completed")},
                 )
-            elif mode not in {"pause", "pause-loss", "interrupt-loss"}:
+            elif mode not in {"pause", "pause-loss", "interrupt-loss"} and not mode.startswith("goal-steer"):
                 notify(
                     "turn/completed",
                     {"threadId": "thread-goal", "turn": turn("turn-1", "completed")},
@@ -265,6 +274,38 @@ for line in sys.stdin:
             if mode == "pause-loss":
                 sys.exit(0)
             send({"id": request_id, "result": {"goal": goal(goal_status)}})
+    elif method == "turn/steer":
+        if mode == "goal-steer-loss":
+            sys.exit(0)
+        if params.get("expectedTurnId") != active_turn_id:
+            send({"id": request_id, "error": {
+                "code": -32600, "message": "expected Turn is no longer active",
+            }})
+            continue
+        if mode == "goal-steer-bad-receipt":
+            send({"id": request_id, "result": {"turnId": "wrong-turn"}})
+            continue
+        if mode == "goal-steer-malformed-receipt":
+            send({"id": request_id, "result": {}})
+            continue
+        accepted_turn_id = active_turn_id
+        if active_turn_id == "turn-1":
+            notify("turn/completed", {
+                "threadId": "thread-goal", "turn": turn("turn-1", "completed"),
+            })
+            active_turn_id = "turn-2"
+            notify("turn/started", {
+                "threadId": "thread-goal", "turn": turn("turn-2", "inProgress"),
+            })
+        else:
+            goal_status = "complete"
+            notify("thread/goal/updated", {
+                "threadId": "thread-goal", "goal": goal("complete"),
+            })
+            notify("turn/completed", {
+                "threadId": "thread-goal", "turn": turn("turn-2", "completed"),
+            })
+        send({"id": request_id, "result": {"turnId": accepted_turn_id}})
     elif method == "turn/interrupt":
         if mode == "interrupt-loss":
             sys.exit(0)
@@ -599,6 +640,118 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
         assert terminal.turn_diff is not None
         self.assertIn("final-latest", terminal.turn_diff)
 
+    async def test_goal_steer_preserves_typed_input_and_exact_turn_without_subscription(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            log_path = Path(raw) / "requests.jsonl"
+            async with AsyncCodex(_config(log_path, "goal-steer")) as codex:
+                process = codex._client._sync._proc
+                control = AppServerGoalControl(codex)
+                handle = await control.start("thread-goal", "ship safely")
+                self.assertEqual(handle.current_physical_turn_id(), "turn-1")
+                client_type = type(codex._client)
+                with (
+                    patch.object(
+                        client_type, "_subscribe_turn_notifications",
+                        side_effect=AssertionError("steer must not acquire a subscription"),
+                    ) as subscribe,
+                    patch.object(
+                        client_type, "next_goal_notification",
+                        side_effect=AssertionError("steer must not consume Goal events"),
+                    ) as consume,
+                ):
+                    first = await handle.steer(
+                        [
+                            TextInput("include these $code-review requirements"),
+                            ImageInput("data:image/png;base64,eA=="),
+                            LocalImageInput("/tmp/reference.png"),
+                            SkillInput("code-review", "/tmp/SKILL.md"),
+                        ],
+                        expected_turn_id="turn-1",
+                    )
+                    self.assertEqual(first.turn_id, "turn-1")
+                    self.assertEqual(handle.current_physical_turn_id(), "turn-2")
+                    with self.assertRaises(InvalidRequestError):
+                        await handle.steer("must not move to B", expected_turn_id="turn-1")
+                    second = await handle.steer("finish B", expected_turn_id="turn-2")
+                    self.assertEqual(second.turn_id, "turn-2")
+                    subscribe.assert_not_called()
+                    consume.assert_not_called()
+                terminal = await handle.wait_terminal()
+                self.assertEqual(handle.id, "turn-1")
+                self.assertEqual(terminal.final_physical_turn_id, "turn-2")
+            _close_probe_pipes(process)
+            messages = _messages(log_path)
+        requests = [item for item in messages if item.get("method") == "turn/steer"]
+        self.assertEqual(
+            requests[0]["params"],
+            {
+                "threadId": "thread-goal",
+                "expectedTurnId": "turn-1",
+                "input": [
+                    {"type": "text", "text": "include these $code-review requirements"},
+                    {"type": "image", "url": "data:image/png;base64,eA=="},
+                    {"type": "localImage", "path": "/tmp/reference.png"},
+                    {"type": "skill", "name": "code-review", "path": "/tmp/SKILL.md"},
+                ],
+            },
+        )
+        self.assertEqual(
+            [request["params"]["expectedTurnId"] for request in requests],
+            ["turn-1", "turn-1", "turn-2"],
+        )
+        self.assertEqual(requests[2]["params"]["input"], [{"type": "text", "text": "finish B"}])
+        self.assertEqual(
+            [item["method"] for item in messages if "id" in item],
+            [
+                "initialize", "thread/read", "thread/goal/clear", "thread/goal/set",
+                "turn/steer", "turn/steer", "turn/steer",
+            ],
+        )
+
+    async def test_goal_steer_unknown_receipt_never_retries_or_pauses(self) -> None:
+        for mode in (
+            "goal-steer-loss", "goal-steer-bad-receipt", "goal-steer-malformed-receipt"
+        ):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
+                log_path = Path(raw) / "requests.jsonl"
+                codex = AsyncCodex(_config(log_path, mode))
+                await codex.__aenter__()
+                process = codex._client._sync._proc
+                try:
+                    handle = await AppServerGoalControl(codex).start("thread-goal", "ship")
+                    with self.assertRaises(GoalMutationStateUnknown) as caught:
+                        await handle.steer("adjust", expected_turn_id="turn-1")
+                    self.assertIs(caught.exception.handle, handle)
+                    self.assertEqual(caught.exception.physical_turn_id, "turn-1")
+                finally:
+                    with suppress(BrokenPipeError):
+                        await codex.close()
+                _close_probe_pipes(process)
+                self.assertEqual(
+                    [item["method"] for item in _messages(log_path) if "id" in item],
+                    [
+                        "initialize", "thread/read", "thread/goal/clear",
+                        "thread/goal/set", "turn/steer",
+                    ],
+                )
+
+    async def test_goal_steer_invalid_input_fails_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            log_path = Path(raw) / "requests.jsonl"
+            async with AsyncCodex(_config(log_path, "goal-steer")) as codex:
+                process = codex._client._sync._proc
+                handle = await AppServerGoalControl(codex).start("thread-goal", "ship")
+                with self.assertRaises(TypeError):
+                    await handle.steer(object(), expected_turn_id="turn-1")
+                with self.assertRaises(ValueError):
+                    await handle.steer("input", expected_turn_id=" ")
+            _close_probe_pipes(process)
+            self.assertFalse(
+                any(item.get("method") == "turn/steer" for item in _messages(log_path))
+            )
+
     async def test_goal_resume_registers_route_without_clearing_goal(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             log_path = Path(raw) / "requests.jsonl"
@@ -809,6 +962,28 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                         AppServerSkillCatalog(codex),
                         AppServerSkillCatalog,
                     )
+                for method in (None, lambda self, thread_id, input: None):
+                    with self.subTest(turn_steer=method), patch.object(
+                        type(codex._client), "turn_steer", method
+                    ):
+                        with self.assertRaises(SdkGapCapabilityUnavailable):
+                            AppServerGoalControl(codex)
+                        self.assertIsInstance(AppServerSkillCatalog(codex), AppServerSkillCatalog)
+                for name in ("_normalize_run_input", "_to_wire_input"):
+                    for function in (None, lambda changed_input: None):
+                        with self.subTest(function=name, shape=function), patch(
+                            f"netizen.sdk_gap_adapter._sdk_inputs.{name}", function
+                        ):
+                            with self.assertRaises(SdkGapCapabilityUnavailable):
+                                AppServerGoalControl(codex)
+                            self.assertIsInstance(AppServerSkillCatalog(codex), AppServerSkillCatalog)
+                with patch(
+                    "netizen.sdk_gap_adapter._generated.TurnSteerResponse",
+                    type("MalformedResponse", (), {"model_fields": {}}),
+                ):
+                    with self.assertRaises(SdkGapCapabilityUnavailable):
+                        AppServerGoalControl(codex)
+                    self.assertIsInstance(AppServerSkillCatalog(codex), AppServerSkillCatalog)
                 with patch(
                     "netizen.sdk_gap_adapter._generated.TurnDiffUpdatedNotification",
                     None,

@@ -3323,6 +3323,12 @@ class CardRendererTest(unittest.TestCase):
                     if item.get("element_id")
                 }
                 self.assertEqual(element_ids, expected_ids)
+                visible_text = json.dumps(card.card, ensure_ascii=False)
+                self.assertNotIn("已接收调整", visible_text)
+                self.assertEqual(
+                    "最近一次原生上报，可能尚未反映追加消息" in visible_text,
+                    projection.goal is not None and projection.activity is not None,
+                )
 
         with self.assertRaisesRegex(ValueError, "same binding_id"):
             reply_card(
@@ -3480,6 +3486,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("generate reports", rebuilt_text)
         self.assertIn("敏感内容已隐藏", rebuilt_text)
         self.assertIn("报告已生成", rebuilt_text)
+        self.assertIn("最近一次原生上报，可能尚未反映追加消息", rebuilt_text)
         rebuilt_visible = "\n".join(
             element["content"]
             for element in _elements(rebuilt.card, "markdown")
