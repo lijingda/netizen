@@ -22,8 +22,23 @@ from netizen.runtime.contracts import (
 )
 from netizen.schedules.models import ScheduleRule
 
-from test_channel_app import FakeChannel, FakeMessage, StubRuntime, completed_turn_result, sent_result
-from test_schedule_cards import callback, elements, form_values, manager_form
+from tests.support.channel_messages import (
+    FakeChannel,
+    FakeMessage,
+)
+from tests.support.channel_runtime import (
+    StubRuntime,
+)
+from tests.support.channel_results import (
+    completed_turn_result,
+    sent_result,
+)
+from tests.support.channel_cards import (
+    callback,
+    elements,
+    form_values,
+    manager_form,
+)
 
 
 # Topic-mode chats carry a real topic ID even for a top-level user topic.

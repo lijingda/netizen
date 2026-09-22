@@ -21,7 +21,7 @@ from lark_channel import (
     flatten_content,
 )
 
-from netizen import channel_app
+from netizen.channel import input_preparation
 from netizen.bindings import BindingStore, SideTopicState
 from netizen.channel_app import ChannelApplication
 from netizen.codex_runtime import Submission, SubmitDisposition
@@ -43,13 +43,13 @@ from netizen.message_history import (
     MessageHistoryWindow,
 )
 from netizen.projects import ProjectRegistry
-from test_channel_app import (
+from tests.support.channel_messages import (
     FakeChannel,
     FakeMessage,
     FakeMessageHistory,
-    StubRuntime,
     plain_prompt_projection,
 )
+from tests.support.channel_runtime import StubRuntime
 
 
 def card_content(text: str) -> InteractiveContent:
@@ -807,7 +807,7 @@ class MessageMaterialInputTest(unittest.IsolatedAsyncioTestCase):
                 cancelled.set()
 
         with (
-            patch.object(channel_app, "_QUOTE_FETCH_TIMEOUT_SECONDS", 0.01),
+            patch.object(input_preparation, "_QUOTE_FETCH_TIMEOUT_SECONDS", 0.01),
             patch.object(
                 self.channel, "fetch_quoted_context", side_effect=never_returns
             ) as fetch,

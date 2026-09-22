@@ -216,21 +216,8 @@ LaunchAgent 安装、启动和 ready 冒烟，不能用 CI 代替。
 模型提供方、飞书租户能力或服务环境时，只运行受影响的 phase。没有触及这些边界的迭代无需
 运行 live probe。
 
-2026-09-22 SDK/Goal 初版候选固定 SDK/CLI `0.155.1`，通过 `make check`（2045 项测试、
-编译、依赖检查和全部 SDK synthetic probes），以及下文 `probe_python_sdk.py` 的完整
-17 个原生 phase、Thread naming 和 Project delete probes。Goal phase 额外验证当前
-物理 Turn 可追加消息、resume 后旧 expected Turn 明确拒绝、新 Turn 的追加改变最终
-回复，同时保留原 Goal 文件 diff 与同 Thread 后续对话。两个 pinned adapter 的 SDK
-源码 fingerprint 不变，仅更新 exact version；其他能力仍按 shape 与行为门禁验收。
-最终卡片代码另通过全部 265 项 Channel 回归，覆盖未知追加回执保留已确认的最终回答，
-以及模型自行暂停时不误报已调用后台终端清理。
-随后精简 admission 的重复身份字段/校验与 Goal 展示状态，重新通过 `make check`
-（2040 项测试、编译、依赖检查及全部 SDK synthetic probes）。首次运行有一项既有
-普通 Turn 清理测试在 100ms 限制下超时，日志同时记录约 399ms 的事件循环延迟；
-未修改测试阈值，独立复跑及完整复跑均通过。此次收缩未改 SDK adapter 或原生生命周期，
-沿用上述 live 验证；Goal 清单静态说明及分页另通过全部 63 项卡片测试。
-本轮使用本机登录账号和隔离临时 Git cwd，不代表飞书客户端投递、目标主机安装或发布
-已经完成；没有部署或重启 Netizen 服务。
+已执行的版本、覆盖范围及未覆盖边界统一记录在
+[兼容性结论](#已验证的兼容性结论)；本节维护检查命令与变更触发条件。
 
 macOS 系统不自带 GNU `timeout`；只在执行 live probes 时先用
 `brew install coreutils` 提供 `gtimeout`。最终用户安装和日常服务运行不依赖 Homebrew
@@ -487,8 +474,7 @@ interrupt，并为 exact Thread 请求清理 App Server 已登记的后台 termi
   不变、独立普通持久 Thread、exact initial Turn 完成与结果投递替身。它不代表真实
   飞书点击或客户端渲染已经通过。
 
-2026-09-21 手动触发候选通过 `make check`（2025 项测试、编译、依赖和 SDK synthetic
-检查），并以 `gpt-5.6-sol`、SDK/CLI `0.154.0` 通过 `--phase manual`：一次自然语言
+2026-09-21 以 `gpt-5.6-sol`、SDK/CLI `0.154.0` 通过 `--phase manual`：一次自然语言
 请求只产生一个手动 Run，计划指令/配置、暂停意图与时间游标保持不变，独立持久 Thread
 的首轮完成、屏障释放及测试传输回执均确认。探针所属原生资源已清理，用户 MCP 与
 Project trust 配置不变；本次没有真实飞书投递、客户端点击或目标主机安装回滚验收。
@@ -555,6 +541,20 @@ Goal 需分别验证进度卡开关两种配置：已有卡片更新后都应独
 验收或目标主机自己的 Host Validation。变更原因和验证摘要保留在 commit/PR 说明中，
 单次运行的日志、失败诊断和复验过程留在验证产物中。
 
+SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和
+[requirements.lock](../requirements.lock) 为准。以下证据保留实际验证时的版本；旧版本的
+结果不会自动变成新版本、真实飞书链路或目标主机的验收结论。定时任务另见
+[专属兼容性记录](#定时任务兼容性与验收)。
+
+2026-09-22 SDK/CLI `0.155.1` 已通过 `make check`，以及 `probe_python_sdk.py` 的完整
+17 个原生 phase、Thread naming 和 Project delete probes。Goal phase 额外验证当前
+物理 Turn 可追加消息、resume 后旧 expected Turn 明确拒绝、新 Turn 的追加改变最终
+回复，同时保留原 Goal 文件 diff 与同 Thread 后续对话。两个 pinned adapter 的 SDK
+源码 fingerprint 与前一验证版本相同，仅更新 exact version；其他能力仍按 shape 与行为门禁验收。
+相关本地回归覆盖追加回执未知时保留已确认的最终回答、模型自行暂停时不误报后台终端清理，
+以及 Goal 清单和分页。原生 probes 使用本机登录账号和隔离临时 Git cwd；本次证据不覆盖
+飞书客户端投递、目标主机安装或正式发布，也没有部署或重启 Netizen 服务。
+
 - SDK/CLI `0.154.0` 支持公开压缩终态确认及同连接、同 Thread 后续 Turn，`/compact`
   可用。唯一候选、启动前有界 baseline 与结果未知时的失败边界见 ADR 0013。
 - child/fileChange 支持新子任务 patch 归属、child→root 消息和 v2 空目标 wait；祖先
@@ -569,14 +569,14 @@ Goal 需分别验证进度卡开关两种配置：已有卡片更新后都应独
 - Project 删除的原生兼容性覆盖 mixed-sessions 与 orphan-Side；四视图 absent、
   Side 关闭、跨重启 tombstone 和 cwd 保留是验收要求。真实飞书 topic 与浏览器传输
   不在这项原生探针的覆盖范围内。
-- 当前 SDK `0.154.0` 的精确源码指纹为
+- SDK `0.154.0` 验证时的精确源码指纹为
   `9db021b08bbcc75f18206d64ecf8a7d5ba63b380d91181718a3c9153ed4a053f`。
   该值属于 ADR 0009/0020 的版本兼容门禁，不是某台主机的环境配置。
 - foreground tool process 不属于 background-terminal registry；
   `interrupt` 和 terminal cleanup 成功不证明前台进程已退出。
   `foreground_process_exited_within_5s=false` 是受支持分类，但 native Turn 必须进入
   `interrupted`、same-Thread resume 必须成功，probe 自己不得遗留 marker。
-- 当前 `0.154.0` 的 Project config 观测分类为 `hot-reloaded`：同进程及重启后均读取
+- SDK/CLI `0.154.0` 的 Project config 探针分类为 `hot-reloaded`：同进程及重启后均读取
   新配置，探针不修改用户全局配置。未来版本的 `restart-required` 仍可接受，但须更新
   兼容性结论。
 - sandbox probe 只报告 `workspace-write-or-full` 或 `read-only-or-denied` 的端到端
@@ -915,7 +915,8 @@ profile 只在候选 service 启动时加载：首次安装和原本 active 的�
 bind 仍是最终事实。预检通过后才渲染并验证平台 service definition，原子切换
 `current`，再用候选 release 完整替换
 `${CODEX_HOME:-~/.codex}/skills` 下的 `netizen-user-guide` 和 `netizen-lark`。
-这两个受管目录共同参与完整快照及失败回滚；人工修改会在升级时丢失，
+受管目录由 [install_managed_skill.py](../scripts/install_managed_skill.py) 的清单定义；
+这两个目录共同参与完整快照及失败回滚；人工修改会在升级时丢失，
 其他 Skill 不会被读取或修改。
 首次安装会 enable 并启动服务；升级前若服务在
 运行，新版本会启动并等待主进程发布 `0600` ready marker；若原本停止则保持当前会话停止。

@@ -11,24 +11,23 @@ from lark_channel.channel.safety.pipeline import SafetyPipeline
 from netizen.cards.scheduled import decode_schedule_action, schedule_form_card, schedule_manager_card
 from netizen.domain import FeishuScope, ScopeKind
 
-import test_scheduled_channel as fixtures
-from test_schedule_cards import callback, form_values
+from tests.support.channel_fixtures import scheduled_channel_fixture
+from tests.support.channel_cards import (
+    callback,
+    form_values,
+)
 
 
 class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.fixture = fixtures.ScheduledChannelTest()
-        await self.fixture.asyncSetUp()
+        self.fixture = await self.enterAsyncContext(scheduled_channel_fixture())
         self.gate = SafetyPipeline(loop=asyncio.get_running_loop(), on_message=lambda _: None)
+        self.addAsyncCleanup(self.gate.dispose)
         self.scope = FeishuScope("app", "oc_group", ScopeKind.TOPIC, "omt_retry")
         self.fixture.channel.fetched_messages["om_card"] = {"code": 0, "data": {"items": [{
             "message_id": "om_card", "chat_id": self.scope.chat_id, "thread_id": self.scope.topic_id,
         }]}}
         self.handler_calls = 0
-
-    async def asyncTearDown(self):
-        await self.gate.dispose()
-        await self.fixture.asyncTearDown()
 
     def new_form(self):
         card = schedule_form_card(self.scope, projects=self.fixture.projects.list(enabled_only=True), default_timezone="UTC")

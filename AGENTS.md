@@ -12,21 +12,35 @@ their cited ADRs before changing that boundary.
   For a system overview, see [engineering overview](docs/design.md#工程概览);
   domain vocabulary is in [CONTEXT.md](CONTEXT.md). The task-specific contracts
   and ADRs below remain the direct entry points for related changes.
-- Runtime, Scope/Binding identity, concurrency, Goal/Side lifecycle, and SDK
-  adapters: [runtime semantics](docs/design.md#运行与锁) and
+- Runtime, Scope/Binding identity and concurrency:
+  [identity](docs/design.md#scopebinding-与会话配置),
+  [locks and admission](docs/design.md#锁与输入准入),
+  [Turn observation](docs/design.md#普通-turn-终态与观测恢复), and
   [failure semantics](docs/design.md#失败语义).
+  Lifecycle-specific rules are in [Goal](docs/design.md#goal-物理-turn-与逻辑终态),
+  [Side](docs/design.md#side-运行与关闭),
+  [subscriptions](docs/design.md#普通会话订阅), and
+  [archive/delete](docs/design.md#原生归档与删除).
+  SDK compatibility boundaries are in [adapters](docs/design.md#sdk-适配边界).
   Goal input retains exact physical-Turn admission across rollover
   ([ADR 0069](docs/adr/0069-steer-the-current-physical-goal-turn.md)).
   Background Thread naming has its own failure and cleanup boundary in
   [ADR 0067](docs/adr/0067-name-threads-with-private-ephemeral-forks.md).
-- Message provenance, mention catch-up, Reply Cards, and Files:
-  [core model](docs/design.md#核心模型) and
-  [runtime projections](docs/design.md#运行与锁). Preserve the referenced
+- Message provenance, mention catch-up, quotes, and images:
+  [input preparation](docs/design.md#消息输入准备).
+  Reply Cards, Activity, completion mentions, and Files:
+  [presentation](docs/design.md#回复与活动展示).
+  Controls and form callbacks: [commands and cards](docs/design.md#飞书命令与控制卡片).
+  Preserve the referenced
   ADRs' exact identity, context, display, and file-evidence contracts.
-- SQLite, configuration, service environment, and Admin Web:
-  [data and configuration](docs/design.md#数据与配置).
+- SQLite and current schema policy: [data](docs/design.md#channel-数据库与结构校验).
+  App credentials: [credential source](docs/design.md#飞书应用凭据).
+  Service environment and native settings: [configuration](docs/design.md#原生环境与能力配置).
+  Admin Web: [queries and actions](docs/design.md#管理查询与操作), including
+  [runtime polling](docs/design.md#运行态投影与轮询).
   Project deletion uses the exact inventory, tombstone and lifecycle boundaries
-  in [ADR 0060](docs/adr/0060-delete-projects-with-exact-session-inventory.md).
+  in [the current contract](docs/design.md#project-删除与交接) and
+  [ADR 0060](docs/adr/0060-delete-projects-with-exact-session-inventory.md).
 - Scheduled Plans, dispatch, ordinary topic Threads, and the dedicated MCP
   management entry: [scheduled tasks](docs/design.md#定时任务) and
   [ADR 0061](docs/adr/0061-schedule-ordinary-threads-in-feishu-topics.md).
