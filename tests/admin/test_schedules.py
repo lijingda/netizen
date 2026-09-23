@@ -31,7 +31,7 @@ class FakeSchedules:
             "id": "plan-exact", "revision": 7, "name": "Daily report",
             "instructions": "Read the project.\nSummarize the changes.",
             "project_alias": "test", "app_id": "cli_test", "chat_id": "oc_target",
-            "enabled": True,
+            "enabled": True, "can_run_now": True,
             "schedule": {"kind": "daily", "at": "09:00", "timezone": "Asia/Shanghai"},
             "next_due_at": 1893488400,
         }
@@ -191,14 +191,15 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_manual_run_grants_and_submit_enforce_current_readiness_and_revision(self) -> None:
         session = await self.login()
-        for blocked in ({"inflight": True}, {"blocked_reason": "blocked_unknown"},
+        for blocked in ({}, {"inflight": True}, {"blocked_reason": "blocked_unknown"},
                         {"blocked_reason": "project_disabled"}, {"blocked_reason": "project_unavailable"}):
-            self.schedules.plan.update(inflight=False, blocked_reason=None)
+            self.schedules.plan.update(inflight=False, blocked_reason=None, can_run_now=False)
             self.schedules.plan.update(blocked)
             plan = (await self.page(session))["plans"][0]
             self.assertIsNone(plan["actions"]["run_now"])
             self.assertIsNotNone(plan["actions"]["update"])
-        self.schedules.plan.update(inflight=False, blocked_reason=None)
+            self.assertIsNotNone(plan["actions"]["delete"])
+        self.schedules.plan.update(inflight=False, blocked_reason=None, can_run_now=True)
         action = (await self.page(session))["plans"][0]["actions"]["run_now"]
         self.schedules.plan["revision"] += 1
         status, _, result = await self.json_post("/api/v1/schedules/run-now", session,
@@ -338,6 +339,35 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200, result)
         self.assertEqual(self.schedules.calls[-1][0]["session_settings"], {"progress_card_enabled": False})
         self.assertNotIn("native_thread_id", self.schedules.calls[-1][0])
+
+    async def test_binding_target_preview_create_and_automatic_pause_use_shared_service(self) -> None:
+        session = await self.login()
+        status, _, options = await self.json_get("/api/v1/schedules?mode=options&binding_query=project-one", session)
+        self.assertEqual(status, 200, options)
+        self.assertEqual(self.schedules.calls[-1], ({"mode": "options", "binding_query": "project-one"}, "admin"))
+        target = {"target_kind": "binding", "target_binding_id": "binding-exact"}
+        rule = self.schedules.plan["schedule"]
+        query = urlencode({"mode": "preview", **target, "schedule": json.dumps(rule)})
+        status, _, preview = await self.json_get(f"/api/v1/schedules?{query}", session)
+        self.assertEqual(status, 200, preview)
+        self.assertEqual(self.schedules.previews[-1], {**target, "schedule": rule})
+        create = (await self.page(session))["actions"]["create"]
+        definition = {**target, "name": "继续检查", "instructions": "检查原问题", "schedule": rule}
+        status, _, result = await self.json_post("/api/v1/schedules/create", session, {
+            **fixture._action_payload(create), "definition": definition,
+        })
+        self.assertEqual(status, 200, result)
+        submitted, source = self.schedules.calls[-1]
+        self.assertEqual(source, "admin")
+        for key, value in definition.items():
+            self.assertEqual(submitted[key], value)
+        self.assertFalse({"project", "chat_id", "session_settings", "native_thread_id"} & submitted.keys())
+        self.schedules.plan.update(**target, enabled=True, blocked_reason="target_inactive", can_run_now=False)
+        plan = (await self.page(session))["plans"][0]
+        self.assertTrue(plan["enabled"])
+        self.assertEqual(plan["target_binding_id"], "binding-exact")
+        self.assertIsNone(plan["actions"]["run_now"])
+        self.assertIsNotNone(plan["actions"]["update"])
 
     async def test_project_delete_exposes_plans_and_unresolved_dispatch_counts(self) -> None:
         self.management.preview_project_delete = AsyncMock(return_value=SimpleNamespace(

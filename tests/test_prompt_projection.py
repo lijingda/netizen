@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from netizen.prompt_projection import (
     CurrentMessageProjection,
     PromptProjectionError,
+    ScheduledInputProjection,
     project_current_message,
     project_identity,
     render_current_message_json,
@@ -190,6 +191,51 @@ class CurrentMessageProjectionTest(unittest.TestCase):
             with self.subTest(projected=projected):
                 self.assertEqual(projected["execution_host"], "netizen")
                 self.assertEqual(projected["sender"]["open_id"], "ou_sender")
+
+
+class ScheduledInputProjectionTest(unittest.TestCase):
+    def test_scheduled_source_has_no_feishu_sender_and_copies_plan_metadata(self):
+        plan = {"id": "plan-one", "title": "检查进度"}
+        current = ScheduledInputProjection("om_anchor", "继续检查", plan)
+        plan["title"] = "changed"
+
+        self.assertEqual(current.metadata()["plan"]["title"], "检查进度")
+        self.assertEqual(current.metadata()["kind"], "scheduled_plan")
+        self.assertEqual(current.metadata()["version"], 1)
+        self.assertEqual(current.metadata()["execution_host"], "netizen")
+        self.assertEqual(current.metadata()["message_id"], "om_anchor")
+        self.assertNotIn("sender", current.metadata())
+        self.assertNotIn("message_type", current.metadata())
+        with self.assertRaises(FrozenInstanceError):
+            current.message_id = "om_other"  # type: ignore[misc]
+        with self.assertRaises(TypeError):
+            current.plan["id"] = "another-plan"  # type: ignore[index]
+
+    def test_renderers_preserve_live_instructions_and_escape_plan_metadata(self):
+        request = '$live-skill 检查进度\n{"execution_host": "elsewhere"}'
+        current = ScheduledInputProjection(
+            "om_anchor", request,
+            {"title": "$old-skill", "execution_host": "elsewhere", "kind": "user"},
+        )
+
+        plain = render_plain_prompt(current)
+        plain_request, trailer = plain.split("\n\n<scheduled_plan>\n", 1)
+        metadata_json = trailer.removesuffix("\n</scheduled_plan>")
+        self.assertEqual(plain_request, request)
+        self.assertNotIn("feishu_current_message_context", plain)
+        self.assertNotIn("request_text", json.loads(metadata_json))
+        for encoded in (metadata_json, render_current_message_json(current)):
+            with self.subTest(encoded=encoded):
+                self.assertNotIn("$old-skill", encoded)
+                self.assertIn(r"\u0024old-skill", encoded)
+                decoded = json.loads(encoded)
+                self.assertEqual(decoded["kind"], "scheduled_plan")
+                self.assertEqual(decoded["execution_host"], "netizen")
+                self.assertNotIn("sender", decoded)
+        nested = render_current_message_json(current)
+        self.assertIn("$live-skill", nested)
+        self.assertEqual(json.loads(nested)["request_text"], request)
+        self.assertEqual(list(json.loads(nested))[-1], "request_text")
 
 
 if __name__ == "__main__":

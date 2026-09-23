@@ -47,7 +47,9 @@ from ..message_projection import (
 )
 from ..prompt_projection import (
     CurrentMessageProjection,
+    MessageInputProjection,
     PromptProjectionError,
+    ScheduledInputProjection,
     project_current_content,
     render_plain_prompt,
 )
@@ -96,10 +98,14 @@ class MessageInputPreparer:
         *,
         source_message: Any,
         quoted_target_id: str | None,
-        current: CurrentMessageProjection,
+        current: MessageInputProjection,
         current_images: tuple[ImageReference, ...] = (),
     ) -> PreparedInput:
         """Prepare current-only input, including its optional explicit quote."""
+
+        self._validate_scheduled_material(current, quoted_target_id, current_images)
+        if isinstance(current, ScheduledInputProjection):
+            return PreparedInput(native_input=render_plain_prompt(current))
 
         try:
             current_fallback = await self._prepare_message_content(
@@ -152,6 +158,7 @@ class MessageInputPreparer:
             )
             prompt_text = render_plain_prompt(rendered_current)
             if quoted is not None:
+                assert isinstance(rendered_current, CurrentMessageProjection)
                 prompt_text = compose_quoted_prompt(
                     quoted,
                     rendered_current,
@@ -196,12 +203,17 @@ class MessageInputPreparer:
         lower: MessageContextAnchor,
         upper_id: str,
         quoted_target_id: str | None,
-        current: CurrentMessageProjection,
+        current: MessageInputProjection,
         current_images: tuple[ImageReference, ...] = (),
         message_history: MessageHistoryReader | None,
     ) -> PreparedInput:
         """Prepare a bounded history window and return its exact upper anchor."""
 
+        self._validate_scheduled_material(current, quoted_target_id, current_images)
+        if isinstance(current, ScheduledInputProjection) and upper_id != current.message_id:
+            raise PromptProjectionError(
+                "定时输入的上下文边界与触发消息不一致，本条消息未执行。"
+            )
         reader = message_history
         if reader is None:
             raise MessageHistoryUnavailable(
@@ -210,8 +222,10 @@ class MessageInputPreparer:
 
         try:
             async with asyncio.timeout(_CONTEXT_PREPARATION_TIMEOUT_SECONDS):
-                current_fallback = await self._prepare_message_content(
-                    source_message, source="current",
+                current_fallback = (
+                    await self._prepare_message_content(source_message, source="current")
+                    if isinstance(current, CurrentMessageProjection)
+                    else None
                 )
                 window = await reader.read_window(scope, lower, upper_id)
                 fetched = await self._fetch_history_candidates(
@@ -569,12 +583,14 @@ class MessageInputPreparer:
     def _render_current_content(
         self,
         message: Any,
-        current: CurrentMessageProjection,
+        current: MessageInputProjection,
         *,
         fallback_text: str | None,
         images: Sequence[Any],
         image_prompt_refs: ImagePromptReferences,
-    ) -> CurrentMessageProjection:
+    ) -> MessageInputProjection:
+        if isinstance(current, ScheduledInputProjection):
+            return current
         current = project_current_content(
             message,
             current,
@@ -594,6 +610,19 @@ class MessageInputPreparer:
                 image_prompt_refs=image_prompt_refs,
             ),
         )
+
+    @staticmethod
+    def _validate_scheduled_material(
+        current: MessageInputProjection,
+        quoted_target_id: str | None,
+        current_images: tuple[ImageReference, ...],
+    ) -> None:
+        if isinstance(current, ScheduledInputProjection) and (
+            quoted_target_id is not None or current_images
+        ):
+            raise PromptProjectionError(
+                "定时输入不能把触发消息的引用或图片当作任务材料，本条消息未执行。"
+            )
 
     @staticmethod
     def _prepared_image_keys(

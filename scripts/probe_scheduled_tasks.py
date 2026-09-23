@@ -121,9 +121,10 @@ class FakeFeishu:
 
     bot_identity = SimpleNamespace(open_id="probe-bot", name="Schedule probe")
 
-    def __init__(self) -> None:
+    def __init__(self, *, create_topics: bool = True) -> None:
         self.sent: dict[str, object] = {}
         self.replies = 0
+        self.create_topics = create_topics
 
     async def get_chat_info(self, chat_id: str) -> object:
         return SimpleNamespace(chat_type="group")
@@ -133,8 +134,9 @@ class FakeFeishu:
         _require(isinstance(key, str) and bool(key), "fixture_send_requires_uuid")
         if key not in self.sent:
             message_id = "probe-root-" + key
-            data = {"message_id": message_id, "chat_id": to, "thread_id": "probe-topic-" + key,
-                    "root_id": message_id}
+            data = {"message_id": message_id, "chat_id": to}
+            if self.create_topics:
+                data.update(thread_id="probe-topic-" + key, root_id=message_id)
             self.sent[key] = SimpleNamespace(success=True, message_id=message_id, chunk_ids=[], raw={"code": 0, "data": data})
         return self.sent[key]
 
@@ -165,6 +167,8 @@ class McpRecorder:
     def __init__(self, service: ScheduleService) -> None:
         self.service = service
         self.expected_chats: dict[str, str] = {}
+        self.expected_bindings: dict[str, str] = {}
+        self.expected_target_kinds: dict[str, str] = {}
         self.created: dict[str, str] = {}
         self.create_requests: dict[str, str] = {}
         self.successful_modes: dict[str, set[str]] = {}
@@ -175,8 +179,11 @@ class McpRecorder:
         mode = request.get("mode")
         if (mode == "create" and request.get("enabled") is not False) or request.get("enabled") is True:
             return {"ok": False, "error": {"code": "probe_paused_only", "message": "This probe only permits paused plans."}}
-        if "chat_id" in request or "project" in request or request.get("all"):
-            return {"ok": False, "error": {"code": "probe_defaults_required", "message": "Use this native Thread's default group and Project."}}
+        if any(key in request for key in ("chat_id", "project", "target_binding_id")) or request.get("all"):
+            return {"ok": False, "error": {"code": "probe_defaults_required", "message": "Use this native Thread's default group, Project and Binding."}}
+        target_kind = self.expected_target_kinds.get(thread_id)
+        if mode == "create" and target_kind is not None and request.get("target_kind", "new_topic") != target_kind:
+            return {"ok": False, "error": {"code": "probe_target_required", "message": "Use the requested target_kind: " + target_kind}}
         if mode == "create" and thread_id in self.created and request.get("request_id") != self.create_requests[thread_id]:
             return {"ok": False, "error": {"code": "probe_one_plan_only", "message": "This probe permits one paused plan per Thread."}}
         if mode in {"view", "update", "delete", "runs"} and request.get("plan_id") != self.created.get(thread_id):
@@ -380,23 +387,34 @@ async def _wait_for_completion(
 
 async def _mcp_phase(codex: AsyncCodex, cwd: Path, store: BindingStore, recorder: McpRecorder) -> dict[str, bool]:
     threads = []
-    for suffix in ("a", "b"):
+    for suffix, target_kind in (("a", "new_topic"), ("b", "binding")):
         thread = await codex.thread_start(cwd=str(cwd), ephemeral=True)
         threads.append(thread)
         chat = "probe-chat-" + suffix
         binding = store.create_channel_binding(scope=FeishuScope("probe", chat, ScopeKind.GROUP), project_alias="probe", creator_id="probe")
         store.assign_native_thread_id(binding.id, thread.id)
         recorder.expected_chats[thread.id] = chat
+        recorder.expected_bindings[thread.id] = binding.id
+        recorder.expected_target_kinds[thread.id] = target_kind
     _require(threads[0].id != threads[1].id, "native_threads_not_independent")
     nonce = uuid.uuid4().hex
     await asyncio.gather(*(
-        _run_text(thread, f"请在当前群创建名为 schedule-probe-{nonce}-{index} 的定时计划：每天 UTC 09:00，仅回复 SCHEDULE-PROBE。必须保持暂停 enabled=false。使用 cron_manage；不要显式提供 chat_id 或 project，使用当前会话默认值。只做这件事，不调用其他工具，不运行命令，不修改文件，简短回复结果。")
+        _run_text(thread, f"请在当前群创建名为 schedule-probe-{nonce}-{index} 的定时计划：每天 UTC 09:00，仅回复 SCHEDULE-PROBE。"
+                  + ("每次在新建的独立话题执行。" if index == 0 else "每次在当前会话继续执行，沿用本会话的上下文，使用原会话模式。")
+                  + "必须保持暂停 enabled=false。使用 cron_manage；不要显式提供 target_binding_id、chat_id 或 project，使用当前会话默认值。只做这件事，不调用其他工具，不运行命令，不修改文件，简短回复结果。")
         for index, thread in enumerate(threads)
     ))
     _require(len(recorder.created) == 2, "two_paused_plans_not_created")
     for thread in threads:
         plan = store.schedules.get(recorder.created[thread.id])
         _require(plan.chat_id == recorder.expected_chats[thread.id] and plan.project_alias == "probe" and not plan.enabled, "native_default_identity_mismatch")
+        _require(plan.target_kind == recorder.expected_target_kinds[thread.id], "mcp_target_kind_mismatch")
+        if plan.target_kind == "binding":
+            _require(plan.target_binding_id == recorder.expected_bindings[thread.id]
+                     and plan.session_settings is None, "mcp_default_binding_identity_mismatch")
+        else:
+            _require(plan.target_binding_id is None and plan.session_settings is not None,
+                     "mcp_new_topic_target_changed")
     await asyncio.gather(*(
         _run_text(thread, "请先列出当前群的定时计划，再查看刚创建的计划详情，然后把该计划执行指令修改为：仅回复 SCHEDULE-PROBE-UPDATED。保持暂停，不修改群或Project。使用 cron_manage 的 list、view、update，严格采用实际返回的ID和revision。不要显式填chat_id或project，不调用其他工具、不修改文件。")
         for thread in threads
@@ -404,6 +422,10 @@ async def _mcp_phase(codex: AsyncCodex, cwd: Path, store: BindingStore, recorder
     for thread in threads:
         plan = store.schedules.get(recorder.created[thread.id])
         _require(plan.revision >= 2 and not plan.enabled and "SCHEDULE-PROBE-UPDATED" in plan.instructions, "plan_update_not_persisted")
+        _require(plan.target_kind == recorder.expected_target_kinds[thread.id]
+                 and (plan.target_kind != "binding" or (
+                     plan.target_binding_id == recorder.expected_bindings[thread.id]
+                     and plan.session_settings is None)), "mcp_update_changed_target_identity")
     await asyncio.gather(*(
         _run_text(thread, "请删除刚才修改过的定时计划。使用 cron_manage 的 delete，使用实际plan_id、当前expected_revision和稳定request_id。无需另行确认；保留普通会话。不要操作其他计划或使用其他工具。")
         for thread in threads
@@ -414,7 +436,10 @@ async def _mcp_phase(codex: AsyncCodex, cwd: Path, store: BindingStore, recorder
         _require({"create", "list", "view", "update", "delete"} <= recorder.successful_modes[thread.id], "management_mode_not_observed")
         _require(not store.schedules.list_runs(plan.id), "mcp_probe_created_a_run")
     return {"passed": True, "two_ephemeral_threads": True, "same_cwd_distinct_default_groups": True,
-            "natural_language_crud": True, "only_paused_plans": True, "scheduler_never_started": True}
+            "natural_language_crud": True, "natural_language_new_topic_crud": True,
+            "natural_language_binding_crud": True, "native_identity_default_binding": True,
+            "binding_without_independent_settings": True,
+            "only_paused_plans": True, "scheduler_never_started": True}
 
 
 def _cleanup_error(error: Exception, *, operation: str, thread_id: str | None = None) -> None:
@@ -785,6 +810,136 @@ async def _manual_phase(
         await management.close(deadline=asyncio.get_running_loop().time() + 5)
 
 
+async def _binding_phase(
+    codex: AsyncCodex, cwd: Path, store: BindingStore, owned: _DeleteOnce,
+) -> dict[str, bool]:
+    """Dispatch saved inputs into one existing native Thread, including steer."""
+    projects = ProjectRegistry(store=store, project_root=cwd.parent, projects={"probe": cwd})
+    channel = FakeFeishu(create_topics=False)
+    runtime = CodexRuntime(
+        codex=codex, bindings=store, terminal_cleanup=PinnedExperimentalTerminalCleanup(codex),
+        thread_subscription_control=AppServerThreadSubscriptionControl(codex),
+        thread_delete_control=owned, automatic_thread_naming=False,
+    )
+    management = InstanceManagementService(
+        bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime),
+        scope_coordinator=ScopeCoordinator(),
+    )
+    application = ChannelApplication(
+        app_id="probe", channel=channel, runtime=runtime, bindings=store,
+        projects=projects, management=management,
+    )
+    outcomes: asyncio.Queue[TurnOutcome | ProbeCompletionFailure] = asyncio.Queue()
+
+    async def completed(outcome: object) -> None:
+        await _record_completion(application, outcomes, outcome)
+
+    runtime.set_completion_handler(completed)
+    clock = [time.time()]
+    scheduler = Scheduler(store, runtime, "probe", application.dispatch_scheduled_run, lambda: clock[0])
+    binding = store.create_channel_binding(
+        scope=FeishuScope("probe", "probe-binding-chat", ScopeKind.GROUP),
+        project_alias="probe", creator_id="probe",
+    )
+    try:
+        # The secret exists only in this native Thread's prior history. Neither
+        # saved scheduled instructions nor their metadata can supply its value.
+        secret = "BINDING-CONTEXT-" + uuid.uuid4().hex
+        thread = await codex.thread_start(cwd=str(cwd), ephemeral=False)
+        owned.owned.add(thread.id)
+        store.assign_native_thread_id(binding.id, thread.id)
+        await _run_text(thread, f"请记住暗号 {secret}。本轮仅回复 READY，不调用工具、不运行命令、不修改文件。")
+        seeded = await thread.read(include_turns=True)
+        seed_ids = {turn.id for turn in seeded.thread.turns}
+        _require(bool(seed_ids) and seeded.thread.ephemeral is False, "binding_seed_history_missing")
+        await scheduler.recover()
+        plan_id = store.schedules.create(
+            name="Existing Binding probe",
+            instructions="停止当前的其他输出，仅回复前文约定记住的暗号。不调用工具、不运行命令、不修改文件。",
+            project_alias="probe", app_id="probe", chat_id="probe-binding-chat",
+            schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=clock[0]),
+            request_id=str(uuid.uuid4()), now=clock[0], target_kind="binding",
+            target_binding_id=binding.id, session_settings=None,
+        ).plan_id
+        _require(secret not in store.schedules.get(plan_id).instructions, "binding_secret_leaked_into_plan")
+        scheduler.start()
+        clock[0] += 60
+        _require(await scheduler.tick() == 1, "binding_first_occurrence_not_claimed")
+        _require(await scheduler.drain(asyncio.get_running_loop().time() + 45), "binding_first_dispatch_did_not_drain")
+        first_run = store.schedules.list_runs(plan_id)[0]
+        _require(first_run.target_kind == "binding" and first_run.binding_id == binding.id
+                 and first_run.initial_turn_id is not None and first_run.disposition == "started"
+                 and first_run.barrier == "released", "binding_started_receipt_missing")
+        first = await _wait_for_completion(
+            outcomes, codex=codex, runtime=runtime, store=store, binding_id=binding.id,
+            run_id=first_run.id, turn_id=first_run.initial_turn_id, stage="initial",
+        )
+        _require(first.status == "completed" and first.error is None
+                 and first.thread_id == thread.id and first.turn_id == first_run.initial_turn_id,
+                 "binding_first_turn_identity_mismatch")
+        _require(first.final_response is not None and secret in first.final_response,
+                 "binding_prior_context_not_retained")
+        _require(getattr(first.origin, "message_id", None) == first_run.origin_message_id,
+                 "binding_first_completion_anchor_mismatch")
+        origin = SimpleNamespace(
+            id="probe-binding-user", message_id="probe-binding-user", chat_id="probe-binding-chat",
+            conversation=SimpleNamespace(chat_id="probe-binding-chat", chat_type="group", thread_id=None),
+        )
+        running = await runtime.submit(
+            binding=store.get(binding.id), cwd=cwd,
+            input="请逐项列出从1到1000的整数，只输出文本，不调用工具、不运行命令、不修改文件。",
+            owner_id="probe-user", origin=origin,
+        )
+        running.release_receipt_attempt()
+        await _wait_for_exact_active(thread, running.turn_id)
+        clock[0] += 60
+        _require(await scheduler.tick() == 1, "binding_steer_occurrence_not_claimed")
+        _require(await scheduler.drain(asyncio.get_running_loop().time() + 45), "binding_steer_dispatch_did_not_drain")
+        await scheduler.close()
+        runs = store.schedules.list_runs(plan_id)
+        _require(len(runs) == 2, "binding_occurrences_not_independent")
+        steer_run = next(run for run in runs if run.id != first_run.id)
+        _require(steer_run.binding_id == binding.id and steer_run.initial_turn_id == running.turn_id
+                 and steer_run.disposition == "steered" and steer_run.barrier == "released",
+                 "binding_exact_steer_receipt_missing")
+        second = await _wait_for_completion(
+            outcomes, codex=codex, runtime=runtime, store=store, binding_id=binding.id,
+            run_id=steer_run.id, turn_id=running.turn_id, stage="followup",
+        )
+        _require(second.status == "completed" and second.error is None
+                 and second.thread_id == thread.id and second.turn_id == running.turn_id
+                 and second.owner_id == "probe-user" and second.origin is origin,
+                 "binding_steer_changed_completion_identity")
+        _require(second.final_response is not None and secret in second.final_response,
+                 "binding_steer_input_not_consumed")
+        view = await thread.read(include_turns=True)
+        _require({turn.id for turn in view.thread.turns} == seed_ids | {first.turn_id, running.turn_id},
+                 "binding_steer_created_another_turn")
+        _require(store.get(binding.id).native_thread_id == thread.id
+                 and store.active_binding(binding.scope_key).id == binding.id,
+                 "binding_target_identity_changed")
+        _require(len(channel.sent) == 2 and all(run.topic_id is None for run in runs),
+                 "binding_anchor_transport_mismatch")
+        return {
+            "passed": True, "existing_persistent_thread": True, "prior_native_context_retained": True,
+            "scheduler_channel_ordinary_submit": True, "exact_running_turn_steered": True,
+            "steer_consumed_without_extra_turn": True, "original_completion_origin_retained": True,
+            "independent_input_receipts": True, "group_main_anchor_fixture": True,
+            "real_feishu_calls": False, "natural_language_binding_create_tested": False,
+            "catch_up_tested": False,
+        }
+    finally:
+        await scheduler.close()
+        await scheduler.drain(asyncio.get_running_loop().time() + 3)
+        # Register only this fixture Binding, including partial native startup.
+        native_id = store.get(binding.id).native_thread_id
+        if native_id:
+            owned.owned.add(native_id)
+        await asyncio.wait_for(runtime.cancel_tasks(), 5)
+        await asyncio.wait_for(application.close(), 5)
+        await management.close(deadline=asyncio.get_running_loop().time() + 5)
+
+
 async def probe(*, phase: str, model: str, timeout: float) -> dict[str, Any]:
     _require(openai_codex.__version__ == "0.155.1", "sdk_pin_mismatch")
     config_path = _user_config_path()
@@ -794,7 +949,7 @@ async def probe(*, phase: str, model: str, timeout: float) -> dict[str, Any]:
     try:
         async with asyncio.timeout(timeout):
             with tempfile.TemporaryDirectory(prefix="netizen-schedule-probe-") as temporary:
-                for selected in (("mcp", "mcp-recovery", "dispatch", "manual") if phase == "all" else (phase,)):
+                for selected in (("mcp", "mcp-recovery", "dispatch", "manual", "binding") if phase == "all" else (phase,)):
                     cwd = (Path(temporary) / selected).resolve()
                     cwd.mkdir()
                     subprocess.run(["git", "-C", str(cwd), "init", "--quiet"], check=True, capture_output=True)
@@ -817,9 +972,11 @@ async def probe(*, phase: str, model: str, timeout: float) -> dict[str, Any]:
                             await runner.bind()
                         codex = AsyncCodex(_config(cwd, model, runner))
                         await codex.__aenter__()
-                        owned = _DeleteOnce(codex) if selected in {"dispatch", "manual"} else None
+                        owned = _DeleteOnce(codex) if selected in {"dispatch", "manual", "binding"} else None
                         if selected == "manual":
                             result[selected] = await _manual_phase(codex, cwd, store, owned, runner)
+                        elif selected == "binding":
+                            result[selected] = await _binding_phase(codex, cwd, store, owned)
                         else:
                             result[selected] = await (_mcp_phase(codex, cwd, store, recorder) if selected == "mcp" else _dispatch_phase(codex, cwd, store, owned))
                     finally:
@@ -838,7 +995,7 @@ async def probe(*, phase: str, model: str, timeout: float) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--phase", choices=("mcp", "mcp-recovery", "dispatch", "manual", "all"), default="all")
+    parser.add_argument("--phase", choices=("mcp", "mcp-recovery", "dispatch", "manual", "binding", "all"), default="all")
     parser.add_argument("--model", required=True, help="explicit compatible model override for this test App Server only")
     parser.add_argument("--timeout", type=float, default=300, help="total async scenario deadline in seconds; cleanup is bounded separately")
     return parser

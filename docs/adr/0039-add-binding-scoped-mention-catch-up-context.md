@@ -3,9 +3,13 @@ status: accepted
 date: 2026-08-24
 amends: 0011, 0015, 0016, 0029, 0030
 related: 0001, 0004, 0021
+amended_by: 0070
 ---
 
 # 为普通 Binding 增加 @ 时补充期间消息的上下文模式
+
+2026-09-23 修订：[ADR 0070](0070-schedule-inputs-in-existing-bindings.md) 允许原会话
+定时输入使用真实系统锚点作为 catch-up upper，普通真人消息仍需逐条 @ 准入。
 
 ## 背景
 

@@ -3,10 +3,13 @@ status: accepted
 date: 2026-09-08
 amends: 0008, 0023, 0029, 0030, 0031, 0034, 0060
 related: 0016, 0017, 0021, 0022, 0037, 0039, 0049
-amended_by: 0063, 0068
+amended_by: 0063, 0068, 0070
 ---
 
 # 在独立飞书话题中调度普通持久会话
+
+2026-09-23 修订：[ADR 0070](0070-schedule-inputs-in-existing-bindings.md) 增加 exact
+Binding 目标，复用普通输入的 start/steer；本文的新话题创建与初轮屏障保留为 `new_topic` 模式。
 
 2026-09-21 修订：[ADR 0068](0068-run-saved-scheduled-plans-manually.md) 允许三个管理
 入口手动执行已保存的计划版本，并恢复仅支持当前数据库结构的约定；执行仍共用

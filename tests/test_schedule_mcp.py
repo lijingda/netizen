@@ -99,6 +99,29 @@ class ScheduleMcpTests(unittest.IsolatedAsyncioTestCase):
         await self.call(request)
         self.assertEqual(self.requests, [(request, None)])
 
+    async def test_binding_target_arguments_preserve_source_identity_and_exact_selection(self):
+        self.runner.open_admission()
+        base = {**CREATE_EXAMPLE, "target_kind": "binding"}
+        validator = Draft202012Validator(_tool_schema())
+        for request, thread_id in (
+            (base, "ordinary-thread"),
+            ({**base, "target_binding_id": "exact-binding-id"}, "side-thread"),
+            ({"mode": "list", "all": True, "target_kind": "binding", "target_binding_id": "exact-binding-id", "ended": False}, None),
+            ({"mode": "options", "binding_query": "partial-binding-id"}, None),
+        ):
+            with self.subTest(request=request):
+                self.assertFalse(list(validator.iter_errors(request)))
+                response = await self.call(request, {"threadId": thread_id} if thread_id else None)
+                self.assertFalse(response["isError"], response)
+                self.assertEqual(self.requests[-1], (request, thread_id))
+
+    async def test_invalid_binding_target_shape_does_not_reach_management(self):
+        self.runner.open_admission()
+        for fields in ({"target_kind": "thread"}, {"target_binding_id": ""}, {"target_binding_id": 42}, {"binding_query": "x" * 201}):
+            response = await self.call({**CREATE_EXAMPLE, **fields})
+            self.assertEqual(response["structuredContent"]["error"]["code"], "invalid_request")
+        self.assertEqual(self.requests, [])
+
     async def test_conflicting_or_malformed_metadata_never_reaches_service(self):
         self.runner.open_admission()
         for meta in (

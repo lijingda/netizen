@@ -78,6 +78,10 @@ class MessageHistoryWindow:
 
 
 class MessageHistoryReader(Protocol):
+    async def resolve_topic_reply_anchor(
+        self, scope: FeishuScope,
+    ) -> MessageContextAnchor: ...
+
     async def resolve_anchor(
         self,
         scope: FeishuScope,
@@ -136,6 +140,42 @@ class FeishuMessageHistoryReader:
         self._max_pages = max_pages
         self._max_raw_messages = max_raw_messages
         self._page_size = page_size
+
+    async def resolve_topic_reply_anchor(
+        self, scope: FeishuScope,
+    ) -> MessageContextAnchor:
+        """Find one verified reply target inside an already identified topic.
+
+        This reads a single metadata page, not a guessed source history or a
+        new-topic recovery search. Any verified message in the exact topic is
+        a valid reply anchor; the later send must confirm that same topic.
+        """
+        if scope.kind is not ScopeKind.TOPIC:
+            raise ValueError("a topic Scope is required")
+        request = (ListMessageRequest.builder()
+                   .container_id_type("thread").container_id(scope.topic_id)
+                   .sort_type(_SORT_DESCENDING).page_size(self._page_size)
+                   .with_sender_name(True).build())
+        try:
+            async with asyncio.timeout(self._total_timeout_seconds):
+                response = await self._list_page(request)
+                items = getattr(getattr(response, "data", None), "items", None)
+                if not isinstance(items, (list, tuple)):
+                    raise MessageHistoryContractError("飞书话题消息列表缺少有效消息。")
+                for item in items[:self._page_size]:
+                    if getattr(item, "deleted", None) is True:
+                        continue
+                    message_id = _required_item_string(item, "message_id")
+                    listed = _anchor_from_exact_item(scope, item, expected_id=message_id)
+                    exact = await self._get_exact_item(message_id)
+                    if getattr(exact, "deleted", None) is True:
+                        raise MessageHistoryUnavailable("话题回复锚点已删除，本次未执行。")
+                    anchor = _anchor_from_exact_item(scope, exact, expected_id=message_id)
+                    _validate_list_endpoint(exact, listed)
+                    return anchor
+        except TimeoutError as error:
+            raise MessageHistoryUnavailable("读取话题回复锚点超时，本次未执行。") from error
+        raise MessageHistoryUnavailable("找不到可验证的话题回复锚点，本次未执行。")
 
     async def resolve_anchor(
         self,

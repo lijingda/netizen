@@ -932,7 +932,7 @@ class BindingStoreTest(unittest.TestCase):
 
 class BindingStoreManagementSchemaTest(unittest.TestCase):
     def test_unsupported_database_versions_are_rejected_without_changes(self) -> None:
-        for version in (3, 6, 7, 8, 9, 10, 11, SCHEMA_VERSION + 1):
+        for version in (3, 6, 7, 8, 9, 10, 11, 12, SCHEMA_VERSION + 1):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as raw:
                 path = Path(raw) / "channel.sqlite3"
                 with sqlite3.connect(path) as connection:

@@ -21,6 +21,7 @@ from scripts.probe_scheduled_tasks import (
     FakeFeishu, ManualMcpRecorder, McpRecorder, ProbeCompletionFailure, ProbeFailure, ProbeStopFailure, _manual_phase, _mcp_phase,
     _mcp_recovery_phase, _record_completion, _remove_fixture_trust, _safe_traceback,
     _wait_for_completion, _wait_for_exact_active, _cleanup_error,
+    _binding_phase, build_parser,
 )
 from test_codex_runtime import FakeCodex, FakeTerminalCleanup, FakeThread, FakeThreadSubscriptionControl
 
@@ -91,6 +92,82 @@ class FixtureTrustCleanupTest(unittest.TestCase):
 
 
 class FakeMcpProbeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_binding_phase_dispatches_saved_input_as_start_and_exact_turn_steer(self):
+        await self._exercise_binding_phase()
+
+    async def test_binding_probe_failure_retains_only_its_native_thread_for_cleanup(self):
+        await self._exercise_binding_phase(wrong_context=True)
+
+    async def _exercise_binding_phase(self, *, wrong_context=False):
+        case = self
+
+        class Thread(FakeThread):
+            async def run(self, prompt):
+                self.codex.secret = prompt.split("请记住暗号 ", 1)[1].split("。", 1)[0]
+                handle = await super().turn(prompt)
+                handle.complete(response="READY")
+                return SimpleNamespace(status="completed")
+
+            async def turn(self, input, **kwargs):
+                handle = await super().turn(input, **kwargs)
+                if "逐项列出" in input:
+                    original_steer = handle.steer
+
+                    async def steer(input):
+                        await original_steer(input)
+                        case.assertIn("<scheduled_plan>", input)
+                        case.assertNotIn(self.codex.secret, input)
+                        handle.complete(response=self.codex.secret)
+                        return object()
+
+                    handle.steer = steer
+                else:
+                    case.assertIn("<scheduled_plan>", input)
+                    case.assertNotIn(self.codex.secret, input)
+                    handle.complete(response="wrong-context" if wrong_context else self.codex.secret)
+                return handle
+
+        class Codex(FakeCodex):
+            async def thread_start(self, **kwargs):
+                thread = await super().thread_start(**kwargs)
+                return Thread(thread.id, self)
+
+            async def thread_resume(self, thread_id, **kwargs):
+                thread = await super().thread_resume(thread_id, **kwargs)
+                return Thread(thread.id, self)
+
+        codex = Codex()
+        owned = SimpleNamespace(owned=set())
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            store = BindingStore(cwd / "binding.sqlite3")
+            self.addCleanup(store.close)
+            store.register_project(alias="probe", cwd=str(cwd))
+            with patch("scripts.probe_scheduled_tasks.PinnedExperimentalTerminalCleanup", return_value=FakeTerminalCleanup(codex.events)), \
+                 patch("scripts.probe_scheduled_tasks.AppServerThreadSubscriptionControl", return_value=FakeThreadSubscriptionControl()), \
+                 patch("scripts.probe_scheduled_tasks.AsyncThread", side_effect=lambda client, thread_id: Thread(thread_id, client)):
+                if wrong_context:
+                    with self.assertRaisesRegex(ProbeFailure, "binding_prior_context_not_retained"):
+                        await _binding_phase(codex, cwd, store, owned)
+                else:
+                    result = await _binding_phase(codex, cwd, store, owned)
+                    self.assertTrue(result["prior_native_context_retained"])
+                    self.assertTrue(result["exact_running_turn_steered"])
+                    self.assertTrue(result["original_completion_origin_retained"])
+                    self.assertFalse(result["real_feishu_calls"])
+                    self.assertFalse(result["catch_up_tested"])
+            self.assertEqual(owned.owned, {"native-1"})
+            self.assertEqual(len(codex.start_kwargs), 1)
+            self.assertFalse(codex.start_kwargs[0]["ephemeral"])
+            self.assertEqual(len(codex.turn_inputs), 2 if wrong_context else 3)
+            self.assertTrue(all(thread_id == "native-1" for thread_id, _ in codex.turn_inputs))
+            if not wrong_context:
+                self.assertEqual([len(handle.steers) for handle in codex.handles], [0, 0, 1])
+
+    def test_binding_phase_is_explicitly_selectable(self):
+        args = build_parser().parse_args(["--phase", "binding", "--model", "fixture-model"])
+        self.assertEqual(args.phase, "binding")
+
     async def test_manual_recorder_only_forwards_owned_lookup_and_one_stable_run_request(self):
         service = SimpleNamespace(manage=AsyncMock(return_value={"ok": True, "accepted": True, "run_id": "owned-run"}))
         recorder = ManualMcpRecorder(service, "owned-plan")
@@ -456,6 +533,8 @@ class FakeMcpProbeTest(unittest.IsolatedAsyncioTestCase):
                         request = {"mode": "create", "name": self.id, "instructions": "SCHEDULE-PROBE",
                                    "enabled": False, "schedule": {"kind": "daily", "at": "09:00", "timezone": "UTC"},
                                    "request_id": self.id + "-create"}
+                        if "每次在当前会话继续执行" in prompt:
+                            request["target_kind"] = "binding"
                         result = await recorder.manage(request, self.id)
                     elif self.round == 2:
                         listed = await recorder.manage({"mode": "list"}, self.id)
@@ -482,6 +561,14 @@ class FakeMcpProbeTest(unittest.IsolatedAsyncioTestCase):
 
             result = await _mcp_phase(Codex(), cwd, store, recorder)
             self.assertTrue(result["natural_language_crud"])
+            self.assertTrue(result["natural_language_new_topic_crud"])
+            self.assertTrue(result["natural_language_binding_crud"])
+            self.assertTrue(result["native_identity_default_binding"])
+            binding_plan = store.schedules.get(recorder.created["native-2"], include_deleted=True)
+            self.assertEqual(binding_plan.target_kind, "binding")
+            self.assertEqual(binding_plan.target_binding_id, recorder.expected_bindings["native-2"])
+            self.assertNotEqual(binding_plan.target_binding_id, recorder.expected_bindings["native-1"])
+            self.assertIsNone(binding_plan.session_settings)
             self.assertEqual(len(recorder.created), 2)
             rejected = await recorder.manage({"mode": "create", "enabled": True}, "native-1")
             self.assertEqual(rejected["error"]["code"], "probe_paused_only")
@@ -489,6 +576,11 @@ class FakeMcpProbeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rejected["error"]["code"], "probe_one_plan_only")
             rejected = await recorder.manage({"mode": "list"}, "unknown")
             self.assertEqual(rejected["error"]["code"], "probe_identity_missing")
+            rejected = await recorder.manage({"mode": "create", "enabled": False,
+                "target_kind": "binding", "target_binding_id": recorder.expected_bindings["native-2"]}, "native-2")
+            self.assertEqual(rejected["error"]["code"], "probe_defaults_required")
+            rejected = await recorder.manage({"mode": "create", "enabled": False}, "native-2")
+            self.assertEqual(rejected["error"]["code"], "probe_target_required")
 
 
 if __name__ == "__main__":

@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from lark_channel.channel.channel import _card_action_identity
 from lark_channel.channel.safety.pipeline import SafetyPipeline
 
+from netizen.bindings import BindingQueryBusy
 from netizen.cards.scheduled import decode_schedule_action, schedule_form_card, schedule_manager_card
 from netizen.domain import FeishuScope, ScopeKind
 
@@ -29,8 +30,9 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         }]}}
         self.handler_calls = 0
 
-    def new_form(self):
-        card = schedule_form_card(self.scope, projects=self.fixture.projects.list(enabled_only=True), default_timezone="UTC")
+    def new_form(self, *, target_binding_id=None):
+        card = schedule_form_card(self.scope, projects=self.fixture.projects.list(enabled_only=True),
+            default_timezone="UTC", target_binding_id=target_binding_id)
         values = form_values(card)
         values[next(key for key in values if key.startswith("cron_name"))] = "原样重试计划"
         values.update(cron_kind="daily", cron_instructions="保留完整指令")
@@ -56,6 +58,102 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         message_id, card = self.fixture.channel.updates[-1]
         self.assertEqual(message_id, "om_card")
         return form_values(SimpleNamespace(card=card))
+
+    def new_binding(self):
+        return self.fixture.store.create_channel_binding(
+            scope=self.scope, project_alias="work", creator_id="ou_user",
+        )
+
+    async def test_binding_directory_failure_does_not_block_new_topic_form(self):
+        manager = schedule_manager_card(self.scope, {"plans": []})
+        with patch.object(self.fixture.store, "query_bindings", side_effect=BindingQueryBusy("busy")):
+            await self.push(value=callback(manager, "新建定时任务"))
+        form = self.restored_form()
+        form[next(key for key in form if key.startswith("cron_name"))] = "独立话题计划"
+        form.update(cron_kind="daily", cron_instructions="检查项目")
+        await self.push(form=form)
+        plan, = self.fixture.store.schedules.list(app_id="app")
+        self.assertEqual(plan.target_kind, "new_topic")
+        self.assertIn("计划已保存", str(self.fixture.channel.updates[-1]))
+
+    async def test_noncurrent_binding_create_form_and_crud_keep_the_selected_target(self):
+        original = self.new_binding()
+        manager = schedule_manager_card(self.scope, {"plans": []}, current_binding_id=original.id)
+        create = callback(manager, "在当前会话定时执行")
+        self.new_binding()  # Switching before opening is not a management restriction.
+        await self.push(value=create)
+        form = self.restored_form()
+        form[next(key for key in form if key.startswith("cron_name"))] = "原目标计划"
+        form.update(cron_kind="daily", cron_instructions="继续原问题")
+        replacement = self.new_binding()  # Nor is switching before saving.
+        await self.push(form=form)
+        plan, = self.fixture.store.schedules.list(app_id="app")
+        self.assertEqual(plan.target_binding_id, original.id)
+        self.assertEqual(self.fixture.store.active_binding(self.scope.key).id, replacement.id)
+        self.assertIn("计划已保存", str(self.fixture.channel.updates[-1]))
+        detail = SimpleNamespace(card=self.fixture.channel.updates[-1][1])
+        with self.assertRaises(StopIteration):
+            callback(detail, "立即运行")
+        await self.push(value=callback(detail, "编辑"))
+        edit = self.restored_form()
+        instructions_key = next(key for key in edit if key.startswith("cron_instructions"))
+        edit[instructions_key] = "更新原目标的检查指令"
+        await self.push(form=edit)
+        updated = self.fixture.store.schedules.get(plan.id)
+        self.assertEqual(updated.instructions, edit[instructions_key])
+        self.assertEqual(updated.target_binding_id, original.id)
+        detail = SimpleNamespace(card=self.fixture.channel.updates[-1][1])
+        await self.push(value=callback(detail, "删除计划"))
+        self.assertFalse(self.fixture.store.schedules.list(app_id="app"))
+        self.assertEqual(self.fixture.store.active_binding(self.scope.key).id, replacement.id)
+
+    async def test_binding_create_unknown_response_replays_after_switch_without_duplicate(self):
+        original = self.new_binding()
+        form = self.new_form(target_binding_id=original.id)
+        manage = self.fixture.management.schedules.manage
+        lost = False
+
+        async def lose_first_write_response(request, **kwargs):
+            nonlocal lost
+            result = await manage(request, **kwargs)
+            if request["mode"] == "create" and not lost:
+                lost = True
+                raise OSError("response lost after commit")
+            return result
+
+        self.fixture.management.schedules.manage = lose_first_write_response
+        with self.assertLogs("netizen.channel_app", level="ERROR"):
+            await self.push(form=form)
+        plan, = self.fixture.store.schedules.list(app_id="app")
+        restored = self.restored_form()
+        self.assertEqual(decode_schedule_action(scope=self.scope, value=None, form=restored).request_id,
+            decode_schedule_action(scope=self.scope, value=None, form=form).request_id)
+        replacement = self.new_binding()
+        await self.push(form=restored)
+        replayed, = self.fixture.store.schedules.list(app_id="app")
+        self.assertEqual((replayed.id, replayed.target_binding_id), (plan.id, original.id))
+        self.assertEqual(self.fixture.store.active_binding(self.scope.key).id, replacement.id)
+        self.assertIn("计划已保存", str(self.fixture.channel.updates[-1]))
+
+    async def test_old_binding_run_button_is_rejected_after_switch_without_claim(self):
+        original = self.new_binding()
+        claims = self.fixture.enable_manual_claims()
+        result = await self.fixture.management.schedules.manage({
+            "mode": "create", "name": "原会话手动检查", "instructions": "检查原问题",
+            "target_kind": "binding", "target_binding_id": original.id, "enabled": False,
+            "schedule": {"kind": "interval", "every_minutes": 10, "timezone": "UTC"},
+            "request_id": "binding-manual-create",
+        }, scope_key=self.scope.key, source="card")
+        self.assertTrue(result["ok"], result)
+        plan = result["plan"]
+        self.assertTrue(plan["can_run_now"])
+        button = callback(schedule_manager_card(self.scope, {"plans": [plan]}, selected=result), "立即运行")
+        replacement = self.new_binding()
+        await self.push(value=button)
+        self.assertEqual(claims, [])
+        self.assertEqual(self.fixture.store.schedules.list_runs(plan["id"]), ())
+        self.assertEqual(self.fixture.store.active_binding(self.scope.key).id, replacement.id)
+        self.assertIn("目标会话不可用", str(self.fixture.channel.updates[-1]))
 
     async def test_transient_target_lookup_then_unchanged_retry_passes_real_sdk_gate(self):
         form = self.new_form()

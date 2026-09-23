@@ -111,6 +111,193 @@ class ScheduleRuleTest(unittest.TestCase):
             ScheduleRule("once", "UTC", at="2026-09-08T09:00Z", end_at="2026-09-09T09:00Z")
 
 
+class BindingScheduleStorageTest(unittest.TestCase):
+    def setUp(self):
+        self.now = 100.0
+        self.store = BindingStore(wall_clock=lambda: self.now)
+        self.store.register_project(alias="p", cwd="/tmp/project-p")
+        self.scope = FeishuScope("app", "chat", ScopeKind.TOPIC, "original-topic")
+        self.binding = self.store.create_channel_binding(scope=self.scope, project_alias="p", creator_id="person")
+        self.schedules = self.store.schedules
+        self.sequence = 0
+
+    def tearDown(self):
+        self.store.close()
+
+    def create(self, **changes):
+        self.sequence += 1
+        return self.schedules.create(**{
+            "name": "Continue", "instructions": "Recheck the current work.",
+            "project_alias": "p", "app_id": "app", "chat_id": "chat",
+            "schedule": ScheduleRule("interval", "UTC", every_minutes=1, anchor=100),
+            "target_kind": "binding", "target_binding_id": self.binding.id,
+            "session_settings": None, "request_id": f"create-{self.sequence}", **changes,
+        }).plan_id
+
+    def submission(self, claim):
+        self.schedules.begin_publication(claim.run.id)
+        self.schedules.set_run(claim.run.id, origin_message_id="anchor-" + claim.run.id)
+        return self.schedules.begin_binding_submission(claim.run.id, claim.run.binding_id)
+
+    def test_multiple_occurrences_share_binding_and_turn_without_initial_reservation(self):
+        plan_id = self.create()
+        self.assertIsNone(self.schedules.get(plan_id).session_settings)
+        for due, disposition in ((160, "started"), (220, "steered")):
+            claim = self.schedules.claim_due(plan_id, app_id="app", now=due)
+            self.assertEqual((claim.run.binding_id, claim.run.topic_id), (self.binding.id, "original-topic"))
+            self.submission(claim)
+            self.assertIsNone(self.store.scheduled_initial_reservation(self.binding.id))
+            self.assertIsNone(self.schedules.pending_route(app_id="app", chat_id="chat", topic_id="original-topic"))
+            # A terminal observed on this same Turn is not an input receipt.
+            self.store.release_scheduled_initial_turn(self.binding.id, "same-turn")
+            self.assertIsNone(self.schedules.get_run(claim.run.id).initial_turn_id)
+            self.assertEqual(self.schedules.get_run(claim.run.id).barrier, "held")
+            run = self.schedules.finish_binding_submission(claim.run.id, "same-turn", disposition)
+            self.assertEqual((run.phase, run.barrier, run.disposition), ("handed_off", "released", disposition))
+            self.assertIsNone(self.schedules.pending_for_plan(plan_id))
+        self.assertEqual(len(self.schedules.list_runs(plan_id)), 2)
+
+    def test_target_identity_settings_and_inactive_manual_admission(self):
+        for changes in ({"chat_id": "other-chat"}, {"target_binding_id": "missing"},
+                        {"session_settings": SessionSettings()}, {"target_kind": "invalid"}):
+            with self.subTest(changes=changes), self.assertRaises(ScheduleError):
+                self.create(**changes)
+        self.store.deactivate(scope_key=self.scope.key, binding_id=self.binding.id)
+        plan_id = self.create(enabled=False)
+        plan = self.schedules.get(plan_id)
+        self.assertEqual(self.schedules.binding_target_error(plan), "target_inactive")
+        with self.assertRaises(ScheduleConflict):
+            self.schedules.claim_manual(plan_id, app_id="app", expected_revision=1, request_id="inactive")
+        self.store.activate(scope_key=self.scope.key, binding_id=self.binding.id)
+        _, claim = self.schedules.claim_manual(plan_id, app_id="app", expected_revision=1, request_id="active")
+        self.assertEqual(claim.run.binding_id, self.binding.id)
+        self.assertFalse(self.schedules.get(plan_id).enabled)
+
+    def test_update_keeps_exact_binding_target_and_rejects_rerouting_atomically(self):
+        plan_id = self.create()
+        before = self.schedules.get(plan_id)
+        other = self.store.create_channel_binding(scope=self.scope, project_alias="p", creator_id="other")
+        for index, changes in enumerate((
+            {"target_binding_id": other.id},
+            {"target_kind": "new_topic", "target_binding_id": None, "session_settings": SessionSettings()},
+            {"chat_id": "other-chat"},
+            {"project_alias": "other-project"},
+        )):
+            with self.subTest(changes=changes), self.assertRaises(ScheduleConflict):
+                self.schedules.update(plan_id, expected_revision=1, request_id=f"retarget-{index}", changes=changes)
+            self.assertEqual(self.schedules.get(plan_id), before)
+        changes = {"target_kind": "binding", "target_binding_id": self.binding.id,
+                   "chat_id": before.chat_id, "project_alias": before.project_alias, "name": "Renamed"}
+        result = self.schedules.update(plan_id, expected_revision=1, request_id="same-target", changes=changes)
+        self.assertEqual(result.revision, 2)
+        saved = self.schedules.get(plan_id)
+        self.assertEqual((saved.target_kind, saved.target_binding_id, saved.name), ("binding", self.binding.id, "Renamed"))
+        self.assertTrue(self.schedules.update(plan_id, expected_revision=1, request_id="same-target", changes=changes).replayed)
+
+    def test_new_topic_update_allows_project_and_chat_but_not_target_mode_change(self):
+        plan_id = self.create(target_kind="new_topic", target_binding_id=None, session_settings=SessionSettings())
+        before = self.schedules.get(plan_id)
+        with self.assertRaises(ScheduleConflict):
+            self.schedules.update(plan_id, expected_revision=1, request_id="change-mode", changes={
+                "target_kind": "binding", "target_binding_id": self.binding.id, "session_settings": None,
+            })
+        self.assertEqual(self.schedules.get(plan_id), before)
+        self.store.register_project(alias="q", cwd="/tmp/project-q")
+        self.schedules.update(plan_id, expected_revision=1, request_id="new-destination", changes={
+            "target_kind": "new_topic", "target_binding_id": None, "chat_id": "other-chat", "project_alias": "q",
+        })
+        saved = self.schedules.get(plan_id)
+        self.assertEqual((saved.target_kind, saved.target_binding_id, saved.project_alias, saved.chat_id),
+                         ("new_topic", None, "q", "other-chat"))
+
+    def test_short_switch_pause_does_not_replay_once_inside_grace(self):
+        plan_id = self.create(schedule=ScheduleRule("once", "UTC", at="1970-01-01T00:03Z"))
+        self.now = 179
+        self.store.create_channel_binding(scope=self.scope, project_alias="p", creator_id="person")
+        self.now = 181
+        self.store.activate(scope_key=self.scope.key, binding_id=self.binding.id)
+        plan = self.schedules.get(plan_id)
+        self.assertTrue(plan.enabled)
+        self.assertIsNone(plan.next_due_at)
+        self.assertIsNone(self.schedules.claim_due(plan_id, app_id="app", now=181))
+        self.assertEqual(self.schedules.list_runs(plan_id)[0].error_code, "missed")
+        self.assertTrue(plan_lifecycle(plan, now=181, has_pending=False).ended)
+
+    def test_archive_pause_resume_preserves_manual_intent_and_future_interval(self):
+        plan_id = self.create()
+        paused_id = self.create(enabled=False)
+        self.now = 159
+        self.store.archive_binding(self.binding.id)
+        self.now = 161
+        self.store.activate(scope_key=self.scope.key, binding_id=self.binding.id)
+        self.assertEqual(self.schedules.get(plan_id).next_due_at, 220)
+        self.assertTrue(self.schedules.get(plan_id).enabled)
+        self.assertFalse(self.schedules.get(paused_id).enabled)
+        self.assertEqual(self.schedules.list_runs(paused_id), ())
+        self.assertIsNotNone(self.schedules.claim_due(plan_id, app_id="app", now=220))
+
+    def test_switch_during_handoff_rejects_original_target_and_delete_tombstones(self):
+        plan_id = self.create()
+        claim = self.schedules.claim_due(plan_id, app_id="app", now=160)
+        self.schedules.begin_publication(claim.run.id)
+        self.schedules.set_run(claim.run.id, origin_message_id="anchor")
+        replacement = self.store.create_channel_binding(scope=self.scope, project_alias="p", creator_id="person")
+        with self.assertRaises(ScheduleConflict):
+            self.schedules.begin_binding_submission(claim.run.id, self.binding.id)
+        self.store.delete_binding(self.binding.id)
+        with self.assertRaises(ScheduleNotFound):
+            self.schedules.get(plan_id)
+        tombstone = self.schedules.get(plan_id, include_deleted=True)
+        self.assertEqual(tombstone.instructions, "")
+        self.assertIsNone(tombstone.session_settings)
+        self.assertTrue(self.schedules.get_run(claim.run.id).binding_removed)
+        self.assertIsNone(self.schedules.pending_for_plan(plan_id))
+        self.assertEqual(self.store.active_binding(self.scope.key).id, replacement.id)
+
+    def test_claim_snapshot_survives_plan_delete_and_records_acceptance_only(self):
+        plan_id = self.create()
+        claim = self.schedules.claim_due(plan_id, app_id="app", now=160)
+        self.schedules.delete(plan_id, expected_revision=1, request_id="delete")
+        self.submission(claim)
+        run = self.schedules.finish_binding_submission(claim.run.id, "turn", "steered")
+        self.schedules.abandon_pending_deliveries()
+        self.assertIsNone(self.schedules.get_run(run.id).delivery_state)
+        self.assertEqual(self.schedules.list(app_id="app", target_kind="binding"), ())
+
+    def test_input_receipts_are_bounded_without_independent_result_delivery(self):
+        plan_id = self.create()
+        for index in range(105):
+            _, claim = self.schedules.claim_manual(plan_id, app_id="app", expected_revision=1,
+                                                   request_id=f"manual-{index}", now=160 + index)
+            self.submission(claim)
+            self.schedules.finish_binding_submission(claim.run.id, "same-turn", "steered")
+        self.assertEqual(len(self.schedules.list_runs(plan_id, limit=1001)), 100)
+        replay, claim = self.schedules.claim_manual(plan_id, app_id="app", expected_revision=1,
+                                                   request_id="manual-0", now=300)
+        self.assertTrue(replay.replayed)
+        self.assertIsNone(claim)
+
+    def test_exact_receipt_after_binding_removal_does_not_reopen_barrier(self):
+        plan_id = self.create()
+        claim = self.schedules.claim_due(plan_id, app_id="app", now=160)
+        self.submission(claim)
+        self.store.delete_binding(self.binding.id)
+        run = self.schedules.finish_binding_submission(claim.run.id, "accepted-turn", "started")
+        self.assertEqual((run.barrier, run.disposition, run.initial_turn_id), ("released", "started", "accepted-turn"))
+        self.assertTrue(run.binding_removed)
+
+    def test_binding_anchor_unknown_does_not_create_unknown_topic_inventory(self):
+        plan_id = self.create()
+        for index in range(105):
+            claim = self.schedules.claim_due(plan_id, app_id="app", now=160 + index * 60)
+            self.schedules.begin_publication(claim.run.id)
+            self.schedules.release(claim.run.id, error_code="publishing_unknown")
+        self.assertEqual(len(self.schedules.list_runs(plan_id, limit=1001)), 100)
+        self.assertEqual(self.schedules.project_pending_runs("p"), ())
+        inventory = self.store.preview_project_delete("p")
+        self.assertEqual(inventory.scheduled_runs, ())
+
+
 class ScheduleStorageTest(unittest.TestCase):
     def setUp(self):
         self.now = 100.0
@@ -1006,7 +1193,9 @@ class ScheduleMigrationTest(unittest.TestCase):
             ("DROP TABLE side_topics",),
             ("CREATE TABLE requests_without_key AS SELECT * FROM schedule_requests", "DROP TABLE schedule_requests", "ALTER TABLE requests_without_key RENAME TO schedule_requests"),
             ("DROP INDEX schedule_runs_barrier", "CREATE UNIQUE INDEX schedule_runs_barrier ON schedule_runs(plan_id) WHERE barrier='held'"),
-            ("ALTER TABLE schedule_plans DROP COLUMN session_settings_json",),
+            ("ALTER TABLE schedule_plans RENAME COLUMN session_settings_json TO missing_settings",),
+            ("ALTER TABLE schedule_plans RENAME COLUMN target_binding_id TO missing_target",),
+            ("DROP INDEX schedule_runs_binding", "CREATE UNIQUE INDEX schedule_runs_binding ON schedule_runs(binding_id) WHERE binding_id IS NOT NULL"),
             ("DROP INDEX schedule_runs_due",),
             ("DROP INDEX schedule_runs_due", "CREATE UNIQUE INDEX schedule_runs_due ON schedule_runs(plan_id,due_at) WHERE trigger_source='manual'"),
             ("CREATE UNIQUE INDEX legacy_occurrence ON schedule_runs(plan_id,due_at)",),

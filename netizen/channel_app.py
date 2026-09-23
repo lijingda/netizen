@@ -139,6 +139,7 @@ from .runtime.contracts import (
     SteerRace,
     StopDisposition,
     Submission,
+    SubmissionAdmission,
     SubmitDisposition,
     TerminalCleanupFailed,
     ThreadCompactStartFailed,
@@ -177,6 +178,8 @@ from .domain import (
     MentionContextMode,
     NativeCapability,
     PromptInput,
+    ScheduledBindingConversation,
+    ScheduledBindingOrigin,
     ScheduledConversation,
     ScheduledOrigin,
     SettingsSection,
@@ -226,6 +229,8 @@ from .prompt_projection import (
     MATERIAL_MESSAGE_TYPES,
     MATERIAL_REQUEST,
     PromptProjectionError,
+    MessageInputProjection,
+    ScheduledInputProjection,
     project_current_message,
 )
 from .projects import ProjectError, ProjectRegistry, UnknownProject
@@ -666,6 +671,9 @@ class ChannelApplication:
 
     async def dispatch_scheduled_run(self, claim: Claim) -> None:
         """Publish one claimed occurrence and hand it to the ordinary Runtime."""
+        if claim.run.target_kind == "binding":
+            await self._dispatch_binding_input(claim)
+            return
         plan, run = claim.plan, claim.run
         store = self._bindings.schedules
         native_submission = False
@@ -780,6 +788,108 @@ class ChannelApplication:
                 except Exception:
                     logger.warning("scheduled start notice was not delivered", extra={"run_id": run.id})
 
+    async def _dispatch_binding_input(self, claim: Claim) -> None:
+        """Give a saved input a real anchor and use ordinary message consumption."""
+        plan, run = claim.plan, claim.run
+        store = self._bindings.schedules
+        origin: ScheduledBindingOrigin | None = None
+        try:
+            if run.app_id != self._app_id or plan.app_id != self._app_id:
+                raise ScheduleError("计划所属飞书应用不一致。")
+            store.require_binding_target(plan)
+            binding = self._bindings.get(plan.target_binding_id)
+            scope_record = self._bindings.get_scope(binding.scope_key)
+            scope = FeishuScope(scope_record.app_id, scope_record.chat_id,
+                                scope_record.kind, scope_record.topic_id)
+            # Capture before publishing/reading: these awaits must not turn an
+            # idle input into a later steer or use a replaced context boundary.
+            admission = None
+            admission_error: Exception | None = None
+            try:
+                admission = await self._runtime.capture_submission_admission(binding.id)
+            except Exception as error:
+                # Still publish a real anchor for ordinary visible rejection.
+                admission_error = error
+            chat_kind = _public_chat_kind(await self._channel.get_chat_info(scope.chat_id))
+            if chat_kind not in {"p2p", "group"}:
+                raise ScheduleError("无法确认目标飞书会话，本次未执行。")
+            reply_to = None
+            if scope.kind is ScopeKind.TOPIC:
+                if self._message_history is None:
+                    raise MessageHistoryUnavailable("话题消息读取能力不可用，本次未执行。")
+                anchor = await self._message_history.resolve_topic_reply_anchor(scope)
+                reply_to = anchor.message_id
+            store.require_binding_target(plan)
+            store.begin_publication(run.id)
+            trigger = "手动触发" if run.trigger_source == "manual" else "定时触发"
+            local_due = datetime.fromtimestamp(run.due_at, ZoneInfo(plan.schedule.timezone)).isoformat(timespec="minutes")
+            # A plain card preserves literal instructions without creating @s.
+            anchor_content = OutboundCard(card={
+                "schema": "2.0", "config": {"width_mode": "default"},
+                "header": {"title": {"tag": "plain_text", "content": "定时任务 · " + plan.name}},
+                "body": {"elements": [{"tag": "div", "text": {"tag": "plain_text", "content":
+                    f"{trigger} · {local_due}\n\n" + plan.instructions[:3000]
+                    + ("…" if len(plan.instructions) > 3000 else "")}}]},
+            })
+            sent = await send_topic_message(self._channel, scope.chat_id, anchor_content, SendOpts(
+                receive_id_type="chat_id", reply_to=reply_to,
+                reply_in_thread=scope.kind is ScopeKind.TOPIC,
+                reply_target_gone="fail", uuid=run.root_uuid,
+            ))
+            if sent.thread_id != scope.topic_id or (
+                reply_to is not None and (not sent.root_id or sent.parent_id != reply_to)
+            ):
+                raise TopicPublishError("触发消息不属于原会话，本次未执行。", unknown=True)
+            origin = ScheduledBindingOrigin(
+                self._app_id, scope.chat_id, sent.message_id,
+                ScheduledBindingConversation(scope.chat_id, chat_kind, scope.topic_id),
+                plan.id, run.id, binding.id,
+            )
+            store.set_run(run.id, origin_message_id=sent.message_id,
+                          **({"topic_id": scope.topic_id} if scope.topic_id else {}))
+            if admission_error is not None:
+                raise admission_error
+            projection = ScheduledInputProjection(
+                message_id=sent.message_id, request_text=plan.instructions,
+                plan={"plan_id": plan.id, "plan_revision": plan.revision,
+                      "run_id": run.id, "trigger_source": run.trigger_source,
+                      "creation_source": plan.source, "chat_id": scope.chat_id,
+                      "due_at": datetime.fromtimestamp(run.due_at, ZoneInfo("UTC")).isoformat(),
+                      "timezone": plan.schedule.timezone},
+            )
+            await self._consume_prompt(
+                binding=binding, scope=scope, message=origin, current=projection,
+                owner_id="scheduled_plan:" + plan.id,
+                skill_names=parse_skill_references(plan.instructions),
+                scheduled_run_id=run.id, admission=admission,
+            )
+        except BaseException as error:
+            current_run = store.get_run(run.id)
+            if current_run.barrier != "released":
+                rejected = isinstance(error, (
+                    RuntimeClosed, SteerRace, ThreadStopping, ThreadCompacting,
+                    ThreadOccupied, ThreadGoalActive, ThreadLifecycleError,
+                    ModelCatalogError, SkillCatalogError, SkillReferenceError,
+                    GoalNotFound, GoalNotMaterialized,
+                ))
+                store.release(run.id, error_code=(
+                    "input_unknown" if current_run.phase == "starting_turn" and not rejected
+                    else "publishing_unknown" if (
+                        isinstance(error, TopicPublishError) and error.unknown
+                    ) or (
+                        isinstance(error, asyncio.CancelledError)
+                        and current_run.phase == "publishing_topic"
+                        and current_run.origin_message_id is None
+                    )
+                    else "input_rejected"
+                ))
+            if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                raise
+            if origin is not None:
+                await self._report_input_error(origin, error)
+            else:
+                logger.warning("scheduled input has no confirmed anchor", extra={"run_id": run.id, "error_type": type(error).__name__})
+
     @staticmethod
     def _require_schedule_result(result: dict[str, Any]) -> dict[str, Any]:
         if result.get("ok") is not True:
@@ -798,7 +908,7 @@ class ChannelApplication:
                 raise ScheduleError(f"{field} 必须是非空字符串。")
         if "all" in result and type(result["all"]) is not bool:
             raise ScheduleError("all 必须是布尔值。")
-        if not result.get("all") and not result.get("chat_id"):
+        if result.get("target_kind") != "binding" and not result.get("all") and not result.get("chat_id"):
             result["chat_id"] = scope.chat_id
         return result
 
@@ -844,7 +954,10 @@ class ChannelApplication:
                 {"mode": "runs", "plan_id": selected["plan"]["id"], "limit": 5,
                  **({"cursor": runs_cursor} if runs_cursor else {})}, scope_key=scope.key, source="card",
             ))
-        return schedule_manager_card(scope, listed, navigation=navigation, selected=selected, runs=runs, notice=notice)
+        binding = self._bindings.active_binding(scope.key)
+        return schedule_manager_card(scope, listed, navigation=navigation, selected=selected,
+                                     runs=runs, notice=notice,
+                                     current_binding_id=binding.id if binding else None)
 
     async def _handle_schedule_card_action(self, event: Any) -> None:
         message_id = str(getattr(event, "message_id", "") or "")
@@ -871,12 +984,14 @@ class ChannelApplication:
                     if plan["revision"] != payload.get("expected_revision"):
                         raise ScheduleError("计划已修改，请刷新详情后重新编辑。")
                 binding = self._bindings.active_binding(scope.key)
+                target_binding_id = payload.get("target_binding_id") if decoded.action == "new" else None
                 target = (plan or {}).get("chat_id") or scope.chat_id
                 options, catalog = await service.form_options(scope_key=scope.key, chat_id=target)
                 self._require_schedule_result(options)
                 catalog_error = options.get("model_catalog_error")
                 card = schedule_form_card(scope, projects=self._projects.list(enabled_only=True),
                     default_timezone=service.default_timezone, plan=plan,
+                    target_binding_id=target_binding_id,
                     initial_project=binding.project_alias if binding else None,
                     session_settings=options["session_settings"], catalog=catalog,
                     catalog_error=catalog_error.get("message") if catalog_error else None,
@@ -897,7 +1012,7 @@ class ChannelApplication:
                 notice = "立即运行请求已受理。" + ("同一请求未重复触发。" if receipt.get("replayed") else "")
                 card = await self._schedule_manager_card(scope,
                     navigation={**navigation, "plan_id": payload["plan_id"]}, show_runs=True,
-                    notice=notice + "结果将在目标会话的新话题中交付；原定时安排不变。")
+                    notice=notice + "输入将按计划的执行目标交接；原定时安排不变。")
             elif decoded.action == "delete":
                 deleted = self._require_schedule_result(await service.manage({"mode": "delete", **payload, "request_id": decoded.request_id}, scope_key=scope.key, source="card"))
                 notice = "计划已删除，已有会话保留。" + ("本次已触发的交接仍可能继续。" if deleted.get("inflight") else "")
@@ -948,6 +1063,12 @@ class ChannelApplication:
                 logger.exception("failed to send scheduled retry feedback")
 
     async def _reply_to_origin(self, message: Any, content: Any) -> object:
+        if isinstance(message, ScheduledBindingOrigin):
+            return await self._channel.reply(message, content, SendOpts(
+                receive_id_type="chat_id", reply_to=message.message_id,
+                reply_in_thread=message.conversation.thread_id is not None,
+                reply_target_gone="fail",
+            ))
         if isinstance(message, ScheduledOrigin):
             # A scheduled result belongs to this exact execution topic. The
             # SDK's default target-gone fallback would create a main-chat message.
@@ -1096,37 +1217,42 @@ class ChannelApplication:
                 if current_images:
                     raise InvalidInteraction("控制命令不能携带图片，请拆分后重试。")
                 await self._control(message, interaction)
-        except (InvalidInteraction, ScheduleError) as error:
+        except Exception as error:
+            await self._report_input_error(message, error)
+
+    async def _report_input_error(self, message: Any, error: Exception) -> None:
+        """One user-visible failure policy for real and scheduled inputs."""
+        if isinstance(error, (InvalidInteraction, ScheduleError)):
             await self._reply(message, str(error))
-        except UnknownProject as error:
+        elif isinstance(error, UnknownProject):
             await self._reply(message, f"未知 Project：{error.args[0]}。")
-        except ProjectError as error:
+        elif isinstance(error, ProjectError):
             await self._reply(message, str(error))
-        except BindingNotFound as error:
+        elif isinstance(error, BindingNotFound):
             await self._reply(
                 message,
                 f"当前聊天或话题找不到会话：{error.args[0]}。"
                 "发送 /sessions 查看会话短 ID；已归档会话用 /sessions archived 查找。"
                 "发送 /help 查看用法。",
             )
-        except AmbiguousBinding as error:
+        elif isinstance(error, AmbiguousBinding):
             await self._reply(
                 message,
                 f"会话短 ID 不唯一：{error.args[0]}。"
                 "发送 /sessions 查看并选择目标会话，或使用更长的 ID 重试。",
             )
-        except (
+        elif isinstance(error, (
             QuotedMessageError,
             MessageHistoryError,
             HistoricalMessageError,
             ContextBoundaryCommitFailed,
-        ) as error:
+        )):
             await self._reply(message, describe_error(error))
-        except ImageInputError as error:
+        elif isinstance(error, ImageInputError):
             await self._reply(message, str(error))
-        except PromptProjectionError as error:
+        elif isinstance(error, PromptProjectionError):
             await self._reply(message, str(error))
-        except (
+        elif isinstance(error, (
             ModelCatalogError,
             RuntimeClosed,
             SkillCatalogError,
@@ -1155,9 +1281,9 @@ class ChannelApplication:
             TerminalCleanupFailed,
             TurnInterruptFailed,
             TurnStartFailed,
-        ) as error:
+        )):
             await self._reply(message, describe_error(error))
-        except Exception as error:
+        else:
             logger.exception(
                 "channel interaction failed",
                 extra={"error_type": type(error).__name__},
@@ -2388,7 +2514,6 @@ class ChannelApplication:
                 message, prompt.scope, task_not_executed=True,
             )
             return
-        project = self._projects.resolve_for_binding(binding.project_alias)
         target_id = quoted_message_id(message)
         current = project_current_message(
             message,
@@ -2400,10 +2525,31 @@ class ChannelApplication:
             ),
             request_text=prompt.text,
         )
-        admission = await self._runtime.capture_submission_admission(binding.id)
+        await self._consume_prompt(
+            binding=binding, scope=prompt.scope, message=message, current=current,
+            owner_id=prompt.sender_id, skill_names=prompt.skill_names,
+            target_id=target_id, current_images=current_images,
+        )
+
+    async def _consume_prompt(
+        self, *, binding: ThreadBinding, scope: FeishuScope, message: Any,
+        current: MessageInputProjection, owner_id: str,
+        skill_names: tuple[str, ...], target_id: str | None = None,
+        current_images: tuple[ImageReference, ...] = (),
+        scheduled_run_id: str | None = None,
+        admission: SubmissionAdmission | None = None,
+    ) -> None:
+        """Share preparation, exact admission, acceptance and feedback for inputs."""
+        project = self._projects.resolve_for_binding(binding.project_alias)
+        if admission is None:
+            admission = await self._runtime.capture_submission_admission(binding.id)
+        if (binding.settings_revision != admission.settings_revision
+                or binding.context_revision != admission.context_revision
+                or binding.feedback_revision != admission.feedback_revision):
+            raise SteerRace("准备本条消息期间会话配置或上下文已变化，本条消息未执行。")
         context_commit = None
         if binding.message_context_mode is MentionContextMode.CATCH_UP:
-            self._require_catch_up_message_scope(message, prompt.scope)
+            self._require_catch_up_message_scope(message, scope)
             if binding.context_anchor is None:
                 raise MessageHistoryUnavailable(
                     "当前会话缺少群聊上下文边界，本条消息未执行；"
@@ -2411,9 +2557,9 @@ class ChannelApplication:
                 )
             prepared = await self._input_preparer.prepare_catch_up(
                 source_message=message,
-                scope=prompt.scope,
+                scope=scope,
                 lower=binding.context_anchor,
-                upper_id=prompt.source_id,
+                upper_id=current.message_id,
                 quoted_target_id=target_id,
                 current=current,
                 current_images=current_images,
@@ -2438,12 +2584,14 @@ class ChannelApplication:
             binding=binding,
             cwd=project.cwd,
             input=prepared.native_input,
-            owner_id=prompt.sender_id,
+            owner_id=owner_id,
             origin=message,
-            skill_names=prompt.skill_names,
+            skill_names=skill_names,
             context_commit=context_commit,
         )
         submit_kwargs["admission"] = admission
+        if scheduled_run_id is not None:
+            self._bindings.schedules.begin_binding_submission(scheduled_run_id, binding.id)
         try:
             submission = await self._runtime.submit(**submit_kwargs)
         finally:
@@ -2452,6 +2600,17 @@ class ChannelApplication:
             # while the reaction receipt below waits on Feishu I/O.
             submit_kwargs.pop("input", None)
             prepared = None
+        if scheduled_run_id is not None:
+            try:
+                self._bindings.schedules.finish_binding_submission(
+                    scheduled_run_id, submission.turn_id, submission.disposition.value,
+                )
+            except BaseException:
+                # Recording the input receipt must never strand the accepted
+                # native Turn's ordinary completion consumer.
+                if submission.release_receipt_attempt is not None:
+                    submission.release_receipt_attempt()
+                raise
         if submission.disposition is SubmitDisposition.STEERED:
             if not await self._safe_add_reaction(message, _STEER_REACTION):
                 await self._reply(message, "已接收调整。")
@@ -2475,11 +2634,12 @@ class ChannelApplication:
             ]
             if submission.task_feedback.progress_card_enabled:
                 delivery_options = {}
-                if isinstance(origin, ScheduledOrigin):
+                if isinstance(origin, (ScheduledOrigin, ScheduledBindingOrigin)):
                     delivery_options = {
                         "reply": lambda card: self._reply_to_origin(origin, card),
-                        "validate_reply": lambda result: self._scheduled_reply_confirmed(origin, result),
                     }
+                    if isinstance(origin, ScheduledOrigin):
+                        delivery_options["validate_reply"] = lambda result: self._scheduled_reply_confirmed(origin, result)
                 presenters.append(
                     self._progress_cards.start(
                         binding_id=submission.binding_id,
@@ -6013,7 +6173,7 @@ def _outcome_completion_mention_user_id(
     """
     if (
         not outcome.task_feedback.completion_mention_enabled
-        or isinstance(outcome.origin, ScheduledOrigin)
+        or isinstance(outcome.origin, (ScheduledOrigin, ScheduledBindingOrigin))
         or outcome.background_cleanup_requested
     ):
         return None

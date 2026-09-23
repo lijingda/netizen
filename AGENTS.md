@@ -45,6 +45,9 @@ their cited ADRs before changing that boundary.
   management entry: [scheduled tasks](docs/design.md#定时任务) and
   [ADR 0061](docs/adr/0061-schedule-ordinary-threads-in-feishu-topics.md).
   Manual runs of saved plans follow [ADR 0068](docs/adr/0068-run-saved-scheduled-plans-manually.md).
+  Existing-Binding inputs follow [ADR 0070](docs/adr/0070-schedule-inputs-in-existing-bindings.md):
+  ordinary start/steer admission and feedback, input-receipt Run semantics,
+  and lifecycle-derived suspension independent of manual enablement.
 - Installation, release, permissions, and platform service management:
   [deployment](docs/deployment.md). Routine Agent installation starts with the
   README command and follows installer output; consult the relay procedure for
@@ -78,8 +81,8 @@ their cited ADRs before changing that boundary.
   `CODEX_HOME`, or cross-Thread execution limit.
 - Channel SQLite owns only the documented Scope/Binding/Project metadata,
   schema version, deduplication TTL keys, explicit Binding choices/revisions,
-  and Side routes/tombstones. ADR 0061 narrowly adds current Scheduled Plan
-  instructions, minimal dispatch/Run metadata, exact initial Turn references,
+  and Side routes/tombstones. ADR 0061/0070 narrowly add current Scheduled Plan
+  instructions, minimal dispatch/Run metadata, exact initial or accepted physical Turn references,
   and bounded management-request deduplication. Never store other prompts,
   message bodies, responses, Turn history/activity, card sessions, effective
   Codex configuration, or Admin sessions/tokens/indexes/audit records.

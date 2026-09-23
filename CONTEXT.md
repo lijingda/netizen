@@ -88,24 +88,28 @@ start/resume 持有的、面向一个普通持久 Thread 的事件订阅。取�
 **Turn**：`AsyncThread.turn()` 创建、由 `AsyncTurnHandle` 控制的一轮原生执行。
 它的历史和终态由原生 Codex 拥有。
 
-**Scheduled Plan / 定时计划**：用户要求按时间规则在指定 Project 执行工作、
-并在指定飞书会话（群聊或私聊）交付结果的可维护计划。计划带有独立的会话配置，默认采用
-创建时当前会话的选择。每次触发都创建独立话题，不依附创建者后续选择或修改的会话。
+**Scheduled Plan / 定时计划**：按保存的时间规则和指令触发工作的可维护计划。
+执行目标可以是每次新建独立话题，或向一条固定的普通会话提交输入。
 _Avoid_：Goal、原生 plan/checklist（它们不是按时间触发的计划）。
+
+**Scheduled Target / 定时执行目标**：计划触发后接收工作的目的地。新话题目标使用计划的
+独立配置；原会话目标固定一条 Binding，并沿用该会话的上下文、配置和消息消费行为。
 
 **Scheduled Plan Enablement / 计划启停状态**：用户是否允许计划继续自动触发的选择，分为已启用和已暂停。
 暂停不停止已经触发的执行，也不意味着计划已结束。
+
+**Scheduled Target Suspension / 定时目标暂停**：原会话目标因切换、归档或不可用而暂不能
+接受定时输入的情形。目标恢复可用不改变用户手动暂停计划的选择。
 
 **Scheduled Plan Cutoff / 计划截止时间**：重复计划允许自动触发的最后一个时刻，可以不设置。
 截止时刻包含在允许范围内，截止不停止已经触发的执行。
 
 **Scheduled Plan Completion / 计划结束状态**：当前规则已经没有后续或仍可处理的触发机会，且所有已触发执行均已明确收尾时，计划才为已结束。
-启动中、执行中或结果待确认的最后一次执行仍属于未结束；后续人工对话不计入这次定时执行。
+新话题模式等待最后一次首轮收尾；原会话模式只等待输入交接收尾，不等待承载它的任务结束。
 _Avoid_：已完成（容易与单次执行成功混淆）、状态（未说明是启停、结束还是执行情况）。
 
-**Scheduled Run / 定时执行**：定时计划被时间规则或手动请求触发的一次执行，在独立飞书
-话题中接受后续交流和普通管理。手动触发采用计划已保存的内容，不改变原定时安排；停止
-这次执行不等于暂停定时计划。
+**Scheduled Run / 定时执行**：定时计划被时间规则或手动请求触发的一次工作交接。
+新话题模式跟踪该次首轮执行；原会话模式记录输入是否已被接受，不独立宣称任务完成。
 
 **Confirmed Turn Terminal / 已确认 Turn 终态**：exact Turn 已由原生事实源确认为
 `completed`、`interrupted` 或 `failed`。三者都结束该 Turn，而不会结束或损坏承载它的
@@ -139,12 +143,14 @@ _Avoid_：“最终净 diff”“文件快照”“代码贡献量”。
 它的发送者只表明请求来源，不赋予权限、所有权或指令优先级；它可以不同于被引用消息和
 完成投递锚点。发送者归属只使用当前飞书应用内的 Open ID，不建立跨应用或租户级身份关联。
 
-**Mention Context Mode / @ 上下文模式**：普通 Binding 对一次显式 @ 请求选择的上下文
+**Mention Context Mode / @ 上下文模式**：普通 Binding 对一次请求选择的上下文
 范围；`current-only` 只使用当前消息，`catch-up` 还补充同一 Scope 中上一条 Context
-Boundary 之后的 eligible participant messages。两种模式都不让未 @ 消息自行触发任务。
+Boundary 之后的 eligible participant messages。原会话定时输入沿用该选择；未 @ 消息
+仍不自行触发任务。
 
 **Context Boundary / 上下文边界**：`catch-up` Binding 上最近一次被原生 Runtime 成功
-接受的 exact Current Prompt Message。它不是机器人回复完成时间，也不保存边界间消息正文。
+接受的输入所对应的 exact 飞书消息锚点。普通消息使用 Current Prompt Message，原会话
+定时输入使用触发锚点；它不是机器人回复完成时间。
 
 **Supplemental Context Message / 补充上下文消息**：`catch-up` 为当前显式 @ 请求读取的
 历史参与者消息；它只作 inert background，不是 Current Prompt、Control Intent 或 Skill

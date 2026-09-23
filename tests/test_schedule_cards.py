@@ -53,7 +53,7 @@ class ScheduleCardsTest(unittest.TestCase):
         self.scope = FeishuScope("app", "oc_group", ScopeKind.TOPIC, "omt_existing")
         self.project = Project("work", Path("/tmp"), True, 1)
         self.plan = {"id": "plan-one", "revision": 2, "name": "日报", "instructions": "检查明确资源", "project_alias": "work", "chat_id": "oc_group", "enabled": True,
-                     "schedule": {"kind": "daily", "timezone": "Asia/Shanghai", "at": "09:00"}, "session_settings": SessionSettings().to_dict()}
+                     "schedule": {"kind": "daily", "timezone": "Asia/Shanghai", "at": "09:00"}, "session_settings": SessionSettings().to_dict(), "can_run_now": True}
         self.catalog = ModelCatalog((ModelOption("future-model", "gpt-future", "Future Model", "catalog-only-description", True,
             "high", "priority", (EffortOption("low", "", "low"), EffortOption("high", "", "high")),
             (ServiceTierOption("priority", "Fast", ""),)),))
@@ -83,6 +83,51 @@ class ScheduleCardsTest(unittest.TestCase):
                 self.assertNotIn("sender_id", action.payload)
                 if kind == "once":
                     self.assertEqual(action.payload["schedule"]["at"], "2030-09-10T09:00+08:00")
+
+    def test_binding_create_freezes_exact_target_and_omits_copied_configuration(self):
+        manager = schedule_manager_card(self.scope, {"plans": []}, current_binding_id="binding-original")
+        create = decode_schedule_action(scope=self.scope, value=callback(manager, "在当前会话定时执行"))
+        self.assertEqual(create.payload, {"target_kind": "binding", "target_binding_id": "binding-original"})
+        card = schedule_form_card(self.scope, projects=[], default_timezone="UTC",
+            target_binding_id=create.payload["target_binding_id"])
+        values = form_values(card)
+        values[next(key for key in values if key.startswith("cron_name"))] = "稍后检查"
+        values.update(cron_instructions="继续检查刚才的问题", cron_kind="interval", cron_every_minutes="10")
+        action = decode_schedule_action(scope=self.scope, value=None, form=values)
+        self.assertEqual(action.payload["target_binding_id"], "binding-original")
+        self.assertEqual(action.payload["target_kind"], "binding")
+        self.assertFalse({"project", "chat_id", "session_settings"} & action.payload.keys())
+        self.assertFalse(any(name.startswith("cron_session_") for name in values))
+        self.assertNotIn("cron_chat_id", values)
+        for extra in ({"cron_chat_id": "other"}, {"cron_session_context_mode": "current-only"}):
+            with self.subTest(extra=extra), self.assertRaises(CardActionError):
+                decode_schedule_action(scope=self.scope, value=None, form={**values, **extra})
+        _, retried = schedule_retry_card(app_id="app", chat_id=self.scope.chat_id,
+            value=None, form=values, notice="请核查后重试", projects=[])
+        retry = decode_schedule_action(scope=self.scope, value=None, form=form_values(retried))
+        self.assertEqual(retry.payload, action.payload)
+        self.assertEqual(retry.request_id, action.request_id)
+
+    def test_binding_edit_and_paused_state_preserve_identity_and_acceptance_semantics(self):
+        plan = {**self.plan, "target_kind": "binding", "target_binding_id": "original",
+            "target_label": "正在检查的问题", "session_settings": None,
+            "blocked_reason": "target_inactive", "enabled": True, "can_run_now": False}
+        edit = schedule_form_card(self.scope, projects=[], default_timezone="UTC", plan=plan,
+            target_binding_id="different-current")
+        decoded = decode_schedule_action(scope=self.scope, value=None, form=form_values(edit))
+        self.assertEqual(decoded.payload["target_binding_id"], "original")
+        self.assertEqual(decoded.payload["expected_revision"], self.plan["revision"])
+        card = schedule_manager_card(self.scope, {"plans": [plan]}, selected={"plan": plan},
+            runs={"runs": [{"target_kind": "binding", "status": state} for state in
+                ("input_started", "input_steered", "input_unknown")]})
+        text = str(card.card)
+        self.assertIn("启停：已启用", text)
+        self.assertIn("自动暂停", text)
+        for label in ("已启动新一轮", "已追加当前任务", "输入接收情况待确认"):
+            self.assertIn(label, text)
+        self.assertNotIn("结果投递：", text)
+        self.assertNotIn("立即运行", [button.get("text", {}).get("content") for button in elements(card.card, "button")])
+        self.assertEqual(callback(card, "暂停")["payload"]["enabled"], False)
 
     def test_forms_use_supported_feishu_controls(self):
         for card in (schedule_manager_card(self.scope, {"plans": [self.plan]}),
@@ -298,6 +343,7 @@ class ScheduleCardsTest(unittest.TestCase):
 
     def test_run_now_blocked_plan_explains_reason_and_keeps_refresh_control(self):
         for plan_fields, detail_fields, reason in (
+            ({}, {}, "暂不能立即运行"),
             ({}, {"inflight": True}, "上次首轮执行尚未确认结束"),
             ({"inflight": True}, {}, "上次首轮执行尚未确认结束"),
             ({"blocked_reason": "blocked_unknown"}, {}, "执行状态待确认"),
@@ -305,7 +351,7 @@ class ScheduleCardsTest(unittest.TestCase):
             ({"blocked_reason": "project_unavailable"}, {}, "Project 不可用"),
         ):
             with self.subTest(reason=reason):
-                plan = {**self.plan, **plan_fields}
+                plan = {**self.plan, **plan_fields, "can_run_now": False}
                 card = schedule_manager_card(self.scope, {"plans": [plan]}, selected={"plan": plan, **detail_fields})
                 self.assertNotIn("立即运行", [button.get("text", {}).get("content") for button in elements(card.card, "button")])
                 self.assertIn(reason, str(card.card))

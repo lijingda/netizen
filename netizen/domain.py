@@ -89,6 +89,30 @@ class ScheduledOrigin:
         return self.message_id
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduledBindingConversation:
+    chat_id: str
+    chat_type: str
+    thread_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledBindingOrigin:
+    """A real trigger anchor, distinct from a Feishu-authored input."""
+
+    app_id: str
+    chat_id: str
+    message_id: str
+    conversation: ScheduledBindingConversation
+    plan_id: str
+    run_id: str
+    binding_id: str
+
+    @property
+    def id(self) -> str:
+        return self.message_id
+
+
 class NativeCapability(str, Enum):
     SKILLS = "skills"
     GOAL = "goal"
