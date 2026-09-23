@@ -390,6 +390,11 @@ def _optional_line_counts(
 
 
 def _inspect_manifest_file(entry: TurnFileManifestItem) -> TurnFile:
+    if entry.deleted:
+        return TurnFile(
+            entry.label, Path(entry.path), None, None,
+            entry.additions, entry.deletions, deleted=True,
+        )
     inspected = inspect_turn_file_path(entry.path, entry.label)
     if not inspected.available or inspected.media_kind == "image":
         return inspected
@@ -408,6 +413,7 @@ def _reply_file_item(turn_file: TurnFile) -> ReplyCardFileItem:
         media_kind=turn_file.media_kind,
         additions=turn_file.additions,
         deletions=turn_file.deletions,
+        deleted=turn_file.deleted,
     )
 
 
@@ -424,6 +430,8 @@ def _reply_turn_files(
         seen.add(path)
         size = item.size
         media_kind = item.media_kind
+        if type(item.deleted) is not bool or (item.deleted and size is not None):
+            raise ValueError("deleted files must be unavailable")
         if (size is None) != (media_kind is None):
             raise ValueError("file availability fields must change together")
         if size is not None:
@@ -435,7 +443,7 @@ def _reply_turn_files(
             item.deletions,
             field="file",
         )
-        if media_kind != "file":
+        if media_kind != "file" and not item.deleted:
             additions = None
             deletions = None
         results.append(
@@ -446,6 +454,7 @@ def _reply_turn_files(
                 media_kind=media_kind,
                 additions=additions,
                 deletions=deletions,
+                deleted=item.deleted,
             )
         )
     return tuple(results)
@@ -571,6 +580,7 @@ def _turn_file_manifest(
             label=turn_file.display_path,
             additions=turn_file.additions,
             deletions=turn_file.deletions,
+            deleted=turn_file.deleted,
         )
         for turn_file in files
     )
@@ -694,6 +704,7 @@ def _render_reply_card_page(projection: ReplyCardProjection) -> OutboundCard:
                     item.label,
                     item.additions,
                     item.deletions,
+                    deleted=item.deleted,
                 )
                 for item in files.items
             ),
@@ -1459,11 +1470,14 @@ def _decode_turn_file_manifest(value: Any) -> tuple[TurnFileManifestItem, ...]:
     results: list[TurnFileManifestItem] = []
     seen: set[str] = set()
     for item in value:
-        if not isinstance(item, Mapping) or set(item) not in (
+        if not isinstance(item, Mapping) or set(item) - {"deleted"} not in (
             {"path", "label"},
             {"path", "label", "a", "d"},
         ):
             raise CardActionError("本轮文件清单条目字段无效。")
+        deleted = item.get("deleted", False)
+        if type(deleted) is not bool:
+            raise CardActionError("本轮文件删除标记无效。")
         path = _decode_turn_file_path(item["path"])
         label = _required_string(item["label"], "label")
         if len(label) > 1024 or "\x00" in label:
@@ -1488,6 +1502,7 @@ def _decode_turn_file_manifest(value: Any) -> tuple[TurnFileManifestItem, ...]:
                 label=label,
                 additions=additions,
                 deletions=deletions,
+                deleted=deleted,
             )
         )
     return tuple(results)
@@ -1955,7 +1970,20 @@ def _turn_file_row(
     turn_file: TurnFile,
     action_version: int = TURN_FILE_ACTION_VERSION,
 ) -> dict[str, Any]:
+    line_counts = ""
+    if (
+        (turn_file.media_kind == "file" or turn_file.deleted)
+        and turn_file.additions is not None
+        and turn_file.deletions is not None
+    ):
+        line_counts = (
+            "  "
+            f"<font color='green'>+{turn_file.additions}</font> "
+            f"<font color='red'>-{turn_file.deletions}</font>"
+        )
     if not turn_file.available:
+        icon = "📄" if turn_file.deleted else "⚠️"
+        status = "已删除" if turn_file.deleted else "文件当前不可用"
         return {
             "tag": "column_set",
             "flex_mode": "none",
@@ -1971,8 +1999,8 @@ def _turn_file_row(
                         {
                             "tag": "markdown",
                             "content": (
-                                f"⚠️ `{_turn_file_label(turn_file.display_path)}`\n"
-                                "<font color='grey'>文件当前不可用</font>"
+                                f"{icon} `{_turn_file_label(turn_file.display_path)}`{line_counts}\n"
+                                f"<font color='grey'>{status}</font>"
                             ),
                         }
                     ],
@@ -1982,17 +2010,6 @@ def _turn_file_row(
     assert turn_file.size is not None
     assert turn_file.media_kind is not None
     icon = "🖼️" if turn_file.media_kind == "image" else "📄"
-    line_counts = ""
-    if (
-        turn_file.media_kind == "file"
-        and turn_file.additions is not None
-        and turn_file.deletions is not None
-    ):
-        line_counts = (
-            "  "
-            f"<font color='green'>+{turn_file.additions}</font> "
-            f"<font color='red'>-{turn_file.deletions}</font>"
-        )
     return {
         "tag": "column_set",
         "flex_mode": "none",
@@ -2038,6 +2055,8 @@ def _encode_turn_file_manifest_item(
     item: TurnFileManifestItem,
 ) -> dict[str, Any]:
     encoded: dict[str, Any] = {"path": item.path, "label": item.label}
+    if item.deleted:
+        encoded["deleted"] = True
     if item.additions is not None and item.deletions is not None:
         encoded["a"] = item.additions
         encoded["d"] = item.deletions

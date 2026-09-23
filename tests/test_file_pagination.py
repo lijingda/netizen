@@ -294,3 +294,55 @@ class FilePaginationTest(unittest.TestCase):
                     plain = turn_files_card_from_manifest(final_response=intent.answer, **kwargs)
                     self.assertEqual(page_buttons(plain.card)[0][1]["pagination"], "select")
                     current.write_text("result", encoding="utf-8")
+
+    def test_deleted_row_keeps_counts_without_send_after_page_roundtrip(self) -> None:
+        for version in (4, 5):
+            with self.subTest(version=version):
+                projection = self.projection(9, action_version=version)
+                assert projection.files is not None
+                deleted = replace(
+                    projection.files.items[-1], size=None, media_kind=None,
+                    additions=0, deletions=1893, deleted=True,
+                )
+                projection = replace(projection, files=replace(
+                    projection.files,
+                    items=(*projection.files.items[:-1], deleted),
+                    additions=96, deletions=1917,
+                ))
+                card = reply_card(projection).card
+                self.assertIn("共 9 个", str(card))
+                for target in (1, 0, 1):
+                    value = page_buttons(card)[0][1]
+                    self.assertEqual(value["files"][-1], {
+                        "path": deleted.path, "label": deleted.label,
+                        "a": 0, "d": 1893, "deleted": True,
+                    })
+                    intent = self.decode(value, {"turn_file_page": str(target)})
+                    kwargs = dict(
+                        scope=intent.scope, binding_id=intent.binding_id,
+                        turn_id=intent.turn_id, manifest=intent.files, page=intent.page,
+                        additions=intent.additions, deletions=intent.deletions,
+                    )
+                    if version == 5:
+                        card = reply_card_from_manifest(reply=intent.reply, **kwargs).card
+                    else:
+                        card = turn_files_card_from_manifest(final_response=intent.answer, **kwargs).card
+                    if target == 1:
+                        visible = "\n".join(item["content"] for item in elements(card, "markdown"))
+                        self.assertIn(deleted.label, visible)
+                        self.assertIn("已删除", visible)
+                        self.assertIn("+0", visible)
+                        self.assertIn("-1893", visible)
+                        self.assertNotIn("文件当前不可用", visible)
+                        self.assertEqual([
+                            behavior["value"]["intent"]
+                            for button in elements(card, "button")
+                            for behavior in button.get("behaviors", ())
+                        ], ["turn-file.page"])
+
+                for invalid in (None, "true", 1, []):
+                    with self.subTest(invalid=invalid), self.assertRaises(CardActionError):
+                        self.decode({**value, "files": [
+                            *value["files"][:-1],
+                            {**value["files"][-1], "deleted": invalid},
+                        ]}, {"turn_file_page": "1"})

@@ -739,7 +739,8 @@ traceback；日志同时记录 exact IDs 与该摘要。错误摘要仅在当前
 仅补充路径，不产生行数。成功 `fileChange` patch 是统计唯一事实源：add/delete 完整正文
 按 LF 计行，update 验证完整 hunk 后累计，`Moved to:` 后缀指向 rename 目标。同文件多次
 修改相加，改回原文也计入；这不是最终净 diff。有效 deleted patch 仍进入总计，即使文件
-已不能发送。缺失或畸形 patch 只使对应文件数字及总计未知，其他文件的有效数字保留；
+已不能发送；有本轮成功 delete 记录且已不存在的文件仍保留条目、已知行数和“已删除”标记，
+不提供发送按钮。缺失或畸形 patch 只使对应文件数字及总计未知，其他文件的有效数字保留；
 binary、图片不伪造数字。未进入成功 patch 的 aggregate-only 文件只有文件展示，没有数字。
 
 该 exact Turn 内成功 v1 `spawnAgent` 或 v2 `started` 指向本轮新建子任务。completion
@@ -757,9 +758,9 @@ Project 仅作为相对路径解析基准，不是文件授权边界；子任务
 或 `..` 路径同样规范化，其他 Project 的任务内修改同样计入。访问权限仍由原生 Codex
 sandbox/approval 决定。canonical 重复、缺失、目录和设备文件不进入发送列表；不扫描
 工作区、不从最终文本发现 Files 条目，也不推断没有进入受支持 native 事实的 shell/MCP/第三方工具
-输出。非 Goal 且 Progress Card 关闭时，没有可用文件仍发送原富文本/静态文本；存在
-文件时只发送一张包含最终回复与“本轮文件”的 Card 2.0。Progress Card 开启时，completed
-结果与可用文件进入已发送的同一张卡。
+输出。非 Goal 且 Progress Card 关闭时，没有文件条目仍发送原富文本/静态文本；存在
+条目（含已删除文件）时只发送一张包含最终回复与“本轮文件”的 Card 2.0。Progress Card
+开启时，completed 结果与文件条目进入已发送的同一张卡。
 
 Goal 始终使用组合卡；满足四项终态证据后，只从 exact 最终成功 physical Turn 及其本轮
 新建子任务提取文件和累计统计，并只用该 Turn 的 final agent answer，不聚合更早 rollover
@@ -797,7 +798,9 @@ payload 解码。新 PAGE callback 固定携带 `pagination: select`，要求从
 该标记仅用于回调解码，不增加领域字段、导航状态、缓存或持久记录。旧 v3 opaque-ref
 卡片点击时明确提示已过期，不再重读历史。
 
-每次翻页和发送都从 payload path 重新 resolve/stat；不可用文件在分页中保留位置并取消
+已删除条目以可选 `deleted: true` 随 v4/v5 manifest 保留标记和行数，计入文件总数与分页，
+重绘时不恢复发送按钮；其余条目每次翻页和发送都从 payload path 重新 resolve/stat，
+不可用文件在分页中保留位置并取消
 发送按钮。图片白名单为 PNG/JPEG/GIF/WebP，点击后用 `OutboundImage`；其他普通文件用
 `OutboundFile`。两者都通过 callback source card 的 exact message ID 执行
 `reply_in_thread=True`、`reply_target_gone="fail"`。平面卡片由此成为话题锚点，既有话题

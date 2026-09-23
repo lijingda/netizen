@@ -253,6 +253,7 @@ class TurnFileManifestItem:
     label: str
     additions: int | None = None
     deletions: int | None = None
+    deleted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +335,7 @@ class ReplyCardFileItem:
     media_kind: str | None
     additions: int | None = None
     deletions: int | None = None
+    deleted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
