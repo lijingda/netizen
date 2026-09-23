@@ -46,6 +46,7 @@ from ..message_projection import (
     select_supplemental_messages,
 )
 from ..prompt_projection import (
+    CardAnswerProjection,
     CurrentMessageProjection,
     MessageInputProjection,
     PromptProjectionError,
@@ -103,8 +104,8 @@ class MessageInputPreparer:
     ) -> PreparedInput:
         """Prepare current-only input, including its optional explicit quote."""
 
-        self._validate_scheduled_material(current, quoted_target_id, current_images)
-        if isinstance(current, ScheduledInputProjection):
+        self._validate_anchor_material(current, quoted_target_id, current_images)
+        if isinstance(current, (ScheduledInputProjection, CardAnswerProjection)):
             return PreparedInput(native_input=render_plain_prompt(current))
 
         try:
@@ -209,10 +210,10 @@ class MessageInputPreparer:
     ) -> PreparedInput:
         """Prepare a bounded history window and return its exact upper anchor."""
 
-        self._validate_scheduled_material(current, quoted_target_id, current_images)
-        if isinstance(current, ScheduledInputProjection) and upper_id != current.message_id:
+        self._validate_anchor_material(current, quoted_target_id, current_images)
+        if isinstance(current, (ScheduledInputProjection, CardAnswerProjection)) and upper_id != current.message_id:
             raise PromptProjectionError(
-                "定时输入的上下文边界与触发消息不一致，本条消息未执行。"
+                "本次输入的上下文边界与反馈消息不一致，本条消息未执行。"
             )
         reader = message_history
         if reader is None:
@@ -589,7 +590,7 @@ class MessageInputPreparer:
         images: Sequence[Any],
         image_prompt_refs: ImagePromptReferences,
     ) -> MessageInputProjection:
-        if isinstance(current, ScheduledInputProjection):
+        if isinstance(current, (ScheduledInputProjection, CardAnswerProjection)):
             return current
         current = project_current_content(
             message,
@@ -612,16 +613,16 @@ class MessageInputPreparer:
         )
 
     @staticmethod
-    def _validate_scheduled_material(
+    def _validate_anchor_material(
         current: MessageInputProjection,
         quoted_target_id: str | None,
         current_images: tuple[ImageReference, ...],
     ) -> None:
-        if isinstance(current, ScheduledInputProjection) and (
+        if isinstance(current, (ScheduledInputProjection, CardAnswerProjection)) and (
             quoted_target_id is not None or current_images
         ):
             raise PromptProjectionError(
-                "定时输入不能把触发消息的引用或图片当作任务材料，本条消息未执行。"
+                "本次输入不能把反馈消息的引用或图片当作任务材料，本条消息未执行。"
             )
 
     @staticmethod

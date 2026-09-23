@@ -654,13 +654,14 @@ migration sentinel 阻止继续永久保留 shim，并要求逐项切回公开 p
 `ThreadDeleteControl` 同样只暴露固定 `thread/delete`，生产服务在独立
 shape/synthetic 门禁通过时构造；Runtime 而非 Adapter 负责失败后的有界四视图对账。
 ADR 0020/0052 的 `PinnedTurnActivityObserver` 精确校验 SDK 版本、整包源码指纹、generated
-payload、内部持有类型与 retained event-store shape；它只在 Progress Card 开启的 exact ordinary/Side
-Turn、显式 `/status` 或 steer freshness bookkeeping 中，在 router RLock
+payload、内部持有类型与 retained event-store shape；它在 exact ordinary Turn 的问题观察、
+Progress Card 开启的 Side Turn、显式 `/status` 或 steer freshness bookkeeping 中，在 router RLock
 下复制绝对 cursor 后的通知引用；校验 exact Turn 的保留区间及序号连续性，不调用 RPC、
 不注册/关闭订阅、不消费/裁剪事件、不改订阅者游标、不新建 worker。
-它只向 Runtime 交付 sanitized Activity event；event 的 opaque item identity 仅用于进程内
-lifecycle 合并，Channel Snapshot 会移除它。Goal 不读取该 event store，而是在现有 logical stream
-的唯一 `next_notification` 消费链内 tap 同一安全投影。rename/archive/
+它只向 Runtime 交付 sanitized Activity event 与 ADR 0071 的 structured question projection；
+Activity 的 opaque item identity 仅用于进程内 lifecycle 合并，Channel Snapshot 会移除它；
+问题保留 item identity 供卡片生成原生回答格式。Goal 不读取该 event store，而是在现有 logical stream
+的唯一 `next_notification` 消费链内 tap 同一受限投影。rename/archive/
 unarchive 全部使用高层公开 API。原生名称、归档状态、plan 与终态仍以 Codex 为事实源，不
 增加本地 lifecycle 或 progress 状态列。
 
@@ -892,11 +893,47 @@ usage；不生成 elapsed time、百分比或 ETA，commentary/checklist 沿用�
 查询中的同名字面内容不作估算解释。它不是原生终态事实或历史记录。
 
 Progress Card 开启时，Runtime 的既有 consumer/poll loop 更新快照，Channel Presenter 每秒
-只读取 projection 并在 revision 变化时重绘；关闭时普通/Side Turn 不创建 Activity 卡、
-不增加 observer polling，Goal 也不启用 Activity Tap，但仍更新 Goal 模块。pinned observer
+只读取 projection 并在 revision 变化时重绘；关闭时普通/Side Turn 不创建 Activity 卡，Goal
+不展示 Activity 模块。普通 Binding 与 Goal 仍使用同一 observer cursor / logical Tap 接收
+结构化问题；Side 关闭进度卡时不增加 observer polling，继续原有唯一消费流程。pinned observer
 保持版本/源码指纹、generated shape、exact `thread_id + turn_id`、非消费 event store 和完整 plan
-replacement 门禁；只接受 ADR 0052 的事件白名单，未知事件忽略，白名单 shape 变化 fail
+replacement 门禁；只接受 ADR 0052/0071 的事件白名单，未知事件忽略，白名单 shape 变化 fail
 closed，不能扩展成任意通知或私有 RPC gateway。
+
+### 原生问题卡片与回答
+
+普通 Binding 及其中运行的 Goal 接收 completed `agentMessage` 的非空 `questions`，
+与 `delivery`、`phase` 无关；问题自身的 `final_answer` 不改变原生终态判断。复用上一节
+的唯一观察路径，按 exact 物理 Turn + item 去重，终态 drain 前读取保留的问题。题目和
+选项进入独立的自包含卡片，保留完整文本，不进入 Activity 的限长摘要。每题一张卡，
+建议和“自行填写”是互斥选项，只有选中“自行填写”才读取文本框。卡片发送是有界 best
+effort，不等待初始任务回执，由服务统一清理；不按问题或执行维护发送生命周期，已发起
+的卡片可能在归档/删除后才到达。发送不影响原生执行，不增加 pending/answered/expired
+状态、第二消费者或数据库记录。Side 不属于这条
+以 current Binding 为准的卡片输入路径。
+
+卡片保存原 Binding 与原生问题 identity。提交时核验原卡片 App/chat/topic，确认 Binding
+属于该 Scope 且仍为 current，再捕获普通 admission。若已经切换，只提示切回原会话。
+原提问 Turn 已结束或题目较旧本身不使卡片失效。运行中按捕获的 exact 当前 Turn steer，
+空闲则开始后续 Turn；准备期间的 Binding 切换、Turn 结束、Goal 换轮等竞争继续明确拒绝，
+不自动改投。归档、删除或不可用继续遵守现有准入。
+
+回调不是飞书入站消息。`CardAnswerProjection` 保留实际点击者身份，把原问题卡与新发送的
+机器人回答回执分开；回执作为反馈锚点以及 catch-up 的 exact upper anchor。锚点或回答者
+无法核验时不提交。随后显式传原 Binding 和 admission 进入共享 `_consume_prompt()`，复用
+准备、上下文边界 CAS、公开 SDK start/steer、错误和反馈。只有答案中用户实际提交的显式
+Skill 引用参与解析，模型生成的题目和 item ID 不激活 Skill，也不解析为 slash control。
+
+回答按 Codex `0.156.1` 的稳定 question item identity 与
+`<send_user_message_question_reply>` JSON fragment 包装；即使使用 catch-up，该片段也位于
+顶层用户输入，不放入 inert history。新任务的结果和完成提醒归属回答者及新回执；steer
+保留原任务来源。进入共享输入流程之前的卡片适配失败重绘新 nonce，保留原选择方式；
+nonce 沿用 transport-only 解析。交接后的错误直接复用普通消息的 `_report_input_error()`，
+不增加卡片专用接收结果分类或执行状态，也不重绘原卡。同一原卡、用户和表单沿用 SDK
+有界去重，修改回答是新的显式普通输入；需重发时按聊天反馈在原会话发送，不自动重试。
+旧 `item/tool/requestUserInput` 保持 SDK 原处理。
+完整边界、原生源码依据与兼容门禁见
+[ADR 0071](adr/0071-answer-native-questions-through-binding-input.md)。
 
 ### 回复卡片呈现
 
@@ -1616,7 +1653,7 @@ steer 请求开始后到达的下一次 exact plan update 清除标记，失败 
 于 active Runtime 内存，不保存历史，不进入 SQLite。observer 不消费通知，终态后的公开
 usage stream 仍按原顺序排空同一队列。`/status` 只在用户请求时刷新；Progress Card 开启时，
 同一个 Turn Activity Projection 由 Runtime 按既有节奏更新，Presenter 本身不访问 queue；
-关闭时没有后台 Activity polling。
+关闭后不展示 Activity 卡，但普通 Binding 与 Goal 仍沿同一观察路径接收结构化问题。
 SDK `0.154.0` 的 `update_plan` 工具默认关闭；需要原生 checklist 时由用户在 Codex
 配置中开启 `tools.update_plan.enabled`。Netizen 继续继承工具配置，不自动开启或用提示词
 模拟计划。其他 Activity item 不依赖这一工具。

@@ -188,6 +188,17 @@ for line in sys.stdin:
             )
             if mode == "goal":
                 notify(
+                    "item/completed",
+                    {
+                        "threadId": "thread-goal", "turnId": first, "completedAtMs": 1,
+                        "item": {
+                            "type": "agentMessage", "id": "goal-question-one",
+                            "text": "Choose A or B", "phase": "final_answer",
+                            "questions": [{"title": "Choose", "options": ["A", "B"]}],
+                        },
+                    },
+                )
+                notify(
                     "item/started",
                     {
                         "threadId": "thread-goal",
@@ -597,6 +608,10 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(command.status, TurnActivityStatus.IN_PROGRESS)
         self.assertEqual(command.event_timestamp_ms, 1)
         self.assertEqual(command.text, "执行命令 · cat /tmp/private.txt")
+        questions = [item.question for item in activity if item is not None and item.question is not None]
+        self.assertEqual(len(questions), 1)
+        self.assertEqual(questions[0].item_id, "goal-question-one")
+        self.assertEqual(questions[0].questions[0].options, ("A", "B"))
         methods = [item.get("method") for item in messages if "id" in item]
         self.assertEqual(
             methods,

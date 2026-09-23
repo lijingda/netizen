@@ -20,11 +20,11 @@ from openai_codex.client import CodexClient
 from pydantic import BaseModel, ConfigDict, Field
 
 
-SUPPORTED_SDK_VERSION = "0.155.1"
+SUPPORTED_SDK_VERSION = "0.156.1"
 _CLEAN_METHOD = "thread/backgroundTerminals/clean"
 _LIST_METHOD = "thread/backgroundTerminals/list"
 _PACKAGE_SOURCE_FINGERPRINT = (
-    "9db021b08bbcc75f18206d64ecf8a7d5ba63b380d91181718a3c9153ed4a053f"
+    "7d0a2267e45d39934c64d2c01bddde8b36eacb2d771dd6903a056c6abef8e94f"
 )
 
 

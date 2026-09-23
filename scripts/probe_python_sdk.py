@@ -1783,11 +1783,13 @@ async def _goal_live(cwd: Path) -> dict[str, Any]:
         goal_file_name = f"netizen-goal-diff-{time.time_ns()}.txt"
         goal_file = cwd / goal_file_name
         goal_file_content = "NETIZEN-GOAL-DIFF-LIVE"
+        # Native aggregate diffs require fileChange evidence; a shell/Python
+        # write can create the fixture file without exercising that contract.
         handle = await control.start(
             thread.id,
             "Run /bin/sleep 12 as a bounded first step. After any resume, "
-            f"create {goal_file_name} in the current working directory with exact "
-            f"content {goal_file_content}, then reply exactly "
+            f"use apply_patch to create {goal_file_name} in the current working "
+            f"directory with exact content {goal_file_content}, then reply exactly "
             "GOAL-LIVE-DONE and complete this Goal.",
         )
         await asyncio.sleep(1)
@@ -1832,8 +1834,8 @@ async def _goal_live(cwd: Path) -> dict[str, Any]:
             else:
                 raise AssertionError("Goal steer silently accepted a stale expected Turn")
             await resumed.steer(
-                "Keep the required file task, but replace the final reply with exactly "
-                "GOAL-LIVE-STEERED and complete the Goal.",
+                "Keep the required apply_patch file task, but replace the final reply "
+                "with exactly GOAL-LIVE-STEERED and complete the Goal.",
                 expected_turn_id=resumed_steer_turn_id,
             )
             resumed_terminal = await asyncio.wait_for(
@@ -1884,14 +1886,27 @@ async def _goal_live(cwd: Path) -> dict[str, Any]:
                     pass
             raise
 
-        snapshot = await thread.read(include_turns=True)
-        goal_turn_ids = [turn.id for turn in snapshot.thread.turns]
-        final_turn = next(
-            turn for turn in snapshot.thread.turns
-            if turn.id == resumed_terminal.final_physical_turn_id
+        # Match Runtime's completion boundary before ordinary input: persisted
+        # Thread idle + exact terminal Turn, then clear a successfully completed
+        # Goal once and confirm absence. Stream completion alone is insufficient.
+        final_turn = await _public_terminal_turn(
+            thread, resumed_terminal.final_physical_turn_id,
         )
+        terminal_goal = await control.get(thread.id)
+        if terminal_goal is None or not terminal_goal.status.terminal_or_paused:
+            raise AssertionError("Goal completion was not persisted after Thread idle")
         if _final_response_from_turn(final_turn) != "GOAL-LIVE-STEERED":
             raise AssertionError("Goal final response did not reflect supplemental input")
+        completed_goal_cleared = False
+        if (
+            terminal_goal.status is GoalStatus.COMPLETE
+            and _status_value(final_turn) == "completed"
+        ):
+            if not await control.clear(thread.id) or await control.get(thread.id) is not None:
+                raise AssertionError("completed Goal clear was not confirmed")
+            completed_goal_cleared = True
+        snapshot = await thread.read(include_turns=True)
+        goal_turn_ids = [turn.id for turn in snapshot.thread.turns]
         followup = await thread.turn("Reply exactly: AFTER-GOAL-LIVE")
         followup_terminal = await _public_terminal_turn(thread, followup.id)
         followup_final = _final_response_from_turn(followup_terminal)
@@ -1914,6 +1929,7 @@ async def _goal_live(cwd: Path) -> dict[str, Any]:
             "resumed_diff_additions": file_stats.additions,
             "resumed_diff_deletions": file_stats.deletions,
             "terminal_status": terminal_goal.status.value,
+            "completed_goal_cleared": completed_goal_cleared,
             "observed_turn_ids": goal_turn_ids,
             "same_thread_followup_turn_id": followup.id,
             "same_thread_followup_response": followup_final,

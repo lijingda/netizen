@@ -8,6 +8,7 @@ from enum import Enum
 
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
+    AsyncUserInputQuestion,
     CollabAgentToolCallThreadItem,
     CommandExecutionThreadItem,
     ContextCompactionThreadItem,
@@ -37,6 +38,8 @@ from openai_codex.generated.v2_all import (
     WebSearchThreadItem,
 )
 from openai_codex.models import Notification
+
+from .user_questions import QuestionRequest, UserQuestion
 
 
 ACTIVITY_COMMENTARY_LIMIT = 4
@@ -181,12 +184,17 @@ class TurnActivityNotificationProjection:
     plan_updated: bool = False
     steps: tuple[TurnPlanStepSnapshot, ...] = ()
     event: TurnActivityEvent | None = None
+    question: QuestionRequest | None = None
 
     def __post_init__(self) -> None:
         if self.turn_id is not None:
             _validate_exact_id(self.turn_id, label="Turn")
-        if (self.turn_started or self.turn_completed or self.plan_updated or self.event) and (
-            self.turn_id is None
+        if self.turn_id is None and (
+            self.turn_started
+            or self.turn_completed
+            or self.plan_updated
+            or self.event is not None
+            or self.question is not None
         ):
             raise ValueError("activity projection requires an exact Turn ID")
         if not self.plan_updated and self.steps:
@@ -279,7 +287,45 @@ def project_turn_activity_notification(
         completed=completed,
         event_timestamp_ms=event_timestamp_ms,
     )
-    return TurnActivityNotificationProjection(turn_id=turn_id, event=event)
+    return TurnActivityNotificationProjection(
+        turn_id=turn_id,
+        event=event,
+        question=_project_question(payload.item.root) if completed else None,
+    )
+
+
+def _project_question(item: object) -> QuestionRequest | None:
+    """Project the native user-facing question fields, independently of Activity.
+
+    Delivery and phase describe the message, not whether its structured questions
+    should be shown. Preserve full question/option text for the answer protocol.
+    """
+
+    if type(item) is not AgentMessageThreadItem or not item.questions:
+        return None
+    if type(item.questions) is not list:
+        raise TurnActivityProjectionUnavailable("native questions shape changed")
+    try:
+        _validate_exact_id(item.id, label="item")
+    except ValueError as error:
+        raise TurnActivityProjectionUnavailable("native question item ID changed") from error
+    questions: list[UserQuestion] = []
+    for question in item.questions:
+        if (
+            type(question) is not AsyncUserInputQuestion
+            or not isinstance(question.title, str)
+            or not question.title.strip()
+            or (
+                question.options is not None
+                and (
+                    type(question.options) is not list
+                    or any(not isinstance(option, str) for option in question.options)
+                )
+            )
+        ):
+            raise TurnActivityProjectionUnavailable("native question fields changed")
+        questions.append(UserQuestion(question.title, tuple(question.options or ())))
+    return QuestionRequest(item.id, tuple(questions))
 
 
 def project_plan_steps(items: object) -> tuple[TurnPlanStepSnapshot, ...]:

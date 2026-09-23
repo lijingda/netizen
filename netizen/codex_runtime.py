@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -162,6 +163,7 @@ from .turn_activity import (
 )
 from .turn_plan_observer import TurnActivityObservation, TurnActivityObserver
 from .turn_patch_children import TaskPatchChildren, collect_turn_patch_children
+from .user_questions import QuestionRequest
 
 
 logger = logging.getLogger(__name__)
@@ -186,6 +188,9 @@ _SIDE_CLOSE_DRAIN_TIMEOUT_SECONDS = 5.0
 _SIDE_IDLE_SECONDS = 2 * 60 * 60
 _ORDINARY_THREAD_IDLE_SECONDS = 15 * 60
 _NAMING_SHUTDOWN_WAIT_SECONDS = 1.0
+_QUESTION_DELIVERY_TIMEOUT_SECONDS = 20.0
+
+QuestionHandler = Callable[[str, object, QuestionRequest], Awaitable[None]]
 
 
 class _TurnViewUnverified(RuntimeError):
@@ -242,6 +247,7 @@ class _ActiveTurn:
     activity_commentary_order: list[str] = field(default_factory=list)
     activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
     activity_operation_order: list[str] = field(default_factory=list)
+    question_ids: set[tuple[str, str]] = field(default_factory=set)
     task: asyncio.Task[None] | None = None
 
 
@@ -295,6 +301,7 @@ class _ActiveGoal:
     activity_commentary_order: list[str] = field(default_factory=list)
     activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
     activity_operation_order: list[str] = field(default_factory=list)
+    question_ids: set[tuple[str, str]] = field(default_factory=set)
     pause_attempted: bool = False
     interrupt_acknowledged: bool = False
     cleanup_required: bool = False
@@ -442,6 +449,7 @@ class CodexRuntime:
         self._thread_delete_control = thread_delete_control
         self._turn_plan_observer = turn_plan_observer
         self._on_completion = on_completion
+        self._on_question: QuestionHandler | None = None
         self._poll_interval_seconds = poll_interval_seconds
         self._compaction_timeout_seconds = compaction_timeout_seconds
         self._side_idle_seconds = side_idle_seconds
@@ -474,6 +482,43 @@ class CodexRuntime:
 
     def set_completion_handler(self, handler: CompletionHandler) -> None:
         self._on_completion = handler
+
+    def set_question_handler(self, handler: QuestionHandler) -> None:
+        self._on_question = handler
+
+    def _deliver_question(
+        self,
+        active: _ActiveTurn | _ActiveGoal,
+        turn_id: str,
+        request: QuestionRequest,
+    ) -> None:
+        handler = self._on_question
+        identity = (turn_id, request.item_id)
+        if (
+            handler is None
+            or not active.activity_observation_enabled
+            or identity in active.question_ids
+        ):
+            return
+        active.question_ids.add(identity)
+        binding_id, origin = active.binding_id, active.origin
+
+        async def deliver() -> None:
+            try:
+                async with asyncio.timeout(_QUESTION_DELIVERY_TIMEOUT_SECONDS):
+                    await handler(binding_id, origin, request)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "native question presentation failed",
+                    exc_info=True,
+                    extra={"binding_id": binding_id, "turn_id": turn_id},
+                )
+
+        task = asyncio.create_task(deliver(), name=f"codex-question:{request.item_id}")
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     @property
     def available_capabilities(self) -> frozenset[NativeCapability]:
@@ -3256,10 +3301,10 @@ class CodexRuntime:
     ) -> TurnActivitySnapshot | None:
         """Return one exact Turn's latest process-local display projection.
 
-        Callers opt into the pinned plan observation explicitly. A disabled
-        progress presenter therefore adds no polling merely because a Turn is
-        active. Exact IDs fail closed to ``None`` so a delayed card updater
-        cannot render a replacement Turn into an older card.
+        Callers opt into a refresh explicitly; the runtime also observes native
+        questions independently of the progress presenter. Exact IDs fail closed
+        to ``None`` so a delayed card updater cannot render a replacement Turn
+        into an older card.
         """
 
         active = self._active.get(binding_id)
@@ -3382,6 +3427,9 @@ class CodexRuntime:
             return None
         active.plan_available = True
         active.plan_cursor = observation.next_cursor
+        if isinstance(active, _ActiveTurn):
+            for request in observation.questions:
+                self._deliver_question(active, active.handle.id, request)
         if isinstance(active, _ActiveSideTurn) and observation.turn_completed:
             # Steer freshness reads can see completion before the Side loop.
             # Preserve the drain trigger; only handle.run() proves terminal.
@@ -3598,6 +3646,8 @@ class CodexRuntime:
             active.plan_generated = True
         if projection.event is not None:
             self._apply_activity_events(active, (projection.event,))
+        if projection.question is not None:
+            self._deliver_question(active, turn_id, projection.question)
         if self._goal_activity_visible_state(active) != before:
             active.activity_revision += 1
 
@@ -4328,6 +4378,7 @@ class CodexRuntime:
         turn_id: str | None = None
         active = self._active.pop(binding_id, None)
         if active is not None:
+            active.activity_observation_enabled = False
             turn_id = active.handle.id
             active.receipt_attempted.set()
             active.cleanup_ready.set()
@@ -4344,6 +4395,7 @@ class CodexRuntime:
 
         goal = self._goals.pop(binding_id, None)
         if goal is not None:
+            goal.activity_observation_enabled = False
             goal.receipt_attempted.set()
             goal.cleanup_ready.set()
             if goal.task is not None and not goal.task.done():
@@ -5983,7 +6035,10 @@ class CodexRuntime:
             while error is None and unavailable_error is None:
                 if self._active.get(active.binding_id) is not active:
                     return
-                if active.task_feedback.progress_card_enabled:
+                if (
+                    active.task_feedback.progress_card_enabled
+                    or self._on_question is not None
+                ):
                     self._refresh_turn_activity(active)
                 if observation is None:
                     try:
@@ -6035,7 +6090,10 @@ class CodexRuntime:
                 await asyncio.sleep(self._poll_interval_seconds)
         finally:
             try:
-                if active.task_feedback.progress_card_enabled:
+                if (
+                    active.task_feedback.progress_card_enabled
+                    or self._on_question is not None
+                ):
                     self._refresh_turn_activity(active)
                 activity = self._turn_activity_snapshot(active)
                 if active.terminal_observed:
@@ -6274,7 +6332,7 @@ class CodexRuntime:
         handle = active.handle
         assert handle is not None
         try:
-            if active.task_feedback.progress_card_enabled:
+            if active.task_feedback.progress_card_enabled or self._on_question is not None:
                 active.stream_terminal = await handle.wait_terminal(
                     lambda projection: self._apply_goal_activity_projection(
                         active,

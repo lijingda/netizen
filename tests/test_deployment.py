@@ -153,4 +153,4 @@ class DeploymentAssetsTest(unittest.TestCase):
 
         for dependency in project["project"]["dependencies"]:
             self.assertIn(dependency.lower(), constraints)
-        self.assertIn("openai-codex-cli-bin==0.155.1", constraints)
+        self.assertIn("openai-codex-cli-bin==0.156.1", constraints)

@@ -55,6 +55,79 @@ def _project_item(
 
 
 class TurnActivityProjectionTest(unittest.TestCase):
+    def test_questions_are_completed_structured_messages_independent_of_phase_delivery(
+        self,
+    ) -> None:
+        title = "完整题目" * 100
+        for phase in (None, "commentary", "final_answer"):
+            for delivery in (None, "async"):
+                with self.subTest(phase=phase, delivery=delivery):
+                    item = ThreadItem.model_validate({
+                        "type": "agentMessage", "id": "question-one", "text": "fallback",
+                        "phase": phase, "delivery": delivery,
+                        "questions": [
+                            {"title": title, "options": ["A", "B"]},
+                            {"title": "补充说明"},
+                        ],
+                    })
+                    for completed in (False, True):
+                        payload = (
+                            ItemCompletedNotification(
+                                item=item, threadId="thread-one", turnId="turn-one",
+                                completedAtMs=2,
+                            ) if completed else ItemStartedNotification(
+                                item=item, threadId="thread-one", turnId="turn-one",
+                                startedAtMs=1,
+                            )
+                        )
+                        projection = project_turn_activity_notification(
+                            Notification(
+                                method="item/completed" if completed else "item/started",
+                                payload=payload,
+                            ),
+                            expected_thread_id="thread-one", expected_turn_id="turn-one",
+                        )
+                        self.assertFalse(projection.turn_completed)
+                        if not completed:
+                            self.assertIsNone(projection.question)
+                            continue
+                        self.assertEqual(projection.question.item_id, "question-one")
+                        self.assertEqual(projection.question.questions[0].title, title)
+                        self.assertEqual(projection.question.questions[0].options, ("A", "B"))
+                        self.assertEqual(projection.question.questions[1].options, ())
+
+    def test_empty_or_wrong_identity_questions_are_ignored(self) -> None:
+        for questions, thread_id, turn_id in (
+            (None, "thread-one", "turn-one"),
+            ([], "thread-one", "turn-one"),
+            ([{"title": "Choose"}], "other-thread", "turn-one"),
+            ([{"title": "Choose"}], "thread-one", "other-turn"),
+        ):
+            projection = project_turn_activity_notification(
+                Notification(method="item/completed", payload=ItemCompletedNotification(
+                    item=ThreadItem.model_validate({
+                        "type": "agentMessage", "id": "question-one", "text": "",
+                        "questions": questions,
+                    }),
+                    threadId=thread_id, turnId=turn_id, completedAtMs=1,
+                )),
+                expected_thread_id="thread-one", expected_turn_id="turn-one",
+            )
+            self.assertIsNone(projection.question)
+
+    def test_malformed_question_identity_fails_only_the_display_projection(self) -> None:
+        with self.assertRaises(TurnActivityProjectionUnavailable):
+            project_turn_activity_notification(
+                Notification(method="item/completed", payload=ItemCompletedNotification(
+                    item=ThreadItem.model_validate({
+                        "type": "agentMessage", "id": " ", "text": "Choose",
+                        "phase": "final_answer", "questions": [{"title": "Choose"}],
+                    }),
+                    threadId="thread-one", turnId="turn-one", completedAtMs=1,
+                )),
+                expected_thread_id="thread-one", expected_turn_id="turn-one",
+            )
+
     def test_allowlisted_operations_expose_only_approved_details(self) -> None:
         cases = (
             (

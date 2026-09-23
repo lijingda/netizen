@@ -411,7 +411,10 @@ Runtime synthetic 门禁须覆盖 steer 前刷新先读取 exact completion 并�
 Thread 已是 idle、非 ephemeral 且有持久化 path；这一项失败时 Goal 必须保持 unavailable，
 不能用 dummy Turn 或 synthetic 结果替代。随后用有界、无破坏 objective 验证 start ->
 pause -> exact physical Turn interrupt -> resume rollover -> terminal -> same-Thread normal
-Turn，并由第二个无本地 route 的 SDK client 只读确认 persisted active Goal。灰度前还
+Turn，并由第二个无本地 route 的 SDK client 只读确认 persisted active Goal。探针
+按生产四证明确认公开 Thread idle 与 exact 最终 Turn；成功 complete 的 Goal 只 clear
+一次并确认 absent 后再验证普通续聊。文件 fixture 显式使用 `apply_patch`，使 aggregate
+diff 断言验证原生 `fileChange`，而非仅验证 shell/Python 已写入文件。灰度前还
 必须记录目标环境实际 sandbox/approval 姿态，确认原生自动 continuation
 适合无人值守执行。进程重启后 external-active Goal 的隔离仍需手工验证；当前版本不会
 安全重挂或替用户暂停它。
@@ -560,6 +563,17 @@ SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和
 [requirements.lock](../requirements.lock) 为准。以下证据保留实际验证时的版本；旧版本的
 结果不会自动变成新版本、真实飞书链路或目标主机的验收结论。定时任务另见
 [专属兼容性记录](#定时任务兼容性与验收)。
+
+2026-09-23 SDK/CLI `0.156.1` 已通过 `make check`、固定 SDK synthetic probes、
+`probe_python_sdk.py` 全部 17 个原生 phase、完整 Thread naming 与 Project delete
+两种场景。两个 pinned adapter 的完整 Python 源码指纹更新为
+`7d0a2267e45d39934c64d2c01bddde8b36eacb2d771dd6903a056c6abef8e94f`；源码复核确认
+client/router 的所有权和 retained-event 形状未变，facade migration inventory 为空。
+独立的原生问题探针还确认 `agentMessage.questions` 经非消费 observer 投影后仍保留在
+公开 stream；原提问 Turn 完成后，使用 `0.156.1` 的
+`send_user_message_question_reply` 格式在同一 Thread 启动后续 Turn，模型正确采用
+所选答案。探针使用本机登录账号和隔离临时 Git cwd；这些证据不覆盖真实飞书卡片
+投递/点击、目标主机安装或正式发布，没有部署或重启 Netizen 服务。
 
 2026-09-22 SDK/CLI `0.155.1` 已通过 `make check`，以及 `probe_python_sdk.py` 的完整
 17 个原生 phase、Thread naming 和 Project delete probes。Goal phase 额外验证当前

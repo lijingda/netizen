@@ -46,6 +46,12 @@ Mention Context Mode、对应 revision、creator 和时间。它不复制 Codex 
 **Active Binding**：Scope 中普通消息默认进入的 Binding。`/new`、`/resume` 只切换
 这条指针，不停止其他 Binding 的 Turn。
 
+**Question Card / 问题卡片**：Codex 向普通会话参与者提出的结构化问题及其建议选项。
+卡片始终属于原会话；该会话需要是当前选中的会话，但不要求原提问任务仍在运行。
+
+**Card Answer / 卡片回答**：参与者在问题卡片中明确提交给原会话的一次输入。
+回答者是实际提交者，机器人发送的回答回执只是这次输入的反馈锚点。
+
 **Parent Binding**：创建 Side 时捕获的 exact active、materialized Binding。后续 Scope
 active pointer 改变不重定向已创建的 Side。
 
@@ -150,7 +156,7 @@ Boundary 之后的 eligible participant messages。原会话定时输入沿用�
 
 **Context Boundary / 上下文边界**：`catch-up` Binding 上最近一次被原生 Runtime 成功
 接受的输入所对应的 exact 飞书消息锚点。普通消息使用 Current Prompt Message，原会话
-定时输入使用触发锚点；它不是机器人回复完成时间。
+定时输入使用触发锚点，卡片回答使用新的回答回执；它不是机器人回复完成时间。
 
 **Supplemental Context Message / 补充上下文消息**：`catch-up` 为当前显式 @ 请求读取的
 历史参与者消息；它只作 inert background，不是 Current Prompt、Control Intent 或 Skill
