@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from netizen.bindings import BindingStore, ScopeNotFound, BindingTurnSettings, BindingTaskFeedback
+from netizen.bindings import BindingQueryBusy, BindingQueryClosed, BindingQueryTimeout, BindingStore, ScopeNotFound, BindingTurnSettings, BindingTaskFeedback
 from netizen.domain import FeishuScope, ScopeKind, MentionContextMode, MessageContextAnchor
 from netizen.model_settings import ModelCatalog, ModelOption, EffortOption, ServiceTierOption
 from netizen.session_settings import SessionSettings
@@ -112,6 +112,166 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         for thread_id, expected in (("native-a", first), ("native-b", second)):
             response = await self.service.manage({"mode": "list"}, native_thread_id=thread_id)
             self.assertEqual([item["id"] for item in response["plans"]], [expected["id"]])
+
+    async def test_binding_target_uses_exact_source_and_live_settings_without_catalog(self):
+        source = self.configured_binding()
+        plan = await self.create(native_thread_id=source.native_thread_id, target_kind="binding")
+        self.assertEqual(plan["target_binding_id"], source.id)
+        self.assertIsNone(plan["session_settings"])
+        self.assertIsNone(self.store.schedules.get(plan["id"]).session_settings)
+        self.assertEqual(plan["effective_session_settings"], SessionSettings.from_binding(source).to_dict())
+        self.assertEqual(self.runtime.catalog_calls, 0)
+        changed = self.store.set_turn_settings(binding_id=source.id, expected_revision=source.settings_revision, settings=None)
+        viewed = await self.service.manage({"mode": "view", "plan_id": plan["id"]})
+        self.assertEqual(viewed["plan"]["effective_session_settings"], SessionSettings.from_binding(changed).to_dict())
+        self.assertEqual(viewed["plan"]["revision"], plan["revision"])
+
+    async def test_binding_target_requires_exact_ordinary_binding_and_same_app(self):
+        foreign = self.binding("foreign-chat", "foreign-native", app_id="other-app")
+        for thread_id, fields, code in (
+            ("side-unmapped", {}, "context_required"),
+            ("foreign-native", {}, "context_required"),
+            ("native-a", {"target_binding_id": foreign.id}, "not_found"),
+            ("native-a", {"target_binding_id": "native-a"}, "not_found"),
+        ):
+            with self.subTest(thread_id=thread_id, fields=fields):
+                response = await self.service.manage(self.create_request(target_kind="binding", **fields), native_thread_id=thread_id)
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["error"]["code"], code)
+        explicit = await self.create(native_thread_id="side-unmapped", target_kind="binding", target_binding_id=self.first.id)
+        self.assertEqual(explicit["target_binding_id"], self.first.id)
+
+    async def test_binding_target_identity_is_immutable_and_has_no_independent_overrides(self):
+        for fields in ({"project": "p"}, {"chat_id": "group-a"}, {"session_settings": {}}, {"session_settings": None}):
+            response = await self.service.manage(self.create_request(target_kind="binding", **fields), native_thread_id="native-a")
+            self.assertFalse(response["ok"], response)
+        plan = await self.create(target_kind="binding")
+        update = {"mode": "update", "plan_id": plan["id"], "expected_revision": 1}
+        for index, fields in enumerate((
+            {"target_kind": "new_topic"}, {"target_binding_id": self.second.id},
+            {"project": "p"}, {"chat_id": "group-a"}, {"session_settings": {}},
+        )):
+            response = await self.service.manage({**update, **fields, "request_id": f"invalid-target-{index}"})
+            self.assertFalse(response["ok"], response)
+        changed = await self.service.manage({**update, "request_id": "binding-metadata",
+            "target_kind": "binding", "target_binding_id": self.first.id, "name": "Renamed", "enabled": False})
+        self.assertTrue(changed["ok"], changed)
+        self.assertIsNone(changed["plan"]["session_settings"])
+        self.assertEqual(changed["plan"]["target_binding_id"], self.first.id)
+        self.assertFalse(changed["plan"]["enabled"])
+
+    async def test_binding_suspension_follows_pointer_without_overwriting_manual_pause(self):
+        plan = await self.create(target_kind="binding", enabled=False)
+        self.assertTrue(plan["can_run_now"])
+        self.binding("group-a", "replacement-native")
+        viewed = await self.service.manage({"mode": "view", "plan_id": plan["id"]})
+        self.assertEqual(viewed["plan"]["suspended_reason"], "target_inactive")
+        self.assertFalse(viewed["plan"]["can_run_now"])
+        self.assertFalse(viewed["plan"]["enabled"])
+        self.store.activate(scope_key=self.first.scope_key, binding_id=self.first.id)
+        restored = await self.service.manage({"mode": "view", "plan_id": plan["id"]})
+        self.assertIsNone(restored["plan"]["suspended_reason"])
+        self.assertTrue(restored["plan"]["can_run_now"])
+        self.assertFalse(restored["plan"]["enabled"])
+        self.assertEqual(restored["plan"]["revision"], plan["revision"])
+
+    async def test_binding_options_preview_and_filters_preserve_exact_targets(self):
+        self.binding("foreign-chat", "foreign-native", app_id="other-app")
+        options = await self.service.options(native_thread_id="native-a")
+        self.assertEqual(options["source_binding_id"], self.first.id)
+        self.assertEqual([item["id"] for item in options["binding_targets"]], [self.first.id])
+        self.assertTrue(options["binding_targets"][0]["available"])
+        global_options = await self.service.options()
+        self.assertEqual({item["id"] for item in global_options["binding_targets"]}, {self.first.id, self.second.id})
+        preview = await self.service.preview(self.create_request(target_kind="binding"), native_thread_id="native-a")
+        self.assertTrue(preview["ok"], preview)
+        self.assertIsNone(preview["session_settings"])
+        plan = await self.create(target_kind="binding")
+        await self.create()
+        second = await self.create(native_thread_id="native-b", target_kind="binding")
+        listing = await self.service.manage({"mode": "list", "all": True, "target_kind": "binding"})
+        self.assertEqual({value["id"] for value in listing["plans"]}, {plan["id"], second["id"]})
+        exact = await self.service.manage({"mode": "list", "all": True, "target_binding_id": self.first.id})
+        self.assertEqual([value["id"] for value in exact["plans"]], [plan["id"]])
+        edited = await self.service.preview({"plan_id": plan["id"], "target_kind": "binding", "target_binding_id": self.first.id})
+        self.assertTrue(edited["ok"], edited)
+        rejected = await self.service.preview({"plan_id": plan["id"], "target_binding_id": self.second.id})
+        self.assertFalse(rejected["ok"], rejected)
+
+    async def test_binding_options_include_inactive_targets_for_plan_creation(self):
+        self.binding("group-a", "replacement-native")
+        options = await self.service.options()
+        target = next(item for item in options["binding_targets"] if item["id"] == self.first.id)
+        self.assertFalse(target["current"])
+        self.assertFalse(target["available"])
+        searched = await self.service.manage({"mode": "options", "binding_query": self.first.id})
+        self.assertEqual(searched["binding_targets"], [target])
+        plan = await self.create(native_thread_id=None, target_kind="binding", target_binding_id=target["id"])
+        self.assertEqual(plan["target_binding_id"], self.first.id)
+        self.assertEqual(plan["suspended_reason"], "target_inactive")
+        self.assertFalse(plan["can_run_now"])
+
+    async def test_binding_options_search_filters_before_limit_and_never_injects_unmatched_source(self):
+        own = [self.binding(f"search-chat-{index}", f"search-native-{index}") for index in range(105)]
+        for index in range(105):
+            self.binding(f"foreign-chat-{index}", f"foreign-native-{index}", app_id="other-app")
+        first_page = await self.service.options()
+        self.assertTrue(first_page["bindings_truncated"])
+        self.assertEqual(len(first_page["binding_targets"]), 100)
+        visible = {target["id"] for target in first_page["binding_targets"]}
+        missing = next(binding for binding in own if binding.id not in visible)
+        chat = self.store.get_scope(missing.scope_key).chat_id
+        for query in (missing.id, missing.short_id.upper(), chat):
+            result = await self.service.manage({"mode": "options", "binding_query": query})
+            self.assertTrue(result["ok"], result)
+            self.assertFalse(result["bindings_truncated"])
+            self.assertEqual([target["id"] for target in result["binding_targets"]], [missing.id])
+        unmatched = await self.service.options(native_thread_id="native-a", binding_query="unmatched-query")
+        self.assertEqual(unmatched["binding_targets"], [])
+        self.assertEqual(unmatched["source_binding_id"], self.first.id)
+        foreign = await self.service.options(binding_query="foreign-chat")
+        self.assertEqual(foreign["binding_targets"], [])
+        self.assertFalse(foreign["bindings_truncated"])
+
+    async def test_binding_options_searches_project_topic_and_literal_characters(self):
+        project_cwd = self.cwd / "query-project"
+        project_cwd.mkdir()
+        self.store.register_project(alias="Query_Project", cwd=str(project_cwd))
+        target = self.store.create_channel_binding(
+            scope=FeishuScope("app", "literal%chat", ScopeKind.TOPIC, "topic-query-id"),
+            project_alias="Query_Project", creator_id="person",
+        )
+        for query in ("query_project", "TOPIC-QUERY", "%"):
+            response = await self.service.options(binding_query=query)
+            self.assertTrue(response["ok"], response)
+            self.assertEqual([value["id"] for value in response["binding_targets"]], [target.id])
+        for query in ("x" * 201, 123, []):
+            response = await self.service.manage({"mode": "options", "binding_query": query})
+            self.assertFalse(response["ok"], response)
+        cleared = await self.service.options(binding_query="   ")
+        self.assertEqual(len(cleared["binding_targets"]), 3)
+
+    async def test_binding_runs_report_acceptance_and_never_infer_it_from_turn_completion(self):
+        plan = await self.create(target_kind="binding", schedule={"kind": "interval", "every_minutes": 1})
+        for index, (disposition, error, expected) in enumerate((
+            ("started", None, "input_started"), ("steered", None, "input_steered"),
+            (None, "input_unknown", "input_unknown"),
+        ), 1):
+            self.now += 60
+            claim = self.store.schedules.claim_due(plan["id"], now=self.now, app_id="app")
+            self.assertIsNotNone(claim)
+            self.store.schedules.set_run(claim.run.id, phase="handed_off", barrier="released",
+                initial_turn_id="same-running-turn", error_code=error,
+                **({"disposition": disposition} if disposition is not None else {}),
+                origin_message_id=f"anchor-{index}")
+            self.runtime.states[(self.first.id, "same-running-turn")] = "completed"
+            viewed = await self.service.manage({"mode": "view", "plan_id": plan["id"]})
+            self.assertEqual(viewed["plan"]["execution"]["status"], expected)
+            self.assertIn(f"anchor-{index}", viewed["plan"]["execution"]["feishu_url"])
+            self.assertTrue(viewed["plan"]["can_run_now"])
+        records = await self.service.manage({"mode": "runs", "plan_id": plan["id"]})
+        self.assertEqual([run["status"] for run in records["runs"]], ["input_unknown", "input_steered", "input_started"])
+        self.assertEqual(self.runtime.calls, [])
 
     async def test_recurring_cutoff_shares_preview_claims_and_ended_filters(self):
         request = self.create_request(schedule={"kind": "interval", "every_minutes": 1,
@@ -290,6 +450,22 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unavailable["models"], [])
         self.assertEqual(unavailable["model_catalog_error"]["code"], "model_catalog_unavailable")
         self.assertEqual(unavailable["session_settings"], options["session_settings"])
+
+    async def test_binding_option_failures_preserve_catalog_and_settings_and_recover(self):
+        catalog = self.session_catalog()
+        source = self.configured_binding()
+        expected, _ = await self.service.form_options(native_thread_id=source.native_thread_id)
+        self.assertIsNone(expected["binding_options_error"])
+        for error_type in (BindingQueryBusy, BindingQueryClosed, BindingQueryTimeout):
+            with self.subTest(error=error_type.__name__):
+                with patch.object(self.store, "query_bindings", side_effect=error_type("private reader details")) as query:
+                    options, raw = await self.service.form_options(native_thread_id=source.native_thread_id)
+                query.assert_awaited_once()
+                self.assertIs(raw, catalog)
+                self.assertEqual(options, {**expected, "binding_targets": [], "bindings_truncated": False,
+                    "binding_options_error": {"code": "binding_options_unavailable", "message": "会话选项暂不可用，请稍后重试。"}})
+                recovered = await self.service.options(native_thread_id=source.native_thread_id)
+                self.assertEqual(recovered, expected)
 
     async def test_explicit_model_changes_are_validated_but_pause_and_delete_do_not_read_catalog(self):
         self.session_catalog()

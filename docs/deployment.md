@@ -453,6 +453,20 @@ interrupt，并为 exact Thread 请求清理 App Server 已登记的后台 termi
 不自动创建计划或发消息。源码检查、传输替身、API 接受和客户端点击分别记录，不互相
 替代，也不把旧候选结果当作后来修改边界的验收结果。
 
+2026-09-23 原会话目标以 `gpt-5.6-sol`、SDK/CLI `0.155.1` 通过
+`scripts/probe_scheduled_tasks.py --phase binding`：同一持久 Thread 保留之前的随机
+暗号上下文，真实 Scheduler → Channel → 普通 Runtime 输入先 start、再 steer 当前
+物理 Turn，没有额外 Turn，且保留原 owner/完成消息来源。两次 Run 的输入接收回执
+独立收尾。自有原生资源确认删除，用户 MCP 和 Project trust 配置均未改变。
+本次飞书传输使用替身，不证明真实主线/话题锚点、catch-up 可见性、客户端反馈或
+归档/恢复的完整端到端表现；这些仍须在明确测试会话中验收。
+
+同日扩展的 `--phase mcp` 也通过：同 cwd 的两条原生 Thread 分别完成新话题和
+原会话计划的自然语言 CRUD。原会话请求省略 target_binding_id、chat_id 和 project，
+通过真实原生调用身份映射 exact Binding；创建及更新后均不保存独立 session_settings。
+两个计划始终暂停、没有 Run，未启动 Scheduler；探针所属资源已清理，用户 MCP 与
+Project trust 配置未改变，没有真实飞书调用。这不替代飞书客户端入口验收。
+
 2026-09-22 SDK/CLI `0.155.1` 已通过 MCP、冷恢复/fork、dispatch 与手动触发四个
 原生 phase。四项均确认用户 MCP/Project trust 配置不变、自有原生资源已清理；
 未发送真实飞书消息。真实飞书链路的已验证版本仍为 `0.147.0`，不代表 `0.155.1`
@@ -461,7 +475,7 @@ interrupt，并为 exact Thread 请求清理 App Server 已登记的后台 termi
 - 生产 MCP 框架的真实 CRUD、同 cwd 不同 Thread 的调用身份，以及服务端地址/凭据
   轮换后的冷恢复与 fork。`params._meta.threadId` 可用于 exact Binding 默认值映射，
   不依赖 HTTP header 一定存在。`scripts/probe_scheduled_tasks.py` 提供 mcp、mcp-recovery、
-  dispatch 和 manual 阶段；它使用隔离资源和显式模型，只测试原生执行，不发送飞书消息。
+  dispatch、manual 和 binding 阶段；它使用隔离资源和显式模型，只测试原生执行，不发送飞书消息。
 - 真实飞书链路的覆盖范围包括五类来源（私聊主线、普通群主线、话题群、私聊转话题、
   群聊转话题）的自然语言默认目标与 Project，以及私聊、普通群、话题群的
   Scheduler → Channel → Runtime 首轮、结果 chat/thread/root 和来源 pointer。
@@ -489,8 +503,9 @@ Project trust 配置不变；本次没有真实飞书投递、客户端点击或
 | 边界 | 验证内容 |
 | --- | --- |
 | MCP 接入 | 生产传输鉴别、Host/Origin、大小/超时、无 Admin 可用、同 cwd 身份隔离、缺失/冲突元数据、用户 MCP 和指令继承、冷恢复/fork/服务重启与原生权限组合 |
-| 调度与存储 | 四类规则、时区/DST、截止、高水位、宽限/missed、手动与定时共用 busy/unknown 屏障、手动不改时间游标、不同计划并发、CAS/幂等、裁剪后原 Run 回执及每个交接断点的重启行为 |
-| 飞书与普通生命周期 | 五类来源的自然语言和 /cron；真实 root/seed、结果严格话题归属、卡片完整表单/重试/分页、Activity/Files、后续对话、停止/归档/删除及极快终态顺序 |
+| 调度与存储 | 四类规则、时区/DST、截止、高水位、宽限/missed、两类目标的交接屏障、原会话未知不阻塞下一到期点、手动不改时间游标、不同计划并发、CAS/幂等、裁剪后原 Run 回执及每个交接断点的重启行为 |
+| 原会话输入 | exact Binding/Turn 身份、空闲 start 与运行中 steer、Goal 换轮、配置/上下文竞态、系统来源、原发起人及结束提及保留、catch-up 锚点与接收后游标提交 |
+| 飞书与普通生命周期 | 五类来源的自然语言和 /cron；真实 root/seed 或原位置锚点、结果精确归属、卡片完整表单/重试/分页、Activity/Files、停止/归档/删除及极快终态；原会话切换/归档暂停、恢复不补跑及删除联动 |
 | Admin 与安装 | 跨主机认证/CSRF、三个入口一致性、Project 删除与在途交接、App 切换、当前库重装、旧库只读拒绝、数据库/release/Skill 失败回滚 |
 
 服务只新增同一 background loop 内的 Scheduler 和 loopback 动态端口 MCP；无需用户安装
@@ -1152,7 +1167,7 @@ admission，修复文件后仍需 `./service.sh restart`，不会自动重新开
 HTTP；不得把该端口直接暴露到不受信网络。
 
 `instance.projectRoot` 是必填的绝对路径，用于限制从飞书自动创建的空 Project；它不是
-Binding 的默认 cwd。Channel 服务与安装器只支持当前 schema v12，不保留历史版本
+Binding 的默认 cwd。Channel 服务与安装器只支持当前 schema v13，不保留历史版本
 自动迁移。新库直接创建完整表结构；已有库须通过只读的版本、结构和完整性校验。
 `schedule_plans`、`schedule_runs` 和 `schedule_requests` 仅保存当前计划指令与会话配置、
 最小调度交接/initial Turn 引用及有界管理请求去重，不复制原生历史。

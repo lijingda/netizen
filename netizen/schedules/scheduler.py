@@ -23,6 +23,7 @@ DUE_BATCH_SIZE = 100
 RECOVERY_TIMEOUT_SECONDS = 10.0
 READ_TIMEOUT_SECONDS = 3.0
 DISPATCH_TIMEOUT_SECONDS = 30.0
+BINDING_DISPATCH_TIMEOUT_SECONDS = 180.0
 _TERMINAL = {"completed", "interrupted", "failed"}
 _PRE_NATIVE = {"claimed", "publishing_topic", "binding_ready"}
 
@@ -82,7 +83,13 @@ class Scheduler:
         for run in self._store.pending_runs():
             if run.app_id != self._app_id:
                 continue
-            if run.phase in _PRE_NATIVE:
+            if run.target_kind == "binding":
+                self._store.release(run.id, error_code=(
+                    "input_unknown" if run.phase in {"starting_turn", "handed_off"}
+                    else "publishing_unknown" if run.phase == "publishing_topic"
+                    else "recovery_no_start"
+                ))
+            elif run.phase in _PRE_NATIVE:
                 self._store.release(run.id, error_code=(
                     "publishing_unknown" if run.phase == "publishing_topic"
                     else "recovery_no_start"
@@ -218,9 +225,14 @@ class Scheduler:
             return None
         if run.id in self._dispatches or run.phase in _PRE_NATIVE:
             return None
+        if run.target_kind == "binding":
+            self._store.release(run.id, error_code="input_unknown")
+            return None
         return await self._observe(run, deadline=loop.time() + READ_TIMEOUT_SECONDS)
 
     async def _observe(self, run: Run, *, deadline: float) -> str | None:
+        if run.target_kind == "binding":
+            return None
         loop = self._own_loop()
         self._recovered_running.pop(run.plan_id, None)
         try:
@@ -276,7 +288,8 @@ class Scheduler:
 
     async def _dispatch_once(self, claim: Claim) -> None:
         try:
-            async with asyncio.timeout(DISPATCH_TIMEOUT_SECONDS):
+            timeout = BINDING_DISPATCH_TIMEOUT_SECONDS if claim.run.target_kind == "binding" else DISPATCH_TIMEOUT_SECONDS
+            async with asyncio.timeout(timeout):
                 await self._dispatch(claim)
         except asyncio.CancelledError:
             self._settle_dispatch(claim.run.id, "dispatch_cancelled")
@@ -289,7 +302,9 @@ class Scheduler:
                 run = self._store.get_run(claim.run.id)
             except ScheduleNotFound:
                 return
-            if run.barrier == "held" and (
+            if run.target_kind == "binding" and run.barrier != "released":
+                self._settle_dispatch(run.id, "dispatch_incomplete")
+            elif run.barrier == "held" and (
                 run.phase != "handed_off" or not run.binding_id or not run.initial_turn_id
             ):
                 self._settle_dispatch(run.id, "dispatch_incomplete")
@@ -299,7 +314,16 @@ class Scheduler:
             run = self._store.get_run(run_id)
         except ScheduleNotFound:
             return
-        if run.barrier in {"released", "unknown"}:
+        if run.barrier == "released":
+            return
+        if run.target_kind == "binding":
+            self._store.release(run_id, error_code=(
+                "input_unknown" if run.phase in {"starting_turn", "handed_off"}
+                else "publishing_unknown" if run.phase == "publishing_topic"
+                else reason
+            ))
+            return
+        if run.barrier == "unknown":
             return
         if run.phase in _PRE_NATIVE:
             self._store.release(run_id, error_code="publishing_unknown" if run.phase == "publishing_topic" else reason)

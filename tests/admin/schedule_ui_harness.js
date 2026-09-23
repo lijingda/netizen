@@ -15,7 +15,12 @@ const models = [{ id: "native-default", display_name: "Native default", default_
   efforts: [{ id: "medium", description: "Medium" }, { id: "high", description: "High" }],
   service_tiers: [{ id: "default", name: "Standard" }, { id: "priority", name: "Fast" }] }];
 let catalogError = null;
+let bindingOptionsError = null;
 let contextAvailable = true;
+const bindingTargets = [{ id: "binding-original", label: "已有问题", project_alias: "project-one",
+  current: true, available: true, chat_id: "oc_existing" },
+  { id: "binding-inactive", label: "非当前会话", project_alias: "project-one",
+    current: false, available: false, chat_id: "oc_existing" }];
 const fixturePlan = () => ({
   id: "plan-exact", revision: 7, name: "<b>Report</b>",
   project_alias: "project-one", chat_id: "oc_other",
@@ -57,7 +62,9 @@ async function api(path, options = {}) {
   };
   const mode = query.get("mode") || "list";
   if (mode === "options") return { ok: true, session_settings: structuredClone(defaultSessionSettings),
-    models: catalogError ? [] : structuredClone(models), context_mode_available: contextAvailable, model_catalog_error: catalogError };
+    models: catalogError ? [] : structuredClone(models), context_mode_available: contextAvailable,
+    binding_targets: bindingOptionsError ? [] : structuredClone(bindingTargets),
+    binding_options_error: bindingOptionsError, model_catalog_error: catalogError };
   if (mode === "preview") {
     const schedule = JSON.parse(query.get("schedule"));
     if (schedule.kind === "once" && ambiguous && !query.get("utc_offset")) {
@@ -406,6 +413,31 @@ async function refresh() { await loadSchedules(); return true; }
   await saveSchedule({ preventDefault() {} });
   assert.deepEqual(posts.at(-1).body.definition.session_settings, selectedSettings);
 
+  // Binding lookup failure leaves the independent model options and settings usable.
+  bindingOptionsError = { code: "binding_options_unavailable", message: "会话选项暂不可用，请稍后重试。" };
+  await openScheduleEditor();
+  assert.equal(scheduleInput("model").value, "native-default");
+  assert.equal(scheduleInput("effort").disabled, false);
+  assert.equal(scheduleInput("session-note").textContent, "");
+  assert.deepEqual(scheduleSessionPatch(), defaultSessionSettings);
+  scheduleInput("effort").value = "high";
+  changeScheduleSessionSettings("effort");
+  await previewSchedule();
+  assert.equal(scheduleInput("save").disabled, false);
+  assert.equal(JSON.parse(new URL(gets.at(-1), "http://localhost").searchParams.get("session_settings")).turn_settings.effort_id, "high");
+  scheduleInput("target-kind").value = "binding";
+  renderScheduleTarget();
+  assert.equal(scheduleInput("target-options-note").hidden, false);
+  assert.equal(scheduleInput("target-options-note").textContent, bindingOptionsError.message);
+  assert.equal(scheduleInput("binding").querySelectorAll("option").length, 1);
+  bindingOptionsError = null;
+  await loadScheduleSessionOptions();
+  assert.equal(scheduleInput("binding").querySelectorAll("option")[1].value, "binding-original");
+  assert.equal(scheduleEditor.bindingOptionsError, "");
+  assert.match(scheduleInput("target-options-note").textContent, /选择目标会话/);
+  assert.equal(scheduleInput("effort").value, "high");
+  closeScheduleEditor();
+
   // Catalog failure or a retired model never replaces a persisted setting.
   const retired = fixturePlan();
   retired.session_settings.turn_settings = { model_id: "retired-model", effort_id: "max", service_tier_id: "old-tier" };
@@ -564,10 +596,11 @@ async function refresh() { await loadSchedules(); return true; }
   for (const scenario of [
     { enabled: true, ended: false }, { enabled: false, ended: false },
     { enabled: false, ended: true }, { enabled: true, ended: true },
-    { inflight: true }, { blocked_reason: "blocked_unknown" },
-    { blocked_reason: "project_disabled" }, { blocked_reason: "project_unavailable" },
+    { runNow: false }, { runNow: false, inflight: true }, { runNow: false, blocked_reason: "blocked_unknown" },
+    { runNow: false, blocked_reason: "project_disabled" }, { runNow: false, blocked_reason: "project_unavailable" },
   ]) {
     const manualPlan = { ...fixturePlan(), ...scenario };
+    if (scenario.runNow === false) manualPlan.actions.run_now = null;
     manualPlan.lifecycle = { ended: scenario.ended || false, has_future: !scenario.ended, has_trigger: !scenario.ended };
     manualPlan.execution = { kind: "latest", status: "completed", trigger_source: "manual" };
     plans = [manualPlan];
@@ -575,7 +608,7 @@ async function refresh() { await loadSchedules(); return true; }
     const row = document.querySelector("#schedules-body").querySelector("tr");
     const button = row.querySelectorAll("button").find((item) => item.textContent === "立即运行");
     assert(button);
-    assert.equal(button.disabled, Boolean(scenario.inflight || scenario.blocked_reason));
+    assert.equal(button.disabled, scenario.runNow === false);
     assert.match(row.querySelector(".schedule-execution").textContent, /手动触发/);
     assert.match(row.querySelector(".schedule-execution").textContent, /上次已完成/);
     const before = posts.length;
@@ -583,7 +616,8 @@ async function refresh() { await loadSchedules(); return true; }
     assert.equal(posts.length, before);
   }
   assert.equal(scheduleTriggerSource("scheduled"), "定时触发");
-  plans = [fixturePlan()];
+  // The action grant governs availability even when display metadata differs.
+  plans = [{ ...fixturePlan(), inflight: true, blocked_reason: "target_inactive" }];
   viewedPlan = fixturePlan();
   viewedPlan.execution = { kind: "current", status: "starting", trigger_source: "manual" };
   await showSchedule("plan-exact");
@@ -596,6 +630,8 @@ async function refresh() { await loadSchedules(); return true; }
   const manualPlan = state.schedules.plans[0];
   const manualButton = document.querySelector("#schedules-body").querySelectorAll("button")
     .find((item) => item.textContent === "立即运行");
+  assert.equal(manualButton.disabled, false);
+  assert.match(manualButton.title, /原会话已切走或归档/);
   const beforeManual = posts.length;
   const beforeConfirm = confirmations.length;
   let releaseRun;
@@ -666,4 +702,65 @@ async function refresh() { await loadSchedules(); return true; }
   assert.match(status, /触发结果尚未确认.*查看最近记录/);
   assert.equal(statusError, true);
   assert.equal(scheduleInput("run-receipt").hidden, true);
+
+  // An existing-session plan stores exact target identity without copied settings.
+  respond = null;
+  await openScheduleEditor();
+  scheduleInput("target-kind").value = "binding";
+  renderScheduleTarget();
+  await loadScheduleSessionOptions();
+  assert.equal(scheduleInput("project-field").hidden, true);
+  assert.equal(scheduleInput("chat-field").hidden, true);
+  assert.equal(scheduleInput("session-settings").hidden, true);
+  assert.equal(scheduleInput("project").required, false);
+  assert.equal(scheduleInput("binding").disabled, false);
+  assert.equal(scheduleInput("binding").querySelectorAll("option")[1].value, "binding-original");
+  const inactiveTarget = scheduleInput("binding").querySelectorAll("option").find((option) => option.value === "binding-inactive");
+  assert(inactiveTarget);
+  assert.equal(inactiveTarget.disabled, false);
+  assert.match(inactiveTarget.textContent, /自动暂停/);
+  scheduleInput("binding").value = "binding-inactive";
+  scheduleInput("binding-query").value = "project-one";
+  await loadScheduleSessionOptions();
+  assert.equal(new URL(gets.at(-1), "http://localhost").searchParams.get("binding_query"), "project-one");
+  assert.equal(scheduleInput("binding").value, "binding-inactive");
+  scheduleInput("name").value = "继续检查";
+  scheduleInput("instructions").value = "检查刚才的问题";
+  await previewSchedule();
+  const bindingPreview = new URL(gets.at(-1), "http://localhost").searchParams;
+  assert.equal(bindingPreview.get("target_kind"), "binding");
+  assert.equal(bindingPreview.get("target_binding_id"), "binding-inactive");
+  assert.equal(bindingPreview.get("chat_id"), null);
+  assert.equal(bindingPreview.get("session_settings"), null);
+  await saveSchedule({ preventDefault() {} });
+  const bindingCreate = posts.at(-1).body.definition;
+  assert.equal(bindingCreate.target_kind, "binding");
+  assert.equal(bindingCreate.target_binding_id, "binding-inactive");
+  for (const name of ["session_settings", "project", "chat_id"]) assert.equal(name in bindingCreate, false);
+
+  const boundPlan = { ...fixturePlan(), target_kind: "binding", target_binding_id: "binding-original",
+    target_label: "已有问题", session_settings: null, blocked_reason: "target_inactive", enabled: true,
+    execution: { kind: "latest", status: "input_steered", is_last: false } };
+  boundPlan.actions.run_now = null;
+  plans = [boundPlan];
+  await loadSchedules();
+  const boundRow = document.querySelector("#schedules-body").querySelector("tr");
+  assert(boundRow.textContent.includes("启停：已启用"));
+  assert(boundRow.textContent.includes("自动暂停"));
+  assert(boundRow.textContent.includes("已追加当前任务"));
+  assert(boundRow.textContent.includes("原会话 · 已有问题"));
+  assert.equal(boundRow.querySelectorAll("button").find((node) => node.textContent === "立即运行").disabled, true);
+  await openScheduleEditor(boundPlan);
+  assert.equal(scheduleInput("target-kind").disabled, true);
+  assert.equal(scheduleInput("binding").disabled, true);
+  assert.equal(scheduleInput("binding-query-field").hidden, true);
+  assert.equal(scheduleInput("binding").value, "binding-original");
+  await previewSchedule();
+  await saveSchedule({ preventDefault() {} });
+  const bindingUpdate = posts.at(-1).body.definition;
+  for (const name of ["target_kind", "target_binding_id", "session_settings", "project", "chat_id"]) {
+    assert.equal(name in bindingUpdate, false);
+  }
+  assert.equal(scheduleRunStatus("input_started"), "已启动新一轮");
+  assert.equal(scheduleRunStatus("input_unknown"), "输入接收情况待确认");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

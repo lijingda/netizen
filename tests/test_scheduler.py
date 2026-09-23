@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from netizen.bindings import BindingStore
+from netizen.domain import FeishuScope, ScopeKind
 from netizen.runtime.contracts import TurnObservationUnavailable
 from netizen.schedules.models import ScheduleRule
 from netizen.schedules.scheduler import Scheduler
@@ -26,6 +27,98 @@ class Reader:
         if isinstance(result, Exception):
             raise result
         return result
+
+
+class BindingSchedulerTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.now = 100.0
+        self.bindings = BindingStore(wall_clock=lambda: self.now)
+        self.bindings.register_project(alias="p", cwd="/tmp/session-schedule")
+        self.binding = self.bindings.create_channel_binding(
+            scope=FeishuScope("app", "chat", ScopeKind.GROUP), project_alias="p", creator_id="person",
+        )
+        self.store = self.bindings.schedules
+        self.plan_id = self.store.create(
+            name="Continue", instructions="Recheck current work.", project_alias="p", app_id="app", chat_id="chat",
+            schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100), request_id="create",
+            target_kind="binding", target_binding_id=self.binding.id, session_settings=None,
+        ).plan_id
+        self.reader = Reader()
+        self.dispatches = []
+        self.failure = None
+
+        async def dispatch(claim):
+            self.dispatches.append(claim)
+            self.store.begin_publication(claim.run.id)
+            self.store.set_run(claim.run.id, origin_message_id="anchor-" + claim.run.id)
+            self.store.begin_binding_submission(claim.run.id, self.binding.id)
+            if self.failure is not None:
+                raise self.failure
+            self.store.finish_binding_submission(claim.run.id, "current-turn", "steered")
+
+        self.scheduler = Scheduler(self.bindings, self.reader, "app", dispatch, lambda: self.now)
+
+    async def asyncTearDown(self):
+        await self.scheduler.close()
+        await self.scheduler.drain(asyncio.get_running_loop().time() + 1)
+        self.bindings.close()
+
+    async def tick(self, now):
+        self.now = now
+        count = await self.scheduler.tick()
+        await self.scheduler.drain(asyncio.get_running_loop().time() + 1)
+        return count
+
+    async def test_response_unknown_releases_occurrence_and_next_trigger_can_steer(self):
+        await self.scheduler.recover()
+        self.scheduler.start()
+        self.failure = RuntimeError("native response lost")
+        with self.assertLogs("netizen.schedules.scheduler", level="WARNING"):
+            self.assertEqual(await self.tick(160), 1)
+        first = self.store.list_runs(self.plan_id)[0]
+        self.assertEqual((first.barrier, first.error_code), ("released", "input_unknown"))
+        self.assertIsNone(first.initial_turn_id)
+        self.failure = None
+        self.assertEqual(await self.tick(220), 1)
+        self.assertEqual(self.store.list_runs(self.plan_id)[0].disposition, "steered")
+        self.assertEqual(self.reader.calls, [])
+
+    async def test_recovery_never_infers_input_acceptance_from_turn_terminal(self):
+        claim = self.store.claim_due(self.plan_id, app_id="app", now=160)
+        self.store.begin_publication(claim.run.id)
+        self.store.set_run(claim.run.id, origin_message_id="anchor")
+        self.store.begin_binding_submission(claim.run.id, self.binding.id)
+        self.store.set_run(claim.run.id, initial_turn_id="completed-turn", barrier="unknown")
+        self.reader.status["completed-turn"] = "completed"
+        self.now = 170
+        await self.scheduler.recover()
+        self.scheduler.start()
+        run = self.store.get_run(claim.run.id)
+        self.assertEqual((run.barrier, run.error_code, run.disposition), ("released", "input_unknown", None))
+        self.assertEqual(self.reader.calls, [])
+        self.assertEqual(await self.tick(220), 1)
+
+    async def test_handoff_receipts_do_not_wait_for_long_running_turn(self):
+        await self.scheduler.recover()
+        self.scheduler.start()
+        self.assertEqual(await self.tick(160), 1)
+        self.assertEqual(await self.tick(220), 1)
+        runs = self.store.list_runs(self.plan_id)
+        self.assertEqual([run.initial_turn_id for run in runs], ["current-turn", "current-turn"])
+        self.assertTrue(all(run.barrier == "released" for run in runs))
+        self.assertEqual(self.reader.calls, [])
+
+    async def test_completed_dispatch_cannot_leave_binding_unknown_barrier(self):
+        async def dispatch(claim):
+            self.store.set_run(claim.run.id, phase="starting_turn", barrier="unknown", error_code="input_unknown")
+
+        self.scheduler = Scheduler(self.bindings, self.reader, "app", dispatch, lambda: self.now)
+        await self.scheduler.recover()
+        self.scheduler.start()
+        self.assertEqual(await self.tick(160), 1)
+        self.assertIsNone(self.store.pending_for_plan(self.plan_id))
+        self.assertEqual(self.store.list_runs(self.plan_id)[0].error_code, "input_unknown")
+        self.assertEqual(await self.tick(220), 1)
 
 
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):

@@ -638,8 +638,8 @@ class AdminWebApplication:
             "list": {"mode", "chat_id", "project", "enabled", "ended", "cursor"},
             "view": {"mode", "plan_id"},
             "runs": {"mode", "plan_id", "cursor"},
-            "preview": {"mode", "schedule", "plan_id", "chat_id", "session_settings", "local_at", "utc_offset", "local_end_at", "end_utc_offset"},
-            "options": {"mode", "chat_id"},
+            "preview": {"mode", "schedule", "plan_id", "chat_id", "session_settings", "target_kind", "target_binding_id", "local_at", "utc_offset", "local_end_at", "end_utc_offset"},
+            "options": {"mode", "chat_id", "binding_query"},
         }
         if mode not in allowed:
             raise AdminWebError(400, "invalid_query", "定时任务查询类型无效。")
@@ -735,7 +735,7 @@ class AdminWebApplication:
         )
         return {**_schedule_plan_json(plan, chat), "actions": {
             mode: self._grant(context, f"schedules.{mode}", target, preconditions)
-            if mode != "run_now" or not (plan.get("inflight") or plan.get("blocked_reason")) else None
+            if mode != "run_now" or plan.get("can_run_now") is True else None
             for mode in ("update", "delete", "run_now")
         }}
 
@@ -760,7 +760,7 @@ class AdminWebApplication:
         )
         definition = payload.get("definition", {})
         if not isinstance(definition, dict) or set(definition) - {
-            "name", "instructions", "project", "chat_id", "schedule", "enabled", "session_settings",
+            "name", "instructions", "project", "chat_id", "schedule", "enabled", "session_settings", "target_kind", "target_binding_id",
         }:
             raise AdminWebError(400, "invalid_input", "定时任务定义字段无效。")
         request: dict[str, object] = {

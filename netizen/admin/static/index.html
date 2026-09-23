@@ -115,7 +115,7 @@
         <div><p class="eyebrow">SCHEDULED TASKS</p><h2 id="schedules-heading">定时任务</h2></div>
         <div class="actions"><button id="schedule-new" class="action">创建计划</button><button class="refresh" data-refresh="schedules">刷新</button></div>
       </div>
-      <p class="schedule-help">每次触发会在目标会话的新话题中开启独立任务。立即运行使用已保存的指令和配置，不改变定时安排；暂停或已结束的计划也可以运行一次。</p>
+      <p class="schedule-help">可在独立新话题执行，或定时向指定原会话提交输入。立即运行使用已保存的计划，不改变定时安排；手动暂停或已结束的计划也可以运行一次，原会话须处于当前且可用。</p>
       <p id="schedule-run-receipt" class="meta-line" role="status" hidden></p>
       <form id="schedule-filter" class="filter-bar">
         <label>Project<select id="schedule-filter-project" name="project"><option value="">全部 Project</option></select></label>
@@ -146,9 +146,14 @@
           <div class="schedule-editor-body">
             <div class="schedule-form-grid">
               <label>名称<input id="schedule-name" maxlength="128" required></label>
-              <label>Project<select id="schedule-project" required><option value="">选择 Project</option></select></label>
-              <label>目标会话 ID<input id="schedule-chat" maxlength="512" required></label>
+              <label>执行目标<select id="schedule-target-kind"><option value="new_topic">每次新建独立话题</option><option value="binding">在原会话继续</option></select></label>
+              <label id="schedule-binding-query-field" hidden>查找原会话<input id="schedule-binding-query" maxlength="512" placeholder="Project、聊天 ID 或会话短 ID" disabled></label>
+              <label id="schedule-binding-field" hidden>原会话<select id="schedule-binding" disabled><option value="">选择原会话</option></select></label>
+              <label id="schedule-project-field">Project<select id="schedule-project" required><option value="">选择 Project</option></select></label>
+              <label id="schedule-chat-field">目标会话 ID<input id="schedule-chat" maxlength="512" required></label>
             </div>
+            <p id="schedule-target-note" class="meta-line" hidden>沿用原会话的 Project、模型、上下文和反馈；空闲时启动新一轮，忙碌时追加当前任务。切走或归档后自动暂停，恢复后继续；删除原会话也会删除计划。目标创建后不可更换。</p>
+            <p id="schedule-target-options-note" class="meta-line" hidden role="status"></p>
             <label>任务指令<textarea id="schedule-instructions" rows="5" maxlength="16000" required placeholder="说明每次执行需要完成什么，以及何时需要用户关注。"></textarea></label>
             <h4>触发规则</h4>
             <div class="schedule-form-grid">

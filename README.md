@@ -45,7 +45,7 @@
   [Side](skills/netizen-user-guide/references/user-guide.md#side-临时话题)另开临时话题，或用
   [Goal](skills/netizen-user-guide/references/user-guide.md#goal)让 Codex 围绕目标持续推进。
 - **让任务按时开始。** 用自然语言或 `/cron` 创建
-  [定时任务](skills/netizen-user-guide/references/user-guide.md#定时任务)，每次执行在独立话题交付，之后可以继续交流。
+  [定时任务](skills/netizen-user-guide/references/user-guide.md#定时任务)，可每次在独立话题执行，也可在原会话定时继续。
 
 普通会话的历史由 Codex 保存，可在 Codex App/CLI 中继续使用；App/CLI 中新增的消息不会
 自动回填飞书。多个会话可以并行，同一项目的文件目录共享，修改会相互可见。

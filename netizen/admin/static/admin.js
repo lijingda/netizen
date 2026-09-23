@@ -1575,7 +1575,11 @@ function scheduleRunStatus(status) {
     released: "调度已收尾", recovery_no_start: "服务恢复，本次未启动",
     publishing_unknown: "话题投递待确认", deleted: "执行会话已删除",
     initial_start_rejected: "启动被拒绝", publishing_failed: "话题发布失败",
-    scope_conflict: "话题已有会话，未启动", dispatch_rejected: "未启动" }[status] || "结果暂不可用";
+    scope_conflict: "话题已有会话，未启动", dispatch_rejected: "未启动",
+    input_started: "已启动新一轮", input_steered: "已追加当前任务", input_unknown: "输入接收情况待确认",
+    input_rejected: "输入被拒绝", anchor_failed: "触发消息发送失败", anchor_unknown: "触发消息发送结果待确认",
+    target_inactive: "原会话已切走或归档，本次未执行", target_missing: "原会话不可用",
+    target_mismatch: "原会话位置不匹配" }[status] || "结果暂不可用";
 }
 
 function scheduleTriggerSource(source) {
@@ -1593,7 +1597,12 @@ function scheduleExecutionLabel(execution) {
 
 function scheduleBlockedLabel(plan) {
   return { blocked_unknown: "执行结果待确认", project_disabled: "Project 已停用",
-    project_unavailable: "Project 不可用" }[plan.blocked_reason] || "";
+    project_unavailable: "Project 不可用", target_inactive: "原会话已切走或归档，自动暂停",
+    target_missing: "原会话不可用", target_mismatch: "原会话位置不匹配" }[plan.blocked_reason] || "";
+}
+
+function scheduleTargetLabel(plan) {
+  return plan.target_kind === "binding" ? `原会话 · ${plan.target_label || plan.target_binding_id}` : "每次新建独立话题";
 }
 
 function scheduleNote(parent, value) {
@@ -1616,6 +1625,36 @@ let scheduleProjects = [];
 const pendingScheduleMutations = new Set();
 
 function scheduleInput(id) { return document.querySelector(`#schedule-${id}`); }
+
+function renderScheduleTarget() {
+  const editor = scheduleEditor;
+  if (!editor) return;
+  const binding = scheduleInput("target-kind").value === "binding";
+  scheduleInput("target-kind").disabled = Boolean(editor.plan);
+  scheduleInput("binding-field").hidden = !binding;
+  scheduleInput("binding").disabled = !binding || Boolean(editor.plan);
+  scheduleInput("binding").required = binding;
+  scheduleInput("binding-query-field").hidden = !binding || Boolean(editor.plan);
+  scheduleInput("binding-query").disabled = !binding || Boolean(editor.plan);
+  scheduleInput("target-note").hidden = !binding;
+  scheduleInput("target-options-note").hidden = !binding || Boolean(editor.plan);
+  scheduleInput("target-options-note").textContent = editor.bindingOptionsError
+    || (editor.bindingsTruncated ? "仅显示前 100 个匹配会话，请输入更具体的条件查找。" : "选择目标会话；查找条件修改后离开输入框即可刷新。");
+  for (const field of ["project", "chat"]) {
+    scheduleInput(`${field}-field`).hidden = binding;
+    scheduleInput(field).disabled = binding;
+    scheduleInput(field).required = !binding;
+  }
+  scheduleInput("session-settings").hidden = binding;
+  const selected = editor.plan?.target_binding_id || scheduleInput("binding").value;
+  const targets = editor.bindingTargets;
+  const choices = [["", "选择原会话"], ...targets.map((item) => [item.id,
+    `${item.label} · ${item.project_alias}${item.available ? "" : "（自动暂停）"}`])];
+  if (selected && !targets.some((item) => item.id === selected)) {
+    choices.push([selected, editor.plan?.target_label || `已选择的原会话 · ${selected.slice(0, 8)}`]);
+  }
+  scheduleSelectOptions(scheduleInput("binding"), choices, selected);
+}
 
 function renderScheduleProjects() {
   scheduleSelectOptions(scheduleInput("filter-project"), [["", "全部 Project"],
@@ -1722,11 +1761,17 @@ async function loadScheduleSessionOptions() {
   const chatId = scheduleInput("chat").value.trim();
   const serial = ++editor.optionsSerial;
   const query = new URLSearchParams({ mode: "options" });
-  if (chatId) query.set("chat_id", chatId);
+  if (chatId && scheduleInput("target-kind").value !== "binding") query.set("chat_id", chatId);
+  if (scheduleInput("target-kind").value === "binding" && scheduleInput("binding-query").value.trim()) {
+    query.set("binding_query", scheduleInput("binding-query").value.trim());
+  }
   try {
     const data = await api(`/api/v1/schedules?${query}`);
     if (scheduleEditor !== editor || serial !== editor.optionsSerial) return;
     editor.models = data.models;
+    editor.bindingTargets = data.binding_targets || [];
+    editor.bindingsTruncated = Boolean(data.bindings_truncated);
+    editor.bindingOptionsError = data.binding_options_error?.message || "";
     editor.contextAvailable = data.context_mode_available;
     editor.catalogMessage = data.model_catalog_error
       ? `${data.model_catalog_error.message} 已有配置保持不变，仍可调整其他项目。` : "";
@@ -1736,12 +1781,15 @@ async function loadScheduleSessionOptions() {
       editor.sessionDraft = structuredClone(data.session_settings);
     }
     renderScheduleSessionSettings();
+    renderScheduleTarget();
   } catch (error) {
     if (scheduleEditor !== editor || serial !== editor.optionsSerial) return;
     editor.models = [];
     editor.contextAvailable = null;
     editor.catalogMessage = `${error.message} 可选配置暂未刷新，已有选择保持不变。`;
+    editor.bindingOptionsError = editor.catalogMessage;
     renderScheduleSessionSettings();
+    renderScheduleTarget();
   }
 }
 
@@ -1772,6 +1820,7 @@ function changeScheduleSessionSettings(field) {
 function scheduleSessionPatch() {
   const patch = {};
   if (!scheduleEditor) return patch;
+  if (scheduleInput("target-kind").value === "binding") return patch;
   if (!scheduleEditor.plan) return structuredClone(scheduleEditor.sessionDraft);
   for (const [key, value] of Object.entries(scheduleEditor.sessionDraft)) {
     if (JSON.stringify(value) !== JSON.stringify(scheduleEditor.sessionBase[key])) patch[key] = value;
@@ -1844,8 +1893,13 @@ async function previewSchedule() {
     }
     query.set("schedule", JSON.stringify(rule));
     if (scheduleEditor?.plan) query.set("plan_id", scheduleEditor.plan.id);
-    const chatId = scheduleInput("chat").value.trim();
-    if (chatId) query.set("chat_id", chatId);
+    if (scheduleInput("target-kind").value === "binding") {
+      query.set("target_kind", "binding");
+      query.set("target_binding_id", scheduleInput("binding").value);
+    } else {
+      const chatId = scheduleInput("chat").value.trim();
+      if (chatId) query.set("chat_id", chatId);
+    }
     const settings = scheduleSessionPatch();
     if (Object.keys(settings).length) query.set("session_settings", JSON.stringify(settings));
     const data = await api(`/api/v1/schedules?${query}`);
@@ -1877,11 +1931,14 @@ function openScheduleEditor(plan = null) {
   if (!action) return;
   const settings = plan?.session_settings || defaultScheduleSessionSettings();
   scheduleEditor = { plan, action, sessionBase: structuredClone(settings), sessionDraft: structuredClone(settings),
-    models: [], contextAvailable: null, optionsSerial: 0, settingsTouched: false, catalogMessage: "正在读取模型目录…" };
+    models: [], bindingTargets: [], contextAvailable: null, optionsSerial: 0, settingsTouched: false, catalogMessage: "正在读取模型目录…" };
   const rule = plan?.schedule || { kind: "daily", at: "09:00", timezone: state.schedules.default_timezone || "" };
   scheduleInput("editor").hidden = false;
   scheduleInput("editor-title").textContent = plan ? `编辑计划 · ${plan.name}` : "创建计划";
   scheduleInput("name").value = plan?.name || "";
+  scheduleInput("target-kind").value = plan?.target_kind || "new_topic";
+  scheduleInput("binding").value = plan?.target_binding_id || "";
+  scheduleInput("binding-query").value = "";
   scheduleInput("project").value = plan?.project_alias || "";
   renderScheduleProjects();
   scheduleInput("chat").value = plan?.chat_id || "";
@@ -1901,6 +1958,7 @@ function openScheduleEditor(plan = null) {
   invalidateSchedulePreview();
   scheduleInput("session-settings").open = true;
   renderScheduleSessionSettings();
+  renderScheduleTarget();
   scheduleInput("preview-message").classList.toggle("error", false);
   scheduleInput("close").disabled = false;
   if (!scheduleInput("drawer").open) scheduleInput("drawer").showModal();
@@ -1929,12 +1987,19 @@ async function saveSchedule(event) {
   const hasFuture = schedulePrepared.hasFuture;
   const definition = {
     name: scheduleInput("name").value.trim(),
-    project: scheduleInput("project").value.trim(),
-    chat_id: scheduleInput("chat").value.trim(),
     instructions: scheduleInput("instructions").value.trim(),
     schedule: schedulePrepared.schedule,
     enabled: scheduleInput("enabled").checked,
   };
+  if (scheduleInput("target-kind").value === "binding") {
+    if (!editor.plan) {
+      definition.target_kind = "binding";
+      definition.target_binding_id = scheduleInput("binding").value;
+    }
+  } else {
+    definition.project = scheduleInput("project").value.trim();
+    definition.chat_id = scheduleInput("chat").value.trim();
+  }
   const settings = scheduleSessionPatch();
   if (Object.keys(settings).length) definition.session_settings = settings;
   scheduleEditor.action = null;
@@ -1965,7 +2030,7 @@ async function saveSchedule(event) {
       const trigger = Array.from(document.querySelectorAll("[data-schedule-edit]"))
         .find((button) => button.dataset.scheduleEdit === editor.plan?.id);
       (trigger || scheduleInput("new")).focus();
-      setStatus(hasFuture ? "已保存计划。执行会话将在计划触发时创建。"
+      setStatus(hasFuture ? "已保存计划，将按时向所选目标提交任务。"
         : "已保存计划。当前没有后续触发，已认领的执行可以继续。");
     } catch (error) {
       scheduleInput("new").focus();
@@ -2006,7 +2071,7 @@ async function changeSchedule(plan, mode) {
 
 async function runSchedule(plan, button) {
   const action = plan.actions.run_now;
-  if (!action || plan.inflight || plan.blocked_reason || pendingScheduleMutations.has(plan.id)) return;
+  if (!action || pendingScheduleMutations.has(plan.id)) return;
   pendingScheduleMutations.add(plan.id);
   plan.actions.run_now = null;
   if (button) button.disabled = true;
@@ -2079,6 +2144,7 @@ async function loadSchedules(cursor = null, appliedQuery = cursor ? scheduleList
       ? plan.chat.chatLabel : "会话名称暂不可用";
     link.title = `打开飞书会话 · ${plan.chat_id}`;
     target.append(link);
+    scheduleNote(target, scheduleTargetLabel(plan));
     row.append(target);
     const timing = document.createElement("td");
     timing.className = "schedule-time";
@@ -2106,7 +2172,7 @@ async function loadSchedules(cursor = null, appliedQuery = cursor ? scheduleList
     edit.setAttribute("data-schedule-edit", plan.id);
     actions.append(edit);
     const run = actionButton("立即运行", () => runSchedule(plan, run));
-    run.disabled = !plan.actions.run_now || Boolean(plan.inflight || plan.blocked_reason);
+    run.disabled = !plan.actions.run_now;
     run.title = scheduleBlockedLabel(plan) || (plan.inflight ? "本次执行尚未结束" : "按已保存的指令和配置运行一次，原定时安排保持不变");
     actions.append(run);
     if (plan.lifecycle.has_trigger) {
@@ -2141,7 +2207,9 @@ async function showSchedule(planId) {
       + ` · 目标会话 ID：${data.plan.chat_id}`
       + (data.inflight ? "。编辑、暂停或删除不会取消本次执行。" : "");
     scheduleInput("detail-instructions").textContent = data.plan.instructions;
-    scheduleInput("detail-settings").textContent = scheduleSessionSummary(data.plan.session_settings || defaultScheduleSessionSettings());
+    scheduleInput("detail-settings").textContent = data.plan.target_kind === "binding"
+      ? `${scheduleTargetLabel(data.plan)} · 沿用原会话当前配置；系统输入不新增 @ 通知。`
+      : scheduleSessionSummary(data.plan.session_settings || defaultScheduleSessionSettings());
     scheduleInput("detail-rule").textContent = scheduleRuleLabel(data.plan.schedule);
     renderSchedulePreview("#schedule-detail-preview", data.preview);
     await loadScheduleRuns();
@@ -2168,7 +2236,7 @@ async function loadScheduleRuns(cursor = null) {
         link.href = run.feishu_url;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
-        link.textContent = "打开飞书话题";
+        link.textContent = run.target_kind === "binding" ? "打开触发消息" : "打开飞书话题";
         links.append(link);
       }
       if (run.binding_id && !run.binding_removed) {
@@ -2371,6 +2439,13 @@ scheduleInput("editor").addEventListener("input", invalidateSchedulePreview);
 scheduleInput("kind").addEventListener("change", invalidateSchedulePreview);
 scheduleInput("editor").addEventListener("submit", saveSchedule);
 scheduleInput("chat").addEventListener("change", loadScheduleSessionOptions);
+scheduleInput("target-kind").addEventListener("change", () => {
+  invalidateSchedulePreview();
+  renderScheduleTarget();
+  loadScheduleSessionOptions();
+});
+scheduleInput("binding").addEventListener("change", invalidateSchedulePreview);
+scheduleInput("binding-query").addEventListener("change", loadScheduleSessionOptions);
 for (const field of ["model", "effort", "tier", "context", "reactions", "progress", "completion-mention"]) {
   scheduleInput(field).addEventListener("change", () => changeScheduleSessionSettings(field));
 }

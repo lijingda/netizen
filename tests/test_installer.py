@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class NetizenInstallerTest(unittest.TestCase):
     def test_stopped_upgrade_rejects_old_schema_without_modifying_database(self) -> None:
-        for version in (6, 7, 8, 9, 10, 11):
+        for version in (6, 7, 8, 9, 10, 11, 12):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 layout = self._layout(Path(directory))
                 installer.prepare_directories(layout)

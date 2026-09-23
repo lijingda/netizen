@@ -31,9 +31,9 @@ ephemeral fork，依靠独立话题 route 保留身份，不是普通 Scope/Bind
 | --- | --- |
 | 空闲会话收到普通消息 | 验证消息归属、引用、图片和所选上下文，校验显式 Skill 与会话配置，创建或恢复 exact Thread，启动一个新 Turn；结果回到原请求的投递锚点。 |
 | 运行中的会话收到普通消息 | 经输入准备与身份校验后，steer 当前 exact Turn；不排队、不拼接成下一轮，不改变原任务的结果投递锚点。 |
-| 定时计划到期或手动触发 | 唯一 Scheduler 认领到期点或手动请求，在目标聊天创建独立话题与普通持久 Binding，提交一次初始 Turn；配置取自本次认领快照，不切换来源聊天的当前会话。 |
+| 定时计划到期或手动触发 | 唯一 Scheduler 认领到期点或手动请求；新话题目标创建普通持久 Binding 并提交初始 Turn，原会话目标固定 exact Binding 并按普通消息 start/steer。两者都不切换来源当前会话。 |
 
-输入准备不能把历史消息变成新的控制指令或 Skill 调用；群聊每次触发仍需重新 @机器人。
+输入准备不能把历史消息变成新的控制指令或 Skill 调用；普通群聊参与者每次触发仍需重新 @机器人。
 定时初始输入保留 Scheduled Plan 来源，后续交流沿用普通会话语义。具体准入、消息归属与
 重试边界见[消息输入准备](#消息输入准备)、[锁与输入准入](#锁与输入准入)和
 [定时任务](#定时任务)。
@@ -165,12 +165,16 @@ Mode 的 lazy Binding，不要求任务、不创建 native Thread；完整表单
 4. native handle 返回并完成 ID 校验后保存内存 active Thread/Handle，随后后台轮询公开
    `thread.read()` 的原生状态；Binding 配置不清除，供后续新 Turn 重复使用。
 
-计划触发按 ADR 0061/0068 增加显式的普通会话入口：先认领到期点或手动请求，在目标会话创建独立 topic，
+新话题计划触发按 ADR 0061/0068 增加显式的普通会话入口：先认领到期点或手动请求，在目标会话创建独立 topic，
 原子登记新 Scope/Binding，再用仅允许初始 start 的 Runtime 入口执行计划。它不 fork、
 不创建 Side、不继承来源聊天历史，也不修改来源 active pointer。计划创建时复制来源的会话
 配置意图并独立保存；每次认领冻结配置，交接时应用到新 Binding。计划首轮使用
 Scheduled Plan 来源，不伪造真人 Current Prompt Message；新话题的机器人 seed 是完成
 投递锚点。后续消息、停止、归档、删除和反馈使用普通会话语义。
+
+[ADR 0070](adr/0070-schedule-inputs-in-existing-bindings.md) 增加原会话目标：固定 exact
+Binding，使用普通消息准备、准入和 start/steer；当前配置、catch-up、反馈和 Runtime
+故障规则均取自该会话。真实触发消息只是完成/表情锚点，输入保持 Scheduled Plan 系统来源。
 
 已有 native ID 时只调用 `thread_resume(exact_id)`，不传 cwd、approval、sandbox、
 model、config 或 env override。
@@ -324,6 +328,10 @@ Mention Context Mode 按
   `/control` 和 `$skill` 都编码为 inert supplemental context，不会自动触发任何动作；
 - P2P 与 Side 不读取补充历史。未 @ 的消息不会直接 start/steer，也不会由 Channel 缓存或
   写入 SQLite；只有最终 native input 进入 Codex 原生历史。
+
+原会话定时输入按 ADR 0070 使用同一 catch-up 流程，以本次真实触发消息作为 upper；
+它保留 Scheduled Plan 来源，不伪装成一次真人 @。读取、过滤、限额、exact admission
+和接受后的 cursor CAS 与普通消息一致，原有真人消息的 @ 准入不变。
 
 Context Boundary 是 Binding-scoped exact 飞书消息 marker，不是机器人回复时间。`/new`
 创建 catch-up Binding、`/resume`、`/unarchive` 或从 current-only 切换为 catch-up 时，以
@@ -845,7 +853,8 @@ Task Feedback；Side 则在创建时一次性冻结 Parent 当时的 Task Feedba
 普通与 Side Turn 的 Lifecycle Reaction 始终尽力展示；两项都关闭时仍有 accepted、成功
 steer 和终态表情，但没有 `THINKING` pulse 或 Activity 过程卡。Goal 模块本身始终存在且不
 使用 Lifecycle Reaction。Completion Mention 在普通/Side 终态和 Goal 逻辑终态
-提及 admission 捕获的发起人；停止、暂停、状态未知和自动定时首轮不提及。提及只随
+提及 admission 捕获的发起人；停止、暂停、状态未知和系统定时输入新建的 Turn 不提及，
+定时 steer 不改变原轮提及归属。提及只随
 终态投递，不进入运行卡、文件分页或保留的 Goal 控制投影。新发送的最终回复在消息内 @；
 已有过程卡或 Goal 卡的更新不带 @，确认更新后另发一次引用结果卡的 @ 回复。
 Goal 即使关闭进度卡也复用卡片，因此其独立结束提醒不受进度开关影响。
@@ -907,7 +916,7 @@ closed，不能扩展成任意通知或私有 RPC gateway。
 不新增错误分类、待发送队列或调度器。终态先等待旧轮询退出，再对身份仍有效的原卡
 独立尝试最多三次相同终态更新，失败间隔 0.5 秒，整组请求与间隔共用既有 5 秒超时，
 不受中间失败影响；成功立即结束，取消直接传播。原卡不可用、终态渲染或重试耗尽时，
-才按可用模块回退为新的自包含卡或既有文本。定时首轮另需区分发送前失败与已尝试投递：
+才按可用模块回退为新的自包含卡或既有文本。新话题定时首轮另需区分发送前失败与已尝试投递：
 发送或终态更新已尝试时保留原回执，不补发第二份结果；只有尚未调用发送接口时才可回退。
 终态 Presenter 保留成功或全部明确失败时的最后一次 SDK 更新结果供 Channel 判定；
 若没有成功且任一次结果未知，整组保留未知，后续拒绝不能否定先前可能成功的更新。
@@ -949,11 +958,42 @@ Channel 按 exact native Turn ID 在内存管理普通/Side Turn 的 Lifecycle R
 
 ## 定时任务
 
-Scheduled Plan 保存用户明确指定的执行指令、Project、目标飞书会话、时间规则及会话
-配置。每次触发在目标会话中新建真实话题和普通持久 Thread；单聊、普通群、话题群及
+Scheduled Plan 保存明确的执行指令、时间规则与执行目标，支持 `new_topic` 和 `binding`。
+新话题模式另保存 Project、目标飞书会话和独立会话配置。每次触发在目标会话中新建真实话题和普通持久 Thread；单聊、普通群、话题群及
 已有话题来源使用相同语义。已有话题的计划在所属 chat 新建 sibling 话题，不切换来源
 Scope 的 active Binding，不 fork 来源历史，也不隔离 Project 文件目录。
 执行话题的继续交流、配置、停止、归档、删除和 Files 均复用普通会话能力。
+
+### 原会话目标
+
+原会话模式保存不可变的 `target_binding_id`，从 exact Binding 取得 Project、chat/Scope、
+模型、反馈和上下文配置；`session_settings` 为 null，不保存第二套配置。
+创建时可使用本次 MCP 原生 Thread 对应的 Binding，也可明确选择一个同 App 的普通
+Binding。飞书创建入口冻结明确选定的目标，打开和保存旧表单均不要求该目标仍为当前
+Binding，也不随切换转投；目标创建后不能编辑为另一会话。Side 和未映射原生 Thread
+不作为隐式目标。三个管理入口均允许管理非当前目标，自动触发和立即运行才校验 current。
+
+每次在原 Scope 先发送真实机器人锚点消息。普通群/私聊保持主线；话题通过既有 typed
+只读消息端口在 exact thread 容器取一页元数据、验证其中一条未删除消息作 reply target，
+实际发送回执再次确认 exact topic。找不到有效锚点、发送失败或未知时不执行模型输入。
+消息不依赖入站回流，计划正文不进入 slash control 解析。原会话工作输入沿普通
+MessageInputPreparer、admission 和 Runtime.submit；空闲启动新 Turn，运行中 steer
+捕获的 exact Turn/Goal physical Turn。读取与准备期间的身份/配置竞态按普通规则拒绝。
+
+新 Turn 的反应表情、过程卡、Files、结果和异常回复锚定触发消息；steer 只产生普通
+OnIt/接收回执，保留原轮模型、卡片、结果来源和发起人。系统来源的新 Turn 不结束 @，
+不把锚点机器人的身份当作请求者，也不从计划创建者推断提醒对象。
+
+原会话 Run 仅证明这次输入的交接，`started/steered` 表示已接受，不表示任务完成。
+记录保存 exact Binding 和接收的物理 Turn；多个 Run 可指向同一 Turn。成功、拒绝和
+未知均释放本次交接 barrier，未知不会阻塞下一个独立到期点，不重发本次输入；重启
+只收敛记录，不重放。不能以旧 Turn 后来的终态推断一次 steer 已被接受。Runtime
+全局 admission 关闭等既有失败边界仍同样拒绝用户消息与定时输入。
+
+手动 `enabled` 与目标可用性独立。目标切走或归档时自动暂停，切回或恢复后重新满足
+执行条件，不改写手动暂停意愿；暂停期间到期点不补跑，包括普通宽限内的旧到期点。
+删除 Binding 的确认事务同时删除关联计划定义。手动立即运行可以忽略手动暂停，但
+不能绕过目标或 Runtime 准入。新话题模式的独立配置、初轮 barrier 和结果交付规则不变。
 
 ### 计划、时间与状态
 
@@ -981,8 +1021,9 @@ Scope 的 active Binding，不 fork 来源历史，也不隔离 Project 文件�
 迟到宽限，仅认领最新仍在宽限内的到期点；更早时间合并为 missed，不建立历史队列。
 
 启停意图、是否结束和执行结果独立展示。`enabled` 只代表启停；当前规则既无未来机会、
-也无宽限内可处理机会，且没有尚未收尾的 Run，才算已结束。最后一次启动中、运行中或
-结果待确认仍为未结束；已结束不表示执行成功。筛选与列表共用一次时钟快照，`ended`
+也无宽限内可处理机会，且没有尚未收尾的 Run，才算已结束。新话题模式最后一次启动中、
+运行中或结果待确认仍为未结束；原会话模式以输入交接收尾为准，不等待业务任务结束。
+已结束不表示执行成功。筛选与列表共用一次时钟快照，`ended`
 在 SQL LIMIT 前过滤；不同条件合取并纳入分页游标，不在取页后丢弃已结束项。
 
 | 操作 | 对调度和普通会话的影响 |
@@ -990,7 +1031,7 @@ Scope 的 active Binding，不 fork 来源历史，也不隔离 Project 文件�
 | 暂停、修改、删除计划 | 影响后续认领；已经认领的一次继续使用快照，已有会话保留 |
 | 启用计划 | 取下一未来时间点，不重跑旧触发；过去的一次性须先重新安排 |
 | 立即运行 | 按当前已保存版本认领一次手动执行，暂停及已结束计划也可运行；不改变启停、时间规则、游标、下次到期点或 revision |
-| 普通 /stop、归档、删除会话 | 处理所选普通任务，不暂停计划，不重放该次触发 |
+| 普通 /stop、归档、删除会话 | /stop 处理当前任务；新话题计划独立保留。原会话目标归档自动暂停，删除目标一并删除计划，不重放触发 |
 | 停用 Project | 跳过新触发但保留 enabled 意图，不停止已有执行；恢复后不补跑 |
 | 删除 Project | 冻结新交接并删除关联计划，在途创建仍纳入 ADR 0060 的精确清单 |
 
@@ -1003,21 +1044,28 @@ ID 的墓碑；Project 同名重登记不复活计划。单独删除计划不使
 自然语言沿普通 Prompt/Steer 进入 Codex，由单一 `cron_manage` 工具调用 ScheduleService；
 不增加前置意图分类或独立 Runtime。工具提供 options/list/view/create/update/delete/run_now/runs，
 启停使用 update 的 enabled。参数以 `netizen/schedules/mcp.py` 的 schema 为准。
-模型先按名称定位再用 exact ID；重名有歧义才澄清，指令须明确资源，不依赖创建聊天历史。
+模型先按名称定位再用 exact ID；重名有歧义才澄清。新话题模式指令须明确资源，不依赖
+创建聊天历史；原会话模式可沿用目标 Thread 的原生上下文。
 工具说明由 MCP instructions 和 description 提供，不覆盖原生 developer/base instructions。
 
 `run_now` 只接受 exact plan_id、expected_revision 与稳定 request_id，按已保存的指令、
 配置、Project 和目标会话执行，不接受临时覆盖。普通任务无计划语境时仍按普通 Prompt
 处理；立即运行、启用计划、修改时间分别选择对应操作。回执含 accepted、原 Run ID、
-当次可读的执行信息及可用话题链接；受理不代表任务完成，结果仍在计划目标话题交付。
+当次可读的执行信息及可用消息链接；受理不代表任务完成，反馈沿目标模式的普通会话交付。
 
-显式 chat_id、project 优先；省略时从本次原生 `params._meta.threadId` 查 exact
+新话题模式显式 chat_id、project 优先；省略时从本次原生 `params._meta.threadId` 查 exact
 Thread → Binding → Scope。可选 header 身份存在时须核对一致，不从 cwd、工具参数或
 全局 current 猜测。不具有普通 Binding 映射的 Side/子代理须显式给出所需默认值。
 显式换 chat 不隐式换 Project，update 省略字段保留原值。身份只用于默认值解析，不新增
 创建者权限、群白名单或 Project ACL；目标须满足飞书应用可用性和机器人可达性。
+原会话模式只接受 exact target_binding_id，省略时从同一原生调用身份映射；不允许
+覆盖目标所属的 chat、Project 或配置。options 可按 Binding ID、Project、chat/topic
+搜索同 App 的普通 Binding，包含非当前目标并标明执行可用性；在截断前过滤，避免只显示
+最近会话而找不到旧目标。
+会话列表查询忙碌或超时只返回该组选项的错误，不丢弃已取得的模型和会话配置；
+管理界面明确提示列表暂不可用，不将查询失败解释为没有会话。
 
-会话配置与 `/new` 共用 Model/Effort/Speed、Reaction Pulse、Progress Card、Completion Mention 和 Mention
+新话题目标的会话配置与 `/new` 共用 Model/Effort/Speed、Reaction Pulse、Progress Card、Completion Mention 和 Mention
 Context Mode。创建时复制 exact 来源 Binding 的选择，显式覆盖后独立保存；继承仍存 null，
 不复制有效 Codex 配置。无来源采用 `/new` 默认值，每次认领冻结设置用于新 Binding。
 私聊及私聊话题固定 current-only；群话题 catch-up 从本次真实 root/seed 建立边界，自动
@@ -1026,7 +1074,8 @@ Context Mode。创建时复制 exact 来源 Binding 的选择，显式覆盖后�
 
 `/cron` 用一张管理卡，默认当前会话已启用且未结束，筛选和任务各用下拉框确认。
 选择任务后原卡展开详情和操作，最近记录按需展开；刷新仅作用于所选任务，新建入口独立
-放在底部。新建/编辑各用一张完整表单，频率不触发多级页面跳转，只校验对应时间字段。
+放在底部，并提供冻结当前 Binding 的原会话入口。新建/编辑各用一张完整表单，频率
+不触发多级页面跳转，只校验对应时间字段。原会话表单只展示目标及继承说明，不编辑配置。
 卡片默认每批最多 50 个计划、5 条执行记录；更长指令通过 Admin/自然语言编辑。
 筛选、选择和导航留在回调中，后台不存卡片 session 或草稿。提交以本次完整表单为准，
 经业务校验保存；出错恢复正常输入、exact revision、时间偏移和业务 request_id，每次
@@ -1034,11 +1083,15 @@ Context Mode。创建时复制 exact 来源 Binding 的选择，显式覆盖后�
 
 Admin 默认全部 Project、全部启停状态、未结束；不提供会话 ID 筛选。列表分别展示计划
 状态和执行情况，优先展示尚未收尾的 Run，避免后续 skipped 记录遮住仍在运行的一次。
-Project 使用可选目录，目标会话复用 Sessions 的名称与聊天链接；创建仍填写 chat_id。
+Project 使用可选目录，目标会话复用 Sessions 的名称与聊天链接；新话题创建填写 chat_id，
+原会话创建选择可搜索的 exact Binding，编辑时目标固定。
 创建/编辑在独立侧边表单完成，时间选择器按计划时区解释，关闭后保留列表筛选和位置。
 Admin 沿用认证、CSRF 和 action grant，提供“立即运行”已保存计划版本，不接受任意即时
-Prompt。它与 `/cron`、MCP 调用相同服务入口，首轮未结束或 Project 不可用时不提供有效
-运行操作。Admin 一次性 grant 响应未知后先查最近执行；卡片/MCP 原样重试保留请求 ID。
+Prompt。它与 `/cron`、MCP 调用相同服务入口，交接屏障占用、Project 不可用或原会话目标
+暂停时不提供有效运行操作；新话题模式的屏障延续到初轮结束。Admin 一次性 grant 响应
+未知后先查最近执行；卡片/MCP 原样重试保留请求 ID。
+卡片按钮与 Admin action grant 统一消费公共 `can_run_now`，不另算一套执行资格；
+后端认领和普通 Runtime 提交仍重新校验，按钮可用不是执行许可的最终凭据。
 
 三个入口共用写事务：稳定 request_id 去重，相同 ID 和规范 payload 返回原标识，内容
 不同则冲突；修改/删除以 expected_revision 做 CAS，不擅自递增。凭据保留七天，响应未知
@@ -1054,20 +1107,21 @@ Scheduler 按整分钟查询到期计划，管理变更仍可主动唤醒并重�
 每次查询最多 100 条；查满且有处理进展时立即继续下一批，批间让出事件循环，
 不额外等待一分钟。100 只限制单批查询大小，不限制计划总数或并发执行数。
 
-唯一 Scheduler 在短事务中检查 App、Project、计划 revision、到期点与未决 barrier，
+唯一 Scheduler 在短事务中检查 App、Project、计划 revision、到期点与未决交接 barrier，
 以 `(plan_id, due_at_utc)` 唯一认领并推进游标；revision 只标记快照，不进入去重键。
-同计划首轮未结束时跳过并推进时间，不排队；unknown 阻塞该计划，不靠启停清除。
+新话题模式同计划首轮未结束时跳过并推进时间，不排队；unknown 阻塞该计划，不靠启停清除。
 首轮结束后人工续聊不阻塞下一次。不同计划和 Binding 仍可并行，不加 Project 执行锁。
 
 手动请求在同一事务中校验 App、Project、revision 和同计划 barrier，以 request_id
 认领一次并标注 `trigger_source=manual`；定时认领标注 `scheduled`，到期点唯一约束
-仅作用于定时来源。手动认领不推进调度游标，不消费恰好同一时刻的到期点。首轮 held 或
-unknown 时手动请求明确拒绝；同时到期时按先成功认领者占用屏障，定时侧仍可记录 busy。
+仅作用于定时来源。手动认领不推进调度游标，不消费恰好同一时刻的到期点。交接 held 或
+新话题首轮 unknown 时手动请求明确拒绝；同时到期时按先成功认领者占用屏障，定时侧
+仍可记录 busy。原会话屏障随本次输入交接收尾释放，不等待业务终态。
 认领和加入唯一 Scheduler 的交接任务集合之间不让出事件循环，HTTP/MCP 请求取消不取消
 已受理交接；停机排空与 Project 删除继续覆盖这些任务。详见
 [ADR 0068](adr/0068-run-saved-scheduled-plans-manually.md)。
 
-交接阶段依次为 claimed、publishing_topic、binding_ready、starting_turn、handed_off；
+新话题交接阶段依次为 claimed、publishing_topic、binding_ready、starting_turn、handed_off；
 独立的 barrier 表示 held、unknown 或 released。每次外部调用前标记可能发生的副作用，
 返回后保存 exact identity。root/seed
 使用各自稳定 UUID，只允许既有发送原语的一次同 UUID 对账；仍未知不重新发布或搜索历史猜测。
@@ -1077,19 +1131,20 @@ unknown 时手动请求明确拒绝；同时到期时按先成功认领者占用
 
 定时和手动首轮都使用显式 Scheduled Plan 来源、触发来源及保存的完整指令，不伪造真人
 当前消息或结束提及对象；真人消息路径保持不变。
-完成结果严格回复本次 Completion Origin，使用 reply_in_thread=true、reply_target_gone=fail；
+新话题完成结果严格回复本次 Completion Origin，使用 reply_in_thread=true、reply_target_gone=fail；
 不降级发到主线。文本、Files 或过程卡终态一旦尝试投递，不因失败/超时另发第二份；仅发送前
 准备失败允许文本回退。sent 须有明确成功及 exact chat/topic 证据，分段须逐段核实；否则
 保留 failed/unknown。投递结果独立于 native barrier，不重跑任务，也不建立持久投递队列。
 
-Run 只保存交接阶段、exact initial Turn 引用和投递回执；native Thread ID 从普通 Binding
+新话题 Run 只保存交接阶段、exact initial Turn 引用和投递回执；native Thread ID 从普通 Binding
 获取，原生运行结果按 exact initial Turn 有界读取，不缓存正文/终态或将后续人工 Turn 当成本次。
 解除 barrier 要有 exact 原生终态或可靠生命周期移除证据；普通 Binding 删除与关联 barrier
 释放须原子提交。已 released 不因历史暂不可读重新占用 barrier。每计划保留最近 100 条已释放
 记录，未决及路由证据不按数量裁剪，裁剪不删除普通会话。
 
-恢复只检查未决 Run，不重发启动/结果、不恢复全量 stream。缺少 exact 身份保持 unknown；
+新话题恢复只检查未决 Run，不重发启动/结果、不恢复全量 stream。缺少 exact 身份保持 unknown；
 确认仍在运行的一次只在下一到期点前或显式刷新时有界重查，观测失败不无限自动轮询。
+原会话恢复只标记未确认交接并释放屏障，不读取原生终态来猜测输入是否被接收。
 thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admission，遵守既有恢复边界。
 关闭先停认领和管理 admission、有界排空交接，再由普通 Runtime shutdown，最后关闭传输和 Store。
 
@@ -1097,7 +1152,7 @@ thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admis
 
 ### Channel 数据库与结构校验
 
-`channel.sqlite3` 的 schema v12 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+`channel.sqlite3` 的 schema v13 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`，以及 `schedule_plans`、`schedule_runs`、`schedule_requests`。
 `dedup_keys` 直接实现 Channel SDK 冻结的 `seen/mark` DedupStore 协议。
 `bindings` 保存全空或全有的三个 Binding-scoped catalog
@@ -1117,8 +1172,8 @@ ephemeral native Thread ID 或内容。`projects.deleted` 保留已删除 Projec
 安装事务仍保留数据库快照，失败时按既有 lifetime lock 边界恢复原数据库与 release。
 Project 删除 intent、
 确认清单、fingerprint 和结果只在进程内，不保存解析后的 wire value 或已生效配置。
-ADR 0061 的窄例外仅保存当前计划指令、时间规则与游标、最小调度交接证据、exact initial
-Turn ID 引用和有界管理请求去重。Run 通过 Binding 获取 native Thread ID，不保存第二份
+ADR 0061/0070 的窄例外仅保存当前计划指令、执行目标、时间规则与游标、最小调度交接证据、
+exact 接收 Turn ID 引用和有界管理请求去重。Run 通过 Binding 获取 native Thread ID，不保存第二份
 映射或原生终态历史。计划删除清空指令并保留不可复活墓碑；最近已释放 Run 有界保留。
 除此以外，数据库没有 prompt、补充消息正文/发送者投影、当前消息发送者投影、回复、ephemeral
 native Thread ID、Turn、Goal、
@@ -1392,13 +1447,14 @@ identity 或 Side route identity 等 typed precondition；提交后在锁内重�
 action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact、Side resume 或
 任意筛选结果的批量 native mutation route。
 
-定时管理是 ADR 0061/0068 的计划定义编辑与已保存计划手动执行例外。`/cron` 卡片、Admin
+定时管理是 ADR 0061/0068/0070 的计划定义编辑与已保存计划手动执行例外。`/cron` 卡片、Admin
 “定时任务”页和自然语言 `cron_manage` 共用 ScheduleService，提供分页查询、创建、编辑、
 启停、删除、立即运行和最近执行。
-显式 chat ID 优先；MCP 默认值只从 `params._meta.threadId` 的 exact Binding/Scope 解析，
+新话题目标显式 chat ID 优先，原会话目标固定 exact Binding；MCP 默认值只从
+`params._meta.threadId` 的 exact Binding/Scope 解析，
 无映射时要求显式目标，不按 cwd 猜测或新增 ACL。卡片写操作携带 revision 和稳定请求 ID，
 Admin 继续使用既有认证与 action/CSRF grant。四类时间规则、时区、漏跑、同计划忙碌跳过、
-未知状态阻塞及删除语义见[定时任务](#定时任务)；原生 Goal/plan/checklist
+两种目标各自的交接屏障及删除语义见[定时任务](#定时任务)；原生 Goal/plan/checklist
 不是定时计划。Side 保持原有 slash 白名单。
 
 ### Project 删除与交接

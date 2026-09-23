@@ -36,14 +36,18 @@ _RUN_TABLE = """CREATE TABLE schedule_runs (
         created_at REAL NOT NULL, updated_at REAL NOT NULL,
         missed_from REAL, missed_count INTEGER NOT NULL DEFAULT 0,
         binding_removed INTEGER NOT NULL DEFAULT 0 CHECK(binding_removed IN (0,1)),
-        trigger_source TEXT NOT NULL DEFAULT 'scheduled' CHECK(trigger_source IN ('scheduled','manual'))
+        trigger_source TEXT NOT NULL DEFAULT 'scheduled' CHECK(trigger_source IN ('scheduled','manual')),
+        target_kind TEXT NOT NULL DEFAULT 'new_topic' CHECK(target_kind IN ('new_topic','binding')),
+        disposition TEXT CHECK(disposition IN ('started','steered')),
+        CHECK(target_kind = 'new_topic' OR binding_id IS NOT NULL),
+        CHECK(disposition IS NULL OR (target_kind = 'binding' AND initial_turn_id IS NOT NULL AND barrier = 'released'))
     )"""
 _RUN_INDEXES = (
     "CREATE UNIQUE INDEX schedule_runs_due ON schedule_runs(plan_id, due_at) WHERE trigger_source = 'scheduled'",
     "CREATE INDEX schedule_runs_plan ON schedule_runs(plan_id, due_at DESC, run_id DESC)",
-    "CREATE UNIQUE INDEX schedule_runs_binding ON schedule_runs(binding_id) WHERE binding_id IS NOT NULL",
-    "CREATE UNIQUE INDEX schedule_runs_root ON schedule_runs(app_id, chat_id, root_message_id) WHERE root_message_id IS NOT NULL",
-    "CREATE UNIQUE INDEX schedule_runs_topic ON schedule_runs(app_id, chat_id, topic_id) WHERE topic_id IS NOT NULL",
+    "CREATE UNIQUE INDEX schedule_runs_binding ON schedule_runs(binding_id) WHERE binding_id IS NOT NULL AND target_kind = 'new_topic'",
+    "CREATE UNIQUE INDEX schedule_runs_root ON schedule_runs(app_id, chat_id, root_message_id) WHERE root_message_id IS NOT NULL AND target_kind = 'new_topic'",
+    "CREATE UNIQUE INDEX schedule_runs_topic ON schedule_runs(app_id, chat_id, topic_id) WHERE topic_id IS NOT NULL AND target_kind = 'new_topic'",
     "CREATE UNIQUE INDEX schedule_runs_barrier ON schedule_runs(plan_id) WHERE barrier != 'released'",
 )
 SCHEMA = (
@@ -55,6 +59,10 @@ SCHEMA = (
         processed_through REAL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
         source TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0,1)),
         session_settings_json TEXT,
+        target_kind TEXT NOT NULL DEFAULT 'new_topic' CHECK(target_kind IN ('new_topic','binding')),
+        target_binding_id TEXT,
+        CHECK((target_kind = 'new_topic' AND target_binding_id IS NULL) OR
+              (target_kind = 'binding' AND target_binding_id IS NOT NULL AND session_settings_json IS NULL)),
         CHECK(deleted = 0 OR (enabled = 0 AND instructions = '' AND schedule_json IS NULL))
     )""",
     "CREATE INDEX schedule_plans_due ON schedule_plans(app_id, enabled, next_due_at) WHERE deleted = 0",
@@ -71,21 +79,21 @@ TABLE_COLUMNS = {
     "schedule_plans": {
         "plan_id", "revision", "name", "instructions", "project_alias", "app_id", "chat_id",
         "schedule_json", "enabled", "next_due_at", "processed_through", "created_at",
-        "updated_at", "source", "deleted", "session_settings_json",
+        "updated_at", "source", "deleted", "session_settings_json", "target_kind", "target_binding_id",
     },
     "schedule_runs": {
         "run_id", "plan_id", "plan_revision", "due_at", "project_alias", "app_id", "chat_id",
         "phase", "barrier", "root_uuid", "seed_uuid", "root_message_id", "topic_id",
         "origin_message_id", "binding_id", "initial_turn_id", "error_code", "delivery_state",
-        "created_at", "updated_at", "missed_from", "missed_count", "binding_removed", "trigger_source",
+        "created_at", "updated_at", "missed_from", "missed_count", "binding_removed", "trigger_source", "target_kind", "disposition",
     },
     "schedule_requests": {"request_id", "operation", "payload_digest", "plan_id", "revision", "expires_at", "run_id"},
 }
 _RUN_UNIQUE_INDEXES = {
     "schedule_runs_due": (("plan_id", "due_at"), "trigger_source = 'scheduled'"),
-    "schedule_runs_binding": (("binding_id",), "binding_id is not null"),
-    "schedule_runs_root": (("app_id", "chat_id", "root_message_id"), "root_message_id is not null"),
-    "schedule_runs_topic": (("app_id", "chat_id", "topic_id"), "topic_id is not null"),
+    "schedule_runs_binding": (("binding_id",), "binding_id is not null and target_kind = 'new_topic'"),
+    "schedule_runs_root": (("app_id", "chat_id", "root_message_id"), "root_message_id is not null and target_kind = 'new_topic'"),
+    "schedule_runs_topic": (("app_id", "chat_id", "topic_id"), "topic_id is not null and target_kind = 'new_topic'"),
     "schedule_runs_barrier": (("plan_id",), "barrier != 'released'"),
 }
 PHASES = {name: index for index, name in enumerate(("claimed", "publishing_topic", "binding_ready", "starting_turn", "handed_off", "released"))}
@@ -109,8 +117,26 @@ def require_schema(connection: sqlite3.Connection) -> None:
     columns = {row["name"]: row for row in connection.execute("PRAGMA table_info(schedule_plans)")}
     if "session_settings_json" not in columns or columns["session_settings_json"]["type"].upper() != "TEXT":
         raise RuntimeError("current Channel database is missing scheduled session settings")
-    for row in connection.execute("SELECT deleted, session_settings_json FROM schedule_plans"):
+    for table in ("schedule_plans", "schedule_runs"):
+        target = next(row for row in connection.execute(f"PRAGMA table_info({table})") if row["name"] == "target_kind")
+        if target["type"].upper() != "TEXT" or target["notnull"] != 1 or target["dflt_value"] != "'new_topic'":
+            raise RuntimeError("current scheduling target kind has invalid shape")
+        if connection.execute(f"SELECT 1 FROM {table} WHERE target_kind NOT IN ('new_topic','binding') LIMIT 1").fetchone():
+            raise RuntimeError("current scheduling target kind values are invalid")
+    if connection.execute(
+        "SELECT 1 FROM schedule_runs WHERE (target_kind='binding' AND (binding_id IS NULL OR binding_id='')) "
+        "OR (disposition IS NOT NULL AND (disposition NOT IN ('started','steered') OR target_kind!='binding' "
+        "OR initial_turn_id IS NULL OR initial_turn_id='' OR barrier!='released')) LIMIT 1"
+    ).fetchone():
+        raise RuntimeError("current scheduling input receipt is invalid")
+    for row in connection.execute("SELECT deleted, session_settings_json, target_kind, target_binding_id FROM schedule_plans"):
         raw = row["session_settings_json"]
+        if (row["target_kind"] == "binding") != bool(row["target_binding_id"]):
+            raise RuntimeError("current scheduling target identity is invalid")
+        if row["target_kind"] == "binding":
+            if raw is not None:
+                raise RuntimeError("current Binding plan retains session settings")
+            continue
         if row["deleted"]:
             if raw is not None:
                 raise RuntimeError("current deleted plan retains session settings")
@@ -181,7 +207,10 @@ def _plan(row: sqlite3.Row) -> Plan:
         enabled=bool(row["enabled"]), next_due_at=row["next_due_at"],
         processed_through=row["processed_through"], created_at=row["created_at"],
         updated_at=row["updated_at"], source=row["source"], deleted=bool(row["deleted"]),
-        session_settings=SessionSettings.from_dict(json.loads(row["session_settings_json"])) if not row["deleted"] else SessionSettings(),
+        session_settings=(SessionSettings.from_dict(json.loads(row["session_settings_json"]))
+                          if row["session_settings_json"] is not None
+                          else SessionSettings() if row["target_kind"] == "new_topic" else None),
+        target_kind=row["target_kind"], target_binding_id=row["target_binding_id"],
     )
 
 
@@ -223,6 +252,32 @@ class ScheduleStore:
         if not self.owner.get_project(alias).enabled:
             raise ProjectDisabled(alias)
 
+    def binding_target_error(self, plan: Plan) -> str | None:
+        """Project eligibility from exact ownership and the live Scope pointer."""
+        if plan.target_kind != "binding":
+            return None
+        return self._binding_target_error(plan.target_binding_id, plan.project_alias, plan.app_id, plan.chat_id)
+
+    def _binding_target_error(self, binding_id: str | None, project_alias: str, app_id: str, chat_id: str) -> str | None:
+        with self.owner._lock:
+            row = self._db.execute(
+                "SELECT b.project_alias, s.app_id, s.chat_id, s.active_binding_id "
+                "FROM bindings b JOIN scopes s ON s.scope_key=b.scope_key WHERE b.binding_id=?",
+                (binding_id,),
+            ).fetchone()
+            if row is None:
+                return "target_missing"
+            if (row["project_alias"], row["app_id"], row["chat_id"]) != (project_alias, app_id, chat_id):
+                return "target_mismatch"
+            return None if row["active_binding_id"] == binding_id else "target_inactive"
+
+    def require_binding_target(self, plan: Plan, *, require_active: bool = True) -> None:
+        reason = self.binding_target_error(plan)
+        if reason is not None and (require_active or reason != "target_inactive"):
+            error = ScheduleConflict("目标会话不可用、已切换或已归档，请恢复原会话后再执行。")
+            error.code = reason
+            raise error
+
     def _request(self, request_id: str, operation: str, payload: object, now: float) -> MutationResult | None:
         if not isinstance(request_id, str) or not request_id or len(request_id) > 200:
             raise ScheduleError("写操作需要稳定的 request_id（最多 200 字符）。")
@@ -254,8 +309,14 @@ class ScheduleStore:
             raise ScheduleError("执行指令过长，请缩短或引用文件/文档。")
         if type(plan.enabled) is not bool or not isinstance(plan.schedule, ScheduleRule):
             raise ScheduleError("计划需要有效规则和布尔 enabled。")
-        if not isinstance(plan.session_settings, SessionSettings):
-            raise ScheduleError("计划需要有效的会话设置。")
+        if plan.target_kind == "new_topic":
+            if plan.target_binding_id is not None or not isinstance(plan.session_settings, SessionSettings):
+                raise ScheduleError("新话题计划需要独立会话设置，不能指定原会话。")
+        elif plan.target_kind == "binding":
+            if not isinstance(plan.target_binding_id, str) or not plan.target_binding_id or plan.session_settings is not None:
+                raise ScheduleError("原会话计划需要准确 Binding，并沿用该会话设置。")
+        else:
+            raise ScheduleError("执行目标仅支持新话题或原会话。")
         if not isinstance(plan.source, str) or len(plan.source) > 1000:
             raise ScheduleError("来源说明最多 1000 字符。")
         boundary = max(now, plan.processed_through) if plan.processed_through is not None else now
@@ -265,30 +326,31 @@ class ScheduleStore:
         # renders its common three-occurrence preview.
         plan.schedule.preview(boundary)
 
-    def create(self, *, name: str, instructions: str, project_alias: str, app_id: str, chat_id: str, schedule: ScheduleRule, request_id: str, enabled: bool = True, source: str = "", now: float | None = None, request_payload: object | None = None, session_settings: SessionSettings = SessionSettings()) -> MutationResult:
+    def create(self, *, name: str, instructions: str, project_alias: str, app_id: str, chat_id: str, schedule: ScheduleRule, request_id: str, enabled: bool = True, source: str = "", now: float | None = None, request_payload: object | None = None, session_settings: SessionSettings | None = SessionSettings(), target_kind: str = "new_topic", target_binding_id: str | None = None) -> MutationResult:
         now = self._now(now)
-        if not isinstance(session_settings, SessionSettings):
+        if session_settings is not None and not isinstance(session_settings, SessionSettings):
             raise ScheduleError("计划需要有效的会话设置。")
-        payload = dict(name=name, instructions=instructions, project_alias=project_alias, app_id=app_id, chat_id=chat_id, schedule=schedule.to_dict(), enabled=enabled, source=source)
-        payload["session_settings"] = session_settings.to_dict()
+        payload = dict(name=name, instructions=instructions, project_alias=project_alias, app_id=app_id, chat_id=chat_id, schedule=schedule.to_dict(), enabled=enabled, source=source, target_kind=target_kind, target_binding_id=target_binding_id)
+        payload["session_settings"] = session_settings.to_dict() if session_settings is not None else None
         if request_payload is not None:
             payload = request_payload
         with self.owner._transaction():
             if result := self._request(request_id, "create", payload, now):
                 return result
-            plan = Plan(str(uuid.uuid4()), 1, name, instructions, project_alias, app_id, chat_id, schedule, enabled, schedule.next_after(now) if enabled else None, None, now, now, source, session_settings=session_settings)
+            plan = Plan(str(uuid.uuid4()), 1, name, instructions, project_alias, app_id, chat_id, schedule, enabled, schedule.next_after(now) if enabled else None, None, now, now, source, session_settings=session_settings, target_kind=target_kind, target_binding_id=target_binding_id)
             self._validate(plan, now)
             self._project(project_alias)
+            self.require_binding_target(plan, require_active=False)
             self._db.execute(
-                "INSERT INTO schedule_plans(plan_id,revision,name,instructions,project_alias,app_id,chat_id,schedule_json,enabled,next_due_at,processed_through,created_at,updated_at,source,deleted,session_settings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
-                (plan.id, 1, name, instructions, project_alias, app_id, chat_id, _json(schedule.to_dict()), int(enabled), plan.next_due_at, None, now, now, source, _json(session_settings.to_dict())),
+                "INSERT INTO schedule_plans(plan_id,revision,name,instructions,project_alias,app_id,chat_id,schedule_json,enabled,next_due_at,processed_through,created_at,updated_at,source,deleted,session_settings_json,target_kind,target_binding_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                (plan.id, 1, name, instructions, project_alias, app_id, chat_id, _json(schedule.to_dict()), int(enabled), plan.next_due_at, None, now, now, source, _json(session_settings.to_dict()) if session_settings is not None else None, target_kind, target_binding_id),
             )
             result = MutationResult(plan.id, 1)
             self._remember(request_id, "create", payload, result, now)
             return result
 
     def update(self, plan_id: str, *, expected_revision: int, request_id: str, changes: dict[str, Any], now: float | None = None, request_payload: object | None = None) -> MutationResult:
-        allowed = {"name", "instructions", "project_alias", "chat_id", "schedule", "enabled", "session_settings"}
+        allowed = {"name", "instructions", "project_alias", "chat_id", "schedule", "enabled", "session_settings", "target_kind", "target_binding_id"}
         if not isinstance(changes, dict) or not changes or set(changes) - allowed:
             raise ScheduleError("更新字段为空或包含不可修改字段。")
         changes = dict(changes)
@@ -305,9 +367,12 @@ class ScheduleStore:
             current = self.get(plan_id)
             if type(expected_revision) is not int or current.revision != expected_revision:
                 raise ScheduleRevisionConflict("计划已经修改，请刷新后重试。")
+            if any(field in changes and changes[field] != getattr(current, field)
+                   for field in ("target_kind", "target_binding_id")):
+                raise ScheduleConflict("计划的执行目标类型和原会话不可修改，请新建计划。")
             if "session_settings" in changes and isinstance(changes["session_settings"], dict):
                 try:
-                    changes["session_settings"] = current.session_settings.merge(changes["session_settings"])
+                    changes["session_settings"] = (current.session_settings or SessionSettings()).merge(changes["session_settings"])
                 except SessionSettingsError as error:
                     raise ScheduleError(str(error)) from error
             changed = replace(current, **changes, revision=current.revision + 1, updated_at=now)
@@ -321,6 +386,7 @@ class ScheduleStore:
                 changed, now,
                 require_future=enabling or (schedule_changed and isinstance(changed.schedule, ScheduleRule) and changed.schedule.kind == "once"),
             )
+            self.require_binding_target(changed, require_active=False)
             if changed.project_alias != current.project_alias or enabling:
                 self._project(changed.project_alias)
             else:
@@ -335,8 +401,8 @@ class ScheduleStore:
                 # that is still within the normal scheduler grace period.
                 due = current.next_due_at
             self._db.execute(
-                "UPDATE schedule_plans SET revision=?, name=?, instructions=?, project_alias=?, chat_id=?, schedule_json=?, enabled=?, next_due_at=?, updated_at=?, session_settings_json=? WHERE plan_id=?",
-                (changed.revision, changed.name, changed.instructions, changed.project_alias, changed.chat_id, _json(changed.schedule.to_dict()), int(changed.enabled), due, now, _json(changed.session_settings.to_dict()), plan_id),
+                "UPDATE schedule_plans SET revision=?, name=?, instructions=?, project_alias=?, chat_id=?, schedule_json=?, enabled=?, next_due_at=?, updated_at=?, session_settings_json=?, target_kind=?, target_binding_id=? WHERE plan_id=?",
+                (changed.revision, changed.name, changed.instructions, changed.project_alias, changed.chat_id, _json(changed.schedule.to_dict()), int(changed.enabled), due, now, _json(changed.session_settings.to_dict()) if changed.session_settings is not None else None, changed.target_kind, changed.target_binding_id, plan_id),
             )
             result = MutationResult(plan_id, changed.revision)
             self._remember(request_id, "update", payload, result, now)
@@ -372,13 +438,13 @@ class ScheduleStore:
                 raise ScheduleNotFound("定时计划不存在或已删除。")
             return _plan(row)
 
-    def list(self, *, app_id: str, chat_id: str | None = None, project_alias: str | None = None, enabled: bool | None = None, ended: bool | None = None, now: float | None = None, name: str | None = None, after: str | None = None, limit: int = 20) -> tuple[Plan, ...]:
+    def list(self, *, app_id: str, chat_id: str | None = None, project_alias: str | None = None, enabled: bool | None = None, ended: bool | None = None, now: float | None = None, name: str | None = None, after: str | None = None, limit: int = 20, target_kind: str | None = None, target_binding_id: str | None = None) -> tuple[Plan, ...]:
         if type(limit) is not int or not 1 <= limit <= 1001:
             raise ScheduleError("列表数量必须在 1 到 1001 之间。")
         if ended is not None and type(ended) is not bool:
             raise ScheduleError("ended 必须为 true、false 或 null。")
         where, values = ["app_id=?", "deleted=0"], [app_id]
-        for key, value in (("chat_id", chat_id), ("project_alias", project_alias), ("enabled", enabled)):
+        for key, value in (("chat_id", chat_id), ("project_alias", project_alias), ("enabled", enabled), ("target_kind", target_kind), ("target_binding_id", target_binding_id)):
             if value is not None:
                 where.append(f"{key}=?")
                 values.append(value)
@@ -437,7 +503,7 @@ class ScheduleStore:
         with self.owner._lock:
             rows = self._db.execute(
                 "SELECT * FROM schedule_runs WHERE project_alias=? "
-                "AND (barrier != 'released' OR error_code='publishing_unknown') "
+                "AND (barrier != 'released' OR (target_kind='new_topic' AND error_code='publishing_unknown')) "
                 "ORDER BY run_id", (alias,),
             ).fetchall()
             return tuple(_run(row) for row in rows)
@@ -458,16 +524,23 @@ class ScheduleStore:
             return None
         with self.owner._lock:
             row = self._db.execute(
-                "SELECT * FROM schedule_runs WHERE app_id=? AND chat_id=? AND barrier != 'released' AND phase IN ('claimed','publishing_topic','binding_ready','starting_turn') AND (topic_id=? OR root_message_id=?) LIMIT 1",
+                "SELECT * FROM schedule_runs WHERE app_id=? AND chat_id=? AND target_kind='new_topic' AND barrier != 'released' AND phase IN ('claimed','publishing_topic','binding_ready','starting_turn') AND (topic_id=? OR root_message_id=?) LIMIT 1",
                 (app_id, chat_id, topic_id, root_message_id),
             ).fetchone()
             return _run(row) if row else None
 
     def _insert_run(self, plan: Plan, due_at: float, now: float, *, reason: str | None = None, missed_from: float | None = None, missed_count: int = 0, trigger_source: str = "scheduled") -> Run:
         run_id = str(uuid.uuid4())
+        topic_id = None
+        if plan.target_binding_id is not None:
+            row = self._db.execute(
+                "SELECT s.topic_id FROM bindings b JOIN scopes s ON s.scope_key=b.scope_key WHERE b.binding_id=?",
+                (plan.target_binding_id,),
+            ).fetchone()
+            topic_id = row["topic_id"] if row else None
         self._db.execute(
-            "INSERT INTO schedule_runs(run_id,plan_id,plan_revision,due_at,project_alias,app_id,chat_id,phase,barrier,root_uuid,seed_uuid,error_code,created_at,updated_at,missed_from,missed_count,trigger_source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (run_id, plan.id, plan.revision, due_at, plan.project_alias, plan.app_id, plan.chat_id, "released" if reason else "claimed", "released" if reason else "held", str(uuid.uuid4()), str(uuid.uuid4()), reason, now, now, missed_from, missed_count, trigger_source),
+            "INSERT INTO schedule_runs(run_id,plan_id,plan_revision,due_at,project_alias,app_id,chat_id,phase,barrier,root_uuid,seed_uuid,error_code,created_at,updated_at,missed_from,missed_count,trigger_source,target_kind,binding_id,topic_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (run_id, plan.id, plan.revision, due_at, plan.project_alias, plan.app_id, plan.chat_id, "released" if reason else "claimed", "released" if reason else "held", str(uuid.uuid4()), str(uuid.uuid4()), reason, now, now, missed_from, missed_count, trigger_source, plan.target_kind, plan.target_binding_id, topic_id),
         )
         return self.get_run(run_id)
 
@@ -486,6 +559,7 @@ class ScheduleStore:
             if type(expected_revision) is not int or plan.revision != expected_revision:
                 raise ScheduleRevisionConflict("计划已经修改，请刷新后重试。")
             self._project(plan.project_alias)
+            self.require_binding_target(plan)
             pending = self.pending_for_plan(plan.id)
             if pending is not None:
                 if pending.barrier == "unknown":
@@ -527,6 +601,8 @@ class ScheduleStore:
                 pending = self._db.execute("SELECT barrier FROM schedule_runs WHERE plan_id=? AND barrier != 'released' LIMIT 1", (plan.id,)).fetchone()
                 if not project.enabled or project.deleted:
                     reason = "project_disabled"
+                elif target_error := self.binding_target_error(plan):
+                    reason = target_error
                 elif pending:
                     reason = "blocked_unknown" if pending["barrier"] == "unknown" else "skipped_busy"
             run = self._insert_run(plan, last, now, reason=reason, missed_from=due if reason == "missed" else None, missed_count=count if reason == "missed" else 0)
@@ -538,7 +614,7 @@ class ScheduleStore:
             return Claim(run, plan) if reason is None else None
 
     def _set_run(self, run_id: str, **changes: Any) -> Run:
-        allowed = {"phase", "barrier", "root_message_id", "topic_id", "origin_message_id", "binding_id", "initial_turn_id", "error_code", "delivery_state", "binding_removed"}
+        allowed = {"phase", "barrier", "root_message_id", "topic_id", "origin_message_id", "binding_id", "initial_turn_id", "error_code", "delivery_state", "binding_removed", "disposition"}
         if set(changes) - allowed:
             raise ScheduleError("不支持的执行阶段字段。")
         current = self.get_run(run_id)
@@ -559,7 +635,14 @@ class ScheduleStore:
                     raise ScheduleConflict(f"{field} 是不可替换的 exact identity。")
         if "binding_removed" in changes and (type(changes["binding_removed"]) is not bool or (current.binding_removed and not changes["binding_removed"])):
             raise ScheduleConflict("会话移除事实不可撤销。")
-        if changes.get("barrier") == "released":
+        if "disposition" in changes and (
+            current.target_kind != "binding" or changes["disposition"] not in {"started", "steered"}
+            or (current.disposition is not None and changes["disposition"] != current.disposition)
+        ):
+            raise ScheduleConflict("输入接收回执不可替换。")
+        if changes.get("barrier") == "released" and not (
+            current.target_kind == "binding" and (current.disposition or changes.get("disposition"))
+        ):
             changes["phase"] = "released"
         if changes:
             changes["updated_at"] = self._now(None)
@@ -582,22 +665,52 @@ class ScheduleStore:
             run = self.get_run(run_id)
             if (
                 run.phase != "claimed" or run.barrier != "held"
-                or any((run.root_message_id, run.topic_id, run.origin_message_id,
-                        run.binding_id, run.initial_turn_id))
+                or any((run.root_message_id, run.origin_message_id, run.initial_turn_id))
+                or (run.target_kind == "new_topic" and any((run.topic_id, run.binding_id)))
             ):
                 raise ScheduleConflict("该次定时执行已经进入发布交接。")
             return self._set_run(run_id, phase="publishing_topic")
+
+    def begin_binding_submission(self, run_id: str, binding_id: str) -> Run:
+        """Validate the frozen target immediately before ordinary input admission."""
+        with self.owner._transaction():
+            run = self.get_run(run_id)
+            if (run.target_kind != "binding" or run.binding_id != binding_id
+                or run.barrier != "held" or run.phase != "publishing_topic"
+                or not run.origin_message_id or run.initial_turn_id is not None):
+                raise ScheduleConflict("原会话输入交接不匹配。")
+            self._project(run.project_alias)
+            reason = self._binding_target_error(binding_id, run.project_alias, run.app_id, run.chat_id)
+            if reason is not None:
+                error = ScheduleConflict("定时任务的原会话已切换、归档或删除，本次未提交。")
+                error.code = reason
+                raise error
+            scope = self.owner.get_scope(self.owner.get(binding_id).scope_key)
+            if scope.topic_id != run.topic_id:
+                raise ScheduleConflict("定时任务的原会话位置不匹配。")
+            return self._set_run(run_id, phase="starting_turn")
+
+    def finish_binding_submission(self, run_id: str, turn_id: str, disposition: str) -> Run:
+        """Persist an exact accepted input receipt; future occurrences are independent."""
+        with self.owner._transaction():
+            run = self.get_run(run_id)
+            if run.target_kind != "binding" or run.phase not in {"starting_turn", "handed_off", "released"}:
+                raise ScheduleConflict("原会话输入接收回执不匹配。")
+            run = self._set_run(run_id, initial_turn_id=turn_id, disposition=disposition,
+                                phase="handed_off", barrier="released")
+            self._prune(run.plan_id)
+            return run
 
     def abandon_pending_deliveries(self) -> None:
         """Startup only: a previous process's final receipt cannot be resumed."""
         with self.owner._transaction():
             rows = self._db.execute(
                 "SELECT DISTINCT plan_id FROM schedule_runs "
-                "WHERE initial_turn_id IS NOT NULL AND delivery_state IS NULL"
+                "WHERE target_kind='new_topic' AND initial_turn_id IS NOT NULL AND delivery_state IS NULL"
             ).fetchall()
             self._db.execute(
                 "UPDATE schedule_runs SET delivery_state='unknown', updated_at=? "
-                "WHERE initial_turn_id IS NOT NULL AND delivery_state IS NULL",
+                "WHERE target_kind='new_topic' AND initial_turn_id IS NOT NULL AND delivery_state IS NULL",
                 (self._now(None),),
             )
             for row in rows:
@@ -614,10 +727,32 @@ class ScheduleStore:
             return run
 
     def _release_binding(self, binding_id: str, *, binding_removed: bool) -> None:
-        rows = self._db.execute("SELECT run_id,plan_id FROM schedule_runs WHERE binding_id=?", (binding_id,)).fetchall()
+        rows = self._db.execute("SELECT run_id,plan_id FROM schedule_runs WHERE binding_id=? AND (target_kind='new_topic' OR ?)", (binding_id, binding_removed)).fetchall()
         for row in rows:
             self._set_run(row["run_id"], barrier="released", binding_removed=binding_removed)
             self._prune(row["plan_id"])
+        if binding_removed:
+            self._tombstone("target_kind='binding' AND target_binding_id=?", (binding_id,), self._now(None))
+
+    def _resume_binding(self, binding_id: str) -> None:
+        """Within activation's transaction, discard due points from the inactive interval."""
+        now = self._now(None)
+        rows = self._db.execute(
+            "SELECT * FROM schedule_plans WHERE target_kind='binding' AND target_binding_id=? "
+            "AND deleted=0 AND enabled=1 AND next_due_at <= ?", (binding_id, now),
+        ).fetchall()
+        for row in rows:
+            plan = _plan(row)
+            assert plan.schedule is not None and plan.next_due_at is not None
+            last, count = plan.schedule.through(plan.next_due_at, now)
+            high = max(last, plan.processed_through) if plan.processed_through is not None else last
+            if count and (plan.processed_through is None or last > plan.processed_through):
+                self._insert_run(plan, last, now, reason="missed", missed_from=plan.next_due_at, missed_count=count)
+            self._db.execute(
+                "UPDATE schedule_plans SET processed_through=?, next_due_at=? WHERE plan_id=?",
+                (high, plan.schedule.next_after(max(now, high)), plan.id),
+            )
+            self._prune(plan.id)
 
     def release_binding(self, binding_id: str, *, binding_removed: bool = False) -> None:
         with self.owner._transaction():
@@ -626,11 +761,11 @@ class ScheduleStore:
     def _prune(self, plan_id: str) -> None:
         self._db.execute(
             "DELETE FROM schedule_runs WHERE plan_id=? AND barrier='released' "
-            "AND COALESCE(error_code, '') != 'publishing_unknown' "
-            "AND (initial_turn_id IS NULL OR delivery_state IS NOT NULL) "
+            "AND (target_kind='binding' OR COALESCE(error_code, '') != 'publishing_unknown') "
+            "AND (target_kind='binding' OR initial_turn_id IS NULL OR delivery_state IS NOT NULL) "
             "AND run_id NOT IN (SELECT run_id FROM schedule_runs WHERE plan_id=? "
-            "AND barrier='released' AND COALESCE(error_code, '') != 'publishing_unknown' "
-            "AND (initial_turn_id IS NULL OR delivery_state IS NOT NULL) "
+            "AND barrier='released' AND (target_kind='binding' OR COALESCE(error_code, '') != 'publishing_unknown') "
+            "AND (target_kind='binding' OR initial_turn_id IS NULL OR delivery_state IS NOT NULL) "
             "ORDER BY due_at DESC, run_id DESC LIMIT 100)",
             (plan_id, plan_id),
         )

@@ -32,7 +32,7 @@ from .schedules.store import (
 from .session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 PROJECT_DELETE_LIMIT = 1000
 
 
@@ -300,6 +300,8 @@ class BindingQuery:
     created_before: str | None = None
     project_aliases: tuple[str, ...] | None = None
     scope_kinds: tuple[ScopeKind, ...] | None = None
+    app_id: str | None = None
+    search: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -983,7 +985,8 @@ class BindingStore:
             if scheduled_run_id is not None:
                 run = self.schedules.get_run(scheduled_run_id)
                 if (
-                    run.barrier != "held" or run.phase != "publishing_topic"
+                    run.target_kind != "new_topic"
+                    or run.barrier != "held" or run.phase != "publishing_topic"
                     or run.binding_id is not None
                     or run.project_alias != project_alias
                     or scope.kind is not ScopeKind.TOPIC
@@ -1133,7 +1136,7 @@ class BindingStore:
         with self._lock:
             row = self._connection.execute(
                 "SELECT run_id FROM schedule_runs WHERE binding_id=? "
-                "AND phase IN ('binding_ready','starting_turn') AND barrier != 'released'",
+                "AND target_kind='new_topic' AND phase IN ('binding_ready','starting_turn') AND barrier != 'released'",
                 (binding_id,),
             ).fetchone()
             return row["run_id"] if row is not None else None
@@ -1147,7 +1150,7 @@ class BindingStore:
             if not self.get_project(run.project_alias).enabled:
                 raise ProjectDisabled(run.project_alias)
             if (
-                run.binding_id != binding_id or run.barrier != "held"
+                run.target_kind != "new_topic" or run.binding_id != binding_id or run.barrier != "held"
                 or run.phase != "binding_ready" or run.initial_turn_id is not None
                 or binding.native_thread_id is not None or not binding.active
                 or binding.project_alias != run.project_alias
@@ -1165,7 +1168,7 @@ class BindingStore:
     def mark_scheduled_turn_started(self, run_id: str, binding_id: str, turn_id: str) -> Run:
         with self._transaction():
             run = self.schedules.get_run(run_id)
-            if run.binding_id != binding_id or run.phase not in {"starting_turn", "handed_off", "released"}:
+            if run.target_kind != "new_topic" or run.binding_id != binding_id or run.phase not in {"starting_turn", "handed_off", "released"}:
                 raise ScheduleConflict("定时初轮交接不匹配。")
             return self.schedules._set_run(run_id, initial_turn_id=turn_id, phase="handed_off")
 
@@ -1173,6 +1176,7 @@ class BindingStore:
         with self._transaction():
             row = self._connection.execute(
                 "SELECT run_id FROM schedule_runs WHERE binding_id=? AND barrier != 'released' "
+                "AND target_kind='new_topic' "
                 "AND (initial_turn_id=? OR (initial_turn_id IS NULL AND phase='starting_turn'))",
                 (binding_id, turn_id),
             ).fetchone()
@@ -1433,7 +1437,7 @@ class BindingStore:
             owner = self._connection.execute(
                 """
                 SELECT b.scope_key, b.message_context_mode,
-                       s.kind AS scope_kind
+                       s.kind AS scope_kind, s.active_binding_id
                 FROM bindings b
                 JOIN scopes s ON s.scope_key = b.scope_key
                 WHERE b.binding_id = ?
@@ -1442,6 +1446,8 @@ class BindingStore:
             ).fetchone()
             if owner is None or owner["scope_key"] != scope_key:
                 raise BindingNotFound(binding_id)
+            if owner["active_binding_id"] != binding_id:
+                self.schedules._resume_binding(binding_id)
             mode = _mention_context_mode(owner["message_context_mode"])
             _validate_context_state(
                 scope_kind=ScopeKind(owner["scope_kind"]),
@@ -1812,7 +1818,7 @@ class BindingStore:
         ).fetchall()
         run_rows = self._connection.execute(
             "SELECT run_id FROM schedule_runs WHERE project_alias=? "
-            "AND (barrier != 'released' OR error_code='publishing_unknown') "
+            "AND (barrier != 'released' OR (target_kind='new_topic' AND error_code='publishing_unknown')) "
             "ORDER BY run_id LIMIT ?", (alias, limit + 1),
         ).fetchall()
         if len(plan_rows) > limit or len(run_rows) > limit:
@@ -2988,6 +2994,15 @@ def _binding_inventory_statement(
 ) -> tuple[str, list[object]]:
     clauses: list[str] = []
     parameters: list[object] = []
+    if query.app_id is not None:
+        _require_query_value("App ID", query.app_id)
+        clauses.append("s.app_id = ?")
+        parameters.append(query.app_id)
+    if query.search is not None:
+        _require_query_value("Binding search", query.search)
+        fields = ("b.binding_id", "b.project_alias", "s.chat_id", "s.topic_id")
+        clauses.append("(" + " OR ".join(f"instr(lower({field}), lower(?)) > 0" for field in fields) + ")")
+        parameters.extend(query.search for _ in fields)
     if query.project_alias is not None:
         _require_query_value("Project alias", query.project_alias)
         clauses.append("b.project_alias = ?")

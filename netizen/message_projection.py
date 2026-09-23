@@ -25,7 +25,7 @@ from .message_content import (
     project_message_content,
 )
 from .prompt_projection import (
-    CurrentMessageProjection,
+    MessageInputProjection,
     project_identity,
     render_current_message_json,
 )
@@ -511,7 +511,7 @@ def compose_message_context_prompt(
     supplemental_messages: Sequence[HistoricalMessageProjection] | None = None,
     supplemental_selection: SupplementalMessageSelection | None = None,
     quoted_message: HistoricalMessageProjection | None,
-    current: CurrentMessageProjection,
+    current: MessageInputProjection,
     supplemental_stats: SupplementalContextStats | None = None,
     max_supplemental_messages: int = _DEFAULT_SUPPLEMENTAL_MESSAGE_LIMIT,
     max_supplemental_text: int = _DEFAULT_SUPPLEMENTAL_TEXT_LIMIT,

@@ -2,10 +2,13 @@
 status: accepted
 date: 2026-09-14
 amends: 0046, 0047, 0048, 0061
-amended_by: 0068
+amended_by: 0068, 0070
 ---
 
 # 在任务结束时提及任务发起人
+
+2026-09-23 修订：[ADR 0070](0070-schedule-inputs-in-existing-bindings.md) 明确原会话
+定时输入启动新 Turn 时无结束提及；steer 保留被追加 Turn 的真实发起人和提及归属。
 
 2026-09-21 修订：[ADR 0068](0068-run-saved-scheduled-plans-manually.md) 撤销本文的
 v10 → v11 安装期迁移，服务与安装器只接受当前结构；下文迁移描述保留为历史决策。

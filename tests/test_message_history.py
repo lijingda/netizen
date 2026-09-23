@@ -171,6 +171,117 @@ class FeishuMessageHistoryReaderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.user_id_type, "open_id")
         self.assertTrue(request.with_sender_name)
 
+    async def test_topic_reply_anchor_reads_one_page_and_verifies_exact_message(self) -> None:
+        selected = _MetadataMessage(
+            "om_reply", 2_000, thread_id=self.topic.topic_id,
+            sender_type="bot", sender_name=None,
+        )
+        api = _FakeMessageApi(
+            {"om_reply": selected},
+            [_Response(items=[selected], has_more=True, page_token="unused-next-page")],
+        )
+
+        anchor = await FeishuMessageHistoryReader(_client(api)).resolve_topic_reply_anchor(
+            self.topic,
+        )
+
+        self.assertEqual(anchor, MessageContextAnchor("om_reply", 2_000))
+        self.assertEqual(len(api.list_requests), 1)
+        request = api.list_requests[0]
+        self.assertIsInstance(request, ListMessageRequest)
+        self.assertEqual(request.container_id_type, "thread")
+        self.assertEqual(request.container_id, self.topic.topic_id)
+        self.assertEqual(request.sort_type, "ByCreateTimeDesc")
+        self.assertEqual(request.page_size, 50)
+        self.assertIsNone(request.start_time)
+        self.assertIsNone(request.end_time)
+        self.assertIsNone(request.page_token)
+        self.assertEqual([request.message_id for request in api.get_requests], ["om_reply"])
+
+    async def test_topic_reply_anchor_skips_deleted_list_items_and_rejects_deleted_exact(self):
+        deleted = _MetadataMessage(
+            "om_deleted", 3_000, thread_id=self.topic.topic_id, deleted=True,
+        )
+        valid = _MetadataMessage("om_reply", 2_000, thread_id=self.topic.topic_id)
+        for case in ("skip", "all_deleted", "deleted_during_get"):
+            with self.subTest(case=case):
+                exact = _MetadataMessage(
+                    "om_reply", 2_000, thread_id=self.topic.topic_id,
+                    deleted=case == "deleted_during_get",
+                )
+                items = [deleted] if case == "all_deleted" else [deleted, valid]
+                api = _FakeMessageApi(
+                    {"om_reply": exact},
+                    [_Response(items=items, has_more=True, page_token="unused-next-page")],
+                )
+                reader = FeishuMessageHistoryReader(_client(api))
+                if case == "skip":
+                    self.assertEqual(
+                        await reader.resolve_topic_reply_anchor(self.topic),
+                        MessageContextAnchor("om_reply", 2_000),
+                    )
+                else:
+                    with self.assertRaises(MessageHistoryUnavailable):
+                        await reader.resolve_topic_reply_anchor(self.topic)
+                self.assertEqual(len(api.list_requests), 1)
+                self.assertEqual(
+                    [request.message_id for request in api.get_requests],
+                    [] if case == "all_deleted" else ["om_reply"],
+                )
+
+    async def test_topic_reply_anchor_requires_exact_chat_and_topic_in_list_and_get(self):
+        for source in ("list", "get"):
+            for wrong_scope in ({"chat_id": "oc_other"}, {"thread_id": "omt_other"}):
+                with self.subTest(source=source, wrong_scope=wrong_scope):
+                    listed = _MetadataMessage("om_reply", 2_000, thread_id=self.topic.topic_id)
+                    exact = _MetadataMessage("om_reply", 2_000, thread_id=self.topic.topic_id)
+                    invalid = listed if source == "list" else exact
+                    for key, value in wrong_scope.items():
+                        setattr(invalid, key, value)
+                    api = _FakeMessageApi(
+                        {"om_reply": exact}, [_Response(items=[listed], has_more=False)],
+                    )
+                    with self.assertRaises(MessageHistoryUnavailable):
+                        await FeishuMessageHistoryReader(_client(api)).resolve_topic_reply_anchor(
+                            self.topic,
+                        )
+                    self.assertEqual(len(api.get_requests), int(source == "get"))
+                    self.assertEqual(len(api.list_requests), 1)
+
+    async def test_topic_reply_anchor_rejects_corrupt_shapes_and_exact_identity(self):
+        for case in (
+            "missing_items", "bad_items", "missing_id", "bad_time",
+            "wrong_exact_id", "conflicting_exact_time",
+        ):
+            with self.subTest(case=case):
+                listed = _MetadataMessage("om_reply", 2_000, thread_id=self.topic.topic_id)
+                exact = _MetadataMessage("om_reply", 2_000, thread_id=self.topic.topic_id)
+                items = [listed]
+                if case == "missing_items":
+                    items = None
+                elif case == "bad_items":
+                    items = {"message_id": "om_reply"}
+                elif case == "missing_id":
+                    listed.message_id = ""
+                elif case == "bad_time":
+                    listed.create_time = True
+                elif case == "wrong_exact_id":
+                    exact.message_id = "om_other"
+                elif case == "conflicting_exact_time":
+                    exact.create_time = 2_001
+                api = _FakeMessageApi(
+                    {"om_reply": exact}, [_Response(items=items, has_more=False)],
+                )
+                with self.assertRaises(MessageHistoryContractError):
+                    await FeishuMessageHistoryReader(_client(api)).resolve_topic_reply_anchor(
+                        self.topic,
+                    )
+                self.assertEqual(len(api.list_requests), 1)
+                self.assertEqual(
+                    len(api.get_requests),
+                    int(case in {"wrong_exact_id", "conflicting_exact_time"}),
+                )
+
     async def test_group_window_is_exact_deduplicated_and_oldest_first(self) -> None:
         lower = MessageContextAnchor("om_lower", 1_000)
         api = _FakeMessageApi(

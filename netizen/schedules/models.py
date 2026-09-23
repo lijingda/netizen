@@ -291,7 +291,9 @@ class Plan:
     updated_at: float
     source: str
     deleted: bool = False
-    session_settings: SessionSettings = SessionSettings()
+    session_settings: SessionSettings | None = SessionSettings()
+    target_kind: str = "new_topic"
+    target_binding_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,6 +376,8 @@ class Run:
     missed_count: int = 0
     binding_removed: bool = False
     trigger_source: str = "scheduled"
+    target_kind: str = "new_topic"
+    disposition: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
