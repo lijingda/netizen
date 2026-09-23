@@ -87,6 +87,7 @@ from .cards import (
 from .channel.messages import _nonempty_field, _object_field, _send_result_error_code, public_chat_kind as _public_chat_kind
 from .channel.completion_mentions import send_completion_mention
 from .channel.input_preparation import MessageInputPreparer
+from .channel.question_inputs import CardAnswerConversation, CardAnswerOrigin, card_answer_sender
 from .channel.ports import ReplyChannel
 from .channel.topics import TopicPublishError, send_topic_message, validate_topic_message
 from .cards.scheduled import (
@@ -98,6 +99,14 @@ from .cards.scheduled import (
     schedule_query,
     schedule_retry_card,
 )
+from .cards.questions import (
+    decode_question_answer,
+    decode_question_context,
+    is_question_card_action,
+    render_question_card,
+    render_question_context_card,
+)
+from .user_questions import QuestionRequest
 from .channel.reactions import _REACTION_OPERATION_TIMEOUT_SECONDS, _ReactionController
 from .channel.reply_presenter import (
     GoalCardOrigin,
@@ -226,6 +235,7 @@ from .image_inputs import (
     normalized_message_type,
 )
 from .prompt_projection import (
+    CardAnswerProjection,
     MATERIAL_MESSAGE_TYPES,
     MATERIAL_REQUEST,
     PromptProjectionError,
@@ -661,6 +671,7 @@ class ChannelApplication:
         self._reactions = _ReactionController(channel)
         self._progress_cards = _ProgressCardController(channel, runtime)
         runtime.set_completion_handler(self.handle_completion)
+        runtime.set_question_handler(self.handle_questions)
 
     async def close(self) -> None:
         """Close Channel presentation resources; ServiceCore owns management."""
@@ -1063,7 +1074,7 @@ class ChannelApplication:
                 logger.exception("failed to send scheduled retry feedback")
 
     async def _reply_to_origin(self, message: Any, content: Any) -> object:
-        if isinstance(message, ScheduledBindingOrigin):
+        if isinstance(message, (ScheduledBindingOrigin, CardAnswerOrigin)):
             return await self._channel.reply(message, content, SendOpts(
                 receive_id_type="chat_id", reply_to=message.message_id,
                 reply_in_thread=message.conversation.thread_id is not None,
@@ -1221,7 +1232,7 @@ class ChannelApplication:
             await self._report_input_error(message, error)
 
     async def _report_input_error(self, message: Any, error: Exception) -> None:
-        """One user-visible failure policy for real and scheduled inputs."""
+        """One user-visible failure policy for message, card and scheduled inputs."""
         if isinstance(error, (InvalidInteraction, ScheduleError)):
             await self._reply(message, str(error))
         elif isinstance(error, UnknownProject):
@@ -1295,8 +1306,147 @@ class ChannelApplication:
                 "本提示不代表正在执行的任务已结束。",
             )
 
+    async def handle_questions(
+        self, binding_id: str, origin: object, request: QuestionRequest,
+    ) -> None:
+        """Project native questions without changing the producing Turn."""
+        binding = self._bindings.get(binding_id)
+        record = self._bindings.get_scope(binding.scope_key)
+        scope = FeishuScope(record.app_id, record.chat_id, record.kind, record.topic_id)
+        if scope.app_id != self._app_id:
+            return
+        reply_to = _message_id(origin)
+        if not reply_to and isinstance(origin, GoalCardOrigin):
+            reply_to = _message_id(origin.fallback_origin)
+        if not reply_to:
+            return
+        for index in range(len(request.questions)):
+            identity = json.dumps([scope.key, binding.id, request.item_id, index])
+            async with asyncio.timeout(15):
+                sent = await send_topic_message(
+                    self._channel, scope.chat_id,
+                    render_question_card(binding.id, request, index),
+                    SendOpts(
+                        receive_id_type="chat_id", reply_to=reply_to,
+                        reply_in_thread=scope.kind is ScopeKind.TOPIC,
+                        reply_target_gone="fail",
+                        uuid="question-" + hashlib.sha256(identity.encode()).hexdigest()[:32],
+                    ),
+                )
+            if sent.thread_id != scope.topic_id:
+                raise TopicPublishError("问题卡片的飞书位置未确认。", unknown=True)
+
+    async def _handle_question_card_action(self, event: Any) -> None:
+        """Keep the original Binding and enter ordinary input at click time."""
+        action = getattr(event, "action", None)
+        value, form = getattr(action, "value", None), getattr(action, "form_value", None)
+        message_id = str(getattr(event, "message_id", "") or "")
+        chat_id = str(getattr(event, "chat_id", "") or "")
+        context = None
+        scope = None
+        try:
+            context = decode_question_context(value)
+            answer = decode_question_answer(value, form)
+            context = answer
+            operator = getattr(event, "operator", None)
+            if not message_id or not chat_id or not getattr(operator, "open_id", None):
+                raise CardActionError("卡片回调缺少原消息或回答者身份，本条回答未执行。")
+            async with asyncio.timeout(30):
+                fetched = await self._channel.fetch_message(message_id)
+                data = _object_field(fetched, "data")
+                items = _object_field(data, "items")
+                if (
+                    _object_field(fetched, "code") != 0 or not isinstance(items, list)
+                    or len(items) != 1 or _nonempty_field(items[0], "message_id") != message_id
+                ):
+                    raise CardActionError("无法核验原问题卡片，本条回答未执行。")
+                chat_kind = _public_chat_kind(await self._channel.get_chat_info(chat_id))
+                scope = scope_from_fetched_card(
+                    app_id=self._app_id, callback_chat_id=chat_id,
+                    fetched_message=fetched, chat_type=chat_kind,
+                )
+                binding = self._bindings.get(context.binding_id)
+                if binding.scope_key != scope.key:
+                    raise CardActionError("问题卡片与原会话的位置不一致，本条回答未执行。")
+                current = self._bindings.active_binding(scope.key)
+                if current is None or current.id != binding.id:
+                    raise CardActionError(
+                        f"请先通过 /sessions 切回问题所属会话 {binding.short_id}，再提交回答。"
+                    )
+                admission = await self._runtime.capture_submission_admission(binding.id)
+                sender = await card_answer_sender(self._channel, chat_id, operator)
+                if chat_kind not in {"p2p", "group"}:
+                    raise CardActionError("无法确认原会话类型，本条回答未执行。")
+                # The old question card is not a current history upper. Publish
+                # a real answer anchor after capture, with actual operator
+                # attribution retained separately from this bot-authored card.
+                identity = json.dumps([message_id, sender["open_id"], value, form], sort_keys=True)
+                receipt = OutboundCard(card={
+                    "schema": "2.0", "config": {"width_mode": "default"},
+                    "header": {"title": {"tag": "plain_text", "content": "问题回答"}},
+                    "body": {"elements": [{"tag": "div", "text": {
+                        "tag": "plain_text", "content": (
+                            f"{sender['display_name']} 提交回答，正在处理。\n\n"
+                            + answer.answer[:3000] + ("…" if len(answer.answer) > 3000 else "")
+                        ),
+                    }}]},
+                })
+                sent = await send_topic_message(self._channel, chat_id, receipt, SendOpts(
+                    receive_id_type="chat_id", reply_to=message_id,
+                    reply_in_thread=scope.kind is ScopeKind.TOPIC, reply_target_gone="fail",
+                    uuid="answer-" + hashlib.sha256(identity.encode()).hexdigest()[:32],
+                ))
+                if (
+                    sent.thread_id != scope.topic_id or not sent.root_id or not sent.parent_id
+                    or (scope.kind is not ScopeKind.TOPIC and sent.parent_id != message_id)
+                ):
+                    raise TopicPublishError("回答消息不属于原会话，本条回答未执行。", unknown=True)
+                origin = CardAnswerOrigin(
+                    self._app_id, chat_id, sent.message_id,
+                    CardAnswerConversation(chat_id, chat_kind, scope.topic_id),
+                    message_id, binding.id,
+                )
+            projection = CardAnswerProjection(
+                message_id=sent.message_id, source_card_id=message_id,
+                binding_id=binding.id, sender=sender, request_text=answer.prompt,
+            )
+        except Exception as error:
+            # No ordinary input has been handed off yet. Refresh the form's
+            # transport nonce so an explicit retry can pass SDK dedup.
+            notice = f"回答未提交：{describe_error(error)}"
+            try:
+                card = (
+                    render_question_context_card(context, notice=notice)
+                    if context is not None else error_card(notice)
+                )
+                updated = await self._safe_update_card(message_id, card)
+            except Exception:
+                updated = False
+                logger.warning("question answer card could not be rendered")
+            if not updated and scope is not None:
+                target = _CardReplyTarget(message_id, message_id, chat_id, _CardReplyConversation(scope.topic_id))
+                try:
+                    async with asyncio.timeout(5):
+                        await self._reply(target, notice)
+                except Exception:
+                    logger.warning("question answer feedback unavailable")
+            return
+
+        try:
+            await self._consume_prompt(
+                binding=binding, scope=scope, message=origin, current=projection,
+                owner_id=sender["open_id"], skill_names=parse_skill_references(answer.answer), admission=admission,
+            )
+        except Exception as error:
+            await self._report_input_error(origin, error)
+
     async def handle_card_action(self, event: Any) -> None:
         action = getattr(event, "action", None)
+        if is_question_card_action(
+            getattr(action, "value", None), getattr(action, "form_value", None),
+        ):
+            await self._handle_question_card_action(event)
+            return
         if is_schedule_card_action(
             getattr(action, "value", None), getattr(action, "form_value", None),
         ):
@@ -2634,7 +2784,7 @@ class ChannelApplication:
             ]
             if submission.task_feedback.progress_card_enabled:
                 delivery_options = {}
-                if isinstance(origin, (ScheduledOrigin, ScheduledBindingOrigin)):
+                if isinstance(origin, (ScheduledOrigin, ScheduledBindingOrigin, CardAnswerOrigin)):
                     delivery_options = {
                         "reply": lambda card: self._reply_to_origin(origin, card),
                     }

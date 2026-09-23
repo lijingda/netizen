@@ -746,6 +746,7 @@ class _GoalActivityTap:
             or projection.turn_completed
             or projection.plan_updated
             or projection.event is not None
+            or projection.question is not None
         ):
             return notification
         try:

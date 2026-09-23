@@ -15,7 +15,7 @@ dependencies = [
   "mdformat==1.0.0",
   "mdformat-gfm==1.0.0",
   "mcp==2.2.0",
-  "openai-codex==0.155.1",
+  "openai-codex==0.156.1",
   "pydantic==2.13.4",
   "PyYAML==6.0.3",
   "qrcode==8.2",

@@ -156,6 +156,9 @@ class StubRuntime:
     def set_completion_handler(self, handler) -> None:
         self.completion = handler
 
+    def set_question_handler(self, handler) -> None:
+        self.questions = handler
+
     async def active_binding_changed(
         self,
         previous_binding_id: str | None,

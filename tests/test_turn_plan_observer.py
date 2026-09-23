@@ -135,6 +135,33 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
         self.assertEqual(second.steps[0].step, "ship")
         self.assertIs(second.steps[0].status, TurnPlanStepState.COMPLETED)
 
+    def test_question_projection_uses_the_same_non_consuming_cursor(self) -> None:
+        item = ThreadItem.model_validate({
+            "type": "agentMessage", "id": "question-one", "text": "Choose A or B",
+            "phase": "final_answer", "questions": [{"title": "Choose", "options": ["A", "B"]}],
+        })
+        self.router.route_notification(Notification(
+            method="item/completed", payload=ItemCompletedNotification(
+                item=item, threadId="thread-one", turnId="turn-one", completedAtMs=1,
+            ),
+        ))
+        with self.router._lock:
+            subscribers = dict(self.state.subscribers)
+            retained = tuple(self.state.events.items())
+        first = self.observer.observe(
+            thread_id="thread-one", turn_id="turn-one", after_cursor=0,
+        )
+        self.assertEqual([request.item_id for request in first.questions], ["question-one"])
+        self.assertEqual(first.events, ())
+        self.assertFalse(first.turn_completed)
+        second = self.observer.observe(
+            thread_id="thread-one", turn_id="turn-one", after_cursor=first.next_cursor,
+        )
+        self.assertEqual(second.questions, ())
+        with self.router._lock:
+            self.assertEqual(self.state.subscribers, subscribers)
+            self.assertEqual(tuple(self.state.events.items()), retained)
+
     def test_allowlisted_activity_is_sanitized_and_terminal_is_only_a_signal(
         self,
     ) -> None:
@@ -384,7 +411,7 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
         with patch.object(openai_codex, "__version__", "0.154.1"):
             with self.assertRaisesRegex(
                 TurnActivityObservationUnavailable,
-                "supports only openai-codex==0.155.1",
+                "supports only openai-codex==0.156.1",
             ):
                 PinnedTurnActivityObserver(self.codex)
         with patch.object(

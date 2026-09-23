@@ -29,6 +29,7 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 
 from .terminal_cleanup import _source_tree_fingerprint
+from .user_questions import QuestionRequest
 from .turn_activity import (
     TurnActivityEvent,
     TurnActivityProjectionUnavailable,
@@ -38,9 +39,9 @@ from .turn_activity import (
 )
 
 
-SUPPORTED_SDK_VERSION = "0.155.1"
+SUPPORTED_SDK_VERSION = "0.156.1"
 _PACKAGE_SOURCE_FINGERPRINT = (
-    "9db021b08bbcc75f18206d64ecf8a7d5ba63b380d91181718a3c9153ed4a053f"
+    "7d0a2267e45d39934c64d2c01bddde8b36eacb2d771dd6903a056c6abef8e94f"
 )
 _LOCK_TYPE = type(threading.RLock())
 
@@ -58,6 +59,7 @@ class TurnActivityObservation:
     events: tuple[TurnActivityEvent, ...] = ()
     turn_completed: bool = False
     retained_count: int = 0
+    questions: tuple[QuestionRequest, ...] = ()
 
     def __post_init__(self) -> None:
         if self.next_cursor < 0:
@@ -111,6 +113,7 @@ class PinnedTurnActivityObserver:
         latest_steps: tuple[TurnPlanStepSnapshot, ...] = ()
         latest_cursor: int | None = None
         events: list[TurnActivityEvent] = []
+        questions: list[QuestionRequest] = []
         turn_completed = False
         for item_cursor, item in enumerate(items, start=after_cursor + 1):
             if isinstance(item, BaseException):
@@ -134,6 +137,8 @@ class PinnedTurnActivityObserver:
                 latest_cursor = item_cursor
             if projection.event is not None:
                 events.append(projection.event)
+            if projection.question is not None:
+                questions.append(projection.question)
             turn_completed = turn_completed or projection.turn_completed
 
         return TurnActivityObservation(
@@ -144,6 +149,7 @@ class PinnedTurnActivityObserver:
             events=tuple(events),
             turn_completed=turn_completed,
             retained_count=retained_count,
+            questions=tuple(questions),
         )
 
     def _snapshot_events(

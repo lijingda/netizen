@@ -1,4 +1,4 @@
-"""Current Feishu and scheduled-input provenance in native Codex prompts."""
+"""Feishu message, card answer and scheduled-input provenance in Codex prompts."""
 
 from __future__ import annotations
 
@@ -102,7 +102,43 @@ class ScheduledInputProjection:
         }
 
 
-MessageInputProjection = CurrentMessageProjection | ScheduledInputProjection
+@dataclass(frozen=True, slots=True)
+class CardAnswerProjection:
+    """Explicit user input from a card, anchored to a separate feedback message."""
+
+    message_id: str
+    source_card_id: str
+    binding_id: str
+    sender: Mapping[str, Any]
+    request_text: str
+
+    def __post_init__(self) -> None:
+        if not self.message_id or not self.source_card_id or not self.binding_id:
+            raise ValueError("card answer requires exact message and Binding identities")
+        if not self.sender.get("open_id") or not self.sender.get("display_name"):
+            raise ValueError("card answer requires the real operator's attribution")
+        if not isinstance(self.request_text, str):
+            raise TypeError("card answer request_text must be a string")
+        object.__setattr__(self, "sender", MappingProxyType(dict(self.sender)))
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "kind": "feishu_question_answer",
+            "version": 1,
+            "execution_host": "netizen",
+            "message_id": self.message_id,
+            "source_card_id": self.source_card_id,
+            "binding_id": self.binding_id,
+            "sender": dict(self.sender),
+            "handling": (
+                "explicit card answer from sender; message_id is a bot-authored "
+                "feedback anchor, not the source of the user's answer. "
+                + ATTRIBUTION_HANDLING
+            ),
+        }
+
+
+MessageInputProjection = CurrentMessageProjection | ScheduledInputProjection | CardAnswerProjection
 
 
 def project_current_message(
@@ -240,6 +276,13 @@ def render_plain_prompt(current: MessageInputProjection) -> str:
             "<scheduled_plan>\n"
             f"{_metadata_json(current.metadata())}\n"
             "</scheduled_plan>"
+        )
+    if isinstance(current, CardAnswerProjection):
+        return (
+            f"{current.request_text}\n\n"
+            "<feishu_card_answer_context>\n"
+            f"{_metadata_json(current.metadata())}\n"
+            "</feishu_card_answer_context>"
         )
     context = {
         "kind": _PROMPT_KIND,

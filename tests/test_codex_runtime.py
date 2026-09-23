@@ -123,6 +123,7 @@ from netizen.turn_activity import (
     TurnActivityNotificationProjection,
     TurnActivityStatus,
 )
+from netizen.user_questions import QuestionRequest, UserQuestion
 
 
 @dataclass
@@ -895,6 +896,9 @@ class FakeTurnPlanObserver:
     def complete(self, *, thread_id: str, turn_id: str) -> None:
         self.events.setdefault(turn_id, []).append((thread_id, "terminal", None))
 
+    def append_question(self, *, thread_id: str, turn_id: str, request) -> None:
+        self.events.setdefault(turn_id, []).append((thread_id, "question", request))
+
     def observe(
         self,
         *,
@@ -909,6 +913,7 @@ class FakeTurnPlanObserver:
         latest_steps: tuple[TurnPlanStepSnapshot, ...] = ()
         latest_cursor: int | None = None
         activity_events: list[TurnActivityEvent] = []
+        questions = []
         turn_completed = False
         for cursor, (event_thread_id, kind, value) in enumerate(events, start=1):
             if cursor <= after_cursor or event_thread_id != thread_id:
@@ -918,6 +923,8 @@ class FakeTurnPlanObserver:
                 latest_cursor = cursor
             elif kind == "activity":
                 activity_events.append(value)
+            elif kind == "question":
+                questions.append(value)
             elif kind == "terminal":
                 turn_completed = True
         return TurnActivityObservation(
@@ -930,6 +937,7 @@ class FakeTurnPlanObserver:
             plan_cursor=latest_cursor,
             steps=latest_steps,
             events=tuple(activity_events),
+            questions=tuple(questions),
             turn_completed=turn_completed,
             retained_count=(
                 len(events)
@@ -5727,6 +5735,71 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(outcome, GoalOutcome)
         self.assertIsNone(outcome.activity)
 
+    async def test_goal_questions_use_unique_tap_with_progress_off_and_exact_turn_dedup(
+        self,
+    ) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        handler = AsyncMock()
+        self.runtime.set_question_handler(handler)
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding, cwd=self.cwd, objective="ask as needed",
+            owner_id="ou_user", origin=object(),
+        )
+        submission.release_receipt_attempt()
+        handle = control.handles[-1]
+        await asyncio.sleep(0)
+        first = QuestionRequest("same-item", (UserQuestion("Choose first", ("A", "B")),))
+        projection = TurnActivityNotificationProjection(
+            turn_id=handle.id, question=first,
+        )
+        handle.emit_activity(projection)
+        handle.emit_activity(projection)
+        handle.rollover("physical-next")
+        handle.emit_activity(TurnActivityNotificationProjection(
+            turn_id="physical-next", turn_started=True,
+        ))
+        # Late previous-Turn questions must not be attributed to the new Turn.
+        handle.emit_activity(TurnActivityNotificationProjection(
+            turn_id=handle.id, question=QuestionRequest("late-old", (UserQuestion("stale"),)),
+        ))
+        second = QuestionRequest("same-item", (UserQuestion("Choose next"),))
+        handle.emit_activity(TurnActivityNotificationProjection(
+            turn_id="physical-next", question=second,
+        ))
+        handle.finish(response="final")
+        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+
+        self.assertEqual(handle.wait_terminal_calls, 1)
+        self.assertEqual([call.args[2] for call in handler.await_args_list], [first, second])
+        self.assertEqual([call.args[0] for call in handler.await_args_list], [binding.id] * 2)
+        self.assertEqual(self.outcomes[-1].final_response, "final")
+        self.assertIsNone(self.outcomes[-1].activity)
+
+    async def test_goal_question_delivery_does_not_wait_for_initial_receipt(self) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        delivered = asyncio.Event()
+        handler = AsyncMock(side_effect=lambda *_: delivered.set())
+        self.runtime.set_question_handler(handler)
+        binding = self.binding()
+        submission = await self.runtime.start_goal(
+            binding=binding, cwd=self.cwd, objective="ask then archive",
+            owner_id="ou_user", origin=object(),
+        )
+        handle = control.handles[-1]
+        await asyncio.sleep(0)
+        handle.emit_activity(TurnActivityNotificationProjection(
+            turn_id=handle.id,
+            question=QuestionRequest("question-one", (UserQuestion("Choose"),)),
+        ))
+        await asyncio.wait_for(delivered.wait(), timeout=0.2)
+        handler.assert_awaited_once()
+        await self.runtime.archive_exact(binding.id)
+        submission.release_receipt_attempt()
+        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+
     async def test_goal_patch_children_use_only_final_physical_turn_without_progress(
         self,
     ) -> None:
@@ -7277,6 +7350,141 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stopping.revision, 4)
         self.assertEqual(stopping.state, ActiveState.STOPPING)
         await self.finish(self.codex.handles[0], first)
+
+    async def test_questions_deliver_while_running_with_progress_off_and_dedup_items(
+        self,
+    ) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        received = asyncio.Event()
+        requests = []
+
+        async def capture(binding_id, origin, request):
+            requests.append((binding_id, origin, request))
+            received.set()
+
+        self.runtime.set_question_handler(capture)
+        binding = self.binding()
+        submission = await self.submit(binding)
+        request = QuestionRequest("question-one", (UserQuestion("Choose", ("A", "B")),))
+        for _ in range(2):
+            observer.append_question(
+                thread_id=submission.thread_id, turn_id=submission.turn_id, request=request,
+            )
+        observer.append_question(
+            thread_id="other-thread", turn_id=submission.turn_id,
+            request=QuestionRequest("foreign", (UserQuestion("Wrong Thread"),)),
+        )
+        submission.release_receipt_attempt()
+        await asyncio.wait_for(received.wait(), timeout=0.2)
+
+        self.assertIsNotNone(self.runtime.active_turn(binding.id))
+        self.assertEqual(self.outcomes, [])
+        self.assertEqual(requests, [(binding.id, self.runtime._active[binding.id].origin, request)])
+        await self.finish(self.codex.handles[0], submission)
+        self.assertEqual(len(requests), 1)
+
+    async def test_terminal_questions_are_observed_before_unique_drain_without_progress(
+        self,
+    ) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        handler = AsyncMock()
+        self.runtime.set_question_handler(handler)
+        binding = self.binding()
+        submission = await self.submit(binding)
+        request = QuestionRequest("terminal-question", (UserQuestion("Follow up?"),))
+        original_read = self.runtime._read_terminal_result
+
+        async def terminal_read(active):
+            # Simulate an event retained while the terminal read is in flight.
+            result = await original_read(active)
+            observer.append_question(
+                thread_id=submission.thread_id, turn_id=submission.turn_id, request=request,
+            )
+            return result
+
+        with patch.object(self.runtime, "_read_terminal_result", side_effect=terminal_read):
+            await self.finish(self.codex.handles[0], submission)
+        handler.assert_awaited_once()
+        self.assertEqual(handler.await_args.args[2], request)
+        self.assertEqual(len(self.outcomes), 1)
+
+    async def test_question_send_uses_service_cleanup_after_turn_completion_and_archive(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        sending, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def handler(*_):
+            sending.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        self.runtime.set_question_handler(handler)
+        binding = self.binding()
+        submission = await self.submit(binding)
+        observer.append_question(
+            thread_id=submission.thread_id, turn_id=submission.turn_id,
+            request=QuestionRequest("question-one", (UserQuestion("Choose"),)),
+        )
+        self.runtime.turn_activity(binding.id, refresh_plan=True)
+        await asyncio.wait_for(sending.wait(), timeout=0.2)
+        consumer = self.runtime._active[binding.id].task
+        self.codex.handles[0].complete()
+        submission.release_receipt_attempt()
+        await asyncio.wait_for(asyncio.shield(consumer), timeout=0.2)
+        self.assertIsNone(self.runtime.active_turn(binding.id))
+        self.assertEqual(len(self.outcomes), 1)
+        self.assertIsNone(self.outcomes[0].error)
+        # A send already in flight may finish after archive. Its ownership is
+        # the service task set, independent of the released execution slot.
+        await self.runtime.archive_exact(binding.id)
+        self.assertFalse(cancelled.is_set())
+        await self.runtime.cancel_tasks()
+        self.assertTrue(cancelled.is_set())
+        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+
+    async def test_question_send_timeout_does_not_change_native_completion(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        sending = asyncio.Event()
+
+        async def handler(*_):
+            sending.set()
+            await asyncio.Event().wait()
+
+        self.runtime.set_question_handler(handler)
+        binding = self.binding()
+        submission = await self.submit(binding)
+        observer.append_question(
+            thread_id=submission.thread_id, turn_id=submission.turn_id,
+            request=QuestionRequest("question-one", (UserQuestion("Choose"),)),
+        )
+        with patch("netizen.codex_runtime._QUESTION_DELIVERY_TIMEOUT_SECONDS", 0.01):
+            with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+                self.runtime.turn_activity(binding.id, refresh_plan=True)
+                await asyncio.wait_for(sending.wait(), timeout=0.2)
+                await self.finish(self.codex.handles[0], submission)
+        self.assertEqual(len(self.outcomes), 1)
+        self.assertIsNone(self.outcomes[0].error)
+
+    async def test_question_delivery_failure_does_not_change_native_completion(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        self.runtime.set_question_handler(AsyncMock(side_effect=RuntimeError("card unavailable")))
+        binding = self.binding()
+        submission = await self.submit(binding)
+        observer.append_question(
+            thread_id=submission.thread_id, turn_id=submission.turn_id,
+            request=QuestionRequest("question-one", (UserQuestion("Choose"),)),
+        )
+        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+            await self.finish(self.codex.handles[0], submission)
+        self.assertEqual(len(self.outcomes), 1)
+        self.assertIsNone(self.outcomes[0].error)
+        self.assertIsNone(self.runtime.active_turn(binding.id))
 
     async def test_disabled_progress_adds_no_terminal_plan_observation(self) -> None:
         observer = FakeTurnPlanObserver()
