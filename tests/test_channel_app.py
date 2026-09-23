@@ -6280,7 +6280,11 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             if behavior["value"]["intent"] == "turn-file.page"
         )
         self.assertEqual(page_value["v"], 5)
-        self.assertEqual(len(page_value["files"]), 11)
+        self.assertEqual(len(page_value["files"]), 12)
+        self.assertEqual(page_value["files"][10], {
+            "path": str(self.project / "deleted.txt"), "label": "deleted.txt",
+            "a": 0, "d": 2, "deleted": True,
+        })
         self.assertEqual((page_value["a"], page_value["d"]), (10, 12))
         self.assertEqual(
             (page_value["files"][8]["a"], page_value["files"][8]["d"]),
@@ -6306,6 +6310,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("![earlier](img_uploaded_2)", paged)
         self.assertEqual(len(self.channel.upload_calls), 2)
         self.assertIn("goal-result-08.txt", paged)
+        self.assertIn("已删除", paged)
+        self.assertIn("deleted.txt", paged)
         self.assertIn("+10", paged)
         self.assertIn("-12", paged)
         self.assertIn("+1", paged)

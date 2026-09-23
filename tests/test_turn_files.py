@@ -56,7 +56,7 @@ class TurnFilesTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def test_extracts_completed_add_update_move_and_image_in_report_order(
+    def test_extracts_completed_changes_and_image_in_report_order(
         self,
     ) -> None:
         added = self.root / "reports" / "sales.xlsx"
@@ -91,12 +91,14 @@ class TurnFilesTest(unittest.TestCase):
 
         self.assertEqual(
             [item.display_path for item in files],
-            ["reports/sales.xlsx", "src/renamed.py", "output/trend.PNG"],
+            ["reports/sales.xlsx", "src/renamed.py", "gone.txt", "output/trend.PNG"],
         )
-        self.assertEqual([item.size for item in files], [5, 4, 13])
+        self.assertEqual([item.size for item in files], [5, 4, None, 13])
+        self.assertTrue(files[2].deleted)
+        self.assertFalse(files[2].available)
         self.assertEqual(
             [item.media_kind for item in files],
-            ["file", "file", "image"],
+            ["file", "file", None, "image"],
         )
 
     def test_only_supported_image_bytes_use_an_image_message(self) -> None:

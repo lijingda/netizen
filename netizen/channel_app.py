@@ -594,6 +594,7 @@ def _reply_files_module(
                 media_kind=item.media_kind,
                 additions=item.additions,
                 deletions=item.deletions,
+                deleted=item.deleted,
             )
             for item in files
         ),

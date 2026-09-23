@@ -31,6 +31,7 @@ class TurnFile:
     media_kind: Literal["image", "file"] | None
     additions: int | None = None
     deletions: int | None = None
+    deleted: bool = False
 
     @property
     def available(self) -> bool:
@@ -52,6 +53,7 @@ class TurnDiffFileStats:
     path: str
     additions: int | None = None
     deletions: int | None = None
+    deleted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +71,7 @@ class _ReportedTurnPath:
     value: str
     additions: int | None = None
     deletions: int | None = None
+    deleted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +102,7 @@ def turn_patch_summary(
     Unreadable children or patches omit the total, retaining known file counts.
     """
     counts: dict[str, tuple[int, int] | None] = {}
+    deleted_paths: set[str] = set()
     additions = deletions = 0
     complete = children.complete
     saw_counts = False
@@ -141,6 +145,8 @@ def turn_patch_summary(
                     continue
                 if not batch.thread_id:
                     root_paths.add(path)
+                if kind.type == "delete" and item.id not in conflicting:
+                    deleted_paths.add(path)
                 value = (
                     None if item.id in conflicting else _file_change_counts(
                         change.diff, kind.type, getattr(kind, "move_path", None),
@@ -180,7 +186,9 @@ def turn_patch_summary(
         additions if complete and saw_counts else None,
         deletions if complete and saw_counts else None,
         tuple(
-            TurnDiffFileStats(path, *(value or (None, None)))
+            TurnDiffFileStats(
+                path, *(value or (None, None)), deleted=path in deleted_paths,
+            )
             for path, value in counts.items()
         ),
     )
@@ -234,12 +242,12 @@ def extract_turn_files(
     diff_summary: TurnDiffSummary | None = None,
     home_directory: Path | None = None,
 ) -> tuple[TurnFile, ...]:
-    """Return current regular files named by supported completed Turn items.
+    """Return current files and missing files with successful deletion evidence.
 
     The public ``ThreadItem.root`` discriminator is the only SDK shape used.
     Project is the base for relative paths, not an authorization boundary.
-    Missing, deleted, and special files are omitted; this function never scans
-    any directory to infer extra outputs.
+    Other missing and special files are omitted; this function never scans any
+    directory to infer extra outputs.
     """
 
     try:
@@ -590,6 +598,7 @@ def _reported_paths(
             file_stats.path,
             file_stats.additions,
             file_stats.deletions,
+            deleted=file_stats.deleted,
         )
     for item in items:
         root = getattr(item, "root", item)
@@ -599,7 +608,7 @@ def _reported_paths(
             for change in getattr(root, "changes", ()):
                 kind = getattr(getattr(change, "kind", None), "root", None)
                 change_type = getattr(kind, "type", None)
-                if change_type not in {"add", "update"}:
+                if change_type not in {"add", "update", "delete"}:
                     continue
                 raw_path = getattr(change, "path", None)
                 if change_type == "update":
@@ -607,7 +616,9 @@ def _reported_paths(
                     if isinstance(move_path, str) and move_path:
                         raw_path = move_path
                 if isinstance(raw_path, str) and raw_path:
-                    yield _ReportedTurnPath("fileChange", raw_path)
+                    yield _ReportedTurnPath(
+                        "fileChange", raw_path, deleted=change_type == "delete",
+                    )
         elif item_type == "imageGeneration" and status == "completed":
             saved_path = _path_value(getattr(root, "saved_path", None))
             if saved_path is not None:
@@ -625,6 +636,22 @@ def _resolve_turn_file(
             candidate = root / candidate
         resolved = candidate.resolve(strict=True)
         metadata = resolved.stat()
+    except FileNotFoundError:
+        if not reported.deleted:
+            return None
+        try:
+            resolved = candidate.resolve()
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return TurnFile(
+            display_path=_display_path(reported, resolved, project_root=root, home=home),
+            resolved_path=resolved,
+            size=None,
+            media_kind=None,
+            additions=reported.additions,
+            deletions=reported.deletions,
+            deleted=True,
+        )
     except (OSError, RuntimeError, ValueError):
         return None
     if not stat.S_ISREG(metadata.st_mode):

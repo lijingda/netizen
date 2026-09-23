@@ -65,6 +65,28 @@ class TurnPatchStatisticsTest(unittest.TestCase):
                 ), self.root)
                 self.assertEqual((summary.additions, summary.deletions), (lines, lines))
 
+    def test_deleted_root_and_child_files_keep_their_counted_rows(self) -> None:
+        (self.root / "report.txt").write_text("result\n")
+        items = (
+            patch_item("add", "report.txt", "result\n", kind="add"),
+            patch_item("del", ".git/cache.json", "one\ntwo\n", kind="delete"),
+        )
+        children = TaskPatchChildren((TurnPatchBatch("child", "turn", self.root, (
+            patch_item("del", ".git/summary.md", "summary\n", kind="delete"),
+        )),))
+        summary = turn_patch_summary(items, self.root, children=children)
+        files = extract_turn_files(items, self.root, diff_summary=summary)
+
+        self.assertEqual((summary.additions, summary.deletions), (1, 3))
+        self.assertEqual([
+            (item.display_path, item.additions, item.deletions, item.deleted, item.available)
+            for item in files
+        ], [
+            ("report.txt", 1, 0, False, True),
+            (".git/cache.json", 0, 2, True, False),
+            (".git/summary.md", 0, 1, True, False),
+        ])
+
     def test_valid_hunks_headers_no_newline_marker_and_header_like_content(self) -> None:
         hunk = "@@ -1 +1 @@\n---old\n+++new\n\\ No newline at end of file\n"
         for body in (hunk, "--- a/file\n+++ b/file\n" + hunk, "diff --git a/file b/file\n--- a/file\n+++ b/file\n" + hunk):
