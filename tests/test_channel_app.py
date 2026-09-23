@@ -6282,7 +6282,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page_value["v"], 5)
         self.assertEqual(len(page_value["files"]), 12)
         self.assertEqual(page_value["files"][10], {
-            "path": str(self.project / "deleted.txt"), "label": "deleted.txt",
+            "path": str((self.project / "deleted.txt").resolve()), "label": "deleted.txt",
             "a": 0, "d": 2, "deleted": True,
         })
         self.assertEqual((page_value["a"], page_value["d"]), (10, 12))
