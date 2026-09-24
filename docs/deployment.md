@@ -564,6 +564,23 @@ SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和
 结果不会自动变成新版本、真实飞书链路或目标主机的验收结论。定时任务另见
 [专属兼容性记录](#定时任务兼容性与验收)。
 
+2026-09-24 Binding/Side 共用问答交互通过 `make check`（2,211 项测试、编译、依赖与全部
+SDK synthetic probes），最后补充的错误反馈分支另通过 13 项问答目标矩阵。原生 Side
+问答探针及一次限定复验均未收到结构化问题；复验在中断/清理前确认 exact Side Turn
+自然 completed、无执行错误，但原生 items 的 `questions` 数量为零。因此不能把这两次
+执行记为原生 Side 问答通过，也不能据此断言 SDK 不支持；该实时链路与真实飞书卡片
+展示/点击仍待验收。探针只使用隔离 cwd 和自建 Thread，已清理并归档自建 Parent，
+没有部署或重启服务。
+独立 Side Runtime smoke 已通过 SDK/CLI `0.156.1`：注册问题 handler 且关闭 Progress Card
+时先自然完成普通 Side Turn，再在后续 exact 命令运行中 close，确认原生 interrupted、
+cleanup/unsubscribe、closed 墓碑和 registry 清除；这证明修改后的观察/关闭链路可用，
+不替代上述结构化问答与飞书验收。
+
+2026-09-24 SDK/CLI `0.156.1` 的后台命名改用公开 `output_schema` 后，
+`probe_thread_naming.py --runtime-only` 通过：生产入口生成有效标题且无工具调用，
+临时 fork 在四种目录视图中均不可见、取消订阅完成，父会话历史与后续对话不受污染。
+本次局部验证未重跑独立中断场景；模型介绍折叠面板尚未做真实飞书客户端展示验收。
+
 2026-09-23 SDK/CLI `0.156.1` 已通过 `make check`、固定 SDK synthetic probes、
 `probe_python_sdk.py` 全部 17 个原生 phase、完整 Thread naming 与 Project delete
 两种场景。两个 pinned adapter 的完整 Python 源码指纹更新为

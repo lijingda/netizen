@@ -34,7 +34,7 @@ from netizen.bindings import BindingStore, BindingTurnSettings  # noqa: E402
 from netizen.codex_runtime import CodexRuntime, SubmitDisposition  # noqa: E402
 from netizen.domain import FeishuScope, ScopeKind  # noqa: E402
 from netizen.model_settings import ModelCatalog, STANDARD_SERVICE_TIER_ID  # noqa: E402
-from netizen.runtime.thread_naming import NAMING_PROMPT  # noqa: E402
+from netizen.runtime.thread_naming import NAMING_OUTPUT_SCHEMA, NAMING_PROMPT  # noqa: E402
 from netizen.terminal_cleanup import PinnedExperimentalTerminalCleanup  # noqa: E402
 from scripts.probe_python_sdk import (  # noqa: E402
     _prove_thread_absent_from_all_catalogs,
@@ -50,11 +50,22 @@ def _progress(message: str) -> None:
 def _validate_title(result: Any, marker: str) -> tuple[str, list[str]]:
     if _status_value(result) != "completed":
         raise AssertionError("naming Turn did not complete")
-    title = getattr(result, "final_response", None)
-    if not isinstance(title, str) or not title.strip():
-        raise AssertionError("naming Turn returned no title")
+    response = getattr(result, "final_response", None)
+    if not isinstance(response, str):
+        raise AssertionError("naming Turn returned no structured response")
+    try:
+        payload = json.loads(response)
+    except (ValueError, RecursionError) as error:
+        raise AssertionError("naming Turn returned invalid JSON") from error
+    if (
+        not isinstance(payload, dict)
+        or payload.keys() != {"title"}
+        or not isinstance(payload["title"], str)
+    ):
+        raise AssertionError("naming Turn returned an invalid title object")
+    title = payload["title"]
     title = title.strip()
-    if marker not in title or len(title.splitlines()) != 1:
+    if marker not in title or len(title) > 120 or len(title.splitlines()) != 1:
         raise AssertionError(
             "naming fork did not return a single-line title containing the "
             "unique project identifier from the parent's first user message"
@@ -148,7 +159,7 @@ async def _interrupted_fork(
     handle = consumer = None
     try:
         await _prove_ephemeral(codex, fork, parent_id)
-        handle = await fork.turn(NAMING_PROMPT)
+        handle = await fork.turn(NAMING_PROMPT, output_schema=NAMING_OUTPUT_SCHEMA)
         consumer = asyncio.create_task(handle.run())
     finally:
         released = await _release_fork(fork, handle, consumer, cleanup, subscription)

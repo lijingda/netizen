@@ -566,14 +566,17 @@ Activity observer 和 Reply Card Presenter 只接收上述生命周期驱动的 
 卡片更新、折叠、删除或超时不进入 close 的 admission、interrupt、cleanup、unsubscribe 或
 tombstone 关键路径。Side 不进入 `/sessions`，不增加 archive/delete 语义。
 
-ephemeral Side 明确不复用[普通 Turn 的持久 history recovery](#普通-turn-终态与观测恢复)。Progress Card 关闭时 consumer 立即
-调用公开 `AsyncTurnHandle.run()`；开启时按 ADR 0052 只读观察 exact Turn 的 retained
-events。任一次 Activity 刷新（包括 steer 前刷新）观察到 `turn/completed` 后，在该
+ephemeral Side 明确不复用[普通 Turn 的持久 history recovery](#普通-turn-终态与观测恢复)。Progress Card 关闭且没有问题 handler 时 consumer 立即
+调用公开 `AsyncTurnHandle.run()`；否则按 ADR 0052/0072 在同一循环只读观察 exact Turn 的 retained
+events，问题展示不受进度卡开关影响。任一次 Activity 刷新（包括 steer 前刷新）观察到 `turn/completed` 后，在该
 active Turn 保留 `completion_notification_seen`，即使其他刷新已推进 cursor，consumer
 仍进入同一个 `handle.run()` 唯一 drain。
 该标记只触发 drain，终态仍由 `run()` 返回值确认。observer 不可用、cursor 回退、
 allowlisted shape 异常或原始通知保留数（包括被投影忽略的 delta）达到固定 4096 high
-water 时立即回退直接 `run()`。该阈值只限制原始通知保留数，
+water 时立即回退直接 `run()`。进入 drain 或 Side close 后停止新观察，不等待已发起的问题卡发送。
+`run()` 返回后从结果 items 补投遗漏的问题，复用原有 Turn/item 去重，不重试已尝试发送的
+卡片；Side 已进入关闭或原 active 已替换时不补投。问题解析失败仅影响展示，不改变原生终态。
+该阈值只限制原始通知保留数，
 不提供 wall-clock timeout 或 notification payload 的 byte 上界。Side 不轮询 history、不增加
 release gate，也不让 observer 成为终态权威；这个边界不删除或放宽普通持久 Thread 的现有
 恢复和 release probe。
@@ -894,34 +897,41 @@ usage；不生成 elapsed time、百分比或 ETA，commentary/checklist 沿用�
 
 Progress Card 开启时，Runtime 的既有 consumer/poll loop 更新快照，Channel Presenter 每秒
 只读取 projection 并在 revision 变化时重绘；关闭时普通/Side Turn 不创建 Activity 卡，Goal
-不展示 Activity 模块。普通 Binding 与 Goal 仍使用同一 observer cursor / logical Tap 接收
-结构化问题；Side 关闭进度卡时不增加 observer polling，继续原有唯一消费流程。pinned observer
+不展示 Activity 模块。普通 Binding、Side 与 Goal 仍使用各自同一 observer cursor / logical Tap 接收
+结构化问题；Side 关闭进度卡且没有问题 handler 时不增加 observer polling，注册 handler 后
+复用同一观察循环提取问题，仍由原有唯一 consumer 确认终态。pinned observer
 保持版本/源码指纹、generated shape、exact `thread_id + turn_id`、非消费 event store 和完整 plan
 replacement 门禁；只接受 ADR 0052/0071 的事件白名单，未知事件忽略，白名单 shape 变化 fail
 closed，不能扩展成任意通知或私有 RPC gateway。
 
 ### 原生问题卡片与回答
 
-普通 Binding 及其中运行的 Goal 接收 completed `agentMessage` 的非空 `questions`，
+普通 Binding、其中运行的 Goal 与 Side 接收 completed `agentMessage` 的非空 `questions`，
 与 `delivery`、`phase` 无关；问题自身的 `final_answer` 不改变原生终态判断。复用上一节
-的唯一观察路径，按 exact 物理 Turn + item 去重，终态 drain 前读取保留的问题。题目和
+的唯一观察路径，按 exact 物理 Turn + item 去重，终态 drain 前读取保留的问题；Side 另从
+SDK drain 结果补投未尝试展示的问题，防止观察降级时遗漏，不增加状态或失败重试。题目和
 选项进入独立的自包含卡片，保留完整文本，不进入 Activity 的限长摘要。每题一张卡，
 建议和“自行填写”是互斥选项，只有选中“自行填写”才读取文本框。卡片发送是有界 best
 effort，不等待初始任务回执，由服务统一清理；不按问题或执行维护发送生命周期，已发起
 的卡片可能在归档/删除后才到达。发送不影响原生执行，不增加 pending/answered/expired
-状态、第二消费者或数据库记录。Side 不属于这条
-以 current Binding 为准的卡片输入路径。
+状态、第二消费者或数据库记录。问题解析、卡片、回答编码、实际回答者和回执共用实现，
+只有目标解析、admission 与提交入口区分 Binding/Side。
 
-卡片保存原 Binding 与原生问题 identity。提交时核验原卡片 App/chat/topic，确认 Binding
-属于该 Scope 且仍为 current，再捕获普通 admission。若已经切换，只提示切回原会话。
+卡片保存带类型的原回答目标与原生问题 identity；新卡片使用 v2 target，旧 v1 Binding
+卡片仍可解码，重绘升级格式但不改变归属。提交时核验原卡片 App/chat/topic 与目标位置。
+Binding 须仍为原 Scope 的 current，再捕获普通 admission；若已经切换，只提示切回原会话。
+Side 使用原 Side ID 的 open route 与独立 Runtime admission，不检查 Parent 的 current、
+归档或存在性；关闭、过期或缺少 Runtime 时拒绝，不转投 Parent 或创建 Binding。
 原提问 Turn 已结束或题目较旧本身不使卡片失效。运行中按捕获的 exact 当前 Turn steer，
 空闲则开始后续 Turn；准备期间的 Binding 切换、Turn 结束、Goal 换轮等竞争继续明确拒绝，
 不自动改投。归档、删除或不可用继续遵守现有准入。
 
 回调不是飞书入站消息。`CardAnswerProjection` 保留实际点击者身份，把原问题卡与新发送的
 机器人回答回执分开；回执作为反馈锚点以及 catch-up 的 exact upper anchor。锚点或回答者
-无法核验时不提交。随后显式传原 Binding 和 admission 进入共享 `_consume_prompt()`，复用
-准备、上下文边界 CAS、公开 SDK start/steer、错误和反馈。只有答案中用户实际提交的显式
+无法核验时不提交。随后显式传原目标和 admission 进入对应的共享输入入口：Binding 的
+`_consume_prompt()` 或 Side 的 `_consume_side_prompt()`；复用各自消息的准备、SDK
+start/steer、错误和反馈。只有 Binding 使用 catch-up 与上下文边界 CAS，Side 不增加
+补充历史，仍沿用创建时冻结的配置。只有答案中用户实际提交的显式
 Skill 引用参与解析，模型生成的题目和 item ID 不激活 Skill，也不解析为 slash control。
 
 回答按 Codex `0.156.1` 的稳定 question item identity 与
@@ -933,7 +943,8 @@ nonce 沿用 transport-only 解析。交接后的错误直接复用普通消息�
 有界去重，修改回答是新的显式普通输入；需重发时按聊天反馈在原会话发送，不自动重试。
 旧 `item/tool/requestUserInput` 保持 SDK 原处理。
 完整边界、原生源码依据与兼容门禁见
-[ADR 0071](adr/0071-answer-native-questions-through-binding-input.md)。
+[ADR 0071](adr/0071-answer-native-questions-through-binding-input.md) 与
+[ADR 0072](adr/0072-share-question-interaction-across-binding-and-side.md)。
 
 ### 回复卡片呈现
 
@@ -1677,14 +1688,18 @@ completed 只更新一个 identity-free 行，并把 `startedAtMs` 替换为 `co
 
 若 Binding 有配置，三项通过 live 模型目录重新解析并标记为“Netizen 会话配置”；目录暂
 不可用时回退显示已保存的精确 ID，不让只读状态查询整体失败；目录可用但选项已下线时明确
-标记配置失效并引导 `/config`。若没有配置，三项统一显示“继承 Codex”。`thread/read` 不返回
-这三项有效值，
-这些文案只表达 Netizen 后续新 Turn 的客户端意图，不把模型目录默认值或本地记录伪装成
+标记配置失效并引导 `/config`。若没有配置，三项统一显示“继承 Codex”。`thread/read` 虽可返回
+已有 Thread 的 Model/Effort，但不提供完整三项配置，也不等于所选 Project 下新会话的默认配置；
+当前公开高层 SDK 没有配置读取入口。这些文案只表达 Netizen 后续新 Turn 的客户端意图，不把模型目录默认值或本地记录伪装成
 原生 Thread 实际值，也不新增 Codex-owned 配置副本。
 
 模型、Effort 与加速 Service Tier 不在代码中枚举。卡片可以展示不同模型 Effort/Tier
 的并集，但提交必须用新一轮 live catalog 对所选模型重新验证；不兼容或已过期组合
-明确失败。固定高层 `models()` 没有 cursor 参数；若响应带非空 `next_cursor`，目录
+明确失败。`/new` 和 `/config` 另附可折叠的模型介绍：只展示本次目录返回的简介、输入能力、
+迁移建议和可选退役时间，不随下拉选择发起回调，不改预选、保存或模型校验逻辑，也不自动迁移。
+目录文案按有界纯文本呈现，不能形成飞书 mention 或交互节点；容量不足时明确省略部分介绍，
+不删模型选项。固定 Channel SDK 不可靠转发独立 select 的 option 和表单按钮名，因此不增加
+同表单“查看介绍”提交按钮。固定高层 `models()` 没有 cursor 参数；若响应带非空 `next_cursor`，目录
 不完整且无法公开翻页，必须整体拒绝而不是把第一页伪装成完整选项。`default` 是 App
 Server 显式回到 Standard 服务层的协议值，其余 Speed
 完全来自模型目录。Fast 仍是同一模型的 Service Tier，不能与独立 Codex Spark Model

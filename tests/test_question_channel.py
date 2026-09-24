@@ -16,7 +16,7 @@ from netizen.domain import FeishuScope, MentionContextMode, MessageContextAnchor
 from netizen.message_history import MessageHistoryStats, MessageHistoryWindow
 from netizen.runtime.contracts import ContextBoundaryCommitFailed, SteerRace, Submission, SubmitDisposition, TurnStartFailed
 from netizen.sdk_gap_adapter import GoalControlError
-from netizen.user_questions import QuestionRequest, UserQuestion
+from netizen.user_questions import BindingQuestionTarget, QuestionRequest, UserQuestion
 from tests.support.channel_cards import callback, elements, form_values
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
@@ -47,7 +47,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
 
     def event(self, *, card=None, text="Use the smaller change", scope=None):
         scope = scope or self.scope
-        card = card or render_question_card(self.binding.id, self.request, 0)
+        card = card or render_question_card(BindingQuestionTarget(self.binding.id), self.request, 0)
         form = form_values(card)
         if text is not None:
             field = elements(card.card, "input")[0]["name"]
@@ -243,7 +243,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
             sent_result("om_q1", chat_id=self.scope.chat_id),
             sent_result("om_q2", chat_id=self.scope.chat_id),
         ])
-        await self.app.handle_questions(self.binding.id, FakeMessage("go", message_id="om_start"), self.request)
+        await self.app.handle_questions(BindingQuestionTarget(self.binding.id), FakeMessage("go", message_id="om_start"), self.request)
         self.assertEqual(len(self.channel.send_calls), 2)
         self.assertEqual(self.runtime.submit_calls, [])
         self.assertNotEqual(self.channel.send_calls[0][2].uuid, self.channel.send_calls[1][2].uuid)
@@ -254,7 +254,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
             None, self.scope, self.binding.id, self.binding.short_id, "test",
             fallback_origin=FakeMessage("/goal finish", message_id="om_goal_input"),
         )
-        await self.app.handle_questions(self.binding.id, origin, QuestionRequest("question", (UserQuestion("Which one?"),)))
+        await self.app.handle_questions(BindingQuestionTarget(self.binding.id), origin, QuestionRequest("question", (UserQuestion("Which one?"),)))
         self.assertEqual(self.channel.send_calls[0][2].reply_to, "om_goal_input")
 
     async def test_sdk_redelivery_is_deduplicated_and_rejected_card_can_retry(self):

@@ -123,7 +123,12 @@ from netizen.turn_activity import (
     TurnActivityNotificationProjection,
     TurnActivityStatus,
 )
-from netizen.user_questions import QuestionRequest, UserQuestion
+from netizen.user_questions import (
+    BindingQuestionTarget,
+    QuestionRequest,
+    SideQuestionTarget,
+    UserQuestion,
+)
 
 
 @dataclass
@@ -298,6 +303,21 @@ def completed_file_change(item_id: str) -> ThreadItem:
                     "diff": "added line\n",
                     "kind": {"type": "add"},
                 }
+            ],
+        }
+    )
+
+
+def completed_question(request: QuestionRequest) -> ThreadItem:
+    return ThreadItem.model_validate(
+        {
+            "type": "agentMessage",
+            "id": request.item_id,
+            "text": "Choose before proceeding",
+            "phase": "final_answer",
+            "questions": [
+                {"title": question.title, "options": list(question.options)}
+                for question in request.questions
             ],
         }
     )
@@ -995,6 +1015,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self,
         *,
         task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
+        native_thread_id: str = "native-parent",
     ):
         binding = self.store.create_binding(
             scope=self.scope,
@@ -1002,7 +1023,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             creator_id="ou_owner",
             task_feedback=task_feedback,
         )
-        self.store.assign_native_thread_id(binding.id, "native-parent")
+        self.store.assign_native_thread_id(binding.id, native_thread_id)
         return self.store.get(binding.id)
 
     async def open_side(self):
@@ -1070,6 +1091,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         submission,
         *,
         response: str = "done",
+        items: tuple[ThreadItem, ...] = (),
     ) -> None:
         handle = next(
             handle
@@ -1077,6 +1099,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             if handle.id == submission.turn_id
         )
         handle.complete(response=response)
+        handle.record.items[:0] = items
         observer = self.runtime._turn_plan_observer
         if isinstance(observer, FakeTurnPlanObserver):
             observer.complete(thread_id=handle.thread_id, turn_id=handle.id)
@@ -1424,7 +1447,9 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.side_snapshot(record.id).state,
             SideSessionState.CLOSING,
         )
-        self.assertEqual(handle.run_calls, 0)
+        # Closing stops display observation and waits on the sole SDK drain;
+        # entering that drain is not evidence that the Turn has terminated.
+        self.assertEqual(handle.run_calls, 1)
 
         handle.complete(status="interrupted")
         observer.complete(
@@ -2158,6 +2183,277 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(outcome.task_feedback, BindingTaskFeedback())
         self.assertIsNone(outcome.activity)
+
+    async def test_side_questions_share_observer_with_or_without_progress(self) -> None:
+        for progress_enabled in (False, True):
+            with self.subTest(progress_enabled=progress_enabled):
+                observer = FakeTurnPlanObserver()
+                self.runtime._turn_plan_observer = observer
+                received = asyncio.Event()
+                handler = AsyncMock(side_effect=lambda *_: received.set())
+                self.runtime.set_question_handler(handler)
+                binding = self.materialized_binding(
+                    task_feedback=BindingTaskFeedback(
+                        progress_card_enabled=progress_enabled,
+                    ),
+                    native_thread_id=f"native-parent-{progress_enabled}",
+                )
+                _, record, _ = await self.open_side_for_binding(binding)
+                origin = object()
+                request = QuestionRequest("same-item", (UserQuestion("Choose", ("A", "B")),))
+                for turn_number in range(2):
+                    received.clear()
+                    started = await self.runtime.submit_side(
+                        side_id=record.id,
+                        input="ask as needed",
+                        owner_id="ou_owner",
+                        origin=origin,
+                    )
+                    handle = self.codex.handles[-1]
+                    for _ in range(2):
+                        observer.append_question(
+                            thread_id=started.thread_id, turn_id=started.turn_id,
+                            request=request,
+                        )
+                    observer.append_question(
+                        thread_id="another-thread", turn_id=started.turn_id,
+                        request=QuestionRequest("foreign-thread", (UserQuestion("Wrong Thread"),)),
+                    )
+                    observer.append_question(
+                        thread_id=started.thread_id, turn_id="another-turn",
+                        request=QuestionRequest("foreign-turn", (UserQuestion("Wrong Turn"),)),
+                    )
+                    # Question sends do not wait for the initial task receipt.
+                    await asyncio.wait_for(received.wait(), timeout=0.2)
+                    self.assertEqual(handle.run_calls, 0)
+                    self.assertEqual(handler.await_count, turn_number + 1)
+                    self.assertEqual(
+                        handler.await_args.args,
+                        (SideQuestionTarget(record.id), origin, request),
+                    )
+                    await self.finish_side_turn(started, items=(completed_question(request),))
+                    self.assertEqual(handle.run_calls, 1)
+                    self.assertEqual(handle.stream_calls, 0)
+                    self.assertEqual(handler.await_count, turn_number + 1)
+                    self.assertEqual(
+                        self.outcomes[-1].activity is not None, progress_enabled,
+                    )
+                self.assertTrue(all(
+                    thread_id == started.thread_id
+                    for thread_id, _, _ in observer.calls
+                ))
+
+    async def test_side_terminal_questions_precede_the_unique_authoritative_drain(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        received = asyncio.Event()
+        handler = AsyncMock(side_effect=lambda *_: received.set())
+        self.runtime.set_question_handler(handler)
+        _, record, _ = await self.open_side()
+        started = await self.runtime.submit_side(
+            side_id=record.id, input="work", owner_id="ou_owner", origin=object(),
+        )
+        started.release_receipt_attempt()
+        handle = self.codex.handles[-1]
+        request = QuestionRequest("terminal-question", (UserQuestion("Next step?"),))
+        observer.append_question(
+            thread_id=started.thread_id, turn_id=started.turn_id, request=request,
+        )
+        observer.complete(thread_id=started.thread_id, turn_id=started.turn_id)
+        await asyncio.wait_for(received.wait(), timeout=0.2)
+
+        self.assertEqual(handle.run_calls, 1)
+        self.assertEqual(self.outcomes, [])
+        self.assertFalse(self.runtime._sides[record.id].active.terminal_observed)
+        # The observer is no longer a reader once the unique drain is running.
+        calls_before = list(observer.calls)
+        observer.append_question(
+            thread_id=started.thread_id, turn_id=started.turn_id,
+            request=QuestionRequest("late-question", (UserQuestion("Too late"),)),
+        )
+        self.runtime.side_turn_activity(record.id, refresh_plan=True)
+        self.assertEqual(observer.calls, calls_before)
+
+        handle.complete(response="authoritative result")
+        handle.record.items.insert(0, completed_question(request))
+        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        handler.assert_awaited_once()
+        self.assertEqual(handler.await_args.args[2], request)
+        self.assertEqual(handle.run_calls, 1)
+        self.assertEqual(self.outcomes[0].result.final_response, "authoritative result")
+
+    async def test_side_question_observer_fallback_keeps_one_consumer_without_progress(
+        self,
+    ) -> None:
+        for mode in ("unavailable", "failure", "high-water"):
+            with self.subTest(mode=mode):
+                observer = FakeTurnPlanObserver()
+                if mode == "failure":
+                    observer.error = RuntimeError("observer unavailable")
+                elif mode == "high-water":
+                    observer.retained_count_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
+                    observer.next_cursor_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
+                self.runtime._turn_plan_observer = (
+                    None if mode == "unavailable" else observer
+                )
+                handler = AsyncMock()
+                self.runtime.set_question_handler(handler)
+                binding = self.materialized_binding(
+                    native_thread_id=f"native-parent-{mode}",
+                )
+                _, record, _ = await self.open_side_for_binding(binding)
+                origin = object()
+                started = await self.runtime.submit_side(
+                    side_id=record.id, input="work", owner_id="ou_owner", origin=origin,
+                )
+                handle = self.codex.handles[-1]
+                retained = QuestionRequest("retained-question", (UserQuestion("Choose"),))
+                late = QuestionRequest("late-question", (UserQuestion("Next step?", ("A", "B")),))
+                if mode == "high-water":
+                    observer.append_question(
+                        thread_id=started.thread_id, turn_id=started.turn_id,
+                        request=retained,
+                    )
+                if mode == "unavailable":
+                    await asyncio.sleep(0)
+                else:
+                    with self.assertLogs("netizen.codex_runtime", level="WARNING") as logs:
+                        await asyncio.sleep(0)
+                    expected_log = "fixed high water" if mode == "high-water" else "observation unavailable"
+                    self.assertTrue(any(expected_log in line for line in logs.output))
+                self.assertEqual(handle.run_calls, 1)
+                self.assertFalse(self.runtime._sides[record.id].active.activity_observation_enabled)
+                observer.append_question(
+                    thread_id=started.thread_id, turn_id=started.turn_id,
+                    request=late,
+                )
+                calls_before = list(observer.calls)
+                self.runtime.side_turn_activity(record.id, refresh_plan=True)
+                self.assertEqual(observer.calls, calls_before)
+                expected = [retained, late] if mode == "high-water" else [late]
+                await self.finish_side_turn(
+                    started,
+                    items=tuple(completed_question(request) for request in (*expected, late)),
+                )
+                self.assertEqual(handle.run_calls, 1)
+                self.assertEqual(handle.stream_calls, 0)
+                self.assertEqual(
+                    [call.args for call in handler.await_args_list],
+                    [(SideQuestionTarget(record.id), origin, request) for request in expected],
+                )
+                self.assertIsNone(self.outcomes[-1].error)
+                self.assertEqual(self.runtime.side_snapshot(record.id).state, SideSessionState.OPEN)
+
+    async def test_side_result_question_projection_failure_is_display_only(self) -> None:
+        handler = AsyncMock()
+        self.runtime.set_question_handler(handler)
+        _, record, _ = await self.open_side()
+        origin = object()
+        started = await self.runtime.submit_side(
+            side_id=record.id, input="work", owner_id="ou_owner", origin=origin,
+        )
+        malformed = completed_question(QuestionRequest("bad-question", (UserQuestion("Choose"),)))
+        malformed.root.questions[0].title = " "
+        request = QuestionRequest("valid-question", (UserQuestion("Continue?"),))
+
+        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+            await self.finish_side_turn(started, items=(malformed, completed_question(request)))
+
+        handler.assert_awaited_once_with(SideQuestionTarget(record.id), origin, request)
+        self.assertIsNone(self.outcomes[-1].error)
+        self.assertEqual(self.outcomes[-1].result.status.value, "completed")
+        self.assertEqual(self.runtime.side_snapshot(record.id).state, SideSessionState.OPEN)
+        following = await self.runtime.submit_side(
+            side_id=record.id, input="continue", owner_id="ou_owner", origin=object(),
+        )
+        await self.finish_side_turn(following)
+
+    async def test_side_question_send_failure_preserves_stop_and_following_turn(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        handler = AsyncMock(side_effect=RuntimeError("card unavailable"))
+        self.runtime.set_question_handler(handler)
+        _, record, _ = await self.open_side()
+        started = await self.runtime.submit_side(
+            side_id=record.id, input="work", owner_id="ou_owner", origin=object(),
+        )
+        started.release_receipt_attempt()
+        handle = self.codex.handles[-1]
+        request = QuestionRequest("question-one", (UserQuestion("Choose"),))
+        handle.record.items.append(completed_question(request))
+        observer.append_question(
+            thread_id=started.thread_id, turn_id=started.turn_id, request=request,
+        )
+        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+            self.assertEqual(
+                await self.runtime.stop_side(record.id), StopDisposition.REQUESTED,
+            )
+            observer.complete(thread_id=started.thread_id, turn_id=started.turn_id)
+            self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertEqual(handle.run_calls, 1)
+        self.assertEqual(self.outcomes[-1].result.status.value, "interrupted")
+        self.assertIsNone(self.outcomes[-1].error)
+        self.assertEqual(self.runtime.side_snapshot(record.id).state, SideSessionState.OPEN)
+        handler.assert_awaited_once()
+
+        following = await self.runtime.submit_side(
+            side_id=record.id, input="continue", owner_id="ou_owner", origin=object(),
+        )
+        self.assertEqual(following.thread_id, started.thread_id)
+        await self.finish_side_turn(following)
+        self.assertIsNone(self.outcomes[-1].error)
+
+    async def test_side_close_stops_new_question_observation_without_waiting_for_send(
+        self,
+    ) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        sending, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def send(*_):
+            sending.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        handler = AsyncMock(side_effect=send)
+        self.runtime.set_question_handler(handler)
+        _, record, _ = await self.open_side()
+        started = await self.runtime.submit_side(
+            side_id=record.id, input="work", owner_id="ou_owner", origin=object(),
+        )
+        handle = self.codex.handles[-1]
+        observer.append_question(
+            thread_id=started.thread_id, turn_id=started.turn_id,
+            request=QuestionRequest("question-one", (UserQuestion("Choose"),)),
+        )
+        await asyncio.wait_for(sending.wait(), timeout=0.2)
+        active = self.runtime._sides[record.id].active
+        interrupt = handle.interrupt
+
+        async def interrupt_with_late_question():
+            calls_before = list(observer.calls)
+            observer.append_question(
+                thread_id=started.thread_id, turn_id=started.turn_id,
+                request=QuestionRequest("late-question", (UserQuestion("Too late"),)),
+            )
+            self.runtime._refresh_turn_activity(active)
+            self.assertEqual(observer.calls, calls_before)
+            handle.record.items.append(completed_question(
+                QuestionRequest("late-question", (UserQuestion("Too late"),)),
+            ))
+            return await interrupt()
+
+        with patch.object(handle, "interrupt", side_effect=interrupt_with_late_question):
+            outcome = await asyncio.wait_for(self.runtime.close_side(record.id), timeout=0.2)
+        self.assertEqual(outcome.state, SideTopicState.CLOSED)
+        self.assertEqual(handle.run_calls, 1)
+        self.assertFalse(cancelled.is_set())
+        handler.assert_awaited_once()
+        # In-flight sends remain bounded, service-owned best-effort work.
+        await self.runtime.cancel_tasks()
+        self.assertTrue(cancelled.is_set())
 
     async def test_side_activity_observer_failure_and_high_water_fall_back(
         self,
@@ -5793,7 +6089,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(handle.wait_terminal_calls, 1)
         self.assertEqual([call.args[2] for call in handler.await_args_list], [first, second])
-        self.assertEqual([call.args[0] for call in handler.await_args_list], [binding.id] * 2)
+        self.assertEqual(
+            [call.args[0] for call in handler.await_args_list],
+            [BindingQuestionTarget(binding.id)] * 2,
+        )
         self.assertEqual(self.outcomes[-1].final_response, "final")
         self.assertIsNone(self.outcomes[-1].activity)
 
@@ -7379,8 +7678,8 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         received = asyncio.Event()
         requests = []
 
-        async def capture(binding_id, origin, request):
-            requests.append((binding_id, origin, request))
+        async def capture(target, origin, request):
+            requests.append((target, origin, request))
             received.set()
 
         self.runtime.set_question_handler(capture)
@@ -7400,7 +7699,9 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(self.runtime.active_turn(binding.id))
         self.assertEqual(self.outcomes, [])
-        self.assertEqual(requests, [(binding.id, self.runtime._active[binding.id].origin, request)])
+        self.assertEqual(requests, [
+            (BindingQuestionTarget(binding.id), self.runtime._active[binding.id].origin, request),
+        ])
         await self.finish(self.codex.handles[0], submission)
         self.assertEqual(len(requests), 1)
 

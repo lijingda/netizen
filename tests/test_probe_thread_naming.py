@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -11,7 +12,7 @@ from scripts import probe_thread_naming as probe
 class NamingProbeTest(unittest.IsolatedAsyncioTestCase):
     def test_title_requires_inherited_identifier_and_no_tool_items(self) -> None:
         result = SimpleNamespace(
-            status="completed", final_response="NAMING-unique 自动命名",
+            status="completed", final_response='{"title":"NAMING-unique 自动命名"}',
             items=[SimpleNamespace(root=SimpleNamespace(type="agentMessage"))],
         )
         self.assertEqual(
@@ -21,12 +22,23 @@ class NamingProbeTest(unittest.IsolatedAsyncioTestCase):
         for title, kind in (
             ("自动命名", "agentMessage"),
             ("NAMING-unique\n自动命名", "agentMessage"),
+            ("NAMING-unique " + "a" * 120, "agentMessage"),
             ("NAMING-unique 自动命名", "commandExecution"),
             ("NAMING-unique 自动命名", "mcpToolCall"),
         ):
             with self.subTest(title=title, kind=kind):
-                result.final_response = title
+                result.final_response = json.dumps({"title": title})
                 result.items = [SimpleNamespace(root=SimpleNamespace(type=kind))]
+                with self.assertRaises(AssertionError):
+                    probe._validate_title(result, "NAMING-unique")
+
+    def test_title_requires_valid_structured_output(self) -> None:
+        for response in (
+            None, 'NAMING-unique 自动命名', '{"title":', '[]', '{}',
+            '{"title":null}', '{"title":"NAMING-unique","extra":true}',
+        ):
+            with self.subTest(response=response):
+                result = SimpleNamespace(status="completed", final_response=response, items=[])
                 with self.assertRaises(AssertionError):
                     probe._validate_title(result, "NAMING-unique")
 

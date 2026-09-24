@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -11,23 +10,30 @@ from uuid import uuid4
 
 from lark_channel import OutboundCard
 
-from ..user_questions import QuestionRequest, UserQuestion, format_question_answer
+from ..user_questions import (
+    BindingQuestionTarget,
+    QuestionRequest,
+    QuestionTarget,
+    SideQuestionTarget,
+    UserQuestion,
+    format_question_answer,
+    question_target_payload,
+)
 from .callbacks import CardActionError, _builder, _notice, _plain, _plain_text
 from .reply import TURN_FILE_CARD_JSON_LIMIT_BYTES
 
 
 _KIND = "netizen_question"
-_VERSION = 1
+_VERSION = 2
 _CHOICE = "netizen_question_choice"
 _TEXT = "netizen_question_text"
 _MAX_ANSWER_CHARS = 1000
-_BINDING_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}")
 QUESTION_CARD_JSON_LIMIT_BYTES = TURN_FILE_CARD_JSON_LIMIT_BYTES
 
 
 @dataclass(frozen=True, slots=True)
 class QuestionCardContext:
-    binding_id: str
+    target: QuestionTarget
     item_id: str
     question_index: int
     question: UserQuestion
@@ -58,7 +64,7 @@ def _payload(context: QuestionCardContext) -> dict[str, Any]:
     return {
         "kind": _KIND,
         "v": _VERSION,
-        "binding_id": context.binding_id,
+        "target": question_target_payload(context.target),
         "item_id": context.item_id,
         "question_index": context.question_index,
         "title": context.question.title,
@@ -67,25 +73,40 @@ def _payload(context: QuestionCardContext) -> dict[str, Any]:
     }
 
 
+def _target(payload: Mapping[str, Any]) -> QuestionTarget:
+    try:
+        if payload["v"] == 1:
+            return BindingQuestionTarget(payload["binding_id"])
+        target = payload["target"]
+        if isinstance(target, Mapping) and set(target) == {"kind", "id"}:
+            if target["kind"] == "binding":
+                return BindingQuestionTarget(target["id"])
+            if target["kind"] == "side":
+                return SideQuestionTarget(target["id"])
+    except (TypeError, ValueError):
+        pass
+    raise CardActionError("问题卡片的会话目标无效。")
+
+
 def _decoded(payload: Any) -> dict[str, Any]:
-    fields = {"kind", "v", "binding_id", "item_id", "question_index", "title", "options"}
     if not isinstance(payload, Mapping):
         raise CardActionError("问题卡片字段不完整或含未知字段。")
     payload = dict(payload)
     payload.pop("nonce", None)  # Transport dedup only, never a business precondition.
+    version = payload.get("v")
+    if payload.get("kind") != _KIND or type(version) is not int or version not in {1, _VERSION}:
+        raise CardActionError("问题卡片版本无效，请在会话中直接回答。")
+    fields = {"kind", "v", "item_id", "question_index", "title", "options"}
+    fields.add("binding_id" if version == 1 else "target")
     if set(payload) != fields:
         raise CardActionError("问题卡片字段不完整或含未知字段。")
-    if payload["kind"] != _KIND or type(payload["v"]) is not int or payload["v"] != _VERSION:
-        raise CardActionError("问题卡片版本无效，请在会话中直接回答。")
-    binding = payload["binding_id"]
+    _target(payload)
     item_id = payload["item_id"]
     index = payload["question_index"]
     title = payload["title"]
     options = payload["options"]
     if (
-        not isinstance(binding, str)
-        or _BINDING_ID.fullmatch(binding) is None
-        or not isinstance(item_id, str)
+        not isinstance(item_id, str)
         or not item_id.strip()
         or len(item_id) > 2048
         or type(index) is not int
@@ -105,7 +126,7 @@ def _decoded(payload: Any) -> dict[str, Any]:
 
 def _context(payload: Mapping[str, Any]) -> QuestionCardContext:
     return QuestionCardContext(
-        binding_id=payload["binding_id"],
+        target=_target(payload),
         item_id=payload["item_id"],
         question_index=payload["question_index"],
         question=UserQuestion(payload["title"], tuple(payload["options"])),
@@ -135,13 +156,13 @@ def decode_question_answer(value: Any, form_value: Any = None) -> QuestionAnswer
         answer = payload["options"][int(choice)]
     context = _context(payload)
     return QuestionAnswer(
-        context.binding_id, context.item_id, context.question_index,
+        context.target, context.item_id, context.question_index,
         context.question, answer, choice,
     )
 
 
 def render_question_card(
-    binding_id: str,
+    target: QuestionTarget,
     request: QuestionRequest,
     question_index: int,
     *,
@@ -150,7 +171,7 @@ def render_question_card(
     if type(question_index) is not int or not 0 <= question_index < len(request.questions):
         raise CardActionError("问题序号无效。")
     return render_question_context_card(
-        QuestionCardContext(binding_id, request.item_id, question_index, request.questions[question_index]),
+        QuestionCardContext(target, request.item_id, question_index, request.questions[question_index]),
         notice=notice,
     )
 

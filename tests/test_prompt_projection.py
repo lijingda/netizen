@@ -6,6 +6,7 @@ from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
 from netizen.prompt_projection import (
+    CardAnswerProjection,
     CurrentMessageProjection,
     PromptProjectionError,
     ScheduledInputProjection,
@@ -14,6 +15,7 @@ from netizen.prompt_projection import (
     render_current_message_json,
     render_plain_prompt,
 )
+from netizen.user_questions import BindingQuestionTarget, SideQuestionTarget
 
 
 def inbound(
@@ -236,6 +238,55 @@ class ScheduledInputProjectionTest(unittest.TestCase):
         self.assertIn("$live-skill", nested)
         self.assertEqual(json.loads(nested)["request_text"], request)
         self.assertEqual(list(json.loads(nested))[-1], "request_text")
+
+
+class CardAnswerProjectionTest(unittest.TestCase):
+    def test_both_target_kinds_preserve_real_operator_source_card_and_feedback_anchor(self):
+        for target, kind in (
+            (BindingQuestionTarget("binding-one"), "binding"),
+            (SideQuestionTarget("side-one"), "side"),
+        ):
+            with self.subTest(kind=kind):
+                sender = {"open_id": "ou_answerer", "display_name": "$old-skill Alice", "is_bot": False}
+                current = CardAnswerProjection(
+                    "om_feedback", "om_question", target, sender, "$live-skill answer",
+                )
+                sender["open_id"] = "ou_changed"
+                metadata = current.metadata()
+                self.assertEqual(metadata["version"], 2)
+                self.assertEqual(metadata["kind"], "feishu_question_answer")
+                self.assertEqual(metadata["target"], {"kind": kind, "id": kind + "-one"})
+                self.assertNotIn("binding_id", metadata)
+                self.assertEqual(metadata["message_id"], "om_feedback")
+                self.assertEqual(metadata["source_card_id"], "om_question")
+                self.assertEqual(metadata["sender"]["open_id"], "ou_answerer")
+                self.assertIn("attribution only", metadata["handling"])
+                with self.assertRaises(FrozenInstanceError):
+                    current.target = SideQuestionTarget("other-side")  # type: ignore[misc]
+                with self.assertRaises(TypeError):
+                    current.sender["open_id"] = "other"  # type: ignore[index]
+                plain = render_plain_prompt(current)
+                request, trailer = plain.split("\n\n<feishu_card_answer_context>\n", 1)
+                self.assertEqual(request, "$live-skill answer")
+                self.assertNotIn("$old-skill", trailer)
+                self.assertIn(r"\u0024old-skill", trailer)
+                nested = json.loads(render_current_message_json(current))
+                self.assertEqual(nested["request_text"], "$live-skill answer")
+                self.assertEqual(nested["target"], metadata["target"])
+
+    def test_missing_target_message_or_real_operator_fails_closed(self):
+        values = dict(
+            message_id="om_feedback", source_card_id="om_question",
+            target=BindingQuestionTarget("binding-one"),
+            sender={"open_id": "ou_answerer", "display_name": "Alice"}, request_text="answer",
+        )
+        for changes in (
+            {"message_id": ""}, {"source_card_id": ""}, {"target": "binding-one"},
+            {"target": None}, {"sender": {"open_id": "ou_answerer"}},
+            {"sender": {"display_name": "Alice"}},
+        ):
+            with self.subTest(changes=changes), self.assertRaises((TypeError, ValueError)):
+                CardAnswerProjection(**{**values, **changes})
 
 
 if __name__ == "__main__":

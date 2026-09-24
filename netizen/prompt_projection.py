@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Any
 
 from .message_content import MATERIAL_MESSAGE_TYPES, TEXT_TYPES, project_message_content
+from .user_questions import QuestionTarget, question_target_payload
 
 
 _PROMPT_KIND = "feishu_current_message"
@@ -108,13 +109,14 @@ class CardAnswerProjection:
 
     message_id: str
     source_card_id: str
-    binding_id: str
+    target: QuestionTarget
     sender: Mapping[str, Any]
     request_text: str
 
     def __post_init__(self) -> None:
-        if not self.message_id or not self.source_card_id or not self.binding_id:
-            raise ValueError("card answer requires exact message and Binding identities")
+        if not self.message_id or not self.source_card_id:
+            raise ValueError("card answer requires exact message identities")
+        question_target_payload(self.target)
         if not self.sender.get("open_id") or not self.sender.get("display_name"):
             raise ValueError("card answer requires the real operator's attribution")
         if not isinstance(self.request_text, str):
@@ -124,11 +126,11 @@ class CardAnswerProjection:
     def metadata(self) -> dict[str, Any]:
         return {
             "kind": "feishu_question_answer",
-            "version": 1,
+            "version": 2,
             "execution_host": "netizen",
             "message_id": self.message_id,
             "source_card_id": self.source_card_id,
-            "binding_id": self.binding_id,
+            "target": question_target_payload(self.target),
             "sender": dict(self.sender),
             "handling": (
                 "explicit card answer from sender; message_id is a bot-authored "

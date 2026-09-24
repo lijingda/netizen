@@ -11,27 +11,37 @@ from netizen.cards.questions import (
     render_question_card,
     render_question_context_card,
 )
-from netizen.user_questions import QuestionRequest, UserQuestion
+from netizen.user_questions import (
+    BindingQuestionTarget,
+    QuestionRequest,
+    SideQuestionTarget,
+    UserQuestion,
+    question_target_payload,
+)
 from tests.support.channel_cards import callback, elements, form_values
 
 
 class QuestionCardsTest(unittest.TestCase):
     def setUp(self):
+        self.target = BindingQuestionTarget("binding-original")
         self.request = QuestionRequest("native-item", (
             UserQuestion("First question", ("First answer",)),
             UserQuestion("Which design?", ("Keep the full first option", "Another option")),
         ))
 
     def card(self):
-        return render_question_card("binding-original", self.request, 1)
+        return render_question_card(self.target, self.request, 1)
 
-    def test_selected_suggestion_preserves_exact_question_index_text_and_original_binding(self):
+    def test_selected_suggestion_preserves_exact_question_index_text_and_original_target(self):
         card = self.card()
         values = {**form_values(card), "netizen_question_choice": "1"}
         value = callback(card, "提交回答")
         self.assertTrue(is_question_card_action(value, values))
         answer = decode_question_answer(value, values)
-        self.assertEqual(answer.binding_id, "binding-original")
+        self.assertEqual(answer.target, self.target)
+        self.assertEqual(value["v"], 2)
+        self.assertEqual(value["target"], question_target_payload(self.target))
+        self.assertNotIn("binding_id", value)
         self.assertEqual(answer.item_id, "native-item")
         self.assertEqual(answer.question_index, 1)
         self.assertEqual(answer.question, self.request.questions[1])
@@ -43,7 +53,7 @@ class QuestionCardsTest(unittest.TestCase):
     def test_free_text_requires_free_choice_without_parsing_commands(self):
         for options in ((), ("Suggested",)):
             with self.subTest(options=options):
-                card = render_question_card("binding-one", QuestionRequest("item", (UserQuestion("Title", options),)), 0)
+                card = render_question_card(self.target, QuestionRequest("item", (UserQuestion("Title", options),)), 0)
                 values = {**form_values(card), "netizen_question_text": " /new $skill\nmy own answer "}
                 answer = decode_question_answer(callback(card, "提交回答"), values)
                 self.assertEqual(answer.answer, " /new $skill\nmy own answer ")
@@ -87,7 +97,7 @@ class QuestionCardsTest(unittest.TestCase):
         self.assertEqual(decode_question_answer(retry_value, form_values(retried)), answer)
 
     def test_retry_preserves_option_index_and_allows_selecting_another_option(self):
-        card = render_question_card("binding-one", QuestionRequest("item", (
+        card = render_question_card(self.target, QuestionRequest("item", (
             UserQuestion("Choose", ("A", "B", "A")),
         )), 0)
         answer = decode_question_answer(callback(card, "提交回答"), {
@@ -103,7 +113,7 @@ class QuestionCardsTest(unittest.TestCase):
     def test_titles_and_suggestions_render_as_complete_plain_text(self):
         title = '<at id="all">all</at> **Question**'
         option = "*" + "long option " * 100 + "*"
-        card = render_question_card("binding-one", QuestionRequest("item", (UserQuestion(title, (option,)),)), 0)
+        card = render_question_card(self.target, QuestionRequest("item", (UserQuestion(title, (option,)),)), 0)
         self.assertEqual(elements(card.card, "markdown"), [])
         plain = [item["content"] for item in elements(card.card, "plain_text")]
         self.assertIn(title, plain)
@@ -119,9 +129,10 @@ class QuestionCardsTest(unittest.TestCase):
         values = form_values(card)
         value = callback(card, "提交回答")
         for changes in (
-            {"binding_id": "bad/identity"}, {"item_id": ""}, {"question_index": True},
+            {"target": {"kind": "binding", "id": "bad/identity"}},
+            {"binding_id": "binding-ambiguous"}, {"item_id": ""}, {"question_index": True},
             {"question_index": -1}, {"title": ""}, {"options": [None]},
-            {"v": 2}, {"extra": "unexpected"},
+            {"v": 3}, {"v": True}, {"extra": "unexpected"},
         ):
             with self.subTest(changes=changes), self.assertRaises(CardActionError):
                 decode_question_context({**value, **changes})
@@ -145,7 +156,60 @@ class QuestionCardsTest(unittest.TestCase):
     def test_oversized_card_rejects_instead_of_silently_truncating(self):
         for question in (UserQuestion("问" * 10_000), UserQuestion("Title", tuple("选项" * 1000 for _ in range(15)))):
             with self.subTest(question=question.title[:20]), self.assertRaises(CardActionError):
-                render_question_card("binding-one", QuestionRequest("item", (question,)), 0)
+                render_question_card(self.target, QuestionRequest("item", (question,)), 0)
+
+    def test_invalid_target_is_never_inferred_or_retargeted(self):
+        value = callback(self.card(), "提交回答")
+        for target in (
+            None, "binding-original", {}, {"id": "existing"}, {"kind": "binding"},
+            {"kind": "thread", "id": "existing"}, {"kind": True, "id": "existing"},
+            {"kind": "side", "id": "side-one", "binding_id": "binding-one"},
+            {"kind": "binding", "id": "binding-one", "side_id": "side-one"},
+            {"kind": "side", "id": ""}, {"kind": "side", "id": "bad/identity"},
+            {"kind": "side", "id": 12}, {"kind": "side", "id": "x" * 129},
+        ):
+            with self.subTest(target=target), self.assertRaises(CardActionError):
+                decode_question_context({**value, "target": target})
+
+
+class SideQuestionCardsTest(QuestionCardsTest):
+    """The entire presentation/answer contract is shared by both target kinds."""
+
+    def setUp(self):
+        super().setUp()
+        self.target = SideQuestionTarget("side-original")
+
+
+class LegacyQuestionCardsTest(unittest.TestCase):
+    def setUp(self):
+        self.value = {
+            "kind": "netizen_question", "v": 1, "binding_id": "binding-original",
+            "item_id": "old-item", "question_index": 2, "title": "Old question?",
+            "options": ["Keep", "Change"], "nonce": "original-nonce",
+        }
+
+    def test_legacy_binding_card_decodes_and_retry_upgrades_without_retargeting(self):
+        answer = decode_question_answer(self.value, {"netizen_question_choice": "1"})
+        self.assertEqual(answer.target, BindingQuestionTarget("binding-original"))
+        self.assertEqual(answer.item_id, "old-item")
+        self.assertEqual(answer.question_index, 2)
+        self.assertEqual(answer.answer, "Change")
+        retry = render_question_context_card(answer)
+        value = callback(retry, "提交回答")
+        self.assertEqual(value["v"], 2)
+        self.assertEqual(value["target"], {"kind": "binding", "id": "binding-original"})
+        self.assertNotIn("binding_id", value)
+        self.assertEqual(decode_question_answer(value, form_values(retry)), answer)
+
+    def test_legacy_card_requires_only_exact_binding_identity(self):
+        for changes in (
+            {"target": {"kind": "side", "id": "side-one"}},
+            {"side_id": "side-one"}, {"binding_id": "bad/identity"},
+            {"binding_id": None}, {"binding_id": ""}, {"binding_id": "x" * 129},
+            {"v": 2},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(CardActionError):
+                decode_question_context({**self.value, **changes})
 
 
 if __name__ == "__main__":
