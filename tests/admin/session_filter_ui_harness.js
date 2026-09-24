@@ -240,6 +240,33 @@ async function refresh(tab) {
   assert.doesNotMatch(rows.textContent, /Lazy Session|原生会话缺失/);
   assert.deepEqual(rows.querySelectorAll("button").map((button) => button.textContent), ["停止"]);
 
+  // Native seconds render in the browser's time zone and change with the list response.
+  const previousTZ = process.env.TZ;
+  process.env.TZ = "Asia/Shanghai";
+  const updatedAt = Date.UTC(2030, 0, 2, 3, 4, 5) / 1000;
+  const headers = document.querySelector("#sessions").querySelectorAll("th");
+  const updatedColumn = headers.findIndex((header) => header.textContent === "最近更新");
+  assert(updatedColumn >= 0);
+  const updateText = () => rows.querySelector("tr").querySelectorAll("td")[updatedColumn].textContent;
+  for (const catalogState of ["active", "archived", "unknown"]) {
+    sessionResponse = { items: [{ ...unknown, catalogState, updatedAt }], nextCursor: null };
+    await loadSessions();
+    assert.equal(updateText(), "2030/1/2 11:04:05");
+  }
+  sessionResponse.items[0] = { ...unknown, updatedAt: updatedAt + 60 };
+  await refresh("sessions");
+  assert.equal(updateText(), "2030/1/2 11:05:05");
+  for (const updatedAt of [null, undefined, "invalid", -1, 1e15]) {
+    sessionResponse.items[0] = { ...unknown, updatedAt };
+    await loadSessions();
+    assert.equal(updateText(), "—");
+  }
+  sessionResponse.items[0] = { ...unknown, catalogState: "lazy", nativeThreadId: null, updatedAt: null };
+  await loadSessions();
+  assert.equal(updateText(), "尚未开始");
+  if (previousTZ === undefined) delete process.env.TZ;
+  else process.env.TZ = previousTZ;
+
   // Location links use topic metadata even when the chat name could not be resolved.
   const topicOpenUrl = "https://applink.feishu.cn/client/thread/open?open_chat_id=oc-chat&open_thread_id=omt-topic&openchatid=oc-chat&openthreadid=omt-topic&thread_position=-1";
   for (const location of [

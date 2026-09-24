@@ -471,6 +471,7 @@ class NativeThreadMetadata:
     thread_id: str
     name: str | None
     preview: str
+    updated_at: int | None = None  # Native Unix timestamp in seconds; never persisted here.
 
 
 class NativeThreadCatalogState(str, Enum):

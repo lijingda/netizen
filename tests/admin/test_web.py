@@ -306,7 +306,7 @@ class FakeManagement:
                 BindingInventoryRecord(self.native, self.scope),
                 NativeThreadView(
                     NativeThreadCatalogState.ACTIVE,
-                    NativeThreadMetadata("native-active", "Active", "preview"),
+                    NativeThreadMetadata("native-active", "Active", "preview", updated_at=1_730_831_111),
                 ),
                 label,
             ),
@@ -314,7 +314,7 @@ class FakeManagement:
                 BindingInventoryRecord(self.archived, self.scope),
                 NativeThreadView(
                     NativeThreadCatalogState.ARCHIVED,
-                    NativeThreadMetadata("native-archived", "Archived", "old"),
+                    NativeThreadMetadata("native-archived", "Archived", "old", updated_at=1_730_750_000),
                 ),
                 label,
             ),
@@ -1568,6 +1568,9 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_id["binding-lazy"]["catalogState"], "lazy")
         self.assertEqual(by_id["binding-archived"]["pointerState"], "inactive")
         self.assertEqual(by_id["binding-archived"]["catalogState"], "archived")
+        self.assertEqual(by_id["binding-native"]["updatedAt"], 1_730_831_111)
+        self.assertEqual(by_id["binding-archived"]["updatedAt"], 1_730_750_000)
+        self.assertIsNone(by_id["binding-lazy"]["updatedAt"])
         for item in by_id.values():
             self.assertNotIn("sessionState", item)
             self.assertNotIn("nativeState", item)
@@ -1639,7 +1642,11 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             unknown.id, 5, running=True,
         )
         label = ChatLabelResolver.fallback("oc_chat")
-        for metadata in (None, NativeThreadMetadata("native-unlisted", "Read title", "preview")):
+        for metadata in (
+            None,
+            NativeThreadMetadata("native-unlisted", "Read title", "preview"),
+            NativeThreadMetadata("native-unlisted", "Read title", "preview", updated_at=1_730_831_111),
+        ):
             with self.subTest(metadata=metadata):
                 self.management.session_items_override = (
                     SessionInventoryItem(
@@ -1666,6 +1673,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(item["nativeThreadId"], "native-unlisted")
                 self.assertEqual(item["pointerState"], "inactive")
                 self.assertEqual(item["nativeTitle"], metadata.name if metadata else None)
+                self.assertEqual(item["updatedAt"], metadata.updated_at if metadata else None)
                 self.assertEqual(item["runtime"]["primaryStatus"], "running")
                 self.assertEqual(
                     set(item["actions"]), {"configure", "createLazy", "stop"},

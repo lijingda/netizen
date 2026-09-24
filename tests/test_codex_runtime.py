@@ -2930,13 +2930,29 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_thread_summary_reads_exact_id_without_history_or_resume(self) -> None:
         read = AsyncMock(return_value=SimpleNamespace(thread=SimpleNamespace(
             id="native-1", name="Existing empty Thread", preview="",
+            updated_at=1_730_831_111,
         )))
         with patch("netizen.codex_runtime.AsyncThread", return_value=SimpleNamespace(read=read)) as thread:
             metadata = await self.runtime.thread_summary("native-1")
         thread.assert_called_once_with(self.codex, "native-1")
         read.assert_awaited_once_with(include_turns=False)
-        self.assertEqual(metadata, NativeThreadMetadata("native-1", "Existing empty Thread", ""))
+        self.assertEqual(metadata, NativeThreadMetadata(
+            "native-1", "Existing empty Thread", "", updated_at=1_730_831_111,
+        ))
         self.assertEqual(self.codex.thread_list_calls, [])
+
+    async def test_thread_summary_keeps_metadata_when_update_time_is_unavailable(self) -> None:
+        for value in (None, True, "1730831111", -1, 1.5, 0):
+            with self.subTest(updated_at=value), patch("netizen.codex_runtime.AsyncThread") as thread:
+                thread.return_value.read = AsyncMock(return_value=SimpleNamespace(
+                    thread=SimpleNamespace(
+                        id="native-1", name="Title", preview="preview", updated_at=value,
+                    ),
+                ))
+                metadata = await self.runtime.thread_summary("native-1")
+                self.assertEqual(metadata.name, "Title")
+                self.assertEqual(metadata.preview, "preview")
+                self.assertEqual(metadata.updated_at, 0 if type(value) is int and value == 0 else None)
 
     async def test_thread_summary_rejects_wrong_identity_and_invalid_metadata(self) -> None:
         for row in (
@@ -2972,6 +2988,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                         id="native-1",
                         name="First title",
                         preview="first prompt",
+                        updated_at=1_730_831_111,
                     ),
                 ],
                 next_cursor="unused-page",
@@ -2987,6 +3004,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     "native-1",
                     "First title",
                     "first prompt",
+                    updated_at=1_730_831_111,
                 ),
                 "native-2": NativeThreadMetadata(
                     "native-2",
@@ -4018,7 +4036,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_complete_native_catalog_is_bounded_and_paginated(self) -> None:
         self.codex.thread_list_pages = [
             SimpleNamespace(
-                data=[SimpleNamespace(id="native-1", name="One", preview="first")],
+                data=[SimpleNamespace(id="native-1", name="One", preview="first", updated_at=1_730_750_000)],
                 next_cursor="page-two",
             ),
             SimpleNamespace(
@@ -4038,6 +4056,8 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ("native-1", "native-2"),
         )
         self.assertEqual(catalog.by_id()["native-1"].name, "One")
+        self.assertEqual(catalog.by_id()["native-1"].updated_at, 1_730_750_000)
+        self.assertIsNone(catalog.by_id()["native-2"].updated_at)
         self.assertEqual(len(self.codex.thread_list_calls), 2)
 
     async def test_complete_native_catalog_fails_whole_read_at_limits(self) -> None:
