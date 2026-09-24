@@ -1405,6 +1405,11 @@ Sessions 只为当前展示页未确认且缺 metadata 的 Thread，通过公开
 管理目录查询只读索引，保留完整分页与合计最多 100000 个 ID 的上限，索引阶段最多 3 秒，
 且占剩余请求预算不超过一半，为本地分页和投影留出时间；Sessions 总请求预算仍为 10 秒。
 
+Sessions 的“最近更新”复用上述目录与摘要读取返回的原生 Thread `updated_at`（Unix 秒），
+沿现有 metadata 投影传给 Admin，不增加查询或 Channel SQLite 字段。浏览器按本地时区
+显示；Lazy 显示“尚未开始”，原生时间缺失或无效时显示 `—`，不以 Binding 创建/激活时间
+替代。它与标题、摘要一起随列表刷新更新，不进入五秒运行态轮询，也不改变排序或分页。
+
 Projects 同样读取 active/archived 索引。归档数只统计索引确认的本地 Binding，待确认数为
 已物化 Binding 数减去索引确认的 active 与 archived 数；冲突 ID 不计为已确认，Lazy 不计
 入待确认。显示“已确认 N”与另有多少会话待确认，不能把部分计数冒充精确归档总数。

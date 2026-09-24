@@ -1232,7 +1232,9 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         lazy = await self._create()
         self.runtime.active_metadata["indexed-active"] = NativeThreadMetadata("indexed-active", "Indexed", "active")
         # A stored Thread with an empty preview is readable but absent from both lists.
-        self.runtime.summary_metadata["unindexed"] = NativeThreadMetadata("unindexed", "Existing", "")
+        self.runtime.summary_metadata["unindexed"] = NativeThreadMetadata(
+            "unindexed", "Existing", "", updated_at=1_730_831_111,
+        )
         cases = (
             ((SessionInventoryState.ACTIVE, SessionInventoryState.LAZY, SessionInventoryState.UNKNOWN), [lazy.id, unindexed.id, indexed.id]),
             ((SessionInventoryState.ACTIVE,), [indexed.id]),
@@ -1264,6 +1266,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                         if item.record.binding.id == unindexed.id:
                             self.assertIsNone(item.native.state)
                             self.assertEqual(item.native.metadata.name, "Existing")
+                            self.assertEqual(item.native.metadata.updated_at, 1_730_831_111)
                     items.extend(page.items)
                     cursor = page.next_cursor
                     if cursor is None:

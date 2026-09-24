@@ -1102,6 +1102,7 @@ class AdminWebApplication:
             "nativeThreadId": binding.native_thread_id,
             "nativeTitle": metadata.name if metadata is not None else None,
             "nativePreview": metadata.preview if metadata is not None else None,
+            "updatedAt": metadata.updated_at if metadata is not None else None,
             "creator": binding.creator_id,
             "createdAt": binding.created_at,
             "activatedAt": binding.activated_at,

@@ -1352,6 +1352,13 @@ function sessionIdentityCell(row, session) {
   row.append(td);
 }
 
+function sessionUpdatedAtLabel(session) {
+  if (session.catalogState === "lazy") return "尚未开始";
+  if (!Number.isSafeInteger(session.updatedAt) || session.updatedAt < 0) return "—";
+  const date = new Date(session.updatedAt * 1000);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("zh-CN", { hour12: false });
+}
+
 function renderSessionPagination() {
   const page = state.sessionPage;
   document.querySelector("#sessions-previous").disabled = page.previousCursors.length === 0;
@@ -1424,6 +1431,7 @@ async function loadSessions(cursor = state.sessionPage.cursor) {
     const settings = session.turnSettings;
     const model = settings ? `${settings.modelId} / ${settings.effortId} / ${settings.serviceTierId}` : "继承 Codex";
     cell(row, `${session.messageContextMode} · ${model}`);
+    cell(row, sessionUpdatedAtLabel(session));
     const actions = actionsCell(row);
     wireSessionActions(actions, session);
     body.append(row);

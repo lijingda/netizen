@@ -1711,7 +1711,9 @@ class CodexRuntime:
             or not isinstance(preview, str)
         ):
             raise ThreadCatalogError("thread/read returned an invalid Thread summary")
-        return NativeThreadMetadata(thread_id, name, preview)
+        return NativeThreadMetadata(
+            thread_id, name, preview, updated_at=_thread_updated_at(thread),
+        )
 
     async def thread_metadata(
         self,
@@ -1799,6 +1801,7 @@ class CodexRuntime:
                             thread_id=thread_id,
                             name=name,
                             preview=preview,
+                            updated_at=_thread_updated_at(thread),
                         )
                         remaining.remove(thread_id)
 
@@ -1902,6 +1905,7 @@ class CodexRuntime:
                                 thread_id=thread_id,
                                 name=name,
                                 preview=preview,
+                                updated_at=_thread_updated_at(thread),
                             )
                         )
 
@@ -7046,6 +7050,13 @@ def _thread_status_type(native_thread: object) -> str | None:
     root = getattr(status, "root", status)
     value = getattr(root, "type", None)
     return value if isinstance(value, str) else None
+
+
+def _thread_updated_at(native_thread: object) -> int | None:
+    value = getattr(native_thread, "updated_at", None)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 def _turn_contains_item(turn: object, item_type: str) -> bool:
