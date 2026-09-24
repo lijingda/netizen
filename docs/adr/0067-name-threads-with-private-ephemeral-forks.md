@@ -21,9 +21,12 @@ continuation、Side 和命名分支自身不触发。已有名称保持不变，
 不等待父任务完成。`include_turns=False` 只省略 RPC 返回历史，不裁剪模型上下文。
 
 临时分支使用 fork 时的上下文快照及提交时的模型设置，不追随父会话后续 steer。
-提示词明确历史只作参考、不得执行原任务或调用任何工具、只输出一个单行标题；这是用户
-接受的提示词约束，不是权限隔离。不修改原生工具配置、用户配置或 developer/base instructions。
-只接受 exact 命名 Turn completed 的 1–120 字符单行文本，通过公开 `set_name()` 写原 Thread。
+提示词明确历史只作参考、不得执行原任务或调用任何工具，并通过公开
+`turn(output_schema=...)` 要求最终回答为仅含 `title` 字符串的 JSON 对象。标题仍须是
+1–120 字符单行文本；格式或值无效时跳过本次命名，不回退接受未受约束的文本。
+结构化输出只约束最终回答，不禁用工具；禁工具仍是用户接受的提示词约束，不是权限隔离。
+不修改原生工具配置、用户配置或 developer/base instructions。
+只接受 exact 命名 Turn completed 的有效标题，通过公开 `set_name()` 写原 Thread。
 
 任务不建立 Binding、Scope、Side route、卡片或数据库记录，不进入普通任务集合、
 `wait_idle()`、Activity/Result/Files、主会话用量投影和 Netizen 会话统计。真实模型用量仍由

@@ -106,7 +106,13 @@ from .cards.questions import (
     render_question_card,
     render_question_context_card,
 )
-from .user_questions import QuestionRequest
+from .user_questions import (
+    BindingQuestionTarget,
+    QuestionRequest,
+    QuestionTarget,
+    SideQuestionTarget,
+    question_target_payload,
+)
 from .channel.reactions import _REACTION_OPERATION_TIMEOUT_SECONDS, _ReactionController
 from .channel.reply_presenter import (
     GoalCardOrigin,
@@ -142,6 +148,7 @@ from .runtime.contracts import (
     SideSessionNotFound,
     SideSessionState,
     SideStartFailed,
+    SideSubmissionAdmission,
     SideTurnActivitySnapshot,
     SideTurnOutcome,
     SkillReferenceError,
@@ -1306,13 +1313,28 @@ class ChannelApplication:
                 "本提示不代表正在执行的任务已结束。",
             )
 
+    def _question_recipient(
+        self, target: QuestionTarget,
+    ) -> tuple[FeishuScope, ThreadBinding | SideTopicRecord]:
+        """Resolve an existing target without following a Parent or current pointer."""
+        if isinstance(target, BindingQuestionTarget):
+            binding = self._bindings.get(target.binding_id)
+            record = self._bindings.get_scope(binding.scope_key)
+            return FeishuScope(record.app_id, record.chat_id, record.kind, record.topic_id), binding
+        if isinstance(target, SideQuestionTarget):
+            side = self._bindings.get_side_topic(target.side_id)
+            if side.state is not SideTopicState.OPEN:
+                raise CardActionError(
+                    "问题所属 Side 尚未就绪或已结束、过期，本条回答未执行；不会转投主会话。"
+                )
+            return self._side_scope(side), side
+        raise CardActionError("问题的回答目标无效。")
+
     async def handle_questions(
-        self, binding_id: str, origin: object, request: QuestionRequest,
+        self, target: QuestionTarget, origin: object, request: QuestionRequest,
     ) -> None:
-        """Project native questions without changing the producing Turn."""
-        binding = self._bindings.get(binding_id)
-        record = self._bindings.get_scope(binding.scope_key)
-        scope = FeishuScope(record.app_id, record.chat_id, record.kind, record.topic_id)
+        """Project questions for either target without changing the producing Turn."""
+        scope, _ = self._question_recipient(target)
         if scope.app_id != self._app_id:
             return
         reply_to = _message_id(origin)
@@ -1321,11 +1343,11 @@ class ChannelApplication:
         if not reply_to:
             return
         for index in range(len(request.questions)):
-            identity = json.dumps([scope.key, binding.id, request.item_id, index])
+            identity = json.dumps([scope.key, question_target_payload(target), request.item_id, index])
             async with asyncio.timeout(15):
                 sent = await send_topic_message(
                     self._channel, scope.chat_id,
-                    render_question_card(binding.id, request, index),
+                    render_question_card(target, request, index),
                     SendOpts(
                         receive_id_type="chat_id", reply_to=reply_to,
                         reply_in_thread=scope.kind is ScopeKind.TOPIC,
@@ -1337,7 +1359,7 @@ class ChannelApplication:
                 raise TopicPublishError("问题卡片的飞书位置未确认。", unknown=True)
 
     async def _handle_question_card_action(self, event: Any) -> None:
-        """Keep the original Binding and enter ordinary input at click time."""
+        """Share answer handling; only admission and submission depend on the target."""
         action = getattr(event, "action", None)
         value, form = getattr(action, "value", None), getattr(action, "form_value", None)
         message_id = str(getattr(event, "message_id", "") or "")
@@ -1365,15 +1387,18 @@ class ChannelApplication:
                     app_id=self._app_id, callback_chat_id=chat_id,
                     fetched_message=fetched, chat_type=chat_kind,
                 )
-                binding = self._bindings.get(context.binding_id)
-                if binding.scope_key != scope.key:
+                target_scope, recipient = self._question_recipient(context.target)
+                if target_scope != scope:
                     raise CardActionError("问题卡片与原会话的位置不一致，本条回答未执行。")
-                current = self._bindings.active_binding(scope.key)
-                if current is None or current.id != binding.id:
-                    raise CardActionError(
-                        f"请先通过 /sessions 切回问题所属会话 {binding.short_id}，再提交回答。"
-                    )
-                admission = await self._runtime.capture_submission_admission(binding.id)
+                if isinstance(recipient, ThreadBinding):
+                    current = self._bindings.active_binding(scope.key)
+                    if current is None or current.id != recipient.id:
+                        raise CardActionError(
+                            f"请先通过 /sessions 切回问题所属会话 {recipient.short_id}，再提交回答。"
+                        )
+                    admission = await self._runtime.capture_submission_admission(recipient.id)
+                else:
+                    admission = await self._runtime.capture_side_submission_admission(recipient.id)
                 sender = await card_answer_sender(self._channel, chat_id, operator)
                 if chat_kind not in {"p2p", "group"}:
                     raise CardActionError("无法确认原会话类型，本条回答未执行。")
@@ -1404,14 +1429,14 @@ class ChannelApplication:
                 origin = CardAnswerOrigin(
                     self._app_id, chat_id, sent.message_id,
                     CardAnswerConversation(chat_id, chat_kind, scope.topic_id),
-                    message_id, binding.id,
+                    message_id, context.target,
                 )
             projection = CardAnswerProjection(
                 message_id=sent.message_id, source_card_id=message_id,
-                binding_id=binding.id, sender=sender, request_text=answer.prompt,
+                target=context.target, sender=sender, request_text=answer.prompt,
             )
         except Exception as error:
-            # No ordinary input has been handed off yet. Refresh the form's
+            # No input has been handed off yet. Refresh the form's
             # transport nonce so an explicit retry can pass SDK dedup.
             notice = f"回答未提交：{describe_error(error)}"
             try:
@@ -1427,16 +1452,30 @@ class ChannelApplication:
                 target = _CardReplyTarget(message_id, message_id, chat_id, _CardReplyConversation(scope.topic_id))
                 try:
                     async with asyncio.timeout(5):
-                        await self._reply(target, notice)
+                        await self._channel.reply(target, notice, SendOpts(
+                            receive_id_type="chat_id", reply_to=message_id,
+                            reply_in_thread=scope.kind is ScopeKind.TOPIC,
+                            reply_target_gone="fail",
+                        ))
                 except Exception:
                     logger.warning("question answer feedback unavailable")
             return
 
         try:
-            await self._consume_prompt(
-                binding=binding, scope=scope, message=origin, current=projection,
-                owner_id=sender["open_id"], skill_names=parse_skill_references(answer.answer), admission=admission,
-            )
+            skill_names = parse_skill_references(answer.answer)
+            if isinstance(recipient, ThreadBinding):
+                assert isinstance(admission, SubmissionAdmission)
+                await self._consume_prompt(
+                    binding=recipient, scope=scope, message=origin, current=projection,
+                    owner_id=sender["open_id"], skill_names=skill_names, admission=admission,
+                )
+            else:
+                assert isinstance(admission, SideSubmissionAdmission)
+                await self._consume_side_prompt(
+                    side_id=recipient.id, source_message=origin, reply_origin=origin,
+                    current=projection, owner_id=sender["open_id"],
+                    skill_names=skill_names, admission=admission,
+                )
         except Exception as error:
             await self._report_input_error(origin, error)
 
@@ -2919,6 +2958,20 @@ class ChannelApplication:
             ),
             request_text=prompt.text,
         )
+        await self._consume_side_prompt(
+            side_id=side_id, source_message=source_message, reply_origin=reply_origin,
+            current=current, owner_id=prompt.sender_id, skill_names=prompt.skill_names,
+            admission=admission, quoted_target_id=quoted_target_id,
+            current_images=current_images,
+        )
+
+    async def _consume_side_prompt(
+        self, *, side_id: str, source_message: Any, reply_origin: Any,
+        current: MessageInputProjection, owner_id: str, skill_names: tuple[str, ...],
+        admission: SideSubmissionAdmission, quoted_target_id: str | None = None,
+        current_images: tuple[ImageReference, ...] = (),
+    ) -> None:
+        """Use the same Side preparation, exact admission and feedback for all inputs."""
         prepared = await self._input_preparer.prepare(
             source_message=source_message,
             quoted_target_id=quoted_target_id,
@@ -2928,10 +2981,10 @@ class ChannelApplication:
         submit_kwargs: dict[str, Any] = dict(
             side_id=side_id,
             input=prepared.native_input,
-            owner_id=prompt.sender_id,
+            owner_id=owner_id,
             origin=reply_origin,
             admission=admission,
-            skill_names=prompt.skill_names,
+            skill_names=skill_names,
         )
         try:
             submission = await self._runtime.submit_side(**submit_kwargs)
@@ -2955,12 +3008,16 @@ class ChannelApplication:
                 )
             ]
             if submission.task_feedback.progress_card_enabled:
+                delivery_options = {}
+                if isinstance(reply_origin, CardAnswerOrigin):
+                    delivery_options["reply"] = lambda card: self._reply_to_origin(reply_origin, card)
                 presenters.append(
                     self._progress_cards.start_side(
                         side_id=submission.side_id,
                         thread_id=submission.thread_id,
                         turn_id=submission.turn_id,
                         origin=reply_origin,
+                        **delivery_options,
                     )
                 )
             if presenters:

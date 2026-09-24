@@ -415,6 +415,7 @@ class _ReplyCardPresenter:
         thread_id: str,
         turn_id: str,
         origin: object,
+        reply: Callable[[OutboundCard], Awaitable[object]] | None = None,
     ) -> bool:
         if self._closed:
             return False
@@ -444,7 +445,11 @@ class _ReplyCardPresenter:
         try:
             card = turn_progress_card(snapshot=snapshot)
             async with asyncio.timeout(self._operation_timeout_seconds):
-                result = await self._channel.reply(origin, card)
+                result = (
+                    await self._channel.reply(origin, card)
+                    if reply is None
+                    else await reply(card)
+                )
         except asyncio.CancelledError:
             raise
         except Exception:

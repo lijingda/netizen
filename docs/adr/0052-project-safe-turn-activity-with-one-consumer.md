@@ -3,9 +3,15 @@ status: accepted
 date: 2026-09-01
 amends: 0020, 0047, 0048, 0049
 related: 0021, 0046, 0051
+amended_by: 0071, 0072
 ---
 
 # 用单一消费链投影安全的 Turn Activity
+
+> [ADR 0071](0071-answer-native-questions-through-binding-input.md) 与
+> [ADR 0072](0072-share-question-interaction-across-binding-and-side.md) 在同一观察链加入
+> 原生问题投影；注册问题 handler 后，普通 Turn 与 Side 即使关闭进度卡也观察问题。
+> 不增加消费者，不改变下文的原生终态权威、Side high-water 回退及唯一 drain。
 
 2026-09-14 展示修订：命令、文件和网页操作直接投影原生字段的有界预览；commentary 保留
 普通路径、链接和代码片段。原生 `commandActions` 是 best-effort 分类，缺少可展示信息时

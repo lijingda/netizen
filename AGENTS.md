@@ -28,8 +28,9 @@ their cited ADRs before changing that boundary.
   [ADR 0067](docs/adr/0067-name-threads-with-private-ephemeral-forks.md).
 - Message provenance, mention catch-up, quotes, and images:
   [input preparation](docs/design.md#消息输入准备).
-  Native question cards and their Binding-bound ordinary input follow
-  [ADR 0071](docs/adr/0071-answer-native-questions-through-binding-input.md).
+  Shared native question cards use target-specific Binding/Side input admission
+  ([ADR 0071](docs/adr/0071-answer-native-questions-through-binding-input.md),
+  [ADR 0072](docs/adr/0072-share-question-interaction-across-binding-and-side.md)).
   Reply Cards, Activity, completion mentions, and Files:
   [presentation](docs/design.md#回复与活动展示).
   Controls and form callbacks: [commands and cards](docs/design.md#飞书命令与控制卡片).

@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import FrozenInstanceError
 
-from netizen.user_questions import format_question_answer, question_item_id
+from netizen.user_questions import (
+    BindingQuestionTarget,
+    SideQuestionTarget,
+    format_question_answer,
+    question_item_id,
+    question_target_payload,
+)
 
 
 def reply_body(text: str) -> list[dict[str, str]]:
@@ -15,6 +22,23 @@ def reply_body(text: str) -> list[dict[str, str]]:
 
 
 class UserQuestionsTest(unittest.TestCase):
+    def test_target_references_preserve_identity_kind_and_are_immutable(self):
+        for target_type, kind, field in (
+            (BindingQuestionTarget, "binding", "binding_id"),
+            (SideQuestionTarget, "side", "side_id"),
+        ):
+            with self.subTest(kind=kind):
+                target = target_type("exact-existing-id")
+                self.assertEqual(question_target_payload(target), {"kind": kind, "id": "exact-existing-id"})
+                with self.assertRaises(FrozenInstanceError):
+                    setattr(target, field, "different-id")
+                for invalid in ("", "bad/id", " leading", "x" * 129, 1, None):
+                    with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                        target_type(invalid)
+        self.assertNotEqual(BindingQuestionTarget("same-id"), SideQuestionTarget("same-id"))
+        with self.assertRaises(TypeError):
+            question_target_payload("untyped-id")
+
     def test_matches_native_156_reply_envelope_and_question_identity(self):
         actual = format_question_answer("item-123", 2, "Which option?", "Option B")
         self.assertEqual(

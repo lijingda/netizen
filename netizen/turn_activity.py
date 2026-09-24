@@ -290,11 +290,11 @@ def project_turn_activity_notification(
     return TurnActivityNotificationProjection(
         turn_id=turn_id,
         event=event,
-        question=_project_question(payload.item.root) if completed else None,
+        question=project_question(payload.item.root) if completed else None,
     )
 
 
-def _project_question(item: object) -> QuestionRequest | None:
+def project_question(item: object) -> QuestionRequest | None:
     """Project the native user-facing question fields, independently of Activity.
 
     Delivery and phase describe the message, not whether its structured questions

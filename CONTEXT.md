@@ -46,8 +46,11 @@ Mention Context Mode、对应 revision、creator 和时间。它不复制 Codex 
 **Active Binding**：Scope 中普通消息默认进入的 Binding。`/new`、`/resume` 只切换
 这条指针，不停止其他 Binding 的 Turn。
 
-**Question Card / 问题卡片**：Codex 向普通会话参与者提出的结构化问题及其建议选项。
-卡片始终属于原会话；该会话需要是当前选中的会话，但不要求原提问任务仍在运行。
+**Question Card / 问题卡片**：Codex 向普通会话或 Side 话题参与者提出的结构化问题及其建议选项。
+卡片始终属于原回答目标，不要求原提问任务仍在运行。
+
+**Question Target / 回答目标**：问题所属的原 Binding 或 Side；回答不会改投当前新选中的
+会话或 Side 的 Parent。Binding 须仍是当前选中的会话，Side 须仍存活且可接收输入。
 
 **Card Answer / 卡片回答**：参与者在问题卡片中明确提交给原会话的一次输入。
 回答者是实际提交者，机器人发送的回答回执只是这次输入的反馈锚点。

@@ -3,9 +3,14 @@ status: accepted
 date: 2026-09-23
 amends: 0020, 0039, 0052
 related: 0029, 0046, 0069, 0070
+amended_by: 0072
 ---
 
 # 将原生结构化问题的回答作为原会话普通输入
+
+> [ADR 0072](0072-share-question-interaction-across-binding-and-side.md) 将本文问答交互扩展
+> 到 Side；以带类型的原回答目标代替 Binding-only 字段，分别复用两类输入准入。
+> 下文最初版本的 Side 排除和仅 Binding 卡片字段由该修订替代，其余输入语义继续保留。
 
 Codex 的结构化问题已经通过 SDK 的 `agentMessage.questions` 到达 Netizen，官方客户端
 使用普通用户输入提交回答。我们为普通 Binding 和其中运行的 Goal 增加自包含问题卡片，

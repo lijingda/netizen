@@ -4,7 +4,7 @@ import unittest
 from enum import Enum
 from types import SimpleNamespace
 
-from openai_codex.generated.v2_all import ModelListResponse, ReasoningEffort
+from openai_codex.generated.v2_all import ModelListResponse, ModelUpgradeInfo, ReasoningEffort
 
 from netizen.model_settings import (
     ModelCatalog,
@@ -49,6 +49,55 @@ def model(
 
 
 class ModelCatalogTest(unittest.TestCase):
+    def test_native_sdk_typed_metadata_is_projected_for_display(self) -> None:
+        response = ModelListResponse.model_validate({"data": [{
+            "id": "alpha", "model": "wire-alpha", "displayName": "Alpha",
+            "description": "Native catalog", "hidden": False, "isDefault": True,
+            "defaultReasoningEffort": "low",
+            "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "Low"}],
+            "inputModalities": ["text", "image"], "upgrade": "beta",
+            "upgradeInfo": {"model": "beta", "upgradeCopy": "Try beta", "retirementAt": 1800000000},
+        }]})
+        projected = ModelCatalog.from_response(response).default_model
+        self.assertEqual(projected.input_modalities, ("text", "image"))
+        self.assertEqual(projected.upgrade, "beta")
+        self.assertIs(projected.upgrade_info, response.data[0].upgrade_info)
+        self.assertEqual(projected.upgrade_info.upgrade_copy, "Try beta")
+
+    def test_display_metadata_does_not_change_model_resolution(self) -> None:
+        raw = model(
+            "alpha", default=True, efforts=[effort(Effort.LOW)],
+            default_effort=Effort.LOW,
+        )
+        raw.input_modalities = ["text", "image"]
+        raw.upgrade = "beta"
+        raw.upgrade_info = ModelUpgradeInfo(
+            model="beta", upgrade_copy="Try beta", migration_markdown="Migration details",
+            model_link="https://example.com/beta", retirement_at=1800000000,
+        )
+        catalog = ModelCatalog.from_response(SimpleNamespace(data=[raw]))
+        projected = catalog.default_model
+        self.assertEqual(projected.input_modalities, ("text", "image"))
+        self.assertEqual(projected.upgrade, "beta")
+        self.assertIs(projected.upgrade_info, raw.upgrade_info)
+        self.assertEqual(
+            catalog.resolve(model_id="alpha", effort_id="low", service_tier_id="default").model,
+            "wire-alpha",
+        )
+
+    def test_optional_display_metadata_can_be_absent(self) -> None:
+        raw = model(
+            "alpha", default=True, efforts=[effort(Effort.LOW)],
+            default_effort=Effort.LOW,
+        )
+        for modalities in (None, "text", [False]):
+            with self.subTest(modalities=modalities):
+                raw.input_modalities = modalities
+                projected = ModelCatalog.from_response(SimpleNamespace(data=[raw])).default_model
+                self.assertIsNone(projected.input_modalities)
+                self.assertIsNone(projected.upgrade)
+                self.assertIsNone(projected.upgrade_info)
+
     def test_native_max_and_ultra_follow_each_models_catalog_capabilities(self) -> None:
         response = ModelListResponse.model_validate(
             {

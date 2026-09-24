@@ -160,10 +160,16 @@ from .turn_activity import (
     TurnActivityKind,
     TurnActivityNotificationProjection,
     TurnPlanStepSnapshot,
+    project_question,
 )
 from .turn_plan_observer import TurnActivityObservation, TurnActivityObserver
 from .turn_patch_children import TaskPatchChildren, collect_turn_patch_children
-from .user_questions import QuestionRequest
+from .user_questions import (
+    BindingQuestionTarget,
+    QuestionRequest,
+    QuestionTarget,
+    SideQuestionTarget,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -190,7 +196,7 @@ _ORDINARY_THREAD_IDLE_SECONDS = 15 * 60
 _NAMING_SHUTDOWN_WAIT_SECONDS = 1.0
 _QUESTION_DELIVERY_TIMEOUT_SECONDS = 20.0
 
-QuestionHandler = Callable[[str, object, QuestionRequest], Awaitable[None]]
+QuestionHandler = Callable[[QuestionTarget, object, QuestionRequest], Awaitable[None]]
 
 
 class _TurnViewUnverified(RuntimeError):
@@ -353,6 +359,7 @@ class _ThreadSubscription:
 
 @dataclass(slots=True)
 class _ActiveSideTurn:
+    side_id: str
     handle: NativeTurnHandle
     owner_id: str
     origin: object
@@ -381,6 +388,7 @@ class _ActiveSideTurn:
     activity_commentary_order: list[str] = field(default_factory=list)
     activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
     activity_operation_order: list[str] = field(default_factory=list)
+    question_ids: set[tuple[str, str]] = field(default_factory=set)
     task: asyncio.Task[None] | None = None
 
 
@@ -488,32 +496,44 @@ class CodexRuntime:
 
     def _deliver_question(
         self,
-        active: _ActiveTurn | _ActiveGoal,
+        active: _ActiveTurn | _ActiveGoal | _ActiveSideTurn,
         turn_id: str,
         request: QuestionRequest,
     ) -> None:
         handler = self._on_question
         identity = (turn_id, request.item_id)
-        if (
-            handler is None
-            or not active.activity_observation_enabled
-            or identity in active.question_ids
-        ):
+        if handler is None or identity in active.question_ids:
             return
+        target: QuestionTarget
+        if isinstance(active, _ActiveSideTurn):
+            session = self._sides.get(active.side_id)
+            if (
+                session is None
+                or session.state is not SideSessionState.OPEN
+                or session.active is not active
+            ):
+                return
+            target = SideQuestionTarget(active.side_id)
+            target_log = {"side_id": active.side_id}
+        else:
+            if not active.activity_observation_enabled:
+                return
+            target = BindingQuestionTarget(active.binding_id)
+            target_log = {"binding_id": active.binding_id}
         active.question_ids.add(identity)
-        binding_id, origin = active.binding_id, active.origin
+        origin = active.origin
 
         async def deliver() -> None:
             try:
                 async with asyncio.timeout(_QUESTION_DELIVERY_TIMEOUT_SECONDS):
-                    await handler(binding_id, origin, request)
+                    await handler(target, origin, request)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.warning(
                     "native question presentation failed",
                     exc_info=True,
-                    extra={"binding_id": binding_id, "turn_id": turn_id},
+                    extra={**target_log, "turn_id": turn_id},
                 )
 
         task = asyncio.create_task(deliver(), name=f"codex-question:{request.item_id}")
@@ -1478,6 +1498,7 @@ class CodexRuntime:
                     receipt_attempted = asyncio.Event()
                     session.terminal_cleanup_succeeded = False
                     active = _ActiveSideTurn(
+                        side_id=side_id,
                         handle=handle,
                         owner_id=owner_id,
                         origin=origin,
@@ -1570,6 +1591,7 @@ class CodexRuntime:
                 self._cancel_side_idle(session)
                 active = session.active
                 if active is not None:
+                    active.activity_observation_enabled = False
                     if active.state is ActiveState.RUNNING:
                         active.state = ActiveState.STOPPING
                         active.activity_revision += 1
@@ -3431,9 +3453,8 @@ class CodexRuntime:
             return None
         active.plan_available = True
         active.plan_cursor = observation.next_cursor
-        if isinstance(active, _ActiveTurn):
-            for request in observation.questions:
-                self._deliver_question(active, active.handle.id, request)
+        for request in observation.questions:
+            self._deliver_question(active, active.handle.id, request)
         if isinstance(active, _ActiveSideTurn) and observation.turn_completed:
             # Steer freshness reads can see completion before the Side loop.
             # Preserve the drain trigger; only handle.run() proves terminal.
@@ -5349,10 +5370,10 @@ class CodexRuntime:
         try:
             # Side Threads are ephemeral. Intentionally use the normal SDK
             # handle path and do not apply persisted-thread completion recovery.
-            # When Activity is enabled, only peek until exact completion is
-            # queued; ``handle.run()`` remains the sole consumer and terminal
-            # authority.
-            if active.task_feedback.progress_card_enabled:
+            # Activity and questions share the same observation loop. Only
+            # peek until exact completion is queued; ``handle.run()`` remains
+            # the sole consumer and terminal authority.
+            if active.task_feedback.progress_card_enabled or self._on_question is not None:
                 while True:
                     observation = self._refresh_turn_activity(active)
                     if observation is None:
@@ -5375,8 +5396,29 @@ class CodexRuntime:
                     if active.completion_notification_seen:
                         break
                     await asyncio.sleep(self._poll_interval_seconds)
+            # Once drain starts, status/steer refreshes must no longer peek at
+            # notifications concurrently consumed by the SDK handle.
+            active.activity_observation_enabled = False
             result = await active.handle.run()
             active.terminal_observed = True
+            # Drain can include questions missed after observation fell back.
+            # Reuse delivery dedup and the live Side guard, without restarting
+            # observation or retrying earlier presentation attempts.
+            if self._on_question is not None:
+                for item in getattr(result, "items", ()):
+                    try:
+                        request = project_question(getattr(item, "root", None))
+                        if request is not None:
+                            self._deliver_question(active, active.handle.id, request)
+                    except Exception as caught:
+                        logger.warning(
+                            "Side result question presentation unavailable",
+                            extra={
+                                "side_id": session.side_id,
+                                "turn_id": active.handle.id,
+                                "error_type": type(caught).__name__,
+                            },
+                        )
         except asyncio.CancelledError:
             raise
         except BaseException as caught:

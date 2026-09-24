@@ -6,7 +6,45 @@ These are presentation values, not pending requests or a question lifecycle.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
+
+
+_TARGET_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}")
+
+
+def _validate_target_id(value: str) -> None:
+    if not isinstance(value, str) or _TARGET_ID.fullmatch(value) is None:
+        raise ValueError("question target requires an exact Binding or Side identity")
+
+
+@dataclass(frozen=True, slots=True)
+class BindingQuestionTarget:
+    binding_id: str
+
+    def __post_init__(self) -> None:
+        _validate_target_id(self.binding_id)
+
+
+@dataclass(frozen=True, slots=True)
+class SideQuestionTarget:
+    side_id: str
+
+    def __post_init__(self) -> None:
+        _validate_target_id(self.side_id)
+
+
+QuestionTarget = BindingQuestionTarget | SideQuestionTarget
+
+
+def question_target_payload(target: QuestionTarget) -> dict[str, str]:
+    """Reference an existing input target without introducing another identity."""
+
+    if isinstance(target, BindingQuestionTarget):
+        return {"kind": "binding", "id": target.binding_id}
+    if isinstance(target, SideQuestionTarget):
+        return {"kind": "side", "id": target.side_id}
+    raise TypeError("question target must reference a Binding or Side")
 
 
 @dataclass(frozen=True, slots=True)

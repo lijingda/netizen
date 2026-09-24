@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from openai_codex.generated.v2_all import ModelUpgradeInfo
+
 
 # App Server uses this protocol-level request value to explicitly select
 # Standard processing instead of inheriting a previous accelerated tier.  It
@@ -43,6 +45,9 @@ class ModelOption:
     default_service_tier_id: str
     efforts: tuple[EffortOption, ...]
     service_tiers: tuple[ServiceTierOption, ...]
+    input_modalities: tuple[str, ...] | None = None
+    upgrade: str | None = None
+    upgrade_info: ModelUpgradeInfo | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +173,11 @@ def _model_option(raw: Any) -> ModelOption:
         "model.display_name",
     )
     description = str(getattr(raw, "description", "") or "")
+    raw_modalities = getattr(raw, "input_modalities", None)
+    modalities = (
+        tuple(getattr(item, "value", item) for item in raw_modalities)
+        if isinstance(raw_modalities, list) else None
+    )
 
     efforts = tuple(
         _effort_option(option)
@@ -218,6 +228,17 @@ def _model_option(raw: Any) -> ModelOption:
         default_service_tier_id=default_tier_id,
         efforts=efforts,
         service_tiers=tiers,
+        input_modalities=(
+            modalities
+            if modalities is not None and all(isinstance(item, str) for item in modalities)
+            else None
+        ),
+        upgrade=(getattr(raw, "upgrade", None) or None),
+        upgrade_info=(
+            raw.upgrade_info
+            if isinstance(getattr(raw, "upgrade_info", None), ModelUpgradeInfo)
+            else None
+        ),
     )
 
 

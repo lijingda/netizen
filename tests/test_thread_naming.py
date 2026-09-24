@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from copy import deepcopy
 from types import SimpleNamespace
@@ -24,7 +25,7 @@ class NamingHandle:
         self.interrupt_completes = True
         self.error: Exception | None = None
         self.result = SimpleNamespace(
-            id=self.id, status="completed", final_response="会话自动命名",
+            id=self.id, status="completed", final_response='{"title":"会话自动命名"}',
         )
         self.run_calls = 0
         self.run_cancelled = False
@@ -220,7 +221,14 @@ class ThreadNamerTest(unittest.IsolatedAsyncioTestCase):
         await self.drain()
         self.assertEqual(self.commits, [("binding", "parent", "会话自动命名")])
         self.assertEqual(self.codex.fork_calls, [("parent", {"ephemeral": True, "include_turns": False})])
-        self.assertEqual(self.codex.child.turn_calls, [(NAMING_PROMPT, {})])
+        self.assertEqual(self.codex.child.turn_calls, [(NAMING_PROMPT, {
+            "output_schema": {
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+                "additionalProperties": False,
+            },
+        })])
         self.assertEqual(self.codex.child.handle.run_calls, 1)
         self.assertNotIn(("interrupt", "private-fork"), self.events)
         self.assert_child_cleanup()
@@ -522,13 +530,44 @@ class ThreadNamerTest(unittest.IsolatedAsyncioTestCase):
             ("title", "completed", "wrong-turn"),
         ):
             with self.subTest(title=title, status=status, result_id=result_id):
-                handle.result.final_response = title
+                handle.result.final_response = json.dumps({"title": title})
                 handle.result.status = status
                 handle.result.id = result_id
                 handle.finished.set()
                 self.start()
                 await self.drain()
         self.assertEqual(self.commits, [])
+
+    async def test_invalid_structured_output_is_skipped_and_releases_attempt(self) -> None:
+        handle = self.codex.child.handle
+        for response in (
+            None, "", "legacy plain title", '{"title":',
+            '```json\n{"title":"name"}\n```',
+            'null', '[]', '{}', '"name"',
+            '{"title":null}', '{"title":1}', '{"title":[]}',
+            '{"title":"name","explanation":"extra"}',
+        ):
+            with self.subTest(response=response):
+                handle.result.final_response = response
+                handle.finished.set()
+                self.start()
+                await self.drain()
+                self.assertEqual(self.commits, [])
+                self.assertNotIn("binding", self.namer._jobs)
+                self.assertEqual(self.events[-2:], [
+                    ("clean", "private-fork"), ("unsubscribe", "private-fork"),
+                ])
+
+    async def test_structured_output_accepts_json_formatting_and_valid_title_bounds(self) -> None:
+        handle = self.codex.child.handle
+        for title in (' 名称 ', 'a' * 120, '修复 "标题" 转义'):
+            with self.subTest(title=title):
+                handle.result.final_response = json.dumps({"title": title}, indent=2)
+                handle.finished.set()
+                self.start()
+                await self.drain()
+                self.assertEqual(self.commits[-1], ("binding", "parent", title.strip()))
+                self.assertNotIn("binding", self.namer._jobs)
 
     async def test_wrong_fork_cannot_clean_parent(self) -> None:
         self.codex.child.id = self.parent.id
@@ -673,4 +712,10 @@ class ThreadNamerTest(unittest.IsolatedAsyncioTestCase):
         await self.drain()
         self.assertEqual(self.codex.child.turn_calls[0][1], {
             "model": "model-wire", "effort": "low", "service_tier": "default",
+            "output_schema": {
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+                "additionalProperties": False,
+            },
         })

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..prompt_projection import PromptProjectionError, project_identity
+from ..user_questions import QuestionTarget
 from .ports import ReplyChannel
 
 
@@ -23,7 +24,7 @@ class CardAnswerOrigin:
     message_id: str
     conversation: CardAnswerConversation
     source_card_id: str
-    binding_id: str
+    target: QuestionTarget
 
     @property
     def id(self) -> str:
