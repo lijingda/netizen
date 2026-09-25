@@ -34,6 +34,8 @@ class Settings:
     projects: dict[str, Path] = field(default_factory=dict)
     security_mode: str = "audit"
     admin_web: AdminWebSettings = AdminWebSettings()
+    # Optional experiment assembly; not a user-editable YAML or environment key.
+    decision_model_config_path: Path | None = field(default=None, repr=False)
 
     @classmethod
     def from_file(
@@ -101,6 +103,7 @@ class Settings:
             projects=projects,
             security_mode=security_mode,
             admin_web=admin_web,
+            decision_model_config_path=config_path.parent / "credentials" / "decision-model.json",
         )
 
 

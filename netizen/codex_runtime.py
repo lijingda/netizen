@@ -2663,6 +2663,7 @@ class CodexRuntime:
         task_feedback: BindingTaskFeedback,
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
+        autonomy_enabled: bool | None = None,
     ) -> ThreadBinding:
         """Atomically update Turn settings, context, and task feedback."""
 
@@ -2709,6 +2710,7 @@ class CodexRuntime:
                 task_feedback=task_feedback,
                 message_context_mode=message_context_mode,
                 context_anchor=context_anchor,
+                **({"autonomy_enabled": autonomy_enabled} if autonomy_enabled is not None else {}),
             )
             if (
                 updated.settings_revision != binding.settings_revision
@@ -2796,6 +2798,7 @@ class CodexRuntime:
         admission: SubmissionAdmission | None = None,
         context_commit: ContextCursorCommit | None = None,
         skill_names: tuple[str, ...] = (),
+        input_guard: Callable[[], None] | None = None,
     ) -> Submission:
         active = self._active.get(binding.id)
         if (
@@ -2808,6 +2811,7 @@ class CodexRuntime:
             binding=binding, cwd=cwd, input=input, owner_id=owner_id,
             origin=origin, admission=admission, context_commit=context_commit,
             skill_names=skill_names,
+            input_guard=input_guard,
         )
 
     async def submit_initial(
@@ -2867,6 +2871,7 @@ class CodexRuntime:
         context_commit: ContextCursorCommit | None = None,
         skill_names: tuple[str, ...] = (),
         initial: _ScheduledInitialSubmission | None = None,
+        input_guard: Callable[[], None] | None = None,
     ) -> Submission:
         initial_run_id = initial.run_id if initial is not None else None
         if initial_run_id is None:
@@ -3045,6 +3050,8 @@ class CodexRuntime:
                 admission=admission,
                 goal=goal,
             )
+            if input_guard is not None:
+                input_guard()
             self._advance_admission_revision(binding.id)
             if goal is not None:
                 assert admission is not None and admission.turn_id is not None
@@ -3157,6 +3164,15 @@ class CodexRuntime:
                     )
                     raise
 
+            # Optional input selectors can be revoked while Thread start/resume
+            # is in flight. Keep its exact identity, but send no prompt after
+            # revocation. This is not an unknown native mutation failure.
+            if input_guard is not None:
+                try:
+                    input_guard()
+                except BaseException:
+                    self._schedule_known_subscription_locked(binding.id, thread.id)
+                    raise
             try:
                 turn_kwargs: dict[str, object] = {}
                 if resolved_settings is not None:

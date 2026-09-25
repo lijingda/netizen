@@ -343,6 +343,8 @@ schema version、Channel SDK dedup TTL key、Binding 上可选的 Binding Turn S
 metadata，以及不含 native ID/content 的 Side Topic Route/墓碑；不保存补充消息正文、
 解析后的 wire value、Codex 已生效配置、Turn Activity Projection、Progress Card session、
 普通 Thread 订阅状态或空闲 timer。
+自主模式实验分支的窄例外见 [ADR 0073](docs/adr/0073-isolate-experimental-autonomous-ingress.md)：
+专属表保存 Decision Context 与待最终结果的 Turn 引用；这不是原生会话历史副本。
 
 **Channel Participant / Channel 参与者**：飞书应用权限允许其消息到达 Netizen 的
 发送者。Netizen 不再按 user、chat 或角色做二次准入；同一普通 Scope 的参与者共享

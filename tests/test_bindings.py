@@ -843,6 +843,10 @@ class BindingStoreTest(unittest.TestCase):
                 "schedule_plans",
                 "schedule_runs",
                 "schedule_requests",
+                "autonomy_bindings",
+                "autonomy_records",
+                "autonomy_pending_turns",
+                "sqlite_sequence",
             },
         )
         self.assertTrue(
@@ -851,7 +855,6 @@ class BindingStoreTest(unittest.TestCase):
                 "response",
                 "cwd_copy",
                 "turn_status",
-                "turn_id",
                 "queue",
                 "effective_model",
                 "effective_effort",
@@ -861,6 +864,7 @@ class BindingStoreTest(unittest.TestCase):
         for column, owning_table in (
             ("instructions", "schedule_plans"),
             ("initial_turn_id", "schedule_runs"),
+            ("turn_id", "autonomy_pending_turns"),
         ):
             self.assertEqual(
                 {

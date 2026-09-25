@@ -80,6 +80,7 @@ from .model_info import with_model_details
 SESSIONS_PAGE_SIZE = 10
 MAX_THREAD_NAME_CHARS = 120
 MAX_SETTING_ID_CHARS = 128
+_AUTONOMOUS_MODE_REFERENCE = "autonomy:v1:enabled"
 _RENAME_NAME_FIELD = re.compile(
     r"rename_name_v1__([A-Za-z0-9][A-Za-z0-9-]{0,127})"
 )
@@ -321,6 +322,8 @@ def _new_binding_form(
     allow_context_mode: bool,
     message_context_mode: MentionContextMode,
     task_feedback: BindingTaskFeedback,
+    show_autonomy: bool = False,
+    autonomy_enabled: bool = False,
 ) -> dict[str, Any]:
     initial_project = next(
         (
@@ -375,6 +378,8 @@ def _new_binding_form(
             _context_mode_form_elements(
                 prefix="new",
                 initial_mode=message_context_mode,
+                show_autonomy=show_autonomy,
+                autonomy_enabled=autonomy_enabled,
             )
         )
     elements.extend(
@@ -401,6 +406,8 @@ def _binding_config_form(
     task_feedback: BindingTaskFeedback,
     allow_context_mode: bool,
     catalog: ModelCatalog | None,
+    show_autonomy: bool = False,
+    autonomy_enabled: bool = False,
 ) -> dict[str, Any]:
     def model_reference(model_id: str | None) -> str:
         return _config_model_reference(
@@ -439,6 +446,8 @@ def _binding_config_form(
             _context_mode_form_elements(
                 prefix="config",
                 initial_mode=message_context_mode,
+                show_autonomy=show_autonomy,
+                autonomy_enabled=autonomy_enabled,
             )
         )
     elements.extend(
@@ -536,29 +545,45 @@ def _context_mode_form_elements(
     *,
     prefix: str,
     initial_mode: MentionContextMode,
+    show_autonomy: bool = False,
+    autonomy_enabled: bool = False,
 ) -> list[dict[str, Any]]:
+    options = (
+        (
+            "仅这条 @ 消息（默认）",
+            _context_mode_reference(MentionContextMode.CURRENT_ONLY),
+        ),
+        (
+            "自动带上期间的群聊讨论",
+            _context_mode_reference(MentionContextMode.CATCH_UP),
+        ),
+    )
+    hint = (
+        "机器人始终只响应 @ 它的消息。选择“自动带上”后，"
+        "两次 @ 之间群里其他成员未 @ 机器人的消息，"
+        "也会在下一次 @ 时被读取，作为背景交给 Codex。"
+    )
+    label = "@ 时读取的消息范围"
+    initial_option = _context_mode_reference(initial_mode)
+    if show_autonomy:
+        options += (("自主模式（实验）", _AUTONOMOUS_MODE_REFERENCE),)
+        label = "消息模式"
+        hint = (
+            "前两种模式只响应 @；选择“自动带上”会同时读取两次 @ 之间的群聊讨论。"
+            "自主模式由所配置的决策服务判断未 @ 消息是否需要处理，不自动带入历史。"
+            "显式 @ 仍可直接触发；判定跳过时不发送通知。"
+        )
+        if autonomy_enabled:
+            initial_option = _AUTONOMOUS_MODE_REFERENCE
     return [
-        _form_label("@ 时读取的消息范围"),
+        _form_label(label),
         _static_select(
             name=f"{prefix}_context_mode",
-            placeholder="选择 @ 时读取的消息范围",
-            options=(
-                (
-                    "仅这条 @ 消息（默认）",
-                    _context_mode_reference(MentionContextMode.CURRENT_ONLY),
-                ),
-                (
-                    "自动带上期间的群聊讨论",
-                    _context_mode_reference(MentionContextMode.CATCH_UP),
-                ),
-            ),
-            initial_option=_context_mode_reference(initial_mode),
+            placeholder=f"选择{label}",
+            options=options,
+            initial_option=initial_option,
         ),
-        _form_hint(
-            "机器人始终只响应 @ 它的消息。选择“自动带上”后，"
-            "两次 @ 之间群里其他成员未 @ 机器人的消息，"
-            "也会在下一次 @ 时被读取，作为背景交给 Codex。"
-        ),
+        _form_hint(hint),
     ]
 
 
@@ -766,6 +791,8 @@ def new_binding_card(
     allow_context_mode: bool = True,
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
     task_feedback: BindingTaskFeedback | None = None,
+    show_autonomy: bool = False,
+    autonomy_enabled: bool = False,
 ) -> OutboundCard:
     builder = _builder("新建会话", "选择项目，开始一次对话")
     builder.markdown(
@@ -801,6 +828,8 @@ def new_binding_card(
                 task_feedback=(
                     task_feedback or SessionSettings.new_defaults(catalog).task_feedback
                 ),
+                show_autonomy=show_autonomy and scope.kind is not ScopeKind.DIRECT,
+                autonomy_enabled=autonomy_enabled,
             )
         )
     return OutboundCard(card=with_model_details(builder.to_dict(), catalog if projects else None))
@@ -821,6 +850,8 @@ def config_card(
     task_feedback: BindingTaskFeedback | None = None,
     allow_context_mode: bool = True,
     catalog_error: str | None = None,
+    show_autonomy: bool = False,
+    autonomy_enabled: bool = False,
 ) -> OutboundCard:
     builder = _builder("当前会话配置", f"{short_id} · {project_alias}")
     builder.markdown(
@@ -861,6 +892,8 @@ def config_card(
             task_feedback=task_feedback or BindingTaskFeedback(),
             allow_context_mode=allow_context_mode,
             catalog=catalog,
+            show_autonomy=show_autonomy and scope.kind is not ScopeKind.DIRECT,
+            autonomy_enabled=autonomy_enabled,
         )
     )
     return OutboundCard(card=with_model_details(builder.to_dict(), catalog))
@@ -1535,6 +1568,7 @@ def binding_created_card(
     settings: TurnModelSettings | None = None,
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
     task_feedback: BindingTaskFeedback | None = None,
+    autonomy_enabled: bool = False,
 ) -> OutboundCard:
     builder = _builder(
         "会话创建成功",
@@ -1548,10 +1582,16 @@ def binding_created_card(
     builder.markdown(
         "现在可以直接发送任务，例如：**梳理这个项目的结构。**\n"
         "如果刚才的任务因没有会话而未执行，请重新发送。\n"
-        "在群聊和群话题中，每条消息都需要 @机器人。"
+        + (
+            "未 @ 消息将由决策模型判断，明确需要处理时仍可 @机器人。"
+            if autonomy_enabled
+            else "在群聊和群话题中，每条消息都需要 @机器人。"
+        )
     )
     builder.markdown(_model_source_summary(settings))
-    builder.markdown(_context_mode_summary(message_context_mode))
+    builder.markdown(
+        _context_mode_summary(message_context_mode, autonomy_enabled=autonomy_enabled)
+    )
     builder.markdown(
         _task_feedback_summary(task_feedback or BindingTaskFeedback())
     )
@@ -1565,6 +1605,7 @@ def binding_configured_card(
     settings: TurnModelSettings | None,
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
     task_feedback: BindingTaskFeedback | None = None,
+    autonomy_enabled: bool = False,
 ) -> OutboundCard:
     builder = _builder(
         "会话配置已保存",
@@ -1572,7 +1613,9 @@ def binding_configured_card(
         template="green",
     )
     builder.markdown(_model_source_summary(settings))
-    builder.markdown(_context_mode_summary(message_context_mode))
+    builder.markdown(
+        _context_mode_summary(message_context_mode, autonomy_enabled=autonomy_enabled)
+    )
     builder.markdown(
         _task_feedback_summary(task_feedback or BindingTaskFeedback())
     )
@@ -1590,7 +1633,14 @@ def _model_source_summary(settings: TurnModelSettings | None) -> str:
     )
 
 
-def _context_mode_summary(mode: MentionContextMode) -> str:
+def _context_mode_summary(
+    mode: MentionContextMode, *, autonomy_enabled: bool = False,
+) -> str:
+    if autonomy_enabled:
+        return (
+            "消息模式：自主模式（实验）。未 @ 消息由决策模型判断是否处理；"
+            "显式 @ 直接触发，不自动带入历史。"
+        )
     if mode is MentionContextMode.CATCH_UP:
         return (
             "@ 时读取的消息范围：自动带上期间的群聊讨论。"
@@ -1928,6 +1978,21 @@ def decode_card_form(
     )
 
 
+def _normalize_binding_message_mode(
+    payload: dict[str, Any], *, prefix: str, scope: FeishuScope,
+) -> bool | None:
+    """Keep the experimental choice out of shared and scheduled settings."""
+    field = f"{prefix}_context_mode"
+    if field not in payload:
+        return None
+    if payload[field] != _AUTONOMOUS_MODE_REFERENCE:
+        return False
+    if scope.kind is ScopeKind.DIRECT:
+        raise CardActionError("自主模式仅适用于群聊或普通群话题。")
+    payload[field] = _context_mode_reference(MentionContextMode.CURRENT_ONLY)
+    return True
+
+
 def _decode_new_binding_form(
     *,
     scope: FeishuScope,
@@ -1963,6 +2028,9 @@ def _decode_new_binding_form(
     model_id = _decode_new_model_reference(
         _required_string(payload["new_model"], "new_model")
     )
+    autonomy_enabled = _normalize_binding_message_mode(
+        payload, prefix="new", scope=scope,
+    )
     settings = decode_session_settings_fields(payload, prefix="new", model_id=model_id)
     turn = settings.turn_settings
     return CardControlIntent(
@@ -1976,6 +2044,7 @@ def _decode_new_binding_form(
         effort_id=turn.effort_id if turn else None,
         service_tier_id=turn.service_tier_id if turn else None,
         message_context_mode=settings.message_context_mode,
+        autonomy_enabled=autonomy_enabled,
         reaction_pulse_enabled=settings.task_feedback.reaction_pulse_enabled,
         progress_card_enabled=settings.task_feedback.progress_card_enabled,
         completion_mention_enabled=settings.task_feedback.completion_mention_enabled,
@@ -2018,6 +2087,9 @@ def _decode_config_form(
     ) = _decode_config_model_reference(
         _required_string(payload["config_model"], "config_model")
     )
+    autonomy_enabled = _normalize_binding_message_mode(
+        payload, prefix="config", scope=scope,
+    )
     settings = decode_session_settings_fields(payload, prefix="config", model_id=model_id)
     turn = settings.turn_settings
     return CardControlIntent(
@@ -2033,6 +2105,7 @@ def _decode_config_form(
         effort_id=turn.effort_id if turn else None,
         service_tier_id=turn.service_tier_id if turn else None,
         message_context_mode=settings.message_context_mode,
+        autonomy_enabled=autonomy_enabled,
         reaction_pulse_enabled=settings.task_feedback.reaction_pulse_enabled,
         progress_card_enabled=settings.task_feedback.progress_card_enabled,
         completion_mention_enabled=settings.task_feedback.completion_mention_enabled,

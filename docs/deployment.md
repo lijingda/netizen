@@ -1198,8 +1198,9 @@ admission，修复文件后仍需 `./service.sh restart`，不会自动重新开
 HTTP；不得把该端口直接暴露到不受信网络。
 
 `instance.projectRoot` 是必填的绝对路径，用于限制从飞书自动创建的空 Project；它不是
-Binding 的默认 cwd。Channel 服务与安装器只支持当前 schema v13，不保留历史版本
+Binding 的默认 cwd。本实验分支 Channel 服务与安装器只支持 schema v14，不保留历史版本
 自动迁移。新库直接创建完整表结构；已有库须通过只读的版本、结构和完整性校验。
+自主模式新增专属表，不兼容 main 的 v13 库；此分支仅使用隔离的新库做实验，不直接升级运行中实例。
 `schedule_plans`、`schedule_runs` 和 `schedule_requests` 仅保存当前计划指令与会话配置、
 最小调度交接/initial Turn 引用及有界管理请求去重，不复制原生历史。
 当前库重装保留 Scope/Binding/Project、去重记录及 `side_topics` 永久墓碑；激活仍在

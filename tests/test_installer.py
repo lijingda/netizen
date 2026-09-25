@@ -1403,6 +1403,7 @@ class NetizenInstallerTest(unittest.TestCase):
             activate.assert_called_once()
             self.assertIn("cli_installed", layout.lark_app_file.read_text())
             self.assertEqual(self._secret(layout), "installed-secret")
+            self.assertFalse((layout.product_root / "credentials" / "decision-model.json").exists())
 
     def test_admin_secret_is_preserved_and_invalid_existing_file_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

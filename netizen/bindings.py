@@ -19,6 +19,11 @@ from enum import Enum
 from pathlib import Path
 from typing import TypeVar
 
+from .autonomy.store import (
+    AutonomyStore,
+    create_schema as create_autonomy_schema,
+    require_schema as require_autonomy_schema,
+)
 from .domain import (
     FeishuScope,
     MentionContextMode,
@@ -32,7 +37,7 @@ from .schedules.store import (
 from .session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 PROJECT_DELETE_LIMIT = 1000
 
 
@@ -440,6 +445,7 @@ def _require_current_schema(connection: sqlite3.Connection) -> None:
         )
     _require_project_metadata_schema(connection)
     require_schema(connection)
+    require_autonomy_schema(connection)
 
 
 def _require_project_metadata_schema(
@@ -574,6 +580,9 @@ class BindingStore:
         )
         self._connection.row_factory = sqlite3.Row
         self.schedules = ScheduleStore(self)
+        self.autonomy = AutonomyStore(
+            self._connection, transaction=self._transaction, lock=self._lock,
+        )
         try:
             self._initialize()
             if not self._is_memory:
@@ -811,8 +820,10 @@ class BindingStore:
                     self._connection.execute(statement)
                 if rows:
                     require_schema(self._connection)
+                    require_autonomy_schema(self._connection)
                 else:
                     create_schema(self._connection)
+                    create_autonomy_schema(self._connection)
                 if not rows:
                     self._connection.execute(
                         "INSERT INTO schema_version(version) VALUES (?)",
@@ -870,6 +881,7 @@ class BindingStore:
         task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
         message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
         context_anchor: MessageContextAnchor | None = None,
+        autonomy_enabled: bool = False,
     ) -> ThreadBinding:
         """Compatibility entry point for older callers.
 
@@ -892,6 +904,7 @@ class BindingStore:
             activate=True,
             allow_scope_insert=True,
             allow_empty_project_registry=True,
+            autonomy_enabled=autonomy_enabled,
         )
 
     def create_channel_binding(
@@ -905,6 +918,7 @@ class BindingStore:
         task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
         message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
         context_anchor: MessageContextAnchor | None = None,
+        autonomy_enabled: bool = False,
     ) -> ThreadBinding:
         """Atomically validate Project state, upsert exact Scope, and activate."""
 
@@ -922,6 +936,7 @@ class BindingStore:
             activate=True,
             allow_scope_insert=True,
             allow_empty_project_registry=False,
+            autonomy_enabled=autonomy_enabled,
         )
 
     def create_admin_binding(
@@ -968,6 +983,7 @@ class BindingStore:
         allow_scope_insert: bool,
         allow_empty_project_registry: bool,
         scheduled_run_id: str | None = None,
+        autonomy_enabled: bool = False,
     ) -> ThreadBinding:
         if not project_alias or not creator_id:
             raise ValueError("Binding Project and creator must not be empty")
@@ -975,6 +991,9 @@ class BindingStore:
             scope_kind=scope.kind,
             mode=message_context_mode,
             anchor=context_anchor,
+        )
+        _validate_autonomy_mode(
+            scope_kind=scope.kind, mode=message_context_mode, enabled=autonomy_enabled,
         )
         binding_id = self._id_factory()
         now = _now()
@@ -1100,6 +1119,8 @@ class BindingStore:
                     """,
                     (binding_id, now, scope.key),
                 )
+            if autonomy_enabled:
+                self.autonomy.set_enabled(binding_id, True)
             if scheduled_run_id is not None:
                 self.schedules._set_run(
                     scheduled_run_id, phase="binding_ready", binding_id=binding_id,
@@ -1250,6 +1271,7 @@ class BindingStore:
         task_feedback: BindingTaskFeedback,
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
+        autonomy_enabled: bool | None = None,
     ) -> ThreadBinding:
         """Atomically replace Turn settings, context, and task feedback.
 
@@ -1266,6 +1288,8 @@ class BindingStore:
             raise ValueError("expected feedback revision must be positive")
         if not isinstance(message_context_mode, MentionContextMode):
             raise ValueError("message context mode must be a MentionContextMode")
+        if autonomy_enabled is not None and type(autonomy_enabled) is not bool:
+            raise ValueError("autonomy_enabled must be a boolean or None")
         settings_values = _settings_values(settings)
         feedback_values = _feedback_values(task_feedback)
         with self._transaction():
@@ -1321,6 +1345,15 @@ class BindingStore:
                 mode=message_context_mode,
                 anchor=next_anchor,
             )
+            current_autonomy = self.autonomy.is_enabled(binding_id)
+            next_autonomy = current_autonomy if autonomy_enabled is None else autonomy_enabled
+            if message_context_mode is MentionContextMode.CATCH_UP and autonomy_enabled is None:
+                next_autonomy = False
+            _validate_autonomy_mode(
+                scope_kind=scope_kind, mode=message_context_mode, enabled=next_autonomy,
+            )
+            autonomy_changed = current_autonomy != next_autonomy
+            context_changed = context_changed or autonomy_changed
 
             settings_changed = current_settings != settings_values
             current_feedback = (
@@ -1372,6 +1405,8 @@ class BindingStore:
             )
             if cursor.rowcount != 1:
                 raise BindingConflict("Binding configuration changed concurrently")
+            if autonomy_changed:
+                self.autonomy.set_enabled(binding_id, next_autonomy)
         return self.get(binding_id)
 
     def commit_context_anchor(
@@ -2919,6 +2954,17 @@ def _context_values(
     if not isinstance(anchor, MessageContextAnchor):
         raise ValueError("context anchor must be a MessageContextAnchor")
     return (anchor.message_id, anchor.create_time_ms)
+
+
+def _validate_autonomy_mode(
+    *, scope_kind: ScopeKind, mode: MentionContextMode, enabled: bool,
+) -> None:
+    if type(enabled) is not bool:
+        raise ValueError("autonomy_enabled must be a boolean")
+    if enabled and (
+        scope_kind is ScopeKind.DIRECT or mode is not MentionContextMode.CURRENT_ONLY
+    ):
+        raise ValueError("autonomy requires a group/topic Binding with current-only context")
 
 
 def _validate_context_state(

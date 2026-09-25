@@ -192,6 +192,8 @@ class StubRuntime:
         return await self.release_binding(self.binding_store.get(binding_id))
 
     async def submit(self, **kwargs) -> Submission:
+        if kwargs.get("input_guard") is not None:
+            kwargs["input_guard"]()
         if self.enforce_active_submission:
             assert self.binding_store is not None
             binding = self.binding_store.get(kwargs["binding"].id)
@@ -549,6 +551,7 @@ class StubRuntime:
         task_feedback: BindingTaskFeedback,
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
+        autonomy_enabled: bool | None = None,
     ):
         self.configure_settings_calls.append(
             {
@@ -572,6 +575,7 @@ class StubRuntime:
             task_feedback=task_feedback,
             message_context_mode=message_context_mode,
             context_anchor=context_anchor,
+            **({"autonomy_enabled": autonomy_enabled} if autonomy_enabled is not None else {}),
         )
 
     def active_turn(self, binding_id: str) -> ActiveTurnSnapshot | None:

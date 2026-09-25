@@ -31,8 +31,10 @@ class ScheduleUiTest(unittest.TestCase):
         before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_SCHEDULE_CONTROLLER\n")
         dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
         result = subprocess.run(
-            [node, "-e", "const htmlTree = " + json.dumps(tree.root) + ";\n"
-             + dom + before + payload + helpers + project_options + controller + listeners + after],
+            [node, "-"],
+            # The page tree and controller can exceed the OS per-argument limit.
+            input="const htmlTree = " + json.dumps(tree.root) + ";\n"
+            + dom + before + payload + helpers + project_options + controller + listeners + after,
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

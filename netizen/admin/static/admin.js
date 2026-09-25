@@ -2371,6 +2371,7 @@ async function refresh(tab, cursor = undefined) {
     if (tab === "side-topics") await loadSides(cursor || null);
     if (tab === "updates") await loadUpdates();
     if (tab === "schedules") await loadSchedules(cursor || null);
+    if (tab === "autonomy") await loadAutonomy();
     setStatus("已更新。");
     return true;
   } catch (error) {

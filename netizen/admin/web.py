@@ -68,6 +68,7 @@ from .queries import (
     _text_set_query,
 )
 from .transport import AdminHttpTransport, Request, Response
+from ..autonomy import AutonomyConflict, AutonomyError
 from ..bindings import (
     AmbiguousBinding,
     BindingNotFound,
@@ -474,6 +475,12 @@ class AdminWebApplication:
                 ((b"Content-Type", b"text/javascript; charset=utf-8"),),
                 self._assets["admin.js"],
             )
+        if route == ("GET", "/static/autonomy.js"):
+            return Response(
+                200,
+                ((b"Content-Type", b"text/javascript; charset=utf-8"),),
+                self._assets["autonomy.js"],
+            )
         if route == ("POST", "/logout"):
             self._auth.logout(context.session_token)
             return Response(
@@ -497,8 +504,15 @@ class AdminWebApplication:
             return self._updates_response(
                 context, await self._management.update_status()
             )
+        if route == ("GET", "/api/v1/autonomy"):
+            _require_query_keys(context.query, set())
+            return self._autonomy_response(
+                context, await self._management.autonomy_status()
+            )
 
         mutations: dict[str, Callable[[_RequestContext], Awaitable[Response]]] = {
+            "/api/v1/autonomy/configure": self._autonomy_configure,
+            "/api/v1/autonomy/test": self._autonomy_test,
             "/api/v1/schedules/create": self._schedule_create,
             "/api/v1/schedules/update": self._schedule_update,
             "/api/v1/schedules/delete": self._schedule_delete,
@@ -529,6 +543,70 @@ class AdminWebApplication:
         if handler is not None:
             return await handler(context)
         raise AdminWebError(404, "not_found", "管理接口不存在。")
+
+    def _autonomy_response(
+        self, context: _RequestContext, status: dict[str, Any]
+    ) -> Response:
+        # Explicit projection keeps secrets out even if the service gains fields.
+        payload = {key: status[key] for key in (
+            "supported", "revision", "configured", "state", "error",
+        )}
+        config = status.get("config")
+        payload["config"] = None if config is None else {
+            key: config[key] for key in (
+                "provider", "base_url", "model", "has_api_key",
+                "timeout_seconds", "input_budget",
+            )
+        }
+        target = AdminActionTarget("autonomy-config", str(status["revision"]))
+        payload["actions"] = {
+            name: self._grant(context, f"autonomy.{name}", target, _empty_preconditions())
+            if status["supported"] and (name == "configure" or status["configured"])
+            else None
+            for name in ("configure", "test")
+        }
+        return _json_response(200, {**payload, "requestId": context.request.request_id})
+
+    async def _autonomy_configure(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        payload, grant = self._redeem(
+            context, "autonomy.configure", expected_resource="autonomy-config",
+            allowed_extra={"config"},
+        )
+        config = payload.get("config")
+        if not isinstance(config, dict) or set(config) - {
+            "provider", "base_url", "model", "api_key", "clear_api_key",
+            "timeout_seconds", "input_budget", "clear",
+        }:
+            raise AdminWebError(400, "invalid_input", "决策模型配置字段无效。")
+        if any(key in config and type(config[key]) is not bool for key in ("clear", "clear_api_key")):
+            raise AdminWebError(400, "invalid_input", "清除配置和密钥的选项必须是布尔值。")
+        if config.get("clear") is True and set(config) != {"clear"}:
+            raise AdminWebError(400, "invalid_input", "清除配置不能同时提交新配置字段。")
+        status = await self._mutation(
+            context, "autonomy.configure", grant.target.target_id,
+            self._management.configure_autonomy({
+                **config, "expected_revision": int(grant.target.target_id),
+            }),
+        )
+        return self._autonomy_response(context, status)
+
+    async def _autonomy_test(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        _, grant = self._redeem(
+            context, "autonomy.test", expected_resource="autonomy-config",
+        )
+        # No caller-supplied state, prompt, messages, URL or secret is accepted.
+        result = await self._mutation(
+            context, "autonomy.test", grant.target.target_id,
+            self._management.test_autonomy_connection(
+                expected_revision=int(grant.target.target_id),
+            ),
+        )
+        return _json_response(200, {
+            **{key: result[key] for key in ("ok", "revision", "error")},
+            "requestId": context.request.request_id,
+        })
 
     def _updates_response(
         self, context: _RequestContext, status: dict[str, Any]
@@ -2034,7 +2112,7 @@ def _format_authority(host: str, port: int) -> str:
 def _load_assets() -> dict[str, bytes]:
     root = importlib.resources.files("netizen.admin").joinpath("static")
     assets: dict[str, bytes] = {}
-    for name in ("index.html", "admin.css", "admin.js"):
+    for name in ("index.html", "admin.css", "admin.js", "autonomy.js"):
         assets[name] = root.joinpath(name).read_bytes()
     return assets
 
@@ -2443,6 +2521,10 @@ _UPDATE_HTTP_ERRORS = {
 def _map_error(error: BaseException) -> AdminWebError | None:
     if isinstance(error, AdminWebError):
         return error
+    if isinstance(error, AutonomyConflict):
+        return AdminWebError(409, "autonomy_revision_conflict", "决策配置已变化，请刷新后重试。")
+    if isinstance(error, AutonomyError):
+        return AdminWebError(400, "autonomy_invalid_config", str(error))
     if isinstance(error, ThreadOccupied):
         return AdminWebError(409, "thread_occupied", str(error))
     if isinstance(error, UpdateError):

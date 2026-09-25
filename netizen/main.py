@@ -50,6 +50,7 @@ import lark_oapi as lark
 from openai_codex import AsyncCodex, CodexConfig
 
 from .admin.web import AdminWebRunner
+from .autonomy import AutonomyService, CodexSummarizer
 from .bindings import BindingStore
 from .channel_app import ChannelApplication
 from .codex_runtime import CodexRuntime
@@ -118,7 +119,9 @@ def build_channel(settings: Settings, store: BindingStore) -> FeishuChannel:
         policy=PolicyConfig(
             dm_policy="open",
             group_policy="open",
-            require_mention=True,
+            # Autonomous candidates must reach the application-owned gate.
+            # Unassembled instances keep the original SDK mention policy.
+            require_mention=settings.decision_model_config_path is None,
             respond_to_mention_all=False,
         ),
         safety=SafetyConfig(
@@ -163,6 +166,8 @@ class ServiceCore:
         self._admin: AdminWebRunner | None = None
         self._schedule_mcp: ScheduleMcpRunner | None = None
         self._scheduler: Scheduler | None = None
+        self._autonomy: AutonomyService | None = None
+        self._autonomy_summarizer: CodexSummarizer | None = None
         self.application: ChannelApplication | None = None
         self._started = False
         self._closed = False
@@ -213,6 +218,17 @@ class ServiceCore:
             thread_subscription_control = AppServerThreadSubscriptionControl(
                 self._codex
             )
+            if self._settings.decision_model_config_path is not None:
+                self._autonomy_summarizer = CodexSummarizer(
+                    codex=self._codex,
+                    terminal_cleanup=terminal_cleanup,
+                    subscription_control=thread_subscription_control,
+                )
+                self._autonomy = AutonomyService(
+                    self._store.autonomy,
+                    self._settings.decision_model_config_path,
+                    summarizer=self._autonomy_summarizer,
+                )
             skill_catalog = None
             goal_control = None
             side_boundary_control = None
@@ -260,6 +276,7 @@ class ServiceCore:
                 runtime=ManagementRuntimePort(self._runtime),
                 scope_coordinator=scope_coordinator,
                 chat_labels=self._channel,
+                autonomy=self._autonomy,
             )
             schedules = self._management.enable_schedules(
                 app_id=self._settings.app_id, chat_info=self._channel,
@@ -289,6 +306,7 @@ class ServiceCore:
                     self._message_history_client
                 ),
                 management=self._management,
+                autonomy=self._autonomy,
             )
             self._scheduler = Scheduler(
                 bindings=self._store, runtime=self._runtime,
@@ -320,6 +338,14 @@ class ServiceCore:
 
     async def _close_partial_start(self) -> None:
         deadline = asyncio.get_running_loop().time() + _SHUTDOWN_BUDGET_SECONDS
+        if self._autonomy is not None:
+            self._autonomy.close()
+        if self._autonomy_summarizer is not None:
+            self._autonomy_summarizer.close()
+            await _cleanup_with_budget(
+                "partial decision summary cleanup", self._autonomy_summarizer.aclose,
+                deadline=deadline, cap=5,
+            )
         if self._scheduler is not None:
             self._scheduler.close_admission()
             await _cleanup_with_budget(
@@ -377,6 +403,10 @@ class ServiceCore:
         if self._closed:
             return
         self._closed = True
+        if self._autonomy is not None:
+            self._autonomy.close()
+        if self._autonomy_summarizer is not None:
+            self._autonomy_summarizer.close()
         if self._management is not None:
             self._management.set_service_ready(False)
         deadline = asyncio.get_running_loop().time() + _SHUTDOWN_BUDGET_SECONDS
@@ -397,6 +427,11 @@ class ServiceCore:
                 logger.exception("failed to disable Feishu admission")
             if self._runtime is not None:
                 self._runtime.close_admission()
+            if self._autonomy_summarizer is not None:
+                await _cleanup_with_budget(
+                    "decision summary cleanup", self._autonomy_summarizer.aclose,
+                    deadline=deadline, cap=5,
+                )
             if self._scheduler is not None:
                 await _cleanup_with_budget(
                     "Scheduler timer close", self._scheduler.close,

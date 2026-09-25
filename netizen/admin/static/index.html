@@ -6,6 +6,7 @@
   <title>Netizen Admin</title>
   <link rel="stylesheet" href="/static/admin.css">
   <script src="/static/admin.js" defer></script>
+  <script src="/static/autonomy.js" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -22,6 +23,7 @@
     <button class="tab" data-tab="side-topics" aria-selected="false">Side Topics</button>
     <button class="tab" data-tab="schedules" aria-selected="false">定时任务</button>
     <button class="tab" data-tab="updates" aria-selected="false">系统维护</button>
+    <button class="tab" data-tab="autonomy" aria-selected="false">自主模式 · 实验</button>
   </nav>
 
   <main>
@@ -229,6 +231,38 @@
         <p id="update-notes">检查更新后显示发布说明。</p>
         <a id="update-release-link" target="_blank" rel="noopener noreferrer" hidden>在 GitHub 查看此版本</a>
       </section>
+    </section>
+    <section id="autonomy" class="panel" aria-labelledby="autonomy-heading" hidden>
+      <div class="section-head">
+        <div><p class="eyebrow">EXPERIMENTAL</p><h2 id="autonomy-heading">自主模式决策模型</h2></div>
+        <button class="refresh" data-refresh="autonomy">刷新</button>
+      </div>
+      <p>可选实验功能。配置后，在群聊 /new 或 /config 中单独选择自主模式；不会自动为其他会话启用。</p>
+      <p>候选消息会先发送给所配置的决策服务，即使最终不消费。Netizen 仅保留实际接收的消息与最终回复作为决策上下文；外部服务可能按其自身策略留存请求。</p>
+      <p id="autonomy-state" role="status" aria-live="polite">尚未读取配置。</p>
+      <form id="autonomy-form" class="card-form" autocomplete="off">
+        <fieldset id="autonomy-fields" disabled>
+          <label>提供方<select id="autonomy-provider"><option value="jev">Jev</option><option value="laya">Laya（自行部署）</option></select></label>
+          <label>服务地址<input id="autonomy-base-url" type="url" maxlength="2048" required></label>
+          <label>模型<input id="autonomy-model" maxlength="200" required></label>
+          <label>API Key<input id="autonomy-key" type="password" maxlength="8192" autocomplete="new-password" aria-describedby="autonomy-key-status"></label>
+          <p id="autonomy-key-status" class="hint"></p>
+          <label><input id="autonomy-clear-key" type="checkbox">清除已保存的 API Key（无鉴权的 Laya 可使用）</label>
+          <p class="hint">密钥从不回显。同一提供方和地址下留空表示保留；更换提供方或地址后须重新录入密钥。请只在受信网络访问 Admin。</p>
+          <details><summary>高级设置</summary>
+            <label>超时（秒）<input id="autonomy-timeout" type="number" min="0.1" max="60" step="0.1" required></label>
+            <label>输入预算<input id="autonomy-budget" type="number" min="512" max="32000" step="1" required></label>
+            <p class="hint">预算必须符合所选模型的上下文限制；Netizen 不依赖服务端静默截断。</p>
+          </details>
+          <button type="submit">保存并应用</button>
+        </fieldset>
+      </form>
+      <div class="actions">
+        <button id="autonomy-test" disabled>测试已保存的连接</button>
+        <button id="autonomy-clear" class="quiet" disabled>清除决策配置</button>
+      </div>
+      <p class="hint">保存后下一次判断使用新配置，不重启服务。测试仅发送固定公开样例，不使用聊天内容，也不验证实际群聊判断质量。</p>
+      <p class="hint">清除后保留会话的自主模式选择，但不再自动消费未 @ 消息；显式 @ 和控制操作继续可用。</p>
     </section>
   </main>
 

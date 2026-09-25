@@ -1204,8 +1204,11 @@ thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admis
 保存已接收输入、最终正文和决策摘要；其余历史、跳过正文及运行活动仍不得持久化。该能力默认不启用，
 不会扩展既有 `MentionContextMode` 或定时计划配置；合并／移除注意事项见[实验交接](experiments/autonomous-mode/README.md)。
 
-`channel.sqlite3` 的 schema v13 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+本实验分支 `channel.sqlite3` 的 schema v14 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`，以及 `schedule_plans`、`schedule_runs`、`schedule_requests`。
+额外的 `autonomy_bindings`、`autonomy_records`、`autonomy_pending_turns` 分别承载独立开关／摘要、
+已接收消息／最终正文和待最终结果的 exact Turn 引用；均随 Binding 删除级联清理，不存跳过的正文。
+此分支不自动迁移 main 的 v13 数据库；只能用新建隔离测试库，正式合入前另行确认数据升级方案。
 `dedup_keys` 直接实现 Channel SDK 冻结的 `seen/mark` DedupStore 协议。
 `bindings` 保存全空或全有的三个 Binding-scoped catalog
 ID、settings revision、三个显式保存的 Binding Task Feedback 布尔值及 feedback revision、

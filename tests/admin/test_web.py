@@ -2084,7 +2084,7 @@ class AdminStaticAssetsTest(unittest.TestCase):
         parser = _AdminAssetParser()
         parser.feed(html)
 
-        self.assertEqual(parser.scripts, ["/static/admin.js"])
+        self.assertEqual(parser.scripts, ["/static/admin.js", "/static/autonomy.js"])
         self.assertEqual(parser.stylesheets, ["/static/admin.css"])
         self.assertFalse(parser.inline_script_text.strip())
         self.assertTrue({"projects", "sessions", "side-topics", "updates"} <= parser.ids)

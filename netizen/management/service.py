@@ -8,7 +8,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
 from .chat_labels import ChatLabel, ChatLabelProvider, ChatLabelResolver
@@ -80,6 +80,9 @@ from ..projects import (
 from ..sdk_gap_adapter import GoalControlError, GoalSnapshot
 from ..schedules.service import ScheduleService
 from ..model_settings import ModelCatalog
+
+if TYPE_CHECKING:
+    from ..autonomy import AutonomyService
 
 
 _BINDING_STATUS_RESOLUTION_CONCURRENCY = 8
@@ -493,6 +496,7 @@ class ManagementRuntimePort:
         task_feedback: BindingTaskFeedback,
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
+        autonomy_enabled: bool | None = None,
     ) -> ThreadBinding:
         return await self.__runtime.configure_context_exact(
             binding_id=binding_id,
@@ -503,6 +507,7 @@ class ManagementRuntimePort:
             task_feedback=task_feedback,
             message_context_mode=message_context_mode,
             context_anchor=context_anchor,
+            **({"autonomy_enabled": autonomy_enabled} if autonomy_enabled is not None else {}),
         )
 
     async def activate_exact(
@@ -715,12 +720,14 @@ class InstanceManagementService:
         blocking_io: BoundedBlockingIOExecutor | None = None,
         chat_labels: ChatLabelProvider | None = None,
         updates: UpdateService | None = None,
+        autonomy: AutonomyService | None = None,
     ) -> None:
         self._bindings = bindings
         self._projects = projects
         self._runtime = runtime
         self._scope_coordinator = scope_coordinator
         self._updates = updates or UpdateService()
+        self._autonomy = autonomy
         self._chat_labels = (
             ChatLabelResolver(chat_labels) if chat_labels is not None else None
         )
@@ -784,6 +791,25 @@ class InstanceManagementService:
 
     async def update_status(self) -> dict[str, Any]:
         return await self._updates.status()
+
+    async def autonomy_status(self) -> dict[str, Any]:
+        if self._autonomy is None:
+            return {
+                "supported": False, "revision": 0, "configured": False,
+                "config": None, "state": "unavailable", "error": None,
+            }
+        return {**self._autonomy.get_status(), "supported": True}
+
+    async def configure_autonomy(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._autonomy is None:
+            raise ValueError("自主模式实验功能未装配。")
+        await self._autonomy.configure(payload)
+        return await self.autonomy_status()
+
+    async def test_autonomy_connection(self, *, expected_revision: int) -> dict[str, Any]:
+        if self._autonomy is None:
+            raise ValueError("自主模式实验功能未装配。")
+        return await self._autonomy.test_connection(expected_revision=expected_revision)
 
     async def check_update(self) -> dict[str, Any]:
         return await self._updates.check()
@@ -1455,6 +1481,7 @@ class InstanceManagementService:
         task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
         message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
         context_anchor: MessageContextAnchor | None = None,
+        autonomy_enabled: bool = False,
         deadline: float | None = None,
     ) -> CreatedBinding:
         project = await self._blocking_io.submit(
@@ -1475,6 +1502,7 @@ class InstanceManagementService:
                     task_feedback=task_feedback,
                     message_context_mode=message_context_mode,
                     context_anchor=context_anchor,
+                    autonomy_enabled=autonomy_enabled,
                 )
             except (
                 StoredProjectNotFound,
@@ -1596,6 +1624,7 @@ class InstanceManagementService:
         task_feedback: BindingTaskFeedback,
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
+        autonomy_enabled: bool | None = None,
     ) -> ThreadBinding:
         async with self._scope_coordinator.hold(target.scope_key):
             binding = self._require_current(target)
@@ -1608,6 +1637,7 @@ class InstanceManagementService:
                 task_feedback=task_feedback,
                 message_context_mode=message_context_mode,
                 context_anchor=context_anchor,
+                **({"autonomy_enabled": autonomy_enabled} if autonomy_enabled is not None else {}),
             )
 
     async def rename_current_binding(

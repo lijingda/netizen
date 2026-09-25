@@ -260,6 +260,7 @@ class CardControlIntent:
     progress_card_enabled: bool | None = None
     completion_mention_enabled: bool | None = None
     message_context_mode: MentionContextMode | None = None
+    autonomy_enabled: bool | None = None
     side_id: str | None = None
     page: int | None = None
     goal_generation: str | None = None

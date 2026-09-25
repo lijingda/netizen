@@ -23,6 +23,10 @@ from lark_channel import (
     OutboundPost,
     SendOpts,
 )
+from openai_codex import TextInput
+
+from .autonomy import AutonomyService, Candidate
+from .autonomy.models import Decision
 
 from .bindings import (
     AmbiguousBinding,
@@ -663,6 +667,7 @@ class ChannelApplication:
         projects: ProjectRegistry,
         management: InstanceManagementService,
         message_history: MessageHistoryReader | None = None,
+        autonomy: AutonomyService | None = None,
     ) -> None:
         self._app_id = app_id
         self._channel = channel
@@ -670,6 +675,7 @@ class ChannelApplication:
         self._bindings = bindings
         self._projects = projects
         self._message_history = message_history
+        self._autonomy = autonomy
         self._input_preparer = MessageInputPreparer(channel=channel)
         self._management = management
         self._management.enable_schedules(app_id=app_id, chat_info=channel)
@@ -1213,6 +1219,7 @@ class ChannelApplication:
 
             direct = _message_chat_type(message) == "p2p"
             if not direct and not bool(getattr(message, "mentioned_bot", False)):
+                await self._autonomous_message(message, scope)
                 return
             pending = self._bindings.schedules.pending_route(
                 app_id=self._app_id,
@@ -1237,6 +1244,84 @@ class ChannelApplication:
                 await self._control(message, interaction)
         except Exception as error:
             await self._report_input_error(message, error)
+
+    def _autonomy_enabled(self, binding_id: str) -> bool:
+        if self._autonomy is None:
+            return False
+        try:
+            return self._autonomy.store.is_enabled(binding_id)
+        except Exception:
+            self._autonomy.mark_unavailable(binding_id, "storage_failed")
+            return False
+
+    @staticmethod
+    def _autonomy_candidate(message: Any) -> Candidate:
+        sender = getattr(message, "sender", None)
+        return Candidate(
+            message_id=_message_id(message),
+            text=_body_text(message),
+            sender=str(getattr(sender, "display_name", None) or _sender_id(message)),
+            message_type=normalized_message_type(message),
+        )
+
+    async def _autonomous_message(self, message: Any, scope: FeishuScope) -> None:
+        """Optional gate only; native admission and execution remain unchanged."""
+        if self._autonomy is None or not _autonomy_human_group_message(message):
+            return
+        binding = self._bindings.active_binding(scope.key)
+        if binding is None or not self._autonomy_enabled(binding.id):
+            return
+        try:
+            # Commands still require an explicit mention. Never turn a dropped
+            # slash command into a control action or a model-authored instruction.
+            if _body_text(message).lstrip().startswith("/"):
+                return
+            if self._bindings.schedules.pending_route(
+                app_id=self._app_id, chat_id=scope.chat_id, topic_id=scope.topic_id,
+                root_message_id=_inbound_root_message_id(message),
+            ) is not None:
+                return
+            prompt = self._parse_current_interaction(message, scope)
+            if not isinstance(prompt, PromptInput):
+                return
+            admission = await self._runtime.capture_submission_admission(binding.id)
+            goal = self._runtime.active_goal(binding.id)
+            logical_turn_id = goal.logical_turn_id if goal is not None else None
+            project = self._projects.resolve_for_binding(binding.project_alias)
+            candidate = self._autonomy_candidate(message)
+            decision = await self._autonomy.decide(binding.id, candidate, str(project.cwd))
+            if decision.outcome != "consume":
+                return
+            current_binding = self._bindings.active_binding(scope.key)
+            if current_binding is None or current_binding.id != binding.id:
+                self._autonomy.mark_unavailable(binding.id, "stale")
+                return
+            images = current_message_image_references(message)
+            current = project_current_message(
+                message, expected_message_id=prompt.source_id,
+                expected_sender_id=prompt.sender_id,
+                message_type=normalized_message_type(message),
+                content_fidelity="full_multimodal" if images else "full_text",
+                request_text=prompt.text,
+            )
+            await self._consume_prompt(
+                binding=binding, scope=scope, message=message, current=current,
+                owner_id=prompt.sender_id, skill_names=prompt.skill_names,
+                target_id=quoted_message_id(message), current_images=images,
+                admission=admission, autonomy_candidate=candidate,
+                autonomy_decision=decision, require_autonomy=True,
+                autonomy_logical_turn_id=logical_turn_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # No per-message notifications, raw provider errors or fallback
+            # execution. Explicit @ continues through the ordinary path.
+            self._autonomy.mark_unavailable(binding.id, "admission_failed")
+            try:
+                self._autonomy.note_gap_unknown(binding.id)
+            except Exception:
+                pass  # Broken optional bookkeeping must remain silent.
 
     async def _report_input_error(self, message: Any, error: Exception) -> None:
         """One user-visible failure policy for message, card and scheduled inputs."""
@@ -1688,6 +1773,7 @@ class ChannelApplication:
         if scheduled:
             self._scheduled_completions.add(origin.run_id)
         try:
+            await self._record_autonomy_final(outcome)
             await self._handle_completion(outcome)
         finally:
             if scheduled:
@@ -1700,6 +1786,37 @@ class ChannelApplication:
                         self._bindings.schedules.set_run(origin.run_id, delivery_state="unknown")
                 except ScheduleNotFound:
                     pass  # A completed receipt may have allowed normal pruning.
+
+    async def _record_autonomy_final(self, outcome: Any) -> None:
+        if self._autonomy is None:
+            return
+        if isinstance(outcome, TurnOutcome):
+            if outcome.status not in {"completed", "interrupted", "failed"}:
+                return
+            turn_id, accepted_turn_id = outcome.turn_id, None
+            record = outcome.status == "completed" and outcome.error is None
+        elif isinstance(outcome, GoalOutcome):
+            if not (
+                outcome.goal is not None and outcome.goal.status.terminal_or_paused
+                and outcome.final_physical_turn_id is not None
+                and outcome.final_turn_status in {"completed", "interrupted", "failed"}
+            ):
+                return
+            turn_id = outcome.final_physical_turn_id
+            accepted_turn_id = outcome.logical_turn_id
+            record = outcome.final_turn_status == "completed"
+        else:
+            return
+        try:
+            if record and outcome.final_response:
+                await self._autonomy.record_final(
+                    outcome.binding_id, turn_id, outcome.final_response,
+                    accepted_turn_id=accepted_turn_id,
+                )
+            else:
+                self._autonomy.forget_turn(outcome.binding_id, accepted_turn_id or turn_id)
+        except Exception:
+            self._autonomy.mark_unavailable(outcome.binding_id, "storage_failed")
 
     async def _handle_completion(
         self,
@@ -2714,10 +2831,19 @@ class ChannelApplication:
             ),
             request_text=prompt.text,
         )
+        candidate = None
+        decision = None
+        if self._autonomy_enabled(binding.id) and _autonomy_human_group_message(message):
+            try:
+                candidate = self._autonomy_candidate(message)
+                decision = self._autonomy.prepare_explicit(binding.id, candidate)
+            except Exception:
+                self._autonomy.mark_unavailable(binding.id, "storage_failed")
         await self._consume_prompt(
             binding=binding, scope=prompt.scope, message=message, current=current,
             owner_id=prompt.sender_id, skill_names=prompt.skill_names,
             target_id=target_id, current_images=current_images,
+            autonomy_candidate=candidate, autonomy_decision=decision,
         )
 
     async def _consume_prompt(
@@ -2727,11 +2853,18 @@ class ChannelApplication:
         current_images: tuple[ImageReference, ...] = (),
         scheduled_run_id: str | None = None,
         admission: SubmissionAdmission | None = None,
+        autonomy_candidate: Candidate | None = None,
+        autonomy_decision: Decision | None = None,
+        require_autonomy: bool = False,
+        autonomy_logical_turn_id: str | None = None,
     ) -> None:
         """Share preparation, exact admission, acceptance and feedback for inputs."""
         project = self._projects.resolve_for_binding(binding.project_alias)
         if admission is None:
             admission = await self._runtime.capture_submission_admission(binding.id)
+            if autonomy_candidate is not None:
+                goal = self._runtime.active_goal(binding.id)
+                autonomy_logical_turn_id = goal.logical_turn_id if goal is not None else None
         if (binding.settings_revision != admission.settings_revision
                 or binding.context_revision != admission.context_revision
                 or binding.feedback_revision != admission.feedback_revision):
@@ -2769,16 +2902,44 @@ class ChannelApplication:
                 current_images=current_images,
             )
 
+        autonomy_current = False
+        try:
+            autonomy_current = (
+                autonomy_decision is not None and self._autonomy is not None
+                and self._autonomy.token_current(autonomy_decision.token)
+            )
+        except Exception:
+            if require_autonomy:
+                raise
+            self._autonomy.mark_unavailable(binding.id, "storage_failed")
+        if require_autonomy:
+            active = self._bindings.active_binding(scope.key)
+            if not autonomy_current or active is None or active.id != binding.id:
+                raise SteerRace("自主判断期间会话状态已变化，本条消息未自动执行。")
+        native_input = prepared.native_input
+        if require_autonomy and autonomy_current and autonomy_decision.gap_hint:
+            hint = "<netizen_autonomous_context>\n" + autonomy_decision.gap_hint + "\n</netizen_autonomous_context>\n\n"
+            native_input = (
+                hint + native_input if isinstance(native_input, str)
+                else [TextInput(text=hint), *native_input]
+            )
         submit_kwargs: dict[str, Any] = dict(
             binding=binding,
             cwd=project.cwd,
-            input=prepared.native_input,
+            input=native_input,
             owner_id=owner_id,
             origin=message,
             skill_names=skill_names,
             context_commit=context_commit,
         )
         submit_kwargs["admission"] = admission
+        if require_autonomy:
+            def guard() -> None:
+                active = self._bindings.active_binding(scope.key)
+                if (not self._autonomy.token_current(autonomy_decision.token)
+                        or active is None or active.id != binding.id):
+                    raise SteerRace("自主判断已失效，本条消息未自动执行。")
+            submit_kwargs["input_guard"] = guard
         if scheduled_run_id is not None:
             self._bindings.schedules.begin_binding_submission(scheduled_run_id, binding.id)
         try:
@@ -2789,6 +2950,18 @@ class ChannelApplication:
             # while the reaction receipt below waits on Feishu I/O.
             submit_kwargs.pop("input", None)
             prepared = None
+            native_input = None
+        if (autonomy_candidate is not None and autonomy_decision is not None
+                and autonomy_decision.token is not None):
+            try:
+                self._autonomy.record_accepted(
+                    binding.id, autonomy_candidate, submission.turn_id,
+                    token=autonomy_decision.token,
+                    logical_turn_id=autonomy_logical_turn_id,
+                )
+            except Exception:
+                # Bookkeeping cannot strand an accepted Turn's receipt owner.
+                self._autonomy.mark_unavailable(binding.id, "storage_failed")
         if scheduled_run_id is not None:
             try:
                 self._bindings.schedules.finish_binding_submission(
@@ -4000,6 +4173,8 @@ class ChannelApplication:
                     allow_context_mode=(
                         _message_chat_type(message) == "group"
                     ),
+                    show_autonomy=self._autonomy is not None,
+                    autonomy_enabled=self._autonomy_enabled(binding.id),
                     catalog_error=catalog_error,
                 ),
             )
@@ -4056,6 +4231,7 @@ class ChannelApplication:
                 catalog=catalog,
                 catalog_error=catalog_error,
                 allow_context_mode=(_message_chat_type(message) == "group"),
+                show_autonomy=self._autonomy is not None,
             )
             try:
                 await self._reply(
@@ -4299,6 +4475,13 @@ class ChannelApplication:
                     f"{context_mode_display(binding.message_context_mode)}",
                 )
             )
+            if self._autonomy_enabled(binding.id):
+                autonomy_status = self._autonomy.get_status(binding.id)
+                context_mode_lines = (
+                    "消息接收：自主模式（实验性）；显式 @ 不经过决策模型",
+                    "决策服务：" + autonomy_status["state"],
+                    *((autonomy_status["error"],) if autonomy_status["error"] else ()),
+                )
             await self._reply(
                 message,
                 "\n".join(
@@ -4746,6 +4929,7 @@ class ChannelApplication:
             assert intent.reaction_pulse_enabled is not None
             assert intent.progress_card_enabled is not None
             assert intent.completion_mention_enabled is not None
+            self._require_autonomy_configured(intent.autonomy_enabled)
             message_context_mode = (
                 intent.message_context_mode or MentionContextMode.CURRENT_ONLY
             )
@@ -4771,6 +4955,7 @@ class ChannelApplication:
                 task_feedback=task_feedback,
                 message_context_mode=message_context_mode,
                 context_anchor=context_anchor,
+                autonomy_enabled=bool(intent.autonomy_enabled),
             )
             updated = await self._safe_update_card(
                 intent.source_id,
@@ -4780,6 +4965,7 @@ class ChannelApplication:
                     settings=settings,
                     task_feedback=binding.task_feedback,
                     message_context_mode=binding.message_context_mode,
+                    autonomy_enabled=self._autonomy_enabled(binding.id),
                 ),
             )
             if not updated:
@@ -4796,7 +4982,9 @@ class ChannelApplication:
                     f"结束时 @ 提醒：{'开启' if binding.task_feedback.completion_mention_enabled else '关闭'}。"
                     "现在可以直接发送任务，例如：梳理这个项目的结构。"
                     "如果刚才的任务因没有会话而未执行，请重新发送。"
-                    "在群聊和群话题中，每条消息都需要 @机器人。",
+                    + ("自主模式已开启；显式 @ 可直接提交，控制命令仍需 @。"
+                       if self._autonomy_enabled(binding.id)
+                       else "在群聊和群话题中，每条消息都需要 @机器人。"),
                 )
             return
         if intent.name is CardControlName.CONFIGURE_BINDING:
@@ -4808,6 +4996,7 @@ class ChannelApplication:
             assert intent.reaction_pulse_enabled is not None
             assert intent.progress_card_enabled is not None
             assert intent.completion_mention_enabled is not None
+            self._require_autonomy_configured(intent.autonomy_enabled)
             settings = await self._resolve_card_model_settings(intent)
             task_feedback = BindingTaskFeedback(
                 reaction_pulse_enabled=bool(intent.reaction_pulse_enabled),
@@ -4837,6 +5026,7 @@ class ChannelApplication:
                     task_feedback=task_feedback,
                     message_context_mode=intent.message_context_mode,
                     context_anchor=context_anchor,
+                    autonomy_enabled=intent.autonomy_enabled,
                 )
             except NoCurrentBinding as error:
                 raise CardActionError(
@@ -4862,6 +5052,7 @@ class ChannelApplication:
                     settings=settings,
                     task_feedback=binding.task_feedback,
                     message_context_mode=binding.message_context_mode,
+                    autonomy_enabled=self._autonomy_enabled(binding.id),
                 ),
             )
             if not updated:
@@ -5804,6 +5995,7 @@ class ChannelApplication:
             )
             if (
                 intent.message_context_mode is MentionContextMode.CATCH_UP
+                or intent.autonomy_enabled is True
             ):
                 if topic_id is not None:
                     chat_kind = _public_chat_kind(
@@ -5812,7 +6004,7 @@ class ChannelApplication:
                 if chat_kind == "group":
                     return intent
                 raise CardActionError(
-                    "私聊和私聊话题不支持补充群聊上下文，本次未执行。"
+                    "私聊和私聊话题不支持补充群聊上下文或自主模式，本次未执行。"
                 )
             return intent
         return decode_button_action(
@@ -5835,6 +6027,7 @@ class ChannelApplication:
         task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
         message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
         context_anchor: MessageContextAnchor | None = None,
+        autonomy_enabled: bool = False,
     ):
         created = await self._management.create_current_binding(
             scope=scope,
@@ -5845,8 +6038,16 @@ class ChannelApplication:
             task_feedback=task_feedback,
             message_context_mode=message_context_mode,
             context_anchor=context_anchor,
+            autonomy_enabled=autonomy_enabled,
         )
         return created.project, created.binding
+
+    def _require_autonomy_configured(self, enabled: bool | None) -> None:
+        if enabled:
+            if self._autonomy is None or not self._autonomy.configured:
+                raise CardActionError(
+                    "决策模型未配置；请到 Admin 配置后重新新建或配置会话。本次未修改会话。"
+                )
 
     def _settings_card(
         self,
@@ -6242,6 +6443,15 @@ def _sender_id(message: Any) -> str:
     return str(
         getattr(message, "sender_id", None)
         or getattr(sender, "open_id", "")
+    )
+
+
+def _autonomy_human_group_message(message: Any) -> bool:
+    sender = getattr(message, "sender", None)
+    return (
+        _message_chat_type(message) == "group"
+        and getattr(sender, "sender_type", None) == "user"
+        and not bool(getattr(sender, "is_bot", False))
     )
 
 

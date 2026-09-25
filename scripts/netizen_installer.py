@@ -2281,6 +2281,10 @@ def _install(
     info(f"configuration: {selected_layout.config_file}")
     info("service environment: account shell profile (reloaded on every start)")
     info(f"service control: {release.source / 'service.sh'}")
+    info(
+        "optional experiment: configure a decision model in Admin Web to enable "
+        "autonomous group sessions; existing modes need no decision model"
+    )
     return release
 
 
