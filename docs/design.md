@@ -1200,6 +1200,10 @@ thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admis
 
 ### Channel 数据库与结构校验
 
+自主模式实验分支按 [ADR 0073](adr/0073-isolate-experimental-autonomous-ingress.md) 窄扩展功能专属表，
+保存已接收输入、最终正文和决策摘要；其余历史、跳过正文及运行活动仍不得持久化。该能力默认不启用，
+不会扩展既有 `MentionContextMode` 或定时计划配置；合并／移除注意事项见[实验交接](experiments/autonomous-mode/README.md)。
+
 `channel.sqlite3` 的 schema v13 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`，以及 `schedule_plans`、`schedule_runs`、`schedule_requests`。
 `dedup_keys` 直接实现 Channel SDK 冻结的 `seen/mark` DedupStore 协议。

@@ -90,6 +90,9 @@ their cited ADRs before changing that boundary.
   message bodies, responses, Turn history/activity, card sessions, effective
   Codex configuration, or Admin sessions/tokens/indexes/audit records.
   Side routes never store native Thread IDs.
+  Experimental-branch-only [ADR 0073](docs/adr/0073-isolate-experimental-autonomous-ingress.md)
+  narrowly adds Binding-bound autonomous decision records and summaries in feature-owned
+  tables within the same Store; it does not permit skipped-message bodies or another history model.
 - Use exact-pinned official SDKs and public high-level APIs. Approved narrow
   adapters are terminal cleanup (ADR 0009), Goal/Skills (0014), Side boundary
   (0021), Thread unsubscribe (0028), Thread Delete (0037), and non-consuming
