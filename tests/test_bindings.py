@@ -8,7 +8,10 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from netizen.bindings import (
     AmbiguousBinding,
@@ -19,6 +22,7 @@ from netizen.bindings import (
     BindingNotFound,
     BindingQuery,
     BindingQueryBusy,
+    BindingQueryClosed,
     BindingQueryTimeout,
     BindingSettingsRevisionConflict,
     BindingStore,
@@ -1653,47 +1657,146 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
         rows = await self.store._read_rows("SELECT 1", deadline_seconds=2)
         self.assertEqual([row[0] for row in rows], [1])
 
-    async def test_query_worker_does_not_stall_loop_and_admission_is_bounded(
-        self,
-    ) -> None:
+    @asynccontextmanager
+    async def held_query_worker(self, *, deadline_seconds=10):
         loop = asyncio.get_running_loop()
         entered = asyncio.Event()
         release = threading.Event()
-        worker_exited = threading.Event()
 
         def blocked_query(connection: sqlite3.Connection) -> int:
-            try:
-                loop.call_soon_threadsafe(entered.set)
-                if not release.wait(5):
-                    raise AssertionError("event loop did not release the query worker")
-                return connection.execute("SELECT 1").fetchone()[0]
-            finally:
-                worker_exited.set()
+            loop.call_soon_threadsafe(entered.set)
+            if not release.wait(5):
+                raise AssertionError("event loop did not release the query worker")
+            return connection.execute("SELECT 1").fetchone()[0]
 
         first = asyncio.create_task(
-            self.store._submit_query(blocked_query, deadline_seconds=10)
+            self.store._submit_query(blocked_query, deadline_seconds=deadline_seconds)
         )
         try:
             await asyncio.wait_for(entered.wait(), timeout=5)
-            # The worker stays blocked until this coroutine explicitly releases it;
-            # correctness does not depend on heartbeats fitting inside a deadline.
-            self.assertFalse(worker_exited.is_set())
-            self.assertFalse(first.done())
-            with self.assertRaises(BindingQueryBusy):
-                await self.store.query_bindings()
-            first.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await first
-            self.assertFalse(worker_exited.is_set())
-            with self.assertRaises(BindingQueryBusy):
-                await self.store.query_bindings()
-            self.assertTrue(self.store._query_futures)
+            yield first, release
         finally:
             release.set()
             await asyncio.gather(first, return_exceptions=True)
             await asyncio.wait_for(self.store.drain_queries(), timeout=5)
-        self.assertTrue(worker_exited.is_set())
+
+    async def test_query_queue_is_bounded_without_stalling_loop_or_parallel_sql(self) -> None:
+        with patch("netizen.bindings._ADMIN_QUERY_CAPACITY", 3):
+            async with self.held_query_worker() as (first, release):
+                executed = []
+
+                def queued(connection):
+                    executed.append(threading.get_ident())
+                    return connection.execute("SELECT 1").fetchone()[0]
+
+                pending = [asyncio.create_task(self.store._submit_query(
+                    queued, deadline_seconds=5,
+                )) for _ in range(2)]
+                try:
+                    await asyncio.sleep(0)
+                    self.assertFalse(first.done())
+                    self.assertTrue(all(not task.done() for task in pending))
+                    self.assertEqual(executed, [])
+                    with self.assertRaises(BindingQueryBusy):
+                        await self.store.query_bindings()
+                    release.set()
+                    self.assertEqual(await asyncio.gather(first, *pending), [1, 1, 1])
+                    self.assertEqual(len(set(executed)), 1)
+                    self.assertNotEqual(executed[0], threading.get_ident())
+                finally:
+                    release.set()
+                    await asyncio.gather(*pending, return_exceptions=True)
+        self.assertEqual((await self.store._read_rows("SELECT 2", deadline_seconds=2))[0][0], 2)
+
+    async def test_cancelled_query_waiters_and_drain_keep_actual_work_counted(self) -> None:
+        with patch("netizen.bindings._ADMIN_QUERY_CAPACITY", 2):
+            async with self.held_query_worker() as (first, _):
+                queued = asyncio.create_task(self.store.query_bindings(deadline_seconds=5))
+                await asyncio.sleep(0)
+                for task in (first, queued):
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                drain = asyncio.create_task(self.store.drain_queries())
+                await asyncio.sleep(0)
+                drain.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await drain
+                self.assertEqual(len(self.store._query_futures), 2)
+                self.assertTrue(all(not future.done() for future in self.store._query_futures))
+                with self.assertRaises(BindingQueryBusy):
+                    await self.store.query_bindings()
         self.assertFalse(self.store._query_futures)
+
+    async def test_queued_timeout_returns_before_worker_is_free_and_skips_sql(self) -> None:
+        executed = threading.Event()
+        with patch("netizen.bindings._ADMIN_QUERY_CAPACITY", 2):
+            async with self.held_query_worker() as (first, _):
+                with self.assertRaises(BindingQueryTimeout):
+                    await asyncio.wait_for(self.store._submit_query(
+                        lambda connection: executed.set(), deadline_seconds=0.02,
+                    ), timeout=2)
+                self.assertFalse(first.done())
+                self.assertFalse(executed.is_set())
+                with self.assertRaises(BindingQueryBusy):
+                    await self.store.query_bindings()
+        self.assertFalse(executed.is_set())
+        self.assertFalse(self.store._query_futures)
+        self.assertEqual((await self.store._read_rows("SELECT 1", deadline_seconds=2))[0][0], 1)
+
+    async def test_running_timeout_keeps_capacity_until_worker_finishes(self) -> None:
+        with patch("netizen.bindings._ADMIN_QUERY_CAPACITY", 1):
+            async with self.held_query_worker(deadline_seconds=0.05) as (first, _):
+                with self.assertRaises(BindingQueryTimeout):
+                    await asyncio.wait_for(first, timeout=2)
+                self.assertEqual(len(self.store._query_futures), 1)
+                with self.assertRaises(BindingQueryBusy):
+                    await self.store.query_bindings()
+        self.assertFalse(self.store._query_futures)
+        self.assertEqual((await self.store._read_rows("SELECT 1", deadline_seconds=2))[0][0], 1)
+
+    async def test_queue_time_and_short_sql_share_one_deadline(self) -> None:
+        async with self.held_query_worker() as (_, release):
+            now = 100.0
+
+            def operation(connection):
+                nonlocal now
+                # Nine seconds were spent queued; two more exceed the original
+                # ten-second budget, even for SQL shorter than 100 opcodes.
+                now += 2
+                return connection.execute("SELECT 1").fetchone()[0]
+
+            with patch("netizen.bindings.time", SimpleNamespace(monotonic=lambda: now)):
+                query = asyncio.create_task(self.store._submit_query(operation, deadline_seconds=10))
+                await asyncio.sleep(0)
+                now += 9
+                release.set()
+                with self.assertRaises(BindingQueryTimeout):
+                    await query
+
+    async def test_close_rejects_new_queries_and_drains_queued_work(self) -> None:
+        async with self.held_query_worker() as (first, release):
+            queued = asyncio.create_task(self.store._read_rows("SELECT 2", deadline_seconds=5))
+            closing = asyncio.create_task(self.store.aclose())
+            try:
+                await asyncio.sleep(0)
+                self.assertFalse(closing.done())
+                with self.assertRaises(BindingQueryClosed):
+                    await self.store.query_bindings()
+                release.set()
+                self.assertEqual(await first, 1)
+                self.assertEqual((await queued)[0][0], 2)
+                await closing
+            finally:
+                release.set()
+                await asyncio.gather(queued, closing, return_exceptions=True)
+        with self.assertRaises(BindingQueryClosed):
+            await self.store.query_bindings()
+
+    async def test_query_deadline_must_be_positive_and_finite(self) -> None:
+        for budget in (0, -1, float("inf"), float("nan")):
+            with self.subTest(budget=budget), self.assertRaises(ValueError):
+                await self.store._submit_query(lambda connection: None, deadline_seconds=budget)
 
     async def test_wal_reader_does_not_block_real_writer_commit(self) -> None:
         project = self.store.get_project("alpha")
