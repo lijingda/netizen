@@ -25,6 +25,10 @@ from .domain import (
     MessageContextAnchor,
     ScopeKind,
 )
+from .defaults.store import (
+    DefaultsStore, create_schema as create_defaults_schema,
+    require_schema as require_defaults_schema,
+)
 from .schedules.models import Run, ScheduleConflict
 from .schedules.store import (
     ScheduleStore, create_schema, require_schema,
@@ -32,7 +36,7 @@ from .schedules.store import (
 from .session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 PROJECT_DELETE_LIMIT = 1000
 
 
@@ -440,6 +444,7 @@ def _require_current_schema(connection: sqlite3.Connection) -> None:
         )
     _require_project_metadata_schema(connection)
     require_schema(connection)
+    require_defaults_schema(connection)
 
 
 def _require_project_metadata_schema(
@@ -574,6 +579,7 @@ class BindingStore:
         )
         self._connection.row_factory = sqlite3.Row
         self.schedules = ScheduleStore(self)
+        self.defaults = DefaultsStore(self)
         try:
             self._initialize()
             if not self._is_memory:
@@ -811,8 +817,10 @@ class BindingStore:
                     self._connection.execute(statement)
                 if rows:
                     require_schema(self._connection)
+                    require_defaults_schema(self._connection)
                 else:
                     create_schema(self._connection)
+                    create_defaults_schema(self._connection)
                 if not rows:
                     self._connection.execute(
                         "INSERT INTO schema_version(version) VALUES (?)",

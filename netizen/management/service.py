@@ -79,6 +79,7 @@ from ..projects import (
 )
 from ..sdk_gap_adapter import GoalControlError, GoalSnapshot
 from ..schedules.service import ScheduleService
+from ..defaults.service import SessionDefaultsService
 from ..model_settings import ModelCatalog
 
 
@@ -415,8 +416,10 @@ class CurrentSideTarget:
 
 @dataclass(frozen=True, slots=True)
 class CreatedBinding:
-    project: Project
+    # Reusing an existing Binding leaves Project resolution to ordinary input.
+    project: Project | None
     binding: ThreadBinding
+    created: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -737,6 +740,7 @@ class InstanceManagementService:
         self._summary_reads: set[asyncio.Task[NativeThreadMetadata]] = set()
         self._summary_reads_closed = False
         self.schedules: ScheduleService | None = None
+        self.defaults: SessionDefaultsService | None = None
         self._schedule_creation_drain: Callable[[str, float], Awaitable[bool]] | None = None
 
     def enable_schedules(self, *, app_id: str, chat_info: Any = None) -> ScheduleService:
@@ -753,6 +757,17 @@ class InstanceManagementService:
         self, callback: Callable[[str, float], Awaitable[bool]],
     ) -> None:
         self._schedule_creation_drain = callback
+
+    def enable_defaults(self, *, app_id: str, chat_info: Any = None) -> SessionDefaultsService:
+        if self.defaults is None:
+            self.defaults = SessionDefaultsService(
+                bindings=self._bindings, projects=self._projects,
+                runtime=self._runtime, app_id=app_id, chat_info=chat_info,
+                blocking_io=self._blocking_io,
+            )
+        elif self.defaults.app_id != app_id:
+            raise ValueError("default configuration App identity cannot change")
+        return self.defaults
 
     @property
     def scope_coordinator(self) -> ScopeCoordinator:
@@ -1456,6 +1471,7 @@ class InstanceManagementService:
         message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
         context_anchor: MessageContextAnchor | None = None,
         deadline: float | None = None,
+        only_if_empty: bool = False,
     ) -> CreatedBinding:
         project = await self._blocking_io.submit(
             self._projects.resolve_for_new,
@@ -1465,12 +1481,18 @@ class InstanceManagementService:
         )
         async with self._scope_coordinator.hold(scope.key):
             previous_id = self._active_id(scope.key)
+            if only_if_empty and previous_id is not None:
+                return CreatedBinding(
+                    project=None, binding=self._bindings.get(previous_id), created=False,
+                )
             try:
                 binding = self._bindings.create_channel_binding(
                     scope=scope,
                     project_alias=project.alias,
                     creator_id=creator_id,
-                    expected_project_revision=expected_project_revision,
+                    expected_project_revision=(
+                        project.revision if only_if_empty else expected_project_revision
+                    ),
                     turn_settings=turn_settings,
                     task_feedback=task_feedback,
                     message_context_mode=message_context_mode,

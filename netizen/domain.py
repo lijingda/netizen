@@ -176,6 +176,7 @@ class ControlName(str, Enum):
     NEW = "new"
     SIDE = "side"
     CONFIG = "config"
+    DEFAULTS = "defaults"
     COMPACT = "compact"
     SETTINGS = "settings"
     CRON = "cron"

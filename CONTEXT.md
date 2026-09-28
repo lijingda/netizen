@@ -46,6 +46,12 @@ Mention Context Mode、对应 revision、creator 和时间。它不复制 Codex 
 **Active Binding**：Scope 中普通消息默认进入的 Binding。`/new`、`/resume` 只切换
 这条指针，不停止其他 Binding 的 Turn。
 
+**Session Defaults / 会话默认配置**：聊天中缺少当前会话时用于自动创建普通 Binding 的
+Project 与显式会话配置意图。配置属于聊天，生成的会话属于真实消息所在的 Scope。
+
+**Session Default Rule / 会话默认规则**：选择会话默认配置的精确聊天记录或有序群名
+关键词规则。精确聊天优先，群名规则采用第一条命中，生成的会话不持续继承规则变更。
+
 **Question Card / 问题卡片**：Codex 向普通会话或 Side 话题参与者提出的结构化问题及其建议选项。
 卡片始终属于原回答目标，不要求原提问任务仍在运行。
 

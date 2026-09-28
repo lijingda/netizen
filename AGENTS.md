@@ -21,6 +21,9 @@ their cited ADRs before changing that boundary.
   [Side](docs/design.md#side-运行与关闭),
   [subscriptions](docs/design.md#普通会话订阅), and
   [archive/delete](docs/design.md#原生归档与删除).
+  Missing-current session creation uses chat defaults and the original message Scope
+  ([ADR 0073](docs/adr/0073-create-sessions-from-chat-defaults.md)); keep `/new`, input
+  admission, and Project deletion semantics independent of those rules.
   SDK compatibility boundaries are in [adapters](docs/design.md#sdk-适配边界).
   Goal input retains exact physical-Turn admission across rollover
   ([ADR 0069](docs/adr/0069-steer-the-current-physical-goal-turn.md)).
@@ -86,7 +89,9 @@ their cited ADRs before changing that boundary.
   schema version, deduplication TTL keys, explicit Binding choices/revisions,
   and Side routes/tombstones. ADR 0061/0070 narrowly add current Scheduled Plan
   instructions, minimal dispatch/Run metadata, exact initial or accepted physical Turn references,
-  and bounded management-request deduplication. Never store other prompts,
+  and bounded management-request deduplication.
+  ADR 0073 also permits chat default rules, explicit creation settings and ordering
+  revisions, independent of Project lifecycle. Never store other prompts,
   message bodies, responses, Turn history/activity, card sessions, effective
   Codex configuration, or Admin sessions/tokens/indexes/audit records.
   Side routes never store native Thread IDs.

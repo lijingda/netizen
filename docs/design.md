@@ -43,7 +43,7 @@ ephemeral fork，依靠独立话题 route 保留身份，不是普通 Scope/Bind
 | 所有者 | 负责的状态 |
 | --- | --- |
 | Codex 原生状态 | 登录、Thread/Turn 历史、Goal、工具、Skills、MCP 与原生配置；Netizen 复用 effective user 的标准 `$CODEX_HOME`。 |
-| Channel SQLite | Scope/Binding/Project 元数据、显式配置意图与 revision、去重 TTL、上下文边界及不含 native ID 的 Side 路由墓碑；定时任务窄扩展保存当前计划指令与最小交接记录。 |
+| Channel SQLite | Scope/Binding/Project 元数据、显式配置意图与 revision、聊天默认配置与有序群名规则、去重 TTL、上下文边界及不含 native ID 的 Side 路由墓碑；定时任务窄扩展保存当前计划指令与最小交接记录。 |
 | 当前进程内存 | 活动 Turn/Goal/Side、锁与准入、订阅计时、Activity/usage 展示、Admin session 与一次性控制凭据；重启不自动重建这些执行或展示状态。 |
 | 部署状态目录 | 安装锁、激活意图、ready/lifetime 标记与有界升级/重启结果；不进入 Channel SQLite。 |
 
@@ -151,10 +151,11 @@ creator 和时间；Scope 只保存 active Binding 指针。P2P 固定为 `curre
 Binding，也不形成配置继承链；创建时冻结 Parent 当时的 Model/Effort/Speed 与 Task
 Feedback，之后独立，Mention Context Mode 固定为 current-only。
 
-exact `/new` 是普通用户创建会话的唯一入口；任何 `/new ...` 参数都零 mutation 地拒绝。
+exact `/new` 保留原有手动创建入口；任何 `/new ...` 参数都零 mutation 地拒绝。
 它打开 Card 2.0，提交只写入包含 Project、可选 Turn Settings 和 Mention Context
 Mode 的 lazy Binding，不要求任务、不创建 native Thread；完整表单及目录降级语义见
-[新建与配置表单](#新建与配置表单)。
+[新建与配置表单](#新建与配置表单)。没有当前 Binding 的普通输入还可按
+[聊天默认配置](#聊天默认配置与自动创建)自动创建；`/new` 不读取这些默认值或改变预填行为。
 下一条需要启动新 Turn 的普通消息执行：
 
 1. 若有 Binding 配置，在进入 native mutation 前重新调用 live `codex.models()`，按所选
@@ -209,6 +210,46 @@ running Turn 的普通输入仍只调用 exact handle `steer()`：即使 Binding
 发送首 Turn；写入失败或冲突时关闭新 admission，且不发送 prompt。每次 cleanup 前还
 会核对 handle Thread ID、`AsyncThread.id` 与 Binding 的 write-once native ID；若
 handle 回报不同 ID，关闭 admission 且不对不可信 handle 执行 interrupt/cleanup。
+
+### 聊天默认配置与自动创建
+
+[ADR 0073](adr/0073-create-sessions-from-chat-defaults.md) 增加按聊天配置的会话默认值。
+配置属于 exact App/chat，供该聊天中的单聊主线、群聊主线和普通话题使用；本次消息的
+真实位置决定 Scope，不由默认配置创建或选择话题。已有 active Binding 时直接沿用，
+不重新匹配默认值；只有通过现有来源与 mention 准入的普通输入在当前 Scope 没有当前 Binding
+时才尝试自动创建。Control、Side 路由及其墓碑、Scheduled Plan 仍走各自入口，不借此
+创建普通会话。群聊及群话题仍逐条要求 @，单聊及其话题仍不要求 @。
+
+默认值只有两种匹配方式：
+
+1. exact chat 配置，每个 App/chat 最多一份，优先于任何群名规则；
+2. 同 App 内按已保存顺序逐条判断的群名规则，首条包含关键词的规则命中即停止。
+   关键词不得为空，使用 `casefold()` 忽略大小写，不支持正则或类别兜底；仅群聊适用。
+
+一次采用命中规则的完整配置，不跨规则拼字段。配置保存 Project alias、可选
+Model/Effort/Speed、三个 Task Feedback 开关与 Mention Context Mode；Project 必填，其余
+沿用现有创建默认值及 inherit Codex 语义，P2P 固定 current-only。它不是 effective Codex
+配置，也不含 Prompt 或业务流程。创建时复制到 Binding，后续修改或删除默认值、修改
+规则顺序或群名，都不改变已创建的 Binding，包括尚未物化的 Lazy Binding。
+
+无匹配则走原有无会话引导。匹配配置不可用（例如 Project 不存在、停用，或模型设置
+失效）时，先明确说明默认配置不可用，再走同一引导；不继续尝试下一条规则。需要群名
+但查询失败时也明确说明无法判定，不冒充未命中。Project 删除不联动清理或禁用默认值，
+不把它们加入 Project 删除清单，不新增身份墓碑；后续使用仍按现有 Registry 校验。
+
+自动创建组装现有创建参数，复用同一个 management service；不伪造 `/new` 消息、卡片
+或回调。在现有 Scope 锁内重读 pointer，仅为空才创建并设为当前，否则返回已有 Binding。
+消息随后固定使用返回的 Binding 并进入普通输入准备和 Runtime admission；不引入串行
+消费或排队。两条并发消息最多自动创建一个 Binding，但仍可能由现有准入拒绝其中一条，
+不保证触发创建者先提交。手动 `/new` 仍可随后创建另一 Binding 并切换；准备期间目标
+已切换的输入按原规则拒绝，不改投新目标。
+
+catch-up 自动创建以触发消息的真实 marker 初始化边界，这条消息同时作为首轮请求；
+初始化不等于输入已经接受，不能丢弃或重复提交首条请求。首轮仍准备当前正文、引用和
+图片，不读取该起点之前的补充历史，之后复用普通 catch-up 及 native 接受后的 cursor CAS。
+会话创建成功后的准备、准入或原生执行失败遵循原有失败语义，保留该 Binding，不回退成
+“未创建”或自动重放。状态未知的已有 Binding 不视为缺失；归档或删除明确清空 pointer
+后，下一条普通输入可再次按默认配置创建新 Binding。
 
 ### 原生压缩
 
@@ -335,7 +376,9 @@ Mention Context Mode 按
 
 Context Boundary 是 Binding-scoped exact 飞书消息 marker，不是机器人回复时间。`/new`
 创建 catch-up Binding、`/resume`、`/unarchive` 或从 current-only 切换为 catch-up 时，以
-exact control/card message 重置边界，避免补录 Binding 非 active 期间的讨论。start/steer
+exact control/card message 重置边界，避免补录 Binding 非 active 期间的讨论。按 ADR 0073
+自动创建时只将初始边界改为本次真实触发消息，该消息仍作为首轮请求执行，首轮不补读更早
+讨论；后续读取、准备和提交复用同一流程。start/steer
 被 native Runtime 确认接受后，Runtime 才在同一 Binding lock 内 CAS 推进边界；失败、竞态
 拒绝或准备超时不推进。若 native 已接受但 SQLite commit 失败，Runtime 保留 active tracking、
 关闭全局 admission，并明确报告任务已接受但边界未持久化。
@@ -1200,8 +1243,9 @@ thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admis
 
 ### Channel 数据库与结构校验
 
-`channel.sqlite3` 的 schema v13 包含 `schema_version`、`scopes`、`bindings`、`projects`、
-`side_topics`、`dedup_keys`，以及 `schedule_plans`、`schedule_runs`、`schedule_requests`。
+`channel.sqlite3` 的 schema v14 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+`side_topics`、`dedup_keys`、`session_defaults`、`session_defaults_order`，以及
+`schedule_plans`、`schedule_runs`、`schedule_requests`。
 `dedup_keys` 直接实现 Channel SDK 冻结的 `seen/mark` DedupStore 协议。
 `bindings` 保存全空或全有的三个 Binding-scoped catalog
 ID、settings revision、三个显式保存的 Binding Task Feedback 布尔值及 feedback revision、
@@ -1214,6 +1258,9 @@ app/chat/topic/root/source、Parent Binding
 ID、creator、mention policy、creating/open/closed/expired/failed 和时间，不保存
 ephemeral native Thread ID 或内容。`projects.deleted` 保留已删除 Project 的 Registry 墓碑，
 阻止 YAML bootstrap 复活；正常查询隐藏墓碑，显式重新登记继续递增 alias 的 revision。
+`session_defaults` 仅保存 App 隔离的精确聊天／群名匹配条件、创建配置意图和 revision，
+`session_defaults_order` 保存同 App 群名规则的顺序元数据；不保存消息、聊天历史、有效
+Codex 配置或卡片 session，也不与 Project 删除级联。
 服务与安装器只支持当前完整 schema，新库直接创建完整结构。按
 [ADR 0068](adr/0068-run-saved-scheduled-plans-manually.md)，项目尚未推广，不保留旧版
 自动迁移或旧字段兼容；已有库只读校验，旧版本或损坏结构明确拒绝，不重建空库。
@@ -1500,6 +1547,12 @@ identity 或 Side route identity 等 typed precondition；提交后在锁内重�
 action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact、Side resume 或
 任意筛选结果的批量 native mutation route。
 
+按 [ADR 0073](adr/0073-create-sessions-from-chat-defaults.md)，Admin 可逐条管理精确聊天
+默认配置，以及创建、修改、删除和调整群名规则顺序。它与飞书 `/defaults` 共用同一
+management service 和持久数据，修改沿用 revision 及 action/CSRF 检查；不支持精确配置
+批量设置、类别默认值或禁用自动创建的覆盖项。保存默认值只修改配置，不创建 Binding，
+也不从 Admin 发送即时 Prompt。群聊 catch-up 默认值在真实消息触发创建时才取得初始边界。
+
 定时管理是 ADR 0061/0068/0070 的计划定义编辑与已保存计划手动执行例外。`/cron` 卡片、Admin
 “定时任务”页和自然语言 `cron_manage` 共用 ScheduleService，提供分页查询、创建、编辑、
 启停、删除、立即运行和最近执行。
@@ -1581,6 +1634,16 @@ inherit 的 minimal form，不要求用户改走命令。提交后只创建 lazy
 分页或快捷创建兜底。若公开卡片更新返回失败或抛错，回调在同一聊天或话题回复等价结果，
 避免已提交的 Binding 没有反馈。完整决定见
 [ADR 0040](adr/0040-make-new-card-only-and-show-all-projects.md)。
+
+`/defaults` 使用一张表单查看和配置当前 App/chat 的会话默认值；不要求当前 Scope 已有
+Binding，在普通话题中操作也作用于所属聊天。表单明确显示作用范围与配置来源：有精确
+配置时回填它；没有精确配置但命中群名规则时回填该规则，并说明保存会创建本聊天的精确
+配置；均未命中时显示未配置，Project 保持待选，其余取现有创建默认值。字段复用 Project、
+Model/Effort/Speed、Task Feedback 和群聊 Context Mode 的已有选择语义。
+保存只写当前聊天的一份精确配置，不修改匹配到的群名规则；删除只移除精确配置，之后
+重新匹配群名规则。没有精确配置时不提供可删除继承规则的动作。保存、删除后重绘同一
+表单，不新增卡片 session。`/new` 仍按原有表单与预选逻辑工作，`/config` 仍修改已有
+Binding，两者不受默认值回填影响。
 
 `/config` 是独立的会话卡片，不属于实例级 `/settings` Projects 分区；它用同一组
 Model inherit/explicit 语义更新当前 active Binding 的持久设置，并允许独立切换
@@ -1714,19 +1777,22 @@ reaction/progress presenter 与终态路径。
 ### 命令注册与首次引导
 
 文本命令由统一注册表记录 owner（Channel/native/hybrid/host）、usage、alias 与能力
-状态，`/help` 只从可用条目生成。Model/Effort/Speed 只由 `/new` 和 `/config`
-管理；`/model`、`/effort`、`/fast` 不注册。每条飞书消息只解析一个 control 或
+状态，`/help` 只从可用条目生成。已有会话的 Model/Effort/Speed 由 `/new` 和 `/config`
+管理，聊天的创建默认值通过 `/defaults` 或 Admin 管理；`/model`、`/effort`、`/fast`
+不注册。每条飞书消息只解析一个 control 或
 prompt，未知 slash command fail closed，不增加任意 `/`/`@` 链式解释器。`/compact`
 映射为零参数 native control，只作用于当前有历史且空闲的普通会话；
 CLI/App 的 `/copy`、`/vim`、`/theme`、`/exit` 等纯宿主命令同样明确不可用且不进入帮助。
 
 首次使用引导只读取现有 Project 与当前 Scope 的 Binding 元数据，不记录用户是否已读
-教程。普通消息和需要当前会话的 control 在没有 active Binding 时共用下一步提示：无
+教程。普通消息在没有 active Binding 时先按聊天默认配置尝试自动创建；没有命中，或已
+说明默认配置不可用后，与需要当前会话的 control 共用下一步提示：无
 enabled Project 引导 `/settings` 后 `/new`，有 enabled Project 引导 `/new`；当前 Scope
 有 Binding 记录时优先提示 `/sessions`，并提供 `/sessions archived` 查找归档的入口。
 这些记录只用于导航，不推断原生会话是否可恢复，不触发 native read 或 mutation。普通
 消息还明确告知任务未执行、准备后需重新发送；群消息按公开 chat type 提醒逐条 @，
-不把单聊话题当成群话题。不暂存或自动重放 Prompt，也不自动创建 Project/Binding。
+不把单聊话题当成群话题。不暂存或自动重放 Prompt，也不自动创建 Project；未命中可用
+默认配置时不创建 Binding。Control 本身不触发默认配置自动创建。
 `/help` 提供快速开始并按统一注册表的用途分类展示当前可用命令；少量明确误用（如
 `/project`）只给出正确入口，不注册别名或模糊执行。Project 登记/启用和会话创建成功的
 反馈继续指明下一步，新建表单及回调 identity、版本、能力门禁保持原有契约。

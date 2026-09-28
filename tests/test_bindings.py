@@ -843,6 +843,8 @@ class BindingStoreTest(unittest.TestCase):
                 "schedule_plans",
                 "schedule_runs",
                 "schedule_requests",
+                "session_defaults",
+                "session_defaults_order",
             },
         )
         self.assertTrue(
