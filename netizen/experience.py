@@ -74,6 +74,14 @@ COMMAND_SPECS = (
         group=CommandGroup.START,
     ),
     CommandSpec(
+        "defaults",
+        ControlName.DEFAULTS,
+        CommandOwner.CHANNEL,
+        "/defaults",
+        "查看和设置当前聊天的默认会话配置；无当前会话时自动创建",
+        group=CommandGroup.START,
+    ),
+    CommandSpec(
         "help",
         ControlName.HELP,
         CommandOwner.CHANNEL,
@@ -375,6 +383,7 @@ def _validate_arguments(name: ControlName, arguments: tuple[str, ...]) -> None:
         ControlName.NEW: 0,
         ControlName.SIDE: None,
         ControlName.CONFIG: 0,
+        ControlName.DEFAULTS: 0,
         ControlName.COMPACT: 0,
         ControlName.SETTINGS: 0,
         ControlName.CRON: 0,

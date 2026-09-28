@@ -106,6 +106,8 @@ from .cards.questions import (
     render_question_card,
     render_question_context_card,
 )
+from .cards.defaults import defaults_card, decode_defaults_action, is_defaults_card_action
+from .defaults import DefaultConfigurationError
 from .user_questions import (
     BindingQuestionTarget,
     QuestionRequest,
@@ -673,6 +675,7 @@ class ChannelApplication:
         self._input_preparer = MessageInputPreparer(channel=channel)
         self._management = management
         self._management.enable_schedules(app_id=app_id, chat_info=channel)
+        self._management.enable_defaults(app_id=app_id, chat_info=channel)
         self._scope_coordinator = management.scope_coordinator
         self._scheduled_completions: set[str] = set()
         self._reactions = _ReactionController(channel)
@@ -1240,7 +1243,7 @@ class ChannelApplication:
 
     async def _report_input_error(self, message: Any, error: Exception) -> None:
         """One user-visible failure policy for message, card and scheduled inputs."""
-        if isinstance(error, (InvalidInteraction, ScheduleError)):
+        if isinstance(error, (InvalidInteraction, ScheduleError, DefaultConfigurationError)):
             await self._reply(message, str(error))
         elif isinstance(error, UnknownProject):
             await self._reply(message, f"未知 Project：{error.args[0]}。")
@@ -1481,6 +1484,11 @@ class ChannelApplication:
 
     async def handle_card_action(self, event: Any) -> None:
         action = getattr(event, "action", None)
+        if is_defaults_card_action(
+            getattr(action, "value", None), getattr(action, "form_value", None),
+        ):
+            await self._handle_defaults_card_action(event)
+            return
         if is_question_card_action(
             getattr(action, "value", None), getattr(action, "form_value", None),
         ):
@@ -2698,6 +2706,9 @@ class ChannelApplication:
         current_images: tuple[ImageReference, ...] = (),
     ) -> None:
         binding = self._bindings.active_binding(prompt.scope.key)
+        initial_context_anchor = None
+        if binding is None:
+            binding, initial_context_anchor = await self._auto_create_binding(message, prompt)
         if binding is None:
             await self._reply_no_current_binding(
                 message, prompt.scope, task_not_executed=True,
@@ -2718,6 +2729,108 @@ class ChannelApplication:
             binding=binding, scope=prompt.scope, message=message, current=current,
             owner_id=prompt.sender_id, skill_names=prompt.skill_names,
             target_id=target_id, current_images=current_images,
+            initial_context_anchor=initial_context_anchor,
+        )
+
+    async def _auto_create_binding(
+        self, message: Any, prompt: PromptInput,
+    ) -> tuple[ThreadBinding | None, MessageContextAnchor | None]:
+        service = self._management.defaults
+        assert service is not None
+        try:
+            rule = await service.resolve(prompt.scope.chat_id, _message_chat_type(message))
+            if rule is None:
+                return self._bindings.active_binding(prompt.scope.key), None
+            await service.validate(rule)
+            settings = rule.session_settings
+            anchor = None
+            if settings.message_context_mode is MentionContextMode.CATCH_UP:
+                self._require_catch_up_message_scope(message, prompt.scope)
+                anchor = await self._resolve_context_anchor(prompt.scope, prompt.source_id)
+            created = await self._management.create_current_binding(
+                scope=prompt.scope, creator_id=prompt.sender_id, project_alias=rule.project,
+                turn_settings=settings.turn_settings, task_feedback=settings.task_feedback,
+                message_context_mode=settings.message_context_mode, context_anchor=anchor,
+                only_if_empty=True,
+            )
+        except (DefaultConfigurationError, ProjectError, ModelCatalogError, MessageHistoryError) as error:
+            # A concurrent manual creation wins even if the default could not be
+            # prepared. Never present an existing Binding as missing, or replay
+            # an input after a native operation with uncertain side effects.
+            current = self._bindings.active_binding(prompt.scope.key)
+            if current is not None:
+                return current, None
+            await self._reply(message, "默认会话配置不可用：" + str(error))
+            return None, None
+        return created.binding, anchor if created.created else None
+
+    async def _defaults_card(
+        self, scope: FeishuScope, *, notice: str | None = None,
+        notice_is_error: bool = False,
+    ) -> OutboundCard:
+        service = self._management.defaults
+        assert service is not None
+        view = await service.manage({"mode": "view", "chat_id": scope.chat_id})
+        catalog = None
+        try:
+            async with asyncio.timeout(5):
+                catalog = await self._runtime.model_catalog()
+        except Exception:
+            # Existing defaults must remain inspectable/deletable even when
+            # the native model catalog is unavailable.
+            pass
+        return defaults_card(
+            scope, view, self._projects.list(), catalog,
+            notice=notice, notice_is_error=notice_is_error,
+        )
+
+    async def _handle_defaults_card_action(self, event: Any) -> None:
+        action = getattr(event, "action", None)
+        message_id = str(getattr(event, "message_id", "") or "")
+        chat_id = str(getattr(event, "chat_id", "") or "")
+        scope = None
+        notice = None
+        failed = False
+        try:
+            operator = getattr(getattr(event, "operator", None), "open_id", None)
+            if getattr(action, "tag", None) != "button" or not message_id or not chat_id or not operator:
+                raise CardActionError("默认会话配置回调缺少真实卡片或操作者。")
+            fetched = await self._channel.fetch_message(message_id)
+            chat_kind = _public_chat_kind(await self._channel.get_chat_info(chat_id))
+            scope = scope_from_fetched_card(
+                app_id=self._app_id, callback_chat_id=chat_id,
+                fetched_message=fetched, chat_type=chat_kind,
+            )
+            if chat_kind is None:
+                raise CardActionError("无法确认默认配置所属聊天的类型，请重新打开 /defaults。")
+            request = decode_defaults_action(
+                scope, getattr(action, "value", None), getattr(action, "form_value", None),
+            )
+            service = self._management.defaults
+            assert service is not None
+            await service.manage(request)
+            notice = (
+                "已删除当前聊天的精确默认配置；群名规则仍可生效。"
+                if request["mode"] == "delete" else "已保存当前聊天的默认会话配置。"
+            )
+        except (CardActionError, DefaultConfigurationError, ProjectError, ModelCatalogError) as error:
+            notice, failed = str(error), True
+        except Exception as error:
+            logger.warning("default configuration callback failed", extra={"error_type": type(error).__name__})
+            notice, failed = "默认会话配置操作未能确认，请重新打开 /defaults 查看。", True
+        if scope is None:
+            if message_id:
+                await self._safe_update_card(message_id, error_card(notice or "默认会话配置操作失败。"))
+            return
+        try:
+            card = await self._defaults_card(scope, notice=notice, notice_is_error=failed)
+            if await self._safe_update_card(message_id, card):
+                return
+        except Exception:
+            logger.exception("default configuration card refresh failed")
+        await self._reply(
+            _CardReplyTarget(message_id, message_id, chat_id, _CardReplyConversation(scope.topic_id)),
+            notice or "请重新打开 /defaults 查看默认会话配置。",
         )
 
     async def _consume_prompt(
@@ -2727,6 +2840,7 @@ class ChannelApplication:
         current_images: tuple[ImageReference, ...] = (),
         scheduled_run_id: str | None = None,
         admission: SubmissionAdmission | None = None,
+        initial_context_anchor: MessageContextAnchor | None = None,
     ) -> None:
         """Share preparation, exact admission, acceptance and feedback for inputs."""
         project = self._projects.resolve_for_binding(binding.project_alias)
@@ -2744,23 +2858,39 @@ class ChannelApplication:
                     "当前会话缺少群聊上下文边界，本条消息未执行；"
                     "请重新发送 /config 并重新选择 @ 时读取的消息范围。"
                 )
-            prepared = await self._input_preparer.prepare_catch_up(
-                source_message=message,
-                scope=scope,
-                lower=binding.context_anchor,
-                upper_id=current.message_id,
-                quoted_target_id=target_id,
-                current=current,
-                current_images=current_images,
-                message_history=self._message_history,
-            )
-            assert prepared.context_anchor is not None
-            assert prepared.context_stats is not None
-            context_commit = ContextCursorCommit(
-                expected_context_revision=admission.context_revision,
-                anchor=prepared.context_anchor,
-            )
-            await self._send_context_receipt(message, prepared.context_stats)
+            if initial_context_anchor is not None:
+                if (
+                    initial_context_anchor != binding.context_anchor
+                    or initial_context_anchor.message_id != current.message_id
+                    or binding.native_thread_id is not None
+                ):
+                    raise SteerRace("自动创建会话的首条消息边界已变化，请重新发送。")
+                prepared = await self._input_preparer.prepare(
+                    source_message=message, quoted_target_id=target_id, current=current,
+                    current_images=current_images,
+                )
+                context_commit = ContextCursorCommit(
+                    expected_context_revision=admission.context_revision,
+                    anchor=initial_context_anchor,
+                )
+            else:
+                prepared = await self._input_preparer.prepare_catch_up(
+                    source_message=message,
+                    scope=scope,
+                    lower=binding.context_anchor,
+                    upper_id=current.message_id,
+                    quoted_target_id=target_id,
+                    current=current,
+                    current_images=current_images,
+                    message_history=self._message_history,
+                )
+                assert prepared.context_anchor is not None
+                assert prepared.context_stats is not None
+                context_commit = ContextCursorCommit(
+                    expected_context_revision=admission.context_revision,
+                    anchor=prepared.context_anchor,
+                )
+                await self._send_context_receipt(message, prepared.context_stats)
         else:
             prepared = await self._input_preparer.prepare(
                 source_message=message,
@@ -3624,6 +3754,9 @@ class ChannelApplication:
             return
         if intent.name is ControlName.SETTINGS:
             await self._reply(message, self._settings_card(intent.scope))
+            return
+        if intent.name is ControlName.DEFAULTS:
+            await self._reply(message, await self._defaults_card(intent.scope))
             return
         if intent.name is ControlName.CRON:
             await self._reply(message, await self._schedule_manager_card(intent.scope))
@@ -5846,6 +5979,7 @@ class ChannelApplication:
             message_context_mode=message_context_mode,
             context_anchor=context_anchor,
         )
+        assert created.project is not None
         return created.project, created.binding
 
     def _settings_card(

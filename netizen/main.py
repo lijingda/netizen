@@ -264,6 +264,9 @@ class ServiceCore:
             schedules = self._management.enable_schedules(
                 app_id=self._settings.app_id, chat_info=self._channel,
             )
+            self._management.enable_defaults(
+                app_id=self._settings.app_id, chat_info=self._channel,
+            )
 
             async def manage_schedule(request: dict[str, Any], thread_id: str | None) -> dict[str, Any]:
                 return await schedules.manage(request, native_thread_id=thread_id)

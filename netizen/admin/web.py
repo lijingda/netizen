@@ -141,6 +141,7 @@ from ..projects import (
 )
 from ..deployment.update_protocol import UpdateProtocolError, validate_target
 from ..schedules.models import AmbiguousLocalTime, ScheduleError, resolve_once_local
+from ..defaults import DefaultConfigurationError
 
 
 logger = logging.getLogger(__name__)
@@ -211,6 +212,8 @@ class AdminActionPreconditions:
     side_root_message_id: ExpectedValue[str]
     inventory_fingerprint: ExpectedValue[str]
     schedule_revision: ExpectedValue[int]
+    default_revision: ExpectedValue[int]
+    default_order_revision: ExpectedValue[int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,6 +487,8 @@ class AdminWebApplication:
             return await self._projects(context)
         if route == ("GET", "/api/v1/schedules"):
             return await self._schedules(context)
+        if route == ("GET", "/api/v1/defaults"):
+            return await self._defaults(context)
         if route == ("GET", "/api/v1/sessions"):
             return await self._sessions(context)
         if route == ("GET", "/api/v1/projects/options"):
@@ -499,6 +504,9 @@ class AdminWebApplication:
             )
 
         mutations: dict[str, Callable[[_RequestContext], Awaitable[Response]]] = {
+            "/api/v1/defaults/save": self._default_save,
+            "/api/v1/defaults/delete": self._default_delete,
+            "/api/v1/defaults/reorder": self._default_reorder,
             "/api/v1/schedules/create": self._schedule_create,
             "/api/v1/schedules/update": self._schedule_update,
             "/api/v1/schedules/delete": self._schedule_delete,
@@ -631,6 +639,104 @@ class AdminWebApplication:
         return _json_response(
             202, {"requestId": context.request.request_id, "operation": operation}
         )
+
+    async def _default_manage(self, request: dict[str, object]) -> dict[str, Any]:
+        try:
+            return await self._management.defaults.manage(request)
+        except DefaultConfigurationError as error:
+            status = 409 if error.code in {"revision_conflict", "order_conflict", "not_found"} else 400
+            if error.code in {"unavailable", "chat_unavailable", "chat_kind_unknown", "model_catalog_unavailable"}:
+                status = 503
+            raise AdminWebError(status, error.code, str(error)) from error
+
+    def _default_record(self, context: _RequestContext, rule: dict[str, Any]) -> dict[str, Any]:
+        target = AdminActionTarget("default-rule", rule["id"])
+        preconditions = _empty_preconditions(default_revision=ExpectedValue.expect(rule["revision"]))
+        return {**rule, "actions": {
+            mode: self._grant(context, f"defaults.{mode}", target, preconditions)
+            for mode in ("save", "delete")
+        }}
+
+    async def _defaults(self, context: _RequestContext) -> Response:
+        mode = _optional_one(context.query, "mode") or "list"
+        allowed = {
+            "list": {"mode", "kind", "offset", "limit"},
+            "view": {"mode", "chat_id"},
+            "options": {"mode", "chat_id"},
+        }
+        if mode not in allowed:
+            raise AdminWebError(400, "invalid_query", "默认配置查询类型无效。")
+        _require_query_keys(context.query, allowed[mode])
+        request: dict[str, object] = {"mode": mode}
+        for key in allowed[mode] - {"mode"}:
+            value = _optional_text_query(context.query, key)
+            if value is not None:
+                if key in {"offset", "limit"}:
+                    if not value.isascii() or not value.isdigit():
+                        raise AdminWebError(400, "invalid_query", "分页参数无效。")
+                    request[key] = int(value)
+                else:
+                    request[key] = value
+        if mode == "list":
+            request.setdefault("kind", "chat")
+        result = await self._default_manage(request)
+        if mode == "list":
+            kind = request.get("kind", "chat")
+            result = {**result, "items": [self._default_record(context, rule) for rule in result["items"]],
+                "actions": {"create": self._grant(
+                    context, "defaults.save", AdminActionTarget("default-registry", str(kind)), _empty_preconditions(),
+                )}}
+            if kind == "group_name":
+                result["actions"]["reorder"] = self._grant(
+                    context, "defaults.reorder", AdminActionTarget("default-registry", "group_name"),
+                    _empty_preconditions(default_order_revision=ExpectedValue.expect(result["order_revision"])),
+                )
+        elif mode == "view":
+            if result["exact"] is not None:
+                result = {**result, "exact": self._default_record(context, result["exact"])}
+            result = {**result, "actions": {"create": self._grant(
+                context, "defaults.save", AdminActionTarget("default-registry", "chat"), _empty_preconditions(),
+            )}}
+        return _json_response(200, {**result, "requestId": context.request.request_id})
+
+    async def _default_save(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        payload = _parse_json(context.request)
+        _require_body_keys(payload, _ACTION_KEYS | {"definition"})
+        target = _action_target(payload)
+        if target.resource not in {"default-registry", "default-rule"}:
+            raise AdminWebError(400, "invalid_target", "默认配置目标无效。")
+        grant = self._redeem_parsed(context, payload, "defaults.save", target, expected_resource=target.resource)
+        definition = payload.get("definition")
+        if not isinstance(definition, dict) or set(definition) - {
+            "kind", "chat_id", "keyword", "project", "session_settings",
+        }:
+            raise AdminWebError(400, "invalid_input", "默认配置字段无效。")
+        request: dict[str, object] = {**definition, "mode": "save", "expected_revision": None}
+        if target.resource == "default-rule":
+            request.update(id=grant.target.target_id, expected_revision=_expected_value(
+                _grant_preconditions(grant).default_revision, "Default revision",
+            ))
+        elif definition.get("kind") != grant.target.target_id:
+            raise AdminWebError(400, "invalid_target", "默认配置类型与操作凭据不一致。")
+        result = await self._mutation(context, "defaults.save", grant.target.target_id, self._default_manage(request))
+        return _json_response(200, {**result, "requestId": context.request.request_id})
+
+    async def _default_delete(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        _, grant = self._redeem(context, "defaults.delete", expected_resource="default-rule")
+        request: dict[str, object] = {"mode": "delete", "id": grant.target.target_id,
+            "expected_revision": _expected_value(_grant_preconditions(grant).default_revision, "Default revision")}
+        result = await self._mutation(context, "defaults.delete", grant.target.target_id, self._default_manage(request))
+        return _json_response(200, {**result, "requestId": context.request.request_id})
+
+    async def _default_reorder(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        payload, grant = self._redeem(context, "defaults.reorder", expected_resource="default-registry", allowed_extra={"rule_ids"})
+        request: dict[str, object] = {"mode": "reorder", "rule_ids": payload.get("rule_ids"),
+            "order_revision": _expected_value(_grant_preconditions(grant).default_order_revision, "Default order revision")}
+        result = await self._mutation(context, "defaults.reorder", grant.target.target_id, self._default_manage(request))
+        return _json_response(200, {**result, "requestId": context.request.request_id})
 
     async def _schedules(self, context: _RequestContext) -> Response:
         mode = _optional_one(context.query, "mode") or "list"
@@ -2333,6 +2439,8 @@ def _empty_preconditions(
     side_root_message_id: ExpectedValue[str] | None = None,
     inventory_fingerprint: ExpectedValue[str] | None = None,
     schedule_revision: ExpectedValue[int] | None = None,
+    default_revision: ExpectedValue[int] | None = None,
+    default_order_revision: ExpectedValue[int] | None = None,
 ) -> AdminActionPreconditions:
     return AdminActionPreconditions(
         active_binding_id or ExpectedValue.dont_check(),
@@ -2347,6 +2455,8 @@ def _empty_preconditions(
         side_root_message_id or ExpectedValue.dont_check(),
         inventory_fingerprint or ExpectedValue.dont_check(),
         schedule_revision or ExpectedValue.dont_check(),
+        default_revision or ExpectedValue.dont_check(),
+        default_order_revision or ExpectedValue.dont_check(),
     )
 
 

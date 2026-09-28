@@ -7,6 +7,7 @@ const state = {
   sides: null,
   updates: null,
   schedules: null,
+  defaults: null,
   projectCursor: null,
   sideCursor: null,
   sessionPage: {
@@ -1549,6 +1550,255 @@ function rowByIdentity(selector, key, value) {
   return null;
 }
 
+let defaultsEditor = null;
+let defaultsProjects = [];
+let defaultsOffset = 0;
+let defaultsListSerial = 0;
+let defaultsBusy = false;
+const defaultsInput = (name) => document.querySelector(`#defaults-${name}`);
+
+function renderDefaultSettings() {
+  const editor = defaultsEditor;
+  defaultsInput("fields").disabled = defaultsBusy || Boolean(editor?.loading);
+  if (!editor) return;
+  const settings = editor.settings;
+  const turn = settings.turn_settings;
+  const model = editor.models.find((item) => item.id === turn?.model_id);
+  scheduleSelectOptions(defaultsInput("model"), [["", "继承 Codex"],
+    ...editor.models.map((item) => [item.id, item.display_name])], turn?.model_id);
+  scheduleSelectOptions(defaultsInput("effort"), (model?.efforts || []).map((item) => [item.id, item.id]), turn?.effort_id);
+  scheduleSelectOptions(defaultsInput("tier"), (model?.service_tiers || []).map((item) => [item.id, item.name || item.id]), turn?.service_tier_id);
+  defaultsInput("effort").disabled = !model;
+  defaultsInput("tier").disabled = !model;
+  defaultsInput("context").value = settings.message_context_mode;
+  for (const option of defaultsInput("context").querySelectorAll("option")) {
+    option.disabled = option.value === "catch-up" && editor.contextAvailable === false;
+  }
+  defaultsInput("reactions").checked = settings.reaction_pulse_enabled;
+  defaultsInput("progress").checked = settings.progress_card_enabled;
+  defaultsInput("completion-mention").checked = settings.completion_mention_enabled;
+  const notes = [editor.sourceNote, editor.error, editor.catalogError];
+  if (turn && !model) notes.push("已保存的模型当前不可用，选择保持不变；可显式选择其他模型。");
+  if (editor.contextAvailable === false) notes.push("单聊不支持补齐未读上下文，请使用当前消息。");
+  defaultsInput("note").textContent = notes.filter(Boolean).join(" ");
+  defaultsInput("note").classList.toggle("error", Boolean(editor.error));
+  defaultsInput("save").disabled = defaultsBusy || editor.loading || !editor.action;
+}
+
+function renderDefaultProject(project) {
+  scheduleSelectOptions(defaultsInput("project"), [["", "选择 Project"], ...defaultsProjects.map((item) => [
+    item.alias, item.enabled ? item.alias : `${item.alias}（已停用）`,
+  ])], project);
+}
+
+async function loadDefaultOptions(resolveChat = false) {
+  const editor = defaultsEditor;
+  if (!editor) return;
+  const serial = ++editor.serial;
+  const chatId = editor.kind === "chat" ? defaultsInput("chat").value.trim() : "";
+  editor.loading = true;
+  editor.error = "";
+  renderDefaultSettings();
+  try {
+    let view = null;
+    if (resolveChat && chatId) {
+      view = await api(`/api/v1/defaults?${new URLSearchParams({ mode: "view", chat_id: chatId })}`);
+      if (defaultsEditor !== editor || serial !== editor.serial) return;
+      editor.record = view.exact;
+      editor.action = view.exact?.actions.save || view.actions.create;
+      const effective = view.exact || view.effective;
+      if (effective) {
+        editor.settings = structuredClone(effective.session_settings);
+        renderDefaultProject(effective.project);
+        editor.touched = true;
+      } else {
+        editor.settings = defaultScheduleSessionSettings();
+        renderDefaultProject("");
+        editor.touched = false;
+      }
+      editor.sourceNote = view.exact ? "修改本聊天的精确配置。"
+        : view.effective ? "当前使用群名规则；保存后成为本聊天的精确配置。" : "本聊天尚未配置默认会话。";
+      if (view.match_error) editor.sourceNote += ` ${view.match_error}`;
+    }
+    const query = new URLSearchParams({ mode: "options" });
+    if (chatId) query.set("chat_id", chatId);
+    const data = await api(`/api/v1/defaults?${query}`);
+    if (defaultsEditor !== editor || serial !== editor.serial) return;
+    editor.models = data.models;
+    editor.contextAvailable = data.context_mode_available;
+    editor.catalogError = typeof data.model_catalog_error === "string"
+      ? data.model_catalog_error : data.model_catalog_error?.message || "";
+    if (!editor.record && !editor.touched && !view?.effective) editor.settings = structuredClone(data.session_settings);
+  } catch (error) {
+    if (defaultsEditor !== editor || serial !== editor.serial) return;
+    editor.error = `${error.message} 请重新打开表单后操作。`;
+    if (resolveChat) editor.action = null;
+  } finally {
+    if (defaultsEditor === editor && serial === editor.serial) {
+      editor.loading = false;
+      renderDefaultSettings();
+    }
+  }
+}
+
+function openDefaultEditor(kind, record = null) {
+  if (defaultsBusy || !state.defaults) return;
+  defaultsEditor = { kind, record, action: record?.actions.save || state.defaults[kind].actions.create,
+    settings: structuredClone(record?.session_settings || defaultScheduleSessionSettings()),
+    models: [], serial: 0, loading: true, touched: false, contextAvailable: null,
+    sourceNote: record ? "修改已保存的配置，只影响之后创建的会话。" : "保存后，在没有当前会话的位置收到消息时生效。",
+    error: "", catalogError: "" };
+  defaultsInput("editor").hidden = false;
+  defaultsInput("editor-title").textContent = kind === "chat" ? "聊天精确配置" : "群名规则";
+  defaultsInput("chat-field").hidden = kind !== "chat";
+  defaultsInput("keyword-field").hidden = kind !== "group_name";
+  defaultsInput("chat").value = record?.chat_id || "";
+  defaultsInput("chat").disabled = kind !== "chat" || Boolean(record);
+  defaultsInput("chat").required = kind === "chat";
+  defaultsInput("keyword").value = record?.keyword || "";
+  defaultsInput("keyword").disabled = kind !== "group_name";
+  defaultsInput("keyword").required = kind === "group_name";
+  renderDefaultProject(record?.project || "");
+  renderDefaultSettings();
+  loadDefaultOptions();
+  defaultsInput(record ? "project" : kind === "chat" ? "chat" : "keyword").focus();
+}
+
+function closeDefaultEditor() {
+  if (defaultsBusy) return;
+  defaultsEditor = null;
+  defaultsInput("editor").hidden = true;
+}
+
+function changeDefaultSettings(field) {
+  const editor = defaultsEditor;
+  if (!editor) return;
+  editor.touched = true;
+  const settings = editor.settings;
+  if (field === "model") {
+    const selected = editor.models.find((item) => item.id === defaultsInput("model").value);
+    if (!defaultsInput("model").value) settings.turn_settings = null;
+    else if (selected) settings.turn_settings = { model_id: selected.id,
+      effort_id: selected.default_effort_id, service_tier_id: selected.default_service_tier_id };
+  } else if (field === "effort" && settings.turn_settings) settings.turn_settings.effort_id = defaultsInput("effort").value;
+  else if (field === "tier" && settings.turn_settings) settings.turn_settings.service_tier_id = defaultsInput("tier").value;
+  else if (field === "context") settings.message_context_mode = defaultsInput("context").value;
+  else if (field === "reactions") settings.reaction_pulse_enabled = defaultsInput("reactions").checked;
+  else if (field === "progress") settings.progress_card_enabled = defaultsInput("progress").checked;
+  else if (field === "completion-mention") settings.completion_mention_enabled = defaultsInput("completion-mention").checked;
+  renderDefaultSettings();
+}
+
+async function defaultMutation(mode, action, extra = {}) {
+  if (defaultsBusy || !action) return false;
+  defaultsBusy = true;
+  renderDefaultSettings();
+  try {
+    await api(`/api/v1/defaults/${mode}`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actionPayload(action, extra)) });
+  } catch (error) {
+    setStatus(`${error.message} 请刷新列表，核查后重新操作。`, true);
+    if (defaultsEditor) {
+      defaultsEditor.action = null;
+      defaultsEditor.error = `${error.message} 请重新打开表单后操作。`;
+    }
+    return false;
+  } finally {
+    defaultsBusy = false;
+    renderDefaultSettings();
+  }
+  closeDefaultEditor();
+  try {
+    await loadDefaults(defaultsOffset);
+    setStatus("默认会话配置已保存。");
+  } catch (error) {
+    setStatus(`操作已完成，但列表刷新失败：${error.message} 请手动刷新。`, true);
+  }
+  return true;
+}
+
+async function saveDefault(event) {
+  event.preventDefault();
+  const editor = defaultsEditor;
+  if (!editor || editor.loading || !editor.action || defaultsBusy) return;
+  const definition = { kind: editor.kind, project: defaultsInput("project").value,
+    session_settings: structuredClone(editor.settings) };
+  if (editor.kind === "chat") definition.chat_id = defaultsInput("chat").value.trim();
+  else definition.keyword = defaultsInput("keyword").value.trim();
+  const action = editor.action;
+  editor.action = null;
+  await defaultMutation("save", action, { definition });
+}
+
+async function deleteDefault(record) {
+  if (defaultsBusy || !window.confirm(record.kind === "chat"
+    ? `删除 ${record.chat_id} 的精确配置？删除后可能重新命中群名规则，已有会话不受影响。`
+    : `删除群名规则“${record.keyword}”？已有会话不受影响。`)) return;
+  const action = record.actions.delete;
+  record.actions.delete = null;
+  await defaultMutation("delete", action);
+}
+
+async function moveDefaultRule(index, delta) {
+  const page = state.defaults?.group_name;
+  if (!page || page.has_more || defaultsBusy) return;
+  const ids = page.items.map((rule) => rule.id);
+  const other = index + delta;
+  if (other < 0 || other >= ids.length) return;
+  [ids[index], ids[other]] = [ids[other], ids[index]];
+  const action = page.actions.reorder;
+  page.actions.reorder = null;
+  await defaultMutation("reorder", action, { rule_ids: ids });
+}
+
+async function loadDefaults(offset = 0) {
+  const serial = ++defaultsListSerial;
+  const [chat, group, projects] = await Promise.all([
+    api(`/api/v1/defaults?${new URLSearchParams({ kind: "chat", offset: String(offset), limit: "50" })}`),
+    api("/api/v1/defaults?kind=group_name&limit=200"), queryProjectOptions(),
+  ]);
+  if (serial !== defaultsListSerial) return;
+  defaultsProjects = projects;
+  defaultsOffset = offset;
+  state.defaults = { chat, group_name: group };
+  for (const [kind, page, body] of [["chat", chat, defaultsInput("chat-body")], ["group_name", group, defaultsInput("rules-body")]]) {
+    body.replaceChildren();
+    page.items.forEach((rule, index) => {
+      const row = document.createElement("tr");
+      if (kind === "group_name") cell(row, String(index + 1));
+      cell(row, kind === "chat" ? rule.chat_id : rule.keyword);
+      cell(row, rule.project);
+      cell(row, scheduleSessionSummary(rule.session_settings));
+      const actions = document.createElement("td");
+      actions.className = "actions";
+      const button = (label, callback, disabled = false) => {
+        const node = document.createElement("button");
+        node.textContent = label;
+        node.disabled = disabled;
+        node.addEventListener("click", callback);
+        actions.append(node);
+      };
+      button("编辑", () => openDefaultEditor(kind, rule));
+      button("删除", () => deleteDefault(rule));
+      if (kind === "group_name") {
+        button("上移", () => moveDefaultRule(index, -1), index === 0 || page.has_more);
+        button("下移", () => moveDefaultRule(index, 1), index === page.items.length - 1 || page.has_more);
+      }
+      row.append(actions);
+      body.append(row);
+    });
+    if (!page.items.length) {
+      const row = document.createElement("tr");
+      const empty = cell(row, kind === "chat" ? "尚未配置聊天默认值。" : "尚未配置群名规则。");
+      empty.colSpan = kind === "chat" ? 4 : 5;
+      body.append(row);
+    }
+  }
+  defaultsInput("previous").disabled = offset === 0;
+  defaultsInput("next").disabled = !chat.has_more;
+  defaultsInput("page").textContent = `第 ${Math.floor(offset / 50) + 1} 页`;
+}
+
 function scheduleDate(value) {
   if (value == null) return "—";
   if (typeof value === "number") return new Date(value * 1000).toISOString();
@@ -2371,6 +2621,7 @@ async function refresh(tab, cursor = undefined) {
     if (tab === "side-topics") await loadSides(cursor || null);
     if (tab === "updates") await loadUpdates();
     if (tab === "schedules") await loadSchedules(cursor || null);
+    if (tab === "defaults") await loadDefaults();
     setStatus("已更新。");
     return true;
   } catch (error) {
@@ -2440,6 +2691,19 @@ document.querySelector("#projects-next").addEventListener("click", () => refresh
 document.querySelector("#sessions-previous").addEventListener("click", () => moveSessionPage("previous"));
 document.querySelector("#sessions-next").addEventListener("click", () => moveSessionPage("next"));
 document.querySelector("#sides-next").addEventListener("click", () => refresh("side-topics", state.sideCursor));
+defaultsInput("new-chat").addEventListener("click", () => openDefaultEditor("chat"));
+defaultsInput("new-rule").addEventListener("click", () => openDefaultEditor("group_name"));
+defaultsInput("cancel").addEventListener("click", closeDefaultEditor);
+defaultsInput("editor").addEventListener("submit", saveDefault);
+defaultsInput("chat").addEventListener("change", () => loadDefaultOptions(true));
+for (const field of ["model", "effort", "tier", "context", "reactions", "progress", "completion-mention"]) {
+  defaultsInput(field).addEventListener("change", () => changeDefaultSettings(field));
+}
+for (const [name, delta] of [["previous", -50], ["next", 50]]) {
+  defaultsInput(name).addEventListener("click", async () => {
+    try { await loadDefaults(Math.max(0, defaultsOffset + delta)); } catch (error) { setStatus(error.message, true); }
+  });
+}
 scheduleInput("filter").addEventListener("submit", (event) => { event.preventDefault(); refresh("schedules"); });
 scheduleInput("new").addEventListener("click", () => openScheduleEditor());
 scheduleInput("preview").addEventListener("click", previewSchedule);
