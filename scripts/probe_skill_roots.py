@@ -30,7 +30,8 @@ async def probe(source: Path) -> dict[str, object]:
     require_no_facade_migration()
     roots = validate_builtin_skills(source)
     with tempfile.TemporaryDirectory(prefix="netizen-skill-roots-") as directory:
-        root = Path(directory)
+        # Native discovery returns physical paths (e.g. /private/var on macOS).
+        root = Path(directory).resolve()
         home, codex_home, project = (root / name for name in ("home", "codex", "project"))
         for path in (home, codex_home, project):
             path.mkdir()
