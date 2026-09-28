@@ -39,7 +39,8 @@ their cited ADRs before changing that boundary.
   Controls and form callbacks: [commands and cards](docs/design.md#飞书命令与控制卡片).
   Preserve the referenced
   ADRs' exact identity, context, display, and file-evidence contracts.
-- SQLite and current schema policy: [data](docs/design.md#channel-数据库与结构校验).
+- SQLite and schema migration policy: [data](docs/design.md#channel-数据库与结构校验) and
+  [ADR 0075](docs/adr/0075-migrate-channel-databases-during-installation.md).
   App credentials: [credential source](docs/design.md#飞书应用凭据).
   Service environment and native settings: [configuration](docs/design.md#原生环境与能力配置).
   Admin Web: [queries and actions](docs/design.md#管理查询与操作), including
@@ -150,9 +151,16 @@ their cited ADRs before changing that boundary.
   format without adding a CLI installation/runtime dependency. Preserve exact-App
   repair versus whole-file deletion for rebinding and atomic credential writes.
 - Published Release and Source Install share one activation/rollback transaction.
-  Keep database rollback gated by both unloaded manager target and released
-  lifetime lock; restore CLOEXEC before Codex children start. Loaded/active is
-  never a substitute for the private ready marker (ADR 0034).
+  Migrate supported Channel schemas from v14 only through this shared installer;
+  Runtime still requires the current full schema. Preserve published migration
+  steps and add historical fixtures whenever schema or persisted semantics change
+  (ADR 0075). Keep database rollback gated by both unloaded manager target and a
+  held lifetime lock throughout restoration. Preserve the original recovery snapshot
+  across interrupted retries. Persist candidate admission before opening input;
+  once marked, preserve its database and recover only with the exact candidate.
+  Never reapply a snapshot after restarting the restored old service. Restore
+  CLOEXEC before Codex children start. Loaded/active is never a substitute for the
+  private ready marker (ADR 0034).
 - Built-in Skills belong to the physical running release. Register their root on
   the same initialized App Server before catalog/Thread access; fail startup if
   registration fails. Never install, snapshot, roll back, or uninstall global user

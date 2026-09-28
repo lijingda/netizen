@@ -60,12 +60,15 @@ SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕�
     admin-web-secret                            # 独立 32-byte base64url credential，0600
   state/
     channel.sqlite3[-wal|-shm]                  # Binding/Turn settings/Task feedback/Registry/Dedup
-    .install.lock / .activation-intent.json     # 跨卸载锁与异常中断恢复意图
+    .install.lock / .activation-intent.json     # 跨卸载锁与安装事务恢复记录
     update.json                                # 最近一次 Admin 升级/重启的有界 typed 结果，0600
     netizen-update-<rootDigest>-<operationId>.plist # macOS 一次性部署提交文件，终态后清理
     service.lifetime.lock / service.ready       # 精确退出与 readiness 契约
     netizen.log / launchd.stderr.log            # macOS 有界服务日志/launcher 错误
-    rollback-recovery-*                         # 回滚恢复材料
+    activation-recovery-<id>/                  # 安装事务恢复材料，完成后清理
+      manifest.json / admission                # 原始状态与阶段／已可能开放输入的证据
+      database/                                # 原始数据库及 sidecar 快照
+    rollback-recovery-*                         # 旧安装器可能保留的恢复材料
   releases/.netizen-managed                     # 删除前必须匹配的 ownership marker
   releases/<sha256>/source/                     # Published Release 或当前工作区快照
   releases/<sha256>/source/skills/              # 当前 release 的两个内置 Skills
@@ -538,7 +541,7 @@ Project trust 配置不变；本次没有真实飞书投递、客户端点击或
 | 调度与存储 | 四类规则、时区/DST、截止、高水位、宽限/missed、两类目标的交接屏障、原会话未知不阻塞下一到期点、手动不改时间游标、不同计划并发、CAS/幂等、裁剪后原 Run 回执及每个交接断点的重启行为 |
 | 原会话输入 | exact Binding/Turn 身份、空闲 start 与运行中 steer、Goal 换轮、配置/上下文竞态、系统来源、原发起人及结束提及保留、catch-up 锚点与接收后游标提交 |
 | 飞书与普通生命周期 | 五类来源的自然语言和 /cron；真实 root/seed 或原位置锚点、结果精确归属、卡片完整表单/重试/分页、Activity/Files、停止/归档/删除及极快终态；原会话切换/归档暂停、恢复不补跑及删除联动 |
-| Admin 与安装 | 跨主机认证/CSRF、三个入口一致性、Project 删除与在途交接、App 切换、当前库重装、旧库只读拒绝、数据库/release 失败回滚及内置 Skills 随 release 恢复 |
+| Admin 与安装 | 跨主机认证/CSRF、三个入口一致性、Project 删除与在途交接、App 切换、当前库重装、受支持旧库迁移与不受支持库只读拒绝、数据库/release 失败及中断恢复、内置 Skills 随 release 恢复 |
 
 服务只新增同一 background loop 内的 Scheduler 和 loopback 动态端口 MCP；无需用户安装
 新 Skill、手动配置 MCP 或启动另一个服务。公开 CodexConfig 只追加本次进程专属随机
@@ -547,9 +550,64 @@ MCP entry，环境完整继承后仅增加一个随机名称的临时 bearer key
 Admin 关闭时 MCP 仍可用。停止先关闭认领和管理 admission、排空在途交接，再执行既有
 普通 Turn shutdown 并关闭传输；重启不补跑错过的时间，也不重发结果未知的执行。
 
-安装边界验收包括当前 schema 完整初始化与重装、旧版本库只读拒绝、当前元数据与
-Side/Project 墓碑保留，以及失败后原数据库/release 恢复；manager target 未卸载或 lifetime lock
-仍被占用时，既有回滚禁止条件保持不变。
+安装边界验收包括当前 schema 完整初始化与重装、受支持旧库迁移、不受支持库只读拒绝、
+当前元数据与 Side/Project 墓碑保留，以及失败／中断恢复；manager target 未卸载或未能
+取得 lifetime lock 时禁止数据库恢复，取得后须持锁至全部写入完成。
+
+### 数据库迁移与中断恢复验收
+
+[ADR 0075](adr/0075-migrate-channel-databases-during-installation.md) 从 schema v14 建立
+持续维护的前向迁移基线。当前 schema 仍为 v14，因此当前实现没有生产迁移步骤；
+框架的跨版本执行使用独立测试迁移验证，不能据此声称不存在的生产 v15 已通过验收。
+v13 及更早数据库和旧服务／安装布局仍不支持自动迁移。
+
+以下是变更相关的验收要求，不是已通过的记录。先执行 `make check`，再在隔离 root 和
+明确指定的可恢复测试账号上，分别验证 Linux systemd user manager 与 macOS LaunchAgent：
+
+- 使用新库、当前完整库、含 Scope/Binding/Project/Side 墓碑、会话默认配置及调度关联
+  数据的旧库夹具，验证新建与迁移结果一致、旧值保留；每个新增 schema 同时覆盖相邻和
+  从 v14 起跨多个版本的升级。较新／未知版本、缺失路径及坏约束须在停服前拒绝。
+- 正式安装、源码安装与 Admin 升级共用相同迁移路径；下载／依赖准备期间旧服务继续
+  工作，active/stopped 和 enabled/disabled 意图保留，同 root 并发安装互斥。
+- 在迁移步骤中注入异常，确认完整路径的数据与版本一起回滚。事务提交前终止安装器
+  后重跑，仍使用最初恢复快照，不能把中间状态重新归类为新安装或重建空库。
+- 分别在数据库提交后、`current` 切换后、候选启动前后、持久 admission marker 写入
+  前后及 ready 后终止安装器再重跑。marker 写入失败不得开放输入；没有 marker 的
+  候选启动失败可完整回滚。marker 存在后写入一条测试记录，确认只允许 exact 候选
+  向前恢复且保留记录，拒绝改装其他版本。证据不足时须保留材料并明确报错，不能仅凭
+  ready 或 schema 相同报告成功。旧服务已恢复并接收新数据后重试，不得再次还原快照。
+- manager target 未卸载、lifetime lock 仍被其他进程持有、恢复材料缺失／损坏或恢复
+  写入失败时保持失败关闭；数据库恢复过程中另一个服务不能取得 lifetime lock。
+  首次安装在服务定义发布前失败或中断后须能重试；Linux 停止缺失 unit 报错时，仅在
+  manager 查询明确为 `not-found`／`inactive` 且 lifetime lock 已释放后允许恢复。
+  在主数据库恢复后、WAL 恢复前中断，须继续恢复整份快照，期间旧程序不得接收输入；
+  `database_restored` 已持久记录后重试不再复制快照。
+  完整回滚才能报告 `rolled_back`；不能确认的结果保留为 `recovery_required`。
+- 恢复与清理只操作本实例记录的 release、服务定义和数据库文件，保留配置意图与共享
+  Codex 状态。中断恢复成功后才能清理材料；重复执行不再次迁移或复用过期快照。
+
+实机记录须注明 exact 候选、平台、夹具源／目标 schema、故障点、退出结果及最终
+服务／数据库状态。迁移提交与真实 manager 停启的证据不能由内存 SQLite、FakeBackend
+或常规安装成功代替；尚未执行的平台与故障场景须分别列明，不影响已记录证据的范围。
+
+2026-09-28 的隔离实机记录：`tests/support/deployment_migration_probe.py` 在 macOS
+LaunchAgent 与 Linux systemd user manager 各通过 active/stopped 升级、admission 前
+失败回滚、admission 后保留新数据并 exact 恢复，以及首次安装在服务定义发布前因端口
+冲突失败后的完整回滚与重试，共 10 个场景。两平台使用相同冻结代码摘要
+`8e20c46d652f7598fa11584b36d00c98a6dc14b32abe81b4b0b9b763e6da6494`，覆盖当前
+guarded-current／`database_restored` 恢复路径及本轮轻量简化；原有业务夹具值与完整性
+校验通过。首次安装由生产建库逻辑创建 v14；Linux 缺失 unit 的真实查询返回 0，状态
+为 `not-found`／`inactive`，安装器随后仍确认 lifetime lock 释放。临时
+服务与夹具均已清理。探针使用真实服务管理器和生产安装／迁移代码，服务本体是最小
+夹具；不加载 SDK 或飞书，不证明正式 Release 下载、完整 Runtime 或消息端到端行为。
+SIGKILL、WAL 半恢复及旧服务重启后新写入由真实 SQLite／子进程故障测试另行覆盖，
+不记作平台探针覆盖。可复现命令（workspace 必须尚不存在）：
+
+```bash
+python3 tests/support/deployment_migration_probe.py \
+  --workspace /tmp/netizen-migration-probe-<platform>-<id> \
+  --report /tmp/netizen-migration-probe-<platform>-<id>.json
+```
 
 ### 会话默认配置与自动创建验收
 
@@ -574,8 +632,8 @@ Adapter 边界时仍按[既有触发条件](#代码门禁与按需实时兼容�
 - catch-up 首轮使用真实触发消息作为初始边界，当前正文／引用／图片正常提交且不补读
   更早讨论；随后在群主线与话题分别验证从该消息之后读取。继续满足既有 chat/thread
   history rollout gate；本地“lower 等于 upper”的测试不能替代真实消息及客户端验收。
-- schema v14 新库完整初始化、当前库重装保留默认配置和规则顺序，v13 及其他旧库只读
-  拒绝，不新增迁移。数据库/release 失败回滚沿用卸载 manager target 与 lifetime lock
+- schema v14 新库完整初始化、当前库重装保留默认配置和规则顺序，v13 及更早库只读
+  拒绝。后续版本迁移遵循 ADR 0075；数据库/release 恢复沿用卸载 manager target 与 lifetime lock
   双门禁。Project 删除后默认配置保留，使用时按不可用提示降级，不新增联动删除。
 
 真实群聊消息和客户端操作须在指定的测试环境验收；缺少该条件时分别记录未验证范围，
@@ -926,13 +984,13 @@ API 能接受的历史或替代 scope，与特定应用类型、租户策略和�
 不会迁移到新应用的飞书 Scope。
 
 应用重绑定和 release 激活采用两阶段语义。官方或手工流程一旦成功写入新 App ID/Secret，
-这对凭据就是持久的用户配置意图；随后 tenant 权限门禁失败时不会进入 activation，候选启动
-失败时则回滚旧 `current`、服务定义和数据库，内置 Skills 随恢复后的 release 加载；
+这对凭据就是持久的用户配置意图；随后 tenant 权限门禁失败时不会进入 activation，激活
+失败按[候选验证与切换](#候选验证与切换)的证据决定回滚或保留待恢复状态，内置 Skills 随实际 release 加载；
 两种失败都不自动恢复旧应用凭据。
 完成管理员审批、应用发布和租户安装后重跑同一入口，会复用新绑定继续验证与激活，不重复
 打开应用选择流程。若用户决定放弃重绑定，恢复事先备份的整个应用凭据文件，并重新运行
 安装入口。权限门禁失败且旧进程未停止时，它
-继续使用启动时已加载的旧凭据；候选启动失败回滚或任何后续服务启动，都使用磁盘上的新绑定，
+继续使用启动时已加载的旧凭据；激活恢复或任何后续服务启动，都使用磁盘上的新绑定，
 因此不能把权限未就绪状态长期搁置。
 
 应用凭据只通过该 profile 初始化、读取和原子保存。项目尚未推广，不提供旧凭据格式迁移、
@@ -1078,18 +1136,26 @@ venv 中固定 Codex CLI 的 `login status`。这些安全检查使用安装调�
 实际安装与后续服务仍使用已解析 Layout 的 root。安装器不会在 service cgroup
 之外执行任意账号 profile，因为 profile 可以产生不可逆副作用或自行 daemonize。真实
 profile 只在候选 service 启动时加载：首次安装和原本 active 的升级会等待 ready，失败时
-回滚；原本停止的升级保持停止，之后 `service.sh --root "<NETIZEN_ROOT>" start` 或 `restart` 会等待最多 120 秒确认 ready
+按下述恢复边界处理；原本停止的升级保持停止，之后 `service.sh --root "<NETIZEN_ROOT>" start` 或 `restart` 会等待最多 120 秒确认 ready
 并直接暴露 shell/profile 启动错误；对已经 loaded 且已有有效 ready marker 的服务，
 `start` 幂等返回，loaded 但未 ready 则只做有界等待。任意具体 MCP/工具是否可用仍取决于其自身配置，不能
 由安装器枚举。真实 Thread capability phases 只在相关 SDK/Adapter/环境开发变更时按前文
 运行，不在正式 Release workflow 或每个最终用户安装中重复创建探针 Thread。
+
+数据库迁移属于这条共同安装事务，服务启动不自动改表。候选准备期间先只读检查已有库
+的版本、结构、完整性和完整迁移路径，拒绝 v13 及更早、未知／较新版本、路径缺失或
+损坏的库；新库直接创建目标完整结构。当前目标仍为 schema v14，尚无生产迁移步骤。
+未来跨多个应用版本升级时，由注册表依次执行所需的 schema 迁移，与应用版本号无关。
 
 激活阶段停止当前 root 的现役 user service（如果原本在运行），随后对已有固定端口的 Admin Web address
 执行 best-effort bind preflight。所有成功 socket 会持有到本次地址枚举结束，IPv6 明确
 设置 `IPV6_V6ONLY`；`EADDRNOTAVAIL` 只有在同一配置至少一个地址成功时才可忽略，端口占用
 则在数据库快照、service definition 和 `current` 切换之前失败并进入既有 activation rollback。runtime
 bind 仍是最终事实。端口字段缺失时不预检或补写 8787，由首次运行进程实际绑定后固化。
-预检通过后才渲染并验证平台 service definition，原子切换 `current`。内置
+预检通过且 manager target 已卸载后，在持有 lifetime lock 的条件下再次校验数据库，
+保存升级前的原始恢复快照并执行完整迁移路径。全部步骤、版本更新及最终校验放在
+同一个 SQLite 事务中，任一步失败都不提交部分 schema。成功后才原子切换 `current`、
+发布预先渲染的平台 service definition。内置
 `netizen-user-guide` 和 `netizen-lark` 保存在实际 release 的 `source/skills`，由
 [内置资源校验](../netizen/builtin_skills.py)检查完整性，启动时通过同一 App Server 的
 `skills/extraRoots/set` 注册。它不写用户 config.toml 或全局 Skills 目录，不再做
@@ -1102,21 +1168,40 @@ Linux 延续原 enabled/disabled 意图；macOS 保证 plist 已安装/enabled�
 
 只有 service definition、release 及其内置资源校验成功，并且事务按安装前状态应启动服务时已取得
 ready，旧 `current` 才记录为 `previous`，并只保留这两个 release；原本停止的升级不要求
-产生 ready，仍保持停止。候选启动前会在旧进程停止且端口预检通过后复制
-`channel.sqlite3` 及现有
-sidecar；任一步失败都会停止候选并恢复旧 release 指针、service definition、数据库
-和 enable/active 状态。launcher 启动时在稳定的 `state/service.lifetime.lock` inode 上持有
+产生 ready，仍保持停止。launcher 启动时在稳定的 `state/service.lifetime.lock` inode 上持有
 独占锁；主进程接管同一 FD 后立即恢复 CLOEXEC，Codex 工具与后台 terminal 不会继承。
-安装器只有在服务管理器目标已卸载且该锁可取得时才恢复数据库；若无法确认，跳过恢复
-并保留 recovery snapshot，避免仍存活的候选写入旧状态。若数据库恢复本身失败，保留的
-state 目录会保存 recovery snapshot，并在错误里打印精确路径。已写入的自动分配端口和
+
+候选在开放任何输入边界前，必须持久写入恢复目录的 `admission` marker，写入失败则
+不开放输入。恢复时先确认服务管理器目标已卸载，再全程持有 lifetime lock 并读取
+marker：它不存在时，候选启动失败仍可恢复旧 release 指针、service definition、
+数据库和原启停意图；锁不可取得或恢复失败时保留原始快照并报告恢复不完整。marker
+存在表示候选可能已接受输入，即使未观测到 ready 也禁止自动覆盖数据库；此时保留新库
+和恢复材料，仅允许重跑 exact 候选安装器向前恢复，其他版本或证据矛盾明确拒绝。
+主数据库与 WAL 等文件共同构成快照，不能仅凭主文件 schema 正确判断恢复完成。
+实际还原时始终持有 lifetime lock，先将 `current` 暂指带 admission guard 的候选并
+记录 `restoring`，完整复制并 fsync 全部文件后记录 `database_restored`，再还原旧
+`current` 与服务定义，防止没有恢复保护的旧程序在中途重启并接收输入。`restoring`
+重试必须完整恢复；`database_restored` 及以后只恢复指针／服务，不再拷贝原始快照，
+以免覆盖旧服务恢复后的新数据。
+首次升级可能来自没有 admission hook 的旧 release。中断后若 `current` 仍为原
+release、尚未开始恢复写入，且只读校验确认数据库仍是原完整 schema（例如迁移未提交、
+SQLite 已回滚），
+恢复会保留现有数据库，避免覆盖旧服务重启后的新数据；此选择记录为 `restoring_source`，
+即使再次中断也继续保留，不重新还原快照。
+已写入的自动分配端口和
 显式 `--admin-port` 均是持久配置意图，不因候选失败而撤销；旧 release 无法使用当前配置
 取得 ready 时按恢复失败报告，不能宣称完整回滚成功。
 
-任何可能停止旧服务的 mutation 之前，安装器都会原子写入 activation intent，记录本次
-操作完成后应保持的 active/enabled 状态。正常成功或完整回滚会清除它；若进程在切换中被
-`SIGKILL` 或异常退出，下次执行原安装入口会优先恢复该意图，再执行候选切换。因此
-发布后的半成品状态不会被误认成用户主动停止/禁用服务；`uninstall.sh` 会清除遗留意图。
+任何可能停止旧服务的 mutation 之前，安装器先创建私有
+`state/activation-recovery-<id>/manifest.json`，记录原 `current`／`previous`、旧服务定义、
+启停状态、源／目标 schema 和事务阶段；停服后把原始数据库与 sidecar 保存到该目录的
+`database/`，固化文件清单、权限和 SHA-256。原子写入的 activation intent v2 保留原
+release 与启停意图字段，只增加该恢复记录 ID。正常成功或完整回滚才清理恢复材料；
+先清除 intent，再清理对应目录，清理失败保留材料并提示。若进程被 `SIGKILL` 或异常
+退出，下次执行安装入口优先对账原事务，不能用已迁移的数据重做一份“升级前备份”。
+已经写入 admission marker 的恢复始终保持新数据库，只接受 exact 候选；缺失或矛盾的
+证据失败关闭，不能把半成品当作用户主动停止／禁用或一次成功升级。
+中断恢复不会因机器重启自动执行，须显式运行安装入口。
 
 不自动迁移旧 system unit、固定名称 user unit/LaunchAgent 或无标记旧布局，也不清理
 旧全局 Skills。旧安装的停止、备份和人工处理不属于新实例安装事务。
@@ -1156,6 +1241,8 @@ installed、loaded、ready 和日志路径，不能用 loaded 代替 ready。具
 
 `uninstall.sh` 接受 `--root`，只停止/disable 该实例 user service，并删除精确受管的
 unit/plist、程序 releases 与安装 cache。内置 Skills 随该 release 清理，不动全局 Skills。
+卸载同时清除 activation intent，但保留恢复目录；后续安装不会自动认领或重放没有
+intent 引用的孤立恢复材料。
 它明确保留 `.netizen-root`、
 `config.yaml`、`lark-app`、`credentials`、含 Channel
 SQLite 的 `state`、Project 目录、其他 Codex Skills 及原生 Thread/Turn 历史。若用户也
@@ -1200,26 +1287,29 @@ SHA-256，不会在安装中途跟随 latest 换版本。候选必须是 immutab
 | --- | --- |
 | 升级成功 | 所选安装事务成功完成；常规升级不重复整套主机验收。 |
 | 升级失败 | 下载、校验、环境或候选准备未完成，旧版本未切换；根据固定错误提示处理后，显式重新检查与提交。 |
-| 升级失败，已回滚 | 安装器确认完整恢复旧状态；处理候选启动等原因后再显式提交。 |
+| 升级失败，已回滚 | 安装器确认完整恢复旧状态；处理报错原因后再显式提交。 |
 | 需要处理后重试 | 补全配置/凭据或 exact 飞书应用权限；应用授权、审批与发布完成后再检查和提交。Admin worker 不开启授权浏览器；需要 CLI repair 时继续按本文原有 exact-App 流程。 |
 | 升级结果未确认，需要修复 | worker 被中断、失联或回滚不完整，不能继续从 Admin 提交；保留状态与 recovery snapshot，用既有官方安装入口恢复。 |
 | 已通过安装器恢复 | 后续显式 CLI 安装已成功修复旧未知记录；原 operation/target 保留，实际运行版本单独显示，不表示原页面点击成功。 |
 
-遇到需要修复的结果，以同一安装用户下载官方 installer 到文件后执行，例如：
+遇到需要修复的结果，以同一安装用户下载原目标 exact tag 的官方 installer 到文件后
+执行，将 `<EXACT_TAG>` 替换为报错提示的原目标 tag（例如 `v0.9.0`）：
 
 ```bash
 netizen_recovery_dir=$(mktemp -d)
 curl -fL --proto '=https' --proto-redir '=https' \
-  https://github.com/lijingda/netizen/releases/latest/download/install.sh \
+  "https://github.com/lijingda/netizen/releases/download/<EXACT_TAG>/install.sh" \
   -o "$netizen_recovery_dir/install.sh"
 sh "$netizen_recovery_dir/install.sh" --root "<NETIZEN_ROOT>" </dev/null
 ```
 
-需要固定原目标时将下载地址改为所选 exact tag 的 `install.sh`；不要修改 `update.json`
-伪造成功，也不要删除 `.activation-intent.json` 或 recovery snapshot。CLI 在同一安装锁
+admission marker 已存在时必须先恢复原 exact 候选，不能用后来发布的 latest 直接跳过
+该事务。不要修改 `update.json` 伪造成功，也不要删除 `.activation-intent.json`、恢复
+目录或 admission marker。CLI 在同一安装锁
 内恢复既有 activation intent 并完成事务后，才把旧未知/非终态记录标为
 `recovered/manual_recovery`；失败保留原记录。Source Install 成功也可完成该恢复，但其
-运行来源仍不允许 Admin 升级。若恢复需要 exact-App 浏览器修复，继续遵循本文 Agent
+候选已开放输入时同样要求原 exact release 内容，不能先修改工作区再覆盖安装；运行来源
+仍不允许 Admin 升级。若恢复需要 exact-App 浏览器修复，继续遵循本文 Agent
 relay 规则，不把 App Secret 发到聊天。机器掉电不会自动执行恢复，须重新运行安装入口。
 
 一次性执行者的下载与安装输出不进入 Admin API；页面只显示固定阶段与错误码。排障按
@@ -1347,16 +1437,19 @@ admission，修复文件后仍需 `./service.sh --root "<NETIZEN_ROOT>" restart`
 HTTP；不得把该端口直接暴露到不受信网络。
 
 `instance.projectRoot` 是必填的绝对路径，用于限制从飞书自动创建的空 Project；它不是
-Binding 的默认 cwd。Channel 服务与安装器只支持当前 schema v14，不保留历史版本
-自动迁移。新库直接创建完整表结构；已有库须通过只读的版本、结构和完整性校验。
+Binding 的默认 cwd。Channel 服务只支持当前完整 schema v14；安装器按
+[ADR 0075](adr/0075-migrate-channel-databases-during-installation.md) 从 v14 起维护前向
+迁移路径。新库直接创建完整表结构，已有库先经过只读版本、结构、完整性和路径校验，
+再由安装事务在停服持锁后迁移；当前仍为 v14，没有生产迁移步骤。
 `session_defaults` 和 `session_defaults_order` 仅保存 App 隔离的聊天默认配置、群名匹配
 条件与有序规则元数据，不保存聊天正文或有效 Codex 配置。
 `schedule_plans`、`schedule_runs` 和 `schedule_requests` 仅保存当前计划指令与会话配置、
 最小调度交接/initial Turn 引用及有界管理请求去重，不复制原生历史。
-当前库重装保留 Scope/Binding/Project、会话默认配置及规则顺序、去重记录及 `side_topics` 永久墓碑；激活仍在
-lifetime lock 与快照保护下完成，失败恢复原数据库与旧 release。
-旧版本或损坏数据库明确拒绝，不自动删除或重建空库。本机旧数据的一次性转换需单独
-停服、备份并校验，不属于安装器自动升级流程。
+当前库重装及后续受支持迁移保留 Scope/Binding/Project、会话默认配置及规则顺序、去重
+记录和 `side_topics` 永久墓碑。迁移与允许的数据库恢复均全程持有 lifetime lock，
+失败／中断按[候选验证与切换](#候选验证与切换)恢复，不覆盖候选可能已写入的新数据。
+低于 v14、未知／较新版本、缺失迁移路径或损坏数据库明确拒绝，不自动删除或重建空库。
+早期试验版数据的一次性转换仍需单独停服、备份并校验，不属于自动升级流程。
 配置的 `projects` mapping 启动时仍只做 `INSERT OR IGNORE`，停用、动态登记和已删除记录
 始终优先；已删除 alias 只有显式重新登记才能复用，revision 继续递增。Project 删除保留
 磁盘代码目录。Project 删除清单同时纳入定时计划和在途定时创建；提交后删除关联计划，
@@ -1521,10 +1614,12 @@ override 或第二套 CODEX_HOME 模拟多实例。
    候选验证失败，确认在停止服务之前退出。使用测试应用缺失权限的场景，确认显示
    `requires_action`、无后台授权浏览器；授权修复后显式重试可以继续。检查 API、结果文件、
    worker argv/plist 与服务日志没有凭据、session/action token 或任务正文。
-5. **激活回滚。** 用本地候选夹具分别注入配置端口冲突和候选 ready 失败，核对安装器
-   已恢复旧 `current`、服务定义、数据库和原服务意图，内置 Skills 来自恢复后的 release，结果为 `rolled_back`。
-   恢复后 Admin 可连通仍必须显示升级失败已回滚，不能显示成功。故意使 rollback 不完整时
-   只能显示 `recovery_required`，保留恢复材料。
+5. **激活失败。** 用本地候选夹具注入配置端口冲突和 admission marker 写入前的启动失败，核对安装器
+   已恢复旧 `current`、服务定义、数据库和原服务意图，内置 Skills 来自恢复后的 release，
+   结果为 `rolled_back`。恢复后 Admin 可连通仍必须显示升级失败已回滚，不能显示成功。
+   另注入 admission marker 已写入但 ready 未确认和 rollback 不完整；只能显示
+   `recovery_required`，保留恢复材料及可能已写入的新数据，按数据库迁移验收验证 exact
+   候选向前恢复、不同候选拒绝和旧服务恢复后不重复还原数据库。
 6. **中断与恢复。** 在受控测试进程中分别于 `accepted`、下载/准备、停止旧服务后、切换
    `current` 后中断 exact worker job；manager 查询超时单独测试，不能重派。释放安装锁后
    对账得到未知恢复状态；仍持锁时不能当作 worker 已消失。按上文官方文件入口恢复，确认
@@ -1560,9 +1655,9 @@ ADR 0059 首次交付或改变重启准入、执行隔离、安装锁、停机/r
 ## 验收顺序
 
 每次改动安装器、launcher、主进程 ready 时，先完成两套平台门禁：Linux 重跑 systemd
-fresh/active/stopped upgrade、失败回滚、linger 和卸载；真实 macOS 14+ 受支持架构真机在
+fresh/active/stopped upgrade、失败与中断恢复、linger 和卸载；真实 macOS 14+ 受支持架构真机在
 实际 GUI 登录用户下依次验证首次安装、`start|stop|restart|status`、active/stopped upgrade、
-故意启动失败后恢复旧版本、失败自动重启、sleep/wake、logout/login 后自动启动，以及卸载
+激活失败的回滚／向前恢复、失败自动重启、sleep/wake、logout/login 后自动启动，以及卸载
 保留边界。macOS 还必须在 Codex 启动一个后台 terminal 后停止 Netizen，确认 terminal 可继续
 存活但不会持有 `service.lifetime.lock`；检查 plist、进程 argv/environment、`netizen.log` 和
 `launchd.stderr.log` 均不含 App/Admin Secret。最后在两平台重跑真实 Codex Thread、steer、
@@ -1593,8 +1688,9 @@ Binding。
 逐个删除会话，磁盘标记文件保留，Project 消失而 Side 墓碑仍在。执行期间从另一入口尝试
 新建关联会话、Side 或重新启用，均应拒绝。验证部分失败/断线后 Project 仍停用且显示
 剩余项，不把结果未知显示为整体成功。重启时 YAML 不应恢复已删除 Project；显式复用
-alias 后旧 revision/action 必须失效。数据库边界变更还应针对候选验证旧版本只读拒绝、
-当前库重装的 metadata 保留，以及失败时恢复原数据库/release，记录与此边界相关的真实结果。
+alias 后旧 revision/action 必须失效。数据库边界变更还应针对候选验证受支持版本迁移与
+不受支持库只读拒绝、当前库重装的 metadata 保留，以及失败／中断恢复和候选新数据
+保留；按[数据库迁移验收](#数据库迁移与中断恢复验收)记录与此边界相关的真实结果。
 双击同一 action 应返回 stale/consumed；与飞书并发操作同一目标时只允许符合 exact native
 identity 的一方提交。重启服务后旧 Admin session 必须失效，持久 Binding/设置/Side
 墓碑不变；journal 不得出现 credential、cookie/action token、cwd、name/preview 或 body。

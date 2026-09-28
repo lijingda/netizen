@@ -175,6 +175,11 @@ def _write_atomic(path: Path, content: bytes, *, mode: int) -> None:
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     except BaseException:
         with contextlib.suppress(OSError):
             os.close(descriptor)

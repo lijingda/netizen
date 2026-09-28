@@ -2,13 +2,16 @@
 status: accepted
 date: 2026-09-21
 amends: 0031, 0061, 0063
-amended_by: 0070
+amended_by: 0070, 0075
 ---
 
 # 通过现有调度链路手动执行已保存的计划
 
 2026-09-23 修订：[ADR 0070](0070-schedule-inputs-in-existing-bindings.md) 将已保存版本的
 手动运行扩展到 exact Binding 目标；不接受任意即时 Prompt，但可按保存的计划 steer。
+
+2026-09-28 修订：[ADR 0075](0075-migrate-channel-databases-during-installation.md) 从 schema
+v14 建立安装期前向迁移基线，替代下文不维护历史数据库迁移的政策；不补建 v10–v13 路径。
 
 创建、修改计划后的试跑以及临时执行需要直接使用计划已保存的指令和配置。用户确认
 Admin、`/cron` 和自然语言均提供“立即运行”，并采用同一 Scheduled Run 与普通会话

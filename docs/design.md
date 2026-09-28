@@ -1270,10 +1270,14 @@ ephemeral native Thread ID 或内容。`projects.deleted` 保留已删除 Projec
 `session_defaults` 仅保存 App 隔离的精确聊天／群名匹配条件、创建配置意图和 revision，
 `session_defaults_order` 保存同 App 群名规则的顺序元数据；不保存消息、聊天历史、有效
 Codex 配置或卡片 session，也不与 Project 删除级联。
-服务与安装器只支持当前完整 schema，新库直接创建完整结构。按
-[ADR 0068](adr/0068-run-saved-scheduled-plans-manually.md)，项目尚未推广，不保留旧版
-自动迁移或旧字段兼容；已有库只读校验，旧版本或损坏结构明确拒绝，不重建空库。
-安装事务仍保留数据库快照，失败时按既有 lifetime lock 边界恢复原数据库与 release。
+Runtime 只接受当前完整 schema，新库直接创建完整结构。按
+[ADR 0075](adr/0075-migrate-channel-databases-during-installation.md)，安装器从 schema v14
+开始维护前向迁移：按显式版本关系选择完整路径，停服并持有 lifetime lock 后，在一个
+SQLite 事务内完成迁移、版本推进和最终结构／完整性校验。已发布的迁移与版本校验不
+依赖以后变化的当前建表逻辑。当前仍为 v14，没有为框架预设虚构的后继 schema。
+Runtime 不执行迁移或保留旧字段兼容；安装器在只读预检中拒绝低于基线、未知／较新版本、
+路径缺失或损坏的数据库，不重建空库。快照及中断恢复属于下述部署事务，不在 SQLite
+增加部署历史或恢复记录。
 Project 删除 intent、
 确认清单、fingerprint 和结果只在进程内，不保存解析后的 wire value 或已生效配置。
 ADR 0061/0070 的窄例外仅保存当前计划指令、执行目标、时间规则与游标、最小调度交接证据、
@@ -1353,12 +1357,26 @@ user unit；macOS 14+ 的 Apple Silicon 与 Intel Mac 使用当前 GUI 登录用
 `.netizen-root` 只证明受管命名空间归属，不能据此删除整个安装根。目录认领和精确文件校验
 见[部署文档](deployment.md#目录)。不提供旧服务名/布局迁移或跨此次格式变更自动降级。
 launcher 在稳定的 `state/service.lifetime.lock` inode 上持有独占锁，并只为最终 exec 短暂
-开放 FD 继承；主进程在导入 SDK 边界前恢复 CLOEXEC。候选回滚只有同时确认 manager target
-已卸载且锁已释放时才能恢复 Channel Database。loaded 与 ready 分离：installer 和
+开放 FD 继承；主进程在导入 SDK 边界前恢复 CLOEXEC。数据库快照、迁移与恢复写入都须
+确认 manager target 已卸载，并在操作全程持有该锁。loaded 与 ready 分离：installer 和
 launcher 清理旧 marker，主进程仅在 Feishu background、Runtime 与 admission 全部开启后原子
 发布 `0600 state/service.ready`，正常退出尽力删除。
 macOS 应用入口通过精确锁定的 `truststore` 使用 Security.framework 的系统钥匙串验证 TLS；
 它不导出证书、不生成 CA bundle，也不增加 Netizen 环境配置。Linux TLS 行为保持不变。
+
+按 ADR 0075，候选准备和只读迁移路径预检在停服之前完成；停服后再次验证数据库，保存
+升级前快照并迁移，成功后才切换 release。activation intent v2 保留原 release／启停
+意图，并引用私有 `state/activation-recovery-<id>/manifest.json`；后者记录原始数据库
+快照证据、旧服务定义、原 `current`／`previous`、源／目标 schema 与事务阶段。重试
+必须读取同一恢复依据，不能覆盖原快照或把半成品作为新起点。
+
+Runtime 在开放输入前持久写入该恢复目录的 `admission` marker，失败则不开放输入。
+恢复时先确认服务退出并持有 lifetime lock，再读取 marker；它不存在时启动失败仍可
+完整回滚，它存在时保留候选新库，只有重跑 exact 候选安装器才能向前完成原事务，
+其他版本或矛盾证据报告 `recovery_required`。旧库主文件与 WAL 等全部恢复并持久记录
+完成后，重试只恢复指针／服务而不再次覆盖数据库。私有 ready 证明服务就绪，不证明
+未接收过请求，
+也不能独立证明整个安装事务完成。原本停止的升级仍保持停止。
 
 ADR 0057 的 Admin Upgrade 是上述安装事务的显式手动入口。管理 application 只持有一个
 有界 blocking-I/O worker，用于官方 Release 查询、部署状态读取和一次性进程提交；它不

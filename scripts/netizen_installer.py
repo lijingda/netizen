@@ -54,7 +54,18 @@ from netizen.lark_app import (  # noqa: E402
     load_lark_app,
 )
 from netizen.bindings import (  # noqa: E402
-    validate_channel_database,
+    SCHEMA_VERSION,
+)
+from netizen.database_migrations import (  # noqa: E402
+    plan_channel_database,
+    migrate_channel_database,
+)
+from netizen.deployment.activation_recovery import (  # noqa: E402
+    ActivationIntent,
+    decode_activation_intent,
+    Recovery,
+    create_recovery,
+    load_recovery,
 )
 from netizen.deployment.update_protocol import (  # noqa: E402
     ENV_ARCHIVE_SHA256,
@@ -247,14 +258,6 @@ class DatabaseSnapshot:
     data_dir: Path
     saved_root: Path
     existing_files: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ActivationIntent:
-    release: str
-    prior_release: str | None
-    should_start: bool
-    should_enable: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1759,44 +1762,9 @@ def _read_activation_intent(layout: Layout) -> ActivationIntent | None:
         return None
     _require_regular_file(path, "activation intent")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise InstallError(f"activation intent is unreadable: {path}: {error}") from error
-    if not isinstance(payload, dict) or set(payload) != {
-        "version",
-        "release",
-        "priorRelease",
-        "shouldStart",
-        "shouldEnable",
-    }:
-        raise InstallError(f"activation intent has an invalid shape: {path}")
-    release = payload["release"]
-    prior_release = payload["priorRelease"]
-    should_start = payload["shouldStart"]
-    should_enable = payload["shouldEnable"]
-    if (
-        not isinstance(payload["version"], int)
-        or isinstance(payload["version"], bool)
-        or payload["version"] != 1
-        or not isinstance(release, str)
-        or RELEASE_NAME.fullmatch(release) is None
-        or (
-            prior_release is not None
-            and (
-                not isinstance(prior_release, str)
-                or RELEASE_NAME.fullmatch(prior_release) is None
-            )
-        )
-        or not isinstance(should_start, bool)
-        or not isinstance(should_enable, bool)
-    ):
-        raise InstallError(f"activation intent has invalid values: {path}")
-    return ActivationIntent(
-        release=release,
-        prior_release=prior_release,
-        should_start=should_start,
-        should_enable=should_enable,
-    )
+        return decode_activation_intent(path.read_bytes())
+    except (OSError, InstallError) as error:
+        raise InstallError(f"could not read activation intent {path}: {error}") from error
 
 
 def _write_activation_intent(
@@ -1806,6 +1774,7 @@ def _write_activation_intent(
     should_start: bool,
     should_enable: bool,
     prior_release: Path | None = None,
+    recovery: str | None = None,
 ) -> None:
     if RELEASE_NAME.fullmatch(release.digest) is None:
         raise InstallError(f"activation intent has an invalid release digest: {release.digest}")
@@ -1822,17 +1791,22 @@ def _write_activation_intent(
             )
         prior_digest = resolved_prior.name
     payload = {
-        "version": 1,
+        "version": 1 if recovery is None else 2,
         "release": release.digest,
         "priorRelease": prior_digest,
         "shouldStart": should_start,
         "shouldEnable": should_enable,
     }
+    if recovery is not None:
+        if re.fullmatch(r"[0-9a-f]{32}", recovery) is None:
+            raise InstallError("invalid activation recovery identity")
+        payload["recovery"] = recovery
     _write_atomic(
         layout.state_dir / ACTIVATION_INTENT,
         (json.dumps(payload, sort_keys=True) + "\n").encode(),
         mode=0o600,
     )
+    _sync_directory(layout.state_dir)
 
 
 def _clear_activation_intent(layout: Layout) -> None:
@@ -1842,8 +1816,17 @@ def _clear_activation_intent(layout: Layout) -> None:
     _require_regular_file(path, "activation intent")
     try:
         path.unlink()
+        _sync_directory(layout.state_dir)
     except OSError as error:
         raise InstallError(f"could not clear activation intent {path}: {error}") from error
+
+
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _intent_prior_release(
@@ -1866,6 +1849,187 @@ def _intent_prior_release(
     return resolved
 
 
+def _recovery_release(layout: Layout, digest: str | None) -> Path | None:
+    if digest is None:
+        return None
+    path = layout.releases / digest
+    if path.is_symlink() or not path.is_dir() or path.resolve().parent != layout.releases.resolve():
+        raise InstallError(f"activation recovery release is unavailable: {digest}")
+    return path
+
+
+def _recovery_snapshot(layout: Layout, recovery: Recovery) -> DatabaseSnapshot | None:
+    files = recovery.payload["database_files"]
+    if files is None:
+        return None
+    recovery.verify_database()
+    return DatabaseSnapshot(layout.state_dir, recovery.root / "database", tuple(files))
+
+
+def _clear_recovery(layout: Layout, recovery: Recovery) -> None:
+    # Unlink the durable transaction pointer first. A crash during cleanup may
+    # leave unused recovery material, never an intent pointing to missing data.
+    _clear_activation_intent(layout)
+    try:
+        recovery.remove()
+    except (OSError, InstallError) as error:
+        info(f"warning: completed recovery material retained at {recovery.root}: {error}")
+
+
+def _commit_activation(layout: Layout, release: Release, recovery: Recovery) -> None:
+    old = _recovery_release(layout, recovery.payload["old_current"])
+    if old is None:
+        _set_release_link(layout.previous, None, layout)
+    elif old.resolve() != release.root.resolve():
+        _set_release_link(layout.previous, old, layout)
+    recovery.save(phase="committed")
+    _clear_recovery(layout, recovery)
+
+
+def _rollback_activation(
+    layout: Layout,
+    backend: ServiceBackend,
+    recovery: Recovery,
+    *,
+    ready_timeout: float,
+    preserve_source_database: bool = False,
+) -> None:
+    payload = recovery.payload
+    old = _recovery_release(layout, payload["old_current"])
+    previous = _recovery_release(layout, payload["old_previous"])
+    # Once restoration completed, an old service may already have accepted new
+    # input. Retrying its start must not restore the snapshot a second time.
+    if payload["phase"] not in {"restoring_service", "restored"}:
+        backend.stop_and_confirm()
+        with _hold_service_lifetime_lock(layout):
+            if recovery.admission_observed():
+                raise InstallError(
+                    "candidate may have accepted input; retained its database and "
+                    f"original recovery snapshot at {recovery.root}; rerun the exact candidate installer"
+                )
+            snapshot = _recovery_snapshot(layout, recovery)
+            keep_source = payload["phase"] == "restoring_source"
+            if (
+                preserve_source_database and payload["source_version"] is not None
+                and payload["phase"] not in {"restoring", "database_restored"}
+                and _read_release_link(layout.current, layout) == old
+            ):
+                # The first supported old release has no admission hook. After
+                # installer death it can restart and accept input if SQLite
+                # rolled the migration back. A valid source DB is already the
+                # state we need; restoring its earlier snapshot would lose work.
+                try:
+                    current_plan = plan_channel_database(layout.state_dir / "channel.sqlite3")
+                except (RuntimeError, OSError):
+                    pass
+                else:
+                    keep_source = current_plan["source_version"] == payload["source_version"]
+            if keep_source:
+                recovery.save(phase="restoring_source")
+            elif payload["phase"] != "database_restored":
+                # During a multi-file DB/WAL restore, the main file alone can
+                # be a valid but incomplete source database. Keep the stable
+                # service entry on the guarded candidate until every snapshot
+                # file is restored and this completion is durable. Old v14
+                # binaries do not understand recovery admission markers.
+                candidate = _recovery_release(layout, payload["release"])
+                _set_release_link(layout.current, candidate, layout)
+                recovery.save(phase="restoring")
+                _restore_database(snapshot)
+                recovery.save(phase="database_restored")
+            _set_release_link(layout.current, old, layout)
+            _set_release_link(layout.previous, previous, layout)
+            definition = payload["definition"]
+            backend.restore_definition(
+                FileSnapshot(
+                    existed=definition["existed"],
+                    content=bytes.fromhex(definition["content"]),
+                    mode=definition["mode"],
+                ),
+                should_enable=payload["old_enabled"],
+            )
+            recovery.save(phase="restoring_service")
+    else:
+        if _read_release_link(layout.current, layout) != old:
+            raise InstallError("restored release changed; refusing to repeat database recovery")
+    if payload["old_loaded"]:
+        backend.start_and_wait(timeout=ready_timeout)
+    recovery.save(phase="restored")
+    _clear_recovery(layout, recovery)
+
+
+def _recover_activation(
+    layout: Layout,
+    release: Release,
+    backend: ServiceBackend,
+    intent: ActivationIntent,
+    *,
+    ready_timeout: float,
+) -> bool:
+    """Resolve one durable activation before planning another database change."""
+    assert intent.recovery is not None
+    recovery = load_recovery(layout, intent.recovery)
+    payload = recovery.payload
+    if (
+        payload["release"] != intent.release
+        or payload["old_current"] != intent.prior_release
+        or payload["should_start"] != intent.should_start
+        or payload["should_enable"] != intent.should_enable
+    ):
+        raise InstallError("activation intent and recovery record disagree")
+    if release.digest != payload["release"] and (
+        recovery.admission_observed() or payload["phase"] == "committed"
+    ):
+        raise InstallError(
+            "interrupted candidate may have accepted input; recover its exact release "
+            f"{payload['release']} before installing another version; recovery: {recovery.root}"
+        )
+    if payload["phase"] in {
+        "restoring", "restoring_source", "database_restored", "restoring_service", "restored",
+    }:
+        _rollback_activation(
+            layout, backend, recovery, ready_timeout=ready_timeout,
+            preserve_source_database=True,
+        )
+        return False
+    # Stop under the normal manager proof before consulting the marker. This
+    # closes the race with a candidate publishing admission while we recover.
+    if payload["phase"] != "committed":
+        backend.stop_and_confirm()
+    with _hold_service_lifetime_lock(layout) if payload["phase"] != "committed" else contextlib.nullcontext():
+        admitted = recovery.admission_observed()
+    if not admitted and payload["phase"] != "committed":
+        _rollback_activation(
+            layout, backend, recovery, ready_timeout=ready_timeout,
+            preserve_source_database=True,
+        )
+        return False
+    if release.digest != payload["release"]:
+        raise InstallError(
+            "interrupted candidate may have accepted input; recover its exact release "
+            f"{payload['release']} before installing another version; recovery: {recovery.root}"
+        )
+    if _read_release_link(layout.current, layout) != release.root.resolve():
+        raise InstallError("interrupted candidate release changed; database was retained")
+    database = layout.state_dir / "channel.sqlite3"
+    if _path_exists(database):
+        plan = plan_channel_database(database)
+        if plan["source_version"] != payload["target_version"] or plan["steps"]:
+            raise InstallError("interrupted candidate database differs from its migration target")
+    elif admitted:
+        raise InstallError("interrupted candidate database is missing; recovery required")
+    # Forward recovery deliberately never restores the old snapshot, including
+    # when a repeated start fails. A subsequent exact installer can retry it.
+    backend.publish_definition(
+        backend.render_definition(release), should_enable=payload["should_enable"],
+    )
+    if payload["should_start"]:
+        recovery.save(phase="starting")
+        backend.start_and_wait(timeout=ready_timeout)
+    _commit_activation(layout, release, recovery)
+    return True
+
+
 def activate_release(
     release: Release,
     layout: Layout,
@@ -1879,6 +2043,25 @@ def activate_release(
 ) -> None:
     execute = run_command if runner is None else runner
     backend = _service_backend(layout, execute)
+    if data_dir is not None and data_dir.resolve() != layout.state_dir.resolve():
+        raise InstallError("Channel database must belong to the selected instance root")
+    pending_intent = _read_activation_intent(layout)
+    if pending_intent is not None and pending_intent.recovery is not None:
+        if update is not None:
+            update.report("installing")
+        try:
+            completed = _recover_activation(
+                layout, release, backend, pending_intent, ready_timeout=ready_timeout,
+            )
+        except BaseException as error:
+            if update is not None:
+                update.report("recovery_required", "rollback_incomplete")
+            raise InstallError(f"interrupted activation requires recovery: {error}") from error
+        if completed:
+            _prune_after_activation(layout)
+            return
+        pending_intent = None
+
     old_current = _read_release_link(layout.current, layout)
     old_previous = _read_release_link(layout.previous, layout)
     old_definition = backend.capture_definition()
@@ -1888,175 +2071,95 @@ def activate_release(
             "the managed service definition is missing but its service-manager "
             "target is still loaded/enabled; inspect it before installing"
         )
-    pending_intent = _read_activation_intent(layout)
     if pending_intent is None:
         intended_prior_release = old_current
         should_start = old_current is None or old_state.loaded
         should_enable = old_current is None or old_state.enabled
     else:
+        # Version 1 intents predate automatic migration. Keep their existing
+        # active/enabled recovery semantics without claiming a historical DB snapshot.
         intended_prior_release = _intent_prior_release(layout, pending_intent)
         should_start = pending_intent.should_start
         should_enable = pending_intent.should_enable
-        info(
-            "recovering interrupted activation intent from release "
-            f"{pending_intent.release[:12]}"
-        )
+        info(f"recovering interrupted activation intent from release {pending_intent.release[:12]}")
+    database = layout.state_dir / "channel.sqlite3"
+    try:
+        plan = plan_channel_database(database) if _path_exists(database) else None
+    except (RuntimeError, OSError) as error:
+        raise InstallError(f"Channel database upgrade preflight failed: {error}") from error
     definition = backend.render_definition(release)
-
-    with tempfile.TemporaryDirectory(prefix=".rollback-", dir=layout.state_dir) as temp:
-        database_snapshot: DatabaseSnapshot | None = None
-        changed_service = False
-        definition_publish_attempted = False
-        if update is not None:
-            update.report("installing")
-        _write_activation_intent(
-            layout,
-            release,
-            should_start=should_start,
-            should_enable=should_enable,
-            prior_release=intended_prior_release,
-        )
-        try:
-            if old_state.loaded:
-                changed_service = True
-                backend.stop_and_confirm()
-
-            if admin_bind is not None:
-                preflight_admin_bind(admin_bind)
-
-            channel_data_dir = layout.state_dir if data_dir is None else data_dir
-            channel_database = channel_data_dir / "channel.sqlite3"
-            if _path_exists(channel_database):
-                # The old service is already confirmed stopped above. Holding
-                # its stable lifetime lock closes the race with an external
-                # service start while capturing the rollback snapshot and
-                # validating the current database without upgrading it.
-                with _hold_service_lifetime_lock(layout):
-                    database_snapshot = _capture_database(
-                        channel_data_dir,
-                        Path(temp),
-                    )
-                    validate_channel_database(channel_database)
-                    _set_release_link(layout.current, release.root, layout)
-            else:
-                if should_start:
-                    database_snapshot = _capture_database(
-                        channel_data_dir,
-                        Path(temp),
-                    )
-                _set_release_link(layout.current, release.root, layout)
-            definition_publish_attempted = True
-            backend.publish_definition(
-                definition,
-                should_enable=should_enable,
-            )
-            if should_start:
-                # A failed start request can still have created a process.
-                changed_service = True
-                if update is not None:
-                    update.report("restarting")
-                backend.start_and_wait(timeout=ready_timeout)
-
-            if pending_intent is not None:
-                if intended_prior_release is None:
-                    _set_release_link(layout.previous, None, layout)
-                elif intended_prior_release != release.root.resolve():
-                    _set_release_link(
-                        layout.previous,
-                        intended_prior_release,
-                        layout,
-                    )
-            elif old_current is not None and old_current != release.root.resolve():
-                _set_release_link(layout.previous, old_current, layout)
-            elif old_current is None and old_previous is None:
-                _set_release_link(layout.previous, None, layout)
-            _clear_activation_intent(layout)
-        except BaseException as error:
-            rollback_errors: list[str] = []
-            preserve_snapshot = False
-            candidate_stopped = True
-            if changed_service:
-                try:
-                    backend.stop_and_confirm()
-                except BaseException as rollback_error:
-                    candidate_stopped = False
-                    preserve_snapshot = True
-                    rollback_errors.append(f"stop candidate: {rollback_error}")
-            rollback_safe_to_start = candidate_stopped
-            rollback_actions: list[tuple[str, Callable[[], None]]] = [
-                (
-                    "current release",
-                    lambda: _set_release_link(layout.current, old_current, layout),
-                ),
-            ]
-            if definition_publish_attempted:
-                rollback_actions.append(
-                    (
-                        "service definition",
-                        lambda: backend.restore_definition(
-                            old_definition,
-                            should_enable=old_state.enabled,
-                        ),
-                    )
-                )
-            rollback_actions.append(("database", lambda: _restore_database(database_snapshot)))
-            for label, action in rollback_actions:
-                if label == "database" and not candidate_stopped:
-                    preserve_snapshot = True
-                    rollback_safe_to_start = False
-                    rollback_errors.append(
-                        f"restore {label}: skipped because candidate stop was not confirmed"
-                    )
-                    continue
-                try:
-                    action()
-                except BaseException as rollback_error:
-                    rollback_safe_to_start = False
-                    rollback_errors.append(f"restore {label}: {rollback_error}")
-                    preserve_snapshot = preserve_snapshot or label == "database"
-            if preserve_snapshot:
-                recovery = layout.state_dir / f"rollback-recovery-{uuid.uuid4().hex}"
-                try:
-                    os.replace(temp, recovery)
-                    rollback_errors.append(
-                        f"rollback recovery snapshot preserved at {recovery}"
-                    )
-                except OSError as preserve_error:
-                    rollback_errors.append(
-                        "rollback recovery snapshot could not be preserved: "
-                        f"{preserve_error}"
-                    )
-            try:
-                if old_state.loaded and rollback_safe_to_start:
-                    backend.start_and_wait(timeout=ready_timeout)
-                elif old_state.loaded:
-                    rollback_errors.append(
-                        "restore user service: skipped because rollback state is incomplete"
-                    )
-            except BaseException as rollback_error:
-                rollback_errors.append(f"restore user service: {rollback_error}")
-            if pending_intent is None and not rollback_errors:
-                try:
-                    _clear_activation_intent(layout)
-                except BaseException as rollback_error:
-                    rollback_errors.append(
-                        f"clear activation intent: {rollback_error}"
-                    )
-            detail = f"; rollback issues: {'; '.join(rollback_errors)}" if rollback_errors else ""
+    recovery = create_recovery(layout, {
+        "phase": "prepared",
+        "release": release.digest,
+        "old_current": None if intended_prior_release is None else intended_prior_release.name,
+        "old_previous": None if old_previous is None else old_previous.name,
+        "old_loaded": old_state.loaded,
+        "old_enabled": old_state.enabled,
+        "should_start": should_start,
+        "should_enable": should_enable,
+        "source_version": None if plan is None else plan["source_version"],
+        "target_version": SCHEMA_VERSION if plan is None else plan["target_version"],
+        "definition": {
+            "existed": old_definition.existed,
+            "content": old_definition.content.hex(),
+            "mode": old_definition.mode,
+        },
+        "database_files": None,
+    })
+    if update is not None:
+        update.report("installing")
+    _write_activation_intent(
+        layout, release, should_start=should_start, should_enable=should_enable,
+        prior_release=intended_prior_release, recovery=recovery.id,
+    )
+    try:
+        if old_state.loaded:
+            backend.stop_and_confirm()
+        if admin_bind is not None:
+            preflight_admin_bind(admin_bind)
+        with _hold_service_lifetime_lock(layout):
+            # Re-plan after exclusion: preflight was read-only while the old
+            # service could still write. Never infer a schema from release tags.
+            if plan is not None:
+                locked_plan = plan_channel_database(database)
+                if locked_plan != plan:
+                    raise InstallError("Channel database migration plan changed before activation")
+            elif _path_exists(database):
+                raise InstallError("Channel database appeared after upgrade preflight")
+            snapshot = _capture_database(layout.state_dir, recovery.root)
+            recovery.seal_database(snapshot.existing_files)
+            recovery.save(phase="snapshot")
+            if plan is not None:
+                info(f"Channel database schema {plan['source_version']} -> {plan['target_version']}")
+                migrate_channel_database(database, expected_source_version=plan["source_version"])
+            recovery.save(phase="publishing")
+            _set_release_link(layout.current, release.root, layout)
+            backend.publish_definition(definition, should_enable=should_enable)
+            recovery.save(phase="starting" if should_start else "published")
+        if should_start:
             if update is not None:
-                # A pending interrupted activation is not a proof that the
-                # original installation has now been fully restored.
-                incomplete = bool(rollback_errors) or pending_intent is not None
-                try:
-                    update.report(
-                        "recovery_required" if incomplete else "rolled_back",
-                        "rollback_incomplete" if incomplete else "activation_failed",
-                    )
-                except InstallError:
-                    pass
+                update.report("restarting")
+            backend.start_and_wait(timeout=ready_timeout)
+        _commit_activation(layout, release, recovery)
+    except BaseException as error:
+        try:
+            _rollback_activation(layout, backend, recovery, ready_timeout=ready_timeout)
+        except BaseException as rollback_error:
+            if update is not None:
+                with contextlib.suppress(InstallError):
+                    update.report("recovery_required", "rollback_incomplete")
             raise InstallError(
-                f"activation failed and was rolled back: {error}{detail}"
+                f"activation failed: {error}; rollback incomplete: {rollback_error}; "
+                f"recovery snapshot preserved at {recovery.root}"
             ) from error
+        if update is not None:
+            with contextlib.suppress(InstallError):
+                update.report("rolled_back", "activation_failed")
+        raise InstallError(f"activation failed and was rolled back: {error}") from error
+    _prune_after_activation(layout)
+
+
+def _prune_after_activation(layout: Layout) -> None:
     try:
         _prune_releases(layout)
     except (InstallError, OSError) as error:
@@ -2114,6 +2217,9 @@ def _restore_database(snapshot: DatabaseSnapshot | None) -> None:
         shutil.copy2(saved, restored, follow_symlinks=False)
         if _stream_digest(saved) != _stream_digest(restored):
             raise InstallError(f"restored Channel database differs: {restored}")
+        with restored.open("rb") as handle:
+            os.fsync(handle.fileno())
+    _sync_directory(data_dir)
 
 
 def _stream_digest(path: Path) -> bytes:
@@ -2147,6 +2253,7 @@ def _set_release_link(link: Path, target: Path | None, layout: Layout) -> None:
             if not link.is_symlink():
                 raise InstallError(f"managed release pointer is not a symlink: {link}")
             link.unlink()
+            _sync_directory(link.parent)
         return
     resolved_target = target.resolve(strict=True)
     if (
@@ -2159,6 +2266,7 @@ def _set_release_link(link: Path, target: Path | None, layout: Layout) -> None:
     try:
         os.symlink(os.path.relpath(resolved_target, link.parent.resolve()), temporary)
         os.replace(temporary, link)
+        _sync_directory(link.parent)
     finally:
         with contextlib.suppress(OSError):
             temporary.unlink()

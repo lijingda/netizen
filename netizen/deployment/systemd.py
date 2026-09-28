@@ -350,16 +350,35 @@ class SystemdServiceBackend:
         # Issue the idempotent stop even when the last state observation was
         # inactive: a prior start response may have been lost after creating
         # the process.
-        systemctl_user(
-            self.layout,
-            "stop",
-            self.layout.service_name,
-            runner=self._runner,
-        )
-        # systemctl stop is itself a synchronous manager transition.  The
-        # lifetime lock independently proves that the Python process released
-        # rollback-protected state; unlike launchd, no second manager poll is
-        # needed here.
+        try:
+            systemctl_user(
+                self.layout,
+                "stop",
+                self.layout.service_name,
+                runner=self._runner,
+            )
+        except InstallError:
+            # A first installation can fail before publishing its unit. Do
+            # not mistake that absent target for a failed manager transition:
+            # require exact, successful state evidence before checking the
+            # lifetime lock. Other stop or query failures remain fail closed.
+            state = systemctl_user(
+                self.layout,
+                "show",
+                self.layout.service_name,
+                "--property=LoadState",
+                "--property=ActiveState",
+                runner=self._runner,
+                check=False,
+                capture_output=True,
+            )
+            if state.returncode != 0 or sorted(state.stdout.splitlines()) != [
+                "ActiveState=inactive", "LoadState=not-found",
+            ]:
+                raise
+        # A successful stop is a synchronous manager transition; otherwise the
+        # query above proved the target absent and inactive. The lifetime lock
+        # independently proves that Python released rollback-protected state.
         _wait_for_stop_confirmation(
             self.layout,
             is_loaded=lambda: False,

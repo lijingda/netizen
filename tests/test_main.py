@@ -30,6 +30,7 @@ from netizen.main import (
     _publish_ready_marker,
     _register_channel_handlers,
     _scrub_channel_environment,
+    _start_channel_input,
     build_channel,
     main,
 )
@@ -537,6 +538,42 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                     else:
                         await _open_core_admission(core, ready_file=ready_file)
                         self.assertEqual(events, ["admission"] if outcome == "unmanaged" else ["admission", "marker", True])
+
+    async def test_channel_input_requires_durable_admission_before_transport_starts(self) -> None:
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                events = []
+                def record(_ready, _release):
+                    events.append("record")
+                    if failure:
+                        raise RuntimeError("cannot persist admission")
+                channel = SimpleNamespace(start_background=AsyncMock(side_effect=lambda: events.append("transport")))
+                with (
+                    patch("netizen.main.mark_candidate_admission", side_effect=record),
+                    patch("netizen.main._register_channel_handlers", side_effect=lambda *_args: events.append("handlers")),
+                ):
+                    if failure:
+                        with self.assertRaisesRegex(RuntimeError, "cannot persist"):
+                            await _start_channel_input(channel, object(), ready_file=Path("/unused/service.ready"))
+                        self.assertEqual(events, ["record"])
+                    else:
+                        await _start_channel_input(channel, object(), ready_file=Path("/unused/service.ready"))
+                        self.assertEqual(events, ["record", "handlers", "transport"])
+
+    async def test_installed_admission_uses_physical_venv_release(self) -> None:
+        release = Path("/tmp/instance/releases/" + "a" * 64).resolve()
+        prefix = release / "venv"
+        module = prefix / "lib/python3.12/site-packages/netizen/main.py"
+        channel = SimpleNamespace(start_background=AsyncMock())
+        with (
+            patch("netizen.main.__file__", str(module)),
+            patch("netizen.main.sys.prefix", str(prefix)),
+            patch("netizen.main.mark_candidate_admission") as record,
+            patch("netizen.main._register_channel_handlers"),
+        ):
+            ready = Path("/tmp/instance/state/service.ready")
+            await _start_channel_input(channel, object(), ready_file=ready)
+        record.assert_called_once_with(ready, release)
 
     async def test_schedule_mcp_bind_failure_stops_before_codex(self) -> None:
         self.mcp_bind_error = OSError("schedule listener failed")
