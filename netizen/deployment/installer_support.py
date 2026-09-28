@@ -19,6 +19,7 @@ from collections.abc import (
 from dataclasses import dataclass
 from pathlib import Path
 
+from netizen.instance import instance_digest, launch_agent_label, systemd_service_name
 from .update_protocol import (
     ENV_ARCHIVE_SHA256,
     ENV_LOCK_FD,
@@ -58,6 +59,18 @@ class Layout:
     @property
     def lark_app_file(self) -> Path:
         return self.product_root / "lark-app" / "config.json"
+
+    @property
+    def root_digest(self) -> str:
+        return instance_digest(self.product_root)
+
+    @property
+    def service_name(self) -> str:
+        return systemd_service_name(self.product_root)
+
+    @property
+    def service_label(self) -> str:
+        return launch_agent_label(self.product_root)
 
 
 @dataclass(frozen=True, slots=True)

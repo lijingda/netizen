@@ -8,6 +8,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
+from pathlib import Path
 from typing import Any, NoReturn
 
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
@@ -718,12 +719,13 @@ class InstanceManagementService:
         blocking_io: BoundedBlockingIOExecutor | None = None,
         chat_labels: ChatLabelProvider | None = None,
         updates: UpdateService | None = None,
+        root: Path | None = None,
     ) -> None:
         self._bindings = bindings
         self._projects = projects
         self._runtime = runtime
         self._scope_coordinator = scope_coordinator
-        self._updates = updates or UpdateService()
+        self._updates = updates or UpdateService(root=root)
         self._chat_labels = (
             ChatLabelResolver(chat_labels) if chat_labels is not None else None
         )

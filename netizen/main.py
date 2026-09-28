@@ -51,8 +51,10 @@ from openai_codex import AsyncCodex, CodexConfig
 
 from .admin.web import AdminWebRunner
 from .bindings import BindingStore
+from .builtin_skills import builtin_skill_root
 from .channel_app import ChannelApplication
 from .codex_runtime import CodexRuntime
+from .instance import resolve_instance_root
 from .management import (
     InstanceManagementService,
     ManagementRuntimePort,
@@ -64,6 +66,7 @@ from .sdk_gap_adapter import (
     AppServerGoalControl,
     AppServerSideBoundaryControl,
     AppServerSkillCatalog,
+    AppServerSkillRoots,
     AppServerThreadDeleteControl,
     AppServerThreadSubscriptionControl,
     SdkGapCapabilityUnavailable,
@@ -151,11 +154,13 @@ class ServiceCore:
         channel: FeishuChannel,
         store: BindingStore,
         projects: ProjectRegistry,
+        instance_root: Path,
     ) -> None:
         self._settings = settings
         self._channel = channel
         self._store = store
         self._projects = projects
+        self._instance_root = instance_root.resolve()
         self._codex: AsyncCodex | None = None
         self._runtime: CodexRuntime | None = None
         self._management: InstanceManagementService | None = None
@@ -182,6 +187,10 @@ class ServiceCore:
                     host=self._settings.admin_web.host,
                     port=self._settings.admin_web.port,
                     credential_path=credential_path,
+                    instance_root=self._instance_root,
+                    config_path=self._settings.config_path,
+                    config_snapshot=self._settings.config_snapshot,
+                    access_host=self._settings.admin_web.access_host,
                 )
                 await self._admin.bind()
                 stage_started_at = _log_startup_timing("Admin listener", stage_started_at)
@@ -204,10 +213,17 @@ class ServiceCore:
                         *_CODEX_SERVICE_CONFIG_OVERRIDES,
                         *self._schedule_mcp.config_overrides,
                     ),
-                    env={**os.environ, **self._schedule_mcp.app_server_env},
+                    env={
+                        **os.environ,
+                        **self._schedule_mcp.app_server_env,
+                        "NETIZEN_ROOT": str(self._instance_root),
+                    },
                 )
             )
             await self._codex.__aenter__()
+            # Release-local Skills must be active before catalogs, recovery or
+            # any native Thread can be reached. Failure closes this startup.
+            await AppServerSkillRoots(self._codex).set_roots((builtin_skill_root(),))
             stage_started_at = _log_startup_timing("Codex connection", stage_started_at)
             terminal_cleanup = PinnedExperimentalTerminalCleanup(self._codex)
             thread_subscription_control = AppServerThreadSubscriptionControl(
@@ -260,6 +276,7 @@ class ServiceCore:
                 runtime=ManagementRuntimePort(self._runtime),
                 scope_coordinator=scope_coordinator,
                 chat_labels=self._channel,
+                root=self._instance_root,
             )
             schedules = self._management.enable_schedules(
                 app_id=self._settings.app_id, chat_info=self._channel,
@@ -292,6 +309,9 @@ class ServiceCore:
                     self._message_history_client
                 ),
                 management=self._management,
+                admin_urls=self._admin.urls if self._admin is not None else (),
+                admin_loopback_only=self._admin.loopback_only if self._admin is not None else None,
+                instance_root=self._instance_root,
             )
             self._scheduler = Scheduler(
                 bindings=self._store, runtime=self._runtime,
@@ -517,7 +537,12 @@ class ServiceCore:
                     )
 
 
-async def run(settings: Settings, *, ready_file: Path | None = None) -> None:
+async def run(
+    settings: Settings,
+    *,
+    instance_root: Path,
+    ready_file: Path | None = None,
+) -> None:
     stage_started_at = time.monotonic()
     settings.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(settings.data_dir, 0o700)
@@ -538,6 +563,7 @@ async def run(settings: Settings, *, ready_file: Path | None = None) -> None:
         channel=channel,
         store=store,
         projects=projects,
+        instance_root=instance_root,
     )
     _log_startup_timing("Projects and Channel construction", stage_started_at)
     stop_event = asyncio.Event()
@@ -638,6 +664,7 @@ def _register_channel_handlers(
 def _scrub_channel_environment() -> None:
     # Hygiene only: with the accepted same-user/full-access Pilot boundary,
     # Codex can still read the protected secret file if explicitly instructed.
+    # NETIZEN_ROOT stays as the non-secret, exact instance context for tools.
     os.environ.pop("FEISHU_APP_SECRET", None)
     os.environ.pop("FEISHU_APP_SECRET_FILE", None)
     os.environ.pop("NETIZEN_LARK_APP_CONFIG", None)
@@ -654,6 +681,28 @@ def _managed_absolute_path(raw: str, *, label: str) -> Path:
     if not path.is_absolute() or path == Path(path.anchor):
         raise RuntimeError(f"{label} must be an absolute non-root path: {path}")
     return path
+
+
+def _validate_instance_path(path: Path, expected: Path, *, label: str) -> None:
+    if not path.is_absolute() or path.resolve() != expected:
+        raise RuntimeError(f"{label} must belong to NETIZEN_ROOT: expected {expected}, got {path}")
+
+
+def _validate_instance_environment(
+    root: Path, config_path: Path, environment: dict[str, str],
+) -> None:
+    """Reject mixed instance paths before opening logs, credentials or state."""
+    _validate_instance_path(config_path, root / "config.yaml", label="NETIZEN_CONFIG_PATH")
+    expected_paths = {
+        "NETIZEN_LARK_APP_CONFIG": root / "lark-app" / "config.json",
+        "NETIZEN_ADMIN_SECRET_FILE": root / "credentials" / "admin-web-secret",
+        "NETIZEN_LOG_FILE": root / "state" / "netizen.log",
+        "NETIZEN_READY_FILE": root / "state" / "service.ready",
+        "NETIZEN_LIFETIME_LOCK_FILE": root / "state" / "service.lifetime.lock",
+    }
+    for name, expected in expected_paths.items():
+        if name in environment:
+            _validate_instance_path(Path(environment[name]), expected, label=name)
 
 
 def _adopt_lifetime_lock() -> int | None:
@@ -729,8 +778,8 @@ def _clear_ready_marker(path: Path) -> None:
 
 
 def _configure_logging() -> None:
-    raw_log_file = os.environ.get("NETIZEN_LOG_FILE", "").strip()
-    if not raw_log_file:
+    raw_log_file = os.environ.get("NETIZEN_LOG_FILE", "")
+    if not raw_log_file.strip():
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -756,11 +805,25 @@ def _configure_logging() -> None:
 
 
 def main() -> None:
+    startup_environment = dict(os.environ)
     lifetime_descriptor = _adopt_lifetime_lock()
     try:
         stage_started_at = time.monotonic()
+        if lifetime_descriptor is not None and "NETIZEN_ROOT" not in startup_environment:
+            raise RuntimeError("managed service environment is missing NETIZEN_ROOT")
+        instance_root = resolve_instance_root(environ=startup_environment)
+        config_path = Path(startup_environment.get(
+            "NETIZEN_CONFIG_PATH",
+            str(instance_root / "config.yaml"),
+        ))
+        _validate_instance_environment(instance_root, config_path, startup_environment)
+        # The entry point owns the instance context for both managed and manual
+        # starts. Export it before creating any Codex/tool subprocesses.
+        os.environ["NETIZEN_ROOT"] = str(instance_root)
+        os.environ["NETIZEN_LARK_APP_CONFIG"] = str(instance_root / "lark-app" / "config.json")
+        os.environ["NETIZEN_ADMIN_SECRET_FILE"] = str(instance_root / "credentials" / "admin-web-secret")
         _configure_platform_trust()
-        raw_ready_file = os.environ.get("NETIZEN_READY_FILE", "").strip()
+        raw_ready_file = startup_environment.get("NETIZEN_READY_FILE", "")
         if lifetime_descriptor is not None and not raw_ready_file:
             raise RuntimeError("managed service environment is missing NETIZEN_READY_FILE")
         ready_file = (
@@ -768,13 +831,19 @@ def main() -> None:
             if lifetime_descriptor is not None
             else None
         )
+        settings = Settings.from_file(config_path)
+        _validate_instance_path(settings.data_dir, instance_root / "state", label="instance.dataDir")
+        if settings.admin_web.credential_path is not None:
+            _validate_instance_path(
+                settings.admin_web.credential_path,
+                instance_root / "credentials" / "admin-web-secret",
+                label="Admin credential path",
+            )
         _configure_logging()
         logger.info("netizen startup: module imports completed in %.3fs", _IMPORT_SECONDS)
-        config_path = Path(os.environ.get("NETIZEN_CONFIG_PATH", "config.yaml"))
-        settings = Settings.from_file(config_path)
         _scrub_channel_environment()
         _log_startup_timing("configuration", stage_started_at)
-        asyncio.run(run(settings, ready_file=ready_file))
+        asyncio.run(run(settings, instance_root=instance_root, ready_file=ready_file))
     finally:
         if lifetime_descriptor is not None:
             with contextlib.suppress(OSError):

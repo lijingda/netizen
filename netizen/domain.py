@@ -189,6 +189,7 @@ class ControlName(str, Enum):
     STOP = "stop"
     RELEASE = "release"
     STATUS = "status"
+    ADMIN = "admin"
     GOAL = "goal"
     HELP = "help"
 

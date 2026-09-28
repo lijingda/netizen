@@ -28,7 +28,9 @@ Admin JavaScript 行为测试使用 Node.js 22，请在完整开发门禁前确�
 
 `make check` 执行 unittest、Python 编译检查、依赖一致性检查与 SDK synthetic probes，
 不创建真实 Codex Thread，也不要求 Codex 登录。SDK 合同测试主要使用 fake App Server；
-受管 Skill discovery 另启动真实 bundled App Server 做只读发现。
+内置 Skill discovery 另启动真实 bundled App Server 做只读发现；这不能证明普通
+start/resume、Side/fork 或子 agent 的模型执行加载，相关 live 验收见
+[多实例与内置 Skills](deployment.md#多实例与内置-skills-验收)。
 
 ### 局部回归与共享测试支持
 
@@ -63,8 +65,10 @@ codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
 [部署前置条件](deployment.md#前置门禁)。上述 `codex exec` 是真实执行，与无需登录的
 本地代码门禁不同。
 
-复制 [config.example.yaml](../config.example.yaml) 到本地配置文件，并将
-`dataDir`、`projectRoot` 与 Project 目录示例替换为实际绝对路径。`projectRoot` 用来限制
+先选定开发实例目录，通过 `NETIZEN_ROOT` 指定；未设置时默认有效账号的 `~/.netizen`，
+不读取 cwd 下的配置，也不根据配置位置反推 root。复制
+[config.example.yaml](../config.example.yaml) 到 `<root>/config.yaml`，将 `dataDir` 设为
+`<root>/state`，`projectRoot` 与 Project 目录示例替换为实际绝对路径。`projectRoot` 用来限制
 自动创建的空 Project，不是默认工作目录。`projects` mapping 启动时导入尚未登记的项；
 后续在飞书 `/settings` 管理 Project，已停用、动态登记或删除的记录不被配置文件覆盖。
 没有登记并启用的 Project 时，`/new` 会引导打开 `/settings`，不会回退到服务工作目录。
@@ -74,26 +78,30 @@ codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
 受管安装器会自动请求该契约，但两种方式都需要完成租户审批、应用发布与安装，设置可用
 用户和群，并把机器人加入目标群；权限变更必须随应用版本发布。
 
-本地开发与受管服务共用应用凭据文件：在 YAML 所在目录下的 `lark-app/config.json` 中
+本地开发与受管服务采用相同凭据布局：在 `<root>/lark-app/config.json` 中
 准备固定名为 `netizen` 的 profile，格式见[配置与管理页访问](deployment.md#配置与管理页访问)。
 目录权限为 `0700`，文件为当前用户拥有的普通非 symlink 文件，权限为 `0600` 或更严格。
-也可用 `NETIZEN_LARK_APP_CONFIG` 指向其他绝对路径。App ID 不再从 YAML 读取，
+启动入口统一派生配置、App profile 和 Admin credential 路径；如显式设置
+`NETIZEN_CONFIG_PATH`、`NETIZEN_LARK_APP_CONFIG` 或 `NETIZEN_ADMIN_SECRET_FILE`，
+必须与该 root 的布局一致，冲突时在读取凭据、写日志或打开数据库前拒绝。
+App ID 不再从 YAML 读取，
 `FEISHU_APP_SECRET` 和 `FEISHU_APP_SECRET_FILE` 不再支持，已有 shell 设置需移除。
 不要将 Secret 写进仓库或命令历史；安装和运行无需安装 `lark-cli`。Admin Web
-仅支持凭据文件：启用时必须设置绝对的 `NETIZEN_ADMIN_SECRET_FILE`，不接受 raw secret
-环境变量。以下使用已安全准备的应用凭据文件，并生成独立 Admin credential；
-所有 `/absolute/path/` 都需替换为本地路径：
+仅支持 `<root>/credentials/admin-web-secret`，不接受 raw secret 环境变量。
+以下使用已安全准备的开发实例配置与应用凭据文件，并生成独立 Admin credential；
+示例 root 需替换为本地路径，已有 credential 不要覆盖：
 
 ```bash
 umask 077
-.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(32), end="")' > /absolute/path/admin-web-secret
-export NETIZEN_CONFIG_PATH=/absolute/path/config.yaml
-export NETIZEN_LARK_APP_CONFIG=/absolute/path/lark-app/config.json
-export NETIZEN_ADMIN_SECRET_FILE=/absolute/path/admin-web-secret
+export NETIZEN_ROOT=/absolute/path/netizen-dev
+mkdir -p "$NETIZEN_ROOT/credentials"
+.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(32), end="")' > "$NETIZEN_ROOT/credentials/admin-web-secret"
 .venv/bin/python -m netizen.main
 ```
 
-Admin 默认监听 `0.0.0.0:8787`，面向受信内网中的单一实例管理员；登录与凭据轮换见
+Admin 默认监听 `0.0.0.0`；port 字段缺失时首次从 8787–8886 实际绑定后写回当前 YAML，
+之后固定使用。已有端口冲突报错，不自动漂移；本地测试可显式指定端口。
+在飞书用 `/admin` 查看已绑定的 URL 和实例 root。它面向受信内网中的单一实例管理员；登录与凭据轮换见
 [配置与管理页访问](deployment.md#配置与管理页访问)。本地只调试飞书入口时，可在 YAML
 中显式设置 `adminWeb.enabled: false`。
 
@@ -103,6 +111,17 @@ Admin 默认监听 `0.0.0.0:8787`，面向受信内网中的单一实例管理�
 `./dev-install.sh </dev/null` 并按输出继续；首次配置会在候选检查与 Codex 登录验证后给出
 浏览器链接，确认后自动保存凭据。Agent 应转交链接并保留同一进程；其他交互方式与排障见
 [Agent 安装说明](deployment.md#agent-驱动首次安装)。
+
+同账号多实例通过 `--root` 或 `NETIZEN_ROOT` 选择位置，默认有效用户 `~/.netizen`。
+例如 `./dev-install.sh --root "$HOME/share" --admin-port 8890 </dev/null`，随后使用
+`./service.sh --root "$HOME/share" restart`、`./uninstall.sh --root "$HOME/share"`。
+安装参数覆盖环境；服务固定 canonical root，不随之后 shell 变量变化。受管状态必须位于
+该 root 的 `state`；手工入口也校验配置、凭据和状态属于同一个 root。
+内置 Skills 从实际运行的 `source/skills` 注册到该 App Server 的额外根，不再安装到
+全局 Skills；CODEX_HOME 保持共享。启动入口无论原变量是否存在，都在创建 Codex 前将
+规范化的 root 写入当前进程 NETIZEN_ROOT，供内置 Lark Skill 使用；用户原生工具环境
+策略若过滤此变量，Skill 明确失败而不回退到另一实例。目录保护、平台名称与双实例
+验收见[部署目录契约](deployment.md#目录)和[多实例验收门禁](deployment.md#多实例与内置-skills-验收)。
 
 ## 私有运维记录
 

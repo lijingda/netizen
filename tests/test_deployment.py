@@ -101,7 +101,7 @@ class DeploymentAssetsTest(unittest.TestCase):
 
         self.assertEqual(local_link_errors(ROOT, documents), [])
 
-    def test_unit_template_is_for_one_per_user_python_service(self) -> None:
+    def test_unit_template_is_for_one_per_instance_python_service(self) -> None:
         unit = (ROOT / "deploy/netizen.service").read_text(encoding="utf-8")
 
         self.assertNotIn("User=", unit)
@@ -111,6 +111,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertNotIn("ExecStartPre=", unit)
         self.assertNotIn("service.env", unit)
         self.assertIn("Environment=@HOME_ENV@", unit)
+        self.assertIn("Environment=@ROOT_ENV@", unit)
         self.assertIn("Environment=@CODEX_HOME_ENV@", unit)
         self.assertIn("ExecStart=@EXEC_START@", unit)
         self.assertIn("Environment=@LARK_APP_CONFIG_ENV@", unit)
@@ -136,7 +137,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertEqual(config["projects"], {"test": "/home/your-user/projects/test"})
         self.assertEqual(config["channel"], {"securityMode": "audit"})
         self.assertEqual(
-            config["adminWeb"], {"enabled": True, "host": "0.0.0.0", "port": 8787}
+            config["adminWeb"], {"enabled": True, "host": "0.0.0.0"}
         )
 
     def test_every_direct_runtime_dependency_has_an_exact_constraint(self) -> None:

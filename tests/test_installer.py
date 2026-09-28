@@ -12,6 +12,7 @@ import socket
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -126,6 +127,12 @@ class NetizenInstallerTest(unittest.TestCase):
             platform_name="linux",
         )
 
+    def _service_definition(self, layout: installer.Layout) -> str:
+        release = installer.Release(
+            digest="a" * 64, root=ROOT, source=ROOT, venv=ROOT / ".venv"
+        )
+        return systemd.render_systemd_service(release, layout)
+
     def _published_source(
         self,
         destination: Path,
@@ -159,7 +166,7 @@ class NetizenInstallerTest(unittest.TestCase):
             requirements_digest=requirements_digest,
         )
 
-    def test_layout_uses_fixed_current_user_paths_and_ignores_xdg_overrides(self) -> None:
+    def test_layout_defaults_to_current_user_paths_and_ignores_xdg_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             home = root / "account-home"
@@ -195,7 +202,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(layout.releases, home / ".netizen/releases")
             self.assertEqual(
                 layout.service_file,
-                home / ".config/systemd/user/netizen.service",
+                home / ".config/systemd/user" / layout.service_name,
             )
             self.assertEqual(layout.codex_home, root / "codex")
             self.assertEqual(layout.username, "chosen-user")
@@ -392,7 +399,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.require_codex_login.assert_called_once_with(
                 release,
                 layout,
-                rerun_instruction="rerun ./dev-install.sh",
+                rerun_instruction=f"rerun ./dev-install.sh --root {layout.product_root}",
                 runner=installer.run_command,
             )
             backend.assert_called_once_with()
@@ -444,6 +451,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 rerun_instruction=(
                     f"rerun the official Netizen v{manifest.version} installer from "
                     f"{installer.OFFICIAL_RELEASE_DOWNLOADS}/v{manifest.version}/install.sh"
+                    f" --root {layout.product_root}"
                 ),
                 runner=installer.run_command,
             )
@@ -479,7 +487,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 username="current-user",
                 platform_name="linux",
             )
-            source = layout.product_root / "checkout"
+            source = layout.state_dir / "checkout"
             source.mkdir(parents=True)
 
             with self.assertRaisesRegex(installer.InstallError, "source overlaps"):
@@ -1640,6 +1648,55 @@ class NetizenInstallerTest(unittest.TestCase):
                 published_manifest,
             )
 
+    def test_source_candidate_gates_ignore_ambient_instance_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            layout = self._layout(root)
+            installer.prepare_directories(layout)
+            checked_roots: list[str] = []
+
+            def fake_runner(argv: list[object], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                rendered = [os.fspath(value) for value in argv]
+                if rendered[1:3] == ["-m", "venv"]:
+                    candidate_bin = Path(rendered[3]) / "bin"
+                    candidate_bin.mkdir(parents=True)
+                    (candidate_bin / "python").write_text("candidate", encoding="utf-8")
+                if "unittest" in rendered:
+                    # Exercise a fresh child using the candidate gate's actual
+                    # environment, without building a venv or invoking services.
+                    result = subprocess.run(
+                        [
+                            sys.executable, "-E", "-B", "-c",
+                            "import os, sys; from pathlib import Path; "
+                            "from netizen.deployment.update_executor import UpdateExecutor; "
+                            "home = Path(sys.argv[1]); "
+                            "assert UpdateExecutor(home, 'linux').product_root == home / '.netizen'; "
+                            "assert 'NETIZEN_CONFIG_PATH' not in os.environ; "
+                            "assert 'NETIZEN_LARK_APP_CONFIG' not in os.environ",
+                            str(root / "test-home"),
+                        ],
+                        cwd=kwargs["cwd"], env=kwargs["env"],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    checked_roots.append(os.environ["NETIZEN_ROOT"])
+                return subprocess.CompletedProcess(rendered, 0, "", "")
+
+            inherited_roots = (layout.product_root, layout.home / "another instance")
+            for inherited_root in inherited_roots:
+                with self.subTest(inherited_root=inherited_root), patch.dict(os.environ, {
+                    "NETIZEN_ROOT": str(inherited_root),
+                    "NETIZEN_CONFIG_PATH": str(inherited_root / "config.yaml"),
+                    "NETIZEN_LARK_APP_CONFIG": str(inherited_root / "lark-app/config.json"),
+                }):
+                    release = installer.prepare_source_release(layout, source_root=ROOT, runner=fake_runner)
+                    self.assertEqual(release.root.parent, layout.releases)
+                    self.assertEqual(os.environ["NETIZEN_ROOT"], str(inherited_root))
+                    self.assertEqual(installer._service_environment(layout)["NETIZEN_ROOT"], str(layout.product_root))
+            # The second preparation reuses the first candidate and must apply
+            # the same isolation to its repeated qualification checks.
+            self.assertEqual(checked_roots, [str(path) for path in inherited_roots])
+
     def test_bytecode_failure_discards_candidate_before_activation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
@@ -2175,8 +2232,7 @@ class NetizenInstallerTest(unittest.TestCase):
             layout = self._layout(Path(directory))
             installer.prepare_directories(layout)
             layout.service_file.write_text(
-                systemd.SYSTEMD_SERVICE_MARKER
-                + "\nEnvironment=NETIZEN_READY_FILE=/managed/service.ready\n",
+                self._service_definition(layout),
                 encoding="utf-8",
             )
             calls: list[list[str]] = []
@@ -2201,8 +2257,8 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(
                 calls,
                 [
-                    ["systemctl", "--user", "stop", "netizen.service"],
-                    ["systemctl", "--user", "start", "netizen.service"],
+                    ["systemctl", "--user", "stop", layout.service_name],
+                    ["systemctl", "--user", "start", layout.service_name],
                 ],
             )
             self.assertTrue(all("sudo" not in call for call in calls))
@@ -2217,8 +2273,7 @@ class NetizenInstallerTest(unittest.TestCase):
             layout = self._layout(Path(directory))
             installer.prepare_directories(layout)
             layout.service_file.write_text(
-                systemd.SYSTEMD_SERVICE_MARKER
-                + "\nEnvironment=NETIZEN_READY_FILE=/managed/service.ready\n",
+                self._service_definition(layout),
                 encoding="utf-8",
             )
             calls: list[list[str]] = []
@@ -2250,8 +2305,8 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(
                 calls,
                 [
-                    ["systemctl", "--user", "stop", "netizen.service"],
-                    ["systemctl", "--user", "start", "netizen.service"],
+                    ["systemctl", "--user", "stop", layout.service_name],
+                    ["systemctl", "--user", "start", layout.service_name],
                 ],
             )
 
@@ -2260,7 +2315,7 @@ class NetizenInstallerTest(unittest.TestCase):
             layout = self._layout(Path(directory))
             installer.prepare_directories(layout)
             layout.service_file.write_text(
-                systemd.SYSTEMD_SERVICE_MARKER,
+                self._service_definition(layout),
                 encoding="utf-8",
             )
             layout.ready_file.write_bytes(service_backend.READY_MARKER_CONTENT)
@@ -2289,7 +2344,7 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(
                 calls,
-                [["systemctl", "--user", "is-active", "netizen.service"]],
+                [["systemctl", "--user", "is-active", layout.service_name]],
             )
             wait_for_ready.assert_not_called()
 
@@ -2310,7 +2365,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     rendered,
                     1,
                     "",
-                    "Unit netizen.service could not be found.\n",
+                    f"Unit {layout.service_name} could not be found.\n",
                 )
 
             self.assertEqual(
@@ -2361,7 +2416,7 @@ class NetizenInstallerTest(unittest.TestCase):
     def test_service_action_refuses_an_unrecognized_same_name_unit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
-            layout.service_file.parent.mkdir(parents=True)
+            installer.prepare_directories(layout)
             layout.service_file.write_text(
                 "[Service]\nExecStart=/bin/other\n",
                 encoding="utf-8",
@@ -2395,7 +2450,7 @@ class NetizenInstallerTest(unittest.TestCase):
 
             self.assertFalse(layout.current.exists())
 
-    def test_failed_activation_restores_release_unit_and_skill(self) -> None:
+    def test_failed_activation_restores_release_unit_database_and_preserves_global_skills(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             layout = self._layout(root)
@@ -2403,7 +2458,7 @@ class NetizenInstallerTest(unittest.TestCase):
             old = self._release(layout, "1" * 64)
             candidate = self._release(layout, "2" * 64)
             installer._set_release_link(layout.current, old.root, layout)
-            old_unit_text = systemd.SYSTEMD_SERVICE_MARKER + "\n# old unit\n"
+            old_unit_text = self._service_definition(layout) + "\n# old unit\n"
             layout.service_file.write_text(old_unit_text, encoding="utf-8")
             old_skill = layout.codex_home / "skills/netizen-user-guide"
             old_skill.mkdir(parents=True)
@@ -2420,13 +2475,6 @@ class NetizenInstallerTest(unittest.TestCase):
             def fake_runner(argv: list[object], **_kwargs: object) -> subprocess.CompletedProcess[str]:
                 rendered = [os.fspath(value) for value in argv]
                 calls.append(rendered)
-                if rendered[0] == "journalctl":
-                    return subprocess.CompletedProcess(
-                        rendered,
-                        0,
-                        systemd.LEGACY_SYSTEMD_READY_LOG + "\n",
-                        "",
-                    )
                 return subprocess.CompletedProcess(rendered, 0, "active\n", "")
 
             def fail_candidate_once(*_args: object, **_kwargs: object) -> None:
@@ -2438,7 +2486,6 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(systemd, "_user_service_state", return_value=(True, True)),
-                patch.object(systemd, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
                 patch.object(
                     systemd,
                     "_wait_for_systemd_ready",
@@ -2465,13 +2512,16 @@ class NetizenInstallerTest(unittest.TestCase):
                 2,
             )
             self.assertIn(
-                ["systemctl", "--user", "start", "netizen.service"],
+                ["systemctl", "--user", "start", layout.service_name],
                 calls,
             )
-            self.assertTrue(any(call[0] == "journalctl" for call in calls))
+            self.assertTrue(all(
+                call[:2] == ["systemctl", "--user"]
+                for call in calls if call[0] == "systemctl"
+            ))
 
 
-    def test_second_skill_install_failure_restores_both_previous_states(self) -> None:
+    def test_activation_leaves_existing_and_absent_global_skills_unchanged(self) -> None:
         for had_lark in (False, True):
             with self.subTest(had_lark=had_lark), tempfile.TemporaryDirectory() as directory:
                 layout = self._layout(Path(directory))
@@ -2481,89 +2531,68 @@ class NetizenInstallerTest(unittest.TestCase):
                 installer._set_release_link(layout.current, old.root, layout)
                 guide = layout.codex_home / "skills/netizen-user-guide"
                 guide.mkdir(parents=True)
-                (guide / "SKILL.md").write_text("old guide")
+                (guide / "SKILL.md").write_text("user guide")
                 feishu = layout.codex_home / "skills/netizen-lark"
                 if had_lark:
                     feishu.mkdir()
-                    (feishu / "SKILL.md").write_text("old lark")
-                real_install = installer.install_skill
-
-                def fail_second(*, source_skill: Path, codex_home: Path):
-                    if source_skill.name == "netizen-lark":
-                        self.assertNotEqual((guide / "SKILL.md").read_text(), "old guide")
-                        raise installer.SkillInstallError("second Skill failed")
-                    return real_install(source_skill=source_skill, codex_home=codex_home)
-
+                    (feishu / "SKILL.md").write_text("user lark")
                 backend = _stopped_backend()
-                with (
-                    patch.object(installer, "_service_backend", return_value=backend),
-                    patch.object(installer, "install_skill", side_effect=fail_second),
-                    self.assertRaisesRegex(installer.InstallError, "rolled back"),
-                ):
+                with patch.object(installer, "_service_backend", return_value=backend):
                     installer.activate_release(candidate, layout, interactive=False)
 
-                self.assertEqual((guide / "SKILL.md").read_text(), "old guide")
+                self.assertEqual((guide / "SKILL.md").read_text(), "user guide")
                 self.assertEqual(feishu.exists(), had_lark)
                 if had_lark:
-                    self.assertEqual((feishu / "SKILL.md").read_text(), "old lark")
-                self.assertEqual(installer._read_release_link(layout.current, layout), old.root.resolve())
-                backend.publish_definition.assert_not_called()
+                    self.assertEqual((feishu / "SKILL.md").read_text(), "user lark")
+                self.assertEqual(installer._read_release_link(layout.current, layout), candidate.root.resolve())
+                backend.publish_definition.assert_called_once()
 
-    def test_failed_skill_rollback_preserves_a_recovery_snapshot(self) -> None:
+    def test_failed_database_rollback_preserves_a_recovery_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            layout = self._layout(root)
+            layout = self._layout(Path(directory))
             installer.prepare_directories(layout)
             old = self._release(layout, "7" * 64)
             candidate = self._release(layout, "8" * 64)
             installer._set_release_link(layout.current, old.root, layout)
-            layout.service_file.write_text(
-                systemd.SYSTEMD_SERVICE_MARKER,
-                encoding="utf-8",
+            layout.service_file.write_text(self._service_definition(layout), encoding="utf-8")
+            database = layout.state_dir / "channel.sqlite3"
+            BindingStore(database).close()
+            original_database = database.read_bytes()
+            backend = _stopped_backend()
+            backend.capture_definition.return_value = installer.FileSnapshot(
+                True, self._service_definition(layout).encode(), 0o600
             )
-            old_skill = layout.codex_home / "skills/netizen-user-guide"
-            old_skill.mkdir(parents=True)
-            (old_skill / "SKILL.md").write_text("recovery content", encoding="utf-8")
-            old_lark = layout.codex_home / "skills/netizen-lark"
-            old_lark.mkdir()
-            (old_lark / "SKILL.md").write_text("feishu recovery", encoding="utf-8")
+            backend.inspect_state.return_value = installer.ServiceState(True, True)
 
-            def fake_runner(argv: list[object], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-                rendered = [os.fspath(value) for value in argv]
-                return subprocess.CompletedProcess(rendered, 0, "active\n", "")
+            def fail_ready(**_kwargs: object) -> None:
+                database.write_bytes(b"candidate database")
+                raise installer.InstallError("candidate failed")
 
+            backend.start_and_wait.side_effect = fail_ready
             with (
-                patch.object(systemd, "_user_service_state", return_value=(True, True)),
-                patch.object(systemd, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
-                patch.object(
-                    systemd,
-                    "_wait_for_systemd_ready",
-                    side_effect=installer.InstallError("candidate failed"),
-                ),
+                patch.object(installer, "_service_backend", return_value=backend),
                 patch.object(
                     installer,
-                    "_restore_skill",
+                    "_restore_database",
                     side_effect=installer.InstallError("restore failed"),
                 ),
+                self.assertRaisesRegex(installer.InstallError, "snapshot preserved"),
             ):
-                with self.assertRaisesRegex(installer.InstallError, "snapshot preserved"):
-                    installer.activate_release(
-                        candidate,
-                        layout,
-                        interactive=False,
-                        runner=fake_runner,
-                    )
+                installer.activate_release(
+                    candidate,
+                    layout,
+                    interactive=False,
+                    data_dir=layout.state_dir,
+                )
 
             recoveries = list(layout.state_dir.glob("rollback-recovery-*"))
             self.assertEqual(len(recoveries), 1)
             self.assertEqual(
-                (recoveries[0] / "netizen-user-guide/SKILL.md").read_text(),
-                "recovery content",
+                (recoveries[0] / "database/channel.sqlite3").read_bytes(),
+                original_database,
             )
-            self.assertEqual(
-                (recoveries[0] / "netizen-lark/SKILL.md").read_text(),
-                "feishu recovery",
-            )
+            self.assertEqual(database.read_bytes(), b"candidate database")
+            backend.start_and_wait.assert_called_once()
 
     def test_stopped_upgrade_stays_stopped_and_retains_previous_release(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2574,7 +2603,7 @@ class NetizenInstallerTest(unittest.TestCase):
             candidate = self._release(layout, "4" * 64)
             installer._set_release_link(layout.current, old.root, layout)
             layout.service_file.write_text(
-                systemd.SYSTEMD_SERVICE_MARKER,
+                self._service_definition(layout),
                 encoding="utf-8",
             )
             calls: list[list[str]] = []
@@ -2586,7 +2615,6 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(systemd, "_user_service_state", return_value=(False, True)),
-                patch.object(systemd, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
             ):
                 installer.activate_release(
                     candidate,
@@ -2603,13 +2631,11 @@ class NetizenInstallerTest(unittest.TestCase):
                 installer._read_release_link(layout.previous, layout),
                 old.root.resolve(),
             )
-            self.assertNotIn(["systemctl", "--user", "start", "netizen.service"], calls)
+            self.assertNotIn(["systemctl", "--user", "start", layout.service_name], calls)
 
-            for name in installer.SKILL_NAMES:
-                self.assertEqual(
-                    (layout.codex_home / "skills" / name / "SKILL.md").read_bytes(),
-                    (candidate.source / "skills" / name / "SKILL.md").read_bytes(),
-                )
+            self.assertFalse((layout.codex_home / "skills").exists())
+            for name in ("netizen-user-guide", "netizen-lark"):
+                self.assertTrue((candidate.source / "skills" / name / "SKILL.md").is_file())
 
     def test_disabled_stopped_upgrade_remains_disabled_and_stopped(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2628,7 +2654,6 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(systemd, "_user_service_state", return_value=(False, False)),
-                patch.object(systemd, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
             ):
                 installer.activate_release(
                     candidate,
@@ -2637,8 +2662,8 @@ class NetizenInstallerTest(unittest.TestCase):
                     runner=fake_runner,
                 )
 
-            self.assertNotIn(["systemctl", "--user", "enable", "netizen.service"], calls)
-            self.assertNotIn(["systemctl", "--user", "start", "netizen.service"], calls)
+            self.assertNotIn(["systemctl", "--user", "enable", layout.service_name], calls)
+            self.assertNotIn(["systemctl", "--user", "start", layout.service_name], calls)
 
     def test_first_install_starts_service_and_has_no_previous_release(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2655,7 +2680,6 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(systemd, "_user_service_state", return_value=(False, False)),
-                patch.object(systemd, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
                 patch.object(systemd, "_wait_for_systemd_ready"),
             ):
                 installer.activate_release(
@@ -2665,8 +2689,8 @@ class NetizenInstallerTest(unittest.TestCase):
                     runner=fake_runner,
                 )
 
-            self.assertIn(["systemctl", "--user", "start", "netizen.service"], calls)
-            self.assertIn(["systemctl", "--user", "enable", "netizen.service"], calls)
+            self.assertIn(["systemctl", "--user", "start", layout.service_name], calls)
+            self.assertIn(["systemctl", "--user", "enable", layout.service_name], calls)
             self.assertEqual(
                 installer._read_release_link(layout.current, layout),
                 candidate.root.resolve(),
@@ -2681,7 +2705,7 @@ class NetizenInstallerTest(unittest.TestCase):
             candidate = self._release(layout, "d" * 64)
             installer._set_release_link(layout.current, candidate.root, layout)
             layout.service_file.write_text(
-                systemd.SYSTEMD_SERVICE_MARKER,
+                self._service_definition(layout),
                 encoding="utf-8",
             )
             installer._write_activation_intent(
@@ -2702,11 +2726,6 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(systemd, "_user_service_state", return_value=(False, False)),
-                patch.object(
-                    systemd,
-                    "inspect_legacy_service",
-                    return_value=installer.LegacyServiceState(),
-                ),
                 patch.object(systemd, "_wait_for_systemd_ready"),
             ):
                 installer.activate_release(
@@ -2717,11 +2736,11 @@ class NetizenInstallerTest(unittest.TestCase):
                 )
 
             self.assertIn(
-                ["systemctl", "--user", "enable", "netizen.service"],
+                ["systemctl", "--user", "enable", layout.service_name],
                 calls,
             )
             self.assertIn(
-                ["systemctl", "--user", "start", "netizen.service"],
+                ["systemctl", "--user", "start", layout.service_name],
                 calls,
             )
             self.assertFalse((layout.state_dir / installer.ACTIVATION_INTENT).exists())
@@ -2737,7 +2756,7 @@ class NetizenInstallerTest(unittest.TestCase):
             installer._set_release_link(layout.current, interrupted.root, layout)
             installer._set_release_link(layout.previous, old.root, layout)
             layout.service_file.write_text(
-                systemd.SYSTEMD_SERVICE_MARKER,
+                self._service_definition(layout),
                 encoding="utf-8",
             )
             installer._write_activation_intent(
@@ -2757,11 +2776,6 @@ class NetizenInstallerTest(unittest.TestCase):
 
             with (
                 patch.object(systemd, "_user_service_state", return_value=(False, False)),
-                patch.object(
-                    systemd,
-                    "inspect_legacy_service",
-                    return_value=installer.LegacyServiceState(),
-                ),
                 patch.object(systemd, "_wait_for_systemd_ready"),
             ):
                 installer.activate_release(
@@ -2908,7 +2922,7 @@ class NetizenInstallerTest(unittest.TestCase):
             layout = self._layout(root)
             installer.prepare_directories(layout)
             layout.service_file.write_text(
-                systemd.SYSTEMD_SERVICE_MARKER,
+                self._service_definition(layout),
                 encoding="utf-8",
             )
             (layout.cache_dir / "artifact").write_text("cached", encoding="utf-8")
@@ -2948,8 +2962,8 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertFalse(layout.current.exists())
             self.assertFalse(layout.previous.exists())
             self.assertFalse(layout.service_file.exists())
-            self.assertFalse(managed_skill.exists())
-            self.assertFalse(lark_skill.exists())
+            self.assertEqual((managed_skill / "SKILL.md").read_text(), "managed")
+            self.assertEqual((lark_skill / "SKILL.md").read_text(), "managed")
             self.assertTrue(layout.config_file.exists())
             self.assertEqual(layout.admin_secret_file.read_text(), "A" * 43)
             self.assertTrue((layout.state_dir / "channel.sqlite3").exists())
@@ -2975,7 +2989,7 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             installer.prepare_directories(layout)
             layout.service_file.write_text(
-                systemd.SYSTEMD_SERVICE_MARKER,
+                self._service_definition(layout),
                 encoding="utf-8",
             )
             unrelated = root / "drift-data/netizen/keep"
@@ -3001,14 +3015,14 @@ class NetizenInstallerTest(unittest.TestCase):
             unrelated.parent.mkdir(parents=True)
             unrelated.write_text("unrelated", encoding="utf-8")
 
-            with self.assertRaisesRegex(installer.InstallError, "without a Netizen marker"):
+            with self.assertRaisesRegex(installer.InstallError, "non-empty unowned directory"):
                 installer.prepare_directories(layout)
             with self.assertRaisesRegex(installer.InstallError, "marker"):
                 installer._remove_managed_netizen_directory(layout.releases, layout)
 
             self.assertEqual(unrelated.read_text(), "unrelated")
 
-    def test_uninstall_refuses_orphaned_active_unit_before_removing_skill(self) -> None:
+    def test_uninstall_refuses_orphaned_active_unit_and_preserves_global_skills(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._layout(Path(directory))
             managed_skill = layout.codex_home / "skills/netizen-user-guide"
@@ -3019,7 +3033,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 patch.object(installer, "require_supported_platform"),
                 patch.object(systemd, "_user_service_state", return_value=(True, False)),
             ):
-                with self.assertRaisesRegex(installer.InstallError, "active/enabled"):
+                with self.assertRaisesRegex(installer.InstallError, "orphaned service"):
                     installer.uninstall(layout=layout)
 
             self.assertTrue((managed_skill / "SKILL.md").exists())
@@ -3035,13 +3049,12 @@ class NetizenInstallerTest(unittest.TestCase):
             def fake_runner(argv: list[object], **_kwargs: object) -> subprocess.CompletedProcess[str]:
                 rendered = [os.fspath(value) for value in argv]
                 calls.append(rendered)
-                if rendered == ["systemctl", "--user", "start", "netizen.service"]:
+                if rendered == ["systemctl", "--user", "start", layout.service_name]:
                     raise installer.InstallError("start response lost")
                 return subprocess.CompletedProcess(rendered, 0, "inactive\n", "")
 
             with (
                 patch.object(systemd, "_user_service_state", return_value=(False, False)),
-                patch.object(systemd, "inspect_legacy_service", return_value=installer.LegacyServiceState()),
             ):
                 with self.assertRaisesRegex(installer.InstallError, "rolled back"):
                     installer.activate_release(
@@ -3052,7 +3065,7 @@ class NetizenInstallerTest(unittest.TestCase):
                         data_dir=layout.state_dir,
                     )
 
-            self.assertIn(["systemctl", "--user", "stop", "netizen.service"], calls)
+            self.assertIn(["systemctl", "--user", "stop", layout.service_name], calls)
             self.assertIsNone(installer._read_release_link(layout.current, layout))
             self.assertFalse(layout.service_file.exists())
             self.assertFalse((layout.codex_home / "skills/netizen-user-guide").exists())
@@ -3179,9 +3192,9 @@ class NetizenInstallerTest(unittest.TestCase):
             self.assertEqual(
                 layout.service_file,
                 layout.home
-                / "Library/LaunchAgents/io.github.lijingda.netizen.plist",
+                / f"Library/LaunchAgents/{layout.service_label}.plist",
             )
-            self.assertEqual(payload["Label"], launchd.LAUNCH_AGENT_LABEL)
+            self.assertEqual(payload["Label"], layout.service_label)
             self.assertEqual(
                 payload["ProgramArguments"],
                 launchd._launch_agent_program_arguments(layout),
@@ -3255,7 +3268,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 runner=runner,
             )
 
-            target = f"gui/{layout.uid}/{launchd.LAUNCH_AGENT_LABEL}"
+            target = f"gui/{layout.uid}/{layout.service_label}"
             self.assertIn(["launchctl", "enable", target], calls)
             self.assertIn(
                 [
@@ -3325,7 +3338,7 @@ class NetizenInstallerTest(unittest.TestCase):
             backend.preflight()
             backend.start_and_wait(timeout=0.1)
 
-            target = f"gui/{layout.uid}/{launchd.LAUNCH_AGENT_LABEL}"
+            target = f"gui/{layout.uid}/{layout.service_label}"
             enable = ["launchctl", "enable", target]
             bootstrap = [
                 "launchctl",
@@ -3358,7 +3371,7 @@ class NetizenInstallerTest(unittest.TestCase):
 
             self.assertEqual(backend.service_action("restart"), 0)
 
-            target = f"gui/{layout.uid}/{launchd.LAUNCH_AGENT_LABEL}"
+            target = f"gui/{layout.uid}/{layout.service_label}"
             bootout = ["launchctl", "bootout", target]
             enable = ["launchctl", "enable", target]
             bootstrap = [
@@ -3462,7 +3475,7 @@ class NetizenInstallerTest(unittest.TestCase):
             layout.service_file.write_bytes(
                 plistlib.dumps(
                     {
-                        "Label": launchd.LAUNCH_AGENT_LABEL,
+                        "Label": layout.service_label,
                         "ProgramArguments": ["/bin/other"],
                         "EnvironmentVariables": {
                             launchd.LAUNCH_AGENT_SENTINEL_NAME:
@@ -3517,7 +3530,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 data_dir=layout.state_dir,
             )
 
-            target = f"gui/{layout.uid}/{launchd.LAUNCH_AGENT_LABEL}"
+            target = f"gui/{layout.uid}/{layout.service_label}"
             bootout = ["launchctl", "bootout", target]
             bootstrap = [
                 "launchctl",
@@ -3558,7 +3571,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 runner=runner,
             )
 
-            target = f"gui/{layout.uid}/{launchd.LAUNCH_AGENT_LABEL}"
+            target = f"gui/{layout.uid}/{layout.service_label}"
             self.assertIn(["launchctl", "enable", target], calls)
             self.assertNotIn("bootstrap", [argument for call in calls for argument in call])
             self.assertIs(state["loaded"], False)
@@ -3600,7 +3613,7 @@ class NetizenInstallerTest(unittest.TestCase):
 
             self.assertIs(state["loaded"], False)
 
-    def test_macos_failed_stop_skips_database_and_skill_rollback(self) -> None:
+    def test_macos_failed_stop_skips_database_rollback_and_preserves_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = self._darwin_layout(Path(directory))
             installer.prepare_directories(layout)
@@ -3648,12 +3661,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 )
 
             self.assertEqual(database.read_text(), "candidate database")
-            self.assertTrue(
-                (layout.codex_home / "skills/netizen-user-guide/SKILL.md").is_file()
-            )
-            self.assertTrue(
-                (layout.codex_home / "skills/netizen-lark/SKILL.md").is_file()
-            )
+            self.assertFalse((layout.codex_home / "skills").exists())
             self.assertTrue(list(layout.state_dir.glob("rollback-recovery-*")))
 
 
@@ -3678,7 +3686,7 @@ class NetizenInstallerTest(unittest.TestCase):
             with patch.object(installer, "require_supported_platform"):
                 installer.uninstall(layout=layout, runner=runner)
 
-            target = f"gui/{layout.uid}/{launchd.LAUNCH_AGENT_LABEL}"
+            target = f"gui/{layout.uid}/{layout.service_label}"
             self.assertIn(["launchctl", "bootout", target], calls)
             self.assertIn(["launchctl", "disable", target], calls)
             self.assertFalse(layout.service_file.exists())
@@ -3715,7 +3723,7 @@ class NetizenInstallerTest(unittest.TestCase):
         state = {"loaded": initially_loaded}
         calls: list[list[str]] = []
         domain = f"gui/{layout.uid}"
-        target = f"{domain}/{launchd.LAUNCH_AGENT_LABEL}"
+        target = f"{domain}/{layout.service_label}"
         if initially_ready:
             layout.ready_file.write_bytes(service_backend.READY_MARKER_CONTENT)
             layout.ready_file.chmod(0o600)
@@ -3810,7 +3818,7 @@ class NetizenInstallerTest(unittest.TestCase):
         deploy = source / "deploy"
         deploy.mkdir()
         shutil.move(source / "deploy.service", deploy / "netizen.service")
-        for name in installer.SKILL_NAMES:
+        for name in ("netizen-user-guide", "netizen-lark"):
             shutil.copytree(ROOT / "skills" / name, source / "skills" / name)
         venv = root / "venv"
         venv.mkdir()
@@ -3821,7 +3829,6 @@ def _stopped_backend() -> MagicMock:
     backend = MagicMock()
     backend.capture_definition.return_value = installer.FileSnapshot(False)
     backend.inspect_state.return_value = installer.ServiceState(False, False)
-    backend.inspect_legacy.return_value = installer.LegacyServiceState()
     backend.render_definition.return_value = b"candidate service definition"
     return backend
 

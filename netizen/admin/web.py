@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import html
 import importlib.resources
@@ -67,7 +68,10 @@ from .queries import (
     _session_page_size,
     _text_set_query,
 )
-from .transport import AdminHttpTransport, Request, Response
+from .transport import AdminHttpState, AdminHttpTransport, Request, Response
+from .port_config import ConfigFileSnapshot, persist_admin_port
+from ..instance import instance_digest
+from ..settings import validate_access_host
 from ..bindings import (
     AmbiguousBinding,
     BindingNotFound,
@@ -157,6 +161,7 @@ _MUTATION_DEADLINE_SECONDS = 15.0
 _MAX_QUERY_FIELDS = 256
 _MAX_JSON_FIELDS = 20
 _RUNTIME_SNAPSHOT_BATCH_SIZE = 50
+_AUTO_PORTS = range(8787, 8887)
 
 _SECURITY_HEADERS = (
     (b"Cache-Control", b"no-store"),
@@ -239,14 +244,22 @@ class AdminWebApplication:
         *,
         auth: AdminAuth,
         management: InstanceManagementService,
+        instance_root: Path | None = None,
     ) -> None:
         self._auth = auth
         self._management = management
+        self._instance_root = instance_root
+        suffix = f"_{instance_digest(instance_root)}" if instance_root is not None else ""
+        self._session_cookie = _SESSION_COOKIE + suffix
+        self._preauth_cookie = _PREAUTH_COOKIE + suffix
         self._ready = False
         self._authorities: frozenset[str] = frozenset()
         self._origins: frozenset[str] = frozenset()
         self._mutation_tasks: set[asyncio.Task[object]] = set()
         self._assets = _load_assets()
+        self._assets["index.html"] = self._assets["index.html"].replace(
+            b"__NETIZEN_INSTANCE_ROOT__", html.escape(_root_label(instance_root)).encode("utf-8")
+        )
 
     @property
     def ready(self) -> bool:
@@ -360,7 +373,7 @@ class AdminWebApplication:
             query=query,
             authority=authority,
             source_ip=peer[0],
-            session_token=cookies.get(_SESSION_COOKIE),
+            session_token=cookies.get(self._session_cookie),
             session_log_handle=None,
         )
 
@@ -432,12 +445,12 @@ class AdminWebApplication:
             challenge = self._auth.issue_preauth(context.source_ip)
         except LoginRejected:
             raise AdminWebError(401, "login_rejected", "登录暂不可用，请稍后重试。") from None
-        page = _login_html(challenge.form_nonce)
+        page = _login_html(challenge.form_nonce, self._instance_root)
         return Response(
             200,
             headers=(
                 (b"Content-Type", b"text/html; charset=utf-8"),
-                (b"Set-Cookie", _cookie(_PREAUTH_COOKIE, challenge.cookie_token)),
+                (b"Set-Cookie", _cookie(self._preauth_cookie, challenge.cookie_token)),
             ),
             body=page,
         )
@@ -448,7 +461,7 @@ class AdminWebApplication:
         try:
             issued = self._auth.login(
                 source_ip=context.source_ip,
-                cookie_token=cookies.get(_PREAUTH_COOKIE),
+                cookie_token=cookies.get(self._preauth_cookie),
                 form_nonce=_one(form, "nonce"),
                 credential=_one(form, "credential"),
             )
@@ -458,8 +471,8 @@ class AdminWebApplication:
             303,
             headers=(
                 (b"Location", b"/"),
-                (b"Set-Cookie", _cookie(_SESSION_COOKIE, issued.token)),
-                (b"Set-Cookie", _expired_cookie(_PREAUTH_COOKIE)),
+                (b"Set-Cookie", _cookie(self._session_cookie, issued.token)),
+                (b"Set-Cookie", _expired_cookie(self._preauth_cookie)),
             ),
         )
 
@@ -481,7 +494,7 @@ class AdminWebApplication:
             self._auth.logout(context.session_token)
             return Response(
                 204,
-                ((b"Set-Cookie", _expired_cookie(_SESSION_COOKIE)),),
+                ((b"Set-Cookie", _expired_cookie(self._session_cookie)),),
             )
         if route == ("GET", "/api/v1/projects"):
             return await self._projects(context)
@@ -1989,19 +2002,30 @@ class AdminWebRunner:
         self,
         *,
         host: str,
-        port: int,
+        port: int | None,
         credential_path: Path,
         management: InstanceManagementService | None = None,
         auth: AdminAuth | None = None,
+        instance_root: Path | None = None,
+        config_path: Path | None = None,
+        config_snapshot: ConfigFileSnapshot | None = None,
+        access_host: str | None = None,
     ) -> None:
         self._host = host
         self._port = port
+        self._instance_root = instance_root
+        self._config_path = config_path
+        self._config_snapshot = config_snapshot
+        self._access_host = validate_access_host(access_host) if access_host is not None else None
+        self._urls: tuple[str, ...] = ()
+        self._loopback_only = False
+        self._bound = False
         self._auth = auth or AdminAuth(credential_path)
         self._application: AdminWebApplication | None = None
         self._authorities: tuple[str, ...] | None = None
         if management is not None:
             self.attach_management(management)
-        self._transport = AdminHttpTransport(host, port, self._handle)
+        self._transport = AdminHttpTransport(host, port if port is not None else 8787, self._handle)
 
     @property
     def application(self) -> AdminWebApplication:
@@ -2018,21 +2042,79 @@ class AdminWebRunner:
     def addresses(self):
         return self._transport.addresses
 
+    @property
+    def instance_root(self) -> Path | None:
+        return self._instance_root
+
+    @property
+    def urls(self) -> tuple[str, ...]:
+        """Bound runtime addresses, never guesses from pending disk settings."""
+        return self._urls
+
+    @property
+    def loopback_only(self) -> bool:
+        return self._loopback_only
+
     async def bind(self) -> None:
+        if self._bound:
+            raise RuntimeError("Admin Web runner can only bind once")
+        self._bound = True
         try:
-            await self._transport.bind()
+            if self._port is None:
+                snapshot = self._config_snapshot
+                if self._config_path is None or snapshot is None or snapshot.path != self._config_path:
+                    raise ValueError("automatic Admin port allocation requires the startup configuration snapshot")
+                for port in _AUTO_PORTS:
+                    self._transport = AdminHttpTransport(self._host, port, self._handle)
+                    try:
+                        await self._transport.bind()
+                    except OSError as error:
+                        if error.errno != errno.EADDRINUSE:
+                            raise
+                    else:
+                        persist_admin_port(snapshot, port)
+                        self._port = port
+                        break
+                else:
+                    raise OSError(
+                        errno.EADDRINUSE,
+                        f"Admin ports 8787–8886 are occupied; configure adminWeb.port in {self._config_path}",
+                    )
+            else:
+                try:
+                    await self._transport.bind()
+                except OSError as error:
+                    if error.errno == errno.EADDRINUSE and self._config_path is not None:
+                        raise OSError(
+                            errno.EADDRINUSE,
+                            f"Admin port {self._port} is occupied; configure adminWeb.port in {self._config_path}",
+                        ) from error
+                    raise
+            assert self._port is not None
             self._authorities = await asyncio.to_thread(
                 accepted_authorities,
                 self._host,
                 self._port,
                 self._transport.addresses,
             )
+            if self._access_host is not None:
+                self._authorities = tuple(sorted({
+                    *self._authorities,
+                    *(_format_authority(self._access_host, port) for port in _bound_ports(self.addresses)),
+                }))
+            self._loopback_only = _loopback_addresses(self.addresses)
+            self._urls = admin_access_urls(
+                self._host, self.addresses, self._authorities, self._access_host,
+            )
             if self._application is not None:
                 self._application.configure_authorities(self._authorities)
         except BaseException:
             try:
-                await self._transport.close()
+                # Failure before bind has no loop-owned transport to close.
+                if self._transport.state is not AdminHttpState.NEW:
+                    await self._transport.close()
             finally:
+                self._urls = ()
                 self._auth.close()
             raise
 
@@ -2041,7 +2123,9 @@ class AdminWebRunner:
 
         if self._application is not None:
             raise RuntimeError("Admin management application is already attached")
-        application = AdminWebApplication(auth=self._auth, management=management)
+        application = AdminWebApplication(
+            auth=self._auth, management=management, instance_root=self._instance_root,
+        )
         if self._authorities is not None:
             application.configure_authorities(self._authorities)
         self._application = application
@@ -2071,9 +2155,11 @@ class AdminWebRunner:
     async def close_listener(self) -> None:
         self.close_admission()
         await self._transport.close()
+        self._urls = ()
 
     async def drain(self, deadline: float) -> None:
         await self._transport.drain(deadline)
+        self._urls = ()
         if self._application is not None:
             await self._application.drain(deadline)
 
@@ -2137,6 +2223,73 @@ def _format_authority(host: str, port: int) -> str:
     return f"{rendered}:{port}"
 
 
+def _bound_ports(addresses: Sequence[object]) -> tuple[int, ...]:
+    return tuple(sorted({
+        address[1] for address in addresses
+        if isinstance(address, tuple) and len(address) >= 2 and isinstance(address[1], int)
+    }))
+
+
+def _loopback_addresses(addresses: Sequence[object]) -> bool:
+    hosts = [address[0] for address in addresses if isinstance(address, tuple) and address]
+    return bool(hosts) and all(ipaddress.ip_address(host).is_loopback for host in hosts)
+
+
+def admin_access_urls(
+    bind_host: str,
+    addresses: Sequence[object],
+    authorities: Sequence[str],
+    access_host: str | None = None,
+) -> tuple[str, ...]:
+    """A bounded set of URLs using the actual bound port and accepted Hosts."""
+
+    ports = _bound_ports(addresses)
+    if not ports:
+        return ()
+    if access_host is not None:
+        selected = [_format_authority(access_host, port) for port in ports]
+    elif _loopback_addresses(addresses):
+        selected = [
+            _format_authority(str(address[0]), int(address[1]))
+            for address in addresses if isinstance(address, tuple)
+        ]
+    elif bind_host not in {"0.0.0.0", "::", ""}:
+        selected = [_format_authority(bind_host, port) for port in ports]
+    else:
+        family_ports = {
+            (ipaddress.ip_address(str(address[0])).version, int(address[1]))
+            for address in addresses if isinstance(address, tuple) and len(address) >= 2
+        }
+        selected = []
+        for authority in authorities:
+            parsed = urlsplit(f"http://{authority}")
+            hostname = parsed.hostname
+            if not hostname or hostname == "localhost":
+                continue
+            if parsed.port not in ports:
+                continue
+            try:
+                address = ipaddress.ip_address(hostname)
+            except ValueError:
+                # A discovered name may resolve only to an unbound address
+                # family. Advertise the discovered IPs; accessHost remains
+                # the explicit choice for a hostname.
+                continue
+            if (
+                (address.version, parsed.port) not in family_ports
+                or address.is_unspecified or address.is_loopback or address.is_link_local
+            ):
+                continue
+            selected.append(authority)
+        if not selected:
+            selected = [
+                _format_authority("127.0.0.1" if family == 4 else "::1", port)
+                for family, port in sorted(family_ports)
+            ]
+    allowed = set(authorities)
+    return tuple(f"http://{authority}/" for authority in dict.fromkeys(selected) if authority in allowed)[:4]
+
+
 def _load_assets() -> dict[str, bytes]:
     root = importlib.resources.files("netizen.admin").joinpath("static")
     assets: dict[str, bytes] = {}
@@ -2145,7 +2298,11 @@ def _load_assets() -> dict[str, bytes]:
     return assets
 
 
-def _login_html(nonce: str) -> bytes:
+def _root_label(root: Path | None) -> str:
+    return str(root) if root is not None else "非受管开发实例"
+
+
+def _login_html(nonce: str, instance_root: Path | None = None) -> bytes:
     escaped = html.escape(nonce, quote=True)
     return (
         "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
@@ -2155,6 +2312,7 @@ def _login_html(nonce: str) -> bytes:
         "<body class='login-body'><main class='login-card'>"
         "<p class='eyebrow'>INSTANCE CONTROL PLANE</p>"
         "<h1>Netizen Admin</h1><p>输入实例管理员密钥。</p>"
+        f"<p class='instance-root'>{html.escape(_root_label(instance_root))}</p>"
         "<form method='post' action='/login'>"
         f"<input type='hidden' name='nonce' value='{escaped}'>"
         "<label for='credential'>管理员密钥</label>"

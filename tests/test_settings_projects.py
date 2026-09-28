@@ -62,7 +62,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings.projects["test"].name, "project")
         self.assertEqual(settings.project_root.name, "projects")
         self.assertEqual(settings.admin_web.host, "0.0.0.0")
-        self.assertEqual(settings.admin_web.port, 8787)
+        self.assertIsNone(settings.admin_web.port)
         self.assertTrue(settings.admin_web.enabled)
 
     def test_project_root_is_required(self) -> None:
@@ -199,6 +199,8 @@ class SettingsTest(unittest.TestCase):
                 ("host: 127.0.0.1", "host: ''", "non-empty host"),
                 ("port: 9443", "port: 0", "1 to 65535"),
                 ("port: 9443", "port: true", "1 to 65535"),
+                ("port: 9443", "port: null", "1 to 65535"),
+                ("port: 9443", "port: ''", "1 to 65535"),
             )
             baseline = config.read_text(encoding="utf-8")
             for old, new, message in invalid_cases:
@@ -230,6 +232,33 @@ class SettingsTest(unittest.TestCase):
                         "NETIZEN_ADMIN_SECRET": "raw-secret",
                     },
                 )
+
+    def test_access_host_validation_and_startup_configuration_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            config = self.write_config(directory)
+            baseline = config.read_text()
+            for supplied, expected in (
+                ("admin.example.com", "admin.example.com"),
+                ("Admin.Example.COM", "admin.example.com"),
+                ("192.0.2.2", "192.0.2.2"),
+                ("2001:db8::1", "2001:db8::1"),
+            ):
+                with self.subTest(supplied=supplied):
+                    config.write_text(baseline + f"adminWeb:\n  accessHost: '{supplied}'\n")
+                    loaded = Settings.from_file(config, self.environment(directory))
+                    self.assertEqual(loaded.admin_web.access_host, expected)
+                    self.assertEqual(loaded.config_path, config.resolve())
+                    self.assertEqual(loaded.config_snapshot.content, config.read_bytes())
+            for supplied in (
+                "", " ", "http://admin.example.com", "admin.example.com:8787",
+                "admin.example.com/path", "admin.example.com?x=y", "user@host",
+                "[::1]", "::", "0.0.0.0", "-invalid", "hello world", "*.example.com",
+            ):
+                with self.subTest(supplied=supplied):
+                    config.write_text(baseline + f"adminWeb:\n  accessHost: '{supplied}'\n")
+                    with self.assertRaisesRegex(SettingsError, "accessHost"):
+                        Settings.from_file(config, self.environment(directory))
 
     def test_profile_is_authoritative_over_legacy_yaml_and_cli_selectors(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

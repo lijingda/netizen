@@ -22,7 +22,6 @@ from .installer_support import (
     _write_atomic,
 )
 from .service_backend import (
-    LegacyServiceState,
     ServiceState,
     SERVICE_READY_TIMEOUT_SECONDS,
     SERVICE_STOP_TIMEOUT_SECONDS,
@@ -34,7 +33,6 @@ from .service_backend import (
 )
 
 
-LAUNCH_AGENT_LABEL = "io.github.lijingda.netizen"
 LAUNCH_AGENT_SENTINEL_NAME = "NETIZEN_MANAGED_LAUNCH_AGENT"
 LAUNCH_AGENT_SENTINEL_VALUE = "io.github.lijingda.netizen/v1"
 
@@ -82,7 +80,7 @@ def _launch_agent_program_arguments(layout: Layout) -> list[str]:
 def render_launch_agent(release: Release, layout: Layout) -> bytes:
     del release  # The stable current pointer is the LaunchAgent activation boundary.
     payload = {
-        "Label": LAUNCH_AGENT_LABEL,
+        "Label": layout.service_label,
         "ProgramArguments": _launch_agent_program_arguments(layout),
         "WorkingDirectory": str(layout.home),
         "RunAtLoad": True,
@@ -92,6 +90,7 @@ def render_launch_agent(release: Release, layout: Layout) -> bytes:
         "Umask": 0o077,
         "EnvironmentVariables": {
             "HOME": str(layout.home),
+            "NETIZEN_ROOT": str(layout.product_root),
             "CODEX_HOME": str(layout.codex_home),
             "PATH": _service_bootstrap_path(layout),
             "PYTHONDONTWRITEBYTECODE": "1",
@@ -130,10 +129,21 @@ def _require_managed_launch_agent(path: Path, layout: Layout) -> None:
     environment = payload.get("EnvironmentVariables") if isinstance(payload, dict) else None
     if (
         not isinstance(environment, dict)
-        or payload.get("Label") != LAUNCH_AGENT_LABEL
+        or payload.get("Label") != layout.service_label
         or payload.get("ProgramArguments") != _launch_agent_program_arguments(layout)
         or environment.get(LAUNCH_AGENT_SENTINEL_NAME)
         != LAUNCH_AGENT_SENTINEL_VALUE
+        or any(environment.get(name) != str(value) for name, value in {
+            "HOME": layout.home,
+            "NETIZEN_ROOT": layout.product_root,
+            "NETIZEN_CONFIG_PATH": layout.config_file,
+            "NETIZEN_LARK_APP_CONFIG": layout.lark_app_file,
+            "NETIZEN_ADMIN_SECRET_FILE": layout.admin_secret_file,
+            "NETIZEN_READY_FILE": layout.ready_file,
+            "NETIZEN_LIFETIME_LOCK_FILE": layout.lifetime_lock_file,
+            "NETIZEN_LOG_FILE": layout.log_file,
+        }.items())
+        or payload.get("StandardErrorPath") != str(layout.service_error_log)
     ):
         raise InstallError(f"refusing to operate on an unrecognized LaunchAgent: {path}")
 
@@ -143,7 +153,7 @@ class LaunchAgentServiceBackend:
         self.layout = layout
         self._runner = runner
         self._domain = f"gui/{layout.uid}"
-        self._target = f"{self._domain}/{LAUNCH_AGENT_LABEL}"
+        self._target = f"{self._domain}/{layout.service_label}"
 
     def preflight(self) -> None:
         domain = _launchctl(
@@ -227,6 +237,8 @@ class LaunchAgentServiceBackend:
         )
 
     def publish_definition(self, content: bytes, *, should_enable: bool) -> None:
+        if _path_exists(self.layout.service_file):
+            _require_managed_launch_agent(self.layout.service_file, self.layout)
         _write_atomic(self.layout.service_file, content, mode=0o600)
         self._validate_definition()
         self._set_enabled(should_enable)
@@ -257,7 +269,7 @@ class LaunchAgentServiceBackend:
         excerpt = _log_excerpt(self.layout.service_error_log)
         suffix = f"; recent launchd stderr: {excerpt}" if excerpt else ""
         raise InstallError(
-            f"{LAUNCH_AGENT_LABEL} did not become ready within {timeout:g}s{suffix}"
+            f"{self.layout.service_label} did not become ready within {timeout:g}s{suffix}"
         )
 
     def start_and_wait(self, *, timeout: float) -> None:
@@ -313,22 +325,3 @@ class LaunchAgentServiceBackend:
                 "the managed LaunchAgent plist is missing but the launchd target is "
                 "still loaded; inspect it before uninstalling"
             )
-
-    def inspect_legacy(self) -> LegacyServiceState:
-        return LegacyServiceState()
-
-    def disable_legacy(
-        self,
-        state: LegacyServiceState,
-        *,
-        interactive: bool,
-    ) -> None:
-        del state, interactive
-
-    def restore_legacy(
-        self,
-        state: LegacyServiceState,
-        *,
-        interactive: bool,
-    ) -> None:
-        del state, interactive

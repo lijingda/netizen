@@ -92,6 +92,13 @@ Agent 应转交链接、保留同一个安装进程并继续读取输出；确�
 已有应用也会按需补权。不要把 App Secret 发到聊天里；手工配置仅作为备用方式。
 特殊交互方式与排障见[Agent 安装说明](docs/deployment.md#agent-驱动首次安装)。
 
+默认安装到当前账号的 `~/.netizen`。源码版支持用 `--root`（或 `NETIZEN_ROOT`）选择
+不同目录，在同一账号下运行独立机器人；各实例共享原生 Codex 登录和配置，不提供权限隔离。
+例如 `./dev-install.sh --root "$HOME/share" --admin-port 8890`；端口参数可省略，首次启动
+自动选择并保存可用端口。后续启停、升级和卸载须选择同一个 root，详见
+[多实例目录与参数](docs/deployment.md#目录)。这项部署格式变更不迁移旧安装；正式版本以
+所选 Release 的能力为准，不代表上面的既有版本安装器已经包含本次改动。
+
 ### 3. 在飞书开始第一次对话
 
 1. 打开机器人单聊；如需在群里使用，先将机器人加入目标群。
@@ -124,6 +131,7 @@ Agent 应转交链接、保留同一个安装进程并继续读取输出；确�
 | 调整模型、思考强度和过程卡 | `/config`，当前会话空闲时使用 |
 | 查看当前任务和上下文用量 | `/status` |
 | 中断当前任务 | `/stop`；不保证前台工具进程退出，见[停止说明](skills/netizen-user-guide/references/user-guide.md#stop) |
+| 查找当前机器人的管理入口 | `/admin`；返回实际管理 URL 和实例根目录，不返回登录凭据 |
 | 管理定时任务 | `/cron`，也可以直接用自然语言描述计划 |
 | 查看当前实例提供的命令 | `/help` |
 
@@ -155,8 +163,9 @@ Side 会在同一聊天中新建话题，可继续多轮讨论。它与原会话
 ## 管理与维护
 
 实例管理员可以通过 **Admin Web** 集中管理项目、会话、Side 话题、会话默认配置和定时任务，
-并在“系统维护”中检查正式更新或重启服务。默认地址为受信内网的
-`http://<服务器 IP>:8787`，使用安装器生成的独立管理员凭据；
+并在“系统维护”中检查正式更新或重启服务。发送 `/admin` 可获取当前实例的管理 URL
+和根目录，无需创建会话。未指定端口时首次从 `8787` 起分配并保存，各实例独立监听；
+管理页仍使用安装器生成的独立管理员凭据，命令不会返回凭据或免登录链接。
 [访问方式](docs/deployment.md#配置与管理页访问)见部署文档。
 
 升级与重启都会影响正在执行的任务，重启后不会自动续跑。
@@ -179,7 +188,8 @@ Side 会在同一聊天中新建话题，可继续多轮讨论。它与原会话
 
 也可以直接在飞书问 **“Netizen 怎么切换会话？”**。安装器随版本提供
 [用户指南 Skill](skills/netizen-user-guide/SKILL.md)，支持自然语言咨询；
-需要显式调用时，发送 `$netizen-user-guide 你的问题`。
+需要显式调用时，发送 `$netizen-user-guide 你的问题`。内置 Skills 保存在当前实例的
+release 中，只为其 Codex 进程加载，不覆盖用户的全局 Skills。
 
 ### 按需读取飞书历史
 
@@ -191,9 +201,10 @@ Side 会在同一聊天中新建话题，可继续多轮讨论。它与原会话
 [飞书 CLI 与 Skills 的官方安装说明](https://github.com/larksuite/cli)安装
 `lark-cli` 及 `lark-im` / `lark-shared` Skills；已有安装可以复用。
 
-`netizen-lark` 说明如何选择 `~/.netizen/lark-app/config.json` 中的 `netizen` profile，
+`netizen-lark` 说明如何选择当前 `NETIZEN_ROOT/lark-app/config.json` 中的 `netizen` profile，
 由可选的 CLI 直接复用 Netizen 的应用凭据；查询与结果处理由 lark Skills 指导。
 Skill 不带脚本，不需将凭据读入模型上下文，也不修改用户默认的 CLI 配置。
+运行上下文缺少 `NETIZEN_ROOT` 时明确报错，不猜测默认实例的机器人身份。
 机器人仍受已有权限和聊天可见性约束；历史只在任务需要时读取。
 其他场景（包括读取消息中的文档、妙记链接）沿用原有 lark Skills 与用户的 CLI 配置；
 失败后由 Agent 酌情判断是否尝试 Netizen 机器人凭证，具体见 Skill 的身份使用范围。

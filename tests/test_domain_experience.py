@@ -260,11 +260,20 @@ class ExperienceTest(unittest.TestCase):
         with self.assertRaisesRegex(InvalidInteraction, "不接受参数"):
             self.parse("/release now", NativeCapability.RELEASE)
 
+    def test_admin_is_an_argument_free_control_without_native_capabilities(self) -> None:
+        intent = self.parse("/admin")
+        self.assertIsInstance(intent, ControlIntent)
+        self.assertEqual(intent.name, ControlName.ADMIN)
+        self.assertEqual(intent.arguments, ())
+        self.assertIn("`/admin`", command_help())
+        with self.assertRaisesRegex(InvalidInteraction, "/admin 不接受参数"):
+            self.parse("/admin other")
+
     def test_side_help_only_lists_the_side_surface(self) -> None:
         group_help = side_command_help(requires_mention=True)
         direct_help = side_command_help(requires_mention=False)
 
-        for command in ("/status", "/stop", "/side close", "/help"):
+        for command in ("/status", "/stop", "/side close", "/admin", "/help"):
             self.assertIn(command, group_help)
         for unavailable in ("/new", "/config", "/goal", "/archive"):
             self.assertNotIn(unavailable, group_help)

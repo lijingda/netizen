@@ -4,7 +4,7 @@ import asyncio
 import json
 import unittest
 import uuid
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, closing, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,6 +37,7 @@ from netizen.channel.input_preparation import MessageInputPreparer
 from netizen.channel import reactions, reply_presenter
 from netizen.turn_patch_children import TaskPatchChildren, TurnPatchBatch
 from netizen.bindings import (
+    BindingStore,
     BindingNotFound,
     BindingTaskFeedback,
     BindingTurnSettings,
@@ -111,6 +112,7 @@ from netizen.message_history import (
     MessageHistoryWindow,
 )
 from netizen.sdk_gap_adapter import GoalStatus
+from netizen.projects import ProjectRegistry
 from netizen.turn_activity import (
     TurnActivityEntrySnapshot,
     TurnActivityKind,
@@ -565,6 +567,100 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.projects = self.fixture.projects
         self.management = self.fixture.management
         self.app = self.fixture.app
+
+    async def test_admin_reports_bound_addresses_without_projects_or_bindings(self) -> None:
+        store = self.enterContext(closing(BindingStore()))
+        runtime = StubRuntime()
+        runtime.binding_store = store
+        projects = ProjectRegistry(store=store, project_root=self.project_root, projects={})
+        management = InstanceManagementService(
+            bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime),
+            scope_coordinator=ScopeCoordinator(),
+        )
+        self.addAsyncCleanup(management.close)
+        root = self.project_root / "team 中文"
+        urls = ("http://192.0.2.15:8789/", "http://[2001:db8::1]:8789/")
+        app = ChannelApplication(
+            app_id="cli_test", channel=self.channel, runtime=runtime, bindings=store,
+            projects=projects, management=management, admin_urls=urls, instance_root=root,
+        )
+        self.addAsyncCleanup(app.close)
+        changes_before = store._connection.total_changes
+        for index, (chat_type, topic) in enumerate((
+            ("p2p", None), ("group", None), ("p2p", "omt-direct"), ("group", "omt-group"),
+        )):
+            with self.subTest(chat_type=chat_type, topic=topic):
+                message = FakeMessage(
+                    "/admin", message_id=f"om-admin-{index}", chat_type=chat_type,
+                    thread_id=topic, mentioned_bot=chat_type == "group",
+                )
+                await app.handle_message(message)
+                reply = self.channel.replies[-1][1]
+                self.assertIn(str(root), reply)
+                for url in urls:
+                    self.assertIn(url, reply)
+                self.assertIn("adminWeb.accessHost", reply)
+                self.assertNotIn(":8787", reply)
+                self.assertEqual(store.list_bindings(app._scope(message).key), [])
+        self.assertEqual(store.list_projects(), [])
+        self.assertEqual(store._connection.total_changes, changes_before)
+        self.assertEqual(runtime.submit_calls, [])
+        self.assertEqual(runtime.submit_side_calls, [])
+        self.assertEqual(self.channel.reactions, [])
+
+    async def test_admin_disabled_and_loopback_addresses_are_explicit(self) -> None:
+        root = self.project_root / "private"
+        for urls in ((), ("http://127.0.0.1:8890/", "http://[::1]:8890/")):
+            with self.subTest(urls=urls):
+                app = ChannelApplication(
+                    app_id="cli_test", channel=self.channel, runtime=self.runtime,
+                    bindings=self.store, projects=self.projects, management=self.management,
+                    admin_urls=urls, instance_root=root,
+                )
+                self.addAsyncCleanup(app.close)
+                await app.handle_message(FakeMessage("/admin", message_id="om-admin"))
+                reply = self.channel.replies[-1][1]
+                self.assertIn(str(root), reply)
+                if urls:
+                    self.assertIn("服务器本机访问", reply)
+                    self.assertIn("自行建立隧道", reply)
+                else:
+                    self.assertIn("未启用 Admin Web", reply)
+                    self.assertNotIn("http://", reply)
+        self.assertEqual(self.runtime.submit_calls, [])
+
+    async def test_admin_loopback_notice_covers_listener_and_url_fallback(self) -> None:
+        for loopback_only, urls, expected_notice in (
+            (True, ("http://admin.example.com:8890/",), True),
+            (False, ("http://localhost:8890/",), True),
+            (False, ("http://[::1]:8890/",), True),
+            (False, ("http://127.0.0.1:8890/",), True),
+            (False, ("http://192.0.2.4:8890/",), False),
+            (False, ("http://[::1]:8890/", "http://192.0.2.4:8890/"), False),
+        ):
+            with self.subTest(loopback_only=loopback_only, urls=urls):
+                app = ChannelApplication(
+                    app_id="cli_test", channel=self.channel, runtime=self.runtime,
+                    bindings=self.store, projects=self.projects, management=self.management,
+                    admin_urls=urls, admin_loopback_only=loopback_only,
+                    instance_root=self.project_root / "private",
+                )
+                self.addAsyncCleanup(app.close)
+                await app.handle_message(FakeMessage("/admin", message_id="om-admin"))
+                reply = self.channel.replies[-1][1]
+                for url in urls:
+                    self.assertIn(url, reply)
+                self.assertEqual("服务器本机访问" in reply, expected_notice)
+                self.assertEqual("自行建立隧道" in reply, expected_notice)
+        self.assertEqual(self.runtime.submit_calls, [])
+
+    async def test_admin_preserves_group_mention_admission(self) -> None:
+        await self.app.handle_message(FakeMessage(
+            "/admin", message_id="om-admin-unmentioned", chat_type="group",
+            mentioned_bot=False,
+        ))
+        self.assertEqual(self.channel.replies, [])
+        self.assertEqual(self.runtime.submit_calls, [])
 
 
     async def test_close_only_owns_presentation_even_when_card_cleanup_fails(self) -> None:
@@ -10060,6 +10156,35 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         assert record is not None
         return binding, record
+
+    async def test_admin_uses_same_entry_in_valid_side_but_preserves_closed_route(self) -> None:
+        _, record = await self.open_direct_side()
+        urls = ("http://netizen.example:8881/",)
+        root = self.project.parent / "bot"
+        app = ChannelApplication(
+            app_id="cli_test", channel=self.channel, runtime=self.runtime,
+            bindings=self.store, projects=self.projects, management=self.management,
+            admin_urls=urls, instance_root=root,
+        )
+        self.addAsyncCleanup(app.close)
+        await app.handle_message(FakeMessage("/admin", message_id="om-admin-main"))
+        ordinary_reply = self.channel.replies[-1][1]
+        side_message = FakeMessage(
+            "/admin", message_id="om-admin-side", chat_id="oc-direct", chat_type="p2p",
+            thread_id=record.topic_id, mentioned_bot=False,
+        )
+        await app.handle_message(side_message)
+        self.assertEqual(self.channel.replies[-1][1], ordinary_reply)
+        self.assertIn(urls[0], ordinary_reply)
+        self.assertIn(str(root), ordinary_reply)
+
+        self.store.transition_side_topic(record.id, SideTopicState.CLOSED)
+        await app.handle_message(side_message)
+        closed_reply = self.channel.replies[-1][1]
+        self.assertIn("不会转成普通会话", closed_reply)
+        self.assertNotIn(urls[0], closed_reply)
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(self.runtime.submit_side_calls, [])
 
     async def test_side_turn_default_feedback_keeps_rich_text_terminal_reply(
         self,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import re
@@ -12,6 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from lark_channel import (
@@ -665,6 +667,9 @@ class ChannelApplication:
         projects: ProjectRegistry,
         management: InstanceManagementService,
         message_history: MessageHistoryReader | None = None,
+        admin_urls: tuple[str, ...] = (),
+        admin_loopback_only: bool | None = None,
+        instance_root: Path | None = None,
     ) -> None:
         self._app_id = app_id
         self._channel = channel
@@ -672,6 +677,9 @@ class ChannelApplication:
         self._bindings = bindings
         self._projects = projects
         self._message_history = message_history
+        self._admin_urls = admin_urls
+        self._admin_loopback_only = admin_loopback_only
+        self._instance_root = instance_root
         self._input_preparer = MessageInputPreparer(channel=channel)
         self._management = management
         self._management.enable_schedules(app_id=app_id, chat_info=channel)
@@ -3161,6 +3169,9 @@ class ChannelApplication:
         intent: ControlIntent,
         record: SideTopicRecord,
     ) -> None:
+        if intent.name is ControlName.ADMIN:
+            await self._reply(message, self._admin_entry())
+            return
         if intent.name in {ControlName.MENU, ControlName.HELP}:
             await self._reply(
                 message,
@@ -3746,6 +3757,9 @@ class ChannelApplication:
         return await reader.resolve_anchor(scope, message_id)
 
     async def _control(self, message: Any, intent: ControlIntent) -> None:
+        if intent.name is ControlName.ADMIN:
+            await self._reply(message, self._admin_entry())
+            return
         if intent.name in {ControlName.MENU, ControlName.HELP}:
             await self._reply(message, self._help())
             return
@@ -6183,8 +6197,43 @@ class ChannelApplication:
         except Exception:
             logger.exception("failed to send card action fallback feedback")
 
+    def _admin_entry(self) -> str:
+        """Present only the successfully bound listener, never configuration guesses."""
+        root = (
+            f"`{_markdown_code(str(self._instance_root))}`"
+            if self._instance_root is not None
+            else "未提供"
+        )
+        lines = [f"实例根目录：{root}"]
+        if not self._admin_urls:
+            lines.append("当前实例未启用 Admin Web。")
+            return "\n\n".join(lines)
+        lines.extend(("Admin Web 管理地址：", *self._admin_urls))
+        loopback_only = self._admin_loopback_only is True or all(
+            _admin_url_is_loopback(url) for url in self._admin_urls
+        )
+        if loopback_only:
+            lines.append("以上地址仅供服务器本机访问；远程访问需自行建立隧道。")
+        elif len(self._admin_urls) > 1:
+            lines.append(
+                "请使用可访问的服务器地址；可在本实例 config.yaml 中设置 "
+                "adminWeb.accessHost 指定展示地址。"
+            )
+        lines.append("管理页仍需独立的管理员凭据登录；请勿在聊天中发送凭据。")
+        return "\n\n".join(lines)
+
     def _help(self) -> str:
         return command_help(self._runtime.available_capabilities)
+
+
+def _admin_url_is_loopback(url: str) -> bool:
+    host = urlsplit(url).hostname
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host or "").is_loopback
+    except ValueError:
+        return False
 
 
 def _side_send_uuid(prefix: str, side_id: str) -> str:

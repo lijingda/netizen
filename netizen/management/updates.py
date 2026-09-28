@@ -19,6 +19,7 @@ from urllib.error import HTTPError, URLError
 import urllib.request
 
 from .blocking_io import BoundedBlockingIOExecutor
+from ..instance import resolve_instance_root
 from ..deployment.update_executor import UpdateExecutor, UpdateDispatchUnknown, UpdateExecutorError
 from ..deployment.update_protocol import (
     UpdateProtocolError, acquire_install_lock, activation_requires_recovery,
@@ -71,7 +72,7 @@ def _read_metadata(path: Path) -> dict[str, Any]:
         os.close(descriptor)
 
 
-def installed_release(home: Path) -> InstalledRelease:
+def installed_release(product_root: Path) -> InstalledRelease:
     """Identify the running interpreter, never the mutable current symlink."""
     try:
         version = importlib.metadata.version("netizen")
@@ -79,7 +80,7 @@ def installed_release(home: Path) -> InstalledRelease:
         version = "unknown"
     prefix = Path(sys.prefix).resolve()
     root = prefix.parent
-    releases = (home / ".netizen" / "releases").resolve()
+    releases = (product_root / "releases").resolve()
     if (prefix.name != "venv" or root.parent != releases
             or _DIGEST.fullmatch(root.name) is None
             or not Path(__file__).resolve().is_relative_to(prefix)):
@@ -197,13 +198,13 @@ def _newer(candidate: str, current: str) -> bool:
 class UpdateService:
     """One bounded management I/O worker; no scheduler or Runtime dependency."""
 
-    def __init__(self, *, home: Path | None = None,
+    def __init__(self, *, root: Path | None = None, home: Path | None = None,
                  current: InstalledRelease | None = None,
                  executor: UpdateExecutor | None = None,
                  fetch: Callable[[], dict[str, Any]] = fetch_latest_release,
                  clock: Callable[[], float] = time.time) -> None:
-        self.home = home or Path(pwd.getpwuid(os.geteuid()).pw_dir)
-        self.product_root = self.home / ".netizen"
+        self.home = (home or Path(pwd.getpwuid(os.geteuid()).pw_dir)).resolve()
+        self.product_root = resolve_instance_root(root, account_home=self.home)
         self._current = current
         self._executor = executor
         self._fetch, self._clock = fetch, clock
@@ -246,12 +247,12 @@ class UpdateService:
 
     def _installation(self) -> InstalledRelease:
         if self._current is None:
-            self._current = installed_release(self.home)
+            self._current = installed_release(self.product_root)
         return self._current
 
     def _manager(self) -> UpdateExecutor:
         if self._executor is None:
-            self._executor = UpdateExecutor(self.home)
+            self._executor = UpdateExecutor(self.home, root=self.product_root)
         return self._executor
 
     def _supported(self, current: InstalledRelease) -> bool:
@@ -262,9 +263,13 @@ class UpdateService:
                 or _VERSION.fullmatch(current.version) is None):
             return False
         try:
-            return (self.product_root / "current").is_symlink() and (
-                self.product_root / "current").resolve(strict=True) == current.root
-        except OSError:
+            pointer = self.product_root / "current"
+            return (
+                current.root.parent == (self.product_root / "releases").resolve(strict=True)
+                and _DIGEST.fullmatch(current.root.name) is not None
+                and pointer.is_symlink() and pointer.resolve(strict=True) == current.root
+            )
+        except (OSError, RuntimeError):
             return False
 
     def _operation(self) -> dict[str, Any] | None:

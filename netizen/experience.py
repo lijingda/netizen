@@ -82,6 +82,14 @@ COMMAND_SPECS = (
         group=CommandGroup.START,
     ),
     CommandSpec(
+        "admin",
+        ControlName.ADMIN,
+        CommandOwner.CHANNEL,
+        "/admin",
+        "查看当前实例的管理地址和根目录；无需创建会话",
+        group=CommandGroup.START,
+    ),
+    CommandSpec(
         "help",
         ControlName.HELP,
         CommandOwner.CHANNEL,
@@ -396,6 +404,7 @@ def _validate_arguments(name: ControlName, arguments: tuple[str, ...]) -> None:
         ControlName.STOP: 0,
         ControlName.RELEASE: 0,
         ControlName.STATUS: 0,
+        ControlName.ADMIN: 0,
         ControlName.GOAL: None,
         ControlName.HELP: 0,
     }[name]
@@ -506,6 +515,7 @@ def side_command_help(*, requires_mention: bool) -> str:
         "- `/status` — 查看 Side 状态",
         "- `/stop` — 只中断当前 Side 任务，Side 仍可继续",
         "- `/side close` — 结束当前 Side 话题，结束后不能继续",
+        "- `/admin` — 查看当前实例的管理地址和根目录",
         "- `/help` 或 `/` — 显示本帮助",
         "",
         "---",

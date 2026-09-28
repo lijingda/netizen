@@ -80,6 +80,7 @@ control 或一个 prompt，不能串联多个命令。群聊中的命令同样�
 | `/goal [目标]` | 查看或启动持续目标 | [Goal](#goal) |
 | `/goal pause`、`/goal resume`、`/goal clear` | 暂停、恢复或显式结束当前 Goal | [Goal](#goal) |
 | `/cron` | 管理定时计划；暂停计划不停止已认领的执行 | [定时任务](#定时任务) |
+| `/admin` | 返回当前实例已绑定的管理地址与根目录；无需 Project 或当前会话 | [Admin Web](#admin-web) |
 | `$skill-name ...` | 在普通消息开头显式调用一个或多个 Codex Skills | [Skills](#codex-skills) |
 | `/help`、`/` | 查看当前实例开放的帮助 | [能力差异](#与-codex-appcli-的差异) |
 
@@ -369,10 +370,18 @@ Admin 可以逐条配置具体群聊或单聊，也可以按“群名包含关�
 实例还默认提供单管理员 Admin Web，用于跨飞书 Scope 集中筛选和管理 Projects、普通
 Sessions、Side Topics、会话默认配置与定时计划。它与飞书共用同一个 Registry/Runtime，但权限来自独立 Admin
 credential，不会因为某人是 Channel 参与者或 Binding 创建者而自动开放。实例管理员可从
-部署主机的 `~/.netizen/credentials/admin-web-secret` 获取登录凭据，并在受信内网访问
-`http://<服务器 IP>:8787`；普通使用者继续使用 `/settings`、`/defaults` 和当前 Scope 的会话命令。
-该凭据不是飞书 App Secret，不应发送到聊天。Admin 默认监听 `0.0.0.0:8787`，使用受信
-内网 HTTP，不提供 TLS、OIDC、多管理员或 RBAC；不应直接暴露到不受信网络。
+部署主机当前实例的 `<NETIZEN_ROOT>/credentials/admin-web-secret` 获取登录凭据；未指定
+安装位置时根目录为 `~/.netizen`。发送 `/admin` 可找回当前实例实际绑定的管理 URL 和
+根目录，无需先登记 Project 或创建会话，也不会调用模型。有效的 Side 话题同样支持；
+关闭或过期的 Side 仍返回原有结束提示。Admin 未启用时命令会明确说明。
+
+Admin 默认监听 `0.0.0.0`；首次未指定端口时从 `8787` 开始寻找可用端口，绑定后保存在
+本实例配置中，之后不自动换号。多实例的管理端口彼此独立；不要仅凭默认端口猜测入口。
+多网卡或服务器名称不明确时，部署者可在本实例 `config.yaml` 中设置 `adminWeb.accessHost`。
+仅提供 loopback 地址时需在服务器本机访问或自行建立隧道。`/admin` 不返回登录凭据、
+session token 或免登录链接，也不改变管理权限。该凭据不是飞书 App Secret，不应发送到
+聊天。Admin 使用受信内网 HTTP，不提供 TLS、OIDC、多管理员或 RBAC；不应直接暴露到
+不受信网络。普通使用者继续使用 `/settings`、`/defaults` 和当前 Scope 的会话命令。
 
 登录状态不会因闲置或使用时长自动过期。退出登录、服务重启或管理员轮换凭据后需重新
 登录；浏览器清除会话 Cookie 后也需重新登录。登录会话数量达到上限时，新登录会替换
@@ -430,8 +439,10 @@ Projects 页可“删除 Project 及关联 Sessions”。确认范围包含该�
 | 检查更新 → 升级并重启 | 受管 Published Release | 手动检查并确认官方稳定版本，安装本次选定的精确版本；不会自动跟随之后变化的 latest |
 | 重启服务 | 受管 Published Release 和 Source Install | 无需检查更新，保持当前版本，重新启动 Netizen 及其 Codex 运行环境 |
 
-源码安装升级仍在相应工作区运行 `./dev-install.sh`；非受管运行使用原有部署入口。服务已
-停止时管理页不可用，由部署者执行已安装脚本 `~/.netizen/current/source/service.sh restart`。
+源码安装升级仍在相应工作区运行 `./dev-install.sh --root "<NETIZEN_ROOT>"`；非受管运行
+使用原有部署入口。服务已停止时管理页不可用，由部署者执行已安装脚本
+`"<NETIZEN_ROOT>/current/source/service.sh" --root "<NETIZEN_ROOT>" restart`。
+这里的 `<NETIZEN_ROOT>` 应替换成目标实例实际根目录；脚本不会根据自身所在目录猜测实例。
 
 升级和重启都不检测任务忙闲、不等待任务结束，提交前需要确认。升级准备版本时服务照常
 运行，切换时会中断普通任务、暂停 Goal、结束临时 Side；独立重启有相同影响，之后不会
@@ -449,8 +460,9 @@ Projects 页可“删除 Project 及关联 Sessions”。确认范围包含该�
 - 单纯重启超时后，可点击“刷新维护状态”或“检查更新”。若系统确认该次重启后的服务
   已就绪且没有未完成安装事务，会显示“服务已恢复”并重新开放维护按钮；原重启不改判成功。
 - 复核后仍显示“结果未确认，需要修复”时，两种维护提交都会受阻。请部署者以同一安装用户重新运行
-  官方安装入口恢复；Source Install 仍使用原工作区的 `./dev-install.sh`。
-  不要编辑 `~/.netizen/state/update.json` 伪造成功，也不要删除 `.activation-intent.json`
+  官方安装入口并带目标实例的 `--root` 恢复；Source Install 仍使用原工作区的
+  `./dev-install.sh --root "<NETIZEN_ROOT>"`。
+  不要编辑 `<NETIZEN_ROOT>/state/update.json` 伪造成功，也不要删除 `.activation-intent.json`
   或恢复快照。后续显示“已通过安装器恢复”证明新安装完成了修复，不把原点击改判为成功。
 
 ### 查找、切换和命名会话
@@ -669,7 +681,7 @@ Side 适合在不打断 Parent 会话的情况下讨论一个临时分支。
 - Side 创建时冻结 Parent 当时的 Model、Effort、Speed、Reaction Pulse、Progress Card 与结束时 @ 提醒；
   Parent 后续 `/config` 不影响既有 Side。每轮 Side Turn 的表情、进度卡、富文本和文件卡
   与普通 Turn 使用同一规则。
-- Side 内只支持普通 prompt、`//`、`/status`、`/stop`、`/help`、`/` 和 `/side close`。
+- Side 内只支持普通 prompt、`//`、`/status`、`/stop`、`/admin`、`/help`、`/` 和 `/side close`。
 - Side 内不支持 Goal；需要 Goal 时回到普通会话。
 - `/stop` 只中断当前 Side Turn，Side 仍可继续；`/side close` 才真正结束 Side 并取消订阅。
 - Side 空闲两小时或 Netizen 服务重启后过期。旧 Side 话题不会自动变成普通会话。
@@ -708,10 +720,10 @@ Goal 和 Side 都依赖运行时原生能力门禁。如果当前 `/help` 没有
 - Skill 会在 start/steer 前重新发现和校验。名称不存在、已禁用或路径失效时，本条消息不会执行。
 - 飞书不提供 `/skills` 浏览命令。想知道当前有哪些 Skill，可以直接用自然语言询问 Codex。
 - `$skill` 是普通 prompt 的一部分，不能和飞书 slash control 串成一个消息，也不能放进 Goal objective。
-- 本手册随受管 `netizen-user-guide` Skill 安装到服务账号的
-  `$CODEX_HOME/skills/netizen-user-guide`（`CODEX_HOME` 默认是 `~/.codex`）。可以显式发送
-  `$netizen-user-guide <问题>`。每次受管部署都会完整替换该目录，人工修改会丢失；卸载
-  也只删除这个受管 Skill，其他用户 Skills 不受影响。
+- 本手册随当前实例的 release 保存，Netizen 启动时只为自己的 Codex 进程加载内置
+  `netizen-user-guide` 与 `netizen-lark` Skills，不写入全局 `$CODEX_HOME/skills`。
+  可以显式发送 `$netizen-user-guide <问题>`。升级随 release 切换版本；卸载只清理本实例
+  的受管文件，不删除共享的用户 Skills。各实例仍复用服务账号的原生 Codex 登录和配置。
 
 ## 与 Codex App/CLI 的差异
 
@@ -799,7 +811,8 @@ Goal、Compaction 或 Turn 观测不可用时也会直接委托 App Server remov
 
 先确认工具路径或变量已经写入服务账号的持久 shell profile，而不是只在当前终端临时
 `export`。Netizen 会在每次服务启动时重新读取 interactive login shell 的导出环境；修改
-profile 后需要由部署者执行 `service.sh restart`。alias、未导出的 shell function 和依赖
+profile 后需要由部署者执行 `service.sh --root "<NETIZEN_ROOT>" restart`，指定目标实例。
+alias、未导出的 shell function 和依赖
 真实 TTY 的初始化不属于后台服务可继承的环境。Bash 用户若只在 `.bashrc` 配置 NVM，需
 确认 `.bash_profile` 或 `.profile` 会 source 它。
 

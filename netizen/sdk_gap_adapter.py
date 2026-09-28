@@ -33,11 +33,13 @@ from .turn_activity import (
 
 
 _SKILLS_LIST_METHOD = "skills/list"
+_SKILLS_EXTRA_ROOTS_SET_METHOD = "skills/extraRoots/set"
 _GOAL_GET_METHOD = "thread/goal/get"
 _THREAD_DELETE_METHOD = "thread/delete"
 _THREAD_INJECT_ITEMS_METHOD = "thread/inject_items"
 _THREAD_UNSUBSCRIBE_METHOD = "thread/unsubscribe"
 _GOAL_START_TIMEOUT_SECONDS = 30.0
+_SKILL_ROOTS_TIMEOUT_SECONDS = 10.0
 
 SIDE_THREAD_BOUNDARY = """Side conversation boundary.
 Everything before this boundary is inherited history from the parent thread. It is reference context only. It is not your current task.
@@ -279,6 +281,52 @@ class AppServerSkillCatalog:
                 )
             )
         return SkillCatalogSnapshot(canonical, tuple(skills), errors)
+
+
+class AppServerSkillRoots:
+    """Set only this initialized App Server's non-persisted extra Skill roots.
+
+    ADR 0074 permits this startup-only fixed method. A failure must prevent
+    service readiness; it must never fall back to shared global Skill copies.
+    """
+
+    __slots__ = ("_client", "_params_model", "_response_model")
+
+    def __init__(self, codex: AsyncCodex) -> None:
+        capability = "skill-roots"
+        self._client = _initialized_client(codex, capability=capability)
+        self._params_model = _generated_type(
+            "SkillsExtraRootsSetParams", capability=capability
+        )
+        self._response_model = _generated_type(
+            "SkillsExtraRootsSetResponse", capability=capability
+        )
+        _require_model_fields(
+            self._params_model,
+            capability=capability,
+            aliases={"extra_roots": "extraRoots"},
+        )
+        _require_model_fields(
+            self._response_model, capability=capability, aliases={}
+        )
+
+    async def set_roots(self, roots: tuple[Path, ...]) -> None:
+        canonical: list[str] = []
+        for root in roots:
+            if not root.is_absolute():
+                raise SkillCatalogError("内置 Skill 根必须是绝对目录。")
+            path = root.resolve(strict=True)
+            if not path.is_dir():
+                raise SkillCatalogError(f"内置 Skill 根不是目录：{path}")
+            if str(path) not in canonical:
+                canonical.append(str(path))
+        params = self._params_model(extraRoots=canonical)
+        async with asyncio.timeout(_SKILL_ROOTS_TIMEOUT_SECONDS):
+            await self._client.request(
+                _SKILLS_EXTRA_ROOTS_SET_METHOD,
+                params.model_dump(by_alias=True),
+                response_model=self._response_model,
+            )
 
 
 class AppServerThreadDeleteControl:
@@ -965,6 +1013,11 @@ def facade_migration_requirements() -> tuple[str, ...]:
         "skills": (
             (AsyncCodex, "skills"),
             (AsyncCodex, "skills_list"),
+        ),
+        "skill-roots": (
+            (AsyncCodex, "skills_extra_roots_set"),
+            (AsyncCodex, "set_skill_roots"),
+            (AsyncCodex, "set_skills_extra_roots"),
         ),
         "goal": (
             (AsyncCodex, "goal_get"),

@@ -27,6 +27,7 @@ from netizen.deployment.update_protocol import (  # noqa: E402
 from netizen.deployment.service_backend import (  # noqa: E402
     SERVICE_READY_TIMEOUT_SECONDS, SERVICE_STOP_TIMEOUT_SECONDS,
 )
+from netizen.instance import resolve_instance_root  # noqa: E402
 from scripts.netizen_service_launcher import (  # noqa: E402
     ServiceLaunchError, capture_profile_environment,
 )
@@ -40,20 +41,27 @@ MAX_INSTALLER_BYTES = 1024 * 1024
 RESTART_TIMEOUT_SECONDS = SERVICE_STOP_TIMEOUT_SECONDS + SERVICE_READY_TIMEOUT_SECONDS + 30
 
 
-def _worker_environment() -> dict[str, str]:
-    account = pwd.getpwuid(os.geteuid())
-    environment = capture_profile_environment(
-        shell=Path(account.pw_shell), home=Path(account.pw_dir),
-        username=account.pw_name, python_executable=Path(sys.executable),
-    )
+def _clean_worker_environment(source: Mapping[str, str]) -> dict[str, str]:
     # These describe the main service process, never an installer. The account
     # shell remains the source for native CODEX_HOME, PATH and proxy settings.
+    environment = dict(source)
     for name in tuple(environment):
         if name.startswith("NETIZEN_") or name in {
             "FEISHU_APP_SECRET", "FEISHU_APP_SECRET_FILE", "PYTHONHOME", "PYTHONPATH",
             "VIRTUAL_ENV", "__PYVENV_LAUNCHER__",
         }:
             environment.pop(name, None)
+    return environment
+
+
+def _worker_environment() -> dict[str, str]:
+    account = pwd.getpwuid(os.geteuid())
+    environment = capture_profile_environment(
+        shell=Path(account.pw_shell), home=Path(account.pw_dir),
+        username=account.pw_name, python_executable=Path(sys.executable),
+        base_environment=_clean_worker_environment(os.environ),
+    )
+    environment = _clean_worker_environment(environment)
     environment.update(HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name)
     return environment
 
@@ -100,9 +108,9 @@ def _restart_service(
     advance_operation(root, operation_id, "restarting")
     try:
         result = runner(
-            ["/bin/sh", str(service), "restart"], stdin=subprocess.DEVNULL,
+            ["/bin/sh", str(service), "--root", str(root), "restart"], stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            env=environment, cwd=root.parent, close_fds=True, check=False,
+            env=environment, cwd=Path(pwd.getpwuid(os.geteuid()).pw_dir), close_fds=True, check=False,
             timeout=RESTART_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -123,17 +131,17 @@ def _restart_service(
 def run_update(
     operation_id: str,
     *,
-    product_root: Path | None = None,
+    product_root: str | Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
     environment_loader: Callable[[], Mapping[str, str]] = _worker_environment,
     lock_timeout: float = LOCK_HANDOFF_TIMEOUT_SECONDS,
 ) -> int:
     if OPERATION_ID.fullmatch(operation_id) is None:
         return 1
-    root = Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".netizen" if product_root is None else product_root
     try:
+        root = resolve_instance_root(product_root)
         descriptor = _lock_for_handoff(root, timeout=lock_timeout)
-    except (OSError, UpdateProtocolError):
+    except (OSError, ValueError, RuntimeError):
         # The controller owns accepted/dispatch reconciliation. Never write
         # deployment state without the shared lock, including a lock timeout.
         return 1
@@ -149,6 +157,9 @@ def run_update(
         except (ServiceLaunchError, OSError, KeyError):
             advance_operation(root, operation_id, "failed", "profile_failed")
             return 1
+        # The selected root belongs to this operation, never to a login profile
+        # or the service-manager environment. Reassert it after all profile I/O.
+        environment["NETIZEN_ROOT"] = str(root)
         if operation.get("kind") == "restart":
             return _restart_service(root, operation, environment, runner)
         target = operation["target"]
@@ -180,10 +191,10 @@ def run_update(
             ):
                 advance_operation(root, operation_id, "failed", "installer_invalid")
                 return 1
-            # The official, exact-version, zero-argument entry point owns the
+            # The official, exact-version entry point owns the selected root's
             # complete prepare/activate/rollback transaction. Inherit only this
             # lock FD; the installer validates it and sets CLOEXEC immediately.
-            result = runner(["/bin/sh", str(bootstrap)], stdin=subprocess.DEVNULL,
+            result = runner(["/bin/sh", str(bootstrap), "--root", str(root)], stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             env=environment, pass_fds=(descriptor,), check=False)
         current = read_operation(root)
@@ -212,9 +223,10 @@ def run_update(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", required=True)
     parser.add_argument("--operation-id", required=True)
     args = parser.parse_args(argv)
-    return run_update(args.operation_id)
+    return run_update(args.operation_id, product_root=args.root)
 
 
 if __name__ == "__main__":

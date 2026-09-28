@@ -1,5 +1,5 @@
 # Manual-development example. The managed installers do not copy this file: they generate
-# ~/.netizen/config.yaml with account-specific absolute paths and `projects: {}`.
+# <NETIZEN_ROOT>/config.yaml with account-specific absolute paths and `projects: {}`.
 # Replace every /home/your-user path before running Netizen directly.
 instance:
   dataDir: /home/your-user/.netizen/state
@@ -20,7 +20,11 @@ channel:
 adminWeb:
   enabled: true
   host: 0.0.0.0
-  port: 8787
+  # Omit port for first-start allocation from 8787 through 8886. Once bound,
+  # the selected port is written here and stays fixed on subsequent starts.
+  # port: 8787
+  # Optional advertised hostname or IP; no scheme, port, or path.
+  # accessHost: server.example.com
 
 # The app ID and secret live together in the protected netizen profile at
 # lark-app/config.json beside this YAML file (directory 0700, file 0600).

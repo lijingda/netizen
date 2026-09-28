@@ -19,6 +19,7 @@ import os
 import pwd
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import stat
@@ -38,11 +39,13 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from scripts.feishu_app_onboarding import REQUIRED_TENANT_SCOPES  # noqa: E402
-from scripts.install_managed_skill import (  # noqa: E402
-    SKILL_NAMES,
-    SkillInstallError,
-    install_skill,
-    remove_skill,
+from netizen.instance import (  # noqa: E402
+    INSTANCE_ROOT_MARKER,
+    INSTANCE_ROOT_MARKER_CONTENT,
+    require_instance_root_marker,
+    resolve_instance_root,
+    systemd_service_name,
+    launch_agent_label,
 )
 from netizen.lark_app import (  # noqa: E402
     LarkAppConfigError,
@@ -65,6 +68,10 @@ from netizen.deployment.update_protocol import (  # noqa: E402
     terminal_phase,
     validate_inherited_lock,
 )
+from netizen.deployment.update_executor import (  # noqa: E402
+    UpdateExecutor,
+    UpdateExecutorError,
+)
 from netizen.deployment.installer_support import (  # noqa: E402
     InstallError,
     Layout,
@@ -82,16 +89,13 @@ from netizen.deployment.installer_support import (  # noqa: E402
 from netizen.deployment.service_backend import (  # noqa: E402
     ServiceBackend,
     ServiceState,
-    LegacyServiceState,
     SERVICE_READY_TIMEOUT_SECONDS,
     _service_environment,
 )
 from netizen.deployment.systemd import (  # noqa: E402
-    SYSTEMD_SERVICE_NAME,
     SystemdServiceBackend,
 )
 from netizen.deployment.launchd import (  # noqa: E402
-    LAUNCH_AGENT_LABEL,
     LaunchAgentServiceBackend,
 )
 
@@ -239,13 +243,6 @@ class PublishedReleaseManifest:
 
 
 @dataclass(frozen=True, slots=True)
-class SkillSnapshot:
-    kind: str
-    saved_path: Path | None = None
-    link_target: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class DatabaseSnapshot:
     data_dir: Path
     saved_root: Path
@@ -264,7 +261,7 @@ class ActivationIntent:
 class AdminBind:
     enabled: bool
     host: str
-    port: int
+    port: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,13 +301,14 @@ class CandidatePreparer(Protocol):
 
 def resolve_layout(
     *,
+    root: str | Path | None = None,
     environ: Mapping[str, str] | None = None,
     account_home: Path | None = None,
     uid: int | None = None,
     username: str | None = None,
     platform_name: str | None = None,
 ) -> Layout:
-    """Resolve fixed deployment paths for the effective user, never ``$SUDO_USER``."""
+    """Resolve one canonical instance for the effective user, never ``$SUDO_USER``."""
 
     env = os.environ if environ is None else environ
     effective_uid = os.geteuid() if uid is None else uid
@@ -325,10 +323,7 @@ def resolve_layout(
     if not home.is_absolute() or home == Path(home.anchor):
         raise InstallError(f"current user's home must be an absolute non-root path: {home}")
 
-    # Netizen has one product root, one user unit, and a fixed set of managed Skills
-    # per Unix user. Keep their deployment identity stable across shells,
-    # agents, and sudo environments instead of allowing XDG overrides to
-    # select another root.
+    # Platform discovery stays in the effective account's standard location.
     config_home = home / ".config"
     configured_codex_home = env.get("CODEX_HOME", "").strip()
     codex_home = (
@@ -337,16 +332,21 @@ def resolve_layout(
     if not codex_home.is_absolute() or codex_home == Path(codex_home.anchor):
         raise InstallError(f"CODEX_HOME must be an absolute non-root path: {codex_home}")
 
-    product_root = home / ".netizen"
+    try:
+        product_root = resolve_instance_root(root, environ=env, account_home=home)
+    except (ValueError, OSError, RuntimeError) as error:
+        raise InstallError(str(error)) from error
+    if product_root == codex_home.resolve():
+        raise InstallError("NETIZEN_ROOT must not be CODEX_HOME")
     credentials_dir = product_root / "credentials"
     selected_platform = _supported_platform_name(platform_name)
     if selected_platform == "linux":
         service_dir = config_home / "systemd" / "user"
-        service_file = service_dir / SYSTEMD_SERVICE_NAME
+        service_file = service_dir / systemd_service_name(product_root)
         service_error_log = product_root / "state" / "service.stderr.log"
     else:
         service_dir = home / "Library" / "LaunchAgents"
-        service_file = service_dir / f"{LAUNCH_AGENT_LABEL}.plist"
+        service_file = service_dir / f"{launch_agent_label(product_root)}.plist"
         service_error_log = product_root / "state" / "launchd.stderr.log"
     layout = Layout(
         platform=selected_platform,
@@ -441,13 +441,15 @@ def _validate_source_location(source_root: Path, layout: Layout) -> None:
         and RELEASE_NAME.fullmatch(source.parent.name) is not None
         and source.name == "source"
     )
+    if source == layout.product_root or layout.product_root.is_relative_to(source):
+        raise InstallError(f"install root must not be inside the release source: {source}")
     for managed in (
-        layout.product_root,
-        layout.codex_home,
+        layout.releases, layout.cache_dir, layout.state_dir,
+        layout.credentials_dir, layout.lark_app_file.parent, layout.codex_home,
     ):
         if not _paths_overlap(source, managed):
             continue
-        if managed == layout.product_root and managed_release_source:
+        if managed == layout.releases and managed_release_source:
             continue
         raise InstallError(
             f"release source overlaps a managed install/data path: {source}, {managed}"
@@ -527,7 +529,7 @@ def require_codex_login(
 
 
 def prepare_directories(layout: Layout) -> None:
-    _ensure_real_directory(layout.product_root, mode=0o700)
+    _claim_instance_root(layout)
     _ensure_managed_netizen_directory(layout.releases)
     for path in (
         layout.credentials_dir,
@@ -539,14 +541,116 @@ def prepare_directories(layout: Layout) -> None:
     _ensure_real_directory(layout.service_dir, mode=0o700, enforce_mode=False)
 
 
+def _validate_root_marker(layout: Layout) -> None:
+    try:
+        require_instance_root_marker(layout.product_root, uid=layout.uid)
+    except (OSError, ValueError) as error:
+        raise InstallError(f"could not validate instance root marker: {error}") from error
+
+
+def _preflight_instance_root(layout: Layout) -> bool:
+    """Inspect all reserved entries before claiming or chmod'ing any directory."""
+
+    _validate_layout_safety(layout)
+    if layout.product_root.exists():
+        metadata = layout.product_root.stat()
+        if metadata.st_uid != layout.uid or stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise InstallError(
+                "existing NETIZEN_ROOT must be current-user owned and not writable by group/others; "
+                f"its permissions were not changed: {layout.product_root}"
+            )
+    marker = layout.product_root / INSTANCE_ROOT_MARKER
+    claimed = _path_exists(marker)
+    if claimed:
+        _validate_root_marker(layout)
+    for path in (
+        layout.state_dir, layout.releases, layout.cache_dir,
+        layout.credentials_dir, layout.lark_app_file.parent,
+    ):
+        if not _path_exists(path):
+            continue
+        if path.is_symlink() or not path.is_dir():
+            raise InstallError(f"managed Netizen path is not a real directory: {path}")
+        if claimed:
+            if path in (layout.releases, layout.cache_dir) and any(path.iterdir()):
+                _require_managed_netizen_directory(path, layout)
+            continue
+        allowed = (
+            {layout.admin_secret_file} if path == layout.credentials_dir else
+            {layout.lark_app_file} if path == layout.lark_app_file.parent else set()
+        )
+        if any(child not in allowed for child in path.iterdir()):
+            # Another installer may have finished the atomic claim meanwhile.
+            if _path_exists(marker):
+                return _preflight_instance_root(layout)
+            raise InstallError(f"refusing to claim a non-empty unowned directory: {path}")
+    for path in (layout.config_file, layout.admin_secret_file, layout.lark_app_file):
+        if _path_exists(path):
+            _require_regular_file(path, "instance configuration")
+            if not claimed:
+                metadata = path.stat()
+                if metadata.st_uid != layout.uid or stat.S_IMODE(metadata.st_mode) & 0o077:
+                    raise InstallError(f"preconfigured instance file must be private and current-user owned: {path}")
+    if not claimed:
+        # A concurrent installer may have claimed and populated the root since
+        # the first observation. Revalidate its marker instead of adopting it.
+        if _path_exists(marker):
+            return _preflight_instance_root(layout)
+        for link in (layout.current, layout.previous):
+            if _path_exists(link):
+                raise InstallError(f"refusing to adopt a deployment without an instance root marker: {link}")
+        if _path_exists(layout.lark_app_file):
+            try:
+                load_lark_app(layout.lark_app_file, allow_incomplete=True)
+            except LarkAppConfigError as error:
+                raise InstallError(str(error)) from error
+        if _path_exists(layout.admin_secret_file):
+            # This path exists: validation is stdlib-only and must not create
+            # or repair a credential while the namespace is still unclaimed.
+            _prepare_admin_secret(layout.admin_secret_file)
+    return claimed
+
+
+def _claim_instance_root(layout: Layout) -> None:
+    if _preflight_instance_root(layout):
+        _sync_instance_root(layout)
+        return
+    _ensure_real_directory(layout.product_root, mode=0o700, enforce_mode=False)
+    marker = layout.product_root / INSTANCE_ROOT_MARKER
+    descriptor, name = tempfile.mkstemp(prefix=".netizen-root.", dir=layout.product_root)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(INSTANCE_ROOT_MARKER_CONTENT)
+            output.flush()
+            os.fsync(output.fileno())
+        # Link publishes a complete marker without replacing another claim.
+        try:
+            os.link(temporary, marker)
+        except FileExistsError:
+            pass
+        _validate_root_marker(layout)
+    finally:
+        temporary.unlink(missing_ok=True)
+    _sync_instance_root(layout)
+
+
+def _sync_instance_root(layout: Layout) -> None:
+    # Publish ownership durably before creating state/lock entries. Also sync
+    # an existing marker, which may just have been linked by another installer.
+    descriptor = os.open(layout.product_root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _ensure_managed_netizen_directory(path: Path) -> None:
     existed = _path_exists(path)
     if existed and (path.is_symlink() or not path.is_dir()):
         raise InstallError(f"managed Netizen path is not a real directory: {path}")
     if not existed:
         _ensure_real_directory(path, mode=0o700)
-    else:
-        path.chmod(0o700)
 
     marker = path / MANAGED_DIRECTORY_MARKER
     if not _path_exists(marker):
@@ -559,23 +663,25 @@ def _ensure_managed_netizen_directory(path: Path) -> None:
                 f"refusing to claim a non-empty directory without a Netizen marker: {path}"
             )
         _write_atomic(marker, MANAGED_DIRECTORY_MARKER_CONTENT, mode=0o600)
+        path.chmod(0o700)
         return
 
     _require_regular_file(marker, "managed directory marker")
     try:
         content = marker.read_bytes()
-        marker.chmod(0o600)
     except OSError as error:
         raise InstallError(f"could not read managed directory marker {marker}: {error}") from error
     if content != MANAGED_DIRECTORY_MARKER_CONTENT:
         raise InstallError(f"managed directory marker is not recognized: {marker}")
+    path.chmod(0o700)
+    marker.chmod(0o600)
 
 
 @contextlib.contextmanager
 def installation_lock(layout: Layout) -> Iterator[None]:
     # The lock must outlive uninstall. Deleting a locked file would let a new
     # process create a second inode and enter concurrently with an old waiter.
-    _ensure_real_directory(layout.product_root, mode=0o700)
+    _claim_instance_root(layout)
     _ensure_real_directory(layout.state_dir, mode=0o700)
     try:
         with install_lock(layout.product_root, blocking=True):
@@ -751,7 +857,6 @@ def _default_config(layout: Layout) -> str:
         "adminWeb:\n"
         "  enabled: true\n"
         "  host: 0.0.0.0\n"
-        "  port: 8787\n"
     )
 
 
@@ -1009,6 +1114,9 @@ def _prepare_release(
 ) -> Release:
     execute = run_command if runner is None else runner
     environment = _clean_subprocess_environment()
+    # The layout already owns the selected instance. Candidate checks must not
+    # inherit it as the default root for their disposable test environments.
+    environment.pop("NETIZEN_ROOT", None)
     environment["HOME"] = str(layout.home)
     environment["CODEX_HOME"] = str(layout.codex_home)
     environment["PIP_CACHE_DIR"] = str(layout.cache_dir / "pip")
@@ -1522,18 +1630,22 @@ def validate_runtime(
         not isinstance(admin_bind.enabled, bool)
         or not isinstance(admin_bind.host, str)
         or not admin_bind.host
-        or isinstance(admin_bind.port, bool)
-        or not isinstance(admin_bind.port, int)
-        or not 1 <= admin_bind.port <= 65535
+        or (admin_bind.port is not None and (
+            isinstance(admin_bind.port, bool)
+            or not isinstance(admin_bind.port, int)
+            or not 1 <= admin_bind.port <= 65535
+        ))
     ):
         raise InstallError("candidate returned an invalid Admin Web bind")
+    if data_dir.resolve() != layout.state_dir.resolve():
+        raise InstallError("managed instance.dataDir must be NETIZEN_ROOT/state")
     return RuntimeValidation(data_dir=data_dir, admin_bind=admin_bind)
 
 
 def preflight_admin_bind(binding: AdminBind) -> None:
     """Best-effort collision check while holding every successful address."""
 
-    if not binding.enabled:
+    if not binding.enabled or binding.port is None:
         return
     try:
         addresses = socket.getaddrinfo(
@@ -1776,12 +1888,11 @@ def activate_release(
             "the managed service definition is missing but its service-manager "
             "target is still loaded/enabled; inspect it before installing"
         )
-    legacy = backend.inspect_legacy()
     pending_intent = _read_activation_intent(layout)
     if pending_intent is None:
         intended_prior_release = old_current
-        should_start = old_current is None or old_state.loaded or legacy.active
-        should_enable = old_current is None or old_state.enabled or legacy.enabled
+        should_start = old_current is None or old_state.loaded
+        should_enable = old_current is None or old_state.enabled
     else:
         intended_prior_release = _intent_prior_release(layout, pending_intent)
         should_start = pending_intent.should_start
@@ -1793,18 +1904,9 @@ def activate_release(
     definition = backend.render_definition(release)
 
     with tempfile.TemporaryDirectory(prefix=".rollback-", dir=layout.state_dir) as temp:
-        skill_snapshots = {
-            name: _capture_skill(layout, Path(temp), name) for name in SKILL_NAMES
-        }
         database_snapshot: DatabaseSnapshot | None = None
         changed_service = False
         definition_publish_attempted = False
-        legacy_disabled = bool(
-            legacy.present
-            and legacy.recognized
-            and (legacy.active or legacy.enabled)
-            and (layout.uid == 0 or interactive)
-        )
         if update is not None:
             update.report("installing")
         _write_activation_intent(
@@ -1815,10 +1917,6 @@ def activate_release(
             prior_release=intended_prior_release,
         )
         try:
-            backend.disable_legacy(
-                legacy,
-                interactive=interactive,
-            )
             if old_state.loaded:
                 changed_service = True
                 backend.stop_and_confirm()
@@ -1847,11 +1945,6 @@ def activate_release(
                         Path(temp),
                     )
                 _set_release_link(layout.current, release.root, layout)
-            for name in SKILL_NAMES:
-                install_skill(
-                    source_skill=release.source / "skills" / name,
-                    codex_home=layout.codex_home,
-                )
             definition_publish_attempted = True
             backend.publish_definition(
                 definition,
@@ -1907,12 +2000,8 @@ def activate_release(
                     )
                 )
             rollback_actions.append(("database", lambda: _restore_database(database_snapshot)))
-            rollback_actions.extend(
-                ("Skill", lambda name=name, snapshot=snapshot: _restore_skill(layout, snapshot, name))
-                for name, snapshot in skill_snapshots.items()
-            )
             for label, action in rollback_actions:
-                if label in {"database", "Skill"} and not candidate_stopped:
+                if label == "database" and not candidate_stopped:
                     preserve_snapshot = True
                     rollback_safe_to_start = False
                     rollback_errors.append(
@@ -1924,10 +2013,7 @@ def activate_release(
                 except BaseException as rollback_error:
                     rollback_safe_to_start = False
                     rollback_errors.append(f"restore {label}: {rollback_error}")
-                    preserve_snapshot = preserve_snapshot or label in {
-                        "database",
-                        "Skill",
-                    }
+                    preserve_snapshot = preserve_snapshot or label == "database"
             if preserve_snapshot:
                 recovery = layout.state_dir / f"rollback-recovery-{uuid.uuid4().hex}"
                 try:
@@ -1949,18 +2035,6 @@ def activate_release(
                     )
             except BaseException as rollback_error:
                 rollback_errors.append(f"restore user service: {rollback_error}")
-            if legacy_disabled and rollback_safe_to_start:
-                try:
-                    backend.restore_legacy(
-                        legacy,
-                        interactive=interactive,
-                    )
-                except BaseException as rollback_error:
-                    rollback_errors.append(f"restore legacy service: {rollback_error}")
-            elif legacy_disabled:
-                rollback_errors.append(
-                    "restore legacy service: skipped because rollback state is incomplete"
-                )
             if pending_intent is None and not rollback_errors:
                 try:
                     _clear_activation_intent(layout)
@@ -2050,43 +2124,6 @@ def _stream_digest(path: Path) -> bytes:
     return digest.digest()
 
 
-def _capture_skill(layout: Layout, temporary_root: Path, skill_name: str) -> SkillSnapshot:
-    target = layout.codex_home / "skills" / skill_name
-    if not _path_exists(target):
-        return SkillSnapshot(kind="absent")
-    if target.is_symlink():
-        return SkillSnapshot(kind="symlink", link_target=os.readlink(target))
-    saved = temporary_root / skill_name
-    if target.is_dir():
-        shutil.copytree(target, saved, symlinks=True)
-        return SkillSnapshot(kind="directory", saved_path=saved)
-    if target.is_file():
-        shutil.copy2(target, saved, follow_symlinks=False)
-        return SkillSnapshot(kind="file", saved_path=saved)
-    raise InstallError(f"managed Skill has an unsupported filesystem type: {target}")
-
-
-def _restore_skill(layout: Layout, snapshot: SkillSnapshot, skill_name: str) -> None:
-    skills_root = layout.codex_home / "skills"
-    target = skills_root / skill_name
-    if _path_exists(target):
-        _remove_path(target)
-    if snapshot.kind == "absent":
-        return
-    _ensure_real_directory(skills_root, mode=0o700, enforce_mode=False)
-    if snapshot.kind == "symlink":
-        assert snapshot.link_target is not None
-        os.symlink(snapshot.link_target, target)
-    elif snapshot.kind == "directory":
-        assert snapshot.saved_path is not None
-        shutil.copytree(snapshot.saved_path, target, symlinks=True)
-    elif snapshot.kind == "file":
-        assert snapshot.saved_path is not None
-        shutil.copy2(snapshot.saved_path, target, follow_symlinks=False)
-    else:  # pragma: no cover - internal invariant
-        raise InstallError(f"unknown Skill snapshot kind: {snapshot.kind}")
-
-
 def _read_release_link(link: Path, layout: Layout) -> Path | None:
     if not _path_exists(link):
         return None
@@ -2145,6 +2182,7 @@ def install_source(
     layout: Layout | None = None,
     runner: Runner | None = None,
     interactive: bool | None = None,
+    admin_port: int | None = None,
 ) -> Release:
     return _install(
         source_root=source_root,
@@ -2153,6 +2191,7 @@ def install_source(
         layout=layout,
         runner=runner,
         interactive=interactive,
+        admin_port=admin_port,
     )
 
 
@@ -2162,6 +2201,7 @@ def install_published(
     layout: Layout | None = None,
     runner: Runner | None = None,
     interactive: bool | None = None,
+    admin_port: int | None = None,
 ) -> Release:
     manifest = read_published_release_manifest(source_root)
     selected_layout = resolve_layout() if layout is None else layout
@@ -2192,6 +2232,7 @@ def install_published(
             runner=runner,
             interactive=False if update is not None else interactive,
             update=update,
+            admin_port=admin_port,
         )
 
 
@@ -2204,8 +2245,14 @@ def _install(
     runner: Runner | None,
     interactive: bool | None,
     update: InstallerUpdate | None = None,
+    admin_port: int | None = None,
 ) -> Release:
     selected_layout = resolve_layout() if layout is None else layout
+    if admin_port is not None and (isinstance(admin_port, bool) or not isinstance(admin_port, int) or not 1 <= admin_port <= 65535):
+        raise InstallError("admin port must be an integer from 1 to 65535")
+    rerun_instruction += f" --root {shlex.quote(str(selected_layout.product_root))}"
+    if admin_port is not None:
+        rerun_instruction += f" --admin-port {admin_port}"
     require_supported_platform(
         selected_layout.platform,
         require_definition_validation=True,
@@ -2240,6 +2287,8 @@ def _install(
             source_root=source_root,
             runner=execute,
         )
+        if admin_port is not None:
+            _configure_admin_port(release, selected_layout, admin_port, execute)
         require_codex_login(
             release,
             selected_layout,
@@ -2280,8 +2329,28 @@ def _install(
     info(f"installed release {release.digest[:12]} at {release.root}")
     info(f"configuration: {selected_layout.config_file}")
     info("service environment: account shell profile (reloaded on every start)")
-    info(f"service control: {release.source / 'service.sh'}")
+    info(f"instance root: {selected_layout.product_root}")
+    info(f"service control: {shlex.join([str(release.source / 'service.sh'), '--root', str(selected_layout.product_root), 'status'])}")
+    info("send /admin to this Feishu bot to find its running Admin URL")
     return release
+
+
+def _configure_admin_port(release: Release, layout: Layout, port: int, execute: Runner) -> None:
+    # Bootstrap is stdlib-only. Use the validated candidate's YAML dependency
+    # to update the one requested field without dropping unrelated mappings.
+    execute(
+        [
+            release.venv / "bin" / "python", "-E", "-B", "-c",
+            (
+                "from pathlib import Path; import sys; "
+                "from netizen.admin.port_config import set_admin_port; "
+                "set_admin_port(Path(sys.argv[1]), int(sys.argv[2]))"
+            ),
+            layout.config_file, str(port),
+        ],
+        cwd=release.root,
+        env=_service_environment(layout),
+    )
 
 
 def service_action(
@@ -2294,6 +2363,7 @@ def service_action(
         raise InstallError("service action must be start, stop, restart, or status")
     selected_layout = resolve_layout() if layout is None else layout
     require_supported_platform(selected_layout.platform)
+    _validate_root_marker(selected_layout)
     execute = run_command if runner is None else runner
     backend = _service_backend(selected_layout, execute)
     if (
@@ -2308,6 +2378,27 @@ def service_action(
     return backend.service_action(action)
 
 
+def _cleanup_terminal_maintenance(layout: Layout) -> None:
+    """Clean only a durable terminal job while the installer owns its lock.
+
+    The held install lock proves the worker no longer owns execution. Pending
+    records are not a completion proof and are left for normal reconciliation.
+    Never discover jobs by name prefix or change the recorded outcome here.
+    """
+    try:
+        operation = read_operation(layout.product_root)
+        if operation is None or not terminal_phase(operation["phase"]):
+            return
+        UpdateExecutor(layout.home, layout.platform, root=layout.product_root).cleanup(
+            operation["operationId"]
+        )
+    except (OSError, UpdateProtocolError, UpdateExecutorError) as error:
+        raise InstallError(
+            "could not safely clean up this instance's completed maintenance job; "
+            "its program and deployment state were retained"
+        ) from error
+
+
 def uninstall(
     *,
     layout: Layout | None = None,
@@ -2318,6 +2409,14 @@ def uninstall(
     _validate_layout_safety(selected_layout)
     execute = run_command if runner is None else runner
     backend = _service_backend(selected_layout, execute)
+    if not _path_exists(selected_layout.product_root) and not _path_exists(selected_layout.service_file):
+        backend.preflight()
+        state = backend.inspect_state()
+        if state.loaded or state.enabled:
+            raise InstallError("refusing to uninstall an orphaned service without its instance root and definition")
+        info(f"Netizen is already uninstalled at {selected_layout.product_root}")
+        return
+    _validate_root_marker(selected_layout)
     for path in (selected_layout.releases, selected_layout.cache_dir):
         if _path_exists(path):
             _require_managed_netizen_directory(path, selected_layout)
@@ -2329,7 +2428,6 @@ def uninstall(
     if _path_exists(selected_layout.service_file):
         backend.capture_definition()
     backend.preflight()
-    managed_skills = [selected_layout.codex_home / "skills" / name for name in SKILL_NAMES]
     with installation_lock(selected_layout):
         if not any(
             _path_exists(path)
@@ -2339,10 +2437,13 @@ def uninstall(
                 selected_layout.current,
                 selected_layout.previous,
                 selected_layout.service_file,
-                *managed_skills,
                 activation_intent,
             )
         ):
+            state = backend.inspect_state()
+            if state.loaded or state.enabled:
+                raise InstallError("refusing to uninstall an orphaned service without its definition")
+            _cleanup_terminal_maintenance(selected_layout)
             info("Netizen is already uninstalled for this user")
             return
         try:
@@ -2357,19 +2458,16 @@ def uninstall(
             _read_release_link(link, selected_layout)
         if _path_exists(activation_intent):
             _read_activation_intent(selected_layout)
+        if _path_exists(selected_layout.service_file):
+            backend.capture_definition()
+        _cleanup_terminal_maintenance(selected_layout)
         backend.uninstall_definition()
-        if selected_layout.codex_home.exists():
-            try:
-                for name in SKILL_NAMES:
-                    remove_skill(codex_home=selected_layout.codex_home, skill_name=name)
-            except SkillInstallError as error:
-                raise InstallError(str(error)) from error
         _clear_activation_intent(selected_layout)
         for link in (selected_layout.current, selected_layout.previous):
             _set_release_link(link, None, selected_layout)
         _remove_managed_netizen_directory(selected_layout.cache_dir, selected_layout)
         _remove_managed_netizen_directory(selected_layout.releases, selected_layout)
-    info("uninstalled Netizen program, user service, and managed Skills")
+    info(f"uninstalled Netizen program and user service at {selected_layout.product_root}")
     info(
         "preserved configuration and credentials: "
         f"{selected_layout.config_file}, {selected_layout.lark_app_file}, {selected_layout.credentials_dir}"
@@ -2402,39 +2500,47 @@ def _require_managed_netizen_directory(path: Path, layout: Layout) -> None:
         raise InstallError(f"managed directory marker is not recognized: {marker}")
 
 
-def _remove_path(path: Path) -> None:
-    if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
-    else:
-        path.unlink()
-
-
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Netizen installer internals")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("install-source")
+    source = subparsers.add_parser("install-source")
     release = subparsers.add_parser("install-release")
     release.add_argument("source_root", type=Path)
     service = subparsers.add_parser("service")
     service.add_argument("action", choices=("start", "stop", "restart", "status"))
-    subparsers.add_parser("uninstall")
+    remove = subparsers.add_parser("uninstall")
+    for command in (source, release, service, remove):
+        command.add_argument("--root", help="instance directory (defaults to NETIZEN_ROOT or ~/.netizen)")
+    for command in (source, release):
+        command.add_argument("--admin-port", type=_port_argument)
     return parser.parse_args(argv)
+
+
+def _port_argument(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("admin port must be an integer from 1 to 65535") from error
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("admin port must be an integer from 1 to 65535")
+    return port
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        layout = resolve_layout(root=args.root)
         if args.command == "install-source":
-            install_source()
+            install_source(layout=layout, admin_port=args.admin_port)
             return 0
         if args.command == "install-release":
-            install_published(source_root=args.source_root)
+            install_published(source_root=args.source_root, layout=layout, admin_port=args.admin_port)
             return 0
         if args.command == "service":
-            return service_action(args.action)
-        uninstall()
+            return service_action(args.action, layout=layout)
+        uninstall(layout=layout)
         return 0
-    except (InstallError, SkillInstallError, OSError) as error:
+    except (InstallError, OSError) as error:
         print(f"netizen: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
@@ -182,20 +183,30 @@ class AdminHttpTransport:
             raise RuntimeError("Admin HTTP transport can only be bound once")
 
         try:
+            # asyncio closes every partially bound address if bind fails.
+            # Defer serving until we own the returned server so cancellation
+            # or listen/start_serving failure can also close every socket.
             server = await asyncio.start_server(
                 self._accepted,
                 self._host,
                 self._port,
-                start_serving=True,
+                start_serving=False,
                 limit=MAX_HEADER_SECTION_BYTES + MAX_BODY_BYTES + 1,
                 reuse_port=False,
             )
+            self._server = server
+            if not server.sockets:
+                raise OSError(errno.EADDRNOTAVAIL, "Admin listener has no bound sockets")
+            await server.start_serving()
         except BaseException:
+            if self._server is not None:
+                self._server.close()
+                await self._server.wait_closed()
+                self._server = None
             self._state = AdminHttpState.CLOSED
             self._closing = True
             raise
 
-        self._server = server
         self._state = AdminHttpState.BOUND_CLOSED
 
     def open_admission(self) -> None:

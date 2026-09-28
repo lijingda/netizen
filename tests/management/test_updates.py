@@ -64,7 +64,8 @@ class ReleaseTests(unittest.TestCase):
     def test_running_release_identity_uses_interpreter_and_provenance(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary).resolve()
-            root = home / ".netizen/releases" / ("c" * 64)
+            product_root = home / "共享 instance"
+            root = product_root / "releases" / ("c" * 64)
             (root / "source").mkdir(parents=True)
             prefix = root / "venv"
             prefix.mkdir()
@@ -79,14 +80,15 @@ class ReleaseTests(unittest.TestCase):
             with patch("netizen.management.updates.sys.prefix", str(prefix)), \
                     patch("netizen.management.updates.__file__", str(prefix / "lib/netizen/management/updates.py")), \
                     patch("netizen.management.updates.importlib.metadata.version", return_value="0.4.6"):
-                self.assertEqual(installed_release(home), InstalledRelease("0.4.6", "published", root))
+                self.assertEqual(installed_release(product_root), InstalledRelease("0.4.6", "published", root))
+                self.assertEqual(installed_release(home / ".netizen").source, "unmanaged")
                 meta["qualification"] = "source"
                 (root / ".release.json").write_text(json.dumps(meta))
-                self.assertEqual(installed_release(home).source, "source")
+                self.assertEqual(installed_release(product_root).source, "source")
                 meta["qualification"] = "published"
                 meta["publishedRelease"]["commit"] = "0" * 40
                 (root / ".release.json").write_text(json.dumps(meta))
-                self.assertEqual(installed_release(home).source, "unmanaged")
+                self.assertEqual(installed_release(product_root).source, "unmanaged")
 
                 real_open = os.open
                 def nonblocking_open(path, flags, *args, **kwargs):
@@ -97,7 +99,7 @@ class ReleaseTests(unittest.TestCase):
                 metadata_path.unlink()
                 os.mkfifo(metadata_path, 0o600)
                 with patch("netizen.management.updates.os.open", side_effect=nonblocking_open):
-                    self.assertEqual(installed_release(home).source, "unmanaged")
+                    self.assertEqual(installed_release(product_root).source, "unmanaged")
 
 
 class FakeExecutor:
@@ -161,6 +163,47 @@ class UpdateServiceTests(unittest.IsolatedAsyncioTestCase):
         operation = new_restart_operation("0.4.6", self.release.name)
         write_operation(self.root, operation)
         return advance_operation(self.root, operation["operationId"], phase, code)
+
+    async def test_explicit_instance_root_owns_submission_lock_result_and_manager(self):
+        other = self.home / "共享 instance"
+        (other / "state").mkdir(parents=True, mode=0o700)
+        release = other / "releases" / self.release.name
+        release.mkdir(parents=True)
+        (other / "current").symlink_to(release)
+        executor = FakeExecutor()
+        with (
+            patch.dict(os.environ, {"NETIZEN_ROOT": str(self.root)}),
+            patch("netizen.management.updates.UpdateExecutor", return_value=executor) as manager,
+        ):
+            service = UpdateService(root=other, home=self.home,
+                                    current=InstalledRelease("0.4.6", "published", release),
+                                    fetch=self.fetch)
+            self.addAsyncCleanup(service.close)
+            await service.check()
+            descriptor = acquire_install_lock(self.root)
+            try:
+                operation = await service.start(target=TARGET)
+            finally:
+                os.close(descriptor)
+            manager.assert_called_once_with(self.home, root=other)
+        self.assertIsNone(read_operation(self.root))
+        self.assertEqual(read_operation(other), operation)
+        self.assertEqual(executor.launched, [(operation["operationId"], release)])
+        self.assertEqual(self.executor.launched, [])
+
+    async def test_other_instance_release_cannot_become_a_restart_target(self):
+        other = self.home / "other-instance"
+        (other / "state").mkdir(parents=True, mode=0o700)
+        (other / "current").symlink_to(self.release)
+        service = UpdateService(root=other, home=self.home, current=self.service._current,
+                                executor=FakeExecutor())
+        self.addAsyncCleanup(service.close)
+        status = await service.status()
+        self.assertFalse(status["restartSupported"])
+        with self.assertRaises(UpdateError) as caught:
+            await service.restart(release_digest=self.release.name)
+        self.assertEqual(caught.exception.code, "restart_unsupported")
+        self.assertIsNone(read_operation(other))
 
     async def test_late_ready_recovers_on_refresh_and_cached_update_check(self):
         for entry in ("status", "check"):

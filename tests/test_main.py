@@ -8,15 +8,18 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from lark_channel import DedupStore
 from openai_codex import CodexConfig
 
+from netizen.admin.port_config import ConfigFileSnapshot
 from netizen.bindings import BindingStore, SideTopicState
 from netizen.domain import FeishuScope, ScopeKind
+from netizen.lark_app import encode_lark_app
 from netizen.main import (
     ServiceCore,
     _adopt_lifetime_lock,
@@ -74,14 +77,17 @@ class MainConfigurationTest(unittest.TestCase):
         runtime = object()
 
         with (
-            patch.dict(os.environ, {"NETIZEN_CONFIG_PATH": "/tmp/config"}, clear=True),
+            patch.dict(os.environ, {"NETIZEN_ROOT": "/tmp/instance"}, clear=True),
             patch("netizen.main._adopt_lifetime_lock", return_value=None),
             patch(
                 "netizen.main._configure_platform_trust",
                 side_effect=lambda: events.append("trust"),
             ),
             patch("netizen.main._configure_logging"),
-            patch("netizen.main.Settings.from_file", return_value=object()),
+            patch("netizen.main.Settings.from_file", return_value=SimpleNamespace(
+                data_dir=Path("/tmp/instance/state").resolve(),
+                admin_web=AdminWebSettings(enabled=False),
+            )),
             patch("netizen.main._scrub_channel_environment"),
             patch(
                 "netizen.main.run",
@@ -159,6 +165,7 @@ class MainConfigurationTest(unittest.TestCase):
                 "NETIZEN_LOG_FILE": "/managed/netizen.log",
                 "NETIZEN_MANAGED_LAUNCH_AGENT": "sentinel",
                 "NETIZEN_READY_FILE": "/managed/service.ready",
+                "NETIZEN_ROOT": "/managed",
                 "CODEX_HOME": "/home/user/.codex",
                 "HOME": "/home/user",
             },
@@ -177,6 +184,146 @@ class MainConfigurationTest(unittest.TestCase):
             self.assertNotIn("NETIZEN_READY_FILE", os.environ)
             self.assertEqual(os.environ["CODEX_HOME"], "/home/user/.codex")
             self.assertEqual(os.environ["HOME"], "/home/user")
+            self.assertEqual(os.environ["NETIZEN_ROOT"], "/managed")
+
+    def test_main_uses_canonical_root_config_and_preserves_shared_codex_home(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            alias = root / "alias"
+            target = root / "instance"
+            target.mkdir()
+            alias.symlink_to(target, target_is_directory=True)
+            configured = replace(settings(root), data_dir=target / "state")
+            environment = {
+                "NETIZEN_ROOT": str(alias),
+                "CODEX_HOME": str(root / "shared-codex"),
+            }
+            runtime = object()
+            configuration_environments: list[dict[str, str]] = []
+
+            def load_settings(_path: Path) -> Settings:
+                configuration_environments.append(dict(os.environ))
+                return configured
+
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch("netizen.main._configure_platform_trust"),
+                patch("netizen.main._configure_logging"),
+                patch("netizen.main.Settings.from_file", side_effect=load_settings) as load,
+                patch("netizen.main.run", new=Mock(return_value=runtime)) as run,
+                patch("netizen.main.asyncio.run") as execute,
+            ):
+                main()
+                load.assert_called_once_with(target / "config.yaml")
+                run.assert_called_once_with(configured, instance_root=target, ready_file=None)
+                execute.assert_called_once_with(runtime)
+                self.assertEqual(os.environ["NETIZEN_ROOT"], str(target))
+                self.assertEqual(os.environ["CODEX_HOME"], environment["CODEX_HOME"])
+                self.assertEqual(
+                    configuration_environments[0]["NETIZEN_LARK_APP_CONFIG"],
+                    str(target / "lark-app" / "config.json"),
+                )
+                self.assertEqual(
+                    configuration_environments[0]["NETIZEN_ADMIN_SECRET_FILE"],
+                    str(target / "credentials" / "admin-web-secret"),
+                )
+                self.assertNotIn("NETIZEN_LARK_APP_CONFIG", os.environ)
+                self.assertNotIn("NETIZEN_ADMIN_SECRET_FILE", os.environ)
+
+    def test_main_without_root_loads_default_instance_and_exports_its_context(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw).resolve()
+            root = home / ".netizen"
+            profile = root / "lark-app" / "config.json"
+            profile.parent.mkdir(parents=True, mode=0o700)
+            profile.write_bytes(encode_lark_app("cli_default", "fake-secret"))
+            profile.chmod(0o600)
+            config = root / "config.yaml"
+            config.write_text(
+                f"instance:\n  dataDir: {root / 'state'}\n  projectRoot: {home / 'projects'}\n"
+                "adminWeb:\n  enabled: false\n", encoding="utf-8",
+            )
+            with (
+                patch.dict(os.environ, {"HOME": str(home / "unrelated")}, clear=True),
+                patch("netizen.instance.pwd.getpwuid", return_value=SimpleNamespace(pw_dir=str(home))),
+                patch("netizen.main._configure_platform_trust"),
+                patch("netizen.main._configure_logging"),
+                patch("netizen.main.run", new=Mock()) as run,
+                patch("netizen.main.asyncio.run"),
+            ):
+                main()
+                configured = run.call_args.args[0]
+                self.assertEqual(configured.config_path, config)
+                self.assertEqual(configured.app_id, "cli_default")
+                self.assertEqual(configured.data_dir, root / "state")
+                self.assertEqual(run.call_args.kwargs["instance_root"], root)
+                self.assertEqual(os.environ["NETIZEN_ROOT"], str(root))
+                self.assertNotIn("NETIZEN_LARK_APP_CONFIG", os.environ)
+                self.assertNotIn("NETIZEN_ADMIN_SECRET_FILE", os.environ)
+
+    def test_main_rejects_cross_instance_paths_before_logging_or_runtime(self) -> None:
+        names = (
+            "NETIZEN_CONFIG_PATH", "NETIZEN_LARK_APP_CONFIG",
+            "NETIZEN_ADMIN_SECRET_FILE", "NETIZEN_LOG_FILE",
+            "NETIZEN_READY_FILE", "NETIZEN_LIFETIME_LOCK_FILE",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            cases = ((name, explicit) for name in names for explicit in (False, True))
+            for name, explicit_root in cases:
+                with (
+                    self.subTest(name=name, explicit_root=explicit_root),
+                    patch.dict(os.environ, {
+                        **({"NETIZEN_ROOT": str(root / "a")} if explicit_root else {}),
+                        name: str(root / "b" / "wrong-path"),
+                    }, clear=True),
+                    patch("netizen.instance.pwd.getpwuid", return_value=SimpleNamespace(pw_dir=str(root))),
+                    patch("netizen.main._adopt_lifetime_lock", return_value=None),
+                    patch("netizen.main.Settings.from_file") as load,
+                    patch("netizen.main._configure_logging") as logging,
+                    patch("netizen.main.run", new=Mock()) as run,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, name):
+                        main()
+                    load.assert_not_called()
+                    logging.assert_not_called()
+                    run.assert_not_called()
+
+    def test_main_rejects_cross_instance_configured_state_before_log_or_database(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            configured = settings(root)
+            for label, candidate in (
+                ("instance.dataDir", configured),
+                ("Admin credential path", replace(
+                    configured, data_dir=root / "state",
+                    admin_web=AdminWebSettings(credential_path=root / "other-secret"),
+                )),
+            ):
+                with (
+                    self.subTest(label=label),
+                    patch.dict(os.environ, {"NETIZEN_ROOT": str(root)}, clear=True),
+                    patch("netizen.main._configure_platform_trust"),
+                    patch("netizen.main.Settings.from_file", return_value=candidate),
+                    patch("netizen.main._configure_logging") as logging,
+                    patch("netizen.main.run", new=Mock()) as run,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, label):
+                        main()
+                    logging.assert_not_called()
+                    run.assert_not_called()
+
+    def test_managed_main_requires_root_and_closes_adopted_descriptor(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("netizen.main._adopt_lifetime_lock", return_value=12345),
+            patch("netizen.main.os.close") as close,
+            patch("netizen.main._configure_logging") as logging,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "missing NETIZEN_ROOT"):
+                main()
+            close.assert_called_once_with(12345)
+            logging.assert_not_called()
 
     def test_adopted_lifetime_lock_is_cloexec_for_tool_subprocesses(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -316,6 +463,17 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.schedulers: list[FakeScheduler] = []
         self.mcp_bind_error: BaseException | None = None
         self.schedule_recovery_error: BaseException | None = None
+        self.skill_roots_error: BaseException | None = None
+        self.skill_root_calls: list[tuple[object, tuple[Path, ...]]] = []
+        self.builtin_root = Path("/physical-release/source/skills")
+
+        def make_skill_roots(codex: object) -> object:
+            async def set_roots(roots: tuple[Path, ...]) -> None:
+                self.schedule_events.append("skills:set")
+                self.skill_root_calls.append((codex, roots))
+                if self.skill_roots_error is not None:
+                    raise self.skill_roots_error
+            return SimpleNamespace(set_roots=set_roots)
 
         def make_mcp() -> FakeScheduleMcpRunner:
             runner = FakeScheduleMcpRunner(self.schedule_events)
@@ -331,6 +489,8 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
 
         self.enterContext(patch("netizen.main.ScheduleMcpRunner", make_mcp))
         self.enterContext(patch("netizen.main.Scheduler", make_scheduler))
+        self.enterContext(patch("netizen.main.AppServerSkillRoots", make_skill_roots))
+        self.enterContext(patch("netizen.main.builtin_skill_root", return_value=self.builtin_root))
 
     def _make_core(self, root: Path) -> ServiceCore:
         configured = settings(root)
@@ -338,6 +498,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(store.close)
         return ServiceCore(
             settings=configured,
+            instance_root=root,
             channel=SimpleNamespace(  # type: ignore[arg-type]
                 safety=None, update_policy=lambda **_kwargs: None,
             ),
@@ -439,13 +600,18 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
     async def test_admin_listener_binds_before_codex_and_opens_explicitly(self) -> None:
         events: list[str] = []
         self.schedule_events = events
+        admin_options: dict[str, object] = {}
 
         class FakeAdminRunner:
-            def __init__(self, **_kwargs: object) -> None:
+            def __init__(self, **kwargs: object) -> None:
                 events.append("admin:init")
+                admin_options.update(kwargs)
+                self.urls = ()
+                self.loopback_only = True
 
             async def bind(self) -> None:
                 events.append("admin:bind")
+                self.urls = ("http://admin.example.test:8788/",)
 
             def attach_management(self, management: object) -> None:
                 self.management = management
@@ -491,7 +657,10 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 return "unsubscribed"
 
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
+            root = Path(raw).resolve()
+            instance_root = root / "explicit-instance"
+            config_path = root / "development-config.yaml"
+            snapshot = ConfigFileSnapshot(config_path, b"adminWeb: {}", ())
             configured = settings(root)
             configured = Settings(
                 app_id=configured.app_id,
@@ -503,9 +672,12 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 admin_web=AdminWebSettings(
                     enabled=True,
                     host="0.0.0.0",
-                    port=8787,
+                    port=None,
+                    access_host="admin.example.test",
                     credential_path=root / "admin-secret",
                 ),
+                config_path=config_path,
+                config_snapshot=snapshot,
             )
             store = BindingStore()
             channel = SimpleNamespace(
@@ -521,17 +693,34 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                     projects=configured.projects,
                     project_root=configured.project_root,
                 ),
+                instance_root=instance_root,
             )
             with (
                 patch("netizen.main.AdminWebRunner", FakeAdminRunner),
                 patch("netizen.main.AsyncCodex", FakeAsyncCodex),
                 patch("netizen.main.PinnedExperimentalTerminalCleanup", FakeCleanup),
                 patch("netizen.main.AppServerThreadSubscriptionControl", FakeCleanup),
+                patch("netizen.main.AppServerSkillCatalog", side_effect=lambda _: events.append("catalog:init")),
             ):
                 await core.start()
                 self.assertLess(events.index("admin:bind"), events.index("codex:init"))
                 self.assertLess(events.index("mcp:bind"), events.index("codex:init"))
                 self.assertLess(events.index("codex:enter"), events.index("admin:attach"))
+                self.assertLess(events.index("codex:enter"), events.index("skills:set"))
+                self.assertLess(events.index("skills:set"), events.index("admin:attach"))
+                self.assertLess(events.index("skills:set"), events.index("catalog:init"))
+                self.assertEqual(self.skill_root_calls, [(core._codex, (self.builtin_root,))])
+                self.assertEqual(admin_options, {
+                    "host": "0.0.0.0", "port": None,
+                    "credential_path": root / "admin-secret",
+                    "instance_root": instance_root,
+                    "config_path": config_path, "config_snapshot": snapshot,
+                    "access_host": "admin.example.test",
+                })
+                self.assertEqual(core.application._admin_urls, ("http://admin.example.test:8788/",))
+                self.assertEqual(core.application._instance_root, instance_root)
+                self.assertTrue(core.application._admin_loopback_only)
+                self.assertEqual(core._management._updates.product_root, instance_root)
                 self.assertNotIn("admin:open", events)
                 self.assertNotIn("mcp:open", events)
                 self.assertNotIn("scheduler:start", events)
@@ -565,6 +754,59 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("admin:close-listener", events)
         self.assertIn("admin:drain", events)
         self.assertIn("codex:close", events)
+
+    async def test_builtin_skill_registration_failure_closes_startup_before_runtime(self) -> None:
+        for phase in ("adapter", "registration"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as raw:
+                core = self._make_core(Path(raw))
+                core._settings = replace(
+                    core._settings,
+                    admin_web=AdminWebSettings(credential_path=Path(raw) / "admin-secret"),
+                )
+                codex = SimpleNamespace(__aenter__=AsyncMock(), close=AsyncMock())
+                admin = SimpleNamespace(
+                    bind=AsyncMock(), close_listener=AsyncMock(), drain=AsyncMock(),
+                    close_auth=Mock(), urls=(), loopback_only=False,
+                )
+                error = RuntimeError("builtin Skills unavailable")
+                roots = SimpleNamespace(set_roots=AsyncMock(side_effect=error))
+                with (
+                    patch("netizen.main.AdminWebRunner", return_value=admin),
+                    patch("netizen.main.AsyncCodex", return_value=codex),
+                    patch("netizen.main.AppServerSkillRoots", return_value=roots,
+                          side_effect=error if phase == "adapter" else None),
+                    patch("netizen.main.AppServerSkillCatalog") as catalog,
+                    patch("netizen.main.CodexRuntime") as runtime,
+                    patch("netizen.main._publish_ready_marker") as ready,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "builtin Skills unavailable"):
+                        await core.start()
+                    with self.assertRaisesRegex(RuntimeError, "not ready"):
+                        core.open_admission()
+                    admin.bind.assert_awaited_once()
+                    codex.__aenter__.assert_awaited_once()
+                    codex.close.assert_awaited_once()
+                    admin.close_listener.assert_awaited_once()
+                    admin.drain.assert_awaited_once()
+                    admin.close_auth.assert_called_once()
+                    catalog.assert_not_called()
+                    runtime.assert_not_called()
+                    ready.assert_not_called()
+                    self.assertIsNone(core.application)
+                    self.assertIsNone(core._scheduler)
+
+    async def test_core_uses_explicit_context_not_config_or_data_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            core = self._make_core(root)
+            self.assertEqual(core._instance_root, root)
+            configured = replace(core._settings, config_path=root / "config-root" / "config.yaml")
+            configured_core = ServiceCore(
+                settings=configured, channel=core._channel,
+                store=core._store, projects=core._projects,
+                instance_root=root,
+            )
+            self.assertEqual(configured_core._instance_root, root)
 
     async def test_admin_bind_failure_cleans_partial_state_without_starting_codex(
         self,
@@ -605,6 +847,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             store = BindingStore()
             core = ServiceCore(
                 settings=configured,
+                instance_root=root,
                 channel=SimpleNamespace(safety=None),  # type: ignore[arg-type]
                 store=store,
                 projects=ProjectRegistry(
@@ -704,6 +947,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             channel=channel,  # type: ignore[arg-type]
             store=FakeStore(),  # type: ignore[arg-type]
             projects=SimpleNamespace(),  # type: ignore[arg-type]
+            instance_root=Path("/unused/instance"),
         )
         core._admin = FakeAdmin()  # type: ignore[assignment]
         core._schedule_mcp = FakeScheduleMcpRunner(events)  # type: ignore[assignment]
@@ -781,6 +1025,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                     channel=SimpleNamespace(update_policy=lambda **_kwargs: None),  # type: ignore[arg-type]
                     store=store,  # type: ignore[arg-type]
                     projects=SimpleNamespace(),  # type: ignore[arg-type]
+                    instance_root=Path("/unused/instance"),
                 )
                 core._management = SimpleNamespace(close=close_management, set_service_ready=lambda _ready: None)  # type: ignore[assignment]
                 core.application = SimpleNamespace(close=AsyncMock())  # type: ignore[assignment]
@@ -824,6 +1069,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             channel=SimpleNamespace(update_policy=lambda **_kwargs: None),  # type: ignore[arg-type]
             store=SimpleNamespace(aclose=AsyncMock()),  # type: ignore[arg-type]
             projects=SimpleNamespace(),  # type: ignore[arg-type]
+            instance_root=Path("/unused/instance"),
         )
         core._management = management  # type: ignore[assignment]
         with (
@@ -926,6 +1172,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             )
             core = ServiceCore(
                 settings=configured,
+                instance_root=root,
                 channel=channel,  # type: ignore[arg-type]
                 store=store,
                 projects=ProjectRegistry(
@@ -999,7 +1246,8 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(config.codex_bin)
         self.assertEqual(
             config.env,
-            captured_environment | FakeScheduleMcpRunner.app_server_env,
+            captured_environment | FakeScheduleMcpRunner.app_server_env
+            | {"NETIZEN_ROOT": str(root.resolve())},
         )
         self.assertEqual(len(cleanup_codex), 1)
         self.assertEqual(boundary_codex, [cleanup_codex[0]])
@@ -1056,6 +1304,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             store = BindingStore()
             core = ServiceCore(
                 settings=configured,
+                instance_root=root,
                 channel=SimpleNamespace(  # type: ignore[arg-type]
                     safety=None,
                     update_policy=lambda **_kwargs: None,

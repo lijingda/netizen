@@ -19,6 +19,8 @@ import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from netizen.instance import require_instance_root_marker
+
 
 PROFILE_CAPTURE_TIMEOUT_SECONDS = 10.0
 PROFILE_CAPTURE_MAX_BYTES = 4 * 1024 * 1024
@@ -272,6 +274,7 @@ def capture_profile_environment(
 def service_environment(
     captured: Mapping[str, str],
     *,
+    instance_root: Path,
     home: Path,
     username: str,
     shell: Path,
@@ -286,7 +289,18 @@ def service_environment(
 ) -> dict[str, str]:
     """Preserve the shell snapshot while enforcing Netizen-owned launch values."""
 
+    managed_paths = {
+        "NETIZEN_CONFIG_PATH": config_path,
+        "NETIZEN_LARK_APP_CONFIG": lark_app_config,
+        "NETIZEN_ADMIN_SECRET_FILE": admin_secret_file,
+        "NETIZEN_READY_FILE": ready_file,
+        "NETIZEN_LIFETIME_LOCK_FILE": lifetime_lock_file,
+    }
+    if log_file is not None:
+        managed_paths["NETIZEN_LOG_FILE"] = log_file
+    _validate_instance_paths(instance_root, managed_paths)
     environment = dict(captured)
+    environment.pop("NETIZEN_ROOT", None)
     environment.pop("FEISHU_APP_SECRET", None)
     environment.pop("FEISHU_APP_SECRET_FILE", None)
     environment.pop("NETIZEN_LARK_APP_CONFIG", None)
@@ -302,6 +316,7 @@ def service_environment(
     environment.update(
         {
             "CODEX_HOME": codex_home,
+            "NETIZEN_ROOT": str(instance_root),
             "NETIZEN_LARK_APP_CONFIG": lark_app_config,
             "HOME": str(home),
             "LOGNAME": username,
@@ -323,22 +338,45 @@ def service_environment(
 
 
 def _required_environment(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
+    value = os.environ.get(name, "")
+    if not value.strip():
         raise ServiceLaunchError(f"managed service environment is missing {name}")
     return value
 
 
 def _optional_environment(name: str) -> str | None:
-    value = os.environ.get(name, "").strip()
-    return value or None
+    value = os.environ.get(name, "")
+    return value if value.strip() else None
 
 
 def _managed_absolute_path(value: str, *, label: str) -> Path:
     path = Path(value)
-    if not path.is_absolute() or path == Path(path.anchor):
+    if (not path.is_absolute() or path == Path(path.anchor)
+            or any(ord(character) < 0x20 for character in value)):
         raise ServiceLaunchError(f"{label} must be an absolute non-root path: {path}")
     return path
+
+
+def _instance_paths(root: Path) -> dict[str, str]:
+    return {
+        "NETIZEN_CONFIG_PATH": str(root / "config.yaml"),
+        "NETIZEN_LARK_APP_CONFIG": str(root / "lark-app" / "config.json"),
+        "NETIZEN_ADMIN_SECRET_FILE": str(root / "credentials" / "admin-web-secret"),
+        "NETIZEN_READY_FILE": str(root / "state" / "service.ready"),
+        "NETIZEN_LIFETIME_LOCK_FILE": str(root / "state" / "service.lifetime.lock"),
+    }
+
+
+def _validate_instance_paths(root: Path, values: Mapping[str, str]) -> None:
+    root = _managed_absolute_path(str(root), label="NETIZEN_ROOT")
+    if root.resolve() != root:
+        raise ServiceLaunchError("NETIZEN_ROOT must be the canonical instance path")
+    expected = _instance_paths(root)
+    if "NETIZEN_LOG_FILE" in values:
+        expected["NETIZEN_LOG_FILE"] = str(root / "state" / "netizen.log")
+    for name, path in expected.items():
+        if values.get(name) != path:
+            raise ServiceLaunchError(f"managed {name} does not match NETIZEN_ROOT")
 
 
 def acquire_lifetime_lock(path: Path) -> int:
@@ -381,12 +419,28 @@ def clear_ready_marker(path: Path) -> None:
 
 
 def launch() -> None:
+    instance_root = _managed_absolute_path(
+        _required_environment("NETIZEN_ROOT"), label="NETIZEN_ROOT",
+    )
+    managed = {name: _required_environment(name) for name in _instance_paths(instance_root)}
+    managed["CODEX_HOME"] = _required_environment("CODEX_HOME")
+    for name in ("NETIZEN_LOG_FILE", "NETIZEN_MANAGED_LAUNCH_AGENT"):
+        value = _optional_environment(name)
+        if value is not None:
+            managed[name] = value
+    # Reject a mixed service definition before touching either instance's lock
+    # or ready marker. Capture all launch values before loading the profile.
+    _validate_instance_paths(instance_root, managed)
+    try:
+        require_instance_root_marker(instance_root)
+    except (OSError, ValueError) as error:
+        raise ServiceLaunchError(f"could not validate instance root marker: {error}") from error
     lifetime_lock_path = _managed_absolute_path(
-        _required_environment("NETIZEN_LIFETIME_LOCK_FILE"),
+        managed["NETIZEN_LIFETIME_LOCK_FILE"],
         label="NETIZEN_LIFETIME_LOCK_FILE",
     )
     ready_path = _managed_absolute_path(
-        _required_environment("NETIZEN_READY_FILE"),
+        managed["NETIZEN_READY_FILE"],
         label="NETIZEN_READY_FILE",
     )
     lifetime_descriptor = acquire_lifetime_lock(lifetime_lock_path)
@@ -394,6 +448,8 @@ def launch() -> None:
         clear_ready_marker(ready_path)
         _launch_with_lifetime_lock(
             lifetime_descriptor,
+            instance_root=instance_root,
+            managed=managed,
             lifetime_lock_path=lifetime_lock_path,
             ready_path=ready_path,
         )
@@ -407,6 +463,8 @@ def launch() -> None:
 def _launch_with_lifetime_lock(
     lifetime_descriptor: int,
     *,
+    instance_root: Path,
+    managed: Mapping[str, str],
     lifetime_lock_path: Path,
     ready_path: Path,
 ) -> None:
@@ -433,19 +491,18 @@ def _launch_with_lifetime_lock(
         )
     environment = service_environment(
         captured,
+        instance_root=instance_root,
         home=home,
         username=account.pw_name,
         shell=shell,
-        codex_home=_required_environment("CODEX_HOME"),
-        config_path=_required_environment("NETIZEN_CONFIG_PATH"),
-        lark_app_config=_required_environment("NETIZEN_LARK_APP_CONFIG"),
-        admin_secret_file=_required_environment("NETIZEN_ADMIN_SECRET_FILE"),
+        codex_home=managed["CODEX_HOME"],
+        config_path=managed["NETIZEN_CONFIG_PATH"],
+        lark_app_config=managed["NETIZEN_LARK_APP_CONFIG"],
+        admin_secret_file=managed["NETIZEN_ADMIN_SECRET_FILE"],
         ready_file=str(ready_path),
         lifetime_lock_file=str(lifetime_lock_path),
-        log_file=_optional_environment("NETIZEN_LOG_FILE"),
-        launch_agent_sentinel=_optional_environment(
-            "NETIZEN_MANAGED_LAUNCH_AGENT"
-        ),
+        log_file=managed.get("NETIZEN_LOG_FILE"),
+        launch_agent_sentinel=managed.get("NETIZEN_MANAGED_LAUNCH_AGENT"),
     )
     environment["NETIZEN_LIFETIME_LOCK_FD"] = str(lifetime_descriptor)
     os.set_inheritable(lifetime_descriptor, True)
