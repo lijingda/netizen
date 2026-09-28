@@ -1288,7 +1288,10 @@ audit record。
 
 文件数据库使用 WAL、`synchronous=FULL` 和有界 writer busy timeout。Admin 的 keyset
 分页查询只通过 Store-owned `query_only` connection 与单 worker executor 执行，SQL 有
-progress deadline 和提交前容量门禁；读事务不跨 `await`，也不会让 Web 自己成为第二个
+progress deadline 和提交前容量门禁；执行中与排队中合计最多 32 个查询，等待以异步方式
+进行，排队与执行共用从提交开始计算的总 deadline。容量满时明确报忙；排队期间已超时的
+查询轮到执行时直接失败，不执行 SQL。调用方超时或取消不提前释放底层任务的容量，
+shutdown 排空实际任务后才关闭连接。读事务不跨 `await`，也不会让 Web 自己成为第二个
 SQLite owner。Project 路径解析、存在性检查和建目录同样进入独立的有界 blocking-I/O
 executor。HTTP 断连只丢失响应，已经提交的 mutation/I/O 继续被跟踪到完成或 shutdown
 deadline，不据此声称回滚。

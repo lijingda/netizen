@@ -6,6 +6,7 @@ import asyncio
 import concurrent.futures
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import threading
@@ -37,6 +38,9 @@ from .session_settings import BindingTaskFeedback, BindingTurnSettings, SessionS
 
 
 SCHEMA_VERSION = 14
+
+# Includes the running query and all submitted queries waiting for the reader.
+_ADMIN_QUERY_CAPACITY = 32
 PROJECT_DELETE_LIMIT = 1000
 
 
@@ -208,7 +212,7 @@ class SideTopicNotFound(LookupError):
 
 
 class BindingQueryBusy(RuntimeError):
-    """The bounded Admin query worker already owns its one admission slot."""
+    """The Admin query capacity is full or SQLite cannot acquire a read lock."""
 
 
 class BindingQueryClosed(RuntimeError):
@@ -216,7 +220,7 @@ class BindingQueryClosed(RuntimeError):
 
 
 class BindingQueryTimeout(TimeoutError):
-    """SQLite interrupted an Admin query at its statement deadline."""
+    """An Admin query exceeded its combined queue and execution deadline."""
 
 
 class ScopeConflict(RuntimeError):
@@ -560,7 +564,6 @@ class BindingStore:
         self._lock = threading.RLock()
         self._project_delete_intents: dict[str, ProjectDeleteSnapshot] = {}
         self._query_state_lock = threading.Lock()
-        self._query_admission = threading.Lock()
         self._query_futures: set[concurrent.futures.Future[object]] = set()
         self._query_closing = False
         self._closed = False
@@ -2435,9 +2438,6 @@ class BindingStore:
         *,
         deadline_seconds: float,
     ) -> list[sqlite3.Row]:
-        if deadline_seconds <= 0:
-            raise ValueError("query deadline must be positive")
-
         def operation(connection: sqlite3.Connection) -> list[sqlite3.Row]:
             return connection.execute(statement, tuple(parameters)).fetchall()
 
@@ -2453,31 +2453,40 @@ class BindingStore:
         *,
         deadline_seconds: float,
     ) -> "_QueryResult":
-        if not self._query_admission.acquire(blocking=False):
-            raise BindingQueryBusy("Admin query reader is busy")
+        if not math.isfinite(deadline_seconds) or deadline_seconds <= 0:
+            raise ValueError("query deadline must be positive and finite")
+        deadline = time.monotonic() + deadline_seconds
         with self._query_state_lock:
             if self._query_closing:
-                self._query_admission.release()
                 raise BindingQueryClosed("Binding Store query reader is closed")
-            try:
-                future = self._query_executor.submit(
-                    self._execute_query,
-                    operation,
-                    deadline_seconds,
-                )
-            except BaseException:
-                self._query_admission.release()
-                raise
+            if len(self._query_futures) >= _ADMIN_QUERY_CAPACITY:
+                raise BindingQueryBusy("Admin query capacity is full")
+            future = self._query_executor.submit(
+                self._execute_query,
+                operation,
+                deadline,
+            )
             self._query_futures.add(future)
         future.add_done_callback(self._query_finished)
-        return await asyncio.shield(asyncio.wrap_future(future))
+        wrapped = asyncio.wrap_future(future)
+        wrapped.add_done_callback(_consume_query_exception)
+        # wait() never cancels the worker future. Keep counting queued work even
+        # after its caller leaves: cancelling it would leave executor queue items
+        # behind while returning capacity early, allowing an unbounded backlog.
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            done, _ = await asyncio.wait((wrapped,), timeout=remaining)
+            if done:
+                return wrapped.result()
+        if future.done():
+            return future.result()
+        raise BindingQueryTimeout("Binding Store query exceeded its deadline")
 
     def _execute_query(
         self,
         operation: Callable[[sqlite3.Connection], "_QueryResult"],
-        deadline_seconds: float,
+        deadline: float,
     ) -> "_QueryResult":
-        deadline = time.monotonic() + deadline_seconds
         expired = False
 
         def progress() -> int:
@@ -2488,9 +2497,15 @@ class BindingStore:
         connection = self._query_connection or self._connection
         lock = self._lock if self._query_connection is None else nullcontext()
         with lock:
+            if time.monotonic() >= deadline:
+                raise BindingQueryTimeout("Binding Store query exceeded its deadline")
             connection.set_progress_handler(progress, 100)
             try:
-                return operation(connection)
+                result = operation(connection)
+                # Short statements may not reach the progress callback interval.
+                if time.monotonic() >= deadline:
+                    raise BindingQueryTimeout("Binding Store query exceeded its deadline")
+                return result
             except sqlite3.OperationalError as error:
                 message = str(error).lower()
                 if expired or "interrupted" in message:
@@ -2509,7 +2524,6 @@ class BindingStore:
     ) -> None:
         with self._query_state_lock:
             self._query_futures.discard(future)
-        self._query_admission.release()
 
     async def drain_queries(self) -> None:
         """Wait for every already-submitted Admin read, including cancelled callers."""
@@ -2519,10 +2533,10 @@ class BindingStore:
                 futures = tuple(self._query_futures)
             if not futures:
                 return
-            await asyncio.gather(
-                *(asyncio.wrap_future(future) for future in futures),
-                return_exceptions=True,
-            )
+            wrapped = [asyncio.wrap_future(future) for future in futures]
+            for waiter in wrapped:
+                waiter.add_done_callback(_consume_query_exception)
+            await asyncio.wait(wrapped)
 
     async def aclose(self) -> None:
         """Close query admission, drain it, then close both owned connections."""
@@ -2628,6 +2642,12 @@ class _Transaction:
 
 
 _QueryResult = TypeVar("_QueryResult")
+
+
+def _consume_query_exception(future: asyncio.Future[object]) -> None:
+    # A timed-out/cancelled caller may no longer be awaiting this result.
+    if not future.cancelled():
+        future.exception()
 
 
 _COMPATIBLE_INDEXES = (

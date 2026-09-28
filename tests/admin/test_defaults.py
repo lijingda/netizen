@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
+import threading
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from netizen.bindings import BindingStore
 from netizen.defaults import DefaultConfigurationError
 from netizen.defaults.service import SessionDefaultsService
+from netizen.management import InstanceManagementService, ScopeCoordinator
 from netizen.projects import ProjectRegistry
 from tests.admin import test_web as fixture
 from tests.management.test_chat_labels import FakeChatInfo, FakeChatLabelProvider
@@ -158,6 +162,68 @@ class AdminDefaultsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200, result)
         self.assertFalse(result["context_mode_available"])
         self.assertEqual(result["model_catalog_error"], "暂不可用")
+
+    async def test_default_page_queries_share_one_reader_without_rejecting_concurrency(self) -> None:
+        store = BindingStore(self.root / "concurrent-defaults.sqlite3")
+        projects = ProjectRegistry(
+            store=store, project_root=self.root, projects={"database-project": self.root},
+        )
+        management = InstanceManagementService(
+            bindings=store, projects=projects, runtime=SimpleNamespace(),
+            scope_coordinator=ScopeCoordinator(), root=self.root,
+        )
+        management.enable_defaults(app_id="cli_test")
+        self.runner.application._management = management
+        session = await self.login()
+        loop = asyncio.get_running_loop()
+        reader_entered = asyncio.Event()
+        all_queries_submitted = asyncio.Event()
+        release_reader = threading.Event()
+        submit_query = store._submit_query
+        submitted = 0
+
+        async def submit_with_barrier(operation, *, deadline_seconds):
+            nonlocal submitted
+            submitted += 1
+            if submitted == 3:
+                all_queries_submitted.set()
+            if submitted == 1:
+                def held_read(connection):
+                    loop.call_soon_threadsafe(reader_entered.set)
+                    if not release_reader.wait(5):
+                        raise AssertionError("concurrent HTTP queries never reached the reader")
+                    return operation(connection)
+
+                operation_to_submit = held_read
+            else:
+                operation_to_submit = operation
+            return await submit_query(operation_to_submit, deadline_seconds=deadline_seconds)
+
+        requests = []
+        try:
+            with patch.object(store, "_submit_query", submit_with_barrier):
+                requests.append(asyncio.create_task(self.json_get(
+                    "/api/v1/defaults?kind=chat&offset=0&limit=50", session,
+                )))
+                await asyncio.wait_for(reader_entered.wait(), timeout=5)
+                requests.extend(asyncio.create_task(self.json_get(path, session)) for path in (
+                    "/api/v1/defaults?kind=group_name&limit=200",
+                    "/api/v1/projects/options?pageSize=50",
+                ))
+                # Both later handlers reach the real Store while the first SQL
+                # worker is held; success cannot depend on fast query timing.
+                await asyncio.wait_for(all_queries_submitted.wait(), timeout=5)
+                release_reader.set()
+                responses = await asyncio.wait_for(asyncio.gather(*requests), timeout=5)
+            self.assertEqual([status for status, _, _ in responses], [200, 200, 200], responses)
+            self.assertEqual(responses[0][2]["items"], [])
+            self.assertEqual(responses[1][2]["items"], [])
+            self.assertEqual(responses[2][2]["items"], [{"alias": "database-project", "enabled": True}])
+        finally:
+            release_reader.set()
+            await asyncio.gather(*requests, return_exceptions=True)
+            await management.close()
+            await store.aclose()
 
     async def test_prompt_revision_and_bulk_mutations_are_not_accepted(self) -> None:
         session = await self.login()
