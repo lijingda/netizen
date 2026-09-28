@@ -54,6 +54,7 @@ from .bindings import BindingStore
 from .builtin_skills import builtin_skill_root
 from .channel_app import ChannelApplication
 from .codex_runtime import CodexRuntime
+from .deployment.activation_recovery import mark_candidate_admission
 from .instance import resolve_instance_root
 from .management import (
     InstanceManagementService,
@@ -580,8 +581,7 @@ async def run(
         core_started = True
         assert core.application is not None
         stage_started_at = time.monotonic()
-        _register_channel_handlers(channel, core.application)
-        await channel.start_background()
+        await _start_channel_input(channel, core.application, ready_file=ready_file)
         _log_startup_timing("Feishu connection", stage_started_at)
         await _await_channel_future(channel.schedule(_open_core_admission(core, ready_file=ready_file)))
         logger.info(
@@ -601,6 +601,23 @@ async def run(
             finally:
                 if ready_file is not None:
                     _clear_ready_marker(ready_file)
+
+
+async def _start_channel_input(
+    channel: FeishuChannel,
+    application: ChannelApplication,
+    *,
+    ready_file: Path | None,
+) -> None:
+    if ready_file is not None:
+        # Feishu can deliver while start_background is still running, before
+        # Admin/Scheduler admission or the ready marker. Record this first.
+        module = Path(__file__).resolve()
+        prefix = Path(sys.prefix).resolve()
+        release_root = prefix.parent if module.is_relative_to(prefix) else module.parents[2]
+        mark_candidate_admission(ready_file, release_root)
+    _register_channel_handlers(channel, application)
+    await channel.start_background()
 
 
 async def _open_core_admission(core: ServiceCore, *, ready_file: Path | None = None) -> None:

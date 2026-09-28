@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class NetizenInstallerTest(unittest.TestCase):
     def test_stopped_upgrade_rejects_old_schema_without_modifying_database(self) -> None:
-        for version in (6, 7, 8, 9, 10, 11, 12):
+        for version in (6, 7, 8, 9, 10, 11, 12, 13):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 layout = self._layout(Path(directory))
                 installer.prepare_directories(layout)
@@ -45,7 +45,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 before = database.read_bytes()
                 backend = _stopped_backend()
                 with patch.object(installer, "_service_backend", return_value=backend):
-                    with self.assertRaisesRegex(installer.InstallError, "unsupported.*schema version"):
+                    with self.assertRaisesRegex(installer.InstallError, "unsupported.*schema"):
                         installer.activate_release(candidate, layout, interactive=False, data_dir=layout.state_dir)
                 self.assertEqual(database.read_bytes(), before)
                 self.assertEqual(installer._read_release_link(layout.current, layout), old.root.resolve())
@@ -2375,6 +2375,150 @@ class NetizenInstallerTest(unittest.TestCase):
             )
             self.assertEqual(calls[0][2], "show-environment")
 
+    def test_systemd_stop_confirms_absent_unit_and_released_lifetime_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            layout.ready_file.write_bytes(service_backend.READY_MARKER_CONTENT)
+            calls: list[list[str]] = []
+
+            def runner(argv, **_kwargs):
+                rendered = list(map(os.fspath, argv))
+                calls.append(rendered)
+                if rendered[2] == "stop":
+                    raise installer.InstallError("unit not loaded")
+                return subprocess.CompletedProcess(
+                    rendered, 0, "LoadState=not-found\nActiveState=inactive\n", "",
+                )
+
+            backend = systemd.SystemdServiceBackend(layout, runner)
+            backend.stop_and_confirm(timeout=0.01)
+
+            self.assertFalse(layout.ready_file.exists())
+            self.assertTrue(service_backend._lifetime_lock_available(layout))
+            self.assertEqual(calls, [
+                ["systemctl", "--user", "stop", layout.service_name],
+                ["systemctl", "--user", "show", layout.service_name,
+                 "--property=LoadState", "--property=ActiveState"],
+            ])
+
+    def test_systemd_failed_stop_rejects_unproven_absence(self) -> None:
+        cases = (
+            (0, "LoadState=loaded\nActiveState=inactive\n"),
+            (0, "LoadState=not-found\nActiveState=active\n"),
+            (0, "LoadState=not-found\n"),
+            (0, "LoadState=not-found\nActiveState=inactive\nActiveState=inactive\n"),
+            (0, ""),
+            (1, "LoadState=not-found\nActiveState=inactive\n"),
+        )
+        for returncode, output in cases:
+            with self.subTest(returncode=returncode, output=output), tempfile.TemporaryDirectory() as directory:
+                layout = self._layout(Path(directory))
+                installer.prepare_directories(layout)
+                layout.ready_file.write_bytes(service_backend.READY_MARKER_CONTENT)
+
+                def runner(argv, **_kwargs):
+                    if argv[2] == "stop":
+                        raise installer.InstallError("stop failed")
+                    return subprocess.CompletedProcess(argv, returncode, output, "")
+
+                backend = systemd.SystemdServiceBackend(layout, runner)
+                with self.assertRaisesRegex(installer.InstallError, "stop failed"):
+                    backend.stop_and_confirm(timeout=0.01)
+                self.assertTrue(layout.ready_file.exists())
+                self.assertFalse(layout.lifetime_lock_file.exists())
+
+    def test_systemd_failed_stop_preserves_manager_query_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+
+            def runner(argv, **_kwargs):
+                if argv[2] == "stop":
+                    raise installer.InstallError("stop failed")
+                raise installer.InstallError("manager unavailable")
+
+            backend = systemd.SystemdServiceBackend(layout, runner)
+            with self.assertRaisesRegex(installer.InstallError, "manager unavailable"):
+                backend.stop_and_confirm(timeout=0.01)
+            self.assertFalse(layout.lifetime_lock_file.exists())
+
+    def test_systemd_absent_unit_stop_still_requires_released_lifetime_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self._layout(Path(directory))
+            installer.prepare_directories(layout)
+            layout.ready_file.write_bytes(service_backend.READY_MARKER_CONTENT)
+
+            def runner(argv, **_kwargs):
+                if argv[2] == "stop":
+                    raise installer.InstallError("unit not loaded")
+                return subprocess.CompletedProcess(
+                    argv, 0, "LoadState=not-found\nActiveState=inactive\n", "",
+                )
+
+            backend = systemd.SystemdServiceBackend(layout, runner)
+            descriptor = os.open(layout.lifetime_lock_file, os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                with self.assertRaisesRegex(installer.InstallError, "refusing to mutate rollback-protected state"):
+                    backend.stop_and_confirm(timeout=0.01)
+                self.assertTrue(layout.ready_file.exists())
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+            backend.stop_and_confirm(timeout=0.01)
+            self.assertFalse(layout.ready_file.exists())
+
+    def test_first_install_recovers_failure_before_unit_publication(self) -> None:
+        for failure in ("port_conflict", "interrupted_intent"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                layout = self._layout(Path(directory))
+                installer.prepare_directories(layout)
+                candidate = self._release(layout, "a" * 64)
+
+                def runner(argv, **_kwargs):
+                    rendered = list(map(os.fspath, argv))
+                    if rendered[:3] == ["systemctl", "--user", "stop"] and not layout.service_file.exists():
+                        raise installer.InstallError("unit not loaded")
+                    if rendered[:3] == ["systemctl", "--user", "show"]:
+                        return subprocess.CompletedProcess(
+                            rendered, 0, "LoadState=not-found\nActiveState=inactive\n", "",
+                        )
+                    return subprocess.CompletedProcess(rendered, 0, "", "")
+
+                with patch.object(systemd, "_wait_for_systemd_ready"):
+                    if failure == "port_conflict":
+                        with (
+                            patch.object(installer, "preflight_admin_bind", side_effect=installer.InstallError("address in use")),
+                            self.assertRaisesRegex(installer.InstallError, "was rolled back: address in use"),
+                        ):
+                            installer.activate_release(
+                                candidate, layout, interactive=False, runner=runner,
+                                admin_bind=installer.AdminBind(True, "127.0.0.1", 8787),
+                            )
+                        self.assertIsNone(installer._read_activation_intent(layout))
+                    else:
+                        write_intent = installer._write_activation_intent
+
+                        def write_then_interrupt(*args, **kwargs):
+                            write_intent(*args, **kwargs)
+                            raise KeyboardInterrupt("installer interrupted before unit publication")
+
+                        with (
+                            patch.object(installer, "_write_activation_intent", side_effect=write_then_interrupt),
+                            self.assertRaises(KeyboardInterrupt),
+                        ):
+                            installer.activate_release(candidate, layout, interactive=False, runner=runner)
+                        self.assertIsNotNone(installer._read_activation_intent(layout))
+                    self.assertFalse(layout.service_file.exists())
+                    self.assertIsNone(installer._read_release_link(layout.current, layout))
+
+                    installer.activate_release(candidate, layout, interactive=False, runner=runner)
+
+                self.assertIsNone(installer._read_activation_intent(layout))
+                self.assertEqual(installer._read_release_link(layout.current, layout), candidate.root.resolve())
+                self.assertTrue(layout.service_file.is_file())
+
     def test_custom_systemd_unit_search_path_must_include_the_fixed_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2586,7 +2730,7 @@ class NetizenInstallerTest(unittest.TestCase):
                     data_dir=layout.state_dir,
                 )
 
-            recoveries = list(layout.state_dir.glob("rollback-recovery-*"))
+            recoveries = list(layout.state_dir.glob("activation-recovery-*"))
             self.assertEqual(len(recoveries), 1)
             self.assertEqual(
                 (recoveries[0] / "database/channel.sqlite3").read_bytes(),
@@ -3650,7 +3794,7 @@ class NetizenInstallerTest(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(
                     installer.InstallError,
-                    "restore database: skipped",
+                    "rollback incomplete: candidate still alive",
                 ),
             ):
                 installer.activate_release(
@@ -3663,7 +3807,7 @@ class NetizenInstallerTest(unittest.TestCase):
 
             self.assertEqual(database.read_text(), "candidate database")
             self.assertFalse((layout.codex_home / "skills").exists())
-            self.assertTrue(list(layout.state_dir.glob("rollback-recovery-*")))
+            self.assertTrue(list(layout.state_dir.glob("activation-recovery-*")))
 
 
     def test_macos_uninstall_removes_only_managed_artifacts_and_preserves_state(self) -> None:

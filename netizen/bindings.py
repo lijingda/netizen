@@ -444,7 +444,8 @@ def _require_current_schema(connection: sqlite3.Connection) -> None:
     if len(versions) != 1 or versions[0]["version"] != SCHEMA_VERSION:
         raise RuntimeError(
             "unsupported channel database schema version; "
-            "only the current schema is supported; existing data was not changed"
+            "only the current schema is supported by the service; "
+            "run the installer to upgrade supported databases; existing data was not changed"
         )
     _require_project_metadata_schema(connection)
     require_schema(connection)
