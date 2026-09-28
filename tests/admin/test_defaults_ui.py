@@ -27,7 +27,7 @@ class DefaultsUiTest(unittest.TestCase):
             source[source.index("async function queryProjectOptions("):source.index("async function loadSessionProjectOptions(")],
             source[source.index("function defaultScheduleSessionSettings("):source.index("function renderScheduleSessionSettings(")],
             source[source.index("let defaultsEditor ="):source.index("function scheduleDate(")],
-            source[source.index('defaultsInput("new-chat").addEventListener'):source.index('scheduleInput("filter").addEventListener')],
+            source[source.index('defaultsInput("new").addEventListener'):source.index('scheduleInput("filter").addEventListener')],
         ]
         fixture = Path(__file__).with_name("defaults_ui_harness.js")
         before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_DEFAULTS_CONTROLLER\n")

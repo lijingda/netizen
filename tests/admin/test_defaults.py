@@ -14,7 +14,7 @@ from netizen.defaults.service import SessionDefaultsService
 from netizen.management import InstanceManagementService, ScopeCoordinator
 from netizen.projects import ProjectRegistry
 from tests.admin import test_web as fixture
-from tests.management.test_chat_labels import FakeChatInfo, FakeChatLabelProvider
+from tests.management.test_chat_labels import FakeChatInfo, FakeChatLabelProvider, FakeChatMember
 
 
 class FakeDefaults:
@@ -162,6 +162,53 @@ class AdminDefaultsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200, result)
         self.assertFalse(result["context_mode_available"])
         self.assertEqual(result["model_catalog_error"], "暂不可用")
+
+    async def test_chat_labels_share_management_cache_and_preserve_exact_actions(self) -> None:
+        store = BindingStore(self.root / "default-chat-labels.sqlite3")
+        self.addAsyncCleanup(store.aclose)
+        provider = FakeChatLabelProvider()
+        provider.info = {
+            "oc_group": FakeChatInfo("Engineering", "group"),
+            "oc_direct": FakeChatInfo("", "p2p"),
+            "oc_unshown": FakeChatInfo("Outside this page", "group"),
+        }
+        provider.members["oc_direct"] = [FakeChatMember("ou_alice", "Alice")]
+        management = InstanceManagementService(
+            bindings=store, projects=ProjectRegistry(store=store, project_root=self.root, projects={"test": self.root}),
+            runtime=SimpleNamespace(), scope_coordinator=ScopeCoordinator(), chat_labels=provider,
+        )
+        self.addAsyncCleanup(management.close)
+        management.defaults = self.defaults
+        self.runner.application._management = management
+        template = self.defaults.records[0]
+        self.defaults.records = [
+            *[{**template, "id": f"exact-{index}", "chat_id": chat_id}
+              for index, chat_id in enumerate(("oc_group", "oc_direct", "oc_missing"))],
+            *self.defaults.records[1:],
+        ]
+        await management.resolve_chat_labels(("oc_group",), deadline=asyncio.get_running_loop().time() + 1)
+        session = await self.login()
+        page = await self.page(session)
+        group, direct, missing = page["items"]
+        self.assertEqual(group["chat"], {
+            "chatId": "oc_group", "chatLabel": "Engineering", "chatLabelResolved": True,
+            "chatMode": "group", "chatType": "private",
+            "chatOpenUrl": "https://applink.feishu.cn/client/chat/open?openChatId=oc_group",
+        })
+        self.assertEqual(group["chat_id"], "oc_group")
+        self.assertEqual(group["revision"], template["revision"])
+        for mode in ("save", "delete"):
+            self.assertEqual(group["actions"][mode]["target"]["targetId"], "exact-0")
+        self.assertEqual(direct["chat"]["chatLabel"], "Alice")
+        self.assertEqual(direct["chat"]["chatOpenUrl"], "https://applink.feishu.cn/client/chat/open?openId=ou_alice")
+        self.assertEqual(missing["chat"]["chatLabel"], "oc_missing")
+        self.assertFalse(missing["chat"]["chatLabelResolved"])
+        self.assertEqual(missing["chat"]["chatOpenUrl"], "https://applink.feishu.cn/client/chat/open?openChatId=oc_missing")
+        await self.page(session)
+        rules = await self.page(session, "group_name")
+        self.assertTrue(all("chat" not in rule for rule in rules["items"]))
+        self.assertCountEqual(provider.info_calls, ["oc_group", "oc_direct", "oc_missing"])
+        self.assertEqual(provider.member_calls, ["oc_direct"])
 
     async def test_default_page_queries_share_one_reader_without_rejecting_concurrency(self) -> None:
         store = BindingStore(self.root / "concurrent-defaults.sqlite3")

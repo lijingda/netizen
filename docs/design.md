@@ -1605,6 +1605,10 @@ action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact
 management service 和持久数据，修改沿用 revision 及 action/CSRF 检查；不支持精确配置
 批量设置、类别默认值或禁用自动创建的覆盖项。保存默认值只修改配置，不创建 Binding，
 也不从 Admin 发送即时 Prompt。群聊 catch-up 默认值在真实消息触发创建时才取得初始边界。
+默认会话配置页以“指定聊天”和“群名匹配”两个二级 Tab 分别展示列表，前者包含单聊与
+群聊精确配置，名称解析复用现有 best-effort 聊天展示，失败时显示 chat ID。两类列表均不
+提供过滤；群名规则按实际优先级完整展示并上移／下移。新建和编辑在右侧抽屉中进行，
+保存后保留当前 Tab 与分页位置，删除导致当前页为空时回退上一页。
 
 定时管理是 ADR 0061/0068/0070 的计划定义编辑与已保存计划手动执行例外。`/cron` 卡片、Admin
 “定时任务”页和自然语言 `cron_manage` 共用 ScheduleService，提供分页查询、创建、编辑、

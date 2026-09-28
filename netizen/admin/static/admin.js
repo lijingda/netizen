@@ -1555,12 +1555,40 @@ function rowByIdentity(selector, key, value) {
 let defaultsEditor = null;
 let defaultsProjects = [];
 let defaultsOffset = 0;
+let defaultsTab = "chat";
 let defaultsListSerial = 0;
 let defaultsBusy = false;
+let defaultsNeedsRefresh = false;
 const defaultsInput = (name) => document.querySelector(`#defaults-${name}`);
+
+function selectDefaultTab(kind) {
+  if (defaultsBusy) return;
+  defaultsTab = kind;
+  for (const candidate of ["chat", "group_name"]) {
+    const selected = candidate === kind;
+    defaultsInput(`tab-${candidate}`).setAttribute("aria-selected", String(selected));
+    defaultsInput(`tab-${candidate}`).tabIndex = selected ? 0 : -1;
+    defaultsInput(`panel-${candidate}`).hidden = !selected;
+  }
+  defaultsInput("new").textContent = kind === "chat" ? "添加聊天配置" : "添加群名规则";
+  renderDefaultControls();
+}
+
+function renderDefaultControls() {
+  defaultsInput("new").disabled = defaultsBusy || defaultsNeedsRefresh || !state.defaults?.[defaultsTab];
+  for (const kind of ["chat", "group_name"]) defaultsInput(`tab-${kind}`).disabled = defaultsBusy;
+  defaultsInput("previous").disabled = defaultsBusy || defaultsOffset === 0;
+  defaultsInput("next").disabled = defaultsBusy || !state.defaults?.chat.has_more;
+  defaultsInput("cancel").disabled = defaultsBusy;
+  defaultsInput("close").disabled = defaultsBusy;
+  for (const button of document.querySelectorAll("[data-default-action]")) {
+    button.disabled = defaultsBusy || defaultsNeedsRefresh || button.dataset.unavailable === "true";
+  }
+}
 
 function renderDefaultSettings() {
   const editor = defaultsEditor;
+  renderDefaultControls();
   defaultsInput("fields").disabled = defaultsBusy || Boolean(editor?.loading);
   if (!editor) return;
   const settings = editor.settings;
@@ -1579,12 +1607,14 @@ function renderDefaultSettings() {
   defaultsInput("reactions").checked = settings.reaction_pulse_enabled;
   defaultsInput("progress").checked = settings.progress_card_enabled;
   defaultsInput("completion-mention").checked = settings.completion_mention_enabled;
-  const notes = [editor.sourceNote, editor.error, editor.catalogError];
+  const notes = [editor.loading ? "正在读取配置…" : "", editor.sourceNote, editor.error, editor.catalogError];
   if (turn && !model) notes.push("已保存的模型当前不可用，选择保持不变；可显式选择其他模型。");
   if (editor.contextAvailable === false) notes.push("单聊不支持补齐未读上下文，请使用当前消息。");
   defaultsInput("note").textContent = notes.filter(Boolean).join(" ");
   defaultsInput("note").classList.toggle("error", Boolean(editor.error));
   defaultsInput("save").disabled = defaultsBusy || editor.loading || !editor.action;
+  defaultsInput("save").textContent = defaultsBusy ? "保存中…" : "保存";
+  defaultsInput("editor").setAttribute("aria-busy", String(defaultsBusy || editor.loading));
 }
 
 function renderDefaultProject(project) {
@@ -1644,14 +1674,18 @@ async function loadDefaultOptions(resolveChat = false) {
 }
 
 function openDefaultEditor(kind, record = null) {
-  if (defaultsBusy || !state.defaults) return;
-  defaultsEditor = { kind, record, action: record?.actions.save || state.defaults[kind].actions.create,
+  if (defaultsBusy || defaultsNeedsRefresh || !state.defaults) return;
+  defaultsEditor = { kind, record, action: record ? record.actions.save : state.defaults[kind].actions.create,
+    returnFocus: document.activeElement,
     settings: structuredClone(record?.session_settings || defaultScheduleSessionSettings()),
     models: [], serial: 0, loading: true, touched: false, contextAvailable: null,
     sourceNote: record ? "修改已保存的配置，只影响之后创建的会话。" : "保存后，在没有当前会话的位置收到消息时生效。",
     error: "", catalogError: "" };
   defaultsInput("editor").hidden = false;
-  defaultsInput("editor-title").textContent = kind === "chat" ? "聊天精确配置" : "群名规则";
+  defaultsInput("editor-title").textContent = `${record ? "编辑" : "添加"}${kind === "chat" ? "聊天配置" : "群名规则"}`;
+  defaultsInput("target-help").textContent = kind === "chat"
+    ? "支持单聊和群聊，优先于群名规则。删除后可能重新命中群名规则。"
+    : "群名包含关键词即匹配，英文忽略大小写。新规则追加到末尾，保存后可在列表中调整优先级。";
   defaultsInput("chat-field").hidden = kind !== "chat";
   defaultsInput("keyword-field").hidden = kind !== "group_name";
   defaultsInput("chat").value = record?.chat_id || "";
@@ -1662,14 +1696,23 @@ function openDefaultEditor(kind, record = null) {
   defaultsInput("keyword").required = kind === "group_name";
   renderDefaultProject(record?.project || "");
   renderDefaultSettings();
-  loadDefaultOptions();
-  defaultsInput(record ? "project" : kind === "chat" ? "chat" : "keyword").focus();
+  if (!defaultsInput("drawer").open) defaultsInput("drawer").showModal();
+  document.body.classList.toggle("defaults-drawer-open", true);
+  defaultsInput("close").focus();
+  const editor = defaultsEditor;
+  loadDefaultOptions().then(() => {
+    if (defaultsEditor === editor && document.activeElement === defaultsInput("close")) {
+      defaultsInput(record ? "project" : kind === "chat" ? "chat" : "keyword").focus();
+    }
+  });
 }
 
 function closeDefaultEditor() {
   if (defaultsBusy) return;
   defaultsEditor = null;
   defaultsInput("editor").hidden = true;
+  defaultsInput("drawer").close();
+  document.body.classList.toggle("defaults-drawer-open", false);
 }
 
 function changeDefaultSettings(field) {
@@ -1693,6 +1736,8 @@ function changeDefaultSettings(field) {
 
 async function defaultMutation(mode, action, extra = {}) {
   if (defaultsBusy || !action) return false;
+  const returnFocus = defaultsEditor?.returnFocus || document.activeElement;
+  defaultsListSerial += 1;
   defaultsBusy = true;
   renderDefaultSettings();
   try {
@@ -1706,13 +1751,15 @@ async function defaultMutation(mode, action, extra = {}) {
     }
     return false;
   } finally {
+    defaultsListSerial += 1;
+    defaultsNeedsRefresh = true;
     defaultsBusy = false;
     renderDefaultSettings();
   }
   closeDefaultEditor();
   try {
-    await loadDefaults(defaultsOffset);
-    setStatus("默认会话配置已保存。");
+    await loadDefaults(defaultsOffset, returnFocus);
+    setStatus(mode === "delete" ? "默认会话配置已删除。" : mode === "reorder" ? "群名规则优先级已更新。" : "默认会话配置已保存。");
   } catch (error) {
     setStatus(`操作已完成，但列表刷新失败：${error.message} 请手动刷新。`, true);
   }
@@ -1733,7 +1780,7 @@ async function saveDefault(event) {
 }
 
 async function deleteDefault(record) {
-  if (defaultsBusy || !window.confirm(record.kind === "chat"
+  if (defaultsBusy || defaultsNeedsRefresh || !window.confirm(record.kind === "chat"
     ? `删除 ${record.chat_id} 的精确配置？删除后可能重新命中群名规则，已有会话不受影响。`
     : `删除群名规则“${record.keyword}”？已有会话不受影响。`)) return;
   const action = record.actions.delete;
@@ -1743,7 +1790,7 @@ async function deleteDefault(record) {
 
 async function moveDefaultRule(index, delta) {
   const page = state.defaults?.group_name;
-  if (!page || page.has_more || defaultsBusy) return;
+  if (!page || page.has_more || defaultsBusy || defaultsNeedsRefresh) return;
   const ids = page.items.map((rule) => rule.id);
   const other = index + delta;
   if (other < 0 || other >= ids.length) return;
@@ -1753,52 +1800,115 @@ async function moveDefaultRule(index, delta) {
   await defaultMutation("reorder", action, { rule_ids: ids });
 }
 
-async function loadDefaults(offset = 0) {
+function defaultListButton(label, callback, { id = "", disabled = false, primary = false, danger = false } = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `action${primary ? "" : " secondary"}${danger ? " danger" : ""}`;
+  button.textContent = label;
+  button.setAttribute("data-default-action", label);
+  button.dataset.defaultId = id;
+  button.dataset.unavailable = String(disabled);
+  button.disabled = defaultsBusy || disabled;
+  button.addEventListener("click", callback);
+  return button;
+}
+
+function defaultChatCell(row, rule) {
+  const td = document.createElement("td");
+  const chat = rule.chat;
+  const title = document.createElement(chat?.chatOpenUrl ? "a" : "strong");
+  title.textContent = chat?.chatLabelResolved ? chat.chatLabel : rule.chat_id;
+  if (chat?.chatOpenUrl) {
+    title.className = "chat-link";
+    title.href = chat.chatOpenUrl;
+    title.target = "_blank";
+    title.rel = "noopener noreferrer";
+  }
+  td.append(title);
+  if (chat?.chatLabelResolved) {
+    const id = document.createElement("div");
+    id.className = "id";
+    id.textContent = rule.chat_id;
+    td.append(id);
+  }
+  row.append(td);
+}
+
+function defaultSettingsCell(row, settings) {
+  const td = document.createElement("td");
+  const model = settings.turn_settings;
+  const title = document.createElement("div");
+  title.textContent = model ? `${model.model_id} / ${model.effort_id} / ${model.service_tier_id}` : "继承 Codex";
+  const detail = document.createElement("div");
+  detail.className = "default-settings-detail";
+  detail.textContent = scheduleSessionSummary(settings).split(" · ").slice(1).join(" · ");
+  td.append(title, detail);
+  row.append(td);
+}
+
+async function loadDefaults(offset = defaultsOffset, returnFocus = null) {
   const serial = ++defaultsListSerial;
   const [chat, group, projects] = await Promise.all([
     api(`/api/v1/defaults?${new URLSearchParams({ kind: "chat", offset: String(offset), limit: "50" })}`),
     api("/api/v1/defaults?kind=group_name&limit=200"), queryProjectOptions(),
   ]);
   if (serial !== defaultsListSerial) return;
+  if (offset > 0 && !chat.items.length) return loadDefaults(Math.max(0, offset - 50), returnFocus);
+  const focused = returnFocus || document.activeElement;
+  const restoreFocus = !document.activeElement || document.activeElement === focused || document.activeElement === document.body;
   defaultsProjects = projects;
   defaultsOffset = offset;
+  defaultsNeedsRefresh = false;
   state.defaults = { chat, group_name: group };
   for (const [kind, page, body] of [["chat", chat, defaultsInput("chat-body")], ["group_name", group, defaultsInput("rules-body")]]) {
     body.replaceChildren();
     page.items.forEach((rule, index) => {
       const row = document.createElement("tr");
-      if (kind === "group_name") cell(row, String(index + 1));
-      cell(row, kind === "chat" ? rule.chat_id : rule.keyword);
-      cell(row, rule.project);
-      cell(row, scheduleSessionSummary(rule.session_settings));
-      const actions = document.createElement("td");
-      actions.className = "actions";
-      const button = (label, callback, disabled = false) => {
-        const node = document.createElement("button");
-        node.textContent = label;
-        node.disabled = disabled;
-        node.addEventListener("click", callback);
-        actions.append(node);
-      };
-      button("编辑", () => openDefaultEditor(kind, rule));
-      button("删除", () => deleteDefault(rule));
       if (kind === "group_name") {
-        button("上移", () => moveDefaultRule(index, -1), index === 0 || page.has_more);
-        button("下移", () => moveDefaultRule(index, 1), index === page.items.length - 1 || page.has_more);
+        cell(row, String(index + 1));
+        cell(row, rule.keyword);
+      } else defaultChatCell(row, rule);
+      cell(row, rule.project);
+      defaultSettingsCell(row, rule.session_settings);
+      const actions = document.createElement("td");
+      const buttons = document.createElement("div");
+      buttons.className = "actions";
+      buttons.append(
+        defaultListButton("编辑", () => openDefaultEditor(kind, rule), { id: rule.id, disabled: !rule.actions.save }),
+        defaultListButton("删除", () => deleteDefault(rule), { id: rule.id, disabled: !rule.actions.delete, danger: true }),
+      );
+      if (kind === "group_name") {
+        buttons.append(
+          defaultListButton("上移", () => moveDefaultRule(index, -1), { id: rule.id, disabled: index === 0 || page.has_more || !page.actions.reorder }),
+          defaultListButton("下移", () => moveDefaultRule(index, 1), { id: rule.id, disabled: index === page.items.length - 1 || page.has_more || !page.actions.reorder }),
+        );
       }
+      actions.append(buttons);
       row.append(actions);
       body.append(row);
     });
     if (!page.items.length) {
       const row = document.createElement("tr");
-      const empty = cell(row, kind === "chat" ? "尚未配置聊天默认值。" : "尚未配置群名规则。");
+      const empty = cell(row, "", "defaults-empty");
       empty.colSpan = kind === "chat" ? 4 : 5;
+      const message = document.createElement("p");
+      message.textContent = kind === "chat" ? "还没有聊天配置，为一个单聊或群聊设置会话默认值。" : "还没有群名规则，通过关键词为匹配的群聊设置会话默认值。";
+      empty.append(message, defaultListButton(kind === "chat" ? "添加聊天配置" : "添加群名规则",
+        () => openDefaultEditor(kind), { primary: true }));
       body.append(row);
     }
   }
-  defaultsInput("previous").disabled = offset === 0;
-  defaultsInput("next").disabled = !chat.has_more;
+  defaultsInput("pagination").hidden = offset === 0 && !chat.has_more;
   defaultsInput("page").textContent = `第 ${Math.floor(offset / 50) + 1} 页`;
+  renderDefaultControls();
+  if (restoreFocus && focused === defaultsInput("new")) {
+    focused.focus({ preventScroll: true });
+  } else if (restoreFocus && focused?.dataset.defaultAction) {
+    const replacement = Array.from(defaultsInput(`panel-${defaultsTab}`).querySelectorAll("[data-default-action]"))
+      .find((button) => button.dataset.defaultId === focused.dataset.defaultId
+        && button.dataset.defaultAction === focused.dataset.defaultAction && !button.disabled);
+    (replacement || defaultsInput("new")).focus({ preventScroll: true });
+  }
 }
 
 function scheduleDate(value) {
@@ -2693,9 +2803,23 @@ document.querySelector("#projects-next").addEventListener("click", () => refresh
 document.querySelector("#sessions-previous").addEventListener("click", () => moveSessionPage("previous"));
 document.querySelector("#sessions-next").addEventListener("click", () => moveSessionPage("next"));
 document.querySelector("#sides-next").addEventListener("click", () => refresh("side-topics", state.sideCursor));
-defaultsInput("new-chat").addEventListener("click", () => openDefaultEditor("chat"));
-defaultsInput("new-rule").addEventListener("click", () => openDefaultEditor("group_name"));
+defaultsInput("new").addEventListener("click", () => openDefaultEditor(defaultsTab));
+for (const kind of ["chat", "group_name"]) {
+  defaultsInput(`tab-${kind}`).addEventListener("click", () => selectDefaultTab(kind));
+  defaultsInput(`tab-${kind}`).addEventListener("keydown", (event) => {
+    if (defaultsBusy || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const target = event.key === "Home" ? "chat" : event.key === "End" ? "group_name" : kind === "chat" ? "group_name" : "chat";
+    selectDefaultTab(target);
+    defaultsInput(`tab-${target}`).focus();
+  });
+}
 defaultsInput("cancel").addEventListener("click", closeDefaultEditor);
+defaultsInput("close").addEventListener("click", closeDefaultEditor);
+defaultsInput("drawer").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeDefaultEditor();
+});
 defaultsInput("editor").addEventListener("submit", saveDefault);
 defaultsInput("chat").addEventListener("change", () => loadDefaultOptions(true));
 for (const field of ["model", "effort", "tier", "context", "reactions", "progress", "completion-mention"]) {
