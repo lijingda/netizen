@@ -47,13 +47,13 @@ class BuiltinSkillsTest(unittest.TestCase):
             current.symlink_to(release, target_is_directory=True)
             self.assertEqual(
                 builtin_skill_root(runtime_prefix=current / "venv", package_file=module),
-                source / "skills",
+                (source / "skills").resolve(),
             )
             current.unlink()
             current.symlink_to(root / "releases" / "release-2", target_is_directory=True)
             self.assertEqual(
                 builtin_skill_root(runtime_prefix=prefix, package_file=module),
-                source / "skills",
+                (source / "skills").resolve(),
             )
 
     def test_unrecognized_package_layout_fails_without_global_fallback(self) -> None:

@@ -186,20 +186,21 @@ class NetizenInstallerTest(unittest.TestCase):
                 platform_name="linux",
             )
 
+            product_root = (home / ".netizen").resolve()
             self.assertEqual(layout.home, home)
-            self.assertEqual(layout.product_root, home / ".netizen")
-            self.assertEqual(layout.config_file, home / ".netizen/config.yaml")
+            self.assertEqual(layout.product_root, product_root)
+            self.assertEqual(layout.config_file, product_root / "config.yaml")
             self.assertEqual(
                 layout.credentials_dir,
-                home / ".netizen/credentials",
+                product_root / "credentials",
             )
             self.assertEqual(
                 layout.admin_secret_file,
-                home / ".netizen/credentials/admin-web-secret",
+                product_root / "credentials/admin-web-secret",
             )
-            self.assertEqual(layout.state_dir, home / ".netizen/state")
-            self.assertEqual(layout.cache_dir, home / ".netizen/cache")
-            self.assertEqual(layout.releases, home / ".netizen/releases")
+            self.assertEqual(layout.state_dir, product_root / "state")
+            self.assertEqual(layout.cache_dir, product_root / "cache")
+            self.assertEqual(layout.releases, product_root / "releases")
             self.assertEqual(
                 layout.service_file,
                 home / ".config/systemd/user" / layout.service_name,

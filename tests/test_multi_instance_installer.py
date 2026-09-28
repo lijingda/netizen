@@ -43,17 +43,30 @@ class MultiInstanceInstallerTest(unittest.TestCase):
             "HOME": str(self.directory / "wrong-home"),
             "NETIZEN_ROOT": "~/from environment",
         }
-        self.assertEqual(self.layout().product_root, self.home / ".netizen")
+        self.assertEqual(self.layout().product_root, (self.home / ".netizen").resolve())
         self.assertEqual(
             self.layout(environ=environment).product_root,
-            self.home / "from environment",
+            (self.home / "from environment").resolve(),
         )
         selected = self.layout("~/共享 team", environ=environment)
-        self.assertEqual(selected.product_root, self.home / "共享 team")
+        self.assertEqual(selected.product_root, (self.home / "共享 team").resolve())
         self.assertEqual(selected.codex_home, self.home / ".codex")
         self.assertEqual(selected.lark_app_file, selected.product_root / "lark-app/config.json")
         self.assertEqual(selected.config_file, selected.product_root / "config.yaml")
         self.assertEqual(selected.state_dir, selected.product_root / "state")
+
+    def test_default_root_canonicalizes_a_symlinked_account_home(self) -> None:
+        alias = self.directory / "home-alias"
+        alias.symlink_to(self.home, target_is_directory=True)
+        layout = installer.resolve_layout(
+            environ={}, account_home=alias, uid=os.geteuid(),
+            username="current-user", platform_name="linux",
+        )
+        canonical = self.layout()
+        self.assertEqual(layout.product_root, canonical.product_root)
+        self.assertEqual(layout.config_file, canonical.config_file)
+        self.assertEqual(layout.state_dir, canonical.state_dir)
+        self.assertEqual(layout.service_name, canonical.service_name)
 
     def test_root_aliases_produce_the_same_platform_targets(self) -> None:
         root = self.home / "实例 one"
