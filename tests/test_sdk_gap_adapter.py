@@ -25,6 +25,7 @@ from netizen.sdk_gap_adapter import (
     AppServerGoalControl,
     AppServerSideBoundaryControl,
     AppServerSkillCatalog,
+    AppServerSkillRoots,
     AppServerThreadDeleteControl,
     AppServerThreadSubscriptionControl,
     GoalControlError,
@@ -124,6 +125,15 @@ for line in sys.stdin:
                 "serverInfo": {"name": "fake", "version": "1"},
             },
         })
+    elif method == "skills/extraRoots/set":
+        if mode == "skill-roots-loss":
+            raise SystemExit(0)
+        if mode == "skill-roots-timeout":
+            continue
+        if mode == "skill-roots-rejected":
+            send({"id": request_id, "error": {"code": -32602, "message": "roots rejected"}})
+        else:
+            send({"id": request_id, "result": {}})
     elif method == "skills/list":
         send({
             "id": request_id,
@@ -562,6 +572,53 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
             ["initialize", "skills/list"],
         )
 
+    async def test_skill_roots_use_same_client_typed_absolute_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            log_path = root / "requests.jsonl"
+            async with AsyncCodex(_config(log_path)) as codex:
+                process = codex._client._sync._proc
+                roots = AppServerSkillRoots(codex)
+                self.assertFalse(hasattr(roots, "request"))
+                await roots.set_roots((root, root))
+                await roots.set_roots(())
+                with self.assertRaises(FileNotFoundError):
+                    await roots.set_roots((root / "absent",))
+                with self.assertRaisesRegex(RuntimeError, "绝对目录"):
+                    await roots.set_roots((Path("relative"),))
+                await AppServerSkillCatalog(codex).list(Path("/tmp/project"))
+            _close_probe_pipes(process)
+            messages = [item for item in _messages(log_path) if "id" in item]
+        self.assertEqual(
+            [item["method"] for item in messages],
+            ["initialize", "skills/extraRoots/set", "skills/extraRoots/set", "skills/list"],
+        )
+        self.assertEqual(messages[1]["params"], {"extraRoots": [str(root)]})
+        self.assertEqual(messages[2]["params"], {"extraRoots": []})
+
+    async def test_skill_root_registration_failure_is_not_retried(self) -> None:
+        for mode in ("skill-roots-loss", "skill-roots-rejected", "skill-roots-timeout"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
+                log_path = Path(raw) / "requests.jsonl"
+                codex = AsyncCodex(_config(log_path, mode))
+                await codex.__aenter__()
+                process = codex._client._sync._proc
+                try:
+                    with (
+                        patch("netizen.sdk_gap_adapter._SKILL_ROOTS_TIMEOUT_SECONDS", 0.05),
+                        self.assertRaises(Exception),
+                    ):
+                        await AppServerSkillRoots(codex).set_roots((Path(raw),))
+                finally:
+                    with suppress(BrokenPipeError):
+                        await codex.close()
+                _close_probe_pipes(process)
+                requests = [
+                    item for item in _messages(log_path)
+                    if item.get("method") == "skills/extraRoots/set"
+                ]
+                self.assertEqual(len(requests), 1)
+
     async def test_goal_start_routes_immediate_multi_turn_notifications(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             log_path = Path(raw) / "requests.jsonl"
@@ -928,6 +985,7 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
             async with AsyncCodex(_config(log_path)) as codex:
                 process = codex._client._sync._proc
                 with patch.object(openai_codex, "__version__", "99.0.0"):
+                    self.assertIsInstance(AppServerSkillRoots(codex), AppServerSkillRoots)
                     self.assertIsInstance(
                         AppServerSkillCatalog(codex),
                         AppServerSkillCatalog,
@@ -956,6 +1014,17 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
             log_path = Path(raw) / "requests.jsonl"
             async with AsyncCodex(_config(log_path)) as codex:
                 process = codex._client._sync._proc
+                for model_name in ("SkillsExtraRootsSetParams", "SkillsExtraRootsSetResponse"):
+                    with patch(f"netizen.sdk_gap_adapter._generated.{model_name}", None):
+                        with self.assertRaises(SdkGapCapabilityUnavailable):
+                            AppServerSkillRoots(codex)
+                        self.assertIsInstance(AppServerSkillCatalog(codex), AppServerSkillCatalog)
+                with patch(
+                    "netizen.sdk_gap_adapter._generated.SkillsExtraRootsSetParams",
+                    type("MalformedParams", (), {"model_fields": {}}),
+                ):
+                    with self.assertRaises(SdkGapCapabilityUnavailable):
+                        AppServerSkillRoots(codex)
                 with patch(
                     "netizen.sdk_gap_adapter._generated.SkillsListResponse",
                     None,
@@ -1044,6 +1113,11 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
 
     def test_public_facade_inventory_is_a_migration_sentinel(self) -> None:
         self.assertEqual(facade_migration_requirements(), ())
+        with patch.object(AsyncCodex, "skills_extra_roots_set", object(), create=True):
+            self.assertEqual(
+                facade_migration_requirements(),
+                ("migration-required:skill-roots:AsyncCodex.skills_extra_roots_set",),
+            )
         with patch.object(
             AsyncCodex,
             "thread_unsubscribe",

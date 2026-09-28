@@ -1,5 +1,11 @@
 # Netizen 领域词汇
 
+**Netizen Instance / Netizen 实例**：独立安装、绑定一个飞书应用并可单独启停和维护的
+Netizen 部署单位。同一实例内的多个 Project 或 Binding 不是多个实例。
+
+**Instance Root / 实例根目录**：标识并承载一个 Netizen 实例的安装位置。它不同于
+实例使用的 Project，也不表示实例拥有独立的 Codex 用户状态。
+
 **Main Qualification / main 代码资格**：exact `main` commit 的 required CI 已成功完成
 统一本地代码门禁。它是正式发布复用的代码可靠性结论，不包含账号、租户、模型提供方或
 目标主机的实时兼容性结论。
@@ -234,8 +240,9 @@ Channel Database。
 
 **SDK Gap Adapter / SDK 能力缺口适配器**：ADR 0014 定义的临时、可逐项删除边界。
 它只复用同一个 `AsyncCodex` 已初始化的 App Server，为 ADR 0014 的固定 Goal/Skills
-method、ADR 0021 的固定 Side boundary、ADR 0028 的固定 Thread unsubscribe method 和
-ADR 0037 的固定 Thread Delete method 提供窄语义口；不暴露通用 RPC，不复制协议或状态，
+method、ADR 0021 的固定 Side boundary、ADR 0028 的固定 Thread unsubscribe method、
+ADR 0037 的固定 Thread Delete method 及 ADR 0074 的进程级 Skill roots 提供窄语义口；
+不暴露通用 RPC，不复制协议或状态，
 也不按 SDK 版本号做运行时许可。SDK 升级由能力 shape、真实 SDK client synthetic harness
 和目标环境 live probe 放行；高层 facade 支持一项就切回并删除一项 shim。
 

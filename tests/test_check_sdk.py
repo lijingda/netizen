@@ -30,6 +30,7 @@ class CheckSdkTest(unittest.TestCase):
                 "probe_sdk_completion_race.py",
                 "--usage-drain", "--attempts", "40", "--timeout", "10",
             ],
+            ["probe_skill_roots.py", "--timeout", "15"],
         ]
         probe = """\
 import json

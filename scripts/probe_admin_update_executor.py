@@ -28,6 +28,7 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
 from netizen.deployment.update_executor import UpdateExecutor  # noqa: E402
+from netizen.instance import instance_digest  # noqa: E402
 
 
 _ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -45,7 +46,7 @@ class _ParentExecutor(UpdateExecutor):
 
     def _label(self, operation_id: str) -> str:
         self._validate_operation_id(operation_id)
-        return f"netizen-update-probe-parent-{operation_id}"
+        return f"netizen-update-probe-parent-{instance_digest(self.product_root)}-{operation_id}"
 
 
 def _write(path: Path, value: dict[str, Any]) -> None:
@@ -117,9 +118,9 @@ def _fixture(home: Path) -> dict[str, Any]:
 def _job(home: Path, config: dict[str, Any], role: str) -> tuple[UpdateExecutor, str]:
     # There is deliberately no general target-name, command, or script option.
     if role == "parent":
-        return _ParentExecutor(home), config["parent_id"]
+        return _ParentExecutor(home, root=home / ".netizen"), config["parent_id"]
     if role == "helper":
-        return UpdateExecutor(home), config["helper_id"]
+        return UpdateExecutor(home, root=home / ".netizen"), config["helper_id"]
     raise ProbeError("unknown probe job role")
 
 
@@ -159,7 +160,7 @@ def _parent(home: Path, config: dict[str, Any]) -> None:
         os.environ["NETIZEN_LIFETIME_LOCK_FD"] = str(lock.fileno())
         os.environ["NETIZEN_LIFETIME_LOCK_FILE"] = str(state / "parent.lifetime.lock")
         _write(state / "parent-started.json", {"cgroup": _cgroup()})
-        UpdateExecutor(home).launch(config["helper_id"], home / ".netizen" / "current")
+        UpdateExecutor(home, root=home / ".netizen").launch(config["helper_id"], home / ".netizen" / "current")
         _write(state / "parent-submitted.json", {"helper_id": config["helper_id"]})
         while time.monotonic() < config["deadline"]:
             time.sleep(0.1)
@@ -195,9 +196,11 @@ def _helper(home: Path, config: dict[str, Any]) -> None:
         )
 
 
-def _actor(operation_id: str) -> int:
+def _actor(operation_id: str, root: Path) -> int:
     home = Path(__file__).resolve().parents[5]
     config = _fixture(home)
+    if root != home / ".netizen":
+        raise ProbeError("the probe actor root is not its disposable fixture")
     if Path(__file__).resolve() != home / ".netizen" / "releases" / config["release_id"] / "source" / "scripts" / "netizen_updater.py":
         raise ProbeError("the probe actor did not start from its physical fixture release")
     role = "parent" if operation_id == config["parent_id"] else "helper"
@@ -227,6 +230,7 @@ def _prepare(root: Path, deadline: float) -> tuple[Path, dict[str, Any]]:
     package = release / "source" / "netizen"
     package.mkdir()
     (package / "__init__.py").write_text("", encoding="utf-8")
+    shutil.copyfile(SOURCE_ROOT / "netizen" / "instance.py", package / "instance.py")
     deployment = package / "deployment"
     deployment.mkdir()
     (deployment / "__init__.py").write_text("", encoding="utf-8")
@@ -256,8 +260,8 @@ def _evidence(home: Path, config: dict[str, Any]) -> dict[str, bool]:
         helper = _read(state / "helper-started.json")["cgroup"]
         checks["distinct_service_cgroups"] = (
             parent != helper
-            and f"netizen-update-probe-parent-{config['parent_id']}.service" in parent
-            and f"netizen-update-{config['helper_id']}.service" in helper
+            and f"netizen-update-probe-parent-{instance_digest(home / '.netizen')}-{config['parent_id']}.service" in parent
+            and f"netizen-update-{instance_digest(home / '.netizen')}-{config['helper_id']}.service" in helper
         )
     return checks
 
@@ -270,7 +274,7 @@ def _run_probe(timeout: float) -> dict[str, Any]:
     try:
         deadline = time.monotonic() + timeout
         home, config = _prepare(root, deadline)
-        _ParentExecutor(home).launch(config["parent_id"], home / ".netizen" / "current")
+        _ParentExecutor(home, root=home / ".netizen").launch(config["parent_id"], home / ".netizen" / "current")
         state = home / ".netizen" / "state"
 
         def finished() -> bool:
@@ -284,7 +288,7 @@ def _run_probe(timeout: float) -> dict[str, Any]:
         _wait(finished, deadline, "helper completion after parent stop")
         _wait(lambda: _lock_available(state / "helper.execution.lock"), deadline, "helper result write to finish")
         checks = _evidence(home, config)
-        checks["parent_manager_stopped"] = not _ParentExecutor(home).is_active(config["parent_id"])
+        checks["parent_manager_stopped"] = not _ParentExecutor(home, root=home / ".netizen").is_active(config["parent_id"])
         report.update({"ok": all(checks.values()), "checks": checks})
         if not report["ok"]:
             report["error"] = "one or more executor isolation proofs failed"
@@ -318,9 +322,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=60, help="probe deadline in seconds; cleanup has an additional 20-second budget")
     parser.add_argument("--operation-id", help=argparse.SUPPRESS)
+    parser.add_argument("--root", help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
     if arguments.operation_id is not None:
-        return _actor(arguments.operation_id)
+        if arguments.root is None:
+            parser.error("a probe actor requires --root")
+        return _actor(arguments.operation_id, Path(arguments.root))
+    if arguments.root is not None:
+        parser.error("the probe creates its own disposable root")
     if not 5 <= arguments.timeout <= 300:
         parser.error("--timeout must be between 5 and 300 seconds")
     if sys.platform not in {"linux", "darwin"}:

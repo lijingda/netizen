@@ -12,6 +12,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from netizen.instance import (
+    INSTANCE_ROOT_MARKER,
+    INSTANCE_ROOT_MARKER_CONTENT,
+    require_instance_root_marker,
+)
 from scripts import netizen_service_launcher as launcher
 
 
@@ -253,9 +258,11 @@ printf 'logout-noise=ignored'
                 )
 
     def test_managed_values_override_profile_without_losing_tool_environment(self) -> None:
-        home = Path("/home/service-user")
+        home = Path("/home/service-user").resolve()
+        root = home / ".netizen"
         environment = launcher.service_environment(
             {
+                "NETIZEN_ROOT": "/wrong/instance",
                 "CODEX_HOME": "/wrong/codex",
                 "CUSTOM_TOKEN": "available-to-codex",
                 "FEISHU_APP_SECRET": "must-be-removed",
@@ -268,19 +275,16 @@ printf 'logout-noise=ignored'
                 "XDG_CONFIG_HOME": "/home/service-user/.xdg-config",
                 "https_proxy": "http://proxy",
             },
+            instance_root=root,
             home=home,
             username="service-user",
             shell=Path("/bin/bash"),
             codex_home="/home/service-user/.codex",
-            config_path="/home/service-user/.netizen/config.yaml",
-            lark_app_config="/home/service-user/.netizen/lark-app/config.json",
-            admin_secret_file=(
-                "/home/service-user/.netizen/credentials/admin-web-secret"
-            ),
-            ready_file="/home/service-user/.netizen/state/service.ready",
-            lifetime_lock_file=(
-                "/home/service-user/.netizen/state/service.lifetime.lock"
-            ),
+            config_path=str(root / "config.yaml"),
+            lark_app_config=str(root / "lark-app/config.json"),
+            admin_secret_file=str(root / "credentials/admin-web-secret"),
+            ready_file=str(root / "state/service.ready"),
+            lifetime_lock_file=str(root / "state/service.lifetime.lock"),
         )
 
         self.assertEqual(
@@ -294,16 +298,17 @@ printf 'logout-noise=ignored'
             "/home/service-user/.xdg-config",
         )
         self.assertEqual(environment["CODEX_HOME"], "/home/service-user/.codex")
+        self.assertEqual(environment["NETIZEN_ROOT"], str(home / ".netizen"))
         self.assertNotIn("FEISHU_APP_SECRET", environment)
         self.assertNotIn("FEISHU_APP_SECRET_FILE", environment)
         self.assertNotIn("NETIZEN_ADMIN_SECRET", environment)
         self.assertEqual(
             environment["NETIZEN_LARK_APP_CONFIG"],
-            "/home/service-user/.netizen/lark-app/config.json",
+            str(root / "lark-app/config.json"),
         )
         self.assertEqual(
             environment["NETIZEN_ADMIN_SECRET_FILE"],
-            "/home/service-user/.netizen/credentials/admin-web-secret",
+            str(root / "credentials/admin-web-secret"),
         )
         self.assertNotIn("PYTHONPATH", environment)
         self.assertEqual(environment["PYTHONUNBUFFERED"], "1")
@@ -314,23 +319,11 @@ printf 'logout-noise=ignored'
             pw_name="service-user",
             pw_shell="/bin/bash",
         )
+        root = Path("/home/service-user/.netizen").resolve()
         managed = {
+            "NETIZEN_ROOT": str(root),
             "CODEX_HOME": "/home/service-user/.codex",
-            "NETIZEN_LARK_APP_CONFIG": (
-                "/home/service-user/.netizen/lark-app/config.json"
-            ),
-            "NETIZEN_ADMIN_SECRET_FILE": (
-                "/home/service-user/.netizen/credentials/admin-web-secret"
-            ),
-            "NETIZEN_CONFIG_PATH": (
-                "/home/service-user/.netizen/config.yaml"
-            ),
-            "NETIZEN_READY_FILE": (
-                "/home/service-user/.netizen/state/service.ready"
-            ),
-            "NETIZEN_LIFETIME_LOCK_FILE": (
-                "/home/service-user/.netizen/state/service.lifetime.lock"
-            ),
+            **launcher._instance_paths(root),
         }
         with (
             patch.dict(launcher.os.environ, managed, clear=True),
@@ -339,11 +332,13 @@ printf 'logout-noise=ignored'
                 launcher,
                 "capture_profile_environment",
                 return_value={
+                    "NETIZEN_ROOT": "/wrong/instance/from-profile",
                     "PATH": "/home/service-user/.nvm/current/bin:/usr/bin",
                     "PYTHONOPTIMIZE": "2",
                 },
             ),
             patch.object(launcher.os, "execve") as execute,
+            patch.object(launcher, "require_instance_root_marker") as check_root,
             patch.object(launcher, "acquire_lifetime_lock", return_value=9),
             patch.object(launcher, "clear_ready_marker") as clear_ready,
             patch.object(launcher.os, "set_inheritable") as set_inheritable,
@@ -351,6 +346,7 @@ printf 'logout-noise=ignored'
             launcher.launch()
 
         executable, argv, environment = execute.call_args.args
+        check_root.assert_called_once_with(root)
         self.assertEqual(executable, launcher.sys.executable)
         self.assertEqual(
             argv,
@@ -362,6 +358,7 @@ printf 'logout-noise=ignored'
         )
         self.assertEqual(environment["PYTHONOPTIMIZE"], "2")
         self.assertEqual(environment["CODEX_HOME"], managed["CODEX_HOME"])
+        self.assertEqual(environment["NETIZEN_ROOT"], managed["NETIZEN_ROOT"])
         self.assertEqual(environment["NETIZEN_LIFETIME_LOCK_FD"], "9")
         clear_ready.assert_called_once_with(Path(managed["NETIZEN_READY_FILE"]))
         self.assertEqual(
@@ -396,16 +393,21 @@ printf 'logout-noise=ignored'
 
     def test_launcher_removes_stale_ready_marker_before_profile_capture(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            ready = root / "service.ready"
-            lock = root / "service.lifetime.lock"
+            root = Path(directory).resolve() / "share with trailing space "
+            state = root / "state"
+            state.mkdir(parents=True)
+            marker = root / INSTANCE_ROOT_MARKER
+            marker.write_bytes(INSTANCE_ROOT_MARKER_CONTENT)
+            marker.chmod(0o600)
+            ready = state / "service.ready"
             ready.write_text("stale", encoding="utf-8")
             with (
                 patch.dict(
                     launcher.os.environ,
                     {
-                        "NETIZEN_LIFETIME_LOCK_FILE": str(lock),
-                        "NETIZEN_READY_FILE": str(ready),
+                        **launcher._instance_paths(root),
+                        "NETIZEN_ROOT": str(root),
+                        "CODEX_HOME": str(root / "codex-user-state"),
                     },
                     clear=True,
                 ),
@@ -417,9 +419,99 @@ printf 'logout-noise=ignored'
                 launcher.launch()
 
             self.assertFalse(ready.exists())
+            self.assertEqual(launch_main.call_args.kwargs["instance_root"], root)
             descriptor = launch_main.call_args.args[0]
             with self.assertRaises(OSError):
                 os.fstat(descriptor)
+
+    def test_invalid_root_marker_fails_before_any_startup_mutation(self) -> None:
+        for case in ("missing", "content", "mode", "symlink", "directory"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                marker = root / INSTANCE_ROOT_MARKER
+                if case == "directory":
+                    marker.mkdir(mode=0o600)
+                elif case == "symlink":
+                    target = root / "marker-target"
+                    target.write_bytes(INSTANCE_ROOT_MARKER_CONTENT)
+                    target.chmod(0o600)
+                    marker.symlink_to(target)
+                elif case != "missing":
+                    marker.write_bytes(b"unknown-root\n" if case == "content" else INSTANCE_ROOT_MARKER_CONTENT)
+                    marker.chmod(0o644 if case == "mode" else 0o600)
+                with (
+                    patch.dict(launcher.os.environ, {
+                        **launcher._instance_paths(root),
+                        "NETIZEN_ROOT": str(root),
+                        "CODEX_HOME": str(root / "shared-codex"),
+                    }, clear=True),
+                    patch.object(launcher, "acquire_lifetime_lock") as acquire,
+                    patch.object(launcher, "clear_ready_marker") as clear,
+                    patch.object(launcher, "capture_profile_environment") as capture,
+                    patch.object(launcher.os, "execve") as execute,
+                ):
+                    with self.assertRaisesRegex(launcher.ServiceLaunchError, "instance root marker"):
+                        launcher.launch()
+                    acquire.assert_not_called()
+                    clear.assert_not_called()
+                    capture.assert_not_called()
+                    execute.assert_not_called()
+                self.assertFalse((root / "state").exists())
+
+    def test_root_marker_requires_expected_owner_and_exact_content_without_rewriting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / INSTANCE_ROOT_MARKER
+            marker.write_bytes(INSTANCE_ROOT_MARKER_CONTENT)
+            marker.chmod(0o600)
+            before = marker.stat()
+            require_instance_root_marker(root, uid=os.geteuid())
+            with self.assertRaisesRegex(ValueError, "instance root marker"):
+                require_instance_root_marker(root, uid=os.geteuid() + 1)
+            after = marker.stat()
+            self.assertEqual((before.st_ino, before.st_mode, before.st_mtime_ns),
+                             (after.st_ino, after.st_mode, after.st_mtime_ns))
+            marker.write_bytes(INSTANCE_ROOT_MARKER_CONTENT + b"extra")
+            with self.assertRaisesRegex(ValueError, "instance root marker"):
+                require_instance_root_marker(root)
+
+    def test_mixed_instance_paths_fail_before_lock_or_ready_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            other = root / "another-instance"
+            values = {
+                **launcher._instance_paths(root),
+                "NETIZEN_ROOT": str(root),
+                "CODEX_HOME": str(root / "shared-codex"),
+            }
+            for field in launcher._instance_paths(root):
+                with (
+                    self.subTest(field=field),
+                    patch.dict(launcher.os.environ, {
+                        **values, field: launcher._instance_paths(other)[field],
+                    }, clear=True),
+                    patch.object(launcher, "acquire_lifetime_lock") as acquire,
+                    patch.object(launcher, "clear_ready_marker") as clear,
+                    self.assertRaisesRegex(launcher.ServiceLaunchError, "does not match NETIZEN_ROOT"),
+                ):
+                    launcher.launch()
+                acquire.assert_not_called()
+                clear.assert_not_called()
+
+    def test_instance_lifetime_locks_are_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory) / name / "state/service.lifetime.lock" for name in ("a", "b")]
+            for path in paths:
+                path.parent.mkdir(parents=True)
+            first = launcher.acquire_lifetime_lock(paths[0])
+            second = launcher.acquire_lifetime_lock(paths[1])
+            try:
+                with self.assertRaises(launcher.ServiceLaunchError):
+                    launcher.acquire_lifetime_lock(paths[0])
+                self.assertNotEqual(os.fstat(first).st_ino, os.fstat(second).st_ino)
+            finally:
+                os.close(second)
+                os.close(first)
 
 
 if __name__ == "__main__":

@@ -15,11 +15,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ..instance import instance_digest, resolve_instance_root
+
 
 COMMAND_TIMEOUT_SECONDS = 10.0
 _OPERATION_ID = re.compile(r"[0-9a-f]{32}\Z")
 _BOOTSTRAP_PATH = "/usr/local/bin:/usr/bin:/bin"
 _CLEARED_ENVIRONMENT = (
+    "NETIZEN_ROOT",
     "FEISHU_APP_SECRET",
     "NETIZEN_ADMIN_SECRET",
     "FEISHU_APP_SECRET_FILE",
@@ -31,6 +34,10 @@ _CLEARED_ENVIRONMENT = (
     "NETIZEN_READY_FILE",
     "NETIZEN_LOG_FILE",
     "NETIZEN_MANAGED_LAUNCH_AGENT",
+    "NETIZEN_UPDATE_OPERATION_ID",
+    "NETIZEN_UPDATE_LOCK_FD",
+    "NETIZEN_UPDATE_VERSION",
+    "NETIZEN_UPDATE_ARCHIVE_SHA256",
     "PYTHONHOME",
     "PYTHONPATH",
     "VIRTUAL_ENV",
@@ -47,10 +54,15 @@ class UpdateDispatchUnknown(UpdateExecutorError):
 
 
 class UpdateExecutor:
-    def __init__(self, home: Path, platform_name: str | None = None) -> None:
+    def __init__(self, home: Path, platform_name: str | None = None,
+                 *, root: Path | None = None) -> None:
         if not home.is_absolute() or home == Path(home.anchor):
             raise UpdateExecutorError("update home must be an absolute non-root path")
         self.home = home.resolve()
+        try:
+            self.product_root = resolve_instance_root(root, account_home=self.home)
+        except (OSError, ValueError, RuntimeError) as error:
+            raise UpdateExecutorError("invalid update instance root") from error
         self.platform_name = sys.platform if platform_name is None else platform_name
         if self.platform_name not in {"linux", "darwin"}:
             raise UpdateExecutorError("updates require Linux or macOS")
@@ -63,10 +75,10 @@ class UpdateExecutor:
 
     def _label(self, operation_id: str) -> str:
         self._validate_operation_id(operation_id)
-        return f"netizen-update-{operation_id}"
+        return f"netizen-update-{instance_digest(self.product_root)}-{operation_id}"
 
     def _plist_path(self, operation_id: str) -> Path:
-        return self.home / ".netizen" / "state" / f"{self._label(operation_id)}.plist"
+        return self.product_root / "state" / f"{self._label(operation_id)}.plist"
 
     def _worker_arguments(self, operation_id: str, release_root: Path) -> list[str]:
         self._validate_operation_id(operation_id)
@@ -74,7 +86,7 @@ class UpdateExecutor:
             raise UpdateExecutorError("update release must be an absolute path")
         try:
             physical = release_root.resolve(strict=True)
-            releases = (self.home / ".netizen" / "releases").resolve(strict=True)
+            releases = (self.product_root / "releases").resolve(strict=True)
         except OSError as error:
             raise UpdateExecutorError("the installed update release is unavailable") from error
         if physical.parent != releases or not physical.is_dir():
@@ -90,14 +102,16 @@ class UpdateExecutor:
             or worker.resolve() != worker
         ):
             raise UpdateExecutorError("the installed update worker is unavailable")
-        return [str(python), "-E", "-B", "-u", str(worker), "--operation-id", operation_id]
+        return [str(python), "-E", "-B", "-u", str(worker),
+                "--root", str(self.product_root), "--operation-id", operation_id]
 
     def _command(
         self, arguments: list[str], *, dispatch: bool = False, capture: bool = False
     ) -> subprocess.CompletedProcess[str]:
         environment = dict(os.environ)
-        for key in _CLEARED_ENVIRONMENT:
-            environment.pop(key, None)
+        for key in tuple(environment):
+            if key.startswith("NETIZEN_") or key in _CLEARED_ENVIRONMENT:
+                environment.pop(key, None)
         environment["HOME"] = str(self.home)
         if self.platform_name == "linux":
             environment.setdefault("XDG_RUNTIME_DIR", f"/run/user/{self._uid}")
@@ -242,9 +256,10 @@ class UpdateExecutor:
     def cleanup(self, operation_id: str) -> None:
         """Remove a completed job from the service manager.
 
-        Call only from the Admin process after a durable terminal result and a
-        released execution lock. In particular, the updater must not bootout
-        itself: launchd could kill it before it finishes writing its result.
+        The Admin process or installer must own the installation lock and have
+        read a durable terminal result; acquiring that lock proves the worker
+        has released execution. The updater must not bootout itself: launchd
+        could kill it before it finishes writing its result.
         Linux's --collect performs automatic transient-unit removal.
         """
 

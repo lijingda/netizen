@@ -2,10 +2,39 @@
 set -eu
 
 main() {
-if [ "$#" -ne 0 ]; then
-    echo "usage: install.sh" >&2
+validate_install_arguments() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --root)
+                [ "$#" -ge 2 ] && [ -n "$2" ] || return 1
+                shift 2
+                ;;
+            --root=*)
+                [ -n "${1#--root=}" ] || return 1
+                shift
+                ;;
+            --admin-port)
+                [ "$#" -ge 2 ] || return 1
+                candidate_port=$2
+                shift 2
+                case "$candidate_port" in ''|*[!0-9]*) return 1 ;; esac
+                [ "${#candidate_port}" -le 5 ] && [ "$candidate_port" -ge 1 ] && [ "$candidate_port" -le 65535 ] || return 1
+                ;;
+            --admin-port=*)
+                candidate_port=${1#--admin-port=}
+                shift
+                case "$candidate_port" in ''|*[!0-9]*) return 1 ;; esac
+                [ "${#candidate_port}" -le 5 ] && [ "$candidate_port" -ge 1 ] && [ "$candidate_port" -le 65535 ] || return 1
+                ;;
+            *) return 1 ;;
+        esac
+    done
+}
+
+validate_install_arguments "$@" || {
+    echo "usage: install.sh [--root PATH] [--admin-port PORT]" >&2
     exit 2
-fi
+}
 
 REPOSITORY='@@REPOSITORY@@'
 TAG='@@TAG@@'
@@ -19,7 +48,7 @@ fail() {
 }
 
 # The Admin worker binds the download to what the administrator selected. This
-# private handoff never changes the public zero-argument installer interface.
+# private handoff does not change the public root/port installer interface.
 if [ -n "${NETIZEN_UPDATE_OPERATION_ID:-}" ]; then
     [ "${NETIZEN_UPDATE_VERSION:-}" = "$VERSION" ] || \
         fail "Admin update version does not match this exact installer"
@@ -184,11 +213,11 @@ installer="$source_root/scripts/netizen_installer.py"
 # leaves stdin as a pipe, so a real controlling terminal restores the normal
 # human setup flow.  Every remaining case is explicitly non-interactive.
 if [ -t 0 ]; then
-    python3 -E -B -u "$installer" install-release "$source_root"
+    python3 -E -B -u "$installer" install-release "$source_root" "$@"
 elif [ -p /dev/stdin ] && (: </dev/tty) 2>/dev/null; then
-    python3 -E -B -u "$installer" install-release "$source_root" </dev/tty
+    python3 -E -B -u "$installer" install-release "$source_root" "$@" </dev/tty
 else
-    python3 -E -B -u "$installer" install-release "$source_root" </dev/null
+    python3 -E -B -u "$installer" install-release "$source_root" "$@" </dev/null
 fi
 }
 

@@ -9,12 +9,14 @@ Netizen 把飞书单聊、群聊和话题接成 Codex 的消息 Channel。仓库
 
 ### 职责与对象关系
 
-一个常驻 Python 服务内只有一个 `FeishuChannel`、Store、Runtime、Scheduler 和共享
+每个独立实例是一个常驻 Python 服务，内含一个 `FeishuChannel`、Store、Runtime、Scheduler 和共享
 `AsyncCodex`。Channel SDK 负责飞书消息与卡片；Netizen 负责 Scope/Binding 路由、项目
 登记、展示和定时交接；官方 `openai-codex` SDK 管理原生 App Server/CLI 上的 Thread、
 Turn、历史、工具与权限。Admin Web 是同一应用边界上的管理入口，不能提交即时 Prompt
 或浏览完整历史。升级、重启的一次性部署进程是限定例外，见[架构](#架构)与
 [系统维护 API](#系统维护-api)。
+同账号可部署多个 root，各自管理自己的机器人和 Channel 状态，同时共享原生 Codex
+用户状态；不因此增加业务 instance ID、权限隔离或跨实例服务依赖。
 
 普通单聊、群聊主线或话题各是一个 Scope，可关联多个 Binding 和一个当前指针。
 Binding 选择一个 Project 的 canonical cwd，并在物化后精确绑定一个 native Thread；
@@ -49,7 +51,7 @@ ephemeral fork，依靠独立话题 route 保留身份，不是普通 Scope/Bind
 
 持久化清单和各项例外以[数据与配置](#数据与配置)、[定时任务](#定时任务)及
 [部署事务](deployment.md#候选验证与切换)为准。普通 Prompt、回复、Turn 历史、已生效
-Codex 配置与卡片 session 不复制到 Channel 数据库。受管 Skill 的清单和安装回滚边界统一见
+Codex 配置与卡片 session 不复制到 Channel 数据库。内置 Skill 的清单和 release 加载边界统一见
 [候选验证与切换](deployment.md#候选验证与切换)，其他用户 Skill 保持原生管理。
 
 不同 Binding、Parent 与 Side 可以并发使用同一个真实 Project cwd，文件改动彼此可见；
@@ -76,6 +78,9 @@ capability 或版本/指纹门禁及移除条件，不扩展成通用 RPC 层；
 durable queue。普通 Turn 的结构化本轮文件可在终态卡片中按需发送；普通图片
 和富文本图片按 [ADR 0015](adr/0015-support-native-image-inputs-for-message-and-quote.md)
 作为原生视觉输入支持。
+
+同账号多实例只分开部署与运维，不形成数据保密或执行隔离边界；按机器人登记不同
+Project 不限制工具读取该账号可访问的其他文件，Codex 用户状态仍共享。
 
 ## 架构
 
@@ -519,9 +524,10 @@ discovery 期间不持有 Binding 锁，返回后用 admission revision 防止�
 
 安装器随版本提供 [netizen-lark Skill](../skills/netizen-lark/SKILL.md)，让 Agent 按当前
 `message_id` 主动查询飞书聊天／话题历史。Skill 无配套脚本，只说明如何让可选的 CLI
-选择 `~/.netizen/lark-app/config.json` 中的固定 `netizen` profile 并使用机器人身份；
+选择当前 `NETIZEN_ROOT/lark-app/config.json` 中的固定 `netizen` profile 并使用机器人身份；
 CLI 自行换取令牌，查询、分页和结果处理按上游 lark Skills 执行。应用凭据不进入 Prompt，
 无需修改用户默认 CLI 配置。上游 CLI 与 lark Skills 由用户另行安装，缺失不影响 Channel。
+`NETIZEN_ROOT` 缺失或被用户原生工具环境策略过滤时明确失败，不回退到默认实例。
 当前会话消息固定使用 Netizen 机器人；其他场景沿用原有 lark Skills 与用户 CLI 配置，
 失败后可酌情尝试 Netizen 机器人凭证，具体身份使用范围由该 Skill 说明。
 当前消息不额外投影聊天或话题定位字段，需要时从 `message_id` 查询。该路径不改变
@@ -591,7 +597,7 @@ Side 另有以 Side ID 为键的内存 Session registry 和独立锁/admission r
 Parent Binding 的 active 槽。idle 消息对同一 ephemeral `AsyncThread` 新建 Turn，running
 消息只 steer exact handle。引用、图片和 Skills 准备前捕获 Side revision，提交时防止
 close/expiry 或 idle -> running -> idle ABA。Side 内只允许 Prompt、`//`、`/status`、
-`/stop`、`/help`、`/` 和 `/side close`，其他 Binding lifecycle/config/Goal control 和
+`/stop`、`/admin`、`/help`、`/` 和 `/side close`，其他 Binding lifecycle/config/Goal control 和
 嵌套 Side 均拒绝。创建时还在 Parent admission 中冻结并复核 Turn Settings 与 Task
 Feedback revision，后续 Parent 配置不传播。`/stop` interrupt/clean 当前 Side Turn 后仍
 回到 idle，可继续多轮。
@@ -691,7 +697,10 @@ resume 只允许 persisted paused Goal，并固定执行 register route -> set a
 固定 method/params/空响应，并继续校验精确 SDK 版本、整个源码包指纹、内部持有类型和
 `experimentalApi`；它只覆盖官方登记的 background terminal，空响应不是 foreground
 process exit attestation。ADR 0014 的 SDK Gap Adapter 则只为 Goal 与 Skills 暴露
-`GoalControl` / `SkillCatalog` 语义口；ADR 0021 同类地只增加 Side 专用的
+`GoalControl` / `SkillCatalog` 语义口；ADR 0074 增加只设置当前进程额外 Skill 目录的
+`AppServerSkillRoots.set_roots`，固定 `skills/extraRoots/set`，不持久化用户配置。它同样
+使用 generated models、shape/synthetic/live 验证及公开 facade 移除触发器；发现目录不等于
+证明模型执行加载。ADR 0021 同类地只增加 Side 专用的
 `SideBoundaryControl.inject_boundary`。ADR 0028 将可复用的
 `ThreadSubscriptionControl.unsubscribe` 拆成独立能力：两项都固定 method 和安装 SDK 的 generated model，
 不提供通用 request，不维护运行时版本 allowlist。SDK 升级必须通过 per-capability shape、
@@ -1305,12 +1314,12 @@ user/chat/role allowlist。每个被投递到 Scope 的参与者都能管理 Bin
 
 飞书应用初始化是 release 外的安装期流程，不是第二个运行时认证层；服务
 运行时不进入该流程，也不申请或持久化 user token。App ID 与 raw App Secret 的唯一来源为
-`~/.netizen/lark-app/config.json` 中固定名为 `netizen` 的 profile，目录为 `0700`，文件为
+`<NETIZEN_ROOT>/lark-app/config.json` 中固定名为 `netizen` 的 profile，目录为 `0700`，文件为
 当前用户拥有的普通非 symlink 文件，权限为 `0600` 或更严格。它采用官方 Lark CLI 的
 `apps` 格式；Netizen 通过标准库直接读取，不依赖 CLI 或它的 `currentApp` 选择。
 YAML 不再拥有 App ID，服务只传递绝对路径 `NETIZEN_LARK_APP_CONFIG`，不向 Channel
-Database、Codex state、环境或日志写入凭据。源码手工运行未设置该变量时，使用 YAML
-所在目录下的 `lark-app/config.json`；旧 Secret 环境来源明确拒绝。
+Database、Codex state、环境或日志写入凭据。源码手工运行也由启动入口按同一 root 派生
+该路径，显式配置冲突则拒绝启动；旧 Secret 环境来源明确拒绝。
 安装器只初始化、读取并原子写入该 profile；成功保存的应用身份不随候选激活失败而撤销。
 详见 [ADR 0066](adr/0066-share-lark-app-credentials-with-optional-cli.md)。
 公开安装入口在候选验证和 Codex 登录检查通过后，
@@ -1328,14 +1337,21 @@ namespace；旧 Binding 与原生历史保留但不迁移。device flow、凭据
 部署候选有两个显式来源：Published Release 携带发布流水线对 exact archive 的资格，Source
 Install 在目标机对当前工作区运行完整门禁。两者只在候选准备和本地 release identity 上
 分流；配置解析、Codex 登录、飞书 tenant 权限、Host Validation、服务状态与回滚语义不随
-来源变化。部署保持一份 release/配置/凭据/数据库/Skill/activation-intent 事务；平台 Service Backend
+来源变化。每实例保持一份 release/配置/凭据/数据库/activation-intent 事务；内置 Skills 随
+物理 release 加载，不再安装、快照或回滚全局目录。平台 Service Backend
 只负责定义、manager 状态、停止确认、发布、启停、status 与 ready 等待。Linux 使用 systemd
 user unit；macOS 14+ 的 Apple Silicon 与 Intel Mac 使用当前 GUI 登录用户的 LaunchAgent，
 不增加 LaunchDaemon 或第二个运行时。macOS 只使用 `launchctl print` 退出码判断 loaded，
 不解析文本。
+按 [ADR 0074](adr/0074-deploy-independent-instances-by-root.md)，`--root` > `NETIZEN_ROOT` >
+有效用户 `~/.netizen`，入口规范化 canonical root 后显式传递。root 派生配置、凭据、state、
+锁与维护记录；服务名和临时维护 job 以 root 的稳定摘要区分，不增加业务 instance ID。
+受管 `instance.dataDir` 必须为该 root 的 `state`，Project root 与共享 `CODEX_HOME` 独立。
+`.netizen-root` 只证明受管命名空间归属，不能据此删除整个安装根。目录认领和精确文件校验
+见[部署文档](deployment.md#目录)。不提供旧服务名/布局迁移或跨此次格式变更自动降级。
 launcher 在稳定的 `state/service.lifetime.lock` inode 上持有独占锁，并只为最终 exec 短暂
 开放 FD 继承；主进程在导入 SDK 边界前恢复 CLOEXEC。候选回滚只有同时确认 manager target
-已卸载且锁已释放时才能恢复 Channel Database/Skill。loaded 与 ready 分离：installer 和
+已卸载且锁已释放时才能恢复 Channel Database。loaded 与 ready 分离：installer 和
 launcher 清理旧 marker，主进程仅在 Feishu background、Runtime 与 admission 全部开启后原子
 发布 `0600 state/service.ready`，正常退出尽力删除。
 macOS 应用入口通过精确锁定的 `truststore` 使用 Security.framework 的系统钥匙串验证 TLS；
@@ -1347,7 +1363,9 @@ ADR 0057 的 Admin Upgrade 是上述安装事务的显式手动入口。管理 a
 安装器停止主服务，沿用普通 Turn 中断、Goal 暂停和 Side 结束语义，不增加维护状态或
 任务续跑。Admin 不提前退出，也不复制安装器的 active/enabled 意图判断、退出确认或回滚。
 [ADR 0059](adr/0059-support-explicit-admin-service-restart.md) 增加同一执行者的 Admin Restart，
-直接调用已安装的 `source/service.sh restart`；准入、停机证据与失败边界见该 ADR。
+直接调用已安装的 `source/service.sh --root <canonical-root> restart`；root 从当前运行实例
+显式传给管理服务、执行者及安装器，不能在深层模块重新猜测默认位置。准入、停机证据与
+失败边界见该 ADR。
 
 一次性执行者来自当前运行的物理 release，由同用户独立 systemd transient service 或
 临时 LaunchAgent 启动。macOS 提交文件位于 state，显式 bootstrap 到当前 GUI domain，
@@ -1356,6 +1374,9 @@ ADR 0057 的 Admin Upgrade 是上述安装事务的显式手动入口。管理 a
 下载、校验与调用。Admin 记录操作后释放同一锁，执行者取得锁时重读 exact operation 与
 旧 `current` identity；候选安装器验证继承锁 FD、恢复 CLOEXEC 后复用该锁，其他 CLI
 安装和卸载继续与同一锁互斥。平台适配器只拥有临时 job 的提交、观察和清理。
+不同 root 不共享安装锁；worker 清理继承的其他实例 `NETIZEN_*` 后重新注入捕获的 root，
+继承锁 FD 必须属于该 root。临时 job 的查询、终态清理和恢复对账同样只作用于本实例，
+不能由 Admin 请求选择另一 root。
 
 安装器/执行者以 `0600 state/update.json` 原子保存最近一次 typed 部署摘要，最多 4096
 bytes。升级保留 schema 1 的目标版本/Release ID/两项 SHA-256；重启使用 schema 2、
@@ -1372,7 +1393,13 @@ bytes。升级保留 schema 1 的目标版本/Release ID/两项 SHA-256；重启
 
 ### Admin HTTP 与认证
 
-Admin Web 是 ADR 0031 的单管理员、实例级控制面，默认监听 `0.0.0.0:8787`。socket 在
+Admin Web 是 ADR 0031/0074 的单管理员、实例级控制面，默认监听 `0.0.0.0`。
+`adminWeb.port` 已配置时严格使用；字段缺失时在持有实例 lifetime lock 的启动进程中
+实际绑定 8787–8886，只有地址占用才顺延。绑定成功后原子写回本实例 YAML，检测到人工
+修改或写入失败即关闭 listener、启动失败；已固化端口后续冲突不漂移。禁用不分配，
+`0`/`null`/空值不是自动分配；后续初始化失败也保留已写入端口。socket 在
+部分地址绑定失败时按候选整体释放。启动固化端口不重新获取安装器正持有的安装锁，
+避免安装器等待 ready、服务等待安装锁的循环等待。listener 在
 Runtime 之前以 closed admission 绑定；Feishu、Store、Runtime 和管理 application 全部就绪
 后，主 loop 才通过 `channel.schedule(...)` 在 background loop 打开它并打印 ready marker。
 HTTP 使用 exact-pin `h11` 的公开状态机和受限 `asyncio` transport：最多 32 条连接，header
@@ -1384,7 +1411,8 @@ JavaScript 或状态。HTML、JavaScript、API 和其他资源仍要求 session 
 Admin credential 来自绝对路径 `NETIZEN_ADMIN_SECRET_FILE`，解码后必须恰好 32 bytes；
 最终路径不得是 symlink，文件必须为普通文件且 mode 精确为 0600。认证状态完全在内存：
 session 不设闲置或绝对时间过期，退出登录、服务重启或合法 credential 轮换使其失效；
-浏览器 cookie 保持会话 cookie，不设 `Expires` / `Max-Age`。session 保留全局/逐来源容量
+浏览器 cookie 保持会话 cookie，不设 `Expires` / `Max-Age`；session 与 preauth 名称都带
+canonical root 的稳定摘要，避免同一 host 不同端口覆盖登录状态。session 保留全局/逐来源容量
 上限，验证成功的新登录在逐来源已满时替换该来源最早签发的 session，否则在全局已满时
 替换全局最早签发的 session，并撤销其关联 action grants；失败登录不得驱逐已有 session。
 pre-auth nonce 不设时间过期，仍绑定来源、credential generation 和配对的 cookie/form，
@@ -1393,9 +1421,13 @@ pre-auth nonce 不设时间过期，仍绑定来源、credential generation 和�
 全局最早签发的 nonce，避免遗留页面永久占满名额。该回收只影响待提交 nonce，不撤销
 session 或 action grants。一次性 action/CSRF grant 仍保留十分钟 TTL 和容量限制，登录
 继续限速；每次认证边界都会检测合法 credential 轮换并清空旧 bearer。
-Host 只接受启动时发现的本机地址/名称和 exact port，带 body 的 login 及所有 mutation 还要求
+Host 只接受启动时发现的本机地址/名称、可选 `adminWeb.accessHost` 与 exact 实际端口，
+accessHost 只接受 hostname/IP，不是协议、端口、路径或反向代理配置。带 body 的 login 及所有 mutation 还要求
 同源 `Origin`，不信任 forwarded header。页面和 API 直接使用受信内网 HTTP，不实现 TLS、
 OIDC、多管理员或 RBAC。
+管理地址从成功绑定的运行态生成，不返回 `0.0.0.0`/`::` 通配地址；页面与登录页显示
+实例 root。多地址可以配置 accessHost，loopback 地址提示本机或自行隧道访问。不引入
+跨实例网关、端口注册表或总控，也不登记停止实例的端口。
 
 ### 系统维护 API
 
@@ -1784,6 +1816,11 @@ prompt，未知 slash command fail closed，不增加任意 `/`/`@` 链式解释
 映射为零参数 native control，只作用于当前有历史且空闲的普通会话；
 CLI/App 的 `/copy`、`/vim`、`/theme`、`/exit` 等纯宿主命令同样明确不可用且不进入帮助。
 
+`/admin` 是零参数、只读 Channel control，返回当前实例成功绑定的 Admin URL 和根目录；
+无需 Project、Binding 或 native Thread，不触发模型或会话创建，不读取待生效配置来猜测
+端口。未启用时明确回复；普通 Scope 和有效 Side 使用同一响应，保留 @ 规则与关闭 Side
+墓碑路由。不返回 credential、token 或免登录链接，也不增加权限管理。
+
 首次使用引导只读取现有 Project 与当前 Scope 的 Binding 元数据，不记录用户是否已读
 教程。普通消息在没有 active Binding 时先按聊天默认配置尝试自动创建；没有命中，或已
 说明默认配置不可用后，与需要当前会话的 control 共用下一步提示：无
@@ -1821,7 +1858,12 @@ catalog 重新校验。`/goal`、`/goal <objective>`、`pause/resume/clear` 与�
 ### 服务环境与受管 Skill
 
 服务使用 effective user 的账号 `HOME` 与 Standard CODEX_HOME（显式 `CODEX_HOME`
-优先，否则为 `$HOME/.codex`），并只创建一个 `AsyncCodex`。按 ADR 0023，它通过公开
+优先，否则为 `$HOME/.codex`），每实例只创建一个 `AsyncCodex`。多实例继续共享 Codex
+登录、配置、历史、用户 Skills 和 MCP，不拆分 CODEX_HOME。launcher 每次加载账号环境后
+覆盖为服务定义固定的 canonical `NETIZEN_ROOT` 及派生路径；主进程入口统一解析并校验
+root，无论原变量是否存在都在启动 Codex 前写回当前进程。手工入口同样默认账号
+`~/.netizen`，不从 YAML 或状态目录反推，配置、应用凭据和状态路径冲突则拒绝启动。
+清理后保留不含 Secret 的 NETIZEN_ROOT 供工具使用。按 ADR 0023，它通过公开
 `CodexConfig` 固定 `allow_login_shell=false`，让工具使用 ADR 0022 已捕获的账号环境，
 而不是再以 non-interactive login shell 覆盖 PATH。ADR 0061 另加入本进程专属随机 namespace
 的 MCP server entry：在 `127.0.0.1` 动态端口提供一个 `cron_manage` 工具，端点先于
@@ -1832,13 +1874,17 @@ MCP namespace instructions 与工具 description 提供管理指引；新 Thread
 Ask/Custom；其余配置不由 Netizen 覆盖。
 
 release 通过原生 Skill 提供 Netizen 使用咨询和应用 profile／当前消息入口，不进入
-Channel command router，也不替代动态 `/help`。受管目录由
-[安装清单](../scripts/install_managed_skill.py)定义，完整清单及快照、回滚和卸载边界统一见
-[部署文档](deployment.md#候选验证与切换)；其他用户 Skill 仍完全由用户维护。
-候选 venv 安装不产生这项外部副作用，只有 release 切换时的显式安装步骤会更新全局
-Skill，随后重启长期运行的 `AsyncCodex`。每次 SDK 升级的黑盒兼容测试必须通过公开
-`skills/list(forceReload)` 发现该 `$CODEX_HOME/skills` 路径；SDK 升级不能只根据最新版
-文档假定用户 Skill 根目录未变。
+Channel command router，也不替代动态 `/help`。[内置清单与资源校验](../netizen/builtin_skills.py)
+只定位实际运行 release 的 `source/skills`，不用可变的 `current`。启动同一个 AsyncCodex
+后、创建或恢复 Thread 及开放 admission 前，校验内置文件树并用上述固定适配口注册额外
+目录；资源校验或注册失败即启动失败。兼容性 discovery 探针在隔离环境中检查内置
+`netizen-user-guide`、`netizen-lark` 的 catalog 唯一名称和精确文件路径，不把该检查作为
+每次启动保证，也不覆盖用户同名 Skill 的原生解析规则。
+不写 `$CODEX_HOME/skills` 或用户 config.toml，不扫描全机实例，不回滚共享 Codex 状态。
+卸载只清理本实例受管 release；其他用户 Skills 仍完全由用户维护。
+SDK/Adapter 变更须验证 discovery、进程间额外根不串线及普通 start/resume、Side/fork、
+子 agent 的实际 Skill 执行加载；只读发现测试不能替代执行 live gate。完整门禁见
+[部署文档](deployment.md#多实例与内置-skills-验收)。
 
 ### 原生配置与公开能力
 
@@ -1846,7 +1892,7 @@ Netizen 不监听或复制 Codex 已生效配置；Binding 上只允许 ADR 0016
 ID intent。Project config 的重载能力由锁定 SDK 的 compatibility probe 分类，当前
 结论见 `docs/deployment.md`。`hot-reloaded` 与 `restart-required` 都是受支持结果，
 不能泛化为所有用户级键；官方或探针要求重启的设置通过
-已安装 release 的 `service.sh restart` 或管理页“重启服务”重新加载；不保证所有配置
+已安装 release 的 `service.sh --root "<NETIZEN_ROOT>" restart` 或管理页“重启服务”重新加载；不保证所有配置
 作用于已有 Thread。
 
 Runtime 的公开 resume/fork 显式使用 `include_turns=False`，省略仅供返回展示的历史，

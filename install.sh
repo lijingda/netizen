@@ -2,10 +2,39 @@
 set -eu
 
 main() {
-    if [ "$#" -ne 0 ]; then
-        echo "usage: ./install.sh" >&2
-        exit 2
-    fi
+validate_install_arguments() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --root)
+                [ "$#" -ge 2 ] && [ -n "$2" ] || return 1
+                shift 2
+                ;;
+            --root=*)
+                [ -n "${1#--root=}" ] || return 1
+                shift
+                ;;
+            --admin-port)
+                [ "$#" -ge 2 ] || return 1
+                candidate_port=$2
+                shift 2
+                case "$candidate_port" in ''|*[!0-9]*) return 1 ;; esac
+                [ "${#candidate_port}" -le 5 ] && [ "$candidate_port" -ge 1 ] && [ "$candidate_port" -le 65535 ] || return 1
+                ;;
+            --admin-port=*)
+                candidate_port=${1#--admin-port=}
+                shift
+                case "$candidate_port" in ''|*[!0-9]*) return 1 ;; esac
+                [ "${#candidate_port}" -le 5 ] && [ "$candidate_port" -ge 1 ] && [ "$candidate_port" -le 65535 ] || return 1
+                ;;
+            *) return 1 ;;
+        esac
+    done
+}
+
+validate_install_arguments "$@" || {
+    echo "usage: install.sh [--root PATH] [--admin-port PORT]" >&2
+    exit 2
+}
 
     command -v curl >/dev/null 2>&1 || {
         echo "Netizen installation failed: curl is required" >&2
@@ -35,7 +64,7 @@ main() {
         echo "Netizen installation failed: downloaded installer is incomplete" >&2
         exit 1
     }
-    /bin/sh "$exact_installer"
+    /bin/sh "$exact_installer" "$@"
 }
 
 # Keep effects behind a fully parsed function so a truncated `curl | sh` does

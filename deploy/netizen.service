@@ -11,6 +11,7 @@ Type=simple
 WorkingDirectory=%h
 
 Environment=@HOME_ENV@
+Environment=@ROOT_ENV@
 Environment=@CODEX_HOME_ENV@
 Environment=@PATH_ENV@
 Environment=PYTHONDONTWRITEBYTECODE=1
@@ -40,7 +41,7 @@ LimitCORE=0
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=netizen
+SyslogIdentifier=@SYSLOG_IDENTIFIER@
 
 [Install]
 WantedBy=default.target

@@ -28,8 +28,10 @@ class AdminUpdateExecutorProbeTest(unittest.TestCase):
         self.assertTrue((release / "venv" / "bin" / "python").is_file())
         parent, parent_id = probe._job(self.home, config, "parent")
         helper, helper_id = probe._job(self.home, config, "helper")
-        self.assertEqual(parent._label(parent_id), f"netizen-update-probe-parent-{parent_id}")
-        self.assertEqual(helper._label(helper_id), f"netizen-update-{helper_id}")
+        digest = probe.instance_digest(self.home / ".netizen")
+        self.assertEqual(parent._label(parent_id), f"netizen-update-probe-parent-{digest}-{parent_id}")
+        self.assertEqual(helper._label(helper_id), f"netizen-update-{digest}-{helper_id}")
+        self.assertTrue((release / "source" / "netizen" / "instance.py").is_file())
         self.assertFalse((self.home / ".codex").exists())
         self.assertFalse((self.home / ".netizen" / "credentials").exists())
 

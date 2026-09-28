@@ -293,6 +293,7 @@ async function submitMaintenance(kind) {
     : !state.updates.supported || !state.updates.available)) return;
   if (restarting && !window.confirm(
     "确认重启服务？将保持当前版本，重新启动 Netizen 及其 Codex 运行环境。\n\n"
+      + `实例：${document.querySelector("#instance-root")?.textContent || "当前实例"}\n\n`
       + "重启会中断正在执行的任务、暂停 Goal，并结束临时 Side 会话。"
       + "重启后不会自动续跑，管理页需要重新登录。",
   )) return;
@@ -311,8 +312,9 @@ async function submitMaintenance(kind) {
       body: JSON.stringify(actionPayload(envelope)),
     });
     acceptUpdateStatus({ ...state.updates, operation: result.operation });
-    setStatus(restarting ? "重启已受理，正在查询服务重启结果。重启后需要重新登录。"
-      : "升级已受理，正在查询安装器结果。重启后可能需要重新登录。");
+    const instanceLabel = document.querySelector("#instance-root")?.textContent || "当前实例";
+    setStatus((restarting ? "重启已受理，正在查询服务重启结果。重启后需要重新登录。"
+      : "升级已受理，正在查询安装器结果。重启后可能需要重新登录。") + ` 实例：${instanceLabel}`);
   } catch (error) {
     if (error.status === 401) {
       sessionExpired = true;

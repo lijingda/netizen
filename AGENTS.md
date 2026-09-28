@@ -59,6 +59,10 @@ their cited ADRs before changing that boundary.
   README command and follows installer output; consult the relay procedure for
   alternate setup or troubleshooting. Read the relevant acceptance gates
   before changing deployment behavior.
+  Multi-instance root ownership and the scoped Skills adapter are recorded in
+  [ADR 0074](docs/adr/0074-deploy-independent-instances-by-root.md). Read the
+  deployment manual's [multi-instance acceptance gates](docs/deployment.md#多实例与内置-skills-验收)
+  and separate platform/live acceptance status before rollout.
 - End-user usage consultation:
   [netizen-user-guide](skills/netizen-user-guide/SKILL.md). Its reference manual
   explains the product; it is not an engineering implementation guide.
@@ -67,7 +71,7 @@ their cited ADRs before changing that boundary.
 
 ## Architecture
 
-- Netizen is a Feishu/Lark Channel for Codex. Keep one long-lived Python
+- Netizen is a Feishu/Lark Channel for Codex. Per instance, keep one long-lived Python
   service, one `FeishuChannel`, one Channel database, and one shared
   `AsyncCodex`. The Channel SDK owns messaging; the official `openai-codex`
   SDK owns native Threads, Turns, history, tools, configuration, and permissions.
@@ -98,7 +102,8 @@ their cited ADRs before changing that boundary.
 - Use exact-pinned official SDKs and public high-level APIs. Approved narrow
   adapters are terminal cleanup (ADR 0009), Goal/Skills (0014), Side boundary
   (0021), Thread unsubscribe (0028), Thread Delete (0037), and non-consuming
-  Activity observation (0020/0052). Do not add a generic/private RPC gateway,
+  Activity observation (0020/0052), and process-local Skill roots (0074).
+  Do not add a generic/private RPC gateway,
   parse CLI output, patch SDK internals, copy protocol models, or signal
   arbitrary processes. New gaps require an accepted ADR and a removal trigger.
 - Preserve each adapter's documented gate: cleanup and Activity retain exact
@@ -132,19 +137,31 @@ their cited ADRs before changing that boundary.
 
 ## Deployment boundaries
 
-- Use the effective user's fixed `~/.netizen` root, native systemd user unit or
-  current-user LaunchAgent, and standard Codex state. No XDG profiles,
+- Select one canonical root by `--root` > `NETIZEN_ROOT` > the effective user's
+  `~/.netizen`; derive exact systemd user unit/LaunchAgent and maintenance job
+  names from that root (ADR 0074). Keep standard shared Codex state. No registry,
+  cross-instance manager, XDG profiles,
   LaunchDaemon, root helper, persistent Netizen environment file, or PATH snapshot.
   Reload the exported interactive-login-shell environment at each start; Codex
-  tool shells must not replace it (ADR 0022/0023).
-- The fixed `netizen` profile in `~/.netizen/lark-app/config.json` is the sole
+  tool shells must not replace it (ADR 0022/0023). Reassert the captured root
+  after shell reload, validate derived paths before writes, and retain it for tools.
+- The fixed `netizen` profile in `<root>/lark-app/config.json` is the sole
   application credential source (ADR 0066). Share its documented Lark CLI file
   format without adding a CLI installation/runtime dependency. Preserve exact-App
   repair versus whole-file deletion for rebinding and atomic credential writes.
 - Published Release and Source Install share one activation/rollback transaction.
-  Keep database/Skill rollback gated by both unloaded manager target and released
+  Keep database rollback gated by both unloaded manager target and released
   lifetime lock; restore CLOEXEC before Codex children start. Loaded/active is
   never a substitute for the private ready marker (ADR 0034).
+- Built-in Skills belong to the physical running release. Register their root on
+  the same initialized App Server before catalog/Thread access; fail startup if
+  registration fails. Never install, snapshot, roll back, or uninstall global user
+  Skills/Codex state. Preserve root ownership markers and unrelated content; never
+  recursively remove an instance root. No legacy-layout or global-Skill migration.
+- Bind each Admin independently. Only an absent port permits bounded allocation;
+  retain the actual listener and atomically save its port before readiness. An
+  explicit/persisted port never drifts. `/admin` reports this instance's live URLs;
+  Cookie names and the visible root identify the instance without a shared gateway.
 - The maintainer chooses formal release timing; `scripts/release.py` executes
   the chain (ADR 0050). Nothing auto-releases on main or tag pushes. Admin upgrades
   target an exact immutable official Release through the shared installer/lock;

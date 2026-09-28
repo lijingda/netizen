@@ -26,14 +26,6 @@ SERVICE_STOP_TIMEOUT_SECONDS = 90.0
 
 
 @dataclass(frozen=True, slots=True)
-class LegacyServiceState:
-    present: bool = False
-    recognized: bool = False
-    active: bool = False
-    enabled: bool = False
-
-
-@dataclass(frozen=True, slots=True)
 class ServiceState:
     loaded: bool
     enabled: bool
@@ -75,26 +67,11 @@ class ServiceBackend(Protocol):
 
     def uninstall_definition(self) -> None: ...
 
-    def inspect_legacy(self) -> LegacyServiceState: ...
-
-    def disable_legacy(
-        self,
-        state: LegacyServiceState,
-        *,
-        interactive: bool,
-    ) -> None: ...
-
-    def restore_legacy(
-        self,
-        state: LegacyServiceState,
-        *,
-        interactive: bool,
-    ) -> None: ...
-
 
 def _service_environment(layout: Layout) -> dict[str, str]:
     environment = _clean_subprocess_environment()
     environment["HOME"] = str(layout.home)
+    environment["NETIZEN_ROOT"] = str(layout.product_root)
     environment["CODEX_HOME"] = str(layout.codex_home)
     environment["NETIZEN_CONFIG_PATH"] = str(layout.config_file)
     environment["NETIZEN_LARK_APP_CONFIG"] = str(layout.lark_app_file)

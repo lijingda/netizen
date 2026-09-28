@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import ipaddress
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +13,7 @@ from typing import Any
 import yaml
 
 from .lark_app import LARK_APP_RELATIVE_PATH, LarkAppConfigError, load_lark_app
+from .admin.port_config import ConfigFileSnapshot
 
 
 class SettingsError(ValueError):
@@ -21,7 +24,8 @@ class SettingsError(ValueError):
 class AdminWebSettings:
     enabled: bool = True
     host: str = "0.0.0.0"
-    port: int = 8787
+    port: int | None = None
+    access_host: str | None = None
     credential_path: Path | None = field(default=None, repr=False)
 
 
@@ -34,6 +38,8 @@ class Settings:
     projects: dict[str, Path] = field(default_factory=dict)
     security_mode: str = "audit"
     admin_web: AdminWebSettings = AdminWebSettings()
+    config_path: Path | None = None
+    config_snapshot: ConfigFileSnapshot | None = field(default=None, repr=False)
 
     @classmethod
     def from_file(
@@ -43,8 +49,9 @@ class Settings:
     ) -> "Settings":
         env = os.environ if environment is None else environment
         config_path = Path(path).expanduser().resolve(strict=True)
+        config_snapshot = ConfigFileSnapshot.read(config_path)
         try:
-            loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            loaded = yaml.safe_load(config_snapshot.content)
         except yaml.YAMLError as error:
             raise SettingsError(f"invalid YAML: {error}") from error
         if not isinstance(loaded, dict):
@@ -101,6 +108,8 @@ class Settings:
             projects=projects,
             security_mode=security_mode,
             admin_web=admin_web,
+            config_path=config_path,
+            config_snapshot=config_snapshot,
         )
 
 
@@ -142,7 +151,7 @@ def _admin_web_settings(
             "NETIZEN_ADMIN_SECRET_FILE"
         )
     values = _optional_mapping(loaded, "adminWeb")
-    unknown = values.keys() - {"enabled", "host", "port"}
+    unknown = values.keys() - {"enabled", "host", "port", "accessHost"}
     if unknown:
         raise SettingsError("adminWeb contains unsupported settings")
     enabled = values.get("enabled", True)
@@ -156,9 +165,12 @@ def _admin_web_settings(
         or any(ord(character) < 0x20 for character in host)
     ):
         raise SettingsError("adminWeb.host must be a non-empty host")
-    port = values.get("port", 8787)
-    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+    port = values.get("port")
+    if "port" in values and (
+        isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535
+    ):
         raise SettingsError("adminWeb.port must be an integer from 1 to 65535")
+    access_host = validate_access_host(values["accessHost"]) if "accessHost" in values else None
     raw_path = environment.get("NETIZEN_ADMIN_SECRET_FILE", "").strip()
     credential_path: Path | None = None
     if raw_path:
@@ -173,5 +185,32 @@ def _admin_web_settings(
         enabled=enabled,
         host=host,
         port=port,
+        access_host=access_host,
         credential_path=credential_path,
     )
+
+
+def validate_access_host(value: object) -> str:
+    """A hostname or bare IP only; never a URL, port, or wildcard listener."""
+
+    message = "adminWeb.accessHost must be a hostname or IP without scheme, port, path, or wildcard"
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise SettingsError(message)
+    if any(character in value for character in "/\\@?#[]%"):
+        raise SettingsError(message)
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        try:
+            hostname = value.removesuffix(".").encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            raise SettingsError(message) from None
+        if len(hostname) > 253 or any(
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in hostname.split(".")
+        ):
+            raise SettingsError(message)
+        return hostname
+    if address.is_unspecified:
+        raise SettingsError(message)
+    return address.compressed

@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import errno
 import socket
 import unittest
 from collections.abc import Awaitable, Callable
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from netizen.admin.transport import (
     AdminHttpState,
@@ -146,6 +147,55 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
             await writer.wait_closed()
         self.assertEqual(status, 503)
         self.assertEqual(calls, 1)
+
+    async def test_partial_multi_address_bind_failure_closes_every_socket(self) -> None:
+        transport = AdminHttpTransport("host.test", 8787, _ok_handler)
+        self.transports.append(transport)
+        created: list[socket.socket] = []
+        binds = 0
+
+        class BindFailureSocket(socket.socket):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+            def bind(self, address):
+                nonlocal binds
+                binds += 1
+                if binds == 2:
+                    raise OSError(errno.EADDRINUSE, "occupied")
+                return super().bind(address)
+
+        infos = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.2", 0)),
+        ]
+        loop = asyncio.get_running_loop()
+        with patch.object(loop, "getaddrinfo", new=AsyncMock(return_value=infos)), patch("socket.socket", BindFailureSocket):
+            with self.assertRaises(OSError) as error:
+                await transport.bind()
+        self.assertEqual(error.exception.errno, errno.EADDRINUSE)
+        self.assertEqual(binds, 2)
+        self.assertTrue(all(sock.fileno() == -1 for sock in created))
+        self.assertEqual(transport.addresses, ())
+
+    async def test_start_serving_failure_closes_already_bound_server(self) -> None:
+        transport = AdminHttpTransport("127.0.0.1", 0, _ok_handler)
+        self.transports.append(transport)
+        servers = []
+        start_server = asyncio.start_server
+
+        async def recording_start_server(*args, **kwargs):
+            server = await start_server(*args, **kwargs)
+            servers.append(server)
+            return server
+
+        with patch("netizen.admin.transport.asyncio.start_server", recording_start_server), patch("asyncio.base_events.Server.start_serving", new=AsyncMock(side_effect=OSError(errno.EACCES, "denied"))):
+            with self.assertRaises(OSError):
+                await transport.bind()
+        self.assertEqual(len(servers), 1)
+        self.assertEqual(servers[0].sockets, ())
+        self.assertEqual(transport.state, AdminHttpState.CLOSED)
 
     async def test_connection_cap_rejects_33rd_and_returns_capacity(self) -> None:
         transport = await self._transport()

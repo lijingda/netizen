@@ -88,6 +88,8 @@ def _verify_admin_assets(package: object) -> tuple[str, ...]:
 
 
 def main() -> None:
+    from netizen.builtin_skills import validate_builtin_skills
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-root", type=Path, required=True)
     args = parser.parse_args()
@@ -102,12 +104,14 @@ def main() -> None:
         installed_package=installed_package,
         runtime_prefix=Path(sys.prefix),
     )
+    skills = validate_builtin_skills(args.source_root)
     print(
         json.dumps(
             {
                 "installed_package": str(installed_package),
                 "matched_package_files": count,
                 "admin_assets": assets,
+                "builtin_skills": str(skills),
             }
         )
     )

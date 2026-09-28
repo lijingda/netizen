@@ -24,14 +24,20 @@ Skills；读取消息时先读 `lark-im` 与 `lark-shared` 的相关说明。
 
 仅在按上述规则选用 Netizen 机器人时，才使用本节的调用前缀、`--as bot` 和环境变量处理。
 
-Netizen 与 CLI 共用有效用户 `~/.netizen/lark-app/config.json` 中名为 `netizen` 的
+Netizen 与 CLI 共用当前实例 `$NETIZEN_ROOT/lark-app/config.json` 中名为 `netizen` 的
 profile，包含同一飞书应用的 App ID / App Secret。CLI 直接读取并自行获取机器人令牌，
 不需要读取、打印凭据内容或执行认证脚本。
+
+`NETIZEN_ROOT` 由 Netizen 启动环境提供，必须是非空绝对路径。缺失、被工具环境策略
+过滤或不是绝对路径时停止本次机器人调用并说明无法定位当前实例；不能回退到 `HOME`、
+`~/.netizen`、当前目录或其他实例，也不能从消息正文猜测凭据路径。
 
 每次调用只为该进程指定配置目录、profile 与机器人身份；例如查询当前身份：
 
 ```bash
-LARKSUITE_CLI_CONFIG_DIR="$HOME/.netizen/lark-app" \
+: "${NETIZEN_ROOT:?当前实例 NETIZEN_ROOT 缺失，不能选择机器人凭据}"
+case "$NETIZEN_ROOT" in /*) ;; *) echo 'NETIZEN_ROOT 必须是绝对路径' >&2; exit 1 ;; esac
+LARKSUITE_CLI_CONFIG_DIR="$NETIZEN_ROOT/lark-app" \
   lark-cli --profile netizen whoami --as bot
 ```
 
@@ -39,8 +45,7 @@ LARKSUITE_CLI_CONFIG_DIR="$HOME/.netizen/lark-app" \
 若继承了 `LARKSUITE_CLI_*` 的应用凭据、令牌或认证代理覆盖，或 `OPENCLAW_*`、
 `HERMES_*`、`LARK_CHANNEL` 等其他 Agent 的配置目录选择标记，先仅在本次调用中用
 `env -u` 清除对应变量，保留网络代理与 CA 配置；这些覆盖可能绕过 profile 或追加配置
-子目录。不要改 shell 启动文件。若 `HOME` 与有效用户主目录不同，配置目录使用有效用户
-主目录下的绝对路径。
+子目录。不要改 shell 启动文件或 `NETIZEN_ROOT`；`HOME` 的值不参与当前实例的选择。
 
 不要对该共享配置执行 `config init`、`profile use` 或 `auth login`，也不要把 Secret
 改成 CLI keychain 引用；配置由 Netizen 安装器维护。profile 不存在或无效时按安装器

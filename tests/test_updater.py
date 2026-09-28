@@ -120,12 +120,25 @@ class UpdateProtocolTests(unittest.TestCase):
         finally:
             os.close(descriptor)
 
+    def test_instance_locks_and_results_are_independent_and_reject_wrong_root_handoff(self) -> None:
+        other = self.root.parent / "共享 instance"
+        (other / "state").mkdir(parents=True, mode=0o700)
+        operation = protocol.new_operation(TARGET, "c" * 64)
+        protocol.write_operation(self.root, self.operation)
+        protocol.write_operation(other, operation)
+        with protocol.install_lock(self.root) as descriptor, protocol.install_lock(other):
+            with self.assertRaises(protocol.UpdateProtocolError):
+                protocol.validate_inherited_lock(other, descriptor)
+            protocol.advance_operation(other, operation["operationId"], "failed", "dispatch_failed")
+        self.assertEqual(protocol.read_operation(self.root), self.operation)
+        self.assertEqual(protocol.read_operation(other)["code"], "dispatch_failed")
+
 
 class UpdateWorkerTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name) / ".netizen"
+        self.root = Path(temporary.name).resolve() / "共享 ${OTHER} %h instance"
         (self.root / "state").mkdir(parents=True, mode=0o700)
         previous = self.root / "releases" / ("b" * 64)
         previous.mkdir(parents=True)
@@ -143,13 +156,14 @@ class UpdateWorkerTests(unittest.TestCase):
                 self.assertEqual((self.root / "current").resolve().name, "b" * 64)
                 return subprocess.CompletedProcess(command, 0)
             self.assertEqual(command[0], "/bin/sh")
-            self.assertEqual(len(command), 2)
+            self.assertEqual(command[2:], ["--root", str(self.root.resolve())])
             self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
             descriptor = kwargs["pass_fds"][0]
             protocol.validate_inherited_lock(self.root, descriptor)
             with self.assertRaises(BlockingIOError):
                 protocol.acquire_install_lock(self.root)
             environment = kwargs["env"]
+            self.assertEqual(environment["NETIZEN_ROOT"], str(self.root.resolve()))
             self.assertEqual(environment[protocol.ENV_VERSION], TARGET["version"])
             self.assertEqual(environment[protocol.ENV_ARCHIVE_SHA256], TARGET["archiveSha256"])
             self.assertEqual(environment[protocol.ENV_LOCK_FD], str(descriptor))
@@ -167,6 +181,45 @@ class UpdateWorkerTests(unittest.TestCase):
         self.assertEqual(protocol.read_operation(self.root)["phase"], "succeeded")
         with protocol.install_lock(self.root):
             pass
+
+    def test_profile_root_cannot_redirect_the_captured_operation(self) -> None:
+        other = self.root.parent / "another instance"
+        (other / "state").mkdir(parents=True, mode=0o700)
+        other_operation = protocol.new_operation(TARGET, "c" * 64)
+        protocol.write_operation(other, other_operation)
+
+        def runner(command, **kwargs):
+            self.assertEqual(kwargs["env"]["NETIZEN_ROOT"], str(self.root))
+            self.assertEqual(kwargs["env"]["CODEX_HOME"], "/account/shared-codex")
+            self.assertNotIn("NETIZEN_CONFIG_PATH", kwargs["env"])
+            if command[0] == "curl":
+                Path(command[command.index("-o") + 1]).write_bytes(BOOTSTRAP)
+            else:
+                self.assertEqual(command[2:], ["--root", str(self.root)])
+                protocol.validate_inherited_lock(self.root, kwargs["pass_fds"][0])
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(updater, "capture_profile_environment", return_value={
+            "PATH": "/usr/bin:/bin", "NETIZEN_ROOT": str(other),
+            "NETIZEN_CONFIG_PATH": str(other / "config.yaml"),
+            "CODEX_HOME": "/account/shared-codex",
+        }):
+            result = updater.run_update(self.operation["operationId"], product_root=self.root,
+                                        runner=runner)
+        self.assertEqual(result, 0)
+        self.assertEqual(protocol.read_operation(other), other_operation)
+        self.assertEqual(protocol.read_operation(self.root)["phase"], "succeeded")
+
+    def test_worker_cli_passes_explicit_root_and_rejects_empty_selection(self) -> None:
+        with patch.object(updater, "run_update", return_value=0) as run:
+            self.assertEqual(updater.main(["--root", str(self.root),
+                                           "--operation-id", self.operation["operationId"]]), 0)
+        run.assert_called_once_with(self.operation["operationId"], product_root=str(self.root))
+        loader = MagicMock()
+        self.assertEqual(updater.run_update(self.operation["operationId"], product_root="",
+                                            environment_loader=loader), 1)
+        loader.assert_not_called()
+        self.assertEqual(protocol.read_operation(self.root), self.operation)
 
     def test_wrong_installer_hash_never_executes(self) -> None:
         self.assertEqual(self._run(bootstrap=b"tampered"), 1)
@@ -272,14 +325,19 @@ class UpdateWorkerTests(unittest.TestCase):
         self.assertEqual(protocol.read_operation(self.root), self.operation)
 
     def test_profile_environment_preserves_native_settings_and_scrubs_service_identity(self) -> None:
-        with patch.object(updater, "capture_profile_environment", return_value={
-            "PATH": "/account/bin", "CODEX_HOME": "/account/codex", "HTTPS_PROXY": "https://proxy",
-            "NETIZEN_READY_FILE": "/old/ready", "NETIZEN_LIFETIME_LOCK_FD": "5",
-            "NETIZEN_UPDATE_OPERATION_ID": "stale", "FEISHU_APP_SECRET": "secret",
-            "PYTHONPATH": "/old/python",
-        }) as capture:
+        with (
+            patch.dict(os.environ, {"NETIZEN_ROOT": "/manager-instance", "NETIZEN_UPDATE_LOCK_FD": "9"}),
+            patch.object(updater, "capture_profile_environment", return_value={
+                "PATH": "/account/bin", "CODEX_HOME": "/account/codex", "HTTPS_PROXY": "https://proxy",
+                "NETIZEN_READY_FILE": "/old/ready", "NETIZEN_LIFETIME_LOCK_FD": "5",
+                "NETIZEN_UPDATE_OPERATION_ID": "stale", "FEISHU_APP_SECRET": "secret",
+                "NETIZEN_ROOT": "/another-instance",
+                "PYTHONPATH": "/old/python",
+            }) as capture,
+        ):
             environment = updater._worker_environment()
         capture.assert_called_once()
+        self.assertFalse(any(key.startswith("NETIZEN_") for key in capture.call_args.kwargs["base_environment"]))
         self.assertEqual(environment["CODEX_HOME"], "/account/codex")
         self.assertEqual(environment["PATH"], "/account/bin")
         self.assertEqual(environment["HTTPS_PROXY"], "https://proxy")
@@ -292,7 +350,7 @@ class RestartWorkerTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name).resolve() / ".netizen"
+        self.root = Path(temporary.name).resolve() / "共享 restart instance"
         (self.root / "state").mkdir(parents=True, mode=0o700)
         self.release = self.root / "releases" / ("b" * 64)
         (self.release / "source").mkdir(parents=True)
@@ -310,7 +368,7 @@ class RestartWorkerTests(unittest.TestCase):
 
     def test_exact_restart_retains_lock_without_downloading_or_inheriting_it(self) -> None:
         def restart(command, **kwargs):
-            self.assertEqual(command, ["/bin/sh", str(self.service), "restart"])
+            self.assertEqual(command, ["/bin/sh", str(self.service), "--root", str(self.root), "restart"])
             self.assertGreater(
                 kwargs["timeout"],
                 service_backend.SERVICE_STOP_TIMEOUT_SECONDS
@@ -319,6 +377,7 @@ class RestartWorkerTests(unittest.TestCase):
             self.assertTrue(kwargs["close_fds"])
             self.assertNotIn("pass_fds", kwargs)
             self.assertFalse(any(key.startswith("NETIZEN_UPDATE_") for key in kwargs["env"]))
+            self.assertEqual(kwargs["env"]["NETIZEN_ROOT"], str(self.root))
             with self.assertRaises(BlockingIOError):
                 protocol.acquire_install_lock(self.root)
             self.assertEqual(protocol.read_operation(self.root)["phase"], "restarting")
@@ -446,7 +505,6 @@ class InstallerUpdateTests(unittest.TestCase):
                 backend = MagicMock()
                 backend.capture_definition.return_value = installer.FileSnapshot(True, b"old")
                 backend.inspect_state.return_value = installer.ServiceState(True, True)
-                backend.inspect_legacy.return_value = installer.LegacyServiceState()
                 backend.render_definition.return_value = b"new"
                 backend.start_and_wait.side_effect = [installer.InstallError("start failed"), None]
                 if stop_failed:
@@ -454,7 +512,6 @@ class InstallerUpdateTests(unittest.TestCase):
                 with (
                     protocol.install_lock(self.layout.product_root) as descriptor,
                     patch.object(installer, "_service_backend", return_value=backend),
-                    patch.object(installer, "install_skill"),
                 ):
                     update = installer.InstallerUpdate(self.layout.product_root, self.operation["operationId"], descriptor)
                     with self.assertRaises(installer.InstallError):
