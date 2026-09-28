@@ -662,13 +662,25 @@ class AdminWebApplication:
                 status = 503
             raise AdminWebError(status, error.code, str(error)) from error
 
-    def _default_record(self, context: _RequestContext, rule: dict[str, Any]) -> dict[str, Any]:
+    def _default_record(
+        self, context: _RequestContext, rule: dict[str, Any], chat: ChatLabel | None = None,
+    ) -> dict[str, Any]:
         target = AdminActionTarget("default-rule", rule["id"])
         preconditions = _empty_preconditions(default_revision=ExpectedValue.expect(rule["revision"]))
-        return {**rule, "actions": {
+        result = {**rule, "actions": {
             mode: self._grant(context, f"defaults.{mode}", target, preconditions)
             for mode in ("save", "delete")
         }}
+        if chat is not None:
+            result["chat"] = {
+                "chatId": chat.chat_id,
+                "chatLabel": chat.display_name,
+                "chatLabelResolved": chat.resolved,
+                "chatMode": chat.chat_mode,
+                "chatType": chat.chat_type,
+                "chatOpenUrl": _chat_open_url(chat),
+            }
+        return result
 
     async def _defaults(self, context: _RequestContext) -> Response:
         mode = _optional_one(context.query, "mode") or "list"
@@ -695,7 +707,13 @@ class AdminWebApplication:
         result = await self._default_manage(request)
         if mode == "list":
             kind = request.get("kind", "chat")
-            result = {**result, "items": [self._default_record(context, rule) for rule in result["items"]],
+            chats = await self._management.resolve_chat_labels(
+                (rule["chat_id"] for rule in result["items"]),
+                deadline=asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS,
+            ) if kind == "chat" else {}
+            result = {**result, "items": [
+                self._default_record(context, rule, chats.get(rule["chat_id"])) for rule in result["items"]
+            ],
                 "actions": {"create": self._grant(
                     context, "defaults.save", AdminActionTarget("default-registry", str(kind)), _empty_preconditions(),
                 )}}

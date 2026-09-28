@@ -117,36 +117,54 @@
         <div><p class="eyebrow">SESSION DEFAULTS</p><h2 id="defaults-heading">默认会话配置</h2></div>
         <button class="refresh" data-refresh="defaults">刷新</button>
       </div>
-      <p class="hint">当前位置没有会话时，使用聊天精确配置，或从上到下第一条命中的群名规则，自动创建会话并处理消息。已有会话及 /new 的行为保持不变。</p>
-      <form id="defaults-editor" class="card-form" hidden>
-        <h3 id="defaults-editor-title"></h3>
-        <fieldset id="defaults-fields">
-          <div class="schedule-form-grid">
-            <label id="defaults-chat-field">聊天 ID<input id="defaults-chat" maxlength="256" required placeholder="群聊或单聊的 chat_id"></label>
-            <label id="defaults-keyword-field" hidden>群名包含<input id="defaults-keyword" maxlength="200" disabled placeholder="非空关键词，英文忽略大小写"></label>
-            <label>Project<select id="defaults-project" required><option value="">选择 Project</option></select></label>
-            <label>模型<select id="defaults-model"><option value="">继承 Codex</option></select></label>
-            <label>推理强度<select id="defaults-effort" disabled></select></label>
-            <label>速度<select id="defaults-tier" disabled></select></label>
-            <label>上下文<select id="defaults-context"><option value="current-only">当前消息</option><option value="catch-up">补齐未读上下文</option></select></label>
-          </div>
-          <div class="defaults-feedback">
-            <label><input id="defaults-reactions" type="checkbox">表情反馈</label>
-            <label><input id="defaults-progress" type="checkbox">进度卡片</label>
-            <label><input id="defaults-completion-mention" type="checkbox">结束时 @ 提醒</label>
-          </div>
-          <p id="defaults-note" class="hint" role="status"></p>
-          <div class="actions"><button id="defaults-save" type="submit">保存</button><button id="defaults-cancel" type="button" class="quiet">取消</button></div>
-        </fieldset>
-      </form>
-      <div class="section-head"><h3>聊天精确配置</h3><button id="defaults-new-chat">配置一个聊天</button></div>
-      <p class="hint">对单个群聊或单聊生效，优先于群名规则。删除后可能重新命中群名规则。</p>
-      <div class="table-wrap"><table><thead><tr><th>聊天 ID</th><th>Project</th><th>会话配置</th><th>操作</th></tr></thead><tbody id="defaults-chat-body"></tbody></table></div>
-      <nav class="pagination" aria-label="聊天精确配置分页"><button id="defaults-previous" disabled>上一页</button><span id="defaults-page"></span><button id="defaults-next" disabled>下一页</button></nav>
-      <div class="section-head"><h3>群名规则</h3><button id="defaults-new-rule">添加群名规则</button></div>
-      <p class="hint">群名包含关键词即匹配，英文忽略大小写；从上到下采用第一条命中规则。通过上移、下移调整顺序。</p>
-      <div class="table-wrap"><table><thead><tr><th>顺序</th><th>群名包含</th><th>Project</th><th>会话配置</th><th>操作</th></tr></thead><tbody id="defaults-rules-body"></tbody></table></div>
+      <p class="defaults-help">用于当前位置没有会话时自动创建会话。优先使用指定聊天配置；未配置时，按顺序匹配群名规则。</p>
+      <div class="defaults-toolbar">
+        <div class="defaults-tabs" role="tablist" aria-label="默认配置匹配方式">
+          <button id="defaults-tab-chat" class="defaults-tab" role="tab" aria-selected="true" aria-controls="defaults-panel-chat" tabindex="0" data-defaults-tab="chat">指定聊天</button>
+          <button id="defaults-tab-group_name" class="defaults-tab" role="tab" aria-selected="false" aria-controls="defaults-panel-group_name" tabindex="-1" data-defaults-tab="group_name">群名匹配</button>
+        </div>
+        <button id="defaults-new" class="action" disabled>添加聊天配置</button>
+      </div>
+      <div id="defaults-panel-chat" role="tabpanel" aria-labelledby="defaults-tab-chat" tabindex="0">
+        <div class="table-wrap"><table><thead><tr><th>聊天</th><th>Project</th><th>会话配置</th><th>操作</th></tr></thead><tbody id="defaults-chat-body"></tbody></table></div>
+        <nav id="defaults-pagination" class="pagination" aria-label="指定聊天配置分页" hidden><button id="defaults-previous" class="next" disabled>上一页</button><span id="defaults-page" aria-live="polite"></span><button id="defaults-next" class="next" disabled>下一页</button></nav>
+      </div>
+      <div id="defaults-panel-group_name" role="tabpanel" aria-labelledby="defaults-tab-group_name" tabindex="0" hidden>
+        <p class="defaults-order-help">从上到下采用第一条命中规则，通过上移、下移调整优先级。</p>
+        <div class="table-wrap"><table><thead><tr><th>优先级</th><th>群名包含</th><th>Project</th><th>会话配置</th><th>操作</th></tr></thead><tbody id="defaults-rules-body"></tbody></table></div>
+      </div>
     </section>
+    <dialog id="defaults-drawer" class="editor-drawer" aria-labelledby="defaults-editor-title">
+      <form id="defaults-editor" class="card-form drawer-form" hidden>
+        <div class="drawer-head"><div><p class="eyebrow">SESSION DEFAULTS</p><h3 id="defaults-editor-title"></h3></div><button id="defaults-close" class="drawer-close" type="button" aria-label="关闭默认配置表单">×</button></div>
+        <div class="drawer-body">
+          <fieldset id="defaults-fields">
+            <h4>适用对象</h4>
+            <div class="schedule-form-grid">
+              <label id="defaults-chat-field">聊天 ID<input id="defaults-chat" maxlength="256" required placeholder="群聊或单聊的 chat_id" aria-describedby="defaults-target-help"></label>
+              <label id="defaults-keyword-field" hidden>群名包含<input id="defaults-keyword" maxlength="200" disabled placeholder="输入群名关键词" aria-describedby="defaults-target-help"></label>
+            </div>
+            <p id="defaults-target-help" class="defaults-field-help"></p>
+            <h4>会话配置</h4>
+            <div class="schedule-form-grid">
+              <label>Project<select id="defaults-project" required><option value="">选择 Project</option></select></label>
+              <label>模型<select id="defaults-model"><option value="">继承 Codex</option></select></label>
+              <label>推理强度<select id="defaults-effort" disabled></select></label>
+              <label>速度<select id="defaults-tier" disabled></select></label>
+              <label>上下文<select id="defaults-context"><option value="current-only">当前消息</option><option value="catch-up">补齐未读上下文</option></select></label>
+            </div>
+            <h4>任务反馈</h4>
+            <div class="defaults-feedback">
+              <label><input id="defaults-reactions" type="checkbox">表情反馈</label>
+              <label><input id="defaults-progress" type="checkbox">进度卡片</label>
+              <label><input id="defaults-completion-mention" type="checkbox">结束时 @ 提醒</label>
+            </div>
+          </fieldset>
+          <p id="defaults-note" class="defaults-field-help" role="status"></p>
+        </div>
+        <div class="drawer-footer"><button id="defaults-cancel" class="drawer-cancel" type="button">取消</button><button id="defaults-save" type="submit">保存</button></div>
+      </form>
+    </dialog>
     <section id="schedules" class="panel" aria-labelledby="schedules-heading" hidden>
       <div class="section-head">
         <div><p class="eyebrow">SCHEDULED TASKS</p><h2 id="schedules-heading">定时任务</h2></div>
@@ -176,7 +194,7 @@
         <button id="schedule-runs-next" class="next" hidden>下一页记录</button>
       </section>
     </section>
-    <dialog id="schedule-drawer" aria-labelledby="schedule-editor-title">
+    <dialog id="schedule-drawer" class="editor-drawer" aria-labelledby="schedule-editor-title">
       <form id="schedule-editor" class="card-form" hidden>
         <div class="schedule-editor-head"><div><p class="eyebrow">SCHEDULED TASK</p><h3 id="schedule-editor-title">创建计划</h3></div><button id="schedule-close" type="button" aria-label="关闭计划表单">×</button></div>
         <fieldset id="schedule-fields">

@@ -12,6 +12,12 @@ const rule = (id, kind = "group_name") => ({ id, kind, chat_id: kind === "chat" 
   actions: { save: envelope("save", id), delete: envelope("delete", id) } });
 const rules = [rule("first"), rule("second"), rule("third")];
 const exact = rule("exact", "chat");
+exact.chat = { chatId: "oc_exact", chatLabel: "<b>研发讨论群</b>", chatLabelResolved: true,
+  chatOpenUrl: "https://applink.feishu.cn/client/chat/open?openChatId=oc_exact" };
+let chatItems = [exact];
+let groupItems = rules;
+let chatHasMore = true;
+let emptyChatOffsets = new Set();
 let contextAvailable = true;
 let viewExact = null;
 let viewEffective = rules[0];
@@ -21,6 +27,8 @@ let gets = [];
 let pendingOptions = null;
 let pendingView = null;
 let pendingPost = null;
+let pendingList = null;
+let failList = false;
 function pauseRequest(gate, result) {
   return new Promise((resolve, reject) => {
     gate.resolve = () => resolve(result);
@@ -51,8 +59,12 @@ async function api(path, options = {}) {
     return pendingView ? pauseRequest(pendingView, result) : result;
   }
   const kind = query.get("kind");
-  return { items: structuredClone(kind === "chat" ? [exact] : rules), has_more: kind === "chat", offset: Number(query.get("offset") || 0),
+  if (failList) throw new Error("list unavailable");
+  const offset = Number(query.get("offset") || 0);
+  const result = { items: structuredClone(kind === "chat" ? emptyChatOffsets.has(offset) ? [] : chatItems : groupItems),
+    has_more: kind === "chat" && chatHasMore, offset,
     order_revision: 7, actions: { create: envelope("create", kind), reorder: envelope("reorder", "order") } };
+  return pendingList && kind === "chat" ? pauseRequest(pendingList, result) : result;
 }
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 // SHIPPED_DEFAULTS_CONTROLLER
@@ -64,6 +76,38 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   assert.equal(first.querySelector("b"), null);
   assert(first.querySelectorAll("button")[2].disabled);
   assert.equal(defaultsInput("next").disabled, false);
+  const chatRow = defaultsInput("chat-body").querySelector("tr");
+  assert(chatRow.textContent.includes("<b>研发讨论群</b>"));
+  assert(chatRow.textContent.includes("oc_exact"));
+  assert.equal(chatRow.querySelector("b"), null);
+  assert.equal(defaultsInput("panel-chat").hidden, false);
+  assert.equal(defaultsInput("panel-group_name").hidden, true);
+  assert.equal(defaultsInput("tab-chat").getAttribute("aria-selected"), "true");
+  defaultsInput("tab-group_name").click();
+  assert.equal(defaultsInput("panel-chat").hidden, true);
+  assert.equal(defaultsInput("panel-group_name").hidden, false);
+  assert.equal(defaultsInput("tab-group_name").tabIndex, 0);
+  assert.equal(defaultsInput("tab-chat").tabIndex, -1);
+  defaultsInput("new").focus();
+  defaultsInput("new").click();
+  await flush();
+  assert.equal(defaultsEditor.kind, "group_name");
+  assert(defaultsInput("drawer").open);
+  assert(defaultsInput("chat-field").hidden);
+  assert.equal(defaultsInput("keyword-field").hidden, false);
+  assert.equal(document.activeElement, defaultsInput("keyword"));
+  defaultsInput("drawer").dispatch("cancel");
+  assert.equal(defaultsEditor, null);
+  assert.equal(defaultsInput("drawer").open, false);
+  assert.equal(document.activeElement, defaultsInput("new"));
+  const tabKey = defaultsInput("tab-group_name").dispatch("keydown", { key: "Home" });
+  assert(tabKey.prevented);
+  assert.equal(defaultsTab, "chat");
+  assert.equal(document.activeElement, defaultsInput("tab-chat"));
+  defaultsInput("tab-chat").dispatch("keydown", { key: "ArrowRight" });
+  assert.equal(defaultsTab, "group_name");
+  defaultsInput("tab-group_name").dispatch("keydown", { key: "ArrowLeft" });
+  assert.equal(defaultsTab, "chat");
 
   openDefaultEditor("chat", state.defaults.chat.items[0]);
   await flush();
@@ -146,6 +190,9 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   assert.equal(posts.length, beforeFailure + 1);
   failPost = false;
   closeDefaultEditor();
+  assert(defaultsInput("new").disabled);
+  assert(defaultsInput("chat-body").querySelector("button").disabled);
+  await loadDefaults();
 
   await deleteDefault(state.defaults.chat.items[0]);
   assert.equal(posts.at(-1).path, "/api/v1/defaults/delete");
@@ -287,4 +334,120 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
     assert(defaultsInput("save").disabled);
   }
   closeDefaultEditor();
+
+  // Switching views and refreshing keep the exact-chat page, while saving a
+  // group rule keeps the active group view and its priority order.
+  await loadDefaults(50);
+  defaultsInput("tab-group_name").click();
+  await loadDefaults();
+  assert.equal(defaultsTab, "group_name");
+  assert.equal(defaultsOffset, 50);
+  const groupEdit = defaultsInput("rules-body").querySelector("button");
+  groupEdit.focus();
+  groupEdit.click();
+  await flush();
+  pendingPost = {};
+  const savingGroup = saveDefault({ preventDefault() {} });
+  assert(defaultsInput("save").disabled);
+  assert(defaultsInput("close").disabled);
+  assert(defaultsInput("cancel").disabled);
+  assert(defaultsInput("tab-chat").disabled);
+  assert(defaultsInput("new").disabled);
+  defaultsInput("drawer").dispatch("cancel");
+  assert(defaultsInput("drawer").open);
+  selectDefaultTab("chat");
+  assert.equal(defaultsTab, "group_name");
+  pendingPost.resolve();
+  pendingPost = null;
+  await savingGroup;
+  assert.equal(defaultsInput("drawer").open, false);
+  assert.equal(defaultsInput("editor").getAttribute("aria-busy"), "false");
+  assert.equal(defaultsTab, "group_name");
+  assert.equal(defaultsOffset, 50);
+  assert.equal(document.activeElement, defaultsInput("rules-body").querySelector("button"));
+  defaultsInput("tab-chat").click();
+  assert.equal(defaultsInput("page").textContent, "第 2 页");
+
+  // A dismissed, still-loading drawer cannot reopen itself or overwrite a
+  // later editor. Closing remains available during reads, but not writes.
+  pendingOptions = {};
+  openDefaultEditor("chat");
+  const abandoned = pendingOptions;
+  defaultsInput("close").click();
+  assert.equal(defaultsInput("drawer").open, false);
+  pendingOptions = null;
+  openDefaultEditor("group_name", rules[1]);
+  await flush();
+  abandoned.resolve();
+  await flush();
+  assert.equal(defaultsEditor.kind, "group_name");
+  assert.equal(defaultsInput("keyword").value, rules[1].keyword);
+  closeDefaultEditor();
+
+  // A completed write with a failed refresh cannot reuse the old list's
+  // one-shot actions. A fresh read restores the editing controls.
+  openDefaultEditor("group_name", state.defaults.group_name.items[0]);
+  await flush();
+  failList = true;
+  await saveDefault({ preventDefault() {} });
+  assert(status.includes("列表刷新失败"));
+  assert(defaultsInput("new").disabled);
+  assert(defaultsInput("rules-body").querySelector("button").disabled);
+  openDefaultEditor("group_name", state.defaults.group_name.items[0]);
+  assert.equal(defaultsEditor, null);
+  failList = false;
+  await loadDefaults();
+  assert.equal(defaultsInput("new").disabled, false);
+
+  // Native dialogs cannot return focus to a disabled toolbar opener. After
+  // the post-save read finishes, restore it without moving the list position.
+  defaultsInput("new").focus();
+  defaultsInput("new").click();
+  await flush();
+  pendingList = {};
+  const savingNew = saveDefault({ preventDefault() {} });
+  await flush();
+  assert.equal(defaultsInput("drawer").open, false);
+  assert(defaultsInput("new").disabled);
+  document.activeElement = document.body;
+  pendingList.resolve();
+  pendingList = null;
+  await savingNew;
+  assert.equal(document.activeElement, defaultsInput("new"));
+
+  // Empty pages after deletion retreat to a populated page. Empty registries
+  // have a usable creation entry and no meaningless pagination controls.
+  chatHasMore = false;
+  emptyChatOffsets.add(50);
+  await loadDefaults(50);
+  assert.equal(defaultsOffset, 0);
+  assert(defaultsInput("pagination").hidden);
+  chatItems = [];
+  groupItems = [];
+  await loadDefaults();
+  assert(defaultsInput("pagination").hidden);
+  defaultsInput("chat-body").querySelector("button").click();
+  await flush();
+  assert.equal(defaultsEditor.kind, "chat");
+  assert(defaultsInput("drawer").open);
+  closeDefaultEditor();
+  defaultsInput("tab-group_name").click();
+  defaultsInput("rules-body").querySelector("button").click();
+  await flush();
+  assert.equal(defaultsEditor.kind, "group_name");
+  closeDefaultEditor();
+
+  // A slower list response cannot restore stale results over a newer refresh.
+  chatItems = [exact];
+  groupItems = rules;
+  pendingList = {};
+  const stale = pendingList;
+  const oldList = loadDefaults();
+  pendingList = null;
+  chatItems = [{ ...exact, chat: { ...exact.chat, chatLabelResolved: false } }];
+  await loadDefaults();
+  stale.resolve();
+  await oldList;
+  assert.equal(defaultsInput("chat-body").textContent.includes("研发讨论群"), false);
+  assert(defaultsInput("chat-body").textContent.includes("oc_exact"));
 })().catch((error) => { console.error(error); process.exitCode = 1; });
