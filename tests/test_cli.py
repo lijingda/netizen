@@ -42,7 +42,7 @@ class CliTest(unittest.TestCase):
                 resolve.assert_not_called()
 
     def test_cross_environment_start_uses_existing_binding_without_data_preflight(self):
-        root = Path("/tmp/cli-instance-a")
+        root = Path("/tmp/cli-instance-a").resolve()
         binding = ServiceBinding(root, Path("/env-a/bin/python"), Path("/env-a"))
         status = ServiceStatus(binding, True, True, True)
         manager = Mock()
@@ -58,7 +58,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(json.loads(output)["instance"]["binding"]["python"], "/env-a/bin/python")
 
     def test_retained_unbound_start_registers_current_environment(self):
-        root = Path("/tmp/cli-instance-retained")
+        root = Path("/tmp/cli-instance-retained").resolve()
         manager = Mock()
         manager.inspect.return_value = None
         manager.start.return_value = ServiceStatus(cli._current_binding(root), True, True, True)
@@ -89,7 +89,7 @@ class CliTest(unittest.TestCase):
 
     def test_remove_without_confirmation_is_side_effect_free(self):
         manager = Mock()
-        root = Path("/tmp/cli-remove")
+        root = Path("/tmp/cli-remove").resolve()
         manager.inspect.return_value = ServiceStatus(cli._current_binding(root), True, True, True)
         with patch("netizen_cli.cli_services.ServiceManager", return_value=manager), \
              patch("netizen_cli.cli_data.root_maintenance_lock", return_value=contextlib.nullcontext()), \
@@ -102,7 +102,7 @@ class CliTest(unittest.TestCase):
         manager.remove.assert_not_called()
 
     def test_yes_does_not_bypass_failed_stop_or_purge(self):
-        root = Path("/tmp/cli-stop-fail")
+        root = Path("/tmp/cli-stop-fail").resolve()
         manager = Mock()
         manager.inspect.return_value = ServiceStatus(cli._current_binding(root), True, True, True)
         manager.stop.side_effect = RuntimeError("stop timed out")
@@ -118,7 +118,7 @@ class CliTest(unittest.TestCase):
         purge.assert_not_called()
 
     def test_existing_setup_does_not_rebind_or_initialize(self):
-        root = Path("/tmp/cli-existing-setup")
+        root = Path("/tmp/cli-existing-setup").resolve()
         binding = ServiceBinding(root, Path("/env-a/bin/python"), Path("/env-a"))
         for enabled in (True, False):
             with self.subTest(enabled=enabled):

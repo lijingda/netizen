@@ -34,7 +34,7 @@ class BuiltArtifactTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.temporary = tempfile.TemporaryDirectory(prefix="netizen-wheel-test-")
         cls.addClassCleanup(cls.temporary.cleanup)
-        cls.directory = Path(cls.temporary.name)
+        cls.directory = Path(cls.temporary.name).resolve()
         cls.source = cls.directory / "source"
         cls.source.mkdir()
         for name in ("pyproject.toml", "_build.py", "MANIFEST.in", "config.example.yaml"):

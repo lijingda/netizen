@@ -18,7 +18,7 @@ class PackageConfigTest(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.directory = Path(temporary.name)
+        self.directory = Path(temporary.name).resolve()
         self.home = self.directory / "home"
         self.prefix = self.directory / "environment"
         self.env = {
@@ -65,7 +65,7 @@ class PackagePreflightTest(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.directory = Path(temporary.name)
+        self.directory = Path(temporary.name).resolve()
         self.prefix = self.directory / "ordinary env"
         self.work = self.directory / "maintenance"
         self.work.mkdir()
@@ -426,7 +426,7 @@ class PackagePreflightTest(unittest.TestCase):
 class InstalledIdentityProbeTest(unittest.TestCase):
     def test_fresh_isolated_probe_ignores_cwd_and_retains_venv_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             prefix = root / "environment with spaces"
             venv.EnvBuilder(with_pip=False).create(prefix)
             python = prefix / "bin/python"
@@ -472,7 +472,7 @@ class NativeUvPreflightTest(unittest.TestCase):
         self.uv = Path(os.environ["NETIZEN_TEST_UV"]).absolute()
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.directory = Path(temporary.name)
+        self.directory = Path(temporary.name).resolve()
         self.wheels = self.directory / "wheels"
         self.wheels.mkdir()
         self._wheel("1.0")
@@ -596,7 +596,7 @@ class NativeUvPreflightTest(unittest.TestCase):
 class NativePipPreflightTest(unittest.TestCase):
     def test_native_pip_report_no_change_and_real_update(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             self.wheels = root / "wheels"
             self.wheels.mkdir()
             NativeUvPreflightTest._wheel(self, "1.0")

@@ -35,7 +35,7 @@ class BuiltinSkillsTest(unittest.TestCase):
 
     def test_installed_runtime_uses_its_own_package_resources(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
+            root = Path(raw).resolve()
             for prefix in (root / "arbitrary-venv", root / "global", root / "user-site"):
                 module = prefix / "lib" / "netizen_cli" / "builtin_skills.py"
                 resources = module.parent / "resources"

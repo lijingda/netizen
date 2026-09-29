@@ -130,7 +130,9 @@ class LinuxServicesTest(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        tmp_path = Path(temporary.name)
+        # macOS temporary paths can pass through /var -> /private/var.
+        # Real CLI root/prefix discovery canonicalizes before making a binding.
+        tmp_path = Path(temporary.name).resolve()
         home = tmp_path / "account"
         home.mkdir()
         root = tmp_path / "instance with space $dollar %percent"

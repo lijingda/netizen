@@ -74,7 +74,7 @@ class UpdateOrchestrationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.home = Path(self.temporary.name)
+        self.home = Path(self.temporary.name).resolve()
         self.manager = FakeManager({str(self.home / "a"): True, str(self.home / "b"): True,
                                     str(self.home / "c"): False})
         for root in self.manager.roots:
@@ -363,7 +363,7 @@ class UpdateWorkerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.directory = Path(self.temporary.name)
+        self.directory = Path(self.temporary.name).resolve()
         report = cli_update.new_report()
         report["report_path"] = str(self.directory / "report.json")
         report["package"]["before_version"] = "1.0"
@@ -604,7 +604,7 @@ class UpdateWorkerSignalTest(unittest.TestCase):
 
     def check_interruption(self, signum: int, *, ignore_termination: bool = False) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
+            directory = Path(temporary).resolve()
             root = directory / "instance"
             prepare_root(root)
             maintenance = directory / "maintenance"
