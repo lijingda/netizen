@@ -1,0 +1,27 @@
+# Netizen CLI service v2 @METADATA@
+[Unit]
+Description=Netizen CLI instance
+After=network-online.target
+[Service]
+Type=simple
+WorkingDirectory=@HOME@/
+ExecStart=:"@PYTHON@" "-E" "-P" "-m" "netizen_cli" "_serve" "--root" "@ROOT@"
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=75
+KillMode=control-group
+UMask=0077
+Environment="HOME=@HOME@"
+Environment="NETIZEN_ROOT=@ROOT@"
+Environment="NETIZEN_CLI_PREFIX=@PREFIX@"
+Environment="NETIZEN_CLI_SERVICE=1"
+Environment="NETIZEN_CLI_PYTHON=@PYTHON@"
+Environment="NETIZEN_CONFIG_PATH=@ROOT@/config.yaml"
+Environment="NETIZEN_LARK_APP_CONFIG=@ROOT@/lark-app/config.json"
+Environment="NETIZEN_ADMIN_SECRET_FILE=@ROOT@/credentials/admin-web-secret"
+Environment="NETIZEN_READY_FILE=@ROOT@/state/service.ready"
+Environment="NETIZEN_LIFETIME_LOCK_FILE=@ROOT@/state/service.lifetime.lock"
+Environment="NETIZEN_LOG_FILE=@ROOT@/state/netizen.log"
+Environment="PATH=@HOME@/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+[Install]
+WantedBy=default.target

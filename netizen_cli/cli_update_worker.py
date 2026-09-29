@@ -44,22 +44,32 @@ def _check_interrupted() -> None:
 
 
 def _stop_owned_child(child: subprocess.Popen) -> None:
-    """Only signal the new session created for this worker's own child."""
-    if child.poll() is None:
+    """Stop only the group whose unreaped leader still belongs to this worker."""
+    if child.returncode is not None:
+        return
+    for signum, grace in ((signal.SIGTERM, _CHILD_STOP_GRACE), (signal.SIGKILL, 0)):
         try:
-            os.killpg(child.pid, signal.SIGTERM)
+            os.killpg(child.pid, signum)
         except ProcessLookupError:
-            pass
-    try:
-        child.communicate(timeout=_CHILD_STOP_GRACE)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        # Reap even after forced termination; never release maintenance locks
-        # merely because the graceful-stop deadline elapsed.
-        child.communicate()
+            break
+        except PermissionError:
+            # macOS excludes zombies from group signal recipients and can return
+            # EPERM when only our exited leader remains. Reap it, then accept
+            # only a vanished group; never send another signal to its old ID.
+            if child.poll() is None:
+                raise
+            try:
+                os.killpg(child.pid, 0)
+            except ProcessLookupError:
+                break
+            raise
+        if grace:
+            # Do not poll/reap during grace: the leader's exit does not prove
+            # its descendants stopped. Its reserved PID anchors the final signal.
+            time.sleep(grace)
+    # Reap our direct child after the last group signal, while holding the locks.
+    # Orphan zombies are not waitable here and cannot execute or retain locks.
+    child.communicate()
 
 
 def _run_owned(command: list[str], *, timeout: float | None = None,
@@ -81,10 +91,12 @@ def _run_owned(command: list[str], *, timeout: float | None = None,
                     break
                 except subprocess.TimeoutExpired:
                     continue
-            _check_interrupted()
         except BaseException:
             _stop_owned_child(child)
             raise
+        # Successful communicate ends ownership of this command. A late signal
+        # still aborts the update, but must never target its already-reaped PID.
+        _check_interrupted()
         if check and child.returncode:
             raise subprocess.CalledProcessError(child.returncode, command, stdout, stderr)
         return subprocess.CompletedProcess(command, child.returncode, stdout, stderr)

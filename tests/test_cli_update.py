@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -602,7 +603,8 @@ class UpdateWorkerSignalTest(unittest.TestCase):
                 self.fail(f"Timed out waiting for {path.name}")
             time.sleep(0.01)
 
-    def check_interruption(self, signum: int, *, ignore_termination: bool = False) -> None:
+    def check_interruption(self, signum: int, *, ignore_termination: bool = False,
+                           descendant: bool = False) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary).resolve()
             root = directory / "instance"
@@ -619,8 +621,16 @@ class UpdateWorkerSignalTest(unittest.TestCase):
                 "prefix": sys.prefix, "python": sys.executable,
             }]
             child_source = "\n".join([
-                "import os, signal, sys, time", "from pathlib import Path",
+                "import fcntl, os, signal, sys, time", "from pathlib import Path",
                 f"directory = Path({str(directory)!r})",
+                "(directory / 'group').write_text(str(os.getpgrp()))",
+                f"if {descendant!r} and os.fork():",
+                "    time.sleep(20)",
+                "    sys.exit(0)",
+                f"if {descendant!r}:",
+                "    with open(os.devnull, 'wb') as output:",
+                "        os.dup2(output.fileno(), 1)",
+                "        os.dup2(output.fileno(), 2)",
                 "def terminate(signum, frame):",
                 "    (directory / 'received').write_text(str(signum))",
                 f"    if {ignore_termination!r}: return",
@@ -628,8 +638,15 @@ class UpdateWorkerSignalTest(unittest.TestCase):
                 "    (directory / 'exited').write_text('graceful')",
                 "    sys.exit(0)",
                 "signal.signal(signal.SIGTERM, terminate)",
+                "activity = (directory / 'activity.lock').open('w')",
+                "fcntl.flock(activity, fcntl.LOCK_EX)",
+                "heartbeat = (directory / 'heartbeat').open('a', buffering=1)",
+                "heartbeat.write(str(time.monotonic_ns()) + '\\n')",
                 "(directory / 'started').write_text(str(os.getpid()))",
-                "while True: time.sleep(0.05)",
+                "deadline = time.monotonic() + 20",
+                "while time.monotonic() < deadline:",
+                "    heartbeat.write(str(time.monotonic_ns()) + '\\n')",
+                "    time.sleep(0.01)",
             ])
             plan = {
                 "protocol": 1, "json_output": True, "report": report,
@@ -660,6 +677,10 @@ class UpdateWorkerSignalTest(unittest.TestCase):
             try:
                 self.wait_for_file(directory / "started", process)
                 child_pid = int((directory / "started").read_text())
+                if descendant:
+                    group = int((directory / "group").read_text())
+                    self.assertNotEqual(child_pid, group)
+                    self.assertEqual(os.getpgid(child_pid), group)
                 process.send_signal(signum)
                 self.wait_for_file(directory / "received", process)
                 self.assertIsNone(process.poll())
@@ -667,9 +688,16 @@ class UpdateWorkerSignalTest(unittest.TestCase):
                     cli_update._lock(maintenance)
                 with self.assertRaises(BlockingIOError):
                     acquire_install_lock(root)
+                heartbeat = (directory / "heartbeat").read_text()
                 process.send_signal(signum)
                 time.sleep(0.05)
                 self.assertIsNone(process.poll())
+                if descendant:
+                    self.assertNotEqual((directory / "heartbeat").read_text(), heartbeat)
+                    with self.assertRaises(cli_update.UpdateError):
+                        cli_update._lock(maintenance)
+                    with self.assertRaises(BlockingIOError):
+                        acquire_install_lock(root)
                 os.kill(child_pid, 0)
                 (directory / "release").touch()
                 stdout, stderr = process.communicate(timeout=15)
@@ -682,13 +710,29 @@ class UpdateWorkerSignalTest(unittest.TestCase):
                 self.assertEqual(result["unexecuted"], ["validation", "restore"])
                 self.assertEqual(result["instances"][0]["state"], "stopped")
                 self.assertEqual(json.loads(Path(report["report_path"]).read_text()), result)
-                with self.assertRaises(ProcessLookupError):
-                    os.kill(child_pid, 0)
+                # The descendant closes its inherited output pipes, so the
+                # worker's communicate cannot hide early worker/lock release.
+                # This lock is released on exit even if an orphan remains a
+                # zombie until init reaps it. kill(pid, 0) alone cannot prove
+                # whether a descendant is still capable of writing the package.
+                with (directory / "activity.lock").open("r+") as activity:
+                    fcntl.flock(activity, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                heartbeat = (directory / "heartbeat").read_text()
+                time.sleep(0.05)
+                self.assertEqual((directory / "heartbeat").read_text(), heartbeat)
+                if not descendant:
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(child_pid, 0)
                 self.assertEqual((directory / "exited").exists(), not ignore_termination)
                 os.close(cli_update._lock(maintenance))
                 os.close(acquire_install_lock(root))
             finally:
                 (directory / "release").touch()
+                if descendant and child_pid is not None:
+                    # Clean only this fixture if the worker regresses and
+                    # exits before terminating its descendant.
+                    with contextlib.suppress(ProcessLookupError):
+                        os.kill(child_pid, signal.SIGKILL)
                 if process.poll() is None:
                     process.terminate()
                     try:
@@ -710,6 +754,26 @@ class UpdateWorkerSignalTest(unittest.TestCase):
 
     def test_sigterm_escalates_for_owned_child_ignoring_termination(self) -> None:
         self.check_interruption(signal.SIGTERM, ignore_termination=True)
+
+    def test_sigterm_stops_descendant_after_group_leader_exits(self) -> None:
+        self.check_interruption(signal.SIGTERM, ignore_termination=True, descendant=True)
+
+    def test_cleanup_never_signals_a_reaped_process_group(self) -> None:
+        with patch.object(cli_update_worker.os, "killpg") as killpg:
+            cli_update_worker._stop_owned_child(SimpleNamespace(returncode=0))
+        killpg.assert_not_called()
+
+    def test_late_interruption_aborts_without_cleaning_a_completed_command(self) -> None:
+        with patch.object(cli_update_worker.subprocess, "Popen") as popen:
+            child = popen.return_value.__enter__.return_value
+            child.communicate.return_value = ("done", "")
+            child.returncode = 0
+            with patch.object(cli_update_worker, "_check_interrupted", side_effect=[
+                None, None, cli_update_worker.UpdateInterrupted("SIGTERM"),
+            ]), patch.object(cli_update_worker, "_stop_owned_child") as cleanup:
+                with self.assertRaises(cli_update_worker.UpdateInterrupted):
+                    cli_update_worker._run_owned(["disposable-command"], capture_output=True)
+            cleanup.assert_not_called()
 
 
 if __name__ == "__main__":
