@@ -219,7 +219,7 @@ class Acceptance:
         value = None
         if parse and text.strip():
             try:
-                value = json.loads(text.strip().splitlines()[-1])
+                value = json.loads(text)
                 write_json(prefix.with_suffix(".result.json"), value)
             except json.JSONDecodeError:
                 require(process.returncode != 0, name + " returned no valid JSON result")
