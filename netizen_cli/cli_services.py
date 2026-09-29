@@ -1,7 +1,8 @@
 """Per-user installed-CLI services; definitions are the instance inventory.
 
-Only Netizen's frozen v1 definition shape is writable. Recognition is independent
-of the current renderer; a new format needs its own explicitly supported validator.
+Only Netizen's frozen definitions are writable (Linux v2, launchd v1).
+Recognition retains v1 independently of the current renderer; a new format
+needs its own explicitly supported validator.
 systemd state comes from machine properties; launchd's documented list columns
 provide PID state.
 The diagnostic output of ``launchctl print`` is deliberately never parsed.
@@ -61,6 +62,7 @@ class ServiceStatus:
 
 
 _V1_MARKER = "# Netizen CLI service v1 "
+_V2_MARKER = "# Netizen CLI service v2 "
 _V1_SENTINEL = "io.github.lijingda.netizen/cli-v1"
 _READY = b"netizen service ready\n"
 _LOG_READ_LIMIT = 1024 * 1024
@@ -139,6 +141,31 @@ def _v1_definition(home: Path, platform: str, binding: ServiceBinding,
         "[Install]", "WantedBy=default.target", "",
     ]
     return "\n".join(lines).encode()
+
+
+def _v2_linux_definition(home: Path, binding: ServiceBinding) -> bytes:
+    """Frozen v2: correct only Linux's single-path WorkingDirectory syntax.
+
+    Unlike ExecStart/Environment, this field does not unquote or C-unescape.
+    Escape specifiers only; the trailing slash protects a final space or
+    backslash from unit-file whitespace stripping / line continuation.
+    Keep v1 byte recognition unchanged, including its invalid quoted path.
+    """
+    content = _v1_definition(home, "linux", binding)
+    old = "\nWorkingDirectory=" + _v1_quote(str(home)) + "\n"
+    new = "\nWorkingDirectory=" + str(home).replace("%", "%%") + "/\n"
+    return (content.replace(_V1_MARKER.encode(), _V2_MARKER.encode(), 1)
+            .replace(old.encode(), new.encode(), 1))
+
+
+def _same_service_fragment(fragment: str, expected: Path) -> bool:
+    """Allow parent-directory aliases, never a different or symlink unit file."""
+    actual = Path(fragment)
+    try:
+        return (actual.is_absolute() and not actual.is_symlink()
+                and actual.resolve(strict=True) == expected.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _read_owned(path: Path, uid: int) -> bytes:
@@ -270,6 +297,8 @@ class ServiceManager:
         return _v1_arguments(binding)
 
     def _render(self, binding: ServiceBinding, *, enabled: bool = True) -> bytes:
+        if self.platform == "linux":
+            return _v2_linux_definition(self.home, binding)
         return _v1_definition(self.home, self.platform, binding, enabled=enabled)
 
     def _binding_from_file(self, path: Path) -> ServiceBinding:
@@ -277,14 +306,18 @@ class ServiceManager:
         try:
             if self.platform == "linux":
                 first, *_ = content.decode().splitlines()
-                if not first.startswith(_V1_MARKER):
-                    raise ValueError("unsupported service definition format; only CLI v1 is supported")
-                raw = json.loads(first[len(_V1_MARKER):])
+                marker = next((value for value in (_V1_MARKER, _V2_MARKER)
+                               if first.startswith(value)), None)
+                if marker is None:
+                    raise ValueError("unsupported service definition format; only CLI v1/v2 are supported")
+                raw = json.loads(first[len(marker):])
                 if set(raw) != {"root", "python", "prefix", "codex_home"}:
                     raise ValueError("unrecognized binding metadata")
                 binding = ServiceBinding(*(Path(raw[key]) for key in ("root", "python", "prefix")),
                                          Path(raw["codex_home"]) if raw["codex_home"] is not None else None)
-                valid = content == _v1_definition(self.home, self.platform, binding)
+                expected = (_v2_linux_definition(self.home, binding) if marker == _V2_MARKER
+                            else _v1_definition(self.home, self.platform, binding))
+                valid = content == expected
             else:
                 payload = plistlib.loads(content)
                 env = payload["EnvironmentVariables"]
@@ -402,7 +435,7 @@ class ServiceManager:
                 running = False
             else:
                 if (props["LoadState"] != "loaded"
-                        or props["FragmentPath"] != str(path)
+                        or not _same_service_fragment(props["FragmentPath"], path)
                         or props["DropInPaths"] or props["NeedDaemonReload"] != "no"
                         or props["Transient"] != "no"):
                     raise ServiceError("effective systemd definition differs or is unknown; inspect overrides")

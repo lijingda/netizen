@@ -5,6 +5,7 @@ import html
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -152,11 +153,11 @@ class LinuxServicesTest(unittest.TestCase):
         self.managed = manager, native, binding
         self.addCleanup(lambda: [os.close(fd) for fd in native.descriptors.values()])
 
-    def install_v1_fixture(self) -> bytes:
-        """Load persisted v1 evidence without using the current service renderer."""
+    def install_service_fixture(self, version: int = 1) -> bytes:
+        """Load persisted evidence without using the current service renderer."""
         manager, _, binding = self.managed
         suffix = ".service" if self.platform == "linux" else ".plist"
-        template = (Path(__file__).parent / "fixtures" / ("cli_service_v1" + suffix)).read_text()
+        template = (Path(__file__).parent / "fixtures" / (f"cli_service_v{version}" + suffix)).read_text()
         for name, value in {"ROOT": binding.root, "PYTHON": binding.python,
                             "PREFIX": binding.prefix, "HOME": manager.home,
                             "LABEL": manager.service_name(binding.root)}.items():
@@ -175,7 +176,7 @@ class LinuxServicesTest(unittest.TestCase):
 
     def test_frozen_v1_services_remain_controllable_after_default_renderer_changes(self) -> None:
         manager, native, binding = self.managed
-        content = self.install_v1_fixture()
+        content = self.install_service_fixture()
         # A package update may select a new format for new registrations. All
         # controls and inventory must still understand known persisted v1 bytes.
         with patch.object(manager, "_render", return_value=b"future default format\n") as render:
@@ -191,10 +192,11 @@ class LinuxServicesTest(unittest.TestCase):
 
     def test_v1_fixture_rejects_unknown_versions_identity_changes_and_overrides(self) -> None:
         manager, native, binding = self.managed
-        content = self.install_v1_fixture()
+        content = self.install_service_fixture()
         if self.platform == "linux":
             mutations = [
-                content.replace(b"service v1 ", b"service v2 "),
+                content.replace(b"service v1 ", b"service v9 "),
+                content.replace(b"service v1 ", b"service v2 "),  # No mixed-format definitions.
                 content.replace(b'ExecStart=:', b'ExecStart=:+'),
                 content.replace(b'"NETIZEN_CLI_SERVICE=1"', b'"NETIZEN_CLI_SERVICE=0"'),
                 content.replace(b'"NETIZEN_ROOT=', b'"OTHER_ROOT='),
@@ -422,6 +424,82 @@ class LinuxServicesTest(unittest.TestCase):
                 manager.start(binding.root, timeout=0)
         assert not native.descriptors
 
+    def test_systemd_home_alias_identifies_the_same_owned_definition(self) -> None:
+        manager, native, binding = self.managed
+        if self.platform != "linux":
+            self.skipTest("systemd-specific fragment identity")
+        manager.register(binding)
+        alias = manager.home.parent / "home-alias"
+        alias.symlink_to(manager.home, target_is_directory=True)
+        fragment = alias / manager.service_file(binding.root).relative_to(manager.home)
+        name = manager.service_name(binding.root)
+        native.overrides[name] = {"FragmentPath": str(fragment)}
+        self.assertEqual(manager.inspect(binding.root).binding, binding)
+        self.assertTrue(manager.start(binding.root, timeout=0).ready)
+        self.assertEqual(manager.inspect(binding.root).binding.python, binding.python)
+        self.assertTrue(binding.python.is_symlink())
+        self.assertFalse(manager.stop(binding.root, timeout=0).running)
+        native.overrides.clear()
+        manager.remove(binding.root)
+        self.assertIsNone(manager.inspect(binding.root))
+
+    def test_systemd_v2_fixture_is_independent_of_the_current_renderer(self) -> None:
+        manager, native, binding = self.managed
+        if self.platform != "linux":
+            self.skipTest("Linux v2 serialization")
+        content = self.install_service_fixture(version=2)
+        with patch.object(manager, "_render", return_value=b"future format") as render:
+            manager.register(binding)
+            self.assertTrue(manager.start(binding.root, timeout=0).ready)
+            self.assertEqual(manager.service_file(binding.root).read_bytes(), content)
+            self.assertFalse(manager.stop(binding.root, timeout=0).running)
+            render.assert_not_called()
+        for changed in (
+            content.replace(b"service v2 ", b"service v9 "),
+            content.replace(b"service v2 ", b"service v1 "),
+            content.replace(b"WorkingDirectory=", b"RootDirectory="),
+            content.replace(b"KillMode=control-group", b"KillMode=process"),
+            content.replace(b"[Install]", b"Environment=PYTHONPATH=/unsafe\n[Install]"),
+        ):
+            with self.subTest(definition=changed):
+                _private(manager.service_file(binding.root), changed)
+                native.calls.clear()
+                with self.assertRaises(ServiceError):
+                    manager.remove(binding.root)
+                self.assertFalse(native.calls)
+
+    def test_systemd_fragment_alias_does_not_admit_other_files_or_overrides(self) -> None:
+        manager, native, binding = self.managed
+        if self.platform != "linux":
+            self.skipTest("systemd-specific fragment identity")
+        manager.register(binding)
+        path = manager.service_file(binding.root)
+        other = manager.home.parent / "other-definition"
+        other.mkdir()
+        _private(other / path.name, path.read_bytes())
+        alias = manager.home.parent / "home-alias"
+        alias.symlink_to(manager.home, target_is_directory=True)
+        fragment = alias / path.relative_to(manager.home)
+        loop = manager.home.parent / "loop"
+        loop.symlink_to(loop)
+        leaf_alias = other / "alias.service"
+        leaf_alias.symlink_to(path)
+        for properties in (
+            {"FragmentPath": ""},
+            {"FragmentPath": path.name},
+            {"FragmentPath": str(other / path.name)},
+            {"FragmentPath": str(loop / path.name)},
+            {"FragmentPath": str(leaf_alias)},
+            {"FragmentPath": str(fragment), "DropInPaths": "/tmp/override.conf"},
+            {"FragmentPath": str(fragment), "NeedDaemonReload": "yes"},
+            {"FragmentPath": str(fragment), "Transient": "yes"},
+        ):
+            with self.subTest(properties=properties):
+                native.overrides[manager.service_name(binding.root)] = properties
+                with self.assertRaisesRegex(ServiceError, "definition differs"):
+                    manager.start(binding.root, timeout=0)
+        self.assertFalse(native.descriptors)
+
 
     def test_launchd_loaded_is_not_running_and_print_text_is_not_state(self) -> None:
         manager, native, binding = self.managed
@@ -572,3 +650,33 @@ class LinuxServicesTest(unittest.TestCase):
 
 class DarwinServicesTest(LinuxServicesTest):
     platform = "darwin"
+
+
+@unittest.skipUnless(sys.platform == "linux" and shutil.which("systemd-analyze"),
+                     "requires the native systemd unit parser, not a running manager")
+class NativeSystemdDefinitionTest(unittest.TestCase):
+    def test_generated_units_pass_native_verification_without_registering_services(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="netizen-unit-verify-") as directory:
+            base = Path(directory).resolve()
+            # Use the real parser, but never load host service configuration or
+            # generators. Minimal ordering targets satisfy default dependencies.
+            for target in ("sysinit", "basic", "shutdown", "network-online"):
+                (base / (target + ".target")).write_text(
+                    "[Unit]\nDescription=Disposable parser target\nDefaultDependencies=no\n"
+                )
+            binding = ServiceBinding(base / "root", Path(sys.executable).absolute(),
+                                     Path(sys.prefix).resolve())
+            for name in ("account", 'account with space $dollar %percent "quote" \\slash',
+                         "trailing-space ", "trailing-backslash\\"):
+                with self.subTest(home=name):
+                    home = base / name
+                    home.mkdir()
+                    manager = ServiceManager(home=home, platform="linux")
+                    unit = base / "netizen-parser-probe.service"
+                    unit.write_bytes(manager._render(binding))
+                    result = subprocess.run(
+                        ["systemd-analyze", "--generators=no", "verify", str(unit)],
+                        env={**os.environ, "SYSTEMD_UNIT_PATH": str(base)},
+                        capture_output=True, text=True, timeout=20, check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
