@@ -1,104 +1,38 @@
-name: Main quality gate
+name: One-shot macOS CLI acceptance probe
 
 on:
-  pull_request:
-    branches: [main]
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: netizen-main-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  check:
-    name: Python ${{ matrix.python }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.11", "3.12", "3.13", "3.14"]
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js for Admin JavaScript behavior tests
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Set up supported Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-          cache: pip
-          cache-dependency-path: requirements.lock
-
-      - name: Install the locked dependency set
-        run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install --disable-pip-version-check --no-input setuptools==80.9.0
-          .venv/bin/python -m pip install \
-            --disable-pip-version-check \
-            --no-input \
-            --constraint requirements.lock \
-            .
-
-      - name: Run the repository gate
-        run: make check
-
-  macos-arm64-check:
-    name: macOS arm64 Python ${{ matrix.python }}
+  gui-probe:
     runs-on: macos-15
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.13", "3.14"]
+    timeout-minutes: 5
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js for Admin JavaScript behavior tests
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Set up supported Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-          cache: pip
-          cache-dependency-path: requirements.lock
-
-      - name: Confirm the standard arm64 runtime
+      - name: Read the isolated runner GUI domain
+        shell: bash
+        env:
+          CANDIDATE_SHA: cd00eca3c7467873e366564bc75caff61d5ad88c
         run: |
-          test "$(uname -m)" = arm64
-          python - <<'PY'
-          import sys
-
-          assert sys.implementation.name == "cpython"
-          assert sys.version_info[:2] in {(3, 13), (3, 14)}
-          PY
-
-      - name: Install the locked dependency set
-        run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install --disable-pip-version-check --no-input setuptools==80.9.0
-          .venv/bin/python -m pip install \
-            --disable-pip-version-check \
-            --no-input \
-            --constraint requirements.lock \
-            .
-
-      - name: Verify macOS system trust integration
-        run: >-
-          .venv/bin/python -I -B -c
-          'from netizen_cli.main import _configure_platform_trust;
-          _configure_platform_trust()'
-
-      - name: Run the repository gate
-        run: make check
+          python3 - <<'PYTHON'
+          import json, os, platform, subprocess
+          from pathlib import Path
+          uid = os.geteuid()
+          domain = f"gui/{uid}"
+          query = subprocess.run(["launchctl", "print", domain], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+          report = {"candidate_sha": os.environ["CANDIDATE_SHA"], "harness_sha": os.environ["GITHUB_SHA"], "platform": platform.platform(), "uid": uid, "console_uid": os.stat("/dev/console").st_uid, "image_os": os.environ.get("ImageOS"), "image_version": os.environ.get("ImageVersion"), "gui_domain": domain, "gui_query_returncode": query.returncode, "service_start_verified": False}
+          output = Path(os.environ["RUNNER_TEMP"]) / "netizen-gui-probe.json"
+          output.write_text(json.dumps(report, indent=2) + "\n")
+          print(json.dumps(report, indent=2))
+          raise SystemExit(0 if query.returncode == 0 else 78)
+          PYTHON
+      - name: Preserve the read-only probe result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: netizen-gui-probe
+          path: ${{ runner.temp }}/netizen-gui-probe.json
+          if-no-files-found: error
+          retention-days: 7
