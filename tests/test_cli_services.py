@@ -128,7 +128,9 @@ class LinuxServicesTest(unittest.TestCase):
     platform = "linux"
 
     def setUp(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
+        # Include the macOS parent-name fragment so log-body assertions cannot
+        # accidentally match "older" inside a displayed "folders" path.
+        temporary = tempfile.TemporaryDirectory(prefix="netizen-folders-")
         self.addCleanup(temporary.cleanup)
         # macOS temporary paths can pass through /var -> /private/var.
         # Real CLI root/prefix discovery canonicalizes before making a binding.
@@ -522,7 +524,7 @@ class LinuxServicesTest(unittest.TestCase):
         manager._runner = runner
         output = manager.logs(binding.root, lines=1)
         self.assertIn("Runtime failure detail", output)
-        self.assertNotIn("older", output)
+        self.assertNotIn("older", output.splitlines())
         self.assertIn("before logger startup error", output)
         (binding.root / "state/netizen.log").unlink()
         self.assertIn("before logger startup error", manager.logs(binding.root, lines=1))
