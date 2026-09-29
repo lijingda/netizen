@@ -91,7 +91,7 @@ def internal(mode, directory, root=None):
 
         def helper(module, args, **kwargs):
             if module == "netizen_cli.feishu_app_onboarding":
-                return {"version": 1, "appId": "ci_business_fixture",
+                return {"version": 1, "appId": "cli_business_fixture",
                         "appSecret": "synthetic-not-a-real-secret"}
             if module == "netizen_cli.feishu_app_permissions":
                 return {"version": 1, "missingScopes": []}
