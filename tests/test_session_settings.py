@@ -4,10 +4,10 @@ import dataclasses
 import unittest
 from types import SimpleNamespace
 
-from netizen.bindings import BindingStore, BindingTaskFeedback, BindingTurnSettings
-from netizen.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
-from netizen.model_settings import ModelCatalog, ModelCatalogError
-from netizen.session_settings import SessionSettings, SessionSettingsError
+from netizen_cli.bindings import BindingStore, BindingTaskFeedback, BindingTurnSettings
+from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
+from netizen_cli.model_settings import ModelCatalog, ModelCatalogError
+from netizen_cli.session_settings import SessionSettings, SessionSettingsError
 from tests.test_model_settings import Effort, effort, model, tier
 
 

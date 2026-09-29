@@ -10,8 +10,8 @@ from lark_channel import InboundPipeline, InteractiveContent, QuotedContext, Tex
 from lark_channel.channel.normalize.pipeline import PipelineConfig, PipelineDeps
 from lark_channel.channel.quote import QuoteResolver
 
-from netizen.message_content import UnsupportedHistoricalMessage
-from netizen.message_preparation import (
+from netizen_cli.message_content import UnsupportedHistoricalMessage
+from netizen_cli.message_preparation import (
     MessagePreparationError,
     prepare_message_content,
 )

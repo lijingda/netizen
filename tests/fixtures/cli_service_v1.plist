@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>AbandonProcessGroup</key><false/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>@HOME@</string>
+    <key>NETIZEN_ROOT</key><string>@ROOT@</string>
+    <key>NETIZEN_CLI_PREFIX</key><string>@PREFIX@</string>
+    <key>NETIZEN_CLI_SERVICE</key><string>1</string>
+    <key>NETIZEN_CLI_PYTHON</key><string>@PYTHON@</string>
+    <key>NETIZEN_CONFIG_PATH</key><string>@ROOT@/config.yaml</string>
+    <key>NETIZEN_LARK_APP_CONFIG</key><string>@ROOT@/lark-app/config.json</string>
+    <key>NETIZEN_ADMIN_SECRET_FILE</key><string>@ROOT@/credentials/admin-web-secret</string>
+    <key>NETIZEN_READY_FILE</key><string>@ROOT@/state/service.ready</string>
+    <key>NETIZEN_LIFETIME_LOCK_FILE</key><string>@ROOT@/state/service.lifetime.lock</string>
+    <key>NETIZEN_LOG_FILE</key><string>@ROOT@/state/netizen.log</string>
+    <key>PATH</key><string>@HOME@/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>NETIZEN_MANAGED_LAUNCH_AGENT</key><string>io.github.lijingda.netizen/cli-v1</string>
+  </dict>
+  <key>ExitTimeOut</key><integer>75</integer>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>Label</key><string>@LABEL@</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@PYTHON@</string><string>-E</string><string>-P</string>
+    <string>-m</string><string>netizen_cli</string><string>_serve</string>
+    <string>--root</string><string>@ROOT@</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StandardErrorPath</key><string>@ROOT@/state/launchd.stderr.log</string>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>ThrottleInterval</key><integer>3</integer>
+  <key>Umask</key><integer>63</integer>
+  <key>WorkingDirectory</key><string>@HOME@</string>
+</dict>
+</plist>

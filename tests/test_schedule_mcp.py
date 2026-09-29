@@ -11,8 +11,8 @@ import httpx
 from jsonschema import Draft202012Validator
 from mcp.types import CallToolRequestParams
 
-from netizen.schedules.mcp import CREATE_EXAMPLE, MAX_BODY_BYTES, ScheduleMcpRunner, _Arguments, _tool_schema
-from netizen.schedules.models import ScheduleRule
+from netizen_cli.schedules.mcp import CREATE_EXAMPLE, MAX_BODY_BYTES, ScheduleMcpRunner, _Arguments, _tool_schema
+from netizen_cli.schedules.models import ScheduleRule
 
 
 class ScheduleMcpTests(unittest.IsolatedAsyncioTestCase):
@@ -307,7 +307,7 @@ class ScheduleMcpTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
             yield b"}"
 
-        with patch("netizen.schedules.mcp.HTTP_TIMEOUT_SECONDS", 0.01):
+        with patch("netizen_cli.schedules.mcp.HTTP_TIMEOUT_SECONDS", 0.01):
             response = await self.client.post(self.runner.url, content=chunks(), headers={"content-type": "application/json"})
         self.assertEqual(response.status_code, 408)
 
@@ -322,7 +322,7 @@ class ScheduleMcpTests(unittest.IsolatedAsyncioTestCase):
 
         self.runner._callback = manage
         self.runner.open_admission()
-        with patch("netizen.schedules.mcp.CALL_TIMEOUT_SECONDS", 0.05):
+        with patch("netizen_cli.schedules.mcp.CALL_TIMEOUT_SECONDS", 0.05):
             pending = asyncio.create_task(self.call({"mode": "list"}))
             await started.wait()
             self.runner.close_admission()
@@ -337,7 +337,7 @@ class ScheduleMcpTests(unittest.IsolatedAsyncioTestCase):
 
         self.runner._callback = fail
         self.runner.open_admission()
-        with self.assertLogs("netizen.schedules.mcp", level="ERROR") as captured:
+        with self.assertLogs("netizen_cli.schedules.mcp", level="ERROR") as captured:
             result = await self.call({"mode": "list"})
         self.assertEqual(result["structuredContent"]["error"]["code"], "internal_error")
         self.assertNotIn("SECRET", json.dumps(result) + str(captured.output))

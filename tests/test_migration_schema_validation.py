@@ -6,8 +6,8 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from netizen.database_migrations import plan_channel_database
-from netizen.migrations.schema import require_schema
+from netizen_cli.database_migrations import plan_channel_database
+from netizen_cli.migrations.schema import require_schema
 
 
 FIXTURES = Path(__file__).parent / "fixtures"

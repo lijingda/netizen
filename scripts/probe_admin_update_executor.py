@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 import uuid
+import venv
 from pathlib import Path
 from typing import Any
 
@@ -27,12 +28,11 @@ from typing import Any
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
-from netizen.deployment.update_executor import UpdateExecutor  # noqa: E402
-from netizen.instance import instance_digest  # noqa: E402
+from netizen_cli.deployment.update_executor import UpdateExecutor  # noqa: E402
+from netizen_cli.instance import instance_digest  # noqa: E402
 
 
 _ID = re.compile(r"[0-9a-f]{32}\Z")
-_RELEASE_ID = re.compile(r"[0-9a-f]{64}\Z")
 _FIXTURE_PREFIX = "netizen-update-executor-probe-"
 _FIXTURE_ACCOUNT = "account ${NETIZEN_PROBE_EXPANSION} %h space ' ;"
 
@@ -108,8 +108,10 @@ def _fixture(home: Path) -> dict[str, Any]:
             raise ProbeError("invalid disposable job identity")
     if config["parent_id"] == config["helper_id"]:
         raise ProbeError("parent and helper identities must differ")
-    if not isinstance(config.get("release_id"), str) or _RELEASE_ID.fullmatch(config["release_id"]) is None:
-        raise ProbeError("invalid disposable release identity")
+    package = config.get("package_dir")
+    if (not isinstance(package, str) or Path(package).name != "netizen_cli"
+            or not Path(package).resolve().is_relative_to((home / "python-env").resolve())):
+        raise ProbeError("invalid disposable package identity")
     if not isinstance(config.get("deadline"), (float, int)):
         raise ProbeError("invalid probe deadline")
     return config
@@ -160,7 +162,7 @@ def _parent(home: Path, config: dict[str, Any]) -> None:
         os.environ["NETIZEN_LIFETIME_LOCK_FD"] = str(lock.fileno())
         os.environ["NETIZEN_LIFETIME_LOCK_FILE"] = str(state / "parent.lifetime.lock")
         _write(state / "parent-started.json", {"cgroup": _cgroup()})
-        UpdateExecutor(home, root=home / ".netizen").launch(config["helper_id"], home / ".netizen" / "current")
+        UpdateExecutor(home, root=home / ".netizen").launch(config["helper_id"], home / "python-env" / "bin" / "python")
         _write(state / "parent-submitted.json", {"helper_id": config["helper_id"]})
         while time.monotonic() < config["deadline"]:
             time.sleep(0.1)
@@ -197,12 +199,12 @@ def _helper(home: Path, config: dict[str, Any]) -> None:
 
 
 def _actor(operation_id: str, root: Path) -> int:
-    home = Path(__file__).resolve().parents[5]
+    home = root.parent
     config = _fixture(home)
     if root != home / ".netizen":
         raise ProbeError("the probe actor root is not its disposable fixture")
-    if Path(__file__).resolve() != home / ".netizen" / "releases" / config["release_id"] / "source" / "scripts" / "netizen_updater.py":
-        raise ProbeError("the probe actor did not start from its physical fixture release")
+    if Path(__file__).resolve() != Path(config["package_dir"]) / "deployment" / "restart_worker.py":
+        raise ProbeError("the probe actor did not start from its fixture package")
     role = "parent" if operation_id == config["parent_id"] else "helper"
     if operation_id != config[f"{role}_id"]:
         raise ProbeError("operation does not belong to this probe fixture")
@@ -219,39 +221,42 @@ def _actor(operation_id: str, root: Path) -> int:
 
 def _prepare(root: Path, deadline: float) -> tuple[Path, dict[str, Any]]:
     home = root / _FIXTURE_ACCOUNT
+    environment = home / "python-env"
+    # This is a disposable test fixture, not Netizen's product installation.
+    # No pip/network/package download; use a real venv to exercise -m and the
+    # selected Python spelling under the unchanged production dispatcher.
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+    python = environment / "bin" / "python"
+    paths = subprocess.run([str(python), "-I", "-c",
+                            "import sysconfig; print(sysconfig.get_path('purelib'))"],
+                           check=True, capture_output=True, text=True,
+                           timeout=min(10, _remaining(deadline)))
+    package = Path(paths.stdout.strip()) / "netizen_cli"
     config = {"parent_id": uuid.uuid4().hex, "helper_id": uuid.uuid4().hex,
-              "release_id": uuid.uuid4().hex + uuid.uuid4().hex, "deadline": deadline}
-    release = home / ".netizen" / "releases" / config["release_id"]
-    (release / "venv" / "bin").mkdir(parents=True, mode=0o700)
-    (release / "venv" / "bin" / "python").symlink_to(Path(sys.executable).resolve())
-    scripts = release / "source" / "scripts"
-    scripts.mkdir(parents=True)
-    shutil.copyfile(__file__, scripts / "netizen_updater.py")
-    package = release / "source" / "netizen"
+              "package_dir": str(package), "deadline": deadline}
     package.mkdir()
     (package / "__init__.py").write_text("", encoding="utf-8")
-    shutil.copyfile(SOURCE_ROOT / "netizen" / "instance.py", package / "instance.py")
+    shutil.copyfile(SOURCE_ROOT / "netizen_cli" / "instance.py", package / "instance.py")
     deployment = package / "deployment"
     deployment.mkdir()
     (deployment / "__init__.py").write_text("", encoding="utf-8")
-    shutil.copyfile(SOURCE_ROOT / "netizen" / "deployment" / "update_executor.py", deployment / "update_executor.py")
+    shutil.copyfile(SOURCE_ROOT / "netizen_cli" / "deployment" / "update_executor.py", deployment / "update_executor.py")
+    shutil.copyfile(__file__, deployment / "restart_worker.py")
     state = home / ".netizen" / "state"
-    state.mkdir(mode=0o700)
+    state.mkdir(parents=True, mode=0o700)
     _write(state / "probe.json", config)
-    (home / ".netizen" / "current").symlink_to(release)
     return home, config
 
 
 def _evidence(home: Path, config: dict[str, Any]) -> dict[str, bool]:
     state = home / ".netizen" / "state"
     completed = _read(state / "completed.json")
-    release = home / ".netizen" / "releases" / config["release_id"]
     checks = {
         "launched_from_managed_parent": (state / "parent-submitted.json").is_file(),
         "helper_completed_after_stopping_parent": completed.get("parent_stopped") is True,
         "parent_lifetime_fd_not_inherited": completed.get("parent_lock_released") is True,
-        "physical_release_python": completed.get("python") == str(release / "venv" / "bin" / "python"),
-        "physical_release_script": completed.get("script") == str(release / "source" / "scripts" / "netizen_updater.py"),
+        "bound_environment_python": completed.get("python") == str(home / "python-env" / "bin" / "python"),
+        "installed_worker_module": completed.get("script") == str(Path(config["package_dir"]) / "deployment" / "restart_worker.py"),
         "literal_dollar_percent_space_home": completed.get("home") == str(home) and completed.get("cwd") == str(home),
         "exact_operation": completed.get("operation_id") == config["helper_id"],
     }
@@ -274,7 +279,7 @@ def _run_probe(timeout: float) -> dict[str, Any]:
     try:
         deadline = time.monotonic() + timeout
         home, config = _prepare(root, deadline)
-        _ParentExecutor(home, root=home / ".netizen").launch(config["parent_id"], home / ".netizen" / "current")
+        _ParentExecutor(home, root=home / ".netizen").launch(config["parent_id"], home / "python-env" / "bin" / "python")
         state = home / ".netizen" / "state"
 
         def finished() -> bool:

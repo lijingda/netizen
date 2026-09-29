@@ -9,7 +9,7 @@ import unittest
 from collections.abc import Awaitable, Callable
 from unittest.mock import AsyncMock, patch
 
-from netizen.admin.transport import (
+from netizen_cli.admin.transport import (
     AdminHttpState,
     AdminHttpTransport,
     MAX_ACTIVE_CONNECTIONS,
@@ -190,7 +190,7 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
             servers.append(server)
             return server
 
-        with patch("netizen.admin.transport.asyncio.start_server", recording_start_server), patch("asyncio.base_events.Server.start_serving", new=AsyncMock(side_effect=OSError(errno.EACCES, "denied"))):
+        with patch("netizen_cli.admin.transport.asyncio.start_server", recording_start_server), patch("asyncio.base_events.Server.start_serving", new=AsyncMock(side_effect=OSError(errno.EACCES, "denied"))):
             with self.assertRaises(OSError):
                 await transport.bind()
         self.assertEqual(len(servers), 1)
@@ -241,7 +241,7 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_header_deadline_is_absolute_despite_drip(self) -> None:
-        with patch("netizen.admin.transport.HEADER_TIMEOUT_SECONDS", 0.15):
+        with patch("netizen_cli.admin.transport.HEADER_TIMEOUT_SECONDS", 0.15):
             transport = await self._transport()
             reader, writer = await self._connect(transport)
             try:
@@ -270,7 +270,7 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
             calls += 1
             return Response(204)
 
-        with patch("netizen.admin.transport.BODY_TIMEOUT_SECONDS", 0.12):
+        with patch("netizen_cli.admin.transport.BODY_TIMEOUT_SECONDS", 0.12):
             transport = await self._transport(handler)
             reader, writer = await self._connect(transport)
             try:
@@ -420,7 +420,7 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("ATTACKER_SECRET")
 
         transport = await self._transport(handler)
-        with self.assertLogs("netizen.admin.transport", level="ERROR") as captured:
+        with self.assertLogs("netizen_cli.admin.transport", level="ERROR") as captured:
             status, _headers, body = await self._request(
                 transport,
                 b"GET / HTTP/1.1\r\nHost: x\r\n\r\n",
@@ -435,8 +435,8 @@ class AdminHttpTransportTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_keepalive_then_second_header_timeout(self) -> None:
         with (
-            patch("netizen.admin.transport.HEADER_TIMEOUT_SECONDS", 0.10),
-            patch("netizen.admin.transport.KEEPALIVE_TIMEOUT_SECONDS", 0.40),
+            patch("netizen_cli.admin.transport.HEADER_TIMEOUT_SECONDS", 0.10),
+            patch("netizen_cli.admin.transport.KEEPALIVE_TIMEOUT_SECONDS", 0.40),
         ):
             transport = await self._transport()
             reader, writer = await self._connect(transport)

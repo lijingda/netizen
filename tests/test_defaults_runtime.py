@@ -6,16 +6,16 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from netizen.bindings import BindingStore
-from netizen.channel_app import ChannelApplication
-from netizen.codex_runtime import CodexRuntime
-from netizen.management import (
+from netizen_cli.bindings import BindingStore
+from netizen_cli.channel_app import ChannelApplication
+from netizen_cli.codex_runtime import CodexRuntime
+from netizen_cli.management import (
     InstanceManagementService,
     ManagementRuntimePort,
     ScopeCoordinator,
 )
-from netizen.projects import ProjectRegistry
-from netizen.session_settings import BindingTaskFeedback, SessionSettings
+from netizen_cli.projects import ProjectRegistry
+from netizen_cli.session_settings import BindingTaskFeedback, SessionSettings
 from tests.support.channel_messages import FakeChannel, FakeMessage, plain_prompt_projection
 from tests.test_codex_runtime import FakeCodex, FakeTerminalCleanup
 

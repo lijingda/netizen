@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from openai_codex.generated.v2_all import ModelListResponse, ModelUpgradeInfo, ReasoningEffort
 
-from netizen.model_settings import (
+from netizen_cli.model_settings import (
     ModelCatalog,
     ModelCatalogError,
     STANDARD_SERVICE_TIER_ID,

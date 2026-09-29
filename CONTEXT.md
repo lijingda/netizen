@@ -1,10 +1,16 @@
 # Netizen 领域词汇
 
-**Netizen Instance / Netizen 实例**：独立安装、绑定一个飞书应用并可单独启停和维护的
-Netizen 部署单位。同一实例内的多个 Project 或 Binding 不是多个实例。
+**Netizen Instance / Netizen 实例**：绑定一个飞书应用、拥有独立数据并可单独启停和维护的
+Netizen 部署单位。多个实例可共用一个程序安装；同一实例内的多个 Project 或 Binding 不是多个实例。
 
-**Instance Root / 实例根目录**：标识并承载一个 Netizen 实例的安装位置。它不同于
-实例使用的 Project，也不表示实例拥有独立的 Codex 用户状态。
+**Instance Root / 实例根目录**：标识并承载一个 Netizen 实例配置和数据的位置。它不同于
+程序安装环境和实例使用的 Project，也不表示实例拥有独立的 Codex 用户状态。
+
+**CLI Installation / CLI 安装**：用户选定 Python 环境中的一份 Netizen 程序，可供多个
+实例共用；它的更新范围不由某一个实例根目录限定。
+
+**Service Binding / 服务绑定**：一个实例与其受管服务所使用的程序环境之间的明确关联。
+停止服务不解除绑定，从另一环境控制服务也不等于切换绑定。
 
 **Main Qualification / main 代码资格**：exact `main` commit 的 required CI 已成功完成
 统一本地代码门禁。它是正式发布复用的代码可靠性结论，不包含账号、租户、模型提供方或
@@ -15,23 +21,19 @@ tag/commit，且构建后的 manifest、摘要和不可变 Release 资产保持�
 测试或 Live Compatibility Probe。
 
 **Published Release / 已发布 Release**：由具有 Main Qualification 的 exact commit 构建、
-通过 Release Integrity 验证并经官方 Release 渠道提供的不可变安装候选。安装到另一台
-受支持主机时只重复该主机自己的 Host Validation。
+通过 Release Integrity 验证并经官方渠道提供的不可变程序制品。包安装不等于创建
+实例；目标主机及实例能否运行仍由 Host Validation 确认。
 
-**Source Install / 源码安装**：把当前工作区（包括本地未提交修改）作为未获发布者认证的
-候选进行安装。它与 Published Release 安装共享激活事务，但必须自行通过完整本地门禁。
+**Source Install / 源码安装**：从工作区构建或以 editable 方式安装到选定 Python 环境的
+程序，未获发布者认证。它必须自行通过完整本地门禁，不属于自动更新支持的安装形态。
 
-**Admin Upgrade / 管理页升级**：实例管理员在管理页明确选择一个更新的 Published Release
-后发起的一次安装与重启操作。它允许打断现有工作，不承诺任务续跑，也不是定时自动更新。
-_Avoid_：热升级、无感升级、自动更新。
+**Admin Restart / 管理页重启**：实例管理员在管理页明确发起、使用本实例绑定环境中
+当前安装程序的一次服务重启，允许打断现有工作且不承诺任务续跑；它不是程序升级。
 
-**Admin Restart / 管理页重启**：实例管理员在管理页明确发起、保持当前安装版本的一次
-服务重启，允许打断现有工作且不承诺任务续跑。
-
-**Host Validation / 主机验证**：每次安装都对目标账号、解释器、依赖、配置、原生 SDK、
-飞书权限，以及按原服务意图需要启动时的 ready 条件执行的验证。它不替代 Published
-Release 的 Main Qualification / Release Integrity，也不替代 Source Install 的完整本地
-门禁。
+**Host Validation / 主机验证**：在准备实例和真实启动时，对目标账号、解释器、依赖、
+配置、数据、原生 SDK、飞书权限和 ready 条件执行的适用验证。包工具完成安装不表示
+实例已通过验证；它不替代发布制品的 Main Qualification / Release Integrity，
+也不替代源码安装的完整本地门禁。
 
 **Live Compatibility Probe / 实时兼容性探针**：需要真实 Codex/飞书账号、模型提供方或
 目标服务环境的开发验证。它在相关 SDK、Adapter、原生生命周期或环境变更时按需运行，

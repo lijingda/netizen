@@ -18,8 +18,8 @@ import tempfile
 from openai_codex import AsyncCodex, CodexConfig
 import openai_codex
 
-from netizen.builtin_skills import BUILTIN_SKILL_NAMES, validate_builtin_skills
-from netizen.sdk_gap_adapter import (
+from netizen_cli.builtin_skills import BUILTIN_SKILL_NAMES, validate_builtin_skills
+from netizen_cli.sdk_gap_adapter import (
     AppServerSkillCatalog,
     AppServerSkillRoots,
     require_no_facade_migration,

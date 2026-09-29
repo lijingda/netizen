@@ -2,7 +2,7 @@ import asyncio
 import threading
 import unittest
 
-from netizen.management.coordination import ScopeCoordinator
+from netizen_cli.management.coordination import ScopeCoordinator
 
 
 class ScopeCoordinatorTest(unittest.IsolatedAsyncioTestCase):

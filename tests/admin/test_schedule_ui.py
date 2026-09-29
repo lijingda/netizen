@@ -18,7 +18,7 @@ class ScheduleUiTest(unittest.TestCase):
             if os.environ.get("CI") == "true":
                 self.fail(reason)
             self.skipTest(reason)
-        static = Path(__file__).resolve().parents[2] / "netizen/admin/static"
+        static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
         tree = _HtmlTree()
         tree.feed((static / "index.html").read_text(encoding="utf-8"))
         source = (static / "admin.js").read_text(encoding="utf-8")
@@ -26,7 +26,7 @@ class ScheduleUiTest(unittest.TestCase):
         helpers = source[source.index("function cell("):source.index("function confirmMaterializedDelete(")]
         project_options = source[source.index("async function queryProjectOptions("):source.index("async function loadSessionProjectOptions(")]
         controller = source[source.index("function scheduleDate("):source.index("function mergeDeferredBindingRuntime(")]
-        listeners = source[source.index('scheduleInput("filter").addEventListener'):source.index('document.querySelector("#update-check").addEventListener')]
+        listeners = source[source.index('scheduleInput("filter").addEventListener'):source.index('document.querySelector("#service-restart").addEventListener')]
         fixture = Path(__file__).with_name("schedule_ui_harness.js")
         before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_SCHEDULE_CONTROLLER\n")
         dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")

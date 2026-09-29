@@ -4,7 +4,7 @@ import asyncio
 import threading
 import unittest
 
-from netizen.management.blocking_io import (
+from netizen_cli.management.blocking_io import (
     BlockingIODrainTimeout,
     BlockingIOExecutorClosed,
     BlockingIOExecutorSaturated,

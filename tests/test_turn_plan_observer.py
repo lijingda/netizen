@@ -23,13 +23,13 @@ from openai_codex.generated.v2_all import (
 )
 from openai_codex.models import Notification, UnknownNotification
 
-from netizen import turn_plan_observer
-from netizen.turn_plan_observer import (
+from netizen_cli import turn_plan_observer
+from netizen_cli.turn_plan_observer import (
     PinnedTurnActivityObserver,
     TurnActivityObservationUnavailable,
     TurnPlanStepState,
 )
-from netizen.turn_activity import TurnActivityKind, TurnActivityStatus
+from netizen_cli.turn_activity import TurnActivityKind, TurnActivityStatus
 
 
 def _plan(

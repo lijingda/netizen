@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from scripts import feishu_app_onboarding as onboarding
+from netizen_cli import feishu_app_onboarding as onboarding
 
 
 class FeishuAppOnboardingTest(unittest.TestCase):

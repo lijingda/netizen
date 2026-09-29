@@ -17,7 +17,7 @@ class DefaultsUiTest(unittest.TestCase):
             if os.environ.get("CI") == "true":
                 self.fail("Node.js is required for Admin JavaScript behavior tests")
             self.skipTest("Node.js is required for Admin JavaScript behavior tests")
-        static = Path(__file__).resolve().parents[2] / "netizen/admin/static"
+        static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
         tree = _HtmlTree()
         tree.feed((static / "index.html").read_text(encoding="utf-8"))
         source = (static / "admin.js").read_text(encoding="utf-8")

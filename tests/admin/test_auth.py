@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
-from netizen.admin.auth import (
+from netizen_cli.admin.auth import (
     ActionCsrfRejected,
     AdmissionClosed,
     AdminAuth,
@@ -155,9 +155,9 @@ class AdminAuthTest(unittest.TestCase):
             return real_read(descriptor, amount)
 
         with (
-            patch("netizen.admin.auth.os.open", side_effect=tracked_open),
-            patch("netizen.admin.auth.os.fstat", side_effect=tracked_fstat),
-            patch("netizen.admin.auth.os.read", side_effect=tracked_read),
+            patch("netizen_cli.admin.auth.os.open", side_effect=tracked_open),
+            patch("netizen_cli.admin.auth.os.fstat", side_effect=tracked_fstat),
+            patch("netizen_cli.admin.auth.os.read", side_effect=tracked_read),
         ):
             snapshot = load_credential_snapshot(self.credential_path)
 
@@ -201,7 +201,7 @@ class AdminAuthTest(unittest.TestCase):
             values[stat.ST_MTIME] = result.st_mtime + 1
             return os.stat_result(values)
 
-        with patch("netizen.admin.auth.os.fstat", side_effect=changing_fstat):
+        with patch("netizen_cli.admin.auth.os.fstat", side_effect=changing_fstat):
             with self.assertRaises(CredentialFileError):
                 load_credential_snapshot(self.credential_path)
         self.assertEqual(calls, 2)
@@ -246,7 +246,7 @@ class AdminAuthTest(unittest.TestCase):
             load_credential_snapshot(missing)
         self.assertIsNone(caught.exception.__cause__)
 
-        with patch("netizen.admin.auth.os.read", side_effect=OSError("raw detail")):
+        with patch("netizen_cli.admin.auth.os.read", side_effect=OSError("raw detail")):
             with self.assertRaises(CredentialFileError) as caught:
                 load_credential_snapshot(self.credential_path)
         self.assertIsNone(caught.exception.__cause__)

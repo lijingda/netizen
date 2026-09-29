@@ -5,16 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from openai_codex.types import ThreadItem
-from netizen.codex_runtime import (
+from netizen_cli.codex_runtime import (
     ActiveState,
     GoalActivitySnapshot,
     GoalOperationState,
     SideTurnActivitySnapshot,
     TurnActivitySnapshot,
 )
-from netizen.sdk_gap_adapter import GoalSnapshot, GoalStatus
-from netizen.turn_activity import TurnActivityEntrySnapshot
-from netizen.turn_plan_observer import TurnPlanStepSnapshot
+from netizen_cli.sdk_gap_adapter import GoalSnapshot, GoalStatus
+from netizen_cli.turn_activity import TurnActivityEntrySnapshot
+from netizen_cli.turn_plan_observer import TurnPlanStepSnapshot
 
 
 def native_goal(

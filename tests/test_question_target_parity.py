@@ -17,16 +17,16 @@ from unittest.mock import AsyncMock
 from lark_channel import CardActionPayload, ChatQueueConfig, OutboundCard, PolicyConfig, SafetyPipeline, TextBatchConfig
 from lark_channel.channel.channel import _card_action_identity
 
-from netizen.bindings import BindingTaskFeedback, SideTopicState
-from netizen.cards.questions import decode_question_context, render_question_card
-from netizen.channel.question_inputs import CardAnswerOrigin
-from netizen.domain import FeishuScope, ScopeKind
-from netizen.runtime.contracts import (
+from netizen_cli.bindings import BindingTaskFeedback, SideTopicState
+from netizen_cli.cards.questions import decode_question_context, render_question_card
+from netizen_cli.channel.question_inputs import CardAnswerOrigin
+from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.runtime.contracts import (
     ActiveState, SideSessionClosing, SideSubmission, SideSubmissionAdmission,
     SideTurnActivitySnapshot, SteerRace, Submission, SubmissionAdmission,
     SubmitDisposition, TurnStartFailed,
 )
-from netizen.user_questions import BindingQuestionTarget, QuestionRequest, SideQuestionTarget, UserQuestion
+from netizen_cli.user_questions import BindingQuestionTarget, QuestionRequest, SideQuestionTarget, UserQuestion
 from tests.support.channel_cards import callback, elements, form_values
 from tests.support.channel_fixtures import side_channel_fixture
 from tests.support.channel_messages import FakeMessage

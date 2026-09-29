@@ -4,6 +4,7 @@ import asyncio
 import fcntl
 import os
 import stat
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -16,11 +17,18 @@ from unittest.mock import AsyncMock, Mock, patch
 from lark_channel import DedupStore
 from openai_codex import CodexConfig
 
-from netizen.admin.port_config import ConfigFileSnapshot
-from netizen.bindings import BindingStore, SideTopicState
-from netizen.domain import FeishuScope, ScopeKind
-from netizen.lark_app import encode_lark_app
-from netizen.main import (
+from netizen_cli.admin.port_config import ConfigFileSnapshot
+from netizen_cli.bindings import BindingStore, SideTopicState
+from netizen_cli.cli_data import (
+    StartupRejected,
+    acquire_lifetime_lock,
+    ensure_instance_root,
+    initialize_instance_data,
+    instance_lifetime_lock,
+)
+from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.lark_app import encode_lark_app
+from netizen_cli.main import (
     ServiceCore,
     _adopt_lifetime_lock,
     _clear_ready_marker,
@@ -34,8 +42,8 @@ from netizen.main import (
     build_channel,
     main,
 )
-from netizen.projects import ProjectRegistry
-from netizen.settings import AdminWebSettings, Settings
+from netizen_cli.projects import ProjectRegistry
+from netizen_cli.settings import AdminWebSettings, Settings
 
 
 def settings(root: Path) -> Settings:
@@ -60,7 +68,7 @@ class MainConfigurationTest(unittest.TestCase):
         )
 
         with (
-            patch("netizen.main.sys.platform", "darwin"),
+            patch("netizen_cli.main.sys.platform", "darwin"),
             patch.dict(sys.modules, {"truststore": fake_truststore}),
         ):
             _configure_platform_trust()
@@ -68,7 +76,7 @@ class MainConfigurationTest(unittest.TestCase):
 
     def test_platform_trust_does_not_import_truststore_on_linux(self) -> None:
         with (
-            patch("netizen.main.sys.platform", "linux"),
+            patch("netizen_cli.main.sys.platform", "linux"),
             patch.dict(sys.modules, {"truststore": None}),
         ):
             _configure_platform_trust()
@@ -79,23 +87,25 @@ class MainConfigurationTest(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"NETIZEN_ROOT": "/tmp/instance"}, clear=True),
-            patch("netizen.main._adopt_lifetime_lock", return_value=None),
+            patch("netizen_cli.main._adopt_lifetime_lock", return_value=None),
+            patch("netizen_cli.main.acquire_lifetime_lock", return_value=12345),
+            patch("netizen_cli.main.prepare_instance", side_effect=lambda *_args, **_kwargs: events.append("data")),
             patch(
-                "netizen.main._configure_platform_trust",
+                "netizen_cli.main._configure_platform_trust",
                 side_effect=lambda: events.append("trust"),
             ),
-            patch("netizen.main._configure_logging"),
-            patch("netizen.main.Settings.from_file", return_value=SimpleNamespace(
+            patch("netizen_cli.main._configure_logging"),
+            patch("netizen_cli.main.Settings.from_file", return_value=SimpleNamespace(
                 data_dir=Path("/tmp/instance/state").resolve(),
                 admin_web=AdminWebSettings(enabled=False),
             )),
-            patch("netizen.main._scrub_channel_environment"),
+            patch("netizen_cli.main._scrub_channel_environment"),
             patch(
-                "netizen.main.run",
+                "netizen_cli.main.run",
                 new=lambda *_args, **_kwargs: runtime,
             ),
             patch(
-                "netizen.main.asyncio.run",
+                "netizen_cli.main.asyncio.run",
                 side_effect=lambda candidate: events.append(
                     "runtime" if candidate is runtime else "unexpected"
                 ),
@@ -103,7 +113,7 @@ class MainConfigurationTest(unittest.TestCase):
         ):
             main()
 
-        self.assertEqual(events, ["trust", "runtime"])
+        self.assertEqual(events, ["trust", "data", "runtime"])
 
     def test_message_and_card_action_handlers_are_registered(self) -> None:
         registered: dict[str, object] = {}
@@ -208,11 +218,13 @@ class MainConfigurationTest(unittest.TestCase):
 
             with (
                 patch.dict(os.environ, environment, clear=True),
-                patch("netizen.main._configure_platform_trust"),
-                patch("netizen.main._configure_logging"),
-                patch("netizen.main.Settings.from_file", side_effect=load_settings) as load,
-                patch("netizen.main.run", new=Mock(return_value=runtime)) as run,
-                patch("netizen.main.asyncio.run") as execute,
+                patch("netizen_cli.main._configure_platform_trust"),
+                patch("netizen_cli.main._configure_logging"),
+                patch("netizen_cli.main.acquire_lifetime_lock", return_value=12345),
+                patch("netizen_cli.main.prepare_instance"),
+                patch("netizen_cli.main.Settings.from_file", side_effect=load_settings) as load,
+                patch("netizen_cli.main.run", new=Mock(return_value=runtime)) as run,
+                patch("netizen_cli.main.asyncio.run") as execute,
             ):
                 main()
                 load.assert_called_once_with(target / "config.yaml")
@@ -235,8 +247,8 @@ class MainConfigurationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             home = Path(raw).resolve()
             root = home / ".netizen"
+            ensure_instance_root(root)
             profile = root / "lark-app" / "config.json"
-            profile.parent.mkdir(parents=True, mode=0o700)
             profile.write_bytes(encode_lark_app("cli_default", "fake-secret"))
             profile.chmod(0o600)
             config = root / "config.yaml"
@@ -244,13 +256,16 @@ class MainConfigurationTest(unittest.TestCase):
                 f"instance:\n  dataDir: {root / 'state'}\n  projectRoot: {home / 'projects'}\n"
                 "adminWeb:\n  enabled: false\n", encoding="utf-8",
             )
+            config.chmod(0o600)
+            with instance_lifetime_lock(root) as descriptor:
+                initialize_instance_data(root, lifetime_descriptor=descriptor)
             with (
                 patch.dict(os.environ, {"HOME": str(home / "unrelated")}, clear=True),
-                patch("netizen.instance.pwd.getpwuid", return_value=SimpleNamespace(pw_dir=str(home))),
-                patch("netizen.main._configure_platform_trust"),
-                patch("netizen.main._configure_logging"),
-                patch("netizen.main.run", new=Mock()) as run,
-                patch("netizen.main.asyncio.run"),
+                patch("netizen_cli.instance.pwd.getpwuid", return_value=SimpleNamespace(pw_dir=str(home))),
+                patch("netizen_cli.main._configure_platform_trust"),
+                patch("netizen_cli.main._configure_logging"),
+                patch("netizen_cli.main.run", new=Mock()) as run,
+                patch("netizen_cli.main.asyncio.run"),
             ):
                 main()
                 configured = run.call_args.args[0]
@@ -278,17 +293,118 @@ class MainConfigurationTest(unittest.TestCase):
                         **({"NETIZEN_ROOT": str(root / "a")} if explicit_root else {}),
                         name: str(root / "b" / "wrong-path"),
                     }, clear=True),
-                    patch("netizen.instance.pwd.getpwuid", return_value=SimpleNamespace(pw_dir=str(root))),
-                    patch("netizen.main._adopt_lifetime_lock", return_value=None),
-                    patch("netizen.main.Settings.from_file") as load,
-                    patch("netizen.main._configure_logging") as logging,
-                    patch("netizen.main.run", new=Mock()) as run,
+                    patch("netizen_cli.instance.pwd.getpwuid", return_value=SimpleNamespace(pw_dir=str(root))),
+                    patch("netizen_cli.main._adopt_lifetime_lock", return_value=None),
+                    patch("netizen_cli.main.Settings.from_file") as load,
+                    patch("netizen_cli.main._configure_logging") as logging,
+                    patch("netizen_cli.main.run", new=Mock()) as run,
                 ):
                     with self.assertRaisesRegex(RuntimeError, name):
                         main()
                     load.assert_not_called()
                     logging.assert_not_called()
                     run.assert_not_called()
+
+    def test_managed_and_manual_start_retain_lock_and_propagate_runtime_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            ensure_instance_root(root)
+            config = root / "config.yaml"
+            config.write_text("instance: {}\n")
+            config.chmod(0o600)
+            with instance_lifetime_lock(root) as descriptor:
+                initialize_instance_data(root, lifetime_descriptor=descriptor)
+            configured = replace(settings(root), data_dir=root / "state")
+            def fail_runtime(*_args, **_kwargs):
+                with self.assertRaises(BlockingIOError):
+                    acquire_lifetime_lock(root)
+                raise RuntimeError("runtime failed")
+            for managed in (False, True):
+                with (
+                    self.subTest(managed=managed),
+                    patch.dict(os.environ, {"NETIZEN_ROOT": str(root), "NETIZEN_CLI_SERVICE": "1" if managed else "0"}, clear=True),
+                    patch("netizen_cli.main.Settings.from_file", return_value=configured),
+                    patch("netizen_cli.main._configure_logging"),
+                    patch("netizen_cli.main.run", side_effect=fail_runtime),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "runtime failed"):
+                        main()
+            # Exit, including failure, releases ownership; no orphan descriptor.
+            with instance_lifetime_lock(root):
+                pass
+
+    def test_actual_start_with_lost_database_fails_before_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            ensure_instance_root(root)
+            config = root / "config.yaml"
+            config.write_text("instance: {}\n")
+            config.chmod(0o600)
+            with instance_lifetime_lock(root) as descriptor:
+                initialize_instance_data(root, lifetime_descriptor=descriptor)
+            database = root / "state" / "channel.sqlite3"
+            database.unlink()
+            with (
+                patch.dict(os.environ, {"NETIZEN_ROOT": str(root)}, clear=True),
+                patch("netizen_cli.main.Settings.from_file", return_value=replace(settings(root), data_dir=root / "state")),
+                patch("netizen_cli.main._configure_logging") as logging,
+                patch("netizen_cli.main.run") as run,
+            ):
+                with self.assertRaisesRegex(StartupRejected, "database is missing"):
+                    main()
+            self.assertFalse(database.exists())
+            logging.assert_not_called()
+            run.assert_not_called()
+
+    def test_managed_invalid_config_or_data_exits_cleanly_without_ready_or_retry_loop(self) -> None:
+        for kind in ("config", "missing", "future"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw).resolve()
+                ensure_instance_root(root)
+                config = root / "config.yaml"
+                config.write_text("instance: {}\n")
+                config.chmod(0o600)
+                with instance_lifetime_lock(root) as descriptor:
+                    initialize_instance_data(root, lifetime_descriptor=descriptor)
+                database = root / "state" / "channel.sqlite3"
+                if kind == "missing":
+                    database.unlink()
+                elif kind == "future":
+                    connection = sqlite3.connect(database)
+                    connection.execute("UPDATE schema_version SET version=999")
+                    connection.commit()
+                    connection.close()
+                descriptor = acquire_lifetime_lock(root)
+                ready = root / "state" / "service.ready"
+                with (
+                    patch.dict(os.environ, {
+                        "NETIZEN_ROOT": str(root), "NETIZEN_CLI_SERVICE": "1",
+                        "NETIZEN_READY_FILE": str(ready),
+                        "NETIZEN_LIFETIME_LOCK_FD": str(descriptor),
+                        "NETIZEN_LIFETIME_LOCK_FILE": str(root / "state" / "service.lifetime.lock"),
+                    }, clear=True),
+                    patch("netizen_cli.main.Settings.from_file", return_value=replace(settings(root), data_dir=root / "state"),
+                          side_effect=ValueError("invalid config") if kind == "config" else None),
+                    patch("netizen_cli.main.run") as run,
+                    self.assertLogs("netizen_cli.main", level="ERROR") as logs,
+                ):
+                    self.assertIsNone(main())
+                run.assert_not_called()
+                self.assertFalse(ready.exists())
+                self.assertIn("startup rejected", logs.output[0])
+                with instance_lifetime_lock(root):
+                    pass
+
+    def test_managed_transient_failures_still_exit_unsuccessfully(self) -> None:
+        for error in (OSError("temporary network failure"), RuntimeError("unexpected runtime failure")):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.dict(os.environ, {"NETIZEN_CLI_SERVICE": "1"}, clear=True),
+                patch("netizen_cli.main._run_service", side_effect=error),
+            ):
+                with self.assertRaises(type(error)) as failure:
+                    main()
+                self.assertIs(failure.exception, error)
 
     def test_main_rejects_cross_instance_configured_state_before_log_or_database(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -304,10 +420,10 @@ class MainConfigurationTest(unittest.TestCase):
                 with (
                     self.subTest(label=label),
                     patch.dict(os.environ, {"NETIZEN_ROOT": str(root)}, clear=True),
-                    patch("netizen.main._configure_platform_trust"),
-                    patch("netizen.main.Settings.from_file", return_value=candidate),
-                    patch("netizen.main._configure_logging") as logging,
-                    patch("netizen.main.run", new=Mock()) as run,
+                    patch("netizen_cli.main._configure_platform_trust"),
+                    patch("netizen_cli.main.Settings.from_file", return_value=candidate),
+                    patch("netizen_cli.main._configure_logging") as logging,
+                    patch("netizen_cli.main.run", new=Mock()) as run,
                 ):
                     with self.assertRaisesRegex(RuntimeError, label):
                         main()
@@ -317,9 +433,9 @@ class MainConfigurationTest(unittest.TestCase):
     def test_managed_main_requires_root_and_closes_adopted_descriptor(self) -> None:
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("netizen.main._adopt_lifetime_lock", return_value=12345),
-            patch("netizen.main.os.close") as close,
-            patch("netizen.main._configure_logging") as logging,
+            patch("netizen_cli.main._adopt_lifetime_lock", return_value=12345),
+            patch("netizen_cli.main.os.close") as close,
+            patch("netizen_cli.main._configure_logging") as logging,
         ):
             with self.assertRaisesRegex(RuntimeError, "missing NETIZEN_ROOT"):
                 main()
@@ -488,10 +604,10 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             self.schedulers.append(scheduler)
             return scheduler
 
-        self.enterContext(patch("netizen.main.ScheduleMcpRunner", make_mcp))
-        self.enterContext(patch("netizen.main.Scheduler", make_scheduler))
-        self.enterContext(patch("netizen.main.AppServerSkillRoots", make_skill_roots))
-        self.enterContext(patch("netizen.main.builtin_skill_root", return_value=self.builtin_root))
+        self.enterContext(patch("netizen_cli.main.ScheduleMcpRunner", make_mcp))
+        self.enterContext(patch("netizen_cli.main.Scheduler", make_scheduler))
+        self.enterContext(patch("netizen_cli.main.AppServerSkillRoots", make_skill_roots))
+        self.enterContext(patch("netizen_cli.main.builtin_skill_root", return_value=self.builtin_root))
 
     def _make_core(self, root: Path) -> ServiceCore:
         configured = settings(root)
@@ -529,7 +645,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                     open_admission=open_admission,
                     _management=SimpleNamespace(set_service_ready=lambda ready: events.append(ready)),
                 )
-                with patch("netizen.main._publish_ready_marker", side_effect=publish):
+                with patch("netizen_cli.main._publish_ready_marker", side_effect=publish):
                     ready_file = None if outcome == "unmanaged" else Path("/unused/service.ready")
                     if outcome.endswith("failed"):
                         with self.assertRaises(RuntimeError):
@@ -539,47 +655,18 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                         await _open_core_admission(core, ready_file=ready_file)
                         self.assertEqual(events, ["admission"] if outcome == "unmanaged" else ["admission", "marker", True])
 
-    async def test_channel_input_requires_durable_admission_before_transport_starts(self) -> None:
-        for failure in (False, True):
-            with self.subTest(failure=failure):
-                events = []
-                def record(_ready, _release):
-                    events.append("record")
-                    if failure:
-                        raise RuntimeError("cannot persist admission")
-                channel = SimpleNamespace(start_background=AsyncMock(side_effect=lambda: events.append("transport")))
-                with (
-                    patch("netizen.main.mark_candidate_admission", side_effect=record),
-                    patch("netizen.main._register_channel_handlers", side_effect=lambda *_args: events.append("handlers")),
-                ):
-                    if failure:
-                        with self.assertRaisesRegex(RuntimeError, "cannot persist"):
-                            await _start_channel_input(channel, object(), ready_file=Path("/unused/service.ready"))
-                        self.assertEqual(events, ["record"])
-                    else:
-                        await _start_channel_input(channel, object(), ready_file=Path("/unused/service.ready"))
-                        self.assertEqual(events, ["record", "handlers", "transport"])
-
-    async def test_installed_admission_uses_physical_venv_release(self) -> None:
-        release = Path("/tmp/instance/releases/" + "a" * 64).resolve()
-        prefix = release / "venv"
-        module = prefix / "lib/python3.12/site-packages/netizen/main.py"
-        channel = SimpleNamespace(start_background=AsyncMock())
-        with (
-            patch("netizen.main.__file__", str(module)),
-            patch("netizen.main.sys.prefix", str(prefix)),
-            patch("netizen.main.mark_candidate_admission") as record,
-            patch("netizen.main._register_channel_handlers"),
-        ):
-            ready = Path("/tmp/instance/state/service.ready")
-            await _start_channel_input(channel, object(), ready_file=ready)
-        record.assert_called_once_with(ready, release)
+    async def test_channel_input_registers_handlers_before_transport_without_release_rollback(self) -> None:
+        events = []
+        channel = SimpleNamespace(start_background=AsyncMock(side_effect=lambda: events.append("transport")))
+        with patch("netizen_cli.main._register_channel_handlers", side_effect=lambda *_args: events.append("handlers")):
+            await _start_channel_input(channel, object(), ready_file=Path("/unused/service.ready"))
+        self.assertEqual(events, ["handlers", "transport"])
 
     async def test_schedule_mcp_bind_failure_stops_before_codex(self) -> None:
         self.mcp_bind_error = OSError("schedule listener failed")
         with tempfile.TemporaryDirectory() as raw:
             core = self._make_core(Path(raw))
-            with patch("netizen.main.AsyncCodex") as codex_constructor:
+            with patch("netizen_cli.main.AsyncCodex") as codex_constructor:
                 with self.assertRaisesRegex(OSError, "schedule listener failed"):
                     await core.start()
                 codex_constructor.assert_not_called()
@@ -613,10 +700,10 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as raw:
             core = self._make_core(Path(raw))
             with (
-                patch("netizen.main.AsyncCodex", return_value=codex) as constructor,
-                patch("netizen.main.PinnedExperimentalTerminalCleanup", return_value=cleanup),
-                patch("netizen.main.AppServerThreadSubscriptionControl", return_value=cleanup),
-                patch("netizen.main.ChannelApplication", FakeApplication),
+                patch("netizen_cli.main.AsyncCodex", return_value=codex) as constructor,
+                patch("netizen_cli.main.PinnedExperimentalTerminalCleanup", return_value=cleanup),
+                patch("netizen_cli.main.AppServerThreadSubscriptionControl", return_value=cleanup),
+                patch("netizen_cli.main.ChannelApplication", FakeApplication),
             ):
                 with self.assertRaisesRegex(RuntimeError, "recovery failed"):
                     await core.start()
@@ -733,11 +820,11 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 instance_root=instance_root,
             )
             with (
-                patch("netizen.main.AdminWebRunner", FakeAdminRunner),
-                patch("netizen.main.AsyncCodex", FakeAsyncCodex),
-                patch("netizen.main.PinnedExperimentalTerminalCleanup", FakeCleanup),
-                patch("netizen.main.AppServerThreadSubscriptionControl", FakeCleanup),
-                patch("netizen.main.AppServerSkillCatalog", side_effect=lambda _: events.append("catalog:init")),
+                patch("netizen_cli.main.AdminWebRunner", FakeAdminRunner),
+                patch("netizen_cli.main.AsyncCodex", FakeAsyncCodex),
+                patch("netizen_cli.main.PinnedExperimentalTerminalCleanup", FakeCleanup),
+                patch("netizen_cli.main.AppServerThreadSubscriptionControl", FakeCleanup),
+                patch("netizen_cli.main.AppServerSkillCatalog", side_effect=lambda _: events.append("catalog:init")),
             ):
                 await core.start()
                 self.assertLess(events.index("admin:bind"), events.index("codex:init"))
@@ -808,13 +895,13 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 error = RuntimeError("builtin Skills unavailable")
                 roots = SimpleNamespace(set_roots=AsyncMock(side_effect=error))
                 with (
-                    patch("netizen.main.AdminWebRunner", return_value=admin),
-                    patch("netizen.main.AsyncCodex", return_value=codex),
-                    patch("netizen.main.AppServerSkillRoots", return_value=roots,
+                    patch("netizen_cli.main.AdminWebRunner", return_value=admin),
+                    patch("netizen_cli.main.AsyncCodex", return_value=codex),
+                    patch("netizen_cli.main.AppServerSkillRoots", return_value=roots,
                           side_effect=error if phase == "adapter" else None),
-                    patch("netizen.main.AppServerSkillCatalog") as catalog,
-                    patch("netizen.main.CodexRuntime") as runtime,
-                    patch("netizen.main._publish_ready_marker") as ready,
+                    patch("netizen_cli.main.AppServerSkillCatalog") as catalog,
+                    patch("netizen_cli.main.CodexRuntime") as runtime,
+                    patch("netizen_cli.main._publish_ready_marker") as ready,
                 ):
                     with self.assertRaisesRegex(RuntimeError, "builtin Skills unavailable"):
                         await core.start()
@@ -895,9 +982,9 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             )
             try:
                 with (
-                    patch("netizen.main.AdminWebRunner", FailingAdminRunner),
+                    patch("netizen_cli.main.AdminWebRunner", FailingAdminRunner),
                     patch(
-                        "netizen.main.AsyncCodex",
+                        "netizen_cli.main.AsyncCodex",
                         side_effect=AssertionError("Codex must not start"),
                     ),
                 ):
@@ -918,7 +1005,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_shutdown_closes_ingress_then_drains_and_cleans_in_order(self) -> None:
-        from netizen.main import _SHUTDOWN_BUDGET_SECONDS
+        from netizen_cli.main import _SHUTDOWN_BUDGET_SECONDS
 
         events: list[str] = []
 
@@ -1076,7 +1163,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 if failure == "error":
                     core.application.close.side_effect = RuntimeError("presentation close failed")
 
-                with patch("netizen.main._cleanup_step", bounded_step):
+                with patch("netizen_cli.main._cleanup_step", bounded_step):
                     if failure == "cancel":
                         closing = asyncio.create_task(core.close())
                         await asyncio.wait_for(started.wait(), timeout=1)
@@ -1084,7 +1171,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                         with self.assertRaises(asyncio.CancelledError):
                             await asyncio.wait_for(closing, timeout=1)
                     else:
-                        with self.assertLogs("netizen.main", level="WARNING"):
+                        with self.assertLogs("netizen_cli.main", level="WARNING"):
                             await asyncio.wait_for(core.close(), timeout=1)
 
                 self.assertTrue(completed)
@@ -1110,8 +1197,8 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         )
         core._management = management  # type: ignore[assignment]
         with (
-            patch("netizen.main._SHUTDOWN_BUDGET_SECONDS", 0.01),
-            self.assertLogs("netizen.main", level="WARNING") as logs,
+            patch("netizen_cli.main._SHUTDOWN_BUDGET_SECONDS", 0.01),
+            self.assertLogs("netizen_cli.main", level="WARNING") as logs,
         ):
             await asyncio.wait_for(core.close(), timeout=1)
 
@@ -1228,21 +1315,21 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                             "NETIZEN_TEST_EXPORTED": "keep this exact value",
                         },
                     ),
-                    patch("netizen.main.AsyncCodex", FakeAsyncCodex),
+                    patch("netizen_cli.main.AsyncCodex", FakeAsyncCodex),
                     patch(
-                        "netizen.main.PinnedExperimentalTerminalCleanup",
+                        "netizen_cli.main.PinnedExperimentalTerminalCleanup",
                         FakeCleanup,
                     ),
                     patch(
-                        "netizen.main.AppServerSideBoundaryControl",
+                        "netizen_cli.main.AppServerSideBoundaryControl",
                         FakeBoundaryControl,
                     ),
                     patch(
-                        "netizen.main.AppServerThreadSubscriptionControl",
+                        "netizen_cli.main.AppServerThreadSubscriptionControl",
                         FakeSubscriptionControl,
                     ),
                     patch(
-                        "netizen.main.AppServerThreadDeleteControl",
+                        "netizen_cli.main.AppServerThreadDeleteControl",
                         FakeDeleteControl,
                     ),
                 ):
@@ -1355,14 +1442,14 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             )
             try:
                 with (
-                    patch("netizen.main.AsyncCodex", FakeAsyncCodex),
-                    patch("netizen.main.CodexRuntime", FakeRuntime),
+                    patch("netizen_cli.main.AsyncCodex", FakeAsyncCodex),
+                    patch("netizen_cli.main.CodexRuntime", FakeRuntime),
                     patch(
-                        "netizen.main.PinnedExperimentalTerminalCleanup",
+                        "netizen_cli.main.PinnedExperimentalTerminalCleanup",
                         FakeCleanup,
                     ),
                     patch(
-                        "netizen.main.AppServerThreadSubscriptionControl",
+                        "netizen_cli.main.AppServerThreadSubscriptionControl",
                         FakeCleanup,
                     ),
                 ):

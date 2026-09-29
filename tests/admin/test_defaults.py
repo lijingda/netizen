@@ -8,11 +8,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from netizen.bindings import BindingStore
-from netizen.defaults import DefaultConfigurationError
-from netizen.defaults.service import SessionDefaultsService
-from netizen.management import InstanceManagementService, ScopeCoordinator
-from netizen.projects import ProjectRegistry
+from netizen_cli.bindings import BindingStore
+from netizen_cli.defaults import DefaultConfigurationError
+from netizen_cli.defaults.service import SessionDefaultsService
+from netizen_cli.management import InstanceManagementService, ScopeCoordinator
+from netizen_cli.projects import ProjectRegistry
 from tests.admin import test_web as fixture
 from tests.management.test_chat_labels import FakeChatInfo, FakeChatLabelProvider, FakeChatMember
 

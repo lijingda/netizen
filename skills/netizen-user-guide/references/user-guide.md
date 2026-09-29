@@ -48,8 +48,8 @@ Project，先通过 `/settings` 登记已有工作目录或创建项目并启用
 
 同群其他机器人也可以通过真实 `@Netizen` 提交任务或补充正在执行的任务，发送者仍标注
 为机器人。飞书应用需开通并发布 `im:message.group_at_msg.include_bot:readonly` 权限；
-安装器默认申请并检查此权限；已有应用缺失时，公开安装入口会引导补权，Admin 后台升级
-会提示需要处理后重试。机器人的未 @ 消息不会自动加入“期间的群聊讨论”。
+CLI setup 默认申请并检查此权限；已有应用缺失时，由部署者在 setup 中完成补权，
+Admin 不执行授权或程序升级。机器人的未 @ 消息不会自动加入“期间的群聊讨论”。
 
 ## 完整命令索引
 
@@ -437,38 +437,35 @@ Projects 页可“删除 Project 及关联 Sessions”。确认范围包含该�
 
 #### Admin 系统维护
 
-“系统维护”页显示运行版本、安装来源与官方更新说明，提供两种独立操作：
+“系统维护”显示当前 Python 安装与最近重启结果，只提供本实例“重启服务”，不再从
+管理页升级共享程序。程序升级由部署者在独立终端执行 `netizen update`，不能从将被
+停止的 Netizen 服务里执行。
 
-| 操作 | 适用安装方式 | 行为 |
-| --- | --- | --- |
-| 检查更新 → 升级并重启 | 受管 Published Release | 手动检查并确认官方稳定版本，安装本次选定的精确版本；不会自动跟随之后变化的 latest |
-| 重启服务 | 受管 Published Release 和 Source Install | 无需检查更新，保持当前版本，重新启动 Netizen 及其 Codex 运行环境 |
+重启使用此实例已经绑定的 Python 环境中的当前程序，重新加载账号持久 shell profile，
+并执行启动数据检查与必要迁移；它不安装包、不切换 Python 环境，也不保证所有原生
+配置作用于已有 Thread。提交前确认停机影响：不等待任务空闲，会中断普通任务、
+暂停 Goal、结束临时 Side，之后不会自动续跑。重启失败不自动回滚用户配置或已迁移数据库。
 
-源码安装升级仍在相应工作区运行 `./dev-install.sh --root "<NETIZEN_ROOT>"`；非受管运行
-使用原有部署入口。服务已停止时管理页不可用，由部署者执行已安装脚本
-`"<NETIZEN_ROOT>/current/source/service.sh" --root "<NETIZEN_ROOT>" restart`。
-这里的 `<NETIZEN_ROOT>` 应替换成目标实例实际根目录；脚本不会根据自身所在目录猜测实例。
+关闭页面、断线或等待超时不取消操作；响应丢失先刷新对账，不要重复点击。重启后需要
+重新登录查看同一操作的结果；页面连通不等于操作成功。“服务已恢复”只表示恢复证据
+得到确认，不改判原失败操作。结果未知时按提示检查实例状态与日志，不手改维护记录
+伪造成功。服务已经停止时管理页不可用，由部署者使用：
 
-升级和重启都不检测任务忙闲、不等待任务结束，提交前需要确认。升级准备版本时服务照常
-运行，切换时会中断普通任务、暂停 Goal、结束临时 Side；独立重启有相同影响，之后不会
-自动续跑。两种操作与 CLI 安装、卸载互斥，不会把新的维护操作排队等待执行。
-重启可重新读取持久 shell profile 和需要重启的 Codex 配置，但不改配置，也不保证所有
-配置对已有 Thread 生效；重启失败不会自动回滚用户改过的配置。
+```bash
+netizen status --root /absolute/path/to/.netizen
+netizen logs --root /absolute/path/to/.netizen
+netizen restart --root /absolute/path/to/.netizen
+```
 
-关闭页面、网络断线或等待超时不会取消操作；提交响应丢失时先刷新对账，不要重复点击。
-服务重启后需重新登录查看维护结果，页面重新连通不代表成功：
+这些是宿主机 CLI 命令，不是飞书 slash 命令。`--root` 选择一个实例；未指定时采用
+NETIZEN_ROOT，再缺省为有效账号的 ~/.netizen。`netizen update` 更新调用它的 Python
+环境及其关联实例，拒绝 --root，不是仅更新当前聊天中的机器人。
 
-- “升级成功”或重启成功表示该操作的完成证据已确认。
-- 升级准备失败表示尚未切换旧版本；“升级失败，已回滚”表示安装器确认恢复旧状态。
-  按页面原因处理后，再显式检查和提交。
-- “需要处理后重试”要求部署者先补全配置、凭据或飞书权限，并完成必要的审批与发布。
-- 单纯重启超时后，可点击“刷新维护状态”或“检查更新”。若系统确认该次重启后的服务
-  已就绪且没有未完成安装事务，会显示“服务已恢复”并重新开放维护按钮；原重启不改判成功。
-- 复核后仍显示“结果未确认，需要修复”时，两种维护提交都会受阻。请部署者以同一安装用户重新运行
-  官方安装入口并带目标实例的 `--root` 恢复；Source Install 仍使用原工作区的
-  `./dev-install.sh --root "<NETIZEN_ROOT>"`。
-  不要编辑 `<NETIZEN_ROOT>/state/update.json` 伪造成功，也不要删除 `.activation-intent.json`
-  或恢复快照。后续显示“已通过安装器恢复”证明新安装完成了修复，不把原点击改判为成功。
+另一个 Python 环境 B 可以按 root 控制绑定 A 的实例，但 start/restart 仍运行 A，
+B 的 update 不涉及 A。切换环境必须先 remove 保留数据、解除绑定，再从 B start；
+不要加 --purge。remove 默认保留实例数据；--purge 才清理展示的有限实例文件，
+-y 只省去交互确认，不能绕过安全检查。实例移除不卸载共享程序，也不删除 Project、
+用户 Skills 或共享 Codex 历史；程序卸载交给原包管理器，先处理其关联实例。
 
 ### 查找、切换和命名会话
 
@@ -725,10 +722,10 @@ Goal 和 Side 都依赖运行时原生能力门禁。如果当前 `/help` 没有
 - Skill 会在 start/steer 前重新发现和校验。名称不存在、已禁用或路径失效时，本条消息不会执行。
 - 飞书不提供 `/skills` 浏览命令。想知道当前有哪些 Skill，可以直接用自然语言询问 Codex。
 - `$skill` 是普通 prompt 的一部分，不能和飞书 slash control 串成一个消息，也不能放进 Goal objective。
-- 本手册随当前实例的 release 保存，Netizen 启动时只为自己的 Codex 进程加载内置
+- 本手册随该实例使用的 Python 安装包保存，Netizen 启动时只为自己的 Codex 进程加载内置
   `netizen-user-guide` 与 `netizen-lark` Skills，不写入全局 `$CODEX_HOME/skills`。
-  可以显式发送 `$netizen-user-guide <问题>`。升级随 release 切换版本；卸载只清理本实例
-  的受管文件，不删除共享的用户 Skills。各实例仍复用服务账号的原生 Codex 登录和配置。
+  可以显式发送 `$netizen-user-guide <问题>`。升级包后重启实例会加载对应版本；移除实例不删除共享安装的资源，
+  包卸载也不删除共享的用户 Skills。各实例仍复用服务账号的原生 Codex 登录和配置。
 
 ## 与 Codex App/CLI 的差异
 
@@ -816,7 +813,7 @@ Goal、Compaction 或 Turn 观测不可用时也会直接委托 App Server remov
 
 先确认工具路径或变量已经写入服务账号的持久 shell profile，而不是只在当前终端临时
 `export`。Netizen 会在每次服务启动时重新读取 interactive login shell 的导出环境；修改
-profile 后需要由部署者执行 `service.sh --root "<NETIZEN_ROOT>" restart`，指定目标实例。
+profile 后需要由部署者执行 `netizen restart --root "<NETIZEN_ROOT>"`，指定目标实例。
 alias、未导出的 shell function 和依赖
 真实 TTY 的初始化不属于后台服务可继承的环境。Bash 用户若只在 `.bashrc` 配置 NVM，需
 确认 `.bash_profile` 或 `.profile` 会 source 它。

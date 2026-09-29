@@ -6,22 +6,22 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from netizen.bindings import (
+from netizen_cli.bindings import (
     BindingNotFound,
     BindingStore,
     ProjectConflict,
     SideTopicState,
 )
-from netizen.codex_runtime import (
+from netizen_cli.codex_runtime import (
     SideCloseFailed,
     SideLifecycleOutcome,
     SideSessionNotFound,
     ThreadDeleteUnavailable,
     ThreadLifecycleStateUnknown,
 )
-from netizen.domain import FeishuScope, ScopeKind
-from netizen.management import InstanceManagementService, ScopeCoordinator
-from netizen.projects import ProjectError, ProjectRegistry, UnknownProject
+from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.management import InstanceManagementService, ScopeCoordinator
+from netizen_cli.projects import ProjectError, ProjectRegistry, UnknownProject
 from tests.management.test_service import FakeManagementRuntime
 
 

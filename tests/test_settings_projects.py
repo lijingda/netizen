@@ -5,16 +5,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from netizen.bindings import BindingStore
-from netizen.lark_app import encode_lark_app
-from netizen.projects import (
+from netizen_cli.bindings import BindingStore
+from netizen_cli.lark_app import encode_lark_app
+from netizen_cli.projects import (
     ProjectDisabled,
     ProjectError,
     ProjectRegistry,
     StaleProject,
     UnknownProject,
 )
-from netizen.settings import AdminWebSettings, Settings, SettingsError
+from netizen_cli.settings import AdminWebSettings, Settings, SettingsError
 
 
 class SettingsTest(unittest.TestCase):

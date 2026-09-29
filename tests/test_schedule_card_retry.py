@@ -8,9 +8,9 @@ from unittest.mock import AsyncMock, patch
 from lark_channel.channel.channel import _card_action_identity
 from lark_channel.channel.safety.pipeline import SafetyPipeline
 
-from netizen.bindings import BindingQueryBusy
-from netizen.cards.scheduled import decode_schedule_action, schedule_form_card, schedule_manager_card
-from netizen.domain import FeishuScope, ScopeKind
+from netizen_cli.bindings import BindingQueryBusy
+from netizen_cli.cards.scheduled import decode_schedule_action, schedule_form_card, schedule_manager_card
+from netizen_cli.domain import FeishuScope, ScopeKind
 
 from tests.support.channel_fixtures import scheduled_channel_fixture
 from tests.support.channel_cards import (
@@ -122,7 +122,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
             return result
 
         self.fixture.management.schedules.manage = lose_first_write_response
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.push(form=form)
         plan, = self.fixture.store.schedules.list(app_id="app")
         restored = self.restored_form()
@@ -185,7 +185,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
                 raise OSError("response lost after commit")
             return result
         self.fixture.management.schedules.manage = lose_first_write_response
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.push(form=form)
         self.assertEqual(len(self.fixture.store.schedules.list(app_id="app")), 1)
         restored = self.restored_form()
@@ -203,7 +203,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         form = self.new_form()
         fetch = self.fixture.channel.fetch_message
         self.fixture.channel.fetch_message = AsyncMock(side_effect=OSError("temporary message lookup failure"))
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.push(form=form)
         self.assertFalse(self.fixture.store.schedules.list(app_id="app"))
         restored = self.restored_form()
@@ -229,7 +229,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         form = self.new_form()
         self.fixture.channel.get_chat_info = AsyncMock(side_effect=OSError("temporary failure"))
         self.fixture.channel.fail_card_updates = True
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.push(form=form)
         self.assertEqual(len(self.fixture.channel.updates), 1)
         self.assertEqual(len(self.fixture.channel.replies), 1)
@@ -250,7 +250,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
                 raise OSError("response lost after commit")
             return result
         self.fixture.management.schedules.manage = lose_first_update_response
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.push(value=value)
         retry = callback(SimpleNamespace(card=self.fixture.channel.updates[-1][1]), "重试刚才的操作")
         self.assertNotEqual(retry["nonce"], value["nonce"])
@@ -277,7 +277,7 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
             return result
 
         self.fixture.management.schedules.manage = lose_first_trigger_response
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             first_key = await self.push(value=value)
         self.assertEqual(len(claims), 1)
         retry = callback(SimpleNamespace(card=self.fixture.channel.updates[-1][1]), "重试刚才的操作")

@@ -38,21 +38,21 @@ from openai_codex.errors import JsonRpcError
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
-from netizen.bindings import BindingNotFound, BindingStore  # noqa: E402
-from netizen.channel_app import ChannelApplication  # noqa: E402
-from netizen.codex_runtime import CodexRuntime, StopDisposition  # noqa: E402
-from netizen.domain import FeishuScope, ScopeKind  # noqa: E402
-from netizen.management.coordination import ScopeCoordinator  # noqa: E402
-from netizen.management.service import InstanceManagementService, ManagementRuntimePort  # noqa: E402
-from netizen.projects import ProjectRegistry  # noqa: E402
-from netizen.runtime.contracts import TurnOutcome  # noqa: E402
-from netizen.schedules.mcp import ScheduleMcpRunner  # noqa: E402
-from netizen.schedules.models import ScheduleRule  # noqa: E402
-from netizen.schedules.scheduler import Scheduler  # noqa: E402
-from netizen.schedules.service import ScheduleService  # noqa: E402
-from netizen.session_settings import SessionSettings  # noqa: E402
-from netizen.sdk_gap_adapter import AppServerThreadSubscriptionControl  # noqa: E402
-from netizen.terminal_cleanup import PinnedExperimentalTerminalCleanup  # noqa: E402
+from netizen_cli.bindings import BindingNotFound, BindingStore  # noqa: E402
+from netizen_cli.channel_app import ChannelApplication  # noqa: E402
+from netizen_cli.codex_runtime import CodexRuntime, StopDisposition  # noqa: E402
+from netizen_cli.domain import FeishuScope, ScopeKind  # noqa: E402
+from netizen_cli.management.coordination import ScopeCoordinator  # noqa: E402
+from netizen_cli.management.service import InstanceManagementService, ManagementRuntimePort  # noqa: E402
+from netizen_cli.projects import ProjectRegistry  # noqa: E402
+from netizen_cli.runtime.contracts import TurnOutcome  # noqa: E402
+from netizen_cli.schedules.mcp import ScheduleMcpRunner  # noqa: E402
+from netizen_cli.schedules.models import ScheduleRule  # noqa: E402
+from netizen_cli.schedules.scheduler import Scheduler  # noqa: E402
+from netizen_cli.schedules.service import ScheduleService  # noqa: E402
+from netizen_cli.session_settings import SessionSettings  # noqa: E402
+from netizen_cli.sdk_gap_adapter import AppServerThreadSubscriptionControl  # noqa: E402
+from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup  # noqa: E402
 from scripts.probe_project_delete import _DeleteOnce  # noqa: E402
 from scripts.probe_python_sdk import (  # noqa: E402
     _prove_thread_absent_from_all_catalogs, _status_value, _thread_status_type,

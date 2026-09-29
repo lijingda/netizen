@@ -7,17 +7,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from netizen.bindings import BindingStore
-from netizen.codex_runtime import CodexRuntime, SubmitDisposition
-from netizen.domain import FeishuScope, ScopeKind
-from netizen.management.coordination import ScopeCoordinator
-from netizen.management.service import (
+from netizen_cli.bindings import BindingStore
+from netizen_cli.codex_runtime import CodexRuntime, SubmitDisposition
+from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.management.coordination import ScopeCoordinator
+from netizen_cli.management.service import (
     CurrentBindingTarget,
     ExactBindingTarget,
     InstanceManagementService,
     ManagementRuntimePort,
 )
-from netizen.projects import ProjectRegistry
+from netizen_cli.projects import ProjectRegistry
 from tests.test_codex_runtime import (
     FakeCodex,
     FakeThread,
@@ -454,7 +454,7 @@ class RuntimeThreadNamingTest(unittest.IsolatedAsyncioTestCase):
         await self.submit()
         await eventually(lambda: len(self.codex.fork_calls) == 1)
         await asyncio.wait_for(self.runtime.interrupt_all(), 0.1)
-        with patch("netizen.codex_runtime._NAMING_SHUTDOWN_WAIT_SECONDS", 0.01):
+        with patch("netizen_cli.codex_runtime._NAMING_SHUTDOWN_WAIT_SECONDS", 0.01):
             await asyncio.wait_for(self.runtime.cancel_tasks(), 0.1)
         self.assertEqual(self.runtime._active, {})
         self.assertTrue(all(task.done() for task in self.runtime._tasks))

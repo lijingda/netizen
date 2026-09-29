@@ -3,15 +3,15 @@ from __future__ import annotations
 import json
 import unittest
 
-from netizen.cards.callbacks import CardActionError
-from netizen.cards.questions import (
+from netizen_cli.cards.callbacks import CardActionError
+from netizen_cli.cards.questions import (
     decode_question_answer,
     decode_question_context,
     is_question_card_action,
     render_question_card,
     render_question_context_card,
 )
-from netizen.user_questions import (
+from netizen_cli.user_questions import (
     BindingQuestionTarget,
     QuestionRequest,
     SideQuestionTarget,

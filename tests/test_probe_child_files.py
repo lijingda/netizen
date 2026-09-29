@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from netizen.turn_patch_children import TaskPatchChildren, TurnPatchBatch
+from netizen_cli.turn_patch_children import TaskPatchChildren, TurnPatchBatch
 from scripts import probe_child_files
 
 

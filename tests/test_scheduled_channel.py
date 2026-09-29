@@ -19,27 +19,27 @@ from lark_channel import (
     RetryConfig,
 )
 
-from netizen.bindings import BindingTaskFeedback, BindingTurnSettings
-from netizen.cards import decode_turn_file_action
-from netizen.channel import reply_presenter
-from netizen.channel_app import ChannelApplication
-from netizen.domain import (
+from netizen_cli.bindings import BindingTaskFeedback, BindingTurnSettings
+from netizen_cli.cards import decode_turn_file_action
+from netizen_cli.channel import reply_presenter
+from netizen_cli.channel_app import ChannelApplication
+from netizen_cli.domain import (
     FeishuScope,
     ScopeKind,
     ScheduledOrigin,
     MentionContextMode,
     MessageContextAnchor,
 )
-from netizen.runtime.contracts import (
+from netizen_cli.runtime.contracts import (
     ActiveState,
     ActiveTurnSnapshot,
     Submission,
     SubmitDisposition,
     TurnOutcome,
 )
-from netizen.schedules.models import ScheduleRule
-from netizen.session_settings import SessionSettings
-from netizen.turn_plan_observer import TurnPlanStepSnapshot, TurnPlanStepState
+from netizen_cli.schedules.models import ScheduleRule
+from netizen_cli.session_settings import SessionSettings
+from netizen_cli.turn_plan_observer import TurnPlanStepSnapshot, TurnPlanStepState
 
 from tests.support.channel_messages import FakeMessage, PNG
 from tests.support.channel_cards import (
@@ -294,7 +294,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         claim, request = await self.progress_fixture()
         self.store.schedules.release(claim.run.id)
         self.channel.reply_results.append(sent_result("om_final", chat_id="oc_group", thread_id="omt_fresh"))
-        with patch("netizen.channel_app.turn_progress_card", side_effect=ValueError("cannot render")):
+        with patch("netizen_cli.channel_app.turn_progress_card", side_effect=ValueError("cannot render")):
             await self.app.handle_completion(TurnOutcome(
                 binding_id=request["binding"].id, thread_id="native-" + claim.run.id,
                 turn_id="turn-initial", owner_id=request["owner_id"], origin=request["origin"],
@@ -548,7 +548,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         claim, request = await self.completion_fixture()
         self.channel.upload_results.append(TimeoutError("upload response lost"))
         self.channel.reply_results.append(sent_result("om_final", chat_id="oc_group", thread_id="omt_fresh"))
-        with self.assertLogs("netizen.result_images", level="WARNING"):
+        with self.assertLogs("netizen_cli.result_images", level="WARNING"):
             await self.finish_files_fixture(claim, request, inline_image=True)
         self.assertEqual(len(self.channel.upload_calls), 1)
         self.assertEqual(len(self.channel.replies), 1)
@@ -596,7 +596,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
     async def test_file_card_preparation_failure_can_fall_back_once(self):
         claim, request = await self.completion_fixture()
         self.channel.reply_results.append(sent_result("om_final", chat_id="oc_group", thread_id="omt_fresh"))
-        with patch("netizen.channel_app.turn_files_card", side_effect=ValueError("cannot render")):
+        with patch("netizen_cli.channel_app.turn_files_card", side_effect=ValueError("cannot render")):
             await self.finish_files_fixture(claim, request)
         self.assertEqual([content for _, content in self.channel.replies], ["report complete"])
         self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "sent")
@@ -667,7 +667,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             return {"code": 0, "data": data}
 
         driver = self.use_sdk_reply(reply)
-        with self.assertLogs("netizen.channel_app", level="WARNING"):
+        with self.assertLogs("netizen_cli.channel_app", level="WARNING"):
             await self.finish_fixture(claim, request, "验收结果\n" * 2000)
         self.assertGreaterEqual(driver.reply_message.await_count, 2)
         driver.create_message.assert_not_awaited()
@@ -680,7 +680,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
                 return {"code": 0, "data": {"message_id": "om_wrong", "chat_id": chat, "thread_id": topic}}
 
             driver = self.use_sdk_reply(reply)
-            with self.assertLogs("netizen.channel_app", level="WARNING"):
+            with self.assertLogs("netizen_cli.channel_app", level="WARNING"):
                 await self.finish_fixture(claim, request)
             self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "unknown")
             driver.reply_message.assert_awaited_once()
@@ -696,7 +696,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             return {"code": 230028 if calls == 1 else 230017, "msg": "rejected"}
 
         driver = self.use_sdk_reply(reply)
-        with self.assertLogs("netizen.channel_app", level="WARNING"):
+        with self.assertLogs("netizen_cli.channel_app", level="WARNING"):
             await self.finish_fixture(claim, request)
         self.assertEqual(driver.reply_message.await_count, 2)
         for call in driver.reply_message.call_args_list:
@@ -1046,7 +1046,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(callback(all_plans, "新建定时任务")["navigation"], {"filter": "all"})
 
     async def test_form_save_survives_new_application_without_server_draft(self):
-        from netizen.cards.scheduled import decode_schedule_action, schedule_form_card
+        from netizen_cli.cards.scheduled import decode_schedule_action, schedule_form_card
         scope = FeishuScope("app", "oc_group", ScopeKind.GROUP)
         editor = schedule_form_card(scope, projects=self.projects.list(enabled_only=True),
             default_timezone="UTC", navigation={"filter": "all"})
@@ -1120,7 +1120,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
 
     def test_invalid_explicit_chat_is_not_replaced_with_current_group(self):
         scope = FeishuScope("app", "oc_group", ScopeKind.GROUP)
-        from netizen.schedules.models import ScheduleError
+        from netizen_cli.schedules.models import ScheduleError
         for invalid in (False, "", 0, []):
             with self.subTest(value=invalid), self.assertRaises(ScheduleError):
                 self.app._schedule_default_chat(scope, {"mode": "list", "chat_id": invalid})
@@ -1129,7 +1129,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         claim = self.claim()
         service = self.management.schedules
         result = await service.manage({"mode": "view", "plan_id": claim.plan.id}, source="card")
-        from netizen.cards.scheduled import schedule_manager_card
+        from netizen_cli.cards.scheduled import schedule_manager_card
         detail = schedule_manager_card(FeishuScope("app", "oc_group", ScopeKind.GROUP), {"plans": [result["plan"]]}, selected=result)
         self.store.schedules.update(claim.plan.id, expected_revision=1, request_id="rename", changes={"name": "新名称"}, now=160)
         await self.card_action(value=callback(detail, "暂停"))
@@ -1139,10 +1139,10 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
     async def test_rejected_card_patch_shows_refresh_feedback_without_replaying_write(self):
         claim = self.claim()
         result = await self.management.schedules.manage({"mode": "view", "plan_id": claim.plan.id}, source="card")
-        from netizen.cards.scheduled import schedule_manager_card
+        from netizen_cli.cards.scheduled import schedule_manager_card
         detail = schedule_manager_card(FeishuScope("app", "oc_group", ScopeKind.GROUP), {"plans": [result["plan"]]}, selected=result)
         self.channel.card_update_results.append(sent_result("om_card", chat_id="oc_group", success=False, code=230099))
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.card_action(value=callback(detail, "暂停"), form={})
         self.assertFalse(self.store.schedules.get(claim.plan.id).enabled)
         self.assertEqual(self.store.schedules.get(claim.plan.id).revision, 2)
@@ -1150,7 +1150,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("卡片刷新失败", str(self.channel.updates[-1]))
 
     async def test_invalid_form_redraws_with_inputs_and_validation_error(self):
-        from netizen.cards.scheduled import schedule_form_card
+        from netizen_cli.cards.scheduled import schedule_form_card
         scope = FeishuScope("app", "oc_group", ScopeKind.GROUP)
         card = schedule_form_card(scope, projects=self.projects.list(enabled_only=True), default_timezone="UTC")
         form = form_values(card)
@@ -1171,7 +1171,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(plan.name, plan.instructions) for plan in plans], [("保留我的输入", "保留完整任务内容")])
 
     async def test_topic_group_card_direct_save_defaults_to_current_group(self):
-        from netizen.cards.scheduled import schedule_form_card
+        from netizen_cli.cards.scheduled import schedule_form_card
         self.channel.chat_types["oc_group"] = "topic"
         scope = FeishuScope("app", "oc_group", ScopeKind.TOPIC, "omt_source")
         form = form_values(schedule_form_card(scope, projects=self.projects.list(enabled_only=True), default_timezone="UTC"))

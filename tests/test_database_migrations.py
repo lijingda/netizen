@@ -10,10 +10,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from netizen import database_migrations as migrations
-from netizen.bindings import BindingStore, validate_channel_database
-from netizen.migrations import v14
-from netizen.migrations.schema import require_schema
+from netizen_cli import database_migrations as migrations
+from netizen_cli.bindings import BindingStore, validate_channel_database
+from netizen_cli.migrations import v14
+from netizen_cli.migrations.schema import require_schema
 
 
 FIXTURES = Path(__file__).parent / "fixtures"

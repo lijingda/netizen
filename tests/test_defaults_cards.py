@@ -6,12 +6,12 @@ import json
 import unittest
 from pathlib import Path
 
-from netizen.cards.callbacks import CardActionError
-from netizen.cards.defaults import defaults_card, decode_defaults_action, is_defaults_card_action
-from netizen.domain import FeishuScope, MentionContextMode, ScopeKind
-from netizen.model_settings import EffortOption, ModelCatalog, ModelOption, ServiceTierOption
-from netizen.projects import Project
-from netizen.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
+from netizen_cli.cards.callbacks import CardActionError
+from netizen_cli.cards.defaults import defaults_card, decode_defaults_action, is_defaults_card_action
+from netizen_cli.domain import FeishuScope, MentionContextMode, ScopeKind
+from netizen_cli.model_settings import EffortOption, ModelCatalog, ModelOption, ServiceTierOption
+from netizen_cli.projects import Project
+from netizen_cli.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 from tests.support.channel_cards import callback, elements, form_values, option_value
 
 

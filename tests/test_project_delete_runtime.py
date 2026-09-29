@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from netizen.bindings import BindingStore, ProjectConflict, SideTopicState
-from netizen.codex_runtime import (
+from netizen_cli.bindings import BindingStore, ProjectConflict, SideTopicState
+from netizen_cli.codex_runtime import (
     CodexRuntime,
     SideCloseFailed,
     SideSessionConflict,
@@ -15,9 +15,9 @@ from netizen.codex_runtime import (
     ThreadDeleteTargetChanged,
     ThreadDeleteUnavailable,
 )
-from netizen.domain import FeishuScope, ScopeKind
-from netizen.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
-from netizen.projects import ProjectRegistry, UnknownProject
+from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.management import InstanceManagementService, ManagementRuntimePort, ScopeCoordinator
+from netizen_cli.projects import ProjectRegistry, UnknownProject
 from tests import test_codex_runtime as fixtures
 
 

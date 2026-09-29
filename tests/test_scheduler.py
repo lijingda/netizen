@@ -6,11 +6,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from netizen.bindings import BindingStore
-from netizen.domain import FeishuScope, ScopeKind
-from netizen.runtime.contracts import TurnObservationUnavailable
-from netizen.schedules.models import ScheduleRule
-from netizen.schedules.scheduler import Scheduler
+from netizen_cli.bindings import BindingStore
+from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.runtime.contracts import TurnObservationUnavailable
+from netizen_cli.schedules.models import ScheduleRule
+from netizen_cli.schedules.scheduler import Scheduler
 
 
 class Reader:
@@ -73,7 +73,7 @@ class BindingSchedulerTests(unittest.IsolatedAsyncioTestCase):
         await self.scheduler.recover()
         self.scheduler.start()
         self.failure = RuntimeError("native response lost")
-        with self.assertLogs("netizen.schedules.scheduler", level="WARNING"):
+        with self.assertLogs("netizen_cli.schedules.scheduler", level="WARNING"):
             self.assertEqual(await self.tick(160), 1)
         first = self.store.list_runs(self.plan_id)[0]
         self.assertEqual((first.barrier, first.error_code), ("released", "input_unknown"))
@@ -217,7 +217,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list(app_id="app", ended=True, now=160), ())
         self.now = 220
         self.assertEqual(await self.scheduler.tick(), 0)
-        with self.assertLogs("netizen.schedules.scheduler", level="WARNING"):
+        with self.assertLogs("netizen_cli.schedules.scheduler", level="WARNING"):
             release.set()
             self.assertTrue(await self.scheduler.drain(asyncio.get_running_loop().time() + 1))
         self.assertEqual(len(self.dispatched), 1)
@@ -384,7 +384,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         second = self.native(self.occurrence().id)
         self.reader.gate = asyncio.Event()
         self.now = 200
-        with patch("netizen.schedules.scheduler.RECOVERY_TIMEOUT_SECONDS", 0.01):
+        with patch("netizen_cli.schedules.scheduler.RECOVERY_TIMEOUT_SECONDS", 0.01):
             # The ceiling only guards against a true hang; the shared 0.01s
             # budget drives the outcome, so keep headroom for runner jitter.
             async with asyncio.timeout(2.0):
@@ -422,7 +422,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         plan_id = self.plan()
         await self.start()
         self.now = 160
-        with patch("netizen.schedules.scheduler.DISPATCH_TIMEOUT_SECONDS", 0.01):
+        with patch("netizen_cli.schedules.scheduler.DISPATCH_TIMEOUT_SECONDS", 0.01):
             await self.scheduler.tick()
             await self.scheduler.drain(asyncio.get_running_loop().time() + 1)
         run = self.store.pending_for_plan(plan_id)
@@ -506,7 +506,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             raise TimeoutError
 
-        with patch("netizen.schedules.scheduler.asyncio.wait_for", side_effect=wait_until_next_minute):
+        with patch("netizen_cli.schedules.scheduler.asyncio.wait_for", side_effect=wait_until_next_minute):
             await self.start()
             async with asyncio.timeout(1):
                 await self.scheduler._timer

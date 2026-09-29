@@ -16,14 +16,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from netizen.admin.errors import AdminWebError
-from netizen.admin.presentation import (
+from netizen_cli.admin.errors import AdminWebError
+from netizen_cli.admin.presentation import (
     _chat_open_url,
     _release_disposition_message,
     _stop_disposition_message,
     _topic_open_url,
 )
-from netizen.admin.queries import (
+from netizen_cli.admin.queries import (
     _created_range_query,
     _current_query,
     _scope_kinds_query,
@@ -31,12 +31,12 @@ from netizen.admin.queries import (
     _session_page_size,
     _text_set_query,
 )
-from netizen.admin.web import (
+from netizen_cli.admin.web import (
     AdminWebRunner,
     _batches,
     accepted_authorities,
 )
-from netizen.bindings import (
+from netizen_cli.bindings import (
     BindingCursor,
     BindingInventoryRecord,
     BindingTurnSettings,
@@ -49,7 +49,7 @@ from netizen.bindings import (
     SideTopicState,
     ThreadBinding,
 )
-from netizen.codex_runtime import (
+from netizen_cli.codex_runtime import (
     ActiveState,
     ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
@@ -65,8 +65,8 @@ from netizen.codex_runtime import (
     ThreadSubscriptionState,
     ThreadOccupied,
 )
-from netizen.domain import GoalStatus, ScopeKind
-from netizen.management import (
+from netizen_cli.domain import GoalStatus, ScopeKind
+from netizen_cli.management import (
     BindingStatusProjection,
     ChatLabel,
     ChatLabelResolver,
@@ -87,10 +87,10 @@ from netizen.management import (
     SideTopicInventoryPage,
     StoppedBinding,
 )
-from netizen.management.service import _project_binding_status
-from netizen.management.updates import UpdateError
-from netizen.projects import Project
-from netizen.sdk_gap_adapter import GoalSnapshot
+from netizen_cli.management.service import _project_binding_status
+from netizen_cli.management.updates import UpdateError
+from netizen_cli.projects import Project
+from netizen_cli.sdk_gap_adapter import GoalSnapshot
 
 
 class FakeManagement:
@@ -109,7 +109,7 @@ class FakeManagement:
         self.set_enabled_release: asyncio.Event | None = None
         self.update_data = {
             "current": {
-                "version": "1.0.0", "source": "published", "releaseDigest": "a" * 64,
+                "version": "1.0.0", "source": "published", "installationId": "a" * 64,
             },
             "supported": True,
             "latest": {
@@ -265,14 +265,14 @@ class FakeManagement:
         }
         return self.update_data["operation"]
 
-    async def restart_service(self, *, release_digest):
-        self.calls.append(("restart_service", release_digest))
+    async def restart_service(self, *, installation_id):
+        self.calls.append(("restart_service", installation_id))
         self.update_data["restartAvailable"] = False
         self.update_data["operation"] = {
             "schema": 2, "kind": "restart", "operationId": "d" * 32,
             "target": {
                 "version": self.update_data["current"]["version"],
-                "releaseDigest": release_digest,
+                "installationId": installation_id,
             },
             "phase": "accepted", "code": "none",
         }
@@ -615,7 +615,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         # has focused coverage below. Keep every case independent of host DNS,
         # which can take about a minute on a macOS CI runner.
         self.authority_builder_patch = patch(
-            "netizen.admin.web.accepted_authorities",
+            "netizen_cli.admin.web.accepted_authorities",
             side_effect=loopback_authorities,
         )
         self.authority_builder_patch.start()
@@ -724,53 +724,21 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         return status, headers, json.loads(content) if content else None
 
-    async def test_updates_require_auth_and_check_uses_one_shot_csrf(self) -> None:
+    async def test_updates_require_auth_and_admin_has_no_package_update_authority(self) -> None:
         self.runner.open_admission()
         status, _, _ = await self.request("GET", "/api/v1/updates")
         self.assertEqual(status, 401)
         session = await self.login()
         status, _, data = await self.json_get("/api/v1/updates", session)
         self.assertEqual(status, 200)
-        self.assertEqual(self.management.calls, [("update_status", None)])
-        check = data["actions"]["check"]
-        rejected = _action_payload(check)
-        rejected["csrfToken"] = "invalid"
-        status, _, _ = await self.json_post("/api/v1/updates/check", session, rejected)
-        self.assertEqual(status, 403)
-        status, _, checked = await self.json_post(
-            "/api/v1/updates/check", session, _action_payload(check)
-        )
-        self.assertEqual(status, 200)
-        self.assertIn("check", checked["actions"])
-        status, _, _ = await self.json_post(
-            "/api/v1/updates/check", session, _action_payload(check)
-        )
-        self.assertEqual(status, 409)
-        self.assertEqual(self.management.calls.count(("check_update", None)), 1)
-
-    async def test_update_install_binds_exact_release_and_accepts_once(self) -> None:
-        self.runner.open_admission()
-        session = await self.login()
-        _, _, data = await self.json_get("/api/v1/updates", session)
-        grant = data["actions"]["install"]
-        self.assertEqual(set(grant["target"]), {
-            "version", "releaseId", "installerSha256", "archiveSha256",
-        })
-        # A later release does not silently change the granted target.
-        self.management.update_data["latest"]["version"] = "1.2.0"
-        status, _, result = await self.json_post(
-            "/api/v1/updates/install", session, _action_payload(grant)
-        )
-        self.assertEqual(status, 202)
-        self.assertEqual(result["operation"]["phase"], "accepted")
-        self.assertEqual(result["operation"]["target"]["version"], "1.1.0")
-        self.assertEqual(self.management.calls[-1], ("start_update", grant["target"]))
-        status, _, _ = await self.json_post(
-            "/api/v1/updates/install", session, _action_payload(grant)
-        )
-        self.assertEqual(status, 409)
-        _, _, status_data = await self.json_get("/api/v1/updates", session)
-        self.assertIsNone(status_data["actions"]["install"])
+        self.assertIsNone(data["actions"]["check"])
+        self.assertIsNone(data["actions"]["install"])
+        self.assertIn("netizen update", data["message"])
+        for action in ("check", "install"):
+            status, _, result = await self.json_post(f"/api/v1/updates/{action}", session, {})
+            self.assertEqual(status, 409)
+            self.assertEqual(result["code"], "update_unsupported")
+        self.assertFalse(any(call[0] in {"check_update", "start_update"} for call in self.management.calls))
 
     async def test_maintenance_rejects_tampering_and_untrusted_requests(self) -> None:
         self.runner.open_admission()
@@ -778,9 +746,6 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         session = await self.login()
         other_session = await self.login()
         targets = {
-            "install": ({"version": "1.2.0"}, {"releaseId": 999},
-                        {"installerSha256": "d" * 64}, {"archiveSha256": "e" * 64},
-                        {"url": "https://example.com/evil.sh"}, {"releaseId": True}),
             "restart": ({"targetId": "d" * 64}, {"resource": "instance-update"},
                         {"scopeKey": "foreign-scope"}, {"command": "sh malicious.sh"}),
         }
@@ -822,14 +787,14 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         })
         # Forward the granted identity even if a later read sees another release.
         # UpdateService must reject that stale identity inside the install lock.
-        self.management.update_data["current"]["releaseDigest"] = "f" * 64
+        self.management.update_data["current"]["installationId"] = "f" * 64
         status, _, result = await self.json_post(
             "/api/v1/updates/restart", session, _action_payload(grant)
         )
         self.assertEqual(status, 202)
         self.assertEqual(result["operation"]["kind"], "restart")
         self.assertEqual(result["operation"]["phase"], "accepted")
-        self.assertEqual(result["operation"]["target"]["releaseDigest"], "a" * 64)
+        self.assertEqual(result["operation"]["target"]["installationId"], "a" * 64)
         self.assertEqual(self.management.calls[-1], ("restart_service", "a" * 64))
         status, _, _ = await self.json_post(
             "/api/v1/updates/restart", session, _action_payload(grant)
@@ -875,37 +840,36 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status, 200)
             self.assertEqual(data["operation"]["phase"], "recovery_required")
             self.assertIsNone(data["actions"]["install"])
-            self.assertIsNotNone(data["actions"]["check"])
+            self.assertIsNone(data["actions"]["check"])
         self.management.update_data["supported"] = True
         self.management.update_data["current"]["source"] = "published"
         for phase in ("requires_action", "recovered"):
             self.management.update_data["operation"]["phase"] = phase
             _, _, data = await self.json_get("/api/v1/updates", session)
-            self.assertIsNotNone(data["actions"]["install"])
+            self.assertIsNone(data["actions"]["install"])
 
     async def test_update_errors_keep_stable_http_code_and_message(self) -> None:
         self.runner.open_admission()
         self.management.update_data.update(restartSupported=True, restartAvailable=True)
         session = await self.login()
         cases = (
-            ("restart_unsupported", 409, "restart_unsupported", "仅当前受管安装支持 Admin 重启。"),
+            ("restart_unsupported", 409, "restart_unsupported", "仅绑定当前 Python 环境的受管实例支持 Admin 重启。"),
             ("invalid_update_target", 400, "invalid_update_target", "升级目标无效。"),
-            ("update_unsupported", 409, "update_unsupported", "仅当前受管正式版本支持 Admin 升级。"),
+            ("update_unsupported", 409, "update_unsupported", "请在对应 Python 环境运行 netizen update。"),
             ("update_target_changed", 409, "update_target_changed", "升级目标已变化，请重新检查更新。"),
             ("update_busy", 409, "update_busy", "另一个安装或维护操作正在执行，请稍后查看结果。"),
-            ("update_state_unavailable", 503, "update_state_unavailable", "维护状态无法确认，请检查安装器状态文件。"),
-            ("update_lock_unavailable", 503, "update_state_unavailable", "无法取得安装锁，请检查安装状态。"),
+            ("update_state_unavailable", 503, "update_state_unavailable", "维护状态无法确认，请检查实例维护记录。"),
+            ("update_lock_unavailable", 503, "update_state_unavailable", "无法取得维护锁，请检查实例状态。"),
             ("update_installation_changed", 409, "update_target_changed", "当前安装已变化，请重新连接。"),
             ("update_already_submitted", 409, "update_busy", "维护操作已提交，请查看已有操作结果。"),
-            ("update_recovery_required", 409, "update_recovery_required", "上次维护结果未确认，请使用安装器恢复。"),
+            ("update_recovery_required", 409, "update_recovery_required", "上次维护结果未确认，请检查服务状态并使用 netizen restart 恢复。"),
             ("update_cleanup_unavailable", 503, "update_cleanup_unavailable", "暂时无法清理上次维护任务，请稍后重试。"),
             ("update_submission_unknown", 503, "update_state_unavailable", "维护操作提交结果无法确认，请刷新查看；不要重复提交。"),
         )
         for reason, expected_status, code, message in cases:
             with self.subTest(reason=reason):
                 _, _, data = await self.json_get("/api/v1/updates", session)
-                restarting = reason == "restart_unsupported"
-                action, method = ("restart", "restart_service") if restarting else ("install", "start_update")
+                action, method = "restart", "restart_service"
                 with patch.object(self.management, method, side_effect=UpdateError(reason)):
                     status, _, result = await self.json_post(
                         f"/api/v1/updates/{action}", session, _action_payload(data["actions"][action]),
@@ -914,79 +878,21 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["code"], code)
                 self.assertEqual(result["message"], message)
 
-    async def test_update_responses_present_status_and_check_failures_without_internal_fields(self) -> None:
+    async def test_maintenance_status_explains_environment_scope_without_internal_fields(self) -> None:
         self.runner.open_admission()
         session = await self.login()
-        cases = (
-            ("published", True, ""),
-            ("published", False, "当前运行版本与安装指针不一致，请重新连接或检查安装结果。"),
-            ("source", False, "当前是源码安装；请在源码工作区运行 ./dev-install.sh。"),
-            ("unmanaged", False, "当前不属于受管正式安装；请使用官方 install.sh 安装正式版本。"),
-        )
-        for source, supported, message in cases:
-            for error_code in (None, "release_check_failed"):
-                with self.subTest(source=source, supported=supported, error_code=error_code):
-                    self.management.update_data["current"]["source"] = source
-                    self.management.update_data.update(
-                        supported=supported, available=supported and error_code is None,
-                        checkingErrorCode=error_code,
-                    )
-                    get_status, _, data = await self.json_get("/api/v1/updates", session)
-                    post_status, _, checked = await self.json_post(
-                        "/api/v1/updates/check", session, _action_payload(data["actions"]["check"]),
-                    )
-                    self.assertEqual((get_status, post_status), (200, 200))
-                    for response in (data, checked):
-                        self.assertEqual(set(response), {
-                            "current", "supported", "message", "latest", "available",
-                            "operation", "checkingError", "checkedAt", "requestId", "actions",
-                        })
-                        self.assertEqual(response["message"], message)
-                        self.assertEqual(response["checkingError"], (
-                            "检查更新失败，原因暂未识别。请稍后重试；若持续出现，请联系维护者。"
-                            if error_code else None
-                        ))
-                        self.assertEqual(response["current"], self.management.update_data["current"])
-                        self.assertEqual(response["latest"], self.management.update_data["latest"])
-                        self.assertEqual(response["available"], supported and error_code is None)
-
-    async def test_update_check_failures_explain_the_cause_and_next_step(self) -> None:
-        self.runner.open_admission()
-        session = await self.login()
-        cases = (
-            ("release_rate_limited", "限流", "请稍后重试"),
-            ("release_access_denied", "HTTP 403", "网络访问策略"),
-            ("release_not_found", "HTTP 404", "Release 状态"),
-            ("release_service_unavailable", "HTTP 5xx", "稍后重新检查"),
-            ("release_http_error", "异常 HTTP 响应", "联系维护者"),
-            ("release_check_timeout", "超时", "网络或代理"),
-            ("release_network_error", "网络错误", "HTTPS 证书"),
-            ("release_invalid_response", "未通过校验", "联系维护者"),
-            ("SECRET unknown", "原因暂未识别", "联系维护者"),
-        )
-        for code, cause, next_step in cases:
-            with self.subTest(code=code):
-                self.management.update_data.update(
-                    checkingErrorCode=code, latest=None, available=False,
-                )
-                get_status, _, data = await self.json_get("/api/v1/updates", session)
-                post_status, _, checked = await self.json_post(
-                    "/api/v1/updates/check", session, _action_payload(data["actions"]["check"]),
-                )
-                self.assertEqual((get_status, post_status), (200, 200))
-                self.assertEqual(data["checkingError"], checked["checkingError"])
-                for response in (data, checked):
-                    self.assertIn(cause, response["checkingError"])
-                    self.assertIn(next_step, response["checkingError"])
-                    self.assertNotIn("checkingErrorCode", response)
-                    self.assertNotIn("SECRET", json.dumps(response))
-                    self.assertIsNone(response["actions"]["install"])
+        status, _, data = await self.json_get("/api/v1/updates", session)
+        self.assertEqual(status, 200)
+        self.assertIn("Python 环境", data["message"])
+        self.assertNotIn("checkingErrorCode", data)
+        self.assertIsNone(data["actions"]["install"])
+        self.assertIsNone(data["actions"]["check"])
 
     async def test_unknown_update_failure_does_not_expose_internal_details(self) -> None:
         self.runner.open_admission()
         session = await self.login()
         with patch.object(self.management, "update_status", side_effect=UpdateError("SECRET internal reason")), \
-                self.assertLogs("netizen.admin.web", level="ERROR"):
+                self.assertLogs("netizen_cli.admin.web", level="ERROR"):
             status, _, result = await self.json_get("/api/v1/updates", session)
         self.assertEqual(status, 500)
         self.assertEqual(result["code"], "internal_error")
@@ -1095,7 +1001,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError(sensitive)
 
         self.management.query_projects = fail_query
-        with self.assertLogs("netizen.admin.web", level="ERROR") as captured:
+        with self.assertLogs("netizen_cli.admin.web", level="ERROR") as captured:
             status, _headers, payload = await self.request(
                 "GET",
                 "/api/v1/projects",
@@ -1339,8 +1245,8 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             "resolved",
         )
 
-        from netizen.admin.queries import _encode_binding_cursor, _fingerprint
-        from netizen.bindings import BindingCursor
+        from netizen_cli.admin.queries import _encode_binding_cursor, _fingerprint
+        from netizen_cli.bindings import BindingCursor
 
         cursor = _encode_binding_cursor(
             BindingCursor("2030", "binding"),
@@ -2037,9 +1943,9 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
 
     def test_authority_builder_uses_canonical_bracketed_ipv6(self) -> None:
         with (
-            patch("netizen.admin.web.socket.gethostname", return_value="host.test"),
-            patch("netizen.admin.web.socket.getfqdn", return_value="host.example"),
-            patch("netizen.admin.web.socket.getaddrinfo", return_value=[]),
+            patch("netizen_cli.admin.web.socket.gethostname", return_value="host.test"),
+            patch("netizen_cli.admin.web.socket.getfqdn", return_value="host.example"),
+            patch("netizen_cli.admin.web.socket.getaddrinfo", return_value=[]),
         ):
             authorities = accepted_authorities("::", 8787, (("::1", 8787, 0, 0),))
         self.assertIn("[::1]:8787", authorities)
@@ -2078,7 +1984,7 @@ class _AdminAssetParser(HTMLParser):
 
 class AdminStaticAssetsTest(unittest.TestCase):
     def test_static_ui_has_four_pages_external_assets_and_safe_text_sinks(self) -> None:
-        root = Path(__file__).resolve().parents[2] / "netizen/admin/static"
+        root = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
         html = (root / "index.html").read_text(encoding="utf-8")
         javascript = (root / "admin.js").read_text(encoding="utf-8")
         parser = _AdminAssetParser()
@@ -2088,7 +1994,9 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertEqual(parser.stylesheets, ["/static/admin.css"])
         self.assertFalse(parser.inline_script_text.strip())
         self.assertTrue({"projects", "sessions", "side-topics", "updates"} <= parser.ids)
-        self.assertIn("升级会中断正在执行的任务、暂停 Goal，并结束临时 Side 会话。升级后不会自动续跑。", html)
+        self.assertIn("service-restart", parser.ids)
+        self.assertNotIn("update-install", parser.ids)
+        self.assertNotIn("update-check", parser.ids)
         self.assertTrue(
             {
                 "session-page-size",
@@ -2142,7 +2050,7 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertRegex(javascript, r"setInterval\([\s\S]+?,\s*5000\s*\)")
 
     def test_time_range_filter_is_shared_accessible_and_uses_utc_bounds(self) -> None:
-        root = Path(__file__).resolve().parents[2] / "netizen/admin/static"
+        root = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
         html = (root / "index.html").read_text(encoding="utf-8")
         javascript = (root / "admin.js").read_text(encoding="utf-8")
         stylesheet = (root / "admin.css").read_text(encoding="utf-8")
@@ -2204,7 +2112,7 @@ class AdminStaticAssetsTest(unittest.TestCase):
         if node is None:
             self.skipTest("Node.js is unavailable for the Admin JavaScript behavior test")
         javascript = (
-            Path(__file__).resolve().parents[2] / "netizen/admin/static/admin.js"
+            Path(__file__).resolve().parents[2] / "netizen_cli/admin/static/admin.js"
         ).read_text(encoding="utf-8")
         start = javascript.index("let timeRangeModalOwner")
         end = javascript.index("function initializeTimeRangeFilter")

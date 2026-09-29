@@ -105,7 +105,7 @@ sys.exit(17 if index == int(os.environ["NETIZEN_TEST_PROBE_FAIL_AT"]) else 0)
             [shlex.split(line) for line in result.stdout.splitlines()],
             [
                 ["/chosen/python", "-m", "unittest", "discover", "-s", "tests", "-v"],
-                ["/chosen/python", "-m", "compileall", "-q", "netizen", "scripts", "tests"],
+                ["/chosen/python", "-m", "compileall", "-q", "netizen_cli", "scripts", "tests"],
                 ["/chosen/python", "-m", "pip", "check"],
                 ["/chosen/python", "scripts/check_sdk.py"],
             ],

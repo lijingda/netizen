@@ -8,8 +8,8 @@ from typing import Any
 from lark_oapi.api.im.v1.model.get_message_request import GetMessageRequest
 from lark_oapi.api.im.v1.model.list_message_request import ListMessageRequest
 
-from netizen.domain import FeishuScope, MessageContextAnchor, ScopeKind
-from netizen.message_history import (
+from netizen_cli.domain import FeishuScope, MessageContextAnchor, ScopeKind
+from netizen_cli.message_history import (
     FeishuMessageHistoryReader,
     MessageHistoryContractError,
     MessageHistoryUnavailable,

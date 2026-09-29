@@ -31,31 +31,31 @@ from openai_codex import ImageInput, TextInput
 from openai_codex.errors import InternalRpcError
 from openai_codex.types import ThreadItem, TurnError
 
-from netizen import channel_app
-from netizen.channel import input_preparation
-from netizen.channel.input_preparation import MessageInputPreparer
-from netizen.channel import reactions, reply_presenter
-from netizen.turn_patch_children import TaskPatchChildren, TurnPatchBatch
-from netizen.bindings import (
+from netizen_cli import channel_app
+from netizen_cli.channel import input_preparation
+from netizen_cli.channel.input_preparation import MessageInputPreparer
+from netizen_cli.channel import reactions, reply_presenter
+from netizen_cli.turn_patch_children import TaskPatchChildren, TurnPatchBatch
+from netizen_cli.bindings import (
     BindingStore,
     BindingNotFound,
     BindingTaskFeedback,
     BindingTurnSettings,
     SideTopicState,
 )
-from netizen.cards import (
+from netizen_cli.cards import (
     CardActionError,
     decode_turn_file_action,
     goal_generation,
     reply_card,
 )
-from netizen.channel_app import ChannelApplication, SideTopicCreateFailed
-from netizen.management import (
+from netizen_cli.channel_app import ChannelApplication, SideTopicCreateFailed
+from netizen_cli.management import (
     InstanceManagementService,
     ManagementRuntimePort,
     ScopeCoordinator,
 )
-from netizen.codex_runtime import (
+from netizen_cli.codex_runtime import (
     ActiveGoalSnapshot,
     ActiveState,
     ActiveTurnSnapshot,
@@ -94,7 +94,7 @@ from netizen.codex_runtime import (
     TurnObservationUnavailableOutcome,
     TurnStartFailed,
 )
-from netizen.domain import (
+from netizen_cli.domain import (
     FeishuScope,
     MentionContextMode,
     MessageContextAnchor,
@@ -105,20 +105,20 @@ from netizen.domain import (
     ReplyCardResultModule,
     ScopeKind,
 )
-from netizen.message_history import (
+from netizen_cli.message_history import (
     MessageHistoryRef,
     MessageHistoryStats,
     MessageHistoryUnavailable,
     MessageHistoryWindow,
 )
-from netizen.sdk_gap_adapter import GoalStatus
-from netizen.projects import ProjectRegistry
-from netizen.turn_activity import (
+from netizen_cli.sdk_gap_adapter import GoalStatus
+from netizen_cli.projects import ProjectRegistry
+from netizen_cli.turn_activity import (
     TurnActivityEntrySnapshot,
     TurnActivityKind,
     TurnActivityStatus,
 )
-from netizen.turn_plan_observer import TurnPlanStepSnapshot, TurnPlanStepState
+from netizen_cli.turn_plan_observer import TurnPlanStepSnapshot, TurnPlanStepState
 from tests.support.channel_messages import (
     PNG,
     FakeMessage,
@@ -350,7 +350,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
 
                     with (
                         patch.object(self.channel, "update_card", side_effect=update),
-                        self.assertLogs("netizen.channel.reply_presenter", level="ERROR"),
+                        self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"),
                     ):
                         self.publish_revision(2)
                         first = await asyncio.wait_for(requests.get(), timeout=1)
@@ -392,7 +392,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
 
                 with (
                     patch.object(self.channel, "update_card", side_effect=update),
-                    self.assertLogs("netizen.channel.reply_presenter", level="ERROR"),
+                    self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"),
                 ):
                     self.publish_revision(2)
                     await asyncio.wait_for(self.session.task, timeout=1)
@@ -424,7 +424,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
 
                     with (
                         patch.object(self.channel, "update_card", side_effect=update),
-                        self.assertLogs("netizen.channel.reply_presenter", level="ERROR"),
+                        self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"),
                     ):
                         self.publish_revision(2)
                         await asyncio.wait_for(entered.wait(), timeout=1)
@@ -481,7 +481,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                         json.JSONDecodeError("Bad Gateway", "", 0), rejected,
                         SimpleNamespace(success=True) if succeeds else rejected,
                     ))
-                    with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+                    with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
                         self.assertEqual(await self.finish_card(), succeeds)
                     self.assertEqual(len(self.channel.updates), 3)
                     self.assertTrue(all(
@@ -512,7 +512,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                         with (
                             patch.object(self.channel, "update_card", side_effect=update),
                             patch.object(reply_presenter, "_TERMINAL_CARD_RETRY_SECONDS", 60),
-                            self.assertLogs("netizen.channel.reply_presenter")
+                            self.assertLogs("netizen_cli.channel.reply_presenter")
                             if stage == "delay" or not cancel else nullcontext(),
                         ):
                             finishing = asyncio.create_task(self.finish_card())
@@ -542,7 +542,7 @@ class ReplyCardPollingTest(unittest.IsolatedAsyncioTestCase):
                         method = "turn_activity" if kind == "ordinary" else "side_turn_activity"
                     with (
                         patch.object(target, method, side_effect=RuntimeError("broken projection")),
-                        self.assertLogs("netizen.channel.reply_presenter", level="ERROR"),
+                        self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"),
                     ):
                         self.publish_revision(2)
                         await asyncio.wait_for(self.session.task, timeout=1)
@@ -991,7 +991,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.channel.reply_results.append(RuntimeError("progress send failed"))
         prompt = FakeMessage("hello", message_id="om_progress_failed")
 
-        with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
             await self.app.handle_message(prompt)
         self.assertTrue(released)
 
@@ -1179,7 +1179,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ))
 
         with (
-            self.assertLogs("netizen.channel.reply_presenter", level="ERROR"),
+            self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"),
             patch.object(
                 channel_app,
                 "turn_patch_summary",
@@ -1268,7 +1268,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         key = (binding.id, "native-one", "turn-one")
         session = self.app._progress_cards._sessions[key]
 
-        with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
             await asyncio.wait_for(session.task, timeout=1)
             self.assertTrue(session.failed)
             self.assertTrue(session.task.done())
@@ -1439,7 +1439,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel.reply_results.extend((rejected, rejected))
 
-        with self.assertLogs("netizen.channel_app", level="ERROR") as logs:
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR") as logs:
             await self.app._reply(origin, "alice@example.com")
 
         self.assertEqual(len(self.channel.replies), 2)
@@ -2183,7 +2183,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     expected = f"before\n\n![first]({key})\n\nmiddle\n\n![second]({key})\n\nafter"
                     with (
                         patch.object(self.app, "_task_completion_files", wraps=self.app._task_completion_files) as collect_files,
-                        self.assertLogs("netizen", level="ERROR") if delivery_fails else nullcontext(),
+                        self.assertLogs("netizen_cli", level="ERROR") if delivery_fails else nullcontext(),
                     ):
                         await self.app.handle_completion(TurnOutcome(
                             binding_id=binding.id, thread_id="native-images", turn_id=turn_id,
@@ -2275,7 +2275,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         report.write_text("report", encoding="utf-8")
         self.channel.reply_results.extend((RuntimeError("card failed"), object()))
 
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.app.handle_completion(
                 TurnOutcome(
                     binding_id=binding.id,
@@ -2309,7 +2309,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     "本轮文件共 501 个，超过上限；未截断文件清单。"
                 ),
             ),
-            self.assertLogs("netizen.channel_app", level="WARNING"),
+            self.assertLogs("netizen_cli.channel_app", level="WARNING"),
         ):
             await self.app.handle_completion(
                 TurnOutcome(
@@ -2872,7 +2872,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel.fail_once_reaction_remove = True
         try:
-            with self.assertLogs("netizen.channel.reactions", level="ERROR"):
+            with self.assertLogs("netizen_cli.channel.reactions", level="ERROR"):
                 self.assertTrue(
                     await controller.start(
                         "turn-one",
@@ -2930,7 +2930,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel.fail_once_reaction_on = "THINKING"
         try:
-            with self.assertLogs("netizen.channel.reactions", level="ERROR"):
+            with self.assertLogs("netizen_cli.channel.reactions", level="ERROR"):
                 self.assertTrue(
                     await controller.start(
                         "turn-one",
@@ -2969,7 +2969,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel.fail_once_reaction_on = "DONE"
 
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.app.handle_completion(
                 TurnOutcome(
                     binding_id="binding-one",
@@ -3027,7 +3027,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
 
         with patch(
-            "netizen.channel_app.git_branch_status",
+            "netizen_cli.channel_app.git_branch_status",
             return_value="main...origin/main [ahead 2]",
         ) as read_branch:
             await self.app.handle_message(
@@ -3342,7 +3342,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(self.runtime, "goal_snapshot", stalled_goal),
-            patch("netizen.channel_app._SESSION_QUERY_TIMEOUT_SECONDS", 0.05),
+            patch("netizen_cli.channel_app._SESSION_QUERY_TIMEOUT_SECONDS", 0.05),
         ):
             card = await asyncio.wait_for(self.app._sessions_card(scope=scope), 0.5)
         self.assertTrue(entered.is_set())
@@ -3779,7 +3779,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 "_archived_sessions_card",
                 side_effect=RuntimeError("catalog refresh failed"),
             ),
-            self.assertLogs("netizen.channel_app", level="ERROR"),
+            self.assertLogs("netizen_cli.channel_app", level="ERROR"),
         ):
             await self.app.handle_card_action(
                 direct_button_event(
@@ -4112,7 +4112,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         replies_before = len(self.channel.replies)
         with (
             patch.object(channel_app.asyncio, "sleep", record_delay),
-            self.assertLogs("netizen.channel_app", level="WARNING"),
+            self.assertLogs("netizen_cli.channel_app", level="WARNING"),
         ):
             await self.app.handle_card_action(
                 direct_button_event(
@@ -4150,7 +4150,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(channel_app.asyncio, "sleep", record_delay),
-            self.assertLogs("netizen.channel_app", level="ERROR"),
+            self.assertLogs("netizen_cli.channel_app", level="ERROR"),
         ):
             await self.app.handle_card_action(
                 direct_button_event(
@@ -4221,7 +4221,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(channel_app.asyncio, "sleep", record_delay),
-            self.assertLogs("netizen.channel_app", level="WARNING"),
+            self.assertLogs("netizen_cli.channel_app", level="WARNING"),
         ):
             await self.app.handle_card_action(
                 direct_button_event(final_value, message_id="om_sessions")
@@ -4545,7 +4545,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.app._sessions_card = AsyncMock(side_effect=RuntimeError("card unavailable"))
 
-        with self.assertLogs("netizen.channel_app", level="WARNING"):
+        with self.assertLogs("netizen_cli.channel_app", level="WARNING"):
             await self.app.handle_card_action(
                 direct_button_event(
                     final["behaviors"][0]["value"],
@@ -4912,7 +4912,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.app._sessions_card = AsyncMock(side_effect=RuntimeError("card unavailable"))
 
-        with self.assertLogs("netizen.channel_app", level="WARNING"):
+        with self.assertLogs("netizen_cli.channel_app", level="WARNING"):
             await self.app.handle_card_action(
                 direct_button_event(
                     archive["behaviors"][0]["value"],
@@ -5191,7 +5191,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.store.assign_native_thread_id(binding.id, "native-one")
         self.runtime.thread_metadata_error = RuntimeError("history unavailable")
 
-        with self.assertLogs("netizen.channel_app", level="WARNING"):
+        with self.assertLogs("netizen_cli.channel_app", level="WARNING"):
             await self.app.handle_message(
                 FakeMessage("/status", message_id="om_status")
             )
@@ -5286,7 +5286,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.runtime.model_catalog_error = RuntimeError("catalog down")
 
-        with self.assertLogs("netizen.channel_app", level="WARNING") as logs:
+        with self.assertLogs("netizen_cli.channel_app", level="WARNING") as logs:
             await self.app.handle_message(
                 FakeMessage("/status", message_id="om_status")
             )
@@ -5462,7 +5462,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel.reply_results.append(RuntimeError("card send failed"))
 
-        with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
             await self.app.handle_message(
                 FakeMessage("/goal ship safely", message_id="om_goal_start_fail")
             )
@@ -5497,7 +5497,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel.reply_results.append(RuntimeError("initial card failed"))
 
-        with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
             await self.app.handle_message(
                 FakeMessage("/goal ship safely", message_id="om_goal_initial_fail")
             )
@@ -5560,7 +5560,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel.fail_card_updates = True
 
-        with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
             await self.app.handle_card_action(
                 direct_button_event(
                     resume_value,
@@ -5859,7 +5859,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         key = (binding.id, "native-one", generation)
         session = self.app._progress_cards._goal_sessions[key]
 
-        with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
             await asyncio.wait_for(session.task, timeout=1)
             self.assertTrue(session.failed)
             self.assertTrue(session.task.done())
@@ -6585,7 +6585,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         result_path.write_text("result", encoding="utf-8")
         self.channel.fail_card_updates = True
 
-        with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
             await self.app.handle_completion(
                 GoalOutcome(
                     binding_id=binding.id,
@@ -7324,7 +7324,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             -32603, "provider connection failed", data={"request": "private body"},
         )
 
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.app.handle_message(FakeMessage("继续", message_id="om_rpc_failure"))
 
         reply = str(self.channel.replies[-1][1])
@@ -7360,7 +7360,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(self.app, "_decode_card_event", side_effect=error),
-            self.assertLogs("netizen.channel_app", level="ERROR"),
+            self.assertLogs("netizen_cli.channel_app", level="ERROR"),
         ):
             await self.app.handle_card_action(event)
 
@@ -7979,7 +7979,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 "fetch_inbound_message",
                 side_effect=never_returns,
             ),
-            patch("netizen.channel.input_preparation._QUOTE_FETCH_TIMEOUT_SECONDS", 0.001),
+            patch("netizen_cli.channel.input_preparation._QUOTE_FETCH_TIMEOUT_SECONDS", 0.001),
         ):
             await self.app.handle_message(
                 FakeMessage(
@@ -8049,7 +8049,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 "fetch_quoted_context",
                 side_effect=observed_context,
             ),
-            patch("netizen.channel.input_preparation.asyncio.timeout", side_effect=observed_timeout),
+            patch("netizen_cli.channel.input_preparation.asyncio.timeout", side_effect=observed_timeout),
         ):
             await self.app.handle_message(
                 FakeMessage(
@@ -8092,7 +8092,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 "fetch_quoted_context",
                 side_effect=never_returns,
             ),
-            patch("netizen.channel.input_preparation._QUOTE_FETCH_TIMEOUT_SECONDS", 0.001),
+            patch("netizen_cli.channel.input_preparation._QUOTE_FETCH_TIMEOUT_SECONDS", 0.001),
         ):
             await self.app.handle_message(
                 FakeMessage(
@@ -8604,7 +8604,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_new_can_inherit_when_model_catalog_fails(self) -> None:
         self.runtime.model_catalog_error = RuntimeError("catalog unavailable")
 
-        with self.assertLogs("netizen.channel_app", level="WARNING"):
+        with self.assertLogs("netizen_cli.channel_app", level="WARNING"):
             await self.app.handle_message(FakeMessage("/new", message_id="om_picker"))
 
         picker = self.channel.replies[-1][1]
@@ -8721,7 +8721,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.app.handle_card_action(event)
 
         scope = FeishuScope(
@@ -8758,7 +8758,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.channel.card_update_success = False
         event = direct_card_event(self.channel, values)
 
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.app.handle_card_action(event)
 
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
@@ -8959,7 +8959,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.channel.chat_types["oc_direct"] = "p2p"
         self.channel.fail_card_updates = True
 
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.app.handle_card_action(
                 SimpleNamespace(
                     message_id="om_card",
@@ -8999,7 +8999,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel.fail_once_reaction_on = "Typing"
 
-        with self.assertLogs("netizen.channel.reactions", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel.reactions", level="ERROR"):
             await self.app.handle_message(FakeMessage("hello", message_id="om_prompt"))
 
         self.assertTrue(released)
@@ -9167,7 +9167,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.channel.fail_once_reaction_on = "OnIt"
 
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.app.handle_message(
                 FakeMessage("new direction", message_id="om_steer")
             )
@@ -10063,7 +10063,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.channel.fail_card_updates = update_failed
                 replies_before = len(self.channel.replies)
-                with self.assertLogs("netizen.channel.reply_presenter", level="ERROR") if update_failed else nullcontext():
+                with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR") if update_failed else nullcontext():
                     await self.app.handle_completion(outcome)
 
                 card = str(self.channel.updates[-1][1])
@@ -10281,7 +10281,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             mentioned_bot=False,
         )
 
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.app.handle_message(prompt)
 
         self.assertIn((prompt.id, "已接收 Side 调整。"), self.channel.replies)
@@ -10555,7 +10555,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         key = (record.id, "native-side-1", "side-turn-1")
         session = self.app._progress_cards._side_sessions[key]
 
-        with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
             await asyncio.wait_for(session.task, timeout=1)
             self.assertTrue(session.failed)
             self.assertTrue(session.task.done())
@@ -10601,7 +10601,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             mentioned_bot=False,
         )
 
-        with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
             await self.app.handle_message(prompt)
         await self.app.handle_completion(
             SideTurnOutcome(
@@ -11545,7 +11545,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         assert record is not None
 
         with patch(
-            "netizen.channel_app.git_branch_status",
+            "netizen_cli.channel_app.git_branch_status",
             return_value="HEAD (no branch)",
         ) as read_branch:
             await self.app.handle_message(

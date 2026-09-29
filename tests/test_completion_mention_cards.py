@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from netizen.cards import (
+from netizen_cli.cards import (
     TurnFileCardLimitError,
     decode_turn_file_action,
     reply_card,
@@ -17,13 +17,13 @@ from netizen.cards import (
     turn_progress_card,
     turn_progress_card_from_manifest,
 )
-from netizen.channel.reply_presenter import (
+from netizen_cli.channel.reply_presenter import (
     GoalCardOrigin,
     _GoalCardDelivery,
     _ReplyCardPresenter,
 )
-from netizen.completion_mention import valid_completion_mention_user_id
-from netizen.domain import (
+from netizen_cli.completion_mention import valid_completion_mention_user_id
+from netizen_cli.domain import (
     FeishuScope,
     ReplyCardActivityModule,
     ReplyCardFileItem,
@@ -34,7 +34,7 @@ from netizen.domain import (
     ScopeKind,
     TurnProgressManifest,
 )
-from netizen.turn_files import TurnFile
+from netizen_cli.turn_files import TurnFile
 
 
 USER_ID = "ou_completion_owner"
@@ -201,7 +201,7 @@ class CompletionMentionCardsTest(unittest.TestCase):
         plain = ReplyCardProjection(result=ReplyCardResultModule(ANSWER))
         baseline = reply_card(plain)
         limit = len(json.dumps(baseline.card, ensure_ascii=False).encode("utf-8"))
-        with patch("netizen.cards.reply.TURN_FILE_CARD_JSON_LIMIT_BYTES", limit):
+        with patch("netizen_cli.cards.reply.TURN_FILE_CARD_JSON_LIMIT_BYTES", limit):
             reply_card(plain)
             with self.assertRaises(TurnFileCardLimitError):
                 reply_card(replace(plain, result=ReplyCardResultModule(ANSWER, USER_ID)))

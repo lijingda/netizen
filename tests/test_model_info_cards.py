@@ -8,13 +8,13 @@ import unittest
 
 from openai_codex.generated.v2_all import ModelUpgradeInfo
 
-from netizen.bindings import BindingTurnSettings
-from netizen.cards import config_card, new_binding_card
-from netizen.cards.model_info import with_model_details
-from netizen.cards.reply import TURN_FILE_CARD_JSON_LIMIT_BYTES
-from netizen.domain import FeishuScope, ScopeKind
-from netizen.model_settings import EffortOption, ModelCatalog, ModelOption
-from netizen.projects import Project
+from netizen_cli.bindings import BindingTurnSettings
+from netizen_cli.cards import config_card, new_binding_card
+from netizen_cli.cards.model_info import with_model_details
+from netizen_cli.cards.reply import TURN_FILE_CARD_JSON_LIMIT_BYTES
+from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.model_settings import EffortOption, ModelCatalog, ModelOption
+from netizen_cli.projects import Project
 from support.channel_cards import _elements
 
 

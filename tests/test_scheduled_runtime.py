@@ -12,17 +12,17 @@ from unittest.mock import patch
 
 from openai_codex import AsyncCodex, CodexConfig
 
-from netizen.bindings import BindingNotFound, BindingStore, ProjectDisabled
-from netizen.codex_runtime import (
+from netizen_cli.bindings import BindingNotFound, BindingStore, ProjectDisabled
+from netizen_cli.codex_runtime import (
     ActiveState, CodexRuntime, RuntimeClosed, ScheduledInitialStartConflict,
     ScheduledTurnReadError, SkillReferenceError, SubmitDisposition, ThreadLifecycleState,
     ThreadLifecycleStateUnknown, TurnObservationUnavailable, TurnStartFailed,
 )
-from netizen.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
-from netizen.model_settings import ModelCatalogError
-from netizen.runtime.contracts import ContextCursorCommit
-from netizen.schedules.models import ScheduleConflict, ScheduleRule
-from netizen.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
+from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
+from netizen_cli.model_settings import ModelCatalogError
+from netizen_cli.runtime.contracts import ContextCursorCommit
+from netizen_cli.schedules.models import ScheduleConflict, ScheduleRule
+from netizen_cli.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 from tests.test_codex_runtime import (
     FakeCodex, FakeSkillCatalog, FakeTerminalCleanup, FakeThread,
     FakeThreadDeleteControl, fake_skills,
@@ -40,7 +40,7 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         # Behavioral fixtures replace the public handle constructor, rather
         # than inventing a Thread-read method on the high-level Codex facade.
         reader = patch(
-            "netizen.codex_runtime.AsyncThread",
+            "netizen_cli.codex_runtime.AsyncThread",
             side_effect=lambda codex, thread_id: FakeThread(thread_id, codex),
         )
         reader.start()

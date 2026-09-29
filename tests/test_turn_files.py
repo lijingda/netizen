@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from openai_codex.types import ThreadItem
 
-from netizen.turn_files import (
+from netizen_cli.turn_files import (
     TurnFileError,
     extract_turn_files,
     has_turn_file_references,
@@ -404,7 +404,7 @@ class TurnFilesTest(unittest.TestCase):
         summary = turn_diff_summary(diff)
 
         with patch(
-            "netizen.turn_files.turn_diff_summary",
+            "netizen_cli.turn_files.turn_diff_summary",
             side_effect=AssertionError("diff was parsed again"),
         ):
             self.assertTrue(

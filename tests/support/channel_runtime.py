@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from netizen.bindings import (
+from netizen_cli.bindings import (
     BindingStore,
     BindingTaskFeedback,
     BindingTurnSettings,
     SideTopicState,
 )
-from netizen.codex_runtime import (
+from netizen_cli.codex_runtime import (
     ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
     CompactSubmission,
@@ -37,15 +37,15 @@ from netizen.codex_runtime import (
     TurnProgressSnapshot,
     TurnActivitySnapshot,
 )
-from netizen.domain import MentionContextMode, MessageContextAnchor
-from netizen.model_settings import (
+from netizen_cli.domain import MentionContextMode, MessageContextAnchor
+from netizen_cli.model_settings import (
     EffortOption,
     ModelCatalog,
     ModelOption,
     ServiceTierOption,
     TurnModelSettings,
 )
-from netizen.sdk_gap_adapter import GoalSnapshot
+from netizen_cli.sdk_gap_adapter import GoalSnapshot
 
 
 class StubRuntime:

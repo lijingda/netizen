@@ -8,7 +8,7 @@ from openai_codex.types import TurnError
 from pydantic import BaseModel, TypeAdapter, ValidationError, field_validator
 from pydantic_core import PydanticCustomError
 
-from netizen.error_messages import describe_error, native_turn_failure
+from netizen_cli.error_messages import describe_error, native_turn_failure
 
 
 class ErrorMessagesTest(unittest.TestCase):

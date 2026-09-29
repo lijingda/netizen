@@ -7,8 +7,8 @@ from pathlib import Path
 
 from openai_codex.types import ThreadItem
 
-from netizen.turn_files import extract_turn_files, turn_patch_summary
-from netizen.turn_patch_children import TaskPatchChildren, TurnPatchBatch
+from netizen_cli.turn_files import extract_turn_files, turn_patch_summary
+from netizen_cli.turn_patch_children import TaskPatchChildren, TurnPatchBatch
 
 
 def patch_item(

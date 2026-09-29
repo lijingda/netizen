@@ -19,16 +19,16 @@ from lark_channel import (
     RetryConfig,
 )
 
-from netizen.channel import reply_presenter
-from netizen.channel_app import _outcome_completion_mention_user_id
-from netizen.bindings import BindingTaskFeedback
-from netizen.codex_runtime import (
+from netizen_cli.channel import reply_presenter
+from netizen_cli.channel_app import _outcome_completion_mention_user_id
+from netizen_cli.bindings import BindingTaskFeedback
+from netizen_cli.codex_runtime import (
     GoalFinalizationStatus,
     GoalOutcome,
     SideTurnOutcome,
     TurnOutcome,
 )
-from netizen.domain import (
+from netizen_cli.domain import (
     FeishuScope,
     GoalStatus,
     ScheduledConversation,
@@ -235,7 +235,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                         self.queue_reminder()
                     if retry:
                         self.channel.card_update_results.append(TimeoutError("update response lost"))
-                    with self.assertLogs("netizen.channel.reply_presenter", "ERROR") if retry else nullcontext():
+                    with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR") if retry else nullcontext():
                         await self.app.handle_completion(outcome)
                     self.assertEqual(len(self.channel.replies), 1)
                     self.assertEqual(len(self.channel.updates), 2 if retry else 1)
@@ -262,7 +262,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                         if response_lost else retryable_sent_result()
                         for _ in range(3)
                     )
-                    with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+                    with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
                         await self.app.handle_completion(outcome)
                     self.assertEqual(len(self.channel.updates), 3)
                     self.assertEqual(self.channel.updates[0][0], "om_progress")
@@ -309,8 +309,8 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                         outcome = await self.start_progress(outcome)
                         self.channel.replies.clear()
                         with (
-                            patch("netizen.channel_app.turn_progress_card", side_effect=ValueError("cannot render")),
-                            self.assertLogs("netizen.channel.reply_presenter", level="ERROR"),
+                            patch("netizen_cli.channel_app.turn_progress_card", side_effect=ValueError("cannot render")),
+                            self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"),
                         ):
                             await self.app.handle_completion(outcome)
                     else:
@@ -354,7 +354,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     task_feedback=BindingTaskFeedback(progress_card_enabled=True),
                 ))
                 self.channel.send_results.append(receipt)
-                with self.assertLogs("netizen.channel.completion_mentions", level="WARNING"):
+                with self.assertLogs("netizen_cli.channel.completion_mentions", level="WARNING"):
                     await self.app.handle_completion(outcome)
                 self.assertEqual(len(self.channel.replies), 1)
                 self.assertEqual(len(self.channel.updates), 1)
@@ -388,7 +388,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                         TimeoutError("file card response lost")
                         if response_lost else retryable_sent_result()
                     )
-                    with self.assertLogs("netizen.channel_app", level="WARNING"):
+                    with self.assertLogs("netizen_cli.channel_app", level="WARNING"):
                         await self.app.handle_completion(self.outcome(
                             result=completed_turn_result(
                                 file_change_item("result.txt"), final_response="结果正文",
@@ -405,8 +405,8 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
     async def test_file_card_construction_failure_keeps_mention_for_text_fallback(self):
         (self.fixture.project / "result.txt").write_text("result", encoding="utf-8")
         with (
-            patch("netizen.channel_app.turn_files_card", side_effect=ValueError("cannot render")),
-            self.assertLogs("netizen.channel_app", level="ERROR"),
+            patch("netizen_cli.channel_app.turn_files_card", side_effect=ValueError("cannot render")),
+            self.assertLogs("netizen_cli.channel_app", level="ERROR"),
         ):
             await self.app.handle_completion(self.outcome(
                 result=completed_turn_result(
@@ -635,7 +635,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                         ))
                     elif enabled:
                         self.queue_reminder(card_id, thread_id=scope.topic_id)
-                    with self.assertLogs("netizen.channel.reply_presenter", "ERROR") if failures else nullcontext():
+                    with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR") if failures else nullcontext():
                         await self.app.handle_completion(outcome)
                     if update_fails:
                         self.assertEqual(len(self.channel.replies), 1)
@@ -670,7 +670,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     TimeoutError("terminal update response lost") for _ in range(3)
                 )
                 self.channel.reply_results.append(TimeoutError("fallback card response lost"))
-                with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+                with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
                     await self.app.handle_completion(self.goal_outcome(
                         origin=origin, goal=replace(running, status=GoalStatus.COMPLETE),
                         task_feedback=BindingTaskFeedback(progress_card_enabled=progress),
@@ -699,7 +699,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     project_alias=self.binding.project_alias, fallback_origin=self.origin,
                 )
                 answer = "Goal 结果正文\n" + "x" * 60_000
-                with self.assertLogs("netizen.channel_app", level="WARNING"):
+                with self.assertLogs("netizen_cli.channel_app", level="WARNING"):
                     await self.app.handle_completion(self.goal_outcome(
                         origin=origin, goal=replace(running, status=GoalStatus.COMPLETE),
                         final_response=answer,
@@ -740,7 +740,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     task_feedback=BindingTaskFeedback(progress_card_enabled=True),
                 )
                 if update_fails:
-                    with self.assertLogs("netizen.channel.reply_presenter", level="ERROR"):
+                    with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
                         await self.app.handle_completion(outcome)
                 else:
                     await self.app.handle_completion(outcome)
@@ -859,7 +859,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
             create_message=AsyncMock(),
         )
         sdk_origin = self.use_sdk_reply(driver)
-        with self.assertLogs("netizen.channel_app", level="WARNING"):
+        with self.assertLogs("netizen_cli.channel_app", level="WARNING"):
             await self.app.handle_completion(self.outcome(
                 origin=sdk_origin,
                 result=completed_turn_result(final_response="完整结果\n" * 2000),

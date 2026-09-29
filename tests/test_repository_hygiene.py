@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
-
-from scripts import netizen_installer as installer
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +29,16 @@ INSTANCE_EXECUTION_RECORD = re.compile(
 )
 
 
+def source_files() -> list[str]:
+    """Inspect versioned and not-yet-committed public files, never ignored data."""
+    result = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    )
+    return sorted({name for name in result.stdout.split("\0")
+                   if name and (ROOT / name).is_file() and not (ROOT / name).is_symlink()})
+
+
 class RepositoryHygieneTest(unittest.TestCase):
     def test_adr_numeric_identifiers_are_unique(self) -> None:
         by_identifier: dict[str, list[str]] = {}
@@ -47,17 +56,18 @@ class RepositoryHygieneTest(unittest.TestCase):
         self,
     ) -> None:
         ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
-        manifest = installer.source_manifest(ROOT)
+        manifest = source_files()
 
         self.assertIn("/LOCAL_ENVIRONMENT.md", ignored)
         self.assertIn(".gitignore", manifest)
         self.assertIn("LOCAL_ENVIRONMENT.example.md", manifest)
         self.assertNotIn("LOCAL_ENVIRONMENT.md", manifest)
+        self.assertFalse(any(name.startswith("docs/research/") for name in manifest))
 
     def test_publishable_source_has_no_machine_specific_coordinates(self) -> None:
         violations: list[str] = []
 
-        for relative in installer.source_manifest(ROOT):
+        for relative in source_files():
             text = (ROOT / relative).read_text(encoding="utf-8")
             for line_number, line in enumerate(text.splitlines(), start=1):
                 if PRIVATE_IPV4.search(line):

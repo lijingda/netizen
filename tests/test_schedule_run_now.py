@@ -6,11 +6,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from netizen.bindings import BindingStore
-from netizen.domain import FeishuScope, ScopeKind
-from netizen.schedules.models import ScheduleRule
-from netizen.schedules.scheduler import Scheduler
-from netizen.schedules.service import ScheduleService
+from netizen_cli.bindings import BindingStore
+from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.schedules.models import ScheduleRule
+from netizen_cli.schedules.scheduler import Scheduler
+from netizen_cli.schedules.service import ScheduleService
 
 
 class ScheduleRunNowTest(unittest.IsolatedAsyncioTestCase):

@@ -16,17 +16,21 @@ Python 包，不存在 Node.js/TypeScript 运行时、前端构建或 fallback�
 
 ```bash
 python3 -m venv .venv
+.venv/bin/python -m pip install 'setuptools==80.9.0'
 .venv/bin/python -m pip install -c requirements.lock -e .
 node --version
 make check
 ```
 
 Admin JavaScript 行为测试使用 Node.js 22，请在完整开发门禁前确认版本。Node.js 仅用于
-开发与 CI 测试，不是生产运行或 Source Install 的前置依赖。本地缺少 Node.js 时该项
+开发与 CI 测试，不是 Python 包生产运行的前置依赖。本地缺少 Node.js 时该项
 测试会明确跳过；此时 `make check` 通过不代表 JavaScript 测试已完成。CI 安装 Node.js
 并强制执行该项测试。
 
-`make check` 执行 unittest、Python 编译检查、依赖一致性检查与 SDK synthetic probes，
+`make check` 执行 unittest（含 wheel／sdist 构建与隔离资源加载）、Python 编译检查、
+依赖一致性检查与 SDK synthetic probes。打包测试要求开发环境安装上述固定构建后端；也可
+用 `NETIZEN_TEST_BUILD_PYTHON=/absolute/path/to/builder/python make check` 指定已准备好的
+独立构建 Python。测试不自动下载构建依赖，不静默跳过打包门禁。它
 不创建真实 Codex Thread，也不要求 Codex 登录。SDK 合同测试主要使用 fake App Server；
 内置 Skill discovery 另启动真实 bundled App Server 做只读发现；这不能证明普通
 start/resume、Side/fork 或子 agent 的模型执行加载，相关 live 验收见
@@ -53,10 +57,12 @@ start/resume、Side/fork 或子 agent 的模型执行加载，相关 live 验收
 
 ### 修改数据库结构与持久化语义
 
-Channel 数据库从 schema v14 起维护安装期前向迁移，Runtime 仍只接受当前完整结构。
+Channel 数据库从 schema v14 起维护前向迁移；每次实际服务启动都检查并按需执行，
+业务 Runtime 仍只接受当前完整结构。仅 setup 初始化新库，已有实例缺库必须报错。
 结构或已保存数据的解释发生变化时，在同一改动中递增 schema，并提供从前一版本出发
 的明确迁移；应用版本变化但数据契约未变时不新增迁移。当前 v14 是基线，不补建早期
-试验版路径。政策和恢复边界见 [ADR 0075](adr/0075-migrate-channel-databases-during-installation.md)。
+试验版路径。冻结迁移规则见 [ADR 0075](adr/0075-migrate-channel-databases-during-installation.md)，
+当前启动与失败边界由 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 修订。
 
 迁移使用稳定的 SQL／转换逻辑和对应版本校验，不调用以后会变化的当前建表函数，
 不自行 commit、不使用会隐式结束事务的执行方式，也不包含网络、文件等外部副作用。
@@ -66,10 +72,9 @@ Channel 数据库从 schema v14 起维护安装期前向迁移，Runtime 仍只�
 迁移登记 `validate_target`，同时用于该版本作为升级源时的校验，不重复登记 source 校验器。
 
 测试验证最早受支持版本到当前版本的完整路径、相邻版本、重复运行、迁移后与新库的
-结构／约束等价性，以及步骤中途失败后数据和版本一同回滚。涉及安装器时补测数据库
-提交前后、release 切换、admission marker 持久写入及候选启动边界的中断重试，验证
-marker 写入失败不开放输入、已有 marker 时只允许 exact 候选向前恢复，并且不覆盖
-候选或已恢复旧服务后来写入的新数据。
+结构／约束等价性，以及步骤中途失败后数据和版本一同回滚。补测 startup lifetime lock、
+初始化证据、新库与丢库区分、迁移前备份、事务提交前中断，以及提交后服务启动失败。
+提交前失败回滚事务；提交后保留新库，不能按 ready 是否出现自动还原旧快照。
 执行 `make check`，并按[数据库迁移与中断恢复验收](deployment.md#数据库迁移与中断恢复验收)
 记录受影响平台的隔离实机结果；没有运行的项目明确标为未验证。
 
@@ -87,63 +92,48 @@ codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
 [部署前置条件](deployment.md#前置门禁)。上述 `codex exec` 是真实执行，与无需登录的
 本地代码门禁不同。
 
-先选定开发实例目录，通过 `NETIZEN_ROOT` 指定；未设置时默认有效账号的 `~/.netizen`，
-不读取 cwd 下的配置，也不根据配置位置反推 root。复制
-[config.example.yaml](../config.example.yaml) 到 `<root>/config.yaml`，将 `dataDir` 设为
-`<root>/state`，`projectRoot` 与 Project 目录示例替换为实际绝对路径。`projectRoot` 用来限制
-自动创建的空 Project，不是默认工作目录。`projects` mapping 启动时导入尚未登记的项；
-后续在飞书 `/settings` 管理 Project，已停用、动态登记或删除的记录不被配置文件覆盖。
-没有登记并启用的 Project 时，`/new` 会引导打开 `/settings`，不会回退到服务工作目录。
-持久化规则见[数据与配置](design.md#数据与配置)。
-
-本地手工准备的飞书应用需按[权限、事件与回调契约](deployment.md#前置门禁)逐项配置。
-受管安装器会自动请求该契约，但两种方式都需要完成租户审批、应用发布与安装，设置可用
-用户和群，并把机器人加入目标群；权限变更必须随应用版本发布。
-
-本地开发与受管服务采用相同凭据布局：在 `<root>/lark-app/config.json` 中
-准备固定名为 `netizen` 的 profile，格式见[配置与管理页访问](deployment.md#配置与管理页访问)。
-目录权限为 `0700`，文件为当前用户拥有的普通非 symlink 文件，权限为 `0600` 或更严格。
-启动入口统一派生配置、App profile 和 Admin credential 路径；如显式设置
-`NETIZEN_CONFIG_PATH`、`NETIZEN_LARK_APP_CONFIG` 或 `NETIZEN_ADMIN_SECRET_FILE`，
-必须与该 root 的布局一致，冲突时在读取凭据、写日志或打开数据库前拒绝。
-App ID 不再从 YAML 读取，
-`FEISHU_APP_SECRET` 和 `FEISHU_APP_SECRET_FILE` 不再支持，已有 shell 设置需移除。
-不要将 Secret 写进仓库或命令历史；安装和运行无需安装 `lark-cli`。Admin Web
-仅支持 `<root>/credentials/admin-web-secret`，不接受 raw secret 环境变量。
-以下使用已安全准备的开发实例配置与应用凭据文件，并生成独立 Admin credential；
-示例 root 需替换为本地路径，已有 credential 不要覆盖：
+开发安装也是普通 `netizen-cli` Python 包；`pip install -e .` 使用当前 checkout，
+不复制源码到实例，不创建独立 release。选择与真实实例不同的专用 root：
 
 ```bash
-umask 077
-export NETIZEN_ROOT=/absolute/path/netizen-dev
-mkdir -p "$NETIZEN_ROOT/credentials"
-.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(32), end="")' > "$NETIZEN_ROOT/credentials/admin-web-secret"
-.venv/bin/python -m netizen.main
+.venv/bin/python -m netizen_cli setup --root /absolute/path/netizen-dev/.netizen
+.venv/bin/python -m netizen_cli start --root /absolute/path/netizen-dev/.netizen
+.venv/bin/python -m netizen_cli status --root /absolute/path/netizen-dev/.netizen
 ```
 
-Admin 默认监听 `0.0.0.0`；port 字段缺失时首次从 8787–8886 实际绑定后写回当前 YAML，
-之后固定使用。已有端口冲突报错，不自动漂移；本地测试可显式指定端口。
-在飞书用 `/admin` 查看已绑定的 URL 和实例 root。它面向受信内网中的单一实例管理员；登录与凭据轮换见
-[配置与管理页访问](deployment.md#配置与管理页访问)。本地只调试飞书入口时，可在 YAML
-中显式设置 `adminWeb.enabled: false`。
+setup 只准备配置、凭据、数据库和服务绑定，不自动启动。没有 TTY 时转交飞书验证 URL
+并保留同一进程，不索取 App Secret；权限、租户审批、发布、安装、可用范围及入群要求
+见[前置门禁](deployment.md#前置门禁)。不要使用旧 `dev-install.sh`／`install.sh`
+部署新 CLI；详见[CLI 手册](cli.md)。editable 属于开发安装，不承诺自动 update 支持。
 
-要把当前工作区安装为服务，使用 `./dev-install.sh`，包括未提交修改；`./install.sh`
-安装的是最新正式 Release。两者使用相同激活和回滚事务，不执行 `git pull`。首次安装、
-服务环境与启停流程见[部署文档](deployment.md#安装)。Agent 安装当前工作区可直接执行
-`./dev-install.sh </dev/null` 并按输出继续；首次配置会在候选检查与 Codex 登录验证后给出
-浏览器链接，确认后自动保存凭据。Agent 应转交链接并保留同一进程；其他交互方式与排障见
-[Agent 安装说明](deployment.md#agent-驱动首次安装)。
+前台调试也必须先有完整准备过的实例，并先停止其受管服务，避免同实例双启动：
 
-同账号多实例通过 `--root` 或 `NETIZEN_ROOT` 选择位置，默认有效用户 `~/.netizen`。
-例如 `./dev-install.sh --root "$HOME/share" --admin-port 8890 </dev/null`，随后使用
-`./service.sh --root "$HOME/share" restart`、`./uninstall.sh --root "$HOME/share"`。
-安装参数覆盖环境；服务固定 canonical root，不随之后 shell 变量变化。受管状态必须位于
-该 root 的 `state`；手工入口也校验配置、凭据和状态属于同一个 root。
-内置 Skills 从实际运行的 `source/skills` 注册到该 App Server 的额外根，不再安装到
-全局 Skills；CODEX_HOME 保持共享。启动入口无论原变量是否存在，都在创建 Codex 前将
-规范化的 root 写入当前进程 NETIZEN_ROOT，供内置 Lark Skill 使用；用户原生工具环境
-策略若过滤此变量，Skill 明确失败而不回退到另一实例。目录保护、平台名称与双实例
-验收见[部署目录契约](deployment.md#目录)和[多实例验收门禁](deployment.md#多实例与内置-skills-验收)。
+```bash
+.venv/bin/python -m netizen_cli stop --root /absolute/path/netizen-dev/.netizen
+NETIZEN_ROOT=/absolute/path/netizen-dev/.netizen .venv/bin/python -m netizen_cli.main
+```
+
+`netizen_cli.main` 是 Runtime 入口，不是空目录初始化器；它仍要求归属标记、初始化
+证据、私有配置／凭据及数据库，启动时在同一 lifetime lock 内检查与迁移。不要通过
+手工创建 marker 或删除数据库绕过准入。前台进程不在 update 的系统服务清单保证内，
+结束调试后再通过 start 启动受管服务。
+
+配置和凭据布局见[目录](deployment.md#目录)与
+[配置与管理页访问](deployment.md#配置与管理页访问)。`config.example.yaml` 只是示例；
+`instance.dataDir` 必须是选定 root 的 `state`。`projectRoot` 限制自动创建的空
+Project，不是默认 cwd；`projects` 只引导尚未登记项，后续使用飞书／Admin 管理。
+服务默认 Admin host 为 0.0.0.0，缺省端口首次实际绑定后写回，已有端口不漂移；
+只调试 Channel 时可显式关闭 Admin。
+
+实例命令按 root，程序更新按调用环境；另一个 venv 的 start/restart 不自动接管已有
+绑定。需要切换时先 remove 保留数据，再在新环境 start，不加 --purge。修改正在被
+运行服务使用的 editable 源码也会改变磁盘程序，先停止相关服务、完成修改与检查后再
+启动，不视为支持热更新。
+
+内置 Skills 从实际安装包加载；editable 从该 checkout 的 canonical `skills/` 加载，
+不写全局 Codex Skills。NETIZEN_ROOT 仍作为当前实例上下文提供给工具；被用户原生
+环境过滤策略移除时，内置 Lark Skill 明确失败，不猜另一实例凭据。实际模型加载和
+双实例隔离见[对应验收](deployment.md#多实例与内置-skills-验收)。
 
 ## 私有运维记录
 
@@ -155,7 +145,7 @@ cp LOCAL_ENVIRONMENT.example.md LOCAL_ENVIRONMENT.md
 chmod 600 LOCAL_ENVIRONMENT.md
 ```
 
-`LOCAL_ENVIRONMENT.md` 被 Git 忽略且不进入安装 release，不得包含 raw Secret。它只是
+`LOCAL_ENVIRONMENT.md` 被 Git 忽略且不进入发行包，不得包含 raw Secret。它只是
 可选运维档案，不是运行时配置；没有它时仍按本文开发并
 [显式选择部署目标](deployment.md#选择部署目标)。运维前若文件存在，应读取其中的目标
 约定；不要把私有坐标复制到跟踪文件或公开产物。
@@ -171,5 +161,6 @@ PR 与 main push 统一执行 `make check`。真实账号、App Server 与飞书
 [部署与验收](deployment.md#代码门禁与按需实时兼容性验证)。未触及相关边界的改动无需
 重复 live probe。报告所运行的检查、结果以及任何跳过项或验证缺口。
 
-正式 Release 由维护者决定时机，复用 exact main commit 的成功 CI，不重复代码测试或
-账号级 live probe；执行流程见[正式发布](deployment.md#发布正式-release)。
+PyPI 发布由维护者显式决定，开发和本地构建不授权上传。必须验收 wheel、sdist 及其
+隔离安装，不能用旧 GitHub release archive 的合格结论替代；当前发布状态见
+[CLI 手册](cli.md#验证与发布状态)和[发布说明](deployment.md#发布正式-release)。

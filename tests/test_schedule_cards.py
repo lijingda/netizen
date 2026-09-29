@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 from lark_channel import OutboundSender
 
-from netizen.cards.callbacks import CardActionError
-from netizen.cards.scheduled import (
+from netizen_cli.cards.callbacks import CardActionError
+from netizen_cli.cards.scheduled import (
     decode_schedule_action,
     is_schedule_card_action,
     schedule_form_card,
@@ -20,15 +20,15 @@ from netizen.cards.scheduled import (
     schedule_retry_card,
     SCHEDULE_CARD_JSON_LIMIT_BYTES,
 )
-from netizen.domain import FeishuScope, ScopeKind
-from netizen.model_settings import (
+from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.model_settings import (
     EffortOption,
     ModelCatalog,
     ModelOption,
     ServiceTierOption,
 )
-from netizen.projects import Project
-from netizen.session_settings import SessionSettings
+from netizen_cli.projects import Project
+from netizen_cli.session_settings import SessionSettings
 from tests.support.channel_cards import (
     callback,
     elements,

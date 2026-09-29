@@ -185,11 +185,11 @@ async def _client() -> None:
     from openai_codex import AsyncCodex, CodexConfig
     from openai_codex.generated.v2_all import TurnPlanUpdatedNotification
 
-    from netizen.turn_plan_observer import (
+    from netizen_cli.turn_plan_observer import (
         PinnedTurnActivityObserver,
         TurnPlanStepState,
     )
-    from netizen.turn_activity import TurnActivityKind, TurnActivityStatus
+    from netizen_cli.turn_activity import TurnActivityKind, TurnActivityStatus
 
     config = CodexConfig(
         launch_args_override=(

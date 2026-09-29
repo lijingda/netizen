@@ -11,8 +11,8 @@ from unittest.mock import patch
 import openai_codex
 from openai_codex import AsyncCodex, CodexConfig
 
-from netizen import terminal_cleanup
-from netizen.terminal_cleanup import (
+from netizen_cli import terminal_cleanup
+from netizen_cli.terminal_cleanup import (
     PinnedExperimentalTerminalCleanup,
     UnsupportedCleanupSdk,
 )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from netizen.domain import (
+from netizen_cli.domain import (
     ACTIVE_STATE_VALUES,
     ActiveState,
     ControlIntent,
@@ -15,7 +15,7 @@ from netizen.domain import (
     ScopeKind,
     session_stop_available,
 )
-from netizen.experience import (
+from netizen_cli.experience import (
     COMMAND_SPECS,
     CommandGroup,
     InvalidInteraction,

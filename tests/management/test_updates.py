@@ -1,712 +1,250 @@
 from __future__ import annotations
 
-import asyncio
-import copy
-from email.message import Message
-from http.client import IncompleteRead
-import io
-import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import MagicMock, patch
-from urllib.error import HTTPError, URLError
+from unittest.mock import Mock, patch
 
-from netizen.management.updates import (
-    InstalledRelease, UpdateError, UpdateService, installed_release, parse_release,
-    fetch_latest_release, LATEST_API, MAX_RELEASE_BYTES,
+from netizen_cli.deployment.restart_worker import assert_no_pending_restart, finish_manual_restart, run
+from netizen_cli.deployment.update_executor import UpdateDispatchUnknown, UpdateExecutorError
+from netizen_cli.deployment.update_protocol import (
+    acquire_install_lock, advance_operation, new_cli_restart_operation,
+    read_operation, write_operation,
 )
-from netizen.deployment.update_executor import UpdateDispatchUnknown, UpdateExecutorError
-from netizen.deployment.update_protocol import (
-    acquire_install_lock, advance_operation, new_operation, read_operation, write_operation,
-    new_restart_operation, UpdateProtocolError,
-)
+from netizen_cli.management.updates import InstalledPackage, UpdateError, UpdateService
 
 
-TARGET = {"version": "0.5.0", "releaseId": 125, "installerSha256": "a" * 64,
-          "archiveSha256": "b" * 64}
-
-
-def release_response() -> dict:
-    return {"id": 125, "tag_name": "v0.5.0", "draft": False, "prerelease": False,
-            "immutable": True, "body": "A <script> is displayed as text.", "assets": [
-                {"name": name, "state": "uploaded", "digest": "sha256:" + digest,
-                 "browser_download_url": "https://github.com/lijingda/netizen/releases/download/v0.5.0/" + name}
-                for name, digest in (("install.sh", "a" * 64), ("netizen-v0.5.0.tar.gz", "b" * 64))]}
-
-
-class ReleaseTests(unittest.TestCase):
-    def test_release_binds_official_assets_and_preserves_plain_notes(self):
-        latest = parse_release(release_response())
-        self.assertEqual({key: latest[key] for key in TARGET}, TARGET)
-        self.assertEqual(latest["notes"], "A <script> is displayed as text.")
-        self.assertEqual(latest["url"], "https://github.com/lijingda/netizen/releases/tag/v0.5.0")
-
-    def test_rejects_incomplete_mutable_or_unofficial_releases(self):
-        mutations = [
-            lambda r: r.update(draft=True), lambda r: r.update(prerelease=True),
-            lambda r: r.update(immutable=False), lambda r: r.update(id=True),
-            lambda r: r.update(tag_name="v0.5.0; touch /tmp/injected"),
-            lambda r: r.update(tag_name="v0.5.0-rc.1"),
-            lambda r: r["assets"].pop(),
-            lambda r: r["assets"].append(copy.deepcopy(r["assets"][0])),
-            lambda r: r["assets"][0].update(digest=None),
-            lambda r: r["assets"][0].update(browser_download_url="https://evil.example/install.sh"),
-            lambda r: r.update(body={"unexpected": "object"}),
-        ]
-        for mutate in mutations:
-            response = release_response()
-            mutate(response)
-            with self.subTest(response=response), self.assertRaises((ValueError, RuntimeError)):
-                parse_release(response)
-
-    def test_running_release_identity_uses_interpreter_and_provenance(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary).resolve()
-            product_root = home / "共享 instance"
-            root = product_root / "releases" / ("c" * 64)
-            (root / "source").mkdir(parents=True)
-            prefix = root / "venv"
-            prefix.mkdir()
-            manifest = {"schema": 1, "qualification": "github-release", "version": "0.4.6",
-                        "commit": "d" * 40, "sourceDigest": "e" * 64, "requirementsDigest": "f" * 64}
-            meta = {"gateSchema": 1, "qualification": "published", "digest": root.name,
-                    "sourceDigest": manifest["sourceDigest"], "publishedRelease": {
-                        "version": "0.4.6", "commit": manifest["commit"],
-                        "requirementsDigest": manifest["requirementsDigest"]}}
-            (root / "source/.netizen-release.json").write_text(json.dumps(manifest))
-            (root / ".release.json").write_text(json.dumps(meta))
-            with patch("netizen.management.updates.sys.prefix", str(prefix)), \
-                    patch("netizen.management.updates.__file__", str(prefix / "lib/netizen/management/updates.py")), \
-                    patch("netizen.management.updates.importlib.metadata.version", return_value="0.4.6"):
-                self.assertEqual(installed_release(product_root), InstalledRelease("0.4.6", "published", root))
-                self.assertEqual(installed_release(home / ".netizen").source, "unmanaged")
-                meta["qualification"] = "source"
-                (root / ".release.json").write_text(json.dumps(meta))
-                self.assertEqual(installed_release(product_root).source, "source")
-                meta["qualification"] = "published"
-                meta["publishedRelease"]["commit"] = "0" * 40
-                (root / ".release.json").write_text(json.dumps(meta))
-                self.assertEqual(installed_release(product_root).source, "unmanaged")
-
-                real_open = os.open
-                def nonblocking_open(path, flags, *args, **kwargs):
-                    # Fail the regression safely instead of opening a blocking FIFO.
-                    self.assertTrue(flags & os.O_NONBLOCK)
-                    return real_open(path, flags, *args, **kwargs)
-                metadata_path = root / ".release.json"
-                metadata_path.unlink()
-                os.mkfifo(metadata_path, 0o600)
-                with patch("netizen.management.updates.os.open", side_effect=nonblocking_open):
-                    self.assertEqual(installed_release(product_root).source, "unmanaged")
-
-
-class FakeExecutor:
-    def __init__(self):
-        self.launched = []
-        self.cleaned = []
-        self.active = True
-        self.error = None
-        self.cleanup_error = None
-        self.on_launch = None
-
-    def launch(self, operation_id, release_root):
-        self.launched.append((operation_id, release_root))
-        if self.on_launch:
-            self.on_launch()
-        if self.error:
-            raise self.error
-
-    def is_active(self, operation_id):
-        if isinstance(self.active, Exception):
-            raise self.active
-        return self.active
-
-    def cleanup(self, operation_id):
-        self.cleaned.append(operation_id)
-        if self.cleanup_error:
-            raise self.cleanup_error
-
-
-class UpdateServiceTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.home = Path(self.temporary.name).resolve()
+class MaintenanceTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
         self.root = self.home / ".netizen"
         (self.root / "state").mkdir(parents=True, mode=0o700)
-        self.release = self.root / "releases" / ("c" * 64)
-        self.release.mkdir(parents=True)
-        (self.root / "current").symlink_to(self.release)
-        self.executor = FakeExecutor()
-        self.fetches = 0
-        self.now = 2_000_000_000
-        self.service = UpdateService(home=self.home, current=InstalledRelease("0.4.6", "published", self.release),
-                                     executor=self.executor, fetch=self.fetch,
-                                     clock=lambda: self.now)
+        self.current = InstalledPackage("1.2.3", self.home / "env/bin/python",
+                                        self.home / "env", self.home / "env/site/netizen_cli")
+        self.executor = Mock()
+        self.executor.is_active.return_value = True
+        self.binding = Mock(return_value=True)
+        self.service = self.make_service()
 
-    async def asyncTearDown(self):
-        await self.service.close()
-        self.temporary.cleanup()
+    def make_service(self) -> UpdateService:
+        result = UpdateService(root=self.root, home=self.home, current=self.current,
+                               executor=self.executor, binding_matches=self.binding)
+        self.addAsyncCleanup(result.close)
+        return result
 
-    def fetch(self):
-        self.fetches += 1
-        return parse_release(release_response())
-
-    def startup_service(self):
-        service = UpdateService(home=self.home, current=self.service._current,
-                                executor=self.executor, fetch=self.fetch, clock=lambda: self.now)
-        self.addAsyncCleanup(service.close)
-        return service
-
-    def restart_record(self, phase="restarting", code="none"):
-        operation = new_restart_operation("0.4.6", self.release.name)
-        write_operation(self.root, operation)
-        return advance_operation(self.root, operation["operationId"], phase, code)
-
-    async def test_explicit_instance_root_owns_submission_lock_result_and_manager(self):
-        other = self.home / "共享 instance"
-        (other / "state").mkdir(parents=True, mode=0o700)
-        release = other / "releases" / self.release.name
-        release.mkdir(parents=True)
-        (other / "current").symlink_to(release)
-        executor = FakeExecutor()
-        with (
-            patch.dict(os.environ, {"NETIZEN_ROOT": str(self.root)}),
-            patch("netizen.management.updates.UpdateExecutor", return_value=executor) as manager,
-        ):
-            service = UpdateService(root=other, home=self.home,
-                                    current=InstalledRelease("0.4.6", "published", release),
-                                    fetch=self.fetch)
-            self.addAsyncCleanup(service.close)
-            await service.check()
-            descriptor = acquire_install_lock(self.root)
-            try:
-                operation = await service.start(target=TARGET)
-            finally:
-                os.close(descriptor)
-            manager.assert_called_once_with(self.home, root=other)
-        self.assertIsNone(read_operation(self.root))
-        self.assertEqual(read_operation(other), operation)
-        self.assertEqual(executor.launched, [(operation["operationId"], release)])
-        self.assertEqual(self.executor.launched, [])
-
-    async def test_other_instance_release_cannot_become_a_restart_target(self):
-        other = self.home / "other-instance"
-        (other / "state").mkdir(parents=True, mode=0o700)
-        (other / "current").symlink_to(self.release)
-        service = UpdateService(root=other, home=self.home, current=self.service._current,
-                                executor=FakeExecutor())
-        self.addAsyncCleanup(service.close)
-        status = await service.status()
-        self.assertFalse(status["restartSupported"])
-        with self.assertRaises(UpdateError) as caught:
-            await service.restart(release_digest=self.release.name)
-        self.assertEqual(caught.exception.code, "restart_unsupported")
-        self.assertIsNone(read_operation(other))
-
-    async def test_late_ready_recovers_on_refresh_and_cached_update_check(self):
-        for entry in ("status", "check"):
-            for startup_phase in ("restarting", "recovery_required"):
-                with self.subTest(entry=entry, startup_phase=startup_phase):
-                    operation = self.restart_record(startup_phase, "restart_failed" if startup_phase == "recovery_required" else "none")
-                    service = self.startup_service()
-                    descriptor = acquire_install_lock(self.root)
-                    try:
-                        self.assertFalse((await service.check())["restartAvailable"])
-                        service.set_service_ready(True)
-                        advance_operation(self.root, operation["operationId"], "recovery_required", "restart_failed")
-                    finally:
-                        os.close(descriptor)
-                    fetches = self.fetches
-                    status = await getattr(service, entry)()
-                    self.assertEqual(self.fetches, fetches)
-                    self.assertEqual(status["operation"]["phase"], "recovered")
-                    self.assertEqual(status["operation"]["code"], "service_ready")
-                    for key in ("operationId", "target", "previousRelease", "createdAt"):
-                        self.assertEqual(status["operation"][key], operation[key])
-                    self.assertTrue(status["available"])
-                    self.assertTrue(status["restartAvailable"])
-                    self.assertEqual((await service.status())["operation"], status["operation"])
-                    self.assertEqual(self.executor.launched, [])
-
-    async def test_recovery_requires_the_exact_operation_at_process_startup(self):
-        for startup in ("missing", "accepted", "other_operation", "unreadable"):
-            with self.subTest(startup=startup):
-                operation = self.restart_record("accepted")
-                if startup == "missing":
-                    (self.root / "state/update.json").unlink()
-                if startup == "other_operation":
-                    self.restart_record()
-                if startup == "unreadable":
-                    with patch("netizen.management.updates.read_operation", side_effect=UpdateProtocolError("unreadable")):
-                        service = self.startup_service()
-                else:
-                    service = self.startup_service()
-                write_operation(self.root, operation)
-                expected = advance_operation(self.root, operation["operationId"], "recovery_required", "restart_failed")
-                service.set_service_ready(True)
-                status = await service.status()
-                self.assertEqual(status["operation"], expected)
-                self.assertFalse(status["restartAvailable"])
-
-    async def test_recovery_requires_ready_matching_installation_and_restart_failure(self):
-        for blocked in ("not_ready", "upgrade", "worker_lost", "previous_release_changed",
-                        "operation_invalid", "version", "digest", "unmanaged", "activation"):
-            with self.subTest(blocked=blocked):
-                operation = self.restart_record("recovery_required", "restart_failed")
-                if blocked == "upgrade":
-                    write_operation(self.root, new_operation(TARGET, self.release.name))
-                    operation = read_operation(self.root)
-                    operation = advance_operation(self.root, operation["operationId"], "recovery_required", "restart_failed")
-                elif blocked in {"worker_lost", "previous_release_changed", "operation_invalid"}:
-                    operation = advance_operation(self.root, operation["operationId"], "recovery_required", blocked)
-                service = self.startup_service()
-                service.set_service_ready(blocked != "not_ready")
-                if blocked in {"version", "digest", "unmanaged"}:
-                    service._current = InstalledRelease(
-                        "0.4.7" if blocked == "version" else "0.4.6",
-                        "unmanaged" if blocked == "unmanaged" else "published",
-                        self.release.parent / ("d" * 64) if blocked == "digest" else self.release,
-                    )
-                intent = self.root / "state/.activation-intent.json"
-                if blocked == "activation":
-                    intent.symlink_to("missing")
-                try:
-                    status = await service.status()
-                    self.assertEqual(status["operation"], operation)
-                    self.assertFalse(status["restartAvailable"])
-                finally:
-                    intent.unlink(missing_ok=True)
-
-    async def test_recovery_waits_for_install_lock_and_successful_worker_cleanup(self):
-        operation = self.restart_record("recovery_required", "restart_failed")
-        service = self.startup_service()
-        service.set_service_ready(True)
-        descriptor = acquire_install_lock(self.root)
-        try:
-            self.assertEqual((await service.status())["operation"], operation)
-            self.assertEqual(self.executor.cleaned, [])
-        finally:
-            os.close(descriptor)
-        self.executor.cleanup_error = UpdateExecutorError("manager observation unknown")
-        self.assertEqual((await service.status())["operation"], operation)
-        self.assertEqual(read_operation(self.root), operation)
-        self.executor.cleanup_error = None
-        self.assertEqual((await service.status())["operation"]["phase"], "recovered")
-
-    async def test_recovery_rechecks_conditions_after_worker_cleanup(self):
-        for change in ("closing", "pointer", "activation"):
-            with self.subTest(change=change):
-                operation = self.restart_record("recovery_required", "restart_failed")
-                service = self.startup_service()
-                service.set_service_ready(True)
-                intent = self.root / "state/.activation-intent.json"
-
-                def cleanup(_operation_id):
-                    with self.assertRaises(BlockingIOError):
-                        acquire_install_lock(self.root)
-                    if change == "closing":
-                        service.set_service_ready(False)
-                    elif change == "pointer":
-                        (self.root / "current").unlink()
-                    else:
-                        intent.touch()
-
-                try:
-                    with patch.object(self.executor, "cleanup", side_effect=cleanup):
-                        self.assertEqual((await service.status())["operation"], operation)
-                finally:
-                    intent.unlink(missing_ok=True)
-                    if not (self.root / "current").exists():
-                        (self.root / "current").symlink_to(self.release)
-
-    async def test_managed_source_recovers_restart_without_enabling_updates(self):
-        self.restart_record("recovery_required", "restart_failed")
-        self.service._current = InstalledRelease("0.4.6", "source", self.release)
-        service = self.startup_service()
-        service.set_service_ready(True)
-        status = await service.check()
-        self.assertEqual(status["operation"]["phase"], "recovered")
-        self.assertTrue(status["restartAvailable"])
-        self.assertFalse(status["available"])
-        self.assertEqual(self.fetches, 0)
-
-    async def test_check_is_explicit_cached_and_start_uses_exact_target(self):
-        self.assertFalse((await self.service.status())["available"])
-        self.assertEqual(self.fetches, 0)
-        self.assertTrue((await self.service.check())["available"])
-        await self.service.check()
-        self.assertEqual(self.fetches, 1)
-        def assert_locked():
-            with self.assertRaises(BlockingIOError):
-                acquire_install_lock(self.root)
-        self.executor.on_launch = assert_locked
-        operation = await self.service.start(target=TARGET)
-        self.assertEqual(operation["target"], TARGET)
-        self.assertEqual(read_operation(self.root), operation)
-        self.assertEqual(self.executor.launched, [(operation["operationId"], self.release)])
-        self.now = operation["createdAt"]
-        self.assertFalse((await self.service.status())["available"])
-        with self.assertRaises(UpdateError) as error:
-            await self.service.start(target=TARGET)
-        self.assertEqual(error.exception.code, "update_already_submitted")
-        self.assertEqual(len(self.executor.launched), 1)
-
-    async def test_source_and_unmanaged_never_fetch_or_launch(self):
-        for source in ("source", "unmanaged"):
-            self.service._current = InstalledRelease("0.4.6", source, self.release)
-            status = await self.service.check()
+    async def test_status_and_check_never_offer_package_updates(self) -> None:
+        for status in (await self.service.status(), await self.service.check()):
             self.assertFalse(status["supported"])
-            self.assertEqual(status["current"]["source"], source)
-            self.assertNotIn("message", status)
-            with self.assertRaises(UpdateError) as error:
-                await self.service.start(target=TARGET)
-            self.assertEqual(error.exception.code, "update_unsupported")
-        self.assertEqual(self.fetches, 0)
-        self.assertEqual(self.executor.launched, [])
+            self.assertFalse(status["available"])
+            self.assertIsNone(status["latest"])
+            self.assertTrue(status["restartAvailable"])
+            self.assertEqual(status["current"]["installationId"], self.current.identity)
+        with self.assertRaisesRegex(UpdateError, "update_unsupported"):
+            await self.service.start(target={"url": "https://untrusted.invalid"})
+        self.executor.launch.assert_not_called()
 
-    async def test_restart_needs_no_release_check_and_supports_managed_source(self):
-        for source in ("published", "source"):
-            with self.subTest(source=source):
-                self.service._current = InstalledRelease("0.4.6", source, self.release)
-                self.assertTrue((await self.service.status())["restartAvailable"])
-                operation = await self.service.restart(release_digest=self.release.name)
-                self.assertEqual(operation["kind"], "restart")
-                self.assertEqual(operation["target"], {
-                    "version": "0.4.6", "releaseDigest": self.release.name,
-                })
-                self.assertEqual(read_operation(self.root), operation)
-                advance_operation(self.root, operation["operationId"], "succeeded")
-        self.assertEqual(self.fetches, 0)
-        self.assertEqual(len(self.executor.launched), 2)
+    async def test_restart_uses_bound_python_and_typed_installation_identity_once(self) -> None:
+        operation = await self.service.restart(installation_id=self.current.identity)
+        self.assertEqual(operation["schema"], 3)
+        self.assertEqual(operation["target"], {
+            "version": "1.2.3", "installationId": self.current.identity,
+        })
+        self.executor.launch.assert_called_once_with(operation["operationId"], self.current.python)
+        with self.assertRaisesRegex(UpdateError, "update_already_submitted"):
+            await self.service.restart(installation_id=self.current.identity)
 
-    async def test_restart_is_unavailable_for_unmanaged_or_changed_installation(self):
-        for source, digest in (("unmanaged", self.release.name), ("published", "a" * 64)):
-            self.service._current = InstalledRelease("0.4.6", source, self.release)
-            with self.assertRaises(UpdateError):
-                await self.service.restart(release_digest=digest)
-        self.assertEqual(self.executor.launched, [])
-        self.assertIsNone(read_operation(self.root))
-        with patch.object(self.service, "_restart_supported", side_effect=[True, False]), \
-                self.assertRaises(UpdateError) as error:
-            await self.service.restart(release_digest=self.release.name)
-        self.assertEqual(error.exception.code, "update_installation_changed")
+    async def test_wrong_or_changed_binding_and_stale_identity_do_not_dispatch(self) -> None:
+        with self.assertRaisesRegex(UpdateError, "update_installation_changed"):
+            await self.service.restart(installation_id="0" * 64)
+        self.binding.return_value = False
+        with self.assertRaisesRegex(UpdateError, "restart_unsupported"):
+            await self.service.restart(installation_id=self.current.identity)
+        self.binding.side_effect = [True, False]
+        with self.assertRaisesRegex(UpdateError, "update_installation_changed"):
+            await self.service.restart(installation_id=self.current.identity)
+        self.executor.launch.assert_not_called()
 
-    async def test_restart_and_upgrade_block_each_other_and_recovery(self):
-        await self.service.check()
-        for restart in (False, True):
-            for phase in ("accepted", "restarting", "recovery_required"):
-                with self.subTest(restart=restart, phase=phase):
-                    operation = (new_restart_operation("0.4.6", self.release.name) if restart
-                                 else new_operation(TARGET, self.release.name))
-                    write_operation(self.root, operation)
-                    advance_operation(self.root, operation["operationId"], phase)
-                    self.now = operation["createdAt"]
-                    descriptor = acquire_install_lock(self.root)
-                    try:
-                        status = await self.service.status()
-                        self.assertFalse(status["available"])
-                        self.assertFalse(status["restartAvailable"])
-                    finally:
-                        os.close(descriptor)
-                    for submit in (lambda: self.service.start(target=TARGET),
-                                   lambda: self.service.restart(release_digest=self.release.name)):
-                        with self.assertRaises(UpdateError):
-                            await submit()
-        self.assertEqual(self.executor.launched, [])
+    async def test_environment_id_does_not_collapse_shared_python_symlinks(self) -> None:
+        other = InstalledPackage(self.current.version, self.home / "other/bin/python",
+                                 self.home / "other", self.current.package)
+        self.assertNotEqual(other.identity, self.current.identity)
 
-    async def test_restart_respects_install_lock_and_interrupted_activation(self):
-        descriptor = acquire_install_lock(self.root)
-        try:
-            with self.assertRaises(UpdateError) as error:
-                await self.service.restart(release_digest=self.release.name)
-            self.assertEqual(error.exception.code, "update_busy")
-        finally:
-            os.close(descriptor)
-        # Even a dangling intent symlink must fail closed before dispatch.
-        (self.root / "state/.activation-intent.json").symlink_to("missing")
-        self.assertFalse((await self.service.status())["restartAvailable"])
-        with self.assertRaises(UpdateError) as error:
-            await self.service.restart(release_digest=self.release.name)
-        self.assertEqual(error.exception.code, "update_recovery_required")
-        self.assertIsNone(read_operation(self.root))
-        self.assertEqual(self.executor.launched, [])
-
-    async def test_ambiguous_restart_and_lost_worker_never_resubmit(self):
-        self.executor.error = UpdateDispatchUnknown("SECRET")
-        operation = await self.service.restart(release_digest=self.release.name)
+    async def test_dispatch_unknown_is_not_retried_and_definite_failure_is_recorded(self) -> None:
+        self.executor.launch.side_effect = UpdateDispatchUnknown("secret")
+        operation = await self.service.restart(installation_id=self.current.identity)
         self.assertEqual(operation["phase"], "accepted")
-        self.now = operation["createdAt"]
-        self.assertFalse((await self.service.status())["restartAvailable"])
-        with self.assertRaises(UpdateError):
-            await self.service.restart(release_digest=self.release.name)
-        self.executor.active = False
+        self.assertEqual((await self.service.status())["operation"]["phase"], "accepted")
+        self.executor.launch.assert_called_once()
+        advance_operation(self.root, operation["operationId"], "failed", "dispatch_failed")
+        self.executor.launch.side_effect = UpdateExecutorError("secret")
+        operation = await self.service.restart(installation_id=self.current.identity)
+        self.assertEqual((operation["phase"], operation["code"]), ("failed", "dispatch_failed"))
+
+    async def test_active_lock_preserves_nonterminal_result(self) -> None:
+        operation = new_cli_restart_operation(self.current.version, self.current.identity)
+        write_operation(self.root, operation)
+        lock = acquire_install_lock(self.root)
+        try:
+            self.assertEqual((await self.service.status())["operation"]["phase"], "accepted")
+            with self.assertRaisesRegex(UpdateError, "update_busy"):
+                await self.service.restart(installation_id=self.current.identity)
+        finally:
+            os.close(lock)
+
+    async def test_worker_absence_is_unknown_not_success(self) -> None:
+        operation = new_cli_restart_operation(self.current.version, self.current.identity)
+        write_operation(self.root, operation)
+        self.executor.is_active.return_value = False
         status = await self.service.status()
-        self.assertEqual(status["operation"]["phase"], "recovery_required")
-        self.assertEqual(status["operation"]["kind"], "restart")
+        self.assertEqual(status["operation"]["code"], "worker_lost")
         self.assertFalse(status["restartAvailable"])
-        self.assertEqual(len(self.executor.launched), 1)
 
-    async def test_target_tampering_and_nonforward_versions_fail_before_dispatch(self):
-        await self.service.check()
-        for value in ({**TARGET, "installerSha256": "0" * 64},
-                      {**TARGET, "url": "https://evil.example"},
-                      {**TARGET, "version": "0.4.6"}):
-            with self.assertRaises(UpdateError):
-                await self.service.start(target=value)
-        self.assertEqual(self.executor.launched, [])
-        self.assertIsNone(read_operation(self.root))
-
-    async def test_compare_versions_numerically(self):
-        self.service._current = InstalledRelease("0.10.0", "published", self.release)
-        self.assertFalse((await self.service.check())["available"])
-
-    async def test_candidate_is_pinned_even_if_upstream_changes_after_check(self):
-        await self.service.check()
-        self.service._fetch = lambda: {**TARGET, "version": "0.6.0"}
-        operation = await self.service.start(target=TARGET)
-        self.assertEqual(operation["target"]["version"], "0.5.0")
-        self.assertEqual(self.fetches, 1)
-
-    async def test_cli_lock_conflict_never_creates_a_second_operation(self):
-        await self.service.check()
-        descriptor = acquire_install_lock(self.root)
-        try:
-            with self.assertRaises(UpdateError) as error:
-                await self.service.start(target=TARGET)
-            self.assertEqual(error.exception.code, "update_busy")
-            self.assertIsNone(read_operation(self.root))
-        finally:
-            os.close(descriptor)
-
-    async def test_changed_current_is_rejected(self):
-        await self.service.check()
-        (self.root / "current").unlink()
-        (self.root / "current").symlink_to(self.root / "releases" / ("d" * 64))
-        with self.assertRaises(UpdateError):
-            await self.service.start(target=TARGET)
-        self.assertEqual(self.executor.launched, [])
-
-    async def test_changed_current_after_lock_is_a_distinct_failure(self):
-        await self.service.check()
-        with patch.object(self.service, "_supported", side_effect=[True, False]), \
-                self.assertRaises(UpdateError) as error:
-            await self.service.start(target=TARGET)
-        self.assertEqual(error.exception.code, "update_installation_changed")
-        self.assertIsNone(read_operation(self.root))
-        self.assertEqual(self.executor.launched, [])
-
-    async def test_lock_failure_and_submission_unknown_have_distinct_codes(self):
-        await self.service.check()
-        with patch("netizen.management.updates.acquire_install_lock", side_effect=OSError("SECRET lock")), \
-                self.assertRaises(UpdateError) as error:
-            await self.service.start(target=TARGET)
-        self.assertEqual(error.exception.code, "update_lock_unavailable")
-        with patch("netizen.management.updates.write_operation", side_effect=OSError("SECRET state")), \
-                self.assertRaises(UpdateError) as error:
-            await self.service.start(target=TARGET)
-        self.assertEqual(error.exception.code, "update_submission_unknown")
-        self.assertIsNone(read_operation(self.root))
-        self.assertEqual(self.executor.launched, [])
-
-    async def test_ambiguous_dispatch_retains_exact_attempt_without_retry(self):
-        await self.service.check()
-        self.executor.error = UpdateDispatchUnknown("ambiguous")
-        operation = await self.service.start(target=TARGET)
-        self.assertEqual(operation["phase"], "accepted")
-        with self.assertRaises(UpdateError):
-            await self.service.start(target=TARGET)
-        self.assertEqual(len(self.executor.launched), 1)
-
-    async def test_definite_dispatch_failure_is_durable_and_retryable(self):
-        await self.service.check()
-        self.executor.error = UpdateExecutorError("SECRET must not enter result")
-        operation = await self.service.start(target=TARGET)
-        self.assertEqual(operation["phase"], "failed")
-        self.assertNotIn("SECRET", json.dumps(operation))
-        self.executor.error = None
-        retry = await self.service.start(target=TARGET)
-        self.assertNotEqual(retry["operationId"], operation["operationId"])
-
-    async def test_dead_worker_is_unknown_not_success_even_when_new_service_is_ready(self):
-        operation = new_operation(TARGET, self.release.name)
+    async def test_only_new_ready_process_can_recover_failed_restart(self) -> None:
+        operation = new_cli_restart_operation(self.current.version, self.current.identity)
         write_operation(self.root, operation)
         advance_operation(self.root, operation["operationId"], "restarting")
-        (self.root / "state/service.ready").write_text("netizen service ready\n")
-        status = await self.service.status()
-        self.assertEqual(status["operation"]["phase"], "recovery_required")
-        self.assertEqual(status["operation"]["code"], "worker_lost")
+        restarted = self.make_service()
+        advance_operation(self.root, operation["operationId"], "recovery_required", "restart_failed")
+        self.service.set_service_ready(True)
+        self.assertEqual((await self.service.status())["operation"]["phase"], "recovery_required")
+        self.assertEqual((await restarted.status())["operation"]["phase"], "recovery_required")
+        restarted.set_service_ready(True)
+        status = await restarted.status()
+        self.assertEqual((status["operation"]["phase"], status["operation"]["code"]),
+                         ("recovered", "service_ready"))
+        self.assertTrue(status["restartAvailable"])
 
-    async def test_active_worker_state_is_not_inferred_from_a_status_timeout(self):
-        operation = new_operation(TARGET, self.release.name)
-        write_operation(self.root, operation)
-        self.executor.active = UpdateExecutorError("temporary observation timeout")
-        with self.assertRaises(UpdateError) as error:
-            await self.service.status()
-        self.assertEqual(error.exception.code, "update_state_unavailable")
-        self.assertEqual(read_operation(self.root)["phase"], "accepted")
-        self.assertEqual(self.executor.cleaned, [])
+    async def test_worker_stops_before_start_and_reports_ready_failure_without_rollback(self) -> None:
+        from netizen_cli.cli_services import ServiceError
 
-    async def test_worker_holding_install_lock_is_not_reconciled_or_cleaned(self):
-        operation = new_operation(TARGET, self.release.name)
+        manager = Mock()
+        manager.inspect.return_value = SimpleNamespace(binding=SimpleNamespace(
+            prefix=self.current.prefix, python=self.current.python))
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                manager.reset_mock()
+                manager.start.side_effect = ServiceError("not ready") if fail else None
+                operation = new_cli_restart_operation(self.current.version, self.current.identity)
+                write_operation(self.root, operation)
+                with patch("netizen_cli.management.updates.installed_package", return_value=self.current):
+                    self.assertEqual(run(self.root, operation["operationId"], manager=manager), int(fail))
+                names = [call[0] for call in manager.mock_calls]
+                self.assertEqual(names, ["inspect", "stop", "start"])
+                expected = "recovery_required" if fail else "succeeded"
+                self.assertEqual(read_operation(self.root)["phase"], expected)
+
+    async def test_worker_does_not_stop_when_target_changed_or_operation_stale(self) -> None:
+        operation = new_cli_restart_operation(self.current.version, "0" * 64)
         write_operation(self.root, operation)
-        advance_operation(self.root, operation["operationId"], "succeeded")
-        descriptor = acquire_install_lock(self.root)
+        manager = Mock()
+        with patch("netizen_cli.management.updates.installed_package", return_value=self.current):
+            self.assertEqual(run(self.root, operation["operationId"], manager=manager), 1)
+        manager.stop.assert_not_called()
+        manager.start.assert_not_called()
+        self.assertEqual(read_operation(self.root)["code"], "previous_release_changed")
+        self.assertEqual(run(self.root, operation["operationId"], manager=manager), 1)
+
+    async def test_explicit_ready_cli_recovery_keeps_original_target_without_claiming_success(self) -> None:
+        operation = new_cli_restart_operation("0.1.0", "0" * 64)
+        write_operation(self.root, operation)
+        advance_operation(self.root, operation["operationId"], "recovery_required", "worker_lost")
+        status = SimpleNamespace(running=True, ready=True, binding=SimpleNamespace(root=self.root))
+        self.executor.is_active.return_value = False
+        lock = acquire_install_lock(self.root)
         try:
-            self.assertEqual((await self.service.status())["operation"]["phase"], "succeeded")
-            self.assertEqual(self.executor.cleaned, [])
+            result = finish_manual_restart(self.root, lock_descriptor=lock, status=status,
+                                           executor=self.executor)
         finally:
-            os.close(descriptor)
-        self.executor.cleanup_error = UpdateExecutorError("cleanup unavailable")
-        self.assertEqual((await self.service.status())["operation"]["phase"], "succeeded")
+            os.close(lock)
+        self.assertEqual(result["phase"], "recovered")
+        self.assertEqual(result["code"], "manual_recovery")
+        self.assertEqual(result["target"], operation["target"])
+        self.executor.cleanup.assert_called_once_with(operation["operationId"])
 
-    async def test_requires_action_allows_explicit_retry(self):
-        await self.service.check()
-        previous = new_operation(TARGET, self.release.name)
-        write_operation(self.root, previous)
-        advance_operation(self.root, previous["operationId"], "requires_action", "permissions_required")
-        self.assertTrue((await self.service.status())["available"])
-        operation = await self.service.start(target=TARGET)
-        self.assertNotEqual(operation["operationId"], previous["operationId"])
+    async def test_manual_recovery_cannot_clear_an_active_or_unobserved_worker(self) -> None:
+        operation = new_cli_restart_operation("0.1.0", "0" * 64)
+        write_operation(self.root, operation)
+        advance_operation(self.root, operation["operationId"], "recovery_required", "worker_lost")
+        status = SimpleNamespace(running=True, ready=True, binding=SimpleNamespace(root=self.root))
+        lock = acquire_install_lock(self.root)
+        try:
+            for outcome in (True, UpdateExecutorError("unknown")):
+                self.executor.is_active.side_effect = [outcome]
+                result = finish_manual_restart(self.root, lock_descriptor=lock, status=status,
+                                               executor=self.executor)
+                self.assertEqual(result["phase"], "recovery_required")
+            self.assertEqual(self.executor.cleanup.call_count, 2)
+        finally:
+            os.close(lock)
 
-    async def test_cleanup_failure_preserves_previous_result_without_dispatch(self):
-        await self.service.check()
-        previous = new_operation(TARGET, self.release.name)
-        write_operation(self.root, previous)
-        previous = advance_operation(self.root, previous["operationId"], "failed", "dispatch_failed")
-        self.executor.cleanup_error = UpdateExecutorError("SECRET manager detail")
-        with self.assertRaises(UpdateError) as error:
-            await self.service.start(target=TARGET)
-        self.assertEqual(error.exception.code, "update_cleanup_unavailable")
-        self.assertNotIn("SECRET", str(error.exception))
-        self.assertEqual(read_operation(self.root), previous)
-        self.assertEqual(self.executor.launched, [])
+    async def test_fresh_pending_restart_blocks_cli_mutation_without_cancelling_dispatch(self) -> None:
+        operation = new_cli_restart_operation(self.current.version, self.current.identity)
+        write_operation(self.root, operation)
+        lock = acquire_install_lock(self.root)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "pending dispatch"):
+                assert_no_pending_restart(self.root, lock_descriptor=lock, now=operation["createdAt"] + 59)
+            self.assertEqual(read_operation(self.root), operation)
+            ready = SimpleNamespace(running=True, ready=True, binding=SimpleNamespace(root=self.root))
+            result = finish_manual_restart(self.root, lock_descriptor=lock, status=ready,
+                                           executor=self.executor)
+            self.assertEqual(result["phase"], "accepted")
+            self.executor.cleanup.assert_not_called()
+        finally:
+            os.close(lock)
 
-    async def test_cli_recovered_operation_allows_a_new_explicit_update(self):
-        await self.service.check()
-        previous = new_operation(TARGET, self.release.name)
-        write_operation(self.root, previous)
-        advance_operation(self.root, previous["operationId"], "recovered", "manual_recovery")
-        self.assertTrue((await self.service.status())["available"])
-        self.assertEqual((await self.service.status())["operation"]["phase"], "recovered")
-        operation = await self.service.start(target=TARGET)
-        self.assertNotEqual(operation["operationId"], previous["operationId"])
-
-    async def test_optional_updater_does_not_probe_manager_during_service_construction(self):
-        with patch("netizen.management.updates.UpdateExecutor", side_effect=UpdateExecutorError("unavailable")):
-            service = UpdateService(home=self.home, current=InstalledRelease("0.4.6", "unmanaged"))
+    async def test_stale_dispatch_is_fenced_before_delayed_worker_can_restart_removed_instance(self) -> None:
+        operation = new_cli_restart_operation(self.current.version, self.current.identity)
+        write_operation(self.root, operation)
+        manager = Mock()
+        lock = acquire_install_lock(self.root)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            delayed = pool.submit(run, self.root, operation["operationId"], manager=manager)
             try:
-                self.assertFalse((await service.status())["supported"])
+                result = assert_no_pending_restart(self.root, lock_descriptor=lock,
+                                                   now=operation["createdAt"] + 60)
+                self.assertEqual((result["phase"], result["code"]), ("failed", "dispatch_failed"))
+                # Simulated remove/purge occurs here under the same lock. Only
+                # the retained terminal operation and lock are needed to fence
+                # this helper; no instance binding or data is reconstructed.
+                manager.assert_not_called()
             finally:
-                await service.close()
+                os.close(lock)
+            self.assertEqual(delayed.result(timeout=5), 1)
+        self.assertEqual(manager.mock_calls, [])
+        self.assertEqual(read_operation(self.root), result)
 
-    async def test_new_admin_process_reads_prior_installer_result(self):
-        operation = new_operation(TARGET, self.release.name)
+    async def test_abandoned_restarting_phase_is_unknown_until_explicit_ready_recovery(self) -> None:
+        operation = new_cli_restart_operation(self.current.version, self.current.identity)
         write_operation(self.root, operation)
-        advance_operation(self.root, operation["operationId"], "rolled_back", "activation_failed")
-        other = UpdateService(home=self.home, current=self.service._current, executor=self.executor)
+        advance_operation(self.root, operation["operationId"], "restarting")
+        lock = acquire_install_lock(self.root)
         try:
-            self.assertEqual((await other.status())["operation"]["phase"], "rolled_back")
+            result = assert_no_pending_restart(self.root, lock_descriptor=lock)
+            self.assertEqual((result["phase"], result["code"]), ("recovery_required", "worker_lost"))
+            self.assertEqual(result["target"], operation["target"])
         finally:
-            await other.close()
+            os.close(lock)
 
-    async def test_network_failure_is_visible_and_does_not_modify_installation(self):
-        def fail():
-            raise OSError("SECRET remote text")
-        self.service._fetch = fail
-        status = await self.service.check()
-        self.assertFalse(status["available"])
-        self.assertEqual(status["checkingErrorCode"], "release_network_error")
-        self.assertNotIn("checkingError", status)
-        self.assertNotIn("SECRET", json.dumps(status))
-        self.assertIsNone(read_operation(self.root))
-
-
-    async def test_release_failures_are_classified_cached_and_recover_without_dispatch(self):
-        def http_error(code, headers=None, body=b'{"message":"SECRET remote text"}'):
-            message = Message()
-            for key, value in (headers or {}).items():
-                message[key] = value
-            return HTTPError(LATEST_API, code, "SECRET reason", message, io.BytesIO(body))
-
-        cases = [
-            (http_error(403, {"X-RateLimit-Remaining": "0"}), "release_rate_limited"),
-            (http_error(403, {"Retry-After": "120"}), "release_rate_limited"),
-            (http_error(403, {"X-RateLimit-Remaining": "5"},
-                        b'{"message":"You have exceeded a secondary rate limit. SECRET"}'),
-             "release_rate_limited"),
-            (http_error(429), "release_rate_limited"),
-            (http_error(403, {"X-RateLimit-Remaining": "5"}), "release_access_denied"),
-            (http_error(403, body=b"<html>SECRET forbidden</html>"), "release_access_denied"),
-            (http_error(403, body=b'{"message":"' + b"x" * 8192 + b'rate limit"}'),
-             "release_access_denied"),
-            (http_error(404), "release_not_found"),
-            (http_error(502), "release_service_unavailable"),
-            (http_error(401), "release_http_error"),
-            (URLError("SECRET network"), "release_network_error"),
-            (TimeoutError("SECRET timeout"), "release_check_timeout"),
-            (URLError(TimeoutError("SECRET connect timeout")), "release_check_timeout"),
-            (IncompleteRead(b"SECRET truncated"), "release_network_error"),
-        ]
-        for failure, expected in cases:
-            with self.subTest(failure=failure, expected=expected):
-                self.service._fetch = self.fetch
-                self.assertTrue((await self.service.check())["available"])
-                self.now += 60
-                self.service._fetch = fetch_latest_release
-                with patch("netizen.management.updates.urllib.request.urlopen",
-                           side_effect=failure) as opener:
-                    status = await self.service.check()
-                    self.assertEqual(status["checkingErrorCode"], expected)
-                    self.assertIsNone(status["latest"])
-                    self.assertFalse(status["available"])
-                    self.assertTrue(status["restartAvailable"])
-                    self.assertNotIn("SECRET", json.dumps(status))
-                    self.assertEqual(await self.service.status(), status)
-                    self.now += 59
-                    self.assertEqual(await self.service.check(), status)
-                    self.assertEqual(opener.call_count, 1)
-                    with self.assertRaises(UpdateError) as rejected:
-                        await self.service.start(target=TARGET)
-                    self.assertEqual(rejected.exception.code, "update_target_changed")
-                if isinstance(failure, HTTPError):
-                    self.assertTrue(failure.closed)
-                self.service._fetch = self.fetch
-                self.now += 1
-                recovered = await self.service.check()
-                self.assertTrue(recovered["available"])
-                self.assertIsNone(recovered["checkingErrorCode"])
-        self.assertEqual(self.executor.launched, [])
-        self.assertIsNone(read_operation(self.root))
-
-    async def test_invalid_release_responses_are_distinct_from_network_failures(self):
-        incomplete = release_response()
-        incomplete["assets"].pop()
-        invalid_target = release_response()
-        invalid_target["id"] = True
-        for payload, url in (
-            (b"SECRET invalid JSON", LATEST_API),
-            (b"x" * (MAX_RELEASE_BYTES + 1), LATEST_API),
-            (json.dumps(incomplete).encode(), LATEST_API),
-            (json.dumps(invalid_target).encode(), LATEST_API),
-            (json.dumps(release_response()).encode(), "https://example.com/SECRET"),
-        ):
-            with self.subTest(url=url, size=len(payload)):
-                response = MagicMock()
-                response.__enter__.return_value = response
-                response.geturl.return_value = url
-                response.read.return_value = payload
-                self.service._fetch = fetch_latest_release
-                self.now += 60
-                with patch("netizen.management.updates.urllib.request.urlopen", return_value=response):
-                    status = await self.service.check()
-                self.assertEqual(status["checkingErrorCode"], "release_invalid_response")
-                self.assertFalse(status["available"])
-                self.assertIsNone(status["latest"])
-                self.assertNotIn("SECRET", json.dumps(status))
-                self.assertTrue(response.__exit__.called)
-
-
-if __name__ == "__main__":
-    unittest.main()
+    async def test_pending_guard_requires_real_lock_and_does_not_clear_corrupt_records(self) -> None:
+        operation = new_cli_restart_operation(self.current.version, self.current.identity)
+        write_operation(self.root, operation)
+        lock = acquire_install_lock(self.root)
+        os.close(lock)
+        with self.assertRaises(OSError):
+            assert_no_pending_restart(self.root, lock_descriptor=lock)
+        self.assertEqual(read_operation(self.root), operation)
+        lock = acquire_install_lock(self.root)
+        path = self.root / "state" / "update.json"
+        path.write_text("{broken", encoding="utf-8")
+        try:
+            with self.assertRaisesRegex(RuntimeError, "could not read"):
+                assert_no_pending_restart(self.root, lock_descriptor=lock)
+            self.assertEqual(path.read_text(encoding="utf-8"), "{broken")
+        finally:
+            os.close(lock)
