@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 from lark_channel import OutboundCard
 
-from netizen.cards import callbacks
-from netizen.cards import (
+from netizen_cli.cards import callbacks
+from netizen_cli.cards import (
     ArchivedSessionCardItem,
     CardActionError,
     SessionCardItem,
@@ -43,12 +43,12 @@ from netizen.cards import (
     reply_card,
     reply_card_from_manifest,
 )
-from netizen.bindings import (
+from netizen_cli.bindings import (
     BindingTaskFeedback,
     BindingTurnSettings,
     SideTopicState,
 )
-from netizen.domain import (
+from netizen_cli.domain import (
     CardControlName,
     FeishuScope,
     MentionContextMode,
@@ -67,21 +67,21 @@ from netizen.domain import (
     TurnProgressManifest,
     TurnProgressManifestStep,
 )
-from netizen.projects import Project
-from netizen.model_settings import (
+from netizen_cli.projects import Project
+from netizen_cli.model_settings import (
     EffortOption,
     ModelCatalog,
     ModelOption,
     ServiceTierOption,
     TurnModelSettings,
 )
-from netizen.sdk_gap_adapter import GoalSnapshot, GoalStatus
-from netizen.turn_activity import (
+from netizen_cli.sdk_gap_adapter import GoalSnapshot, GoalStatus
+from netizen_cli.turn_activity import (
     TurnActivityEntrySnapshot,
     TurnActivityKind,
     TurnActivityStatus,
 )
-from netizen.turn_files import TurnFile
+from netizen_cli.turn_files import TurnFile
 
 
 class CardCodecTest(unittest.TestCase):

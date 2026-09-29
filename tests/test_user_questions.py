@@ -4,7 +4,7 @@ import json
 import unittest
 from dataclasses import FrozenInstanceError
 
-from netizen.user_questions import (
+from netizen_cli.user_questions import (
     BindingQuestionTarget,
     SideQuestionTarget,
     format_question_answer,

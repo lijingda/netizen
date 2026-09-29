@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from netizen.lark_app import (
+from netizen_cli.lark_app import (
     LarkAppConfigError,
     encode_lark_app,
     load_lark_app,
@@ -83,7 +83,7 @@ class LarkAppCredentialsTest(unittest.TestCase):
             SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=os.geteuid() + 1),
             SimpleNamespace(st_mode=stat.S_IFIFO | 0o600, st_uid=os.geteuid()),
         ):
-            with patch("netizen.lark_app.os.fstat", return_value=metadata):
+            with patch("netizen_cli.lark_app.os.fstat", return_value=metadata):
                 with self.assertRaises(LarkAppConfigError):
                     load_lark_app(self.path)
 

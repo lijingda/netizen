@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from netizen.bindings import BindingNotFound, ProjectDeleting
-from netizen.domain import ActiveState, FeishuScope, ScopeKind
-from netizen.management import ExactBindingTarget
-from netizen.runtime.contracts import ActiveTurnSnapshot, BindingRuntimeSnapshot, ThreadLifecycleStateUnknown
-from netizen.schedules.models import ScheduleNotFound, ScheduleRule
+from netizen_cli.bindings import BindingNotFound, ProjectDeleting
+from netizen_cli.domain import ActiveState, FeishuScope, ScopeKind
+from netizen_cli.management import ExactBindingTarget
+from netizen_cli.runtime.contracts import ActiveTurnSnapshot, BindingRuntimeSnapshot, ThreadLifecycleStateUnknown
+from netizen_cli.schedules.models import ScheduleNotFound, ScheduleRule
 from tests.management import test_project_deletion as fixture
 
 

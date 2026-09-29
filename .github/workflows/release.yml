@@ -1,23 +1,27 @@
-# Repository prerequisite: GitHub Immutable Releases must be enabled.  This
-# workflow creates a new exact-tag release and never replaces an existing asset.
-# Code qualification belongs to the exact main commit's required CI run.  This
-# workflow does not rerun tests or account-scoped live probes; it verifies that
-# qualification, builds one deterministic artifact, checks its identity, and
-# publishes through the `published-release` environment for deployment history;
-# that environment does not require a separate reviewer.
+# Explicit maintainer dispatch only; no push/tag/release event publishes packages.
+# publish=true requires a configured netizen-cli PyPI Trusted Publisher for this
+# repository, release.yml and the published-release environment. No token secret.
+# Configure GitHub Immutable Releases separately. Default dispatch only verifies
+# and preserves candidate artifacts; scripts/release.py requests full publication
+# after the maintainer instruction.
 name: Publish main-qualified release
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Exact existing release tag, for example v0.3.0
+        description: Exact existing main-qualified tag, for example v0.10.0
         required: true
         type: string
       notes:
-        description: Optional pre-rendered release notes prepended to the release body
+        description: Optional pre-rendered release notes
         required: false
         type: string
+      publish:
+        description: Publish verified distributions to PyPI and finalize the GitHub Release
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -31,9 +35,10 @@ jobs:
   build-artifact:
     runs-on: ubuntu-latest
     outputs:
-      archive-name: ${{ steps.identity.outputs.archive-name }}
-      archive-sha256: ${{ steps.build.outputs.archive-sha256 }}
       commit: ${{ steps.identity.outputs.commit }}
+      wheel-name: ${{ steps.build.outputs.wheel-name }}
+      sdist-name: ${{ steps.build.outputs.sdist-name }}
+      manifest-sha256: ${{ steps.build.outputs.manifest-sha256 }}
       main-gate-url: ${{ steps.main-gate.outputs.url }}
     steps:
       - name: Check out exact tag
@@ -41,28 +46,21 @@ jobs:
         with:
           ref: refs/tags/${{ inputs.tag }}
           fetch-depth: 0
-
-      - name: Set up artifact builder
+      - name: Set up distribution builder
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Resolve exact release identity
         id: identity
-        shell: bash
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
-          test -n "$commit"
           test "$(git rev-parse HEAD)" = "$commit"
           test -z "$(git status --porcelain --untracked-files=all)"
-          version="${RELEASE_TAG#v}"
-          test "$RELEASE_TAG" = "v$version"
-          echo "archive-name=netizen-$RELEASE_TAG.tar.gz" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
-
+          echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$commit")" >> "$GITHUB_ENV"
       - name: Require successful main CI for the exact commit
         id: main-gate
         uses: actions/github-script@v7
@@ -73,129 +71,107 @@ jobs:
             const { owner, repo } = context.repo;
             const expectedCommit = process.env.RELEASE_COMMIT;
             const response = await github.rest.actions.listWorkflowRuns({
-              owner,
-              repo,
-              workflow_id: 'ci.yml',
-              branch: 'main',
-              event: 'push',
-              head_sha: expectedCommit,
-              per_page: 100,
+              owner, repo, workflow_id: 'ci.yml', branch: 'main', event: 'push',
+              head_sha: expectedCommit, per_page: 100,
             });
             const successful = response.data.workflow_runs.find((run) =>
-              run.head_sha === expectedCommit &&
-              run.head_branch === 'main' &&
-              run.event === 'push' &&
-              run.status === 'completed' &&
-              run.conclusion === 'success'
+              run.head_sha === expectedCommit && run.head_branch === 'main' &&
+              run.event === 'push' && run.status === 'completed' && run.conclusion === 'success'
             );
             if (!successful) {
-              throw new Error(
-                `Exact release commit ${expectedCommit} has no successful main CI run.`
-              );
+              throw new Error(`Exact release commit ${expectedCommit} has no successful main CI run.`);
             }
             core.setOutput('url', successful.html_url);
-            core.notice(`Reusing successful main qualification: ${successful.html_url}`);
-
-      - name: Build one deterministic candidate and bootstrap
+      - name: Install the pinned build backend
+        run: python -m pip install --disable-pip-version-check --no-input setuptools==80.9.0
+      - name: Build the sdist and its wheel once
         id: build
         env:
           RELEASE_COMMIT: ${{ steps.identity.outputs.commit }}
-          RELEASE_REPOSITORY: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.tag }}
-        run: |
-          python scripts/build_release_artifact.py \
-            --output-dir dist \
-            --tag "$RELEASE_TAG" \
-            --commit "$RELEASE_COMMIT" \
-            --repository "$RELEASE_REPOSITORY"
-          ARCHIVE_PATH="dist/netizen-$RELEASE_TAG.tar.gz" python - <<'PY'
-          import hashlib
-          import os
-          from pathlib import Path
-
-          digest = hashlib.sha256(Path(os.environ["ARCHIVE_PATH"]).read_bytes()).hexdigest()
-          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
-              output.write(f"archive-sha256={digest}\n")
-          PY
-
-      - name: Preserve exact candidate bytes
+        run: >-
+          python scripts/build_cli_distribution.py --output-dir dist
+          --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+      - name: Preserve exact distribution bytes
         uses: actions/upload-artifact@v4
         with:
           name: release-candidate
           path: |
-            dist/${{ steps.identity.outputs.archive-name }}
-            dist/install.sh
+            dist/*.whl
+            dist/*.tar.gz
+            dist/netizen-cli-release.json
           if-no-files-found: error
           retention-days: 7
 
   verify-artifact:
-    name: Verify release artifact identity
+    name: Verify Python distribution identity and isolated installation
     needs: build-artifact
     runs-on: ubuntu-latest
     steps:
-      - name: Set up artifact verifier
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Download the one built candidate
-        uses: actions/download-artifact@v4
+      - name: Verify the verification code is the main-qualified commit
+        env:
+          RELEASE_COMMIT: ${{ needs.build-artifact.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+      - uses: actions/download-artifact@v4
         with:
           name: release-candidate
           path: dist
-
-      - name: Extract and verify candidate identity
-        shell: bash
+      - name: Verify exact bytes, names and resources without rebuilding
         env:
-          ARCHIVE_NAME: ${{ needs.build-artifact.outputs.archive-name }}
-          ARCHIVE_SHA256: ${{ needs.build-artifact.outputs.archive-sha256 }}
-          RELEASE_COMMIT: ${{ needs.build-artifact.outputs.commit }}
           RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ needs.build-artifact.outputs.commit }}
+          MANIFEST_SHA256: ${{ needs.build-artifact.outputs.manifest-sha256 }}
+        run: >-
+          python scripts/build_cli_distribution.py --verify-only --output-dir dist
+          --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --manifest-sha256 "$MANIFEST_SHA256"
+      - name: Install the wheel into a fresh disposable environment
+        env:
+          WHEEL_NAME: ${{ needs.build-artifact.outputs.wheel-name }}
         run: |
-          set -euo pipefail
-          python - <<'PY'
-          import hashlib
-          import os
-          from pathlib import Path
+          python -m venv "$RUNNER_TEMP/netizen-wheel-smoke"
+          "$RUNNER_TEMP/netizen-wheel-smoke/bin/python" -m pip install \
+            --disable-pip-version-check --no-input --constraint requirements.lock "dist/$WHEEL_NAME"
+      - name: Verify imports and resources outside the checkout without starting services
+        run: |
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/netizen-wheel-smoke/bin/python" -I -m netizen_cli --help
+          "$RUNNER_TEMP/netizen-wheel-smoke/bin/python" -I -m netizen_cli --version
+          "$RUNNER_TEMP/netizen-wheel-smoke/bin/python" -I - <<'PY'
+          from netizen_cli.builtin_skills import builtin_skill_root
+          from netizen_cli.package_resources import resource_path
+          import netizen_cli.cli_services
+          import netizen_cli.cli_update_restore
+          import netizen_cli.service_launcher
 
-          archive = Path("dist") / os.environ["ARCHIVE_NAME"]
-          assert hashlib.sha256(archive.read_bytes()).hexdigest() == os.environ["ARCHIVE_SHA256"]
-          PY
-          mkdir candidate
-          tar -xzf "dist/$ARCHIVE_NAME" -C candidate
-          source_root="candidate/netizen-$RELEASE_TAG"
-          test -d "$source_root"
-          SOURCE_ROOT="$source_root" python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          root = Path(os.environ["SOURCE_ROOT"])
-          manifest = json.loads((root / ".netizen-release.json").read_text())
-          assert manifest["schema"] == 1
-          assert manifest["commit"] == os.environ["RELEASE_COMMIT"]
-          assert manifest["version"] == os.environ["RELEASE_TAG"].removeprefix("v")
-          assert manifest["qualification"] == "github-release"
+          assert (builtin_skill_root() / "netizen-user-guide/SKILL.md").is_file()
+          assert resource_path("config.example.yaml").is_file()
           PY
 
-  publish-release:
+  prepare-release:
+    if: inputs.publish
     needs: [build-artifact, verify-artifact]
     runs-on: ubuntu-latest
     environment: published-release
     permissions:
       contents: write
+    outputs:
+      release-id: ${{ steps.draft.outputs.release-id }}
     steps:
-      - name: Download the main-qualified candidate without rebuilding it
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: release-candidate
           path: dist
-
-      - name: Create draft, upload exact assets, then publish
+      - name: Create draft and upload the exact Python distributions
+        id: draft
         uses: actions/github-script@v7
         env:
-          ARCHIVE_NAME: ${{ needs.build-artifact.outputs.archive-name }}
-          ARCHIVE_SHA256: ${{ needs.build-artifact.outputs.archive-sha256 }}
+          MANIFEST_SHA256: ${{ needs.build-artifact.outputs.manifest-sha256 }}
           MAIN_GATE_URL: ${{ needs.build-artifact.outputs.main-gate-url }}
           RELEASE_COMMIT: ${{ needs.build-artifact.outputs.commit }}
           RELEASE_NOTES: ${{ inputs.notes }}
@@ -207,105 +183,121 @@ jobs:
             const path = require('path');
             const { owner, repo } = context.repo;
             const tag = process.env.RELEASE_TAG;
-            const expectedCommit = process.env.RELEASE_COMMIT;
-
-            async function resolveTagCommit() {
-              let object = (await github.rest.git.getRef({
-                owner,
-                repo,
-                ref: `tags/${tag}`,
-              })).data.object;
-              const visited = new Set();
-              while (object.type === 'tag') {
-                if (visited.has(object.sha)) {
-                  throw new Error(`Tag ${tag} contains a cycle.`);
-                }
-                visited.add(object.sha);
-                object = (await github.rest.git.getTag({
-                  owner,
-                  repo,
-                  tag_sha: object.sha,
-                })).data.object;
-              }
-              if (object.type !== 'commit') {
-                throw new Error(`Tag ${tag} does not resolve to a commit.`);
-              }
-              return object.sha;
+            let object = (await github.rest.git.getRef({owner, repo, ref: `tags/${tag}`})).data.object;
+            const visited = new Set();
+            while (object.type === 'tag') {
+              if (visited.has(object.sha)) throw new Error('Cyclic annotated tag');
+              visited.add(object.sha);
+              object = (await github.rest.git.getTag({owner, repo, tag_sha: object.sha})).data.object;
             }
-
-            async function requireExactTag() {
-              const actualCommit = await resolveTagCommit();
-              if (actualCommit !== expectedCommit) {
-                throw new Error(
-                  `Tag ${tag} moved: expected ${expectedCommit}, found ${actualCommit}.`
-                );
+            if (object.type !== 'commit' || object.sha !== process.env.RELEASE_COMMIT) {
+              throw new Error(`Tag ${tag} moved from the main-qualified commit.`);
+            }
+            const sha = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+            const manifestBytes = fs.readFileSync('dist/netizen-cli-release.json');
+            if (sha(manifestBytes) !== process.env.MANIFEST_SHA256) throw new Error('Manifest changed');
+            const manifest = JSON.parse(manifestBytes);
+            const assets = Object.keys(manifest.files);
+            for (const name of assets) {
+              if (path.basename(name) !== name || sha(fs.readFileSync(path.join('dist', name))) !== manifest.files[name]) {
+                throw new Error('Distribution changed');
               }
             }
-
-            await requireExactTag();
-
-            const archivePath = path.join('dist', process.env.ARCHIVE_NAME);
-            const actualArchiveSha256 = crypto
-              .createHash('sha256')
-              .update(fs.readFileSync(archivePath))
-              .digest('hex');
-            if (actualArchiveSha256 !== process.env.ARCHIVE_SHA256) {
-              throw new Error('Downloaded release archive no longer matches its built SHA-256.');
-            }
-
             try {
-              await github.rest.repos.getReleaseByTag({ owner, repo, tag });
-              core.setFailed(`Release ${tag} already exists; immutable assets are never replaced.`);
-              return;
+              await github.rest.repos.getReleaseByTag({owner, repo, tag});
+              throw new Error(`Release ${tag} already exists; assets are never replaced. Inspect an interrupted draft manually.`);
             } catch (error) {
               if (error.status !== 404) throw error;
             }
-
-            const standardBody = [
-              'This release was built once from an exact main commit whose required',
-              'Main quality gate completed successfully.',
-              '',
-              `Main quality gate: ${process.env.MAIN_GATE_URL}`,
-              `Release archive SHA-256: ${process.env.ARCHIVE_SHA256}`,
-            ].join('\n');
             const notes = (process.env.RELEASE_NOTES || '').trim();
-            const created = await github.rest.repos.createRelease({
-              owner,
-              repo,
-              tag_name: tag,
-              target_commitish: process.env.RELEASE_COMMIT,
-              name: `Netizen ${tag}`,
-              body: notes ? `${notes}\n\n${standardBody}` : standardBody,
-              draft: true,
-              prerelease: false,
-            });
-
-            const assets = [
-              [process.env.ARCHIVE_NAME, 'application/gzip'],
-              ['install.sh', 'application/x-sh'],
-            ];
-            for (const [name, contentType] of assets) {
+            const body = [notes, '', `Main quality gate: ${process.env.MAIN_GATE_URL}`,
+              `Source commit: ${manifest.commit}`, `Distribution manifest SHA-256: ${process.env.MANIFEST_SHA256}`,
+              '', 'Artifacts are ordinary netizen-cli wheel/sdist distributions; no legacy installer is published.'].join('\n');
+            const release = (await github.rest.repos.createRelease({owner, repo, tag_name: tag,
+              target_commitish: manifest.commit, name: `Netizen ${tag}`, body, draft: true, prerelease: false})).data;
+            assets.push('netizen-cli-release.json');
+            for (const name of assets) {
               const data = fs.readFileSync(path.join('dist', name));
-              await github.rest.repos.uploadReleaseAsset({
-                owner,
-                repo,
-                release_id: created.data.id,
-                name,
-                data,
-                headers: {
-                  'content-type': contentType,
-                  'content-length': data.length,
-                },
-              });
+              await github.rest.repos.uploadReleaseAsset({owner, repo, release_id: release.id,
+                name, data, headers: {'content-type': 'application/octet-stream', 'content-length': data.length}});
             }
+            core.setOutput('release-id', release.id);
+            core.notice(`Draft release: ${release.html_url}`);
 
-            // Recheck after asset upload despite the active tag ruleset.  The
-            // workflow fails closed before release immutability takes effect.
-            await requireExactTag();
-            const published = await github.rest.repos.updateRelease({
-              owner,
-              repo,
-              release_id: created.data.id,
-              draft: false,
-            });
-            core.notice(`Published immutable release candidate: ${published.data.html_url}`);
+  publish-pypi:
+    if: inputs.publish
+    needs: [build-artifact, verify-artifact, prepare-release]
+    runs-on: ubuntu-latest
+    environment: published-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-candidate
+          path: candidate
+      - name: Recheck tag and copy only verified distributions for PyPI
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ needs.build-artifact.outputs.commit }}
+          MANIFEST_SHA256: ${{ needs.build-artifact.outputs.manifest-sha256 }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const crypto = require('crypto');
+            const { owner, repo } = context.repo;
+            let object = (await github.rest.git.getRef({owner, repo, ref: `tags/${process.env.RELEASE_TAG}`})).data.object;
+            const visited = new Set();
+            while (object.type === 'tag') {
+              if (visited.has(object.sha)) throw new Error('Cyclic annotated tag');
+              visited.add(object.sha);
+              object = (await github.rest.git.getTag({owner, repo, tag_sha: object.sha})).data.object;
+            }
+            if (object.type !== 'commit' || object.sha !== process.env.RELEASE_COMMIT) throw new Error('Tag moved before PyPI publication');
+            const sha = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+            const manifestBytes = fs.readFileSync('candidate/netizen-cli-release.json');
+            if (sha(manifestBytes) !== process.env.MANIFEST_SHA256) throw new Error('Manifest changed');
+            const manifest = JSON.parse(manifestBytes);
+            fs.mkdirSync('dist');
+            for (const [name, digest] of Object.entries(manifest.files)) {
+              if (path.basename(name) !== name || !(name.endsWith('.whl') || name.endsWith('.tar.gz'))) throw new Error('Unexpected artifact');
+              const bytes = fs.readFileSync(path.join('candidate', name));
+              if (sha(bytes) !== digest) throw new Error('Distribution changed');
+              fs.writeFileSync(path.join('dist', name), bytes, {flag: 'wx'});
+            }
+      - name: Publish using the configured PyPI Trusted Publisher
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-release:
+    if: inputs.publish
+    needs: [build-artifact, prepare-release, publish-pypi]
+    runs-on: ubuntu-latest
+    environment: published-release
+    permissions:
+      contents: write
+    steps:
+      - name: Finalize the GitHub Release only after PyPI succeeded
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.prepare-release.outputs.release-id }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ needs.build-artifact.outputs.commit }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            let object = (await github.rest.git.getRef({owner, repo, ref: `tags/${process.env.RELEASE_TAG}`})).data.object;
+            const visited = new Set();
+            while (object.type === 'tag') {
+              if (visited.has(object.sha)) throw new Error('Cyclic annotated tag');
+              visited.add(object.sha);
+              object = (await github.rest.git.getTag({owner, repo, tag_sha: object.sha})).data.object;
+            }
+            if (object.type !== 'commit' || object.sha !== process.env.RELEASE_COMMIT) throw new Error('Tag moved before finalization');
+            const release_id = Number(process.env.RELEASE_ID);
+            const current = (await github.rest.repos.getRelease({owner, repo, release_id})).data;
+            if (!current.draft || current.tag_name !== process.env.RELEASE_TAG) throw new Error('Draft identity changed');
+            const published = await github.rest.repos.updateRelease({owner, repo, release_id, draft: false});
+            core.notice(`Published immutable release: ${published.data.html_url}`);

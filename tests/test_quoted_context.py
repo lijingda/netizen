@@ -35,7 +35,7 @@ from lark_channel import (
     VoteContent,
 )
 
-from netizen.quoted_context import (
+from netizen_cli.quoted_context import (
     QuotedMessageContractError,
     QuotedMessageUnavailable,
     UnsupportedQuotedMessage,
@@ -45,7 +45,7 @@ from netizen.quoted_context import (
     quoted_message_id,
     validate_quoted_message,
 )
-from netizen.message_projection import (
+from netizen_cli.message_projection import (
     HistoricalMessageContractError,
     HistoricalMessageUnavailable,
     SupplementalContextStats,
@@ -55,7 +55,7 @@ from netizen.message_projection import (
     project_supplemental_message,
     select_supplemental_messages,
 )
-from netizen.prompt_projection import CurrentMessageProjection, project_identity
+from netizen_cli.prompt_projection import CurrentMessageProjection, project_identity
 
 
 def inbound(

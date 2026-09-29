@@ -21,7 +21,7 @@ from openai_codex import (
 )
 from openai_codex.errors import InvalidRequestError
 
-from netizen.sdk_gap_adapter import (
+from netizen_cli.sdk_gap_adapter import (
     AppServerGoalControl,
     AppServerSideBoundaryControl,
     AppServerSkillCatalog,
@@ -39,7 +39,7 @@ from netizen.sdk_gap_adapter import (
     ThreadUnsubscribeStatus,
     facade_migration_requirements,
 )
-from netizen.turn_activity import (
+from netizen_cli.turn_activity import (
     TurnActivityKind,
     TurnActivityNotificationProjection,
     TurnActivityStatus,
@@ -605,7 +605,7 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                 process = codex._client._sync._proc
                 try:
                     with (
-                        patch("netizen.sdk_gap_adapter._SKILL_ROOTS_TIMEOUT_SECONDS", 0.05),
+                        patch("netizen_cli.sdk_gap_adapter._SKILL_ROOTS_TIMEOUT_SECONDS", 0.05),
                         self.assertRaises(Exception),
                     ):
                         await AppServerSkillRoots(codex).set_roots((Path(raw),))
@@ -1015,18 +1015,18 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
             async with AsyncCodex(_config(log_path)) as codex:
                 process = codex._client._sync._proc
                 for model_name in ("SkillsExtraRootsSetParams", "SkillsExtraRootsSetResponse"):
-                    with patch(f"netizen.sdk_gap_adapter._generated.{model_name}", None):
+                    with patch(f"netizen_cli.sdk_gap_adapter._generated.{model_name}", None):
                         with self.assertRaises(SdkGapCapabilityUnavailable):
                             AppServerSkillRoots(codex)
                         self.assertIsInstance(AppServerSkillCatalog(codex), AppServerSkillCatalog)
                 with patch(
-                    "netizen.sdk_gap_adapter._generated.SkillsExtraRootsSetParams",
+                    "netizen_cli.sdk_gap_adapter._generated.SkillsExtraRootsSetParams",
                     type("MalformedParams", (), {"model_fields": {}}),
                 ):
                     with self.assertRaises(SdkGapCapabilityUnavailable):
                         AppServerSkillRoots(codex)
                 with patch(
-                    "netizen.sdk_gap_adapter._generated.SkillsListResponse",
+                    "netizen_cli.sdk_gap_adapter._generated.SkillsListResponse",
                     None,
                 ):
                     with self.assertRaises(SdkGapCapabilityUnavailable):
@@ -1056,20 +1056,20 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                 for name in ("_normalize_run_input", "_to_wire_input"):
                     for function in (None, lambda changed_input: None):
                         with self.subTest(function=name, shape=function), patch(
-                            f"netizen.sdk_gap_adapter._sdk_inputs.{name}", function
+                            f"netizen_cli.sdk_gap_adapter._sdk_inputs.{name}", function
                         ):
                             with self.assertRaises(SdkGapCapabilityUnavailable):
                                 AppServerGoalControl(codex)
                             self.assertIsInstance(AppServerSkillCatalog(codex), AppServerSkillCatalog)
                 with patch(
-                    "netizen.sdk_gap_adapter._generated.TurnSteerResponse",
+                    "netizen_cli.sdk_gap_adapter._generated.TurnSteerResponse",
                     type("MalformedResponse", (), {"model_fields": {}}),
                 ):
                     with self.assertRaises(SdkGapCapabilityUnavailable):
                         AppServerGoalControl(codex)
                     self.assertIsInstance(AppServerSkillCatalog(codex), AppServerSkillCatalog)
                 with patch(
-                    "netizen.sdk_gap_adapter._generated.TurnDiffUpdatedNotification",
+                    "netizen_cli.sdk_gap_adapter._generated.TurnDiffUpdatedNotification",
                     None,
                 ):
                     with self.assertRaises(SdkGapCapabilityUnavailable):
@@ -1079,7 +1079,7 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                         AppServerSkillCatalog,
                     )
                 with patch(
-                    "netizen.sdk_gap_adapter._generated.ThreadInjectItemsResponse",
+                    "netizen_cli.sdk_gap_adapter._generated.ThreadInjectItemsResponse",
                     None,
                 ):
                     with self.assertRaises(SdkGapCapabilityUnavailable):
@@ -1089,7 +1089,7 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                         AppServerSkillCatalog,
                     )
                 with patch(
-                    "netizen.sdk_gap_adapter._generated.ThreadUnsubscribeStatus",
+                    "netizen_cli.sdk_gap_adapter._generated.ThreadUnsubscribeStatus",
                     type("MalformedStatus", (), {}),
                 ):
                     with self.assertRaises(SdkGapCapabilityUnavailable):
@@ -1099,7 +1099,7 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                         AppServerSkillCatalog,
                     )
                 with patch(
-                    "netizen.sdk_gap_adapter._generated.ThreadDeleteResponse",
+                    "netizen_cli.sdk_gap_adapter._generated.ThreadDeleteResponse",
                     None,
                 ):
                     with self.assertRaises(SdkGapCapabilityUnavailable):

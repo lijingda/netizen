@@ -41,6 +41,7 @@ jobs:
       - name: Install the locked dependency set
         run: |
           python -m venv .venv
+          .venv/bin/python -m pip install --disable-pip-version-check --no-input setuptools==80.9.0
           .venv/bin/python -m pip install \
             --disable-pip-version-check \
             --no-input \
@@ -86,6 +87,7 @@ jobs:
       - name: Install the locked dependency set
         run: |
           python -m venv .venv
+          .venv/bin/python -m pip install --disable-pip-version-check --no-input setuptools==80.9.0
           .venv/bin/python -m pip install \
             --disable-pip-version-check \
             --no-input \
@@ -95,7 +97,7 @@ jobs:
       - name: Verify macOS system trust integration
         run: >-
           .venv/bin/python -I -B -c
-          'from netizen.main import _configure_platform_trust;
+          'from netizen_cli.main import _configure_platform_trust;
           _configure_platform_trust()'
 
       - name: Run the repository gate

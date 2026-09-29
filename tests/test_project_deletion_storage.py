@@ -8,7 +8,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from netizen.bindings import (
+from netizen_cli.bindings import (
     BindingStore,
     validate_channel_database,
     ProjectDeleteLimitExceeded,
@@ -19,8 +19,8 @@ from netizen.bindings import (
     ProjectRevisionConflict,
     SideTopicState,
 )
-from netizen.domain import FeishuScope, ScopeKind
-from netizen.projects import ProjectError, ProjectRegistry, StaleProject, UnknownProject
+from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.projects import ProjectError, ProjectRegistry, StaleProject, UnknownProject
 
 
 class ProjectDeletionStoreTest(unittest.TestCase):

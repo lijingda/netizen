@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import subprocess
 import tempfile
 import time
 import unittest
@@ -19,21 +20,26 @@ class AdminUpdateExecutorProbeTest(unittest.TestCase):
         self.home, self.config = probe._prepare(self.root, time.monotonic() + 5)
         self.state = self.home / ".netizen" / "state"
 
-    def test_fixture_has_physical_worker_and_separate_random_job_identities(self) -> None:
+    def test_fixture_has_installed_worker_and_separate_random_job_identities(self) -> None:
         config = probe._fixture(self.home)
         self.assertNotEqual(config["parent_id"], config["helper_id"])
-        release = self.home / ".netizen" / "releases" / config["release_id"]
-        self.assertEqual((self.home / ".netizen" / "current").resolve(), release)
-        self.assertTrue((release / "source" / "scripts" / "netizen_updater.py").is_file())
-        self.assertTrue((release / "venv" / "bin" / "python").is_file())
+        package = Path(config["package_dir"])
+        self.assertFalse((self.home / ".netizen" / "current").exists())
+        self.assertTrue((package / "deployment" / "restart_worker.py").is_file())
+        self.assertTrue((self.home / "python-env" / "bin" / "python").is_file())
         parent, parent_id = probe._job(self.home, config, "parent")
         helper, helper_id = probe._job(self.home, config, "helper")
         digest = probe.instance_digest(self.home / ".netizen")
         self.assertEqual(parent._label(parent_id), f"netizen-update-probe-parent-{digest}-{parent_id}")
         self.assertEqual(helper._label(helper_id), f"netizen-update-{digest}-{helper_id}")
-        self.assertTrue((release / "source" / "netizen" / "instance.py").is_file())
+        self.assertTrue((package / "instance.py").is_file())
         self.assertFalse((self.home / ".codex").exists())
         self.assertFalse((self.home / ".netizen" / "credentials").exists())
+        arguments = helper._worker_arguments(helper_id, self.home / "python-env" / "bin" / "python")
+        # Prove actual isolated module loading without dispatching any manager job.
+        result = subprocess.run(arguments[:-4] + ["--help"], cwd=self.home,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_fixture_rejects_production_or_injected_job_targets(self) -> None:
         with self.assertRaises(probe.ProbeError):

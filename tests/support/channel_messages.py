@@ -13,8 +13,8 @@ from lark_channel import (
     ResourceDescriptor,
     TextContent,
 )
-from netizen.domain import FeishuScope, MessageContextAnchor
-from netizen.message_history import MessageHistoryWindow
+from netizen_cli.domain import FeishuScope, MessageContextAnchor
+from netizen_cli.message_history import MessageHistoryWindow
 
 
 PNG = b"\x89PNG\r\n\x1a\nchannel-test"

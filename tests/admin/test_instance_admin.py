@@ -16,16 +16,16 @@ from urllib.parse import urlencode
 
 import yaml
 
-from netizen.admin.auth import AdminAuth
-from netizen.admin.port_config import (
+from netizen_cli.admin.auth import AdminAuth
+from netizen_cli.admin.port_config import (
     AdminPortConfigurationError,
     ConfigFileSnapshot,
     persist_admin_port,
     set_admin_port,
 )
-from netizen.admin.transport import AdminHttpState, AdminHttpTransport, Request
-from netizen.admin.web import AdminWebApplication, AdminWebRunner, accepted_authorities, admin_access_urls
-from netizen.instance import instance_digest
+from netizen_cli.admin.transport import AdminHttpState, AdminHttpTransport, Request
+from netizen_cli.admin.web import AdminWebApplication, AdminWebRunner, accepted_authorities, admin_access_urls
+from netizen_cli.instance import instance_digest
 from tests.admin.test_web import FakeManagement
 
 
@@ -90,7 +90,7 @@ class PortConfigurationTest(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b"unchanged")
 
     def test_failed_replace_retains_config_and_cleans_temporary(self) -> None:
-        with patch("netizen.admin.port_config.os.replace", side_effect=OSError("read only")):
+        with patch("netizen_cli.admin.port_config.os.replace", side_effect=OSError("read only")):
             with self.assertRaises(OSError):
                 persist_admin_port(ConfigFileSnapshot.read(self.path), 8788)
         self.assertEqual(self.path.read_bytes(), self.content)
@@ -125,7 +125,7 @@ class AdminPortAllocationTest(unittest.IsolatedAsyncioTestCase):
         self.runners: list[AdminWebRunner] = []
         self.addCleanup(self.temp.cleanup)
         self.authorities = patch(
-            "netizen.admin.web.accepted_authorities",
+            "netizen_cli.admin.web.accepted_authorities",
             side_effect=lambda _host, _port, addresses: tuple(
                 f"127.0.0.1:{address[1]}" for address in addresses
             ),
@@ -169,7 +169,7 @@ class AdminPortAllocationTest(unittest.IsolatedAsyncioTestCase):
         _listener, port = self.occupied_socket()
         runner, config = self.runner("automatic")
         self.assertEqual(runner.urls, ())
-        with patch("netizen.admin.web._AUTO_PORTS", range(port, min(port + 100, 65536))):
+        with patch("netizen_cli.admin.web._AUTO_PORTS", range(port, min(port + 100, 65536))):
             await runner.bind()
         selected = runner.addresses[0][1]
         self.assertGreater(selected, port)
@@ -186,7 +186,7 @@ class AdminPortAllocationTest(unittest.IsolatedAsyncioTestCase):
         listener.close()
         one, one_config = self.runner("one")
         two, two_config = self.runner("two")
-        with patch("netizen.admin.web._AUTO_PORTS", range(port, min(port + 100, 65536))):
+        with patch("netizen_cli.admin.web._AUTO_PORTS", range(port, min(port + 100, 65536))):
             await asyncio.gather(one.bind(), two.bind())
         selected = {yaml.safe_load(path.read_bytes())["adminWeb"]["port"] for path in (one_config, two_config)}
         self.assertEqual(len(selected), 2)
@@ -228,7 +228,7 @@ class AdminPortAllocationTest(unittest.IsolatedAsyncioTestCase):
             await original_bind(transport)
             config.write_text("projects: {human: /project}\n")
 
-        with patch("netizen.admin.web._AUTO_PORTS", range(port, min(port + 100, 65536))), patch.object(AdminHttpTransport, "bind", changed_bind):
+        with patch("netizen_cli.admin.web._AUTO_PORTS", range(port, min(port + 100, 65536))), patch.object(AdminHttpTransport, "bind", changed_bind):
             with self.assertRaisesRegex(AdminPortConfigurationError, "changed since startup"):
                 await runner.bind()
         self.assertEqual(config.read_text(), "projects: {human: /project}\n")
@@ -242,7 +242,7 @@ class AdminPortAllocationTest(unittest.IsolatedAsyncioTestCase):
         listener.close()
         runner, config = self.runner("write-failed")
         before = config.read_bytes()
-        with patch("netizen.admin.web._AUTO_PORTS", range(port, min(port + 100, 65536))), patch("netizen.admin.web.persist_admin_port", side_effect=OSError("disk full")):
+        with patch("netizen_cli.admin.web._AUTO_PORTS", range(port, min(port + 100, 65536))), patch("netizen_cli.admin.web.persist_admin_port", side_effect=OSError("disk full")):
             with self.assertRaisesRegex(OSError, "disk full"):
                 await runner.bind()
         self.assertEqual(config.read_bytes(), before)
@@ -253,7 +253,7 @@ class AdminPortAllocationTest(unittest.IsolatedAsyncioTestCase):
         listener, port = self.occupied_socket()
         listener.close()
         first, config = self.runner("persisted")
-        with patch("netizen.admin.web._AUTO_PORTS", range(port, min(port + 100, 65536))):
+        with patch("netizen_cli.admin.web._AUTO_PORTS", range(port, min(port + 100, 65536))):
             await first.bind()
         selected = first.addresses[0][1]
         await first.drain(asyncio.get_running_loop().time() + 1)
@@ -264,7 +264,7 @@ class AdminPortAllocationTest(unittest.IsolatedAsyncioTestCase):
             instance_root=config.parent, config_path=config, config_snapshot=snapshot,
         )
         self.runners.append(restarted)
-        with patch("netizen.admin.web.persist_admin_port", side_effect=AssertionError("unexpected rewrite")):
+        with patch("netizen_cli.admin.web.persist_admin_port", side_effect=AssertionError("unexpected rewrite")):
             await restarted.bind()
         self.assertEqual(ConfigFileSnapshot.read(config), snapshot)
         self.assertEqual(restarted.addresses[0][1], selected)
@@ -387,9 +387,9 @@ class AdminInstancePresentationTest(unittest.IsolatedAsyncioTestCase):
         ):
             with (
                 self.subTest(host=host),
-                patch("netizen.admin.web.socket.gethostname", return_value="server"),
-                patch("netizen.admin.web.socket.getfqdn", return_value="server.example.test"),
-                patch("netizen.admin.web.socket.getaddrinfo", return_value=[discovered]),
+                patch("netizen_cli.admin.web.socket.gethostname", return_value="server"),
+                patch("netizen_cli.admin.web.socket.getfqdn", return_value="server.example.test"),
+                patch("netizen_cli.admin.web.socket.getaddrinfo", return_value=[discovered]),
             ):
                 authorities = accepted_authorities(host, 8890, (bound,))
                 self.assertIn("server.example.test:8890", authorities)

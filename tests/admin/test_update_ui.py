@@ -8,8 +8,8 @@ import subprocess
 import unittest
 from unittest import mock
 
-from netizen.deployment.update_protocol import CODES, PHASES, TERMINAL_PHASES
-from netizen.admin.web import AdminActionTarget, _action_target_json
+from netizen_cli.deployment.update_protocol import CODES, PHASES, TERMINAL_PHASES
+from netizen_cli.admin.web import AdminActionTarget, _action_target_json
 
 
 class UpdateUiTest(unittest.TestCase):
@@ -21,7 +21,7 @@ class UpdateUiTest(unittest.TestCase):
                 self.fail(reason)
             self.skipTest(reason)
         root = Path(__file__).resolve().parents[2]
-        source = (root / "netizen/admin/static/admin.js").read_text(encoding="utf-8")
+        source = (root / "netizen_cli/admin/static/admin.js").read_text(encoding="utf-8")
         # Exercise the shipped controller with deterministic HTTP and timers.
         core = source[source.index("async function api("):source.index("async function mutate(")]
         harness = Path(__file__).with_name("update_ui_harness.js").read_text(encoding="utf-8")

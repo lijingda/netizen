@@ -8,13 +8,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from netizen.bindings import BindingStore, validate_channel_database
-from netizen.defaults import DefaultConfigurationError
-from netizen.defaults.service import SessionDefaultsService
-from netizen.domain import MentionContextMode
-from netizen.model_settings import EffortOption, ModelCatalog, ModelOption
-from netizen.projects import ProjectRegistry
-from netizen.session_settings import BindingTurnSettings, SessionSettings
+from netizen_cli.bindings import BindingStore, validate_channel_database
+from netizen_cli.defaults import DefaultConfigurationError
+from netizen_cli.defaults.service import SessionDefaultsService
+from netizen_cli.domain import MentionContextMode
+from netizen_cli.model_settings import EffortOption, ModelCatalog, ModelOption
+from netizen_cli.projects import ProjectRegistry
+from netizen_cli.session_settings import BindingTurnSettings, SessionSettings
 
 
 class SessionDefaultsTest(unittest.IsolatedAsyncioTestCase):

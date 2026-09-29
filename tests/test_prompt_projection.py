@@ -5,7 +5,7 @@ import unittest
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
-from netizen.prompt_projection import (
+from netizen_cli.prompt_projection import (
     CardAnswerProjection,
     CurrentMessageProjection,
     PromptProjectionError,
@@ -15,7 +15,7 @@ from netizen.prompt_projection import (
     render_current_message_json,
     render_plain_prompt,
 )
-from netizen.user_questions import BindingQuestionTarget, SideQuestionTarget
+from netizen_cli.user_questions import BindingQuestionTarget, SideQuestionTarget
 
 
 def inbound(

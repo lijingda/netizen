@@ -10,12 +10,12 @@ from pathlib import Path
 
 from lark_channel import FeishuChannel, LogLevel, SendOpts
 
-from netizen.cards import (
+from netizen_cli.cards import (
     decode_turn_file_action,
     reply_card,
     reply_card_from_manifest,
 )
-from netizen.domain import (
+from netizen_cli.domain import (
     FeishuScope,
     ReplyCardFileItem,
     ReplyCardFilesModule,
@@ -23,8 +23,8 @@ from netizen.domain import (
     ReplyCardResultModule,
     ScopeKind,
 )
-from netizen.settings import Settings
-from netizen.turn_files import TurnFile
+from netizen_cli.settings import Settings
+from netizen_cli.turn_files import TurnFile
 
 
 def _page_value(value: object) -> dict[str, object] | None:

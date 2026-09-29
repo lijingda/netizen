@@ -9,9 +9,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from netizen.bindings import BindingQuery, BindingStore, SideTopicState
-from netizen.channel_app import ChannelApplication
-from netizen.codex_runtime import (
+from netizen_cli.bindings import BindingQuery, BindingStore, SideTopicState
+from netizen_cli.channel_app import ChannelApplication
+from netizen_cli.codex_runtime import (
     ActiveGoalSnapshot,
     ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
@@ -33,7 +33,7 @@ from netizen.codex_runtime import (
     ThreadCatalogIdentityMissing,
     ThreadDeleteTargetChanged,
 )
-from netizen.domain import (
+from netizen_cli.domain import (
     ActiveState,
     FeishuScope,
     GoalOperationState,
@@ -41,7 +41,7 @@ from netizen.domain import (
     NativeCapability,
     ScopeKind,
 )
-from netizen.management import (
+from netizen_cli.management import (
     ActivePointerChanged,
     BindingScopeMismatch,
     CurrentBindingChanged,
@@ -59,9 +59,9 @@ from netizen.management import (
     SideIdentityMismatch,
     classify_native_thread_view,
 )
-from netizen.projects import ProjectRegistry
-from netizen.sdk_gap_adapter import GoalControlError, GoalSnapshot
-from netizen.management.service import _project_binding_status
+from netizen_cli.projects import ProjectRegistry
+from netizen_cli.sdk_gap_adapter import GoalControlError, GoalSnapshot
+from netizen_cli.management.service import _project_binding_status
 
 
 class FakeManagementRuntime:
@@ -912,7 +912,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
     async def test_scope_session_pages_pin_current_preserve_activation_order_and_only_hydrate_visible(self) -> None:
         bindings = []
         for index in range(4):
-            with patch("netizen.bindings._now", return_value=f"2026-01-0{index + 1}T00:00:00+00:00"):
+            with patch("netizen_cli.bindings._now", return_value=f"2026-01-0{index + 1}T00:00:00+00:00"):
                 binding = await self._create()
             self.store.assign_native_thread_id(binding.id, f"native-{index}")
             self.runtime.summary_metadata[f"native-{index}"] = NativeThreadMetadata(
@@ -921,10 +921,10 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
             bindings.append(binding)
         outside = await self._create(self.other_scope)
         self.store.assign_native_thread_id(outside.id, "native-outside")
-        with patch("netizen.bindings._now", return_value="2030-01-01T00:00:00+00:00"):
+        with patch("netizen_cli.bindings._now", return_value="2030-01-01T00:00:00+00:00"):
             self.store.activate(scope_key=self.scope.key, binding_id=bindings[1].id)
         # A wall-clock rollback must not put the current Binding on a later page.
-        with patch("netizen.bindings._now", return_value="2020-01-01T00:00:00+00:00"):
+        with patch("netizen_cli.bindings._now", return_value="2020-01-01T00:00:00+00:00"):
             self.store.activate(scope_key=self.scope.key, binding_id=bindings[0].id)
 
         for requested_page, expected_indices in ((0, (0, 1)), (1, (3, 2)), (99, (3, 2))):
@@ -1495,7 +1495,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(self.runtime, "thread_catalog_exact", side_effect=stalled_catalog),
-            patch("netizen.management.service._NATIVE_INDEX_READ_SECONDS", 0.01),
+            patch("netizen_cli.management.service._NATIVE_INDEX_READ_SECONDS", 0.01),
         ):
             sessions = await asyncio.wait_for(self.service.query_sessions(
                 query=SessionQuery(inventory_states=(SessionInventoryState.UNKNOWN,)),

@@ -10,12 +10,12 @@ from unittest.mock import AsyncMock
 from urllib.parse import urlencode
 
 from tests.admin import test_web as fixture
-from netizen.management import ProjectDeletionResult
-from netizen.management import InstanceManagementService, ScopeCoordinator
-from netizen.bindings import BindingStore
-from netizen.projects import ProjectRegistry
-from netizen.schedules.service import ScheduleService
-from netizen.model_settings import EffortOption, ModelCatalog, ModelOption, ServiceTierOption
+from netizen_cli.management import ProjectDeletionResult
+from netizen_cli.management import InstanceManagementService, ScopeCoordinator
+from netizen_cli.bindings import BindingStore
+from netizen_cli.projects import ProjectRegistry
+from netizen_cli.schedules.service import ScheduleService
+from netizen_cli.model_settings import EffortOption, ModelCatalog, ModelOption, ServiceTierOption
 from tests.management.test_chat_labels import FakeChatInfo, FakeChatLabelProvider, FakeChatMember
 from tests.management.test_service import FakeManagementRuntime
 
@@ -297,7 +297,7 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
         action = (await self.page(session))["actions"]["create"]
         payload = {**fixture._action_payload(action), "definition": {"instructions": "private-secret-instruction"}}
         self.schedules.error = {"code": "invalid_input", "message": "任务参数无效。"}
-        with self.assertLogs("netizen.admin.web", level="INFO") as captured:
+        with self.assertLogs("netizen_cli.admin.web", level="INFO") as captured:
             status, _, _ = await self.json_post("/api/v1/schedules/create", session, payload)
         self.assertEqual(status, 400)
         self.assertNotIn("private-secret-instruction", "".join(captured.output))

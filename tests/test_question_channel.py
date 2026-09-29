@@ -9,14 +9,14 @@ from unittest.mock import AsyncMock
 from lark_channel import CardActionPayload, ChatQueueConfig, OutboundCard, PolicyConfig, SafetyPipeline, TextBatchConfig
 from lark_channel.channel.channel import _card_action_identity
 
-from netizen.cards.questions import render_question_card
-from netizen.channel.question_inputs import CardAnswerOrigin
-from netizen.channel.reply_presenter import GoalCardOrigin
-from netizen.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
-from netizen.message_history import MessageHistoryStats, MessageHistoryWindow
-from netizen.runtime.contracts import ContextBoundaryCommitFailed, SteerRace, Submission, SubmitDisposition, TurnStartFailed
-from netizen.sdk_gap_adapter import GoalControlError
-from netizen.user_questions import BindingQuestionTarget, QuestionRequest, UserQuestion
+from netizen_cli.cards.questions import render_question_card
+from netizen_cli.channel.question_inputs import CardAnswerOrigin
+from netizen_cli.channel.reply_presenter import GoalCardOrigin
+from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
+from netizen_cli.message_history import MessageHistoryStats, MessageHistoryWindow
+from netizen_cli.runtime.contracts import ContextBoundaryCommitFailed, SteerRace, Submission, SubmitDisposition, TurnStartFailed
+from netizen_cli.sdk_gap_adapter import GoalControlError
+from netizen_cli.user_questions import BindingQuestionTarget, QuestionRequest, UserQuestion
 from tests.support.channel_cards import callback, elements, form_values
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeMessage
@@ -161,7 +161,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
     async def test_unconfirmed_native_submit_uses_shared_error_feedback(self):
         self.queue_anchor()
         self.runtime.submit = AsyncMock(side_effect=OSError("lost response"))
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.app.handle_card_action(self.event())
         self.runtime.submit.assert_awaited_once()
         self.assertEqual(self.channel.replies[-1][0], "om_answer")
@@ -172,7 +172,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
     async def test_feedback_failure_after_acceptance_does_not_claim_rejection(self):
         self.queue_anchor()
         self.app._present_ordinary_receipt = AsyncMock(side_effect=OSError("feedback failed"))
-        with self.assertLogs("netizen.channel_app", level="ERROR"):
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
             await self.app.handle_card_action(self.event())
         self.assertEqual(len(self.runtime.submit_calls), 1)
         self.assertEqual(self.channel.replies[-1][0], "om_answer")

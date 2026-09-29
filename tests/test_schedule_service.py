@@ -8,11 +8,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from netizen.bindings import BindingQueryBusy, BindingQueryClosed, BindingQueryTimeout, BindingStore, ScopeNotFound, BindingTurnSettings, BindingTaskFeedback
-from netizen.domain import FeishuScope, ScopeKind, MentionContextMode, MessageContextAnchor
-from netizen.model_settings import ModelCatalog, ModelOption, EffortOption, ServiceTierOption
-from netizen.session_settings import SessionSettings
-from netizen.schedules.service import ScheduleService
+from netizen_cli.bindings import BindingQueryBusy, BindingQueryClosed, BindingQueryTimeout, BindingStore, ScopeNotFound, BindingTurnSettings, BindingTaskFeedback
+from netizen_cli.domain import FeishuScope, ScopeKind, MentionContextMode, MessageContextAnchor
+from netizen_cli.model_settings import ModelCatalog, ModelOption, EffortOption, ServiceTierOption
+from netizen_cli.session_settings import SessionSettings
+from netizen_cli.schedules.service import ScheduleService
 
 
 class ChatInfoFixture:
@@ -571,7 +571,7 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(viewed["plan"]["schedule"]["timezone"], "Asia/Shanghai")
 
     async def test_unknown_local_timezone_requires_an_explicit_zone(self):
-        with patch("netizen.schedules.service.local_timezone", return_value=None):
+        with patch("netizen_cli.schedules.service.local_timezone", return_value=None):
             service = ScheduleService(
                 bindings=self.store, runtime=self.runtime, app_id="app",
                 chat_info=self.chats, wall_clock=lambda: self.now,
@@ -942,7 +942,7 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
 
         self.runtime.read_scheduled_turn = blocked_reader
-        with patch("netizen.schedules.service._READ_TIMEOUT_SECONDS", 0.01):
+        with patch("netizen_cli.schedules.service._READ_TIMEOUT_SECONDS", 0.01):
             timed_out = await asyncio.wait_for(self.service.manage({"mode": "list"}, native_thread_id="native-a"), 1)
         self.assertEqual({item["execution"]["status"] for item in timed_out["plans"]}, {"unavailable"})
         self.assertTrue(all(self.store.schedules.get_run(run_id).barrier == "held" for _plan, run_id, _binding in fixtures))

@@ -12,11 +12,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from openai_codex.errors import InvalidRequestError
 
-from netizen.bindings import BindingStore
-from netizen.channel_app import ChannelApplication
-from netizen.codex_runtime import CodexRuntime
-from netizen.domain import ActiveState, ScheduledConversation, ScheduledOrigin
-from netizen.schedules.service import ScheduleService
+from netizen_cli.bindings import BindingStore
+from netizen_cli.channel_app import ChannelApplication
+from netizen_cli.codex_runtime import CodexRuntime
+from netizen_cli.domain import ActiveState, ScheduledConversation, ScheduledOrigin
+from netizen_cli.schedules.service import ScheduleService
 from scripts.probe_scheduled_tasks import (
     FakeFeishu, ManualMcpRecorder, McpRecorder, ProbeCompletionFailure, ProbeFailure, ProbeStopFailure, _manual_phase, _mcp_phase,
     _mcp_recovery_phase, _record_completion, _remove_fixture_trust, _safe_traceback,

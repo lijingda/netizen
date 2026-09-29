@@ -24,7 +24,7 @@ from openai_codex.generated.v2_all import (
     Turn,
 )
 
-from netizen.sdk_gap_adapter import facade_migration_requirements
+from netizen_cli.sdk_gap_adapter import facade_migration_requirements
 
 
 class CodexSdkCapabilityContractTest(unittest.TestCase):

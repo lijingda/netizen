@@ -39,8 +39,9 @@ their cited ADRs before changing that boundary.
   Controls and form callbacks: [commands and cards](docs/design.md#飞书命令与控制卡片).
   Preserve the referenced
   ADRs' exact identity, context, display, and file-evidence contracts.
-- SQLite and schema migration policy: [data](docs/design.md#channel-数据库与结构校验) and
-  [ADR 0075](docs/adr/0075-migrate-channel-databases-during-installation.md).
+- SQLite and schema migration policy: [data](docs/design.md#channel-数据库与结构校验),
+  [ADR 0075](docs/adr/0075-migrate-channel-databases-during-installation.md), as amended by
+  [ADR 0076](docs/adr/0076-separate-cli-installations-from-instance-data.md).
   App credentials: [credential source](docs/design.md#飞书应用凭据).
   Service environment and native settings: [configuration](docs/design.md#原生环境与能力配置).
   Admin Web: [queries and actions](docs/design.md#管理查询与操作), including
@@ -56,8 +57,10 @@ their cited ADRs before changing that boundary.
   ordinary start/steer admission and feedback, input-receipt Run semantics,
   and lifecycle-derived suspension independent of manual enablement.
 - Installation, release, permissions, and platform service management:
-  [deployment](docs/deployment.md). Routine Agent installation starts with the
-  README command and follows installer output; consult the relay procedure for
+  [CLI deployment](docs/cli.md) and [platform/live evidence](docs/deployment.md).
+  [ADR 0076](docs/adr/0076-separate-cli-installations-from-instance-data.md) replaces
+  the per-instance release installer with an environment-scoped Python package.
+  Routine Agent installation starts with the README command and follows setup output; consult the relay procedure for
   alternate setup or troubleshooting. Read the relevant acceptance gates
   before changing deployment behavior.
   Multi-instance root ownership and the scoped Skills adapter are recorded in
@@ -78,8 +81,8 @@ their cited ADRs before changing that boundary.
   SDK owns native Threads, Turns, history, tools, configuration, and permissions.
 - The in-process Admin Web is a management-only adapter over that same
   application/runtime boundary (ADR 0031). The one-shot Admin deployment process
-  for upgrades and explicit restarts is the sole deployment exception
-  (ADR 0057/0059). The sole in-process Scheduler shares that boundary; Admin
+  for explicit instance restarts is the sole deployment exception
+  (ADR 0057/0059/0076); Admin cannot upgrade the shared program. The sole in-process Scheduler shares that boundary; Admin
   may maintain Scheduled Plans and request manual runs of their saved versions,
   but cannot submit arbitrary immediate Prompts (ADR 0061/0068).
   Do not add another runtime, long-lived service, scheduler, history model, or
@@ -150,18 +153,15 @@ their cited ADRs before changing that boundary.
   application credential source (ADR 0066). Share its documented Lark CLI file
   format without adding a CLI installation/runtime dependency. Preserve exact-App
   repair versus whole-file deletion for rebinding and atomic credential writes.
-- Published Release and Source Install share one activation/rollback transaction.
-  Migrate supported Channel schemas from v14 only through this shared installer;
-  Runtime still requires the current full schema. Preserve published migration
-  steps and add historical fixtures whenever schema or persisted semantics change
-  (ADR 0075). Keep database rollback gated by both unloaded manager target and a
-  held lifetime lock throughout restoration. Preserve the original recovery snapshot
-  across interrupted retries. Persist candidate admission before opening input;
-  once marked, preserve its database and recover only with the exact candidate.
-  Never reapply a snapshot after restarting the restored old service. Restore
-  CLOEXEC before Codex children start. Loaded/active is never a substitute for the
-  private ready marker (ADR 0034).
-- Built-in Skills belong to the physical running release. Register their root on
+- Programs belong to the selected Python environment; instance roots contain data,
+  not release/venv/current trees. Explicit setup initializes new data, every actual
+  service start validates and migrates under the lifetime lock before Runtime admission
+  (ADR 0076). Preserve v14 baseline and frozen migration steps/fixtures. Missing data
+  never means a new instance. SQL failures before commit roll back; failures after
+  commit retain the new database, never automatically restore an old snapshot.
+  Restore CLOEXEC before Codex children start. Loaded/active is never a substitute
+  for the private ready marker.
+- Built-in Skills belong to the physical installed package. Register their root on
   the same initialized App Server before catalog/Thread access; fail startup if
   registration fails. Never install, snapshot, roll back, or uninstall global user
   Skills/Codex state. Preserve root ownership markers and unrelated content; never
@@ -170,23 +170,28 @@ their cited ADRs before changing that boundary.
   retain the actual listener and atomically save its port before readiness. An
   explicit/persisted port never drifts. `/admin` reports this instance's live URLs;
   Cookie names and the visible root identify the instance without a shared gateway.
-- The maintainer chooses formal release timing; `scripts/release.py` executes
-  the chain (ADR 0050). Nothing auto-releases on main or tag pushes. Admin upgrades
-  target an exact immutable official Release through the shared installer/lock;
-  Admin restarts use the exact installed service script without installation. Both
-  share that lock and keep bounded results in deployment state, never SQLite
-  (ADR 0057/0059).
-- Use the official `install.sh` for Published Releases and `./dev-install.sh`
-  for the exact workspace. Agents download the official installer to a file;
-  run it with `</dev/null` and follow its output. Public installation can perform
-  initial browser setup and exact-App repair without a TTY (ADR 0062); Admin
-  upgrades still return `requires_action` without browser authorization.
-  Relay any verification URL to the user while retaining the same installer
+- The maintainer chooses formal release timing; nothing auto-releases on main or tag
+  pushes. `netizen update` uses only its selected environment, rejects --root, records
+  the running set, confirms stop before package replacement, validates with a new
+  process, then restores only that set. Stop failure aborts without compensation;
+  unknown installation state never triggers blind restart. No runtime version guard,
+  separate instance registry, cross-instance rollback, or hidden package-manager fallback.
+  Service definitions are the inventory; finite package-layout adapters must fail closed.
+- Control is root-scoped, update is environment-scoped. Existing bindings never follow
+  the calling venv. Explicit switching is remove (retain data) then target-environment
+  start; no rebind command. Removal displays exact scope; -y skips confirmation only.
+  --purge deletes only verified instance-owned files, never Projects or a whole root.
+- Install the ordinary netizen-cli package with the user's package manager, then run
+  netizen setup and start. The package install does not configure or start services.
+  Public setup can perform initial browser setup and exact-App repair without a TTY
+  (ADR 0062); Admin restart never performs browser authorization.
+  Relay any verification URL to the user while retaining the same setup
   process and reading its stderr progress; credentials are saved privately.
   Never request an App Secret in chat. Other interaction modes are documented
   in the deployment handoff procedure.
-  A successful official installer exit completes routine upgrade verification;
-  expand checks only for an ambiguous result, changed boundary, or user request.
+  Package update and per-instance ready results are separate evidence; do not report
+  a zero package-manager exit as proof every instance recovered. Native uninstall is
+  not intercepted; remove/transfer all service bindings before uninstalling the package.
 - No default remote target is defined. For operations, read ignored
   `LOCAL_ENVIRONMENT.md` when present; otherwise use an explicit target. Never
   copy its coordinates into tracked files/artifacts or treat it as runtime config.
@@ -197,6 +202,7 @@ their cited ADRs before changing that boundary.
   avoid tests that lock documentation wording or source layout.
 - Use `make check` for the repository gate. Run affected live phases only under
   the [documented triggers](docs/deployment.md#代码门禁与按需实时兼容性验证).
-  Formal Releases reuse successful CI for the exact main commit; routine
-  Published Release upgrades use installer success rather than repeated acceptance.
+  Formal Releases reuse successful CI for the exact main commit; package changes
+  require isolated wheel/sdist validation. Synthetic tests do not replace platform/live
+  acceptance; historical release-installer evidence does not certify the new CLI.
 - Review the final diff and report checks, results, and material verification gaps.

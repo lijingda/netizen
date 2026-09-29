@@ -1,0 +1,5 @@
+include _build.py
+include config.example.yaml
+recursive-include skills/netizen-lark *
+recursive-include skills/netizen-user-guide *
+global-exclude __pycache__ *.py[cod]

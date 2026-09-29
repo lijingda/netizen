@@ -9,6 +9,11 @@ merges it, waits for the exact merge commit's main CI, creates and pushes the
 protected annotated tag, dispatches the release workflow with the notes, and
 follows the workflow to the published release.
 
+The PyPI netizen-cli Trusted Publisher must already authorize this repository,
+release.yml and the published-release environment. The workflow's manual UI
+defaults to a draft; this maintainer-requested full chain explicitly publishes
+the wheel/sdist to PyPI and only then finalizes the GitHub Release (ADR 0076).
+
 Anything needing human judgement fails closed and escalates: a breaking
 change in the range, an explicitly chosen version, or any failed gate.  The
 script never weakens the release workflow's own integrity checks; a bad run
@@ -53,9 +58,7 @@ TAG_MESSAGE_TEMPLATE = "Netizen {tag}"
 # guards these anchors against drift.
 VERSION_FILES: tuple[tuple[str, str], ...] = (
     ("pyproject.toml", 'version = "{version}"'),
-    ("netizen/__init__.py", '__version__ = "{version}"'),
-    ("README.md", "releases/download/{tag}/install.sh"),
-    ("docs/deployment.md", "releases/download/{tag}/install.sh"),
+    ("netizen_cli/__init__.py", '__version__ = "{version}"'),
 )
 
 SECTION_ORDER = ("Features", "Bug Fixes", "Documentation", "Other Changes")
@@ -423,6 +426,8 @@ def dispatch_release_workflow(tag: str, notes_path: Path) -> None:
         tag,
         "-f",
         f"tag={tag}",
+        "-f",
+        "publish=true",
         "-F",
         f"notes=@{notes_path}",
     )

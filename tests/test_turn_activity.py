@@ -11,7 +11,7 @@ from openai_codex.generated.v2_all import (
 )
 from openai_codex.models import Notification, UnknownNotification
 
-from netizen.turn_activity import (
+from netizen_cli.turn_activity import (
     ACTIVITY_OPERATION_TEXT_LIMIT,
     ACTIVITY_TEXT_LIMIT,
     TurnActivityKind,

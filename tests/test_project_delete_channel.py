@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from netizen.bindings import BindingNotFound, ProjectNotFound, SideTopicState
-from netizen.domain import NativeCapability
+from netizen_cli.bindings import BindingNotFound, ProjectNotFound, SideTopicState
+from netizen_cli.domain import NativeCapability
 from tests.support.channel_fixtures import side_channel_fixture
 from tests.support.channel_messages import FakeMessage
 

@@ -33,10 +33,10 @@ from openai_codex import (
 import openai_codex
 from openai_codex.types import ThreadTokenUsageUpdatedNotification
 
-from netizen.codex_runtime import _is_paginated_turn_read_unavailable
-from netizen.model_settings import ModelCatalog, STANDARD_SERVICE_TIER_ID
-from netizen.prompt_projection import CurrentMessageProjection, render_plain_prompt
-from netizen.sdk_gap_adapter import (
+from netizen_cli.codex_runtime import _is_paginated_turn_read_unavailable
+from netizen_cli.model_settings import ModelCatalog, STANDARD_SERVICE_TIER_ID
+from netizen_cli.prompt_projection import CurrentMessageProjection, render_plain_prompt
+from netizen_cli.sdk_gap_adapter import (
     AppServerGoalControl,
     AppServerSideBoundaryControl,
     AppServerSkillCatalog,
@@ -45,12 +45,12 @@ from netizen.sdk_gap_adapter import (
     GoalStatus,
     facade_migration_requirements,
 )
-from netizen.terminal_cleanup import PinnedExperimentalTerminalCleanup, TerminalCleanup
-from netizen.turn_plan_observer import (
+from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup, TerminalCleanup
+from netizen_cli.turn_plan_observer import (
     PinnedTurnActivityObserver,
     TurnActivityObservation,
 )
-from netizen.turn_files import turn_diff_summary
+from netizen_cli.turn_files import turn_diff_summary
 
 
 _NOT_MATERIALIZED_SUFFIX = (

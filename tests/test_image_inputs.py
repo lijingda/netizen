@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from openai_codex import ImageInput, TextInput
 
-from netizen.image_inputs import (
+from netizen_cli.image_inputs import (
     ImageInputContractError,
     ImageInputUnavailable,
     ImageReference,

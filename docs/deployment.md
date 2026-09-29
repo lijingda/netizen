@@ -1,29 +1,26 @@
 # Linux 与 macOS 独立实例部署
 
-> 同机多实例决策见 [ADR 0074](adr/0074-deploy-independent-instances-by-root.md)，
-> 验收要求见[多实例与内置 Skills](#多实例与内置-skills-验收)。本文描述当前源码；历史
-> Release 不因文档更新而获得新参数。新两平台多实例实机验收与内置 Skills 实际执行
-> 加载须分别记录，不能复用旧单实例部署的历史绿灯。
+> 当前程序分发与维护遵循 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md)
+> 和 [CLI 安装与维护](cli.md)。新 CLI 尚未发布到 PyPI；开发不等于发布或真实安装迁移。
+> 本文保留的旧 release／激活回滚记录均为历史证据，不能证明 CLI 的安装、更新或两平台
+> 服务验收已经通过。源码测试、实际 SDK 执行、浏览器流程与平台服务验收分别记录。
 
-Netizen 以执行正式 `install.sh` 或源码 `dev-install.sh` 的当前用户运行，与该用户的 CLI 共用标准 `$CODEX_HOME`
-（默认 `~/.codex`）；不创建专用 Agent 用户、第二套 Codex 状态或 system-level daemon。
-正式支持 Linux 的 systemd user manager，以及 macOS 14+ 当前 GUI 登录用户的 LaunchAgent；
-Apple Silicon 与 Intel Mac 均在支持范围内。macOS 注销后停止、下次登录自动启动；不提供
-LaunchDaemon。
-同一账号可以用不同安装 root 部署独立机器人，每实例各自持有服务、配置、凭据、Channel
-数据库和 Admin listener；不提供跨实例网关、统一管理或权限隔离。各机器人分别绑定其
-飞书应用，不把重复使用同一 App 当作高可用模式。
+Netizen 使用用户选择的 Python 安装，服务以当前账号运行，共享原生 Codex 状态。
+不下载 Python、不创建隐藏 venv，不在每个实例保存程序 release。Linux 使用 systemd
+user manager，macOS 14+ 使用当前 GUI 用户的 LaunchAgent，不提供 LaunchDaemon。
+一个账号可运行多个独立 root，每实例一个机器人、Channel DB、Admin listener 和业务
+服务；这不是跨实例权限隔离、网关或同 App 高可用模式。
 
 ## 按任务查阅
 
 | 要完成的任务 | 阅读入口 |
 | --- | --- |
-| 首次安装 | [选择部署目标](#选择部署目标) → [前置门禁](#前置门禁) → [安装](#安装)；常规 Agent 代装直接使用 [README 命令](../README.md#快速开始)，按安装器提示继续。 |
+| 首次安装 | [选择部署目标](#选择部署目标) → [前置门禁](#前置门禁) → [安装](#安装)；Agent 使用 [CLI 安装与 setup](cli.md#安装与首次使用)，按输出继续。 |
 | 更换飞书应用或补齐权限 | [更换飞书应用与权限修复](#更换飞书应用与权限修复)；新增权限契约先看[维护飞书权限契约](#维护飞书权限契约)。 |
-| 升级、启停或卸载 | [脚本操作与成功判据](#升级启停和卸载)、[管理页升级](#从-admin-升级)、[管理页重启](#从-admin-重启)。 |
+| 升级、启停或卸载 | [CLI 操作与成功判据](#升级启停和卸载)、[程序更新边界](#从-admin-升级)、[管理页重启](#从-admin-重启)。 |
 | 调整工具环境、代理或证书 | [服务环境](#服务环境)及[安装前提](#安装)；修改账号 profile 后重启服务。 |
 | 配置项目、访问或轮换 Admin 凭据 | [配置与管理页访问](#配置与管理页访问)。 |
-| 排查启动失败、未知状态或回滚 | [候选验证与切换](#候选验证与切换)、[Fail-closed 运维语义](#fail-closed-运维语义)、[平台服务管理器与日志](#平台服务管理器)。 |
+| 排查启动失败、未知状态或迁移失败 | [候选验证与切换](#候选验证与切换)、[Fail-closed 运维语义](#fail-closed-运维语义)、[平台服务管理器与日志](#平台服务管理器)。 |
 | 开发与发布 | [本地开发](CONTRIBUTING.md)、[代码门禁与 live 触发条件](#代码门禁与按需实时兼容性验证)、[兼容性结论](#已验证的兼容性结论)、[正式发布](#发布正式-release)。 |
 
 ## 选择部署目标
@@ -39,7 +36,7 @@ SSH config 中的 alias，也可以是 `<user>@<hostname>`。LaunchAgent 的首�
 `LOCAL_ENVIRONMENT.example.md` 为被 Git 忽略的 `LOCAL_ENVIRONMENT.md`。该文件不是
 运行时配置；没有它的全新 clone 仍应完全按本文完成部署。
 
-每个 Python release 与自己的 venv 一起安装到选定实例 root。ADR 0014/0074 的
+程序安装在选定的长期 Python 环境，实例 root 只保存数据。ADR 0014/0074 的
 Goal/Skills、ADR 0021 的 Side 与 ADR 0037 的 Thread Delete Adapter 不做运行时版本
 allowlist；修改 pinned SDK/App Server 或这些 Adapter 时，开发迭代必须对实际 resolved
 组合运行受影响的 capability harness。Delete 能力变更还必须覆盖 disposable lifecycle
@@ -51,81 +48,45 @@ SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕�
 ## 目录
 
 ```text
-<NETIZEN_ROOT>/                                # 默认 effective user 的 ~/.netizen
-  .netizen-root                               # 受管命名空间与布局版本标记
-  config.yaml                                   # Channel 配置，0600
-  lark-app/                                    # 应用凭据目录，0700
-    config.json                                # netizen profile：App ID 与 Secret，0600
-  credentials/
-    admin-web-secret                            # 独立 32-byte base64url credential，0600
+<selected-python-environment>/
+  .../site-packages/netizen_cli/               # 程序、Admin 静态资源
+    resources/skills/                         # 两个内置 Skills
+    resources/config.example.yaml
+  bin/netizen                                 # console entry point
+<NETIZEN_ROOT>/                                # 默认有效账号 ~/.netizen
+  .netizen-root                               # 私有归属标记
+  .netizen-initialized                        # 显式初始化／清理阶段证据
+  config.yaml                                # 私有 Channel 配置
+  lark-app/config.json                       # 固定 netizen profile
+  credentials/admin-web-secret
   state/
-    channel.sqlite3[-wal|-shm]                  # Binding/Turn settings/Task feedback/Registry/Dedup
-    .install.lock / .activation-intent.json     # 跨卸载锁与安装事务恢复记录
-    update.json                                # 最近一次 Admin 升级/重启的有界 typed 结果，0600
-    netizen-update-<rootDigest>-<operationId>.plist # macOS 一次性部署提交文件，终态后清理
-    service.lifetime.lock / service.ready       # 精确退出与 readiness 契约
-    netizen.log / launchd.stderr.log            # macOS 有界服务日志/launcher 错误
-    activation-recovery-<id>/                  # 安装事务恢复材料，完成后清理
-      manifest.json / admission                # 原始状态与阶段／已可能开放输入的证据
-      database/                                # 原始数据库及 sidecar 快照
-    rollback-recovery-*                         # 旧安装器可能保留的恢复材料
-  releases/.netizen-managed                     # 删除前必须匹配的 ownership marker
-  releases/<sha256>/source/                     # Published Release 或当前工作区快照
-  releases/<sha256>/source/skills/              # 当前 release 的两个内置 Skills
-  releases/<sha256>/source/extensions/          # 随版本提供、由用户手动安装的可选扩展
-  releases/<sha256>/venv/                       # 与源码成对的 runtime
-  current -> releases/<sha256>                  # 现役 release
-  previous -> releases/<sha256>                 # 一个回滚点
-  cache/.netizen-managed                        # 可删除安装缓存的 ownership marker
-~/.config/systemd/user/
-  netizen-<rootDigest>.service                  # Linux 渲染后的 user unit
-~/Library/LaunchAgents/
-  io.github.lijingda.netizen.<rootDigest>.plist # macOS 渲染后的 LaunchAgent
-${CODEX_HOME:-~/.codex}/                        # 账号共享的原生 Codex 状态，不由卸载器删除
+    channel.sqlite3[-wal|-shm|-journal]
+    .install.lock                            # 本实例维护互斥
+    service.lifetime.lock / service.ready
+    service.identity.json                    # PID/解释器/prefix/root；不是注册表
+    update.json                              # 最近一次 Admin 重启摘要
+    netizen.log*
+    migration-backups/                       # 需要迁移时的私有恢复材料
+~/.config/systemd/user/netizen-<rootDigest>.service
+~/Library/LaunchAgents/io.github.lijingda.netizen.<rootDigest>.plist
+${CODEX_HOME:-~/.codex}/                      # 用户共享原生状态，不属于实例清理范围
 ```
 
-配置、Channel 状态和 Codex 原生状态都在 release 之外。ProjectRegistry 仍会解析并保存
-canonical cwd；安装器不复制 Project，也不会创建 per-Binding workspace。
+当前布局没有 releases、current、previous 或每实例 venv。root 选择为 `--root` >
+`NETIZEN_ROOT` > 有效账号 ~/.netizen，显式空值拒绝，相对路径以调用 cwd 为基准，
+解析为 canonical absolute path。服务定义固定该 root 与绝对 Python 入口，终端切换 venv
+不改变已有绑定；rootDigest 只是 canonical root 的 SHA-256 前 24 个十六进制字符。
 
-正式 Release archive 和 Source Install 快照都包含 `extensions/`。用户可以从解压后的
-版本包或 `<NETIZEN_ROOT>/current/source/extensions/` 取用扩展，按各自说明手动安装，例如
-[netizen-herdr](../extensions/netizen-herdr/README.md)。扩展文件参与版本源码摘要校验，
-但不会自动安装到 Codex skills 目录；用户手动安装的副本不由 Netizen 升级或卸载管理。
+实例目录属于当前账号且不可被组／其他用户写入。setup 只认领符合契约的空命名空间或
+安全预配置文件，原子创建归属标记；已有外来 state、损坏标记、symlink 或混合 root
+明确拒绝，不以名称猜归属。初始化证据区分首次创建、已有实例缺库和未完成 purge。
+配置 `instance.dataDir` 必须是该 root 的 state，Project 与共享 Codex 数据不搬动。
 
-root 选择优先级是 `--root` > `NETIZEN_ROOT` > effective user 的 `~/.netizen`。显式空值
-拒绝；相对路径相对调用 cwd，`~/` 使用有效账号 home，随后解析 symlink 为 canonical
-absolute path。服务定义固定该路径，启动时覆盖 shell 中同名变量；从任意 checkout 或
-release 调用脚本仍须明确选择 root，不能根据脚本位置推断。移动目录须重新注册服务，
-不提供自动搬迁。`rootDigest` 是 canonical root 的 SHA-256 前 24 个十六进制字符，
-不是用户配置的第二份实例身份。
-
-安装位置不使用 XDG profiles。`CODEX_HOME` 继续遵循原生选择，账号登录、配置、历史、
-用户 Skills 与 MCP 共享；每实例仍独立启动自己的 App Server。Project 不复制，默认
-`instance.projectRoot` 仍为账号 `~/projects`；受管 `instance.dataDir` 必须是当前 root
-的 `state`，复制别的实例的绝对 dataDir 会被拒绝。
-
-root 可以是已有的 `~/share` 等目录，但不认领其中陌生文件，也不改变已有 root 的模式。
-已有 root 必须归当前用户所有且不可被组/其他用户写入，不合规时原样拒绝。
-在创建 state/安装锁或写配置前先检查受管命名项：无标记时只允许不存在或为空的受管
-子目录，以及私有、当前用户拥有的普通预配置与凭据文件；凭据格式也在此时校验。
-之后原子创建并持久化 `.netizen-root`。YAML 完整语义和 dataDir 一致性由候选环境在
-激活前校验；无效配置可留下准备目录，但不会自动修复或覆盖原始内容，也不会激活服务。
-这避免 stdlib-only bootstrap 额外建立解析依赖环境。标记损坏、
-目录非空而无归属或已知源码/Project/CODEX_HOME 与可删除子树重叠时明确拒绝。根目录和
-账号 home 永不作为递归删除目标；保留标记用于失败重试和卸载后重装。不扫描所有实例，
-不接管旧固定布局，不支持跨此次部署格式变化的自动降级。
-
-`releases/cache` 是专用的可删除命名空间，不得放置用户 Project、共享 CODEX_HOME、
-持久配置、源码输入或另一实例。重叠检查只针对当前已知路径，不承诺发现之后人为登记
-到 release 内的项目。服务摘要名称本身也不是归属证据；覆盖或卸载服务定义前仍核对
-exact root、launcher、配置路径和受管标记，冲突则失败而非接管。
-
-安装器只会新建空的 `releases`/`cache`，或复用带精确 `.netizen-managed` marker 的目录。
-若它们已经非空且无标记，安装和卸载都会 fail closed，避免仅凭目录名认领并递归删除。
-Linux 安装器还会读取 systemd user manager 的环境；若它用 `XDG_CONFIG_HOME` 或
-`SYSTEMD_UNIT_PATH` 排除了固定的 `~/.config/systemd/user`，安装会在切换前明确失败。
-macOS 则在任何配置、release 或服务文件 mutation 前检查当前 GUI launchd domain，并用
-`plutil -lint` 与结构化回读验证 plist。
+remove 默认仅解除系统服务及自启，保留数据；--purge 先展示并确认有限、已验证的文件
+清单，永不递归删除 root／home，不删除未知文件、Project 或共享 Codex 状态。
+移除实例不卸载 Python 环境中的共享包。旧目录手工转换见[CLI 手册](cli.md#admin-与旧安装)。
+可选[netizen-herdr 扩展](../extensions/netizen-herdr/README.md)仍由用户从源码按说明安装，
+不是 wheel 自动安装的全局 Skill。
 
 ## 前置门禁
 
@@ -138,19 +99,17 @@ codex login status
 codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
 ```
 
-受管安装器不会安装 Codex CLI/Codex App 或代用户登录，也不要求系统 `PATH` 中存在全局
-`codex`。候选 release 准备完成后，它会使用 venv 中随 SDK 固定的 bundled Codex runtime，
-以将运行 Netizen 的账户 home 和 `${CODEX_HOME:-~/.codex}` 执行 `login status`。该检查不区分
-Linux/macOS，也不区分登录由 CLI 还是 App 建立；只要固定 runtime 能识别有效状态就继续。
-未识别到登录时，安装器会输出 Codex CLI 与 Codex App 的官方安装地址和精确重试入口后退出，
-不会激活候选服务；已完成验证的候选 release 可以在登录后重试时复用。
-不要把一次登录成功当作持久前提。若命令出现认证错误，应先独立验证登录，不要用服务
-失败掩盖认证问题。
+CLI setup 不安装全局 Codex CLI/App、不代用户登录，也不要求 PATH 上存在 codex。
+它用当前安装所带的固定 bundled runtime 在当前账号环境执行 login status；显式
+CODEX_HOME 与后续绑定保持一致，未指定则使用账号默认。setup 不执行账号 profile，
+profile 只在受管服务启动边界内加载；若用户依赖 profile 导出的自定义 Codex home，
+应从正常账号环境执行 setup 或显式提供该路径。登录错误先独立修复，不把一次检查
+当作长期有效保证。
 
 逐条引用会调用“获取指定消息”，普通/富文本图片还会调用“获取消息中的资源文件”。群聊
 Binding 的 catch-up 模式会在收到有效 @ 后，通过同一应用身份调用“获取会话历史消息”和
 exact “获取指定消息”；群主线使用 chat container，普通话题使用 thread container。
-受管安装器的官方 SDK 浏览器流程会用最小模板请求下面的应用身份权限、
+CLI setup 的官方 SDK 浏览器流程会用最小模板请求下面的应用身份权限、
 `im.message.receive_v1` 应用身份事件和 `card.action.trigger` 回调，不申请用户身份权限或
 token；手工准备的应用必须逐项配置。无论来源，飞书应用版本在发布前都必须确认：
 
@@ -228,15 +187,15 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 
 所有面向 `main` 的代码先通过 `make check`；PR 和 main push 的 GitHub CI 都在 Linux x64
 标准 CPython 3.11-3.14，以及 macOS arm64 标准 CPython 3.13/3.14 执行这一个统一本地门禁。
-正式 Release 复用 exact main commit 的成功 CI 结论，不重新执行本节测试。
+发布可复用 exact main commit 的成功 CI 结论，但不能用旧 archive 门禁替代新包验收。
 固定 SDK synthetic probes 的命令、参数和执行顺序统一由 `scripts/check_sdk.py` 维护；
-`make check` 与安装器的目标机 Host Validation 都调用该入口，失败即停止后续探针。
+`make check` 调用该入口，失败即停止后续探针；新 CLI 包安装不重复运行完整测试。
 SDK synthetic 门禁还要求 20 次快速完成通过原生 handle、20 次公开 read 恢复和
 40 次 usage/diff drain，交替覆盖先观察到运行中和启动响应前已经完成的 Turn，
 验证开始请求窗口内的通知保留与终态后唯一消费。
 Main Qualification 的 Linux 与 macOS jobs 均显式安装 Node.js 22，执行 Admin JavaScript
 行为测试；在 `CI=true` 时缺少 Node.js 会使测试失败。Node.js 是开发和 CI 的测试工具，
-不参与前端构建，也不增加生产运行或 Source Install 的前置依赖。本地（包括 Source Install）
+不参与前端构建，也不增加生产运行的前置依赖。本地开发
 缺少 Node.js 时该项测试会明确跳过，门禁通过不代表 JavaScript 行为测试已完成；其必跑保证
 由 Main Qualification CI 提供。
 macOS job 还会从安装后的 wheel 实际初始化系统钥匙串 truststore；CI 没有真实应用凭据与
@@ -541,7 +500,7 @@ Project trust 配置不变；本次没有真实飞书投递、客户端点击或
 | 调度与存储 | 四类规则、时区/DST、截止、高水位、宽限/missed、两类目标的交接屏障、原会话未知不阻塞下一到期点、手动不改时间游标、不同计划并发、CAS/幂等、裁剪后原 Run 回执及每个交接断点的重启行为 |
 | 原会话输入 | exact Binding/Turn 身份、空闲 start 与运行中 steer、Goal 换轮、配置/上下文竞态、系统来源、原发起人及结束提及保留、catch-up 锚点与接收后游标提交 |
 | 飞书与普通生命周期 | 五类来源的自然语言和 /cron；真实 root/seed 或原位置锚点、结果精确归属、卡片完整表单/重试/分页、Activity/Files、停止/归档/删除及极快终态；原会话切换/归档暂停、恢复不补跑及删除联动 |
-| Admin 与安装 | 跨主机认证/CSRF、三个入口一致性、Project 删除与在途交接、App 切换、当前库重装、受支持旧库迁移与不受支持库只读拒绝、数据库/release 失败及中断恢复、内置 Skills 随 release 恢复 |
+| Admin 与安装 | 跨主机认证/CSRF、三个入口一致性、Project 删除与在途交接、App 切换、当前库重装、受支持旧库迁移与不受支持库只读拒绝、启动迁移提交前后失败、实例恢复报告、内置 Skills 来自实际安装包 |
 
 服务只新增同一 background loop 内的 Scheduler 和 loopback 动态端口 MCP；无需用户安装
 新 Skill、手动配置 MCP 或启动另一个服务。公开 CodexConfig 只追加本次进程专属随机
@@ -550,45 +509,31 @@ MCP entry，环境完整继承后仅增加一个随机名称的临时 bearer key
 Admin 关闭时 MCP 仍可用。停止先关闭认领和管理 admission、排空在途交接，再执行既有
 普通 Turn shutdown 并关闭传输；重启不补跑错过的时间，也不重发结果未知的执行。
 
-安装边界验收包括当前 schema 完整初始化与重装、受支持旧库迁移、不受支持库只读拒绝、
-当前元数据与 Side/Project 墓碑保留，以及失败／中断恢复；manager target 未卸载或未能
-取得 lifetime lock 时禁止数据库恢复，取得后须持锁至全部写入完成。
+启动边界验收包括当前 schema 显式初始化、受支持旧库迁移、不受支持库只读拒绝、
+元数据与 Side/Project 墓碑保留。迁移持有 lifetime lock；提交后失败不自动恢复旧数据库。
 
 ### 数据库迁移与中断恢复验收
 
-[ADR 0075](adr/0075-migrate-channel-databases-during-installation.md) 从 schema v14 建立
-持续维护的前向迁移基线。当前 schema 仍为 v14，因此当前实现没有生产迁移步骤；
-框架的跨版本执行使用独立测试迁移验证，不能据此声称不存在的生产 v15 已通过验收。
-v13 及更早数据库和旧服务／安装布局仍不支持自动迁移。
+[ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移移到每次实际
+启动，保留 ADR 0075 的 v14 基线与冻结步骤。当前仍为 v14，没有虚构生产 v15；
+旧 schema／布局的转换不因此自动得到支持。以下为新 CLI 的验收要求，不是通过记录：
 
-以下是变更相关的验收要求，不是已通过的记录。先执行 `make check`，再在隔离 root 和
-明确指定的可恢复测试账号上，分别验证 Linux systemd user manager 与 macOS LaunchAgent：
+- setup 才创建新库；start、自动重启及恢复启动都校验已有库，缺库不能重新初始化。
+- lifetime lock 从迁移准备持续持有到服务退出；同实例并发启动、查询和更新不得成为
+  第二个 writer。Runtime 仅在完整校验后开放输入。
+- 冻结历史夹具覆盖相邻及跨版本路径、关联记录和墓碑、结构／约束等价性。较新／未知、
+  坏约束及缺路径拒绝业务启动，不改库。
+- 只在有迁移时备份；事务内异常／中断使全部步骤和版本一起回滚。事务提交后即使
+  配置、SDK、权限、端口或 ready 失败，也保留新库，不自动还原备份。
+- 确定的配置／schema 准入失败在受管入口不发布 ready，也不进入失败自动重试循环；
+  CLI start 仍报告失败，手工 Runtime 启动非零退出。修复后显式 start。
+- 包更新成功但部分实例启动失败逐项报告，不回滚其他实例；运行／停止与自启意图区分。
+  purge 中断保留阶段证据，不能误判为空的新实例。
 
-- 使用新库、当前完整库、含 Scope/Binding/Project/Side 墓碑、会话默认配置及调度关联
-  数据的旧库夹具，验证新建与迁移结果一致、旧值保留；每个新增 schema 同时覆盖相邻和
-  从 v14 起跨多个版本的升级。较新／未知版本、缺失路径及坏约束须在停服前拒绝。
-- 正式安装、源码安装与 Admin 升级共用相同迁移路径；下载／依赖准备期间旧服务继续
-  工作，active/stopped 和 enabled/disabled 意图保留，同 root 并发安装互斥。
-- 在迁移步骤中注入异常，确认完整路径的数据与版本一起回滚。事务提交前终止安装器
-  后重跑，仍使用最初恢复快照，不能把中间状态重新归类为新安装或重建空库。
-- 分别在数据库提交后、`current` 切换后、候选启动前后、持久 admission marker 写入
-  前后及 ready 后终止安装器再重跑。marker 写入失败不得开放输入；没有 marker 的
-  候选启动失败可完整回滚。marker 存在后写入一条测试记录，确认只允许 exact 候选
-  向前恢复且保留记录，拒绝改装其他版本。证据不足时须保留材料并明确报错，不能仅凭
-  ready 或 schema 相同报告成功。旧服务已恢复并接收新数据后重试，不得再次还原快照。
-- manager target 未卸载、lifetime lock 仍被其他进程持有、恢复材料缺失／损坏或恢复
-  写入失败时保持失败关闭；数据库恢复过程中另一个服务不能取得 lifetime lock。
-  首次安装在服务定义发布前失败或中断后须能重试；Linux 停止缺失 unit 报错时，仅在
-  manager 查询明确为 `not-found`／`inactive` 且 lifetime lock 已释放后允许恢复。
-  在主数据库恢复后、WAL 恢复前中断，须继续恢复整份快照，期间旧程序不得接收输入；
-  `database_restored` 已持久记录后重试不再复制快照。
-  完整回滚才能报告 `rolled_back`；不能确认的结果保留为 `recovery_required`。
-- 恢复与清理只操作本实例记录的 release、服务定义和数据库文件，保留配置意图与共享
-  Codex 状态。中断恢复成功后才能清理材料；重复执行不再次迁移或复用过期快照。
+每个平台记录 exact Python／包工具／CLI 版本、源目标 schema、故障点和最终状态。
+内存 SQLite、fake manager 或旧安装器成功均不能替代新 CLI 的实机证据。
 
-实机记录须注明 exact 候选、平台、夹具源／目标 schema、故障点、退出结果及最终
-服务／数据库状态。迁移提交与真实 manager 停启的证据不能由内存 SQLite、FakeBackend
-或常规安装成功代替；尚未执行的平台与故障场景须分别列明，不影响已记录证据的范围。
+#### 历史证据：旧 release 安装事务（不适用于 CLI 验收）
 
 2026-09-28 的隔离实机记录：`tests/support/deployment_migration_probe.py` 在 macOS
 LaunchAgent 与 Linux systemd user manager 各通过 active/stopped 升级、admission 前
@@ -601,13 +546,8 @@ guarded-current／`database_restored` 恢复路径及本轮轻量简化；原有
 服务与夹具均已清理。探针使用真实服务管理器和生产安装／迁移代码，服务本体是最小
 夹具；不加载 SDK 或飞书，不证明正式 Release 下载、完整 Runtime 或消息端到端行为。
 SIGKILL、WAL 半恢复及旧服务重启后新写入由真实 SQLite／子进程故障测试另行覆盖，
-不记作平台探针覆盖。可复现命令（workspace 必须尚不存在）：
-
-```bash
-python3 tests/support/deployment_migration_probe.py \
-  --workspace /tmp/netizen-migration-probe-<platform>-<id> \
-  --report /tmp/netizen-migration-probe-<platform>-<id>.json
-```
+不记作平台探针覆盖。该探针随旧 release 部署链退出当前源码，可在 Git 历史中查阅；
+不再作为新 CLI 的可执行验收入口，不能直接复用这条历史通过记录。
 
 ### 会话默认配置与自动创建验收
 
@@ -633,8 +573,8 @@ Adapter 边界时仍按[既有触发条件](#代码门禁与按需实时兼容�
   更早讨论；随后在群主线与话题分别验证从该消息之后读取。继续满足既有 chat/thread
   history rollout gate；本地“lower 等于 upper”的测试不能替代真实消息及客户端验收。
 - schema v14 新库完整初始化、当前库重装保留默认配置和规则顺序，v13 及更早库只读
-  拒绝。后续版本迁移遵循 ADR 0075；数据库/release 恢复沿用卸载 manager target 与 lifetime lock
-  双门禁。Project 删除后默认配置保留，使用时按不可用提示降级，不新增联动删除。
+  拒绝。后续版本迁移遵循 ADR 0076；启动迁移持续持有 lifetime lock，不提供自动旧库恢复。
+  Project 删除后默认配置保留，使用时按不可用提示降级，不新增联动删除。
 
 真实群聊消息和客户端操作须在指定的测试环境验收；缺少该条件时分别记录未验证范围，
 不能用 synthetic 结果声明飞书卡片、catch-up 或目标机安装回滚已通过。
@@ -670,53 +610,35 @@ Goal 需分别验证进度卡开关两种配置：已有卡片更新后都应独
 
 ### 多实例与内置 Skills 验收
 
-ADR 0074 改变部署格式、平台目标、启动环境和 Skill 加载边界。下面是新边界的验收要求，
-不是已通过的记录；既有日期证据只证明当时的版本和范围，不能替代本次验收。
+ADR 0076 改变程序归属、服务绑定与数据准入。以下要求须以新 CLI 单独验收，不复用旧
+安装器的历史绿灯。先运行 `make check`；包资源门禁必须覆盖 wheel、sdist 重建、包外 cwd
+和隔离导入，不允许依赖源码目录或实例 release。
 
-本地 `make check` 覆盖 root 规范化、目录归属与危险重叠拒绝、脚本参数透传、服务名称和
-ownership、维护链路 root 传递、端口绑定/固化/失败关闭、Cookie 区分、`/admin` 路由，
-以及 extra-roots 的 generated shape、固定 payload 和公开 facade 移除触发器。
-只读原生发现可单独运行：
+Linux 和 macOS 均需同一账号两个明确 root、两份独立 Python 安装，验证 setup 不启动、
+start 等待 ready、stop 确认退出、remove 保留数据、--purge／-y 精确范围、B 控制 A 但仍
+运行 A、remove→B start 的显式切换。服务定义损坏、环境消失、stop 超时、锁占用、
+stale ready／runtime identity 和异常 manager 查询必须失败关闭，不能误接管。
+
+环境更新分别验证普通 pip、uv pip、uv tool 的有限安装识别；自定义目录、symlink、
+同名多份安装、缺损元数据、无 pip 环境及不支持工具版本需要明确分类。pip／uv pip
+可靠无变化不停止实例，uv tool 允许无变化重启；停服失败不补偿、包失败不盲启、部分
+恢复失败不全局回滚。更新期间外部启动／外部包写入不在强互斥保证内，报告不得伪造状态。
+
+内置 Skills 仍只注册到同一初始化 App Server 的额外根，不写 config.toml 或全局 Skills。
+只读发现可用：
 
 ```bash
 .venv/bin/python scripts/probe_skill_roots.py --source-root "$PWD" --timeout 15
 ```
 
-此探针使用临时 Codex home，验证两个内置 Skill 的精确路径、额外根仅属于当前 App Server、
-清空后不再发现、未改 config.toml 或全局 Skills；输出 `model_execution_verified=false`。
-它不调用模型，不能证明实际执行加载。SDK/Adapter 变更后还须在目标登录环境中以生产
-相同的额外根注册顺序，分别验证普通新建/冷恢复、Side/fork、Goal 自动后续 Turn 与
-native 子 agent 的实际 Skill 执行，覆盖自然选择和显式 `$skill` catalog/revalidation。
-两个 App Server 在同一隔离测试 Codex home 分别注册不同额外根，确认目录不串线、共享
-配置零写入，默认用户 Skill/MCP 及同名、禁用、歧义规则仍生效。A/B 的 Lark Skill 应各自
-使用所属 App profile，root 缺失不回退；注册失败不得 ready，升级/回滚加载对应物理
-release，Skill 及引用资源损坏须在制品或候选校验中拒绝。
+这只验证 catalog 与路径，不证明模型实际执行。SDK／adapter／资源加载边界变化时，
+验证普通新建／冷恢复、Side/fork、Goal 后续 Turn 与 native 子 agent 的实际加载，
+自然匹配和显式调用都须覆盖；两实例额外根不串线，Lark Skill 使用所属 root，
+资源损坏或注册失败不得 ready。普通用户同名、禁用、歧义 Skill 保持原生规则。
 
-Linux 和 macOS 实机各用同一账号两个明确 root 完成安装、并行启动、单独重启、升级、
-故障回滚、停止和卸载；一实例操作不得改变另一个的服务、App profile、数据库或内置
-Skills。还须验证并发首次自动端口分配、已固化端口冲突失败、同 host 双 Admin 并行登录、
-`/admin` 实际 URL 与实例 root，以及含空格/Unicode 路径的正式 bootstrap 和维护 worker。
-不测试停止实例的端口登记或旧格式迁移，因为本版本不提供这些功能。
-
-故障与并发验收还须覆盖：
-
-- root 别名定位同一服务、并发 marker 认领、中断重试及卸载重装；保留已有陌生内容和
-  权限，冲突在 mutation 前拒绝。正式 bootstrap、源码安装及失败恢复提示保留原 root；
-  profile 导出另一 root 时，服务与 worker 仍使用原目标。
-- 同实例 CLI/Admin 维护互斥、不同实例不互阻，错 root 的锁 FD 被拒绝。A 的候选失败、
-  中断、回滚或卸载不能影响 B 的 listener、数据库、凭据、Skills 和维护 job。
-  未确认待恢复/清理所涉及的候选或旧进程已退出时，不得恢复数据库或清理其 release；
-  退出仍以 exact manager target 与 lifetime lock 为证据，stale ready、worker 失联和
-  结果未知不得猜测成功或重新派发。
-- 自动端口候选耗尽、非占用错误、部分 socket 失败及配置写入失败的清理；固化后重启、
-  重装和升级不漂移，后续初始化失败仍保留已固化值；禁用时不分配。验证 IPv4/IPv6、
-  wildcard、loopback、accessHost 与 Host/Origin 一致，`/admin` 不依赖 Binding 或模型，
-  普通与有效 Side 均只返回实际运行地址，不暴露凭据或免登录 token。
-- 同 host 双 Admin 的 session/preauth Cookie 并用；登出或重启 A 不撤销 B 的登录。
-  卸载 A 精确保留配置、凭据、state、标记和陌生文件，不删除全局用户 Skill 或 B 的内容。
-
-真实飞书路由、浏览器并行登录、两平台完整生命周期及模型执行需分别留存范围和结果；
-只有替身测试或只读 discovery 时，明确列为未验证，不以代码门禁替代实机证据。
+同时验证双 Admin 登录与 root 标识、端口首次实际分配及固化、端口冲突不漂移、显式
+端口／禁用 Admin、服务 profile 导出别的 root 后仍重申绑定。Project、用户 Codex
+状态与外来文件不得因其他实例生命周期而被修改。
 
 ### 已验证的兼容性结论
 
@@ -802,8 +724,8 @@ client/router 的所有权和 retained-event 形状未变，facade migration inv
   服务相同的账号 login 环境运行，只比较必要变量名或摘要，不记录环境值。
 - 修改 migration、rollback、installed-source equality、database integrity、service ready、
   Linux `NRestarts` 或 macOS failure restart、遗留进程等边界时，必须针对变更候选重跑对应
-  验证，历史绿灯不能作为新边界的证据；未触及这些边界的常规 Published Release 升级仍以
-  官方 installer 的零退出为准，不重复整套验收。
+  验证，历史绿灯不能作为新边界的证据；新 CLI 不继承旧 installer 零退出的安装合格结论。
+  未触及相应 live 边界时不机械重复整套实机验收。
 
 `--phase config` 只在给定测试 cwd 下创建临时 Project，验证同一 App Server 的
 Project config 重载后自动清理；它不会读写全局 `config.toml`。分类为
@@ -813,7 +735,7 @@ Project config 重载后自动清理；它不会读写全局 `config.toml`。分
 点击“重启服务”，或执行下列命令。重启不保证所有配置作用于已有 Thread：
 
 ```bash
-"<NETIZEN_ROOT>/current/source/service.sh" --root "<NETIZEN_ROOT>" restart
+netizen restart --root "<NETIZEN_ROOT>"
 ```
 
 然后重跑对应 probe，不能拿重启前的分类替代新配置的实际效果。
@@ -830,512 +752,133 @@ phase，以新结果为准。
 
 ## 发布正式 Release
 
-`.github/workflows/ci.yml` 在面向 `main` 的 pull request 和每次 push 到 `main` 时，分别用
-Linux x64 标准 CPython 3.11、3.12、3.13、3.14，以及 macOS arm64 标准 CPython 3.13、3.14
-安装固定版本依赖并运行 `make check`。公开仓库的 `Protect main` ruleset 禁止删除和
-force-push、要求所有变更经过 pull request；这六个 job 均须配置为 required status checks，
-仓库所有者也不在绕过名单中。
+新发行目标为 PyPI 的 `netizen-cli`。代码开发、构建 wheel／sdist、通过 CI 都不等于
+上传或正式发布；发布必须由维护者显式触发。当前源码提供发布链，但尚未因此证明 PyPI
+项目归属、Trusted Publisher 配置或实际发布成功，不能将成功 CI 等同于具备发布权限。
 
-正式发布的时机由维护者决定；指令后由 `scripts/release.py`（ADR 0050）一次执行发布全链，
-项目不因 main push 或 tag push 自动发布。GitHub 仓库必须启用
-Immutable Releases；active 的 `Protect version tags` ruleset 禁止任何人更新或删除已创建的
-`v*` tag，且无绕过者。`published-release` environment 只保留 deployment history，不配置
-required reviewer 或 wait timer。tag 采用与 `pyproject.toml` 完全一致的 `vX.Y.Z`。workflow 校验 clean exact-tag
-checkout 和 full commit，并通过 GitHub Actions API 要求该 exact SHA 已有一次成功完成的
-`main` push `Main quality gate`；只有 PR 上别的 SHA 成功，或 main run 尚未完成，
-都不能发布。随后在
-创建 draft 前和正式发布前再次解析 lightweight/annotated tag、核对它仍指向同一 commit；
-不一致时在 Release 变为 immutable 前失败关闭。构建阶段只运行一次
-`scripts/build_release_artifact.py`，生成项目自建的
-deterministic archive 与 exact `install.sh` bootstrap；单个完整性 job 校验 archive SHA-256，
-把已核对摘要的自建 archive 解压到空目录，并核对 manifest 的 version/full
-commit/qualification，再把同一份字节交给发布 job。它验证的是 workflow 内候选 identity；
-拒绝危险成员、路径逃逸、链接、特殊文件和超限展开的严格解压由最终 `install.sh` bootstrap
-在目标机执行。
-
-Release workflow 不安装依赖、不运行 `make check`，也不接收或执行账号级 Codex、飞书与
-真实 service lifecycle live probes。维护者的发布指令与脚本的 exact-tag 创建、workflow
-dispatch 共同构成发布意图边界（ADR 0043、ADR 0050）；`published-release` environment
-不增加一次无法提供新技术证据的重复审批。最终 job 通过
-GitHub Release API 创建 draft、上传已经验证摘要的 archive 与 bootstrap、再次核对 tag 后
-发布。可选的 dispatch `notes` 输入被前置到发布页正文，未传入时正文保持纯完整性元数据。
-它不依赖 GitHub CLI，也不允许覆盖已有 tag 或 asset。
-发布失败时 draft 保留供维护者检查，不得用重新构建的同名文件替换原候选。
+首次发布前，维护者须确认 `netizen-cli` 的 PyPI 项目归属／待创建项目，并配置与实际
+GitHub owner、repository、`release.yml` workflow 和 `published-release` environment
+对应的 Trusted Publisher。流程使用 OIDC，不新增长期 PyPI token secret。GitHub 的
+Immutable Releases、版本 tag 保护及 environment 权限也需单独确认；工作流文件的存在
+不会自动创建这些外部设置，本次开发没有代用户配置或执行发布。
 
 ### 发布步骤
 
-维护者决定发布后，在干净且与 `origin/main` 一致的 checkout 上运行：
+1. 维护者明确决定发布并完成上述外部准备；按实际变更补齐 SDK、浏览器及两平台 live
+   验收，明确记录未完成范围。`scripts/release.py` 执行版本推导／指定、notes、版本 PR、
+   exact main CI、受保护 annotated tag 与 workflow dispatch 的完整链，不自动响应 push
+   或 tag 发布。运行该脚本意味着请求正式发布，不是只构建或 dry-run。
+2. `release.yml` 只接受显式 workflow_dispatch，核对 exact tag 和同一 main commit 的
+   成功 CI；固定 `setuptools==80.9.0`，由 `scripts/build_cli_distribution.py` 先构建
+   sdist，再从该 sdist 构建 wheel，生成带 SHA-256 的 `netizen-cli-release.json`。
+3. 后续 job 使用同一份制品，不重新构建；校验名称、版本、资源和摘要，并在全新临时
+   Python 环境安装 wheel，从 checkout 之外检查 CLI、模块和资源，不启动真实实例。
+4. 默认手工 dispatch 的 `publish=false` 只构建、验证并保留 Actions 制品，不创建
+   GitHub draft，也不调用 PyPI；不占用后续同 tag 的正式发布入口。
+   `scripts/release.py` 明确提交 `publish=true`：建立 draft、再次核对 tag／摘要后，通过配置好的
+   Trusted Publisher 上传 wheel 和 sdist；仅在 PyPI 步骤成功后才正式发布 GitHub Release。
+   发布完成后仍应独立验证实际索引安装，不把构建日志当作最终用户可安装证明。
 
-```bash
-python scripts/release.py                  # 版本从 conventional commits 推导
-python scripts/release.py --version v0.5.0 # 显式指定（breaking 等需人工判断时）
-```
+PyPI 或后续步骤失败时保留 draft 与可核查状态，不自动换凭据、覆盖资产或回滚索引。
+尤其上传可能部分完成，而 PyPI 已上传版本文件不可当作普通可覆盖文件；先核对索引中
+实际存在的同版本文件、摘要和 GitHub draft，再由维护者决定修复方式，不盲目重跑或
+重新构建同版本冒充原制品。已有同 tag Release 会使自动链拒绝，以免替换中断证据。
 
-脚本依次执行：推导并校验版本（feat→minor，其余→patch；范围内出现 breaking change 时
-失败并升级给维护者）→ 从 git log 确定性生成 release notes → 提交版本 bump PR
-（`pyproject.toml`、`netizen/__init__.py`、README 与本文档中的 exact-tag 示例 URL）→
-等待 required checks 并合入 → 等待 merge commit 的 main CI → 在 merge commit 上创建并
-推送 annotated exact tag → dispatch release workflow（notes 经 `notes` 输入注入发布页）→
-跟踪 workflow 至发布完成。任一门禁失败或出现需要人工判断的歧义时，脚本停止并把原因交回
-维护者；它不绕过或弱化 workflow 自身的任何校验。
-
-archive 内的 `.netizen-release.json` 不参与自身记录的 `sourceDigest`，但会作为独立成员被
-installer 再校验。当前 `requirements.lock` 固定版本但尚未锁定各平台 wheel hash，因此
-Release Integrity 证明的是 exact Netizen source archive、requirements lock 摘要和 main
-代码资格的绑定，不声称目标机从 package index 下载的 wheel 与 CI 字节完全相同；目标机的
-`pip check` 和 SDK synthetic probes 仍是强制 Host
-Validation。若要升级为离线或 wheel 字节级认证，应另行引入 hash-locked wheelhouse。
+历史 GitHub archive／bootstrap 流程记录在 ADR 0050 及其相关 ADR 和 Git 历史中。
+它证明的是旧 immutable source archive，不是新 wheel／PyPI 发行，更不能用旧
+install.sh 的零退出证明 CLI 环境识别、schema 启动迁移或 update 协调器已经验收。
 
 ## 安装
 
-需要 Python 3.11-3.14、`venv`，以及 bundled Codex runtime 能识别的有效账户登录。
-CI 使用标准 CPython 构建；free-threaded 变体未单独验证，但安装器不会主动拒绝。
-登录可以由 Codex CLI 或 Codex App 建立；全局 CLI 不是安装前提。Linux 还需要
-systemd/logind；macOS 需要系统自带 `launchctl`、`plutil` 和当前用户的 GUI 登录会话。
-服务内的 HTTPS/WebSocket 在 macOS 上直接使用系统钥匙串信任；企业根证书应由管理员安装并
-标记为受信任。Netizen 不生成或维护单独的 CA bundle，Linux 的证书路径不受此行为影响。
-
-普通用户使用 GitHub Published Release。latest URL 返回最新稳定 Release 的 bootstrap；
-重定向后的脚本已经固定自己的 exact tag、项目构建 archive 名和 SHA-256，不会在安装中途
-再次追随 latest：
-
-```bash
-# 最新稳定版本
-curl -fsSL https://github.com/lijingda/netizen/releases/latest/download/install.sh | sh
-
-# 指定版本（示例）
-curl -fsSL https://github.com/lijingda/netizen/releases/download/v0.9.1/install.sh | sh
-```
-
-仓库根的 `./install.sh` 只是同一 latest 正式入口。它不会安装当前 checkout；开发、
-本机调试或云上直接编辑后部署当前工作区必须显式运行 `./dev-install.sh`。两类脚本及
-正式 bootstrap 接受 `--root` 和可选 `--admin-port`；不接收 App ID、Secret、branch、
-`skip-tests` 或任意下载地址，也不执行 `git pull`。这些新参数需所选 Release 已包含
-多实例支持；不要用历史版本安装器执行新格式部署。
-
-```bash
-./dev-install.sh --root "$HOME/share" </dev/null
-./dev-install.sh --root "$HOME/projects/team" --admin-port 8890 </dev/null
-```
-
-`--admin-port` 是 1–65535 的整数，非法值在安装副作用前拒绝；指定时写入/覆盖本实例
-`adminWeb.port`，省略则保留现有字段，首次缺失时交给运行进程实际绑定后固化。
-服务脚本不借 start/restart 修改端口。手动设定的端口冲突只报错、不换号；停止实例的
-未监听端口不登记、不预留。后续运维和安装中断后的重试也必须带相同 `--root`。
-不要用 `sudo`“提升权限”：脚本总是为执行它的 effective user 安装；若明确以 root 执行，
-得到的就是 root 自己的安装。
-
-正式 bootstrap 只下载该 exact tag 的 `netizen-v<version>.tar.gz`，先校验 bootstrap 内嵌的
-SHA-256，再用拒绝绝对路径、`..`、重复成员、链接、特殊文件和超限展开的 extractor 解包，
-并要求 `.netizen-release.json` 的 version、full commit、`sourceDigest`、
-`requirementsDigest` 和 qualification 全部合法。随后内部 `install-release <source-root>`
-安装固定依赖，执行 package/resource 完整性、`compileall`、`pip check` 和固定 SDK probes；
-它不重复运行该 exact source commit 已在 Main Qualification 中通过的全量 unittest。
-
-`dev-install.sh` 调用内部 `install-source`。当前工作区里的受管源码、文档、Skill 和测试
-（包括未提交的新文件与改动）一起计算 SHA-256 并复制到独立 release，`.git`、venv、cache
-和 pyc 不进入快照；候选随后运行完整 unittest 及全部 Host Validation。Source 与 Published
-使用隔离的本地 release identity，不能以相同源码摘要跨模式复用资格。两条路径在候选准备
-后汇入同一个配置、凭据、Service Backend、数据库 snapshot、activation intent、
-`current`/`previous`、ready 和 rollback 事务。
-
-公开安装入口在首次飞书凭据不完整时，先构建、验证候选 release 并检查 Codex 登录，再使用
-候选 venv 中固定的官方 `lark-oapi` device flow，通过 stderr 显示 URL 与终端二维码。
-无 TTY 时直接进入该流程，不读取 stdin；有 TTY 时保留安装方式菜单，默认浏览器，另可选择
-手工输入 `cli_...` App ID 和隐藏 App Secret。全新骨架由官方页面选择创建新 Bot 应用或复用已有
-应用；`lark-app/config.json` 的 `netizen` profile 已有有效 `appId` 且 `appSecret` 为空时，
-只更新该 exact 应用。删除整个应用凭据文件则表示显式飞书应用绑定重置：官方页面重新
-创建或选择应用，并允许结果替换旧 App ID；失败或取消保持该重置意图。它使用
-`addons.preset=false`，只声明前置门禁
-列出的 tenant scopes、`im.message.receive_v1` tenant event 和 `card.action.trigger`
-callback；不安装/调用 Lark CLI，不申请 user scope/event，不保存 user token/info。确认成功
-后 App ID 与 Secret 一起原子写入受保护的 `lark-app/config.json`。浏览器失败时仅有 TTY 的
-安装提供手工回退；
-无 TTY 时失败、取消或最多 660 秒超时都明确终止，不转入终端输入或激活候选；Ctrl-C 中止安装。
-已有完整凭据且权限满足的升级不打开浏览器。Admin 后台升级不承载授权，缺配置或权限时
-仍返回 `requires_action`（[ADR 0062](adr/0062-decouple-initial-app-onboarding-from-terminal-input.md)）。
+完整用户流程、命令与支持边界见[CLI 安装与维护](cli.md)。选择长期 Python 环境安装
+`netizen-cli`（不是第三方同名 `netizen` 包），然后分别 setup 和 start。包安装无实例
+副作用；setup 不默认启动。当前 checkout 的旧 install.sh、dev-install.sh、service.sh、
+uninstall.sh 入口已停用，只返回 CLI 指引；不会生成 release/current 或隐藏 venv。
+源码安装使用选定 Python 的 `pip install .` 或开发期 `pip install -e .`，再 setup/start。
+此前已安装的物理旧 release 脚本不会被开发改动自动更新，真实旧安装另行手工转换。
 
 ### 维护飞书权限契约
 
-新增或替换 `scripts/feishu_app_onboarding.py` 中的 `REQUIRED_TENANT_SCOPES` 前，不能只
-根据某个 API 文档列出的可选权限或 `99991679` 错误中的候选 scope 判断它当前可申请。
-API 能接受的历史或替代 scope，与特定应用类型、租户策略和应用能力在注册页允许申请的
-权限目录不是同一个集合。维护者必须在目标应用的开发者后台依次核验：
-
-1. 在 **开发配置 > 权限管理** 的当前权限列表中搜索 exact scope，确认它尚未开通；
-2. 点击 **开通权限**，切换到 **应用身份权限（tenant_access_token）**，再次搜索 exact
-   scope；只有选择页实际返回该权限，才可把它加入 tenant 权限契约；
-3. 手工验证 `register_app` 时，使用一个在选择页可见、但当前权限列表中不存在的 scope，
-   并先确认官方页面准确列出权限名称。纯诊断应在点击最终确认前取消；有意变更契约时，
-   确认后仍必须通过 `GET /open-apis/application/v6/scopes` 验证 tenant grant 生效。
-
-`lark_oapi.register_app` 只校验 `addons` 的数据形状，不校验平台权限目录；飞书页面可能静默
-忽略不存在或当前应用不可申请的项目，并直接显示“配置成功”。本次排查中的
-`drive:drive:readonly` 就是具体例子：它虽出现在部分 API 文档的候选权限中，但在目标应用的
-**开通权限** 选择页搜索结果为零，因此不能作为该应用的 onboarding addon。浏览器页面成功
-始终不能替代安装器已有的有效 tenant scope 二次门禁。
+权限和回调的单一契约仍是[前置门禁](#前置门禁)。修改
+`netizen_cli/feishu_app_onboarding.py` 的 tenant addons 时，同步更新权限检查、
+用户说明及相关行为测试；不新增 CLI 运行依赖或自行实现飞书授权协议。审批、发布、
+租户安装与入群须按真实流程确认，SDK 返回凭据不等于全部权限已生效。
 
 ### 更换飞书应用与权限修复
 
-部署后更换应用不要求卸载程序。如需保留人工回退能力，先安全备份当前实例路径
-`<NETIZEN_ROOT>/lark-app/config.json`，再删除这个应用凭据文件并带相同 `--root` 执行原来的正式或源码安装入口，
-即可进入上述绑定重置；正常升级不要删除该文件，只需直接
-再次安装。选择不同 App ID 后，旧应用的 Scope/Binding 和 Codex 原生历史仍保留，但
-不会迁移到新应用的飞书 Scope。
-
-应用重绑定和 release 激活采用两阶段语义。官方或手工流程一旦成功写入新 App ID/Secret，
-这对凭据就是持久的用户配置意图；随后 tenant 权限门禁失败时不会进入 activation，激活
-失败按[候选验证与切换](#候选验证与切换)的证据决定回滚或保留待恢复状态，内置 Skills 随实际 release 加载；
-两种失败都不自动恢复旧应用凭据。
-完成管理员审批、应用发布和租户安装后重跑同一入口，会复用新绑定继续验证与激活，不重复
-打开应用选择流程。若用户决定放弃重绑定，恢复事先备份的整个应用凭据文件，并重新运行
-安装入口。权限门禁失败且旧进程未停止时，它
-继续使用启动时已加载的旧凭据；激活恢复或任何后续服务启动，都使用磁盘上的新绑定，
-因此不能把权限未就绪状态长期搁置。
-
-应用凭据只通过该 profile 初始化、读取和原子保存。项目尚未推广，不提供旧凭据格式迁移、
-旧固定服务/目录或全局 Skill 的迁移，以及旧格式版本回滚兼容；见 ADR 0074 与
-[ADR 0066](adr/0066-share-lark-app-credentials-with-optional-cli.md)。
-
-取得完整凭据后，安装器使用候选 release 的官方 SDK 查询租户授权状态；tenant 权限能力
-契约中的精确 scope 或官方等价 scope 组必须满足，才能准备 host 或进入 release activation。
-已有完整凭据的公开安装发现缺失项时，无论是否有 TTY 都只对 exact App 运行一次官方浏览器修复
-并重新查询；
-该流程通过 stderr 输出验证 URL/二维码并有界等待最多约 660 秒，不读取 stdin。本轮刚完成
-首次初始化时不重复打开修复流程；二次查询仍缺失或查询不可验证时直接退出。旧 `current`、
-运行中服务和服务定义此时均未改变。device flow 只完成公开应用配置：租户管理员审批、按
-租户策略发布应用版本、完成租户安装、配置可用范围、把机器人加入目标群仍是人工完成项；
-完成后重新执行同一个安装入口，安装器不会轮询审批或自动重复申请。安装器还会用
-`secrets.token_urlsafe(32)` 自动生成不带
-换行的独立 Admin Web credential；已存在的合法文件只验证、永不覆盖。两个 Secret 都不会
-进入命令参数、环境、YAML、unit 文本或日志；Feishu App Secret 只从 helper stdout 的父进程
-捕获 pipe 落到 `0600` 文件，stdout 不转发到终端。
+setup 对已有服务绑定仅报告 already_registered，不静默修改或接管。需要修复应用时，
+先用原环境 stop／remove 保留数据，安全备份并按意图调整 profile，再在选定环境 setup、
+start。已有有效 App ID 加空 Secret 是 exact-App 修复；删除整个 profile 文件表示
+重新选择应用，别在普通更新时删除。新凭据成功保存后即为持久配置意图，后续权限或
+启动失败不还原旧凭据。App ID 改变不会迁移旧 Scope 或原生历史。
 
 ### Agent 驱动首次安装
 
-常规代装直接执行 [README 中的 Agent 命令](../README.md#快速开始)，按安装器输出继续，
-无需预先阅读本节。以下说明非交互安装的行为、可选的交互方式和异常交接，供按需查阅。
-
-Agent 先把 latest 或 exact-tag 正式 `install.sh` 下载到文件，再运行
-`sh install.sh --root "<NETIZEN_ROOT>" </dev/null`；源码安装运行
-`./dev-install.sh --root "<NETIZEN_ROOT>" </dev/null`。将占位符替换为目标目录；默认实例可省略
-参数，但自定义实例的中断重试、权限修复和恢复均须保留相同 root。不要使用
-`curl | sh`，因为脚本内容和安装器输入会争用同一 stdin。`</dev/null` 只关闭终端输入，
-不禁止浏览器确认。安装器在候选验证与 Codex 登录检查通过后，缺少飞书凭据时自动发起一次
-官方流程；已有完整凭据但 tenant scope 缺失时则自动进入 exact-App 修复。两者均通过 stderr
-输出 URL/二维码并等待页面确认，无需 PTY、菜单输入或预先填写 Secret。
-
-1. 使用能保留长运行进程、在退出前读取中间 stderr 的命令工具执行安装命令。
-2. 收到验证 URL 后原样交给用户，说明在官方页面创建或选择应用、确认配置。保留同一个
-   进程与会话；不要取消后重跑，也不要把链接留到进程结束后才转交。helper 的凭据 stdout
-   由安装器私下捕获，Agent 不应尝试读取或展示。
-3. 用户完成页面确认后继续读取同一进程，安装器自动保存凭据、检查有效权限并继续。只有
-   安装器成功退出才算安装完成；页面“配置成功”不能替代最终结果。
-
-每次安装最多发起一次浏览器流程，父进程最多等待 660 秒。无 TTY 时失败、取消或超时会明确
-退出，不转入手工输入，也不自动重发链接。确认旧进程已退出后可重跑同一命令，使用新链接；
-不要复用已结束流程的链接。页面确认后若仍缺租户权限，先完成审批、发布或租户安装再重跑，
-不要循环申请。已有有效配置、Secret 和完整授权的升级不需要页面确认。
-
-首次未绑定时可在官方页面新建或复用；profile 中已有有效 App ID 且 `appSecret` 为空时
-锁定 exact 应用。若整个应用凭据文件被显式删除，无 TTY 也会进入上述应用绑定重置；
-安装器可以生成空 profile 骨架，但取消或失败不能恢复旧 App ID 或丢失重置意图。
-成功保存新凭据后的两阶段激活与恢复
-规则见[更换飞书应用与权限修复](#更换飞书应用与权限修复)。
-
-命令工具不能保留进程或转交中间输出时，可让用户直接在自己的终端运行同一个安装器。
-手工配置仍是备用方式：用户自行将 App ID 与 Secret 写入错误提示中的受保护文件后重跑，
-或在有 TTY 的安装菜单中选择手工输入；已有应用也可先在飞书后台补全权限。不要让用户把
-App Secret 粘贴到聊天、命令参数、仓库或 YAML 中。Admin 后台升级的 `requires_action`
-需要在公开安装入口完成配置或权限修复后，由管理员显式重试。
+使用选定环境的 `netizen setup --root "<NETIZEN_ROOT>" </dev/null`，在出现验证链接时
+转交给用户并保留同一进程，继续读取 stderr 进度。stdout 的 helper 凭据通道只由程序
+私下消费，不能展示到聊天。等待最多 660 秒；取消／失败后按输出修复再显式重试，
+不要循环申请，不要求用户粘贴 App Secret。setup 成功后另行执行 start 并等 ready。
 
 ### 浏览器安装路径验收
 
-修改首次配置、绑定重置、官方 onboarding 或调用端交接边界时，先以隔离测试覆盖无 TTY 的
-完整路径：首次缺凭据能输出链接且不读取 stdin，确认后自动保存与继续，exact-App 不串号，
-删除应用凭据文件的重置可在取消后重试，失败或超时不激活、不重复发起。另确认有 TTY 菜单与手工
-回退、已有应用一次补权和 Admin `requires_action` 边界保持。
-
-改变此路径后，在正式发布前用可控的真实应用与隔离账号或主机验证
-“Agent 执行 → 及时转交链接 → 页面新建或复用 → 同一进程继续”，核对页面预填权限、事件与
-回调、实际 tenant 授权，以及凭据未进入输出。若无法完成页面或租户审批，明确记录未通过
-的步骤，不能用模拟 SDK 或普通 `make check` 冒充现场验收。以上是验收要求，不是通过记录。
+在授权的隔离应用／账号完成无 TTY URL 交接、相同进程继续、首次选择／exact-App 修复、
+权限不足、取消和超时；验证凭据不进入输出、argv、日志或 YAML。TTY 浏览器失败只
+允许一次手工回退，Ctrl-C 不回退，成功后不再次发起浏览器补权。此项须单独记录，
+fake helper 和代码门禁不能冒充真实应用验收。
 
 ### 服务环境
 
-systemd 与 launchd 都不会替服务读取完整的 `.bashrc`、`.profile` 等账号工具环境。渲染的
-service definition 只给 profile loader 一条固定基础 `PATH`；macOS 额外包含标准
-`/opt/homebrew/bin` 与 `/opt/homebrew/sbin`，但两种平台都不保存执行安装的 SSH、Agent、
-venv 或 NVM PATH。每次 start/restart 和服务管理器自动重启都会先运行 release 内的短生命
-周期 launcher；它
-根据 effective uid 的账号数据库取得 home 与 login shell，执行一次无 TTY interactive
-login profile，取得完整导出环境后直接 `exec` release Python。服务管理器因而继续监督
-真实 Netizen PID、信号和退出状态，不把进程长期包在交互 shell、tmux 或伪终端中。
+systemd／launchd 不负责加载完整用户 profile。包内 launcher 每次实际启动时按有效 uid
+查询 home／login shell，执行一次有界、无 TTY 的 interactive login shell，取得导出
+环境后原位 exec 绑定的 Python。探针仍使用随机 NUL framing、长度和摘要校验，
+10 秒／4 MiB 上限；stdout／stderr 不进入日志，不泄露环境。探针 exec 替换 shell，
+避免 logout hooks。超时、非零退出、不完整输出或不支持 shell 明确失败。
 
-Bash/Zsh/POSIX shell 使用 `-lic`，Fish 使用等价 login + interactive 模式。profile 的
-stdout 和环境快照由 launcher 增量、有界读取，stderr 直接丢弃，都不进入 journal、launchd
-stderr 或文件；随机 NUL 边界定位快照，声明长度和 SHA-256 摘要会拒绝后台 writer 在边界内并发
-插入的内容。探针用 `exec` 替换 login shell，因此
-不会在完成环境捕获时执行 `.bash_logout`、`.zlogout` 等会话结束 hook。探针超过 10 秒、
-输出超过 4 MiB、shell/profile 退出
-非零或未返回完整快照时会 fail closed，错误只报告 shell 和状态，不回显可能含 Secret 的
-profile 输出。用户应先在终端验证相同模式，例如 Bash 使用：
+保留 PATH、代理、CA、语言及普通工具变量，重申账号 HOME、canonical root、配置与
+凭据路径，清理直接 Secret 和 Python／venv 覆盖。解释器、探针和最终进程使用固定
+绝对 Python 及 `-E -P`，最终 Runtime 另用 `-B -u`；不从 profile PATH 重新找 Python，
+也不以 -I／-s 隐藏用户 site。显式注册 CODEX_HOME 优先；否则采用加载后的 profile
+值，再缺省为账号 ~/.codex。setup 登录检查不预执行这个 profile。
 
-```bash
-/bin/bash -lic 'command -v codex; command -v bytedcli; command -v node'
-```
-
-Bash 的 interactive login shell 按原生规则读取 `.bash_profile` / `.bash_login` / `.profile`，
-不会额外自动读取 `.bashrc`。若 NVM 等初始化只在 `.bashrc`，应由 login profile 正常 source
-它；launcher 不替用户强制再 source 一遍，避免常见 profile 已经引用时产生双重副作用。
-Zsh、Fish 和其他支持的 shell 同样遵循各自原生 startup 顺序。
-
-捕获结果保留 PATH、NVM、代理/CA、语言、XDG 和普通导出变量；随后重新覆盖账号身份、
-`HOME`、安装时选择的 `CODEX_HOME`、服务定义固定的 `NETIZEN_ROOT`、派生的 Netizen 配置、应用 profile 与 Admin credential 路径，
-并清除 shell profile 中的旧 Feishu Secret 来源、direct Admin Secret、可能漂移的应用与
-Admin credential 路径，以及会污染 release Python 的 venv/Python 变量；随后写回安装器
-固定路径。service definition 中的 launcher、环境探针和最终 Netizen
-解释器都显式使用 `-E -B -u`（非交互校验省略 `-u`），因此其他 `PYTHON*` 变量可以继续
-作为工具环境存在，却不能改变受管 release Python 的 import、优化、pyc 或缓冲行为。
-Codex 工具子进程的继承、过滤和显式 set 仍由同一份用户级
-`~/.codex/config.toml` 的原生 `shell_environment_policy` 决定。Netizen 通过公开
-`CodexConfig` 固定 `allow_login_shell=false`：工具默认直接继承 launcher 已取得的环境，
-不会再由 Codex 的 non-interactive login shell/snapshot 把 NVM PATH 覆盖回系统 PATH；
-不写死 PATH，也不维护第二份变量策略。定时管理仅另加
-[ADR 0061](adr/0061-schedule-ordinary-threads-in-feishu-topics.md) 规定的进程临时 MCP entry
-与 bearer 环境变量。主进程入口校验同一 root 的配置、凭据和状态路径，并在启动 Codex
-前总将 canonical NETIZEN_ROOT 写入当前进程；手工启动也使用显式 root 或有效账号默认
-`~/.netizen`，不从 YAML 或状态目录反推。不含 Secret 的 NETIZEN_ROOT 保留给工具子进程；若用户原生 policy
-过滤该变量，内置 Lark Skill 明确失败，不能猜测默认凭据。修改持久 profile 后执行
-`./service.sh --root "<NETIZEN_ROOT>" restart`
-即可；某个已有终端里的临时 `export`、alias、未导出的 shell function 和真实 TTY 状态
-不会被后台服务继承。
-
-systemd user service 在用户注销后继续运行依赖 linger。若未启用，交互安装会执行一次
-`sudo loginctl enable-linger <当前用户>`；无 TTY 安装会先退出并打印这条命令，Agent 可
-经主机授权独立执行后重试。安装器不会关闭 linger，因为它可能同时服务该用户的其他
-user units。
-
-macOS 不使用 linger，也不会请求 sudo。`~/Library/LaunchAgents/io.github.lijingda.netizen.<rootDigest>.plist`
-只属于当前用户登录会话；退出登录会停止服务，下次登录由 `RunAtLoad` 自动启动。若用户执行
-`service.sh --root "<NETIZEN_ROOT>" stop`，当前会话保持停止，但 plist 仍为下一次登录启用。每次显式 bootstrap 前
-安装器都会执行 `launchctl enable gui/<uid>/io.github.lijingda.netizen.<rootDigest>`，清除 launchd 保存的
-sticky disabled 状态。
+遵守 ADR 0022／0023 的单一环境事实源和 `allow_login_shell=false` 公开 override；
+不维护 PATH 快照、环境副本或实例私有 Codex 状态。修改持久 profile 后执行
+`netizen restart --root "<NETIZEN_ROOT>"`。别把终端临时 export、alias 或 TTY 状态
+当作后台服务自动继承契约。
 
 ### 候选验证与切换
 
-安装器先在新 release 创建全新 venv，并以 `requirements.lock` 约束安装依赖。
-pip 安装使用 `--no-compile`；随后由候选 venv 的 Python 以 4 个 worker 并行预编译
-该 venv 内的字节码，再进入原有校验。预编译失败会取消并清理候选，不切换现役版本；
-已验证 release 的复用不重复执行此步骤。
-Source Install 额外执行完整 unittest；两路都在目标机运行 `compileall`、`pip check`、固定
-SDK synthetic probes 和 `scripts/verify_installed_release.py`（逐一比较 Python 与 Admin
-HTML/CSS/JS 等所有普通 package files，并做 `importlib.resources` smoke）、配置解析和候选
-venv 中固定 Codex CLI 的 `login status`。这些安全检查使用安装调用者经清理的环境；候选
-门禁不继承 NETIZEN_ROOT 等实例启动上下文，测试不能因此选中正在安装的真实实例。
-实际安装与后续服务仍使用已解析 Layout 的 root。安装器不会在 service cgroup
-之外执行任意账号 profile，因为 profile 可以产生不可逆副作用或自行 daemonize。真实
-profile 只在候选 service 启动时加载：首次安装和原本 active 的升级会等待 ready，失败时
-按下述恢复边界处理；原本停止的升级保持停止，之后 `service.sh --root "<NETIZEN_ROOT>" start` 或 `restart` 会等待最多 120 秒确认 ready
-并直接暴露 shell/profile 启动错误；对已经 loaded 且已有有效 ready marker 的服务，
-`start` 幂等返回，loaded 但未 ready 则只做有界等待。任意具体 MCP/工具是否可用仍取决于其自身配置，不能
-由安装器枚举。真实 Thread capability phases 只在相关 SDK/Adapter/环境开发变更时按前文
-运行，不在正式 Release workflow 或每个最终用户安装中重复创建探针 Thread。
-
-数据库迁移属于这条共同安装事务，服务启动不自动改表。候选准备期间先只读检查已有库
-的版本、结构、完整性和完整迁移路径，拒绝 v13 及更早、未知／较新版本、路径缺失或
-损坏的库；新库直接创建目标完整结构。当前目标仍为 schema v14，尚无生产迁移步骤。
-未来跨多个应用版本升级时，由注册表依次执行所需的 schema 迁移，与应用版本号无关。
-
-激活阶段停止当前 root 的现役 user service（如果原本在运行），随后对已有固定端口的 Admin Web address
-执行 best-effort bind preflight。所有成功 socket 会持有到本次地址枚举结束，IPv6 明确
-设置 `IPV6_V6ONLY`；`EADDRNOTAVAIL` 只有在同一配置至少一个地址成功时才可忽略，端口占用
-则在数据库快照、service definition 和 `current` 切换之前失败并进入既有 activation rollback。runtime
-bind 仍是最终事实。端口字段缺失时不预检或补写 8787，由首次运行进程实际绑定后固化。
-预检通过且 manager target 已卸载后，在持有 lifetime lock 的条件下再次校验数据库，
-保存升级前的原始恢复快照并执行完整迁移路径。全部步骤、版本更新及最终校验放在
-同一个 SQLite 事务中，任一步失败都不提交部分 schema。成功后才原子切换 `current`、
-发布预先渲染的平台 service definition。内置
-`netizen-user-guide` 和 `netizen-lark` 保存在实际 release 的 `source/skills`，由
-[内置资源校验](../netizen/builtin_skills.py)检查完整性，启动时通过同一 App Server 的
-`skills/extraRoots/set` 注册。它不写用户 config.toml 或全局 Skills 目录，不再做
-Skill 安装、共享目录快照、回滚或卸载。回滚启动旧物理 release 时自然加载其内置版本；
-不依赖其他实例处于同版本，不协调其他实例，也不回滚原生 Codex 用户状态。
-普通独立 CLI 不再因安装 Netizen 自动获得这两个内置 Skill；既有用户副本不迁移、不清理。
-首次安装会 enable 并启动服务；升级前若服务在
-运行，新版本会启动并等待主进程发布 `0600` ready marker；若原本停止则保持当前会话停止。
-Linux 延续原 enabled/disabled 意图；macOS 保证 plist 已安装/enabled，供下次登录自动启动。
-
-只有 service definition、release 及其内置资源校验成功，并且事务按安装前状态应启动服务时已取得
-ready，旧 `current` 才记录为 `previous`，并只保留这两个 release；原本停止的升级不要求
-产生 ready，仍保持停止。launcher 启动时在稳定的 `state/service.lifetime.lock` inode 上持有
-独占锁；主进程接管同一 FD 后立即恢复 CLOEXEC，Codex 工具与后台 terminal 不会继承。
-
-候选在开放任何输入边界前，必须持久写入恢复目录的 `admission` marker，写入失败则
-不开放输入。恢复时先确认服务管理器目标已卸载，再全程持有 lifetime lock 并读取
-marker：它不存在时，候选启动失败仍可恢复旧 release 指针、service definition、
-数据库和原启停意图；锁不可取得或恢复失败时保留原始快照并报告恢复不完整。marker
-存在表示候选可能已接受输入，即使未观测到 ready 也禁止自动覆盖数据库；此时保留新库
-和恢复材料，仅允许重跑 exact 候选安装器向前恢复，其他版本或证据矛盾明确拒绝。
-主数据库与 WAL 等文件共同构成快照，不能仅凭主文件 schema 正确判断恢复完成。
-实际还原时始终持有 lifetime lock，先将 `current` 暂指带 admission guard 的候选并
-记录 `restoring`，完整复制并 fsync 全部文件后记录 `database_restored`，再还原旧
-`current` 与服务定义，防止没有恢复保护的旧程序在中途重启并接收输入。`restoring`
-重试必须完整恢复；`database_restored` 及以后只恢复指针／服务，不再拷贝原始快照，
-以免覆盖旧服务恢复后的新数据。
-首次升级可能来自没有 admission hook 的旧 release。中断后若 `current` 仍为原
-release、尚未开始恢复写入，且只读校验确认数据库仍是原完整 schema（例如迁移未提交、
-SQLite 已回滚），
-恢复会保留现有数据库，避免覆盖旧服务重启后的新数据；此选择记录为 `restoring_source`，
-即使再次中断也继续保留，不重新还原快照。
-已写入的自动分配端口和
-显式 `--admin-port` 均是持久配置意图，不因候选失败而撤销；旧 release 无法使用当前配置
-取得 ready 时按恢复失败报告，不能宣称完整回滚成功。
-
-任何可能停止旧服务的 mutation 之前，安装器先创建私有
-`state/activation-recovery-<id>/manifest.json`，记录原 `current`／`previous`、旧服务定义、
-启停状态、源／目标 schema 和事务阶段；停服后把原始数据库与 sidecar 保存到该目录的
-`database/`，固化文件清单、权限和 SHA-256。原子写入的 activation intent v2 保留原
-release 与启停意图字段，只增加该恢复记录 ID。正常成功或完整回滚才清理恢复材料；
-先清除 intent，再清理对应目录，清理失败保留材料并提示。若进程被 `SIGKILL` 或异常
-退出，下次执行安装入口优先对账原事务，不能用已迁移的数据重做一份“升级前备份”。
-已经写入 admission marker 的恢复始终保持新数据库，只接受 exact 候选；缺失或矛盾的
-证据失败关闭，不能把半成品当作用户主动停止／禁用或一次成功升级。
-中断恢复不会因机器重启自动执行，须显式运行安装入口。
-
-不自动迁移旧 system unit、固定名称 user unit/LaunchAgent 或无标记旧布局，也不清理
-旧全局 Skills。旧安装的停止、备份和人工处理不属于新实例安装事务。
+此锚点保留给旧链接；当前没有 release/current 候选切换或跨程序／数据库自动回滚。
+实际启动在 lifetime lock 内校验实例并按需迁移，全部通过后才开放 Runtime 和 ready。
+SQL 提交前失败回滚事务，提交后失败保留新库。确定的配置／schema 拒绝不发布 ready，
+受管入口不进入失败重启循环；CLI start 仍失败，修复后显式 start。详见
+[启动迁移契约](design.md#channel-数据库与结构校验)与[CLI 更新](cli.md#程序更新)。
 
 ### 升级、启停和卸载
 
-正式升级可使用下面的 Admin 入口，或重新运行 latest/选定 exact-tag installer；更新任意
-开发目录后运行源码入口：
+实例命令为 `netizen start|stop|restart|status|logs --root ...`，控制绑定的服务。
+程序更新使用独立终端中的 `netizen update`，按调用环境发现关联实例，拒绝 --root。
+先记录运行集合、停止且确认退出，再更新包并仅恢复原运行集合；pip／uv pip 预检无
+变化时可省略停启，uv tool 可能无变化也重启。阶段／状态／失败理由与后续建议分别报告，
+不解析安装日志来判断成功，不自动换包工具。
 
-```bash
-./dev-install.sh --root "$HOME/share"
-```
-
-日常服务控制只走当前用户的平台 service manager；`service.sh` 内外都不使用 sudo：
-
-```bash
-./service.sh --root "$HOME/share" start
-./service.sh --root "$HOME/share" stop
-./service.sh --root "$HOME/share" restart
-./service.sh --root "$HOME/share" status
-```
-
-上例操作 `~/share` 实例；省略 `--root` 时使用 NETIZEN_ROOT，变量也未设置才选择默认
-`~/.netizen`。`service.sh` 接受 `--root` 和上述一个动作，不执行 `git pull`。`start` 在服务已 loaded 且 ready 时
-幂等返回；loaded 但尚未 ready 时只做有界等待，不另起进程。`start` 和 `restart` 的启动
-阶段最多等待 120 秒，只有服务管理器保持 loaded 且主进程在 admission 开放后发布私有 ready marker 才
-成功；profile 超时、shell 失败或主服务未就绪均返回非零。macOS `status` 分别显示
-installed、loaded、ready 和日志路径，不能用 loaded 代替 ready。具体日志入口见
-[平台服务管理器](#平台服务管理器)。
-
-若原 checkout 已删除，从安装目录使用完全相同的入口：
-
-```bash
-"$HOME/share/current/source/service.sh" --root "$HOME/share" status
-"$HOME/share/current/source/uninstall.sh" --root "$HOME/share"
-```
-
-`uninstall.sh` 接受 `--root`，只停止/disable 该实例 user service，并删除精确受管的
-unit/plist、程序 releases 与安装 cache。内置 Skills 随该 release 清理，不动全局 Skills。
-卸载同时清除 activation intent，但保留恢复目录；后续安装不会自动认领或重放没有
-intent 引用的孤立恢复材料。
-它明确保留 `.netizen-root`、
-`config.yaml`、`lark-app`、`credentials`、含 Channel
-SQLite 的 `state`、Project 目录、其他 Codex Skills 及原生 Thread/Turn 历史。若用户也
-要删除这些数据，应在确认备份和影响后另行处理，不能扩张卸载器的默认删除范围。
-
-下载到文件运行的官方 installer 返回 0，就是 Published Release 安装事务成功的权威判据。
-此时目标机 Host Validation 和 activation/rollback transaction 已完成；安装前 active 的
-服务已经等待私有 ready marker，安装前主动停止的服务则按原意保持停止。常规升级成功后
-无需再次检查数据库完整性、journal、跨主机 Admin Web、live Thread 或人工飞书消息，也
-不能拿单独的 service-manager `active` 替代 installer 成功。只有 installer 返回非零、进程
-中断导致结果不明确、本轮变更的安装/服务/持久化/SDK 兼容边界要求重新验收，或用户明确
-要求时，才展开对应检查。
+`netizen remove` 默认保留数据，--purge 仅清理显示的已验证文件，-y 不免除安全门禁。
+程序卸载交给原包管理器，先处理该环境全部关联服务（含停止实例）。原生包卸载不会
+自动停服，也不删除保留数据、用户 Python 或共享 Codex 状态。具体流程见
+[CLI 生命周期](cli.md#移除实例清理数据切换环境)。
 
 ### 从 Admin 升级
 
-首个包含管理页维护能力的版本需要先通过已有安装入口安装一次。之后由实例管理员登录
-Admin，打开 **系统维护**，点击“检查更新”，查看当前版本、官方候选版本和发布说明，再
-点击“升级并重启”。仅受管 Published Release 支持此操作；Source Install 显示源码安装
-说明，继续在相应工作区运行 `./dev-install.sh --root "<NETIZEN_ROOT>"`。服务未运行时使用原有 CLI 入口。
-
-每次点击固定服务端检查到的 exact 官方稳定版本、Release ID、installer 与 tarball 的
-SHA-256，不会在安装中途跟随 latest 换版本。候选必须是 immutable Release 且提供完整
-资产摘要；查询失败区分 GitHub 限流、访问被拒绝、未找到发布版本、上游服务异常、网络
-连接/超时和发布信息校验失败，页面提供对应处理建议，不展示远端原始错误或降级到未校验下载。
-限流时应等待恢复后再检查
-（[GitHub 限流说明](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)）。
-此入口未增加自定义签名，继续信任官方 HTTPS、不可变资产与安装器 manifest 验证。
-更新检查由用户显式触发，短期缓存
-60 秒，不后台定时检查或下载。
-
-升级不检测忙闲、不等待现有会话结束、不进入维护状态。准备候选期间继续服务；安装器
-实际切换时按已有正常停机流程中断普通 Turn、暂停 Goal、结束临时 Side Session，升级后
-不自动续跑。执行者独立于主服务生命周期运行，只有安装器能停止主服务、判断原启停意图、
-切换、等待 ready 和回滚；不能先手动停止服务再期待页面完成重启。
-
-提交后页面展示阶段并有界读取结果。浏览器关闭、页面等待到期、网络断线不取消安装；
-提交响应丢失时先刷新查看，不能再次 POST 猜测补交。主服务重启后需要重新登录查看结果。
-正常结果来自当前 `<NETIZEN_ROOT>/state/update.json` 的 typed 安装摘要；重新连通、manager active、
-当前版本或 ready 均不能单独证明升级成功。
-
-| 页面结果 | 含义与下一步 |
-| --- | --- |
-| 升级成功 | 所选安装事务成功完成；常规升级不重复整套主机验收。 |
-| 升级失败 | 下载、校验、环境或候选准备未完成，旧版本未切换；根据固定错误提示处理后，显式重新检查与提交。 |
-| 升级失败，已回滚 | 安装器确认完整恢复旧状态；处理报错原因后再显式提交。 |
-| 需要处理后重试 | 补全配置/凭据或 exact 飞书应用权限；应用授权、审批与发布完成后再检查和提交。Admin worker 不开启授权浏览器；需要 CLI repair 时继续按本文原有 exact-App 流程。 |
-| 升级结果未确认，需要修复 | worker 被中断、失联或回滚不完整，不能继续从 Admin 提交；保留状态与 recovery snapshot，用既有官方安装入口恢复。 |
-| 已通过安装器恢复 | 后续显式 CLI 安装已成功修复旧未知记录；原 operation/target 保留，实际运行版本单独显示，不表示原页面点击成功。 |
-
-遇到需要修复的结果，以同一安装用户下载原目标 exact tag 的官方 installer 到文件后
-执行，将 `<EXACT_TAG>` 替换为报错提示的原目标 tag（例如 `v0.9.0`）：
-
-```bash
-netizen_recovery_dir=$(mktemp -d)
-curl -fL --proto '=https' --proto-redir '=https' \
-  "https://github.com/lijingda/netizen/releases/download/<EXACT_TAG>/install.sh" \
-  -o "$netizen_recovery_dir/install.sh"
-sh "$netizen_recovery_dir/install.sh" --root "<NETIZEN_ROOT>" </dev/null
-```
-
-admission marker 已存在时必须先恢复原 exact 候选，不能用后来发布的 latest 直接跳过
-该事务。不要修改 `update.json` 伪造成功，也不要删除 `.activation-intent.json`、恢复
-目录或 admission marker。CLI 在同一安装锁
-内恢复既有 activation intent 并完成事务后，才把旧未知/非终态记录标为
-`recovered/manual_recovery`；失败保留原记录。Source Install 成功也可完成该恢复，但其
-候选已开放输入时同样要求原 exact release 内容，不能先修改工作区再覆盖安装；运行来源
-仍不允许 Admin 升级。若恢复需要 exact-App 浏览器修复，继续遵循本文 Agent
-relay 规则，不把 App Secret 发到聊天。机器掉电不会自动执行恢复，须重新运行安装入口。
-
-一次性执行者的下载与安装输出不进入 Admin API；页面只显示固定阶段与错误码。排障按
-安装器的显式执行结果和现有主服务日志确定原因，不从页面失败文案推测是否已回滚。
+当前不支持。Admin 不具备共享 Python 安装的程序升级权限，也不会从旧 install API
+重新进入历史安装器。使用独立终端的 `netizen update`；不要在将被停止的服务上下文
+执行该命令。
 
 ### 从 Admin 重启
 
-受管 Published Release 和 Source Install 可在 **系统维护** 页直接点击“重启服务”，
-无需检查更新，保持当前版本。确认后会中断 Turn、暂停 Goal、结束临时 Side，任务不会自动
-续跑；重启后重新登录查看结果。服务已停止时使用 CLI
-`service.sh --root "<NETIZEN_ROOT>" restart`。
+受管实例可在系统维护页显式重启本实例，由独立临时 manager job 控制绑定的服务。
+不安装包、不重绑环境、不等待任务空闲、不自动续跑；重启前确认停机影响。
+返回的是操作受理／进展，不把 HTTP 成功、页面重连或 PID 存在当作整个重启成功。
+断线后重新登录读取同一结果；未知状态先查 status/logs，不编辑记录伪造成功。
 
-重启沿用上述升级的互斥、断线对账与显式 CLI 恢复流程。执行失败可能需要处理，不会回滚
-用户修改的 Codex 配置；重新连通不能证明成功。
-
-单纯重启超时后，点击“刷新维护状态”或“检查更新”会复核当前服务。只有该进程启动时已
-观察到同一重启操作，随后完成受管就绪，且执行者已收尾、运行版本/目标/`current` 一致、
-没有未完成安装事务，才显示“服务已恢复”并重新开放维护按钮。原操作与目标保留为
-`recovered/service_ready`，不改报原重启成功。此能力只读取少量本地状态，不添加后台轮询
-或状态文件，也不探测每个组件的网络健康。升级或回滚中断等其他未知结果继续通过安装器恢复。
-准入与执行差异见
-[ADR 0059](adr/0059-support-explicit-admin-service-restart.md)。
-
-首次上线验收或相关产品边界发生变化时，按本文对应门禁核对 ready 日志，并在飞书发送
-“运行中的任务再发一条消息会怎样？”确认自然语言回答包含 steer 且明确不排队；再用
-`$netizen-user-guide 如何切换会话？` 验证显式调用能说明 `/sessions` 和 `/resume`。
 
 ## 配置与管理页访问
 
@@ -1356,9 +899,9 @@ relay 规则，不把 App Secret 发到聊天。机器掉电不会自动执行�
 }
 ```
 
-示例中的 ID 和 Secret 只是占位符，不要直接用于安装。目录由安装器设为 `0700`，文件为
+示例中的 ID 和 Secret 只是占位符，不要直接用于安装。目录由 setup 设为 `0700`，文件为
 当前用户拥有的普通非 symlink 文件，权限为 `0600` 或更严格。Netizen 固定读取名为
-`netizen` 的 profile，忽略 `currentApp`，不解析 Secret 引用或用户 token；安装器原子保存
+`netizen` 的 profile，忽略 `currentApp`，不解析 Secret 引用或用户 token；setup 原子保存
 raw App ID／Secret。重复 JSON 字段、重复的 `netizen` profile、错误品牌或不合法凭据会
 明确拒绝，报错不含 Secret。
 
@@ -1378,7 +921,7 @@ Admin credential 仍独立保存，必须是 `token_urlsafe(32)` 的 canonical b
 直接完成官方浏览器初始化：
 
 ```bash
-./dev-install.sh --root "<NETIZEN_ROOT>" </dev/null  # 按输出转交验证链接并保留同一进程
+netizen setup --root "<NETIZEN_ROOT>" </dev/null  # 新实例或已解除绑定实例；按输出转交验证链接
 ```
 
 从带 Netizen allowlist 的旧版本升级时，必须先从 live `config.yaml` 删除整个
@@ -1433,21 +976,22 @@ Cookie，打开同一实例的新页可能使旧页无法提交；登录失败�
 
 轮换时用安全的原子文件写入替换同一路径并保持 0600，然后刷新页面；运行中 auth 会在下一
 认证边界检测到合法 identity/content 变化并立即注销全部旧 session。非法替换会锁闭 Admin
-admission，修复文件后仍需 `./service.sh --root "<NETIZEN_ROOT>" restart`，不会自动重新开放。V1 使用不加密的内网
+admission，修复文件后仍需 `netizen restart --root "<NETIZEN_ROOT>"`，不会自动重新开放。V1 使用不加密的内网
 HTTP；不得把该端口直接暴露到不受信网络。
 
 `instance.projectRoot` 是必填的绝对路径，用于限制从飞书自动创建的空 Project；它不是
-Binding 的默认 cwd。Channel 服务只支持当前完整 schema v14；安装器按
-[ADR 0075](adr/0075-migrate-channel-databases-during-installation.md) 从 v14 起维护前向
-迁移路径。新库直接创建完整表结构，已有库先经过只读版本、结构、完整性和路径校验，
-再由安装事务在停服持锁后迁移；当前仍为 v14，没有生产迁移步骤。
+Binding 的默认 cwd。Channel 业务只支持当前完整 schema v14；实际启动入口按
+[ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 在 lifetime lock 内
+检查数据并按需迁移，setup 才创建新库。当前没有生产迁移步骤；未来冻结步骤从 v14
+持续维护。提交前错误回滚事务，提交后服务失败保留新库，不自动恢复旧备份。
+
 `session_defaults` 和 `session_defaults_order` 仅保存 App 隔离的聊天默认配置、群名匹配
 条件与有序规则元数据，不保存聊天正文或有效 Codex 配置。
 `schedule_plans`、`schedule_runs` 和 `schedule_requests` 仅保存当前计划指令与会话配置、
 最小调度交接/initial Turn 引用及有界管理请求去重，不复制原生历史。
 当前库重装及后续受支持迁移保留 Scope/Binding/Project、会话默认配置及规则顺序、去重
-记录和 `side_topics` 永久墓碑。迁移与允许的数据库恢复均全程持有 lifetime lock，
-失败／中断按[候选验证与切换](#候选验证与切换)恢复，不覆盖候选可能已写入的新数据。
+记录和 `side_topics` 永久墓碑。迁移全程持有 lifetime lock，
+失败／中断按[启动边界](#候选验证与切换)报告，不覆盖已提交的新数据。
 低于 v14、未知／较新版本、缺失迁移路径或损坏数据库明确拒绝，不自动删除或重建空库。
 早期试验版数据的一次性转换仍需单独停服、备份并校验，不属于自动升级流程。
 配置的 `projects` mapping 启动时仍只做 `INSERT OR IGNORE`，停用、动态登记和已删除记录
@@ -1465,7 +1009,7 @@ Project 删除联动，保留原记录并在使用时重新校验。不要手工
 
 - 若 Netizen 提示 admission 已关闭或要求重启，表示一次 native start/turn/terminal
   结果无法安全判定。Pilot 有意不自动重试，也不自动修改 Binding；检查平台日志后
-  人工执行当前 release 的 `service.sh --root "<NETIZEN_ROOT>" restart`。
+  人工执行 `netizen restart --root "<NETIZEN_ROOT>"`。
 - 若某个 Binding 长时间停留在 running，公开 native read 会继续保留该 slot 并周期
   记录 warning，避免在未知终态下误开第二轮。其他 Binding 不受影响；持续异常时检查
   App Server/平台日志，并通过正常 `/stop` 或服务重启恢复，禁止手工清理 SQLite 或
@@ -1498,167 +1042,50 @@ Project 删除联动，保留原记录并在使用时重新校验。不要手工
 
 ### Linux systemd
 
-仓库 `deploy/netizen.service` 是安装器渲染的 user-unit 模板；它不包含 `User=`、固定
-home 或 release 路径，也有意不增加外层 filesystem/network sandbox。用户仍由共享
-`.codex/config.toml` 的原生 permission mode 决定 Codex 行为。不要手工把模板复制到
-`/etc/systemd/system`，也不要用 system-level `systemctl` 控制它。
+服务位于当前账号固定 user unit 目录，以 canonical root 派生名称，ExecStart 固定
+Python、CLI 内部 _serve 入口及 root。不请求 sudo，不保存调用者 PATH；用户注销后
+持续运行所需 linger 由用户／运维自行配置，不替其他 user units 改变全局策略。
 
-```bash
-./service.sh --root "<NETIZEN_ROOT>" status
-journalctl --user -u 'netizen-<rootDigest>.service' -n 100 --no-pager
-loginctl show-user "$USER" --property=Linger
-```
-
-正式与源码安装器共同负责 unit 写入、`systemctl --user daemon-reload/enable`、首次启动或按旧状态
-切换；`uninstall.sh` 负责 stop/disable 和删除。`service.sh` 只接受
-`--root` 和一个 `start|stop|restart|status` 动作，不会安装、升级、enable、改配置或请求 sudo。
-以上占位符替换成所选实例 root 和 status 显示的精确服务名，不从目录 basename 猜测。
+状态来自 systemctl 的属性／JSON 查询及实例锁、ready。未知 drop-in、需要 daemon-reload、
+FragmentPath 冲突或关联服务无法确认时拒绝修改。stop 会取消 manager 重启意图并确认
+进程和锁已释放；它不解除绑定，也不修改下一次机器启动的自启配置。
 
 ### macOS LaunchAgent
 
-安装器用 `plistlib` 生成并回读
-`~/Library/LaunchAgents/io.github.lijingda.netizen.<rootDigest>.plist`，随后执行 `plutil -lint`。受管判断
-同时要求：当前 UID 拥有的普通非 symlink 文件、无 group/world write、exact Label、指向
-当前 `<NETIZEN_ROOT>/current` 的 exact `ProgramArguments`、root 与派生配置路径，以及受管 environment sentinel；任一不符
-都拒绝覆盖或卸载。不要手工用 `launchctl load/unload` 或编辑 plist；使用相同的
-`service.sh` 命令。
+服务属于当前 GUI 用户的 LaunchAgent，要求 gui domain 存在；仅 SSH 无 GUI 会明确
+失败。服务定义固定绑定，使用官方 launchctl 查询，print 只用于 exact target 存在性，
+不解析其诊断正文。运行 PID 与私有 service.identity.json、lifetime lock、定义同时
+核对，不把 loaded 当运行。无法可靠读取的 enabled 状态报告 unknown，不猜测。
 
-```bash
-./service.sh --root "<NETIZEN_ROOT>" status
-tail -n 100 "<NETIZEN_ROOT>/state/netizen.log"
-tail -n 100 "<NETIZEN_ROOT>/state/launchd.stderr.log"
-```
-
-状态只把 `launchctl print gui/<uid>/io.github.lijingda.netizen.<rootDigest>` 的退出码作为 loaded 判断，
-不解析其文本；Apple 不把该文本声明为稳定 API。`start` 使用
-`enable + bootstrap gui/<uid> <plist>`，`stop` 使用 exact service target 的 `bootout` 并等待
-lifetime lock，`restart` 是完整 stop-confirm 后再 bootstrap，不使用 `kickstart`。应用 INFO
-日志由标准库 rotating handler 保留为最多 5 MiB × 3 个文件；launcher/exec 失败单独进入
-`launchd.stderr.log`，两者都不得含 Secret。
-
-每次启动记录 shell 环境加载、Python 模块导入、配置、数据库、Projects/Channel 构造、
-Admin/MCP listener、Codex 连接、Runtime 恢复与飞书连接的 monotonic 耗时；只记录固定阶段名
-和耗时，不记录环境或凭据。shell 阶段进入服务 stderr，其余阶段进入应用日志。
-Admin 重启执行者的外层上限按停止确认等待 90 秒、就绪等待 120 秒及额外余量 30 秒设为
-240 秒；脚本和 manager 命令也占用这个总上限。服务一旦就绪就立即返回，不会固定等待整个窗口。
-
-ready marker 只有在 Admin credential/closed bind、唯一 Codex Runtime、Store、Channel
-application、Feishu ingress 和 Admin admission 全部成功后才以原子 `0600` 文件发布。
-installer 每次启动前权威删除旧 marker，launcher 每次进程启动再次清理，正常退出也尽力
-删除；service manager 的 loaded/active 不能替代 ready。正常 shutdown 在 Channel
-background loop 使用一个 60 秒 monotonic absolute budget：先关闭 Admin listener、Feishu
-policy 和 Runtime admission，再排空 Admin/Feishu handlers 与 blocking I/O，最后清理 native
-Turns/task-feedback presenters、Codex transport 和 Store。systemd `TimeoutStopSec=75s` 与 LaunchAgent
-`ExitTimeOut=75` 给 Python finally 留出完整内部预算；安装器的停止确认窗口为 90 秒，且未
-取得 lifetime lock 就不会执行状态回滚。
-所有新 service definition 只接受私有 marker；不以旧日志或 manager active 兼容旧服务格式。
+stop 使用 bootout 并确认退出，保留 plist 与既有登录自启意图；remove 才禁用并删除
+经过校验的服务定义。start 不偷偷清除用户 disable override，失败时报告诊断。
+日志用于展示，不作为状态解析协议。两平台真实 manager 验收须各自执行。
 
 ## 管理页升级验收
 
-以下是 ADR 0057 首次交付及之后改变升级边界时的门禁，不是已通过的运行记录；具体 host、
-exact commit/Release、命令、退出码和故障注入结果保存在 checkout 的私有验收记录或本次
-交付报告中。只运行 fake manager/unit tests 不能声称 Linux/macOS 实机升级通过。
-
-先运行聚焦测试，再完成仓库门禁：
-
-```bash
-.venv/bin/python -m unittest tests.management.test_updates tests.test_updater \
-  tests.test_update_executor tests.test_admin_update_executor_probe \
-  tests.admin.test_update_ui tests.admin.test_web \
-  tests.test_installer tests.test_release_artifact -v
-make check
-```
-
-这些自动化检查必须覆盖：仅受管 Published 运行可升级；stable/immutable/资产 identity
-与双 digest 完整校验；更高版本比较、latest 变化与 stale action；POST-only/session/
-CSRF/Origin/Host；源码提示；页面发布说明按纯文本渲染；重复点击、提交响应丢失、断线、
-401 重登、有界 polling；实例安装锁交接、FD identity 与 CLOEXEC；官方 bootstrap 的 root/端口参数透传
-和 manifest 检查；prepare/activate/ready/rollback 的 typed 结果；worker/manager 观察未知
-不重复 dispatch；损坏/越权/超限状态文件失败关闭；CLI 成功恢复未知结果且失败不清理。
-还必须证明 ready 或新版本可访问不能单独得到 `succeeded`。
-
-独立执行边界还可先在两平台运行实机探针：
-
-```bash
-.venv/bin/python scripts/probe_admin_update_executor.py --timeout 60
-```
-
-探针用真实服务管理器启动随机命名的临时父任务，再由父任务调用生产
-`UpdateExecutor` 启动一次性执行者。执行者停止该父任务后继续完成，验证父任务
-生命周期锁未被继承、物理 release 路径与特殊字符传递正确；Linux 另检查 cgroup
-不同。它不读取产品凭据、不操作任何正式实例 user unit 或 LaunchAgent，结束后清理
-自己的任务和临时目录。结果 `scope=executor-isolation` 只证明进程隔离；它不执行安装、
-切换或回滚，不能替代下面的正式渠道和故障恢复验收。
-
-然后在明确指定的可恢复测试账号上分别验证 Linux systemd user manager 和 macOS 14+
-实际 GUI 用户；使用显式测试 root，在同账号另启动第二个 root 检查互不影响，不用 XDG
-override 或第二套 CODEX_HOME 模拟多实例。
-准备旧版与候选版的 exact identity、合法现有凭据和原安装状态。端到端正式渠道用例必须有
-两个包含该升级协议的真实官方 immutable Releases；本地夹具不能替代这一项，正式发布
-仍按 ADR 0050 由维护者明确决定。不得为了测试修改正式同名 Release 资产。
-
-1. **运行中升级与停机影响。** 通过真实 Admin 登录提交更新；在准备阶段让普通 Turn、
-   Goal 或 Side 继续收到输入，确认没有 busy 拒绝或维护门禁。切换时确认既有停机语义，
-   新服务不恢复这些执行。记录主服务停止前后 exact update job 存活的证据、installer
-   零退出和 `succeeded` 结果，确认新运行版本与所选 exact 目标相符。
-2. **隔离与清理。** Linux 读取 `systemctl --user show netizen-<rootDigest>.service` 及 exact
-   `netizen-update-<rootDigest>-<operationId>.service` 的结构化 `ControlGroup`/`ActiveState`，确认不同
-   cgroup、`Restart=no`，主服务 stop 不杀掉执行者。macOS 仅用
-   `launchctl print gui/<uid>/netizen-update-<rootDigest>-<operationId>` 的退出码确认 job 已加载，
-   结合安装锁与最终结果证明实际执行；不解析其文本。完成后刷新 Admin，确认临时 plist/job
-   已清理且下次登录不重放。macOS logout/login 与 Linux manager 中止按中断用例处理。
-3. **重复与交错。** 双击、第二个浏览器、刷新、在途 CLI 安装/卸载只允许同一安装锁下
-   一个操作执行。提交后关闭页面再重新打开，不追加第二个 operation；改变 latest 后仍
-   安装原目标。准备期间仍能正常访问其他 Admin 页面，不因网络下载阻塞唯一事件循环。
-4. **准备失败与需要处理。** 在可控故障夹具中注入下载失败、installer/archive 摘要错误、
-   候选验证失败，确认在停止服务之前退出。使用测试应用缺失权限的场景，确认显示
-   `requires_action`、无后台授权浏览器；授权修复后显式重试可以继续。检查 API、结果文件、
-   worker argv/plist 与服务日志没有凭据、session/action token 或任务正文。
-5. **激活失败。** 用本地候选夹具注入配置端口冲突和 admission marker 写入前的启动失败，核对安装器
-   已恢复旧 `current`、服务定义、数据库和原服务意图，内置 Skills 来自恢复后的 release，
-   结果为 `rolled_back`。恢复后 Admin 可连通仍必须显示升级失败已回滚，不能显示成功。
-   另注入 admission marker 已写入但 ready 未确认和 rollback 不完整；只能显示
-   `recovery_required`，保留恢复材料及可能已写入的新数据，按数据库迁移验收验证 exact
-   候选向前恢复、不同候选拒绝和旧服务恢复后不重复还原数据库。
-6. **中断与恢复。** 在受控测试进程中分别于 `accepted`、下载/准备、停止旧服务后、切换
-   `current` 后中断 exact worker job；manager 查询超时单独测试，不能重派。释放安装锁后
-   对账得到未知恢复状态；仍持锁时不能当作 worker 已消失。按上文官方文件入口恢复，确认
-   activation intent 和数据库恢复条件沿用现有事务，成功才得到 `recovered`。
-   失败重跑不得清旧记录；原 operation/target 与实际运行版本各自正确。
-7. **浏览器重连。** 在另一台受信内网主机验证重启期间的断线、恢复后的 401 与重新登录，
-   只读回最近一次结果。准备失败不注销原登录；等待到期仅停止 polling，不制造终态或
-   自动提交。重登后仍可查看正确的升级页，源码/非受管运行始终不给安装 action。
-
-上述升级门禁之外，安装器、launcher 与 ready 变更仍须完成下一节已有的 fresh/active/
-stopped 安装、原生 SDK 生命周期及两平台服务资格检查；已由 exact 候选运行过的同一检查
-可复用结果，不以历史版本绿灯替代。
+此标题保留旧链接；新 CLI 的 Admin 不允许程序升级。必须验证旧 install API 拒绝、
+UI 不提供升级动作、check 只刷新本地信息、无远程 Release 请求／包工具调用，且不能
+通过任意 root／URL／路径注入绕过。环境级 update 的验收见
+[多实例与内置 Skills](#多实例与内置-skills-验收)和[CLI 手册](cli.md#验证与发布状态)。
+历史 ADR 0057 的正式 release 升级证据不能替代这些新门禁。
 
 ### 管理页重启验收
 
-ADR 0059 首次交付或改变重启准入、执行隔离、安装锁、停机/ready、对账或登录边界时，
-执行 `make check`，并在上述两平台可恢复测试账号上验证真实主服务生命周期。复用管理页
-升级验收中的隔离与清理、停机影响、重复与交错、中断恢复和浏览器重连检查，增加以下差异：
+在 Linux 与 macOS 隔离实例验证：一次性授权绑定实际安装身份；不同实例不能互相操作；
+独立 job 不随主服务停机而结束；重启固定原绑定环境；实例维护锁和环境 update 的交错
+不重复提交；结果未知先对账，不虚构成功；HTTP 断线／重登不重发。同时验证真实 ready、
+任务中断／Goal 暂停／Side 关闭、重启后的 session 注销以及迁移提交后失败保留数据。
 
-- Published Release 与 Source Install 均无需检查更新即可重启；版本与 `current` 不变，
-  无 Release 查询、下载、安装或配置写入；非受管及 stale pointer 拒绝提交。
-- 服务脚本完成 stop-confirm/start-ready 并零退出才成功；停止未确认、启动失败和 ready
-  超时都不得推断成功或回滚。执行者持锁至结果写入，锁不被服务或 Codex 子进程继承。
-- 重启与升级、CLI 安装/卸载互斥；pending、未知结果、未恢复 activation intent、迟到
-  accepted worker 或 manager 观察未知不造成重派；CLI 恢复保留原操作并只报告 `recovered`。
-- 重启迟到就绪后的刷新和检查更新可得到 `recovered/service_ready` 并恢复维护按钮；
-  旧进程、缺失或错误启动快照、未确认 ready、关闭中、锁忙、执行者清理失败、目标或
-  `current` 变化、activation intent、升级及其他未知原因均不得自动恢复。执行者收尾
-  期间变化的 ready/版本/intent 必须重新核对；无新增后台轮询或持久状态文件。
-
-同一候选已有的共享检查结果可复用；隔离探针及 fake manager 测试不能替代两平台实机证据。
+伪 manager 和单元测试只证明本地逻辑；每项实机结果记录 exact 候选、平台、命令、
+故障点与清理情况。没有执行的项目明确未验证，不复用旧 release 的成功记录。
 
 ## 验收顺序
 
-每次改动安装器、launcher、主进程 ready 时，先完成两套平台门禁：Linux 重跑 systemd
-fresh/active/stopped upgrade、失败与中断恢复、linger 和卸载；真实 macOS 14+ 受支持架构真机在
-实际 GUI 登录用户下依次验证首次安装、`start|stop|restart|status`、active/stopped upgrade、
-激活失败的回滚／向前恢复、失败自动重启、sleep/wake、logout/login 后自动启动，以及卸载
-保留边界。macOS 还必须在 Codex 启动一个后台 terminal 后停止 Netizen，确认 terminal 可继续
+改变 CLI 绑定、launcher、迁移或 ready 边界时，按受影响范围完成两平台验收：Linux 的
+systemd user，以及 macOS 14+ 实际 GUI 用户的 LaunchAgent。覆盖 setup/start 分离、
+启停与 remove、环境 update 的原运行集合、失败报告、数据提交后不回滚，以及 sleep/wake、
+logout/login 自启意图。确定的配置／schema 拒绝不无限重启；异常运行退出仍按服务策略处理。
+macOS 还必须在 Codex 启动一个后台 terminal 后停止 Netizen，确认 terminal 可继续
 存活但不会持有 `service.lifetime.lock`；检查 plist、进程 argv/environment、`netizen.log` 和
 `launchd.stderr.log` 均不含 App/Admin Secret。最后在两平台重跑真实 Codex Thread、steer、
 cleanup 和 exact-ID resume probes；fake launchctl/systemctl 单测不能替代这些真机门禁。
@@ -1694,8 +1121,8 @@ alias 后旧 revision/action 必须失效。数据库边界变更还应针对候
 双击同一 action 应返回 stale/consumed；与飞书并发操作同一目标时只允许符合 exact native
 identity 的一方提交。重启服务后旧 Admin session 必须失效，持久 Binding/设置/Side
 墓碑不变；journal 不得出现 credential、cookie/action token、cwd、name/preview 或 body。
-最后占用 configured port 再执行一次候选激活，确认它在数据库快照/current 切换前失败且旧
-release 恢复；释放端口后再部署。以上真实浏览器、跨主机与端口回滚属于 Admin Web 首次
+最后占用 configured port 再启动实例，确认明确报错、不漂移端口，并保留已经提交的迁移；
+释放端口后显式 start。以上真实浏览器、跨主机与端口失败边界属于 Admin Web 首次
 上线或相关边界变更的 live 验收，本地 loopback 单测不能替代。
 
 1. P2P `/help`、exact `/new`、`/sessions`、`/status`（native=pending）；`/sessions`

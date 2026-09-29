@@ -7,10 +7,12 @@ from pathlib import Path
 from unittest.mock import call, patch
 
 from scripts.release import (
+    VERSION_FILES,
     CommitEntry,
     ReleaseEscalation,
     ReleaseError,
     bump_text,
+    dispatch_release_workflow,
     merge_pull_request,
     next_version,
     parse_log,
@@ -196,6 +198,14 @@ class ValidateExplicitVersionTest(unittest.TestCase):
 
 
 class ReleaseOrchestrationTest(unittest.TestCase):
+    def test_maintainer_release_requests_full_publication_explicitly(self) -> None:
+        with patch("scripts.release.gh") as gh_mock:
+            dispatch_release_workflow("v1.2.3", Path("/tmp/netizen-notes.md"))
+        self.assertEqual(gh_mock.call_args, call(
+            "workflow", "run", "release.yml", "--ref", "v1.2.3",
+            "-f", "tag=v1.2.3", "-f", "publish=true", "-F", "notes=@/tmp/netizen-notes.md",
+        ))
+
     def test_merge_returns_the_pull_requests_exact_merge_commit(self) -> None:
         with (
             patch("scripts.release.gh") as gh_mock,
@@ -262,21 +272,11 @@ class ReleaseAnchorTest(unittest.TestCase):
 
     def test_version_files_contain_each_anchor_exactly_once(self) -> None:
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        package = (ROOT / "netizen" / "__init__.py").read_text(encoding="utf-8")
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        deployment = (ROOT / "docs" / "deployment.md").read_text(
-            encoding="utf-8"
-        )
+        package = (ROOT / "netizen_cli" / "__init__.py").read_text(encoding="utf-8")
 
         self.assertEqual(len(re.findall(r'^version = "\d+\.\d+\.\d+"$', pyproject, re.M)), 1)
         self.assertEqual(len(re.findall(r'^__version__ = "\d+\.\d+\.\d+"$', package, re.M)), 1)
-        for document in (readme, deployment):
-            self.assertEqual(
-                len(re.findall(
-                    r"releases/download/v\d+\.\d+\.\d+/install\.sh", document
-                )),
-                1,
-            )
+        self.assertEqual({name for name, _ in VERSION_FILES}, {"pyproject.toml", "netizen_cli/__init__.py"})
 
     def test_release_workflow_accepts_notes_input(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(

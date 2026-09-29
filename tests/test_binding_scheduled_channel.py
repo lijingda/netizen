@@ -11,29 +11,29 @@ from unittest.mock import AsyncMock, patch
 
 from lark_channel import Identity, OutboundPost
 
-from netizen.bindings import BindingStore, BindingTaskFeedback, BindingTurnSettings
-from netizen.channel_app import ChannelApplication
-from netizen.codex_runtime import CodexRuntime
-from netizen.domain import (
+from netizen_cli.bindings import BindingStore, BindingTaskFeedback, BindingTurnSettings
+from netizen_cli.channel_app import ChannelApplication
+from netizen_cli.codex_runtime import CodexRuntime
+from netizen_cli.domain import (
     FeishuScope,
     MentionContextMode,
     MessageContextAnchor,
     ScheduledBindingOrigin,
     ScopeKind,
 )
-from netizen.management import (
+from netizen_cli.management import (
     InstanceManagementService,
     ManagementRuntimePort,
     ScopeCoordinator,
 )
-from netizen.message_history import (
+from netizen_cli.message_history import (
     MessageHistoryRef,
     MessageHistoryStats,
     MessageHistoryUnavailable,
     MessageHistoryWindow,
 )
-from netizen.projects import ProjectRegistry
-from netizen.schedules.models import ScheduleRule
+from netizen_cli.projects import ProjectRegistry
+from netizen_cli.schedules.models import ScheduleRule
 from tests.support.channel_messages import FakeChannel, FakeMessage, FakeMessageHistory
 from tests.support.channel_results import sent_result
 from tests.test_codex_runtime import FakeCodex, FakeGoalControl, FakeTerminalCleanup, FakeThread
@@ -54,7 +54,7 @@ class BindingScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         )
         self.codex = FakeCodex()
         self.enterContext(patch(
-            "netizen.codex_runtime.AsyncThread",
+            "netizen_cli.codex_runtime.AsyncThread",
             side_effect=lambda codex, thread_id: FakeThread(thread_id, codex),
         ))
         self.runtime = CodexRuntime(

@@ -9,11 +9,11 @@ from unittest.mock import AsyncMock, patch
 from lark_channel import ImageContent, OutboundCard, ResourceDescriptor
 from openai_codex import ImageInput
 
-from netizen.cards.defaults import decode_defaults_action
-from netizen.codex_runtime import SteerRace, Submission, SubmitDisposition
-from netizen.domain import MentionContextMode, MessageContextAnchor, ScopeKind
-from netizen.message_history import MessageHistoryStats, MessageHistoryWindow
-from netizen.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
+from netizen_cli.cards.defaults import decode_defaults_action
+from netizen_cli.codex_runtime import SteerRace, Submission, SubmitDisposition
+from netizen_cli.domain import MentionContextMode, MessageContextAnchor, ScopeKind
+from netizen_cli.message_history import MessageHistoryStats, MessageHistoryWindow
+from netizen_cli.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 from tests.support.channel_cards import callback, elements, form_values, new_form_values
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import PNG, FakeMessage, plain_prompt_projection

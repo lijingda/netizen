@@ -26,16 +26,16 @@ from openai_codex import AsyncCodex
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
-from netizen.sdk_gap_adapter import (  # noqa: E402
+from netizen_cli.sdk_gap_adapter import (  # noqa: E402
     AppServerThreadSubscriptionControl,
     facade_migration_requirements,
 )
-from netizen.bindings import BindingStore, BindingTurnSettings  # noqa: E402
-from netizen.codex_runtime import CodexRuntime, SubmitDisposition  # noqa: E402
-from netizen.domain import FeishuScope, ScopeKind  # noqa: E402
-from netizen.model_settings import ModelCatalog, STANDARD_SERVICE_TIER_ID  # noqa: E402
-from netizen.runtime.thread_naming import NAMING_OUTPUT_SCHEMA, NAMING_PROMPT  # noqa: E402
-from netizen.terminal_cleanup import PinnedExperimentalTerminalCleanup  # noqa: E402
+from netizen_cli.bindings import BindingStore, BindingTurnSettings  # noqa: E402
+from netizen_cli.codex_runtime import CodexRuntime, SubmitDisposition  # noqa: E402
+from netizen_cli.domain import FeishuScope, ScopeKind  # noqa: E402
+from netizen_cli.model_settings import ModelCatalog, STANDARD_SERVICE_TIER_ID  # noqa: E402
+from netizen_cli.runtime.thread_naming import NAMING_OUTPUT_SCHEMA, NAMING_PROMPT  # noqa: E402
+from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup  # noqa: E402
 from scripts.probe_python_sdk import (  # noqa: E402
     _prove_thread_absent_from_all_catalogs,
     _public_final_response,

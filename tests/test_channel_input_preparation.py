@@ -15,16 +15,16 @@ from lark_channel import (
     TextContent,
 )
 
-from netizen.channel.input_preparation import MessageInputPreparer
-from netizen.domain import FeishuScope, MessageContextAnchor, ScopeKind
-from netizen.image_inputs import ImageInputUnavailable, ImageReference
-from netizen.message_history import (
+from netizen_cli.channel.input_preparation import MessageInputPreparer
+from netizen_cli.domain import FeishuScope, MessageContextAnchor, ScopeKind
+from netizen_cli.image_inputs import ImageInputUnavailable, ImageReference
+from netizen_cli.message_history import (
     MessageHistoryRef,
     MessageHistoryStats,
     MessageHistoryUnavailable,
     MessageHistoryWindow,
 )
-from netizen.prompt_projection import (
+from netizen_cli.prompt_projection import (
     PromptProjectionError,
     ScheduledInputProjection,
     project_current_message,

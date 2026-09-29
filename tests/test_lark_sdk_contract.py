@@ -51,19 +51,19 @@ from lark_oapi.api.im.v1 import (
 )
 from openai_codex import ImageInput, TextInput
 
-from netizen import channel_app
-from netizen.cards import settings_card, turn_files_card, turn_files_card_from_manifest
-from netizen.domain import FeishuScope, ScopeKind, TurnFileManifestItem
-from netizen.image_inputs import (
+from netizen_cli import channel_app
+from netizen_cli.cards import settings_card, turn_files_card, turn_files_card_from_manifest
+from netizen_cli.domain import FeishuScope, ScopeKind, TurnFileManifestItem
+from netizen_cli.image_inputs import (
     UnsupportedPromptMedia,
     current_message_image_references,
     image_references,
 )
-from netizen.quoted_context import (
+from netizen_cli.quoted_context import (
     interactive_quote_visible_text,
     quoted_message_id,
 )
-from netizen.turn_files import TurnFile
+from netizen_cli.turn_files import TurnFile
 
 
 def _elements(value: object, tag: str) -> list[dict[str, object]]:

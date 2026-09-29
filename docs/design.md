@@ -3,7 +3,7 @@
 ## 工程概览
 
 Netizen 把飞书单聊、群聊和话题接成 Codex 的消息 Channel。仓库唯一的生产实现是
-`netizen/` 下的 Python 包，由 `pyproject.toml` 构建和安装；没有 Node.js/TypeScript
+`netizen_cli/` 下的 Python 包，由 `pyproject.toml` 构建和安装；没有 Node.js/TypeScript
 运行时、构建面或 fallback。Node.js 仅用于 Admin JavaScript 行为测试，开发步骤见
 [贡献指南](CONTRIBUTING.md)。完整用户行为见[用户手册](../skills/netizen-user-guide/references/user-guide.md)。
 
@@ -13,7 +13,7 @@ Netizen 把飞书单聊、群聊和话题接成 Codex 的消息 Channel。仓库
 `AsyncCodex`。Channel SDK 负责飞书消息与卡片；Netizen 负责 Scope/Binding 路由、项目
 登记、展示和定时交接；官方 `openai-codex` SDK 管理原生 App Server/CLI 上的 Thread、
 Turn、历史、工具与权限。Admin Web 是同一应用边界上的管理入口，不能提交即时 Prompt
-或浏览完整历史。升级、重启的一次性部署进程是限定例外，见[架构](#架构)与
+或浏览完整历史。环境更新协调器与实例重启的一次性进程是限定例外，见[架构](#架构)与
 [系统维护 API](#系统维护-api)。
 同账号可部署多个 root，各自管理自己的机器人和 Channel 状态，同时共享原生 Codex
 用户状态；不因此增加业务 instance ID、权限隔离或跨实例服务依赖。
@@ -47,11 +47,11 @@ ephemeral fork，依靠独立话题 route 保留身份，不是普通 Scope/Bind
 | Codex 原生状态 | 登录、Thread/Turn 历史、Goal、工具、Skills、MCP 与原生配置；Netizen 复用 effective user 的标准 `$CODEX_HOME`。 |
 | Channel SQLite | Scope/Binding/Project 元数据、显式配置意图与 revision、聊天默认配置与有序群名规则、去重 TTL、上下文边界及不含 native ID 的 Side 路由墓碑；定时任务窄扩展保存当前计划指令与最小交接记录。 |
 | 当前进程内存 | 活动 Turn/Goal/Side、锁与准入、订阅计时、Activity/usage 展示、Admin session 与一次性控制凭据；重启不自动重建这些执行或展示状态。 |
-| 部署状态目录 | 安装锁、激活意图、ready/lifetime 标记与有界升级/重启结果；不进入 Channel SQLite。 |
+| 实例 state 目录 | 实例维护锁、初始化证据、ready/lifetime/runtime identity、迁移备份与有界 Admin 重启结果；不进入 Channel SQLite。 |
 
 持久化清单和各项例外以[数据与配置](#数据与配置)、[定时任务](#定时任务)及
 [部署事务](deployment.md#候选验证与切换)为准。普通 Prompt、回复、Turn 历史、已生效
-Codex 配置与卡片 session 不复制到 Channel 数据库。内置 Skill 的清单和 release 加载边界统一见
+Codex 配置与卡片 session 不复制到 Channel 数据库。内置 Skill 的清单和安装包加载边界统一见
 [候选验证与切换](deployment.md#候选验证与切换)，其他用户 Skill 保持原生管理。
 
 不同 Binding、Parent 与 Side 可以并发使用同一个真实 Project cwd，文件改动彼此可见；
@@ -129,20 +129,22 @@ Server 是 `AsyncCodex` 的子进程，不是第二套业务服务。
 
 | 位置 | 职责 |
 | --- | --- |
-| `netizen/main.py` | ServiceCore 装配并负责共享管理服务、Scheduler、Runtime、SDK 和 Store 的生命周期；管理服务注入各入口适配器。 |
-| `netizen/channel_app.py`、`netizen/channel/` | ChannelApplication 负责准入、Runtime 提交和完成事件编排，并装配、关闭同一表情控制器和回复卡片呈现器；展示会话留在各自对象内。 |
-| `netizen/channel/input_preparation.py` | MessageInputPreparer 负责当前、引用和 catch-up 材料的读取、校验与图片准备，返回 typed PreparedInput；ChannelApplication 继续捕获 admission、组装 Context Boundary 提交参数并发送可见回执，Runtime 确认接受后才推进边界。 |
-| `netizen/message_content.py`、`netizen/message_preparation.py` | 前者统一当前、引用和补充消息的纯内容投影；后者共享公共 SDK 卡片补读，由消息准备组件复用。控制意图仍由 Channel 入口判定。 |
-| `netizen/cards/` | `controls.py` 负责管理卡片和表单，`reply.py` 负责回复、Activity、Files，`callbacks.py` 集中共享回调协议及基础组件；包入口显式导出公共接口。 |
-| `netizen/admin/` | `web.py` 集中路由、认证、一次性授权与请求任务生命周期；`queries.py` 负责查询和分页游标，`presentation.py` 负责响应转换。 |
-| `netizen/management/` | 各管理入口共用的应用边界，包括 `updates.py` 中的升级查询与升级/重启发起编排。 |
-| `netizen/schedules/` | 当前计划、时间规则、最小交接记录、唯一调度器和单工具 MCP 入口；复用同一个 BindingStore writer 与普通 Runtime。 |
-| `netizen/deployment/` | 部署记录与安装锁协议、独立升级/重启进程调度，以及安装器共享基础和现有 ServiceBackend 的两平台实现。 |
-| `netizen/runtime/contracts.py`、`netizen/codex_runtime.py` | 前者唯一定义公共协议、异常、输入输出和快照；后者继续独占任务、Goal、Side、订阅和锁，并保留原公共类型导入路径。 |
+| `netizen_cli/main.py` | ServiceCore 装配并负责共享管理服务、Scheduler、Runtime、SDK 和 Store 的生命周期；管理服务注入各入口适配器。 |
+| `netizen_cli/channel_app.py`、`netizen_cli/channel/` | ChannelApplication 负责准入、Runtime 提交和完成事件编排，并装配、关闭同一表情控制器和回复卡片呈现器；展示会话留在各自对象内。 |
+| `netizen_cli/channel/input_preparation.py` | MessageInputPreparer 负责当前、引用和 catch-up 材料的读取、校验与图片准备，返回 typed PreparedInput；ChannelApplication 继续捕获 admission、组装 Context Boundary 提交参数并发送可见回执，Runtime 确认接受后才推进边界。 |
+| `netizen_cli/message_content.py`、`netizen_cli/message_preparation.py` | 前者统一当前、引用和补充消息的纯内容投影；后者共享公共 SDK 卡片补读，由消息准备组件复用。控制意图仍由 Channel 入口判定。 |
+| `netizen_cli/cards/` | `controls.py` 负责管理卡片和表单，`reply.py` 负责回复、Activity、Files，`callbacks.py` 集中共享回调协议及基础组件；包入口显式导出公共接口。 |
+| `netizen_cli/admin/` | `web.py` 集中路由、认证、一次性授权与请求任务生命周期；`queries.py` 负责查询和分页游标，`presentation.py` 负责响应转换。 |
+| `netizen_cli/management/` | 各管理入口共用的应用边界，包括 `updates.py` 中的安装信息与本实例重启编排。 |
+| `netizen_cli/schedules/` | 当前计划、时间规则、最小交接记录、唯一调度器和单工具 MCP 入口；复用同一个 BindingStore writer 与普通 Runtime。 |
+| `netizen_cli/deployment/` | 有界 Admin 重启记录、维护锁与独立重启 job；旧 release 安装模块仅保留历史兼容测试。 |
+| `netizen_cli/runtime/contracts.py`、`netizen_cli/codex_runtime.py` | 前者唯一定义公共协议、异常、输入输出和快照；后者继续独占任务、Goal、Side、订阅和锁，并保留原公共类型导入路径。 |
 
-`scripts/netizen_installer.py` 保留唯一的安装、激活和回滚事务。
-它与 `scripts/netizen_updater.py`、`scripts/netizen_service_launcher.py` 的入口路径保持固定；
-部署支持模块可在候选虚拟环境建立前从展开源码导入，不依赖 Runtime 或项目第三方依赖。
+程序分发与实例数据由 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md)
+分开：`netizen_cli/cli.py` 提供命令，`cli_services.py` 控制精确系统服务，
+`cli_data.py` 负责显式初始化、启动校验和迁移，`cli_packages.py` 限定包维护方式，
+`cli_update.py` 与包替换范围外的临时协调器负责环境级更新。程序及依赖由用户 Python
+包管理器维护；不会为每实例生成 release 或 venv，也不增加常驻总控服务。
 
 ## 核心模型
 
@@ -522,7 +524,7 @@ discovery 期间不持有 Binding 锁，返回后用 admission revision 防止�
 被引用历史中的 `$` 会在版本化 quote envelope 中编码为非激活文本，不能把历史内容
 变成当前 Skill 调用。
 
-安装器随版本提供 [netizen-lark Skill](../skills/netizen-lark/SKILL.md)，让 Agent 按当前
+Python 包随版本提供 [netizen-lark Skill](../skills/netizen-lark/SKILL.md)，让 Agent 按当前
 `message_id` 主动查询飞书聊天／话题历史。Skill 无配套脚本，只说明如何让可选的 CLI
 选择当前 `NETIZEN_ROOT/lark-app/config.json` 中的固定 `netizen` profile 并使用机器人身份；
 CLI 自行换取令牌，查询、分页和结果处理按上游 lark Skills 执行。应用凭据不进入 Prompt，
@@ -1097,7 +1099,7 @@ OnIt/接收回执，保留原轮模型、卡片、结果来源和发起人。系
 
 ### 计划、时间与状态
 
-时间计算统一由 `netizen/schedules/models.py` 提供，查询预览与调度使用同一规则：
+时间计算统一由 `netizen_cli/schedules/models.py` 提供，查询预览与调度使用同一规则：
 
 | 规则 | 行为 |
 | --- | --- |
@@ -1143,7 +1145,7 @@ ID 的墓碑；Project 同名重登记不复活计划。单独删除计划不使
 
 自然语言沿普通 Prompt/Steer 进入 Codex，由单一 `cron_manage` 工具调用 ScheduleService；
 不增加前置意图分类或独立 Runtime。工具提供 options/list/view/create/update/delete/run_now/runs，
-启停使用 update 的 enabled。参数以 `netizen/schedules/mcp.py` 的 schema 为准。
+启停使用 update 的 enabled。参数以 `netizen_cli/schedules/mcp.py` 的 schema 为准。
 模型先按名称定位再用 exact ID；重名有歧义才澄清。新话题模式指令须明确资源，不依赖
 创建聊天历史；原会话模式可沿用目标 Thread 的原生上下文。
 工具说明由 MCP instructions 和 description 提供，不覆盖原生 developer/base instructions。
@@ -1270,14 +1272,19 @@ ephemeral native Thread ID 或内容。`projects.deleted` 保留已删除 Projec
 `session_defaults` 仅保存 App 隔离的精确聊天／群名匹配条件、创建配置意图和 revision，
 `session_defaults_order` 保存同 App 群名规则的顺序元数据；不保存消息、聊天历史、有效
 Codex 配置或卡片 session，也不与 Project 删除级联。
-Runtime 只接受当前完整 schema，新库直接创建完整结构。按
-[ADR 0075](adr/0075-migrate-channel-databases-during-installation.md)，安装器从 schema v14
-开始维护前向迁移：按显式版本关系选择完整路径，停服并持有 lifetime lock 后，在一个
-SQLite 事务内完成迁移、版本推进和最终结构／完整性校验。已发布的迁移与版本校验不
-依赖以后变化的当前建表逻辑。当前仍为 v14，没有为框架预设虚构的后继 schema。
-Runtime 不执行迁移或保留旧字段兼容；安装器在只读预检中拒绝低于基线、未知／较新版本、
-路径缺失或损坏的数据库，不重建空库。快照及中断恢复属于下述部署事务，不在 SQLite
-增加部署历史或恢复记录。
+Runtime 只接受当前完整 schema；只有显式 `netizen setup` 可以初始化新库。
+[ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移从安装器移到
+每次实际启动：入口先取得实例 lifetime lock，检查初始化证据、配置和数据库，再按
+数据格式版本选取完整迁移路径。基线仍为 v14，沿用
+[ADR 0075](adr/0075-migrate-channel-databases-during-installation.md) 的冻结 SQL／转换与
+历史夹具规则；应用版本变化不自动增加 schema。迁移步骤、版本推进及最终完整性校验
+在同一个 SQLite 事务内完成。只在需要迁移时保存私有恢复备份；无变化不重复迁移。
+较新／未知版本、路径缺失、坏约束或已有实例丢库均拒绝启动，不重建空库。提交前失败
+回滚事务；提交后即使服务未 ready 也保留新库，不自动还原旧数据库或降级程序。
+确定的配置／schema 准入错误在受管入口不发布 ready，也不进入失败自动重试循环；
+CLI start 仍明确失败，手工 Runtime 启动非零退出。修复后显式启动，不以退出码代替 ready。
+业务 Runtime 不保留旧字段兼容；查询命令不触发迁移。
+
 Project 删除 intent、
 确认清单、fingerprint 和结果只在进程内，不保存解析后的 wire value 或已生效配置。
 ADR 0061/0070 的窄例外仅保存当前计划指令、执行目标、时间规则与游标、最小调度交接证据、
@@ -1319,96 +1326,63 @@ user/chat/role allowlist。每个被投递到 Scope 的参与者都能管理 Bin
 
 ### 飞书应用凭据
 
-飞书应用初始化是 release 外的安装期流程，不是第二个运行时认证层；服务
-运行时不进入该流程，也不申请或持久化 user token。App ID 与 raw App Secret 的唯一来源为
-`<NETIZEN_ROOT>/lark-app/config.json` 中固定名为 `netizen` 的 profile，目录为 `0700`，文件为
-当前用户拥有的普通非 symlink 文件，权限为 `0600` 或更严格。它采用官方 Lark CLI 的
-`apps` 格式；Netizen 通过标准库直接读取，不依赖 CLI 或它的 `currentApp` 选择。
-YAML 不再拥有 App ID，服务只传递绝对路径 `NETIZEN_LARK_APP_CONFIG`，不向 Channel
-Database、Codex state、环境或日志写入凭据。源码手工运行也由启动入口按同一 root 派生
-该路径，显式配置冲突则拒绝启动；旧 Secret 环境来源明确拒绝。
-安装器只初始化、读取并原子写入该 profile；成功保存的应用身份不随候选激活失败而撤销。
-详见 [ADR 0066](adr/0066-share-lark-app-credentials-with-optional-cli.md)。
-公开安装入口在候选验证和 Codex 登录检查通过后，
-凭据不完整时默认走官方浏览器初始化；首次配置、显式重绑定与已有应用补权都不依赖 TTY。
-TTY 只决定是否显示安装方式菜单与允许手工输入。无 TTY 的浏览器失败、取消或 660 秒超时
-直接退出，不转入终端输入等待；同一次安装最多发起一次流程，成功后仍校验有效 tenant
-权限才允许激活（[ADR 0062](adr/0062-decouple-initial-app-onboarding-from-terminal-input.md)）。
-Admin Upgrade 缺配置或权限时仍返回 `requires_action`，不在一次性升级进程中开启授权。
-App ID 改变后新消息进入新的 Scope
-namespace；旧 Binding 与原生历史保留但不迁移。device flow、凭据文件交接与安装期权限
-门禁的完整流程见 [部署文档](deployment.md)。
+飞书应用初始化属于显式 `netizen setup`，包安装与服务运行不进入授权流程。App ID 与
+raw App Secret 的唯一来源是 `<NETIZEN_ROOT>/lark-app/config.json` 的固定 `netizen`
+profile：当前用户拥有的普通非 symlink 文件，目录 0700、文件 0600 或更严格。
+沿用 [ADR 0066](adr/0066-share-lark-app-credentials-with-optional-cli.md) 的官方 CLI 格式，
+不依赖 Lark CLI、不跟随 currentApp、不建立 user OAuth；凭据不进入 YAML、SQLite、
+argv 或日志。所有入口均固定本实例绝对路径，旧 Secret 环境来源拒绝。
+
+setup 在当前选定账号环境检查 bundled Codex 登录，不在服务之外执行账号 profile。
+随后按 [ADR 0062](adr/0062-decouple-initial-app-onboarding-from-terminal-input.md)
+执行最多一次官方浏览器流程，660 秒有界等待；无 TTY 也可转交 URL 并保留同一进程。
+TTY 支持手工输入与浏览器失败后的一次手工回退，Ctrl-C 与非 TTY 失败不转入输入等待。
+有效 App ID 加空 Secret 表示 exact-App 修复；删除 profile 文件才表示重新选择应用。
+成功写入的凭据不因后续权限、注册或启动失败恢复旧值。有效 tenant 权限、审批、发布、
+安装、可用范围与入群仍按[部署前置条件](deployment.md#前置门禁)检查。
+
+Admin 不具备包更新或浏览器授权能力。App ID 改变后新消息进入新的 Scope namespace；
+旧 Binding 与原生历史保留，不自动迁移。
 
 ### 部署事务与操作状态
 
-部署候选有两个显式来源：Published Release 携带发布流水线对 exact archive 的资格，Source
-Install 在目标机对当前工作区运行完整门禁。两者只在候选准备和本地 release identity 上
-分流；配置解析、Codex 登录、飞书 tenant 权限、Host Validation、服务状态与回滚语义不随
-来源变化。每实例保持一份 release/配置/凭据/数据库/activation-intent 事务；内置 Skills 随
-物理 release 加载，不再安装、快照或回滚全局目录。平台 Service Backend
-只负责定义、manager 状态、停止确认、发布、启停、status 与 ready 等待。Linux 使用 systemd
-user unit；macOS 14+ 的 Apple Silicon 与 Intel Mac 使用当前 GUI 登录用户的 LaunchAgent，
-不增加 LaunchDaemon 或第二个运行时。macOS 只使用 `launchctl print` 退出码判断 loaded，
-不解析文本。
-按 [ADR 0074](adr/0074-deploy-independent-instances-by-root.md)，`--root` > `NETIZEN_ROOT` >
-有效用户 `~/.netizen`，入口规范化 canonical root 后显式传递。root 派生配置、凭据、state、
-锁与维护记录；服务名和临时维护 job 以 root 的稳定摘要区分，不增加业务 instance ID。
-受管 `instance.dataDir` 必须为该 root 的 `state`，Project root 与共享 `CODEX_HOME` 独立。
-`.netizen-root` 只证明受管命名空间归属，不能据此删除整个安装根。目录认领和精确文件校验
-见[部署文档](deployment.md#目录)。不提供旧服务名/布局迁移或跨此次格式变更自动降级。
-launcher 在稳定的 `state/service.lifetime.lock` inode 上持有独占锁，并只为最终 exec 短暂
-开放 FD 继承；主进程在导入 SDK 边界前恢复 CLOEXEC。数据库快照、迁移与恢复写入都须
-确认 manager target 已卸载，并在操作全程持有该锁。loaded 与 ready 分离：installer 和
-launcher 清理旧 marker，主进程仅在 Feishu background、Runtime 与 admission 全部开启后原子
-发布 `0600 state/service.ready`，正常退出尽力删除。
-macOS 应用入口通过精确锁定的 `truststore` 使用 Security.framework 的系统钥匙串验证 TLS；
-它不导出证书、不生成 CA bundle，也不增加 Netizen 环境配置。Linux TLS 行为保持不变。
+[ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 定义普通 Python 包：
+发行名 `netizen-cli`，模块 `netizen_cli`，命令 `netizen`。同一选定 Python 安装可服务
+多个实例，其他环境可有不同版本。每实例仍只有一个长期业务服务、Channel DB 和
+AsyncCodex。Linux 使用 systemd user unit；macOS 使用当前 GUI 用户的 LaunchAgent，
+不增加 root helper、LaunchDaemon、独立实例注册表或常驻更新服务。
 
-按 ADR 0075，候选准备和只读迁移路径预检在停服之前完成；停服后再次验证数据库，保存
-升级前快照并迁移，成功后才切换 release。activation intent v2 保留原 release／启停
-意图，并引用私有 `state/activation-recovery-<id>/manifest.json`；后者记录原始数据库
-快照证据、旧服务定义、原 `current`／`previous`、源／目标 schema 与事务阶段。重试
-必须读取同一恢复依据，不能覆盖原快照或把半成品作为新起点。
+实例命令选择 `--root > NETIZEN_ROOT > ~/.netizen`；canonical root 决定配置、凭据、
+state、锁、服务名与临时重启 job 名。服务定义固定绝对 Python 入口、环境 prefix 和
+root，不从当前 PATH 重新选择解释器。B 环境可按 root 控制绑定 A 的服务，但
+start/restart 仍运行 A；切换必须 remove 保留数据并解除绑定，再从 B start。无绑定
+不等于数据可新建：start 先确认无旧进程且实例完整，不能冒充 setup 初始化。
+`remove --purge` 才清理展示过的有限实例文件；`-y` 不免除安全检查。根目录、Project、
+外来文件与共享 Codex 数据永不递归删除。目录及操作见[CLI 手册](cli.md)。
 
-Runtime 在开放输入前持久写入该恢复目录的 `admission` marker，失败则不开放输入。
-恢复时先确认服务退出并持有 lifetime lock，再读取 marker；它不存在时启动失败仍可
-完整回滚，它存在时保留候选新库，只有重跑 exact 候选安装器才能向前完成原事务，
-其他版本或矛盾证据报告 `recovery_required`。旧库主文件与 WAL 等全部恢复并持久记录
-完成后，重试只恢复指针／服务而不再次覆盖数据库。私有 ready 证明服务就绪，不证明
-未接收过请求，
-也不能独立证明整个安装事务完成。原本停止的升级仍保持停止。
+launcher 在稳定的 `state/service.lifetime.lock` inode 上持有独占锁，并仅为最终 exec
+临时开放 FD 继承；主进程最早入口恢复 CLOEXEC，锁覆盖启动检查、迁移和运行至退出。
+`state/service.identity.json` 只记录本次 PID、解释器、prefix 与 root；须结合实时
+manager PID、绑定及锁判断，文件存在本身不证明运行。ready 仅在完整 Runtime、Channel
+与 admission 准备后发布。服务停止须确认管理器不再拉起且 lifetime lock 可获取，
+loaded／enabled／running／ready 不互相替代。macOS TLS 继续使用 truststore 系统钥匙串。
 
-ADR 0057 的 Admin Upgrade 是上述安装事务的显式手动入口。管理 application 只持有一个
-有界 blocking-I/O worker，用于官方 Release 查询、部署状态读取和一次性进程提交；它不
-依赖 Runtime 的忙闲投影或 Scope/Binding lock。候选准备期间服务照常接收输入，切换时由
-安装器停止主服务，沿用普通 Turn 中断、Goal 暂停和 Side 结束语义，不增加维护状态或
-任务续跑。Admin 不提前退出，也不复制安装器的 active/enabled 意图判断、退出确认或回滚。
-[ADR 0059](adr/0059-support-explicit-admin-service-restart.md) 增加同一执行者的 Admin Restart，
-直接调用已安装的 `source/service.sh --root <canonical-root> restart`；root 从当前运行实例
-显式传给管理服务、执行者及安装器，不能在深层模块重新猜测默认位置。准入、停机证据与
-失败边界见该 ADR。
+`netizen update` 属于当前安装环境，拒绝 --root，NETIZEN_ROOT 不缩小范围。它通过
+受管服务定义发现当前用户下关联的实例，核对实时状态和安装归属；有歧义在停服前拒绝。
+pip／uv pip 的可靠无变化预检可跳过停启；uv tool 不模拟 dry-run，接受无包变化也可能
+重启。先记录运行集合、逐个停止并确认退出，再由替换范围外的临时协调器调用对应包
+工具，新进程验证后只恢复原运行实例并等待 ready。停止失败立即中止，不补偿已停实例；
+安装状态不明不盲目启动；部分实例失败不跨实例回滚。包更新和实例结果分别报告。
+不拦截外部 pip／uv，不做运行中版本检测，也不承诺与任意外部启动或环境写入互斥。
 
-一次性执行者来自当前运行的物理 release，由同用户独立 systemd transient service 或
-临时 LaunchAgent 启动。macOS 提交文件位于 state，显式 bootstrap 到当前 GUI domain，
-不进入登录自动发现目录；两平台均不自动重启该 job。它按 ADR 0022 的有界 shell 装载器
-取得本次账号环境，不新增环境文件，并持有现有 `state/.install.lock` 完成 exact installer
-下载、校验与调用。Admin 记录操作后释放同一锁，执行者取得锁时重读 exact operation 与
-旧 `current` identity；候选安装器验证继承锁 FD、恢复 CLOEXEC 后复用该锁，其他 CLI
-安装和卸载继续与同一锁互斥。平台适配器只拥有临时 job 的提交、观察和清理。
-不同 root 不共享安装锁；worker 清理继承的其他实例 `NETIZEN_*` 后重新注入捕获的 root，
-继承锁 FD 必须属于该 root。临时 job 的查询、终态清理和恢复对账同样只作用于本实例，
-不能由 Admin 请求选择另一 root。
+Admin 只发起本实例重启，由同用户独立 systemd transient service／临时 LaunchAgent
+执行，使用绑定环境中的当前程序。它复用实例维护锁，不由被停止的主进程自身执行，
+不等待任务空闲，不保证任务续跑，不恢复旧配置或数据库。最近一次 typed 操作摘要
+保存在私有 `state/update.json`，不进入 Channel SQLite。包更新不由此记录授权。
 
-安装器/执行者以 `0600 state/update.json` 原子保存最近一次 typed 部署摘要，最多 4096
-bytes。升级保留 schema 1 的目标版本/Release ID/两项 SHA-256；重启使用 schema 2、
-`kind=restart` 和目标 `{version, releaseDigest}`，不构造不存在的 Release ID 或资产摘要。
-其余字段只含 operation ID、旧 release digest、阶段/固定错误码与时间。下载说明只在查询
-缓存中存在，凭据、action/CSRF token、任务正文、命令输出不进入该文件或 Channel SQLite。`accepted/downloading/preparing/installing/restarting`
-表示安装阶段；`succeeded/failed/rolled_back/requires_action/recovery_required/recovered`
-区分结果。它不成为 Runtime 状态、队列或历史记录。完整回滚才能报告 `rolled_back`；已有
-异常 activation intent 或恢复不完整只能报告 `recovery_required`。后续显式 CLI 安装在
-同一锁内成功完成事务后，可把旧未知记录改为 `recovered/manual_recovery`，保留原 operation
-与目标；这只证明后续部署恢复，不把原操作改报成功，实际运行版本另行显示。
+旧 release/current 安装必须由维护者手工转换，残留旧 activation intent 需先手工处理；
+新入口不继续旧安装事务，不把旧恢复快照直接用于启动。旧实现和历史验收仅证明其当时
+边界，新 CLI 的测试及两平台实机验收分别记录。
 
 ## 管理查询与操作
 
@@ -1419,8 +1393,8 @@ Admin Web 是 ADR 0031/0074 的单管理员、实例级控制面，默认监听 
 实际绑定 8787–8886，只有地址占用才顺延。绑定成功后原子写回本实例 YAML，检测到人工
 修改或写入失败即关闭 listener、启动失败；已固化端口后续冲突不漂移。禁用不分配，
 `0`/`null`/空值不是自动分配；后续初始化失败也保留已写入端口。socket 在
-部分地址绑定失败时按候选整体释放。启动固化端口不重新获取安装器正持有的安装锁，
-避免安装器等待 ready、服务等待安装锁的循环等待。listener 在
+部分地址绑定失败时按候选整体释放。启动固化端口不重新获取 CLI 正持有的实例维护锁，
+避免 CLI 等待 ready、服务等待维护锁的循环等待。listener 在
 Runtime 之前以 closed admission 绑定；Feishu、Store、Runtime 和管理 application 全部就绪
 后，主 loop 才通过 `channel.schedule(...)` 在 background loop 打开它并打印 ready marker。
 HTTP 使用 exact-pin `h11` 的公开状态机和受限 `asyncio` transport：最多 32 条连接，header
@@ -1452,30 +1426,20 @@ OIDC、多管理员或 RBAC。
 
 ### 系统维护 API
 
-系统维护是 ADR 0057/0059 的实例部署页面，保留 `updates` 路由。`GET /api/v1/updates`
-读取当前安装来源、检查缓存与最近操作；`POST /api/v1/updates/check` 显式检查固定官方 GitHub latest API，
-`POST /api/v1/updates/install` 提交所选 exact Release，
-`POST /api/v1/updates/restart` 提交当前安装的重启。三个 POST 复用同源认证与一次性
-action/CSRF grant；安装 grant 绑定 version、Release ID、installer SHA-256 和 archive
-SHA-256；独立的重启 grant 绑定标识当前安装的 release digest，无需检查更新。API 不接受 URL、
-命令、任意路径、source checkout 或强制跳过验证参数。
+系统维护沿用 `updates` 路由，但按 ADR 0076 收缩为本实例重启。
+`GET /api/v1/updates` 返回当前 Python 安装信息和最近操作；
+`POST /api/v1/updates/check` 与 `POST /api/v1/updates/install` 返回 409，
+明确拒绝旧的远端检查／程序升级操作；本地信息通过 GET 刷新；
+`POST /api/v1/updates/restart` 经原有同源认证、CSRF 和一次性授权提交重启。
+重启授权绑定 version、绝对 Python、prefix 与实际模块位置形成的安装身份；
+执行前重新确认当前实例仍绑定该环境。API 不接受任意 root、命令、URL 或下载地址。
 
-只允许当前解释器/包位于受管物理 release、Published metadata/manifest 与运行版本一致且
-`current` 仍指向它时升级。候选必须为官方 immutable、stable、完整提供两项资产 digest 的
-更高版本；检查缓存有界并保留 60 秒，不定时检查。执行时只下载已选 exact tag 的
-`install.sh`，先验证其 SHA-256，再由 bootstrap 验证绑定的 tarball SHA-256 和 manifest。
-信任官方 HTTPS 与 immutable Release，未增加自定义签名。源码/非受管实例显示来源和
-现有 CLI 安装方式，不能从页面改造成另一种安装来源。重启另允许满足 ADR 0059 准入的
-受管 Source Install，无需官方候选。
-
-提交后浏览器只做有界状态 polling，不等待 HTTP 请求跨越服务重启；断线不会取消安装，
-也不隐式重发 POST。重启使旧 session 失效，重新登录后读持久的同一操作摘要。页面只按
-typed 安装结果显示成功/回滚；ready、连通和正在运行的版本不能独立证明完整事务结果。
-非终态记录在执行锁仍被持有时保留；锁已释放时，accepted 操作还有有界 manager handoff
-核验，已失去执行者的记录则转为 `recovery_required`。manager 观察失败仍保持未知，不能
-据此重新 dispatch；macOS 清理只在终态且锁已释放后进行。页面等待到期仅停止自动读取，
-提示手动查看，不篡改部署终态或排队重试。升级与重启共享上述最近操作和安装锁；
-任一未完成或 `recovery_required` 记录都阻止两类提交。
+重启操作使用 schema 3、`kind=restart` 和 `installationId`，保留有界 typed 阶段与
+失败代码，不伪造旧 Release ID／摘要。已有未终结或结果未知操作阻止重复提交；
+HTTP 断线、页面超时不取消 job，也不隐式重发。重启后 session 失效，重新登录读取
+同一持久摘要，页面连通不能代替完成证据。若同一次启动、绑定、安装身份及 ready
+满足窄恢复条件，可显示服务已恢复，但不改判原操作成功。其他未知状态要求运维核查
+status/logs；不能编辑记录伪造成功或调用旧安装器来执行全局更新。
 
 ### 会话目录与分页
 
@@ -1882,8 +1846,8 @@ catalog 重新校验。`/goal`、`/goal <objective>`、`pause/resume/clear` 与�
 
 ### 服务环境与受管 Skill
 
-服务使用 effective user 的账号 `HOME` 与 Standard CODEX_HOME（显式 `CODEX_HOME`
-优先，否则为 `$HOME/.codex`），每实例只创建一个 `AsyncCodex`。多实例继续共享 Codex
+服务使用 effective user 的账号 `HOME` 与共享 CODEX_HOME（注册时显式绑定优先，
+否则采用本次 profile 导出值，再缺省为账号 `$HOME/.codex`），每实例只创建一个 `AsyncCodex`。多实例继续共享 Codex
 登录、配置、历史、用户 Skills 和 MCP，不拆分 CODEX_HOME。launcher 每次加载账号环境后
 覆盖为服务定义固定的 canonical `NETIZEN_ROOT` 及派生路径；主进程入口统一解析并校验
 root，无论原变量是否存在都在启动 Codex 前写回当前进程。手工入口同样默认账号
@@ -1898,15 +1862,16 @@ AsyncCodex 绑定，业务 admission 在完整初始化与调度恢复后开放�
 MCP namespace instructions 与工具 description 提供管理指引；新 Thread 的公开 API 默认 `auto_review`，不能完整继承
 Ask/Custom；其余配置不由 Netizen 覆盖。
 
-release 通过原生 Skill 提供 Netizen 使用咨询和应用 profile／当前消息入口，不进入
-Channel command router，也不替代动态 `/help`。[内置清单与资源校验](../netizen/builtin_skills.py)
-只定位实际运行 release 的 `source/skills`，不用可变的 `current`。启动同一个 AsyncCodex
+安装包通过原生 Skill 提供 Netizen 使用咨询和应用 profile／当前消息入口，不进入
+Channel command router，也不替代动态 `/help`。[内置清单与资源校验](../netizen_cli/builtin_skills.py)
+只定位实际导入包的 `resources/skills`；显式源码／editable 导入使用对应 checkout 的
+canonical Skills 树，不依赖 cwd、PATH 或实例目录。启动同一个 AsyncCodex
 后、创建或恢复 Thread 及开放 admission 前，校验内置文件树并用上述固定适配口注册额外
 目录；资源校验或注册失败即启动失败。兼容性 discovery 探针在隔离环境中检查内置
 `netizen-user-guide`、`netizen-lark` 的 catalog 唯一名称和精确文件路径，不把该检查作为
 每次启动保证，也不覆盖用户同名 Skill 的原生解析规则。
 不写 `$CODEX_HOME/skills` 或用户 config.toml，不扫描全机实例，不回滚共享 Codex 状态。
-卸载只清理本实例受管 release；其他用户 Skills 仍完全由用户维护。
+包卸载由包管理器清理该安装的内置资源；实例移除不删除共享安装，其他用户 Skills 仍由用户维护。
 SDK/Adapter 变更须验证 discovery、进程间额外根不串线及普通 start/resume、Side/fork、
 子 agent 的实际 Skill 执行加载；只读发现测试不能替代执行 live gate。完整门禁见
 [部署文档](deployment.md#多实例与内置-skills-验收)。
@@ -1917,7 +1882,7 @@ Netizen 不监听或复制 Codex 已生效配置；Binding 上只允许 ADR 0016
 ID intent。Project config 的重载能力由锁定 SDK 的 compatibility probe 分类，当前
 结论见 `docs/deployment.md`。`hot-reloaded` 与 `restart-required` 都是受支持结果，
 不能泛化为所有用户级键；官方或探针要求重启的设置通过
-已安装 release 的 `service.sh --root "<NETIZEN_ROOT>" restart` 或管理页“重启服务”重新加载；不保证所有配置
+`netizen restart --root "<NETIZEN_ROOT>"` 或管理页“重启服务”重新加载；不保证所有配置
 作用于已有 Thread。
 
 Runtime 的公开 resume/fork 显式使用 `include_turns=False`，省略仅供返回展示的历史，
@@ -1947,7 +1912,7 @@ SDK/App Server 升级的检查集合、触发条件和顺序统一见
   shutdown 先关闭调度认领、MCP/Admin/Feishu 和 Runtime admission，停止 Scheduler timer，
   再在一个 60 秒 monotonic absolute budget 内排空 handlers、定时交接与 blocking I/O，最后
   interrupt/清理 Runtime、Codex 和 Store；systemd `TimeoutStopSec` 与 LaunchAgent
-  `ExitTimeOut` 都以 75 秒外层 deadline 兜底，安装器再以 90 秒完成精确退出确认。
+  `ExitTimeOut` 都以 75 秒外层 deadline 兜底，CLI 再以 90 秒完成精确退出确认。
   共享管理服务由 ServiceCore 统一关闭，ChannelApplication 只关闭自己的展示资源；
   首次管理 I/O 排空未完成时，ServiceCore 在同一总时限内再做一次有界补充清理。
 - Admin mutation 发出后遇到 response loss/cancellation 不自动重试。一次性 grant 已消费，

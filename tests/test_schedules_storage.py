@@ -9,13 +9,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-from netizen.bindings import (
+from netizen_cli.bindings import (
     BindingStore, ProjectDeleting, ProjectDisabled, ProjectInventoryConflict,
     ScopeConflict, ScopeNotFound, SideTopicState, validate_channel_database,
 )
-from netizen.domain import FeishuScope, ScopeKind, MentionContextMode, MessageContextAnchor
-from netizen.session_settings import SessionSettings, BindingTurnSettings, BindingTaskFeedback
-from netizen.schedules.models import (
+from netizen_cli.domain import FeishuScope, ScopeKind, MentionContextMode, MessageContextAnchor
+from netizen_cli.session_settings import SessionSettings, BindingTurnSettings, BindingTaskFeedback
+from netizen_cli.schedules.models import (
     ScheduleConflict, ScheduleError, ScheduleNotFound, ScheduleRequestConflict,
     ScheduleRevisionConflict, ScheduleRule, plan_lifecycle,
 )

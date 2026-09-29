@@ -8,9 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts import feishu_app_permissions as permissions
-from scripts.feishu_app_onboarding import REQUIRED_TENANT_SCOPES
-from netizen.lark_app import encode_lark_app
+from netizen_cli import feishu_app_permissions as permissions
+from netizen_cli.feishu_app_onboarding import REQUIRED_TENANT_SCOPES
+from netizen_cli.lark_app import encode_lark_app
 
 
 def _response(*scope_states: tuple[str, int], success: bool = True) -> SimpleNamespace:

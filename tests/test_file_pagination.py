@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from netizen.cards import (
+from netizen_cli.cards import (
     CardActionError,
     TurnFileCardLimitError,
     decode_turn_file_action,
@@ -17,7 +17,7 @@ from netizen.cards import (
     turn_files_card_from_manifest,
     turn_progress_card_from_manifest,
 )
-from netizen.domain import (
+from netizen_cli.domain import (
     FeishuScope,
     ReplyCardActivityModule,
     ReplyCardFileItem,
@@ -140,7 +140,7 @@ class FilePaginationTest(unittest.TestCase):
                 answer = "界" + "x" * ((55_000 - base) // increment)
                 fitting = render_all(answer)
                 self.assertLessEqual(max(map(encoded_size, fitting)), 55_000)
-                with patch("netizen.cards.reply.TURN_FILE_CARD_JSON_LIMIT_BYTES", 1_000_000):
+                with patch("netizen_cli.cards.reply.TURN_FILE_CARD_JSON_LIMIT_BYTES", 1_000_000):
                     oversized = render_all(answer + "x")
                 self.assertLessEqual(encoded_size(oversized[0]), 55_000)
                 self.assertGreater(encoded_size(oversized[1]), 55_000)

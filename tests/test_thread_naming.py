@@ -8,8 +8,8 @@ from types import SimpleNamespace
 
 from openai_codex import InternalRpcError, InvalidRequestError
 
-from netizen.model_settings import TurnModelSettings
-from netizen.runtime.thread_naming import NAMING_PROMPT, NamingJob, ThreadNamer
+from netizen_cli.model_settings import TurnModelSettings
+from netizen_cli.runtime.thread_naming import NAMING_PROMPT, NamingJob, ThreadNamer
 
 
 class NamingHandle:

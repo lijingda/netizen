@@ -25,7 +25,7 @@ from openai_codex.types import (
     TurnError,
 )
 
-from netizen.bindings import (
+from netizen_cli.bindings import (
     BindingConflict,
     BindingNotFound,
     BindingStore,
@@ -33,7 +33,7 @@ from netizen.bindings import (
     BindingTurnSettings,
     SideTopicState,
 )
-from netizen.codex_runtime import (
+from netizen_cli.codex_runtime import (
     ActiveState,
     ExternalGoalActive,
     GoalFinalizationStatus,
@@ -92,14 +92,14 @@ from netizen.codex_runtime import (
     TurnStartFailed,
     TurnOutcome,
 )
-from netizen.domain import (
+from netizen_cli.domain import (
     FeishuScope,
     MentionContextMode,
     MessageContextAnchor,
     ScopeKind,
 )
-from netizen.model_settings import ModelCatalogError
-from netizen.sdk_gap_adapter import (
+from netizen_cli.model_settings import ModelCatalogError
+from netizen_cli.sdk_gap_adapter import (
     DiscoveredSkill,
     GoalMutationStateUnknown,
     GoalPauseAck,
@@ -110,20 +110,20 @@ from netizen.sdk_gap_adapter import (
     ThreadUnsubscribeStateUnknown,
     ThreadUnsubscribeStatus,
 )
-from netizen.turn_patch_children import TaskPatchChildren, TurnPatchBatch
-from netizen.turn_plan_observer import (
+from netizen_cli.turn_patch_children import TaskPatchChildren, TurnPatchBatch
+from netizen_cli.turn_plan_observer import (
     TurnActivityObservation,
     TurnPlanStepSnapshot,
     TurnPlanStepState,
 )
-from netizen.turn_activity import (
+from netizen_cli.turn_activity import (
     SIDE_ACTIVITY_QUEUE_HIGH_WATER,
     TurnActivityEvent,
     TurnActivityKind,
     TurnActivityNotificationProjection,
     TurnActivityStatus,
 )
-from netizen.user_questions import (
+from netizen_cli.user_questions import (
     BindingQuestionTarget,
     QuestionRequest,
     SideQuestionTarget,
@@ -1434,7 +1434,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         handle.complete_on_interrupt = False
 
         with patch(
-            "netizen.codex_runtime._SIDE_CLOSE_DRAIN_TIMEOUT_SECONDS",
+            "netizen_cli.codex_runtime._SIDE_CLOSE_DRAIN_TIMEOUT_SECONDS",
             0.01,
         ), self.assertRaisesRegex(SideCloseFailed, "终态未确认"):
             await self.runtime.close_side(record.id)
@@ -2097,7 +2097,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             batches=(TurnPatchBatch("child", "child-turn", self.cwd, (root_patch,)),)
         )
         with patch(
-            "netizen.codex_runtime.collect_turn_patch_children",
+            "netizen_cli.codex_runtime.collect_turn_patch_children",
             new_callable=AsyncMock,
             return_value=children,
         ) as collect:
@@ -2130,10 +2130,10 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             origin=object(),
         )
         with patch(
-            "netizen.codex_runtime.collect_turn_patch_children",
+            "netizen_cli.codex_runtime.collect_turn_patch_children",
             new_callable=AsyncMock,
             side_effect=RuntimeError("child read unavailable"),
-        ) as collect, self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        ) as collect, self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             await self.finish_side_turn(started, response="side final")
 
         outcome = self.outcomes[-1]
@@ -2148,7 +2148,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         _binding, record, _snapshot = await self.open_side()
         for status in ("failed", "interrupted"):
             with self.subTest(status=status), patch(
-                "netizen.codex_runtime.collect_turn_patch_children",
+                "netizen_cli.codex_runtime.collect_turn_patch_children",
                 new_callable=AsyncMock,
             ) as collect:
                 started = await self.runtime.submit_side(
@@ -2317,7 +2317,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 if mode == "unavailable":
                     await asyncio.sleep(0)
                 else:
-                    with self.assertLogs("netizen.codex_runtime", level="WARNING") as logs:
+                    with self.assertLogs("netizen_cli.codex_runtime", level="WARNING") as logs:
                         await asyncio.sleep(0)
                     expected_log = "fixed high water" if mode == "high-water" else "observation unavailable"
                     self.assertTrue(any(expected_log in line for line in logs.output))
@@ -2356,7 +2356,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         malformed.root.questions[0].title = " "
         request = QuestionRequest("valid-question", (UserQuestion("Continue?"),))
 
-        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             await self.finish_side_turn(started, items=(malformed, completed_question(request)))
 
         handler.assert_awaited_once_with(SideQuestionTarget(record.id), origin, request)
@@ -2384,7 +2384,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         observer.append_question(
             thread_id=started.thread_id, turn_id=started.turn_id, request=request,
         )
-        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             self.assertEqual(
                 await self.runtime.stop_side(record.id), StopDisposition.REQUESTED,
             )
@@ -2489,7 +2489,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 )
 
                 if mode == "failure":
-                    with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+                    with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
                         started = await self.runtime.submit_side(
                             side_id=record.id,
                             input="work",
@@ -2498,7 +2498,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                         )
                         await asyncio.sleep(0)
                 else:
-                    with self.assertLogs("netizen.codex_runtime", level="WARNING") as logs:
+                    with self.assertLogs("netizen_cli.codex_runtime", level="WARNING") as logs:
                         started = await self.runtime.submit_side(
                             side_id=record.id,
                             input="work",
@@ -2533,7 +2533,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handle.run_calls, 0)
         # Let the normal observer-failure fallback finish this test's stream.
         observer.error = RuntimeError("observation ended")
-        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             await self.finish_side_turn(started)
 
     async def test_multiple_sides_on_one_parent_run_without_cross_side_lock(self) -> None:
@@ -3228,7 +3228,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             id="native-1", name="Existing empty Thread", preview="",
             updated_at=1_730_831_111,
         )))
-        with patch("netizen.codex_runtime.AsyncThread", return_value=SimpleNamespace(read=read)) as thread:
+        with patch("netizen_cli.codex_runtime.AsyncThread", return_value=SimpleNamespace(read=read)) as thread:
             metadata = await self.runtime.thread_summary("native-1")
         thread.assert_called_once_with(self.codex, "native-1")
         read.assert_awaited_once_with(include_turns=False)
@@ -3239,7 +3239,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_thread_summary_keeps_metadata_when_update_time_is_unavailable(self) -> None:
         for value in (None, True, "1730831111", -1, 1.5, 0):
-            with self.subTest(updated_at=value), patch("netizen.codex_runtime.AsyncThread") as thread:
+            with self.subTest(updated_at=value), patch("netizen_cli.codex_runtime.AsyncThread") as thread:
                 thread.return_value.read = AsyncMock(return_value=SimpleNamespace(
                     thread=SimpleNamespace(
                         id="native-1", name="Title", preview="preview", updated_at=value,
@@ -3256,7 +3256,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(id="native-1", name=10, preview="preview"),
             SimpleNamespace(id="native-1", name=None, preview=None),
         ):
-            with self.subTest(row=row), patch("netizen.codex_runtime.AsyncThread") as thread:
+            with self.subTest(row=row), patch("netizen_cli.codex_runtime.AsyncThread") as thread:
                 thread.return_value.read = AsyncMock(return_value=SimpleNamespace(thread=row))
                 with self.assertRaises(ThreadCatalogError):
                     await self.runtime.thread_summary("native-1")
@@ -4654,7 +4654,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             while not self.runtime._active[binding.id].in_progress_observed:
                 await asyncio.sleep(0)
         with patch(
-            "netizen.codex_runtime.collect_turn_patch_children",
+            "netizen_cli.codex_runtime.collect_turn_patch_children",
             new_callable=AsyncMock,
             return_value=children,
         ) as collect:
@@ -4682,10 +4682,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         submission = await self.submit(binding)
         with patch(
-            "netizen.codex_runtime.collect_turn_patch_children",
+            "netizen_cli.codex_runtime.collect_turn_patch_children",
             new_callable=AsyncMock,
             side_effect=RuntimeError("child read unavailable"),
-        ) as collect, self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        ) as collect, self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             await self.finish(self.codex.handles[-1], submission)
 
         outcome = self.outcomes[-1]
@@ -4702,7 +4702,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         for status in ("failed", "interrupted"):
             with self.subTest(status=status), patch(
-                "netizen.codex_runtime.collect_turn_patch_children",
+                "netizen_cli.codex_runtime.collect_turn_patch_children",
                 new_callable=AsyncMock,
             ) as collect:
                 submission = await self.submit(self.store.get(binding.id))
@@ -4750,7 +4750,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         handle.notifications.put_nowait(RuntimeError("transport closed"))
         handle.complete()
         submission.release_receipt_attempt()
-        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             await self.runtime.wait_idle()
 
         self.assertEqual(handle.stream_calls, 1)
@@ -4784,7 +4784,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 ),
             )
         )
-        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             await self.finish(handle, submission)
 
         self.assertIsNone(self.outcomes[0].turn_diff)
@@ -5435,9 +5435,9 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         submission.release_receipt_attempt()
 
         with patch(
-            "netizen.codex_runtime._GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS",
+            "netizen_cli.codex_runtime._GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS",
             0.01,
-        ), self.assertLogs("netizen.codex_runtime", level="ERROR"):
+        ), self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
             control.handles[0].finish(
                 goal_status=GoalStatus.PAUSED,
                 turn_status="interrupted",
@@ -5504,7 +5504,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         submission.release_receipt_attempt()
         self.codex.omit_agent_items_full_reads = 1
 
-        with self.assertLogs("netizen.codex_runtime", level="WARNING") as logs:
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING") as logs:
             control.handles[0].finish(response="materialized Goal response")
             await self.runtime.wait_idle()
 
@@ -5574,7 +5574,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         submission.release_receipt_attempt()
 
-        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
             control.handles[0].finish()
             control.persisted = goal_snapshot(
                 GoalStatus.COMPLETE,
@@ -5608,7 +5608,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         submission.release_receipt_attempt()
         control.handles[0].terminal_logical_turn_id = "other-logical-turn"
 
-        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
             control.handles[0].finish()
             await self.runtime.wait_idle()
 
@@ -5634,7 +5634,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 )
                 submission.release_receipt_attempt()
                 with patch(
-                    "netizen.codex_runtime.collect_turn_patch_children",
+                    "netizen_cli.codex_runtime.collect_turn_patch_children",
                     new_callable=AsyncMock,
                 ) as collect:
                     control.handles[-1].finish(
@@ -5737,7 +5737,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         submission.release_receipt_attempt()
 
-        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
             control.handles[0].finish(response="answer survives")
             await self.runtime.wait_idle()
 
@@ -5787,7 +5787,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         submission.release_receipt_attempt()
 
-        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
             control.handles[0].finish()
             await self.runtime.wait_idle()
 
@@ -5821,7 +5821,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         submission.release_receipt_attempt()
 
-        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
             control.handles[0].finish(response="result survives cancellation")
             await self.runtime.wait_idle()
 
@@ -5856,7 +5856,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         submission.release_receipt_attempt()
 
-        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
             control.handles[0].finish()
             await self.runtime.wait_idle()
 
@@ -5897,7 +5897,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         submission.release_receipt_attempt()
 
-        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
             control.handles[0].finish(response="original result survives")
             await self.runtime.wait_idle()
 
@@ -5944,7 +5944,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         submission.release_receipt_attempt()
 
-        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
             control.handles[0].finish(response="stale generation result")
             await self.runtime.wait_idle()
 
@@ -6140,7 +6140,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             batches=(TurnPatchBatch("child", "child-turn", self.cwd, (root_patch,)),)
         )
         with patch(
-            "netizen.codex_runtime.collect_turn_patch_children",
+            "netizen_cli.codex_runtime.collect_turn_patch_children",
             new_callable=AsyncMock,
             return_value=children,
         ) as collect:
@@ -6177,10 +6177,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             origin=object(),
         )
         with patch(
-            "netizen.codex_runtime.collect_turn_patch_children",
+            "netizen_cli.codex_runtime.collect_turn_patch_children",
             new_callable=AsyncMock,
             side_effect=RuntimeError("child read unavailable"),
-        ) as collect, self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        ) as collect, self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             control.handles[-1].finish(response="goal final")
             submission.release_receipt_attempt()
             await self.runtime.wait_idle()
@@ -6450,7 +6450,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self.runtime.stop(binding.id)
         self.assertEqual(control.handles[0].pause_calls, 0)
         self.assertEqual(self.cleanup.calls, [])
-        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             await self.runtime.interrupt_all()
         self.assertEqual(control.handles[0].pause_calls, 0)
         self.assertEqual(self.cleanup.calls, [])
@@ -6881,7 +6881,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await self.finish(self.codex.handles[-1], first)
         reads_before = len(self.codex.read_calls)
         self.codex.read_gate = asyncio.Event()
-        with patch("netizen.codex_runtime._COMPACTION_BASELINE_TIMEOUT_SECONDS", 0.02):
+        with patch("netizen_cli.codex_runtime._COMPACTION_BASELINE_TIMEOUT_SECONDS", 0.02):
             compact = asyncio.create_task(self.runtime.compact(
                 binding=self.store.get(binding.id), owner_id="ou_user", origin=object()
             ))
@@ -7049,7 +7049,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         compact.release_receipt_attempt()
         self.codex.read_errors.append(ValueError("unclassified read failure"))
-        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
             await self.runtime.wait_idle()
 
         outcome = self.outcomes[-1]
@@ -7085,7 +7085,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.codex.compact_records.append(("native-1", external))
 
-        with self.assertLogs("netizen.codex_runtime", level="ERROR"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
             await self.runtime.wait_idle()
 
         outcome = self.outcomes[-1]
@@ -7113,7 +7113,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         compact.release_receipt_attempt()
         with (
             patch.object(self.runtime, "_compaction_timeout_seconds", 0.001),
-            self.assertLogs("netizen.codex_runtime", level="ERROR"),
+            self.assertLogs("netizen_cli.codex_runtime", level="ERROR"),
         ):
             await self.runtime.wait_idle()
 
@@ -7507,7 +7507,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         first = await self.submit(binding, "first")
 
-        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             progress = self.runtime.turn_progress(binding.id)
 
         assert progress is not None
@@ -7783,8 +7783,8 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             thread_id=submission.thread_id, turn_id=submission.turn_id,
             request=QuestionRequest("question-one", (UserQuestion("Choose"),)),
         )
-        with patch("netizen.codex_runtime._QUESTION_DELIVERY_TIMEOUT_SECONDS", 0.01):
-            with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        with patch("netizen_cli.codex_runtime._QUESTION_DELIVERY_TIMEOUT_SECONDS", 0.01):
+            with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
                 self.runtime.turn_activity(binding.id, refresh_plan=True)
                 await asyncio.wait_for(sending.wait(), timeout=0.2)
                 await self.finish(self.codex.handles[0], submission)
@@ -7801,7 +7801,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             thread_id=submission.thread_id, turn_id=submission.turn_id,
             request=QuestionRequest("question-one", (UserQuestion("Choose"),)),
         )
-        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             await self.finish(self.codex.handles[0], submission)
         self.assertEqual(len(self.outcomes), 1)
         self.assertIsNone(self.outcomes[0].error)
@@ -8253,7 +8253,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
 
         await asyncio.wait_for(wait_for_terminal(), timeout=0.1)
-        with self.assertLogs("netizen.codex_runtime", level="WARNING") as logs:
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING") as logs:
             self.assertEqual(
                 await self.runtime.stop(binding.id),
                 StopDisposition.REQUESTED,
@@ -8275,7 +8275,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         async def fail_acknowledgement() -> None:
             raise RuntimeError("Feishu unavailable")
 
-        with self.assertLogs("netizen.codex_runtime", level="WARNING") as logs:
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING") as logs:
             result = await self.runtime.stop(
                 binding.id,
                 acknowledge=fail_acknowledgement,
@@ -8300,10 +8300,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
 
         with patch(
-            "netizen.codex_runtime._STOP_ACK_ATTEMPT_TIMEOUT_SECONDS",
+            "netizen_cli.codex_runtime._STOP_ACK_ATTEMPT_TIMEOUT_SECONDS",
             0.001,
         ):
-            with self.assertLogs("netizen.codex_runtime", level="WARNING") as logs:
+            with self.assertLogs("netizen_cli.codex_runtime", level="WARNING") as logs:
                 result = await self.runtime.stop(
                     binding.id,
                     acknowledge=blocked_acknowledgement,
@@ -8346,7 +8346,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await self.submit(binding)
         self.cleanup.failures.append(RuntimeError("cleanup unavailable"))
 
-        with self.assertLogs("netizen.codex_runtime", level="ERROR") as logs:
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR") as logs:
             with self.assertRaisesRegex(
                 ExceptionGroup,
                 "native Turn cleanups failed",
@@ -8541,7 +8541,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.codex.read_errors.append(InternalRpcError(-32603, "rollout is empty"))
         binding = self.binding()
 
-        with self.assertLogs("netizen.codex_runtime", level="WARNING") as logs:
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING") as logs:
             submission = await self.submit(binding)
             submission.release_receipt_attempt()
             await self.runtime.wait_idle()
@@ -8563,7 +8563,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             for index in range(4)
         )
         binding = self.binding()
-        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             submission = await self.submit(binding)
             submission.release_receipt_attempt()
             await self.runtime.wait_idle()
@@ -8607,7 +8607,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(FakeThread, "read", read),
             patch.object(self.codex, "thread_resume", resume),
-            self.assertLogs("netizen.codex_runtime", level="WARNING"),
+            self.assertLogs("netizen_cli.codex_runtime", level="WARNING"),
         ):
             submission = await self.submit(binding)
             submission.release_receipt_attempt()
@@ -8636,7 +8636,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             -32600, "thread native-1 already has an active writer",
         ))
 
-        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             submission = await self.submit(binding)
             submission.release_receipt_attempt()
             await self.runtime.wait_idle()
@@ -8672,7 +8672,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     MethodNotFoundError(-32601, f"{operation} is not supported yet")
                 )
                 binding = self.binding()
-                with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+                with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
                     submission = await self.submit(binding)
                     submission.release_receipt_attempt()
                     await self.runtime.wait_idle()
@@ -8699,7 +8699,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     for _ in range(4)
                 )
                 binding = self.binding()
-                with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+                with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
                     submission = await self.submit(binding)
                     submission.release_receipt_attempt()
                     await self.runtime.wait_idle()
@@ -8733,7 +8733,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 errors = self.codex.full_read_errors if include_turns else self.codex.read_errors
                 errors.append(MethodNotFoundError(code, message))
                 binding = self.binding()
-                with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+                with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
                     submission = await self.submit(binding)
                     submission.release_receipt_attempt()
                     await self.runtime.wait_idle()
@@ -8800,7 +8800,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         binding = self.binding()
 
-        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             submission = await self.submit(binding)
             submission.release_receipt_attempt()
             await self.runtime.wait_idle()
@@ -8914,7 +8914,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.codex.read_gate = asyncio.Event()
         binding = self.binding()
 
-        with self.assertLogs("netizen.codex_runtime", level="WARNING"):
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
             submission = await self.submit(binding)
             try:
                 while len(self.codex.read_calls) < 2:
@@ -8980,7 +8980,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         submission = await self.submit(binding)
         submission.release_receipt_attempt()
-        with self.assertLogs("netizen.codex_runtime", level="WARNING") as logs:
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING") as logs:
             await self.runtime.wait_idle()
         self.assertEqual(self.runtime.active_turn(binding.id).state, ActiveState.OBSERVATION_UNAVAILABLE)
         self.assertIsInstance(self.outcomes[-1], TurnObservationUnavailableOutcome)
@@ -9094,7 +9094,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.codex.handles[0].fail("backend disconnected", "serverOverloaded")
         self.codex.handles[0].notifications.get_nowait()
         self.codex.read_statuses.append("systemError")
-        with patch("netizen.codex_runtime._TERMINAL_STREAM_DRAIN_TIMEOUT_SECONDS", 0.01):
+        with patch("netizen_cli.codex_runtime._TERMINAL_STREAM_DRAIN_TIMEOUT_SECONDS", 0.01):
             follow_up = await self.submit(binding, "continue")
         self.assertEqual(follow_up.thread_id, original.thread_id)
         self.assertEqual(len(self.outcomes), 2)
@@ -9308,7 +9308,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         await self._park_turn_for_recovery(binding)
         self.codex.read_gate = asyncio.Event()
-        with patch("netizen.codex_runtime._TURN_OBSERVATION_RECOVERY_TIMEOUT_SECONDS", 0.01):
+        with patch("netizen_cli.codex_runtime._TURN_OBSERVATION_RECOVERY_TIMEOUT_SECONDS", 0.01):
             with self.assertRaises(TurnObservationUnavailable):
                 await self.submit(binding, "continue")
             await self.runtime.wait_idle()

@@ -10,21 +10,21 @@ from pathlib import Path
 
 from lark_channel import OutboundCard
 
-from netizen import channel_app
-from netizen.bindings import BindingStore, BindingTaskFeedback
-from netizen.cards import goal_generation, reply_card
-from netizen.channel import reply_presenter
-from netizen.channel_app import ChannelApplication
-from netizen.domain import FeishuScope, NativeCapability, ReplyCardProjection, ScopeKind
-from netizen.management import (
+from netizen_cli import channel_app
+from netizen_cli.bindings import BindingStore, BindingTaskFeedback
+from netizen_cli.cards import goal_generation, reply_card
+from netizen_cli.channel import reply_presenter
+from netizen_cli.channel_app import ChannelApplication
+from netizen_cli.domain import FeishuScope, NativeCapability, ReplyCardProjection, ScopeKind
+from netizen_cli.management import (
     InstanceManagementService,
     ManagementRuntimePort,
     ScopeCoordinator,
 )
-from netizen.projects import ProjectRegistry
-from netizen.runtime.contracts import Submission, SubmitDisposition
-from netizen.schedules.models import ScheduleRule
-from netizen.sdk_gap_adapter import GoalSnapshot
+from netizen_cli.projects import ProjectRegistry
+from netizen_cli.runtime.contracts import Submission, SubmitDisposition
+from netizen_cli.schedules.models import ScheduleRule
+from netizen_cli.sdk_gap_adapter import GoalSnapshot
 from tests.support.channel_messages import FakeChannel, FakeMessage, FakeMessageHistory
 from tests.support.channel_results import sent_result
 from tests.support.channel_runtime import StubRuntime

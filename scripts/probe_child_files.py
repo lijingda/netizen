@@ -33,12 +33,12 @@ from openai_codex.generated.v2_all import (
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
-from netizen.turn_files import turn_patch_summary  # noqa: E402
-from netizen.turn_patch_children import (  # noqa: E402
+from netizen_cli.turn_files import turn_patch_summary  # noqa: E402
+from netizen_cli.turn_patch_children import (  # noqa: E402
     _has_parent,
     collect_turn_patch_children,
 )
-from netizen.sdk_gap_adapter import facade_migration_requirements  # noqa: E402
+from netizen_cli.sdk_gap_adapter import facade_migration_requirements  # noqa: E402
 from scripts.probe_python_sdk import (  # noqa: E402
     _public_terminal_turn,
     _status_value,

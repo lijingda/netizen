@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import os
 import shutil
 import sys
@@ -12,12 +13,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from netizen.instance import (
+from netizen_cli.instance import (
     INSTANCE_ROOT_MARKER,
     INSTANCE_ROOT_MARKER_CONTENT,
     require_instance_root_marker,
 )
-from scripts import netizen_service_launcher as launcher
+from netizen_cli import service_launcher as launcher
 
 
 class NetizenServiceLauncherTest(unittest.TestCase):
@@ -313,7 +314,7 @@ printf 'logout-noise=ignored'
         self.assertNotIn("PYTHONPATH", environment)
         self.assertEqual(environment["PYTHONUNBUFFERED"], "1")
 
-    def test_launch_execs_release_python_with_the_captured_environment(self) -> None:
+    def test_launch_execs_bound_python_with_the_captured_environment(self) -> None:
         account = SimpleNamespace(
             pw_dir="/home/service-user",
             pw_name="service-user",
@@ -335,12 +336,16 @@ printf 'logout-noise=ignored'
                     "NETIZEN_ROOT": "/wrong/instance/from-profile",
                     "PATH": "/home/service-user/.nvm/current/bin:/usr/bin",
                     "PYTHONOPTIMIZE": "2",
+                    "NETIZEN_CLI_PREFIX": "/wrong/profile-env",
+                    "NETIZEN_CLI_SERVICE": "0",
                 },
             ),
             patch.object(launcher.os, "execve") as execute,
             patch.object(launcher, "require_instance_root_marker") as check_root,
             patch.object(launcher, "acquire_lifetime_lock", return_value=9),
             patch.object(launcher, "clear_ready_marker") as clear_ready,
+            patch.object(launcher, "publish_service_identity", return_value=(1, 2)),
+            patch.object(launcher, "clear_own_service_identity"),
             patch.object(launcher.os, "set_inheritable") as set_inheritable,
         ):
             launcher.launch()
@@ -350,7 +355,7 @@ printf 'logout-noise=ignored'
         self.assertEqual(executable, launcher.sys.executable)
         self.assertEqual(
             argv,
-            [launcher.sys.executable, "-E", "-B", "-u", "-m", "netizen.main"],
+            [launcher.sys.executable, "-E", "-P", "-B", "-u", "-m", "netizen_cli.main"],
         )
         self.assertEqual(
             environment["PATH"],
@@ -360,11 +365,56 @@ printf 'logout-noise=ignored'
         self.assertEqual(environment["CODEX_HOME"], managed["CODEX_HOME"])
         self.assertEqual(environment["NETIZEN_ROOT"], managed["NETIZEN_ROOT"])
         self.assertEqual(environment["NETIZEN_LIFETIME_LOCK_FD"], "9")
+        self.assertEqual(environment["NETIZEN_CLI_PREFIX"], launcher.sys.prefix)
+        self.assertEqual(environment["NETIZEN_CLI_SERVICE"], "1")
         clear_ready.assert_called_once_with(Path(managed["NETIZEN_READY_FILE"]))
         self.assertEqual(
             [call.args for call in set_inheritable.call_args_list],
             [(9, True), (9, False), (9, False)],
         )
+
+    def test_codex_home_defaults_to_shared_profile_then_account_home(self) -> None:
+        home = Path("/home/service-user").resolve()
+        root = home / ".netizen"
+        for captured, expected in (({"CODEX_HOME": "/tmp/shared-profile-codex"}, "/tmp/shared-profile-codex"),
+                                   ({}, str(home / ".codex"))):
+            with self.subTest(captured=captured):
+                environment = launcher.service_environment(
+                    captured, instance_root=root, home=home, username="service-user",
+                    shell=Path("/bin/bash"), codex_home=None,
+                    config_path=str(root / "config.yaml"),
+                    lark_app_config=str(root / "lark-app/config.json"),
+                    admin_secret_file=str(root / "credentials/admin-web-secret"),
+                    ready_file=str(root / "state/service.ready"),
+                    lifetime_lock_file=str(root / "state/service.lifetime.lock"),
+                )
+                self.assertEqual(environment["CODEX_HOME"], expected)
+
+    def test_explicit_root_derives_paths_and_keeps_bound_codex_home(self) -> None:
+        root = Path("/tmp/instance-a").resolve()
+        with (
+            patch.dict(launcher.os.environ, {"CODEX_HOME": "/tmp/shared-codex"}, clear=True),
+            patch.object(launcher, "require_instance_root_marker"),
+            patch.object(launcher, "acquire_lifetime_lock", return_value=9),
+            patch.object(launcher, "clear_ready_marker"),
+            patch.object(launcher, "publish_service_identity", return_value=(1, 2)),
+            patch.object(launcher, "clear_own_service_identity"),
+            patch.object(launcher, "_launch_with_lifetime_lock") as execute,
+            patch.object(launcher.os, "set_inheritable"),
+        ):
+            launcher.launch(root)
+        managed = execute.call_args.kwargs["managed"]
+        self.assertEqual(managed["CODEX_HOME"], "/tmp/shared-codex")
+        self.assertEqual(managed["NETIZEN_CONFIG_PATH"], str(root / "config.yaml"))
+
+    def test_wrong_environment_binding_rejected_before_instance_mutation(self) -> None:
+        with (
+            patch.dict(launcher.os.environ, {"NETIZEN_CLI_PREFIX": "/wrong/environment"}, clear=True),
+            patch.object(launcher, "acquire_lifetime_lock") as acquire,
+            self.assertRaisesRegex(launcher.ServiceLaunchError, "bound Python environment"),
+        ):
+            launcher.launch(Path("/tmp/instance-a").resolve())
+        acquire.assert_not_called()
 
     def test_lifetime_lock_uses_one_stable_cloexec_inode(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -512,6 +562,75 @@ printf 'logout-noise=ignored'
             finally:
                 os.close(second)
                 os.close(first)
+
+    def test_identity_publishes_fixed_interpreter_and_replaces_stale_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "state").mkdir(mode=0o700)
+            path = root / "state/service.identity.json"
+            path.write_text("stale", encoding="utf-8")
+            path.chmod(0o600)
+            with patch.object(launcher.sys, "executable", "/selected/env/bin/python"):
+                identity = launcher.publish_service_identity(root)
+            self.assertEqual(json.loads(path.read_text()), {
+                "format": 1, "pid": os.getpid(), "python": "/selected/env/bin/python",
+                "prefix": str(Path(sys.prefix).resolve()), "root": str(root),
+            })
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(identity, (path.stat().st_dev, path.stat().st_ino))
+            launcher.clear_own_service_identity(root, identity)
+            self.assertFalse(path.exists())
+
+    def test_identity_cleanup_preserves_replaced_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "state").mkdir(mode=0o700)
+            identity = launcher.publish_service_identity(root)
+            path = root / "state/service.identity.json"
+            replacement = root / "state/replacement"
+            replacement.write_text("new owner's evidence", encoding="utf-8")
+            replacement.replace(path)
+            launcher.clear_own_service_identity(root, identity)
+            self.assertEqual(path.read_text(), "new owner's evidence")
+
+    def test_identity_rejects_symlinks_and_unsafe_markers(self) -> None:
+        for kind in ("symlink", "mode", "directory", "hardlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                (root / "state").mkdir(mode=0o700)
+                path = root / "state/service.identity.json"
+                target = root / "unrelated"
+                target.write_text("preserve", encoding="utf-8")
+                target.chmod(0o600)
+                if kind == "symlink":
+                    path.symlink_to(target)
+                elif kind == "directory":
+                    path.mkdir()
+                elif kind == "hardlink":
+                    os.link(target, path)
+                else:
+                    path.write_text("preserve", encoding="utf-8")
+                    path.chmod(0o644)
+                with self.assertRaisesRegex(launcher.ServiceLaunchError, "unsafe service identity"):
+                    launcher.publish_service_identity(root)
+                self.assertEqual(target.read_text(), "preserve")
+
+    def test_failed_launch_removes_only_its_identity_before_releasing_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "state").mkdir(mode=0o700)
+            marker = root / INSTANCE_ROOT_MARKER
+            marker.write_bytes(INSTANCE_ROOT_MARKER_CONTENT)
+            marker.chmod(0o600)
+            with (
+                patch.dict(launcher.os.environ, {}, clear=True),
+                patch.object(launcher, "_launch_with_lifetime_lock", side_effect=RuntimeError("profile failed")),
+                self.assertRaisesRegex(RuntimeError, "profile failed"),
+            ):
+                launcher.launch(root)
+            self.assertFalse((root / "state/service.identity.json").exists())
+            descriptor = launcher.acquire_lifetime_lock(root / "state/service.lifetime.lock")
+            os.close(descriptor)
 
 
 if __name__ == "__main__":

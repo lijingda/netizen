@@ -11,16 +11,16 @@ from types import SimpleNamespace
 
 from lark_channel import OutboundCard
 
-from netizen.bindings import BindingStore
-from netizen.channel_app import ChannelApplication
-from netizen.domain import FeishuScope, ScheduledOrigin, ScopeKind
-from netizen.management import InstanceManagementService, ScopeCoordinator
-from netizen.management.service import ManagementRuntimePort
-from netizen.projects import ProjectRegistry
-from netizen.runtime.contracts import (
+from netizen_cli.bindings import BindingStore
+from netizen_cli.channel_app import ChannelApplication
+from netizen_cli.domain import FeishuScope, ScheduledOrigin, ScopeKind
+from netizen_cli.management import InstanceManagementService, ScopeCoordinator
+from netizen_cli.management.service import ManagementRuntimePort
+from netizen_cli.projects import ProjectRegistry
+from netizen_cli.runtime.contracts import (
     ActiveState, ActiveTurnSnapshot, Submission, SubmitDisposition, TurnOutcome,
 )
-from netizen.schedules.models import ScheduleRule
+from netizen_cli.schedules.models import ScheduleRule
 
 from tests.support.channel_messages import (
     FakeChannel,

@@ -4,7 +4,7 @@ import asyncio
 import unittest
 from dataclasses import dataclass
 
-from netizen.management import ChatLabelResolver
+from netizen_cli.management import ChatLabelResolver
 
 
 @dataclass(frozen=True)

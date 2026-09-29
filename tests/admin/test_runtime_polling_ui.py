@@ -18,7 +18,7 @@ class RuntimePollingUiTest(unittest.TestCase):
             if os.environ.get("CI") == "true":
                 self.fail(reason)
             self.skipTest(reason)
-        static = Path(__file__).resolve().parents[2] / "netizen/admin/static"
+        static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
         tree = _HtmlTree()
         tree.feed((static / "index.html").read_text(encoding="utf-8"))
         source = (static / "admin.js").read_text(encoding="utf-8")

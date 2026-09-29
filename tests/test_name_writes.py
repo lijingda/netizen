@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from netizen.runtime.name_writes import ThreadNameWrites
+from netizen_cli.runtime.name_writes import ThreadNameWrites
 
 
 class ControlledWrite:

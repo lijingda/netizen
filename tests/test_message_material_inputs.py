@@ -21,28 +21,28 @@ from lark_channel import (
     flatten_content,
 )
 
-from netizen.channel import input_preparation
-from netizen.bindings import BindingStore, SideTopicState
-from netizen.channel_app import ChannelApplication
-from netizen.codex_runtime import Submission, SubmitDisposition
-from netizen.domain import (
+from netizen_cli.channel import input_preparation
+from netizen_cli.bindings import BindingStore, SideTopicState
+from netizen_cli.channel_app import ChannelApplication
+from netizen_cli.codex_runtime import Submission, SubmitDisposition
+from netizen_cli.domain import (
     FeishuScope,
     MentionContextMode,
     MessageContextAnchor,
     NativeCapability,
     ScopeKind,
 )
-from netizen.management import (
+from netizen_cli.management import (
     InstanceManagementService,
     ManagementRuntimePort,
     ScopeCoordinator,
 )
-from netizen.message_history import (
+from netizen_cli.message_history import (
     MessageHistoryRef,
     MessageHistoryStats,
     MessageHistoryWindow,
 )
-from netizen.projects import ProjectRegistry
+from netizen_cli.projects import ProjectRegistry
 from tests.support.channel_messages import (
     FakeChannel,
     FakeMessage,

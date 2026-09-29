@@ -19,7 +19,7 @@ class ProjectDeleteUiTest(unittest.TestCase):
                 self.fail(reason)
             self.skipTest(reason)
         root = Path(__file__).resolve().parents[2]
-        static = root / "netizen/admin/static"
+        static = root / "netizen_cli/admin/static"
         tree = _HtmlTree()
         tree.feed((static / "index.html").read_text(encoding="utf-8"))
         source = (static / "admin.js").read_text(encoding="utf-8")

@@ -4,8 +4,8 @@ import asyncio
 import unittest
 from unittest.mock import patch
 
-from netizen.domain import FeishuScope, ScopeKind
-from netizen.session_settings import BindingTaskFeedback
+from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.session_settings import BindingTaskFeedback
 from tests.support.channel_fixtures import channel_fixture
 
 

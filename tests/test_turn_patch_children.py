@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from openai_codex.generated.v2_all import ThreadItem, ThreadReadResponse, Turn
 
-from netizen.turn_patch_children import (
+from netizen_cli.turn_patch_children import (
     TaskPatchChildren,
     collect_turn_patch_children,
 )
@@ -142,7 +142,7 @@ class TurnPatchChildrenTest(unittest.IsolatedAsyncioTestCase):
                 raise value
             return value
 
-        with patch("netizen.turn_patch_children.AsyncThread.read", new=read):
+        with patch("netizen_cli.turn_patch_children.AsyncThread.read", new=read):
             result = await collect_turn_patch_children(
                 codex, thread_id="root", turn_id="root-turn", items=items
             )
@@ -671,8 +671,8 @@ class TurnPatchChildrenTest(unittest.IsolatedAsyncioTestCase):
                 cancelled.set()
 
         with (
-            patch("netizen.turn_patch_children.AsyncThread.read", new=read),
-            patch("netizen.turn_patch_children._READ_TIMEOUT_SECONDS", 0.01),
+            patch("netizen_cli.turn_patch_children.AsyncThread.read", new=read),
+            patch("netizen_cli.turn_patch_children._READ_TIMEOUT_SECONDS", 0.01),
         ):
             result = await collect_turn_patch_children(
                 object(),
@@ -692,7 +692,7 @@ class TurnPatchChildrenTest(unittest.IsolatedAsyncioTestCase):
             entered.set()
             await asyncio.Event().wait()
 
-        with patch("netizen.turn_patch_children.AsyncThread.read", new=read):
+        with patch("netizen_cli.turn_patch_children.AsyncThread.read", new=read):
             task = asyncio.create_task(
                 collect_turn_patch_children(
                     object(),
@@ -721,8 +721,8 @@ class TurnPatchChildrenTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
 
         with (
-            patch("netizen.turn_patch_children.AsyncThread.read", new=read),
-            patch("netizen.turn_patch_children._READ_TIMEOUT_SECONDS", 0.01),
+            patch("netizen_cli.turn_patch_children.AsyncThread.read", new=read),
+            patch("netizen_cli.turn_patch_children._READ_TIMEOUT_SECONDS", 0.01),
         ):
             result = await collect_turn_patch_children(
                 object(),

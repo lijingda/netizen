@@ -8,8 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from netizen import result_images
-from netizen.result_images import prepare_result_images
+from netizen_cli import result_images
+from netizen_cli.result_images import prepare_result_images
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"fixture"

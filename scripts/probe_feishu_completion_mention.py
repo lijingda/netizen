@@ -20,17 +20,17 @@ from lark_channel import (
     OutboundText, RetryConfig, SendOpts,
 )
 
-from netizen.cards import reply_card
-from netizen.channel.topics import validate_topic_message
-from netizen.completion_mention import valid_completion_mention_user_id
-from netizen.domain import (
+from netizen_cli.cards import reply_card
+from netizen_cli.channel.topics import validate_topic_message
+from netizen_cli.completion_mention import valid_completion_mention_user_id
+from netizen_cli.domain import (
     ReplyCardActivityModule,
     ReplyCardProjection,
     ReplyCardResultModule,
     TurnCommentaryManifestEntry,
     TurnProgressManifest,
 )
-from netizen.settings import Settings
+from netizen_cli.settings import Settings
 
 
 def _validate_args(args: argparse.Namespace) -> None:

@@ -24,7 +24,7 @@ from lark_channel import (
 from lark_channel.channel import normalize as sdk_normalize
 from lark_channel.channel.normalize.pipeline import PipelineConfig, PipelineDeps
 
-from netizen.message_content import (
+from netizen_cli.message_content import (
     HistoricalMessageContractError,
     HistoricalMessageUnavailable,
     UnsupportedHistoricalMessage,

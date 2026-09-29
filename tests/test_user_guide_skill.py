@@ -8,13 +8,13 @@ from unittest.mock import patch
 
 import yaml
 
-from netizen.builtin_skills import (
+from netizen_cli.builtin_skills import (
     BUILTIN_SKILL_NAMES,
     BuiltinSkillError,
     builtin_skill_root,
     validate_builtin_skills,
 )
-from netizen.experience import COMMAND_SPECS
+from netizen_cli.experience import COMMAND_SPECS
 from tests.documentation_links import local_link_errors
 
 
@@ -33,36 +33,34 @@ class BuiltinSkillsTest(unittest.TestCase):
         with patch("pathlib.Path.cwd", side_effect=AssertionError("do not read cwd")):
             self.assertEqual(builtin_skill_root(), ROOT / "skills")
 
-    def test_installed_runtime_uses_physical_release_not_current(self) -> None:
+    def test_installed_runtime_uses_its_own_package_resources(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            release = root / "releases" / "release-1"
-            source = release / "source"
+            for prefix in (root / "arbitrary-venv", root / "global", root / "user-site"):
+                module = prefix / "lib" / "netizen_cli" / "builtin_skills.py"
+                resources = module.parent / "resources"
+                shutil.copytree(ROOT / "skills", resources / "skills")
+                module.touch()
+                with self.subTest(prefix=prefix), patch("pathlib.Path.cwd", side_effect=AssertionError):
+                    self.assertEqual(builtin_skill_root(package_file=module), resources / "skills")
+
+    def test_damaged_package_resources_do_not_fall_back_to_source(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            source = Path(raw)
             shutil.copytree(ROOT / "skills", source / "skills")
-            prefix = release / "venv"
-            module = prefix / "lib" / "netizen" / "builtin_skills.py"
-            module.parent.mkdir(parents=True)
-            module.touch()
-            current = root / "current"
-            current.symlink_to(release, target_is_directory=True)
-            self.assertEqual(
-                builtin_skill_root(runtime_prefix=current / "venv", package_file=module),
-                (source / "skills").resolve(),
-            )
-            current.unlink()
-            current.symlink_to(root / "releases" / "release-2", target_is_directory=True)
-            self.assertEqual(
-                builtin_skill_root(runtime_prefix=prefix, package_file=module),
-                (source / "skills").resolve(),
-            )
+            (source / "pyproject.toml").touch()
+            package = source / "netizen_cli"
+            (package / "resources").mkdir(parents=True)
+            with self.assertRaises(BuiltinSkillError):
+                builtin_skill_root(package_file=package / "builtin_skills.py")
 
     def test_unrecognized_package_layout_fails_without_global_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             with self.assertRaises(BuiltinSkillError):
-                builtin_skill_root(runtime_prefix=root / "venv", package_file=root / "other.py")
+                builtin_skill_root(package_file=root / "other.py")
             with self.assertRaises(BuiltinSkillError):
-                builtin_skill_root(runtime_prefix=root, package_file=root / "netizen" / "__init__.py")
+                builtin_skill_root(package_file=root / "netizen_cli" / "__init__.py")
 
     def test_missing_reference_entrypoint_and_symlink_fail_closed(self) -> None:
         for damage in ("reference", "entrypoint", "symlink", "external-reference", "empty"):

@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock
 
 from lark_channel import OutboundConfig, OutboundSender, RetryConfig
 
-from netizen.channel.completion_mentions import send_completion_mention
-from netizen.domain import FeishuScope, ScopeKind
+from netizen_cli.channel.completion_mentions import send_completion_mention
+from netizen_cli.domain import FeishuScope, ScopeKind
 
 
 class CompletionTopicDeliveryTest(unittest.IsolatedAsyncioTestCase):
@@ -88,7 +88,7 @@ class CompletionTopicDeliveryTest(unittest.IsolatedAsyncioTestCase):
                 if expected:
                     result = await send_completion_mention(channel, **kwargs)
                 else:
-                    with self.assertLogs("netizen.channel.completion_mentions", level="WARNING"):
+                    with self.assertLogs("netizen_cli.channel.completion_mentions", level="WARNING"):
                         result = await send_completion_mention(channel, **kwargs)
                 self.assertEqual(result, expected)
                 channel.send.assert_awaited_once()

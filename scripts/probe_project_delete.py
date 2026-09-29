@@ -26,26 +26,26 @@ from openai_codex import AsyncCodex
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
-from netizen.bindings import (  # noqa: E402
+from netizen_cli.bindings import (  # noqa: E402
     BindingNotFound, BindingStore, BindingTurnSettings, SideTopicState,
 )
-from netizen.codex_runtime import CodexRuntime, SideSessionNotFound  # noqa: E402
-from netizen.domain import FeishuScope, ScopeKind  # noqa: E402
-from netizen.management.coordination import ScopeCoordinator  # noqa: E402
-from netizen.management.service import (  # noqa: E402
+from netizen_cli.codex_runtime import CodexRuntime, SideSessionNotFound  # noqa: E402
+from netizen_cli.domain import FeishuScope, ScopeKind  # noqa: E402
+from netizen_cli.management.coordination import ScopeCoordinator  # noqa: E402
+from netizen_cli.management.service import (  # noqa: E402
     ExactBindingTarget,
     InstanceManagementService,
     ManagementRuntimePort,
 )
-from netizen.model_settings import ModelCatalog, STANDARD_SERVICE_TIER_ID  # noqa: E402
-from netizen.projects import ProjectRegistry  # noqa: E402
-from netizen.runtime.contracts import SideTurnOutcome  # noqa: E402
-from netizen.sdk_gap_adapter import (  # noqa: E402
+from netizen_cli.model_settings import ModelCatalog, STANDARD_SERVICE_TIER_ID  # noqa: E402
+from netizen_cli.projects import ProjectRegistry  # noqa: E402
+from netizen_cli.runtime.contracts import SideTurnOutcome  # noqa: E402
+from netizen_cli.sdk_gap_adapter import (  # noqa: E402
     AppServerSideBoundaryControl,
     AppServerThreadDeleteControl,
     AppServerThreadSubscriptionControl,
 )
-from netizen.terminal_cleanup import PinnedExperimentalTerminalCleanup  # noqa: E402
+from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup  # noqa: E402
 from scripts.probe_python_sdk import (  # noqa: E402
     _prove_thread_absent_from_all_catalogs,
     _public_final_response,

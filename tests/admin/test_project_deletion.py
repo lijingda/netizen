@@ -6,11 +6,11 @@ import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from netizen.bindings import BindingStore, ProjectNotFound, SideTopicState
-from netizen.domain import FeishuScope, ScopeKind
-from netizen.management import InstanceManagementService, ScopeCoordinator
-from netizen.projects import ProjectRegistry
-from netizen.runtime.contracts import (
+from netizen_cli.bindings import BindingStore, ProjectNotFound, SideTopicState
+from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.management import InstanceManagementService, ScopeCoordinator
+from netizen_cli.projects import ProjectRegistry
+from netizen_cli.runtime.contracts import (
     NativeThreadMetadata,
     SideCloseFailed,
     ThreadLifecycleStateUnknown,

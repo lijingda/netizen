@@ -20,7 +20,7 @@
 <p align="center">
   <a href="#快速开始">快速开始</a> ·
   <a href="skills/netizen-user-guide/references/user-guide.md">使用指南</a> ·
-  <a href="docs/deployment.md">部署文档</a> ·
+  <a href="docs/cli.md">CLI 安装与维护</a> ·
   <a href="docs/CONTRIBUTING.md">参与贡献</a>
 </p>
 
@@ -59,45 +59,40 @@
 | 需要 | 说明 |
 | --- | --- |
 | Linux 或 macOS | Linux 使用 systemd user；macOS 14+ 支持 Apple Silicon 与 Intel，需已登录桌面 |
-| Python 3.11–3.14 | 需要 `venv`；生产运行不依赖 Node.js |
+| Python 3.11–3.14 | 使用用户选定的环境，不捆绑 Python；生产运行不依赖 Node.js |
 | 有效的 Codex 登录 | 先在运行服务的同一账号下通过 Codex CLI 或 App 登录；不要求全局安装 CLI |
-| 飞书应用 | 安装器引导创建或选择机器人应用；按租户要求完成授权、审批、发布和可用范围设置 |
+| 飞书应用 | setup 引导创建或选择机器人应用；按租户要求完成授权、审批、发布和可用范围设置 |
 
 Netizen 面向一台主机上的受信用户，使用服务账号的 Codex 状态与工具权限。
 Linux 注销后常驻需要 linger；macOS 服务随桌面登录启动、注销停止。
 [完整前置条件](docs/deployment.md#前置门禁)
 
-### 2. 安装正式版本
+### 2. 安装 CLI 并创建实例
 
-在准备运行服务的账号终端中执行，不加 `sudo`：
-
-```sh
-curl -fsSL https://github.com/lijingda/netizen/releases/latest/download/install.sh -o /tmp/netizen-install.sh
-sh /tmp/netizen-install.sh
-```
-
-按安装器引导完成飞书应用配置。需要固定版本时，使用
-[当前版本安装器](https://github.com/lijingda/netizen/releases/download/v0.9.1/install.sh)；
-已有应用的权限也会在激活前检查。
-
-由 Agent 代装时，直接执行以下命令，再按安装器输出的提示继续：
+此分支改为普通 Python CLI，尚未发布到 PyPI；以下为新版使用方式，不表示旧 Release
+已具备这些命令。开发安装见[贡献指南](docs/CONTRIBUTING.md)。发行后在选定环境安装：
 
 ```sh
-curl -fsSL https://github.com/lijingda/netizen/releases/latest/download/install.sh -o /tmp/netizen-install.sh
-sh /tmp/netizen-install.sh </dev/null
+python -m pip install netizen-cli
+# 也可使用 uv tool install netizen-cli
+netizen setup
+netizen start
+netizen status
 ```
 
-首次缺少飞书凭据时，安装器在环境准备完成后会输出验证链接，由用户在官方页面创建或选择机器人。
-Agent 应转交链接、保留同一个安装进程并继续读取输出；确认后凭据自动保存，安装继续。
-已有应用也会按需补权。不要把 App Secret 发到聊天里；手工配置仅作为备用方式。
-特殊交互方式与排障见[Agent 安装说明](docs/deployment.md#agent-驱动首次安装)。
+setup 准备配置、飞书授权和实例数据并注册服务，不默认启动。首次缺凭据会输出浏览器
+验证链接；Agent 可运行 `netizen setup </dev/null`，转交链接并保留同一进程，确认后自动
+保存凭据。不要把 App Secret 发到聊天里。start 等待服务真正就绪，每次实际启动均检查
+数据格式并按需迁移。
 
-默认安装到当前账号的 `~/.netizen`。源码版支持用 `--root`（或 `NETIZEN_ROOT`）选择
-不同目录，在同一账号下运行独立机器人；各实例共享原生 Codex 登录和配置，不提供权限隔离。
-例如 `./dev-install.sh --root "$HOME/share" --admin-port 8890`；端口参数可省略，首次启动
-自动选择并保存可用端口。后续启停、升级和卸载须选择同一个 root，详见
-[多实例目录与参数](docs/deployment.md#目录)。这项部署格式变更不迁移旧安装；正式版本以
-所选 Release 的能力为准，不代表上面的既有版本安装器已经包含本次改动。
+默认实例数据集中在 `~/.netizen`；程序位于选定 Python 环境。用 `--root` 或 NETIZEN_ROOT
+选择其他实例，例如 `netizen setup --root "$HOME/work/.netizen" --admin-port 8890`。
+各实例共享原生 Codex 状态；服务固定注册时的 Python，终端换 venv 不改变已有绑定。
+
+日常维护用 `netizen update` 更新当前环境并恢复原来运行的实例；它不接受 --root。
+`netizen remove --root ...` 默认保留数据，--purge 才清理精确范围，-y 只省略确认。
+完整流程、失败边界、跨环境切换和卸载见 [CLI 安装与维护](docs/cli.md)。旧安装手工转换，
+不提供自动旧布局迁移，不要直接对现有旧实例执行新版清理命令。
 
 ### 3. 在飞书开始第一次对话
 
@@ -186,14 +181,14 @@ Side 会在同一聊天中新建话题，可继续多轮讨论。它与原会话
 
 <a id="用户指南-skill"></a>
 
-也可以直接在飞书问 **“Netizen 怎么切换会话？”**。安装器随版本提供
+也可以直接在飞书问 **“Netizen 怎么切换会话？”**。Python 安装包随版本提供
 [用户指南 Skill](skills/netizen-user-guide/SKILL.md)，支持自然语言咨询；
-需要显式调用时，发送 `$netizen-user-guide 你的问题`。内置 Skills 保存在当前实例的
-release 中，只为其 Codex 进程加载，不覆盖用户的全局 Skills。
+需要显式调用时，发送 `$netizen-user-guide 你的问题`。内置 Skills 属于实例所绑定的
+Python 安装，只为该实例的 Codex 进程加载，不覆盖用户的全局 Skills。
 
 ### 按需读取飞书历史
 
-安装器同时提供 [netizen-lark Skill](skills/netizen-lark/SKILL.md)。Agent 可以从当前消息的
+Python 安装包同时提供 [netizen-lark Skill](skills/netizen-lark/SKILL.md)。Agent 可以从当前消息的
 `message_id` 定位聊天／话题，再以 **本机 Netizen 的机器人身份**按需读取相关历史。
 例如：“看看这个话题之前的讨论，再回答我的问题。”已有逐条引用和 catch-up 不依赖此能力。
 
@@ -222,5 +217,5 @@ Skill 不带脚本，不需将凭据读入模型上下文，也不修改用户�
 | 理解系统与修改实现 | [工程设计](docs/design.md) · [领域词汇](CONTEXT.md) · [架构决策](docs/adr/) |
 
 欢迎通过 [Issues](https://github.com/lijingda/netizen/issues)反馈问题或提出建议，也欢迎
-提交代码与文档改进。开发当前工作区请按贡献指南使用 `./dev-install.sh`；
-正式版本安装使用上面的 `install.sh`。
+提交代码与文档改进。开发当前工作区请按贡献指南安装 editable Python 包；
+正式发行使用上面的 CLI 安装流程。旧 shell 安装入口已退役，不会自动转换现有实例。

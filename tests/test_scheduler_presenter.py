@@ -7,14 +7,14 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from lark_channel import OutboundCard
 
-from netizen.cards import turn_progress_card
-from netizen.channel.reply_presenter import _ReplyCardPresenter
-from netizen.runtime.contracts import ActiveState, TurnActivitySnapshot
+from netizen_cli.cards import turn_progress_card
+from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
+from netizen_cli.runtime.contracts import ActiveState, TurnActivitySnapshot
 
 
 class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.enterContext(patch("netizen.channel.reply_presenter._TERMINAL_CARD_RETRY_SECONDS", 0.01))
+        self.enterContext(patch("netizen_cli.channel.reply_presenter._TERMINAL_CARD_RETRY_SECONDS", 0.01))
         self.identity = {
             "binding_id": "binding-scheduled",
             "thread_id": "native-scheduled",
@@ -117,7 +117,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
                     if error is None:
                         started = await self.start(validate_reply=validate)
                     else:
-                        with self.assertLogs("netizen.channel.reply_presenter", "ERROR"):
+                        with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR"):
                             started = await self.start(validate_reply=validate)
                     self.assertFalse(started)
                     poll.assert_not_called()
@@ -140,7 +140,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
             return True
 
         with patch.object(presenter, "_poll", new_callable=AsyncMock) as poll:
-            with self.assertLogs("netizen.channel.reply_presenter", "ERROR"):
+            with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR"):
                 self.assertFalse(await presenter.start(
                     **self.identity, origin=self.origin, validate_reply=validate,
                 ))
@@ -154,7 +154,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await self.start())
                 self.channel.update_card.reset_mock()
                 self.channel.update_card.side_effect = [response, response, response]
-                with self.assertLogs("netizen.channel.reply_presenter", "ERROR"):
+                with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR"):
                     attempt = await self.finish()
                 self.assertIsNotNone(attempt)
                 self.assertEqual(attempt.message_id, "om_progress")
@@ -166,7 +166,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
     async def test_render_failure_does_not_attempt_terminal_update(self):
         self.assertTrue(await self.start())
         render = Mock(side_effect=RuntimeError("invalid card"))
-        with self.assertLogs("netizen.channel.reply_presenter", "ERROR"):
+        with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR"):
             self.assertIsNone(await self.finish(render=render))
         render.assert_called_once_with(self.activity)
         self.assertIsNone(await self.finish())
@@ -217,7 +217,7 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
 
         self.channel.update_card.side_effect = pending_update
-        with self.assertLogs("netizen.channel.reply_presenter", "WARNING"):
+        with self.assertLogs("netizen_cli.channel.reply_presenter", "WARNING"):
             attempt = await self.finish()
         self.assertTrue(entered.is_set())
         self.assertIsNotNone(attempt)

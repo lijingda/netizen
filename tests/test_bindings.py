@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from netizen.bindings import (
+from netizen_cli.bindings import (
     AmbiguousBinding,
     BindingCursor,
     BindingConflict,
@@ -44,7 +44,7 @@ from netizen.bindings import (
     _side_inventory_statement,
     _Transaction,
 )
-from netizen.domain import (
+from netizen_cli.domain import (
     FeishuScope,
     MentionContextMode,
     MessageContextAnchor,
@@ -973,7 +973,7 @@ class BindingStoreManagementSchemaTest(unittest.TestCase):
                 [sys.executable, "-c", """
 import os
 import sys
-from netizen.bindings import BindingStore
+from netizen_cli.bindings import BindingStore
 store = BindingStore(sys.argv[1])
 store._connection.execute("PRAGMA wal_autocheckpoint = 0")
 store.register_project(alias="retained", cwd="/tmp/retained")
@@ -998,7 +998,7 @@ os._exit(0)
                 [sys.executable, "-c", """
 import os
 import sys
-from netizen.bindings import BindingStore
+from netizen_cli.bindings import BindingStore
 store = BindingStore(sys.argv[1])
 store._connection.execute("PRAGMA wal_autocheckpoint = 0")
 store.register_project(alias="retained", cwd="/tmp/retained")
@@ -1681,7 +1681,7 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(self.store.drain_queries(), timeout=5)
 
     async def test_query_queue_is_bounded_without_stalling_loop_or_parallel_sql(self) -> None:
-        with patch("netizen.bindings._ADMIN_QUERY_CAPACITY", 3):
+        with patch("netizen_cli.bindings._ADMIN_QUERY_CAPACITY", 3):
             async with self.held_query_worker() as (first, release):
                 executed = []
 
@@ -1709,7 +1709,7 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.store._read_rows("SELECT 2", deadline_seconds=2))[0][0], 2)
 
     async def test_cancelled_query_waiters_and_drain_keep_actual_work_counted(self) -> None:
-        with patch("netizen.bindings._ADMIN_QUERY_CAPACITY", 2):
+        with patch("netizen_cli.bindings._ADMIN_QUERY_CAPACITY", 2):
             async with self.held_query_worker() as (first, _):
                 queued = asyncio.create_task(self.store.query_bindings(deadline_seconds=5))
                 await asyncio.sleep(0)
@@ -1730,7 +1730,7 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_queued_timeout_returns_before_worker_is_free_and_skips_sql(self) -> None:
         executed = threading.Event()
-        with patch("netizen.bindings._ADMIN_QUERY_CAPACITY", 2):
+        with patch("netizen_cli.bindings._ADMIN_QUERY_CAPACITY", 2):
             async with self.held_query_worker() as (first, _):
                 with self.assertRaises(BindingQueryTimeout):
                     await asyncio.wait_for(self.store._submit_query(
@@ -1745,7 +1745,7 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.store._read_rows("SELECT 1", deadline_seconds=2))[0][0], 1)
 
     async def test_running_timeout_keeps_capacity_until_worker_finishes(self) -> None:
-        with patch("netizen.bindings._ADMIN_QUERY_CAPACITY", 1):
+        with patch("netizen_cli.bindings._ADMIN_QUERY_CAPACITY", 1):
             async with self.held_query_worker(deadline_seconds=0.05) as (first, _):
                 with self.assertRaises(BindingQueryTimeout):
                     await asyncio.wait_for(first, timeout=2)
@@ -1766,7 +1766,7 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
                 now += 2
                 return connection.execute("SELECT 1").fetchone()[0]
 
-            with patch("netizen.bindings.time", SimpleNamespace(monotonic=lambda: now)):
+            with patch("netizen_cli.bindings.time", SimpleNamespace(monotonic=lambda: now)):
                 query = asyncio.create_task(self.store._submit_query(operation, deadline_seconds=10))
                 await asyncio.sleep(0)
                 now += 9

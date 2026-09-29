@@ -5,7 +5,7 @@ from copy import deepcopy
 
 from markdown_it import MarkdownIt
 
-from netizen.markdown_images import (
+from netizen_cli.markdown_images import (
     image_tokens,
     parse_markdown,
     render_markdown,
