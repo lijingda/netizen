@@ -14,53 +14,6 @@ import zipfile
 from netizen_cli import cli_packages as packages
 
 
-class PackageConfigTest(unittest.TestCase):
-    def setUp(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.directory = Path(temporary.name).resolve()
-        self.home = self.directory / "home"
-        self.prefix = self.directory / "environment"
-        self.env = {
-            "XDG_CONFIG_HOME": str(self.directory / "config"),
-            "XDG_DATA_HOME": str(self.directory / "user data"),
-            "XDG_DATA_DIRS": os.pathsep.join(str(self.directory / name)
-                                          for name in ("global data", "extra data")),
-        }
-        self.enterContext(patch.object(Path, "home", return_value=self.home))
-        self.enterContext(patch.object(sys, "platform", "darwin"))
-
-    def assert_config_rejected(self, config: Path) -> None:
-        config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text("[global]\nindex-url = https://example.invalid/simple\n")
-        try:
-            with self.assertRaises(packages.PackageUpdateError) as error:
-                packages._check_tool_config("pip", self.prefix, self.env)
-            self.assertIn(str(config), str(error.exception))
-        finally:
-            config.unlink()
-
-    def test_macos_xdg_data_config_is_not_silently_ignored(self) -> None:
-        for directory in ("user data", "global data", "extra data"):
-            with self.subTest(directory=directory):
-                self.assert_config_rejected(self.directory / directory / "pip/pip.conf")
-
-    def test_macos_fallback_config_is_checked_with_custom_xdg_config_home(self) -> None:
-        self.assert_config_rejected(self.home / ".config/pip/pip.conf")
-
-    def test_macos_legacy_and_environment_configs_remain_checked(self) -> None:
-        for config in (self.home / "Library/Application Support/pip/pip.conf",
-                       self.home / ".pip/pip.conf", self.prefix / "pip.conf"):
-            with self.subTest(config=config):
-                self.assert_config_rejected(config)
-
-    def test_explicit_null_config_still_disables_file_discovery(self) -> None:
-        config = self.directory / "user data/pip/pip.conf"
-        config.parent.mkdir(parents=True)
-        config.write_text("[global]\nindex-url = https://example.invalid/simple\n")
-        packages._check_tool_config("pip", self.prefix, {**self.env, "PIP_CONFIG_FILE": os.devnull})
-
-
 class PackagePreflightTest(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
@@ -88,7 +41,6 @@ class PackagePreflightTest(unittest.TestCase):
         patch.dict(os.environ, {"PATH": str(self.directory)}, clear=True).start()
         patch.object(packages, "_run", side_effect=self.run_command).start()
         patch.object(packages, "_uv_executable", return_value=str(self.uv)).start()
-        patch.object(packages, "_config_paths", return_value=set()).start()
 
     def _layout(self) -> None:
         scripts = self.prefix / "bin"
@@ -157,7 +109,7 @@ class PackagePreflightTest(unittest.TestCase):
         self.assertFalse(plan["changes_required"])
         self.assertEqual(plan["command"][:4], [str(self.python), "-I", "-m", "pip"])
         self.assertNotEqual(plan["environment_python"], str(self.python.resolve()))
-        self.assertEqual(plan["command_env"]["PIP_CONFIG_FILE"], os.devnull)
+        self.assertNotIn("PIP_CONFIG_FILE", plan["command_env"])
         self.assertEqual(json.loads(json.dumps(plan)), plan)
 
     def test_dependency_only_change_still_requires_update(self) -> None:
@@ -400,14 +352,37 @@ class PackagePreflightTest(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(plan))
         self.assertEqual(self.environments[-1]["PIP_INDEX_URL"], "https://user:secret@example.test/simple")
 
-    def test_custom_config_is_not_silently_ignored(self) -> None:
+    def test_pip_config_is_inherited_without_disabling_or_saving_it(self) -> None:
         config = self.directory / "pip.conf"
-        config.write_text("[global]\nindex-url = https://private.test/simple\n")
-        with patch.object(packages, "_config_paths", return_value={config}):
-            with self.assertRaisesRegex(packages.PackageUpdateError, "Custom package configuration"):
-                self.prepare()
-            with patch.dict(os.environ, {"PIP_CONFIG_FILE": os.devnull}):
-                self.assertEqual(self.prepare()["backend"], "pip")
+        config.write_text("[global]\nindex-url = https://user:secret@private.test/simple\n")
+        with patch.dict(os.environ, {"PIP_CONFIG_FILE": str(config)}):
+            plan = self.prepare()
+        self.assertEqual(plan["backend"], "pip")
+        self.assertEqual(self.environments[-1]["PIP_CONFIG_FILE"], str(config))
+        self.assertNotIn("PIP_CONFIG_FILE", plan["command_env"])
+        self.assertNotIn("secret", json.dumps(plan))
+
+    def assert_uv_config_inherited(self, backend: str) -> None:
+        config = self.directory / "uv.toml"
+        config.write_text('index-url = "https://user:secret@private.test/simple"\n')
+        with patch.dict(os.environ, {"UV_CONFIG_FILE": str(config)}):
+            plan = self.prepare(backend=backend)
+        self.assertEqual(plan["backend"], backend)
+        uv_calls = [(call, environment) for call, environment
+                    in zip(self.calls, self.environments) if call[0] == str(self.uv)]
+        self.assertTrue(uv_calls)
+        for call, environment in uv_calls:
+            self.assertNotIn("--no-config", call)
+            self.assertEqual(environment["UV_CONFIG_FILE"], str(config))
+        self.assertNotIn("UV_CONFIG_FILE", plan["command_env"])
+        self.assertNotIn("secret", json.dumps(plan))
+
+    def test_uv_pip_config_is_shared_by_identity_and_preflight(self) -> None:
+        self.assert_uv_config_inherited("uv-pip")
+
+    def test_uv_tool_config_is_shared_by_identity_and_upgrade(self) -> None:
+        self.tool_layout()
+        self.assert_uv_config_inherited("uv-tool")
 
     def test_preflight_target_replacement_is_detected(self) -> None:
         original = self.run_command
@@ -476,12 +451,14 @@ class NativeUvPreflightTest(unittest.TestCase):
         self.wheels = self.directory / "wheels"
         self.wheels.mkdir()
         self._wheel("1.0")
+        config = self.directory / "uv.toml"
+        config.write_text(f'offline = true\nno-index = true\nfind-links = ["{self.wheels}"]\n')
         environment = {
             "HOME": str(self.directory), "PATH": str(self.uv.parent) + os.pathsep + os.defpath,
             "UV_TOOL_DIR": str(self.directory / "tools"),
             "UV_TOOL_BIN_DIR": str(self.directory / "bin"),
             "UV_CACHE_DIR": str(self.directory / "cache"), "UV_PYTHON_DOWNLOADS": "never",
-            "UV_FIND_LINKS": str(self.wheels), "UV_OFFLINE": "true",
+            "UV_CONFIG_FILE": str(config),
         }
         self.addCleanup(patch.stopall)
         patch.dict(os.environ, environment, clear=True).start()
@@ -504,7 +481,7 @@ class NativeUvPreflightTest(unittest.TestCase):
 
     def command(self, *args: str) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
-            [str(self.uv), "--no-config", *args, "--no-index"], cwd=self.directory,
+            [str(self.uv), *args], cwd=self.directory,
             text=True, capture_output=True, check=False, timeout=45,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -570,7 +547,7 @@ class NativeUvPreflightTest(unittest.TestCase):
 
     def test_native_pinned_tool_run_cache_survives_attempted_update(self) -> None:
         command = [
-            str(self.uv), "--no-config", "tool", "run", "--no-index",
+            str(self.uv), "tool", "run",
             "--python", sys.executable, "--from", "netizen-cli==1.0", "python", "-I", "-c",
             "import sys,json,importlib.metadata as m; "
             "print(json.dumps({'python':sys.executable,'version':m.version('netizen-cli')}))",
@@ -594,7 +571,7 @@ class NativeUvPreflightTest(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("NETIZEN_TEST_PIP"), "set NETIZEN_TEST_PIP=1 for an isolated ensurepip/native report probe")
 class NativePipPreflightTest(unittest.TestCase):
-    def test_native_pip_report_no_change_and_real_update(self) -> None:
+    def test_native_pip_user_config_no_change_and_real_update(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             self.wheels = root / "wheels"
@@ -603,8 +580,10 @@ class NativePipPreflightTest(unittest.TestCase):
             prefix = root / "ordinary"
             venv.EnvBuilder(with_pip=True).create(prefix)
             python = prefix / "bin/python"
-            env = {"PATH": os.defpath, "HOME": str(root), "PIP_CONFIG_FILE": os.devnull,
-                   "PIP_NO_INDEX": "1", "PIP_FIND_LINKS": str(self.wheels)}
+            config = root / ".pip/pip.conf"
+            config.parent.mkdir()
+            config.write_text(f"[global]\nno-index = true\nfind-links = {self.wheels}\n")
+            env = {"PATH": os.defpath, "HOME": str(root)}
             with patch.dict(os.environ, env, clear=True):
                 subprocess.run([str(python), "-I", "-m", "pip", "install", "netizen-cli==1.0"],
                                cwd=root, text=True, capture_output=True, check=True, timeout=45)
