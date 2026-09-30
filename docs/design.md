@@ -305,8 +305,10 @@ catch-up 自动创建以触发消息的真实 marker 初始化边界，这条消
 ### 原生 Goal
 
 `/goal <objective>` 在当前 Binding 上启动原生 persisted Goal。lazy Binding 先创建并
-write-once 绑定一个已持久化、idle、非 ephemeral 的零 Turn Thread；若公开 read 不能
-证明这一点，Goal 明确不可用。Adapter 返回一个 opaque logical handle，SDK 自己把自动
+write-once 绑定零 Turn Thread，公开 read 确认 idle、非 ephemeral 和原生 path 后直接
+沿用创建返回的 handle；这些 metadata 不证明首 Turn 前可按 ID 冷恢复，相关限制见
+[兼容性结论](deployment.md#已验证的兼容性结论)。若无法确认上述状态，Goal 明确不可用。
+Adapter 返回一个 opaque logical handle，SDK 自己把自动
 continuation 的多个物理 Turn 合并为一个通知流。`/goal` 只读展示，`pause/resume/clear`
 和 Goal 卡片按钮进入同一 typed control 路由；Goal 模块显示 objective、tokens used 与
 可用的 token budget，不显示耗时。Goal start、过程、
@@ -811,14 +813,25 @@ identity/slot、阻止重复 start/steer，并停止全部周期性 I/O。“重
 `0.154.0` full read 的内部分页投影尚未就绪时，精确 `-32601` 消息
 `list_turns is not supported yet` / `list_items is not supported yet` 也只进入同一有界
 read 恢复；其他 MethodNotFound 保持失败关闭，见 ADR 0049。
+
+公开 read 可在新 Turn 启动窗口内短暂把运行中的任务读成 `interrupted`。每次首次
+读到该状态时保留占用，固定等 2 秒，再读取同一 Thread 的同一 exact Turn 一次；
+仍为 `interrupted` 才按原中断流程收尾，变成 `inProgress` 则继续观察，其他终态按实际
+结果处理。复查失败、身份不匹配或目标缺失不能用首次中断兜底，沿用既有观测失败与
+有界恢复；恢复内的等待和复查仍计入原 5 秒、3 次 I/O 预算。不依赖时间字段或此前
+是否已观察到运行中，也不增加后台重试循环。Scheduled 状态查询使用相同确认规则，
+压缩还保留唯一候选与 Thread idle 的原有条件；Side 与 Goal 的 stream 终态契约不变。
+
 completed 状态还可能短暂先于 final agent message 可见；
 普通 Turn 最多再做 4 次 full-history 读取（默认约 2 秒），期间已标记 terminal 以避免
 `/stop` 误中断，之后的读取失败也不再进入观测尝试，仍无文本时保留显式无文本兜底。
 completed/failed/interrupted 都是
 Confirmed Turn Terminal：三者都释放 Ordinary Turn slot 并保留同一 Native Thread；
-`failed` 只把本轮显示为错误，后续消息仍在该 Thread 启动下一 Turn。终态和 final agent
-message 都来自 SDK 的公开 native Turn 模型，不创建外层 Turn 记录，也不以异常或超时
-伪造 terminal。
+`failed` 只把本轮显示为错误，后续消息仍在该 Thread 启动下一 Turn。原生
+`interrupted` 若携带 `error`，普通 Turn、Side 和压缩反馈保留中断状态并附加过滤后的
+原生原因；不把该原因当作失败或观测未知，也不阻止已确认终态后的续聊。没有原因时
+沿用普通中断提示。终态和 final agent message 都来自 SDK 的公开 native Turn 模型，
+不创建外层 Turn 记录，也不以异常或超时伪造 terminal。
 失败和观测不可用均返回可用的具体原因；原生错误保留公开 message/error code，读取故障
 保留显式 cause 的有界摘要。统一过滤凭据、限制长度、不输出 raw RPC data/工具输出/
 traceback；日志同时记录 exact IDs 与该摘要。错误摘要仅在当前内存观察槽存活，不写 SQLite。

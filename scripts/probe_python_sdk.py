@@ -33,7 +33,10 @@ from openai_codex import (
 import openai_codex
 from openai_codex.types import ThreadTokenUsageUpdatedNotification
 
-from netizen_cli.codex_runtime import _is_paginated_turn_read_unavailable
+from netizen_cli.codex_runtime import (
+    _INTERRUPTION_CONFIRMATION_SECONDS,
+    _is_paginated_turn_read_unavailable,
+)
 from netizen_cli.model_settings import ModelCatalog, STANDARD_SERVICE_TIER_ID
 from netizen_cli.prompt_projection import CurrentMessageProjection, render_plain_prompt
 from netizen_cli.sdk_gap_adapter import (
@@ -372,6 +375,11 @@ async def _context_usage(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
                 None,
             )
             exact_status = _status_value(exact) if exact is not None else None
+            if exact_status == "interrupted":
+                snapshot, exact = await _confirm_interrupted_turn(
+                    thread, handle.id, deadline=deadline,
+                )
+                exact_status = _status_value(exact)
             if (
                 _thread_status_type(snapshot.thread) == "active"
                 and exact_status == "inProgress"
@@ -1049,6 +1057,11 @@ async def _polling_completion(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
             await asyncio.sleep(0.5)
             continue
         status = _status_value(exact)
+        if status == "interrupted":
+            snapshot, exact = await _confirm_interrupted_turn(
+                thread, handle.id, deadline=deadline,
+            )
+            status = _status_value(exact)
         if not statuses or statuses[-1] != status:
             statuses.append(status or "unknown")
         if status == "inProgress":
@@ -1087,6 +1100,20 @@ async def _compact(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
         raise AssertionError("pre-compaction Turn returned an unexpected response")
 
     before_ids = {before_handle.id}
+
+    def candidate(native_thread: Any) -> Any:
+        candidates = []
+        for turn in native_thread.turns:
+            item_types = {
+                getattr(getattr(item, "root", item), "type", None)
+                for item in turn.items
+            }
+            if turn.id not in before_ids and "contextCompaction" in item_types:
+                candidates.append(turn)
+        if len(candidates) > 1:
+            raise AssertionError("multiple post-baseline compaction Turns observed")
+        return candidates[0] if candidates else None
+
     started = time.monotonic()
     await thread.compact()
     request_elapsed = time.monotonic() - started
@@ -1131,17 +1158,17 @@ async def _compact(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
             read_error_count += 1
             await asyncio.sleep(0.25)
             continue
-        candidates = []
-        for turn in snapshot.thread.turns:
-            item_types = {
-                getattr(getattr(item, "root", item), "type", None)
-                for item in turn.items
-            }
-            if turn.id not in before_ids and "contextCompaction" in item_types:
-                candidates.append(turn)
-        if len(candidates) > 1:
-            raise AssertionError("multiple post-baseline compaction Turns observed")
-        compact_turn = candidates[0] if candidates else None
+        compact_turn = candidate(snapshot.thread)
+        if compact_turn is not None and _status_value(compact_turn) == "interrupted":
+            snapshot, compact_turn = await _confirm_interrupted_turn(
+                thread, compact_turn.id, deadline=deadline,
+            )
+            confirmed = candidate(snapshot.thread)
+            if confirmed is None or confirmed.id != compact_turn.id:
+                raise AssertionError("interruption confirmation lost the compaction Turn")
+            status = _thread_status_type(snapshot.thread)
+            if status not in {"notLoaded", "active", "idle"}:
+                raise RuntimeError(f"unexpected compaction confirmation status: {status!r}")
         if (
             compact_turn is not None
             and status == "idle"
@@ -1179,6 +1206,25 @@ async def _compact(codex: AsyncCodex, cwd: Path) -> dict[str, Any]:
         "after_turn_id": after_handle.id,
         "after_response": after_response,
     }
+
+
+async def _confirm_interrupted_turn(
+    thread: Any,
+    turn_id: str,
+    *,
+    deadline: float,
+) -> tuple[Any, Any]:
+    """Reread the same exact Turn once after an interrupted candidate."""
+
+    async with asyncio.timeout_at(deadline):
+        await asyncio.sleep(_INTERRUPTION_CONFIRMATION_SECONDS)
+        snapshot = await thread.read(include_turns=True)
+    if snapshot.thread.id != thread.id:
+        raise AssertionError("interruption confirmation changed the native Thread ID")
+    exact = [turn for turn in snapshot.thread.turns if turn.id == turn_id]
+    if len(exact) != 1:
+        raise AssertionError("interruption confirmation did not return one exact Turn")
+    return snapshot, exact[0]
 
 
 async def _public_terminal_turn(
@@ -1226,6 +1272,10 @@ async def _public_terminal_turn(
             (turn for turn in snapshot.thread.turns if turn.id == turn_id),
             None,
         )
+        if exact is not None and _status_value(exact) == "interrupted":
+            snapshot, exact = await _confirm_interrupted_turn(
+                thread, turn_id, deadline=deadline,
+            )
         if exact is None or _status_value(exact) == "inProgress":
             await asyncio.sleep(0.5)
             continue

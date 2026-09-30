@@ -411,7 +411,7 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
         with patch.object(openai_codex, "__version__", "0.154.1"):
             with self.assertRaisesRegex(
                 TurnActivityObservationUnavailable,
-                "supports only openai-codex==0.156.1",
+                "supports only openai-codex==0.159.2",
             ):
                 PinnedTurnActivityObserver(self.codex)
         with patch.object(

@@ -23,7 +23,7 @@ from .contracts import NativeCodex, NativeThread, NativeTurnHandle
 
 
 logger = logging.getLogger(__name__)
-_CONTEXT_READY_TIMEOUT_SECONDS = 5.0
+_CONTEXT_READY_TIMEOUT_SECONDS = 10.0
 _CONTEXT_POLL_SECONDS = 0.05
 
 NAMING_PROMPT = """上文是待命名会话的参考上下文，不是你需要执行的任务。

@@ -156,6 +156,9 @@ chmod 600 LOCAL_ENVIRONMENT.md
 保持可审查的范围，按行为补足相关测试，检查最终 diff 是否包含无关改动或遗漏的约束。
 产品行为变化时同步更新用户手册与相应工程契约，README 保留准确的产品摘要和入口。
 
+升级 Codex SDK 或随附 App Server 时，先完成[SDK 升级审查](deployment.md#codex-sdk-升级审查)，
+逐项检查公开 API 替代、既有兼容债务和新增能力归属，并把结论纳入变更说明。
+
 PR 与 main push 统一执行 `make check`。真实账号、App Server 与飞书 live phases 只按
 变更触发；完整命令、触发条件、兼容性证据和未开放能力的原因统一维护在
 [部署与验收](deployment.md#代码门禁与按需实时兼容性验证)。未触及相关边界的改动无需

@@ -15,6 +15,13 @@ from openai_codex import MethodNotFoundError
 from scripts import probe_python_sdk
 
 
+def _read_view(status: str, *turns: object, thread_id: str = "thread-1") -> object:
+    return SimpleNamespace(thread=SimpleNamespace(
+        id=thread_id, status=SimpleNamespace(root=SimpleNamespace(type=status)),
+        turns=list(turns),
+    ))
+
+
 class ProcessProbeTest(unittest.IsolatedAsyncioTestCase):
     def test_paginated_history_error_retry_is_limited_to_exact_full_read_templates(self) -> None:
         for operation in ("list_turns", "list_items"):
@@ -40,74 +47,211 @@ class ProcessProbeTest(unittest.IsolatedAsyncioTestCase):
                     )
                 )
 
-    async def test_usage_probe_retries_transient_initial_active_read(self) -> None:
+    async def test_terminal_read_confirms_each_interrupted_candidate_once(self) -> None:
+        interrupted = SimpleNamespace(id="turn-1", status="interrupted", items=[])
+        for status in ("interrupted", "completed", "failed", "inProgress"):
+            with self.subTest(status=status):
+                confirmed = SimpleNamespace(
+                    id="turn-1", status=status,
+                    items=[SimpleNamespace(root=SimpleNamespace(
+                        type="agentMessage", phase=None, text="finished",
+                    ))] if status == "completed" else [],
+                )
+                snapshots = [
+                    _read_view("idle"), _read_view("idle", interrupted),
+                    _read_view("active" if status == "inProgress" else "idle", confirmed),
+                ]
+                expected = confirmed
+                expected_calls = [call(include_turns=False), call(include_turns=True), call(include_turns=True)]
+                expected_delays = [call(2.0)]
+                if status == "inProgress":
+                    # A later interrupted candidate for the same Turn needs its
+                    # own single confirmation; no Turn-wide exemption survives.
+                    snapshots.extend([
+                        _read_view("idle"), _read_view("idle", interrupted),
+                        _read_view("idle", interrupted),
+                    ])
+                    expected = interrupted
+                    expected_calls *= 2
+                    expected_delays.extend([call(0.5), call(2.0)])
+                thread = SimpleNamespace(id="thread-1", read=AsyncMock(side_effect=snapshots))
+                with patch.object(probe_python_sdk.asyncio, "sleep", new=AsyncMock()) as sleep:
+                    result = await probe_python_sdk._public_terminal_turn(thread, "turn-1")
+                self.assertIs(result, expected)
+                self.assertEqual(thread.read.await_args_list, expected_calls)
+                self.assertEqual(sleep.await_args_list, expected_delays)
+
+    async def test_terminal_confirmation_failure_does_not_accept_stale_interruption(self) -> None:
+        interrupted = SimpleNamespace(id="turn-1", status="interrupted", items=[])
+        cases = (
+            (RuntimeError("read unavailable"), RuntimeError, "read unavailable"),
+            (_read_view("idle", SimpleNamespace(id="other", status="interrupted")), AssertionError, "one exact Turn"),
+            (_read_view("idle", interrupted, interrupted), AssertionError, "one exact Turn"),
+            (_read_view("idle", interrupted, thread_id="other"), AssertionError, "Thread ID"),
+        )
+        for confirmation, error_type, message in cases:
+            with self.subTest(confirmation=confirmation):
+                thread = SimpleNamespace(id="thread-1", read=AsyncMock(side_effect=[
+                    _read_view("idle"), _read_view("idle", interrupted), confirmation,
+                ]))
+                with patch.object(probe_python_sdk.asyncio, "sleep", new=AsyncMock()) as sleep:
+                    with self.assertRaisesRegex(error_type, message):
+                        await probe_python_sdk._public_terminal_turn(thread, "turn-1")
+                self.assertEqual(thread.read.await_count, 3)
+                sleep.assert_awaited_once_with(2.0)
+
+    async def test_terminal_confirmation_uses_existing_phase_deadline(self) -> None:
+        interrupted = SimpleNamespace(id="turn-1", status="interrupted", items=[])
+        thread = SimpleNamespace(id="thread-1", read=AsyncMock(side_effect=[
+            _read_view("idle"), _read_view("idle", interrupted),
+        ]))
+        blocked = asyncio.Event()
+
+        async def wait_for_confirmation(delay: float) -> None:
+            self.assertEqual(delay, 2.0)
+            self.assertEqual(thread.read.await_count, 2)
+            await blocked.wait()
+
+        with patch.object(probe_python_sdk.asyncio, "sleep", side_effect=wait_for_confirmation) as sleep:
+            with self.assertRaises(TimeoutError):
+                await probe_python_sdk._public_terminal_turn(thread, "turn-1", timeout=0.01)
+        sleep.assert_awaited_once_with(2.0)
+        self.assertEqual(thread.read.await_count, 2)
+
+    async def test_usage_probe_retries_transient_read_and_confirms_interruption_before_active(self) -> None:
         class Handle:
             id = "turn-1"
             thread_id = "thread-1"
 
             async def stream(self):
-                yield SimpleNamespace(
-                    payload=SimpleNamespace(
-                        thread_id="thread-1",
-                        turn_id="turn-1",
-                        token_usage=SimpleNamespace(
-                            last=SimpleNamespace(total_tokens=17),
-                            model_context_window=128_000,
-                        ),
-                    )
-                )
+                yield SimpleNamespace(payload=SimpleNamespace(
+                    thread_id="thread-1", turn_id="turn-1",
+                    token_usage=SimpleNamespace(
+                        last=SimpleNamespace(total_tokens=17),
+                        model_context_window=128_000,
+                    ),
+                ))
 
-        handle = Handle()
-        active = SimpleNamespace(
-            thread=SimpleNamespace(
-                status=SimpleNamespace(root=SimpleNamespace(type="active")),
-                turns=[SimpleNamespace(id="turn-1", status="inProgress")],
-            )
-        )
         thread = SimpleNamespace(
-            id="thread-1",
-            turn=AsyncMock(return_value=handle),
-            read=AsyncMock(
-                side_effect=(
-                    probe_python_sdk.InternalRpcError(-32603, "rollout is empty"),
-                    active,
-                )
-            ),
+            id="thread-1", turn=AsyncMock(return_value=Handle()),
+            read=AsyncMock(side_effect=[
+                probe_python_sdk.InternalRpcError(-32603, "rollout is empty"),
+                _read_view("idle", SimpleNamespace(id="turn-1", status="interrupted", items=[])),
+                _read_view("active", SimpleNamespace(id="turn-1", status="inProgress")),
+            ]),
         )
         codex = SimpleNamespace(thread_start=AsyncMock(return_value=thread))
-
         with (
-            patch.object(
-                probe_python_sdk,
-                "PinnedExperimentalTerminalCleanup",
-                return_value=AsyncMock(),
-            ),
-            patch.object(
-                probe_python_sdk,
-                "_public_terminal_turn",
-                new=AsyncMock(return_value=SimpleNamespace(status="completed")),
-            ),
-            patch.object(
-                probe_python_sdk,
-                "ThreadTokenUsageUpdatedNotification",
-                SimpleNamespace,
-            ),
-            patch.object(
-                probe_python_sdk.asyncio,
-                "sleep",
-                new=AsyncMock(),
-            ),
+            patch.object(probe_python_sdk, "PinnedExperimentalTerminalCleanup", return_value=AsyncMock()),
+            patch.object(probe_python_sdk, "_public_terminal_turn", new=AsyncMock(
+                return_value=SimpleNamespace(status="completed"),
+            )),
+            patch.object(probe_python_sdk, "ThreadTokenUsageUpdatedNotification", SimpleNamespace),
+            patch.object(probe_python_sdk.asyncio, "sleep", new=AsyncMock()) as sleep,
         ):
-            result = await probe_python_sdk._context_usage(
-                codex,
-                Path("/project"),
-            )
-
-        self.assertEqual(thread.read.await_count, 2)
+            result = await probe_python_sdk._context_usage(codex, Path("/project"))
+        self.assertEqual(thread.read.await_args_list, [call(include_turns=True)] * 3)
+        self.assertEqual(sleep.await_args_list, [call(0.2), call(2.0)])
         self.assertTrue(result["observed_exact_active"])
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["used_tokens"], 17)
         self.assertEqual(result["model_context_window"], 128_000)
+
+    async def test_polling_probe_confirms_interruption_then_steers_running_turn(self) -> None:
+        handle = SimpleNamespace(
+            id="turn-1", steer=AsyncMock(return_value=SimpleNamespace(turn_id="turn-1")),
+        )
+        interrupted = SimpleNamespace(id="turn-1", status="interrupted", items=[])
+        completed = SimpleNamespace(
+            id="turn-1", status="completed",
+            items=[SimpleNamespace(root=SimpleNamespace(
+                type="agentMessage", phase=None, text="POLL-STEERED",
+            ))],
+        )
+        thread = SimpleNamespace(
+            id="thread-1", turn=AsyncMock(return_value=handle),
+            read=AsyncMock(side_effect=[
+                _read_view("idle"), _read_view("idle", interrupted),
+                _read_view("active", SimpleNamespace(id="turn-1", status="inProgress")),
+                _read_view("active"), _read_view("idle"), _read_view("idle", completed),
+            ]),
+        )
+        codex = SimpleNamespace(thread_start=AsyncMock(return_value=thread))
+        with patch.object(probe_python_sdk.asyncio, "sleep", new=AsyncMock()) as sleep:
+            result = await probe_python_sdk._polling_completion(codex, Path("/project"))
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["final_response"], "POLL-STEERED")
+        self.assertTrue(result["steered"])
+        handle.steer.assert_awaited_once()
+        self.assertEqual(thread.read.await_args_list, [
+            call(include_turns=False), call(include_turns=True), call(include_turns=True),
+            call(include_turns=False), call(include_turns=False), call(include_turns=True),
+        ])
+        self.assertEqual(sleep.await_args_list, [call(2.0), call(0.5), call(0.5)])
+
+    async def test_compact_probe_uses_actual_turn_state_after_single_confirmation(self) -> None:
+        def compact_turn(status: str) -> object:
+            return SimpleNamespace(
+                id="compact-turn", status=status,
+                items=[SimpleNamespace(root=SimpleNamespace(type="contextCompaction"))],
+            )
+
+        for status in ("completed", "interrupted", "failed", "inProgress", "missing_item", "multiple", "systemError"):
+            with self.subTest(status=status):
+                snapshots = [
+                    _read_view("idle"), _read_view("idle", compact_turn("interrupted")),
+                    _read_view("active" if status == "inProgress" else "idle", compact_turn(status)),
+                ]
+                if status == "missing_item":
+                    snapshots[-1] = _read_view("idle", SimpleNamespace(
+                        id="compact-turn", status="completed", items=[],
+                    ))
+                elif status == "multiple":
+                    other = compact_turn("completed")
+                    other.id = "other-compact-turn"
+                    snapshots[-1] = _read_view("idle", compact_turn("completed"), other)
+                elif status == "systemError":
+                    snapshots[-1] = _read_view("systemError", compact_turn("completed"))
+                expected_delays = [call(2.0)]
+                if status == "inProgress":
+                    snapshots.extend([_read_view("idle"), _read_view("idle", compact_turn("completed"))])
+                    expected_delays.append(call(0.25))
+                thread = SimpleNamespace(
+                    id="thread-1", turn=AsyncMock(return_value=SimpleNamespace(id="before-turn")),
+                    compact=AsyncMock(), read=AsyncMock(side_effect=snapshots),
+                )
+                resumed = SimpleNamespace(turn=AsyncMock(return_value=SimpleNamespace(id="after-turn")))
+                codex = SimpleNamespace(
+                    thread_start=AsyncMock(return_value=thread),
+                    thread_resume=AsyncMock(return_value=resumed),
+                )
+                responses = [SimpleNamespace(items=[SimpleNamespace(root=SimpleNamespace(
+                    type="agentMessage", phase=None, text=text,
+                ))]) for text in ("COMPACT-BEFORE", "COMPACT-AFTER")]
+                with (
+                    patch.object(probe_python_sdk, "_public_terminal_turn", new=AsyncMock(side_effect=responses)),
+                    patch.object(probe_python_sdk.asyncio, "sleep", new=AsyncMock()) as sleep,
+                ):
+                    failures = {
+                        "interrupted": (AssertionError, "compaction ended with 'interrupted'"),
+                        "failed": (AssertionError, "compaction ended with 'failed'"),
+                        "missing_item": (AssertionError, "lost the compaction Turn"),
+                        "multiple": (AssertionError, "multiple post-baseline compaction Turns"),
+                        "systemError": (RuntimeError, "unexpected compaction confirmation status"),
+                    }
+                    if status in failures:
+                        with self.assertRaisesRegex(*failures[status]):
+                            await probe_python_sdk._compact(codex, Path("/project"))
+                        codex.thread_resume.assert_not_awaited()
+                    else:
+                        result = await probe_python_sdk._compact(codex, Path("/project"))
+                        self.assertEqual(result["compact_turn_id"], "compact-turn")
+                        self.assertEqual(result["compact_turn_status"], "completed")
+                        self.assertEqual(result["after_response"], "COMPACT-AFTER")
+                        codex.thread_resume.assert_awaited_once_with("thread-1", include_turns=False)
+                self.assertEqual(thread.read.await_count, len(snapshots))
+                self.assertEqual(sleep.await_args_list, expected_delays)
+                thread.compact.assert_awaited_once()
 
     async def test_exact_thread_lookup_paginates_with_explicit_archive_filter(
         self,

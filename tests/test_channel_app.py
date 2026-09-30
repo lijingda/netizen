@@ -9983,7 +9983,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         release_stop.set()
         await task
 
-    async def test_external_interrupt_does_not_claim_background_cleanup(self) -> None:
+    async def test_interruption_without_cleanup_does_not_claim_source_or_cleanup(self) -> None:
         origin = await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
@@ -10004,7 +10004,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             (
                 origin.id,
-                "Codex Turn 已被外部中断；本服务未请求清理已登记的后台终端。"
+                "Codex Turn 已中断；本服务未请求清理已登记的后台终端。"
                 "前台工具进程可能仍在运行。",
             ),
             self.channel.replies,
@@ -10327,6 +10327,87 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 )
 
                 self.assertIn((origin.id, reaction), self.channel.reactions)
+
+    async def test_interrupted_reason_keeps_status_across_turn_targets_and_delivery(self) -> None:
+        binding, record = await self.open_direct_side()
+        self.enterContext(patch.object(reply_presenter, "_TERMINAL_CARD_RETRY_SECONDS", 0.001))
+        for kind in ("ordinary", "side"):
+            for delivery in ("text", "card", "fallback"):
+                for reason in (None, "stopped after repeated denials", "API_KEY=private-credential"):
+                    with self.subTest(kind=kind, delivery=delivery, reason=reason):
+                        origin = FakeMessage(
+                            "work", message_id=f"om-{kind}-{delivery}",
+                            chat_id="oc-direct", chat_type="p2p",
+                            thread_id=record.topic_id, mentioned_bot=False,
+                        )
+                        native_error = None if reason is None else TurnError.model_validate({
+                            "message": reason,
+                            "codexErrorInfo": "tooManyDenials",
+                            "additionalDetails": "private raw response",
+                        })
+                        feedback = BindingTaskFeedback(
+                            progress_card_enabled=delivery != "text",
+                            completion_mention_enabled=True,
+                        )
+                        common = dict(
+                            owner_id="ou_user", origin=origin, task_feedback=feedback,
+                            background_cleanup_requested=kind == "side",
+                            result=SimpleNamespace(status="interrupted", error=native_error),
+                        )
+                        if kind == "ordinary":
+                            activity = turn_activity_snapshot(binding_id=binding.id)
+                            self.runtime.turn_activity_values[binding.id] = activity
+                            target = dict(binding_id=binding.id, thread_id="native-one", turn_id="turn-one")
+                            outcome = TurnOutcome(**target, **common, activity=activity)
+                            start = self.app._progress_cards.start
+                        else:
+                            activity = side_turn_activity_snapshot(side_id=record.id)
+                            self.runtime.side_turn_activity_values[record.id] = activity
+                            target = dict(side_id=record.id, thread_id="native-side-1", turn_id="side-turn-1")
+                            outcome = SideTurnOutcome(
+                                **target, **common, parent_binding_id=binding.id,
+                                cwd=self.project, activity=activity,
+                            )
+                            start = self.app._progress_cards.start_side
+                        if delivery != "text":
+                            self.channel.reply_results.append(sent_result(
+                                "om-interrupted-progress", chat_id="oc-direct", thread_id=record.topic_id,
+                            ))
+                            self.assertTrue(await start(**target, origin=origin))
+                        self.channel.fail_card_updates = delivery == "fallback"
+                        replies_before = len(self.channel.replies)
+                        sends_before = len(self.channel.send_calls)
+                        with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR") if delivery == "fallback" else nullcontext():
+                            await self.app.handle_completion(outcome)
+                        replies = self.channel.replies[replies_before:]
+                        if delivery == "card":
+                            self.assertEqual(replies, [])
+                        else:
+                            self.assertEqual(len(replies), 1)
+                        displayed = (
+                            json.dumps(self.channel.updates[-1][1], ensure_ascii=False)
+                            if delivery == "card" else str(replies[0][1])
+                        )
+                        if delivery != "text":
+                            card = json.dumps(self.channel.updates[-1][1], ensure_ascii=False)
+                            self.assertIn("任务已中断", card)
+                            self.assertNotIn("任务失败", card)
+                        self.assertIn("前台工具进程", displayed)
+                        self.assertIn("Codex Turn 已中断", displayed)
+                        self.assertNotIn("外部中断", displayed)
+                        self.assertIn("未请求清理" if kind == "ordinary" else "已请求清理", displayed)
+                        if reason is None:
+                            self.assertNotIn("中断原因", displayed)
+                        else:
+                            self.assertIn("中断原因", displayed)
+                            self.assertIn("tooManyDenials", displayed)
+                            self.assertIn("敏感内容已隐藏" if reason.startswith("API_KEY") else reason, displayed)
+                        self.assertNotIn("private", displayed)
+                        self.assertNotIn("<at", displayed)
+                        self.assertEqual(len(self.channel.send_calls), sends_before)
+                        self.assertEqual(self.channel.reactions[-1], (origin.id, "CrossMark"))
+                        self.assertEqual(outcome.status, "interrupted")
+                        self.assertIsNone(outcome.error)
 
     async def test_side_turn_without_progress_uses_result_files_card(self) -> None:
         binding, record = await self.open_direct_side()

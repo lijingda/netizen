@@ -138,7 +138,10 @@ class ErrorMessagesTest(unittest.TestCase):
                 self.assertNotIn("private", message)
 
     def test_native_codes_and_public_messages_cover_multiple_failure_causes(self) -> None:
-        for code in ("serverOverloaded", "rateLimitExceeded", "unauthorized", "sandboxError"):
+        for code in (
+            "serverOverloaded", "rateLimitExceeded", "unauthorized", "sandboxError",
+            "flexUnavailable", "tooManyDenials",
+        ):
             with self.subTest(code=code):
                 native = TurnError.model_validate({
                     "message": "use another available model",

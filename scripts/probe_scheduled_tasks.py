@@ -55,7 +55,8 @@ from netizen_cli.sdk_gap_adapter import AppServerThreadSubscriptionControl  # no
 from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup  # noqa: E402
 from scripts.probe_project_delete import _DeleteOnce  # noqa: E402
 from scripts.probe_python_sdk import (  # noqa: E402
-    _prove_thread_absent_from_all_catalogs, _status_value, _thread_status_type,
+    _confirm_interrupted_turn, _prove_thread_absent_from_all_catalogs,
+    _status_value, _thread_status_type,
 )
 
 
@@ -321,14 +322,25 @@ async def _run_text(thread: Any, prompt: str) -> None:
 
 async def _wait_for_exact_active(thread: AsyncThread, turn_id: str, *, timeout: float = 30) -> None:
     """Read native readiness; a started handle alone is not interrupt evidence."""
+    deadline = asyncio.get_running_loop().time() + timeout
     try:
-        async with asyncio.timeout(timeout):
+        async with asyncio.timeout_at(deadline):
             while True:
                 snapshot = await thread.read(include_turns=True)
                 _require(snapshot.thread.id == thread.id, "stop_fixture_thread_identity_changed")
                 exact = [turn for turn in snapshot.thread.turns if turn.id == turn_id]
                 _require(len(exact) <= 1, "stop_fixture_turn_identity_conflict")
                 status = _status_value(exact[0]) if exact else None
+                if status == "interrupted":
+                    try:
+                        snapshot, confirmed = await _confirm_interrupted_turn(
+                            thread, turn_id, deadline=deadline,
+                        )
+                    except TimeoutError:
+                        raise
+                    except Exception as error:
+                        raise ProbeFailure("stop_fixture_interruption_confirmation_unavailable") from error
+                    status = _status_value(confirmed)
                 if status in {"completed", "interrupted", "failed"}:
                     raise ProbeFailure("stop_fixture_terminal_before_active_observation")
                 if status == "inProgress" and _thread_status_type(snapshot.thread) == "active":
@@ -941,7 +953,7 @@ async def _binding_phase(
 
 
 async def probe(*, phase: str, model: str, timeout: float) -> dict[str, Any]:
-    _require(openai_codex.__version__ == "0.156.1", "sdk_pin_mismatch")
+    _require(openai_codex.__version__ == "0.159.2", "sdk_pin_mismatch")
     config_path = _user_config_path()
     before = _read_config(config_path)
     result: dict[str, Any] = {"passed": False, "read_only_startup_override": True, "real_feishu_calls": False}
