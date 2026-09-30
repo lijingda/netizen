@@ -34,7 +34,7 @@ class Settings:
     app_id: str
     app_secret: str = field(repr=False)
     project_root: Path
-    data_dir: Path = Path(".netizen-data")
+    data_dir: Path
     projects: dict[str, Path] = field(default_factory=dict)
     security_mode: str = "audit"
     admin_web: AdminWebSettings = AdminWebSettings()

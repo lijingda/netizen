@@ -230,7 +230,8 @@ once context 而不是丢失已读消息的残余风险。
 
 模式修改只允许 idle、非 Goal、非 compacting、非 lifecycle-unknown Binding，并与模型
 配置在一笔 Store transaction 中校验各自 revision。模式改变会推进 Runtime admission
-revision，使已在准备的 Prompt fail closed。Admin inventory/API 展示 mode 与 revision；
+revision，使已在准备的 Prompt fail closed。Admin inventory/API 通过完整会话设置展示 mode；
+revision 由服务端 action grant 捕获和校验，不在会话响应中重复返回。
 V1 的 Admin create 默认 `current-only`，不从浏览器凭空构造飞书 anchor，启用 `catch-up`
 仍通过 exact Feishu `/new` 或 `/config` card 完成。
 

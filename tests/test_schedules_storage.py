@@ -349,7 +349,9 @@ class ScheduleStorageTest(unittest.TestCase):
         self.assertEqual(claim.plan, before)
         self.assertEqual(self.schedules.get(plan_id), before)
         self.assertEqual((claim.run.trigger_source, claim.run.phase, claim.run.barrier, claim.run.due_at), ("manual", "claimed", "held", 110))
-        self.schedules.update(plan_id, expected_revision=1, request_id=self.request(), changes={"instructions": "changed", "session_settings": {"progress_card_enabled": False}})
+        changed_settings = dataclasses.replace(settings, task_feedback=BindingTaskFeedback(False, False))
+        self.schedules.update(plan_id, expected_revision=1, request_id=self.request(),
+            changes={"instructions": "changed", "session_settings": changed_settings})
         self.assertEqual(claim.plan.instructions, before.instructions)
         self.assertEqual(claim.plan.session_settings, settings)
         replay, replay_claim = self.manual(plan_id, request_id="manual")
@@ -544,7 +546,7 @@ class ScheduleStorageTest(unittest.TestCase):
                 self.schedules.update(plan_id, expected_revision=1, request_id=self.request(), changes={
                     "name": "new name", "instructions": "new instructions", "project_alias": "p",
                     "enabled": True, "schedule": rule,
-                    "session_settings": {"progress_card_enabled": True},
+                    "session_settings": SessionSettings(task_feedback=BindingTaskFeedback(progress_card_enabled=True)),
                 }, now=due + 1)
                 current = self.schedules.get(plan_id)
                 self.assertEqual((current.next_due_at, current.processed_through), (due, None))
@@ -817,7 +819,7 @@ class ScheduleStorageTest(unittest.TestCase):
         plan = self.create(session_settings=copied)
         claim = self.claim(plan.plan_id)
         self.schedules.update(plan.plan_id, expected_revision=1, request_id=self.request(), changes={
-            "session_settings": {"turn_settings": None, "reaction_pulse_enabled": False, "completion_mention_enabled": True, "message_context_mode": "current-only"},
+            "session_settings": SessionSettings(task_feedback=BindingTaskFeedback(False, True)),
         })
         changed = self.schedules.get(plan.plan_id)
         self.assertIsNone(changed.session_settings.turn_settings)
@@ -843,10 +845,38 @@ class ScheduleStorageTest(unittest.TestCase):
         )
         self.assertEqual(self.schedules.get(plan.plan_id).session_settings, changed.session_settings)
 
+    def test_update_requires_typed_values_without_consuming_request(self):
+        plan = self.create(session_settings=SessionSettings(task_feedback=BindingTaskFeedback(True, True)))
+        before = self.schedules.get(plan.plan_id)
+        for changes in (
+            {"schedule": self.rule.to_dict()},
+            {"session_settings": {"progress_card_enabled": False}},
+            {"session_settings": before.session_settings.to_dict()},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ScheduleError):
+                self.schedules.update(plan.plan_id, expected_revision=1, request_id="typed-update", changes=changes)
+            self.assertEqual(self.schedules.get(plan.plan_id), before)
+        rule = dataclasses.replace(self.rule, every_minutes=2)
+        settings = SessionSettings(task_feedback=BindingTaskFeedback(False, True))
+        changes = {"schedule": rule, "session_settings": settings}
+        updated = self.schedules.update(plan.plan_id, expected_revision=1, request_id="typed-update", changes=changes)
+        current = self.schedules.get(plan.plan_id)
+        self.assertEqual((updated.revision, current.schedule, current.session_settings), (2, rule, settings))
+        replay = self.schedules.update(plan.plan_id, expected_revision=1, request_id="typed-update", changes=changes)
+        self.assertTrue(replay.replayed)
+        self.assertEqual(replay.revision, 2)
+        for changes in (
+            {"schedule": rule.to_dict(), "session_settings": settings},
+            {"schedule": rule, "session_settings": settings.to_dict()},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ScheduleError):
+                self.schedules.update(plan.plan_id, expected_revision=1, request_id="typed-update", changes=changes)
+        self.assertEqual(self.schedules.get(plan.plan_id), current)
+
     def test_settings_validation_is_atomic_and_tombstone_clears_saved_intent(self):
         plan = self.create(session_settings=SessionSettings(task_feedback=BindingTaskFeedback(True, True)))
         with self.assertRaises(ScheduleError):
-            self.schedules.update(plan.plan_id, expected_revision=1, request_id=self.request(), changes={"session_settings": {"progress_card_enabled": 1}})
+            self.schedules.update(plan.plan_id, expected_revision=1, request_id=self.request(), changes={"session_settings": None})
         self.assertEqual(self.schedules.get(plan.plan_id).revision, 1)
         self.schedules.delete(plan.plan_id, expected_revision=1, request_id=self.request())
         self.assertIsNone(self.store._connection.execute("SELECT session_settings_json FROM schedule_plans WHERE plan_id=?", (plan.plan_id,)).fetchone()[0])

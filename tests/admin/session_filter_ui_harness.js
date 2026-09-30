@@ -223,7 +223,9 @@ async function refresh(tab) {
     chatOpenUrl: "https://applink.feishu.cn/client/chat/open?openChatId=oc-chat",
     sessionType: "message", pointerState: "inactive", catalogState: "unknown",
     nativeTitle: "Read summary", nativePreview: "", projectAlias: "netizen",
-    messageContextMode: "current_only", runtime: { primaryStatus: "running", primaryStatusResolution: "local" },
+    sessionSettings: { turn_settings: null, message_context_mode: "current-only",
+      reaction_pulse_enabled: false, progress_card_enabled: false, completion_mention_enabled: true },
+    runtime: { primaryStatus: "running", primaryStatusResolution: "local" },
     actions: { stop: {} },
   };
   let sessionResponse = { items: [unknown], nextCursor: null, catalogAvailable: true };

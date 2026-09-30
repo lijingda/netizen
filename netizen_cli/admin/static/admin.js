@@ -112,8 +112,8 @@ function renderUpdates() {
   document.querySelector("#update-source").textContent = {
     python: "Python 环境安装",
   }[data.current.source] || "安装来源未知";
-  document.querySelector("#update-message").textContent = data.checkingError
-    || data.message || "程序更新请在对应 Python 环境运行 netizen update。";
+  document.querySelector("#update-message").textContent = data.message
+    || "程序更新请在对应 Python 环境运行 netizen update。";
   const operation = data.operation;
   const restarting = updateExpectedTarget != null || operation?.kind === "restart";
   const operationName = restarting ? "重启" : "升级";
@@ -1371,9 +1371,10 @@ async function loadSessions(cursor = state.sessionPage.cursor) {
     updateRuntimeCell(runtime, session.runtime);
     row.append(runtime);
     cell(row, session.projectAlias);
-    const settings = session.turnSettings;
-    const model = settings ? `${settings.modelId} / ${settings.effortId} / ${settings.serviceTierId}` : "继承 Codex";
-    cell(row, `${session.messageContextMode} · ${model}`);
+    const settings = session.sessionSettings;
+    const turnSettings = settings.turn_settings;
+    const model = turnSettings ? `${turnSettings.model_id} / ${turnSettings.effort_id} / ${turnSettings.service_tier_id}` : "继承 Codex";
+    cell(row, `${settings.message_context_mode} · ${model}`);
     cell(row, sessionUpdatedAtLabel(session));
     const actions = actionsCell(row);
     wireSessionActions(actions, session);

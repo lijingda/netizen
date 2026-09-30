@@ -42,7 +42,6 @@ from .presentation import (
     _runtime_binding_json,
     _runtime_side_json,
     _schedule_plan_json,
-    _settings_json,
     _stop_disposition_message,
     _topic_open_url,
 )
@@ -555,12 +554,8 @@ class AdminWebApplication:
         self, context: _RequestContext, status: dict[str, Any]
     ) -> Response:
         payload = dict(status)
-        payload.pop("checkingErrorCode")
         payload["message"] = "程序更新属于 Python 环境级操作，请在对应环境运行 netizen update；管理页只重启当前实例。"
-        payload["checkingError"] = None
         actions: dict[str, object] = {
-            "check": None,
-            "install": None,
             "restart": None,
         }
         if status.get("restartAvailable") is True:
@@ -1188,11 +1183,6 @@ class AdminWebApplication:
             "creator": binding.creator_id,
             "createdAt": binding.created_at,
             "activatedAt": binding.activated_at,
-            "settingsRevision": binding.settings_revision,
-            "turnSettings": _settings_json(binding.turn_settings),
-            "messageContextMode": binding.message_context_mode.value,
-            "contextRevision": binding.context_revision,
-            "feedbackRevision": binding.feedback_revision,
             "sessionSettings": SessionSettings.from_binding(binding).to_dict(),
             "runtime": _runtime_binding_json(status),
             "actions": actions,
@@ -2637,7 +2627,6 @@ def _runtime_precondition(grant: object) -> RuntimePrecondition:
 
 
 _UPDATE_HTTP_ERRORS = {
-    "update_unsupported": (409, "update_unsupported", "请在对应 Python 环境运行 netizen update。"),
     "restart_unsupported": (409, "restart_unsupported", "仅绑定当前 Python 环境的受管实例支持 Admin 重启。"),
     "update_busy": (409, "update_busy", "另一个安装或维护操作正在执行，请稍后查看结果。"),
     "update_state_unavailable": (

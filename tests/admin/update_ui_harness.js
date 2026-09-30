@@ -40,10 +40,9 @@ const target = {
 const restartEnvelope = { csrfToken: "csrf", actionToken: "action", target: restartTarget };
 function freshStatus(operation = null) {
   return {
-    current: { version: "1.0.0", source: "python" }, supported: false,
-    available: false, latest: null,
+    current: { version: "1.0.0", source: "python" },
     restartSupported: true, restartAvailable: true,
-    operation, actions: { check: null, install: null, restart: restartEnvelope },
+    operation, actions: { restart: restartEnvelope },
   };
 }
 const operation = (phase, id = "new-operation") => ({
