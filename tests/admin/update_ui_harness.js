@@ -37,24 +37,21 @@ const target = {
   version: "1.1.0", releaseId: 12,
   installerSha256: "a".repeat(64), archiveSha256: "b".repeat(64),
 };
-const envelope = { csrfToken: "csrf", actionToken: "action", target };
-const restartEnvelope = { ...envelope, target: restartTarget };
+const restartEnvelope = { csrfToken: "csrf", actionToken: "action", target: restartTarget };
 function freshStatus(operation = null) {
   return {
-    current: { version: "1.0.0", source: "python" }, supported: true,
-    available: true, latest: { ...target, notes: "<img src=x onerror=alert(1)>",
-      url: "https://github.com/lijingda/netizen/releases/tag/v1.1.0" },
+    current: { version: "1.0.0", source: "python" }, supported: false,
+    available: false, latest: null,
     restartSupported: true, restartAvailable: true,
     operation, actions: { check: null, install: null, restart: restartEnvelope },
   };
 }
 const operation = (phase, id = "new-operation") => ({
-  operationId: id, phase, code: "none", target,
+  schema: 1, operationId: id, phase, code: "none", target,
 });
 const restartOperation = (phase, id = "new-restart") => ({
   schema: 3, kind: "restart", operationId: id, phase, code: "none",
   target: { version: "1.0.0", installationId: restartTarget.targetId },
-  previousRelease: restartTarget.targetId,
 });
 // SHIPPED_UPDATE_CONTROLLER
 (async () => {
@@ -74,7 +71,6 @@ const restartOperation = (phase, id = "new-restart") => ({
   answer = () => new Promise((_resolve, reject) => { rejectSubmit = reject; });
   const first = restartService();
   await restartService();
-  await submitMaintenance("upgrade");
   assert.equal(requests.filter(({options}) => options.method === "POST").length, 1);
   assert.equal(requests.at(-1).path, "/api/v1/updates/restart");
   assert.equal(elements.get("#service-restart").disabled, true);
@@ -86,7 +82,9 @@ const restartOperation = (phase, id = "new-restart") => ({
   for (const unrelated of [
     restartOperation("succeeded", "old-restart"),
     { ...restartOperation("succeeded"), target: { version: "1.0.0", installationId: "d".repeat(64) } },
-    { ...restartOperation("succeeded"), schema: 1, kind: undefined },
+    operation("succeeded"),
+    { ...restartOperation("succeeded"), schema: 2,
+      target: { version: "1.0.0", releaseDigest: restartTarget.targetId } },
   ]) {
     answer = async () => response(freshStatus(unrelated));
     await pollUpdateStatus();
@@ -140,6 +138,15 @@ const restartOperation = (phase, id = "new-restart") => ({
   const count = requests.length;
   await restartService();
   assert.equal(requests.length, count);
+
+  // Historical upgrade/restart records remain readable without offering installation.
+  acceptUpdateStatus(freshStatus(operation("rolled_back")));
+  assert.equal(elements.get("#update-phase").textContent, "升级失败，已回滚");
+  assert.match(elements.get("#update-detail").textContent, /目标版本 1.1.0/);
+  acceptUpdateStatus(freshStatus({ ...restartOperation("succeeded"), schema: 2,
+    target: { version: "1.0.0", releaseDigest: restartTarget.targetId } }));
+  assert.equal(elements.get("#update-phase").textContent, "重启成功");
+  assert.match(elements.get("#update-detail").textContent, /保持版本 1.0.0/);
 
   acceptUpdateStatus(freshStatus(restartOperation("restarting")));
   answer = async () => response({message: "登录失效"}, 401);

@@ -106,13 +106,6 @@ class UpdateService:
     async def status(self) -> dict[str, Any]:
         return await self._io.submit(self._status)
 
-    async def check(self) -> dict[str, Any]:
-        # A local compatibility query: never contacts a release server.
-        return await self.status()
-
-    async def start(self, *, target: dict[str, Any]) -> dict[str, Any]:
-        raise UpdateError("update_unsupported")
-
     async def restart(self, *, installation_id: str) -> dict[str, Any]:
         return await self._io.submit(self._restart, installation_id=installation_id)
 

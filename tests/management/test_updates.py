@@ -37,15 +37,13 @@ class MaintenanceTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(result.close)
         return result
 
-    async def test_status_and_check_never_offer_package_updates(self) -> None:
-        for status in (await self.service.status(), await self.service.check()):
-            self.assertFalse(status["supported"])
-            self.assertFalse(status["available"])
-            self.assertIsNone(status["latest"])
-            self.assertTrue(status["restartAvailable"])
-            self.assertEqual(status["current"]["installationId"], self.current.identity)
-        with self.assertRaisesRegex(UpdateError, "update_unsupported"):
-            await self.service.start(target={"url": "https://untrusted.invalid"})
+    async def test_status_never_offers_package_updates(self) -> None:
+        status = await self.service.status()
+        self.assertFalse(status["supported"])
+        self.assertFalse(status["available"])
+        self.assertIsNone(status["latest"])
+        self.assertTrue(status["restartAvailable"])
+        self.assertEqual(status["current"]["installationId"], self.current.identity)
         self.executor.launch.assert_not_called()
 
     async def test_restart_uses_bound_python_and_typed_installation_identity_once(self) -> None:

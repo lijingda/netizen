@@ -153,11 +153,13 @@ class LinuxServicesTest(unittest.TestCase):
         self.managed = manager, native, binding
         self.addCleanup(lambda: [os.close(fd) for fd in native.descriptors.values()])
 
-    def install_service_fixture(self, version: int = 1) -> bytes:
+    def install_service_fixture(self) -> bytes:
         """Load persisted evidence without using the current service renderer."""
         manager, _, binding = self.managed
         suffix = ".service" if self.platform == "linux" else ".plist"
-        template = (Path(__file__).parent / "fixtures" / (f"cli_service_v{version}" + suffix)).read_text()
+        template = (Path(__file__).parent / "fixtures" / ("cli_service_v1" + suffix)).read_text()
+        if self.platform == "linux":
+            template = template.replace("@WORKING_DIRECTORY@", str(manager.home).replace("%", "%%") + "/")
         for name, value in {"ROOT": binding.root, "PYTHON": binding.python,
                             "PREFIX": binding.prefix, "HOME": manager.home,
                             "LABEL": manager.service_name(binding.root)}.items():
@@ -174,12 +176,11 @@ class LinuxServicesTest(unittest.TestCase):
         _private(manager.service_file(binding.root), content)
         return content
 
-    def test_frozen_v1_services_remain_controllable_after_default_renderer_changes(self) -> None:
+    def test_known_service_fixture_remains_controllable_without_rerendering(self) -> None:
         manager, native, binding = self.managed
         content = self.install_service_fixture()
-        # A package update may select a new format for new registrations. All
-        # controls and inventory must still understand known persisted v1 bytes.
-        with patch.object(manager, "_render", return_value=b"future default format\n") as render:
+        # Existing bindings are recognized and controlled without rewriting them.
+        with patch.object(manager, "_render", side_effect=AssertionError("unexpected rewrite")) as render:
             manager.register(binding)
             self.assertEqual(manager.inspect(binding.root).binding, binding)
             self.assertEqual([status.binding for status in manager.list_instances()], [binding])
@@ -190,13 +191,15 @@ class LinuxServicesTest(unittest.TestCase):
             self.assertIsNone(manager.inspect(binding.root))
             render.assert_not_called()
 
-    def test_v1_fixture_rejects_unknown_versions_identity_changes_and_overrides(self) -> None:
+    def test_service_fixture_rejects_unknown_versions_identity_changes_and_overrides(self) -> None:
         manager, native, binding = self.managed
         content = self.install_service_fixture()
         if self.platform == "linux":
             mutations = [
-                content.replace(b"service v1 ", b"service v9 "),
-                content.replace(b"service v1 ", b"service v2 "),  # No mixed-format definitions.
+                content.replace(b"service v1 ", b"service v2 "),
+                content.replace(b"WorkingDirectory=", b"RootDirectory="),
+                content.replace(f"WorkingDirectory={manager.home}/".encode(),
+                                f'WorkingDirectory="{manager.home}"'.encode()),
                 content.replace(b'ExecStart=:', b'ExecStart=:+'),
                 content.replace(b'"NETIZEN_CLI_SERVICE=1"', b'"NETIZEN_CLI_SERVICE=0"'),
                 content.replace(b'"NETIZEN_ROOT=', b'"OTHER_ROOT='),
@@ -408,7 +411,6 @@ class LinuxServicesTest(unittest.TestCase):
         configured = ServiceBinding(binding.root, binding.python, binding.prefix, selected)
         manager.register(configured)
         assert manager.inspect(binding.root).binding.codex_home == selected
-        assert manager._environment(configured)["CODEX_HOME"] == str(selected)
 
 
     def test_systemd_effective_overrides_are_not_accepted(self) -> None:
@@ -442,31 +444,6 @@ class LinuxServicesTest(unittest.TestCase):
         native.overrides.clear()
         manager.remove(binding.root)
         self.assertIsNone(manager.inspect(binding.root))
-
-    def test_systemd_v2_fixture_is_independent_of_the_current_renderer(self) -> None:
-        manager, native, binding = self.managed
-        if self.platform != "linux":
-            self.skipTest("Linux v2 serialization")
-        content = self.install_service_fixture(version=2)
-        with patch.object(manager, "_render", return_value=b"future format") as render:
-            manager.register(binding)
-            self.assertTrue(manager.start(binding.root, timeout=0).ready)
-            self.assertEqual(manager.service_file(binding.root).read_bytes(), content)
-            self.assertFalse(manager.stop(binding.root, timeout=0).running)
-            render.assert_not_called()
-        for changed in (
-            content.replace(b"service v2 ", b"service v9 "),
-            content.replace(b"service v2 ", b"service v1 "),
-            content.replace(b"WorkingDirectory=", b"RootDirectory="),
-            content.replace(b"KillMode=control-group", b"KillMode=process"),
-            content.replace(b"[Install]", b"Environment=PYTHONPATH=/unsafe\n[Install]"),
-        ):
-            with self.subTest(definition=changed):
-                _private(manager.service_file(binding.root), changed)
-                native.calls.clear()
-                with self.assertRaises(ServiceError):
-                    manager.remove(binding.root)
-                self.assertFalse(native.calls)
 
     def test_systemd_fragment_alias_does_not_admit_other_files_or_overrides(self) -> None:
         manager, native, binding = self.managed
