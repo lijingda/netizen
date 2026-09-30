@@ -26,10 +26,6 @@ class DefaultRule:
     revision: int
     position: int | None
 
-    @property
-    def settings(self) -> SessionSettings:
-        return self.session_settings
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id, "kind": self.kind, "chat_id": self.chat_id,

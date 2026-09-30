@@ -25,7 +25,6 @@ from .models import MutationResult, Plan, Run, ScheduleError, ScheduleNotFound, 
 
 
 _NATIVE_STATUSES = frozenset({"inProgress", "completed", "interrupted", "failed"})
-_TERMINAL = _NATIVE_STATUSES - {"inProgress"}
 _READ_CONCURRENCY = 4
 _READ_TIMEOUT_SECONDS = 5.0
 _FIELDS = {
@@ -614,22 +613,9 @@ class ScheduleService:
         pending = self._store.pending_for_plan(plan.id)
         if pending is None:
             return {}
-        if self._refresh is not None:
-            return {pending.id: await self._refresh(plan.id) or "unavailable"}
-        if pending.initial_turn_id is None:
-            return {}
-        timezone = plan.schedule.timezone if plan.schedule else "UTC"
-        value, = await self._observe_runs([(pending, timezone)])
-        status = value["status"]
-        try:
-            if status in _TERMINAL:
-                self._store.release(pending.id)
-                self._wake()
-            elif status == "unavailable":
-                self._store.set_run(pending.id, barrier="unknown", error_code="observation_unavailable")
-        except ScheduleNotFound:
-            pass
-        return {pending.id: status}
+        if self._refresh is None:
+            raise _InputError("unavailable", "调度服务尚未就绪，暂不能核查未结束的定时执行。")
+        return {pending.id: await self._refresh(plan.id) or "unavailable"}
 
     async def _observe_runs(self, runs: Sequence[tuple[Run, str]], *, observed: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
         deadline = asyncio.get_running_loop().time() + _READ_TIMEOUT_SECONDS

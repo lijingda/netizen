@@ -484,7 +484,8 @@ class ScheduledSdkReadShapeTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             log_path = Path(directory) / "requests.jsonl"
             with closing(BindingStore()) as store:
-                binding = store.create_binding(
+                store.register_project(alias="p", cwd="/tmp/project")
+                binding = store.create_channel_binding(
                     scope=FeishuScope("app", "chat", ScopeKind.TOPIC, "topic"),
                     project_alias="p", creator_id="scheduled_plan:test",
                 )

@@ -872,40 +872,6 @@ class BindingStore:
                 )
         return tuple(self.get_side_topic(row["side_id"]) for row in rows)
 
-    def create_binding(
-        self,
-        *,
-        scope: FeishuScope,
-        project_alias: str,
-        creator_id: str,
-        turn_settings: BindingTurnSettings | None = None,
-        task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
-        message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
-        context_anchor: MessageContextAnchor | None = None,
-    ) -> ThreadBinding:
-        """Compatibility entry point for older callers.
-
-        Production ingress should use :meth:`create_channel_binding`, whose
-        Project check is unconditional.  Existing direct callers
-        that have an entirely empty Project registry retain the historical
-        construction seam; once any Project exists, this method applies the
-        same enabled-Project requirement as production.
-        """
-
-        return self._create_binding(
-            scope=scope,
-            project_alias=project_alias,
-            creator_id=creator_id,
-            turn_settings=turn_settings,
-            task_feedback=task_feedback,
-            message_context_mode=message_context_mode,
-            context_anchor=context_anchor,
-            expected_project_revision=None,
-            activate=True,
-            allow_scope_insert=True,
-            allow_empty_project_registry=True,
-        )
-
     def create_channel_binding(
         self,
         *,
@@ -933,7 +899,6 @@ class BindingStore:
             expected_project_revision=expected_project_revision,
             activate=True,
             allow_scope_insert=True,
-            allow_empty_project_registry=False,
         )
 
     def create_admin_binding(
@@ -962,7 +927,6 @@ class BindingStore:
             expected_project_revision=expected_project_revision,
             activate=activate,
             allow_scope_insert=False,
-            allow_empty_project_registry=False,
         )
 
     def _create_binding(
@@ -978,7 +942,6 @@ class BindingStore:
         expected_project_revision: int | None,
         activate: bool,
         allow_scope_insert: bool,
-        allow_empty_project_registry: bool,
         scheduled_run_id: str | None = None,
     ) -> ThreadBinding:
         if not project_alias or not creator_id:
@@ -1057,22 +1020,15 @@ class BindingStore:
                 (project_alias,),
             ).fetchone()
             self.require_project_not_deleting(project_alias)
-            if project_row is None and allow_empty_project_registry:
-                any_project = self._connection.execute(
-                    "SELECT 1 FROM projects LIMIT 1"
-                ).fetchone()
-                if any_project is not None:
-                    raise ProjectNotFound(project_alias)
-            elif project_row is None:
+            if project_row is None:
                 raise ProjectNotFound(project_alias)
-            if project_row is not None:
-                if not bool(project_row["enabled"]):
-                    raise ProjectDisabled(project_alias)
-                if (
-                    expected_project_revision is not None
-                    and project_row["revision"] != expected_project_revision
-                ):
-                    raise ProjectRevisionConflict(project_alias)
+            if not bool(project_row["enabled"]):
+                raise ProjectDisabled(project_alias)
+            if (
+                expected_project_revision is not None
+                and project_row["revision"] != expected_project_revision
+            ):
+                raise ProjectRevisionConflict(project_alias)
 
             self._connection.execute(
                 """
@@ -1133,7 +1089,7 @@ class BindingStore:
             task_feedback=session_settings.task_feedback,
             message_context_mode=session_settings.message_context_mode,
             context_anchor=context_anchor, expected_project_revision=None, activate=True,
-            allow_scope_insert=True, allow_empty_project_registry=False,
+            allow_scope_insert=True,
             scheduled_run_id=run_id,
         )
 
@@ -1495,62 +1451,6 @@ class BindingStore:
                 WHERE scope_key = ?
                 """,
                 (binding_id, now, scope_key),
-            )
-        return self.get(binding_id)
-
-    def deactivate(self, *, scope_key: str, binding_id: str) -> ThreadBinding:
-        """Clear the active pointer only when it still targets this Binding."""
-
-        with self._transaction():
-            row = self._connection.execute(
-                "SELECT active_binding_id FROM scopes WHERE scope_key = ?",
-                (scope_key,),
-            ).fetchone()
-            if row is None or row["active_binding_id"] != binding_id:
-                raise BindingConflict("Binding is no longer active in this Scope")
-            owner = self._connection.execute(
-                "SELECT scope_key FROM bindings WHERE binding_id = ?",
-                (binding_id,),
-            ).fetchone()
-            if owner is None or owner["scope_key"] != scope_key:
-                raise BindingNotFound(binding_id)
-            self._connection.execute(
-                """
-                UPDATE scopes
-                SET active_binding_id = NULL, updated_at = ?
-                WHERE scope_key = ? AND active_binding_id = ?
-                """,
-                (_now(), scope_key, binding_id),
-            )
-        return self.get(binding_id)
-
-    def deactivate_if_active(
-        self,
-        *,
-        scope_key: str,
-        binding_id: str,
-    ) -> ThreadBinding:
-        """Clear this Binding's Scope pointer when it is still current.
-
-        Exact management operations may archive an inactive Binding.  They
-        must still validate ownership, but must not disturb the Scope's actual
-        current pointer merely because another Binding was the mutation target.
-        """
-
-        with self._transaction():
-            owner = self._connection.execute(
-                "SELECT scope_key FROM bindings WHERE binding_id = ?",
-                (binding_id,),
-            ).fetchone()
-            if owner is None or owner["scope_key"] != scope_key:
-                raise BindingNotFound(binding_id)
-            self._connection.execute(
-                """
-                UPDATE scopes
-                SET active_binding_id = NULL, updated_at = ?
-                WHERE scope_key = ? AND active_binding_id = ?
-                """,
-                (_now(), scope_key, binding_id),
             )
         return self.get(binding_id)
 
@@ -2282,13 +2182,6 @@ class BindingStore:
                 )
             return root_record
         return None
-
-    def list_side_topics(self) -> list[SideTopicRecord]:
-        with self._lock:
-            rows = self._connection.execute(
-                _SIDE_TOPIC_SELECT + " ORDER BY created_at, side_id"
-            ).fetchall()
-        return [_side_topic(row) for row in rows]
 
     async def query_bindings(
         self,

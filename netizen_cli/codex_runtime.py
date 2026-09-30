@@ -679,14 +679,6 @@ class CodexRuntime:
                 )
             return activated
 
-    async def release_binding(
-        self,
-        binding: ThreadBinding,
-    ) -> ReleaseDisposition:
-        """Compatibility wrapper for the exact Binding release primitive."""
-
-        return await self.release_exact(binding.id)
-
     async def release_exact(
         self,
         binding_id: str,
@@ -2045,15 +2037,6 @@ class CodexRuntime:
             archived=True,
         )
 
-    async def rename_binding(
-        self,
-        binding: ThreadBinding,
-        name: str,
-    ) -> str:
-        """Compatibility wrapper for the exact Binding rename primitive."""
-
-        return await self.rename_exact(binding.id, name)
-
     async def rename_exact(
         self,
         binding_id: str,
@@ -2199,11 +2182,6 @@ class CodexRuntime:
                 extra={"binding_id": job.binding_id, "thread_id": job.parent.id},
             )
 
-    async def archive_binding(self, binding: ThreadBinding) -> ThreadBinding:
-        """Compatibility wrapper for the exact Binding archive primitive."""
-
-        return await self.archive_exact(binding.id)
-
     async def archive_exact(self, binding_id: str) -> ThreadBinding:
         if not self._accepting:
             raise RuntimeClosed("服务正在停止，暂不能归档会话。")
@@ -2283,14 +2261,6 @@ class CodexRuntime:
                 "原生 Codex 会话已归档，但本地 Binding 更新结果未确认。"
             ) from local_commit_error
         return archived
-
-    async def delete_binding(self, binding: ThreadBinding) -> ThreadBinding:
-        """Compatibility wrapper for exact Binding delete."""
-
-        return await self.delete_exact(
-            binding.id,
-            expected_native_thread_id=binding.native_thread_id,
-        )
 
     async def delete_exact(
         self,
@@ -2452,11 +2422,6 @@ class CodexRuntime:
             ) from local_commit_error
         return deleted
 
-    async def unarchive_binding(self, binding: ThreadBinding) -> ThreadBinding:
-        """Compatibility wrapper that restores and selects the Binding."""
-
-        return await self.restore_as_current_exact(binding.id)
-
     async def restore_exact(self, binding_id: str) -> ThreadBinding:
         """Restore one archived Binding without changing its Scope pointer."""
 
@@ -2579,21 +2544,6 @@ class CodexRuntime:
             model_id=model_id,
             effort_id=effort_id,
             service_tier_id=service_tier_id,
-        )
-
-    async def configure_turn_settings(
-        self,
-        *,
-        binding_id: str,
-        expected_revision: int,
-        settings: BindingTurnSettings | None,
-    ) -> ThreadBinding:
-        """Compatibility wrapper for the exact configuration primitive."""
-
-        return await self.configure_exact(
-            binding_id=binding_id,
-            expected_revision=expected_revision,
-            settings=settings,
         )
 
     async def configure_exact(

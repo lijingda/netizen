@@ -882,7 +882,7 @@ class SupplementalProjectionTest(unittest.TestCase):
 
     def test_empty_history_keeps_a_compact_complete_context_status(self) -> None:
         result = compose_message_context_prompt(
-            supplemental_messages=(),
+            supplemental_selection=select_supplemental_messages(()),
             quoted_message=None,
             current=current("now"),
         )
@@ -912,7 +912,7 @@ class SupplementalProjectionTest(unittest.TestCase):
         assert not isinstance(projected, SupplementalMessageOmission)
 
         result = compose_message_context_prompt(
-            supplemental_messages=(projected,),
+            supplemental_selection=select_supplemental_messages((projected,)),
             quoted_message=None,
             current=current("now"),
         )
@@ -993,15 +993,18 @@ class SupplementalProjectionTest(unittest.TestCase):
         assert not isinstance(latest, SupplementalMessageOmission)
 
         result = compose_message_context_prompt(
-            supplemental_messages=(first, duplicate, latest),
+            supplemental_selection=select_supplemental_messages(
+                (first, duplicate, latest),
+                quoted_message_id=quoted.message_id,
+                supplemental_stats=SupplementalContextStats(
+                    scanned_count=5,
+                    omitted_count=2,
+                    unsupported_omitted_count=1,
+                    truncated_before=True,
+                ),
+            ),
             quoted_message=quoted,
             current=current("$live-skill answer this"),
-            supplemental_stats=SupplementalContextStats(
-                scanned_count=5,
-                omitted_count=2,
-                unsupported_omitted_count=1,
-                truncated_before=True,
-            ),
         )
 
         current_prefix, current_json = result.text.split('"current_message"', 1)
@@ -1057,11 +1060,13 @@ class SupplementalProjectionTest(unittest.TestCase):
             projected.append(item)
 
         result = compose_message_context_prompt(
-            supplemental_messages=projected,
+            supplemental_selection=select_supplemental_messages(
+                projected,
+                max_supplemental_messages=3,
+                max_supplemental_text=7,
+            ),
             quoted_message=None,
             current=current("now"),
-            max_supplemental_messages=3,
-            max_supplemental_text=7,
         )
         envelope = json.loads(result.text)
 
@@ -1079,11 +1084,13 @@ class SupplementalProjectionTest(unittest.TestCase):
         self.assertTrue(result.stats.text_limit_reached)
 
         text_limited = compose_message_context_prompt(
-            supplemental_messages=projected,
+            supplemental_selection=select_supplemental_messages(
+                projected,
+                max_supplemental_messages=4,
+                max_supplemental_text=7,
+            ),
             quoted_message=None,
             current=current("now"),
-            max_supplemental_messages=4,
-            max_supplemental_text=7,
         )
         self.assertEqual(text_limited.stats.selected_count, 2)
         self.assertEqual(text_limited.stats.truncated_count, 2)
@@ -1111,7 +1118,7 @@ class SupplementalProjectionTest(unittest.TestCase):
         assert not isinstance(second, SupplementalMessageOmission)
 
         result = compose_message_context_prompt(
-            supplemental_messages=(first, second),
+            supplemental_selection=select_supplemental_messages((first, second)),
             quoted_message=None,
             current=current("now"),
         )
@@ -1140,7 +1147,7 @@ class SupplementalProjectionTest(unittest.TestCase):
         assert not isinstance(projected, SupplementalMessageOmission)
 
         result = compose_message_context_prompt(
-            supplemental_messages=(projected,),
+            supplemental_selection=select_supplemental_messages((projected,)),
             quoted_message=None,
             current=current("now"),
         )
@@ -1152,7 +1159,7 @@ class SupplementalProjectionTest(unittest.TestCase):
 
         with self.assertRaises(HistoricalMessageContractError):
             compose_message_context_prompt(
-                supplemental_messages=(projected, projected),
+                supplemental_selection=select_supplemental_messages((projected, projected)),
                 quoted_message=None,
                 current=current("now"),
             )
@@ -1169,7 +1176,9 @@ class SupplementalProjectionTest(unittest.TestCase):
         assert not isinstance(first, SupplementalMessageOmission)
 
         result = compose_message_context_prompt(
-            supplemental_messages=(first,),
+            supplemental_selection=select_supplemental_messages(
+                (first,), quoted_message_id=quoted.message_id,
+            ),
             quoted_message=quoted,
             current=current("now"),
         )
@@ -1186,9 +1195,18 @@ class SupplementalProjectionTest(unittest.TestCase):
         assert not isinstance(older, SupplementalMessageOmission)
 
         with self.assertRaises(HistoricalMessageContractError):
+            select_supplemental_messages((newer, older))
+
+    def test_composer_rejects_a_different_quote_than_the_prepared_selection(self) -> None:
+        quoted = project_quoted_message(inbound(message_id="om_quote"))
+        selection = select_supplemental_messages(
+            (), quoted_message_id="om_other_quote",
+        )
+
+        with self.assertRaises(HistoricalMessageContractError):
             compose_message_context_prompt(
-                supplemental_messages=(newer, older),
-                quoted_message=None,
+                supplemental_selection=selection,
+                quoted_message=quoted,
                 current=current("now"),
             )
 

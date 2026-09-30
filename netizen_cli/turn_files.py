@@ -80,7 +80,6 @@ class _ParsedDiffBlock:
     deleted: bool
     binary: bool
     counts: tuple[int, int] | None
-    malformed: bool
 
 
 _HUNK_HEADER = re.compile(
@@ -300,74 +299,18 @@ def has_turn_file_references(
 def turn_diff_paths(diff: str | None) -> tuple[str, ...]:
     """Return current-side paths from a Git-style aggregate unified diff.
 
-    App Server's ``turn/diff/updated`` payload is an aggregate snapshot.  This
-    is the compatibility wrapper for callers that only need paths. Deleted
-    targets are excluded; rename destinations and binary-file headers remain
-    supported.
-    """
-
-    return tuple(item.path for item in turn_diff_summary(diff).files)
-
-
-def turn_diff_summary(diff: str | None) -> TurnDiffSummary:
-    """Parse paths and line counts from the latest aggregate unified diff.
-
-    A malformed hunk invalidates all numeric statistics while preserving any
-    independently parseable current-side paths. Binary blocks keep their path
-    but never receive line counts. Aggregate totals include valid deleted-file
-    hunks even though deleted targets cannot appear in the current file list.
+    Aggregate snapshots supplement file discovery, never patch line counts.
+    Deleted targets are excluded; rename destinations and binary-file headers
+    remain supported. Repeated paths retain their first reported position.
     """
 
     if not isinstance(diff, str) or not diff:
-        return TurnDiffSummary()
-
-    first_header = re.search(r"(?m)^diff --git ", diff)
-    malformed_prelude = (
-        first_header is not None
-        and bool(diff[: first_header.start()].strip())
-    )
-    blocks = tuple(_parse_diff_block(lines) for lines in _diff_blocks(diff))
-    merged: list[TurnDiffFileStats] = []
-    positions: dict[str, int] = {}
-    for block in blocks:
-        if block.deleted or block.path is None:
-            continue
-        item = TurnDiffFileStats(
-            block.path,
-            *(block.counts or (None, None)),
-        )
-        position = positions.get(item.path)
-        if position is None:
-            positions[item.path] = len(merged)
-            merged.append(item)
-            continue
-        previous = merged[position]
-        if (
-            previous.additions is None
-            or previous.deletions is None
-            or item.additions is None
-            or item.deletions is None
-        ):
-            merged[position] = TurnDiffFileStats(item.path)
-        else:
-            merged[position] = TurnDiffFileStats(
-                item.path,
-                previous.additions + item.additions,
-                previous.deletions + item.deletions,
-            )
-    if malformed_prelude or any(block.malformed for block in blocks):
-        return TurnDiffSummary(
-            files=tuple(TurnDiffFileStats(item.path) for item in merged)
-        )
-    numeric = tuple(block.counts for block in blocks if block.counts is not None)
-    totals_known = bool(numeric) and all(
-        block.counts is not None or block.binary for block in blocks
-    )
-    return TurnDiffSummary(
-        additions=sum(counts[0] for counts in numeric) if totals_known else None,
-        deletions=sum(counts[1] for counts in numeric) if totals_known else None,
-        files=tuple(merged),
-    )
+        return ()
+    blocks = (_parse_diff_block(lines) for lines in _diff_blocks(diff))
+    return tuple(dict.fromkeys(
+        block.path for block in blocks
+        if block.path is not None and not block.deleted
+    ))
 
 
 def _diff_blocks(diff: str) -> Iterable[tuple[str, ...]]:
@@ -519,7 +462,7 @@ def _parse_diff_block(lines: Sequence[str]) -> _ParsedDiffBlock:
         if not malformed and (saw_hunk or pure_rename)
         else None
     )
-    return _ParsedDiffBlock(path, deleted, binary, counts, malformed)
+    return _ParsedDiffBlock(path, deleted, binary, counts)
 
 
 def paginate_turn_files(
@@ -591,7 +534,9 @@ def _reported_paths(
     turn_diff: str | None = None,
     diff_summary: TurnDiffSummary | None = None,
 ) -> Iterable[_ReportedTurnPath]:
-    summary = diff_summary if diff_summary is not None else turn_diff_summary(turn_diff)
+    summary = diff_summary if diff_summary is not None else TurnDiffSummary(
+        files=tuple(TurnDiffFileStats(path) for path in turn_diff_paths(turn_diff))
+    )
     for file_stats in summary.files:
         yield _ReportedTurnPath(
             "turnDiff",

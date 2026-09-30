@@ -28,7 +28,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         self.fx = await self.enterAsyncContext(channel_fixture())
         self.app, self.runtime, self.channel = self.fx.app, self.fx.runtime, self.fx.channel
         self.scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
-        self.binding = self.fx.store.create_binding(
+        self.binding = self.fx.store.create_channel_binding(
             scope=self.scope, project_alias="test", creator_id="ou_creator",
         )
         self.channel.chat_types[self.scope.chat_id] = "p2p"
@@ -106,7 +106,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_inactive_binding_rejected_without_admission_or_input(self):
         event = self.event()
-        self.fx.store.create_binding(scope=self.scope, project_alias="test", creator_id="ou_other")
+        self.fx.store.create_channel_binding(scope=self.scope, project_alias="test", creator_id="ou_other")
         await self.app.handle_card_action(event)
         self.assertEqual(self.runtime.capture_calls, [])
         self.assertEqual(self.runtime.submit_calls, [])
@@ -126,7 +126,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         self.runtime.enforce_active_submission = True
         async def members(*args, **kwargs):
             self.assertEqual(self.runtime.capture_calls, [self.binding.id])
-            self.fx.store.create_binding(scope=self.scope, project_alias="test", creator_id="ou_other")
+            self.fx.store.create_channel_binding(scope=self.scope, project_alias="test", creator_id="ou_other")
             return [SimpleNamespace(id="ou_answerer", name="Answering Person")]
         self.channel.get_chat_members = members
         await self.app.handle_card_action(self.event())
@@ -204,7 +204,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         group = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
         lower = MessageContextAnchor("om_lower", 1000)
         upper = MessageContextAnchor("om_answer", 9000)
-        self.binding = self.fx.store.create_binding(
+        self.binding = self.fx.store.create_channel_binding(
             scope=group, project_alias="test", creator_id="ou_creator",
             message_context_mode=MentionContextMode.CATCH_UP, context_anchor=lower,
         )
@@ -228,7 +228,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_topic_question_and_answer_stay_in_original_topic(self):
         topic = FeishuScope("cli_test", "oc_group", ScopeKind.TOPIC, "omt_topic")
-        self.binding = self.fx.store.create_binding(scope=topic, project_alias="test", creator_id="ou_creator")
+        self.binding = self.fx.store.create_channel_binding(scope=topic, project_alias="test", creator_id="ou_creator")
         self.channel.send_results.append(sent_result(
             "om_answer", chat_id=topic.chat_id, thread_id=topic.topic_id,
             root_id="om_root", parent_id="om_root",

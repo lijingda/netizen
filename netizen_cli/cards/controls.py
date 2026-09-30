@@ -2178,38 +2178,6 @@ def _decode_project_management_form(
     )
 
 
-def _project_row(
-    project: Project,
-    controls: list[dict[str, Any]],
-    *,
-    status: str,
-) -> dict[str, Any]:
-    return {
-        "tag": "column_set",
-        "flex_mode": "none",
-        "background_style": "grey-50",
-        "margin": "0 0 8px 0",
-        "columns": [
-            {
-                "tag": "column",
-                "width": "weighted",
-                "weight": 5,
-                "padding": "8px",
-                "elements": [
-                    _plain(f"{project.alias} · {status}\n{project.cwd}"),
-                ],
-            },
-            {
-                "tag": "column",
-                "width": "auto",
-                "vertical_align": "center",
-                "padding": "8px",
-                "elements": controls,
-            },
-        ],
-    }
-
-
 def _archived_session_row(
     *,
     scope: FeishuScope,

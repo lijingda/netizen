@@ -90,13 +90,6 @@ class ProjectRegistry:
     def resolve_for_binding(self, alias: str) -> Project:
         return _usable_project(self._resolve(alias))
 
-    def resolve(self, alias: str) -> Project:
-        """Compatibility alias for existing bindings; disabled rows still resolve."""
-        return self.resolve_for_binding(alias)
-
-    def aliases(self) -> tuple[str, ...]:
-        return tuple(project.alias for project in self.list())
-
     def register(
         self,
         *,

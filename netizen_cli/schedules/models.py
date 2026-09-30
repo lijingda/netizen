@@ -302,10 +302,6 @@ class PlanLifecycle:
     has_future: bool
     has_trigger: bool
 
-    @property
-    def can_toggle(self) -> bool:
-        return self.has_trigger
-
 
 def _trigger_opportunities(
     rule: ScheduleRule | None, *, enabled: bool, next_due_at: float | None,

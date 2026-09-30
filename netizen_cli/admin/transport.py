@@ -112,7 +112,6 @@ class _ClientDisconnected(Exception):
 class _Connection:
     writer: asyncio.StreamWriter
     accepted_at: float
-    task: asyncio.Task[None] | None = None
     handler_task: asyncio.Task[Response] | None = None
 
 
@@ -350,7 +349,6 @@ class AdminHttpTransport:
         task = self._owned_loop().create_task(
             self._serve_connection(connection, reader)
         )
-        connection.task = task
         self._track_task(task, self._connection_tasks)
 
     async def _serve_connection(
@@ -365,17 +363,15 @@ class AdminHttpTransport:
             h11.SERVER,
             max_incomplete_event_size=MAX_HEADER_SECTION_BYTES,
         )
-        pending = b""
         first_request = True
 
         try:
             while not self._closing:
                 request_id = secrets.token_hex(16)
                 try:
-                    request, pending = await self._read_request(
+                    request = await self._read_request(
                         reader=reader,
                         parser=parser,
-                        pending=pending,
                         first_request=first_request,
                         accepted_at=connection.accepted_at,
                         peer=peer,
@@ -486,7 +482,6 @@ class AdminHttpTransport:
                     parser.start_next_cycle()
                 except h11.LocalProtocolError:
                     return
-                pending = b""
         except asyncio.CancelledError:
             handler = connection.handler_task
             if handler is not None and not handler.done():
@@ -505,19 +500,17 @@ class AdminHttpTransport:
         *,
         reader: asyncio.StreamReader,
         parser: h11.Connection,
-        pending: bytes,
         first_request: bool,
         accepted_at: float,
         peer: Address,
         sockname: Address,
         request_id: str,
-    ) -> tuple[Request, bytes]:
+    ) -> Request:
         loop = self._owned_loop()
+        pending = b""
 
         if first_request:
             header_deadline = accepted_at + HEADER_TIMEOUT_SECONDS
-        elif pending:
-            header_deadline = loop.time() + HEADER_TIMEOUT_SECONDS
         else:
             try:
                 first_byte = await asyncio.wait_for(
@@ -578,7 +571,7 @@ class AdminHttpTransport:
             # entered are pipelining, including a same-write second request.
             raise _RequestRejected(400, "pipelined_request")
 
-        request = Request(
+        return Request(
             method=event.method,
             target=event.target,
             http_version=event.http_version,
@@ -588,7 +581,6 @@ class AdminHttpTransport:
             sockname=sockname,
             request_id=request_id,
         )
-        return request, b""
 
     async def _read_header_section(
         self,

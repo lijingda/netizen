@@ -121,7 +121,7 @@ class ProjectDeletionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.directory.cleanup()
 
     def binding(self, name: str, *, native: str | None = None, project: str = "test"):
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=FeishuScope("cli_test", f"oc_{name}", ScopeKind.DIRECT),
             project_alias=project,
             creator_id="ou_owner",
@@ -212,14 +212,15 @@ class ProjectDeletionServiceTest(unittest.IsolatedAsyncioTestCase):
             close_index = next(i for i, call in enumerate(self.runtime.calls) if call[:2] == ("close-side", side.id))
             delete_index = next(i for i, call in enumerate(self.runtime.calls) if call[:2] == ("delete", parent.id))
             self.assertLess(close_index, delete_index)
-        self.assertTrue(all(side.state.terminal for side in self.store.list_side_topics()))
+        sides = (await self.store.query_side_topics()).items
+        self.assertTrue(all(item.side_topic.state.terminal for item in sides))
         closed_ids = {call[1] for call in self.runtime.calls if call[0] == "close-side"}
         self.assertNotIn(closed_side.id, closed_ids)
         self.assertNotIn(expired_side.id, closed_ids)
         forbidden = {"stop", "archive", "restore", "activate", "release", "catalog", "goal-snapshot"}
         self.assertFalse(any(call[0] in forbidden for call in self.runtime.calls))
         with self.assertRaises(UnknownProject):
-            self.projects.resolve("test")
+            self.projects.resolve_for_binding("test")
         self.assertEqual(self.marker.read_text(encoding="utf-8"), "project code stays")
 
     async def test_missing_binding_uses_exact_delete_without_catalog_filter(self) -> None:

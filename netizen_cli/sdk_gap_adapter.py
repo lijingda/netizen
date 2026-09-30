@@ -95,10 +95,7 @@ class ThreadUnsubscribeStateUnknown(RuntimeError):
 class DiscoveredSkill:
     name: str
     path: str
-    description: str
-    scope: str
     enabled: bool
-    display_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,26 +255,11 @@ class AppServerSkillCatalog:
             path_value = getattr(getattr(item, "path", None), "root", None)
             if not isinstance(path_value, str) or not Path(path_value).is_absolute():
                 raise SkillCatalogError("Codex 返回了非绝对路径的 Skill，已拒绝使用。")
-            scope_value = getattr(getattr(item, "scope", None), "value", None)
-            if not isinstance(scope_value, str):
-                raise SkillCatalogError("Codex 返回了未知的 Skill scope。")
-            interface = getattr(item, "interface", None)
-            display_name = getattr(interface, "display_name", None)
             skills.append(
                 DiscoveredSkill(
                     name=_trimmed_string(getattr(item, "name", None), "Skill name"),
                     path=path_value,
-                    description=_trimmed_string(
-                        getattr(item, "description", None),
-                        "Skill description",
-                    ),
-                    scope=scope_value,
                     enabled=getattr(item, "enabled", None) is True,
-                    display_name=(
-                        display_name
-                        if isinstance(display_name, str) and display_name.strip()
-                        else None
-                    ),
                 )
             )
         return SkillCatalogSnapshot(canonical, tuple(skills), errors)
@@ -662,9 +644,7 @@ class AppServerGoalControl:
         except Exception as error:
             raise GoalControlError("无法为既有 Goal 注册通知路由。") from error
         handle = self._handle(state, None)
-        mutation_attempted = False
         try:
-            mutation_attempted = True
             response = await self._client.thread_goal_set(
                 thread_id,
                 status=self._status_model.active,
@@ -681,24 +661,18 @@ class AppServerGoalControl:
             handle._bind_logical_turn(logical_turn_id)
             return handle
         except asyncio.CancelledError as error:
-            if mutation_attempted:
-                # Cancellation must continue to cancel the caller, but the
-                # route was registered before the mutation and is now owned by
-                # Runtime until transport teardown.  Attach the opaque handle
-                # so Runtime can retain that ownership without converting
-                # cancellation into an ordinary exception.
-                error.goal_handle = handle
-                raise
-            await handle.aclose()
+            # Cancellation must continue to cancel the caller, but the
+            # route was registered before the mutation and is now owned by
+            # Runtime until transport teardown. Attach the opaque handle
+            # so Runtime can retain that ownership without converting
+            # cancellation into an ordinary exception.
+            error.goal_handle = handle
             raise
         except Exception as error:
-            if mutation_attempted:
-                raise GoalMutationStateUnknown(
-                    "Codex Goal 恢复结果未确认；不能自动重试。",
-                    handle=handle,
-                ) from error
-            await handle.aclose()
-            raise GoalControlError("Codex Goal 恢复前置检查失败。") from error
+            raise GoalMutationStateUnknown(
+                "Codex Goal 恢复结果未确认；不能自动重试。",
+                handle=handle,
+            ) from error
 
     async def clear(self, thread_id: str) -> bool:
         _validate_thread_id(thread_id)

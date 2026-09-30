@@ -101,12 +101,12 @@ class QuestionTargetParityTest(unittest.IsolatedAsyncioTestCase):
     async def case(self, kind, *, app_id="cli_test"):
         async with side_channel_fixture() as fx:
             parent_scope = FeishuScope(app_id, "oc_group", ScopeKind.GROUP)
-            parent = fx.store.create_binding(scope=parent_scope, project_alias="test", creator_id="ou_creator")
+            parent = fx.store.create_channel_binding(scope=parent_scope, project_alias="test", creator_id="ou_creator")
             fx.store.assign_native_thread_id(parent.id, "native-parent")
             parent = fx.store.get(parent.id)
             scope = FeishuScope(app_id, "oc_group", ScopeKind.TOPIC, "omt_target")
             if kind == "binding":
-                recipient = fx.store.create_binding(scope=scope, project_alias="test", creator_id="ou_creator")
+                recipient = fx.store.create_channel_binding(scope=scope, project_alias="test", creator_id="ou_creator")
                 fx.store.assign_native_thread_id(recipient.id, "native-target")
                 recipient = fx.store.get(recipient.id)
                 target = BindingQuestionTarget(recipient.id)
@@ -335,7 +335,7 @@ class QuestionTargetParityTest(unittest.IsolatedAsyncioTestCase):
                 async with self.case("side") as c:
                     event = c.event()
                     if change == "switch":
-                        c.fx.store.create_binding(
+                        c.fx.store.create_channel_binding(
                             scope=FeishuScope("cli_test", "oc_group", ScopeKind.GROUP),
                             project_alias="test", creator_id="ou_other",
                         )

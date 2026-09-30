@@ -854,9 +854,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         session = await self.login()
         cases = (
             ("restart_unsupported", 409, "restart_unsupported", "仅绑定当前 Python 环境的受管实例支持 Admin 重启。"),
-            ("invalid_update_target", 400, "invalid_update_target", "升级目标无效。"),
             ("update_unsupported", 409, "update_unsupported", "请在对应 Python 环境运行 netizen update。"),
-            ("update_target_changed", 409, "update_target_changed", "升级目标已变化，请重新检查更新。"),
             ("update_busy", 409, "update_busy", "另一个安装或维护操作正在执行，请稍后查看结果。"),
             ("update_state_unavailable", 503, "update_state_unavailable", "维护状态无法确认，请检查实例维护记录。"),
             ("update_lock_unavailable", 503, "update_state_unavailable", "无法取得维护锁，请检查实例状态。"),
@@ -885,6 +883,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertIn("Python 环境", data["message"])
         self.assertNotIn("checkingErrorCode", data)
+        self.assertIsNone(data["checkingError"])
         self.assertIsNone(data["actions"]["install"])
         self.assertIsNone(data["actions"]["check"])
 

@@ -38,7 +38,6 @@ from .presentation import (
     _chat_open_url,
     _jsonable,
     _project_result,
-    _release_check_message,
     _release_disposition_message,
     _runtime_binding_json,
     _runtime_side_json,
@@ -127,7 +126,6 @@ from ..management import (
     CurrentSideTarget,
     ExactBindingTarget,
     InstanceManagementService,
-    NativeCatalogInconsistent,
     NativeThreadMissing,
     ProjectDeletionResult,
     RuntimePrecondition,
@@ -542,9 +540,9 @@ class AdminWebApplication:
         self, context: _RequestContext, status: dict[str, Any]
     ) -> Response:
         payload = dict(status)
-        checking_error_code = payload.pop("checkingErrorCode")
+        payload.pop("checkingErrorCode")
         payload["message"] = "程序更新属于 Python 环境级操作，请在对应环境运行 netizen update；管理页只重启当前实例。"
-        payload["checkingError"] = _release_check_message(checking_error_code)
+        payload["checkingError"] = None
         actions: dict[str, object] = {
             "check": None,
             "install": None,
@@ -2608,10 +2606,8 @@ def _runtime_precondition(grant: object) -> RuntimePrecondition:
 
 
 _UPDATE_HTTP_ERRORS = {
-    "invalid_update_target": (400, "invalid_update_target", "升级目标无效。"),
     "update_unsupported": (409, "update_unsupported", "请在对应 Python 环境运行 netizen update。"),
     "restart_unsupported": (409, "restart_unsupported", "仅绑定当前 Python 环境的受管实例支持 Admin 重启。"),
-    "update_target_changed": (409, "update_target_changed", "升级目标已变化，请重新检查更新。"),
     "update_busy": (409, "update_busy", "另一个安装或维护操作正在执行，请稍后查看结果。"),
     "update_state_unavailable": (
         503, "update_state_unavailable", "维护状态无法确认，请检查实例维护记录。",
@@ -2693,7 +2689,6 @@ def _map_error(error: BaseException) -> AdminWebError | None:
             BlockingIOResultUnknown,
             BlockingIODrainTimeout,
             BlockingIOShutdownTimeout,
-            NativeCatalogInconsistent,
             RuntimeClosed,
             ThreadCatalogError,
             ThreadLifecycleStateUnknown,

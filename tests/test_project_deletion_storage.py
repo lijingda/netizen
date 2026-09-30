@@ -239,11 +239,10 @@ class ProjectDeletionStoreTest(unittest.TestCase):
 
     def test_limits_reject_whole_inventory_instead_of_truncating(self):
         binding = self.binding()
-        self.side(binding.id, "one")
-        self.side(binding.id, "two")
+        sides = (self.side(binding.id, "one"), self.side(binding.id, "two"))
         with self.assertRaises(ProjectDeleteLimitExceeded):
             self.store.preview_project_delete("test", limit=1)
-        for side in self.store.list_side_topics():
+        for side in sides:
             self.store.transition_side_topic(side.id, SideTopicState.FAILED)
         self.binding()
         with self.assertRaises(ProjectDeleteLimitExceeded):
@@ -288,9 +287,8 @@ class ProjectDeletionRegistryTest(unittest.TestCase):
                     store=store, project_root=root, projects={"test": root / "missing"}
                 )
                 self.assertEqual(registry.list(), ())
-                self.assertEqual(registry.aliases(), ())
                 with self.assertRaises(UnknownProject):
-                    registry.resolve("test")
+                    registry.resolve_for_binding("test")
                 new_cwd = root / "new"
                 new_cwd.mkdir()
                 registered = registry.register(

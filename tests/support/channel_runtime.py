@@ -181,15 +181,13 @@ class StubRuntime:
     ) -> ThreadSubscriptionSnapshot | None:
         return self.subscription_snapshots.get(binding_id)
 
-    async def release_binding(self, binding) -> ReleaseDisposition:
+    async def release_exact(self, binding_id: str) -> ReleaseDisposition:
+        assert self.binding_store is not None
+        binding = self.binding_store.get(binding_id)
         self.release_binding_calls.append(binding.id)
         if self.release_error is not None:
             raise self.release_error
         return self.release_disposition
-
-    async def release_exact(self, binding_id: str) -> ReleaseDisposition:
-        assert self.binding_store is not None
-        return await self.release_binding(self.binding_store.get(binding_id))
 
     async def submit(self, **kwargs) -> Submission:
         if self.enforce_active_submission:
@@ -381,21 +379,20 @@ class StubRuntime:
         ):
             raise ThreadLifecycleError("会话运行状态已经变化。")
 
-    async def rename_binding(self, binding, name: str) -> str:
+    async def rename_exact(self, binding_id: str, name: str) -> str:
+        assert self.binding_store is not None
+        binding = self.binding_store.get(binding_id)
         normalized = " ".join(name.split())
         self.rename_binding_calls.append((binding.id, normalized))
         return normalized
 
-    async def rename_exact(self, binding_id: str, name: str) -> str:
+    async def archive_exact(self, binding_id: str):
         assert self.binding_store is not None
-        return await self.rename_binding(self.binding_store.get(binding_id), name)
-
-    async def archive_binding(self, binding):
+        binding = self.binding_store.get(binding_id)
         if self.archive_binding_error is not None:
             raise self.archive_binding_error
         self.archive_binding_calls.append(binding.id)
         self.active.pop(binding.id, None)
-        assert self.binding_store is not None
         if binding.native_thread_id is not None:
             metadata = self.thread_metadata_values.pop(
                 binding.native_thread_id,
@@ -408,20 +405,12 @@ class StubRuntime:
             self.archived_thread_metadata_values[binding.native_thread_id] = (
                 metadata
             )
-        return self.binding_store.deactivate_if_active(
-            scope_key=binding.scope_key,
-            binding_id=binding.id,
-        )
+        return self.binding_store.archive_binding(binding.id)
 
-    async def archive_exact(self, binding_id: str):
-        assert self.binding_store is not None
-        return await self.archive_binding(self.binding_store.get(binding_id))
-
-    async def delete_binding(self, binding):
+    async def _delete_binding(self, binding):
         if self.delete_binding_error is not None:
             raise self.delete_binding_error
         assert self.binding_store is not None
-        current = self.binding_store.get(binding.id)
         self.delete_binding_calls.append(binding.id)
         self.active.pop(binding.id, None)
         return self.binding_store.delete_binding(binding.id)
@@ -436,7 +425,7 @@ class StubRuntime:
         binding = self.binding_store.get(binding_id)
         if binding.native_thread_id != expected_native_thread_id:
             raise ThreadLifecycleError("会话的原生 Thread 已变化。")
-        return await self.delete_binding(binding)
+        return await self._delete_binding(binding)
 
     async def delete_archived_exact(
         self,
@@ -453,7 +442,7 @@ class StubRuntime:
         ):
             raise ThreadLifecycleError("归档会话已变化。")
         self.archived_thread_metadata_values.pop(expected_native_thread_id)
-        return await self.delete_binding(binding)
+        return await self._delete_binding(binding)
 
     async def delete_lazy_exact(self, binding_id: str):
         assert self.binding_store is not None
@@ -462,15 +451,7 @@ class StubRuntime:
             raise ThreadDeleteUnavailable(
                 "已有原生历史的会话不能走 Lazy 删除。"
             )
-        return await self.delete_binding(binding)
-
-    async def unarchive_binding(self, binding):
-        self.unarchive_binding_calls.append(binding.id)
-        assert self.binding_store is not None
-        return self.binding_store.activate(
-            scope_key=binding.scope_key,
-            binding_id=binding.id,
-        )
+        return await self._delete_binding(binding)
 
     async def restore_exact(self, binding_id: str):
         self.unarchive_binding_calls.append(binding_id)
@@ -509,7 +490,7 @@ class StubRuntime:
             raise self.model_catalog_error
         return self.catalog.resolve(**values)
 
-    async def configure_turn_settings(
+    async def configure_exact(
         self,
         *,
         binding_id: str,
@@ -524,19 +505,6 @@ class StubRuntime:
         self.configure_settings_calls.append(values)
         assert self.binding_store is not None
         return self.binding_store.set_turn_settings(**values)
-
-    async def configure_exact(
-        self,
-        *,
-        binding_id: str,
-        expected_revision: int,
-        settings: BindingTurnSettings | None,
-    ):
-        return await self.configure_turn_settings(
-            binding_id=binding_id,
-            expected_revision=expected_revision,
-            settings=settings,
-        )
 
     async def configure_context_exact(
         self,

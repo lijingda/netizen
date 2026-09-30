@@ -122,10 +122,7 @@ class FakeManagementRuntime:
         binding = self.store.get(binding_id)
         assert binding.native_thread_id is not None
         self.archived.add(binding.native_thread_id)
-        return self.store.deactivate_if_active(
-            scope_key=binding.scope_key,
-            binding_id=binding.id,
-        )
+        return self.store.archive_binding(binding.id)
 
     async def restore_exact(self, binding_id: str):
         self.calls.append(("restore", binding_id))
@@ -226,21 +223,6 @@ class FakeManagementRuntime:
 
     async def binding_pointer_changed(self, previous, current) -> None:
         self.calls.append(("pointer", previous, current))
-
-    async def is_thread_archived(self, thread_id: str) -> bool:
-        self.calls.append(("is-archived", thread_id))
-        return thread_id in self.archived
-
-    async def thread_catalog_state_exact(
-        self,
-        thread_id: str,
-    ) -> NativeThreadCatalogState:
-        self.calls.append(("catalog-state", thread_id))
-        if thread_id in self.archived:
-            return NativeThreadCatalogState.ARCHIVED
-        if thread_id in self.missing:
-            return NativeThreadCatalogState.MISSING
-        return NativeThreadCatalogState.ACTIVE
 
     async def thread_metadata_exact(
         self,
@@ -579,10 +561,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         archived = await self._create()
         self.store.assign_native_thread_id(archived.id, "native-archived")
-        self.store.deactivate(
-            scope_key=self.scope.key,
-            binding_id=archived.id,
-        )
+        self.store.archive_binding(archived.id)
         self.runtime.archived.add("native-archived")
 
         await self.service.delete_archived_exact_binding(
@@ -688,10 +667,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
     async def test_exact_activate_rejects_missing_native_catalog_identity(self) -> None:
         binding = await self._create()
         self.store.assign_native_thread_id(binding.id, "native-missing")
-        self.store.deactivate_if_active(
-            scope_key=self.scope.key,
-            binding_id=binding.id,
-        )
+        current = await self._create()
         self.runtime.missing.add("native-missing")
 
         with self.assertRaises(NativeThreadMissing):
@@ -699,11 +675,11 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                 target=ExactBindingTarget(
                     scope_key=self.scope.key,
                     binding_id=binding.id,
-                    expected_active_binding_id=None,
+                    expected_active_binding_id=current.id,
                 )
             )
 
-        self.assertIsNone(self.store.active_binding(self.scope.key))
+        self.assertEqual(self.store.active_binding(self.scope.key).id, current.id)
 
     async def test_name_writer_wait_does_not_block_same_or_other_scope(self) -> None:
         first = await self._create()

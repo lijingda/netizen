@@ -508,15 +508,11 @@ class ScheduleStore:
             ).fetchall()
             return tuple(_run(row) for row in rows)
 
-    def pending_runs(self, *, project_alias: str | None = None, limit: int | None = None) -> tuple[Run, ...]:
+    def pending_runs(self) -> tuple[Run, ...]:
         with self.owner._lock:
-            where = "barrier != 'released'" + (" AND project_alias=?" if project_alias else "")
-            parameters: tuple[Any, ...] = (project_alias,) if project_alias else ()
-            if limit is not None:
-                if type(limit) is not int or not 1 <= limit <= 1001:
-                    raise ScheduleError("列表数量必须在 1 到 1001 之间。")
-                parameters += (limit,)
-            rows = self._db.execute("SELECT * FROM schedule_runs WHERE " + where + " ORDER BY due_at, run_id" + (" LIMIT ?" if limit is not None else ""), parameters).fetchall()
+            rows = self._db.execute(
+                "SELECT * FROM schedule_runs WHERE barrier != 'released' ORDER BY due_at, run_id",
+            ).fetchall()
             return tuple(_run(row) for row in rows)
 
     def pending_route(self, *, app_id: str, chat_id: str, topic_id: str | None = None, root_message_id: str | None = None) -> Run | None:
@@ -753,10 +749,6 @@ class ScheduleStore:
                 (high, plan.schedule.next_after(max(now, high)), plan.id),
             )
             self._prune(plan.id)
-
-    def release_binding(self, binding_id: str, *, binding_removed: bool = False) -> None:
-        with self.owner._transaction():
-            self._release_binding(binding_id, binding_removed=binding_removed)
 
     def _prune(self, plan_id: str) -> None:
         self._db.execute(

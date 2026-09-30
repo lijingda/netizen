@@ -67,7 +67,8 @@ class SessionSettingsTest(unittest.TestCase):
             defaults.merge({"turn_settings": {"model_id": "unavailable", "effort_id": "low", "service_tier_id": "priority"}}).validate_catalog(catalog)
         store = BindingStore()
         try:
-            binding = store.create_binding(
+            store.bootstrap_project(alias="p", cwd="/tmp/p")
+            binding = store.create_channel_binding(
                 scope=FeishuScope("app", "chat", ScopeKind.TOPIC, "source-topic"),
                 project_alias="p", creator_id="user", turn_settings=None,
                 task_feedback=BindingTaskFeedback(True, False),

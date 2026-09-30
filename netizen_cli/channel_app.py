@@ -91,7 +91,7 @@ from .channel.completion_mentions import send_completion_mention
 from .channel.input_preparation import MessageInputPreparer
 from .channel.question_inputs import CardAnswerConversation, CardAnswerOrigin, card_answer_sender
 from .channel.ports import ReplyChannel
-from .channel.topics import TopicPublishError, send_topic_message, validate_topic_message
+from .channel.topics import TopicPublishError, send_topic_message
 from .cards.scheduled import (
     decode_schedule_action,
     is_schedule_card_action,
@@ -652,10 +652,6 @@ class _SentMessage:
     parent_id: str | None
 
 
-# Compatibility construction seam retained for focused ordinary-Turn tests.
-_ProgressCardController = _ReplyCardPresenter
-
-
 class ChannelApplication:
     def __init__(
         self,
@@ -687,7 +683,7 @@ class ChannelApplication:
         self._scope_coordinator = management.scope_coordinator
         self._scheduled_completions: set[str] = set()
         self._reactions = _ReactionController(channel)
-        self._progress_cards = _ProgressCardController(channel, runtime)
+        self._progress_cards = _ReplyCardPresenter(channel, runtime)
         runtime.set_completion_handler(self.handle_completion)
         runtime.set_question_handler(self.handle_questions)
 
@@ -6335,20 +6331,6 @@ def _side_reply_target(
         message_id=message.message_id,
         chat_id=message.chat_id,
         conversation=_CardReplyConversation(thread_id=topic_id),
-    )
-
-
-def _validated_sent_message(
-    result: object,
-    *,
-    expected_chat_id: str,
-) -> _SentMessage:
-    try:
-        sent = validate_topic_message(result, expected_chat_id)
-    except TopicPublishError as error:
-        raise SideTopicCreateFailed("Side " + str(error)) from error
-    return _SentMessage(
-        sent.message_id, sent.chat_id, sent.thread_id, sent.root_id, sent.parent_id,
     )
 
 
