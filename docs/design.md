@@ -170,7 +170,7 @@ Server 是 `AsyncCodex` 的子进程，不是第二套业务服务。
 | `netizen_cli/admin/` | `web.py` 集中路由、认证、一次性授权与请求任务生命周期；`queries.py` 负责查询和分页游标，`presentation.py` 负责响应转换。 |
 | `netizen_cli/management/` | 各管理入口共用的应用边界，包括 `updates.py` 中的安装信息与本实例重启编排。 |
 | `netizen_cli/schedules/` | 当前计划、时间规则、最小交接记录、唯一调度器和单工具 MCP 入口；复用同一个 BindingStore writer 与普通 Runtime。 |
-| `netizen_cli/deployment/` | 有界 Admin 重启记录、维护锁与独立重启 job；旧 release 安装模块仅保留历史兼容测试。 |
+| `netizen_cli/deployment/` | 有界 Admin 重启记录、维护锁与独立重启 job。 |
 | `netizen_cli/runtime/contracts.py`、`netizen_cli/codex_runtime.py` | 前者唯一定义公共协议、异常、输入输出和快照；后者继续独占任务、Goal、Side、订阅和锁，并保留原公共类型导入路径。 |
 
 程序分发与实例数据由 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md)
@@ -1473,6 +1473,9 @@ HTTP 断线、页面超时不取消 job，也不隐式重发。重启后 session
 满足窄恢复条件，可显示服务已恢复，但不改判原操作成功。其他未知状态要求运维核查
 status/logs；不能编辑记录伪造成功或调用旧安装器来执行全局更新。
 
+维护响应只提供当前安装、重启资格、最近操作和重启授权，不再返回远端版本检查或
+安装授权的空占位字段。旧操作记录继续用于诊断及未完成维护的拒绝边界。
+
 ### 会话目录与分页
 
 Projects、Sessions、Side Topics 都使用服务端 keyset cursor。Binding 查询先在 Channel-owned
@@ -1605,6 +1608,10 @@ context 三类 revision；陈旧页面、Scope 或 pointer 变化、运行中 Tu
 设置或显式改为继承 Codex。只有新的模型选择需要重新校验 live catalog，保留旧选择
 不代表模型已生效或仍可启动。已有 catch-up 可以保留原消息边界或切回 current-only；
 Admin 不构造新边界，新开启 catch-up 继续通过目标飞书会话的 `/config` 完成。
+
+Sessions 列表和配置表单共用完整 `sessionSettings` 投影，不并列返回模型或上下文的
+旧字段。settings、feedback、context revision 只由服务端 action grant 捕获和校验，
+浏览器提交原授权与设置，不提供 revision。
 
 按 [ADR 0073](adr/0073-create-sessions-from-chat-defaults.md)，Admin 可逐条管理精确聊天
 默认配置，以及创建、修改、删除和调整群名规则顺序。它与飞书 `/defaults` 共用同一

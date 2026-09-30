@@ -9,7 +9,6 @@ from typing import Any
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
-from ..bindings import BindingTurnSettings
 from ..runtime.contracts import (
     ReleaseDisposition,
     StopDisposition,
@@ -74,16 +73,6 @@ def _jsonable(value: object) -> object:
     if isinstance(value, (tuple, list)):
         return [_jsonable(item) for item in value]
     raise TypeError(f"unsupported JSON projection: {type(value).__name__}")
-
-
-def _settings_json(settings: BindingTurnSettings | None) -> dict[str, str] | None:
-    if settings is None:
-        return None
-    return {
-        "modelId": settings.model_id,
-        "effortId": settings.effort_id,
-        "serviceTierId": settings.service_tier_id,
-    }
 
 
 def _runtime_binding_json(status: BindingStatusProjection) -> dict[str, object]:
@@ -217,8 +206,4 @@ def _binding_result(request_id: str, binding: Any) -> dict[str, object]:
         "scopeKey": binding.scope_key,
         "current": binding.active,
         "nativeThreadId": binding.native_thread_id,
-        "settingsRevision": binding.settings_revision,
-        "messageContextMode": binding.message_context_mode.value,
-        "contextRevision": binding.context_revision,
-        "feedbackRevision": binding.feedback_revision,
     }

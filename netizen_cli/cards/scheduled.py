@@ -327,7 +327,7 @@ def _plan_summary(plan: Mapping[str, Any]) -> str:
         deadline = f"\n截止：{end}" + ("（含该时刻）" if end_at else "")
     return (
         f"{plan.get('name', '')} · {str(plan.get('id', ''))[:8]}\n"
-        f"Project：{plan.get('project_alias', plan.get('project', ''))}\n"
+        f"Project：{plan.get('project_alias', '')}\n"
         f"目标会话：{plan.get('chat_id', '')}\n"
         + (f"执行目标：原会话 · {plan.get('target_label') or plan.get('target_binding_id', '')}\n" if plan.get("target_kind") == "binding" else "执行目标：每次新建独立话题\n")
         + f"启停：{'已启用' if plan.get('enabled') else '已暂停'}\n"

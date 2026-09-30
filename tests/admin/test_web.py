@@ -114,19 +114,12 @@ class FakeManagement:
         self.set_enabled_release: asyncio.Event | None = None
         self.update_data = {
             "current": {
-                "version": "1.0.0", "source": "published", "installationId": "a" * 64,
+                "version": "1.0.0", "source": "python", "installationId": "a" * 64,
+                "python": str(root / "env/bin/python"),
             },
-            "supported": True,
-            "latest": {
-                "version": "1.1.0", "releaseId": 123,
-                "installerSha256": "b" * 64, "archiveSha256": "c" * 64,
-                "notes": "<script>untrusted release notes</script>",
-                "url": "https://github.com/lijingda/netizen/releases/tag/v1.1.0",
-            },
-            "available": True,
+            "restartSupported": False,
+            "restartAvailable": False,
             "operation": None,
-            "checkingErrorCode": None,
-            "checkedAt": None,
         }
         self.project = Project("test", root, True, 1)
         self.project_record = ProjectRecord(
@@ -258,28 +251,17 @@ class FakeManagement:
         self.calls.append(("update_status", None))
         return json.loads(json.dumps(self.update_data))
 
-    async def check_update(self):
-        self.calls.append(("check_update", None))
-        return json.loads(json.dumps(self.update_data))
-
-    async def start_update(self, *, target):
-        self.calls.append(("start_update", target))
-        self.update_data["operation"] = {
-            "operationId": "d" * 32, "target": target,
-            "phase": "accepted", "code": "none",
-        }
-        return self.update_data["operation"]
-
     async def restart_service(self, *, installation_id):
         self.calls.append(("restart_service", installation_id))
         self.update_data["restartAvailable"] = False
         self.update_data["operation"] = {
-            "schema": 2, "kind": "restart", "operationId": "d" * 32,
+            "schema": 3, "kind": "restart", "operationId": "d" * 32,
             "target": {
                 "version": self.update_data["current"]["version"],
                 "installationId": installation_id,
             },
             "phase": "accepted", "code": "none",
+            "createdAt": 1900000000, "updatedAt": 1900000000,
         }
         return self.update_data["operation"]
 
@@ -736,14 +718,13 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         session = await self.login()
         status, _, data = await self.json_get("/api/v1/updates", session)
         self.assertEqual(status, 200)
-        self.assertIsNone(data["actions"]["check"])
-        self.assertIsNone(data["actions"]["install"])
         self.assertIn("netizen update", data["message"])
+        calls = tuple(self.management.calls)
         for action in ("check", "install"):
             status, _, result = await self.json_post(f"/api/v1/updates/{action}", session, {})
             self.assertEqual(status, 409)
             self.assertEqual(result["code"], "update_unsupported")
-        self.assertFalse(any(call[0] in {"check_update", "start_update"} for call in self.management.calls))
+        self.assertEqual(tuple(self.management.calls), calls)
 
     async def test_maintenance_rejects_tampering_and_untrusted_requests(self) -> None:
         self.runner.open_admission()
@@ -777,9 +758,9 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(status, 400)
                 status, _, _ = await self.json_post(path, other_session, payload)
                 self.assertIn(status, (403, 409))
-        self.assertFalse(any(call[0] in {"start_update", "restart_service"} for call in self.management.calls))
+        self.assertFalse(any(call[0] == "restart_service" for call in self.management.calls))
 
-    async def test_restart_requires_auth_and_binds_exact_current_release_once(self) -> None:
+    async def test_restart_requires_auth_and_binds_exact_current_installation_once(self) -> None:
         self.runner.open_admission()
         status, _, _ = await self.request("POST", "/api/v1/updates/restart")
         self.assertEqual(status, 401)
@@ -790,7 +771,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(grant["target"], {
             "resource": "instance-restart", "targetId": "a" * 64, "scopeKey": None,
         })
-        # Forward the granted identity even if a later read sees another release.
+        # Forward the granted identity even if a later read sees another installation.
         # UpdateService must reject that stale identity inside the install lock.
         self.management.update_data["current"]["installationId"] = "f" * 64
         status, _, result = await self.json_post(
@@ -808,50 +789,40 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.management.calls.count(("restart_service", "a" * 64)), 1)
         _, _, data = await self.json_get("/api/v1/updates", session)
         self.assertIsNone(data["actions"]["restart"])
-        self.assertIsNone(data["actions"]["install"])
 
-    async def test_restart_grants_do_not_require_published_install_or_version_check(self) -> None:
+    async def test_restart_grants_follow_instance_availability(self) -> None:
         self.runner.open_admission()
         session = await self.login()
-        self.management.update_data.update(
-            restartSupported=True, restartAvailable=True, available=False,
-            latest=None, checkedAt=None,
-        )
-        for source in ("published", "source"):
-            self.management.update_data["current"]["source"] = source
-            self.management.update_data["supported"] = source == "published"
-            _, _, data = await self.json_get("/api/v1/updates", session)
-            self.assertIsNotNone(data["actions"]["restart"])
-            self.assertIsNone(data["actions"]["install"])
-        self.assertFalse(any(call[0] == "check_update" for call in self.management.calls))
-        self.management.update_data["restartAvailable"] = False
-        _, _, data = await self.json_get("/api/v1/updates", session)
-        self.assertIsNone(data["actions"]["restart"])
+        for supported, available in ((False, False), (True, False), (True, True)):
+            with self.subTest(supported=supported, available=available):
+                self.management.update_data.update(
+                    restartSupported=supported, restartAvailable=available,
+                )
+                _, _, data = await self.json_get("/api/v1/updates", session)
+                self.assertEqual(data["actions"]["restart"] is not None, available)
 
-    async def test_update_history_survives_source_and_recovery_disablement(self) -> None:
+    async def test_maintenance_history_remains_visible_when_restart_is_unavailable(self) -> None:
         self.runner.open_admission()
         session = await self.login()
-        target = {key: self.management.update_data["latest"][key] for key in (
-            "version", "releaseId", "installerSha256", "archiveSha256",
-        )}
-        self.management.update_data["operation"] = {
-            "operationId": "e" * 32, "phase": "recovery_required",
-            "code": "worker_lost", "target": target,
+        previous_release = "b" * 64
+        common = {
+            "operationId": "e" * 32, "previousRelease": previous_release,
+            "createdAt": 1900000000, "updatedAt": 1900000001,
         }
-        for source in ("published", "source", "unmanaged"):
-            self.management.update_data["current"]["source"] = source
-            self.management.update_data["supported"] = source == "published"
-            status, _, data = await self.json_get("/api/v1/updates", session)
-            self.assertEqual(status, 200)
-            self.assertEqual(data["operation"]["phase"], "recovery_required")
-            self.assertIsNone(data["actions"]["install"])
-            self.assertIsNone(data["actions"]["check"])
-        self.management.update_data["supported"] = True
-        self.management.update_data["current"]["source"] = "published"
-        for phase in ("requires_action", "recovered"):
-            self.management.update_data["operation"]["phase"] = phase
-            _, _, data = await self.json_get("/api/v1/updates", session)
-            self.assertIsNone(data["actions"]["install"])
+        operations = (
+            {**common, "schema": 1, "phase": "rolled_back", "code": "activation_failed",
+             "target": {"version": "0.9.0", "releaseId": 123,
+                        "installerSha256": "c" * 64, "archiveSha256": "d" * 64}},
+            {**common, "schema": 2, "kind": "restart", "phase": "recovery_required",
+             "code": "restart_failed", "target": {"version": "0.9.0", "releaseDigest": previous_release}},
+        )
+        for operation in operations:
+            with self.subTest(schema=operation["schema"]):
+                self.management.update_data["operation"] = operation
+                status, _, data = await self.json_get("/api/v1/updates", session)
+                self.assertEqual(status, 200)
+                self.assertEqual(data["operation"], operation)
+                self.assertIsNone(data["actions"]["restart"])
 
     async def test_update_errors_keep_stable_http_code_and_message(self) -> None:
         self.runner.open_admission()
@@ -859,7 +830,6 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         session = await self.login()
         cases = (
             ("restart_unsupported", 409, "restart_unsupported", "仅绑定当前 Python 环境的受管实例支持 Admin 重启。"),
-            ("update_unsupported", 409, "update_unsupported", "请在对应 Python 环境运行 netizen update。"),
             ("update_busy", 409, "update_busy", "另一个安装或维护操作正在执行，请稍后查看结果。"),
             ("update_state_unavailable", 503, "update_state_unavailable", "维护状态无法确认，请检查实例维护记录。"),
             ("update_lock_unavailable", 503, "update_state_unavailable", "无法取得维护锁，请检查实例状态。"),
@@ -881,16 +851,12 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["code"], code)
                 self.assertEqual(result["message"], message)
 
-    async def test_maintenance_status_explains_environment_scope_without_internal_fields(self) -> None:
+    async def test_maintenance_status_explains_environment_scope(self) -> None:
         self.runner.open_admission()
         session = await self.login()
         status, _, data = await self.json_get("/api/v1/updates", session)
         self.assertEqual(status, 200)
         self.assertIn("Python 环境", data["message"])
-        self.assertNotIn("checkingErrorCode", data)
-        self.assertIsNone(data["checkingError"])
-        self.assertIsNone(data["actions"]["install"])
-        self.assertIsNone(data["actions"]["check"])
 
     async def test_unknown_update_failure_does_not_expose_internal_details(self) -> None:
         self.runner.open_admission()
@@ -1119,7 +1085,6 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200, page)
         item = page["items"][0]
         self.assertEqual(item["sessionSettings"], SessionSettings.from_binding(self.management.lazy).to_dict())
-        self.assertEqual(item["feedbackRevision"], 7)
         self.assertNotIn("context_anchor", item["sessionSettings"])
         settings = SessionSettings(BindingTurnSettings("model", "high", "priority"), BindingTaskFeedback(False, True, True))
         payload = _action_payload(item["actions"]["configure"], sessionSettings=settings.to_dict())

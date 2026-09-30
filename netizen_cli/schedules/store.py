@@ -9,7 +9,7 @@ import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from ..session_settings import SessionSettings, SessionSettingsError
+from ..session_settings import SessionSettings
 
 from .models import (
     Claim, MutationResult, Plan, Run, ScheduleBlockedUnknown, ScheduleConflict, ScheduleError,
@@ -353,9 +353,11 @@ class ScheduleStore:
         allowed = {"name", "instructions", "project_alias", "chat_id", "schedule", "enabled", "session_settings", "target_kind", "target_binding_id"}
         if not isinstance(changes, dict) or not changes or set(changes) - allowed:
             raise ScheduleError("更新字段为空或包含不可修改字段。")
+        if "schedule" in changes and not isinstance(changes["schedule"], ScheduleRule):
+            raise ScheduleError("更新需要完整的时间规则。")
+        if "session_settings" in changes and changes["session_settings"] is not None and not isinstance(changes["session_settings"], SessionSettings):
+            raise ScheduleError("更新需要完整的会话设置，原会话目标使用 null。")
         changes = dict(changes)
-        if isinstance(changes.get("schedule"), dict):
-            changes["schedule"] = ScheduleRule.from_dict(changes["schedule"])
         payload_changes = {key: value.to_dict() if isinstance(value, (ScheduleRule, SessionSettings)) else value for key, value in changes.items()}
         payload = dict(plan_id=plan_id, expected_revision=expected_revision, changes=payload_changes)
         if request_payload is not None:
@@ -370,11 +372,6 @@ class ScheduleStore:
             if any(field in changes and changes[field] != getattr(current, field)
                    for field in ("target_kind", "target_binding_id")):
                 raise ScheduleConflict("计划的执行目标类型和原会话不可修改，请新建计划。")
-            if "session_settings" in changes and isinstance(changes["session_settings"], dict):
-                try:
-                    changes["session_settings"] = (current.session_settings or SessionSettings()).merge(changes["session_settings"])
-                except SessionSettingsError as error:
-                    raise ScheduleError(str(error)) from error
             changed = replace(current, **changes, revision=current.revision + 1, updated_at=now)
             schedule_changed = changed.schedule != current.schedule
             enabled_changed = changed.enabled != current.enabled

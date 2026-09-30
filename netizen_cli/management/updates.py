@@ -169,10 +169,9 @@ class UpdateService:
         busy = operation is not None and (not terminal_phase(operation["phase"])
                                          or operation["phase"] == "recovery_required")
         supported = self._restart_supported()
-        return {"current": self._current.as_dict(), "supported": False,
+        return {"current": self._current.as_dict(),
                 "restartSupported": supported, "restartAvailable": supported and not busy,
-                "latest": None, "available": False, "operation": operation,
-                "checkingErrorCode": None, "checkedAt": None}
+                "operation": operation}
 
     def _restart(self, *, installation_id: str) -> dict[str, Any]:
         if not self._restart_supported():

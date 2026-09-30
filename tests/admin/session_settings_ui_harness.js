@@ -36,9 +36,7 @@ const gets = [];
 const posts = [];
 const grant = (id) => ({
   csrfToken: id + "-csrf-" + generation, actionToken: id + "-once-" + generation,
-  target: { resource: "binding", targetId: id, scopeKey: "cli_test:group:oc_group",
-    bindingId: id, nativeThreadId: "native-" + id,
-    settingsRevision: 3, feedbackRevision: 4, contextRevision: 5 },
+  target: { resource: "binding", targetId: id, scopeKey: "cli_test:group:oc_group" },
 });
 const fixtureSession = (id, settings = baseSettings, extra = {}) => ({
   bindingId: id, shortId: id.slice(-8), projectAlias: "netizen",
@@ -48,9 +46,6 @@ const fixtureSession = (id, settings = baseSettings, extra = {}) => ({
   nativeThreadId: "native-" + id, nativeTitle: "<b>Exact Session</b>",
   pointerState: "current", catalogState: "active", updatedAt: 1900000000,
   runtime: { primaryStatus: "idle", primaryStatusResolution: "resolved" },
-  // The editor must use the complete snake_case intent, not this older display projection.
-  turnSettings: { modelId: "display-only", effortId: "display-only", serviceTierId: "display-only" },
-  messageContextMode: settings.message_context_mode,
   sessionSettings: structuredClone(settings), ...extra,
 });
 let serverSessions = [fixtureSession("binding-exact")];
@@ -120,6 +115,8 @@ function assertPageRetained(page) {
 const cases = {
   async entry_and_complete_save() {
     await loadSessions();
+    assert.match(document.querySelector("#sessions-body").textContent,
+      /catch-up · model-one \/ high \/ priority/);
     const page = structuredClone(state.sessionPage);
     const session = state.sessions.items[0];
     const action = structuredClone(session.actions.configure);
@@ -164,12 +161,15 @@ const cases = {
     assert.equal(document.activeElement, configureButton());
     assert.match(status, /已保存/);
     assert.equal(statusError, false);
+    assert.match(document.querySelector("#sessions-body").textContent,
+      /current-only · model-two \/ high \/ default/);
     assertPageRetained(page);
   },
   async inheritance_and_explicit_defaults() {
     serverSessions[0].sessionSettings.turn_settings = null;
     serverSessions[0].sessionSettings.message_context_mode = "current-only";
     await loadSessions();
+    assert.match(document.querySelector("#sessions-body").textContent, /current-only · 继承 Codex/);
     await openFromList();
     assert.equal(field("model").value, "");
     assert(field("effort").disabled);

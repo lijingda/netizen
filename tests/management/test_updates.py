@@ -37,14 +37,45 @@ class MaintenanceTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(result.close)
         return result
 
-    async def test_status_never_offers_package_updates(self) -> None:
+    async def test_status_reports_current_installation_without_dispatching(self) -> None:
         status = await self.service.status()
-        self.assertFalse(status["supported"])
-        self.assertFalse(status["available"])
-        self.assertIsNone(status["latest"])
-        self.assertTrue(status["restartAvailable"])
         self.assertEqual(status["current"]["installationId"], self.current.identity)
+        self.assertTrue(status["restartAvailable"])
         self.executor.launch.assert_not_called()
+
+    async def test_historical_operations_remain_readable_and_unknown_results_block_restart(self) -> None:
+        previous_release = "b" * 64
+        for schema in (1, 2):
+            with self.subTest(schema=schema):
+                operation = {
+                    "schema": schema, "operationId": "e" * 32,
+                    "previousRelease": previous_release, "createdAt": 1, "updatedAt": 2,
+                    "phase": "rolled_back" if schema == 1 else "succeeded", "code": "none",
+                    "target": {"version": "0.9.0", "releaseId": 123,
+                               "installerSha256": "c" * 64, "archiveSha256": "d" * 64},
+                }
+                if schema == 2:
+                    operation.update(kind="restart", target={
+                        "version": "0.9.0", "releaseDigest": previous_release,
+                    })
+                write_operation(self.root, operation)
+                status = await self.service.status()
+                self.assertEqual(status["operation"], operation)
+                self.assertTrue(status["restartAvailable"])
+
+                write_operation(self.root, {**operation, "phase": "restarting"})
+                with self.assertRaisesRegex(UpdateError, "update_already_submitted"):
+                    await self.service.restart(installation_id=self.current.identity)
+                self.service.set_service_ready(True)
+                status = await self.service.status()
+                self.assertEqual(status["operation"]["schema"], schema)
+                self.assertEqual(status["operation"]["target"], operation["target"])
+                self.assertEqual((status["operation"]["phase"], status["operation"]["code"]),
+                                 ("recovery_required", "worker_lost"))
+                self.assertFalse(status["restartAvailable"])
+                with self.assertRaisesRegex(UpdateError, "update_recovery_required"):
+                    await self.service.restart(installation_id=self.current.identity)
+                self.executor.launch.assert_not_called()
 
     async def test_restart_uses_bound_python_and_typed_installation_identity_once(self) -> None:
         operation = await self.service.restart(installation_id=self.current.identity)

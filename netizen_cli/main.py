@@ -249,13 +249,10 @@ class ServiceCore:
                 goal_control = AppServerGoalControl(self._codex)
             except SdkGapCapabilityUnavailable as error:
                 logger.warning("native Goal unavailable: %s", error)
-            if callable(getattr(self._codex, "thread_fork", None)):
-                try:
-                    side_boundary_control = AppServerSideBoundaryControl(self._codex)
-                except SdkGapCapabilityUnavailable as error:
-                    logger.warning("native Side unavailable: %s", error)
-            else:
-                logger.warning("native Side unavailable: AsyncCodex.thread_fork missing")
+            try:
+                side_boundary_control = AppServerSideBoundaryControl(self._codex)
+            except SdkGapCapabilityUnavailable as error:
+                logger.warning("native Side unavailable: %s", error)
             try:
                 thread_delete_control = AppServerThreadDeleteControl(self._codex)
             except SdkGapCapabilityUnavailable as error:
