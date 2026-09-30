@@ -150,66 +150,6 @@ def _canonical_name(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value).lower()
 
 
-def _config_paths(backend: str, prefix: Path, env: Mapping[str, str]) -> set[Path]:
-    """Bounded documented config locations, not a replacement config parser."""
-    home = Path.home()
-    config_home = Path(env.get("XDG_CONFIG_HOME") or home / ".config")
-    if backend == "pip":
-        paths = {home / ".pip/pip.conf", config_home / "pip/pip.conf", prefix / "pip.conf"}
-        paths.add(Path("/etc/pip.conf"))
-        for root in (env.get("XDG_CONFIG_DIRS") or "/etc/xdg").split(os.pathsep):
-            paths.add(Path(root) / "pip/pip.conf")
-        if sys.platform == "darwin":
-            # pip 26.2 also honors XDG data paths on macOS. Keep legacy and
-            # fallback locations in this conservative check across pip versions.
-            paths.update({Path("/Library/Application Support/pip/pip.conf"),
-                          home / "Library/Application Support/pip/pip.conf",
-                          home / ".config/pip/pip.conf"})
-            if env.get("XDG_DATA_HOME"):
-                paths.add(Path(env["XDG_DATA_HOME"]) / "pip/pip.conf")
-            for root in (env.get("XDG_DATA_DIRS") or "").split(os.pathsep):
-                if root:
-                    paths.add(Path(root) / "pip/pip.conf")
-    else:
-        paths = {config_home / "uv/uv.toml", Path("/etc/uv/uv.toml")}
-    return paths
-
-
-def _check_tool_config(backend: str, prefix: Path, env: Mapping[str, str]) -> None:
-    variable = "PIP_CONFIG_FILE" if backend == "pip" else "UV_CONFIG_FILE"
-    explicit = env.get(variable)
-    # pip explicitly documents the null device as disabling all configuration.
-    if backend == "pip" and explicit == os.devnull:
-        return
-    if backend != "pip" and env.get("UV_NO_CONFIG", "").lower() in ("1", "true", "yes"):
-        return
-    if explicit:
-        raise PackageUpdateError(
-            f"{variable} selects custom package configuration; automatic update cannot verify "
-            "its target settings. Use the owning package manager manually."
-        )
-    existing = sorted(str(p) for p in _config_paths(backend, prefix, env) if p.exists())
-    if backend != "pip":
-        for directory in (Path.cwd(), *Path.cwd().parents):
-            config = directory / "uv.toml"
-            if config.exists():
-                existing.append(str(config))
-            project = directory / "pyproject.toml"
-            if project.is_file():
-                try:
-                    settings = tomllib.loads(project.read_text())
-                except (OSError, ValueError) as exc:
-                    raise PackageUpdateError(f"Cannot verify project configuration {project}; update manually.") from exc
-                if "uv" in settings.get("tool", {}):
-                    existing.append(str(project))
-    if existing:
-        raise PackageUpdateError(
-            "Custom package configuration requires manual update in this release: "
-            + ", ".join(existing)
-            + ". Automatic update does not silently ignore indexes, constraints or target settings."
-        )
-
-
 def _check_environment_options(backend: str, env: Mapping[str, str]) -> None:
     if backend == "pip":
         denied_values = (
@@ -294,7 +234,7 @@ def _uv_executable(env: Mapping[str, str]) -> str:
 
 
 def _uv_directory(uv: str, kind: str, env: Mapping[str, str], cwd: Path) -> Path:
-    result = _run([uv, "--no-config", kind, "dir"], env=env, cwd=cwd)
+    result = _run([uv, kind, "dir"], env=env, cwd=cwd)
     _require_success(result, f"uv {kind}-directory query")
     raw = result.stdout.strip()
     if not raw or "\n" in raw or not Path(raw).is_absolute():
@@ -317,7 +257,7 @@ def _reject_uv_cache_environment(prefix: Path, cache_root: Path | None = None) -
 
 
 def _uv_context(uv: str, env: Mapping[str, str], cwd: Path) -> tuple[str, Path, Path]:
-    result = _run([uv, "--no-config", "self", "version", "--output-format", "json"], env=env, cwd=cwd)
+    result = _run([uv, "self", "version", "--output-format", "json"], env=env, cwd=cwd)
     _require_success(result, "uv version query")
     version = _object(result.stdout, "uv version query").get("version")
     if not isinstance(version, str) or not version.strip():
@@ -487,19 +427,18 @@ def prepare_update(
         if selected is None:
             raise PackageUpdateError("Installer identity is absent. Explicitly choose --via pip or --via uv-pip for a self-managed environment, or update manually.")
     _check_environment_options(selected, env)
-    _check_tool_config(selected, prefix, env)
     if selected == "pip":
         if not info.get("pip_available"):
             raise PackageUpdateError("This environment has no pip. Netizen will not install one or choose an unrelated pip; update manually.")
-        overrides.update({"PIP_DISABLE_PIP_VERSION_CHECK": "1", "PIP_CONFIG_FILE": os.devnull})
+        overrides.update({"PIP_DISABLE_PIP_VERSION_CHECK": "1"})
         command = [executable, "-I", "-m", "pip", "install", "--upgrade", "--no-input", DISTRIBUTION]
     elif selected == "uv-pip":
         assert uv is not None
-        command = [uv, "--no-config", "--no-python-downloads", "pip", "install", "--python", executable,
+        command = [uv, "--no-python-downloads", "pip", "install", "--python", executable,
                    "--upgrade", DISTRIBUTION]
     else:
         assert uv is not None
-        command = [uv, "--no-config", "--no-python-downloads", "tool", "upgrade", DISTRIBUTION]
+        command = [uv, "--no-python-downloads", "tool", "upgrade", DISTRIBUTION]
     env.update(overrides)
     if uv is not None:
         paths[uv] = _identity(Path(uv))
