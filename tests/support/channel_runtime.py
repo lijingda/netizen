@@ -490,22 +490,6 @@ class StubRuntime:
             raise self.model_catalog_error
         return self.catalog.resolve(**values)
 
-    async def configure_exact(
-        self,
-        *,
-        binding_id: str,
-        expected_revision: int,
-        settings: BindingTurnSettings | None,
-    ):
-        values = {
-            "binding_id": binding_id,
-            "expected_revision": expected_revision,
-            "settings": settings,
-        }
-        self.configure_settings_calls.append(values)
-        assert self.binding_store is not None
-        return self.binding_store.set_turn_settings(**values)
-
     async def configure_context_exact(
         self,
         *,

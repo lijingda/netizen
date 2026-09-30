@@ -3222,6 +3222,18 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             context_anchor=MessageContextAnchor("om-lower", 1_000),
         )
 
+    async def _configure_feedback(self, binding):
+        return await self.runtime.configure_context_exact(
+            binding_id=binding.id,
+            expected_settings_revision=binding.settings_revision,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
+            settings=binding.turn_settings,
+            task_feedback=BindingTaskFeedback(True, True, False),
+            message_context_mode=binding.message_context_mode,
+            context_anchor=None,
+        )
+
     async def test_thread_summary_reads_exact_id_without_history_or_resume(self) -> None:
         read = AsyncMock(return_value=SimpleNamespace(thread=SimpleNamespace(
             id="native-1", name="Existing empty Thread", preview="",
@@ -3380,10 +3392,15 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         settings = BindingTurnSettings("model", "high", "priority")
 
         name = await self.runtime.rename_exact(first.id, " inactive ")
-        configured = await self.runtime.configure_exact(
+        configured = await self.runtime.configure_context_exact(
             binding_id=first.id,
-            expected_revision=1,
+            expected_settings_revision=1,
+            expected_context_revision=first.context_revision,
+            expected_feedback_revision=first.feedback_revision,
             settings=settings,
+            task_feedback=first.task_feedback,
+            message_context_mode=first.message_context_mode,
+            context_anchor=None,
         )
 
         self.assertEqual(name, "inactive")
@@ -3395,10 +3412,15 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
         configured = BindingTurnSettings("model", "high", "priority")
-        binding = self.store.set_turn_settings(
+        binding = self.store.set_configuration(
             binding_id=binding.id,
-            expected_revision=1,
+            expected_settings_revision=1,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
             settings=configured,
+            task_feedback=binding.task_feedback,
+            message_context_mode=binding.message_context_mode,
+            context_anchor=None,
         )
 
         archived = await self.runtime.archive_exact(binding.id)
@@ -4111,6 +4133,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ThreadLifecycleStateUnknown):
             await self.runtime.capture_submission_admission(binding.id)
+        before = self.store.get(binding.id)
+        with self.assertRaises(ThreadLifecycleStateUnknown):
+            await self._configure_feedback(before)
+        self.assertEqual(self.store.get(binding.id), before)
         self.assertTrue(self.runtime._accepting)
 
     async def test_delete_local_commit_failure_is_binding_local(
@@ -6069,6 +6095,11 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         submission.release_receipt_attempt()
 
+        before = self.store.get(binding.id)
+        with self.assertRaises(ThreadGoalActive):
+            await self._configure_feedback(before)
+        self.assertEqual(self.store.get(binding.id), before)
+
         control.handles[0].finish()
         await self.runtime.wait_idle()
 
@@ -6598,10 +6629,15 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "default",
         )
 
-        configured = await self.runtime.configure_exact(
+        configured = await self.runtime.configure_context_exact(
             binding_id=binding.id,
-            expected_revision=1,
+            expected_settings_revision=1,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
             settings=settings,
+            task_feedback=binding.task_feedback,
+            message_context_mode=binding.message_context_mode,
+            context_anchor=None,
         )
 
         self.assertEqual(configured.turn_settings, settings)
@@ -6645,14 +6681,15 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         first = await self.submit(binding, "first")
 
         with self.assertRaisesRegex(ThreadRunningConfiguration, "不能修改"):
-            await self.runtime.configure_exact(
+            await self.runtime.configure_context_exact(
                 binding_id=binding.id,
-                expected_revision=1,
-                settings=BindingTurnSettings(
-                    "catalog-model",
-                    "dynamic-effort",
-                    "priority-v2",
-                ),
+                expected_settings_revision=1,
+                expected_context_revision=binding.context_revision,
+                expected_feedback_revision=binding.feedback_revision,
+                settings=BindingTurnSettings('catalog-model', 'dynamic-effort', 'priority-v2'),
+                task_feedback=binding.task_feedback,
+                message_context_mode=binding.message_context_mode,
+                context_anchor=None,
             )
 
         self.assertEqual(self.codex.handles[0].steers, [])
@@ -6669,10 +6706,15 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         # Simulate a stale/external persistence race that the Runtime's config
         # gate normally prevents while a Turn is active.
-        persisted = self.store.set_turn_settings(
+        persisted = self.store.set_configuration(
             binding_id=binding.id,
-            expected_revision=1,
+            expected_settings_revision=1,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
             settings=settings,
+            task_feedback=binding.task_feedback,
+            message_context_mode=binding.message_context_mode,
+            context_anchor=None,
         )
 
         steered = await self.submit(persisted, "steer only")
@@ -6751,8 +6793,8 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             self.store,
-            "set_turn_settings",
-            wraps=self.store.set_turn_settings,
+            "set_configuration",
+            wraps=self.store.set_configuration,
         ) as set_settings:
             submission = await self.submit(binding)
 
@@ -6769,14 +6811,15 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         admission = await self.runtime.capture_submission_admission(binding.id)
 
-        configured = await self.runtime.configure_exact(
+        configured = await self.runtime.configure_context_exact(
             binding_id=binding.id,
-            expected_revision=1,
-            settings=BindingTurnSettings(
-                "catalog-model",
-                "dynamic-effort",
-                "priority-v2",
-            ),
+            expected_settings_revision=1,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
+            settings=BindingTurnSettings('catalog-model', 'dynamic-effort', 'priority-v2'),
+            task_feedback=binding.task_feedback,
+            message_context_mode=binding.message_context_mode,
+            context_anchor=None,
         )
 
         with self.assertRaises(SteerRace):
@@ -6819,6 +6862,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.resume_calls, [("native-1", {"include_turns": False})])
         self.assertEqual(self.codex.compact_calls, ["native-1"])
         self.assertTrue(self.runtime.is_compacting(binding.id))
+        before = self.store.get(binding.id)
+        with self.assertRaises(ThreadCompacting):
+            await self._configure_feedback(before)
+        self.assertEqual(self.store.get(binding.id), before)
         with self.assertRaisesRegex(ThreadCompacting, "正在压缩"):
             await self.submit(binding, "must not race compact")
         self.assertEqual(
@@ -7963,6 +8010,37 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.activity.thread_id, submission.thread_id)
         self.assertEqual(outcome.activity.turn_id, submission.turn_id)
         self.assertEqual([step.step for step in outcome.activity.steps], ["verify"])
+
+    async def test_feedback_configuration_invalidates_prepared_submission(self):
+        binding = self.binding()
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        configured = await self._configure_feedback(binding)
+        self.assertEqual(configured.settings_revision, binding.settings_revision)
+        self.assertEqual(configured.context_revision, binding.context_revision)
+        self.assertEqual(configured.feedback_revision, binding.feedback_revision + 1)
+        with self.assertRaises(SteerRace):
+            await self.submit(configured, "stale feedback configuration", admission=admission)
+        self.assertEqual(self.codex.start_kwargs, [])
+
+    async def test_context_configuration_invalidates_prepared_submission(self):
+        binding = self.catch_up_binding()
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        configured = await self.runtime.configure_context_exact(
+            binding_id=binding.id,
+            expected_settings_revision=binding.settings_revision,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
+            settings=binding.turn_settings,
+            task_feedback=binding.task_feedback,
+            message_context_mode=MentionContextMode.CURRENT_ONLY,
+            context_anchor=None,
+        )
+        self.assertIsNone(configured.context_anchor)
+        self.assertEqual(configured.settings_revision, binding.settings_revision)
+        self.assertEqual(configured.feedback_revision, binding.feedback_revision)
+        with self.assertRaises(SteerRace):
+            await self.submit(configured, "stale context configuration", admission=admission)
+        self.assertEqual(self.codex.start_kwargs, [])
 
     async def test_feedback_revision_invalidates_prepared_submission(self) -> None:
         binding = self.binding()

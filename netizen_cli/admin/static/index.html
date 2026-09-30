@@ -88,6 +88,34 @@
       </nav>
     </section>
 
+    <dialog id="session-settings-drawer" class="editor-drawer" aria-labelledby="session-settings-title" aria-describedby="session-settings-identity">
+      <form id="session-settings-editor" class="card-form drawer-form" hidden>
+        <div class="drawer-head"><div><p class="eyebrow">SESSION SETTINGS</p><h3 id="session-settings-title">配置 Session</h3></div><button id="session-settings-close" class="drawer-close" type="button" aria-label="关闭会话配置表单">×</button></div>
+        <div class="drawer-body">
+          <p id="session-settings-identity" class="meta-line"></p>
+          <p class="session-settings-help">只影响之后由 Netizen 启动的任务。选择继承 Codex 时，沿用 Codex 的原生配置。</p>
+          <fieldset id="session-settings-fields">
+            <h4>模型配置</h4>
+            <div class="schedule-form-grid">
+              <label>模型<select id="session-settings-model"><option value="">继承 Codex</option></select></label>
+              <label>推理强度<select id="session-settings-effort" disabled></select></label>
+              <label>速度<select id="session-settings-tier" disabled></select></label>
+              <label id="session-settings-context-field">消息上下文<select id="session-settings-context" aria-describedby="session-settings-context-note"><option value="current-only">当前消息</option><option value="catch-up">补齐未读上下文</option></select></label>
+            </div>
+            <p id="session-settings-context-note" class="session-settings-help"></p>
+            <h4>任务反馈</h4>
+            <div class="defaults-feedback">
+              <label><input id="session-settings-reactions" type="checkbox">表情反馈</label>
+              <label><input id="session-settings-progress" type="checkbox">进度卡片</label>
+              <label><input id="session-settings-completion-mention" type="checkbox">结束时 @ 提醒</label>
+            </div>
+          </fieldset>
+          <p id="session-settings-note" class="session-settings-help" role="status" aria-live="polite"></p>
+        </div>
+        <div class="drawer-footer"><button id="session-settings-cancel" class="drawer-cancel" type="button">取消</button><button id="session-settings-save" type="submit">保存</button></div>
+      </form>
+    </dialog>
+
     <section id="side-topics" class="panel" aria-labelledby="sides-heading" hidden>
       <div class="section-head">
         <div><p class="eyebrow">EPHEMERAL THREADS</p><h2 id="sides-heading">Side Topics</h2></div>

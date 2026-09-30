@@ -220,4 +220,5 @@ def _binding_result(request_id: str, binding: Any) -> dict[str, object]:
         "settingsRevision": binding.settings_revision,
         "messageContextMode": binding.message_context_mode.value,
         "contextRevision": binding.context_revision,
+        "feedbackRevision": binding.feedback_revision,
     }

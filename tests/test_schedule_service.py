@@ -130,7 +130,16 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.store.schedules.get(plan["id"]).session_settings)
         self.assertEqual(plan["effective_session_settings"], SessionSettings.from_binding(source).to_dict())
         self.assertEqual(self.runtime.catalog_calls, 0)
-        changed = self.store.set_turn_settings(binding_id=source.id, expected_revision=source.settings_revision, settings=None)
+        changed = self.store.set_configuration(
+            binding_id=source.id,
+            expected_settings_revision=source.settings_revision,
+            expected_context_revision=source.context_revision,
+            expected_feedback_revision=source.feedback_revision,
+            settings=None,
+            task_feedback=source.task_feedback,
+            message_context_mode=source.message_context_mode,
+            context_anchor=None,
+        )
         viewed = await self.service.manage({"mode": "view", "plan_id": plan["id"]})
         self.assertEqual(viewed["plan"]["effective_session_settings"], SessionSettings.from_binding(changed).to_dict())
         self.assertEqual(viewed["plan"]["revision"], plan["revision"])
@@ -381,7 +390,16 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((plan["chat_id"], plan["project_alias"]), ("explicit-chat", "other"))
         self.assertEqual(self.store.active_binding(source.scope_key).id, active.id)
         self.assertEqual(self.runtime.catalog_calls, 1)
-        self.store.set_turn_settings(binding_id=source.id, expected_revision=source.settings_revision, settings=None)
+        self.store.set_configuration(
+            binding_id=source.id,
+            expected_settings_revision=source.settings_revision,
+            expected_context_revision=source.context_revision,
+            expected_feedback_revision=source.feedback_revision,
+            settings=None,
+            task_feedback=source.task_feedback,
+            message_context_mode=source.message_context_mode,
+            context_anchor=None,
+        )
         self.assertEqual(self.store.schedules.get(plan["id"]).session_settings.to_dict(), expected)
 
     async def test_new_session_defaults_match_catalog_without_overriding_native_inheritance(self):

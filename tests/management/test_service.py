@@ -9,7 +9,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from netizen_cli.bindings import BindingQuery, BindingStore, SideTopicState
+from netizen_cli.bindings import (
+    BindingContextRevisionConflict,
+    BindingFeedbackRevisionConflict,
+    BindingQuery,
+    BindingSettingsRevisionConflict,
+    BindingStore,
+    SideTopicState,
+)
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.codex_runtime import (
     ActiveGoalSnapshot,
@@ -39,6 +46,8 @@ from netizen_cli.domain import (
     GoalOperationState,
     GoalStatus,
     NativeCapability,
+    MentionContextMode,
+    MessageContextAnchor,
     ScopeKind,
 )
 from netizen_cli.management import (
@@ -60,6 +69,8 @@ from netizen_cli.management import (
     classify_native_thread_view,
 )
 from netizen_cli.projects import ProjectRegistry
+from netizen_cli.model_settings import ModelCatalogError
+from netizen_cli.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettingsError
 from netizen_cli.sdk_gap_adapter import GoalControlError, GoalSnapshot
 from netizen_cli.management.service import _project_binding_status
 
@@ -89,9 +100,13 @@ class FakeManagementRuntime:
         self.goal_snapshot_concurrency = 0
         self.goal_snapshot_max_concurrency = 0
 
-    async def configure_exact(self, **values):
+    async def configure_context_exact(self, **values):
         self.calls.append(("configure", values["binding_id"]))
-        return self.store.set_turn_settings(**values)
+        return self.store.set_configuration(**values)
+
+    async def resolve_turn_settings(self, **values):
+        self.calls.append(("resolve-settings", values))
+        return BindingTurnSettings(**values)
 
     async def activate_exact(self, binding_id: str):
         self.calls.append(("activate", binding_id))
@@ -407,6 +422,107 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(tuple(self.runtime.calls), before)
         self.assertEqual(self.store.active_binding(self.scope.key).id, second.id)
+
+    async def _configure_binding(self, binding, **overrides):
+        active = self.store.active_binding(binding.scope_key)
+        return await self.service.configure_exact_binding(**{
+            "target": ExactBindingTarget(binding.scope_key, binding.id, active.id if active else None),
+            "expected_settings_revision": binding.settings_revision,
+            "expected_context_revision": binding.context_revision,
+            "expected_feedback_revision": binding.feedback_revision,
+            "settings": binding.turn_settings,
+            "task_feedback": binding.task_feedback,
+            "message_context_mode": binding.message_context_mode,
+            **overrides,
+        })
+
+    async def test_complete_configuration_updates_inactive_binding_without_switching(self):
+        first = await self._create()
+        current = await self._create()
+        settings = BindingTurnSettings("model", "high", "priority")
+        feedback = BindingTaskFeedback(True, True, False)
+
+        configured = await self._configure_binding(first, settings=settings, task_feedback=feedback)
+
+        self.assertEqual(configured.turn_settings, settings)
+        self.assertEqual(configured.task_feedback, feedback)
+        self.assertEqual((configured.settings_revision, configured.context_revision, configured.feedback_revision), (2, 1, 2))
+        self.assertFalse(configured.active)
+        self.assertEqual(self.store.active_binding(self.scope.key).id, current.id)
+        self.assertEqual(await self._configure_binding(configured), configured)
+
+    async def test_complete_configuration_rejects_each_stale_revision_without_mutation(self):
+        binding = await self._create()
+        before = tuple(self.runtime.calls)
+        for field, error in (
+            ("expected_settings_revision", BindingSettingsRevisionConflict),
+            ("expected_context_revision", BindingContextRevisionConflict),
+            ("expected_feedback_revision", BindingFeedbackRevisionConflict),
+        ):
+            with self.subTest(field=field), self.assertRaises(error):
+                await self._configure_binding(binding, **{field: 2}, task_feedback=BindingTaskFeedback(True, True, False))
+            self.assertEqual(self.store.get(binding.id), binding)
+            self.assertEqual(tuple(self.runtime.calls), before)
+
+    async def test_complete_configuration_rejects_changed_pointer_and_wrong_scope(self):
+        binding = await self._create()
+        stale = ExactBindingTarget(binding.scope_key, binding.id, binding.id)
+        current = await self._create()
+        other = await self._create(self.other_scope)
+        before = tuple(self.runtime.calls)
+        with self.assertRaises(ActivePointerChanged):
+            await self._configure_binding(binding, target=stale)
+        with self.assertRaises(BindingScopeMismatch):
+            await self._configure_binding(binding, target=ExactBindingTarget(other.scope_key, binding.id, other.id))
+        self.assertEqual(tuple(self.runtime.calls), before)
+        self.assertEqual(self.store.active_binding(self.scope.key).id, current.id)
+
+    async def test_complete_configuration_retains_or_clears_exact_catch_up_boundary(self):
+        scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
+        anchor = MessageContextAnchor("om_boundary", 1000)
+        binding = self.store.create_channel_binding(
+            scope=scope, project_alias="test", creator_id="ou_user",
+            message_context_mode=MentionContextMode.CATCH_UP, context_anchor=anchor,
+        )
+        configured = await self._configure_binding(binding, task_feedback=BindingTaskFeedback(True, True, False))
+        self.assertEqual(configured.context_anchor, anchor)
+        self.assertEqual(configured.context_revision, binding.context_revision)
+        cleared = await self._configure_binding(configured, message_context_mode=MentionContextMode.CURRENT_ONLY)
+        self.assertIsNone(cleared.context_anchor)
+        self.assertEqual(cleared.context_revision, binding.context_revision + 1)
+        self.assertEqual(cleared.task_feedback, configured.task_feedback)
+
+    async def test_admin_cannot_enable_catch_up_without_message_boundary(self):
+        for scope in (
+            self.scope,
+            FeishuScope("cli_test", "oc_group", ScopeKind.GROUP),
+            FeishuScope("cli_test", "oc_group", ScopeKind.TOPIC, "omt_topic"),
+        ):
+            with self.subTest(kind=scope.kind):
+                binding = await self._create(scope)
+                before = tuple(self.runtime.calls)
+                with self.assertRaisesRegex(SessionSettingsError, "/config"):
+                    await self._configure_binding(
+                        binding, settings=BindingTurnSettings("model", "high", "priority"),
+                        task_feedback=BindingTaskFeedback(True, True, False), message_context_mode=MentionContextMode.CATCH_UP,
+                    )
+                self.assertEqual(self.store.get(binding.id), binding)
+                self.assertEqual(tuple(self.runtime.calls), before)
+
+    async def test_existing_model_can_save_feedback_when_catalog_is_unavailable(self):
+        settings = BindingTurnSettings("saved-model", "high", "priority")
+        binding = self.store.create_channel_binding(
+            scope=self.scope, project_alias="test", creator_id="ou_user", turn_settings=settings,
+        )
+        with patch.object(self.runtime, "resolve_turn_settings", AsyncMock(side_effect=ModelCatalogError("unavailable"))) as resolve:
+            configured = await self._configure_binding(binding, task_feedback=BindingTaskFeedback(True, True, False))
+            resolve.assert_not_called()
+            with self.assertRaises(ModelCatalogError):
+                await self._configure_binding(configured, settings=BindingTurnSettings("new-model", "high", "priority"))
+            self.assertEqual(self.store.get(binding.id), configured)
+            inherited = await self._configure_binding(configured, settings=None)
+            self.assertIsNone(inherited.turn_settings)
+            self.assertEqual(inherited.task_feedback, configured.task_feedback)
 
     async def test_exact_inactive_rename_and_archive_preserve_other_pointer(self) -> None:
         first = await self._create()

@@ -831,7 +831,16 @@ class ScheduleStorageTest(unittest.TestCase):
         )
         self.assertEqual(SessionSettings.from_binding(binding), copied)
         self.assertEqual(binding.context_anchor, anchor)
-        self.store.set_turn_settings(binding_id=binding.id, expected_revision=binding.settings_revision, settings=None)
+        self.store.set_configuration(
+            binding_id=binding.id,
+            expected_settings_revision=binding.settings_revision,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
+            settings=None,
+            task_feedback=binding.task_feedback,
+            message_context_mode=binding.message_context_mode,
+            context_anchor=None,
+        )
         self.assertEqual(self.schedules.get(plan.plan_id).session_settings, changed.session_settings)
 
     def test_settings_validation_is_atomic_and_tombstone_clears_saved_intent(self):

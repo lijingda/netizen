@@ -2546,62 +2546,6 @@ class CodexRuntime:
             service_tier_id=service_tier_id,
         )
 
-    async def configure_exact(
-        self,
-        *,
-        binding_id: str,
-        expected_revision: int,
-        settings: BindingTurnSettings | None,
-    ) -> ThreadBinding:
-        """Store a validated selection for one exact Binding."""
-
-        if not self._accepting:
-            raise RuntimeClosed("服务正在停止，暂不能修改会话配置。")
-        if binding_id in self._compacting:
-            raise ThreadCompacting(
-                "当前会话正在压缩上下文，完成前不能修改 Model / Effort / Speed。"
-            )
-        if binding_id in self._goals:
-            raise self._goal_slot_error(self._goals[binding_id])
-        active = self._active.get(binding_id)
-        if active is not None:
-            raise ThreadRunningConfiguration(
-                "当前 Turn 正在执行，不能修改 Model / Effort / Speed；"
-                "请等待完成或先发送 /stop。"
-            )
-
-        async with self._lock(binding_id):
-            if not self._accepting:
-                raise RuntimeClosed("服务正在停止，暂不能修改会话配置。")
-            self._guard_no_lifecycle_locked(binding_id)
-            if binding_id in self._compacting:
-                raise ThreadCompacting(
-                    "当前会话正在压缩上下文，完成前不能修改 "
-                    "Model / Effort / Speed。"
-                )
-            binding = self._bindings.get(binding_id)
-            await self._guard_no_goal_locked(binding)
-            binding = self._bindings.get(binding_id)
-            active = self._active.get(binding_id)
-            if active is not None:
-                if active.state is ActiveState.STOPPING:
-                    raise ThreadStopping(
-                        "当前 Turn 正在停止，不能修改 Model / Effort / Speed；"
-                        "若 /stop 曾提示清理失败，请再次发送 /stop 重试。"
-                    )
-                raise ThreadRunningConfiguration(
-                    "当前 Turn 正在执行，不能修改 Model / Effort / Speed；"
-                    "请等待完成或先发送 /stop。"
-                )
-            updated = self._bindings.set_turn_settings(
-                binding_id=binding_id,
-                expected_revision=expected_revision,
-                settings=settings,
-            )
-            if updated.settings_revision != binding.settings_revision:
-                self._advance_admission_revision(binding_id)
-            return updated
-
     async def configure_context_exact(
         self,
         *,

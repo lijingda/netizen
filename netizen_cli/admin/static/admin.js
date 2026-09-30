@@ -1399,18 +1399,10 @@ function wireSessionActions(actions, session) {
     });
   }));
   if (a.activate) actions.append(actionButton("设为当前", () => mutate("/api/v1/sessions/activate", a.activate)));
-  if (a.configure) actions.append(actionButton("配置", async () => {
-    const clear = window.confirm("确定使用默认配置？取消后可输入精确 Model / Effort / Speed ID。");
-    let turnSettings = null;
-    if (!clear) {
-      const modelId = window.prompt("Model ID", session.turnSettings?.modelId || "");
-      const effortId = window.prompt("Effort ID", session.turnSettings?.effortId || "");
-      const serviceTierId = window.prompt("Speed / Service Tier ID", session.turnSettings?.serviceTierId || "");
-      if (!modelId || !effortId || !serviceTierId) return;
-      turnSettings = { modelId, effortId, serviceTierId };
-    }
-    await mutate("/api/v1/sessions/configure", a.configure, { turnSettings });
-  }));
+  if (a.configure) {
+    const button = actionButton("配置", () => openSessionSettingsEditor(session, button));
+    actions.append(button);
+  }
   if (a.rename) actions.append(actionButton("重命名", async () => {
     const name = window.prompt("新的原生会话名称");
     if (name) await mutate("/api/v1/sessions/rename", a.rename, { name });
@@ -1492,6 +1484,137 @@ function rowByIdentity(selector, key, value) {
   return null;
 }
 
+let sessionSettingsEditor = null;
+const sessionSettingsInput = (name) => document.querySelector(`#session-settings-${name}`);
+
+function renderSessionSettingsEditor() {
+  const editor = sessionSettingsEditor;
+  if (!editor) return;
+  renderSessionSettingsFields(sessionSettingsInput, editor.settings, editor.models, editor.contextAvailable);
+  sessionSettingsInput("fields").disabled = editor.loading || editor.saving;
+  sessionSettingsInput("context-field").hidden = editor.privateChat;
+  sessionSettingsInput("context").disabled = editor.privateChat;
+  sessionSettingsInput("context-note").hidden = editor.privateChat;
+  sessionSettingsInput("context-note").textContent = editor.contextAvailable
+    ? "补齐未读上下文会在下次 @ 时带入同一位置未 @ 机器人的成员消息。关闭后，请到飞书 /config 重新开启。"
+    : "开启补齐未读上下文，请到飞书 /config 设置。";
+  const notes = [editor.loading ? "正在读取模型目录…" : "", editor.catalogError, editor.error];
+  if (editor.settings.turn_settings && !editor.models.some((model) => model.id === editor.settings.turn_settings.model_id)) {
+    notes.push("已保存的模型当前不可用，原选择保持不变；可调整其他配置，或显式选择继承 Codex。");
+  }
+  sessionSettingsInput("note").textContent = notes.filter(Boolean).join(" ");
+  sessionSettingsInput("note").classList.toggle("error", Boolean(editor.error));
+  sessionSettingsInput("save").disabled = editor.loading || editor.saving || !editor.action;
+  sessionSettingsInput("save").textContent = editor.saving ? "保存中…" : "保存";
+  sessionSettingsInput("cancel").disabled = editor.saving;
+  sessionSettingsInput("close").disabled = editor.saving;
+  sessionSettingsInput("editor").setAttribute("aria-busy", String(editor.loading || editor.saving));
+}
+
+async function loadSessionSettingsOptions() {
+  const editor = sessionSettingsEditor;
+  if (!editor) return;
+  const serial = ++editor.optionsSerial;
+  editor.loading = true;
+  renderSessionSettingsEditor();
+  try {
+    const data = await api("/api/v1/sessions/options");
+    if (sessionSettingsEditor !== editor || serial !== editor.optionsSerial) return;
+    editor.models = data.models;
+    editor.catalogError = data.model_catalog_error || "";
+  } catch (error) {
+    if (sessionSettingsEditor !== editor || serial !== editor.optionsSerial) return;
+    editor.models = [];
+    editor.catalogError = `${error.message} 模型目录暂未读取，原选择保持不变。`;
+  } finally {
+    if (sessionSettingsEditor === editor && serial === editor.optionsSerial) {
+      editor.loading = false;
+      renderSessionSettingsEditor();
+    }
+  }
+}
+
+function openSessionSettingsEditor(session, returnFocus) {
+  if (sessionSettingsEditor?.saving || !session.actions.configure) return;
+  const base = structuredClone(session.sessionSettings);
+  const privateChat = session.scopeKind === "direct" || session.chatMode === "p2p";
+  sessionSettingsEditor = { session, returnFocus, settings: structuredClone(base), base,
+    action: session.actions.configure, models: [], catalogError: "", error: "",
+    privateChat, contextAvailable: !privateChat && base.message_context_mode === "catch-up",
+    loading: true, saving: false, optionsSerial: 0 };
+  sessionSettingsInput("editor").hidden = false;
+  sessionSettingsInput("identity").textContent = `${session.nativeTitle || "未命名 Session"} · ${session.shortId} · ${session.projectAlias}`;
+  renderSessionSettingsEditor();
+  if (!sessionSettingsInput("drawer").open) sessionSettingsInput("drawer").showModal();
+  document.body.classList.toggle("session-settings-drawer-open", true);
+  sessionSettingsInput("close").focus();
+  const editor = sessionSettingsEditor;
+  loadSessionSettingsOptions().then(() => {
+    if (sessionSettingsEditor === editor && document.activeElement === sessionSettingsInput("close")) {
+      sessionSettingsInput("model").focus();
+    }
+  });
+}
+
+function closeSessionSettingsEditor() {
+  const editor = sessionSettingsEditor;
+  if (!editor || editor.saving) return;
+  sessionSettingsEditor = null;
+  sessionSettingsInput("editor").hidden = true;
+  sessionSettingsInput("drawer").close();
+  document.body.classList.toggle("session-settings-drawer-open", false);
+  const returnFocus = editor.returnFocus?.disabled
+    ? document.querySelector("#sessions [data-refresh]") : editor.returnFocus;
+  returnFocus?.focus();
+}
+
+function changeSessionSettings(field) {
+  const editor = sessionSettingsEditor;
+  if (!editor || editor.loading || editor.saving) return;
+  if (field === "context" && (editor.privateChat
+    || (sessionSettingsInput("context").value === "catch-up" && !editor.contextAvailable))) {
+    renderSessionSettingsEditor();
+    return;
+  }
+  changeSessionSettingsField(sessionSettingsInput, editor.settings, editor.models, field, editor.base.turn_settings);
+  renderSessionSettingsEditor();
+}
+
+async function saveSessionSettings(event) {
+  event.preventDefault();
+  const editor = sessionSettingsEditor;
+  if (!editor || editor.loading || editor.saving || !editor.action) return;
+  const action = editor.action;
+  editor.action = null;
+  editor.session.actions.configure = null;
+  if (editor.returnFocus) editor.returnFocus.disabled = true;
+  editor.saving = true;
+  renderSessionSettingsEditor();
+  setStatus("正在保存会话配置…");
+  let result;
+  try {
+    result = await api("/api/v1/sessions/configure", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actionPayload(action, { sessionSettings: structuredClone(editor.settings) })) });
+  } catch (error) {
+    editor.error = `${error.message} 请关闭表单，刷新 Sessions 后重新打开配置。`;
+    setStatus(editor.error, true);
+    editor.saving = false;
+    renderSessionSettingsEditor();
+    return;
+  }
+  editor.saving = false;
+  closeSessionSettingsEditor();
+  if (await refresh("sessions")) {
+    setStatus(result?.message || "会话配置已保存。");
+    if (!sessionSettingsEditor && state.tab === "sessions") {
+      const row = rowByIdentity("#sessions-body", "bindingId", editor.session.bindingId);
+      Array.from(row?.querySelectorAll("button") || []).find((button) => button.textContent === "配置")?.focus();
+    }
+  } else {
+    setStatus("会话配置已保存，但 Sessions 列表刷新失败，请手动刷新。", true);
+  }
+}
+
 let defaultsEditor = null;
 let defaultsProjects = [];
 let defaultsOffset = 0;
@@ -1533,20 +1656,7 @@ function renderDefaultSettings() {
   if (!editor) return;
   const settings = editor.settings;
   const turn = settings.turn_settings;
-  const model = editor.models.find((item) => item.id === turn?.model_id);
-  scheduleSelectOptions(defaultsInput("model"), [["", "继承 Codex"],
-    ...editor.models.map((item) => [item.id, item.display_name])], turn?.model_id);
-  scheduleSelectOptions(defaultsInput("effort"), (model?.efforts || []).map((item) => [item.id, item.id]), turn?.effort_id);
-  scheduleSelectOptions(defaultsInput("tier"), (model?.service_tiers || []).map((item) => [item.id, item.name || item.id]), turn?.service_tier_id);
-  defaultsInput("effort").disabled = !model;
-  defaultsInput("tier").disabled = !model;
-  defaultsInput("context").value = settings.message_context_mode;
-  for (const option of defaultsInput("context").querySelectorAll("option")) {
-    option.disabled = option.value === "catch-up" && editor.contextAvailable === false;
-  }
-  defaultsInput("reactions").checked = settings.reaction_pulse_enabled;
-  defaultsInput("progress").checked = settings.progress_card_enabled;
-  defaultsInput("completion-mention").checked = settings.completion_mention_enabled;
+  const model = renderSessionSettingsFields(defaultsInput, settings, editor.models, editor.contextAvailable);
   const notes = [editor.loading ? "正在读取配置…" : "", editor.sourceNote, editor.error, editor.catalogError];
   if (turn && !model) notes.push("已保存的模型当前不可用，选择保持不变；可显式选择其他模型。");
   if (editor.contextAvailable === false) notes.push("单聊不支持补齐未读上下文，请使用当前消息。");
@@ -1659,18 +1769,7 @@ function changeDefaultSettings(field) {
   const editor = defaultsEditor;
   if (!editor) return;
   editor.touched = true;
-  const settings = editor.settings;
-  if (field === "model") {
-    const selected = editor.models.find((item) => item.id === defaultsInput("model").value);
-    if (!defaultsInput("model").value) settings.turn_settings = null;
-    else if (selected) settings.turn_settings = { model_id: selected.id,
-      effort_id: selected.default_effort_id, service_tier_id: selected.default_service_tier_id };
-  } else if (field === "effort" && settings.turn_settings) settings.turn_settings.effort_id = defaultsInput("effort").value;
-  else if (field === "tier" && settings.turn_settings) settings.turn_settings.service_tier_id = defaultsInput("tier").value;
-  else if (field === "context") settings.message_context_mode = defaultsInput("context").value;
-  else if (field === "reactions") settings.reaction_pulse_enabled = defaultsInput("reactions").checked;
-  else if (field === "progress") settings.progress_card_enabled = defaultsInput("progress").checked;
-  else if (field === "completion-mention") settings.completion_mention_enabled = defaultsInput("completion-mention").checked;
+  changeSessionSettingsField(defaultsInput, editor.settings, editor.models, field);
   renderDefaultSettings();
 }
 
@@ -2038,25 +2137,47 @@ function scheduleSelectOptions(node, choices, selected) {
   node.value = selected || "";
 }
 
+function renderSessionSettingsFields(input, settings, models, contextAvailable) {
+  const turn = settings.turn_settings;
+  const model = models.find((item) => item.id === turn?.model_id);
+  scheduleSelectOptions(input("model"), [["", "继承 Codex"],
+    ...models.map((item) => [item.id, item.display_name])], turn?.model_id);
+  scheduleSelectOptions(input("effort"), (model?.efforts || []).map((item) => [item.id, item.id]), turn?.effort_id);
+  scheduleSelectOptions(input("tier"), (model?.service_tiers || []).map((item) => [item.id, item.name || item.id]), turn?.service_tier_id);
+  input("effort").disabled = !model;
+  input("tier").disabled = !model;
+  input("context").value = settings.message_context_mode;
+  for (const option of input("context").querySelectorAll("option")) {
+    option.disabled = option.value === "catch-up" && contextAvailable === false;
+  }
+  input("reactions").checked = settings.reaction_pulse_enabled;
+  input("progress").checked = settings.progress_card_enabled;
+  input("completion-mention").checked = settings.completion_mention_enabled;
+  return model;
+}
+
+function changeSessionSettingsField(input, settings, models, field, baseTurn = null) {
+  if (field === "model") {
+    const id = input("model").value;
+    const selected = models.find((item) => item.id === id);
+    if (!id) settings.turn_settings = null;
+    else if (selected) settings.turn_settings = { model_id: selected.id,
+      effort_id: selected.default_effort_id, service_tier_id: selected.default_service_tier_id };
+    else if (id === baseTurn?.model_id) settings.turn_settings = structuredClone(baseTurn);
+  } else if (field === "effort" && settings.turn_settings) settings.turn_settings.effort_id = input("effort").value;
+  else if (field === "tier" && settings.turn_settings) settings.turn_settings.service_tier_id = input("tier").value;
+  else if (field === "context") settings.message_context_mode = input("context").value;
+  else if (field === "reactions") settings.reaction_pulse_enabled = input("reactions").checked;
+  else if (field === "progress") settings.progress_card_enabled = input("progress").checked;
+  else if (field === "completion-mention") settings.completion_mention_enabled = input("completion-mention").checked;
+}
+
 function renderScheduleSessionSettings() {
   const editor = scheduleEditor;
   if (!editor) return;
   const settings = editor.sessionDraft;
   const current = settings.turn_settings;
-  const model = editor.models.find((item) => item.id === current?.model_id);
-  scheduleSelectOptions(scheduleInput("model"), [["", "继承 Codex"],
-    ...editor.models.map((item) => [item.id, item.display_name])], current?.model_id);
-  scheduleSelectOptions(scheduleInput("effort"), (model?.efforts || []).map((item) => [item.id, item.id]), current?.effort_id);
-  scheduleSelectOptions(scheduleInput("tier"), (model?.service_tiers || []).map((item) => [item.id, item.name || item.id]), current?.service_tier_id);
-  scheduleInput("effort").disabled = !model;
-  scheduleInput("tier").disabled = !model;
-  scheduleInput("context").value = settings.message_context_mode;
-  for (const option of scheduleInput("context").querySelectorAll("option")) {
-    option.disabled = option.value === "catch-up" && editor.contextAvailable === false;
-  }
-  scheduleInput("reactions").checked = settings.reaction_pulse_enabled;
-  scheduleInput("progress").checked = settings.progress_card_enabled;
-  scheduleInput("completion-mention").checked = settings.completion_mention_enabled;
+  const model = renderSessionSettingsFields(scheduleInput, settings, editor.models, editor.contextAvailable);
   scheduleInput("session-summary").textContent = scheduleSessionSummary(settings);
   const notes = [];
   if (editor.catalogMessage) notes.push(editor.catalogMessage);
@@ -2106,23 +2227,8 @@ async function loadScheduleSessionOptions() {
 function changeScheduleSessionSettings(field) {
   const editor = scheduleEditor;
   if (!editor) return;
-  const settings = editor.sessionDraft;
   editor.settingsTouched = true;
-  if (field === "model") {
-    const id = scheduleInput("model").value;
-    const selected = editor.models.find((item) => item.id === id);
-    if (!id) settings.turn_settings = null;
-    else if (selected) settings.turn_settings = { model_id: selected.id,
-      effort_id: selected.default_effort_id, service_tier_id: selected.default_service_tier_id };
-    else if (id === editor.sessionBase.turn_settings?.model_id) settings.turn_settings = structuredClone(editor.sessionBase.turn_settings);
-  } else if (field === "effort" && settings.turn_settings) {
-    settings.turn_settings.effort_id = scheduleInput("effort").value;
-  } else if (field === "tier" && settings.turn_settings) {
-    settings.turn_settings.service_tier_id = scheduleInput("tier").value;
-  } else if (field === "context") settings.message_context_mode = scheduleInput("context").value;
-  else if (field === "reactions") settings.reaction_pulse_enabled = scheduleInput("reactions").checked;
-  else if (field === "progress") settings.progress_card_enabled = scheduleInput("progress").checked;
-  else if (field === "completion-mention") settings.completion_mention_enabled = scheduleInput("completion-mention").checked;
+  changeSessionSettingsField(scheduleInput, editor.sessionDraft, editor.models, field, editor.sessionBase.turn_settings);
   invalidateSchedulePreview();
   renderScheduleSessionSettings();
 }
@@ -2743,6 +2849,16 @@ document.querySelector("#projects-next").addEventListener("click", () => refresh
 document.querySelector("#sessions-previous").addEventListener("click", () => moveSessionPage("previous"));
 document.querySelector("#sessions-next").addEventListener("click", () => moveSessionPage("next"));
 document.querySelector("#sides-next").addEventListener("click", () => refresh("side-topics", state.sideCursor));
+sessionSettingsInput("cancel").addEventListener("click", closeSessionSettingsEditor);
+sessionSettingsInput("close").addEventListener("click", closeSessionSettingsEditor);
+sessionSettingsInput("drawer").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeSessionSettingsEditor();
+});
+sessionSettingsInput("editor").addEventListener("submit", saveSessionSettings);
+for (const field of ["model", "effort", "tier", "context", "reactions", "progress", "completion-mention"]) {
+  sessionSettingsInput(field).addEventListener("change", () => changeSessionSettings(field));
+}
 defaultsInput("new").addEventListener("click", () => openDefaultEditor(defaultsTab));
 for (const kind of ["chat", "group_name"]) {
   defaultsInput(`tab-${kind}`).addEventListener("click", () => selectDefaultTab(kind));
