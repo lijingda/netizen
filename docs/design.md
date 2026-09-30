@@ -27,6 +27,39 @@ ephemeral fork，依靠独立话题 route 保留身份，不是普通 Scope/Bind
 [运行与锁](#运行与锁)；请求材料与投递展示分别见[消息输入准备](#消息输入准备)和
 [回复与活动展示](#回复与活动展示)。
 
+### Netizen 与 Codex 的职责边界
+
+Netizen 是 Codex 的 Channel 和管理适配层。它负责把用户意图映射为正确的 SDK 请求，
+保持 exact Scope/Binding/Thread/Turn 身份、调用顺序、输入准入和本地状态，并如实交付
+返回结果；Codex 通过官方 SDK/App Server 拥有原生执行、历史、工具进程和原生生命周期。
+Netizen 调用公开高层 API；现有能力缺口只走已批准的窄 Adapter，继续遵守
+[SDK 适配边界](#sdk-适配边界)的门禁和移除条件。
+
+| 场景 | Netizen 负责 | 交给 Codex 决定 |
+| --- | --- | --- |
+| 用户 `/stop` | 按目标现有生命周期请求停止；普通活动 Turn 先 exact interrupt，再请求对应 Thread 的 terminal cleanup，处理成功、失败及未知结果。 | 中断执行和回收已登记 terminal 的具体机制与时序。 |
+| 服务退出 | 关闭输入准入，按既有 Ordinary Turn、Goal、Side 生命周期请求停止本实例活动，在共同停服预算内尝试关闭 SDK、释放自身资源和锁，记录失败或预算耗尽。 | AppServer 收到请求和关闭连接后，如何结束原生执行及处置工具进程。 |
+| resume 与后续 Turn | 恢复原 Thread ID，按公开返回确认运行、完成、中断、失败或观测未知，维护本轮槽位及用户反馈。 | 原生上下文恢复、调度及 Turn 执行。 |
+
+请求成功只确认对应 SDK 操作的返回，不能扩张为“所有工具进程已经退出”，也不承诺
+服务退出后 terminal 必须继续存活。Netizen 不为这两种结果额外扫描或 signal Codex
+工具进程，不增加保活或托管机制。服务自身的 lifetime lock 不得被工具子进程继承；
+程序更新协调器回收自己创建的包工具进程仍是 Netizen 的部署职责，与 Codex 工具进程分开。
+
+`completed`、`interrupted`、`failed` 都是需要正确处理的原生终态；SDK 异常或无法确认
+的结果不伪造为终态，也不自动重放可能已生效的请求。恢复与重试只使用既有操作契约
+规定的范围和预算；不根据猜测的 AppServer 内部状态增加第二套执行或恢复编排。
+停止请求失败时仍保留既有 stopping/unknown 约束；服务退出在剩余预算内尝试后续收尾，
+失败或预算耗尽时如实记录，不能无限等待或宣称已完成清理。详细规则见
+[失败语义](#失败语义)和[普通 Turn 终态与观测恢复](#普通-turn-终态与观测恢复)。
+
+以上延续 [ADR 0009](adr/0009-use-version-gated-experimental-terminal-cleanup.md)、
+[ADR 0010](adr/0010-correct-stop-and-background-cleanup-semantics.md) 与
+[ADR 0049](adr/0049-bound-turn-observation-and-delegate-thread-removal.md)。它不把
+`/stop` 的请求顺序扩展到 archive/delete：后者继续直接委托 AppServer 移除 Thread，
+不预先 interrupt 或 cleanup。兼容性异常先检查 Netizen 的调用、返回处理和资源归属；
+原生能力是否满足场景单独记录，不能以“适配层正确处理失败”宣称原生能力已经通过。
+
 ### 三条主要执行路径
 
 | 入口 | 执行过程与结果归属 |

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import os
+import select
 import stat
 import sqlite3
 import subprocess
@@ -442,12 +443,21 @@ class MainConfigurationTest(unittest.TestCase):
             close.assert_called_once_with(12345)
             logging.assert_not_called()
 
-    def test_adopted_lifetime_lock_is_cloexec_for_tool_subprocesses(self) -> None:
+    def test_live_tool_subprocess_does_not_retain_adopted_lifetime_lock(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "service.lifetime.lock"
             descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             os.set_inheritable(descriptor, True)
+            lock_probe = [
+                sys.executable,
+                "-c",
+                "import fcntl,os,sys; fd=os.open(sys.argv[1],os.O_RDWR); "
+                "\ntry: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)"
+                "\nexcept BlockingIOError: raise SystemExit(1)"
+                "\nos.close(fd)",
+                str(path),
+            ]
             try:
                 with patch.dict(
                     os.environ,
@@ -463,25 +473,51 @@ class MainConfigurationTest(unittest.TestCase):
                     self.assertNotIn("NETIZEN_LIFETIME_LOCK_FD", os.environ)
                     self.assertNotIn("NETIZEN_LIFETIME_LOCK_FILE", os.environ)
 
-                    probe = subprocess.run(
+                    with subprocess.Popen(
                         [
                             sys.executable,
                             "-c",
                             (
-                                "import os,sys; fd=int(sys.argv[1]); "
+                                "import os,select,sys; fd=int(sys.argv[1]); "
                                 "\ntry: os.fstat(fd)"
-                                "\nexcept OSError: raise SystemExit(0)"
-                                "\nraise SystemExit(1)"
+                                "\nexcept OSError: pass"
+                                "\nelse: raise SystemExit(1)"
+                                "\nprint('no-lock-fd',flush=True)"
+                                "\nready,_,_=select.select([sys.stdin],[],[],15)"
+                                "\nraise SystemExit(0 if ready and sys.stdin.readline() == 'done\\n' else 2)"
                             ),
                             str(descriptor),
                         ],
-                        check=False,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        text=True,
                         close_fds=False,
-                    )
-                self.assertEqual(probe.returncode, 0)
+                    ) as child:
+                        assert child.stdin is not None and child.stdout is not None
+                        try:
+                            ready, _, _ = select.select([child.stdout], [], [], 10)
+                            self.assertTrue(ready, "child did not report its lock descriptors")
+                            self.assertEqual(child.stdout.readline().strip(), "no-lock-fd")
+                            self.assertIsNone(child.poll())
+                            held = subprocess.run(lock_probe, check=False, timeout=5)
+                            self.assertEqual(held.returncode, 1)
+
+                            # Close only: LOCK_UN could hide an inherited open-file description.
+                            os.close(descriptor)
+                            descriptor = -1
+                            released = subprocess.run(lock_probe, check=False, timeout=5)
+                            self.assertEqual(released.returncode, 0)
+                            self.assertIsNone(child.poll(), "child exited before the lock check")
+                            child.stdin.write("done\n")
+                            child.stdin.flush()
+                            self.assertEqual(child.wait(timeout=5), 0)
+                        finally:
+                            if child.poll() is None:
+                                child.kill()
+                            child.wait(timeout=5)
             finally:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-                os.close(descriptor)
+                if descriptor >= 0:
+                    os.close(descriptor)
 
     def test_ready_marker_is_atomic_private_and_removable(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1120,6 +1156,47 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(events.count(event), 1)
         self.assertEqual(core._schedule_mcp.deadline, core._scheduler.deadline)
         self.assertEqual(core._scheduler.deadline, core._management.deadline)
+
+    async def test_shutdown_native_failure_still_closes_sdk_and_local_resources(self) -> None:
+        for failure in ("cleanup_error", "turns_not_idle"):
+            with self.subTest(failure=failure):
+                runtime = SimpleNamespace(
+                    close_admission=Mock(),
+                    interrupt_all=AsyncMock(),
+                    wait_idle=AsyncMock(return_value=False),
+                    cancel_tasks=AsyncMock(),
+                )
+                if failure == "cleanup_error":
+                    runtime.interrupt_all.side_effect = ExceptionGroup(
+                        "native stop failed", [RuntimeError("cleanup failed")]
+                    )
+                store = SimpleNamespace(aclose=AsyncMock())
+                codex = SimpleNamespace(close=AsyncMock())
+                core = ServiceCore(
+                    settings=SimpleNamespace(),  # type: ignore[arg-type]
+                    channel=SimpleNamespace(  # type: ignore[arg-type]
+                        update_policy=lambda **_kwargs: None,
+                    ),
+                    store=store,  # type: ignore[arg-type]
+                    projects=SimpleNamespace(),  # type: ignore[arg-type]
+                    instance_root=Path("/unused/instance"),
+                )
+                core._runtime = runtime  # type: ignore[assignment]
+                core._codex = codex  # type: ignore[assignment]
+
+                with self.assertLogs("netizen_cli.main", level="WARNING"):
+                    await asyncio.wait_for(core.close(), timeout=1)
+                await core.close()
+
+                runtime.close_admission.assert_called_once()
+                runtime.interrupt_all.assert_awaited_once()
+                if failure == "cleanup_error":
+                    runtime.wait_idle.assert_not_awaited()
+                else:
+                    runtime.wait_idle.assert_awaited_once()
+                codex.close.assert_awaited_once()
+                runtime.cancel_tasks.assert_awaited_once()
+                store.aclose.assert_awaited_once()
 
     async def test_shutdown_retries_unfinished_management_close_with_same_deadline(self) -> None:
         for failure in ("timeout", "cancel", "error"):

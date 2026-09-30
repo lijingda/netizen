@@ -79,6 +79,12 @@ their cited ADRs before changing that boundary.
   service, one `FeishuChannel`, one Channel database, and one shared
   `AsyncCodex`. The Channel SDK owns messaging; the official `openai-codex`
   SDK owns native Threads, Turns, history, tools, configuration, and permissions.
+- Keep the [Netizen/Codex responsibility boundary](docs/design.md#netizen-与-codex-的职责边界):
+  Netizen owns exact request identity/order, SDK result handling, admission, and its
+  resources; Codex owns native execution and tool-process lifetime. Preserve the
+  existing interrupt-then-cleanup requests for `/stop` and service shutdown;
+  request success is not proof of process exit or survival. Do not add native
+  lifecycle workarounds merely to make an acceptance probe pass.
 - The in-process Admin Web is a management-only adapter over that same
   application/runtime boundary (ADR 0031). The one-shot Admin deployment process
   for explicit instance restarts is the sole deployment exception
@@ -205,4 +211,7 @@ their cited ADRs before changing that boundary.
   Formal Releases reuse successful CI for the exact main commit; package changes
   require isolated wheel/sdist validation. Synthetic tests do not replace platform/live
   acceptance; historical release-installer evidence does not certify the new CLI.
+- Keep adapter behavior tests distinct from native capability probes. Verify correct
+  handling of SDK success, failure, interruption, and unknown results; preserve actual
+  live failures rather than treating graceful error handling as native capability success.
 - Review the final diff and report checks, results, and material verification gaps.
