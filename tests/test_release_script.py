@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import call, patch
@@ -15,7 +16,9 @@ from scripts.release import (
     dispatch_release_workflow,
     merge_pull_request,
     next_version,
+    needs_version_bump,
     parse_log,
+    release,
     render_notes,
     summarize_rollup,
     validate_explicit_version,
@@ -153,6 +156,43 @@ class BumpTextTest(unittest.TestCase):
             bump_text("x = 1\nx = 1\n", "x = 1", "x = 2")
 
 
+class PreparedVersionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(temporary)
+        self.enterContext(patch("scripts.release.REPOSITORY_ROOT", self.root))
+
+    def write_versions(self, versions: tuple[str, str]) -> None:
+        for (relative_path, template), version in zip(VERSION_FILES, versions):
+            path = self.root / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(template.format(version=version) + "\n")
+
+    def test_previous_version_requires_a_bump(self) -> None:
+        self.write_versions(("0.9.1", "0.9.1"))
+        self.assertTrue(needs_version_bump("v0.9.1", "v0.10.0"))
+
+    def test_prepared_version_reuses_main(self) -> None:
+        self.write_versions(("0.10.0", "0.10.0"))
+        self.assertFalse(needs_version_bump("v0.9.1", "v0.10.0"))
+
+    def test_mixed_and_unexpected_versions_fail_closed(self) -> None:
+        for versions in [("0.9.1", "0.10.0"), ("0.9.2", "0.9.2")]:
+            with self.subTest(versions=versions):
+                self.write_versions(versions)
+                with self.assertRaises(ReleaseError):
+                    needs_version_bump("v0.9.1", "v0.10.0")
+
+    def test_missing_or_duplicate_version_anchors_fail_closed(self) -> None:
+        self.write_versions(("0.10.0", "0.10.0"))
+        path = self.root / VERSION_FILES[0][0]
+        for content in ["", 'version = "0.10.0"\nversion = "0.9.2"\n']:
+            with self.subTest(content=content):
+                path.write_text(content)
+                with self.assertRaises(ReleaseError):
+                    needs_version_bump("v0.9.1", "v0.10.0")
+
+
 class SummarizeRollupTest(unittest.TestCase):
     def test_empty_rollup_is_pending(self) -> None:
         self.assertEqual(summarize_rollup([]), "pending")
@@ -265,6 +305,73 @@ class ReleaseOrchestrationTest(unittest.TestCase):
                 "status,conclusion,url",
             ),
         )
+
+
+class ReleaseCandidateTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.mocks = {}
+        for name in (
+            "require_clean_release_base", "latest_tag", "collect_entries",
+            "repository", "needs_version_bump", "create_bump_pull_request",
+            "wait_for_pull_request_checks", "merge_pull_request",
+            "wait_for_main_ci", "dispatch_release_workflow",
+            "wait_for_release_run", "gh", "git",
+        ):
+            self.mocks[name] = self.enterContext(patch(f"scripts.release.{name}"))
+        self.mocks["latest_tag"].return_value = "v0.9.1"
+        self.mocks["collect_entries"].return_value = [entry("feat: CLI")]
+        self.mocks["repository"].return_value = "lijingda/netizen"
+        self.mocks["create_bump_pull_request"].return_value = 42
+        self.mocks["merge_pull_request"].return_value = "merge-oid"
+        self.mocks["git"].side_effect = lambda *args: (
+            "prepared-main\n" if args == ("rev-parse", "HEAD") else ""
+        )
+        self.mocks["gh"].return_value = json.dumps({"url": "release-url"})
+
+    def test_prepared_candidate_requires_exact_main_ci_before_tagging(self) -> None:
+        self.mocks["needs_version_bump"].return_value = False
+        self.assertEqual(release("v0.10.0"), "release-url")
+        self.mocks["create_bump_pull_request"].assert_not_called()
+        self.mocks["wait_for_pull_request_checks"].assert_not_called()
+        self.mocks["merge_pull_request"].assert_not_called()
+        self.mocks["wait_for_main_ci"].assert_called_once_with("prepared-main")
+        self.assertIn(
+            call("tag", "-a", "v0.10.0", "-m", "Netizen v0.10.0", "prepared-main"),
+            self.mocks["git"].call_args_list,
+        )
+        self.mocks["dispatch_release_workflow"].assert_called_once()
+
+    def test_previous_version_retains_checked_bump_pull_request(self) -> None:
+        self.mocks["needs_version_bump"].return_value = True
+        release("v0.10.0")
+        self.mocks["create_bump_pull_request"].assert_called_once()
+        self.mocks["wait_for_pull_request_checks"].assert_called_once_with(42)
+        self.mocks["merge_pull_request"].assert_called_once_with(42)
+        self.mocks["wait_for_main_ci"].assert_called_once_with("merge-oid")
+        self.assertIn(
+            call("tag", "-a", "v0.10.0", "-m", "Netizen v0.10.0", "merge-oid"),
+            self.mocks["git"].call_args_list,
+        )
+
+    def test_invalid_version_files_stop_before_release_mutations(self) -> None:
+        self.mocks["needs_version_bump"].side_effect = ReleaseError("mixed versions")
+        with self.assertRaises(ReleaseError):
+            release("v0.10.0")
+        self.mocks["create_bump_pull_request"].assert_not_called()
+        self.mocks["wait_for_main_ci"].assert_not_called()
+        self.mocks["git"].assert_called_once_with("tag", "-l", "v0.10.0")
+        self.mocks["dispatch_release_workflow"].assert_not_called()
+
+    def test_prepared_candidate_failed_ci_never_pushes_tag_or_publishes(self) -> None:
+        self.mocks["needs_version_bump"].return_value = False
+        self.mocks["wait_for_main_ci"].side_effect = ReleaseError("CI failed")
+        with self.assertRaises(ReleaseError):
+            release("v0.10.0")
+        self.assertEqual(
+            self.mocks["git"].call_args_list,
+            [call("tag", "-l", "v0.10.0"), call("rev-parse", "HEAD")],
+        )
+        self.mocks["dispatch_release_workflow"].assert_not_called()
 
 
 class ReleaseAnchorTest(unittest.TestCase):

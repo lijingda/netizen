@@ -4,14 +4,14 @@
 The maintainer decides when to release.  This script then performs the whole
 mechanical chain without further human steps: it derives the version from
 conventional commits since the previous tag, renders deterministic release
-notes, opens the version-bump pull request, waits for its required checks,
-merges it, waits for the exact merge commit's main CI, creates and pushes the
+notes, prepares the version through a checked pull request when needed,
+waits for the exact main commit's CI, creates and pushes the
 protected annotated tag, dispatches the release workflow with the notes, and
 follows the workflow to the published release.
 
 The PyPI netizen-cli Trusted Publisher must already authorize this repository,
 release.yml and the published-release environment. The workflow's manual UI
-defaults to a draft; this maintainer-requested full chain explicitly publishes
+defaults to build verification; this maintainer-requested full chain publishes
 the wheel/sdist to PyPI and only then finalizes the GitHub Release (ADR 0076).
 
 Anything needing human judgement fails closed and escalates: a breaking
@@ -53,9 +53,8 @@ LOG_FORMAT = "%H%x1f%s%x1f%B%x1e"
 BUMP_COMMIT_TEMPLATE = "Prepare {tag} release"
 TAG_MESSAGE_TEMPLATE = "Netizen {tag}"
 
-# Each file must contain its anchor exactly once; the release bump rewrites
-# the previous tag's anchor to the new one.  tests/test_release_script.py
-# guards these anchors against drift.
+# Every file must contain exactly one version anchor. All versions must agree
+# on the previous release or the prepared target before any release mutation.
 VERSION_FILES: tuple[tuple[str, str], ...] = (
     ("pyproject.toml", 'version = "{version}"'),
     ("netizen_cli/__init__.py", '__version__ = "{version}"'),
@@ -166,6 +165,34 @@ def bump_text(text: str, old: str, new: str) -> str:
     if count != 1:
         raise ReleaseError(f"expected exactly one {old!r}, found {count}")
     return text.replace(old, new)
+
+
+def needs_version_bump(previous_tag: str, tag: str) -> bool:
+    """Accept only a consistent previous version or fully prepared target."""
+    versions: set[str] = set()
+    for relative_path, template in VERSION_FILES:
+        content = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+        pattern = re.escape(template).replace(
+            re.escape("{version}"), r"(\d+\.\d+\.\d+)"
+        )
+        matches = re.findall(f"^{pattern}$", content, re.MULTILINE)
+        if len(matches) != 1:
+            raise ReleaseError(
+                f"{relative_path}: expected exactly one version anchor, "
+                f"found {len(matches)}"
+            )
+        # Retain the bump's unique textual-anchor gate before creating a branch.
+        anchor = template.format(version=matches[0])
+        bump_text(content, anchor, anchor)
+        versions.add(matches[0])
+    if versions == {previous_tag[1:]}:
+        return True
+    if versions == {tag[1:]}:
+        return False
+    raise ReleaseError(
+        f"version files must all contain {previous_tag[1:]} or {tag[1:]}; "
+        f"found {sorted(versions)}"
+    )
 
 
 def summarize_rollup(rollup: Sequence[Mapping[str, object]]) -> str:
@@ -478,14 +505,19 @@ def release(explicit_version: str | None) -> str:
         derived = True
     if git("tag", "-l", tag).strip():
         raise ReleaseError(f"tag {tag} already exists")
+    bump_required = needs_version_bump(previous_tag, tag)
     notes = render_notes(repository(), previous_tag, tag, entries)
     print(f"→ releasing {tag} (previous {previous_tag})")
 
-    number = create_bump_pull_request(previous_tag, tag, derived, notes)
-    print(f"→ opened pull request #{number}")
-    wait_for_pull_request_checks(number)
-    merge_commit = merge_pull_request(number)
-    print(f"→ merged into {merge_commit}")
+    if bump_required:
+        number = create_bump_pull_request(previous_tag, tag, derived, notes)
+        print(f"→ opened pull request #{number}")
+        wait_for_pull_request_checks(number)
+        merge_commit = merge_pull_request(number)
+        print(f"→ merged into {merge_commit}")
+    else:
+        merge_commit = git("rev-parse", "HEAD").strip()
+        print(f"→ version already prepared on main at {merge_commit}")
     gate = wait_for_main_ci(merge_commit)
     print(f"→ main CI passed: {gate}")
 

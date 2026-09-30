@@ -771,7 +771,9 @@ Immutable Releases、版本 tag 保护及 environment 权限也需单独确认�
 1. 维护者明确决定发布并完成上述外部准备；按实际变更补齐 SDK、浏览器及两平台 live
    验收，明确记录未完成范围。`scripts/release.py` 执行版本推导／指定、notes、版本 PR、
    exact main CI、受保护 annotated tag 与 workflow dispatch 的完整链，不自动响应 push
-   或 tag 发布。运行该脚本意味着请求正式发布，不是只构建或 dry-run。
+   或 tag 发布。两处包版本均已准备为目标版本时复用当前 main，仍等待该精确提交的成功
+   CI；均为上一版本时才创建版本 PR，混合或其他版本在修改前拒绝。
+   运行该脚本意味着请求正式发布，不是只构建或 dry-run。
 2. `release.yml` 只接受显式 workflow_dispatch，核对 exact tag 和同一 main commit 的
    成功 CI；固定 `setuptools==80.9.0`，由 `scripts/build_cli_distribution.py` 先构建
    sdist，再从该 sdist 构建 wheel，生成带 SHA-256 的 `netizen-cli-release.json`。
