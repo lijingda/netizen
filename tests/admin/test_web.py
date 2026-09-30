@@ -13,7 +13,7 @@ from html.parser import HTMLParser
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from netizen_cli.admin.errors import AdminWebError
@@ -38,8 +38,11 @@ from netizen_cli.admin.web import (
 )
 from netizen_cli.bindings import (
     BindingCursor,
+    BindingContextRevisionConflict,
+    BindingFeedbackRevisionConflict,
     BindingInventoryRecord,
     BindingTurnSettings,
+    BindingSettingsRevisionConflict,
     ProjectAggregate,
     ProjectAggregatePage,
     ProjectRecord,
@@ -65,7 +68,8 @@ from netizen_cli.codex_runtime import (
     ThreadSubscriptionState,
     ThreadOccupied,
 )
-from netizen_cli.domain import GoalStatus, ScopeKind
+from netizen_cli.domain import GoalStatus, MentionContextMode, ScopeKind
+from netizen_cli.session_settings import BindingTaskFeedback, SessionSettings
 from netizen_cli.management import (
     BindingStatusProjection,
     ChatLabel,
@@ -99,6 +103,7 @@ class FakeManagement:
 
     def __init__(self, root: Path) -> None:
         self.native_delete_available = True
+        self.defaults = None
         self.calls: list[tuple[str, object]] = []
         self.query_session_calls: list[dict[str, object]] = []
         self.query_side_topic_calls: list[dict[str, object]] = []
@@ -1103,6 +1108,96 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 200)
 
+    async def test_session_configuration_prefills_and_submits_full_settings_with_server_revisions(self):
+        self.runner.open_admission()
+        self.management.lazy = replace(
+            self.management.lazy, settings_revision=3, context_revision=5, feedback_revision=7,
+            task_feedback=BindingTaskFeedback(True, False, False),
+        )
+        session = await self.login()
+        status, _, page = await self.json_get("/api/v1/sessions?inventoryState=lazy", session)
+        self.assertEqual(status, 200, page)
+        item = page["items"][0]
+        self.assertEqual(item["sessionSettings"], SessionSettings.from_binding(self.management.lazy).to_dict())
+        self.assertEqual(item["feedbackRevision"], 7)
+        self.assertNotIn("context_anchor", item["sessionSettings"])
+        settings = SessionSettings(BindingTurnSettings("model", "high", "priority"), BindingTaskFeedback(False, True, True))
+        payload = _action_payload(item["actions"]["configure"], sessionSettings=settings.to_dict())
+
+        status, _, result = await self.json_post("/api/v1/sessions/configure", session, payload)
+
+        self.assertEqual(status, 200, result)
+        values = next(values for name, values in self.management.calls if name == "configure")
+        self.assertEqual(values["target"].binding_id, item["bindingId"])
+        self.assertEqual(values["target"].scope_key, item["scopeKey"])
+        self.assertEqual(values["expected_settings_revision"], 3)
+        self.assertEqual(values["expected_context_revision"], 5)
+        self.assertEqual(values["expected_feedback_revision"], 7)
+        self.assertEqual(values["settings"], settings.turn_settings)
+        self.assertEqual(values["task_feedback"], settings.task_feedback)
+        self.assertEqual(values["message_context_mode"], MentionContextMode.CURRENT_ONLY)
+        status, _, _ = await self.json_post("/api/v1/sessions/configure", session, payload)
+        self.assertEqual(status, 409)
+        self.assertEqual(len([call for call in self.management.calls if call[0] == "configure"]), 1)
+
+    async def test_session_configuration_rejects_partial_settings_and_client_preconditions(self):
+        self.runner.open_admission()
+        session = await self.login()
+        settings = SessionSettings().to_dict()
+        cases = (
+            {"turnSettings": None},
+            {"sessionSettings": None},
+            {"sessionSettings": {"turn_settings": None}},
+            {"sessionSettings": {**settings, "reaction_pulse_enabled": 1}},
+            {"sessionSettings": {**settings, "turn_settings": {"model_id": "partial"}}},
+            {"sessionSettings": {**settings, "context_anchor": "om_forged"}},
+            {"sessionSettings": settings, "expectedFeedbackRevision": 1},
+        )
+        for extra in cases:
+            with self.subTest(extra=extra):
+                status, _, page = await self.json_get("/api/v1/sessions?inventoryState=lazy", session)
+                self.assertEqual(status, 200, page)
+                payload = _action_payload(page["items"][0]["actions"]["configure"], **extra)
+                status, _, result = await self.json_post("/api/v1/sessions/configure", session, payload)
+                self.assertEqual(status, 400, result)
+        self.assertEqual(self.management.calls, [])
+
+    async def test_session_configuration_maps_each_revision_conflict_to_409(self):
+        self.runner.open_admission()
+        session = await self.login()
+        for error in (BindingSettingsRevisionConflict, BindingContextRevisionConflict, BindingFeedbackRevisionConflict):
+            with self.subTest(error=error.__name__):
+                status, _, page = await self.json_get("/api/v1/sessions?inventoryState=lazy", session)
+                self.assertEqual(status, 200, page)
+                payload = _action_payload(page["items"][0]["actions"]["configure"], sessionSettings=SessionSettings().to_dict())
+                with patch.object(self.management, "configure_exact_binding", AsyncMock(side_effect=error("stale"))) as configure:
+                    status, _, result = await self.json_post("/api/v1/sessions/configure", session, payload)
+                    self.assertEqual(status, 409, result)
+                    self.assertEqual(result["code"], "stale_or_conflict")
+                    status, _, _ = await self.json_post("/api/v1/sessions/configure", session, payload)
+                    self.assertEqual(status, 409)
+                    configure.assert_awaited_once()
+
+    async def test_session_options_share_model_catalog_and_require_authentication(self):
+        self.runner.open_admission()
+        options = {"models": [], "model_catalog_error": "暂不可用"}
+        manage = AsyncMock(return_value={**options, "session_settings": SessionSettings().to_dict()})
+        self.management.defaults = SimpleNamespace(manage=manage)
+        status, _, _ = await self.request("GET", "/api/v1/sessions/options")
+        self.assertEqual(status, 401)
+        manage.assert_not_awaited()
+        session = await self.login()
+        status, _, result = await self.json_get("/api/v1/sessions/options", session)
+        self.assertEqual(status, 200, result)
+        self.assertEqual({key: result[key] for key in options}, options)
+        self.assertNotIn("session_settings", result)
+        manage.assert_awaited_once_with({"mode": "options"})
+        status, _, _ = await self.json_get("/api/v1/sessions/options?chat_id=forged", session)
+        self.assertEqual(status, 400)
+        self.management.defaults = None
+        status, _, _ = await self.json_get("/api/v1/sessions/options", session)
+        self.assertEqual(status, 503)
+
     async def test_all_session_and_side_mutation_routes_are_reachable(self) -> None:
         self.runner.open_admission()
         session = await self.login()
@@ -1117,7 +1212,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
 
         cases = [
             ("binding-lazy", "activate", "/api/v1/sessions/activate", {}),
-            ("binding-lazy", "configure", "/api/v1/sessions/configure", {"turnSettings": None}),
+            ("binding-lazy", "configure", "/api/v1/sessions/configure", {"sessionSettings": SessionSettings().to_dict()}),
             ("binding-lazy", "deleteLazy", "/api/v1/sessions/delete-lazy", {}),
             ("binding-native", "rename", "/api/v1/sessions/rename", {"name": "Renamed"}),
             ("binding-native", "archive", "/api/v1/sessions/archive", {}),

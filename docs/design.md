@@ -1596,6 +1596,16 @@ identity 或 Side route identity 等 typed precondition；提交后在锁内重�
 action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact、Side resume 或
 任意筛选结果的批量 native mutation route。
 
+Sessions 的“配置”使用完整会话设置抽屉，回填 Model/Effort/Speed、Reaction Pulse、
+Progress Card、Completion Mention 和消息上下文；单聊不显示上下文选择。它与飞书
+`/config` 复用同一个 Runtime/Store 原子保存入口，grant 同时固定 settings、feedback、
+context 三类 revision；陈旧页面、Scope 或 pointer 变化、运行中 Turn/Goal、compaction
+和未知 lifecycle 均不能部分保存或改投其他 Binding。配置 inactive Binding 不改变 current。
+模型选项复用默认会话配置的目录查询；目录不可用时保留已保存的精确选择，仍可调整其他
+设置或显式改为继承 Codex。只有新的模型选择需要重新校验 live catalog，保留旧选择
+不代表模型已生效或仍可启动。已有 catch-up 可以保留原消息边界或切回 current-only；
+Admin 不构造新边界，新开启 catch-up 继续通过目标飞书会话的 `/config` 完成。
+
 按 [ADR 0073](adr/0073-create-sessions-from-chat-defaults.md)，Admin 可逐条管理精确聊天
 默认配置，以及创建、修改、删除和调整群名规则顺序。它与飞书 `/defaults` 共用同一
 management service 和持久数据，修改沿用 revision 及 action/CSRF 检查；不支持精确配置

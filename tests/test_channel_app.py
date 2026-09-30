@@ -5215,14 +5215,15 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.set_turn_settings(
+        self.store.set_configuration(
             binding_id=binding.id,
-            expected_revision=binding.settings_revision,
-            settings=BindingTurnSettings(
-                "future-model",
-                "ultra",
-                "priority-v2",
-            ),
+            expected_settings_revision=binding.settings_revision,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
+            settings=BindingTurnSettings('future-model', 'ultra', 'priority-v2'),
+            task_feedback=binding.task_feedback,
+            message_context_mode=binding.message_context_mode,
+            context_anchor=None,
         )
 
         await self.app.handle_message(
@@ -5270,14 +5271,15 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.set_turn_settings(
+        self.store.set_configuration(
             binding_id=binding.id,
-            expected_revision=binding.settings_revision,
-            settings=BindingTurnSettings(
-                "future-model",
-                "ultra",
-                "priority-v2",
-            ),
+            expected_settings_revision=binding.settings_revision,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
+            settings=BindingTurnSettings('future-model', 'ultra', 'priority-v2'),
+            task_feedback=binding.task_feedback,
+            message_context_mode=binding.message_context_mode,
+            context_anchor=None,
         )
         self.runtime.model_catalog_error = RuntimeError("catalog down")
 
@@ -5303,14 +5305,15 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new()
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
-        self.store.set_turn_settings(
+        self.store.set_configuration(
             binding_id=binding.id,
-            expected_revision=binding.settings_revision,
-            settings=BindingTurnSettings(
-                "removed-model",
-                "removed-effort",
-                "removed-tier",
-            ),
+            expected_settings_revision=binding.settings_revision,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
+            settings=BindingTurnSettings('removed-model', 'removed-effort', 'removed-tier'),
+            task_feedback=binding.task_feedback,
+            message_context_mode=binding.message_context_mode,
+            context_anchor=None,
         )
 
         await self.app.handle_message(
@@ -8499,10 +8502,15 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
         settings = BindingTurnSettings("future-model", "ultra", "priority-v2")
-        binding = self.store.set_turn_settings(
+        binding = self.store.set_configuration(
             binding_id=binding.id,
-            expected_revision=1,
+            expected_settings_revision=1,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
             settings=settings,
+            task_feedback=binding.task_feedback,
+            message_context_mode=binding.message_context_mode,
+            context_anchor=None,
         )
         await self.app.handle_message(FakeMessage("/config", message_id="om_config"))
         card = self.channel.replies[-1][1]

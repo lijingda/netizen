@@ -78,6 +78,8 @@ from ..bindings import (
     BindingQueryBusy,
     BindingQueryClosed,
     BindingQueryTimeout,
+    BindingContextRevisionConflict,
+    BindingFeedbackRevisionConflict,
     BindingSettingsRevisionConflict,
     BindingTurnSettings,
     ProjectConflict as StoredProjectConflict,
@@ -143,6 +145,7 @@ from ..projects import (
 )
 from ..schedules.models import AmbiguousLocalTime, ScheduleError, resolve_once_local
 from ..defaults import DefaultConfigurationError
+from ..session_settings import SessionSettings, SessionSettingsError
 
 
 logger = logging.getLogger(__name__)
@@ -193,6 +196,8 @@ class AdminActionPreconditions:
     active_binding_id: ExpectedValue[str]
     project_revision: ExpectedValue[int]
     settings_revision: ExpectedValue[int]
+    context_revision: ExpectedValue[int]
+    feedback_revision: ExpectedValue[int]
     native_thread_id: ExpectedValue[str]
     activity_revision: ExpectedValue[int]
     physical_turn_id: ExpectedValue[str]
@@ -489,6 +494,16 @@ class AdminWebApplication:
             return await self._defaults(context)
         if route == ("GET", "/api/v1/sessions"):
             return await self._sessions(context)
+        if route == ("GET", "/api/v1/sessions/options"):
+            _require_query_keys(context.query, set())
+            if self._management.defaults is None:
+                raise AdminWebError(503, "unavailable", "会话配置选项暂不可用。")
+            options = await self._default_manage({"mode": "options"})
+            return _json_response(200, {
+                "requestId": context.request.request_id,
+                "models": options["models"],
+                "model_catalog_error": options["model_catalog_error"],
+            })
         if route == ("GET", "/api/v1/projects/options"):
             return await self._project_options(context)
         if route == ("GET", "/api/v1/runtime-snapshots"):
@@ -1060,6 +1075,8 @@ class AdminWebApplication:
         preconditions = _empty_preconditions(
             active_binding_id=active_expected,
             settings_revision=ExpectedValue.expect(binding.settings_revision),
+            context_revision=ExpectedValue.expect(binding.context_revision),
+            feedback_revision=ExpectedValue.expect(binding.feedback_revision),
             native_thread_id=native_expected,
             activity_revision=ExpectedValue.expect(runtime.activity_revision),
             physical_turn_id=(
@@ -1175,6 +1192,8 @@ class AdminWebApplication:
             "turnSettings": _settings_json(binding.turn_settings),
             "messageContextMode": binding.message_context_mode.value,
             "contextRevision": binding.context_revision,
+            "feedbackRevision": binding.feedback_revision,
+            "sessionSettings": SessionSettings.from_binding(binding).to_dict(),
             "runtime": _runtime_binding_json(status),
             "actions": actions,
         }
@@ -1559,9 +1578,9 @@ class AdminWebApplication:
             context,
             "sessions.configure",
             expected_resource="binding",
-            allowed_extra={"turnSettings"},
+            allowed_extra={"sessionSettings"},
         )
-        settings = await self._validated_settings(payload.get("turnSettings"))
+        settings = SessionSettings.from_dict(payload.get("sessionSettings"))
         preconditions = _grant_preconditions(grant)
         revision = _expected_value(
             preconditions.settings_revision,
@@ -1574,7 +1593,15 @@ class AdminWebApplication:
             self._management.configure_exact_binding(
                 target=_binding_target(grant),
                 expected_settings_revision=revision,
-                settings=settings,
+                expected_context_revision=_expected_value(
+                    preconditions.context_revision, "Binding context revision",
+                ),
+                expected_feedback_revision=_expected_value(
+                    preconditions.feedback_revision, "Binding feedback revision",
+                ),
+                settings=settings.turn_settings,
+                task_feedback=settings.task_feedback,
+                message_context_mode=settings.message_context_mode,
             ),
         )
         return _json_response(
@@ -2513,6 +2540,8 @@ def _empty_preconditions(
     active_binding_id: ExpectedValue[str] | None = None,
     project_revision: ExpectedValue[int] | None = None,
     settings_revision: ExpectedValue[int] | None = None,
+    context_revision: ExpectedValue[int] | None = None,
+    feedback_revision: ExpectedValue[int] | None = None,
     native_thread_id: ExpectedValue[str] | None = None,
     activity_revision: ExpectedValue[int] | None = None,
     physical_turn_id: ExpectedValue[str] | None = None,
@@ -2529,6 +2558,8 @@ def _empty_preconditions(
         active_binding_id or ExpectedValue.dont_check(),
         project_revision or ExpectedValue.dont_check(),
         settings_revision or ExpectedValue.dont_check(),
+        context_revision or ExpectedValue.dont_check(),
+        feedback_revision or ExpectedValue.dont_check(),
         native_thread_id or ExpectedValue.dont_check(),
         activity_revision or ExpectedValue.dont_check(),
         physical_turn_id or ExpectedValue.dont_check(),
@@ -2639,6 +2670,8 @@ def _map_error(error: BaseException) -> AdminWebError | None:
     if isinstance(error, UpdateError):
         mapped = _UPDATE_HTTP_ERRORS.get(error.code)
         return AdminWebError(*mapped) if mapped is not None else None
+    if isinstance(error, SessionSettingsError):
+        return AdminWebError(400, error.code, str(error))
     if isinstance(error, (ValueError, AmbiguousBinding)) and not isinstance(error, ProjectError):
         return AdminWebError(400, "invalid_input", "请求参数无效。")
     if isinstance(
@@ -2652,6 +2685,8 @@ def _map_error(error: BaseException) -> AdminWebError | None:
             ActivePointerChanged,
             BindingScopeMismatch,
             BindingSettingsRevisionConflict,
+            BindingContextRevisionConflict,
+            BindingFeedbackRevisionConflict,
             RuntimeStateChanged,
             StaleProject,
             StoredProjectConflict,

@@ -126,25 +126,40 @@ class BindingStoreTest(unittest.TestCase):
         self.assertEqual(binding.turn_settings, selected)
         self.assertEqual(binding.settings_revision, 1)
 
-        unchanged = self.store.set_turn_settings(
+        unchanged = self.store.set_configuration(
             binding_id=binding.id,
-            expected_revision=1,
+            expected_settings_revision=1,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
             settings=selected,
+            task_feedback=binding.task_feedback,
+            message_context_mode=binding.message_context_mode,
+            context_anchor=None,
         )
         self.assertEqual(unchanged.settings_revision, 1)
 
-        cleared = self.store.set_turn_settings(
+        cleared = self.store.set_configuration(
             binding_id=binding.id,
-            expected_revision=1,
+            expected_settings_revision=1,
+            expected_context_revision=binding.context_revision,
+            expected_feedback_revision=binding.feedback_revision,
             settings=None,
+            task_feedback=binding.task_feedback,
+            message_context_mode=binding.message_context_mode,
+            context_anchor=None,
         )
         self.assertIsNone(cleared.turn_settings)
         self.assertEqual(cleared.settings_revision, 2)
         with self.assertRaises(BindingSettingsRevisionConflict):
-            self.store.set_turn_settings(
+            self.store.set_configuration(
                 binding_id=binding.id,
-                expected_revision=1,
+                expected_settings_revision=1,
+                expected_context_revision=binding.context_revision,
+                expected_feedback_revision=binding.feedback_revision,
                 settings=selected,
+                task_feedback=binding.task_feedback,
+                message_context_mode=binding.message_context_mode,
+                context_anchor=None,
             )
 
     def test_database_rejects_partial_turn_settings(self) -> None:

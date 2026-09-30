@@ -398,7 +398,7 @@ session token 或免登录链接，也不改变管理权限。该凭据不是飞
 十分钟有效期，操作页面过期时需要刷新。
 
 Admin Web 可以管理 inactive/cross-Scope exact Binding，包括创建 Lazy、设为当前、修改
-Turn Settings、重命名、归档、恢复或恢复并设为当前、删除 Lazy、Stop 和 Release，也可
+完整会话配置、重命名、归档、恢复或恢复并设为当前、删除 Lazy、Stop 和 Release，也可
 在 Delete capability 可用时删除 active 或 archived 的原生 Thread。两类删除都需二次确认；
 materialized 删除的确认文案会显示会话、Scope、short ID，并说明原生 Thread、spawned
 descendants、Codex App/CLI 历史与本地 Binding 都会永久消失。它不能发送即时 Prompt、查看完整
@@ -406,6 +406,12 @@ descendants、Codex App/CLI 历史与本地 Binding 都会永久消失。它不�
 范围；但不能在没有 exact 飞书消息边界时新启用 catch-up，也不能把 catch-up 会话从后台
 直接设为 current。页面操作结果未知时应刷新对账，
 不要重放；服务重启或 credential 轮换会注销原 session。
+
+Sessions 的“配置”打开完整会话设置表单，可修改 Model、Effort、Speed、执行中表情反馈、
+进度卡片和结束时 @ 提醒；群聊及群话题还显示消息上下文设置。已有“补齐未读上下文”
+可以保留或关闭，新开启仍需在目标飞书会话发送 `/config`。模型目录暂不可用时，已有
+选择保持不变，仍可调整反馈或显式改为“继承 Codex”。配置只影响之后的任务；正在运行、
+停止、执行 Goal 或压缩上下文的会话暂不能保存。表单失效或保存失败时，重新打开后操作。
 
 Sessions 页的 Project、Scope、会话状态和当前指针均支持多选；同一项取“或”，不同项
 取“且”。默认显示 Active、Lazy 和“状态未确认”；Project 可搜索并包含停用项目。

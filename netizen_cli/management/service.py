@@ -16,11 +16,14 @@ from .chat_labels import ChatLabel, ChatLabelProvider, ChatLabelResolver
 from .coordination import ScopeCoordinator
 from .updates import UpdateService
 from ..bindings import (
+    BindingContextRevisionConflict,
     BindingCursor,
+    BindingFeedbackRevisionConflict,
     BindingInventoryRecord,
     BindingNotFound,
     BindingPage,
     BindingQuery,
+    BindingSettingsRevisionConflict,
     BindingStore,
     BindingTaskFeedback,
     BindingTurnSettings,
@@ -41,6 +44,7 @@ from ..bindings import (
     ThreadBinding,
 )
 from ..codex_runtime import CodexRuntime
+from ..session_settings import SessionSettingsError
 from ..runtime.contracts import (
     ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
@@ -468,19 +472,6 @@ class ManagementRuntimePort:
     @property
     def native_delete_available(self) -> bool:
         return NativeCapability.DELETE in self.__runtime.available_capabilities
-
-    async def configure_exact(
-        self,
-        *,
-        binding_id: str,
-        expected_revision: int,
-        settings: BindingTurnSettings | None,
-    ) -> ThreadBinding:
-        return await self.__runtime.configure_exact(
-            binding_id=binding_id,
-            expected_revision=expected_revision,
-            settings=settings,
-        )
 
     async def configure_context_exact(
         self,
@@ -1723,14 +1714,42 @@ class InstanceManagementService:
         *,
         target: ExactBindingTarget,
         expected_settings_revision: int,
+        expected_context_revision: int,
+        expected_feedback_revision: int,
         settings: BindingTurnSettings | None,
+        task_feedback: BindingTaskFeedback,
+        message_context_mode: MentionContextMode,
     ) -> ThreadBinding:
         async with self._scope_coordinator.hold(target.scope_key):
             binding, _ = self._require_exact(target)
-            return await self._runtime.configure_exact(
+            if binding.settings_revision != expected_settings_revision:
+                raise BindingSettingsRevisionConflict(binding.id)
+            if binding.context_revision != expected_context_revision:
+                raise BindingContextRevisionConflict(binding.id)
+            if binding.feedback_revision != expected_feedback_revision:
+                raise BindingFeedbackRevisionConflict(binding.id)
+            if (
+                binding.message_context_mode is MentionContextMode.CURRENT_ONLY
+                and message_context_mode is MentionContextMode.CATCH_UP
+            ):
+                raise SessionSettingsError(
+                    "开启补齐未读上下文需要飞书消息边界，请在目标会话发送 /config。"
+                )
+            if settings is not None and settings != binding.turn_settings:
+                settings = await self.resolve_turn_settings(
+                    model_id=settings.model_id,
+                    effort_id=settings.effort_id,
+                    service_tier_id=settings.service_tier_id,
+                )
+            return await self._runtime.configure_context_exact(
                 binding_id=binding.id,
-                expected_revision=expected_settings_revision,
+                expected_settings_revision=expected_settings_revision,
+                expected_context_revision=expected_context_revision,
+                expected_feedback_revision=expected_feedback_revision,
                 settings=settings,
+                task_feedback=task_feedback,
+                message_context_mode=message_context_mode,
+                context_anchor=None,
             )
 
     async def rename_exact_binding(

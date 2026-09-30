@@ -1164,49 +1164,6 @@ class BindingStore:
             self.schedules._release_binding(binding_id, binding_removed=False)
         return self.get(binding_id)
 
-    def set_turn_settings(
-        self,
-        *,
-        binding_id: str,
-        expected_revision: int,
-        settings: BindingTurnSettings | None,
-    ) -> ThreadBinding:
-        if expected_revision < 1:
-            raise ValueError("expected settings revision must be positive")
-        values = _settings_values(settings)
-        with self._transaction():
-            row = self._connection.execute(
-                """
-                SELECT model_id, effort_id, service_tier_id, settings_revision
-                FROM bindings
-                WHERE binding_id = ?
-                """,
-                (binding_id,),
-            ).fetchone()
-            if row is None:
-                raise BindingNotFound(binding_id)
-            if row["settings_revision"] != expected_revision:
-                raise BindingSettingsRevisionConflict(binding_id)
-            current = (
-                row["model_id"],
-                row["effort_id"],
-                row["service_tier_id"],
-            )
-            if current == values:
-                return self.get(binding_id)
-            cursor = self._connection.execute(
-                """
-                UPDATE bindings
-                SET model_id = ?, effort_id = ?, service_tier_id = ?,
-                    settings_revision = settings_revision + 1
-                WHERE binding_id = ? AND settings_revision = ?
-                """,
-                (*values, binding_id, expected_revision),
-            )
-            if cursor.rowcount != 1:
-                raise BindingSettingsRevisionConflict(binding_id)
-        return self.get(binding_id)
-
     def set_configuration(
         self,
         *,
