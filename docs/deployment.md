@@ -207,18 +207,9 @@ LaunchAgent 安装、启动和 ready 冒烟，不能用 CI 代替。
 模型提供方、飞书租户能力或服务环境时，只运行受影响的 phase。没有触及这些边界的迭代无需
 运行 live probe。
 
-按[Netizen 与 Codex 的职责边界](design.md#netizen-与-codex-的职责边界)解释 harness 结果：
-
-- 本地行为测试和 SDK synthetic harness 检查 exact 请求归属与顺序、公开返回的处理、
-  停止失败的 stopping/unknown、三种原生终态及后续同一 Thread 的使用，并验证服务在
-  剩余预算内继续尝试 SDK 和自身资源收尾。请求成功不能作为工具进程已退出或必须存活的断言。
-- Live probe 验证固定原生能力在真实环境中的表现。要求正常回复的 smoke/resume 等
-  场景收到 `interrupted` 或 `failed` 时仍保留失败；Netizen 能正确显示该结果不等于
-  原生能力通过，也不能仅据此认定 Netizen 实现错误。记录版本、exact IDs、原始结果和
-  清理范围，不通过反复重跑覆盖首次失败或把失败改记成功。
-- 定位优先检查 Netizen 是否误用接口、误解析返回、重复执行或扩大清理范围。AppServer
-  内部执行不由 Netizen 复制或接管；新兼容处理仍须符合 SDK 适配契约，不能为了探针变绿
-  添加内部状态猜测、进程控制或无界重试。
+按[职责边界](design.md#netizen-与-codex-的职责边界)分别记录适配行为与原生能力结果。
+要求正常回复的 smoke/resume 场景收到 `interrupted` 或 `failed` 时仍记失败，保留首次
+失败的版本、exact IDs、原始返回与清理范围；复验结果另行记录。
 
 已执行的版本、覆盖范围及未覆盖边界统一记录在
 [兼容性结论](#已验证的兼容性结论)；本节维护检查命令与变更触发条件。
@@ -1103,10 +1094,9 @@ lifetime lock 非继承须有独立的实进程证据：exec 子进程未拿到�
 探针验证，不要求为此执行模型；子进程已退出后能获取锁，不能单独证明此前未继承。
 该锁机制证据不替代真实 manager 停服：仍须确认本实例服务退出、manager 不会再拉起
 且 lifetime lock 可获取。
-macOS 的 Codex 后台 terminal 停服观察保留现有 interrupt、terminal cleanup 请求与
-有界 SDK 关闭；terminal 之后继续运行或退出只记录原生/平台行为，不把任一种结果设为
-Netizen 的强制门禁，也不为取得特定结果修改 AppServer 或增加进程托管。缺少锁非继承
-证据时明确记为未验证；测试进程若仍存活，按其预设期限结束并确认清理，不能影响无关进程。
+macOS 停服时核对现有 interrupt、terminal cleanup 与有界 SDK 关闭请求，记录后台
+terminal 继续运行或退出的实际结果，任一种结果均不作为独立通过或失败判据。缺少锁
+非继承证据时明确记为未验证；测试进程须有预设期限，结束后确认清理且不影响无关进程。
 检查 plist、进程 argv/environment、`netizen.log` 和 `launchd.stderr.log` 均不含 App/Admin
 Secret。最后在两平台重跑真实 Codex Thread、steer、cleanup 和 exact-ID resume probes，
 按上述职责分别记录适配行为与原生能力结果；fake launchctl/systemctl 单测不能替代这些真机门禁。
