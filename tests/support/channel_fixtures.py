@@ -24,6 +24,7 @@ from netizen_cli.management import (
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.runtime.contracts import Submission, SubmitDisposition
 from netizen_cli.schedules.models import ScheduleRule
+from netizen_cli.schedules.scheduler import Scheduler
 from netizen_cli.sdk_gap_adapter import GoalSnapshot
 from tests.support.channel_messages import FakeChannel, FakeMessage, FakeMessageHistory
 from tests.support.channel_results import sent_result
@@ -111,7 +112,7 @@ class SideChannelFixture(ChannelFixture):
         task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
     ):
         scope = self.app._scope(message)
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=scope,
             project_alias="test",
             creator_id="ou_owner",
@@ -248,4 +249,10 @@ async def scheduled_channel_fixture():
             fixture_type=ScheduledChannelFixture, history=FakeMessageHistory(),
         ) as fixture:
             fixture.runtime.submit_initial = fixture.submit_initial
-            yield fixture
+            scheduler = Scheduler(store, fixture.runtime, "app", fixture.app.dispatch_scheduled_run,
+                                  wall_clock=lambda: 160.0)
+            fixture.management.schedules.set_refresh_handler(scheduler.refresh)
+            try:
+                yield fixture
+            finally:
+                await scheduler.close()

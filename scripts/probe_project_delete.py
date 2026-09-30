@@ -190,7 +190,8 @@ async def _scenario(
                 raise AssertionError("orphan fixture lost the exact Side identity")
 
         preview = await service.preview_project_delete(
-            alias=label, expected_revision=projects.resolve(label).revision,
+            alias=label,
+            expected_revision=projects.resolve_for_binding(label).revision,
             deadline=asyncio.get_running_loop().time() + 20,
         )
         expected_bindings = 0 if orphan_side else 3

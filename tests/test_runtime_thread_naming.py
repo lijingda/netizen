@@ -137,7 +137,7 @@ class RuntimeThreadNamingTest(unittest.IsolatedAsyncioTestCase):
         self.directory.cleanup()
 
     def new_binding(self):
-        return self.store.create_binding(
+        return self.store.create_channel_binding(
             scope=self.scope, project_alias="test", creator_id="user",
         )
 

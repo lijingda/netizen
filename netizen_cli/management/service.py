@@ -120,10 +120,6 @@ class NativeThreadMissing(ManagementError):
     pass
 
 
-class NativeCatalogInconsistent(ManagementError):
-    pass
-
-
 class RuntimeStateChanged(ManagementError):
     pass
 
@@ -642,15 +638,6 @@ class ManagementRuntimePort:
             previous_binding_id,
             current_binding_id,
         )
-
-    async def is_thread_archived(self, thread_id: str) -> bool:
-        return await self.__runtime.thread_is_archived(thread_id)
-
-    async def thread_catalog_state_exact(
-        self,
-        thread_id: str,
-    ) -> NativeThreadCatalogState:
-        return await self.__runtime.thread_catalog_state(thread_id)
 
     def runtime_snapshot_exact(self, binding_id: str) -> BindingRuntimeSnapshot:
         return self.__runtime.binding_runtime_snapshot(binding_id)
@@ -1655,16 +1642,6 @@ class InstanceManagementService:
             if previous_id == binding.id and current_id is None:
                 await self._runtime.binding_pointer_changed(binding.id, None)
         return archived
-
-    async def delete_current_lazy_binding(
-        self,
-        *,
-        target: CurrentBindingTarget,
-    ) -> ThreadBinding:
-        return await self.delete_current_binding(
-            target=target,
-            expected_native_thread_id=None,
-        )
 
     async def delete_current_binding(
         self,

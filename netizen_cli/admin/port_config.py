@@ -1,4 +1,4 @@
-"""Narrow atomic port writes for explicit installation and first startup."""
+"""Atomic persistence of the Admin port allocated during first startup."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def persist_admin_port(snapshot: ConfigFileSnapshot, port: int) -> None:
     """Preserve all YAML values and refuse a detected concurrent human edit.
 
     The caller retains its listening socket and instance lifetime lock. This
-    deliberately does not acquire the installer lock (the installer may still
+    deliberately does not acquire the CLI maintenance lock (the CLI may still
     be waiting for this startup). Only the previously absent port is added.
     """
 
@@ -69,23 +69,6 @@ def persist_admin_port(snapshot: ConfigFileSnapshot, port: int) -> None:
         raise AdminPortConfigurationError("Admin port allocation requires enabled Admin and absent port")
     # YAML aliases may share this mapping with another key. Updating Admin
     # must not mutate those unrelated values through Python object identity.
-    values = dict(values)
-    loaded["adminWeb"] = values
-    values["port"] = port
-    _write_configuration(snapshot, loaded)
-
-
-def set_admin_port(path: Path, port: int) -> None:
-    """Apply an explicit installer choice, even if Admin is currently disabled."""
-
-    _validate_port(port)
-    snapshot = ConfigFileSnapshot.read(path)
-    loaded = yaml.safe_load(snapshot.content)
-    if not isinstance(loaded, dict):
-        raise AdminPortConfigurationError("configuration root must be a mapping")
-    values = loaded.setdefault("adminWeb", {})
-    if not isinstance(values, dict):
-        raise AdminPortConfigurationError("adminWeb must be a mapping")
     values = dict(values)
     loaded["adminWeb"] = values
     values["port"] = port

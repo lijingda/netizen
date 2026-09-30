@@ -41,7 +41,7 @@ class ProjectDeleteSideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             automatic_thread_naming=False,
         )
         self.scope = FeishuScope("cli_test", "oc_delete", ScopeKind.DIRECT)
-        self.binding = self.store.create_binding(
+        self.binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_owner",
@@ -302,7 +302,7 @@ class ProjectDeleteSideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delete_control.calls, ["native-parent"])
         self.assertEqual(self.side_control.unsubscribe_calls, [created.thread_id])
         with self.assertRaises(UnknownProject):
-            projects.resolve("test")
+            projects.resolve_for_binding("test")
 
     async def test_inflight_ordinary_materialization_stales_both_lazy_deletes(self) -> None:
         await self._assert_inflight_materialization_keeps_native_binding(goal=False)
@@ -315,7 +315,7 @@ class ProjectDeleteSideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         *,
         goal: bool,
     ) -> None:
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=FeishuScope("cli_test", "oc_lazy", ScopeKind.DIRECT),
             project_alias="test",
             creator_id="ou_owner",

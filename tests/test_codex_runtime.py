@@ -664,15 +664,11 @@ def fake_skills() -> tuple[DiscoveredSkill, ...]:
         DiscoveredSkill(
             "code-review",
             "/tmp/code-review/SKILL.md",
-            "Review code",
-            "repo",
             True,
         ),
         DiscoveredSkill(
             "test-triage",
             "/tmp/test-triage/SKILL.md",
-            "Triage tests",
-            "user",
             True,
         ),
     )
@@ -998,6 +994,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.cwd_context = tempfile.TemporaryDirectory()
         self.cwd = Path(self.cwd_context.name)
         self.scope = FeishuScope("cli_test", "oc_side", ScopeKind.DIRECT)
+        self.store.bootstrap_project(alias="test", cwd=str(self.cwd))
 
     async def asyncTearDown(self) -> None:
         try:
@@ -1017,7 +1014,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
         native_thread_id: str = "native-parent",
     ):
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_owner",
@@ -1807,7 +1804,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             reaction_pulse_enabled=True,
             progress_card_enabled=True,
         )
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_owner",
@@ -1863,7 +1860,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_side_creation_rejects_feedback_change_during_resolution(self) -> None:
         self.install_model_catalog()
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_owner",
@@ -1916,7 +1913,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         observer = FakeTurnPlanObserver()
         self.runtime._turn_plan_observer = observer
         feedback = BindingTaskFeedback(progress_card_enabled=True)
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_owner",
@@ -2468,7 +2465,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     observer.next_cursor_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
                 self.runtime._turn_plan_observer = observer
                 feedback = BindingTaskFeedback(progress_card_enabled=True)
-                binding = self.store.create_binding(
+                binding = self.store.create_channel_binding(
                     scope=FeishuScope(
                         "cli_test",
                         f"oc_{mode}",
@@ -2636,6 +2633,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.scope = FeishuScope("cli_test", "oc_release", ScopeKind.DIRECT)
         self.cwd_context = tempfile.TemporaryDirectory()
         self.cwd = Path(self.cwd_context.name)
+        self.store.bootstrap_project(alias="test", cwd=str(self.cwd))
 
     def _new_runtime(self, *, idle_seconds: float) -> CodexRuntime:
         return CodexRuntime(
@@ -2656,7 +2654,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.cwd_context.cleanup()
 
     def binding(self, *, scope: FeishuScope | None = None):
-        return self.store.create_binding(
+        return self.store.create_channel_binding(
             scope=scope or self.scope,
             project_alias="test",
             creator_id="ou_user",
@@ -2781,7 +2779,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.codex.read_statuses.append("notLoaded")
 
         with self.assertRaisesRegex(ThreadReleaseError, "notLoaded"):
-            await self.runtime.release_binding(binding)
+            await self.runtime.release_exact(binding.id)
 
         snapshot = self.runtime.thread_subscription_snapshot(binding.id)
         assert snapshot is not None
@@ -2879,7 +2877,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = await self._complete_turn(self.binding())
         reads_before = len(self.codex.read_calls)
         self.codex.read_gate = asyncio.Event()
-        task = asyncio.create_task(self.runtime.release_binding(binding))
+        task = asyncio.create_task(self.runtime.release_exact(binding.id))
         await self._wait_for_reads(reads_before + 1)
 
         task.cancel()
@@ -2899,7 +2897,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.runtime = self._new_runtime(idle_seconds=10)
         binding = await self._complete_turn(self.binding())
         self.subscription.gate = asyncio.Event()
-        task = asyncio.create_task(self.runtime.release_binding(binding))
+        task = asyncio.create_task(self.runtime.release_exact(binding.id))
         await asyncio.wait_for(self.subscription.entered.wait(), timeout=0.2)
 
         task.cancel()
@@ -2916,7 +2914,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_release_refuses_busy_and_registered_terminal(self) -> None:
         lazy = self.binding()
         self.assertEqual(
-            await self.runtime.release_binding(lazy),
+            await self.runtime.release_exact(lazy.id),
             ReleaseDisposition.NOT_MATERIALIZED,
         )
         running = await self.runtime.submit(
@@ -2927,7 +2925,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
             origin=object(),
         )
         with self.assertRaises(ThreadRunningConfiguration):
-            await self.runtime.release_binding(self.store.get(lazy.id))
+            await self.runtime.release_exact(lazy.id)
         assert running.release_receipt_attempt is not None
         running.release_receipt_attempt()
         self.codex.handles[-1].complete()
@@ -2935,18 +2933,18 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.codex.read_statuses.append("active")
         with self.assertRaises(ThreadReleaseError):
-            await self.runtime.release_binding(self.store.get(lazy.id))
+            await self.runtime.release_exact(lazy.id)
         self.assertEqual(self.inspector.calls, [])
 
         self.inspector.results.append(True)
         with self.assertRaises(ThreadBackgroundTerminalsActive):
-            await self.runtime.release_binding(self.store.get(lazy.id))
+            await self.runtime.release_exact(lazy.id)
         self.assertEqual(self.subscription.calls, [])
         self.assertEqual(self.cleanup.calls, [])
 
         self.inspector.results.append(False)
         self.assertEqual(
-            await self.runtime.release_binding(self.store.get(lazy.id)),
+            await self.runtime.release_exact(lazy.id),
             ReleaseDisposition.RELEASED,
         )
 
@@ -2958,25 +2956,25 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.runtime._compacting[binding.id] = object()
         with self.assertRaises(ThreadCompacting):
-            await self.runtime.release_binding(binding)
+            await self.runtime.release_exact(binding.id)
         self.runtime._compacting.pop(binding.id)
 
         self.runtime._goals[binding.id] = SimpleNamespace(
             state=GoalOperationState.RUNNING
         )
         with self.assertRaises(ThreadGoalActive):
-            await self.runtime.release_binding(binding)
+            await self.runtime.release_exact(binding.id)
         self.runtime._goals.pop(binding.id)
 
         self.runtime._lifecycles[binding.id] = SimpleNamespace(
             state=ThreadLifecycleState.RENAMING
         )
         with self.assertRaises(ThreadLifecycleError):
-            await self.runtime.release_binding(binding)
+            await self.runtime.release_exact(binding.id)
         self.runtime._lifecycles.pop(binding.id)
 
         self.assertEqual(
-            await self.runtime.release_binding(binding),
+            await self.runtime.release_exact(binding.id),
             ReleaseDisposition.RELEASED,
         )
 
@@ -3061,7 +3059,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(self.runtime.thread_subscription_snapshot(binding.id))
         self.assertEqual(
-            await self.runtime.release_binding(binding),
+            await self.runtime.release_exact(binding.id),
             ReleaseDisposition.NOT_SUBSCRIBED,
         )
         await asyncio.sleep(0.02)
@@ -3195,6 +3193,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.scope = FeishuScope("cli_test", "oc_chat", ScopeKind.DIRECT)
         self.cwd_context = tempfile.TemporaryDirectory()
         self.cwd = Path(self.cwd_context.name)
+        self.store.bootstrap_project(alias="test", cwd=str(self.cwd))
 
     async def asyncTearDown(self) -> None:
         try:
@@ -3207,7 +3206,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.cwd_context.cleanup()
 
     def binding(self, scope: FeishuScope | None = None):
-        return self.store.create_binding(
+        return self.store.create_channel_binding(
             scope=scope or self.scope,
             project_alias="test",
             creator_id="ou_user",
@@ -3215,7 +3214,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     def catch_up_binding(self):
         scope = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
-        return self.store.create_binding(
+        return self.store.create_channel_binding(
             scope=scope,
             project_alias="test",
             creator_id="ou_user",
@@ -3364,7 +3363,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.store.assign_native_thread_id(binding.id, "native-1")
         binding = self.store.get(binding.id)
 
-        name = await self.runtime.rename_binding(binding, "  Release   review  ")
+        name = await self.runtime.rename_exact(binding.id, "  Release   review  ")
 
         self.assertEqual(name, "Release review")
         self.assertEqual(
@@ -3402,7 +3401,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             settings=configured,
         )
 
-        archived = await self.runtime.archive_binding(binding)
+        archived = await self.runtime.archive_exact(binding.id)
 
         self.assertEqual(self.codex.archive_calls, ["native-1"])
         self.assertFalse(archived.active)
@@ -3449,7 +3448,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         observer = FakeTurnPlanObserver()
         self.runtime._turn_plan_observer = observer
         self.codex.read_gate = asyncio.Event()
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_user",
@@ -3818,7 +3817,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.codex.archive_errors.append(RuntimeError("lost response"))
 
         with self.assertRaises(ThreadLifecycleStateUnknown):
-            await self.runtime.archive_binding(binding)
+            await self.runtime.archive_exact(binding.id)
 
         self.assertTrue(self.store.get(binding.id).active)
         self.assertEqual(
@@ -3835,7 +3834,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_delete_lazy_binding_never_calls_native_delete(self) -> None:
         binding = self.binding()
 
-        deleted = await self.runtime.delete_binding(binding)
+        deleted = await self.runtime.delete_exact(
+            binding.id,
+            expected_native_thread_id=binding.native_thread_id,
+        )
 
         self.assertEqual(deleted.id, binding.id)
         self.assertEqual(self.delete_control.calls, [])
@@ -3860,7 +3862,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.store.assign_native_thread_id(stale.id, "native-1")
 
         with self.assertRaises(ThreadDeleteTargetChanged):
-            await self.runtime.delete_binding(stale)
+            await self.runtime.delete_exact(
+                stale.id,
+                expected_native_thread_id=stale.native_thread_id,
+            )
 
         self.assertEqual(self.delete_control.calls, [])
         self.assertEqual(self.store.get(stale.id).native_thread_id, "native-1")
@@ -3870,7 +3875,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.store.assign_native_thread_id(binding.id, "native-1")
         binding = self.store.get(binding.id)
 
-        deleted = await self.runtime.delete_binding(binding)
+        deleted = await self.runtime.delete_exact(
+            binding.id,
+            expected_native_thread_id=binding.native_thread_id,
+        )
 
         self.assertEqual(deleted.id, binding.id)
         self.assertEqual(self.delete_control.calls, ["native-1"])
@@ -3938,7 +3946,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(data=[], next_cursor=None),
         ]
 
-        deleted = await self.runtime.delete_binding(binding)
+        deleted = await self.runtime.delete_exact(
+            binding.id,
+            expected_native_thread_id=binding.native_thread_id,
+        )
 
         self.assertEqual(deleted.id, binding.id)
         with self.assertRaises(BindingNotFound):
@@ -3996,7 +4007,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         ]
 
         with self.assertRaisesRegex(ThreadLifecycleError, "仍存在"):
-            await self.runtime.delete_binding(binding)
+            await self.runtime.delete_exact(
+                binding.id,
+                expected_native_thread_id=binding.native_thread_id,
+            )
 
         self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
         self.assertIsNone(self.runtime.lifecycle_state(binding.id))
@@ -4010,7 +4024,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.store.get(binding.id)
         self.codex.resume_errors.append(RuntimeError("must not resume"))
 
-        deleted = await self.runtime.delete_binding(binding)
+        deleted = await self.runtime.delete_exact(
+            binding.id,
+            expected_native_thread_id=binding.native_thread_id,
+        )
 
         self.assertEqual(deleted.id, binding.id)
         self.assertEqual(self.delete_control.calls, ["native-1"])
@@ -4027,7 +4044,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.store.assign_native_thread_id(binding.id, "native-1")
         binding = self.store.get(binding.id)
         self.codex.resume_errors.append(RuntimeError("resume failed"))
-        deleted = await self.runtime.delete_binding(binding)
+        deleted = await self.runtime.delete_exact(
+            binding.id,
+            expected_native_thread_id=binding.native_thread_id,
+        )
 
         self.assertEqual(deleted.id, binding.id)
         self.assertEqual(self.delete_control.calls, ["native-1"])
@@ -4042,7 +4062,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.runtime._thread_delete_control = None
 
         with self.assertRaises(ThreadDeleteUnavailable):
-            await self.runtime.delete_binding(binding)
+            await self.runtime.delete_exact(
+                binding.id,
+                expected_native_thread_id=binding.native_thread_id,
+            )
 
         self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
         self.assertIsNone(self.runtime.lifecycle_state(binding.id))
@@ -4056,7 +4079,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.delete_control.errors.append(RuntimeError("lost response"))
 
         with self.assertRaises(ThreadLifecycleStateUnknown):
-            await self.runtime.delete_binding(binding)
+            await self.runtime.delete_exact(
+                binding.id,
+                expected_native_thread_id=binding.native_thread_id,
+            )
 
         self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
         lifecycle = self.runtime.lifecycle_state(binding.id)
@@ -4073,7 +4099,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.delete_control.errors.append(asyncio.CancelledError())
 
         with self.assertRaises(asyncio.CancelledError):
-            await self.runtime.delete_binding(binding)
+            await self.runtime.delete_exact(
+                binding.id,
+                expected_native_thread_id=binding.native_thread_id,
+            )
 
         self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
         self.assertEqual(
@@ -4161,7 +4190,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         submission = await self.submit(binding)
         binding = self.store.get(binding.id)
 
-        name = await self.runtime.rename_binding(binding, "Running review")
+        name = await self.runtime.rename_exact(binding.id, "Running review")
 
         self.assertEqual(name, "Running review")
         self.assertEqual(
@@ -4174,7 +4203,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_unarchive_uses_archived_inventory_then_activates_binding(self) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
-        self.store.deactivate(scope_key=self.scope.key, binding_id=binding.id)
+        self.store.archive_binding(binding.id)
         binding = self.store.get(binding.id)
         self.codex.thread_list_pages = [
             SimpleNamespace(
@@ -4189,7 +4218,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             )
         ]
 
-        restored = await self.runtime.unarchive_binding(binding)
+        restored = await self.runtime.restore_as_current_exact(binding.id)
 
         self.assertEqual(self.codex.unarchive_calls, ["native-1"])
         self.assertEqual(self.codex.resume_calls, [("native-1", {"include_turns": False})])
@@ -4248,7 +4277,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_unarchive_requires_exact_resume_before_activation(self) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
-        self.store.deactivate(scope_key=self.scope.key, binding_id=binding.id)
+        self.store.archive_binding(binding.id)
         binding = self.store.get(binding.id)
         self.codex.thread_list_pages = [
             SimpleNamespace(
@@ -4259,7 +4288,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.codex.resume_errors.append(RuntimeError("resume failed"))
 
         with self.assertRaises(ThreadLifecycleStateUnknown):
-            await self.runtime.unarchive_binding(binding)
+            await self.runtime.restore_as_current_exact(binding.id)
 
         self.assertEqual(self.codex.unarchive_calls, ["native-1"])
         self.assertEqual(self.codex.resume_calls, [("native-1", {"include_turns": False})])
@@ -4276,7 +4305,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_occupied_thread_after_unarchive_retains_unknown_lifecycle(self) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
-        self.store.deactivate(scope_key=self.scope.key, binding_id=binding.id)
+        self.store.archive_binding(binding.id)
         self.codex.thread_list_pages = [SimpleNamespace(
             data=[SimpleNamespace(id="native-1", name=None, preview="archived")],
             next_cursor=None,
@@ -4992,8 +5021,6 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             DiscoveredSkill(
                 "code-review",
                 "/tmp/other/SKILL.md",
-                "Other",
-                "user",
                 True,
             ),
         )
@@ -5970,7 +5997,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.runtime._turn_plan_observer = observer
         control = FakeGoalControl(self.codex)
         self.runtime._goal_control = control
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_user",
@@ -6197,7 +6224,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_goal_activity_resets_on_physical_turn_rollover(self) -> None:
         control = FakeGoalControl(self.codex)
         self.runtime._goal_control = control
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_user",
@@ -6512,7 +6539,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "dynamic-effort",
             "priority-v2",
         )
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_user",
@@ -6571,7 +6598,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "default",
         )
 
-        configured = await self.runtime.configure_turn_settings(
+        configured = await self.runtime.configure_exact(
             binding_id=binding.id,
             expected_revision=1,
             settings=settings,
@@ -6618,7 +6645,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         first = await self.submit(binding, "first")
 
         with self.assertRaisesRegex(ThreadRunningConfiguration, "不能修改"):
-            await self.runtime.configure_turn_settings(
+            await self.runtime.configure_exact(
                 binding_id=binding.id,
                 expected_revision=1,
                 settings=BindingTurnSettings(
@@ -6665,7 +6692,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "dynamic-effort",
             "priority-v2",
         )
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_user",
@@ -6690,7 +6717,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "dynamic-effort",
             "priority-v2",
         )
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_user",
@@ -6715,7 +6742,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "dynamic-effort",
             "priority-v2",
         )
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_user",
@@ -6742,7 +6769,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         admission = await self.runtime.capture_submission_admission(binding.id)
 
-        configured = await self.runtime.configure_turn_settings(
+        configured = await self.runtime.configure_exact(
             binding_id=binding.id,
             expected_revision=1,
             settings=BindingTurnSettings(
@@ -7903,7 +7930,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         observer = FakeTurnPlanObserver()
         self.runtime._turn_plan_observer = observer
         feedback = BindingTaskFeedback(progress_card_enabled=True)
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_user",
@@ -8142,7 +8169,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_stopping_rejects_prompt_and_stop_uses_interrupt(self) -> None:
         observer = FakeTurnPlanObserver()
         self.runtime._turn_plan_observer = observer
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_user",

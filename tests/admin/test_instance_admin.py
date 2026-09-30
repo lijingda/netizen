@@ -21,7 +21,6 @@ from netizen_cli.admin.port_config import (
     AdminPortConfigurationError,
     ConfigFileSnapshot,
     persist_admin_port,
-    set_admin_port,
 )
 from netizen_cli.admin.transport import AdminHttpState, AdminHttpTransport, Request
 from netizen_cli.admin.web import AdminWebApplication, AdminWebRunner, accepted_authorities, admin_access_urls
@@ -102,20 +101,6 @@ class PortConfigurationTest(unittest.TestCase):
                 self.path.write_text(yaml.safe_dump({"adminWeb": values}))
                 with self.assertRaisesRegex(AdminPortConfigurationError, "absent port"):
                     persist_admin_port(ConfigFileSnapshot.read(self.path), 8788)
-
-    def test_explicit_installer_port_replaces_existing_port_even_when_disabled(self) -> None:
-        self.path.write_text("adminWeb:\n  enabled: false\n  port: 8787\n  accessHost: admin.test\nprojects: {}\n")
-        set_admin_port(self.path, 8890)
-        self.assertEqual(yaml.safe_load(self.path.read_bytes()), {
-            "adminWeb": {"enabled": False, "port": 8890, "accessHost": "admin.test"},
-            "projects": {},
-        })
-
-    def test_explicit_invalid_installer_port_never_changes_configuration(self) -> None:
-        for invalid in (0, -1, 65536, True, None, "8787"):
-            with self.subTest(invalid=invalid), self.assertRaises(AdminPortConfigurationError):
-                set_admin_port(self.path, invalid)
-        self.assertEqual(self.path.read_bytes(), self.content)
 
 
 class AdminPortAllocationTest(unittest.IsolatedAsyncioTestCase):

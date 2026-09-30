@@ -67,13 +67,15 @@ class BindingStoreTest(unittest.TestCase):
             id_factory=lambda: next(ids),
             wall_clock=lambda: self.now,
         )
+        self.store.bootstrap_project(alias="test", cwd="/tmp/test")
+        self.store.bootstrap_project(alias="none", cwd="/tmp/none")
         self.scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
 
     def tearDown(self) -> None:
         self.store.close()
 
     def create(self, project: str = "none"):
-        return self.store.create_binding(
+        return self.store.create_channel_binding(
             scope=self.scope,
             project_alias=project,
             creator_id="ou_user",
@@ -115,7 +117,7 @@ class BindingStoreTest(unittest.TestCase):
 
     def test_turn_settings_are_persistent_atomic_and_revision_guarded(self) -> None:
         selected = BindingTurnSettings("model", "high", "priority")
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="test",
             creator_id="ou_user",
@@ -244,7 +246,7 @@ class BindingStoreTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "booleans"):
             BindingTaskFeedback(reaction_pulse_enabled=1)  # type: ignore[arg-type]
 
-        created_enabled = self.store.create_binding(
+        created_enabled = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="none",
             creator_id="ou_user",
@@ -258,7 +260,7 @@ class BindingStoreTest(unittest.TestCase):
     ) -> None:
         anchor = MessageContextAnchor("om_initial", 1_700_000_000_000)
         with self.assertRaisesRegex(ValueError, "direct"):
-            self.store.create_binding(
+            self.store.create_channel_binding(
                 scope=self.scope,
                 project_alias="none",
                 creator_id="ou_user",
@@ -274,20 +276,20 @@ class BindingStoreTest(unittest.TestCase):
 
         group = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
         with self.assertRaisesRegex(ValueError, "must not have"):
-            self.store.create_binding(
+            self.store.create_channel_binding(
                 scope=group,
                 project_alias="none",
                 creator_id="ou_user",
                 context_anchor=anchor,
             )
         with self.assertRaisesRegex(ValueError, "requires"):
-            self.store.create_binding(
+            self.store.create_channel_binding(
                 scope=group,
                 project_alias="none",
                 creator_id="ou_user",
                 message_context_mode=MentionContextMode.CATCH_UP,
             )
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=group,
             project_alias="none",
             creator_id="ou_user",
@@ -304,7 +306,7 @@ class BindingStoreTest(unittest.TestCase):
             ScopeKind.TOPIC,
             "omt_topic",
         )
-        topic_binding = self.store.create_binding(
+        topic_binding = self.store.create_channel_binding(
             scope=topic,
             project_alias="none",
             creator_id="ou_user",
@@ -324,7 +326,7 @@ class BindingStoreTest(unittest.TestCase):
             )
         self.assertEqual(self.store.get(binding.id).context_anchor, anchor)
 
-        direct = self.store.create_binding(
+        direct = self.store.create_channel_binding(
             scope=self.scope,
             project_alias="none",
             creator_id="ou_user",
@@ -364,7 +366,7 @@ class BindingStoreTest(unittest.TestCase):
         self,
     ) -> None:
         group = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=group,
             project_alias="none",
             creator_id="ou_user",
@@ -444,7 +446,7 @@ class BindingStoreTest(unittest.TestCase):
     def test_context_anchor_commit_is_revision_guarded(self) -> None:
         group = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
         initial = MessageContextAnchor("om_initial", 1_700_000_000_000)
-        binding = self.store.create_binding(
+        binding = self.store.create_channel_binding(
             scope=group,
             project_alias="none",
             creator_id="ou_user",
@@ -468,7 +470,7 @@ class BindingStoreTest(unittest.TestCase):
             )
         self.assertEqual(self.store.get(binding.id), committed)
 
-        current_only = self.store.create_binding(
+        current_only = self.store.create_channel_binding(
             scope=group,
             project_alias="none",
             creator_id="ou_user",
@@ -483,14 +485,14 @@ class BindingStoreTest(unittest.TestCase):
     def test_catch_up_activation_requires_and_commits_a_reset_anchor(self) -> None:
         group = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
         initial = MessageContextAnchor("om_initial", 1_700_000_000_000)
-        catch_up = self.store.create_binding(
+        catch_up = self.store.create_channel_binding(
             scope=group,
             project_alias="none",
             creator_id="ou_user",
             message_context_mode=MentionContextMode.CATCH_UP,
             context_anchor=initial,
         )
-        current_only = self.store.create_binding(
+        current_only = self.store.create_channel_binding(
             scope=group,
             project_alias="none",
             creator_id="ou_user",
@@ -536,23 +538,18 @@ class BindingStoreTest(unittest.TestCase):
         self.assertEqual(self.store.active_binding(self.scope.key).id, first.id)
         self.assertNotEqual(first.id, second.id)
 
-    def test_deactivate_clears_only_the_exact_active_pointer(self) -> None:
+    def test_archive_clears_only_the_exact_active_pointer(self) -> None:
         binding = self.create("test")
         self.store.assign_native_thread_id(binding.id, "native-1")
 
-        deactivated = self.store.deactivate(
-            scope_key=self.scope.key,
-            binding_id=binding.id,
-        )
+        archived = self.store.archive_binding(binding.id)
 
-        self.assertFalse(deactivated.active)
-        self.assertEqual(deactivated.native_thread_id, "native-1")
+        self.assertFalse(archived.active)
+        self.assertEqual(archived.native_thread_id, "native-1")
         self.assertIsNone(self.store.active_binding(self.scope.key))
-        with self.assertRaises(BindingConflict):
-            self.store.deactivate(
-                scope_key=self.scope.key,
-                binding_id=binding.id,
-            )
+        current = self.create("none")
+        self.store.archive_binding(binding.id)
+        self.assertEqual(self.store.active_binding(self.scope.key).id, current.id)
 
     def test_delete_binding_is_atomic_and_clears_active_pointer(self) -> None:
         first = self.create("test")
@@ -600,9 +597,10 @@ class BindingStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "channel.sqlite3"
             first = BindingStore(path, id_factory=lambda: "binding-one")
+            first.bootstrap_project(alias="test", cwd="/tmp/test")
             scope = FeishuScope("cli_test", "oc_chat", ScopeKind.GROUP)
             anchor = MessageContextAnchor("om_initial", 1_700_000_000_000)
-            binding = first.create_binding(
+            binding = first.create_channel_binding(
                 scope=scope,
                 project_alias="test",
                 creator_id="ou_operator",
@@ -786,8 +784,9 @@ class BindingStoreTest(unittest.TestCase):
             path = Path(directory) / "channel.sqlite3"
             ids = iter(("binding-one", "side-one"))
             first = BindingStore(path, id_factory=lambda: next(ids))
+            first.bootstrap_project(alias="test", cwd="/tmp/test")
             scope = FeishuScope("cli_test", "oc_chat", ScopeKind.GROUP)
-            binding = first.create_binding(
+            binding = first.create_channel_binding(
                 scope=scope,
                 project_alias="test",
                 creator_id="ou_operator",
@@ -912,17 +911,17 @@ class BindingStoreTest(unittest.TestCase):
         )
 
     def test_project_registry_rows_are_persistent_and_revision_guarded(self) -> None:
-        first = self.store.bootstrap_project(alias="none", cwd="/tmp/default")
+        first = self.store.bootstrap_project(alias="bootstrap", cwd="/tmp/default")
         self.assertTrue(first.enabled)
         self.assertEqual(first.revision, 1)
-        self.store.bootstrap_project(alias="none", cwd="/tmp/ignored")
-        self.assertEqual(self.store.get_project("none").cwd, "/tmp/default")
+        self.store.bootstrap_project(alias="bootstrap", cwd="/tmp/ignored")
+        self.assertEqual(self.store.get_project("bootstrap").cwd, "/tmp/default")
 
-        project = self.store.register_project(alias="test", cwd="/tmp/test")
+        project = self.store.register_project(alias="registered", cwd="/tmp/test")
         with self.assertRaises(ProjectConflict):
-            self.store.register_project(alias="test", cwd="/tmp/other")
+            self.store.register_project(alias="registered", cwd="/tmp/other")
         disabled = self.store.set_project_enabled(
-            alias="test",
+            alias="registered",
             enabled=False,
             expected_revision=project.revision,
         )
@@ -930,7 +929,7 @@ class BindingStoreTest(unittest.TestCase):
         self.assertEqual(disabled.revision, 2)
         with self.assertRaises(ProjectRevisionConflict):
             self.store.set_project_enabled(
-                alias="test",
+                alias="registered",
                 enabled=True,
                 expected_revision=project.revision,
             )
@@ -1140,6 +1139,8 @@ os._exit(0)
                     project_alias=disabled.alias,
                     creator_id="ou_user",
                 )
+            with self.assertRaises(ScopeNotFound):
+                store.get_scope(missing.key)
             with self.assertRaises(ProjectRevisionConflict):
                 store.create_channel_binding(
                     scope=missing,
@@ -1147,6 +1148,8 @@ os._exit(0)
                     expected_project_revision=project.revision + 1,
                     creator_id="ou_user",
                 )
+            with self.assertRaises(ScopeNotFound):
+                store.get_scope(missing.key)
 
             store._connection.execute(
                 "UPDATE scopes SET app_id = 'tampered' WHERE scope_key = ?",
@@ -1161,19 +1164,25 @@ os._exit(0)
         finally:
             store.close()
 
-    def test_compatibility_create_checks_projects_after_registry_bootstrap(self) -> None:
-        store = BindingStore(id_factory=lambda: "binding")
+    def test_create_requires_registered_project_and_rolls_back_scope(self) -> None:
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
-        try:
-            store.bootstrap_project(alias="known", cwd="/tmp/known")
-            with self.assertRaises(ProjectNotFound):
-                store.create_binding(
-                    scope=scope,
-                    project_alias="missing",
-                    creator_id="ou_user",
-                )
-        finally:
-            store.close()
+        for populated in (False, True):
+            with self.subTest(populated=populated):
+                store = BindingStore(id_factory=lambda: "binding")
+                try:
+                    if populated:
+                        store.bootstrap_project(alias="known", cwd="/tmp/known")
+                    with self.assertRaises(ProjectNotFound):
+                        store.create_channel_binding(
+                            scope=scope,
+                            project_alias="missing",
+                            creator_id="ou_user",
+                        )
+                    with self.assertRaises(ScopeNotFound):
+                        store.get_scope(scope.key)
+                    self.assertEqual(store.list_bindings(scope.key), [])
+                finally:
+                    store.close()
 
 
     def test_file_database_uses_bounded_full_wal_writer_and_hot_wal_is_legacy_readable(
@@ -1357,9 +1366,10 @@ os._exit(0)
             path = Path(raw) / "channel.sqlite3"
             first = BindingStore(path, id_factory=lambda: "binding")
             second = BindingStore(path)
+            first.bootstrap_project(alias="none", cwd="/tmp/none")
             group = FeishuScope("cli_test", "oc_context_race", ScopeKind.GROUP)
             initial = MessageContextAnchor("om_initial", 1_700_000_000_000)
-            binding = first.create_binding(
+            binding = first.create_channel_binding(
                 scope=group,
                 project_alias="none",
                 creator_id="ou_user",

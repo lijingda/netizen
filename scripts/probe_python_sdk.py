@@ -50,7 +50,7 @@ from netizen_cli.turn_plan_observer import (
     PinnedTurnActivityObserver,
     TurnActivityObservation,
 )
-from netizen_cli.turn_files import turn_diff_summary
+from netizen_cli.turn_files import turn_diff_paths
 
 
 _NOT_MATERIALIZED_SUFFIX = (
@@ -1849,19 +1849,8 @@ async def _goal_live(cwd: Path) -> dict[str, Any]:
                 raise AssertionError(
                     "resumed Goal final physical Turn omitted its aggregate diff"
                 )
-            summary = turn_diff_summary(resumed_terminal.turn_diff)
-            file_stats = next(
-                (
-                    item
-                    for item in summary.files
-                    if item.path == goal_file_name
-                ),
-                None,
-            )
             if (
-                file_stats is None
-                or file_stats.additions != 1
-                or file_stats.deletions != 0
+                goal_file_name not in turn_diff_paths(resumed_terminal.turn_diff)
                 or not goal_file.is_file()
                 or goal_file.read_text(encoding="utf-8").strip() != goal_file_content
             ):
@@ -1926,8 +1915,6 @@ async def _goal_live(cwd: Path) -> dict[str, Any]:
             "resumed_logical_turn_id": resumed.id,
             "resumed_physical_terminal_id": resumed_terminal.final_physical_turn_id,
             "resumed_diff_file": goal_file_name,
-            "resumed_diff_additions": file_stats.additions,
-            "resumed_diff_deletions": file_stats.deletions,
             "terminal_status": terminal_goal.status.value,
             "completed_goal_cleared": completed_goal_cleared,
             "observed_turn_ids": goal_turn_ids,

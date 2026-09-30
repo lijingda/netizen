@@ -55,7 +55,7 @@ class ProjectDeletionChannelPublicationTest(unittest.IsolatedAsyncioTestCase):
                         fixture.channel.send = delayed_send
                         publication = asyncio.create_task(fixture.app.handle_message(source))
                         await asyncio.wait_for(entered.wait(), 1)
-                        route = fixture.store.list_side_topics()[0]
+                        route = (await fixture.store.query_side_topics()).items[0].side_topic
                         self.assertEqual(route.state, SideTopicState.CREATING)
                         project = fixture.store.get_project("test")
                         preview = await fixture.management.preview_project_delete(

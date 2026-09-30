@@ -21,6 +21,7 @@ from netizen_cli.runtime.contracts import (
     ActiveState, ActiveTurnSnapshot, Submission, SubmitDisposition, TurnOutcome,
 )
 from netizen_cli.schedules.models import ScheduleRule
+from netizen_cli.schedules.scheduler import Scheduler
 
 from tests.support.channel_messages import (
     FakeChannel,
@@ -87,6 +88,8 @@ class ScheduleScopeMatrixTest(unittest.IsolatedAsyncioTestCase):
                 runtime=ManagementRuntimePort(runtime), scope_coordinator=ScopeCoordinator())
             app = ChannelApplication(app_id="app", channel=channel, runtime=runtime,
                 bindings=store, projects=projects, management=management)
+            scheduler = Scheduler(store, runtime, "app", app.dispatch_scheduled_run)
+            management.schedules.set_refresh_handler(scheduler.refresh)
             scope = FeishuScope("app", "oc_source", kind, topic)
             source = store.create_channel_binding(scope=scope, project_alias="work", creator_id="ou_user")
             store.assign_native_thread_id(source.id, "native-source")
@@ -111,6 +114,7 @@ class ScheduleScopeMatrixTest(unittest.IsolatedAsyncioTestCase):
             try:
                 yield state
             finally:
+                await scheduler.close()
                 await app.close()
                 await management.close()
                 store.close()

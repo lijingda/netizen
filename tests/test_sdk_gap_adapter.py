@@ -144,7 +144,7 @@ for line in sys.stdin:
                     "skills": [
                         {
                             "name": "code-review",
-                            "description": "Review code",
+                            "description": "  Review code  ",
                             "enabled": True,
                             "path": "/tmp/project/.agents/skills/code-review/SKILL.md",
                             "scope": "repo",
@@ -152,7 +152,7 @@ for line in sys.stdin:
                         },
                         {
                             "name": "test-triage",
-                            "description": "Triage tests",
+                            "description": "",
                             "enabled": True,
                             "path": "/tmp/project/.agents/skills/test-triage/SKILL.md",
                             "scope": "repo",
@@ -541,7 +541,7 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
             _close_probe_pipes(process)
             gc.collect()
 
-    async def test_skills_list_uses_one_exact_typed_contract(self) -> None:
+    async def test_skills_list_preserves_invocation_fields_and_exact_request(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             log_path = Path(raw) / "requests.jsonl"
             async with AsyncCodex(_config(log_path)) as codex:
@@ -558,9 +558,13 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
 
         canonical = Path("/tmp/project").resolve()
         self.assertEqual(snapshot.cwd, canonical)
+        # Display metadata cannot reject otherwise valid invocation fields.
         self.assertEqual(
-            tuple(skill.name for skill in snapshot.skills),
-            ("code-review", "test-triage"),
+            tuple((skill.name, skill.path, skill.enabled) for skill in snapshot.skills),
+            (
+                ("code-review", "/tmp/project/.agents/skills/code-review/SKILL.md", True),
+                ("test-triage", "/tmp/project/.agents/skills/test-triage/SKILL.md", True),
+            ),
         )
         request = next(item for item in messages if item.get("method") == "skills/list")
         self.assertEqual(

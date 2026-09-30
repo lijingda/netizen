@@ -12,6 +12,7 @@ from netizen_cli.bindings import BindingQueryBusy, BindingQueryClosed, BindingQu
 from netizen_cli.domain import FeishuScope, ScopeKind, MentionContextMode, MessageContextAnchor
 from netizen_cli.model_settings import ModelCatalog, ModelOption, EffortOption, ServiceTierOption
 from netizen_cli.session_settings import SessionSettings
+from netizen_cli.schedules.scheduler import Scheduler
 from netizen_cli.schedules.service import ScheduleService
 
 
@@ -62,12 +63,20 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         self.now = datetime.fromisoformat("2026-09-08T08:00:00+00:00").timestamp()
         self.chats = ChatInfoFixture()
         self.runtime = RunReaderFixture()
+
+        async def dispatch(claim):
+            self.fail("Management-only fixture must not dispatch new work")
+
+        self.scheduler = Scheduler(self.store, self.runtime, "app", dispatch, lambda: self.now)
         self.service = self.new_service()
+        self.service.set_refresh_handler(self.scheduler.refresh)
         self.first = self.binding("group-a", "native-a")
         self.second = self.binding("group-b", "native-b")
         self.request_sequence = 0
 
     async def asyncTearDown(self):
+        await self.scheduler.close()
+        await self.scheduler.drain(asyncio.get_running_loop().time() + 0.1)
         self.store.close()
         self.directory.cleanup()
 
@@ -984,25 +993,71 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.schedules.get_run(run_id).barrier, "unknown")
 
     async def test_scheduler_refresh_result_is_reused_without_a_second_native_read(self):
-        plan, run_id, _binding = await self.run_fixture()
-        refreshed = []
-
-        async def refresh(plan_id):
-            refreshed.append(plan_id)
-            self.store.schedules.release(run_id)
-            return "completed"
-
-        self.service.set_refresh_handler(refresh)
+        plan, run_id, binding = await self.run_fixture()
+        self.runtime.states[binding.id, "initial-turn"] = "completed"
         invalid = await self.service.manage({"mode": "runs", "plan_id": plan["id"], "cursor": "invalid"})
         self.assertFalse(invalid["ok"])
-        self.assertEqual(refreshed, [])
+        self.assertEqual(self.runtime.calls, [])
         self.assertEqual(self.store.schedules.get_run(run_id).barrier, "held")
         response = await self.service.manage({"mode": "runs", "plan_id": plan["id"]})
         self.assertTrue(response["ok"], response)
-        self.assertEqual(refreshed, [plan["id"]])
-        self.assertEqual(self.runtime.calls, [])
+        self.assertEqual(self.runtime.calls, [(binding.id, "initial-turn")])
         self.assertEqual(response["runs"][0]["status"], "completed")
         self.assertEqual(response["runs"][0]["barrier"], "released")
+
+    async def test_pending_refresh_requires_scheduler_but_standalone_crud_still_works(self):
+        standalone = self.new_service()
+        paused = await self.create(service=standalone, enabled=False)
+        for mode in ("view", "runs"):
+            response = await standalone.manage({"mode": mode, "plan_id": paused["id"]})
+            self.assertTrue(response["ok"], response)
+        plan, run_id, _binding = await self.run_fixture()
+        before = self.store.schedules.get_run(run_id)
+        for mode in ("view", "runs"):
+            response = await standalone.manage({"mode": mode, "plan_id": plan["id"]})
+            self.assertFalse(response["ok"], response)
+            self.assertEqual(response["error"]["code"], "unavailable")
+        self.assertEqual(self.store.schedules.get_run(run_id), before)
+        self.assertEqual(self.runtime.calls, [])
+
+    async def test_refresh_restores_running_barrier_and_rechecks_only_when_next_due(self):
+        await self.scheduler.recover()
+        plan, run_id, binding = await self.run_fixture()
+        self.store.schedules.set_run(run_id, barrier="unknown", error_code="read_unavailable")
+        response = await self.service.manage({"mode": "view", "plan_id": plan["id"]})
+        self.assertTrue(response["ok"], response)
+        self.assertEqual(response["plan"]["execution"]["status"], "inProgress")
+        recovered = self.store.schedules.get_run(run_id)
+        self.assertEqual((recovered.barrier, recovered.error_code), ("held", None))
+        self.assertEqual(self.runtime.calls, [(binding.id, "initial-turn")])
+        self.scheduler.start()
+        self.now += 30
+        self.assertEqual(await self.scheduler.tick(), 0)
+        self.assertEqual(self.runtime.calls, [(binding.id, "initial-turn")])
+        self.now += 30
+        self.assertEqual(await self.scheduler.tick(), 0)
+        self.assertEqual(self.runtime.calls, [(binding.id, "initial-turn")] * 2)
+        self.assertEqual(self.store.schedules.get_run(run_id).barrier, "held")
+        self.assertEqual(self.store.schedules.list_runs(plan["id"], limit=1)[0].error_code, "skipped_busy")
+
+    async def test_cancelled_management_refresh_preserves_unknown_without_second_read(self):
+        plan, run_id, binding = await self.run_fixture()
+        entered = asyncio.Event()
+
+        async def blocked_reader(binding_id, turn_id, *, deadline):
+            self.runtime.calls.append((binding_id, turn_id))
+            entered.set()
+            await asyncio.Event().wait()
+
+        self.runtime.read_scheduled_turn = blocked_reader
+        task = asyncio.create_task(self.service.manage({"mode": "view", "plan_id": plan["id"]}))
+        await asyncio.wait_for(entered.wait(), 1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        saved = self.store.schedules.get_run(run_id)
+        self.assertEqual((saved.barrier, saved.error_code), ("unknown", "read_cancelled"))
+        self.assertEqual(self.runtime.calls, [(binding.id, "initial-turn")])
 
 
 if __name__ == "__main__":

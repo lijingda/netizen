@@ -293,8 +293,12 @@ class ProjectRegistryTest(unittest.TestCase):
                     projects={"test": project},
                 )
 
-                self.assertEqual(registry.resolve("test").cwd, project.resolve())
-                self.assertEqual(registry.aliases(), ("test",))
+                self.assertEqual(
+                    registry.resolve_for_binding("test").cwd, project.resolve()
+                )
+                self.assertEqual(
+                    tuple(project.alias for project in registry.list()), ("test",)
+                )
             finally:
                 store.close()
 
@@ -315,9 +319,9 @@ class ProjectRegistryTest(unittest.TestCase):
                     project_root=root,
                     projects={},
                 )
-                self.assertEqual(registry.aliases(), ())
+                self.assertEqual(registry.list(), ())
                 with self.assertRaises(UnknownProject):
-                    registry.resolve("missing")
+                    registry.resolve_for_binding("missing")
             finally:
                 store.close()
 
@@ -340,7 +344,7 @@ class ProjectRegistryTest(unittest.TestCase):
                 )
 
                 self.assertEqual(registry.project_root, real.resolve())
-                self.assertEqual(registry.aliases(), ())
+                self.assertEqual(registry.list(), ())
             finally:
                 store.close()
 

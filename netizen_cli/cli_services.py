@@ -598,10 +598,6 @@ class ServiceManager:
                 raise ServiceError(f"service did not fully exit within {timeout:g}s; no further action performed")
             time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
 
-    def restart(self, root: Path) -> ServiceStatus:
-        self.stop(root)
-        return self.start(root)
-
     def remove(self, root: Path) -> None:
         root = self._root(root)
         if self.inspect(root) is None:

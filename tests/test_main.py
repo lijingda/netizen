@@ -1351,7 +1351,10 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             root = Path(raw)
             configured = settings(root)
             store = BindingStore()
-            binding = store.create_binding(
+            store.bootstrap_project(
+                alias="test", cwd=str(configured.projects["test"].resolve()),
+            )
+            binding = store.create_channel_binding(
                 scope=FeishuScope("cli_test", "oc_chat", ScopeKind.DIRECT),
                 project_alias="test",
                 creator_id="ou_owner",

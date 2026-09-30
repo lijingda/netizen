@@ -75,22 +75,51 @@ class DeploymentAssetsTest(unittest.TestCase):
 
     def test_main_ci_runs_repository_gate_for_supported_python_versions(self) -> None:
         workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
-        self.assertTrue(workflow_path.is_file())
-        workflow = workflow_path.read_text(encoding="utf-8")
-        linux_job, macos_job = workflow.split("  macos-arm64-check:\n", 1)
-        self.assertIn("pull_request:\n    branches: [main]", workflow)
-        self.assertIn("push:\n    branches: [main]", workflow)
-        self.assertIn(
-            'python: ["3.11", "3.12", "3.13", "3.14"]', linux_job
+        workflow = yaml.load(
+            workflow_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
         )
-        self.assertIn('python: ["3.13", "3.14"]', macos_job)
-        self.assertIn("runs-on: macos-15", macos_job)
-        self.assertIn('test "$(uname -m)" = arm64', macos_job)
-        self.assertNotIn("Verify macOS system trust integration", linux_job)
-        self.assertIn("Verify macOS system trust integration", macos_job)
-        self.assertIn("_configure_platform_trust", macos_job)
-        self.assertIn("permissions:\n  contents: read", workflow)
-        self.assertIn("--constraint requirements.lock", workflow)
-        self.assertEqual(workflow.count("setuptools==80.9.0"), 2)
-        self.assertIn("from netizen_cli.main", macos_job)
-        self.assertEqual(workflow.count("run: make check"), 2)
+        for event in ("pull_request", "push"):
+            self.assertEqual(workflow["on"][event]["branches"], ["main"])
+        self.assertEqual(workflow["permissions"]["contents"], "read")
+
+        for job_name, runner, versions in (
+            ("check", "ubuntu-latest", ["3.11", "3.12", "3.13", "3.14"]),
+            ("macos-arm64-check", "macos-15", ["3.13", "3.14"]),
+        ):
+            with self.subTest(job=job_name):
+                job = workflow["jobs"][job_name]
+                self.assertEqual(job["runs-on"], runner)
+                self.assertEqual(job["strategy"]["matrix"]["python"], versions)
+                actions = {
+                    step["uses"]: step.get("with", {})
+                    for step in job["steps"] if "uses" in step
+                }
+                self.assertEqual(
+                    actions["actions/setup-node@v4"]["node-version"], "22"
+                )
+                self.assertEqual(
+                    actions["actions/setup-python@v5"]["python-version"],
+                    "${{ matrix.python }}",
+                )
+                commands = [
+                    step["run"] for step in job["steps"] if "run" in step
+                ]
+                self.assertIn("make check", commands)
+                self.assertTrue(any(
+                    "--constraint requirements.lock" in command
+                    and "setuptools==80.9.0" in command
+                    for command in commands
+                ))
+                trust_checks = [
+                    command for command in commands
+                    if "_configure_platform_trust" in command
+                ]
+                if job_name == "macos-arm64-check":
+                    self.assertTrue(any(
+                        'test "$(uname -m)" = arm64' in command
+                        for command in commands
+                    ))
+                    self.assertEqual(len(trust_checks), 1)
+                    self.assertIn("from netizen_cli.main", trust_checks[0])
+                else:
+                    self.assertEqual(trust_checks, [])

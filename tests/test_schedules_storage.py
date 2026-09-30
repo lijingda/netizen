@@ -162,7 +162,7 @@ class BindingScheduleStorageTest(unittest.TestCase):
                         {"session_settings": SessionSettings()}, {"target_kind": "invalid"}):
             with self.subTest(changes=changes), self.assertRaises(ScheduleError):
                 self.create(**changes)
-        self.store.deactivate(scope_key=self.scope.key, binding_id=self.binding.id)
+        self.store.create_channel_binding(scope=self.scope, project_alias="p", creator_id="other")
         plan_id = self.create(enabled=False)
         plan = self.schedules.get(plan_id)
         self.assertEqual(self.schedules.binding_target_error(plan), "target_inactive")
@@ -473,7 +473,7 @@ class ScheduleStorageTest(unittest.TestCase):
         self.store.mark_scheduled_turn_started(claim.run.id, binding.id, "last-turn")
         self.schedules.set_run(claim.run.id, barrier="unknown")
         state = self.lifecycle(plan_id, now=220)
-        self.assertEqual((state.ended, state.has_future, state.can_toggle), (False, False, False))
+        self.assertEqual((state.ended, state.has_future, state.has_trigger), (False, False, False))
         self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", ended=False, now=220)], [plan_id])
         self.assertIsNone(self.claim(plan_id, at=220))
         self.store.release_scheduled_initial_turn(binding.id, "different")
@@ -575,9 +575,9 @@ class ScheduleStorageTest(unittest.TestCase):
         once = self.create(enabled=False, schedule=ScheduleRule("once", "UTC", at="1970-01-01T00:03Z")).plan_id
         for plan_id in (recurring, once):
             before = self.lifecycle(plan_id, now=100)
-            self.assertEqual((before.ended, before.has_future, before.has_trigger, before.can_toggle), (False, True, True, True))
+            self.assertEqual((before.ended, before.has_future, before.has_trigger), (False, True, True))
         after = self.lifecycle(once, now=181)
-        self.assertEqual((after.ended, after.has_future, after.has_trigger, after.can_toggle), (True, False, False, False))
+        self.assertEqual((after.ended, after.has_future, after.has_trigger), (True, False, False))
         self.assertFalse(self.lifecycle(recurring, now=181).ended)
         self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", enabled=False, ended=True, now=181)], [once])
         self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", enabled=False, ended=False, now=181)], [recurring])
@@ -623,7 +623,7 @@ class ScheduleStorageTest(unittest.TestCase):
 
         def assert_pending():
             state = self.lifecycle(once, now=300)
-            self.assertEqual((state.ended, state.has_future, state.has_trigger, state.can_toggle), (False, False, False, False))
+            self.assertEqual((state.ended, state.has_future, state.has_trigger), (False, False, False))
             self.assertEqual([plan.id for plan in self.schedules.list(app_id="app", ended=False, now=300)], [once])
             self.assertEqual(self.schedules.list(app_id="app", ended=True, now=300), ())
 
@@ -1031,15 +1031,19 @@ class ScheduleStorageTest(unittest.TestCase):
         self.store.release_scheduled_initial_turn(binding.id, "later-manual-turn")
         self.assertEqual(self.schedules.get_run(claim.run.id).initial_turn_id, "initial")
 
-    def test_deactivate_is_not_archive_and_delete_atomically_marks_removed(self):
+    def test_switching_active_binding_is_not_archive_and_delete_atomically_marks_removed(self):
         plan = self.create()
         claim = self.claim(plan.plan_id)
         binding = self.binding(claim)
-        self.store.deactivate(scope_key=binding.scope_key, binding_id=binding.id)
+        current = self.store.create_channel_binding(
+            scope=self.store.get_scope(binding.scope_key).scope,
+            project_alias="p", creator_id="other",
+        )
         self.assertEqual(self.schedules.get_run(claim.run.id).barrier, "held")
         self.store.archive_binding(binding.id)
         self.assertEqual(self.schedules.get_run(claim.run.id).barrier, "released")
         self.assertFalse(self.schedules.get_run(claim.run.id).binding_removed)
+        self.assertEqual(self.store.active_binding(binding.scope_key).id, current.id)
         self.store.delete_binding(binding.id)
         run = self.schedules.get_run(claim.run.id)
         self.assertTrue(run.binding_removed)
@@ -1099,7 +1103,7 @@ class ScheduleStorageTest(unittest.TestCase):
         self.assertTrue(self.schedules.get(plan.plan_id, include_deleted=True).deleted)
         with self.assertRaises(ProjectInventoryConflict):
             self.store.finish_project_delete(alias="p", expected_revision=reserved.project.revision, expected_inventory_fingerprint=reserved.fingerprint)
-        self.assertEqual(self.schedules.pending_runs(project_alias="p")[0].id, claim.run.id)
+        self.assertEqual(self.schedules.project_pending_runs("p")[0].id, claim.run.id)
         with self.assertRaises(ProjectDeleting):
             self.binding(claim)
         self.schedules.release(claim.run.id, error_code="project_deleted_before_start")

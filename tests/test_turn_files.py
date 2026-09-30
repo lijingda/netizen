@@ -4,7 +4,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 from openai_codex.types import ThreadItem
 
@@ -16,7 +15,7 @@ from netizen_cli.turn_files import (
     paginate_turn_files,
     require_turn_file_path,
     turn_diff_paths,
-    turn_diff_summary,
+    turn_patch_summary,
 )
 
 
@@ -248,83 +247,25 @@ class TurnFilesTest(unittest.TestCase):
             ["docs/new report.md", "assets/chart.png", "报告.md"],
         )
 
-    def test_diff_parser_counts_multi_hunk_new_delete_and_rename(self) -> None:
-        for relative, body in (
-            ("src/app.py", b"app"),
-            ("src/new.py", b"new"),
-            ("docs/renamed.md", b"renamed"),
-            ("assets/chart.png", b"\x89PNG\r\n\x1a\nimage"),
-        ):
-            path = self.root / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(body)
+    def test_aggregate_diff_discovers_paths_without_line_statistics(self) -> None:
+        (self.root / "report.md").write_text("new\n", encoding="utf-8")
         diff = (
-            "diff --git a/src/app.py b/src/app.py\n"
-            "--- a/src/app.py\n"
-            "+++ b/src/app.py\n"
-            "@@ -1,2 +1,3 @@\n"
-            " context\n"
+            "diff --git a/report.md b/report.md\n"
+            "--- a/report.md\n"
+            "+++ b/report.md\n"
+            "@@ -1 +1 @@\n"
             "-old\n"
             "+new\n"
-            "+extra\n"
-            "@@ -10,2 +11 @@\n"
-            "-old one\n"
-            "-old two\n"
-            "+replacement\n"
-            "diff --git a/src/new.py b/src/new.py\n"
-            "new file mode 100644\n"
-            "--- /dev/null\n"
-            "+++ b/src/new.py\n"
-            "@@ -0,0 +1,2 @@\n"
-            "+first\n"
-            "+second\n"
-            "diff --git a/gone.txt b/gone.txt\n"
-            "deleted file mode 100644\n"
-            "--- a/gone.txt\n"
-            "+++ /dev/null\n"
-            "@@ -1,2 +0,0 @@\n"
-            "-gone one\n"
-            "-gone two\n"
-            "diff --git a/docs/old.md b/docs/renamed.md\n"
-            "similarity index 100%\n"
-            "rename from docs/old.md\n"
-            "rename to docs/renamed.md\n"
-            "diff --git a/assets/chart.png b/assets/chart.png\n"
-            "Binary files a/assets/chart.png and b/assets/chart.png differ\n"
-        )
-
-        summary = turn_diff_summary(diff)
-
-        self.assertEqual((summary.additions, summary.deletions), (5, 5))
-        self.assertEqual(
-            [
-                (item.path, item.additions, item.deletions)
-                for item in summary.files
-            ],
-            [
-                ("src/app.py", 3, 3),
-                ("src/new.py", 2, 0),
-                ("docs/renamed.md", 0, 0),
-                ("assets/chart.png", None, None),
-            ],
         )
         files = extract_turn_files((), self.root, turn_diff=diff)
+
+        self.assertEqual(turn_diff_paths(diff + diff), ("report.md",))
         self.assertEqual(
             [
-                (
-                    item.display_path,
-                    item.additions,
-                    item.deletions,
-                    item.media_kind,
-                )
+                (item.display_path, item.additions, item.deletions)
                 for item in files
             ],
-            [
-                ("src/app.py", 3, 3, "file"),
-                ("src/new.py", 2, 0, "file"),
-                ("docs/renamed.md", 0, 0, "file"),
-                ("assets/chart.png", None, None, "image"),
-            ],
+            [("report.md", None, None)],
         )
 
     def test_diff_parser_preserves_metadata_path_semantics(self) -> None:
@@ -369,24 +310,13 @@ class TurnFilesTest(unittest.TestCase):
             "new mode 100755\n"
         )
 
-        summary = turn_diff_summary(diff)
-
-        self.assertEqual((summary.additions, summary.deletions), (None, None))
         self.assertEqual(
-            [
-                (item.path, item.additions, item.deletions)
-                for item in summary.files
-            ],
-            [
-                ("src/app.py", 1, 1),
-                ("a/new name.txt", 0, 0),
-                ("assets/before and after.bin", None, None),
-                ("copies/a/copy.txt", None, None),
-                ("empty new.txt", None, None),
-                ("mode only.txt", None, None),
-            ],
+            turn_diff_paths(diff),
+            (
+                "src/app.py", "a/new name.txt", "assets/before and after.bin",
+                "copies/a/copy.txt", "empty new.txt", "mode only.txt",
+            ),
         )
-        self.assertNotIn("empty-delete.txt", turn_diff_paths(diff))
 
     def test_precomputed_summary_is_reused_for_reference_and_file_extraction(
         self,
@@ -401,27 +331,22 @@ class TurnFilesTest(unittest.TestCase):
             "-old\n"
             "+new\n"
         )
-        summary = turn_diff_summary(diff)
+        summary = turn_patch_summary((file_change({
+            "path": "report.md", "diff": "first\nsecond\n",
+            "kind": {"type": "add"},
+        }),), self.root)
 
-        with patch(
-            "netizen_cli.turn_files.turn_diff_summary",
-            side_effect=AssertionError("diff was parsed again"),
-        ):
-            self.assertTrue(
-                has_turn_file_references((), diff_summary=summary)
-            )
-            files = extract_turn_files(
-                (),
-                self.root,
-                diff_summary=summary,
-            )
+        self.assertTrue(has_turn_file_references((), diff_summary=summary))
+        files = extract_turn_files(
+            (), self.root, turn_diff=diff, diff_summary=summary,
+        )
 
         self.assertEqual(
             [(item.display_path, item.additions, item.deletions) for item in files],
-            [("report.md", 1, 1)],
+            [("report.md", 2, 0)],
         )
 
-    def test_malformed_hunk_preserves_paths_but_omits_all_counts(self) -> None:
+    def test_malformed_aggregate_hunk_preserves_independent_paths(self) -> None:
         first = self.root / "first.txt"
         second = self.root / "second.txt"
         first.write_text("first", encoding="utf-8")
@@ -440,16 +365,7 @@ class TurnFilesTest(unittest.TestCase):
             "+untrusted\n"
         )
 
-        summary = turn_diff_summary(diff)
-
-        self.assertEqual((summary.additions, summary.deletions), (None, None))
-        self.assertEqual(
-            [(item.path, item.additions, item.deletions) for item in summary.files],
-            [
-                ("first.txt", None, None),
-                ("second.txt", None, None),
-            ],
-        )
+        self.assertEqual(turn_diff_paths(diff), ("first.txt", "second.txt"))
         self.assertEqual(
             [
                 (item.display_path, item.additions, item.deletions)
@@ -461,35 +377,25 @@ class TurnFilesTest(unittest.TestCase):
             ],
         )
 
-    def test_missing_hunk_and_stray_body_lines_fail_closed(self) -> None:
-        for body in (
+    def test_aggregate_paths_do_not_depend_on_complete_hunks(self) -> None:
+        for body, expected_paths in (
             (
                 "diff --git a/truncated.txt b/truncated.txt\n"
                 "--- a/truncated.txt\n"
-                "+++ b/truncated.txt\n"
+                "+++ b/truncated.txt\n",
+                ("truncated.txt",),
             ),
             (
                 "diff --git a/stray.txt b/stray.txt\n"
                 "-old\n"
-                "+new\n"
+                "+new\n",
+                ("stray.txt",),
             ),
         ):
             with self.subTest(body=body):
-                summary = turn_diff_summary(body)
-                self.assertEqual(
-                    (summary.additions, summary.deletions),
-                    (None, None),
-                )
-                self.assertEqual(len(summary.files), 1)
-                self.assertEqual(
-                    (
-                        summary.files[0].additions,
-                        summary.files[0].deletions,
-                    ),
-                    (None, None),
-                )
+                self.assertEqual(turn_diff_paths(body), expected_paths)
 
-    def test_truncated_nonempty_prelude_invalidates_later_counts(self) -> None:
+    def test_truncated_aggregate_prelude_does_not_hide_reported_paths(self) -> None:
         diff = (
             "--- a/first.txt\n"
             "+++ b/first.txt\n"
@@ -504,37 +410,7 @@ class TurnFilesTest(unittest.TestCase):
             "+after\n"
         )
 
-        summary = turn_diff_summary(diff)
-
-        self.assertEqual((summary.additions, summary.deletions), (None, None))
-        self.assertEqual(
-            [(item.path, item.additions, item.deletions) for item in summary.files],
-            [("second.txt", None, None)],
-        )
-
-    def test_missing_hunk_invalidates_later_file_counts(self) -> None:
-        diff = (
-            "diff --git a/first.txt b/first.txt\n"
-            "--- a/first.txt\n"
-            "+++ b/first.txt\n"
-            "diff --git a/second.txt b/second.txt\n"
-            "--- a/second.txt\n"
-            "+++ b/second.txt\n"
-            "@@ -1 +1 @@\n"
-            "-before\n"
-            "+after\n"
-        )
-
-        summary = turn_diff_summary(diff)
-
-        self.assertEqual((summary.additions, summary.deletions), (None, None))
-        self.assertEqual(
-            [(item.path, item.additions, item.deletions) for item in summary.files],
-            [
-                ("first.txt", None, None),
-                ("second.txt", None, None),
-            ],
-        )
+        self.assertEqual(turn_diff_paths(diff), ("second.txt",))
 
     def test_unsupported_metadata_only_changes_preserve_paths_without_counts(
         self,
@@ -569,21 +445,7 @@ class TurnFilesTest(unittest.TestCase):
         )
         for body, expected_paths in cases:
             with self.subTest(body=body):
-                summary = turn_diff_summary(body)
-                self.assertEqual(
-                    (summary.additions, summary.deletions),
-                    (None, None),
-                )
-                self.assertEqual(
-                    tuple(item.path for item in summary.files),
-                    expected_paths,
-                )
-                self.assertTrue(
-                    all(
-                        item.additions is None and item.deletions is None
-                        for item in summary.files
-                    )
-                )
+                self.assertEqual(turn_diff_paths(body), expected_paths)
 
     def test_accepts_exact_external_files_and_generated_images_without_scanning(
         self,

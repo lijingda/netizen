@@ -571,21 +571,6 @@ def turn_progress_card(
     )
 
 
-def _turn_file_manifest(
-    files: tuple[TurnFile, ...],
-) -> tuple[TurnFileManifestItem, ...]:
-    return tuple(
-        TurnFileManifestItem(
-            path=str(turn_file.resolved_path),
-            label=turn_file.display_path,
-            additions=turn_file.additions,
-            deletions=turn_file.deletions,
-            deleted=turn_file.deleted,
-        )
-        for turn_file in files
-    )
-
-
 def _turn_progress_manifest(
     snapshot: _TurnActivitySnapshotLike,
 ) -> TurnProgressManifest:

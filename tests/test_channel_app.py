@@ -24,6 +24,7 @@ from lark_channel import (
     QuotedContext,
     ResourceDescriptor,
     SendError,
+    SendOpts,
     SendResult,
     TextContent,
 )
@@ -3419,7 +3420,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         async def rename_then_switch(binding_id, name):
             result = await rename(binding_id, name)
-            self.store.create_binding(
+            self.store.create_channel_binding(
                 scope=scope, project_alias=original.project_alias, creator_id="ou_user",
             )
             return result
@@ -3670,10 +3671,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         archived_binding = self.store.active_binding(scope.key)
         self.store.assign_native_thread_id(archived_binding.id, "native-one")
-        self.store.deactivate(
-            scope_key=scope.key,
-            binding_id=archived_binding.id,
-        )
+        self.store.archive_binding(archived_binding.id)
         self.runtime.archived_thread_metadata_values["native-one"] = (
             NativeThreadMetadata("native-one", "Archived work", "old task")
         )
@@ -3737,10 +3735,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         archived_binding = self.store.active_binding(scope.key)
         self.store.assign_native_thread_id(archived_binding.id, "native-one")
-        self.store.deactivate(
-            scope_key=scope.key,
-            binding_id=archived_binding.id,
-        )
+        self.store.archive_binding(archived_binding.id)
         self.runtime.archived_thread_metadata_values["native-one"] = (
             NativeThreadMetadata("native-one", "Archived work", "old task")
         )
@@ -4011,7 +4006,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         # "设为当前" button (the active binding has no switch button).
         await self.fixture.new(message_id="om_new_two")
         other_scope = FeishuScope("cli_test", "oc_other", ScopeKind.DIRECT)
-        other = self.store.create_binding(
+        other = self.store.create_channel_binding(
             scope=other_scope,
             project_alias="test",
             creator_id="ou_other",
@@ -4835,7 +4830,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.fixture.new(message_id="om_new_current")
         current = self.store.active_binding(scope.key)
         other_scope = FeishuScope("cli_test", "oc_other", ScopeKind.DIRECT)
-        other = self.store.create_binding(
+        other = self.store.create_channel_binding(
             scope=other_scope,
             project_alias="test",
             creator_id="ou_other",
@@ -5034,7 +5029,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         archived = self.store.active_binding(scope.key)
         self.store.assign_native_thread_id(archived.id, "native-one")
-        self.store.deactivate(scope_key=scope.key, binding_id=archived.id)
+        self.store.archive_binding(archived.id)
         self.runtime.archived_thread_metadata_values["native-one"] = (
             NativeThreadMetadata("native-one", "Archived work", "old task")
         )
@@ -7419,7 +7414,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         await self.fixture.create_binding(scope)
         binding = self.store.active_binding(scope.key)
-        self.store.deactivate(scope_key=scope.key, binding_id=binding.id)
+        self.store.archive_binding(binding.id)
         project = self.projects.resolve_for_new("test")
         self.projects.set_enabled(
             alias=project.alias, enabled=False, expected_revision=project.revision,
@@ -7470,7 +7465,9 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("/help", guidance)
                 self.assertNotIn("刚才的任务", guidance)
         self.assertEqual(self.store.list_bindings(scope.key), [])
-        self.assertEqual(self.store.list_side_topics(), [])
+        self.assertEqual(
+            (await self.store.query_side_topics()).items, ()
+        )
         self.assertEqual(self.runtime.submit_calls, [])
         self.assertEqual(self.runtime.model_catalog_calls, 0)
 
@@ -7724,7 +7721,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_different_bindings_prepare_images_concurrently(self) -> None:
         await self.fixture.new()
         other_scope = FeishuScope("cli_test", "oc_other", ScopeKind.DIRECT)
-        self.store.create_binding(
+        self.store.create_channel_binding(
             scope=other_scope,
             project_alias="test",
             creator_id="ou_other",
@@ -8346,7 +8343,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selected, f"project:v1:other:{other.revision}")
         self.assertEqual(len(self.store.list_bindings(scope.key)), 3)
 
-        self.store.deactivate(scope_key=scope.key, binding_id=current.id)
+        self.store.archive_binding(current.id)
         _card, selected = await render("om_recent")
         self.assertEqual(selected, f"project:v1:other:{other.revision}")
 
@@ -11440,7 +11437,7 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         closed_scope = FeishuScope(
             "cli_test", "oc-chat", ScopeKind.TOPIC, "omt-closed"
         )
-        self.store.create_binding(
+        self.store.create_channel_binding(
             scope=closed_scope,
             project_alias="test",
             creator_id="ou_owner",
@@ -11878,16 +11875,16 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(any("230071" in str(content) for _mid, content in self.channel.replies))
 
-    def test_side_send_result_validator_rejects_every_identity_boundary(self) -> None:
+    async def test_side_send_rejects_every_response_identity_boundary(self) -> None:
         valid = sent_result(
             "om-valid",
             chat_id="oc-chat",
             thread_id="omt-valid",
             root_id="om-valid",
         )
-        parsed = channel_app._validated_sent_message(
-            valid,
-            expected_chat_id="oc-chat",
+        self.channel.send_results.append(valid)
+        parsed = await self.app._send_side_message(
+            "oc-chat", "Side root", SendOpts(uuid="side-validator-valid"),
         )
         self.assertEqual(parsed.message_id, "om-valid")
 
@@ -11917,12 +11914,12 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ("missing-data", missing_data),
             ("unsuccessful", unsuccessful),
         ):
+            self.channel.send_results.append(result)
             with self.subTest(label=label), self.assertRaises(
                 SideTopicCreateFailed
             ):
-                channel_app._validated_sent_message(
-                    result,
-                    expected_chat_id="oc-chat",
+                await self.app._send_side_message(
+                    "oc-chat", "Side root", SendOpts(uuid=f"side-validator-{label}"),
                 )
 
 

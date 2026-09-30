@@ -94,6 +94,16 @@ class TurnPatchStatisticsTest(unittest.TestCase):
                 summary = turn_patch_summary((patch_item("patch", "file", body),), self.root)
                 self.assertEqual((summary.additions, summary.deletions), (1, 1))
 
+    def test_update_counts_every_valid_hunk(self) -> None:
+        body = (
+            "--- a/file\n+++ b/file\n"
+            "@@ -1,2 +1,3 @@\n-old-a\n-old-b\n+new-a\n+new-b\n+new-c\n"
+            "@@ -10,2 +11 @@\n shared\n-removed\n"
+        )
+        summary = turn_patch_summary((patch_item("patch", "file", body),), self.root)
+        self.assertEqual((summary.additions, summary.deletions), (3, 3))
+        self.assertEqual((summary.files[0].additions, summary.files[0].deletions), (3, 3))
+
     def test_sdk_move_suffix_is_metadata_and_destination_is_used(self) -> None:
         target = str(self.root / "renamed file")
         for body, expected in ((update("old\n", "new\n"), (1, 1)), ("", (0, 0))):
@@ -155,14 +165,24 @@ class TurnPatchStatisticsTest(unittest.TestCase):
         self.assertEqual((summary.files[0].additions, summary.files[0].deletions), (1, 0))
 
     def test_invalid_patch_only_invalidates_affected_path_and_total(self) -> None:
-        summary = turn_patch_summary((
-            patch_item("good", "good", "known\n", kind="add"),
-            patch_item("prior", "bad", "known\n", kind="add"),
-            patch_item("bad", "bad", "@@ -1 +1,2 @@\n-old\n+truncated\n"),
-        ), self.root)
-        self.assertIsNone(summary.additions)
-        self.assertEqual(summary.files[0].additions, 1)
-        self.assertIsNone(summary.files[1].additions)
+        for body in (
+            "@@ -1 +1,2 @@\n-old\n+truncated\n",
+            "--- a/file\n+++ b/file\n",
+            "--- a/file\n+++ b/file\n-old\n+new\n@@ -1 +1 @@\n-old\n+new\n",
+            "--- a/file\n+++ b/file\n@@ malformed @@\n-old\n+new\n",
+            "-truncated\n+prelude\ndiff --git a/file b/file\n" + update("old\n", "new\n"),
+        ):
+            with self.subTest(body=body):
+                summary = turn_patch_summary((
+                    patch_item("good", "good", "known\n", kind="add"),
+                    patch_item("prior", "bad", "known\n", kind="add"),
+                    patch_item("bad", "bad", body),
+                ), self.root)
+                self.assertIsNone(summary.additions)
+                self.assertIsNone(summary.deletions)
+                self.assertEqual((summary.files[0].additions, summary.files[0].deletions), (1, 0))
+                self.assertIsNone(summary.files[1].additions)
+                self.assertIsNone(summary.files[1].deletions)
 
     def test_binary_and_unknown_update_do_not_fabricate_zero(self) -> None:
         for body in ("", "Binary files a/file and b/file differ\n", "GIT binary patch\n", "x\0y"):
