@@ -21,7 +21,7 @@ user manager，macOS 14+ 使用当前 GUI 用户的 LaunchAgent，不提供 Laun
 | 调整工具环境、代理或证书 | [服务环境](#服务环境)及[安装前提](#安装)；修改账号 profile 后重启服务。 |
 | 配置项目、访问或轮换 Admin 凭据 | [配置与管理页访问](#配置与管理页访问)。 |
 | 排查启动失败、未知状态或迁移失败 | [候选验证与切换](#候选验证与切换)、[Fail-closed 运维语义](#fail-closed-运维语义)、[平台服务管理器与日志](#平台服务管理器)。 |
-| 开发与发布 | [本地开发](CONTRIBUTING.md)、[代码门禁与 live 触发条件](#代码门禁与按需实时兼容性验证)、[兼容性结论](#已验证的兼容性结论)、[正式发布](#发布正式-release)。 |
+| 开发与发布 | [本地开发](CONTRIBUTING.md)、[Codex SDK 升级审查](#codex-sdk-升级审查)、[代码门禁与 live 触发条件](#代码门禁与按需实时兼容性验证)、[兼容性结论](#已验证的兼容性结论)、[正式发布](#发布正式-release)。 |
 
 ## 选择部署目标
 
@@ -183,6 +183,47 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
 暂不可见的消息能在一次有界重读中收敛或被明确标成不完整。若平台表现为静默遗漏，必须
 保持 catch-up unavailable，不能用 generated SDK shape 或本地 Fake 代替这个 rollout gate。
 
+### Codex SDK 升级审查
+
+每次升级 `openai-codex` 或随附 App Server（包括 patch 版本），都必须完成以下审查，
+并执行后文规定的门禁。该流程落实 [ADR 0014](adr/0014-use-removable-sdk-gap-adapters.md#sdk-升级-harness)
+及[SDK 适配边界](design.md#sdk-适配边界)；测试通过只证明已覆盖行为，不能代替能力与产品语义审查。
+
+1. **确定比较基线。** 记录升级前实际锁定的 SDK/CLI 版本与目标版本；请求“最新版”时
+   核实最新稳定发布，区分 SDK 包、随附 CLI/App Server 与模型目录的变化。阅读对应官方更新
+   记录，并比较两个精确版本的安装包或源码；开发主线文档不能代替目标发布的实际实现。
+2. **检查完整差异。** 比较公开导出、类/子资源、方法、属性、签名和返回类型，以及
+   generated models、字段可空性/默认值、枚举、错误、通知和序列化语义。对 adapter
+   依赖的私有 ownership、事件存储、消费与取消逻辑另做源码复核。区分公开高层 API、
+   低层 client、协议模型和 App Server 行为；高层源码未变不代表原生执行语义未变。
+   现有 `facade_migration_requirements()` 仅检查预列候选名；空结果不能替代完整 API
+   差异审查，也不能证明换名、新子资源、cleanup 或 Activity 等能力仍无公开替代。
+3. **逐项复核兼容债务。** 从当前实现、[适配边界](design.md#sdk-适配边界)及各自 ADR
+   建立本次清单，覆盖 gap adapters、pinned cleanup/Activity，以及 SDK 限制造成的
+   产品缺口和临时处理；不要只审查本次测试失败的模块。对每项记录“迁移/删除”“保留”
+   或“待验证”，附目标 API/行为证据、保留原因和解除条件。公开等价能力可用时，遵循
+   对应 ADR 的 migration-required 与 parity 门禁，在本次升级中切换 provider、删除
+   对应 shim/私有依赖并保留行为测试；仅有协议字段不算高层替代。观测恢复、压缩归属、
+   Goal 重挂、fork/命名等待、订阅与进程清理等处理须核对原约束是否真的消失，不能仅
+   因原生发布说明声称修复就删除。
+4. **判定新增能力的归属。** 对与 Netizen 有关的变化分别说明：必须适配的契约变化、
+   已由 SDK/原生配置生效、可选产品能力、仍有接口或验证缺口。核对错误/终态、身份、
+   时间字段、用户反馈及配置生效范围；不能仅以“字段可解析”宣称语义已适配。属于
+   Codex 的模型、工具、权限与配置能力继续由 Codex 管理；不因升级自动增加 Netizen
+   开关、配置副本或新私有 adapter。无须修改的项也给出依据。
+5. **按结论实施与验证。** 源码复核后再更新精确依赖、必要指纹和契约断言；完成
+   `make check`、[完整原生集合及专项门禁](#代码门禁与按需实时兼容性验证)。对新增或
+   声称已修复但既有探针未覆盖的行为，补有界、disposable 的针对性验证；协议 shape、
+   synthetic、真实原生执行、飞书客户端和平台部署分别报告，不能互相替代。保留首次
+   失败、诊断与复验结果，无法验证的项明确标记，不能通过放宽断言或修改期望来制造
+   成功。顺带发现的旧缺陷、超时调参和产品扩展须单独说明理由与升级的因果关系，避免
+   把它们混同于必需适配。
+6. **交付审查结论。** 在变更说明中记录版本基线、官方来源/源码差异、逐项兼容债务
+   决定、新增能力分类、实际改动、检查结果及未覆盖边界；没有可删除封装或新增必需适配
+   也明确写出。同步受影响的设计/用户行为契约，通用兼容性摘要写入
+   [兼容性结论](#已验证的兼容性结论)，单次日志、exact IDs 和私有环境信息按该节约定
+   留在验证产物中。升级审查不授权发布或部署。
+
 ### 代码门禁与按需实时兼容性验证
 
 所有面向 `main` 的代码先通过 `make check`；PR 和 main push 的 GitHub CI 都在 Linux x64
@@ -203,8 +244,9 @@ macOS job 还会从安装后的 wheel 实际初始化系统钥匙串 truststore�
 LaunchAgent 安装、启动和 ready 冒烟，不能用 CI 代替。
 
 真实账号 live probes 是开发阶段按变更触发的兼容性工具，不是普通 merge 或正式 Release
-门禁。升级 pinned SDK/App Server 时运行完整集合；修改 SDK Gap Adapter、相关原生生命周期、
-模型提供方、飞书租户能力或服务环境时，只运行受影响的 phase。没有触及这些边界的迭代无需
+门禁。升级 pinned SDK/App Server 时完成[升级审查](#codex-sdk-升级审查)并运行完整集合；
+修改 SDK Gap Adapter、相关原生生命周期、模型提供方、飞书租户能力或服务环境时，
+只运行受影响的 phase。没有触及这些边界的迭代无需
 运行 live probe。
 
 按[职责边界](design.md#netizen-与-codex-的职责边界)分别记录适配行为与原生能力结果。
@@ -403,7 +445,8 @@ Runtime synthetic 门禁须覆盖 steer 前刷新先读取 exact completion 并�
 不证明立即卸载，仍遵循 App Server 的 idle 宽限期。
 
 `goal` phase 是 Goal 上线的硬门禁。它首先创建零 Turn Thread，并用公开 read 证明该
-Thread 已是 idle、非 ephemeral 且有持久化 path；这一项失败时 Goal 必须保持 unavailable，
+Thread 已是 idle、非 ephemeral 且返回原生 path；这不证明零 Turn 可冷恢复。
+这一项失败时 Goal 必须保持 unavailable，
 不能用 dummy Turn 或 synthetic 结果替代。随后用有界、无破坏 objective 验证 start ->
 pause -> exact physical Turn interrupt -> resume rollover -> terminal -> same-Thread normal
 Turn，并由第二个无本地 route 的 SDK client 只读确认 persisted active Goal。探针
@@ -656,6 +699,47 @@ SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和
 [requirements.lock](../requirements.lock) 为准。以下证据保留实际验证时的版本；旧版本的
 结果不会自动变成新版本、真实飞书链路或目标主机的验收结论。定时任务另见
 [专属兼容性记录](#定时任务兼容性与验收)。
+
+2026-09-30 SDK/CLI `0.159.2` 已通过 `make check`（2,482 项测试、16 项按本机环境
+跳过，含包构建/隔离资源验证、编译、依赖与全部 SDK synthetic probes），以及
+`probe_python_sdk.py` 全部 17 个原生 phase、完整 Thread naming 与 Project delete
+两种场景。两个 pinned adapter 的完整 Python
+源码指纹为 `ce2e5e94cf00a499ae03b31e70ace1ca889501e5c0a64e62b6448c2516aae65f`；
+源码复核确认 client/router 的所有权和 retained-event 形状未变，facade migration
+inventory 为空；Project config 仍分类为 `hot-reloaded`。
+
+同日补做零 Turn 持久性评估：`thread_start` 返回的 Thread 虽可用
+`read(include_turns=False)` 读取 idle、非 ephemeral 和 path，但这些 metadata 不能证明
+rollout 已落盘。独立临时 Thread 实测中，创建后等待两秒、只读摘要后等待两秒，以及
+关闭首个 App Server 再用第二个恢复，`thread_resume` 均返回 `no rollout found`；
+`include_turns=False` 也不能绕过。完整 history read 另返回 `list_turns is not supported yet`，
+不能拿失败读取的潜在副作用当持久化接口。新版空 Thread 归档之所以可用，是
+[固定版本原生源码](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/app-server/src/request_processors/thread_processor.rs)
+在归档前主动调用内部 persist；“先归档再恢复”实测可让零 Turn Thread 恢复，但属于额外
+生命周期操作，不作为普通创建方案。因此继续保留 Lazy Binding；移除的前提是公开创建
+流程能在没有真实 Turn、额外归档恢复或私有 RPC 的情况下，可靠支持 exact ID 的同连接
+及冷恢复。既有 Goal 路径直接沿用刚创建的 handle，不能作为这一恢复能力的证明。
+本次试作已撤回，SDK 升级及此前修复保留；探针仅操作自建临时 Thread，未发送模型请求。
+
+本轮保留了 interrupt、release 和命名的首次失败记录。带诊断的独立观测确认：恢复后
+新 Turn 的公开 read 可短暂返回 `interrupted`、有开始时间而无完成时间，随后同一 exact
+Turn 变为 `inProgress` 并正常 completed；不能以首次状态立即结束观察。普通 Turn、
+Scheduled 查询、压缩与探针对首次 `interrupted` 固定等待 2 秒再读取同一 exact Turn
+一次，以第二次有效读取结果继续原流程，不再依赖 timing 字段。复查失败沿用已有
+观测失败边界；首次结果不能代替确认。携带原生 error 的已确认中断
+会显示过滤后的原因，仍允许同 Thread 续聊。命名复验观察到 exact 输入接近原 5 秒
+期限才可见，因此局部等待扩大到 10 秒，整体 120 秒预算不变；未断言首次命名失败的
+确切原因。简化为两秒复查后，受影响的 interrupt、release、usage、polling、compact
+五个原生 phase、命名 Runtime 路径及定时任务 dispatch 再次通过；dispatch 覆盖
+exact 初始状态读取、停止、续聊与归档删除，飞书传输使用替身，用户 MCP 和 Project
+trust 配置不变。首次记录、诊断实验和复验结果分别留在验证产物中。
+
+额外 Skill roots 还完成真实模型执行验证：普通新建和冷恢复自然匹配、ephemeral Side
+显式 typed Skill 调用、Goal pause/resume 后续物理 Turn、直接读取原生 child 的 final，
+以及同 HOME 两 App Server 注册同名不同根的实际隔离。该专项使用一次性自建 Skill，
+不代表 Lark 真实调用、同名/禁用/歧义规则或 Goal 自动 rollover 的验收。以上原生探针
+使用本机登录账号和隔离临时 cwd，不覆盖真实飞书客户端、目标主机安装或正式发布；
+没有部署或重启 Netizen 服务。
 
 2026-09-24 Binding/Side 共用问答交互通过 `make check`（2,211 项测试、编译、依赖与全部
 SDK synthetic probes），最后补充的错误反馈分支另通过 13 项问答目标矩阵。原生 Side

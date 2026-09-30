@@ -253,7 +253,7 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manual.disposition, SubmitDisposition.STEERED)
         self.assertEqual(manual.turn_id, first.turn_id)
         await self.runtime.stop_exact(binding.id)
-        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        self.assertTrue(await self.runtime.wait_idle(timeout=3))
         self.assertEqual(self.codex.handles[0].interrupt_count, 1)
         self.assertEqual(self.store.schedules.get_run(run_id).barrier, "released")
         later = await self.runtime.submit(

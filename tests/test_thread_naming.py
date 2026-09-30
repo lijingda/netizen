@@ -5,6 +5,7 @@ import json
 import unittest
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from openai_codex import InternalRpcError, InvalidRequestError
 
@@ -287,6 +288,73 @@ class ThreadNamerTest(unittest.IsolatedAsyncioTestCase):
         await self.drain()
         self.assertEqual(self.codex.fork_calls, [])
         self.assertEqual(self.commits, [])
+
+    async def test_exact_input_visible_after_five_seconds_can_still_name(self) -> None:
+        self.namer._timeout_seconds = 120.0
+        self.parent.native.turns.append(SimpleNamespace(
+            id="previous-turn", status="completed",
+            items=[SimpleNamespace(root=SimpleNamespace(type="userMessage"))],
+        ))
+        self.parent.native.turns[0].items = []
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        elapsed = 0.0
+        with (
+            patch.object(loop, "time", side_effect=lambda: real_time() + elapsed),
+            patch.object(loop, "slow_callback_duration", 120.0),
+        ):
+            self.start()
+            await self.parent.full_read_entered.wait()
+            elapsed = 6.0
+            async with asyncio.timeout(1):
+                while self.parent.full_read_count < 2:
+                    await asyncio.sleep(0)
+            self.assertEqual(self.codex.fork_calls, [])
+            self.parent.native.turns[0].items.append(SimpleNamespace(
+                root=SimpleNamespace(type="userMessage"),
+            ))
+            elapsed = 6.1
+            await self.running()
+            self.assertEqual(self.parent.native.turns[0].status, "inProgress")
+            self.codex.child.handle.finished.set()
+            await self.drain()
+        self.assertEqual(self.commits, [("binding", "parent", "会话自动命名")])
+        self.assert_child_cleanup()
+
+    async def test_input_deadline_at_ten_seconds_skips_and_later_turn_retries(self) -> None:
+        self.namer._timeout_seconds = 120.0
+        self.parent.native.turns[0].items = []
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        elapsed = 0.0
+        with (
+            patch.object(loop, "time", side_effect=lambda: real_time() + elapsed),
+            patch.object(loop, "slow_callback_duration", 120.0),
+        ):
+            self.start()
+            await self.parent.full_read_entered.wait()
+            elapsed = 9.0
+            async with asyncio.timeout(1):
+                while self.parent.full_read_count < 2:
+                    await asyncio.sleep(0)
+            self.assertIn("binding", self.namer._jobs)
+            self.assertEqual(self.codex.fork_calls, [])
+            elapsed = 10.0
+            await self.drain()
+        self.assertEqual(self.codex.fork_calls, [])
+        self.assertEqual(self.commits, [])
+        self.assertNotIn("binding", self.namer._jobs)
+        self.parent.native.turns.append(SimpleNamespace(
+            id="next-turn", status="inProgress",
+            items=[SimpleNamespace(root=SimpleNamespace(type="userMessage"))],
+        ))
+        self.namer.start("binding", self.parent, "next-turn")
+        await self.running()
+        self.codex.child.handle.finished.set()
+        await self.drain()
+        self.assertEqual(self.commits, [("binding", "parent", "会话自动命名")])
+        self.assertEqual(len(self.codex.fork_calls), 1)
+        self.assert_child_cleanup()
 
     async def test_known_unmaterialized_context_can_become_visible(self) -> None:
         self.parent.full_read_errors.append(InvalidRequestError(

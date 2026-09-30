@@ -1832,18 +1832,7 @@ class ChannelApplication:
             )
             return
         if outcome.status == "interrupted":
-            if outcome.background_cleanup_requested:
-                await self._reply(
-                    outcome.origin,
-                    "Codex Turn 已中断；已请求清理该 Thread 中已登记的后台终端。"
-                    "前台工具进程不受此接口保证，可能仍在运行。",
-                )
-            else:
-                await self._reply(
-                    outcome.origin,
-                    "Codex Turn 已被外部中断；本服务未请求清理已登记的后台终端。"
-                    "前台工具进程可能仍在运行。",
-                )
+            await self._reply(outcome.origin, _task_interruption_text(outcome))
             return
         if outcome.status != "completed":
             await self._reply_task_result(
@@ -1901,16 +1890,7 @@ class ChannelApplication:
             final_response = _task_failure_text(outcome)
         elif outcome.status == "interrupted":
             terminal_status = "interrupted"
-            if outcome.background_cleanup_requested:
-                final_response = (
-                    "Codex Turn 已中断；已请求清理该 Thread 中已登记的后台终端。"
-                    "前台工具进程不受此接口保证，可能仍在运行。"
-                )
-            else:
-                final_response = (
-                    "Codex Turn 已被外部中断；本服务未请求清理已登记的后台终端。"
-                    "前台工具进程可能仍在运行。"
-                )
+            final_response = _task_interruption_text(outcome)
         elif outcome.status != "completed":
             final_response = _task_failure_text(outcome)
         else:
@@ -6512,6 +6492,23 @@ def _first_post_node(message: Any) -> dict[str, Any] | None:
             if isinstance(node, dict):
                 return node
     return None
+
+
+def _task_interruption_text(outcome: TurnOutcome | SideTurnOutcome) -> str:
+    if outcome.background_cleanup_requested:
+        message = (
+            "Codex Turn 已中断；已请求清理该 Thread 中已登记的后台终端。"
+            "前台工具进程不受此接口保证，可能仍在运行。"
+        )
+    else:
+        message = (
+            "Codex Turn 已中断；本服务未请求清理已登记的后台终端。"
+            "前台工具进程可能仍在运行。"
+        )
+    native_error = getattr(outcome.result, "error", None)
+    if native_error is not None:
+        message += f"\n中断原因：{describe_error(native_turn_failure(native_error))}"
+    return message
 
 
 def _task_failure_text(outcome: TurnOutcome | SideTurnOutcome) -> str:

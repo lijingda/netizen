@@ -188,6 +188,7 @@ _THREAD_CATALOG_MAX_ITEMS = 100_000
 _THREAD_DELETE_RECONCILE_TIMEOUT_SECONDS = 20.0
 _TURN_OBSERVATION_RECOVERY_TIMEOUT_SECONDS = 5.0
 _TURN_OBSERVATION_RECOVERY_MAX_IO = 3
+_INTERRUPTION_CONFIRMATION_SECONDS = 2.0
 _TERMINAL_RESPONSE_MATERIALIZATION_RETRIES = 4
 _TERMINAL_STREAM_DRAIN_TIMEOUT_SECONDS = 1.0
 _SIDE_CLOSE_DRAIN_TIMEOUT_SECONDS = 5.0
@@ -4736,45 +4737,49 @@ class CodexRuntime:
                         raise ScheduledTurnReadError(
                             "thread_unavailable", "定时执行尚无原生 Thread 引用。",
                         )
-                try:
-                    response = await AsyncThread(self._codex, thread_id).read(
-                        include_turns=True,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    raise ScheduledTurnReadError(
-                        "read_unavailable", "暂时无法读取本次定时执行的原生状态。",
-                    ) from error
-                async with self._lock(binding_id):
-                    current = self._scheduled_read_binding_locked(binding_id)
-                    if current.native_thread_id != thread_id:
-                        raise ScheduledTurnReadError(
-                            "identity_changed", "定时执行的原生 Thread 引用已变化。",
+                for attempt in range(2):
+                    if attempt == 1:
+                        await asyncio.sleep(_INTERRUPTION_CONFIRMATION_SECONDS)
+                    try:
+                        response = await AsyncThread(self._codex, thread_id).read(
+                            include_turns=True,
                         )
-                    native = getattr(response, "thread", None)
-                    if getattr(native, "id", None) != thread_id:
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:
                         raise ScheduledTurnReadError(
-                            "identity_mismatch", "原生读取返回了其他 Thread。",
-                        )
-                    exact = [
-                        turn for turn in getattr(native, "turns", ())
-                        if getattr(turn, "id", None) == turn_id
-                    ]
-                    if len(exact) != 1:
-                        raise ScheduledTurnReadError(
-                            "turn_unavailable", "原生历史无法确认本次 exact Turn。",
-                        )
-                    status = _enum_value(getattr(exact[0], "status", None))
-                    if status not in {"inProgress", "completed", "interrupted", "failed"}:
-                        raise ScheduledTurnReadError(
-                            "status_unavailable", "原生 Turn 状态无法确认。",
-                        )
-                    if status == "inProgress" and _thread_status_type(native) != "active":
-                        raise ScheduledTurnReadError(
-                            "status_conflict", "原生 Thread 与本次 Turn 状态不一致。",
-                        )
-                    return status
+                            "read_unavailable", "暂时无法读取本次定时执行的原生状态。",
+                        ) from error
+                    async with self._lock(binding_id):
+                        current = self._scheduled_read_binding_locked(binding_id)
+                        if current.native_thread_id != thread_id:
+                            raise ScheduledTurnReadError(
+                                "identity_changed", "定时执行的原生 Thread 引用已变化。",
+                            )
+                        native = getattr(response, "thread", None)
+                        if getattr(native, "id", None) != thread_id:
+                            raise ScheduledTurnReadError(
+                                "identity_mismatch", "原生读取返回了其他 Thread。",
+                            )
+                        exact = [
+                            turn for turn in getattr(native, "turns", ())
+                            if getattr(turn, "id", None) == turn_id
+                        ]
+                        if len(exact) != 1:
+                            raise ScheduledTurnReadError(
+                                "turn_unavailable", "原生历史无法确认本次 exact Turn。",
+                            )
+                        status = _enum_value(getattr(exact[0], "status", None))
+                        if status not in {"inProgress", "completed", "interrupted", "failed"}:
+                            raise ScheduledTurnReadError(
+                                "status_unavailable", "原生 Turn 状态无法确认。",
+                            )
+                        if status == "inProgress" and _thread_status_type(native) != "active":
+                            raise ScheduledTurnReadError(
+                                "status_conflict", "原生 Thread 与本次 Turn 状态不一致。",
+                            )
+                        if status != "interrupted" or attempt == 1:
+                            return status
         except TimeoutError as error:
             raise ScheduledTurnReadError(
                 "read_timeout", "读取本次定时执行状态超时，请稍后刷新。",
@@ -5719,6 +5724,29 @@ class CodexRuntime:
         self,
         active: _ActiveCompaction,
     ) -> None:
+        def candidate(native_thread: object) -> object | None:
+            if getattr(native_thread, "id", None) != active.thread.id:
+                raise RuntimeError("compaction read returned a different Thread")
+            new_turns = [
+                turn
+                for turn in getattr(native_thread, "turns", ())
+                if getattr(turn, "id", None) not in active.before_turn_ids
+            ]
+            candidates = [
+                turn
+                for turn in new_turns
+                if _turn_contains_item(turn, "contextCompaction")
+            ]
+            if len(new_turns) > 1 or len(candidates) > 1:
+                # compact() returns no Turn ID. Concurrent writers on the same
+                # native Thread therefore make request attribution impossible
+                # through the pinned public facade; never select an arbitrary
+                # candidate and report it as this request's success.
+                raise RuntimeError(
+                    "multiple native Turns appeared after compaction baseline"
+                )
+            return candidates[0] if candidates else None
+
         failures = 0
         while True:
             native_thread, failures = await self._read_compaction_thread(
@@ -5757,38 +5785,34 @@ class CodexRuntime:
                     f"unexpected native Thread status: {thread_status!r}"
                 )
 
-            new_turns = [
-                turn
-                for turn in getattr(native_thread, "turns", ())
-                if getattr(turn, "id", None) not in active.before_turn_ids
-            ]
-            candidates = [
-                turn
-                for turn in new_turns
-                if _turn_contains_item(turn, "contextCompaction")
-            ]
-            if len(new_turns) > 1 or len(candidates) > 1:
-                # compact() returns no Turn ID. Concurrent writers on the same
-                # native Thread therefore make request attribution impossible
-                # through the pinned public facade; never select an arbitrary
-                # candidate and report it as this request's success.
-                raise RuntimeError(
-                    "multiple native Turns appeared after compaction baseline"
-                )
-            if not candidates:
+            compact_turn = candidate(native_thread)
+            if compact_turn is None:
                 # The start acknowledgement can race ahead of native status:
                 # the pinned live probe observes idle -> active -> idle.  An
                 # idle read without a new contextCompaction Turn is therefore
                 # not completion evidence.
                 await asyncio.sleep(self._poll_interval_seconds * 4)
                 continue
-            compact_turn = candidates[0]
-
             compact_turn_id = getattr(compact_turn, "id", None)
             active.compact_turn_id = (
                 compact_turn_id if isinstance(compact_turn_id, str) else None
             )
             status = _enum_value(getattr(compact_turn, "status", None))
+            if status == "interrupted":
+                await asyncio.sleep(_INTERRUPTION_CONFIRMATION_SECONDS)
+                native_thread, failures = await self._read_compaction_thread(
+                    active, include_turns=True, failures=failures,
+                )
+                confirmed = candidate(native_thread)
+                if confirmed is None or getattr(confirmed, "id", None) != compact_turn_id:
+                    raise RuntimeError("compaction interruption confirmation lost the exact Turn")
+                thread_status = _thread_status_type(native_thread)
+                if thread_status in {"notLoaded", "active"}:
+                    continue
+                if thread_status != "idle":
+                    raise RuntimeError(f"unexpected compaction confirmation status: {thread_status!r}")
+                compact_turn = confirmed
+                status = _enum_value(getattr(compact_turn, "status", None))
             active.status = status
             if status == "inProgress":
                 await asyncio.sleep(self._poll_interval_seconds * 4)
@@ -5807,7 +5831,11 @@ class CodexRuntime:
                     else "原生 Codex 上下文压缩失败。"
                 )
             if status == "interrupted":
-                raise CompactionFailed("原生 Codex 上下文压缩被中断。")
+                message = "原生 Codex 上下文压缩被中断。"
+                native_error = getattr(compact_turn, "error", None)
+                if native_error is not None:
+                    message += f"中断原因：{describe_error(native_turn_failure(native_error))}"
+                raise CompactionFailed(message)
             return
 
     async def _read_compaction_thread(
@@ -6135,6 +6163,8 @@ class CodexRuntime:
         self,
         active: _ActiveTurn,
         initial_error: BaseException,
+        *,
+        interruption_pending: bool = False,
     ) -> TurnResult | _TurnObservation:
         """Try at most three native I/O operations within one five-second window."""
 
@@ -6198,6 +6228,15 @@ class CodexRuntime:
                     else:
                         if isinstance(classified, _TurnObservation):
                             return classified
+                        if (
+                            _enum_value(getattr(classified, "status", None)) == "interrupted"
+                            and not interruption_pending
+                        ):
+                            interruption_pending = True
+                            if io_count >= _TURN_OBSERVATION_RECOVERY_MAX_IO:
+                                break
+                            await asyncio.sleep(_INTERRUPTION_CONFIRMATION_SECONDS)
+                            continue
                         terminal_turn = classified
                         break
                     await asyncio.sleep(self._poll_interval_seconds)
@@ -6574,6 +6613,17 @@ class CodexRuntime:
 
         full_view = await self._read_native_thread(active, include_turns=True)
         classified = self._classify_full_turn_view(active, full_view)
+        if _enum_value(getattr(classified, "status", None)) == "interrupted":
+            await asyncio.sleep(_INTERRUPTION_CONFIRMATION_SECONDS)
+            try:
+                full_view = await self._read_native_thread(active, include_turns=True)
+                classified = self._classify_full_turn_view(active, full_view)
+            except _TurnViewUnverified as error:
+                return await self._observe_with_bounded_recovery(
+                    active, error, interruption_pending=True,
+                )
+            if isinstance(classified, _TurnObservation):
+                return classified
         if isinstance(classified, _TurnObservation):
             if thread_status == "idle":
                 raise _TurnViewUnverified(
@@ -6620,10 +6670,6 @@ class CodexRuntime:
             raise RuntimeError(
                 f"unexpected native Turn status: {turn_status!r}"
             )
-        # Thread runtime status (including systemError/notLoaded) is not the
-        # persisted exact Turn's terminal status. Accept the latter first.
-        active.terminal_observed = True
-        self._bindings.release_scheduled_initial_turn(active.binding_id, active.handle.id)
         return turn
 
     async def _materialize_terminal_turn(
@@ -6633,6 +6679,8 @@ class CodexRuntime:
     ) -> TurnResult:
         """Deliver a proven terminal Turn without re-entering recovery."""
 
+        active.terminal_observed = True
+        self._bindings.release_scheduled_initial_turn(active.binding_id, active.handle.id)
         status = _enum_value(getattr(turn, "status", None))
         current = turn
         retries = _TERMINAL_RESPONSE_MATERIALIZATION_RETRIES

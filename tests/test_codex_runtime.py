@@ -50,6 +50,7 @@ from netizen_cli.codex_runtime import (
     ContextCursorCommit,
     CodexRuntime,
     RuntimeClosed,
+    ScheduledTurnReadError,
     ReleaseDisposition,
     SideCloseFailed,
     SideLifecycleOutcome,
@@ -206,6 +207,7 @@ class FakeTurnHandle:
                     final_response = self.record.items[-1].root.text
                 return SimpleNamespace(
                     status=self.record.status,
+                    error=self.record.error,
                     final_response=final_response,
                     items=list(self.record.items),
                 )
@@ -965,6 +967,7 @@ class FakeTurnPlanObserver:
 
 class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        self.enterContext(patch("netizen_cli.codex_runtime._INTERRUPTION_CONFIRMATION_SECONDS", 0.001))
         self.next_id = 0
 
         def make_id() -> str:
@@ -1116,6 +1119,33 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.parent_binding_id, binding.id)
         self.assertEqual(snapshot.topic_id, record.topic_id)
         self.assertEqual(snapshot.state, SideSessionState.OPEN)
+
+    async def test_interrupted_side_with_native_error_keeps_terminal_and_admission(self) -> None:
+        _binding, record, snapshot = await self.open_side()
+        submission = await self.runtime.submit_side(
+            side_id=record.id, input="first", owner_id="ou_owner", origin=object(),
+        )
+        handle = self.codex.handles[-1]
+        native_error = TurnError.model_validate({
+            "message": "stopped after repeated denials", "codexErrorInfo": "tooManyDenials",
+        })
+        handle.record.error = native_error
+        handle.complete(status="interrupted")
+        submission.release_receipt_attempt()
+        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+
+        outcome = self.outcomes[-1]
+        self.assertEqual(outcome.status, "interrupted")
+        self.assertIsNone(outcome.error)
+        self.assertIs(outcome.result.error, native_error)
+        self.assertIsNone(self.runtime.side_snapshot(record.id).turn_id)
+        self.assertEqual(self.runtime.side_snapshot(record.id).state, SideSessionState.OPEN)
+        self.assertTrue(self.runtime._accepting)
+        follow_up = await self.runtime.submit_side(
+            side_id=record.id, input="continue", owner_id="ou_owner", origin=object(),
+        )
+        self.assertEqual(follow_up.thread_id, snapshot.thread_id)
+        await self.finish_side_turn(follow_up)
 
     async def test_occupied_parent_rejects_side_before_fork_without_closing_service(
         self,
@@ -2618,6 +2648,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
 class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        self.enterContext(patch("netizen_cli.codex_runtime._INTERRUPTION_CONFIRMATION_SECONDS", 0.001))
         self.next_id = 0
 
         def make_id() -> str:
@@ -3162,6 +3193,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
 class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        self.enterContext(patch("netizen_cli.codex_runtime._INTERRUPTION_CONFIRMATION_SECONDS", 0.001))
         self.ids = iter(["binding-1", "binding-2", "binding-3"])
         self.store = BindingStore(id_factory=lambda: next(self.ids))
         self.codex = FakeCodex()
@@ -5087,7 +5119,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(stop_result, StopDisposition.REQUESTED)
         catalog.gate.set()
-        with self.assertRaises(SteerRace):
+        with self.assertRaises((ThreadStopping, SteerRace)):
             await delayed
         first.release_receipt_attempt()
         await self.runtime.wait_idle()
@@ -6888,6 +6920,58 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.status, "completed")
         self.assertIsNone(outcome.error)
 
+    async def test_compaction_interruption_recheck_keeps_candidate_and_requires_idle(self) -> None:
+        def view(turn_id="compact-turn", status="interrupted", thread_status="idle"):
+            return SimpleNamespace(
+                id="compact-thread", status=SimpleNamespace(root=SimpleNamespace(type=thread_status)),
+                turns=[] if turn_id is None else [SimpleNamespace(
+                    id=turn_id, status=FakeStatus(status),
+                    items=[SimpleNamespace(type="contextCompaction")],
+                )],
+            )
+
+        for confirmation in ("interrupted", "inProgress", "completed", "failed", "active", "notLoaded", "missing", "other-turn"):
+            with self.subTest(confirmation=confirmation):
+                active = SimpleNamespace(
+                    thread=SimpleNamespace(id="compact-thread"), before_turn_ids=set(),
+                    compact_turn_id=None, terminal_observed=False, status=None,
+                )
+                second = view(status=confirmation)
+                if confirmation in {"active", "notLoaded"}:
+                    second = view(thread_status=confirmation)
+                elif confirmation in {"missing", "other-turn"}:
+                    second = view(None if confirmation == "missing" else "different-turn")
+                views = iter([view(), view(), second, view(status="completed"), view(status="completed")])
+                reads = 0
+
+                async def read(_active, **_kwargs):
+                    nonlocal reads
+                    reads += 1
+                    self.assertFalse(active.terminal_observed)
+                    return next(views), 0
+
+                with (
+                    patch.object(self.runtime, "_read_compaction_thread", side_effect=read),
+                    patch("netizen_cli.codex_runtime._INTERRUPTION_CONFIRMATION_SECONDS", 2),
+                    patch("netizen_cli.codex_runtime.asyncio.sleep", new_callable=AsyncMock) as sleep_mock,
+                ):
+                    if confirmation in {"missing", "other-turn"}:
+                        with self.assertRaisesRegex(RuntimeError, "lost the exact Turn"):
+                            await self.runtime._read_compaction_terminal(active)
+                        self.assertFalse(active.terminal_observed)
+                    elif confirmation in {"failed", "interrupted"}:
+                        with self.assertRaises(CompactionFailed):
+                            await self.runtime._read_compaction_terminal(active)
+                        self.assertTrue(active.terminal_observed)
+                        self.assertEqual(active.status, confirmation)
+                    else:
+                        await self.runtime._read_compaction_terminal(active)
+                        self.assertTrue(active.terminal_observed)
+                        self.assertEqual(active.status, "completed")
+                    self.assertEqual(sum(call.args == (2,) for call in sleep_mock.await_args_list), 1)
+                self.assertEqual(active.compact_turn_id, "compact-turn")
+                self.assertEqual(reads, 5 if confirmation in {"active", "notLoaded", "inProgress"} else 3)
+
     async def test_compact_requires_materialized_idle_binding(self) -> None:
         lazy = self.binding()
         with self.assertRaisesRegex(ThreadNotMaterialized, "尚未创建"):
@@ -7020,6 +7104,44 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         next_turn = await self.submit(self.store.get(binding.id), "after failure")
         await self.finish(self.codex.handles[-1], next_turn)
+
+    async def test_interrupted_compaction_retains_safe_reason_and_releases_binding(self) -> None:
+        binding = self.binding()
+        first = await self.submit(binding, "before compact")
+        await self.finish(self.codex.handles[-1], first)
+        for message in (None, "stopped after repeated denials", "API_KEY=private-credential"):
+            with self.subTest(message=message):
+                compact = await self.runtime.compact(
+                    binding=self.store.get(binding.id), owner_id="ou_user", origin=object(),
+                )
+                compact.release_receipt_attempt()
+                self.codex.finish_compaction(status="interrupted")
+                if message is not None:
+                    self.codex.compact_records[-1][1].error = TurnError.model_validate({
+                        "message": message,
+                        "codexErrorInfo": "tooManyDenials",
+                        "additionalDetails": "private raw response",
+                    })
+                self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+
+                outcome = self.outcomes[-1]
+                self.assertEqual(outcome.status, "interrupted")
+                self.assertIsInstance(outcome.error, CompactionFailed)
+                detail = str(outcome.error)
+                self.assertIn("压缩被中断", detail)
+                if message is None:
+                    self.assertEqual(detail, "原生 Codex 上下文压缩被中断。")
+                else:
+                    self.assertIn("tooManyDenials", detail)
+                    if message.startswith("API_KEY"):
+                        self.assertIn("敏感内容已隐藏", detail)
+                    else:
+                        self.assertIn(message, detail)
+                self.assertNotIn("private", detail)
+                self.assertFalse(self.runtime.is_compacting(binding.id))
+                next_turn = await self.submit(self.store.get(binding.id), "after interrupt")
+                self.assertEqual(next_turn.thread_id, first.thread_id)
+                await self.finish(self.codex.handles[-1], next_turn)
 
     async def test_idle_without_new_context_item_is_not_compaction_completion(
         self,
@@ -9053,6 +9175,217 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await self.runtime.wait_idle()
         self.assertEqual(self.outcomes[-1].final_response, "continued")
 
+    async def test_interruption_recheck_uses_latest_exact_status_without_releasing_early(self) -> None:
+        binding = self.binding()
+        real_sleep = asyncio.sleep
+        for recovered_status, recovery in (
+            ("interrupted", False), ("inProgress", False), ("completed", False), ("failed", False),
+            ("interrupted", True),
+        ):
+            with self.subTest(recovered_status=recovered_status, recovery=recovery):
+                if recovery:
+                    self.codex.read_errors.append(InternalRpcError(-32603, "temporary history outage"))
+                recovery_entered = asyncio.Event()
+                release_recovery = asyncio.Event()
+                native_read = FakeThread.read
+                full_reads = 0
+
+                async def read(thread, *, include_turns=False):
+                    nonlocal full_reads
+                    response = await native_read(thread, include_turns=include_turns)
+                    if include_turns:
+                        full_reads += 1
+                    if include_turns and full_reads == 1:
+                        record = self.codex.handles[-1].record
+                        response.thread.status.root.type = "idle"
+                        response.thread.turns = [SimpleNamespace(
+                            **{**vars(record), "status": FakeStatus("interrupted"), "completed_at": 2, "items": []},
+                        )]
+                    elif not include_turns and full_reads == 0:
+                        response.thread.status.root.type = "idle"
+                    return response
+
+                async def sleep(delay):
+                    if delay == 2:
+                        recovery_entered.set()
+                        await release_recovery.wait()
+                    else:
+                        await real_sleep(delay)
+
+                outcomes_before = len(self.outcomes)
+                with (
+                    patch.object(FakeThread, "read", read),
+                    patch("netizen_cli.codex_runtime._INTERRUPTION_CONFIRMATION_SECONDS", 2),
+                    patch("netizen_cli.codex_runtime.asyncio.sleep", side_effect=sleep) as sleep_mock,
+                    patch.object(self.store, "release_scheduled_initial_turn", wraps=self.store.release_scheduled_initial_turn) as release_initial,
+                ):
+                    submission = await self.submit(binding)
+                    handle = self.codex.handles[-1]
+                    submission.release_receipt_attempt()
+                    try:
+                        await asyncio.wait_for(recovery_entered.wait(), 1)
+                        active = self.runtime.active_turn(binding.id)
+                        self.assertEqual(active.turn_id, submission.turn_id)
+                        self.assertFalse(self.runtime._active[binding.id].terminal_observed)
+                        self.assertEqual(len(self.outcomes), outcomes_before)
+                        release_initial.assert_not_called()
+                        self.assertEqual(handle.stream_calls, 0)
+                        self.assertEqual(full_reads, 1)
+                        async with asyncio.timeout(1):
+                            async with self.runtime._lock(binding.id):
+                                pass
+                        if recovered_status == "failed":
+                            handle.fail("confirmed native failure")
+                        elif recovered_status != "inProgress":
+                            handle.complete(status=recovered_status, response="same exact Turn completed")
+                        release_recovery.set()
+                        if recovered_status == "inProgress":
+                            async with asyncio.timeout(1):
+                                while not self.runtime._active[binding.id].in_progress_observed:
+                                    await real_sleep(0)
+                            self.assertEqual(self.runtime.active_turn(binding.id).turn_id, submission.turn_id)
+                            self.assertEqual(len(self.outcomes), outcomes_before)
+                            release_initial.assert_not_called()
+                            handle.complete(response="same exact Turn completed")
+                        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+                    finally:
+                        release_recovery.set()
+                    self.assertEqual(sum(call.args == (2,) for call in sleep_mock.await_args_list), 1)
+                    release_initial.assert_called_once_with(binding.id, submission.turn_id)
+                self.assertEqual(len(self.outcomes), outcomes_before + 1)
+                self.assertEqual(self.outcomes[-1].turn_id, submission.turn_id)
+                self.assertEqual(self.outcomes[-1].status, "completed" if recovered_status == "inProgress" else recovered_status)
+                self.assertIsNone(self.runtime.active_turn(binding.id))
+                self.assertEqual(handle.interrupt_count, 0)
+                self.assertEqual(self.cleanup.calls, [])
+
+    async def test_failed_interruption_recheck_keeps_bounded_recovery_without_fallback(self) -> None:
+        native_read = FakeThread.read
+        real_sleep = asyncio.sleep
+        for failure in ("missing", "read-error", "wrong-thread"):
+            with self.subTest(failure=failure):
+                binding = self.binding()
+                full_reads = 0
+
+                async def read(thread, *, include_turns=False):
+                    nonlocal full_reads
+                    response = await native_read(thread, include_turns=include_turns)
+                    response.thread.status.root.type = "idle"
+                    if include_turns:
+                        full_reads += 1
+                        if full_reads == 1:
+                            response.thread.turns = [SimpleNamespace(
+                                id=self.codex.handles[-1].id, status=FakeStatus("interrupted"), items=[],
+                            )]
+                        elif failure == "read-error":
+                            raise InternalRpcError(-32603, "history unavailable")
+                        elif failure == "wrong-thread":
+                            response.thread.id = "other-thread"
+                        else:
+                            response.thread.turns = []
+                    return response
+
+                async def sleep(delay):
+                    await real_sleep(0 if delay == 2 else delay)
+
+                with (
+                    patch.object(FakeThread, "read", read),
+                    patch("netizen_cli.codex_runtime._INTERRUPTION_CONFIRMATION_SECONDS", 2),
+                    patch("netizen_cli.codex_runtime.asyncio.sleep", side_effect=sleep) as sleep_mock,
+                    patch.object(self.store, "release_scheduled_initial_turn", wraps=self.store.release_scheduled_initial_turn) as release_initial,
+                ):
+                    submission = await self.submit(binding)
+                    submission.release_receipt_attempt()
+                    self.assertTrue(await self.runtime.wait_idle(timeout=1))
+                    self.assertEqual(full_reads, 2 if failure == "wrong-thread" else 5)
+                    self.assertEqual(sum(call.args == (2,) for call in sleep_mock.await_args_list), 1)
+                    active = self.runtime.active_turn(binding.id)
+                    self.assertEqual(active.state, ActiveState.OBSERVATION_UNAVAILABLE)
+                    self.assertEqual(active.turn_id, submission.turn_id)
+                    self.assertFalse(self.runtime._active[binding.id].terminal_observed)
+                    self.assertIsInstance(self.outcomes[-1], TurnObservationUnavailableOutcome)
+                    release_initial.assert_not_called()
+                self.assertEqual(self.codex.handles[-1].stream_calls, 0)
+                self.assertEqual(self.codex.handles[-1].interrupt_count, 0)
+                self.assertEqual(self.cleanup.calls, [])
+                await self.runtime.cancel_tasks()
+
+    async def test_recovery_interruption_confirmation_keeps_read_and_time_budgets(self) -> None:
+        real_sleep = asyncio.sleep
+        for budget in ("last-read", "timeout"):
+            with self.subTest(budget=budget):
+                binding = self.binding()
+                before = len(self.codex.read_calls)
+                self.codex.read_errors.extend(
+                    InternalRpcError(-32603, "history unavailable")
+                    for _ in range(3 if budget == "last-read" else 1)
+                )
+                with (
+                    patch("netizen_cli.codex_runtime._INTERRUPTION_CONFIRMATION_SECONDS", 2),
+                    patch("netizen_cli.codex_runtime._TURN_OBSERVATION_RECOVERY_TIMEOUT_SECONDS", 0.05),
+                    patch("netizen_cli.codex_runtime.asyncio.sleep", wraps=real_sleep) as sleep_mock,
+                    patch.object(self.store, "release_scheduled_initial_turn", wraps=self.store.release_scheduled_initial_turn) as release_initial,
+                ):
+                    submission = await self.submit(binding)
+                    self.codex.handles[-1].complete(status="interrupted")
+                    submission.release_receipt_attempt()
+                    self.assertTrue(await self.runtime.wait_idle(timeout=1))
+                    self.assertEqual(len(self.codex.read_calls) - before, 4 if budget == "last-read" else 2)
+                    self.assertEqual(sum(call.args == (2,) for call in sleep_mock.await_args_list), 0 if budget == "last-read" else 1)
+                    self.assertEqual(self.runtime.active_turn(binding.id).state, ActiveState.OBSERVATION_UNAVAILABLE)
+                    self.assertFalse(self.runtime._active[binding.id].terminal_observed)
+                    release_initial.assert_not_called()
+                await self.runtime.cancel_tasks()
+
+    async def test_scheduled_interruption_recheck_preserves_exact_identity(self) -> None:
+        binding = self.binding()
+        self.store.assign_native_thread_id(binding.id, "scheduled-thread")
+        real_sleep = asyncio.sleep
+
+        def view(status):
+            return SimpleNamespace(thread=SimpleNamespace(
+                id="scheduled-thread",
+                status=SimpleNamespace(root=SimpleNamespace(type="active" if status == "inProgress" else "idle")),
+                turns=[SimpleNamespace(id="initial-turn", status=FakeStatus(status))],
+            ))
+
+        for confirmed, error_code in (
+            ("interrupted", None), ("inProgress", None), ("completed", None), ("failed", None),
+            ("missing", "turn_unavailable"), ("wrong-thread", "identity_mismatch"),
+            ("read-error", "read_unavailable"),
+        ):
+            with self.subTest(confirmed=confirmed):
+                second = view(confirmed)
+                if confirmed == "missing":
+                    second.thread.turns = []
+                elif confirmed == "wrong-thread":
+                    second.thread.id = "other-thread"
+                elif confirmed == "read-error":
+                    second = InternalRpcError(-32603, "history unavailable")
+                read = AsyncMock(side_effect=[view("interrupted"), second])
+
+                async def sleep(delay):
+                    self.assertEqual(delay, 2)
+                    self.assertFalse(self.runtime._lock(binding.id).locked())
+                    await real_sleep(0)
+
+                with (
+                    patch("netizen_cli.codex_runtime.AsyncThread", return_value=SimpleNamespace(read=read)),
+                    patch("netizen_cli.codex_runtime._INTERRUPTION_CONFIRMATION_SECONDS", 2),
+                    patch("netizen_cli.codex_runtime.asyncio.sleep", side_effect=sleep) as sleep_mock,
+                ):
+                    if error_code:
+                        with self.assertRaises(ScheduledTurnReadError) as caught:
+                            await self.runtime.read_scheduled_turn(binding.id, "initial-turn")
+                        self.assertEqual(caught.exception.code, error_code)
+                    else:
+                        self.assertEqual(await self.runtime.read_scheduled_turn(binding.id, "initial-turn"), confirmed)
+                    sleep_mock.assert_awaited_once_with(2)
+                self.assertEqual(read.await_count, 2)
+                self.assertTrue(all(call.kwargs == {"include_turns": True} for call in read.await_args_list))
+        self.assertEqual(self.codex.resume_calls, [])
+        self.assertEqual(self.codex.handles, [])
+
     async def test_exact_terminals_are_authoritative_under_all_known_thread_states(self) -> None:
         binding = self.binding()
         for thread_status in ("systemError", "notLoaded", "idle", "active"):
@@ -9063,6 +9396,11 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     if turn_status == "failed":
                         handle.fail("backend unavailable", "serverOverloaded")
                     else:
+                        if turn_status == "interrupted":
+                            handle.record.error = TurnError.model_validate({
+                                "message": "stopped after repeated denials",
+                                "codexErrorInfo": "tooManyDenials",
+                            })
                         handle.complete(status=turn_status)
                     self.codex.read_statuses.extend([thread_status] * 2)
                     submission.release_receipt_attempt()
@@ -9078,6 +9416,8 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                         self.assertIn("serverOverloaded", str(outcome.error))
                     else:
                         self.assertIsNone(outcome.error)
+                        if turn_status == "interrupted":
+                            self.assertIs(outcome.result.error, handle.record.error)
                     self.assertEqual(len(self.codex.start_kwargs), 1)
 
     async def test_system_error_without_exact_terminal_stays_unavailable_with_reason(self) -> None:

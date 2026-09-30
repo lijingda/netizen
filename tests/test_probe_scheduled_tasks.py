@@ -9,7 +9,7 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 from openai_codex.errors import InvalidRequestError
 
 from netizen_cli.bindings import BindingStore
@@ -485,26 +485,57 @@ class FakeMcpProbeTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(client.closed for client in clients))
             self.assertTrue(all(runner.closed for runner in runners))
 
-    async def test_stop_waits_for_exact_turn_and_active_thread_and_rejects_terminal(self):
+    async def test_stop_confirms_interruption_and_requires_exact_active_turn(self):
         snapshots = [
             ("active", [SimpleNamespace(id="other", status="inProgress")]),
             ("idle", [SimpleNamespace(id="owned-turn", status="inProgress")]),
+            ("idle", [SimpleNamespace(id="owned-turn", status="interrupted")]),
             ("active", [SimpleNamespace(id="owned-turn", status="inProgress")]),
         ]
-
-        async def read(**kwargs):
-            self.assertEqual(kwargs, {"include_turns": True})
-            state, turns = snapshots.pop(0)
-            return SimpleNamespace(thread=SimpleNamespace(
-                id="owned-thread", status=SimpleNamespace(type=state), turns=turns,
-            ))
-
+        read = AsyncMock(side_effect=[SimpleNamespace(thread=SimpleNamespace(
+            id="owned-thread", status=SimpleNamespace(type=state), turns=turns,
+        )) for state, turns in snapshots])
         thread = SimpleNamespace(id="owned-thread", read=read)
-        await _wait_for_exact_active(thread, "owned-turn")
-        self.assertFalse(snapshots)
-        snapshots.append(("idle", [SimpleNamespace(id="owned-turn", status="completed")]))
-        with self.assertRaisesRegex(ProbeFailure, "stop_fixture_terminal_before_active_observation"):
+        with patch("scripts.probe_python_sdk.asyncio.sleep", new=AsyncMock()) as sleep:
             await _wait_for_exact_active(thread, "owned-turn")
+        self.assertEqual(read.await_args_list, [call(include_turns=True)] * 4)
+        self.assertEqual(sleep.await_args_list, [call(0.1), call(0.1), call(2.0)])
+
+    async def test_stop_rejects_actual_terminal_after_single_interruption_confirmation(self):
+        for status in ("completed", "interrupted", "failed"):
+            with self.subTest(status=status):
+                thread = SimpleNamespace(id="owned-thread", read=AsyncMock(side_effect=[
+                    SimpleNamespace(thread=SimpleNamespace(
+                        id="owned-thread", status=SimpleNamespace(type="idle"),
+                        turns=[SimpleNamespace(id="owned-turn", status=state)],
+                    )) for state in ("interrupted", status)
+                ]))
+                with patch("scripts.probe_python_sdk.asyncio.sleep", new=AsyncMock()) as sleep:
+                    with self.assertRaisesRegex(ProbeFailure, "stop_fixture_terminal_before_active_observation"):
+                        await _wait_for_exact_active(thread, "owned-turn")
+                sleep.assert_awaited_once_with(2.0)
+                self.assertEqual(thread.read.await_args_list, [call(include_turns=True)] * 2)
+
+    async def test_stop_confirmation_failure_cannot_satisfy_active_or_terminal_observation(self):
+        for confirmation in (
+            RuntimeError("read unavailable"),
+            SimpleNamespace(thread=SimpleNamespace(
+                id="owned-thread", status=SimpleNamespace(type="active"),
+                turns=[SimpleNamespace(id="other", status="inProgress")],
+            )),
+        ):
+            with self.subTest(confirmation=confirmation):
+                thread = SimpleNamespace(id="owned-thread", read=AsyncMock(side_effect=[
+                    SimpleNamespace(thread=SimpleNamespace(
+                        id="owned-thread", status=SimpleNamespace(type="idle"),
+                        turns=[SimpleNamespace(id="owned-turn", status="interrupted")],
+                    )), confirmation,
+                ]))
+                with patch("scripts.probe_python_sdk.asyncio.sleep", new=AsyncMock()) as sleep:
+                    with self.assertRaisesRegex(ProbeFailure, "stop_fixture_interruption_confirmation_unavailable"):
+                        await _wait_for_exact_active(thread, "owned-turn")
+                sleep.assert_awaited_once_with(2.0)
+                self.assertEqual(thread.read.await_count, 2)
 
     async def test_stop_error_reports_only_numeric_code_and_classification(self):
         error = ProbeStopFailure(InvalidRequestError(-32600, "No active turn for SECRET-NATIVE-ID"))

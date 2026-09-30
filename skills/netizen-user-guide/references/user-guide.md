@@ -122,6 +122,7 @@ Side 仅接受其[命令白名单](#side-临时话题)，不能把上表所有�
 - Netizen 不保存 prompt queue，不会把运行中的新消息悄悄排成下一轮，也不会把多条消息合并成一个 prompt。
 - `completed`、`interrupted` 和 `failed` 都只结束当前 Turn；即使本轮失败，Thread、历史和
   Binding 仍保留，下一条消息可以在同一 Thread 开始新 Turn，不必为保留上下文而换会话。
+  若 Codex 返回具体中断原因，回复或进度卡会一并显示；该任务仍是中断状态。
 - 若暂时无法确认 exact Turn 状态，Netizen 只做一次最多 5 秒、最多三次原生 I/O 的
   短恢复，其中最多 resume 一次。恢复 exact `inProgress` 就继续正常无时限轮询和 steer；
   确认 terminal 就交付结果。仍不可验证时显示 `turn-observation-unavailable`，保留
