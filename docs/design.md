@@ -1413,9 +1413,8 @@ Admin 只发起本实例重启，由同用户独立 systemd transient service／
 不等待任务空闲，不保证任务续跑，不恢复旧配置或数据库。最近一次 typed 操作摘要
 保存在私有 `state/update.json`，不进入 Channel SQLite。包更新不由此记录授权。
 
-旧 release/current 安装必须由维护者手工转换，残留旧 activation intent 需先手工处理；
-新入口不继续旧安装事务，不把旧恢复快照直接用于启动。旧实现和历史验收仅证明其当时
-边界，新 CLI 的测试及两平台实机验收分别记录。
+新入口不继续旧 release/current 安装或 activation 事务，不把旧恢复快照直接用于启动。
+历史实现的验收仅证明其当时边界，CLI 的测试及两平台实机验收分别记录。
 
 ## 管理查询与操作
 

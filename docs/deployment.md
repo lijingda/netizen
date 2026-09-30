@@ -1,7 +1,7 @@
 # Linux 与 macOS 独立实例部署
 
 > 当前程序分发与维护遵循 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md)
-> 和 [CLI 安装与维护](cli.md)。新 CLI 尚未发布到 PyPI；开发不等于发布或真实安装迁移。
+> 和 [CLI 安装与维护](cli.md)。`netizen-cli` 自 0.10.0 起通过 PyPI 发行。
 > 本文保留的旧 release／激活回滚记录均为历史证据，不能证明 CLI 的安装、更新或两平台
 > 服务验收已经通过。源码测试、实际 SDK 执行、浏览器流程与平台服务验收分别记录。
 
@@ -84,7 +84,7 @@ ${CODEX_HOME:-~/.codex}/                      # 用户共享原生状态，不�
 
 remove 默认仅解除系统服务及自启，保留数据；--purge 先展示并确认有限、已验证的文件
 清单，永不递归删除 root／home，不删除未知文件、Project 或共享 Codex 状态。
-移除实例不卸载 Python 环境中的共享包。旧目录手工转换见[CLI 手册](cli.md#admin-与旧安装)。
+移除实例不卸载 Python 环境中的共享包。
 可选[netizen-herdr 扩展](../extensions/netizen-herdr/README.md)仍由用户从源码按说明安装，
 不是 wheel 自动安装的全局 Skill。
 
@@ -756,15 +756,14 @@ phase，以新结果为准。
 
 ## 发布正式 Release
 
-新发行目标为 PyPI 的 `netizen-cli`。代码开发、构建 wheel／sdist、通过 CI 都不等于
-上传或正式发布；发布必须由维护者显式触发。当前源码提供发布链，但尚未因此证明 PyPI
-项目归属、Trusted Publisher 配置或实际发布成功，不能将成功 CI 等同于具备发布权限。
+发行包为 PyPI 的 `netizen-cli`。[0.10.0](https://pypi.org/project/netizen-cli/0.10.0/)
+已通过本流程正式发布，并完成公开索引隔离安装验证。代码开发、构建 wheel／sdist、
+通过 CI 不等于上传或正式发布；后续发布仍须由维护者显式触发。
 
-首次发布前，维护者须确认 `netizen-cli` 的 PyPI 项目归属／待创建项目，并配置与实际
-GitHub owner、repository、`release.yml` workflow 和 `published-release` environment
-对应的 Trusted Publisher。流程使用 OIDC，不新增长期 PyPI token secret。GitHub 的
-Immutable Releases、版本 tag 保护及 environment 权限也需单独确认；工作流文件的存在
-不会自动创建这些外部设置，本次开发没有代用户配置或执行发布。
+正式发布前，维护者须确认 `netizen-cli` 的 PyPI 项目归属，以及与实际 GitHub owner、
+repository、`release.yml` workflow 和 `published-release` environment 对应的 Trusted
+Publisher。流程使用 OIDC，不新增长期 PyPI token secret。GitHub 的 Immutable Releases、
+版本 tag 保护及 environment 权限也需单独确认；工作流文件不会自动创建这些外部设置。
 
 ### 发布步骤
 
@@ -801,7 +800,6 @@ install.sh 的零退出证明 CLI 环境识别、schema 启动迁移或 update �
 副作用；setup 不默认启动。当前 checkout 的旧 install.sh、dev-install.sh、service.sh、
 uninstall.sh 入口已停用，只返回 CLI 指引；不会生成 release/current 或隐藏 venv。
 源码安装使用选定 Python 的 `pip install .` 或开发期 `pip install -e .`，再 setup/start。
-此前已安装的物理旧 release 脚本不会被开发改动自动更新，真实旧安装另行手工转换。
 
 ### 维护飞书权限契约
 

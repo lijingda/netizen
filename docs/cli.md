@@ -1,8 +1,8 @@
 # Netizen CLI 安装与维护
 
 本手册描述 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 的普通
-Python 包模型。该改造尚未发布到 PyPI；以下是新版本接口，不代表当前线上旧 Release
-已经支持。发布、旧安装手工转换与真实平台验收必须分别执行，不自动发生。
+Python 包模型。`netizen-cli` 自 0.10.0 起通过 PyPI 发行；包安装、实例 setup 和
+服务启动是分别执行的操作。
 
 ## 安装与首次使用
 
@@ -58,8 +58,7 @@ ready 证据决定运行状态。当前用户权限之外、未知 supervisor �
 服务定义统一使用 CLI v1 格式，内部按平台生成和校验 systemd unit 或 launchd plist。
 Linux 使用正确的 WorkingDirectory 单路径写法。未知、被修改或被系统管理器拒绝的
 定义不能猜测接管；Linux 接受父目录符号链接产生的同文件路径别名，但仍拒绝服务文件
-本身的符号链接、不同文件和额外覆盖配置。首次发布前的临时验收定义不提供兼容转换，
-测试环境需清理旧定义后重新注册。
+本身的符号链接、不同文件和额外覆盖配置。
 
 ```sh
 netizen stop --root /absolute/path/to/.netizen
@@ -157,17 +156,10 @@ netizen remove --root /absolute/path/to/.netizen --purge -y
 方式转移，再从准确环境卸载 netizen-cli。原生 pip／uv 卸载不会替 Netizen 停服或清理
 服务；程序卸载不删除保留的实例数据、用户 Python 或共享 Codex 状态。
 
-## Admin 与旧安装
+## Admin 管理
 
 Admin 只允许本实例管理与显式重启，不再安装或升级全局程序。重启使用绑定环境中
 当前程序，可能触发该实例数据迁移，不承诺任务续跑；程序更新从外部 CLI 执行。
-
-旧 release/current 安装由维护者手工转换：先确认并停止旧服务、备份实例数据，安装
-选定 Python 环境中的 CLI，再按新数据归属与初始化证据校验注册服务，启动验证，最后
-只清理已确认的旧程序文件。没有自动旧布局转换器；不要直接对旧目录运行 purge，
-也不要通过删库或伪造空实例绕过校验。转换操作需另行指定目标和确认，开发不自动执行。
-旧部署模块、模板和仅服务旧事务的测试已移除，历史代码可在 Git 历史中查阅。
-旧 shell／Python 安装与更新入口只保留拒绝执行和迁移指引；历史 schema 夹具仍保留。
 
 ## 验证与发布状态
 

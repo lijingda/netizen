@@ -69,8 +69,8 @@ Linux 注销后常驻需要 linger；macOS 服务随桌面登录启动、注销�
 
 ### 2. 安装 CLI 并创建实例
 
-此分支改为普通 Python CLI，尚未发布到 PyPI；以下为新版使用方式，不表示旧 Release
-已具备这些命令。开发安装见[贡献指南](docs/CONTRIBUTING.md)。发行后在选定环境安装：
+在选定 Python 环境从 PyPI 安装 `netizen-cli`。源码开发安装见
+[贡献指南](docs/CONTRIBUTING.md)。
 
 ```sh
 python -m pip install netizen-cli
@@ -91,8 +91,7 @@ setup 准备配置、飞书授权和实例数据并注册服务，不默认启�
 
 日常维护用 `netizen update` 更新当前环境并恢复原来运行的实例；它不接受 --root。
 `netizen remove --root ...` 默认保留数据，--purge 才清理精确范围，-y 只省略确认。
-完整流程、失败边界、跨环境切换和卸载见 [CLI 安装与维护](docs/cli.md)。旧安装手工转换，
-不提供自动旧布局迁移，不要直接对现有旧实例执行新版清理命令。
+完整流程、失败边界、跨环境切换和卸载见 [CLI 安装与维护](docs/cli.md)。
 
 ### 3. 在飞书开始第一次对话
 
