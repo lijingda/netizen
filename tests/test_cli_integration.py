@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 from netizen_cli import cli
 from netizen_cli.cli_data import prepare_instance
-from netizen_cli.cli_services import ServiceBinding, ServiceManager
+from netizen_cli.cli_services import ServiceBinding, ServiceManager, _service_environment
 from tests.test_cli_services import ManagerDouble
 
 
@@ -238,7 +238,7 @@ class LinuxCliIntegrationTest(unittest.TestCase):
             self.setup_instance()
         self.assertFalse(stale.exists())
         self.assertEqual(self.manager.inspect(self.root).binding.root, self.root)
-        self.assertEqual(self.manager._environment(self.current)["NETIZEN_CONFIG_PATH"],
+        self.assertEqual(_service_environment(self.home, self.current)["NETIZEN_CONFIG_PATH"],
                          str(self.root / "config.yaml"))
 
     def test_missing_database_failure_preserves_existing_binding_and_reports_start_phase(self) -> None:
@@ -255,7 +255,7 @@ class LinuxCliIntegrationTest(unittest.TestCase):
         from netizen_cli import service_launcher
 
         self.setup_instance()
-        environment = self.manager._environment(self.current)
+        environment = _service_environment(self.home, self.current)
         stale = self.directory / "stale-profile-instance"
         snapshot = {
             "PATH": "/some/other/python/bin:/usr/bin", "NETIZEN_ROOT": str(stale),

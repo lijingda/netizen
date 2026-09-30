@@ -90,19 +90,13 @@ let updatePollDelay = 2000;
 let updatePollExpired = false;
 let updateSubmitting = false;
 let updateExpectedTarget = null;
-let updateExpectedKind = null;
 let updatePriorOperationId = null;
 let updateDisconnected = false;
 let updateReading = false;
 
-function sameUpdateTarget(left, right, kind) {
-  if (kind === "restart") {
-    return left?.resource === "instance-restart" && typeof left.targetId === "string"
-      && left.targetId === right?.installationId;
-  }
-  return left != null && right != null
-    && ["version", "releaseId", "installerSha256", "archiveSha256"]
-      .every((key) => left[key] === right[key]);
+function sameRestartTarget(left, right) {
+  return left?.resource === "instance-restart" && typeof left.targetId === "string"
+    && left.targetId === right?.installationId;
 }
 
 function updateNeedsPolling() {
@@ -121,7 +115,7 @@ function renderUpdates() {
   document.querySelector("#update-message").textContent = data.checkingError
     || data.message || "程序更新请在对应 Python 环境运行 netizen update。";
   const operation = data.operation;
-  const restarting = (updateExpectedKind || operation?.kind) === "restart";
+  const restarting = updateExpectedTarget != null || operation?.kind === "restart";
   const operationName = restarting ? "重启" : "升级";
   let phase = operation
     ? (updatePhaseLabels[operation.phase] || "维护结果未确认").replace("升级", operationName)
@@ -172,11 +166,10 @@ async function updateApi(path, options = {}) {
 
 function acceptUpdateStatus(data) {
   state.updates = data;
-  if ((data.operation?.kind || "upgrade") === updateExpectedKind
-      && sameUpdateTarget(updateExpectedTarget, data.operation?.target, updateExpectedKind)
+  if (data.operation?.kind === "restart"
+      && sameRestartTarget(updateExpectedTarget, data.operation?.target)
       && data.operation.operationId !== updatePriorOperationId) {
     updateExpectedTarget = null;
-    updateExpectedKind = null;
   }
   updateDisconnected = false;
   updatePollDelay = 2000;
@@ -238,20 +231,11 @@ async function loadUpdates() {
 }
 
 async function restartService() {
-  return submitMaintenance("restart");
-}
-
-async function submitMaintenance(kind) {
-  if (kind !== "restart") return;
   if (updateSubmitting || updateReading || updateNeedsPolling()
       || updatePollExpired || updateDisconnected) return;
-  const restarting = kind === "restart";
-  const action = restarting ? "restart" : "install";
-  const envelope = state.updates?.actions?.[action];
-  if (!envelope || (restarting
-    ? !state.updates.restartSupported || !state.updates.restartAvailable
-    : !state.updates.supported || !state.updates.available)) return;
-  if (restarting && !window.confirm(
+  const envelope = state.updates?.actions?.restart;
+  if (!envelope || !state.updates.restartSupported || !state.updates.restartAvailable) return;
+  if (!window.confirm(
     "确认重启服务？将使用绑定环境中当前安装的程序，不更新软件包。\n\n"
       + `实例：${document.querySelector("#instance-root")?.textContent || "当前实例"}\n\n`
       + "重启会中断正在执行的任务、暂停 Goal，并结束临时 Side 会话。"
@@ -259,22 +243,19 @@ async function submitMaintenance(kind) {
   )) return;
   updateSubmitting = true;
   updateExpectedTarget = envelope.target;
-  updateExpectedKind = kind;
   updatePriorOperationId = state.updates.operation?.operationId || null;
   updatePollStarted = Date.now();
-  state.updates.actions.install = null;
   state.updates.actions.restart = null;
   renderUpdates();
   let sessionExpired = false;
   try {
-    const result = await updateApi(`/api/v1/updates/${action}`, {
+    const result = await updateApi("/api/v1/updates/restart", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(actionPayload(envelope)),
     });
     acceptUpdateStatus({ ...state.updates, operation: result.operation });
     const instanceLabel = document.querySelector("#instance-root")?.textContent || "当前实例";
-    setStatus((restarting ? "重启已受理，正在查询服务重启结果。重启后需要重新登录。"
-      : "升级已受理，正在查询安装器结果。重启后可能需要重新登录。") + ` 实例：${instanceLabel}`);
+    setStatus(`重启已受理，正在查询服务重启结果。重启后需要重新登录。 实例：${instanceLabel}`);
   } catch (error) {
     if (error.status === 401) {
       sessionExpired = true;
@@ -282,10 +263,9 @@ async function submitMaintenance(kind) {
     }
     if (error.status >= 400 && error.status < 500) {
       updateExpectedTarget = null;
-      updateExpectedKind = null;
       setStatus(`${error.message} 请刷新维护状态。`, true);
     } else {
-      setStatus(`${restarting ? "重启" : "升级"}提交结果未确认，正在查询服务端记录；请勿重复提交。`, true);
+      setStatus("重启提交结果未确认，正在查询服务端记录；请勿重复提交。", true);
     }
   } finally {
     updateSubmitting = false;

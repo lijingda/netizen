@@ -802,12 +802,6 @@ class InstanceManagementService:
     async def update_status(self) -> dict[str, Any]:
         return await self._updates.status()
 
-    async def check_update(self) -> dict[str, Any]:
-        return await self._updates.check()
-
-    async def start_update(self, *, target: dict[str, Any]) -> dict[str, Any]:
-        return await self._updates.start(target=target)
-
     async def restart_service(self, *, installation_id: str) -> dict[str, Any]:
         return await self._updates.restart(installation_id=installation_id)
 

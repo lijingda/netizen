@@ -41,10 +41,6 @@ CODES = frozenset({
     "previous_release_changed", "profile_failed", "manual_recovery",
     "restart_failed", "service_ready",
 })
-ENV_OPERATION_ID = "NETIZEN_UPDATE_OPERATION_ID"
-ENV_LOCK_FD = "NETIZEN_UPDATE_LOCK_FD"
-ENV_VERSION = "NETIZEN_UPDATE_VERSION"
-ENV_ARCHIVE_SHA256 = "NETIZEN_UPDATE_ARCHIVE_SHA256"
 
 
 class UpdateProtocolError(RuntimeError):
@@ -143,15 +139,6 @@ def new_cli_restart_operation(version: str, installation_id: str) -> dict[str, A
 
 def terminal_phase(phase: str) -> bool:
     return phase in TERMINAL_PHASES
-
-
-def activation_requires_recovery(product_root: Path) -> bool:
-    """An interrupted installer must reconcile its transaction before restart."""
-    try:
-        (product_root / "state" / ".activation-intent.json").lstat()
-    except FileNotFoundError:
-        return False
-    return True
 
 
 def _state_directory(product_root: Path) -> Path:

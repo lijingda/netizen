@@ -1,8 +1,8 @@
 """Per-user installed-CLI services; definitions are the instance inventory.
 
-Only Netizen's frozen definitions are writable (Linux v2, launchd v1).
-Recognition retains v1 independently of the current renderer; a new format
-needs its own explicitly supported validator.
+Only Netizen's CLI v1 service definition is writable, rendered for systemd or
+launchd. Recognition uses the same platform-specific contract independently
+of the registration renderer.
 systemd state comes from machine properties; launchd's documented list columns
 provide PID state.
 The diagnostic output of ``launchctl print`` is deliberately never parsed.
@@ -61,9 +61,8 @@ class ServiceStatus:
     loaded: bool = False
 
 
-_V1_MARKER = "# Netizen CLI service v1 "
-_V2_MARKER = "# Netizen CLI service v2 "
-_V1_SENTINEL = "io.github.lijingda.netizen/cli-v1"
+_SERVICE_MARKER = "# Netizen CLI service v1 "
+_LAUNCH_AGENT_SENTINEL = "io.github.lijingda.netizen/cli-v1"
 _READY = b"netizen service ready\n"
 _LOG_READ_LIMIT = 1024 * 1024
 _SYSTEMD_PROPERTIES = (
@@ -72,14 +71,14 @@ _SYSTEMD_PROPERTIES = (
 )
 
 
-def _v1_quote(value: str) -> str:
+def _systemd_quote(value: str) -> str:
     if any(ord(c) < 32 for c in value):
         raise ServiceError("systemd values cannot contain control characters")
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
 
 
-def _v1_environment(home: Path, binding: ServiceBinding) -> dict[str, str]:
-    """Frozen v1 environment: no extra overrides or caller PATH are accepted."""
+def _service_environment(home: Path, binding: ServiceBinding) -> dict[str, str]:
+    """Service environment: no extra overrides or caller PATH are accepted."""
     root = binding.root
     environment = {
         "HOME": str(home), "NETIZEN_ROOT": str(root),
@@ -99,26 +98,25 @@ def _v1_environment(home: Path, binding: ServiceBinding) -> dict[str, str]:
     return environment
 
 
-def _v1_arguments(binding: ServiceBinding) -> list[str]:
+def _service_arguments(binding: ServiceBinding) -> list[str]:
     return [str(binding.python), "-E", "-P", "-m", "netizen_cli", "_serve",
             "--root", str(binding.root)]
 
 
-def _v1_definition(home: Path, platform: str, binding: ServiceBinding,
-                   *, enabled: bool = True) -> bytes:
-    """Frozen CLI v1 contract, never expanded to match new rendering defaults.
+def _service_definition(home: Path, platform: str, binding: ServiceBinding,
+                        *, enabled: bool = True) -> bytes:
+    """CLI v1 contract with native platform serialization.
 
     Linux accepts this exact serialization; launchd accepts this exact plist
     structure and types. Binding paths and RunAtLoad are the only variable
-    fields. Changes require a separately versioned contract, retaining this one
-    while v1 is supported. This is not a parser for arbitrary manager overrides.
+    fields. This is not a parser for arbitrary manager overrides.
     """
-    env = _v1_environment(home, binding)
+    env = _service_environment(home, binding)
     if platform == "darwin":
-        env["NETIZEN_MANAGED_LAUNCH_AGENT"] = _V1_SENTINEL
+        env["NETIZEN_MANAGED_LAUNCH_AGENT"] = _LAUNCH_AGENT_SENTINEL
         return plistlib.dumps({
             "Label": launch_agent_label(binding.root),
-            "ProgramArguments": _v1_arguments(binding),
+            "ProgramArguments": _service_arguments(binding),
             "WorkingDirectory": str(home), "RunAtLoad": enabled,
             "KeepAlive": {"SuccessfulExit": False}, "ExitTimeOut": 75,
             "ThrottleInterval": 3, "Umask": 0o077,
@@ -131,31 +129,18 @@ def _v1_definition(home: Path, platform: str, binding: ServiceBinding,
                            "codex_home": str(binding.codex_home) if binding.codex_home else None},
                           sort_keys=True)
     lines = [
-        _V1_MARKER + metadata, "[Unit]", "Description=Netizen CLI instance",
+        _SERVICE_MARKER + metadata, "[Unit]", "Description=Netizen CLI instance",
         "After=network-online.target", "[Service]", "Type=simple",
-        "WorkingDirectory=" + _v1_quote(str(home)),
-        "ExecStart=:" + " ".join(_v1_quote(arg) for arg in _v1_arguments(binding)),
+        # This single-path field does not unquote or C-unescape. Escape only
+        # specifiers; '/' protects a trailing space or backslash in the path.
+        "WorkingDirectory=" + str(home).replace("%", "%%") + "/",
+        "ExecStart=:" + " ".join(_systemd_quote(arg) for arg in _service_arguments(binding)),
         "Restart=on-failure", "RestartSec=3", "TimeoutStopSec=75",
         "KillMode=control-group", "UMask=0077",
-        *["Environment=" + _v1_quote(f"{key}={value}") for key, value in env.items()],
+        *["Environment=" + _systemd_quote(f"{key}={value}") for key, value in env.items()],
         "[Install]", "WantedBy=default.target", "",
     ]
     return "\n".join(lines).encode()
-
-
-def _v2_linux_definition(home: Path, binding: ServiceBinding) -> bytes:
-    """Frozen v2: correct only Linux's single-path WorkingDirectory syntax.
-
-    Unlike ExecStart/Environment, this field does not unquote or C-unescape.
-    Escape specifiers only; the trailing slash protects a final space or
-    backslash from unit-file whitespace stripping / line continuation.
-    Keep v1 byte recognition unchanged, including its invalid quoted path.
-    """
-    content = _v1_definition(home, "linux", binding)
-    old = "\nWorkingDirectory=" + _v1_quote(str(home)) + "\n"
-    new = "\nWorkingDirectory=" + str(home).replace("%", "%%") + "/\n"
-    return (content.replace(_V1_MARKER.encode(), _V2_MARKER.encode(), 1)
-            .replace(old.encode(), new.encode(), 1))
 
 
 def _same_service_fragment(fragment: str, expected: Path) -> bool:
@@ -290,45 +275,34 @@ class ServiceManager:
             raise ServiceError("instance root cannot be the account home or filesystem root")
         return root
 
-    def _environment(self, binding: ServiceBinding) -> dict[str, str]:
-        return _v1_environment(self.home, binding)
-
-    def _arguments(self, binding: ServiceBinding) -> list[str]:
-        return _v1_arguments(binding)
-
     def _render(self, binding: ServiceBinding, *, enabled: bool = True) -> bytes:
-        if self.platform == "linux":
-            return _v2_linux_definition(self.home, binding)
-        return _v1_definition(self.home, self.platform, binding, enabled=enabled)
+        return _service_definition(self.home, self.platform, binding, enabled=enabled)
 
     def _binding_from_file(self, path: Path) -> ServiceBinding:
         content = _read_owned(path, self.uid)
         try:
             if self.platform == "linux":
                 first, *_ = content.decode().splitlines()
-                marker = next((value for value in (_V1_MARKER, _V2_MARKER)
-                               if first.startswith(value)), None)
-                if marker is None:
-                    raise ValueError("unsupported service definition format; only CLI v1/v2 are supported")
-                raw = json.loads(first[len(marker):])
+                if not first.startswith(_SERVICE_MARKER):
+                    raise ValueError("unsupported service definition format; only CLI v1 is supported")
+                raw = json.loads(first[len(_SERVICE_MARKER):])
                 if set(raw) != {"root", "python", "prefix", "codex_home"}:
                     raise ValueError("unrecognized binding metadata")
                 binding = ServiceBinding(*(Path(raw[key]) for key in ("root", "python", "prefix")),
                                          Path(raw["codex_home"]) if raw["codex_home"] is not None else None)
-                expected = (_v2_linux_definition(self.home, binding) if marker == _V2_MARKER
-                            else _v1_definition(self.home, self.platform, binding))
+                expected = _service_definition(self.home, self.platform, binding)
                 valid = content == expected
             else:
                 payload = plistlib.loads(content)
                 env = payload["EnvironmentVariables"]
-                if not isinstance(env, dict) or env.get("NETIZEN_MANAGED_LAUNCH_AGENT") != _V1_SENTINEL:
+                if not isinstance(env, dict) or env.get("NETIZEN_MANAGED_LAUNCH_AGENT") != _LAUNCH_AGENT_SENTINEL:
                     raise ValueError("unsupported service definition format; only CLI v1 is supported")
                 binding = ServiceBinding(Path(env["NETIZEN_ROOT"]),
                                          Path(env["NETIZEN_CLI_PYTHON"]),
                                          Path(env["NETIZEN_CLI_PREFIX"]),
                                          Path(env["CODEX_HOME"]) if "CODEX_HOME" in env else None)
                 enabled = payload["RunAtLoad"]
-                expected = plistlib.loads(_v1_definition(self.home, self.platform, binding, enabled=enabled))
+                expected = plistlib.loads(_service_definition(self.home, self.platform, binding, enabled=enabled))
                 # plist serialization retains scalar types (False is not the
                 # integer 0), unlike Python's ordinary dictionary equality.
                 valid = (isinstance(enabled, bool)

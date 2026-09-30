@@ -348,7 +348,7 @@ printf 'logout-noise=ignored'
             patch.object(launcher, "clear_own_service_identity"),
             patch.object(launcher.os, "set_inheritable") as set_inheritable,
         ):
-            launcher.launch()
+            launcher.launch(root)
 
         executable, argv, environment = execute.call_args.args
         check_root.assert_called_once_with(root)
@@ -466,7 +466,7 @@ printf 'logout-noise=ignored'
                     "_launch_with_lifetime_lock",
                 ) as launch_main,
             ):
-                launcher.launch()
+                launcher.launch(root)
 
             self.assertFalse(ready.exists())
             self.assertEqual(launch_main.call_args.kwargs["instance_root"], root)
@@ -501,7 +501,7 @@ printf 'logout-noise=ignored'
                     patch.object(launcher.os, "execve") as execute,
                 ):
                     with self.assertRaisesRegex(launcher.ServiceLaunchError, "instance root marker"):
-                        launcher.launch()
+                        launcher.launch(root)
                     acquire.assert_not_called()
                     clear.assert_not_called()
                     capture.assert_not_called()
@@ -544,7 +544,7 @@ printf 'logout-noise=ignored'
                     patch.object(launcher, "clear_ready_marker") as clear,
                     self.assertRaisesRegex(launcher.ServiceLaunchError, "does not match NETIZEN_ROOT"),
                 ):
-                    launcher.launch()
+                    launcher.launch(root)
                 acquire.assert_not_called()
                 clear.assert_not_called()
 

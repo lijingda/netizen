@@ -55,10 +55,11 @@ schema 没变化不会重复迁移或无条件备份。status/help/version 不�
 服务。没有独立实例注册表：服务定义是受管实例清单，管理器实时状态与 lifetime lock／
 ready 证据决定运行状态。当前用户权限之外、未知 supervisor 和任意手工进程不在自动
 发现保证中。
-服务定义按冻结格式校验：Linux 新注册使用 v2，修正 WorkingDirectory 的单路径写法；
-macOS 仍为 v1，并保留已有 v1 定义的识别。校验不随当前模板的排版变化而改变；未知、
-被修改或被系统管理器拒绝的定义不能猜测接管。Linux 接受父目录符号链接产生的同文件
-路径别名，但仍拒绝服务文件本身的符号链接、不同文件和额外覆盖配置。
+服务定义统一使用 CLI v1 格式，内部按平台生成和校验 systemd unit 或 launchd plist。
+Linux 使用正确的 WorkingDirectory 单路径写法。未知、被修改或被系统管理器拒绝的
+定义不能猜测接管；Linux 接受父目录符号链接产生的同文件路径别名，但仍拒绝服务文件
+本身的符号链接、不同文件和额外覆盖配置。首次发布前的临时验收定义不提供兼容转换，
+测试环境需清理旧定义后重新注册。
 
 ```sh
 netizen stop --root /absolute/path/to/.netizen
@@ -196,8 +197,8 @@ systemd／launchd、新 CLI 的浏览器／完整 Runtime 与正式 PyPI 发布�
 启用原生 pip／uv 探针的 `make check` 再次通过：2435 项中 2427 通过、8 项平台分支
 条件跳过，编译、依赖检查和 SDK 门禁全部通过。本轮未操作现有实例或发布程序。
 
-同日 Linux 服务路径小修：修正 WorkingDirectory 字段及合法父目录路径别名识别，
-保留冻结 v1 校验并新增 Linux v2 定义。启用原生 pip／uv 探针的 `make check` 通过：
+同日 Linux 服务路径小修：修正 WorkingDirectory 字段及合法父目录路径别名识别。
+该轮启用原生 pip／uv 探针的 `make check` 通过：
 2442 项中 2431 通过、11 项条件跳过，编译、依赖和 SDK 门禁全部通过。原生 systemd
 解析及隔离实机验证覆盖基本启停／移除、A/B 环境绑定、缺库拒绝和特殊字符工作目录；
 测试服务均已清理。业务 Runtime 使用明确夹具，不代表完整飞书／SDK Runtime、

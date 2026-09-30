@@ -17,7 +17,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 
 from netizen_cli.instance import require_instance_root_marker
@@ -347,13 +347,6 @@ def service_environment(
     return environment
 
 
-def _required_environment(name: str) -> str:
-    value = os.environ.get(name, "")
-    if not value.strip():
-        raise ServiceLaunchError(f"managed service environment is missing {name}")
-    return value
-
-
 def _optional_environment(name: str) -> str | None:
     value = os.environ.get(name, "")
     return value if value.strip() else None
@@ -476,24 +469,17 @@ def clear_own_service_identity(root: Path, identity: tuple[int, int]) -> None:
             path.unlink()
 
 
-def launch(root: Path | None = None) -> None:
-    """Start the bound interpreter; profile PATH never selects another Python.
+def launch(root: Path) -> None:
+    """Start the bound interpreter for the CLI's explicit canonical root.
 
-    CLI service definitions pass a canonical root explicitly. Root-derived values
-    may be omitted there, but conflicting values fail before lock/ready mutation.
-    The no-argument form retains strict validation for existing managed callers.
+    Root-derived values may be omitted, but conflicting values fail before
+    lock/ready mutation. Profile PATH never selects another Python.
     """
-    instance_root = _managed_absolute_path(
-        str(root) if root is not None else _required_environment("NETIZEN_ROOT"),
-        label="NETIZEN_ROOT",
-    )
-    if root is None:
-        managed = {name: _required_environment(name) for name in _instance_paths(instance_root)}
-    else:
-        managed = {
-            name: _optional_environment(name) or value
-            for name, value in _instance_paths(instance_root).items()
-        }
+    instance_root = _managed_absolute_path(str(root), label="NETIZEN_ROOT")
+    managed = {
+        name: _optional_environment(name) or value
+        for name, value in _instance_paths(instance_root).items()
+    }
     codex_home = _optional_environment("CODEX_HOME")
     if codex_home is not None:
         managed["CODEX_HOME"] = str(_managed_absolute_path(codex_home, label="CODEX_HOME"))
@@ -595,16 +581,3 @@ def _launch_with_lifetime_lock(
         )
     finally:
         os.set_inheritable(lifetime_descriptor, False)
-
-
-def main(_argv: Sequence[str] | None = None) -> int:
-    try:
-        launch()
-    except (OSError, ServiceLaunchError) as error:
-        print(f"netizen: {error}", file=sys.stderr)
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

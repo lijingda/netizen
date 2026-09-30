@@ -4,7 +4,7 @@ Description=Netizen CLI instance
 After=network-online.target
 [Service]
 Type=simple
-WorkingDirectory="@HOME@"
+WorkingDirectory=@WORKING_DIRECTORY@
 ExecStart=:"@PYTHON@" "-E" "-P" "-m" "netizen_cli" "_serve" "--root" "@ROOT@"
 Restart=on-failure
 RestartSec=3
