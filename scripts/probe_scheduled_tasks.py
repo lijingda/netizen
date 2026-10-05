@@ -953,7 +953,7 @@ async def _binding_phase(
 
 
 async def probe(*, phase: str, model: str, timeout: float) -> dict[str, Any]:
-    _require(openai_codex.__version__ == "0.159.2", "sdk_pin_mismatch")
+    _require(openai_codex.__version__ == "0.160.0", "sdk_pin_mismatch")
     config_path = _user_config_path()
     before = _read_config(config_path)
     result: dict[str, Any] = {"passed": False, "read_only_startup_override": True, "real_feishu_calls": False}

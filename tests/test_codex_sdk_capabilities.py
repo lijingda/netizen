@@ -29,7 +29,7 @@ from netizen_cli.sdk_gap_adapter import facade_migration_requirements
 
 class CodexSdkCapabilityContractTest(unittest.TestCase):
     def test_pinned_public_surface_supports_dynamic_turn_model_settings(self) -> None:
-        self.assertEqual(openai_codex.__version__, "0.159.2")
+        self.assertEqual(openai_codex.__version__, "0.160.0")
         self.assertTrue(callable(AsyncCodex.models))
         parameters = inspect.signature(AsyncThread.turn).parameters
         self.assertTrue({"model", "effort", "service_tier"}.issubset(parameters))
