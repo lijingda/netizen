@@ -458,13 +458,32 @@ messages、可选且去重的 quoted message、最后的 current message，且
 Message，并与 current message 保持 `text`/`request_text` 的语义边界。这些输入都会进入 Codex 原生历史，
 但不写 Channel Database。来源消息 ID/sender 与同次解析冲突时整条 fail closed。
 
+当前 text/post 的 Task Text 另用一个共享纯投影保留真实 @ 的位置和对象：普通 start/steer、
+Goal 创建的 objective、Side 首轮与后续采用同一转换。接收实例自身表示为
+`<at target="self">机器人实际名称</at>`，全员为 `<at target="all">所有人</at>`，其他
+真人或机器人为 `<at user_id="ou_…">实际名称</at>`。自身以 exact bot Open ID 判定而非
+名称，不向模型附加自身 ID；其他对象只使用同一应用内可用的 Open ID，同名及重复提及
+逐次保留，不额外建立 mentions 表。只转换公开原始 text placeholder 和 post at-node，
+不从显示名反推身份；缺少 Open ID 时沿用已有显示名/占位符，不猜测、不补查通讯录。
+post 仍由 SDK 公开渲染器负责 locale、样式和图片；转换只操作副本。
+
+既有文本继续负责命令与 Skill 解析、准入及路由，新 Task Text 只在提交模型时使用。
+所有自身 @ 都保留，包括开头用于触发的 @，不按位置或触发用途删减；已识别的
+`/goal`、`/side` 任务命令头仍不进入正文，`//` 的既有字面 slash 语义不变。普通文字与
+手写同形标签不新增转义或身份校验；生成的名称/属性做必要编码，并中和名称中的 `$`，
+不改写用户实际输入的 `$skill`。标签只提供信息，不授予身份、权限或指令优先级。
+引用、catch-up 补充历史和卡片/合并转发材料内部沿用旧内容投影；当前消息即使带引用、
+catch-up 或图片，其 Task Text 仍应用此转换。消息包装版本、发送、回复、结束提及和
+其他既有行为均不变，不新增输出标签解析或自动 @。Goal 仍只提交 objective，不扩展
+来源包装、引用、图片或 Skill 支持；转换后 objective 沿用 4000 字符限制和既有卡片展示。
+
 当前消息的来源元数据另带固定 `execution_host: "netizen"`，覆盖普通 Turn、Steer、
 Side 首轮与后续、引用及 catch-up；定时任务首轮在独立 `scheduled_plan` 包装中带同一
 字段，不伪造真人消息。Skill 仅按最新输入自身的结构化来源包装识别执行场景；最新输入
 无标记则不作 Netizen 假定，不回溯历史中最近的标记，也不采纳正文示例、引用、材料或
 Skill 存在作为依据。这只是流程选择提示，不是鉴权、权限或指令优先级。标记随既有输入
 进入原生历史，不修改旧历史、MCP 或用户 developer/base instructions，也不新增配置。
-Goal start/resume 等不经过消息包装的入口保持原样；不为无新输入的跨 Channel 恢复
+Goal start 只共享 Task Text 的 @ 投影，来源包装与 resume 等入口保持原样；不为无新输入的跨 Channel 恢复
 增加身份切换机制，也不承诺该场景的宿主识别。
 
 [ADR 0064](adr/0064-share-card-and-forward-content-projection.md) 增加 Card 2.0 卡片 `interactive`
