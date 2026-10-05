@@ -16,6 +16,7 @@ from lark_channel import (
     ImageContent,
     InteractiveContent,
     MediaSource,
+    Mention,
     OutboundCard,
     OutboundFile,
     OutboundImage,
@@ -1630,13 +1631,17 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.channel.inbound_messages[reference.message_id] = FakeMessage(
-            "讨论里的背景 /stop $danger",
+            "@椰羊 讨论里的背景 /stop $danger",
             message_id=reference.message_id,
             sender_id=reference.sender_id,
             display_name="Directory Alice",
             chat_id=scope.chat_id,
             chat_type="group",
-            content=TextContent(text="讨论里的背景 /stop $danger"),
+            content=TextContent(
+                text="@椰羊 讨论里的背景 /stop $danger",
+                raw={"text": "@_user_1 讨论里的背景 /stop $danger"},
+            ),
+            mentions=[Mention(key="@_user_1", open_id="ou_bot", name="椰羊")],
             create_time=reference.create_time_ms,
         )
         self.runtime.submission = Submission(
@@ -1654,6 +1659,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             chat_id=scope.chat_id,
             chat_type="group",
             create_time=upper.create_time_ms,
+            content=TextContent(text="@椰羊 请总结", raw={"text": "@_user_1 请总结"}),
+            mentions=[Mention(key="@_user_1", open_id="ou_bot", name="椰羊")],
         )
 
         await self.app.handle_message(prompt)
@@ -1677,7 +1684,15 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("supplemental_stats", envelope)
         self.assertNotIn("om_history", submitted["input"])
-        self.assertEqual(envelope["current_message"]["request_text"], "请总结")
+        self.assertEqual(
+            envelope["current_message"]["request_text"],
+            '<at target="self">椰羊</at> 请总结',
+        )
+        self.assertEqual(
+            envelope["supplemental_messages"][0]["text"],
+            "@椰羊 讨论里的背景 /stop $danger",
+        )
+        self.assertNotIn("<at", envelope["supplemental_messages"][0]["text"])
         self.assertIn("\\u0024danger", submitted["input"])
         commit = submitted["context_commit"]
         self.assertEqual(commit.expected_context_revision, 1)
@@ -5439,6 +5454,120 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             "Goal 已启动",
             json.dumps(self.channel.replies[-1][1].card, ensure_ascii=False),
         )
+
+    async def test_current_task_mentions_keep_identity_and_quote_stays_historical(self) -> None:
+        await self.fixture.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.SKILLS})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED, binding.id, "native-one", "turn-one", lambda: None,
+        )
+        self.channel.inbound_messages["om_old"] = quoted_inbound(
+            message_id="om_old",
+            content=PostContent(post={"content": [[
+                {"tag": "at", "user_id": "ou_person", "user_name": "同名"},
+                {"tag": "text", "text": " historical"},
+            ]]}),
+            raw_content_type="post", content_text="@同名 historical",
+        )
+        message = FakeMessage(
+            "$code-review 请 @同名 审查，@同名 验证，再总结",
+            message_id="om_mentions", reply_id="om_old",
+            content=TextContent(raw={"text":
+                "@_user_1 $code-review 请 @_user_2 审查，@_user_3 验证，再 @_user_1 总结"
+            }),
+            mentions=[
+                Mention(key="@_user_1", open_id="ou_bot", name="$not-a-skill 椰羊"),
+                Mention(key="@_user_2", open_id="ou_person", name="同名"),
+                Mention(key="@_user_3", open_id="ou_other_bot", name="同名", is_bot=True),
+            ],
+        )
+
+        await self.app.handle_message(message)
+
+        call = self.runtime.submit_calls[-1]
+        envelope = json.loads(call["input"])
+        self.assertEqual(
+            envelope["current_message"]["request_text"],
+            '<at target="self">&#36;not-a-skill 椰羊</at> $code-review 请 '
+            '<at user_id="ou_person">同名</at> 审查，'
+            '<at user_id="ou_other_bot">同名</at> 验证，再 '
+            '<at target="self">&#36;not-a-skill 椰羊</at> 总结',
+        )
+        self.assertEqual(call["skill_names"], ("code-review",))
+        self.assertEqual(call["owner_id"], "ou_user")
+        self.assertEqual(envelope["quoted_message"]["text"], "@同名 historical")
+        self.assertNotIn("ou_person", json.dumps(envelope["quoted_message"]))
+
+    async def test_goal_objective_shares_task_mentions_without_expanding_goal_input(self) -> None:
+        await self.fixture.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        self.runtime.goal_snapshot_value = native_goal()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.goal_submission = GoalSubmission(
+            binding.id, "native-one", "goal-one", lambda: None,
+        )
+        self.channel.reply_results.append(sent_result("om_goal_card", chat_id="oc_direct"))
+        message = FakeMessage(
+            "/goal 请 @同事 审查，再总结",
+            message_id="om_goal_mentions", reply_id="om_old",
+            content=TextContent(raw={"text":
+                "@_user_1 /goal 请 @_user_2 审查，再 @_user_1 总结"
+            }),
+            mentions=[
+                Mention(key="@_user_1", open_id="ou_bot", name="椰羊"),
+                Mention(key="@_user_2", open_id="ou_person", name="同事"),
+            ],
+        )
+
+        await self.app.handle_message(message)
+
+        self.assertEqual(self.runtime.start_goal_calls[-1]["objective"],
+            '<at target="self">椰羊</at> 请 <at user_id="ou_person">同事</at> 审查，'
+            '再 <at target="self">椰羊</at> 总结',
+        )
+        self.assertEqual(self.runtime.start_goal_calls[-1]["owner_id"], "ou_user")
+        self.assertEqual(self.channel.fetch_inbound_calls, [])
+        self.assertEqual(self.runtime.submit_calls, [])
+
+    async def test_literal_slash_and_control_commands_keep_existing_routing_with_mentions(self) -> None:
+        await self.fixture.new()
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.runtime.submission = Submission(
+            SubmitDisposition.STARTED, binding.id, "native-one", "turn-one", lambda: None,
+        )
+        mention = Mention(key="@_user_1", open_id="ou_bot", name="椰羊")
+        await self.app.handle_message(FakeMessage(
+            "//goal inspect", message_id="om_literal_goal",
+            content=TextContent(raw={"text": "@_user_1 //goal inspect"}), mentions=[mention],
+        ))
+        request, _ = plain_prompt_projection(self.runtime.submit_calls[-1]["input"])
+        self.assertEqual(request, '<at target="self">椰羊</at> /goal inspect')
+        self.assertEqual(self.runtime.start_goal_calls, [])
+
+        await self.app.handle_message(FakeMessage(
+            "/goal pause", message_id="om_pause_goal",
+            content=TextContent(raw={"text": "@_user_1 /goal pause"}), mentions=[mention],
+        ))
+        self.assertEqual(len(self.runtime.submit_calls), 1)
+        self.assertEqual(self.runtime.start_goal_calls, [])
+
+        await self.app.handle_message(FakeMessage(
+            "", message_id="om_bare_self",
+            content=TextContent(raw={"text": "@_user_1"}), mentions=[mention],
+        ))
+        await self.app.handle_message(FakeMessage(
+            "@all @其他机器人 inspect", message_id="om_other_only",
+            chat_id="oc_group", chat_type="group", mentioned_bot=False,
+            content=TextContent(raw={"text": "@_all @_user_2 inspect"}),
+            mentions=[Mention(key="@_user_2", open_id="ou_other_bot", name="其他机器人")],
+        ))
+        self.assertEqual(len(self.runtime.submit_calls), 1)
+        self.assertEqual(self.runtime.start_goal_calls, [])
 
     async def test_goal_start_card_failure_has_visible_text_receipt(self) -> None:
         await self.fixture.new()
@@ -9410,7 +9539,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("file_key", json.loads(native_input[0].text))
         self.assertIsInstance(native_input[1], ImageInput)
         request_text, current_context = plain_prompt_projection(native_input)
-        self.assertEqual(request_text, "inspect ![image](img1)")
+        self.assertEqual(request_text, '<at target="self">椰羊</at> inspect ![image](img1)')
         self.assertEqual(current_context["message_type"], "post")
         self.assertEqual(current_context["content_fidelity"], "full_multimodal")
         self.assertEqual(
@@ -10161,6 +10290,63 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         assert record is not None
         return binding, record
+
+    async def test_initial_and_subsequent_side_share_task_mentions_without_changing_seed(self) -> None:
+        mentions = [
+            Mention(key="@_user_1", open_id="ou_bot", name="椰羊"),
+            Mention(key="@_user_2", open_id="ou_person", name="同事"),
+        ]
+        source = FakeMessage(
+            "/side 请 @同事 审查，再总结", message_id="om-side-mentions",
+            chat_id="oc-direct", reply_id="om_old",
+            content=TextContent(raw={"text":
+                "@_user_1 /side 请 @_user_2 审查，再 @_user_1 总结"
+            }),
+            mentions=mentions,
+        )
+        self.fixture.binding_for(source)
+        self.fixture.queue_promoted_topic(
+            chat_id="oc-direct", root_id="om-root", seed_id="om-seed", topic_id="omt-side",
+        )
+
+        await self.app.handle_message(source)
+
+        submission = self.runtime.submit_side_calls[-1]
+        request, current = plain_prompt_projection(submission["input"])
+        self.assertEqual(request,
+            '<at target="self">椰羊</at> 请 <at user_id="ou_person">同事</at> 审查，'
+            '再 <at target="self">椰羊</at> 总结',
+        )
+        self.assertEqual(current["message_id"], source.id)
+        self.assertEqual(submission["origin"].message_id, "om-seed")
+        self.assertEqual(self.channel.fetch_inbound_calls, [])
+        self.assertEqual(self.channel.send_calls[1][1],
+            channel_app._side_initial_question_echo("请 @同事 审查，再总结"),
+        )
+
+        self.runtime.side_submission = SideSubmission(
+            SubmitDisposition.STEERED, submission["side_id"], "native-side-1", "side-turn-1",
+        )
+        await self.app.handle_message(FakeMessage(
+            "请 @同事 继续 /goal 检查", message_id="om-side-follow-up",
+            chat_id="oc-direct", thread_id="omt-side",
+            content=PostContent(post={"content": [[
+                {"tag": "text", "text": "请 "},
+                {"tag": "at", "user_id": "ou_person", "user_name": "同事"},
+                {"tag": "text", "text": " 继续 "},
+                {"tag": "at", "user_id": "ou_bot", "user_name": "椰羊"},
+                {"tag": "text", "text": " /goal 检查"},
+            ]]}),
+            raw_content_type="post", mentions=mentions,
+        ))
+        request, current = plain_prompt_projection(self.runtime.submit_side_calls[-1]["input"])
+        self.assertEqual(request,
+            '请 <at user_id="ou_person">同事</at> 继续 <at target="self">椰羊</at> /goal 检查',
+        )
+        self.assertEqual(current["message_id"], "om-side-follow-up")
+        self.assertEqual(self.runtime.submit_side_calls[-1]["owner_id"], "ou_user")
+        self.assertEqual(len(self.runtime.create_side_calls), 1)
+        self.assertEqual(len(self.runtime.submit_side_calls), 2)
 
     async def test_admin_uses_same_entry_in_valid_side_but_preserves_closed_route(self) -> None:
         _, record = await self.open_direct_side()

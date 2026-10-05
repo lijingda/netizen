@@ -255,6 +255,7 @@ from .prompt_projection import (
     project_current_message,
 )
 from .projects import ProjectError, ProjectRegistry, UnknownProject
+from .task_text import project_task_text
 from .result_images import prepare_result_images
 from .quoted_context import (
     QuotedMessageError,
@@ -2707,7 +2708,7 @@ class ChannelApplication:
             content_fidelity=(
                 "full_multimodal" if current_images else "full_text"
             ),
-            request_text=prompt.text,
+            request_text=self._model_task_text(message, prompt.text),
         )
         await self._consume_prompt(
             binding=binding, scope=prompt.scope, message=message, current=current,
@@ -2989,6 +2990,21 @@ class ChannelApplication:
             available_capabilities=self._runtime.available_capabilities,
         )
 
+    def _model_task_text(
+        self, message: Any, request_text: str, *, command: str | None = None,
+    ) -> str:
+        bot_open_id = _channel_bot_open_id(self._channel)
+        return project_task_text(
+            message, request_text,
+            bot_open_id=bot_open_id,
+            bot_name=getattr(getattr(self._channel, "bot_identity", None), "name", None),
+            command=command,
+            literal_slash=(
+                command is None
+                and _body_text(message, bot_open_id=bot_open_id).strip().startswith("//")
+            ),
+        )
+
     async def _side_message(
         self,
         message: Any,
@@ -3060,6 +3076,7 @@ class ChannelApplication:
         reply_origin: Any,
         quoted_target_id: str | None,
         current_images: tuple[ImageReference, ...] = (),
+        source_command: str | None = None,
     ) -> None:
         admission = await self._runtime.capture_side_submission_admission(side_id)
         current = project_current_message(
@@ -3070,7 +3087,9 @@ class ChannelApplication:
             content_fidelity=(
                 "full_multimodal" if current_images else "full_text"
             ),
-            request_text=prompt.text,
+            request_text=self._model_task_text(
+                source_message, prompt.text, command=source_command,
+            ),
         )
         await self._consume_side_prompt(
             side_id=side_id, source_message=source_message, reply_origin=reply_origin,
@@ -3543,6 +3562,7 @@ class ChannelApplication:
                 side_id=record.id,
                 reply_origin=reply_origin,
                 quoted_target_id=None,
+                source_command="side",
             )
         except InvalidInteraction as error:
             await self._reply(reply_origin, str(error))
@@ -4036,7 +4056,7 @@ class ChannelApplication:
             submission = await self._runtime.start_goal(
                 binding=binding,
                 cwd=project.cwd,
-                objective=argument,
+                objective=self._model_task_text(message, argument, command="goal"),
                 owner_id=intent.sender_id,
                 origin=origin,
             )
