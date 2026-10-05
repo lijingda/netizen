@@ -700,6 +700,16 @@ SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和
 结果不会自动变成新版本、真实飞书链路或目标主机的验收结论。定时任务另见
 [专属兼容性记录](#定时任务兼容性与验收)。
 
+2026-10-05 SDK/CLI `0.160.0` 通过当前代码的 `make check`（2,505 项测试，16 项按条件
+跳过，含包构建及 SDK synthetic 门禁）。10 月 4 日同版本候选已通过全部 17 个原生
+phase、完整 Thread naming、额外 Skill roots 实际执行和新增行为专项；对应 SDK
+适配器、Runtime 与探针未变。上述本机证据不代表真实飞书或目标主机部署已验收。
+
+与 `0.159.2` 相比，Python SDK 源码及指纹未变，没有新增可替代现有适配器的公开
+高层 API。本次仅同步精确版本声明，保留现有适配器与恢复措施，无业务或数据迁移。
+原生显式 `model_catalog_url` 失败或对应 discovery 未开启时不再回退 bundled 目录；
+Netizen 沿用空目录拒绝，使用自定义目录的部署须验证其 endpoint 和 discovery 配置。
+
 2026-09-30 SDK/CLI `0.159.2` 已通过 `make check`（2,482 项测试、16 项按本机环境
 跳过，含包构建/隔离资源验证、编译、依赖与全部 SDK synthetic probes），以及
 `probe_python_sdk.py` 全部 17 个原生 phase、完整 Thread naming 与 Project delete

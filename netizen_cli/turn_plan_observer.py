@@ -39,7 +39,7 @@ from .turn_activity import (
 )
 
 
-SUPPORTED_SDK_VERSION = "0.159.2"
+SUPPORTED_SDK_VERSION = "0.160.0"
 _PACKAGE_SOURCE_FINGERPRINT = (
     "ce2e5e94cf00a499ae03b31e70ace1ca889501e5c0a64e62b6448c2516aae65f"
 )
