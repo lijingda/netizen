@@ -690,7 +690,16 @@ class UpdateWorkerSignalTest(unittest.TestCase):
                     acquire_install_lock(root)
                 heartbeat = (directory / "heartbeat").read_text()
                 process.send_signal(signum)
-                time.sleep(0.05)
+                if descendant:
+                    # Allow slow CI scheduling, but stay within the worker's 5s grace.
+                    deadline = time.monotonic() + 2
+                    while (directory / "heartbeat").read_text() == heartbeat:
+                        self.assertIsNone(process.poll(), "Worker exited before descendant progress")
+                        if time.monotonic() >= deadline:
+                            self.fail("Descendant heartbeat did not advance during the shutdown grace")
+                        time.sleep(0.01)
+                else:
+                    time.sleep(0.05)
                 self.assertIsNone(process.poll())
                 if descendant:
                     self.assertNotEqual((directory / "heartbeat").read_text(), heartbeat)
