@@ -202,6 +202,8 @@ their cited ADRs before changing that boundary.
 
 - Scale planning, tests, and review to the change. Preserve behavior coverage;
   avoid tests that lock documentation wording or source layout.
+  For asynchronous progress, prefer bounded condition waits or explicit synchronization
+  over fixed sleeps to avoid flaky tests under slow CI scheduling.
 - For every Codex SDK or bundled App Server upgrade, complete the
   [SDK upgrade review](docs/deployment.md#codex-sdk-升级审查): compare the full API and
   behavior changes, reassess adapters and workarounds, classify new capabilities,
