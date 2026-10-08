@@ -433,8 +433,19 @@ class AdminWebApplication:
         try:
             challenge = self._auth.issue_preauth(context.source_ip)
         except LoginRejected:
-            raise AdminWebError(401, "login_rejected", "登录暂不可用，请稍后重试。") from None
-        page = _login_html(challenge.form_nonce, self._instance_root)
+            return Response(
+                401,
+                headers=(
+                    (b"Content-Type", b"text/html; charset=utf-8"),
+                    (b"Set-Cookie", _expired_cookie(self._preauth_cookie)),
+                ),
+                body=_login_html(None, self._instance_root),
+            )
+        page = _login_html(
+            challenge.form_nonce,
+            self._instance_root,
+            login_failed=context.query.get("error") == ["1"],
+        )
         return Response(
             200,
             headers=(
@@ -455,7 +466,15 @@ class AdminWebApplication:
                 credential=_one(form, "credential"),
             )
         except LoginRejected:
-            raise AdminWebError(401, "login_rejected", "登录凭据无效。") from None
+            # Keep rejected form submissions out of browser refresh history.
+            # The GET issues a fresh challenge only when the rate limit allows it.
+            return Response(
+                303,
+                headers=(
+                    (b"Location", b"/login?error=1"),
+                    (b"Set-Cookie", _expired_cookie(self._preauth_cookie)),
+                ),
+            )
         return Response(
             303,
             headers=(
@@ -2265,8 +2284,33 @@ def _root_label(root: Path | None) -> str:
     return str(root) if root is not None else "非受管开发实例"
 
 
-def _login_html(nonce: str, instance_root: Path | None = None) -> bytes:
-    escaped = html.escape(nonce, quote=True)
+def _login_html(
+    nonce: str | None,
+    instance_root: Path | None = None,
+    *,
+    login_failed: bool = False,
+) -> bytes:
+    if nonce is None:
+        content = (
+            "<p class='status error' role='alert'>登录暂不可用，请暂停尝试，"
+            "约 5 分钟后重新打开登录页。</p>"
+            "<a href='/login'>重新打开登录页</a>"
+        )
+    else:
+        escaped = html.escape(nonce, quote=True)
+        content = (
+            "<p class='status error' role='alert'>登录未成功，请核对当前实例的管理员密钥，"
+            "并使用下方的新表单重试。</p>"
+            if login_failed else ""
+        )
+        content += (
+            "<form method='post' action='/login'>"
+            f"<input type='hidden' name='nonce' value='{escaped}'>"
+            "<label for='credential'>管理员密钥</label>"
+            "<input id='credential' name='credential' type='password' "
+            "autocomplete='current-password' required autofocus>"
+            "<button type='submit'>登录</button></form>"
+        )
     return (
         "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -2276,12 +2320,7 @@ def _login_html(nonce: str, instance_root: Path | None = None) -> bytes:
         "<p class='eyebrow'>INSTANCE CONTROL PLANE</p>"
         "<h1>Netizen Admin</h1><p>输入实例管理员密钥。</p>"
         f"<p class='instance-root'>{html.escape(_root_label(instance_root))}</p>"
-        "<form method='post' action='/login'>"
-        f"<input type='hidden' name='nonce' value='{escaped}'>"
-        "<label for='credential'>管理员密钥</label>"
-        "<input id='credential' name='credential' type='password' "
-        "autocomplete='current-password' required autofocus>"
-        "<button type='submit'>登录</button></form></main></body></html>"
+        f"{content}</main></body></html>"
     ).encode("utf-8")
 
 

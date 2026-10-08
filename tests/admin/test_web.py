@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+from netizen_cli.admin.auth import AdminAuth
 from netizen_cli.admin.errors import AdminWebError
 from netizen_cli.admin.presentation import (
     _chat_open_url,
@@ -591,6 +592,8 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.credential = secrets.token_urlsafe(32)
         self.secret_path.write_text(self.credential, encoding="ascii")
         self.secret_path.chmod(0o600)
+        self.auth_now = 1_000.0
+        self.auth = AdminAuth(self.secret_path, clock=lambda: self.auth_now)
         self.management = FakeManagement(self.root)
 
         def loopback_authorities(_host, _port, addresses):
@@ -611,6 +614,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=0,
             credential_path=self.secret_path,
+            auth=self.auth,
             management=self.management,  # type: ignore[arg-type]
         )
         await self.runner.bind()
@@ -664,6 +668,35 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             writer.close()
             await writer.wait_closed()
 
+    async def login_form(self, target: str = "/login") -> tuple[str, str, bytes]:
+        status, headers, body = await self.request("GET", target)
+        self.assertEqual(status, 200)
+        self.assertEqual(dict(headers)["content-type"], "text/html; charset=utf-8")
+        preauth = _cookie_value(headers, "netizen_admin_preauth")
+        nonce_match = re.search(rb"name='nonce' value='([^']+)'", body)
+        assert nonce_match is not None
+        return preauth, nonce_match.group(1).decode("ascii"), body
+
+    async def submit_login(
+        self, preauth: str, nonce: str, credential: str,
+    ) -> tuple[int, list[tuple[str, str]], bytes]:
+        form = urlencode(
+            {
+                "nonce": nonce,
+                "credential": credential,
+            }
+        ).encode("ascii")
+        return await self.request(
+            "POST",
+            "/login",
+            headers=[
+                ("Origin", self.origin),
+                ("Content-Type", "application/x-www-form-urlencoded"),
+                ("Cookie", f"netizen_admin_preauth={preauth}"),
+            ],
+            body=form,
+        )
+
     async def login(self) -> str:
         status, headers, body = await self.request("GET", "/login")
         self.assertEqual(status, 200)
@@ -687,6 +720,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             body=form,
         )
         self.assertEqual(status, 303)
+        self.assertEqual(dict(headers)["location"], "/")
         return _cookie_value(headers, "netizen_admin_session")
 
     async def json_get(self, target: str, session: str):
@@ -899,6 +933,90 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         mapped = dict(headers)
         self.assertEqual(mapped["cache-control"], "no-store")
         self.assertIn("frame-ancestors 'none'", mapped["content-security-policy"])
+
+    async def test_login_rejection_redirects_to_fresh_form_without_echoing_secrets(self) -> None:
+        self.runner.open_admission()
+        preauth, nonce, _ = await self.login_form()
+        wrong_credential = secrets.token_urlsafe(32)
+        # A wrong credential and replay of the consumed form have the same response.
+        for credential in (wrong_credential, self.credential):
+            status, headers, body = await self.submit_login(preauth, nonce, credential)
+            self.assertEqual(status, 303)
+            target = dict(headers)["location"]
+            self.assertEqual(target, "/login?error=1")
+            self.assertEqual(body, b"")
+            self.assertIn("Max-Age=0", dict(headers)["set-cookie"])
+            self.assertEqual(dict(headers)["cache-control"], "no-store")
+            for secret in (preauth, nonce, wrong_credential, self.credential):
+                self.assertNotIn(secret, str(headers))
+
+        fresh_cookie, fresh_nonce, page = await self.login_form(target)
+        self.assertNotEqual(fresh_cookie, preauth)
+        self.assertNotEqual(fresh_nonce, nonce)
+        self.assertIn(b"role='alert'", page)
+        for secret in (preauth, nonce, wrong_credential, self.credential):
+            self.assertNotIn(secret.encode(), page)
+        # Refreshing the redirected GET does not repeat a failed login.
+        failures = self.auth.state_counts().global_failures
+        fresh_cookie, fresh_nonce, _ = await self.login_form(target)
+        self.assertEqual(self.auth.state_counts().global_failures, failures)
+        status, headers, _ = await self.submit_login(
+            fresh_cookie, fresh_nonce, self.credential,
+        )
+        self.assertEqual(status, 303)
+        self.assertEqual(dict(headers)["location"], "/")
+        session = _cookie_value(headers, "netizen_admin_session")
+        status, _, _ = await self.request(
+            "GET", "/", headers=[("Cookie", f"netizen_admin_session={session}")],
+        )
+        self.assertEqual(status, 200)
+
+    async def test_login_rate_limit_shows_html_and_recovers_without_refresh_extending_it(self) -> None:
+        self.runner.open_admission()
+        for _ in range(5):
+            preauth, nonce, _ = await self.login_form()
+            status, headers, _ = await self.submit_login(preauth, nonce, "wrong")
+            self.assertEqual(status, 303)
+        target = dict(headers)["location"]
+        counts = self.auth.state_counts()
+        self.assertEqual(counts.global_failures, 5)
+        self.assertEqual(counts.preauth, 0)
+        for elapsed, route in ((0, target), (150, "/login"), (299, target)):
+            self.auth_now = 1_000.0 + elapsed
+            status, headers, page = await self.request("GET", route)
+            self.assertEqual(status, 401)
+            self.assertEqual(dict(headers)["content-type"], "text/html; charset=utf-8")
+            self.assertEqual(dict(headers)["cache-control"], "no-store")
+            self.assertIn(b"frame-ancestors 'none'", dict(headers)["content-security-policy"].encode())
+            self.assertIn(b"role='alert'", page)
+            self.assertIn(b"href='/login'", page)
+            self.assertNotIn(b"<form", page)
+            self.assertNotIn(b"name='nonce'", page)
+            self.assertIn("Max-Age=0", dict(headers)["set-cookie"])
+            self.assertEqual(self.auth.state_counts(), counts)
+        self.auth_now = 1_300.0
+        session = await self.login()
+        self.assertEqual(self.auth.state_counts().global_failures, 0)
+        self.auth.authenticate(session)
+
+    async def test_login_redirect_does_not_bypass_origin_validation(self) -> None:
+        self.runner.open_admission()
+        preauth, nonce, _ = await self.login_form()
+        status, headers, body = await self.request(
+            "POST", "/login",
+            headers=[
+                ("Origin", "http://evil.invalid"),
+                ("Content-Type", "application/x-www-form-urlencoded"),
+                ("Cookie", f"netizen_admin_preauth={preauth}"),
+            ],
+            body=urlencode({"nonce": nonce, "credential": self.credential}).encode(),
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(body)["code"], "invalid_origin")
+        self.assertNotIn("location", dict(headers))
+        self.assertNotIn("set-cookie", dict(headers))
+        self.assertEqual(self.auth.state_counts().sessions, 0)
+        self.assertEqual(self.auth.state_counts().global_failures, 0)
 
     async def test_unknown_route_does_not_leak_before_auth_and_origin_is_exact(self) -> None:
         self.runner.open_admission()
