@@ -93,6 +93,7 @@ from netizen_cli.management import (
     StoppedBinding,
 )
 from netizen_cli.management.service import _project_binding_status
+from netizen_cli.management.chat_directory import AvailableChat, AvailableChatPage, ChatDirectoryError
 from netizen_cli.management.updates import UpdateError
 from netizen_cli.projects import Project
 from netizen_cli.sdk_gap_adapter import GoalSnapshot
@@ -744,6 +745,71 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             body=body,
         )
         return status, headers, json.loads(content) if content else None
+
+    async def test_chat_picker_queries_and_assets_require_authentication(self) -> None:
+        self.runner.open_admission()
+        for path in ("/api/v1/chats", "/api/v1/chats/validate?chatId=oc_test", "/static/chat-picker.js", "/static/chat-picker.css"):
+            status, _, _ = await self.request("GET", path)
+            self.assertEqual(status, 401, path)
+        session = await self.login()
+        for path, content_type in (("/static/chat-picker.js", "text/javascript; charset=utf-8"), ("/static/chat-picker.css", "text/css; charset=utf-8")):
+            status, headers, content = await self.request("GET", path, headers=[("Cookie", f"netizen_admin_session={session}")])
+            self.assertEqual(status, 200)
+            self.assertEqual(dict(headers)["content-type"], content_type)
+            self.assertIn("script-src 'self'", dict(headers)["content-security-policy"])
+            self.assertTrue(content)
+
+    async def test_chat_picker_pagination_is_bound_to_keyword(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        group = AvailableChat("oc_group", "<群聊>", None, False)
+        self.management.query_available_chats = AsyncMock(return_value=AvailableChatPage((group,), "page-two", "搜索提示"))
+        status, _, payload = await self.json_get("/api/v1/chats?query=", session)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["items"], [{"chatId": "oc_group", "name": "<群聊>", "chatMode": None, "external": False}])
+        self.assertEqual(payload["notice"], "搜索提示")
+        self.management.query_available_chats.assert_awaited_with(query="", page_token=None)
+        cursor = payload["nextCursor"]
+        self.management.query_available_chats.return_value = AvailableChatPage((), None)
+        status, _, payload = await self.json_get("/api/v1/chats?" + urlencode({"cursor": cursor}), session)
+        self.assertEqual(status, 200)
+        self.assertIsNone(payload["nextCursor"])
+        self.management.query_available_chats.assert_awaited_with(query="", page_token="page-two")
+        status, _, payload = await self.json_get("/api/v1/chats?" + urlencode({"query": "群", "cursor": cursor}), session)
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["code"], "invalid_cursor")
+        self.assertEqual(self.management.query_available_chats.await_count, 2)
+
+    async def test_chat_picker_rejects_invalid_query_before_service(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        self.management.query_available_chats = AsyncMock()
+        for query in ({"query": "x" * 51}, {"query": " x"}, {"cursor": ""}, {"pageSize": 100}, {"cursor": "malformed"}, {"cursor": "x" * 2_049}):
+            status, _, _ = await self.json_get("/api/v1/chats?" + urlencode(query), session)
+            self.assertEqual(status, 400, query)
+        status, _, _ = await self.json_get("/api/v1/chats?query=a&query=b", session)
+        self.assertEqual(status, 400)
+        self.management.query_available_chats.assert_not_awaited()
+
+    async def test_chat_picker_validation_and_errors_are_explicit(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        group = AvailableChat("oc_group", "新名称", "topic", False)
+        self.management.validate_available_chat = AsyncMock(return_value=group)
+        status, _, payload = await self.json_get("/api/v1/chats/validate?chatId=oc_group", session)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["chat"]["name"], "新名称")
+        self.management.validate_available_chat.assert_awaited_once_with("oc_group")
+        for query in ("", "?chatId=", "?chatId=oc_a&chatId=oc_b", "?chatId=oc_group&unknown=x"):
+            status, _, _ = await self.json_get("/api/v1/chats/validate" + query, session)
+            self.assertEqual(status, 400, query)
+        self.assertEqual(self.management.validate_available_chat.await_count, 1)
+        for code, status in (("chat_permission_denied", 403), ("chat_query_timeout", 503), ("chat_unavailable", 409), ("chat_query_rate_limited", 429)):
+            self.management.validate_available_chat.side_effect = ChatDirectoryError(code, "可显示的明确错误")
+            actual_status, _, payload = await self.json_get("/api/v1/chats/validate?chatId=oc_group", session)
+            self.assertEqual(actual_status, status)
+            self.assertEqual(payload["code"], code)
+            self.assertNotIn("items", payload)
 
     async def test_updates_require_auth_and_admin_has_no_package_update_authority(self) -> None:
         self.runner.open_admission()
@@ -2167,8 +2233,8 @@ class AdminStaticAssetsTest(unittest.TestCase):
         parser = _AdminAssetParser()
         parser.feed(html)
 
-        self.assertEqual(parser.scripts, ["/static/admin.js"])
-        self.assertEqual(parser.stylesheets, ["/static/admin.css"])
+        self.assertEqual(parser.scripts, ["/static/chat-picker.js", "/static/admin.js"])
+        self.assertEqual(parser.stylesheets, ["/static/admin.css", "/static/chat-picker.css"])
         self.assertFalse(parser.inline_script_text.strip())
         self.assertTrue({"projects", "sessions", "side-topics", "updates"} <= parser.ids)
         self.assertIn("service-restart", parser.ids)

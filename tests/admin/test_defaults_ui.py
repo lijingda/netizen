@@ -22,6 +22,8 @@ class DefaultsUiTest(unittest.TestCase):
         tree.feed((static / "index.html").read_text(encoding="utf-8"))
         source = (static / "admin.js").read_text(encoding="utf-8")
         parts = [
+            (static / "chat-picker.js").read_text(encoding="utf-8"),
+            source[source.index("async function fetchChatPage("):source.index("let defaultsEditor =")],
             source[source.index("function actionPayload("):source.index("async function mutate(")],
             source[source.index("function cell("):source.index("function confirmMaterializedDelete(")],
             source[source.index("async function queryProjectOptions("):source.index("async function loadSessionProjectOptions(")],

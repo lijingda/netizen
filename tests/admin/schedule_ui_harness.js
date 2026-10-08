@@ -1,4 +1,6 @@
-const state = { schedules: null };
+const state = { tab: "schedules", schedules: null, sessionPage: { cursor: "sessions-page-three", number: 3 } };
+function selectTab(name) { state.tab = name; }
+const flush = () => new Promise((resolve) => setImmediate(resolve));
 let status = "";
 let statusError = false;
 function setStatus(message, error = false) { status = message; statusError = error; }
@@ -9,18 +11,16 @@ const envelope = (mode) => ({
   csrfToken: `${mode}-csrf`, actionToken: `${mode}-once`,
   target: { resource: mode === "create" ? "schedule-registry" : "schedule", targetId: "plan-exact" },
 });
+let createGrant = envelope("create");
+let chatValidationGate = null;
+let scheduleOptionsGate = null;
 const defaultSessionSettings = { turn_settings: { model_id: "native-default", effort_id: "medium", service_tier_id: "default" },
   reaction_pulse_enabled: false, progress_card_enabled: false, completion_mention_enabled: true, message_context_mode: "current-only" };
 const models = [{ id: "native-default", display_name: "Native default", default_effort_id: "medium", default_service_tier_id: "default",
   efforts: [{ id: "medium", description: "Medium" }, { id: "high", description: "High" }],
   service_tiers: [{ id: "default", name: "Standard" }, { id: "priority", name: "Fast" }] }];
 let catalogError = null;
-let bindingOptionsError = null;
 let contextAvailable = true;
-const bindingTargets = [{ id: "binding-original", label: "已有问题", project_alias: "project-one",
-  current: true, available: true, chat_id: "oc_existing" },
-  { id: "binding-inactive", label: "非当前会话", project_alias: "project-one",
-    current: false, available: false, chat_id: "oc_existing" }];
 const fixturePlan = () => ({
   id: "plan-exact", revision: 7, name: "<b>Report</b>",
   project_alias: "project-one", chat_id: "oc_other",
@@ -55,16 +55,26 @@ async function api(path, options = {}) {
   }
   gets.push(path);
   const query = new URL(path, "http://localhost").searchParams;
+  if (path.startsWith("/api/v1/chats/validate?")) {
+    if (chatValidationGate) return new Promise((resolve) => { chatValidationGate.resolve = resolve; });
+    return { chatId: query.get("chatId") };
+  }
+  if (path.startsWith("/api/v1/chats?")) return { items: [{ chatId: "oc_picker", name: "研发群" }], nextCursor: null };
   if (path.startsWith("/api/v1/projects/options")) return {
     items: query.has("cursor") ? [{ alias: "retired", enabled: false }] : [
       { alias: "project-one", enabled: true }, { alias: "project-two", enabled: true }],
     nextCursor: query.has("cursor") ? null : "project-page-two",
   };
   const mode = query.get("mode") || "list";
-  if (mode === "options") return { ok: true, session_settings: structuredClone(defaultSessionSettings),
-    models: catalogError ? [] : structuredClone(models), context_mode_available: contextAvailable,
-    binding_targets: bindingOptionsError ? [] : structuredClone(bindingTargets),
-    binding_options_error: bindingOptionsError, model_catalog_error: catalogError };
+  if (mode === "options") {
+    const result = { ok: true, session_settings: structuredClone(defaultSessionSettings),
+      models: catalogError ? [] : structuredClone(models), context_mode_available: contextAvailable,
+      model_catalog_error: catalogError };
+    if (scheduleOptionsGate) return new Promise((resolve) => {
+      scheduleOptionsGate.resolve = (overrides = {}) => resolve({ ...result, ...overrides });
+    });
+    return result;
+  }
   if (mode === "preview") {
     const schedule = JSON.parse(query.get("schedule"));
     if (schedule.kind === "once" && ambiguous && !query.get("utc_offset")) {
@@ -97,10 +107,14 @@ async function api(path, options = {}) {
   ], next_cursor: "runs-page" };
   if (failList) throw new Error("列表暂不可用");
   return { ok: true, plans: structuredClone(plans), next_cursor: "page-two",
-    default_timezone: "Asia/Shanghai", actions: { create: envelope("create") } };
+    default_timezone: "Asia/Shanghai", actions: { create: createGrant } };
 }
 async function refresh() { await loadSchedules(); return true; }
 // SHIPPED_SCHEDULE_CONTROLLER
+async function openNewScheduleEditor() {
+  await openScheduleEditor();
+  chatTarget("schedule").set({ chatId: "oc_test", chat: { chatMode: "group", chatLabel: "测试群" } });
+}
 (async () => {
   await loadSchedules();
   const rows = document.querySelector("#schedules-body").querySelectorAll("tr");
@@ -184,7 +198,7 @@ async function refresh() { await loadSchedules(); return true; }
   scheduleInput("filter-project").value = "project-two";
   assert(gets.some((path) => path.startsWith("/api/v1/schedules?") && new URL(path, "http://localhost").searchParams.get("cursor") === "page-two"));
 
-  await openScheduleEditor();
+  await openNewScheduleEditor();
   assert.equal(scheduleInput("timezone").value, "Asia/Shanghai");
   assert.equal(scheduleInput("save").disabled, true);
   assert.equal(scheduleInput("editor").hidden, false);
@@ -232,7 +246,7 @@ async function refresh() { await loadSchedules(); return true; }
   // Escape/cancel discards the form without changing the list or writing a plan.
   const beforeCancel = posts.length;
   scheduleInput("new").focus();
-  await openScheduleEditor();
+  await openNewScheduleEditor();
   scheduleInput("name").value = "Discard this draft";
   scheduleInput("drawer").dispatch("cancel");
   assert.equal(scheduleInput("drawer").open, false);
@@ -241,7 +255,7 @@ async function refresh() { await loadSchedules(); return true; }
   assert.equal(scheduleInput("filter-project").value, "project-two");
 
   // All four rules serialize their own fields, including an exact previewed interval anchor.
-  await openScheduleEditor();
+  await openNewScheduleEditor();
   scheduleInput("kind").value = "weekly";
   scheduleInput("weekdays").querySelectorAll("input")[0].checked = true;
   scheduleInput("weekdays").querySelectorAll("input")[4].checked = true;
@@ -359,11 +373,12 @@ async function refresh() { await loadSchedules(); return true; }
 
   // Submission cannot be dismissed/reopened or submitted twice while pending.
   respond = null;
-  await openScheduleEditor();
+  await openNewScheduleEditor();
   await previewSchedule();
   let finishSave;
   respond = () => new Promise((resolve) => { finishSave = resolve; });
   const pendingSave = saveSchedule({ preventDefault() {} });
+  await flush();
   const pendingCount = posts.length;
   scheduleInput("drawer").dispatch("cancel");
   closeScheduleEditor();
@@ -376,7 +391,7 @@ async function refresh() { await loadSchedules(); return true; }
 
   // A successful save followed by a failed refresh must stay visibly successful.
   respond = null;
-  await openScheduleEditor();
+  await openNewScheduleEditor();
   await previewSchedule();
   failList = true;
   await saveSchedule({ preventDefault() {} });
@@ -388,7 +403,7 @@ async function refresh() { await loadSchedules(); return true; }
   // The native options select supplies defaults and combinations; feedback
   // and context remain independent per-occurrence choices.
   respond = null;
-  await openScheduleEditor();
+  await openNewScheduleEditor();
   assert.equal(scheduleInput("session-settings").open, true);
   assert.equal(scheduleInput("model").value, "native-default");
   assert.equal(scheduleInput("effort").value, "medium");
@@ -413,9 +428,8 @@ async function refresh() { await loadSchedules(); return true; }
   await saveSchedule({ preventDefault() {} });
   assert.deepEqual(posts.at(-1).body.definition.session_settings, selectedSettings);
 
-  // Binding lookup failure leaves the independent model options and settings usable.
-  bindingOptionsError = { code: "binding_options_unavailable", message: "会话选项暂不可用，请稍后重试。" };
-  await openScheduleEditor();
+  // Binding targeting now delegates to Sessions without an independent list lookup.
+  await openNewScheduleEditor();
   assert.equal(scheduleInput("model").value, "native-default");
   assert.equal(scheduleInput("effort").disabled, false);
   assert.equal(scheduleInput("session-note").textContent, "");
@@ -427,14 +441,11 @@ async function refresh() { await loadSchedules(); return true; }
   assert.equal(JSON.parse(new URL(gets.at(-1), "http://localhost").searchParams.get("session_settings")).turn_settings.effort_id, "high");
   scheduleInput("target-kind").value = "binding";
   renderScheduleTarget();
-  assert.equal(scheduleInput("target-options-note").hidden, false);
-  assert.equal(scheduleInput("target-options-note").textContent, bindingOptionsError.message);
-  assert.equal(scheduleInput("binding").querySelectorAll("option").length, 1);
-  bindingOptionsError = null;
+  assert.equal(scheduleInput("select-session").hidden, false);
+  assert.match(scheduleInput("binding-summary").textContent, /Sessions/);
+  assert.equal(scheduleInput("binding").value, "");
   await loadScheduleSessionOptions();
-  assert.equal(scheduleInput("binding").querySelectorAll("option")[1].value, "binding-original");
-  assert.equal(scheduleEditor.bindingOptionsError, "");
-  assert.match(scheduleInput("target-options-note").textContent, /选择目标会话/);
+  assert.equal(scheduleInput("preview").disabled, true);
   assert.equal(scheduleInput("effort").value, "high");
   closeScheduleEditor();
 
@@ -509,7 +520,7 @@ async function refresh() { await loadSchedules(); return true; }
   assert(!("end_at" in posts.at(-1).body.definition.schedule));
 
   // A deadline has its own DST ambiguity choice and does not borrow once offsets.
-  await openScheduleEditor();
+  await openNewScheduleEditor();
   scheduleInput("timezone").value = "America/New_York";
   scheduleInput("end-at").value = "2030-11-03T01:30";
   ambiguousEnd = true;
@@ -585,7 +596,7 @@ async function refresh() { await loadSchedules(); return true; }
   assert.equal(schedulePrepared.schedule.end_at, "2029-12-01T18:00+08:00");
   await saveSchedule({ preventDefault() {} });
   assert.equal(posts.at(-1).body.definition.schedule.end_at, "2029-12-01T18:00+08:00");
-  await openScheduleEditor();
+  await openNewScheduleEditor();
   assert.equal(scheduleInput("end-at").value, "");
   await previewSchedule();
   assert.equal(scheduleInput("save").disabled, true);
@@ -703,40 +714,101 @@ async function refresh() { await loadSchedules(); return true; }
   assert.equal(statusError, true);
   assert.equal(scheduleInput("run-receipt").hidden, true);
 
-  // An existing-session plan stores exact target identity without copied settings.
+  // An existing-session plan is selected from Sessions, never from a second binding list.
   respond = null;
   await openScheduleEditor();
   scheduleInput("target-kind").value = "binding";
   renderScheduleTarget();
   await loadScheduleSessionOptions();
   assert.equal(scheduleInput("project-field").hidden, true);
-  assert.equal(scheduleInput("chat-field").hidden, true);
+  assert.equal(scheduleInput("chat-target").hidden, true);
   assert.equal(scheduleInput("session-settings").hidden, true);
   assert.equal(scheduleInput("project").required, false);
-  assert.equal(scheduleInput("binding").disabled, false);
-  assert.equal(scheduleInput("binding").querySelectorAll("option")[1].value, "binding-original");
-  const inactiveTarget = scheduleInput("binding").querySelectorAll("option").find((option) => option.value === "binding-inactive");
-  assert(inactiveTarget);
-  assert.equal(inactiveTarget.disabled, false);
-  assert.match(inactiveTarget.textContent, /自动暂停/);
-  scheduleInput("binding").value = "binding-inactive";
-  scheduleInput("binding-query").value = "project-one";
-  await loadScheduleSessionOptions();
-  assert.equal(new URL(gets.at(-1), "http://localhost").searchParams.get("binding_query"), "project-one");
-  assert.equal(scheduleInput("binding").value, "binding-inactive");
+  assert.equal(scheduleInput("binding").value, "");
+  assert.equal(scheduleInput("preview").disabled, true);
+  assert.equal(scheduleInput("select-session").hidden, false);
   scheduleInput("name").value = "继续检查";
   scheduleInput("instructions").value = "检查刚才的问题";
+  scheduleInput("kind").value = "weekly";
+  scheduleInput("timezone").value = "America/New_York";
+  scheduleInput("time").value = "11:35";
+  scheduleInput("at").value = "2030-11-03T01:30";
+  scheduleInput("end-at").value = "2030-11-03T01:45";
+  scheduleInput("every").value = "17";
+  scheduleInput("enabled").checked = false;
+  scheduleInput("weekdays").querySelectorAll("input")[2].checked = true;
+  scheduleSelectOptions(scheduleInput("offset"), [["-04:00", "第一次"], ["-05:00", "第二次"]], "-05:00");
+  scheduleSelectOptions(scheduleInput("end-offset"), [["-04:00", "第一次"], ["-05:00", "第二次"]], "-04:00");
+  scheduleInput("offset-field").hidden = false;
+  scheduleInput("end-offset-field").hidden = false;
+  const expectedDraft = captureScheduleDraft();
+  scheduleInput("select-session").click();
+  assert.equal(state.tab, "sessions");
+  assert.equal(scheduleInput("drawer").open, false);
+  assert.equal(document.querySelector("#session-schedule-selection").hidden, false);
+  assert.deepEqual(pendingScheduleDraft, expectedDraft);
+  const targetSession = { bindingId: "binding-inactive", shortId: "short-exact", nativeTitle: "<img src=x onerror=alert(1)>",
+    chatId: "oc_original", chatLabel: "<b>原群</b>", projectAlias: "project-one", topicId: "omt_exact",
+    pointerState: "other", catalogState: "archived" };
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  const position = structuredClone(state.sessionPage);
+  const oldGrant = state.schedules.actions.create;
+  createGrant = { ...envelope("create"), actionToken: "fresh-session-create-grant" };
+  const beforeTargetOpen = gets.length;
+  await openScheduleForSession(targetSession, opener);
+  assert.equal(gets[beforeTargetOpen], "/api/v1/schedules?mode=list");
+  assert.notDeepEqual(scheduleEditor.action, oldGrant);
+  assert.deepEqual(scheduleEditor.action, createGrant);
+  assert.deepEqual(captureScheduleDraft(), expectedDraft, "switching to Sessions must preserve every entered schedule field");
+  assert.equal(pendingScheduleDraft, null);
+  assert.equal(document.querySelector("#session-schedule-selection").hidden, true);
+  assert.equal(scheduleInput("target-kind").disabled, true);
+  assert.equal(scheduleInput("binding").value, "binding-inactive");
+  assert.equal(scheduleInput("select-session").hidden, true);
+  assert.match(scheduleInput("binding-summary").textContent, /<img src=x onerror=alert\(1\)>/);
+  assert.match(scheduleInput("binding-summary").textContent, /自动暂停/);
+  assert.match(scheduleInput("binding-summary").textContent, /omt_exact/);
+  assert.equal(scheduleInput("binding-summary").querySelector("img"), null);
+  assert.equal(scheduleInput("binding-summary").querySelector("input"), null);
+  assert.deepEqual(state.sessionPage, position);
   await previewSchedule();
   const bindingPreview = new URL(gets.at(-1), "http://localhost").searchParams;
   assert.equal(bindingPreview.get("target_kind"), "binding");
   assert.equal(bindingPreview.get("target_binding_id"), "binding-inactive");
   assert.equal(bindingPreview.get("chat_id"), null);
   assert.equal(bindingPreview.get("session_settings"), null);
+  const beforeBindingSave = gets.length;
   await saveSchedule({ preventDefault() {} });
   const bindingCreate = posts.at(-1).body.definition;
   assert.equal(bindingCreate.target_kind, "binding");
   assert.equal(bindingCreate.target_binding_id, "binding-inactive");
   for (const name of ["session_settings", "project", "chat_id"]) assert.equal(name in bindingCreate, false);
+  assert.equal(posts.at(-1).body.actionToken, "fresh-session-create-grant");
+  assert.equal(gets.length, beforeBindingSave, "saving from Sessions must not reload or move its list");
+  assert.equal(state.tab, "sessions");
+  assert.deepEqual(state.sessionPage, position);
+  assert.equal(document.activeElement, opener);
+  assert.equal(document.querySelector("#session-schedule-saved").hidden, false);
+  document.querySelector("#session-schedule-view").click();
+  assert.equal(state.tab, "schedules");
+
+  // Canceling a selection discards its page-local draft, including a later row click.
+  await openScheduleEditor();
+  scheduleInput("name").value = "必须丢弃的草稿";
+  scheduleInput("instructions").value = "discard me";
+  scheduleInput("target-kind").value = "binding";
+  renderScheduleTarget();
+  scheduleInput("select-session").click();
+  document.querySelector("#session-schedule-cancel").click();
+  assert.equal(pendingScheduleDraft, null);
+  assert.equal(document.querySelector("#session-schedule-selection").hidden, true);
+  await openScheduleForSession(targetSession, opener);
+  assert.equal(scheduleInput("name").value, "");
+  assert.equal(scheduleInput("instructions").value, "");
+  closeScheduleEditor();
+  assert.equal(pendingScheduleDraft, null);
+  state.tab = "schedules";
 
   const boundPlan = { ...fixturePlan(), target_kind: "binding", target_binding_id: "binding-original",
     target_label: "已有问题", session_settings: null, blocked_reason: "target_inactive", enabled: true,
@@ -752,8 +824,8 @@ async function refresh() { await loadSchedules(); return true; }
   assert.equal(boundRow.querySelectorAll("button").find((node) => node.textContent === "立即运行").disabled, true);
   await openScheduleEditor(boundPlan);
   assert.equal(scheduleInput("target-kind").disabled, true);
-  assert.equal(scheduleInput("binding").disabled, true);
-  assert.equal(scheduleInput("binding-query-field").hidden, true);
+  assert.equal(scheduleInput("binding").type, "hidden");
+  assert.equal(scheduleInput("select-session").hidden, true);
   assert.equal(scheduleInput("binding").value, "binding-original");
   await previewSchedule();
   await saveSchedule({ preventDefault() {} });
@@ -763,4 +835,103 @@ async function refresh() { await loadSchedules(); return true; }
   }
   assert.equal(scheduleRunStatus("input_started"), "已启动新一轮");
   assert.equal(scheduleRunStatus("input_unknown"), "输入接收情况待确认");
+
+  // The new-topic flow uses the same group picker and an explicit, explained p2p mode.
+  contextAvailable = true;
+  await openScheduleEditor();
+  assert.equal(scheduleInput("chat-kind").value, "group");
+  assert.equal(scheduleInput("group-picker").hidden, false);
+  assert.equal(scheduleInput("chat-field").hidden, true);
+  chatTarget("schedule").focus();
+  await flush();
+  scheduleInput("group-picker").querySelector(".chat-picker-option").click();
+  await flush();
+  assert.equal(scheduleInput("chat").value, "oc_picker");
+  scheduleInput("chat-manual").checked = true;
+  scheduleInput("chat-manual").dispatch("change");
+  await flush();
+  assert.equal(scheduleInput("chat").value, "oc_picker");
+  assert.equal(scheduleInput("chat-field").hidden, false);
+  scheduleInput("chat-kind").value = "p2p";
+  scheduleInput("chat-kind").dispatch("change");
+  assert.equal(scheduleInput("chat").value, "");
+  assert.equal(scheduleInput("group-picker").hidden, true);
+  assert.equal(scheduleInput("chat-manual-field").hidden, true);
+  assert.match(scheduleInput("chat-help").textContent, /\/cron/);
+  assert.match(scheduleInput("chat-help").textContent, /不是用户 ID/);
+  scheduleInput("chat").value = "oc_typed_group";
+  scheduleInput("chat").dispatch("input");
+  scheduleInput("chat").dispatch("change");
+  await flush();
+  assert.equal(scheduleInput("chat-kind").value, "group");
+  assert.equal(scheduleInput("chat-field").hidden, false);
+  assert.equal(scheduleInput("group-picker").hidden, true);
+  assert.equal(scheduleInput("chat").value, "oc_typed_group");
+  closeScheduleEditor();
+
+  contextAvailable = null;
+  await openScheduleEditor(fixturePlan());
+  assert.equal(scheduleInput("chat-kind").value, "unknown");
+  assert.equal(scheduleInput("chat-field").hidden, false);
+  assert.equal(scheduleInput("chat").value, "oc_other");
+  assert.match(scheduleInput("chat-help").textContent, /保留原聊天 ID/);
+  contextAvailable = false;
+  await loadScheduleSessionOptions();
+  assert.equal(scheduleInput("chat-kind").value, "p2p");
+  assert.equal(scheduleInput("chat").value, "oc_other");
+  closeScheduleEditor();
+  const p2pPlan = fixturePlan();
+  p2pPlan.chat = { chatType: "p2p", chatMode: "group", chatLabel: "单聊" };
+  await openScheduleEditor(p2pPlan);
+  assert.equal(scheduleInput("chat-kind").value, "p2p");
+  assert.equal(scheduleInput("chat-field").hidden, false);
+  assert.equal(scheduleInput("context-field").hidden, true);
+  closeScheduleEditor();
+
+  // Duplicate submissions are rejected before an outstanding group-validation read.
+  contextAvailable = true;
+  await openNewScheduleEditor();
+  await previewSchedule();
+  const beforeValidationPost = posts.length;
+  const beforeValidationRead = gets.filter((path) => path.startsWith("/api/v1/chats/validate?")).length;
+  chatValidationGate = {};
+  const validatingSave = saveSchedule({ preventDefault() {} });
+  assert.equal(scheduleInput("fields").disabled, true);
+  await saveSchedule({ preventDefault() {} });
+  assert.equal(posts.length, beforeValidationPost);
+  assert.equal(gets.filter((path) => path.startsWith("/api/v1/chats/validate?")).length, beforeValidationRead + 1);
+  chatValidationGate.resolve({ chatId: "oc_test" });
+  chatValidationGate = null;
+  await validatingSave;
+  assert.equal(posts.length, beforeValidationPost + 1);
+
+  // A late options response can invalidate a preview while group validation awaits.
+  // Saving must then stop safely, without consuming the grant or submitting new settings.
+  await openNewScheduleEditor();
+  scheduleOptionsGate = {};
+  const refreshingOptions = loadScheduleSessionOptions();
+  await previewSchedule();
+  const preparedBeforeOptions = schedulePrepared;
+  const grantBeforeOptions = scheduleEditor.action;
+  const beforeOptionsRacePost = posts.length;
+  chatValidationGate = {};
+  const savingDuringOptions = saveSchedule({ preventDefault() {} });
+  assert.equal(scheduleInput("fields").disabled, true);
+  scheduleOptionsGate.resolve({ session_settings: {
+    ...structuredClone(defaultSessionSettings), progress_card_enabled: !defaultSessionSettings.progress_card_enabled,
+  } });
+  scheduleOptionsGate = null;
+  await refreshingOptions;
+  assert(preparedBeforeOptions);
+  assert.equal(schedulePrepared, null, "late changed session defaults must invalidate the prepared schedule");
+  chatValidationGate.resolve({ chatId: "oc_test" });
+  chatValidationGate = null;
+  await assert.doesNotReject(() => savingDuringOptions);
+  assert.equal(posts.length, beforeOptionsRacePost);
+  assert.equal(scheduleEditor.action, grantBeforeOptions);
+  assert.equal(scheduleInput("fields").disabled, false);
+  assert.equal(scheduleInput("close").disabled, false);
+  assert.equal(scheduleInput("save").disabled, true);
+  assert.match(scheduleInput("preview-message").textContent, /重新预览/);
+  closeScheduleEditor();
 })().catch((error) => { console.error(error); process.exitCode = 1; });
