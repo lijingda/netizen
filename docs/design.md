@@ -1480,6 +1480,10 @@ pre-auth nonce 不设时间过期，仍绑定来源、credential generation 和�
 全局最早签发的 nonce，避免遗留页面永久占满名额。该回收只影响待提交 nonce，不撤销
 session 或 action grants。一次性 action/CSRF grant 仍保留十分钟 TTL 和容量限制，登录
 继续限速；每次认证边界都会检测合法 credential 轮换并清空旧 bearer。
+登录表单被拒绝时统一 303 跳转到带固定失败标记的登录页，GET 在限速允许时签发新
+cookie/nonce 并显示统一提示，避免刷新重交旧表单。限速期间 GET `/login` 返回 401 HTML
+等待页和重试入口，不签发 nonce 或提供提交表单；刷新不增加失败计数，限速窗口结束后
+重新访问即可恢复。错误标记不携带 credential、nonce 或具体拒绝原因。
 Host 只接受启动时发现的本机地址/名称、可选 `adminWeb.accessHost` 与 exact 实际端口，
 accessHost 只接受 hostname/IP，不是协议、端口、路径或反向代理配置。带 body 的 login 及所有 mutation 还要求
 同源 `Origin`，不信任 forwarded header。页面和 API 直接使用受信内网 HTTP，不实现 TLS、
