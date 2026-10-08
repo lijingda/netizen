@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from lark_channel import OutboundCard
@@ -14,6 +15,7 @@ from ..bindings import (
     BindingTurnSettings,
     SideTopicState,
 )
+from ..completion_mention import valid_completion_mention_user_id
 from ..domain import (
     ActiveState,
     CardControlIntent,
@@ -106,6 +108,17 @@ class SessionCardItem:
     activity_revision: int = 0
     turn_id: str | None = None
     catalog_unconfirmed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SideTopicCardContext:
+    parent_title: str = "原会话信息暂不可用"
+    project_alias: str | None = None
+    project_cwd: str | None = None
+    source_url: str | None = None
+    source_is_topic: bool = False
+    can_resume_parent: bool = False
+    creator_name: str | None = None
 
 
 def settings_card(
@@ -1465,6 +1478,9 @@ def side_topic_card(
     creator_id: str,
     created_at: str,
     state: SideTopicState,
+    context: SideTopicCardContext = SideTopicCardContext(),
+    requires_mention: bool = False,
+    show_creator_profile: bool = True,
     notice: str | None = None,
     notice_is_error: bool = False,
 ) -> OutboundCard:
@@ -1483,49 +1499,104 @@ def side_topic_card(
         SideTopicState.FAILED: "red",
     }
     builder = _builder(
-        "Codex Side",
-        f"{labels[state]} · Parent {parent_short_id}",
+        "Side 临时对话",
+        labels[state],
         template=templates[state],
     )
     if notice:
         builder.raw(_notice(notice, error=notice_is_error))
-    builder.markdown(
-        f"**状态**：`{state.value}`\n"
-        f"**Parent 会话**：`{_md_code(parent_short_id)}`\n"
-        f"**创建者**：`{_md_code(creator_id)}`\n"
-        f"**创建时间**：`{_md_code(created_at)}`\n\n"
-        "Side 使用独立的 ephemeral Codex Thread，并与 Parent 共享 Project cwd；"
-        "文件改动彼此可见。服务重启后本 Side 会过期，历史消息仅保留在飞书中。"
-    )
+    # Native names and filesystem paths are display data, never card markup.
+    builder.raw(_plain(f"来源会话：{context.parent_title}"))
+    if context.project_alias is not None:
+        builder.raw(_plain(f"所属项目：{context.project_alias}"))
+    if show_creator_profile and valid_completion_mention_user_id(creator_id):
+        builder.raw({
+            "tag": "column_set",
+            "vertical_align": "center",
+            "columns": [
+                {"tag": "column", "width": "auto", "elements": [_plain("发起人：")]},
+                {"tag": "column", "width": "weighted", "weight": 1, "elements": [{
+                    "tag": "person", "user_id": creator_id, "size": "small",
+                    "show_avatar": True, "show_name": True,
+                }]},
+            ],
+        })
+    else:
+        builder.raw(_plain(f"发起人：{context.creator_name or '姓名暂不可用'}"))
+    builder.markdown(f"**创建时间**：{_side_created_time(created_at)}")
+    if state is SideTopicState.OPEN:
+        builder.raw(_plain(
+            "在本话题 @ 机器人继续提问。" if requires_mention
+            else "在本话题继续提问。"
+        ))
+    elif state in {SideTopicState.CLOSED, SideTopicState.EXPIRED}:
+        builder.raw(_plain(
+            "需要继续讨论时，请回到来源位置，选择原会话后重新发送 /side。"
+        ))
+    builder.raw(_plain(
+        "继承原会话创建时的上下文，之后独立对话；双方共享项目文件。"
+        "空闲两小时或服务重启后失效，历史消息仍保留在飞书中。"
+    ))
     if state is SideTopicState.OPEN and scope.kind is not ScopeKind.TOPIC:
         raise ValueError("an open Side card requires its exact Topic scope")
+    buttons: list[dict[str, Any]] = []
     if (
         state in {SideTopicState.CREATING, SideTopicState.OPEN}
         and scope.kind is ScopeKind.TOPIC
     ):
         creating = state is SideTopicState.CREATING
-        builder.raw(
-            _button_row(
-                _repeatable_callback_button(
-                    label="取消 Side" if creating else "结束 Side",
-                    value=_envelope(
-                        scope,
-                        CardControlName.SIDE_CLOSE,
-                        side_id=_side_reference(side_id),
+        buttons.append(
+            _repeatable_callback_button(
+                label="取消 Side" if creating else "结束 Side",
+                value=_envelope(
+                    scope,
+                    CardControlName.SIDE_CLOSE,
+                    side_id=_side_reference(side_id),
+                ),
+                style="danger",
+                confirm=(
+                    "取消 Side" if creating else "结束 Side",
+                    (
+                        "将重试清理未完成的 Side，并取消原生订阅。"
+                        if creating
+                        else "将中断当前 Side Turn、清理后台终端并取消原生订阅。"
                     ),
-                    style="danger",
-                    confirm=(
-                        "取消 Side" if creating else "结束 Side",
-                        (
-                            "将重试清理未完成的 Side，并取消原生订阅。"
-                            if creating
-                            else "将中断当前 Side Turn、清理后台终端并取消原生订阅。"
-                        ),
-                    ),
-                )
+                ),
             )
         )
+    if context.source_url is not None:
+        buttons.append({
+            "tag": "button", "type": "default",
+            "text": _plain_text("查看来源话题" if context.source_is_topic else "查看来源聊天"),
+            "behaviors": [{"type": "open_url", "default_url": context.source_url}],
+        })
+    if buttons:
+        builder.raw(_button_row(*buttons))
+    details = [f"原会话编号：{parent_short_id}", f"Side 编号：{side_id[:8]}"]
+    if context.can_resume_parent:
+        details.append(f"在来源位置选择原会话：/resume {parent_short_id}")
+    if context.project_cwd is not None:
+        details.append(f"项目工作目录：{context.project_cwd}")
+    builder.raw({
+        "tag": "collapsible_panel", "expanded": False,
+        "header": {"title": _plain_text("会话详情")},
+        "elements": [_plain("\n".join(details))],
+    })
     return OutboundCard(card=builder.to_dict())
+
+
+def _side_created_time(created_at: str) -> str:
+    try:
+        value = datetime.fromisoformat(created_at)
+        if value.utcoffset() is None:
+            return "时间暂不可用"
+        timestamp = int(value.timestamp() * 1000)
+    except (ValueError, TypeError, OverflowError, OSError):
+        return "时间暂不可用"
+    return (
+        f"<local_datetime millisecond='{timestamp}' format_type='date_num'></local_datetime> "
+        f"<local_datetime millisecond='{timestamp}' format_type='time'></local_datetime>"
+    )
 
 
 def binding_created_card(

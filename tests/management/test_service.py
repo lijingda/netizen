@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 from netizen_cli.bindings import (
     BindingContextRevisionConflict,
     BindingFeedbackRevisionConflict,
+    BindingNotFound,
     BindingQuery,
     BindingSettingsRevisionConflict,
     BindingStore,
@@ -1467,6 +1468,95 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(all(item.inventory_state is SessionInventoryState.UNKNOWN for item in page.items))
                     self.assertTrue(all(item.native.metadata is not None for item in page.items))
 
+    async def test_binding_metadata_exact_reads_original_binding_without_switching(self) -> None:
+        parent = await self._create()
+        self.store.assign_native_thread_id(parent.id, "original-parent")
+        current = await self._create()
+        self.store.assign_native_thread_id(current.id, "current-thread")
+        parent = self.store.get(parent.id)
+        metadata = NativeThreadMetadata("original-parent", "Parent name", "preview")
+        self.runtime.summary_metadata[metadata.thread_id] = metadata
+        self.runtime.calls.clear()
+
+        result = await self.service.binding_metadata_exact(
+            parent.id, deadline=asyncio.get_running_loop().time() + 1,
+        )
+
+        self.assertIs(result, metadata)
+        self.assertEqual(self.runtime.calls, [("summary", "original-parent")])
+        self.assertEqual(self.store.get(parent.id), parent)
+        self.assertEqual(self.store.active_binding(self.scope.key).id, current.id)
+
+    async def test_binding_metadata_lazy_and_missing_bindings_do_not_read_native(self) -> None:
+        binding = await self._create()
+        self.runtime.calls.clear()
+        deadline = asyncio.get_running_loop().time() + 1
+
+        self.assertIsNone(await self.service.binding_metadata_exact(binding.id, deadline=deadline))
+        with self.assertRaises(BindingNotFound):
+            await self.service.binding_metadata_exact("missing-binding", deadline=deadline)
+
+        self.assertEqual(self.runtime.calls, [])
+        self.assertEqual(self.store.get(binding.id), binding)
+
+    async def test_binding_metadata_read_failure_preserves_binding(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "unavailable-summary")
+        binding = self.store.get(binding.id)
+        self.runtime.calls.clear()
+
+        result = await self.service.binding_metadata_exact(
+            binding.id, deadline=asyncio.get_running_loop().time() + 1,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(self.runtime.calls, [("summary", "unavailable-summary")])
+        self.assertEqual(self.store.get(binding.id), binding)
+
+    async def test_binding_metadata_deadline_and_cancellation_preserve_pending_read(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "parent-thread")
+        metadata = NativeThreadMetadata("parent-thread", "Parent name", "")
+        loop = asyncio.get_running_loop()
+
+        for wait_result in ("deadline", "cancelled"):
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            async def read(thread_id):
+                self.assertEqual(thread_id, "parent-thread")
+                entered.set()
+                await release.wait()
+                return metadata
+
+            with self.subTest(wait_result=wait_result), patch.object(
+                self.runtime, "thread_summary_exact", side_effect=read,
+            ):
+                query = asyncio.create_task(self.service.binding_metadata_exact(
+                    binding.id, deadline=loop.time() + (0.5 if wait_result == "deadline" else 5),
+                ))
+                try:
+                    await asyncio.wait_for(entered.wait(), 1)
+                    pending = tuple(self.service._summary_reads)
+                    self.assertEqual(len(pending), 1)
+                    if wait_result == "deadline":
+                        self.assertIsNone(await asyncio.wait_for(query, 1))
+                    else:
+                        query.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await query
+
+                    self.assertEqual(self.service._summary_reads, set(pending))
+                    self.assertTrue(all(not task.done() for task in pending))
+                    release.set()
+                    self.assertEqual(await asyncio.wait_for(asyncio.gather(*pending), 1), [metadata])
+                    self.assertEqual(self.service._summary_reads, set())
+                finally:
+                    release.set()
+                    await asyncio.wait_for(asyncio.gather(
+                        query, *self.service._summary_reads, return_exceptions=True,
+                    ), 1)
+
     async def test_summary_uses_request_budget_and_isolates_individual_failures(self) -> None:
         for thread_id in ("slow", "failed"):
             binding = await self._create()
@@ -1520,6 +1610,11 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                 ):
                     self.assertEqual(len(page.items), 10)
                     self.assertTrue(all(item.native.metadata is None for item in page.items))
+                current = self.store.active_binding(self.scope.key)
+                assert current is not None
+                self.assertIsNone(await asyncio.wait_for(self.service.binding_metadata_exact(
+                    current.id, deadline=loop.time() + 0.1,
+                ), 0.5))
                 self.assertEqual(len(reads), 4)
                 self.assertEqual(len(self.service._summary_reads), 4)
                 release.set()

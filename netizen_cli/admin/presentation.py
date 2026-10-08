@@ -6,9 +6,9 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Any
-from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
+from ..feishu_links import chat_open_url, topic_open_url as _topic_open_url
 from ..runtime.contracts import (
     ReleaseDisposition,
     StopDisposition,
@@ -17,23 +17,10 @@ from ..management import BindingStatusProjection, ChatLabel
 
 
 def _chat_open_url(chat: ChatLabel) -> str:
-    if chat.chat_mode == "p2p" and chat.p2p_target_open_id is not None:
-        query = urlencode({"openId": chat.p2p_target_open_id})
-    else:
-        query = urlencode({"openChatId": chat.chat_id})
-    return f"https://applink.feishu.cn/client/chat/open?{query}"
-
-
-def _topic_open_url(chat_id: str, topic_id: str) -> str:
-    # Match the official Lark CLI's desktop/mobile ID spellings and root position.
-    query = urlencode({
-        "open_chat_id": chat_id,
-        "open_thread_id": topic_id,
-        "openchatid": chat_id,
-        "openthreadid": topic_id,
-        "thread_position": -1,
-    })
-    return f"https://applink.feishu.cn/client/thread/open?{query}"
+    return chat_open_url(
+        chat.chat_id,
+        p2p_target_open_id=(chat.p2p_target_open_id if chat.chat_mode == "p2p" else None),
+    )
 
 
 def _schedule_plan_json(plan: dict[str, Any], chat: ChatLabel) -> dict[str, Any]:

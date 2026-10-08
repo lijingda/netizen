@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs, urlsplit
 
 from lark_channel import (
     FeishuChannelErrorCode,
@@ -10291,6 +10292,218 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         assert record is not None
         return binding, record
 
+    async def test_side_root_uses_exact_parent_and_readable_source_navigation(self) -> None:
+        source = FakeMessage(
+            "/side", message_id="om-readable-side", chat_id="oc-group",
+            chat_type="group", thread_id="omt-parent", display_name="真实发起人",
+        )
+        binding = self.fixture.binding_for(source)
+        self.runtime.thread_summary_values[binding.native_thread_id] = NativeThreadMetadata(
+            binding.native_thread_id, "  Release\n  review  ", "unused preview",
+        )
+        self.fixture.queue_promoted_topic(
+            chat_id="oc-group", root_id="om-root", seed_id="om-seed", topic_id="omt-side",
+        )
+
+        await self.app.handle_message(source)
+
+        record = self.store.side_topic_for_source(app_id="cli_test", source_message_id=source.id)
+        assert record is not None
+        fresh = self.channel.send_calls[0][1]
+        self.assertIsInstance(fresh, OutboundCard)
+        self.assertEqual(_elements(fresh.card, "person"), [])
+        self.assertIn("发起人：真实发起人", str(fresh.card))
+        root = self.channel.updates[-1][1]
+        self.assertIn("来源会话：Release review", str(root))
+        self.assertIn("所属项目：test", str(root))
+        person, = _elements(root, "person")
+        self.assertEqual(person["user_id"], source.sender.open_id)
+        panel, = _elements(root, "collapsible_panel")
+        self.assertFalse(panel["expanded"])
+        self.assertIn(f"/resume {binding.short_id}", str(panel))
+        self.assertIn(str(self.project), str(panel))
+        close, location = _elements(root, "button")
+        self.assertEqual(close["behaviors"][0]["value"]["topic_id"], "omt-side")
+        self.assertEqual(location["behaviors"][0]["type"], "open_url")
+        query = parse_qs(urlsplit(location["behaviors"][0]["default_url"]).query)
+        self.assertEqual(query["open_thread_id"], ["omt-parent"])
+        self.assertEqual(query["openthreadid"], ["omt-parent"])
+        self.assertEqual(query["open_chat_id"], ["oc-group"])
+        self.assertEqual(query["thread_position"], ["-1"])
+
+        replacement = self.fixture.binding_for(source)
+        self.runtime.thread_summary_values[replacement.native_thread_id] = NativeThreadMetadata(
+            replacement.native_thread_id, "Wrong current conversation", "wrong preview",
+        )
+        self.runtime.thread_summary_values[binding.native_thread_id] = NativeThreadMetadata(
+            binding.native_thread_id, "Renamed original", "original preview",
+        )
+        await self.app._update_side_card(record)
+
+        updated = str(self.channel.updates[-1][1])
+        self.assertIn("Renamed original", updated)
+        self.assertNotIn("Wrong current conversation", updated)
+        self.assertEqual(self.runtime.thread_summary_calls, [binding.native_thread_id] * 2)
+        self.assertEqual(self.runtime.thread_metadata_calls, [])
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(self.store.active_binding(binding.scope_key).id, replacement.id)
+        self.assertEqual(self.runtime.submit_side_calls, [])
+
+    async def test_side_root_title_uses_bounded_native_fallbacks(self) -> None:
+        binding, record = await self.open_direct_side()
+        for name, preview, expected in (
+            (None, "  Preview\n fallback  ", "Preview fallback"),
+            ("\t", "\n", "未命名会话"),
+            (None, "长" * 80, "长" * 47 + "…"),
+        ):
+            with self.subTest(name=name, preview=preview):
+                self.runtime.thread_summary_values[binding.native_thread_id] = NativeThreadMetadata(
+                    binding.native_thread_id, name, preview,
+                )
+                await self.app._update_side_card(record)
+                text = [item["content"] for item in _elements(self.channel.updates[-1][1], "plain_text")]
+                self.assertIn(f"来源会话：{expected}", text)
+
+    async def test_side_deleted_parent_uses_frozen_project_but_never_guesses_source_topic(self) -> None:
+        source = FakeMessage(
+            "/side", message_id="om-deleted-parent", chat_id="oc-group",
+            chat_type="group", thread_id="omt-parent",
+        )
+        binding = self.fixture.binding_for(source)
+        self.queue_direct_topic(chat_id="oc-group", root_id="om-root", topic_id="omt-side")
+        await self.app.handle_message(source)
+        record = self.store.side_topic_for_source(app_id="cli_test", source_message_id=source.id)
+        assert record is not None
+        frozen_cwd = self.project.parent / "frozen-cwd"
+        self.runtime.side_snapshots[record.id] = replace(
+            self.runtime.side_snapshot(record.id), cwd=frozen_cwd,
+        )
+        self.store.delete_binding(binding.id)
+        replacement = self.fixture.binding_for(source)
+        self.runtime.thread_summary_values[replacement.native_thread_id] = NativeThreadMetadata(
+            replacement.native_thread_id, "Wrong replacement", "unused",
+        )
+        reads_before = len(self.runtime.thread_summary_calls)
+
+        await self.app._update_side_card(record)
+
+        root = self.channel.updates[-1][1]
+        self.assertIn("原会话已删除", str(root))
+        self.assertIn("所属项目：test", str(root))
+        self.assertIn(str(frozen_cwd), str(root))
+        self.assertNotIn("/resume", str(root))
+        self.assertNotIn("Wrong replacement", str(root))
+        self.assertNotIn("omt-parent", str(root))
+        source_button = _elements(root, "button")[-1]
+        query = parse_qs(urlsplit(source_button["behaviors"][0]["default_url"]).query)
+        self.assertEqual(query, {"openChatId": ["oc-group"]})
+
+        await self.runtime.close_side(record.id)
+
+        closed = self.channel.updates[-1][1]
+        self.assertEqual(closed["header"]["subtitle"]["content"], "已结束")
+        self.assertNotIn("所属项目", str(closed))
+        self.assertNotIn("项目工作目录", str(closed))
+        self.assertEqual(len(self.runtime.thread_summary_calls), reads_before)
+        self.assertEqual(self.store.active_binding(binding.scope_key).id, replacement.id)
+
+    async def test_side_profile_rejection_replaces_same_root_without_affecting_execution(self) -> None:
+        source = FakeMessage(
+            "/side inspect", message_id="om-profile-fallback", chat_id="oc-direct",
+            chat_type="p2p", mentioned_bot=False, display_name="真实发起人",
+        )
+        self.fixture.binding_for(source)
+        self.fixture.queue_promoted_topic(
+            chat_id="oc-direct", root_id="om-root", seed_id="om-seed", topic_id="omt-side",
+        )
+        self.channel.card_update_results.extend((
+            SimpleNamespace(success=False), SimpleNamespace(success=True),
+        ))
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
+            await self.app.handle_message(source)
+        record = self.store.side_topic_for_source(app_id="cli_test", source_message_id=source.id)
+        assert record is not None
+        self.assertEqual(record.state, SideTopicState.OPEN)
+        self.assertEqual([message_id for message_id, _ in self.channel.updates], ["om-root"] * 2)
+        self.assertEqual(len(_elements(self.channel.updates[0][1], "person")), 1)
+        self.assertEqual(_elements(self.channel.updates[1][1], "person"), [])
+        self.assertIn("发起人：真实发起人", str(self.channel.updates[1][1]))
+        self.assertEqual(len(self.channel.send_calls), 2)
+        self.assertEqual(len(self.runtime.create_side_calls), 1)
+        self.assertEqual(len(self.runtime.submit_side_calls), 1)
+
+        self.channel.fail_card_updates = True
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
+            await self.app.handle_message(FakeMessage(
+                "/side close", message_id="om-close", chat_id="oc-direct",
+                chat_type="p2p", thread_id=record.topic_id, mentioned_bot=False,
+            ))
+        self.assertEqual(self.store.get_side_topic(record.id).state, SideTopicState.CLOSED)
+        self.assertNotIn(record.id, self.runtime.side_snapshots)
+        self.assertEqual(self.runtime.close_side_calls, [(record.id, SideTopicState.CLOSED)])
+        self.assertEqual(len(self.channel.send_calls), 2)
+
+    async def test_side_parent_summary_timeout_does_not_block_creation_or_close(self) -> None:
+        source = FakeMessage(
+            "/side inspect", message_id="om-title-timeout", chat_id="oc-direct",
+            chat_type="p2p", mentioned_bot=False,
+        )
+        binding = self.fixture.binding_for(source)
+        self.fixture.queue_promoted_topic(
+            chat_id="oc-direct", root_id="om-root", seed_id="om-seed", topic_id="omt-side",
+        )
+        release = asyncio.Event()
+
+        async def delayed_summary(thread_id):
+            self.assertEqual(thread_id, binding.native_thread_id)
+            await release.wait()
+            return NativeThreadMetadata(thread_id, "Delayed original", "unused")
+
+        try:
+            with (
+                patch.object(self.runtime, "thread_summary", new=delayed_summary),
+                patch("netizen_cli.channel_app._SIDE_CARD_METADATA_TIMEOUT_SECONDS", 0.01),
+            ):
+                await asyncio.wait_for(self.app.handle_message(source), timeout=1)
+                record = self.store.side_topic_for_source(app_id="cli_test", source_message_id=source.id)
+                assert record is not None
+                self.assertEqual(record.state, SideTopicState.OPEN)
+                self.assertIn("会话信息暂不可用", str(self.channel.updates[-1][1]))
+                self.assertEqual(len(self.runtime.submit_side_calls), 1)
+                await asyncio.wait_for(self.app.handle_message(FakeMessage(
+                    "/side close", message_id="om-close", chat_id="oc-direct",
+                    chat_type="p2p", thread_id=record.topic_id, mentioned_bot=False,
+                )), timeout=1)
+                self.assertEqual(self.store.get_side_topic(record.id).state, SideTopicState.CLOSED)
+                self.assertEqual(self.channel.updates[-1][1]["header"]["subtitle"]["content"], "已结束")
+        finally:
+            release.set()
+            await asyncio.gather(*tuple(self.management._summary_reads))
+
+    async def test_side_title_wait_does_not_restore_an_open_card_after_close(self) -> None:
+        binding, record = await self.open_direct_side()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def delayed_metadata(*_args, **_kwargs):
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+            return NativeThreadMetadata(binding.native_thread_id, "Original", "")
+
+        with patch.object(self.management, "binding_metadata_exact", new=delayed_metadata):
+            updating = asyncio.create_task(self.app._update_side_card(record))
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                await self.runtime.close_side(record.id)
+                self.assertEqual(self.channel.updates[-1][1]["header"]["subtitle"]["content"], "已结束")
+            finally:
+                release.set()
+                await asyncio.wait_for(updating, timeout=1)
+        root = self.channel.updates[-1][1]
+        self.assertEqual(root["header"]["subtitle"]["content"], "已结束")
+        self.assertNotIn("side.close", str(root))
+
     async def test_initial_and_subsequent_side_share_task_mentions_without_changing_seed(self) -> None:
         mentions = [
             Mention(key="@_user_1", open_id="ou_bot", name="椰羊"),
@@ -10981,9 +11194,10 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(calls[0][2].receive_id_type, "chat_id")
             self.assertNotIn("side.close", str(calls[0][1]))
             if message.conversation.thread_id is not None:
-                self.assertNotIn(
-                    message.conversation.thread_id,
-                    str(calls[0][1]),
+                source_button, = _elements(calls[0][1].card, "button")
+                source_query = parse_qs(urlsplit(source_button["behaviors"][0]["default_url"]).query)
+                self.assertEqual(
+                    source_query["open_thread_id"], [message.conversation.thread_id],
                 )
             if index == len(cases):
                 self.assertEqual(len(calls), 1)
@@ -11006,10 +11220,10 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(source_replies, [])
             open_card = str(self.channel.updates[-1][1])
             self.assertNotIn("Side 已创建，可以开始多轮对话", open_card)
-            if index == len(cases):
-                self.assertIn(channel_app._SIDE_EMPTY_TOPIC_PROMPT, open_card)
-            else:
-                self.assertNotIn(channel_app._SIDE_EMPTY_TOPIC_PROMPT, open_card)
+            self.assertIn(
+                "在本话题 @ 机器人继续提问。" if index >= 3 else "在本话题继续提问。",
+                open_card,
+            )
             record = self.store.side_topic_for_source(
                 app_id="cli_test",
                 source_message_id=message.id,

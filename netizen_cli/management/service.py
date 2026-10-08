@@ -1271,6 +1271,19 @@ class InstanceManagementService:
             unconfirmed_count=unconfirmed_count,
         )
 
+    async def binding_metadata_exact(
+        self, binding_id: str, *, deadline: float,
+    ) -> NativeThreadMetadata | None:
+        """Read an exact Binding's display summary with the shared worker budget.
+
+        A missing summary says nothing about native archive/existence state.
+        Timed-out SDK workers remain counted until their requests finish.
+        """
+        binding = self._bindings.get(binding_id)
+        views = await self._session_native_views((binding,), native=None, deadline=deadline)
+        view = views.get(binding.native_thread_id)
+        return view.metadata if view is not None else None
+
     async def query_side_topics(
         self,
         *,

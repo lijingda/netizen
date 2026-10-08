@@ -1474,7 +1474,12 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     相同，Activity/Result/Files 始终更新同一个回复卡 message ID。随后修改 Parent 的
     Model/Effort/Speed 与三项 Task Feedback，既有 Side 后续 Turn 必须继续使用创建时快照；
     新建 Side 才使用新值。Side 内 `/goal` 必须零 mutation 拒绝，根卡 close/expiry 更新仍
-    独立于 Turn 回复。重启服务后旧 Side 明确 expired 且不创建 Binding；再验证 idle 两小时
+    独立于 Turn 回复。Side 根卡另验收原会话名称、人员头像/姓名和客户端本地时间，以及
+    默认折叠的“会话详情”原生展开/收起；来源链接在桌面/移动端打开 exact 原话题或聊天，
+    不切换当前会话。切换 Parent 后旧 Side 仍显示原会话，删除 Parent 后不猜测新话题或
+    提供错误恢复命令。人员组件拒绝、标题读取超时或根卡更新失败不得影响创建、首轮执行
+    和关闭；纯文本基础卡仍能创建话题。此处真实客户端显示与点击须单独验收，Fake 不能替代。
+    重启服务后旧 Side 明确 expired 且不创建 Binding；再验证 idle 两小时
     过期。若
     P2P 建话题返回 230071，记录为当前飞书 live gate 未通过并保持 Side unavailable，不能
     以单元测试替代。

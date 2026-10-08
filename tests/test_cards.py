@@ -12,6 +12,7 @@ from netizen_cli.cards import (
     ArchivedSessionCardItem,
     CardActionError,
     SessionCardItem,
+    SideTopicCardContext,
     SettingsCardActionError,
     TurnFileCardLimitError,
     activity_step_display,
@@ -3538,7 +3539,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("side.close", serialized)
         self.assertIn("side:v1:side-123", serialized)
         self.assertIn("omt_side", serialized)
-        self.assertIn("共享 Project cwd", serialized)
+        self.assertIn("共享项目文件", serialized)
         self.assertIn("服务重启后", serialized)
         self.assertIn("confirm", serialized)
 
@@ -3577,6 +3578,95 @@ class CardRendererTest(unittest.TestCase):
                     state=state,
                 )
                 self.assertNotIn("side.close", str(card.card))
+
+    def test_side_card_keeps_readable_facts_and_collapses_technical_details(self) -> None:
+        topic = FeishuScope("cli_test", "oc_group", ScopeKind.TOPIC, "omt_side")
+        title = "Release <at id=all></at> [review](https://example.com)"
+        cwd = "/project/<at id=all></at>"
+        card = side_topic_card(
+            scope=topic,
+            side_id="side-1234567890",
+            parent_short_id="parent12",
+            creator_id="ou_creator",
+            created_at="1970-01-01T08:00:01+08:00",
+            state=SideTopicState.OPEN,
+            context=SideTopicCardContext(
+                parent_title=title,
+                project_alias="release",
+                project_cwd=cwd,
+                source_url="https://applink.feishu.cn/client/thread/open?source",
+                source_is_topic=True,
+                can_resume_parent=True,
+            ),
+            requires_mention=True,
+        )
+        self.assertEqual(card.card["header"]["subtitle"]["content"], "可用")
+        self.assertNotIn("parent12", str(card.card["header"]))
+        person, = _elements(card.card, "person")
+        self.assertEqual(person["user_id"], "ou_creator")
+        self.assertTrue(person["show_name"])
+        self.assertTrue(person["show_avatar"])
+        self.assertEqual(_elements(card.card, "at"), [])
+        panel, = _elements(card.card, "collapsible_panel")
+        self.assertFalse(panel["expanded"])
+        self.assertEqual(panel["header"]["title"]["content"], "会话详情")
+        self.assertIn("parent12", str(panel))
+        self.assertIn("side-123", str(panel))
+        self.assertIn("/resume parent12", str(panel))
+        self.assertIn(cwd, str(panel))
+        body = [element for element in card.card["body"]["elements"] if element is not panel]
+        plain_text = [element["content"] for element in _elements(body, "plain_text")]
+        self.assertIn(f"来源会话：{title}", plain_text)
+        self.assertIn("所属项目：release", plain_text)
+        self.assertIn("在本话题 @ 机器人继续提问。", plain_text)
+        self.assertFalse(any("parent12" in text or cwd in text for text in plain_text))
+        markdown = str(_elements(card.card, "markdown"))
+        self.assertIn("millisecond='1000'", markdown)
+        self.assertIn("format_type='date_num'", markdown)
+        self.assertIn("format_type='time'", markdown)
+        self.assertNotIn(title, markdown)
+        self.assertNotIn(cwd, markdown)
+        self.assertNotIn("1970-01-01T08:00:01+08:00", markdown)
+        close, source = _elements(card.card, "button")
+        self.assertEqual(close["behaviors"][0]["value"]["side_id"], "side:v1:side-1234567890")
+        self.assertEqual(close["behaviors"][0]["value"]["topic_id"], "omt_side")
+        self.assertEqual(source["text"]["content"], "查看来源话题")
+        self.assertEqual(source["behaviors"], [{
+            "type": "open_url", "default_url": "https://applink.feishu.cn/client/thread/open?source",
+        }])
+
+    def test_side_card_optional_profile_and_time_fall_back_without_raw_identifiers(self) -> None:
+        for creator_id, profile, created_at in (
+            ("ou_creator", False, "invalid timestamp"),
+            ("all", True, "2026-01-01T12:00:00"),
+        ):
+            with self.subTest(creator_id=creator_id):
+                name = "<at id=all></at> 张三"
+                card = side_topic_card(
+                    scope=self.scope,
+                    side_id="side-123",
+                    parent_short_id="parent12",
+                    creator_id=creator_id,
+                    created_at=created_at,
+                    state=SideTopicState.CLOSED,
+                    context=SideTopicCardContext(
+                        creator_name=name,
+                        source_url="https://applink.feishu.cn/client/chat/open?source",
+                    ),
+                    show_creator_profile=profile,
+                )
+                self.assertEqual(_elements(card.card, "person"), [])
+                self.assertIn(f"发起人：{name}", [
+                    text["content"] for text in _elements(card.card, "plain_text")
+                ])
+                markdown = str(_elements(card.card, "markdown"))
+                self.assertIn("时间暂不可用", markdown)
+                self.assertNotIn(created_at, markdown)
+                self.assertNotIn("local_datetime", markdown)
+                self.assertNotIn("/resume", str(card.card))
+                self.assertEqual(card.card["header"]["subtitle"]["content"], "已结束")
+                source, = _elements(card.card, "button")
+                self.assertEqual(source["text"]["content"], "查看来源聊天")
 
     def test_lifecycle_cards_encode_exact_binding_and_destructive_confirmation(self) -> None:
         binding_id = "11111111-0000-0000-0000-000000000001"
