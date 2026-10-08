@@ -10,6 +10,8 @@ from netizen_cli.cards.questions import (
     is_question_card_action,
     render_question_card,
     render_question_context_card,
+    render_question_receipt_card,
+    render_question_submission_card,
 )
 from netizen_cli.user_questions import (
     BindingQuestionTarget,
@@ -31,6 +33,20 @@ class QuestionCardsTest(unittest.TestCase):
 
     def card(self):
         return render_question_card(self.target, self.request, 1)
+
+    def test_free_answer_is_the_last_numbered_option_with_a_single_line_input(self):
+        card = self.card()
+        form = elements(card.card, "form")[0]
+        input_field, = elements(form, "input")
+        selector, = elements(form, "select_static")
+        self.assertEqual(input_field["input_type"], "text")
+        self.assertEqual(input_field["label"]["content"], "3. 自行填写")
+        self.assertEqual([option["value"] for option in selector["options"]], ["0", "1", "free"])
+        self.assertIn("自行填写", selector["options"][-1]["text"]["content"])
+        self.assertEqual([item["text"]["content"] for item in form["elements"][:2]], [
+            "1. Keep the full first option", "2. Another option",
+        ])
+        self.assertLess(form["elements"].index(input_field), form["elements"].index(selector))
 
     def test_selected_suggestion_preserves_exact_question_index_text_and_original_target(self):
         card = self.card()
@@ -86,6 +102,21 @@ class QuestionCardsTest(unittest.TestCase):
                 self.assertNotEqual(retry_value["nonce"], value["nonce"])
                 self.assertEqual(decode_question_context(retry_value), context)
 
+    def test_answer_validation_explains_how_to_correct_or_send_outside_the_card(self):
+        value = callback(self.card(), "提交回答")
+        cases = (
+            ({"netizen_question_choice": "free", "netizen_question_text": "  "}, ("自行填写", "输入", "改选")),
+            ({"netizen_question_choice": "9"}, ("重新选择", "自行填写")),
+            ({"netizen_question_choice": "free", "netizen_question_text": "x" * 1001}, ("1,000", "缩短", "原会话")),
+            ({"unrecognized_field": "answer"}, ("表单", "原会话直接发送")),
+        )
+        for form, expected in cases:
+            with self.subTest(form_fields=list(form)):
+                with self.assertRaises(CardActionError) as caught:
+                    decode_question_answer(value, form)
+                for action in expected:
+                    self.assertIn(action, str(caught.exception))
+
     def test_retry_keeps_free_answer_and_choice_with_fresh_nonce(self):
         card = self.card()
         value = callback(card, "提交回答")
@@ -95,6 +126,43 @@ class QuestionCardsTest(unittest.TestCase):
         retry_value = callback(retried, "提交回答")
         self.assertNotEqual(value["nonce"], retry_value["nonce"])
         self.assertEqual(decode_question_answer(retry_value, form_values(retried)), answer)
+        self.assertEqual(retried.card["header"]["title"]["content"], "回答提交失败")
+        self.assertIn("尚未交给 Codex", retried.card["header"]["subtitle"]["content"])
+
+    def test_answer_receipt_contains_full_question_and_answer_as_plain_text(self):
+        title = '<at id="all">all</at> **Use the standard module name?**'
+        option = "*" + "long answer " * 300 + "*"
+        card = render_question_card(self.target, QuestionRequest("item", (UserQuestion(title, (option,)),)), 0)
+        answer = decode_question_answer(callback(card, "提交回答"), {"netizen_question_choice": "0"})
+        receipt = render_question_receipt_card(answer, sender_name="Answering Person")
+        self.assertEqual(elements(receipt.card, "markdown"), [])
+        plain = [item["content"] for item in elements(receipt.card, "plain_text")]
+        self.assertIn("问题\n" + title, plain)
+        self.assertIn("Answering Person 的回答\n" + option, plain)
+        self.assertEqual(elements(receipt.card, "button"), [])
+        self.assertIn("通过问题卡提交的回答", receipt.card["header"]["subtitle"]["content"])
+        self.assertTrue(any("提交结果" in text and "原问题卡" in text and "聊天反馈" in text for text in plain))
+        self.assertNotIn("正在处理", json.dumps(receipt.card, ensure_ascii=False))
+
+    def test_submission_summary_keeps_question_answer_and_actual_acceptance_without_submit_controls(self):
+        card = self.card()
+        answer = decode_question_answer(callback(card, "提交回答"), {
+            "netizen_question_choice": "free", "netizen_question_text": "我的回答",
+        })
+        for accepted, notice in ((True, None), (True, "反馈失败"), (False, "接收结果未确认")):
+            with self.subTest(accepted=accepted, notice=notice):
+                result = render_question_submission_card(
+                    answer, sender_name="Answering Person", accepted=accepted, notice=notice,
+                )
+                self.assertEqual(result.card["header"]["title"]["content"],
+                                 "回答已提交" if accepted else "回答提交异常")
+                plain = [item["content"] for item in elements(result.card, "plain_text")]
+                self.assertIn("问题\nWhich design?", plain)
+                self.assertIn("Answering Person 的回答\n我的回答", plain)
+                if notice:
+                    self.assertIn(notice, plain)
+                for tag in ("form", "button", "input", "select_static"):
+                    self.assertEqual(elements(result.card, tag), [])
 
     def test_retry_preserves_option_index_and_allows_selecting_another_option(self):
         card = render_question_card(self.target, QuestionRequest("item", (
