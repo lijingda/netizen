@@ -49,6 +49,7 @@ from .cards import (
     ArchivedSessionCardItem,
     CardActionError,
     SessionCardItem,
+    SideTopicCardContext,
     SESSIONS_PAGE_SIZE,
     SettingsCardActionError,
     TURN_FILE_ACTION_VERSION,
@@ -239,6 +240,7 @@ from .management import (
     SessionInventoryState,
 )
 from .git_status import git_branch_status
+from .feishu_links import chat_open_url, topic_open_url
 from .image_inputs import (
     ImageInputError,
     ImageReference,
@@ -291,6 +293,7 @@ _TURN_FILES_WITHOUT_FINAL_RESPONSE = "任务已完成，已生成以下文件。
 
 _TEXTUAL_CONTENT_TYPES = frozenset({"text", "post"})
 _SESSION_QUERY_TIMEOUT_SECONDS = 10.0
+_SIDE_CARD_METADATA_TIMEOUT_SECONDS = 1.0
 _CONTEXT_RECEIPT_TIMEOUT_SECONDS = 5.0
 _DONE_REACTION = "DONE"
 _ERROR_REACTION = "ERROR"
@@ -1198,7 +1201,7 @@ class ChannelApplication:
             *(
                 self._update_side_card(
                     record,
-                    notice="服务已重启；ephemeral Side 已过期。",
+                    notice="服务已重启，本临时对话已过期；历史消息仍可查看。",
                 )
                 for record in records
                 if record.root_message_id is not None
@@ -2140,8 +2143,8 @@ class ChannelApplication:
             return
         if outcome.error is None:
             notice = {
-                SideTopicState.CLOSED: "Side 已结束并释放原生订阅。",
-                SideTopicState.EXPIRED: "Side 已因空闲超时或服务重启而过期。",
+                SideTopicState.CLOSED: "本临时对话已结束，历史消息仍可查看。",
+                SideTopicState.EXPIRED: "本临时对话已因空闲超时或服务重启而过期；历史消息仍可查看。",
                 SideTopicState.FAILED: "Side 创建失败，已释放可确认的原生资源。",
             }.get(record.state)
             await self._update_side_card(record, notice=notice)
@@ -3426,6 +3429,10 @@ class ChannelApplication:
                 record.chat_id,
                 ScopeKind.GROUP if record.requires_mention else ScopeKind.DIRECT,
             )
+            card_context = await self._side_card_context(
+                record,
+                creator_name=_nonempty_field(_object_field(message, "sender"), "display_name"),
+            )
             root_card = side_topic_card(
                 scope=root_scope,
                 side_id=record.id,
@@ -3433,6 +3440,11 @@ class ChannelApplication:
                 creator_id=record.creator_id,
                 created_at=record.created_at,
                 state=SideTopicState.CREATING,
+                context=card_context,
+                requires_mention=record.requires_mention,
+                # The fresh root establishes the topic. Optional profile
+                # rendering is only attempted once the route is confirmed.
+                show_creator_profile=False,
             )
             root = await self._send_side_message(
                 record.chat_id,
@@ -3502,11 +3514,7 @@ class ChannelApplication:
         assert root is not None
         await self._update_side_card(
             record,
-            notice=(
-                _SIDE_EMPTY_TOPIC_PROMPT
-                if initial_text is None and root.thread_id is not None
-                else None
-            ),
+            context=card_context,
         )
         if initial_text is not None:
             assert origin is not None
@@ -3660,40 +3668,114 @@ class ChannelApplication:
             record.topic_id,
         )
 
+    async def _side_card_context(
+        self, record: SideTopicRecord, *, creator_name: str | None = None,
+    ) -> SideTopicCardContext:
+        """Optional display facts; never consult the chat's current Binding."""
+        title = "原会话信息暂不可用"
+        project_alias = None
+        project_cwd = None
+        source_url = chat_open_url(record.chat_id)
+        source_is_topic = False
+        can_resume_parent = False
+        binding = None
+        try:
+            binding = self._bindings.get(record.parent_binding_id)
+        except BindingNotFound:
+            title = "原会话已删除"
+        except Exception:
+            logger.warning("Side Parent display lookup failed", exc_info=True)
+        if binding is not None:
+            project_alias = binding.project_alias
+            try:
+                source = self._bindings.get_scope(binding.scope_key).scope
+                if source.app_id != record.app_id or source.chat_id != record.chat_id:
+                    raise SideTopicConflict("Side Parent display Scope identity mismatch")
+                if source.topic_id is not None:
+                    source_url = topic_open_url(source.chat_id, source.topic_id)
+                    source_is_topic = True
+                can_resume_parent = True
+            except Exception:
+                logger.warning("Side source location unavailable", exc_info=True)
+            try:
+                metadata = await self._management.binding_metadata_exact(
+                    binding.id,
+                    deadline=asyncio.get_running_loop().time() + _SIDE_CARD_METADATA_TIMEOUT_SECONDS,
+                )
+                title = _session_title(binding, metadata)
+            except Exception:
+                logger.warning("Side Parent title unavailable", exc_info=True)
+        try:
+            snapshot = self._runtime.side_snapshot(record.id)
+            if snapshot.parent_binding_id != record.parent_binding_id:
+                raise SideSessionConflict("Side display Parent identity mismatch")
+            project_alias = snapshot.project_alias
+            project_cwd = str(snapshot.cwd)
+        except SideSessionNotFound:
+            pass
+        except Exception:
+            logger.warning("Side project snapshot unavailable", exc_info=True)
+        if project_cwd is None and project_alias is not None:
+            try:
+                # Read registered metadata without filesystem or admission checks.
+                project_cwd = self._bindings.get_project(project_alias).cwd
+            except Exception:
+                logger.warning("Side project display lookup failed", exc_info=True)
+        return SideTopicCardContext(
+            parent_title=title,
+            project_alias=project_alias,
+            project_cwd=project_cwd,
+            source_url=source_url,
+            source_is_topic=source_is_topic,
+            can_resume_parent=can_resume_parent,
+            creator_name=_normalized_thread_text(creator_name, max_chars=120),
+        )
+
     async def _update_side_card(
         self,
         record: SideTopicRecord,
         *,
         notice: str | None = None,
         notice_is_error: bool = False,
+        context: SideTopicCardContext | None = None,
     ) -> bool:
         if record.root_message_id is None:
             return False
-        if record.topic_id is not None:
-            scope = self._side_scope(record)
-        else:
-            scope = FeishuScope(
-                record.app_id,
-                record.chat_id,
-                ScopeKind.GROUP if record.requires_mention else ScopeKind.DIRECT,
+        if context is None:
+            context = await self._side_card_context(record)
+        for show_creator_profile in (True, False):
+            # Recheck after enrichment or fallback so a close/expiry during those
+            # waits is reflected here. Already in-flight updates may still race.
+            current = self._bindings.get_side_topic(record.id)
+            if current.root_message_id is None:
+                return False
+            scope = (
+                self._side_scope(current) if current.topic_id is not None
+                else FeishuScope(
+                    current.app_id,
+                    current.chat_id,
+                    ScopeKind.GROUP if current.requires_mention else ScopeKind.DIRECT,
+                )
             )
-        try:
-            parent_short_id = self._bindings.get(record.parent_binding_id).short_id
-        except BindingNotFound:
-            parent_short_id = record.parent_binding_id[:8]
-        return await self._safe_update_card(
-            record.root_message_id,
-            side_topic_card(
+            same_state = current.state is record.state
+            card = side_topic_card(
                 scope=scope,
-                side_id=record.id,
-                parent_short_id=parent_short_id,
-                creator_id=record.creator_id,
-                created_at=record.created_at,
-                state=record.state,
-                notice=notice,
-                notice_is_error=notice_is_error,
-            ),
-        )
+                side_id=current.id,
+                parent_short_id=current.parent_binding_id[:8],
+                creator_id=current.creator_id,
+                created_at=current.created_at,
+                state=current.state,
+                notice=notice if same_state else None,
+                notice_is_error=notice_is_error if same_state else False,
+                context=context,
+                requires_mention=current.requires_mention,
+                show_creator_profile=show_creator_profile,
+            )
+            if await self._safe_update_card(current.root_message_id, card):
+                return True
+            # Replacing the exact existing message is safe even if an update's
+            # result was lost. Never resend the fresh root with different content.
+        return False
 
     async def _send_context_receipt(
         self,

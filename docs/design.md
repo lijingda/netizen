@@ -382,6 +382,21 @@ message/chat/root/parent/thread 关系、code、分片和 success；来源 topic
 消除这个 V1 crash window。首轮问题只在新话题显示并执行；Parent 创建成功后不发文字回复，
 错误仍在来源位置明确报告。
 
+Side 根卡主展示来源会话名称、所属项目、发起人和飞书客户端本地创建时间；名称仅补读
+route 记录的 exact Parent Binding，不追随当前指针。原生名称优先，缺省时复用有界摘要，
+读取失败保留占位。补读与 Sessions 共享最多 4 个 SDK worker，排队与读取合计最多 1 秒；
+超时后的请求继续计数直到实际返回，不增加目录扫描、恢复 Thread 或后台重试。
+项目工作目录优先取运行中的 Side 快照；终态时尽力读取原 Binding 的项目元数据，
+Parent 与运行态都不可用时省略，不猜测其他会话。上述展示信息不新增持久化字段。
+
+根卡首次发布以入站发送者姓名展示发起人，不依赖人员组件；确认 topic 后再在同一 root
+尽力增强为飞书原生头像/姓名组件，更新失败退回普通文本，不以新 payload 重发 fresh root。
+“会话详情”默认折叠，原生展开/收起只改变显示，包含原会话/Side 短编号、已知项目 cwd，
+及原位置仍可定位时的 `/resume <原会话编号>`。来源按钮只打开原话题或聊天，不自动切换
+当前 Binding、不在 Side 内执行恢复；Parent 已删除时只保留已知聊天入口且省略恢复命令。
+名称、姓名和路径均使用 plain text，不能成为 mention 或卡片 markup。创建、结束、过期与
+异常的既有生命周期语义保持不变，不增加首轮问题预览或逐轮根卡更新。
+
 Side Topic route 不是新的 ScopeKind。消息先按 exact topic ID 查 Side，再按 inbound
 root ID 回退，只有未命中才进入普通 Scope/Binding。P2P/P2P topic 依据 underlying
 `chat_type=p2p` 免 @；群主线和各类群话题仍逐条要求 @。`closed/expired/failed`
@@ -1628,8 +1643,8 @@ archived/missing/Lazy 与运行态。Sessions 的位置链接优先打开话题�
 用现有 `chat_id` / `topic_id` 生成 `client/thread/open`，同时携带 `open_chat_id` /
 `openchatid`、`open_thread_id` / `openthreadid` 两套客户端参数，根消息位置为
 `thread_position=-1`。判断不依赖 chat mode 或名称解析；无话题链接时使用原聊天 AppLink。
-URL 只在 Admin 响应中生成，不增加消息查询、CLI 运行依赖或持久存储，也不改变
-Scope/Binding/native Thread 身份。名称与 AppLink 都是当次管理展示事实。
+URL 在 Admin 响应和 Side 根卡中按已知 exact 位置生成，不增加消息查询、CLI 运行依赖或
+持久存储，也不改变 Scope/Binding/native Thread 身份。名称与 AppLink 都是当次展示事实。
 
 ### 管理动作与确认
 

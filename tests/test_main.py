@@ -1457,7 +1457,8 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(boundary_codex, [cleanup_codex[0]])
         self.assertEqual(subscription_codex, [cleanup_codex[0]])
         self.assertEqual(side_card_updates[0][0], "om_root")
-        self.assertIn("expired", str(side_card_updates[0][1]))
+        self.assertEqual(side_card_updates[0][1]["header"]["subtitle"]["content"], "已过期")
+        self.assertEqual(side_card_updates[0][1]["header"]["template"], "grey")
         self.assertTrue(closed)
 
     async def test_close_always_closes_transport_and_tasks_after_cancellation(self) -> None:
