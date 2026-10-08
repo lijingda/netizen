@@ -67,6 +67,7 @@ from .management import (
     ManagementRuntimePort,
     ScopeCoordinator,
 )
+from .management.chat_directory import FeishuChatDirectory
 from .message_history import FeishuMessageHistoryReader
 from .projects import ProjectError, ProjectRegistry
 from .sdk_gap_adapter import (
@@ -171,7 +172,7 @@ class ServiceCore:
         self._codex: AsyncCodex | None = None
         self._runtime: CodexRuntime | None = None
         self._management: InstanceManagementService | None = None
-        self._message_history_client: Any | None = None
+        self._feishu_read_client: Any | None = None
         self._admin: AdminWebRunner | None = None
         self._schedule_mcp: ScheduleMcpRunner | None = None
         self._scheduler: Scheduler | None = None
@@ -274,12 +275,21 @@ class ServiceCore:
                 turn_plan_observer=turn_plan_observer,
             )
             scope_coordinator = ScopeCoordinator()
+            self._feishu_read_client = (
+                lark.Client.builder()
+                .app_id(self._settings.app_id)
+                .app_secret(self._settings.app_secret)
+                .timeout(10)
+                .log_level(lark.LogLevel.WARNING)
+                .build()
+            )
             self._management = InstanceManagementService(
                 bindings=self._store,
                 projects=self._projects,
                 runtime=ManagementRuntimePort(self._runtime),
                 scope_coordinator=scope_coordinator,
                 chat_labels=self._channel,
+                chat_directory=FeishuChatDirectory(self._feishu_read_client),
                 root=self._instance_root,
             )
             schedules = self._management.enable_schedules(
@@ -295,14 +305,6 @@ class ServiceCore:
             self._schedule_mcp.attach(manage_schedule)
             if self._admin is not None:
                 self._admin.attach_management(self._management)
-            self._message_history_client = (
-                lark.Client.builder()
-                .app_id(self._settings.app_id)
-                .app_secret(self._settings.app_secret)
-                .timeout(10)
-                .log_level(lark.LogLevel.WARNING)
-                .build()
-            )
             self.application = ChannelApplication(
                 app_id=self._settings.app_id,
                 channel=self._channel,
@@ -310,7 +312,7 @@ class ServiceCore:
                 bindings=self._store,
                 projects=self._projects,
                 message_history=FeishuMessageHistoryReader(
-                    self._message_history_client
+                    self._feishu_read_client
                 ),
                 management=self._management,
                 admin_urls=self._admin.urls if self._admin is not None else (),

@@ -4,6 +4,8 @@ let answer;
 async function api(path) { requests.push(path); return answer(path); }
 let refreshed;
 let loadOnRefresh = false;
+let selectedScheduleSession = null;
+function openScheduleForSession(session, button) { selectedScheduleSession = { session, button }; }
 async function refresh(tab) {
   refreshed = tab;
   if (loadOnRefresh) {
@@ -25,7 +27,8 @@ async function refresh(tab) {
   assert(!query().has("scopeKind"));
   assert(!query().has("current"));
   assert.equal(form.querySelectorAll("input").filter((input) =>
-    ["chatId", "topicId", "identity"].includes(input.name)).length, 0);
+    ["topicId", "identity"].includes(input.name)).length, 0);
+  assert.equal(form.querySelectorAll("input").find((input) => input.name === "chatId").type, "hidden");
 
   // All option pages are fetched without native metadata/action-grant endpoints.
   answer = (path) => new URL(path, "https://admin").searchParams.has("cursor")
@@ -240,7 +243,12 @@ async function refresh(tab) {
   assert.match(notice.textContent, /无法确认.*刷新/);
   assert.match(rows.textContent, /Read summary.*状态未确认.*running/);
   assert.doesNotMatch(rows.textContent, /Lazy Session|原生会话缺失/);
-  assert.deepEqual(rows.querySelectorAll("button").map((button) => button.textContent), ["停止"]);
+  assert.deepEqual(rows.querySelectorAll("button").map((button) => button.textContent), ["创建定时任务", "停止"]);
+  const createSchedule = rows.querySelectorAll("button").find((button) => button.textContent === "创建定时任务");
+  createSchedule.click();
+  assert.equal(selectedScheduleSession.session, state.sessions.items[0]);
+  assert.equal(selectedScheduleSession.session.bindingId, unknown.bindingId);
+  assert.equal(selectedScheduleSession.button, createSchedule);
 
   // Native seconds render in the browser's time zone and change with the list response.
   const previousTZ = process.env.TZ;
@@ -299,4 +307,47 @@ async function refresh(tab) {
   sessionResponse = { items: [], nextCursor: null, catalogAvailable: true };
   await loadSessions();
   assert.equal(notice.hidden, true);
+
+  // The shared group picker submits exact chat IDs and resets applied pagination on filtering.
+  const answerSessions = answer;
+  answer = (path) => path.startsWith("/api/v1/chats?")
+    ? { items: [{ chatId: "oc_selected", name: "研发 & 测试群" }], nextCursor: null }
+    : answerSessions(path);
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  sessionChatPicker.focus();
+  await flush();
+  const pickerRoot = document.querySelector("#session-chat-picker");
+  assert.match(pickerRoot.textContent, /当前已加入且可访问/);
+  pickerRoot.querySelector(".chat-picker-option").click();
+  assert.equal(query().get("chatId"), "oc_selected");
+  assert.equal(document.querySelector("#session-chat-filter").value, "oc_selected");
+  state.sessionPage = { cursor: "page-three", number: 3, nextCursor: "page-four", previousCursors: [null, "page-two"], query: "pageSize=20" };
+  form.dispatch("submit");
+  await flush();
+  assert.equal(state.sessionPage.number, 1);
+  assert.equal(state.sessionPage.cursor, null);
+  assert.deepEqual(state.sessionPage.previousCursors, []);
+  assert.equal(new URLSearchParams(state.sessionPage.query).get("chatId"), "oc_selected");
+  const filterRequest = new URL(requests.filter((path) => path.startsWith("/api/v1/sessions?")).at(-1), "https://admin");
+  assert.equal(filterRequest.searchParams.get("chatId"), "oc_selected");
+  assert.equal(filterRequest.searchParams.has("cursor"), false);
+  const searchInput = pickerRoot.querySelector("input");
+  searchInput.value = "另一个群";
+  searchInput.dispatch("input");
+  assert.equal(document.querySelector("#session-chat-filter").value, "", "editing the label must not retain the previously selected filter ID");
+  sessionChatPicker.close();
+  form.dispatch("submit");
+  await flush();
+  assert.equal(new URLSearchParams(state.sessionPage.query).has("chatId"), false);
+  await fetchChatPage({ query: "研发 & 测试", cursor: "later+page" });
+  const chatQuery = new URL(requests.at(-1), "https://admin").searchParams;
+  assert.equal(chatQuery.get("query"), "研发 & 测试");
+  assert.equal(chatQuery.get("cursor"), "later+page");
+  sessionChatPicker.setSelection({ chatId: "oc_selected", name: "研发群" });
+  document.querySelector("#session-chat-filter").value = "oc_selected";
+  await resetSessionFilters();
+  assert.equal(document.querySelector("#session-chat-filter").value, "");
+  assert.equal(searchInput.value, "");
+  assert.equal(sessionChatPicker.getSelection(), null);
+  assert.equal(new URLSearchParams(state.sessionPage.query).has("chatId"), false);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

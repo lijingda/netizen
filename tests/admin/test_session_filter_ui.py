@@ -62,9 +62,13 @@ class SessionFilterUiTest(unittest.TestCase):
         )
         before, after = harness.split("// SHIPPED_FILTER_CONTROLLERS\n")
         dom = Path(__file__).with_name("dom_harness.js").read_text(encoding="utf-8")
+        shared_chat = (static / "chat-picker.js").read_text(encoding="utf-8") + source[
+            source.index("async function fetchChatPage("):source.index("let defaultsEditor =")]
+        listeners = source[source.index('document.querySelector("#session-filter").addEventListener'):
+                           source.index('document.querySelector("#side-filter").addEventListener')]
         result = subprocess.run(
             [node, "-e", "const htmlTree = " + json.dumps(tree.root) + ";\n"
-             + dom + before + filters + presentation + pagination + after],
+             + dom + before + shared_chat + filters + presentation + pagination + listeners + after],
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

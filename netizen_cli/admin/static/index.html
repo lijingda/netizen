@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Netizen Admin</title>
   <link rel="stylesheet" href="/static/admin.css">
+  <link rel="stylesheet" href="/static/chat-picker.css">
+  <script src="/static/chat-picker.js" defer></script>
   <script src="/static/admin.js" defer></script>
 </head>
 <body>
@@ -65,6 +67,8 @@
       </div>
       <form id="session-filter" class="filter-bar">
         <fieldset class="multi-filter" data-session-multi="project"><legend>Project</legend></fieldset>
+        <div id="session-chat-picker"></div>
+        <input id="session-chat-filter" name="chatId" type="hidden">
         <fieldset class="multi-filter" data-session-multi="scopeKind"><legend>Scope</legend></fieldset>
         <fieldset class="multi-filter" data-session-multi="inventoryState"><legend>会话状态</legend></fieldset>
         <fieldset class="multi-filter" data-session-multi="current"><legend>当前指针</legend></fieldset>
@@ -78,6 +82,13 @@
         <button type="button" id="session-filter-reset" class="refresh">重置</button>
       </form>
       <p id="sessions-catalog-notice" class="hint" role="status" hidden>原生目录暂时无法确认部分会话的状态，请稍后刷新。</p>
+      <div id="session-schedule-selection" class="selection-notice" hidden>
+        <p>请选择执行此定时任务的会话。已填写的内容暂存在当前页面，刷新页面将丢失。</p>
+        <button id="session-schedule-cancel" class="refresh" type="button">取消选择</button>
+      </div>
+      <div id="session-schedule-saved" class="selection-notice" hidden role="status">
+        <p>定时任务已创建。</p><button id="session-schedule-view" class="refresh" type="button">查看定时任务</button>
+      </div>
       <div class="table-wrap"><table><thead><tr>
         <th>飞书位置</th><th>类型</th><th>Session</th><th>会话状态</th><th>运行态</th><th>Project</th><th>配置</th><th title="原生会话最近更新时间，按浏览器本地时区显示">最近更新</th><th>操作</th>
       </tr></thead><tbody id="sessions-body"></tbody></table></div>
@@ -169,7 +180,13 @@
           <fieldset id="defaults-fields">
             <h4>适用对象</h4>
             <div class="schedule-form-grid">
-              <label id="defaults-chat-field">聊天 ID<input id="defaults-chat" maxlength="256" required placeholder="群聊或单聊的 chat_id" aria-describedby="defaults-target-help"></label>
+              <div id="defaults-chat-target" class="chat-target">
+                <label>聊天类型<select id="defaults-chat-kind"><option value="group">群聊</option><option value="p2p">单聊</option><option value="unknown" hidden>类型待确认</option></select></label>
+                <div id="defaults-group-picker"></div>
+                <label id="defaults-chat-manual-field" class="chat-manual-toggle"><input id="defaults-chat-manual" type="checkbox">手动输入聊天 ID</label>
+                <label id="defaults-chat-field">聊天 ID<input id="defaults-chat" maxlength="256" placeholder="oc_…（聊天 ID，不是用户 ID）" aria-describedby="defaults-chat-help"></label>
+                <p id="defaults-chat-help" class="defaults-field-help"></p>
+              </div>
               <label id="defaults-keyword-field" hidden>群名包含<input id="defaults-keyword" maxlength="200" disabled placeholder="输入群名关键词" aria-describedby="defaults-target-help"></label>
             </div>
             <p id="defaults-target-help" class="defaults-field-help"></p>
@@ -179,7 +196,7 @@
               <label>模型<select id="defaults-model"><option value="">继承 Codex</option></select></label>
               <label>推理强度<select id="defaults-effort" disabled></select></label>
               <label>速度<select id="defaults-tier" disabled></select></label>
-              <label>上下文<select id="defaults-context"><option value="current-only">当前消息</option><option value="catch-up">补齐未读上下文</option></select></label>
+              <label id="defaults-context-field">上下文<select id="defaults-context"><option value="current-only">当前消息</option><option value="catch-up">补齐未读上下文</option></select></label>
             </div>
             <h4>任务反馈</h4>
             <div class="defaults-feedback">
@@ -228,15 +245,23 @@
         <fieldset id="schedule-fields">
           <div class="schedule-editor-body">
             <div class="schedule-form-grid">
-              <label>名称<input id="schedule-name" maxlength="128" required></label>
               <label>执行目标<select id="schedule-target-kind"><option value="new_topic">每次新建独立话题</option><option value="binding">在原会话继续</option></select></label>
-              <label id="schedule-binding-query-field" hidden>查找原会话<input id="schedule-binding-query" maxlength="512" placeholder="Project、聊天 ID 或会话短 ID" disabled></label>
-              <label id="schedule-binding-field" hidden>原会话<select id="schedule-binding" disabled><option value="">选择原会话</option></select></label>
+              <label>名称<input id="schedule-name" maxlength="128" required></label>
+              <div id="schedule-binding-field" class="schedule-binding-target" hidden>
+                <input id="schedule-binding" type="hidden">
+                <p id="schedule-binding-summary" class="target-summary"></p>
+                <button id="schedule-select-session" type="button">前往 Sessions 选择会话</button>
+              </div>
               <label id="schedule-project-field">Project<select id="schedule-project" required><option value="">选择 Project</option></select></label>
-              <label id="schedule-chat-field">目标会话 ID<input id="schedule-chat" maxlength="512" required></label>
+              <div id="schedule-chat-target" class="chat-target">
+                <label>聊天类型<select id="schedule-chat-kind"><option value="group">群聊</option><option value="p2p">单聊</option><option value="unknown" hidden>类型待确认</option></select></label>
+                <div id="schedule-group-picker"></div>
+                <label id="schedule-chat-manual-field" class="chat-manual-toggle"><input id="schedule-chat-manual" type="checkbox">手动输入聊天 ID</label>
+                <label id="schedule-chat-field">聊天 ID<input id="schedule-chat" maxlength="512" placeholder="oc_…（聊天 ID，不是用户 ID）" aria-describedby="schedule-chat-help"></label>
+                <p id="schedule-chat-help" class="defaults-field-help"></p>
+              </div>
             </div>
             <p id="schedule-target-note" class="meta-line" hidden>沿用原会话的 Project、模型、上下文和反馈；空闲时启动新一轮，忙碌时追加当前任务。切走或归档后自动暂停，恢复后继续；删除原会话也会删除计划。目标创建后不可更换。</p>
-            <p id="schedule-target-options-note" class="meta-line" hidden role="status"></p>
             <label>任务指令<textarea id="schedule-instructions" rows="5" maxlength="16000" required placeholder="说明每次执行需要完成什么，以及何时需要用户关注。"></textarea></label>
             <h4>触发规则</h4>
             <div class="schedule-form-grid">
@@ -266,7 +291,7 @@
                 <label>模型<select id="schedule-model"><option value="">继承 Codex</option></select></label>
                 <label>思考强度<select id="schedule-effort" disabled></select></label>
                 <label>速度<select id="schedule-tier" disabled></select></label>
-                <label>消息上下文<select id="schedule-context"><option value="current-only">当前消息</option><option value="catch-up">补齐未读上下文</option></select></label>
+                <label id="schedule-context-field">消息上下文<select id="schedule-context"><option value="current-only">当前消息</option><option value="catch-up">补齐未读上下文</option></select></label>
               </div>
               <label class="schedule-checkbox"><input id="schedule-reactions" type="checkbox">任务表情反馈</label>
               <label class="schedule-checkbox"><input id="schedule-progress" type="checkbox">进度卡片</label>

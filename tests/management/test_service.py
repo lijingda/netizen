@@ -68,6 +68,7 @@ from netizen_cli.management import (
     SideIdentityMismatch,
     classify_native_thread_view,
 )
+from netizen_cli.management.chat_directory import AvailableChat, AvailableChatPage, ChatDirectoryError
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.model_settings import ModelCatalogError
 from netizen_cli.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettingsError
@@ -368,6 +369,30 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         await self.service.close()
         self.store.close()
         self.tmp.cleanup()
+
+    async def test_live_chat_queries_use_injected_read_port(self) -> None:
+        chat = AvailableChat("oc_group", "群聊", "group", False)
+        page = AvailableChatPage((chat,), "more")
+        directory = SimpleNamespace(query=AsyncMock(return_value=page), validate=AsyncMock(return_value=chat))
+        service = InstanceManagementService(
+            bindings=self.store, projects=self.projects, runtime=self.runtime,
+            scope_coordinator=self.coordinator, chat_directory=directory,
+        )
+        try:
+            self.assertIs(await service.query_available_chats(query="群", page_token="first"), page)
+            self.assertIs(await service.validate_available_chat("oc_group"), chat)
+            directory.query.assert_awaited_once_with(query="群", page_token="first")
+            directory.validate.assert_awaited_once_with("oc_group")
+        finally:
+            await service.close()
+
+    async def test_missing_chat_directory_is_unavailable_not_an_empty_directory(self) -> None:
+        with self.assertRaises(ChatDirectoryError) as caught:
+            await self.service.query_available_chats()
+        self.assertEqual(caught.exception.code, "chat_query_unavailable")
+        with self.assertRaises(ChatDirectoryError) as caught:
+            await self.service.validate_available_chat("oc_group")
+        self.assertEqual(caught.exception.code, "chat_query_unavailable")
 
     async def _create(self, scope: FeishuScope | None = None):
         return (

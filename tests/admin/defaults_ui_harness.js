@@ -43,6 +43,8 @@ async function api(path, options = {}) {
     return {};
   }
   gets.push(path);
+  if (path.startsWith("/api/v1/chats/validate?")) return { chatId: new URL(path, "http://localhost").searchParams.get("chatId") };
+  if (path.startsWith("/api/v1/chats?")) return { items: [{ chatId: "oc_picker", name: "研发群" }], nextCursor: null };
   if (path.startsWith("/api/v1/projects/options")) return { items: [{ alias: "available", enabled: true }], nextCursor: null };
   const query = new URL(path, "http://localhost").searchParams;
   if (query.get("mode") === "options") {
@@ -404,6 +406,8 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   defaultsInput("new").focus();
   defaultsInput("new").click();
   await flush();
+  defaultsInput("chat").value = "oc_new_saved";
+  await loadDefaultOptions(true);
   pendingList = {};
   const savingNew = saveDefault({ preventDefault() {} });
   await flush();
@@ -450,4 +454,77 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await oldList;
   assert.equal(defaultsInput("chat-body").textContent.includes("研发讨论群"), false);
   assert(defaultsInput("chat-body").textContent.includes("oc_exact"));
+
+  // Exact defaults share the remote group picker, while p2p remains explicit ID entry.
+  contextAvailable = true;
+  viewExact = null;
+  viewEffective = null;
+  selectDefaultTab("chat");
+  openDefaultEditor("chat");
+  await flush();
+  assert.equal(defaultsInput("chat-kind").value, "group");
+  assert.equal(defaultsInput("group-picker").hidden, false);
+  assert.equal(defaultsInput("chat-field").hidden, true);
+  assert.match(defaultsInput("group-picker").textContent, /当前已加入且可访问/);
+  defaultsInput("group-picker").querySelector(".chat-picker-option").click();
+  await flush();
+  assert.equal(defaultsInput("chat").value, "oc_picker");
+  assert(gets.some((path) => path.includes("mode=view&chat_id=oc_picker")));
+  defaultsInput("chat-manual").checked = true;
+  defaultsInput("chat-manual").dispatch("change");
+  await flush();
+  assert.equal(defaultsInput("chat-field").hidden, false);
+  assert.equal(defaultsInput("chat").disabled, false);
+  assert.equal(defaultsInput("chat").value, "oc_picker");
+  defaultsInput("chat-manual").checked = false;
+  defaultsInput("chat-manual").dispatch("change");
+  assert.equal(defaultsInput("chat").value, "");
+  assert.equal(defaultsInput("save").disabled, true);
+  defaultsInput("chat-kind").value = "p2p";
+  defaultsInput("chat-kind").dispatch("change");
+  assert.equal(defaultsInput("group-picker").hidden, true);
+  assert.equal(defaultsInput("chat-field").hidden, false);
+  assert.match(defaultsInput("chat-help").textContent, /\/defaults/);
+  assert.match(defaultsInput("chat-help").textContent, /不是用户 ID/);
+  assert.equal(defaultsInput("context-field").hidden, true);
+  contextAvailable = false;
+  defaultsInput("chat").value = "oc_p2p";
+  defaultsInput("chat").dispatch("input");
+  defaultsInput("chat").dispatch("change");
+  await flush();
+  assert.equal(defaultsInput("chat-kind").value, "p2p");
+  assert.equal(defaultsInput("chat").value, "oc_p2p");
+  closeDefaultEditor();
+
+  // Unknown saved targets stay visible and locked through failed/unresolved metadata.
+  contextAvailable = null;
+  const unresolved = { ...exact, chat: { chatLabel: "旧目标", chatType: null, chatMode: null } };
+  openDefaultEditor("chat", unresolved);
+  await flush();
+  assert.equal(defaultsInput("chat-kind").value, "unknown");
+  assert.equal(defaultsInput("chat").value, "oc_exact");
+  assert.equal(defaultsInput("chat-field").hidden, false);
+  assert.equal(defaultsInput("chat").disabled, true);
+  assert.match(defaultsInput("chat-help").textContent, /保留原聊天 ID/);
+  contextAvailable = true;
+  await loadDefaultOptions();
+  assert.equal(defaultsInput("chat-kind").value, "group");
+  assert.equal(defaultsInput("chat").value, "oc_exact");
+  assert.equal(defaultsInput("chat-field").hidden, false);
+  assert.equal(defaultsInput("chat").disabled, true);
+  closeDefaultEditor();
+
+  // chatType is authoritative; chatMode may describe message layout, not p2p identity.
+  const target = chatTarget("defaults");
+  target.set({ chatId: "oc_direct", chat: { chatType: "p2p", chatMode: "group" } });
+  assert.equal(target.kind(), "p2p");
+  assert.equal(defaultsInput("chat-field").hidden, false);
+  target.set({ chatId: "oc_group", chat: { chatType: "group", chatMode: "p2p" } });
+  assert.equal(target.kind(), "group");
+  target.set({ chatId: "oc_corrected", chat: { chatType: "p2p" } });
+  target.resolveKind(true);
+  assert.equal(target.kind(), "group");
+  assert.equal(defaultsInput("chat").value, "oc_corrected");
+  assert.equal(defaultsInput("chat-field").hidden, false, "correcting a typed target must not hide its ID behind an empty picker");
+  assert.equal(defaultsInput("group-picker").hidden, true);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

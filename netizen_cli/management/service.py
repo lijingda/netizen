@@ -13,6 +13,7 @@ from typing import Any, NoReturn
 
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
 from .chat_labels import ChatLabel, ChatLabelProvider, ChatLabelResolver
+from .chat_directory import AvailableChat, AvailableChatPage, ChatDirectory, ChatDirectoryError
 from .coordination import ScopeCoordinator
 from .updates import UpdateService
 from ..bindings import (
@@ -696,6 +697,7 @@ class InstanceManagementService:
         scope_coordinator: ScopeCoordinator,
         blocking_io: BoundedBlockingIOExecutor | None = None,
         chat_labels: ChatLabelProvider | None = None,
+        chat_directory: ChatDirectory | None = None,
         updates: UpdateService | None = None,
         root: Path | None = None,
     ) -> None:
@@ -707,6 +709,7 @@ class InstanceManagementService:
         self._chat_labels = (
             ChatLabelResolver(chat_labels) if chat_labels is not None else None
         )
+        self._chat_directory = chat_directory
         self._blocking_io = blocking_io or BoundedBlockingIOExecutor(
             max_workers=1,
             capacity=2,
@@ -2067,6 +2070,18 @@ class InstanceManagementService:
         self._summary_read_limiter.release()
         if not task.cancelled():
             task.exception()  # Consume failures even after the page wait expired.
+
+    async def query_available_chats(
+        self, *, query: str = "", page_token: str | None = None,
+    ) -> AvailableChatPage:
+        if self._chat_directory is None:
+            raise ChatDirectoryError("chat_query_unavailable", "群聊查询暂不可用。")
+        return await self._chat_directory.query(query=query, page_token=page_token)
+
+    async def validate_available_chat(self, chat_id: str) -> AvailableChat:
+        if self._chat_directory is None:
+            raise ChatDirectoryError("chat_query_unavailable", "群聊查询暂不可用。")
+        return await self._chat_directory.validate(chat_id)
 
     async def resolve_chat_labels(
         self,

@@ -49,9 +49,11 @@ from .queries import (
     _created_range_query,
     _current_query,
     _decode_binding_cursor,
+    _decode_cursor,
     _decode_project_cursor,
     _decode_side_cursor,
     _encode_binding_cursor,
+    _encode_cursor,
     _encode_project_cursor,
     _encode_side_cursor,
     _fingerprint,
@@ -96,6 +98,7 @@ from ..management.blocking_io import (
     BlockingIOShutdownTimeout,
 )
 from ..management.updates import UpdateError
+from ..management.chat_directory import AvailableChat, ChatDirectoryError
 from ..runtime.contracts import (
     NativeThreadCatalogState,
     RuntimeClosed,
@@ -498,6 +501,10 @@ class AdminWebApplication:
                 ((b"Content-Type", b"text/javascript; charset=utf-8"),),
                 self._assets["admin.js"],
             )
+        if context.method == "GET" and context.path in {"/static/chat-picker.js", "/static/chat-picker.css"}:
+            name = context.path.removeprefix("/static/")
+            content_type = b"text/javascript; charset=utf-8" if name.endswith(".js") else b"text/css; charset=utf-8"
+            return Response(200, ((b"Content-Type", content_type),), self._assets[name])
         if route == ("POST", "/logout"):
             self._auth.logout(context.session_token)
             return Response(
@@ -506,6 +513,15 @@ class AdminWebApplication:
             )
         if route == ("GET", "/api/v1/projects"):
             return await self._projects(context)
+        if route == ("GET", "/api/v1/chats"):
+            return await self._chats(context)
+        if route == ("GET", "/api/v1/chats/validate"):
+            _require_query_keys(context.query, {"chatId"})
+            chat_id = _optional_text_query(context.query, "chatId", maximum=256)
+            if chat_id is None:
+                raise AdminWebError(400, "invalid_chat_id", "请选择群聊。")
+            chat = await self._management.validate_available_chat(chat_id)
+            return _json_response(200, {"requestId": context.request.request_id, "chat": _available_chat_json(chat)})
         if route == ("GET", "/api/v1/schedules"):
             return await self._schedules(context)
         if route == ("GET", "/api/v1/defaults"):
@@ -880,6 +896,27 @@ class AdminWebApplication:
             operate(),
         )
         return _json_response(202 if mode == "run_now" else 200, {**result, "requestId": context.request.request_id})
+
+    async def _chats(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, {"query", "cursor"})
+        values = context.query.get("query", [""])
+        if len(values) != 1 or len(values[0]) > 50 or values[0].strip() != values[0]:
+            raise AdminWebError(400, "invalid_query", "群名关键词最多 50 个字符，不能包含首尾空白。")
+        query = values[0]
+        fingerprint = _fingerprint("chats", {"query": query})
+        cursor = _decode_cursor(
+            _optional_one(context.query, "cursor"), kind="chat", length=1, fingerprint=fingerprint,
+        )
+        page = await self._management.query_available_chats(
+            query=query, page_token=cursor[0] if cursor is not None else None,
+        )
+        return _json_response(200, {
+            "requestId": context.request.request_id,
+            "items": [_available_chat_json(chat) for chat in page.items],
+            "nextCursor": _encode_cursor("chat", (page.next_page_token,), fingerprint)
+            if page.next_page_token is not None else None,
+            "notice": page.notice,
+        })
 
     async def _projects(self, context: _RequestContext) -> Response:
         allowed = {"cursor", "pageSize"}
@@ -2275,9 +2312,16 @@ def admin_access_urls(
 def _load_assets() -> dict[str, bytes]:
     root = importlib.resources.files("netizen_cli.admin").joinpath("static")
     assets: dict[str, bytes] = {}
-    for name in ("index.html", "admin.css", "admin.js"):
+    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css"):
         assets[name] = root.joinpath(name).read_bytes()
     return assets
+
+
+def _available_chat_json(chat: AvailableChat) -> dict[str, Any]:
+    return {
+        "chatId": chat.chat_id, "name": chat.name,
+        "chatMode": chat.chat_mode, "external": chat.external,
+    }
 
 
 def _root_label(root: Path | None) -> str:
@@ -2691,6 +2735,13 @@ _UPDATE_HTTP_ERRORS = {
 
 
 def _map_error(error: BaseException) -> AdminWebError | None:
+    if isinstance(error, ChatDirectoryError):
+        status = {
+            "invalid_query": 400, "invalid_cursor": 400, "invalid_chat_id": 400,
+            "not_group_chat": 400, "chat_unavailable": 409, "chat_search_limit": 400,
+            "chat_permission_denied": 403, "chat_query_rate_limited": 429,
+        }.get(error.code, 503)
+        return AdminWebError(status, error.code, str(error))
     if isinstance(error, AdminWebError):
         return error
     if isinstance(error, ThreadOccupied):
