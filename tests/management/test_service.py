@@ -1501,18 +1501,61 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(asyncio.gather(*self.service._summary_reads), 1)
                 page = await self.service.query_sessions(deadline=loop.time() + 1)
                 self.assertTrue(all(item.native.metadata is not None for item in page.items))
-
-                # Shutdown closes admission even when an already-issued read is pending.
-                release.clear()
-                page = await self.service.query_sessions(deadline=loop.time() + 0.1)
-                count_before_close = len(reads)
-                await asyncio.wait_for(self.service.close(deadline=loop.time() + 0.01), 0.5)
-                await self.service.query_sessions(deadline=loop.time() + 0.1)
-                self.assertEqual(len(reads), count_before_close)
         finally:
             release.set()
             if self.service._summary_reads:
                 await asyncio.wait_for(asyncio.gather(*self.service._summary_reads), 1)
+
+    async def test_summary_shutdown_preserves_pending_workers_and_rejects_new_reads(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "unindexed")
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        release = threading.Event()
+        reads = []
+
+        def blocking_read(thread_id):
+            loop.call_soon_threadsafe(entered.set)
+            release.wait()
+            return NativeThreadMetadata(thread_id, "Summary", "")
+
+        async def read(thread_id):
+            reads.append(thread_id)
+            return await asyncio.to_thread(blocking_read, thread_id)
+
+        with patch.object(self.runtime, "thread_summary_exact", side_effect=read):
+            # Request expiry is covered separately; keep it outside the
+            # bounded event waits that establish this shutdown scenario.
+            query = asyncio.create_task(
+                self.service.query_sessions(deadline=loop.time() + 30),
+            )
+            try:
+                # Observe the real worker entering before closing admission.
+                await asyncio.wait_for(entered.wait(), 5)
+                pending = set(self.service._summary_reads)
+                self.assertEqual(len(pending), 1)
+                # Thread-pool shutdown is not the behavior under test. Let it
+                # finish normally, with an outer timeout only to catch hangs.
+                await asyncio.wait_for(self.service.close(), 5)
+                self.assertEqual(self.service._summary_reads, pending)
+                self.assertTrue(all(not task.done() for task in pending))
+                self.assertFalse(query.done())
+
+                release.set()
+                page = await asyncio.wait_for(query, 5)
+                self.assertEqual(page.items[0].native.metadata.name, "Summary")
+                self.assertEqual(self.service._summary_reads, set())
+                # Recheck with free concurrency slots, so saturation cannot
+                # conceal a regression in the closed-admission check.
+                page = await self.service.query_sessions(deadline=loop.time() + 5)
+                self.assertEqual(reads, ["unindexed"])
+                self.assertIsNone(page.items[0].native.metadata)
+            finally:
+                release.set()
+                await asyncio.wait_for(
+                    asyncio.gather(query, *self.service._summary_reads, return_exceptions=True),
+                    5,
+                )
 
     async def test_project_counts_distinguish_confirmed_unknown_and_unavailable(self) -> None:
         for thread_id in ("active", "archived", "unindexed"):
