@@ -67,7 +67,8 @@ Project 与显式会话配置意图。配置属于聊天，生成的会话属于
 会话或 Side 的 Parent。Binding 须仍是当前选中的会话，Side 须仍存活且可接收输入。
 
 **Card Answer / 卡片回答**：参与者在问题卡片中明确提交给原会话的一次输入。
-回答者是实际提交者，机器人发送的回答回执只是这次输入的反馈锚点。
+回答者是实际提交者；机器人发送的回答记录（回答回执）是这次输入的上下文与反馈锚点，
+不表示 Codex 已接收答案或完成处理。
 
 **Parent Binding**：创建 Side 时捕获的 exact active、materialized Binding。后续 Scope
 active pointer 改变不重定向已创建的 Side。

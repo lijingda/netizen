@@ -71,6 +71,14 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
     def updated_card(self):
         return OutboundCard(card=self.channel.updates[-1][1])
 
+    def assert_submission_summary(self, *, accepted):
+        self.assertEqual(self.channel.updates[-1][0], "om_question")
+        card = self.updated_card().card
+        self.assertEqual(card["header"]["title"]["content"],
+                         "回答已提交" if accepted else "回答提交异常")
+        self.assertEqual(elements(card, "form"), [])
+        self.assertEqual(elements(card, "button"), [])
+
     async def test_late_answer_starts_ordinary_input_with_real_operator_and_new_anchor(self):
         self.queue_anchor()
         await self.app.handle_card_action(self.event())
@@ -92,7 +100,11 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["source_card_id"], "om_question")
         self.assertEqual(self.channel.fetch_inbound_calls, [])
         self.assertEqual(self.released, [True])
-        self.assertEqual(self.channel.updates, [])
+        self.assert_submission_summary(accepted=True)
+        receipt = self.channel.send_calls[0][1].card
+        plain = [item["content"] for item in elements(receipt, "plain_text")]
+        self.assertIn("问题\nShould we use $unselected?", plain)
+        self.assertIn("Answering Person 的回答\nUse the smaller change", plain)
 
     async def test_answer_uses_normal_steer_feedback_and_literal_slash_text(self):
         self.runtime.submission = Submission(SubmitDisposition.STEERED, self.binding.id, "thread", "running-turn")
@@ -103,6 +115,28 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fx.store.active_binding(self.scope.key).id, self.binding.id)
         self.assertEqual(self.channel.reactions[0][0], "om_answer")
         self.assertEqual(self.released, [])
+        self.assert_submission_summary(accepted=True)
+
+    async def test_answer_receipt_does_not_claim_acceptance_before_native_submit_returns(self):
+        entered, complete = asyncio.Event(), asyncio.Event()
+
+        async def submit(**kwargs):
+            entered.set()
+            await complete.wait()
+            return self.runtime.submission
+
+        self.runtime.submit = AsyncMock(side_effect=submit)
+        self.queue_anchor()
+        task = asyncio.create_task(self.app.handle_card_action(self.event()))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertEqual(len(self.channel.send_calls), 1)
+            self.assertEqual(self.channel.updates, [])
+        finally:
+            complete.set()
+            await asyncio.wait_for(task, 1)
+        self.runtime.submit.assert_awaited_once()
+        self.assert_submission_summary(accepted=True)
 
     async def test_inactive_binding_rejected_without_admission_or_input(self):
         event = self.event()
@@ -112,6 +146,8 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.submit_calls, [])
         self.assertEqual(self.channel.send_calls, [])
         self.assertIn("切回", str(self.updated_card().card))
+        self.assertIn("/sessions", str(self.updated_card().card))
+        self.assertIn("无需修改答案", str(self.updated_card().card))
         self.assertNotEqual(callback(self.updated_card(), "提交回答"), event.action.value)
 
     async def test_callback_cannot_move_question_to_another_scope(self):
@@ -120,6 +156,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.capture_calls, [])
         self.assertEqual(self.runtime.submit_calls, [])
         self.assertIn("位置不一致", str(self.updated_card().card))
+        self.assertIn("原提问所在聊天或话题", str(self.updated_card().card))
 
     async def test_switch_during_answer_preparation_keeps_captured_binding_and_rejects(self):
         self.queue_anchor()
@@ -133,7 +170,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.submit_calls, [])
         self.assertEqual(self.channel.replies[-1][0], "om_answer")
         self.assertIn("会话已切换", self.channel.replies[-1][1])
-        self.assertEqual(self.channel.updates, [])
+        self.assert_submission_summary(accepted=False)
 
     async def test_turn_race_does_not_start_or_retry(self):
         self.queue_anchor()
@@ -141,9 +178,9 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_card_action(self.event())
         self.runtime.submit.assert_awaited_once()
         self.assertEqual(self.channel.replies[-1], ("om_answer", "原 Turn 已结束，请重发。"))
-        self.assertEqual(self.channel.updates, [])
+        self.assert_submission_summary(accepted=False)
 
-    async def test_native_errors_keep_shared_recovery_guidance_without_card_state(self):
+    async def test_native_errors_keep_shared_guidance_and_confirmed_acceptance_on_original_card(self):
         errors = (
             GoalControlError("无法确认当前 Thread 是否存在 active Goal；本条消息未执行。"),
             TurnStartFailed("Codex Turn 启动结果未确认；服务已停止接收新任务，请重启服务。"),
@@ -156,7 +193,8 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
                 await self.app.handle_card_action(self.event())
                 self.runtime.submit.assert_awaited_once()
                 self.assertEqual(self.channel.replies[-1], ("om_answer", str(error)))
-                self.assertEqual(self.channel.updates, [])
+                self.assert_submission_summary(accepted=isinstance(error, ContextBoundaryCommitFailed))
+                self.assertIn(str(error), str(self.updated_card().card))
 
     async def test_unconfirmed_native_submit_uses_shared_error_feedback(self):
         self.queue_anchor()
@@ -167,7 +205,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.replies[-1][0], "om_answer")
         self.assertIn("lost response", self.channel.replies[-1][1])
         self.assertNotIn("未执行", self.channel.replies[-1][1])
-        self.assertEqual(self.channel.updates, [])
+        self.assert_submission_summary(accepted=False)
 
     async def test_feedback_failure_after_acceptance_does_not_claim_rejection(self):
         self.queue_anchor()
@@ -178,14 +216,97 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.replies[-1][0], "om_answer")
         self.assertIn("feedback failed", self.channel.replies[-1][1])
         self.assertNotIn("未执行", self.channel.replies[-1][1])
-        self.assertEqual(self.channel.updates, [])
+        self.assert_submission_summary(accepted=True)
+
+    async def test_failed_error_reply_still_updates_original_question_without_resubmitting(self):
+        self.queue_anchor()
+        self.runtime.submit = AsyncMock(side_effect=OSError("lost native response"))
+        self.channel.reply = AsyncMock(side_effect=OSError("feedback failed"))
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
+            with self.assertRaisesRegex(OSError, "feedback failed"):
+                await self.app.handle_card_action(self.event())
+        self.runtime.submit.assert_awaited_once()
+        self.assert_submission_summary(accepted=False)
+        self.assertIn("lost native response", str(self.updated_card().card))
 
     async def test_preparation_rejection_replies_if_card_update_fails(self):
         self.runtime.capture_error = SteerRace("原 Turn 已结束，请重发。")
         self.app._safe_update_card = AsyncMock(return_value=False)
         await self.app.handle_card_action(self.event())
         self.assertEqual(self.runtime.submit_calls, [])
-        self.assertEqual(self.channel.replies[-1], ("om_question", "回答未提交：原 Turn 已结束，请重发。"))
+        message_id, notice = self.channel.replies[-1]
+        self.assertEqual(message_id, "om_question")
+        self.assertIn("原 Turn 已结束，请重发。", notice)
+        self.assertIn("尚未交给 Codex", notice)
+        self.assertIn("无需修改答案", notice)
+
+    async def test_card_verification_failure_preserves_answer_and_explains_recovery(self):
+        event = self.event()
+        self.channel.fetch_message = AsyncMock(side_effect=TimeoutError())
+        await self.app.handle_card_action(event)
+        self.assertEqual(self.runtime.capture_calls, [])
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(self.channel.send_calls, [])
+        card = self.updated_card()
+        self.assertEqual(form_values(card)["netizen_question_text"], "Use the smaller change")
+        content = str(card.card)
+        for expected in ("请求超时", "尚未交给 Codex", "无需修改答案", "检查或恢复", "重新提交"):
+            self.assertIn(expected, content)
+
+    async def test_scope_verification_errors_preserve_valid_answer_and_explain_recovery(self):
+        for failure in ("unknown-chat-type", "message-chat-mismatch"):
+            with self.subTest(failure=failure):
+                event = self.event()
+                self.channel.chat_types[self.scope.chat_id] = "p2p"
+                if failure == "unknown-chat-type":
+                    self.channel.chat_types[self.scope.chat_id] = "unsupported"
+                    reason = "无法判断卡片来自单聊还是群聊"
+                else:
+                    self.channel.fetched_messages["om_question"]["data"]["items"][0]["chat_id"] = "oc_other"
+                    reason = "卡片原消息与回调聊天不一致"
+                await self.app.handle_card_action(event)
+                self.assertEqual(self.runtime.capture_calls, [])
+                self.assertEqual(self.runtime.submit_calls, [])
+                self.assertEqual(self.channel.send_calls, [])
+                card = self.updated_card()
+                self.assertEqual(form_values(card)["netizen_question_text"], "Use the smaller change")
+                self.assertNotEqual(callback(card, "提交回答"), event.action.value)
+                for expected in (reason, "尚未交给 Codex", "无需修改答案", "稍后重试", "原会话直接发送", "消息读取权限"):
+                    self.assertIn(expected, str(card.card))
+
+    async def test_missing_callback_identity_explains_manual_answer_fallback(self):
+        event = self.event()
+        event.operator = None
+        await self.app.handle_card_action(event)
+        self.assertEqual(self.runtime.capture_calls, [])
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(self.channel.send_calls, [])
+        content = str(self.updated_card().card)
+        for expected in ("回答者身份", "尚未交给 Codex", "无需修改答案", "原会话直接发送", "卡片回调配置"):
+            self.assertIn(expected, content)
+
+    async def test_unknown_topic_chat_type_explains_recovery_without_publishing_anchor(self):
+        topic = FeishuScope("cli_test", "oc_group", ScopeKind.TOPIC, "omt_topic")
+        self.binding = self.fx.store.create_channel_binding(scope=topic, project_alias="test", creator_id="ou_creator")
+        self.channel.chat_types[topic.chat_id] = "unsupported"
+        await self.app.handle_card_action(self.event(scope=topic))
+        self.assertEqual(self.runtime.capture_calls, [self.binding.id])
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(self.channel.send_calls, [])
+        content = str(self.updated_card().card)
+        for expected in ("无法确认原会话类型", "尚未交给 Codex", "无需修改答案", "稍后重试", "原会话直接发送", "聊天信息读取权限"):
+            self.assertIn(expected, content)
+
+    async def test_missing_binding_explains_old_card_is_unusable_without_retargeting(self):
+        card = render_question_card(BindingQuestionTarget("missing-binding"), self.request, 0)
+        await self.app.handle_card_action(self.event(card=card))
+        self.assertEqual(self.runtime.capture_calls, [])
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(self.channel.send_calls, [])
+        content = str(self.updated_card().card)
+        self.assertIn("会话已不存在", content)
+        self.assertIn("/sessions", content)
+        self.assertIn("直接发送问题和回答", content)
 
     async def test_wrong_anchor_identity_never_reaches_native(self):
         self.channel.send_results.append(sent_result("om_answer", chat_id=self.scope.chat_id, thread_id="wrong-topic"))
@@ -317,7 +438,7 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
             await pipeline.push_action(identity, self.scope.chat_id, dispatch)
             await asyncio.sleep(0.01)
             self.runtime.submit.assert_awaited_once()
-            self.assertEqual(self.channel.updates, [])
+            self.assert_submission_summary(accepted=False)
             self.assertEqual(self.channel.replies[-1], ("om_answer", "结果未确认，请重启服务。"))
         finally:
             await pipeline.dispose()

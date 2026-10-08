@@ -103,11 +103,14 @@ from .cards.scheduled import (
     schedule_retry_card,
 )
 from .cards.questions import (
+    QuestionAnswer,
     decode_question_answer,
     decode_question_context,
     is_question_card_action,
     render_question_card,
     render_question_context_card,
+    render_question_receipt_card,
+    render_question_submission_card,
 )
 from .cards.defaults import defaults_card, decode_defaults_action, is_defaults_card_action
 from .defaults import DefaultConfigurationError
@@ -304,6 +307,7 @@ _STEER_REACTION = "OnIt"
 _FEISHU_CARD_ACTION_LOCK_OUTER_CODE = 230099
 _FEISHU_CARD_ACTION_LOCK_INNER_CODE = 11310
 _CARD_ACTION_LOCK_RETRY_DELAYS_SECONDS = (0.2, 0.5)
+_QUESTION_SUBMISSION_CARD_TIMEOUT_SECONDS = 5.0
 _SESSION_TITLE_MAX_CHARS = 48
 _STATUS_THREAD_NAME_MAX_CHARS = 120
 _STATUS_THREAD_PREVIEW_MAX_CHARS = 240
@@ -1337,6 +1341,7 @@ class ChannelApplication:
             if side.state is not SideTopicState.OPEN:
                 raise CardActionError(
                     "问题所属 Side 尚未就绪或已结束、过期，本条回答未执行；不会转投主会话。"
+                    "请在主会话查看 /sessions；旧 Side 已结束或过期时，需重新发起 /side。"
                 )
             return self._side_scope(side), side
         raise CardActionError("问题的回答目标无效。")
@@ -1383,7 +1388,10 @@ class ChannelApplication:
             context = answer
             operator = getattr(event, "operator", None)
             if not message_id or not chat_id or not getattr(operator, "open_id", None):
-                raise CardActionError("卡片回调缺少原消息或回答者身份，本条回答未执行。")
+                raise CardActionError(
+                    "卡片回调缺少原消息或回答者身份，本次回答尚未交给 Codex。无需修改答案；"
+                    "请在原会话直接发送回答，或联系管理员检查卡片回调配置。"
+                )
             async with asyncio.timeout(30):
                 fetched = await self._channel.fetch_message(message_id)
                 data = _object_field(fetched, "data")
@@ -1392,41 +1400,47 @@ class ChannelApplication:
                     _object_field(fetched, "code") != 0 or not isinstance(items, list)
                     or len(items) != 1 or _nonempty_field(items[0], "message_id") != message_id
                 ):
-                    raise CardActionError("无法核验原问题卡片，本条回答未执行。")
+                    raise CardActionError(
+                        "无法核验原问题卡片，本次回答尚未交给 Codex。无需修改答案；"
+                        "请稍后重试，若仍失败，请在原会话直接发送回答并联系管理员检查消息读取权限。"
+                    )
                 chat_kind = _public_chat_kind(await self._channel.get_chat_info(chat_id))
-                scope = scope_from_fetched_card(
-                    app_id=self._app_id, callback_chat_id=chat_id,
-                    fetched_message=fetched, chat_type=chat_kind,
-                )
+                try:
+                    scope = scope_from_fetched_card(
+                        app_id=self._app_id, callback_chat_id=chat_id,
+                        fetched_message=fetched, chat_type=chat_kind,
+                    )
+                except CardActionError as error:
+                    raise CardActionError(
+                        "无法核验问题卡片所在会话，本次回答尚未交给 Codex。无需修改答案；"
+                        "请稍后重试，若仍失败，请在原会话直接发送回答并联系管理员检查消息读取权限。"
+                    ) from error
                 target_scope, recipient = self._question_recipient(context.target)
                 if target_scope != scope:
-                    raise CardActionError("问题卡片与原会话的位置不一致，本条回答未执行。")
+                    raise CardActionError(
+                        "问题卡片与原会话的位置不一致，本条回答未执行。无需修改答案；"
+                        "请回到原提问所在聊天或话题提交，或在原会话直接发送回答。"
+                    )
                 if isinstance(recipient, ThreadBinding):
                     current = self._bindings.active_binding(scope.key)
                     if current is None or current.id != recipient.id:
                         raise CardActionError(
-                            f"请先通过 /sessions 切回问题所属会话 {recipient.short_id}，再提交回答。"
+                            f"请先通过 /sessions 切回问题所属会话 {recipient.short_id}，再提交回答；无需修改答案。"
                         )
                     admission = await self._runtime.capture_submission_admission(recipient.id)
                 else:
                     admission = await self._runtime.capture_side_submission_admission(recipient.id)
                 sender = await card_answer_sender(self._channel, chat_id, operator)
                 if chat_kind not in {"p2p", "group"}:
-                    raise CardActionError("无法确认原会话类型，本条回答未执行。")
+                    raise CardActionError(
+                        "无法确认原会话类型，本次回答尚未交给 Codex。无需修改答案；"
+                        "请稍后重试，若仍失败，请在原会话直接发送回答并联系管理员检查聊天信息读取权限。"
+                    )
                 # The old question card is not a current history upper. Publish
                 # a real answer anchor after capture, with actual operator
                 # attribution retained separately from this bot-authored card.
                 identity = json.dumps([message_id, sender["open_id"], value, form], sort_keys=True)
-                receipt = OutboundCard(card={
-                    "schema": "2.0", "config": {"width_mode": "default"},
-                    "header": {"title": {"tag": "plain_text", "content": "问题回答"}},
-                    "body": {"elements": [{"tag": "div", "text": {
-                        "tag": "plain_text", "content": (
-                            f"{sender['display_name']} 提交回答，正在处理。\n\n"
-                            + answer.answer[:3000] + ("…" if len(answer.answer) > 3000 else "")
-                        ),
-                    }}]},
-                })
+                receipt = render_question_receipt_card(answer, sender_name=sender["display_name"])
                 sent = await send_topic_message(self._channel, chat_id, receipt, SendOpts(
                     receive_id_type="chat_id", reply_to=message_id,
                     reply_in_thread=scope.kind is ScopeKind.TOPIC, reply_target_gone="fail",
@@ -1449,7 +1463,24 @@ class ChannelApplication:
         except Exception as error:
             # No input has been handed off yet. Refresh the form's
             # transport nonce so an explicit retry can pass SDK dedup.
-            notice = f"回答未提交：{describe_error(error)}"
+            if isinstance(error, TopicPublishError):
+                explanation = (
+                    "未能确认回答记录已正确发送到原会话，本次回答尚未交给 Codex。"
+                    "无需修改答案；请稍后重试，或在原会话直接发送回答。"
+                    f"\n原因：{describe_error(error)}"
+                )
+            elif isinstance(error, BindingNotFound):
+                explanation = "问题所属会话已不存在，请通过 /sessions 选择可用会话，再直接发送问题和回答。"
+            elif isinstance(error, (SideTopicNotFound, SideSessionNotFound)):
+                explanation = "问题所属 Side 已不可用，旧卡片不能恢复它；请在主会话重新发起 /side，再发送问题和回答。"
+            else:
+                explanation = describe_error(error)
+                if isinstance(context, QuestionAnswer) and not isinstance(error, CardActionError):
+                    explanation += (
+                        "\n本次回答尚未交给 Codex，无需修改答案。"
+                        "请按上述原因处理，必要时检查或恢复服务；确认原会话仍可用后，可重新提交或直接发送回答。"
+                    )
+            notice = f"回答未提交：{explanation}"
             try:
                 card = (
                     render_question_context_card(context, notice=notice)
@@ -1472,6 +1503,13 @@ class ChannelApplication:
                     logger.warning("question answer feedback unavailable")
             return
 
+        accepted = False
+        submission_notice = None
+
+        def mark_accepted() -> None:
+            nonlocal accepted
+            accepted = True
+
         try:
             skill_names = parse_skill_references(answer.answer)
             if isinstance(recipient, ThreadBinding):
@@ -1479,6 +1517,7 @@ class ChannelApplication:
                 await self._consume_prompt(
                     binding=recipient, scope=scope, message=origin, current=projection,
                     owner_id=sender["open_id"], skill_names=skill_names, admission=admission,
+                    on_accepted=mark_accepted,
                 )
             else:
                 assert isinstance(admission, SideSubmissionAdmission)
@@ -1486,9 +1525,23 @@ class ChannelApplication:
                     side_id=recipient.id, source_message=origin, reply_origin=origin,
                     current=projection, owner_id=sender["open_id"],
                     skill_names=skill_names, admission=admission,
+                    on_accepted=mark_accepted,
                 )
         except Exception as error:
+            accepted = accepted or isinstance(error, ContextBoundaryCommitFailed)
+            submission_notice = describe_error(error)
             await self._report_input_error(origin, error)
+        finally:
+            if accepted or submission_notice is not None:
+                try:
+                    async with asyncio.timeout(_QUESTION_SUBMISSION_CARD_TIMEOUT_SECONDS):
+                        card = render_question_submission_card(
+                            answer, sender_name=sender["display_name"],
+                            accepted=accepted, notice=submission_notice,
+                        )
+                        await self._safe_update_card(message_id, card)
+                except Exception:
+                    logger.warning("question submission feedback unavailable", exc_info=True)
 
     async def handle_card_action(self, event: Any) -> None:
         action = getattr(event, "action", None)
@@ -2829,6 +2882,7 @@ class ChannelApplication:
         scheduled_run_id: str | None = None,
         admission: SubmissionAdmission | None = None,
         initial_context_anchor: MessageContextAnchor | None = None,
+        on_accepted: Callable[[], None] | None = None,
     ) -> None:
         """Share preparation, exact admission, acceptance and feedback for inputs."""
         project = self._projects.resolve_for_binding(binding.project_alias)
@@ -2901,6 +2955,8 @@ class ChannelApplication:
             self._bindings.schedules.begin_binding_submission(scheduled_run_id, binding.id)
         try:
             submission = await self._runtime.submit(**submit_kwargs)
+            if on_accepted is not None:
+                on_accepted()
         finally:
             # The native RPC has consumed the input (or owns its in-flight
             # serialization). Do not retain a second large data-URL reference
@@ -3106,6 +3162,7 @@ class ChannelApplication:
         current: MessageInputProjection, owner_id: str, skill_names: tuple[str, ...],
         admission: SideSubmissionAdmission, quoted_target_id: str | None = None,
         current_images: tuple[ImageReference, ...] = (),
+        on_accepted: Callable[[], None] | None = None,
     ) -> None:
         """Use the same Side preparation, exact admission and feedback for all inputs."""
         prepared = await self._input_preparer.prepare(
@@ -3124,6 +3181,8 @@ class ChannelApplication:
         )
         try:
             submission = await self._runtime.submit_side(**submit_kwargs)
+            if on_accepted is not None:
+                on_accepted()
         finally:
             submit_kwargs.pop("input", None)
             prepared = None

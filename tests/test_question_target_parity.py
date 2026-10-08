@@ -12,7 +12,7 @@ import unittest
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from lark_channel import CardActionPayload, ChatQueueConfig, OutboundCard, PolicyConfig, SafetyPipeline, TextBatchConfig
 from lark_channel.channel.channel import _card_action_identity
@@ -97,6 +97,14 @@ class _Case:
 
 
 class QuestionTargetParityTest(unittest.IsolatedAsyncioTestCase):
+    def assert_submission_summary(self, case, *, accepted):
+        self.assertEqual(case.fx.channel.updates[-1][0], "om_question")
+        card = case.updated_card().card
+        self.assertEqual(card["header"]["title"]["content"],
+                         "回答已提交" if accepted else "回答提交异常")
+        self.assertEqual(elements(card, "form"), [])
+        self.assertEqual(elements(card, "button"), [])
+
     @asynccontextmanager
     async def case(self, kind, *, app_id="cli_test"):
         async with side_channel_fixture() as fx:
@@ -183,7 +191,7 @@ class QuestionTargetParityTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(context["source_card_id"], "om_question")
                     self.assertEqual(c.fx.channel.fetch_inbound_calls, [])
                     self.assertEqual(c.released, [True])
-                    self.assertEqual(c.fx.channel.updates, [])
+                    self.assert_submission_summary(c, accepted=True)
 
     async def test_running_answer_passes_exact_admission_and_treats_slash_literally(self):
         for kind in ("binding", "side"):
@@ -207,6 +215,7 @@ class QuestionTargetParityTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(c.fx.channel.reactions[0][0], "om_answer")
                     self.assertEqual(c.released, [])
                     self.assertEqual(c.fx.store.active_binding(c.parent.scope_key).id, c.parent.id)
+                    self.assert_submission_summary(c, accepted=True)
 
     async def test_preparation_captures_once_and_runtime_race_is_not_card_retry(self):
         for kind in ("binding", "side"):
@@ -223,7 +232,7 @@ class QuestionTargetParityTest(unittest.IsolatedAsyncioTestCase):
                     submit.assert_awaited_once()
                     self.assertEqual(c.captures, [c.recipient.id])
                     self.assertEqual(c.fx.channel.replies[-1], ("om_answer", "原 Turn 已结束，请重发。"))
-                    self.assertEqual(c.fx.channel.updates, [])
+                    self.assert_submission_summary(c, accepted=False)
 
     async def test_foreign_app_chat_or_topic_rejects_before_admission(self):
         for kind in ("binding", "side"):
@@ -245,13 +254,20 @@ class QuestionTargetParityTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(kind=kind):
                 async with self.case(kind) as c:
                     event = c.event()
-                    c.fx.channel.send_results.append(OSError("answer unavailable"))
+                    c.fx.channel.send_results.extend([OSError("answer unavailable"), OSError("answer unavailable")])
                     await c.fx.app.handle_card_action(event)
                     self.assertEqual(c.submits, [])
                     updated = c.updated_card()
                     self.assertNotEqual(callback(updated, "提交回答")["nonce"], event.action.value["nonce"])
                     self.assertEqual(decode_question_context(callback(updated, "提交回答")).target, c.target)
                     self.assertTrue(elements(updated.card, "form"))
+                    self.assertEqual(form_values(updated)["netizen_question_text"], "Use the smaller change")
+                    content = str(updated.card)
+                    for expected in ("回答记录", "尚未交给 Codex", "无需修改答案", "稍后重试", "原会话直接发送"):
+                        self.assertIn(expected, content)
+                    self.assertNotIn("Codex 接收结果未确认", content)
+                    self.assertEqual(len(c.fx.channel.send_calls), 2)
+                    self.assertEqual(c.fx.channel.send_calls[0][2].uuid, c.fx.channel.send_calls[1][2].uuid)
 
     async def test_rejection_fallback_stays_on_original_card_without_fresh_send(self):
         for kind in ("binding", "side"):
@@ -311,7 +327,7 @@ class QuestionTargetParityTest(unittest.IsolatedAsyncioTestCase):
                         await push(retry)
                         await asyncio.sleep(0.01)
                         self.assertEqual(len(c.submits), 1)
-                        self.assertEqual(len(c.fx.channel.updates), 1)
+                        self.assertEqual(len(c.fx.channel.updates), 2)
                     finally:
                         await pipeline.dispose()
 
@@ -325,7 +341,48 @@ class QuestionTargetParityTest(unittest.IsolatedAsyncioTestCase):
                     await c.fx.app.handle_card_action(c.event())
                     submit.assert_awaited_once()
                     self.assertEqual(c.fx.channel.replies[-1], ("om_answer", "结果未确认，请重启服务。"))
-                    self.assertEqual(c.fx.channel.updates, [])
+                    self.assert_submission_summary(c, accepted=False)
+
+    async def test_original_card_update_failure_or_timeout_preserves_native_acceptance_and_release(self):
+        for kind in ("binding", "side"):
+            for failure in ("rejected", "error", "timeout"):
+                with self.subTest(kind=kind, failure=failure):
+                    async with self.case(kind) as c:
+                        if failure == "timeout":
+                            async def update(*args):
+                                self.assertEqual(c.released, [True])
+                                await asyncio.Event().wait()
+                            update_mock = AsyncMock(side_effect=update)
+                        elif failure == "error":
+                            update_mock = AsyncMock(side_effect=OSError("card unavailable"))
+                        else:
+                            update_mock = AsyncMock(return_value=False)
+                        c.fx.app._safe_update_card = update_mock
+                        c.queue_anchor()
+                        with patch("netizen_cli.channel_app._QUESTION_SUBMISSION_CARD_TIMEOUT_SECONDS", 0.01):
+                            if failure == "rejected":
+                                await c.fx.app.handle_card_action(c.event())
+                            else:
+                                with self.assertLogs("netizen_cli.channel_app", level="WARNING"):
+                                    await c.fx.app.handle_card_action(c.event())
+                        self.assertEqual(len(c.submits), 1)
+                        self.assertEqual(c.released, [True])
+                        self.assertEqual(len(c.fx.channel.send_calls), 1)
+                        self.assertEqual(c.fx.channel.replies, [])
+                        update_mock.assert_awaited_once()
+                        self.assertEqual(update_mock.await_args.args[0], "om_question")
+                        self.assertEqual(update_mock.await_args.args[1].card["header"]["title"]["content"], "回答已提交")
+
+    async def test_side_feedback_error_after_acceptance_keeps_original_card_submitted(self):
+        async with self.case("side") as c:
+            c.queue_anchor()
+            c.fx.app._reactions.start = AsyncMock(side_effect=OSError("feedback failed"))
+            with self.assertLogs("netizen_cli.channel_app", level="ERROR"):
+                await c.fx.app.handle_card_action(c.event())
+            self.assertEqual(len(c.submits), 1)
+            self.assertEqual(c.released, [True])
+            self.assertIn("feedback failed", c.fx.channel.replies[-1][1])
+            self.assert_submission_summary(c, accepted=True)
 
     async def test_side_answer_ignores_later_parent_metadata_changes(self):
         # Mutate persisted parent metadata only: the Channel must not consult it
@@ -370,6 +427,21 @@ class QuestionTargetParityTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(c.fx.channel.send_calls, [])
                     self.assertEqual(c.fx.store.list_bindings(c.scope.key), [])
                     self.assertIn("回答未提交", str(c.updated_card().card))
+                    if state in {"closed", "expired", "missing-runtime"}:
+                        self.assertIn("主会话", str(c.updated_card().card))
+                        self.assertIn("/side", str(c.updated_card().card))
+
+    async def test_missing_side_route_explains_recovery_without_redirecting_or_recreating_it(self):
+        async with self.case("side") as c:
+            card = render_question_card(SideQuestionTarget("missing-side"), REQUEST, 0)
+            await c.fx.app.handle_card_action(c.event(card=card))
+            self.assertEqual(c.captures, [])
+            self.assertEqual(c.submits, [])
+            self.assertEqual(c.fx.runtime.submit_calls, [])
+            self.assertEqual(c.fx.channel.send_calls, [])
+            content = str(c.updated_card().card)
+            self.assertIn("旧卡片不能恢复", content)
+            self.assertIn("主会话重新发起 /side", content)
 
     async def test_side_close_during_preparation_uses_shared_input_error(self):
         async with self.case("side") as c:
@@ -384,7 +456,7 @@ class QuestionTargetParityTest(unittest.IsolatedAsyncioTestCase):
             c.fx.runtime.submit_side.assert_awaited_once()
             self.assertEqual(c.captures, [c.recipient.id])
             self.assertEqual(c.fx.channel.replies[-1], ("om_answer", "Side 已结束，本条消息未执行。"))
-            self.assertEqual(c.fx.channel.updates, [])
+            self.assert_submission_summary(c, accepted=False)
             self.assertEqual(c.fx.store.list_bindings(c.scope.key), [])
 
     async def test_side_progress_reply_keeps_exact_answer_anchor_and_no_fresh_fallback(self):
