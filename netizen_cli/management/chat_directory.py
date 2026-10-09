@@ -19,6 +19,7 @@ from lark_oapi.api.im.v2.model.search_chat_request import SearchChatRequest
 from lark_oapi.api.im.v2.model.search_chat_request_body import SearchChatRequestBody
 
 from ..channel.messages import public_chat_kind
+from ..chat_avatars import avatar_url
 
 
 _PAGE_SIZE = 20
@@ -42,6 +43,7 @@ class AvailableChat:
     # List v1 does not promise a mode; do not invent group versus topic.
     chat_mode: str | None
     external: bool | None
+    avatar_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,4 +235,4 @@ def _chat(data: Any, chat_id: Any, *, search_result: bool = False) -> AvailableC
         or (external is not None and type(external) is not bool)
     ):
         raise _contract_error()
-    return AvailableChat(chat_id, name or chat_id, mode, external)
+    return AvailableChat(chat_id, name or chat_id, mode, external, avatar_url(getattr(data, "avatar", None)))

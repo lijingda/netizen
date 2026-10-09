@@ -57,9 +57,10 @@ async function api(path, options = {}) {
   const query = new URL(path, "http://localhost").searchParams;
   if (path.startsWith("/api/v1/chats/validate?")) {
     if (chatValidationGate) return new Promise((resolve) => { chatValidationGate.resolve = resolve; });
-    return { chatId: query.get("chatId") };
+    return { chat: { chatId: query.get("chatId"), avatarUrl: "https://example.feishucdn.com/saved.jpg" } };
   }
-  if (path.startsWith("/api/v1/chats?")) return { items: [{ chatId: "oc_picker", name: "研发群" }], nextCursor: null };
+  if (path.startsWith("/api/v1/chats?")) return { items: [{ chatId: "oc_picker", name: "研发群",
+    avatarUrl: "https://example.feishucdn.com/schedule.jpg" }], nextCursor: null };
   if (path.startsWith("/api/v1/projects/options")) return {
     items: query.has("cursor") ? [{ alias: "retired", enabled: false }] : [
       { alias: "project-one", enabled: true }, { alias: "project-two", enabled: true }],
@@ -847,6 +848,8 @@ async function openNewScheduleEditor() {
   scheduleInput("group-picker").querySelector(".chat-picker-option").click();
   await flush();
   assert.equal(scheduleInput("chat").value, "oc_picker");
+  assert.equal(scheduleInput("group-picker").querySelector(".chat-picker-selected-avatar").querySelector("img").src,
+    "https://example.feishucdn.com/schedule.jpg");
   scheduleInput("chat-manual").checked = true;
   scheduleInput("chat-manual").dispatch("change");
   await flush();

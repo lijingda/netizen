@@ -45,6 +45,7 @@ from .bindings import (
     SideTopicState,
     ThreadBinding,
 )
+from .chat_avatars import ChatAvatarImages
 from .cards import (
     account_usage_card,
     ArchivedSessionCardItem,
@@ -685,6 +686,7 @@ class ChannelApplication:
     ) -> None:
         self._app_id = app_id
         self._channel = channel
+        self._chat_avatars = ChatAvatarImages(channel)
         self._runtime = runtime
         self._bindings = bindings
         self._projects = projects
@@ -3505,12 +3507,24 @@ class ChannelApplication:
                 page = await self._management.query_available_chats(
                     query=request.query or "", page_token=request.page_token,
                 )
-                card = fork_chat_results_card(scope, request.source, page, query=request.query or "", **common)
+                card = fork_chat_results_card(scope, request.source, page, query=request.query or "",
+                    avatar_keys=await self._chat_avatars.prepare(page.items), **common)
             elif request.action == "select":
                 target = None if request.target_chat_id == scope.chat_id else (
                     await self._management.validate_available_chat(request.target_chat_id)
                 )
-                card = fork_confirm_card(scope, request.source, target_chat=target, **common)
+                avatar_chat = target
+                if avatar_chat is None and scope.kind != ScopeKind.DIRECT:
+                    # Same-chat creation has no directory prerequisite. This
+                    # lookup is only for display, including P2P topic fallback.
+                    try:
+                        async with asyncio.timeout(2.0):
+                            avatar_chat = await self._management.validate_available_chat(scope.chat_id)
+                    except Exception:
+                        pass
+                avatar_keys = await self._chat_avatars.prepare((avatar_chat,)) if avatar_chat is not None else {}
+                card = fork_confirm_card(scope, request.source, target_chat=target,
+                    avatar_key=avatar_keys.get(request.target_chat_id), **common)
             elif request.action == "create":
                 await self._create_fork_from_card(
                     intent=request, scope=scope, source=source, source_title=title,

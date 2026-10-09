@@ -311,7 +311,8 @@ async function refresh(tab) {
   // The shared group picker submits exact chat IDs and resets applied pagination on filtering.
   const answerSessions = answer;
   answer = (path) => path.startsWith("/api/v1/chats?")
-    ? { items: [{ chatId: "oc_selected", name: "研发 & 测试群" }], nextCursor: null }
+    ? { items: [{ chatId: "oc_selected", name: "研发 & 测试群",
+      avatarUrl: "https://example.feishucdn.com/sessions.jpg" }], nextCursor: null }
     : answerSessions(path);
   const flush = () => new Promise((resolve) => setImmediate(resolve));
   sessionChatPicker.focus();
@@ -321,6 +322,8 @@ async function refresh(tab) {
   pickerRoot.querySelector(".chat-picker-option").click();
   assert.equal(query().get("chatId"), "oc_selected");
   assert.equal(document.querySelector("#session-chat-filter").value, "oc_selected");
+  assert.equal(pickerRoot.querySelector(".chat-picker-selected-avatar").querySelector("img").src,
+    "https://example.feishucdn.com/sessions.jpg");
   state.sessionPage = { cursor: "page-three", number: 3, nextCursor: "page-four", previousCursors: [null, "page-two"], query: "pageSize=20" };
   form.dispatch("submit");
   await flush();

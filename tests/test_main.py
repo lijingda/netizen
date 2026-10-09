@@ -20,6 +20,7 @@ from openai_codex import CodexConfig
 
 from netizen_cli.admin.port_config import ConfigFileSnapshot
 from netizen_cli.bindings import BindingStore, SideTopicState
+from netizen_cli.chat_avatars import CHAT_AVATAR_HOSTS
 from netizen_cli.cli_data import (
     StartupRejected,
     acquire_lifetime_lock,
@@ -158,6 +159,7 @@ class MainConfigurationTest(unittest.TestCase):
         self.assertEqual(channel.config.policy.group_policy, "open")
         self.assertTrue(channel.config.inbound.include_raw)
         self.assertTrue(channel.config.resolve_sender_names)
+        self.assertEqual(channel.config.outbound.ssrf_allowlist, list(CHAT_AVATAR_HOSTS))
         self.assertIsNone(channel.config.policy.allow_from)
         self.assertIsNone(channel.config.policy.group_allowlist)
         self.assertEqual(channel.config.security.mode, "audit")
