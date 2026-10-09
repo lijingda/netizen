@@ -152,6 +152,99 @@ class CliTest(unittest.TestCase):
         create.assert_not_called()
         lock.assert_not_called()
 
+    def test_doctor_without_root_lists_all_environments_and_stopped_instances(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            environments = [directory / name for name in ("current", "other")]
+            statuses = []
+            for index, prefix in enumerate(environments):
+                (prefix / "bin").mkdir(parents=True)
+                python = prefix / "bin/python"
+                python.symlink_to(sys.executable)
+                binding = ServiceBinding(directory / f"instance-{index}", python, prefix)
+                statuses.append(ServiceStatus(binding, index == 0, True, index == 0, True))
+            alias = directory / "environment-alias"
+            alias.symlink_to(environments[0], target_is_directory=True)
+            manager = Mock()
+            manager.list_instances.return_value = statuses
+            with patch("netizen_cli.cli_services.ServiceManager", return_value=manager), \
+                 patch("sys.prefix", str(alias)), \
+                 patch.dict(os.environ, {"NETIZEN_ROOT": str(statuses[0].binding.root)}), \
+                 patch("netizen_cli.cli.resolve_instance_root") as resolve:
+                code, output, _ = self.invoke(["doctor", "--json"])
+            self.assertEqual(code, 0)
+            result = json.loads(output)
+            self.assertEqual(result["count"], 2)
+            self.assertEqual(result["cli"]["prefix"], str(alias))
+            self.assertEqual([row["root"] for row in result["instances"]],
+                             [str(status.binding.root) for status in statuses])
+            self.assertEqual([row["current_environment"] for row in result["instances"]], [True, False])
+            self.assertEqual([row["running"] for row in result["instances"]], [True, False])
+            self.assertEqual([row["ready"] for row in result["instances"]], [True, False])
+            self.assertTrue(all(row["bound"] for row in result["instances"]))
+            self.assertEqual(manager.method_calls, [call.list_instances()])
+            resolve.assert_not_called()
+
+    def test_doctor_empty_inventory_ignores_invalid_environment_root(self):
+        manager = Mock()
+        manager.list_instances.return_value = []
+        with patch("netizen_cli.cli_services.ServiceManager", return_value=manager), \
+             patch.dict(os.environ, {"NETIZEN_ROOT": "/"}), \
+             patch("netizen_cli.cli_data.ensure_instance_root") as create, \
+             patch("netizen_cli.cli_data.root_maintenance_lock") as lock:
+            code, output, _ = self.invoke(["--json", "doctor"])
+        self.assertEqual(code, 0)
+        result = json.loads(output)
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(result["instances"], [])
+        self.assertEqual(result["cli"]["python"], os.path.abspath(sys.executable))
+        self.assertEqual(manager.method_calls, [call.list_instances()])
+        create.assert_not_called()
+        lock.assert_not_called()
+
+    def test_doctor_explicit_root_keeps_single_instance_output_in_both_positions(self):
+        root = Path("/tmp/cli-doctor").resolve()
+        status = ServiceStatus(cli._current_binding(root), True, True, True)
+        for arguments in (["doctor", "--root", str(root), "--json"],
+                          ["--root", str(root), "--json", "doctor"]):
+            for observed in (status, None):
+                with self.subTest(arguments=arguments, bound=observed is not None):
+                    manager = Mock()
+                    manager.inspect.return_value = observed
+                    with patch("netizen_cli.cli_services.ServiceManager", return_value=manager), \
+                         patch.dict(os.environ, {"NETIZEN_ROOT": "/tmp/other-instance"}):
+                        code, output, _ = self.invoke(arguments)
+                    self.assertEqual(code, 0)
+                    result = json.loads(output)
+                    self.assertEqual(result["root"], str(root))
+                    self.assertEqual(result["bound"], observed is not None)
+                    self.assertEqual(result["cli"]["version"], cli.__version__)
+                    self.assertNotIn("instances", result)
+                    self.assertEqual(manager.method_calls, [call.inspect(root)])
+
+    def test_doctor_inventory_failure_is_not_reported_as_an_empty_success(self):
+        manager = Mock()
+        manager.list_instances.side_effect = RuntimeError("unrecognized service definition")
+        with patch("netizen_cli.cli_services.ServiceManager", return_value=manager):
+            code, output, _ = self.invoke(["doctor", "--json"])
+        self.assertEqual(code, 1)
+        result = json.loads(output)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("unrecognized service definition", result["reason"])
+        self.assertNotIn("instances", result)
+        self.assertEqual(manager.method_calls, [call.list_instances()])
+
+    def test_status_without_root_still_uses_environment_root(self):
+        root = Path("/tmp/cli-status-default").resolve()
+        manager = Mock()
+        manager.inspect.return_value = None
+        with patch("netizen_cli.cli_services.ServiceManager", return_value=manager), \
+             patch.dict(os.environ, {"NETIZEN_ROOT": str(root)}):
+            code, output, _ = self.invoke(["status", "--json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["root"], str(root))
+        self.assertEqual(manager.method_calls, [call.inspect(root)])
+
     def test_pending_admin_restart_blocks_mutations_before_service_or_data_changes(self):
         for command in ("start", "stop", "restart", "remove"):
             with self.subTest(command=command):

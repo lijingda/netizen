@@ -26,12 +26,14 @@ def parser() -> argparse.ArgumentParser:
         ("restart", "Restart using the existing service's Python environment"),
         ("status", "Show the selected instance's binding and runtime state"),
         ("logs", "Read the selected instance's logs"),
-        ("doctor", "Read-only instance and installation diagnostics"),
+        ("doctor", "Read-only diagnostics; list all user instances unless --root is given"),
         ("remove", "Remove an instance service; preserve data unless --purge"),
         ("_serve", "Internal service-manager entry; not an interactive command"),
     ):
         command = commands.add_parser(name, help=description)
-        command.add_argument("--root", help="instance data root")
+        command.add_argument("--root", help=(
+            "diagnose only this instance; omitted: list all user instances, ignoring NETIZEN_ROOT"
+            if name == "doctor" else "instance data root"))
         command.add_argument("--json", action="store_true", help="machine-readable result")
         if name == "remove":
             command.add_argument("--purge", action="store_true", help="also delete the displayed owned instance data")
@@ -87,6 +89,28 @@ def _current_binding(root: Path):
                           codex_home=Path(codex_home).expanduser().absolute() if codex_home else None)
 
 
+def _doctor_command(root: Path | None, *, json_output: bool, report: dict) -> int:
+    from .cli_services import ServiceManager
+
+    manager = ServiceManager()
+    if root is None:
+        prefix = Path(sys.prefix).resolve()
+        instances = [
+            {**_status_value(status, status.binding.root),
+             "current_environment": status.binding.prefix == prefix}
+            for status in manager.list_instances()
+        ]
+        value = {"count": len(instances), "instances": instances}
+    else:
+        report.update(root=str(root), total=1, instance="unknown")
+        value = _status_value(manager.inspect(root), root)
+    value["cli"] = {"python": os.path.abspath(sys.executable),
+                    "prefix": sys.prefix, "version": __version__}
+    value["note"] = "Read-only service diagnostics; does not migrate or open a running instance's database."
+    _emit(value, json_output=json_output)
+    return 0
+
+
 def _confirm_removal(root: Path, status: object | None, inventory: Sequence[Path],
                      *, purge: bool, yes: bool) -> None:
     """Always disclose the exact scope, even when confirmation is pre-authorized."""
@@ -117,7 +141,7 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
     report.update(root=str(root), phase="preflight", completed=0,
                   total={"setup": 3, "start": 2, "stop": 1, "restart": 2,
                          "remove": 3}.get(command, 1), instance="unknown")
-    if command in {"status", "doctor", "logs"}:
+    if command in {"status", "logs"}:
         if command == "logs":
             output = manager.logs(root, lines=args.lines)
             if output is not None:
@@ -125,10 +149,6 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
             return 0
         status = manager.inspect(root)
         value = _status_value(status, root)
-        if command == "doctor":
-            value["cli"] = {"python": os.path.abspath(sys.executable),
-                            "prefix": sys.prefix, "version": __version__}
-            value["note"] = "Read-only service diagnostics; does not migrate or open a running instance's database."
         _emit(value, json_output=json_output)
         return 0
 
@@ -267,6 +287,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             return run_update(json_output=json_output, backend=args.via)
         selected_root = args.root if args.root is not None else args.global_root
+        if args.command == "doctor":
+            root = resolve_instance_root(selected_root) if selected_root is not None else None
+            return _doctor_command(root, json_output=json_output, report=report)
         root = resolve_instance_root(selected_root)
         if args.command == "_serve":
             from .service_launcher import launch
