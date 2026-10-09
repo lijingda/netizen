@@ -495,6 +495,8 @@ netizen restart --root /absolute/path/to/.netizen
 这些是宿主机 CLI 命令，不是飞书 slash 命令。`--root` 选择一个实例；未指定时采用
 NETIZEN_ROOT，再缺省为有效账号的 ~/.netizen。`netizen update` 更新调用它的 Python
 环境及其关联实例，拒绝 --root，不是仅更新当前聊天中的机器人。
+升级日志逐行显示阶段和每个实例的停止／恢复结果；包验证成功与实例 ready 分开报告。
+`netizen update --json` 将最终结构化结果写入 stdout，进度和包管理器输出写入 stderr。
 
 需要查实例清单时，在宿主机执行 `netizen doctor --json`：不传 `--root` 会忽略
 NETIZEN_ROOT，列出当前用户全部可识别的受管实例，包含其他 Python 环境和已停止实例。

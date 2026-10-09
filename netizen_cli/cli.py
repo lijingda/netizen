@@ -42,8 +42,21 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--admin-port", type=_port)
         if name == "logs":
             command.add_argument("--lines", type=_lines, default=100)
-    update = commands.add_parser("update", help="Update this installation and restore its previously running services")
-    update.add_argument("--json", action="store_true", help="machine-readable result")
+    update = commands.add_parser(
+        "update", help="Update this installation and restore its previously running services",
+        description=(
+            "Update this Python environment and restore its previously running services.\n"
+            "Run from an external terminal. --root is not accepted; NETIZEN_ROOT does\n"
+            "not limit the update scope."),
+        epilog=(
+            "Agent/script example:\n"
+            "  netizen update --json >result.json 2>progress.log\n\n"
+            "Use the final JSON report and exit code to determine the outcome.\n"
+            "Package verification and instance readiness are reported separately."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    update.add_argument("--json", action="store_true", help=(
+        "write one final JSON object to stdout; progress and package-manager output go to stderr"))
     update.add_argument("--via", choices=("pip", "uv-pip", "uv-tool"),
                         help="resolve an ambiguous supported maintenance method; target checks still apply")
     return result

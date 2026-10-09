@@ -11,6 +11,7 @@ import hashlib
 import fcntl
 import json
 import os
+import shlex
 import signal
 import subprocess
 import stat
@@ -122,29 +123,77 @@ def persist_report(path: Path, report: dict[str, Any]) -> None:
             os.unlink(temporary)
 
 
+def progress(message: str) -> None:
+    """Keep line-oriented progress timely without making it an update decision."""
+    try:
+        print(message, file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 def print_report(report: dict[str, Any], *, json_output: bool = False) -> None:
     if json_output:
         print(json.dumps(report, ensure_ascii=False))
         return
-    print(f"Update {report['status']}; phase: {report['phase']}")
-    if report.get("environment"):
-        print(f"Environment: {report['environment']} (backend: {report.get('backend') or 'unconfirmed'})")
     package = report["package"]
-    print(f"Package: {package['state']} ({package.get('before_version', '?')}"
-          f" -> {package.get('after_version') or '?'})")
-    progress = report["progress"]
-    print(f"Stopped {progress['stopped']}/{progress['stop_total']}; "
-          f"ready {progress['ready']}/{progress['start_total']}")
+    counts = report["progress"]
+    succeeded = report["status"] == "succeeded"
+    noop = succeeded and not package["replacement_started"]
+    if noop:
+        print("No package changes required under the current package-manager configuration.")
+    elif succeeded:
+        print("Update complete.")
+    elif package["state"] == "verified":
+        print("Update incomplete: the installed package was verified.")
+    else:
+        stage = {"preflight": "preflight checks", "stopping": "instance shutdown",
+                 "updating": "package update", "validating": "installation verification",
+                 "restoring": "instance recovery"}.get(report["phase"], report["phase"])
+        print(f"Update failed during {stage}.")
+    if report.get("environment"):
+        print(f"Environment: {report['environment']}")
+    if report.get("backend"):
+        print(f"Package manager: {report['backend']}")
+    if noop:
+        print(f"Package: netizen-cli {package['before_version']} (unchanged).")
+        print("No instances were stopped or restarted.")
+    elif package["state"] == "verified":
+        before, after = package["before_version"], package["after_version"]
+        version = f"{after} (version unchanged)" if before == after else f"{before} -> {after}"
+        print(f"Package: netizen-cli {version}; installation verified.")
+        if counts["start_total"]:
+            print(f"Instances: {counts['ready']}/{counts['start_total']} restored and ready.")
+        else:
+            print("No previously running instances needed restoring.")
+    else:
+        if package["replacement_started"]:
+            print("Package state is unknown; no instances were restarted.")
+        else:
+            print("Package replacement did not start.")
+            print("Instance recovery was not attempted.")
+    if not report["inventory_complete"]:
+        print("Instance inventory could not be confirmed.")
     for item in report["instances"]:
-        print(f"  {item['root']} [{item['service']}]: {item['state']}")
+        state = item["state"]
+        if item["action"] == "start" and state in {"unknown", "starting"}:
+            state = "readiness unconfirmed (may be running)"
+        elif state == "loaded":
+            state = "loaded, no running process"
+        elif state == "unknown":
+            state = "state unconfirmed"
+        elif state == "stopped" and not noop:
+            state = "stopped (not restarted)" if item["was_running"] else "stopped (kept stopped)"
+        print(f"  {item['root']}: {state}")
         if item.get("reason"):
             print(f"    {item['reason']}")
-    if report.get("reason"):
-        print(report["reason"])
+        if item["action"] == "start" and item["state"] != "ready":
+            root = shlex.quote(item["root"])
+            print(f"    Check: netizen status --root {root}")
+            print(f"    Logs: netizen logs --root {root}")
+    if not succeeded and report.get("reason"):
+        print(f"Reason: {report['reason']}")
     if report.get("recommendation"):
         print(f"Next: {report['recommendation']}")
-    if report.get("unexecuted"):
-        print("Not executed: " + ", ".join(report["unexecuted"]))
     if report.get("report_path"):
         print(f"Report: {report['report_path']}")
 
@@ -209,6 +258,7 @@ def execute(plan: dict[str, Any], *, runner: Any = _run_owned) -> dict[str, Any]
     report["phase"] = "updating"
     persist_report(report_path, report)
     try:
+        progress("Rechecking installation before package replacement...")
         _validate_root_locks(plan)
         for name, expected in package.get("revalidation_files", {}).items():
             actual = hashlib.sha256(Path(name).read_bytes()).hexdigest()
@@ -230,6 +280,7 @@ def execute(plan: dict[str, Any], *, runner: Any = _run_owned) -> dict[str, Any]
         report["unexecuted"] = ["validation", "restore"]
         persist_report(report_path, report)
         # Package output is diagnostic only, never parsed to decide success or no-op.
+        progress(f"Updating packages with {package.get('backend') or report.get('backend') or 'package manager'}...")
         result = runner(
             package["command"], cwd=package["command_cwd"],
             env=environment, stdin=subprocess.DEVNULL,
@@ -245,6 +296,7 @@ def execute(plan: dict[str, Any], *, runner: Any = _run_owned) -> dict[str, Any]
         report["phase"] = "validating"
         report["package"]["state"] = "unverified"
         persist_report(report_path, report)
+        progress("Verifying the installed package...")
         validation = runner(
             package["validation_command"], cwd=package["command_cwd"],
             env=environment, stdin=subprocess.DEVNULL,
@@ -259,12 +311,14 @@ def execute(plan: dict[str, Any], *, runner: Any = _run_owned) -> dict[str, Any]
         report["phase"] = "restoring"
         report["unexecuted"] = [f"start:{item['root']}" for item in report["instances"] if item["was_running"]]
         persist_report(report_path, report)
+        progress(f"Verified netizen-cli {installed['version']}.")
         for item in report["instances"]:
             if not item["was_running"]:
                 continue
             item.update(state="starting", action="start")
             report["unexecuted"].remove(f"start:{item['root']}")
             persist_report(report_path, report)
+            progress(f"Restoring {item['root']}; waiting for readiness...")
             try:
                 restored = runner(
                     [package["environment_python"], "-I", "-m", "netizen_cli.cli_update_restore",
@@ -285,6 +339,10 @@ def execute(plan: dict[str, Any], *, runner: Any = _run_owned) -> dict[str, Any]
             except (OSError, subprocess.TimeoutExpired) as error:
                 item.update(state="unknown", reason=f"Start result could not be confirmed: {type(error).__name__}")
             persist_report(report_path, report)
+            if item["state"] == "ready":
+                progress(f"Ready: {item['root']}.")
+            else:
+                progress(f"Readiness unconfirmed: {item['root']} (may be running).")
         if report["progress"]["ready"] != report["progress"]["start_total"]:
             return _error(
                 report, "Program update was verified, but some instances did not confirm readiness.",
