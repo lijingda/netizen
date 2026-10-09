@@ -71,6 +71,7 @@ from .queries import (
 from .transport import AdminHttpState, AdminHttpTransport, Request, Response
 from .port_config import ConfigFileSnapshot, persist_admin_port
 from ..instance import instance_digest
+from ..chat_avatars import CHAT_AVATAR_IMAGE_SOURCES, avatar_url
 from ..settings import validate_access_host
 from ..bindings import (
     AmbiguousBinding,
@@ -169,9 +170,12 @@ _SECURITY_HEADERS = (
     (b"Cache-Control", b"no-store"),
     (
         b"Content-Security-Policy",
-        b"default-src 'self'; script-src 'self'; style-src 'self'; "
-        b"object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
-        b"form-action 'self'",
+        (
+            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            f"img-src 'self' {CHAT_AVATAR_IMAGE_SOURCES}; "
+            "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
+            "form-action 'self'"
+        ).encode("ascii"),
     ),
     (b"X-Content-Type-Options", b"nosniff"),
     # Basic HTML form submissions serialize Origin as "null" under
@@ -2315,6 +2319,7 @@ def _available_chat_json(chat: AvailableChat) -> dict[str, Any]:
     return {
         "chatId": chat.chat_id, "name": chat.name,
         "chatMode": chat.chat_mode, "external": chat.external,
+        "avatarUrl": avatar_url(chat.avatar_url),
     }
 
 

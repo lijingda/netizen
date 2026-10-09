@@ -370,6 +370,15 @@ materialized persisted 行都可确认后 exact archive/delete，不以本地 Tu
 默认在当前聊天另建话题，也可选择机器人已加入的其他群；不接入已有话题或改变来源 current。
 跨群目录通过共享 Management 的 `query_available_chats` / `validate_available_chat` 查询、
 提交复核，复用既有 FeishuChatDirectory 和官方客户端，不经过 Admin HTTP 或增加权限层。
+群候选和确认项尽力展示群头像。目录只透传受支持飞书 CDN 的 HTTPS `avatar` URL，
+图片来源、浏览器 CSP 与公开上传 allowlist 共用精确主机集合；当前支持官方头像示例中的
+`p3-lark-file.byteimg.com`、`s1-imfile.feishucdn.com`、`s3-imfile.feishucdn.com`，未知来源降级。
+Channel 使用公开 `upload_media(MediaSource(kind="url"), kind="image")` 取得卡片图片 key；
+每页最多准备 20 张，实例最多 4 路并发，整批预算 4 秒。成功 key 按 URL 在进程内最多缓存
+128 项、10 分钟，不缓存目录或成员关系，不写 SQLite。当前群确认的头像查询另限 2 秒，
+失败不新增创建门禁；头像缺失、下载或上传失败时群选项降级为通用图标，聊天类型未确认
+则保留文字，不改变 callback 中的目标 ID 或 fork 的提交复核。飞书 `/cron` 暂不接入
+这套选群展示。
 
 公开 `thread_fork(ephemeral=False, include_turns=False)` 继承原生历史和权限；分支与来源
 共用 Project/cwd，复制显式 Model/Effort/Speed、Task Feedback 和上下文模式，之后各自独立。
@@ -1708,6 +1717,11 @@ group list，有关键词使用公开 v2 search 并检查机器人成员关系�
 不足不作为空列表。`GET /api/v1/chats/validate` 在保存前重新读取成员关系和群信息，保存
 与运行仍进入现有管理服务的目标校验。查询不注册事件、不发送消息、不自动入群，不增加
 用户 OAuth、CLI 依赖、持久索引或另一套服务。显示文字按纯文本处理，静态资源继续同源。
+群选择器的候选与已选状态展示头像、名称和 ID；目录返回可选 `avatarUrl`，浏览器直连
+受支持的飞书 HTTPS CDN，不由 Admin 代理下载，图片不发送 referrer，CSP 只为这些图片
+来源增开权限。头像缺失或加载失败显示通用群图标。默认配置和新话题计划的历史目标在
+确认类型为群后，通过既有 validate 查询尽力补头像，失败不影响保存，晚到响应不覆盖
+新选择或已关闭表单；不持久化 URL，也不将头像作为群身份或可用性的证明。
 Sessions 的群筛选复用此选择器，将选中 ID 交给既有 `chatId` 条件；不筛选时仍显示原有
 历史会话，机器人已退出的群只是不再进入群选择器。
 

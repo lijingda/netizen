@@ -113,6 +113,61 @@ class ForkCardsTest(unittest.TestCase):
         self.assertIsNone(search.page_token)
         self.assertEqual(decode_fork_action(self.scope, callback(card, "返回创建位置")).action, "destination")
 
+    def test_result_avatars_follow_exact_chat_ids_and_preserve_selection(self):
+        same_name = AvailableChat("oc_other_87654321", self.chat.name, None, True)
+        page = AvailableChatPage((self.chat, same_name), None)
+        plain_card = fork_chat_results_card(self.scope, self.source, page,
+            query="研发", **self.display)
+        card = fork_chat_results_card(self.scope, self.source, page, query="研发",
+            avatar_keys={self.chat.chat_id: "img_v3_avatar", "oc_unrelated": "img_v3_other"},
+            **self.display)
+        select = self.choice(card)
+        self.assertEqual(select["options"][0]["icon"],
+            {"tag": "custom_icon", "img_key": "img_v3_avatar"})
+        self.assertEqual(select["options"][1]["icon"],
+            {"tag": "standard_icon", "token": "group_outlined"})
+        for option, plain, chat in zip(select["options"], self.choice(plain_card)["options"], page.items):
+            with self.subTest(chat=chat.chat_id):
+                self.assertEqual(option["value"], plain["value"])
+                self.assertEqual(option["text"], plain["text"])
+                self.assertEqual(plain["icon"], {"tag": "standard_icon", "token": "group_outlined"})
+                action = decode_fork_action(self.scope, {}, {select["name"]: option["value"]})
+                self.assertEqual(action.target_chat_id, chat.chat_id)
+                self.assertEqual(action.source, self.source)
+        self.assertNotIn("img_v3_other", str(card.card))
+
+    def test_confirm_avatar_preserves_final_submission_and_falls_back(self):
+        for target in (None, self.chat):
+            with self.subTest(target=target):
+                plain_card = self.confirm(target=target)
+                card = fork_confirm_card(self.scope, self.source, target_chat=target,
+                    avatar_key="img_v3_avatar", **self.display)
+                select = self.choice(card)
+                option = select["options"][0]
+                self.assertEqual(option["icon"], {"tag": "custom_icon", "img_key": "img_v3_avatar"})
+                self.assertEqual(select["initial_option"], option["value"])
+                plain_option = self.choice(plain_card)["options"][0]
+                if target is not None:
+                    self.assertEqual(plain_option["icon"], {"tag": "standard_icon", "token": "group_outlined"})
+                else:
+                    self.assertNotIn("icon", plain_option)
+                self.assertEqual(form_values(card), form_values(plain_card))
+                action = decode_fork_action(self.scope, {}, form_values(card))
+                self.assertEqual(action.action, "create")
+                self.assertEqual(action.target_chat_id, target.chat_id if target else self.scope.chat_id)
+                self.assertEqual(action.source, self.source)
+
+    def test_current_chat_does_not_mislabel_direct_or_unknown_topic_as_a_group(self):
+        for kind in ScopeKind:
+            with self.subTest(kind=kind):
+                scope = FeishuScope("app", "oc_source", kind, "omt_source" if kind is ScopeKind.TOPIC else None)
+                card = fork_confirm_card(scope, self.source, **self.display)
+                option = self.choice(card)["options"][0]
+                if kind is ScopeKind.GROUP:
+                    self.assertEqual(option["icon"], {"tag": "standard_icon", "token": "group_outlined"})
+                else:
+                    self.assertNotIn("icon", option)
+
     def test_final_name_form_preserves_exact_source_revisions_and_cross_group_notice(self):
         card = self.confirm(target=self.chat)
         form = {**form_values(card), "fork_name_v1": "  方案\n B  "}

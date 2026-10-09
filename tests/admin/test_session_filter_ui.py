@@ -67,8 +67,8 @@ class SessionFilterUiTest(unittest.TestCase):
         listeners = source[source.index('document.querySelector("#session-filter").addEventListener'):
                            source.index('document.querySelector("#side-filter").addEventListener')]
         result = subprocess.run(
-            [node, "-e", "const htmlTree = " + json.dumps(tree.root) + ";\n"
-             + dom + before + shared_chat + filters + presentation + pagination + listeners + after],
+            [node], input="const htmlTree = " + json.dumps(tree.root) + ";\n"
+             + dom + before + shared_chat + filters + presentation + pagination + listeners + after,
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

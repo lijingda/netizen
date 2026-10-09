@@ -29,6 +29,7 @@ let pendingView = null;
 let pendingPost = null;
 let pendingList = null;
 let failList = false;
+let pendingAvatar = null;
 function pauseRequest(gate, result) {
   return new Promise((resolve, reject) => {
     gate.resolve = () => resolve(result);
@@ -43,8 +44,13 @@ async function api(path, options = {}) {
     return {};
   }
   gets.push(path);
-  if (path.startsWith("/api/v1/chats/validate?")) return { chatId: new URL(path, "http://localhost").searchParams.get("chatId") };
-  if (path.startsWith("/api/v1/chats?")) return { items: [{ chatId: "oc_picker", name: "研发群" }], nextCursor: null };
+  if (path.startsWith("/api/v1/chats/validate?")) {
+    const result = { chat: { chatId: new URL(path, "http://localhost").searchParams.get("chatId"),
+      name: "最新群名称", avatarUrl: "https://example.feishucdn.com/saved.jpg" } };
+    return pendingAvatar ? pauseRequest(pendingAvatar, result) : result;
+  }
+  if (path.startsWith("/api/v1/chats?")) return { items: [{ chatId: "oc_picker", name: "研发群",
+    avatarUrl: "https://example.feishucdn.com/picker.jpg" }], nextCursor: null };
   if (path.startsWith("/api/v1/projects/options")) return { items: [{ alias: "available", enabled: true }], nextCursor: null };
   const query = new URL(path, "http://localhost").searchParams;
   if (query.get("mode") === "options") {
@@ -469,6 +475,8 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   defaultsInput("group-picker").querySelector(".chat-picker-option").click();
   await flush();
   assert.equal(defaultsInput("chat").value, "oc_picker");
+  assert.equal(defaultsInput("group-picker").querySelector(".chat-picker-selected-avatar").querySelector("img").src,
+    "https://example.feishucdn.com/picker.jpg");
   assert(gets.some((path) => path.includes("mode=view&chat_id=oc_picker")));
   defaultsInput("chat-manual").checked = true;
   defaultsInput("chat-manual").dispatch("change");
@@ -527,4 +535,68 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   assert.equal(defaultsInput("chat").value, "oc_corrected");
   assert.equal(defaultsInput("chat-field").hidden, false, "correcting a typed target must not hide its ID behind an empty picker");
   assert.equal(defaultsInput("group-picker").hidden, true);
+
+  // Existing group targets retrieve display metadata without changing their identity,
+  // name, locked state or edit/save capability. Late responses are never retargeted.
+  const selectedAvatar = () => defaultsInput("group-picker").querySelector(".chat-picker-selected-avatar");
+  target.set({ chatId: "oc_saved", chat: { chatType: "group", chatLabel: "已存群名" }, readOnly: true });
+  await flush();
+  assert.equal(selectedAvatar().querySelector("img").src, "https://example.feishucdn.com/saved.jpg");
+  assert.equal(defaultsInput("group-picker").querySelector("input").value, "已存群名");
+  assert.equal(defaultsInput("chat").value, "oc_saved");
+  assert.equal(defaultsInput("group-picker").querySelector("input").disabled, true);
+  pendingAvatar = {};
+  const failedAvatar = pendingAvatar;
+  target.set({ chatId: "oc_unavailable", chat: { chatType: "group" }, readOnly: true });
+  const statusBeforeAvatarFailure = status;
+  failedAvatar.reject("群头像暂不可用");
+  pendingAvatar = null;
+  await flush();
+  assert.equal(selectedAvatar().querySelector("img"), null);
+  assert.equal(defaultsInput("chat").value, "oc_unavailable");
+  assert.equal(status, statusBeforeAvatarFailure);
+  pendingAvatar = {};
+  const staleAvatar = pendingAvatar;
+  target.set({ chatId: "oc_same", chat: { chatType: "group" } });
+  pendingAvatar = null;
+  target.set({ chatId: "oc_same", chat: { chatType: "group", avatarUrl: "https://example.feishucdn.com/new.jpg" } });
+  staleAvatar.resolve();
+  await flush();
+  assert.equal(selectedAvatar().querySelector("img").src, "https://example.feishucdn.com/new.jpg");
+  pendingAvatar = {};
+  const closedAvatar = pendingAvatar;
+  target.set({ chatId: "oc_closed", chat: { chatType: "group" } });
+  target.close();
+  pendingAvatar = null;
+  closedAvatar.resolve();
+  await flush();
+  assert.equal(selectedAvatar().querySelector("img"), null);
+  pendingAvatar = {};
+  const clearedAvatar = pendingAvatar;
+  target.set({ chatId: "oc_cleared", chat: { chatType: "group" } });
+  defaultsInput("group-picker").querySelector(".chat-picker-clear").click();
+  pendingAvatar = null;
+  clearedAvatar.resolve();
+  await flush();
+  assert.equal(defaultsInput("chat").value, "");
+  assert.equal(selectedAvatar().hidden, true);
+  target.close();
+
+  // An unavailable avatar does not disable editing or saving an existing exact rule.
+  contextAvailable = true;
+  pendingAvatar = {};
+  const unavailableExisting = pendingAvatar;
+  openDefaultEditor("chat", { ...exact, chat: { ...exact.chat, chatType: "group" } });
+  await flush();
+  const saveDisabledBefore = defaultsInput("save").disabled;
+  unavailableExisting.reject("机器人已退出目标群");
+  pendingAvatar = null;
+  await flush();
+  assert.equal(defaultsInput("save").disabled, saveDisabledBefore);
+  defaultsInput("progress").checked = !defaultsEditor.settings.progress_card_enabled;
+  changeDefaultSettings("progress");
+  const beforeSavingWithoutAvatar = posts.length;
+  await saveDefault({ preventDefault() {} });
+  assert.equal(posts.length, beforeSavingWithoutAvatar + 1);
+  assert.equal(posts.at(-1).body.definition.chat_id, "oc_exact");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

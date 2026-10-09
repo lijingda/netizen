@@ -44,6 +44,26 @@ class ChatDirectoryTest(unittest.IsolatedAsyncioTestCase):
         ))
         self.directory = FeishuChatDirectory(self.client)
 
+    async def test_avatars_flow_through_existing_list_search_and_validation_calls(self):
+        url = "https://p3-lark-file.byteimg.com/img/avatar.jpg"
+        self.list.return_value = listed([chat(avatar=url)])
+        self.search.return_value = searched([chat(avatar=url)])
+        self.get.return_value = GetChatResponse({"code": 0, "data": chat(avatar=url)})
+        self.assertEqual((await self.directory.query()).items[0].avatar_url, url)
+        self.assertEqual((await self.directory.query(query="测试")).items[0].avatar_url, url)
+        self.assertEqual((await self.directory.validate("oc_group")).avatar_url, url)
+        self.assertEqual((self.list.await_count, self.search.await_count, self.get.await_count), (1, 1, 1))
+        self.assertEqual(self.member.await_count, 2)
+
+    async def test_missing_or_untrusted_avatar_never_removes_a_valid_group(self):
+        for url in (None, "", "https://example.com/avatar.jpg", "javascript:alert(1)",
+                    "https://p3-lark-file.byteimg.com@localhost/avatar.jpg"):
+            with self.subTest(avatar=url):
+                self.list.return_value = listed([chat(avatar=url)])
+                group = (await self.directory.query()).items[0]
+                self.assertEqual(group.chat_id, "oc_group")
+                self.assertIsNone(group.avatar_url)
+
     async def test_browse_uses_joined_group_list_and_one_bounded_page(self):
         self.list.return_value = listed([
             chat(chat_mode=None), chat("oc_dissolved", chat_status="dissolved"),
