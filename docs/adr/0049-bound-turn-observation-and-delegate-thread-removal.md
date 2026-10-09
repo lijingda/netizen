@@ -3,10 +3,14 @@ status: accepted
 date: 2026-08-30
 amends: 0008, 0010, 0017, 0036, 0037, 0038
 related: 0031, 0047
-amended_by: 0052
+amended_by: 0052, 0078
 ---
 
 # 有界处理 Turn 观测故障，并委托 App Server 移除 Thread
+
+> 后续修订：[ADR 0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)
+> 修订 Delete 的失败处理：明确拒绝保留 Binding 并清理可能失效的活动投影，未知结果局部隔离；不再目录对账，archive 不变。
+> 以下保留决策时的契约与证据。
 
 ## 背景
 

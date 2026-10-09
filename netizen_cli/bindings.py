@@ -901,6 +901,42 @@ class BindingStore:
             allow_scope_insert=True,
         )
 
+    def create_fork_binding(
+        self,
+        *,
+        scope: FeishuScope,
+        source: ThreadBinding,
+        native_thread_id: str,
+        root_message_id: str,
+        creator_id: str,
+        expected_project_revision: int,
+        context_anchor: MessageContextAnchor | None = None,
+    ) -> ThreadBinding:
+        """Bind an already-created persistent fork to one empty, real topic."""
+
+        if (
+            scope.kind is not ScopeKind.TOPIC or scope.key == source.scope_key
+            or not native_thread_id or native_thread_id == source.native_thread_id
+            or source.native_thread_id is None or not root_message_id
+            or expected_project_revision < 1
+        ):
+            raise ValueError("fork requires a new native Thread and a fresh topic")
+        if self.get_scope(source.scope_key).app_id != scope.app_id:
+            raise ScopeConflict("分支必须属于同一个飞书应用。")
+        try:
+            return self._create_binding(
+                scope=scope, project_alias=source.project_alias, creator_id=creator_id,
+                turn_settings=source.turn_settings, task_feedback=source.task_feedback,
+                message_context_mode=source.message_context_mode,
+                context_anchor=context_anchor,
+                expected_project_revision=expected_project_revision,
+                activate=True, allow_scope_insert=True,
+                native_thread_id=native_thread_id,
+                empty_topic_root_message_id=root_message_id,
+            )
+        except sqlite3.IntegrityError as error:
+            raise BindingConflict("原生分支已绑定到其他会话，本次未覆盖。") from error
+
     def create_admin_binding(
         self,
         *,
@@ -943,6 +979,8 @@ class BindingStore:
         activate: bool,
         allow_scope_insert: bool,
         scheduled_run_id: str | None = None,
+        native_thread_id: str | None = None,
+        empty_topic_root_message_id: str | None = None,
     ) -> ThreadBinding:
         if not project_alias or not creator_id:
             raise ValueError("Binding Project and creator must not be empty")
@@ -957,6 +995,13 @@ class BindingStore:
         feedback_values = _feedback_values(task_feedback)
         context_values = _context_values(context_anchor)
         with self._transaction():
+            if empty_topic_root_message_id is not None:
+                if self._connection.execute(
+                    "SELECT 1 FROM side_topics WHERE app_id=? AND chat_id=? "
+                    "AND (topic_id=? OR root_message_id=?) LIMIT 1",
+                    (scope.app_id, scope.chat_id, scope.topic_id, empty_topic_root_message_id),
+                ).fetchone() is not None:
+                    raise ScopeConflict("目标话题属于 Side，本次未绑定分支。")
             if scheduled_run_id is not None:
                 run = self.schedules.get_run(scheduled_run_id)
                 if (
@@ -1002,7 +1047,7 @@ class BindingStore:
                 )
             else:
                 _require_exact_scope(scope_row, scope)
-                if scheduled_run_id is not None and (
+                if (scheduled_run_id is not None or empty_topic_root_message_id is not None) and (
                     scope_row["active_binding_id"] is not None
                     or self._connection.execute(
                         "SELECT 1 FROM bindings WHERE scope_key=? LIMIT 1", (scope.key,)
@@ -1042,13 +1087,14 @@ class BindingStore:
                     feedback_revision,
                     creator_id, created_at, activated_at, ever_activated
                 ) VALUES (
-                    ?, ?, ?, NULL, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, ?
                 )
                 """,
                 (
                     binding_id,
                     scope.key,
                     project_alias,
+                    native_thread_id,
                     *settings_values,
                     message_context_mode.value,
                     *context_values,

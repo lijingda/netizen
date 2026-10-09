@@ -36,6 +36,7 @@ from netizen_cli.sdk_gap_adapter import (
     SideBoundaryStateUnknown,
     ThreadUnsubscribeStateUnknown,
     ThreadDeleteStateUnknown,
+    ThreadDeleteRejected,
     ThreadUnsubscribeStatus,
     facade_migration_requirements,
 )
@@ -339,7 +340,10 @@ for line in sys.stdin:
     elif method == "thread/delete":
         if mode == "delete-loss":
             sys.exit(0)
-        send({"id": request_id, "result": {}})
+        if mode == "delete-rejected":
+            send({"id": request_id, "error": {"code": -32600, "message": "thread history is referenced by a fork"}})
+        else:
+            send({"id": request_id, "result": {}})
     elif method == "thread/inject_items":
         if mode == "side-inject-loss":
             sys.exit(0)
@@ -540,6 +544,23 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                     await codex.close()
             _close_probe_pipes(process)
             gc.collect()
+
+    async def test_thread_delete_explicit_rpc_error_is_rejected_without_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            log_path = Path(raw) / "requests.jsonl"
+            async with AsyncCodex(_config(log_path, "delete-rejected")) as codex:
+                process = codex._client._sync._proc
+                control = AppServerThreadDeleteControl(codex)
+                with self.assertRaises(ThreadDeleteRejected) as raised:
+                    await control.delete("thread-goal")
+            _close_probe_pipes(process)
+            messages = _messages(log_path)
+        self.assertIsInstance(raised.exception.__cause__, InvalidRequestError)
+        self.assertEqual(raised.exception.__cause__.code, -32600)
+        self.assertEqual(
+            [item["params"] for item in messages if item.get("method") == "thread/delete"],
+            [{"threadId": "thread-goal"}],
+        )
 
     async def test_skills_list_preserves_invocation_fields_and_exact_request(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

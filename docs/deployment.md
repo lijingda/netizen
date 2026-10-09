@@ -40,7 +40,7 @@ SSH config 中的 alias，也可以是 `<user>@<hostname>`。LaunchAgent 的首�
 Goal/Skills、ADR 0021 的 Side 与 ADR 0037 的 Thread Delete Adapter 不做运行时版本
 allowlist；修改 pinned SDK/App Server 或这些 Adapter 时，开发迭代必须对实际 resolved
 组合运行受影响的 capability harness。Delete 能力变更还必须覆盖 disposable lifecycle
-live probe 与 Runtime 四视图对账测试。ADR 0020/0052 的 active-Turn Activity observer
+live probe 与 Runtime 原生返回分类、局部 unknown 和零自动重试测试（ADR 0078）。ADR 0020/0052 的 active-Turn Activity observer
 另行精确锁定 SDK 版本、源码指纹、generated shape 和非消费 event-store contract；门禁失败只
 关闭 checklist/Activity 展示，不关闭普通 Turn。这个降级以 ADR 0009 独立的 service-wide
 SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕过该门禁。
@@ -249,6 +249,20 @@ LaunchAgent 安装、启动和 ready 冒烟，不能用 CI 代替。
 只运行受影响的 phase。没有触及这些边界的迭代无需
 运行 live probe。
 
+账号额度适配（ADR 0077）变更时，在目标服务账号环境运行
+`.venv/bin/python scripts/probe_account_rate_limits.py --live`，并按下文方式加外部
+进程 deadline。它只读一次原生额度，不创建 Thread 或请求模型，输出精确 SDK/CLI
+版本、结果与窗口数量，不输出账号或余额。省略 `--live` 时使用临时未登录环境，
+只验证认证错误路径，不能替代成功读取。飞书 `/usage` 的展示仍需单独验收。
+
+持久 fork、直接恢复或原生删除边界（ADR 0078）变更时，使用
+`.venv/bin/python scripts/probe_persistent_fork.py` 并加外部 420 秒 deadline。
+它创建一条短模型回复和两个自有持久 Thread，验证完整绑定、同 handle 订阅、
+分支零自身 Turn 冷恢复、历史引用拒绝与先分支后来源删除；使用临时本地话题身份，
+不调用飞书。临时 cwd 的 trust 仅用公开进程级配置传入，断言用户配置字节不变；
+与其他检查配置不变的探针串行执行。未知删除结果不自动重试，保留输出的 exact ID
+供人工核查；飞书创建、选群和回调另行验收。
+
 按[职责边界](design.md#netizen-与-codex-的职责边界)分别记录适配行为与原生能力结果。
 要求正常回复的 smoke/resume 场景收到 `interrupted` 或 `failed` 时仍记失败，保留首次
 失败的版本、exact IDs、原始返回与清理范围；复验结果另行记录。
@@ -377,7 +391,7 @@ Skills、Side boundary inject、Thread unsubscribe、Apps 或 Thread Delete 出�
 失败，直到对应 port 切回公开 provider 并删除 shim。`make check` 还会让真实安装 SDK client 连接 fake
 stdio App Server，按能力验证 fixed method/params/generated model、Goal 的即时通知与
 多 Turn logical stream、resume route-before-mutation、Thread Delete 空响应与 response-loss
-unknown、Side 固定 boundary、三种 unsubscribe status 与 response-loss 不重试，以及无
+unknown、明确 Delete RPC 拒绝、Side 固定 boundary、三种 unsubscribe status 与 response-loss 不重试，以及无
 版本/experimental gate；
 不能用 mock 私有 helper 代替，也不能因一个能力 shape 失败连带关闭另一个能力。
 
@@ -399,7 +413,8 @@ Thread；delete 响应失败时也不得自动重发。
 
 `0.154.0` 源码契约还会拒绝删除由其它 App Server 持有 writer 的 Thread，或仍被
 外部持久 fork 引用的历史。Netizen 不扩大 Project 的 Binding/Side 清单去删除这些外部
-对象，也不绕过拒绝；保留现有四视图对账和 remaining/unknown 结果。MCP 冷恢复探针
+对象，也不绕过拒绝；按原生返回保留 Binding，并报告 remaining/unknown 结果，不以目录
+缺项收尾删除。live 探针可在已知成功后读取目录验证存储效果，这不属于生产删除对账。MCP 冷恢复探针
 只对自己显式创建的已知 fork 先执行 delete，再删除 parent，以遵守该历史依赖；失败
 输出安全分类及自有 ID，不能通过重试未知 delete 取得通过结果。
 
@@ -559,6 +574,33 @@ Admin 关闭时 MCP 仍可用。停止先关闭认领和管理 admission、排�
 启动边界验收包括当前 schema 显式初始化、受支持旧库迁移、不受支持库只读拒绝、
 元数据与 Side/Project 墓碑保留。迁移持有 lifetime lock；提交后失败不自动恢复旧数据库。
 
+### 持久分支、恢复与删除验收
+
+[ADR 0078](adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md) 的三项边界
+分别验证，不能用临时 Side 成功代替持久 fork，也不能用目录展示代替恢复或删除的结果。
+
+| 范围 | 自动化与原生验证 | 飞书客户端验证 |
+| --- | --- | --- |
+| 创建与继承 | exact idle 来源、原生历史/权限、同 cwd、显式设置复制、目标 catch-up 新边界；零新增 Turn 的完整 Binding 与原 handle 订阅/释放 | 当前聊天与其他群各一个新话题；创建中和成功更新同一根卡；名称、链接和来源保持正确 |
+| 群选择与提交 | 复用共享目录查询/复核，来源/current/revision 变化、目标不可用或占用时不覆盖；公开表单区分搜索/选择/创建 | 搜索、翻页、下拉和最终名称；同类公共卡片去重，受理后禁用提交、成功移除按钮 |
+| 创建交接 | root/seed 响应阻塞时提前输入；默认配置先创建则 fork 冲突，fork 先提交则输入进入分支；每阶段失败、Project 删除和 shutdown | 提示等待完成后再发消息，失败只报告已知事实，已成功会话不会因回执失败被撤销 |
+| 普通恢复 | `activate_exact` 直接 resume，无 list/read 预检；未发新消息且列表缺席分支、Lazy、运行中 rejoin、明确拒绝、未知结果、本地提交失败和旧输入失效 | `/resume`、列表切换、Admin 同一语义；成功后反馈，拒绝保留 current，不卡在目录“未确认”状态 |
+| 普通删除 | 成功才删 Binding，RPC 拒绝保留并清理失效投影，传输未知局部隔离；零自动 list/read/retry；来源受分支历史引用限制 | 普通/归档/分支相同确认与反馈；不会把源会话删除解释为独立分支级联删除 |
+
+真实原生持久性验证仅使用 disposable cwd 和自建 Thread：有历史的来源创建持久 fork，
+在分支尚无新增 Turn 时同连接 resume、关闭首个 App Server 后冷 resume，核对 exact ID
+和继承上下文。目录可能漏列，但不影响直接恢复。随后验证来源的历史引用删除拒绝，
+只清理本次自建且身份明确的资源，不能重试结果未知的原生删除或按名称猜认资源。
+`/fork` 的五种来源入口（P2P、P2P 话题、普通群主线、普通群话题、话题模式群）和跨群
+真实发布需单独验收；不以 FakeChannel 或 native-only 探针宣称通过。
+
+`/usage` 在无 Project/Binding、普通群话题和有效 Side 分别验收，群聊保留 @ 规则。
+由客户端显示同一 epoch 的日期、时间和时区；至少在两个设备时区核对 `local_datetime`。
+确认有限额度的剩余条与百分比一致、普通 Codex 额度优先、实际存在的模型/Credits/月度
+字段展示正确，缺字段不显示为充足或零；未登录/超时使用现有失败反馈。无需为此创建
+任务、购买额度或触发 reset。MCP 指南只核对原生登录与同环境凭证复用说明；文档存在
+不表示已验收真实 OAuth。
+
 ### 数据库迁移与中断恢复验收
 
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移移到每次实际
@@ -712,6 +754,67 @@ SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和
 [requirements.lock](../requirements.lock) 为准。以下证据保留实际验证时的版本；旧版本的
 结果不会自动变成新版本、真实飞书链路或目标主机的验收结论。定时任务另见
 [专属兼容性记录](#定时任务兼容性与验收)。
+
+2026-10-08 至 10-09 审查并迁移 SDK/CLI `0.160.0` → `0.161.0`。比较官方两个精确版本的完整
+Python 包（22 个文件），仅 generated models 和 notification registry 两个文件变化；
+公开 facade、client/router、Goal/Turn 消费与取消实现未改变，没有可直接替换现有窄适配
+的新增高层 API。两个 pinned adapter 使用已复核的 Python 源码树指纹
+`ab78afdc53e5cad9c812066f93a08927ac3bed3246471f5df498d9cb01f4a36e`。
+SDK wheel SHA-256 为 `41823fb522572bcbd5acee7123947ba81d7eb60c69e9b237`；
+版本与完整原生差异依据[官方发布](https://github.com/openai/codex/releases/tag/rust-v0.161.0)
+和[固定 tag 比较](https://github.com/openai/codex/compare/rust-v0.160.0...rust-v0.161.0)。
+原生差异已枚举并重点复核与 Netizen 有关边界，不代表逐行审查全部 Rust 或运行上游测试。
+
+| 变化或能力 | 迁移决定与边界 |
+| --- | --- |
+| 开放式 `CodexErrorInfo` 字符串/对象 | 保留受限错误投影；回归 unknown、损坏 known 与 HTTP variant，不能展示任意对象或改变 exact Turn 归属。 |
+| `thread/prediction/updated` | 允许 SDK 注册/解析；`sourceTurnId` 不视为活动 `turnId`，不生成终态、Activity 或回复模块。 |
+| Goal set/clear `origin` | **本次不接入的明确缺口。** 协议支持，但现有 SDK Goal helper 不透传；保留生命周期，缺少新增用户来源记录。待原 helper 可透传或公开等价 API 可用时重新评估，不另写 Goal 编排。 |
+| MCP OAuth `loginId` 与 TUI `/mcp login` | 原生处理登录关联；Netizen 仅补登录/凭证复用指南，不加 OAuth UI、凭证库或通知消费者。 |
+| 账号额度 `/usage` | 已有原生能力的可选产品接入，按 ADR 0077 只读同次额度快照，飞书 Card 2.0 使用阅读者时区。 |
+| 普通持久 `/fork` | 已有公开能力的可选接入，按 ADR 0078 使用普通 Binding 和共享群目录；配套直接 resume/native-response delete 不属于 SDK 必需协议迁移。 |
+| 动态模型目录、API-key discovery、原生 retry/fallback、权限及存储修复 | 继续由 Codex 管理，不硬编码默认模型、复制配置或增加 Netizen 重试。API-key/Bedrock、特定 provider 和权限分支须有专属证据，普通账号 smoke 不代表已覆盖。 |
+| TUI/音频/其他客户端能力 | 不自动接入飞书；标题/摘要搜索沿用现有 Admin，最近回答沿用飞书消息记录。 |
+
+兼容债务逐项保留：Goal、Skills catalog/extra roots、Side boundary、unsubscribe、Delete
+仍缺等价高层接口，沿各 ADR 的 capability/synthetic/live 和公开替代触发器迁移；新增
+账号额度适配遵守相同规则。cleanup/后台 terminal inspector 与非消费 Activity/question
+observer 的所有权、方法、retained events 和指纹门禁保持。原生 replay/abort 改动不能
+证明客户端的普通 Turn 有界 read 恢复、interrupted 复查、终态正文补读、compaction 唯一
+候选归属或命名输入可见性等待已不必要，因此保留这些措施。Lazy Binding、Goal 重挂与
+clear generation CAS、完整 Plan/Apps/idle settings/models 分页等公开能力缺口未解除。
+原生 cold resume 后继续 active Goal 在 `0.160.0` 已存在，本次不借升级增加修复或保护流程。
+
+当前 `0.161.0` 本机 macOS arm64 的合并实现通过 `make check`：2,665 项测试、
+16 项按条件跳过，含 wheel/sdist 隔离验证及 SDK synthetic 门禁；新协议、额度、持久分支、
+直接恢复与删除结果处理的行为回归通过。额度排序修正另通过 15 项相关测试；
+Admin 的 60 项 HTTP 回归通过，包含目录漏列的当前分支实际提交归档、删除确认。
+跳过项为平台特定及需显式启用的包管理器探针。
+全部 17 个原生 phase 已通过：models、turn-settings、smoke、usage、steer、plan、polling、
+compact、concurrency、interrupt、skills、lifecycle、side、release、config、goal、sandbox。
+只读账号额度 probe 已验证登录账号返回成功，临时未登录环境返回认证错误。
+额外命名、Project 删除 mixed-sessions/orphan-Side、定时 Binding 输入及六项 Skill roots
+实际执行专项通过。真实 Runtime/Store 持久 fork 验证了原位置不变、完整原子绑定、同
+handle 订阅、零新增 Turn 的冷恢复与继承上下文、原生历史引用拒绝删除来源并保留 Binding，
+以及先删除分支再删除来源。该探针使用临时本地话题身份，不代表飞书发布链路。
+对应流程已沉淀为 `scripts/probe_persistent_fork.py`，通过编译和 help 检查；原生证据
+来自等价临时探针及同一对资源的接续，未为脚本落盘重复请求模型。
+早期并行探针因原生为临时 cwd 自动保存 trust 而未通过配置不变断言；定时输入改用
+公开进程级 exact cwd trust override 串行复验通过，用户配置的字节摘要不变。没有为此
+修改产品配置策略或放宽探针断言；首次失败仍保留在运行证据中。
+本轮能够证明归属的三个临时 cwd trust 项已精确清理，保留其他配置，没有整文件回滚。
+真实飞书 `/usage` 的客户端时间展示、跨群 `/fork` 卡片交互尚未验收；以上不代表已发布、
+部署或重启服务。真实 OAuth、API-key/Bedrock 和未执行的权限专项不在上述通过范围内。
+本轮 Scheduler 专项仅执行了 `binding`；`mcp`、`mcp-recovery`、`dispatch`、`manual`
+以及独立 child-files 专项没有本版执行记录，不能以 17 phases 或 Skill roots 子任务验证替代。
+
+历史基线：2026-10-08 新增按需账号额度读取（ADR 0077），当时 SDK/CLI 保持 `0.160.0`。`make check`
+通过 2,565 项测试（16 项按条件跳过），包括 wheel/sdist 与隔离资源、SDK synthetic 门禁。
+额度适配专属的 13 项测试同时通过 `0.160.0` 和候选 `0.161.0`，含真实 SDK client
+往返、legacy 严格校验及超时/取消后的连接复用。`0.160.0` bundled App Server 的
+只读 live probe 已验证已登录账号成功返回额度窗口，临时未登录环境返回认证错误；
+未创建 Thread 或请求模型。真实飞书 `/usage` 展示与其他部署账号尚未验收，以上不表示
+已经升级到 `0.161.0` 或完成该候选的全部升级门禁。
 
 2026-10-05 SDK/CLI `0.160.0` 通过当前代码的 `make check`（2,505 项测试，16 项按条件
 跳过，含包构建及 SDK synthetic 门禁）。10 月 4 日同版本候选已通过全部 17 个原生
@@ -1428,12 +1531,13 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     stale。materialized `/delete` 必须显示原生 Thread、spawned descendants、Codex App/CLI
     历史与 Binding 均永久删除的红色确认卡；切换 current 或 exact Turn/Goal/Compaction
     状态变化不能使其失效，只有 Binding/native Thread 身份变化才必须零 mutation。正常确认
-    后 root 与 descendants 从原生四视图消失，Binding/pointer 再删除。
+    后仅根据原生成功响应删除 Binding/pointer；另对自建样本核查 root 与 descendants 已从
+    四个目录视图消失，检查不得变成生产删除的前置或失败收尾条件。
 
-    `thread/delete` response loss 与四视图异常是 synthetic fault，不在真实账号手工制造；
-    `make check` 通过 `tests/test_sdk_gap_adapter.py` 和 `tests/test_codex_runtime.py` 自动覆盖：
-    四视图 absent 时提交 Binding、任一 present 时保留 Binding 并允许重新确认、查询冲突/
-    失败时只保留该 Binding 的 lifecycle-unknown，且任何路径都不能盲目再次调用 delete。
+    `thread/delete` response loss 与明确拒绝由 synthetic fault 覆盖，不在真实账号手工制造；
+    `make check` 验证：仅原生成功响应提交 Binding 删除，明确 RPC 错误保留 Binding、清理
+    可能失效的活动投影后允许重新确认，传输/响应未知保留 Binding-local lifecycle-unknown。
+    not-found 不等同成功，任何失败都不能追加 list/read 对账或自动再次调用 delete。
     同一 Scope 的其他 Binding 必须仍可 start/steer/lifecycle。archive 的响应不确定性同样只做
     一次 active/archived 目录对账：exact ID 只在 archived 时提交，仍 active 时释放 reservation。
 
@@ -1452,8 +1556,9 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     必须使旧按钮零 mutation；删除末页唯一项后页码夹取。另从 `/sessions archived` 对 exact
     archived 行完成独立二次确认 Delete，确认不先 unarchive、active pointer 不变且 spawned
     descendants 随 root 从四视图消失。active 与 archived materialized delete 必须复用同一
-    native-first primitive 和一次只读对账。`/archive` 与 `/delete` 仍不接受目标参数且保持
-    current-only；归档列表的恢复与删除都必须再次校验 exact archived catalog 身份。
+    native-first primitive 和原生返回处理。`/archive` 与 `/delete` 仍不接受目标参数且保持
+    current-only；归档列表恢复仍校验 archived catalog，删除只复核 exact Scope/Binding/native
+    身份并交给 App Server，不额外目录预检。
 19. 在已物化 Parent 上分别从 P2P、P2P 话题、普通群主线、普通群话题和话题模式群触发
     `/side`；从已有话题触发必须得到同 chat 的 sibling，不得留在或嵌套原话题。P2P 与
     P2P Side 话题无需 @，三类群入口及 Side 后续每条消息都必须 @。每个 Side 连续完成

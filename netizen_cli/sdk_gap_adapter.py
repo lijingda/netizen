@@ -20,7 +20,7 @@ from typing import Any, AsyncIterator, Protocol
 from openai_codex import AsyncCodex
 from openai_codex import _goal as _sdk_goal
 from openai_codex import _inputs as _sdk_inputs
-from openai_codex.errors import InvalidRequestError
+from openai_codex.errors import InvalidRequestError, JsonRpcError
 from openai_codex.generated import v2_all as _generated
 from openai_codex.models import Notification
 
@@ -81,6 +81,10 @@ class GoalMutationStateUnknown(GoalControlError):
 
 class ThreadDeleteStateUnknown(RuntimeError):
     """The exact native Thread delete may have taken effect."""
+
+
+class ThreadDeleteRejected(RuntimeError):
+    """The server returned a delete error, possibly after shutting down activity."""
 
 
 class SideBoundaryStateUnknown(RuntimeError):
@@ -354,6 +358,8 @@ class AppServerThreadDeleteControl:
             )
         except asyncio.CancelledError:
             raise
+        except JsonRpcError as error:
+            raise ThreadDeleteRejected("Codex 拒绝了本次 Thread 删除。") from error
         except Exception as error:
             raise ThreadDeleteStateUnknown(
                 "Codex Thread 删除结果未确认；不能自动重试。"
@@ -981,6 +987,7 @@ def facade_migration_requirements() -> tuple[str, ...]:
     """Return public facade candidates that require deleting a gap shim."""
 
     from openai_codex import AsyncThread
+    from .account_rate_limits import facade_migration_requirements as account_migrations
 
     requirements: list[str] = []
     candidates = {
@@ -1021,7 +1028,7 @@ def facade_migration_requirements() -> tuple[str, ...]:
         names = tuple(f"{owner.__name__}.{name}" for owner, name in entries if hasattr(owner, name))
         if names:
             requirements.append(f"migration-required:{capability}:{','.join(names)}")
-    return tuple(requirements)
+    return tuple(requirements) + account_migrations()
 
 
 def require_no_facade_migration() -> None:

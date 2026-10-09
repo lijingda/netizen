@@ -41,6 +41,9 @@
   [群聊上下文](skills/netizen-user-guide/references/user-guide.md#发送消息引用与图片)。
 - **取回本轮文件。** 完成后从回复卡片中按需发送有原生执行记录的文件；发送的是点击时
   的当前内容，详见[文件说明](skills/netizen-user-guide/references/user-guide.md#查看和发送本轮文件)。
+- **保留上下文，另开一条讨论。** 用
+  [持久分支](skills/netizen-user-guide/references/user-guide.md#fork-持久分支)在当前聊天或其他群
+  创建普通话题，之后独立继续。
 - **展开临时讨论，推进持续目标。** 用
   [Side](skills/netizen-user-guide/references/user-guide.md#side-临时话题)另开临时话题，或用
   [Goal](skills/netizen-user-guide/references/user-guide.md#goal)让 Codex 围绕目标持续推进。
@@ -122,8 +125,10 @@ setup 准备配置、飞书授权和实例数据并注册服务，不默认启�
 | 新建会话，选择项目 | `/new` |
 | 查看、保存或删除当前聊天的会话默认配置 | `/defaults` |
 | 查看并切换已有会话 | `/sessions` |
+| 从当前空闲会话另建持久分支话题 | `/fork` |
 | 调整模型、思考强度和过程卡 | `/config`，当前会话空闲时使用 |
 | 查看当前任务和上下文用量 | `/status` |
+| 查看共享 Codex 账号额度和重置时间 | `/usage` |
 | 中断当前任务 | `/stop`；不保证前台工具进程退出，见[停止说明](skills/netizen-user-guide/references/user-guide.md#stop) |
 | 查找当前机器人的管理入口 | `/admin`；返回实际管理 URL 和实例根目录，不返回登录凭据 |
 | 管理定时任务 | `/cron`，也可以直接用自然语言描述计划 |
@@ -175,7 +180,7 @@ Side 会在同一聊天中新建话题，可继续多轮讨论。它与原会话
   飞书 1.0 卡片明确不支持。
   输出文件按本轮原生记录发现，不扫描工作区补齐，也不自动上传。
 - **Codex 能力有宿主差异。** 飞书复用原生会话和工具，但并非每个 App/CLI 控件都可用；
-  新会话采用 `auto_review`，不能完整继承 App 的 Ask/Custom。
+  全新会话采用 `auto_review`，持久分支沿用原生继承权限；不提供 App 的 Ask/Custom 选择器。
   [完整差异与当前限制](skills/netizen-user-guide/references/user-guide.md#与-codex-appcli-的差异)
 
 <a id="用户指南-skill"></a>

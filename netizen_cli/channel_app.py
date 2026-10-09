@@ -10,7 +10,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -46,6 +46,7 @@ from .bindings import (
     ThreadBinding,
 )
 from .cards import (
+    account_usage_card,
     ArchivedSessionCardItem,
     CardActionError,
     SessionCardItem,
@@ -113,6 +114,12 @@ from .cards.questions import (
     render_question_submission_card,
 )
 from .cards.defaults import defaults_card, decode_defaults_action, is_defaults_card_action
+from .cards.fork import (
+    ForkCardAction, ForkSource, decode_fork_action, is_fork_card_action,
+    fork_destination_card, fork_chat_search_card, fork_chat_results_card,
+    fork_confirm_card, fork_status_card,
+)
+from .feishu_links import topic_open_url
 from .defaults import DefaultConfigurationError
 from .user_questions import (
     BindingQuestionTarget,
@@ -237,6 +244,7 @@ from .management import (
     CurrentSideTarget,
     ExactBindingTarget,
     InstanceManagementService,
+    NativeThreadMissing,
     NoCurrentBinding,
     RuntimePrecondition,
     SideIdentityMismatch,
@@ -1287,6 +1295,7 @@ class ChannelApplication:
             await self._reply(message, str(error))
         elif isinstance(error, (
             ModelCatalogError,
+            NativeThreadMissing,
             RuntimeClosed,
             SkillCatalogError,
             SkillReferenceError,
@@ -1545,6 +1554,11 @@ class ChannelApplication:
 
     async def handle_card_action(self, event: Any) -> None:
         action = getattr(event, "action", None)
+        if is_fork_card_action(
+            getattr(action, "value", None), getattr(action, "form_value", None),
+        ):
+            await self._handle_fork_card_action(event)
+            return
         if is_defaults_card_action(
             getattr(action, "value", None), getattr(action, "form_value", None),
         ):
@@ -1616,6 +1630,7 @@ class ChannelApplication:
             GoalStateUnknown,
             ModelCatalogError,
             MessageHistoryError,
+            NativeThreadMissing,
             ProjectError,
             RuntimeClosed,
             ThreadCompacting,
@@ -3226,13 +3241,19 @@ class ChannelApplication:
         intent: ControlIntent,
         record: SideTopicRecord,
     ) -> None:
+        if intent.name is ControlName.USAGE:
+            await self._usage(message)
+            return
         if intent.name is ControlName.ADMIN:
             await self._reply(message, self._admin_entry())
             return
         if intent.name in {ControlName.MENU, ControlName.HELP}:
             await self._reply(
                 message,
-                side_command_help(requires_mention=record.requires_mention),
+                side_command_help(
+                    requires_mention=record.requires_mention,
+                    available_capabilities=self._runtime.available_capabilities,
+                ),
             )
             return
         if intent.name is ControlName.STATUS:
@@ -3410,6 +3431,184 @@ class ChannelApplication:
             )
         await self._update_side_card(current, notice=notice)
         await self._reply(message, reply)
+
+    async def _fork_source_title(self, binding: ThreadBinding) -> str:
+        try:
+            async with asyncio.timeout(3):
+                metadata = await self._runtime.thread_summary(binding.native_thread_id)
+                return metadata.name or binding.short_id
+        except Exception:
+            return binding.short_id
+
+    async def _fork_card(self, message: Any, intent: ControlIntent) -> None:
+        binding = self._bindings.active_binding(intent.scope.key)
+        if binding is None:
+            await self._reply_no_current_binding(message, intent.scope)
+            return
+        if binding.native_thread_id is None:
+            raise ThreadNotMaterialized("当前会话尚无原生上下文；请先发送任务，再使用 /fork。")
+        project = self._bindings.get_project(binding.project_alias)
+        self._bindings.require_project_not_deleting(binding.project_alias)
+        if not project.enabled:
+            raise CardActionError("Project 已停用，不能创建分支。")
+        source = ForkSource(
+            binding.id, binding.native_thread_id, binding.settings_revision,
+            binding.context_revision, binding.feedback_revision, project.revision,
+        )
+        await self._reply(message, fork_destination_card(
+            intent.scope, source, source_title=await self._fork_source_title(binding),
+            project_alias=binding.project_alias,
+        ))
+
+    def _require_fork_source(self, scope: FeishuScope, source: ForkSource) -> ThreadBinding:
+        binding = self._bindings.get(source.binding_id)
+        if binding.scope_key != scope.key or not binding.active or (
+            binding.native_thread_id, binding.settings_revision,
+            binding.context_revision, binding.feedback_revision,
+        ) != (
+            source.native_thread_id, source.settings_revision,
+            source.context_revision, source.feedback_revision,
+        ):
+            raise CardActionError("来源会话或配置已变化，请重新发送 /fork。")
+        project = self._bindings.get_project(binding.project_alias)
+        if not project.enabled or project.revision != source.project_revision:
+            raise CardActionError("来源 Project 已变化，请重新发送 /fork。")
+        self._bindings.require_project_not_deleting(binding.project_alias)
+        return binding
+
+    async def _handle_fork_card_action(self, event: Any) -> None:
+        action = getattr(event, "action", None)
+        message_id = str(getattr(event, "message_id", "") or "")
+        chat_id = str(getattr(event, "chat_id", "") or "")
+        try:
+            sender_id = getattr(getattr(event, "operator", None), "open_id", None)
+            if getattr(action, "tag", None) != "button" or not message_id or not chat_id or not sender_id:
+                raise CardActionError("分支卡片回调缺少真实卡片或操作者。")
+            fetched = await self._channel.fetch_message(message_id)
+            topic_id = fetched_card_topic_id(callback_chat_id=chat_id, fetched_message=fetched)
+            chat_kind = None if topic_id is not None else _public_chat_kind(await self._channel.get_chat_info(chat_id))
+            scope = scope_from_fetched_card(app_id=self._app_id, callback_chat_id=chat_id,
+                fetched_message=fetched, chat_type=chat_kind)
+            if self._bindings.side_topic_for_message(
+                app_id=self._app_id, chat_id=chat_id, topic_id=topic_id, root_message_id=message_id,
+            ) is not None:
+                raise CardActionError("Side 话题不支持创建持久分支，请返回普通会话使用 /fork。")
+            request = decode_fork_action(scope, getattr(action, "value", None), getattr(action, "form_value", None))
+            source = self._require_fork_source(scope, request.source)
+            title = await self._fork_source_title(source)
+            common = {"source_title": title, "project_alias": source.project_alias}
+            if request.action == "destination":
+                card = fork_destination_card(scope, request.source, **common)
+            elif request.action == "search":
+                card = fork_chat_search_card(scope, request.source, **common)
+            elif request.action == "results":
+                page = await self._management.query_available_chats(
+                    query=request.query or "", page_token=request.page_token,
+                )
+                card = fork_chat_results_card(scope, request.source, page, query=request.query or "", **common)
+            elif request.action == "select":
+                target = None if request.target_chat_id == scope.chat_id else (
+                    await self._management.validate_available_chat(request.target_chat_id)
+                )
+                card = fork_confirm_card(scope, request.source, target_chat=target, **common)
+            elif request.action == "create":
+                await self._create_fork_from_card(
+                    intent=request, scope=scope, source=source, source_title=title,
+                    message_id=message_id, sender_id=sender_id,
+                )
+                return
+            else:
+                raise CardActionError("未知分支卡片动作。")
+            if not await self._safe_update_card(message_id, card):
+                raise CardActionError("分支选择卡片更新未确认，请重新发送 /fork。")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.warning("fork card action failed", extra={"error_type": type(error).__name__})
+            if message_id:
+                await self._safe_update_card(message_id, error_card(describe_error(error)))
+
+    async def _create_fork_from_card(
+        self, *, intent: ForkCardAction, scope: FeishuScope, source: ThreadBinding,
+        source_title: str, message_id: str, sender_id: str,
+    ) -> None:
+        assert intent.target_chat_id is not None and intent.name is not None
+        target_chat_id = intent.target_chat_id
+        if target_chat_id != scope.chat_id:
+            await self._management.validate_available_chat(target_chat_id)
+        project = await self._management.resolve_new_project(
+            source.project_alias, deadline=asyncio.get_running_loop().time() + 10.0,
+        )
+        if project.revision != intent.source.project_revision:
+            raise CardActionError("来源 Project 已变化，请重新发送 /fork。")
+        common = {"name": intent.name, "source_title": source_title, "project_alias": project.alias}
+        thread = root = binding = None
+        topic_url = None
+        status = "failed"
+        detail = None
+        async with self._runtime.track_fork_creation(project.alias):
+            try:
+                await self._safe_update_card(message_id, fork_status_card(status="creating", **common))
+                async with self._scope_coordinator.hold(scope.key):
+                    source = self._require_fork_source(scope, intent.source)
+                    thread = await self._runtime.fork_exact(source, expected_project_revision=project.revision)
+                self._runtime.require_fork_creation_open(project.alias)
+                root = await send_topic_message(self._channel, target_chat_id,
+                    fork_status_card(status="creating", **common),
+                    SendOpts(receive_id_type="chat_id", uuid=hashlib.sha256(
+                        ("netizen-fork-root:v1\0" + thread.id).encode()).hexdigest()[:32]))
+                if root.parent_id is not None or root.root_id not in {None, root.message_id}:
+                    raise TopicPublishError("飞书未确认新话题根消息，本次未绑定分支。", unknown=True)
+                origin = root
+                if root.thread_id is None:
+                    origin = await send_topic_message(self._channel, target_chat_id,
+                        "分支正在创建，请等待根卡片显示创建完成后再发送消息。",
+                        SendOpts(receive_id_type="chat_id", reply_to=root.message_id,
+                            reply_in_thread=True, reply_target_gone="fail", uuid=hashlib.sha256(
+                                ("netizen-fork-seed:v1\0" + thread.id).encode()).hexdigest()[:32]))
+                    if origin.thread_id is None or origin.root_id != root.message_id or origin.parent_id != root.message_id:
+                        raise TopicPublishError("飞书未确认种子消息与新话题的关系，本次未绑定分支。", unknown=True)
+                if origin.thread_id is None or (target_chat_id == scope.chat_id and origin.thread_id == scope.topic_id):
+                    raise TopicPublishError("飞书未创建新的普通话题，本次未绑定分支。", unknown=True)
+                destination = FeishuScope(self._app_id, target_chat_id, ScopeKind.TOPIC, origin.thread_id)
+                topic_url = topic_open_url(target_chat_id, origin.thread_id)
+                anchor = await self._resolve_context_anchor(destination, origin.message_id) if (
+                    source.message_context_mode is MentionContextMode.CATCH_UP
+                ) else None
+                async with self._scope_coordinator.hold(destination.key):
+                    self._runtime.require_fork_creation_open(project.alias)
+                    binding = self._bindings.create_fork_binding(
+                        scope=destination, source=source, native_thread_id=thread.id,
+                        root_message_id=root.message_id, creator_id=sender_id,
+                        expected_project_revision=project.revision, context_anchor=anchor,
+                    )
+                    named = await self._runtime.adopt_fork(binding, thread, name=intent.name)
+                status = "success"
+                if not named:
+                    detail = "会话已创建；原生名称更新未确认，可稍后使用 /rename 修改。"
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning("persistent fork creation incomplete", extra={"error_type": type(error).__name__})
+                detail = describe_error(error)
+                if binding is not None:
+                    detail = "本地会话已保存，但订阅交接未确认；请先核查会话，不要重新创建。" + detail
+            finally:
+                if thread is not None and binding is None:
+                    await self._runtime.release_unbound_fork(thread)
+            card = fork_status_card(status=status, topic_url=topic_url, detail=detail,
+                native_thread_id=None if thread is None else thread.id,
+                binding_saved=binding is not None, **common)
+            if root is not None:
+                await self._safe_update_card(root.message_id, card)
+            if not await self._safe_update_card(message_id, card):
+                target = _CardReplyTarget(message_id, message_id, scope.chat_id, _CardReplyConversation(scope.topic_id))
+                try:
+                    await self._reply(target, card)
+                except Exception:
+                    # Delivery cannot undo a known Binding or replace its
+                    # success/partial-result notice with a generic error.
+                    logger.warning("fork result receipt was not delivered", exc_info=True)
 
     async def _create_side(
         self,
@@ -3894,6 +4093,12 @@ class ChannelApplication:
         return await reader.resolve_anchor(scope, message_id)
 
     async def _control(self, message: Any, intent: ControlIntent) -> None:
+        if intent.name is ControlName.FORK:
+            await self._fork_card(message, intent)
+            return
+        if intent.name is ControlName.USAGE:
+            await self._usage(message)
+            return
         if intent.name is ControlName.ADMIN:
             await self._reply(message, self._admin_entry())
             return
@@ -4392,7 +4597,7 @@ class ChannelApplication:
             )
             await self._reply(
                 message,
-                f"已切换到会话 {binding.short_id}（{binding.project_alias}）。",
+                f"{'已恢复并切换' if binding.native_thread_id else '已切换'}到会话 {binding.short_id}（{binding.project_alias}）。",
             )
             return
         if intent.name is ControlName.UNARCHIVE:
@@ -5313,7 +5518,7 @@ class ChannelApplication:
                 context_anchor=context_anchor,
             )
             success_notice = (
-                f"✅ 已切换到会话 {activated.short_id}"
+                f"✅ {'已恢复并切换' if activated.native_thread_id else '已切换'}到会话 {activated.short_id}"
                 f"（{activated.project_alias}）。"
             )
             try:
@@ -6333,6 +6538,21 @@ class ChannelApplication:
             await self._reply(target, content)
         except Exception:
             logger.exception("failed to send card action fallback feedback")
+
+    async def _usage(self, message: Any) -> None:
+        try:
+            snapshot = await self._runtime.account_rate_limits()
+        except Exception as error:
+            # Account responses can contain identity and billing details. Keep
+            # this control's failure projection independent of backend text.
+            logger.warning("account rate limits read failed: %s", type(error).__name__)
+            await self._reply(
+                message,
+                "账号额度暂不可用。请确认服务使用的 Codex 已登录且账号支持额度查询，"
+                "或稍后重新发送 /usage。",
+            )
+            return
+        await self._reply(message, account_usage_card(snapshot))
 
     def _admin_entry(self) -> str:
         """Present only the successfully bound listener, never configuration guesses."""

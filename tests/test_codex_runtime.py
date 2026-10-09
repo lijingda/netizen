@@ -108,6 +108,7 @@ from netizen_cli.sdk_gap_adapter import (
     GoalStatus,
     GoalStreamTerminal,
     SkillCatalogSnapshot,
+    ThreadDeleteRejected,
     ThreadUnsubscribeStateUnknown,
     ThreadUnsubscribeStatus,
 )
@@ -3049,31 +3050,29 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.runtime = self._new_runtime(idle_seconds=10)
         binding = await self._complete_turn(self.binding())
         self.binding()
-        async with self.runtime._lock(binding.id):
-            self.runtime._schedule_subscription_release_locked(
-                self.runtime._subscriptions[binding.id],
-                delay=0.01,
-            )
-        catalog_entered = asyncio.Event()
-        release_catalog = asyncio.Event()
+        resume_entered = asyncio.Event()
+        release_resume = asyncio.Event()
 
-        async def blocked_catalog(_thread_id: str):
-            catalog_entered.set()
-            await release_catalog.wait()
-            return NativeThreadCatalogState.ACTIVE
+        async def blocked_resume(thread_id: str, **kwargs):
+            self.codex.resume_calls.append((thread_id, kwargs))
+            resume_entered.set()
+            await release_resume.wait()
+            return FakeThread(thread_id, self.codex)
 
-        with patch.object(
-            self.runtime,
-            "thread_catalog_state",
-            side_effect=blocked_catalog,
-        ):
-            task = asyncio.create_task(self.runtime.activate_exact(binding.id))
-            await asyncio.wait_for(catalog_entered.wait(), timeout=0.2)
-            await asyncio.sleep(0.02)
-            release_catalog.set()
-            activated = await asyncio.wait_for(task, timeout=0.2)
+        with patch.object(self.codex, "thread_resume", side_effect=blocked_resume):
+            async with self.runtime._lock(binding.id):
+                task = asyncio.create_task(self.runtime.activate_exact(binding.id))
+                # Queue activation on the exact lock before scheduling an old
+                # inactive timer. Both must serialize through that same lock.
+                await asyncio.sleep(0)
+                record = self.runtime._subscriptions[binding.id]
+                self.runtime._schedule_subscription_release_locked(record, delay=0)
+                old_timer = record.idle_task
+            await asyncio.wait_for(resume_entered.wait(), timeout=1)
+            release_resume.set()
+            activated = await asyncio.wait_for(task, timeout=1)
+            await asyncio.gather(old_timer, return_exceptions=True)
 
-        await asyncio.sleep(0.02)
         self.assertTrue(activated.active)
         self.assertEqual(self.subscription.calls, [])
         snapshot = self.runtime.thread_subscription_snapshot(binding.id)
@@ -3752,54 +3751,25 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime.lifecycle_state(binding.id))
         await self.runtime.wait_idle()
 
-    async def test_delete_response_loss_reconciles_once_without_retry(
-        self,
-    ) -> None:
+    async def test_delete_response_loss_keeps_binding_without_catalog_or_retry(self) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
         self.delete_control.errors.append(RuntimeError("lost response"))
 
-        with (
-            patch.object(
-                self.runtime,
-                "_thread_delete_catalog_state",
-                return_value=NativeThreadCatalogState.ACTIVE,
-            ) as reconcile,
-            self.assertRaises(ThreadLifecycleError),
-        ):
+        with self.assertRaises(ThreadLifecycleStateUnknown):
             await self.runtime.delete_exact(
-                    binding.id,
-                    expected_native_thread_id="native-1",
-                )
-
-        self.assertEqual(self.delete_control.calls, ["native-1"])
-        reconcile.assert_awaited_once_with("native-1")
-        self.assertIsNone(self.runtime.lifecycle_state(binding.id))
-        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
-        self.assertTrue(self.runtime._accepting)
-
-    async def test_delete_response_loss_commits_when_catalog_proves_absence(
-        self,
-    ) -> None:
-        binding = self.binding()
-        self.store.assign_native_thread_id(binding.id, "native-1")
-        self.delete_control.errors.append(RuntimeError("lost response"))
-
-        with patch.object(
-            self.runtime,
-            "_thread_delete_catalog_state",
-            return_value=NativeThreadCatalogState.MISSING,
-        ) as reconcile:
-            deleted = await self.runtime.delete_exact(
-                binding.id,
-                expected_native_thread_id="native-1",
+                binding.id, expected_native_thread_id="native-1",
             )
 
-        self.assertEqual(deleted.id, binding.id)
         self.assertEqual(self.delete_control.calls, ["native-1"])
-        reconcile.assert_awaited_once_with("native-1")
-        with self.assertRaises(BindingNotFound):
-            self.store.get(binding.id)
+        self.assertEqual(self.codex.thread_list_calls, [])
+        self.assertEqual(self.codex.read_calls, [])
+        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
+        self.assertEqual(
+            self.runtime.lifecycle_state(binding.id).state,
+            ThreadLifecycleState.UNKNOWN,
+        )
+        self.assertTrue(self.runtime._accepting)
 
     async def test_archive_response_loss_commits_when_catalog_proves_archived(
         self,
@@ -3988,87 +3958,50 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.delete_control.calls, ["native-1"])
         self.assertEqual(self.codex.thread_list_calls, [])
 
-    async def test_delete_error_reconciles_four_missing_native_views(self) -> None:
+    async def test_delete_explicit_rejection_keeps_binding_without_catalog(self) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
-        binding = self.store.get(binding.id)
-        self.delete_control.errors.append(RuntimeError("app-server error"))
-        self.codex.thread_list_pages = [
-            SimpleNamespace(data=[], next_cursor=None),
-            SimpleNamespace(data=[], next_cursor=None),
-            SimpleNamespace(data=[], next_cursor=None),
-            SimpleNamespace(data=[], next_cursor=None),
-        ]
+        for message in (
+            "thread history is referenced by a fork",
+            "no rollout found for thread id native-1",
+        ):
+            with self.subTest(message=message):
+                self.delete_control.errors.append(ThreadDeleteRejected(message))
+                with self.assertRaisesRegex(ThreadLifecycleError, "Binding 已保留"):
+                    await self.runtime.delete_exact(
+                        binding.id, expected_native_thread_id="native-1",
+                    )
+                self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
+                self.assertIsNone(self.runtime.lifecycle_state(binding.id))
+                self.assertTrue(self.runtime._accepting)
+        self.assertEqual(self.delete_control.calls, ["native-1", "native-1"])
+        self.assertEqual(self.codex.thread_list_calls, [])
+        self.assertEqual(self.codex.read_calls, [])
 
-        deleted = await self.runtime.delete_exact(
-            binding.id,
-            expected_native_thread_id=binding.native_thread_id,
-        )
-
-        self.assertEqual(deleted.id, binding.id)
-        with self.assertRaises(BindingNotFound):
-            self.store.get(binding.id)
-        self.assertEqual(
-            self.codex.thread_list_calls,
-            [
-                {
-                    "archived": False,
-                    "cursor": None,
-                    "limit": 100,
-                    "model_providers": [],
-                    "use_state_db_only": False,
-                },
-                {
-                    "archived": True,
-                    "cursor": None,
-                    "limit": 100,
-                    "model_providers": [],
-                    "use_state_db_only": False,
-                },
-                {
-                    "archived": False,
-                    "cursor": None,
-                    "limit": 100,
-                    "model_providers": [],
-                    "use_state_db_only": True,
-                },
-                {
-                    "archived": True,
-                    "cursor": None,
-                    "limit": 100,
-                    "model_providers": [],
-                    "use_state_db_only": True,
-                },
-            ],
-        )
-        self.assertTrue(self.runtime._accepting)
-
-    async def test_delete_error_with_present_native_thread_is_retryable(self) -> None:
+    async def test_delete_rejection_discards_stale_activity_and_allows_archive(self) -> None:
+        self.codex.read_gate = asyncio.Event()
         binding = self.binding()
-        self.store.assign_native_thread_id(binding.id, "native-1")
-        binding = self.store.get(binding.id)
-        self.delete_control.errors.append(RuntimeError("app-server error"))
-        present = SimpleNamespace(
-            id="native-1",
-            name=None,
-            preview="existing",
-        )
-        self.codex.thread_list_pages = [
-            SimpleNamespace(data=[present], next_cursor=None),
-            SimpleNamespace(data=[], next_cursor=None),
-            SimpleNamespace(data=[present], next_cursor=None),
-            SimpleNamespace(data=[], next_cursor=None),
-        ]
+        submission = await self.submit(binding)
+        self.delete_control.errors.append(ThreadDeleteRejected("fork references history"))
 
-        with self.assertRaisesRegex(ThreadLifecycleError, "仍存在"):
+        with self.assertRaises(ThreadLifecycleError):
             await self.runtime.delete_exact(
-                binding.id,
-                expected_native_thread_id=binding.native_thread_id,
+                binding.id, expected_native_thread_id=submission.thread_id,
             )
 
-        self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        self.assertIsNone(self.runtime.active_turn(binding.id))
+        self.assertIsNone(self.runtime.thread_subscription_snapshot(binding.id))
         self.assertIsNone(self.runtime.lifecycle_state(binding.id))
-        self.assertTrue(self.runtime._accepting)
+        self.assertEqual(self.codex.handles[0].interrupt_count, 0)
+        self.assertEqual(self.cleanup.calls, [])
+        self.assertTrue(any(isinstance(item, ThreadActivityDiscardedOutcome) for item in self.outcomes))
+        self.assertFalse(any(isinstance(item, TurnOutcome) for item in self.outcomes))
+        self.assertEqual(self.store.get(binding.id).native_thread_id, submission.thread_id)
+
+        archived = await self.runtime.archive_exact(binding.id)
+        self.assertFalse(archived.active)
+        self.assertEqual(self.codex.archive_calls, [submission.thread_id])
 
     async def test_delete_does_not_resume_or_read_before_native_mutation(
         self,
@@ -4124,7 +4057,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get(binding.id).native_thread_id, "native-1")
         self.assertIsNone(self.runtime.lifecycle_state(binding.id))
 
-    async def test_delete_reconciliation_failure_is_binding_local(
+    async def test_delete_unknown_result_is_binding_local(
         self,
     ) -> None:
         binding = self.binding()

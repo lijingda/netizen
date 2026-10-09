@@ -2,12 +2,16 @@
 status: accepted
 date: 2026-08-24
 amends: 0017, 0031
-amended_by: 0038, 0049, 0054
+amended_by: 0038, 0049, 0054, 0078
 supersedes: 0019
 related: 0014, 0026
 ---
 
 # 用薄 SDK Gap Adapter 与原生目录对账开放 Thread Delete
+
+> 后续修订：[ADR 0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)
+> 将删除失败后的目录对账替换为按本次原生响应处理，保留固定 Delete Adapter 与原生 shutdown/级联。
+> 以下保留决策时的契约与证据。
 
 > 修订说明：ADR 0038 只为普通 `/sessions` 增加 exact idle 会话的两阶段删除入口；本 ADR
 > 定义的固定 Adapter、native-first、descendant cascade 和失败后一次四视图对账保持不变，

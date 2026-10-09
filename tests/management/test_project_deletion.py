@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from netizen_cli.bindings import (
     BindingNotFound,
@@ -229,6 +230,28 @@ class ProjectDeletionServiceTest(unittest.IsolatedAsyncioTestCase):
         result = await self.delete()
         self.assertTrue(result.deleted)
         self.assertEqual(self.native_deletes(), [("delete", missing.id, "native-missing")])
+
+    async def test_inflight_fork_keeps_project_disabled_and_preserves_bindings(self) -> None:
+        source = self.binding("source", native="native-source")
+        lazy = self.binding("lazy")
+        snapshot = await self.preview()
+        with patch.object(self.runtime, "project_has_fork_creation", return_value=True) as creating:
+            result = await self.delete(snapshot)
+
+        creating.assert_called_once_with("test")
+        self.assertFalse(result.deleted)
+        self.assertEqual(result.code, "fork_creation_in_progress")
+        self.assertEqual(result.deleted_session_count, 0)
+        self.assertEqual({item.id for item in result.remaining_sessions}, {source.id, lazy.id})
+        self.assertEqual(self.native_deletes(), [])
+        self.assert_retained(source, lazy)
+
+        # A later explicit confirmation can proceed after publication ends.
+        result = await self.delete(await self.preview())
+        self.assertTrue(result.deleted)
+        self.assertEqual(self.native_deletes(), [
+            ("delete", source.id, "native-source"), ("delete", lazy.id, None),
+        ])
 
     async def test_preexisting_orphan_side_is_closed_before_removing_empty_project(self) -> None:
         parent = self.binding("deleted-parent", native="native-parent")

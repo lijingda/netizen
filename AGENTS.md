@@ -21,6 +21,8 @@ their cited ADRs before changing that boundary.
   [Side](docs/design.md#side-运行与关闭),
   [subscriptions](docs/design.md#普通会话订阅), and
   [archive/delete](docs/design.md#原生归档与删除).
+  Persistent forks and shared resume/delete result handling follow
+  [ADR 0078](docs/adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md).
   Missing-current session creation uses chat defaults and the original message Scope
   ([ADR 0073](docs/adr/0073-create-sessions-from-chat-defaults.md)); keep `/new`, input
   admission, and Project deletion semantics independent of those rules.
@@ -108,14 +110,16 @@ their cited ADRs before changing that boundary.
 - Use exact-pinned official SDKs and public high-level APIs. Approved narrow
   adapters are terminal cleanup (ADR 0009), Goal/Skills (0014), Side boundary
   (0021), Thread unsubscribe (0028), Thread Delete (0037), and non-consuming
-  Activity observation (0020/0052), and process-local Skill roots (0074).
+  Activity observation (0020/0052), process-local Skill roots (0074), and read-only
+  account rate limits ([0077](docs/adr/0077-read-account-rate-limits-on-demand.md)).
   Do not add a generic/private RPC gateway,
   parse CLI output, patch SDK internals, copy protocol models, or signal
   arbitrary processes. New gaps require an accepted ADR and a removal trigger.
 - Preserve each adapter's documented gate: cleanup and Activity retain exact
   version/fingerprint checks; the other adapters use capability shape,
   synthetic, and live harnesses. Delete also requires disposable live coverage
-  and Runtime four-view reconciliation. Model upgrades do not replace these gates.
+  and exact native-response handling (ADR 0078), without catalog reconciliation.
+  Model upgrades do not replace these gates.
 - Message-history access remains the narrow, public, typed, read-only
   `lark-oapi` port using the same app credentials (ADR 0039). Preserve chat-main
   versus thread-topic semantics, inert historical context, and its rollout gate.
@@ -135,8 +139,8 @@ their cited ADRs before changing that boundary.
   Model/Effort/Speed intent, non-login tool boundary, and dedicated temporary
   Scheduler MCP server entry (ADR 0061). This public process override must not
   write user configuration, replace user MCP entries, or override developer/base
-  instructions. New Threads use the public SDK's `auto_review` default;
-  Ask/Custom approval is not inherited.
+  instructions. Fresh Threads use the public SDK's `auto_review` default;
+  persistent forks retain native inherited permissions without client overrides.
 - Unsupported native capabilities remain explicit gaps. Keep product non-goals
   in [design.md](docs/design.md#目标与边界); do not simulate them with prompts or
   local state.

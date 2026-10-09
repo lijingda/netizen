@@ -114,6 +114,7 @@ class ScheduledBindingOrigin:
 
 
 class NativeCapability(str, Enum):
+    ACCOUNT_RATE_LIMITS = "account-rate-limits"
     SKILLS = "skills"
     GOAL = "goal"
     SIDE = "side"
@@ -175,6 +176,7 @@ class ControlName(str, Enum):
     MENU = "menu"
     NEW = "new"
     SIDE = "side"
+    FORK = "fork"
     CONFIG = "config"
     DEFAULTS = "defaults"
     COMPACT = "compact"
@@ -189,6 +191,7 @@ class ControlName(str, Enum):
     STOP = "stop"
     RELEASE = "release"
     STATUS = "status"
+    USAGE = "usage"
     ADMIN = "admin"
     GOAL = "goal"
     HELP = "help"

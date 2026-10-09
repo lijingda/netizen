@@ -3,9 +3,14 @@ status: accepted
 date: 2026-09-07
 amends: 0031, 0054
 related: 0034, 0037, 0046, 0049
+amended_by: 0078
 ---
 
 # 按精确会话清单删除 Project
+
+> 后续修订：[ADR 0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)
+> 将共享删除改为按原生返回处理，并把持久 fork 的进程内在途创建纳入 Project 删除交接。
+> 以下保留决策时的契约与证据。
 
 Admin 已能跨 Scope 删除单个普通会话，但清理整个 Project 仍需逐个查找，并容易遗漏归档
 会话。实例管理员现在可以确认删除一个 Project 及其完整关联 Sessions；该操作复用既有

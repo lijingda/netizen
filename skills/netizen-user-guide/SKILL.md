@@ -1,7 +1,7 @@
 ---
 name: netizen-user-guide
 description: >-
-  解答 Netizen 飞书 Channel 的使用问题，包括命令、会话、定时任务、执行反馈、消息与文件，
+  解答 Netizen 飞书 Channel 的使用问题，包括命令、会话与持久分支、账号额度、定时任务、执行反馈、消息与文件、MCP OAuth 登录，
   以及与 Codex App/CLI 的差异。用户未说“Netizen”但在询问当前飞书机器人或会话
   如何使用时也适用。仅用于使用咨询；普通编码及工程实现、架构、部署、调试不适用。
   仅以最新输入的结构化来源包装中 execution_host=netizen 识别 Netizen 执行场景；
@@ -20,11 +20,15 @@ Netizen 通过官方 Codex SDK 将飞书接入原生 Codex。默认按当前 Net
 
 - [会话与 Project](references/user-guide.md#会话与-project-管理)、
   [停止](references/user-guide.md#stop)、[Side](references/user-guide.md#side-临时话题)、
-  [Goal](references/user-guide.md#goal)：说明对应的并发、失效或历史删除后果。
+  [Goal](references/user-guide.md#goal)、[持久分支](references/user-guide.md#fork-持久分支)：
+  说明对应的并发、失效或历史删除后果。
+- [账号额度](references/user-guide.md#usage)：说明共享账号、剩余额度和客户端时区。
 - [运行反馈](references/user-guide.md#飞书中的运行反馈)、
   [本轮文件](references/user-guide.md#查看和发送本轮文件)：按手册解释开关、展示范围和统计口径。
 - [定时任务](references/user-guide.md#定时任务)：区分定时计划与一次普通执行，解释
   `/cron`、自然语言管理、时间规则，以及暂停计划和停止任务的不同后果。
+- [MCP 登录](references/user-guide.md#mcp-登录)：MCP 提示未登录或 OAuth 授权过期时，
+  说明原生 Codex 登录方式及 Netizen 复用条件。
 
 ## 回答与边界
 

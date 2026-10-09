@@ -69,6 +69,7 @@ from .management import (
 )
 from .management.chat_directory import FeishuChatDirectory
 from .message_history import FeishuMessageHistoryReader
+from .account_rate_limits import AppServerAccountRateLimits
 from .projects import ProjectError, ProjectRegistry
 from .sdk_gap_adapter import (
     AppServerGoalControl,
@@ -238,6 +239,7 @@ class ServiceCore:
                 self._codex
             )
             skill_catalog = None
+            account_rate_limits = None
             goal_control = None
             side_boundary_control = None
             thread_delete_control = None
@@ -246,6 +248,10 @@ class ServiceCore:
                 skill_catalog = AppServerSkillCatalog(self._codex)
             except SdkGapCapabilityUnavailable as error:
                 logger.warning("native Skills unavailable: %s", error)
+            try:
+                account_rate_limits = AppServerAccountRateLimits(self._codex)
+            except SdkGapCapabilityUnavailable as error:
+                logger.warning("native account rate limits unavailable: %s", error)
             try:
                 goal_control = AppServerGoalControl(self._codex)
             except SdkGapCapabilityUnavailable as error:
@@ -267,6 +273,7 @@ class ServiceCore:
                 bindings=self._store,
                 terminal_cleanup=terminal_cleanup,
                 skill_catalog=skill_catalog,
+                account_rate_limits=account_rate_limits,
                 goal_control=goal_control,
                 side_boundary_control=side_boundary_control,
                 thread_subscription_control=thread_subscription_control,

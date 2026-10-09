@@ -49,6 +49,9 @@ from netizen_cli.sdk_gap_adapter import GoalSnapshot
 
 
 class StubRuntime:
+    def project_has_fork_creation(self, alias: str) -> bool:
+        return False
+
     def __init__(self) -> None:
         self.available_capabilities = frozenset()
         self.completion = None
