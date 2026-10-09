@@ -93,6 +93,8 @@ setup 准备配置、飞书授权和实例数据并注册服务，不默认启�
 各实例共享原生 Codex 状态；服务固定注册时的 Python，终端换 venv 不改变已有绑定。
 
 日常维护用 `netizen update` 更新当前环境并恢复原来运行的实例；它不接受 --root。
+Agent／脚本使用 `netizen update --json`：stdout 只输出最终 JSON，进度和包管理器输出
+写入 stderr。以 JSON 和退出码判断结果，包验证成功与实例恢复 ready 分别报告。
 `netizen remove --root ...` 默认保留数据，--purge 才清理精确范围，-y 只省略确认。
 完整流程、失败边界、跨环境切换和卸载见 [CLI 安装与维护](docs/cli.md)。
 

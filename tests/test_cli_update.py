@@ -31,6 +31,18 @@ def prepare_root(root: Path) -> None:
     marker.chmod(0o600)
 
 
+def human_report(report: dict) -> str:
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        cli_update_worker.print_report(report)
+    return output.getvalue()
+
+
+class BrokenProgressStream(io.StringIO):
+    def write(self, text: str) -> int:
+        raise BrokenPipeError("progress consumer closed")
+
+
 class FakeManager:
     def __init__(self, roots: dict[str, bool]) -> None:
         self.platform = "linux"
@@ -110,6 +122,42 @@ class UpdateOrchestrationTest(unittest.TestCase):
         self.assertEqual(report["package"]["state"], "unchanged")
         self.assertFalse(report["package"]["replacement_started"])
         self.assertEqual([row["state"] for row in report["instances"]], ["running", "running", "stopped"])
+        output = human_report(report)
+        self.assertIn("No package changes required under the current package-manager configuration", output)
+        self.assertIn("No instances were stopped or restarted", output)
+        self.assertNotIn("Not executed", output)
+        self.assertNotIn("latest", output)
+        self.assertIn("leave unchanged", self.stderr.getvalue())
+        self.assertNotIn("stop and restore", self.stderr.getvalue())
+
+    def test_progress_precedes_preflight_and_each_stop_with_json_stdout(self) -> None:
+        def prepare(**kwargs):
+            output = self.stderr.getvalue()
+            self.assertIn(f"Python: {sys.executable}", output)
+            self.assertIn(f"Environment: {Path(sys.prefix).resolve()}", output)
+            self.assertIn("Checking installation and package changes...", output)
+            return self.package(**kwargs)
+
+        original_stop = self.manager.stop
+        def stop(root):
+            output = self.stderr.getvalue()
+            self.assertIn(f"Stopping {root}...", output)
+            for _, previous in self.manager.actions:
+                self.assertIn(f"Stopped: {previous}.", output)
+            return original_stop(root)
+
+        with patch.object(self.manager, "stop", side_effect=stop):
+            _, report = self.invoke(prepare)
+        self.assertEqual(report["progress"]["stopped"], 2)
+        self.assertEqual(len(self.stdout.getvalue().splitlines()), 1)
+        self.assertEqual(json.loads(Path(report["report_path"]).read_text()), report)
+
+    def test_broken_progress_stream_does_not_prevent_stops_or_handoff(self) -> None:
+        self.stderr = BrokenProgressStream()
+        code, report = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertEqual(report["progress"]["stopped"], 2)
+        self.assertEqual(report["reason"], "OSError: exec failed")
 
     def test_unknown_service_aborts_before_any_stop(self) -> None:
         self.manager.query_failure = str(self.home / "b")
@@ -117,6 +165,10 @@ class UpdateOrchestrationTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(report["phase"], "preflight")
         self.assertEqual(self.manager.actions, [])
+        output = human_report(report)
+        self.assertIn("Update failed during preflight checks", output)
+        self.assertIn("Instance inventory could not be confirmed", output)
+        self.assertIn("Package replacement did not start", output)
 
     def test_partial_stop_failure_leaves_already_stopped_instance_stopped(self) -> None:
         self.manager.stop_failure = str(self.home / "b")
@@ -127,6 +179,12 @@ class UpdateOrchestrationTest(unittest.TestCase):
         self.assertEqual([row["state"] for row in report["instances"]], ["stopped", "running", "stopped"])
         self.assertFalse(report["package"]["replacement_started"])
         self.assertEqual(report["progress"]["stopped"], 1)
+        output = human_report(report)
+        self.assertIn("Update failed during instance shutdown", output)
+        self.assertIn(f"{self.home / 'a'}: stopped (not restarted)", output)
+        self.assertIn(f"{self.home / 'b'}: running", output)
+        self.assertNotIn("No instances were stopped", output)
+        self.assertIn(f"Stop failed for {self.home / 'b'}", self.stderr.getvalue())
 
     def test_handoff_uses_external_worker_base_python_and_exact_original_set(self) -> None:
         captured = {}
@@ -149,24 +207,31 @@ class UpdateOrchestrationTest(unittest.TestCase):
     def test_loaded_launchagent_is_stopped_but_not_added_to_running_restore_set(self) -> None:
         self.manager.platform = "darwin"
         calls = []
+        captured = {}
 
         def handoff(_executable, argv):
             plan = json.loads(Path(argv[-1]).read_text())
             def runner(command, **kwargs):
                 calls.append(command)
                 return subprocess.CompletedProcess(command, 0, stdout='{"version":"2.0"}')
-            report = cli_update_worker.execute(plan, runner=runner)
-            self.assertEqual(report["status"], "succeeded")
-            self.assertEqual(report["progress"],
-                             {"stop_total": 3, "stopped": 3, "start_total": 2, "ready": 2})
-            self.assertFalse(report["instances"][2]["was_running"])
-            self.assertEqual(report["instances"][2]["state"], "stopped")
+            captured["report"] = cli_update_worker.execute(plan, runner=runner)
             raise OSError("synthetic handoff test")
 
         self.invoke(executor=handoff)
+        report = captured["report"]
+        self.assertEqual(report["status"], "succeeded")
+        self.assertEqual(report["progress"],
+                         {"stop_total": 3, "stopped": 3, "start_total": 2, "ready": 2})
+        self.assertFalse(report["instances"][2]["was_running"])
+        self.assertEqual(report["instances"][2]["state"], "stopped")
+        output = human_report(report)
+        self.assertIn("2/2 restored and ready", output)
+        self.assertIn(f"{self.home / 'c'}: stopped (kept stopped)", output)
         self.assertEqual(self.manager.actions, [("stop", str(self.home / name)) for name in "abc"])
         self.assertEqual([command[-1] for command in calls[2:]],
                          [str(self.home / name) for name in "ab"])
+        self.assertIn(f"{self.home / 'c'}: loaded, no running process -> unload; keep stopped",
+                      self.stderr.getvalue())
 
     def test_reloaded_launchagent_aborts_before_worker_handoff(self) -> None:
         self.manager.platform = "darwin"
@@ -366,6 +431,7 @@ class UpdateWorkerTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name).resolve()
         report = cli_update.new_report()
+        report.update(environment=sys.prefix, backend="pip", inventory_complete=True)
         report["report_path"] = str(self.directory / "report.json")
         report["package"]["before_version"] = "1.0"
         report["progress"].update(stop_total=2, stopped=2, start_total=2)
@@ -407,6 +473,50 @@ class UpdateWorkerTest(unittest.TestCase):
         self.assertNotIn("pass_fds", self.calls[0][1])
         for call, root in zip(self.calls[2:], ("a", "b")):
             self.assertEqual(call[1]["pass_fds"], (self.plan["root_locks"][str(self.directory / root)],))
+        output = human_report(report)
+        self.assertIn("Update complete.", output)
+        self.assertIn("netizen-cli 1.0 -> 2.0; installation verified", output)
+        self.assertIn("2/2 restored and ready", output)
+
+    def test_progress_wraps_raw_package_output_and_precedes_validation_and_restore(self) -> None:
+        output = io.StringIO()
+        def runner(argv, **kwargs):
+            if argv == ["package-tool"]:
+                self.assertIn("Updating packages with pip...", output.getvalue())
+                self.assertIs(kwargs["stdout"], output)
+                self.assertIs(kwargs["stderr"], output)
+                print("raw package stdout", file=kwargs["stdout"])
+                print("raw package stderr", file=kwargs["stderr"])
+            elif argv == ["validate"]:
+                self.assertTrue(output.getvalue().endswith("Verifying the installed package...\n"))
+            else:
+                self.assertIn("Verified netizen-cli 2.0.", output.getvalue())
+                self.assertTrue(output.getvalue().endswith(f"Restoring {argv[-1]}; waiting for readiness...\n"))
+                if argv[-1] == str(self.directory / "b"):
+                    self.assertIn(f"Ready: {self.directory / 'a'}.", output.getvalue())
+            return self.runner(argv, **kwargs)
+
+        with contextlib.redirect_stderr(output):
+            report = cli_update_worker.execute(self.plan, runner=runner)
+        text = output.getvalue()
+        self.assertIn("raw package stdout\nraw package stderr\nVerifying", text)
+        self.assertNotIn("\r", text)
+        self.assertNotIn("\x1b", text)
+        self.assertIn(f"Ready: {self.directory / 'b'}.", text)
+        self.assertEqual(report["status"], "succeeded")
+
+    def test_progress_write_failure_does_not_change_worker_result(self) -> None:
+        with contextlib.redirect_stderr(BrokenProgressStream()):
+            report = cli_update_worker.execute(self.plan, runner=self.runner)
+        self.assertEqual(report["status"], "succeeded")
+        self.assertEqual(report["progress"]["ready"], 2)
+
+    def test_progress_is_flushed_for_noninteractive_readers(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output), patch.object(output, "flush") as flush:
+            cli_update_worker.progress("Checking installation...")
+        self.assertEqual(output.getvalue(), "Checking installation...\n")
+        flush.assert_called_once_with()
 
     def test_package_failure_is_unknown_not_rollback_and_never_starts(self) -> None:
         def runner(argv, **kwargs):
@@ -418,6 +528,9 @@ class UpdateWorkerTest(unittest.TestCase):
         self.assertTrue(report["package"]["replacement_started"])
         self.assertEqual(report["phase"], "updating")
         self.assertEqual(report["status"], "failed")
+        output = human_report(report)
+        self.assertIn("Package state is unknown; no instances were restarted", output)
+        self.assertNotIn("Update complete", output)
 
     def test_invalid_validation_output_never_restores(self) -> None:
         def runner(argv, **kwargs):
@@ -427,6 +540,7 @@ class UpdateWorkerTest(unittest.TestCase):
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(report["phase"], "validating")
         self.assertEqual(report["package"]["state"], "unknown")
+        self.assertIn("Update failed during installation verification", human_report(report))
 
     def test_own_validation_error_protocol_preserves_actionable_reason(self) -> None:
         def runner(argv, **kwargs):
@@ -450,6 +564,13 @@ class UpdateWorkerTest(unittest.TestCase):
         self.assertEqual(report["package"]["state"], "verified")
         self.assertEqual([item["state"] for item in report["instances"]], ["unknown", "ready", "stopped"])
         self.assertEqual(report["progress"]["ready"], 1)
+        output = human_report(report)
+        self.assertIn("Update incomplete: the installed package was verified", output)
+        self.assertIn("1/2 restored and ready", output)
+        self.assertIn(f"{self.directory / 'a'}: readiness unconfirmed (may be running)", output)
+        self.assertIn(f"{self.directory / 'b'}: ready", output)
+        self.assertIn(f"netizen status --root {self.directory / 'a'}", output)
+        self.assertIn(f"netizen logs --root {self.directory / 'a'}", output)
 
     def test_changed_identity_files_abort_before_package_replacement(self) -> None:
         metadata = self.directory / "METADATA"
@@ -459,6 +580,10 @@ class UpdateWorkerTest(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(report["status"], "failed")
         self.assertFalse(report["package"]["replacement_started"])
+        output = human_report(report)
+        self.assertIn("Package replacement did not start", output)
+        self.assertIn(f"{self.directory / 'a'}: stopped (not restarted)", output)
+        self.assertNotIn("No instances were stopped", output)
 
     def test_fresh_identity_revalidation_failure_prevents_package_replacement(self) -> None:
         self.plan["package_plan"]["revalidation_command"] = ["revalidate"]
@@ -487,6 +612,35 @@ class UpdateWorkerTest(unittest.TestCase):
         self.assertEqual(report["status"], "succeeded")
         self.assertEqual(report["package"]["after_version"], "1.0")
         self.assertEqual(report["progress"]["ready"], 2)
+        output = human_report(report)
+        self.assertIn("netizen-cli 1.0 (version unchanged); installation verified", output)
+        self.assertIn("2/2 restored and ready", output)
+        self.assertNotIn("No package changes required", output)
+
+    def test_interruption_after_all_ready_does_not_claim_recovery_failure(self) -> None:
+        with patch.object(cli_update_worker, "_check_interrupted", side_effect=KeyboardInterrupt()):
+            report = cli_update_worker.execute(self.plan, runner=self.runner)
+        self.assertEqual(report["status"], "failed")
+        output = human_report(report)
+        self.assertIn("Update incomplete", output)
+        self.assertIn("2/2 restored and ready", output)
+        self.assertIn("KeyboardInterrupt", output)
+        self.assertNotIn("readiness unconfirmed", output)
+
+    def test_rendering_preserves_json_report_and_quotes_recovery_commands(self) -> None:
+        report = self.plan["report"]
+        report.update(status="failed", phase="restoring")
+        report["package"].update(state="verified", replacement_started=True, after_version="2.0")
+        report["instances"][0].update(root="/tmp/work netizen's root", action="start", state="unknown")
+        original = json.dumps(report)
+        output = human_report(report)
+        self.assertIn("netizen status --root '/tmp/work netizen'\"'\"'s root'", output)
+        self.assertIn(f"Report: {report['report_path']}", output)
+        self.assertEqual(json.dumps(report), original)
+        machine_output = io.StringIO()
+        with contextlib.redirect_stdout(machine_output):
+            cli_update_worker.print_report(report, json_output=True)
+        self.assertEqual(json.loads(machine_output.getvalue()), json.loads(original))
 
     def test_interrupt_during_start_marks_unknown_without_database_or_package_rollback(self) -> None:
         def runner(argv, **kwargs):
@@ -558,6 +712,9 @@ class UpdateWorkerTest(unittest.TestCase):
         self.assertFalse(source.exists())
         self.assertFalse(plan_file.exists())
         self.assertEqual(json.loads(result.stdout)["package"]["state"], "verified")
+        self.assertEqual(len(result.stdout.splitlines()), 1)
+        self.assertIn("Verifying the installed package...", result.stderr)
+        self.assertIn("Verified netizen-cli 2.0.", result.stderr)
         self.assertEqual(json.loads(Path(self.plan["report"]["report_path"]).read_text())["status"], "succeeded")
 
     def test_external_worker_retains_locks_but_does_not_leak_them_to_package_tool(self) -> None:

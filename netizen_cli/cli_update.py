@@ -157,6 +157,7 @@ def stop_recorded(manager: Any, report: dict[str, Any]) -> None:
         if not item["needs_stop"]:
             continue
         item["action"] = "stop"
+        cli_update_worker.progress(f"Stopping {item['root']}...")
         try:
             stopped = manager.stop(Path(item["root"]))
             if _needs_stop(manager, stopped):
@@ -166,9 +167,11 @@ def stop_recorded(manager: Any, report: dict[str, Any]) -> None:
         except (Exception, KeyboardInterrupt) as error:
             item["reason"] = str(error)
             _refresh_observed(manager, report["instances"])
+            cli_update_worker.progress(f"Stop failed for {item['root']}; observed state: {item['state']}.")
             raise UpdateError(f"Stopping {item['root']} failed: {error}") from error
         if report.get("report_path"):
             cli_update_worker.persist_report(Path(report["report_path"]), report)
+        cli_update_worker.progress(f"Stopped: {item['root']}.")
     # Detect already-observable external starts before the package replacement.
     for item in report["instances"]:
         try:
@@ -212,6 +215,9 @@ def run_update(*, json_output: bool = False, backend: str | None = None,
     root_locks: dict[str, int] = {}
     maintenance = ExitStack()
     try:
+        cli_update_worker.progress("Netizen update")
+        cli_update_worker.progress(f"Python: {sys.executable}")
+        cli_update_worker.progress(f"Environment: {report['environment']}")
         if os.environ.get("NETIZEN_CLI_SERVICE") == "1":
             raise UpdateError("Run netizen update from an external terminal, not inside a Netizen service")
         directory = maintenance_directory(Path(sys.prefix), home=home)
@@ -221,11 +227,15 @@ def run_update(*, json_output: bool = False, backend: str | None = None,
         if prepare is None:
             from .cli_packages import prepare_update
             prepare = prepare_update
+        cli_update_worker.progress("Checking installation and package changes...")
         package = prepare(work_dir=operation, backend=backend)
         if Path(package["prefix"]).resolve() != Path(sys.prefix).resolve():
             raise UpdateError("Package update target does not match the locked current Python environment")
         report.update(environment=package["prefix"], backend=package["backend"])
         report["package"]["before_version"] = package["before_version"]
+        cli_update_worker.progress(f"Current version: netizen-cli {package['before_version']}")
+        cli_update_worker.progress(f"Package manager: {package['backend']}")
+        cli_update_worker.progress("Checking associated instances...")
         if manager is None:
             from .cli_services import ServiceManager
             manager = ServiceManager()
@@ -240,6 +250,7 @@ def run_update(*, json_output: bool = False, backend: str | None = None,
 
             # Use the very same locks as CLI mutations and Admin restarts. Take
             # every known root (including stopped instances) before stopping any.
+            cli_update_worker.progress("Checking instance maintenance locks...")
             for item in sorted(report["instances"], key=lambda row: row["root"]):
                 try:
                     root = Path(item["root"])
@@ -264,20 +275,28 @@ def run_update(*, json_output: bool = False, backend: str | None = None,
         count = sum(item["was_running"] for item in report["instances"])
         report["progress"].update(stop_total=sum(item["needs_stop"] for item in report["instances"]),
                                   start_total=count)
-        print(f"Updating {package['prefix']} using {package['backend']}; "
-              f"{count} running instance(s) affected.", file=sys.stderr)
+        cli_update_worker.progress(f"Instances: {len(report['instances'])} associated with this environment.")
         for item in report["instances"]:
-            print(f"  {item['root']}: {item['state']}", file=sys.stderr)
+            state = "loaded, no running process" if item["state"] == "loaded" else item["state"]
+            if not package["changes_required"]:
+                action = "leave unchanged"
+            elif item["was_running"]:
+                action = "stop and restore after verification"
+            elif item["needs_stop"]:
+                action = "unload; keep stopped"
+            else:
+                action = "keep stopped"
+            cli_update_worker.progress(f"  {item['root']}: {state} -> {action}")
         if package.get("notice"):
-            print(package["notice"], file=sys.stderr)
+            cli_update_worker.progress(package["notice"])
         if not package["changes_required"]:
             report.update(status="succeeded", phase="complete", reason="No package changes are required.")
             report["package"]["after_version"] = package["before_version"]
             report["progress"].update(stop_total=0, start_total=0)
             report["unexecuted"] = ["stop (not needed)", "package-update (not needed)", "restore (not needed)"]
         else:
-            print("Running tasks may be interrupted. Only previously running instances will be restored.",
-                  file=sys.stderr)
+            cli_update_worker.progress(
+                "Running tasks may be interrupted. Only previously running instances will be restored.")
             cli_update_worker.persist_report(Path(report["report_path"]), report)
             stop_recorded(manager, report)
             worker, plan_file = _stage_worker(operation, report, package,
