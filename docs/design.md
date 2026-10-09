@@ -1519,13 +1519,18 @@ Admin 不具备包更新或浏览器授权能力。App ID 改变后新消息进�
 AsyncCodex。Linux 使用 systemd user unit；macOS 使用当前 GUI 用户的 LaunchAgent，
 不增加 root helper、LaunchDaemon、独立实例注册表或常驻更新服务。
 
-实例命令选择 `--root > NETIZEN_ROOT > ~/.netizen`；canonical root 决定配置、凭据、
+单实例操作选择 `--root > NETIZEN_ROOT > ~/.netizen`；canonical root 决定配置、凭据、
 state、锁、服务名与临时重启 job 名。服务定义固定绝对 Python 入口、环境 prefix 和
 root，不从当前 PATH 重新选择解释器。B 环境可按 root 控制绑定 A 的服务，但
 start/restart 仍运行 A；切换必须 remove 保留数据并解除绑定，再从 B start。无绑定
 不等于数据可新建：start 先确认无旧进程且实例完整，不能冒充 setup 初始化。
 `remove --purge` 才清理展示过的有限实例文件；`-y` 不免除安全检查。根目录、Project、
 外来文件与共享 Codex 数据永不递归删除。目录及操作见[CLI 手册](cli.md)。
+
+`doctor` 显式传 `--root` 时只读诊断该实例；未传时忽略 `NETIZEN_ROOT` 和默认 root，复用现有服务
+发现与状态校验，列出当前用户所有可识别的受管实例（跨 Python 环境、包含已停止实例）。
+列表标注绑定 prefix 是否属于当前 CLI 环境，不把环境关联当作 update 预检通过。
+不新增注册表，不发现其他用户或手工前台进程；发现失败不能当作空列表或完整清单。
 
 launcher 在稳定的 `state/service.lifetime.lock` inode 上持有独占锁，并仅为最终 exec
 临时开放 FD 继承；主进程最早入口恢复 CLOEXEC，锁覆盖启动检查、迁移和运行至退出。

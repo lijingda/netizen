@@ -496,6 +496,12 @@ netizen restart --root /absolute/path/to/.netizen
 NETIZEN_ROOT，再缺省为有效账号的 ~/.netizen。`netizen update` 更新调用它的 Python
 环境及其关联实例，拒绝 --root，不是仅更新当前聊天中的机器人。
 
+需要查实例清单时，在宿主机执行 `netizen doctor --json`：不传 `--root` 会忽略
+NETIZEN_ROOT，列出当前用户全部可识别的受管实例，包含其他 Python 环境和已停止实例。
+结果中的 `cli` 表示本次命令的 Python 环境，`count` 是实例数，`instances` 是实例数组；
+每项的 `current_environment` 表示是否属于当前 CLI 环境。它不枚举其他用户或手工前台
+进程，也不代表升级预检已通过。只查一个实例时用 `netizen doctor --root /path/to/.netizen --json`。
+
 另一个 Python 环境 B 可以按 root 控制绑定 A 的实例，但 start/restart 仍运行 A，
 B 的 update 不涉及 A。切换环境必须先 remove 保留数据、解除绑定，再从 B start；
 不要加 --purge。remove 默认保留实例数据；--purge 才清理展示的有限实例文件，

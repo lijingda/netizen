@@ -27,7 +27,8 @@ netizen start --root /absolute/path/to/.netizen
 netizen status --root /absolute/path/to/.netizen
 ```
 
-root 选择顺序为 `--root`、`NETIZEN_ROOT`、有效账号的 `~/.netizen`。包安装只安装程序、
+单实例操作的 root 选择顺序为 `--root`、`NETIZEN_ROOT`、有效账号的 `~/.netizen`；
+`doctor` 未显式传 `--root` 时改为列出全部受管实例，见下文。包安装只安装程序、
 依赖和资源，不生成实例、注册服务或迁移数据库。setup 检查共享 Codex 登录、通过官方
 飞书浏览器流程准备应用凭据并校验权限，初始化数据、注册服务，但不默认启动。
 无 TTY 也可用浏览器完成；agent 应转交验证 URL 并保留同一进程，不索取 App Secret。
@@ -65,10 +66,18 @@ netizen stop --root /absolute/path/to/.netizen
 netizen restart --root /absolute/path/to/.netizen
 netizen logs --root /absolute/path/to/.netizen --lines 100
 netizen doctor --root /absolute/path/to/.netizen
+netizen doctor --json
 ```
 
 stop 只在确认退出后成功，并保留绑定；restart 使用绑定环境而非调用者环境。
-doctor 为只读诊断，不以另一环境的业务代码迁移运行实例。命令支持 `--json` 结果，
+doctor 为只读诊断，不以另一环境的业务代码迁移运行实例。显式 `--root`（放在 doctor
+前后均可）保留单实例诊断；不传时忽略 `NETIZEN_ROOT` 和默认 root，列出当前用户可识别的
+全部受管实例，包含其他 Python 环境及已停止的实例，不包含其他用户或手工前台进程。
+列表 JSON 为一个对象，包含 `cli`、`count`、`instances` 和 `note`；各实例保留 `root`、
+`binding` 和运行状态，另以 `current_environment` 标明绑定 prefix 是否属于当前 CLI
+的 Python 环境。这只表示环境关联，不代替 update 的安装归属与服务状态预检。
+无实例时返回 `count: 0` 和空数组；服务定义或管理器查询无法确认时报告失败，不伪装成
+空列表或完整清单。命令支持 `--json` 结果，
 失败报告当前阶段、已知状态、原因和后续建议；未知不能写成已成功。
 
 ## 程序更新
