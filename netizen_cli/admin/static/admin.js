@@ -1643,9 +1643,11 @@ function chatTarget(prefix, onChange = null) {
   if (chatTargetControllers.has(prefix)) return chatTargetControllers.get(prefix);
   const node = (name) => document.querySelector(`#${prefix}-${name}`);
   let locked = false;
+  let avatarRevision = 0;
   const picker = window.createChatPicker(node("group-picker"), {
     id: `${prefix}-group`, label: "群聊", fetchPage: fetchChatPage,
     onChange: (chat) => {
+      avatarRevision += 1;
       node("chat").value = chat?.chatId || "";
       onChange?.();
     },
@@ -1667,6 +1669,7 @@ function chatTarget(prefix, onChange = null) {
         : manual ? "请填写群聊的聊天 ID，不是用户 ID。保存时将重新检查目标。" : "";
   }
   node("chat-kind").addEventListener("change", () => {
+    avatarRevision += 1;
     picker.reset();
     node("chat").value = "";
     node("chat-manual").checked = false;
@@ -1674,6 +1677,7 @@ function chatTarget(prefix, onChange = null) {
     onChange?.();
   });
   node("chat-manual").addEventListener("change", () => {
+    avatarRevision += 1;
     if (!node("chat-manual").checked) {
       picker.reset();
       node("chat").value = "";
@@ -1681,18 +1685,29 @@ function chatTarget(prefix, onChange = null) {
     render();
     onChange?.();
   });
-  node("chat").addEventListener("input", () => { picker.reset(); onChange?.(false); });
+  node("chat").addEventListener("input", () => { avatarRevision += 1; picker.reset(); onChange?.(false); });
+  async function hydrateAvatar(chatId, current) {
+    try {
+      const result = await api(`/api/v1/chats/validate?${new URLSearchParams({ chatId })}`);
+      if (current !== avatarRevision || node("chat").value !== chatId || result.chat?.chatId !== chatId) return;
+      picker.updateSelectionAvatar(chatId, result.chat.avatarUrl);
+    } catch {
+      // Display metadata must never prevent editing a saved target.
+    }
+  }
   const controller = {
     picker,
     render,
     set({ chatId = "", chat = null, readOnly = false } = {}) {
+      const current = ++avatarRevision;
       locked = readOnly;
       const kind = ["p2p", "group"].includes(chat?.chatType) ? chat.chatType : chat?.chatMode;
       node("chat-kind").value = kind === "p2p" ? "p2p" : ["group", "topic"].includes(kind) ? "group" : chatId ? "unknown" : "group";
       node("chat-manual").checked = Boolean(chatId && !kind);
       node("chat").value = chatId;
-      picker.setSelection(chatId ? { chatId, name: chat?.chatLabel || chatId } : null);
+      picker.setSelection(chatId ? { chatId, name: chat?.chatLabel || chatId, avatarUrl: chat?.avatarUrl } : null);
       render();
+      if (chatId && node("chat-kind").value === "group" && !chat?.avatarUrl) void hydrateAvatar(chatId, current);
     },
     resolveKind(contextAvailable) {
       if (contextAvailable == null || !node("chat").value.trim()) return;
@@ -1704,7 +1719,7 @@ function chatTarget(prefix, onChange = null) {
     },
     kind: () => node("chat-kind").value,
     focus() { if (node("group-picker").hidden) node("chat").focus(); else picker.focus(); },
-    close: () => picker.close(),
+    close() { avatarRevision += 1; picker.close(); },
     async validate() {
       const id = node("chat").value.trim();
       if (!id) throw new Error("请选择聊天，或手动填写聊天 ID。");

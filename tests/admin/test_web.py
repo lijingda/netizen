@@ -757,16 +757,20 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status, 200)
             self.assertEqual(dict(headers)["content-type"], content_type)
             self.assertIn("script-src 'self'", dict(headers)["content-security-policy"])
+            self.assertIn("img-src 'self' https://p3-lark-file.byteimg.com", dict(headers)["content-security-policy"])
+            self.assertNotIn("img-src *", dict(headers)["content-security-policy"])
+            self.assertNotIn("https://*.", dict(headers)["content-security-policy"])
             self.assertTrue(content)
 
     async def test_chat_picker_pagination_is_bound_to_keyword(self) -> None:
         self.runner.open_admission()
         session = await self.login()
-        group = AvailableChat("oc_group", "<群聊>", None, False)
+        avatar = "https://p3-lark-file.byteimg.com/img/avatar.jpg"
+        group = AvailableChat("oc_group", "<群聊>", None, False, avatar)
         self.management.query_available_chats = AsyncMock(return_value=AvailableChatPage((group,), "page-two", "搜索提示"))
         status, _, payload = await self.json_get("/api/v1/chats?query=", session)
         self.assertEqual(status, 200)
-        self.assertEqual(payload["items"], [{"chatId": "oc_group", "name": "<群聊>", "chatMode": None, "external": False}])
+        self.assertEqual(payload["items"], [{"chatId": "oc_group", "name": "<群聊>", "chatMode": None, "external": False, "avatarUrl": avatar}])
         self.assertEqual(payload["notice"], "搜索提示")
         self.management.query_available_chats.assert_awaited_with(query="", page_token=None)
         cursor = payload["nextCursor"]
@@ -794,11 +798,13 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
     async def test_chat_picker_validation_and_errors_are_explicit(self) -> None:
         self.runner.open_admission()
         session = await self.login()
-        group = AvailableChat("oc_group", "新名称", "topic", False)
+        avatar = "https://s1-imfile.feishucdn.com/static-resource/avatar.jpg"
+        group = AvailableChat("oc_group", "新名称", "topic", False, avatar)
         self.management.validate_available_chat = AsyncMock(return_value=group)
         status, _, payload = await self.json_get("/api/v1/chats/validate?chatId=oc_group", session)
         self.assertEqual(status, 200)
         self.assertEqual(payload["chat"]["name"], "新名称")
+        self.assertEqual(payload["chat"]["avatarUrl"], avatar)
         self.management.validate_available_chat.assert_awaited_once_with("oc_group")
         for query in ("", "?chatId=", "?chatId=oc_a&chatId=oc_b", "?chatId=oc_group&unknown=x"):
             status, _, _ = await self.json_get("/api/v1/chats/validate" + query, session)

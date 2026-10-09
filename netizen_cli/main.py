@@ -60,6 +60,7 @@ from .cli_data import (
     prepare_instance,
 )
 from .channel_app import ChannelApplication
+from .chat_avatars import CHAT_AVATAR_HOSTS
 from .codex_runtime import CodexRuntime
 from .instance import resolve_instance_root
 from .management import (
@@ -147,6 +148,9 @@ def build_channel(settings: Settings, store: BindingStore) -> FeishuChannel:
         outbound=OutboundConfig(
             reply_mode="static",
             text_chunk_limit=3_500,
+            # URL inputs must also pass chat_avatars.avatar_url; this SDK
+            # setting alone does not reject every unlisted public host.
+            ssrf_allowlist=list(CHAT_AVATAR_HOSTS),
         ),
         security=SecurityConfig(mode=settings.security_mode),
         dedup_store=store,

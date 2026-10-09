@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from lark_channel import OutboundCard
 
-from ..domain import FeishuScope
+from ..domain import FeishuScope, ScopeKind
 from .callbacks import (
     CardActionError,
     _builder,
@@ -208,13 +208,17 @@ def _button(scope: FeishuScope, source: ForkSource, label: str, action: str, **e
 
 def _form(*, options: list[tuple[str, str]], label: str, submit: str,
           inputs: tuple[dict[str, Any], ...] = (), selected: str | None = None,
-          create: bool = False) -> dict[str, Any]:
+          create: bool = False,
+          option_icons: Mapping[str, dict[str, str]] | None = None) -> dict[str, Any]:
     # Navigation redraws use the shared transport nonce convention. Creation
     # stays stable like other one-shot controls, without a separate claim key.
     select = {
         "tag": "select_static", "name": _FORM_PREFIX + ("create" if create else _new_callback_nonce()),
         "required": True, "width": "fill", "placeholder": _plain_text(label),
-        "options": [{"text": _plain_text(text), "value": value} for value, text in options],
+        "options": [{
+            "text": _plain_text(text), "value": value,
+            **({"icon": option_icons[value]} if option_icons and value in option_icons else {}),
+        } for value, text in options],
     }
     if selected is not None:
         select["initial_option"] = selected
@@ -223,6 +227,12 @@ def _form(*, options: list[tuple[str, str]], label: str, submit: str,
         {"tag": "button", "name": "fork_submit_v1", "text": _plain_text(submit),
          "type": "primary_filled", "width": "fill", "form_action_type": "submit"},
     ]}
+
+
+def _chat_icon(avatar_key: str | None) -> dict[str, str]:
+    if avatar_key:
+        return {"tag": "custom_icon", "img_key": avatar_key}
+    return {"tag": "standard_icon", "token": "group_outlined"}
 
 
 def _header(source_title: str, project_alias: str):
@@ -259,17 +269,23 @@ def fork_chat_search_card(scope: FeishuScope, source: ForkSource, *, source_titl
 
 
 def fork_chat_results_card(scope: FeishuScope, source: ForkSource, page: AvailableChatPage, *,
-                           query: str, source_title: str, project_alias: str) -> OutboundCard:
+                           query: str, source_title: str, project_alias: str,
+                           avatar_keys: Mapping[str, str] | None = None) -> OutboundCard:
     query = _query(query)
     builder = _header(source_title, project_alias)
     builder.raw(_plain(f"群名包含「{query}」的机器人可用群。"))
     if page.notice:
         builder.raw(_notice(page.notice))
     if page.items:
-        builder.raw(_form(options=[(
-            _encoded(_state(scope, source, "select", target_chat_id=chat.chat_id)),
-            f"{chat.name} · {chat.chat_id[-8:]}" + (" · 外部群" if chat.external else ""),
-        ) for chat in page.items], label="目标群聊", submit="选择此群"))
+        options = []
+        icons = {}
+        for chat in page.items:
+            reference = _encoded(_state(scope, source, "select", target_chat_id=chat.chat_id))
+            options.append((reference,
+                f"{chat.name} · {chat.chat_id[-8:]}" + (" · 外部群" if chat.external else "")))
+            icons[reference] = _chat_icon(avatar_keys.get(chat.chat_id) if avatar_keys else None)
+        builder.raw(_form(options=options, option_icons=icons,
+            label="目标群聊", submit="选择此群"))
     else:
         builder.raw(_plain("本页没有符合条件的可用群。"))
     if page.next_page_token:
@@ -280,7 +296,8 @@ def fork_chat_results_card(scope: FeishuScope, source: ForkSource, page: Availab
 
 
 def fork_confirm_card(scope: FeishuScope, source: ForkSource, *, source_title: str,
-                      project_alias: str, target_chat: AvailableChat | None = None) -> OutboundCard:
+                      project_alias: str, target_chat: AvailableChat | None = None,
+                      avatar_key: str | None = None) -> OutboundCard:
     """Only this final page accepts a name, so navigation has no name draft."""
     target_id = target_chat.chat_id if target_chat is not None else scope.chat_id
     target_label = target_chat.name if target_chat is not None else "当前聊天"
@@ -290,7 +307,10 @@ def fork_confirm_card(scope: FeishuScope, source: ForkSource, *, source_title: s
         builder.raw(_notice("目标群的参与者可通过新会话继续使用继承的上下文；后续回答可能引用来源会话的内容。"))
     reference = _encoded(_state(scope, source, "create", target_chat_id=target_id))
     default_name = " ".join(source_title.split())[:MAX_THREAD_NAME_CHARS - len(" · 分支")] + " · 分支"
+    # A topic alone is not group evidence: P2P chats can also contain topics.
+    icon = _chat_icon(avatar_key) if avatar_key or target_chat is not None or scope.kind is ScopeKind.GROUP else None
     builder.raw(_form(options=[(reference, target_label)], selected=reference,
+        option_icons={reference: icon} if icon is not None else None,
         label="已确认的目的地", submit="确认创建", create=True, inputs=({
             "tag": "input", "name": _NAME_FIELD, "required": True,
             "label": _plain_text("新会话名称"), "default_value": default_name,

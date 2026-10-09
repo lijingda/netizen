@@ -107,10 +107,10 @@ async function selectionKeyboardAndEmptyStates() {
   f.input.dispatch("keydown", { key: "ArrowUp" });
   assert.equal(f.input.getAttribute("aria-activedescendant"), `${f.input.id}-option-1`);
   assert.equal(f.input.dispatch("keydown", { key: "Enter" }).prevented, true);
-  assert.deepEqual(f.picker.getSelection(), { chatId: "oc_b", name: "B" });
+  assert.deepEqual(f.picker.getSelection(), { chatId: "oc_b", name: "B", avatarUrl: null });
   assert.equal(f.input.getAttribute("aria-expanded"), "false");
   assert.equal(f.input.getAttribute("aria-activedescendant"), null);
-  assert.deepEqual(f.changes[1], { chatId: "oc_b", name: "B" });
+  assert.deepEqual(f.changes[1], { chatId: "oc_b", name: "B", avatarUrl: null });
   f.root.querySelector(".chat-picker-clear").click();
   assert.equal(f.input.value, "");
   assert.equal(f.picker.getSelection(), null);
@@ -215,7 +215,7 @@ async function lifecycleAndComposition() {
   f.requests[1].resolve({ items: [{ chatId: "oc_dev", name: "研发群" }] });
   await settle();
   f.rows()[0].click();
-  assert.deepEqual(f.picker.getSelection(), { chatId: "oc_dev", name: "研发群" });
+  assert.deepEqual(f.picker.getSelection(), { chatId: "oc_dev", name: "研发群", avatarUrl: null });
   const changeCount = f.changes.length;
   f.picker.reset();
   assert.equal(f.changes.length, changeCount);
@@ -229,6 +229,65 @@ async function lifecycleAndComposition() {
   assert.equal(f.rows().length, 0);
 }
 
+async function avatarsAndDisplayOnlyRefresh() {
+  const f = setup();
+  const avatarUrl = "https://example.feishucdn.com/group.jpg";
+  const freshAvatarUrl = "https://example.feishucdn.com/fresh.jpg";
+  f.picker.focus();
+  f.requests[0].resolve({ items: [
+    { chatId: "oc_avatar", name: "<b>同名群</b>", avatarUrl },
+    { chatId: "oc_missing", name: "同名群" },
+  ] });
+  await settle();
+  const row = f.rows()[0];
+  assert.equal(row.querySelector(".chat-picker-name").textContent, "<b>同名群</b>");
+  assert.equal(row.querySelector("b"), null);
+  assert.equal(row.querySelector(".chat-picker-id").textContent, "oc_avatar");
+  assert.equal(row.querySelector(".chat-picker-avatar").getAttribute("aria-hidden"), "true");
+  assert.equal(row.querySelector("img").src, avatarUrl);
+  assert.equal(row.querySelector("img").alt, "");
+  assert.equal(row.querySelector("img").referrerPolicy, "no-referrer");
+  assert.equal(f.rows()[1].querySelector("img"), null);
+  assert(row.querySelector(".chat-picker-avatar-fallback"));
+  assert(f.rows()[1].querySelector(".chat-picker-avatar-fallback"));
+  row.querySelector("img").dispatch("load");
+  assert.equal(row.querySelector(".chat-picker-avatar-fallback").hidden, true,
+    "loaded transparent avatars must not show a placeholder underneath");
+  row.querySelector("img").dispatch("error");
+  assert.equal(row.querySelector("img").hidden, true, "broken images reveal the group placeholder");
+  assert.equal(row.querySelector(".chat-picker-avatar-fallback").hidden, false);
+  row.click();
+  const selected = f.root.querySelector(".chat-picker-selected-avatar");
+  const selectedId = f.root.querySelector(".chat-picker-selected-id");
+  assert.equal(selected.hidden, false);
+  assert.equal(selected.querySelector("img").src, avatarUrl);
+  assert.equal(selectedId.textContent, "oc_avatar");
+  assert.equal(f.picker.getSelection().avatarUrl, avatarUrl);
+  assert.equal(f.changes[0].avatarUrl, avatarUrl);
+  selected.querySelector("img").dispatch("load");
+  assert.equal(selected.querySelector(".chat-picker-avatar-fallback").hidden, true);
+  selected.querySelector("img").dispatch("error");
+  assert.equal(selected.querySelector("img").hidden, true);
+  assert.equal(selected.querySelector(".chat-picker-avatar-fallback").hidden, false);
+  assert.equal(f.picker.getSelection().chatId, "oc_avatar", "image failure must preserve target identity");
+  f.picker.updateSelectionAvatar("oc_other", freshAvatarUrl);
+  assert.equal(selected.querySelector("img").src, avatarUrl, "metadata for another target is ignored");
+  f.picker.updateSelectionAvatar("oc_avatar", freshAvatarUrl);
+  assert.equal(selected.querySelector("img").src, freshAvatarUrl);
+  assert.equal(f.changes.length, 1, "avatar refresh must not emit target changes");
+  assert.equal(f.input.value, "<b>同名群</b>");
+  f.type("new search");
+  assert.equal(selected.hidden, true);
+  assert.equal(selectedId.hidden, true);
+  f.picker.close();
+  f.picker.setSelection({ chatId: "oc_missing", name: "群聊", avatarUrl: {} });
+  assert.equal(selected.querySelector("img"), null);
+  assert(selected.querySelector(".chat-picker-avatar-fallback"));
+  assert.equal(selected.hidden, false);
+  f.picker.reset();
+  assert.equal(selected.hidden, true);
+}
+
 (async () => {
   await remoteQueriesIgnoreStaleResults();
   await paginationRetryAndPlainText();
@@ -236,4 +295,5 @@ async function lifecycleAndComposition() {
   await retryAndEscapeFromPaging();
   await focusedPagingButtonsSurviveBusyRendering();
   await lifecycleAndComposition();
+  await avatarsAndDisplayOnlyRefresh();
 })().catch((error) => { console.error(error); process.exitCode = 1; });

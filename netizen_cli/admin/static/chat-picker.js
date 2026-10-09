@@ -16,6 +16,7 @@
     const caption = make("label", "chat-picker-label", label);
     caption.htmlFor = id;
     const control = make("div", "chat-picker-control");
+    const selectedAvatar = make("span", "chat-picker-selected-avatar");
     const input = make("input", "chat-picker-input");
     input.id = id;
     input.type = "text";
@@ -26,7 +27,7 @@
     input.setAttribute("aria-autocomplete", "list");
     input.setAttribute("aria-haspopup", "listbox");
     input.setAttribute("aria-controls", `${id}-options`);
-    input.setAttribute("aria-describedby", `${id}-hint`);
+    input.setAttribute("aria-describedby", `${id}-selection ${id}-hint`);
     const clear = make("button", "chat-picker-clear", "×");
     clear.type = "button";
     clear.setAttribute("aria-label", "清除群聊");
@@ -45,9 +46,11 @@
     more.type = "button";
     const hint = make("p", "chat-picker-hint", "仅支持选择机器人当前已加入且可访问的群聊。");
     hint.id = `${id}-hint`;
+    const selectedId = make("p", "chat-picker-selected-id");
+    selectedId.id = `${id}-selection`;
     popup.append(list, status, retry, more);
-    control.append(input, clear, popup);
-    wrapper.append(caption, control, hint);
+    control.append(selectedAvatar, input, clear, popup);
+    wrapper.append(caption, control, selectedId, hint);
     root.replaceChildren(wrapper);
 
     let selection = null;
@@ -66,6 +69,32 @@
     let timer = null;
     let composing = false;
     let restoringFocus = false;
+    let renderedAvatarUrl;
+
+    function normalize(item) {
+      return item && typeof item.chatId === "string" && item.chatId ? {
+        chatId: item.chatId,
+        name: typeof item.name === "string" && item.name ? item.name : item.chatId,
+        avatarUrl: typeof item.avatarUrl === "string" && item.avatarUrl ? item.avatarUrl : null,
+      } : null;
+    }
+
+    function avatar(url) {
+      const frame = make("span", "chat-picker-avatar");
+      frame.setAttribute("aria-hidden", "true");
+      const fallback = make("span", "chat-picker-avatar-fallback");
+      frame.append(fallback);
+      if (url) {
+        const image = make("img", "chat-picker-avatar-image");
+        image.alt = "";
+        image.referrerPolicy = "no-referrer";
+        image.addEventListener("load", () => { fallback.hidden = true; });
+        image.addEventListener("error", () => { image.hidden = true; fallback.hidden = false; });
+        image.src = url;
+        frame.append(image);
+      }
+      return frame;
+    }
 
     function invalidate() {
       revision += 1;
@@ -80,6 +109,15 @@
       clear.hidden = !input.value;
       clear.disabled = disabled;
       popup.hidden = !expanded;
+      selectedAvatar.hidden = !selection;
+      control.setAttribute("data-selected", String(Boolean(selection)));
+      const avatarUrl = selection?.avatarUrl || null;
+      if (renderedAvatarUrl !== avatarUrl) {
+        selectedAvatar.replaceChildren(avatar(avatarUrl));
+        renderedAvatarUrl = avatarUrl;
+      }
+      selectedId.hidden = !selection;
+      selectedId.textContent = selection?.chatId || "";
       list.replaceChildren();
       items.forEach((item, index) => {
         const row = make("div", "chat-picker-option");
@@ -87,8 +125,10 @@
         row.setAttribute("role", "option");
         row.setAttribute("aria-selected", String(selection?.chatId === item.chatId));
         row.setAttribute("data-active", String(index === activeIndex));
-        row.append(make("span", "chat-picker-name", item.name),
+        const text = make("span", "chat-picker-text");
+        text.append(make("span", "chat-picker-name", item.name),
           make("span", "chat-picker-id", item.chatId));
+        row.append(avatar(item.avatarUrl), text);
         // Keep focus on the combobox when choosing an option with a pointer.
         row.addEventListener("pointerdown", (event) => event.preventDefault());
         row.addEventListener("click", () => choose(item));
@@ -127,10 +167,8 @@
         if (current !== revision || disabled || !expanded) return;
         const merged = new Map((cursor ? items : []).map((item) => [item.chatId, item]));
         for (const item of page.items || []) {
-          if (!item || typeof item.chatId !== "string" || !item.chatId) continue;
-          if (!merged.has(item.chatId)) merged.set(item.chatId, {
-            chatId: item.chatId, name: typeof item.name === "string" && item.name ? item.name : item.chatId,
-          });
+          const chat = normalize(item);
+          if (chat && !merged.has(chat.chatId)) merged.set(chat.chatId, chat);
         }
         items = [...merged.values()];
         nextCursor = typeof page.nextCursor === "string" && page.nextCursor && page.nextCursor !== cursor
@@ -165,7 +203,7 @@
 
     function setSelection(item) {
       close();
-      selection = item?.chatId ? { chatId: item.chatId, name: item.name || item.chatId } : null;
+      selection = normalize(item);
       input.value = selection?.name || "";
       query = "";
       items = [];
@@ -248,6 +286,11 @@
 
     return {
       setSelection,
+      updateSelectionAvatar(chatId, avatarUrl) {
+        if (selection?.chatId !== chatId) return;
+        selection = normalize({ ...selection, avatarUrl });
+        render();
+      },
       getSelection: () => selection ? { ...selection } : null,
       setDisabled(value) { disabled = Boolean(value); if (disabled) close(); else render(); },
       close,
