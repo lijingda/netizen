@@ -1,5 +1,6 @@
 """Stable public entry points for Channel cards and callback decoding."""
 
+from .usage import account_usage_card
 from .callbacks import (
     ACTION_VERSION,
     CardActionError,
@@ -56,6 +57,7 @@ from .controls import (
 )
 
 __all__ = [
+    "account_usage_card",
     "ACTION_VERSION",
     "ArchivedSessionCardItem",
     "CardActionError",

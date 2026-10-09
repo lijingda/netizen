@@ -2,11 +2,15 @@
 status: accepted
 date: 2026-08-21
 amends: 0017, 0021, 0028
-amended_by: 0037, 0049, 0054, 0057, 0060
+amended_by: 0037, 0049, 0054, 0057, 0060, 0078
 related: 0016, 0019
 ---
 
 # 引入进程内 Admin Web 管理控制面
+
+> 后续修订：[ADR 0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)
+> 修订普通会话“设为当前”的原生恢复和共享删除失败处理。
+> 以下保留决策时的契约与证据。
 
 > **修订：** [ADR 0049](0049-bound-turn-observation-and-delegate-thread-removal.md)
 > 删除 Admin exact archive 的 idle 与 Runtime activity 前置条件；它与飞书入口一样只占用

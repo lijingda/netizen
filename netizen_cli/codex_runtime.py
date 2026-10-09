@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -24,6 +25,11 @@ from openai_codex import (
 )
 from openai_codex.types import ThreadTokenUsageUpdatedNotification
 
+from .account_rate_limits import (
+    AccountRateLimits,
+    AccountRateLimitsSnapshot,
+    AccountRateLimitsUnavailable,
+)
 from .bindings import (
     PROJECT_DELETE_LIMIT,
     BindingStore,
@@ -80,6 +86,8 @@ from .runtime.contracts import (
     ContextAnchorRequired,
     ThreadLifecycleStateUnknown,
     ThreadArchived,
+    ThreadResumeNotFound,
+    ThreadResumeFailed,
     ThreadNotArchived,
     ThreadDeleteUnavailable,
     ThreadDeleteTargetChanged,
@@ -90,7 +98,6 @@ from .runtime.contracts import (
     ThreadCatalogError,
     ThreadCatalogDeadlineExceeded,
     ThreadCatalogLimitExceeded,
-    ThreadCatalogIdentityMissing,
     SideUnavailable,
     SideSessionNotFound,
     SideSessionConflict,
@@ -146,6 +153,7 @@ from .sdk_gap_adapter import (
     SideBoundaryControl,
     SkillCatalog,
     ThreadDeleteControl,
+    ThreadDeleteRejected,
     ThreadSubscriptionControl,
     ThreadUnsubscribeStatus,
     ThreadUnsubscribeStateUnknown,
@@ -185,13 +193,14 @@ _GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS = 20.0
 _THREAD_LIST_PAGE_LIMIT = 100
 _THREAD_CATALOG_MAX_PAGES = 1_000
 _THREAD_CATALOG_MAX_ITEMS = 100_000
-_THREAD_DELETE_RECONCILE_TIMEOUT_SECONDS = 20.0
+_THREAD_ARCHIVE_RECONCILE_TIMEOUT_SECONDS = 20.0
 _TURN_OBSERVATION_RECOVERY_TIMEOUT_SECONDS = 5.0
 _TURN_OBSERVATION_RECOVERY_MAX_IO = 3
 _INTERRUPTION_CONFIRMATION_SECONDS = 2.0
 _TERMINAL_RESPONSE_MATERIALIZATION_RETRIES = 4
 _TERMINAL_STREAM_DRAIN_TIMEOUT_SECONDS = 1.0
 _SIDE_CLOSE_DRAIN_TIMEOUT_SECONDS = 5.0
+_FORK_RELEASE_TIMEOUT_SECONDS = 5.0
 _SIDE_IDLE_SECONDS = 2 * 60 * 60
 _ORDINARY_THREAD_IDLE_SECONDS = 15 * 60
 _NAMING_SHUTDOWN_WAIT_SECONDS = 1.0
@@ -428,6 +437,7 @@ class CodexRuntime:
         bindings: BindingStore,
         terminal_cleanup: TerminalCleanup,
         skill_catalog: SkillCatalog | None = None,
+        account_rate_limits: AccountRateLimits | None = None,
         goal_control: GoalControl | None = None,
         side_boundary_control: SideBoundaryControl | None = None,
         thread_subscription_control: ThreadSubscriptionControl | None = None,
@@ -451,6 +461,7 @@ class CodexRuntime:
         self._bindings = bindings
         self._terminal_cleanup = terminal_cleanup
         self._skill_catalog = skill_catalog
+        self._account_rate_limits = account_rate_limits
         self._goal_control = goal_control
         self._side_boundary_control = side_boundary_control
         self._thread_subscription_control = thread_subscription_control
@@ -474,6 +485,7 @@ class CodexRuntime:
         self._side_locks: dict[str, asyncio.Lock] = {}
         self._admission_revisions: dict[str, int] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+        self._fork_creations: dict[asyncio.Task[object], str] = {}
         self._side_idle_tasks: set[asyncio.Task[None]] = set()
         self._subscription_idle_tasks: set[asyncio.Task[None]] = set()
         self._name_writes = ThreadNameWrites()
@@ -544,6 +556,8 @@ class CodexRuntime:
     @property
     def available_capabilities(self) -> frozenset[NativeCapability]:
         capabilities: set[NativeCapability] = set()
+        if self._account_rate_limits is not None:
+            capabilities.add(NativeCapability.ACCOUNT_RATE_LIMITS)
         if self._skill_catalog is not None:
             capabilities.add(NativeCapability.SKILLS)
         if self._goal_control is not None:
@@ -656,18 +670,50 @@ class CodexRuntime:
             ):
                 raise ValueError("current-only activation cannot carry an anchor")
             if binding.native_thread_id is not None:
-                state = await self.thread_catalog_state(binding.native_thread_id)
-                if state is NativeThreadCatalogState.ARCHIVED:
-                    raise ThreadArchived("归档会话必须先恢复，不能直接设为当前。")
-                if state is NativeThreadCatalogState.MISSING:
-                    raise ThreadCatalogIdentityMissing(
-                        "native Thread is absent from active and archived catalogs"
+                try:
+                    thread = await self._resume_thread_for_operation(
+                        binding.native_thread_id,
                     )
-            activated = self._bindings.activate(
-                scope_key=binding.scope_key,
-                binding_id=binding.id,
-                context_anchor=context_anchor,
-            )
+                    self._mark_thread_subscribed_locked(binding, thread)
+                except (ThreadLifecycleError, ThreadOccupied):
+                    raise
+                except asyncio.CancelledError:
+                    self.close_admission()
+                    raise
+                except Exception as error:
+                    self.close_admission()
+                    raise ThreadResumeFailed(
+                        "Codex 会话恢复结果未确认；本次未切换当前会话。"
+                        "服务已停止接收新任务，请重启服务。"
+                    ) from error
+            try:
+                activated = self._bindings.activate(
+                    scope_key=binding.scope_key,
+                    binding_id=binding.id,
+                    context_anchor=context_anchor,
+                )
+            except Exception as error:
+                # activate() commits before returning its final read. Do not
+                # claim rollback merely because that read failed.
+                self._advance_admission_revision(binding.id)
+                if binding.native_thread_id is None:
+                    raise
+                try:
+                    self._schedule_known_subscription_locked(
+                        binding.id,
+                        binding.native_thread_id,
+                    )
+                except Exception:
+                    self.close_admission()
+                    logger.exception("could not schedule resumed Thread subscription")
+                raise ThreadResumeFailed(
+                    "原生 Codex 会话已恢复，但本地切换结果未确认；"
+                    + (
+                        "请检查当前会话后再操作。"
+                        if self._accepting
+                        else "服务已停止接收新任务，请重启服务。"
+                    )
+                ) from error
             self._advance_admission_revision(binding.id)
             record = self._subscriptions.get(binding.id)
             if (
@@ -1272,6 +1318,178 @@ class CodexRuntime:
         if route.parent_binding_id != binding.id or route.state.terminal:
             raise SideSessionConflict("Side 路由已结束或父会话已变化，本次未创建。")
 
+    @asynccontextmanager
+    async def track_fork_creation(self, project_alias: str) -> AsyncIterator[None]:
+        """Include one ordinary fork handoff in existing shutdown ownership."""
+
+        task = asyncio.current_task()
+        if task is None or task in self._fork_creations:
+            raise RuntimeError("fork creation must have one non-nested owning task")
+        self._fork_creations[task] = project_alias
+        already_tracked = task in self._tasks
+        self._tasks.add(task)
+        try:
+            self.require_fork_creation_open(project_alias)
+            yield
+        finally:
+            self._fork_creations.pop(task, None)
+            if not already_tracked:
+                self._tasks.discard(task)
+
+    def project_has_fork_creation(self, project_alias: str) -> bool:
+        return project_alias in self._fork_creations.values()
+
+    def require_fork_creation_open(self, project_alias: str) -> None:
+        """Fence native creation and the final synchronous Binding commit."""
+
+        if not self._accepting:
+            raise RuntimeClosed("服务正在停止，本次分支创建未完成。")
+        if self._fork_creations.get(asyncio.current_task()) != project_alias:
+            raise RuntimeError("fork creation handoff is not owned by this task")
+        self._bindings.require_project_not_deleting(project_alias)
+
+    def _require_fork_source_locked(
+        self, source: ThreadBinding, expected_project_revision: int,
+    ) -> ThreadBinding:
+        self.require_fork_creation_open(source.project_alias)
+        self._guard_no_lifecycle_locked(source.id)
+        current = self._bindings.get(source.id)
+        if (
+            not current.active
+            or current.scope_key != source.scope_key
+            or current.project_alias != source.project_alias
+            or current.native_thread_id != source.native_thread_id
+            or current.settings_revision != source.settings_revision
+            or current.context_revision != source.context_revision
+            or current.feedback_revision != source.feedback_revision
+        ):
+            raise SteerRace("来源会话或配置已变化，请重新发送 /fork。")
+        if current.native_thread_id is None:
+            raise ThreadNotMaterialized(
+                "当前会话尚无原生上下文；请先发送一条任务，再使用 /fork。"
+            )
+        project = self._bindings.get_project(current.project_alias)
+        if not project.enabled:
+            raise ProjectDisabled("Project 已停用，不能创建分支。")
+        if project.revision != expected_project_revision:
+            raise SteerRace("Project 已变化，请重新发送 /fork。")
+        if current.id in self._compacting:
+            raise ThreadCompacting("来源会话正在压缩上下文，完成前不能创建分支。")
+        if current.id in self._goals:
+            raise self._goal_slot_error(self._goals[current.id])
+        active = self._active.get(current.id)
+        if active is not None:
+            if active.state is ActiveState.STOPPING:
+                raise ThreadStopping("来源 Turn 正在停止，完成后才能创建分支。")
+            if active.state is ActiveState.OBSERVATION_UNAVAILABLE:
+                raise TurnObservationUnavailable("来源 Turn 观测不可用，暂不能创建分支。")
+            raise ThreadRunningConfiguration("来源会话正在执行，空闲后才能创建分支。")
+        return current
+
+    async def fork_exact(
+        self, source: ThreadBinding, *, expected_project_revision: int,
+    ) -> NativeThread:
+        """Take one persistent native snapshot without loading the source."""
+
+        async with self._lock(source.id):
+            current = self._require_fork_source_locked(source, expected_project_revision)
+            await self._guard_no_goal_locked(current)
+            response = await AsyncThread(self._codex, current.native_thread_id).read(
+                include_turns=False,
+            )
+            native = getattr(response, "thread", None)
+            if (
+                getattr(native, "id", None) != current.native_thread_id
+                or getattr(native, "ephemeral", None) is not False
+            ):
+                raise ThreadLifecycleError("无法确认来源原生会话身份，本次未创建分支。")
+            if _thread_status_type(native) not in {"idle", "notLoaded"}:
+                raise ThreadRunningConfiguration(
+                    "来源原生会话尚未确认空闲，本次未创建分支。"
+                )
+            # Source settings and Project admission may change during the
+            # read-only awaits. No new native request follows a stale snapshot.
+            current = self._require_fork_source_locked(source, expected_project_revision)
+            try:
+                thread = await self._codex.thread_fork(
+                    current.native_thread_id, ephemeral=False, include_turns=False,
+                )
+            except asyncio.CancelledError:
+                raise
+            except InvalidRequestError as error:
+                raise ThreadLifecycleError(
+                    f"Codex 拒绝创建分支：{describe_error(error)}"
+                ) from error
+            except Exception as error:
+                raise ThreadLifecycleError(
+                    "原生分支创建结果未确认；本次不自动重试，可能需人工核查。"
+                ) from error
+            if (
+                not isinstance(getattr(thread, "id", None), str)
+                or not thread.id
+                or thread.id == current.native_thread_id
+            ):
+                raise ThreadLifecycleError(
+                    "Codex 返回的分支标识无效；创建结果未确认，不能继续绑定。"
+                )
+            # Preserve the known ID for the caller's partial-failure feedback.
+            # It rechecks admission before publishing/committing, and owns
+            # releasing this exact handle if that handoff cannot complete.
+            return thread
+
+    async def adopt_fork(
+        self, binding: ThreadBinding, thread: NativeThread, *, name: str | None = None,
+    ) -> bool:
+        """Register and optionally name the returned handle, without resuming it."""
+
+        async with self._lock(binding.id):
+            self.require_fork_creation_open(binding.project_alias)
+            current = self._bindings.get(binding.id)
+            if (
+                current.native_thread_id != thread.id
+                or current.native_thread_id != binding.native_thread_id
+                or current.scope_key != binding.scope_key
+                or current.project_alias != binding.project_alias
+            ):
+                raise SteerRace("分支绑定身份已变化，不能登记原生订阅。")
+            record = self._mark_thread_subscribed_locked(current, thread)
+            try:
+                if name is not None:
+                    normalized = " ".join(name.split())
+                    if not normalized or len(normalized) > 120:
+                        raise ValueError("会话名称必须为 1 到 120 个字符。")
+                    await thread.set_name(normalized)
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "persistent fork name write was not confirmed",
+                    extra={"binding_id": binding.id, "thread_id": thread.id},
+                )
+                return False
+            finally:
+                self._schedule_subscription_release_locked(record)
+
+    async def release_unbound_fork(self, thread: NativeThread) -> bool:
+        """Best-effort release of a known orphan handle, never delete or retry."""
+
+        control = self._thread_subscription_control
+        if control is None:
+            return False
+        try:
+            async with asyncio.timeout(_FORK_RELEASE_TIMEOUT_SECONDS):
+                await control.unsubscribe(thread.id)
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "unbound persistent fork subscription release was not confirmed",
+                exc_info=True, extra={"thread_id": thread.id},
+            )
+            return False
+
     async def drain_project_side_creation(self, binding_id: str) -> None:
         """Wait for an admitted Side fork to publish its exact local session.
 
@@ -1696,6 +1914,15 @@ class CodexRuntime:
 
         return await self.close_side(side_id, state=state)
 
+    async def account_rate_limits(self) -> AccountRateLimitsSnapshot:
+        """Read shared native account limits without opening a Thread."""
+
+        if not self._accepting:
+            raise RuntimeClosed("服务正在停止，暂不能读取 Codex 账号额度。")
+        if self._account_rate_limits is None:
+            raise AccountRateLimitsUnavailable("当前实例的 Codex 账号额度查询不可用。")
+        return await self._account_rate_limits.read()
+
     async def model_catalog(self) -> ModelCatalog:
         """Read the live native catalog; Netizen never caches model options."""
 
@@ -1961,47 +2188,6 @@ class CodexRuntime:
             return NativeThreadCatalogState.ARCHIVED
         return NativeThreadCatalogState.MISSING
 
-    async def _thread_delete_catalog_state(
-        self,
-        thread_id: str,
-    ) -> NativeThreadCatalogState:
-        """Reconcile one delete against both rollout scan and state DB views."""
-
-        deadline = (
-            asyncio.get_running_loop().time()
-            + _THREAD_DELETE_RECONCILE_TIMEOUT_SECONDS
-        )
-        active_present = False
-        archived_present = False
-        for use_state_db_only in (False, True):
-            active = await self.thread_metadata(
-                (thread_id,),
-                archived=False,
-                deadline=deadline,
-                max_pages=_THREAD_CATALOG_MAX_PAGES,
-                max_items=_THREAD_CATALOG_MAX_ITEMS,
-                use_state_db_only=use_state_db_only,
-            )
-            archived = await self.thread_metadata(
-                (thread_id,),
-                archived=True,
-                deadline=deadline,
-                max_pages=_THREAD_CATALOG_MAX_PAGES,
-                max_items=_THREAD_CATALOG_MAX_ITEMS,
-                use_state_db_only=use_state_db_only,
-            )
-            active_present = active_present or thread_id in active
-            archived_present = archived_present or thread_id in archived
-        if active_present and archived_present:
-            raise ThreadCatalogError(
-                "native Thread appeared in active and archived delete views"
-            )
-        if active_present:
-            return NativeThreadCatalogState.ACTIVE
-        if archived_present:
-            return NativeThreadCatalogState.ARCHIVED
-        return NativeThreadCatalogState.MISSING
-
     def context_window_usage(
         self,
         binding_id: str,
@@ -2213,7 +2399,7 @@ class CodexRuntime:
         if mutation_error is not None:
             try:
                 async with asyncio.timeout(
-                    _THREAD_DELETE_RECONCILE_TIMEOUT_SECONDS
+                    _THREAD_ARCHIVE_RECONCILE_TIMEOUT_SECONDS
                 ):
                     state = await self.thread_catalog_state(thread_id)
             except asyncio.CancelledError:
@@ -2370,33 +2556,35 @@ class CodexRuntime:
                 "本次未调用 Codex，Binding 与原生历史均未改变。"
             )
 
-        delete_error: Exception | None = None
         try:
             await control.delete(thread_id)
         except asyncio.CancelledError:
             await self._mark_lifecycle_unknown(operation)
             raise
-        except Exception as error:
-            delete_error = error
-
-        if delete_error is not None:
+        except ThreadDeleteRejected as error:
+            # Native delete may shut down the Thread before rejecting its
+            # history removal. Keep the Binding, but never revive stale local
+            # Turn/Goal/Activity or subscription observations.
+            async with self._lock(operation.binding_id):
+                binding = self._require_reserved_lifecycle_binding_locked(operation)
+                discarded = self._discard_local_thread_activity_locked(
+                    binding.id,
+                    thread_id,
+                )
             try:
-                state = await self._thread_delete_catalog_state(thread_id)
-            except asyncio.CancelledError:
-                await self._mark_lifecycle_unknown(operation)
-                raise
-            except Exception as reconcile_error:
-                await self._mark_lifecycle_unknown(operation)
-                raise ThreadLifecycleStateUnknown(
-                    "Codex 会话删除结果与原生目录均未确认；Binding 保留且"
-                    "当前 Binding 生命周期状态未知，请稍后重新检查。"
-                ) from reconcile_error
-            if state is not NativeThreadCatalogState.MISSING:
+                await self._deliver_thread_activity_discarded(discarded)
+            finally:
                 await self._release_lifecycle_reservation(operation)
-                raise ThreadLifecycleError(
-                    "Codex 会话仍存在于原生目录，Binding 已保留；"
-                    "本次删除未完成，请重新确认后重试。"
-                ) from delete_error
+            raise ThreadLifecycleError(
+                "Codex 未完成本次删除，Binding 已保留；"
+                "原有运行活动可能已停止，请重新确认后再操作。"
+            ) from error
+        except Exception as error:
+            await self._mark_lifecycle_unknown(operation)
+            raise ThreadLifecycleStateUnknown(
+                "Codex 会话删除结果未确认；Binding 已保留，"
+                "当前 Binding 生命周期状态未知，不能自动重试。"
+            ) from error
 
         local_commit_error: Exception | None = None
         async with self._lock(operation.binding_id):
@@ -2419,7 +2607,7 @@ class CodexRuntime:
                     self._finish_lifecycle_locked(operation)
         if local_commit_error is not None:
             raise ThreadLifecycleStateUnknown(
-                "原生 Codex 会话已删除或确认不存在，但 Binding 删除结果未确认。"
+                "原生 Codex 会话已删除，但 Binding 删除结果未确认。"
             ) from local_commit_error
         return deleted
 
@@ -3982,7 +4170,7 @@ class CodexRuntime:
             return True
 
     async def _resume_thread_for_operation(self, thread_id: str) -> NativeThread:
-        """Recognize only an exact writer rejection before a new operation.
+        """Recognize only verified exact-ID resume rejections.
 
         A timeout, another invalid request, or the same text from a different
         operation is not proof that the requested operation had no side effects.
@@ -3992,10 +4180,26 @@ class CodexRuntime:
         try:
             return await self._codex.thread_resume(thread_id, include_turns=False)
         except InvalidRequestError as error:
-            if (
-                error.code == -32600
-                and error.message == f"thread {thread_id} already has an active writer"
+            if error.code != -32600:
+                raise
+            if error.message == (
+                f"session {thread_id} is archived. Run `codex unarchive {thread_id}` "
+                "to unarchive it first."
             ):
+                raise ThreadArchived(
+                    "原生会话已归档；请先使用“恢复归档并切换”。"
+                ) from error
+            if error.message == f"no rollout found for thread id {thread_id}":
+                raise ThreadResumeNotFound(
+                    "未找到该原生会话的可恢复记录；Binding 已保留。"
+                ) from error
+            if error.message == (
+                f"thread {thread_id} is closing; retry thread/resume after the thread is closed"
+            ):
+                raise ThreadLifecycleError(
+                    "原生会话正在关闭；请等待关闭完成后再恢复。"
+                ) from error
+            if error.message == f"thread {thread_id} already has an active writer":
                 raise ThreadOccupied(
                     "该会话正被其他 Codex 实例占用，本次操作未执行。"
                     "请在占用该会话的 Codex App 中归档，或在占用它的 CLI 会话中执行 /archive；"
@@ -4292,7 +4496,7 @@ class CodexRuntime:
         binding_id: str,
         thread_id: str,
     ) -> ThreadActivityDiscardedOutcome:
-        """Forget local execution state after native archive/delete is confirmed."""
+        """Forget observations invalidated by native archive/delete shutdown."""
 
         changed = False
         turn_id: str | None = None

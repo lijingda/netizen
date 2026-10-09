@@ -182,6 +182,14 @@ class ThreadArchived(ThreadLifecycleError):
     pass
 
 
+class ThreadResumeNotFound(ThreadLifecycleError):
+    """Native resume explicitly found no restorable record for the exact ID."""
+
+
+class ThreadResumeFailed(ThreadLifecycleError):
+    """Native resume or its subsequent local activation is not confirmed."""
+
+
 class ThreadNotArchived(ThreadLifecycleError):
     pass
 
@@ -219,10 +227,6 @@ class ThreadCatalogDeadlineExceeded(ThreadCatalogError):
 
 
 class ThreadCatalogLimitExceeded(ThreadCatalogError):
-    pass
-
-
-class ThreadCatalogIdentityMissing(ThreadCatalogError):
     pass
 
 
@@ -672,7 +676,7 @@ class TurnObservationUnavailableOutcome:
 
 @dataclass(frozen=True, slots=True)
 class ThreadActivityDiscardedOutcome:
-    """Presentation-only notice after native Thread removal is committed."""
+    """Presentation-only notice after native removal invalidates observations."""
 
     binding_id: str
     thread_id: str

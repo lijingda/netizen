@@ -3847,7 +3847,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(activated.context_revision, first_context_revision)
         self.assertEqual(self.message_history.resolve_calls, [])
         updated = self.channel.updates[-1][1]
-        self.assertIn("已切换到会话", str(updated))
+        self.assertIn("已恢复并切换到会话", str(updated))
         self.assertIn("● 当前", str(updated))
 
     async def test_sessions_activate_catch_up_resets_boundary_to_exact_card(
@@ -4013,7 +4013,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.store.active_binding(scope.key).id, first.id)
         reply = self.channel.replies[-1][1]
-        self.assertIn("已切换到会话", reply)
+        self.assertIn("已恢复并切换到会话", reply)
 
     async def test_sessions_activate_rejects_cross_scope_binding(self) -> None:
         await self.fixture.new(message_id="om_new_one")

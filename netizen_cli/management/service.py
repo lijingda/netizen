@@ -61,7 +61,7 @@ from ..runtime.contracts import (
     StopDisposition,
     ThreadSubscriptionState,
     ThreadArchived,
-    ThreadCatalogIdentityMissing,
+    ThreadResumeNotFound,
     ThreadDeleteTargetChanged,
     ThreadDeleteUnavailable,
     ThreadLifecycleError,
@@ -134,6 +134,10 @@ class SidePublicationInProgress(ManagementError):
 
 
 class SchedulePublicationInProgress(ManagementError):
+    pass
+
+
+class ForkPublicationInProgress(ManagementError):
     pass
 
 
@@ -649,6 +653,9 @@ class ManagementRuntimePort:
     def project_side_snapshots(self, alias: str) -> tuple[SideSessionSnapshot, ...]:
         return self.__runtime.project_side_snapshots(alias)
 
+    def project_has_fork_creation(self, alias: str) -> bool:
+        return self.__runtime.project_has_fork_creation(alias)
+
     async def thread_metadata_exact(
         self,
         thread_ids: tuple[str, ...],
@@ -965,6 +972,8 @@ class InstanceManagementService:
         code = "deleted"
         deleted = False
         try:
+            if self._runtime.project_has_fork_creation(alias):
+                raise ForkPublicationInProgress(alias)
             if self._schedule_creation_drain is not None:
                 drained = await self._schedule_creation_drain(
                     alias, min(deadline, loop.time() + _PROJECT_DELETE_STEP_SECONDS),
@@ -1066,6 +1075,8 @@ class InstanceManagementService:
                 code = "side_creation_in_progress"
             elif isinstance(error, SchedulePublicationInProgress):
                 code = "schedule_creation_in_progress"
+            elif isinstance(error, ForkPublicationInProgress):
+                code = "fork_creation_in_progress"
             else:
                 code = "delete_failed"
         finally:
@@ -1570,9 +1581,9 @@ class InstanceManagementService:
                     binding.id,
                     context_anchor=context_anchor,
                 )
-            except ThreadCatalogIdentityMissing as error:
+            except ThreadResumeNotFound as error:
                 raise NativeThreadMissing(
-                    "原生会话不在 active 或 archived catalog；本次未设为当前。"
+                    "Codex 未找到该会话的可恢复记录；已保留会话，本次未切换。"
                 ) from error
             await self._runtime.binding_pointer_changed(previous_id, activated.id)
             return activated
@@ -1718,9 +1729,9 @@ class InstanceManagementService:
             binding, previous_id = self._require_exact(target)
             try:
                 activated = await self._runtime.activate_exact(binding.id)
-            except ThreadCatalogIdentityMissing as error:
+            except ThreadResumeNotFound as error:
                 raise NativeThreadMissing(
-                    "原生会话不在 active 或 archived catalog；本次未设为当前。"
+                    "Codex 未找到该会话的可恢复记录；已保留会话，本次未切换。"
                 ) from error
             await self._runtime.binding_pointer_changed(previous_id, activated.id)
             return activated

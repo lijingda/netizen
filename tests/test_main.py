@@ -861,6 +861,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 patch("netizen_cli.main.PinnedExperimentalTerminalCleanup", FakeCleanup),
                 patch("netizen_cli.main.AppServerThreadSubscriptionControl", FakeCleanup),
                 patch("netizen_cli.main.AppServerSkillCatalog", side_effect=lambda _: events.append("catalog:init")),
+                patch("netizen_cli.main.AppServerAccountRateLimits") as account_limits,
             ):
                 await core.start()
                 self.assertLess(events.index("admin:bind"), events.index("codex:init"))
@@ -870,6 +871,8 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 self.assertLess(events.index("skills:set"), events.index("admin:attach"))
                 self.assertLess(events.index("skills:set"), events.index("catalog:init"))
                 self.assertEqual(self.skill_root_calls, [(core._codex, (self.builtin_root,))])
+                account_limits.assert_called_once_with(core._codex)
+                self.assertIs(core._runtime._account_rate_limits, account_limits.return_value)
                 self.assertEqual(admin_options, {
                     "host": "0.0.0.0", "port": None,
                     "credential_path": root / "admin-secret",

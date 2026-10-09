@@ -1731,7 +1731,11 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("deleteMaterialized", by_id["binding-native"]["actions"])
         self.assertIn("deleteMaterialized", by_id["binding-archived"]["actions"])
+        self.assertNotIn("activate", by_id["binding-archived"]["actions"])
+        self.assertIn("unarchiveCurrent", by_id["binding-archived"]["actions"])
         self.assertNotIn("deleteMaterialized", by_id["binding-lazy"]["actions"])
+        self.assertNotIn("archive", by_id["binding-lazy"]["actions"])
+        self.assertNotIn("archive", by_id["binding-archived"]["actions"])
 
         status, _headers, page = await self.json_get(
             "/api/v1/sessions?pageSize=100",
@@ -1778,7 +1782,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 400)
         self.assertEqual(error["code"], "invalid_query")
 
-    async def test_unknown_session_state_preserves_identity_and_stop_without_native_grants(self) -> None:
+    async def test_unknown_session_state_retains_exact_lifecycle_and_stop_actions(self) -> None:
         self.runner.open_admission()
         session = await self.login()
         unknown = replace(
@@ -1825,8 +1829,18 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(item["updatedAt"], metadata.updated_at if metadata else None)
                 self.assertEqual(item["runtime"]["primaryStatus"], "running")
                 self.assertEqual(
-                    set(item["actions"]), {"configure", "createLazy", "stop"},
+                    set(item["actions"]),
+                    {"configure", "createLazy", "stop", "activate", "archive", "deleteMaterialized"},
                 )
+                status, _, result = await self.json_post(
+                    "/api/v1/sessions/activate", session,
+                    _action_payload(item["actions"]["activate"]),
+                )
+                self.assertEqual(status, 200, result)
+                name, values = self.management.calls[-1]
+                self.assertEqual(name, "activate")
+                self.assertEqual(values["target"].binding_id, "binding-unknown")
+                self.assertEqual(values["target"].scope_key, unknown.scope_key)
                 self.assertEqual(page["items"][1]["catalogState"], "lazy")
                 self.assertIn("deleteLazy", page["items"][1]["actions"])
 
@@ -1841,6 +1855,48 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status, 200, page)
             self.assertEqual(page["items"], [])
             self.assertFalse(page["catalogAvailable"])
+
+    async def test_unlisted_current_fork_can_use_exact_archive_and_delete_actions(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        scope = replace(
+            self.management.scope,
+            scope_key="cli_test:topic:oc_chat:omt_fork",
+            kind=ScopeKind.TOPIC, topic_id="omt_fork", active_binding_id="binding-fork",
+        )
+        fork = replace(
+            self.management.native, id="binding-fork", scope_key=scope.scope_key,
+            native_thread_id="native-fork",
+        )
+        self.management.runtime_by_id[fork.id] = self.management._runtime(fork.id, 1)
+        self.management.session_items_override = (
+            SessionInventoryItem(
+                BindingInventoryRecord(fork, scope),
+                NativeThreadView(None, NativeThreadMetadata("native-fork", "Unread fork", "Inherited history")),
+                ChatLabelResolver.fallback(scope.chat_id),
+            ),
+        )
+        for action, operation in (("archive", "archive"), ("deleteMaterialized", "delete-materialized")):
+            with self.subTest(action=action):
+                status, _, page = await self.json_get("/api/v1/sessions", session)
+                self.assertEqual(status, 200, page)
+                item = page["items"][0]
+                self.assertEqual(item["catalogState"], "unknown")
+                self.assertEqual(item["pointerState"], "current")
+                self.assertEqual(item["nativeTitle"], "Unread fork")
+                self.assertNotIn("activate", item["actions"])
+                status, _, result = await self.json_post(
+                    f"/api/v1/sessions/{operation}", session,
+                    _action_payload(item["actions"][action]),
+                )
+                self.assertEqual(status, 200, result)
+                name, values = self.management.calls[-1]
+                self.assertEqual(name, operation)
+                self.assertEqual(values["target"].binding_id, fork.id)
+                self.assertEqual(values["target"].scope_key, scope.scope_key)
+                self.assertIsNone(values["target"].expected_active_binding_id)
+                if operation == "delete-materialized":
+                    self.assertEqual(values["expected_native_thread_id"], fork.native_thread_id)
 
     async def test_projects_api_keeps_local_inventory_when_catalog_is_unconfirmed(self) -> None:
         self.runner.open_admission()
@@ -1868,7 +1924,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("setEnabled", item["actions"])
                 self.assertIn("previewDelete", item["actions"])
 
-    async def test_materialized_delete_action_requires_capability_and_live_catalog(self) -> None:
+    async def test_materialized_delete_action_requires_capability_not_catalog_membership(self) -> None:
         self.runner.open_admission()
         session = await self.login()
 
@@ -1910,7 +1966,8 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(status, 200)
-        self.assertNotIn("deleteMaterialized", page["items"][0]["actions"])
+        self.assertIn("deleteMaterialized", page["items"][0]["actions"])
+        self.assertIn("archive", page["items"][0]["actions"])
 
     async def test_materialized_delete_action_is_one_shot(self) -> None:
         self.runner.open_admission()

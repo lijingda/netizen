@@ -50,6 +50,11 @@ class CommandSpec:
 
 COMMAND_SPECS = (
     CommandSpec(
+        "fork", ControlName.FORK, CommandOwner.HYBRID, "/fork",
+        "从当前空闲会话另建普通话题，继承上下文并共享项目文件",
+        group=CommandGroup.START,
+    ),
+    CommandSpec(
         "new",
         ControlName.NEW,
         CommandOwner.HYBRID,
@@ -95,6 +100,16 @@ COMMAND_SPECS = (
         CommandOwner.CHANNEL,
         "/help",
         "显示本帮助",
+        group=CommandGroup.START,
+    ),
+    CommandSpec(
+        "usage",
+        ControlName.USAGE,
+        CommandOwner.HYBRID,
+        "/usage",
+        "查看共享 Codex 账号的剩余额度和重置时间；无需创建会话",
+        requires=NativeCapability.ACCOUNT_RATE_LIMITS,
+        unavailable_reason="当前 SDK/App Server 的账号额度查询兼容契约未通过",
         group=CommandGroup.START,
     ),
     CommandSpec(
@@ -404,6 +419,8 @@ def _validate_arguments(name: ControlName, arguments: tuple[str, ...]) -> None:
         ControlName.STOP: 0,
         ControlName.RELEASE: 0,
         ControlName.STATUS: 0,
+        ControlName.USAGE: 0,
+        ControlName.FORK: 0,
         ControlName.ADMIN: 0,
         ControlName.GOAL: None,
         ControlName.HELP: 0,
@@ -501,7 +518,10 @@ def command_help(
     return "\n".join(lines)
 
 
-def side_command_help(*, requires_mention: bool) -> str:
+def side_command_help(
+    *, requires_mention: bool,
+    available_capabilities: Collection[NativeCapability] = (),
+) -> str:
     lines = [
         "### Side 话题帮助",
         "",
@@ -516,6 +536,10 @@ def side_command_help(*, requires_mention: bool) -> str:
         "- `/stop` — 只中断当前 Side 任务，Side 仍可继续",
         "- `/side close` — 结束当前 Side 话题，结束后不能继续",
         "- `/admin` — 查看当前实例的管理地址和根目录",
+        *(
+            ["- `/usage` — 查看共享 Codex 账号的剩余额度和重置时间"]
+            if NativeCapability.ACCOUNT_RATE_LIMITS in available_capabilities else []
+        ),
         "- `/help` 或 `/` — 显示本帮助",
         "",
         "---",

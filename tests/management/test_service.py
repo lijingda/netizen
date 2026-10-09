@@ -38,7 +38,7 @@ from netizen_cli.codex_runtime import (
     ThreadSubscriptionState,
     ThreadArchived,
     ThreadCatalogError,
-    ThreadCatalogIdentityMissing,
+    ThreadResumeNotFound,
     ThreadDeleteTargetChanged,
 )
 from netizen_cli.domain import (
@@ -110,16 +110,17 @@ class FakeManagementRuntime:
         self.calls.append(("resolve-settings", values))
         return BindingTurnSettings(**values)
 
-    async def activate_exact(self, binding_id: str):
+    async def activate_exact(self, binding_id: str, *, context_anchor=None):
         self.calls.append(("activate", binding_id))
         binding = self.store.get(binding_id)
         if binding.native_thread_id in self.archived:
             raise ThreadArchived("archived")
         if binding.native_thread_id in self.missing:
-            raise ThreadCatalogIdentityMissing("missing")
+            raise ThreadResumeNotFound("missing")
         return self.store.activate(
             scope_key=binding.scope_key,
             binding_id=binding.id,
+            context_anchor=context_anchor,
         )
 
     async def rename_exact(self, binding_id: str, name: str) -> str:
@@ -306,6 +307,9 @@ class FakeManagementRuntime:
     def side_snapshot_exact(self, side_id: str):
         self.calls.append(("side-snapshot", side_id))
         return self.side_snapshots.get(side_id)
+
+    def project_has_fork_creation(self, alias: str) -> bool:
+        return False
 
     def project_side_snapshots(self, alias: str, *, limit: int = 1000):
         self.calls.append(("project-side-snapshots", alias))
@@ -806,22 +810,68 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.store.get(binding.id).id, binding.id)
 
-    async def test_exact_activate_rejects_missing_native_catalog_identity(self) -> None:
+    async def test_both_activation_entries_map_native_resume_not_found_and_keep_current(self) -> None:
         binding = await self._create()
         self.store.assign_native_thread_id(binding.id, "native-missing")
         current = await self._create()
         self.runtime.missing.add("native-missing")
 
-        with self.assertRaises(NativeThreadMissing):
-            await self.service.activate_exact_binding(
-                target=ExactBindingTarget(
-                    scope_key=self.scope.key,
-                    binding_id=binding.id,
-                    expected_active_binding_id=current.id,
-                )
-            )
+        for exact in (False, True):
+            with self.subTest(exact=exact):
+                self.runtime.calls.clear()
+                with self.assertRaisesRegex(NativeThreadMissing, "可恢复记录"):
+                    if exact:
+                        await self.service.activate_exact_binding(
+                            target=ExactBindingTarget(self.scope.key, binding.id, current.id),
+                        )
+                    else:
+                        await self.service.resume_current_binding(
+                            scope_key=self.scope.key, reference=binding.short_id,
+                        )
+                self.assertEqual(self.runtime.calls, [("activate", binding.id)])
+                self.assertEqual(self.store.active_binding(self.scope.key).id, current.id)
+                self.assertEqual(self.store.get(binding.id).native_thread_id, "native-missing")
 
-        self.assertEqual(self.store.active_binding(self.scope.key).id, current.id)
+    async def test_both_activation_entries_use_runtime_without_catalog_preflight(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-unlisted")
+        current = await self._create()
+        for exact in (False, True):
+            with self.subTest(exact=exact):
+                self.store.activate(scope_key=self.scope.key, binding_id=current.id)
+                self.runtime.calls.clear()
+                if exact:
+                    activated = await self.service.activate_exact_binding(
+                        target=ExactBindingTarget(self.scope.key, binding.id, current.id),
+                    )
+                else:
+                    activated = await self.service.resume_current_binding(
+                        scope_key=self.scope.key, reference=binding.short_id,
+                    )
+                self.assertEqual(activated.id, binding.id)
+                self.assertEqual(self.runtime.calls, [
+                    ("activate", binding.id), ("pointer", current.id, binding.id),
+                ])
+
+    async def test_both_activation_entries_keep_archived_rejection_explicit(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "native-archived")
+        current = await self._create()
+        self.runtime.archived.add("native-archived")
+        for exact in (False, True):
+            with self.subTest(exact=exact):
+                self.runtime.calls.clear()
+                with self.assertRaises(ThreadArchived):
+                    if exact:
+                        await self.service.activate_exact_binding(
+                            target=ExactBindingTarget(self.scope.key, binding.id, current.id),
+                        )
+                    else:
+                        await self.service.resume_current_binding(
+                            scope_key=self.scope.key, reference=binding.short_id,
+                        )
+                self.assertEqual(self.runtime.calls, [("activate", binding.id)])
+                self.assertEqual(self.store.active_binding(self.scope.key).id, current.id)
 
     async def test_name_writer_wait_does_not_block_same_or_other_scope(self) -> None:
         first = await self._create()

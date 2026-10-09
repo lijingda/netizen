@@ -1149,10 +1149,7 @@ class AdminWebApplication:
         if (
             binding.message_context_mode is MentionContextMode.CURRENT_ONLY
             and status.pointer_state != "current"
-            and (
-                binding.native_thread_id is None
-                or native_state is NativeThreadCatalogState.ACTIVE
-            )
+            and native_state is not NativeThreadCatalogState.ARCHIVED
         ):
             actions["activate"] = self._grant(
                 context, "sessions.activate", target, preconditions
@@ -1164,12 +1161,6 @@ class AdminWebApplication:
         elif native_state is NativeThreadCatalogState.ACTIVE:
             actions["rename"] = self._grant(
                 context, "sessions.rename", target, preconditions
-            )
-            actions["archive"] = self._grant(
-                context,
-                "sessions.archive",
-                target,
-                lifecycle_preconditions,
             )
             if status.can_release:
                 actions["release"] = self._grant(
@@ -1183,14 +1174,16 @@ class AdminWebApplication:
                 actions["unarchiveCurrent"] = self._grant(
                     context, "sessions.unarchive-current", target, preconditions
                 )
-        if (
-            self._management.native_delete_available
-            and native_state
-            in {
-                NativeThreadCatalogState.ACTIVE,
-                NativeThreadCatalogState.ARCHIVED,
-            }
-        ):
+        # A persistent fork may exist before it appears in native catalogs.
+        # Keep exact lifecycle controls available and let the native call decide.
+        if binding.native_thread_id is not None and native_state is not NativeThreadCatalogState.ARCHIVED:
+            actions["archive"] = self._grant(
+                context,
+                "sessions.archive",
+                target,
+                lifecycle_preconditions,
+            )
+        if binding.native_thread_id is not None and self._management.native_delete_available:
             actions["deleteMaterialized"] = self._grant(
                 context,
                 "sessions.delete-materialized",
@@ -1522,6 +1515,7 @@ class AdminWebApplication:
             "side_close_failed": "关联 Side 的关闭未完成，请先处理该 Side。",
             "side_creation_in_progress": "关联 Side 正在创建飞书话题，请等待创建完成后刷新并重新确认。",
             "schedule_creation_in_progress": "关联定时任务仍在创建话题或执行交接结果未决，请查看剩余记录后重新确认。",
+            "fork_creation_in_progress": "关联分支仍在创建话题，请等待创建完成后刷新并重新确认。",
             "delete_failed": "删除未全部完成，请查看剩余会话状态后重新确认。",
         }
         if result.deleted:
