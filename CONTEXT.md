@@ -39,6 +39,9 @@ tag/commit，且构建后的 manifest、摘要和不可变 Release 资产保持�
 目标服务环境的开发验证。它在相关 SDK、Adapter、原生生命周期或环境变更时按需运行，
 用于形成或更新兼容性结论，不是每次 merge 或 Published Release 的通用门禁。
 
+**Feishu Chat / 飞书聊天**：飞书中的一个单聊或群聊，可包含多个话题；它是交流位置，
+不同于在其中继续工作的 Agent 会话。
+
 **Binding Scope / 普通 Scope**：独立承载 active Binding 指针的飞书位置：P2P、群聊
 主线或一个普通真实话题。被 Side Topic Route 占用的话题不再解释为 Binding Scope。
 
@@ -46,7 +49,7 @@ tag/commit，且构建后的 manifest、摘要和不可变 Release 资产保持�
 更换 App ID 会进入新的 Binding Scope 命名空间；旧 Channel 记录和原生 Codex 历史继续
 保留，但不迁移到新应用的 Scope。
 
-**Thread Binding / 会话**：Scope 内的 Channel 记录，保存本地 ID、Project alias、
+**Thread Binding / Agent 会话（会话）**：Scope 内的 Channel 记录，保存本地 ID、Project alias、
 可空 native Codex Thread ID、可选的 Binding Turn Settings、Binding Task Feedback、
 Mention Context Mode、对应 revision、creator 和时间。它不复制 Codex 历史或已生效的
 原生 Thread 配置。

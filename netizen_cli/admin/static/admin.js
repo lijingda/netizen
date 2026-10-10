@@ -1662,11 +1662,12 @@ function chatTarget(prefix, onChange = null) {
     node("chat").required = !locked && manual;
     node("chat-kind").disabled = locked;
     picker.setDisabled(locked);
+    node("chat-id-help").hidden = !manual || locked;
     node("chat-help").textContent = node("chat-kind").value === "p2p"
-      ? `请填写聊天 ID，不是用户 ID。推荐在目标单聊中使用 ${prefix === "defaults" ? "/defaults 配置默认会话" : "/cron 创建定时任务"}，无需查询聊天 ID。单聊仅使用当前消息。`
+      ? `也可在目标单聊中发送 ${prefix === "defaults" ? "/defaults，直接配置该聊天" : "/cron，选择“当前聊天”"}，无需查询聊天 ID。`
       : node("chat-kind").value === "unknown"
         ? "暂未确认聊天类型，保留原聊天 ID；读取失败不会更换目标。"
-        : manual ? "请填写群聊的聊天 ID，不是用户 ID。保存时将重新检查目标。" : "";
+        : manual ? "请填写群聊的聊天 ID。保存时将重新检查目标。" : "";
   }
   node("chat-kind").addEventListener("change", () => {
     avatarRevision += 1;

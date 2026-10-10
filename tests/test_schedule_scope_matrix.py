@@ -22,6 +22,7 @@ from netizen_cli.runtime.contracts import (
 )
 from netizen_cli.schedules.models import ScheduleRule
 from netizen_cli.schedules.scheduler import Scheduler
+from tests.support.chat_targets import FakeChatTargetDirectory
 
 from tests.support.channel_messages import (
     FakeChannel,
@@ -85,7 +86,8 @@ class ScheduleScopeMatrixTest(unittest.IsolatedAsyncioTestCase):
 
             channel.get_chat_info = get_chat_info
             management = InstanceManagementService(bindings=store, projects=projects,
-                runtime=ManagementRuntimePort(runtime), scope_coordinator=ScopeCoordinator())
+                runtime=ManagementRuntimePort(runtime), scope_coordinator=ScopeCoordinator(),
+                chat_directory=FakeChatTargetDirectory(channel))
             app = ChannelApplication(app_id="app", channel=channel, runtime=runtime,
                 bindings=store, projects=projects, management=management)
             scheduler = Scheduler(store, runtime, "app", app.dispatch_scheduled_run)

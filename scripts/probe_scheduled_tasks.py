@@ -40,6 +40,7 @@ sys.path.insert(0, str(SOURCE_ROOT))
 
 from netizen_cli.bindings import BindingNotFound, BindingStore  # noqa: E402
 from netizen_cli.channel_app import ChannelApplication  # noqa: E402
+from netizen_cli.chat_targets import ValidatedChatTarget  # noqa: E402
 from netizen_cli.codex_runtime import CodexRuntime, StopDisposition  # noqa: E402
 from netizen_cli.domain import FeishuScope, ScopeKind  # noqa: E402
 from netizen_cli.management.coordination import ScopeCoordinator  # noqa: E402
@@ -129,6 +130,10 @@ class FakeFeishu:
 
     async def get_chat_info(self, chat_id: str) -> object:
         return SimpleNamespace(chat_type="group")
+
+    async def validate_target(self, chat_id: str) -> ValidatedChatTarget:
+        # This harness deliberately has no real Feishu client or credentials.
+        return ValidatedChatTarget(chat_id, "group")
 
     async def send(self, to: str, content: object, opts: object = None) -> object:
         key = getattr(opts, "uuid", None)
@@ -512,6 +517,7 @@ async def _mcp_recovery_phase(cwd: Path, model: str, store: BindingStore) -> dic
     """Rotate process MCP state, cold-resume an exact history, then fork it."""
     recorder = McpRecorder(ScheduleService(
         bindings=store, runtime=None, app_id="probe", chat_info=FakeFeishu(), default_timezone="UTC",
+        chat_target_validator=FakeFeishu().validate_target,
     ))
     native_ids: set[str] = set()
     attempted: set[str] = set()
@@ -632,7 +638,7 @@ async def _dispatch_phase(codex: AsyncCodex, cwd: Path, store: BindingStore, own
     channel = FakeFeishu()
     runtime = CodexRuntime(codex=codex, bindings=store, terminal_cleanup=PinnedExperimentalTerminalCleanup(codex),
                            thread_subscription_control=AppServerThreadSubscriptionControl(codex), thread_delete_control=owned)
-    management = InstanceManagementService(bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime), scope_coordinator=ScopeCoordinator())
+    management = InstanceManagementService(bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime), scope_coordinator=ScopeCoordinator(), chat_directory=channel)
     application = ChannelApplication(app_id="probe", channel=channel, runtime=runtime, bindings=store, projects=projects, management=management)
     outcomes: asyncio.Queue[TurnOutcome | ProbeCompletionFailure] = asyncio.Queue()
 
@@ -730,7 +736,7 @@ async def _manual_phase(
     channel = FakeFeishu()
     runtime = CodexRuntime(codex=codex, bindings=store, terminal_cleanup=PinnedExperimentalTerminalCleanup(codex),
                            thread_subscription_control=AppServerThreadSubscriptionControl(codex), thread_delete_control=owned)
-    management = InstanceManagementService(bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime), scope_coordinator=ScopeCoordinator())
+    management = InstanceManagementService(bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime), scope_coordinator=ScopeCoordinator(), chat_directory=channel)
     application = ChannelApplication(app_id="probe", channel=channel, runtime=runtime, bindings=store, projects=projects, management=management)
     outcomes: asyncio.Queue[TurnOutcome | ProbeCompletionFailure] = asyncio.Queue()
 
@@ -741,7 +747,8 @@ async def _manual_phase(
     clock = [time.time()]
     scheduler = Scheduler(store, runtime, "probe", application.dispatch_scheduled_run, lambda: clock[0])
     service = ScheduleService(bindings=store, runtime=runtime, app_id="probe", chat_info=channel,
-                              wall_clock=lambda: clock[0], default_timezone="UTC")
+                              wall_clock=lambda: clock[0], default_timezone="UTC",
+                              chat_target_validator=channel.validate_target)
     service.set_run_now_handler(scheduler.run_now)
     service.set_refresh_handler(scheduler.refresh)
     plan_id = None
@@ -835,7 +842,7 @@ async def _binding_phase(
     )
     management = InstanceManagementService(
         bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime),
-        scope_coordinator=ScopeCoordinator(),
+        scope_coordinator=ScopeCoordinator(), chat_directory=channel,
     )
     application = ChannelApplication(
         app_id="probe", channel=channel, runtime=runtime, bindings=store,
@@ -976,7 +983,8 @@ async def probe(*, phase: str, model: str, timeout: float) -> dict[str, Any]:
                             result[selected] = await _mcp_recovery_phase(cwd, model, store)
                             continue
                         if selected == "mcp":
-                            recorder = McpRecorder(ScheduleService(bindings=store, runtime=None, app_id="probe", chat_info=FakeFeishu(), default_timezone="UTC"))
+                            recorder = McpRecorder(ScheduleService(bindings=store, runtime=None, app_id="probe", chat_info=FakeFeishu(), default_timezone="UTC",
+                                                                 chat_target_validator=FakeFeishu().validate_target))
                             runner.attach(recorder.manage)
                             await runner.bind()
                             runner.open_admission()

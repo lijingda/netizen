@@ -7,6 +7,7 @@ from typing import Any
 
 from ..bindings import BindingQueryBusy, BindingQueryClosed, BindingQueryTimeout, BindingStore
 from ..channel.messages import public_chat_kind
+from ..chat_targets import ChatTargetError, ChatTargetValidator
 from ..domain import MentionContextMode
 from ..model_settings import ModelCatalogError, STANDARD_SERVICE_TIER_ID
 from ..projects import Project, ProjectError, ProjectRegistry
@@ -29,12 +30,14 @@ class SessionDefaultsService:
     def __init__(
         self, *, bindings: BindingStore, projects: ProjectRegistry,
         runtime: Any, app_id: str, chat_info: Any = None, blocking_io: Any = None,
+        chat_target_validator: ChatTargetValidator | None = None,
     ) -> None:
         self.app_id = app_id
         self._store = bindings.defaults
         self._projects = projects
         self._runtime = runtime
         self._chat_info = chat_info
+        self._chat_target_validator = chat_target_validator
         self._blocking_io = blocking_io
 
     async def _chat(self, chat_id: str) -> tuple[str, Any]:
@@ -173,7 +176,12 @@ class SessionDefaultsService:
             raise DefaultConfigurationError(str(error)) from error
         project = _text(request.get("project"), "project", maximum=64)
         if chat_id is not None:
-            chat_kind, _ = await self._chat(chat_id)
+            if self._chat_target_validator is None:
+                raise DefaultConfigurationError("飞书聊天校验暂不可用，请稍后重试。", code="chat_query_unavailable")
+            try:
+                chat_kind = (await self._chat_target_validator(chat_id)).chat_kind
+            except ChatTargetError as error:
+                raise DefaultConfigurationError(str(error), code=error.code) from error
             if chat_kind == "p2p" and settings.message_context_mode is MentionContextMode.CATCH_UP:
                 raise DefaultConfigurationError("单聊默认配置只支持 current-only。")
         candidate = DefaultRule(rule_id or "", self.app_id, kind, chat_id, keyword, project, settings, expected or 1, None)

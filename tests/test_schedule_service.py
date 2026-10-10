@@ -9,11 +9,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from netizen_cli.bindings import BindingQueryBusy, BindingQueryClosed, BindingQueryTimeout, BindingStore, ScopeNotFound, BindingTurnSettings, BindingTaskFeedback
+from netizen_cli.chat_targets import ChatTargetError
 from netizen_cli.domain import FeishuScope, ScopeKind, MentionContextMode, MessageContextAnchor
 from netizen_cli.model_settings import ModelCatalog, ModelOption, EffortOption, ServiceTierOption
 from netizen_cli.session_settings import SessionSettings
 from netizen_cli.schedules.scheduler import Scheduler
 from netizen_cli.schedules.service import ScheduleService
+from tests.support.chat_targets import FakeChatTargetDirectory
 
 
 class ChatInfoFixture:
@@ -62,6 +64,7 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         self.store.register_project(alias="p", cwd=str(self.cwd))
         self.now = datetime.fromisoformat("2026-09-08T08:00:00+00:00").timestamp()
         self.chats = ChatInfoFixture()
+        self.chat_targets = FakeChatTargetDirectory(self.chats)
         self.runtime = RunReaderFixture()
 
         async def dispatch(claim):
@@ -85,6 +88,7 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
             bindings=self.store, runtime=self.runtime, app_id=app_id,
             chat_info=self.chats, wall_clock=lambda: self.now,
             default_timezone="Asia/Shanghai",
+            chat_target_validator=self.chat_targets.validate_target,
         )
 
     def binding(self, chat_id, thread_id, *, app_id="app", direct=False):
@@ -478,6 +482,24 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unavailable["model_catalog_error"]["code"], "model_catalog_unavailable")
         self.assertEqual(unavailable["session_settings"], options["session_settings"])
 
+    async def test_model_catalog_options_do_not_reload_chat_or_binding_inputs(self):
+        catalog = self.session_catalog()
+        with (
+            patch.object(self.service, "_source", side_effect=AssertionError("Must preserve the draft source")) as source,
+            patch.object(self.store, "query_bindings", side_effect=AssertionError("No Binding lookup needed")) as query,
+        ):
+            result, error = await self.service.model_catalog_options()
+            self.assertIs(result, catalog)
+            self.assertIsNone(error)
+            self.runtime.catalog = None
+            result, error = await self.service.model_catalog_options()
+            self.assertIsNone(result)
+            self.assertEqual(error["code"], "model_catalog_unavailable")
+        source.assert_not_called()
+        query.assert_not_called()
+        self.assertEqual(self.chats.calls, [])
+        self.assertEqual(self.runtime.catalog_calls, 2)
+
     async def test_binding_option_failures_preserve_catalog_and_settings_and_recover(self):
         catalog = self.session_catalog()
         source = self.configured_binding()
@@ -490,9 +512,67 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
                 query.assert_awaited_once()
                 self.assertIs(raw, catalog)
                 self.assertEqual(options, {**expected, "binding_targets": [], "bindings_truncated": False,
-                    "binding_options_error": {"code": "binding_options_unavailable", "message": "会话选项暂不可用，请稍后重试。"}})
+                    "binding_options_error": {"code": "binding_options_unavailable", "message": "Agent 会话选项暂不可用，请稍后重试。"}})
                 recovered = await self.service.options(native_thread_id=source.native_thread_id)
                 self.assertEqual(recovered, expected)
+
+    async def test_form_chat_read_failures_preserve_source_settings_and_available_catalog(self):
+        catalog = self.session_catalog()
+        source = self.configured_binding()
+        # A native source is exact even after another Binding becomes current.
+        self.binding("configured-chat", "replacement-native")
+        for target, value, code in (
+            ("unavailable-chat", OSError("private transport details"), "chat_unavailable"),
+            ("unknown-chat", ("private", "unknown"), "chat_kind_unknown"),
+        ):
+            with self.subTest(target=target):
+                self.chats.types[target] = value
+                options, raw = await self.service.form_options(native_thread_id=source.native_thread_id, chat_id=target)
+                self.assertTrue(options["ok"], options)
+                self.assertIs(raw, catalog)
+                self.assertEqual(options["source_binding_id"], source.id)
+                self.assertEqual(options["session_settings"], SessionSettings.from_binding(source).to_dict())
+                self.assertEqual(options["models"][0]["id"], "model-a")
+                self.assertIsNone(options["context_mode_available"])
+                self.assertIsNone(options["model_catalog_error"])
+                self.assertEqual(options["chat_info_error"]["code"], code)
+                self.assertNotIn("private transport details", str(options))
+                for caller in ("admin", "mcp"):
+                    public = await self.service.manage({"mode": "options", "chat_id": target},
+                        native_thread_id=source.native_thread_id, source=caller)
+                    self.assertEqual(public, {"ok": False, "error": options["chat_info_error"]})
+
+    async def test_form_chat_and_catalog_failures_are_independent(self):
+        source = self.configured_binding()
+        self.chats.types["unknown-chat"] = None
+        options, raw = await self.service.form_options(native_thread_id=source.native_thread_id, chat_id="unknown-chat")
+        self.assertTrue(options["ok"], options)
+        self.assertIsNone(raw)
+        self.assertEqual(options["session_settings"], SessionSettings.from_binding(source).to_dict())
+        self.assertEqual(options["chat_info_error"]["code"], "chat_kind_unknown")
+        self.assertEqual(options["model_catalog_error"]["code"], "model_catalog_unavailable")
+        self.assertIsNone(options["context_mode_available"])
+        self.assertEqual(options["models"], [])
+
+    async def test_form_invalid_target_or_query_is_rejected_before_external_reads(self):
+        for fields in ({"chat_id": " "}, {"chat_id": False}, {"binding_query": 1}, {"binding_query": "x" * 201}):
+            with self.subTest(fields=fields):
+                options, raw = await self.service.form_options(native_thread_id="native-a", **fields)
+                self.assertFalse(options["ok"], options)
+                self.assertEqual(options["error"]["code"], "invalid_schedule")
+                self.assertIsNone(raw)
+        self.assertEqual(self.chats.calls, [])
+        self.assertEqual(self.runtime.catalog_calls, 0)
+
+    async def test_form_source_resolution_failure_is_not_a_target_display_error(self):
+        with patch.object(self.store, "get_scope", side_effect=ScopeNotFound("Source Scope no longer exists")):
+            options, raw = await self.service.form_options(native_thread_id="native-a", chat_id="group-b")
+        self.assertFalse(options["ok"], options)
+        self.assertEqual(options["error"]["code"], "not_found")
+        self.assertNotIn("chat_info_error", options)
+        self.assertIsNone(raw)
+        self.assertEqual(self.chats.calls, [])
+        self.assertEqual(self.runtime.catalog_calls, 0)
 
     async def test_explicit_model_changes_are_validated_but_pause_and_delete_do_not_read_catalog(self):
         self.session_catalog()
@@ -602,6 +682,7 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
             service = ScheduleService(
                 bindings=self.store, runtime=self.runtime, app_id="app",
                 chat_info=self.chats, wall_clock=lambda: self.now,
+                chat_target_validator=self.chat_targets.validate_target,
             )
         missing = await service.manage(self.create_request(), native_thread_id="native-a")
         self.assertEqual(missing["error"]["code"], "timezone_required")
@@ -839,6 +920,33 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
                 self.create_request(chat_id=chat), native_thread_id="native-a",
             )
             self.assertFalse(response["ok"], response)
+        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+
+    async def test_same_submitted_target_is_revalidated_but_successful_replay_is_not(self):
+        request = self.create_request(chat_id="oc_target")
+        response = await self.service.manage(request, native_thread_id="native-a")
+        self.assertTrue(response["ok"], response)
+        plan = response["plan"]
+        self.assertEqual(self.chat_targets.calls, ["oc_target"])
+        self.chat_targets.errors["oc_target"] = ChatTargetError("chat_unavailable", "机器人已退出群聊。")
+        replay = await self.service.manage(request, native_thread_id="native-a")
+        self.assertTrue(replay["ok"], replay)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(self.chat_targets.calls, ["oc_target"])
+        update = {"mode": "update", "plan_id": plan["id"], "expected_revision": 1,
+                  "request_id": "same-target-update", "chat_id": "oc_target", "name": "Not saved"}
+        rejected = await self.service.manage(update)
+        self.assertEqual(rejected["error"]["code"], "chat_unavailable")
+        self.assertEqual(self.chat_targets.calls, ["oc_target", "oc_target"])
+        stored = self.store.schedules.get(plan["id"])
+        self.assertEqual(stored.revision, 1)
+        self.assertEqual(stored.name, plan["name"])
+
+    async def test_submit_requires_validation_port_and_does_not_fall_back_to_metadata(self):
+        self.service._chat_target_validator = None
+        rejected = await self.service.manage(self.create_request(), native_thread_id="native-a")
+        self.assertEqual(rejected["error"]["code"], "chat_query_unavailable")
+        self.assertEqual(self.chats.calls, [])
         self.assertEqual(self.store.schedules.list(app_id="app"), ())
 
     async def run_fixture(self, *, schedule=None):

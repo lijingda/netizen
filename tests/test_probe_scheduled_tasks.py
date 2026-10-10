@@ -550,6 +550,7 @@ class FakeMcpProbeTest(unittest.IsolatedAsyncioTestCase):
             store.register_project(alias="probe", cwd=str(cwd))
             recorder = McpRecorder(ScheduleService(
                 bindings=store, runtime=None, app_id="probe", chat_info=FakeFeishu(), default_timezone="UTC",
+                chat_target_validator=FakeFeishu().validate_target,
             ))
             case = self
 

@@ -59,7 +59,7 @@ def avatar_url(value: object) -> str | None:
 
 
 class ChatAvatarImages:
-    """Prepare at most one directory page; timeout/failure only loses icons."""
+    """Prepare one bounded form's candidates; timeout/failure only loses icons."""
 
     def __init__(self, channel: ReplyChannel, *, prepare_seconds: float = _PREPARE_SECONDS) -> None:
         self._channel = channel
@@ -77,10 +77,10 @@ class ChatAvatarImages:
         self._keys.move_to_end(url)
         return cached[1]
 
-    async def _prepare_url(self, url: str) -> None:
+    async def _prepare_url(self, url: str) -> str | None:
         async with self._calls:
-            if self._cached(url) is not None:
-                return
+            if (cached := self._cached(url)) is not None:
+                return cached
             try:
                 key = await self._channel.upload_media(MediaSource(kind="url", url=url), kind="image")
                 if not isinstance(key, str) or not _IMAGE_KEY.fullmatch(key):
@@ -93,16 +93,22 @@ class ChatAvatarImages:
             self._keys.move_to_end(url)
             while len(self._keys) > _MAX_KEYS:
                 self._keys.popitem(last=False)
+            return key
 
     async def prepare(self, chats: Sequence[AvailableChat]) -> dict[str, str]:
-        urls = {chat.chat_id: url for chat in chats[:20] if (url := avatar_url(chat.avatar_url))}
-        missing = dict.fromkeys(url for url in urls.values() if self._cached(url) is None)
+        """Prepare the caller's bounded batch; completed results outlive LRU eviction."""
+        urls = {chat.chat_id: url for chat in chats if (url := avatar_url(chat.avatar_url))}
+        keys = {url: key for url in dict.fromkeys(urls.values()) if (key := self._cached(url)) is not None}
+        missing = dict.fromkeys(url for url in urls.values() if url not in keys)
+        async def prepare_one(url: str) -> None:
+            if (key := await self._prepare_url(url)) is not None:
+                keys[url] = key
         if missing:
             # All work belongs to this request, including cancellation. No
             # retained background jobs or card/session state survive a redraw.
             try:
                 async with asyncio.timeout(self._prepare_seconds):
-                    await asyncio.gather(*(self._prepare_url(url) for url in missing))
+                    await asyncio.gather(*(prepare_one(url) for url in missing))
             except TimeoutError:
                 pass
-        return {chat_id: key for chat_id, url in urls.items() if (key := self._cached(url))}
+        return {chat_id: keys[url] for chat_id, url in urls.items() if url in keys}

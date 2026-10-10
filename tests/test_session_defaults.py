@@ -9,12 +9,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from netizen_cli.bindings import BindingStore, validate_channel_database
+from netizen_cli.chat_targets import ChatTargetError
 from netizen_cli.defaults import DefaultConfigurationError
 from netizen_cli.defaults.service import SessionDefaultsService
 from netizen_cli.domain import MentionContextMode
 from netizen_cli.model_settings import EffortOption, ModelCatalog, ModelOption
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.session_settings import BindingTurnSettings, SessionSettings
+from tests.support.chat_targets import FakeChatTargetDirectory
 
 
 class SessionDefaultsTest(unittest.IsolatedAsyncioTestCase):
@@ -24,6 +26,7 @@ class SessionDefaultsTest(unittest.IsolatedAsyncioTestCase):
         self.bindings = BindingStore(self.root / "channel.sqlite3")
         self.projects = ProjectRegistry(store=self.bindings, project_root=self.root, projects={"p": self.root})
         self.chats = SimpleNamespace(get_chat_info=AsyncMock(return_value=SimpleNamespace(name="支付 OnCall", chat_mode="topic")))
+        self.chat_targets = FakeChatTargetDirectory(self.chats)
         self.catalog = ModelCatalog((ModelOption(
             "model", "native-model", "Model", "", True, "high", "default",
             (EffortOption("high", "High", "high"),), (),
@@ -35,6 +38,7 @@ class SessionDefaultsTest(unittest.IsolatedAsyncioTestCase):
         return SessionDefaultsService(
             bindings=self.bindings, projects=self.projects, runtime=self.runtime,
             app_id=app_id, chat_info=self.chats,
+            chat_target_validator=self.chat_targets.validate_target,
         )
 
     async def asyncTearDown(self):
@@ -126,6 +130,26 @@ class SessionDefaultsTest(unittest.IsolatedAsyncioTestCase):
         deleted = await self.service.manage({"mode": "delete", "id": rule["id"], "expected_revision": 2})
         self.assertEqual(deleted, {"deleted": rule["id"]})
         self.assertIsNone(await self.service.resolve("oc_chat"))
+
+    async def test_exact_save_revalidates_same_target_before_mutation(self):
+        rule = await self.save()
+        self.assertEqual(self.chat_targets.calls, ["oc_chat"])
+        self.chats.get_chat_info.assert_awaited_once_with("oc_chat")
+        self.chat_targets.errors["oc_chat"] = ChatTargetError("chat_unavailable", "机器人无法访问目标聊天。")
+        with self.assertRaises(DefaultConfigurationError) as caught:
+            await self.save(id=rule["id"], expected_revision=1)
+        self.assertEqual(caught.exception.code, "chat_unavailable")
+        self.assertEqual(self.chat_targets.calls, ["oc_chat", "oc_chat"])
+        self.assertEqual(self.bindings.defaults.get("app", rule["id"]).revision, 1)
+
+    async def test_exact_save_requires_target_validator_but_group_rules_do_not(self):
+        self.service._chat_target_validator = None
+        with self.assertRaises(DefaultConfigurationError) as caught:
+            await self.save()
+        self.assertEqual(caught.exception.code, "chat_query_unavailable")
+        self.chats.get_chat_info.assert_not_awaited()
+        self.assertIsNone(self.bindings.defaults.exact("app", "oc_chat"))
+        self.assertEqual((await self.group())["kind"], "group_name")
 
     async def test_order_cas_covers_add_delete_and_complete_inventory(self):
         first = await self.group("oncall")

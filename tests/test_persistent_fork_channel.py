@@ -5,11 +5,12 @@ import json
 import unittest
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call, patch
 
 from lark_channel import OutboundCard
 
-from netizen_cli.cards.fork import ForkSource, fork_confirm_card
+from netizen_cli.cards.fork import ForkSource, decode_fork_action, fork_form_card
+from netizen_cli.chat_targets import ChatTargetError, ValidatedChatTarget
 from netizen_cli.codex_runtime import NativeThreadMetadata, RuntimeClosed, Submission, SubmitDisposition, ThreadLifecycleError
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.management.chat_directory import AvailableChat, AvailableChatPage, ChatDirectoryError
@@ -79,8 +80,11 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         self.runtime.thread_resume = AsyncMock()
         self.runtime.thread_start = AsyncMock()
         self.runtime.rename_exact = AsyncMock(return_value="新方案")
-        self.management.query_available_chats = AsyncMock()
-        self.management.validate_available_chat = AsyncMock()
+        self.management.query_available_chats = AsyncMock(return_value=AvailableChatPage((), None))
+        self.management.validate_available_chat = AsyncMock(return_value=None)
+        self.management.validate_chat_target = AsyncMock(
+            side_effect=lambda chat_id: ValidatedChatTarget(chat_id, "group"),
+        )
         self.history.anchors["om_root"] = MessageContextAnchor("om_root", 2000)
         self.history.anchors["om_seed"] = MessageContextAnchor("om_seed", 2001)
 
@@ -120,9 +124,12 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def confirm_event(self, *, target=None):
-        card = fork_confirm_card(self.scope, self.reference(), source_title="来源方案",
-                                 project_alias="test", target_chat=target)
-        return self.event(form={**form_values(card), "fork_name_v1": "新方案"})
+        card = fork_form_card(self.scope, self.reference(), source_title="来源方案",
+                             project_alias="test", chats=(target,) if target else (),
+                             target_mode="group" if target else "current",
+                             target_choice=target.chat_id if target else "")
+        return self.event(form={**form_values(card), "fork_name_v5": "新方案"},
+                          value=callback(card, "创建分支"))
 
     def queue_topic(self, *, chat_id=None, promoted=False):
         chat_id = chat_id or self.target_scope.chat_id
@@ -143,27 +150,38 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         self.runtime.thread_start.assert_not_awaited()
         self.runtime.rename_exact.assert_not_awaited()
 
-    async def open_chat_search_results(self):
+    async def open_form(self):
         await self.app.handle_message(FakeMessage("/fork", message_id="om_command",
             chat_id=self.scope.chat_id, thread_id=self.scope.topic_id, chat_type="group"))
-        select = elements(self.channel.replies[-1][1].card, "select_static")[0]
-        await self.app.handle_card_action(self.event(form={select["name"]: select["options"][1]["value"]}))
-        search = OutboundCard(card=self.channel.updates[-1][1])
-        await self.app.handle_card_action(self.event(form={**form_values(search), "fork_query_v1": "研发"}))
+        return self.channel.replies[-1][1]
+
+    async def search_form(self, card, *, query="", values=None, label="查找群聊"):
+        submitted = {**form_values(card), **(values or {})}
+        if label == "查找群聊":
+            submitted["fork_query_v5"] = query
+        await self.app.handle_card_action(self.event(value=callback(card, label), form=submitted))
         return OutboundCard(card=self.channel.updates[-1][1])
 
-    async def test_command_opens_destination_without_native_or_directory_work(self):
-        message = FakeMessage("/fork", message_id="om_command", chat_id=self.scope.chat_id,
-                              thread_id=self.scope.topic_id, chat_type="group")
-        await self.app.handle_message(message)
-        card = self.channel.replies[-1][1]
+    async def jump_form(self, card, page_index, *, values=None):
+        page_field = next(item for item in elements(card.card, "select_static") if item["name"] == "fork_page_v5")
+        await self.app.handle_card_action(self.event(value=callback(card, "跳转"), form={
+            **form_values(card), **(values or {}), "fork_page_v5": page_field["options"][page_index]["value"],
+        }))
+        return OutboundCard(card=self.channel.updates[-1][1])
+
+    async def test_command_opens_single_form_without_directory_or_native_work(self):
+        card = await self.open_form()
         self.assertIsInstance(card, OutboundCard)
-        self.assertIn("当前聊天的新话题", str(card.card))
-        self.assertIn("选择其他群", str(card.card))
+        self.assertEqual(form_values(card)["fork_mode_v5"], "current")
+        self.assertNotIn("fork_target_v5", form_values(card))
+        self.assertEqual(form_values(card)["fork_name_v5"], "来源方案 · 分支")
+        self.assertEqual(len(elements(card.card, "button")), 2)
         self.runtime.fork_exact.assert_not_awaited()
         self.management.query_available_chats.assert_not_awaited()
         self.management.validate_available_chat.assert_not_awaited()
+        self.assertIn("fork_query_v5", form_values(card))
         self.assertEqual(self.channel.send_calls, [])
+        self.assertEqual(self.channel.updates, [])
         self.assert_no_execution()
         await self.app.handle_message(FakeMessage("/fork", message_id="om_unmentioned",
             chat_id=self.scope.chat_id, thread_id=self.scope.topic_id,
@@ -172,7 +190,9 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_same_chat_fork_is_complete_before_adoption_and_keeps_source(self):
         self.queue_topic()
-        await self.app.handle_card_action(self.confirm_event())
+        event = self.confirm_event()
+        event.action.form_value.update(fork_target_v5={"malformed": "inactive"}, fork_chat_id_v5=["oc_other"])
+        await self.app.handle_card_action(event)
         target = self.store.active_binding(self.target_scope.key)
         self.assertIsNotNone(target, self.updates_text())
         self.assertEqual(target.native_thread_id, self.native.id)
@@ -199,31 +219,48 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("会话分支已创建", str(root_updates[0]))
         self.assert_no_execution()
 
-    async def test_cross_group_picker_reuses_directory_then_promotes_one_root_with_seed(self):
+    async def test_empty_name_submission_preserves_form_and_target_without_creation(self):
+        target = AvailableChat("oc_target", "研发群", "group", False)
+        self.management.query_available_chats.return_value = AvailableChatPage((target,), None)
+        event = self.confirm_event(target=target)
+        event.action.form_value["fork_name_v5"] = "  "
+        await self.app.handle_card_action(event)
+        card = OutboundCard(card=self.channel.updates[-1][1])
+        self.assertEqual(form_values(card)["fork_name_v5"], "  ")
+        self.assertEqual(form_values(card)["fork_target_v5"], target.chat_id)
+        self.assertIn("会话名称不能为空", str(card.card))
+        self.assertEqual(len(elements(card.card, "form")), 1)
+        self.assertEqual(self.channel.send_calls, [])
+        self.runtime.fork_exact.assert_not_awaited()
+        self.assert_no_execution()
+
+    async def test_cross_group_single_submit_promotes_one_root_with_seed(self):
         target = AvailableChat("oc_target", "研发群", "group", False,
             "https://p3-lark-file.byteimg.com/img/avatar.jpg")
         self.target_scope = FeishuScope("cli_test", target.chat_id, ScopeKind.TOPIC, "omt_fork")
-        self.management.query_available_chats.return_value = AvailableChatPage((target,), "page-two")
-        self.management.validate_available_chat.return_value = target
+        self.management.query_available_chats.return_value = AvailableChatPage((target,), None)
+        self.management.validate_available_chat.side_effect = lambda chat_id: target if chat_id == target.chat_id else None
         self.channel.upload_results.append("img_v3_avatar")
-        results = await self.open_chat_search_results()
-        self.management.query_available_chats.assert_awaited_once_with(query="研发", page_token=None)
-        select = elements(results.card, "select_static")[0]
-        self.assertEqual(select["options"][0]["icon"], {"tag": "custom_icon", "img_key": "img_v3_avatar"})
-        await self.app.handle_card_action(self.event(form={select["name"]: select["options"][0]["value"]}))
-        self.management.validate_available_chat.assert_awaited_once_with(target.chat_id)
-        confirmation = OutboundCard(card=self.channel.updates[-1][1])
-        self.assertIn("目标群的参与者", str(confirmation.card))
-        self.assertEqual(elements(confirmation.card, "select_static")[0]["options"][0]["icon"],
+        card = await self.open_form()
+        self.management.query_available_chats.assert_not_awaited()
+        card = await self.search_form(card)
+        self.management.query_available_chats.assert_awaited_once_with(query="", page_token=None, page_size=20)
+        select = next(item for item in elements(card.card, "select_static") if item["name"] == "fork_target_v5")
+        self.assertEqual(select["options"][0]["icon"],
             {"tag": "custom_icon", "img_key": "img_v3_avatar"})
+        self.assertIn("目标聊天的参与者", str(card.card))
+        self.assertEqual(len(self.channel.updates), 1)
         self.assertEqual(len(self.channel.upload_calls), 1)
         source, kind = self.channel.upload_calls[0]
         self.assertEqual((source.kind, source.url, kind), ("url", target.avatar_url, "image"))
         self.runtime.fork_exact.assert_not_awaited()
         self.assertEqual(self.channel.send_calls, [])
         self.queue_topic(chat_id=target.chat_id, promoted=True)
-        await self.app.handle_card_action(self.event(form={**form_values(confirmation), "fork_name_v1": "新方案"}))
-        self.assertEqual(self.management.validate_available_chat.await_count, 2)
+        self.management.validate_available_chat.reset_mock()
+        await self.app.handle_card_action(self.event(value=callback(card, "创建分支"), form={
+            **form_values(card), "fork_name_v5": "新方案", "fork_mode_v5": "group", "fork_target_v5": target.chat_id,
+        }))
+        self.management.validate_chat_target.assert_awaited_once_with(target.chat_id)
         binding = self.store.active_binding(self.target_scope.key)
         self.assertIsNotNone(binding, self.updates_text())
         self.assertEqual(binding.context_anchor, MessageContextAnchor("om_seed", 2001))
@@ -235,54 +272,332 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([event for event in self.events if event.startswith("send-")], ["send-root", "send-seed"])
         self.assert_no_execution()
 
-    async def test_avatar_upload_failure_preserves_cross_group_selection_confirmation_and_creation(self):
+    async def test_avatar_upload_failure_preserves_cross_group_creation(self):
         target = AvailableChat("oc_target", "研发群", "group", False,
             "https://p3-lark-file.byteimg.com/img/avatar.jpg")
         self.target_scope = FeishuScope("cli_test", target.chat_id, ScopeKind.TOPIC, "omt_fork")
         self.management.query_available_chats.return_value = AvailableChatPage((target,), None)
-        self.management.validate_available_chat.return_value = target
-        self.channel.upload_results.extend([RuntimeError("avatar unavailable"), RuntimeError("upload unavailable")])
-        results = await self.open_chat_search_results()
-        select = elements(results.card, "select_static")[0]
-        self.assertEqual(select["options"][0]["icon"], {"tag": "standard_icon", "token": "group_outlined"})
-        await self.app.handle_card_action(self.event(form={select["name"]: select["options"][0]["value"]}))
-        confirmation = OutboundCard(card=self.channel.updates[-1][1])
-        self.assertEqual(elements(confirmation.card, "select_static")[0]["options"][0]["icon"],
+        self.management.validate_available_chat.side_effect = lambda chat_id: target if chat_id == target.chat_id else None
+        self.channel.upload_results.append(RuntimeError("avatar unavailable"))
+        card = await self.open_form()
+        card = await self.search_form(card)
+        self.assertEqual(next(item for item in elements(card.card, "select_static") if item["name"] == "fork_target_v5")["options"][0]["icon"],
             {"tag": "standard_icon", "token": "group_outlined"})
-        self.assertIn("目标群的参与者", str(confirmation.card))
         self.runtime.fork_exact.assert_not_awaited()
         self.queue_topic(chat_id=target.chat_id)
-        await self.app.handle_card_action(self.event(form={**form_values(confirmation), "fork_name_v1": "新方案"}))
+        self.management.validate_available_chat.reset_mock()
+        await self.app.handle_card_action(self.event(value=callback(card, "创建分支"), form={
+            **form_values(card), "fork_name_v5": "新方案", "fork_mode_v5": "group", "fork_target_v5": target.chat_id,
+        }))
         binding = self.store.active_binding(self.target_scope.key)
         self.assertIsNotNone(binding, self.updates_text())
         self.assertEqual(binding.native_thread_id, self.native.id)
-        self.assertEqual(self.management.validate_available_chat.await_count, 2)
-        self.assertEqual(len(self.channel.upload_calls), 2)
+        self.management.validate_chat_target.assert_awaited_once_with(target.chat_id)
+        self.assertEqual(len(self.channel.upload_calls), 1)
         self.assertEqual([call[0] for call in self.channel.send_calls], [target.chat_id])
         self.assertEqual(self.store.active_binding(self.scope.key), self.source)
         self.assert_no_execution()
 
-    async def test_current_chat_avatar_lookup_failure_does_not_require_directory_for_creation(self):
-        await self.app.handle_message(FakeMessage("/fork", message_id="om_command",
-            chat_id=self.scope.chat_id, thread_id=self.scope.topic_id, chat_type="group"))
-        destination = self.channel.replies[-1][1]
-        for error in (ChatDirectoryError("unavailable", "群资料暂不可用。"), TimeoutError()):
-            with self.subTest(error=type(error).__name__):
-                self.management.validate_available_chat.side_effect = error
-                await self.app.handle_card_action(self.event(form=form_values(destination)))
-                confirmation = OutboundCard(card=self.channel.updates[-1][1])
-                self.assertNotIn("icon", elements(confirmation.card, "select_static")[0]["options"][0])
-                self.assertIn("当前聊天", str(confirmation.card))
-                self.assertNotIn("目标群的参与者", str(confirmation.card))
+    async def test_current_chat_does_not_require_group_directory_for_creation(self):
+        self.management.validate_available_chat.side_effect = AssertionError("Current chat needs no group display lookup")
+        card = await self.open_form()
+        self.assertNotIn("fork_target_v5", form_values(card))
+        self.assertIn("当前聊天", str(card.card))
         self.assertEqual(self.channel.upload_calls, [])
-        self.assertEqual(self.management.validate_available_chat.await_count, 2)
-        self.management.validate_available_chat.assert_awaited_with(self.scope.chat_id)
+        self.management.validate_available_chat.assert_not_awaited()
         self.queue_topic()
-        await self.app.handle_card_action(self.event(form={**form_values(confirmation), "fork_name_v1": "新方案"}))
+        await self.app.handle_card_action(self.event(value=callback(card, "创建分支"),
+            form={**form_values(card), "fork_name_v5": "新方案"}))
         target = self.store.active_binding(self.target_scope.key)
         self.assertIsNotNone(target, self.updates_text())
         self.assertEqual(target.native_thread_id, self.native.id)
-        self.assertEqual(self.management.validate_available_chat.await_count, 2)
+        self.management.validate_available_chat.assert_not_awaited()
+        self.assertEqual(self.store.active_binding(self.scope.key), self.source)
+        self.assert_no_execution()
+
+    async def test_complete_snapshot_prepares_all_avatars_once_and_jumps_without_directory_calls(self):
+        groups = tuple(AvailableChat(f"oc_group_{i}", f"研发群 {i}", "group", False,
+            f"https://p3-lark-file.byteimg.com/{i}.jpg") for i in range(23))
+        self.management.query_available_chats.side_effect = [
+            AvailableChatPage(groups[:20], "next"), AvailableChatPage(groups[20:], None),
+        ]
+        card = await self.open_form()
+        self.assertNotIn("fork_target_v5", form_values(card))
+        self.management.query_available_chats.assert_not_awaited()
+        self.assertEqual(self.channel.upload_calls, [])
+        avatar_keys = {group.chat_id: f"img_group_{index}" for index, group in enumerate(groups)}
+        self.app._chat_avatars.prepare = AsyncMock(return_value=avatar_keys)
+        card = await self.search_form(card)
+        options = next(item for item in elements(card.card, "select_static") if item["name"] == "fork_target_v5")["options"]
+        self.assertEqual([item["value"] for item in options], [g.chat_id for g in groups[:10]])
+        self.assertTrue(all(item["icon"]["tag"] == "custom_icon" for item in options))
+        self.app._chat_avatars.prepare.assert_awaited_once()
+        self.assertEqual({group.chat_id for group in self.app._chat_avatars.prepare.await_args.args[0]},
+                         {group.chat_id for group in groups})
+        self.assertEqual(self.management.query_available_chats.await_args_list, [
+            call(query="", page_token=None, page_size=20), call(query="", page_token="next", page_size=20),
+        ])
+        snapshot = callback(card, "跳转")["snapshot"]
+        self.management.query_available_chats.reset_mock()
+        self.management.validate_available_chat.reset_mock()
+        self.app._chat_avatars.prepare.reset_mock()
+        before = self.store._connection.total_changes
+        for page_index in (2, 1, 0):
+            card = await self.jump_form(card, page_index)
+            options = next(item for item in elements(card.card, "select_static") if item["name"] == "fork_target_v5")["options"]
+            self.assertEqual([item["value"] for item in options],
+                             [group.chat_id for group in groups[page_index * 10:(page_index + 1) * 10]])
+            self.assertEqual({item["value"]: item["icon"]["img_key"] for item in options},
+                             {group.chat_id: avatar_keys[group.chat_id] for group in groups[page_index * 10:(page_index + 1) * 10]})
+            self.assertEqual(callback(card, "跳转")["snapshot"], snapshot)
+        self.management.query_available_chats.assert_not_awaited()
+        self.management.validate_available_chat.assert_not_awaited()
+        self.app._chat_avatars.prepare.assert_not_awaited()
+        self.assertEqual(self.store._connection.total_changes, before)
+        self.assertFalse(any(button["text"]["content"] == "下一页" for button in elements(card.card, "button")))
+        self.runtime.fork_exact.assert_not_awaited()
+        self.assertEqual(self.channel.send_calls, [])
+
+    async def test_snapshot_jump_preserves_pending_input_selection_and_name_until_new_search(self):
+        groups = tuple(AvailableChat(f"oc_group_{i}", f"研发群 {i}", "group", False) for i in range(12))
+        self.management.query_available_chats.return_value = AvailableChatPage(groups, None)
+        card = await self.open_form()
+        card = await self.search_form(card, query="研发")
+        self.management.query_available_chats.assert_awaited_once_with(query="研发", page_token=None, page_size=20)
+        values = {**form_values(card), "fork_name_v5": "已编辑名称", "fork_mode_v5": "group", "fork_target_v5": groups[0].chat_id,
+                  "fork_query_v5": " 产品 ", "fork_chat_id_v5": "oc_private"}
+        self.management.query_available_chats.reset_mock()
+        before = self.store._connection.total_changes
+        updated = await self.jump_form(card, 1, values=values)
+        self.management.query_available_chats.assert_not_awaited()
+        self.assertEqual(form_values(updated)["fork_name_v5"], "已编辑名称")
+        self.assertEqual(form_values(updated)["fork_mode_v5"], "group")
+        self.assertEqual(form_values(updated)["fork_target_v5"], groups[0].chat_id)
+        self.assertEqual(form_values(updated)["fork_query_v5"], "产品")
+        self.assertEqual(form_values(updated)["fork_chat_id_v5"], "oc_private")
+        self.assertIn(groups[-1].chat_id, [o["value"] for o in next(item for item in elements(updated.card, "select_static") if item["name"] == "fork_target_v5")["options"]])
+        updated = await self.search_form(updated, query=" 产品 ")
+        self.management.query_available_chats.assert_awaited_once_with(query="产品", page_token=None, page_size=20)
+        self.assertEqual(form_values(updated)["fork_name_v5"], "已编辑名称")
+        self.assertEqual(form_values(updated)["fork_target_v5"], "")
+        self.assertEqual(form_values(updated)["fork_chat_id_v5"], "oc_private")
+        await self.app.handle_card_action(self.event(value=callback(updated, "查找群聊"), form={
+            **form_values(updated), "fork_query_v5": "", "fork_name_v5": "",
+        }))
+        self.management.query_available_chats.assert_awaited_with(query="", page_token=None, page_size=20)
+        self.assertEqual(form_values(OutboundCard(card=self.channel.updates[-1][1]))["fork_name_v5"], "")
+        self.assertEqual(self.store._connection.total_changes, before)
+        self.runtime.fork_exact.assert_not_awaited()
+        self.assertEqual(self.channel.send_calls, [])
+
+    async def test_paging_retains_selected_current_group_but_new_search_does_not_inject_it(self):
+        current = AvailableChat(self.scope.chat_id, "当前来源群", "group", False)
+        others = tuple(AvailableChat(f"oc_other_{i}", f"其他群 {i}", "group", False) for i in range(10))
+        self.management.validate_available_chat.side_effect = lambda chat_id: current if chat_id == current.chat_id else None
+        self.management.query_available_chats.side_effect = [
+            AvailableChatPage((current, *others), None), AvailableChatPage((others[-1],), None),
+        ]
+        card = await self.search_form(await self.open_form(), query="来源")
+        card = await self.jump_form(card, 1, values={
+            "fork_mode_v5": "group", "fork_target_v5": current.chat_id, "fork_name_v5": "保留当前来源群",
+        })
+        picker = next(item for item in elements(card.card, "select_static") if item["name"] == "fork_target_v5")
+        self.assertEqual(picker["initial_option"], current.chat_id)
+        self.assertEqual({option["value"] for option in picker["options"]}, {current.chat_id, others[-1].chat_id})
+        decoded = decode_fork_action(self.scope, callback(card, "创建分支"), form_values(card))
+        self.assertEqual((decoded.action, decoded.target_chat_id, decoded.name),
+                         ("create", current.chat_id, "保留当前来源群"))
+        card = await self.search_form(card, query="其他")
+        picker = next(item for item in elements(card.card, "select_static") if item["name"] == "fork_target_v5")
+        self.assertNotIn("initial_option", picker)
+        self.assertEqual([option["value"] for option in picker["options"]], [others[-1].chat_id])
+        self.assertEqual(form_values(card)["fork_name_v5"], "保留当前来源群")
+        self.runtime.fork_exact.assert_not_awaited()
+        self.assertEqual(self.channel.send_calls, [])
+
+    async def test_oversize_complete_snapshot_offers_narrower_search_without_partial_results(self):
+        groups = tuple(AvailableChat(f"oc_group_{i}", "很长的群名" * 800, "group", False) for i in range(10))
+        self.management.query_available_chats.return_value = AvailableChatPage(groups, None)
+        card = await self.search_form(await self.open_form(), values={
+            "fork_name_v5": "保留草稿", "fork_chat_id_v5": "oc_private",
+        })
+        self.assertEqual(form_values(card)["fork_name_v5"], "保留草稿")
+        self.assertEqual(form_values(card)["fork_chat_id_v5"], "oc_private")
+        self.assertEqual(form_values(card).get("fork_target_v5", ""), "")
+        self.assertIn("fork_query_v5", form_values(card))
+        self.assertNotIn("oc_group_", str(card.card))
+        self.assertFalse(any(button["text"]["content"] == "跳转" for button in elements(card.card, "button")))
+        self.runtime.fork_exact.assert_not_awaited()
+        self.assertEqual(self.channel.send_calls, [])
+
+    async def test_midstream_search_failure_discards_partial_results_and_preserves_editable_draft(self):
+        group = AvailableChat("oc_target", "研发群", "group", False)
+        self.management.query_available_chats.side_effect = [
+            AvailableChatPage((group,), "retry-page"), ChatDirectoryError("unavailable", "目录不可用"),
+            AvailableChatPage((group,), None),
+        ]
+        card = await self.search_form(await self.open_form(), values={
+            "fork_name_v5": "未完成的分支名", "fork_chat_id_v5": "oc_private",
+        })
+        self.assertNotIn(group.chat_id, str(card.card))
+        self.assertFalse(any(button["text"]["content"] == "跳转" for button in elements(card.card, "button")))
+        self.assertIn("fork_query_v5", form_values(card))
+        self.assertEqual(form_values(card).get("fork_target_v5", ""), "")
+        self.assertEqual(form_values(card)["fork_name_v5"], "未完成的分支名")
+        self.assertEqual(form_values(card)["fork_chat_id_v5"], "oc_private")
+        card = await self.search_form(card, query="研发")
+        self.management.query_available_chats.assert_awaited_with(query="研发", page_token=None, page_size=20)
+        self.assertEqual(form_values(card)["fork_target_v5"], "")
+        self.assertIn(group.chat_id, [o["value"] for o in next(item for item in elements(card.card, "select_static") if item["name"] == "fork_target_v5")["options"]])
+        self.runtime.fork_exact.assert_not_awaited()
+        self.assertEqual(self.channel.send_calls, [])
+
+    async def test_list_timeout_or_failure_does_not_block_same_chat_creation(self):
+        cancelled = asyncio.Event()
+        async def stalled_query(**kwargs):
+            if kwargs["page_token"] is None:
+                return AvailableChatPage((AvailableChat("oc_partial_timeout", "未收齐的群", "group", False),), "stalled")
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
+        self.management.query_available_chats.side_effect = stalled_query
+        initial = await self.open_form()
+        self.management.query_available_chats.assert_not_awaited()
+        with patch("netizen_cli.channel_app._CARD_CHAT_QUERY_SECONDS", 0.01):
+            card = await self.search_form(initial)
+        self.assertTrue(cancelled.is_set())
+        self.assertNotIn("oc_partial_timeout", str(card.card))
+        self.assertFalse(any(button["text"]["content"] == "跳转" for button in elements(card.card, "button")))
+        self.queue_topic()
+        await self.app.handle_card_action(self.event(value=callback(card, "创建分支"), form={
+            **form_values(card), "fork_name_v5": "新方案", "fork_mode_v5": "current", "fork_chat_id_v5": "oc_residual",
+        }))
+        self.assertIsNotNone(self.store.active_binding(self.target_scope.key), self.updates_text())
+
+    async def test_empty_platform_pages_are_consumed_before_exposing_complete_empty_snapshot(self):
+        self.management.query_available_chats.side_effect = [
+            AvailableChatPage((), "first"), AvailableChatPage((), None),
+        ]
+        card = await self.search_form(await self.open_form())
+        self.assertEqual(self.management.query_available_chats.await_args_list, [
+            call(query="", page_token=None, page_size=20), call(query="", page_token="first", page_size=20),
+        ])
+        self.assertIn("fork_query_v5", form_values(card))
+        self.assertFalse(any(b["text"]["content"] == "跳转" for b in elements(card.card, "button")))
+        self.runtime.fork_exact.assert_not_awaited()
+        self.assertEqual(self.channel.send_calls, [])
+
+    async def test_selected_group_is_revalidated_at_submission(self):
+        group = AvailableChat("oc_target", "研发群", "group", False)
+        self.management.query_available_chats.return_value = AvailableChatPage((group,), None)
+        card = await self.search_form(await self.open_form())
+        self.management.validate_chat_target.side_effect = ChatTargetError("chat_unavailable", "机器人已退出该群")
+        await self.app.handle_card_action(self.event(value=callback(card, "创建分支"), form={
+            **form_values(card), "fork_name_v5": "新方案", "fork_mode_v5": "group", "fork_target_v5": group.chat_id,
+        }))
+        self.runtime.fork_exact.assert_not_awaited()
+        self.assertEqual(self.channel.send_calls, [])
+        self.assertIn("已退出", self.updates_text())
+
+    async def test_id_target_p2p_normalizes_catch_up_and_ignores_inactive_group(self):
+        self.management.validate_chat_target.side_effect = lambda chat_id: ValidatedChatTarget(chat_id, "p2p")
+        event = self.confirm_event()
+        event.action.form_value.update(
+            fork_mode_v5="id", fork_chat_id_v5="oc_private", fork_target_v5="oc_ignored",
+        )
+        self.queue_topic(chat_id="oc_private", promoted=True)
+        with patch.object(self.app, "_resolve_context_anchor", new_callable=AsyncMock) as anchor:
+            await self.app.handle_card_action(event)
+        anchor.assert_not_awaited()
+        self.management.validate_chat_target.assert_awaited_once_with("oc_private")
+        destination = FeishuScope("cli_test", "oc_private", ScopeKind.TOPIC, "omt_fork")
+        branch = self.store.active_binding(destination.key)
+        self.assertIsNotNone(branch, self.updates_text())
+        self.assertEqual(branch.message_context_mode, MentionContextMode.CURRENT_ONLY)
+        self.assertIsNone(branch.context_anchor)
+        self.assertEqual(branch.native_thread_id, self.native.id)
+        self.assertEqual(branch.turn_settings, self.source.turn_settings)
+        self.assertEqual(self.store.get(self.source.id), self.source)
+        self.assert_no_execution()
+
+    async def test_empty_group_or_id_stays_editable_without_validation_or_creation(self):
+        for mode, selected, chat_id in (("group", "", "oc_other"), ("id", "oc_other", "  ")):
+            with self.subTest(mode=mode):
+                event = self.confirm_event()
+                event.action.form_value.update(
+                    fork_mode_v5=mode, fork_target_v5=selected, fork_chat_id_v5=chat_id,
+                )
+                await self.app.handle_card_action(event)
+                retry = OutboundCard(card=self.channel.updates[-1][1])
+                values = form_values(retry)
+                self.assertEqual(values["fork_mode_v5"], mode)
+                self.assertEqual(values["fork_chat_id_v5"], chat_id)
+                self.assertEqual(values.get("fork_target_v5", ""), selected)
+                self.assertEqual(values["fork_name_v5"], "新方案")
+                self.assertEqual(len(elements(retry.card, "form")), 1)
+                self.management.validate_chat_target.assert_not_awaited()
+                self.runtime.fork_exact.assert_not_awaited()
+                self.assertEqual(self.channel.send_calls, [])
+                self.assertIsNone(self.store.active_binding(self.target_scope.key))
+
+    async def test_target_validation_failure_preserves_full_draft_and_renews_retry(self):
+        event = self.confirm_event()
+        event.action.form_value.update(
+            fork_mode_v5="id", fork_chat_id_v5="oc_private", fork_target_v5=self.scope.chat_id,
+            fork_query_v5="研发",
+        )
+        self.management.validate_chat_target.side_effect = ChatTargetError("chat_unavailable", "聊天暂不可访问")
+        await self.app.handle_card_action(event)
+        self.runtime.fork_exact.assert_not_awaited()
+        self.assertEqual(self.channel.send_calls, [])
+        restored = OutboundCard(card=self.channel.updates[-1][1])
+        values = form_values(restored)
+        for key in ("fork_mode_v5", "fork_chat_id_v5", "fork_target_v5", "fork_name_v5", "fork_query_v5"):
+            self.assertEqual(values[key], event.action.form_value[key])
+        retry_value = callback(restored, "创建分支")
+        self.assertNotEqual(retry_value["nonce"], event.action.value["nonce"])
+        self.management.validate_chat_target.side_effect = lambda chat_id: ValidatedChatTarget(chat_id, "p2p")
+        self.queue_topic(chat_id="oc_private")
+        await self.app.handle_card_action(self.event(value=retry_value, form=values))
+        self.runtime.fork_exact.assert_awaited_once()
+        self.assertIsNotNone(self.store.active_binding(FeishuScope(
+            "cli_test", "oc_private", ScopeKind.TOPIC, "omt_fork",
+        ).key))
+
+    async def test_current_chat_is_validated_before_fork_too(self):
+        self.management.validate_chat_target.side_effect = ChatTargetError("chat_unavailable", "机器人无法访问当前聊天")
+        await self.app.handle_card_action(self.confirm_event())
+        self.management.validate_chat_target.assert_awaited_once_with(self.scope.chat_id)
+        self.runtime.fork_exact.assert_not_awaited()
+        self.assertEqual(self.channel.send_calls, [])
+
+    async def test_current_p2p_main_keeps_its_exact_source(self):
+        await self.assert_current_p2p_source(ScopeKind.DIRECT)
+
+    async def test_current_p2p_topic_keeps_its_exact_source(self):
+        await self.assert_current_p2p_source(ScopeKind.TOPIC)
+
+    async def assert_current_p2p_source(self, source_kind):
+        chat_id = f"oc_private_{source_kind.value}"
+        self.scope = FeishuScope("cli_test", chat_id, source_kind,
+            "omt_private_source" if source_kind is ScopeKind.TOPIC else None)
+        source = self.store.create_channel_binding(
+            scope=self.scope, project_alias="test", creator_id="ou_source",
+        )
+        self.store.assign_native_thread_id(source.id, f"native-source-{source_kind.value}")
+        self.source = self.store.get(source.id)
+        self.native = SimpleNamespace(id=f"native-fork-{source_kind.value}")
+        self.target_scope = FeishuScope("cli_test", chat_id, ScopeKind.TOPIC, "omt_fork")
+        self.channel.chat_types[chat_id] = "p2p"
+        self.management.validate_chat_target.side_effect = lambda target: ValidatedChatTarget(target, "p2p")
+        self.queue_topic(promoted=True)
+        await self.app.handle_card_action(self.confirm_event())
+        branch = self.store.active_binding(self.target_scope.key)
+        self.assertIsNotNone(branch, self.updates_text())
+        self.assertEqual(branch.native_thread_id, self.native.id)
+        self.assertEqual(branch.message_context_mode, MentionContextMode.CURRENT_ONLY)
+        self.assertIsNone(branch.context_anchor)
         self.assertEqual(self.store.active_binding(self.scope.key), self.source)
         self.assert_no_execution()
 
@@ -303,9 +618,24 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         self.runtime.fork_exact.assert_not_awaited()
         self.assertIn("不一致", self.updates_text())
 
+    async def test_snapshot_page_rechecks_exact_source_without_querying_directory(self):
+        groups = tuple(AvailableChat(f"oc_scope_{index}", f"查询群 {index}", "group", False) for index in range(12))
+        self.management.query_available_chats.return_value = AvailableChatPage(groups, None)
+        card = await self.search_form(await self.open_form())
+        self.management.query_available_chats.reset_mock()
+        self.management.validate_available_chat.reset_mock()
+        second = self.store.create_channel_binding(scope=self.scope, project_alias="test", creator_id="ou_other")
+        denied = await self.jump_form(card, 1)
+        self.assertIn("变化", str(denied.card))
+        self.assertEqual(self.store.active_binding(self.scope.key), second)
+        self.management.query_available_chats.assert_not_awaited()
+        self.management.validate_available_chat.assert_not_awaited()
+        self.runtime.fork_exact.assert_not_awaited()
+        self.assertEqual(self.channel.send_calls, [])
+
     async def test_target_removed_before_confirm_is_rejected_before_native_creation(self):
         target = AvailableChat("oc_target", "已移除的群", None, None)
-        self.management.validate_available_chat.side_effect = ChatDirectoryError("not_member", "机器人已不在目标群。")
+        self.management.validate_chat_target.side_effect = ChatTargetError("not_member", "机器人已不在目标群。")
         await self.app.handle_card_action(self.confirm_event(target=target))
         self.runtime.fork_exact.assert_not_awaited()
         self.assertEqual(self.channel.send_calls, [])

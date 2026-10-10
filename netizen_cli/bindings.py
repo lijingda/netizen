@@ -910,6 +910,7 @@ class BindingStore:
         root_message_id: str,
         creator_id: str,
         expected_project_revision: int,
+        target_chat_kind: str,
         context_anchor: MessageContextAnchor | None = None,
     ) -> ThreadBinding:
         """Bind an already-created persistent fork to one empty, real topic."""
@@ -919,16 +920,21 @@ class BindingStore:
             or not native_thread_id or native_thread_id == source.native_thread_id
             or source.native_thread_id is None or not root_message_id
             or expected_project_revision < 1
+            or target_chat_kind not in {"group", "p2p"}
         ):
             raise ValueError("fork requires a new native Thread and a fresh topic")
         if self.get_scope(source.scope_key).app_id != scope.app_id:
             raise ScopeConflict("分支必须属于同一个飞书应用。")
+        context_mode = (
+            MentionContextMode.CURRENT_ONLY if target_chat_kind == "p2p"
+            else source.message_context_mode
+        )
         try:
             return self._create_binding(
                 scope=scope, project_alias=source.project_alias, creator_id=creator_id,
                 turn_settings=source.turn_settings, task_feedback=source.task_feedback,
-                message_context_mode=source.message_context_mode,
-                context_anchor=context_anchor,
+                message_context_mode=context_mode,
+                context_anchor=context_anchor if context_mode is MentionContextMode.CATCH_UP else None,
                 expected_project_revision=expected_project_revision,
                 activate=True, allow_scope_insert=True,
                 native_thread_id=native_thread_id,

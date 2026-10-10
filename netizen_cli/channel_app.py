@@ -46,6 +46,7 @@ from .bindings import (
     ThreadBinding,
 )
 from .chat_avatars import ChatAvatarImages
+from .chat_targets import ChatTargetError
 from .cards import (
     account_usage_card,
     ArchivedSessionCardItem,
@@ -99,11 +100,13 @@ from .cards.scheduled import (
     decode_schedule_action,
     is_schedule_card_action,
     schedule_form_card,
+    schedule_draft_card,
     schedule_manager_card,
     schedule_navigation,
     schedule_query,
     schedule_retry_card,
 )
+from .cards.chat_target import CHAT_SEARCH_LIMIT, ChatSearchSnapshot
 from .cards.questions import (
     QuestionAnswer,
     decode_question_answer,
@@ -116,9 +119,8 @@ from .cards.questions import (
 )
 from .cards.defaults import defaults_card, decode_defaults_action, is_defaults_card_action
 from .cards.fork import (
-    ForkCardAction, ForkSource, decode_fork_action, is_fork_card_action,
-    fork_destination_card, fork_chat_search_card, fork_chat_results_card,
-    fork_confirm_card, fork_status_card,
+    ForkCardAction, ForkCardCapacityError, ForkFormValidationError, ForkSource, decode_fork_action, is_fork_card_action,
+    fork_form_card, fork_status_card,
 )
 from .feishu_links import topic_open_url
 from .defaults import DefaultConfigurationError
@@ -251,6 +253,7 @@ from .management import (
     SideIdentityMismatch,
     SessionInventoryState,
 )
+from .management.chat_directory import AvailableChat
 from .git_status import git_branch_status
 from .feishu_links import chat_open_url, topic_open_url
 from .image_inputs import (
@@ -317,6 +320,9 @@ _FEISHU_CARD_ACTION_LOCK_OUTER_CODE = 230099
 _FEISHU_CARD_ACTION_LOCK_INNER_CODE = 11310
 _CARD_ACTION_LOCK_RETRY_DELAYS_SECONDS = (0.2, 0.5)
 _QUESTION_SUBMISSION_CARD_TIMEOUT_SECONDS = 5.0
+_CARD_CHAT_QUERY_SECONDS = 8.0
+_CARD_CHAT_QUERY_PAGE_SIZE = 20
+_CARD_CHAT_QUERY_MAX_PAGES = 20
 _SESSION_TITLE_MAX_CHARS = 48
 _STATUS_THREAD_NAME_MAX_CHARS = 120
 _STATUS_THREAD_PREVIEW_MAX_CHARS = 240
@@ -1029,21 +1035,73 @@ class ChannelApplication:
                 binding = self._bindings.active_binding(scope.key)
                 target_binding_id = payload.get("target_binding_id") if decoded.action == "new" else None
                 target = (plan or {}).get("chat_id") or scope.chat_id
+                fixed_target_id = (plan or {}).get("target_binding_id") or target_binding_id
+                fixed_display: dict[str, Any] = {}
+                if fixed_target_id is not None:
+                    fixed_binding = self._bindings.get(fixed_target_id)
+                    fixed_scope = self._bindings.get_scope(fixed_binding.scope_key)
+                    if fixed_scope.app_id != self._app_id:
+                        raise ScheduleError("目标 Agent 会话不属于当前飞书应用。")
+                    target = fixed_scope.chat_id
+                    fixed_display = {
+                        "target_chat_id": target, "target_topic_id": fixed_scope.topic_id,
+                        "target_label": fixed_binding.id,
+                    }
+                    try:
+                        labels = await self._management.resolve_chat_labels(
+                            (target,), deadline=asyncio.get_running_loop().time() + 2,
+                        )
+                        fixed_display["target_chat_label"] = labels[target].display_name
+                    except Exception:
+                        # Display names never change the exact readonly target.
+                        pass
                 options, catalog = await service.form_options(scope_key=scope.key, chat_id=target)
                 self._require_schedule_result(options)
+                chat_info_error = options.get("chat_info_error")
+                if fixed_target_id is not None and chat_info_error:
+                    raise ScheduleError(chat_info_error["message"])
                 catalog_error = options.get("model_catalog_error")
-                card = schedule_form_card(scope, projects=self._projects.list(enabled_only=True),
+                chat_options = {} if fixed_target_id is not None or target == scope.chat_id else await self._schedule_chat_options(
+                    target_chat_id=target if options["context_mode_available"] is True else None,
+                )
+                if chat_info_error:
+                    chat_options["chat_directory_error"] = (
+                        "目标飞书聊天暂不可读取，聊天类型尚未确认；已保留原 ID 和配置，提交时将重新校验。"
+                    )
+                form_options = dict(projects=self._projects.list(enabled_only=True),
                     default_timezone=service.default_timezone, plan=plan,
                     target_binding_id=target_binding_id,
                     initial_project=binding.project_alias if binding else None,
                     session_settings=options["session_settings"], catalog=catalog,
                     catalog_error=catalog_error.get("message") if catalog_error else None,
-                    allow_context_mode=options["context_mode_available"] is True, navigation=navigation)
+                    allow_context_mode=options["context_mode_available"] is not False,
+                    navigation=navigation,
+                    **fixed_display)
+                card = schedule_form_card(scope, **form_options, **chat_options)
+            elif decoded.action in {"search_chats", "page_chats"}:
+                # The draft is display state, not a create/update request.
+                # Search and failed saves share its renderer, not retry logic.
+                catalog, catalog_error = await service.model_catalog_options()
+                projects = self._projects.list(enabled_only=True)
+                catalog_notice = catalog_error["message"] if catalog_error else None
+                try:
+                    snapshot = (await self._card_chat_snapshot(query=payload["query"])
+                                if decoded.action == "search_chats" else payload["snapshot"])
+                    card = schedule_draft_card(payload["draft"], projects=projects,
+                        catalog=catalog, catalog_error=catalog_notice,
+                        chat_snapshot=snapshot, chat_page=payload.get("page", 0))
+                except CardActionError as error:
+                    # Incomplete/oversized results are never presented as a
+                    # complete snapshot. The editable business draft survives.
+                    card = schedule_draft_card(payload["draft"], projects=projects,
+                        catalog=catalog, catalog_error=catalog_notice,
+                        chat_directory_error=str(error))
             elif decoded.action == "save":
-                draft = self._schedule_default_chat(scope, payload)
-                request = {**draft, "mode": "update" if draft.get("plan_id") else "create", "request_id": decoded.request_id}
+                request = {**payload, "mode": "update" if payload.get("plan_id") else "create", "request_id": decoded.request_id}
                 result = self._require_schedule_result(await service.manage(request, scope_key=scope.key, source="card"))
-                card = await self._schedule_manager_card(scope, navigation=navigation, selected=result, notice="计划已保存。")
+                saved_target = result.get("plan", {}).get("chat_id")
+                notice = "计划已保存。" + (f"目标飞书聊天：{saved_target}。" if saved_target else "")
+                card = await self._schedule_manager_card(scope, navigation=navigation, selected=result, notice=notice)
             elif decoded.action == "enabled":
                 result = self._require_schedule_result(await service.manage({"mode": "update", **payload, "request_id": decoded.request_id}, scope_key=scope.key, source="card"))
                 card = await self._schedule_manager_card(scope, navigation=navigation, selected=result,
@@ -1058,7 +1116,7 @@ class ChannelApplication:
                     notice=notice + "输入将按计划的执行目标交接；原定时安排不变。")
             elif decoded.action == "delete":
                 deleted = self._require_schedule_result(await service.manage({"mode": "delete", **payload, "request_id": decoded.request_id}, scope_key=scope.key, source="card"))
-                notice = "计划已删除，已有会话保留。" + ("本次已触发的交接仍可能继续。" if deleted.get("inflight") else "")
+                notice = "计划已删除，已有 Agent 会话保留。" + ("本次已触发的交接仍可能继续。" if deleted.get("inflight") else "")
                 navigation = {key: value for key, value in navigation.items() if key != "plan_id"}
                 card = await self._schedule_manager_card(scope, navigation=navigation, notice=notice)
             elif decoded.action == "runs":
@@ -1077,6 +1135,17 @@ class ChannelApplication:
             await self._recover_schedule_card_action(event, scope=scope,
                 notice="定时任务操作未确认。可原样重试确认，同一请求不会重复创建计划或触发执行；修改前请先确认上次保存结果。")
 
+    async def _schedule_chat_options(
+        self, *, target_chat_id: str | None = None,
+    ) -> dict[str, Any]:
+        chats = {}
+        if target_chat_id:
+            selected = await self._card_display_group(target_chat_id)
+            if selected is not None:
+                chats[selected.chat_id] = selected
+        return dict(chats=tuple(chats.values()),
+            chat_avatar_keys=await self._chat_avatars.prepare(tuple(chats.values())))
+
     async def _recover_schedule_card_action(self, event: Any, *, scope: FeishuScope | None, notice: str) -> None:
         """Renew only the UI nonce; never turn display metadata into authority."""
         message_id = str(getattr(event, "message_id", "") or "")
@@ -1085,9 +1154,15 @@ class ChannelApplication:
         try:
             if not message_id or not chat_id or not getattr(getattr(event, "operator", None), "open_id", None):
                 raise CardActionError("卡片回调缺少消息或操作者。")
+            catalog = None
+            catalog_error = None
+            if scope is not None and getattr(action, "form_value", None):
+                catalog, catalog_error = await self._management.schedules.model_catalog_options()
             display_scope, card = schedule_retry_card(app_id=self._app_id, chat_id=chat_id,
                 value=getattr(action, "value", None), form=getattr(action, "form_value", None),
-                notice=notice, projects=self._projects.list(enabled_only=True), scope=scope)
+                notice=notice, projects=self._projects.list(enabled_only=True), scope=scope,
+                catalog=catalog, catalog_error=catalog_error["message"] if catalog_error else None,
+                chat_directory_error="已保留填写内容与已选群；可查找更多群聊，或填写聊天 ID。")
             if await self._safe_update_card(message_id, card):
                 return
             scope = scope or display_scope
@@ -3457,10 +3532,93 @@ class ChannelApplication:
             binding.id, binding.native_thread_id, binding.settings_revision,
             binding.context_revision, binding.feedback_revision, project.revision,
         )
-        await self._reply(message, fork_destination_card(
-            intent.scope, source, source_title=await self._fork_source_title(binding),
-            project_alias=binding.project_alias,
-        ))
+        await self._reply(message, await self._fork_form(intent.scope, source, binding))
+
+    async def _card_chat_snapshot(self, *, query: str) -> ChatSearchSnapshot:
+        """Collect one complete bounded result, then let the card own navigation."""
+        chats: dict[str, AvailableChat] = {}
+        cursor = notice = None
+        try:
+            async with asyncio.timeout(_CARD_CHAT_QUERY_SECONDS):
+                for _ in range(_CARD_CHAT_QUERY_MAX_PAGES):
+                    result = await self._management.query_available_chats(
+                        query=query, page_token=cursor, page_size=_CARD_CHAT_QUERY_PAGE_SIZE,
+                    )
+                    chats.update((chat.chat_id, chat) for chat in result.items)
+                    if len(chats) > CHAT_SEARCH_LIMIT:
+                        raise CardActionError(f"匹配群聊超过 {CHAT_SEARCH_LIMIT} 个，请使用更具体的群名查找，或填写聊天 ID；未展示不完整结果。")
+                    notice = result.notice or notice
+                    cursor = result.next_page_token
+                    if cursor is None:
+                        break
+                else:
+                    raise CardActionError("群聊查找范围过大，请使用更具体的群名；未展示不完整结果。")
+        except CardActionError:
+            raise
+        except TimeoutError:
+            raise CardActionError("群聊查找超时，请缩小关键词范围后重试，或填写聊天 ID；未展示不完整结果。") from None
+        except Exception:
+            raise CardActionError("群聊查找未完成，请重新查找，或填写聊天 ID；未展示不完整结果。") from None
+        items = tuple(chats.values())
+        avatars = await self._chat_avatars.prepare(items)
+        return ChatSearchSnapshot(query, items, avatars, notice)
+
+    async def _card_display_group(self, chat_id: str) -> AvailableChat | None:
+        # Presentation only: failure must not make same-chat creation depend
+        # on group discovery (P2P chats may also contain ordinary topics).
+        try:
+            async with asyncio.timeout(2.0):
+                return await self._management.validate_available_chat(chat_id)
+        except Exception:
+            return None
+
+    async def _fork_form(
+        self, scope: FeishuScope, source: ForkSource, binding: ThreadBinding, *,
+        name: str | None = None, target_chat_id: str | None = None,
+        target_mode: str | None = None, target_choice: str | None = None, target_id: str = "",
+        query: str = "", notice: str | None = None,
+        query_input: str | None = None, searched: bool = False,
+        chat_snapshot: ChatSearchSnapshot | None = None, chat_page: int = 0,
+    ) -> OutboundCard:
+        title = await self._fork_source_title(binding)
+        if searched:
+            try:
+                chat_snapshot = await self._card_chat_snapshot(query=query)
+            except CardActionError as error:
+                notice = "\n".join(item for item in (notice, str(error)) if item)
+        # A page callback already carries all names and avatar keys. Do not
+        # re-read the directory or re-upload images to display that snapshot.
+        chats = {chat.chat_id: chat for chat in chat_snapshot.chats} if chat_snapshot is not None else {}
+        selected_id = target_choice if target_choice is not None else (
+            target_chat_id if target_mode in {None, "group"} and target_chat_id != scope.chat_id else None
+        )
+        if (chat_snapshot is None and selected_id
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,191}", selected_id)):
+            # Keep a selected destination and the name across optional remote
+            # search/paging. Membership is still revalidated on creation.
+            selected = await self._card_display_group(selected_id)
+            chats[selected_id] = selected or AvailableChat(selected_id, selected_id, None, None)
+        display = dict(
+            source_title=title, project_alias=binding.project_alias,
+            avatar_keys=(await self._chat_avatars.prepare(tuple(chats.values()))
+                         if chat_snapshot is None else chat_snapshot.avatar_keys),
+            name=name, target_chat_id=target_chat_id, query=query, query_input=query_input,
+            target_mode=target_mode, target_choice=target_choice, target_id=target_id,
+        )
+        try:
+            return fork_form_card(
+                scope, source, **display, chats=tuple(chats.values()),
+                chat_snapshot=chat_snapshot, chat_page=chat_page, notice=notice,
+            )
+        except ForkCardCapacityError:
+            # Do not truncate searchable names or silently present a partial
+            # directory as complete. Keep the draft while requesting a query.
+            selected = chats.get(selected_id) if selected_id else None
+            return fork_form_card(
+                scope, source, **display, chats=(selected,) if selected else (),
+                notice="\n".join(item for item in (notice,
+                    "完整群聊结果超过卡片容量，请按更具体的群名查找，或填写聊天 ID；未截断结果。") if item),
+            )
 
     def _require_fork_source(self, scope: FeishuScope, source: ForkSource) -> ThreadBinding:
         binding = self._bindings.get(source.binding_id)
@@ -3495,39 +3653,23 @@ class ChannelApplication:
                 app_id=self._app_id, chat_id=chat_id, topic_id=topic_id, root_message_id=message_id,
             ) is not None:
                 raise CardActionError("Side 话题不支持创建持久分支，请返回普通会话使用 /fork。")
-            request = decode_fork_action(scope, getattr(action, "value", None), getattr(action, "form_value", None))
+            notice = None
+            try:
+                request = decode_fork_action(scope, getattr(action, "value", None), getattr(action, "form_value", None))
+            except ForkFormValidationError as error:
+                request, notice = error.draft, str(error)
             source = self._require_fork_source(scope, request.source)
-            title = await self._fork_source_title(source)
-            common = {"source_title": title, "project_alias": source.project_alias}
-            if request.action == "destination":
-                card = fork_destination_card(scope, request.source, **common)
-            elif request.action == "search":
-                card = fork_chat_search_card(scope, request.source, **common)
-            elif request.action == "results":
-                page = await self._management.query_available_chats(
-                    query=request.query or "", page_token=request.page_token,
+            if request.action == "results":
+                card = await self._fork_form(
+                    scope, request.source, source, name=request.name, target_chat_id=request.target_chat_id,
+                    target_mode=request.target_mode, target_choice=request.target_choice, target_id=request.target_id,
+                    query=request.query or "", notice=notice,
+                    query_input=request.query_input, searched=request.search_requested,
+                    chat_snapshot=request.chat_snapshot, chat_page=request.chat_page,
                 )
-                card = fork_chat_results_card(scope, request.source, page, query=request.query or "",
-                    avatar_keys=await self._chat_avatars.prepare(page.items), **common)
-            elif request.action == "select":
-                target = None if request.target_chat_id == scope.chat_id else (
-                    await self._management.validate_available_chat(request.target_chat_id)
-                )
-                avatar_chat = target
-                if avatar_chat is None and scope.kind != ScopeKind.DIRECT:
-                    # Same-chat creation has no directory prerequisite. This
-                    # lookup is only for display, including P2P topic fallback.
-                    try:
-                        async with asyncio.timeout(2.0):
-                            avatar_chat = await self._management.validate_available_chat(scope.chat_id)
-                    except Exception:
-                        pass
-                avatar_keys = await self._chat_avatars.prepare((avatar_chat,)) if avatar_chat is not None else {}
-                card = fork_confirm_card(scope, request.source, target_chat=target,
-                    avatar_key=avatar_keys.get(request.target_chat_id), **common)
             elif request.action == "create":
                 await self._create_fork_from_card(
-                    intent=request, scope=scope, source=source, source_title=title,
+                    intent=request, scope=scope, source=source, source_title=await self._fork_source_title(source),
                     message_id=message_id, sender_id=sender_id,
                 )
                 return
@@ -3548,8 +3690,20 @@ class ChannelApplication:
     ) -> None:
         assert intent.target_chat_id is not None and intent.name is not None
         target_chat_id = intent.target_chat_id
-        if target_chat_id != scope.chat_id:
-            await self._management.validate_available_chat(target_chat_id)
+        try:
+            target = await self._management.validate_chat_target(target_chat_id)
+        except ChatTargetError as error:
+            # This is before any native or topic creation. Only this boundary
+            # can restore a submit button; unknown creation results must not.
+            card = await self._fork_form(
+                scope, intent.source, source, name=intent.name, target_chat_id=target_chat_id,
+                target_mode=intent.target_mode, target_choice=intent.target_choice, target_id=intent.target_id,
+                query=intent.query or "", notice=str(error),
+                query_input=intent.query_input,
+            )
+            if not await self._safe_update_card(message_id, card):
+                raise CardActionError("目标校验未通过，表单恢复失败；本次未创建分支，请重新发送 /fork。") from error
+            return
         project = await self._management.resolve_new_project(
             source.project_alias, deadline=asyncio.get_running_loop().time() + 10.0,
         )
@@ -3587,7 +3741,7 @@ class ChannelApplication:
                 destination = FeishuScope(self._app_id, target_chat_id, ScopeKind.TOPIC, origin.thread_id)
                 topic_url = topic_open_url(target_chat_id, origin.thread_id)
                 anchor = await self._resolve_context_anchor(destination, origin.message_id) if (
-                    source.message_context_mode is MentionContextMode.CATCH_UP
+                    target.chat_kind == "group" and source.message_context_mode is MentionContextMode.CATCH_UP
                 ) else None
                 async with self._scope_coordinator.hold(destination.key):
                     self._runtime.require_fork_creation_open(project.alias)
@@ -3595,6 +3749,7 @@ class ChannelApplication:
                         scope=destination, source=source, native_thread_id=thread.id,
                         root_message_id=root.message_id, creator_id=sender_id,
                         expected_project_revision=project.revision, context_anchor=anchor,
+                        target_chat_kind=target.chat_kind,
                     )
                     named = await self._runtime.adopt_fork(binding, thread, name=intent.name)
                 status = "success"

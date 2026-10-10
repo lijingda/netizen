@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,23 +19,34 @@ from lark_channel import OutboundCard
 
 from ..domain import FeishuScope, MentionContextMode, ScopeKind
 from ..model_settings import ModelCatalog
+from ..management.chat_directory import AvailableChat
 from ..projects import Project
-from ..session_settings import SessionSettings
+from ..session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 from ..schedules.models import AmbiguousLocalTime, ScheduleError, resolve_once_local
 from .callbacks import CardActionError, _builder, _notice, _plain, _plain_text
-from .controls import decode_session_settings_form, session_settings_form_elements, session_settings_summary
+from .chat_target import (
+    ChatSearchSnapshot, ChatSearchView, ChatTargetDraft, chat_options, chat_target_elements,
+    decode_chat_snapshot, encode_chat_snapshot, initial_chat_target, read_chat_target, resolve_chat_target,
+    snapshot_capacity_selections, snapshot_chat_options,
+)
+from .pagination import decode_page_selection, pagination_controls
+from .controls import (
+    MAX_SETTING_ID_CHARS,
+    _decode_context_mode_reference, _decode_new_model_reference, _decode_task_feedback_reference,
+    decode_session_settings_form, session_settings_form_elements, session_settings_summary,
+)
 from .reply import TURN_FILE_CARD_JSON_LIMIT_BYTES
 
 
 _VERSION = 4
-_FORM_PREFIX = "cron_name_v6__"
+_FORM_PREFIX = "cron_name_v7__"
 _KINDS = {"once": "一次性", "daily": "每天", "weekly": "每周", "interval": "固定间隔"}
 _FILTERS = {
-    "current": "当前会话 · 全部任务", "current_enabled": "当前会话 · 已启用",
-    "current_paused": "当前会话 · 已暂停", "all": "全部会话 · 全部任务",
-    "all_enabled": "全部会话 · 已启用", "all_paused": "全部会话 · 已暂停",
+    "current": "当前飞书聊天 · 全部任务", "current_enabled": "当前飞书聊天 · 已启用",
+    "current_paused": "当前飞书聊天 · 已暂停", "all": "全部飞书聊天 · 全部任务",
+    "all_enabled": "全部飞书聊天 · 已启用", "all_paused": "全部飞书聊天 · 已暂停",
 }
-_ACTIONS = {"list", "new", "view", "edit", "delete", "runs", "enabled", "run_now"}
+_ACTIONS = {"list", "new", "view", "edit", "delete", "runs", "enabled", "run_now", "search_chats", "page_chats"}
 _FIELDS = {
     "list": (set(), set()),
     "new": (set(), {"target_kind", "target_binding_id"}),
@@ -45,26 +56,29 @@ _FIELDS = {
     "runs": ({"plan_id"}, {"cursor"}),
     "enabled": ({"plan_id", "expected_revision", "enabled"}, set()),
     "run_now": ({"plan_id", "expected_revision"}, set()),
+    "search_chats": (set(), set()),
+    "page_chats": ({"snapshot"}, set()),
 }
 _MAX_INSTRUCTIONS = 8000
 _MAX_FORM_INSTRUCTIONS = 1000
 _MAX_INSTRUCTION_JSON_BYTES = 12_000
 SCHEDULE_CARD_JSON_LIMIT_BYTES = TURN_FILE_CARD_JSON_LIMIT_BYTES
+_CARD_ELEMENT_LIMIT = 200
 _STATES = {
     "enabled": "已启用", "paused": "已暂停", "ended": "计划已结束",
     "blocked_unknown": "执行状态待确认", "project_disabled": "Project 已停用",
     "project_unavailable": "Project 不可用", "completed": "已完成",
     "failed": "执行失败", "interrupted": "已停止", "inProgress": "运行中",
-    "running": "运行中", "deleted": "会话已删除", "unavailable": "状态暂不可读",
+    "running": "运行中", "deleted": "Agent 会话已删除", "unavailable": "状态暂不可读",
     "claimed": "已触发", "publishing_topic": "正在创建话题", "binding_ready": "正在启动",
     "starting": "正在启动", "starting_turn": "正在启动", "handed_off": "已启动", "released": "本次已处理",
     "missed": "已错过", "skipped_busy": "上次仍在运行，本次跳过",
-    "scope_conflict": "话题已有会话，本次未启动", "publishing_unknown": "话题发布结果待确认",
+    "scope_conflict": "话题已有 Agent 会话，本次未启动", "publishing_unknown": "话题发布结果待确认",
     "publishing_failed": "话题发布失败", "dispatch_rejected": "本次未启动",
     "initial_start_rejected": "首次启动条件已改变", "initial_start_unknown": "启动结果待确认",
     "observation_unavailable": "执行状态暂不可读", "sent": "已投递", "unknown": "待确认",
-    "target_inactive": "原会话已切走或归档，自动暂停", "target_missing": "原会话不可用",
-    "target_mismatch": "原会话位置不匹配", "input_started": "已启动新一轮",
+    "target_inactive": "目标 Agent 会话已切换或归档，自动暂停", "target_missing": "目标 Agent 会话不可用",
+    "target_mismatch": "目标 Agent 会话所在飞书聊天或话题不匹配", "input_started": "已启动新一轮",
     "input_steered": "已追加当前任务", "input_unknown": "输入接收情况待确认",
     "input_rejected": "输入被拒绝", "anchor_failed": "触发消息发送失败",
     "anchor_unknown": "触发消息发送结果待确认",
@@ -97,7 +111,7 @@ def _session_settings(value: Any) -> SessionSettings:
     try:
         return SessionSettings.from_dict(dict(value) if isinstance(value, Mapping) else value)
     except ValueError as error:
-        raise CardActionError("会话配置不完整，请重新发送 /cron。") from error
+        raise CardActionError("Agent 会话配置不完整，请重新发送 /cron。") from error
 
 
 def _card(builder: Any) -> OutboundCard:
@@ -107,9 +121,18 @@ def _card(builder: Any) -> OutboundCard:
     card["body"].update(padding="12px", vertical_spacing="12px")
     # lark-channel-sdk 1.4.0 OutboundSender serializes cards this exact way,
     # without splitting them. Use the existing, verified Reply Card ceiling.
-    if len(json.dumps(card, ensure_ascii=False).encode("utf-8")) > SCHEDULE_CARD_JSON_LIMIT_BYTES:
+    if (_element_count(card) > _CARD_ELEMENT_LIMIT
+            or len(json.dumps(card, ensure_ascii=False).encode("utf-8")) > SCHEDULE_CARD_JSON_LIMIT_BYTES):
         raise CardActionError("卡片内容较长，请通过 Admin 或自然语言管理这项计划；内容未被截断保存。")
     return OutboundCard(card=card)
+
+
+def _element_count(value: Any) -> int:
+    if isinstance(value, Mapping):
+        return int("tag" in value) + sum(_element_count(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(_element_count(item) for item in value)
+    return 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +141,19 @@ class ScheduleCardAction:
     payload: dict[str, Any]
     request_id: str
     navigation: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleFormDraft:
+    """One renderable form, separate from a validated plan write request."""
+
+    scope: FeishuScope
+    meta: dict[str, Any]
+    fields: dict[str, Any]
+    settings: SessionSettings
+    target: ChatTargetDraft
+    allow_context_mode: bool
+    session_fields: dict[str, str] | None = None
 
 
 def schedule_navigation(value: Any = None) -> dict[str, Any]:
@@ -182,19 +218,21 @@ def is_schedule_card_action(value: Any, form: Any = None) -> bool:
 
 def decode_schedule_action(*, scope: FeishuScope, value: Any, form: Any = None) -> ScheduleCardAction:
     if form is not None and form != {}:
-        return _decode_form(scope, form)
+        return _decode_form(scope, form, value=value)
     if not isinstance(value, Mapping) or set(value) != {"kind", "v", "scope", "action", "payload", "request_id", "navigation", "nonce"}:
         raise CardActionError("定时任务卡片动作无效，请重新发送 /cron。")
     if value["kind"] != "netizen_cron" or type(value["v"]) is not int or value["v"] != _VERSION:
         raise CardActionError("定时任务卡片已过期，请重新发送 /cron。")
     if value["scope"] != scope.key or value["action"] not in _ACTIONS:
-        raise CardActionError("定时任务卡片与当前会话不一致，请在当前会话重新发送 /cron。")
+        raise CardActionError("定时任务卡片与当前飞书聊天或话题不一致，请在原位置重新发送 /cron。")
     if not isinstance(value["payload"], dict) or not isinstance(value["request_id"], str) or not value["request_id"]:
         raise CardActionError("定时任务卡片缺少操作凭据。")
     if not isinstance(value["nonce"], str) or not re.fullmatch(r"[0-9a-f]{32}", value["nonce"]):
         raise CardActionError("定时任务卡片缺少交互凭据。")
     required, optional = _FIELDS[value["action"]]
     fields = set(value["payload"])
+    if value["action"] == "search_chats" and "cursor" in fields:
+        raise CardActionError("群聊分页卡片已更新，请重新查找群聊。")
     if not required <= fields or fields - required - optional:
         raise CardActionError("定时任务卡片动作字段不完整或含未知字段。")
     if value["action"] == "new" and fields and (
@@ -202,7 +240,7 @@ def decode_schedule_action(*, scope: FeishuScope, value: Any, form: Any = None) 
             or value["payload"]["target_kind"] != "binding"
             or not isinstance(value["payload"]["target_binding_id"], str)
             or not value["payload"]["target_binding_id"].strip()):
-        raise CardActionError("原会话目标无效，请重新打开定时任务卡片。")
+        raise CardActionError("目标 Agent 会话无效，请重新打开定时任务卡片。")
     return ScheduleCardAction(value["action"], dict(value["payload"]), value["request_id"], schedule_navigation(value["navigation"]))
 
 
@@ -287,7 +325,7 @@ def schedule_manager_card(scope: FeishuScope, result: dict[str, Any], *, navigat
                 f"{str(item.get('name', ''))[:60]} · {_display_state(item.get('status') or ('enabled' if item.get('enabled') else 'paused'))} · {str(item['id'])[:8]}") for item in plans],
             selected=_encoded(state) if plan is not None else None, submit="查看任务"))
     else:
-        builder.raw(_plain("还没有符合条件的任务。可新建独立话题任务，或在当前会话中定时继续。"))
+        builder.raw(_plain("还没有符合条件的任务。可新建独立话题任务，或在当前 Agent 会话中定时继续。"))
     pages = []
     if state.get("cursor"):
         pages.append(_button(scope, "回到首页", "list", navigation={"filter": state["filter"]}))
@@ -304,7 +342,7 @@ def schedule_manager_card(scope: FeishuScope, result: dict[str, Any], *, navigat
     builder.divider()
     builder.raw(_button(scope, "新建定时任务", "new", navigation=state, primary=True))
     if current_binding_id:
-        builder.raw(_button(scope, "在当前会话定时执行", "new",
+        builder.raw(_button(scope, "在当前 Agent 会话中定时执行", "new",
             {"target_kind": "binding", "target_binding_id": current_binding_id}, navigation=state))
     return _card(builder)
 
@@ -328,8 +366,8 @@ def _plan_summary(plan: Mapping[str, Any]) -> str:
     return (
         f"{plan.get('name', '')} · {str(plan.get('id', ''))[:8]}\n"
         f"Project：{plan.get('project_alias', '')}\n"
-        f"目标会话：{plan.get('chat_id', '')}\n"
-        + (f"执行目标：原会话 · {plan.get('target_label') or plan.get('target_binding_id', '')}\n" if plan.get("target_kind") == "binding" else "执行目标：每次新建独立话题\n")
+        f"目标飞书聊天：{plan.get('chat_id', '')}\n"
+        + (f"执行目标：Agent 会话 · {plan.get('target_label') or plan.get('target_binding_id', '')}\n" if plan.get("target_kind") == "binding" else "执行目标：每次新建独立话题\n")
         + f"启停：{'已启用' if plan.get('enabled') else '已暂停'}\n"
         + f"时间：{rule_text} · {rule.get('timezone', '')}\n"
         f"状态：{status}" + (f" · {_display_state(blocked)}" if blocked else "")
@@ -349,16 +387,16 @@ def _render_selected_plan(builder: Any, scope: FeishuScope, result: dict[str, An
         builder.raw(_plain("执行指令（内容节选）\n" + instructions[:2000] + "…"))
         builder.raw(_notice("完整指令较长，请通过 Admin 或自然语言查看、编辑。计划原文完整保留，仍可在此启停或删除。"))
     if plan.get("target_kind") == "binding":
-        builder.raw(_plain("Project、模型、上下文和反馈随原会话当前配置；系统触发不新增 @ 通知。"))
+        builder.raw(_plain("Project、模型、上下文和反馈随目标 Agent 会话当前配置；系统触发不新增 @ 通知。"))
     else:
-        builder.raw(_fold("会话配置", _plain(session_settings_summary(_session_settings(plan.get("session_settings", SessionSettings()))))))
+        builder.raw(_fold("Agent 会话配置", _plain(session_settings_summary(_session_settings(plan.get("session_settings", SessionSettings()))))))
     inflight = result.get("inflight") or plan.get("inflight")
     if inflight:
         builder.raw(_notice("本次已触发，修改、暂停或删除从后续触发生效；本次交接可以继续。"))
     exact = {"plan_id": plan["id"], "expected_revision": plan["revision"]}
     actions = []
     if plan.get("can_run_now") is True:
-        builder.raw(_plain("立即运行会将保存的指令提交到原会话，空闲时启动新一轮，忙碌时追加当前任务；原定时安排保持不变。"
+        builder.raw(_plain("立即运行会将保存的指令提交到目标 Agent 会话，空闲时启动新一轮，忙碌时追加当前任务；原定时安排保持不变。"
             if plan.get("target_kind") == "binding" else "立即运行会按当前保存的内容执行一次，并新建话题；原定时安排保持不变。"))
         actions.append(_button(scope, "立即运行", "run_now", exact, navigation=navigation, primary=True))
     elif plan.get("blocked_reason"):
@@ -373,7 +411,7 @@ def _render_selected_plan(builder: Any, scope: FeishuScope, result: dict[str, An
     builder.raw(_row(*actions))
     delete = _button(scope, "删除计划", "delete", exact, navigation=navigation, danger=True)
     delete["confirm"] = {"title": _plain_text("删除定时任务？"),
-        "text": _plain_text("删除后停止后续触发，保留已有普通会话。已认领的本次交接仍可能继续。删除的计划不能恢复。")}
+        "text": _plain_text("删除后停止后续触发，保留已有 Agent 会话。已认领的本次交接仍可能继续。删除的计划不能恢复。")}
     builder.raw(_row(_button(scope, "最近执行", "runs", {"plan_id": plan["id"]}, navigation=navigation),
         _button(scope, "刷新任务", "view", {"plan_id": plan["id"]}, navigation=navigation), delete))
 
@@ -384,7 +422,7 @@ def _runs_panel(scope: FeishuScope, result: dict[str, Any], *, plan_id: str, nav
     if not runs:
         items.append(_plain("还没有触发记录。"))
     for run in runs:
-        delivery = ("反馈：随原会话当前任务交付" if run.get("target_kind") == "binding" else
+        delivery = ("反馈：随目标 Agent 会话当前任务交付" if run.get("target_kind") == "binding" else
             f"结果投递：{ {'sent': '已投递', 'failed': '投递失败', 'unknown': '待确认'}.get(run.get('delivery_state'), '尚未投递')}")
         items.append(_plain(
             f"时间：{run.get('due_local') or _utc_time(run.get('due_at'))}\n"
@@ -419,8 +457,12 @@ def schedule_form_card(scope: FeishuScope, *, projects: Sequence[Project], defau
                        initial_project: str | None = None, session_settings: SessionSettings | Mapping[str, Any] | None = None,
                        catalog: ModelCatalog | None = None, catalog_error: str | None = None,
                        allow_context_mode: bool = False, navigation: Any = None,
-                       _retry_form: Mapping[str, Any] | None = None, _request_id: str | None = None,
-                       _notice_text: str | None = None) -> OutboundCard:
+                       chats: Sequence[AvailableChat] = (), chat_avatar_keys: Mapping[str, str] | None = None,
+                       chat_snapshot: ChatSearchSnapshot | None = None, chat_page: int = 0,
+                       chat_directory_error: str | None = None,
+                       target_chat_id: str | None = None, target_chat_label: str | None = None,
+                       target_topic_id: str | None = None,
+                       target_label: str | None = None) -> OutboundCard:
     navigation = schedule_navigation(navigation)
     builder = _builder("编辑定时任务" if plan else "新建定时任务", "填写内容与时间，保存后按计划执行")
     existing = dict(plan or {})
@@ -445,7 +487,7 @@ def schedule_form_card(scope: FeishuScope, *, projects: Sequence[Project], defau
     kind = rule.get("kind", "once")
     if kind not in _KINDS:
         raise CardActionError("未知时间规则。")
-    meta = {"request_id": _request_id or uuid4().hex}
+    meta = {"request_id": uuid4().hex, "navigation": navigation, "scope": scope.key}
     if plan:
         meta.update(plan_id=plan["id"], expected_revision=plan["revision"])
     if kind == "interval" and rule.get("anchor") is not None:
@@ -460,77 +502,244 @@ def schedule_form_card(scope: FeishuScope, *, projects: Sequence[Project], defau
     if kind != "once" and rule.get("end_at"):
         end_at = datetime.fromisoformat(rule["end_at"]).astimezone(ZoneInfo(timezone))
         meta["original_end_at"] = rule["end_at"]
-    instructions_name = "cron_instructions"
-    if meta.get("plan_id"):
-        instructions_name += f"__{meta['plan_id']}:{meta['expected_revision']}"
-    timezone_name = "cron_timezone" + (f"__{meta['original_at']}" if "original_at" in meta else "")
-    elements = [
-        _input(_form_name(scope, "plan", uuid4().hex), "名称", str(existing.get("name", ""))),
-        _input(instructions_name, "执行内容", str(existing.get("instructions", "")), multiline=True),
-        _row(_select("cron_kind", "执行频率", list(_KINDS.items()), kind), _input(timezone_name, "时区", timezone)),
-    ]
-    date = {"tag": "date_picker", "name": "cron_date", "required": False, "width": "fill", "placeholder": _plain_text("选择日期")}
-    if once_at:
-        date["initial_date"] = once_at.strftime("%Y-%m-%d")
-    time = {"tag": "picker_time", "name": "cron_at", "required": False, "width": "fill",
-        "placeholder": _plain_text("选择时间"), "initial_time": once_at.strftime("%H:%M") if once_at else rule.get("at") or "09:00"}
-    elements.append(_row(_labeled("日期 · 仅一次性", date), _labeled("时间 · 一次性 / 每天 / 每周", time)))
-    weekdays = {"tag": "multi_select_static", "name": "cron_weekdays", "required": False,
-        "width": "fill", "placeholder": _plain_text("选择星期"),
-        "options": [{"text": _plain_text("周" + "一二三四五六日"[day]), "value": str(day)} for day in range(7)],
-        "selected_values": [str(day) for day in rule.get("weekdays", (0, 1, 2, 3, 4))]}
-    minutes_name = "cron_every_minutes" + (f"__{meta['anchor']}" if "anchor" in meta else "")
-    elements.append(_row(_labeled("星期 · 仅每周", weekdays),
-        _input(minutes_name, "分钟间隔 · 仅固定间隔", str(rule.get("every_minutes") or 60), required=False)))
-    end_time_name = "cron_end_time" + (f"__{meta['original_end_at']}" if "original_end_at" in meta else "")
-    end_date = {"tag": "date_picker", "name": "cron_end_date", "required": False, "width": "fill", "placeholder": _plain_text("不限截止日期")}
-    end_time = {"tag": "picker_time", "name": end_time_name, "required": False, "width": "fill", "placeholder": _plain_text("选择截止时间")}
-    if end_at:
-        end_date["initial_date"] = end_at.strftime("%Y-%m-%d")
-        end_time["initial_time"] = end_at.strftime("%H:%M")
-    elements.append(_plain("截止时间 · 仅每天 / 每周 / 固定间隔（可选）"))
-    elements.append(_row(_labeled("截止日期", end_date), _labeled("截止时间（含该时刻）", end_time)))
-    elements.append(_plain("截止日期与时间使用上方时区；同时留空可取消截止。"))
-    project_meta = {"navigation": navigation, "scope": scope.key, "request_id": meta["request_id"]}
+    fields = {
+        "cron_name": str(existing.get("name", "")), "cron_instructions": str(existing.get("instructions", "")),
+        "cron_kind": kind, "cron_timezone": timezone,
+        "cron_date": once_at.strftime("%Y-%m-%d") if once_at else "",
+        "cron_at": once_at.strftime("%H:%M") if once_at else rule.get("at") or "09:00",
+        "cron_weekdays": [str(day) for day in rule.get("weekdays", (0, 1, 2, 3, 4))],
+        "cron_every_minutes": str(rule.get("every_minutes") or 60),
+        "cron_end_date": end_at.strftime("%Y-%m-%d") if end_at else "",
+        "cron_end_time": end_at.strftime("%H:%M") if end_at else "",
+        "cron_chat_query": chat_snapshot.query if chat_snapshot is not None else "",
+    }
     if binding_target:
-        target_meta = {**project_meta, "target_kind": "binding", "target_binding_id": target_binding_id}
-        label = "原会话 · " + str(existing.get("target_label") or target_binding_id)
-        elements.append(_select("cron_project", "执行目标（创建后固定）", [(_encoded(target_meta), label)], _encoded(target_meta)))
-        elements.append(_plain("沿用原会话的 Project、模型、上下文和反馈。到点提交一条输入，空闲时启动新一轮，忙碌时追加当前任务。切走或归档后自动暂停，恢复后继续；删除原会话也会删除计划。"))
+        raw_label = str(existing.get("target_label") or target_label or target_binding_id)
+        target_chat_id = str(existing.get("chat_id") or target_chat_id or scope.chat_id)
+        target_topic_id = target_topic_id or existing.get("target_topic_id")
+        meta.update(target_kind="binding", target_binding_id=target_binding_id,
+            target_chat_id=target_chat_id, target_label=raw_label,
+            target_chat_label=target_chat_label or "", target_topic_id=target_topic_id or "")
     else:
-        elements.extend(_new_topic_form_fields(existing, projects=projects, initial_project=initial_project,
-            project_meta=project_meta, settings=settings, catalog=catalog, catalog_error=catalog_error,
-            allow_context_mode=allow_context_mode))
+        meta["project"] = existing.get("project_alias") or initial_project or projects[0].alias
+    target = initial_chat_target(current_chat_id=scope.chat_id,
+        target_chat_id=existing.get("chat_id"), options=chat_options(chats))
+    draft = ScheduleFormDraft(scope, meta, fields, settings, target, allow_context_mode)
+    return schedule_draft_card(draft, projects=projects, catalog=catalog, catalog_error=catalog_error,
+        chats=chats, chat_avatar_keys=chat_avatar_keys,
+        chat_snapshot=chat_snapshot, chat_page=chat_page, chat_directory_error=chat_directory_error)
+
+
+def schedule_draft_card(draft: ScheduleFormDraft, *, projects: Sequence[Project],
+                        catalog: ModelCatalog | None = None, catalog_error: str | None = None,
+                        chats: Sequence[AvailableChat] = (), chat_avatar_keys: Mapping[str, str] | None = None,
+                        chat_snapshot: ChatSearchSnapshot | None = None, chat_page: int = 0,
+                        chat_directory_error: str | None = None,
+                        notice: str | None = None) -> OutboundCard:
+    """Render initial, edited, searched and failed forms from the same draft."""
+    options = dict(projects=projects, catalog=catalog, catalog_error=catalog_error,
+        chats=chats, chat_avatar_keys=chat_avatar_keys,
+        chat_snapshot=chat_snapshot, chat_directory_error=chat_directory_error, notice=notice)
+    if chat_snapshot is None:
+        return _render_schedule_draft_card(draft, chat_page=0, **options)
+    if type(chat_page) is not int or not 0 <= chat_page < chat_snapshot.total_pages:
+        raise CardActionError("群聊页码无效，请重新查找群聊。")
+    result = None
+    try:
+        # Full callback snapshots and page choices also consume card capacity.
+        # Validate every page before showing any result, never a partial set.
+        for page in range(chat_snapshot.total_pages):
+            rendered = _render_schedule_draft_card(draft, chat_page=page, **options)
+            for retained in snapshot_capacity_selections(chat_snapshot, page):
+                if retained == draft.target.choice:
+                    continue
+                capacity_draft = replace(draft, target=replace(draft.target, choice=retained))
+                _render_schedule_draft_card(capacity_draft, chat_page=page, **options)
+            if page == chat_page:
+                result = rendered
+    except CardActionError as error:
+        raise CardActionError("群聊查找结果超出卡片容量，请细化关键词或填写聊天 ID；结果和任务内容均未截断。") from error
+    assert result is not None
+    return result
+
+
+def _render_schedule_draft_card(draft: ScheduleFormDraft, *, projects: Sequence[Project],
+                               catalog: ModelCatalog | None, catalog_error: str | None,
+                               chats: Sequence[AvailableChat], chat_avatar_keys: Mapping[str, str] | None,
+                               chat_snapshot: ChatSearchSnapshot | None,
+                               chat_page: int, chat_directory_error: str | None,
+                               notice: str | None) -> OutboundCard:
+    scope, meta, fields = draft.scope, draft.meta, draft.fields
+    editing = "plan_id" in meta
+    binding_target = meta.get("target_kind") == "binding"
+    builder = _builder("编辑定时任务" if editing else "新建定时任务", "填写内容与时间，保存后按计划执行")
+    instructions_name = "cron_instructions" + (f"__{meta['plan_id']}:{meta['expected_revision']}" if editing else "")
+    timezone_name = "cron_timezone" + (f"__{meta['original_at']}" if "original_at" in meta else "")
+    minutes_name = "cron_every_minutes" + (f"__{meta['anchor']}" if "anchor" in meta else "")
+    end_time_name = "cron_end_time" + (f"__{meta['original_end_at']}" if "original_end_at" in meta else "")
+    elements = [
+        _input(_form_name(scope, "plan", uuid4().hex), "名称", fields["cron_name"]),
+        _input(instructions_name, "执行内容", fields["cron_instructions"], multiline=True),
+        _row(_select("cron_kind", "执行频率", list(_KINDS.items()), fields["cron_kind"]),
+            _input(timezone_name, "时区", fields["cron_timezone"])),
+        _row(_labeled("日期 · 仅一次性", _draft_picker("cron_date", "date_picker", fields.get("cron_date", ""))),
+            _labeled("时间 · 一次性 / 每天 / 每周", _draft_picker("cron_at", "picker_time", fields.get("cron_at", "")))),
+        _row(_labeled("星期 · 仅每周", {
+            "tag": "multi_select_static", "name": "cron_weekdays", "required": False, "width": "fill",
+            "placeholder": _plain_text("选择星期"),
+            "options": [{"text": _plain_text("周" + "一二三四五六日"[day]), "value": str(day)} for day in range(7)],
+            "selected_values": fields.get("cron_weekdays", []),
+        }), _input(minutes_name, "分钟间隔 · 仅固定间隔", fields.get("cron_every_minutes", ""), required=False)),
+        _plain("截止时间 · 仅每天 / 每周 / 固定间隔（可选）"),
+        _row(_labeled("截止日期", _draft_picker("cron_end_date", "date_picker", fields.get("cron_end_date", ""))),
+            _labeled("截止时间（含该时刻）", _draft_picker(end_time_name, "picker_time", fields.get("cron_end_time", "")))),
+        _plain("截止日期与时间使用上方时区；同时留空可取消截止。"),
+    ]
+    project_meta = {key: value for key, value in meta.items()
+        if key not in {"plan_id", "expected_revision", "anchor", "original_at", "original_end_at"}}
+    if binding_target:
+        target_value = _encoded(project_meta)
+        target_chat_id = meta.get("target_chat_id") or scope.chat_id
+        target_chat_label, target_topic_id = meta.get("target_chat_label"), meta.get("target_topic_id")
+        elements.append(_select("cron_project", "目标 Agent 会话（只读，创建后固定）",
+            [(target_value, "Agent 会话 · " + (meta.get("target_label") or meta["target_binding_id"]))], target_value))
+        elements.append(_plain("所属飞书聊天：" + (target_chat_label + " · " if target_chat_label else "") + target_chat_id
+            + (f"\n所属飞书话题：{target_topic_id}" if target_topic_id else "")))
+        elements.append(_plain("沿用目标 Agent 会话的 Project、模型、上下文和反馈。到点提交一条输入，空闲时启动新一轮，忙碌时追加当前任务。切换或归档后自动暂停，恢复后继续；删除目标 Agent 会话也会删除计划。"))
+    else:
+        elements.extend(_new_topic_form_fields(draft, projects=projects, project_meta=project_meta,
+            catalog=catalog, catalog_error=catalog_error))
+        elements.extend(_chat_target_form_fields(draft, chats=chats, chat_avatar_keys=chat_avatar_keys,
+            chat_snapshot=chat_snapshot, chat_page=chat_page,
+            chat_directory_error=chat_directory_error))
     elements.append(_plain("只使用所选频率对应的日期、时间、星期或间隔；日期与时间以所填时区为准。"))
-    elements.append({"tag": "button", "name": "cron_save", "text": _plain_text("保存修改" if plan else "创建任务"), "type": "primary_filled", "width": "fill", "form_action_type": "submit"})
-    if _retry_form is not None:
-        _restore_form_fields(elements, _retry_form)
-    if _notice_text:
-        builder.raw(_notice(_notice_text))
+    elements.append({"tag": "button", "name": "cron_save", "text": _plain_text("保存修改" if editing else "创建任务"),
+        "type": "primary_filled", "width": "fill", "form_action_type": "submit"})
+    if not binding_target:
+        # Directory search submits the same form before task details are filled.
+        # Final-save validation remains in the business decoder.
+        _relax_required_fields(elements)
+    if notice:
+        builder.raw(_notice(notice))
     builder.raw({"tag": "form", "name": "cron_plan", "elements": elements})
-    builder.raw(_button(scope, "取消", "view" if plan else "list", {"plan_id": plan["id"]} if plan else {}, navigation=navigation))
+    builder.raw(_button(scope, "取消", "view" if editing else "list",
+        {"plan_id": meta["plan_id"]} if editing else {}, navigation=meta["navigation"]))
     return _card(builder)
 
 
-def _new_topic_form_fields(existing: Mapping[str, Any], *, projects: Sequence[Project], initial_project: str | None,
-                           project_meta: dict[str, Any], settings: SessionSettings, catalog: ModelCatalog | None,
-                           catalog_error: str | None, allow_context_mode: bool) -> list[dict[str, Any]]:
+def _draft_picker(name: str, tag: str, value: str) -> dict[str, Any]:
+    date = tag == "date_picker"
+    result = {"tag": tag, "name": name, "required": False, "width": "fill",
+        "placeholder": _plain_text("选择日期" if date else "选择时间")}
+    if value:
+        result["initial_date" if date else "initial_time"] = value
+    return result
+
+
+def _new_topic_form_fields(draft: ScheduleFormDraft, *, projects: Sequence[Project],
+                           project_meta: dict[str, Any], catalog: ModelCatalog | None,
+                           catalog_error: str | None) -> list[dict[str, Any]]:
     elements: list[dict[str, Any]] = [_plain("执行目标：每次新建独立话题。")]
-    selected_project = existing.get("project_alias") or initial_project
-    if selected_project is not None and selected_project not in {project.alias for project in projects}:
-        elements.append(_notice(f"Project「{selected_project}」已停用或不可用，请选择可用的 Project；保存前不会更改计划。"))
-        selected_project = None
-    elif selected_project is None:
-        selected_project = projects[0].alias
-    project_options = [(_encoded({"project": p.alias, **project_meta}), p.alias) for p in projects]
-    selected_project_value = _encoded({"project": selected_project, **project_meta}) if selected_project is not None else None
+    selected_project = draft.meta["project"]
+    project_choices = list(projects)
+    if selected_project is not None and selected_project not in {project.alias for project in projects if project.enabled}:
+        elements.append(_notice(f"Project「{selected_project}」已停用或不可用，请选择可用的 Project 后保存；仍可先查找群聊，不会更改计划。"))
+        if selected_project not in {project.alias for project in projects}:
+            # Preserve only the display identity needed for read-only search
+            # and retries. Saving still resolves the exact live Project.
+            project_choices.append(Project(selected_project, Path("."), False, 0))
+    project_options = [(_encoded({**project_meta, "project": p.alias}), p.alias if p.enabled else p.alias + " · 已停用或不可用") for p in project_choices]
+    selected_project_value = _encoded({**project_meta, "project": selected_project}) if selected_project is not None else None
     elements.append(_select("cron_project", "执行 Project", project_options, selected_project_value))
-    elements.append(_fold("目标会话", _input("cron_chat_id", "目标会话 ID（留空使用当前会话）", str(existing.get("chat_id", "")), required=False)))
-    elements.append(_fold("会话配置",
-        _plain(session_settings_summary(settings, allow_context_mode=allow_context_mode)),
-        *session_settings_form_elements(prefix="cron_session", settings=settings, catalog=catalog,
-            catalog_error=catalog_error, allow_context_mode=allow_context_mode)))
+    incomplete_model = draft.session_fields is not None and any(
+        not draft.session_fields.get("cron_session_" + field, "") for field in ("effort", "speed")
+    ) and _decode_new_model_reference(draft.session_fields["cron_session_model"]) is not None
+    elements.append(_fold("Agent 会话配置",
+        _plain("配置尚未填写完整；查找群聊不会保存任务。" if incomplete_model else
+            session_settings_summary(draft.settings, allow_context_mode=draft.allow_context_mode)),
+        *_draft_session_fields(draft, catalog=catalog, catalog_error=catalog_error)))
     return elements
+
+
+def _draft_session_fields(draft: ScheduleFormDraft, *, catalog: ModelCatalog | None,
+                          catalog_error: str | None) -> list[dict[str, Any]]:
+    # Catalog choices and unsaved selections are separate inputs. In particular,
+    # selecting inherit must not discard the user's pending Effort/Speed values.
+    settings = replace(draft.settings, turn_settings=None) if draft.session_fields is not None and catalog else draft.settings
+    elements = session_settings_form_elements(prefix="cron_session", settings=settings, catalog=catalog,
+        catalog_error=catalog_error, allow_context_mode=draft.allow_context_mode)
+    remaining = dict(draft.session_fields or {})
+    for control in elements:
+        if control.get("tag") != "select_static" or control["name"] not in remaining:
+            continue
+        value = remaining.pop(control["name"])
+        control.pop("initial_option", None)
+        if value:
+            if value not in {option["value"] for option in control["options"]}:
+                control["options"].append({"text": _plain_text("保留所选值"), "value": value})
+            control["initial_option"] = value
+    for name, value in remaining.items():
+        # An unavailable catalog has no inherited Effort/Speed controls. Keep
+        # their pending choices as selects, not a second text-input fallback.
+        elements.append(_select(name, "Effort" if name.endswith("effort") else "Speed",
+            [(value, value)] if value else [], value or None))
+    return elements
+
+
+def _chat_target_form_fields(draft: ScheduleFormDraft, *,
+                             chats: Sequence[AvailableChat], chat_avatar_keys: Mapping[str, str] | None,
+                             chat_snapshot: ChatSearchSnapshot | None,
+                             chat_page: int,
+                             chat_directory_error: str | None) -> list[dict[str, Any]]:
+    scope, target = draft.scope, draft.target
+    navigation = draft.meta["navigation"]
+    groups = {chat.chat_id: chat for chat in chats}
+    if target.choice and target.choice not in groups:
+        # Retained selection is only a draft, never an availability assertion.
+        groups[target.choice] = AvailableChat(target.choice, "已选群聊 · " + target.choice, None, None)
+    if chat_snapshot is None:
+        options = chat_options(tuple(groups.values()), avatar_keys=chat_avatar_keys)
+    else:
+        options = snapshot_chat_options(chat_snapshot, chat_page, target.choice)
+        if target.choice and all(option["value"] != target.choice for option in options):
+            options.extend(chat_options((groups[target.choice],), avatar_keys=chat_avatar_keys))
+    search = _button(scope, "查找群聊", "search_chats", navigation=navigation)
+    search.update(name="cron_search_chats", form_action_type="submit")
+    paging = None
+    if chat_snapshot is not None:
+        jump = _button(scope, "跳转", "page_chats", {"snapshot": encode_chat_snapshot(chat_snapshot)}, navigation=navigation)
+        jump.update(name="cron_page_chats", form_action_type="submit")
+        paging = pagination_controls(page_field="cron_chat_page", page=chat_page,
+            total_pages=chat_snapshot.total_pages, button=jump)
+    target_fields = chat_target_elements(mode_field="cron_target_mode", choice_field="cron_group_id",
+        id_field="cron_chat_id", draft=target, options=options,
+        search=ChatSearchView("cron_chat_query", draft.fields.get("cron_chat_query", ""),
+            chat_snapshot.query if chat_snapshot is not None else None, search, paging,
+            result_count=len(chat_snapshot.chats) if chat_snapshot is not None else None,
+            page=chat_page, total_pages=chat_snapshot.total_pages if chat_snapshot is not None else 1))
+    target_hint = "目标飞书聊天 · 每次触发在指定聊天中新建话题"
+    directory_notice = chat_directory_error or (chat_snapshot.notice if chat_snapshot is not None else None)
+    if directory_notice:
+        # Directory feedback belongs beside the target, not the task settings.
+        target_hint += "\n" + directory_notice
+    return [_plain(target_hint), *target_fields]
+
+
+def _relax_required_fields(node: Any) -> None:
+    if isinstance(node, list):
+        for child in node:
+            _relax_required_fields(child)
+    elif isinstance(node, dict):
+        if "required" in node:
+            node["required"] = False
+        for child in node.values():
+            _relax_required_fields(child)
+
+
+def _chat_query(value: Any) -> str:
+    if not isinstance(value, str) or len(value.strip()) > 50 or any(ord(char) < 32 or 127 <= ord(char) < 160 for char in value):
+        raise CardActionError("群名关键词最多 50 个字符，不能包含控制字符。")
+    return value.strip()
 
 
 def _form_identity(scope: FeishuScope, form: Any) -> tuple[str, list[str]]:
@@ -547,7 +756,7 @@ def _form_identity(scope: FeishuScope, form: Any) -> tuple[str, list[str]]:
     if (not isinstance(identity, list) or len(identity) != 3 or identity[0] != hashlib.sha256(scope.key.encode()).hexdigest()[:20]
             or not isinstance(identity[1], str) or identity[1] not in {"p", "f", "m"}
             or not isinstance(identity[2], str) or not re.fullmatch(r"[0-9a-f]{32}", identity[2])):
-        raise CardActionError("定时任务表单与原消息会话不一致，请在当前会话重新发送 /cron。")
+        raise CardActionError("定时任务表单与原消息所在飞书聊天或话题不一致，请在原位置重新发送 /cron。")
     return names[0], identity
 
 
@@ -556,12 +765,16 @@ def _plan_form_metadata(form: Mapping[str, Any]) -> dict[str, Any]:
     meta = _decoded(_text(form.get("cron_project"), "Project"))
     binding_target = meta.get("target_kind") == "binding"
     target_fields = {"target_kind", "target_binding_id"} if binding_target else {"project"}
-    if set(meta) != target_fields | {"navigation", "scope", "request_id"}:
+    required = target_fields | {"navigation", "scope", "request_id"}
+    display_fields = {"target_chat_id", "target_chat_label", "target_topic_id", "target_label"} if binding_target else set()
+    if not required <= set(meta) or set(meta) - required - display_fields:
         raise CardActionError("定时任务 Project 选项无效，请重新选择。")
+    if any(not isinstance(meta[key], str) or len(meta[key]) > 512 for key in display_fields & set(meta)):
+        raise CardActionError("目标 Agent 会话的显示信息无效，请重新打开表单。")
     if not isinstance(meta["request_id"], str) or not re.fullmatch(r"[0-9a-f]{32}", meta["request_id"]):
         raise CardActionError("定时任务表单缺少操作凭据。")
     if binding_target:
-        meta["target_binding_id"] = _text(meta["target_binding_id"], "原会话")
+        meta["target_binding_id"] = _text(meta["target_binding_id"], "目标 Agent 会话")
     else:
         meta["project"] = _text(meta["project"], "Project")
     meta["navigation"] = schedule_navigation(meta["navigation"])
@@ -576,7 +789,108 @@ def _plan_form_metadata(form: Mapping[str, Any]) -> dict[str, Any]:
     return meta
 
 
-def _decode_form(scope: FeishuScope, form: Any) -> ScheduleCardAction:
+def read_schedule_form(scope: FeishuScope, form: Mapping[str, Any]) -> ScheduleFormDraft:
+    """Validate native form shape, not whether incomplete business data can save."""
+    name, identity = _form_identity(scope, form)
+    if identity[1] != "p":
+        raise CardActionError("无法恢复缺少身份的定时任务表单。")
+    meta = _plan_form_metadata(form)
+    if meta["scope"] != scope.key:
+        raise CardActionError("定时任务 Project 选项与当前飞书聊天或话题不一致。")
+    binding_target = meta.get("target_kind") == "binding"
+    target = ChatTargetDraft() if binding_target else read_chat_target(form,
+        mode_field="cron_target_mode", choice_field="cron_group_id", id_field="cron_chat_id")
+    fields: dict[str, Any] = {}
+    session_fields: dict[str, str] = {}
+    evidence = {"cron_timezone": "original_at", "cron_every_minutes": "anchor", "cron_end_time": "original_end_at"}
+    allowed = {"cron_name", "cron_instructions", "cron_project", "cron_timezone", "cron_kind",
+        "cron_every_minutes", "cron_at", "cron_date", "cron_weekdays", "cron_end_date", "cron_end_time"}
+    if not binding_target:
+        allowed.update({"cron_target_mode", "cron_group_id", "cron_chat_id", "cron_chat_query", "cron_chat_page"})
+    for key, value in form.items():
+        if not isinstance(key, str):
+            raise CardActionError("表单字段格式无效，无法恢复。")
+        base, decorated, reference = key.partition("__")
+        if key == name:
+            base = "cron_name"
+        elif key.startswith("cron_session_"):
+            value = "" if value is None else value
+            if binding_target or not isinstance(value, str):
+                raise CardActionError("Agent 会话配置字段格式无效。")
+            session_fields[key] = value
+            continue
+        elif decorated:
+            if not reference or base not in {*evidence, "cron_instructions"}:
+                raise CardActionError("表单包含未知字段。")
+            if base in evidence:
+                meta[evidence[base]] = reference
+        if base in fields or base not in allowed:
+            raise CardActionError("定时任务表单缺少字段或混入其他操作。")
+        if base in {"cron_group_id", "cron_chat_id", "cron_target_mode"}:
+            # Shared target parsing has already discarded malformed inactive
+            # controls; neither their value nor shape may override the mode.
+            continue
+        if base == "cron_weekdays":
+            value = [] if value is None or value == "" else value
+            if not isinstance(value, list) or any(day not in [str(i) for i in range(7)] for day in value):
+                raise CardActionError("星期字段格式无效，无法恢复。")
+        else:
+            value = "" if value is None else value
+            if not isinstance(value, str):
+                raise CardActionError("表单字段格式无效，无法恢复。")
+            if value and base in {"cron_date", "cron_end_date"}:
+                match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})(?: [+-]\d{4})?", value)
+                try:
+                    if match is None:
+                        raise ValueError("invalid date")
+                    datetime.fromisoformat(match[1])
+                except ValueError as error:
+                    raise CardActionError("日期字段格式无效，请重新打开卡片。") from error
+                value = match[1]
+            elif value and base in {"cron_at", "cron_end_time"}:
+                value = _picker_clock(value)
+        fields[base] = value
+    if not {"cron_name", "cron_instructions", "cron_project", "cron_timezone", "cron_kind"} <= fields.keys():
+        raise CardActionError("定时任务表单缺少字段。")
+    if fields["cron_kind"] not in _KINDS:
+        raise CardActionError("未知时间规则。")
+    if len(fields["cron_instructions"]) > _MAX_FORM_INSTRUCTIONS or not _instructions_fit(fields["cron_instructions"]):
+        raise CardActionError("执行指令超过卡片编辑容量，请通过 Admin 或自然语言维护；尚未保存。")
+    if target.choice and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,191}", target.choice) is None:
+        if target.mode == "group":
+            raise CardActionError("飞书聊天选项无效，请重新选择。")
+        target = replace(target, choice="")
+    settings = SessionSettings() if binding_target else _read_draft_settings(session_fields)
+    return ScheduleFormDraft(scope, meta, fields, settings, target,
+        "cron_session_context_mode" in session_fields, None if binding_target else session_fields)
+
+
+def _read_draft_settings(fields: dict[str, str]) -> SessionSettings:
+    core = {"cron_session_" + key for key in ("model", "task_reactions", "progress_card", "completion_mention")}
+    context = {"cron_session_context_mode"} if "cron_session_context_mode" in fields else set()
+    tuning = {"cron_session_effort", "cron_session_speed"}
+    if not core <= fields.keys() or fields.keys() - core - context - tuning:
+        raise CardActionError("会话配置表单字段不完整或包含未知字段。")
+    model = _decode_new_model_reference(fields["cron_session_model"])
+    feedback = BindingTaskFeedback(*(_decode_task_feedback_reference(fields["cron_session_" + field], field)
+        for field in ("task_reactions", "progress_card", "completion_mention")))
+    mode = _decode_context_mode_reference(fields["cron_session_context_mode"]) if context else MentionContextMode.CURRENT_ONLY
+    turn = None
+    if model is not None or tuning & fields.keys():
+        # Optional native selects may omit an unselected value altogether.
+        # Keep it blank in the draft; final save still requires both values.
+        for key in tuning:
+            fields.setdefault(key, "")
+    if tuning <= fields.keys():
+        effort, speed = fields["cron_session_effort"], fields["cron_session_speed"]
+        if any(len(value) > MAX_SETTING_ID_CHARS or any(ord(char) < 32 for char in value) for value in (effort, speed)):
+            raise CardActionError("Effort / Speed 字段格式无效。")
+        if model is not None and effort and speed:
+            turn = BindingTurnSettings(model, effort, speed)
+    return SessionSettings(turn, feedback, mode)
+
+
+def _decode_form(scope: FeishuScope, form: Any, *, value: Any = None) -> ScheduleCardAction:
     name, identity = _form_identity(scope, form)
     names = [name]
     form_kind = {"p": "plan", "f": "filter", "m": "manage"}[identity[1]]
@@ -588,9 +902,23 @@ def _decode_form(scope: FeishuScope, form: Any) -> ScheduleCardAction:
         if (form_kind == "filter" and set(choice) != {"filter"}) or (form_kind == "manage" and "plan_id" not in choice):
             raise CardActionError("定时任务选项无效，请重新选择。")
         return ScheduleCardAction("list", {}, identity[2], schedule_navigation(choice))
+    if isinstance(value, Mapping) and value.get("action") in {"search_chats", "page_chats"}:
+        action = decode_schedule_action(scope=scope, value=value)
+        draft = read_schedule_form(scope, form)
+        meta = draft.meta
+        if meta.get("target_kind") == "binding":
+            raise CardActionError("固定 Agent 会话任务不能重新选择飞书聊天。")
+        if action.action == "search_chats":
+            query = _chat_query(draft.fields.get("cron_chat_query", ""))
+            draft = replace(draft, target=replace(draft.target, choice=""))
+            payload = {"query": query, "draft": draft}
+        else:
+            snapshot = decode_chat_snapshot(action.payload["snapshot"])
+            payload = {"snapshot": snapshot, "page": decode_page_selection(form.get("cron_chat_page"), snapshot.total_pages), "draft": draft}
+        return ScheduleCardAction(action.action, payload, meta["request_id"], meta["navigation"])
     meta = _plan_form_metadata(form)
     if meta["scope"] != scope.key:
-        raise CardActionError("定时任务 Project 选项与当前会话不一致。")
+        raise CardActionError("定时任务 Project 选项与当前飞书聊天或话题不一致。")
     kind = _text(form.get("cron_kind"), "执行频率")
     if kind not in _KINDS:
         raise CardActionError("未知时间规则。")
@@ -616,12 +944,14 @@ def _decode_form(scope: FeishuScope, form: Any) -> ScheduleCardAction:
     settings_fields = {key: form.pop(key) for key in tuple(form) if isinstance(key, str) and key.startswith("cron_session_")}
     binding_target = meta.get("target_kind") == "binding"
     if binding_target and settings_fields:
-        raise CardActionError("原会话任务沿用会话配置，请重新打开表单。")
+        raise CardActionError("固定 Agent 会话任务沿用目标配置，请重新打开表单。")
     settings = None if binding_target else decode_session_settings_form(settings_fields, prefix="cron_session")
     expected = {names[0], "cron_instructions", "cron_project", "cron_timezone", "cron_kind"}
     if not binding_target:
-        expected.add("cron_chat_id")
+        expected.add("cron_target_mode")
     optional = {"cron_every_minutes", "cron_at", "cron_date", "cron_weekdays", "cron_end_date", "cron_end_time"}
+    if not binding_target:
+        optional.update({"cron_group_id", "cron_chat_id", "cron_chat_query", "cron_chat_page"})
     if not expected <= set(form) or set(form) - expected - optional:
         raise CardActionError("定时任务表单缺少字段或混入其他操作。")
     rule: dict[str, Any] = {"kind": kind, "timezone": _text(form["cron_timezone"], "时区")}
@@ -655,8 +985,10 @@ def _decode_form(scope: FeishuScope, form: Any) -> ScheduleCardAction:
         draft.update(project=meta["project"], session_settings=settings.to_dict())
     if not _instructions_fit(draft["instructions"]) or len(draft["instructions"]) > _MAX_FORM_INSTRUCTIONS:
         raise CardActionError("执行指令超过卡片编辑容量，请通过 Admin 或自然语言维护；尚未保存。")
-    if form.get("cron_chat_id"):
-        draft["chat_id"] = _text(form["cron_chat_id"], "目标会话")
+    if not binding_target:
+        target = read_chat_target(form, mode_field="cron_target_mode",
+            choice_field="cron_group_id", id_field="cron_chat_id")
+        draft["chat_id"] = resolve_chat_target(target, current_chat_id=scope.chat_id)
     if "plan_id" in meta:
         draft.update(plan_id=meta["plan_id"], expected_revision=meta["expected_revision"])
     return ScheduleCardAction("save", draft, meta["request_id"], meta["navigation"])
@@ -664,40 +996,25 @@ def _decode_form(scope: FeishuScope, form: Any) -> ScheduleCardAction:
 
 def schedule_retry_card(*, app_id: str, chat_id: str, value: Any, form: Any,
                         notice: str, projects: Sequence[Project],
-                        scope: FeishuScope | None = None) -> tuple[FeishuScope, OutboundCard]:
+                        scope: FeishuScope | None = None,
+                        catalog: ModelCatalog | None = None, catalog_error: str | None = None,
+                        chats: Sequence[AvailableChat] = (), chat_avatar_keys: Mapping[str, str] | None = None,
+                        chat_snapshot: ChatSearchSnapshot | None = None, chat_page: int = 0,
+                        chat_directory_error: str | None = None) -> tuple[FeishuScope, OutboundCard]:
     """Restore only UI state; this scope never authorizes a management request.
 
     Each renewed transport nonce is independent of the original write identity.
     The next callback must fetch and validate the message's real scope again.
     """
     if isinstance(form, Mapping) and form and "cron_project" in form:
-        meta = _plan_form_metadata(form)
-        original_scope = _retry_scope(meta["scope"], app_id=app_id, chat_id=chat_id)
+        original_scope = _retry_scope(_decoded(form["cron_project"]).get("scope"), app_id=app_id, chat_id=chat_id)
         if scope is not None and scope != original_scope:
             raise CardActionError("卡片位置已改变，请重新发送 /cron。")
-        _, identity = _form_identity(original_scope, form)
-        if identity[1] != "p":
-            raise CardActionError("无法恢复缺少身份的定时任务表单。")
-        binding_target = meta.get("target_kind") == "binding"
-        project = meta.get("project")
-        settings_fields = {key: item for key, item in form.items() if isinstance(key, str) and key.startswith("cron_session_")}
-        if binding_target and settings_fields:
-            raise CardActionError("原会话任务沿用会话配置，请重新打开表单。")
-        settings = None if binding_target else decode_session_settings_form(settings_fields, prefix="cron_session")
-        plan = {"id": meta["plan_id"], "revision": meta["expected_revision"], "project_alias": project} if "plan_id" in meta else None
-        if binding_target and plan:
-            plan.update(target_kind="binding", target_binding_id=meta["target_binding_id"])
-        # The retained option is display data, not a Project registration or
-        # availability decision. The service revalidates the exact submitted ID.
-        options = list(projects)
-        if project is not None and project not in {item.alias for item in options}:
-            options.append(Project(project, Path("."), False, 0))
-        return original_scope, schedule_form_card(original_scope, projects=options,
-            default_timezone="", plan=plan, initial_project=project, session_settings=settings,
-            target_binding_id=meta.get("target_binding_id"),
-            allow_context_mode="cron_session_context_mode" in form,
-            navigation=meta["navigation"], _retry_form=form,
-            _request_id=meta["request_id"], _notice_text=notice)
+        draft = read_schedule_form(original_scope, form)
+        return original_scope, schedule_draft_card(draft, projects=projects,
+            catalog=catalog, catalog_error=catalog_error,
+            chats=chats, chat_avatar_keys=chat_avatar_keys, chat_snapshot=chat_snapshot, chat_page=chat_page,
+            chat_directory_error=chat_directory_error, notice=notice)
     if form:
         if scope is None:
             raise CardActionError("暂时无法确认卡片位置，请稍后重新发送 /cron。")
@@ -721,7 +1038,7 @@ def schedule_retry_card(*, app_id: str, chat_id: str, value: Any, form: Any,
 
 def _retry_scope(value: Any, *, app_id: str, chat_id: str) -> FeishuScope:
     if not isinstance(value, str) or len(value) > 2048:
-        raise CardActionError("定时任务卡片会话身份无效。")
+        raise CardActionError("定时任务卡片的飞书聊天或话题身份无效。")
     parts = value.split(":")
     try:
         if len(parts) != 6 or parts[:2] != ["scope", "v1"]:
@@ -732,72 +1049,7 @@ def _retry_scope(value: Any, *, app_id: str, chat_id: str) -> FeishuScope:
             raise ValueError("scope mismatch")
         return scope
     except ValueError as error:
-        raise CardActionError("定时任务卡片会话身份无效。") from error
-
-
-def _restore_form_fields(elements: list[dict[str, Any]], submitted: Mapping[str, Any]) -> None:
-    fields: dict[str, tuple[str, Any]] = {}
-    for name, value in submitted.items():
-        if not isinstance(name, str):
-            raise CardActionError("表单字段格式无效，无法恢复。")
-        base = "cron_name" if name.startswith(_FORM_PREFIX) else name.split("__", 1)[0]
-        if base in fields or not (isinstance(value, str) or value is None or (isinstance(value, list) and all(isinstance(item, str) for item in value))):
-            raise CardActionError("表单字段格式无效，无法恢复。")
-        fields[base] = (name, value)
-    restored = set()
-    def visit(node: Any) -> None:
-        if isinstance(node, list):
-            for child in node:
-                visit(child)
-        elif isinstance(node, dict):
-            tag, name = node.get("tag"), node.get("name")
-            if tag in {"input", "select_static", "multi_select_static", "date_picker", "picker_time"} and isinstance(name, str):
-                base = "cron_name" if name.startswith(_FORM_PREFIX) else name.split("__", 1)[0]
-                original_name, value = fields.get(base, (name, ""))
-                restored.add(base)
-                node["name"] = name if base == "cron_name" else original_name
-                if tag == "multi_select_static":
-                    if value is None or value == "":
-                        value = []
-                    if not isinstance(value, list) or any(item not in {option["value"] for option in node["options"]} for item in value):
-                        raise CardActionError("星期字段格式无效，无法恢复。")
-                    node["selected_values"] = value
-                else:
-                    if value is None:
-                        value = ""
-                    if not isinstance(value, str):
-                        raise CardActionError("表单字段格式无效，无法恢复。")
-                    if tag == "select_static":
-                        node.pop("initial_option", None)
-                        if value:
-                            node["initial_option"] = value
-                            if value not in {option["value"] for option in node["options"]}:
-                                raise CardActionError("选项字段格式无效，无法恢复。")
-                    elif tag == "input":
-                        node["default_value"] = value
-                    else:
-                        initial = "initial_date" if tag == "date_picker" else "initial_time"
-                        node.pop(initial, None)
-                        try:
-                            if value and tag == "date_picker":
-                                match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})(?: [+-]\d{4})?", value)
-                                if not match:
-                                    raise ValueError("invalid picker date")
-                                datetime.fromisoformat(match[1])
-                                node[initial] = match[1]
-                            elif value:
-                                node[initial] = _picker_clock(value)
-                        except (ValueError, CardActionError) as error:
-                            raise CardActionError("日期或时间字段格式无效，无法恢复，请重新打开卡片。") from error
-                return
-            for child in tuple(node.values()):
-                visit(child)
-    visit(elements)
-    for base in fields.keys() - restored:
-        name, value = fields[base]
-        if base not in {"cron_session_effort", "cron_session_speed"} or not isinstance(value, str):
-            raise CardActionError("表单包含无法恢复的字段。")
-        elements.insert(-1, _input(name, "Effort" if base.endswith("effort") else "Speed", value))
+        raise CardActionError("定时任务卡片的飞书聊天或话题身份无效。") from error
 
 
 def _picker_clock(value: str, *, label: str = "执行时间") -> str:

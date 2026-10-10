@@ -135,7 +135,10 @@
       <form id="side-filter" class="filter-bar">
         <label>Project<input name="project" maxlength="64"></label>
         <label>Parent Binding<input name="parentBindingId" maxlength="512"></label>
-        <label>Chat ID<input name="chatId" maxlength="512"></label>
+        <div>
+          <label>Chat ID<input name="chatId" maxlength="512" placeholder="聊天 ID，不是用户 ID" aria-describedby="side-chat-id-help"></label>
+          <p id="side-chat-id-help" class="defaults-field-help"><a href="https://open.feishu.cn/document/server-docs/group/chat/chat-id-description" target="_blank" rel="noopener noreferrer" title="聊天 ID，不是用户 ID；单聊请选择与本机器人的聊天">如何获取聊天 ID</a></p>
+        </div>
         <label>Topic ID<input name="topicId" maxlength="512"></label>
         <label>Root Message ID<input name="rootMessageId" maxlength="512"></label>
         <label>状态
@@ -184,8 +187,9 @@
                 <label>聊天类型<select id="defaults-chat-kind"><option value="group">群聊</option><option value="p2p">单聊</option><option value="unknown" hidden>类型待确认</option></select></label>
                 <div id="defaults-group-picker"></div>
                 <label id="defaults-chat-manual-field" class="chat-manual-toggle"><input id="defaults-chat-manual" type="checkbox">手动输入聊天 ID</label>
-                <label id="defaults-chat-field">聊天 ID<input id="defaults-chat" maxlength="256" placeholder="oc_…（聊天 ID，不是用户 ID）" aria-describedby="defaults-chat-help"></label>
+                <label id="defaults-chat-field">聊天 ID<input id="defaults-chat" maxlength="256" placeholder="oc_…（聊天 ID，不是用户 ID）" aria-describedby="defaults-chat-help defaults-chat-id-help"></label>
                 <p id="defaults-chat-help" class="defaults-field-help"></p>
+                <p id="defaults-chat-id-help" class="defaults-field-help" hidden>请填写聊天 ID，不是用户 ID；单聊请选择与本机器人的聊天。<a href="https://open.feishu.cn/document/server-docs/group/chat/chat-id-description" target="_blank" rel="noopener noreferrer">如何获取聊天 ID</a></p>
               </div>
               <label id="defaults-keyword-field" hidden>群名包含<input id="defaults-keyword" maxlength="200" disabled placeholder="输入群名关键词" aria-describedby="defaults-target-help"></label>
             </div>
@@ -257,8 +261,9 @@
                 <label>聊天类型<select id="schedule-chat-kind"><option value="group">群聊</option><option value="p2p">单聊</option><option value="unknown" hidden>类型待确认</option></select></label>
                 <div id="schedule-group-picker"></div>
                 <label id="schedule-chat-manual-field" class="chat-manual-toggle"><input id="schedule-chat-manual" type="checkbox">手动输入聊天 ID</label>
-                <label id="schedule-chat-field">聊天 ID<input id="schedule-chat" maxlength="512" placeholder="oc_…（聊天 ID，不是用户 ID）" aria-describedby="schedule-chat-help"></label>
+                <label id="schedule-chat-field">聊天 ID<input id="schedule-chat" maxlength="512" placeholder="oc_…（聊天 ID，不是用户 ID）" aria-describedby="schedule-chat-help schedule-chat-id-help"></label>
                 <p id="schedule-chat-help" class="defaults-field-help"></p>
+                <p id="schedule-chat-id-help" class="defaults-field-help" hidden>请填写聊天 ID，不是用户 ID；单聊请选择与本机器人的聊天。<a href="https://open.feishu.cn/document/server-docs/group/chat/chat-id-description" target="_blank" rel="noopener noreferrer">如何获取聊天 ID</a></p>
               </div>
             </div>
             <p id="schedule-target-note" class="meta-line" hidden>沿用原会话的 Project、模型、上下文和反馈；空闲时启动新一轮，忙碌时追加当前任务。切走或归档后自动暂停，恢复后继续；删除原会话也会删除计划。目标创建后不可更换。</p>

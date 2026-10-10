@@ -11,11 +11,14 @@ from lark_channel.channel.safety.pipeline import SafetyPipeline
 from netizen_cli.bindings import BindingQueryBusy
 from netizen_cli.cards.scheduled import decode_schedule_action, schedule_form_card, schedule_manager_card
 from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.management.chat_directory import AvailableChat, AvailableChatPage
 
 from tests.support.channel_fixtures import scheduled_channel_fixture
 from tests.support.channel_cards import (
     callback,
+    elements,
     form_values,
+    option_value,
 )
 
 
@@ -76,10 +79,62 @@ class ScheduleCardRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.target_kind, "new_topic")
         self.assertIn("计划已保存", str(self.fixture.channel.updates[-1]))
 
+    async def test_group_search_stays_available_and_preserves_draft_after_business_error(self):
+        current = AvailableChat(self.scope.chat_id, "当前群", "group", False)
+        other = AvailableChat("oc_other", "另一个群", "group", False)
+        self.fixture.management.query_available_chats = AsyncMock(return_value=AvailableChatPage((current, other), None))
+        manager = schedule_manager_card(self.scope, {"plans": []})
+        await self.push(value=callback(manager, "新建定时任务"))
+        opened = SimpleNamespace(card=self.fixture.channel.updates[-1][1])
+        self.assertIn("查找群聊", [button["text"]["content"] for button in elements(opened.card, "button")])
+        values = form_values(opened)
+        values[next(key for key in values if key.startswith("cron_name"))] = "失败后保留的任务"
+        values.update(cron_instructions="需要保留的指令", cron_kind="daily", cron_target_mode="group",
+            cron_group_id="", cron_chat_id="oc_inactive")
+        request_id = option_value(values["cron_project"])["request_id"]
+        await self.push(form=values)
+        self.assertEqual(self.fixture.store.schedules.list(app_id="app"), ())
+        retry = SimpleNamespace(card=self.fixture.channel.updates[-1][1])
+        search = callback(retry, "查找群聊")
+        restored = form_values(retry)
+        self.assertEqual((restored["cron_target_mode"], restored.get("cron_group_id", ""), restored["cron_chat_id"]),
+            ("group", "", "oc_inactive"))
+        self.assertEqual(restored["cron_instructions"], "需要保留的指令")
+        restored["cron_chat_query"] = "另一个"
+        self.fixture.management.query_available_chats.return_value = AvailableChatPage((other,), None)
+        await self.push(value=search, form=restored)
+        self.assertEqual(self.fixture.store.schedules.list(app_id="app"), ())
+        searched = SimpleNamespace(card=self.fixture.channel.updates[-1][1])
+        candidates = next(item for item in elements(searched.card, "select_static") if item["name"] == "cron_group_id")
+        self.assertEqual([option["value"] for option in candidates["options"]], ["oc_other"])
+        self.assertEqual(option_value(form_values(searched)["cron_project"])["request_id"], request_id)
+        self.assertEqual(form_values(searched)["cron_chat_id"], "oc_inactive")
+
+    async def test_unavailable_project_placeholder_allows_search_but_cannot_save(self):
+        available = self.fixture.store.get_project("work")
+        self.fixture.store.register_project(alias="retired", cwd=available.cwd)
+        self.fixture.projects.set_enabled(alias="retired", enabled=False, expected_revision=1)
+        card = schedule_form_card(self.scope, projects=self.fixture.projects.list(enabled_only=True),
+            default_timezone="UTC", initial_project="retired")
+        values = form_values(card)
+        self.assertEqual(option_value(values["cron_project"])["project"], "retired")
+        self.fixture.management.query_available_chats = AsyncMock(return_value=AvailableChatPage((), None))
+        await self.push(value=callback(card, "查找群聊"), form=values)
+        self.fixture.management.query_available_chats.assert_awaited_once_with(query="", page_token=None, page_size=20)
+        self.assertFalse(self.fixture.store.schedules.list(app_id="app"))
+        restored = self.restored_form()
+        self.assertEqual(option_value(restored["cron_project"])["project"], "retired")
+        restored[next(key for key in restored if key.startswith("cron_name"))] = "不可保存的任务"
+        restored.update(cron_instructions="指令", cron_kind="daily")
+        await self.push(form=restored)
+        self.assertFalse(self.fixture.store.schedules.list(app_id="app"))
+        self.assertIn("Project", str(self.fixture.channel.updates[-1]))
+        self.assertIn("停用", str(self.fixture.channel.updates[-1]))
+
     async def test_noncurrent_binding_create_form_and_crud_keep_the_selected_target(self):
         original = self.new_binding()
         manager = schedule_manager_card(self.scope, {"plans": []}, current_binding_id=original.id)
-        create = callback(manager, "在当前会话定时执行")
+        create = callback(manager, "在当前 Agent 会话中定时执行")
         self.new_binding()  # Switching before opening is not a management restriction.
         await self.push(value=create)
         form = self.restored_form()
