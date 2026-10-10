@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import openai_codex
-from openai_codex import AsyncCodex
+from openai_codex import AsyncCodex, CodexConfig
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
@@ -277,8 +277,15 @@ async def probe(*, model: str | None = None) -> dict[str, Any]:
     if openai_codex.__version__ != "0.162.1":
         raise RuntimeError("this candidate probe requires pinned openai-codex==0.162.1")
     with tempfile.TemporaryDirectory(prefix="netizen-project-delete-probe-") as temporary:
-        async with AsyncCodex() as codex:
-            root = Path(temporary)
+        root = Path(temporary).resolve()
+        # Native override keys split on dots without parsing quoted keys.
+        # Supply exact fixture paths as an inline TOML table instead.
+        projects = ", ".join(
+            f'{json.dumps(str(root / name))} = {{ trust_level = "trusted" }}'
+            for name in ("mixed-sessions", "orphan-side")
+        )
+        config = CodexConfig(config_overrides=(f"projects={{{projects}}}",))
+        async with AsyncCodex(config) as codex:
             binding_settings = None
             if model is not None:
                 catalog = ModelCatalog.from_response(await codex.models())
