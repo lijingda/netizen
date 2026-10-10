@@ -57,6 +57,7 @@ from netizen_cli.domain import (
     ReplyCardFileItem,
     ReplyCardFilesModule,
     ReplyCardGoalModule,
+    ReplyCardPartialAnswerModule,
     ReplyCardProjection,
     ReplyCardResultModule,
     SettingsSection,
@@ -3519,6 +3520,146 @@ class CardRendererTest(unittest.TestCase):
                 form_value={"turn_file_page": "1"},
                 value=retargeted,
             )
+
+    def test_partial_answer_module_stays_expanded_and_keeps_complete_ordered_text(self) -> None:
+        snapshot = SimpleNamespace(
+            state="running", steer_count=0, plan_available=False,
+            plan_generated=False, plan_may_be_stale=False, steps=(),
+            commentary=(), operations=(),
+            partial_answers=(
+                SimpleNamespace(text="先完成的答案。" * 80),
+                SimpleNamespace(text="第二项答案。"),
+                SimpleNamespace(text="第二项答案。"),
+            ),
+        )
+        for terminal in (None, "completed", "failed", "interrupted"):
+            with self.subTest(terminal=terminal):
+                card = turn_progress_card(
+                    snapshot=snapshot, terminal_status=terminal,
+                    final_response="最终结论" if terminal is not None else None,
+                )
+                modules = card.card["body"]["elements"]
+                self.assertEqual(
+                    [item["element_id"] for item in modules],
+                    ["turnprogressv1", "partialanswerv1"]
+                    + (["turnanswerv1"] if terminal is not None else []),
+                )
+                partial = modules[1]
+                self.assertEqual(partial["tag"], "column_set")
+                self.assertFalse(_elements(partial, "collapsible_panel"))
+                if terminal is not None:
+                    self.assertNotEqual(partial["background_style"], modules[2]["background_style"])
+                self.assertEqual(
+                    [item["content"] for item in _elements(partial, "markdown")],
+                    ["**阶段性答案**"] + [item.text for item in snapshot.partial_answers],
+                )
+        absent = turn_progress_card(snapshot=snapshot, partial_answers=())
+        self.assertNotIn("partialanswerv1", json.dumps(absent.card))
+        authoritative = turn_progress_card(
+            snapshot=snapshot, terminal_status="completed", final_response="done",
+            partial_answers=(SimpleNamespace(text="终态补齐的答案"),),
+        )
+        self.assertIn("终态补齐的答案", json.dumps(authoritative.card, ensure_ascii=False))
+        self.assertNotIn("第二项答案", json.dumps(authoritative.card, ensure_ascii=False))
+
+    def test_partial_answer_files_use_v5_and_preserve_text_on_pagination(self) -> None:
+        files = tuple(
+            TurnFile(f"report-{index}.txt", Path(f"/tmp/report-{index}.txt"), 1, "file")
+            for index in range(10)
+        )
+        snapshot = SimpleNamespace(
+            state="running", steer_count=0, plan_available=False,
+            plan_generated=False, plan_may_be_stale=False, steps=(),
+            commentary=(), operations=(),
+            partial_answers=(SimpleNamespace(text="早先完成的答案"),),
+        )
+        for progress in (False, True):
+            with self.subTest(progress=progress):
+                kwargs = dict(
+                    scope=self.scope, binding_id="binding-123", turn_id="turn-123",
+                    final_response="最终答案", files=files,
+                    completion_mention_user_id="ou_user",
+                )
+                original = (
+                    turn_progress_card(snapshot=snapshot, terminal_status="completed", **kwargs)
+                    if progress else turn_files_card(partial_answers=snapshot.partial_answers, **kwargs)
+                )
+                page_value = next(
+                    behavior["value"]
+                    for button in _elements(original.card, "button")
+                    for behavior in button.get("behaviors", ())
+                    if behavior["value"]["intent"] == "turn-file.page"
+                )
+                self.assertEqual(page_value["v"], 5)
+                self.assertEqual(
+                    page_value["reply"]["partial_answer"],
+                    {"contents": ["早先完成的答案"]},
+                )
+                intent = decode_turn_file_action(
+                    app_id="cli_test", message_id="om_card",
+                    callback_chat_id=self.scope.chat_id, sender_id="ou_user",
+                    tag="button", form_value={"turn_file_page": "1"}, value=page_value,
+                )
+                self.assertEqual(
+                    intent.reply.partial_answer,
+                    ReplyCardPartialAnswerModule(("早先完成的答案",)),
+                )
+                rebuilt = reply_card_from_manifest(
+                    scope=intent.scope, binding_id=intent.binding_id,
+                    turn_id=intent.turn_id, manifest=intent.files,
+                    reply=intent.reply, page=intent.page,
+                )
+                visible = "\n".join(item["content"] for item in _elements(rebuilt.card, "markdown"))
+                self.assertEqual(visible.count("早先完成的答案"), 1)
+                self.assertIn("最终答案", visible)
+                self.assertIn("report-8.txt", visible)
+                self.assertNotIn("<at ", visible)
+                for invalid in (
+                    {}, {"contents": []}, {"contents": "text"},
+                    {"contents": [""]}, {"contents": [None]},
+                    {"contents": ["bad\x00text"]},
+                    {"contents": ["text"], "turn_id": "unexpected"},
+                ):
+                    damaged = json.loads(json.dumps(page_value))
+                    damaged["reply"]["partial_answer"] = invalid
+                    with self.subTest(invalid=invalid), self.assertRaises(CardActionError):
+                        decode_turn_file_action(
+                            app_id="cli_test", message_id="om_card",
+                            callback_chat_id=self.scope.chat_id, sender_id="ou_user",
+                            tag="button", form_value={"turn_file_page": "1"}, value=damaged,
+                        )
+        # An ordinary final Files card still omits answers already sent as rich text.
+        ordinary = turn_files_card(
+            scope=self.scope, binding_id="binding-123", turn_id="turn-123",
+            final_response="最终答案", files=files,
+        )
+        self.assertNotIn("partialanswerv1", json.dumps(ordinary.card))
+        self.assertNotIn('"v": 5', json.dumps(ordinary.card))
+
+    def test_partial_answer_goal_module_order_and_existing_capacity_check(self) -> None:
+        goal = ReplyCardGoalModule(
+            binding_id="binding-123", short_id="binding1", project_alias="test",
+            goal_generation="z" * 43, status="paused", runtime_state="goal-paused",
+            objective="finish reports", token_budget=None, tokens_used=50,
+        )
+        card = reply_card(ReplyCardProjection(
+            scope=self.scope, goal=goal,
+            partial_answer=ReplyCardPartialAnswerModule(("前一物理轮答案", "当前轮答案")),
+            result=ReplyCardResultModule("done"),
+        ))
+        self.assertEqual(
+            [item["element_id"] for item in card.card["body"]["elements"]],
+            ["goalmodulev1", "partialanswerv1", "turnanswerv1"],
+        )
+        with self.assertRaises(TurnFileCardLimitError):
+            reply_card(ReplyCardProjection(
+                partial_answer=ReplyCardPartialAnswerModule(("answer" * 10000,)),
+            ))
+        for invalid in ((), [], (None,), ("bad\x00answer",)):
+            with self.subTest(invalid=invalid), self.assertRaises((ValueError, CardActionError)):
+                reply_card(ReplyCardProjection(
+                    partial_answer=ReplyCardPartialAnswerModule(invalid),
+                ))
 
     def test_side_card_exposes_close_for_open_and_routable_creating_states(self) -> None:
         topic = FeishuScope(

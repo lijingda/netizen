@@ -14,6 +14,7 @@ from typing import Any, Protocol
 
 from ..bindings import BindingTaskFeedback, SideTopicState
 from ..domain import ActiveState, GoalOperationState, MessageContextAnchor
+from ..partial_answers import PartialAnswer
 from ..sdk_gap_adapter import GoalSnapshot
 from ..turn_activity import TurnActivityEntrySnapshot, TurnPlanStepSnapshot
 from ..turn_patch_children import TaskPatchChildren
@@ -390,11 +391,11 @@ class TurnProgressSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class TurnActivitySnapshot:
-    """Latest bounded display projection for one exact active Turn.
+    """Display projection for one exact active Turn.
 
-    The projection keeps only bounded, allowlisted activity and the latest full
-    plan replacement. It is process-local display data, not a Turn history or
-    a second terminal-state authority.
+    Activity is bounded and allowlisted; stable answer fragments retain full
+    text separately. Both are process-local reply data, not persisted history
+    or a second terminal-state authority.
     """
 
     binding_id: str
@@ -409,6 +410,7 @@ class TurnActivitySnapshot:
     steps: tuple[TurnPlanStepSnapshot, ...]
     commentary: tuple[TurnActivityEntrySnapshot, ...] = ()
     operations: tuple[TurnActivityEntrySnapshot, ...] = ()
+    partial_answers: tuple[PartialAnswer, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.binding_id or not self.thread_id or not self.turn_id:
@@ -421,7 +423,7 @@ class TurnActivitySnapshot:
 
 @dataclass(frozen=True, slots=True)
 class SideTurnActivitySnapshot:
-    """Latest bounded display projection for one exact active Side Turn."""
+    """Activity and stable answers for one exact active Side Turn."""
 
     side_id: str
     thread_id: str
@@ -435,6 +437,7 @@ class SideTurnActivitySnapshot:
     steps: tuple[TurnPlanStepSnapshot, ...]
     commentary: tuple[TurnActivityEntrySnapshot, ...] = ()
     operations: tuple[TurnActivityEntrySnapshot, ...] = ()
+    partial_answers: tuple[PartialAnswer, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.side_id or not self.thread_id or not self.turn_id:
@@ -449,7 +452,7 @@ class SideTurnActivitySnapshot:
 
 @dataclass(frozen=True, slots=True)
 class GoalActivitySnapshot:
-    """Latest bounded display projection for one exact native Goal run."""
+    """Current-Turn Activity and accumulated answers for one exact Goal run."""
 
     binding_id: str
     thread_id: str
@@ -462,6 +465,7 @@ class GoalActivitySnapshot:
     steps: tuple[TurnPlanStepSnapshot, ...]
     commentary: tuple[TurnActivityEntrySnapshot, ...] = ()
     operations: tuple[TurnActivityEntrySnapshot, ...] = ()
+    partial_answers: tuple[PartialAnswer, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.binding_id or not self.thread_id or not self.logical_turn_id:
@@ -638,6 +642,7 @@ class TurnOutcome:
     feedback_revision: int = 1
     activity: TurnActivitySnapshot | None = None
     patch_children: TaskPatchChildren = TaskPatchChildren()
+    partial_answers: tuple[PartialAnswer, ...] = ()
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:
@@ -718,6 +723,7 @@ class GoalOutcome:
     finalization: GoalFinalizationStatus = GoalFinalizationStatus.NOT_APPLICABLE
     finalization_error: BaseException | None = None
     patch_children: TaskPatchChildren = TaskPatchChildren()
+    partial_answers: tuple[PartialAnswer, ...] = ()
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:
@@ -749,6 +755,7 @@ class SideTurnOutcome:
     feedback_revision: int = 1
     activity: SideTurnActivitySnapshot | None = None
     patch_children: TaskPatchChildren = TaskPatchChildren()
+    partial_answers: tuple[PartialAnswer, ...] = ()
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:

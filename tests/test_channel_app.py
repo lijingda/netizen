@@ -854,7 +854,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(released)
         self.assertEqual(self.channel.reactions, [("om_silent", "Typing")])
         self.assertEqual(self.channel.replies, [])
-        self.assertEqual(self.runtime.turn_activity_calls, [])
+        # Progress is disabled, but stable answers still use the observation snapshot.
+        self.assertEqual(self.runtime.turn_activity_calls, [(binding.id, "native-one", "turn-one", False)])
 
         await self.app.handle_completion(
             TurnOutcome(

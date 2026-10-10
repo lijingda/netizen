@@ -348,6 +348,13 @@ class ReplyCardActivityModule:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplyCardPartialAnswerModule:
+    """Ordered stable answer text, independent of Activity and final Result."""
+
+    contents: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ReplyCardResultModule:
     content: str
     # One terminal delivery only; never retained in file-page callbacks.
@@ -385,6 +392,7 @@ class ReplyCardManifest:
     goal: ReplyCardGoalModule | None = None
     activity: ReplyCardActivityModule | None = None
     result: ReplyCardResultModule | None = None
+    partial_answer: ReplyCardPartialAnswerModule | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,6 +404,7 @@ class ReplyCardProjection:
     activity: ReplyCardActivityModule | None = None
     result: ReplyCardResultModule | None = None
     files: ReplyCardFilesModule | None = None
+    partial_answer: ReplyCardPartialAnswerModule | None = None
 
 
 @dataclass(frozen=True, slots=True)

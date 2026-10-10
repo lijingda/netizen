@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from contextlib import suppress
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import openai_codex
 from openai_codex import (
@@ -204,7 +204,7 @@ for line in sys.stdin:
                         "threadId": "thread-goal", "turnId": first, "completedAtMs": 1,
                         "item": {
                             "type": "agentMessage", "id": "goal-question-one",
-                            "text": "Choose A or B", "phase": "final_answer",
+                            "text": "Choose A or B", "phase": "partial_answer",
                             "questions": [{"title": "Choose", "options": ["A", "B"]}],
                         },
                     },
@@ -279,6 +279,10 @@ for line in sys.stdin:
                         "diff": unified_diff("final.txt", "old", "final-latest"),
                     },
                 )
+                notify("item/completed", {
+                    "threadId": "thread-goal", "turnId": "turn-2", "completedAtMs": 2,
+                    "item": {"type": "agentMessage", "id": "second-partial", "text": "second stable", "phase": "partial_answer"},
+                })
                 goal_status = "complete"
                 notify(
                     "thread/goal/updated",
@@ -694,6 +698,11 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(questions), 1)
         self.assertEqual(questions[0].item_id, "goal-question-one")
         self.assertEqual(questions[0].questions[0].options, ("A", "B"))
+        answers = [item.partial_answer for item in activity if item is not None and item.partial_answer is not None]
+        self.assertEqual([(a.turn_id, a.item_id, a.text) for a in answers], [
+            ("turn-1", "goal-question-one", "Choose A or B"),
+            ("turn-2", "second-partial", "second stable"),
+        ])
         methods = [item.get("method") for item in messages if "id" in item]
         self.assertEqual(
             methods,
@@ -715,6 +724,42 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
                 "status": "active",
             },
         )
+
+    async def test_goal_answer_tap_does_not_rewind_on_repeated_old_turn_start(self) -> None:
+        from openai_codex.generated.v2_all import (
+            ItemCompletedNotification, ThreadItem, Turn, TurnStartedNotification,
+        )
+        from openai_codex.models import Notification
+        from netizen_cli.sdk_gap_adapter import _GoalActivityTap
+
+        def started(turn_id):
+            return Notification(method="turn/started", payload=TurnStartedNotification(
+                threadId="thread-goal", turn=Turn(id=turn_id, items=[], status="inProgress"),
+            ))
+
+        def answer(turn_id, item_id):
+            return Notification(method="item/completed", payload=ItemCompletedNotification(
+                threadId="thread-goal", turnId=turn_id, completedAtMs=1,
+                item=ThreadItem.model_validate({
+                    "type": "agentMessage", "id": item_id, "text": item_id, "phase": "partial_answer",
+                }),
+            ))
+
+        notifications = [
+            started("first"), answer("first", "a"), started("second"),
+            started("first"), answer("first", "late"), answer("second", "b"),
+        ]
+        client = AsyncMock()
+        client.next_goal_notification.side_effect = notifications
+        tap = _GoalActivityTap("thread-goal")
+        projected = []
+        tap.bind(projected.append)
+        state = object()
+        for notification in notifications:
+            self.assertIs(await tap.next_notification(client, state), notification)
+        self.assertEqual(client.next_goal_notification.await_count, len(notifications))
+        answers = [p.partial_answer for p in projected if p.partial_answer is not None]
+        self.assertEqual([(a.turn_id, a.item_id) for a in answers], [("first", "a"), ("second", "b")])
 
     async def test_goal_activity_sink_failure_does_not_break_unique_stream(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

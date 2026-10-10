@@ -110,6 +110,26 @@ class PinnedTurnActivityObserverTest(unittest.TestCase):
             ),
         )
 
+    def test_partial_answers_share_the_non_consuming_cursor(self) -> None:
+        item = ThreadItem.model_validate({
+            "type": "agentMessage", "id": "answer-one", "phase": "partial_answer",
+            "text": "stable answer" * 100,
+        })
+        for method, payload in (
+            ("item/started", ItemStartedNotification(item=item, threadId="thread-one", turnId="turn-one", startedAtMs=1)),
+            ("item/completed", ItemCompletedNotification(item=item, threadId="thread-one", turnId="turn-one", completedAtMs=2)),
+        ):
+            self.router.route_notification(Notification(method=method, payload=payload))
+        before = dict(self.state.subscribers)
+        observation = self.observer.observe(thread_id="thread-one", turn_id="turn-one", after_cursor=0)
+        self.assertEqual(self.state.subscribers, before)
+        self.assertEqual(len(observation.partial_answers), 1)
+        self.assertEqual(observation.partial_answers[0].text, item.root.text)
+        self.assertEqual(observation.events, ())
+        self.assertFalse(observation.turn_completed)
+        later = self.observer.observe(thread_id="thread-one", turn_id="turn-one", after_cursor=observation.next_cursor)
+        self.assertEqual(later.partial_answers, ())
+
     def test_later_plan_is_a_full_replacement_and_cursor_is_incremental(self) -> None:
         self.router.route_notification(_plan())
         first = self.observer.observe(

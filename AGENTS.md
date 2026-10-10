@@ -36,8 +36,10 @@ their cited ADRs before changing that boundary.
   Shared native question cards use target-specific Binding/Side input admission
   ([ADR 0071](docs/adr/0071-answer-native-questions-through-binding-input.md),
   [ADR 0072](docs/adr/0072-share-question-interaction-across-binding-and-side.md)).
-  Reply Cards, Activity, completion mentions, and Files:
-  [presentation](docs/design.md#回复与活动展示).
+  Reply Cards, Activity, Partial Answers, completion mentions, and Files:
+  [presentation](docs/design.md#回复与活动展示), including
+  [ADR 0079](docs/adr/0079-deliver-partial-answers-with-existing-reply-presentation.md)
+  for stable answers during execution and Goal rollover retention.
   Controls and form callbacks: [commands and cards](docs/design.md#飞书命令与控制卡片).
   Preserve the referenced
   ADRs' exact identity, context, display, and file-evidence contracts.
@@ -124,9 +126,11 @@ their cited ADRs before changing that boundary.
   `lark-oapi` port using the same app credentials (ADR 0039). Preserve chat-main
   versus thread-topic semantics, inert historical context, and its rollout gate.
 - Display is best effort and never changes native execution. Keep Reply Cards
-  within the closed Goal/Activity/Result/Files set; never expose reasoning or raw
+  within the closed Goal/Activity/Partial Answer/Result/Files set; never expose reasoning or raw
   tool arguments/output. Files use exact Turn evidence, not workspace scans.
-  Preserve Goal's four-proof completion and exact final-Turn handoff contract.
+  Partial Answers use the existing observation/consumption chain independently of
+  Progress Card, never signal completion, and never create database answer history.
+  Preserve Goal's four-proof completion and exact final-Turn Result/Files handoff contract.
 - Every materialized persisted non-ephemeral Thread retains archive/delete
   controls. Delegate shutdown to App Server after reserving exact lifecycle
   intent and releasing Binding/Scope locks; do not pre-interrupt, cleanup, or

@@ -3,11 +3,16 @@ status: accepted
 date: 2026-08-28
 amends: 0021, 0046, 0047
 related: 0020, 0024, 0027
-amended_by: 0051, 0052, 0072
+amended_by: 0051, 0052, 0072, 0079
 ---
 
 # 让 Side Turn 复用普通 Turn 的任务反馈与回复卡
 
+> [ADR 0079](0079-deliver-partial-answers-with-existing-reply-presentation.md) 让 Side 共用阶段性
+> 答案：已有运行卡时加入始终展开的模块，无运行卡时逐条富文本；观察不受 Progress 开关
+> 控制，含阶段性模块的 Files 卡使用 v5。Side 的冻结设置、唯一消费、观察降级和容器
+> 生命周期保持。下文仅 Activity/Result/Files 与进度关闭零观察的原始规则受此修订。
+>
 > [ADR 0051](0051-keep-lifecycle-reactions-and-make-pulse-optional.md) 保留 Side
 > 冻结 Parent Task Feedback 的边界，但将其表情选项收窄为只控制
 > `THINKING` Reaction Pulse；Side Turn 的 accepted、成功 steer 与终态表情改为始终尽力展示。

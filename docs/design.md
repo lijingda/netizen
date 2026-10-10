@@ -768,9 +768,9 @@ Activity observer 和 Reply Card Presenter 只接收上述生命周期驱动的 
 卡片更新、折叠、删除或超时不进入 close 的 admission、interrupt、cleanup、unsubscribe 或
 tombstone 关键路径。Side 不进入 `/sessions`，不增加 archive/delete 语义。
 
-ephemeral Side 明确不复用[普通 Turn 的持久 history recovery](#普通-turn-终态与观测恢复)。Progress Card 关闭且没有问题 handler 时 consumer 立即
-调用公开 `AsyncTurnHandle.run()`；否则按 ADR 0052/0072 在同一循环只读观察 exact Turn 的 retained
-events，问题展示不受进度卡开关影响。任一次 Activity 刷新（包括 steer 前刷新）观察到 `turn/completed` 后，在该
+ephemeral Side 明确不复用[普通 Turn 的持久 history recovery](#普通-turn-终态与观测恢复)。
+按 ADR 0052/0072/0079 在同一循环只读观察 exact Turn 的 retained events，阶段性答案和
+已注册的问题展示不受进度卡开关影响。任一次刷新（包括 steer 前刷新）观察到 `turn/completed` 后，在该
 active Turn 保留 `completion_notification_seen`，即使其他刷新已推进 cursor，consumer
 仍进入同一个 `handle.run()` 唯一 drain。
 该标记只触发 drain，终态仍由 `run()` 返回值确认。observer 不可用、cursor 回退、
@@ -867,15 +867,26 @@ ADR 0077 的 `AppServerAccountRateLimits.read` 只读固定 `account/rateLimits/
 facade 出现后删除适配，不消费通知或维护账号状态。
 ADR 0020/0052 的 `PinnedTurnActivityObserver` 精确校验 SDK 版本、整包源码指纹、generated
 payload、内部持有类型与 retained event-store shape；它在 exact ordinary Turn 的问题观察、
-Progress Card 开启的 Side Turn、显式 `/status` 或 steer freshness bookkeeping 中，在 router RLock
+ordinary/Side 的阶段性答案观察、显式 `/status` 或 steer freshness bookkeeping 中，在 router RLock
 下复制绝对 cursor 后的通知引用；校验 exact Turn 的保留区间及序号连续性，不调用 RPC、
 不注册/关闭订阅、不消费/裁剪事件、不改订阅者游标、不新建 worker。
-它只向 Runtime 交付 sanitized Activity event 与 ADR 0071 的 structured question projection；
+它只向 Runtime 交付 sanitized Activity event、ADR 0071 的 structured question projection
+与 [ADR 0079](adr/0079-deliver-partial-answers-with-existing-reply-presentation.md) 的稳定答案片段；
 Activity 的 opaque item identity 仅用于进程内 lifecycle 合并，Channel Snapshot 会移除它；
 问题保留 item identity 供卡片生成原生回答格式。Goal 不读取该 event store，而是在现有 logical stream
 的唯一 `next_notification` 消费链内 tap 同一受限投影。rename/archive/
 unarchive 全部使用高层公开 API。原生名称、归档状态、plan 与终态仍以 Codex 为事实源，不
 增加本地 lifecycle 或 progress 状态列。
+
+`root_turn_id` / `parent_turn_id` 由 Codex 原生传递，当前 Netizen 调用无须补写或消费；
+不据此改 Files 归属、扩大旧子任务统计或新增过滤，随现有流程回归。
+
+#### 暂缓接入的原生能力
+
+以下能力取舍及重新评估条件长期维护于本节。后续 SDK 升级或相关功能设计时须重新
+核对并更新；临时审查报告的清理不影响这些工程决定。
+
+**Goal 来源（`origin`）**
 
 0.161.0 升级审查中的 Goal `origin` 决定（2026-10-08）：暂不接入，将其保留为明确的
 能力缺口，不单独阻塞 SDK 升级，升级仍须完成既有兼容性门禁。该版本的协议模型和
@@ -891,6 +902,13 @@ worker 和取消补偿不符合当前维护成本目标，因此保留
 提供等价能力。届时区分用户新建、恢复、暂停、清除与内部前置 clear、自动完成清理、
 shutdown、取消补偿；不能统一标为 `user`。不为暂缺的来源添加本地持久状态、补写 Prompt、
 SDK patch 或另一套 Goal 编排。
+
+**附件归属查询（`thread/attachmentOwner/list`）**
+
+0.162.1 新增的 `thread/attachmentOwner/list` 暂不接入。开始设计“新建独立 worktree 会话”
+时，重新评估附件的资源归属、追溯与清理需求，以及 SDK 是否已有公开等价能力。原生查询
+仅覆盖当前 App Server store，须完整分页，且不是原子的 cleanup 检查；不能替代
+ADR 0060 的 Project 精确清单或 ADR 0078 的原生 delete 成功证明，不为此新增私有 gateway。
 
 ### 原生归档与删除
 
@@ -1016,15 +1034,16 @@ sandbox/approval 决定。canonical 重复、缺失、目录和设备文件不�
 
 Goal 始终使用组合卡；满足四项终态证据后，只从 exact 最终成功 physical Turn 及其本轮
 新建子任务提取文件和累计统计，并只用该 Turn 的 final agent answer，不聚合更早 rollover
-Turn。现有唯一 Goal notification Tap 仍在 rollover 时清空旧 aggregate snapshot，只将
-final physical Turn 的 latest diff 用于文件发现。最终 physical Turn 没有文本/文件时
-使用既有空结果语义，不用上一轮填充。成功 Side Turn 共用同一 patch 统计和子任务读取，
+Turn；阶段性答案独立按同次连续执行保留，不改变该文件边界。现有唯一 Goal notification Tap
+仍在 rollover 时清空旧 aggregate snapshot，只将 final physical Turn 的 latest diff 用于文件发现。
+最终 physical Turn 没有 final/文件时不从上一轮填充 Result/Files；已确认交付的阶段性答案
+仅由独立模块保留，并按下文收尾。成功 Side Turn 共用同一 patch 统计和子任务读取，
 也显示已知行数；不补读 Side aggregate diff 或更早 Side Turn，其 observer、唯一
 `handle.run()` consumer 和 4096 high-water 保持不变。compaction、失败和中断终态不进入
 本轮文件路径。
 
-普通 Result + Files 与 Activity + Result + Files 卡继续使用 v4 callback；Goal 与 Files
-同卡时使用 v5 完整组合 manifest。两版每页 8 个，最多 400 个完整分页，展示总数、
+不含 Goal/Partial Answer 的普通与 Side 文件卡继续使用 v4 callback；Goal 或 Partial Answer
+与 Files 同卡时使用 v5 完整组合 manifest。两版每页 8 个，最多 400 个完整分页，展示总数、
 页码、证据完整时的本轮累计 `+N -M`、脱敏逻辑位置与逐文件 `+N -M`；图片和统计未知的
 文件不显示数字，也不显示文件大小。Project 内文件使用 Project 相对路径，Project 外原生生成图使用
 `生成图片/<文件名>`，账号 home 内其他文件使用 `~/...`，其余位置只显示有界路径尾部。
@@ -1038,7 +1057,8 @@ Card 2.0 JSON UTF-8 bytes 逐页检查，包含完整 manifest、其他模块和
 只有分页表单的提交按钮携带完整 manifest，选项仅传从零开始的页码字符串，通过公开 `form_value`
 读取并验证范围；固定 Channel SDK 丢失独立 select callback 的 `option`，不为此新增
 私有适配。已知的条目统计用短字段 `a/d` 成对携带，未知时成对省略，整轮统计也以顶层
-`a/d` 携带。v5 另外携带有界冻结的 Goal/Activity/Result 模块。Binding/Turn 只保留 provenance 和
+`a/d` 携带。v5 另外携带有界冻结的 Goal/Activity/Partial Answer/Result 模块；阶段性模块为
+可选字段，旧 v4 及不含该字段的 v5 继续严格解码。Binding/Turn 只保留 provenance 和
 幂等 identity；v5 callback 不读取飞书原卡、Binding、Project 或 completed Turn，直接重建
 并更新完整 Card 2.0，翻页不会丢失其他模块。cleared 卡不在进程内保留文件清单、Projection
 或 session；非 cleared Goal 只为当前进程控制面有界保留终态 Projection。两者都不写入
@@ -1093,7 +1113,8 @@ Task Feedback；Side 则在创建时一次性冻结 Parent 当时的 Task Feedba
 沿用。运行中或 Side 创建后修改 Parent 配置不会改变已经捕获的 operation。新建会话默认
 关闭 Reaction Pulse、开启 Progress Card 与 Completion Mention，已有表情/进度卡选择保留。Reaction Pulse
 只控制普通/Side Turn 的 `THINKING` 执行中闪烁，Progress Card
-控制普通/Side Turn 是否产生 Activity 运行卡，以及 Goal 组合卡是否加入 Activity 模块。
+控制普通/Side Turn 是否产生 Activity 运行卡，以及 Goal 组合卡是否加入 Activity 模块；
+不控制阶段性答案或原生问题的观察与投递。
 普通与 Side Turn 的 Lifecycle Reaction 始终尽力展示；两项都关闭时仍有 accepted、成功
 steer 和终态表情，但没有 `THINKING` pulse 或 Activity 过程卡。Goal 模块本身始终存在且不
 使用 Lifecycle Reaction。Completion Mention 在普通/Side 终态和 Goal 逻辑终态
@@ -1110,7 +1131,8 @@ Goal 即使关闭进度卡也复用卡片，因此其独立结束提醒不受进
 [ADR 0047](adr/0047-compose-typed-reply-cards-and-finalize-complete-goals.md)，Side 扩展见
 [ADR 0048](adr/0048-integrate-side-turns-with-task-feedback-reply-cards.md)，表情语义修订见
 [ADR 0051](adr/0051-keep-lifecycle-reactions-and-make-pulse-optional.md)，Activity 事件所有权与
-安全投影见 [ADR 0052](adr/0052-project-safe-turn-activity-with-one-consumer.md)。
+安全投影见 [ADR 0052](adr/0052-project-safe-turn-activity-with-one-consumer.md)，阶段性答案见
+[ADR 0079](adr/0079-deliver-partial-answers-with-existing-reply-presentation.md)。
 
 ### Activity 安全投影
 
@@ -1131,18 +1153,59 @@ commentary 保留内部换行；CRLF/CR 统一为 LF，tab 展开为四个空格
 任意工具参数。工具名不做字符白名单、合规
 判定或单独截断，只在卡片 Markdown 边界转义。commentary 和预览先过滤明确凭据再限长，
 保留普通路径、链接、邮箱、内联代码和长标识符，卡片/manifest 解码再次过滤并转义。
-不显示 reasoning、final answer、delta、MCP server、工具参数/结果、命令输出、diff 或 token
+Activity 不显示 reasoning、partial/final answer、delta、MCP server、工具参数/结果、命令输出、diff 或 token
 usage；不生成 elapsed time、百分比或 ETA，commentary/checklist 沿用估算过滤，原生命令/
 查询中的同名字面内容不作估算解释。它不是原生终态事实或历史记录。
 
 Progress Card 开启时，Runtime 的既有 consumer/poll loop 更新快照，Channel Presenter 每秒
 只读取 projection 并在 revision 变化时重绘；关闭时普通/Side Turn 不创建 Activity 卡，Goal
-不展示 Activity 模块。普通 Binding、Side 与 Goal 仍使用各自同一 observer cursor / logical Tap 接收
-结构化问题；Side 关闭进度卡且没有问题 handler 时不增加 observer polling，注册 handler 后
-复用同一观察循环提取问题，仍由原有唯一 consumer 确认终态。pinned observer
+不展示 Activity 模块。普通 Binding、Side 与 Goal 仍使用各自同一 observer cursor / logical Tap
+提取阶段性答案，并在已注册的问题 handler 路径接收结构化问题；关闭 Progress 不停止这些
+观察，仍由原有唯一消费链取得结果。pinned observer
 保持版本/源码指纹、generated shape、exact `thread_id + turn_id`、非消费 event store 和完整 plan
-replacement 门禁；只接受 ADR 0052/0071 的事件白名单，未知事件忽略，白名单 shape 变化 fail
+replacement 门禁；只接受 ADR 0052/0071/0079 的事件白名单，未知事件忽略，白名单 shape 变化 fail
 closed，不能扩展成任意通知或私有 RPC gateway。
+
+### 阶段性答案
+
+按 [ADR 0079](adr/0079-deliver-partial-answers-with-existing-reply-presentation.md)，仅把
+completed `agentMessage` 中明确标记 `partial_answer` 的稳定正文作为阶段性答案。
+它独立于 Activity 的四条/160 字摘要限制，不是 reasoning、工具输出或终态。
+普通会话、持久 fork、Side 按实际回复形态共用交付规则：已有运行卡时加入按需出现、
+始终展开的 Partial Answer 模块，按原生已观察顺序追加。该模块使用与 Goal 一致的
+`grey-50` 背景与 `12px` 内边距，最终 Result 保持 `default`，使两种正文有清楚的视觉
+边界，不加入折叠。没有运行卡时，每个完整 item
+以带“阶段性答案”标识的富文本回复原消息/话题，不带 Files，不逐 token 发送。
+最终无文件富文本/有文件卡片的选择不变，不因终态出现 Files 重发先前已发片段。
+
+Goal 始终有控制卡，Progress 开关只影响 Activity。阶段性模块在同次连续 logical run
+的自动物理 Turn rollover 中累计，Activity 仍按轮重置；暂停、失败/中断和逻辑终态保留
+已展示片段，手动 resume 的新 logical run 重置。最终 Result/Files 仍来自四证明锁定的
+exact 最终物理 Turn。重启、缓存丢失或外部重挂不恢复旧阶段性答案，不扫描旧卡、完整
+Thread 或文件目录，不增加数据库历史。
+
+复用现有非消费 observer 和 Goal 唯一 logical stream tap，保留 exact Thread/physical
+Turn/item 身份并去重；重复/迟到事件、补读和重试不能重复追加或改换归属。普通观察
+不可用后停止周期观察 I/O；Side 的 observer/cursor 降级及 4096 high-water 仍转入唯一
+`run()`，不为提前推送增加消费者或 ephemeral history 轮询。终态从可取得的权威 typed
+items 补齐已知遗漏。SDK `0.162.1` 的 Side `handle.run()` 遇到 failed 直接抛错、不返回
+items；若先因 high-water 或 observer 异常降级，只能保留此前已观察片段，之后未观察且
+未返回 items 的片段不能补齐。Goal 只补读最终物理 Turn，不追补旧轮。
+
+阶段性与最终正文分别投影，不机械拼接已交付片段，模型 final 自身的复述原样保留。
+终态补齐尚未尝试或明确未交付的片段；发送结果未知不视为肯定失败，不盲目重发。
+只有 partial 没有 final 时，确认片段交付后才可说明答案见阶段性内容，不能误报没有
+生成正文，也不能在投递未确认时声称已送达。片段不触发完成 @、DONE、Scheduled Run
+完成回执或槽释放；原生失败/中断仍按真实状态展示。片段与身份、投递记录仅在进程内。
+定时新话题首轮的阶段性富文本复用最终回复的 exact 消息/聊天/话题归属校验；SDK 拆分
+长消息后逐条核对。校验与发送共用有界预算，归属未确认、读取失败或超时均不记为已交付，
+不重发未知片段，也不提前更新 Scheduled Run 完成回执。
+
+全部重绘包含当前阶段性投影，包括终态、文件分页、Goal 状态/暂停和替代卡；手动恢复
+按新 run 重置。迟到更新不得覆盖终态、新片段或关闭状态，更新失败不丢弃已积累内容；
+投递始终 best effort 且有界，不阻塞原生执行和生命周期收尾。沿用既有卡片容量检查、
+更新失败与终态降级，不新增阶段性专用分段、溢出消息、限额或历史存储。Goal 既有精简
+卡片降级可省略阶段性模块，准确说明完整投递未确认，不能据生成记录声称已经送达。
 
 ### 原生问题卡片与回答
 
@@ -1200,9 +1263,10 @@ nonce 沿用 transport-only 解析。交接后的错误直接复用普通消息�
 
 ### 回复卡片呈现
 
-唯一 Reply Card Presenter 接受固定顺序的 Goal、Activity、Result、Files typed modules，
+唯一 Reply Card Presenter 接受固定顺序的 Goal、Activity、Partial Answer、Result、Files typed modules，
 每次变化都重绘完整 Projection，模块不能各自持有或更新飞书消息。Goal、Activity 或 Files
-任一存在时使用卡片；三者都不存在的 Result 继续走富文本/静态文本。Activity 运行时顶部
+任一存在时使用卡片；没有运行卡的 Partial Answer 与 Result 各按上述规则走富文本/静态文本。
+初始没有片段不渲染 Partial Answer，出现后运行中及终态都不折叠。Activity 运行时顶部
 `collapsible_panel` 展开并显示状态、进展、通用操作与 checklist；进展和操作行使用同一
 毫秒时间戳的 Card 2.0 Markdown `date_num` 与 `time` 两个 `local_datetime` 标签，由查看者
 客户端按本地语言与时区呈现日期和分钟；进展正文直接跟在时间分隔符 `·` 后，不增加 `•`。
@@ -1222,9 +1286,10 @@ nonce 沿用 transport-only 解析。交接后的错误直接复用普通消息�
 若没有成功且任一次结果未知，整组保留未知，后续拒绝不能否定先前可能成功的更新。
 重试只替换同一条原卡，不重试新消息发送；运行中轮询仍沿用上述有界行为。
 展示失败不阻断、取消、重试或改写 native
-execution。只有 Goal + Files 使用的 v5 callback
-携带完整、裁剪且有界的 Reply Card manifest，翻页不丢 Goal/Activity/Result；普通文件卡
-继续使用 v4；Side 只组合 Activity/Result/Files，也使用 v4。进程内在 active lifecycle
+execution。Goal 或 Partial Answer 与 Files 同卡使用 v5 callback，
+携带完整且符合既有容量约束的 Reply Card manifest，翻页不丢 Goal/Activity/Partial Answer/Result；
+其余普通/Side 文件卡继续使用 v4。Side 只组合 Activity/Partial Answer/Result/Files。
+进程内在 active lifecycle
 保留 updater，并为非 cleared Goal 有界保留终态
 控制 Projection；不持久化卡片 session。崩溃或强制 kill 后不扫描或猜测旧运行卡，之后
 `/goal` 只创建新的状态快照卡。Goal 初始卡失败提供可见文字回执；终态 Channel handoff
@@ -2034,7 +2099,8 @@ steer 请求开始后到达的下一次 exact plan update 清除标记，失败 
 于 active Runtime 内存，不保存历史，不进入 SQLite。observer 不消费通知，终态后的公开
 usage stream 仍按原顺序排空同一队列。`/status` 只在用户请求时刷新；Progress Card 开启时，
 同一个 Turn Activity Projection 由 Runtime 按既有节奏更新，Presenter 本身不访问 queue；
-关闭后不展示 Activity 卡，但普通 Binding 与 Goal 仍沿同一观察路径接收结构化问题。
+关闭后不展示 Activity 卡，但普通 Binding、Goal 与 Side 仍沿同一观察路径提取阶段性答案，
+并在已注册的问题 handler 路径接收结构化问题。
 SDK `0.154.0` 的 `update_plan` 工具默认关闭；需要原生 checklist 时由用户在 Codex
 配置中开启 `tools.update_plan.enabled`。Netizen 继续继承工具配置，不自动开启或用提示词
 模拟计划。其他 Activity item 不依赖这一工具。
