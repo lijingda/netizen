@@ -2,11 +2,16 @@
 status: accepted
 date: 2026-08-28
 amends: 0014, 0024, 0027, 0046
-amended_by: 0048, 0052, 0053
+amended_by: 0048, 0052, 0053, 0079
 ---
 
 # 组合类型化回复卡并只自动收尾完成的 Goal
 
+> [ADR 0079](0079-deliver-partial-answers-with-existing-reply-presentation.md) 将封闭集合扩展为
+> Goal/Activity/Partial Answer/Result/Files，运行中交付阶段性答案；Goal 连续自动换轮保留
+> 已观察片段，手动恢复重置。含阶段性模块的 Files 卡也使用 v5 完整 manifest，唯一
+> Presenter、四证明终态与 exact 最终 Turn 的 Result/Files 边界保持。下文保留原始决定。
+>
 > [ADR 0048](0048-integrate-side-turns-with-task-feedback-reply-cards.md) 让 Side Turn 也复用
 > Activity、Result 与 Files 模块，但不允许 Goal Module；本 ADR 的单 Presenter 与封闭模块
 > 集合保持不变。

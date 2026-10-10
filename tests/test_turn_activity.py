@@ -59,7 +59,7 @@ class TurnActivityProjectionTest(unittest.TestCase):
         self,
     ) -> None:
         title = "完整题目" * 100
-        for phase in (None, "commentary", "final_answer"):
+        for phase in (None, "commentary", "partial_answer", "final_answer"):
             for delivery in (None, "async"):
                 with self.subTest(phase=phase, delivery=delivery):
                     item = ThreadItem.model_validate({
@@ -95,6 +95,36 @@ class TurnActivityProjectionTest(unittest.TestCase):
                         self.assertEqual(projection.question.questions[0].title, title)
                         self.assertEqual(projection.question.questions[0].options, ("A", "B"))
                         self.assertEqual(projection.question.questions[1].options, ())
+
+    def test_partial_answers_require_completed_items_and_exact_identity(self) -> None:
+        text = "稳定答案\n" * 200
+        item = ThreadItem.model_validate({
+            "type": "agentMessage", "id": "answer-one", "text": text,
+            "phase": "partial_answer", "questions": [{"title": "Continue?"}],
+        })
+        for completed, thread_id, turn_id in (
+            (False, "thread-one", "turn-one"),
+            (True, "thread-one", "turn-one"),
+            (True, "wrong-thread", "turn-one"),
+            (True, "thread-one", "wrong-turn"),
+        ):
+            payload = (ItemCompletedNotification(
+                item=item, threadId=thread_id, turnId=turn_id, completedAtMs=2,
+            ) if completed else ItemStartedNotification(
+                item=item, threadId=thread_id, turnId=turn_id, startedAtMs=1,
+            ))
+            projection = project_turn_activity_notification(
+                Notification(method="item/completed" if completed else "item/started", payload=payload),
+                expected_thread_id="thread-one", expected_turn_id="turn-one",
+            )
+            self.assertIsNone(projection.event)
+            self.assertFalse(projection.turn_completed)
+            if completed and thread_id == "thread-one" and turn_id == "turn-one":
+                self.assertEqual(projection.partial_answer.text, text)
+                self.assertEqual(projection.partial_answer.item_id, "answer-one")
+                self.assertIsNotNone(projection.question)
+            else:
+                self.assertIsNone(projection.partial_answer)
 
     def test_empty_or_wrong_identity_questions_are_ignored(self) -> None:
         for questions, thread_id, turn_id in (

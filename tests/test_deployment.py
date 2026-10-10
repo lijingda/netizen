@@ -71,7 +71,7 @@ class DeploymentAssetsTest(unittest.TestCase):
 
         for dependency in project["project"]["dependencies"]:
             self.assertIn(dependency.lower(), constraints)
-        self.assertIn("openai-codex-cli-bin==0.161.0", constraints)
+        self.assertIn("openai-codex-cli-bin==0.162.1", constraints)
 
     def test_main_ci_runs_repository_gate_for_supported_python_versions(self) -> None:
         workflow_path = ROOT / ".github" / "workflows" / "ci.yml"

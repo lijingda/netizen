@@ -50,6 +50,7 @@ from .domain import (
     NativeCapability,
 )
 from .model_settings import ModelCatalog, TurnModelSettings
+from .partial_answers import PartialAnswer, partial_answers_from_items
 from .error_messages import describe_error, native_turn_failure
 from .runtime.name_writes import ThreadNameWrites
 from .runtime.thread_naming import NamingJob, ThreadNamer
@@ -263,6 +264,7 @@ class _ActiveTurn:
     activity_commentary_order: list[str] = field(default_factory=list)
     activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
     activity_operation_order: list[str] = field(default_factory=list)
+    partial_answers: dict[tuple[str, str, str], PartialAnswer] = field(default_factory=dict)
     question_ids: set[tuple[str, str]] = field(default_factory=set)
     task: asyncio.Task[None] | None = None
 
@@ -309,6 +311,7 @@ class _ActiveGoal:
     activity_revision: int = 1
     activity_observation_enabled: bool = True
     activity_turn_id: str | None = None
+    activity_turn_ids: set[str] = field(default_factory=set)
     plan_cursor: int = 0
     plan_generated: bool = False
     plan_available: bool = True
@@ -317,6 +320,7 @@ class _ActiveGoal:
     activity_commentary_order: list[str] = field(default_factory=list)
     activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
     activity_operation_order: list[str] = field(default_factory=list)
+    partial_answers: dict[tuple[str, str, str], PartialAnswer] = field(default_factory=dict)
     question_ids: set[tuple[str, str]] = field(default_factory=set)
     pause_attempted: bool = False
     interrupt_acknowledged: bool = False
@@ -398,6 +402,7 @@ class _ActiveSideTurn:
     activity_commentary_order: list[str] = field(default_factory=list)
     activity_operations: dict[str, TurnActivityEvent] = field(default_factory=dict)
     activity_operation_order: list[str] = field(default_factory=list)
+    partial_answers: dict[tuple[str, str, str], PartialAnswer] = field(default_factory=dict)
     question_ids: set[tuple[str, str]] = field(default_factory=set)
     task: asyncio.Task[None] | None = None
 
@@ -3441,6 +3446,7 @@ class CodexRuntime:
             steps=active.plan_steps,
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
+            partial_answers=tuple(active.partial_answers.values()),
         )
 
     def side_turn_activity(
@@ -3485,6 +3491,7 @@ class CodexRuntime:
             steps=active.plan_steps,
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
+            partial_answers=tuple(active.partial_answers.values()),
         )
 
     def _turn_activity_visible_state(
@@ -3500,6 +3507,7 @@ class CodexRuntime:
             active.plan_steps,
             self._activity_commentary(active),
             self._activity_operations(active),
+            tuple(active.partial_answers.values()),
         )
 
     def _refresh_turn_activity(
@@ -3512,6 +3520,7 @@ class CodexRuntime:
         observer = self._turn_plan_observer
         if observer is None:
             active.plan_available = False
+            active.activity_observation_enabled = False
             if self._turn_activity_visible_state(active) != before:
                 active.activity_revision += 1
             return None
@@ -3523,6 +3532,7 @@ class CodexRuntime:
             )
         except Exception as error:
             active.plan_available = False
+            active.activity_observation_enabled = False
             if self._turn_activity_visible_state(active) != before:
                 active.activity_revision += 1
             logger.warning(
@@ -3542,6 +3552,7 @@ class CodexRuntime:
             # Steer freshness reads can see completion before the Side loop.
             # Preserve the drain trigger; only handle.run() proves terminal.
             active.completion_notification_seen = True
+        self._apply_partial_answers(active, observation.partial_answers)
         self._apply_activity_events(active, observation.events)
         if observation.plan_updated:
             active.plan_steps = observation.steps
@@ -3651,6 +3662,46 @@ class CodexRuntime:
                 active.activity_operations.pop(discarded, None)
 
     @staticmethod
+    def _apply_partial_answers(
+        active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
+        answers: tuple[PartialAnswer, ...],
+    ) -> None:
+        if isinstance(active, _ActiveGoal):
+            thread_id, turn_id = active.thread_id, active.activity_turn_id
+        else:
+            thread_id, turn_id = active.handle.thread_id, active.handle.id
+        for answer in answers:
+            if answer.thread_id != thread_id or answer.turn_id != turn_id:
+                continue
+            key = (answer.thread_id, answer.turn_id, answer.item_id)
+            # Completed fragments are stable. Duplicates never reorder or
+            # rewrite a fragment that may already have been delivered.
+            active.partial_answers.setdefault(key, answer)
+
+    def _supplement_partial_answers(
+        self,
+        active: _ActiveTurn | _ActiveSideTurn | _ActiveGoal,
+        *,
+        thread_id: str,
+        turn_id: str,
+        items: tuple[object, ...],
+    ) -> None:
+        """Supplement only the already-proven terminal physical Turn."""
+        before = len(active.partial_answers)
+        try:
+            answers = partial_answers_from_items(
+                items, thread_id=thread_id, turn_id=turn_id,
+            )
+        except (ValueError, TypeError):
+            logger.warning("terminal partial answer projection unavailable", exc_info=True)
+            return
+        for answer in answers:
+            key = (answer.thread_id, answer.turn_id, answer.item_id)
+            active.partial_answers.setdefault(key, answer)
+        if len(active.partial_answers) != before:
+            active.activity_revision += 1
+
+    @staticmethod
     def _reset_activity(active: _ActiveGoal) -> None:
         active.plan_cursor = 0
         active.plan_generated = False
@@ -3712,6 +3763,7 @@ class CodexRuntime:
             steps=active.plan_steps,
             commentary=self._activity_commentary(active),
             operations=self._activity_operations(active),
+            partial_answers=tuple(active.partial_answers.values()),
         )
 
     def _goal_activity_visible_state(self, active: _ActiveGoal) -> tuple[object, ...]:
@@ -3723,6 +3775,7 @@ class CodexRuntime:
             active.plan_steps,
             self._activity_commentary(active),
             self._activity_operations(active),
+            tuple(active.partial_answers.values()),
         )
 
     def _apply_goal_activity_projection(
@@ -3743,6 +3796,9 @@ class CodexRuntime:
             return
         active.plan_available = True
         if projection.turn_started and turn_id != active.activity_turn_id:
+            if turn_id in active.activity_turn_ids:
+                return
+            active.activity_turn_ids.add(turn_id)
             active.activity_turn_id = turn_id
             self._reset_activity(active)
         if turn_id != active.activity_turn_id:
@@ -3756,6 +3812,8 @@ class CodexRuntime:
             self._apply_activity_events(active, (projection.event,))
         if projection.question is not None:
             self._deliver_question(active, turn_id, projection.question)
+        if projection.partial_answer is not None:
+            self._apply_partial_answers(active, (projection.partial_answer,))
         if self._goal_activity_visible_state(active) != before:
             active.activity_revision += 1
 
@@ -5473,37 +5531,40 @@ class CodexRuntime:
         try:
             # Side Threads are ephemeral. Intentionally use the normal SDK
             # handle path and do not apply persisted-thread completion recovery.
-            # Activity and questions share the same observation loop. Only
+            # Activity, answers and questions share one observation loop. Only
             # peek until exact completion is queued; ``handle.run()`` remains
             # the sole consumer and terminal authority.
-            if active.task_feedback.progress_card_enabled or self._on_question is not None:
-                while True:
-                    observation = self._refresh_turn_activity(active)
-                    if observation is None:
-                        break
-                    if observation.retained_count >= SIDE_ACTIVITY_QUEUE_HIGH_WATER:
-                        before = self._turn_activity_visible_state(active)
-                        active.plan_available = False
-                        active.activity_observation_enabled = False
-                        if self._turn_activity_visible_state(active) != before:
-                            active.activity_revision += 1
-                        logger.warning(
-                            "Side Turn activity queue reached the fixed high water; "
-                            "falling back to the unique consumer",
-                            extra={
-                                "thread_id": active.handle.thread_id,
-                                "turn_id": active.handle.id,
-                            },
-                        )
-                        break
-                    if active.completion_notification_seen:
-                        break
-                    await asyncio.sleep(self._poll_interval_seconds)
+            while True:
+                observation = self._refresh_turn_activity(active)
+                if observation is None:
+                    break
+                if observation.retained_count >= SIDE_ACTIVITY_QUEUE_HIGH_WATER:
+                    before = self._turn_activity_visible_state(active)
+                    active.plan_available = False
+                    active.activity_observation_enabled = False
+                    if self._turn_activity_visible_state(active) != before:
+                        active.activity_revision += 1
+                    logger.warning(
+                        "Side Turn activity queue reached the fixed high water; "
+                        "falling back to the unique consumer",
+                        extra={
+                            "thread_id": active.handle.thread_id,
+                            "turn_id": active.handle.id,
+                        },
+                    )
+                    break
+                if active.completion_notification_seen:
+                    break
+                await asyncio.sleep(self._poll_interval_seconds)
             # Once drain starts, status/steer refreshes must no longer peek at
             # notifications concurrently consumed by the SDK handle.
             active.activity_observation_enabled = False
             result = await active.handle.run()
             active.terminal_observed = True
+            self._supplement_partial_answers(
+                active, thread_id=active.handle.thread_id, turn_id=active.handle.id,
+                items=tuple(getattr(result, "items", ())),
+            )
             # Drain can include questions missed after observation fell back.
             # Reuse delivery dedup and the live Side guard, without restarting
             # observation or retrying earlier presentation attempts.
@@ -5583,6 +5644,7 @@ class CodexRuntime:
             task_feedback=active.task_feedback,
             feedback_revision=active.feedback_revision,
             activity=activity,
+            partial_answers=tuple(active.partial_answers.values()),
             patch_children=(
                 await self._completion_patch_children(
                     session.thread.id, active.handle.id,
@@ -6207,11 +6269,7 @@ class CodexRuntime:
             while error is None and unavailable_error is None:
                 if self._active.get(active.binding_id) is not active:
                     return
-                if (
-                    active.task_feedback.progress_card_enabled
-                    or self._on_question is not None
-                ):
-                    self._refresh_turn_activity(active)
+                self._refresh_turn_activity(active)
                 if observation is None:
                     try:
                         observation = await self._read_terminal_result(active)
@@ -6262,11 +6320,12 @@ class CodexRuntime:
                 await asyncio.sleep(self._poll_interval_seconds)
         finally:
             try:
-                if (
-                    active.task_feedback.progress_card_enabled
-                    or self._on_question is not None
-                ):
-                    self._refresh_turn_activity(active)
+                self._refresh_turn_activity(active)
+                if result is not None:
+                    self._supplement_partial_answers(
+                        active, thread_id=active.handle.thread_id, turn_id=active.handle.id,
+                        items=tuple(getattr(result, "items", ())),
+                    )
                 activity = self._turn_activity_snapshot(active)
                 if active.terminal_observed:
                     observed_usage = False
@@ -6346,6 +6405,7 @@ class CodexRuntime:
             task_feedback=active.task_feedback,
             feedback_revision=active.feedback_revision,
             activity=activity,
+            partial_answers=tuple(active.partial_answers.values()),
             patch_children=(
                 await self._completion_patch_children(
                     active.handle.thread_id, active.handle.id,
@@ -6515,15 +6575,9 @@ class CodexRuntime:
         handle = active.handle
         assert handle is not None
         try:
-            if active.task_feedback.progress_card_enabled or self._on_question is not None:
-                active.stream_terminal = await handle.wait_terminal(
-                    lambda projection: self._apply_goal_activity_projection(
-                        active,
-                        projection,
-                    )
-                )
-            else:
-                active.stream_terminal = await handle.wait_terminal()
+            active.stream_terminal = await handle.wait_terminal(
+                lambda projection: self._apply_goal_activity_projection(active, projection)
+            )
             if active.stream_terminal.logical_turn_id != handle.id:
                 raise RuntimeError("Goal stream terminal identity mismatch")
             async with asyncio.timeout(_COMPACTION_TERMINAL_TIMEOUT_SECONDS):
@@ -6666,6 +6720,7 @@ class CodexRuntime:
                     if active.task_feedback.progress_card_enabled
                     else None
                 ),
+                partial_answers=tuple(active.partial_answers.values()),
                 finalization=finalization,
                 finalization_error=finalization_error,
                 patch_children=(
@@ -6788,6 +6843,10 @@ class CodexRuntime:
             active.final_turn_status = turn_status
             active.final_items = items
             active.final_response = final_response
+            self._supplement_partial_answers(
+                active, thread_id=active.thread_id,
+                turn_id=terminal.final_physical_turn_id, items=items,
+            )
             return persisted
 
     async def _read_terminal_result(

@@ -24,6 +24,7 @@ from ..domain import (
     ReplyCardFilesModule,
     ReplyCardGoalModule,
     ReplyCardManifest,
+    ReplyCardPartialAnswerModule,
     ReplyCardProjection,
     ReplyCardResultModule,
     ScopeKind,
@@ -82,6 +83,7 @@ from .pagination import decode_page_selection, pagination_controls
 TURN_FILE_MANIFEST_LIMIT = 400
 TURN_FILE_CARD_JSON_LIMIT_BYTES = 55_000
 _TURN_ANSWER_ELEMENT_ID = "turnanswerv1"
+_PARTIAL_ANSWER_ELEMENT_ID = "partialanswerv1"
 _TURN_FILES_ELEMENT_ID = "turnfilesv4"
 _TURN_PROGRESS_ELEMENT_ID = "turnprogressv1"
 _GOAL_ELEMENT_ID = "goalmodulev1"
@@ -106,6 +108,10 @@ class _TurnActivityEntryLike(Protocol):
 class _TurnCommentaryEntryLike(Protocol):
     event_timestamp_ms: int | None
     text: str | None
+
+
+class _PartialAnswerLike(Protocol):
+    text: str
 
 
 class _TurnActivitySnapshotLike(Protocol):
@@ -173,6 +179,7 @@ def reply_card_from_manifest(
             scope=scope,
             goal=reply.goal,
             activity=reply.activity,
+            partial_answer=reply.partial_answer,
             result=reply.result,
             files=ReplyCardFilesModule(
                 binding_id=binding_id,
@@ -191,11 +198,15 @@ def _normalize_reply_projection(
     projection: ReplyCardProjection,
 ) -> ReplyCardProjection:
     if not any(
-        (projection.goal, projection.activity, projection.result, projection.files)
+        (
+            projection.goal, projection.activity, projection.partial_answer,
+            projection.result, projection.files,
+        )
     ):
         raise ValueError("a Reply Card requires at least one module")
     goal = _normalize_goal_module(projection.goal)
     activity = _normalize_activity_module(projection.activity)
+    partial_answer = _normalize_partial_answer_module(projection.partial_answer)
     result = projection.result
     if result is not None:
         _bounded_card_text(result.content, "result", 100_000)
@@ -228,9 +239,9 @@ def _normalize_reply_projection(
             raise ValueError("unsupported Reply Card file action version")
         if (
             files.action_version == TURN_FILE_ACTION_VERSION
-            and goal is not None
+            and (goal is not None or partial_answer is not None)
         ):
-            raise ValueError("a Goal + Files Reply Card requires v5 callbacks")
+            raise ValueError("a Goal or Partial Answer + Files Reply Card requires v5 callbacks")
         if goal is not None and goal.binding_id != files.binding_id:
             raise ValueError("Goal and Files modules require the same binding_id")
         _optional_line_counts(
@@ -259,6 +270,7 @@ def _normalize_reply_projection(
         projection,
         goal=goal,
         activity=activity,
+        partial_answer=partial_answer,
         files=files,
     )
 
@@ -314,6 +326,30 @@ def _normalize_activity_module(
         terminal_status=terminal_status,
         collapsed=activity.collapsed or terminal_status is not None,
     )
+
+
+def _normalize_partial_answer_module(
+    partial_answer: ReplyCardPartialAnswerModule | None,
+) -> ReplyCardPartialAnswerModule | None:
+    if partial_answer is None:
+        return None
+    if (
+        not isinstance(partial_answer, ReplyCardPartialAnswerModule)
+        or not isinstance(partial_answer.contents, tuple)
+        or not partial_answer.contents
+    ):
+        raise ValueError("a Partial Answer module requires an ordered nonempty tuple")
+    for content in partial_answer.contents:
+        _bounded_card_text(content, "partial_answer.content", 100_000)
+    return partial_answer
+
+
+def _partial_answer_module(
+    partial_answers: tuple[_PartialAnswerLike, ...],
+) -> ReplyCardPartialAnswerModule | None:
+    if not partial_answers:
+        return None
+    return ReplyCardPartialAnswerModule(tuple(item.text for item in partial_answers))
 
 
 def _sanitize_turn_progress_manifest(
@@ -472,10 +508,12 @@ def turn_files_card(
     additions: int | None = None,
     deletions: int | None = None,
     completion_mention_user_id: str | None = None,
+    partial_answers: tuple[_PartialAnswerLike, ...] = (),
 ) -> OutboundCard:
     return reply_card(
         ReplyCardProjection(
             scope=scope,
+            partial_answer=_partial_answer_module(partial_answers),
             result=ReplyCardResultModule(
                 final_response,
                 completion_mention_user_id=completion_mention_user_id,
@@ -485,7 +523,10 @@ def turn_files_card(
                 turn_id=turn_id,
                 items=tuple(_reply_file_item(item) for item in files),
                 page=page,
-                action_version=TURN_FILE_ACTION_VERSION,
+                action_version=(
+                    REPLY_CARD_ACTION_VERSION if partial_answers
+                    else TURN_FILE_ACTION_VERSION
+                ),
                 additions=additions,
                 deletions=deletions,
             ),
@@ -506,6 +547,7 @@ def turn_progress_card(
     additions: int | None = None,
     deletions: int | None = None,
     completion_mention_user_id: str | None = None,
+    partial_answers: tuple[_PartialAnswerLike, ...] | None = None,
 ) -> OutboundCard:
     """Render one replaceable Phase 1 Turn progress card.
 
@@ -517,6 +559,10 @@ def turn_progress_card(
     """
 
     normalized_terminal_status = _terminal_progress_status(terminal_status)
+    partial_answer = _partial_answer_module(
+        getattr(snapshot, "partial_answers", ())
+        if partial_answers is None else partial_answers
+    )
     if normalized_terminal_status is None:
         if completion_mention_user_id is not None:
             raise ValueError("a running progress card cannot contain a completion mention")
@@ -552,7 +598,10 @@ def turn_progress_card(
             binding_id=binding_id,
             turn_id=turn_id,
             items=tuple(_reply_file_item(item) for item in files),
-            action_version=TURN_FILE_ACTION_VERSION,
+            action_version=(
+                REPLY_CARD_ACTION_VERSION if partial_answer is not None
+                else TURN_FILE_ACTION_VERSION
+            ),
             additions=additions,
             deletions=deletions,
         )
@@ -566,6 +615,7 @@ def turn_progress_card(
         ReplyCardProjection(
             scope=scope,
             activity=activity,
+            partial_answer=partial_answer,
             result=result,
             files=files_module,
         )
@@ -672,6 +722,8 @@ def _render_reply_card_page(projection: ReplyCardProjection) -> OutboundCard:
                 goal=projection.goal is not None,
             )
         )
+    if projection.partial_answer is not None:
+        builder.raw(_partial_answer_block(projection.partial_answer))
     if projection.result is not None:
         builder.raw(_turn_answer_block(projection.result))
     if projection.files is not None:
@@ -777,6 +829,8 @@ def _reply_card_chrome(
             "green",
             f"任务已完成 · 本轮文件 {visible.total_items} 个",
         )
+    if projection.result is None and projection.partial_answer is not None:
+        return "任务执行中", None, "blue", "阶段性答案"
     return "任务已完成", None, "green", "任务已完成"
 
 
@@ -937,6 +991,7 @@ def _reply_card_manifest(projection: ReplyCardProjection) -> ReplyCardManifest:
     return ReplyCardManifest(
         goal=projection.goal,
         activity=projection.activity,
+        partial_answer=projection.partial_answer,
         result=(
             None
             if projection.result is None
@@ -1649,18 +1704,20 @@ def _decode_reply_card_manifest(
     *,
     binding_id: str,
 ) -> ReplyCardManifest:
-    if not isinstance(value, Mapping) or set(value) != {
-        "goal",
-        "activity",
-        "result",
-    }:
+    required = {"goal", "activity", "result"}
+    if not isinstance(value, Mapping) or set(value) not in (
+        required, required | {"partial_answer"},
+    ):
         raise CardActionError("组合回复清单字段不完整或包含未知字段。")
     goal = _decode_reply_goal_module(value["goal"], binding_id=binding_id)
     activity = _decode_reply_activity_module(value["activity"])
+    partial_answer = _decode_reply_partial_answer_module(value.get("partial_answer"))
     result = _decode_reply_result_module(value["result"])
-    if goal is None and activity is None and result is None:
+    if goal is None and activity is None and partial_answer is None and result is None:
         raise CardActionError("组合回复清单不能为空。")
-    return ReplyCardManifest(goal=goal, activity=activity, result=result)
+    return ReplyCardManifest(
+        goal=goal, activity=activity, partial_answer=partial_answer, result=result,
+    )
 
 
 def _decode_reply_goal_module(
@@ -1781,6 +1838,22 @@ def _decode_reply_activity_module(value: Any) -> ReplyCardActivityModule | None:
     )
 
 
+def _decode_reply_partial_answer_module(
+    value: Any,
+) -> ReplyCardPartialAnswerModule | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != {"contents"}:
+        raise CardActionError("Partial Answer 模块字段不完整或包含未知字段。")
+    contents = value["contents"]
+    if not isinstance(contents, list) or not contents:
+        raise CardActionError("Partial Answer 模块必须包含有序的非空答案清单。")
+    return ReplyCardPartialAnswerModule(tuple(
+        _bounded_decode_string(content, "partial_answer.content", 100_000)
+        for content in contents
+    ))
+
+
 def _decode_reply_result_module(value: Any) -> ReplyCardResultModule | None:
     if value is None:
         return None
@@ -1829,6 +1902,31 @@ def _decode_turn_file_path(value: Any) -> str:
     if len(path) > 8192 or "\x00" in path or not Path(path).is_absolute():
         raise CardActionError("本轮文件路径必须是有效的绝对路径。")
     return path
+
+
+def _partial_answer_block(
+    partial_answer: ReplyCardPartialAnswerModule,
+) -> dict[str, Any]:
+    return {
+        "tag": "column_set",
+        "element_id": _PARTIAL_ANSWER_ELEMENT_ID,
+        "flex_mode": "none",
+        "background_style": "grey-50",
+        "columns": [{
+            "tag": "column",
+            "width": "weighted",
+            "weight": 1,
+            "padding": "12px",
+            "vertical_spacing": "8px",
+            "elements": [
+                {"tag": "markdown", "content": "**阶段性答案**"},
+                *(
+                    {"tag": "markdown", "content": content}
+                    for content in partial_answer.contents
+                ),
+            ],
+        }],
+    }
 
 
 def _turn_answer_block(result: ReplyCardResultModule) -> dict[str, Any]:
@@ -2160,13 +2258,16 @@ def _encode_turn_progress_manifest(
 def _encode_reply_card_manifest(
     reply: ReplyCardManifest,
 ) -> dict[str, Any]:
-    return {
+    value = {
         "goal": _encode_reply_goal_module(reply.goal),
         "activity": _encode_reply_activity_module(reply.activity),
         "result": (
             None if reply.result is None else {"content": reply.result.content}
         ),
     }
+    if reply.partial_answer is not None:
+        value["partial_answer"] = {"contents": list(reply.partial_answer.contents)}
+    return value
 
 
 def _encode_reply_goal_module(

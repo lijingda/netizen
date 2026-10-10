@@ -325,9 +325,8 @@ reasoning，也不是 Turn 历史或终态事实源；操作预览不代表对�
 
 **Side Turn**：以 Side ID 为键、在同一 ephemeral Side Thread 上串行开始或 steer 的
 当前 Turn。它使用普通 `AsyncTurnHandle.run()` 完成路径，不使用持久 Thread history
-recovery，且不写入 Channel Database。Progress Card 开启时可在调用同一个 `run()` 唯一
-消费前只读观察到 exact terminal signal；关闭或观察降级时立即使用原路径。展示复用普通
-Turn 的 Lifecycle Reaction 以及 Activity、Result、Files 回复模块，但不允许 Goal。
+recovery，且不写入 Channel Database。展示复用普通 Turn 的 Lifecycle Reaction 以及
+Activity、Partial Answer、Result、Files 回复模块，但不允许 Goal。
 
 **Lifecycle Reaction / 任务生命周期表情**：普通与 Side Turn 始终开启的尽力节点反馈：
 accepted 原消息使用 `Typing`，成功 steer 使用 `OnIt`，终态使用
@@ -336,13 +335,16 @@ accepted 原消息使用 `Typing`，成功 steer 使用 `OnIt`，终态使用
 **Reaction Pulse / 执行中表情闪烁**：Binding 可选开启的 `THINKING` 运行脉冲，默认
 关闭；它不控制 Lifecycle Reaction。Side 在创建时冻结 Parent 当时的选择。
 
-**Reply Card / 回复卡**：依附 Completion Origin、由 Goal、Activity、Result 与 Files
-四种 typed Reply Card Module 按需组合的一张 Card 2.0。Goal、Activity 或 Files 任一模块
+**Reply Card / 回复卡**：依附 Completion Origin、由 Goal、Activity、Partial Answer、Result 与 Files
+五种 typed Reply Card Module 按需组合的一张 Card 2.0。Goal、Activity 或 Files 任一模块
 存在时使用卡片；只有 Result 时继续使用富文本/静态文本。它不是 Turn 或 Goal 的状态事实源。
 
 **Reply Card Module / 回复卡模块**：Reply Card 中封闭、类型化的展示块；当前只有 Goal、
-Activity、Result 与 Files 四种。模块只投影已经确认的领域状态，不独立发送或更新消息，也
+Activity、Partial Answer、Result 与 Files 五种。模块只投影已经确认的领域状态，不独立发送或更新消息，也
 不构成动态插件系统。
+
+**Partial Answer / 阶段性答案**：Codex 明确标记为稳定但非终态的答案片段，任务之后仍可能
+继续输出或执行工具。它是答案正文，不是 Activity 摘要，也不是任务完成或最终结果的证明。
 
 **Progress Card / 进度卡**：Binding 可选开启 Activity Module 的用户设置。普通 Turn 或
 Goal 执行中展开有界活动投影；Side Turn 使用 Side 创建时冻结的选择。终态在同一 Reply

@@ -42,7 +42,11 @@ allowlist；修改 pinned SDK/App Server 或这些 Adapter 时，开发迭代必
 组合运行受影响的 capability harness。Delete 能力变更还必须覆盖 disposable lifecycle
 live probe 与 Runtime 原生返回分类、局部 unknown 和零自动重试测试（ADR 0078）。ADR 0020/0052 的 active-Turn Activity observer
 另行精确锁定 SDK 版本、源码指纹、generated shape 和非消费 event-store contract；门禁失败只
-关闭 checklist/Activity 展示，不关闭普通 Turn。这个降级以 ADR 0009 独立的 service-wide
+关闭提前 Activity/问题/阶段性答案观察，不关闭普通 Turn；答案从可取得的权威终态 items
+补齐。SDK `0.162.1` 的 Side `handle.run()` 遇到 failed 直接抛错、不返回 items，因此
+high-water/observer 降级后只能保留此前已观察片段，后续未观察且未返回 items 的片段
+不能补齐；不增加 ephemeral history 读取或第二消费者。
+这个降级以 ADR 0009 独立的 service-wide
 SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕过该门禁。
 
 ## 目录
@@ -206,8 +210,10 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
    对应 shim/私有依赖并保留行为测试；仅有协议字段不算高层替代。观测恢复、压缩归属、
    Goal 重挂、fork/命名等待、订阅与进程清理等处理须核对原约束是否真的消失，不能仅
    因原生发布说明声称修复就删除。
-4. **判定新增能力的归属。** 对与 Netizen 有关的变化分别说明：必须适配的契约变化、
-   已由 SDK/原生配置生效、可选产品能力、仍有接口或验证缺口。核对错误/终态、身份、
+4. **审查新增能力的价值与归属。** 对与 Netizen 有关的变化说明用户收益、当前缺口、
+   公开能力层级、维护成本、职责边界和所需验证证据，并逐项决定本次接入、原生生效、
+   延期或不适用。区分必须适配的契约变化与主动选择的产品扩展；不能因“可选”一律延期，
+   也不能只因出现新字段就制造接入需求。延期项写明重新评估条件。核对错误/终态、身份、
    时间字段、用户反馈及配置生效范围；不能仅以“字段可解析”宣称语义已适配。属于
    Codex 的模型、工具、权限与配置能力继续由 Codex 管理；不因升级自动增加 Netizen
    开关、配置副本或新私有 adapter。无须修改的项也给出依据。
@@ -218,11 +224,16 @@ container 两类 live probe。probe 要同时证明 lower/upper exact endpoint �
    失败、诊断与复验结果，无法验证的项明确标记，不能通过放宽断言或修改期望来制造
    成功。顺带发现的旧缺陷、超时调参和产品扩展须单独说明理由与升级的因果关系，避免
    把它们混同于必需适配。
-6. **交付审查结论。** 在变更说明中记录版本基线、官方来源/源码差异、逐项兼容债务
-   决定、新增能力分类、实际改动、检查结果及未覆盖边界；没有可删除封装或新增必需适配
-   也明确写出。同步受影响的设计/用户行为契约，通用兼容性摘要写入
-   [兼容性结论](#已验证的兼容性结论)，单次日志、exact IDs 和私有环境信息按该节约定
-   留在验证产物中。升级审查不授权发布或部署。
+6. **交付并维护审查结论。** 报告开头和审查结束回复固定包含四部分：**SDK/App Server
+   改动简介、改哪些、验证哪些、增加哪些**。分开介绍 Python SDK 的接口/数据变化与
+   App Server 的执行行为，用用户操作和实际功能说明影响，不只罗列字段与文件名。
+   记录版本基线、官方来源/源码差异、逐项兼容债务决定、新能力取舍及依据、实际检查与
+   未覆盖边界；无须改动、不接入或无可删除封装的项也说明原因。明确当前处于审查、实施
+   还是验收阶段；讨论改变取舍时更新同一份报告，作为后续实施依据。
+   单次版本分析、产品选择与待验收计划放审查报告；长期行为和决策同步设计、ADR 与
+   用户手册；只有完成对应验证后，才把通用兼容性摘要写入
+   [兼容性结论](#已验证的兼容性结论)。不能将候选计划写成已验证事实。单次日志、exact IDs
+   和私有环境信息按该节约定留在验证产物中。升级审查不授权发布或部署。
 
 ### 代码门禁与按需实时兼容性验证
 
@@ -262,6 +273,33 @@ LaunchAgent 安装、启动和 ready 冒烟，不能用 CI 代替。
 不调用飞书。临时 cwd 的 trust 仅用公开进程级配置传入，断言用户配置字节不变；
 与其他检查配置不变的探针串行执行。未知删除结果不自动重试，保留输出的 exact ID
 供人工核查；飞书创建、选群和回调另行验收。
+
+阶段性答案、命令大输出持久化、压缩或卸载边界变化时，可运行两个显式原生专项：
+`scripts/probe_sdk_partial_answers.py`（外部 150 秒 deadline）和
+`scripts/probe_sdk_native_boundaries.py`（外部 180 秒 deadline）。两者均可用 `--case`
+选取场景、`--output` 保存证据，使用临时 HOME/CODEX_HOME、回环 mock Responses provider
+和真正 bundled App Server，不使用真实模型账号。前者覆盖阶段性答案、命令/MCP 输出冷恢复，
+以及通过生产 Goal Tap/CodexRuntime 验证两轮自动 continuation、阶段性片段保留与四证明收尾；
+后者覆盖 local/remote-v2 手动压缩成功和 provider 错误、超过 10 秒 idle closing、慢
+required MCP 启动断连回收及压缩准备失败。后者直接使用公开 WebSocket wire，是测试 harness，不能
+复用于生产私有 gateway；目前依赖 POSIX 文件锁。mock provider 的原生执行通过不代表
+真实模型触发频率、压缩自动路径或飞书展示已验收。
+
+阶段性答案的真实飞书传输另用 `scripts/probe_feishu_partial_answers.py`，仅在用户明确
+授权的测试群运行。先用 `--dry-run` 检查生产渲染器生成的载荷；实际投递去掉该参数：
+
+```bash
+.venv/bin/python scripts/probe_feishu_partial_answers.py \
+  --config "$NETIZEN_ROOT/config.yaml" --chat-id "$probe_chat_id" --dry-run
+```
+
+完整探针发送六张明确标注“验收／模拟”的卡、执行二十次更新，并发送五条富文本样例；
+不创建真实任务，不提供真实 Goal/文件控制目标。`--only-rich-text` 只发送五条富文本，
+不重发卡片；没有自动重试未知投递。它分别记录 API ACK、exact 目的地回读、文件翻页
+manifest 的本地往返与可读正文核对，不把合成投影冒充原生端到端或用户真实点击。
+若消息读取 API 返回“请升级至最新版本客户端，以查看内容”的明确兼容占位内容，
+只能证明消息身份，正文核对必须保持未验证；API ACK 和占位正文均不证明真实客户端
+显示或回调可用。实际测试群、消息 ID 与查看者反馈仅保存在私有证据，不写入公共文档。
 
 按[职责边界](design.md#netizen-与-codex-的职责边界)分别记录适配行为与原生能力结果。
 要求正常回复的 smoke/resume 场景收到 `interrupted` 或 `failed` 时仍记失败，保留首次
@@ -485,11 +523,13 @@ ADR 0009 的 fail-closed 门禁会校验整个 pinned `openai_codex` Python 源�
 确定性聚合指纹；部署包必须保留 `.py` 源文件。只有 `.pyc`、无法读取源码或任一源码
 文件不匹配的安装都会按设计拒绝启动，不能绕过该门禁。
 
-上述版本/指纹规则只属于 terminal inspection/cleanup。Goal/Skills SDK Gap Adapter 按
+上述精确版本/整包指纹规则属于 terminal inspection/cleanup 和 ADR 0020/0052 的 Activity
+observer，各自保留对应所有权及非消费门禁。Goal/Skills SDK Gap Adapter 按
 ADR 0014、Side boundary 与 Thread subscription Adapter 按 ADR 0021/0028、Thread Delete
 Adapter 按 ADR 0037 使用 capability shape + synthetic + live harness，不得新增另一套
-运行时版本白名单。Delete 的生产调用还必须固定为一个 method，并由 Runtime 承担
-present/absent/unknown 对账；同样不得删除 ADR 0009 的既有门禁来“统一”两类 Adapter。
+运行时版本白名单。Delete 的生产调用还必须固定为一个 method；按 ADR 0078 信任原生
+成功响应，可信 RPC 拒绝保留 Binding，传输/响应未知局部隔离，不追加目录对账或自动
+重试。同样不得删除既有 pinned 门禁来“统一”两类 Adapter。
 
 SDK `0.154.0` 保留请求窗口内快速完成 Turn 的通知；原生 `handle.run()` completion
 synthetic 探针须验证这一契约。普通持久 Thread 仍以公开 read
@@ -766,6 +806,16 @@ stale ready／runtime identity 和异常 manager 查询必须失败关闭，不�
 自然匹配和显式调用都须覆盖；两实例额外根不串线，Lark Skill 使用所属 root，
 资源损坏或注册失败不得 ready。普通用户同名、禁用、歧义 Skill 保持原生规则。
 
+原生加载可用 `scripts/probe_skill_execution.py --live --timeout 240 --output <evidence.json>`，
+外部总 deadline 2400 秒（SIGINT 后另给 15 秒退出）。默认七阶段串行；可用重复的
+`--phase new|cold|side|fork|child|goal|isolation` 只跑受影响阶段。使用一次性只读 Skill，
+分别断言原生 command 确实读到新随机资源、exact Turn 的最终回答匹配正文和资源标记；
+catalog 及请求不含答案。两 App Server 隔离阶段共享 HOME/cwd/Skill 名但 roots 不同。
+进程级信任使用顶层 inline TOML `projects={...}`，不能把含引号的路径放进 dotted
+override key。失败停止并保留已知自建 Thread ID，不重试未知清理；与其他检查用户配置
+不变的探针串行。Goal 阶段验证 pause/resume 后的新物理 Turn，不冒充自动 rollover；
+这不替代安装包资源、Lark 实际调用、同名/禁用/歧义规则或平台启动验收。
+
 同时验证双 Admin 登录与 root 标识、端口首次实际分配及固化、端口冲突不漂移、显式
 端口／禁用 Admin、服务 profile 导出别的 root 后仍重申绑定。Project、用户 Codex
 状态与外来文件不得因其他实例生命周期而被修改。
@@ -782,6 +832,56 @@ SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和
 [requirements.lock](../requirements.lock) 为准。以下证据保留实际验证时的版本；旧版本的
 结果不会自动变成新版本、真实飞书链路或目标主机的验收结论。定时任务另见
 [专属兼容性记录](#定时任务兼容性与验收)。
+
+2026-10-10 的 `0.161.0` → `0.162.1` 升级在本机 macOS arm64 完成新版源码指纹复核：
+`7c50badc428374e91233516562fb971b1727b00157b93e5771221a672a20d215`。
+两个 pinned adapter 保留精确版本/指纹与各自的所有权门禁；其他窄适配器没有新增公开
+高层替代，继续保留原契约。阶段性答案按 ADR 0079 接入，归因字段不引起 Files 改造，
+附件归属查询和 Goal origin 保持设计中记录的延期条件。
+
+视觉修订及阶段性投递回执修复后的最终 `make check` 通过 2,841 项测试、16 项条件跳过，包含 wheel/sdist
+隔离验证、编译、依赖一致性、SDK Activity/20/20/40 synthetic 与只读 Skill roots。
+此前另测通过的 13 项探针单测（原生/Skill 8 项、飞书阶段性答案 5 项）已纳入此次全量。
+定时阶段性富文本复用既有精确投递校验；单条/多分段归属、未知结果不重发及校验异常/
+超时的三项新增回归通过，阶段性消息不写入完成回执。
+完整命名、持久 fork、只读账号额度、子任务 Files、Scheduler 五阶段及 Project 删除
+两场景专项通过；这些原生/Runtime 结果不代表飞书客户端交互已经验收。
+
+全部 17 个真实账号原生 phase 通过，覆盖模型/速度、普通执行、steer、观察、压缩、并发、
+中断、Skills、生命周期、Side、订阅释放、配置、Goal 与 sandbox。新确定性原生专项的
+12 个场景通过，确认 partial 可继续工具执行或直接 completed；终态摘要不会包含全部
+partial，须保留 item 观察/权威完整读取。命令与 MCP 大结果持久化截断在 64 KiB 内，
+同轮 72 KiB 的 partial/final 均完整；手动压缩成功与 HTTP 错误后的上下文/工具目录、
+压缩准备失败上报且不发起模型请求、slow unload closing 拒绝恢复及最终回收、慢
+required MCP 断连回收均有实际证据。
+
+新增 Goal 两轮专项使用真实 App Server、生产 Goal Tap 和 CodexRuntime：一次 start 后
+自动生成两轮，每轮一条 partial，第二轮真正调用 `update_goal` complete。最终回答前的
+运行快照和最终 Outcome 均保留两片段及 exact 轮次身份；final 只取第二轮，四证明完成
+后 clear/get absent。没有伪造 SDK 通知或 Runtime 投影，也不包含飞书投递。
+
+Skill 实际加载的 new、cold、side、fork、child、goal、isolation 七阶段通过，均核对
+原生工具读取新随机资源、答案标记和用户配置不变；隔离阶段确认同 HOME/cwd/名称的
+两个 App Server 使用各自额外根。首轮 Side 因探针误要求可选 `forked_from_id` 必须存在
+而失败；对照生成模型和现有生产契约，修正为允许缺省、拒绝错误实值后，剩余五阶段
+复验通过，保留首次失败。没有修改生产 Side 身份守卫。Goal 阶段仅覆盖显式暂停和手动
+恢复后的新物理 Turn；自动 rollover 的阶段性答案保留由上述独立原生专项证明。
+
+经用户授权，真实测试群已发送 6 张阶段性卡片与 5 条富文本，共 11 条消息、26 次卡片
+更新，均收到成功 API ACK 并核对 exact 消息/聊天身份。原 Files 卡更新后回读的页码标题
+为第 2/2 页，但正文 API 返回明确兼容占位，阶段性正文无法从该接口核验；未重发卡片。
+用户确认初版能显示，但后续截图指出阶段性与最终正文视觉分界不足；已按反馈调整，
+对原六张卡追加六次更新，API ACK 和 exact 身份回读全部通过，没有新增消息。新版尚无
+用户视觉复核；原反馈未说明所用客户端，不能推断桌面和移动端均验收。
+样例复用生产渲染器/Presenter 和真实传输，运行状态为模拟投影；
+原生 Goal 两轮专项是独立证据，不合并宣称完整 native→飞书端到端通过。真实点击回调
+尚未验收。
+
+本次目录仅提供 Standard/Fast，Ultra Fast 真实执行未验收。新专项没有覆盖压缩
+auto/mid-turn 和压缩与 Goal snapshot/rollover 的组合矩阵、slow unload 与 revert 替换 runtime
+的独立竞态；Skill 探针也不替代 Lark Skill 实际调用、同名/禁用/歧义规则或平台启动验收。
+上述证据不替代未覆盖客户端组合、真实点击与目标平台服务验收；本次没有发布、
+更新或重启已有实例。
 
 2026-10-08 至 10-09 审查并迁移 SDK/CLI `0.160.0` → `0.161.0`。比较官方两个精确版本的完整
 Python 包（22 个文件），仅 generated models 和 notification registry 两个文件变化；
@@ -1421,7 +1521,7 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
    不注入标签。
    成功 steer 后旧 checklist 在新
    plan 到达前标记可能过期，之后整体替换。终态在同一卡片折叠过程并显示结果；有文件时
-   同卡保留既有 v4 文件分页/callback。分别使 initial、中间和终态 card update 失败，native
+   同卡保留文件分页/callback：无阶段性模块时 v4，有阶段性模块时 v5。分别使 initial、中间和终态 card update 失败，native
    Turn 都必须继续。单次中间失败后，下一轮应更新原卡；失败期间出现多个 revision 时只
    发送最新快照，成功后清零失败计数。连续三次中间失败即停止轮询，此后恢复服务，终态
    仍应独立更新原卡且不新增回复；单次终态失败后应重试同一原卡，成功后只发送一次结束提醒。
@@ -1429,6 +1529,17 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
    终态或关闭应立即唤醒轮询等待，不等待剩余重试次数。initial 失败仍直接回退，均不产生
    重试风暴。最后同时开启两项，确认两套 presenter
    并存而不重复最终结果，并在 P2P、群主线和普通话题各验证一次。
+
+   阶段性答案按 [ADR 0079](adr/0079-deliver-partial-answers-with-existing-reply-presentation.md)
+   验收：普通会话、持久 fork 和 Side 开关 Progress 两种形态，初始无片段不渲染空模块；
+   出现多个 completed partial 后按原生顺序更新同一卡或逐条富文本，零完成 @、DONE 与
+   提前槽释放。终态卡保留始终展开的阶段性内容，final 自身复述不删改，不机械重发已交付
+   片段；partial-only 仅在确认片段交付后给出相应收尾。覆盖重复事件、终态补读、明确
+   失败与未知发送、观察降级、失败/中断，以及阻塞运行态更新后终态或 Side close 的竞态。
+   原生生成、实际飞书发送和客户端显示分别记录；未触发原生 partial 时不得以合成事件
+   通过冒充已验证生成能力。另验证 Side 降级后 failed `run()` 抛错仍保留已观察片段，
+   不虚构后续未取得 items 的答案恢复。容量超限继续按现有规则处理，不新增 partial
+   专用兜底；Goal 精简卡省略阶段性模块时不得声称完整答案已经交付。
 
    running 时 `/status` 仍出现完整 native ID、已接受 steer 次数和同一 checklist。在可观测
    Turn 完成、公开 usage 通知已排空后 `/status` 显示当前
@@ -1482,9 +1593,11 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
    exact 物理 Turn，`/config`、`/compact` 仍被拒绝。准备期间换轮必须明确拒绝旧目标，
    不重投或新增 Turn；启动、暂停、收尾、unknown 与无安全 route 时仍拒绝。原生 Goal
    phase 验证当前 Turn steer、resume 后旧 expected-ID 拒绝及新 Turn steer 改变结果。
-   Progress Card 关闭时该卡只有 Goal/终态 Result/可选 Files，开启时
+   Progress Card 关闭时该卡保留 Goal/可选 Partial Answer/终态 Result/可选 Files，开启时
    增加 Activity，且 start、rollover、pause、resume、terminal 都更新同一个 message ID；
-   rollover 后 Activity 只显示新物理 Turn 的原生事件时间和操作信息。
+   rollover 后 Activity 只显示新物理 Turn 的原生事件时间和操作信息；阶段性答案则保留同次
+   连续执行已观察片段，至少两轮验证去重、旧轮迟到事件与最新投影。暂停保留、手动恢复
+   重置，服务重启的新状态卡不重建片段；最终 Result/Files 仍只取 exact 最终物理 Turn。
    `/goal pause` 与 `/stop` 都先暂停 Goal、中断 exact 物理 Turn 并请求 terminal cleanup，
    随后卡片或 `/goal resume` 可继续；paused、blocked、usage/budget limited 都不得自动
    clear，并保留“结束 Goal”。只有 logical stream、persisted Goal、exact final Turn 与
@@ -1602,9 +1715,10 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     identity，且只产生一个话题；不同 root/seed UUID 必须互异。这个对账门禁失败时 Side
     必须保持 unavailable，因为 FakeChannel 只能证明本地复用了 UUID，不能证明飞书的响应
     形状。在 Parent 关闭三项反馈后创建 Side，确认无文件终态为富文本/静态文本，
-    accepted/steer/终态 Lifecycle Reaction 与 ordinary Turn 相同，且零 `THINKING`/plan
-    observation；再创建同时开启三项的 Side，确认 Reaction Pulse 与 ordinary Turn
-    相同，Activity/Result/Files 始终更新同一个回复卡 message ID。随后修改 Parent 的
+    accepted/steer/终态 Lifecycle Reaction 与 ordinary Turn 相同，且零 `THINKING` 与 Activity
+    卡；阶段性答案和问题仍从同一观察链提取。再创建同时开启三项的 Side，确认 Reaction
+    Pulse 与 ordinary Turn 相同，Activity/Partial Answer/Result/Files 始终更新同一个回复卡
+    message ID。随后修改 Parent 的
     Model/Effort/Speed 与三项 Task Feedback，既有 Side 后续 Turn 必须继续使用创建时快照；
     新建 Side 才使用新值。Side 内 `/goal` 必须零 mutation 拒绝，根卡 close/expiry 更新仍
     独立于 Turn 回复。Side 根卡另验收原会话名称、人员头像/姓名和客户端本地时间，以及
@@ -1645,9 +1759,9 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     96.9 KB 请求返回 230099/200800 的容量证据。Progress Card 关闭时，无文件 Turn 必须仍
     只有富文本/静态文本最终回复；有文件 Turn 必须只有一张同时包含最终回复和本轮文件的
     现有完成卡。Progress Card 开启时，两种结果都更新最初的同一张运行卡，有文件时继续
-    包含既有 v4 manifest。再验证 Goal exact 最终物理 Turn completed 的文件进入同一张
+    包含自包含 manifest（无阶段性模块时 v4，有阶段性模块时 v5）。再验证 Goal exact 最终物理 Turn completed 的文件进入同一张
     Goal 卡并使用 v5 完整 Reply Card manifest，而更早 rollover Turn 的文件不会被猜测
-    聚合；Side exact completed Turn 的 structured items 进入普通 v4 完成/进度卡，并显示
+    聚合；Side exact completed Turn 的 structured items 进入对应完成/进度卡，并显示
     成功 patch 的累计行数；Side aggregate diff、先前 Side Turn 和未进入受支持 native
     事实的文件不会被补齐。Goal live phase 必须让 resumed exact final physical Turn 创建
     一个临时文件，从成功 `fileChange` 验证累计行数；同一唯一 Goal notification stream
@@ -1673,7 +1787,7 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     显示脱敏逻辑位置；所有条目隐藏大小、按钮统一为“发送”，按 8 个一页完整翻页，可见正文
     不出现绝对路径、文件列表预览、diff 正文或发送全部；v5 callback payload 则必须逐项携带明文
     absolute path，并对已知统计携带成对 `a/d`，翻页后完整保留整轮统计与
-    Goal/Activity/Result。
+    Goal/Activity/Partial Answer/Result；旧 v4 与不含 Partial Answer 的 v5 也必须继续可用。
     依次在 P2P 平面消息、
     群主线和已有话题点击普通文件或图片的“发送”：平面卡片必须出现以该卡片为锚点的话题，记录真实
     root/parent/thread 返回；已有话题必须保持原 thread ID，飞书能正常预览/下载实际文件。
@@ -1693,7 +1807,7 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     完成真实 create/update；在飞书实际选择末页、中间页和首页并
     点击“跳转”，确认 submit callback 同时保留完整 `value` manifest 与所选页码的
     `form_value`，每次更新后仍能再次跳转，且只在提交按钮中出现完整 manifest。重启前后
-    同卡必须保留 Goal/Activity/Result、整轮与逐文件统计；不能只用合成回调证明
+    同卡必须保留 Goal/Activity/Partial Answer/Result、整轮与逐文件统计；不能只用合成回调证明
     表单点击可用。记录实际序列化容量与平台返回，检查各页都不超过 55,000 bytes；
     任一页无法完整容纳时应明确省略 Files，不截断。没有 live 条件时明确记录这部分
     未验证，不能宣称真实表单兼容或容量验收通过。
