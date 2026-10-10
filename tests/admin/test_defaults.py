@@ -15,6 +15,7 @@ from netizen_cli.management import InstanceManagementService, ScopeCoordinator
 from netizen_cli.projects import ProjectRegistry
 from tests.admin import test_web as fixture
 from tests.management.test_chat_labels import FakeChatInfo, FakeChatLabelProvider, FakeChatMember
+from tests.support.chat_targets import FakeChatTargetDirectory
 
 
 class FakeDefaults:
@@ -295,6 +296,7 @@ class AdminDefaultsTest(unittest.IsolatedAsyncioTestCase):
                           "oc_direct": FakeChatInfo("", "p2p")}
         self.management.defaults = SessionDefaultsService(
             bindings=store, projects=projects, runtime=SimpleNamespace(), app_id="cli_test", chat_info=chat_info,
+            chat_target_validator=FakeChatTargetDirectory(chat_info).validate_target,
         )
         session = await self.login()
         settings = self.defaults.records[0]["session_settings"]

@@ -76,6 +76,7 @@ from .callbacks import (
     _scope_from_envelope,
     _turn_reference,
 )
+from .pagination import decode_page_selection, pagination_controls
 
 
 TURN_FILE_MANIFEST_LIMIT = 400
@@ -1389,14 +1390,7 @@ def decode_turn_file_action(
                 or set(form_value) != {"turn_file_page"}
             ):
                 raise CardActionError("本轮文件选页表单字段无效。")
-            selection = form_value["turn_file_page"]
-            # Match the exact advertised ASCII values; reject coercion,
-            # oversized numbers and options outside this complete manifest.
-            if not isinstance(selection, str) or selection not in {
-                str(index) for index in range(total_pages)
-            }:
-                raise CardActionError("本轮文件页码超出范围。")
-            page = int(selection)
+            page = decode_page_selection(form_value["turn_file_page"], total_pages)
         if "a" in payload:
             try:
                 additions, deletions = _optional_line_counts(
@@ -2091,30 +2085,15 @@ def _turn_file_pagination(
         ),
     )
     button.update(name="turn_file_jump", form_action_type="submit")
-    # The Files header already shows current/total pages. Use the selector
-    # itself as the footer's current-page label, preserving capacity.
-    columns = [
-        {
-            "tag": "column",
-            "width": "auto",
-            "elements": [{
-                "tag": "select_static",
-                "name": "turn_file_page",
-                "required": True,
-                "initial_option": str(page),
-                "placeholder": _plain_text("选择页码"),
-                "options": [
-                    {"text": _plain_text(f"第{index + 1}页"), "value": str(index)}
-                    for index in range(total_pages)
-                ],
-            }],
-        },
-        {"tag": "column", "width": "auto", "elements": [button]},
-    ]
+    controls = pagination_controls(
+        page_field="turn_file_page", page=page,
+        total_pages=total_pages, button=button,
+    )
+    assert controls is not None
     return {
         "tag": "form",
         "name": "turn_file_pagination",
-        "elements": [{"tag": "column_set", "flex_mode": "none", "columns": columns}],
+        "elements": [controls],
     }
 
 

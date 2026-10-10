@@ -13,6 +13,7 @@ from tests.admin import test_web as fixture
 from netizen_cli.management import ProjectDeletionResult
 from netizen_cli.management import InstanceManagementService, ScopeCoordinator
 from netizen_cli.bindings import BindingStore
+from netizen_cli.chat_targets import ValidatedChatTarget
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.schedules.service import ScheduleService
 from netizen_cli.model_settings import EffortOption, ModelCatalog, ModelOption, ServiceTierOption
@@ -538,6 +539,7 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
         self.management.schedules = ScheduleService(
             bindings=store, runtime=runtime, app_id="cli_test",
             chat_info=SimpleNamespace(get_chat_info=AsyncMock(return_value=SimpleNamespace(chat_type="group"))),
+            chat_target_validator=AsyncMock(side_effect=lambda chat_id: ValidatedChatTarget(chat_id, "group")),
             wall_clock=lambda: 1893456000, default_timezone="Asia/Shanghai",
         )
         session = await self.login()

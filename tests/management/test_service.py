@@ -70,6 +70,7 @@ from netizen_cli.management import (
     classify_native_thread_view,
 )
 from netizen_cli.management.chat_directory import AvailableChat, AvailableChatPage, ChatDirectoryError
+from netizen_cli.chat_targets import ValidatedChatTarget
 from netizen_cli.projects import ProjectRegistry
 from netizen_cli.model_settings import ModelCatalogError
 from netizen_cli.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettingsError
@@ -378,7 +379,9 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
     async def test_live_chat_queries_use_injected_read_port(self) -> None:
         chat = AvailableChat("oc_group", "群聊", "group", False)
         page = AvailableChatPage((chat,), "more")
-        directory = SimpleNamespace(query=AsyncMock(return_value=page), validate=AsyncMock(return_value=chat))
+        target = ValidatedChatTarget("oc_direct", "p2p")
+        directory = SimpleNamespace(query=AsyncMock(return_value=page), validate=AsyncMock(return_value=chat),
+                                    validate_target=AsyncMock(return_value=target))
         service = InstanceManagementService(
             bindings=self.store, projects=self.projects, runtime=self.runtime,
             scope_coordinator=self.coordinator, chat_directory=directory,
@@ -386,14 +389,22 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         try:
             self.assertIs(await service.query_available_chats(query="群", page_token="first"), page)
             self.assertIs(await service.validate_available_chat("oc_group"), chat)
-            directory.query.assert_awaited_once_with(query="群", page_token="first")
+            self.assertIs(await service.validate_chat_target("oc_direct"), target)
+            directory.query.assert_awaited_once_with(query="群", page_token="first", page_size=20)
+            await service.query_available_chats(query="群", page_token="more", page_size=10)
+            directory.query.assert_awaited_with(query="群", page_token="more", page_size=10)
             directory.validate.assert_awaited_once_with("oc_group")
+            directory.validate_target.assert_awaited_once_with("oc_direct")
         finally:
             await service.close()
 
     async def test_missing_chat_directory_is_unavailable_not_an_empty_directory(self) -> None:
         with self.assertRaises(ChatDirectoryError) as caught:
             await self.service.query_available_chats()
+        self.assertEqual(caught.exception.code, "chat_query_unavailable")
+
+        with self.assertRaises(ChatDirectoryError) as caught:
+            await self.service.validate_chat_target("oc_direct")
         self.assertEqual(caught.exception.code, "chat_query_unavailable")
         with self.assertRaises(ChatDirectoryError) as caught:
             await self.service.validate_available_chat("oc_group")

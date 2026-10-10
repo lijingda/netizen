@@ -161,6 +161,18 @@ async function refresh(tab) {
   side.querySelectorAll("input").find((input) => input.name === "project").value = "side-project";
   assert.equal(formQuery(side).get("project"), "side-project");
   assert(!formQuery(side).has("inventoryState"));
+  const sideChatId = side.querySelectorAll("input").find((input) => input.name === "chatId");
+  const sideIdHelp = document.querySelector(`#${sideChatId.getAttribute("aria-describedby")}`);
+  assert.equal(sideIdHelp.hidden, false);
+  const sideIdHelpLink = sideIdHelp.querySelector("a");
+  assert.equal(sideIdHelpLink.textContent, "如何获取聊天 ID");
+  assert.equal(sideIdHelpLink.getAttribute("href"), "https://open.feishu.cn/document/server-docs/group/chat/chat-id-description");
+  assert.equal(sideIdHelpLink.getAttribute("target"), "_blank");
+  assert.equal(sideIdHelpLink.getAttribute("rel"), "noopener noreferrer");
+  assert.match(sideChatId.getAttribute("placeholder"), /不是用户 ID/);
+  assert.match(sideIdHelpLink.getAttribute("title"), /与本机器人的聊天/);
+  sideChatId.value = "oc_filter";
+  assert.equal(formQuery(side).get("chatId"), "oc_filter", "ID help must not alter read-only filtering");
 
   // Pagination reuses the applied repeated values and absolute UTC bounds.
   // Checkbox/time changes remain drafts until explicit 筛选/reset/page-size submission.

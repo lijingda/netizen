@@ -14,6 +14,7 @@ from typing import Any, NoReturn
 from .blocking_io import BoundedBlockingIOExecutor, BlockingIOExecutorSaturated
 from .chat_labels import ChatLabel, ChatLabelProvider, ChatLabelResolver
 from .chat_directory import AvailableChat, AvailableChatPage, ChatDirectory, ChatDirectoryError
+from ..chat_targets import ValidatedChatTarget
 from .coordination import ScopeCoordinator
 from .updates import UpdateService
 from ..bindings import (
@@ -738,6 +739,7 @@ class InstanceManagementService:
             self.schedules = ScheduleService(
                 bindings=self._bindings, runtime=self._runtime,
                 app_id=app_id, chat_info=chat_info,
+                chat_target_validator=self.validate_chat_target,
             )
         elif self.schedules.app_id != app_id:
             raise ValueError("schedule management App identity cannot change")
@@ -753,6 +755,7 @@ class InstanceManagementService:
             self.defaults = SessionDefaultsService(
                 bindings=self._bindings, projects=self._projects,
                 runtime=self._runtime, app_id=app_id, chat_info=chat_info,
+                chat_target_validator=self.validate_chat_target,
                 blocking_io=self._blocking_io,
             )
         elif self.defaults.app_id != app_id:
@@ -2096,16 +2099,21 @@ class InstanceManagementService:
             task.exception()  # Consume failures even after the page wait expired.
 
     async def query_available_chats(
-        self, *, query: str = "", page_token: str | None = None,
+        self, *, query: str = "", page_token: str | None = None, page_size: int = 20,
     ) -> AvailableChatPage:
         if self._chat_directory is None:
             raise ChatDirectoryError("chat_query_unavailable", "群聊查询暂不可用。")
-        return await self._chat_directory.query(query=query, page_token=page_token)
+        return await self._chat_directory.query(query=query, page_token=page_token, page_size=page_size)
 
     async def validate_available_chat(self, chat_id: str) -> AvailableChat:
         if self._chat_directory is None:
             raise ChatDirectoryError("chat_query_unavailable", "群聊查询暂不可用。")
         return await self._chat_directory.validate(chat_id)
+
+    async def validate_chat_target(self, chat_id: str) -> ValidatedChatTarget:
+        if self._chat_directory is None:
+            raise ChatDirectoryError("chat_query_unavailable", "飞书聊天校验暂不可用，请稍后重试。")
+        return await self._chat_directory.validate_target(chat_id)
 
     async def resolve_chat_labels(
         self,

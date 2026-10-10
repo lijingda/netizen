@@ -127,7 +127,26 @@ class ChatDirectoryTest(unittest.IsolatedAsyncioTestCase):
         await self.directory.query(page_token="next-page")
         self.assertEqual(self.list.call_args.args[0].page_token, "next-page")
 
+    async def test_card_page_size_is_requested_upstream_without_dropping_page_tail(self):
+        for query, api, response in (("", self.list, listed), ("研发", self.search, searched)):
+            with self.subTest(query=query):
+                api.return_value = response([chat(f"oc_{index}") for index in range(10)],
+                                           has_more=True, page_token="second")
+                first = await self.directory.query(query=query, page_size=10)
+                self.assertEqual(len(first.items), 10)
+                self.assertEqual(api.call_args.args[0].page_size, 10)
+                api.return_value = response([chat("oc_10")])
+                last = await self.directory.query(query=query, page_token=first.next_page_token, page_size=10)
+                self.assertEqual(api.call_args.args[0].page_token, "second")
+                self.assertEqual([item.chat_id for item in first.items + last.items],
+                                 [f"oc_{index}" for index in range(11)])
+                self.assertIsNone(last.next_page_token)
+
     async def test_invalid_inputs_never_call_platform(self):
+        for page_size in (0, 21, True, "10"):
+            with self.subTest(page_size=page_size), self.assertRaises(ChatDirectoryError) as caught:
+                await self.directory.query(page_size=page_size)
+            self.assertEqual(caught.exception.code, "invalid_page_size")
         for query in ("x" * 51, " group", "group "):
             with self.subTest(query=query), self.assertRaises(ChatDirectoryError) as caught:
                 await self.directory.query(query=query)
@@ -155,6 +174,71 @@ class ChatDirectoryTest(unittest.IsolatedAsyncioTestCase):
             await self.directory.validate("oc_group")
         self.assertEqual(caught.exception.code, "chat_unavailable")
         self.assertEqual(self.get.await_count, 1)
+
+    async def test_submitted_group_checks_real_type_state_and_bot_membership(self):
+        # Unlike display validation, target validity does not require a name or
+        # avatar. Metadata visibility alone does not establish membership.
+        self.get.return_value = GetChatResponse({"code": 0, "data": {
+            "chat_mode": "topic", "chat_status": "normal",
+        }})
+        target = await self.directory.validate_target("oc_group")
+        self.assertEqual((target.chat_id, target.chat_kind), ("oc_group", "group"))
+        self.member.assert_awaited_once()
+        self.assertEqual(self.member.call_args.args[0].chat_id, "oc_group")
+        self.member.return_value = membership(False)
+        with self.assertRaises(ChatDirectoryError) as caught:
+            await self.directory.validate_target("oc_group")
+        self.assertEqual(caught.exception.code, "chat_unavailable")
+
+    async def test_submitted_p2p_uses_bot_metadata_without_group_only_fields_or_membership(self):
+        for status in (None, "normal"):
+            with self.subTest(status=status):
+                self.get.return_value = GetChatResponse({"code": 0, "data": {
+                    "chat_mode": "p2p", "chat_status": status,
+                }})
+                target = await self.directory.validate_target("oc_direct")
+                self.assertEqual((target.chat_id, target.chat_kind), ("oc_direct", "p2p"))
+        self.member.assert_not_awaited()
+        self.list.assert_not_awaited()
+        self.search.assert_not_awaited()
+
+    async def test_submitted_target_fails_closed_for_unknown_kind_state_or_access(self):
+        for fields, code in (
+            ({"chat_mode": None}, "chat_kind_unknown"),
+            ({"chat_mode": "group", "chat_status": None}, "chat_query_failed"),
+            ({"chat_mode": "p2p", "chat_status": "unknown"}, "chat_query_failed"),
+            ({"chat_mode": "p2p", "chat_status": "dissolved"}, "chat_unavailable"),
+            ({"chat_mode": "group", "chat_status": "dissolved_save"}, "chat_unavailable"),
+        ):
+            with self.subTest(fields=fields):
+                self.get.return_value = GetChatResponse({"code": 0, "data": fields})
+                with self.assertRaises(ChatDirectoryError) as caught:
+                    await self.directory.validate_target("oc_target")
+                self.assertEqual(caught.exception.code, code)
+        self.member.assert_not_awaited()
+        self.get.return_value = GetChatResponse({"code": 99991672, "msg": "secret"})
+        with self.assertRaises(ChatDirectoryError) as caught:
+            await self.directory.validate_target("oc_direct")
+        self.assertEqual(caught.exception.code, "chat_permission_denied")
+        self.assertNotIn("secret", str(caught.exception))
+
+    async def test_submitted_target_rejects_user_id_and_bounds_lookup_time(self):
+        for value in ("ou_user", "on_user", "oc_", "oc_target/path", " oc_target"):
+            with self.subTest(value=value), self.assertRaises(ChatDirectoryError) as caught:
+                await self.directory.validate_target(value)
+            self.assertEqual(caught.exception.code, "invalid_chat_id")
+        self.get.assert_not_awaited()
+        self.member.assert_not_awaited()
+        gate = asyncio.Event()
+
+        async def blocked(_):
+            await gate.wait()
+
+        self.get.side_effect = blocked
+        directory = FeishuChatDirectory(self.client, query_seconds=0.01)
+        with self.assertRaises(ChatDirectoryError) as caught:
+            await directory.validate_target("oc_target")
+        self.assertEqual(caught.exception.code, "chat_query_timeout")
 
     async def test_selected_dissolved_or_p2p_chat_cannot_become_group(self):
         for fields, code in [({"chat_mode": "p2p"}, "not_group_chat"), ({"chat_status": "dissolved_save"}, "chat_unavailable")]:

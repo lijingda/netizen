@@ -66,6 +66,12 @@ class ChatAvatarImagesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"oc_group": "img_v3_avatar"})
         self.assertEqual(self.channel.upload_media.await_count, 3)
 
+    async def test_prepares_complete_caller_bounded_batch_without_page_truncation(self):
+        chats = tuple(chat(f"oc_{i}", URL + f"?n={i}") for i in range(20))
+        result = await self.images.prepare(chats)
+        self.assertEqual(set(result), {item.chat_id for item in chats})
+        self.assertEqual(self.channel.upload_media.await_count, len(chats))
+
     async def test_failed_and_invalid_uploads_only_omit_the_affected_icons(self):
         self.channel.upload_media.side_effect = [RuntimeError("failure"), "not-a-key", "img_v3_ok"]
         chats = tuple(chat(f"oc_{i}", URL + f"?n={i}") for i in range(3))
@@ -80,6 +86,14 @@ class ChatAvatarImagesTest(unittest.IsolatedAsyncioTestCase):
                 await self.images.prepare((chat(url=URL + f"?n={number}"),))
             await self.images.prepare((chat(url=URL + "?n=0"),))
         self.assertEqual(self.channel.upload_media.await_count, 4)
+
+    async def test_full_snapshot_retains_all_prepared_keys_despite_smaller_lru(self):
+        chats = tuple(chat(f"oc_{i}", URL + f"?n={i}") for i in range(30))
+        with patch("netizen_cli.chat_avatars._MAX_KEYS", 2):
+            result = await self.images.prepare(chats)
+        self.assertEqual(set(result), {item.chat_id for item in chats})
+        self.assertEqual(self.channel.upload_media.await_count, len(chats))
+        self.assertEqual(len(self.images._keys), 2)
 
     async def test_timeout_retains_ready_images_and_cancels_pending_uploads(self):
         stopped = asyncio.Event()

@@ -1,17 +1,16 @@
-"""Ordinary persistent fork cards; navigation travels on the real card."""
+"""Self-contained forms for ordinary persistent forks."""
 
 from __future__ import annotations
 
-import base64
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from lark_channel import OutboundCard
 
-from ..domain import FeishuScope, ScopeKind
+from ..domain import FeishuScope
 from .callbacks import (
     CardActionError,
     _builder,
@@ -21,28 +20,47 @@ from .callbacks import (
     _plain_text,
     _valid_callback_nonce,
 )
+from .chat_target import (
+    ChatSearchSnapshot,
+    ChatSearchView,
+    ChatTargetDraft,
+    chat_options,
+    chat_target_elements,
+    decode_chat_snapshot,
+    encode_chat_snapshot,
+    initial_chat_target,
+    read_chat_target,
+    resolve_chat_target,
+    snapshot_capacity_selections,
+    snapshot_chat_options,
+)
 from .controls import MAX_THREAD_NAME_CHARS
+from .pagination import decode_page_selection, pagination_controls
+from .reply import TURN_FILE_CARD_JSON_LIMIT_BYTES
 
 if TYPE_CHECKING:
-    from ..management.chat_directory import AvailableChat, AvailableChatPage
+    from ..management.chat_directory import AvailableChat
 
 
-_VERSION = 1
-_FORM_PREFIX = "fork_choice_v1__"
-_NAME_FIELD = "fork_name_v1"
-_QUERY_FIELD = "fork_query_v1"
+_VERSION = 5
+_MODE_FIELD = "fork_mode_v5"
+_TARGET_FIELD = "fork_target_v5"
+_ID_FIELD = "fork_chat_id_v5"
+_NAME_FIELD = "fork_name_v5"
+_QUERY_FIELD = "fork_query_v5"
+_PAGE_FIELD = "fork_page_v5"
 _SOURCE_FIELDS = {
     "binding_id", "native_thread_id", "settings_revision", "context_revision",
     "feedback_revision", "project_revision",
 }
 _STATE_FIELDS = {"kind", "v", "scope", "source", "action"}
 _ACTION_FIELDS = {
-    "destination": set(), "search": set(), "query": set(),
-    "results": {"query", "page_token"},
-    "select": {"target_chat_id"}, "create": {"target_chat_id"},
+    "create": {"nonce"}, "search": {"nonce"},
+    "page": {"nonce", "snapshot"},
 }
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,191}")
 _BINDING_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}")
+_CARD_ELEMENT_LIMIT = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,27 +82,25 @@ class ForkCardAction:
     target_chat_id: str | None = None
     name: str | None = None
     query: str | None = None
-    page_token: str | None = None
+    target_mode: str = "current"
+    target_choice: str = ""
+    target_id: str = ""
+    query_input: str | None = None
+    search_requested: bool = False
+    chat_snapshot: ChatSearchSnapshot | None = None
+    chat_page: int = 0
 
 
-def _encoded(state: Mapping[str, Any]) -> str:
-    return base64.urlsafe_b64encode(json.dumps(
-        state, ensure_ascii=False, separators=(",", ":"),
-    ).encode()).decode().rstrip("=")
+class ForkFormValidationError(CardActionError):
+    """A valid draft with a recoverable input error, not a creation request."""
+
+    def __init__(self, message: str, draft: ForkCardAction) -> None:
+        super().__init__(message)
+        self.draft = draft
 
 
-def _decoded(value: Any) -> dict[str, Any]:
-    if not isinstance(value, str) or not value or len(value) > 8192:
-        raise CardActionError("分支选项无效，请重新发送 /fork。")
-    try:
-        state = json.loads(base64.b64decode(
-            value + "=" * (-len(value) % 4), altchars=b"-_", validate=True,
-        ))
-    except (ValueError, UnicodeError) as error:
-        raise CardActionError("分支选项无效，请重新发送 /fork。") from error
-    if not isinstance(state, dict):
-        raise CardActionError("分支选项无效，请重新发送 /fork。")
-    return state
+class ForkCardCapacityError(CardActionError):
+    """The candidates need a narrower query to fit the platform card."""
 
 
 def _source(value: Any) -> ForkSource:
@@ -99,224 +115,211 @@ def _source(value: Any) -> ForkSource:
     return ForkSource(**value)
 
 
-def _state(scope: FeishuScope, source: ForkSource, action: str, **extra: Any) -> dict[str, Any]:
-    state = {
-        "kind": "netizen_fork", "v": _VERSION, "scope": scope.key,
-        "source": asdict(source), "action": action, **extra,
-    }
-    _validate_state(scope, state)
-    return state
+def _query(value: Any) -> str:
+    if not isinstance(value, str) or any(ord(char) < 32 or 127 <= ord(char) < 160 for char in value):
+        raise CardActionError("群名关键词无效。")
+    query = value.strip()
+    if len(query) > 50:
+        raise CardActionError("群名关键词最多 50 个字符。")
+    return query
 
 
-def _validate_state(scope: FeishuScope, state: Mapping[str, Any]) -> ForkCardAction:
+def _name(value: Any, *, create: bool) -> str:
+    if not isinstance(value, str) or "\x00" in value:
+        raise CardActionError("会话名称无效。")
+    if len(value) > MAX_THREAD_NAME_CHARS:
+        raise CardActionError(f"会话名称最多 {MAX_THREAD_NAME_CHARS} 个字符。")
+    if not create:
+        return value
+    name = " ".join(value.split())
+    if not name:
+        raise CardActionError("会话名称不能为空。")
+    return name
+
+
+def _validate_state(scope: FeishuScope, state: Any) -> tuple[ForkSource, ChatSearchSnapshot | None]:
+    if not isinstance(state, Mapping):
+        raise CardActionError("分支卡片动作无效，请重新发送 /fork。")
+    if state.get("kind") != "netizen_fork" or type(state.get("v")) is not int or state["v"] != _VERSION:
+        raise CardActionError("分支卡片已过期，请重新发送 /fork。")
     action = state.get("action")
     if not isinstance(action, str) or action not in _ACTION_FIELDS:
         raise CardActionError("未知分支卡片动作。")
     if set(state) != _STATE_FIELDS | _ACTION_FIELDS[action]:
         raise CardActionError("分支卡片动作字段不完整或包含未知字段。")
-    if state["kind"] != "netizen_fork" or type(state["v"]) is not int or state["v"] != _VERSION:
-        raise CardActionError("分支卡片已过期，请重新发送 /fork。")
     if state["scope"] != scope.key:
         raise CardActionError("分支卡片与来源会话位置不一致。")
-    source = _source(state["source"])
-    target = state.get("target_chat_id")
-    if action in {"select", "create"} and (
-        not isinstance(target, str) or _ID.fullmatch(target) is None
-    ):
-        raise CardActionError("分支目标聊天无效，请重新选择。")
-    query, token = state.get("query"), state.get("page_token")
-    if action == "results":
-        if _query(query) != query:
-            raise CardActionError("群名关键词不能包含首尾空白。")
-        if token is not None and (
-            not isinstance(token, str) or not token.strip() or len(token) > 1024
-            or any(ord(char) < 32 for char in token)
-        ):
-            raise CardActionError("群聊分页游标无效，请重新搜索。")
-    return ForkCardAction(action, source, target_chat_id=target, query=query, page_token=token)
-
-
-def _query(value: Any) -> str:
-    if not isinstance(value, str):
-        raise CardActionError("请输入群名关键词。")
-    query = value.strip()
-    if not query or len(query) > 50 or any(ord(char) < 32 for char in query):
-        raise CardActionError("群名关键词需要 1 至 50 个字符。")
-    return query
+    if not _valid_callback_nonce(state["nonce"]):
+        raise CardActionError("分支卡片动作无效，请重新发送 /fork。")
+    snapshot = decode_chat_snapshot(state["snapshot"]) if action == "page" else None
+    return _source(state["source"]), snapshot
 
 
 def is_fork_card_action(value: Any, form: Any = None) -> bool:
     return (isinstance(value, Mapping) and value.get("kind") == "netizen_fork") or (
-        isinstance(form, Mapping)
-        and any(isinstance(name, str) and name.startswith(_FORM_PREFIX) for name in form)
+        isinstance(form, Mapping) and any(
+            name in {_MODE_FIELD, _TARGET_FIELD, _ID_FIELD, _NAME_FIELD, _QUERY_FIELD, _PAGE_FIELD}
+            for name in form
+        )
     )
 
 
 def decode_fork_action(scope: FeishuScope, value: Any, form: Any = None) -> ForkCardAction:
-    """Decode public form_value only; callers verify the fetched card Scope."""
-    if form is not None and form != {}:
-        if value is not None and value != {}:
-            raise CardActionError("分支表单混入其他操作。")
-        if not isinstance(form, Mapping):
-            raise CardActionError("分支表单无效。")
-        fields = [name for name in form if isinstance(name, str) and name.startswith(_FORM_PREFIX)]
-        if len(fields) != 1:
-            raise CardActionError("分支表单身份无效，请重新发送 /fork。")
-        suffix = fields[0][len(_FORM_PREFIX):]
-        if suffix != "create" and not _valid_callback_nonce(suffix):
-            raise CardActionError("分支表单身份无效，请重新发送 /fork。")
-        action = _validate_state(scope, _decoded(form[fields[0]]))
-        expected = {fields[0]}
-        if suffix == "create":
-            if action.action != "create":
-                raise CardActionError("分支创建表单与动作不一致。")
-            expected.add(_NAME_FIELD)
-        elif action.action == "create":
-            raise CardActionError("分支创建表单身份无效。")
-        if action.action == "query":
-            expected.add(_QUERY_FIELD)
-        if set(form) != expected:
-            raise CardActionError("分支表单缺少字段或混入其他操作。")
-        if action.action == "query":
-            return ForkCardAction("results", action.source, query=_query(form[_QUERY_FIELD]))
-        if action.action == "create":
-            raw_name = form[_NAME_FIELD]
-            if not isinstance(raw_name, str) or "\x00" in raw_name:
-                raise CardActionError("会话名称无效。")
-            name = " ".join(raw_name.split())
-            if not name or len(name) > MAX_THREAD_NAME_CHARS:
-                raise CardActionError(f"会话名称需要 1 至 {MAX_THREAD_NAME_CHARS} 个字符。")
-            return ForkCardAction("create", action.source, action.target_chat_id, name)
-        return action
-    if not isinstance(value, Mapping) or not _valid_callback_nonce(value.get("nonce")):
-        raise CardActionError("分支卡片动作无效，请重新发送 /fork。")
-    state = {key: item for key, item in value.items() if key != "nonce"}
-    action = _validate_state(scope, state)
-    if action.action not in {"destination", "search", "results"}:
-        raise CardActionError("请选择目标并通过分支表单提交。")
-    return action
+    """Read public callback value and form_value; callers verify card Scope."""
+    source, snapshot = _validate_state(scope, value)
+    if not isinstance(form, Mapping) or _MODE_FIELD not in form or (
+        set(form) - {_MODE_FIELD, _TARGET_FIELD, _ID_FIELD, _NAME_FIELD, _QUERY_FIELD, _PAGE_FIELD}
+    ):
+        raise CardActionError("分支表单缺少字段或混入其他操作。")
+    target_draft = read_chat_target(form, mode_field=_MODE_FIELD,
+                                   choice_field=_TARGET_FIELD, id_field=_ID_FIELD)
+    action = value["action"]
+    name_input = form.get(_NAME_FIELD, "")
+    name = _name("" if name_input is None else name_input, create=False)
+    query_input = form.get(_QUERY_FIELD, "")
+    query = _query("" if query_input is None else query_input)
+    # Search must work with an empty selected target and preserve the name/ID
+    # draft. Only the create action resolves and validates a destination.
+    draft = ForkCardAction(
+        "results", source, name=name, query=query,
+        target_mode=target_draft.mode, target_choice=target_draft.choice,
+        target_id=target_draft.chat_id, query_input=query,
+    )
+    if action == "create":
+        try:
+            target = resolve_chat_target(target_draft, current_chat_id=scope.chat_id,
+                                         choice_error="请选择创建位置。")
+            normalized_name = _name(name, create=True)
+        except CardActionError as error:
+            raise ForkFormValidationError(str(error), draft) from None
+        return ForkCardAction(
+            "create", source, target_chat_id=target, name=normalized_name, query=query,
+            target_mode=target_draft.mode, target_choice=target_draft.choice,
+            target_id=target_draft.chat_id, query_input=query,
+        )
+    # Only Search applies edited text. Paging always follows its rendered
+    # result snapshot and retains the independent draft for a later search.
+    page = decode_page_selection(form.get(_PAGE_FIELD), snapshot.total_pages) if snapshot else 0
+    applied_query = snapshot.query if snapshot else query
+    selected = target_draft.choice if action == "page" else ""
+    return ForkCardAction(
+        "results", source, name=name, query=applied_query, target_mode=target_draft.mode,
+        target_choice=selected, target_id=target_draft.chat_id, query_input=query,
+        search_requested=action == "search", chat_snapshot=snapshot, chat_page=page,
+    )
 
 
 def _button(scope: FeishuScope, source: ForkSource, label: str, action: str, **extra: Any) -> dict[str, Any]:
+    value = {
+        "kind": "netizen_fork", "v": _VERSION, "scope": scope.key,
+        "source": asdict(source), "action": action, **extra,
+    }
+    value["nonce"] = _new_callback_nonce()
+    _validate_state(scope, value)
     return {
-        "tag": "button", "text": _plain_text(label), "type": "default",
-        "behaviors": [{"type": "callback", "value": {
-            **_state(scope, source, action, **extra), "nonce": _new_callback_nonce(),
-        }}],
+        "tag": "button", "name": f"fork_{action}_v5", "text": _plain_text(label),
+        "type": "primary_filled" if action == "create" else "default", "width": "fill",
+        "form_action_type": "submit", "behaviors": [{"type": "callback", "value": value}],
     }
 
 
-def _form(*, options: list[tuple[str, str]], label: str, submit: str,
-          inputs: tuple[dict[str, Any], ...] = (), selected: str | None = None,
-          create: bool = False,
-          option_icons: Mapping[str, dict[str, str]] | None = None) -> dict[str, Any]:
-    # Navigation redraws use the shared transport nonce convention. Creation
-    # stays stable like other one-shot controls, without a separate claim key.
-    select = {
-        "tag": "select_static", "name": _FORM_PREFIX + ("create" if create else _new_callback_nonce()),
-        "required": True, "width": "fill", "placeholder": _plain_text(label),
-        "options": [{
-            "text": _plain_text(text), "value": value,
-            **({"icon": option_icons[value]} if option_icons and value in option_icons else {}),
-        } for value, text in options],
-    }
-    if selected is not None:
-        select["initial_option"] = selected
-    return {"tag": "form", "name": "fork_form_v1", "elements": [
-        _plain(label), select, *inputs,
-        {"tag": "button", "name": "fork_submit_v1", "text": _plain_text(submit),
-         "type": "primary_filled", "width": "fill", "form_action_type": "submit"},
-    ]}
+def _label(value: str, limit: int = 80) -> str:
+    text = " ".join(value.split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
-def _chat_icon(avatar_key: str | None) -> dict[str, str]:
-    if avatar_key:
-        return {"tag": "custom_icon", "img_key": avatar_key}
-    return {"tag": "standard_icon", "token": "group_outlined"}
+def _element_count(value: Any) -> int:
+    if isinstance(value, dict):
+        return int("tag" in value) + sum(_element_count(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(_element_count(item) for item in value)
+    return 0
 
 
-def _header(source_title: str, project_alias: str):
-    builder = _builder("创建会话分支", project_alias)
-    builder.raw(_plain(f"来源：{source_title}"))
-    builder.raw(_plain("新会话继承当前原生上下文，在一个新话题中独立继续。两个会话共享项目文件，修改会相互可见。"))
-    return builder
-
-
-def fork_destination_card(scope: FeishuScope, source: ForkSource, *, source_title: str,
-                          project_alias: str) -> OutboundCard:
-    builder = _header(source_title, project_alias)
-    current = _encoded(_state(scope, source, "select", target_chat_id=scope.chat_id))
-    builder.raw(_form(options=[(current, "当前聊天的新话题"),
-        (_encoded(_state(scope, source, "search")), "选择其他群")],
-        selected=current, label="创建位置", submit="继续"))
-    return OutboundCard(card=builder.to_dict())
-
-
-def fork_chat_search_card(scope: FeishuScope, source: ForkSource, *, source_title: str,
-                          project_alias: str, notice: str | None = None) -> OutboundCard:
-    builder = _header(source_title, project_alias)
-    builder.raw(_plain("按群名查找机器人已加入的群；结果不按操作者的群成员身份筛选，当前卡片的参与者均可见。"))
-    if notice:
-        builder.raw(_notice(notice))
-    reference = _encoded(_state(scope, source, "query"))
-    builder.raw(_form(options=[(reference, source_title)], selected=reference,
-        label="来源会话", submit="搜索群聊", inputs=({
-            "tag": "input", "name": _QUERY_FIELD, "required": True, "max_length": 50,
-            "label": _plain_text("群名关键词"), "placeholder": _plain_text("输入群名关键词"),
-        },)))
-    builder.raw(_button(scope, source, "返回创建位置", "destination"))
-    return OutboundCard(card=builder.to_dict())
-
-
-def fork_chat_results_card(scope: FeishuScope, source: ForkSource, page: AvailableChatPage, *,
-                           query: str, source_title: str, project_alias: str,
-                           avatar_keys: Mapping[str, str] | None = None) -> OutboundCard:
-    query = _query(query)
-    builder = _header(source_title, project_alias)
-    builder.raw(_plain(f"群名包含「{query}」的机器人可用群。"))
-    if page.notice:
-        builder.raw(_notice(page.notice))
-    if page.items:
-        options = []
-        icons = {}
-        for chat in page.items:
-            reference = _encoded(_state(scope, source, "select", target_chat_id=chat.chat_id))
-            options.append((reference,
-                f"{chat.name} · {chat.chat_id[-8:]}" + (" · 外部群" if chat.external else "")))
-            icons[reference] = _chat_icon(avatar_keys.get(chat.chat_id) if avatar_keys else None)
-        builder.raw(_form(options=options, option_icons=icons,
-            label="目标群聊", submit="选择此群"))
+def fork_form_card(scope: FeishuScope, source: ForkSource, *, source_title: str,
+                   project_alias: str, chats: Sequence[AvailableChat] = (),
+                   avatar_keys: Mapping[str, str] | None = None,
+                   name: str | None = None, target_chat_id: str | None = None,
+                   target_mode: str | None = None, target_choice: str | None = None,
+                   target_id: str = "",
+                   query: str = "",
+                   query_input: str | None = None,
+                   chat_snapshot: ChatSearchSnapshot | None = None, chat_page: int = 0,
+                   notice: str | None = None) -> OutboundCard:
+    """One form carries the name and target through search and final creation."""
+    query = _query(chat_snapshot.query if chat_snapshot else query)
+    if chat_snapshot is not None:
+        # Validate the requested page even for a single-page result; bad page
+        # state must not silently show a different slice.
+        chat_snapshot.page_chats(chat_page)
+        options = chat_options(chat_snapshot.chats, avatar_keys=chat_snapshot.avatar_keys)
     else:
-        builder.raw(_plain("本页没有符合条件的可用群。"))
-    if page.next_page_token:
-        builder.raw(_button(scope, source, "下一页", "results", query=query, page_token=page.next_page_token))
-    builder.raw(_button(scope, source, "重新搜索", "search"))
-    builder.raw(_button(scope, source, "返回创建位置", "destination"))
-    return OutboundCard(card=builder.to_dict())
-
-
-def fork_confirm_card(scope: FeishuScope, source: ForkSource, *, source_title: str,
-                      project_alias: str, target_chat: AvailableChat | None = None,
-                      avatar_key: str | None = None) -> OutboundCard:
-    """Only this final page accepts a name, so navigation has no name draft."""
-    target_id = target_chat.chat_id if target_chat is not None else scope.chat_id
-    target_label = target_chat.name if target_chat is not None else "当前聊天"
-    builder = _header(source_title, project_alias)
-    builder.raw(_plain(f"创建位置：{target_label}的新普通话题。来源会话保持不变。"))
-    if target_id != scope.chat_id:
-        builder.raw(_notice("目标群的参与者可通过新会话继续使用继承的上下文；后续回答可能引用来源会话的内容。"))
-    reference = _encoded(_state(scope, source, "create", target_chat_id=target_id))
+        options = chat_options(chats, avatar_keys=avatar_keys)
+    target = (initial_chat_target(current_chat_id=scope.chat_id, target_chat_id=target_chat_id, options=options)
+              if target_mode is None else ChatTargetDraft(target_mode, target_choice or "", target_id))
     default_name = " ".join(source_title.split())[:MAX_THREAD_NAME_CHARS - len(" · 分支")] + " · 分支"
-    # A topic alone is not group evidence: P2P chats can also contain topics.
-    icon = _chat_icon(avatar_key) if avatar_key or target_chat is not None or scope.kind is ScopeKind.GROUP else None
-    builder.raw(_form(options=[(reference, target_label)], selected=reference,
-        option_icons={reference: icon} if icon is not None else None,
-        label="已确认的目的地", submit="确认创建", create=True, inputs=({
-            "tag": "input", "name": _NAME_FIELD, "required": True,
-            "label": _plain_text("新会话名称"), "default_value": default_name,
-            "max_length": MAX_THREAD_NAME_CHARS,
-        },)))
-    return OutboundCard(card=builder.to_dict())
+    draft_name = _name(default_name if name is None else name, create=False)
+    target_notice = (
+        "指定其他聊天时，目标聊天的参与者可通过新会话继续使用继承的上下文；后续回答可能引用来源会话的内容。\n"
+        "可选群为机器人已加入的群；不按操作者的群成员身份筛选，当前卡片的参与者均可见。"
+    )
+    if notice:
+        target_notice += "\n" + _label(notice, 512)
+    if chat_snapshot is not None and chat_snapshot.notice:
+        target_notice += "\n" + _label(chat_snapshot.notice, 512)
+
+    def render(page: int, selection: str) -> OutboundCard:
+        page_options = options
+        navigation = None
+        if chat_snapshot is not None:
+            page_options = snapshot_chat_options(chat_snapshot, page, selection)
+            if chat_snapshot.total_pages > 1:
+                navigation = pagination_controls(
+                    page_field=_PAGE_FIELD, page=page, total_pages=chat_snapshot.total_pages,
+                    button=_button(scope, source, "跳转", "page", snapshot=encode_chat_snapshot(chat_snapshot)),
+                )
+        search = ChatSearchView(
+            query_field=_QUERY_FIELD, query=query if query_input is None else _query(query_input),
+            applied_query=query if chat_snapshot is not None else None,
+            search_button=_button(scope, source, "查找群聊", "search"), navigation=navigation,
+            result_count=len(chat_snapshot.chats) if chat_snapshot is not None else None,
+            page=page, total_pages=chat_snapshot.total_pages if chat_snapshot is not None else 1,
+        )
+        builder = _builder("创建会话分支", _label(project_alias, 120))
+        builder.raw(_plain(f"来源：{_label(source_title, 120)}\n"
+                           "新会话继承当前原生上下文。两个会话共享项目文件，修改会相互可见。"))
+        builder.raw(_notice(target_notice))
+        fields = [
+            {"tag": "input", "name": _NAME_FIELD, "width": "fill",
+             "label": _plain_text("分支名称"), "default_value": draft_name,
+             "max_length": MAX_THREAD_NAME_CHARS},
+            _plain("目标飞书聊天 · 在所选聊天中新建分支话题"),
+            *chat_target_elements(
+                mode_field=_MODE_FIELD, choice_field=_TARGET_FIELD, id_field=_ID_FIELD,
+                draft=ChatTargetDraft(target.mode, selection, target.chat_id), options=page_options,
+                search=search,
+            ),
+            _button(scope, source, "创建分支", "create"),
+        ]
+        builder.raw({"tag": "form", "name": "fork_form_v5", "elements": fields})
+        card = builder.to_dict()
+        # Check the actual SDK serialization, including the single snapshot
+        # callback and avatar keys; never truncate a complete search result.
+        if len(json.dumps(card, ensure_ascii=False).encode("utf-8")) > TURN_FILE_CARD_JSON_LIMIT_BYTES or (
+            _element_count(card) > _CARD_ELEMENT_LIMIT
+        ):
+            raise ForkCardCapacityError("完整群聊结果超过分支卡片容量，请缩小群名关键词范围后重新查找。")
+        return OutboundCard(card=card)
+
+    card = render(chat_page, target.choice)
+    if chat_snapshot is not None:
+        # A later page may have longer labels, or keep a selection from another
+        # page. Global name disambiguation keeps every option's size stable;
+        # the largest in-page and retained selections cover bytes and tags.
+        for page in range(chat_snapshot.total_pages):
+            for capacity_selection in snapshot_capacity_selections(chat_snapshot, page):
+                render(page, capacity_selection)
+    return card
 
 
 def fork_status_card(*, name: str, source_title: str, project_alias: str,

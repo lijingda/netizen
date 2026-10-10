@@ -29,6 +29,7 @@ from netizen_cli.sdk_gap_adapter import GoalSnapshot
 from tests.support.channel_messages import FakeChannel, FakeMessage, FakeMessageHistory
 from tests.support.channel_results import sent_result
 from tests.support.channel_runtime import StubRuntime
+from tests.support.chat_targets import FakeChatTargetDirectory
 
 
 @dataclass
@@ -194,6 +195,7 @@ async def _assembled_channel(
     management = InstanceManagementService(
         bindings=store, projects=projects, runtime=ManagementRuntimePort(runtime),
         scope_coordinator=ScopeCoordinator(),
+        chat_directory=FakeChatTargetDirectory(channel),
     )
     async with AsyncExitStack() as resources:
         resources.push_async_callback(management.close)

@@ -4,16 +4,22 @@ import copy
 import base64
 import json
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
+from dataclasses import replace
 
 from lark_channel import OutboundSender
 
 from netizen_cli.cards.callbacks import CardActionError
+from netizen_cli.cards.chat_target import ChatSearchSnapshot
 from netizen_cli.cards.scheduled import (
     decode_schedule_action,
     is_schedule_card_action,
     schedule_form_card,
+    schedule_draft_card,
+    read_schedule_form,
+    _element_count,
     schedule_manager_card,
     schedule_navigation,
     schedule_query,
@@ -21,6 +27,7 @@ from netizen_cli.cards.scheduled import (
     SCHEDULE_CARD_JSON_LIMIT_BYTES,
 )
 from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.management.chat_directory import AvailableChat
 from netizen_cli.model_settings import (
     EffortOption,
     ModelCatalog,
@@ -79,14 +86,285 @@ class ScheduleCardsTest(unittest.TestCase):
                 self.assertEqual(action.action, "save")
                 self.assertEqual(action.payload["schedule"]["kind"], kind)
                 self.assertEqual(action.payload["project"], "work")
-                self.assertNotIn("chat_id", action.payload)
+                self.assertEqual(action.payload["chat_id"], self.scope.chat_id)
                 self.assertNotIn("sender_id", action.payload)
                 if kind == "once":
                     self.assertEqual(action.payload["schedule"]["at"], "2030-09-10T09:00+08:00")
 
+    def test_chat_inputs_only_use_selected_mode(self):
+        values = form_values(schedule_form_card(self.scope, projects=[self.project],
+            default_timezone="UTC", plan=self.plan))
+        for mode, choice, chat_id, expected in (
+                ("current", "oc_stale", "oc_stale_id", self.scope.chat_id),
+                ("current", ["bad", "inactive"], {"bad": "inactive"}, self.scope.chat_id),
+                ("group", "oc_selected", "oc_stale", "oc_selected"),
+                ("group", "oc_selected", {"bad": "inactive"}, "oc_selected"),
+                ("id", "oc_stale", "oc_private", "oc_private"),
+                ("id", ["bad", "inactive"], " oc_private ", "oc_private")):
+            with self.subTest(mode=mode, chat_id=chat_id):
+                decoded = decode_schedule_action(scope=self.scope, value=None,
+                    form={**values, "cron_target_mode": mode, "cron_group_id": choice, "cron_chat_id": chat_id})
+                self.assertEqual(decoded.payload.get("chat_id"), expected)
+
+    def test_missing_target_mode_is_not_inferred_from_id(self):
+        values = form_values(schedule_form_card(self.scope, projects=[self.project],
+            default_timezone="UTC", plan=self.plan))
+        values.pop("cron_target_mode")
+        values["cron_chat_id"] = "oc_explicit_private"
+        with self.assertRaises(CardActionError):
+            decode_schedule_action(scope=self.scope, value=None, form=values)
+        with self.assertRaises(CardActionError):
+            schedule_retry_card(app_id="app", chat_id=self.scope.chat_id, value=None,
+                form=values, notice="检查后重试", projects=[self.project])
+
+    def test_empty_id_does_not_fall_back_and_retry_retains_selected_mode(self):
+        values = form_values(schedule_form_card(self.scope, projects=[self.project],
+            default_timezone="UTC", plan=self.plan))
+        for empty in ("", " ", None):
+            with self.subTest(empty=empty):
+                submitted = {**values, "cron_target_mode": "id", "cron_group_id": "oc_stale",
+                    "cron_chat_id": empty}
+                with self.assertRaises(CardActionError):
+                    decode_schedule_action(scope=self.scope, value=None, form=submitted)
+                _, retry = schedule_retry_card(app_id="app", chat_id=self.scope.chat_id, value=None,
+                    form=submitted, notice="请填写聊天 ID", projects=[self.project])
+                self.assertEqual(form_values(retry)["cron_target_mode"], "id")
+                self.assertFalse(form_values(retry)["cron_chat_id"].strip())
+
+    def test_empty_group_does_not_fall_back_to_id_and_failed_draft_is_retained(self):
+        values = form_values(schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC", plan=self.plan))
+        values.update(cron_target_mode="group", cron_group_id="", cron_chat_id="oc_old")
+        with self.assertRaisesRegex(CardActionError, "请选择飞书群聊"):
+            decode_schedule_action(scope=self.scope, value=None, form=values)
+        _, retry = schedule_retry_card(app_id="app", chat_id=self.scope.chat_id, value=None, form=values,
+            notice="请选择飞书群聊", projects=[self.project])
+        restored = form_values(retry)
+        self.assertNotIn("cron_group_id", restored)
+        self.assertEqual(restored["cron_chat_id"], "oc_old")
+        self.assertEqual(restored["cron_target_mode"], "group")
+        self.assertEqual(restored["cron_instructions__plan-one:2"], self.plan["instructions"])
+        for malformed in ({"cron_target_mode": "unknown"}, {"cron_target_mode": ["id", "group"]},
+                {"cron_target_mode": "id", "cron_chat_id": ["oc_bad"]}):
+            with self.subTest(malformed=malformed), self.assertRaises(CardActionError):
+                decode_schedule_action(scope=self.scope, value=None, form={**values, **malformed})
+        del values["cron_target_mode"]
+        with self.assertRaises(CardActionError):
+            decode_schedule_action(scope=self.scope, value=None, form=values)
+
+    def test_group_options_have_avatars_disambiguation_and_no_repeated_topic_label(self):
+        groups = (AvailableChat("oc_one", "研发", "group", False), AvailableChat("oc_two", "研发", "group", False))
+        card = schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC",
+            chat_snapshot=ChatSearchSnapshot("研发", groups, {"oc_one": "img_one", "oc_two": "img_two"}))
+        group = next(item for item in elements(card.card, "select_static") if item["name"] == "cron_group_id")
+        self.assertFalse(group["required"])
+        self.assertEqual([item["icon"]["img_key"] for item in group["options"]], ["img_one", "img_two"])
+        self.assertEqual(len({item["text"]["content"] for item in group["options"]}), 2)
+        self.assertNotIn("新话题", str(group["options"]))
+        self.assertIn("https://open.feishu.cn/document/server-docs/group/chat/chat-id-description", str(card.card))
+        self.assertIn("查找群聊", [item["text"]["content"] for item in elements(card.card, "button")])
+
+    def test_new_target_defaults_to_current_and_edit_preserves_saved_destination(self):
+        group = AvailableChat(self.scope.chat_id, "当前群", "group", False)
+        group_values = form_values(schedule_form_card(self.scope, projects=[self.project],
+            default_timezone="UTC", chats=[group]))
+        self.assertEqual(group_values["cron_target_mode"], "current")
+        self.assertNotIn("cron_group_id", group_values)
+        private = FeishuScope("app", "oc_private", ScopeKind.TOPIC, "omt_private")
+        values = form_values(schedule_form_card(private, projects=[self.project], default_timezone="UTC", chats=[group]))
+        self.assertEqual((values["cron_target_mode"], values["cron_chat_id"]), ("current", ""))
+        edit = form_values(schedule_form_card(private, projects=[self.project], default_timezone="UTC",
+            plan={**self.plan, "chat_id": "oc_saved_private"}, chats=[group]))
+        self.assertEqual((edit["cron_target_mode"], edit["cron_chat_id"]), ("id", "oc_saved_private"))
+        self.assertEqual(decode_schedule_action(scope=private, value=None, form=edit).payload["chat_id"], "oc_saved_private")
+        for groups, expected_mode in (([group], "group"), ([], "id")):
+            with self.subTest(groups=groups):
+                edit = form_values(schedule_form_card(private, projects=[self.project], default_timezone="UTC",
+                    plan=self.plan, chats=groups, chat_directory_error="目录暂不可读" if not groups else None))
+                self.assertEqual(edit["cron_target_mode"], expected_mode)
+                self.assertEqual(decode_schedule_action(scope=private, value=None, form=edit).payload["chat_id"], self.plan["chat_id"])
+
+    def test_current_mode_uses_chat_from_verified_scope_for_group_private_and_topics(self):
+        for scope in (FeishuScope("app", "oc_group", ScopeKind.GROUP),
+                FeishuScope("app", "oc_private", ScopeKind.DIRECT),
+                self.scope, FeishuScope("app", "oc_private", ScopeKind.TOPIC, "omt_private")):
+            with self.subTest(scope=scope):
+                card = schedule_form_card(scope, projects=[self.project], default_timezone="UTC")
+                form = form_values(card)
+                form[next(name for name in form if name.startswith("cron_name"))] = "当前聊天任务"
+                form.update(cron_instructions="检查明确资源", cron_kind="daily")
+                modes = next(item for item in elements(card.card, "select_static") if item["name"] == "cron_target_mode")
+                self.assertEqual([item["value"] for item in modes["options"]], ["current", "group", "id"])
+                self.assertEqual(decode_schedule_action(scope=scope, value=None, form=form).payload["chat_id"], scope.chat_id)
+
+    def test_directory_search_preserves_full_form_without_saving_or_required_fields(self):
+        snapshot = ChatSearchSnapshot("旧词", tuple(AvailableChat(f"oc_{index}", f"群 {index}", "group", False)
+            for index in range(21)), {})
+        card = schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC", plan=self.plan,
+            chat_snapshot=snapshot)
+        for tag in ("input", "select_static", "multi_select_static", "date_picker", "picker_time"):
+            self.assertTrue(all(not node["required"] for node in elements(card.card, tag)))
+        values = form_values(card)
+        name = next(key for key in values if key.startswith("cron_name"))
+        values[name] = ""
+        values.update(cron_chat_query=" 新词 ", cron_target_mode="group", cron_group_id="oc_0", cron_chat_id="oc_inactive", cron_chat_page="2")
+        values["cron_instructions__plan-one:2"] = "未完成但要保留的任务"
+        values["cron_timezone"] = "invalid-zone"
+        action = decode_schedule_action(scope=self.scope, value=callback(card, "跳转"), form=values)
+        self.assertEqual(action.action, "page_chats")
+        self.assertEqual(action.payload["snapshot"].query, snapshot.query)
+        self.assertEqual([chat.chat_id for chat in action.payload["snapshot"].chats], [chat.chat_id for chat in snapshot.chats])
+        self.assertEqual(action.payload["page"], 2)
+        self.assertEqual(action.payload["draft"].fields["cron_chat_query"], " 新词 ")
+        self.assertEqual(action.payload["draft"].meta["expected_revision"], 2)
+        self.assertEqual(action.request_id, option_value(values["cron_project"])["request_id"])
+        retry = schedule_draft_card(action.payload["draft"],
+            notice="找到更多群聊", projects=[self.project],
+            chat_snapshot=action.payload["snapshot"], chat_page=action.payload["page"])
+        restored = form_values(retry)
+        self.assertEqual(restored["cron_group_id"], "oc_0")
+        options = next(node["options"] for node in elements(retry.card, "select_static") if node["name"] == "cron_group_id")
+        self.assertEqual([item["value"] for item in options], ["oc_20", "oc_0"])
+        self.assertEqual(restored["cron_chat_id"], "oc_inactive")
+        self.assertEqual(restored["cron_timezone"], "invalid-zone")
+        self.assertEqual(restored["cron_instructions__plan-one:2"], "未完成但要保留的任务")
+        self.assertEqual(option_value(restored["cron_project"])["request_id"], action.request_id)
+        with self.assertRaises(CardActionError):
+            decode_schedule_action(scope=self.scope, value=None, form=restored)
+        fresh = decode_schedule_action(scope=self.scope, value=callback(card, "查找群聊"), form=values)
+        self.assertEqual(fresh.payload["query"], "新词")
+        self.assertNotIn("snapshot", fresh.payload)
+        self.assertEqual(fresh.payload["draft"].target.choice, "")
+        self.assertEqual(fresh.payload["draft"].target.chat_id, "oc_inactive")
+
+    def test_group_jump_validates_page_and_snapshot_and_save_ignores_page(self):
+        snapshot = ChatSearchSnapshot("", tuple(AvailableChat(f"oc_{index}", "同名", "group", False)
+            for index in range(21)), {})
+        card = schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC", plan=self.plan,
+            chat_snapshot=snapshot)
+        jump = callback(card, "跳转")
+        values = form_values(card)
+        for page in (None, "", "-1", "3", "01", "１", 1, {"page": "1"}):
+            with self.subTest(page=page), self.assertRaises(CardActionError):
+                decode_schedule_action(scope=self.scope, value=jump, form={**values, "cron_chat_page": page})
+        corrupted = copy.deepcopy(jump)
+        corrupted["payload"]["snapshot"]["chats"].append(corrupted["payload"]["snapshot"]["chats"][0])
+        with self.assertRaises(CardActionError):
+            decode_schedule_action(scope=self.scope, value=corrupted, form={**values, "cron_chat_page": "1"})
+        old = copy.deepcopy(callback(card, "查找群聊"))
+        old["payload"] = {"query": "旧词", "cursor": "next"}
+        with self.assertRaisesRegex(CardActionError, "重新查找"):
+            decode_schedule_action(scope=self.scope, value=old, form=values)
+        saved = decode_schedule_action(scope=self.scope, value=None, form={**values, "cron_chat_page": "999"})
+        self.assertEqual(saved.action, "save")
+        self.assertEqual(saved.payload["instructions"], self.plan["instructions"])
+        for page in range(3):
+            displayed = schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC",
+                chat_snapshot=snapshot, chat_page=page)
+            group = next(item for item in elements(displayed.card, "select_static") if item["name"] == "cron_group_id")
+            self.assertTrue(all(" · " in item["text"]["content"] for item in group["options"]))
+
+    def test_single_page_and_empty_search_do_not_add_paging_controls(self):
+        for groups in ((), (AvailableChat("oc_one", "研发", "group", False),)):
+            with self.subTest(groups=groups):
+                card = schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC",
+                    chat_snapshot=ChatSearchSnapshot("研发", groups, {}))
+                self.assertNotIn("跳转", [node["text"]["content"] for node in elements(card.card, "button")])
+                self.assertNotIn("cron_chat_page", form_values(card))
+                self.assertNotIn("snapshot", str(callback(card, "查找群聊")))
+
+    def test_group_capacity_never_silently_truncates_candidates_or_task_content(self):
+        groups = [AvailableChat(f"oc_{index}", "群" * 200, "group", False) for index in range(80)]
+        with self.assertRaises(CardActionError):
+            schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC", plan=self.plan,
+                chat_snapshot=ChatSearchSnapshot("群", tuple(groups), {}))
+        fallback = schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC", plan=self.plan,
+            chat_directory_error="本批选项太多，请缩小关键词")
+        self.assertEqual(form_values(fallback)["cron_instructions__plan-one:2"], self.plan["instructions"])
+        self.assertIn("查找群聊", [item["text"]["content"] for item in elements(fallback.card, "button")])
+
+    def test_search_and_retry_keep_full_catalog_and_pending_inherited_tuning(self):
+        card = schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC", catalog=self.catalog)
+        form = form_values(card)
+        form.update(cron_session_effort="low", cron_chat_query="研发")
+        original_options = {node["name"]: node["options"] for node in elements(card.card, "select_static")
+            if node["name"] in {"cron_session_model", "cron_session_effort", "cron_session_speed"}}
+        action = decode_schedule_action(scope=self.scope, value=callback(card, "查找群聊"), form=form)
+        searched = schedule_draft_card(action.payload["draft"], projects=[self.project], catalog=self.catalog,
+            chat_snapshot=ChatSearchSnapshot("研发", (AvailableChat("oc_result", "研发", "group", False),), {}))
+        _, retried = schedule_retry_card(app_id="app", chat_id=self.scope.chat_id, value=None,
+            form=form, projects=[self.project], catalog=self.catalog, notice="请补充任务内容")
+        for rendered in (searched, retried):
+            with self.subTest(card=rendered.card["header"]):
+                self.assertEqual({node["name"]: node["options"] for node in elements(rendered.card, "select_static")
+                    if node["name"] in original_options}, original_options)
+                restored = form_values(rendered)
+                self.assertEqual(restored["cron_session_effort"], "low")
+                self.assertEqual(restored["cron_session_model"], form["cron_session_model"])
+                self.assertNotIn("模型目录暂不可用", str(rendered.card))
+
+    def test_search_keeps_incomplete_explicit_model_choices_without_saving(self):
+        card = schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC", catalog=self.catalog)
+        form = form_values(card)
+        model = next(node for node in elements(card.card, "select_static") if node["name"] == "cron_session_model")
+        form.update(cron_session_model=model["options"][1]["value"], cron_session_effort="", cron_session_speed="")
+        action = decode_schedule_action(scope=self.scope, value=callback(card, "查找群聊"), form=form)
+        self.assertEqual(action.action, "search_chats")
+        rendered = schedule_draft_card(action.payload["draft"], projects=[self.project], catalog=self.catalog,
+            chat_snapshot=ChatSearchSnapshot("", (), {}))
+        restored = form_values(rendered)
+        self.assertEqual(restored["cron_session_model"], form["cron_session_model"])
+        self.assertEqual(restored["cron_session_effort"], "")
+        self.assertEqual(restored["cron_session_speed"], "")
+        with self.assertRaises(CardActionError):
+            decode_schedule_action(scope=self.scope, value=None, form=restored)
+        for omitted in (("cron_session_effort",), ("cron_session_speed",), ("cron_session_effort", "cron_session_speed")):
+            with self.subTest(omitted=omitted):
+                blank = {key: (None if key in {"cron_session_effort", "cron_session_speed"} else value)
+                    for key, value in form.items() if key not in omitted}
+                action = decode_schedule_action(scope=self.scope, value=callback(card, "查找群聊"), form=blank)
+                rendered = schedule_draft_card(action.payload["draft"], projects=[self.project], catalog=self.catalog,
+                    chat_snapshot=ChatSearchSnapshot("", (), {}))
+                restored = form_values(rendered)
+                self.assertEqual((restored["cron_session_effort"], restored["cron_session_speed"]), ("", ""))
+                self.assertEqual(restored["cron_session_model"], form["cron_session_model"])
+                with self.assertRaises(CardActionError):
+                    decode_schedule_action(scope=self.scope, value=None, form=restored)
+
+    def test_search_rejects_unknown_fields_and_accepts_unfilled_query(self):
+        card = schedule_form_card(self.scope, projects=[self.project], default_timezone="UTC")
+        form = form_values(card)
+        search = callback(card, "查找群聊")
+        for value in (None, ""):
+            blank = {**form, "cron_chat_query": value, "cron_instructions": value, "cron_date": value, "cron_at": value}
+            blank[next(key for key in form if key.startswith("cron_name"))] = value
+            action = decode_schedule_action(scope=self.scope, value=search, form=blank)
+            self.assertEqual(action.payload["query"], "")
+            restored = form_values(schedule_draft_card(action.payload["draft"], projects=[self.project],
+                chat_snapshot=ChatSearchSnapshot("", (), {})))
+            self.assertEqual(restored["cron_instructions"], "")
+            self.assertEqual(restored["cron_at"], "")
+        without_query = {key: value for key, value in form.items() if key != "cron_chat_query"}
+        self.assertEqual(decode_schedule_action(scope=self.scope, value=search, form=without_query).payload["query"], "")
+        for extra in ({"unknown": "value"}, {"cron_timezone__UTC": "UTC"}, {"cron_session_unknown": "value"}):
+            with self.subTest(extra=extra), self.assertRaises(CardActionError):
+                decode_schedule_action(scope=self.scope, value=search, form={**form, **extra})
+
+    def test_binding_target_chat_and_topic_remain_readonly_after_retry(self):
+        card = schedule_form_card(self.scope, projects=[], default_timezone="UTC", target_binding_id="binding-fixed",
+            target_chat_id="oc_exact", target_chat_label="准确群名", target_topic_id="omt_exact", target_label="原问题")
+        values = form_values(card)
+        self.assertFalse({"cron_target_mode", "cron_group_id", "cron_chat_id", "cron_chat_query"} & values.keys())
+        self.assertIn("oc_exact", str(card.card))
+        self.assertIn("omt_exact", str(card.card))
+        _, retry = schedule_retry_card(app_id="app", chat_id=self.scope.chat_id, value=None, form=values,
+            notice="保留任务", projects=[])
+        self.assertIn("准确群名", str(retry.card))
+        self.assertIn("omt_exact", str(retry.card))
+        self.assertEqual(option_value(form_values(retry)["cron_project"])["target_binding_id"], "binding-fixed")
+
     def test_binding_create_freezes_exact_target_and_omits_copied_configuration(self):
         manager = schedule_manager_card(self.scope, {"plans": []}, current_binding_id="binding-original")
-        create = decode_schedule_action(scope=self.scope, value=callback(manager, "在当前会话定时执行"))
+        create = decode_schedule_action(scope=self.scope, value=callback(manager, "在当前 Agent 会话中定时执行"))
         self.assertEqual(create.payload, {"target_kind": "binding", "target_binding_id": "binding-original"})
         card = schedule_form_card(self.scope, projects=[], default_timezone="UTC",
             target_binding_id=create.payload["target_binding_id"])
@@ -147,7 +425,7 @@ class ScheduleCardsTest(unittest.TestCase):
         self.assertFalse(interval["required"])
         self.assertTrue(any(item["name"].startswith("cron_timezone") for item in elements(card.card, "input")))
         self.assertFalse(any(item["name"].startswith("cron_timezone") for panel in elements(card.card, "collapsible_panel") for item in elements(panel, "input")))
-        self.assertEqual([item["text"]["content"] for item in elements(card.card, "button")], ["创建任务", "取消"])
+        self.assertEqual([item["text"]["content"] for item in elements(card.card, "button")], ["查找群聊", "创建任务", "取消"])
 
     def test_edit_field_identity_fits_real_topic_and_uuid_plan_limits(self):
         self.scope = FeishuScope("cli_" + "a" * 16, "oc_" + "a" * 32, ScopeKind.TOPIC, "omt_" + "b" * 32)
@@ -166,7 +444,7 @@ class ScheduleCardsTest(unittest.TestCase):
     def test_obsolete_form_identity_is_rejected(self):
         meta = {"scope": self.scope.key, "kind": "once", "request_id": "old-form"}
         encoded = base64.urlsafe_b64encode(json.dumps(meta).encode()).decode().rstrip("=")
-        for prefix in ("cron_name_v1__", "cron_name_v2__", "cron_name_v3__", "cron_name_v4__", "cron_name_v5__"):
+        for prefix in ("cron_name_v1__", "cron_name_v2__", "cron_name_v3__", "cron_name_v4__", "cron_name_v5__", "cron_name_v6__"):
             with self.subTest(prefix=prefix):
                 form = {prefix + encoded: "旧卡片", "cron_instructions": "旧指令", "cron_project": "work", "cron_chat_id": "",
                     "cron_timezone": "UTC", "cron_at": "2030-09-10T09:00+08:00"}
@@ -417,17 +695,19 @@ class ScheduleCardsTest(unittest.TestCase):
             with self.subTest(existing=existing):
                 card = schedule_form_card(self.scope, projects=[available], default_timezone="UTC", **existing)
                 control = next(item for item in elements(card.card, "select_static") if item["name"] == "cron_project")
-                self.assertNotIn("initial_option", control)
-                self.assertEqual([option_value(item["value"])["project"] for item in control["options"]], ["available"])
+                self.assertEqual(option_value(control["initial_option"])["project"], "work")
+                self.assertEqual([option_value(item["value"])["project"] for item in control["options"]], ["available", "work"])
                 self.assertIn("已停用或不可用", str(card.card))
                 form = form_values(card)
+                searched = decode_schedule_action(scope=self.scope, value=callback(card, "查找群聊"), form=form)
+                self.assertEqual(searched.action, "search_chats")
+                self.assertEqual(searched.payload["draft"].meta["project"], "work")
                 form["cron_kind"] = "daily"
                 name = next(key for key in form if key.startswith("cron_name"))
                 form[name] = form[name] or "新计划"
                 instructions = next(key for key in form if key.startswith("cron_instructions"))
                 form[instructions] = form[instructions] or "新指令"
-                with self.assertRaisesRegex(CardActionError, "Project不能为空"):
-                    decode_schedule_action(scope=self.scope, value=None, form=form)
+                self.assertEqual(decode_schedule_action(scope=self.scope, value=None, form=form).payload["project"], "work")
                 form["cron_project"] = control["options"][0]["value"]
                 action = decode_schedule_action(scope=self.scope, value=None, form=form)
                 self.assertEqual(action.payload["project"], "available")
@@ -460,7 +740,7 @@ class ScheduleCardsTest(unittest.TestCase):
         self.assertEqual(corrected.request_id, first.request_id)
         self.assertEqual(corrected.payload["schedule"], {"kind": "interval", "timezone": "Asia/Shanghai", "every_minutes": 15, "end_at": None})
         self.assertEqual(corrected.payload["expected_revision"], self.plan["revision"])
-        self.assertEqual([item["text"]["content"] for item in elements(card.card, "button")], ["保存修改", "取消"])
+        self.assertEqual([item["text"]["content"] for item in elements(card.card, "button")], ["查找群聊", "保存修改", "取消"])
 
     def test_retry_form_renews_transport_identity_but_keeps_all_business_fields(self):
         self.plan["schedule"] = {"kind": "interval", "timezone": "America/New_York", "every_minutes": 45,
@@ -767,7 +1047,7 @@ class ScheduleCardsTest(unittest.TestCase):
         self.assertEqual(delete.action, "delete")
         self.assertEqual(delete.payload, {"plan_id": "plan-one", "expected_revision": 2})
         button = next(item for item in elements(detail.card, "button") if item.get("text", {}).get("content") == "删除计划")
-        self.assertIn("保留已有普通会话", str(button["confirm"]))
+        self.assertIn("保留已有 Agent 会话", str(button["confirm"]))
         runs = schedule_manager_card(self.scope, {"plans": [self.plan]}, selected={"plan": self.plan},
             runs={"runs": [{"status": "starting"}, {"status": "completed", "feishu_url": "https://applink.feishu.cn/client/chat/open?chatId=oc_group", "delivery_state": "sent"}], "next_cursor": "more"})
         panel = next(item for item in elements(runs.card, "collapsible_panel") if item["header"]["title"]["content"] == "最近执行")
@@ -792,6 +1072,71 @@ class ScheduleCardsTest(unittest.TestCase):
 
 
 class ScheduleCardCapacityTest(unittest.IsolatedAsyncioTestCase):
+    def test_group_snapshot_pages_keep_full_options_and_one_callback_snapshot(self):
+        scope = FeishuScope("app", "oc_group", ScopeKind.TOPIC, "omt_topic")
+        groups = tuple(AvailableChat(f"oc_result_{index}", f"研发群 {index}", "group", False) for index in range(25))
+        snapshot = ChatSearchSnapshot("研发", groups, {chat.chat_id: f"img_{index}" for index, chat in enumerate(groups)})
+        projects = [Project("work", Path("/tmp"), True, 1)]
+        initial = schedule_form_card(scope, projects=projects, default_timezone="UTC")
+        draft = read_schedule_form(scope, form_values(initial))
+        retained = replace(draft, target=replace(draft.target, mode="group", choice=groups[0].chat_id))
+        for state in (draft, retained):
+            for page in range(3):
+                with self.subTest(selected=state.target.choice, page=page):
+                    rendered = schedule_draft_card(state, projects=projects, chat_snapshot=snapshot, chat_page=page)
+                    self.assertLessEqual(_element_count(rendered.card), 200)
+                    choices = next(item for item in elements(rendered.card, "select_static") if item["name"] == "cron_group_id")
+                    expected = {chat.chat_id for chat in groups[page * 10:(page + 1) * 10]} | ({state.target.choice} if state.target.choice else set())
+                    self.assertEqual({item["value"] for item in choices["options"]}, expected)
+                    actions = [behavior["value"] for button in elements(rendered.card, "button")
+                        for behavior in button.get("behaviors", ())]
+                    self.assertEqual(sum("snapshot" in action["payload"] for action in actions), 1)
+                    self.assertEqual(len(elements(rendered.card, "form")), 1)
+                    selected_page = next(item for item in elements(rendered.card, "select_static") if item["name"] == "cron_chat_page")
+                    self.assertEqual(selected_page["initial_option"], str(page))
+
+    def test_fixed_group_page_rejects_capacity_without_removing_model_choices(self):
+        scope = FeishuScope("app", "oc_group", ScopeKind.TOPIC, "omt_topic")
+        projects = [Project(f"project-{index}", Path("/tmp"), True, index) for index in range(16)]
+        catalog = ModelCatalog(tuple(ModelOption(f"model-{index}", f"model-{index}", f"Model {index}", "", index == 0,
+            "high", "priority", (EffortOption("low", "", "low"), EffortOption("high", "", "high")),
+            (ServiceTierOption("priority", "Fast", ""),)) for index in range(16)))
+        initial = schedule_form_card(scope, projects=projects, default_timezone="UTC", catalog=catalog, allow_context_mode=True)
+        draft = read_schedule_form(scope, form_values(initial))
+        snapshot = ChatSearchSnapshot("研发", tuple(AvailableChat(f"oc_{index}", f"研发群 {index}", "group", False)
+            for index in range(21)), {})
+        with self.assertRaisesRegex(CardActionError, "细化关键词或填写聊天 ID"):
+            schedule_draft_card(draft, projects=projects, catalog=catalog, chat_snapshot=snapshot)
+        self.assertEqual(len(next(item["options"] for item in elements(initial.card, "select_static")
+            if item["name"] == "cron_session_model")), 17)
+
+    def test_capacity_validates_later_pages_before_exposing_first_page(self):
+        scope = FeishuScope("app", "oc_group", ScopeKind.TOPIC, "omt_topic")
+        projects = [Project("work", Path("/tmp"), True, 1)]
+        snapshot = ChatSearchSnapshot("", tuple(AvailableChat(f"oc_{index}", "短" if index < 10 else "长" * 100,
+            "group", False) for index in range(20)), {})
+        draft = read_schedule_form(scope, form_values(schedule_form_card(scope, projects=projects, default_timezone="UTC")))
+        pages = [schedule_draft_card(draft, projects=projects, chat_snapshot=snapshot, chat_page=page) for page in range(2)]
+        sizes = [len(json.dumps(page.card, ensure_ascii=False).encode("utf-8")) for page in pages]
+        self.assertLess(sizes[0], sizes[1])
+        with patch("netizen_cli.cards.scheduled.SCHEDULE_CARD_JSON_LIMIT_BYTES", (sizes[0] + sizes[1]) // 2):
+            with self.assertRaisesRegex(CardActionError, "细化关键词"):
+                schedule_draft_card(draft, projects=projects, chat_snapshot=snapshot, chat_page=0)
+
+    def test_capacity_reserves_future_selected_caption_even_on_single_page(self):
+        scope = FeishuScope("app", "oc_group", ScopeKind.TOPIC, "omt_topic")
+        projects = [Project("work", Path("/tmp"), True, 1)]
+        snapshot = ChatSearchSnapshot("", (AvailableChat("oc_long", "长群名" * 100, "group", False),), {})
+        draft = read_schedule_form(scope, form_values(schedule_form_card(scope, projects=projects, default_timezone="UTC")))
+        selected = replace(draft, target=replace(draft.target, choice="oc_long"))
+        before = schedule_draft_card(draft, projects=projects, chat_snapshot=snapshot)
+        after = schedule_draft_card(selected, projects=projects, chat_snapshot=snapshot)
+        sizes = [len(json.dumps(card.card, ensure_ascii=False).encode("utf-8")) for card in (before, after)]
+        self.assertLess(sizes[0], sizes[1])
+        with patch("netizen_cli.cards.scheduled.SCHEDULE_CARD_JSON_LIMIT_BYTES", (sizes[0] + sizes[1]) // 2):
+            with self.assertRaisesRegex(CardActionError, "细化关键词"):
+                schedule_draft_card(draft, projects=projects, chat_snapshot=snapshot)
+
     def test_full_form_with_deadline_stays_within_component_budget(self):
         scope = FeishuScope("app", "oc_group", ScopeKind.TOPIC, "omt_topic")
         projects = [Project(f"project-{index}", Path("/tmp"), True, index) for index in range(16)]

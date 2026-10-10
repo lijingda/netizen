@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..bindings import BindingNotFound, BindingQuery, BindingQueryBusy, BindingQueryClosed, BindingQueryTimeout, BindingStore, ProjectConflict, ProjectDeleting, ProjectDisabled, ProjectNotFound, ScopeNotFound
 from ..channel.messages import public_chat_kind
+from ..chat_targets import ChatTargetError, ChatTargetValidator
 from ..model_settings import ModelCatalog, ModelCatalogError, STANDARD_SERVICE_TIER_ID
 from ..session_settings import SessionSettings, SessionSettingsError
 from .models import MutationResult, Plan, Run, ScheduleError, ScheduleNotFound, ScheduleRule, plan_lifecycle
@@ -73,12 +74,14 @@ class ScheduleService:
         self, *, bindings: BindingStore, runtime: Any, app_id: str,
         chat_info: Any = None, wall_clock: Callable[[], float] = time.time,
         default_timezone: str | None = None,
+        chat_target_validator: ChatTargetValidator | None = None,
     ) -> None:
         self.app_id = app_id
         self._bindings = bindings
         self._store = bindings.schedules
         self._runtime = runtime
         self._chat_info = chat_info
+        self._chat_target_validator = chat_target_validator
         self._clock = wall_clock
         self.default_timezone = default_timezone or local_timezone()
         self._wake: Callable[[], None] = lambda: None
@@ -159,7 +162,7 @@ class ScheduleService:
                 _boolean(all_plans, "all")
                 chat = data["chat_id"] if "chat_id" in data else (None if all_plans else chat_default)
                 if not all_plans and not chat:
-                    raise _InputError("context_required", "无法确定当前会话；请提供 chat_id 或 all=true。")
+                    raise _InputError("context_required", "无法确定当前飞书聊天；请提供 chat_id 或 all=true。")
                 filters = {"app_id": self.app_id, "chat_id": chat,
                            "project_alias": data.get("project"), "enabled": data.get("enabled"),
                            "ended": data.get("ended"), "target_kind": data.get("target_kind"),
@@ -190,14 +193,14 @@ class ScheduleService:
                     target_scope, target = self._binding_target(data, binding=binding)
                     target_binding_id = target.id
                     chat, project = target_scope.chat_id, target.project_alias
-                    await self._validate_chat(chat)
+                    await self._validate_submitted_chat(chat)
                     settings = None
                 else:
                     if "target_binding_id" in data:
                         raise ScheduleError("新话题模式不接受 target_binding_id。")
                     chat = _text(data["chat_id"] if "chat_id" in data else chat_default, "chat_id")
                     project = _text(data["project"] if "project" in data else project_default, "project")
-                    chat_kind = await self._validate_chat(chat)
+                    chat_kind = await self._validate_submitted_chat(chat)
                     settings = await self._resolve_session_settings(data, binding=binding, chat_kind=chat_kind)
                 rule = self._rule(data, now=now)
                 enabled = data.get("enabled", True)
@@ -264,9 +267,12 @@ class ScheduleService:
                 _boolean(changes["enabled"], "enabled")
             if "project" in data:
                 changes["project_alias"] = _text(data["project"], "project")
-            if "session_settings" in data or ("chat_id" in changes and changes["chat_id"] != plan.chat_id):
-                chat_kind = await self._validate_chat(_text(changes.get("chat_id", plan.chat_id), "chat_id"))
-                changes["session_settings"] = await self._resolve_session_settings(data, previous=plan.session_settings, chat_kind=chat_kind)
+            if "chat_id" in changes:
+                changes["chat_id"] = _text(changes["chat_id"], "chat_id")
+            if "session_settings" in data or "chat_id" in changes:
+                chat_kind = await self._validate_submitted_chat(changes.get("chat_id", plan.chat_id))
+                if "session_settings" in data or changes.get("chat_id", plan.chat_id) != plan.chat_id:
+                    changes["session_settings"] = await self._resolve_session_settings(data, previous=plan.session_settings, chat_kind=chat_kind)
             if "schedule" in data or "timezone" in data:
                 changes["schedule"] = self._rule(data, now=now, previous=plan.schedule)
             result = self._store.update(plan.id, expected_revision=revision, request_id=request_id, changes=changes, now=now, request_payload=request_payload)
@@ -315,18 +321,18 @@ class ScheduleService:
     @staticmethod
     def _reject_binding_overrides(request: Mapping[str, Any]) -> None:
         if {"project", "chat_id", "session_settings"}.intersection(request):
-            raise ScheduleError("原会话计划沿用目标 Binding 的 Project、位置和配置，不接受独立覆盖。")
+            raise ScheduleError("Agent 会话计划沿用目标 Binding 的 Project、位置和配置，不接受独立覆盖。")
 
     def _binding_target(self, request: Mapping[str, Any], *, binding: Any = None) -> tuple[Any, Any]:
         target_id = request.get("target_binding_id")
         if target_id is None:
             if binding is None:
-                raise _InputError("context_required", "无法确定原会话；请提供 options 返回的准确 target_binding_id。")
+                raise _InputError("context_required", "无法确定目标 Agent 会话；请提供 options 返回的准确 target_binding_id。")
             target_id = binding.id
         target = self._bindings.get(_text(target_id, "target_binding_id"))
         scope = self._bindings.get_scope(target.scope_key)
         if scope.app_id != self.app_id:
-            raise BindingNotFound("当前应用下没有这个目标会话。")
+            raise BindingNotFound("当前应用下没有这个目标 Agent 会话。")
         return scope, target
 
     def _validate_target_update(self, request: Mapping[str, Any], plan: Plan) -> None:
@@ -337,7 +343,8 @@ class ScheduleService:
         if plan.target_kind == "binding":
             self._reject_binding_overrides(request)
 
-    async def _catalog(self) -> tuple[ModelCatalog | None, dict[str, str] | None]:
+    async def model_catalog_options(self) -> tuple[ModelCatalog | None, dict[str, str] | None]:
+        """Load only model choices when an existing form draft is redrawn."""
         try:
             async with asyncio.timeout(5):
                 return await self._runtime.model_catalog(), None
@@ -355,7 +362,7 @@ class ScheduleService:
         elif binding is not None:
             base = SessionSettings.from_binding(binding)
         elif "turn_settings" not in patch:
-            catalog, catalog_error = await self._catalog()
+            catalog, catalog_error = await self.model_catalog_options()
             base = SessionSettings.new_defaults(catalog)
         else:
             base = SessionSettings.new_defaults(None)
@@ -366,7 +373,7 @@ class ScheduleService:
             settings = settings.merge({"message_context_mode": "current-only"})
         if settings.turn_settings is not None and (previous is None or settings.turn_settings != previous.turn_settings):
             if catalog is None and catalog_error is None:
-                catalog, catalog_error = await self._catalog()
+                catalog, catalog_error = await self.model_catalog_options()
             if catalog is None:
                 assert catalog_error is not None
                 raise _InputError(catalog_error["code"], catalog_error["message"])
@@ -378,9 +385,13 @@ class ScheduleService:
 
     async def options(self, *, native_thread_id: str | None = None, scope_key: str | None = None, chat_id: str | None = None, binding_query: str | None = None) -> dict[str, Any]:
         result, _ = await self.form_options(native_thread_id=native_thread_id, scope_key=scope_key, chat_id=chat_id, binding_query=binding_query)
+        # Public Admin/MCP options retain their strict target-read contract.
+        if result.get("chat_info_error") is not None:
+            return {"ok": False, "error": result["chat_info_error"]}
         return result
 
     async def form_options(self, *, native_thread_id: str | None = None, scope_key: str | None = None, chat_id: str | None = None, binding_query: str | None = None) -> tuple[dict[str, Any], ModelCatalog | None]:
+        """Load independent presentation inputs without losing editable defaults."""
         try:
             if binding_query is not None:
                 if not isinstance(binding_query, str) or len(binding_query) > 200:
@@ -388,8 +399,13 @@ class ScheduleService:
                 binding_query = binding_query.strip() or None
             scope, binding = self._source(native_thread_id, scope_key)
             chat = _text(chat_id, "chat_id") if chat_id is not None else scope.chat_id if scope else None
-            kind = await self._validate_chat(chat) if chat is not None else None
-            catalog, error = await self._catalog()
+            kind, chat_error = None, None
+            if chat is not None:
+                try:
+                    kind = await self._validate_chat(chat)
+                except _InputError as error:
+                    chat_error = _failure(error)["error"]
+            catalog, error = await self.model_catalog_options()
             settings = SessionSettings.from_binding(binding) if binding else SessionSettings.new_defaults(catalog)
             if kind == "p2p":
                 settings = settings.merge({"message_context_mode": "current-only"})
@@ -398,11 +414,12 @@ class ScheduleService:
                 targets, truncated = await self._binding_options(chat=chat, binding=binding, search=binding_query)
             except (BindingQueryBusy, BindingQueryClosed, BindingQueryTimeout):
                 targets, truncated = [], False
-                binding_error = {"code": "binding_options_unavailable", "message": "会话选项暂不可用，请稍后重试。"}
+                binding_error = {"code": "binding_options_unavailable", "message": "Agent 会话选项暂不可用，请稍后重试。"}
             return {"ok": True, "session_settings": settings.to_dict(), "models": _models(catalog),
                     "source_binding_id": binding.id if binding else None,
                     "binding_targets": targets, "bindings_truncated": truncated,
                     "binding_options_error": binding_error,
+                    "chat_info_error": chat_error,
                     "context_mode_available": kind != "p2p" if kind is not None else None,
                     "model_catalog_error": error}, catalog
         except (ScheduleError, SessionSettingsError, BindingNotFound, ScopeNotFound) as error:
@@ -479,16 +496,24 @@ class ScheduleService:
 
     async def _validate_chat(self, chat_id: str) -> str:
         if self._chat_info is None:
-            raise _InputError("unavailable", "会话信息服务暂不可用。")
+            raise _InputError("unavailable", "飞书聊天信息服务暂不可用。")
         try:
             async with asyncio.timeout(5):
                 info = await self._chat_info.get_chat_info(chat_id)
         except Exception as error:
-            raise _InputError("chat_unavailable", "无法访问目标会话，请检查 chat_id 和机器人是否可访问该会话。") from error
+            raise _InputError("chat_unavailable", "无法访问目标飞书聊天，请检查 chat_id 和机器人是否可访问该聊天。") from error
         kind = public_chat_kind(info)
         if kind is None:
-            raise _InputError("chat_kind_unknown", "无法确认目标会话类型，请稍后重试或检查 chat_id；这不代表当前会话是私聊。")
+            raise _InputError("chat_kind_unknown", "无法确认目标飞书聊天类型，请稍后重试或检查 chat_id；这不代表当前聊天是单聊。")
         return kind
+
+    async def _validate_submitted_chat(self, chat_id: str) -> str:
+        if self._chat_target_validator is None:
+            raise _InputError("chat_query_unavailable", "飞书聊天校验暂不可用，请稍后重试。")
+        try:
+            return (await self._chat_target_validator(chat_id)).chat_kind
+        except ChatTargetError as error:
+            raise _InputError(error.code, str(error)) from error
 
     async def _run_receipt(self, result: MutationResult) -> dict[str, Any]:
         if not result.run_id:

@@ -13,6 +13,7 @@ from typing import Literal
 from openai_codex.generated.v2_all import FileChangeThreadItem
 from openai_codex.types import ThreadItem
 
+from .pagination import ItemPage, PageError, paginate_items
 from .turn_patch_children import TaskPatchChildren, TurnPatchBatch
 
 
@@ -39,11 +40,8 @@ class TurnFile:
 
 
 @dataclass(frozen=True, slots=True)
-class TurnFilePage:
-    items: tuple[TurnFile, ...]
-    page: int
-    total_pages: int
-    total_items: int
+class TurnFilePage(ItemPage[TurnFile]):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,24 +469,15 @@ def paginate_turn_files(
     *,
     page_size: int = TURN_FILE_PAGE_SIZE,
 ) -> TurnFilePage:
-    if isinstance(page, bool) or not isinstance(page, int) or page < 0:
-        raise TurnFileError("本轮文件页码无效，请重新打开原卡片。")
-    if (
-        isinstance(page_size, bool)
-        or not isinstance(page_size, int)
-        or page_size < 1
-    ):
-        raise ValueError("page_size must be a positive integer")
-    total_items = len(files)
-    total_pages = max(1, (total_items + page_size - 1) // page_size)
-    if page >= total_pages:
-        raise TurnFileError("本轮文件页码已过期，请重新打开原卡片。")
-    start = page * page_size
+    try:
+        visible = paginate_items(files, page, page_size=page_size)
+    except PageError as error:
+        raise TurnFileError(f"本轮文件{error}请重新打开原卡片。") from error
     return TurnFilePage(
-        items=tuple(files[start : start + page_size]),
-        page=page,
-        total_pages=total_pages,
-        total_items=total_items,
+        items=visible.items,
+        page=visible.page,
+        total_pages=visible.total_pages,
+        total_items=visible.total_items,
     )
 
 

@@ -31,6 +31,7 @@ class PersistentForkBindingTest(unittest.TestCase):
             "scope": self.target, "source": self.source,
             "native_thread_id": "fork-native", "root_message_id": "root",
             "creator_id": "fork-user", "expected_project_revision": 1,
+            "target_chat_kind": "group",
             "context_anchor": MessageContextAnchor("target-seed", 2000),
             **overrides,
         })
@@ -55,6 +56,21 @@ class PersistentForkBindingTest(unittest.TestCase):
         self.assertEqual(self.store.active_binding(self.target.key).id, existing.id)
         self.assertEqual(len(self.store.list_bindings(self.target.key)), 1)
         self.assertIsNone(self.store.get(existing.id).native_thread_id)
+
+    def test_p2p_target_only_normalizes_future_catch_up_not_source_or_other_settings(self) -> None:
+        branch = self.create(target_chat_kind="p2p")
+        self.assertEqual(branch.message_context_mode, MentionContextMode.CURRENT_ONLY)
+        self.assertIsNone(branch.context_anchor)
+        self.assertEqual(branch.turn_settings, self.source.turn_settings)
+        self.assertEqual(branch.task_feedback, self.source.task_feedback)
+        self.assertEqual(branch.native_thread_id, "fork-native")
+        self.assertEqual(self.store.get(self.source.id), self.source)
+
+    def test_unknown_target_kind_cannot_create_binding(self) -> None:
+        with self.assertRaises(ValueError):
+            self.create(target_chat_kind="unknown")
+        with self.assertRaises(ScopeNotFound):
+            self.store.get_scope(self.target.key)
 
     def test_duplicate_native_identity_rolls_back_scope_and_current(self) -> None:
         branch = self.create()
