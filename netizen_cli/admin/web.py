@@ -193,7 +193,7 @@ _SECURITY_HEADERS = (
     (b"X-Frame-Options", b"DENY"),
 )
 
-# ADR 0079: the fixed official selector is a trusted same-origin dependency.
+# ADR 0080: the fixed official selector is a trusted same-origin dependency.
 # The exception applies to the authenticated Admin document, not the login page.
 _SELECTOR_CSP = (
     "default-src 'self'; script-src 'self' 'unsafe-eval' "

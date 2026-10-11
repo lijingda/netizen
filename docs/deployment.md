@@ -1150,7 +1150,7 @@ uninstall.sh 入口已停用，只返回 CLI 指引；不会生成 release/curre
 权限和回调的单一契约仍是[前置门禁](#前置门禁)。修改
 `netizen_cli/feishu_app_onboarding.py` 的 tenant/user addons 时，同步更新权限检查、
 用户说明及相关行为测试；不新增 CLI 运行依赖。Admin 的窄协议适配遵守
-[ADR 0079](adr/0079-authenticate-admins-with-feishu-identities.md)，不扩展为通用 API 转发。
+[ADR 0080](adr/0080-authenticate-admins-with-feishu-identities.md)，不扩展为通用 API 转发。
 审批、发布、
 租户安装与入群须按真实流程确认，SDK 返回凭据不等于全部权限已生效。
 
@@ -1189,7 +1189,7 @@ fake helper 和代码门禁不能冒充真实应用验收。
 
 ### Admin 飞书登录与管理员维护验收
 
-2026-10-11 本轮将 [ADR 0079](adr/0079-authenticate-admins-with-feishu-identities.md) 接入
+2026-10-11 本轮将 [ADR 0080](adr/0080-authenticate-admins-with-feishu-identities.md) 接入
 当前源码，未据此发布版本或部署真实实例。临时 demo 的真人登录、选人和本人 Open ID
 对应证据不等于正式链路通过；以下 live 项仍需在授权的隔离应用和实例完成：
 

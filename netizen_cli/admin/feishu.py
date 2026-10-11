@@ -1,4 +1,4 @@
-"""Narrow Feishu Admin OAuth and selector boundary (ADR 0079).
+"""Narrow Feishu Admin OAuth and selector boundary (ADR 0080).
 
 The pinned SDK owns typed user-info calls. Its Device Flow endpoints do not
 support this app, so the fixed accounts protocol and public selector-ticket

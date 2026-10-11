@@ -128,7 +128,7 @@ Admin 是必备能力，不支持 `adminWeb.enabled`。管理员通过飞书登�
 分别位于实例的 `state/admin-users.json`、`credentials/admin-user-tokens.json`；
 服务重启保留用户凭证，但浏览器 session 失效。安装统一开通 user 类型
 `component:selector`、`offline_access`，新登录也请求这两项权限；名单展示不另申请通讯录权限。
-相关边界见 [ADR 0079](adr/0079-authenticate-admins-with-feishu-identities.md)，真人和平台验收
+相关边界见 [ADR 0080](adr/0080-authenticate-admins-with-feishu-identities.md)，真人和平台验收
 见[部署手册](deployment.md#admin-飞书登录与管理员维护验收)，本地测试通过不代表已上线。
 
 实例命令按 root，程序更新按调用环境；另一个 venv 的 start/restart 不自动接管已有

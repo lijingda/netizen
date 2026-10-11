@@ -1669,7 +1669,7 @@ Admin 只发起本实例重启，由同用户独立 systemd transient service／
 
 ### Admin HTTP 与认证
 
-Admin Web 是 ADR 0031/0074/0079 的实例级控制面，管理员权力相同，无角色或 Project ACL。
+Admin Web 是 ADR 0031/0074/0080 的实例级控制面，管理员权力相同，无角色或 Project ACL。
 Admin 是必备能力，不再提供 enabled 配置，默认监听 `0.0.0.0`。
 `adminWeb.port` 已配置时严格使用；字段缺失时在持有实例 lifetime lock 的启动进程中
 实际绑定 8787–8886，只有地址占用才顺延。绑定成功后原子写回本实例 YAML，检测到人工
@@ -1685,7 +1685,7 @@ absolute deadline 5 秒、keep-alive 15 秒、request/header line 8 KiB、header
 设备授权 start/state/cancel/二维码与无细节 readiness；未认证 GET `/` 只返回 303 到
 `/login`。管理 HTML、JavaScript、API 和其他资源要求 session 并返回 401。
 
-按 [ADR 0079](adr/0079-authenticate-admins-with-feishu-identities.md)，登录复用当前实例
+按 [ADR 0080](adr/0080-authenticate-admins-with-feishu-identities.md)，登录复用当前实例
 飞书应用的 Device Flow，不要求实例回调 URL。打开登录页只签发 preauth 并查询状态，
 用户主动开始才创建上游授权；nonce/cookie/来源配对且仅消费一次，尝试有界、可取消，
 `slow_down` 至少加五秒。发起与失败均有限速，取消不退还发起额度。后台不无限轮询，
@@ -1736,7 +1736,7 @@ type 为 user 后仍须管理员确认及服务端授权校验。当前用户资
 支持准确应用身份确认或 `--admin-open-id`。已有名单不被操作者替换；后台启动只校验，
 缺管理员提示 setup 而不等待授权。删除旧 secret 认证、生成和启动依赖，旧文件不自动
 删除；本轮不保留旧 enabled/secret 配置及服务模板兼容。协议 SDK 缺口与移除条件见 ADR
-0079，平台真人验收状态见部署记录，不以合成测试或旧 demo 冒充正式版本验收。
+0080，平台真人验收状态见部署记录，不以合成测试或旧 demo 冒充正式版本验收。
 
 ### 系统维护 API
 
