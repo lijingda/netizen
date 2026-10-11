@@ -19,6 +19,7 @@ from lark_channel import DedupStore
 from openai_codex import CodexConfig
 
 from netizen_cli.admin.port_config import ConfigFileSnapshot
+from netizen_cli.admin.users import AdminUsers
 from netizen_cli.bindings import BindingStore, SideTopicState
 from netizen_cli.chat_avatars import CHAT_AVATAR_HOSTS
 from netizen_cli.cli_data import (
@@ -51,6 +52,9 @@ from netizen_cli.settings import AdminWebSettings, Settings
 def settings(root: Path) -> Settings:
     project = root / "project"
     project.mkdir(exist_ok=True)
+    users = AdminUsers(root, "cli_test")
+    if not users.has_admins:
+        users.add_initial("ou_admin")
     return Settings(
         app_id="cli_test",
         app_secret="secret",
@@ -58,11 +62,14 @@ def settings(root: Path) -> Settings:
         project_root=root,
         projects={"test": project},
         security_mode="audit",
-        admin_web=AdminWebSettings(enabled=False),
+        admin_web=AdminWebSettings(),
     )
 
 
 class MainConfigurationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enterContext(patch("netizen_cli.main.require_admin_binding"))
+
     def test_platform_trust_uses_keychain_on_macos(self) -> None:
         calls: list[str] = []
         fake_truststore = SimpleNamespace(
@@ -99,7 +106,7 @@ class MainConfigurationTest(unittest.TestCase):
             patch("netizen_cli.main._configure_logging"),
             patch("netizen_cli.main.Settings.from_file", return_value=SimpleNamespace(
                 data_dir=Path("/tmp/instance/state").resolve(),
-                admin_web=AdminWebSettings(enabled=False),
+                admin_web=AdminWebSettings(),
             )),
             patch("netizen_cli.main._scrub_channel_environment"),
             patch(
@@ -239,10 +246,7 @@ class MainConfigurationTest(unittest.TestCase):
                     configuration_environments[0]["NETIZEN_LARK_APP_CONFIG"],
                     str(target / "lark-app" / "config.json"),
                 )
-                self.assertEqual(
-                    configuration_environments[0]["NETIZEN_ADMIN_SECRET_FILE"],
-                    str(target / "credentials" / "admin-web-secret"),
-                )
+                self.assertNotIn("NETIZEN_ADMIN_SECRET_FILE", configuration_environments[0])
                 self.assertNotIn("NETIZEN_LARK_APP_CONFIG", os.environ)
                 self.assertNotIn("NETIZEN_ADMIN_SECRET_FILE", os.environ)
 
@@ -257,9 +261,10 @@ class MainConfigurationTest(unittest.TestCase):
             config = root / "config.yaml"
             config.write_text(
                 f"instance:\n  dataDir: {root / 'state'}\n  projectRoot: {home / 'projects'}\n"
-                "adminWeb:\n  enabled: false\n", encoding="utf-8",
+                "adminWeb: {}\n", encoding="utf-8",
             )
             config.chmod(0o600)
+            AdminUsers(root, "cli_default").add_initial("ou_admin")
             with instance_lifetime_lock(root) as descriptor:
                 initialize_instance_data(root, lifetime_descriptor=descriptor)
             with (
@@ -283,7 +288,7 @@ class MainConfigurationTest(unittest.TestCase):
     def test_main_rejects_cross_instance_paths_before_logging_or_runtime(self) -> None:
         names = (
             "NETIZEN_CONFIG_PATH", "NETIZEN_LARK_APP_CONFIG",
-            "NETIZEN_ADMIN_SECRET_FILE", "NETIZEN_LOG_FILE",
+            "NETIZEN_LOG_FILE",
             "NETIZEN_READY_FILE", "NETIZEN_LIFETIME_LOCK_FILE",
         )
         with tempfile.TemporaryDirectory() as raw:
@@ -413,13 +418,7 @@ class MainConfigurationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw).resolve()
             configured = settings(root)
-            for label, candidate in (
-                ("instance.dataDir", configured),
-                ("Admin credential path", replace(
-                    configured, data_dir=root / "state",
-                    admin_web=AdminWebSettings(credential_path=root / "other-secret"),
-                )),
-            ):
+            for label, candidate in (("instance.dataDir", configured),):
                 with (
                     self.subTest(label=label),
                     patch.dict(os.environ, {"NETIZEN_ROOT": str(root)}, clear=True),
@@ -646,6 +645,11 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch("netizen_cli.main.Scheduler", make_scheduler))
         self.enterContext(patch("netizen_cli.main.AppServerSkillRoots", make_skill_roots))
         self.enterContext(patch("netizen_cli.main.builtin_skill_root", return_value=self.builtin_root))
+        self.enterContext(patch("netizen_cli.main.AdminWebRunner", side_effect=lambda **_kwargs: SimpleNamespace(
+            bind=AsyncMock(), close_listener=AsyncMock(), drain=AsyncMock(),
+            close_auth=Mock(), attach_management=Mock(), open_admission=Mock(),
+            close_admission=Mock(), urls=(), loopback_only=True,
+        )))
 
     def _make_core(self, root: Path) -> ServiceCore:
         configured = settings(root)
@@ -715,6 +719,23 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.schedulers, [])
         self.assertEqual(self.schedule_events.count("mcp:close"), 1)
         self.assertNotIn("mcp:open", self.schedule_events)
+
+    async def test_missing_administrator_rejects_before_listener_or_codex(self) -> None:
+        from netizen_cli.cli_setup import SetupError
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            core = self._make_core(root)
+            AdminUsers(root, "cli_test").path.unlink()
+            with (
+                patch("netizen_cli.main.AdminWebRunner") as listener,
+                patch("netizen_cli.main.AsyncCodex") as codex,
+            ):
+                with self.assertRaises(SetupError):
+                    await core.start()
+                listener.assert_not_called()
+                codex.assert_not_called()
+        self.assertEqual(self.mcp_runners, [])
 
     async def test_recovery_failure_closes_schedule_components_and_native_transport(self) -> None:
         self.schedule_recovery_error = RuntimeError("recovery failed")
@@ -821,6 +842,8 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw).resolve()
             instance_root = root / "explicit-instance"
+            instance_root.mkdir()
+            AdminUsers(instance_root, "cli_test").add_initial("ou_admin")
             config_path = root / "development-config.yaml"
             snapshot = ConfigFileSnapshot(config_path, b"adminWeb: {}", ())
             configured = settings(root)
@@ -832,11 +855,9 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 projects=configured.projects,
                 security_mode=configured.security_mode,
                 admin_web=AdminWebSettings(
-                    enabled=True,
                     host="0.0.0.0",
                     port=None,
                     access_host="admin.example.test",
-                    credential_path=root / "admin-secret",
                 ),
                 config_path=config_path,
                 config_snapshot=snapshot,
@@ -875,9 +896,11 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.skill_root_calls, [(core._codex, (self.builtin_root,))])
                 account_limits.assert_called_once_with(core._codex)
                 self.assertIs(core._runtime._account_rate_limits, account_limits.return_value)
+                self.assertIsInstance(admin_options.pop("users"), AdminUsers)
+                self.assertEqual(admin_options["feishu_client"].app_id, "cli_test")
+                admin_options.pop("feishu_client")
                 self.assertEqual(admin_options, {
                     "host": "0.0.0.0", "port": None,
-                    "credential_path": root / "admin-secret",
                     "instance_root": instance_root,
                     "config_path": config_path, "config_snapshot": snapshot,
                     "access_host": "admin.example.test",
@@ -924,10 +947,6 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         for phase in ("adapter", "registration"):
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as raw:
                 core = self._make_core(Path(raw))
-                core._settings = replace(
-                    core._settings,
-                    admin_web=AdminWebSettings(credential_path=Path(raw) / "admin-secret"),
-                )
                 codex = SimpleNamespace(__aenter__=AsyncMock(), close=AsyncMock())
                 admin = SimpleNamespace(
                     bind=AsyncMock(), close_listener=AsyncMock(), drain=AsyncMock(),
@@ -1005,9 +1024,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 project_root=configured.project_root,
                 projects=configured.projects,
                 security_mode=configured.security_mode,
-                admin_web=AdminWebSettings(
-                    credential_path=root / "admin-secret"
-                ),
+                admin_web=AdminWebSettings(),
             )
             store = BindingStore()
             core = ServiceCore(

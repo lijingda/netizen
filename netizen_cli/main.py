@@ -50,7 +50,9 @@ import lark_oapi as lark
 from openai_codex import AsyncCodex, CodexConfig
 
 from .admin.web import AdminWebRunner
-from .admin.auth import CredentialFileError, load_credential_snapshot
+from .admin.users import AdminUsers, AdminUsersError
+from .admin.feishu import FeishuClient
+from .cli_setup import require_admin_binding, SetupError
 from .bindings import BindingStore, validate_channel_database
 from .builtin_skills import builtin_skill_root
 from .cli_data import (
@@ -188,25 +190,23 @@ class ServiceCore:
     async def start(self) -> None:
         stage_started_at = time.monotonic()
         try:
-            if self._settings.admin_web.enabled:
-                credential_path = self._settings.admin_web.credential_path
-                if credential_path is None:
-                    raise RuntimeError(
-                        "Admin Web is enabled without a credential path"
-                    )
-                # Credential validation and the closed listener come first so
-                # a bad secret or occupied port cannot start the Feishu side.
-                self._admin = AdminWebRunner(
-                    host=self._settings.admin_web.host,
-                    port=self._settings.admin_web.port,
-                    credential_path=credential_path,
-                    instance_root=self._instance_root,
-                    config_path=self._settings.config_path,
-                    config_snapshot=self._settings.config_snapshot,
-                    access_host=self._settings.admin_web.access_host,
-                )
-                await self._admin.bind()
-                stage_started_at = _log_startup_timing("Admin listener", stage_started_at)
+            # Admin is mandatory. Identity validation and the closed listener
+            # precede native/Channel admission; no interactive authorization here.
+            users = AdminUsers(self._instance_root, self._settings.app_id)
+            if not users.has_admins:
+                raise SetupError("Admin administrator missing; run netizen setup --root for this instance")
+            self._admin = AdminWebRunner(
+                host=self._settings.admin_web.host,
+                port=self._settings.admin_web.port,
+                users=users,
+                feishu_client=FeishuClient(self._settings.app_id, self._settings.app_secret),
+                instance_root=self._instance_root,
+                config_path=self._settings.config_path,
+                config_snapshot=self._settings.config_snapshot,
+                access_host=self._settings.admin_web.access_host,
+            )
+            await self._admin.bind()
+            stage_started_at = _log_startup_timing("Admin listener", stage_started_at)
 
             # Bind the native MCP transport before App Server initializes its
             # catalog. Calls remain closed until the shared application is ready.
@@ -725,7 +725,6 @@ def _validate_instance_environment(
     _validate_instance_path(config_path, root / "config.yaml", label="NETIZEN_CONFIG_PATH")
     expected_paths = {
         "NETIZEN_LARK_APP_CONFIG": root / "lark-app" / "config.json",
-        "NETIZEN_ADMIN_SECRET_FILE": root / "credentials" / "admin-web-secret",
         "NETIZEN_LOG_FILE": root / "state" / "netizen.log",
         "NETIZEN_READY_FILE": root / "state" / "service.ready",
         "NETIZEN_LIFETIME_LOCK_FILE": root / "state" / "service.lifetime.lock",
@@ -866,7 +865,7 @@ def _run_service() -> None:
         # starts. Export it before creating any Codex/tool subprocesses.
         os.environ["NETIZEN_ROOT"] = str(instance_root)
         os.environ["NETIZEN_LARK_APP_CONFIG"] = str(instance_root / "lark-app" / "config.json")
-        os.environ["NETIZEN_ADMIN_SECRET_FILE"] = str(instance_root / "credentials" / "admin-web-secret")
+        os.environ.pop("NETIZEN_ADMIN_SECRET_FILE", None)
         _configure_platform_trust()
         raw_ready_file = startup_environment.get("NETIZEN_READY_FILE", "")
         if lifetime_descriptor is not None and not raw_ready_file:
@@ -881,23 +880,16 @@ def _run_service() -> None:
         except (ValueError, FileNotFoundError, PermissionError) as error:
             raise StartupRejected(str(error)) from error
         _validate_instance_path(settings.data_dir, instance_root / "state", label="instance.dataDir")
-        if settings.admin_web.credential_path is not None:
-            _validate_instance_path(
-                settings.admin_web.credential_path,
-                instance_root / "credentials" / "admin-web-secret",
-                label="Admin credential path",
-            )
-            if settings.admin_web.enabled:
-                try:
-                    load_credential_snapshot(settings.admin_web.credential_path)
-                except CredentialFileError as error:
-                    raise StartupRejected(str(error)) from error
         if lifetime_descriptor is None:
             try:
                 lifetime_descriptor = acquire_lifetime_lock(instance_root)
             except (InstanceDataError, FileNotFoundError, PermissionError) as error:
                 raise StartupRejected(str(error)) from error
         prepare_instance(instance_root, lifetime_descriptor=lifetime_descriptor)
+        try:
+            require_admin_binding(instance_root)
+        except (SetupError, AdminUsersError, ValueError, OSError) as error:
+            raise StartupRejected(str(error)) from error
         _configure_logging()
         logger.info("netizen startup: module imports completed in %.3fs", _IMPORT_SECONDS)
         _scrub_channel_environment()

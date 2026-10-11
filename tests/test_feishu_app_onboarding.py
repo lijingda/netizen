@@ -92,7 +92,8 @@ class FeishuAppOnboardingTest(unittest.TestCase):
         self.assertIs(addons["preset"], False)
         self.assertEqual(
             addons["scopes"],
-            {"tenant": list(onboarding.REQUIRED_TENANT_SCOPES)},
+            {"tenant": list(onboarding.REQUIRED_TENANT_SCOPES),
+             "user": ["component:selector", "offline_access"]},
         )
         self.assertIn(
             "im:message.group_at_msg.include_bot:readonly",
@@ -113,7 +114,8 @@ class FeishuAppOnboardingTest(unittest.TestCase):
             onboarding.TENANT_SCOPE_ALTERNATIVES["im:chat:read"],
             frozenset(("im:chat", "im:chat:read", "im:chat:readonly")),
         )
-        self.assertNotIn("user", addons["scopes"])
+        self.assertNotIn("component:selector", addons["scopes"]["tenant"])
+        self.assertNotIn("offline_access", addons["scopes"]["tenant"])
         self.assertEqual(
             addons["events"],
             {"items": {"tenant": ["im.message.receive_v1"]}},

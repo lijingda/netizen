@@ -217,9 +217,9 @@ Project、普通 Binding、Side Topic、Admin Upgrade 与 Admin Restart。它与
 application service、Scope coordinator、Runtime、Store 和 Codex client；不是 Prompt Channel，也不
 拥有第二份历史或配置事实。
 
-**Instance Administrator / 实例管理员**：Admin Control Plane 的单一运维身份，凭独立
-credential 跨 Scope 管理当前 Netizen 实例。它不同于 Channel
-Participant、Binding creator 或 Project owner，后几者都不自动获得实例管理员权限。
+**Instance Administrator / 实例管理员**：获当前实例授权、通过当前飞书应用确认的用户身份，
+可跨 Scope 管理该实例；各管理员具有相同权限。它不同于 Channel Participant、Binding
+creator 或 Project owner，后几者都不自动获得实例管理员权限。
 
 **Codex-owned Setting / Codex 原生设置**：由标准 Codex 配置层拥有、同时影响
 CLI/App/Netizen 的设置；Netizen 只通过原生 Codex 接口读取或修改。

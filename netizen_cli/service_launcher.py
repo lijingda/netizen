@@ -283,7 +283,6 @@ def service_environment(
     codex_home: str | None,
     config_path: str,
     lark_app_config: str,
-    admin_secret_file: str,
     ready_file: str,
     lifetime_lock_file: str,
     log_file: str | None = None,
@@ -297,7 +296,6 @@ def service_environment(
     managed_paths = {
         "NETIZEN_CONFIG_PATH": config_path,
         "NETIZEN_LARK_APP_CONFIG": lark_app_config,
-        "NETIZEN_ADMIN_SECRET_FILE": admin_secret_file,
         "NETIZEN_READY_FILE": ready_file,
         "NETIZEN_LIFETIME_LOCK_FILE": lifetime_lock_file,
     }
@@ -328,7 +326,6 @@ def service_environment(
             "HOME": str(home),
             "LOGNAME": username,
             "NETIZEN_CONFIG_PATH": config_path,
-            "NETIZEN_ADMIN_SECRET_FILE": admin_secret_file,
             "NETIZEN_LIFETIME_LOCK_FILE": lifetime_lock_file,
             "NETIZEN_READY_FILE": ready_file,
             "NETIZEN_CLI_SERVICE": "1",
@@ -364,7 +361,6 @@ def _instance_paths(root: Path) -> dict[str, str]:
     return {
         "NETIZEN_CONFIG_PATH": str(root / "config.yaml"),
         "NETIZEN_LARK_APP_CONFIG": str(root / "lark-app" / "config.json"),
-        "NETIZEN_ADMIN_SECRET_FILE": str(root / "credentials" / "admin-web-secret"),
         "NETIZEN_READY_FILE": str(root / "state" / "service.ready"),
         "NETIZEN_LIFETIME_LOCK_FILE": str(root / "state" / "service.lifetime.lock"),
     }
@@ -564,7 +560,6 @@ def _launch_with_lifetime_lock(
         codex_home=managed.get("CODEX_HOME"),
         config_path=managed["NETIZEN_CONFIG_PATH"],
         lark_app_config=managed["NETIZEN_LARK_APP_CONFIG"],
-        admin_secret_file=managed["NETIZEN_ADMIN_SECRET_FILE"],
         ready_file=str(ready_path),
         lifetime_lock_file=str(lifetime_lock_path),
         log_file=managed.get("NETIZEN_LOG_FILE"),

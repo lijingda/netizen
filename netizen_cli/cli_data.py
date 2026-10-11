@@ -47,6 +47,7 @@ _BACKUP_MARKER_CONTENT = b"netizen-channel-migration-backup-v1\n"
 _DIRECTORIES = ("state", "credentials", "lark-app")
 _PURGE_FILES = (
     "config.yaml", "lark-app/config.json", "credentials/admin-web-secret",
+    "state/admin-users.json", "credentials/admin-user-tokens.json",
     "state/channel.sqlite3", "state/channel.sqlite3-wal", "state/channel.sqlite3-shm",
     "state/channel.sqlite3-journal", "state/netizen.log", "state/netizen.log.1",
     "state/netizen.log.2", "state/launchd.stderr.log", "state/service.ready",
@@ -121,7 +122,7 @@ def _atomic_write(path: Path, payload: bytes) -> None:
 def ensure_instance_root(root: Path) -> None:
     """Explicit setup's minimal ownership preparation, before any other writes.
 
-    A preconfigured private config/profile/secret may be supplied. Unmarked state
+    A preconfigured private config/profile may be supplied. Unmarked state
     and unknown files in managed directories are never silently claimed.
     """
     canonical = resolve_instance_root(root)
@@ -151,10 +152,6 @@ def ensure_instance_root(root: Path) -> None:
         profile = root / "lark-app" / "config.json"
         if profile.exists():
             load_lark_app(profile, allow_incomplete=True)
-        secret = root / "credentials" / "admin-web-secret"
-        if secret.exists():
-            from .admin.auth import load_credential_snapshot
-            load_credential_snapshot(secret)
         descriptor, temporary = tempfile.mkstemp(prefix=".netizen-root-", dir=root)
         try:
             with os.fdopen(descriptor, "wb") as output:

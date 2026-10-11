@@ -41,7 +41,7 @@ class CliDataTest(unittest.TestCase):
         self.config.write_text(
             f"instance:\n  dataDir: {self.root / 'state'}\n"
             f"  projectRoot: {self.parent / 'projects'}\n"
-            "adminWeb:\n  enabled: false\n",
+            "adminWeb:\n  host: 127.0.0.1\n",
             encoding="utf-8",
         )
         self.config.chmod(0o600)
@@ -271,8 +271,24 @@ class CliDataTest(unittest.TestCase):
         self.assertFalse((root / INSTANCE_ROOT_MARKER).exists())
         self.assertEqual(profile.read_text(), "{}")
 
+    def test_root_does_not_read_or_validate_retired_admin_secret(self) -> None:
+        root = self.parent / "retired-secret"
+        secret = root / "credentials/admin-web-secret"
+        secret.parent.mkdir(mode=0o700, parents=True)
+        secret.write_bytes(b"no longer a login credential")
+        secret.chmod(0o600)
+        ensure_instance_root(root)
+        self.assertTrue((root / INSTANCE_ROOT_MARKER).exists())
+        self.assertEqual(secret.read_bytes(), b"no longer a login credential")
+
     def test_purge_exact_files_preserves_unknown_projects_codex_and_root(self) -> None:
         self.initialize()
+        private_files = [self.root / relative for relative in (
+            "state/admin-users.json", "credentials/admin-user-tokens.json", "credentials/admin-web-secret",
+        )]
+        for path in private_files:
+            path.write_text("private fixture")
+            path.chmod(0o600)
         identity = self.root / "state" / "service.identity.json"
         identity.write_text('{"format":1,"pid":123}')
         identity.chmod(0o600)
@@ -287,10 +303,13 @@ class CliDataTest(unittest.TestCase):
         self.assertIn(self.database, inventory)
         self.assertIn(identity, inventory)
         self.assertIn(stderr, inventory)
+        for path in private_files:
+            self.assertIn(path, inventory)
         self.assertNotIn(self.root / INSTANCE_DATA_MARKER, inventory)
         with instance_lifetime_lock(self.root) as descriptor:
             deleted = purge_instance_data(self.root, expected_inventory=inventory, lifetime_descriptor=descriptor)
         self.assertEqual(deleted, inventory)
+        self.assertTrue(all(not path.exists() for path in private_files))
         self.assertTrue((self.root / INSTANCE_ROOT_MARKER).is_file())
         self.assertTrue((self.root / "state" / "service.lifetime.lock").is_file())
         for path in paths:

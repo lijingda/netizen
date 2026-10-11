@@ -19,13 +19,7 @@ from netizen_cli.settings import AdminWebSettings, Settings, SettingsError
 
 class SettingsTest(unittest.TestCase):
     def environment(self, directory: Path, **values: str) -> dict[str, str]:
-        credential = directory / "admin-web-secret"
-        credential.write_text("A" * 43, encoding="ascii")
-        credential.chmod(0o600)
-        return {
-            "NETIZEN_ADMIN_SECRET_FILE": str(credential),
-            **values,
-        }
+        return values
 
     def write_config(self, directory: Path) -> Path:
         lark_app = directory / "lark-app" / "config.json"
@@ -63,7 +57,6 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings.project_root.name, "projects")
         self.assertEqual(settings.admin_web.host, "0.0.0.0")
         self.assertIsNone(settings.admin_web.port)
-        self.assertTrue(settings.admin_web.enabled)
 
     def test_project_root_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -158,13 +151,13 @@ class SettingsTest(unittest.TestCase):
                     ),
                 )
 
-    def test_admin_web_override_disable_and_validation(self) -> None:
+    def test_admin_web_override_and_validation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             config = self.write_config(directory)
             config.write_text(
                 config.read_text(encoding="utf-8")
-                + "adminWeb:\n  enabled: true\n  host: 127.0.0.1\n  port: 9443\n",
+                + "adminWeb:\n  host: 127.0.0.1\n  port: 9443\n",
                 encoding="utf-8",
             )
             loaded = Settings.from_file(
@@ -174,28 +167,14 @@ class SettingsTest(unittest.TestCase):
             self.assertEqual(
                 loaded.admin_web,
                 AdminWebSettings(
-                    enabled=True,
                     host="127.0.0.1",
                     port=9443,
-                    credential_path=directory / "admin-web-secret",
                 ),
             )
-
-            config.write_text(
-                config.read_text(encoding="utf-8").replace(
-                    "enabled: true", "enabled: false"
-                ),
-                encoding="utf-8",
-            )
-            disabled = Settings.from_file(
-                config,
-                {},
-            )
-            self.assertFalse(disabled.admin_web.enabled)
-            self.assertIsNone(disabled.admin_web.credential_path)
 
             invalid_cases = (
-                ("enabled: false", "enabled: 1", "boolean"),
+                ("adminWeb:\n", "adminWeb:\n  enabled: false\n", "unsupported settings"),
+                ("adminWeb:\n", "adminWeb:\n  enabled: true\n", "unsupported settings"),
                 ("host: 127.0.0.1", "host: ''", "non-empty host"),
                 ("port: 9443", "port: 0", "1 to 65535"),
                 ("port: 9443", "port: true", "1 to 65535"),
@@ -212,26 +191,16 @@ class SettingsTest(unittest.TestCase):
                             {},
                         )
 
-    def test_enabled_admin_requires_absolute_path_and_rejects_raw_secret(self) -> None:
+    def test_admin_has_no_legacy_secret_dependency(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             config = self.write_config(directory)
-            with self.assertRaisesRegex(SettingsError, "required"):
-                Settings.from_file(config, {})
-            with self.assertRaisesRegex(SettingsError, "must be an absolute path"):
-                Settings.from_file(
-                    config,
-                    {
-                        "NETIZEN_ADMIN_SECRET_FILE": "relative",
-                    },
-                )
-            with self.assertRaisesRegex(SettingsError, "not supported"):
-                Settings.from_file(
-                    config,
-                    {
-                        "NETIZEN_ADMIN_SECRET": "raw-secret",
-                    },
-                )
+            expected = Settings.from_file(config, {}).admin_web
+            actual = Settings.from_file(config, {
+                "NETIZEN_ADMIN_SECRET_FILE": "missing-relative-file",
+                "NETIZEN_ADMIN_SECRET": "obsolete-secret",
+            }).admin_web
+            self.assertEqual(actual, expected)
 
     def test_access_host_validation_and_startup_configuration_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -283,7 +283,6 @@ printf 'logout-noise=ignored'
             codex_home="/home/service-user/.codex",
             config_path=str(root / "config.yaml"),
             lark_app_config=str(root / "lark-app/config.json"),
-            admin_secret_file=str(root / "credentials/admin-web-secret"),
             ready_file=str(root / "state/service.ready"),
             lifetime_lock_file=str(root / "state/service.lifetime.lock"),
         )
@@ -307,10 +306,7 @@ printf 'logout-noise=ignored'
             environment["NETIZEN_LARK_APP_CONFIG"],
             str(root / "lark-app/config.json"),
         )
-        self.assertEqual(
-            environment["NETIZEN_ADMIN_SECRET_FILE"],
-            str(root / "credentials/admin-web-secret"),
-        )
+        self.assertNotIn("NETIZEN_ADMIN_SECRET_FILE", environment)
         self.assertNotIn("PYTHONPATH", environment)
         self.assertEqual(environment["PYTHONUNBUFFERED"], "1")
 
@@ -384,7 +380,6 @@ printf 'logout-noise=ignored'
                     shell=Path("/bin/bash"), codex_home=None,
                     config_path=str(root / "config.yaml"),
                     lark_app_config=str(root / "lark-app/config.json"),
-                    admin_secret_file=str(root / "credentials/admin-web-secret"),
                     ready_file=str(root / "state/service.ready"),
                     lifetime_lock_file=str(root / "state/service.lifetime.lock"),
                 )

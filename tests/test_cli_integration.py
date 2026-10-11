@@ -19,6 +19,7 @@ import unittest
 from unittest.mock import patch
 
 from netizen_cli import cli
+from netizen_cli.admin.users import AdminUsers
 from netizen_cli.cli_data import prepare_instance
 from netizen_cli.cli_services import ServiceBinding, ServiceManager, _service_environment
 from tests.test_cli_services import ManagerDouble
@@ -71,7 +72,7 @@ class LinuxCliIntegrationTest(unittest.TestCase):
                     raise self.onboarding_error
                 return {"version": 1, "appId": "cli_testapp", "appSecret": "not-a-real-secret"}
             if module == "netizen_cli.feishu_app_permissions":
-                return {"version": 1, "missingScopes": getattr(self, "missing_scopes", [])}
+                return {"version": 1, "missingScopes": getattr(self, "missing_scopes", {"tenant": [], "user": []})}
             raise AssertionError(f"unexpected external setup helper: {module}")
 
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
@@ -81,7 +82,8 @@ class LinuxCliIntegrationTest(unittest.TestCase):
                 patch("netizen_cli.cli_setup._helper", side_effect=helper), \
                 patch("netizen_cli.deployment.restart_worker.finish_manual_restart", return_value=None), \
                 patch("sys.stdin", io.StringIO()):
-            code = cli.main([command, "--root", str(self.root), "--json", *arguments])
+            defaults = ["--admin-open-id", "ou_fixture_admin"] if command == "setup" else []
+            code = cli.main([command, "--root", str(self.root), "--json", *defaults, *arguments])
         return code, json.loads(stdout.getvalue()), stderr.getvalue()
 
     def setup_instance(self) -> None:
@@ -89,8 +91,29 @@ class LinuxCliIntegrationTest(unittest.TestCase):
         self.assertEqual(code, 0, report)
         self.assertEqual(report["status"], "prepared")
 
+    def test_registered_setup_repairs_missing_administrator_without_rebinding(self) -> None:
+        self.setup_instance()
+        definition = self.manager.service_file(self.root).read_bytes()
+        database = (self.root / "state/channel.sqlite3").read_bytes()
+        (self.root / "state/admin-users.json").unlink()
+        self.current = self.environments[1]
+        code, report, _ = self.invoke("setup", "--admin-open-id", "ou_repaired")
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["status"], "configured")
+        self.assertEqual(self.manager.service_file(self.root).read_bytes(), definition)
+        self.assertEqual((self.root / "state/channel.sqlite3").read_bytes(), database)
+        self.assertEqual(AdminUsers(self.root, "cli_testapp").list()[0].identity.open_id, "ou_repaired")
+
+    def test_start_rejects_missing_administrator_without_starting_service(self) -> None:
+        self.setup_instance()
+        (self.root / "state/admin-users.json").unlink()
+        code, report, _ = self.invoke("start")
+        self.assertEqual(code, 1, report)
+        self.assertIn("administrator configuration", report["reason"])
+        self.assertFalse(self.manager.inspect(self.root).running)
+
     def test_failed_authorization_setup_can_purge_its_exact_saved_credentials(self) -> None:
-        self.missing_scopes = ["im:message"]
+        self.missing_scopes = {"tenant": ["im:message"], "user": []}
         code, report, _ = self.invoke("setup")
         self.assertEqual(code, 1, report)
         self.assertEqual(report["phase"], "prepare_configuration")
@@ -316,7 +339,7 @@ class LinuxCliIntegrationTest(unittest.TestCase):
     def test_cross_environment_purge_protects_bound_environments_native_state(self) -> None:
         original = self.current
         self.current = ServiceBinding(original.root, original.python, original.prefix,
-                                      self.root / "credentials")
+                                      self.root / "state")
         self.setup_instance()
         self.current = self.environments[1]
         with patch.dict(os.environ, {"CODEX_HOME": str(self.directory / "B-codex-home")}):
@@ -325,7 +348,7 @@ class LinuxCliIntegrationTest(unittest.TestCase):
         self.assertEqual(report["phase"], "preflight")
         self.assertIn("overlaps", report["reason"])
         self.assertIsNotNone(self.manager.inspect(self.root))
-        self.assertTrue((self.root / "credentials/admin-web-secret").exists())
+        self.assertTrue((self.root / "state/admin-users.json").exists())
 
     def test_unregister_failure_after_unlink_reports_unknown_not_stale_bound_state(self) -> None:
         if self.platform != "linux":

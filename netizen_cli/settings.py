@@ -22,11 +22,9 @@ class SettingsError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class AdminWebSettings:
-    enabled: bool = True
     host: str = "0.0.0.0"
     port: int | None = None
     access_host: str | None = None
-    credential_path: Path | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +62,7 @@ class Settings:
 
         instance = _mapping(loaded, "instance")
         channel = _optional_mapping(loaded, "channel")
-        admin_web = _admin_web_settings(loaded, env)
+        admin_web = _admin_web_settings(loaded)
         raw_projects = loaded.get("projects", {})
         if not isinstance(raw_projects, dict):
             raise SettingsError("projects must map aliases to absolute paths")
@@ -142,21 +140,11 @@ def _absolute_path(parent: Mapping[str, Any], name: str) -> Path:
 
 def _admin_web_settings(
     loaded: Mapping[str, Any],
-    environment: Mapping[str, str],
 ) -> AdminWebSettings:
-    raw_secret = environment.get("NETIZEN_ADMIN_SECRET", "")
-    if raw_secret:
-        raise SettingsError(
-            "NETIZEN_ADMIN_SECRET is not supported; use "
-            "NETIZEN_ADMIN_SECRET_FILE"
-        )
     values = _optional_mapping(loaded, "adminWeb")
-    unknown = values.keys() - {"enabled", "host", "port", "accessHost"}
+    unknown = values.keys() - {"host", "port", "accessHost"}
     if unknown:
         raise SettingsError("adminWeb contains unsupported settings")
-    enabled = values.get("enabled", True)
-    if not isinstance(enabled, bool):
-        raise SettingsError("adminWeb.enabled must be a boolean")
     host = values.get("host", "0.0.0.0")
     if (
         not isinstance(host, str)
@@ -171,22 +159,10 @@ def _admin_web_settings(
     ):
         raise SettingsError("adminWeb.port must be an integer from 1 to 65535")
     access_host = validate_access_host(values["accessHost"]) if "accessHost" in values else None
-    raw_path = environment.get("NETIZEN_ADMIN_SECRET_FILE", "").strip()
-    credential_path: Path | None = None
-    if raw_path:
-        credential_path = Path(raw_path)
-        if not credential_path.is_absolute():
-            raise SettingsError("NETIZEN_ADMIN_SECRET_FILE must be an absolute path")
-    elif enabled:
-        raise SettingsError(
-            "NETIZEN_ADMIN_SECRET_FILE is required when Admin Web is enabled"
-        )
     return AdminWebSettings(
-        enabled=enabled,
         host=host,
         port=port,
         access_host=access_host,
-        credential_path=credential_path,
     )
 
 

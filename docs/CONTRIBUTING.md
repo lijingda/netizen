@@ -101,8 +101,9 @@ codex exec --skip-git-repo-check "Reply exactly: CLI-AUTH"
 .venv/bin/python -m netizen_cli status --root /absolute/path/netizen-dev/.netizen
 ```
 
-setup 只准备配置、凭据、数据库和服务绑定，不自动启动。没有 TTY 时转交飞书验证 URL
-并保留同一进程，不索取 App Secret；权限、租户审批、发布、安装、可用范围及入群要求
+setup 只准备配置、应用凭据、首管理员、数据库和服务绑定，不自动启动。没有 TTY 时逐次
+转交飞书验证 URL 并保留同一进程，不索取 App Secret；也可用 `--admin-open-id ou_...`
+指定当前应用下的首位管理员。权限、租户审批、发布、安装、可用范围及入群要求
 见[前置门禁](deployment.md#前置门禁)。不要使用旧 `dev-install.sh`／`install.sh`
 部署新 CLI；详见[CLI 手册](cli.md)。editable 属于开发安装，不承诺自动 update 支持。
 
@@ -114,7 +115,7 @@ NETIZEN_ROOT=/absolute/path/netizen-dev/.netizen .venv/bin/python -m netizen_cli
 ```
 
 `netizen_cli.main` 是 Runtime 入口，不是空目录初始化器；它仍要求归属标记、初始化
-证据、私有配置／凭据及数据库，启动时在同一 lifetime lock 内检查与迁移。不要通过
+证据、私有配置／凭据、当前应用管理员名单及数据库，启动时在同一 lifetime lock 内检查与迁移。不要通过
 手工创建 marker 或删除数据库绕过准入。前台进程不在 update 的系统服务清单保证内，
 结束调试后再通过 start 启动受管服务。
 
@@ -123,7 +124,12 @@ NETIZEN_ROOT=/absolute/path/netizen-dev/.netizen .venv/bin/python -m netizen_cli
 `instance.dataDir` 必须是选定 root 的 `state`。`projectRoot` 限制自动创建的空
 Project，不是默认 cwd；`projects` 只引导尚未登记项，后续使用飞书／Admin 管理。
 服务默认 Admin host 为 0.0.0.0，缺省端口首次实际绑定后写回，已有端口不漂移；
-只调试 Channel 时可显式关闭 Admin。
+Admin 是必备能力，不支持 `adminWeb.enabled`。管理员通过飞书登录，名单与用户凭证
+分别位于实例的 `state/admin-users.json`、`credentials/admin-user-tokens.json`；
+服务重启保留用户凭证，但浏览器 session 失效。安装统一开通 user 类型
+`component:selector`、`offline_access`，新登录也请求这两项权限；名单展示不另申请通讯录权限。
+相关边界见 [ADR 0080](adr/0080-authenticate-admins-with-feishu-identities.md)，真人和平台验收
+见[部署手册](deployment.md#admin-飞书登录与管理员维护验收)，本地测试通过不代表已上线。
 
 实例命令按 root，程序更新按调用环境；另一个 venv 的 start/restart 不自动接管已有
 绑定。需要切换时先 remove 保留数据，再在新环境 start，不加 --purge。修改正在被

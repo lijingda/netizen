@@ -6,7 +6,6 @@ import contextlib
 import json
 import os
 import pwd
-import secrets
 import stat
 import subprocess
 import sys
@@ -148,8 +147,8 @@ def _browser_or_manual(root: Path, app_id: str | None, *, runner: Callable,
         _manual_credentials(root, app_id, source=source, secret_prompt=secret_prompt)
 
 
-def _missing_permissions(root: Path, *, runner: Callable) -> list[str]:
-    from .feishu_app_onboarding import REQUIRED_TENANT_SCOPES
+def _missing_permissions(root: Path, *, runner: Callable) -> dict[str, list[str]]:
+    from .feishu_app_onboarding import REQUIRED_TENANT_SCOPES, REQUIRED_USER_SCOPES
 
     try:
         value = _helper("netizen_cli.feishu_app_permissions",
@@ -162,19 +161,85 @@ def _missing_permissions(root: Path, *, runner: Callable) -> list[str]:
             "lark-app/config.json (keep appId), then rerun netizen setup for exact-App repair"
         ) from None
     missing = value.get("missingScopes")
-    if (set(value) != {"version", "missingScopes"} or not isinstance(missing, list)
-            or any(not isinstance(scope, str) for scope in missing)
-            or missing != [scope for scope in REQUIRED_TENANT_SCOPES if scope in missing]):
+    required = {"tenant": REQUIRED_TENANT_SCOPES, "user": REQUIRED_USER_SCOPES}
+    if (set(value) != {"version", "missingScopes"} or not isinstance(missing, dict)
+            or set(missing) != set(required)
+            or any(not isinstance(missing[kind], list)
+                   or any(not isinstance(scope, str) for scope in missing[kind])
+                   or missing[kind] != [scope for scope in scopes if scope in missing[kind]]
+                   for kind, scopes in required.items())):
         raise SetupError("permission helper returned an invalid result")
     return missing
 
 
+def admin_binding_ready(root: Path) -> bool:
+    """Read-only binding check shared by explicit setup and startup admission."""
+    from .admin.users import AdminUsers
+
+    profile = root / "lark-app/config.json"
+    if not profile.exists() and not profile.is_symlink():
+        return False
+    credentials = load_lark_app(profile, allow_incomplete=True)
+    if not credentials.app_id or not credentials.app_secret:
+        return False
+    return AdminUsers(root, credentials.app_id).has_admins
+
+
+def require_admin_binding(root: Path) -> None:
+    """Background starts never initiate an authorization flow."""
+    if not admin_binding_ready(root):
+        raise SetupError(
+            f"Feishu app and administrator configuration is required; run netizen setup --root {root} "
+            "explicitly to authorize, or supply --admin-open-id for the current app"
+        )
+
+
+def _bind_admin(root: Path, *, open_id: str | None, source: IO[str]) -> None:
+    from .admin.users import AdminUsers
+
+    credentials = load_lark_app(root / "lark-app/config.json")
+    users = AdminUsers(root, credentials.app_id)
+    if users.has_admins:
+        return
+    name = ""
+    avatar_url = None
+    if open_id is None and source.isatty():
+        print("First administrator: [1] Feishu login (default), [2] enter this app's Open ID", file=sys.stderr)
+        choice = source.readline().strip()
+        if choice not in {"", "1", "2"}:
+            raise SetupError("choose 1 or 2 and rerun setup")
+        if choice == "2":
+            print(f"Administrator Open ID for {credentials.app_id}: ", end="", file=sys.stderr, flush=True)
+            open_id = source.readline().strip()
+    if open_id is None:
+        from .admin.feishu import run_admin_binding
+
+        def verification(url: str) -> None:
+            print(f"Administrator binding for {credentials.app_id} in {root}:", file=sys.stderr)
+            print(url, file=sys.stderr)
+            print("Open this Feishu/Lark URL to sign in. Agents: relay the URL to the user and "
+                  "keep this setup process running until confirmation completes.", file=sys.stderr, flush=True)
+
+        try:
+            identity = run_admin_binding(credentials.app_id, credentials.app_secret, verification)
+        except Exception:
+            if not source.isatty():
+                raise SetupError("administrator authorization did not complete; rerun setup or supply --admin-open-id") from None
+            print("Administrator authorization did not complete. Enter this app's Open ID manually, "
+                  "or press Ctrl-C to cancel.", file=sys.stderr)
+            print(f"Administrator Open ID for {credentials.app_id}: ", end="", file=sys.stderr, flush=True)
+            open_id = source.readline().strip()
+        else:
+            open_id, name, avatar_url = identity.open_id, identity.name, identity.avatar_url
+    users.add_initial(open_id, name=name, avatar_url=avatar_url)
+
+
 def prepare_configuration(root: Path, *, admin_port: int | None = None,
+                          admin_open_id: str | None = None,
                           runner: Callable = subprocess.run,
                           input_stream: IO[str] | None = None,
                           secret_prompt: Callable[[str], str] = getpass.getpass) -> None:
     """Root/maintenance/lifetime locks belong to the caller; no service is started."""
-    from .admin.auth import load_credential_snapshot
     from .settings import Settings
     import yaml
 
@@ -185,7 +250,7 @@ def prepare_configuration(root: Path, *, admin_port: int | None = None,
             "instance": {"dataDir": str(root / "state"),
                          "projectRoot": str(Path(pwd.getpwuid(os.geteuid()).pw_dir) / "projects")},
             "projects": {}, "channel": {"securityMode": "audit"},
-            "adminWeb": {"enabled": True, "host": "0.0.0.0"},
+            "adminWeb": {"host": "0.0.0.0"},
         }
         if admin_port is not None:
             config["adminWeb"]["port"] = admin_port
@@ -201,11 +266,6 @@ def prepare_configuration(root: Path, *, admin_port: int | None = None,
             port = admin.get("port") if isinstance(admin, dict) else None
             if type(port) is not int or port != admin_port:
                 raise SetupError("--admin-port differs from existing configuration; edit the config explicitly")
-    credential = root / "credentials/admin-web-secret"
-    if not credential.exists() and not credential.is_symlink():
-        _write_atomic(credential, secrets.token_urlsafe(32).encode("ascii"), mode=0o600)
-    _private_file(credential)
-    load_credential_snapshot(credential)
     profile = root / "lark-app/config.json"
     if not profile.exists() and not profile.is_symlink():
         _write_atomic(profile, encode_lark_app("", ""), mode=0o600)
@@ -227,16 +287,16 @@ def prepare_configuration(root: Path, *, admin_port: int | None = None,
             _browser_or_manual(root, credentials.app_id or None, runner=runner,
                                source=source, secret_prompt=secret_prompt)
     missing = _missing_permissions(root, runner=runner)
-    if missing and not started_flow:
+    if any(missing.values()) and not started_flow:
         _browser_or_manual(root, load_lark_app(profile).app_id, runner=runner,
                            source=source, secret_prompt=secret_prompt)
         missing = _missing_permissions(root, runner=runner)
-    if missing:
+    if any(missing.values()):
         raise SetupError("finish tenant approval, publish/install the app, then rerun setup; missing scopes: "
-                         + ", ".join(missing))
+                         + ", ".join(f"{kind}:{scope}" for kind, scopes in missing.items() for scope in scopes))
     settings = Settings.from_file(config_file, environment={
-        "NETIZEN_ADMIN_SECRET_FILE": str(credential),
         "NETIZEN_LARK_APP_CONFIG": str(profile),
     })
     if settings.data_dir.resolve() != root / "state":
         raise SetupError("instance.dataDir must be this instance's state directory")
+    _bind_admin(root, open_id=admin_open_id, source=source)

@@ -40,6 +40,7 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("-y", "--yes", action="store_true", help="skip confirmation, not safety checks")
         if name == "setup":
             command.add_argument("--admin-port", type=_port)
+            command.add_argument("--admin-open-id", help="first administrator's Open ID in this instance's bound app")
         if name == "logs":
             command.add_argument("--lines", type=_lines, default=100)
     update = commands.add_parser(
@@ -171,10 +172,10 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
     from .deployment.restart_worker import assert_no_pending_restart
 
     if command == "setup":
-        from .cli_setup import prepare_configuration, require_codex_login
+        from .cli_setup import admin_binding_ready, prepare_configuration, require_codex_login
 
         existing = manager.inspect(root)
-        if existing is not None:
+        if existing is not None and admin_binding_ready(root):
             _emit({"phase": "setup", "status": "already_registered",
                    "instance": _status_value(existing, root),
                    "recommendation": (
@@ -185,22 +186,34 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
                    )},
                   json_output=json_output)
             return 0
-        require_codex_login()
+        if existing is not None and existing.running:
+            raise RuntimeError(
+                f"administrator configuration is missing; stop this instance with netizen stop --root {root}, "
+                "then rerun setup to authorize or supply --admin-open-id"
+            )
+        if existing is None:
+            require_codex_login()
         ensure_instance_root(root)
         with root_maintenance_lock(root) as maintenance_descriptor:
             assert_no_pending_restart(root, lock_descriptor=maintenance_descriptor)
-            if manager.inspect(root) is not None:
+            current = manager.inspect(root)
+            if ((existing is None and current is not None)
+                    or (existing is not None and (current is None or current.binding != existing.binding))):
                 raise RuntimeError("instance was registered concurrently; inspect its status before retrying")
             with instance_lifetime_lock(root) as descriptor:
                 report.update(phase="prepare_instance")
-                begin_instance_setup(root, lifetime_descriptor=descriptor)
+                if existing is None:
+                    begin_instance_setup(root, lifetime_descriptor=descriptor)
+                else:
+                    validate_prepared_instance(root)
                 report.update(phase="prepare_configuration")
-                prepare_configuration(root, admin_port=args.admin_port)
-                report.update(phase="initialize", completed=1)
-                initialize_instance_data(root, lifetime_descriptor=descriptor)
-                report.update(phase="register", completed=2)
-                manager.register(_current_binding(root), lifetime_descriptor=descriptor)
-        _emit({"phase": "setup", "status": "prepared", "root": str(root),
+                prepare_configuration(root, admin_port=args.admin_port, admin_open_id=args.admin_open_id)
+                if existing is None:
+                    report.update(phase="initialize", completed=1)
+                    initialize_instance_data(root, lifetime_descriptor=descriptor)
+                    report.update(phase="register", completed=2)
+                    manager.register(_current_binding(root), lifetime_descriptor=descriptor)
+        _emit({"phase": "setup", "status": "prepared" if existing is None else "configured", "root": str(root),
                "recommendation": f"Run netizen start --root {root}"}, json_output=json_output)
         return 0
 
@@ -208,11 +221,18 @@ def _instance_command(args: argparse.Namespace, root: Path, *, json_output: bool
         assert_no_pending_restart(root, lock_descriptor=maintenance_descriptor)
         status = manager.inspect(root)
         report["instance"] = _status_value(status, root)
+        if command in {"start", "restart"} and status is not None:
+            from .cli_setup import require_admin_binding
+
+            require_admin_binding(root)
         if command == "start":
             if status is None:
                 report["phase"] = "register"
                 with instance_lifetime_lock(root) as descriptor:
                     validate_prepared_instance(root)
+                    from .cli_setup import require_admin_binding
+
+                    require_admin_binding(root)
                     binding = _current_binding(root)
                     manager.register(binding, lifetime_descriptor=descriptor)
                     # Registration and process readiness are separate facts.

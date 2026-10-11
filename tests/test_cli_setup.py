@@ -5,12 +5,14 @@ import io
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 from netizen_cli import cli_setup as setup
+from netizen_cli.admin.users import AdminIdentity, AdminUsers, AdminUsersUnavailable
 from netizen_cli.cli_data import ensure_instance_root
 from netizen_cli.lark_app import encode_lark_app, load_lark_app
 
@@ -98,12 +100,110 @@ class ConfigurationSetupTests(unittest.TestCase):
         profile.write_bytes(encode_lark_app(app_id, ""))
         profile.chmod(0o600)
 
+    def complete_profile(self) -> None:
+        setup._write_atomic(self.root / "lark-app/config.json", encode_lark_app("cli_existing", "saved-secret"), mode=0o600)
+
+    def test_non_tty_manual_open_id_initializes_current_app_without_login_or_secret_file(self) -> None:
+        self.complete_profile()
+        with patch.object(setup, "_missing_permissions", return_value={"tenant": [], "user": []}), \
+             patch.dict(sys.modules, {"netizen_cli.admin.feishu": SimpleNamespace(
+                 run_admin_binding=Mock(side_effect=AssertionError("must not authorize")))}):
+            setup.prepare_configuration(self.root, admin_open_id="ou_manual", input_stream=io.StringIO())
+        members = AdminUsers(self.root, "cli_existing").list()
+        self.assertEqual([member.identity for member in members], [AdminIdentity("cli_existing", "ou_manual")])
+        self.assertFalse((self.root / "credentials/admin-web-secret").exists())
+        self.assertNotIn("enabled", (self.root / "config.yaml").read_text())
+        setup.require_admin_binding(self.root)
+
+    def test_tty_manual_administrator_entry_does_not_require_user_login(self) -> None:
+        self.complete_profile()
+        with patch.object(setup, "_missing_permissions", return_value={"tenant": [], "user": []}):
+            setup.prepare_configuration(self.root, input_stream=TerminalInput("2\nou_manual\n"))
+        self.assertEqual(AdminUsers(self.root, "cli_existing").list()[0].identity.open_id, "ou_manual")
+
+    def test_non_tty_login_uses_exact_app_and_relays_verification_url(self) -> None:
+        self.complete_profile()
+
+        def bind(app_id, app_secret, verification):
+            self.assertEqual((app_id, app_secret), ("cli_existing", "saved-secret"))
+            verification("https://accounts.feishu.cn/device/fixture")
+            return SimpleNamespace(open_id="ou_verified", name="Verified user", avatar_url=None)
+
+        with patch.object(setup, "_missing_permissions", return_value={"tenant": [], "user": []}), \
+             patch.dict(sys.modules, {"netizen_cli.admin.feishu": SimpleNamespace(run_admin_binding=bind)}):
+            setup.prepare_configuration(self.root, input_stream=io.StringIO())
+        member = AdminUsers(self.root, "cli_existing").list()[0]
+        self.assertEqual((member.identity.open_id, member.name), ("ou_verified", "Verified user"))
+        self.assertIn("https://accounts.feishu.cn/device/fixture", self.output.getvalue())
+        self.assertIn(str(self.root), self.output.getvalue())
+        self.assertNotIn("saved-secret", self.output.getvalue())
+
+    def test_existing_administrators_are_preserved_when_setup_is_repeated(self) -> None:
+        self.complete_profile()
+        AdminUsers(self.root, "cli_existing").add_initial("ou_original")
+        before = (self.root / "state/admin-users.json").read_bytes()
+        with patch.object(setup, "_missing_permissions", return_value={"tenant": [], "user": []}):
+            setup.prepare_configuration(self.root, admin_open_id="ou_different", input_stream=io.StringIO())
+        self.assertEqual((self.root / "state/admin-users.json").read_bytes(), before)
+
+    def test_bad_administrator_file_is_not_treated_as_missing(self) -> None:
+        self.complete_profile()
+        path = self.root / "state/admin-users.json"
+        setup._write_atomic(path, b"invalid-private-list", mode=0o600)
+        with self.assertRaises(AdminUsersUnavailable):
+            setup.require_admin_binding(self.root)
+        with patch.object(setup, "_missing_permissions", return_value={"tenant": [], "user": []}), \
+             self.assertRaises(AdminUsersUnavailable):
+            setup.prepare_configuration(self.root, admin_open_id="ou_manual", input_stream=io.StringIO())
+        self.assertEqual(path.read_bytes(), b"invalid-private-list")
+
+    def test_missing_user_scope_repairs_exact_app_before_binding_administrator(self) -> None:
+        self.complete_profile()
+        with patch.object(setup, "_register") as browser, \
+             patch.object(setup, "_missing_permissions", side_effect=[
+                 {"tenant": [], "user": ["offline_access"]}, {"tenant": [], "user": []},
+             ]):
+            setup.prepare_configuration(self.root, admin_open_id="ou_manual", input_stream=io.StringIO())
+        self.assertEqual(browser.call_args.args[1], "cli_existing")
+        self.assertTrue(setup.admin_binding_ready(self.root))
+
+    def test_administrator_authorization_failure_is_bounded_and_does_not_emit_credentials(self) -> None:
+        self.complete_profile()
+        login = Mock(side_effect=RuntimeError("private-user-token"))
+        with patch.object(setup, "_missing_permissions", return_value={"tenant": [], "user": []}), \
+             patch.dict(sys.modules, {"netizen_cli.admin.feishu": SimpleNamespace(run_admin_binding=login)}), \
+             self.assertRaisesRegex(setup.SetupError, "authorization did not complete") as caught:
+            setup.prepare_configuration(self.root, input_stream=io.StringIO())
+        self.assertEqual(login.call_count, 1)
+        self.assertNotIn("private-user-token", str(caught.exception))
+        self.assertFalse(setup.admin_binding_ready(self.root))
+        with self.assertRaisesRegex(setup.SetupError, "run netizen setup"):
+            setup.require_admin_binding(self.root)
+
+    def test_tty_administrator_login_failure_has_one_manual_fallback_but_cancel_does_not(self) -> None:
+        self.complete_profile()
+        login = Mock(side_effect=RuntimeError("private-user-token"))
+        with patch.object(setup, "_missing_permissions", return_value={"tenant": [], "user": []}), \
+             patch.dict(sys.modules, {"netizen_cli.admin.feishu": SimpleNamespace(run_admin_binding=login)}):
+            setup.prepare_configuration(self.root, input_stream=TerminalInput("\nou_fallback\n"))
+        self.assertEqual(login.call_count, 1)
+        self.assertEqual(AdminUsers(self.root, "cli_existing").list()[0].identity.open_id, "ou_fallback")
+        self.assertNotIn("private-user-token", self.output.getvalue())
+        (self.root / "state/admin-users.json").unlink()
+        login.side_effect = KeyboardInterrupt()
+        with patch.object(setup, "_missing_permissions", return_value={"tenant": [], "user": []}), \
+             patch.dict(sys.modules, {"netizen_cli.admin.feishu": SimpleNamespace(run_admin_binding=login)}), \
+             self.assertRaises(KeyboardInterrupt):
+            setup.prepare_configuration(self.root, input_stream=TerminalInput("\nou_not_used\n"))
+        self.assertFalse(setup.admin_binding_ready(self.root))
+
     def test_tty_browser_failure_has_one_manual_fallback_without_echoing_error(self) -> None:
         with (
             patch.object(setup, "_register", side_effect=setup.SetupError("private SDK response")) as browser,
-            patch.object(setup, "_missing_permissions", return_value=[]) as permissions,
+            patch.object(setup, "_missing_permissions", return_value={"tenant": [], "user": []}) as permissions,
         ):
             setup.prepare_configuration(self.root, input_stream=TerminalInput("\ncli_manual\n"),
+                                        admin_open_id="ou_admin",
                                         secret_prompt=lambda _: "manual-secret")
         browser.assert_called_once()
         permissions.assert_called_once()
@@ -116,9 +216,10 @@ class ConfigurationSetupTests(unittest.TestCase):
         self.incomplete_profile("cli_existing")
         with (
             patch.object(setup, "_register", side_effect=setup.SetupError("failed")) as browser,
-            patch.object(setup, "_missing_permissions", return_value=[]),
+            patch.object(setup, "_missing_permissions", return_value={"tenant": [], "user": []}),
         ):
             setup.prepare_configuration(self.root, input_stream=TerminalInput("\n"),
+                                        admin_open_id="ou_admin",
                                         secret_prompt=lambda _: "replacement-secret")
         self.assertEqual(browser.call_args.args[1], "cli_existing")
         self.assertEqual(load_lark_app(self.root / "lark-app/config.json").app_id, "cli_existing")
@@ -151,7 +252,7 @@ class ConfigurationSetupTests(unittest.TestCase):
     def test_manual_fallback_does_not_start_a_second_browser_for_missing_permissions(self) -> None:
         with (
             patch.object(setup, "_register", side_effect=setup.SetupError("failed")) as browser,
-            patch.object(setup, "_missing_permissions", return_value=["im:message"]),
+            patch.object(setup, "_missing_permissions", return_value={"tenant": ["im:message"], "user": []}),
             self.assertRaisesRegex(setup.SetupError, "tenant approval"),
         ):
             setup.prepare_configuration(self.root, input_stream=TerminalInput("\ncli_manual\n"),
@@ -175,8 +276,9 @@ class ConfigurationSetupTests(unittest.TestCase):
         config = self.root / "config.yaml"
         before = config.read_bytes()
         before_stat = config.stat()
-        with patch.object(setup, "_missing_permissions", return_value=[]):
+        with patch.object(setup, "_missing_permissions", return_value={"tenant": [], "user": []}):
             setup.prepare_configuration(self.root, admin_port=8890,
+                                        admin_open_id="ou_admin",
                                         input_stream=TerminalInput("2\ncli_retry\n"),
                                         secret_prompt=lambda _: "retry-secret")
         self.assertEqual(config.read_bytes(), before)

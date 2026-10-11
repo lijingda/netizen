@@ -270,3 +270,25 @@ body.schedule-drawer-open, body.defaults-drawer-open, body.session-settings-draw
   .defaults-tab { padding: 8px 12px; }
 }
 #schedule-session-note { color: var(--muted); margin: 12px 0; font-size: 13px; }
+.identity-toolbar, .person { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.identity-toolbar { flex-wrap: wrap; justify-content: flex-end; }
+.person-name { overflow-wrap: anywhere; }
+.person-avatar, .person-placeholder { width: 36px; height: 36px; border-radius: 50%; flex: 0 0 36px; object-fit: cover; }
+.person-placeholder { display: grid; place-items: center; background: var(--blue-soft); color: var(--blue); font-size: 15px; }
+.person-avatar[hidden], .person-placeholder[hidden] { display: none; }
+.auth-expired { display: flex; align-items: center; justify-content: center; gap: 18px; padding: 18px; background: #fff2df; color: #7b4400; }
+.auth-expired[hidden], .person[hidden], .identity-panel[hidden], .identity-panel [hidden], .login-card [hidden] { display: none; }
+.system-tabs { width: fit-content; margin: 22px 0; }
+.admin-users { padding: 0; margin: 0; list-style: none; }
+.admin-users > li { display: flex; justify-content: space-between; align-items: center; gap: 16px; border-top: 1px solid var(--line); padding: 16px 0; }
+.identity-panel { max-width: 480px; border: 1px solid var(--line); border-radius: 14px; margin-bottom: 24px; padding: 20px; color: var(--ink); }
+.identity-panel h3 { margin: 0; }
+.identity-panel > p { margin: 20px 0; }
+.identity-panel-actions, .login-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
+#admin-selector { min-height: 48px; margin: 18px 0; }
+#admin-user-selection { margin-top: 20px; }
+.login-qr { display: block; width: min(240px, 100%); height: auto; margin: 18px auto; }
+.login-link { display: inline-block; margin-bottom: 14px; }
+.login-actions { justify-content: flex-start; margin: 18px 0; }
+#login-code { overflow-wrap: anywhere; }
+@media (max-width: 600px) { .topbar { align-items: flex-start; gap: 20px; flex-wrap: wrap; } .identity-toolbar { justify-content: flex-start; } }

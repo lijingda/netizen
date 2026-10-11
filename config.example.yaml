@@ -15,10 +15,9 @@ projects:
 channel:
   securityMode: audit
 
-# Single-administrator management UI. It is enabled by default and listens on
-# all interfaces for direct access inside the trusted private network.
+# Required management UI, using this app's Feishu administrator identities.
+# It listens on all interfaces for direct access inside the trusted private network.
 adminWeb:
-  enabled: true
   host: 0.0.0.0
   # Omit port for first-start allocation from 8787 through 8886. Once bound,
   # the selected port is written here and stays fixed on subsequent starts.
@@ -31,5 +30,7 @@ adminWeb:
 # The installer prepares this file; see docs/deployment.md for its JSON format.
 # An explicit override must be an absolute path. Lark CLI is optional.
 # NETIZEN_LARK_APP_CONFIG=/home/your-user/.netizen/lark-app/config.json
-# Admin Web supports only a canonical 32-byte base64url credential file.
-# NETIZEN_ADMIN_SECRET_FILE=/home/your-user/.netizen/credentials/admin-web-secret
+# Setup binds the first administrator through Feishu login or --admin-open-id.
+# Administrator membership: <NETIZEN_ROOT>/state/admin-users.json
+# Private user credentials: <NETIZEN_ROOT>/credentials/admin-user-tokens.json
+# Admin browser sessions stay in memory and require login after service restart.
