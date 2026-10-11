@@ -5,13 +5,15 @@ import hashlib
 import json
 import os
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from netizen_cli.instance import (
     INSTANCE_ROOT_MARKER,
@@ -208,10 +210,73 @@ printf 'logout-noise=ignored'
     def test_profile_output_limit_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
-            shell = self._fake_bash(home, "eval \"$2\"\n")
+            os.mkfifo(home / "release")
+            # Keep the writer alive until cleanup, independent of scheduling.
+            shell = self._fake_bash(
+                home,
+                "printf '%s' '" + "x" * 33 + "'\n"
+                'read -r release < "$HOME/release"\n',
+            )
+            popen = subprocess.Popen
+            terminate_process_group = launcher._terminate_process_group
+
+            def start_writer(*args, **kwargs) -> subprocess.Popen[bytes]:
+                process = popen(*args, **kwargs)
+                self.addCleanup(process.wait, timeout=5)
+                self.addCleanup(process.kill)
+                assert process.stdout is not None
+                self.addCleanup(process.stdout.close)
+                return process
+
+            def terminate_live_writer(process: subprocess.Popen[bytes]) -> None:
+                self.assertIsNone(process.poll(), "writer exited before cleanup")
+                terminate_process_group(process)
 
             with (
+                patch.object(launcher.subprocess, "Popen", side_effect=start_writer),
                 patch.object(launcher, "PROFILE_CAPTURE_MAX_BYTES", 32),
+                patch.object(
+                    launcher,
+                    "_terminate_process_group",
+                    side_effect=terminate_live_writer,
+                ) as terminate,
+                self.assertRaisesRegex(
+                    launcher.ServiceLaunchError,
+                    "exceeded the 4 MiB safety limit",
+                ),
+            ):
+                launcher.capture_profile_environment(
+                    shell=shell,
+                    home=home,
+                    username="service-user",
+                    python_executable=Path(sys.executable),
+                    base_environment={"PATH": "/bin"},
+                    timeout=5,
+                )
+
+            terminate.assert_called_once()
+            process = terminate.call_args.args[0]
+            self.assertEqual(process.returncode, -signal.SIGKILL)
+            self.assertTrue(process.stdout.closed)
+
+    def test_profile_output_limit_reaps_probe_when_process_group_is_gone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            shell = self._fake_bash(home, "eval \"$2\"\n")
+            stdout = Mock()
+            stdout.fileno.return_value = 7
+            process = SimpleNamespace(pid=12345, stdout=stdout, wait=Mock(return_value=0))
+
+            with (
+                patch.object(launcher.subprocess, "Popen", return_value=process),
+                patch.object(
+                    launcher,
+                    "_read_profile_snapshot",
+                    side_effect=launcher._ProfileOutputTooLarge,
+                ),
+                patch.object(
+                    launcher.os, "killpg", side_effect=ProcessLookupError
+                ) as killpg,
                 self.assertRaisesRegex(
                     launcher.ServiceLaunchError,
                     "exceeded the 4 MiB safety limit",
@@ -225,6 +290,41 @@ printf 'logout-noise=ignored'
                     base_environment={"PATH": "/bin"},
                     timeout=2,
                 )
+
+            killpg.assert_called_once_with(process.pid, signal.SIGKILL)
+            process.wait.assert_called_once_with(timeout=1)
+            stdout.close.assert_called_once()
+
+    def test_profile_output_limit_is_checked_after_writer_exits(self) -> None:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-E",
+                "-P",
+                "-B",
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'x' * 33)",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(process.wait, timeout=5)
+        self.addCleanup(process.kill)
+        assert process.stdout is not None
+        self.addCleanup(process.stdout.close)
+        self.assertEqual(process.wait(timeout=5), 0)
+
+        with (
+            patch.object(launcher, "PROFILE_CAPTURE_MAX_BYTES", 32),
+            self.assertRaises(launcher._ProfileOutputTooLarge),
+        ):
+            launcher._read_profile_snapshot(
+                process.stdout.fileno(),
+                process,
+                end_token="NETIZEN_ENV_END_test",
+                timeout=5,
+            )
 
     def test_unsupported_or_non_executable_shell_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
