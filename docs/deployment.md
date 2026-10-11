@@ -19,7 +19,7 @@ user manager，macOS 14+ 使用当前 GUI 用户的 LaunchAgent，不提供 Laun
 | 更换飞书应用或补齐权限 | [更换飞书应用与权限修复](#更换飞书应用与权限修复)；新增权限契约先看[维护飞书权限契约](#维护飞书权限契约)。 |
 | 升级、启停或卸载 | [CLI 操作与成功判据](#升级启停和卸载)、[程序更新边界](#从-admin-升级)、[管理页重启](#从-admin-重启)。 |
 | 调整工具环境、代理或证书 | [服务环境](#服务环境)及[安装前提](#安装)；修改账号 profile 后重启服务。 |
-| 配置项目、访问或轮换 Admin 凭据 | [配置与管理页访问](#配置与管理页访问)。 |
+| 配置项目、登录 Admin 或维护管理员 | [配置与管理页访问](#配置与管理页访问)。 |
 | 排查启动失败、未知状态或迁移失败 | [候选验证与切换](#候选验证与切换)、[Fail-closed 运维语义](#fail-closed-运维语义)、[平台服务管理器与日志](#平台服务管理器)。 |
 | 开发与发布 | [本地开发](CONTRIBUTING.md)、[Codex SDK 升级审查](#codex-sdk-升级审查)、[代码门禁与 live 触发条件](#代码门禁与按需实时兼容性验证)、[兼容性结论](#已验证的兼容性结论)、[正式发布](#发布正式-release)。 |
 
@@ -58,8 +58,9 @@ SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕�
   .netizen-initialized                        # 显式初始化／清理阶段证据
   config.yaml                                # 私有 Channel 配置
   lark-app/config.json                       # 固定 netizen profile
-  credentials/admin-web-secret
+  credentials/admin-user-tokens.json         # 当前管理员用户凭证；私有，跨重启保留
   state/
+    admin-users.json                         # 当前应用的管理员名单与展示快照
     channel.sqlite3[-wal|-shm|-journal]
     .install.lock                            # 本实例维护互斥
     service.lifetime.lock / service.ready
@@ -84,6 +85,8 @@ ${CODEX_HOME:-~/.codex}/                      # 用户共享原生状态，不�
 
 remove 默认仅解除系统服务及自启，保留数据；--purge 先展示并确认有限、已验证的文件
 清单，永不递归删除 root／home，不删除未知文件、Project 或共享 Codex 状态。
+名单、用户凭证及遗留 `credentials/admin-web-secret` 均属于精确 purge 清单；普通
+setup/start/update 不自动删除遗留 secret，也不再生成或读取它。
 移除实例不卸载 Python 环境中的共享包。
 可选[netizen-herdr 扩展](../extensions/netizen-herdr/README.md)仍由用户从源码按说明安装，
 不是 wheel 自动安装的全局 Skill。
@@ -109,9 +112,12 @@ profile 只在受管服务启动边界内加载；若用户依赖 profile 导出
 逐条引用会调用“获取指定消息”，普通/富文本图片还会调用“获取消息中的资源文件”。群聊
 Binding 的 catch-up 模式会在收到有效 @ 后，通过同一应用身份调用“获取会话历史消息”和
 exact “获取指定消息”；群主线使用 chat container，普通话题使用 thread container。
-CLI setup 的官方 SDK 浏览器流程会用最小模板请求下面的应用身份权限、
-`im.message.receive_v1` 应用身份事件和 `card.action.trigger` 回调，不申请用户身份权限或
-token；手工准备的应用必须逐项配置。无论来源，飞书应用版本在发布前都必须确认：
+CLI setup 的官方 SDK 浏览器流程会请求下面的应用身份权限、`im.message.receive_v1`
+应用身份事件和 `card.action.trigger` 回调，以及 Admin 所需的 user 类型
+`component:selector`、`offline_access`。手工准备的应用也必须逐项配置。
+安装期权限检查区分 tenant/user 类型；同名的另一类型授权不能代替。应用开通不替代
+每位管理员的用户授权，新 Admin 登录统一请求上述两个 user scope。
+无论来源，飞书应用版本在发布前都必须确认：
 
 - 单聊事件投递具备 `im:message.p2p_msg:readonly`，普通消息能力具备 `im:message`；
 - `/settings` 等卡片回调识别会话类型具备 canonical `im:chat:read`；官方“获取群信息”接口
@@ -558,7 +564,7 @@ Project trust 配置不变；本次没有真实飞书投递、客户端点击或
 
 | 边界 | 验证内容 |
 | --- | --- |
-| MCP 接入 | 生产传输鉴别、Host/Origin、大小/超时、无 Admin 可用、同 cwd 身份隔离、缺失/冲突元数据、用户 MCP 和指令继承、冷恢复/fork/服务重启与原生权限组合 |
+| MCP 接入 | 生产传输鉴别、Host/Origin、大小/超时、不依赖 Admin 浏览器登录、同 cwd 身份隔离、缺失/冲突元数据、用户 MCP 和指令继承、冷恢复/fork/服务重启与原生权限组合 |
 | 调度与存储 | 四类规则、时区/DST、截止、高水位、宽限/missed、两类目标的交接屏障、原会话未知不阻塞下一到期点、手动不改时间游标、不同计划并发、CAS/幂等、裁剪后原 Run 回执及每个交接断点的重启行为 |
 | 原会话输入 | exact Binding/Turn 身份、空闲 start 与运行中 steer、Goal 换轮、配置/上下文竞态、系统来源、原发起人及结束提及保留、catch-up 锚点与接收后游标提交 |
 | 飞书与普通生命周期 | 五类来源的自然语言和 /cron；真实 root/seed 或原位置锚点、结果精确归属、卡片完整表单/重试/分页、Activity/Files、停止/归档/删除及极快终态；原会话切换/归档暂停、恢复不补跑及删除联动 |
@@ -568,7 +574,7 @@ Project trust 配置不变；本次没有真实飞书投递、客户端点击或
 新 Skill、手动配置 MCP 或启动另一个服务。公开 CodexConfig 只追加本次进程专属随机
 MCP entry，环境完整继承后仅增加一个随机名称的临时 bearer key；不改用户 config.toml
 和其他 MCP。端点先于 App Server 初始化，管理与调度在 shared application ready 后开放，
-Admin 关闭时 MCP 仍可用。停止先关闭认领和管理 admission、排空在途交接，再执行既有
+MCP 不依赖浏览器的 Admin 登录状态。停止先关闭认领和管理 admission、排空在途交接，再执行既有
 普通 Turn shutdown 并关闭传输；重启不补跑错过的时间，也不重发结果未知的执行。
 
 启动边界验收包括当前 schema 显式初始化、受支持旧库迁移、不受支持库只读拒绝、
@@ -767,7 +773,7 @@ stale ready／runtime identity 和异常 manager 查询必须失败关闭，不�
 资源损坏或注册失败不得 ready。普通用户同名、禁用、歧义 Skill 保持原生规则。
 
 同时验证双 Admin 登录与 root 标识、端口首次实际分配及固化、端口冲突不漂移、显式
-端口／禁用 Admin、服务 profile 导出别的 root 后仍重申绑定。Project、用户 Codex
+端口、缺管理员的后台启动拒绝、服务 profile 导出别的 root 后仍重申绑定。Project、用户 Codex
 状态与外来文件不得因其他实例生命周期而被修改。
 
 ### 已验证的兼容性结论
@@ -1042,24 +1048,37 @@ uninstall.sh 入口已停用，只返回 CLI 指引；不会生成 release/curre
 ### 维护飞书权限契约
 
 权限和回调的单一契约仍是[前置门禁](#前置门禁)。修改
-`netizen_cli/feishu_app_onboarding.py` 的 tenant addons 时，同步更新权限检查、
-用户说明及相关行为测试；不新增 CLI 运行依赖或自行实现飞书授权协议。审批、发布、
+`netizen_cli/feishu_app_onboarding.py` 的 tenant/user addons 时，同步更新权限检查、
+用户说明及相关行为测试；不新增 CLI 运行依赖。Admin 的窄协议适配遵守
+[ADR 0079](adr/0079-authenticate-admins-with-feishu-identities.md)，不扩展为通用 API 转发。
+审批、发布、
 租户安装与入群须按真实流程确认，SDK 返回凭据不等于全部权限已生效。
 
 ### 更换飞书应用与权限修复
 
-setup 对已有服务绑定仅报告 already_registered，不静默修改或接管。需要修复应用时，
+setup 对应用和管理员齐全的已有服务绑定报告 already_registered，不静默修改或接管。
+已有准确应用只缺管理员时，先 stop，再直接 setup 授权或填写 `--admin-open-id`；服务
+绑定与数据库不变。名单格式或文件权限错误会明确失败，不当作空名单重新认领。旧应用
+成员不授权当前应用；更换应用后须显式绑定当前应用的首管理员，旧应用成员记录仍保留。
+需要修复已有完整绑定的应用权限时，
 先用原环境 stop／remove 保留数据，安全备份并按意图调整 profile，再在选定环境 setup、
 start。已有有效 App ID 加空 Secret 是 exact-App 修复；删除整个 profile 文件表示
 重新选择应用，别在普通更新时删除。新凭据成功保存后即为持久配置意图，后续权限或
 启动失败不还原旧凭据。App ID 改变不会迁移旧 Scope 或原生历史。
+管理员身份键为 `App ID + Open ID`，不使用 `tenant_key`；换应用时须由本机操作者明确
+准备新应用的名单，不能沿用旧应用的 Open ID、名单或用户 token。新版不提供旧 secret、
+enabled 配置或旧服务模板的兼容迁移。
 
 ### Agent 驱动首次安装
 
 使用选定环境的 `netizen setup --root "<NETIZEN_ROOT>" </dev/null`，在出现验证链接时
-转交给用户并保留同一进程，继续读取 stderr 进度。stdout 的 helper 凭据通道只由程序
-私下消费，不能展示到聊天。等待最多 660 秒；取消／失败后按输出修复再显式重试，
+逐次转交给用户并保留同一进程，继续读取 stderr 进度。应用注册和首管理员身份确认是
+两个阶段；后者通过当前 exact App 的 Device Flow 和本人资料确认，未经同应用证据核对
+的注册 Open ID 不直接入名单。stdout 的 helper 凭据通道只由程序私下消费，不能展示到
+聊天。每阶段等待最多 660 秒；取消／失败后按输出修复再显式重试，
 不要循环申请，不要求用户粘贴 App Secret。setup 成功后另行执行 start 并等 ready。
+已有应用也可用 `netizen setup --root "<NETIZEN_ROOT>" --admin-open-id ou_example`
+指定首管理员，支持无 TTY；它不覆盖已有名单，也不将手填 ID 当作登录证明。
 
 ### 浏览器安装路径验收
 
@@ -1067,6 +1086,41 @@ start。已有有效 App ID 加空 Secret 是 exact-App 修复；删除整个 pr
 权限不足、取消和超时；验证凭据不进入输出、argv、日志或 YAML。TTY 浏览器失败只
 允许一次手工回退，Ctrl-C 不回退，成功后不再次发起浏览器补权。此项须单独记录，
 fake helper 和代码门禁不能冒充真实应用验收。
+
+### Admin 飞书登录与管理员维护验收
+
+2026-10-11 本轮将 [ADR 0079](adr/0079-authenticate-admins-with-feishu-identities.md) 接入
+当前源码，未据此发布版本或部署真实实例。临时 demo 的真人登录、选人和本人 Open ID
+对应证据不等于正式链路通过；以下 live 项仍需在授权的隔离应用和实例完成：
+
+- 新应用与已有 exact App 的无 TTY setup、手填首管理员、取消/超时及两阶段 URL 交接；
+  user 类型权限实际开通、新登录申请及实际授予 `component:selector offline_access`。
+- 普通浏览器与飞书客户端的授权返回、非管理员拒绝、搜索选人及 ID 对应、确认增删、
+  最后一人保护、自删后所有会话撤销；官方 Selector 作为受信同源依赖加载。
+- 真实 UAT/RT 刷新与轮换、失效登出、重启保留凭证但匿名浏览器仍需登录；名单与凭证
+  的权限、原子写失败和删除时的在途结果不得恢复已撤销资格。
+- 另一台受信内网主机的 Host/Origin/CSRF、登录流程限速与脱敏；Linux systemd 和 macOS
+  LaunchAgent 的缺管理员启动拒绝、显式补配置、重启、更新恢复及精确 purge。
+
+本地行为测试和静态检查分别记录，不替代这些真人、跨主机和平台验收；HTTP 的部署
+前提仍是受信内网，不新增公网安全或免授权确认承诺。
+
+本轮本地证据：独立 Python 3.11 环境按锁定依赖运行 `make check`，全部门禁通过。
+其中 review 修复后的 unittest 共 2,939 项、15 项
+按平台或原生包管理器探针条件跳过，其余通过；包含 wheel/sdist 构建与隔离资源加载。
+编译、依赖一致性、SDK 合成探针及一次性未认证 App Server 的只读 Skills 发现均通过，
+不包含模型执行或真实飞书授权。前端行为测试使用 Node 24.18.1，不冒充 CI 的 Node 22
+验收；隔离 Chromium 在 390/1365 像素宽度验证登录、取消、管理员增删、最后一人保护、
+会话失效和迟到响应，使用合成后端及 Selector 数据，无横向溢出或页面异常。本人资料
+仅整页初始化请求一次，切换管理 tab/刷新名单不重复查询。该浏览器环境缺中文字体，
+中文内容通过 DOM 校验，截图不作为中文字体效果或真实飞书搜索证据。
+
+本轮实现 review 后另用固定官方 Selector SDK 1.2.21 与合成鉴权响应、候选数据复验：
+在 390/1365 像素宽度下，页内选人区域的 body 下拉候选可点击；鉴权请求网络失败导致
+SDK Promise 挂起时显示整页重新加载入口，关闭重开不重复鉴权，整页重载后恢复。
+行为测试补充 SDK 页外候选、超时和旧请求迟到，以及登录终态容量释放、明确 UAT
+过期码穿透至单次刷新。此项使用真实 SDK 代码，但所有网络请求均被合成拦截，不是
+真实飞书授权、用户搜索或客户端验收；前述 live 缺口不因此关闭。
 
 ### 服务环境
 
@@ -1157,13 +1211,17 @@ raw App ID／Secret。重复 JSON 字段、重复的 `netizen` profile、错误�
 CLI `1.0.95`，需用不含真实凭据的隔离 profile 验证目录选择、固定 profile 和自动换令牌
 分支；这不能替代真实应用授权或飞书验收。
 
-Admin credential 仍独立保存，必须是 `token_urlsafe(32)` 的 canonical base64url 单行、
-无尾换行，且 mode 必须精确为 `0600`。若需要由 Agent 预配置，可安全地以文件写入 API/
-受控 stdin 写入；不要把 Secret 放在 CLI 参数或 shell history 中。首次无 TTY 安装可以
-直接完成官方浏览器初始化：
+Admin 使用同一应用的飞书登录，管理员名单与用户凭证分别保存在私有的
+`<NETIZEN_ROOT>/state/admin-users.json` 和
+`<NETIZEN_ROOT>/credentials/admin-user-tokens.json`，不进入上述 profile 或 Channel SQLite。
+文件由当前用户拥有、普通非 symlink、单硬链接，写入权限为 `0600`，读取也允许只读
+`0400`；原子替换。在线由服务统一修改，离线 setup 持有维护锁和 lifetime lock。
+不要在服务运行时直接编辑名单或 token 文件。首次无 TTY 安装可以完成浏览器初始化：
 
 ```bash
-netizen setup --root "<NETIZEN_ROOT>" </dev/null  # 新实例或已解除绑定实例；按输出转交验证链接
+netizen setup --root "<NETIZEN_ROOT>" </dev/null  # 按输出逐次转交应用绑定/管理员登录链接
+# 已绑定当前应用时，也可显式指定首管理员：
+netizen setup --root "<NETIZEN_ROOT>" --admin-open-id ou_example
 ```
 
 从带 Netizen allowlist 的旧版本升级时，必须先从 live `config.yaml` 删除整个
@@ -1171,58 +1229,58 @@ netizen setup --root "<NETIZEN_ROOT>" </dev/null  # 新实例或已解除绑定�
 启动，避免部署者误以为这些字段仍然生效。
 
 不要把 Secret 内容写入 YAML、仓库、shell 参数、shell profile、systemd `Environment=`
-或 LaunchAgent plist。服务只传递应用配置与 Admin credential 的受保护文件路径。
+或 LaunchAgent plist。服务只传递应用配置的受保护路径，名单和用户凭证固定从实例 root
+派生。旧 Admin secret 不再生成、读取或接受为登录凭据，也不提供自动回退；磁盘遗留
+文件不自动删除，只有显式 purge 才按精确清单处理。
 
 `adminWeb` 首次未指定端口时等价于：
 
 ```yaml
 adminWeb:
-  enabled: true
   host: 0.0.0.0
   # port 缺失时首次实际绑定 8787–8886 中可用的端口，随后写回此字段
   # accessHost: netizen.internal  # 可选访问 hostname/IP，不含协议、端口或路径
 ```
 
-可覆盖 host/port 或显式关闭；启用时使用 `<NETIZEN_ROOT>/credentials/admin-web-secret`，
-启动入口设置 NETIZEN_ADMIN_SECRET_FILE，显式提供时必须与该路径一致。
+可覆盖 host/port/accessHost；Admin 为必备能力，`enabled` 属于不支持的配置，启动会拒绝。
+启动须已有当前应用的管理员；缺名单时显式 setup 补配置，后台启动和重启不会等待扫码。
 端口字段存在时严格使用，冲突报错；只有缺失才自动分配，`0`、`null`、空字符串无效。
 启动进程保留已绑定 listener 后原子更新 YAML，检测人工修改或写入失败即关闭 listener，
 不以探测空闲后释放 socket 的方式分配。只有 EADDRINUSE 才尝试下一端口，最多 100 个；
 其他错误或耗尽均启动失败。端口一旦写入，即使后续初始化失败也保留；删除 port 再启动
-才重新请求分配。禁用 Admin 时不绑定、不分配。停止实例的已保存端口不登记或预留。
+才重新请求分配。停止实例的已保存端口不登记或预留。
 
 在飞书发送 `/admin` 获取成功绑定的管理地址和实例根目录，不要求 Project/会话，也不
-调用模型。有效 Side 同样可用，已关闭 Side 保持原路由；未启用时明确说明。命令不返回
+调用模型。有效 Side 同样可用，已关闭 Side 保持原路由。命令不返回
 credential、session token 或免登录链接。访问 URL 不使用 `0.0.0.0`/`::`；通配监听自动选择
 与实际监听地址族及端口匹配的本机 IP，没有匹配项时回退同族 loopback。多网卡可设置
 `accessHost`，它连同实际端口加入已有 Host/Origin 精确校验，不增加代理信任或 NAT 映射。
 只有 loopback 地址时使用服务器本机或自行隧道。未登录时根路径跳转到 `/login`。
-页面和登录页均显示实例 root。登录凭据可由
-实例管理员在受控终端读取：
+页面和登录页均显示实例 root。点击飞书登录后在官方授权页确认，保留原页等待结果；
+服务端确认用户身份及当前管理员资格后才保存用户凭证和签发本地 session。匿名访问者
+不能认领首管理员。姓名和头像只是本地展示快照，不参与 `App ID + Open ID` 授权判断。
 
-```bash
-cat "<NETIZEN_ROOT>/credentials/admin-web-secret"
-```
-
-Admin 登录会话不设闲置或绝对时间过期；退出登录、服务重启或凭据轮换会使其失效。
+Admin 登录会话不设闲置或绝对时间过期；退出登录、服务重启或管理员被移除会使其失效。
 浏览器仍使用会话 Cookie，清除 Cookie 后需重新登录。同一来源最多保留 16 个、全局最多
 256 个登录会话；验证成功的新登录在达到上限时替换最早会话，优先在已满的同一来源内
 替换，并撤销旧会话的操作凭据。
 
-登录页的一次性校验码也不设时间过期；已提交、服务重启、凭据轮换或待提交校验码达到
-容量上限后被替换时，需重新打开 `/login`。待提交校验码最多每来源 16 个、全局 1,024 个，
-新签发优先替换已满来源的最早记录，否则在全局满时替换全局最早记录。多个登录页共用
-Cookie，打开同一实例的新页可能使旧页无法提交。登录失败后自动跳回带提示的新登录页，
-不要后退重交旧表单；核对凭据来自该部署主机的当前实例。
-每来源五分钟内最多五次失败、全局最多二十次；达到限制后登录页显示等待提示与重试
-入口，暂不提供提交表单。暂停尝试约五分钟后重新打开 `/login`，无需重启服务；刷新
-等待页不会增加失败计数。登录后的操作凭据十分钟有效期保持不变。
-两个 Cookie 名都带 rootDigest；同一 host 不同端口的实例可并行登录，互不覆盖。
+登录尝试绑定原浏览器、来源和一次性挑战，并按飞书返回期限有界轮询；取消、过期或
+限速时按页面提示重试。登录后的操作凭据仍有十分钟有效期。Cookie 名带 rootDigest，
+同一 host 不同端口的实例可并行登录。Host/Origin、CSRF、容量与限速校验仍适用。
 
-轮换时用安全的原子文件写入替换同一路径并保持 0600，然后刷新页面；运行中 auth 会在下一
-认证边界检测到合法 identity/content 变化并立即注销全部旧 session。非法替换会锁闭 Admin
-admission，修复文件后仍需 `netizen restart --root "<NETIZEN_ROOT>"`，不会自动重新开放。V1 使用不加密的内网
-HTTP；不得把该端口直接暴露到不受信网络。
+用户 token 跨服务重启保留，但不会自动恢复匿名浏览器登录。仅在实际调用飞书时检查
+期限并按需刷新，不增加后台续期；刷新失败使当前请求的浏览器 session 失效，需要重新
+登录。普通退出只清除当前 session 和关联操作授权，保留共享用户凭证。每位管理员仅
+一份当前 UAT/RT；登录或刷新成功原子覆盖，token 不给前端、不写日志。
+
+“系统管理 → 权限管理 → 管理员”使用飞书官方 Selector 搜索选人，管理员确认后由后端
+复核当前资格与名单 revision 再添加。管理员同权，可删除自己但不能删除最后一人；
+删除立即撤销其所有 session 和未消费操作授权，并清理用户凭证，在途结果不得重新
+建立已撤销的授权。名单展示使用本地姓名/头像快照，不额外申请通讯录权限。运行中若
+名单不可用，Admin 拒绝管理访问，不终止机器人或已受理任务。仍使用不加密的受信内网
+HTTP，不得把端口直接暴露到不受信网络。正式链路的真人和平台验收状态见
+[专项验收](#admin-飞书登录与管理员维护验收)。
 
 `instance.projectRoot` 是必填的绝对路径，用于限制从飞书自动创建的空 Project；它不是
 Binding 的默认 cwd。Channel 业务只支持当前完整 schema v14；实际启动入口按
@@ -1338,15 +1396,15 @@ lifetime lock 非继承须有独立的实进程证据：exec 子进程未拿到�
 macOS 停服时核对现有 interrupt、terminal cleanup 与有界 SDK 关闭请求，记录后台
 terminal 继续运行或退出的实际结果，任一种结果均不作为独立通过或失败判据。缺少锁
 非继承证据时明确记为未验证；测试进程须有预设期限，结束后确认清理且不影响无关进程。
-检查 plist、进程 argv/environment、`netizen.log` 和 `launchd.stderr.log` 均不含 App/Admin
-Secret。最后在两平台重跑真实 Codex Thread、steer、cleanup 和 exact-ID resume probes，
+检查 plist、进程 argv/environment、`netizen.log` 和 `launchd.stderr.log` 均不含 App Secret、
+UAT/RT、设备授权码或本地会话凭证。最后在两平台重跑真实 Codex Thread、steer、cleanup 和 exact-ID resume probes，
 按上述职责分别记录适配行为与原生能力结果；fake launchctl/systemctl 单测不能替代这些真机门禁。
 
 先通过 `/admin` 获取当前实例的实际端口，从另一台受信内网主机直接访问
 `http://<服务器 IP>:<实际端口>`：未登录的 `/` 返回 303
-重定向到 `/login`（不返回 HTML 或状态），未知 route 和 API 必须返回 401，只有登录页复用的
-无状态 CSS 可匿名读取，`/health/ready` 只返回无细节状态；
-使用独立 credential 登录后，检查四个一级
+重定向到 `/login`（不返回 HTML 或状态），未知 route 和受保护 API 必须返回 401。仅明确
+公开的登录页面、登录资源与授权端点允许进入预认证流程，仍需浏览器绑定和同源检查；
+`/health/ready` 只返回无细节状态。通过飞书登录并核对管理员名单后，检查各管理
 页面、筛选、分页和五秒 runtime polling。Sessions 默认显示 Active + Lazy，Project 可搜索
 并包含停用项；Project/Scope/状态/current 的多选应满足同项“或”、跨项“且”，无 ID 输入框，
 列表 ID 仍可见。验证重置恢复默认状态、全部时间和每页 20 条。分别选择 10/20/50/100，确认前后翻页、
@@ -1627,12 +1685,10 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
 
     ```bash
     set -euo pipefail
-    unset FEISHU_APP_SECRET FEISHU_APP_SECRET_FILE NETIZEN_ADMIN_SECRET
+    unset FEISHU_APP_SECRET FEISHU_APP_SECRET_FILE NETIZEN_ADMIN_SECRET NETIZEN_ADMIN_SECRET_FILE
     export NETIZEN_ROOT="<目标实例绝对根目录>"
     export NETIZEN_LARK_APP_CONFIG="${NETIZEN_ROOT}/lark-app/config.json"
-    export NETIZEN_ADMIN_SECRET_FILE="${NETIZEN_ROOT}/credentials/admin-web-secret"
     test -s "$NETIZEN_LARK_APP_CONFIG"
-    test -s "$NETIZEN_ADMIN_SECRET_FILE"
     probe_chat_id=${NETIZEN_FILE_PROBE_CHAT_ID:?set target Feishu chat ID}
     for count in 100 400; do
       .venv/bin/python scripts/probe_feishu_turn_file_card.py \

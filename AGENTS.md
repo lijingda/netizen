@@ -47,6 +47,7 @@ their cited ADRs before changing that boundary.
   App credentials: [credential source](docs/design.md#飞书应用凭据).
   Service environment and native settings: [configuration](docs/design.md#原生环境与能力配置).
   Admin Web: [queries and actions](docs/design.md#管理查询与操作), including
+  [Feishu administrator identities](docs/adr/0079-authenticate-admins-with-feishu-identities.md) and
   [runtime polling](docs/design.md#运行态投影与轮询).
   Project deletion uses the exact inventory, tombstone and lifecycle boundaries
   in [the current contract](docs/design.md#project-删除与交接) and
@@ -115,6 +116,8 @@ their cited ADRs before changing that boundary.
   Do not add a generic/private RPC gateway,
   parse CLI output, patch SDK internals, copy protocol models, or signal
   arbitrary processes. New gaps require an accepted ADR and a removal trigger.
+  The narrow Feishu Admin OAuth/ticket HTTP exception and its SDK replacement
+  trigger are defined in [ADR 0079](docs/adr/0079-authenticate-admins-with-feishu-identities.md).
 - Preserve each adapter's documented gate: cleanup and Activity retain exact
   version/fingerprint checks; the other adapters use capability shape,
   synthetic, and live harnesses. Delete also requires disposable live coverage
@@ -132,8 +135,8 @@ their cited ADRs before changing that boundary.
   intent and releasing Binding/Scope locks; do not pre-interrupt, cleanup, or
   wait for idle. Preserve bounded observation/reconciliation and Binding-local
   unknown states (ADR 0037/0049); never fabricate a terminal.
-- Feishu app availability and chat membership govern Channel admission. The
-  single Instance Administrator is separate Admin Web authority, not multi-user
+- Feishu app availability and chat membership govern Channel admission. Instance
+  Administrators are separate, equal Admin Web authorities, not multi-role
   RBAC, a Netizen allowlist, or Project ACLs. Native Codex controls model, tools,
   Skills, MCP, sandboxing, and environment policy except the documented Binding
   Model/Effort/Speed intent, non-login tool boundary, and dedicated temporary

@@ -27,15 +27,25 @@ function setStatus(message, isError = false) {
 }
 
 async function api(path, options = {}) {
+  if (state.authExpired) {
+    const error = new Error("登录已过期，请重新登录。");
+    error.status = 401;
+    throw error;
+  }
   const response = await fetch(path, { cache: "no-store", ...options });
-  if (response.status === 401) {
-    window.location.assign("/login");
-    const error = new Error("登录已失效，请重新登录。");
+  if (response.status === 401 || state.authExpired) {
+    expireAdminSession();
+    const error = new Error("登录已过期，请重新登录。");
     error.status = 401;
     throw error;
   }
   if (response.status === 204) return null;
   const data = await response.json();
+  if (state.authExpired) {
+    const error = new Error("登录已过期，请重新登录。");
+    error.status = 401;
+    throw error;
+  }
   if (!response.ok) {
     const error = new Error(data.message || `请求失败 (${response.status})`);
     error.status = response.status;
@@ -44,6 +54,19 @@ async function api(path, options = {}) {
     throw error;
   }
   return data;
+}
+
+function expireAdminSession() {
+  if (state.authExpired) return;
+  state.authExpired = true;
+  stopUpdatePolling();
+  if (typeof runtimePollTimer !== "undefined") clearInterval(runtimePollTimer);
+  for (const element of document.querySelectorAll?.(".panel, dialog, .tabs") || []) element.inert = true;
+  for (const button of document.querySelectorAll?.("button") || []) button.disabled = true;
+  const notice = document.querySelector("#auth-expired");
+  if (notice) notice.hidden = false;
+  window.NetizenIdentity?.expire();
+  setStatus("登录已过期，请重新登录。", true);
 }
 
 const updateTerminalPhases = new Set([
@@ -183,7 +206,7 @@ function stopUpdatePolling() {
 
 function scheduleUpdatePoll() {
   stopUpdatePolling();
-  if (state.tab !== "updates" || updatePollExpired || !updateNeedsPolling()) return;
+  if (state.authExpired || state.tab !== "updates" || updatePollExpired || !updateNeedsPolling()) return;
   if (updatePollStarted == null) updatePollStarted = Date.now();
   if (Date.now() - updatePollStarted >= updatePollLimitMs) {
     updatePollExpired = true;
@@ -195,7 +218,7 @@ function scheduleUpdatePoll() {
 
 async function pollUpdateStatus() {
   updatePollTimer = null;
-  if (state.tab !== "updates") return;
+  if (state.authExpired || state.tab !== "updates") return;
   if (updateReading) {
     scheduleUpdatePoll();
     return;
@@ -3021,6 +3044,7 @@ function applyRuntimeSnapshots(payload, resolveChanges = true) {
 }
 
 async function refresh(tab, cursor = undefined) {
+  if (state.authExpired) return false;
   setStatus("正在读取服务端事实…");
   try {
     if (tab === "projects") await loadProjects(cursor || null);
@@ -3032,6 +3056,7 @@ async function refresh(tab, cursor = undefined) {
     if (tab === "updates") await loadUpdates();
     if (tab === "schedules") await loadSchedules(cursor || null);
     if (tab === "defaults") await loadDefaults();
+    if (tab === "system") await window.NetizenIdentity.loadUsers();
     setStatus("已更新。");
     return true;
   } catch (error) {
@@ -3041,6 +3066,7 @@ async function refresh(tab, cursor = undefined) {
 }
 
 function selectTab(name) {
+  if (state.authExpired) return;
   state.tab = name;
   sessionChatPicker?.close();
   stopUpdatePolling();
@@ -3208,9 +3234,10 @@ async function fetchRuntimeSnapshots(bindingIds, sideIds, resolvePrimary = false
 
 let runtimePollInFlight = false;
 
-setInterval(async () => {
+const runtimePollTimer = setInterval(async () => {
   if (
-    runtimePollInFlight
+    state.authExpired
+    || runtimePollInFlight
     || document.hidden
     || (state.tab !== "sessions" && state.tab !== "side-topics")
   ) return;
@@ -3266,3 +3293,4 @@ if (linkedBindingId) {
   initialTab = "sessions";
 }
 selectTab(initialTab);
+window.NetizenIdentity.loadProfile().catch((error) => setStatus(error.message, true));

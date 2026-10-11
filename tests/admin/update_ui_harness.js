@@ -151,7 +151,12 @@ const restartOperation = (phase, id = "new-restart") => ({
   answer = async () => response({message: "登录失效"}, 401);
   stopUpdatePolling();
   await pollUpdateStatus();
-  assert.equal(redirected, "/login");
+  assert.equal(redirected, null);
+  assert.equal(state.authExpired, true);
+  assert.equal(elements.get("#auth-expired").hidden, false);
   assert.equal(updatePollTimer, null);
+  const requestCount = requests.length;
+  await assert.rejects(api("/api/v1/updates"), (error) => error.status === 401);
+  assert.equal(requests.length, requestCount);
   assert.doesNotMatch(elements.get("#update-phase").textContent, /成功/);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

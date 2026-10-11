@@ -29,20 +29,40 @@ netizen status --root /absolute/path/to/.netizen
 
 单实例操作的 root 选择顺序为 `--root`、`NETIZEN_ROOT`、有效账号的 `~/.netizen`；
 `doctor` 未显式传 `--root` 时改为列出全部受管实例，见下文。包安装只安装程序、
-依赖和资源，不生成实例、注册服务或迁移数据库。setup 检查共享 Codex 登录、通过官方
-飞书浏览器流程准备应用凭据并校验权限，初始化数据、注册服务，但不默认启动。
-无 TTY 也可用浏览器完成；agent 应转交验证 URL 并保留同一进程，不索取 App Secret。
-凭据留在 `<root>/lark-app/config.json` 的固定 netizen profile；租户审批、发布、安装、
-可用范围和机器人入群仍需用户完成。首次可用 `--admin-port` 指定端口。
+依赖和资源，不生成实例、注册服务或迁移数据库。首次 setup 检查共享 Codex 登录、通过
+官方飞书浏览器流程准备应用凭据并校验权限，再确认当前应用的首位管理员，初始化数据、
+注册服务，但不默认启动。无 TTY 也可用浏览器完成；agent 应逐次转交验证 URL 并保留
+同一进程，不索取 App Secret。应用绑定和首管理员身份确认可能分别要求一次授权；
+注册返回的 Open ID 不直接作为已核对的登录身份。
+应用凭据留在 `<root>/lark-app/config.json` 的固定 netizen profile；租户审批、发布、安装、
+可用范围和机器人入群仍需用户完成。应用需开通 user 类型 `component:selector`、
+`offline_access`，新 Admin 登录也统一请求这两项授权。首次可用 `--admin-port` 指定端口。
+
+本机受信操作者也可手填当前应用下的 Open ID，支持人和 Agent 的非交互流程：
+
+```sh
+netizen setup --root /absolute/path/to/.netizen --admin-open-id ou_example
+```
+
+App ID 来自该实例已绑定的应用，不填写 `tenant_key`。该参数只初始化首管理员，已有
+管理员时保留原名单；指定 ID 不是登录凭证，该用户之后仍须真实完成飞书登录。
+名单保存为 `<root>/state/admin-users.json`；已通过名单核对的用户凭证独立保存到
+`<root>/credentials/admin-user-tokens.json`，不进入应用 profile 或 Channel SQLite。
+
 setup 在外部授权前记录“初始化中”，因此授权失败或取消后可以重试，也可用 remove
 --purge 清理已生成的精确文件；不会把已有实例缺库误当作首次创建。
-已有服务绑定时，setup 只报告 `already_registered` 和当前状态，保留绑定及自启设置，
-不会替用户重新启用或启动服务；运行已有绑定请用同一 root 的 start。如果之前的注册
+已有服务绑定且应用和管理员齐全时，setup 报告 `already_registered` 和当前状态，保留
+名单、绑定及自启设置；不会按本次操作者改写管理员，也不重新启用或启动服务。已有
+应用只缺管理员时，停止实例后可直接运行相同 setup 补配置，返回 `configured`，不改变
+原绑定环境和数据库。运行中的实例缺管理员会提示先 stop；格式或权限错误不会当作空名单。
+运行已有绑定请用同一 root 的 start。如果之前的注册
 过程失败，应先检查 status；需要重新注册时，用 remove（不加 --purge）保留数据，
 再从目标 Python 环境对同一 root 执行 setup，确认注册成功后显式 start。
 
 start 等待该实例真正 ready，不把 manager 已加载当作成功。每次实际启动（包括系统
-自动启动和崩溃重启）都校验环境和数据、按需迁移。数据格式较新、损坏、缺库或缺少
+自动启动和崩溃重启）都校验当前应用管理员、环境和数据、按需迁移。Admin 是必备能力，
+没有 `adminWeb.enabled` 配置；缺管理员时提示显式 setup，后台重启或更新恢复不等待扫码。
+数据格式较新、损坏、缺库或缺少
 迁移路径时拒绝业务启动，不创建空库；迁移提交后的启动失败不恢复旧数据库。
 schema 没变化不会重复迁移或无条件备份。status/help/version 不触发迁移。
 
@@ -190,6 +210,14 @@ netizen remove --root /absolute/path/to/.netizen --purge -y
 
 Admin 只允许本实例管理与显式重启，不再安装或升级全局程序。重启使用绑定环境中
 当前程序，可能触发该实例数据迁移，不承诺任务续跑；程序更新从外部 CLI 执行。
+登录使用当前应用的飞书身份，只允许名单内的 `App ID + Open ID`。管理员同权，可在
+“系统管理 → 权限管理 → 管理员”维护名单；不能删除最后一人。旧共享 secret 登录、
+生成及读取依赖已移除，不提供备用入口。遗留 secret 文件不自动删除，仍属于显式
+`remove --purge` 的有限清单。
+
+浏览器 session 只在内存，重启或退出后需要重新登录；用户 token 跨重启保留，只有实际
+调用飞书时才检查并按需刷新。删除管理员立即撤销其登录与未使用操作授权并清理凭证，
+不会取消已经受理的任务。Admin 继续使用受信内网 HTTP。
 
 ## 验证与发布状态
 
@@ -198,6 +226,10 @@ Admin 只允许本实例管理与显式重启，不再安装或升级全局程�
 构建 Python（可通过 NETIZEN_TEST_BUILD_PYTHON 指定）。Linux/macOS 的真实 service
 manager、飞书 browser/ready、实际 SDK Skills 执行和中断恢复仍需要对应实机验收。
 未完成实机项不能因 synthetic 测试通过就标为通过；不把已有 release 的证据转移到新 CLI。
+
+2026-10-11 的飞书登录和管理员维护变更属于当前源码，未据此发布版本或部署实例。
+正式初始化身份确认、新 scope 的实际授予与刷新、普通浏览器及飞书客户端、跨主机
+登录和两平台服务验收仍需单独完成，见[专项验收](deployment.md#admin-飞书登录与管理员维护验收)。
 
 2026-09-29 首轮本地实现验收：Linux 开发环境的 `make check` 通过，2613 项测试中 2608
 通过、5 项为另一平台专属分支的条件跳过；编译、依赖检查和 SDK synthetic／只读 Skills

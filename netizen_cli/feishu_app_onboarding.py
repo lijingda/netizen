@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create or update the Bot-only Feishu/Lark app used by Netizen.
+"""Create or update the Feishu/Lark app used by Netizen and its Admin login.
 
 This helper runs in the selected installation without requiring Lark CLI.
 Its stdout is a private machine-readable credential channel consumed by setup;
@@ -25,6 +25,7 @@ REQUIRED_TENANT_SCOPES = (
     "im:resource",
     "im:message:send_as_bot",
 )
+REQUIRED_USER_SCOPES = ("component:selector", "offline_access")
 TENANT_SCOPE_ALTERNATIVES = {
     "im:chat:read": frozenset(("im:chat", "im:chat:read", "im:chat:readonly")),
 }
@@ -49,7 +50,10 @@ def _registration_options(app_id: str | None) -> dict[str, Any]:
         },
         "addons": {
             "preset": False,
-            "scopes": {"tenant": list(REQUIRED_TENANT_SCOPES)},
+            "scopes": {
+                "tenant": list(REQUIRED_TENANT_SCOPES),
+                "user": list(REQUIRED_USER_SCOPES),
+            },
             "events": {"items": {"tenant": list(TENANT_EVENTS)}},
             "callbacks": {"items": list(CALLBACKS)},
         },
@@ -112,7 +116,7 @@ def run_registration(
             raise OnboardingError("registration returned an invalid verification URL")
         print("", file=progress_output)
         print(
-            "Open this Feishu/Lark URL and confirm the requested Bot access:",
+            "Open this Feishu/Lark URL and confirm the requested app permissions:",
             file=progress_output,
         )
         print(url, file=progress_output)

@@ -65,8 +65,8 @@ def persist_admin_port(snapshot: ConfigFileSnapshot, port: int) -> None:
     if not isinstance(loaded, dict):
         raise AdminPortConfigurationError("configuration root must be a mapping")
     values = loaded.setdefault("adminWeb", {})
-    if not isinstance(values, dict) or "port" in values or values.get("enabled", True) is not True:
-        raise AdminPortConfigurationError("Admin port allocation requires enabled Admin and absent port")
+    if not isinstance(values, dict) or "port" in values:
+        raise AdminPortConfigurationError("Admin port allocation requires an absent port")
     # YAML aliases may share this mapping with another key. Updating Admin
     # must not mutate those unrelated values through Python object identity.
     values = dict(values)

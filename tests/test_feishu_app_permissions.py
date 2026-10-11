@@ -9,11 +9,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from netizen_cli import feishu_app_permissions as permissions
-from netizen_cli.feishu_app_onboarding import REQUIRED_TENANT_SCOPES
+from netizen_cli.feishu_app_onboarding import REQUIRED_TENANT_SCOPES, REQUIRED_USER_SCOPES
 from netizen_cli.lark_app import encode_lark_app
 
 
-def _response(*scope_states: tuple[str, int], success: bool = True) -> SimpleNamespace:
+def _response(*scope_states: tuple[str, int], success: bool = True,
+              user_scopes: bool = True) -> SimpleNamespace:
     return SimpleNamespace(
         success=lambda: success,
         data=SimpleNamespace(
@@ -24,7 +25,8 @@ def _response(*scope_states: tuple[str, int], success: bool = True) -> SimpleNam
                     scope_type="tenant",
                 )
                 for name, status in scope_states
-            ]
+            ] + ([SimpleNamespace(scope_name=name, grant_status=1, scope_type="user")
+                  for name in REQUIRED_USER_SCOPES] if user_scopes else [])
         ),
     )
 
@@ -49,7 +51,7 @@ class FeishuAppPermissionsTest(unittest.TestCase):
 
         self.assertEqual(
             json.loads(output.getvalue()),
-            {"version": 1, "missingScopes": []},
+            {"version": 1, "missingScopes": {"tenant": [], "user": []}},
         )
 
     def test_each_official_chat_info_scope_satisfies_the_requirement(self) -> None:
@@ -71,7 +73,7 @@ class FeishuAppPermissionsTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     json.loads(output.getvalue()),
-                    {"version": 1, "missingScopes": []},
+                    {"version": 1, "missingScopes": {"tenant": [], "user": []}},
                 )
 
     def test_bot_mentions_require_an_effective_tenant_grant(self) -> None:
@@ -104,7 +106,7 @@ class FeishuAppPermissionsTest(unittest.TestCase):
 
                 self.assertEqual(
                     json.loads(output.getvalue()),
-                    {"version": 1, "missingScopes": missing},
+                    {"version": 1, "missingScopes": {"tenant": missing, "user": []}},
                 )
 
     def test_absent_and_unauthorized_scopes_are_reported_in_contract_order(self) -> None:
@@ -137,7 +139,7 @@ class FeishuAppPermissionsTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            json.loads(output.getvalue())["missingScopes"],
+            json.loads(output.getvalue())["missingScopes"]["tenant"],
             ["im:message.p2p_msg:readonly", "im:chat:read"],
         )
 
@@ -164,6 +166,20 @@ class FeishuAppPermissionsTest(unittest.TestCase):
                 list_scopes=lambda: malformed,
                 stdout=io.StringIO(),
             )
+
+    def test_user_scopes_require_effective_user_grants(self) -> None:
+        for kind, status, expected in (
+            ("tenant", 1, list(REQUIRED_USER_SCOPES)),
+            ("user", 2, list(REQUIRED_USER_SCOPES)),
+            ("user", 1, []),
+        ):
+            with self.subTest(kind=kind, status=status):
+                response = _response(*((scope, 1) for scope in REQUIRED_TENANT_SCOPES), user_scopes=False)
+                response.data.scopes.extend(
+                    SimpleNamespace(scope_name=scope, grant_status=status, scope_type=kind)
+                    for scope in REQUIRED_USER_SCOPES
+                )
+                self.assertEqual(permissions._missing_required_scopes(response), {"tenant": [], "user": expected})
 
     def test_main_uses_app_secret_without_disclosing_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

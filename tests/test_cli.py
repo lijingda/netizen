@@ -16,10 +16,11 @@ from netizen_cli.cli_services import ServiceBinding, ServiceStatus
 
 
 class CliTest(unittest.TestCase):
-    def invoke(self, arguments, *, pending_restart=None):
+    def invoke(self, arguments, *, pending_restart=None, admin_binding_error=None):
         output, errors = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors), \
              patch("netizen_cli.deployment.restart_worker.assert_no_pending_restart", side_effect=pending_restart), \
+             patch("netizen_cli.cli_setup.require_admin_binding", side_effect=admin_binding_error), \
              patch("netizen_cli.deployment.restart_worker.finish_manual_restart", return_value=None):
             code = cli.main(arguments)
         return code, output.getvalue(), errors.getvalue()
@@ -126,6 +127,7 @@ class CliTest(unittest.TestCase):
                 manager.inspect.return_value = ServiceStatus(binding, False, enabled, False)
                 with patch("netizen_cli.cli_services.ServiceManager", return_value=manager), \
                      patch("netizen_cli.cli_setup.require_codex_login") as login, \
+                     patch("netizen_cli.cli_setup.admin_binding_ready", return_value=True) as check_binding, \
                      patch("netizen_cli.cli_setup.prepare_configuration") as configure, \
                      patch("netizen_cli.cli_data.initialize_instance_data") as initialize:
                     code, output, _ = self.invoke(["setup", "--root", str(root), "--json"])
@@ -136,9 +138,39 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(result["instance"]["binding"]["python"], "/env-a/bin/python")
                 self.assertTrue(result["recommendation"])
                 login.assert_not_called()
+                check_binding.assert_called_once_with(root)
                 configure.assert_not_called()
                 initialize.assert_not_called()
                 self.assertEqual(manager.method_calls, [call.inspect(root)])
+
+    def test_existing_setup_missing_administrator_does_not_return_success_while_running(self):
+        root = Path("/tmp/cli-existing-running").resolve()
+        manager = Mock()
+        manager.inspect.return_value = ServiceStatus(cli._current_binding(root), True, True, True)
+        with patch("netizen_cli.cli_services.ServiceManager", return_value=manager), \
+             patch("netizen_cli.cli_setup.admin_binding_ready", return_value=False), \
+             patch("netizen_cli.cli_setup.prepare_configuration") as configure:
+            code, output, _ = self.invoke(["setup", "--root", str(root), "--admin-open-id", "ou_admin", "--json"])
+        self.assertEqual(code, 1)
+        self.assertIn("stop this instance", json.loads(output)["reason"])
+        configure.assert_not_called()
+        manager.stop.assert_not_called()
+
+    def test_start_and_restart_reject_missing_administrator_before_service_changes(self):
+        root = Path("/tmp/cli-missing-administrator").resolve()
+        for command in ("start", "restart"):
+            with self.subTest(command=command):
+                manager = Mock()
+                manager.inspect.return_value = ServiceStatus(cli._current_binding(root), False, True, False)
+                with patch("netizen_cli.cli_services.ServiceManager", return_value=manager), \
+                     patch("netizen_cli.cli_data.root_maintenance_lock", return_value=contextlib.nullcontext()):
+                    code, output, _ = self.invoke([command, "--root", str(root), "--json"],
+                                                 admin_binding_error=RuntimeError("administrator configuration is required"))
+                self.assertEqual(code, 1)
+                self.assertIn("administrator", json.loads(output)["reason"])
+                manager.stop.assert_not_called()
+                manager.start.assert_not_called()
+                manager.register.assert_not_called()
 
     def test_status_is_read_only(self):
         manager = Mock()

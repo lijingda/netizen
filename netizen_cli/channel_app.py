@@ -6732,7 +6732,7 @@ class ChannelApplication:
         )
         lines = [f"实例根目录：{root}"]
         if not self._admin_urls:
-            lines.append("当前实例未启用 Admin Web。")
+            lines.append("当前实例的 Admin Web 管理地址暂不可用。")
             return "\n\n".join(lines)
         lines.extend(("Admin Web 管理地址：", *self._admin_urls))
         loopback_only = self._admin_loopback_only is True or all(
@@ -6745,7 +6745,7 @@ class ChannelApplication:
                 "请使用可访问的服务器地址；可在本实例 config.yaml 中设置 "
                 "adminWeb.accessHost 指定展示地址。"
             )
-        lines.append("管理页仍需独立的管理员凭据登录；请勿在聊天中发送凭据。")
+        lines.append("请使用管理员名单中的飞书账号登录管理页；请勿在聊天中发送登录凭证。")
         return "\n\n".join(lines)
 
     def _help(self) -> str:

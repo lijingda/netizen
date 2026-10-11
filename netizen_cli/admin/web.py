@@ -8,6 +8,8 @@ import hashlib
 import html
 import importlib.resources
 import ipaddress
+import io
+import inspect
 import json
 import logging
 import socket
@@ -33,6 +35,13 @@ from .auth import (
     StaleActionGrant,
 )
 from .errors import AdminWebError
+from .credentials import AdminCredentials
+from .feishu import AuthExpired, FeishuClient, FeishuError
+from .login import AdminLogin
+from .users import (
+    AdminIdentity, AdminUsers, AdminUsersError, AdminUsersUnavailable,
+    AdminPermissionDenied, LastAdministrator,
+)
 from .presentation import (
     _binding_result,
     _chat_open_url,
@@ -157,7 +166,6 @@ logger = logging.getLogger(__name__)
 _SESSION_COOKIE = "netizen_admin_session"
 _PREAUTH_COOKIE = "netizen_admin_preauth"
 _JSON_TYPE = "application/json"
-_FORM_TYPE = "application/x-www-form-urlencoded"
 _QUERY_DEADLINE_SECONDS = 5.0
 _SESSION_QUERY_DEADLINE_SECONDS = 10.0
 _MUTATION_DEADLINE_SECONDS = 15.0
@@ -184,6 +192,20 @@ _SECURITY_HEADERS = (
     (b"Referrer-Policy", b"same-origin"),
     (b"X-Frame-Options", b"DENY"),
 )
+
+# ADR 0079: the fixed official selector is a trusted same-origin dependency.
+# The exception applies to the authenticated Admin document, not the login page.
+_SELECTOR_CSP = (
+    "default-src 'self'; script-src 'self' 'unsafe-eval' "
+    "https://lf3-cdn-tos.bytegoofy.com/obj/goofy/locl/lark/external_js_sdk/h5-js-sdk-1.2.21.js "
+    "https://sf1-scmcdn-cn.feishucdn.com/obj/feishu-static/locl/lark/external_js_sdk/; "
+    "style-src 'self' 'unsafe-inline' https://sf1-scmcdn-cn.feishucdn.com; "
+    f"img-src 'self' data: {CHAT_AVATAR_IMAGE_SOURCES} https://*.feishucdn.com https://*.feishu.cn; "
+    "connect-src 'self' https://open.feishu.cn https://internal-api-lark-api.feishu.cn "
+    "https://internal-api-space.feishu.cn https://accounts.feishu.cn/suite/passport/users/get_info; "
+    "frame-src https://open.feishu.cn https://www.feishu.cn https://accounts.feishu.cn; "
+    "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+).encode("ascii")
 
 
 class AdminMutationDrainTimeout(TimeoutError):
@@ -215,6 +237,7 @@ class AdminActionPreconditions:
     schedule_revision: ExpectedValue[int]
     default_revision: ExpectedValue[int]
     default_order_revision: ExpectedValue[int]
+    admin_revision: ExpectedValue[int] = ExpectedValue.dont_check()
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,10 +264,15 @@ class AdminWebApplication:
         auth: AdminAuth,
         management: InstanceManagementService,
         instance_root: Path | None = None,
+        credentials: AdminCredentials | None = None,
+        login: AdminLogin | None = None,
     ) -> None:
         self._auth = auth
         self._management = management
         self._instance_root = instance_root
+        self._users = auth.users
+        self._credentials = credentials
+        self._login_flow = login
         suffix = f"_{instance_digest(instance_root)}" if instance_root is not None else ""
         self._session_cookie = _SESSION_COOKIE + suffix
         self._preauth_cookie = _PREAUTH_COOKIE + suffix
@@ -286,6 +314,10 @@ class AdminWebApplication:
 
     def close_auth(self) -> None:
         self._ready = False
+        if self._login_flow is not None:
+            self._login_flow.close()
+        if self._credentials is not None:
+            self._credentials.close()
         self._auth.close()
 
     async def drain(self, deadline: float) -> None:
@@ -388,9 +420,10 @@ class AdminWebApplication:
             )
         if context.path == "/login" and context.method == "GET":
             return self._login_page(context)
-        if context.path == "/login" and context.method == "POST":
-            self._require_origin(context)
-            return self._login(context)
+        if context.path == "/static/login.js" and context.method == "GET":
+            return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["login.js"])
+        if context.path.startswith("/api/v1/login/"):
+            return await self._login_request(context)
 
         if context.path == "/" and context.method == "GET":
             # The browser entry point redirects anonymous visitors to the
@@ -437,6 +470,8 @@ class AdminWebApplication:
             raise AdminWebError(403, "invalid_origin", "请求 Origin 不受信任。")
 
     def _login_page(self, context: _RequestContext) -> Response:
+        if self._login_flow is not None:
+            self._login_flow.discard(_cookies(context.request).get(self._preauth_cookie))
         try:
             challenge = self._auth.issue_preauth(context.source_ip)
         except LoginRejected:
@@ -451,7 +486,6 @@ class AdminWebApplication:
         page = _login_html(
             challenge.form_nonce,
             self._instance_root,
-            login_failed=context.query.get("error") == ["1"],
         )
         return Response(
             200,
@@ -462,41 +496,49 @@ class AdminWebApplication:
             body=page,
         )
 
-    def _login(self, context: _RequestContext) -> Response:
-        form = _parse_form(context.request)
-        cookies = _cookies(context.request)
-        try:
-            issued = self._auth.login(
-                source_ip=context.source_ip,
-                cookie_token=cookies.get(self._preauth_cookie),
-                form_nonce=_one(form, "nonce"),
-                credential=_one(form, "credential"),
-            )
-        except LoginRejected:
-            # Keep rejected form submissions out of browser refresh history.
-            # The GET issues a fresh challenge only when the rate limit allows it.
-            return Response(
-                303,
-                headers=(
-                    (b"Location", b"/login?error=1"),
+    async def _login_request(self, context: _RequestContext) -> Response:
+        flow = self._login_flow
+        if flow is None:
+            raise AdminWebError(503, "login_unavailable", "飞书登录暂不可用。")
+        _require_query_keys(context.query, set())
+        cookie = _cookies(context.request).get(self._preauth_cookie)
+        route = (context.method, context.path)
+        if route == ("GET", "/api/v1/login/state"):
+            data, token = await flow.status(cookie=cookie, source=context.source_ip)
+            result = _json_response(200, data)
+            if token is not None:
+                return Response(result.status, result.headers + (
+                    (b"Set-Cookie", _cookie(self._session_cookie, token)),
                     (b"Set-Cookie", _expired_cookie(self._preauth_cookie)),
-                ),
-            )
-        return Response(
-            303,
-            headers=(
-                (b"Location", b"/"),
-                (b"Set-Cookie", _cookie(self._session_cookie, issued.token)),
-                (b"Set-Cookie", _expired_cookie(self._preauth_cookie)),
-            ),
-        )
+                ), result.body)
+            return result
+        if route == ("GET", "/api/v1/login/qr"):
+            uri = flow.verification_uri(cookie, context.source_ip)
+            if uri is None:
+                raise AdminWebError(404, "not_found", "当前没有待确认的授权。")
+            import qrcode
+            import qrcode.image.svg
+            output = io.BytesIO()
+            qrcode.make(uri, image_factory=qrcode.image.svg.SvgPathImage).save(output)
+            return Response(200, ((b"Content-Type", b"image/svg+xml"),), output.getvalue())
+        if context.method == "POST" and context.path in {"/api/v1/login/start", "/api/v1/login/cancel"}:
+            self._require_origin(context)
+            payload = _parse_json(context.request)
+            _require_body_keys(payload, {"nonce"})
+            nonce = _required_text(payload, "nonce", maximum=128)
+            if context.path.endswith("/start"):
+                data = await flow.start(cookie=cookie, nonce=nonce, source=context.source_ip)
+                return _json_response(200, data)
+            flow.cancel(cookie=cookie, nonce=nonce, source=context.source_ip)
+            return _json_response(200, {"state": "cancelled"})
+        raise AdminWebError(404, "not_found", "接口不存在。")
 
     async def _dispatch_authenticated(self, context: _RequestContext) -> Response:
         route = (context.method, context.path)
         if route == ("GET", "/"):
             return Response(
                 200,
-                ((b"Content-Type", b"text/html; charset=utf-8"),),
+                ((b"Content-Type", b"text/html; charset=utf-8"), (b"Content-Security-Policy", _SELECTOR_CSP)),
                 self._assets["index.html"],
             )
         if route == ("GET", "/static/admin.js"):
@@ -505,6 +547,19 @@ class AdminWebApplication:
                 ((b"Content-Type", b"text/javascript; charset=utf-8"),),
                 self._assets["admin.js"],
             )
+        if route == ("GET", "/static/identity.js"):
+            return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["identity.js"])
+        if route == ("GET", "/api/v1/identity"):
+            _require_query_keys(context.query, set())
+            session = self._authenticate(context)
+            profile = await self._identity_call(context, self._identity_credentials().profile(session.identity, session.add_revision))
+            return _json_response(200, {"openId": profile.open_id, "name": profile.name, "avatarUrl": _user_avatar(profile.avatar_url)})
+        if route == ("GET", "/api/v1/admin-users"):
+            return self._admin_users(context)
+        if context.method == "POST" and context.path in {
+            "/api/v1/admin-users/add", "/api/v1/admin-users/remove", "/api/v1/admin-users/selector-config",
+        }:
+            return await self._admin_user_action(context)
         if context.method == "GET" and context.path in {"/static/chat-picker.js", "/static/chat-picker.css"}:
             name = context.path.removeprefix("/static/")
             content_type = b"text/javascript; charset=utf-8" if name.endswith(".js") else b"text/css; charset=utf-8"
@@ -1880,6 +1935,86 @@ class AdminWebApplication:
             service_tier_id=_required_text(value, "serviceTierId", maximum=128),
         )
 
+    def _identity_credentials(self) -> AdminCredentials:
+        if self._credentials is None:
+            raise AdminWebError(503, "identity_unavailable", "飞书身份服务暂不可用。")
+        return self._credentials
+
+    async def _identity_call(self, context: _RequestContext, operation: Awaitable[T]) -> T:
+        try:
+            result = await operation
+            self._authenticate(context)
+            return result
+        except AuthExpired:
+            self._auth.logout(context.session_token)
+            raise AdminWebError(401, "auth_expired", "飞书凭证已过期，请重新登录。") from None
+
+    def _admin_users(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        with self._users.lock:
+            session = self._authenticate(context)
+            revision = self._users.revision
+            preconditions = _empty_preconditions(admin_revision=ExpectedValue.expect(revision))
+            members = self._users.list()
+            rows = [{
+                "openId": member.identity.open_id, "name": member.name,
+                "avatarUrl": _user_avatar(member.avatar_url),
+                "removeAction": self._grant(context, "admin-users.remove",
+                    AdminActionTarget("admin-user", member.identity.open_id), preconditions) if len(members) > 1 else None,
+            } for member in members]
+            return _json_response(200, {
+                "revision": revision, "currentOpenId": session.identity.open_id, "users": rows,
+                "addAction": self._grant(context, "admin-users.add", AdminActionTarget("admin-users", self._users.app_id), preconditions),
+                "selectorAction": self._grant(context, "admin-users.selector-config", AdminActionTarget("admin-users", self._users.app_id), preconditions),
+            })
+
+    async def _admin_user_action(self, context: _RequestContext) -> Response:
+        action = context.path.rsplit("/", 1)[-1]
+        extras = ({"revision", "openId", "entityId", "type", "name", "avatarUrl"} if action == "add"
+                  else {"revision", "openId"} if action == "remove" else set())
+        payload, grant = self._redeem(context, f"admin-users.{action}",
+            expected_resource="admin-user" if action == "remove" else "admin-users", allowed_extra=extras)
+        revision = _expected_value(_grant_preconditions(grant).admin_revision, "administrator list")
+        session = self._authenticate(context)
+        if action == "selector-config":
+            if grant.target.target_id != self._users.app_id:
+                raise StaleActionGrant()
+            result = await self._identity_call(context, self._identity_credentials().selector_config(
+                session.identity, session.add_revision, f"http://{context.authority}/",
+            ))
+            return _json_response(200, result)
+        if _required_int(payload, "revision", minimum=1) != revision:
+            raise StaleActionGrant()
+        open_id = _required_text(payload, "openId", maximum=256)
+        identity = AdminIdentity(self._users.app_id, open_id)
+        if action == "add":
+            if grant.target.target_id != self._users.app_id or payload["type"] != "user" or payload["entityId"] not in (None, open_id):
+                raise AdminWebError(400, "invalid_selection", "选人结果无效，请重新选择。")
+            name = payload["name"]
+            if not isinstance(name, str) or len(name) > 1024 or any(ord(c) < 32 for c in name):
+                raise AdminWebError(400, "invalid_selection", "选人姓名无效。")
+            raw_avatar = payload["avatarUrl"]
+            if raw_avatar is not None and (not isinstance(raw_avatar, str) or len(raw_avatar) > 4096):
+                raise AdminWebError(400, "invalid_selection", "选人头像无效。")
+            async def apply_add():
+                with self._users.lock:
+                    self._authenticate(context)
+                    self._users.add(identity, actor=session.identity, expected_revision=revision,
+                                    name=name, avatar_url=_user_avatar(raw_avatar))
+            await self._mutation(context, "admin-users.add", open_id, apply_add())
+            return _json_response(200, {"revision": self._users.revision})
+        if grant.target.target_id != open_id:
+            raise StaleActionGrant()
+        async def apply_remove():
+            with self._users.lock:
+                self._authenticate(context)
+                self._users.remove(identity, actor=session.identity, expected_revision=revision)
+        await self._mutation(context, "admin-users.remove", open_id, apply_remove())
+        result = _json_response(200, {"revision": self._users.revision, "loggedOut": identity == session.identity})
+        if identity == session.identity:
+            return Response(result.status, result.headers + ((b"Set-Cookie", _expired_cookie(self._session_cookie)),), result.body)
+        return result
+
     def _grant(
         self,
         context: _RequestContext,
@@ -1971,6 +2106,12 @@ class AdminWebApplication:
             terminal = "success"
             error_name: str | None = None
             try:
+                try:
+                    self._auth.authenticate(context.session_token)
+                except BaseException:
+                    if inspect.iscoroutine(operation):
+                        operation.close()
+                    raise
                 result = await operation
                 if isinstance(result, ProjectDeletionResult) and not result.deleted:
                     terminal = "incomplete"
@@ -2020,7 +2161,8 @@ class AdminWebRunner:
         *,
         host: str,
         port: int | None,
-        credential_path: Path,
+        users: AdminUsers,
+        feishu_client: FeishuClient | None = None,
         management: InstanceManagementService | None = None,
         auth: AdminAuth | None = None,
         instance_root: Path | None = None,
@@ -2037,7 +2179,16 @@ class AdminWebRunner:
         self._urls: tuple[str, ...] = ()
         self._loopback_only = False
         self._bound = False
-        self._auth = auth or AdminAuth(credential_path)
+        self._auth = auth or AdminAuth(users)
+        if self._auth.users is not users:
+            raise ValueError("Admin authentication must use the same administrator store")
+        if feishu_client is None:
+            from ..lark_app import load_lark_app
+            app = load_lark_app(users.path.parent.parent / "lark-app" / "config.json")
+            feishu_client = FeishuClient(app.app_id, app.app_secret)
+        self._feishu_client = feishu_client
+        self._credentials = AdminCredentials(users.path.parent.parent, users, feishu_client)
+        self._login = AdminLogin(self._auth, users, self._credentials, feishu_client)
         self._application: AdminWebApplication | None = None
         self._authorities: tuple[str, ...] | None = None
         if management is not None:
@@ -2142,6 +2293,7 @@ class AdminWebRunner:
             raise RuntimeError("Admin management application is already attached")
         application = AdminWebApplication(
             auth=self._auth, management=management, instance_root=self._instance_root,
+            credentials=self._credentials, login=self._login,
         )
         if self._authorities is not None:
             application.configure_authorities(self._authorities)
@@ -2175,15 +2327,20 @@ class AdminWebRunner:
         self._urls = ()
 
     async def drain(self, deadline: float) -> None:
-        await self._transport.drain(deadline)
-        self._urls = ()
-        if self._application is not None:
-            await self._application.drain(deadline)
+        try:
+            await self._transport.drain(deadline)
+            self._urls = ()
+            if self._application is not None:
+                await self._application.drain(deadline)
+        finally:
+            await self._feishu_client.aclose()
 
     def close_auth(self) -> None:
         if self._application is not None:
             self._application.close_auth()
         else:
+            self._login.close()
+            self._credentials.close()
             self._auth.close()
 
 
@@ -2310,7 +2467,7 @@ def admin_access_urls(
 def _load_assets() -> dict[str, bytes]:
     root = importlib.resources.files("netizen_cli.admin").joinpath("static")
     assets: dict[str, bytes] = {}
-    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css"):
+    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js"):
         assets[name] = root.joinpath(name).read_bytes()
     return assets
 
@@ -2327,44 +2484,28 @@ def _root_label(root: Path | None) -> str:
     return str(root) if root is not None else "非受管开发实例"
 
 
+def _user_avatar(value: str | None) -> str | None:
+    if not value or len(value) > 4096:
+        return None
+    try:
+        parsed = urlsplit(value)
+        host = (parsed.hostname or "").lower()
+        if (parsed.scheme != "https" or parsed.username is not None or parsed.password is not None
+                or parsed.port not in (None, 443) or any(ord(c) < 33 for c in value)):
+            return None
+        return value if host.endswith((".feishucdn.com", ".feishu.cn")) else avatar_url(value)
+    except ValueError:
+        return None
+
+
 def _login_html(
     nonce: str | None,
     instance_root: Path | None = None,
-    *,
-    login_failed: bool = False,
 ) -> bytes:
-    if nonce is None:
-        content = (
-            "<p class='status error' role='alert'>登录暂不可用，请暂停尝试，"
-            "约 5 分钟后重新打开登录页。</p>"
-            "<a href='/login'>重新打开登录页</a>"
-        )
-    else:
-        escaped = html.escape(nonce, quote=True)
-        content = (
-            "<p class='status error' role='alert'>登录未成功，请核对当前实例的管理员密钥，"
-            "并使用下方的新表单重试。</p>"
-            if login_failed else ""
-        )
-        content += (
-            "<form method='post' action='/login'>"
-            f"<input type='hidden' name='nonce' value='{escaped}'>"
-            "<label for='credential'>管理员密钥</label>"
-            "<input id='credential' name='credential' type='password' "
-            "autocomplete='current-password' required autofocus>"
-            "<button type='submit'>登录</button></form>"
-        )
-    return (
-        "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>Netizen Admin 登录</title>"
-        "<link rel='stylesheet' href='/static/admin.css'></head>"
-        "<body class='login-body'><main class='login-card'>"
-        "<p class='eyebrow'>INSTANCE CONTROL PLANE</p>"
-        "<h1>Netizen Admin</h1><p>输入实例管理员密钥。</p>"
-        f"<p class='instance-root'>{html.escape(_root_label(instance_root))}</p>"
-        f"{content}</main></body></html>"
-    ).encode("utf-8")
+    page = importlib.resources.files("netizen_cli.admin").joinpath("static/login.html").read_bytes()
+    return page.replace(b"__NETIZEN_LOGIN_NONCE__", html.escape(nonce or "", quote=True).encode()).replace(
+        b"__NETIZEN_INSTANCE_ROOT__", html.escape(_root_label(instance_root)).encode(),
+    )
 
 
 def _secure(response: Response) -> Response:
@@ -2453,24 +2594,6 @@ def _content_type(request: Request) -> str:
         raise AdminWebError(415, "invalid_content_type", "请求格式不支持。") from None
 
 
-def _parse_form(request: Request) -> Mapping[str, list[str]]:
-    if _content_type(request) != _FORM_TYPE:
-        raise AdminWebError(415, "invalid_content_type", "登录表单格式无效。")
-    try:
-        body = request.body.decode("utf-8")
-        values = parse_qs(
-            body,
-            keep_blank_values=True,
-            strict_parsing=True,
-            max_num_fields=4,
-        )
-    except (UnicodeDecodeError, ValueError):
-        raise AdminWebError(400, "invalid_form", "登录表单无效。") from None
-    if set(values) != {"nonce", "credential"}:
-        raise AdminWebError(400, "invalid_form", "登录表单无效。")
-    return values
-
-
 def _parse_json(request: Request) -> dict[str, object]:
     if _content_type(request) != _JSON_TYPE:
         raise AdminWebError(415, "invalid_content_type", "请求必须使用 JSON。")
@@ -2493,13 +2616,6 @@ def _parse_json(request: Request) -> dict[str, object]:
     if not isinstance(value, dict):
         raise AdminWebError(400, "invalid_json", "请求 JSON 必须是对象。")
     return value
-
-
-def _one(values: Mapping[str, list[str]], name: str) -> str:
-    items = values.get(name)
-    if items is None or len(items) != 1 or not items[0]:
-        raise AdminWebError(400, "invalid_input", f"缺少字段 {name}。")
-    return items[0]
 
 
 def _batches(values: Sequence[str], size: int) -> tuple[tuple[str, ...], ...]:
@@ -2625,6 +2741,7 @@ def _empty_preconditions(
     schedule_revision: ExpectedValue[int] | None = None,
     default_revision: ExpectedValue[int] | None = None,
     default_order_revision: ExpectedValue[int] | None = None,
+    admin_revision: ExpectedValue[int] | None = None,
 ) -> AdminActionPreconditions:
     return AdminActionPreconditions(
         active_binding_id or ExpectedValue.dont_check(),
@@ -2643,6 +2760,7 @@ def _empty_preconditions(
         schedule_revision or ExpectedValue.dont_check(),
         default_revision or ExpectedValue.dont_check(),
         default_order_revision or ExpectedValue.dont_check(),
+        admin_revision or ExpectedValue.dont_check(),
     )
 
 
@@ -2734,6 +2852,20 @@ _UPDATE_HTTP_ERRORS = {
 
 
 def _map_error(error: BaseException) -> AdminWebError | None:
+    if isinstance(error, LoginRejected):
+        return AdminWebError(401, "login_rejected", "登录请求无效或尝试过于频繁，请稍后重新打开登录页。")
+    if isinstance(error, (SessionRejected, AdmissionClosed)):
+        return AdminWebError(401, "not_authenticated", "请重新登录。")
+    if isinstance(error, StaleActionGrant):
+        return AdminWebError(409, "stale_action", "操作授权已过期或名单已变化，请刷新后重试。")
+    if isinstance(error, FeishuError):
+        return AdminWebError(502, "feishu_error", "飞书请求未完成，请稍后重试。")
+    if isinstance(error, AdminUsersError):
+        if isinstance(error, AdminPermissionDenied):
+            return AdminWebError(401, "not_authenticated", "请重新登录。")
+        if isinstance(error, AdminUsersUnavailable):
+            return AdminWebError(503, error.code, "管理员配置暂不可用。")
+        return AdminWebError(409, error.code, "不能删除最后一位管理员。" if isinstance(error, LastAdministrator) else "管理员名单已变化，请刷新后重试。")
     if isinstance(error, ChatDirectoryError):
         status = {
             "invalid_query": 400, "invalid_cursor": 400, "invalid_chat_id": 400,

@@ -611,7 +611,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.submit_side_calls, [])
         self.assertEqual(self.channel.reactions, [])
 
-    async def test_admin_disabled_and_loopback_addresses_are_explicit(self) -> None:
+    async def test_admin_unavailable_and_loopback_addresses_are_explicit(self) -> None:
         root = self.project_root / "private"
         for urls in ((), ("http://127.0.0.1:8890/", "http://[::1]:8890/")):
             with self.subTest(urls=urls):
@@ -628,7 +628,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("服务器本机访问", reply)
                     self.assertIn("自行建立隧道", reply)
                 else:
-                    self.assertIn("未启用 Admin Web", reply)
+                    self.assertIn("管理地址暂不可用", reply)
                     self.assertNotIn("http://", reply)
         self.assertEqual(self.runtime.submit_calls, [])
 

@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import errno
 import html
+import json
 import re
-import secrets
 import socket
 import stat
 import tempfile
@@ -17,6 +17,9 @@ from urllib.parse import urlencode
 import yaml
 
 from netizen_cli.admin.auth import AdminAuth
+from netizen_cli.admin.credentials import AdminCredentials
+from netizen_cli.admin.login import AdminLogin
+from netizen_cli.admin.users import AdminUsers
 from netizen_cli.admin.port_config import (
     AdminPortConfigurationError,
     ConfigFileSnapshot,
@@ -25,7 +28,7 @@ from netizen_cli.admin.port_config import (
 from netizen_cli.admin.transport import AdminHttpState, AdminHttpTransport, Request
 from netizen_cli.admin.web import AdminWebApplication, AdminWebRunner, accepted_authorities, admin_access_urls
 from netizen_cli.instance import instance_digest
-from tests.admin.test_web import FakeManagement
+from tests.admin.test_web import FakeFeishuClient, FakeManagement
 
 
 class PortConfigurationTest(unittest.TestCase):
@@ -48,7 +51,7 @@ class PortConfigurationTest(unittest.TestCase):
         self.assertEqual(list(self.path.parent.glob(".admin-port-*")), [])
 
     def test_existing_admin_values_and_other_yaml_values_are_preserved(self) -> None:
-        self.path.write_bytes(self.content + b"adminWeb:\n  host: 127.0.0.1\n  enabled: true\n  accessHost: admin.test\n")
+        self.path.write_bytes(self.content + b"adminWeb:\n  host: 127.0.0.1\n  accessHost: admin.test\n")
         baseline = yaml.safe_load(self.path.read_bytes())
         persist_admin_port(ConfigFileSnapshot.read(self.path), 8800)
         expected = {**baseline, "adminWeb": {**baseline["adminWeb"], "port": 8800}}
@@ -95,8 +98,8 @@ class PortConfigurationTest(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), self.content)
         self.assertEqual(list(self.path.parent.glob(".admin-port-*")), [])
 
-    def test_disabled_or_explicit_port_cannot_be_allocated(self) -> None:
-        for values in ({"enabled": False}, {"port": 8787}, {"port": None}):
+    def test_explicit_port_cannot_be_allocated(self) -> None:
+        for values in ({"port": 8787}, {"port": None}):
             with self.subTest(values=values):
                 self.path.write_text(yaml.safe_dump({"adminWeb": values}))
                 with self.assertRaisesRegex(AdminPortConfigurationError, "absent port"):
@@ -127,16 +130,16 @@ class AdminPortAllocationTest(unittest.IsolatedAsyncioTestCase):
     def runner(self, name: str, *, port: int | None = None, access_host: str | None = None):
         root = self.root / name
         root.mkdir()
-        credential = root / "credential"
-        credential.write_text(secrets.token_urlsafe(32))
-        credential.chmod(0o600)
+        users = AdminUsers(root, "cli_test")
+        users.add_initial("ou_admin")
         config = root / "config.yaml"
         values = {"host": "127.0.0.1"}
         if port is not None:
             values["port"] = port
         config.write_text(yaml.safe_dump({"adminWeb": values, "projects": {}}))
         runner = AdminWebRunner(
-            host="127.0.0.1", port=port, credential_path=credential,
+            host="127.0.0.1", port=port, users=users,
+            feishu_client=FakeFeishuClient(),
             instance_root=root, config_path=config, config_snapshot=ConfigFileSnapshot.read(config),
             access_host=access_host,
         )
@@ -245,7 +248,8 @@ class AdminPortAllocationTest(unittest.IsolatedAsyncioTestCase):
         first.close_auth()
         snapshot = ConfigFileSnapshot.read(config)
         restarted = AdminWebRunner(
-            host="127.0.0.1", port=selected, credential_path=config.parent / "credential",
+            host="127.0.0.1", port=selected, users=AdminUsers(config.parent, "cli_test"),
+            feishu_client=FakeFeishuClient(),
             instance_root=config.parent, config_path=config, config_snapshot=snapshot,
         )
         self.runners.append(restarted)
@@ -266,14 +270,14 @@ class AdminPortAllocationTest(unittest.IsolatedAsyncioTestCase):
         bad_port = await runner.application.handle(_request("GET", "/login", f"admin.example.com:{port + 1}"))
         self.assertEqual(bad_port.status, 400)
         cookies = _response_cookies(response)
-        nonce = re.search(rb"name='nonce' value='([^']+)'", response.body).group(1).decode()
+        nonce = re.search(rb'id="login-nonce"[^>]*value="([^"]+)"', response.body).group(1).decode()
         response = await runner.application.handle(_request(
-            "POST", "/login", f"admin.example.com:{port}",
+            "POST", "/api/v1/login/start", f"admin.example.com:{port}",
             cookies=cookies,
             origin=f"http://admin.example.com:{port}",
-            form={"nonce": nonce, "credential": (self.root / "access" / "credential").read_text()},
+            payload={"nonce": nonce},
         ))
-        self.assertEqual(response.status, 303)
+        self.assertEqual(response.status, 200)
 
 
 class AdminInstancePresentationTest(unittest.IsolatedAsyncioTestCase):
@@ -281,14 +285,20 @@ class AdminInstancePresentationTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             applications = []
-            credential = secrets.token_urlsafe(32)
+            now = [1_000.0]
             for name in ("one <unsafe>", "two"):
                 instance = root / name
                 instance.mkdir()
-                secret = instance / "credential"
-                secret.write_text(credential)
-                secret.chmod(0o600)
-                app = AdminWebApplication(auth=AdminAuth(secret), management=FakeManagement(root), instance_root=instance)
+                users = AdminUsers(instance, "cli_test")
+                users.add_initial("ou_admin")
+                auth = AdminAuth(users)
+                client = FakeFeishuClient(clock=lambda: now[0])
+                credentials = AdminCredentials(instance, users, client, clock=lambda: now[0])
+                login = AdminLogin(auth, users, credentials, client, clock=lambda: now[0])
+                app = AdminWebApplication(
+                    auth=auth, management=FakeManagement(root), instance_root=instance,
+                    credentials=credentials, login=login,
+                )
                 app.configure_authorities(("127.0.0.1:8787",))
                 app.open_admission()
                 self.addCleanup(app.close_auth)
@@ -299,12 +309,15 @@ class AdminInstancePresentationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(html.escape(str(instance)).encode(), response.body)
                 self.assertNotIn(b"one <unsafe>", response.body)
                 browser_cookies.update(_response_cookies(response))
-                nonce = re.search(rb"name='nonce' value='([^']+)'", response.body).group(1).decode()
+                nonce = re.search(rb'id="login-nonce"[^>]*value="([^"]+)"', response.body).group(1).decode()
                 response = await app.handle(_request(
-                    "POST", "/login", cookies=browser_cookies,
-                    origin="http://127.0.0.1:8787", form={"nonce": nonce, "credential": credential},
+                    "POST", "/api/v1/login/start", cookies=browser_cookies,
+                    origin="http://127.0.0.1:8787", payload={"nonce": nonce},
                 ))
-                self.assertEqual(response.status, 303)
+                self.assertEqual(response.status, 200)
+                now[0] += 1
+                response = await app.handle(_request("GET", "/api/v1/login/state", cookies=browser_cookies))
+                self.assertEqual(response.status, 200)
                 issued = _response_cookies(response)
                 self.assertIn(f"netizen_admin_session_{instance_digest(instance)}", issued)
                 self.assertEqual(issued[f"netizen_admin_preauth_{instance_digest(instance)}"], "")
@@ -399,7 +412,7 @@ class AdminInstancePresentationTest(unittest.IsolatedAsyncioTestCase):
         )
 
 
-def _request(method, path, authority="127.0.0.1:8787", *, cookies=None, origin=None, form=None):
+def _request(method, path, authority="127.0.0.1:8787", *, cookies=None, origin=None, form=None, payload=None):
     headers = [(b"Host", authority.encode())]
     if cookies:
         headers.append((b"Cookie", "; ".join(f"{key}={value}" for key, value in cookies.items()).encode()))
@@ -409,6 +422,9 @@ def _request(method, path, authority="127.0.0.1:8787", *, cookies=None, origin=N
     if form:
         headers.append((b"Content-Type", b"application/x-www-form-urlencoded"))
         body = urlencode(form).encode()
+    if payload is not None:
+        headers.append((b"Content-Type", b"application/json"))
+        body = json.dumps(payload).encode()
     return Request(method.encode(), path.encode(), b"1.1", tuple(headers), body, ("127.0.0.1", 1234), ("127.0.0.1", 8787), "test")
 
 

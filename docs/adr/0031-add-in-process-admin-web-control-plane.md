@@ -2,11 +2,14 @@
 status: accepted
 date: 2026-08-21
 amends: 0017, 0021, 0028
-amended_by: 0037, 0049, 0054, 0057, 0060, 0078
+amended_by: 0037, 0049, 0054, 0057, 0060, 0078, 0079
 related: 0016, 0019
 ---
 
 # 引入进程内 Admin Web 管理控制面
+
+> [ADR 0079](0079-authenticate-admins-with-feishu-identities.md) 将认证改为飞书身份与
+> 可维护管理员名单，移除 secret 与 Admin 禁用配置；以下对应内容保留为历史决策。
 
 > 后续修订：[ADR 0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)
 > 修订普通会话“设为当前”的原生恢复和共享删除失败处理。

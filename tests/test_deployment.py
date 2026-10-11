@@ -54,7 +54,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertEqual(config["projects"], {"test": "/home/your-user/projects/test"})
         self.assertEqual(config["channel"], {"securityMode": "audit"})
         self.assertEqual(
-            config["adminWeb"], {"enabled": True, "host": "0.0.0.0"}
+            config["adminWeb"], {"host": "0.0.0.0"}
         )
 
     def test_every_direct_runtime_dependency_has_an_exact_constraint(self) -> None:

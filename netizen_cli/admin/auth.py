@@ -1,7 +1,7 @@
-"""In-memory authentication state for the single-administrator Admin Web.
+"""In-memory browser authentication and authorization for Admin Web.
 
-This module deliberately contains no HTTP concepts.  It owns the credential
-generation, opaque browser tokens, login throttling, and one-shot action
+This module deliberately contains no HTTP concepts. It owns opaque browser
+tokens, login throttling, and one-shot action
 authorization state; the HTTP adapter is responsible for cookies, Host,
 Origin, and status-code mapping.
 """
@@ -14,36 +14,25 @@ import hashlib
 import hmac
 import ipaddress
 import math
-import os
 import secrets
-import stat
-import threading
 import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
-from pathlib import Path
 from typing import Generic, TypeVar, cast
+
+from .users import AdminIdentity, AdminUsers, AdminUsersUnavailable
 
 
 _TOKEN_BYTES = 32
 _TOKEN_TEXT_BYTES = 43
-_MAX_CREDENTIAL_FILE_BYTES = _TOKEN_TEXT_BYTES + 1
-_DUMMY_DIGEST = hashlib.sha256(bytes(_TOKEN_BYTES)).digest()
 
 
 class AdminAuthError(RuntimeError):
     """Base class for stable, non-sensitive Admin authentication failures."""
 
     code = "admin_auth_error"
-
-
-class CredentialFileError(AdminAuthError):
-    code = "credential_unavailable"
-
-    def __init__(self) -> None:
-        super().__init__("admin credential unavailable")
 
 
 class AdmissionClosed(AdminAuthError):
@@ -169,27 +158,6 @@ class AuthLimits:
 
 
 @dataclass(frozen=True, slots=True)
-class CredentialIdentity:
-    """Identity fields whose legal change constitutes credential rotation."""
-
-    device: int
-    inode: int
-    mode: int
-    links: int
-    owner: int
-    group: int
-    size: int
-    modified_ns: int
-    changed_ns: int
-
-
-@dataclass(frozen=True, slots=True)
-class CredentialSnapshot:
-    identity: CredentialIdentity
-    digest: bytes = field(repr=False)
-
-
-@dataclass(frozen=True, slots=True)
 class IssuedPreauthChallenge:
     cookie_token: str = field(repr=False)
     form_nonce: str = field(repr=False)
@@ -200,12 +168,16 @@ class IssuedSession:
     token: str = field(repr=False)
     log_handle: str
     generation: int
+    identity: AdminIdentity
+    add_revision: int
 
 
 @dataclass(frozen=True, slots=True)
 class AuthenticatedSession:
     log_handle: str
     generation: int
+    identity: AdminIdentity
+    add_revision: int
 
 
 class ExpectationMode(str, Enum):
@@ -264,6 +236,8 @@ class RedeemedAction(Generic[TargetT, PreconditionsT]):
     action_kind: str
     target: TargetT
     preconditions: PreconditionsT
+    identity: AdminIdentity
+    add_revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +263,8 @@ class _SessionRecord:
     source: str
     log_handle: str
     generation: int
+    identity: AdminIdentity
+    add_revision: int
 
 
 @dataclass(slots=True, repr=False)
@@ -321,86 +297,7 @@ def normalize_source_ip(source: str) -> str:
     return address.compressed.lower()
 
 
-def load_credential_snapshot(path: str | Path) -> CredentialSnapshot:
-    """Read and validate the credential without following the final symlink.
-
-    The two metadata snapshots and the content read all use the same file
-    descriptor.  The returned object contains only a digest, never credential
-    text or decoded secret bytes.
-    """
-
-    credential_path = os.fspath(path)
-    if not os.path.isabs(credential_path):
-        raise CredentialFileError()
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    cloexec = getattr(os, "O_CLOEXEC", None)
-    if not nofollow or cloexec is None:
-        raise CredentialFileError()
-    flags = os.O_RDONLY | nofollow | cloexec
-    try:
-        descriptor = os.open(credential_path, flags)
-    except OSError:
-        raise CredentialFileError() from None
-    try:
-        try:
-            before = os.fstat(descriptor)
-            _validate_credential_metadata(before)
-            content = _read_bounded(descriptor, _MAX_CREDENTIAL_FILE_BYTES)
-            after = os.fstat(descriptor)
-            _validate_credential_metadata(after)
-        except OSError:
-            raise CredentialFileError() from None
-        before_identity = _credential_identity(before)
-        after_identity = _credential_identity(after)
-        if before_identity != after_identity:
-            raise CredentialFileError()
-        digest = _credential_digest(content, allow_terminal_lf=True)
-        if digest is None:
-            raise CredentialFileError()
-        return CredentialSnapshot(identity=after_identity, digest=digest)
-    finally:
-        os.close(descriptor)
-
-
-def _validate_credential_metadata(metadata: os.stat_result) -> None:
-    if not stat.S_ISREG(metadata.st_mode):
-        raise CredentialFileError()
-    if stat.S_IMODE(metadata.st_mode) != 0o600:
-        raise CredentialFileError()
-    if metadata.st_size < _TOKEN_TEXT_BYTES:
-        raise CredentialFileError()
-    if metadata.st_size > _MAX_CREDENTIAL_FILE_BYTES:
-        raise CredentialFileError()
-
-
-def _credential_identity(metadata: os.stat_result) -> CredentialIdentity:
-    return CredentialIdentity(
-        device=metadata.st_dev,
-        inode=metadata.st_ino,
-        mode=metadata.st_mode,
-        links=metadata.st_nlink,
-        owner=metadata.st_uid,
-        group=metadata.st_gid,
-        size=metadata.st_size,
-        modified_ns=metadata.st_mtime_ns,
-        changed_ns=metadata.st_ctime_ns,
-    )
-
-
-def _read_bounded(descriptor: int, maximum: int) -> bytes:
-    content = bytearray()
-    while len(content) <= maximum:
-        chunk = os.read(descriptor, maximum + 1 - len(content))
-        if not chunk:
-            return bytes(content)
-        content.extend(chunk)
-    raise CredentialFileError()
-
-
-def _credential_digest(content: bytes, *, allow_terminal_lf: bool) -> bytes | None:
-    token = content
-    if allow_terminal_lf and token.endswith(b"\n"):
-        token = token[:-1]
+def _opaque_digest(token: bytes) -> bytes | None:
     if len(token) != _TOKEN_TEXT_BYTES:
         return None
     if b"\n" in token or b"\r" in token:
@@ -424,7 +321,7 @@ def _token_digest(token: object) -> bytes | None:
         encoded = token.encode("ascii")
     except UnicodeEncodeError:
         return None
-    return _credential_digest(encoded, allow_terminal_lf=False)
+    return _opaque_digest(encoded)
 
 
 def _new_token() -> tuple[str, bytes]:
@@ -440,18 +337,15 @@ class AdminAuth:
 
     def __init__(
         self,
-        credential_path: str | Path,
+        users: AdminUsers,
         *,
         clock: Callable[[], float] = time.monotonic,
         limits: AuthLimits | None = None,
     ) -> None:
-        snapshot = load_credential_snapshot(credential_path)
-        self._credential_path = Path(credential_path)
+        self._users = users
         self._clock = clock
         self._limits = AuthLimits() if limits is None else limits
-        self._lock = threading.RLock()
-        self._credential_digest: bytes | None = snapshot.digest
-        self._credential_identity: CredentialIdentity | None = snapshot.identity
+        self._lock = users.lock
         self._generation = 1
         self._admission_open = True
         self._last_now: float | None = None
@@ -460,6 +354,11 @@ class AdminAuth:
         self._actions: dict[bytes, _ActionRecord] = {}
         self._rate_by_source: dict[str, deque[float]] = {}
         self._rate_global: deque[float] = deque()
+        users.subscribe_revocation(self.revoke_identity)
+
+    @property
+    def users(self) -> AdminUsers:
+        return self._users
 
     @property
     def generation(self) -> int:
@@ -471,15 +370,9 @@ class AdminAuth:
         with self._lock:
             return self._admission_open
 
-    def refresh_credential(self) -> bool:
-        """Validate the credential path and apply a legal rotation atomically."""
-
-        with self._lock:
-            return self._refresh_credential_locked()
-
     def issue_preauth(self, source_ip: str) -> IssuedPreauthChallenge:
         with self._lock:
-            self._refresh_credential_locked()
+            self._require_admission_locked()
             now = self._now_locked()
             self._prune_locked(now)
             source = self._normalize_login_source(source_ip)
@@ -510,18 +403,17 @@ class AdminAuth:
                 form_nonce=form_nonce,
             )
 
-    def login(
+    def consume_preauth(
         self,
         *,
         source_ip: str,
         cookie_token: object,
         form_nonce: object,
-        credential: object,
-    ) -> IssuedSession:
-        """Consume one pre-auth challenge and exchange the credential for a session."""
+    ) -> None:
+        """Consume the browser-bound challenge before starting Feishu login."""
 
         with self._lock:
-            self._refresh_credential_locked()
+            self._require_admission_locked()
             now = self._now_locked()
             self._prune_locked(now)
             source = self._normalize_login_source(source_ip)
@@ -531,17 +423,51 @@ class AdminAuth:
                 cookie_token=cookie_token,
                 form_nonce=form_nonce,
             )
-            candidate_digest = _token_digest(credential)
-            supplied_digest = (
-                _DUMMY_DIGEST if candidate_digest is None else candidate_digest
-            )
-            expected_digest = self._credential_digest
-            digest_matches = hmac.compare_digest(
-                supplied_digest,
-                _DUMMY_DIGEST if expected_digest is None else expected_digest,
-            )
-            credential_valid = candidate_digest is not None and digest_matches
-            if not (rate_allowed and nonce_valid and credential_valid):
+            if not (rate_allowed and nonce_valid):
+                if rate_allowed:
+                    self._record_login_failure_locked(source, now)
+                raise LoginRejected()
+
+    def reject_login(self, source_ip: str) -> None:
+        """Record a failed upstream identity attempt without revealing its reason."""
+        with self._lock:
+            self._require_admission_locked()
+            source = self._normalize_login_source(source_ip)
+            now = self._now_locked()
+            if self._rate_allowed_locked(source, now):
+                self._record_login_failure_locked(source, now)
+            raise LoginRejected()
+
+    def precheck_for_session(
+        self, identity: AdminIdentity, *, source_ip: str, expected_add_revision: int,
+    ) -> None:
+        """Check the trusted login commit before persisting its user credential.
+
+        The credential writer calls this under the shared membership lock after
+        any per-user refresh wait. It neither allocates nor evicts a session.
+        """
+        with self._lock:
+            self._require_admission_locked()
+            source = self._normalize_login_source(source_ip)
+            member = self._users.get_membership(identity)
+            if (not self._rate_allowed_locked(source, self._now_locked())
+                    or member is None or type(expected_add_revision) is not int
+                    or member.add_revision != expected_add_revision):
+                raise LoginRejected()
+
+    def issue_session(
+        self, identity: AdminIdentity, *, source_ip: str, expected_add_revision: int,
+    ) -> IssuedSession:
+        """Trusted server-only handoff after Feishu identity and attempt validation."""
+        with self._lock:
+            self._require_admission_locked()
+            now = self._now_locked()
+            self._prune_locked(now)
+            source = self._normalize_login_source(source_ip)
+            member = self._users.get_membership(identity)
+            rate_allowed = self._rate_allowed_locked(source, now)
+            if (not rate_allowed or member is None or type(expected_add_revision) is not int
+                    or member.add_revision != expected_add_revision):
                 if rate_allowed:
                     self._record_login_failure_locked(source, now)
                 raise LoginRejected()
@@ -562,11 +488,15 @@ class AdminAuth:
                 source=source,
                 log_handle=log_handle,
                 generation=self._generation,
+                identity=identity,
+                add_revision=member.add_revision,
             )
             return IssuedSession(
                 token=token,
                 log_handle=log_handle,
                 generation=self._generation,
+                identity=identity,
+                add_revision=member.add_revision,
             )
 
     def authenticate(
@@ -576,7 +506,7 @@ class AdminAuth:
         """Authenticate a process-local session until it is explicitly revoked."""
 
         with self._lock:
-            self._refresh_credential_locked()
+            self._require_admission_locked()
             now = self._now_locked()
             self._prune_locked(now)
             _, record = self._authenticate_session_locked(session_token)
@@ -584,7 +514,7 @@ class AdminAuth:
 
     def logout(self, session_token: object) -> bool:
         with self._lock:
-            self._refresh_credential_locked()
+            self._require_admission_locked()
             now = self._now_locked()
             self._prune_locked(now)
             digest = _token_digest(session_token)
@@ -607,7 +537,7 @@ class AdminAuth:
         _require_typed_immutable_payload(target)
         _require_typed_immutable_payload(preconditions)
         with self._lock:
-            self._refresh_credential_locked()
+            self._require_admission_locked()
             now = self._now_locked()
             self._prune_locked(now)
             session_digest, _ = self._authenticate_session_locked(session_token)
@@ -653,7 +583,7 @@ class AdminAuth:
         self._validate_action_kind(action_kind)
         _require_typed_immutable_payload(target)
         with self._lock:
-            self._refresh_credential_locked()
+            self._require_admission_locked()
             now = self._now_locked()
             self._prune_locked(now)
             session_digest, session = self._authenticate_session_locked(
@@ -688,6 +618,8 @@ class AdminAuth:
                 action_kind=record.action_kind,
                 target=cast(TargetT, record.target),
                 preconditions=record.preconditions,
+                identity=session.identity,
+                add_revision=session.add_revision,
             )
 
     def state_counts(self) -> AuthStateCounts:
@@ -711,32 +643,24 @@ class AdminAuth:
         with self._lock:
             self._close_admission_locked()
 
-    def _refresh_credential_locked(self) -> bool:
+    def _require_admission_locked(self) -> None:
         if not self._admission_open:
             raise AdmissionClosed()
         try:
-            snapshot = load_credential_snapshot(self._credential_path)
-        except CredentialFileError:
+            self._users.has_admins
+        except AdminUsersUnavailable:
             self._close_admission_locked()
             raise AdmissionClosed() from None
-        digest = self._credential_digest
-        changed = (
-            snapshot.identity != self._credential_identity
-            or digest is None
-            or not hmac.compare_digest(snapshot.digest, digest)
-        )
-        if not changed:
-            return False
-        self._credential_identity = snapshot.identity
-        self._credential_digest = snapshot.digest
-        self._generation += 1
-        self._clear_bearer_state_locked()
-        return True
+
+    def revoke_identity(self, identity: AdminIdentity) -> None:
+        """Revoke all browser sessions and action grants for one exact user."""
+        with self._lock:
+            for digest, record in tuple(self._sessions.items()):
+                if record.identity == identity:
+                    self._drop_session_locked(digest)
 
     def _close_admission_locked(self) -> None:
         self._admission_open = False
-        self._credential_digest = None
-        self._credential_identity = None
         self._clear_bearer_state_locked()
 
     def _clear_bearer_state_locked(self) -> None:
@@ -832,6 +756,10 @@ class AdminAuth:
             if record is not None:
                 self._drop_session_locked(digest)
             raise SessionRejected()
+        member = self._users.get_membership(record.identity)
+        if member is None or member.add_revision != record.add_revision:
+            self._drop_session_locked(digest)
+            raise SessionRejected()
         return digest, record
 
     def _authenticated_session(
@@ -841,6 +769,8 @@ class AdminAuth:
         return AuthenticatedSession(
             log_handle=record.log_handle,
             generation=record.generation,
+            identity=record.identity,
+            add_revision=record.add_revision,
         )
 
     def _drop_session_locked(self, session_digest: bytes) -> None:

@@ -12,7 +12,6 @@
     <key>NETIZEN_CLI_PYTHON</key><string>@PYTHON@</string>
     <key>NETIZEN_CONFIG_PATH</key><string>@ROOT@/config.yaml</string>
     <key>NETIZEN_LARK_APP_CONFIG</key><string>@ROOT@/lark-app/config.json</string>
-    <key>NETIZEN_ADMIN_SECRET_FILE</key><string>@ROOT@/credentials/admin-web-secret</string>
     <key>NETIZEN_READY_FILE</key><string>@ROOT@/state/service.ready</string>
     <key>NETIZEN_LIFETIME_LOCK_FILE</key><string>@ROOT@/state/service.lifetime.lock</string>
     <key>NETIZEN_LOG_FILE</key><string>@ROOT@/state/netizen.log</string>

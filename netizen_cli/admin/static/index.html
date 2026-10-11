@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/static/admin.css">
   <link rel="stylesheet" href="/static/chat-picker.css">
   <script src="/static/chat-picker.js" defer></script>
+  <script src="/static/identity.js" defer></script>
   <script src="/static/admin.js" defer></script>
 </head>
 <body>
@@ -16,8 +17,10 @@
       <h1>Netizen Admin</h1>
       <p id="instance-root" class="instance-root">__NETIZEN_INSTANCE_ROOT__</p>
     </div>
-    <button id="logout" class="quiet">退出登录</button>
+    <div class="identity-toolbar"><div id="current-user" class="person" aria-label="当前管理员"></div><button id="logout" class="quiet">退出登录</button></div>
   </header>
+
+  <div id="auth-expired" class="auth-expired" role="alert" hidden><span>登录已过期，请重新登录。</span><a href="/login">重新登录</a></div>
 
   <nav class="tabs" aria-label="管理模块">
     <button class="tab active" data-tab="projects" aria-selected="true">Projects</button>
@@ -26,6 +29,7 @@
     <button class="tab" data-tab="schedules" aria-selected="false">定时任务</button>
     <button class="tab" data-tab="defaults" aria-selected="false">默认会话配置</button>
     <button class="tab" data-tab="updates" aria-selected="false">系统维护</button>
+    <button class="tab" data-tab="system" aria-selected="false">系统管理</button>
   </nav>
 
   <main>
@@ -310,6 +314,23 @@
         </fieldset>
       </form>
     </dialog>
+    <section id="system" class="panel" aria-labelledby="system-heading" hidden>
+      <div class="section-head"><div><p class="eyebrow">SYSTEM</p><h2 id="system-heading">系统管理</h2></div></div>
+      <div class="defaults-tabs system-tabs" role="tablist" aria-label="系统管理"><button id="permissions-tab" class="defaults-tab" role="tab" aria-selected="true" aria-controls="permissions-panel">权限管理</button></div>
+      <div id="permissions-panel" role="tabpanel" aria-labelledby="permissions-tab">
+        <div class="section-head"><h3>管理员</h3><div class="actions"><button id="admin-user-add" class="action" aria-expanded="false" aria-controls="admin-user-panel" disabled>添加管理员</button><button class="refresh" data-refresh="system">刷新</button></div></div>
+        <p class="defaults-help">管理员拥有本实例的管理权限。至少保留一位管理员。</p>
+        <section id="admin-user-panel" class="identity-panel" aria-labelledby="admin-user-title" hidden>
+          <div class="section-head"><h3 id="admin-user-title">添加管理员</h3><button id="admin-user-close" class="refresh" type="button" aria-label="关闭添加管理员">×</button></div>
+          <p>搜索并选择要授予本实例管理权限的人员。</p>
+          <div id="admin-selector"></div>
+          <div id="admin-user-selection" class="person" hidden></div>
+          <p id="admin-selector-status" class="status" role="status" aria-live="polite"></p>
+          <div class="identity-panel-actions"><button id="admin-selector-retry" class="refresh" hidden>重试加载</button><button id="admin-selector-reload" class="refresh" hidden>重新加载页面</button><button id="admin-user-confirm" class="action" disabled>确认添加</button></div>
+        </section>
+        <ul id="admin-users" class="admin-users" aria-label="管理员名单"></ul>
+      </div>
+    </section>
     <section id="updates" class="panel" aria-labelledby="updates-heading" hidden>
       <div class="section-head">
         <div><p class="eyebrow">NETIZEN</p><h2 id="updates-heading">系统维护</h2></div>

@@ -1541,7 +1541,7 @@ user/chat/role allowlist。每个被投递到 Scope 的参与者都能管理 Bin
 raw App Secret 的唯一来源是 `<NETIZEN_ROOT>/lark-app/config.json` 的固定 `netizen`
 profile：当前用户拥有的普通非 symlink 文件，目录 0700、文件 0600 或更严格。
 沿用 [ADR 0066](adr/0066-share-lark-app-credentials-with-optional-cli.md) 的官方 CLI 格式，
-不依赖 Lark CLI、不跟随 currentApp、不建立 user OAuth；凭据不进入 YAML、SQLite、
+不依赖 Lark CLI、不跟随 currentApp；应用凭据不进入 YAML、SQLite、
 argv 或日志。所有入口均固定本实例绝对路径，旧 Secret 环境来源拒绝。
 
 setup 在当前选定账号环境检查 bundled Codex 登录，不在服务之外执行账号 profile。
@@ -1552,7 +1552,8 @@ TTY 支持手工输入与浏览器失败后的一次手工回退，Ctrl-C 与非
 成功写入的凭据不因后续权限、注册或启动失败恢复旧值。有效 tenant 权限、审批、发布、
 安装、可用范围与入群仍按[部署前置条件](deployment.md#前置门禁)检查。
 
-Admin 不具备包更新或浏览器授权能力。App ID 改变后新消息进入新的 Scope namespace；
+Admin 不具备包更新或应用绑定授权能力；其用户登录独立使用下述 Device Flow。
+App ID 改变后新消息进入新的 Scope namespace；
 旧 Binding 与原生历史保留，不自动迁移。
 
 ### 部署事务与操作状态
@@ -1603,10 +1604,11 @@ Admin 只发起本实例重启，由同用户独立 systemd transient service／
 
 ### Admin HTTP 与认证
 
-Admin Web 是 ADR 0031/0074 的单管理员、实例级控制面，默认监听 `0.0.0.0`。
+Admin Web 是 ADR 0031/0074/0079 的实例级控制面，管理员权力相同，无角色或 Project ACL。
+Admin 是必备能力，不再提供 enabled 配置，默认监听 `0.0.0.0`。
 `adminWeb.port` 已配置时严格使用；字段缺失时在持有实例 lifetime lock 的启动进程中
 实际绑定 8787–8886，只有地址占用才顺延。绑定成功后原子写回本实例 YAML，检测到人工
-修改或写入失败即关闭 listener、启动失败；已固化端口后续冲突不漂移。禁用不分配，
+修改或写入失败即关闭 listener、启动失败；已固化端口后续冲突不漂移。
 `0`/`null`/空值不是自动分配；后续初始化失败也保留已写入端口。socket 在
 部分地址绑定失败时按候选整体释放。启动固化端口不重新获取 CLI 正持有的实例维护锁，
 避免 CLI 等待 ready、服务等待维护锁的循环等待。listener 在
@@ -1614,34 +1616,62 @@ Runtime 之前以 closed admission 绑定；Feishu、Store、Runtime 和管理 a
 后，主 loop 才通过 `channel.schedule(...)` 在 background loop 打开它并打印 ready marker。
 HTTP 使用 exact-pin `h11` 的公开状态机和受限 `asyncio` transport：最多 32 条连接，header
 absolute deadline 5 秒、keep-alive 15 秒、request/header line 8 KiB、headers 32 KiB、body
-64 KiB，并拒绝 pipelining 和 upload。未认证可读取的内容只有 login、登录页复用的无状态
-CSS 与无细节 readiness；未认证 GET `/` 只返回 303 重定向到 `/login`，不返回任何 HTML、
-JavaScript 或状态。HTML、JavaScript、API 和其他资源仍要求 session 并返回 401。
+64 KiB，并拒绝 pipelining 和 upload。未认证内容仅有登录 HTML/JS/CSS、浏览器绑定的
+设备授权 start/state/cancel/二维码与无细节 readiness；未认证 GET `/` 只返回 303 到
+`/login`。管理 HTML、JavaScript、API 和其他资源要求 session 并返回 401。
 
-Admin credential 来自绝对路径 `NETIZEN_ADMIN_SECRET_FILE`，解码后必须恰好 32 bytes；
-最终路径不得是 symlink，文件必须为普通文件且 mode 精确为 0600。认证状态完全在内存：
-session 不设闲置或绝对时间过期，退出登录、服务重启或合法 credential 轮换使其失效；
-浏览器 cookie 保持会话 cookie，不设 `Expires` / `Max-Age`；session 与 preauth 名称都带
-canonical root 的稳定摘要，避免同一 host 不同端口覆盖登录状态。session 保留全局/逐来源容量
-上限，验证成功的新登录在逐来源已满时替换该来源最早签发的 session，否则在全局已满时
-替换全局最早签发的 session，并撤销其关联 action grants；失败登录不得驱逐已有 session。
-pre-auth nonce 不设时间过期，仍绑定来源、credential generation 和配对的 cookie/form，
-每次登录尝试只可消费一次。待提交 nonce 保留每来源 16 个、全局 1,024 个容量上限；
-新签发通过限速检查后，逐来源已满时替换该来源最早签发的 nonce，否则全局已满时替换
-全局最早签发的 nonce，避免遗留页面永久占满名额。该回收只影响待提交 nonce，不撤销
-session 或 action grants。一次性 action/CSRF grant 仍保留十分钟 TTL 和容量限制，登录
-继续限速；每次认证边界都会检测合法 credential 轮换并清空旧 bearer。
-登录表单被拒绝时统一 303 跳转到带固定失败标记的登录页，GET 在限速允许时签发新
-cookie/nonce 并显示统一提示，避免刷新重交旧表单。限速期间 GET `/login` 返回 401 HTML
-等待页和重试入口，不签发 nonce 或提供提交表单；刷新不增加失败计数，限速窗口结束后
-重新访问即可恢复。错误标记不携带 credential、nonce 或具体拒绝原因。
+按 [ADR 0079](adr/0079-authenticate-admins-with-feishu-identities.md)，登录复用当前实例
+飞书应用的 Device Flow，不要求实例回调 URL。打开登录页只签发 preauth 并查询状态，
+用户主动开始才创建上游授权；nonce/cookie/来源配对且仅消费一次，尝试有界、可取消，
+`slow_down` 至少加五秒。发起与失败均有限速，取消不退还发起额度。后台不无限轮询，
+并发容量只计算待完成尝试；终态响应有界保留，回收终态记录不撤销已签发的 session。
+页面查询驱动有间隔的授权轮询。取消、超时、重启、旧尝试及非管理员结果不得签发 session
+或落盘 token；可信 `user_info.open_id` 与当前 App ID 组成身份，不使用 tenant_key。
+
+`state/admin-users.json` 是独立私有名单，成员身份、addRevision、展示姓名头像与授权
+revision 原子保存。只投影当前应用的成员；旧应用成员不能授权新应用。在线单 writer，
+离线 setup 沿用实例维护/lifetime 锁；离线修改名单后重启生效，没有在线重载、watcher、
+Channel SQLite 表或新持久锁。
+展示快照更新不改授权 revision。管理动作复核当前资格、成员代次、一次性授权和预期
+revision；允许自删但同一写入临界区禁止删最后一人。删除先撤销资格及该主体所有 session/
+grants，再清理凭证；清理错误不回滚权限。重新添加不复活删除前状态，已受理操作继续。
+
+`credentials/admin-user-tokens.json` 私密保存每位当前管理员一份 UAT/RT、期限、scope
+和成员代次；仅通过名单复核的登录可写入。普通退出保留共享凭证，重启读取，删除管理员
+清理。仅实际依赖飞书的调用按需刷新；局部管理与轮询不检查 UAT。按用户串行刷新和登录
+提交，独立且仍有效的登录按提交顺序覆盖，不为浏览器登录建立额外排序；网络期间
+不持名单锁。刷新前持久标记该 RT 已尝试，未知结果不再次消费旧 RT，
+成功原子替换并复位，新登录也覆盖恢复。明确过期的只读调用最多刷新重试一次，失效或
+刷新失败撤销当前浏览器会话；不主动协调其他浏览器。资料接口普通异常沿用普通错误。
+
+session 仍只在内存，不设闲置或绝对 TTL；cookie 为 HttpOnly、SameSite=Strict 的会话
+cookie，无 Expires/Max-Age。服务重启要求重新确认身份，磁盘有效 token 不证明当前
+浏览器身份。名称带 canonical root 摘要；保留全局/逐来源容量、新合法登录回收最早
+session 并撤销 grants、失败登录不得驱逐等边界。preauth 保留来源与 cookie/nonce 配对，
+每来源 16、全局 1024 容量；action/CSRF 为十分钟单次 grant。过期页面停止管理请求和
+轮询，显示主动重新登录入口，不自动重放 mutation。
 Host 只接受启动时发现的本机地址/名称、可选 `adminWeb.accessHost` 与 exact 实际端口，
-accessHost 只接受 hostname/IP，不是协议、端口、路径或反向代理配置。带 body 的 login 及所有 mutation 还要求
+accessHost 只接受 hostname/IP，不是协议、端口、路径或反向代理配置。登录 start/cancel 及所有 mutation 还要求
 同源 `Origin`，不信任 forwarded header。页面和 API 直接使用受信内网 HTTP，不实现 TLS、
-OIDC、多管理员或 RBAC。
+OIDC、角色或 RBAC。
 管理地址从成功绑定的运行态生成，不返回 `0.0.0.0`/`::` 通配地址；页面与登录页显示
 实例 root。多地址可以配置 accessHost，loopback 地址提示本机或自行隧道访问。不引入
 跨实例网关、端口注册表或总控，也不登记停止实例的端口。
+
+“系统管理 → 权限管理 → 管理员”使用官方固定版本 Selector，按用户确认作为受信同源
+依赖加载，不要求严格 iframe 隔离。组件放在页内展开区域，避免原生模态 dialog 阻断
+SDK 挂在 body 的候选列表；全局 SDK 鉴权超时后引导整页重新加载，不继续局部重试或
+并发重配。仅认证后的 Admin 文档增加组件实际必需的 CSP
+来源和 eval/样式例外，登录页保持原严格策略，不允许任意脚本源。UAT/RT 与 App Secret
+不发给浏览器；后端生成当前已验证 Host 页面 URL 的组件签名。候选 id/entity.id 一致且
+type 为 user 后仍须管理员确认及服务端授权校验。当前用户资料整页加载时查询飞书，
+名单使用本地快照，不新增通讯录查询权限；头像失效显示占位，不缓存二进制头像。
+
+显式 setup 补齐应用 user 类型 `component:selector`/`offline_access` 权限与首管理员，
+支持准确应用身份确认或 `--admin-open-id`。已有名单不被操作者替换；后台启动只校验，
+缺管理员提示 setup 而不等待授权。删除旧 secret 认证、生成和启动依赖，旧文件不自动
+删除；本轮不保留旧 enabled/secret 配置及服务模板兼容。协议 SDK 缺口与移除条件见 ADR
+0079，平台真人验收状态见部署记录，不以合成测试或旧 demo 冒充正式版本验收。
 
 ### 系统维护 API
 
@@ -2189,7 +2219,7 @@ SDK/App Server 升级的检查集合、触发条件和顺序统一见
 
 ## 失败语义
 
-- Admin Web 默认开启；credential 非法、静态资源缺失或 bind 失败会使整个服务启动失败，
+- Admin Web 是必备能力；管理员名单/凭证非法、静态资源缺失或 bind 失败会使整个服务启动失败，
   不会只保留飞书入口。Scheduler/MCP 部分初始化失败也必须关闭已创建组件，不开放业务。
   shutdown 先关闭调度认领、MCP/Admin/Feishu 和 Runtime admission，停止 Scheduler timer，
   再在一个 60 秒 monotonic absolute budget 内排空 handlers、定时交接与 blocking I/O，最后

@@ -86,7 +86,6 @@ def _service_environment(home: Path, binding: ServiceBinding) -> dict[str, str]:
         "NETIZEN_CLI_PYTHON": str(binding.python),
         "NETIZEN_CONFIG_PATH": str(root / "config.yaml"),
         "NETIZEN_LARK_APP_CONFIG": str(root / "lark-app/config.json"),
-        "NETIZEN_ADMIN_SECRET_FILE": str(root / "credentials/admin-web-secret"),
         "NETIZEN_READY_FILE": str(root / "state/service.ready"),
         "NETIZEN_LIFETIME_LOCK_FILE": str(root / "state/service.lifetime.lock"),
         "NETIZEN_LOG_FILE": str(root / "state/netizen.log"),

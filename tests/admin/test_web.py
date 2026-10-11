@@ -8,6 +8,7 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from html.parser import HTMLParser
 from dataclasses import replace
@@ -17,6 +18,9 @@ from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from netizen_cli.admin.auth import AdminAuth
+from netizen_cli.admin.feishu import DeviceChallenge, UserProfile, UserTokens
+from netizen_cli.admin.login import AdminLogin
+from netizen_cli.admin.users import AdminIdentity, AdminUsers
 from netizen_cli.admin.errors import AdminWebError
 from netizen_cli.admin.presentation import (
     _chat_open_url,
@@ -97,6 +101,38 @@ from netizen_cli.management.chat_directory import AvailableChat, AvailableChatPa
 from netizen_cli.management.updates import UpdateError
 from netizen_cli.projects import Project
 from netizen_cli.sdk_gap_adapter import GoalSnapshot
+
+
+class FakeFeishuClient:
+    """Synthetic identity endpoint: never contacts the real application."""
+
+    app_id = "cli_test"
+
+    def __init__(self, clock=time.time):
+        self.clock = clock
+        self.profile = UserProfile("ou_admin", "Admin", "https://example.test/avatar.png")
+        self.start_calls = 0
+        self.poll_calls = 0
+
+    async def start_login(self):
+        self.start_calls += 1
+        return DeviceChallenge(
+            "synthetic-device-code", "SYNTHETIC", "https://accounts.feishu.cn/synthetic",
+            self.clock() + 600, 1,
+        )
+
+    async def poll_login(self, _device_code):
+        self.poll_calls += 1
+        return UserTokens(
+            "synthetic-access-token", "synthetic-refresh-token", self.clock() + 600,
+            self.clock() + 3_600, ("component:selector", "offline_access"),
+        )
+
+    async def user_info(self, _access_token):
+        return self.profile
+
+    async def aclose(self):
+        pass
 
 
 class FakeManagement:
@@ -589,12 +625,11 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.secret_path = self.root / "admin-secret"
-        self.credential = secrets.token_urlsafe(32)
-        self.secret_path.write_text(self.credential, encoding="ascii")
-        self.secret_path.chmod(0o600)
+        self.users = AdminUsers(self.root, "cli_test")
+        self.member = self.users.add_initial("ou_admin")
         self.auth_now = 1_000.0
-        self.auth = AdminAuth(self.secret_path, clock=lambda: self.auth_now)
+        self.auth = AdminAuth(self.users, clock=lambda: self.auth_now)
+        self.feishu = FakeFeishuClient(clock=lambda: self.auth_now)
         self.management = FakeManagement(self.root)
 
         def loopback_authorities(_host, _port, addresses):
@@ -611,13 +646,17 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         self.authority_builder_patch.start()
         self.addCleanup(self.authority_builder_patch.stop)
-        self.runner = AdminWebRunner(
-            host="127.0.0.1",
-            port=0,
-            credential_path=self.secret_path,
-            auth=self.auth,
-            management=self.management,  # type: ignore[arg-type]
-        )
+        with patch("netizen_cli.admin.web.AdminLogin", side_effect=lambda auth, users, credentials, client: AdminLogin(
+            auth, users, credentials, client, clock=lambda: self.auth_now,
+        )):
+            self.runner = AdminWebRunner(
+                host="127.0.0.1",
+                port=0,
+                users=self.users,
+                feishu_client=self.feishu,
+                auth=self.auth,
+                management=self.management,  # type: ignore[arg-type]
+            )
         await self.runner.bind()
         address = self.runner.addresses[0]
         assert isinstance(address, tuple)
@@ -674,55 +713,29 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(dict(headers)["content-type"], "text/html; charset=utf-8")
         preauth = _cookie_value(headers, "netizen_admin_preauth")
-        nonce_match = re.search(rb"name='nonce' value='([^']+)'", body)
+        nonce_match = re.search(rb'id="login-nonce"[^>]*value="([^"]+)"', body)
         assert nonce_match is not None
         return preauth, nonce_match.group(1).decode("ascii"), body
 
     async def submit_login(
-        self, preauth: str, nonce: str, credential: str,
+        self, preauth: str, nonce: str,
     ) -> tuple[int, list[tuple[str, str]], bytes]:
-        form = urlencode(
-            {
-                "nonce": nonce,
-                "credential": credential,
-            }
-        ).encode("ascii")
         return await self.request(
             "POST",
-            "/login",
+            "/api/v1/login/start",
             headers=[
                 ("Origin", self.origin),
-                ("Content-Type", "application/x-www-form-urlencoded"),
+                ("Content-Type", "application/json"),
                 ("Cookie", f"netizen_admin_preauth={preauth}"),
             ],
-            body=form,
+            body=json.dumps({"nonce": nonce}).encode(),
         )
 
     async def login(self) -> str:
-        status, headers, body = await self.request("GET", "/login")
-        self.assertEqual(status, 200)
-        preauth = _cookie_value(headers, "netizen_admin_preauth")
-        nonce_match = re.search(rb"name='nonce' value='([^']+)'", body)
-        assert nonce_match is not None
-        form = urlencode(
-            {
-                "nonce": nonce_match.group(1).decode("ascii"),
-                "credential": self.credential,
-            }
-        ).encode("ascii")
-        status, headers, _body = await self.request(
-            "POST",
-            "/login",
-            headers=[
-                ("Origin", self.origin),
-                ("Content-Type", "application/x-www-form-urlencoded"),
-                ("Cookie", f"netizen_admin_preauth={preauth}"),
-            ],
-            body=form,
-        )
-        self.assertEqual(status, 303)
-        self.assertEqual(dict(headers)["location"], "/")
-        return _cookie_value(headers, "netizen_admin_session")
+        return self.auth.issue_session(
+            AdminIdentity("cli_test", "ou_admin"), source_ip="127.0.0.1",
+            expected_add_revision=self.member.add_revision,
+        ).token
 
     async def json_get(self, target: str, session: str):
         status, headers, body = await self.request(
@@ -990,9 +1003,10 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         status, login_headers, login_page = await self.request("GET", "/login")
         self.assertEqual(status, 200)
         self.assertEqual(dict(login_headers)["referrer-policy"], "same-origin")
-        self.assertIn(b"href='/static/admin.css'", login_page)
-        self.assertIn(b"class='login-body'", login_page)
-        self.assertIn(b"class='login-card'", login_page)
+        self.assertIn(b'href="/static/admin.css"', login_page)
+        self.assertIn(b'class="login-body"', login_page)
+        self.assertIn(b'class="login-card"', login_page)
+        self.assertNotIn(b'name="credential"', login_page)
 
         session = await self.login()
         status, headers, body = await self.request(
@@ -1006,64 +1020,67 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mapped["cache-control"], "no-store")
         self.assertIn("frame-ancestors 'none'", mapped["content-security-policy"])
 
-    async def test_login_rejection_redirects_to_fresh_form_without_echoing_secrets(self) -> None:
+    async def test_old_secret_login_cannot_issue_session_or_echo_credentials(self) -> None:
         self.runner.open_admission()
         preauth, nonce, _ = await self.login_form()
-        wrong_credential = secrets.token_urlsafe(32)
-        # A wrong credential and replay of the consumed form have the same response.
-        for credential in (wrong_credential, self.credential):
-            status, headers, body = await self.submit_login(preauth, nonce, credential)
-            self.assertEqual(status, 303)
-            target = dict(headers)["location"]
-            self.assertEqual(target, "/login?error=1")
-            self.assertEqual(body, b"")
-            self.assertIn("Max-Age=0", dict(headers)["set-cookie"])
-            self.assertEqual(dict(headers)["cache-control"], "no-store")
-            for secret in (preauth, nonce, wrong_credential, self.credential):
-                self.assertNotIn(secret, str(headers))
-
-        fresh_cookie, fresh_nonce, page = await self.login_form(target)
-        self.assertNotEqual(fresh_cookie, preauth)
-        self.assertNotEqual(fresh_nonce, nonce)
-        self.assertIn(b"role='alert'", page)
-        for secret in (preauth, nonce, wrong_credential, self.credential):
-            self.assertNotIn(secret.encode(), page)
-        # Refreshing the redirected GET does not repeat a failed login.
-        failures = self.auth.state_counts().global_failures
-        fresh_cookie, fresh_nonce, _ = await self.login_form(target)
-        self.assertEqual(self.auth.state_counts().global_failures, failures)
-        status, headers, _ = await self.submit_login(
-            fresh_cookie, fresh_nonce, self.credential,
+        credential = secrets.token_urlsafe(32)
+        status, headers, body = await self.request(
+            "POST", "/login", headers=[
+                ("Origin", self.origin),
+                ("Content-Type", "application/x-www-form-urlencoded"),
+                ("Cookie", f"netizen_admin_preauth={preauth}"),
+            ], body=urlencode({"nonce": nonce, "credential": credential}).encode(),
         )
-        self.assertEqual(status, 303)
-        self.assertEqual(dict(headers)["location"], "/")
+        self.assertEqual(status, 401)
+        self.assertEqual(self.auth.state_counts().sessions, 0)
+        self.assertEqual(self.feishu.start_calls, 0)
+        for secret in (preauth, nonce, credential):
+            self.assertNotIn(secret, str(headers))
+            self.assertNotIn(secret.encode(), body)
+
+    async def test_feishu_login_creates_browser_bound_session_without_exposing_tokens(self) -> None:
+        self.runner.open_admission()
+        preauth, nonce, _ = await self.login_form()
+        status, _, body = await self.submit_login(preauth, nonce)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["state"], "pending")
+        self.auth_now += 1
+        status, _, body = await self.request("GET", "/api/v1/login/state")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["state"], "idle")
+        self.assertEqual(self.feishu.poll_calls, 0)
+        status, headers, body = await self.request(
+            "GET", "/api/v1/login/state",
+            headers=[("Cookie", f"netizen_admin_preauth={preauth}")],
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["state"], "authenticated")
         session = _cookie_value(headers, "netizen_admin_session")
+        for secret in ("synthetic-access-token", "synthetic-refresh-token", "synthetic-device-code"):
+            self.assertNotIn(secret.encode(), body)
+            self.assertNotIn(secret, str(headers))
         status, _, _ = await self.request(
             "GET", "/", headers=[("Cookie", f"netizen_admin_session={session}")],
         )
         self.assertEqual(status, 200)
 
-    async def test_login_rate_limit_shows_html_and_recovers_without_refresh_extending_it(self) -> None:
+    async def test_login_rate_limit_recovers_without_page_refresh_extending_it(self) -> None:
         self.runner.open_admission()
         for _ in range(5):
             preauth, nonce, _ = await self.login_form()
-            status, headers, _ = await self.submit_login(preauth, nonce, "wrong")
-            self.assertEqual(status, 303)
-        target = dict(headers)["location"]
+            status, _, _ = await self.submit_login(preauth, secrets.token_urlsafe(32))
+            self.assertEqual(status, 401)
         counts = self.auth.state_counts()
         self.assertEqual(counts.global_failures, 5)
         self.assertEqual(counts.preauth, 0)
-        for elapsed, route in ((0, target), (150, "/login"), (299, target)):
+        self.assertEqual(self.feishu.start_calls, 0)
+        for elapsed in (0, 150, 299):
             self.auth_now = 1_000.0 + elapsed
-            status, headers, page = await self.request("GET", route)
+            status, headers, page = await self.request("GET", "/login")
             self.assertEqual(status, 401)
             self.assertEqual(dict(headers)["content-type"], "text/html; charset=utf-8")
             self.assertEqual(dict(headers)["cache-control"], "no-store")
             self.assertIn(b"frame-ancestors 'none'", dict(headers)["content-security-policy"].encode())
-            self.assertIn(b"role='alert'", page)
-            self.assertIn(b"href='/login'", page)
-            self.assertNotIn(b"<form", page)
-            self.assertNotIn(b"name='nonce'", page)
             self.assertIn("Max-Age=0", dict(headers)["set-cookie"])
             self.assertEqual(self.auth.state_counts(), counts)
         self.auth_now = 1_300.0
@@ -1071,17 +1088,17 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.auth.state_counts().global_failures, 0)
         self.auth.authenticate(session)
 
-    async def test_login_redirect_does_not_bypass_origin_validation(self) -> None:
+    async def test_device_login_does_not_bypass_origin_validation(self) -> None:
         self.runner.open_admission()
         preauth, nonce, _ = await self.login_form()
         status, headers, body = await self.request(
-            "POST", "/login",
+            "POST", "/api/v1/login/start",
             headers=[
                 ("Origin", "http://evil.invalid"),
-                ("Content-Type", "application/x-www-form-urlencoded"),
+                ("Content-Type", "application/json"),
                 ("Cookie", f"netizen_admin_preauth={preauth}"),
             ],
-            body=urlencode({"nonce": nonce, "credential": self.credential}).encode(),
+            body=json.dumps({"nonce": nonce}).encode(),
         )
         self.assertEqual(status, 403)
         self.assertEqual(json.loads(body)["code"], "invalid_origin")
@@ -1105,7 +1122,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(status, 403)
-        self.assertNotIn(self.credential.encode(), payload)
+        self.assertNotIn(session.encode(), payload)
 
     async def test_unauthenticated_root_redirects_to_login(self) -> None:
         self.runner.open_admission()
@@ -1125,12 +1142,10 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 303)
         self.assertEqual(dict(headers)["location"], "/login")
 
-    async def test_rotated_session_cookie_redirects_root_to_login(self) -> None:
+    async def test_revoked_session_cookie_redirects_root_to_login(self) -> None:
         self.runner.open_admission()
         session = await self.login()
-        # Rotate the credential so the existing session is no longer valid.
-        self.secret_path.write_text(secrets.token_urlsafe(32), encoding="ascii")
-        self.secret_path.chmod(0o600)
+        self.auth.revoke_identity(AdminIdentity("cli_test", "ou_admin"))
         status, headers, _body = await self.request(
             "GET",
             "/",
@@ -1174,11 +1189,17 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("error_type=RuntimeError", rendered)
         self.assertNotIn("Traceback", rendered)
 
-    async def test_rotation_invalidates_existing_session(self) -> None:
+    async def test_administrator_removal_invalidates_existing_session(self) -> None:
         self.runner.open_admission()
         session = await self.login()
-        self.secret_path.write_text(secrets.token_urlsafe(32), encoding="ascii")
-        self.secret_path.chmod(0o600)
+        self.users.add(
+            AdminIdentity("cli_test", "ou_other"), actor=AdminIdentity("cli_test", "ou_admin"),
+            expected_revision=self.users.revision,
+        )
+        self.users.remove(
+            AdminIdentity("cli_test", "ou_admin"), actor=AdminIdentity("cli_test", "ou_other"),
+            expected_revision=self.users.revision,
+        )
 
         status, _headers, _payload = await self.json_get("/api/v1/projects", session)
 
@@ -2289,14 +2310,14 @@ class _AdminAssetParser(HTMLParser):
 
 
 class AdminStaticAssetsTest(unittest.TestCase):
-    def test_static_ui_has_four_pages_external_assets_and_safe_text_sinks(self) -> None:
+    def test_static_ui_has_management_pages_external_assets_and_safe_text_sinks(self) -> None:
         root = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
         html = (root / "index.html").read_text(encoding="utf-8")
         javascript = (root / "admin.js").read_text(encoding="utf-8")
         parser = _AdminAssetParser()
         parser.feed(html)
 
-        self.assertEqual(parser.scripts, ["/static/chat-picker.js", "/static/admin.js"])
+        self.assertEqual(parser.scripts, ["/static/chat-picker.js", "/static/identity.js", "/static/admin.js"])
         self.assertEqual(parser.stylesheets, ["/static/admin.css", "/static/chat-picker.css"])
         self.assertFalse(parser.inline_script_text.strip())
         self.assertTrue({"projects", "sessions", "side-topics", "updates"} <= parser.ids)

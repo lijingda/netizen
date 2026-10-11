@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the effective tenant permission contract for the configured app."""
+"""Check the configured app's effective tenant and user permission contract."""
 
 from __future__ import annotations
 
@@ -13,28 +13,29 @@ from typing import Any, IO
 
 from .feishu_app_onboarding import (
     REQUIRED_TENANT_SCOPES,
+    REQUIRED_USER_SCOPES,
     TENANT_SCOPE_ALTERNATIVES,
 )
 from .lark_app import load_lark_app
 
 
 class PermissionCheckError(RuntimeError):
-    """The platform did not return a trustworthy tenant permission state."""
+    """The platform did not return a trustworthy app permission state."""
 
 
 ScopeLister = Callable[[], Any]
 
 
-def _missing_required_scopes(response: Any) -> tuple[str, ...]:
+def _missing_required_scopes(response: Any) -> dict[str, list[str]]:
     success = getattr(response, "success", None)
     if not callable(success) or not success():
-        raise PermissionCheckError("the tenant permission query failed")
+        raise PermissionCheckError("the app permission query failed")
     data = getattr(response, "data", None)
     scopes = getattr(data, "scopes", None)
     if not isinstance(scopes, list):
-        raise PermissionCheckError("the tenant permission query returned invalid data")
+        raise PermissionCheckError("the app permission query returned invalid data")
 
-    granted: set[str] = set()
+    granted: dict[str, set[str]] = {"tenant": set(), "user": set()}
     for scope in scopes:
         name = getattr(scope, "scope_name", None)
         status = getattr(scope, "grant_status", None)
@@ -47,15 +48,17 @@ def _missing_required_scopes(response: Any) -> tuple[str, ...]:
             or scope_type not in {"tenant", "user"}
         ):
             raise PermissionCheckError(
-                "the tenant permission query returned an invalid scope"
+                "the app permission query returned an invalid scope"
             )
-        if scope_type == "tenant" and status == 1:
-            granted.add(name)
-    return tuple(
-        scope
-        for scope in REQUIRED_TENANT_SCOPES
-        if not (TENANT_SCOPE_ALTERNATIVES.get(scope, frozenset((scope,))) & granted)
-    )
+        if status == 1:
+            granted[scope_type].add(name)
+    return {
+        "tenant": [
+            scope for scope in REQUIRED_TENANT_SCOPES
+            if not (TENANT_SCOPE_ALTERNATIVES.get(scope, frozenset((scope,))) & granted["tenant"])
+        ],
+        "user": [scope for scope in REQUIRED_USER_SCOPES if scope not in granted["user"]],
+    }
 
 
 def run_permission_check(
@@ -67,7 +70,7 @@ def run_permission_check(
     missing = _missing_required_scopes(list_scopes())
     print(
         json.dumps(
-            {"version": 1, "missingScopes": list(missing)},
+            {"version": 1, "missingScopes": missing},
             separators=(",", ":"),
         ),
         file=output,
