@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
-from lark_channel import OutboundCard
+from lark_channel import OutboundCard, OutboundPost
 
 from ..cards import CardActionError, reply_card, turn_progress_card
 from ..codex_runtime import CodexRuntime
+from ..partial_answers import PartialAnswer
 from ..runtime.contracts import (
     SideTurnActivitySnapshot,
     TurnActivitySnapshot,
@@ -75,13 +76,28 @@ class GoalCardOrigin:
 
 
 @dataclass(slots=True)
+class _PartialAnswerDelivery:
+    thread_id: str
+    turn_id: str
+    stopped: asyncio.Event
+    reply_partial: Callable[[OutboundPost], Awaitable[object]]
+    validate_reply: Callable[[object], Awaitable[bool]] | None = None
+    attempted_partials: set[tuple[str, str, str]] = field(default_factory=set)
+    confirmed_partials: set[tuple[str, str, str]] = field(default_factory=set)
+
+
+@dataclass(slots=True)
 class _TurnProgressCardSession:
     binding_id: str
     thread_id: str
     turn_id: str
-    message_id: str
+    message_id: str | None
     stopped: asyncio.Event
     snapshot: TurnActivitySnapshot
+    reply_partial: Callable[[OutboundPost], Awaitable[object]] | None = None
+    validate_reply: Callable[[object], Awaitable[bool]] | None = None
+    attempted_partials: set[tuple[str, str, str]] = field(default_factory=set)
+    confirmed_partials: set[tuple[str, str, str]] = field(default_factory=set)
     failed: bool = False
     task: asyncio.Task[None] | None = None
 
@@ -91,9 +107,13 @@ class _SideTurnProgressCardSession:
     side_id: str
     thread_id: str
     turn_id: str
-    message_id: str
+    message_id: str | None
     stopped: asyncio.Event
     snapshot: SideTurnActivitySnapshot
+    reply_partial: Callable[[OutboundPost], Awaitable[object]] | None = None
+    validate_reply: Callable[[object], Awaitable[bool]] | None = None
+    attempted_partials: set[tuple[str, str, str]] = field(default_factory=set)
+    confirmed_partials: set[tuple[str, str, str]] = field(default_factory=set)
     failed: bool = False
     task: asyncio.Task[None] | None = None
 
@@ -182,6 +202,8 @@ class _ReplyCardPresenter:
         origin: object,
         reply: Callable[[OutboundCard], Awaitable[object]] | None = None,
         validate_reply: Callable[[object], Awaitable[bool]] | None = None,
+        progress_enabled: bool = True,
+        reply_partial: Callable[[OutboundPost], Awaitable[object]] | None = None,
     ) -> bool:
         if self._closed:
             return False
@@ -208,31 +230,33 @@ class _ReplyCardPresenter:
                 },
             )
             return False
-        try:
-            card = turn_progress_card(snapshot=snapshot)
-            async with asyncio.timeout(self._operation_timeout_seconds):
-                result = (
-                    await self._channel.reply(origin, card)
-                    if reply is None
-                    else await reply(card)
+        message_id = None
+        if progress_enabled:
+            try:
+                card = turn_progress_card(snapshot=snapshot)
+                async with asyncio.timeout(self._operation_timeout_seconds):
+                    result = (
+                        await self._channel.reply(origin, card)
+                        if reply is None
+                        else await reply(card)
+                    )
+                    if validate_reply is not None and not await validate_reply(result):
+                        return False
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "failed to send initial progress card",
+                    extra={"binding_id": binding_id, "turn_id": turn_id},
                 )
-                if validate_reply is not None and not await validate_reply(result):
-                    return False
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception(
-                "failed to send initial progress card",
-                extra={"binding_id": binding_id, "turn_id": turn_id},
-            )
-            return False
-        message_id = _progress_card_message_id(result)
-        if message_id is None:
-            logger.error(
-                "failed to start progress card: reply message ID unavailable",
-                extra={"binding_id": binding_id, "turn_id": turn_id},
-            )
-            return False
+                return False
+            message_id = _progress_card_message_id(result)
+            if message_id is None:
+                logger.error(
+                    "failed to start progress card: reply message ID unavailable",
+                    extra={"binding_id": binding_id, "turn_id": turn_id},
+                )
+                return False
         current = self._runtime.turn_activity(
             binding_id,
             thread_id=thread_id,
@@ -255,6 +279,10 @@ class _ReplyCardPresenter:
             message_id=message_id,
             stopped=asyncio.Event(),
             snapshot=snapshot,
+            reply_partial=reply_partial or (lambda post: self._channel.reply(origin, post)),
+            validate_reply=validate_reply,
+            attempted_partials=set() if previous is None else previous.attempted_partials,
+            confirmed_partials=set() if previous is None else previous.confirmed_partials,
         )
         self._sessions[key] = session
         session.task = asyncio.create_task(
@@ -262,6 +290,94 @@ class _ReplyCardPresenter:
             name=f"netizen-progress-card-{turn_id}",
         )
         return True
+
+    async def finish_partial_answers(
+        self,
+        *,
+        owner_id: str,
+        thread_id: str,
+        turn_id: str,
+        partial_answers: tuple[PartialAnswer, ...],
+        side: bool,
+        progress_enabled: bool,
+        reply: Callable[[OutboundPost], Awaitable[object]],
+        validate_reply: Callable[[object], Awaitable[bool]] | None = None,
+    ) -> bool:
+        """Quiesce running delivery, then fill known gaps without replaying uncertain sends."""
+
+        sessions = self._side_sessions if side else self._sessions
+        key = (owner_id, thread_id, turn_id)
+        session = sessions.get(key)
+        if session is not None:
+            await self._stop_session(session)
+        if progress_enabled:
+            # The terminal whole-card projection carries every answer. A
+            # replacement is handled by the existing card fallback path.
+            return False
+        if session is None:
+            session = _PartialAnswerDelivery(
+                thread_id=thread_id, turn_id=turn_id,
+                stopped=asyncio.Event(), reply_partial=reply,
+                validate_reply=validate_reply,
+            )
+        sessions.pop(key, None)
+        try:
+            async with asyncio.timeout(self._operation_timeout_seconds):
+                await self._deliver_partial_answers(session, partial_answers, terminal=True)
+        except TimeoutError:
+            logger.warning("terminal partial-answer delivery budget exhausted")
+        identities = {
+            (answer.thread_id, answer.turn_id, answer.item_id)
+            for answer in partial_answers
+            if answer.thread_id == thread_id and answer.turn_id == turn_id
+            and answer.text.strip()
+        }
+        return bool(identities) and identities <= session.confirmed_partials
+
+    async def _deliver_partial_answers(
+        self,
+        session: _PartialAnswerDelivery | _TurnProgressCardSession | _SideTurnProgressCardSession,
+        answers: tuple[PartialAnswer, ...],
+        *,
+        terminal: bool = False,
+    ) -> None:
+        reply = session.reply_partial
+        if reply is None:
+            return
+        for answer in answers:
+            if session.stopped.is_set() and not terminal:
+                return
+            identity = (answer.thread_id, answer.turn_id, answer.item_id)
+            if (
+                answer.thread_id != session.thread_id
+                or answer.turn_id != session.turn_id
+                or not answer.text.strip()
+                or identity in session.attempted_partials
+            ):
+                continue
+            try:
+                post = OutboundPost(markdown=f"**阶段性答案**\n\n{answer.text}")
+            except Exception:
+                # No transport call has happened: final delivery may retry
+                # this known unpublished item after rendering recovers.
+                logger.exception("could not format partial answer")
+                continue
+            # Mark before I/O: a timeout or cancellation may follow publication.
+            # Even an SDK failure may hide a partially delivered long post.
+            session.attempted_partials.add(identity)
+            try:
+                async with asyncio.timeout(self._operation_timeout_seconds):
+                    result = await reply(post)
+                    if not _CardUpdateAttempt("", result).confirmed:
+                        continue
+                    if session.validate_reply is not None and not await session.validate_reply(result):
+                        continue
+                    session.confirmed_partials.add(identity)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("partial-answer delivery was not confirmed")
+                continue
 
     async def finish(
         self,
@@ -276,6 +392,8 @@ class _ReplyCardPresenter:
         if session is None:
             return None
         await self._stop_session(session)
+        if session.message_id is None:
+            return None
         snapshot = activity or session.snapshot
         if (
             snapshot.binding_id != session.binding_id
@@ -377,6 +495,11 @@ class _ReplyCardPresenter:
         if session is None:
             return False
         await self._stop_session(session)
+        if session.message_id is None:
+            # Keep exact item receipts for a later authoritative completion.
+            # No running task remains, so unavailable observation does no I/O.
+            self._sessions[(binding_id, thread_id, turn_id)] = session
+            return False
         if session.failed:
             return False
         try:
@@ -416,6 +539,8 @@ class _ReplyCardPresenter:
         turn_id: str,
         origin: object,
         reply: Callable[[OutboundCard], Awaitable[object]] | None = None,
+        progress_enabled: bool = True,
+        reply_partial: Callable[[OutboundPost], Awaitable[object]] | None = None,
     ) -> bool:
         if self._closed:
             return False
@@ -442,29 +567,31 @@ class _ReplyCardPresenter:
                 },
             )
             return False
-        try:
-            card = turn_progress_card(snapshot=snapshot)
-            async with asyncio.timeout(self._operation_timeout_seconds):
-                result = (
-                    await self._channel.reply(origin, card)
-                    if reply is None
-                    else await reply(card)
+        message_id = None
+        if progress_enabled:
+            try:
+                card = turn_progress_card(snapshot=snapshot)
+                async with asyncio.timeout(self._operation_timeout_seconds):
+                    result = (
+                        await self._channel.reply(origin, card)
+                        if reply is None
+                        else await reply(card)
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "failed to send initial Side progress card",
+                    extra={"side_id": side_id, "turn_id": turn_id},
                 )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception(
-                "failed to send initial Side progress card",
-                extra={"side_id": side_id, "turn_id": turn_id},
-            )
-            return False
-        message_id = _progress_card_message_id(result)
-        if message_id is None:
-            logger.error(
-                "failed to start Side progress card: reply message ID unavailable",
-                extra={"side_id": side_id, "turn_id": turn_id},
-            )
-            return False
+                return False
+            message_id = _progress_card_message_id(result)
+            if message_id is None:
+                logger.error(
+                    "failed to start Side progress card: reply message ID unavailable",
+                    extra={"side_id": side_id, "turn_id": turn_id},
+                )
+                return False
         key = (side_id, thread_id, turn_id)
         previous = self._side_sessions.pop(key, None)
         if previous is not None:
@@ -476,6 +603,9 @@ class _ReplyCardPresenter:
             message_id=message_id,
             stopped=asyncio.Event(),
             snapshot=snapshot,
+            reply_partial=reply_partial or (lambda post: self._channel.reply(origin, post)),
+            attempted_partials=set() if previous is None else previous.attempted_partials,
+            confirmed_partials=set() if previous is None else previous.confirmed_partials,
         )
         self._side_sessions[key] = session
         session.task = asyncio.create_task(
@@ -497,6 +627,8 @@ class _ReplyCardPresenter:
         if session is None:
             return None
         await self._stop_session(session)
+        if session.message_id is None:
+            return None
         snapshot = activity or session.snapshot
         if (
             snapshot.side_id != session.side_id
@@ -981,6 +1113,12 @@ class _ReplyCardPresenter:
                 self._retired_goal_runs.add(
                     (source_id, generation, matched.logical_turn_id)
                 )
+        current = self._goal_projection(source_id, generation)
+        if current is not None and current.partial_answer is not None:
+            incoming = projection.partial_answer
+            retained = current.partial_answer
+            if incoming is None or retained.contents[:len(incoming.contents)] == incoming.contents:
+                projection = replace(projection, partial_answer=retained)
         try:
             card = reply_card(projection)
         except Exception:
@@ -1205,6 +1343,10 @@ class _ReplyCardPresenter:
                 return
             if snapshot is None:
                 continue
+            if session.message_id is None:
+                await self._deliver_partial_answers(session, snapshot.partial_answers)
+                session.snapshot = snapshot
+                continue
             if snapshot.revision == session.snapshot.revision:
                 continue
             try:
@@ -1259,6 +1401,10 @@ class _ReplyCardPresenter:
                 session.failed = True
                 return
             if snapshot is None:
+                continue
+            if session.message_id is None:
+                await self._deliver_partial_answers(session, snapshot.partial_answers)
+                session.snapshot = snapshot
                 continue
             if snapshot.revision == session.snapshot.revision:
                 continue
@@ -1366,6 +1512,8 @@ class _ReplyCardPresenter:
         session: _TurnProgressCardSession,
         card: OutboundCard,
     ) -> bool:
+        if session.message_id is None:
+            return False
         return await self._update_message(
             session.message_id,
             card,
@@ -1378,6 +1526,8 @@ class _ReplyCardPresenter:
         session: _SideTurnProgressCardSession,
         card: OutboundCard,
     ) -> bool:
+        if session.message_id is None:
+            return False
         return await self._update_message(
             session.message_id,
             card,

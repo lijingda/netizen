@@ -24,6 +24,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import traceback
 from typing import Any
 
 import openai_codex
@@ -95,6 +96,32 @@ def _config_digest() -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 
 
+def _fixture_config(cwd: Path) -> CodexConfig:
+    # CLI dotted keys are split literally; quoting a path in the key does not
+    # unquote it and a '.' in the path creates another segment. Parse the path
+    # as a TOML key inside the override value instead.
+    return CodexConfig(
+        cwd=str(cwd),
+        config_overrides=(f'projects={{{json.dumps(str(cwd))}={{trust_level="trusted"}}}}',),
+    )
+
+
+def _save_config_snapshot(directory: Path, label: str) -> None:
+    """Explicit private diagnostics only; never print or restore config bytes."""
+    path = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "config.toml"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    destination = directory / f"config-{label}.toml"
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as snapshot:
+        snapshot.write(path.read_bytes() if path.exists() else b"")
+
+
+def _config_checkpoint(evidence: dict[str, Any], stage: str) -> None:
+    unchanged = _config_digest() == evidence["global_config_sha256_before"]
+    evidence[f"config_unchanged_after_{stage}"] = unchanged
+    assert unchanged, f"user config changed during {stage}"
+
+
 async def _scenario(
     config: CodexConfig, cwd: Path, store: BindingStore, owned: _OwnedDeletes,
     evidence: dict[str, Any],
@@ -119,6 +146,7 @@ async def _scenario(
             )
             parent = await codex.thread_start(cwd=str(cwd), model=model.model)
             owned.states[parent.id] = "created"
+            _config_checkpoint(evidence, "parent_start")
             store.assign_native_thread_id(source.id, parent.id)
             source = store.get(source.id)
             seed = await parent.turn("Reply exactly: " + marker)
@@ -128,10 +156,12 @@ async def _scenario(
             async with runtime.track_fork_creation("fork-probe"):
                 fork = await runtime.fork_exact(source, expected_project_revision=revision)
                 owned.states[fork.id] = "created"
+                _config_checkpoint(evidence, "fork")
                 branch = store.create_fork_binding(
                     scope=target_scope, source=source, native_thread_id=fork.id,
                     root_message_id="probe-root-card", creator_id="probe-owner",
                     expected_project_revision=revision,
+                    target_chat_kind="group",
                     context_anchor=MessageContextAnchor("destination-seed", 2000),
                 )
                 await runtime.adopt_fork(branch, fork)
@@ -160,6 +190,7 @@ async def _scenario(
             restored = await runtime.activate_exact(
                 branch.id, context_anchor=MessageContextAnchor("resume-message", 3000),
             )
+            _config_checkpoint(evidence, "cold_resume")
             assert restored.native_thread_id == fork.id
             inherited = await AsyncThread(cold, fork.id).read(include_turns=True)
             assert [turn.id for turn in inherited.thread.turns] == [seed.id]
@@ -188,22 +219,23 @@ async def _scenario(
             await runtime.cancel_tasks()
 
 
-async def probe(*, timeout: float) -> dict[str, Any]:
+async def probe(*, timeout: float, config_snapshot_dir: Path | None = None) -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "passed": False, "openai_codex_version": openai_codex.__version__,
         "real_feishu_calls": False, "process_only_fixture_trust": True,
     }
     before = _config_digest()
+    evidence["global_config_sha256_before"] = before
+    if config_snapshot_dir is not None:
+        _save_config_snapshot(config_snapshot_dir, "before")
     owned = _OwnedDeletes()
     with tempfile.TemporaryDirectory(prefix="netizen-persistent-fork-probe-") as temporary:
         root = Path(temporary).resolve()
         cwd = root / "project"
         cwd.mkdir()
         subprocess.run(["git", "-C", str(cwd), "init", "--quiet"], check=True)
-        config = CodexConfig(
-            cwd=str(cwd),
-            config_overrides=(f'projects.{json.dumps(str(cwd))}.trust_level="trusted"',),
-        )
+        evidence["fixture_cwd"] = str(cwd)
+        config = _fixture_config(cwd)
         store = BindingStore(root / "channel.sqlite3")
         try:
             async with asyncio.timeout(timeout):
@@ -211,6 +243,7 @@ async def probe(*, timeout: float) -> dict[str, Any]:
             evidence["passed"] = True
         except Exception as error:
             evidence["error_type"] = type(error).__name__
+            traceback.print_exception(error, file=sys.stderr)
         finally:
             # A failed assertion is not permission to retry an unknown native
             # mutation. Cleanup traverses only this run's known IDs, fork first.
@@ -223,13 +256,16 @@ async def probe(*, timeout: float) -> dict[str, Any]:
                             try:
                                 async with asyncio.timeout(15):
                                     await owned.delete(thread_id)
-                            except Exception:
-                                pass
+                            except Exception as error:
+                                traceback.print_exception(error, file=sys.stderr)
                 except Exception as error:
                     evidence["cleanup_error_type"] = type(error).__name__
+                    traceback.print_exception(error, file=sys.stderr)
             store.close()
     evidence["owned_native_outcomes"] = owned.states
     evidence["global_config_bytes_unchanged"] = before == _config_digest()
+    if config_snapshot_dir is not None:
+        _save_config_snapshot(config_snapshot_dir, "after")
     evidence["passed"] = bool(
         evidence["passed"] and evidence["global_config_bytes_unchanged"]
         and all(state == "deleted" for state in owned.states.values())
@@ -240,10 +276,11 @@ async def probe(*, timeout: float) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=300, help="scenario deadline; still use an external deadline")
+    parser.add_argument("--config-snapshot-dir", type=Path, help="Save private mode-0600 before/after config diagnostics; never publish these files")
     arguments = parser.parse_args()
     if arguments.timeout <= 0:
         parser.error("--timeout must be positive")
-    result = asyncio.run(probe(timeout=arguments.timeout))
+    result = asyncio.run(probe(timeout=arguments.timeout, config_snapshot_dir=arguments.config_snapshot_dir))
     print(json.dumps(result, ensure_ascii=False, indent=2))
     raise SystemExit(0 if result["passed"] else 1)
 

@@ -39,6 +39,7 @@ from netizen_cli.runtime.contracts import (
 )
 from netizen_cli.schedules.models import ScheduleRule
 from netizen_cli.session_settings import SessionSettings
+from netizen_cli.partial_answers import PartialAnswer
 from netizen_cli.turn_plan_observer import TurnPlanStepSnapshot, TurnPlanStepState
 
 from tests.support.channel_messages import FakeMessage, PNG
@@ -672,6 +673,112 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(driver.reply_message.await_count, 2)
         driver.create_message.assert_not_awaited()
         self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "unknown")
+
+    async def test_partial_only_completion_checks_single_and_all_chunk_destinations(self):
+        claim, request = await self.completion_fixture()
+        native_id = "native-" + claim.run.id
+        cases = (
+            (False, "oc_group", "omt_fresh", True),
+            (False, "oc_group", None, False),
+            (False, "oc_group", "omt_other", False),
+            (False, "oc_other", "omt_fresh", False),
+            (True, "oc_group", "omt_fresh", True),
+            (True, "oc_group", None, False),
+        )
+        for chunked, first_chat, first_topic, confirmed in cases:
+            with self.subTest(chunked=chunked, chat=first_chat, topic=first_topic):
+                bodies = []
+
+                async def reply(**kwargs):
+                    bodies.append(kwargs["content"])
+                    index = len(bodies)
+                    data = {
+                        "message_id": f"om_partial_{index}",
+                        "chat_id": first_chat if index == 1 else "oc_group",
+                        "thread_id": first_topic if index == 1 else "omt_fresh",
+                    }
+                    self.channel.fetched_messages[data["message_id"]] = {
+                        "code": 0, "data": {"items": [data]},
+                    }
+                    return {"code": 0, "data": data}
+
+                driver = self.use_sdk_reply(reply)
+                partial = PartialAnswer(native_id, "turn-initial", "partial-one",
+                    "验收结果\n" * (2000 if chunked else 1))
+                with patch.object(self.channel, "fetch_message", wraps=self.channel.fetch_message) as fetch:
+                    await self.app.handle_completion(TurnOutcome(
+                        binding_id=request["binding"].id, thread_id=native_id,
+                        turn_id="turn-initial", owner_id=request["owner_id"], origin=request["origin"],
+                        result=completed_turn_result(final_response=None), partial_answers=(partial,),
+                    ))
+                self.assertIn("答案见阶段性答案" if confirmed else "投递未确认", bodies[-1])
+                self.assertNotIn("验收结果", bodies[-1])
+                if not confirmed:
+                    self.assertNotIn("答案见阶段性答案", bodies[-1])
+                if chunked:
+                    self.assertGreater(len(bodies), 2)  # Multiple partial chunks plus one closing.
+                    expected_reads = len(bodies) - 1 if confirmed else 1
+                    self.assertEqual(fetch.await_count, expected_reads)
+                else:
+                    self.assertEqual(len(bodies), 2)
+                    fetch.assert_not_awaited()
+                for call in driver.reply_message.await_args_list:
+                    self.assertEqual(call.kwargs["message_id"], "om_seed")
+                    self.assertTrue(call.kwargs["reply_in_thread"])
+                driver.create_message.assert_not_awaited()
+                # This receipt belongs to the truthful closing, not the partial.
+                self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "sent")
+
+    async def test_running_partial_with_unknown_destination_is_not_replayed_or_a_completion_receipt(self):
+        claim = self.claim()
+        self.queue_topic(promote=True)
+        native_id = "native-" + claim.run.id
+        partial = PartialAnswer(native_id, "turn-initial", "partial-one", "stable answer")
+        self.app._progress_cards = reply_presenter._ReplyCardPresenter(
+            self.channel, self.runtime, poll_seconds=0.001,
+        )
+
+        async def submit_initial(**kwargs):
+            submission = await self.fixture.submit_initial(**kwargs)
+            self.runtime.turn_activity_values[submission.binding_id] = replace(
+                turn_activity_snapshot(binding_id=submission.binding_id,
+                    thread_id=native_id, turn_id="turn-initial"),
+                partial_answers=(partial,),
+            )
+            return submission
+
+        self.runtime.submit_initial = submit_initial
+        self.channel.reply_results.append(sent_result("om_partial", chat_id="oc_group", thread_id=None))
+        checked = asyncio.Event()
+        validate = self.app._scheduled_reply_confirmed
+
+        async def validate_reply(origin, result):
+            confirmed = await validate(origin, result)
+            checked.set()
+            return confirmed
+
+        with patch.object(self.app, "_scheduled_reply_confirmed", side_effect=validate_reply):
+            await self.app.dispatch_scheduled_run(claim)
+            await asyncio.wait_for(checked.wait(), timeout=1)
+        request = self.submissions[0]
+        await self.app._progress_cards.park_unavailable(
+            binding_id=request["binding"].id, thread_id=native_id, turn_id="turn-initial",
+        )
+        self.assertIsNone(self.store.schedules.get_run(claim.run.id).delivery_state)
+        self.assertEqual(len(self.channel.replies), 1)
+        self.assertIsInstance(self.channel.replies[0][1], OutboundPost)
+        self.assertEqual(self.channel.replies[0][1].mentions, [])
+
+        self.store.schedules.release(claim.run.id)
+        self.channel.reply_results.append(sent_result("om_final", chat_id="oc_group", thread_id="omt_fresh"))
+        await self.app.handle_completion(TurnOutcome(
+            binding_id=request["binding"].id, thread_id=native_id, turn_id="turn-initial",
+            owner_id=request["owner_id"], origin=request["origin"],
+            result=completed_turn_result(final_response=None), partial_answers=(partial,),
+        ))
+        self.assertEqual(len(self.channel.replies), 2)
+        self.assertIn("投递未确认", self.channel.replies[-1][1])
+        self.assertNotIn("stable answer", self.channel.replies[-1][1])
 
     async def test_success_without_exact_destination_is_not_marked_delivered_or_retried(self):
         claim, request = await self.completion_fixture()

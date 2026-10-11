@@ -39,6 +39,7 @@ from openai_codex.generated.v2_all import (
 )
 from openai_codex.models import Notification
 
+from .partial_answers import PartialAnswer, project_partial_answer
 from .user_questions import QuestionRequest, UserQuestion
 
 
@@ -185,6 +186,7 @@ class TurnActivityNotificationProjection:
     steps: tuple[TurnPlanStepSnapshot, ...] = ()
     event: TurnActivityEvent | None = None
     question: QuestionRequest | None = None
+    partial_answer: PartialAnswer | None = None
 
     def __post_init__(self) -> None:
         if self.turn_id is not None:
@@ -195,6 +197,7 @@ class TurnActivityNotificationProjection:
             or self.plan_updated
             or self.event is not None
             or self.question is not None
+            or self.partial_answer is not None
         ):
             raise ValueError("activity projection requires an exact Turn ID")
         if not self.plan_updated and self.steps:
@@ -210,8 +213,8 @@ def project_turn_activity_notification(
     """Project one raw notification into a safe internal control event.
 
     Exact Turn and item identities remain process-local so consumers can reject
-    stale events and coalesce lifecycle updates. Channel-facing snapshots strip
-    item identities and never receive arguments, output, or native payloads.
+    stale events and deduplicate stable answers. Activity strips item identities;
+    answers preserve their identity and full text. Neither exposes tool payloads.
     """
 
     if type(notification) is not Notification:
@@ -287,10 +290,21 @@ def project_turn_activity_notification(
         completed=completed,
         event_timestamp_ms=event_timestamp_ms,
     )
+    try:
+        partial_answer = (
+            project_partial_answer(
+                payload.item.root, thread_id=expected_thread_id, turn_id=turn_id,
+            ) if completed else None
+        )
+    except ValueError as error:
+        raise TurnActivityProjectionUnavailable(
+            "native partial answer identity changed"
+        ) from error
     return TurnActivityNotificationProjection(
         turn_id=turn_id,
         event=event,
         question=project_question(payload.item.root) if completed else None,
+        partial_answer=partial_answer,
     )
 
 

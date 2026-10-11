@@ -3,11 +3,16 @@ status: accepted
 date: 2026-09-01
 amends: 0020, 0047, 0048, 0049
 related: 0021, 0046, 0051
-amended_by: 0071, 0072
+amended_by: 0071, 0072, 0079
 ---
 
 # 用单一消费链投影安全的 Turn Activity
 
+> [ADR 0079](0079-deliver-partial-answers-with-existing-reply-presentation.md) 在原观察链提取
+> completed `partial_answer`，作为独立稳定正文交付，不进入 Activity 的摘要/折叠规则。
+> Progress 开关不关闭该观察；Goal 自动 rollover 只重置 Activity，保留同次连续执行的
+> 阶段性片段。非消费守卫、Side high-water 降级、唯一 drain 与原生终态权威保持。
+>
 > [ADR 0071](0071-answer-native-questions-through-binding-input.md) 与
 > [ADR 0072](0072-share-question-interaction-across-binding-and-side.md) 在同一观察链加入
 > 原生问题投影；注册问题 handler 后，普通 Turn 与 Side 即使关闭进度卡也观察问题。

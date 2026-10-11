@@ -113,6 +113,7 @@ from netizen_cli.sdk_gap_adapter import (
     ThreadUnsubscribeStatus,
 )
 from netizen_cli.turn_patch_children import TaskPatchChildren, TurnPatchBatch
+from netizen_cli.partial_answers import PartialAnswer
 from netizen_cli.turn_plan_observer import (
     TurnActivityObservation,
     TurnPlanStepSnapshot,
@@ -918,6 +919,9 @@ class FakeTurnPlanObserver:
     def append_question(self, *, thread_id: str, turn_id: str, request) -> None:
         self.events.setdefault(turn_id, []).append((thread_id, "question", request))
 
+    def append_partial(self, answer: PartialAnswer) -> None:
+        self.events.setdefault(answer.turn_id, []).append((answer.thread_id, "partial", answer))
+
     def observe(
         self,
         *,
@@ -933,6 +937,7 @@ class FakeTurnPlanObserver:
         latest_cursor: int | None = None
         activity_events: list[TurnActivityEvent] = []
         questions = []
+        partial_answers = []
         turn_completed = False
         for cursor, (event_thread_id, kind, value) in enumerate(events, start=1):
             if cursor <= after_cursor or event_thread_id != thread_id:
@@ -944,6 +949,8 @@ class FakeTurnPlanObserver:
                 activity_events.append(value)
             elif kind == "question":
                 questions.append(value)
+            elif kind == "partial":
+                partial_answers.append(value)
             elif kind == "terminal":
                 turn_completed = True
         return TurnActivityObservation(
@@ -957,6 +964,7 @@ class FakeTurnPlanObserver:
             steps=latest_steps,
             events=tuple(activity_events),
             questions=tuple(questions),
+            partial_answers=tuple(partial_answers),
             turn_completed=turn_completed,
             retained_count=(
                 len(events)
@@ -2191,7 +2199,119 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 collect.assert_not_awaited()
                 self.assertEqual(self.outcomes[-1].result.status.value, status)
 
-    async def test_disabled_side_progress_never_observes_plan(self) -> None:
+    async def test_side_partial_answers_survive_high_water_and_terminal_backfill(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        _, record, _ = await self.open_side()
+        started = await self.runtime.submit_side(
+            side_id=record.id, input="work", owner_id="ou_owner", origin=object(),
+        )
+        first = PartialAnswer(started.thread_id, started.turn_id, "p1", "first stable")
+        observer.append_partial(first)
+        async with asyncio.timeout(0.2):
+            while self.runtime.side_turn_activity(record.id).partial_answers != (first,):
+                await asyncio.sleep(0)
+        observer.retained_count_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
+        observer.next_cursor_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
+        handle = self.codex.handles[-1]
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
+            async with asyncio.timeout(0.2):
+                while handle.run_calls != 1:
+                    await asyncio.sleep(0)
+        calls = len(observer.calls)
+        self.runtime.side_turn_activity(record.id, refresh_plan=True)
+        self.assertEqual(len(observer.calls), calls)
+        items = tuple(ThreadItem.model_validate({
+            "type": "agentMessage", "id": item_id, "phase": "partial_answer", "text": text,
+        }) for item_id, text in (("p1", "first stable"), ("p2", "after fallback")))
+        await self.finish_side_turn(started, response="separate final", items=items)
+        outcome = self.outcomes[-1]
+        self.assertEqual(outcome.partial_answers, (
+            first, PartialAnswer(started.thread_id, started.turn_id, "p2", "after fallback"),
+        ))
+        self.assertEqual(outcome.final_response, "separate final")
+        self.assertIsNone(outcome.activity)
+        self.assertEqual(handle.run_calls, 1)
+        self.assertEqual(handle.stream_calls, 0)
+        self.assertFalse(any(include_turns for _, include_turns in self.codex.read_calls))
+
+    async def test_side_failed_sdk_run_retains_only_answers_observed_before_fallback(self) -> None:
+        from openai_codex._run import _collect_async_turn_result
+        from openai_codex.generated.v2_all import (
+            ItemCompletedNotification, Turn, TurnCompletedNotification,
+        )
+
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        _, record, _ = await self.open_side()
+        started = await self.runtime.submit_side(
+            side_id=record.id, input="work", owner_id="ou_owner", origin=object(),
+        )
+        handle = self.codex.handles[-1]
+        reads_before = list(self.codex.read_calls)
+        first = PartialAnswer(started.thread_id, started.turn_id, "p1", "observed stable answer")
+        observer.append_partial(first)
+        async with asyncio.timeout(0.2):
+            while self.runtime.side_turn_activity(record.id).partial_answers != (first,):
+                await asyncio.sleep(0)
+
+        run_started, finish_run = asyncio.Event(), asyncio.Event()
+        late_item = ThreadItem.model_validate({
+            "type": "agentMessage", "id": "p2", "phase": "partial_answer",
+            "text": "not observed before the SDK raises",
+        })
+
+        async def failed_stream():
+            yield Notification(method="item/completed", payload=ItemCompletedNotification(
+                item=late_item, threadId=started.thread_id, turnId=started.turn_id,
+                completedAtMs=2,
+            ))
+            yield Notification(method="turn/completed", payload=TurnCompletedNotification(
+                threadId=started.thread_id,
+                turn=Turn.model_validate({
+                    "id": started.turn_id, "status": "failed", "items": [late_item],
+                    "error": {"message": "native failure after partial"},
+                }),
+            ))
+
+        async def failed_sdk_run():
+            handle.run_calls += 1
+            run_started.set()
+            await finish_run.wait()
+            # Use the pinned SDK collector: failed Turns raise after collecting
+            # p2, so no TurnResult/items are available to the Channel adapter.
+            return await _collect_async_turn_result(failed_stream(), turn_id=started.turn_id)
+
+        with patch.object(handle, "run", side_effect=failed_sdk_run):
+            observer.retained_count_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
+            observer.next_cursor_override = SIDE_ACTIVITY_QUEUE_HIGH_WATER
+            with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
+                await asyncio.wait_for(run_started.wait(), timeout=0.2)
+            calls = len(observer.calls)
+            observer.append_partial(PartialAnswer(
+                started.thread_id, started.turn_id, "p2", late_item.root.text,
+            ))
+            self.runtime.side_turn_activity(record.id, refresh_plan=True)
+            self.assertEqual(len(observer.calls), calls)
+            finish_run.set()
+            started.release_receipt_attempt()
+            self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome, SideTurnOutcome)
+        self.assertEqual(outcome.partial_answers, (first,))
+        self.assertIsNone(outcome.result)
+        self.assertIsNone(outcome.final_response)
+        self.assertIsInstance(outcome.error, RuntimeError)
+        self.assertEqual(str(outcome.error), "native failure after partial")
+        self.assertEqual(handle.run_calls, 1)
+        self.assertEqual(handle.stream_calls, 0)
+        self.assertEqual(self.codex.read_calls, reads_before)
+        self.assertEqual(len(observer.calls), calls)
+        self.assertEqual(self.runtime._sides[record.id].state, SideSessionState.CLOSING)
+        self.assertTrue(self.runtime._sides[record.id].turn_terminal_state_unknown)
+
+    async def test_disabled_side_progress_still_observes_answer_notifications(self) -> None:
         observer = FakeTurnPlanObserver()
         self.runtime._turn_plan_observer = observer
         _binding, record, _snapshot = await self.open_side()
@@ -2203,7 +2323,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         await self.finish_side_turn(started)
 
-        self.assertEqual(observer.calls, [])
+        self.assertTrue(observer.calls)
         outcome = next(
             item
             for item in reversed(self.outcomes)
@@ -6043,7 +6163,54 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ["inspect"],
         )
 
-    async def test_disabled_goal_progress_adds_no_activity_tap_or_observation(
+    async def test_goal_partial_answers_cross_rollover_but_not_manual_resume(self) -> None:
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        started = await self.runtime.start_goal(
+            binding=binding, cwd=self.cwd, objective="staged work", owner_id="ou_user", origin=object(),
+        )
+        started.release_receipt_attempt()
+        handle = control.handles[-1]
+        await asyncio.sleep(0)
+        first = PartialAnswer(handle.thread_id, handle.id, "same-id", "first stage")
+        handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id, partial_answer=first))
+        handle.rollover("physical-two")
+        handle.emit_activity(TurnActivityNotificationProjection(turn_id="physical-two", turn_started=True))
+        second = PartialAnswer(handle.thread_id, "physical-two", "same-id", "second stage")
+        handle.emit_activity(TurnActivityNotificationProjection(turn_id="physical-two", partial_answer=second))
+        # Old duplicate events, including a repeated start, cannot rewind the current view.
+        handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id, turn_started=True))
+        handle.emit_activity(TurnActivityNotificationProjection(turn_id=handle.id, partial_answer=first))
+        snapshot = self.runtime.goal_activity(binding.id)
+        self.assertEqual(snapshot.physical_turn_id, "physical-two")
+        self.assertEqual(snapshot.partial_answers, (first, second))
+        # Only the proven final physical Turn may contribute missing terminal items.
+        self.codex.goal_turns[0][1].items = [ThreadItem.model_validate({
+            "type": "agentMessage", "id": "unobserved-old", "phase": "partial_answer", "text": "old history",
+        })]
+        handle.finish(goal_status=GoalStatus.PAUSED, response="paused final")
+        handle.record.items.insert(0, ThreadItem.model_validate({
+            "type": "agentMessage", "id": "last", "phase": "partial_answer", "text": "last stage",
+        }))
+        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        outcome = self.outcomes[-1]
+        self.assertEqual(outcome.partial_answers, (
+            first, second, PartialAnswer(handle.thread_id, "physical-two", "last", "last stage"),
+        ))
+        self.assertEqual(outcome.final_response, "paused final")
+        self.assertIsNone(outcome.activity)
+        resumed = await self.runtime.resume_goal(
+            binding=self.store.get(binding.id), owner_id="ou_user", origin=object(),
+        )
+        resumed.release_receipt_attempt()
+        await asyncio.sleep(0)
+        self.assertEqual(self.runtime.goal_activity(binding.id).partial_answers, ())
+        control.handles[-1].finish()
+        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertEqual(self.outcomes[-1].partial_answers, ())
+
+    async def test_disabled_goal_progress_keeps_unique_answer_tap(
         self,
     ) -> None:
         observer = FakeTurnPlanObserver()
@@ -6069,7 +6236,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await self.runtime.wait_idle()
 
         self.assertEqual(observer.calls, [])
-        self.assertIsNone(control.handles[0].activity_sink)
+        self.assertIsNotNone(control.handles[0].activity_sink)
         outcome = self.outcomes[-1]
         self.assertIsInstance(outcome, GoalOutcome)
         self.assertIsNone(outcome.activity)
@@ -7936,7 +8103,86 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.outcomes[0].error)
         self.assertIsNone(self.runtime.active_turn(binding.id))
 
-    async def test_disabled_progress_adds_no_terminal_plan_observation(self) -> None:
+    async def test_partial_answers_arrive_without_progress_and_merge_terminal_items(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.binding()
+        started = await self.submit(binding)
+        initial = self.runtime.turn_activity(binding.id)
+        first = PartialAnswer(started.thread_id, started.turn_id, "p1", "full answer" * 200)
+        observer.append_partial(first)
+        observer.append_partial(first)
+        observer.append_partial(PartialAnswer("wrong-thread", started.turn_id, "wrong", "ignore"))
+        started.release_receipt_attempt()
+        async with asyncio.timeout(0.2):
+            while self.runtime.turn_activity(binding.id).partial_answers != (first,):
+                await asyncio.sleep(0)
+        snapshot = self.runtime.turn_activity(binding.id)
+        self.assertGreater(snapshot.revision, initial.revision)
+        self.assertEqual(self.outcomes, [])
+        before = snapshot.revision
+        observer.append_partial(first)
+        self.assertEqual(self.runtime.turn_activity(binding.id, refresh_plan=True).revision, before)
+        handle = self.codex.handles[-1]
+        handle.complete(response="final only")
+        handle.record.items[:0] = [ThreadItem.model_validate({
+            "type": "agentMessage", "id": item_id, "phase": "partial_answer", "text": text,
+        }) for item_id, text in (("p1", first.text), ("p2", "terminal supplement"))]
+        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        outcome = self.outcomes[-1]
+        self.assertEqual(outcome.partial_answers, (
+            first, PartialAnswer(started.thread_id, started.turn_id, "p2", "terminal supplement"),
+        ))
+        self.assertEqual(outcome.activity.partial_answers, outcome.partial_answers)
+        self.assertEqual(outcome.final_response, "final only")
+        self.assertEqual(handle.run_calls, 0)
+        self.assertEqual(handle.stream_calls, 1)
+
+    async def test_partial_observation_failure_stops_retries_and_terminal_backfills(self) -> None:
+        observer = FakeTurnPlanObserver()
+        self.runtime._turn_plan_observer = observer
+        binding = self.binding()
+        started = await self.submit(binding)
+        first = PartialAnswer(started.thread_id, started.turn_id, "p1", "already seen")
+        observer.append_partial(first)
+        self.runtime.turn_activity(binding.id, refresh_plan=True)
+        observer.error = RuntimeError("cursor gap")
+        with self.assertLogs("netizen_cli.codex_runtime", level="WARNING"):
+            snapshot = self.runtime.turn_activity(binding.id, refresh_plan=True)
+        self.assertEqual(snapshot.partial_answers, (first,))
+        self.assertFalse(snapshot.plan_available)
+        calls = len(observer.calls)
+        self.runtime.turn_activity(binding.id, refresh_plan=True)
+        self.assertEqual(len(observer.calls), calls)
+        handle = self.codex.handles[-1]
+        handle.complete(response="final")
+        handle.record.items.insert(0, ThreadItem.model_validate({
+            "type": "agentMessage", "id": "p2", "phase": "partial_answer", "text": "backfilled",
+        }))
+        started.release_receipt_attempt()
+        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertEqual(len(observer.calls), calls)
+        self.assertEqual([a.text for a in self.outcomes[-1].partial_answers], ["already seen", "backfilled"])
+
+    async def test_partial_only_terminal_preserves_native_status_without_final(self) -> None:
+        for status in ("completed", "failed", "interrupted"):
+            with self.subTest(status=status):
+                binding = self.binding(FeishuScope("cli_test", f"oc_{status}", ScopeKind.DIRECT))
+                started = await self.submit(binding)
+                handle = self.codex.handles[-1]
+                handle.complete(status=status)
+                handle.record.items = [ThreadItem.model_validate({
+                    "type": "agentMessage", "id": "partial", "phase": "partial_answer",
+                    "text": "stable but not a terminal signal",
+                })]
+                started.release_receipt_attempt()
+                self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+                outcome = self.outcomes[-1]
+                self.assertEqual(outcome.status, status)
+                self.assertIsNone(outcome.final_response)
+                self.assertEqual(len(outcome.partial_answers), 1)
+
+    async def test_disabled_progress_keeps_answer_observation_at_terminal(self) -> None:
         observer = FakeTurnPlanObserver()
         self.runtime._turn_plan_observer = observer
         binding = self.binding()
@@ -7949,13 +8195,13 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         await self.finish(self.codex.handles[0], submission)
 
-        self.assertEqual(observer.calls, [])
+        self.assertTrue(observer.calls)
         outcome = self.outcomes[-1]
         assert isinstance(outcome, TurnOutcome)
         self.assertEqual(outcome.task_feedback, BindingTaskFeedback())
         self.assertEqual(outcome.feedback_revision, 1)
         assert outcome.activity is not None
-        self.assertFalse(outcome.activity.plan_generated)
+        self.assertTrue(outcome.activity.plan_generated)
 
     async def test_activity_aggregates_subtasks_by_status(self) -> None:
         observer = FakeTurnPlanObserver()

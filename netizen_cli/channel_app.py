@@ -225,6 +225,7 @@ from .domain import (
     ReplyCardFilesModule,
     ReplyCardGoalModule,
     ReplyCardManifest,
+    ReplyCardPartialAnswerModule,
     ReplyCardProjection,
     ReplyCardResultModule,
     TurnActivityManifestEntry,
@@ -1926,6 +1927,19 @@ class ChannelApplication:
                     f"会话上下文压缩以未知状态结束：{outcome.status!r}。",
                 )
             return
+        partials_confirmed = await self._progress_cards.finish_partial_answers(
+            owner_id=(outcome.binding_id if isinstance(outcome, TurnOutcome) else outcome.side_id),
+            thread_id=outcome.thread_id,
+            turn_id=outcome.turn_id,
+            partial_answers=outcome.partial_answers,
+            side=isinstance(outcome, SideTurnOutcome),
+            progress_enabled=outcome.task_feedback.progress_card_enabled,
+            reply=lambda post: self._reply_to_origin(outcome.origin, post),
+            validate_reply=(
+                (lambda result: self._scheduled_reply_confirmed(outcome.origin, result))
+                if isinstance(outcome.origin, ScheduledOrigin) else None
+            ),
+        )
         if outcome.error is not None:
             terminal_reaction = _ERROR_REACTION
         elif outcome.status == "completed":
@@ -1945,6 +1959,12 @@ class ChannelApplication:
         prepared_response = None
         if outcome.error is None and outcome.status == "completed":
             prepared_response = await self._prepare_task_result_images(outcome)
+            if not prepared_response and outcome.partial_answers:
+                prepared_response = (
+                    "任务已完成，答案见阶段性答案。"
+                    if partials_confirmed or outcome.task_feedback.progress_card_enabled
+                    else "任务已完成，但阶段性答案投递未确认。"
+                )
         if outcome.task_feedback.progress_card_enabled:
             try:
                 attempt = await self._complete_task_progress_card(
@@ -1981,7 +2001,7 @@ class ChannelApplication:
             )
             return
         if outcome.status == "interrupted":
-            await self._reply(outcome.origin, _task_interruption_text(outcome))
+            await self._reply_task_result(outcome, _task_interruption_text(outcome), allow_completion_mention=False)
             return
         if outcome.status != "completed":
             await self._reply_task_result(
@@ -2072,6 +2092,7 @@ class ChannelApplication:
         ) -> OutboundCard:
             return turn_progress_card(
                 snapshot=snapshot,
+                partial_answers=outcome.partial_answers,
                 final_response=final_response,
                 files=files,
                 terminal_status=terminal_status,
@@ -2224,6 +2245,7 @@ class ChannelApplication:
                 additions=diff_summary.additions,
                 deletions=diff_summary.deletions,
                 completion_mention_user_id=_outcome_completion_mention_user_id(outcome),
+                partial_answers=(outcome.partial_answers if outcome.task_feedback.progress_card_enabled else ()),
             ) if files else None
         except asyncio.CancelledError:
             raise
@@ -2274,7 +2296,7 @@ class ChannelApplication:
         # SendResult.failure can hide a timeout, retry, or partial publication.
         # Keep the scheduled receipt and never replace it with a fallback's ack.
         if not isinstance(outcome.origin, ScheduledOrigin):
-            await self._reply(outcome.origin, final_response)
+            await self._reply_task_result(outcome, final_response, allow_completion_mention=False)
 
     async def _complete_side_lifecycle(
         self,
@@ -2410,6 +2432,12 @@ class ChannelApplication:
                 or f"Goal 已进入 {status}，未产生文本回复。"
             )
 
+        if outcome.partial_answers and not outcome.final_response and result_text is not None:
+            # Only replace the empty-answer placeholder; native state and any
+            # failure/unknown explanation retain their original authority.
+            result_text = result_text.replace(
+                "未产生文本回复。", "已生成的答案见阶段性答案。",
+            )
         activity = None
         if (
             outcome.task_feedback.progress_card_enabled
@@ -2480,6 +2508,10 @@ class ChannelApplication:
                 notice_is_error=notice_is_error,
             ),
             activity=activity,
+            partial_answer=(
+                ReplyCardPartialAnswerModule(tuple(answer.text for answer in outcome.partial_answers))
+                if outcome.partial_answers else None
+            ),
             result=(
                 ReplyCardResultModule(
                     result_text,
@@ -2543,15 +2575,25 @@ class ChannelApplication:
         if terminal_card is None:
             goal_module = projection.goal
             assert goal_module is not None
+            partial_notice = (
+                "阶段性答案未能完整保留在终态卡片中，完整投递未确认。"
+                if projection.partial_answer is not None else None
+            )
+            compact_notice = f"{notice} 结果正文无法完整放入卡片，已另行回复。"
+            if partial_notice is not None:
+                compact_notice = f"{compact_notice} {partial_notice}"
+                if not outcome.final_response:
+                    # Earlier fragments may already have been displayed. This
+                    # fallback cannot attest delivery of the complete answer.
+                    result_text = f"{notice} {partial_notice}"
             projection = replace(
                 projection,
                 goal=replace(
                     goal_module,
-                    notice=(
-                        f"{notice} 结果正文无法完整放入卡片，已另行回复。"
-                    ),
+                    notice=compact_notice,
                     notice_is_error=True,
                 ),
+                partial_answer=None,
                 result=None,
                 files=None,
             )
@@ -2563,6 +2605,9 @@ class ChannelApplication:
                     "compact terminal Goal Reply Card could not be rendered",
                     extra={"binding_id": outcome.binding_id},
                 )
+
+        if terminal_card is None and outcome.partial_answers and not outcome.final_response:
+            result_text = f"{notice} 阶段性答案投递未确认。"
 
         generation = (
             goal_generation(goal)
@@ -2646,6 +2691,8 @@ class ChannelApplication:
         if fallback_delivery is _GoalCardDelivery.SUPERSEDED:
             return
         if fallback_delivery in {_GoalCardDelivery.FAILED, _GoalCardDelivery.NOT_ATTEMPTED}:
+            if outcome.partial_answers and not outcome.final_response:
+                result_text = f"{notice} 阶段性答案投递未确认。"
             if (
                 fallback_delivery is _GoalCardDelivery.FAILED
                 and projection.result is not None
@@ -2691,6 +2738,10 @@ class ChannelApplication:
                     runtime_state=runtime_state,
                     notice=card_notice,
                 ),
+                partial_answer=(
+                    ReplyCardPartialAnswerModule(tuple(answer.text for answer in activity_snapshot.partial_answers))
+                    if activity_snapshot is not None and activity_snapshot.partial_answers else None
+                ),
                 activity=(
                     _reply_activity_module(activity_snapshot)
                     if activity_enabled and activity_snapshot is not None
@@ -2704,8 +2755,6 @@ class ChannelApplication:
                 thread_id=submission.thread_id,
                 logical_turn_id=submission.logical_turn_id,
             )
-            if activity_enabled
-            else None
         )
         projection = current_projection(
             snapshot,
@@ -2771,8 +2820,6 @@ class ChannelApplication:
                     thread_id=thread_id,
                     logical_turn_id=logical_turn_id,
                 )
-                if activity_enabled
-                else None
             )
             revision = (
                 current.updated_at,
@@ -2785,6 +2832,10 @@ class ChannelApplication:
                     binding=binding,
                     goal=display_goal,
                     runtime_state=active.state.value,
+                ),
+                partial_answer=(
+                    ReplyCardPartialAnswerModule(tuple(answer.text for answer in current_activity.partial_answers))
+                    if current_activity is not None and current_activity.partial_answers else None
                 ),
                 activity=(
                     _reply_activity_module(current_activity)
@@ -3087,23 +3138,24 @@ class ChannelApplication:
                     ),
                 )
             ]
-            if submission.task_feedback.progress_card_enabled:
-                delivery_options = {}
-                if isinstance(origin, (ScheduledOrigin, ScheduledBindingOrigin, CardAnswerOrigin)):
-                    delivery_options = {
-                        "reply": lambda card: self._reply_to_origin(origin, card),
-                    }
-                    if isinstance(origin, ScheduledOrigin):
-                        delivery_options["validate_reply"] = lambda result: self._scheduled_reply_confirmed(origin, result)
-                presenters.append(
-                    self._progress_cards.start(
-                        binding_id=submission.binding_id,
-                        thread_id=submission.thread_id,
-                        turn_id=submission.turn_id,
-                        origin=origin,
-                        **delivery_options,
-                    )
+            delivery_options = {}
+            if isinstance(origin, (ScheduledOrigin, ScheduledBindingOrigin, CardAnswerOrigin)):
+                delivery_options = {
+                    "reply": lambda card: self._reply_to_origin(origin, card),
+                }
+                if isinstance(origin, ScheduledOrigin):
+                    delivery_options["validate_reply"] = lambda result: self._scheduled_reply_confirmed(origin, result)
+            presenters.append(
+                self._progress_cards.start(
+                    binding_id=submission.binding_id,
+                    thread_id=submission.thread_id,
+                    turn_id=submission.turn_id,
+                    origin=origin,
+                    progress_enabled=submission.task_feedback.progress_card_enabled,
+                    reply_partial=lambda post: self._reply_to_origin(origin, post),
+                    **delivery_options,
                 )
+            )
             if presenters:
                 await asyncio.gather(*presenters)
         finally:
@@ -3294,19 +3346,20 @@ class ChannelApplication:
                     ),
                 )
             ]
-            if submission.task_feedback.progress_card_enabled:
-                delivery_options = {}
-                if isinstance(reply_origin, CardAnswerOrigin):
-                    delivery_options["reply"] = lambda card: self._reply_to_origin(reply_origin, card)
-                presenters.append(
-                    self._progress_cards.start_side(
-                        side_id=submission.side_id,
-                        thread_id=submission.thread_id,
-                        turn_id=submission.turn_id,
-                        origin=reply_origin,
-                        **delivery_options,
-                    )
+            delivery_options = {}
+            if isinstance(reply_origin, CardAnswerOrigin):
+                delivery_options["reply"] = lambda card: self._reply_to_origin(reply_origin, card)
+            presenters.append(
+                self._progress_cards.start_side(
+                    side_id=submission.side_id,
+                    thread_id=submission.thread_id,
+                    turn_id=submission.turn_id,
+                    origin=reply_origin,
+                    progress_enabled=submission.task_feedback.progress_card_enabled,
+                    reply_partial=lambda post: self._reply_to_origin(reply_origin, post),
+                    **delivery_options,
                 )
+            )
             if presenters:
                 await asyncio.gather(*presenters)
         finally:
@@ -4304,8 +4357,7 @@ class ChannelApplication:
                 )
                 activity = None
                 if (
-                    binding.task_feedback.progress_card_enabled
-                    and active_goal is not None
+                    active_goal is not None
                     and active_goal.logical_turn_id is not None
                 ):
                     activity = self._runtime.goal_activity(
@@ -4333,8 +4385,12 @@ class ChannelApplication:
                     ),
                     activity=(
                         _reply_activity_module(activity)
-                        if activity is not None
+                        if binding.task_feedback.progress_card_enabled and activity is not None
                         else None
+                    ),
+                    partial_answer=(
+                        ReplyCardPartialAnswerModule(tuple(answer.text for answer in activity.partial_answers))
+                        if activity is not None and activity.partial_answers else None
                     ),
                 )
                 if snapshot is not None:
@@ -4429,8 +4485,7 @@ class ChannelApplication:
                     active_goal = self._runtime.active_goal(binding.id)
                     activity = None
                     if (
-                        binding.task_feedback.progress_card_enabled
-                        and active_goal is not None
+                        active_goal is not None
                         and active_goal.logical_turn_id is not None
                     ):
                         activity = self._runtime.goal_activity(
@@ -4453,8 +4508,12 @@ class ChannelApplication:
                             ),
                             activity=(
                                 _reply_activity_module(activity)
-                                if activity is not None
+                                if binding.task_feedback.progress_card_enabled and activity is not None
                                 else None
+                            ),
+                            partial_answer=(
+                                ReplyCardPartialAnswerModule(tuple(answer.text for answer in activity.partial_answers))
+                                if activity is not None and activity.partial_answers else None
                             ),
                         ),
                     )
@@ -5138,6 +5197,7 @@ class ChannelApplication:
                             reply = ReplyCardManifest(
                                 goal=current.goal,
                                 activity=current.activity,
+                                partial_answer=current.partial_answer,
                                 result=current.result,
                             )
                         return reply_card_from_manifest(
@@ -6576,13 +6636,45 @@ class ChannelApplication:
         origin: object | None = None,
         allow_completion_mention: bool = True,
     ) -> None:
+        mention = _outcome_completion_mention_user_id(outcome) if allow_completion_mention else None
+        if (
+            not isinstance(outcome, GoalOutcome)
+            and outcome.task_feedback.progress_card_enabled
+            and outcome.partial_answers
+        ):
+            terminal_status = (
+                outcome.status if outcome.error is None and outcome.status in {"completed", "interrupted"}
+                else "failed"
+            )
+            activity = (
+                _reply_activity_module(outcome.activity, terminal_status=terminal_status, collapsed=True)
+                if outcome.activity is not None else ReplyCardActivityModule(
+                    TurnProgressManifest(
+                        state="running", steer_count=0, plan_available=False,
+                        plan_generated=False, plan_may_be_stale=False,
+                    ),
+                    terminal_status=terminal_status, collapsed=True,
+                )
+            )
+            try:
+                replacement_card = reply_card(ReplyCardProjection(
+                    activity=activity,
+                    partial_answer=ReplyCardPartialAnswerModule(
+                        tuple(answer.text for answer in outcome.partial_answers)
+                    ),
+                    result=ReplyCardResultModule(content, completion_mention_user_id=mention),
+                ))
+            except Exception:
+                logger.exception("replacement answer card could not be rendered")
+                if outcome.error is None and not outcome.final_response and outcome.status == "completed":
+                    content = "任务已完成，但阶段性答案投递未确认。"
+            else:
+                await self._reply(outcome.origin if origin is None else origin, replacement_card)
+                return
         await self._reply(
             outcome.origin if origin is None else origin,
             content,
-            completion_mention_user_id=(
-                _outcome_completion_mention_user_id(outcome)
-                if allow_completion_mention else None
-            ),
+            completion_mention_user_id=mention,
         )
 
     async def _reply(

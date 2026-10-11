@@ -727,6 +727,7 @@ class _GoalActivityTap:
         "_thread_id",
         "_turn_id",
         "_completed_turn_id",
+        "_started_turn_ids",
         "_turn_diff",
         "_diff_enabled",
         "_sink",
@@ -736,6 +737,7 @@ class _GoalActivityTap:
         self._thread_id = thread_id
         self._turn_id: str | None = None
         self._completed_turn_id: str | None = None
+        self._started_turn_ids: set[str] = set()
         self._turn_diff: str | None = None
         self._diff_enabled = True
         self._sink: Callable[
@@ -750,6 +752,18 @@ class _GoalActivityTap:
 
     async def next_notification(self, client: Any, state: Any) -> Any:
         notification = await client.next_goal_notification(state)
+        if (
+            type(notification) is Notification
+            and notification.method == "turn/started"
+            and type(notification.payload) is _generated.TurnStartedNotification
+            and notification.payload.thread_id == self._thread_id
+        ):
+            turn_id = notification.payload.turn.id
+            if turn_id in self._started_turn_ids:
+                # Presentation must not rewind when an old start is repeated;
+                # the SDK's one stream still receives the original notification.
+                return notification
+            self._started_turn_ids.add(turn_id)
         self._capture_turn_diff(notification)
         sink = self._sink
         if sink is None:
@@ -775,6 +789,7 @@ class _GoalActivityTap:
             or projection.plan_updated
             or projection.event is not None
             or projection.question is not None
+            or projection.partial_answer is not None
         ):
             return notification
         try:
