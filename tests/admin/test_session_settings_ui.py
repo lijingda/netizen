@@ -28,6 +28,7 @@ class SessionSettingsUiTest(unittest.TestCase):
             source[source.index("function cell("):source.index("function showProjectDeleteResult(")],
             source[source.index("function runtimeLabel("):source.index("async function loadSides(")],
             source[source.index("function rowByIdentity("):source.index("let defaultsEditor =")],
+            source[source.index("function sessionSettingsFingerprint("):source.index("function scheduleDate(")],
             source[source.index("function defaultScheduleSessionSettings("):source.index("function renderScheduleSessionSettings(")],
             source[source.index("async function refresh("):source.index("function selectTab(")],
             source[source.index('sessionSettingsInput("cancel").addEventListener'):source.index('defaultsInput("new").addEventListener')],
@@ -45,6 +46,7 @@ class SessionSettingsUiTest(unittest.TestCase):
             "duplicate_save_and_failure",
             "cancel_and_stale_options",
             "saved_refresh_failure",
+            "discard_confirmation",
         ):
             with self.subTest(case=case):
                 result = subprocess.run(

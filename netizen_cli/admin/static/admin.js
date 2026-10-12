@@ -9,7 +9,7 @@ const state = {
   updates: null,
   schedules: null,
   defaults: null,
-  projectCursor: null,
+  projectPage: firstSessionPage(),
   sidePage: firstSessionPage(),
   sessionPage: firstSessionPage(),
 };
@@ -55,6 +55,7 @@ function expireAdminSession() {
   if (state.authExpired) return;
   state.authExpired = true;
   stopUpdatePolling();
+  window.NetizenSelect?.close();
   for (const element of document.querySelectorAll?.(".panel, dialog, .tabs") || []) element.inert = true;
   for (const button of document.querySelectorAll?.("button") || []) button.disabled = true;
   const notice = document.querySelector("#auth-expired");
@@ -515,12 +516,15 @@ async function deleteProject(project) {
   }
 }
 
-async function loadProjects(cursor = null) {
+async function loadProjects(cursor = undefined) {
+  const request = state.projectListRequest = (state.projectListRequest || 0) + 1;
+  const page = resolveCursorPage(state.projectPage || firstSessionPage(), cursor);
   const query = new URLSearchParams({ pageSize: "25" });
-  if (cursor) query.set("cursor", cursor);
+  if (page.cursor) query.set("cursor", page.cursor);
   const data = await api(`/api/v1/projects?${query}`);
+  if (request !== state.projectListRequest) return false;
   state.projects = data;
-  state.projectCursor = data.nextCursor;
+  state.projectPage = { ...page, nextCursor: data.nextCursor };
   const body = document.querySelector("#projects-body");
   body.replaceChildren();
   for (const project of data.items) {
@@ -560,7 +564,8 @@ async function loadProjects(cursor = null) {
     }
     body.append(row);
   }
-  document.querySelector("#projects-next").hidden = !data.nextCursor;
+  renderCursorPagination("projects", state.projectPage, data.items.length);
+  return true;
 }
 
 const timeRangeControllers = new WeakMap();
@@ -578,6 +583,212 @@ const filterOptions = {
   enabled: [["true", "已启用"], ["false", "已暂停"]],
   ended: [["false", "未结束"], ["true", "已结束"]],
 };
+
+// Keep native selects as the field/value/validation owner. Only their popup is
+// replaced, so async option updates and existing form handlers need no mirror.
+function initializeSelectControls() {
+  let current = null;
+
+  function close({ restoreFocus = false } = {}) {
+    if (!current) return;
+    const { select, popup, observer } = current;
+    current = null;
+    observer.disconnect();
+    popup.remove();
+    select.setAttribute("aria-expanded", "false");
+    select.removeAttribute("aria-controls");
+    select.removeAttribute("aria-activedescendant");
+    if (restoreFocus && !select.matches(":disabled")) select.focus();
+  }
+
+  function open(select) {
+    if (select.matches(":disabled")) return;
+    close();
+    const popup = document.createElement("div");
+    popup.className = "multi-filter-popover admin-select-popover";
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "multi-filter-search";
+    search.placeholder = "搜索选项";
+    search.setAttribute("aria-label", "搜索选项");
+    search.setAttribute("role", "combobox");
+    search.setAttribute("aria-autocomplete", "list");
+    search.setAttribute("aria-expanded", "true");
+    const list = document.createElement("div");
+    list.className = "multi-filter-options";
+    list.id = `${select.id}-choices`;
+    list.setAttribute("role", "listbox");
+    const label = select.labels?.[0];
+    if (label) {
+      label.id ||= `${select.id}-label`;
+      list.setAttribute("aria-labelledby", label.id);
+    } else list.setAttribute("aria-label", select.getAttribute("aria-label") || "选项");
+    search.setAttribute("aria-controls", list.id);
+    const empty = document.createElement("p");
+    empty.className = "multi-filter-empty";
+    empty.textContent = "没有匹配选项";
+    const options = [...select.querySelectorAll("option")]
+      .filter((option) => !option.hidden && !option.closest("optgroup")?.hidden);
+    const rows = options.map((option, index) => {
+      const row = document.createElement("div");
+      row.className = "admin-select-option";
+      row.id = `${list.id}-${index}`;
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", String(option.value === select.value));
+      row.setAttribute("aria-disabled", String(option.disabled || Boolean(option.closest("optgroup")?.disabled)));
+      row.textContent = option.label || option.textContent;
+      row.setAttribute("aria-label", row.textContent);
+      row.addEventListener("pointerdown", (event) => event.preventDefault());
+      row.addEventListener("click", () => choose(index));
+      list.append(row);
+      return row;
+    });
+    search.hidden = options.length < 8;
+    popup.append(search, list, empty);
+    (select.closest("dialog") || document.body).append(popup);
+    // Catalog or field locks can change while open. Discard this menu rather
+    // than let a stale option bypass the current native field's constraints.
+    const observer = new MutationObserver(() => close());
+    observer.observe(select, { childList: true, subtree: true, attributes: true,
+      attributeFilter: ["disabled", "hidden", "selected", "value"] });
+    for (let parent = select.parentElement; parent; parent = parent.parentElement) {
+      observer.observe(parent, { attributes: true, attributeFilter: ["disabled", "hidden", "open"] });
+    }
+    let active = options.findIndex((option) => option.value === select.value);
+    let typed = "", typedAt = 0;
+    current = { select, popup, observer, keydown };
+    select.setAttribute("aria-expanded", "true");
+    select.setAttribute("aria-controls", list.id);
+
+    function available() {
+      return rows.map((row, index) => index)
+        .filter((index) => !rows[index].hidden && rows[index].getAttribute("aria-disabled") !== "true");
+    }
+    function highlight(index, scroll = true) {
+      active = index;
+      rows.forEach((row, offset) => { row.dataset.active = String(offset === active); });
+      for (const control of [select, search]) {
+        if (active >= 0) control.setAttribute("aria-activedescendant", rows[active].id);
+        else control.removeAttribute("aria-activedescendant");
+      }
+      if (scroll) rows[active]?.scrollIntoView({ block: "nearest" });
+    }
+    function filter() {
+      const query = search.value.trim().toLocaleLowerCase();
+      rows.forEach((row) => { row.hidden = !row.textContent.toLocaleLowerCase().includes(query); });
+      const visible = available();
+      empty.hidden = rows.some((row) => !row.hidden);
+      highlight(visible.includes(active) ? active : visible[0] ?? -1, false);
+    }
+    function choose(index) {
+      const option = options[index];
+      if (!option || select.matches(":disabled") || !select.contains(option)
+          || option.hidden || option.disabled || option.closest("optgroup")?.disabled || option.closest("optgroup")?.hidden) return;
+      const changed = select.value !== option.value;
+      select.value = option.value;
+      close({ restoreFocus: true });
+      if (changed) {
+        select.dispatchEvent(new Event("input", { bubbles: true }));
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    }
+    function keydown(event) {
+      if (event.isComposing) return;
+      if (event.key === "Escape" || event.key === "F4" || (event.altKey && event.key === "ArrowUp")) {
+        event.preventDefault();
+        event.stopPropagation();
+        close({ restoreFocus: true });
+      } else if (event.key === "Tab") {
+        // Resume the original field's tab order, not the appended popup's.
+        close({ restoreFocus: true });
+      } else if (event.key === "Enter" || (event.key === " " && event.target === select)) {
+        event.preventDefault();
+        choose(active);
+      } else if (["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
+          && (event.target === select || ["ArrowDown", "ArrowUp"].includes(event.key))) {
+        event.preventDefault();
+        const visible = available();
+        const offset = visible.indexOf(active);
+        highlight(event.key === "Home" ? visible[0] ?? -1 : event.key === "End" ? visible.at(-1) ?? -1
+          : visible[(offset + (["ArrowDown", "ArrowRight"].includes(event.key) ? 1 : -1) + visible.length) % visible.length] ?? -1);
+      } else if (event.target === select && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        if (!search.hidden) {
+          search.focus();
+          search.value = event.key;
+          filter();
+        } else {
+          typed = Date.now() - typedAt > 700 ? event.key : typed + event.key;
+          typedAt = Date.now();
+          const match = available().find((index) => rows[index].textContent.toLocaleLowerCase().startsWith(typed.toLocaleLowerCase()));
+          if (match !== undefined) highlight(match);
+        }
+      }
+    }
+    search.addEventListener("input", filter);
+    popup.addEventListener("keydown", keydown);
+    filter();
+    // Fixed positioning avoids clipping by the drawer's scrolling body. The
+    // popup remains inside the dialog's top layer and within the viewport.
+    const bounds = select.getBoundingClientRect();
+    popup.style.width = `${Math.min(Math.max(bounds.width, 180), window.innerWidth - 24)}px`;
+    popup.style.left = `${Math.max(12, Math.min(bounds.left, window.innerWidth - 12 - popup.getBoundingClientRect().width))}px`;
+    const below = window.innerHeight - bounds.bottom - 12;
+    const above = bounds.top - 12;
+    const upward = below < Math.min(popup.getBoundingClientRect().height, 240) && above > below;
+    popup.style.maxHeight = `${Math.max(80, upward ? above - 6 : below - 6)}px`;
+    if (upward) {
+      popup.style.top = "auto";
+      popup.style.bottom = `${window.innerHeight - bounds.top + 6}px`;
+    }
+    else popup.style.top = `${bounds.bottom + 6}px`;
+    highlight(active);
+    if (!search.hidden) search.focus();
+    else select.focus();
+  }
+
+  for (const select of document.querySelectorAll("select")) {
+    if (select.multiple || select.size > 1) continue;
+    select.classList.toggle("admin-select", true);
+    select.setAttribute("aria-expanded", "false");
+    // Desktop opens on mousedown, touch/AT may activate via click. Cancel the
+    // native action at both stages, but toggle exactly once per gesture.
+    for (const eventName of ["pointerdown", "mousedown"]) {
+      select.addEventListener(eventName, (event) => {
+        if (event.button !== 0 || select.matches(":disabled")) return;
+        event.preventDefault();
+        select.focus();
+      });
+    }
+    select.addEventListener("click", (event) => {
+      event.preventDefault();
+      if (current?.select === select) close(); else open(select);
+    });
+    select.addEventListener("keydown", (event) => {
+      if (current?.select === select) return current.keydown(event);
+      if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey && !["ArrowDown", "ArrowUp"].includes(event.key)) return;
+      if (["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End", " ", "Enter", "F4"].includes(event.key) || event.key.length === 1) {
+        event.preventDefault();
+        open(select);
+        if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", " ", "Enter", "F4"].includes(event.key)) current?.keydown(event);
+      }
+    });
+  }
+  for (const eventName of ["pointerdown", "focusin"]) {
+    document.addEventListener(eventName, (event) => {
+      if (current && event.target !== current.select && !current.popup.contains(event.target)) close();
+    });
+  }
+  document.addEventListener("close", () => close(), true);
+  window.addEventListener("resize", () => close());
+  window.addEventListener("blur", () => close());
+  window.addEventListener("scroll", (event) => {
+    if (current && !current.popup.contains(event.target)) close();
+  }, true);
+  return { close };
+}
+
+window.NetizenSelect = initializeSelectControls();
 
 function initializeFilter(root) {
   const name = root.dataset.sessionMulti || root.dataset.sideMulti || root.dataset.scheduleFilter;
@@ -707,6 +918,12 @@ function initializeFilter(root) {
   const controller = {
     close,
     values: () => [...selected],
+    setValues(values) {
+      selected = new Set(values);
+      const known = new Set(options.map(([value]) => value));
+      options = [...options, ...values.filter((value) => !known.has(value)).map((value) => [value, value])];
+      renderChoices();
+    },
     clear() { selected.clear(); renderChoices(); },
     reset() {
       selected = new Set(defaults);
@@ -1189,6 +1406,19 @@ function initializeTimeRangeFilter(root) {
   const controller = {
     cancel: cancelDraft,
     prepareQuery,
+    setBounds(from, before) {
+      if (!from && !before) { this.reset(); return; }
+      const startDate = new Date(from);
+      const beforeDate = new Date(before);
+      const endDate = new Date(beforeDate.getTime() - 60000);
+      applied = { kind: "custom", from, before,
+        startValue: Number.isNaN(startDate.getTime()) ? "" : localMinuteValue(startDate),
+        endValue: Number.isNaN(endDate.getTime()) ? "" : localMinuteValue(endDate),
+        summary: `${Number.isNaN(startDate.getTime()) ? from || "不限起点" : formatLocalMinute(startDate)} — ${Number.isNaN(endDate.getTime()) ? before || "不限终点" : formatLocalMinute(endDate)}` };
+      draft = { ...applied };
+      closePopover({ restoreFocus: false });
+      renderApplied();
+    },
     reset() {
       applied = allTimeRange();
       draft = allTimeRange();
@@ -1360,17 +1590,7 @@ function sessionLocationCell(row, session, { showIdentity = true } = {}) {
   const mode = document.createElement("div");
   mode.className = "meta-line";
   mode.append(badge(chatModeLabel(session.chatMode, session.scopeKind)));
-  const chatId = document.createElement("span");
-  chatId.className = "id";
-  chatId.textContent = session.chatId;
-  if (showIdentity) mode.append(chatId);
   td.append(link, mode);
-  if (showIdentity && session.topicId) {
-    const topicId = document.createElement("div");
-    topicId.className = "id";
-    topicId.textContent = `Topic ${session.topicId}`;
-    td.append(topicId);
-  }
   row.append(td);
 }
 
@@ -1388,14 +1608,32 @@ function sessionIdentityCell(row, session) {
   }
   const bindingId = document.createElement("div");
   bindingId.className = "id";
-  bindingId.textContent = `Binding ${session.shortId} · ${session.bindingId}`;
+  bindingId.textContent = `Binding ${session.shortId}`;
   td.append(bindingId);
-  if (session.nativeThreadId) {
-    const threadId = document.createElement("div");
-    threadId.className = "id";
-    threadId.textContent = `Thread ${session.nativeThreadId}`;
-    td.append(threadId);
+  const details = document.createElement("details");
+  details.className = "session-identities";
+  const summary = document.createElement("summary");
+  summary.textContent = "会话标识";
+  details.append(summary);
+  for (const [label, value] of [["Chat", session.chatId], ["Topic", session.topicId],
+    ["Binding", session.bindingId], ["Thread", session.nativeThreadId]]) {
+    if (!value) continue;
+    const field = document.createElement("label");
+    field.textContent = label;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.readOnly = true;
+    input.value = value;
+    input.setAttribute("aria-label", `${label} ID，选中后可复制`);
+    input.addEventListener("focus", () => input.select());
+    input.addEventListener("click", () => input.select());
+    field.append(input);
+    details.append(field);
   }
+  const hint = document.createElement("small");
+  hint.textContent = "点击标识全选，再按 Ctrl/Cmd+C 复制。";
+  details.append(hint);
+  td.append(details);
   row.append(td);
 }
 
@@ -1414,6 +1652,42 @@ function sessionDateLabel(value) {
 
 function firstSessionPage(query = null) {
   return { cursor: null, nextCursor: null, previousCursors: [], number: 1, query };
+}
+
+function stepCursorPage(page, direction) {
+  const next = { ...page, previousCursors: [...page.previousCursors] };
+  if (direction === "next") {
+    if (!page.nextCursor) return null;
+    next.previousCursors.push(page.cursor);
+    next.cursor = page.nextCursor;
+    next.number += 1;
+  } else {
+    if (!next.previousCursors.length) return null;
+    next.cursor = next.previousCursors.pop();
+    next.number -= 1;
+  }
+  return next;
+}
+
+function resolveCursorPage(current, cursor, query = current.query) {
+  if (cursor && typeof cursor === "object") return { ...cursor, previousCursors: [...cursor.previousCursors] };
+  if (query === current.query) {
+    if (cursor === undefined || cursor === current.cursor) return { ...current, previousCursors: [...current.previousCursors] };
+    if (cursor && cursor === current.nextCursor) return stepCursorPage(current, "next");
+  }
+  return { ...firstSessionPage(query), cursor: cursor || null };
+}
+
+function renderCursorPagination(prefix, page, count) {
+  document.querySelector(`#${prefix}-previous`).disabled = !page.previousCursors.length;
+  document.querySelector(`#${prefix}-next`).disabled = !page.nextCursor;
+  document.querySelector(`#${prefix}-page`).textContent = `第 ${page.number} 页 · ${count} 条`;
+}
+
+function moveListPage(tab, direction) {
+  const page = tab === "projects" ? state.projectPage : schedulePage;
+  const next = stepCursorPage(page, direction);
+  if (next) return refresh(tab, next);
 }
 
 function sessionSort(kind) {
@@ -1515,6 +1789,7 @@ async function loadSessionPage(kind, page, render) {
     renderSessionPagination(kind);
     renderSessionSort(kind);
     renderSessionFreshness();
+    syncPageUrl();
     setStatus("已更新。");
     return true;
   } catch (error) {
@@ -1571,9 +1846,23 @@ function renderSessions(data) {
 
 function wireSessionActions(actions, session) {
   const a = session.actions;
+  const more = document.createElement("details");
+  more.className = "session-more";
+  const summary = document.createElement("summary");
+  summary.textContent = "更多";
+  summary.setAttribute("aria-label", `更多操作 · ${session.shortId}`);
+  const secondary = document.createElement("div");
+  secondary.className = "session-more-items";
+  more.append(summary, secondary);
+  more.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !more.open) return;
+    event.preventDefault();
+    more.open = false;
+    summary.focus();
+  });
   const schedule = actionButton("创建定时任务", () => openScheduleForSession(session, schedule));
-  actions.append(schedule);
-  if (a.createLazy) actions.append(actionButton("新建 Lazy", async () => {
+  secondary.append(schedule);
+  if (a.createLazy) secondary.append(actionButton("新建 Lazy", async () => {
     if (!state.projects) await loadProjects();
     const alias = window.prompt("Project alias");
     if (!alias) return;
@@ -1587,22 +1876,23 @@ function wireSessionActions(actions, session) {
       turnSettings: null,
     });
   }));
-  if (a.activate) actions.append(actionButton("设为当前", () => mutate("/api/v1/sessions/activate", a.activate)));
   if (a.configure) {
     const button = actionButton("配置", () => openSessionSettingsEditor(session, button));
     actions.append(button);
   }
-  if (a.rename) actions.append(actionButton("重命名", async () => {
+  if (a.stop) actions.append(actionButton("停止", () => window.confirm("停止这个 exact 会话的当前运行？") && mutate("/api/v1/sessions/stop", a.stop), true));
+  if (a.activate) actions.append(actionButton("设为当前", () => mutate("/api/v1/sessions/activate", a.activate)));
+  if (a.rename) secondary.append(actionButton("重命名", async () => {
     const name = window.prompt("新的原生会话名称");
     if (name) await mutate("/api/v1/sessions/rename", a.rename, { name });
   }));
-  if (a.archive) actions.append(actionButton("归档", () => window.confirm("确认归档？") && mutate("/api/v1/sessions/archive", a.archive), true));
+  if (a.archive) secondary.append(actionButton("归档", () => window.confirm("确认归档？") && mutate("/api/v1/sessions/archive", a.archive), true));
   if (a.unarchive) actions.append(actionButton("恢复", () => mutate("/api/v1/sessions/unarchive", a.unarchive, { actionKind: a.unarchive.actionKind })));
   if (a.unarchiveCurrent) actions.append(actionButton("恢复并设为当前", () => mutate("/api/v1/sessions/unarchive", a.unarchiveCurrent, { actionKind: a.unarchiveCurrent.actionKind })));
-  if (a.deleteLazy) actions.append(actionButton("删除 Lazy", () => window.confirm("永久删除这个 Lazy Binding？") && mutate("/api/v1/sessions/delete-lazy", a.deleteLazy), true));
-  if (a.deleteMaterialized) actions.append(actionButton("删除", () => confirmMaterializedDelete(session) && mutate("/api/v1/sessions/delete-materialized", a.deleteMaterialized), true));
-  if (a.stop) actions.append(actionButton("停止", () => window.confirm("停止这个 exact 会话的当前运行？") && mutate("/api/v1/sessions/stop", a.stop), true));
-  if (a.release) actions.append(actionButton("释放订阅", () => window.confirm("释放本进程订阅？历史不会删除。") && mutate("/api/v1/sessions/release", a.release)));
+  if (a.deleteLazy) secondary.append(actionButton("删除 Lazy", () => window.confirm("永久删除这个 Lazy Binding？") && mutate("/api/v1/sessions/delete-lazy", a.deleteLazy), true));
+  if (a.deleteMaterialized) secondary.append(actionButton("删除", () => confirmMaterializedDelete(session) && mutate("/api/v1/sessions/delete-materialized", a.deleteMaterialized), true));
+  if (a.release) secondary.append(actionButton("释放订阅", () => window.confirm("释放本进程订阅？历史不会删除。") && mutate("/api/v1/sessions/release", a.release)));
+  actions.append(more);
 }
 
 async function loadSides(page = state.sidePage) {
@@ -1647,7 +1937,7 @@ function renderSides(data) {
       const link = document.createElement("a");
       link.className = "action";
       link.textContent = "查看来源会话";
-      link.href = `/?binding_id=${encodeURIComponent(parent.bindingId)}&inventoryState=all`;
+      link.href = `/sessions/ordinary?identity=${encodeURIComponent(parent.bindingId)}&inventoryState=all`;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
       actions.append(link);
@@ -1667,19 +1957,8 @@ async function moveSidePage(direction) {
 }
 
 async function moveSessionPage(direction, kind = "session") {
-  const page = state[`${kind}Page`];
-  const candidate = { ...page, previousCursors: [...page.previousCursors] };
-  if (direction === "next") {
-    if (!page.nextCursor) return;
-    candidate.previousCursors.push(page.cursor);
-    candidate.cursor = page.nextCursor;
-    candidate.number += 1;
-  } else {
-    if (!page.previousCursors.length) return;
-    candidate.cursor = candidate.previousCursors.pop();
-    candidate.number -= 1;
-  }
-  return refresh("sessions", candidate);
+  const candidate = stepCursorPage(state[`${kind}Page`], direction);
+  if (candidate) return refresh("sessions", candidate);
 }
 
 function sideStateLabel(value) {
@@ -1760,6 +2039,7 @@ async function loadSessionSettingsOptions() {
 
 function openSessionSettingsEditor(session, returnFocus) {
   if (sessionSettingsEditor?.saving || !session.actions.configure) return;
+  if (sessionSettingsEditor && !closeSessionSettingsEditor()) return;
   const base = structuredClone(session.sessionSettings);
   const privateChat = session.scopeKind === "direct" || session.chatMode === "p2p";
   sessionSettingsEditor = { session, returnFocus, settings: structuredClone(base), base,
@@ -1780,9 +2060,11 @@ function openSessionSettingsEditor(session, returnFocus) {
   });
 }
 
-function closeSessionSettingsEditor() {
+function closeSessionSettingsEditor({ saved = false, confirmed = false } = {}) {
   const editor = sessionSettingsEditor;
-  if (!editor || editor.saving) return;
+  if (!editor) return true;
+  if (editor.saving) return false;
+  if (!saved && !confirmed && !confirmDiscardChanges(sessionSettingsHasChanges())) return false;
   sessionSettingsEditor = null;
   sessionSettingsInput("editor").hidden = true;
   sessionSettingsInput("drawer").close();
@@ -1790,6 +2072,12 @@ function closeSessionSettingsEditor() {
   const returnFocus = editor.returnFocus?.disabled
     ? document.querySelector("#sessions [data-refresh]") : editor.returnFocus;
   returnFocus?.focus();
+  return true;
+}
+
+function sessionSettingsHasChanges() {
+  return Boolean(sessionSettingsEditor && sessionSettingsFingerprint(sessionSettingsEditor.settings)
+    !== sessionSettingsFingerprint(sessionSettingsEditor.base));
 }
 
 function changeSessionSettings(field) {
@@ -1827,7 +2115,7 @@ async function saveSessionSettings(event) {
     return;
   }
   editor.saving = false;
-  closeSessionSettingsEditor();
+  closeSessionSettingsEditor({ saved: true });
   if (await refresh("sessions")) {
     setStatus(result?.message || "会话配置已保存。");
     if (!sessionSettingsEditor && state.tab === "sessions") {
@@ -1981,6 +2269,7 @@ function selectDefaultTab(kind) {
   }
   defaultsInput("new").textContent = kind === "chat" ? "添加聊天配置" : "添加群名规则";
   renderDefaultControls();
+  syncPageUrl();
 }
 
 function renderDefaultControls() {
@@ -2039,6 +2328,7 @@ async function loadDefaultOptions(resolveChat = false) {
   const editor = defaultsEditor;
   if (!editor) return;
   const serial = ++editor.serial;
+  const initialOptions = serial === 1 && !resolveChat;
   const chatId = editor.kind === "chat" ? defaultsInput("chat").value.trim() : "";
   editor.loading = true;
   editor.error = "";
@@ -2080,6 +2370,9 @@ async function loadDefaultOptions(resolveChat = false) {
     if (resolveChat) editor.action = null;
   } finally {
     if (defaultsEditor === editor && serial === editor.serial) {
+      // Initial catalog/defaults hydration is not a user edit. Later target
+      // resolution must not erase the original values used for discard checks.
+      if (initialOptions) editor.discardBase = defaultEditorValues();
       editor.loading = false;
       renderDefaultSettings();
     }
@@ -2088,6 +2381,7 @@ async function loadDefaultOptions(resolveChat = false) {
 
 function openDefaultEditor(kind, record = null) {
   if (defaultsBusy || defaultsNeedsRefresh || !state.defaults) return;
+  if (defaultsEditor && !closeDefaultEditor()) return;
   defaultsEditor = { kind, record, action: record ? record.actions.save : state.defaults[kind].actions.create,
     returnFocus: document.activeElement,
     settings: structuredClone(record?.session_settings || defaultScheduleSessionSettings()),
@@ -2106,6 +2400,7 @@ function openDefaultEditor(kind, record = null) {
   defaultsInput("keyword").disabled = kind !== "group_name";
   defaultsInput("keyword").required = kind === "group_name";
   renderDefaultProject(record?.project || "");
+  defaultsEditor.discardBase = defaultEditorValues();
   renderDefaultSettings();
   if (!defaultsInput("drawer").open) defaultsInput("drawer").showModal();
   document.body.classList.toggle("defaults-drawer-open", true);
@@ -2119,13 +2414,28 @@ function openDefaultEditor(kind, record = null) {
   });
 }
 
-function closeDefaultEditor() {
-  if (defaultsBusy) return;
+function closeDefaultEditor({ saved = false, confirmed = false } = {}) {
+  if (defaultsBusy) return false;
+  if (!saved && !confirmed && !confirmDiscardChanges(defaultEditorHasChanges())) return false;
   chatTargetControllers.get("defaults")?.close();
   defaultsEditor = null;
   defaultsInput("editor").hidden = true;
   defaultsInput("drawer").close();
   document.body.classList.toggle("defaults-drawer-open", false);
+  return true;
+}
+
+function defaultEditorValues() {
+  const editor = defaultsEditor;
+  if (!editor) return null;
+  return { kind: editor.kind, project: defaultsInput("project").value,
+    target: defaultsInput(editor.kind === "chat" ? "chat" : "keyword").value,
+    settings: sessionSettingsFingerprint(editor.settings) };
+}
+
+function defaultEditorHasChanges() {
+  return Boolean(defaultsEditor && JSON.stringify(defaultEditorValues())
+    !== JSON.stringify(defaultsEditor.discardBase));
 }
 
 function changeDefaultSettings(field) {
@@ -2158,7 +2468,7 @@ async function defaultMutation(mode, action, extra = {}) {
     defaultsBusy = false;
     renderDefaultSettings();
   }
-  closeDefaultEditor();
+  closeDefaultEditor({ saved: true });
   try {
     await loadDefaults(defaultsOffset, returnFocus);
     setStatus(mode === "delete" ? "默认会话配置已删除。" : mode === "reorder" ? "群名规则优先级已更新。" : "默认会话配置已保存。");
@@ -2324,6 +2634,40 @@ async function loadDefaults(offset = defaultsOffset, returnFocus = null) {
   }
 }
 
+function sessionSettingsFingerprint(settings) {
+  const turn = settings.turn_settings;
+  return JSON.stringify([turn ? [turn.model_id, turn.effort_id, turn.service_tier_id] : null,
+    settings.message_context_mode, settings.reaction_pulse_enabled,
+    settings.progress_card_enabled, settings.completion_mention_enabled]);
+}
+
+function confirmDiscardChanges(changed) {
+  return !changed || window.confirm("有未保存的修改，确定放弃吗？");
+}
+
+function hasUnsavedEditors() {
+  return sessionSettingsHasChanges() || defaultEditorHasChanges() || scheduleEditorHasChanges()
+    || Boolean(pendingScheduleDraft?.dirty);
+}
+
+// Navigation asks once before closing any editor. Busy submissions retain the
+// existing fail-closed boundary; this helper never cancels or repeats a POST.
+function confirmDiscardEditors() {
+  if (sessionSettingsEditor?.saving || defaultsBusy || (scheduleEditor && scheduleInput("fields").disabled)) return false;
+  if (!confirmDiscardChanges(hasUnsavedEditors())) return false;
+  closeSessionSettingsEditor({ confirmed: true });
+  closeDefaultEditor({ confirmed: true });
+  if (scheduleEditor) closeScheduleEditor({ confirmed: true });
+  cancelScheduleSelection({ confirmed: true });
+  return true;
+}
+
+window.addEventListener("beforeunload", (event) => {
+  if (!hasUnsavedEditors()) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+
 function scheduleDate(value) {
   if (value == null) return "—";
   if (typeof value === "number") return new Date(value * 1000).toISOString();
@@ -2401,9 +2745,15 @@ let schedulePrepared = null;
 let schedulePreviewSerial = 0;
 let scheduleDetailSerial = 0;
 let scheduleDetailId = null;
-let scheduleRunsCursor = null;
+let scheduleDetailReturnFocus = null;
+let scheduleRunsSerial = 0;
+let scheduleRunsLoading = false;
+let scheduleRunsPage = { cursor: null, nextCursor: null, previousCursors: [], number: 1 };
+let scheduleRunsRetryPage = null;
 let scheduleListCursor = null;
 let scheduleListQuery = null;
+let schedulePage = firstSessionPage();
+let scheduleListSerial = 0;
 let scheduleProjects = [];
 let pendingScheduleDraft = null;
 const pendingScheduleMutations = new Set();
@@ -2559,8 +2909,9 @@ function renderScheduleProjects() {
       project.enabled ? project.alias : `${project.alias}（已停用）`])], selected);
 }
 
-function closeScheduleEditor({ saved = false } = {}) {
-  if (scheduleInput("fields").disabled && !saved) return;
+function closeScheduleEditor({ saved = false, confirmed = false, preserveDraft = false } = {}) {
+  if (scheduleInput("fields").disabled && !saved) return false;
+  if (!saved && !confirmed && !preserveDraft && !confirmDiscardChanges(scheduleEditorHasChanges())) return false;
   const returnFocus = scheduleEditor?.returnFocus;
   scheduleEditorSerial += 1;
   chatTargetControllers.get("schedule")?.close();
@@ -2570,11 +2921,37 @@ function closeScheduleEditor({ saved = false } = {}) {
   scheduleInput("drawer").close();
   document.body.classList.toggle("schedule-drawer-open", false);
   returnFocus?.focus();
+  return true;
+}
+
+function scheduleEditorValues() {
+  if (!scheduleEditor) return null;
+  const binding = scheduleTargetKind() === "binding";
+  const kind = scheduleInput("kind").value;
+  const rule = { kind, timezone: scheduleInput("timezone").value };
+  for (const field of kind === "once" ? ["at", "offset"]
+    : kind === "interval" ? ["every", "end-at", "end-offset"] : ["time", "end-at", "end-offset"]) {
+    rule[field] = scheduleInput(field).value;
+  }
+  if (kind === "weekly") rule.weekdays = Array.from(scheduleInput("weekdays").querySelectorAll("input"))
+    .filter((input) => input.checked).map((input) => input.value);
+  return { name: scheduleInput("name").value, instructions: scheduleInput("instructions").value,
+    enabled: scheduleInput("enabled").checked, targetKind: scheduleTargetKind(),
+    binding: binding ? scheduleInput("binding").value : "",
+    project: binding ? "" : scheduleInput("project").value,
+    chat: binding ? "" : scheduleInput("chat").value, rule,
+    settings: binding ? null : sessionSettingsFingerprint(scheduleEditor.sessionDraft) };
+}
+
+function scheduleEditorHasChanges() {
+  return Boolean(scheduleEditor && JSON.stringify(scheduleEditorValues())
+    !== JSON.stringify(scheduleEditor.discardBase));
 }
 
 function captureScheduleDraft() {
   const fields = ["name", "instructions", "enabled", "kind", "timezone", "time", "at", "offset", "end-at", "end-offset", "every"];
   return {
+    discardBase: structuredClone(scheduleEditor.discardBase), dirty: scheduleEditorHasChanges(),
     fields: fields.map((id) => ({ id, value: scheduleInput(id).value, checked: scheduleInput(id).checked })),
     offsets: ["offset", "end-offset"].map((id) => ({ id, hidden: scheduleInput(`${id}-field`).hidden,
       options: Array.from(scheduleInput(id).querySelectorAll("option")).map((option) => [option.value, option.textContent]) })),
@@ -2597,18 +2974,20 @@ function restoreScheduleDraft(draft) {
 }
 
 function chooseScheduleSession() {
-  if (!scheduleEditor || scheduleEditor.plan) return;
+  if (!scheduleEditor || scheduleEditor.plan || scheduleInput("fields").disabled) return;
   pendingScheduleDraft = captureScheduleDraft();
-  closeScheduleEditor();
+  closeScheduleEditor({ preserveDraft: true });
   document.querySelector("#session-schedule-selection").hidden = false;
   document.querySelector("#session-schedule-saved").hidden = true;
-  selectTab("sessions", "ordinary");
+  selectTab("sessions", "ordinary", { preserveEditors: true });
 }
 
-function cancelScheduleSelection() {
+function cancelScheduleSelection({ confirmed = false } = {}) {
+  if (!confirmed && !confirmDiscardChanges(Boolean(pendingScheduleDraft?.dirty))) return false;
   pendingScheduleDraft = null;
   scheduleEditorSerial += 1;
   document.querySelector("#session-schedule-selection").hidden = true;
+  return true;
 }
 
 async function openScheduleForSession(session, returnFocus) {
@@ -2620,12 +2999,15 @@ async function openScheduleForSession(session, returnFocus) {
     // Obtain a fresh management grant without changing either tab's list/filter state.
     const data = await api("/api/v1/schedules?mode=list");
     if (serial !== scheduleEditorSerial || state.tab !== "sessions" || state.sessionTab === "temporary") return;
-    await openScheduleEditor(null, { targetSession: session, returnFocus, draft,
+    const loading = openScheduleEditor(null, { targetSession: session, returnFocus, draft,
       action: data.actions.create, timezone: data.default_timezone });
+    // The editor takes ownership synchronously; catalog loading must not keep
+    // a second draft alive after the user saves or discards this editor.
     if (scheduleEditor?.targetSession === session) {
       pendingScheduleDraft = null;
       document.querySelector("#session-schedule-selection").hidden = true;
     }
+    await loading;
   } catch (error) { setStatus(error.message, true); }
   finally { returnFocus.disabled = false; }
 }
@@ -2767,6 +3149,9 @@ async function loadScheduleSessionOptions() {
       if (JSON.stringify(editor.sessionDraft) !== JSON.stringify(data.session_settings)) invalidateSchedulePreview();
       editor.sessionBase = structuredClone(data.session_settings);
       editor.sessionDraft = structuredClone(data.session_settings);
+      if (editor.discardBase && scheduleTargetKind() !== "binding") {
+        editor.discardBase.settings = sessionSettingsFingerprint(data.session_settings);
+      }
     }
     renderScheduleSessionSettings();
     renderScheduleTarget();
@@ -2908,6 +3293,7 @@ async function previewSchedule() {
 
 function openScheduleEditor(plan = null, source = {}) {
   if (scheduleInput("fields").disabled) return;
+  if (scheduleEditor && !closeScheduleEditor()) return;
   for (const field of [...scheduleFieldErrors.keys()]) clearScheduleFieldError(field);
   showScheduleFormError();
   scheduleEditorSerial += 1;
@@ -2942,6 +3328,7 @@ function openScheduleEditor(plan = null, source = {}) {
   for (const input of scheduleInput("weekdays").querySelectorAll("input")) {
     input.checked = (rule.weekdays || []).includes(Number(input.value));
   }
+  scheduleEditor.discardBase = source.draft?.discardBase || scheduleEditorValues();
   if (source.draft) restoreScheduleDraft(source.draft);
   scheduleInput("end-details").open = Boolean(scheduleInput("end-at").value);
   invalidateSchedulePreview();
@@ -3075,11 +3462,7 @@ async function changeSchedule(plan, mode) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(actionPayload(action, definition)),
     });
-    if (scheduleDetailId === plan.id) {
-      scheduleDetailSerial += 1;
-      scheduleDetailId = null;
-      scheduleInput("detail").hidden = true;
-    }
+    if (scheduleDetailId === plan.id) closeScheduleDetail();
     pendingScheduleMutations.delete(plan.id);
     await loadSchedules();
     setStatus(mode === "delete" ? "计划已删除，历史会话保留。" : plan.enabled ? "计划已暂停。" : "计划已启用。");
@@ -3131,22 +3514,26 @@ async function runSchedule(plan, button) {
   }
 }
 
-async function loadSchedules(cursor = null, appliedQuery = cursor ? scheduleListQuery : null) {
-  const query = new URLSearchParams(appliedQuery || "");
-  if (appliedQuery === null) {
+async function loadSchedules(cursor = undefined, appliedQuery = scheduleListQuery) {
+  const serial = ++scheduleListSerial;
+  const page = resolveCursorPage(schedulePage, cursor, appliedQuery);
+  const query = new URLSearchParams(page.query || "");
+  if (page.query === null) {
     for (const [name, value] of new FormData(scheduleInput("filter"))) {
       if (String(value).trim()) query.set(name, String(value).trim());
     }
   }
   const queryIdentity = query.toString();
-  if (cursor) query.set("cursor", cursor);
+  if (page.cursor) query.set("cursor", page.cursor);
   const [data, projects] = await Promise.all([
     api(`/api/v1/schedules?${query}`), queryProjectOptions(),
   ]);
+  if (serial !== scheduleListSerial) return false;
   state.schedules = data;
   scheduleProjects = projects;
-  scheduleListCursor = cursor;
+  scheduleListCursor = page.cursor;
   scheduleListQuery = queryIdentity;
+  schedulePage = { ...page, query: queryIdentity, nextCursor: data.next_cursor };
   renderScheduleProjects();
   const body = document.querySelector("#schedules-body");
   body.replaceChildren();
@@ -3188,7 +3575,9 @@ async function loadSchedules(cursor = null, appliedQuery = cursor ? scheduleList
     if (plan.execution.due_local) scheduleNote(execution, scheduleLocalTime(plan.execution.due_local));
     row.append(execution);
     const actions = actionsCell(row);
-    actions.append(actionButton("详情 / 最近记录", () => showSchedule(plan.id)));
+    const detail = actionButton("详情 / 最近记录", () => showSchedule(plan.id, detail));
+    detail.setAttribute("data-schedule-detail", plan.id);
+    actions.append(detail);
     const edit = actionButton("编辑", () => editSchedule(plan));
     edit.setAttribute("data-schedule-edit", plan.id);
     actions.append(edit);
@@ -3211,17 +3600,60 @@ async function loadSchedules(cursor = null, appliedQuery = cursor ? scheduleList
     row.append(empty);
     body.append(row);
   }
-  document.querySelector("#schedules-next").hidden = !data.next_cursor;
+  renderCursorPagination("schedules", schedulePage, data.plans.length);
+  syncPageUrl();
+  return true;
 }
 
-async function showSchedule(planId) {
+function closeScheduleDetail() {
+  const planId = scheduleDetailId;
+  scheduleDetailSerial += 1;
+  scheduleRunsSerial += 1;
+  scheduleDetailId = null;
+  scheduleRunsLoading = false;
+  scheduleRunsRetryPage = null;
+  const drawer = scheduleInput("detail");
+  if (drawer.open) drawer.close();
+  drawer.hidden = true;
+  document.body.classList.toggle("schedule-detail-open", false);
+  const returnFocus = scheduleDetailReturnFocus?.isConnected ? scheduleDetailReturnFocus
+    : Array.from(document.querySelectorAll("[data-schedule-detail]")).find((button) => button.dataset.scheduleDetail === planId);
+  returnFocus?.focus({ preventScroll: true });
+  scheduleDetailReturnFocus = null;
+}
+
+function renderScheduleRunsPagination() {
+  scheduleInput("runs-page").textContent = `第 ${scheduleRunsPage.number} 页`;
+  scheduleInput("runs-prev").disabled = scheduleRunsLoading || !scheduleRunsPage.previousCursors.length;
+  scheduleInput("runs-next").disabled = scheduleRunsLoading || !scheduleRunsPage.nextCursor;
+}
+
+async function showSchedule(planId, returnFocus = document.activeElement) {
   const serial = ++scheduleDetailSerial;
+  scheduleRunsSerial += 1;
   scheduleDetailId = planId;
+  const drawer = scheduleInput("detail");
+  if (!drawer.open) scheduleDetailReturnFocus = returnFocus;
+  drawer.hidden = false;
+  if (!drawer.open) drawer.showModal();
+  drawer.querySelector(".drawer-body").scrollTop = 0;
+  document.body.classList.toggle("schedule-detail-open", true);
+  scheduleInput("detail-title").textContent = "计划详情";
+  scheduleInput("detail-content").hidden = true;
+  scheduleInput("detail-note").textContent = "正在读取计划详情…";
+  scheduleInput("detail-note").classList.toggle("error", false);
+  scheduleInput("detail-retry").hidden = true;
+  scheduleInput("runs-body").replaceChildren();
+  scheduleInput("runs-note").textContent = "";
+  scheduleRunsPage = { cursor: null, nextCursor: null, previousCursors: [], number: 1 };
+  scheduleRunsLoading = false;
+  scheduleRunsRetryPage = null;
+  renderScheduleRunsPagination();
   try {
     const data = await api(`/api/v1/schedules?${new URLSearchParams({ mode: "view", plan_id: planId })}`);
     if (serial !== scheduleDetailSerial) return;
-    scheduleInput("detail").hidden = false;
-    scheduleInput("detail-title").textContent = `${data.plan.name} · ${data.plan.id} · 修订 ${data.plan.revision}`;
+    scheduleInput("detail-title").textContent = data.plan.name;
+    scheduleInput("detail-identity").textContent = `计划 ${data.plan.id} · 修订 ${data.plan.revision}`;
     scheduleInput("detail-state").textContent = `${schedulePlanState(data.plan).replace("\n", " · ")} · ${scheduleExecutionLabel(data.plan.execution)}`
       + (scheduleTriggerSource(data.plan.execution.trigger_source) ? ` · ${scheduleTriggerSource(data.plan.execution.trigger_source)}` : "")
       + (scheduleBlockedLabel(data.plan) ? ` · ${scheduleBlockedLabel(data.plan)}` : "")
@@ -3233,17 +3665,35 @@ async function showSchedule(planId) {
       : scheduleSessionSummary(data.plan.session_settings || defaultScheduleSessionSettings());
     scheduleInput("detail-rule").textContent = scheduleRuleLabel(data.plan.schedule);
     renderSchedulePreview("#schedule-detail-preview", data.preview);
+    scheduleInput("detail-note").textContent = "";
+    scheduleInput("detail-content").hidden = false;
     await loadScheduleRuns();
-  } catch (error) { if (serial === scheduleDetailSerial) setStatus(error.message, true); }
+  } catch (error) {
+    if (serial !== scheduleDetailSerial) return;
+    scheduleInput("detail-note").textContent = error.message;
+    scheduleInput("detail-note").classList.toggle("error", true);
+    scheduleInput("detail-retry").hidden = false;
+  }
 }
 
-async function loadScheduleRuns(cursor = null) {
+async function loadScheduleRuns(page = scheduleRunsPage) {
   const planId = scheduleDetailId;
+  if (!planId) return false;
+  const serial = ++scheduleRunsSerial;
+  const detailSerial = scheduleDetailSerial;
+  const isCurrent = () => serial === scheduleRunsSerial && detailSerial === scheduleDetailSerial && planId === scheduleDetailId;
+  const candidate = { ...page, previousCursors: [...page.previousCursors] };
   const query = new URLSearchParams({ mode: "runs", plan_id: planId });
-  if (cursor) query.set("cursor", cursor);
+  if (candidate.cursor) query.set("cursor", candidate.cursor);
+  scheduleRunsLoading = true;
+  scheduleRunsRetryPage = null;
+  renderScheduleRunsPagination();
+  scheduleInput("runs-note").textContent = "正在读取触发记录…";
+  scheduleInput("runs-note").classList.toggle("error", false);
+  scheduleInput("runs-retry").hidden = true;
   try {
     const data = await api(`/api/v1/schedules?${query}`);
-    if (planId !== scheduleDetailId) return;
+    if (!isCurrent()) return false;
     const body = scheduleInput("runs-body");
     body.replaceChildren();
     for (const run of data.runs) {
@@ -3262,15 +3712,206 @@ async function loadScheduleRuns(cursor = null) {
       }
       if (run.binding_id && !run.binding_removed) {
         const link = document.createElement("a");
-        link.href = `/?${new URLSearchParams({ binding_id: run.binding_id })}`;
+        link.href = `/sessions/ordinary?${new URLSearchParams({ identity: run.binding_id, inventoryState: "all" })}`;
         link.textContent = "打开 Session";
         links.append(link);
       }
       body.append(row);
     }
-    scheduleRunsCursor = data.next_cursor;
-    scheduleInput("runs-next").hidden = !scheduleRunsCursor;
-  } catch (error) { setStatus(error.message, true); }
+    scheduleRunsPage = { ...candidate, nextCursor: data.next_cursor };
+    scheduleInput("runs-note").textContent = data.runs.length ? "" : "暂无触发记录。";
+    return true;
+  } catch (error) {
+    if (!isCurrent()) return false;
+    scheduleInput("runs-note").textContent = `${error.message} 当前页保持不变，请重试。`;
+    scheduleInput("runs-note").classList.toggle("error", true);
+    scheduleRunsRetryPage = candidate;
+    scheduleInput("runs-retry").hidden = false;
+    return false;
+  } finally {
+    if (isCurrent()) {
+      scheduleRunsLoading = false;
+      renderScheduleRunsPagination();
+    }
+  }
+}
+
+async function moveScheduleRunsPage(direction) {
+  if (scheduleRunsLoading) return false;
+  const page = scheduleRunsPage;
+  if (direction === "next" && page.nextCursor) {
+    return loadScheduleRuns({ cursor: page.nextCursor, nextCursor: null,
+      previousCursors: [...page.previousCursors, page.cursor], number: page.number + 1 });
+  }
+  if (direction === "prev" && page.previousCursors.length) {
+    return loadScheduleRuns({ cursor: page.previousCursors.at(-1), nextCursor: null,
+      previousCursors: page.previousCursors.slice(0, -1), number: page.number - 1 });
+  }
+  return false;
+}
+
+// Only durable query intent belongs in URLs. Grants, editor drafts and live
+// keyset cursors stay in this document and are never restored as server facts.
+const adminPagePaths = { projects: "/projects", schedules: "/schedules", defaults: "/defaults",
+  updates: "/maintenance", system: "/system" };
+const sessionUrlKeys = ["project", "scopeKind", "inventoryState", "current", "chatId", "topicId", "identity",
+  "createdFrom", "createdBefore", "pageSize", "sortBy", "sortDirection"];
+const sideUrlKeys = ["project", "state", "chatId", "createdFrom", "createdBefore", "pageSize", "sortBy", "sortDirection"];
+let navigationReady = false;
+let navigationIndex = 0;
+let navigationHref = "";
+let restoringHistory = false;
+
+function pageQuery(tab, sessionTab, raw = "") {
+  const input = new URLSearchParams(raw);
+  const query = new URLSearchParams();
+  const allowed = tab === "sessions" ? sessionTab === "temporary" ? sideUrlKeys : sessionUrlKeys
+    : tab === "schedules" ? ["project", "enabled", "ended"] : tab === "defaults" ? ["kind"] : [];
+  for (const key of allowed) {
+    for (const value of [...new Set(input.getAll(key).filter(Boolean))].sort()) query.append(key, value);
+  }
+  if (tab === "sessions") {
+    const field = sessionTab === "temporary" ? "state" : "inventoryState";
+    if (!query.has(field)) for (const value of sessionTab === "temporary" ? ["creating", "open"] : ["active", "lazy", "unknown"]) query.append(field, value);
+    if (!query.has("pageSize")) query.set("pageSize", "20");
+    if (!query.has("sortBy")) query.set("sortBy", "updatedAt");
+    if (!query.has("sortDirection")) query.set("sortDirection", "desc");
+  }
+  if (tab === "schedules" && !query.has("ended")) query.set("ended", "false");
+  return query;
+}
+
+function pageUrl(tab, sessionTab = state.sessionTab, raw = "") {
+  const path = tab === "sessions" ? `/sessions/${sessionTab}` : adminPagePaths[tab];
+  const query = pageQuery(tab, sessionTab, raw);
+  if (tab === "sessions") {
+    for (const [key, value] of [["pageSize", "20"], ["sortBy", "updatedAt"], ["sortDirection", "desc"]]) {
+      if (query.getAll(key).length === 1 && query.get(key) === value) query.delete(key);
+    }
+    const key = sessionTab === "temporary" ? "state" : "inventoryState";
+    const defaults = sessionTab === "temporary" ? "creating,open" : "active,lazy,unknown";
+    if (query.getAll(key).sort().join(",") === defaults) query.delete(key);
+  }
+  if (tab === "schedules" && query.get("ended") === "false") query.delete("ended");
+  if (tab === "defaults" && query.get("kind") !== "group_name") query.delete("kind");
+  query.sort();
+  return path + (query.size ? `?${query}` : "");
+}
+
+function currentPageUrl(tab = state.tab) {
+  let query = "";
+  if (tab === "sessions") {
+    const kind = state.sessionTab === "temporary" ? "side" : "session";
+    query = state[`${kind}Page`].query || "";
+  } else if (tab === "schedules") {
+    query = new URLSearchParams(scheduleListQuery || "");
+    if (scheduleListQuery !== null && !query.has("ended")) query.set("ended", "all");
+  }
+  else if (tab === "defaults") query = `kind=${defaultsTab}`;
+  return pageUrl(tab, state.sessionTab, query);
+}
+
+function syncPageUrl({ replace = false } = {}) {
+  if (!navigationReady || state.authExpired) return;
+  const href = currentPageUrl();
+  if (replace || href !== navigationHref) {
+    if (!replace) navigationIndex += 1;
+    window.history[replace ? "replaceState" : "pushState"]({ netizenIndex: navigationIndex }, "", href);
+    navigationHref = href;
+  }
+  for (const link of document.querySelectorAll(".tab")) link.href = currentPageUrl(link.dataset.tab);
+  const login = document.querySelector("#auth-expired a");
+  if (login) login.href = `/login?${new URLSearchParams({ next: href })}`;
+}
+
+function readPageLocation() {
+  const path = window.location.pathname || "/";
+  const query = new URLSearchParams(window.location.search);
+  let tab = Object.keys(adminPagePaths).find((name) => adminPagePaths[name] === path) || "projects";
+  const sessionTab = path === "/sessions/temporary" ? "temporary" : "ordinary";
+  if (path.startsWith("/sessions/")) tab = "sessions";
+  if (path === "/" && query.get("binding_id")) {
+    tab = "sessions";
+    query.set("identity", query.get("binding_id"));
+  }
+  return { tab, sessionTab, query: pageQuery(tab, sessionTab, query) };
+}
+
+function restorePageFilters(route) {
+  const { tab, sessionTab, query } = route;
+  if (tab === "sessions") {
+    const kind = sessionTab === "temporary" ? "side" : "session";
+    const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
+    for (const [name, filter] of filters) filter.setValues(query.getAll(name).filter((value) => value !== "all"));
+    if (kind === "side") ensureSideChatFilter(); else ensureSessionChatFilter();
+    const picker = kind === "side" ? sideChatPicker : sessionChatPicker;
+    const chatId = query.get("chatId");
+    picker.setSelection(chatId ? { chatId, name: chatId } : null);
+    document.querySelector(`#${kind}-chat-filter`).value = chatId || "";
+    document.querySelector(`#${kind}-page-size`).value = query.get("pageSize");
+    for (const root of document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")) {
+      timeRangeControllers.get(root).setBounds(query.get("createdFrom") || "", query.get("createdBefore") || "");
+    }
+    state[`${kind}Page`] = firstSessionPage(query.toString());
+    const name = kind === "side" ? "sides" : "sessions";
+    state[name] = null;
+    state[`${kind}RefreshedAt`] = null;
+    document.querySelector(`#${name}-body`).replaceChildren();
+    renderSessionPagination(kind);
+    renderSessionSort(kind);
+  } else if (tab === "schedules") {
+    for (const [name, filter] of scheduleFilters) filter.setValues(query.getAll(name).filter((value) => value !== "all"));
+    const apiQuery = new URLSearchParams(query);
+    for (const key of ["enabled", "ended"]) if (apiQuery.get(key) === "all") apiQuery.delete(key);
+    scheduleListQuery = apiQuery.toString();
+    scheduleListCursor = null;
+    schedulePage = firstSessionPage(scheduleListQuery);
+    state.schedules = null;
+    document.querySelector("#schedules-body").replaceChildren();
+    renderCursorPagination("schedules", schedulePage, 0);
+  } else if (tab === "projects") {
+    state.projectPage = firstSessionPage();
+    state.projects = null;
+    document.querySelector("#projects-body").replaceChildren();
+    renderCursorPagination("projects", state.projectPage, 0);
+  } else if (tab === "defaults") {
+    defaultsOffset = 0;
+    state.defaults = null;
+    defaultsInput("chat-body").replaceChildren();
+    defaultsInput("rules-body").replaceChildren();
+    defaultsInput("pagination").hidden = true;
+    defaultsInput("page").textContent = "第 1 页";
+    // Render the sub-tab without recording a second history entry.
+    const ready = navigationReady;
+    navigationReady = false;
+    selectDefaultTab(query.get("kind") === "group_name" ? "group_name" : "chat");
+    navigationReady = ready;
+  }
+}
+
+function restorePageLocation() {
+  const route = readPageLocation();
+  restorePageFilters(route);
+  return selectTab(route.tab, route.sessionTab, { preserveEditors: true, replace: true });
+}
+
+function initializePageNavigation() {
+  navigationReady = true;
+  navigationIndex = window.history.state?.netizenIndex || 0;
+  window.addEventListener("popstate", (event) => {
+    if (restoringHistory) { restoringHistory = false; return; }
+    const targetIndex = event.state?.netizenIndex;
+    if (!confirmDiscardEditors()) {
+      if (Number.isInteger(targetIndex) && targetIndex !== navigationIndex) {
+        restoringHistory = true;
+        window.history.go(navigationIndex - targetIndex);
+      } else window.history.replaceState({ netizenIndex: navigationIndex }, "", navigationHref);
+      return;
+    }
+    navigationIndex = Number.isInteger(targetIndex) ? targetIndex : 0;
+    restorePageLocation();
+  });
+  return restorePageLocation();
 }
 
 async function refresh(tab, cursor = undefined) {
@@ -3278,12 +3919,13 @@ async function refresh(tab, cursor = undefined) {
   if (tab === "sessions") {
     return state.sessionTab === "temporary" ? loadSides(cursor) : loadSessions(cursor);
   }
-  const isCurrentView = () => state.tab === tab;
+  const request = state.refreshRequest = (state.refreshRequest || 0) + 1;
+  const isCurrentView = () => state.tab === tab && request === state.refreshRequest;
   setStatus("正在读取服务端事实…");
   try {
-    if (tab === "projects") await loadProjects(cursor || null);
+    if (tab === "projects" && await loadProjects(cursor) === false) return false;
     if (tab === "updates") await loadUpdates();
-    if (tab === "schedules") await loadSchedules(cursor || null);
+    if (tab === "schedules" && await loadSchedules(cursor) === false) return false;
     if (tab === "defaults") await loadDefaults();
     if (tab === "system") await window.NetizenIdentity.loadUsers();
     if (state.authExpired) return false;
@@ -3306,7 +3948,7 @@ function renderSessionTabs() {
 }
 
 function selectSessionTab(name) {
-  if (state.authExpired) return;
+  if (state.authExpired || !confirmDiscardEditors()) return;
   state.sessionTab = name;
   invalidateSessionListRequest();
   sessionChatPicker?.close();
@@ -3314,39 +3956,49 @@ function selectSessionTab(name) {
   openFilter?.close();
   openTimeRangeFilter?.cancel({ restoreFocus: false });
   renderSessionTabs();
+  syncPageUrl();
   return refresh("sessions");
 }
 
-function selectTab(name, sessionTab = state.sessionTab || "ordinary") {
+function selectTab(name, sessionTab = state.sessionTab || "ordinary", { preserveEditors = false, replace = false } = {}) {
   if (state.authExpired) return;
+  if (!preserveEditors && !confirmDiscardEditors()) return;
+  window.NetizenSelect?.close();
+  window.NetizenIdentity?.closePanel?.();
+  closeScheduleDetail();
   state.tab = name;
   state.sessionTab = sessionTab;
   invalidateSessionListRequest();
+  state.projectListRequest = (state.projectListRequest || 0) + 1;
+  scheduleListSerial += 1;
+  state.refreshRequest = (state.refreshRequest || 0) + 1;
   sessionChatPicker?.close();
   sideChatPicker?.close();
+  openFilter?.close();
+  openTimeRangeFilter?.cancel({ restoreFocus: false });
   renderSessionTabs();
   stopUpdatePolling();
-  // Only a navigation preference survives re-login; operation facts always
-  // come from the server, and no credential or session token is stored here.
-  try {
-    if (name === "updates") sessionStorage.setItem("netizen-admin-updates-view", "1");
-    else sessionStorage.removeItem("netizen-admin-updates-view");
-  } catch (_error) { /* Storage may be disabled by browser policy. */ }
   for (const item of document.querySelectorAll(".tab")) {
     const active = item.dataset.tab === name;
     item.classList.toggle("active", active);
-    item.setAttribute("aria-selected", String(active));
+    if (active) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
   }
   for (const panel of document.querySelectorAll(".panel")) {
     const active = panel.id === name;
     panel.hidden = !active;
     panel.classList.toggle("active", active);
   }
-  refresh(name);
+  syncPageUrl({ replace });
+  return refresh(name);
 }
 
 for (const tab of document.querySelectorAll(".tab")) {
-  tab.addEventListener("click", () => selectTab(tab.dataset.tab));
+  tab.addEventListener("click", (event) => {
+    if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button > 0) return;
+    event.preventDefault();
+    selectTab(tab.dataset.tab);
+  });
 }
 for (const tab of document.querySelectorAll("[data-session-tab]")) {
   tab.addEventListener("click", () => selectSessionTab(tab.dataset.sessionTab));
@@ -3399,7 +4051,8 @@ document.querySelector("#side-filter-reset").addEventListener("click", resetSide
 document.querySelector("#side-page-size").addEventListener("change", () => {
   refresh("sessions", sessionFilterPage("side"));
 });
-document.querySelector("#projects-next").addEventListener("click", () => refresh("projects", state.projectCursor));
+document.querySelector("#projects-previous").addEventListener("click", () => moveListPage("projects", "previous"));
+document.querySelector("#projects-next").addEventListener("click", () => moveListPage("projects", "next"));
 document.querySelector("#sessions-previous").addEventListener("click", () => moveSessionPage("previous"));
 document.querySelector("#sessions-next").addEventListener("click", () => moveSessionPage("next"));
 document.querySelector("#sides-previous").addEventListener("click", () => moveSidePage("previous"));
@@ -3441,7 +4094,12 @@ for (const [name, delta] of [["previous", -50], ["next", 50]]) {
     try { await loadDefaults(Math.max(0, defaultsOffset + delta)); } catch (error) { setStatus(error.message, true); }
   });
 }
-scheduleInput("filter").addEventListener("submit", (event) => { event.preventDefault(); refresh("schedules"); });
+scheduleInput("filter").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const query = new URLSearchParams();
+  for (const [key, value] of new FormData(scheduleInput("filter"))) if (value) query.set(key, value);
+  refresh("schedules", firstSessionPage(query.toString()));
+});
 scheduleInput("new").addEventListener("click", () => openScheduleEditor());
 scheduleInput("preview").addEventListener("click", previewSchedule);
 scheduleInput("editor").addEventListener("input", invalidateSchedulePreview);
@@ -3480,24 +4138,21 @@ for (const field of ["at", "timezone", "kind"]) {
 for (const field of ["end-at", "timezone", "kind"]) {
   scheduleInput(field).addEventListener("input", resetScheduleEndOffset);
 }
-document.querySelector("#schedules-next").addEventListener("click", () => refresh("schedules", state.schedules.next_cursor));
-scheduleInput("runs-next").addEventListener("click", () => loadScheduleRuns(scheduleRunsCursor));
+document.querySelector("#schedules-previous").addEventListener("click", () => moveListPage("schedules", "previous"));
+document.querySelector("#schedules-next").addEventListener("click", () => moveListPage("schedules", "next"));
+scheduleInput("runs-prev").addEventListener("click", () => moveScheduleRunsPage("prev"));
+scheduleInput("runs-next").addEventListener("click", () => moveScheduleRunsPage("next"));
+scheduleInput("runs-retry").addEventListener("click", () => loadScheduleRuns(scheduleRunsRetryPage || scheduleRunsPage));
+scheduleInput("detail-retry").addEventListener("click", () => showSchedule(scheduleDetailId));
+scheduleInput("detail-close").addEventListener("click", closeScheduleDetail);
+scheduleInput("detail-done").addEventListener("click", closeScheduleDetail);
+scheduleInput("detail").addEventListener("cancel", (event) => { event.preventDefault(); closeScheduleDetail(); });
 document.querySelector("#service-restart").addEventListener("click", restartService);
-document.querySelector("#logout").addEventListener("click", async () => { await api("/logout", { method: "POST" }); window.location.assign("/login"); });
+document.querySelector("#logout").addEventListener("click", async () => {
+  if (!confirmDiscardEditors()) return;
+  await api("/logout", { method: "POST" });
+  window.location.assign("/login");
+});
 
-let initialTab = "projects";
-try {
-  if (sessionStorage.getItem("netizen-admin-updates-view") === "1") initialTab = "updates";
-} catch (_error) { /* The update page remains available without storage. */ }
-const linkedBindingId = new URLSearchParams(window.location.search).get("binding_id");
-if (linkedBindingId) {
-  const query = new URLSearchParams({ identity: linkedBindingId, pageSize: "20" });
-  if (new URLSearchParams(window.location.search).get("inventoryState") === "all") {
-    query.set("inventoryState", "all");
-    sessionMultiFilters.get("inventoryState").clear();
-  }
-  state.sessionPage = firstSessionPage(query.toString());
-  initialTab = "sessions";
-}
-selectTab(initialTab);
+initializePageNavigation();
 window.NetizenIdentity.loadProfile().catch((error) => setStatus(error.message, true));

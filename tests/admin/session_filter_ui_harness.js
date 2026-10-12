@@ -6,6 +6,7 @@ let refreshed;
 let loadOnRefresh = false;
 let selectedScheduleSession = null;
 function setStatus() {}
+function syncPageUrl() {}
 function openScheduleForSession(session, button) { selectedScheduleSession = { session, button }; }
 async function refresh(tab, page) {
   refreshed = tab;
@@ -248,8 +249,12 @@ async function refresh(tab, page) {
   assert.match(notice.textContent, /无法确认.*刷新/);
   assert.match(rows.textContent, /Read summary.*状态未确认.*running/);
   assert.doesNotMatch(rows.textContent, /Lazy Session|原生会话缺失/);
-  assert.deepEqual(rows.querySelectorAll("button").map((button) => button.textContent), ["创建定时任务", "停止"]);
+  const actions = rows.querySelector(".actions");
+  assert.deepEqual(actions.children.filter((child) => child.tagName === "button").map((button) => button.textContent), ["停止"]);
+  const more = actions.querySelector("details");
+  assert(!more.open, "secondary actions start collapsed");
   const createSchedule = rows.querySelectorAll("button").find((button) => button.textContent === "创建定时任务");
+  assert(more.contains(createSchedule), "schedule entry remains available under more actions");
   createSchedule.click();
   assert.equal(selectedScheduleSession.session, state.sessions.items[0]);
   assert.equal(selectedScheduleSession.session.bindingId, unknown.bindingId);
@@ -301,7 +306,12 @@ async function refresh(tab, page) {
     assert.equal(link.rel, "noopener noreferrer");
     assert.equal(link.textContent, location.chatLabelResolved
       ? "Engineering" : locationFallback(location));
-    if (location.topicId) assert.match(row.textContent, /Topic omt-topic/);
+    if (location.topicId) {
+      assert(!row.textContent.includes(location.topicId), "location cell omits the long topic identifier");
+      sessionIdentityCell(row, location);
+      assert(row.querySelector(".session-identities").querySelectorAll("input")
+        .some((input) => input.readOnly && input.value === location.topicId), "full topic identity remains available for copying");
+    }
   }
 
   // An empty filtered page still discloses a failed catalog read; a healthy refresh clears it.
@@ -323,6 +333,8 @@ async function refresh(tab, page) {
   const pickerRoot = document.querySelector("#session-chat-picker");
   assert.equal(pickerRoot.querySelector(".chat-picker-summary").textContent, "全部");
   sessionChatPicker.focus();
+  assert.equal(pickerRoot.querySelector(".chat-picker-trigger").getAttribute("aria-expanded"), "false");
+  pickerRoot.querySelector(".chat-picker-trigger").click();
   await flush();
   assert.match(pickerRoot.textContent, /当前已加入且可访问/);
   assert.equal(pickerRoot.querySelector(".chat-picker-empty-option").getAttribute("aria-selected"), "true");

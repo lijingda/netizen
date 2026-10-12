@@ -37,6 +37,10 @@ async function remoteQueriesIgnoreStaleResults() {
   const f = setup();
   assert.equal(f.requests.length, 0, "initialization must not query");
   f.picker.focus();
+  assert.equal(document.activeElement, f.trigger, "drawer autofocus targets the closed trigger");
+  assert.equal(f.trigger.getAttribute("aria-expanded"), "false", "focus must not expand the picker");
+  assert.equal(f.requests.length, 0, "focus alone must not fetch the group directory");
+  f.trigger.click();
   assert.deepEqual(f.requests[0].args, { query: "", cursor: null });
   f.type("old keyword");
   f.type("new keyword");
@@ -60,7 +64,7 @@ async function remoteQueriesIgnoreStaleResults() {
 
 async function paginationRetryAndPlainText() {
   const f = setup();
-  f.picker.focus();
+  f.trigger.click();
   f.requests[0].resolve({ items: [{ chatId: "oc_first", name: '<img src=x onerror="alert(1)">' }], nextCursor: "page2" });
   await settle();
   assert.equal(f.root.querySelector("img"), null, "server names must be rendered as plain text");
@@ -124,7 +128,7 @@ async function selectionKeyboardAndEmptyStates() {
   assert.deepEqual(f.changes[1], null);
   assert.equal(f.summary.textContent, "请选择群聊");
   assert.equal(f.trigger.getAttribute("aria-expanded"), "false", "clearing must not reopen the popup");
-  f.picker.focus();
+  f.trigger.click();
   f.requests[2].resolve({ items: [], nextCursor: null });
   await settle();
   assert.match(f.root.textContent, /暂无可选择的群聊/);
@@ -142,7 +146,7 @@ async function selectionKeyboardAndEmptyStates() {
 
 async function retryAndEscapeFromPaging() {
   const f = setup();
-  f.picker.focus();
+  f.trigger.click();
   assert.equal(f.input.dispatch("keydown", { key: "Enter" }).prevented, true,
     "Enter with no selected candidate must not submit a surrounding form");
   f.requests[0].reject(new Error("权限不足"));
@@ -183,7 +187,7 @@ async function focusedPagingButtonsSurviveBusyRendering() {
       },
     });
   }
-  f.picker.focus();
+  f.trigger.click();
   f.requests[0].resolve({ items: [], nextCursor: "page2" });
   await settle();
   more.focus();
@@ -205,7 +209,7 @@ async function focusedPagingButtonsSurviveBusyRendering() {
 
 async function lifecycleAndComposition() {
   const f = setup();
-  f.picker.focus();
+  f.trigger.click();
   f.picker.setSelection({ chatId: "oc_unavailable" });
   f.requests[0].reject(new Error("late failure"));
   await settle();
@@ -220,7 +224,7 @@ async function lifecycleAndComposition() {
   assert.match(f.trigger.title, /oc_unavailable/, "locked selections retain their full identity");
   assert.equal(f.requests.length, 1);
   f.picker.setDisabled(false);
-  f.picker.focus();
+  f.trigger.click();
   f.input.dispatch("compositionstart");
   f.type("研");
   flushDebounce();
@@ -238,7 +242,7 @@ async function lifecycleAndComposition() {
   assert.equal(f.changes.length, changeCount);
   assert.equal(f.picker.getSelection(), null);
   assert.equal(f.requests.length, 3, "reset must not query");
-  f.picker.focus();
+  f.trigger.click();
   f.input.dispatch("focusout", { relatedTarget: document.body });
   f.requests[3].resolve({ items: [{ chatId: "oc_late", name: "late" }] });
   await settle();
@@ -250,7 +254,7 @@ async function avatarsAndDisplayOnlyRefresh() {
   const f = setup();
   const avatarUrl = "https://example.feishucdn.com/group.jpg";
   const freshAvatarUrl = "https://example.feishucdn.com/fresh.jpg";
-  f.picker.focus();
+  f.trigger.click();
   f.requests[0].resolve({ items: [
     { chatId: "oc_avatar", name: "<b>同名群</b>", avatarUrl },
     { chatId: "oc_missing", name: "同名群" },
@@ -293,7 +297,7 @@ async function avatarsAndDisplayOnlyRefresh() {
   assert.equal(selected.querySelector("img").src, freshAvatarUrl);
   assert.equal(f.changes.length, 1, "avatar refresh must not emit target changes");
   assert.equal(f.summary.textContent, "<b>同名群</b>");
-  f.picker.focus();
+  f.trigger.click();
   f.type("new search");
   assert.equal(selected.hidden, false);
   assert.equal(selectedId.hidden, false);

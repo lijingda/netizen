@@ -31,6 +31,10 @@ class ProjectDeleteUiTest(unittest.TestCase):
             source.index("function cell("):
             source.index("const timeRangeControllers =")
         ]
+        pagination = source[
+            source.index("function firstSessionPage("):
+            source.index("function sessionSort(")
+        ]
         fixture = Path(__file__).with_name("project_delete_ui_harness.js")
         before, after = fixture.read_text(encoding="utf-8").split(
             "// SHIPPED_PROJECT_CONTROLLER\n"
@@ -38,7 +42,7 @@ class ProjectDeleteUiTest(unittest.TestCase):
         dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
         result = subprocess.run(
             [node, "-e", "const htmlTree = " + json.dumps(tree.root) + ";\n"
-             + dom + before + payload + controller + after],
+             + dom + before + payload + pagination + controller + after],
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

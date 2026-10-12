@@ -148,7 +148,7 @@ answer = async (path, options) => {
   document.querySelector("#admin-user-add").click();
   await settle();
   const beforeNavigation = unmounts;
-  document.querySelector(".tabs").dispatch("click");
+  window.NetizenIdentity.closePanel();
   assert.equal(unmounts, beforeNavigation + 1);
   assert.equal(document.querySelector("#admin-user-panel").hidden, true);
 

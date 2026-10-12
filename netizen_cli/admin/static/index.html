@@ -22,12 +22,12 @@
   <div id="auth-expired" class="auth-expired" role="alert" hidden><span>登录已过期，请重新登录。</span><a href="/login">重新登录</a></div>
 
   <nav class="tabs" aria-label="管理模块">
-    <button class="tab active" data-tab="projects" aria-selected="true">Projects</button>
-    <button class="tab" data-tab="sessions" aria-selected="false">Sessions</button>
-    <button class="tab" data-tab="schedules" aria-selected="false">定时任务</button>
-    <button class="tab" data-tab="defaults" aria-selected="false">默认会话配置</button>
-    <button class="tab" data-tab="updates" aria-selected="false">系统维护</button>
-    <button class="tab" data-tab="system" aria-selected="false">系统管理</button>
+    <a class="tab active" data-tab="projects" href="/projects" aria-current="page">Projects</a>
+    <a class="tab" data-tab="sessions" href="/sessions/ordinary">Sessions</a>
+    <a class="tab" data-tab="schedules" href="/schedules">定时任务</a>
+    <a class="tab" data-tab="defaults" href="/defaults">默认会话配置</a>
+    <a class="tab" data-tab="updates" href="/maintenance">系统维护</a>
+    <a class="tab" data-tab="system" href="/system">系统管理</a>
   </nav>
 
   <main>
@@ -59,7 +59,11 @@
       <div class="table-wrap"><table><thead><tr>
         <th>Project</th><th>路径</th><th>状态</th><th>会话</th><th>归档</th><th>最近激活</th><th>操作</th>
       </tr></thead><tbody id="projects-body"></tbody></table></div>
-      <button id="projects-next" class="next" hidden>下一页</button>
+      <nav class="pagination" aria-label="Projects 分页">
+        <button id="projects-previous" class="next" disabled>上一页</button>
+        <span id="projects-page" aria-live="polite">第 1 页</span>
+        <button id="projects-next" class="next" disabled>下一页</button>
+      </nav>
     </section>
 
     <section id="sessions" class="panel" aria-labelledby="sessions-heading" hidden>
@@ -237,20 +241,47 @@
       </form>
       <p class="meta-line">未结束包含仍有触发机会的计划，以及最后一次正在启动、执行或结果待确认的计划。暂停不会停止本次执行。</p>
       <div class="table-wrap"><table><thead><tr><th>计划</th><th>Project</th><th>目标会话</th><th>时间安排</th><th>计划状态</th><th>执行情况</th><th>操作</th></tr></thead><tbody id="schedules-body"></tbody></table></div>
-      <button id="schedules-next" class="next" hidden>下一页</button>
-      <section id="schedule-detail" class="schedule-detail" hidden aria-labelledby="schedule-detail-title">
-        <h3 id="schedule-detail-title"></h3>
-        <p id="schedule-detail-state"></p>
-        <p id="schedule-detail-settings"></p>
-        <p id="schedule-detail-rule"></p>
-        <pre id="schedule-detail-instructions"></pre>
-        <ol id="schedule-detail-preview"></ol>
-        <h3>最近触发记录</h3>
-        <p>执行状态以普通会话为准；停止和继续任务请使用话题或 Sessions 中的现有能力。</p>
-        <div class="table-wrap"><table><thead><tr><th>触发时间</th><th>触发来源</th><th>调度状态</th><th>执行入口</th></tr></thead><tbody id="schedule-runs-body"></tbody></table></div>
-        <button id="schedule-runs-next" class="next" hidden>下一页记录</button>
-      </section>
+      <nav class="pagination" aria-label="定时任务分页">
+        <button id="schedules-previous" class="next" disabled>上一页</button>
+        <span id="schedules-page" aria-live="polite">第 1 页</span>
+        <button id="schedules-next" class="next" disabled>下一页</button>
+      </nav>
     </section>
+    <dialog id="schedule-detail" class="editor-drawer" hidden aria-labelledby="schedule-detail-title">
+      <div class="card-form drawer-form">
+        <div class="drawer-head"><div><p class="eyebrow">SCHEDULED TASK</p><h3 id="schedule-detail-title">计划详情</h3></div><button id="schedule-detail-close" type="button" class="drawer-close" aria-label="关闭计划详情">×</button></div>
+        <div class="drawer-body">
+          <p id="schedule-detail-note" role="status"></p>
+          <button id="schedule-detail-retry" class="action" type="button" hidden>重试加载详情</button>
+          <div id="schedule-detail-content" hidden>
+            <section aria-labelledby="schedule-detail-overview-title">
+              <h4 id="schedule-detail-overview-title">计划信息</h4>
+              <p id="schedule-detail-identity" class="meta-line"></p>
+              <p id="schedule-detail-state"></p>
+              <p id="schedule-detail-settings"></p>
+            </section>
+            <section aria-labelledby="schedule-detail-instructions-title">
+              <h4 id="schedule-detail-instructions-title">任务指令</h4>
+              <pre id="schedule-detail-instructions"></pre>
+            </section>
+            <section aria-labelledby="schedule-detail-rule-title">
+              <h4 id="schedule-detail-rule-title">时间安排</h4>
+              <p id="schedule-detail-rule"></p>
+              <ol id="schedule-detail-preview"></ol>
+            </section>
+            <section aria-labelledby="schedule-detail-runs-title">
+              <h4 id="schedule-detail-runs-title">最近触发记录</h4>
+              <p class="meta-line">执行状态以普通会话为准；停止和继续任务请使用话题或 Sessions 中的现有能力。</p>
+              <p id="schedule-runs-note" role="status"></p>
+              <button id="schedule-runs-retry" class="action" type="button" hidden>重试加载记录</button>
+              <div class="table-wrap"><table><thead><tr><th>触发时间</th><th>触发来源</th><th>调度状态</th><th>执行入口</th></tr></thead><tbody id="schedule-runs-body"></tbody></table></div>
+              <div class="pagination" aria-label="触发记录分页"><button id="schedule-runs-prev" class="action" type="button" disabled>上一页</button><span id="schedule-runs-page" aria-live="polite">第 1 页</span><button id="schedule-runs-next" class="action" type="button" disabled>下一页</button></div>
+            </section>
+          </div>
+        </div>
+        <div class="drawer-footer"><button id="schedule-detail-done" class="drawer-cancel" type="button">关闭</button></div>
+      </div>
+    </dialog>
     <dialog id="schedule-drawer" class="editor-drawer" aria-labelledby="schedule-editor-title">
       <form id="schedule-editor" class="card-form" novalidate hidden>
         <div class="schedule-editor-head"><div><p class="eyebrow">SCHEDULED TASK</p><h3 id="schedule-editor-title">创建计划</h3></div><button id="schedule-close" type="button" aria-label="关闭计划表单">×</button></div>

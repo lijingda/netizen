@@ -1,7 +1,10 @@
 const state = { defaults: null };
+function syncPageUrl() {}
 let status = "";
 function setStatus(value) { status = value; }
-window.confirm = () => true;
+let discardConfirmed = true;
+const discardPrompts = [];
+window.confirm = (message) => { discardPrompts.push(message); return discardConfirmed; };
 const settings = { turn_settings: { model_id: "retired", effort_id: "high", service_tier_id: "priority" },
   reaction_pulse_enabled: false, progress_card_enabled: true, completion_mention_enabled: true, message_context_mode: "catch-up" };
 const envelope = (mode, id) => ({ csrfToken: `${id}-${mode}-csrf`, actionToken: `${id}-${mode}-once`,
@@ -466,6 +469,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   viewExact = null;
   viewEffective = null;
   selectDefaultTab("chat");
+  const directoryReads = gets.filter((path) => path.startsWith("/api/v1/chats?")).length;
   openDefaultEditor("chat");
   await flush();
   assert.equal(defaultsInput("chat-kind").value, "group");
@@ -475,6 +479,13 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   assert.equal(defaultsInput("group-picker").querySelector(".chat-picker-summary").textContent, "请选择群聊");
   assert.equal(defaultsInput("group-picker").querySelector(".chat-picker-empty-option"), null);
   assert.match(defaultsInput("group-picker").textContent, /当前已加入且可访问/);
+  assert.equal(document.activeElement, defaultsInput("group"));
+  assert.equal(defaultsInput("group").getAttribute("aria-expanded"), "false",
+    "opening the drawer focuses the group trigger without expanding it");
+  assert.equal(gets.filter((path) => path.startsWith("/api/v1/chats?")).length, directoryReads,
+    "opening the drawer does not request the group directory");
+  defaultsInput("group").click();
+  await flush();
   defaultsInput("group-picker").querySelector(".chat-picker-option").click();
   await flush();
   assert.equal(defaultsInput("chat").value, "oc_picker");
@@ -630,4 +641,48 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await saveDefault({ preventDefault() {} });
   assert.equal(posts.length, beforeSavingWithoutAvatar + 1);
   assert.equal(posts.at(-1).body.definition.chat_id, "oc_exact");
+
+  // Only user changes protect the drawer: hydration, reverting edits and saving
+  // do not produce spurious confirmations, including asynchronously read defaults.
+  pendingOptions = {};
+  openDefaultEditor("group_name");
+  assert.equal(defaultEditorHasChanges(), false);
+  pendingOptions.resolve();
+  pendingOptions = null;
+  await flush();
+  assert.equal(defaultEditorHasChanges(), false);
+  const beforeNoopClose = discardPrompts.length;
+  defaultsInput("close").click();
+  assert.equal(discardPrompts.length, beforeNoopClose);
+  openDefaultEditor("group_name", rules[0]);
+  await flush();
+  const originalKeyword = defaultsInput("keyword").value;
+  defaultsInput("keyword").value = "changed keyword";
+  discardConfirmed = false;
+  for (const cancel of [() => defaultsInput("close").click(), () => defaultsInput("cancel").click(),
+    () => defaultsInput("drawer").dispatch("cancel")]) {
+    cancel();
+    assert.equal(defaultsInput("drawer").open, true);
+    assert.equal(defaultsInput("keyword").value, "changed keyword");
+  }
+  defaultsInput("keyword").value = originalKeyword;
+  assert.equal(defaultEditorHasChanges(), false);
+  const beforeRevertedClose = discardPrompts.length;
+  defaultsInput("close").click();
+  assert.equal(defaultsInput("drawer").open, false);
+  assert.equal(discardPrompts.length, beforeRevertedClose);
+  openDefaultEditor("group_name", rules[0]);
+  await flush();
+  defaultsInput("keyword").value = "saved keyword";
+  const beforeSavedClose = discardPrompts.length;
+  await saveDefault({ preventDefault() {} });
+  assert.equal(defaultsInput("drawer").open, false);
+  assert.equal(discardPrompts.length, beforeSavedClose);
+  openDefaultEditor("group_name", rules[0]);
+  await flush();
+  defaultsInput("project").value = "available";
+  discardConfirmed = true;
+  defaultsInput("cancel").click();
+  assert.equal(defaultsInput("drawer").open, false);
+  assert.equal(defaultsEditor, null);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

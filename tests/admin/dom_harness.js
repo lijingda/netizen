@@ -123,6 +123,16 @@ document.createTextNode = (text) => { const node = new Element("text"); node.tex
 document.body = document.querySelector("body");
 const window = { innerWidth: 1200, addEventListener() {},
   matchMedia: () => ({ matches: false, addEventListener() {} }) };
+window.history = {
+  state: null,
+  replaceState(state, _unused, href) {
+    this.state = state;
+    const url = new URL(href, "https://admin");
+    window.location.pathname = url.pathname;
+    window.location.search = url.search;
+  },
+  pushState(...args) { this.replaceState(...args); },
+};
 class FormData {
   constructor(form) {
     this.entries = form.querySelectorAll("input, select")

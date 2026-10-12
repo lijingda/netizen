@@ -1689,8 +1689,9 @@ Runtime 之前以 closed admission 绑定；Feishu、Store、Runtime 和管理 a
 HTTP 使用 exact-pin `h11` 的公开状态机和受限 `asyncio` transport：最多 32 条连接，header
 absolute deadline 5 秒、keep-alive 15 秒、request/header line 8 KiB、headers 32 KiB、body
 64 KiB，并拒绝 pipelining 和 upload。未认证内容仅有登录 HTML/JS/CSS、浏览器绑定的
-设备授权 start/state/cancel/二维码与无细节 readiness；未认证 GET `/` 只返回 303 到
-`/login`。管理 HTML、JavaScript、API 和其他资源要求 session 并返回 401。
+设备授权 start/state/cancel/二维码与无细节 readiness；未认证 GET 已知 Admin 页面路径
+只返回 303 到 `/login`，携带经校验的回跳地址。管理 HTML、JavaScript、API 和其他资源
+仍要求 session；API、受保护资源和未知路径未认证时返回 401，不改成登录 HTML。
 
 按 [ADR 0080](adr/0080-authenticate-admins-with-feishu-identities.md)，登录复用当前实例
 飞书应用的 Device Flow，不要求实例回调 URL。打开登录页只签发 preauth 并查询状态，
@@ -1745,6 +1746,25 @@ type 为 user 后仍须管理员确认及服务端授权校验。当前用户资
 删除；本轮不保留旧 enabled/secret 配置及服务模板兼容。协议 SDK 缺口与移除条件见 ADR
 0080，平台真人验收状态见部署记录，不以合成测试或旧 demo 冒充正式版本验收。
 
+### 页面导航与未保存修改
+
+模块使用同源路径：`/projects`、`/sessions/ordinary`、`/sessions/temporary`、`/schedules`、
+`/defaults`、`/maintenance` 和 `/system`；默认配置子 Tab 使用 `kind` 查询参数。
+已应用筛选、排序和每页数量写入允许的 query 参数，不把未提交筛选草稿、编辑内容、
+授权或 keyset cursor 放进 URL。复制链接、直接访问和整页刷新均可恢复相同查询条件；
+浏览器前进／后退恢复地址对应视图并重新查询第一页，不恢复列表快照或旧操作授权。
+页内普通 Tab 切换继续保留各列表自己的已应用查询与浏览位置。旧 `/?binding_id=...`
+链接仍进入对应普通会话查询，并保留显式 `inventoryState=all`。
+登录回跳只接受允许的 Admin 相对路径及查询串，拒绝外部地址、未知路径和控制字符，
+无效目标回退 `/projects`；登录成功后重新查询，不重放操作。
+
+会话配置、默认会话配置和定时任务编辑抽屉按当前字段与初始值判断未保存修改。
+关闭、取消、Escape、离开编辑视图或退出登录前可确认放弃，取消则保留原表单与授权；
+整页离开或刷新仅在有修改时请求浏览器原生提醒。不存储持久草稿；还原初始值、
+异步默认值／模型目录回填与成功保存不触发放弃提醒。提交中继续保持原有关闭和重复提交
+限制，未知结果不因离开保护而获得新授权。定时任务选择原会话是内部步骤，保留页内草稿
+而不询问放弃；明确取消选择或离开该流程时仍保护未保存内容。
+
 ### 系统维护 API
 
 系统维护沿用 `updates` 路由，但按 ADR 0076 收缩为本实例重启。
@@ -1788,7 +1808,9 @@ Admin 的 Sessions 下分“普通会话”和“临时会话”两个二级 Tab
 
 Projects、普通会话和临时会话都使用服务端 keyset cursor。Binding 查询先在 Channel-owned
 索引中过滤 Project、Scope kind、chat/topic/Binding/native ID、current 和时间。Sessions 页面
-移除 Chat/Topic/Binding/Thread ID 输入框，列表仍展示 ID，API 保留精确 ID 查询。Project、
+移除 Chat/Topic/Binding/Thread ID 筛选输入框，API 保留精确 ID 查询。普通列表保留名称、
+群名和短 ID，完整 Chat/Topic/Binding/Thread ID 收入“会话标识”折叠区，点击可选中复制；
+折叠仅影响展示，不改变精确身份或操作授权。Project、
 Scope、会话状态和当前指针均多选：同一项取“或”，不同项取“且”。Project 是可搜索下拉，
 通过独立分页 options 查询包含已停用的全部未删除 Project，不读取 native archived aggregate；
 Scope 为单聊/群聊/话题，current 为当前/非当前，两者及 Project 默认全部。重复值和选择
@@ -1855,7 +1877,9 @@ Unknown 分类和按页摘要补读；Channel 不再自行扫描目录或判断�
 缺项或冲突时提示另有未确认会话，不能声称完整空列表。飞书列表不查询 Admin 专用 chat label。
 这些展示投影不作为恢复/删除的存在性证明，也不作为删除清单来源；原生操作按各自返回处理。
 Sessions 每页只接受 10/20/50/100，默认 20；浏览器用 cursor
-栈提供前后翻页，不计算总数或支持随机页码。Runtime snapshot primitive 仍只接受最多 50 个
+栈提供前后翻页，不计算总数或支持随机页码。Projects、定时计划和最近触发记录也提供
+“上一页／第 N 页／下一页”，仅在当前浏览器页面内保留游标栈；查询成功后才更新页码，失败保留
+原页与可重试入口。Runtime snapshot primitive 仍只接受最多 50 个
 完整 ID；100 行 Sessions 首屏由 Web adapter 分两批读取。该只读 primitive 不签发 action
 token，浏览器不再定期请求它。
 
@@ -1927,6 +1951,9 @@ Admin 各处复用同一个群选择器：收起态只占一行，展示头像�
 已选目标，关闭弹层保留原选择，只有选中候选或明确清除才通知调用方；键盘选择和 Escape
 关闭后焦点回到触发按钮。筛选空态及空选项为“全部”，创建和配置表单空态为“请选择群聊”，
 不提供“全部”目标。禁用的已存目标仍通过悬停提示和无障碍描述保留完整身份。
+聚焦选择框不自动展开或查询目录，点击或方向键才打开。单选字段共用 Admin 弹层样式，
+保留原生 select 作为值、表单校验及禁用状态的唯一来源；选项或字段约束变化时关闭旧弹层。
+群选择、单选和筛选触发器使用一致的紧凑字号与行高，不改变各场景的单选／多选语义。
 目录返回可选 `avatarUrl`，浏览器直连
 受支持的飞书 HTTPS CDN，不由 Admin 代理下载，图片不发送 referrer，CSP 只为这些图片
 来源增开权限。头像缺失或加载失败显示通用群图标。默认配置和新话题计划的历史目标在
@@ -1965,6 +1992,10 @@ ADR 0037/0049/0078 的 delete primitive，由原生返回决定结果。
 action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact、Side resume 或
 任意筛选结果的批量 native mutation route。
 
+普通会话按可用能力将“配置”“停止”“设为当前”及恢复操作直接展示；创建定时任务、
+重命名、归档、删除、新建 Lazy 和释放订阅收入“更多”。危险操作不新增独立分组，
+保留原有颜色、二次确认和 exact grant 校验；临时会话少量操作继续直接展示。
+
 临时会话按共享能力展示停止和结束操作。停止只中断当前 Side Turn，Side 保留并可继续；
 结束复用既有 Side close 的停止准入、interrupt、终态确认、cleanup、unsubscribe 与墓碑提交。
 飞书 `/stop` 和 Admin 停止通过同一管理入口调用既有 Runtime `stop_side`；Admin grant
@@ -2002,6 +2033,9 @@ management service 和持久数据，修改沿用 revision 及 action/CSRF 检�
 定时管理是 ADR 0061/0068/0070 的计划定义编辑与已保存计划手动执行例外。`/cron` 卡片、Admin
 “定时任务”页和自然语言 `cron_manage` 共用 ScheduleService，提供分页查询、创建、编辑、
 启停、删除、立即运行和最近执行。
+Admin 的“详情／最近记录”打开只读抽屉，展示计划、时间预览与分页触发记录；加载和失败
+提示位于抽屉内，可分别重试详情或记录，关闭后回到原列表触发位置。晚到响应不得覆盖
+新计划或重新打开已关闭抽屉，不改变计划执行及已受理手动运行的结果。
 新话题目标显式 chat ID 优先，原会话目标固定 exact Binding；MCP 默认值只从
 `params._meta.threadId` 的 exact Binding/Scope 解析，
 无映射时要求显式目标，不按 cwd 猜测或新增 ACL。卡片写操作携带 revision 和稳定请求 ID，
@@ -2010,8 +2044,9 @@ Admin 继续使用既有认证与 action/CSRF grant。四类时间规则、时�
 不是定时计划。Side 保持原有 slash 白名单。
 
 Admin 新话题计划同样先区分群聊与单聊，复用群选择器并保留手动聊天 ID；单聊提示
-可在目标单聊使用 `/cron` 并选择“当前聊天”，无需查询 ID。指定原会话计划从 Sessions 的逐行“创建定时任务”入口打开
-同一抽屉，固定 exact Binding 并只读展示位置、Project 和标识，不复制会话设置。
+可在目标单聊使用 `/cron` 并选择“当前聊天”，无需查询 ID。指定原会话计划从 Sessions
+逐行“更多 → 创建定时任务”入口打开同一抽屉，固定 exact Binding 并只读展示位置、Project
+和标识，不复制会话设置。
 从定时页选择原会话时引导到 Sessions，名称、指令和时间草稿只保留在当前浏览器页内存，
 提供显式取消；选择行后取得新 action grant，恢复草稿并重新预览时间。保存后保留 Sessions
 筛选与分页，提供查看定时任务的入口。不在抽屉复制 Sessions 目录，不自动激活或恢复目标。

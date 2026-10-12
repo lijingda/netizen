@@ -3,6 +3,9 @@
 (() => {
   const node = (id) => document.querySelector(`#login-${id}`);
   const nonce = node("nonce").value;
+  // The server validates this against the exact Admin page allowlist.
+  const returnTarget = node("next").value;
+  node("retry").href = `/login?next=${encodeURIComponent(returnTarget)}`;
   let current = null;
   let busy = false;
   let reading = false;
@@ -60,7 +63,7 @@
         ? `本次授权有效至 ${new Date(data.expiresAt * 1000).toLocaleTimeString()}。` : "";
     }
     if (data.state === "authenticated") {
-      window.location.assign("/");
+      window.location.assign(returnTarget);
     } else if (["starting", "pending"].includes(data.state)) {
       const interval = Number.isFinite(data.interval) ? data.interval : 2;
       timer = setTimeout(check, Math.min(30, Math.max(1, interval)) * 1000);

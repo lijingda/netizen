@@ -1,7 +1,7 @@
 .chat-picker { position: relative; min-width: 0; }
 .chat-picker .chat-picker-label { display: block; margin: 0 0 5px; color: var(--muted); font-size: 13px; }
 .chat-picker-control { position: relative; }
-.chat-picker .chat-picker-trigger { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 36px; border: 1px solid #bac3d0; border-radius: 7px; padding: 8px 10px; background: var(--paper); color: var(--ink); text-align: left; }
+.chat-picker .chat-picker-trigger { display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--control-min-height); border: 1px solid #bac3d0; border-radius: 7px; padding: var(--control-padding); background: var(--paper); color: var(--ink); font-size: var(--control-font-size); line-height: var(--control-line-height); text-align: left; }
 .chat-picker-trigger:hover { border-color: #8290a3; }
 .chat-picker-trigger[data-selected="true"]:not(:disabled) { padding-right: 58px; }
 .chat-picker-trigger:disabled { cursor: default; }
