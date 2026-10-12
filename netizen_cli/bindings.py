@@ -345,6 +345,8 @@ class SideTopicQuery:
     state: SideTopicState | None = None
     created_from: str | None = None
     created_before: str | None = None
+    project_aliases: tuple[str, ...] | None = None
+    states: tuple[SideTopicState, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2229,14 +2231,16 @@ class BindingStore:
         cursor: SideTopicCursor | None = None,
         limit: int = 25,
         deadline_seconds: float = 0.5,
+        extra_side_ids: tuple[str, ...] = (),
     ) -> SideTopicPage:
         """Read one global Side Topic inventory page off the event loop."""
 
-        page_limit = _validate_page_limit(limit)
+        page_limit = _validate_page_limit(limit, maximum=100)
         statement, parameters = _side_inventory_statement(
             query=query,
             cursor=cursor,
             limit=page_limit + 1,
+            extra_side_ids=extra_side_ids,
         )
         rows = await self._read_rows(
             statement,
@@ -3017,11 +3021,11 @@ def _side_inventory_statement(
     query: SideTopicQuery,
     cursor: SideTopicCursor | None,
     limit: int,
+    extra_side_ids: tuple[str, ...] = (),
 ) -> tuple[str, list[object]]:
     clauses: list[str] = []
     parameters: list[object] = []
     for label, column, value in (
-        ("Project alias", "b.project_alias", query.project_alias),
         ("parent Binding ID", "st.parent_binding_id", query.parent_binding_id),
         ("app ID", "st.app_id", query.app_id),
         ("chat ID", "st.chat_id", query.chat_id),
@@ -3032,11 +3036,30 @@ def _side_inventory_statement(
             _require_query_value(label, value)
             clauses.append(column + " = ?")
             parameters.append(value)
-    if query.state is not None:
-        if not isinstance(query.state, SideTopicState):
+    projects = query.project_aliases
+    if query.project_alias is not None:
+        projects = (query.project_alias,)
+    if projects is not None:
+        if not isinstance(projects, tuple) or not projects:
+            raise ValueError("Side Project aliases must be a non-empty tuple")
+        for alias in projects:
+            _require_query_value("Project alias", alias)
+        selected = tuple(sorted(set(projects)))
+        project_clause = "b.project_alias IN (" + ",".join("?" for _ in selected) + ")"
+        parameters.extend(selected)
+        if extra_side_ids:
+            project_clause += " OR st.side_id IN (" + ",".join("?" for _ in extra_side_ids) + ")"
+            parameters.extend(extra_side_ids)
+        clauses.append("(" + project_clause + ")")
+    states = (query.state,) if query.state is not None else query.states
+    if states is not None:
+        if not isinstance(states, tuple) or not states or any(
+            not isinstance(state, SideTopicState) for state in states
+        ):
             raise ValueError("Side Topic state is invalid")
-        clauses.append("st.state = ?")
-        parameters.append(query.state.value)
+        selected_states = tuple(sorted({state.value for state in states}))
+        clauses.append("st.state IN (" + ",".join("?" for _ in selected_states) + ")")
+        parameters.extend(selected_states)
     if query.created_from is not None:
         _require_query_value("created-from time", query.created_from)
         clauses.append("st.created_at >= ?")

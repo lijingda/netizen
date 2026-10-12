@@ -57,6 +57,7 @@ from ..runtime.contracts import (
     SideLifecycleOutcome,
     SideCloseFailed,
     SideSessionSnapshot,
+    SideSessionState,
     SideSessionNotFound,
     StopAcknowledger,
     StopDisposition,
@@ -334,6 +335,33 @@ class SideTopicInventoryItem:
     record: SideTopicInventoryRecord
     chat: ChatLabel
     runtime: SideSessionSnapshot | None
+    parent_binding: ThreadBinding | None = None
+    parent_metadata: NativeThreadMetadata | None = None
+
+    @property
+    def session_state(self) -> str:
+        if self.runtime is not None and self.runtime.state is SideSessionState.CLOSING:
+            return "closing"
+        if self.record.side_topic.state is SideTopicState.CREATING:
+            return "creating"
+        if self.record.side_topic.state.terminal:
+            return self.record.side_topic.state.value
+        if self.runtime is not None:
+            return self.runtime.state.value
+        return "unavailable"
+
+    @property
+    def can_stop(self) -> bool:
+        return (
+            self.record.side_topic.state is SideTopicState.OPEN
+            and self.runtime is not None
+            and self.runtime.state is SideSessionState.OPEN
+            and self.runtime.turn_id is not None
+        )
+
+    @property
+    def can_close(self) -> bool:
+        return self.record.side_topic.state is not SideTopicState.CREATING and self.runtime is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -623,6 +651,17 @@ class ManagementRuntimePort:
     ) -> SideLifecycleOutcome:
         return await self.__runtime.close_side_exact(side_id, state=state)
 
+    async def stop_side(
+        self, side_id: str, *, acknowledge: StopAcknowledger | None = None,
+        expected_revision: int | None = None, expected_turn_id: str | None = None,
+    ) -> StopDisposition:
+        if expected_revision is None:
+            return await self.__runtime.stop_side(side_id, acknowledge=acknowledge)
+        return await self.__runtime.stop_side(
+            side_id, acknowledge=acknowledge, expected_revision=expected_revision,
+            expected_turn_id=expected_turn_id,
+        )
+
     async def drain_project_side_creation(self, binding_id: str) -> None:
         await self.__runtime.drain_project_side_creation(binding_id)
 
@@ -650,6 +689,9 @@ class ManagementRuntimePort:
             return self.__runtime.side_snapshot(side_id)
         except SideSessionNotFound:
             return None
+
+    def side_ids_for_projects(self, project_aliases: tuple[str, ...]) -> tuple[str, ...]:
+        return self.__runtime.side_ids_for_projects(project_aliases)
 
     def project_side_snapshots(self, alias: str) -> tuple[SideSessionSnapshot, ...]:
         return self.__runtime.project_side_snapshots(alias)
@@ -1306,27 +1348,44 @@ class InstanceManagementService:
         limit: int = 25,
         deadline: float,
     ) -> SideTopicInventoryPage:
+        projects = (query.project_alias,) if query.project_alias is not None else query.project_aliases
         page = await self._bindings.query_side_topics(
             query=query,
             cursor=cursor,
             limit=limit,
             deadline_seconds=self._query_seconds(deadline),
+            extra_side_ids=self._runtime.side_ids_for_projects(projects) if projects else (),
         )
-        labels = await self.resolve_chat_labels(
-            (item.side_topic.chat_id for item in page.items),
-            deadline=deadline,
-        )
-        return SideTopicInventoryPage(
-            items=tuple(
-                SideTopicInventoryItem(
-                    record=item,
-                    chat=labels[item.side_topic.chat_id],
-                    runtime=self._runtime.side_snapshot_exact(item.side_topic.id),
-                )
-                for item in page.items
+        parents = {}
+        for item in page.items:
+            parent_id = item.side_topic.parent_binding_id
+            if parent_id in parents:
+                continue
+            try:
+                parents[parent_id] = self._bindings.get(parent_id)
+            except BindingNotFound:
+                pass
+        views, labels = await asyncio.gather(
+            self._session_native_views(tuple(parents.values()), native=None, deadline=deadline),
+            self.resolve_chat_labels(
+                (item.side_topic.chat_id for item in page.items), deadline=deadline,
             ),
-            next_cursor=page.next_cursor,
         )
+        items = []
+        for item in page.items:
+            runtime = self._runtime.side_snapshot_exact(item.side_topic.id)
+            parent = parents.get(item.side_topic.parent_binding_id)
+            items.append(SideTopicInventoryItem(
+                record=replace(item, project_alias=runtime.project_alias) if runtime is not None else item,
+                chat=labels[item.side_topic.chat_id],
+                runtime=runtime,
+                parent_binding=parent,
+                parent_metadata=(
+                    views[parent.native_thread_id].metadata
+                    if parent is not None and parent.native_thread_id in views else None
+                ),
+            ))
+        return SideTopicInventoryPage(items=tuple(items), next_cursor=page.next_cursor)
 
     async def binding_status_exact(
         self,
@@ -1934,6 +1993,23 @@ class InstanceManagementService:
                 expected_activity_revision=runtime_precondition.activity_revision,
                 expected_turn_id=turn_id,
             )
+
+    async def stop_side(
+        self, *, target: CurrentSideTarget,
+        acknowledge: StopAcknowledger | None = None,
+        runtime_precondition: RuntimePrecondition | None = None,
+    ) -> StopDisposition:
+        record = self._bindings.get_side_topic(target.side_id)
+        self._require_side_identity(record, target)
+        if record.state is not SideTopicState.OPEN:
+            raise RuntimeStateChanged("Side 已不再处于可操作状态。")
+        if runtime_precondition is None:
+            return await self._runtime.stop_side(record.id, acknowledge=acknowledge)
+        return await self._runtime.stop_side(
+            record.id, acknowledge=acknowledge,
+            expected_revision=runtime_precondition.activity_revision,
+            expected_turn_id=runtime_precondition.physical_turn_id,
+        )
 
     async def close_side(
         self,

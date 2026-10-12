@@ -40,7 +40,7 @@ class Element {
   getBoundingClientRect() { return { left: 20, width: 240 }; }
   matches(selector) {
     if (selector.startsWith("#")) return this.id === selector.slice(1);
-    if (selector.startsWith(".")) return this.className === selector.slice(1);
+    if (selector.startsWith(".")) return this.className.split(/\s+/).includes(selector.slice(1));
     if (selector.startsWith("[")) return selector.slice(1, -1) in this.attrs;
     if (selector.includes(":not(:disabled)")) {
       return this.tagName === selector.split(":")[0] && !this.disabled;

@@ -169,10 +169,33 @@ def _runtime_side_json(snapshot: Any) -> dict[str, object]:
         "parentBindingId": snapshot.parent_binding_id,
         "threadId": snapshot.thread_id,
         "state": snapshot.state.value,
+        "sessionState": snapshot.state.value,
+        "revision": snapshot.revision,
         "turnId": snapshot.turn_id,
         "turnState": (
             snapshot.turn_state.value if snapshot.turn_state is not None else None
         ),
+    }
+
+
+def _side_parent_json(item: Any) -> dict[str, object]:
+    metadata = item.parent_metadata
+    title = None
+    if item.parent_binding is not None:
+        if item.parent_binding.native_thread_id is None:
+            title = "新会话"
+        elif metadata is None:
+            title = "会话信息暂不可用"
+        else:
+            title = (
+                " ".join((metadata.name or "").split())
+                or " ".join((metadata.preview or "").split())
+                or "未命名会话"
+            )[:120]
+    return {
+        "bindingId": item.record.side_topic.parent_binding_id,
+        "title": title,
+        "available": item.parent_binding is not None,
     }
 
 

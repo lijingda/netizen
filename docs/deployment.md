@@ -1505,7 +1505,8 @@ UAT/RT、设备授权码或本地会话凭证。最后在两平台重跑真实 C
 重定向到 `/login`（不返回 HTML 或状态），未知 route 和受保护 API 必须返回 401。仅明确
 公开的登录页面、登录资源与授权端点允许进入预认证流程，仍需浏览器绑定和同源检查；
 `/health/ready` 只返回无细节状态。通过飞书登录并核对管理员名单后，检查各管理
-页面、筛选、分页和五秒 runtime polling。Sessions 默认显示 Active + Lazy，Project 可搜索
+页面、筛选、分页和五秒 runtime polling。Sessions 默认进入“普通会话”，默认显示
+Active + Lazy + Unknown，Project 可搜索
 并包含停用项；Project/Scope/状态/current 的多选应满足同项“或”、跨项“且”，无 ID 输入框，
 列表 ID 仍可见。验证重置恢复默认状态、全部时间和每页 20 条。分别选择 10/20/50/100，确认前后翻页、
 页码与当前页条数正确；在 P2P、普通群和话题群 Binding 上确认显示真人/群名称与正确类型，
@@ -1514,7 +1515,19 @@ UAT/RT、设备授权码或本地会话凭证。最后在两平台重跑真实 C
 register/create/enable/disable，
 两个 Scope 中 active/inactive、Lazy/materialized/archived Binding 的 create/activate/
 configure/rename/archive/两种 unarchive/delete-lazy/Stop/Release，以及一个 open Side 的 exact
-Close。再创建两个 disposable materialized Binding，分别保持 active catalog 与 archived
+Close。Sessions 的“临时会话”默认选择 creating/open，使用项目和群选择器、状态多选与
+创建时间，默认每页 20，支持 10/20/50/100 与前后翻页；没有 Parent/Topic/Root ID 筛选。
+反复切换两个二级 Tab，确认各自的筛选草稿、已应用查询和分页保留，普通列表字段及操作
+不变，隐藏 Tab 和旧页的异步结果不更新当前页面。查询失败时保留同一份列表、页码和
+已应用条件，筛选草稿不丢失；延迟旧查询的成功或失败
+响应，确认都不能覆盖后来查询的结果或提示，自动补读不抢占手动翻页。无首轮问题的
+Side 创建期间打开列表，确认完成创建后可自动显示可用状态及操作；同一任务追加消息
+不应禁用仍合法的结束操作。检查来源会话名称与话题链接、折叠 ID、来源已删除但仍存活
+Side 的项目展示和筛选，以及已结束记录没有“无进程内 Session”提示。
+在 disposable Side 执行中点击停止，确认只停止该 Turn，后续仍可继续；保留旧页并在飞书
+开始新 Turn，旧停止操作须明确拒绝，不得停止新 Turn。结束与飞书 `/side close` 的结果
+一致，关闭未确认时不显示已结束；运行态轮询不能重新签发操作授权。
+再创建两个 disposable materialized Binding，分别保持 active catalog 与 archived
 catalog：两行仅在 Delete capability 可用时显示删除；点击后浏览器二次确认必须显示会话、
 Scope、short ID 与完整永久级联后果，取消必须零 mutation，确认后才删除对应
 Thread/descendants 与 Binding。删除 inactive 行不得改变其他 active pointer，删除 current 行

@@ -1547,6 +1547,14 @@ class CodexRuntime:
     def side_snapshot(self, side_id: str) -> SideSessionSnapshot:
         return self._side_snapshot(self._require_side(side_id))
 
+    def side_ids_for_projects(self, project_aliases: tuple[str, ...]) -> tuple[str, ...]:
+        """Find live Side IDs by frozen ownership, including deleted Parents."""
+        aliases = set(project_aliases)
+        return tuple(
+            side_id for side_id, session in self._sides.items()
+            if session.project_alias in aliases
+        )
+
     def project_side_snapshots(
         self,
         alias: str,
@@ -1753,9 +1761,16 @@ class CodexRuntime:
         side_id: str,
         *,
         acknowledge: StopAcknowledger | None = None,
+        expected_revision: int | None = None,
+        expected_turn_id: str | None = None,
     ) -> StopDisposition:
         async with self._side_lock(side_id):
             session = self._require_side(side_id)
+            if expected_revision is not None and (
+                session.revision != expected_revision
+                or (session.active.handle.id if session.active is not None else None) != expected_turn_id
+            ):
+                raise SideSessionConflict("Side 运行状态已变化，请刷新后重试。")
             if session.state is SideSessionState.CLOSING:
                 return StopDisposition.STOPPING
             active = session.active
@@ -5344,6 +5359,7 @@ class CodexRuntime:
             turn_id=active.handle.id if active is not None else None,
             turn_state=active.state if active is not None else None,
             last_activity=session.last_activity,
+            revision=session.revision,
         )
 
     def _require_side(self, side_id: str) -> _SideSession:

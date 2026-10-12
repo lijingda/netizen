@@ -55,6 +55,7 @@ from netizen_cli.codex_runtime import (
     SideCloseFailed,
     SideLifecycleOutcome,
     SideSessionClosing,
+    SideSessionConflict,
     SideSessionState,
     SideStartFailed,
     SideTurnActivitySnapshot,
@@ -1301,6 +1302,61 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(RuntimeClosed):
             await self.runtime.capture_side_submission_admission(record.id)
+
+    async def test_exact_side_stop_rejects_replacement_turn_and_idle_aba(self) -> None:
+        _binding, record, initial = await self.open_side()
+        self.assertEqual(await self.runtime.stop_side(
+            record.id, expected_revision=initial.revision, expected_turn_id=None,
+        ), StopDisposition.NOT_RUNNING)
+        first = await self.runtime.submit_side(
+            side_id=record.id, input="first", owner_id="ou_owner", origin=object(),
+        )
+        observed = self.runtime.side_snapshot(record.id)
+        await self.finish_side_turn(first)
+        with self.assertRaises(SideSessionConflict):
+            await self.runtime.stop_side(
+                record.id, expected_revision=initial.revision, expected_turn_id=None,
+            )
+        second = await self.runtime.submit_side(
+            side_id=record.id, input="replacement", owner_id="ou_owner", origin=object(),
+        )
+        replacement = self.codex.handles[-1]
+        with self.assertRaises(SideSessionConflict):
+            await self.runtime.stop_side(
+                record.id, expected_revision=observed.revision,
+                expected_turn_id=observed.turn_id,
+            )
+        self.assertEqual(replacement.interrupt_count, 0)
+        latest = self.runtime.side_snapshot(record.id)
+        self.assertEqual(await self.runtime.stop_side(
+            record.id, expected_revision=latest.revision, expected_turn_id=latest.turn_id,
+        ), StopDisposition.REQUESTED)
+        self.assertEqual(replacement.interrupt_count, 1)
+        await self.finish_side_turn(second)
+
+    async def test_exact_side_stop_rechecks_revision_after_waiting_for_side_lock(self) -> None:
+        _binding, record, initial = await self.open_side()
+        side_lock = self.runtime._side_lock(record.id)
+        await side_lock.acquire()
+        entered = asyncio.Event()
+
+        async def request_stop():
+            entered.set()
+            return await self.runtime.stop_side(
+                record.id, expected_revision=initial.revision, expected_turn_id=None,
+            )
+
+        stop = asyncio.create_task(request_stop())
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            session = self.runtime._sides[record.id]
+            session.state = SideSessionState.CLOSING
+            session.revision += 1
+        finally:
+            side_lock.release()
+        with self.assertRaises(SideSessionConflict):
+            await stop
+        self.assertEqual(await self.runtime.stop_side(record.id), StopDisposition.STOPPING)
 
     async def test_stop_cleans_current_turn_but_side_accepts_another_turn(self) -> None:
         observer = FakeTurnPlanObserver()

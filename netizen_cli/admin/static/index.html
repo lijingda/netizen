@@ -25,7 +25,6 @@
   <nav class="tabs" aria-label="管理模块">
     <button class="tab active" data-tab="projects" aria-selected="true">Projects</button>
     <button class="tab" data-tab="sessions" aria-selected="false">Sessions</button>
-    <button class="tab" data-tab="side-topics" aria-selected="false">Side Topics</button>
     <button class="tab" data-tab="schedules" aria-selected="false">定时任务</button>
     <button class="tab" data-tab="defaults" aria-selected="false">默认会话配置</button>
     <button class="tab" data-tab="updates" aria-selected="false">系统维护</button>
@@ -66,9 +65,14 @@
 
     <section id="sessions" class="panel" aria-labelledby="sessions-heading" hidden>
       <div class="section-head">
-        <div><p class="eyebrow">ORDINARY THREADS</p><h2 id="sessions-heading">Sessions</h2></div>
+        <div><p class="eyebrow">CONVERSATIONS</p><h2 id="sessions-heading">Sessions</h2></div>
         <button class="refresh" data-refresh="sessions">刷新</button>
       </div>
+      <div class="session-tabs" role="tablist" aria-label="会话类型">
+        <button id="session-tab-ordinary" class="session-tab" role="tab" aria-selected="true" aria-controls="sessions-ordinary" tabindex="0" data-session-tab="ordinary">普通会话</button>
+        <button id="session-tab-temporary" class="session-tab" role="tab" aria-selected="false" aria-controls="sessions-temporary" tabindex="-1" data-session-tab="temporary">临时会话</button>
+      </div>
+      <div id="sessions-ordinary" role="tabpanel" aria-labelledby="session-tab-ordinary">
       <form id="session-filter" class="filter-bar">
         <fieldset class="multi-filter" data-session-multi="project"><legend>Project</legend></fieldset>
         <div id="session-chat-picker"></div>
@@ -101,6 +105,27 @@
         <span id="sessions-page" aria-live="polite">第 1 页</span>
         <button id="sessions-next" class="next" disabled>下一页</button>
       </nav>
+      </div>
+      <div id="sessions-temporary" role="tabpanel" aria-labelledby="session-tab-temporary" hidden>
+        <form id="side-filter" class="filter-bar">
+          <fieldset class="multi-filter" data-side-multi="project"><legend>Project</legend></fieldset>
+          <div id="side-chat-picker"></div>
+          <input id="side-chat-filter" name="chatId" type="hidden">
+          <fieldset class="multi-filter" data-side-multi="state"><legend>会话状态</legend></fieldset>
+          <fieldset class="time-range-filter" data-time-range data-time-range-id="side-created"><legend>创建时间</legend></fieldset>
+          <label>每页<select id="side-page-size" name="pageSize"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select></label>
+          <button type="submit">筛选</button>
+          <button type="button" id="side-filter-reset" class="refresh">重置</button>
+        </form>
+        <div class="table-wrap"><table><thead><tr>
+          <th>飞书位置</th><th>来源会话</th><th>会话状态</th><th>运行态</th><th>Project</th><th>创建时间</th><th>操作</th>
+        </tr></thead><tbody id="sides-body"></tbody></table></div>
+        <nav class="pagination" aria-label="临时会话分页">
+          <button id="sides-previous" class="next" disabled>上一页</button>
+          <span id="sides-page" aria-live="polite">第 1 页</span>
+          <button id="sides-next" class="next" disabled>下一页</button>
+        </nav>
+      </div>
     </section>
 
     <dialog id="session-settings-drawer" class="editor-drawer" aria-labelledby="session-settings-title" aria-describedby="session-settings-identity">
@@ -131,33 +156,6 @@
       </form>
     </dialog>
 
-    <section id="side-topics" class="panel" aria-labelledby="sides-heading" hidden>
-      <div class="section-head">
-        <div><p class="eyebrow">EPHEMERAL THREADS</p><h2 id="sides-heading">Side Topics</h2></div>
-        <button class="refresh" data-refresh="side-topics">刷新</button>
-      </div>
-      <form id="side-filter" class="filter-bar">
-        <label>Project<input name="project" maxlength="64"></label>
-        <label>Parent Binding<input name="parentBindingId" maxlength="512"></label>
-        <div>
-          <label>Chat ID<input name="chatId" maxlength="512" placeholder="聊天 ID，不是用户 ID" aria-describedby="side-chat-id-help"></label>
-          <p id="side-chat-id-help" class="defaults-field-help"><a href="https://open.feishu.cn/document/server-docs/group/chat/chat-id-description" target="_blank" rel="noopener noreferrer" title="聊天 ID，不是用户 ID；单聊请选择与本机器人的聊天">如何获取聊天 ID</a></p>
-        </div>
-        <label>Topic ID<input name="topicId" maxlength="512"></label>
-        <label>Root Message ID<input name="rootMessageId" maxlength="512"></label>
-        <label>状态
-          <select name="state"><option value="">全部</option><option value="creating">Creating</option><option value="open">Open</option><option value="closed">Closed</option><option value="failed">Failed</option><option value="expired">Expired</option></select>
-        </label>
-        <fieldset class="time-range-filter" data-time-range data-time-range-id="side-created">
-          <legend>创建时间</legend>
-        </fieldset>
-        <button type="submit">筛选</button>
-      </form>
-      <div class="table-wrap"><table><thead><tr>
-        <th>Side</th><th>Parent / Project</th><th>飞书维度</th><th>状态</th><th>运行态</th><th>操作</th>
-      </tr></thead><tbody id="sides-body"></tbody></table></div>
-      <button id="sides-next" class="next" hidden>下一页</button>
-    </section>
     <section id="defaults" class="panel" aria-labelledby="defaults-heading" hidden>
       <div class="section-head">
         <div><p class="eyebrow">SESSION DEFAULTS</p><h2 id="defaults-heading">默认会话配置</h2></div>

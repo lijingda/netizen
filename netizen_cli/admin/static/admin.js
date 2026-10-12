@@ -2,6 +2,7 @@
 
 const state = {
   tab: "projects",
+  sessionTab: "ordinary",
   projects: null,
   sessions: null,
   sides: null,
@@ -9,14 +10,8 @@ const state = {
   schedules: null,
   defaults: null,
   projectCursor: null,
-  sideCursor: null,
-  sessionPage: {
-    cursor: null,
-    nextCursor: null,
-    previousCursors: [],
-    number: 1,
-    query: null,
-  },
+  sidePage: firstSessionPage(),
+  sessionPage: firstSessionPage(),
 };
 
 const statusNode = document.querySelector("#status");
@@ -520,6 +515,7 @@ async function loadProjects(cursor = null) {
 
 const timeRangeControllers = new WeakMap();
 const sessionMultiFilters = new Map();
+const sideMultiFilters = new Map();
 let openSessionMultiFilter = null;
 
 const sessionFilterOptions = {
@@ -527,12 +523,16 @@ const sessionFilterOptions = {
   scopeKind: [["direct", "单聊"], ["group", "群聊"], ["topic", "话题"]],
   inventoryState: [["active", "Active"], ["lazy", "Lazy"], ["unknown", "状态未确认"], ["archived", "Archived"], ["missing", "Missing"]],
   current: [["true", "当前"], ["false", "非当前"]],
+  state: [["creating", "创建中"], ["open", "存活"], ["closed", "已结束"], ["expired", "已失效"], ["failed", "失败"]],
 };
 
 function initializeSessionMultiFilter(root) {
-  const name = root.dataset.sessionMulti;
+  const name = root.dataset.sessionMulti || root.dataset.sideMulti;
+  const prefix = root.dataset.sideMulti ? "side" : "session";
+  const defaults = name === "inventoryState" ? ["active", "lazy", "unknown"]
+    : name === "state" ? ["creating", "open"] : [];
   const legend = root.querySelector("legend");
-  legend.id = `session-${name}-label`;
+  legend.id = `${prefix}-${name}-label`;
   const trigger = document.createElement("button");
   trigger.type = "button";
   trigger.className = "multi-filter-trigger";
@@ -545,7 +545,7 @@ function initializeSessionMultiFilter(root) {
   trigger.append(summary, chevron);
   const popover = document.createElement("div");
   popover.className = "multi-filter-popover";
-  popover.id = `session-${name}-options`;
+  popover.id = `${prefix}-${name}-options`;
   popover.hidden = true;
   popover.setAttribute("role", "group");
   popover.setAttribute("aria-labelledby", legend.id);
@@ -569,7 +569,7 @@ function initializeSessionMultiFilter(root) {
   popover.append(clear, choices, empty);
   root.append(trigger, popover);
   let options = sessionFilterOptions[name];
-  let selected = new Set(name === "inventoryState" ? ["active", "lazy", "unknown"] : []);
+  let selected = new Set(defaults);
 
   function renderSummary() {
     const labels = options.filter(([value]) => selected.has(value)).map(([, label]) => label);
@@ -639,8 +639,9 @@ function initializeSessionMultiFilter(root) {
   const controller = {
     close,
     values: () => [...selected],
+    clear() { selected.clear(); renderChoices(); },
     reset() {
-      selected = new Set(name === "inventoryState" ? ["active", "lazy", "unknown"] : []);
+      selected = new Set(defaults);
       search.value = "";
       close();
       renderChoices();
@@ -699,6 +700,9 @@ function initializeSessionMultiFilter(root) {
 for (const root of document.querySelectorAll("[data-session-multi]")) {
   sessionMultiFilters.set(root.dataset.sessionMulti, initializeSessionMultiFilter(root));
 }
+for (const root of document.querySelectorAll("[data-side-multi]")) {
+  sideMultiFilters.set(root.dataset.sideMulti, initializeSessionMultiFilter(root));
+}
 
 async function queryProjectOptions() {
   const options = [];
@@ -716,9 +720,10 @@ async function queryProjectOptions() {
   return options;
 }
 
-async function loadSessionProjectOptions() {
+async function loadSessionProjectOptions(filters = sessionMultiFilters, isCurrent = () => true) {
   const projects = await queryProjectOptions();
-  sessionMultiFilters.get("project").setOptions(projects.map((project) => [
+  if (!isCurrent()) return;
+  filters.get("project").setOptions(projects.map((project) => [
     project.alias, project.enabled ? project.alias : `${project.alias}（已停用）`,
   ]));
 }
@@ -731,11 +736,12 @@ function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
   for (const [key, value] of new FormData(form)) {
     if (String(value)) query.append(key, String(value));
   }
-  for (const root of form.querySelectorAll("[data-session-multi]")) {
-    const name = root.dataset.sessionMulti;
-    const values = sessionMultiFilters.get(name).values();
+  for (const root of form.querySelectorAll("[data-session-multi], [data-side-multi]")) {
+    const name = root.dataset.sessionMulti || root.dataset.sideMulti;
+    const filters = root.dataset.sideMulti ? sideMultiFilters : sessionMultiFilters;
+    const values = filters.get(name).values();
     for (const value of values) query.append(name, value);
-    if (name === "inventoryState" && values.length === 0) query.set(name, "all");
+    if (["inventoryState", "state"].includes(name) && values.length === 0) query.set(name, "all");
   }
   if (!query.has("pageSize")) query.set("pageSize", defaultPageSize);
   return query;
@@ -1263,7 +1269,7 @@ function locationFallback(session) {
   return `${chatModeLabel(session.chatMode, session.scopeKind)} · ${shortIdentity(session.chatId)}`;
 }
 
-function sessionLocationCell(row, session) {
+function sessionLocationCell(row, session, { showIdentity = true } = {}) {
   const td = document.createElement("td");
   const link = document.createElement("a");
   link.className = "chat-link";
@@ -1272,7 +1278,7 @@ function sessionLocationCell(row, session) {
   link.rel = "noopener noreferrer";
   link.textContent = session.chatLabelResolved
     ? session.chatLabel
-    : locationFallback(session);
+    : showIdentity ? locationFallback(session) : `${chatModeLabel(session.chatMode, session.scopeKind)}（名称暂不可用）`;
   link.title = session.topicOpenUrl
     ? "打开飞书话题"
     : "打开飞书会话";
@@ -1282,9 +1288,9 @@ function sessionLocationCell(row, session) {
   const chatId = document.createElement("span");
   chatId.className = "id";
   chatId.textContent = session.chatId;
-  mode.append(chatId);
+  if (showIdentity) mode.append(chatId);
   td.append(link, mode);
-  if (session.topicId) {
+  if (showIdentity && session.topicId) {
     const topicId = document.createElement("div");
     topicId.className = "id";
     topicId.textContent = `Topic ${session.topicId}`;
@@ -1325,49 +1331,80 @@ function sessionUpdatedAtLabel(session) {
   return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("zh-CN", { hour12: false });
 }
 
-function renderSessionPagination() {
-  const page = state.sessionPage;
-  document.querySelector("#sessions-previous").disabled = page.previousCursors.length === 0;
-  document.querySelector("#sessions-next").disabled = !page.nextCursor;
-  const count = state.sessions?.items?.length || 0;
-  document.querySelector("#sessions-page").textContent = `第 ${page.number} 页 · ${count} 条`;
+function firstSessionPage(query = null) {
+  return { cursor: null, nextCursor: null, previousCursors: [], number: 1, query };
 }
 
-function resetSessionPagination() {
-  state.sessionPage = {
-    cursor: null,
-    nextCursor: null,
-    previousCursors: [],
-    number: 1,
-    query: null,
-  };
+function sessionFilterPage(kind = "session") {
+  return firstSessionPage(formQuery(document.querySelector(`#${kind}-filter`), "20").toString());
 }
 
-function resetSessionFilters() {
-  const form = document.querySelector("#session-filter");
+function renderSessionPagination(kind = "session") {
+  const name = kind === "side" ? "sides" : "sessions";
+  const page = state[`${kind}Page`];
+  document.querySelector(`#${name}-previous`).disabled = page.previousCursors.length === 0;
+  document.querySelector(`#${name}-next`).disabled = !page.nextCursor;
+  document.querySelector(`#${name}-page`).textContent = `第 ${page.number} 页 · ${state[name]?.items?.length || 0} 条`;
+}
+
+function resetSessionFilters(kind = "session") {
+  const form = document.querySelector(`#${kind}-filter`);
   form.reset();
-  sessionChatPicker?.reset();
-  for (const controller of sessionMultiFilters.values()) controller.reset();
+  (kind === "side" ? sideChatPicker : sessionChatPicker)?.reset();
+  const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
+  for (const controller of filters.values()) controller.reset();
   for (const root of form.querySelectorAll("[data-time-range]")) {
     timeRangeControllers.get(root)?.reset();
   }
-  resetSessionPagination();
-  return refresh("sessions");
+  return refresh("sessions", sessionFilterPage(kind));
 }
 
-async function loadSessions(cursor = state.sessionPage.cursor) {
+function invalidateSessionListRequest() {
+  state.sessionListRequest = (state.sessionListRequest || 0) + 1;
+  state.sessionListPending = false;
+}
+
+async function loadSessionPage(kind, page, render, { background = false } = {}) {
+  if (background && state.sessionListPending) return false;
+  const request = state.sessionListRequest = (state.sessionListRequest || 0) + 1;
+  const isCurrent = () => request === state.sessionListRequest;
+  state.sessionListPending = true;
+  const name = kind === "side" ? "sides" : "sessions";
+  if (!background) setStatus("正在读取服务端事实…");
+  try {
+    const query = page.query == null
+      ? formQuery(document.querySelector(`#${kind}-filter`), "20")
+      : new URLSearchParams(page.query);
+    const candidate = { ...page, query: query.toString(), previousCursors: [...page.previousCursors] };
+    if (!background) {
+      await loadSessionProjectOptions(kind === "side" ? sideMultiFilters : sessionMultiFilters, isCurrent);
+      if (!isCurrent()) return false;
+    }
+    if (page.cursor) query.set("cursor", page.cursor);
+    const data = await api(`/api/v1/${kind === "side" ? "side-topics" : "sessions"}?${query}`);
+    if (!isCurrent()) return false;
+    // Rows and their applied query/cursor stack are one successful result.
+    // Draft edits made while awaiting the response remain in the form.
+    state[name] = data;
+    state[`${kind}Page`] = { ...candidate, nextCursor: data.nextCursor };
+    render(data);
+    renderSessionPagination(kind);
+    if (!background) setStatus("已更新。");
+    return true;
+  } catch (error) {
+    if (isCurrent()) setStatus(error.message + (state[name] ? " 当前仍显示上次成功读取的结果。" : ""), true);
+    return false;
+  } finally {
+    if (isCurrent()) state.sessionListPending = false;
+  }
+}
+
+async function loadSessions(page = state.sessionPage) {
   ensureSessionChatFilter();
-  const query = state.sessionPage.query == null
-    ? formQuery(document.querySelector("#session-filter"), "20")
-    : new URLSearchParams(state.sessionPage.query);
-  const appliedQuery = query.toString();
-  await loadSessionProjectOptions();
-  if (cursor) query.set("cursor", cursor);
-  const data = await api(`/api/v1/sessions?${query}`);
-  state.sessions = data;
-  state.sessionPage.cursor = cursor;
-  state.sessionPage.nextCursor = data.nextCursor;
-  state.sessionPage.query = appliedQuery;
+  return loadSessionPage("session", page, renderSessions);
+}
+
+function renderSessions(data) {
   document.querySelector("#sessions-catalog-notice").hidden = data.catalogAvailable !== false
     && !data.items.some((session) => session.catalogState === "unknown");
   const body = document.querySelector("#sessions-body");
@@ -1405,7 +1442,6 @@ async function loadSessions(cursor = state.sessionPage.cursor) {
     wireSessionActions(actions, session);
     body.append(row);
   }
-  renderSessionPagination();
 }
 
 function wireSessionActions(actions, session) {
@@ -1444,65 +1480,100 @@ function wireSessionActions(actions, session) {
   if (a.release) actions.append(actionButton("释放订阅", () => window.confirm("释放本进程订阅？历史不会删除。") && mutate("/api/v1/sessions/release", a.release)));
 }
 
-async function loadSides(cursor = null) {
-  const query = formQuery(
-    document.querySelector("#side-filter"),
-    "25",
-    cursor === null,
-  );
-  if (cursor) query.set("cursor", cursor);
-  const data = await api(`/api/v1/side-topics?${query}`);
-  state.sides = data;
-  state.sideCursor = data.nextCursor;
+async function loadSides(page = state.sidePage, options = {}) {
+  ensureSideChatFilter();
+  return loadSessionPage("side", page, renderSides, options);
+}
+
+function renderSides(data) {
   const body = document.querySelector("#sides-body");
   body.replaceChildren();
   for (const side of data.items) {
     const row = document.createElement("tr");
     row.dataset.sideId = side.sideId;
-    cell(row, side.sideId, "id");
-    cell(row, `${side.parentBindingId} · ${side.projectAlias || "unknown"}`, "id");
-    cell(row, `${side.chatLabel}${side.topicId ? ` · ${side.topicId}` : ""}`);
+    sessionLocationCell(row, side, { showIdentity: false });
+    const parent = side.parentSession;
+    const source = cell(row, parent?.available ? parent.title || "未命名会话" : "原会话已删除");
+    const details = document.createElement("details");
+    details.className = "side-identities";
+    const summary = document.createElement("summary");
+    summary.textContent = "标识详情";
+    details.append(summary);
+    for (const [label, value] of [["Side", side.sideId], ["来源 Binding", side.parentBindingId],
+      ["Chat", side.chatId], ["Topic", side.topicId], ["Root Message", side.rootMessageId]]) {
+      if (!value) continue;
+      const line = document.createElement("div");
+      line.className = "id";
+      line.textContent = `${label} ${value}`;
+      details.append(line);
+    }
+    source.append(details);
     const stateCell = document.createElement("td");
-    stateCell.append(badge(side.state, side.state === "open", side.state === "failed"));
+    stateCell.className = "side-session-state";
+    updateSideStateCell(stateCell, side);
     row.append(stateCell);
-    const runtime = cell(row, sideRuntimeLabel(side.runtime));
+    const runtime = cell(row, sideRuntimeLabel(side.runtime, side.sessionState));
     runtime.className = "runtime-state";
+    cell(row, side.projectAlias || "原项目已不可用");
+    const created = new Date(side.createdAt);
+    cell(row, Number.isNaN(created.getTime()) ? "—" : created.toLocaleString("zh-CN", { hour12: false }));
     const actions = actionsCell(row);
-    if (side.actions.close) actions.append(actionButton("结束 Side", () => window.confirm("确认结束这个 exact Side？") && mutate("/api/v1/side-topics/close", side.actions.close), true));
+    if (parent?.available) {
+      const link = document.createElement("a");
+      link.className = "action";
+      link.textContent = "查看来源会话";
+      link.href = `/?binding_id=${encodeURIComponent(parent.bindingId)}&inventoryState=all`;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      actions.append(link);
+    }
+    if (side.actions.stop) actions.append(actionButton("停止", () => window.confirm("停止此临时会话的当前任务？之后仍可继续交流。") && mutate("/api/v1/side-topics/stop", side.actions.stop), true));
+    if (side.actions.close) actions.append(actionButton("结束临时会话", () => window.confirm("结束此临时会话？结束后无法恢复。") && mutate("/api/v1/side-topics/close", side.actions.close), true));
     body.append(row);
   }
-  document.querySelector("#sides-next").hidden = !data.nextCursor;
 }
 
-async function moveSessionPage(direction) {
-  const page = state.sessionPage;
-  const previousState = {
-    cursor: page.cursor,
-    nextCursor: page.nextCursor,
-    previousCursors: [...page.previousCursors],
-    number: page.number,
-    query: page.query,
-  };
+function resetSideFilters() {
+  return resetSessionFilters("side");
+}
+
+async function moveSidePage(direction) {
+  return moveSessionPage(direction, "side");
+}
+
+async function moveSessionPage(direction, kind = "session") {
+  const page = state[`${kind}Page`];
+  const candidate = { ...page, previousCursors: [...page.previousCursors] };
   if (direction === "next") {
     if (!page.nextCursor) return;
-    page.previousCursors.push(page.cursor);
-    page.cursor = page.nextCursor;
-    page.number += 1;
+    candidate.previousCursors.push(page.cursor);
+    candidate.cursor = page.nextCursor;
+    candidate.number += 1;
   } else {
     if (!page.previousCursors.length) return;
-    page.cursor = page.previousCursors.pop();
-    page.number -= 1;
+    candidate.cursor = candidate.previousCursors.pop();
+    candidate.number -= 1;
   }
-  if (!await refresh("sessions")) {
-    state.sessionPage = previousState;
-    renderSessionPagination();
-  }
+  return refresh("sessions", candidate);
 }
 
-function sideRuntimeLabel(runtime) {
-  return runtime
-    ? `${runtime.state}${runtime.turnState ? ` · ${runtime.turnState}` : ""}`
-    : "无进程内 Session";
+function sideStateLabel(value) {
+  return { creating: "创建中", open: "可用", closing: "结束中", closed: "已结束",
+    expired: "已失效", failed: "失败", unavailable: "状态待确认" }[value] || "状态待确认";
+}
+
+function updateSideStateCell(target, side) {
+  const value = side.sessionState;
+  target.replaceChildren(badge(sideStateLabel(value), value === "open", ["failed", "unavailable"].includes(value)));
+}
+
+function sideRuntimeLabel(runtime, sessionState = runtime?.sessionState) {
+  if (sessionState === "creating") return "创建中";
+  if (!runtime) return ["closed", "expired", "failed"].includes(sessionState) ? "—" : "状态待确认";
+  if (runtime.state === "closing") return "结束中";
+  const value = runtime.turnState || runtime.state;
+  return { idle: "空闲", open: "空闲", running: "运行中", stopping: "停止中",
+    unknown: "状态待确认", creating: "创建中" }[value] || value;
 }
 
 function rowByIdentity(selector, key, value) {
@@ -1652,13 +1723,22 @@ async function fetchChatPage({ query, cursor }) {
 }
 
 let sessionChatPicker = null;
-function ensureSessionChatFilter() {
-  if (sessionChatPicker) return;
-  sessionChatPicker = window.createChatPicker(document.querySelector("#session-chat-picker"), {
-    id: "session-group", label: "群聊", placeholder: "不限群聊，输入群名查找",
+let sideChatPicker = null;
+
+function createSessionChatFilter(kind) {
+  return window.createChatPicker(document.querySelector(`#${kind}-chat-picker`), {
+    id: `${kind}-group`, label: "群聊", placeholder: "不限群聊，输入群名查找",
     fetchPage: fetchChatPage,
-    onChange: (chat) => { document.querySelector("#session-chat-filter").value = chat?.chatId || ""; },
+    onChange: (chat) => { document.querySelector(`#${kind}-chat-filter`).value = chat?.chatId || ""; },
   });
+}
+
+function ensureSessionChatFilter() {
+  sessionChatPicker ||= createSessionChatFilter("session");
+}
+
+function ensureSideChatFilter() {
+  sideChatPicker ||= createSessionChatFilter("side");
 }
 
 const chatTargetControllers = new Map();
@@ -2286,7 +2366,7 @@ function chooseScheduleSession() {
   closeScheduleEditor();
   document.querySelector("#session-schedule-selection").hidden = false;
   document.querySelector("#session-schedule-saved").hidden = true;
-  selectTab("sessions");
+  selectTab("sessions", "ordinary");
 }
 
 function cancelScheduleSelection() {
@@ -2303,7 +2383,7 @@ async function openScheduleForSession(session, returnFocus) {
   try {
     // Obtain a fresh management grant without changing either tab's list/filter state.
     const data = await api("/api/v1/schedules?mode=list");
-    if (serial !== scheduleEditorSerial || state.tab !== "sessions") return;
+    if (serial !== scheduleEditorSerial || state.tab !== "sessions" || state.sessionTab === "temporary") return;
     await openScheduleEditor(null, { targetSession: session, returnFocus, draft,
       action: data.actions.create, timezone: data.default_timezone });
     if (scheduleEditor?.targetSession === session) {
@@ -3035,40 +3115,75 @@ function applyRuntimeSnapshots(payload, resolveChanges = true) {
   const missing = new Set(payload.missingSideIds);
   for (const side of state.sides?.items || []) {
     if (!sides.has(side.sideId) && !missing.has(side.sideId)) continue;
-    side.runtime = sides.get(side.sideId) || null;
+    const incoming = sides.get(side.sideId) || null;
+    if (incoming?.turnId !== side.runtime?.turnId || incoming?.state !== side.runtime?.state) {
+      side.needsRefresh = true;
+    }
+    side.runtime = incoming;
+    const previousState = side.sessionState;
+    side.sessionState = incoming?.state === "closing" ? "closing" : side.state === "creating" ? "creating"
+      : incoming?.sessionState || (["closed", "expired", "failed"].includes(side.sessionState) ? side.sessionState : "unavailable");
     const row = rowByIdentity("#sides-body", "sideId", side.sideId);
     const node = row?.querySelector(".runtime-state span");
-    if (node) node.textContent = sideRuntimeLabel(side.runtime);
+    if (node) node.textContent = sideRuntimeLabel(side.runtime, side.sessionState);
+    const status = row?.querySelector(".side-session-state");
+    if (status && side.sessionState !== previousState) updateSideStateCell(status, side);
+    // A revision change within the same Turn does not invalidate Close.
+    // Like ordinary sessions, an old Stop grant is checked by the server.
   }
   return changedBindings;
 }
 
 async function refresh(tab, cursor = undefined) {
   if (state.authExpired) return false;
+  if (tab === "sessions") {
+    return state.sessionTab === "temporary" ? loadSides(cursor) : loadSessions(cursor);
+  }
+  const isCurrentView = () => state.tab === tab;
   setStatus("正在读取服务端事实…");
   try {
     if (tab === "projects") await loadProjects(cursor || null);
-    if (tab === "sessions") {
-      if (cursor === undefined) await loadSessions();
-      else await loadSessions(cursor);
-    }
-    if (tab === "side-topics") await loadSides(cursor || null);
     if (tab === "updates") await loadUpdates();
     if (tab === "schedules") await loadSchedules(cursor || null);
     if (tab === "defaults") await loadDefaults();
     if (tab === "system") await window.NetizenIdentity.loadUsers();
-    setStatus("已更新。");
+    if (isCurrentView()) setStatus("已更新。");
     return true;
   } catch (error) {
-    setStatus(error.message, true);
+    if (isCurrentView()) setStatus(error.message, true);
     return false;
   }
 }
 
-function selectTab(name) {
+function renderSessionTabs() {
+  for (const button of document.querySelectorAll("[data-session-tab]")) {
+    const selected = button.dataset.sessionTab === state.sessionTab;
+    button.setAttribute("aria-selected", String(selected));
+    button.setAttribute("tabindex", selected ? "0" : "-1");
+    document.querySelector(`#sessions-${button.dataset.sessionTab}`).hidden = !selected;
+  }
+}
+
+function selectSessionTab(name) {
+  if (state.authExpired) return;
+  state.sessionTab = name;
+  invalidateSessionListRequest();
+  sessionChatPicker?.close();
+  sideChatPicker?.close();
+  openSessionMultiFilter?.close();
+  openTimeRangeFilter?.cancel({ restoreFocus: false });
+  renderSessionTabs();
+  return refresh("sessions");
+}
+
+function selectTab(name, sessionTab = state.sessionTab || "ordinary") {
   if (state.authExpired) return;
   state.tab = name;
+  state.sessionTab = sessionTab;
+  invalidateSessionListRequest();
   sessionChatPicker?.close();
+  sideChatPicker?.close();
+  renderSessionTabs();
   stopUpdatePolling();
   // Only a navigation preference survives re-login; operation facts always
   // come from the server, and no credential or session token is stored here.
@@ -3091,6 +3206,17 @@ function selectTab(name) {
 
 for (const tab of document.querySelectorAll(".tab")) {
   tab.addEventListener("click", () => selectTab(tab.dataset.tab));
+}
+for (const tab of document.querySelectorAll("[data-session-tab]")) {
+  tab.addEventListener("click", () => selectSessionTab(tab.dataset.sessionTab));
+  tab.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const name = event.key === "Home" ? "ordinary" : event.key === "End" ? "temporary"
+      : tab.dataset.sessionTab === "ordinary" ? "temporary" : "ordinary";
+    selectSessionTab(name);
+    document.querySelector(`#session-tab-${name}`).focus();
+  });
 }
 
 for (const button of document.querySelectorAll("[data-refresh]")) {
@@ -3115,19 +3241,24 @@ document.querySelector("#create-project").addEventListener("submit", async (even
 
 document.querySelector("#session-filter").addEventListener("submit", (event) => {
   event.preventDefault();
-  resetSessionPagination();
-  refresh("sessions");
+  refresh("sessions", sessionFilterPage());
 });
-document.querySelector("#session-filter-reset").addEventListener("click", resetSessionFilters);
+document.querySelector("#session-filter-reset").addEventListener("click", () => resetSessionFilters());
 document.querySelector("#session-page-size").addEventListener("change", () => {
-  resetSessionPagination();
-  refresh("sessions");
+  refresh("sessions", sessionFilterPage());
 });
-document.querySelector("#side-filter").addEventListener("submit", (event) => { event.preventDefault(); refresh("side-topics"); });
+document.querySelector("#side-filter").addEventListener("submit", (event) => {
+  event.preventDefault(); refresh("sessions", sessionFilterPage("side"));
+});
+document.querySelector("#side-filter-reset").addEventListener("click", resetSideFilters);
+document.querySelector("#side-page-size").addEventListener("change", () => {
+  refresh("sessions", sessionFilterPage("side"));
+});
 document.querySelector("#projects-next").addEventListener("click", () => refresh("projects", state.projectCursor));
 document.querySelector("#sessions-previous").addEventListener("click", () => moveSessionPage("previous"));
 document.querySelector("#sessions-next").addEventListener("click", () => moveSessionPage("next"));
-document.querySelector("#sides-next").addEventListener("click", () => refresh("side-topics", state.sideCursor));
+document.querySelector("#sides-previous").addEventListener("click", () => moveSidePage("previous"));
+document.querySelector("#sides-next").addEventListener("click", () => moveSidePage("next"));
 sessionSettingsInput("cancel").addEventListener("click", closeSessionSettingsEditor);
 sessionSettingsInput("close").addEventListener("click", closeSessionSettingsEditor);
 sessionSettingsInput("drawer").addEventListener("cancel", (event) => {
@@ -3233,24 +3364,30 @@ async function fetchRuntimeSnapshots(bindingIds, sideIds, resolvePrimary = false
 }
 
 let runtimePollInFlight = false;
+let sidePollRefreshAt = 0;
 
 const runtimePollTimer = setInterval(async () => {
   if (
     state.authExpired
     || runtimePollInFlight
+    || state.sessionListPending
     || document.hidden
-    || (state.tab !== "sessions" && state.tab !== "side-topics")
+    || state.tab !== "sessions"
   ) return;
-  const tab = state.tab;
-  const page = tab === "sessions" ? state.sessions : state.sides;
-  const isCurrentPage = () => state.tab === tab
-    && (tab === "sessions" ? state.sessions : state.sides) === page;
-  const bindingIds = state.tab === "sessions"
+  const view = state.sessionTab;
+  const temporary = view === "temporary";
+  const page = temporary ? state.sides : state.sessions;
+  const request = state.sessionListRequest;
+  const isCurrentPage = () => state.tab === "sessions" && state.sessionTab === view
+    && state.sessionListRequest === request
+    && (temporary ? state.sides : state.sessions) === page;
+  const bindingIds = !temporary
     ? state.sessions?.items?.filter((item) => item.runtime.primaryStatusResolution !== "archived")
       .map((item) => item.bindingId) || []
     : [];
-  const sideIds = state.tab === "side-topics"
-    ? state.sides?.items?.map((item) => item.sideId) || []
+  const sideIds = temporary
+    ? state.sides?.items?.filter((item) => !["closed", "expired", "failed"].includes(item.sessionState))
+      .map((item) => item.sideId) || []
     : [];
   if (!bindingIds.length && !sideIds.length) return;
   runtimePollInFlight = true;
@@ -3259,6 +3396,14 @@ const runtimePollTimer = setInterval(async () => {
     const snapshots = await fetchRuntimeSnapshots(bindingIds, sideIds);
     if (!isCurrentPage() || document.hidden) return;
     const changedBindings = applyRuntimeSnapshots(snapshots);
+    if (temporary && page.items.some((side) => side.needsRefresh
+      || ["creating", "closing", "unavailable"].includes(side.sessionState)) && performance.now() >= sidePollRefreshAt) {
+      // Route publication can change without a Runtime revision. Recheck only
+      // unresolved routes or Turn/lifecycle transitions, never every steer.
+      sidePollRefreshAt = performance.now() + 15000;
+      await loadSides(state.sidePage, { background: true });
+      return;
+    }
     if (changedBindings.length) {
       const changed = new Set(changedBindings);
       resolving = snapshots.bindings.filter((item) => changed.has(item.bindingId));
@@ -3288,8 +3433,12 @@ try {
 } catch (_error) { /* The update page remains available without storage. */ }
 const linkedBindingId = new URLSearchParams(window.location.search).get("binding_id");
 if (linkedBindingId) {
-  resetSessionPagination();
-  state.sessionPage.query = new URLSearchParams({ identity: linkedBindingId, pageSize: "20" }).toString();
+  const query = new URLSearchParams({ identity: linkedBindingId, pageSize: "20" });
+  if (new URLSearchParams(window.location.search).get("inventoryState") === "all") {
+    query.set("inventoryState", "all");
+    sessionMultiFilters.get("inventoryState").clear();
+  }
+  state.sessionPage = firstSessionPage(query.toString());
   initialTab = "sessions";
 }
 selectTab(initialTab);
