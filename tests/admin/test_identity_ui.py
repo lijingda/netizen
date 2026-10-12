@@ -49,3 +49,9 @@ class IdentityUiTest(unittest.TestCase):
         self.run_controller("login.html", (static / "login.js").read_text(
             encoding="utf-8"
         ), "identity_login_ui_harness.js")
+
+    def test_login_success_returns_to_requested_page_and_filters(self) -> None:
+        static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
+        self.run_controller("login.html", (static / "login.js").read_text(
+            encoding="utf-8"
+        ), "login_return_ui_harness.js")

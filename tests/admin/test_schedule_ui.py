@@ -27,6 +27,8 @@ class ScheduleUiTest(unittest.TestCase):
         filters = source[source.index("const timeRangeControllers ="):source.index("async function queryProjectOptions(")]
         project_options = source[source.index("async function queryProjectOptions("):source.index("async function loadSessionProjectOptions(")]
         controller = source[source.index("function scheduleDate("):source.index("async function refresh(")]
+        guards = source[source.index("function sessionSettingsFingerprint("):source.index("function scheduleDate(")]
+        pagination = source[source.index("function firstSessionPage("):source.index("function sessionSort(")]
         listeners = source[source.index('scheduleInput("filter").addEventListener'):source.index('document.querySelector("#service-restart").addEventListener')]
         shared_chat = (static / "chat-picker.js").read_text(encoding="utf-8") + source[
             source.index("async function fetchChatPage("):source.index("let defaultsEditor =")]
@@ -35,7 +37,7 @@ class ScheduleUiTest(unittest.TestCase):
         dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
         result = subprocess.run(
             [node], input="const htmlTree = " + json.dumps(tree.root) + ";\n"
-             + dom + before + payload + helpers + filters + project_options + shared_chat + controller + listeners + after,
-            capture_output=True, text=True, timeout=10,
+             + dom + before + payload + helpers + filters + project_options + shared_chat + guards + pagination + controller + listeners + after,
+            capture_output=True, text=True, timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -9,7 +9,21 @@ Object.defineProperty(document.querySelector("#sessions-body"), "rows", {
 let status = "";
 let statusError = false;
 function setStatus(message, error = false) { status = message; statusError = error; }
-window.prompt = window.confirm = () => { throw new Error("Configuration must use the drawer"); };
+function syncPageUrl() {}
+window.prompt = () => { throw new Error("Configuration must use the drawer"); };
+let discardConfirmed = true;
+const discardPrompts = [];
+window.confirm = (message) => { discardPrompts.push(message); return discardConfirmed; };
+const windowListeners = new Map();
+window.addEventListener = (name, callback) => windowListeners.set(name, callback);
+const defaultsEditor = null;
+const defaultsBusy = false;
+const scheduleEditor = null;
+let pendingScheduleDraft = null;
+function defaultEditorHasChanges() { return false; }
+function scheduleEditorHasChanges() { return false; }
+function closeDefaultEditor() {}
+function cancelScheduleSelection() { pendingScheduleDraft = null; }
 const baseSettings = {
   turn_settings: { model_id: "model-one", effort_id: "high", service_tier_id: "priority" },
   reaction_pulse_enabled: true, progress_card_enabled: false, completion_mention_enabled: true,
@@ -396,6 +410,48 @@ const cases = {
     assertPageRetained(page);
     await openFromList();
     assert.equal(field("completion-mention").checked, false);
+    assert.equal(discardPrompts.length, 0, "successful save never asks to discard edits");
+  },
+  async discard_confirmation() {
+    await loadSessions();
+    await openFromList();
+    assert.equal(hasUnsavedEditors(), false, "initial model hydration is not an edit");
+    const unload = () => {
+      const event = { prevented: false, preventDefault() { this.prevented = true; } };
+      windowListeners.get("beforeunload")(event);
+      return event;
+    };
+    assert.equal(unload().prevented, false);
+    field("close").click();
+    assert.equal(discardPrompts.length, 0);
+    await openFromList();
+    change("progress", true);
+    assert.equal(hasUnsavedEditors(), true);
+    assert.equal(unload().prevented, true);
+    assert.equal(unload().returnValue, "");
+    discardConfirmed = false;
+    for (const cancel of [() => field("close").click(), () => field("cancel").click(),
+      () => field("drawer").dispatch("cancel")]) {
+      cancel();
+      assert.equal(field("drawer").open, true);
+      assert.equal(field("progress").checked, true);
+    }
+    assert.equal(confirmDiscardEditors(), false);
+    assert(sessionSettingsEditor.action, "declining discard does not consume the action");
+    change("progress", false);
+    assert.equal(hasUnsavedEditors(), false, "restoring the initial value clears dirty state");
+    const beforeCleanClose = discardPrompts.length;
+    assert.equal(confirmDiscardEditors(), true);
+    assert.equal(discardPrompts.length, beforeCleanClose);
+    assert.equal(field("drawer").open, false);
+    await openFromList();
+    change("reactions", false);
+    discardConfirmed = true;
+    field("drawer").dispatch("cancel");
+    assert.equal(field("drawer").open, false);
+    assert.equal(hasUnsavedEditors(), false);
+    assert.equal(posts.length, 0);
+    assert(discardPrompts.every((message) => message.includes("未保存")));
   },
 };
 (async () => {

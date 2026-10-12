@@ -86,7 +86,7 @@ async function advanceTime(duration) {
     assert.equal(state.sessionTab, "ordinary");
     const query = requests.findLast((request) => request.path === "/api/v1/sessions").query;
     assert.equal(query.get("identity"), "binding-parent");
-    assert.equal(query.get("inventoryState"), initialSearch.includes("inventoryState=all") ? "all" : null);
+    assert.deepEqual(query.getAll("inventoryState"), initialSearch.includes("inventoryState=all") ? ["all"] : ["active", "lazy", "unknown"]);
     assert.equal(document.querySelector("#sessions-ordinary").hidden, false);
     assert(document.querySelector("#sessions-body").textContent.includes("普通会话标题"));
     if (initialSearch.includes("inventoryState=all")) {
@@ -120,7 +120,10 @@ async function advanceTime(duration) {
   assert(row().querySelector("details").textContent.includes("Side side-a"));
   assert.equal(row().querySelector(".runtime-state").textContent, "运行中");
   const parentLink = row().querySelector(".actions").querySelector("a");
-  assert.equal(parentLink.href, "/?binding_id=binding-parent&inventoryState=all");
+  const parentUrl = new URL(parentLink.href, "http://localhost");
+  assert.equal(parentUrl.pathname, "/sessions/ordinary");
+  assert.equal(parentUrl.searchParams.get("identity"), "binding-parent");
+  assert.equal(parentUrl.searchParams.get("inventoryState"), "all");
   assert.equal(parentLink.target, "_blank");
   const buttons = () => row().querySelectorAll("button");
   assert.deepEqual(buttons().map((button) => button.textContent), ["停止", "结束临时会话"]);
@@ -139,7 +142,7 @@ async function advanceTime(duration) {
   projectRoot.querySelectorAll("input").find((input) => input.value === "docs").click();
   sideChatPicker.setSelection({ chatId: "oc_selected", name: "已选群" });
   document.querySelector("#side-chat-filter").value = "oc_selected";
-  sideChatPicker.focus();
+  document.querySelector("#side-chat-picker .chat-picker-trigger").click();
   await flush();
   assert(sidePickerRoot.querySelector(".chat-picker-empty-option"));
   const sideSearch = document.querySelector("#side-group-search");

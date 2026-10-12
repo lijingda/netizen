@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
 import re
@@ -1182,6 +1183,91 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         # The redirect must not serve the admin HTML or any state.
         self.assertEqual(body, b"")
 
+    async def test_admin_pages_share_authenticated_document_and_preserve_login_target(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        _, _, original = await self.request(
+            "GET", "/", headers=[("Cookie", f"netizen_admin_session={session}")],
+        )
+        for path in (
+            "/projects", "/sessions/ordinary", "/sessions/temporary", "/schedules",
+            "/defaults", "/maintenance", "/system", "/",
+        ):
+            target = path + "?project=netizen&project=demo&sortBy=updatedAt&sortDirection=asc"
+            with self.subTest(path=path):
+                status, headers, body = await self.request("GET", target)
+                self.assertEqual(status, 303)
+                location = urlsplit(dict(headers)["location"])
+                self.assertEqual(location.path, "/login")
+                self.assertEqual(parse_qs(location.query), {"next": [target]})
+                self.assertEqual(body, b"")
+                status, headers, body = await self.request(
+                    "GET", target, headers=[("Cookie", f"netizen_admin_session={session}")],
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(dict(headers)["content-type"], "text/html; charset=utf-8")
+                self.assertEqual(body, original)
+
+    async def test_login_preserves_legacy_binding_and_encoded_query_targets(self) -> None:
+        self.runner.open_admission()
+        for target in (
+            "/?binding_id=binding-1",
+            "/sessions/ordinary?project=R%26D&project=%E7%A0%94%E7%A9%B6&sortDirection=asc",
+        ):
+            with self.subTest(target=target):
+                status, headers, _ = await self.request("GET", target)
+                self.assertEqual(status, 303)
+                login_target = dict(headers)["location"]
+                _, _, body = await self.login_form(login_target)
+                found = re.search(rb'id="login-next"[^>]*value="([^"]+)"', body)
+                self.assertIsNotNone(found)
+                self.assertEqual(html.unescape(found.group(1).decode()), target)
+                self.assertNotIn(b"__NETIZEN_LOGIN_NEXT__", body)
+                session = await self.login()
+                status, headers, body = await self.request(
+                    "GET", login_target, headers=[("Cookie", f"netizen_admin_session={session}")],
+                )
+                self.assertEqual(status, 303)
+                self.assertEqual(dict(headers)["location"], target)
+                self.assertNotIn("set-cookie", dict(headers))
+                self.assertEqual(body, b"")
+
+    async def test_login_rejects_external_unknown_and_ambiguous_return_targets(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        unsafe_targets = (
+            "https://evil.example/projects", "//evil.example/projects", "///evil.example",
+            "///projects", "///sessions/ordinary?inventoryState=all", "///system", "////projects",
+            "javascript:alert(1)", "/\\evil.example", "/projects\\evil.example",
+            "/%2f%2fevil.example", "/projects/../login", "/projects%2f..%2flogin",
+            "/api/v1/projects", "/static/admin.js", "/does-not-exist", "/login",
+            "/projects#external", "/projects#", "/projects?value=%0d%0aLocation:evil",
+            "/projects?value=%5cevil", "/projects\n", " /projects", "",
+        )
+        for target in unsafe_targets:
+            with self.subTest(target=target):
+                status, headers, _ = await self.request(
+                    "GET", "/login?" + urlencode({"next": target}),
+                    headers=[("Cookie", f"netizen_admin_session={session}")],
+                )
+                self.assertEqual(status, 303)
+                self.assertEqual(dict(headers)["location"], "/projects")
+        for query in ("", "?next=%2Fschedules&next=%2Fprojects"):
+            status, headers, _ = await self.request(
+                "GET", "/login" + query,
+                headers=[("Cookie", f"netizen_admin_session={session}")],
+            )
+            self.assertEqual(status, 303)
+            self.assertEqual(dict(headers)["location"], "/projects")
+        for target in ("///projects", "///sessions/ordinary?inventoryState=all", "///system"):
+            with self.subTest(anonymous_target=target):
+                _, _, body = await self.login_form("/login?" + urlencode({"next": target}))
+                self.assertIn(b'id="login-next" type="hidden" value="/projects"', body)
+                self.assertNotIn(target.encode(), body)
+        _, _, body = await self.login_form("/login?next=%2F%2Fevil.example")
+        self.assertIn(b'id="login-next" type="hidden" value="/projects"', body)
+        self.assertNotIn(b"evil.example", body)
+
     async def test_invalid_session_cookie_still_redirects_root_to_login(self) -> None:
         self.runner.open_admission()
         status, headers, _body = await self.request(
@@ -1206,7 +1292,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_unauthenticated_non_root_routes_still_return_json_401(self) -> None:
         self.runner.open_admission()
-        for target in ("/api/v1/projects", "/static/admin.js", "/does-not-exist"):
+        for target in ("/api/v1/projects", "/static/admin.js", "/does-not-exist", "/sessions/unknown"):
             with self.subTest(target=target):
                 status, headers, body = await self.request("GET", target)
                 self.assertEqual(status, 401)

@@ -261,12 +261,11 @@ window.NetizenIdentity = (() => {
 
   node("admin-user-add").addEventListener("click", openPanel);
   node("admin-user-close").addEventListener("click", closePanel);
-  document.querySelector(".tabs").addEventListener("click", closePanel);
   node("admin-user-confirm").addEventListener("click", () => { void addUser(); });
   node("admin-selector-retry").addEventListener("click", () => { void loadSelector(); });
   node("admin-selector-reload").addEventListener("click", () => { window.location.reload(); });
   return {
-    loadProfile, loadUsers,
+    loadProfile, loadUsers, closePanel,
     expire() { expired = true; closePanel(); renderUsers(); },
   };
 })();

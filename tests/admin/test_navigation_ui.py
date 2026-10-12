@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import unittest
+
+from tests.admin.test_session_filter_ui import _HtmlTree
+
+
+class NavigationUiTest(unittest.TestCase):
+    def test_deep_links_history_applied_filters_and_cursor_pages(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            reason = "Node.js 22 is required for Admin JavaScript behavior tests"
+            if os.environ.get("CI") == "true":
+                self.fail(reason)
+            self.skipTest(reason)
+        static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
+        tree = _HtmlTree()
+        tree.feed((static / "index.html").read_text(encoding="utf-8"))
+        fixtures = Path(__file__).parent
+        dom = (fixtures / "dom_harness.js").read_text(encoding="utf-8")
+        common = (fixtures / "side_sessions_ui_harness.js").read_text(encoding="utf-8").split(
+            "// SHIPPED_ADMIN_PAGE\n"
+        )[0]
+        before, after = (fixtures / "navigation_ui_harness.js").read_text(encoding="utf-8").split(
+            "// SHIPPED_ADMIN_PAGE\n"
+        )
+        script = "const htmlTree = " + json.dumps(tree.root) + ";\n" + dom + common + before
+        script += (static / "chat-picker.js").read_text(encoding="utf-8")
+        script += (static / "identity.js").read_text(encoding="utf-8")
+        script += (static / "admin.js").read_text(encoding="utf-8") + after
+        for initial_url in (
+            "/projects",
+            "/sessions/ordinary?project=docs&project=netizen&inventoryState=all&chatId=oc_selected"
+            "&createdFrom=2026-10-01T00%3A00%3A00Z&createdBefore=2026-10-02T00%3A00%3A00Z"
+            "&pageSize=50&sortBy=createdAt&sortDirection=asc&cursor=stale&actionToken=secret",
+            "/sessions/temporary?project=docs&state=closed&pageSize=50&sortDirection=asc",
+            "/schedules?project=netizen&ended=all&enabled=false",
+            "/defaults?kind=group_name",
+        ):
+            with self.subTest(initial_url=initial_url):
+                bootstrap = "const initialSearch = ''; const initialUrl = " + json.dumps(initial_url) + ";\n"
+                result = subprocess.run([node], input=bootstrap + script, capture_output=True,
+                                        text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

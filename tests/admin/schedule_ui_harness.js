@@ -1,5 +1,10 @@
 const state = { tab: "schedules", schedules: null, sessionPage: { cursor: "sessions-page-three", number: 3 } };
 function selectTab(name) { state.tab = name; }
+function syncPageUrl() {}
+function sessionSettingsHasChanges() { return false; }
+function defaultEditorHasChanges() { return false; }
+const windowListeners = new Map();
+window.addEventListener = (name, callback) => windowListeners.set(name, callback);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 let status = "";
 let statusError = false;
@@ -214,7 +219,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("filter-project").value, "");
   assert.equal(filterControl("project", "multi-filter-summary").textContent, "全部");
   clearFilter("ended");
-  await loadSchedules();
+  await loadSchedules(null, null);
   const clearedQuery = new URL(gets.filter((path) => path.startsWith("/api/v1/schedules?")).at(-1), "http://localhost").searchParams;
   assert.equal(clearedQuery.get("project"), null);
   assert.equal(clearedQuery.get("ended"), null, "clear means all, not the initial unfinished filter");
@@ -276,7 +281,7 @@ async function chooseScheduleTarget(value) {
   chooseFilter("ended", "true");
   chooseFilter("enabled", "false");
   plans = [];
-  await loadSchedules();
+  await loadSchedules(null, null);
   const emptyQuery = new URL(gets.filter((path) => path.startsWith("/api/v1/schedules?")).at(-1), "http://localhost").searchParams;
   assert.equal(emptyQuery.get("ended"), "true");
   assert.equal(emptyQuery.get("enabled"), "false");
@@ -284,12 +289,12 @@ async function chooseScheduleTarget(value) {
   chooseFilter("ended", "false");
   clearFilter("enabled");
   plans = [fixturePlan()];
-  await loadSchedules();
+  await loadSchedules(null, null);
   assert.deepEqual(scheduleFilterRoots.get("project").querySelectorAll("input")
     .filter((input) => input.type === "radio").map((input) => input.value),
     ["project-one", "project-two", "retired"]);
   chooseFilter("project", "project-one");
-  await loadSchedules();
+  await loadSchedules(null, null);
   await loadSchedules("page-two");
   chooseFilter("project", "project-two");
   assert(gets.some((path) => path.startsWith("/api/v1/schedules?") && new URL(path, "http://localhost").searchParams.get("cursor") === "page-two"));
@@ -456,7 +461,7 @@ async function chooseScheduleTarget(value) {
   const links = scheduleInput("runs-body").querySelectorAll("a");
   assert.equal(links.length, 2);
   assert(links[0].href.startsWith("https://applink.feishu.cn/"));
-  assert.equal(new URL(links[1].href, "http://localhost").searchParams.get("binding_id"), "binding-exact");
+  assert.equal(new URL(links[1].href, "http://localhost").searchParams.get("identity"), "binding-exact");
   assert.equal(scheduleInput("runs-next").hidden, false);
 
   // A failed save keeps user input and makes its spent action unusable.
@@ -799,8 +804,8 @@ async function chooseScheduleTarget(value) {
   assert.match(scheduleInput("run-receipt").textContent, /accepted-before-refresh/);
   assert.equal(scheduleInput("run-receipt").querySelector("a"), null);
 
-  // Detail/history refresh failures remain visible beside the accepted receipt
-  // and never retry the accepted operation.
+  // Detail/history refresh failures remain visible in the read-only drawer
+  // without replacing the accepted receipt or retrying the operation.
   failList = false;
   await showSchedule("plan-exact");
   for (const mode of ["view", "runs"]) {
@@ -814,8 +819,11 @@ async function chooseScheduleTarget(value) {
     await runSchedule(plan);
     await runSchedule(plan);
     assert.equal(posts.length, before + 1);
-    assert.equal(status, mode === "view" ? "详情刷新失败" : "记录刷新失败");
-    assert.equal(statusError, true);
+    assert.match(scheduleInput(mode === "view" ? "detail-note" : "runs-note").textContent,
+      mode === "view" ? /详情刷新失败/ : /记录刷新失败/);
+    assert.equal(scheduleInput(mode === "view" ? "detail-retry" : "runs-retry").hidden, false);
+    assert.match(status, /已受理/);
+    assert.equal(statusError, false);
     assert.equal(scheduleInput("run-receipt").hidden, false);
     assert.match(scheduleInput("run-receipt").textContent, /已受理/);
     assert(scheduleInput("run-receipt").textContent.includes(runId));
@@ -968,7 +976,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("chat-id-help").hidden, true);
   assert.equal(scheduleInput("group-picker").querySelector(".chat-picker-summary").textContent, "请选择群聊");
   assert.equal(scheduleInput("group-picker").querySelector(".chat-picker-empty-option"), null);
-  chatTarget("schedule").focus();
+  scheduleInput("group").click();
   await flush();
   scheduleInput("group-picker").querySelector(".chat-picker-option").click();
   await flush();
@@ -1173,4 +1181,122 @@ async function chooseScheduleTarget(value) {
   assert.equal(scheduleInput("group").getAttribute("aria-invalid"), "true");
   chatValidationError = null;
   closeScheduleEditor();
+
+  // Compare actual form values rather than a sticky "touched" flag. Opening,
+  // async catalog hydration, previewing and reverting values are all clean.
+  scheduleOptionsGate = {};
+  const loadingCleanEditor = openScheduleEditor();
+  assert.equal(scheduleEditorHasChanges(), false);
+  scheduleInput("name").value = "Typed while options load";
+  scheduleOptionsGate.resolve();
+  scheduleOptionsGate = null;
+  await loadingCleanEditor;
+  assert.equal(scheduleEditorHasChanges(), true, "async defaults must not mark user input as saved");
+  scheduleInput("name").value = "";
+  assert.equal(scheduleEditorHasChanges(), false);
+  const beforeCleanClose = confirmations.length;
+  scheduleInput("close").click();
+  assert.equal(confirmations.length, beforeCleanClose);
+  await openScheduleEditor(fixturePlan());
+  await previewSchedule();
+  assert.equal(scheduleEditorHasChanges(), false);
+  scheduleInput("name").value = "a changed name";
+  confirmation = false;
+  const actionBeforeDiscard = scheduleEditor.action;
+  for (const cancel of [() => scheduleInput("close").click(), () => scheduleInput("cancel").click(),
+    () => scheduleInput("drawer").dispatch("cancel")]) {
+    cancel();
+    assert.equal(scheduleInput("drawer").open, true);
+    assert.equal(scheduleInput("name").value, "a changed name");
+    assert.equal(scheduleEditor.action, actionBeforeDiscard);
+  }
+  const unload = () => {
+    const event = { prevented: false, preventDefault() { this.prevented = true; } };
+    windowListeners.get("beforeunload")(event);
+    return event;
+  };
+  assert.equal(unload().prevented, true);
+  scheduleInput("name").value = fixturePlan().name;
+  assert.equal(scheduleEditorHasChanges(), false);
+  assert.equal(unload().prevented, false);
+  const beforeRevertedClose = confirmations.length;
+  scheduleInput("drawer").dispatch("cancel");
+  assert.equal(scheduleInput("drawer").open, false);
+  assert.equal(confirmations.length, beforeRevertedClose);
+
+  // Choosing an exact session is an internal step, not abandoning the draft.
+  await openScheduleEditor();
+  scheduleInput("name").value = "Preserved target-selection draft";
+  await chooseScheduleTarget("binding");
+  const beforeChoosing = confirmations.length;
+  chooseScheduleSession();
+  assert.equal(confirmations.length, beforeChoosing);
+  assert.equal(scheduleInput("drawer").open, false);
+  assert.equal(hasUnsavedEditors(), true);
+  assert.equal(unload().prevented, true);
+  cancelScheduleSelection();
+  assert(pendingScheduleDraft, "declining discard keeps the pending selection and its draft");
+  await openScheduleForSession(targetSession, opener);
+  assert.equal(scheduleInput("name").value, "Preserved target-selection draft");
+  assert.equal(hasUnsavedEditors(), true);
+  confirmation = true;
+  scheduleInput("cancel").click();
+  assert.equal(hasUnsavedEditors(), false);
+  assert.equal(unload().prevented, false);
+
+  await openNewScheduleEditor();
+  await previewSchedule();
+  const beforeSavedClose = confirmations.length;
+  await saveSchedule({ preventDefault() {} });
+  assert.equal(scheduleEditor, null);
+  assert.equal(confirmations.length, beforeSavedClose, "save success must never ask to discard");
+
+  // Exact-session plans inherit their configuration. Saving or discarding the
+  // handed-off draft need not wait for the shared drawer's model catalog.
+  for (const finish of ["save", "cancel"]) {
+    previewTimes = times;
+    await openScheduleEditor();
+    scheduleInput("name").value = "Draft handed off before catalog";
+    scheduleInput("instructions").value = "Use the original session settings";
+    await chooseScheduleTarget("binding");
+    chooseScheduleSession();
+    scheduleOptionsGate = {};
+    const opening = openScheduleForSession(targetSession, opener);
+    await flush();
+    assert.equal(scheduleInput("drawer").open, true);
+    assert.equal(scheduleInput("session-settings").hidden, true);
+    assert.equal(pendingScheduleDraft, null, "ownership transfers before options finish");
+    assert.equal(document.querySelector("#session-schedule-selection").hidden, true);
+    assert.equal(hasUnsavedEditors(), true, "the active editor still protects its draft");
+    const postsBeforeFinish = posts.length;
+    if (finish === "save") {
+      await previewSchedule();
+      assert.equal(scheduleInput("save").disabled, false, scheduleInput("preview-message").textContent
+        + scheduleInput("form-error").textContent);
+      const beforeSaveConfirm = confirmations.length;
+      await saveSchedule({ preventDefault() {} });
+      assert.equal(posts.length, postsBeforeFinish + 1);
+      assert.equal(posts.at(-1).body.definition.target_binding_id, targetSession.bindingId);
+      assert.equal("session_settings" in posts.at(-1).body.definition, false);
+      assert.equal(confirmations.length, beforeSaveConfirm);
+    } else {
+      confirmation = false;
+      scheduleInput("cancel").click();
+      assert.equal(scheduleInput("drawer").open, true);
+      assert.equal(hasUnsavedEditors(), true);
+      confirmation = true;
+      scheduleInput("cancel").click();
+      assert.equal(posts.length, postsBeforeFinish);
+    }
+    assert.equal(scheduleEditor, null);
+    assert.equal(hasUnsavedEditors(), false);
+    assert.equal(unload().prevented, false);
+    scheduleOptionsGate.resolve();
+    scheduleOptionsGate = null;
+    await opening;
+    assert.equal(hasUnsavedEditors(), false);
+    assert.equal(pendingScheduleDraft, null);
+    assert.equal(document.querySelector("#session-schedule-selection").hidden, true);
+    assert.equal(scheduleInput("drawer").open, false);
+  }
 })().catch((error) => { console.error(error); process.exitCode = 1; });

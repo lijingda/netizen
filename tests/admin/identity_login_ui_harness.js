@@ -1,5 +1,7 @@
 
 document.querySelector("#login-nonce").value = "browser-nonce";
+const returnTarget = "/sessions/ordinary?project=R%26D&sortDirection=asc";
+document.querySelector("#login-next").value = returnTarget;
 let navigation = null;
 window.location = { assign(path) { navigation = path; } };
 const calls = [];
@@ -32,6 +34,7 @@ async function fetch(path, options = {}) {
   assert.equal(calls[0].path, "/api/v1/login/state");
   assert.equal(document.querySelector("#login-start").disabled, false);
   assert.equal(document.querySelector("#login-authorization").hidden, true);
+  assert.equal(document.querySelector("#login-retry").href, `/login?next=${encodeURIComponent(returnTarget)}`);
   document.querySelector("#login-start").click();
   document.querySelector("#login-start").click();
   await settle();
@@ -67,4 +70,5 @@ async function fetch(path, options = {}) {
   document.querySelector("#login-start").click();
   await settle();
   assert.equal(calls.filter((call) => call.path.endsWith("/start")).length, 1);
+
 })().catch((error) => { console.error(error); process.exitCode = 1; });

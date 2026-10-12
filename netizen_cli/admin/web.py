@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, TypeVar
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from .auth import (
     ActionCsrfRejected,
@@ -176,6 +176,10 @@ _MAX_QUERY_FIELDS = 256
 _MAX_JSON_FIELDS = 20
 _RUNTIME_SNAPSHOT_BATCH_SIZE = 50
 _AUTO_PORTS = range(8787, 8887)
+_ADMIN_PAGE_PATHS = frozenset({
+    "/", "/projects", "/sessions/ordinary", "/sessions/temporary",
+    "/schedules", "/defaults", "/maintenance", "/system",
+})
 
 _SECURITY_HEADERS = (
     (b"Cache-Control", b"no-store"),
@@ -428,14 +432,14 @@ class AdminWebApplication:
         if context.path.startswith("/api/v1/login/"):
             return await self._login_request(context)
 
-        if context.path == "/" and context.method == "GET":
-            # The browser entry point redirects anonymous visitors to the
-            # login page.  Every other route (API, static assets other than
-            # the login stylesheet, and unknown paths) still fails closed
-            # with a JSON 401 so the anonymous content surface stays minimal.
+        if context.path in _ADMIN_PAGE_PATHS and context.method == "GET":
+            # Only known browser pages redirect to login.  API, protected
+            # assets and unknown paths continue to fail closed with JSON 401.
             session = self._authenticate_or_none(context)
             if session is None:
-                return Response(303, ((b"Location", b"/login"),))
+                target = _admin_page_target(context.request.target.decode("ascii"))
+                location = "/login" if target == "/" else f"/login?next={quote(target, safe='')}"
+                return Response(303, ((b"Location", location.encode("ascii")),))
         else:
             session = self._authenticate(context)
         context = _RequestContext(
@@ -473,6 +477,10 @@ class AdminWebApplication:
             raise AdminWebError(403, "invalid_origin", "请求 Origin 不受信任。")
 
     def _login_page(self, context: _RequestContext) -> Response:
+        targets = context.query.get("next", [])
+        target = _admin_page_target(targets[0] if len(targets) == 1 else None)
+        if self._authenticate_or_none(context) is not None:
+            return Response(303, ((b"Location", target.encode("ascii")),))
         if self._login_flow is not None:
             self._login_flow.discard(_cookies(context.request).get(self._preauth_cookie))
         try:
@@ -484,11 +492,12 @@ class AdminWebApplication:
                     (b"Content-Type", b"text/html; charset=utf-8"),
                     (b"Set-Cookie", _expired_cookie(self._preauth_cookie)),
                 ),
-                body=_login_html(None, self._instance_root),
+                body=_login_html(None, self._instance_root, target),
             )
         page = _login_html(
             challenge.form_nonce,
             self._instance_root,
+            target,
         )
         return Response(
             200,
@@ -538,7 +547,7 @@ class AdminWebApplication:
 
     async def _dispatch_authenticated(self, context: _RequestContext) -> Response:
         route = (context.method, context.path)
-        if route == ("GET", "/"):
+        if context.method == "GET" and context.path in _ADMIN_PAGE_PATHS:
             return Response(
                 200,
                 ((b"Content-Type", b"text/html; charset=utf-8"), (b"Content-Security-Policy", _SELECTOR_CSP)),
@@ -2569,13 +2578,37 @@ def _user_avatar(value: str | None) -> str | None:
         return None
 
 
+def _admin_page_target(value: str | None) -> str:
+    """Keep browser return navigation on exact Admin pages, never arbitrary URLs."""
+    # Browsers treat ///projects as a network-path reference, while urlsplit
+    # normalizes it to the allowed /projects path with an empty authority.
+    if not value or not value.startswith("/") or value.startswith("//"):
+        return "/projects"
+    if "#" in value or any(ord(char) < 33 or ord(char) > 126 or char == "\\" for char in value):
+        return "/projects"
+    # Reject encoded control characters/backslashes as well.  Query spaces and
+    # UTF-8 text are fine when URL-encoded; the route itself stays an exact match.
+    if any(ord(char) < 32 or ord(char) == 127 or char == "\\" for char in unquote(value)):
+        return "/projects"
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "/projects"
+    if parsed.scheme or parsed.netloc or parsed.fragment or parsed.path not in _ADMIN_PAGE_PATHS:
+        return "/projects"
+    return value
+
+
 def _login_html(
     nonce: str | None,
     instance_root: Path | None = None,
+    return_target: str = "/projects",
 ) -> bytes:
     page = importlib.resources.files("netizen_cli.admin").joinpath("static/login.html").read_bytes()
     return page.replace(b"__NETIZEN_LOGIN_NONCE__", html.escape(nonce or "", quote=True).encode()).replace(
         b"__NETIZEN_INSTANCE_ROOT__", html.escape(_root_label(instance_root)).encode(),
+    ).replace(
+        b"__NETIZEN_LOGIN_NEXT__", html.escape(return_target, quote=True).encode(),
     )
 
 

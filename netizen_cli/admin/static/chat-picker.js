@@ -333,7 +333,7 @@
       setDisabled(value) { disabled = Boolean(value); if (disabled) close(); else render(); },
       close,
       reset: () => setSelection(null),
-      focus() { if (!disabled) { open(); input.focus(); } },
+      focus() { if (!disabled) (expanded ? input : trigger).focus(); },
     };
   };
 })();
