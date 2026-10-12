@@ -3424,8 +3424,11 @@ class ChannelApplication:
                 )
                 acknowledged = True
 
-            disposition = await self._runtime.stop_side(
-                record.id,
+            disposition = await self._management.stop_side(
+                target=CurrentSideTarget(
+                    side_id=record.id, app_id=record.app_id, chat_id=record.chat_id,
+                    topic_id=record.topic_id, root_message_id=record.root_message_id,
+                ),
                 acknowledge=acknowledge,
             )
             if disposition is StopDisposition.NOT_RUNNING and not acknowledged:

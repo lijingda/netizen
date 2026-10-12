@@ -15,7 +15,7 @@ import logging
 import socket
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, TypeVar
@@ -50,6 +50,7 @@ from .presentation import (
     _release_disposition_message,
     _runtime_binding_json,
     _runtime_side_json,
+    _side_parent_json,
     _schedule_plan_json,
     _stop_disposition_message,
     _topic_open_url,
@@ -638,6 +639,7 @@ class AdminWebApplication:
             "/api/v1/sessions/stop": self._session_stop,
             "/api/v1/sessions/release": self._session_release,
             "/api/v1/side-topics/close": self._side_close,
+            "/api/v1/side-topics/stop": self._side_stop,
         }
         handler = mutations.get(context.path) if context.method == "POST" else None
         if handler is not None:
@@ -1352,21 +1354,26 @@ class AdminWebApplication:
             "createdBefore",
         }
         _require_query_keys(context.query, allowed)
-        page_size = _page_size(context.query)
-        state_value = _optional_text_query(context.query, "state")
+        page_size = _session_page_size(context.query)
+        state_values = _text_set_query(context.query, "state")
         try:
-            state = SideTopicState(state_value) if state_value is not None else None
+            if state_values == ("all",):
+                states = None
+            elif state_values:
+                states = tuple(SideTopicState(value) for value in state_values)
+            else:
+                states = (SideTopicState.CREATING, SideTopicState.OPEN)
         except ValueError:
             raise AdminWebError(400, "invalid_state", "Side 状态筛选无效。") from None
         created_from, created_before = _created_range_query(context.query)
         query = SideTopicQuery(
-            project_alias=_optional_text_query(context.query, "project"),
+            project_aliases=_text_set_query(context.query, "project"),
             parent_binding_id=_optional_text_query(context.query, "parentBindingId"),
             app_id=_optional_text_query(context.query, "appId"),
             chat_id=_optional_text_query(context.query, "chatId"),
             topic_id=_optional_text_query(context.query, "topicId"),
             root_message_id=_optional_text_query(context.query, "rootMessageId"),
-            state=state,
+            states=states,
             created_from=created_from,
             created_before=created_before,
         )
@@ -1385,7 +1392,7 @@ class AdminWebApplication:
         for item in page.items:
             side = item.record.side_topic
             actions: dict[str, object] = {}
-            if side.state is SideTopicState.OPEN and item.runtime is not None:
+            if item.can_close or item.can_stop:
                 target = AdminActionTarget("side", side.id, None)
                 preconditions = _empty_preconditions(
                     side_app_id=ExpectedValue.expect(side.app_id),
@@ -1407,10 +1414,21 @@ class AdminWebApplication:
                     target,
                     preconditions,
                 )
+                if item.can_stop:
+                    assert item.runtime is not None
+                    actions["stop"] = self._grant(
+                        context, "side-topics.stop", target,
+                        replace(
+                            preconditions,
+                            activity_revision=ExpectedValue.expect(item.runtime.revision),
+                            physical_turn_id=ExpectedValue.expect(item.runtime.turn_id),
+                        ),
+                    )
             items.append(
                 {
                     "sideId": side.id,
                     "parentBindingId": side.parent_binding_id,
+                    "parentSession": _side_parent_json(item),
                     "projectAlias": item.record.project_alias,
                     "appId": side.app_id,
                     "chatId": side.chat_id,
@@ -1418,10 +1436,15 @@ class AdminWebApplication:
                     "chatLabelResolved": item.chat.resolved,
                     "chatMode": item.chat.chat_mode,
                     "chatType": item.chat.chat_type,
+                    "chatOpenUrl": _chat_open_url(item.chat),
+                    "topicOpenUrl": (
+                        _topic_open_url(side.chat_id, side.topic_id) if side.topic_id else None
+                    ),
                     "topicId": side.topic_id,
                     "rootMessageId": side.root_message_id,
                     "sourceMessageId": side.source_message_id,
                     "state": side.state.value,
+                    "sessionState": item.session_state,
                     "createdAt": side.created_at,
                     "updatedAt": side.updated_at,
                     "runtime": (
@@ -1884,6 +1907,34 @@ class AdminWebApplication:
                 "message": _release_disposition_message(released.disposition),
             },
         )
+
+    async def _side_stop(self, context: _RequestContext) -> Response:
+        _payload, grant = self._redeem(
+            context, "side-topics.stop", expected_resource="side",
+        )
+        preconditions = _grant_preconditions(grant)
+        disposition = await self._mutation(
+            context, "side-topics.stop", grant.target.target_id,
+            self._management.stop_side(
+                target=CurrentSideTarget(
+                    side_id=grant.target.target_id,
+                    app_id=_expected_value(preconditions.side_app_id, "Side app"),
+                    chat_id=_expected_value(preconditions.side_chat_id, "Side chat"),
+                    topic_id=_expected_optional(preconditions.side_topic_id, "Side topic"),
+                    root_message_id=_expected_optional(preconditions.side_root_message_id, "Side root message"),
+                ),
+                runtime_precondition=RuntimePrecondition(
+                    activity_revision=_expected_value(preconditions.activity_revision, "Side revision"),
+                    physical_turn_id=_expected_value(preconditions.physical_turn_id, "Side Turn"),
+                ),
+            ),
+        )
+        return _json_response(200, {
+            "requestId": context.request.request_id,
+            "sideId": grant.target.target_id,
+            "disposition": disposition.value,
+            "message": _stop_disposition_message(disposition),
+        })
 
     async def _side_close(self, context: _RequestContext) -> Response:
         _payload, grant = self._redeem(

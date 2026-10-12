@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -17,6 +18,8 @@ from netizen_cli.bindings import (
     BindingSettingsRevisionConflict,
     BindingStore,
     SideTopicState,
+    SideTopicQuery,
+    SideTopicInventoryRecord,
 )
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.codex_runtime import (
@@ -30,6 +33,8 @@ from netizen_cli.codex_runtime import (
     ReleaseDisposition,
     SideLifecycleOutcome,
     SideSessionNotFound,
+    SideSessionSnapshot,
+    SideSessionState,
     StopDisposition,
     ThreadLifecycleSnapshot,
     ThreadLifecycleState,
@@ -54,6 +59,7 @@ from netizen_cli.domain import (
 from netizen_cli.management import (
     ActivePointerChanged,
     BindingScopeMismatch,
+    ChatLabel,
     CurrentBindingChanged,
     CurrentBindingTarget,
     CurrentSideTarget,
@@ -67,6 +73,7 @@ from netizen_cli.management import (
     SessionInventoryState,
     SessionQuery,
     SideIdentityMismatch,
+    SideTopicInventoryItem,
     classify_native_thread_view,
 )
 from netizen_cli.management.chat_directory import AvailableChat, AvailableChatPage, ChatDirectoryError
@@ -240,6 +247,10 @@ class FakeManagementRuntime:
         record = self.store.transition_side_topic(side_id, state)
         return SideLifecycleOutcome(side_id=side_id, state=record.state)
 
+    async def stop_side(self, side_id, **values):
+        self.calls.append(("stop-side", side_id, values))
+        return StopDisposition.REQUESTED
+
     async def binding_pointer_changed(self, previous, current) -> None:
         self.calls.append(("pointer", previous, current))
 
@@ -308,6 +319,13 @@ class FakeManagementRuntime:
     def side_snapshot_exact(self, side_id: str):
         self.calls.append(("side-snapshot", side_id))
         return self.side_snapshots.get(side_id)
+
+    def side_ids_for_projects(self, project_aliases):
+        self.calls.append(("side-project-ids", project_aliases))
+        return tuple(
+            side_id for side_id, snapshot in self.side_snapshots.items()
+            if snapshot.project_alias in project_aliases
+        )
 
     def project_has_fork_creation(self, alias: str) -> bool:
         return False
@@ -2311,6 +2329,187 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(tuple(self.runtime.calls), before)
 
+    def _side_record(self, parent, source="om_side"):
+        record = self.store.create_side_topic(
+            app_id=self.scope.app_id, chat_id=self.scope.chat_id,
+            source_message_id=source, parent_binding_id=parent.id,
+            creator_id="ou_user", requires_mention=False,
+        )
+        self.store.set_side_topic_root(record.id, "root-" + source)
+        return self.store.open_side_topic(record.id, "topic-" + source)
+
+    def _side_snapshot(self, record, *, project="test", state=SideSessionState.OPEN):
+        return SideSessionSnapshot(
+            side_id=record.id, parent_binding_id=record.parent_binding_id,
+            parent_thread_id="parent-thread", thread_id="ephemeral-thread",
+            project_alias=project, cwd=Path(self.tmp.name), creator_id="ou_user",
+            state=state, topic_id=record.topic_id, root_message_id=record.root_message_id,
+            turn_id=None, turn_state=None, last_activity=1, revision=7,
+        )
+
+    async def test_side_list_filters_live_project_before_pagination_after_parent_delete(self):
+        parent = await self._create()
+        orphan = self._side_record(parent)
+        newer = self._side_record(parent, "om_newer")
+        self.runtime.side_snapshots[orphan.id] = self._side_snapshot(orphan)
+        self.runtime.side_snapshots[newer.id] = self._side_snapshot(newer)
+        self.store.delete_binding(parent.id)
+        self.projects.register(alias="other", path=None, create_directory=True)
+        other_parent = (await self.service.create_current_binding(
+            scope=self.scope, creator_id="ou_user", project_alias="other",
+        )).binding
+        other = self._side_record(other_parent, "om_other")
+        self.runtime.side_snapshots[other.id] = self._side_snapshot(other, project="other")
+        self.store.delete_binding(other_parent.id)
+        self.runtime.calls.clear()
+
+        page = await self.service.query_side_topics(
+            query=SideTopicQuery(project_aliases=("test",), states=(SideTopicState.OPEN,)),
+            limit=1, deadline=asyncio.get_running_loop().time() + 1,
+        )
+        self.assertEqual([item.record.side_topic.id for item in page.items], [newer.id])
+        self.assertIsNotNone(page.next_cursor)
+        self.assertEqual(page.items[0].record.project_alias, "test")
+        self.assertIsNone(page.items[0].parent_binding)
+        self.assertEqual(page.items[0].session_state, "open")
+        self.assertTrue(page.items[0].can_close)
+        self.assertFalse(any(call[0] in {"summary", "catalog"} for call in self.runtime.calls))
+
+        following = await self.service.query_side_topics(
+            query=SideTopicQuery(project_alias="test", project_aliases=("other",), state=SideTopicState.OPEN),
+            cursor=page.next_cursor, limit=1,
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+        self.assertEqual([item.record.side_topic.id for item in following.items], [orphan.id])
+        self.assertIsNone(following.next_cursor)
+        other_page = await self.service.query_side_topics(
+            query=SideTopicQuery(project_aliases=("other",)),
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+        self.assertEqual([item.record.side_topic.id for item in other_page.items], [other.id])
+        self.assertEqual(other_page.items[0].record.project_alias, "other")
+
+        with patch.object(self.runtime, "side_ids_for_projects", side_effect=AssertionError("unexpected global scan")):
+            unfiltered = await self.service.query_side_topics(
+                deadline=asyncio.get_running_loop().time() + 1,
+            )
+        self.assertEqual(
+            {item.record.side_topic.id: item.record.project_alias for item in unfiltered.items},
+            {orphan.id: "test", newer.id: "test", other.id: "other"},
+        )
+
+    async def test_side_list_enriches_only_visible_exact_parents_and_isolates_failure(self):
+        parent = await self._create()
+        self.store.assign_native_thread_id(parent.id, "original-parent")
+        side = self._side_record(parent)
+        self.runtime.summary_metadata["original-parent"] = NativeThreadMetadata(
+            "original-parent", "Source title", "Source preview",
+        )
+        replacement = await self._create()
+        self.store.assign_native_thread_id(replacement.id, "replacement-parent")
+        self._side_record(replacement, "om_newer")
+        self.runtime.calls.clear()
+        page = await self.service.query_side_topics(
+            query=SideTopicQuery(parent_binding_id=parent.id), limit=1,
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+        item = page.items[0]
+        self.assertEqual(item.record.side_topic.id, side.id)
+        self.assertEqual(item.record.project_alias, "test")
+        self.assertEqual(item.parent_binding.id, parent.id)
+        self.assertEqual(item.parent_metadata.name, "Source title")
+        self.assertEqual([call for call in self.runtime.calls if call[0] == "summary"], [
+            ("summary", "original-parent"),
+        ])
+        self.assertFalse(any(call[0] == "catalog" for call in self.runtime.calls))
+        self.runtime.summary_metadata.clear()
+        failed = await self.service.query_side_topics(
+            query=SideTopicQuery(parent_binding_id=parent.id),
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+        self.assertEqual(failed.items[0].parent_binding.id, parent.id)
+        self.assertIsNone(failed.items[0].parent_metadata)
+
+    async def test_side_metadata_and_session_metadata_share_pending_worker_budget(self):
+        self.store._id_factory = lambda: str(uuid.uuid4())
+        for index in range(5):
+            parent = await self._create()
+            self.store.assign_native_thread_id(parent.id, f"parent-{index}")
+            self._side_record(parent, f"om-{index}")
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def read(thread_id):
+            calls.append(thread_id)
+            if len(calls) == 4:
+                entered.set()
+            await release.wait()
+            return NativeThreadMetadata(thread_id, "Parent", "")
+
+        with patch.object(self.runtime, "thread_summary_exact", side_effect=read):
+            task = asyncio.create_task(self.service.query_side_topics(
+                limit=100, deadline=asyncio.get_running_loop().time() + 0.3,
+            ))
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                summary = await self.service.binding_metadata_exact(
+                    parent.id, deadline=asyncio.get_running_loop().time() + 0.01,
+                )
+                self.assertIsNone(summary)
+                page = await asyncio.wait_for(task, 1)
+                self.assertEqual(len(page.items), 5)
+                self.assertEqual(len(calls), 4)
+                self.assertEqual(len(self.service._summary_reads), 4)
+            finally:
+                release.set()
+                await asyncio.wait_for(asyncio.gather(task, *self.service._summary_reads), 1)
+
+    async def test_side_state_projection_and_controls_preserve_lifecycle_truth(self):
+        parent = await self._create()
+        record = self._side_record(parent)
+        runtime = self._side_snapshot(record)
+        item = SideTopicInventoryItem(
+            SideTopicInventoryRecord(record, "test"),
+            ChatLabel("oc_direct", "Chat", "p2p", True), runtime,
+        )
+        for route_state, runtime_state, expected, close in (
+            (SideTopicState.CREATING, SideSessionState.OPEN, "creating", False),
+            (SideTopicState.OPEN, SideSessionState.CLOSING, "closing", True),
+            (SideTopicState.FAILED, SideSessionState.CLOSING, "closing", True),
+        ):
+            projected = replace(item,
+                record=replace(item.record, side_topic=replace(record, state=route_state)),
+                runtime=replace(runtime, state=runtime_state),
+            )
+            self.assertEqual(projected.session_state, expected)
+            self.assertEqual(projected.can_close, close)
+            self.assertFalse(projected.can_stop)
+        self.assertEqual(replace(item, runtime=None).session_state, "unavailable")
+        terminal = replace(item, runtime=None, record=replace(
+            item.record, side_topic=replace(record, state=SideTopicState.CLOSED),
+        ))
+        self.assertEqual(terminal.session_state, "closed")
+        self.assertFalse(terminal.can_close)
+        running = replace(item, runtime=replace(runtime, turn_id="turn-1", turn_state=ActiveState.RUNNING))
+        self.assertTrue(running.can_stop)
+
+    async def test_shared_side_stop_checks_identity_and_forwards_exact_turn(self):
+        parent = await self._create()
+        record = self._side_record(parent)
+        target = CurrentSideTarget(record.id, record.app_id, record.chat_id,
+                                   record.topic_id, record.root_message_id)
+        with self.assertRaises(SideIdentityMismatch):
+            await self.service.stop_side(target=replace(target, chat_id="wrong"))
+        self.assertFalse(any(call[0] == "stop-side" for call in self.runtime.calls))
+        await self.service.stop_side(target=target, runtime_precondition=RuntimePrecondition(7, "turn-1"))
+        self.assertEqual(self.runtime.calls[-1], ("stop-side", record.id, {
+            "acknowledge": None, "expected_revision": 7, "expected_turn_id": "turn-1",
+        }))
+        self.store.transition_side_topic(record.id, SideTopicState.CLOSED)
+        with self.assertRaises(RuntimeStateChanged):
+            await self.service.stop_side(target=target)
+
     async def test_missing_side_session_commits_expired_tombstone(self) -> None:
         parent = await self._create()
         side = self.store.create_side_topic(
@@ -2442,7 +2641,6 @@ class ManagementRuntimePortSurfaceTest(unittest.TestCase):
             "resume_goal",
             "clear_goal",
             "create_side",
-            "stop_side",
             "delete_binding",
         ):
             self.assertFalse(hasattr(port, name), name)

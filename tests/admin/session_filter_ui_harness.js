@@ -1,15 +1,16 @@
-const state = { sessionPage: {} };
+const state = { sessionPage: firstSessionPage() };
 const requests = [];
 let answer;
 async function api(path) { requests.push(path); return answer(path); }
 let refreshed;
 let loadOnRefresh = false;
 let selectedScheduleSession = null;
+function setStatus() {}
 function openScheduleForSession(session, button) { selectedScheduleSession = { session, button }; }
-async function refresh(tab) {
+async function refresh(tab, page) {
   refreshed = tab;
   if (loadOnRefresh) {
-    try { await loadSessions(); return true; } catch { return false; }
+    return loadSessions(page);
   }
 }
 // SHIPPED_FILTER_CONTROLLERS
@@ -141,6 +142,7 @@ async function refresh(tab) {
   assert(query().get("createdBefore"));
   document.querySelector("#session-page-size").value = "100";
   state.sessionPage = { cursor: "later", nextCursor: "next", previousCursors: [null], number: 2 };
+  const displayedPage = state.sessionPage;
   await resetSessionFilters();
   assert.equal(refreshed, "sessions");
   assert.deepEqual(query().getAll("inventoryState"), ["active", "lazy", "unknown"]);
@@ -148,7 +150,7 @@ async function refresh(tab) {
   for (const key of ["project", "scopeKind", "current", "createdFrom", "createdBefore"]) {
     assert(!query().has(key), `${key} should be reset`);
   }
-  assert.deepEqual(state.sessionPage, { cursor: null, nextCursor: null, previousCursors: [], number: 1, query: null });
+  assert.equal(state.sessionPage, displayedPage, "reset drafts do not replace a result before a successful load");
   assert.equal(rangeRoot.querySelector("[data-time-range-summary]").textContent, "全部时间");
 
   // A deleted option stays removable, and options refresh never silently changes a selection.
@@ -158,25 +160,18 @@ async function refresh(tab) {
   assert.deepEqual(query().getAll("project"), ["netizen"]);
   assert.match(control("project", "multi-filter-summary").textContent, /已不可用/);
   const side = document.querySelector("#side-filter");
-  side.querySelectorAll("input").find((input) => input.name === "project").value = "side-project";
-  assert.equal(formQuery(side).get("project"), "side-project");
+  assert.deepEqual(formQuery(side).getAll("state"), ["creating", "open"]);
   assert(!formQuery(side).has("inventoryState"));
   const sideChatId = side.querySelectorAll("input").find((input) => input.name === "chatId");
-  const sideIdHelp = document.querySelector(`#${sideChatId.getAttribute("aria-describedby")}`);
-  assert.equal(sideIdHelp.hidden, false);
-  const sideIdHelpLink = sideIdHelp.querySelector("a");
-  assert.equal(sideIdHelpLink.textContent, "如何获取聊天 ID");
-  assert.equal(sideIdHelpLink.getAttribute("href"), "https://open.feishu.cn/document/server-docs/group/chat/chat-id-description");
-  assert.equal(sideIdHelpLink.getAttribute("target"), "_blank");
-  assert.equal(sideIdHelpLink.getAttribute("rel"), "noopener noreferrer");
-  assert.match(sideChatId.getAttribute("placeholder"), /不是用户 ID/);
-  assert.match(sideIdHelpLink.getAttribute("title"), /与本机器人的聊天/);
+  assert.equal(sideChatId.type, "hidden");
+  assert(!side.querySelectorAll("input").some((input) => ["parentBindingId", "topicId", "rootMessageId"].includes(input.name)));
   sideChatId.value = "oc_filter";
   assert.equal(formQuery(side).get("chatId"), "oc_filter", "ID help must not alter read-only filtering");
 
   // Pagination reuses the applied repeated values and absolute UTC bounds.
   // Checkbox/time changes remain drafts until explicit 筛选/reset/page-size submission.
   await resetSessionFilters();
+  state.sessionPage = firstSessionPage();
   const sessionQueries = [];
   let failNextPage = false;
   answer = (path) => {
@@ -224,8 +219,7 @@ async function refresh(tab) {
   assert.equal(state.sessionPage.query, applied);
   assert.equal(state.sessionPage.number, 1);
   failNextPage = false;
-  resetSessionPagination();
-  await loadSessions();
+  await loadSessions(sessionFilterPage());
   assert.deepEqual(sessionQueries.at(-1).getAll("inventoryState"), ["lazy", "unknown", "archived"]);
   assert.deepEqual(sessionQueries.at(-1).getAll("project"), ["netizen"]);
   assert.deepEqual(sessionQueries.at(-1).getAll("scopeKind"), ["topic"]);
@@ -246,8 +240,7 @@ async function refresh(tab) {
   let sessionResponse = { items: [unknown], nextCursor: null, catalogAvailable: true };
   answer = (path) => path.startsWith("/api/v1/projects/options?")
     ? { items: [], nextCursor: null } : sessionResponse;
-  resetSessionPagination();
-  await loadSessions();
+  await loadSessions(sessionFilterPage());
   const notice = document.querySelector("#sessions-catalog-notice");
   const rows = document.querySelector("#sessions-body");
   assert.equal(notice.hidden, false);

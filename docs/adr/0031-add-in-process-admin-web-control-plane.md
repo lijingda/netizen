@@ -15,6 +15,12 @@ related: 0016, 0019
 > 修订普通会话“设为当前”的原生恢复和共享删除失败处理。
 > 以下保留决策时的契约与证据。
 
+> 2026-10-12 界面修订：Side Topics 并入 Sessions 的“临时会话”二级 Tab，默认进入
+> “普通会话”，普通会话原有筛选、默认项、列表和操作保持不变。两类共享适用的展示组件，
+> 查询和生命周期仍分型；Admin 补齐经共享管理服务调用现有 Side Stop 的入口。当前字段、
+> 筛选及 exact Turn 校验见[管理查询与操作](../design.md#管理查询与操作)。下文独立一级页
+> 和仅开放 Side Close 的描述保留为原始决策记录。
+
 > **修订：** [ADR 0049](0049-bound-turn-observation-and-delegate-thread-removal.md)
 > 删除 Admin exact archive 的 idle 与 Runtime activity 前置条件；它与飞书入口一样只占用
 > exact Binding 后直接委托 App Server。[ADR 0054](0054-allow-admin-to-delete-exact-materialized-sessions.md)

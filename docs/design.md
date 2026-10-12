@@ -1760,15 +1760,23 @@ status/logs；不能编辑记录伪造成功或调用旧安装器来执行全局
 
 ### 会话目录与分页
 
-Projects、Sessions、Side Topics 都使用服务端 keyset cursor。Binding 查询先在 Channel-owned
+Admin 的 Sessions 下分“普通会话”和“临时会话”两个二级 Tab，默认普通会话；不再设置
+独立 Side Topics 一级入口，也不提供跨类型混合列表。普通会话的筛选、默认项、列表字段、
+排序、分页和操作保持原有行为。两个 Tab 分别保留筛选草稿、已应用查询和 cursor 栈，
+共享适用的筛选、位置链接、分页和操作展示组件；切换 Tab 不重置另一类的查询。
+列表内容、已应用筛选、cursor 栈和页码作为同一次成功查询的结果整体提交。请求期间只
+准备候选查询，不提前修改已展示分页；失败保留上一份完整结果，不回滚局部字段。筛选
+草稿独立保留，响应不回写用户尚未提交的编辑；只有当前请求可以提交结果或更新提示，
+过期响应不能覆盖新查询，后台补读不抢占用户正在进行的列表查询。
+
+Projects、普通会话和临时会话都使用服务端 keyset cursor。Binding 查询先在 Channel-owned
 索引中过滤 Project、Scope kind、chat/topic/Binding/native ID、current 和时间。Sessions 页面
 移除 Chat/Topic/Binding/Thread ID 输入框，列表仍展示 ID，API 保留精确 ID 查询。Project、
 Scope、会话状态和当前指针均多选：同一项取“或”，不同项取“且”。Project 是可搜索下拉，
 通过独立分页 options 查询包含已停用的全部未删除 Project，不读取 native archived aggregate；
 Scope 为单聊/群聊/话题，current 为当前/非当前，两者及 Project 默认全部。重复值和选择
 顺序归一化后进入 cursor fingerprint，改变筛选时回到第一页。
-Sessions 与
-Side Topics 的创建时间筛选复用同一个范围组件：收起态显示当前范围，展开后提供本地
+普通会话与临时会话的创建时间筛选复用同一个范围组件：收起态显示当前范围，展开后提供本地
 时区的快捷范围与 `datetime-local` 自定义起止分钟，只有“完成”提交字段草稿，页面“筛选”
 才请求服务端。自定义结束分钟对用户包含，并转换为下一分钟的排他上界。`createdFrom` 与
 `createdBefore` API 只接受带时区的 ISO-8601，先规范化为固定微秒的 UTC `+00:00`，再要求
@@ -1822,6 +1830,21 @@ Sessions 每页只接受 10/20/50/100，默认 20；浏览器用 cursor
 完整 ID；100 行 Sessions 首屏由 Web adapter 分两批读取，浏览器五秒 polling 同样分片后
 合并，既不查 native catalog，也不签发 action token。
 
+临时会话复用 Project 多选、群选择器、状态多选、创建时间范围、重置和每页数量组件，
+每页同样为 10/20/50/100、默认 20。状态默认 `creating` + `open`，包含尚未关闭完成的
+Side；`closed/expired/failed` 由用户显式筛选。它不展示 Scope、当前指针、Parent Binding ID、
+Topic ID 或 Root Message ID 筛选，也不增加按父会话进入关联 Side 列表的入口。API 保留
+精确身份查询，多选同项取“或”、跨项取“且”，归一化后绑定 cursor，筛选发生在分页之前。
+
+临时列表展示飞书位置、独立的“来源会话”列、会话状态、运行态、Project、创建时间和操作。
+来源名称只按创建时的 exact Parent Binding 从现有 metadata 补读，不作为 Side 自身标题；
+当前页去重后的 Parent 使用普通 Sessions 的有界 metadata worker 与请求预算，不查询完整
+历史或保存标题。来源已删除时明确展示，Side 仍保留独立行；来源仍存在时可打开其普通会话
+入口，不改变当前页面普通会话的筛选。Project 优先使用存活 Side 的冻结运行态，父会话已
+删除的存活 Side 也必须按同一归属参与 Project 筛选，终态且无已知来源时不猜测 Project。
+位置链接复用现有 AppLink，原始 ID 放在折叠详情。时间显示 Side 创建时间，不把 route
+更新时间混作普通 Thread 的最近更新时间；不新增配置编辑、Side 标题或历史持久化。
+
 ### 运行态投影与轮询
 
 普通 Binding 的主状态由管理 application 的同一投影提供给飞书与 Admin：固定优先级为
@@ -1845,11 +1868,20 @@ current/inactive、native active/archived/missing/Lazy 与进程订阅是独立�
 以 60 秒为上限继续尝试；轻量本地观测仍为五秒。重试期间保留不可用文案，展示值不变
 时不替换 DOM。退避仅保存在当前页 Session 对象对应的浏览器内存中；新的 activity
 revision、本地活动或成功解析清除旧退避，手动刷新/翻页以新列表重新读取。
-页面隐藏或离开 Sessions/Side Topics 时不发起新轮询，已过时的页面响应不应用；同一
+页面隐藏或离开 Sessions 时不发起新轮询，只轮询当前二级 Tab，已过时的页面响应不应用；同一
 浏览器页面最多一轮运行态请求在途。首屏预算已耗尽时仍保留本地运行态、Lazy 与已确认
 归档的投影，不再发起新的原生 Goal 读取。
 Stop 与 Release 的可见资格消费这份投影，Runtime exact primitive 仍是 mutation 的最终
 安全检查；Admin 的结果文案直接消费共享 `StopDisposition`/`ReleaseDisposition`。
+
+临时会话状态同时消费 route 与 Runtime：`closing` 优先于 route 的 `open`，关闭未确认不
+显示为已结束；终态且没有内存 Session 是正常状态，运行态显示 `—`。状态和可用操作来自
+同一共享管理投影，不由浏览器推断新的生命周期。轻量轮询不签发 action grant；当前 Turn
+或 Side 生命周期变化后，列表须重新取得可用操作，旧页结果不能覆盖新的 Tab 或分页。
+创建中、结束中或 Runtime 缺失等未确认状态进行有界列表复核；Runtime revision 未变化
+不代表话题 route 没有完成创建。同一 Turn 的追加输入不触发整页重取，也不使仅绑定
+route identity 的结束操作失效；旧停止授权仍由共享服务的 exact Turn/revision 校验拒绝，
+需要时显式刷新列表取得新授权。
 
 ### 聊天名称与位置链接
 
@@ -1903,6 +1935,13 @@ ADR 0037/0049/0078 的 delete primitive，由原生返回决定结果。
 继续使用既有 `delete-lazy` 二次确认，Side 和批量路径不获得 materialized delete
 action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact、Side resume 或
 任意筛选结果的批量 native mutation route。
+
+临时会话按共享能力展示停止和结束操作。停止只中断当前 Side Turn，Side 保留并可继续；
+结束复用既有 Side close 的停止准入、interrupt、终态确认、cleanup、unsubscribe 与墓碑提交。
+飞书 `/stop` 和 Admin 停止通过同一管理入口调用既有 Runtime `stop_side`；Admin grant
+固定 Side route identity、活动 revision 和 exact physical Turn，在 Side 锁内复核后才能
+中断，陈旧页面不得停止后来开始的 Turn。两个入口的关闭继续共用 `close_side`，不新增
+Admin 专属生命周期、恢复、归档或删除 Side 墓碑操作。
 
 Sessions 的“配置”使用完整会话设置抽屉，回填 Model/Effort/Speed、Reaction Pulse、
 Progress Card、Completion Mention 和消息上下文；单聊不显示上下文选择。它与飞书

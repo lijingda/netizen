@@ -1,4 +1,4 @@
-const state = { tab: "sessions", sessions: null, sides: null };
+const state = { tab: "sessions", sessionTab: "ordinary", sessions: null, sides: null };
 let now = 0;
 const performance = { now: () => now };
 let poll;
@@ -32,6 +32,7 @@ function session(bindingId, catalogState = "active", resolution = "unavailable",
 function payload(bindings) { return { bindings, sides: [], missingSideIds: [] }; }
 function mount(items) {
   state.tab = "sessions";
+  state.sessionTab = "ordinary";
   state.sessions = { items };
   document.hidden = false;
   const body = document.querySelector("#sessions-body");
@@ -216,7 +217,8 @@ async function tick(at) { now = at; await poll(); }
 
   // Side polls share the in-flight guard, including navigation while pending.
   requests = [];
-  state.tab = "side-topics";
+  state.tab = "sessions";
+  state.sessionTab = "temporary";
   state.sides = { items: [{ sideId: "side-1", runtime: null }] };
   const pendingSide = pending();
   answer = () => pendingSide.promise;

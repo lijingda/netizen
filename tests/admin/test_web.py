@@ -53,6 +53,7 @@ from netizen_cli.bindings import (
     ProjectRecord,
     ScopeRecord,
     SideTopicInventoryRecord,
+    SideTopicCursor,
     SideTopicRecord,
     SideTopicState,
     ThreadBinding,
@@ -65,6 +66,7 @@ from netizen_cli.codex_runtime import (
     NativeThreadMetadata,
     ReleaseDisposition,
     SideSessionSnapshot,
+    SideSessionConflict,
     SideSessionState,
     StopDisposition,
     ThreadLifecycleSnapshot,
@@ -359,6 +361,8 @@ class FakeManagement:
                 "private",
             ),
             self.side_runtime,
+            self.native,
+            NativeThreadMetadata("native-active", "Source session", "source preview"),
         )
         return SideTopicInventoryPage((item,), None)
 
@@ -473,6 +477,10 @@ class FakeManagement:
         self.calls.append(("close-side", values))
         closed = replace(self.side_record, state=SideTopicState.CLOSED)
         return ClosedSide(closed, None)
+
+    async def stop_side(self, **values):
+        self.calls.append(("stop-side", values))
+        return StopDisposition.REQUESTED
 
 
 class AdminSessionPresentationTest(unittest.TestCase):
@@ -1471,6 +1479,91 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertNotIn("close", side_page["items"][0]["actions"])
 
+    async def test_side_query_defaults_multiselect_cursor_and_readable_projection(self):
+        self.runner.open_admission()
+        session = await self.login()
+        status, _headers, page = await self.json_get("/api/v1/side-topics", session)
+        self.assertEqual(status, 200)
+        call = self.management.query_side_topic_calls[-1]
+        self.assertEqual(call["limit"], 20)
+        self.assertEqual(call["query"].states, (SideTopicState.CREATING, SideTopicState.OPEN))
+        row = page["items"][0]
+        self.assertEqual(row["parentSession"], {
+            "bindingId": self.management.native.id, "title": "Source session", "available": True,
+        })
+        self.assertEqual(row["sessionState"], "open")
+        self.assertIn("ou_partner", row["chatOpenUrl"])
+        self.assertIn("omt_topic", row["topicOpenUrl"])
+        self.assertNotIn("stop", row["actions"])
+        original_query = self.management.query_side_topics
+
+        async def with_cursor(**values):
+            result = await original_query(**values)
+            return replace(result, next_cursor=SideTopicCursor("2030", "side-1"))
+
+        with patch.object(self.management, "query_side_topics", side_effect=with_cursor):
+            status, _, page = await self.json_get(
+                "/api/v1/side-topics?state=open&state=creating&state=open&project=b&project=a&pageSize=100",
+                session,
+            )
+            self.assertEqual(status, 200)
+            cursor = page["nextCursor"]
+            status, _, _ = await self.json_get(
+                "/api/v1/side-topics?state=creating&state=open&project=a&project=b&pageSize=100&cursor=" + cursor,
+                session,
+            )
+            self.assertEqual(status, 200)
+            status, _, error = await self.json_get(
+                "/api/v1/side-topics?state=open&project=a&project=b&pageSize=100&cursor=" + cursor,
+                session,
+            )
+            self.assertEqual(status, 400)
+            self.assertEqual(error["code"], "invalid_cursor")
+        status, _, _ = await self.json_get("/api/v1/side-topics?state=all", session)
+        self.assertEqual(status, 200)
+        self.assertIsNone(self.management.query_side_topic_calls[-1]["query"].states)
+        for query in ("pageSize=25", "state=all&state=open", "state=closing"):
+            status, _, _ = await self.json_get("/api/v1/side-topics?" + query, session)
+            self.assertEqual(status, 400)
+
+    async def test_side_stop_is_exact_one_shot_and_stale_state_is_rejected(self):
+        self.runner.open_admission()
+        session = await self.login()
+        self.management.side_runtime = replace(
+            self.management.side_runtime, turn_id="physical-turn", turn_state=ActiveState.RUNNING,
+            revision=7,
+        )
+        _, _, page = await self.json_get("/api/v1/side-topics", session)
+        stop = page["items"][0]["actions"]["stop"]
+        status, _, payload = await self.json_post(
+            "/api/v1/side-topics/stop", session, _action_payload(stop),
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["disposition"], StopDisposition.REQUESTED.value)
+        values = self.management.calls[-1][1]
+        self.assertEqual(values["target"].side_id, "side-1")
+        self.assertEqual(values["target"].topic_id, "omt_topic")
+        self.assertEqual(values["runtime_precondition"].activity_revision, 7)
+        self.assertEqual(values["runtime_precondition"].physical_turn_id, "physical-turn")
+        calls = tuple(self.management.calls)
+        status, _, _ = await self.json_post(
+            "/api/v1/side-topics/stop", session, _action_payload(stop),
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(tuple(self.management.calls), calls)
+        _, _, page = await self.json_get("/api/v1/side-topics", session)
+        with patch.object(self.management, "stop_side", side_effect=SideSessionConflict("changed")):
+            status, _, _ = await self.json_post(
+                "/api/v1/side-topics/stop", session,
+                _action_payload(page["items"][0]["actions"]["stop"]),
+            )
+            self.assertEqual(status, 409)
+        self.management.side_runtime = replace(self.management.side_runtime, state=SideSessionState.CLOSING)
+        _, _, page = await self.json_get("/api/v1/side-topics", session)
+        self.assertEqual(page["items"][0]["sessionState"], "closing")
+        self.assertNotIn("stop", page["items"][0]["actions"])
+        self.assertIn("close", page["items"][0]["actions"])
+
     async def test_cursor_is_bound_to_filter_and_snapshot_get_issues_no_actions(self) -> None:
         self.runner.open_admission()
         session = await self.login()
@@ -2320,7 +2413,8 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertEqual(parser.scripts, ["/static/chat-picker.js", "/static/identity.js", "/static/admin.js"])
         self.assertEqual(parser.stylesheets, ["/static/admin.css", "/static/chat-picker.css"])
         self.assertFalse(parser.inline_script_text.strip())
-        self.assertTrue({"projects", "sessions", "side-topics", "updates"} <= parser.ids)
+        self.assertTrue({"projects", "sessions", "sessions-ordinary", "sessions-temporary", "updates"} <= parser.ids)
+        self.assertNotIn("side-topics", parser.ids)
         self.assertIn("service-restart", parser.ids)
         self.assertNotIn("update-install", parser.ids)
         self.assertNotIn("update-check", parser.ids)
@@ -2358,7 +2452,6 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertIn("result?.message", javascript)
         self.assertNotIn("if (runtime.turn)", javascript)
         self.assertNotIn("if (runtime.goal)", javascript)
-        self.assertIn("resetSessionPagination", javascript)
         self.assertIn("sessionLocationCell", javascript)
         self.assertIn(
             'confirmMaterializedDelete(session) && mutate("/api/v1/sessions/delete-materialized"',
@@ -2373,7 +2466,7 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertIn('link.rel = "noopener noreferrer"', javascript)
         self.assertIn("await refresh(state.tab)", javascript)
         self.assertIn('state.tab === "sessions"', javascript)
-        self.assertIn('state.tab === "side-topics"', javascript)
+        self.assertIn('state.sessionTab === "temporary"', javascript)
         self.assertRegex(javascript, r"setInterval\([\s\S]+?,\s*5000\s*\)")
 
     def test_time_range_filter_is_shared_accessible_and_uses_utc_bounds(self) -> None:
@@ -2425,7 +2518,6 @@ class AdminStaticAssetsTest(unittest.TestCase):
             'end.setAttribute("aria-describedby", `${help.id} ${zone.id} ${error.id}`)',
             javascript,
         )
-        self.assertIn("cursor === null", javascript)
         self.assertIn("root.getBoundingClientRect()", javascript)
         self.assertIn("window.innerWidth - margin - width", javascript)
 

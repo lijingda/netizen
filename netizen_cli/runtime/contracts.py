@@ -577,6 +577,7 @@ class SideSessionSnapshot:
     turn_id: str | None
     turn_state: ActiveState | None
     last_activity: float
+    revision: int = 0
 
 
 @dataclass(frozen=True, slots=True)

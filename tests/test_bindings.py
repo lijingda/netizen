@@ -1576,6 +1576,49 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual([item.binding.id for item in inactive.items], [second.id])
 
+    async def test_side_extra_ids_preserve_other_filters_and_keyset_pagination(self) -> None:
+        alpha = self.create_binding(
+            scope=self.direct, project="alpha", created_at="2030-01-01T00:00:00+00:00",
+        )
+        beta = self.create_binding(
+            scope=self.topic, project="beta", created_at="2030-01-01T00:00:00+00:00",
+        )
+        side_ids = []
+        for index, (parent, day, chat_id, state) in enumerate((
+            (alpha, 1, "oc_group", SideTopicState.CREATING),
+            (alpha, 2, "oc_group", SideTopicState.CREATING),
+            (alpha, 3, "oc_group", SideTopicState.CREATING),
+            (alpha, 3, "oc_other", SideTopicState.CREATING),
+            (alpha, 3, "oc_group", SideTopicState.FAILED),
+            (alpha, 4, "oc_group", SideTopicState.CREATING),
+            (beta, 3, "oc_group", SideTopicState.CREATING),
+        )):
+            side = self.store.create_side_topic(
+                app_id="cli_test", chat_id=chat_id, source_message_id=f"om_source_{index}",
+                parent_binding_id=parent.id, creator_id="ou_user", requires_mention=True,
+            )
+            self.store._connection.execute(
+                "UPDATE side_topics SET created_at = ?, state = ? WHERE side_id = ?",
+                (f"2030-01-0{day}T00:00:00+00:00", state.value, side.id),
+            )
+            side_ids.append(side.id)
+        self.store.delete_binding(alpha.id)
+        query = SideTopicQuery(
+            project_aliases=("alpha",), chat_id="oc_group", states=(SideTopicState.CREATING,),
+            created_from="2030-01-02T00:00:00+00:00", created_before="2030-01-04T00:00:00+00:00",
+        )
+        first = await self.store.query_side_topics(
+            query=query, extra_side_ids=tuple(side_ids[:-1]), limit=1,
+        )
+        self.assertEqual([item.side_topic.id for item in first.items], [side_ids[2]])
+        self.assertIsNone(first.items[0].project_alias)
+        self.assertIsNotNone(first.next_cursor)
+        following = await self.store.query_side_topics(
+            query=query, extra_side_ids=tuple(side_ids[:-1]), cursor=first.next_cursor, limit=100,
+        )
+        self.assertEqual([item.side_topic.id for item in following.items], [side_ids[1]])
+        self.assertIsNone(following.next_cursor)
+
     async def test_side_keyset_project_filters_and_project_aggregates(self) -> None:
         alpha = self.create_binding(
             scope=self.direct,
@@ -1633,6 +1676,23 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(filtered.items[0].project_alias, "beta")
 
+        multi = await self.store.query_side_topics(
+            query=SideTopicQuery(
+                project_aliases=("beta", "alpha", "beta"),
+                states=(SideTopicState.FAILED, SideTopicState.CREATING),
+                chat_id="oc_group",
+            ), limit=1,
+        )
+        self.assertEqual(multi.items[0].side_topic.id, side_ids[-1])
+        following = await self.store.query_side_topics(
+            query=SideTopicQuery(
+                project_aliases=("alpha", "beta"),
+                states=(SideTopicState.CREATING, SideTopicState.FAILED),
+                chat_id="oc_group",
+            ), limit=100, cursor=multi.next_cursor,
+        )
+        self.assertEqual([item.side_topic.id for item in following.items], side_ids[-2::-1])
+
         inactive = self.store.create_admin_binding(
             scope=self.direct,
             project_alias="alpha",
@@ -1648,8 +1708,14 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
             "2030-01-01T00:00:00+00:00",
         )
         self.assertIsNone(inactive.activated_at)
+        for query in (
+            SideTopicQuery(project_aliases=()), SideTopicQuery(states=()),
+            SideTopicQuery(states=("open",)), SideTopicQuery(project_aliases=("",)),
+        ):
+            with self.subTest(query=query), self.assertRaises(ValueError):
+                await self.store.query_side_topics(query=query)
         with self.assertRaises(ValueError):
-            await self.store.query_side_topics(limit=51)
+            await self.store.query_side_topics(limit=101)
         with self.assertRaises(ValueError):
             await self.store.query_project_aggregates(limit=51)
         self.assertEqual(aggregates.next_cursor, "alpha")
