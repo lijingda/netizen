@@ -4,7 +4,7 @@
 
   window.createChatPicker = function createChatPicker(root, options) {
     const { id, label = "群聊", fetchPage, onChange = () => {},
-      placeholder = "输入群名搜索或选择群聊" } = options;
+      placeholder = "请选择群聊", emptyOption = null } = options;
     if (!id || typeof fetchPage !== "function") throw new Error("群聊选择器缺少配置");
     const make = (tag, className, text) => {
       const node = document.createElement(tag);
@@ -16,11 +16,21 @@
     const caption = make("label", "chat-picker-label", label);
     caption.htmlFor = id;
     const control = make("div", "chat-picker-control");
+    const trigger = make("button", "chat-picker-trigger");
+    trigger.id = id;
+    trigger.type = "button";
+    trigger.setAttribute("aria-haspopup", "dialog");
+    trigger.setAttribute("aria-controls", `${id}-popup`);
     const selectedAvatar = make("span", "chat-picker-selected-avatar");
+    const summary = make("span", "chat-picker-summary");
+    const chevron = make("span", "chat-picker-chevron", "⌄");
+    chevron.setAttribute("aria-hidden", "true");
+    trigger.append(selectedAvatar, summary, chevron);
     const input = make("input", "chat-picker-input");
-    input.id = id;
+    input.id = `${id}-search`;
     input.type = "text";
-    input.placeholder = placeholder;
+    input.placeholder = "搜索群名";
+    input.setAttribute("aria-label", "搜索群名");
     input.autocomplete = "off";
     input.spellcheck = false;
     input.setAttribute("role", "combobox");
@@ -32,6 +42,9 @@
     clear.type = "button";
     clear.setAttribute("aria-label", "清除群聊");
     const popup = make("div", "chat-picker-popup");
+    popup.id = `${id}-popup`;
+    popup.setAttribute("role", "dialog");
+    popup.setAttribute("aria-label", `${label}选择`);
     const list = make("div", "chat-picker-options");
     list.id = `${id}-options`;
     list.setAttribute("role", "listbox");
@@ -48,9 +61,10 @@
     hint.id = `${id}-hint`;
     const selectedId = make("p", "chat-picker-selected-id");
     selectedId.id = `${id}-selection`;
-    popup.append(list, status, retry, more);
-    control.append(selectedAvatar, input, clear, popup);
-    wrapper.append(caption, control, selectedId, hint);
+    trigger.setAttribute("aria-describedby", selectedId.id);
+    popup.append(input, selectedId, list, status, retry, more, hint);
+    control.append(trigger, clear, popup);
+    wrapper.append(caption, control);
     root.replaceChildren(wrapper);
 
     let selection = null;
@@ -68,8 +82,9 @@
     let revision = 0;
     let timer = null;
     let composing = false;
-    let restoringFocus = false;
     let renderedAvatarUrl;
+
+    function candidates() { return emptyOption === null ? items : [null, ...items]; }
 
     function normalize(item) {
       return item && typeof item.chatId === "string" && item.chatId ? {
@@ -103,10 +118,16 @@
     }
 
     function render() {
+      trigger.disabled = disabled;
+      trigger.setAttribute("aria-expanded", String(expanded));
+      trigger.setAttribute("data-selected", String(Boolean(selection)));
+      summary.textContent = selection?.name || placeholder;
+      trigger.setAttribute("aria-label", `${label}：${summary.textContent}`);
+      trigger.title = selection ? `${selection.name}\n${selection.chatId}` : placeholder;
       input.disabled = disabled;
       input.setAttribute("aria-expanded", String(expanded));
       list.setAttribute("aria-busy", String(loading));
-      clear.hidden = !input.value;
+      clear.hidden = !selection || disabled;
       clear.disabled = disabled;
       popup.hidden = !expanded;
       selectedAvatar.hidden = !selection;
@@ -117,24 +138,31 @@
         renderedAvatarUrl = avatarUrl;
       }
       selectedId.hidden = !selection;
-      selectedId.textContent = selection?.chatId || "";
+      selectedId.textContent = selection ? `${selection.name}\n${selection.chatId}` : "";
       list.replaceChildren();
-      items.forEach((item, index) => {
-        const row = make("div", "chat-picker-option");
+      const choices = candidates();
+      choices.forEach((item, index) => {
+        const row = make("div", item ? "chat-picker-option" : "chat-picker-empty-option");
         row.id = `${id}-option-${index}`;
         row.setAttribute("role", "option");
-        row.setAttribute("aria-selected", String(selection?.chatId === item.chatId));
+        const selected = item ? selection?.chatId === item.chatId : !selection;
+        row.setAttribute("aria-selected", String(selected));
         row.setAttribute("data-active", String(index === activeIndex));
         const text = make("span", "chat-picker-text");
-        text.append(make("span", "chat-picker-name", item.name),
-          make("span", "chat-picker-id", item.chatId));
-        row.append(avatar(item.avatarUrl), text);
+        text.append(make("span", "chat-picker-name", item?.name || emptyOption));
+        if (item) {
+          text.append(make("span", "chat-picker-id", item.chatId));
+          row.append(avatar(item.avatarUrl));
+        }
+        const check = make("span", "chat-picker-check", selected ? "✓" : "");
+        check.setAttribute("aria-hidden", "true");
+        row.append(text, check);
         // Keep focus on the combobox when choosing an option with a pointer.
         row.addEventListener("pointerdown", (event) => event.preventDefault());
         row.addEventListener("click", () => choose(item));
         list.append(row);
       });
-      if (expanded && activeIndex >= 0 && items[activeIndex]) {
+      if (expanded && activeIndex >= 0 && activeIndex < choices.length) {
         input.setAttribute("aria-activedescendant", `${id}-option-${activeIndex}`);
         list.children[activeIndex]?.scrollIntoView?.({ block: "nearest" });
       } else input.removeAttribute("aria-activedescendant");
@@ -189,22 +217,20 @@
       if (disabled || expanded) return;
       expanded = true;
       render();
+      const bounds = control.getBoundingClientRect();
+      const width = popup.getBoundingClientRect().width;
+      popup.style.left = `${Math.max(12 - bounds.left, Math.min(0, window.innerWidth - 12 - bounds.left - width))}px`;
+      input.focus();
       if (!requested) void load();
     }
 
-    function close() {
+    function close({ restoreFocus = false } = {}) {
       expanded = false;
       activeIndex = -1;
-      if (loading || timer !== null) requested = false;
       invalidate();
       loading = false;
-      render();
-    }
-
-    function setSelection(item) {
-      close();
-      selection = normalize(item);
-      input.value = selection?.name || "";
+      composing = false;
+      input.value = "";
       query = "";
       items = [];
       nextCursor = null;
@@ -212,21 +238,25 @@
       error = "";
       requested = false;
       render();
+      if (restoreFocus) trigger.focus();
+    }
+
+    function setSelection(item) {
+      close();
+      selection = normalize(item);
+      render();
     }
 
     function choose(item) {
       if (disabled || !expanded) return;
       setSelection(item);
-      onChange({ ...selection });
+      trigger.focus();
+      onChange(selection ? { ...selection } : null);
     }
 
     function search() {
-      if (disabled) return;
+      if (disabled || !expanded) return;
       invalidate();
-      if (selection) {
-        selection = null;
-        onChange(null);
-      }
       query = input.value.trim();
       items = [];
       nextCursor = null;
@@ -240,45 +270,53 @@
       if (!composing) timer = setTimeout(() => { timer = null; void load(); }, 250);
     }
 
-    input.addEventListener("focusin", () => { if (!restoringFocus) open(); });
-    input.addEventListener("click", open);
+    trigger.addEventListener("click", () => {
+      if (expanded) close({ restoreFocus: true });
+      else open();
+    });
+    trigger.addEventListener("keydown", (event) => {
+      if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+        event.preventDefault();
+        open();
+      }
+    });
     input.addEventListener("input", search);
     input.addEventListener("compositionstart", () => { composing = true; });
     input.addEventListener("compositionend", () => { composing = false; search(); });
     input.addEventListener("keydown", (event) => {
-      if (disabled || composing || event.isComposing) return;
+      if (disabled || !expanded || composing || event.isComposing) return;
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
         open();
-        if (items.length) {
-          activeIndex = event.key === "ArrowDown" ? (activeIndex + 1) % items.length
-            : (activeIndex < 0 ? items.length - 1 : (activeIndex - 1 + items.length) % items.length);
+        const choices = candidates();
+        if (choices.length) {
+          activeIndex = event.key === "ArrowDown" ? (activeIndex + 1) % choices.length
+            : (activeIndex < 0 ? choices.length - 1 : (activeIndex - 1 + choices.length) % choices.length);
           render();
         }
       } else if (event.key === "Enter" && expanded) {
         event.preventDefault();
-        if (activeIndex >= 0 && items[activeIndex]) choose(items[activeIndex]);
+        const choices = candidates();
+        if (activeIndex >= 0 && activeIndex < choices.length) choose(choices[activeIndex]);
       }
     });
     wrapper.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || !expanded || composing || event.isComposing) return;
       event.preventDefault();
       event.stopPropagation?.();
-      close();
-      // Retry and paging buttons are keyboard-reachable; do not leave focus hidden.
-      restoringFocus = true;
-      input.focus();
-      restoringFocus = false;
+      close({ restoreFocus: true });
     });
     wrapper.addEventListener("focusout", (event) => {
-      if (!wrapper.contains(event.relatedTarget)) close();
+      if (event.relatedTarget && !wrapper.contains(event.relatedTarget)) close();
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (expanded && !wrapper.contains(event.target)) close();
     });
     clear.addEventListener("click", () => {
       if (disabled) return;
       setSelection(null);
       onChange(null);
-      input.focus();
-      open();
+      trigger.focus();
     });
     retry.addEventListener("click", () => { if (!loading) void load(failedCursor); });
     more.addEventListener("click", () => { if (!loading && nextCursor) void load(nextCursor); });
@@ -295,7 +333,7 @@
       setDisabled(value) { disabled = Boolean(value); if (disabled) close(); else render(); },
       close,
       reset: () => setSelection(null),
-      focus() { if (!disabled) { input.focus(); open(); } },
+      focus() { if (!disabled) { open(); input.focus(); } },
     };
   };
 })();

@@ -1,28 +1,37 @@
 .chat-picker { position: relative; min-width: 0; }
 .chat-picker .chat-picker-label { display: block; margin: 0 0 5px; color: var(--muted); font-size: 13px; }
 .chat-picker-control { position: relative; }
-.chat-picker .chat-picker-input { width: 100%; margin: 0; padding-right: 35px; }
-.chat-picker-control[data-selected="true"] .chat-picker-input { padding-left: 45px; }
-.chat-picker-selected-avatar { position: absolute; top: 50%; left: 9px; transform: translateY(-50%); pointer-events: none; }
+.chat-picker .chat-picker-trigger { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 36px; border: 1px solid #bac3d0; border-radius: 7px; padding: 8px 10px; background: var(--paper); color: var(--ink); text-align: left; }
+.chat-picker-trigger:hover { border-color: #8290a3; }
+.chat-picker-trigger[data-selected="true"]:not(:disabled) { padding-right: 58px; }
+.chat-picker-trigger:disabled { cursor: default; }
+.chat-picker-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-picker-chevron { flex: none; margin-left: auto; color: var(--muted); font-size: 16px; line-height: 1; }
+.chat-picker-trigger[data-selected="true"]:not(:disabled) .chat-picker-chevron { position: absolute; right: 10px; }
+.chat-picker .chat-picker-input { width: 100%; margin: 0 0 6px; }
+.chat-picker-selected-avatar { display: inline-flex; flex: none; pointer-events: none; }
 .chat-picker-avatar { position: relative; display: inline-flex; flex: none; align-items: center; justify-content: center; width: 30px; height: 30px; overflow: hidden; border-radius: 7px; background: var(--wash); }
 .chat-picker-avatar-fallback { position: relative; display: inline-block; width: 22px; height: 20px; color: var(--muted); }
 .chat-picker-avatar-fallback::before { content: ""; position: absolute; top: 1px; left: 4px; width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 8px 2px 0 -1px currentColor; }
 .chat-picker-avatar-fallback::after { content: ""; position: absolute; top: 10px; left: 1px; width: 13px; height: 8px; border-radius: 7px 7px 2px 2px; background: currentColor; box-shadow: 9px 1px 0 -1px currentColor; }
 .chat-picker-avatar-image { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.chat-picker .chat-picker-selected-id { margin: 5px 0 0; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; overflow-wrap: anywhere; }
-.chat-picker-input[aria-expanded="true"] { border-color: var(--blue); box-shadow: 0 0 0 2px rgb(24 88 215 / 12%); }
-.chat-picker .chat-picker-clear { position: absolute; top: 50%; right: 6px; width: 24px; height: 24px; transform: translateY(-50%); border: 0; border-radius: 50%; padding: 0; background: transparent; color: var(--muted); font-size: 20px; line-height: 24px; }
+.chat-picker-selected-avatar .chat-picker-avatar { width: 18px; height: 18px; border-radius: 4px; }
+.chat-picker-selected-avatar .chat-picker-avatar-fallback { flex: none; transform: scale(.65); }
+.chat-picker .chat-picker-selected-id { margin: 4px 4px 8px; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-line; }
+.chat-picker-trigger[aria-expanded="true"], .chat-picker-trigger:focus-visible, .chat-picker-input:focus-visible { outline: none; border-color: var(--blue); box-shadow: 0 0 0 2px rgb(24 88 215 / 12%); }
+.chat-picker .chat-picker-clear { position: absolute; top: 50%; right: 30px; width: 24px; height: 24px; transform: translateY(-50%); border: 0; border-radius: 50%; padding: 0; background: transparent; color: var(--muted); font-size: 20px; line-height: 24px; }
 .chat-picker .chat-picker-clear:hover { background: var(--wash); color: var(--ink); }
-.chat-picker-popup { position: absolute; z-index: 103; top: calc(100% + 6px); left: 0; right: 0; border: 1px solid var(--line); border-radius: 9px; padding: 6px; background: var(--paper); box-shadow: 0 12px 32px rgb(23 39 68 / 18%); }
-.chat-picker-options { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; }
-.chat-picker-option { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 5px; cursor: pointer; overflow-wrap: anywhere; }
+.chat-picker-popup { position: absolute; z-index: 103; top: calc(100% + 6px); left: 0; width: max(100%, 340px); max-width: calc(100vw - 24px); max-height: 70vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 9px; padding: 10px; background: var(--paper); box-shadow: 0 12px 32px rgb(23 39 68 / 18%); }
+.chat-picker-options { max-height: min(240px, 35vh); overflow-y: auto; overscroll-behavior: contain; }
+.chat-picker-option, .chat-picker-empty-option { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 5px; cursor: pointer; overflow-wrap: anywhere; }
 .chat-picker-text { display: grid; gap: 4px; min-width: 0; }
-.chat-picker-option:hover, .chat-picker-option[data-active="true"] { background: var(--blue-soft); }
-.chat-picker-option[aria-selected="true"] .chat-picker-name { color: var(--blue); font-weight: 700; }
+.chat-picker-option:hover, .chat-picker-empty-option:hover, .chat-picker-options [data-active="true"] { background: var(--blue-soft); }
+.chat-picker-options [aria-selected="true"] .chat-picker-name { color: var(--blue); font-weight: 700; }
+.chat-picker-check { margin-left: auto; flex: none; color: var(--blue); }
 .chat-picker-name { color: var(--ink); font-size: 13px; }
 .chat-picker-id { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
 .chat-picker .chat-picker-status, .chat-picker .chat-picker-hint { margin: 7px 4px; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
-.chat-picker .chat-picker-hint { margin: 6px 0 0; }
+.chat-picker .chat-picker-hint { margin: 8px 0 0; padding-top: 8px; border-top: 1px solid var(--line); }
 .chat-picker .chat-picker-status.error { color: var(--danger); }
 .chat-picker .chat-picker-retry, .chat-picker .chat-picker-more { width: 100%; border: 0; border-radius: 5px; padding: 8px 10px; background: var(--wash); color: var(--blue); font-size: 13px; text-align: center; }
 .chat-picker [hidden] { display: none; }

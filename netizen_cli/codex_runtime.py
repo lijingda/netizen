@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from openai_codex import (
     AsyncThread,
@@ -2097,6 +2097,8 @@ class CodexRuntime:
         max_pages: int = _THREAD_CATALOG_MAX_PAGES,
         max_items: int = _THREAD_CATALOG_MAX_ITEMS,
         use_state_db_only: bool | None = None,
+        sort_key: Literal["created_at", "updated_at"] | None = None,
+        sort_direction: Literal["asc", "desc"] | None = None,
     ) -> NativeThreadCatalog:
         """Read one complete bounded native catalog for a request-scoped view."""
 
@@ -2106,6 +2108,10 @@ class CodexRuntime:
             raise ValueError("native catalog limits must be positive")
         if use_state_db_only is not None and not isinstance(use_state_db_only, bool):
             raise ValueError("use_state_db_only must be boolean or None")
+        if sort_key is not None and sort_key not in ("created_at", "updated_at"):
+            raise ValueError("sort_key must be created_at, updated_at, or None")
+        if sort_direction is not None and sort_direction not in ("asc", "desc"):
+            raise ValueError("sort_direction must be asc, desc, or None")
         loop = asyncio.get_running_loop()
         if deadline <= loop.time():
             raise ThreadCatalogDeadlineExceeded("native Thread catalog deadline elapsed")
@@ -2130,6 +2136,10 @@ class CodexRuntime:
                     }
                     if use_state_db_only is not None:
                         list_kwargs["use_state_db_only"] = use_state_db_only
+                    if sort_key is not None:
+                        list_kwargs["sort_key"] = sort_key
+                    if sort_direction is not None:
+                        list_kwargs["sort_direction"] = sort_direction
                     response = await self._codex.thread_list(**list_kwargs)
                     page_count += 1
                     data = getattr(response, "data", None)

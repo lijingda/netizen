@@ -5,9 +5,6 @@ const statusMessages = [];
 function setStatus(message) { statusMessages.push(message); }
 let pollsStopped = 0;
 function stopUpdatePolling() { pollsStopped += 1; }
-const runtimePollTimer = 77;
-const clearedIntervals = [];
-function clearInterval(value) { clearedIntervals.push(value); }
 let nextTimer = 0;
 const timers = new Map();
 function setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; }
@@ -216,7 +213,6 @@ answer = async (path, options) => {
   assert.equal(document.querySelector("#system").inert, true);
   assert.equal(navigation, null);
   assert.equal(pollsStopped, 1);
-  assert.deepEqual(clearedIntervals, [77]);
   finishBody({ stale: "success" });
   await assert.rejects(lateRequest, (error) => error.status === 401);
   const requestCount = calls.length;

@@ -2,11 +2,15 @@ window.location = { search: initialSearch, assign() {} };
 window.confirm = () => true;
 window.NetizenIdentity = { loadProfile: async () => {}, loadUsers: async () => {}, expire() {} };
 const sessionStorage = { getItem() {}, setItem() {}, removeItem() {} };
-let poll;
-function setInterval(callback) { poll = callback; return 1; }
-function clearInterval() {}
 let now = 0;
+let nextTimer = 0;
+const timers = new Map();
+function setTimeout(callback, delay = 0) { const id = ++nextTimer; timers.set(id, { callback, at: now + delay }); return id; }
+function clearTimeout(id) { timers.delete(id); }
+function setInterval(callback, delay) { const id = setTimeout(callback, delay); timers.get(id).interval = delay; return id; }
+function clearInterval(id) { timers.delete(id); }
 const performance = { now: () => now };
+Date.now = () => Date.UTC(2026, 9, 12, 8) + now;
 const requests = [];
 const confirmations = [];
 window.confirm = (message) => { confirmations.push(message); return true; };
@@ -14,6 +18,7 @@ const ordinary = {
   bindingId: "binding-parent", shortId: "parent", chatId: "oc_parent", chatLabel: "研发群",
   chatLabelResolved: true, chatMode: "group", chatOpenUrl: "https://applink.feishu.cn/chat",
   nativeTitle: "普通会话标题", sessionType: "message", catalogState: "active", pointerState: "current",
+  createdAt: "2026-10-10T08:00:00+00:00", updatedAt: Date.UTC(2026, 9, 12, 7) / 1000,
   projectAlias: "netizen", sessionSettings: { message_context_mode: "current-only", turn_settings: null },
   runtime: { bindingId: "binding-parent", primaryStatus: "idle", primaryStatusResolution: "local" }, actions: {},
 };
@@ -24,29 +29,30 @@ const side = {
   chatId: "oc_side", chatLabel: "研发群", chatLabelResolved: true, chatMode: "group", topicId: "omt_side",
   rootMessageId: "om_root", topicOpenUrl: "https://applink.feishu.cn/topic", chatOpenUrl: "https://applink.feishu.cn/chat",
   projectAlias: "netizen", state: "open", sessionState: "open", createdAt: "2026-10-12T08:00:00+00:00",
+  updatedAt: "2026-10-12T09:00:00+00:00",
   runtime: { sideId: "side-a", revision: 1, state: "open", sessionState: "open", turnId: "turn-a", turnState: "running" },
   actions: { stop: grant("stop"), close: grant("close") },
 };
 let listItems = [side];
-let snapshotItems = [side.runtime];
 let sideAnswer;
 let ordinaryAnswer;
-let snapshotAnswer;
 let failSide = false;
+let actionFailure = false;
 async function fetch(path, options = {}) {
   const url = new URL(path, "https://admin");
   requests.push({ path: url.pathname, query: url.searchParams, options });
   let data;
   if (url.pathname === "/api/v1/projects/options") data = { items: [{ alias: "netizen", enabled: true }, { alias: "docs", enabled: false }], nextCursor: null };
+  else if (url.pathname === "/api/v1/chats") data = { items: [{ chatId: "oc_selected", name: "已选群" }], nextCursor: null };
   else if (url.pathname === "/api/v1/projects") data = { items: [], nextCursor: null };
   else if (url.pathname === "/api/v1/sessions") data = ordinaryAnswer ? await ordinaryAnswer() : { items: [structuredClone(ordinary)], nextCursor: "ordinary-next" };
   else if (url.pathname === "/api/v1/side-topics") {
     if (failSide) throw new Error("side list unavailable");
     data = sideAnswer ? await sideAnswer() : { items: structuredClone(listItems), nextCursor: url.searchParams.has("cursor") ? null : "side-next" };
-  } else if (url.pathname === "/api/v1/runtime-snapshots") {
-    data = snapshotAnswer ? await snapshotAnswer() : { bindings: url.searchParams.has("bindingIds") ? [ordinary.runtime] : [],
-      sides: url.searchParams.has("sideIds") ? structuredClone(snapshotItems) : [], missingSideIds: [] };
-  } else if (url.pathname.endsWith("/stop") || url.pathname.endsWith("/close")) data = { message: "操作完成" };
+  } else if (url.pathname.endsWith("/stop") || url.pathname.endsWith("/close")) {
+    if (actionFailure) return { ok: false, status: 409, json: async () => ({ message: "会话状态已变化，请重试" }) };
+    data = { message: "操作完成" };
+  }
   else throw new Error(`Unexpected request ${path}`);
   return { ok: true, status: 200, json: async () => data };
 }
@@ -55,6 +61,23 @@ for (const id of ["sessions-body", "sides-body"]) {
 }
 async function flush() { for (let i = 0; i < 80; i += 1) await Promise.resolve(); }
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
+async function advanceTime(duration) {
+  const end = now + duration;
+  let ticks = 0;
+  while (true) {
+    const next = [...timers].filter(([, timer]) => timer.at <= end).sort((left, right) => left[1].at - right[1].at)[0];
+    if (!next) break;
+    assert(++ticks < 1000, "timer loop did not settle");
+    const [id, timer] = next;
+    now = timer.at;
+    if (timer.interval) timer.at += timer.interval;
+    else timers.delete(id);
+    await timer.callback();
+    await flush();
+  }
+  now = end;
+  await flush();
+}
 // SHIPPED_ADMIN_PAGE
 (async () => {
   await flush();
@@ -90,7 +113,7 @@ function deferred() { let resolve, reject; const promise = new Promise((yes, no)
   assert.equal(sideQuery().get("pageSize"), "20");
   for (const key of ["inventoryState", "scopeKind", "current", "parentBindingId", "topicId", "rootMessageId"]) assert(!sideQuery().has(key));
   const row = () => document.querySelector("#sides-body").children[0];
-  assert.equal(row().children.length, 7);
+  assert.equal(row().children.length, 8);
   assert.equal(row().children[0].querySelector("a").href, side.topicOpenUrl);
   assert(!row().children[0].textContent.includes(side.chatId));
   assert.equal(row().children[1].children[0].textContent, "普通会话标题");
@@ -110,10 +133,20 @@ function deferred() { let resolve, reject; const promise = new Promise((yes, no)
   assert(confirmationIncludes("结束后无法恢复"));
 
   const form = document.querySelector("#side-filter");
+  const sidePickerRoot = document.querySelector("#side-chat-picker");
+  assert.equal(sidePickerRoot.querySelector(".chat-picker-summary").textContent, "全部");
   const projectRoot = form.querySelectorAll("[data-side-multi]").find((root) => root.dataset.sideMulti === "project");
   projectRoot.querySelectorAll("input").find((input) => input.value === "docs").click();
   sideChatPicker.setSelection({ chatId: "oc_selected", name: "已选群" });
   document.querySelector("#side-chat-filter").value = "oc_selected";
+  sideChatPicker.focus();
+  await flush();
+  assert(sidePickerRoot.querySelector(".chat-picker-empty-option"));
+  const sideSearch = document.querySelector("#side-group-search");
+  sideSearch.value = "其他群";
+  sideSearch.dispatch("input");
+  sideSearch.dispatch("keydown", { key: "Escape" });
+  assert.equal(document.querySelector("#side-chat-filter").value, "oc_selected");
   const range = form.querySelector("[data-time-range]");
   range.querySelector("[data-time-range-trigger]").click();
   range.querySelectorAll("[data-time-range-preset]").find((button) => button.dataset.timeRangePreset === "today").click();
@@ -141,6 +174,8 @@ function deferred() { let resolve, reject; const promise = new Promise((yes, no)
   assert.equal(state.sidePage.number, 1, "failed page requests retain the displayed cursor stack");
   failSide = false;
   await resetSideFilters();
+  assert.equal(sidePickerRoot.querySelector(".chat-picker-summary").textContent, "全部");
+  assert.equal(sideChatPicker.getSelection(), null);
   assert.equal(sideQuery().get("pageSize"), "20");
   assert.deepEqual(sideQuery().getAll("state"), ["creating", "open"]);
   for (const key of ["project", "chatId", "createdFrom", "createdBefore", "cursor"]) assert(!sideQuery().has(key));
@@ -161,76 +196,6 @@ function deferred() { let resolve, reject; const promise = new Promise((yes, no)
   sideAnswer = null;
 
   await selectSessionTab("temporary");
-  const snapshotWait = deferred(); snapshotAnswer = () => snapshotWait.promise;
-  const oldPoll = poll(); await flush();
-  await selectSessionTab("ordinary");
-  snapshotWait.resolve({ bindings: [], sides: [{ ...side.runtime, state: "closing", sessionState: "closing" }], missingSideIds: [] });
-  await oldPoll;
-  assert.equal(state.sides.items[0].sessionState, "open");
-  snapshotAnswer = null;
-  await selectSessionTab("temporary");
-
-  // Steering the same Turn does not invalidate Close or reload metadata/options.
-  const beforeSteer = requests.length;
-  snapshotItems = [{ ...side.runtime, revision: 2 }];
-  now = 20000;
-  await poll();
-  assert.equal(requests.length, beforeSteer + 1);
-  assert.equal(requests.at(-1).path, "/api/v1/runtime-snapshots");
-  assert(buttons().every((button) => !button.disabled));
-
-  // A Turn change refreshes eligibility; old exact grants still use server checks.
-  const freshList = deferred(); sideAnswer = () => freshList.promise;
-  snapshotItems = [{ ...side.runtime, revision: 3, turnId: "turn-b" }];
-  now = 40000;
-  const transition = poll(); await flush();
-  assert(buttons().every((button) => !button.disabled));
-  freshList.resolve({ items: [{ ...structuredClone(side), runtime: snapshotItems[0], actions: { close: grant("fresh-close") } }], nextCursor: null });
-  await transition;
-  assert.deepEqual(buttons().map((button) => button.textContent), ["结束临时会话"]);
-  assert.equal(buttons()[0].disabled, false);
-  sideAnswer = null;
-
-  // A route can fail during creation before any process-local Side exists.
-  listItems = [{ ...side, state: "creating", sessionState: "creating", runtime: null, actions: {} }];
-  await refresh("sessions");
-  const creationList = deferred(); sideAnswer = () => creationList.promise;
-  snapshotAnswer = async () => ({ bindings: [], sides: [], missingSideIds: [side.sideId] });
-  now = 60000;
-  const creationPoll = poll(); await flush();
-  assert.equal(row().querySelector(".side-session-state").textContent, "创建中");
-  assert.equal(row().querySelector(".runtime-state").textContent, "创建中");
-  creationList.resolve({ items: [{ ...listItems[0], state: "failed", sessionState: "failed" }], nextCursor: null });
-  await creationPoll;
-  assert.equal(row().querySelector(".side-session-state").textContent, "失败");
-  assert.equal(row().querySelector(".runtime-state").textContent, "—");
-  sideAnswer = null; snapshotAnswer = null;
-
-  // An early registry entry is not proof that topic publication has completed.
-  await refresh("sessions");
-  snapshotItems = [side.runtime];
-  now = 65000;
-  await poll();
-  assert.equal(row().querySelector(".side-session-state").textContent, "创建中");
-  snapshotItems = [{ ...side.runtime, state: "closing", sessionState: "closing" }];
-  now = 70000;
-  await poll();
-  assert.equal(row().querySelector(".side-session-state").textContent, "结束中");
-  assert.equal(row().querySelector(".runtime-state").textContent, "结束中");
-
-  // Publication changes only the route for a Side with no initial prompt.
-  const idleRuntime = { ...side.runtime, revision: 0, turnId: null, turnState: null };
-  listItems = [{ ...side, state: "creating", sessionState: "creating", runtime: idleRuntime, actions: {} }];
-  await refresh("sessions");
-  snapshotItems = [idleRuntime];
-  listItems = [{ ...side, runtime: idleRuntime, actions: { close: grant("close") } }];
-  const beforePublication = requests.filter((request) => request.path === "/api/v1/side-topics").length;
-  now = 90000;
-  await poll();
-  assert.equal(requests.filter((request) => request.path === "/api/v1/side-topics").length, beforePublication + 1);
-  assert.equal(row().querySelector(".side-session-state").textContent, "可用");
-  assert.deepEqual(buttons().map((button) => button.textContent), ["结束临时会话"]);
-
   listItems = [{ ...side, parentSession: { bindingId: side.parentBindingId, available: false, title: null },
     projectAlias: null, runtime: null, sessionState: "closed", state: "closed", actions: {}, chatLabelResolved: false }];
   await refresh("sessions");
@@ -239,16 +204,16 @@ function deferred() { let resolve, reject; const promise = new Promise((yes, no)
   assert.equal(row().children[4].textContent, "原项目已不可用");
   assert.equal(buttons().length, 0);
   assert(!row().querySelector(".actions").querySelector("a"));
-  const beforeTerminalPoll = requests.length;
-  await poll();
-  assert.equal(requests.length, beforeTerminalPoll);
+  const beforeIdle = requests.length;
+  await advanceTime(60000);
+  assert.equal(requests.length, beforeIdle);
 
   // Explicit schedule selection forces ordinary even after temporary was selected.
   selectTab("sessions", "ordinary"); await flush();
   assert.equal(state.sessionTab, "ordinary");
   assert.equal(document.querySelector("#sessions-ordinary").hidden, false);
   await checkAtomicSessionLists();
-  await checkSidePollDuringNavigation();
+  await checkSessionSorting();
   function confirmationIncludes(text) { return confirmations.some((message) => message.includes(text)); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 
@@ -266,7 +231,9 @@ async function checkAtomicSessionLists() {
     });
     const answerWith = (answer) => { if (kind === "side") sideAnswer = answer; else ordinaryAnswer = answer; };
     const snapshot = () => ({ page: structuredClone(state[pageKey]), data: structuredClone(state[dataKey]),
-      body: body.textContent, pagination: pagination.textContent });
+      body: body.textContent, pagination: pagination.textContent,
+      refreshedAt: state[`${kind}RefreshedAt`],
+      freshness: document.querySelector("#sessions-refreshed-at").textContent });
     answerWith(async () => reply("original"));
     await selectSessionTab(view);
     await resetSessionFilters(kind);
@@ -333,26 +300,92 @@ async function checkAtomicSessionLists() {
   }
 }
 
-async function checkSidePollDuringNavigation() {
-  listItems = [structuredClone(side)];
-  await selectSessionTab("temporary");
-  await resetSideFilters();
-  const slowSnapshot = deferred(); snapshotAnswer = () => slowSnapshot.promise;
-  const polling = poll(); await flush();
-  const next = deferred(); sideAnswer = () => next.promise;
-  const paging = moveSidePage("next"); await flush();
-  const requestsBefore = requests.length;
-  const changed = { ...side.runtime, revision: 20, turnId: "new-turn" };
-  now = 120000;
-  slowSnapshot.resolve({ bindings: [], sides: [changed], missingSideIds: [] });
-  await polling;
-  assert.equal(requests.length, requestsBefore, "an old poll cannot supersede an in-flight page request");
-  assert.equal(state.sides.items[0].runtime.turnId, side.runtime.turnId);
-  await poll();
-  assert.equal(requests.length, requestsBefore, "polling waits for the user request");
-  next.resolve({ items: [{ ...side, sideId: "second-page", runtime: changed }], nextCursor: null });
-  assert.equal(await paging, true);
-  assert.equal(state.sidePage.number, 2);
-  assert.equal(state.sides.items[0].sideId, "second-page");
-  sideAnswer = null; snapshotAnswer = null;
+async function checkSessionSorting() {
+  const freshness = document.querySelector("#sessions-refreshed-at");
+  for (const [kind, view, dataKey] of [["session", "ordinary", "sessions"], ["side", "temporary", "sides"]]) {
+    const pageKey = `${kind}Page`;
+    const form = document.querySelector(`#${kind}-filter`);
+    const chat = document.querySelector(`#${kind}-chat-filter`);
+    const buttons = document.querySelectorAll("[data-session-sort]").filter((button) => button.dataset.sessionSort === kind);
+    const created = buttons.find((button) => button.dataset.sortBy === "createdAt");
+    const updated = buttons.find((button) => button.dataset.sortBy === "updatedAt");
+    const path = kind === "side" ? "/api/v1/side-topics" : "/api/v1/sessions";
+    const query = () => requests.findLast((request) => request.path === path).query;
+    const answerWith = (answer) => { if (kind === "side") sideAnswer = answer; else ordinaryAnswer = answer; };
+    const row = () => document.querySelector(`#${dataKey}-body`).children[0];
+    listItems = [structuredClone(side)];
+    await selectSessionTab(view);
+    await resetSessionFilters(kind);
+    assert.equal(query().get("sortBy"), "updatedAt");
+    assert.equal(query().get("sortDirection"), "desc");
+    assert.equal(updated.parentElement.getAttribute("aria-sort"), "descending");
+    assert.match(updated.getAttribute("aria-label"), /最近更新由远及近/);
+    assert.equal(created.parentElement.getAttribute("aria-sort"), "none");
+    assert.equal(freshness.hidden, false);
+    assert.match(freshness.textContent, /^更新于 \d{2}:\d{2}:\d{2}$/);
+
+    const createdCell = row().children[kind === "side" ? 5 : 7];
+    const updatedCell = row().children[kind === "side" ? 6 : 8];
+    assert.equal(createdCell.textContent, sessionDateLabel(kind === "side" ? side.createdAt : ordinary.createdAt));
+    assert.equal(updatedCell.textContent, kind === "side" ? sessionDateLabel(side.updatedAt) : sessionUpdatedAtLabel(ordinary));
+
+    chat.value = "oc_applied";
+    form.dispatch("submit"); await flush();
+    await moveSessionPage("next", kind);
+    assert.equal(state[pageKey].number, 2);
+    chat.value = "oc_unsubmitted";
+    await advanceTime(1000);
+    updated.click(); await flush();
+    assert.equal(query().get("sortBy"), "updatedAt");
+    assert.equal(query().get("sortDirection"), "asc");
+    assert.equal(query().get("chatId"), "oc_applied", "sort must preserve applied filters, not submit drafts");
+    assert.equal(chat.value, "oc_unsubmitted");
+    assert(!query().has("cursor"));
+    assert.equal(state[pageKey].number, 1);
+    assert.deepEqual(state[pageKey].previousCursors, []);
+    assert.equal(updated.parentElement.getAttribute("aria-sort"), "ascending");
+    assert.equal(updated.querySelector(".sort-indicator").textContent, "↑");
+
+    created.click(); await flush();
+    assert.equal(query().get("sortBy"), "createdAt");
+    assert.equal(query().get("sortDirection"), "desc", "a newly selected column starts newest first");
+    assert.equal(created.parentElement.getAttribute("aria-sort"), "descending");
+    assert.equal(updated.parentElement.getAttribute("aria-sort"), "none");
+    created.click(); await flush();
+    assert.equal(query().get("sortDirection"), "asc");
+    assert.equal(created.querySelector(".sort-indicator").textContent, "↑");
+    form.dispatch("submit"); await flush();
+    assert.equal(query().get("chatId"), "oc_unsubmitted");
+    assert.equal(query().get("sortBy"), "createdAt");
+    assert.equal(query().get("sortDirection"), "asc", "filtering retains the selected sort");
+    await moveSessionPage("next", kind);
+    assert.equal(query().get("sortDirection"), "asc", "paging retains the selected sort");
+    const savedPage = structuredClone(state[pageKey]);
+    const savedTime = freshness.textContent;
+    const savedRefreshedAt = state[`${kind}RefreshedAt`];
+    const savedRows = document.querySelector(`#${dataKey}-body`).textContent;
+    await advanceTime(1000);
+    answerWith(async () => { throw new Error("sorting unavailable"); });
+    updated.click(); await flush();
+    assert.deepEqual(state[pageKey], savedPage);
+    assert.equal(freshness.textContent, savedTime);
+    assert.equal(state[`${kind}RefreshedAt`], savedRefreshedAt);
+    assert.equal(document.querySelector(`#${dataKey}-body`).textContent, savedRows);
+    assert.equal(created.parentElement.getAttribute("aria-sort"), "ascending", "failed sorting must retain the displayed sort");
+    assert.equal(updated.parentElement.getAttribute("aria-sort"), "none");
+    answerWith(null);
+
+    const other = kind === "side" ? "ordinary" : "temporary";
+    await selectSessionTab(other);
+    await selectSessionTab(view);
+    assert.deepEqual(state[pageKey], savedPage, "each Tab retains its applied sort and page");
+    const unchangedFreshness = freshness.textContent;
+    setStatus("unrelated operation message");
+    assert.equal(freshness.textContent, unchangedFreshness);
+    await resetSessionFilters(kind);
+    assert.equal(query().get("sortBy"), "updatedAt");
+    assert.equal(query().get("sortDirection"), "desc");
+    assert.equal(updated.parentElement.getAttribute("aria-sort"), "descending");
+    assert.equal(created.parentElement.getAttribute("aria-sort"), "none");
+  }
 }

@@ -55,7 +55,6 @@ function expireAdminSession() {
   if (state.authExpired) return;
   state.authExpired = true;
   stopUpdatePolling();
-  if (typeof runtimePollTimer !== "undefined") clearInterval(runtimePollTimer);
   for (const element of document.querySelectorAll?.(".panel, dialog, .tabs") || []) element.inert = true;
   for (const button of document.querySelectorAll?.("button") || []) button.disabled = true;
   const notice = document.querySelector("#auth-expired");
@@ -111,6 +110,45 @@ let updateExpectedTarget = null;
 let updatePriorOperationId = null;
 let updateDisconnected = false;
 let updateReading = false;
+let diagnosticsRequest = null;
+
+function renderInstanceDiagnostics(data, error = null) {
+  for (const [key, yes, no] of [
+    ["bound", "已注册", "未注册"], ["loaded", "已加载", "未加载"],
+    ["running", "运行中", "未运行"], ["ready", "已就绪", "未就绪"],
+    ["enabled", "已启用", "未启用"],
+  ]) {
+    const value = data?.[key];
+    const node = document.querySelector(`#diagnostics-${key}`);
+    node.textContent = value === true ? yes : value === false ? no : "无法确认";
+    node.className = `badge ${value === true ? "on" : value === false ? "warn" : ""}`;
+  }
+  document.querySelector("#diagnostics-root").textContent = data?.root || "无法确认";
+  for (const key of ["python", "prefix"]) {
+    document.querySelector(`#diagnostics-${key}`).textContent = data
+      ? data.binding?.[key] || "未绑定" : "无法确认";
+  }
+  document.querySelector("#diagnostics-codex-home").textContent = !data ? "无法确认"
+    : !data.binding ? "未绑定" : data.binding.codexHome || "未显式指定，随服务环境确定";
+  if (data) document.querySelector("#diagnostics-checked-at").textContent =
+    `上次成功检查：${new Date(data.checkedAt * 1000).toLocaleString("zh-CN", { hour12: false })}`;
+  const message = document.querySelector("#diagnostics-message");
+  message.textContent = error || "只读检查已完成；按需点击“刷新维护状态”重新检查。";
+  message.className = error ? "error" : "";
+}
+
+function loadInstanceDiagnostics() {
+  if (diagnosticsRequest) return diagnosticsRequest;
+  document.querySelector("#diagnostics-message").textContent = "正在检查当前实例…";
+  diagnosticsRequest = updateApi("/api/v1/instance-diagnostics")
+    .then((data) => { if (!state.authExpired) renderInstanceDiagnostics(data); })
+    .catch(() => {
+      renderInstanceDiagnostics(null, state.authExpired ? "登录已失效，请重新登录后检查。"
+        : "本次检查失败，无法确认当前状态；请稍后手动刷新，或使用 doctor --root 排查。");
+    })
+    .finally(() => { diagnosticsRequest = null; });
+  return diagnosticsRequest;
+}
 
 function sameRestartTarget(left, right) {
   return left?.resource === "instance-restart" && typeof left.targetId === "string"
@@ -134,7 +172,7 @@ function renderUpdates() {
     || "程序更新请在对应 Python 环境运行 netizen update。";
   const operation = data.operation;
   const restarting = updateExpectedTarget != null || operation?.kind === "restart";
-  const operationName = restarting ? "重启" : "升级";
+  const operationName = restarting ? "重启" : "维护";
   let phase = operation
     ? (updatePhaseLabels[operation.phase] || "维护结果未确认").replace("升级", operationName)
     : "尚未执行维护操作";
@@ -149,6 +187,12 @@ function renderUpdates() {
   if (operation?.phase === "succeeded") {
     detail += restarting ? " 服务管理器已完成重启，服务就绪已确认。" : " 安装器已确认升级完成。";
   }
+  const legacyUnresolved = operation && operation.kind !== "restart"
+    && (!updateTerminalPhases.has(operation.phase) || operation.phase === "recovery_required");
+  if (legacyUnresolved && !updateExpectedTarget) {
+    phase = "历史维护状态待核查";
+    detail = "旧安装机制的维护结果尚未确认，请检查实例状态和日志。此记录不代表当前版本的升级结果；不要删除维护记录或重复提交操作。";
+  }
   if (updateExpectedTarget) {
     phase = updateSubmitting ? `正在提交${operationName}` : `${operationName}提交结果尚未确认`;
     detail = "正在查询服务端记录，请勿重复提交重启。";
@@ -161,6 +205,8 @@ function renderUpdates() {
     phase = `${operationName}结果尚未确认`;
     detail = "自动查询已停止；请点击“刷新维护状态”手动检查。请勿据此认定操作失败或重复提交。";
   }
+  document.querySelector("#update-operation").hidden = !(operation?.kind === "restart"
+    || legacyUnresolved || updateExpectedTarget || updateDisconnected || updatePollExpired);
   document.querySelector("#update-phase").textContent = phase;
   document.querySelector("#update-detail").textContent = detail;
   document.querySelector("#service-restart").disabled = updateSubmitting || updateReading
@@ -233,6 +279,10 @@ async function pollUpdateStatus() {
 }
 
 async function loadUpdates() {
+  await Promise.all([loadMaintenanceStatus(), loadInstanceDiagnostics()]);
+}
+
+async function loadMaintenanceStatus() {
   if (updateReading) return;
   stopUpdatePolling();
   updatePollStarted = Date.now();
@@ -516,21 +566,26 @@ async function loadProjects(cursor = null) {
 const timeRangeControllers = new WeakMap();
 const sessionMultiFilters = new Map();
 const sideMultiFilters = new Map();
-let openSessionMultiFilter = null;
+const scheduleFilters = new Map();
+let openFilter = null;
 
-const sessionFilterOptions = {
+const filterOptions = {
   project: [],
   scopeKind: [["direct", "单聊"], ["group", "群聊"], ["topic", "话题"]],
   inventoryState: [["active", "Active"], ["lazy", "Lazy"], ["unknown", "状态未确认"], ["archived", "Archived"], ["missing", "Missing"]],
   current: [["true", "当前"], ["false", "非当前"]],
   state: [["creating", "创建中"], ["open", "存活"], ["closed", "已结束"], ["expired", "已失效"], ["failed", "失败"]],
+  enabled: [["true", "已启用"], ["false", "已暂停"]],
+  ended: [["false", "未结束"], ["true", "已结束"]],
 };
 
-function initializeSessionMultiFilter(root) {
-  const name = root.dataset.sessionMulti || root.dataset.sideMulti;
-  const prefix = root.dataset.sideMulti ? "side" : "session";
+function initializeFilter(root) {
+  const name = root.dataset.sessionMulti || root.dataset.sideMulti || root.dataset.scheduleFilter;
+  const single = Boolean(root.dataset.scheduleFilter);
+  const prefix = single ? "schedule" : root.dataset.sideMulti ? "side" : "session";
+  const valueField = single ? document.querySelector(`#schedule-filter-${name}`) : null;
   const defaults = name === "inventoryState" ? ["active", "lazy", "unknown"]
-    : name === "state" ? ["creating", "open"] : [];
+    : name === "state" ? ["creating", "open"] : name === "ended" ? ["false"] : [];
   const legend = root.querySelector("legend");
   legend.id = `${prefix}-${name}-label`;
   const trigger = document.createElement("button");
@@ -562,13 +617,17 @@ function initializeSessionMultiFilter(root) {
   clear.textContent = "清除筛选（全部）";
   const choices = document.createElement("div");
   choices.className = "multi-filter-options";
+  if (single) {
+    choices.setAttribute("role", "radiogroup");
+    choices.setAttribute("aria-labelledby", legend.id);
+  }
   const empty = document.createElement("p");
   empty.className = "multi-filter-empty";
   empty.textContent = "没有匹配的 Project";
   empty.hidden = true;
   popover.append(clear, choices, empty);
   root.append(trigger, popover);
-  let options = sessionFilterOptions[name];
+  let options = filterOptions[name];
   let selected = new Set(defaults);
 
   function renderSummary() {
@@ -576,6 +635,7 @@ function initializeSessionMultiFilter(root) {
     summary.textContent = selected.size === 0 ? "全部" : labels.join("、");
     trigger.title = summary.textContent;
     trigger.setAttribute("aria-label", `${legend.textContent}：${summary.textContent}`);
+    if (valueField) valueField.value = [...selected][0] || "";
   }
 
   function filterChoices() {
@@ -594,10 +654,16 @@ function initializeSessionMultiFilter(root) {
       const label = document.createElement("label");
       label.className = "multi-filter-option";
       const input = document.createElement("input");
-      input.type = "checkbox";
+      input.type = single ? "radio" : "checkbox";
       input.value = value;
       input.checked = selected.has(value);
-      input.addEventListener("change", () => {
+      input.addEventListener(single ? "click" : "change", () => {
+        if (single) {
+          selected = new Set([value]);
+          close({ restoreFocus: true });
+          renderChoices();
+          return;
+        }
         if (input.checked) selected.add(value);
         else selected.delete(value);
         renderSummary();
@@ -612,7 +678,7 @@ function initializeSessionMultiFilter(root) {
   function close({ restoreFocus = false } = {}) {
     popover.hidden = true;
     trigger.setAttribute("aria-expanded", "false");
-    if (openSessionMultiFilter === controller) openSessionMultiFilter = null;
+    if (openFilter === controller) openFilter = null;
     if (restoreFocus) trigger.focus();
   }
 
@@ -622,9 +688,9 @@ function initializeSessionMultiFilter(root) {
   }
 
   function open() {
-    openSessionMultiFilter?.close();
+    openFilter?.close();
     openTimeRangeFilter?.cancel({ restoreFocus: false });
-    openSessionMultiFilter = controller;
+    openFilter = controller;
     search.value = "";
     filterChoices();
     popover.hidden = false;
@@ -633,7 +699,9 @@ function initializeSessionMultiFilter(root) {
     const bounds = root.getBoundingClientRect();
     const width = popover.getBoundingClientRect().width;
     popover.style.left = `${Math.min(0, window.innerWidth - 20 - bounds.left - width)}px`;
-    (name === "project" ? search : visibleInputs()[0] || clear).focus();
+    const inputs = visibleInputs();
+    const current = single ? inputs.find((input) => input.checked) : null;
+    (name === "project" ? search : current || inputs[0] || clear).focus();
   }
 
   const controller = {
@@ -667,6 +735,7 @@ function initializeSessionMultiFilter(root) {
   search.addEventListener("input", filterChoices);
   clear.addEventListener("click", () => {
     selected.clear();
+    if (single) close({ restoreFocus: true });
     renderChoices();
   });
   root.addEventListener("keydown", (event) => {
@@ -676,6 +745,9 @@ function initializeSessionMultiFilter(root) {
       close({ restoreFocus: true });
     } else if (event.key === "Enter" && event.target === search) {
       event.preventDefault();
+    } else if (single && event.key === "Enter" && visibleInputs().includes(event.target)) {
+      event.preventDefault();
+      event.target.click();
     } else if (event.target !== trigger && ["ArrowDown", "ArrowUp"].includes(event.key)) {
       const inputs = visibleInputs();
       if (!inputs.length) return;
@@ -698,10 +770,13 @@ function initializeSessionMultiFilter(root) {
 }
 
 for (const root of document.querySelectorAll("[data-session-multi]")) {
-  sessionMultiFilters.set(root.dataset.sessionMulti, initializeSessionMultiFilter(root));
+  sessionMultiFilters.set(root.dataset.sessionMulti, initializeFilter(root));
 }
 for (const root of document.querySelectorAll("[data-side-multi]")) {
-  sideMultiFilters.set(root.dataset.sideMulti, initializeSessionMultiFilter(root));
+  sideMultiFilters.set(root.dataset.sideMulti, initializeFilter(root));
+}
+for (const root of document.querySelectorAll("[data-schedule-filter]")) {
+  scheduleFilters.set(root.dataset.scheduleFilter, initializeFilter(root));
 }
 
 async function queryProjectOptions() {
@@ -1095,7 +1170,7 @@ function initializeTimeRangeFilter(root) {
   }
 
   function openPopover() {
-    openSessionMultiFilter?.close();
+    openFilter?.close();
     if (openTimeRangeFilter && openTimeRangeFilter !== controller) {
       openTimeRangeFilter.cancel({ restoreFocus: false });
     }
@@ -1331,12 +1406,63 @@ function sessionUpdatedAtLabel(session) {
   return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("zh-CN", { hour12: false });
 }
 
+function sessionDateLabel(value) {
+  if (typeof value !== "string" || !value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("zh-CN", { hour12: false });
+}
+
 function firstSessionPage(query = null) {
   return { cursor: null, nextCursor: null, previousCursors: [], number: 1, query };
 }
 
-function sessionFilterPage(kind = "session") {
-  return firstSessionPage(formQuery(document.querySelector(`#${kind}-filter`), "20").toString());
+function sessionSort(kind) {
+  const query = new URLSearchParams(state[`${kind}Page`]?.query || "");
+  return { by: query.get("sortBy") || "updatedAt", direction: query.get("sortDirection") || "desc" };
+}
+
+function sessionFilterPage(kind = "session", { resetSort = false } = {}) {
+  const query = formQuery(document.querySelector(`#${kind}-filter`), "20");
+  const sort = resetSort ? { by: "updatedAt", direction: "desc" } : sessionSort(kind);
+  query.set("sortBy", sort.by);
+  query.set("sortDirection", sort.direction);
+  return firstSessionPage(query.toString());
+}
+
+function renderSessionSort(kind) {
+  const sort = sessionSort(kind);
+  for (const button of document.querySelectorAll("[data-session-sort]")) {
+    if (button.dataset.sessionSort !== kind) continue;
+    const selected = button.dataset.sortBy === sort.by;
+    const descending = selected && sort.direction === "desc";
+    const label = button.dataset.sortBy === "createdAt" ? "创建时间" : "最近更新";
+    button.parentElement.setAttribute("aria-sort", selected ? descending ? "descending" : "ascending" : "none");
+    button.setAttribute("aria-label", `按${label}${descending ? "由远及近" : "由近及远"}排序`
+      + (selected ? `（当前${descending ? "由近及远" : "由远及近"}）` : ""));
+    button.querySelector(".sort-indicator").textContent = selected ? descending ? "↓" : "↑" : "↕";
+  }
+}
+
+function renderSessionFreshness() {
+  const kind = state.sessionTab === "temporary" ? "side" : "session";
+  const updatedAt = state[`${kind}RefreshedAt`];
+  const node = document.querySelector("#sessions-refreshed-at");
+  node.hidden = updatedAt == null;
+  if (updatedAt == null) return;
+  const date = new Date(updatedAt);
+  node.dateTime = date.toISOString();
+  node.textContent = `更新于 ${date.toLocaleTimeString("zh-CN", { hour12: false })}`;
+  node.title = `${date.toLocaleString("zh-CN", { hour12: false })} 读取；列表不会自动刷新`;
+}
+
+async function sortSessionPage(kind, by) {
+  const page = state[`${kind}Page`];
+  // Sorting operates on the displayed result, not unsubmitted filter drafts.
+  const query = new URLSearchParams(page.query ?? sessionFilterPage(kind).query);
+  const previous = sessionSort(kind);
+  query.set("sortBy", by);
+  query.set("sortDirection", previous.by === by && previous.direction === "desc" ? "asc" : "desc");
+  return refresh("sessions", firstSessionPage(query.toString()));
 }
 
 function renderSessionPagination(kind = "session") {
@@ -1356,30 +1482,27 @@ function resetSessionFilters(kind = "session") {
   for (const root of form.querySelectorAll("[data-time-range]")) {
     timeRangeControllers.get(root)?.reset();
   }
-  return refresh("sessions", sessionFilterPage(kind));
+  return refresh("sessions", sessionFilterPage(kind, { resetSort: true }));
 }
 
 function invalidateSessionListRequest() {
   state.sessionListRequest = (state.sessionListRequest || 0) + 1;
-  state.sessionListPending = false;
 }
 
-async function loadSessionPage(kind, page, render, { background = false } = {}) {
-  if (background && state.sessionListPending) return false;
+async function loadSessionPage(kind, page, render) {
   const request = state.sessionListRequest = (state.sessionListRequest || 0) + 1;
   const isCurrent = () => request === state.sessionListRequest;
-  state.sessionListPending = true;
   const name = kind === "side" ? "sides" : "sessions";
-  if (!background) setStatus("正在读取服务端事实…");
+  setStatus("正在读取服务端事实…");
   try {
     const query = page.query == null
       ? formQuery(document.querySelector(`#${kind}-filter`), "20")
       : new URLSearchParams(page.query);
+    if (!query.has("sortBy")) query.set("sortBy", "updatedAt");
+    if (!query.has("sortDirection")) query.set("sortDirection", "desc");
     const candidate = { ...page, query: query.toString(), previousCursors: [...page.previousCursors] };
-    if (!background) {
-      await loadSessionProjectOptions(kind === "side" ? sideMultiFilters : sessionMultiFilters, isCurrent);
-      if (!isCurrent()) return false;
-    }
+    await loadSessionProjectOptions(kind === "side" ? sideMultiFilters : sessionMultiFilters, isCurrent);
+    if (!isCurrent()) return false;
     if (page.cursor) query.set("cursor", page.cursor);
     const data = await api(`/api/v1/${kind === "side" ? "side-topics" : "sessions"}?${query}`);
     if (!isCurrent()) return false;
@@ -1387,15 +1510,16 @@ async function loadSessionPage(kind, page, render, { background = false } = {}) 
     // Draft edits made while awaiting the response remain in the form.
     state[name] = data;
     state[`${kind}Page`] = { ...candidate, nextCursor: data.nextCursor };
+    state[`${kind}RefreshedAt`] = Date.now();
     render(data);
     renderSessionPagination(kind);
-    if (!background) setStatus("已更新。");
+    renderSessionSort(kind);
+    renderSessionFreshness();
+    setStatus("已更新。");
     return true;
   } catch (error) {
     if (isCurrent()) setStatus(error.message + (state[name] ? " 当前仍显示上次成功读取的结果。" : ""), true);
     return false;
-  } finally {
-    if (isCurrent()) state.sessionListPending = false;
   }
 }
 
@@ -1437,7 +1561,8 @@ function renderSessions(data) {
     const turnSettings = settings.turn_settings;
     const model = turnSettings ? `${turnSettings.model_id} / ${turnSettings.effort_id} / ${turnSettings.service_tier_id}` : "继承 Codex";
     cell(row, `${settings.message_context_mode} · ${model}`);
-    cell(row, sessionUpdatedAtLabel(session));
+    cell(row, sessionDateLabel(session.createdAt), "session-time");
+    cell(row, sessionUpdatedAtLabel(session), "session-time");
     const actions = actionsCell(row);
     wireSessionActions(actions, session);
     body.append(row);
@@ -1480,9 +1605,9 @@ function wireSessionActions(actions, session) {
   if (a.release) actions.append(actionButton("释放订阅", () => window.confirm("释放本进程订阅？历史不会删除。") && mutate("/api/v1/sessions/release", a.release)));
 }
 
-async function loadSides(page = state.sidePage, options = {}) {
+async function loadSides(page = state.sidePage) {
   ensureSideChatFilter();
-  return loadSessionPage("side", page, renderSides, options);
+  return loadSessionPage("side", page, renderSides);
 }
 
 function renderSides(data) {
@@ -1515,8 +1640,8 @@ function renderSides(data) {
     const runtime = cell(row, sideRuntimeLabel(side.runtime, side.sessionState));
     runtime.className = "runtime-state";
     cell(row, side.projectAlias || "原项目已不可用");
-    const created = new Date(side.createdAt);
-    cell(row, Number.isNaN(created.getTime()) ? "—" : created.toLocaleString("zh-CN", { hour12: false }));
+    cell(row, sessionDateLabel(side.createdAt), "session-time");
+    cell(row, sessionDateLabel(side.updatedAt), "session-time");
     const actions = actionsCell(row);
     if (parent?.available) {
       const link = document.createElement("a");
@@ -1727,7 +1852,7 @@ let sideChatPicker = null;
 
 function createSessionChatFilter(kind) {
   return window.createChatPicker(document.querySelector(`#${kind}-chat-picker`), {
-    id: `${kind}-group`, label: "群聊", placeholder: "不限群聊，输入群名查找",
+    id: `${kind}-group`, label: "群聊", placeholder: "全部", emptyOption: "全部",
     fetchPage: fetchChatPage,
     onChange: (chat) => { document.querySelector(`#${kind}-chat-filter`).value = chat?.chatId || ""; },
   });
@@ -2285,10 +2410,122 @@ const pendingScheduleMutations = new Set();
 
 function scheduleInput(id) { return document.querySelector(`#schedule-${id}`); }
 
+const scheduleFieldErrors = new Map();
+
+function clearScheduleFieldError(field) {
+  const error = scheduleFieldErrors.get(field);
+  if (!error) return;
+  error.note.hidden = true;
+  error.control.removeAttribute("aria-invalid");
+  const describedBy = (error.control.getAttribute("aria-describedby") || "").split(" ")
+    .filter((id) => id && id !== error.note.id).join(" ");
+  if (describedBy) error.control.setAttribute("aria-describedby", describedBy);
+  else error.control.removeAttribute("aria-describedby");
+  scheduleFieldErrors.delete(field);
+}
+
+function setScheduleFieldError(field, message) {
+  clearScheduleFieldError(field);
+  const control = field === "chat" && !scheduleInput("group-picker").hidden
+    ? scheduleInput("group-picker").querySelector(".chat-picker-trigger")
+    : scheduleInput(field === "binding" ? "select-session" : field);
+  let note = scheduleInput(`${field}-error`);
+  if (!note) {
+    note = document.createElement("span");
+    note.id = `schedule-${field}-error`;
+    note.className = "schedule-field-error";
+  }
+  // Chat mode can change between a picker and an ID input. Keep its error next
+  // to the currently visible control, not inside the hidden previous mode.
+  const container = field === "chat" && !scheduleInput("group-picker").hidden ? scheduleInput("group-picker")
+    : field === "weekdays" ? control : control.parentElement;
+  if (note.parentElement !== container) container.append(note);
+  note.textContent = message;
+  note.hidden = false;
+  control.setAttribute("aria-invalid", "true");
+  control.setAttribute("aria-describedby", [control.getAttribute("aria-describedby"), note.id].filter(Boolean).join(" "));
+  scheduleFieldErrors.set(field, { control, note });
+}
+
+function focusScheduleError() {
+  const control = scheduleInput("editor").querySelector("[aria-invalid]");
+  if (!control) return;
+  for (let parent = control.parentElement; parent; parent = parent.parentElement) {
+    if (parent.matches("details")) parent.open = true;
+  }
+  const focus = control.querySelector("input, select, button") || control;
+  focus.focus({ preventScroll: true });
+  control.scrollIntoView?.({ block: "center" });
+}
+
+function showScheduleFormError(message = "") {
+  scheduleInput("form-error").textContent = message;
+  scheduleInput("form-error").hidden = !message;
+}
+
+function validateScheduleFields({ saving = false } = {}) {
+  for (const field of [...scheduleFieldErrors.keys()]) clearScheduleFieldError(field);
+  const required = saving ? [["name", "请填写任务名称。"], ["instructions", "请填写任务指令。"]] : [];
+  if (scheduleTargetKind() === "binding") required.push(["binding", "请选择具体会话。"]);
+  else {
+    if (saving) required.push(["project", "请选择 Project。"]);
+    required.push(["chat", "请选择群聊或填写聊天 ID。"]);
+  }
+  const kind = scheduleInput("kind").value;
+  required.push(["timezone", "请填写时区，例如 Asia/Shanghai。"]);
+  if (kind === "once") required.push(["at", "请填写触发日期与时间。"]);
+  if (["daily", "weekly"].includes(kind)) required.push(["time", "请填写当地时间。"]);
+  const offset = kind === "once" ? "offset" : "end-offset";
+  if (!scheduleInput(`${offset}-field`).hidden) required.push([offset, "请选择这一天的哪一次时间。"]);
+  for (const [field, message] of required) {
+    if (!scheduleInput(field).value.trim()) setScheduleFieldError(field, message);
+  }
+  const fields = [...required.map(([field]) => field), ...(kind === "once" ? [] : ["end-at"])];
+  for (const field of fields) {
+    const input = scheduleInput(field);
+    if (input.validity && !input.validity.valid && !scheduleFieldErrors.has(field)) {
+      setScheduleFieldError(field, ["time", "at", "end-at"].includes(field)
+        ? "请填写有效时间，精确到分钟。" : input.validationMessage);
+    }
+  }
+  if (kind === "interval") {
+    const minutes = Number(scheduleInput("every").value);
+    if (!Number.isSafeInteger(minutes) || minutes < 1) setScheduleFieldError("every", "请输入至少 1 的整数分钟。");
+  }
+  if (kind === "weekly" && !Array.from(scheduleInput("weekdays").querySelectorAll("input")).some((input) => input.checked)) {
+    setScheduleFieldError("weekdays", "请至少选择一天。");
+  }
+  if (scheduleFieldErrors.size) {
+    if (scheduleEditor?.action) showScheduleFormError("请检查标红的表单项。");
+    focusScheduleError();
+    return false;
+  }
+  // A spent action still requires explicit reconciliation, even after editing
+  // fields or previewing again. Never erase that instruction with validation.
+  if (scheduleEditor?.action) showScheduleFormError();
+  return true;
+}
+
+function showScheduleRequestError(error, { submitted = false } = {}) {
+  const field = ({ ambiguous_local_time: "offset", ambiguous_end_time: "end-offset",
+    invalid_chat_id: "chat", not_group_chat: "chat",
+    project_disabled: "project", project_unavailable: "project", project_deleting: "project" })[error.code];
+  if (field && (!["chat", "project"].includes(field) || scheduleTargetKind() !== "binding")) {
+    setScheduleFieldError(field, error.message);
+    focusScheduleError();
+  }
+  showScheduleFormError(error.message + (submitted || !scheduleEditor?.action ? " 请刷新列表并重新打开编辑，核查后再操作。" : ""));
+}
+
+function scheduleTargetKind() {
+  return Array.from(scheduleInput("target-kind").querySelectorAll("input"))
+    .find((input) => input.checked).value;
+}
+
 function renderScheduleTarget() {
   const editor = scheduleEditor;
   if (!editor) return;
-  const binding = scheduleInput("target-kind").value === "binding";
+  const binding = scheduleTargetKind() === "binding";
   scheduleInput("target-kind").disabled = Boolean(editor.plan || editor.targetSession);
   scheduleInput("binding-field").hidden = !binding;
   scheduleInput("target-note").hidden = !binding;
@@ -2312,9 +2549,8 @@ function renderScheduleTarget() {
 }
 
 function renderScheduleProjects() {
-  scheduleSelectOptions(scheduleInput("filter-project"), [["", "全部 Project"],
-    ...scheduleProjects.map((project) => [project.alias,
-      project.enabled ? project.alias : `${project.alias}（已停用）`])], scheduleInput("filter-project").value);
+  scheduleFilters.get("project").setOptions(scheduleProjects.map((project) => [project.alias,
+    project.enabled ? project.alias : `${project.alias}（已停用）`]));
   if (!scheduleEditor) return;
   const selected = scheduleInput("project").value || scheduleEditor.plan?.project_alias || "";
   const available = scheduleProjects.filter((project) => project.enabled || project.alias === selected);
@@ -2397,6 +2633,7 @@ async function openScheduleForSession(session, returnFocus) {
 function changeScheduleChat(resolve = true) {
   const editor = scheduleEditor;
   if (!editor) return;
+  clearScheduleFieldError("chat");
   editor.optionsSerial += 1;
   editor.contextAvailable = chatTarget("schedule").kind() === "p2p" ? false : null;
   if (editor.contextAvailable === false) {
@@ -2415,12 +2652,14 @@ function scheduleRuleFingerprint() {
 }
 
 function resetScheduleOffset() {
+  clearScheduleFieldError("offset");
   scheduleInput("offset-field").hidden = true;
   scheduleInput("offset").replaceChildren();
   scheduleInput("offset").value = "";
 }
 
 function resetScheduleEndOffset() {
+  clearScheduleFieldError("end-offset");
   scheduleInput("end-offset-field").hidden = true;
   scheduleInput("end-offset").replaceChildren();
   scheduleInput("end-offset").value = "";
@@ -2515,13 +2754,13 @@ async function loadScheduleSessionOptions() {
   const chatId = scheduleInput("chat").value.trim();
   const serial = ++editor.optionsSerial;
   const query = new URLSearchParams({ mode: "options" });
-  if (chatId && scheduleInput("target-kind").value !== "binding") query.set("chat_id", chatId);
+  if (chatId && scheduleTargetKind() !== "binding") query.set("chat_id", chatId);
   try {
     const data = await api(`/api/v1/schedules?${query}`);
     if (scheduleEditor !== editor || serial !== editor.optionsSerial) return;
     editor.models = data.models;
     editor.contextAvailable = data.context_mode_available;
-    if (scheduleInput("target-kind").value !== "binding") chatTarget("schedule").resolveKind(editor.contextAvailable);
+    if (scheduleTargetKind() !== "binding") chatTarget("schedule").resolveKind(editor.contextAvailable);
     editor.catalogMessage = data.model_catalog_error
       ? `${data.model_catalog_error.message} 已有配置保持不变，仍可调整其他项目。` : "";
     if (!editor.plan && !editor.settingsTouched) {
@@ -2553,7 +2792,7 @@ function changeScheduleSessionSettings(field) {
 function scheduleSessionPatch() {
   const patch = {};
   if (!scheduleEditor) return patch;
-  if (scheduleInput("target-kind").value === "binding") return patch;
+  if (scheduleTargetKind() === "binding") return patch;
   if (!scheduleEditor.plan) return structuredClone(scheduleEditor.sessionDraft);
   for (const [key, value] of Object.entries(scheduleEditor.sessionDraft)) {
     if (JSON.stringify(value) !== JSON.stringify(scheduleEditor.sessionBase[key])) patch[key] = value;
@@ -2588,10 +2827,16 @@ function invalidateSchedulePreview() {
   scheduleInput("save").disabled = true;
   scheduleInput("preview-times").replaceChildren();
   scheduleInput("preview-message").textContent = "保存前请预览触发时间。";
+  scheduleInput("preview-message").classList.toggle("error", false);
   for (const node of document.querySelectorAll("[data-schedule-rule]")) {
     node.hidden = !node.dataset.scheduleRule.split(" ").includes(scheduleInput("kind").value);
   }
   scheduleInput("end-condition").disabled = scheduleInput("kind").value === "once";
+  for (const [field, error] of scheduleFieldErrors) {
+    for (let node = error.control; node && node !== scheduleInput("editor"); node = node.parentElement) {
+      if (node.hidden) { clearScheduleFieldError(field); break; }
+    }
+  }
 }
 
 function renderSchedulePreview(selector, preview) {
@@ -2605,18 +2850,14 @@ function renderSchedulePreview(selector, preview) {
 }
 
 async function previewSchedule() {
+  if (scheduleInput("fields").disabled || !scheduleEditor) return;
   const serial = ++schedulePreviewSerial;
   schedulePrepared = null;
   scheduleInput("save").disabled = true;
+  if (!validateScheduleFields()) return;
   scheduleInput("preview-message").textContent = "正在计算触发时间…";
   scheduleInput("preview-message").classList.toggle("error", false);
   try {
-    if (scheduleInput("target-kind").value === "binding" && !scheduleInput("binding").value) {
-      throw new Error("请先前往 Sessions 选择具体会话。");
-    }
-    if (scheduleInput("target-kind").value !== "binding" && !scheduleInput("chat").value.trim()) {
-      throw new Error("请选择聊天，或手动填写聊天 ID。");
-    }
     const rule = readScheduleRule();
     const fingerprint = scheduleRuleFingerprint();
     const query = new URLSearchParams({ mode: "preview" });
@@ -2632,7 +2873,7 @@ async function previewSchedule() {
     }
     query.set("schedule", JSON.stringify(rule));
     if (scheduleEditor?.plan) query.set("plan_id", scheduleEditor.plan.id);
-    if (scheduleInput("target-kind").value === "binding") {
+    if (scheduleTargetKind() === "binding") {
       query.set("target_kind", "binding");
       query.set("target_binding_id", scheduleInput("binding").value);
     } else {
@@ -2657,14 +2898,18 @@ async function previewSchedule() {
         ...error.choices.map((choice, index) => [choice.utc_offset,
           `第 ${index + 1} 次 · UTC${choice.utc_offset}`])], "");
       scheduleInput(`${field}-field`).hidden = false;
+      if (field === "end-offset") scheduleInput("end-details").open = true;
     }
     scheduleInput("preview-message").textContent = error.message;
     scheduleInput("preview-message").classList.toggle("error", true);
+    showScheduleRequestError(error);
   }
 }
 
 function openScheduleEditor(plan = null, source = {}) {
   if (scheduleInput("fields").disabled) return;
+  for (const field of [...scheduleFieldErrors.keys()]) clearScheduleFieldError(field);
+  showScheduleFormError();
   scheduleEditorSerial += 1;
   const action = source.action || (plan ? plan.actions.update : state.schedules?.actions.create);
   if (!action) return;
@@ -2677,7 +2922,9 @@ function openScheduleEditor(plan = null, source = {}) {
   scheduleInput("editor").hidden = false;
   scheduleInput("editor-title").textContent = plan ? `编辑计划 · ${plan.name}` : "创建计划";
   scheduleInput("name").value = plan?.name || "";
-  scheduleInput("target-kind").value = source.targetSession ? "binding" : plan?.target_kind || "new_topic";
+  for (const input of scheduleInput("target-kind").querySelectorAll("input")) {
+    input.checked = input.value === (source.targetSession ? "binding" : plan?.target_kind || "new_topic");
+  }
   scheduleInput("binding").value = plan?.target_binding_id || source.targetSession?.bindingId || "";
   scheduleInput("project").value = plan?.project_alias || "";
   renderScheduleProjects();
@@ -2696,6 +2943,7 @@ function openScheduleEditor(plan = null, source = {}) {
     input.checked = (rule.weekdays || []).includes(Number(input.value));
   }
   if (source.draft) restoreScheduleDraft(source.draft);
+  scheduleInput("end-details").open = Boolean(scheduleInput("end-at").value);
   invalidateSchedulePreview();
   scheduleInput("session-settings").open = true;
   renderScheduleSessionSettings();
@@ -2722,22 +2970,23 @@ async function saveSchedule(event) {
   event.preventDefault();
   if (scheduleInput("fields").disabled || !scheduleEditor?.action || !schedulePrepared
       || schedulePrepared.fingerprint !== scheduleRuleFingerprint()) return;
+  if (!validateScheduleFields({ saving: true })) return;
   const editor = scheduleEditor;
   const prepared = schedulePrepared;
-  if (scheduleInput("target-kind").value !== "binding") {
+  if (scheduleTargetKind() !== "binding") {
+    let validationError = null;
     scheduleInput("fields").disabled = true;
     scheduleInput("close").disabled = true;
     try { await chatTarget("schedule").validate(); }
     catch (error) {
       invalidateSchedulePreview();
-      scheduleInput("preview-message").textContent = error.message;
-      scheduleInput("preview-message").classList.toggle("error", true);
-      return;
+      validationError = error;
     } finally {
       scheduleInput("fields").disabled = false;
       scheduleInput("close").disabled = false;
     }
     if (scheduleEditor !== editor) return;
+    if (validationError) { showScheduleRequestError(validationError); return; }
   }
   // A late options response may replace defaults and invalidate the preview
   // while group validation is in flight. Never submit that stale confirmation.
@@ -2745,6 +2994,7 @@ async function saveSchedule(event) {
     invalidateSchedulePreview();
     scheduleInput("preview-message").textContent = "配置已更新，请重新预览后保存。";
     scheduleInput("preview-message").classList.toggle("error", true);
+    showScheduleFormError("配置已更新，请重新预览后保存。");
     return;
   }
   scheduleEditorSerial += 1;
@@ -2756,7 +3006,7 @@ async function saveSchedule(event) {
     schedule: prepared.schedule,
     enabled: scheduleInput("enabled").checked,
   };
-  if (scheduleInput("target-kind").value === "binding") {
+  if (scheduleTargetKind() === "binding") {
     if (!editor.plan) {
       definition.target_kind = "binding";
       definition.target_binding_id = scheduleInput("binding").value;
@@ -2779,8 +3029,7 @@ async function saveSchedule(event) {
     saved = true;
     closeScheduleEditor({ saved: true });
   } catch (error) {
-    scheduleInput("preview-message").textContent = `${error.message} 请刷新列表并重新打开编辑，核查后再操作。`;
-    scheduleInput("preview-message").classList.toggle("error", true);
+    showScheduleRequestError(error, { submitted: true });
     setStatus(error.message, true);
     await refresh("schedules");
     setStatus(error.message, true);
@@ -2788,6 +3037,7 @@ async function saveSchedule(event) {
     scheduleInput("fields").disabled = false;
     scheduleInput("close").disabled = false;
     scheduleInput("save").disabled = true;
+    if (!saved) focusScheduleError();
   }
   if (saved) {
     if (editor.fromSessions) {
@@ -3023,117 +3273,6 @@ async function loadScheduleRuns(cursor = null) {
   } catch (error) { setStatus(error.message, true); }
 }
 
-// Page-owned Session objects bound retry state to the current inventory. A
-// refresh (including unarchive) gets new objects and an immediate fresh read.
-const runtimeResolutionRetries = new WeakMap();
-
-function recordRuntimeResolutionFailure(session, activityRevision) {
-  const previous = runtimeResolutionRetries.get(session);
-  const failures = previous?.activityRevision === activityRevision
-    ? Math.min(previous.failures + 1, 4) : 1;
-  runtimeResolutionRetries.set(session, {
-    activityRevision,
-    failures,
-    nextAt: performance.now() + Math.min(10000 * 2 ** (failures - 1), 60000),
-  });
-}
-
-function mergeDeferredBindingRuntime(incoming, previous) {
-  const needsResolution = !previous
-    || incoming.activityRevision !== previous.activityRevision
-    || previous.primaryStatusResolution === "deferred"
-    || previous.primaryStatusResolution === "unavailable";
-  if (!needsResolution) {
-    return {
-      runtime: {
-        ...incoming,
-        primaryStatus: previous.primaryStatus,
-        primaryStatusResolution: previous.primaryStatusResolution,
-      },
-      needsResolution: false,
-    };
-  }
-  return {
-    runtime: {
-      ...incoming,
-      // Commit a new revision only after its exact projection succeeds. This
-      // leaves a failed/timeout follow-up eligible for the next bounded poll.
-      activityRevision: previous?.activityRevision ?? incoming.activityRevision,
-      primaryStatus: previous?.primaryStatus ?? null,
-      // A background retry must not turn an unavailable result into a
-      // visible loading state on every poll. A changed known value remains
-      // explicitly unconfirmed until its exact projection succeeds.
-      primaryStatusResolution: previous?.primaryStatusResolution === "unavailable"
-        ? "unavailable" : "deferred",
-    },
-    needsResolution: true,
-  };
-}
-
-function applyRuntimeSnapshots(payload, resolveChanges = true) {
-  const bindings = new Map(payload.bindings.map((item) => [item.bindingId, item]));
-  const changedBindings = [];
-  for (const session of state.sessions?.items || []) {
-    let incoming = bindings.get(session.bindingId);
-    if (!incoming) continue;
-    // The inventory already confirmed archival. Keep local activity visible
-    // until it clears, then stop resolving/polling this row without inventing
-    // idle or reading a historical Goal.
-    if (session.catalogState === "archived" && incoming.primaryStatusResolution !== "local") {
-      incoming = { ...incoming, primaryStatus: null, primaryStatusResolution: "archived" };
-    }
-    const previous = session.runtime;
-    let runtime = incoming;
-    if (incoming.primaryStatusResolution === "deferred") {
-      const merged = mergeDeferredBindingRuntime(incoming, previous);
-      runtime = merged.runtime;
-      let retry = runtimeResolutionRetries.get(session);
-      if (retry && retry.activityRevision !== incoming.activityRevision) {
-        runtimeResolutionRetries.delete(session);
-        retry = null;
-      }
-      if (resolveChanges && merged.needsResolution && (!retry || performance.now() >= retry.nextAt)) {
-        changedBindings.push(session.bindingId);
-      }
-    } else if (incoming.primaryStatusResolution === "unavailable") {
-      runtime = {
-        ...incoming,
-        activityRevision: previous?.activityRevision ?? incoming.activityRevision,
-        primaryStatus: previous?.primaryStatus ?? null,
-      };
-      recordRuntimeResolutionFailure(session, incoming.activityRevision);
-    } else {
-      runtimeResolutionRetries.delete(session);
-    }
-    session.runtime = runtime;
-    const row = rowByIdentity("#sessions-body", "bindingId", session.bindingId);
-    const node = row?.querySelector(".runtime-state");
-    if (node) updateRuntimeCell(node, runtime);
-  }
-
-  const sides = new Map(payload.sides.map((item) => [item.sideId, item]));
-  const missing = new Set(payload.missingSideIds);
-  for (const side of state.sides?.items || []) {
-    if (!sides.has(side.sideId) && !missing.has(side.sideId)) continue;
-    const incoming = sides.get(side.sideId) || null;
-    if (incoming?.turnId !== side.runtime?.turnId || incoming?.state !== side.runtime?.state) {
-      side.needsRefresh = true;
-    }
-    side.runtime = incoming;
-    const previousState = side.sessionState;
-    side.sessionState = incoming?.state === "closing" ? "closing" : side.state === "creating" ? "creating"
-      : incoming?.sessionState || (["closed", "expired", "failed"].includes(side.sessionState) ? side.sessionState : "unavailable");
-    const row = rowByIdentity("#sides-body", "sideId", side.sideId);
-    const node = row?.querySelector(".runtime-state span");
-    if (node) node.textContent = sideRuntimeLabel(side.runtime, side.sessionState);
-    const status = row?.querySelector(".side-session-state");
-    if (status && side.sessionState !== previousState) updateSideStateCell(status, side);
-    // A revision change within the same Turn does not invalidate Close.
-    // Like ordinary sessions, an old Stop grant is checked by the server.
-  }
-  return changedBindings;
-}
-
 async function refresh(tab, cursor = undefined) {
   if (state.authExpired) return false;
   if (tab === "sessions") {
@@ -3147,6 +3286,7 @@ async function refresh(tab, cursor = undefined) {
     if (tab === "schedules") await loadSchedules(cursor || null);
     if (tab === "defaults") await loadDefaults();
     if (tab === "system") await window.NetizenIdentity.loadUsers();
+    if (state.authExpired) return false;
     if (isCurrentView()) setStatus("已更新。");
     return true;
   } catch (error) {
@@ -3162,6 +3302,7 @@ function renderSessionTabs() {
     button.setAttribute("tabindex", selected ? "0" : "-1");
     document.querySelector(`#sessions-${button.dataset.sessionTab}`).hidden = !selected;
   }
+  renderSessionFreshness();
 }
 
 function selectSessionTab(name) {
@@ -3170,7 +3311,7 @@ function selectSessionTab(name) {
   invalidateSessionListRequest();
   sessionChatPicker?.close();
   sideChatPicker?.close();
-  openSessionMultiFilter?.close();
+  openFilter?.close();
   openTimeRangeFilter?.cancel({ restoreFocus: false });
   renderSessionTabs();
   return refresh("sessions");
@@ -3221,6 +3362,10 @@ for (const tab of document.querySelectorAll("[data-session-tab]")) {
 
 for (const button of document.querySelectorAll("[data-refresh]")) {
   button.addEventListener("click", () => refresh(button.dataset.refresh));
+}
+
+for (const button of document.querySelectorAll("[data-session-sort]")) {
+  button.addEventListener("click", () => sortSessionPage(button.dataset.sessionSort, button.dataset.sortBy));
 }
 
 document.querySelector("#register-project").addEventListener("submit", async (event) => {
@@ -3300,10 +3445,19 @@ scheduleInput("filter").addEventListener("submit", (event) => { event.preventDef
 scheduleInput("new").addEventListener("click", () => openScheduleEditor());
 scheduleInput("preview").addEventListener("click", previewSchedule);
 scheduleInput("editor").addEventListener("input", invalidateSchedulePreview);
+for (const eventName of ["input", "change"]) {
+  scheduleInput("editor").addEventListener(eventName, (event) => {
+    for (const [field, error] of scheduleFieldErrors) {
+      if (error.control === event.target || error.control.contains(event.target)) clearScheduleFieldError(field);
+    }
+    if (scheduleEditor?.action && !scheduleFieldErrors.size) showScheduleFormError();
+  });
+}
 scheduleInput("kind").addEventListener("change", invalidateSchedulePreview);
 scheduleInput("editor").addEventListener("submit", saveSchedule);
 scheduleInput("chat").addEventListener("change", loadScheduleSessionOptions);
 scheduleInput("target-kind").addEventListener("change", () => {
+  for (const field of ["binding", "project", "chat"]) clearScheduleFieldError(field);
   invalidateSchedulePreview();
   renderScheduleTarget();
   loadScheduleSessionOptions();
@@ -3330,102 +3484,6 @@ document.querySelector("#schedules-next").addEventListener("click", () => refres
 scheduleInput("runs-next").addEventListener("click", () => loadScheduleRuns(scheduleRunsCursor));
 document.querySelector("#service-restart").addEventListener("click", restartService);
 document.querySelector("#logout").addEventListener("click", async () => { await api("/logout", { method: "POST" }); window.location.assign("/login"); });
-
-function chunkValues(values, size = 50) {
-  const chunks = [];
-  for (let index = 0; index < values.length; index += size) {
-    chunks.push(values.slice(index, index + size));
-  }
-  return chunks;
-}
-
-async function fetchRuntimeSnapshots(bindingIds, sideIds, resolvePrimary = false) {
-  const paths = [];
-  for (const ids of chunkValues(bindingIds)) {
-    const query = new URLSearchParams({ bindingIds: ids.join(",") });
-    if (resolvePrimary) query.set("resolvePrimary", "true");
-    paths.push(`/api/v1/runtime-snapshots?${query}`);
-  }
-  for (const ids of chunkValues(sideIds)) {
-    const query = new URLSearchParams({ sideIds: ids.join(",") });
-    paths.push(`/api/v1/runtime-snapshots?${query}`);
-  }
-  const payloads = [];
-  if (resolvePrimary) {
-    for (const path of paths) payloads.push(await api(path));
-  } else {
-    payloads.push(...await Promise.all(paths.map((path) => api(path))));
-  }
-  return {
-    bindings: payloads.flatMap((payload) => payload.bindings),
-    sides: payloads.flatMap((payload) => payload.sides),
-    missingSideIds: payloads.flatMap((payload) => payload.missingSideIds),
-  };
-}
-
-let runtimePollInFlight = false;
-let sidePollRefreshAt = 0;
-
-const runtimePollTimer = setInterval(async () => {
-  if (
-    state.authExpired
-    || runtimePollInFlight
-    || state.sessionListPending
-    || document.hidden
-    || state.tab !== "sessions"
-  ) return;
-  const view = state.sessionTab;
-  const temporary = view === "temporary";
-  const page = temporary ? state.sides : state.sessions;
-  const request = state.sessionListRequest;
-  const isCurrentPage = () => state.tab === "sessions" && state.sessionTab === view
-    && state.sessionListRequest === request
-    && (temporary ? state.sides : state.sessions) === page;
-  const bindingIds = !temporary
-    ? state.sessions?.items?.filter((item) => item.runtime.primaryStatusResolution !== "archived")
-      .map((item) => item.bindingId) || []
-    : [];
-  const sideIds = temporary
-    ? state.sides?.items?.filter((item) => !["closed", "expired", "failed"].includes(item.sessionState))
-      .map((item) => item.sideId) || []
-    : [];
-  if (!bindingIds.length && !sideIds.length) return;
-  runtimePollInFlight = true;
-  let resolving = [];
-  try {
-    const snapshots = await fetchRuntimeSnapshots(bindingIds, sideIds);
-    if (!isCurrentPage() || document.hidden) return;
-    const changedBindings = applyRuntimeSnapshots(snapshots);
-    if (temporary && page.items.some((side) => side.needsRefresh
-      || ["creating", "closing", "unavailable"].includes(side.sessionState)) && performance.now() >= sidePollRefreshAt) {
-      // Route publication can change without a Runtime revision. Recheck only
-      // unresolved routes or Turn/lifecycle transitions, never every steer.
-      sidePollRefreshAt = performance.now() + 15000;
-      await loadSides(state.sidePage, { background: true });
-      return;
-    }
-    if (changedBindings.length) {
-      const changed = new Set(changedBindings);
-      resolving = snapshots.bindings.filter((item) => changed.has(item.bindingId));
-      const resolved = await fetchRuntimeSnapshots(changedBindings, [], true);
-      if (!isCurrentPage()) return;
-      applyRuntimeSnapshots(resolved, false);
-    }
-  } catch (error) {
-    if (!isCurrentPage()) return;
-    if (resolving.length) {
-      applyRuntimeSnapshots({
-        bindings: resolving.map((item) => ({
-          ...item, primaryStatus: null, primaryStatusResolution: "unavailable",
-        })),
-        sides: [], missingSideIds: [],
-      }, false);
-    }
-    setStatus(error.message, true);
-  } finally {
-    runtimePollInFlight = false;
-  }
-}, 5000);
 
 let initialTab = "projects";
 try {

@@ -11,7 +11,7 @@ from tests.admin.test_session_filter_ui import _HtmlTree
 
 
 class SideSessionsUiTest(unittest.TestCase):
-    def test_full_page_tabs_side_filters_navigation_actions_and_polling(self) -> None:
+    def test_full_page_tabs_side_filters_navigation_actions_and_sorting(self) -> None:
         node = shutil.which("node")
         if node is None:
             reason = "Node.js 22 is required for Admin JavaScript behavior tests"

@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from .errors import AdminWebError
 from ..bindings import BindingCursor, SideTopicCursor
 from ..domain import ScopeKind
-from ..management import SessionInventoryState
+from ..management import SessionInventoryState, SessionUpdatedCursor
 
 
 _MAX_TEXT_BYTES = 4_096
@@ -69,6 +69,14 @@ def _session_page_size(values: Mapping[str, list[str]]) -> int:
             "Sessions 分页大小必须为 10、20、50 或 100。",
         )
     return value
+
+
+def _session_order_query(values: Mapping[str, list[str]]) -> tuple[str, str]:
+    sort_by = _optional_one(values, "sortBy") or "updatedAt"
+    direction = _optional_one(values, "sortDirection") or "desc"
+    if sort_by not in {"createdAt", "updatedAt"} or direction not in {"asc", "desc"}:
+        raise AdminWebError(400, "invalid_sort", "排序字段或方向无效。")
+    return ("created_at" if sort_by == "createdAt" else "updated_at"), direction
 
 
 def _optional_text_query(
@@ -299,23 +307,57 @@ def _decode_binding_cursor(
     return BindingCursor(*values) if values is not None else None
 
 
+def _encode_session_cursor(
+    cursor: BindingCursor | SessionUpdatedCursor | None,
+    fingerprint: str,
+) -> str | None:
+    if not isinstance(cursor, SessionUpdatedCursor):
+        return _encode_binding_cursor(cursor, fingerprint)
+    return _encode_cursor(
+        "session-updated", (str(cursor.updated_at) if cursor.updated_at is not None else "unknown", cursor.binding_id), fingerprint,
+    )
+
+
+def _decode_session_cursor(
+    encoded: str | None,
+    fingerprint: str,
+    *,
+    sort_by: str,
+) -> BindingCursor | SessionUpdatedCursor | None:
+    if sort_by == "created_at":
+        return _decode_binding_cursor(encoded, fingerprint)
+    values = _decode_cursor(encoded, kind="session-updated", length=2, fingerprint=fingerprint)
+    if values is None:
+        return None
+    raw_time, binding_id = values
+    if raw_time == "unknown":
+        return SessionUpdatedCursor(None, binding_id)
+    if not re.fullmatch(r"0|[1-9][0-9]{0,15}", raw_time):
+        raise AdminWebError(400, "invalid_cursor", "分页游标无效。")
+    return SessionUpdatedCursor(int(raw_time), binding_id)
+
+
 def _encode_side_cursor(
     cursor: SideTopicCursor | None,
     fingerprint: str,
 ) -> str | None:
     if cursor is None:
         return None
+    if cursor.updated_at is not None:
+        return _encode_cursor("side-updated", (cursor.created_at, cursor.side_id, cursor.updated_at), fingerprint)
     return _encode_cursor("side", (cursor.created_at, cursor.side_id), fingerprint)
 
 
 def _decode_side_cursor(
     encoded: str | None,
     fingerprint: str,
+    *,
+    sort_by: str = "created_at",
 ) -> SideTopicCursor | None:
     values = _decode_cursor(
         encoded,
-        kind="side",
-        length=2,
+        kind="side-updated" if sort_by == "updated_at" else "side",
+        length=3 if sort_by == "updated_at" else 2,
         fingerprint=fingerprint,
     )
     return SideTopicCursor(*values) if values is not None else None

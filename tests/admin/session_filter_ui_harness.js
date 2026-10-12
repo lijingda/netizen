@@ -260,7 +260,7 @@ async function refresh(tab, page) {
   process.env.TZ = "Asia/Shanghai";
   const updatedAt = Date.UTC(2030, 0, 2, 3, 4, 5) / 1000;
   const headers = document.querySelector("#sessions").querySelectorAll("th");
-  const updatedColumn = headers.findIndex((header) => header.textContent === "最近更新");
+  const updatedColumn = headers.findIndex((header) => header.querySelector("button")?.dataset.sortBy === "updatedAt");
   assert(updatedColumn >= 0);
   const updateText = () => rows.querySelector("tr").querySelectorAll("td")[updatedColumn].textContent;
   for (const catalogState of ["active", "archived", "unknown"]) {
@@ -320,10 +320,12 @@ async function refresh(tab, page) {
       avatarUrl: "https://example.feishucdn.com/sessions.jpg" }], nextCursor: null }
     : answerSessions(path);
   const flush = () => new Promise((resolve) => setImmediate(resolve));
+  const pickerRoot = document.querySelector("#session-chat-picker");
+  assert.equal(pickerRoot.querySelector(".chat-picker-summary").textContent, "全部");
   sessionChatPicker.focus();
   await flush();
-  const pickerRoot = document.querySelector("#session-chat-picker");
   assert.match(pickerRoot.textContent, /当前已加入且可访问/);
+  assert.equal(pickerRoot.querySelector(".chat-picker-empty-option").getAttribute("aria-selected"), "true");
   pickerRoot.querySelector(".chat-picker-option").click();
   assert.equal(query().get("chatId"), "oc_selected");
   assert.equal(document.querySelector("#session-chat-filter").value, "oc_selected");
@@ -339,11 +341,26 @@ async function refresh(tab, page) {
   const filterRequest = new URL(requests.filter((path) => path.startsWith("/api/v1/sessions?")).at(-1), "https://admin");
   assert.equal(filterRequest.searchParams.get("chatId"), "oc_selected");
   assert.equal(filterRequest.searchParams.has("cursor"), false);
-  const searchInput = pickerRoot.querySelector("input");
+  // Search is an uncommitted lookup: neither typing nor cancelling changes the filter.
+  const searchInput = document.querySelector("#session-group-search");
+  document.querySelector("#session-group").click();
+  const requestsBeforeSearch = requests.filter((path) => path.startsWith("/api/v1/sessions?")).length;
   searchInput.value = "另一个群";
   searchInput.dispatch("input");
-  assert.equal(document.querySelector("#session-chat-filter").value, "", "editing the label must not retain the previously selected filter ID");
-  sessionChatPicker.close();
+  assert.equal(document.querySelector("#session-chat-filter").value, "oc_selected");
+  const cancelSearch = searchInput.dispatch("keydown", { key: "Escape" });
+  assert(cancelSearch.prevented);
+  assert.equal(pickerRoot.querySelector(".chat-picker-summary").textContent, "研发 & 测试群");
+  assert.equal(requests.filter((path) => path.startsWith("/api/v1/sessions?")).length, requestsBeforeSearch);
+  form.dispatch("submit");
+  await flush();
+  assert.equal(new URLSearchParams(state.sessionPage.query).get("chatId"), "oc_selected");
+  document.querySelector("#session-group").click();
+  pickerRoot.querySelector(".chat-picker-empty-option").click();
+  assert.equal(document.querySelector("#session-chat-filter").value, "");
+  assert.equal(pickerRoot.querySelector(".chat-picker-summary").textContent, "全部");
+  assert.equal(new URLSearchParams(state.sessionPage.query).get("chatId"), "oc_selected",
+    "choosing all changes the draft only until the filter form is submitted");
   form.dispatch("submit");
   await flush();
   assert.equal(new URLSearchParams(state.sessionPage.query).has("chatId"), false);

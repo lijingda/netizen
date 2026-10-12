@@ -106,6 +106,32 @@ class UpdateService:
     async def status(self) -> dict[str, Any]:
         return await self._io.submit(self._status)
 
+    async def diagnostics(self) -> dict[str, Any]:
+        return await self._io.submit(self._diagnostics)
+
+    def _diagnostics(self) -> dict[str, Any]:
+        from ..cli_services import ServiceError, ServiceManager
+
+        try:
+            # Use the same exact-root inspection as `doctor --root`; no CLI,
+            # database access or maintenance reconciliation is involved.
+            status = ServiceManager().inspect(self.product_root)
+        except (ServiceError, OSError, ValueError) as error:
+            raise UpdateError("diagnostics_unavailable") from error
+        binding = status.binding if status is not None else None
+        return {
+            "root": str(self.product_root), "checkedAt": self._clock(),
+            "bound": status is not None,
+            "running": status.running if status is not None else False,
+            "ready": status.ready if status is not None else False,
+            "loaded": status.loaded if status is not None else False,
+            "enabled": status.enabled if status is not None else None,
+            "binding": {
+                "python": str(binding.python), "prefix": str(binding.prefix),
+                "codexHome": str(binding.codex_home) if binding.codex_home is not None else None,
+            } if binding is not None else None,
+        }
+
     async def restart(self, *, installation_id: str) -> dict[str, Any]:
         return await self._io.submit(self._restart, installation_id=installation_id)
 

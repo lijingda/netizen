@@ -10,8 +10,8 @@ import unittest
 from tests.admin.test_session_filter_ui import _HtmlTree
 
 
-class RuntimePollingUiTest(unittest.TestCase):
-    def test_archival_retry_backoff_and_visible_runtime_updates(self) -> None:
+class SessionRefreshUiTest(unittest.TestCase):
+    def test_lists_read_only_on_demand_and_keep_action_refresh_and_runtime_labels(self) -> None:
         node = shutil.which("node")
         if node is None:
             reason = "Node.js 22 is required for Admin JavaScript behavior tests"
@@ -21,24 +21,17 @@ class RuntimePollingUiTest(unittest.TestCase):
         static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
         tree = _HtmlTree()
         tree.feed((static / "index.html").read_text(encoding="utf-8"))
-        source = (static / "admin.js").read_text(encoding="utf-8")
-        controller = "\n".join(
-            source[source.index(start):source.index(end)]
-            for start, end in (
-                ("function runtimeLabel(", "function chatModeLabel("),
-                ("function sideRuntimeLabel(", "function scheduleDate("),
-                ("const runtimeResolutionRetries =", "async function refresh("),
-                ("function chunkValues(", "let initialTab ="),
-            )
-        )
-        harness = Path(__file__).with_name("runtime_polling_ui_harness.js").read_text(
+        bootstrap = Path(__file__).with_name("side_sessions_ui_harness.js").read_text(
+            encoding="utf-8"
+        ).split("// SHIPPED_ADMIN_PAGE\n")[0]
+        harness = Path(__file__).with_name("session_refresh_ui_harness.js").read_text(
             encoding="utf-8"
         )
-        before, after = harness.split("// SHIPPED_RUNTIME_CONTROLLER\n")
         dom = Path(__file__).with_name("dom_harness.js").read_text(encoding="utf-8")
         result = subprocess.run(
-            [node, "-e", "const htmlTree = " + json.dumps(tree.root) + ";\n"
-             + dom + before + controller + after],
+            [node], input="const initialSearch = '';\nconst htmlTree = " + json.dumps(tree.root) + ";\n"
+             + dom + bootstrap + (static / "chat-picker.js").read_text(encoding="utf-8")
+             + (static / "admin.js").read_text(encoding="utf-8") + harness,
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

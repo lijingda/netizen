@@ -58,11 +58,11 @@ from .presentation import (
 from .queries import (
     _created_range_query,
     _current_query,
-    _decode_binding_cursor,
+    _decode_session_cursor,
     _decode_cursor,
     _decode_project_cursor,
     _decode_side_cursor,
-    _encode_binding_cursor,
+    _encode_session_cursor,
     _encode_cursor,
     _encode_project_cursor,
     _encode_side_cursor,
@@ -76,6 +76,7 @@ from .queries import (
     _scope_kinds_query,
     _session_inventory_states,
     _session_page_size,
+    _session_order_query,
     _text_set_query,
 )
 from .transport import AdminHttpState, AdminHttpTransport, Request, Response
@@ -89,6 +90,7 @@ from ..bindings import (
     BindingQuery,
     BindingQueryBusy,
     BindingQueryClosed,
+    BindingQueryLimitExceeded,
     BindingQueryTimeout,
     BindingContextRevisionConflict,
     BindingFeedbackRevisionConflict,
@@ -604,6 +606,12 @@ class AdminWebApplication:
             return await self._runtime_snapshots(context)
         if route == ("GET", "/api/v1/side-topics"):
             return await self._side_topics(context)
+        if route == ("GET", "/api/v1/instance-diagnostics"):
+            _require_query_keys(context.query, set())
+            return _json_response(200, {
+                **await self._management.instance_diagnostics(),
+                "requestId": context.request.request_id,
+            })
         if route == ("GET", "/api/v1/updates"):
             _require_query_keys(context.query, set())
             return self._updates_response(
@@ -1093,9 +1101,12 @@ class AdminWebApplication:
             "current",
             "createdFrom",
             "createdBefore",
+            "sortBy",
+            "sortDirection",
         }
         _require_query_keys(context.query, allowed)
         page_size = _session_page_size(context.query)
+        sort_by, sort_direction = _session_order_query(context.query)
         created_from, created_before = _created_range_query(context.query)
         local = BindingQuery(
             project_aliases=_text_set_query(context.query, "project"),
@@ -1110,6 +1121,8 @@ class AdminWebApplication:
         inventory_states = _session_inventory_states(context.query)
         filter_values = {
             "pageSize": page_size,
+            "sortBy": sort_by,
+            "sortDirection": sort_direction,
             "local": _jsonable(local),
             "inventoryState": (
                 tuple(state.value for state in inventory_states)
@@ -1118,7 +1131,7 @@ class AdminWebApplication:
             ),
         }
         fingerprint = _fingerprint("sessions", filter_values)
-        cursor = _decode_binding_cursor(_optional_one(context.query, "cursor"), fingerprint)
+        cursor = _decode_session_cursor(_optional_one(context.query, "cursor"), fingerprint, sort_by=sort_by)
         deadline = (
             asyncio.get_running_loop().time() + _SESSION_QUERY_DEADLINE_SECONDS
         )
@@ -1126,6 +1139,8 @@ class AdminWebApplication:
             query=SessionQuery(
                 local=local,
                 inventory_states=inventory_states,
+                sort_by=sort_by,
+                sort_direction=sort_direction,
             ),
             cursor=cursor,
             limit=page_size,
@@ -1157,7 +1172,7 @@ class AdminWebApplication:
             {
                 "requestId": context.request.request_id,
                 "items": items,
-                "nextCursor": _encode_binding_cursor(page.next_cursor, fingerprint),
+                "nextCursor": _encode_session_cursor(page.next_cursor, fingerprint),
                 "pageSize": page_size,
                 "catalogAvailable": page.catalog_available,
             },
@@ -1352,9 +1367,12 @@ class AdminWebApplication:
             "state",
             "createdFrom",
             "createdBefore",
+            "sortBy",
+            "sortDirection",
         }
         _require_query_keys(context.query, allowed)
         page_size = _session_page_size(context.query)
+        sort_by, sort_direction = _session_order_query(context.query)
         state_values = _text_set_query(context.query, "state")
         try:
             if state_values == ("all",):
@@ -1376,12 +1394,14 @@ class AdminWebApplication:
             states=states,
             created_from=created_from,
             created_before=created_before,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
         )
         fingerprint = _fingerprint(
             "side-topics",
             {"pageSize": page_size, "query": _jsonable(query)},
         )
-        cursor = _decode_side_cursor(_optional_one(context.query, "cursor"), fingerprint)
+        cursor = _decode_side_cursor(_optional_one(context.query, "cursor"), fingerprint, sort_by=sort_by)
         page = await self._management.query_side_topics(
             query=query,
             cursor=cursor,
@@ -2878,6 +2898,9 @@ def _runtime_precondition(grant: object) -> RuntimePrecondition:
 
 
 _UPDATE_HTTP_ERRORS = {
+    "diagnostics_unavailable": (
+        503, "diagnostics_unavailable", "无法确认当前实例状态，请检查服务管理器或稍后手动刷新。",
+    ),
     "restart_unsupported": (409, "restart_unsupported", "仅绑定当前 Python 环境的受管实例支持 Admin 重启。"),
     "update_busy": (409, "update_busy", "另一个安装或维护操作正在执行，请稍后查看结果。"),
     "update_state_unavailable": (
@@ -2933,6 +2956,8 @@ def _map_error(error: BaseException) -> AdminWebError | None:
         return AdminWebError(*mapped) if mapped is not None else None
     if isinstance(error, SessionSettingsError):
         return AdminWebError(400, error.code, str(error))
+    if isinstance(error, BindingQueryLimitExceeded):
+        return AdminWebError(400, "query_limit", "匹配会话过多，请缩小筛选范围。")
     if isinstance(error, (ValueError, AmbiguousBinding)) and not isinstance(error, ProjectError):
         return AdminWebError(400, "invalid_input", "请求参数无效。")
     if isinstance(

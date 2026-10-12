@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 from .domain import (
     FeishuScope,
@@ -223,6 +223,10 @@ class BindingQueryTimeout(TimeoutError):
     """An Admin query exceeded its combined queue and execution deadline."""
 
 
+class BindingQueryLimitExceeded(ValueError):
+    """A complete filtered inventory exceeds the bounded query capacity."""
+
+
 class ScopeConflict(RuntimeError):
     pass
 
@@ -310,6 +314,7 @@ class BindingQuery:
     scope_kinds: tuple[ScopeKind, ...] | None = None
     app_id: str | None = None
     search: str | None = None
+    sort_direction: Literal["asc", "desc"] = "desc"
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +333,7 @@ class BindingPage:
 class SideTopicCursor:
     created_at: str
     side_id: str
+    updated_at: str | None = None
 
     def __post_init__(self) -> None:
         if not self.created_at or not self.side_id:
@@ -347,6 +353,8 @@ class SideTopicQuery:
     created_before: str | None = None
     project_aliases: tuple[str, ...] | None = None
     states: tuple[SideTopicState, ...] | None = None
+    sort_by: Literal["created_at", "updated_at"] = "created_at"
+    sort_direction: Literal["asc", "desc"] = "desc"
 
 
 @dataclass(frozen=True, slots=True)
@@ -2224,6 +2232,34 @@ class BindingStore:
             next_cursor = BindingCursor(last["created_at"], last["binding_id"])
         return BindingPage(items=items, next_cursor=next_cursor)
 
+    async def query_binding_candidates(
+        self,
+        *,
+        query: BindingQuery = BindingQuery(),
+        deadline_seconds: float = 0.5,
+        limit: int = 100_000,
+    ) -> tuple[BindingInventoryRecord, ...]:
+        """Read one bounded local inventory for an external metadata join.
+
+        Filtering and the overflow check share one read snapshot. Never return
+        an apparently complete, truncated inventory for global sorting.
+        """
+
+        candidate_limit = _validate_page_limit(limit, maximum=100_000)
+        statement, parameters = _binding_inventory_statement(
+            query=query, cursor=None, limit=candidate_limit + 1,
+        )
+
+        def operation(connection: sqlite3.Connection) -> tuple[BindingInventoryRecord, ...]:
+            rows = connection.execute(statement, parameters).fetchall()
+            if len(rows) > candidate_limit:
+                raise BindingQueryLimitExceeded("Binding candidates exceed the bounded inventory limit")
+            # Large candidate inventories are also decoded on the reader worker,
+            # not on the shared application event loop.
+            return tuple(_binding_inventory(row) for row in rows)
+
+        return await self._submit_query(operation, deadline_seconds=deadline_seconds)
+
     async def query_side_topics(
         self,
         *,
@@ -2253,7 +2289,10 @@ class BindingStore:
         next_cursor = None
         if has_more and selected:
             last = selected[-1]
-            next_cursor = SideTopicCursor(last["created_at"], last["side_id"])
+            next_cursor = SideTopicCursor(
+                last["created_at"], last["side_id"],
+                last["updated_at"] if query.sort_by == "updated_at" else None,
+            )
         return SideTopicPage(items=items, next_cursor=next_cursor)
 
     async def query_project_aggregates(
@@ -2585,6 +2624,14 @@ _COMPATIBLE_INDEXES = (
     """
     CREATE INDEX IF NOT EXISTS side_topics_state_created
     ON side_topics(state, created_at DESC, side_id DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS side_topics_global_updated
+    ON side_topics(updated_at DESC, side_id DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS side_topics_state_updated
+    ON side_topics(state, updated_at DESC, side_id DESC)
     """,
     """
     CREATE INDEX IF NOT EXISTS side_topics_chat_topic_created
@@ -2927,6 +2974,10 @@ def _binding_inventory_statement(
     cursor: BindingCursor | None,
     limit: int,
 ) -> tuple[str, list[object]]:
+    if query.sort_direction not in ("asc", "desc"):
+        raise ValueError("Binding sort direction is invalid")
+    direction = query.sort_direction.upper()
+    comparison = ">" if query.sort_direction == "asc" else "<"
     clauses: list[str] = []
     parameters: list[object] = []
     if query.app_id is not None:
@@ -3003,15 +3054,15 @@ def _binding_inventory_statement(
         parameters.append(query.created_before)
     if cursor is not None:
         clauses.append(
-            "(b.created_at < ? OR (b.created_at = ? AND b.binding_id < ?))"
+            f"(b.created_at, b.binding_id) {comparison} (?, ?)"
         )
-        parameters.extend((cursor.created_at, cursor.created_at, cursor.binding_id))
+        parameters.extend((cursor.created_at, cursor.binding_id))
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     parameters.append(limit)
     return (
         _BINDING_INVENTORY_SELECT
         + where
-        + " ORDER BY b.created_at DESC, b.binding_id DESC LIMIT ?",
+        + f" ORDER BY b.created_at {direction}, b.binding_id {direction} LIMIT ?",
         parameters,
     )
 
@@ -3023,6 +3074,13 @@ def _side_inventory_statement(
     limit: int,
     extra_side_ids: tuple[str, ...] = (),
 ) -> tuple[str, list[object]]:
+    if query.sort_by not in ("created_at", "updated_at"):
+        raise ValueError("Side Topic sort field is invalid")
+    if query.sort_direction not in ("asc", "desc"):
+        raise ValueError("Side Topic sort direction is invalid")
+    direction = query.sort_direction.upper()
+    comparison = ">" if query.sort_direction == "asc" else "<"
+    sort_column = "st." + query.sort_by
     clauses: list[str] = []
     parameters: list[object] = []
     for label, column, value in (
@@ -3069,16 +3127,18 @@ def _side_inventory_statement(
         clauses.append("st.created_at < ?")
         parameters.append(query.created_before)
     if cursor is not None:
+        cursor_time = cursor.updated_at if query.sort_by == "updated_at" else cursor.created_at
+        _require_query_value("Side Topic cursor time", cursor_time)
         clauses.append(
-            "(st.created_at < ? OR (st.created_at = ? AND st.side_id < ?))"
+            f"({sort_column}, st.side_id) {comparison} (?, ?)"
         )
-        parameters.extend((cursor.created_at, cursor.created_at, cursor.side_id))
+        parameters.extend((cursor_time, cursor.side_id))
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     parameters.append(limit)
     return (
         _SIDE_INVENTORY_SELECT
         + where
-        + " ORDER BY st.created_at DESC, st.side_id DESC LIMIT ?",
+        + f" ORDER BY {sort_column} {direction}, st.side_id {direction} LIMIT ?",
         parameters,
     )
 

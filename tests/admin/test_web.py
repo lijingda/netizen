@@ -46,6 +46,7 @@ from netizen_cli.bindings import (
     BindingContextRevisionConflict,
     BindingFeedbackRevisionConflict,
     BindingInventoryRecord,
+    BindingQueryLimitExceeded,
     BindingTurnSettings,
     BindingSettingsRevisionConflict,
     ProjectAggregate,
@@ -94,6 +95,7 @@ from netizen_cli.management import (
     SessionInventoryItem,
     SessionInventoryPage,
     SessionInventoryState,
+    SessionUpdatedCursor,
     SideTopicInventoryItem,
     SideTopicInventoryPage,
     StoppedBinding,
@@ -290,6 +292,12 @@ class FakeManagement:
     async def update_status(self):
         self.calls.append(("update_status", None))
         return json.loads(json.dumps(self.update_data))
+
+    async def instance_diagnostics(self):
+        self.calls.append(("instance_diagnostics", None))
+        return {"root": "/instance", "checkedAt": 1900000000,
+                "bound": True, "running": True, "ready": True, "loaded": True, "enabled": None,
+                "binding": {"python": "/env/bin/python", "prefix": "/env", "codexHome": None}}
 
     async def restart_service(self, *, installation_id):
         self.calls.append(("restart_service", installation_id))
@@ -837,6 +845,40 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(actual_status, status)
             self.assertEqual(payload["code"], code)
             self.assertNotIn("items", payload)
+
+    async def test_instance_diagnostics_is_authenticated_root_scoped_and_read_only(self) -> None:
+        self.runner.open_admission()
+        status, _, _ = await self.request("GET", "/api/v1/instance-diagnostics")
+        self.assertEqual(status, 401)
+        self.assertNotIn(("instance_diagnostics", None), self.management.calls)
+        session = await self.login()
+        status, _, data = await self.json_get("/api/v1/instance-diagnostics", session)
+        self.assertEqual(status, 200)
+        self.assertEqual(data["root"], "/instance")
+        self.assertTrue(data["ready"])
+        self.assertIsNone(data["enabled"])
+        self.assertEqual(data["binding"]["python"], "/env/bin/python")
+        self.assertNotIn("actions", data)
+        self.assertNotIn(("update_status", None), self.management.calls)
+        calls = tuple(self.management.calls)
+        for suffix in ("?root=/other", "?command=restart", "?all=true"):
+            status, _, _ = await self.json_get("/api/v1/instance-diagnostics" + suffix, session)
+            self.assertEqual(status, 400)
+        status, _, _ = await self.json_post("/api/v1/instance-diagnostics", session, {})
+        self.assertEqual(status, 404)
+        self.assertEqual(tuple(self.management.calls), calls)
+
+    async def test_instance_diagnostics_failure_is_not_a_stopped_service(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        with patch.object(self.management, "instance_diagnostics", side_effect=UpdateError("diagnostics_unavailable")):
+            status, _, data = await self.json_get("/api/v1/instance-diagnostics", session)
+        self.assertEqual(status, 503)
+        self.assertEqual(data["code"], "diagnostics_unavailable")
+        self.assertNotIn("running", data)
+        status, _, maintenance = await self.json_get("/api/v1/updates", session)
+        self.assertEqual(status, 200)
+        self.assertIn("current", maintenance)
 
     async def test_updates_require_auth_and_admin_has_no_package_update_authority(self) -> None:
         self.runner.open_admission()
@@ -1486,6 +1528,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         call = self.management.query_side_topic_calls[-1]
         self.assertEqual(call["limit"], 20)
+        self.assertEqual((call["query"].sort_by, call["query"].sort_direction), ("updated_at", "desc"))
         self.assertEqual(call["query"].states, (SideTopicState.CREATING, SideTopicState.OPEN))
         row = page["items"][0]
         self.assertEqual(row["parentSession"], {
@@ -1499,7 +1542,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
 
         async def with_cursor(**values):
             result = await original_query(**values)
-            return replace(result, next_cursor=SideTopicCursor("2030", "side-1"))
+            return replace(result, next_cursor=SideTopicCursor("2030", "side-1", "2031"))
 
         with patch.object(self.management, "query_side_topics", side_effect=with_cursor):
             status, _, page = await self.json_get(
@@ -1648,7 +1691,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
     async def test_session_multiselect_cursor_uses_normalized_filter_sets(self) -> None:
         self.runner.open_admission()
         session = await self.login()
-        native_cursor = BindingCursor("2030-01-01", "binding-last")
+        native_cursor = SessionUpdatedCursor(1_730_831_111, "binding-last")
         with patch.object(
             self.management,
             "query_sessions",
@@ -1682,6 +1725,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 "&project=gamma", "&scopeKind=group", "&current=true",
                 "&inventoryState=lazy", "&inventoryState=active&inventoryState=lazy",
                 "&inventoryState=unknown", "&pageSize=50",
+                "&sortBy=createdAt", "&sortDirection=asc",
             ):
                 with self.subTest(change=change):
                     status, _, error = await self.json_get(
@@ -1720,6 +1764,51 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(status, 400, error)
             sessions.assert_not_awaited()
+
+    async def test_session_time_order_parameters_and_cursors_are_bound_to_each_order(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        for route, method in (("sessions", "query_sessions"), ("side-topics", "query_side_topics")):
+            for key in ("createdAt", "updatedAt"):
+                for direction in ("asc", "desc"):
+                    with self.subTest(route=route, key=key, direction=direction):
+                        if route == "sessions":
+                            native_cursor = BindingCursor("2030", "binding-last") if key == "createdAt" else SessionUpdatedCursor(None, "binding-last")
+                            result = SessionInventoryPage((), native_cursor)
+                        else:
+                            native_cursor = SideTopicCursor("2030", "side-last", "2031" if key == "updatedAt" else None)
+                            result = SideTopicInventoryPage((), native_cursor)
+                        with patch.object(self.management, method, return_value=result) as call:
+                            url = f"/api/v1/{route}?sortBy={key}&sortDirection={direction}"
+                            status, _, page = await self.json_get(url, session)
+                            self.assertEqual(status, 200, page)
+                            query = call.call_args.kwargs["query"]
+                            self.assertEqual(query.sort_by, "created_at" if key == "createdAt" else "updated_at")
+                            self.assertEqual(query.sort_direction, direction)
+                            cursor = page["nextCursor"]
+                            status, _, page = await self.json_get(url + "&cursor=" + cursor, session)
+                            self.assertEqual(status, 200, page)
+                            self.assertEqual(call.call_args.kwargs["cursor"], native_cursor)
+                            changed = "asc" if direction == "desc" else "desc"
+                            status, _, error = await self.json_get(f"/api/v1/{route}?sortBy={key}&sortDirection={changed}&cursor={cursor}", session)
+                            self.assertEqual(status, 400, error)
+                            self.assertEqual(error["code"], "invalid_cursor")
+            with patch.object(self.management, method) as call:
+                for query in ("sortBy=activatedAt", "sortDirection=DESC", "sortBy=createdAt&sortBy=updatedAt", "sortDirection=asc&sortDirection=desc", "sortBy="):
+                    status, _, error = await self.json_get(f"/api/v1/{route}?{query}", session)
+                    self.assertEqual(status, 400, error)
+                call.assert_not_awaited()
+
+    async def test_session_default_order_is_updated_desc_and_accepts_explicit_equivalent_cursor(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        with patch.object(self.management, "query_sessions", return_value=SessionInventoryPage((), SessionUpdatedCursor(100, "last"))) as call:
+            status, _, page = await self.json_get("/api/v1/sessions", session)
+            self.assertEqual(status, 200, page)
+            query = call.call_args.kwargs["query"]
+            self.assertEqual((query.sort_by, query.sort_direction), ("updated_at", "desc"))
+            status, _, error = await self.json_get("/api/v1/sessions?sortBy=updatedAt&sortDirection=desc&cursor=" + page["nextCursor"], session)
+            self.assertEqual(status, 200, error)
 
     async def test_project_options_are_authenticated_paginated_and_issue_no_actions(self) -> None:
         self.runner.open_admission()
@@ -1798,6 +1887,17 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(query["open_chat_id"], [scope.chat_id])
                     self.assertEqual(query["open_thread_id"], [topic_id])
                     self.assertEqual(query["thread_position"], ["-1"])
+
+    async def test_sessions_inventory_limit_explains_how_to_narrow_query(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        with patch.object(
+            self.management, "query_sessions", AsyncMock(side_effect=BindingQueryLimitExceeded("too many")),
+        ):
+            status, _, result = await self.json_get("/api/v1/sessions", session)
+        self.assertEqual(status, 400)
+        self.assertEqual(result["code"], "query_limit")
+        self.assertIn("缩小筛选范围", result["message"])
 
     async def test_sessions_api_exposes_page_size_presentation_and_state(self) -> None:
         self.runner.open_admission()
@@ -2440,15 +2540,11 @@ class AdminStaticAssetsTest(unittest.TestCase):
         ):
             self.assertNotIn(unsafe, javascript)
         self.assertIn("textContent", javascript)
-        self.assertIn("applyRuntimeSnapshots", javascript)
-        self.assertIn("fetchRuntimeSnapshots", javascript)
-        self.assertIn("chunkValues(bindingIds)", javascript)
         self.assertIn("runtime.primaryStatus", javascript)
         self.assertIn("runtime.subscriptionState", javascript)
         self.assertIn("session.pointerState", javascript)
         self.assertIn("session.catalogState", javascript)
         self.assertNotIn("session.nativeState", javascript)
-        self.assertIn('query.set("resolvePrimary", "true")', javascript)
         self.assertIn("result?.message", javascript)
         self.assertNotIn("if (runtime.turn)", javascript)
         self.assertNotIn("if (runtime.goal)", javascript)
@@ -2467,7 +2563,6 @@ class AdminStaticAssetsTest(unittest.TestCase):
         self.assertIn("await refresh(state.tab)", javascript)
         self.assertIn('state.tab === "sessions"', javascript)
         self.assertIn('state.sessionTab === "temporary"', javascript)
-        self.assertRegex(javascript, r"setInterval\([\s\S]+?,\s*5000\s*\)")
 
     def test_time_range_filter_is_shared_accessible_and_uses_utc_bounds(self) -> None:
         root = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"

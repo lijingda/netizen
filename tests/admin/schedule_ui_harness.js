@@ -14,6 +14,8 @@ const envelope = (mode) => ({
 let createGrant = envelope("create");
 let chatValidationGate = null;
 let scheduleOptionsGate = null;
+let unavailableProject = null;
+let openTimeRangeFilter = null;
 const defaultSessionSettings = { turn_settings: { model_id: "native-default", effort_id: "medium", service_tier_id: "default" },
   reaction_pulse_enabled: false, progress_card_enabled: false, completion_mention_enabled: true, message_context_mode: "current-only" };
 const models = [{ id: "native-default", display_name: "Native default", default_effort_id: "medium", default_service_tier_id: "default",
@@ -42,6 +44,8 @@ let ambiguous = false;
 let ambiguousEnd = false;
 let canonicalEndAt = null;
 let previewTimes = null;
+let previewError = null;
+let chatValidationError = null;
 let viewedPlan = null;
 let failList = false;
 let failView = false;
@@ -56,14 +60,16 @@ async function api(path, options = {}) {
   gets.push(path);
   const query = new URL(path, "http://localhost").searchParams;
   if (path.startsWith("/api/v1/chats/validate?")) {
+    if (chatValidationError) throw chatValidationError;
     if (chatValidationGate) return new Promise((resolve) => { chatValidationGate.resolve = resolve; });
     return { chat: { chatId: query.get("chatId"), avatarUrl: "https://example.feishucdn.com/saved.jpg" } };
   }
   if (path.startsWith("/api/v1/chats?")) return { items: [{ chatId: "oc_picker", name: "研发群",
     avatarUrl: "https://example.feishucdn.com/schedule.jpg" }], nextCursor: null };
   if (path.startsWith("/api/v1/projects/options")) return {
-    items: query.has("cursor") ? [{ alias: "retired", enabled: false }] : [
-      { alias: "project-one", enabled: true }, { alias: "project-two", enabled: true }],
+    items: (query.has("cursor") ? [{ alias: "retired", enabled: false }] : [
+      { alias: "project-one", enabled: true }, { alias: "project-two", enabled: true }])
+      .filter((project) => project.alias !== unavailableProject),
     nextCursor: query.has("cursor") ? null : "project-page-two",
   };
   const mode = query.get("mode") || "list";
@@ -77,6 +83,7 @@ async function api(path, options = {}) {
     return result;
   }
   if (mode === "preview") {
+    if (previewError) throw previewError;
     const schedule = JSON.parse(query.get("schedule"));
     if (schedule.kind === "once" && ambiguous && !query.get("utc_offset")) {
       const error = new Error("所选时间会出现两次，请选择触发时刻。");
@@ -112,9 +119,33 @@ async function api(path, options = {}) {
 }
 async function refresh() { await loadSchedules(); return true; }
 // SHIPPED_SCHEDULE_CONTROLLER
+const scheduleFilterRoots = new Map(scheduleInput("filter").querySelectorAll("[data-schedule-filter]")
+  .map((root) => [root.dataset.scheduleFilter, root]));
+const filterControl = (name, className) => scheduleFilterRoots.get(name).querySelector(`.${className}`);
+const filterOption = (name, value) => scheduleFilterRoots.get(name).querySelectorAll("input")
+  .find((input) => input.type === "radio" && input.value === value);
+function chooseFilter(name, value) {
+  if (filterControl(name, "multi-filter-popover").hidden) filterControl(name, "multi-filter-trigger").click();
+  filterOption(name, value).click();
+}
+function clearFilter(name) {
+  if (filterControl(name, "multi-filter-popover").hidden) filterControl(name, "multi-filter-trigger").click();
+  filterControl(name, "multi-filter-clear").click();
+}
 async function openNewScheduleEditor() {
   await openScheduleEditor();
+  scheduleInput("name").value = "Test schedule";
+  scheduleInput("instructions").value = "Test instructions";
+  scheduleInput("project").value = "project-one";
   chatTarget("schedule").set({ chatId: "oc_test", chat: { chatMode: "group", chatLabel: "测试群" } });
+}
+async function chooseScheduleTarget(value) {
+  const inputs = scheduleInput("target-kind").querySelectorAll("input");
+  for (const input of inputs) input.checked = input.value === value;
+  const selected = inputs.find((input) => input.checked);
+  selected.dispatch("input");
+  selected.dispatch("change");
+  await flush();
 }
 (async () => {
   await loadSchedules();
@@ -127,7 +158,7 @@ async function openNewScheduleEditor() {
   assert.equal(chatLink.textContent, "<b>测试会话</b>");
   assert.equal(chatLink.querySelector("b"), null);
   assert.equal(new URL(chatLink.href).searchParams.get("openChatId"), "oc_other");
-  assert.equal(scheduleInput("filter").querySelectorAll("input").length, 0);
+  assert.deepEqual([...new FormData(scheduleInput("filter"))], [["project", ""], ["enabled", ""], ["ended", "false"]]);
   const defaultList = new URL(gets.find((path) => path.startsWith("/api/v1/schedules?")), "http://localhost").searchParams;
   assert.equal(defaultList.get("ended"), "false");
   assert.equal(defaultList.get("enabled"), null);
@@ -140,6 +171,69 @@ async function openNewScheduleEditor() {
   for (const code of ["publishing_failed", "scope_conflict", "dispatch_rejected", "deleted"]) {
     assert.notEqual(scheduleRunStatus(code), "结果暂不可用");
   }
+
+  // Scheduled filters reuse the searchable dropdown while retaining single-value drafts.
+  const projectTrigger = filterControl("project", "multi-filter-trigger");
+  const projectSearch = filterControl("project", "multi-filter-search");
+  const requestsBeforeFilter = gets.length;
+  projectTrigger.click();
+  assert.equal(projectTrigger.type, "button");
+  assert.equal(projectTrigger.getAttribute("aria-expanded"), "true");
+  assert.equal(document.activeElement, projectSearch);
+  projectSearch.value = "RETIRED";
+  projectSearch.dispatch("input");
+  assert.equal(filterOption("project", "project-one").parentElement.hidden, true);
+  assert.equal(filterOption("project", "retired").parentElement.hidden, false);
+  assert(filterOption("project", "retired").parentElement.textContent.includes("已停用"));
+  assert(projectSearch.dispatch("keydown", { key: "Enter" }).prevented);
+  filterOption("project", "retired").click();
+  assert.equal(scheduleInput("filter-project").value, "retired");
+  assert.equal(filterControl("project", "multi-filter-popover").hidden, true);
+  assert.equal(document.activeElement, projectTrigger);
+  chooseFilter("project", "project-one");
+  assert.equal(filterOption("project", "retired").checked, false);
+  assert.equal(filterOption("project", "project-one").checked, true);
+  assert.deepEqual([...new FormData(scheduleInput("filter"))].filter(([name]) => name === "project"),
+    [["project", "project-one"]]);
+  projectTrigger.click();
+  projectSearch.value = "no such project";
+  projectSearch.dispatch("input");
+  assert.equal(filterControl("project", "multi-filter-empty").hidden, false);
+  assert(projectSearch.dispatch("keydown", { key: "Escape" }).prevented);
+  assert.equal(document.activeElement, projectTrigger);
+  assert.equal(scheduleInput("filter-project").value, "project-one");
+  assert.equal(gets.length, requestsBeforeFilter, "filter choices and search do not apply the draft");
+
+  // Refreshing options preserves a removed Project until explicitly cleared.
+  unavailableProject = "project-one";
+  await loadSchedules();
+  assert.equal(scheduleInput("filter-project").value, "project-one");
+  assert(filterOption("project", "project-one").parentElement.textContent.includes("已不可用"));
+  unavailableProject = null;
+  clearFilter("project");
+  assert.equal(scheduleInput("filter-project").value, "");
+  assert.equal(filterControl("project", "multi-filter-summary").textContent, "全部");
+  clearFilter("ended");
+  await loadSchedules();
+  const clearedQuery = new URL(gets.filter((path) => path.startsWith("/api/v1/schedules?")).at(-1), "http://localhost").searchParams;
+  assert.equal(clearedQuery.get("project"), null);
+  assert.equal(clearedQuery.get("ended"), null, "clear means all, not the initial unfinished filter");
+  chooseFilter("ended", "false");
+  assert.equal(filterControl("ended", "multi-filter-summary").textContent, "未结束");
+  projectTrigger.click();
+  filterControl("enabled", "multi-filter-trigger").dispatch("keydown", { key: "ArrowDown" });
+  assert.equal(filterControl("project", "multi-filter-popover").hidden, true);
+  assert.equal(document.activeElement, filterOption("enabled", "true"));
+  filterOption("enabled", "true").dispatch("keydown", { key: "ArrowDown" });
+  assert.equal(document.activeElement, filterOption("enabled", "false"));
+  assert(filterOption("enabled", "false").dispatch("keydown", { key: "Enter" }).prevented);
+  assert.equal(scheduleInput("filter-enabled").value, "false");
+  assert.equal(filterControl("enabled", "multi-filter-popover").hidden, true);
+  assert.equal(document.activeElement, filterControl("enabled", "multi-filter-trigger"));
+  clearFilter("enabled");
+  filterControl("enabled", "multi-filter-trigger").click();
+  document.body.dispatch("pointerdown");
+  assert.equal(filterControl("enabled", "multi-filter-popover").hidden, true);
 
   // Independent enablement/completion and exact current execution control row actions.
   for (const scenario of [
@@ -179,24 +273,25 @@ async function openNewScheduleEditor() {
     assert(buttons.includes("编辑") && buttons.includes("删除"));
     assert.deepEqual(buttons.filter((label) => ["启用", "暂停"].includes(label)), scenario.toggle ? [scenario.toggle] : []);
   }
-  scheduleInput("filter-ended").value = "true";
-  scheduleInput("filter-enabled").value = "false";
+  chooseFilter("ended", "true");
+  chooseFilter("enabled", "false");
   plans = [];
   await loadSchedules();
   const emptyQuery = new URL(gets.filter((path) => path.startsWith("/api/v1/schedules?")).at(-1), "http://localhost").searchParams;
   assert.equal(emptyQuery.get("ended"), "true");
   assert.equal(emptyQuery.get("enabled"), "false");
   assert(document.querySelector("#schedules-body").textContent.includes("没有符合筛选条件"));
-  scheduleInput("filter-ended").value = "false";
-  scheduleInput("filter-enabled").value = "";
+  chooseFilter("ended", "false");
+  clearFilter("enabled");
   plans = [fixturePlan()];
   await loadSchedules();
-  assert.deepEqual(scheduleInput("filter-project").querySelectorAll("option").map((o) => o.value),
-    ["", "project-one", "project-two", "retired"]);
-  scheduleInput("filter-project").value = "project-one";
+  assert.deepEqual(scheduleFilterRoots.get("project").querySelectorAll("input")
+    .filter((input) => input.type === "radio").map((input) => input.value),
+    ["project-one", "project-two", "retired"]);
+  chooseFilter("project", "project-one");
   await loadSchedules();
   await loadSchedules("page-two");
-  scheduleInput("filter-project").value = "project-two";
+  chooseFilter("project", "project-two");
   assert(gets.some((path) => path.startsWith("/api/v1/schedules?") && new URL(path, "http://localhost").searchParams.get("cursor") === "page-two"));
 
   await openNewScheduleEditor();
@@ -204,6 +299,11 @@ async function openNewScheduleEditor() {
   assert.equal(scheduleInput("save").disabled, true);
   assert.equal(scheduleInput("editor").hidden, false);
   assert.equal(scheduleInput("drawer").open, true);
+  assert.equal(scheduleInput("session-settings").open, true);
+  assert.equal(scheduleInput("end-details").open, false);
+  assert.equal(scheduleInput("target-note").hidden, true);
+  assert.equal(scheduleInput("binding-field").hidden, true);
+  assert.equal(scheduleTargetKind(), "new_topic");
   assert.equal(document.activeElement, scheduleInput("name"));
   assert.equal(scheduleInput("effort").querySelectorAll("option")[0].textContent, "medium");
   assert.deepEqual(scheduleInput("project").querySelectorAll("option").map((o) => o.value),
@@ -279,6 +379,8 @@ async function openNewScheduleEditor() {
   await previewSchedule();
   assert.equal(scheduleInput("save").disabled, true);
   assert.equal(scheduleInput("offset-field").hidden, false);
+  assert.equal(scheduleInput("offset").getAttribute("aria-invalid"), "true");
+  assert.equal(document.activeElement, scheduleInput("offset"));
   scheduleInput("offset").value = "-05:00";
   scheduleInput("offset").dispatch("input");
   await previewSchedule();
@@ -365,8 +467,11 @@ async function openNewScheduleEditor() {
   await saveSchedule({ preventDefault() {} });
   assert.equal(scheduleInput("instructions").value, fixturePlan().instructions);
   assert.equal(scheduleInput("save").disabled, true);
+  assert.match(scheduleInput("form-error").textContent, /请刷新列表并重新打开编辑/);
+  assert.equal(scheduleInput("form-error").hidden, false);
   await previewSchedule();
   assert.equal(scheduleInput("save").disabled, true);
+  assert.match(scheduleInput("form-error").textContent, /请刷新列表并重新打开编辑/);
   await saveSchedule({ preventDefault() {} });
   assert.equal(posts.length, beforeFailure + 1);
   assert.match(status, /已变化/);
@@ -440,14 +545,21 @@ async function openNewScheduleEditor() {
   await previewSchedule();
   assert.equal(scheduleInput("save").disabled, false);
   assert.equal(JSON.parse(new URL(gets.at(-1), "http://localhost").searchParams.get("session_settings")).turn_settings.effort_id, "high");
-  scheduleInput("target-kind").value = "binding";
-  renderScheduleTarget();
+  await chooseScheduleTarget("binding");
+  assert.equal(scheduleInput("save").disabled, true);
+  assert.equal(scheduleInput("target-note").hidden, false);
   assert.equal(scheduleInput("select-session").hidden, false);
   assert.match(scheduleInput("binding-summary").textContent, /Sessions/);
   assert.equal(scheduleInput("binding").value, "");
-  await loadScheduleSessionOptions();
   assert.equal(scheduleInput("preview").disabled, true);
   assert.equal(scheduleInput("effort").value, "high");
+  await chooseScheduleTarget("new_topic");
+  assert.equal(scheduleInput("target-note").hidden, true);
+  assert.equal(scheduleInput("binding-field").hidden, true);
+  assert.equal(scheduleInput("session-settings").hidden, false);
+  assert.equal(scheduleInput("session-settings").open, true);
+  assert.equal(scheduleInput("project").required, true);
+  assert.equal(scheduleInput("chat-target").hidden, false);
   closeScheduleEditor();
 
   // Catalog failure or a retired model never replaces a persisted setting.
@@ -498,6 +610,7 @@ async function openNewScheduleEditor() {
   assert.match(scheduleInput("detail-rule").textContent, /截止 2030-03-01 18:00\+08:00（含）/);
   await openScheduleEditor(deadlinePlan);
   assert.equal(scheduleInput("end-at").value, deadlinePlan.end_local_at);
+  assert.equal(scheduleInput("end-details").open, true);
   previewTimes = [times[0]]; // The service owns the cutoff calculation.
   await previewSchedule();
   let deadlineQuery = new URL(gets.at(-1), "http://localhost").searchParams;
@@ -506,6 +619,15 @@ async function openNewScheduleEditor() {
   assert(!("end_at" in JSON.parse(deadlineQuery.get("schedule"))));
   assert.equal(schedulePrepared.schedule.end_at, deadlinePlan.schedule.end_at);
   assert.equal(scheduleInput("preview-times").querySelectorAll("li").length, 1);
+  const beforeCollapse = { gets: gets.length, posts: posts.length, prepared: schedulePrepared };
+  scheduleInput("end-details").open = false;
+  scheduleInput("end-details").dispatch("toggle");
+  assert.equal(scheduleInput("end-at").value, deadlinePlan.end_local_at);
+  assert.equal(scheduleInput("end-condition").disabled, false);
+  assert.equal(scheduleInput("save").disabled, false);
+  assert.equal(schedulePrepared, beforeCollapse.prepared);
+  assert.equal(gets.length, beforeCollapse.gets);
+  assert.equal(posts.length, beforeCollapse.posts);
   await saveSchedule({ preventDefault() {} });
   assert.deepEqual(posts.at(-1).body.definition.schedule, deadlinePlan.schedule);
 
@@ -524,8 +646,10 @@ async function openNewScheduleEditor() {
   await openNewScheduleEditor();
   scheduleInput("timezone").value = "America/New_York";
   scheduleInput("end-at").value = "2030-11-03T01:30";
+  scheduleInput("end-details").open = false;
   ambiguousEnd = true;
   await previewSchedule();
+  assert.equal(scheduleInput("end-details").open, true, "deadline ambiguity choices must be visible even after collapsing");
   assert.equal(scheduleInput("end-offset-field").hidden, false);
   assert.equal(scheduleInput("offset-field").hidden, true);
   assert.equal(scheduleInput("save").disabled, true);
@@ -718,9 +842,7 @@ async function openNewScheduleEditor() {
   // An existing-session plan is selected from Sessions, never from a second binding list.
   respond = null;
   await openScheduleEditor();
-  scheduleInput("target-kind").value = "binding";
-  renderScheduleTarget();
-  await loadScheduleSessionOptions();
+  await chooseScheduleTarget("binding");
   assert.equal(scheduleInput("project-field").hidden, true);
   assert.equal(scheduleInput("chat-target").hidden, true);
   assert.equal(scheduleInput("session-settings").hidden, true);
@@ -762,6 +884,7 @@ async function openNewScheduleEditor() {
   assert.notDeepEqual(scheduleEditor.action, oldGrant);
   assert.deepEqual(scheduleEditor.action, createGrant);
   assert.deepEqual(captureScheduleDraft(), expectedDraft, "switching to Sessions must preserve every entered schedule field");
+  assert.equal(scheduleInput("end-details").open, true);
   assert.equal(pendingScheduleDraft, null);
   assert.equal(document.querySelector("#session-schedule-selection").hidden, true);
   assert.equal(scheduleInput("target-kind").disabled, true);
@@ -798,8 +921,7 @@ async function openNewScheduleEditor() {
   await openScheduleEditor();
   scheduleInput("name").value = "必须丢弃的草稿";
   scheduleInput("instructions").value = "discard me";
-  scheduleInput("target-kind").value = "binding";
-  renderScheduleTarget();
+  await chooseScheduleTarget("binding");
   scheduleInput("select-session").click();
   document.querySelector("#session-schedule-cancel").click();
   assert.equal(pendingScheduleDraft, null);
@@ -844,6 +966,8 @@ async function openNewScheduleEditor() {
   assert.equal(scheduleInput("group-picker").hidden, false);
   assert.equal(scheduleInput("chat-field").hidden, true);
   assert.equal(scheduleInput("chat-id-help").hidden, true);
+  assert.equal(scheduleInput("group-picker").querySelector(".chat-picker-summary").textContent, "请选择群聊");
+  assert.equal(scheduleInput("group-picker").querySelector(".chat-picker-empty-option"), null);
   chatTarget("schedule").focus();
   await flush();
   scheduleInput("group-picker").querySelector(".chat-picker-option").click();
@@ -851,6 +975,14 @@ async function openNewScheduleEditor() {
   assert.equal(scheduleInput("chat").value, "oc_picker");
   assert.equal(scheduleInput("group-picker").querySelector(".chat-picker-selected-avatar").querySelector("img").src,
     "https://example.feishucdn.com/schedule.jpg");
+  scheduleInput("group").click();
+  const scheduleSearch = scheduleInput("group-search");
+  scheduleSearch.value = "另一个群";
+  scheduleSearch.dispatch("input");
+  const cancelGroupSearch = scheduleSearch.dispatch("keydown", { key: "Escape" });
+  assert(cancelGroupSearch.prevented);
+  assert.equal(scheduleInput("chat").value, "oc_picker", "cancelled searches preserve the scheduled plan target");
+  assert.equal(scheduleInput("editor").hidden, false);
   scheduleInput("chat-manual").checked = true;
   scheduleInput("chat-manual").dispatch("change");
   await flush();
@@ -949,5 +1081,96 @@ async function openNewScheduleEditor() {
   assert.equal(scheduleInput("close").disabled, false);
   assert.equal(scheduleInput("save").disabled, true);
   assert.match(scheduleInput("preview-message").textContent, /重新预览/);
+  closeScheduleEditor();
+  // Inline validation rejects only applicable, locally knowable field errors.
+  // It never sends a mutation or consumes the grant for a correctable draft.
+  await openNewScheduleEditor();
+  const beforeInvalidPost = posts.length;
+  const unspentGrant = scheduleEditor.action;
+  for (const field of ["name", "instructions", "project"]) scheduleInput(field).value = " ";
+  await previewSchedule(); // Time preview does not require the task text yet.
+  await saveSchedule({ preventDefault() {} });
+  assert.equal(posts.length, beforeInvalidPost);
+  assert.equal(scheduleEditor.action, unspentGrant);
+  assert.equal(document.activeElement, scheduleInput("name"));
+  for (const field of ["name", "instructions", "project"]) {
+    assert.equal(scheduleInput(field).getAttribute("aria-invalid"), "true");
+    assert.equal(scheduleInput(`${field}-error`).hidden, false);
+    assert(scheduleInput(field).getAttribute("aria-describedby").includes(`schedule-${field}-error`));
+    scheduleInput(field).value = field === "project" ? "project-one" : "fixed";
+    scheduleInput(field).dispatch("input");
+    assert.equal(scheduleInput(field).getAttribute("aria-invalid"), null);
+    assert.equal(scheduleInput(`${field}-error`).hidden, true);
+  }
+  assert.equal(scheduleInput("form-error").hidden, true);
+
+  // Empty timing/target fields surface together and skip the preview request.
+  chatTarget("schedule").set();
+  scheduleInput("timezone").value = "";
+  scheduleInput("time").value = "";
+  const beforeInvalidPreview = gets.filter(path => path.includes("mode=preview")).length;
+  await previewSchedule();
+  assert.equal(gets.filter(path => path.includes("mode=preview")).length, beforeInvalidPreview);
+  assert.deepEqual([...scheduleFieldErrors.keys()], ["chat", "timezone", "time"]);
+  assert.equal(document.activeElement, scheduleInput("group"));
+  assert.equal(scheduleInput("chat-error").parentElement, scheduleInput("group-picker"));
+  scheduleInput("chat-manual").checked = true;
+  scheduleInput("chat-manual").dispatch("change");
+  assert.equal(scheduleInput("group").getAttribute("aria-invalid"), null);
+  await previewSchedule();
+  assert.equal(document.activeElement, scheduleInput("chat"));
+  assert.equal(scheduleInput("chat-error").parentElement, scheduleInput("chat-field"));
+  closeScheduleEditor();
+
+  await openNewScheduleEditor();
+  scheduleInput("kind").value = "interval";
+  for (const value of ["", "0", "-1", "1.5"]) {
+    scheduleInput("every").value = value;
+    await previewSchedule();
+    assert.equal(scheduleInput("every").getAttribute("aria-invalid"), "true");
+    assert.equal(schedulePrepared, null);
+  }
+  scheduleInput("kind").value = "weekly";
+  scheduleInput("kind").dispatch("input");
+  assert.equal(scheduleInput("every").getAttribute("aria-invalid"), null);
+  await previewSchedule();
+  assert.equal(scheduleInput("weekdays").getAttribute("aria-invalid"), "true");
+  assert.equal(document.activeElement, scheduleInput("weekdays").querySelector("input"));
+  scheduleInput("weekdays").querySelector("input").click();
+  assert.equal(scheduleInput("weekdays").getAttribute("aria-invalid"), null);
+  await previewSchedule();
+  assert(schedulePrepared);
+
+  // Browser-native partial/invalid date input in a closed optional section.
+  scheduleInput("end-details").open = false;
+  scheduleInput("end-at").validity = { valid: false };
+  scheduleInput("end-at").validationMessage = "请填写完整的截止时间。";
+  await previewSchedule();
+  assert.equal(scheduleInput("end-details").open, true);
+  assert.equal(document.activeElement, scheduleInput("end-at"));
+  assert(scheduleInput("end-at").getAttribute("aria-describedby").includes("schedule-timezone-note"));
+  delete scheduleInput("end-at").validity;
+  scheduleInput("end-at").dispatch("input");
+  assert.equal(scheduleInput("end-at").getAttribute("aria-describedby"), "schedule-timezone-note schedule-end-note");
+  closeScheduleEditor();
+
+  // Broad server errors are not guessed into a field by parsing their message.
+  await openNewScheduleEditor();
+  previewError = Object.assign(new Error("时区或其他规则无效 <img src=x>"), { code: "invalid_schedule" });
+  await previewSchedule();
+  assert.equal(scheduleFieldErrors.size, 0);
+  assert.equal(scheduleInput("form-error").hidden, false);
+  assert.equal(scheduleInput("form-error").querySelector("img"), null);
+  previewError = null;
+  await previewSchedule();
+  assert.equal(scheduleInput("form-error").hidden, true);
+  chatValidationError = Object.assign(new Error("聊天 ID 无效"), { code: "invalid_chat_id" });
+  await saveSchedule({ preventDefault() {} });
+  assert.equal(posts.length, beforeInvalidPost);
+  assert(scheduleEditor.action);
+  assert.equal(scheduleInput("fields").disabled, false);
+  assert.equal(document.activeElement, scheduleInput("group"));
+  assert.equal(scheduleInput("group").getAttribute("aria-invalid"), "true");
+  chatValidationError = null;
   closeScheduleEditor();
 })().catch((error) => { console.error(error); process.exitCode = 1; });
