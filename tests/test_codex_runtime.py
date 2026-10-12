@@ -4550,7 +4550,66 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(catalog.by_id()["native-1"].name, "One")
         self.assertEqual(catalog.by_id()["native-1"].updated_at, 1_730_750_000)
         self.assertIsNone(catalog.by_id()["native-2"].updated_at)
-        self.assertEqual(len(self.codex.thread_list_calls), 2)
+        self.assertEqual(self.codex.thread_list_calls, [
+            {"archived": True, "cursor": None, "limit": 100, "model_providers": []},
+            {"archived": True, "cursor": "page-two", "limit": 100, "model_providers": []},
+        ])
+
+    async def test_complete_native_catalog_passes_explicit_sort_on_every_page(self) -> None:
+        for sort_key in (None, "created_at", "updated_at"):
+            for sort_direction in (None, "asc", "desc"):
+                with self.subTest(sort_key=sort_key, sort_direction=sort_direction):
+                    self.codex.thread_list_calls.clear()
+                    self.codex.thread_list_pages = [
+                        SimpleNamespace(
+                            data=[SimpleNamespace(id="native-first", name=None, preview="first")],
+                            next_cursor="page-two",
+                        ),
+                        SimpleNamespace(
+                            data=[SimpleNamespace(id="native-second", name=None, preview="second")],
+                            next_cursor=None,
+                        ),
+                    ]
+
+                    catalog = await self.runtime.thread_catalog(
+                        archived=False,
+                        deadline=asyncio.get_running_loop().time() + 1,
+                        use_state_db_only=True,
+                        sort_key=sort_key,
+                        sort_direction=sort_direction,
+                    )
+
+                    expected = {
+                        "archived": False, "limit": 100, "model_providers": [],
+                        "use_state_db_only": True,
+                    }
+                    if sort_key is not None:
+                        expected["sort_key"] = sort_key
+                    if sort_direction is not None:
+                        expected["sort_direction"] = sort_direction
+                    self.assertEqual(self.codex.thread_list_calls, [
+                        {**expected, "cursor": None},
+                        {**expected, "cursor": "page-two"},
+                    ])
+                    self.assertEqual(
+                        tuple(thread.thread_id for thread in catalog.threads),
+                        ("native-first", "native-second"),
+                    )
+
+    async def test_complete_native_catalog_rejects_invalid_sort_without_requests(self) -> None:
+        for parameter, values in (
+            ("sort_key", ("", "updatedAt", "name", True, ["created_at"])),
+            ("sort_direction", ("", "descending", "ASC", False, ["asc"])),
+        ):
+            for value in values:
+                with self.subTest(parameter=parameter, value=value):
+                    with self.assertRaisesRegex(ValueError, parameter):
+                        await self.runtime.thread_catalog(
+                            archived=False,
+                            deadline=asyncio.get_running_loop().time() + 1,
+                            **{parameter: value},
+                        )
+        self.assertEqual(self.codex.thread_list_calls, [])
 
     async def test_complete_native_catalog_fails_whole_read_at_limits(self) -> None:
         with self.assertRaises(ThreadCatalogDeadlineExceeded):

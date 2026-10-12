@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tempfile
@@ -21,7 +22,7 @@ class MaintenanceTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name)
+        self.home = Path(self.temp.name).resolve()
         self.root = self.home / ".netizen"
         (self.root / "state").mkdir(parents=True, mode=0o700)
         self.current = InstalledPackage("1.2.3", self.home / "env/bin/python",
@@ -42,6 +43,57 @@ class MaintenanceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["current"]["installationId"], self.current.identity)
         self.assertTrue(status["restartAvailable"])
         self.executor.launch.assert_not_called()
+
+    async def test_diagnostics_reuses_exact_root_inspection_without_maintenance(self) -> None:
+        from netizen_cli.cli_services import ServiceBinding, ServiceStatus
+
+        binding = ServiceBinding(self.root, self.current.python, self.current.prefix)
+        self.service._clock = lambda: 1900000000
+        with patch("netizen_cli.cli_services.ServiceManager") as manager, \
+                patch.object(self.service, "_operation", side_effect=AssertionError("not read-only")):
+            for enabled in (True, False, None):
+                with self.subTest(enabled=enabled):
+                    manager.return_value.inspect.return_value = ServiceStatus(binding, True, enabled, True, True)
+                    result = await self.service.diagnostics()
+                    self.assertEqual(result, {
+                        "root": str(self.root), "checkedAt": 1900000000,
+                        "bound": True, "running": True, "ready": True, "loaded": True,
+                        "enabled": enabled, "binding": {
+                            "python": str(self.current.python), "prefix": str(self.current.prefix), "codexHome": None,
+                        },
+                    })
+                    json.dumps(result)  # All paths must already be safe JSON values.
+            manager.return_value.inspect.assert_called_with(self.root)
+            self.assertEqual(manager.return_value.inspect.call_count, 3)
+            manager.return_value.list_instances.assert_not_called()
+            manager.return_value.start.assert_not_called()
+            manager.return_value.stop.assert_not_called()
+        self.assertEqual(self.executor.mock_calls, [])
+        self.binding.assert_not_called()
+
+    async def test_diagnostics_distinguishes_unbound_stopped_and_unavailable(self) -> None:
+        from netizen_cli.cli_services import ServiceBinding, ServiceError, ServiceStatus
+
+        with patch("netizen_cli.cli_services.ServiceManager") as manager:
+            manager.return_value.inspect.return_value = None
+            result = await self.service.diagnostics()
+            self.assertFalse(result["bound"])
+            self.assertFalse(result["running"])
+            self.assertFalse(result["ready"])
+            self.assertFalse(result["loaded"])
+            self.assertIsNone(result["enabled"])
+            self.assertIsNone(result["binding"])
+            binding = ServiceBinding(self.root, self.current.python, self.current.prefix, self.home / "codex")
+            manager.return_value.inspect.return_value = ServiceStatus(binding, False, True, False, True)
+            result = await self.service.diagnostics()
+            self.assertTrue(result["bound"])
+            self.assertFalse(result["running"])
+            self.assertFalse(result["ready"])
+            self.assertEqual(result["binding"]["codexHome"], str(self.home / "codex"))
+            for error in (ServiceError("private manager output"), OSError("private path"), ValueError("bad state")):
+                manager.return_value.inspect.side_effect = error
+                with self.assertRaisesRegex(UpdateError, "^diagnostics_unavailable$"):
+                    await self.service.diagnostics()
 
     async def test_historical_operations_remain_readable_and_unknown_results_block_restart(self) -> None:
         previous_release = "b" * 64

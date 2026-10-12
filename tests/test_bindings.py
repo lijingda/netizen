@@ -1576,6 +1576,117 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual([item.binding.id for item in inactive.items], [second.id])
 
+    async def test_binding_sort_orders_all_filtered_rows_before_pagination(self) -> None:
+        matching = []
+        for index in range(40):
+            binding = self.create_binding(
+                scope=self.topic, project="alpha" if index < 30 else "beta",
+                created_at=f"2030-01-01T00:{index // 3:02d}:00+00:00",
+            )
+            if index < 30:
+                matching.append(binding)
+        for direction in ("asc", "desc"):
+            with self.subTest(direction=direction):
+                query = BindingQuery(project_alias="alpha", sort_direction=direction)
+                expected = sorted(
+                    matching, key=lambda binding: (binding.created_at, binding.id),
+                    reverse=direction == "desc",
+                )
+                first = await self.store.query_bindings(query=query, limit=20)
+                self.assertEqual(
+                    [item.binding.id for item in first.items],
+                    [binding.id for binding in expected[:20]],
+                )
+                self.assertIsNotNone(first.next_cursor)
+                second = await self.store.query_bindings(query=query, cursor=first.next_cursor, limit=20)
+                self.assertEqual(
+                    [item.binding.id for item in second.items],
+                    [binding.id for binding in expected[20:]],
+                )
+                self.assertIsNone(second.next_cursor)
+
+    async def test_binding_candidates_filter_once_and_reject_overflow(self) -> None:
+        expected = []
+        for index in range(4):
+            binding = self.create_binding(
+                scope=self.topic, project="alpha" if index < 2 else "beta",
+                created_at=f"2030-01-0{index + 1}T00:00:00+00:00", native=True,
+            )
+            if index < 2:
+                expected.append(binding.id)
+        statements = []
+        await self.store._submit_query(
+            lambda connection: connection.set_trace_callback(statements.append), deadline_seconds=1,
+        )
+        query = BindingQuery(project_alias="alpha", chat_id="oc_group", materialized=True)
+        candidates = await self.store.query_binding_candidates(query=query, limit=2)
+        self.assertEqual([item.binding.id for item in candidates], list(reversed(expected)))
+        self.assertEqual(len(statements), 1)
+        self.assertTrue(statements[0].lstrip().startswith("SELECT"))
+        self.assertIn("LIMIT 3", statements[0])
+        with self.assertRaisesRegex(ValueError, "bounded inventory limit"):
+            await self.store.query_binding_candidates(query=query, limit=1)
+        self.assertEqual(
+            await self.store.query_binding_candidates(query=BindingQuery(chat_id="no-match"), limit=1), (),
+        )
+        for limit in (0, -1, True, 100_001):
+            with self.subTest(limit=limit), self.assertRaises(ValueError):
+                await self.store.query_binding_candidates(limit=limit)
+
+    async def test_side_sort_uses_selected_time_and_filters_before_pagination(self) -> None:
+        parent = self.create_binding(
+            scope=self.topic, project="alpha", created_at="2030-01-01T00:00:00+00:00",
+        )
+        matching = []
+        for index in range(40):
+            side = self.store.create_side_topic(
+                app_id="cli_test", chat_id="oc_group", source_message_id=f"om_source_{index}",
+                parent_binding_id=parent.id, creator_id="ou_user", requires_mention=True,
+            )
+            created = f"2030-01-01T00:{index // 3:02d}:00+00:00"
+            updated = f"2030-02-01T00:{20 - index // 3:02d}:00+00:00"
+            self.store._connection.execute(
+                "UPDATE side_topics SET created_at = ?, updated_at = ?, state = ? WHERE side_id = ?",
+                (created, updated, "open" if index < 30 else "failed", side.id),
+            )
+            if index < 30:
+                matching.append((side.id, created, updated))
+        for sort_by in ("created_at", "updated_at"):
+            for direction in ("asc", "desc"):
+                with self.subTest(sort_by=sort_by, direction=direction):
+                    query = SideTopicQuery(
+                        states=(SideTopicState.OPEN,), chat_id="oc_group",
+                        sort_by=sort_by, sort_direction=direction,
+                    )
+                    expected = sorted(
+                        matching, key=lambda item: (item[1 if sort_by == "created_at" else 2], item[0]),
+                        reverse=direction == "desc",
+                    )
+                    first = await self.store.query_side_topics(query=query, limit=20)
+                    self.assertEqual([item.side_topic.id for item in first.items], [item[0] for item in expected[:20]])
+                    self.assertIsNotNone(first.next_cursor)
+                    self.assertEqual(first.next_cursor.created_at, expected[19][1])
+                    self.assertEqual(first.next_cursor.updated_at, expected[19][2] if sort_by == "updated_at" else None)
+                    second = await self.store.query_side_topics(query=query, cursor=first.next_cursor, limit=20)
+                    self.assertEqual([item.side_topic.id for item in second.items], [item[0] for item in expected[20:]])
+                    self.assertIsNone(second.next_cursor)
+
+    async def test_sort_inputs_and_missing_updated_cursor_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "sort direction"):
+            await self.store.query_bindings(query=BindingQuery(sort_direction="DESC; DROP TABLE bindings"))
+        with self.assertRaisesRegex(ValueError, "sort direction"):
+            await self.store.query_binding_candidates(query=BindingQuery(sort_direction="invalid"))
+        for query in (
+            SideTopicQuery(sort_by="created_at DESC; DROP TABLE side_topics"),
+            SideTopicQuery(sort_direction="invalid"),
+        ):
+            with self.subTest(query=query), self.assertRaisesRegex(ValueError, "sort"):
+                await self.store.query_side_topics(query=query)
+        with self.assertRaisesRegex(ValueError, "cursor time"):
+            await self.store.query_side_topics(
+                query=SideTopicQuery(sort_by="updated_at"), cursor=SideTopicCursor("2030-01-01", "side"),
+            )
+
     async def test_side_extra_ids_preserve_other_filters_and_keyset_pagination(self) -> None:
         alpha = self.create_binding(
             scope=self.direct, project="alpha", created_at="2030-01-01T00:00:00+00:00",
@@ -1972,3 +2083,27 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("side_topics_state_created", side_plan)
         self.assertNotIn("USE TEMP B-TREE", side_plan)
+
+    async def test_bidirectional_updated_and_created_plans_use_index_seek(self) -> None:
+        for direction in ("asc", "desc"):
+            for state in (None, SideTopicState.OPEN):
+                with self.subTest(direction=direction, state=state):
+                    statement, parameters = _side_inventory_statement(
+                        query=SideTopicQuery(state=state, sort_by="updated_at", sort_direction=direction),
+                        cursor=SideTopicCursor("2030-01-01", "side-050", "2030-02-01"), limit=21,
+                    )
+                    plan = " ".join(row[3] for row in self.store._connection.execute(
+                        "EXPLAIN QUERY PLAN " + statement, parameters,
+                    ))
+                    self.assertIn("SEARCH st USING INDEX side_topics_" + ("state" if state else "global") + "_updated", plan)
+                    self.assertNotIn("USE TEMP B-TREE", plan)
+            with self.subTest(direction=direction):
+                statement, parameters = _binding_inventory_statement(
+                    query=BindingQuery(sort_direction=direction),
+                    cursor=BindingCursor("2030-01-01", "binding-050"), limit=21,
+                )
+                plan = " ".join(row[3] for row in self.store._connection.execute(
+                    "EXPLAIN QUERY PLAN " + statement, parameters,
+                ))
+                self.assertIn("SEARCH b USING INDEX bindings_global_created", plan)
+                self.assertNotIn("USE TEMP B-TREE", plan)

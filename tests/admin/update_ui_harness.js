@@ -26,8 +26,14 @@ function setTimeout(callback, delay) {
 function clearTimeout(id) { timers.delete(id); }
 const requests = [];
 let answer;
+const diagnostics = {
+  root: "/instance", checkedAt: 1900000000, bound: true, loaded: true, running: true, ready: true, enabled: true,
+  binding: { python: "/env/bin/python", prefix: "/env", codexHome: null },
+};
+let diagnosticsAnswer = async () => response(diagnostics);
 async function fetch(path, options) {
   requests.push({ path, options });
+  if (path === "/api/v1/instance-diagnostics") return diagnosticsAnswer();
   return answer(path, options);
 }
 function response(data, status = 200) {
@@ -59,6 +65,13 @@ const restartOperation = (phase, id = "new-restart") => ({
   assert.equal(elements.get("#service-restart").disabled, false);
   assert.match(elements.get("#update-message").textContent, /netizen update/);
   assert(!elements.has("#update-install"));
+  assert.equal(elements.get("#diagnostics-running").textContent, "运行中");
+  assert.equal(elements.get("#diagnostics-ready").textContent, "已就绪");
+  assert.equal(elements.get("#diagnostics-enabled").textContent, "已启用");
+  assert.match(elements.get("#diagnostics-codex-home").textContent, /未显式指定/);
+  assert.match(elements.get("#diagnostics-checked-at").textContent, /上次成功检查/);
+  assert.equal(updatePollTimer, null, "successful diagnostics never starts background polling");
+  const diagnosticReadsBeforeRestart = requests.filter(r => r.path === "/api/v1/instance-diagnostics").length;
   confirmation = false;
   await restartService();
   assert.equal(requests.filter(({options}) => options.method === "POST").length, 0);
@@ -111,6 +124,8 @@ const restartOperation = (phase, id = "new-restart") => ({
   assert.equal(updatePollTimer, null);
   assert.match(elements.get("#update-detail").textContent, /手动检查/);
   assert.doesNotMatch(elements.get("#update-phase").textContent, /成功|失败/);
+  assert.equal(requests.filter(r => r.path === "/api/v1/instance-diagnostics").length, diagnosticReadsBeforeRestart,
+    "restart polling must not poll diagnostics");
 
   answer = async () => response(freshStatus(restartOperation("succeeded")));
   await loadUpdates();
@@ -138,14 +153,89 @@ const restartOperation = (phase, id = "new-restart") => ({
   await restartService();
   assert.equal(requests.length, count);
 
-  // Historical upgrade/restart records remain readable without offering installation.
-  acceptUpdateStatus(freshStatus(operation("rolled_back")));
-  assert.equal(elements.get("#update-phase").textContent, "升级失败，已回滚");
-  assert.match(elements.get("#update-detail").textContent, /目标版本 1.1.0/);
+  // Hide old upgrade outcomes, but preserve restart results and unresolved fences.
+  for (const phase of ["succeeded", "failed", "rolled_back", "requires_action", "recovered"]) {
+    acceptUpdateStatus(freshStatus(operation(phase)));
+    assert.equal(elements.get("#update-operation").hidden, true);
+    assert.equal(elements.get("#service-restart").disabled, false);
+  }
+  for (const phase of ["accepted", "restarting", "recovery_required", "unknown_phase"]) {
+    const legacy = freshStatus(operation(phase));
+    legacy.restartAvailable = false;
+    legacy.actions.restart = null;
+    acceptUpdateStatus(legacy);
+    assert.equal(elements.get("#update-operation").hidden, false);
+    assert.equal(elements.get("#service-restart").disabled, true);
+    assert.match(elements.get("#update-phase").textContent, /历史维护/);
+    assert.doesNotMatch(elements.get("#update-detail").textContent, /官方安装器/);
+  }
   acceptUpdateStatus(freshStatus({ ...restartOperation("succeeded"), schema: 2,
     target: { version: "1.0.0", releaseDigest: restartTarget.targetId } }));
   assert.equal(elements.get("#update-phase").textContent, "重启成功");
   assert.match(elements.get("#update-detail").textContent, /保持版本 1.0.0/);
+  assert.equal(elements.get("#update-operation").hidden, false);
+
+  // Diagnostics failures clear stale healthy badges without changing restart eligibility.
+  answer = async () => response(freshStatus());
+  const checkedAt = elements.get("#diagnostics-checked-at").textContent;
+  diagnosticsAnswer = async () => response({ message: "private manager detail" }, 503);
+  await loadUpdates();
+  for (const key of ["bound", "loaded", "running", "ready", "enabled"]) {
+    assert.equal(elements.get(`#diagnostics-${key}`).textContent, "无法确认");
+    assert.doesNotMatch(elements.get(`#diagnostics-${key}`).className, /\bon\b/);
+  }
+  assert.equal(elements.get("#diagnostics-checked-at").textContent, checkedAt);
+  assert.match(elements.get("#diagnostics-message").textContent, /本次检查失败/);
+  assert.doesNotMatch(elements.get("#diagnostics-message").textContent, /private/);
+  assert.equal(elements.get("#service-restart").disabled, false);
+  assert.equal(updatePollTimer, null);
+  assert.equal(elements.get("#update-operation").hidden, true);
+
+  // Null autostart is unknown, not disabled; raw paths are text, not HTML.
+  diagnosticsAnswer = async () => response({ ...diagnostics, enabled: null, checkedAt: 1900000100,
+    binding: { ...diagnostics.binding, python: "/env/<img src=x>/python" } });
+  await loadUpdates();
+  assert.equal(elements.get("#diagnostics-enabled").textContent, "无法确认");
+  assert.equal(elements.get("#diagnostics-python").textContent, "/env/<img src=x>/python");
+  assert.notEqual(elements.get("#diagnostics-checked-at").textContent, checkedAt);
+  diagnosticsAnswer = async () => response({ ...diagnostics, bound: false, loaded: false,
+    running: false, ready: false, enabled: null, binding: null });
+  await loadUpdates();
+  assert.equal(elements.get("#diagnostics-bound").textContent, "未注册");
+  assert.equal(elements.get("#diagnostics-running").textContent, "未运行");
+  assert.equal(elements.get("#diagnostics-python").textContent, "未绑定");
+
+  let completeDiagnostics;
+  diagnosticsAnswer = () => new Promise(resolve => { completeDiagnostics = resolve; });
+  const pendingDiagnostics = loadInstanceDiagnostics();
+  const readCount = requests.length;
+  assert.equal(loadInstanceDiagnostics(), pendingDiagnostics);
+  assert.equal(requests.length, readCount, "in-flight diagnostics must be deduplicated");
+  completeDiagnostics(response(diagnostics));
+  await pendingDiagnostics;
+  assert.equal(updatePollTimer, null);
+
+  // A failed maintenance read does not discard an independently successful diagnostic.
+  answer = async () => response({ message: "maintenance unavailable" }, 503);
+  diagnosticsAnswer = async () => response({ ...diagnostics, running: false, ready: false });
+  await assert.rejects(loadUpdates(), /maintenance unavailable/);
+  await Promise.resolve();
+  assert.equal(elements.get("#diagnostics-running").textContent, "未运行");
+
+  // A late diagnostic 401 must not turn the same refresh into a success after
+  // maintenance already returned. Login expiry remains the terminal UI state.
+  answer = async () => response(freshStatus());
+  diagnosticsAnswer = () => new Promise(resolve => { completeDiagnostics = resolve; });
+  const expiredRefresh = refresh("updates");
+  for (let tick = 0; tick < 20 && updateReading; tick += 1) await Promise.resolve();
+  assert.equal(updateReading, false);
+  completeDiagnostics(response({ message: "expired" }, 401));
+  assert.equal(await expiredRefresh, false);
+  assert.match(status, /登录已过期/);
+  assert.equal(state.authExpired, true);
+  assert.equal(elements.get("#auth-expired").hidden, false);
+  // Model a fresh login for the independent restart-poll expiry case below.
+  state.authExpired = false;
 
   acceptUpdateStatus(freshStatus(restartOperation("restarting")));
   answer = async () => response({message: "登录失效"}, 401);

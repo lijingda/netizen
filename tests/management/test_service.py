@@ -72,6 +72,7 @@ from netizen_cli.management import (
     ScopeCoordinator,
     SessionInventoryState,
     SessionQuery,
+    SessionUpdatedCursor,
     SideIdentityMismatch,
     SideTopicInventoryItem,
     classify_native_thread_view,
@@ -274,8 +275,11 @@ class FakeManagementRuntime:
 
     async def thread_catalog_exact(
         self, *, archived: bool, deadline: float, use_state_db_only=None,
+        sort_key=None, sort_direction=None,
     ):
         self.calls.append(("catalog", archived, deadline, use_state_db_only))
+        if sort_key is not None or sort_direction is not None:
+            self.calls.append(("catalog-order", archived, sort_key, sort_direction))
         source = self.archived_metadata if archived else self.active_metadata
         return NativeThreadCatalog(archived, tuple(source.values()))
 
@@ -1001,6 +1005,143 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(metadata_calls), 2)
         self.assertEqual(metadata_calls[0][2], ("native-active",))
 
+    async def test_session_time_ordering_is_global_before_twenty_row_pagination(self) -> None:
+        ids = iter(f"00000000-0000-0000-0000-{index:012d}" for index in range(40))
+        self.store._id_factory = lambda: next(ids)
+        candidates = []
+        for index in range(40):
+            binding = await self._create(self.scope if index < 30 else self.other_scope)
+            native_id = f"ordered-{index}"
+            self.store.assign_native_thread_id(binding.id, native_id)
+            # Creation order and native update order deliberately disagree,
+            # with equal update timestamps crossing a page boundary.
+            created = f"2030-01-01T00:00:{index:02d}.000000+00:00"
+            self.store._connection.execute("UPDATE bindings SET created_at=? WHERE binding_id=?", (created, binding.id))
+            updated = 1_700_000_000 + (index * 17 % 11)
+            source = self.runtime.active_metadata if index % 2 else self.runtime.archived_metadata
+            source[native_id] = NativeThreadMetadata(native_id, f"Title {index}", "", updated_at=updated)
+            if index < 30:
+                candidates.append((binding.id, created, updated))
+
+        for sort_by in ("created_at", "updated_at"):
+            for direction in ("asc", "desc"):
+                with self.subTest(sort_by=sort_by, direction=direction):
+                    self.runtime.calls.clear()
+                    query = SessionQuery(
+                        local=BindingQuery(chat_id=self.scope.chat_id),
+                        sort_by=sort_by, sort_direction=direction,
+                    )
+                    first = await self.service.query_sessions(query=query, limit=20, deadline=asyncio.get_running_loop().time() + 2)
+                    second = await self.service.query_sessions(query=query, cursor=first.next_cursor, limit=20, deadline=asyncio.get_running_loop().time() + 2)
+                    expected = sorted(candidates, key=lambda row: (row[1 if sort_by == "created_at" else 2], row[0]), reverse=direction == "desc")
+                    self.assertEqual([item.record.binding.id for item in first.items], [row[0] for row in expected[:20]])
+                    self.assertEqual([item.record.binding.id for item in second.items], [row[0] for row in expected[20:]])
+                    self.assertEqual(len(first.items), 20)
+                    self.assertEqual(len(second.items), 10)
+                    self.assertIsNone(second.next_cursor)
+                    self.assertFalse(any(call[0] == "summary" for call in self.runtime.calls))
+                    if sort_by == "updated_at":
+                        self.assertIsInstance(first.next_cursor, SessionUpdatedCursor)
+                        self.assertEqual(
+                            [call[1:] for call in self.runtime.calls if call[0] == "catalog-order"],
+                            [(False, "created_at", "desc"), (True, "created_at", "desc")] * 2,
+                        )
+
+    async def test_updated_order_filters_native_states_before_paging_and_places_unknown_times_last(self) -> None:
+        known = await self._create()
+        archived = await self._create()
+        unindexed = await self._create()
+        conflict = await self._create()
+        lazy = await self._create()
+        for binding, native in ((known, "known"), (archived, "archived"), (unindexed, "unindexed"), (conflict, "conflict")):
+            self.store.assign_native_thread_id(binding.id, native)
+        self.runtime.active_metadata = {
+            "known": NativeThreadMetadata("known", "Known", "", updated_at=10),
+            "conflict": NativeThreadMetadata("conflict", "Conflict", "", updated_at=1000),
+        }
+        self.runtime.archived_metadata = {
+            "archived": NativeThreadMetadata("archived", "Archived", "", updated_at=2000),
+            "conflict": NativeThreadMetadata("conflict", "Conflict", "", updated_at=3000),
+        }
+        self.runtime.summary_metadata["unindexed"] = NativeThreadMetadata("unindexed", "Recovered", "", updated_at=9999)
+        query = SessionQuery(
+            inventory_states=(SessionInventoryState.ACTIVE, SessionInventoryState.LAZY, SessionInventoryState.UNKNOWN),
+            sort_by="updated_at",
+        )
+        for direction in ("asc", "desc"):
+            with self.subTest(direction=direction):
+                self.runtime.calls.clear()
+                cursor = None
+                items = []
+                for _ in range(5):
+                    page = await self.service.query_sessions(query=replace(query, sort_direction=direction), cursor=cursor, limit=1, deadline=asyncio.get_running_loop().time() + 2)
+                    items.extend(page.items)
+                    if cursor is None:
+                        self.assertEqual(page.items[0].record.binding.id, known.id)
+                        self.assertFalse(any(call[0] == "summary" for call in self.runtime.calls))
+                    cursor = page.next_cursor
+                    if cursor is None:
+                        break
+                unknown_ids = sorted((unindexed.id, conflict.id, lazy.id), reverse=direction == "desc")
+                self.assertEqual([item.record.binding.id for item in items], [known.id, *unknown_ids])
+                recovered = next(item for item in items if item.record.binding.id == unindexed.id)
+                self.assertEqual(recovered.native.metadata.name, "Recovered")
+                self.assertIsNone(recovered.native.metadata.updated_at)
+                self.assertIs(recovered.inventory_state, SessionInventoryState.UNKNOWN)
+
+    async def test_updated_order_skips_catalog_for_empty_or_lazy_candidates(self) -> None:
+        await self._create()
+        for local, states, size in (
+            (BindingQuery(chat_id="no-match"), None, 0),
+            (BindingQuery(), (SessionInventoryState.LAZY,), 1),
+        ):
+            self.runtime.calls.clear()
+            page = await self.service.query_sessions(
+                query=SessionQuery(local=local, inventory_states=states, sort_by="updated_at"),
+                deadline=asyncio.get_running_loop().time() + 1,
+            )
+            self.assertEqual(len(page.items), size)
+            self.assertTrue(page.catalog_available)
+            self.assertFalse(any(call[0] in {"catalog", "metadata", "summary"} for call in self.runtime.calls))
+
+    async def test_updated_order_catalog_failure_keeps_unconfirmed_rows_and_page_only_summary(self) -> None:
+        for index in range(3):
+            binding = await self._create()
+            self.store.assign_native_thread_id(binding.id, f"failed-index-{index}")
+        query = SessionQuery(sort_by="updated_at")
+        with patch.object(self.runtime, "thread_catalog_exact", side_effect=TimeoutError("unavailable")):
+            first = await self.service.query_sessions(query=query, limit=2, deadline=asyncio.get_running_loop().time() + 1)
+            self.assertFalse(first.catalog_available)
+            self.assertEqual(len(first.items), 2)
+            self.assertEqual(len([call for call in self.runtime.calls if call[0] == "summary"]), 2)
+            second = await self.service.query_sessions(query=query, cursor=first.next_cursor, limit=2, deadline=asyncio.get_running_loop().time() + 1)
+            self.assertEqual(len(second.items), 1)
+            self.assertTrue(all(item.inventory_state is SessionInventoryState.UNKNOWN for item in (*first.items, *second.items)))
+            self.assertIsNone(second.next_cursor)
+            active_only = await self.service.query_sessions(query=replace(query, inventory_states=(SessionInventoryState.ACTIVE,)), deadline=asyncio.get_running_loop().time() + 1)
+            self.assertEqual(active_only.items, ())
+
+    async def test_updated_order_reads_catalogs_concurrently_and_never_returns_partial_catalog(self) -> None:
+        binding = await self._create()
+        self.store.assign_native_thread_id(binding.id, "known")
+        both_entered = asyncio.Event()
+        calls = []
+
+        async def catalog(*, archived, **kwargs):
+            calls.append(archived)
+            if len(calls) == 2:
+                both_entered.set()
+            await both_entered.wait()
+            if archived:
+                raise RuntimeError("archive index failed")
+            return NativeThreadCatalog(False, (NativeThreadMetadata("known", "Known", "", updated_at=10),))
+
+        with patch.object(self.runtime, "thread_catalog_exact", side_effect=catalog):
+            page = await asyncio.wait_for(self.service.query_sessions(query=SessionQuery(sort_by="updated_at"), deadline=asyncio.get_running_loop().time() + 2), 3)
+        self.assertEqual(set(calls), {False, True})
+        self.assertFalse(page.catalog_available)
+        self.assertIs(page.items[0].inventory_state, SessionInventoryState.UNKNOWN)
+
     async def test_session_pages_resolve_only_page_cache_misses(self) -> None:
         for index in range(3):
             await self._create(
@@ -1345,6 +1486,58 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([item.record.binding.id for item in second_page.items], [first.id])
         self.assertIsNone(second_page.next_cursor)
+
+    async def test_created_order_requires_matching_lookahead_for_next_page(self) -> None:
+        ids = iter(f"00000000-0000-0000-0000-{index:012d}" for index in range(80))
+        self.store._id_factory = lambda: next(ids)
+        bindings = []
+        for index in range(80):
+            binding = self.store.create_channel_binding(
+                scope=self.scope, project_alias="test", creator_id="ou_user",
+            )
+            native_id = f"lookahead-{index}"
+            self.store.assign_native_thread_id(binding.id, native_id)
+            bindings.append((binding, native_id))
+        self.store._connection.execute(
+            "UPDATE bindings SET created_at = ?", ("2030-01-01T00:00:00.000000+00:00",),
+        )
+
+        for direction in ("asc", "desc"):
+            ordered = sorted(bindings, key=lambda item: item[0].id, reverse=direction == "desc")
+            for has_next in (False, True):
+                with self.subTest(direction=direction, has_next=has_next):
+                    # The possible next match is beyond a full 50-row SQL batch,
+                    # followed by more excluded rows. Equal times exercise ID ties.
+                    matches = {native_id for _, native_id in ordered[:20]}
+                    if has_next:
+                        matches.add(ordered[70][1])
+                    self.runtime.active_metadata.clear()
+                    self.runtime.archived_metadata.clear()
+                    for _, native_id in bindings:
+                        catalog = self.runtime.active_metadata if native_id in matches else self.runtime.archived_metadata
+                        catalog[native_id] = NativeThreadMetadata(native_id, "Title", "")
+                    query = SessionQuery(
+                        inventory_states=(SessionInventoryState.ACTIVE,),
+                        sort_by="created_at", sort_direction=direction,
+                    )
+                    first = await self.service.query_sessions(
+                        query=query, limit=20, deadline=asyncio.get_running_loop().time() + 2,
+                    )
+                    self.assertEqual(
+                        [item.record.binding.id for item in first.items],
+                        [binding.id for binding, _ in ordered[:20]],
+                    )
+                    if not has_next:
+                        self.assertIsNone(first.next_cursor)
+                        continue
+                    self.assertIsNotNone(first.next_cursor)
+                    self.assertEqual(first.next_cursor.binding_id, ordered[19][0].id)
+                    second = await self.service.query_sessions(
+                        query=query, cursor=first.next_cursor, limit=20,
+                        deadline=asyncio.get_running_loop().time() + 2,
+                    )
+                    self.assertEqual([item.record.binding.id for item in second.items], [ordered[70][0].id])
+                    self.assertIsNone(second.next_cursor)
 
     async def test_project_options_include_disabled_and_paginate_without_native_reads(self) -> None:
         project = self.projects.register(alias="disabled", path=None, create_directory=True)

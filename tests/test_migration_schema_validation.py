@@ -5,7 +5,9 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
+from netizen_cli.bindings import BindingStore, _COMPATIBLE_INDEXES
 from netizen_cli.database_migrations import plan_channel_database
 from netizen_cli.migrations.schema import require_schema
 
@@ -31,6 +33,51 @@ class MigrationSchemaValidationTest(unittest.TestCase):
         before = self.database.read_bytes()
         self.assertEqual(plan_channel_database(self.database)["source_version"], 14)
         self.assertEqual(self.database.read_bytes(), before)
+
+    def test_compatible_updated_indexes_preserve_v14_data_and_match_new_store(self) -> None:
+        self.create_v14()
+
+        def saved_data(connection):
+            return tuple(line for line in connection.iterdump() if line.startswith("INSERT INTO"))
+
+        def index_shapes(connection):
+            return {
+                name: tuple((row[2], row[3]) for row in connection.execute(f"PRAGMA index_xinfo({name})") if row[5])
+                for name in ("side_topics_global_updated", "side_topics_state_updated")
+            }
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            before = saved_data(connection)
+            self.assertEqual(index_shapes(connection), {
+                "side_topics_global_updated": (), "side_topics_state_updated": (),
+            })
+        for _ in range(2):
+            with closing(BindingStore(self.database)) as store, closing(BindingStore()) as fresh:
+                self.assertEqual(saved_data(store._connection), before)
+                self.assertEqual(index_shapes(store._connection), index_shapes(fresh._connection))
+                self.assertEqual(index_shapes(store._connection), {
+                    "side_topics_global_updated": (("updated_at", 1), ("side_id", 1)),
+                    "side_topics_state_updated": (("state", 0), ("updated_at", 1), ("side_id", 1)),
+                })
+            self.assertEqual(plan_channel_database(self.database), {
+                "source_version": 14, "target_version": 14, "steps": [],
+            })
+
+    def test_failed_compatible_index_creation_rolls_back_without_changing_data(self) -> None:
+        self.create_v14()
+        with closing(sqlite3.connect(self.database)) as connection:
+            before = tuple(line for line in connection.iterdump() if line.startswith("INSERT INTO"))
+        with patch("netizen_cli.bindings._COMPATIBLE_INDEXES", (*_COMPATIBLE_INDEXES, "INVALID SQL")):
+            with self.assertRaises(sqlite3.OperationalError):
+                BindingStore(self.database)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                tuple(line for line in connection.iterdump() if line.startswith("INSERT INTO")), before,
+            )
+            self.assertEqual(connection.execute(
+                "SELECT name FROM sqlite_master WHERE name IN ('side_topics_global_updated', 'side_topics_state_updated')",
+            ).fetchall(), [])
+        self.assertEqual(plan_channel_database(self.database)["steps"], [])
 
     def test_null_defaults_order_identity_is_rejected_without_writes(self) -> None:
         self.create_v14()

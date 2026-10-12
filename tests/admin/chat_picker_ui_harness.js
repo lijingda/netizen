@@ -11,7 +11,7 @@ async function settle() { await Promise.resolve(); await Promise.resolve(); }
 // SHIPPED_CHAT_PICKER
 
 let nextPicker = 0;
-function setup() {
+function setup(options = {}) {
   const root = document.createElement("div");
   document.body.append(root);
   const requests = [];
@@ -22,9 +22,12 @@ function setup() {
       return new Promise((resolve, reject) => requests.push({ args, resolve, reject }));
     },
     onChange: (item) => changes.push(item),
+    ...options,
   });
   const input = root.querySelector("input");
-  return { root, picker, requests, changes, input,
+  const trigger = root.querySelector(".chat-picker-trigger");
+  return { root, picker, requests, changes, input, trigger,
+    summary: root.querySelector(".chat-picker-summary"),
     rows: () => root.querySelector(".chat-picker-options").children,
     type(value) { input.value = value; input.dispatch("input"); },
   };
@@ -89,38 +92,45 @@ async function paginationRetryAndPlainText() {
 async function selectionKeyboardAndEmptyStates() {
   const f = setup();
   f.picker.setSelection({ chatId: "oc_existing", name: "Existing" });
-  assert.equal(f.input.value, "Existing");
+  assert.equal(f.summary.textContent, "Existing");
+  assert.equal(f.trigger.getAttribute("aria-label"), "选择群聊：Existing");
   assert.equal(f.requests.length, 0);
   assert.equal(f.changes.length, 0, "programmatic changes must not notify");
   const copy = f.picker.getSelection();
   copy.chatId = "changed";
   assert.equal(f.picker.getSelection().chatId, "oc_existing");
+  f.trigger.dispatch("keydown", { key: "ArrowDown" });
+  assert.equal(document.activeElement, f.input);
   f.type("replacement");
-  assert.equal(f.picker.getSelection(), null, "editing visible text must clear the previous selected ID immediately");
-  assert.deepEqual(f.changes, [null]);
+  assert.equal(f.picker.getSelection().chatId, "oc_existing", "searching must preserve the selected target");
+  assert.deepEqual(f.changes, []);
   flushDebounce();
-  f.requests[0].resolve({ items: [{ chatId: "oc_a", name: "A" }, { chatId: "oc_b", name: "B" }] });
+  f.requests[1].resolve({ items: [{ chatId: "oc_a", name: "A" }, { chatId: "oc_b", name: "B" }] });
   await settle();
   assert.equal(f.input.getAttribute("aria-expanded"), "true");
   assert.equal(f.input.dispatch("keydown", { key: "ArrowDown" }).prevented, true);
-  assert.equal(f.input.getAttribute("aria-activedescendant"), `${f.input.id}-option-0`);
+  assert.equal(f.input.getAttribute("aria-activedescendant"), `${f.trigger.id}-option-0`);
   f.input.dispatch("keydown", { key: "ArrowUp" });
-  assert.equal(f.input.getAttribute("aria-activedescendant"), `${f.input.id}-option-1`);
+  assert.equal(f.input.getAttribute("aria-activedescendant"), `${f.trigger.id}-option-1`);
   assert.equal(f.input.dispatch("keydown", { key: "Enter" }).prevented, true);
   assert.deepEqual(f.picker.getSelection(), { chatId: "oc_b", name: "B", avatarUrl: null });
   assert.equal(f.input.getAttribute("aria-expanded"), "false");
   assert.equal(f.input.getAttribute("aria-activedescendant"), null);
-  assert.deepEqual(f.changes[1], { chatId: "oc_b", name: "B", avatarUrl: null });
+  assert.equal(document.activeElement, f.trigger, "selection returns focus to the visible control");
+  assert.deepEqual(f.changes[0], { chatId: "oc_b", name: "B", avatarUrl: null });
   f.root.querySelector(".chat-picker-clear").click();
   assert.equal(f.input.value, "");
   assert.equal(f.picker.getSelection(), null);
-  assert.deepEqual(f.changes[2], null);
-  f.requests[1].resolve({ items: [], nextCursor: null });
+  assert.deepEqual(f.changes[1], null);
+  assert.equal(f.summary.textContent, "请选择群聊");
+  assert.equal(f.trigger.getAttribute("aria-expanded"), "false", "clearing must not reopen the popup");
+  f.picker.focus();
+  f.requests[2].resolve({ items: [], nextCursor: null });
   await settle();
   assert.match(f.root.textContent, /暂无可选择的群聊/);
   f.type("not-found");
   flushDebounce();
-  f.requests[2].resolve({ items: [], nextCursor: null });
+  f.requests[3].resolve({ items: [], nextCursor: null });
   await settle();
   assert.match(f.root.textContent, /未找到匹配群聊/);
   let stopped = false;
@@ -145,8 +155,12 @@ async function retryAndEscapeFromPaging() {
   await settle();
   const more = f.root.querySelector(".chat-picker-more");
   more.focus();
+  f.picker.focus();
+  assert.equal(document.activeElement, f.input, "focus() returns to search in an already open popup");
+  assert.equal(f.requests.length, 2, "refocusing must not query again");
+  more.focus();
   more.dispatch("keydown", { key: "Escape" });
-  assert.equal(document.activeElement, f.input);
+  assert.equal(document.activeElement, f.trigger);
   assert.equal(f.input.getAttribute("aria-expanded"), "false");
   assert.equal(f.requests.length, 2, "restoring focus on Escape must not reopen or query");
 }
@@ -195,24 +209,27 @@ async function lifecycleAndComposition() {
   f.picker.setSelection({ chatId: "oc_unavailable" });
   f.requests[0].reject(new Error("late failure"));
   await settle();
-  assert.equal(f.input.value, "oc_unavailable", "unresolved saved IDs must remain visible");
+  assert.equal(f.summary.textContent, "oc_unavailable", "unresolved saved IDs must remain visible");
   assert.equal(f.input.getAttribute("aria-expanded"), "false");
   assert.doesNotMatch(f.root.textContent, /late failure/);
   f.picker.setDisabled(true);
   f.picker.focus();
-  f.input.dispatch("click");
+  f.trigger.click();
   assert.equal(f.input.disabled, true);
+  assert.equal(f.trigger.disabled, true);
+  assert.match(f.trigger.title, /oc_unavailable/, "locked selections retain their full identity");
   assert.equal(f.requests.length, 1);
   f.picker.setDisabled(false);
+  f.picker.focus();
   f.input.dispatch("compositionstart");
   f.type("研");
   flushDebounce();
-  assert.equal(f.requests.length, 1, "IME composition must not trigger intermediate searches");
+  assert.equal(f.requests.length, 2, "IME composition must not trigger intermediate searches");
   f.input.value = "研发";
   f.input.dispatch("compositionend");
   flushDebounce();
-  assert.deepEqual(f.requests[1].args, { query: "研发", cursor: null });
-  f.requests[1].resolve({ items: [{ chatId: "oc_dev", name: "研发群" }] });
+  assert.deepEqual(f.requests[2].args, { query: "研发", cursor: null });
+  f.requests[2].resolve({ items: [{ chatId: "oc_dev", name: "研发群" }] });
   await settle();
   f.rows()[0].click();
   assert.deepEqual(f.picker.getSelection(), { chatId: "oc_dev", name: "研发群", avatarUrl: null });
@@ -220,10 +237,10 @@ async function lifecycleAndComposition() {
   f.picker.reset();
   assert.equal(f.changes.length, changeCount);
   assert.equal(f.picker.getSelection(), null);
-  assert.equal(f.requests.length, 2, "reset must not query");
+  assert.equal(f.requests.length, 3, "reset must not query");
   f.picker.focus();
   f.input.dispatch("focusout", { relatedTarget: document.body });
-  f.requests[2].resolve({ items: [{ chatId: "oc_late", name: "late" }] });
+  f.requests[3].resolve({ items: [{ chatId: "oc_late", name: "late" }] });
   await settle();
   assert.equal(f.input.getAttribute("aria-expanded"), "false");
   assert.equal(f.rows().length, 0);
@@ -261,7 +278,7 @@ async function avatarsAndDisplayOnlyRefresh() {
   const selectedId = f.root.querySelector(".chat-picker-selected-id");
   assert.equal(selected.hidden, false);
   assert.equal(selected.querySelector("img").src, avatarUrl);
-  assert.equal(selectedId.textContent, "oc_avatar");
+  assert.equal(selectedId.textContent, "<b>同名群</b>\noc_avatar");
   assert.equal(f.picker.getSelection().avatarUrl, avatarUrl);
   assert.equal(f.changes[0].avatarUrl, avatarUrl);
   selected.querySelector("img").dispatch("load");
@@ -275,10 +292,11 @@ async function avatarsAndDisplayOnlyRefresh() {
   f.picker.updateSelectionAvatar("oc_avatar", freshAvatarUrl);
   assert.equal(selected.querySelector("img").src, freshAvatarUrl);
   assert.equal(f.changes.length, 1, "avatar refresh must not emit target changes");
-  assert.equal(f.input.value, "<b>同名群</b>");
+  assert.equal(f.summary.textContent, "<b>同名群</b>");
+  f.picker.focus();
   f.type("new search");
-  assert.equal(selected.hidden, true);
-  assert.equal(selectedId.hidden, true);
+  assert.equal(selected.hidden, false);
+  assert.equal(selectedId.hidden, false);
   f.picker.close();
   f.picker.setSelection({ chatId: "oc_missing", name: "群聊", avatarUrl: {} });
   assert.equal(selected.querySelector("img"), null);
@@ -286,6 +304,44 @@ async function avatarsAndDisplayOnlyRefresh() {
   assert.equal(selected.hidden, false);
   f.picker.reset();
   assert.equal(selected.hidden, true);
+}
+
+async function cancellationAndOptionalEmptyChoice() {
+  const f = setup({ placeholder: "全部", emptyOption: "全部" });
+  assert.equal(f.summary.textContent, "全部");
+  assert.equal(f.trigger.getAttribute("aria-label"), "选择群聊：全部");
+  f.trigger.focus();
+  assert.equal(f.requests.length, 0, "tabbing through closed filters must not query");
+  f.picker.setSelection({ chatId: "oc_kept", name: "Keep this group" });
+  for (const dismiss of [
+    () => f.input.dispatch("keydown", { key: "Escape" }),
+    () => f.trigger.click(),
+    () => document.body.dispatch("pointerdown"),
+    () => document.body.focus(),
+  ]) {
+    f.trigger.click();
+    f.type("abandoned search");
+    flushDebounce();
+    dismiss();
+    assert.equal(f.trigger.getAttribute("aria-expanded"), "false");
+    assert.equal(f.picker.getSelection().chatId, "oc_kept");
+    assert.equal(f.summary.textContent, "Keep this group");
+    assert.deepEqual(f.changes, []);
+    f.requests.at(-1).resolve({ items: [{ chatId: "oc_late", name: "Late result" }] });
+    await settle();
+    assert.equal(f.rows().length, 1, "late results cannot repopulate a closed picker");
+  }
+  f.trigger.click();
+  assert.equal(f.input.value, "", "each opening starts a fresh candidate search");
+  assert.deepEqual(f.requests.at(-1).args, { query: "", cursor: null });
+  f.requests.at(-1).reject(new Error("unavailable"));
+  await settle();
+  f.input.dispatch("keydown", { key: "ArrowDown" });
+  f.input.dispatch("keydown", { key: "Enter" });
+  assert.equal(f.picker.getSelection(), null, "全部 remains usable even if the directory fails");
+  assert.deepEqual(f.changes, [null]);
+  assert.equal(f.summary.textContent, "全部");
+  assert.equal(document.activeElement, f.trigger);
 }
 
 (async () => {
@@ -296,4 +352,5 @@ async function avatarsAndDisplayOnlyRefresh() {
   await focusedPagingButtonsSurviveBusyRendering();
   await lifecycleAndComposition();
   await avatarsAndDisplayOnlyRefresh();
+  await cancellationAndOptionalEmptyChoice();
 })().catch((error) => { console.error(error); process.exitCode = 1; });

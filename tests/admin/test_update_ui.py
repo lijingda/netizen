@@ -24,6 +24,7 @@ class UpdateUiTest(unittest.TestCase):
         source = (root / "netizen_cli/admin/static/admin.js").read_text(encoding="utf-8")
         # Exercise the shipped controller with deterministic HTTP and timers.
         core = source[source.index("async function api("):source.index("async function mutate(")]
+        refresh = source[source.index("async function refresh("):source.index("function renderSessionTabs(")]
         harness = Path(__file__).with_name("update_ui_harness.js").read_text(encoding="utf-8")
         before, after = harness.split("// SHIPPED_UPDATE_CONTROLLER\n")
         # Use the HTTP serializer's real target shape for browser reconciliation.
@@ -40,7 +41,7 @@ class UpdateUiTest(unittest.TestCase):
             + json.dumps(sorted(CODES - {"none"})) + ");\n"
         )
         result = subprocess.run(
-            [node, "-e", before + core + contract + after],
+            [node, "-e", before + core + refresh + contract + after],
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
