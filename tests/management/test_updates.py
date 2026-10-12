@@ -22,7 +22,7 @@ class MaintenanceTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name)
+        self.home = Path(self.temp.name).resolve()
         self.root = self.home / ".netizen"
         (self.root / "state").mkdir(parents=True, mode=0o700)
         self.current = InstalledPackage("1.2.3", self.home / "env/bin/python",
