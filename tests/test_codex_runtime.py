@@ -6823,11 +6823,16 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             creator_id="ou_user",
             turn_settings=settings,
         )
+        self.assertIsNone(binding.native_thread_id)
+        self.assertEqual(self.codex.start_kwargs, [])
 
         submission = await self.submit(binding, "configured first prompt")
 
         self.assertEqual(self.codex.model_calls, 1)
-        self.assertEqual(self.codex.start_kwargs, [{"cwd": str(self.cwd)}])
+        self.assertEqual(
+            self.codex.start_kwargs,
+            [{"cwd": str(self.cwd), "model": "wire-model"}],
+        )
         self.assertEqual(
             self.codex.turn_calls,
             [

@@ -200,8 +200,9 @@ Mode 的 lazy Binding，不要求任务、不创建 native Thread；完整表单
 
 1. 若有 Binding 配置，在进入 native mutation 前重新调用 live `codex.models()`，按所选
    Model 验证 Effort/Tier 并解析 wire value；
-2. lazy Binding 调用 `thread_start(cwd=canonical_project_cwd)` 并 write-once 保存
-   Thread ID；已有 native ID 则只 `thread_resume(exact_id)`；
+2. lazy Binding 调用 `thread_start(cwd=canonical_project_cwd)`；若有 Binding 配置，
+   同时传入本次 live resolve 的 `model`，使原生 Thread 按首轮所选模型初始化。随后
+   write-once 保存 Thread ID；已有 native ID 则只 `thread_resume(exact_id)`；
 3. `thread.turn(prompt, **override)`，没有 Binding 配置时 kwargs 为空；
 4. native handle 返回并完成 ID 校验后保存内存 active Thread/Handle，随后后台轮询公开
    `thread.read()` 的原生状态；Binding 配置不清除，供后续新 Turn 重复使用。

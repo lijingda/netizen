@@ -3216,7 +3216,12 @@ class CodexRuntime:
                     # The public API has no "inherit Ask/Custom" sentinel;
                     # omitting approval_mode deliberately selects its
                     # auto_review default.
-                    thread = await self._codex.thread_start(cwd=str(cwd))
+                    start_kwargs: dict[str, object] = {"cwd": str(cwd)}
+                    if resolved_settings is not None:
+                        # Initialize native model metadata with the first Turn's
+                        # selected model, including its context window budget.
+                        start_kwargs["model"] = resolved_settings.model
+                    thread = await self._codex.thread_start(**start_kwargs)
                 else:
                     # Do not override cwd, sandbox, model, approval, config, or
                     # env while resuming an existing native Thread.
