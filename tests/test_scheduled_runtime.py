@@ -161,7 +161,7 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
         initial = await self.start(run_id, binding)
         initial.release_receipt_attempt()
         native_settings = {"model": "wire-model", "effort": effort, "service_tier": "priority-v2"}
-        self.assertEqual(self.codex.start_kwargs, [{"cwd": str(self.cwd)}])
+        self.assertEqual(self.codex.start_kwargs, [{"cwd": str(self.cwd), "model": "wire-model"}])
         self.assertEqual(self.codex.turn_calls[-1][2], native_settings)
         self.assertEqual(initial.task_feedback, feedback)
         # The running Turn owns its feedback snapshot, even if the persistent
