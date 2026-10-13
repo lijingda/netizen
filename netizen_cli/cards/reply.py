@@ -1059,7 +1059,6 @@ def _turn_progress_panel(
         },
         "elements": _turn_activity_elements(
             snapshot,
-            status_label=status_label,
             hidden_steps=hidden_steps,
             goal=goal,
         ),
@@ -1087,11 +1086,10 @@ def _progress_status_label(
 def _turn_activity_elements(
     snapshot: _TurnActivitySnapshotLike,
     *,
-    status_label: str,
     hidden_steps: int = 0,
     goal: bool = False,
 ) -> list[dict[str, Any]]:
-    elements = [_plain(f"状态：{status_label}")]
+    elements: list[dict[str, Any]] = []
     if snapshot.steer_count:
         elements.append(_plain(f"已接收调整：{snapshot.steer_count} 次"))
     commentary = tuple(getattr(snapshot, "commentary", ()))[

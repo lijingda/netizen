@@ -1387,7 +1387,8 @@ class CardRendererTest(unittest.TestCase):
             for item in _elements(panel, "div")
             if item.get("text", {}).get("tag") == "plain_text"
         )
-        self.assertIn("状态：正在执行", visible)
+        self.assertEqual(panel["header"]["title"]["content"], "执行过程 · 正在执行")
+        self.assertNotIn("状态：", visible)
         self.assertIn("已接收调整：2 次", visible)
         self.assertIn("✓ 检查当前实现", visible)
         self.assertIn("→ 步骤 1", visible)
@@ -2123,6 +2124,7 @@ class CardRendererTest(unittest.TestCase):
         panel = _elements(outbound.card, "collapsible_panel")[0]
         self.assertFalse(panel["expanded"])
         self.assertIn("已完成", panel["header"]["title"]["content"])
+        self.assertNotIn("状态：", json.dumps(panel, ensure_ascii=False))
         visible = "\n".join(
             item["content"] for item in _elements(outbound.card, "markdown")
         )
@@ -2177,6 +2179,11 @@ class CardRendererTest(unittest.TestCase):
         self.assertFalse(
             _elements(interrupted.card, "collapsible_panel")[0]["expanded"]
         )
+        for outbound in (running, unavailable, interrupted):
+            with self.subTest(card=outbound.card["header"]):
+                panel = _elements(outbound.card, "collapsible_panel")[0]
+                self.assertNotIn("状态：", json.dumps(panel, ensure_ascii=False))
+                self.assertIn("过程信息：暂不可用", json.dumps(panel, ensure_ascii=False))
 
         with self.assertRaises(ValueError):
             turn_progress_card(snapshot=snapshot, final_response="尚未结束")
