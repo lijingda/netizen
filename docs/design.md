@@ -1268,7 +1268,8 @@ nonce 沿用 transport-only 解析。交接后的错误直接复用普通消息�
 每次变化都重绘完整 Projection，模块不能各自持有或更新飞书消息。Goal、Activity 或 Files
 任一存在时使用卡片；没有运行卡的 Partial Answer 与 Result 各按上述规则走富文本/静态文本。
 初始没有片段不渲染 Partial Answer，出现后运行中及终态都不折叠。Activity 运行时顶部
-`collapsible_panel` 展开并显示状态、进展、通用操作与 checklist；进展和操作行使用同一
+`collapsible_panel` 展开，状态统一显示在“执行过程 · 状态”标题中，正文显示进展、通用操作
+与 checklist；进展和操作行使用同一
 毫秒时间戳的 Card 2.0 Markdown `date_num` 与 `time` 两个 `local_datetime` 标签，由查看者
 客户端按本地语言与时区呈现日期和分钟；进展正文直接跟在时间分隔符 `·` 后，不增加 `•`。
 终态折叠。Goal 从 start 到 pause/resume/terminal 复用同一张卡并更新其控制按钮。
