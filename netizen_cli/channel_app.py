@@ -118,6 +118,7 @@ from .cards.questions import (
     render_question_submission_card,
 )
 from .cards.defaults import defaults_card, decode_defaults_action, is_defaults_card_action
+from .cards.status import session_status_card, side_status_card
 from .cards.fork import (
     ForkCardAction, ForkCardCapacityError, ForkFormValidationError, ForkSource, decode_fork_action, is_fork_card_action,
     fork_form_card, fork_status_card,
@@ -327,6 +328,11 @@ _CARD_CHAT_QUERY_MAX_PAGES = 20
 _SESSION_TITLE_MAX_CHARS = 48
 _STATUS_THREAD_NAME_MAX_CHARS = 120
 _STATUS_THREAD_PREVIEW_MAX_CHARS = 240
+_THREAD_PREVIEW_TRAILER = re.compile(
+    r'<feishu_current_message_context>\s*\{\s*"kind"\s*:\s*"feishu_current_message"'
+    r'|<feishu_card_answer_context>\s*\{\s*"kind"\s*:\s*"feishu_question_answer"'
+    r'|<scheduled_plan>\s*\{\s*"kind"\s*:\s*"scheduled_plan"'
+)
 _STATUS_PLAN_MAX_STEPS = 12
 _SIDE_ROOT_UUID_PREFIX = "side-root-"
 _SIDE_SEED_UUID_PREFIX = "side-seed-"
@@ -370,6 +376,15 @@ def _markdown_code(value: str) -> str:
     return value.replace("`", "ˋ")
 
 
+def _normalized_thread_preview(value: str | None, *, max_chars: int) -> str | None:
+    # Native previews can end midway through the appended provenance JSON.
+    # Strip only recognized tag + kind pairs in this display projection; names
+    # and native history remain untouched, as do literal tag mentions.
+    if value is not None and (trailer := _THREAD_PREVIEW_TRAILER.search(value)):
+        value = value[:trailer.start()]
+    return _normalized_thread_text(value, max_chars=max_chars)
+
+
 def _session_title(
     binding: ThreadBinding,
     metadata: NativeThreadMetadata | None,
@@ -383,7 +398,7 @@ def _session_title(
             metadata.name,
             max_chars=_SESSION_TITLE_MAX_CHARS,
         )
-        or _normalized_thread_text(
+        or _normalized_thread_preview(
             metadata.preview,
             max_chars=_SESSION_TITLE_MAX_CHARS,
         )
@@ -409,7 +424,7 @@ def _thread_metadata_status_lines(
         metadata.name,
         max_chars=_STATUS_THREAD_NAME_MAX_CHARS,
     )
-    preview = _normalized_thread_text(
+    preview = _normalized_thread_preview(
         metadata.preview,
         max_chars=_STATUS_THREAD_PREVIEW_MAX_CHARS,
     )
@@ -3396,16 +3411,12 @@ class ChannelApplication:
             git_branch_lines = await _git_branch_status_lines(snapshot.cwd)
             await self._reply(
                 message,
-                "\n".join(
-                    (
-                        "当前 Side",
-                        f"Side：{record.short_id}",
-                        f"Parent 会话：{record.parent_binding_id[:8]}",
-                        *git_branch_lines,
-                        f"状态：{snapshot.state.value}",
-                        f"当前 Turn：{turn_state}",
-                        "空闲 2 小时后自动结束；运行中的 Turn 不计入空闲时间。",
-                    )
+                side_status_card(
+                    short_id=record.short_id,
+                    parent_short_id=record.parent_binding_id[:8],
+                    state=snapshot.state.value,
+                    turn_state=turn_state,
+                    git_branch_lines=git_branch_lines,
                 ),
             )
             return
@@ -5021,21 +5032,18 @@ class ChannelApplication:
             )
             await self._reply(
                 message,
-                "\n".join(
-                    (
-                        "当前会话",
-                        f"会话：{binding.short_id}",
-                        *thread_metadata_lines,
-                        f"Project：{binding.project_alias}",
-                        *git_branch_lines,
-                        f"Native Thread：{native}",
-                        f"状态：{state}",
-                        subscription_line,
-                        *progress_lines,
-                        context_window_line,
-                        *context_mode_lines,
-                        *model_lines,
-                    )
+                session_status_card(
+                    short_id=binding.short_id,
+                    project_alias=binding.project_alias,
+                    native_thread_id=native,
+                    state=state,
+                    metadata_lines=thread_metadata_lines,
+                    git_branch_lines=git_branch_lines,
+                    context_window_line=context_window_line,
+                    context_mode_lines=context_mode_lines,
+                    model_lines=model_lines,
+                    progress_lines=progress_lines,
+                    subscription_line=subscription_line,
                 ),
             )
             return
@@ -6439,7 +6447,7 @@ class ChannelApplication:
     async def _binding_model_status_lines(
         self,
         binding: ThreadBinding,
-    ) -> tuple[str, ...]:
+    ) -> tuple[str, str, str, str]:
         configured = binding.turn_settings
         if configured is None:
             value = "继承 Codex"

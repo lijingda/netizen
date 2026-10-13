@@ -155,6 +155,22 @@ from tests.support.channel_fixtures import channel_fixture, side_channel_fixture
 PULSE_ON = BindingTaskFeedback(reaction_pulse_enabled=True)
 
 
+def _status_text(value: object) -> str:
+    assert isinstance(value, OutboundCard), f"expected status card, got {type(value).__name__}"
+
+    def visible_text(node: object) -> list[str]:
+        if isinstance(node, dict):
+            if node.get("tag") in {"plain_text", "markdown"}:
+                content = node.get("content")
+                return [content] if isinstance(content, str) else []
+            return [text for child in node.values() for text in visible_text(child)]
+        if isinstance(node, list):
+            return [text for child in node for text in visible_text(child)]
+        return []
+
+    return "\n".join(visible_text(value.card))
+
+
 def completion_post(markdown: str, user_id: str = "ou_user") -> OutboundPost:
     return OutboundPost(markdown=markdown, mentions=[Identity(open_id=user_id)])
 
@@ -3015,31 +3031,30 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("turn-one", controller._pulses)
 
-    async def test_status_is_multiline_and_shows_lazy_codex_defaults(self) -> None:
+    async def test_status_card_shows_lazy_codex_defaults(self) -> None:
         await self.fixture.new()
 
         await self.app.handle_message(
             FakeMessage("/status", message_id="om_status")
         )
 
-        self.assertEqual(
-            self.channel.replies[-1][1].splitlines(),
-            [
-                "当前会话",
-                "会话：11111111",
-                "名称：新会话",
-                "会话预览：暂无（首条消息后生成）",
-                "Project：test",
-                "Native Thread：pending（首条消息后创建）",
-                "状态：idle",
-                "Netizen 订阅：未建立（会话尚未物化）",
-                "上下文窗口：暂无（首条消息后生成）",
-                "Model：继承 Codex",
-                "Effort：继承 Codex",
-                "Speed：继承 Codex",
-                "配置来源：Codex",
-            ],
-        )
+        lines = _status_text(self.channel.replies[-1][1]).splitlines()
+        for expected in (
+            "当前会话",
+            "会话：11111111",
+            "名称：新会话",
+            "会话预览：暂无（首条消息后生成）",
+            "Project：test",
+            "Native Thread：pending（首条消息后创建）",
+            "状态：idle",
+            "Netizen 订阅：未建立（会话尚未物化）",
+            "上下文窗口：暂无（首条消息后生成）",
+            "Model：继承 Codex",
+            "Effort：继承 Codex",
+            "Speed：继承 Codex",
+            "配置来源：Codex",
+        ):
+            self.assertIn(expected, lines)
 
     async def test_status_shows_git_branch_header_for_current_project(self) -> None:
         await self.fixture.new()
@@ -3052,16 +3067,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 FakeMessage("/status", message_id="om_git_status")
             )
 
-        lines = self.channel.replies[-1][1].splitlines()
-        project_index = lines.index("Project：test")
-        self.assertEqual(
-            lines[project_index : project_index + 3],
-            [
-                "Project：test",
-                "Git Branch：main...origin/main [ahead 2]",
-                "Native Thread：pending（首条消息后创建）",
-            ],
-        )
+        lines = _status_text(self.channel.replies[-1][1]).splitlines()
+        for expected in (
+            "Project：test",
+            "Git Branch：main...origin/main [ahead 2]",
+            "Native Thread：pending（首条消息后创建）",
+        ):
+            self.assertIn(expected, lines)
         read_branch.assert_awaited_once_with(self.project.resolve())
 
     async def test_status_shows_transient_subscription_without_writer_claim(self) -> None:
@@ -3081,7 +3093,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             FakeMessage("/status", message_id="om_subscription_status")
         )
 
-        reply = str(self.channel.replies[-1][1])
+        reply = _status_text(self.channel.replies[-1][1])
         self.assertIn("Netizen 订阅：本进程已取消", reply)
         self.assertIn("不表示 App Server writer 已立即释放", reply)
 
@@ -3195,7 +3207,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         await self.app.handle_message(FakeMessage("/status", message_id="om_status"))
 
-        reply = str(self.channel.replies[-1][1])
+        reply = _status_text(self.channel.replies[-1][1])
         self.assertIn("任务进展", reply)
         self.assertIn("已接收调整：2 次", reply)
         self.assertIn("任务清单（可能尚未反映最近一次调整）：", reply)
@@ -3235,7 +3247,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         await self.app.handle_message(FakeMessage("/status", message_id="om_status"))
 
-        reply = str(self.channel.replies[-1][1])
+        reply = _status_text(self.channel.replies[-1][1])
         self.assertIn("状态：running", reply)
         self.assertIn("已接收调整：1 次", reply)
         self.assertIn("任务清单：暂不可用", reply)
@@ -3381,7 +3393,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_message(
             FakeMessage("/status", message_id="om_goal_status")
         )
-        status = str(self.channel.replies[-1][1])
+        status = _status_text(self.channel.replies[-1][1])
         await self.app.handle_message(
             FakeMessage("/sessions", message_id="om_goal_sessions")
         )
@@ -5078,11 +5090,67 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             FakeMessage("/status", message_id="om_status")
         )
 
-        lines = self.channel.replies[-1][1].splitlines()
+        lines = _status_text(self.channel.replies[-1][1]).splitlines()
         self.assertIn("名称：Release review", lines)
         self.assertIn("会话预览：Check current changes", lines)
         self.assertIn("上下文窗口：暂不可用（下次可观测 Turn 完成后更新）", lines)
         self.assertEqual(self.runtime.thread_metadata_calls, [("native-one",)])
+
+    async def test_status_hides_source_trailer_from_native_preview(self) -> None:
+        await self.fixture.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        preview = (
+            '哈喽 <feishu_current_message_context> '
+            '{"kind": "feishu_current_message", "sender":'
+        )
+        metadata = NativeThreadMetadata("native-one", "打招呼", preview)
+        self.runtime.thread_metadata_values["native-one"] = metadata
+
+        await self.app.handle_message(
+            FakeMessage("/status", message_id="om_status")
+        )
+
+        reply = _status_text(self.channel.replies[-1][1])
+        self.assertIn("会话预览：哈喽", reply.splitlines())
+        self.assertNotIn("feishu_current_message_context", reply)
+        self.assertNotIn('"sender"', reply)
+        self.assertEqual(metadata.preview, preview)
+        self.assertEqual(self.runtime.submit_calls, [])
+
+    async def test_status_keeps_name_and_preview_markup_literal(self) -> None:
+        await self.fixture.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "native-one")
+        name = '<at id="all">所有人</at> **标题**'
+        preview = (
+            '[点击](https://example.test) `echo` <at id="ou_user">用户</at> '
+            '<feishu_current_message_context> 示例'
+        )
+        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
+            "native-one", name, preview,
+        )
+
+        await self.app.handle_message(
+            FakeMessage("/status", message_id="om_status")
+        )
+
+        card = self.channel.replies[-1][1]
+        reply = _status_text(card)
+        self.assertIn(f"名称：{name}", reply.splitlines())
+        self.assertIn(f"会话预览：{preview}", reply.splitlines())
+        plain_content = [
+            element["content"] for element in _elements(card.card, "plain_text")
+        ]
+        self.assertIn(f"名称：{name}", plain_content)
+        self.assertIn(f"会话预览：{preview}", plain_content)
+        markdown = "\n".join(
+            element["content"] for element in _elements(card.card, "markdown")
+        )
+        self.assertNotIn(name, markdown)
+        self.assertNotIn(preview, markdown)
 
     async def test_status_shows_observed_context_window_usage(self) -> None:
         await self.fixture.new()
@@ -5105,7 +5173,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(
             "上下文窗口：24,500 / 100,000 tokens（24.5% 已用）",
-            self.channel.replies[-1][1].splitlines(),
+            _status_text(self.channel.replies[-1][1]).splitlines(),
         )
         self.assertEqual(self.runtime.context_window_usage_calls, [binding.id])
 
@@ -5130,7 +5198,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             FakeMessage("/status", message_id="om_status")
         )
 
-        lines = self.channel.replies[-1][1].splitlines()
+        lines = _status_text(self.channel.replies[-1][1]).splitlines()
         self.assertIn("状态：running", lines)
         self.assertIn(
             "上下文窗口（上一轮完成时）：24,500 / 100,000 tokens（24.5% 已用）",
@@ -5153,7 +5221,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(
             "上下文窗口：已用 24,500 tokens（窗口大小暂不可用）",
-            self.channel.replies[-1][1].splitlines(),
+            _status_text(self.channel.replies[-1][1]).splitlines(),
         )
 
     async def test_status_clamps_overfilled_context_percentage(self) -> None:
@@ -5172,7 +5240,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(
             "上下文窗口：105,000 / 100,000 tokens（100.0% 已用）",
-            self.channel.replies[-1][1].splitlines(),
+            _status_text(self.channel.replies[-1][1]).splitlines(),
         )
 
     async def test_status_uses_preview_when_native_name_is_unset(self) -> None:
@@ -5190,7 +5258,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             FakeMessage("/status", message_id="om_status")
         )
 
-        lines = self.channel.replies[-1][1].splitlines()
+        lines = _status_text(self.channel.replies[-1][1]).splitlines()
         self.assertIn("名称：未设置", lines)
         self.assertIn("会话预览：First task", lines)
 
@@ -5207,7 +5275,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             await self.app.handle_message(
                 FakeMessage("/status", message_id="om_status")
             )
-        status_reply = self.channel.replies[-1][1]
+        status_reply = _status_text(self.channel.replies[-1][1])
         self.assertIn("名称：暂不可用", status_reply)
         self.assertIn("会话预览：暂不可用", status_reply)
         self.assertIn("状态：idle", status_reply)
@@ -5247,11 +5315,11 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             FakeMessage("/status", message_id="om_status")
         )
 
-        reply = self.channel.replies[-1][1]
-        self.assertIn("\nModel：gpt-future-codex\n", reply)
-        self.assertIn("\nEffort：ultra\n", reply)
-        self.assertIn("\nSpeed：Fast v2\n", reply)
-        self.assertTrue(reply.endswith("配置来源：Netizen 会话配置"))
+        reply = _status_text(self.channel.replies[-1][1])
+        self.assertIn("Model：gpt-future-codex", reply.splitlines())
+        self.assertIn("Effort：ultra", reply.splitlines())
+        self.assertIn("Speed：Fast v2", reply.splitlines())
+        self.assertIn("配置来源：Netizen 会话配置", reply.splitlines())
         self.assertEqual(self.runtime.model_catalog_calls, 1)
         self.assertEqual(self.runtime.resolve_model_settings_calls, [])
 
@@ -5265,7 +5333,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             FakeMessage("/status", message_id="om_status")
         )
 
-        lines = self.channel.replies[-1][1].splitlines()
+        lines = _status_text(self.channel.replies[-1][1]).splitlines()
         self.assertIn("Native Thread：native-one", lines)
         self.assertIn(
             "Model：继承 Codex",
@@ -5305,14 +5373,13 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 FakeMessage("/status", message_id="om_status")
             )
 
-        reply = self.channel.replies[-1][1]
-        self.assertIn("\nModel：future-model\n", reply)
-        self.assertIn("\nEffort：ultra\n", reply)
-        self.assertIn("\nSpeed：priority-v2\n", reply)
-        self.assertTrue(
-            reply.endswith(
-                "配置来源：Netizen 会话配置（模型目录暂不可用）"
-            )
+        reply = _status_text(self.channel.replies[-1][1])
+        self.assertIn("Model：future-model", reply.splitlines())
+        self.assertIn("Effort：ultra", reply.splitlines())
+        self.assertIn("Speed：priority-v2", reply.splitlines())
+        self.assertIn(
+            "配置来源：Netizen 会话配置（模型目录暂不可用）",
+            reply.splitlines(),
         )
         self.assertIn("model catalog unavailable", logs.output[0])
 
@@ -5337,12 +5404,11 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             FakeMessage("/status", message_id="om_status")
         )
 
-        reply = self.channel.replies[-1][1]
-        self.assertIn("\nModel：removed-model\n", reply)
-        self.assertTrue(
-            reply.endswith(
-                "配置来源：Netizen 会话配置（已失效，请使用 /config 更新）"
-            )
+        reply = _status_text(self.channel.replies[-1][1])
+        self.assertIn("Model：removed-model", reply.splitlines())
+        self.assertIn(
+            "配置来源：Netizen 会话配置（已失效，请使用 /config 更新）",
+            reply.splitlines(),
         )
 
     async def test_skills_command_is_rejected_without_native_mutation(self) -> None:
@@ -9764,7 +9830,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.runtime.compacting.add(binding.id)
 
         await self.app.handle_message(FakeMessage("/status", message_id="om_status"))
-        self.assertIn("状态：compacting", self.channel.replies[-1][1])
+        self.assertIn("状态：compacting", _status_text(self.channel.replies[-1][1]))
 
         await self.app.handle_message(FakeMessage("/config", message_id="om_config"))
         self.assertIn("正在压缩上下文", self.channel.replies[-1][1])
@@ -12045,6 +12111,9 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     mentioned_bot=False,
                 )
             )
+        status = _status_text(self.channel.replies[-1][1])
+        self.assertIn("当前 Side", status.splitlines())
+        self.assertIn("Git Branch：HEAD (no branch)", status.splitlines())
         await self.app.handle_message(
             FakeMessage(
                 "/new",
@@ -12053,13 +12122,6 @@ class SideChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 chat_type="p2p",
                 thread_id="omt-side",
                 mentioned_bot=False,
-            )
-        )
-        self.assertTrue(any("当前 Side" in str(content) for _mid, content in self.channel.replies))
-        self.assertTrue(
-            any(
-                "Git Branch：HEAD (no branch)" in str(content)
-                for _mid, content in self.channel.replies
             )
         )
         read_branch.assert_awaited_once_with(self.project.resolve())
