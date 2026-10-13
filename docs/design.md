@@ -2197,7 +2197,11 @@ Credits/月度额度按原生含义简短显示，只有这些字段时也可展
 明确报错，不显示为零使用量。它不创建 Thread、不存储快照、不预检或改变执行准入。
 账号身份与付费明细不进入飞书回复，原生错误仅投影为本次查询不可用。
 
-`/status` 以一项一行展示当前 Binding、原生 `name`、首条消息 `preview`、Project、完整
+`/status` 使用只读 Card 2.0，按会话概览、模型配置、上下文用量和任务进展分组，
+Project/状态及 Effort/Speed 分栏显示，完整 Thread ID 和订阅信息默认折叠。
+Side 状态使用同类卡片，分别展示 Side 生命周期与当前 Turn 状态。卡片仅为本次查询快照，
+不自动刷新或新增控制动作。动态字段使用纯文本组件，不解释 Markdown、HTML 或提及。
+卡片保留当前 Binding、原生 `name`、首条消息 `preview`、Project、完整
 native Thread ID、运行状态、当前 active Turn checklist、已接受 steer 次数、上下文窗口
 用量、Model、Effort、Speed 和配置来源。若 Project cwd 位于 Git work tree 中，普通与
 Side `/status` 还会即时显示 Git `status --porcelain=v1 --branch` 的 branch header 内容；
@@ -2206,7 +2210,10 @@ Netizen 只移除稳定的 `## ` 格式前缀，不自行解释普通分支、up
 untracked 或 submodule 状态，只限定 `.git` pathspec，并有独立短超时；非 Git、Git 不可
 用、超时、非零退出或异常输出均省略该行，不能使 `/status` 失败。结果只服务当次展示，
 不缓存、不持久化。名称与
-预览中的换行和多余空白会折叠，过长内容有界截断。普通 Turn 保留公开
+预览中的换行和多余空白会折叠，过长内容有界截断。预览和会话标题的 preview fallback
+在截断前去除已识别的当前消息、问题回答和定时任务来源 trailer（含原生预览已截断的 JSON）；
+识别要求包装标签与对应 JSON `kind` 同时匹配，普通标签文字不受影响。此过滤仅作用于显示，
+不改写原生名称、输入或历史。普通 Turn 保留公开
 `thread.read()` 终态恢复；持久化终态确认后，通过原始 handle 的公开
 `AsyncTurnHandle.stream()` 唯一一次排空该 Turn 已保留的通知，包括首次读取就已完成的 Turn。每次
 `thread/tokenUsage/updated` 用 `last.total_tokens` 表示当前窗口已用量，并配合
