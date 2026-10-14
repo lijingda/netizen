@@ -88,6 +88,51 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
         card = self.form(chats=(self.chat,), target_chat_id=self.chat.chat_id)
         self.assertEqual(self.decode(card).target_chat_id, self.chat.chat_id)
 
+    def test_target_inputs_stay_visible_under_the_mode_in_the_same_form(self):
+        card = self.form()
+        fields = elements(card.card, "form")[0]["elements"]
+        mode = next(item for item in fields if item.get("name") == "fork_mode_v5")
+        group = next(item for item in fields if item.get("tag") == "column_set")
+        submit = next(item for item in fields if item.get("name") == "fork_create_v5")
+        self.assertLess(fields.index(mode), fields.index(group))
+        self.assertLess(fields.index(group), fields.index(submit))
+        self.assertEqual(elements(card.card, "collapsible_panel"), [])
+        self.assertEqual({item["name"] for item in elements(group, "input")},
+                         {"fork_query_v5", "fork_chat_id_v5"})
+        self.assertEqual(elements(group, "button")[0]["name"], "fork_search_v5")
+        self.assertEqual(elements(group, "form"), [])
+        self.assertNotIn("behaviors", mode)
+        self.assertEqual(self.decode(card).target_chat_id, self.scope.chat_id)
+        # Untouched optional controls may be absent in a submit; the mode
+        # still selects the current chat without requiring other inputs.
+        values = {key: value for key, value in form_values(card).items()
+                  if key not in {"fork_query_v5", "fork_chat_id_v5"}}
+        self.assertEqual(decode_fork_action(self.scope, callback(card, "创建分支"), values).target_chat_id,
+                         self.scope.chat_id)
+
+    def test_grouped_inputs_remain_visible_for_drafts_search_and_validation_feedback(self):
+        for state in (
+            {"target_mode": "group"},
+            {"target_mode": "id", "target_id": "unfinished/id", "notice": "请检查聊天 ID"},
+            {"target_mode": "current", "target_id": "oc_retained"},
+            {"target_mode": "current", "target_choice": self.chat.chat_id},
+            {"query_input": "待查询"},
+            {"chat_snapshot": self.snapshot(count=0, chats=())},
+            {"chat_snapshot": self.snapshot(count=23), "chat_page": 1},
+        ):
+            with self.subTest(state=state):
+                card = self.form(**state)
+                form = elements(card.card, "form")[0]
+                group = elements(form, "column_set")[0]
+                self.assertEqual(elements(card.card, "collapsible_panel"), [])
+                self.assertEqual({item["name"] for item in elements(group, "input")},
+                                 {"fork_query_v5", "fork_chat_id_v5"})
+                self.assertEqual(len(elements(card.card, "form")), 1)
+                self.assertEqual(form_values(card)["fork_name_v5"], "设计方案 · 分支")
+                if state.get("chat_page"):
+                    self.assertEqual(len(elements(group, "select_static")), 2)
+                    self.assertEqual(self.decode(card, "跳转", fork_page_v5="2").chat_page, 2)
+
     def test_mode_selects_one_input_and_ignores_inactive_residual_values(self):
         card = self.form(chat_snapshot=self.snapshot(chats=(self.chat,)))
         mode = next(item for item in elements(card.card, "select_static") if item["name"] == "fork_mode_v5")
@@ -527,6 +572,22 @@ class ForkCardsTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(any(item.get("type") == "callback"
                                  for button in elements(card.card, "button")
                                  for item in button.get("behaviors", [])))
+
+    def test_success_uses_branch_name_as_title_and_only_source_receipt_links_to_topic(self):
+        for topic_url in (None, "https://example.test/topic"):
+            with self.subTest(topic_url=topic_url):
+                card = fork_status_card(name="方案 B", **self.display, status="success", topic_url=topic_url).card
+                self.assertEqual(card["header"]["title"], {"tag": "plain_text", "content": "方案 B"})
+                self.assertEqual(card["header"]["subtitle"]["content"], "会话分支已创建")
+                self.assertIn("来源：设计方案", str(card))
+                buttons = elements(card, "button")
+                if topic_url:
+                    self.assertEqual(len(buttons), 1)
+                    self.assertEqual(buttons[0]["behaviors"], [{"type": "open_url", "default_url": topic_url}])
+                    self.assertIn("在新话题中发送消息即可继续", str(card))
+                else:
+                    self.assertEqual(buttons, [])
+                    self.assertIn("在本话题中发送消息即可继续", str(card))
 
 
 if __name__ == "__main__":

@@ -3877,7 +3877,7 @@ class ChannelApplication:
                 origin = root
                 if root.thread_id is None:
                     origin = await send_topic_message(self._channel, target_chat_id,
-                        "分支正在创建，请等待根卡片显示创建完成后再发送消息。",
+                        "分支创建结果请查看话题顶部卡片。创建成功后，可在本话题发送消息继续。",
                         SendOpts(receive_id_type="chat_id", reply_to=root.message_id,
                             reply_in_thread=True, reply_target_gone="fail", uuid=hashlib.sha256(
                                 ("netizen-fork-seed:v1\0" + thread.id).encode()).hexdigest()[:32]))
@@ -3912,11 +3912,12 @@ class ChannelApplication:
             finally:
                 if thread is not None and binding is None:
                     await self._runtime.release_unbound_fork(thread)
-            card = fork_status_card(status=status, topic_url=topic_url, detail=detail,
+            result = dict(status=status, detail=detail,
                 native_thread_id=None if thread is None else thread.id,
                 binding_saved=binding is not None, **common)
             if root is not None:
-                await self._safe_update_card(root.message_id, card)
+                await self._safe_update_card(root.message_id, fork_status_card(**result))
+            card = fork_status_card(topic_url=topic_url, **result)
             if not await self._safe_update_card(message_id, card):
                 target = _CardReplyTarget(message_id, message_id, scope.chat_id, _CardReplyConversation(scope.topic_id))
                 try:

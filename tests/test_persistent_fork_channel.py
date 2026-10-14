@@ -13,6 +13,7 @@ from netizen_cli.cards.fork import ForkSource, decode_fork_action, fork_form_car
 from netizen_cli.chat_targets import ChatTargetError, ValidatedChatTarget
 from netizen_cli.codex_runtime import NativeThreadMetadata, RuntimeClosed, Submission, SubmitDisposition, ThreadLifecycleError
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
+from netizen_cli.feishu_links import topic_open_url
 from netizen_cli.management.chat_directory import AvailableChat, AvailableChatPage, ChatDirectoryError
 from netizen_cli.session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
 from tests.support.channel_cards import callback, elements, form_values
@@ -150,6 +151,23 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         self.runtime.thread_start.assert_not_awaited()
         self.runtime.rename_exact.assert_not_awaited()
 
+    def assert_success_cards(self):
+        root_updates = [card for message_id, card in self.channel.updates if message_id == "om_root"]
+        self.assertEqual(len(root_updates), 1)
+        root_card = root_updates[0]
+        self.assertEqual(root_card["header"]["title"]["content"], "新方案")
+        self.assertEqual(root_card["header"]["subtitle"]["content"], "会话分支已创建")
+        self.assertEqual(elements(root_card, "button"), [])
+        self.assertIn("在本话题中发送消息即可继续", str(root_card))
+        receipt = next(card for message_id, card in reversed(self.channel.updates) if message_id == "om_fork_form")
+        self.assertEqual(receipt["header"], root_card["header"])
+        buttons = elements(receipt, "button")
+        self.assertEqual(len(buttons), 1)
+        self.assertEqual(buttons[0]["behaviors"], [{
+            "type": "open_url",
+            "default_url": topic_open_url(self.target_scope.chat_id, self.target_scope.topic_id),
+        }])
+
     async def open_form(self):
         await self.app.handle_message(FakeMessage("/fork", message_id="om_command",
             chat_id=self.scope.chat_id, thread_id=self.scope.topic_id, chat_type="group"))
@@ -214,9 +232,7 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(root[0], self.scope.chat_id)
         self.assertIsNone(root[2].reply_to)
         self.assertIn("请等待创建完成后再发送消息", str(root[1].card))
-        root_updates = [card for message_id, card in self.channel.updates if message_id == "om_root"]
-        self.assertEqual(len(root_updates), 1)
-        self.assertIn("会话分支已创建", str(root_updates[0]))
+        self.assert_success_cards()
         self.assert_no_execution()
 
     async def test_empty_name_submission_preserves_form_and_target_without_creation(self):
@@ -267,9 +283,14 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call[0] for call in self.channel.send_calls], [target.chat_id, target.chat_id])
         self.assertEqual(self.channel.send_calls[1][2].reply_to, "om_root")
         self.assertTrue(self.channel.send_calls[1][2].reply_in_thread)
+        seed_text = self.channel.send_calls[1][1]
+        self.assertIn("创建结果请查看话题顶部卡片", seed_text)
+        self.assertIn("创建成功后", seed_text)
+        self.assertNotIn("正在创建", seed_text)
         self.assertNotEqual(self.channel.send_calls[0][2].uuid, self.channel.send_calls[1][2].uuid)
         self.assertEqual(self.store.active_binding(self.scope.key), self.source)
         self.assertEqual([event for event in self.events if event.startswith("send-")], ["send-root", "send-seed"])
+        self.assert_success_cards()
         self.assert_no_execution()
 
     async def test_avatar_upload_failure_preserves_cross_group_creation(self):
@@ -769,6 +790,7 @@ class PersistentForkChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(fallback, OutboundCard)
         self.assertEqual(fallback.card, self.channel.updates[-1][1])
         self.assertIn("会话分支已创建", str(fallback.card))
+        self.assert_success_cards()
         self.assert_no_execution()
 
     async def test_failed_success_update_and_fallback_do_not_replace_success_with_error(self):

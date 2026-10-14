@@ -221,7 +221,8 @@ def snapshot_capacity_selections(snapshot: ChatSearchSnapshot, page: int) -> tup
 
 def chat_target_elements(*, mode_field: str, choice_field: str, id_field: str,
                          draft: ChatTargetDraft, options: Sequence[dict[str, Any]],
-                         search: ChatSearchView | None = None) -> list[dict[str, Any]]:
+                         search: ChatSearchView | None = None,
+                         group_details: bool = False) -> list[dict[str, Any]]:
     """Both inputs remain editable; the mode alone determines the saved value."""
     if draft.mode not in {"current", "group", "id"}:
         raise CardActionError("请选择有效的飞书聊天指定方式。")
@@ -246,11 +247,13 @@ def chat_target_elements(*, mode_field: str, choice_field: str, id_field: str,
              {"text": _plain_text("填写聊天 ID"), "value": "id"},
          ], "initial_option": draft.mode},
     ]
-    elements.append(_plain("群聊选择（仅选择群聊时生效）"))
+    if not group_details or search is None:
+        elements.append(_plain("选择群聊" if group_details else "群聊选择（仅选择群聊时生效）"))
     if search is not None:
         elements.extend([
             {"tag": "input", "name": search.query_field, "required": False,
-             "width": "fill", "max_length": 50, "label": _plain_text("查找群聊 · 群名关键词"),
+             "width": "fill", "max_length": 50,
+             "label": _plain_text("群聊 · 群名关键词" if group_details else "查找群聊 · 群名关键词"),
              "default_value": search.query, "placeholder": _plain_text("留空查找全部可选群")},
             search.search_button,
         ])
@@ -261,7 +264,7 @@ def chat_target_elements(*, mode_field: str, choice_field: str, id_field: str,
             elements.append(_plain(f"查找结果 · {query_label}{page_label}。修改关键词后请重新点击查找群聊。"))
         elif choices:
             elements.append(_plain("当前选择；如需其他群，请先查找群聊。"))
-        else:
+        elif not group_details:
             elements.append(_plain("请先查找群聊，再从查找结果中选择。"))
     if choices or search is None:
         if search is not None and draft.choice and "initial_option" in choice:
@@ -272,11 +275,31 @@ def chat_target_elements(*, mode_field: str, choice_field: str, id_field: str,
         elements.append(_plain("没有找到可选群聊，请修改关键词重新查找。"))
     if search is not None and search.navigation is not None:
         elements.append(search.navigation)
-    elements.extend([
+    elements.append(
         {"tag": "input", "name": id_field, "required": False, "width": "fill",
-         "label": _plain_text("聊天 ID（仅填写 ID 时生效）"),
+         "label": _plain_text("聊天 ID" if group_details else "聊天 ID（仅填写 ID 时生效）"),
          "default_value": draft.chat_id, "max_length": 192,
-         "placeholder": _plain_text("请输入聊天 ID（oc_…），不能为空")},
+         "placeholder": _plain_text("oc_…" if group_details else "请输入聊天 ID（oc_…），不能为空")},
+    )
+    if group_details:
+        elements.append({
+            "tag": "markdown", "text_size": "notation",
+            "content": "<font color='grey'>请使用聊天 ID，非用户 ID；单聊限与本机器人的聊天。</font>"
+                f"[获取 ID]({CHAT_ID_HELP_URL})",
+        })
+        mode, *details = elements
+        return [mode, {
+            "tag": "column_set", "flex_mode": "none", "background_style": "grey-50",
+            "columns": [{
+                "tag": "column", "width": "weighted", "weight": 1,
+                "padding": "12px", "vertical_spacing": "8px",
+                "elements": [{
+                    "tag": "markdown", "text_size": "notation",
+                    "content": "<font color='grey'>当前聊天无需填写；其他方式只需填写对应项。</font>",
+                }, *details],
+            }],
+        }]
+    elements.extend([
         _plain("仅指定方式对应的输入生效；填写 ID 时不能为空。聊天 ID 不是用户 ID；单聊请选择与本机器人的聊天。"),
         {"tag": "markdown", "content": f"[如何获取聊天 ID]({CHAT_ID_HELP_URL})"},
     ])
