@@ -76,7 +76,7 @@ _REPEATABLE_CARD_CONTROL_NAMES = frozenset(
 # one updated message. Revision-bearing and one-shot actions stay excluded.
 _REPEATABLE_CALLBACK_INTENTS = frozenset(
     name.value for name in _REPEATABLE_CARD_CONTROL_NAMES
-) | {TurnFileActionName.PAGE.value}
+) | {TurnFileActionName.PAGE.value, "status.command"}
 
 
 class CardActionError(ValueError):

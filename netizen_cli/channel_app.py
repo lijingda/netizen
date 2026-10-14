@@ -118,7 +118,9 @@ from .cards.questions import (
     render_question_submission_card,
 )
 from .cards.defaults import defaults_card, decode_defaults_action, is_defaults_card_action
-from .cards.status import session_status_card, side_status_card
+from .cards.status import (
+    decode_status_command, is_status_command, session_status_card, side_status_card,
+)
 from .cards.fork import (
     ForkCardAction, ForkCardCapacityError, ForkFormValidationError, ForkSource, decode_fork_action, is_fork_card_action,
     fork_form_card, fork_status_card,
@@ -672,6 +674,7 @@ def _reply_files_module(
 @dataclass(frozen=True, slots=True)
 class _CardReplyConversation:
     thread_id: str | None
+    chat_type: str = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -680,6 +683,11 @@ class _CardReplyTarget:
     message_id: str
     chat_id: str
     conversation: _CardReplyConversation
+
+
+@dataclass(frozen=True, slots=True)
+class _CardCommandOrigin(_CardReplyTarget):
+    """A real card callback reply anchor, never a fabricated prompt message."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1197,7 +1205,7 @@ class ChannelApplication:
                 logger.exception("failed to send scheduled retry feedback")
 
     async def _reply_to_origin(self, message: Any, content: Any) -> object:
-        if isinstance(message, (ScheduledBindingOrigin, CardAnswerOrigin)):
+        if isinstance(message, (ScheduledBindingOrigin, CardAnswerOrigin, _CardCommandOrigin)):
             return await self._channel.reply(message, content, SendOpts(
                 receive_id_type="chat_id", reply_to=message.message_id,
                 reply_in_thread=message.conversation.thread_id is not None,
@@ -1645,8 +1653,72 @@ class ChannelApplication:
                 except Exception:
                     logger.warning("question submission feedback unavailable", exc_info=True)
 
+    async def _handle_status_command(self, event: Any) -> None:
+        message_id = str(getattr(event, "message_id", "") or "")
+        chat_id = str(getattr(event, "chat_id", "") or "")
+        sender_id = getattr(getattr(event, "operator", None), "open_id", None)
+        action = getattr(event, "action", None)
+        if not message_id or not chat_id or not isinstance(sender_id, str) or not sender_id:
+            logger.warning("status command callback missing message or operator identity")
+            return
+        origin = _CardCommandOrigin(message_id, message_id, chat_id, _CardReplyConversation(None))
+        renewed_card: OutboundCard | None = None
+        try:
+            if getattr(action, "tag", None) != "button" or getattr(action, "form_value", None):
+                raise CardActionError("状态卡操作无效，请重新发送 /status。")
+            fetched = await self._channel.fetch_message(message_id)
+            topic_id = fetched_card_topic_id(callback_chat_id=chat_id, fetched_message=fetched)
+            # Establish the real reply location before any further I/O. Chat
+            # type is also required for /config and /status inside topics.
+            origin = replace(origin, conversation=_CardReplyConversation(topic_id))
+            chat_kind = _public_chat_kind(await self._channel.get_chat_info(chat_id))
+            if chat_kind not in {"p2p", "group"}:
+                raise CardActionError("无法判断状态卡所在聊天类型，请重新发送 /status。")
+            scope = scope_from_fetched_card(
+                app_id=self._app_id, callback_chat_id=chat_id,
+                fetched_message=fetched, chat_type=chat_kind,
+            )
+            origin = replace(origin, conversation=_CardReplyConversation(topic_id, chat_kind))
+            decoded = decode_status_command(
+                scope=scope, message_id=message_id, sender_id=sender_id,
+                value=getattr(action, "value", None),
+            )
+            side = self._bindings.side_topic_for_message(
+                app_id=self._app_id, chat_id=chat_id, topic_id=scope.topic_id,
+                root_message_id=None,
+            )
+            if decoded.target_kind == "side":
+                if side is None or side.id != decoded.target_id:
+                    raise CardActionError("状态卡对应的 Side 已变化或不可用，本次未执行。")
+                if side.state is SideTopicState.CREATING:
+                    raise CardActionError("这个 Side 尚未就绪，本次未执行。")
+                if not await self._side_session_available(origin, side):
+                    return
+                renewed_card = decoded.card()
+                await self._side_control(origin, decoded.command, side)
+            else:
+                if side is not None:
+                    raise CardActionError("状态卡与当前 Side 话题不一致，本次未执行。")
+                renewed_card = decoded.card()
+                await self._control(origin, decoded.command, expected_binding_id=decoded.target_id)
+        except CardActionError as error:
+            await self._report_input_error(origin, InvalidInteraction(str(error)))
+        except Exception as error:
+            await self._report_input_error(origin, error)
+        finally:
+            # The SDK deduplicates source/operator/payload, so renew only its
+            # nonce. The original snapshot stays unchanged; command replies
+            # always use the same path as slash commands. Never replay a command
+            # when this best-effort transport update fails.
+            if renewed_card is not None:
+                if not await self._safe_update_card(message_id, renewed_card):
+                    await self._reply(origin, "操作入口未能更新；再次操作请重新发送 /status。刚才的操作不会自动重试。")
+
     async def handle_card_action(self, event: Any) -> None:
         action = getattr(event, "action", None)
+        if is_status_command(getattr(action, "value", None)):
+            await self._handle_status_command(event)
+            return
         if is_fork_card_action(
             getattr(action, "value", None), getattr(action, "form_value", None),
         ):
@@ -3248,24 +3320,7 @@ class ChannelApplication:
                 "可发送 /side close 重试清理。",
             )
             return
-        if record.state.terminal:
-            labels = {
-                SideTopicState.CLOSED: "已结束",
-                SideTopicState.EXPIRED: "已过期（服务重启或空闲超时）",
-                SideTopicState.FAILED: "创建失败",
-            }
-            await self._reply(
-                message,
-                f"这个 Side {labels[record.state]}，不会转成普通会话；"
-                "请回到 Parent 会话重新发送 /side。",
-            )
-            return
-        if record.topic_id is None or record.root_message_id is None:
-            raise SideTopicConflict("open Side 缺少话题或根消息标识")
-        try:
-            self._runtime.side_snapshot(record.id)
-        except SideSessionNotFound:
-            await self._report_missing_side_session(message, record)
+        if not await self._side_session_available(message, record):
             return
 
         current_images = current_message_image_references(message)
@@ -3284,6 +3339,29 @@ class ChannelApplication:
         if current_images:
             raise InvalidInteraction("控制命令不能携带图片，请拆分后重试。")
         await self._side_control(message, interaction, record)
+
+    async def _side_session_available(self, message: Any, record: SideTopicRecord) -> bool:
+        """Shared lifecycle admission for messages and status command aliases."""
+        if record.state.terminal:
+            labels = {
+                SideTopicState.CLOSED: "已结束",
+                SideTopicState.EXPIRED: "已过期（服务重启或空闲超时）",
+                SideTopicState.FAILED: "创建失败",
+            }
+            await self._reply(
+                message,
+                f"这个 Side {labels[record.state]}，不会转成普通会话；"
+                "请回到 Parent 会话重新发送 /side。",
+            )
+            return False
+        if record.topic_id is None or record.root_message_id is None:
+            raise SideTopicConflict("open Side 缺少话题或根消息标识")
+        try:
+            self._runtime.side_snapshot(record.id)
+        except SideSessionNotFound:
+            await self._report_missing_side_session(message, record)
+            return False
+        return True
 
     async def _side_prompt(
         self,
@@ -3412,6 +3490,8 @@ class ChannelApplication:
             await self._reply(
                 message,
                 side_status_card(
+                    scope=self._side_scope(record),
+                    side_id=record.id,
                     short_id=record.short_id,
                     parent_short_id=record.parent_binding_id[:8],
                     state=snapshot.state.value,
@@ -4328,7 +4408,16 @@ class ChannelApplication:
             )
         return await reader.resolve_anchor(scope, message_id)
 
-    async def _control(self, message: Any, intent: ControlIntent) -> None:
+    async def _control(
+        self, message: Any, intent: ControlIntent, *, expected_binding_id: str | None = None,
+    ) -> None:
+        if expected_binding_id is not None:
+            # No await before the selected command captures its Binding. The
+            # ordinary command's existing exact-target checks protect mutations
+            # across subsequent I/O; never follow a later current pointer.
+            current = self._bindings.active_binding(intent.scope.key)
+            if current is None or current.id != expected_binding_id:
+                raise InvalidInteraction("当前会话已切换或不可用，本次未执行；请重新发送 /status。")
         if intent.name is ControlName.FORK:
             await self._fork_card(message, intent)
             return
@@ -5033,6 +5122,8 @@ class ChannelApplication:
             await self._reply(
                 message,
                 session_status_card(
+                    scope=intent.scope,
+                    binding_id=binding.id,
                     short_id=binding.short_id,
                     project_alias=binding.project_alias,
                     native_thread_id=native,

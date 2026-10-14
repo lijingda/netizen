@@ -201,7 +201,7 @@ class CardCodecTest(unittest.TestCase):
         self.assertEqual(
             callbacks._REPEATABLE_CALLBACK_INTENTS,
             {name.value for name in repeatable_buttons}
-            | {TurnFileActionName.PAGE.value},
+            | {TurnFileActionName.PAGE.value, "status.command"},
         )
         self.assertEqual(
             set(TurnFileActionName),

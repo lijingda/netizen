@@ -2099,7 +2099,8 @@ Channel SDK 尚未透传的单选 change option，也不读取原始回调。Pro
 SDK safety 层被当成旧投递。Netizen 因此只在可重复动作的公共按钮出口加入每次渲染新建的
 32 位十六进制 `nonce`：Settings 分区导航/刷新、普通与归档会话列表的翻页/返回、会话切换、
 两类删除确认页导航、exact Turn 重新检查、Goal 暂停/恢复、Side 关闭重试和文件分页均走
-这一出口。新增 Project 的 submit 没有 callback value，因此把同一类 nonce 编入必填的
+这一出口。`/status` 命令别名按钮也复用同一出口；处理后只重绘 callback 携带的只读展示
+快照以更新 nonce，不重新查询状态或重复命令。新增 Project 的 submit 没有 callback value，因此把同一类 nonce 编入必填的
 Project mode option value。decoder 只移除 transport nonce，不要求它存在，也不校验其格式；
 Project mode 同样先恢复业务 mode，再忽略可选 transport 后缀。因此 nonce 不进入 typed
 intent、SQLite、业务 precondition 或 outbound UUID，缺失或畸形也不改变业务 payload 的
@@ -2197,10 +2198,27 @@ Credits/月度额度按原生含义简短显示，只有这些字段时也可展
 明确报错，不显示为零使用量。它不创建 Thread、不存储快照、不预检或改变执行准入。
 账号身份与付费明细不进入飞书回复，原生错误仅投影为本次查询不可用。
 
-`/status` 使用只读 Card 2.0，按会话概览、模型配置、上下文用量和任务进展分组，
+`/status` 使用 Card 2.0 展示状态快照与命令入口，按会话概览、模型配置、上下文用量和任务进展分组，
 Project/状态及 Effort/Speed 分栏显示，完整 Thread ID 和订阅信息默认折叠。
 Side 状态使用同类卡片，分别展示 Side 生命周期与当前 Turn 状态。卡片仅为本次查询快照，
-不自动刷新或新增控制动作。动态字段使用纯文本组件，不解释 Markdown、HTML 或提及。
+不自动刷新状态。普通会话（包含 Lazy 和持久分支）提供 `/status`、`/stop`、`/config`、
+`/sessions` 四个命令别名；Side 提供 `/status`、`/stop`、`/side close`。按钮不随快照中的
+运行态隐藏，点击时复用对应 slash 命令的准入、处理和回复；`/status` 别名仍新发状态卡，
+`/config` 仍新发配置卡或原有拒绝原因，不为面板实现另一套业务动作或独有的重新检查。
+
+回调从真实卡片消息确认 App/chat/topic 和聊天类型，使用实际点击者构造 typed ControlIntent，
+不伪造用户消息或提交 Prompt。普通按钮绑定 exact Scope/Binding，执行入口同步验证该
+Binding 仍为 current；之后沿用命令既有的目标捕获及 mutation 校验，不自动切回或改投新
+current。Side 绑定 exact route/Side，沿用已有生命周期和 Session 可用性检查，不跟随 Parent。
+按钮不绑定生成时的 Turn、activity revision 或 native Thread ID；Lazy 物化、同一会话换轮
+不使面板过期，`/stop` 按执行时的原命令语义处理中断/Goal 暂停。
+
+callback 携带严格字段、类型及容量校验的只读展示快照，仅用于更新按钮的 per-render nonce；
+身份和执行准入只取独立目标与实时数据，展示字段不作权限依据，不接受任意 card JSON。
+每次命令处理后尽力重绘同一快照，不更改原状态正文，不新增轮询、card session 或数据库记录。
+整卡编码后限制为 55,000 UTF-8 bytes，计入所有按钮重复携带的快照。重绘失败不重放命令，
+单独提示重新发送 `/status` 获取可用入口；同一 render 的重复投递继续由 SDK 去重。
+动态字段使用纯文本组件，不解释 Markdown、HTML 或提及。
 卡片保留当前 Binding、原生 `name`、首条消息 `preview`、Project、完整
 native Thread ID、运行状态、当前 active Turn checklist、已接受 steer 次数、上下文窗口
 用量、Model、Effort、Speed 和配置来源。若 Project cwd 位于 Git work tree 中，普通与

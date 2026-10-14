@@ -1571,6 +1571,13 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
    `/plan`、`/apps`；`/copy`、`/vim`、`/theme`、`/exit` 也不展示。
    另发送 `/new test`、`/new demo`、带引号和坏引号的 `/new ...`，都必须得到同一迁移提示、
    零 Binding mutation；`//new test` 仍作为字面 prompt。
+   普通与持久分支 `/status` 的“查看状态／停止／会话配置／会话列表”分别与对应 slash
+   命令同样回复；Side 的“查看状态／停止／结束临时会话”同样复用其命令。覆盖单聊、
+   群主线及两种聊天的话题，并分别关闭／开启过程卡。查看状态应新发卡，原面板正文
+   保留原快照；同一用户重复点击已更新凭据的按钮仍可操作，旧回调重投只处理一次。
+   切换会话后旧面板拒绝操作；同会话换轮后停止当前轮，不能因面板生成时 Turn 不同而拒绝。
+   Side 的 Parent 切换不影响按钮，Side 关闭／过期后拒绝；状态卡消息 ID 不得当作 Side 根 ID。
+   入口重绘失败须提示重新发送 `/status`，不得因此重放刚才的命令。
 2. 通过 `/new` 卡片选择 `test` Project、inherit Codex，保持 Reaction Pulse 关闭并手动关闭
    Progress Card 后发送首条 prompt：native accepted 后原消息常驻 `Typing`，但整轮零
    `THINKING`、零进度卡和零心跳回复；成功 steer 的消息添加 `OnIt`，原任务锚点不迁移。
