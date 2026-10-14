@@ -19,6 +19,7 @@ from netizen_cli.cards.chat_target import (
     resolve_chat_target,
 )
 from netizen_cli.management.chat_directory import AvailableChat
+from tests.support.channel_cards import elements
 
 
 class ChatTargetCardsTest(unittest.TestCase):
@@ -103,6 +104,22 @@ class ChatTargetCardsTest(unittest.TestCase):
                 draft = initial_chat_target(current_chat_id="oc_current", target_chat_id=chat_id, options=options)
                 self.assertEqual(draft, expected)
                 self.assertEqual(resolve_chat_target(draft, current_chat_id="oc_current"), chat_id or "oc_current")
+
+    def test_grouping_preserves_native_controls_values_and_default_flat_layout(self):
+        options = chat_options((AvailableChat("oc_group", "研发群", "group", False),))
+        draft = ChatTargetDraft("group", "oc_group", "oc_residual")
+        flat = chat_target_elements(**self.fields, draft=draft, options=options)
+        grouped = chat_target_elements(**self.fields, draft=draft, options=options, group_details=True)
+        self.assertEqual(elements(flat, "column_set"), [])
+        self.assertEqual(elements(grouped, "collapsible_panel"), [])
+        self.assertEqual(grouped[0], flat[0])
+        self.assertEqual(elements(grouped, "select_static"), elements(flat, "select_static"))
+        grouped_input = elements(grouped, "input")[0]
+        flat_input = elements(flat, "input")[0]
+        for key in ("name", "required", "default_value", "max_length"):
+            self.assertEqual(grouped_input[key], flat_input[key])
+        self.assertNotIn("behaviors", grouped_input)
+        self.assertIn(CHAT_ID_HELP_URL, str(grouped))
 
     def test_explicit_search_precedes_result_select_and_pagination(self):
         options = chat_options((AvailableChat("oc_group", "研发群", "group", False),))

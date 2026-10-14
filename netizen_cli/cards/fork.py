@@ -293,11 +293,11 @@ def fork_form_card(scope: FeishuScope, source: ForkSource, *, source_title: str,
             {"tag": "input", "name": _NAME_FIELD, "width": "fill",
              "label": _plain_text("分支名称"), "default_value": draft_name,
              "max_length": MAX_THREAD_NAME_CHARS},
-            _plain("目标飞书聊天 · 在所选聊天中新建分支话题"),
+            {"tag": "markdown", "content": "**分支位置**\n<font color='grey'>在所选聊天中新建分支话题</font>"},
             *chat_target_elements(
                 mode_field=_MODE_FIELD, choice_field=_TARGET_FIELD, id_field=_ID_FIELD,
                 draft=ChatTargetDraft(target.mode, selection, target.chat_id), options=page_options,
-                search=search,
+                search=search, group_details=True,
             ),
             _button(scope, source, "创建分支", "create"),
         ]
@@ -327,14 +327,16 @@ def fork_status_card(*, name: str, source_title: str, project_alias: str,
                      topic_url: str | None = None, detail: str | None = None,
                      native_thread_id: str | None = None,
                      binding_saved: bool = False) -> OutboundCard:
-    """One target root card is updated in place; status pages cannot resubmit."""
+    """Status pages cannot resubmit; only the source receipt gets a topic URL."""
     titles = {"creating": "会话分支创建中", "success": "会话分支已创建", "failed": "会话分支创建未完成"}
-    builder = _builder(titles[status], name, template="red" if status == "failed" else "blue")
+    title, subtitle = (name, titles[status]) if status == "success" else (titles[status], name)
+    builder = _builder(title, subtitle, template="red" if status == "failed" else "blue")
     builder.raw(_plain(f"来源：{source_title}\nProject：{project_alias}"))
     if status == "creating":
         builder.raw(_notice("请等待创建完成后再发送消息。"))
     elif status == "success":
-        builder.raw(_plain("在新话题中发送消息即可继续。两个会话独立管理，共享项目文件；来源会话保持不变。"))
+        location = "新话题" if topic_url else "本话题"
+        builder.raw(_plain(f"在{location}中发送消息即可继续。两个会话独立管理，共享项目文件；来源会话保持不变。"))
         if topic_url:
             builder.raw({"tag": "button", "text": _plain_text("进入新话题"), "type": "primary_filled",
                 "behaviors": [{"type": "open_url", "default_url": topic_url}]})
