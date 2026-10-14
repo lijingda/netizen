@@ -183,7 +183,9 @@ class ThreadNamerTest(unittest.IsolatedAsyncioTestCase):
         self.namer = ThreadNamer(
             codex=self.codex, terminal_cleanup=self.cleanup,
             subscription_control=self.subscriptions, commit=commit,
-            timeout_seconds=0.1, cleanup_timeout_seconds=0.01,
+            # Success paths synchronize on events; only expiry tests shorten
+            # the naming deadline, so a slow CI runner cannot expire a retry.
+            cleanup_timeout_seconds=0.01,
         )
 
     async def asyncTearDown(self) -> None:
@@ -283,6 +285,7 @@ class ThreadNamerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.commits), 1)
 
     async def test_missing_exact_input_times_out_without_fork(self) -> None:
+        self.namer._timeout_seconds = 0.1
         self.parent.native.turns[0].id = "previous-turn"
         self.start()
         await self.drain()
@@ -290,7 +293,6 @@ class ThreadNamerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.commits, [])
 
     async def test_exact_input_visible_after_five_seconds_can_still_name(self) -> None:
-        self.namer._timeout_seconds = 120.0
         self.parent.native.turns.append(SimpleNamespace(
             id="previous-turn", status="completed",
             items=[SimpleNamespace(root=SimpleNamespace(type="userMessage"))],
@@ -322,7 +324,6 @@ class ThreadNamerTest(unittest.IsolatedAsyncioTestCase):
         self.assert_child_cleanup()
 
     async def test_input_deadline_at_ten_seconds_skips_and_later_turn_retries(self) -> None:
-        self.namer._timeout_seconds = 120.0
         self.parent.native.turns[0].items = []
         loop = asyncio.get_running_loop()
         real_time = loop.time
@@ -426,6 +427,7 @@ class ThreadNamerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.codex.fork_calls, [])
 
     async def test_late_fork_after_timeout_is_cleaned_without_starting_turn(self) -> None:
+        self.namer._timeout_seconds = 0.1
         self.codex.fork_gate = asyncio.Event()
         self.start()
         await self.codex.fork_entered.wait()
