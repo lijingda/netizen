@@ -115,7 +115,7 @@ def _command_buttons(
             "snapshot": snapshot,
         })
         for label, command, _arguments in commands
-    ))
+    ), equal_width=False)
 
 
 def _status_card(card: dict[str, Any]) -> OutboundCard:

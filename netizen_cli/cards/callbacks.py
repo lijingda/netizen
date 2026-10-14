@@ -453,15 +453,15 @@ def _builder(title: str, subtitle: str, *, template: str = "blue"):
     )
 
 
-def _button_row(*buttons: dict[str, Any]) -> dict[str, Any]:
+def _button_row(*buttons: dict[str, Any], equal_width: bool = True) -> dict[str, Any]:
     return {
         "tag": "column_set",
         "flex_mode": "none",
         "columns": [
             {
                 "tag": "column",
-                "width": "weighted",
-                "weight": 1,
+                "width": "weighted" if equal_width else "auto",
+                **({"weight": 1} if equal_width else {}),
                 "elements": [button],
             }
             for button in buttons
