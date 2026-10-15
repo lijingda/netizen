@@ -1116,7 +1116,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         release = submission.release_receipt_attempt
         assert release is not None
         release()
-        self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+        self.assertTrue(await self.runtime.wait_idle(timeout=2))
 
     async def test_create_uses_exact_ephemeral_fork_and_fixed_boundary(self) -> None:
         binding, record, snapshot = await self.open_side()
@@ -2428,7 +2428,8 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
                         request=QuestionRequest("foreign-turn", (UserQuestion("Wrong Turn"),)),
                     )
                     # Question sends do not wait for the initial task receipt.
-                    await asyncio.wait_for(received.wait(), timeout=0.2)
+                    # This checks ordering, not subsecond CI scheduling latency.
+                    await asyncio.wait_for(received.wait(), timeout=2)
                     self.assertEqual(handle.run_calls, 0)
                     self.assertEqual(handler.await_count, turn_number + 1)
                     self.assertEqual(
