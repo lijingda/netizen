@@ -318,7 +318,7 @@ def _session_inventory_state(
     return SessionInventoryState(native.state.value)
 
 
-def _indexed_updated_at(native: NativeThreadView | None) -> int | None:
+def _native_updated_at(native: NativeThreadView | None) -> int | None:
     value = native.metadata.updated_at if native is not None and native.metadata is not None else None
     return value if type(value) is int and value >= 0 else None
 
@@ -1335,15 +1335,25 @@ class InstanceManagementService:
             if any(record.binding.native_thread_id is not None for record in records)
             else {}
         )
+        records = tuple(
+            record for record in records
+            if _session_inventory_state(
+                record.binding, (native or {}).get(record.binding.native_thread_id),
+            ) in states
+        )
+        # The native catalog can omit readable Threads with an empty preview.
+        # Recover their summaries before selecting a page, so its timestamps,
+        # ordering and cursor all use the same metadata. Keep time for rendering.
+        views = await self._session_native_views(
+            tuple(record.binding for record in records), native=native,
+            deadline=self._enrichment_deadline(deadline, _NATIVE_INDEX_READ_SECONDS),
+        )
         descending = query.sort_direction == "desc"
 
         def candidates():
             for record in records:
                 binding = record.binding
-                view = (native or {}).get(binding.native_thread_id)
-                if _session_inventory_state(binding, view) not in states:
-                    continue
-                updated = _indexed_updated_at(view)
+                updated = _native_updated_at(views.get(binding.native_thread_id))
                 if cursor is not None:
                     if cursor.updated_at is None:
                         if updated is not None:
@@ -1378,7 +1388,7 @@ class InstanceManagementService:
         self._query_seconds(deadline)
         return await self._session_page(
             tuple(record for record, _updated in selected[:limit]), native=native,
-            next_cursor=next_cursor, deadline=deadline, indexed_update_times=True,
+            next_cursor=next_cursor, deadline=deadline, views=views,
         )
 
     async def query_scope_sessions(
@@ -2195,21 +2205,12 @@ class InstanceManagementService:
         native: dict[str, NativeThreadView] | None,
         next_cursor: BindingCursor | SessionUpdatedCursor | None,
         deadline: float,
-        indexed_update_times: bool = False,
+        views: dict[str, NativeThreadView] | None = None,
     ) -> SessionInventoryPage:
-        views = await self._session_native_views(
-            tuple(record.binding for record in records), native=native, deadline=deadline,
-        )
-        if indexed_update_times:
-            # Summary recovery is still page-only. Its timestamp cannot join an
-            # ordering already chosen from the index: show an unknown time rather
-            # than make recovered rows appear incorrectly sorted.
-            views = {
-                thread_id: replace(view, metadata=replace(
-                    view.metadata, updated_at=_indexed_updated_at((native or {}).get(thread_id)),
-                )) if view.metadata is not None else view
-                for thread_id, view in views.items()
-            }
+        if views is None:
+            views = await self._session_native_views(
+                tuple(record.binding for record in records), native=native, deadline=deadline,
+            )
         labels = await self.resolve_chat_labels(
             (record.scope.chat_id for record in records), deadline=deadline,
         )
@@ -2239,9 +2240,9 @@ class InstanceManagementService:
             )
             for binding in bindings if binding.native_thread_id is not None
         }
-        # Only visible, unclassified rows need a summary. Reading one exact ID
-        # neither proves archive membership nor turns a read failure into Missing.
-        # Use the existing request deadline for the whole page, including queuing.
+        # Read missing summaries for this page, or for candidates before time
+        # ordering. An exact read cannot establish archive/existence state.
+        # The caller's deadline covers both queuing and the actual reads.
 
         async def hydrate(thread_id: str) -> None:
             try:
@@ -2262,7 +2263,20 @@ class InstanceManagementService:
             thread_id for thread_id, view in views.items()
             if view.state is None and view.metadata is None
         )
-        await asyncio.gather(*(hydrate(thread_id) for thread_id in unresolved))
+        pending = iter(unresolved)
+
+        async def hydrate_pending() -> None:
+            for thread_id in pending:
+                if self._summary_reads_closed or asyncio.get_running_loop().time() >= deadline:
+                    break
+                await hydrate(thread_id)
+
+        # A large candidate set must not create one waiting Task per Thread.
+        # The shared limiter still counts SDK requests after caller timeouts.
+        await asyncio.gather(*(
+            hydrate_pending()
+            for _ in range(min(len(unresolved), _SESSION_SUMMARY_READ_CONCURRENCY))
+        ))
         return views
 
     def _summary_read_finished(self, task: asyncio.Task[NativeThreadMetadata]) -> None:

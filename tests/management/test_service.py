@@ -1004,7 +1004,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                             [(False, "created_at", "desc"), (True, "created_at", "desc")] * 2,
                         )
 
-    async def test_updated_order_filters_native_states_before_paging_and_places_unknown_times_last(self) -> None:
+    async def test_updated_order_recovers_unlisted_summaries_before_filtering_cursors(self) -> None:
         known = await self._create()
         archived = await self._create()
         unindexed = await self._create()
@@ -1027,24 +1027,40 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         for direction in ("asc", "desc"):
             with self.subTest(direction=direction):
-                self.runtime.calls.clear()
                 cursor = None
                 items = []
                 for _ in range(5):
+                    self.runtime.calls.clear()
                     page = await self.service.query_sessions(query=replace(query, sort_direction=direction), cursor=cursor, limit=1, deadline=asyncio.get_running_loop().time() + 2)
                     items.extend(page.items)
                     if cursor is None:
-                        self.assertEqual(page.items[0].record.binding.id, known.id)
-                        self.assertFalse(any(call[0] == "summary" for call in self.runtime.calls))
+                        first = known if direction == "asc" else unindexed
+                        self.assertEqual(page.items[0].record.binding.id, first.id)
+                        self.assertEqual(page.next_cursor.updated_at, 10 if direction == "asc" else 9999)
+                    # Reuse the pre-sort results, including a failed read, for
+                    # the displayed row. Do not re-read the selected page.
+                    self.assertCountEqual(
+                        [call[1] for call in self.runtime.calls if call[0] == "summary"],
+                        ["unindexed", "conflict"],
+                    )
                     cursor = page.next_cursor
                     if cursor is None:
                         break
-                unknown_ids = sorted((unindexed.id, conflict.id, lazy.id), reverse=direction == "desc")
-                self.assertEqual([item.record.binding.id for item in items], [known.id, *unknown_ids])
+                unknown_ids = sorted((conflict.id, lazy.id), reverse=direction == "desc")
+                timed_ids = [known.id, unindexed.id] if direction == "asc" else [unindexed.id, known.id]
+                self.assertEqual([item.record.binding.id for item in items], [*timed_ids, *unknown_ids])
                 recovered = next(item for item in items if item.record.binding.id == unindexed.id)
                 self.assertEqual(recovered.native.metadata.name, "Recovered")
-                self.assertIsNone(recovered.native.metadata.updated_at)
+                self.assertEqual(recovered.native.metadata.updated_at, 9999)
                 self.assertIs(recovered.inventory_state, SessionInventoryState.UNKNOWN)
+
+        self.runtime.calls.clear()
+        active_only = await self.service.query_sessions(
+            query=replace(query, inventory_states=(SessionInventoryState.ACTIVE,)),
+            deadline=asyncio.get_running_loop().time() + 2,
+        )
+        self.assertEqual([item.record.binding.id for item in active_only.items], [known.id])
+        self.assertFalse(any(call[0] == "summary" for call in self.runtime.calls))
 
     async def test_updated_order_skips_catalog_for_empty_or_lazy_candidates(self) -> None:
         await self._create()
@@ -1061,18 +1077,23 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(page.catalog_available)
             self.assertFalse(any(call[0] in {"catalog", "metadata", "summary"} for call in self.runtime.calls))
 
-    async def test_updated_order_catalog_failure_keeps_unconfirmed_rows_and_page_only_summary(self) -> None:
+    async def test_updated_order_catalog_failure_keeps_rows_and_uses_exact_summary_times(self) -> None:
         for index in range(3):
             binding = await self._create()
             self.store.assign_native_thread_id(binding.id, f"failed-index-{index}")
+            self.runtime.summary_metadata[f"failed-index-{index}"] = NativeThreadMetadata(
+                f"failed-index-{index}", f"Recovered {index}", "", updated_at=100 + index,
+            )
         query = SessionQuery(sort_by="updated_at")
         with patch.object(self.runtime, "thread_catalog_exact", side_effect=TimeoutError("unavailable")):
             first = await self.service.query_sessions(query=query, limit=2, deadline=asyncio.get_running_loop().time() + 1)
             self.assertFalse(first.catalog_available)
             self.assertEqual(len(first.items), 2)
-            self.assertEqual(len([call for call in self.runtime.calls if call[0] == "summary"]), 2)
+            self.assertEqual([item.native.metadata.updated_at for item in first.items], [102, 101])
+            self.assertEqual(len([call for call in self.runtime.calls if call[0] == "summary"]), 3)
             second = await self.service.query_sessions(query=query, cursor=first.next_cursor, limit=2, deadline=asyncio.get_running_loop().time() + 1)
             self.assertEqual(len(second.items), 1)
+            self.assertEqual(second.items[0].native.metadata.updated_at, 100)
             self.assertTrue(all(item.inventory_state is SessionInventoryState.UNKNOWN for item in (*first.items, *second.items)))
             self.assertIsNone(second.next_cursor)
             active_only = await self.service.query_sessions(query=replace(query, inventory_states=(SessionInventoryState.ACTIVE,)), deadline=asyncio.get_running_loop().time() + 1)
@@ -1806,7 +1827,7 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(items["failed"].native.metadata)
         self.assertTrue(all(item.inventory_state is SessionInventoryState.UNKNOWN for item in page.items))
 
-    async def test_summary_timeouts_keep_sdk_workers_counted_until_completion(self) -> None:
+    async def test_updated_order_summary_timeouts_keep_rows_and_workers_counted(self) -> None:
         self.store._id_factory = lambda: str(uuid.uuid4())
         for index in range(10):
             binding = await self._create()
@@ -1815,10 +1836,11 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         entered = asyncio.Event()
         loop = asyncio.get_running_loop()
         reads = []
+        query = SessionQuery(sort_by="updated_at")
 
         def blocking_read(thread_id):
             release.wait()
-            return NativeThreadMetadata(thread_id, "Summary", "")
+            return NativeThreadMetadata(thread_id, "Summary", "", updated_at=42)
 
         async def read(thread_id):
             reads.append(thread_id)
@@ -1831,11 +1853,11 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(self.runtime, "thread_summary_exact", side_effect=read):
                 # Allow the local query and catalog lookup to start all four SDK
                 # workers on busy CI runners before testing deadline expiry.
-                first = asyncio.create_task(self.service.query_sessions(deadline=loop.time() + 1))
-                await asyncio.wait_for(entered.wait(), 2)
+                first = asyncio.create_task(self.service.query_sessions(query=query, deadline=loop.time() + 4))
+                await asyncio.wait_for(entered.wait(), 3)
                 for page in (
-                    await asyncio.wait_for(first, 2),
-                    await asyncio.wait_for(self.service.query_sessions(deadline=loop.time() + 0.1), 0.5),
+                    await asyncio.wait_for(first, 3),
+                    await asyncio.wait_for(self.service.query_sessions(query=query, deadline=loop.time() + 0.2), 1),
                 ):
                     self.assertEqual(len(page.items), 10)
                     self.assertTrue(all(item.native.metadata is None for item in page.items))
@@ -1848,8 +1870,8 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(self.service._summary_reads), 4)
                 release.set()
                 await asyncio.wait_for(asyncio.gather(*self.service._summary_reads), 1)
-                page = await self.service.query_sessions(deadline=loop.time() + 1)
-                self.assertTrue(all(item.native.metadata is not None for item in page.items))
+                page = await self.service.query_sessions(query=query, deadline=loop.time() + 2)
+                self.assertTrue(all(item.native.metadata.updated_at == 42 for item in page.items))
         finally:
             release.set()
             if self.service._summary_reads:

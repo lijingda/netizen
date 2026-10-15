@@ -5365,11 +5365,15 @@ class ChannelApplication:
                 await self._reply_no_current_binding(message, intent.scope)
                 return
             state = await self._binding_state(binding)
-            metadata = await self._read_thread_metadata((binding,))
-            thread_metadata_lines = _thread_metadata_status_lines(
-                binding,
-                metadata.get(binding.native_thread_id),
-            )
+            try:
+                metadata = await self._management.binding_metadata_exact(
+                    binding.id,
+                    deadline=asyncio.get_running_loop().time() + _SESSION_QUERY_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.warning("Status metadata unavailable", exc_info=True)
+                metadata = None
+            thread_metadata_lines = _thread_metadata_status_lines(binding, metadata)
             try:
                 project = self._projects.resolve_for_binding(binding.project_alias)
             except ProjectError:
