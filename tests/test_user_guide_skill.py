@@ -94,7 +94,10 @@ class UserGuideSkillContentTest(unittest.TestCase):
             self.assertNotIn("[TODO:", text)
 
     def test_guide_covers_the_registered_command_surface(self) -> None:
-        guide = (RELEASE_SKILL / "references" / "user-guide.md").read_text(encoding="utf-8")
+        guide = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((RELEASE_SKILL / "references").rglob("*.md"))
+        )
         for spec in COMMAND_SPECS:
             with self.subTest(command=spec.name):
                 self.assertIn(f"/{spec.name}", guide)

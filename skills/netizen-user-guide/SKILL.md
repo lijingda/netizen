@@ -15,20 +15,24 @@ Netizen 通过官方 Codex SDK 将飞书接入原生 Codex。默认按当前 Net
 
 ## 查阅
 
-回答前阅读 [用户手册](references/user-guide.md) 的相关章节；入门、完整能力说明或横向
-比较需阅读全文。常用入口：
+回答前按问题阅读对应模块；涉及其他功能时沿正文链接补读，不默认通读整套手册。
+首次使用先读[快速开始](references/user-guide.md#快速开始)和[核心心智模型](references/concepts.md)；
+横向比较先读[原生能力与宿主差异](references/native-capabilities.md)，再补读涉及的功能。
+完整能力说明按[手册目录](references/user-guide.md)覆盖各模块。
 
-- [会话与 Project](references/user-guide.md#会话与-project-管理)、
-  [停止](references/user-guide.md#stop)、[Side](references/user-guide.md#side-临时话题)、
-  [Goal](references/user-guide.md#goal)、[持久分支](references/user-guide.md#fork-持久分支)：
-  说明对应的并发、失效或历史删除后果。
-- [账号额度](references/user-guide.md#usage)：说明共享账号、剩余额度和客户端时区。
-- [运行反馈](references/user-guide.md#飞书中的运行反馈)、
-  [本轮文件](references/user-guide.md#查看和发送本轮文件)：按手册解释开关、展示范围和统计口径。
-- [定时任务](references/user-guide.md#定时任务)：区分定时计划与一次普通执行，解释
-  `/cron`、自然语言管理、时间规则，以及暂停计划和停止任务的不同后果。
-- [MCP 登录](references/user-guide.md#mcp-登录)：MCP 提示未登录或 OAuth 授权过期时，
-  说明原生 Codex 登录方式及 Netizen 复用条件。
+| 用户问题 | 查阅与解释重点 |
+| --- | --- |
+| 查命令、操作入口 | [命令索引](references/commands.md)，再进入对应功能说明 |
+| 会话隔离、上下文、并发，追加消息为何没有新开任务 | [核心心智模型](references/concepts.md)：Scope、Project、Turn 与 steer |
+| 新建、默认配置、切换、命名、归档、删除、模型与反馈设置 | [会话与 Project](references/sessions.md)：作用范围、后续生效及历史删除后果 |
+| 群聊 @、引用、图片、转发材料、回答提问卡 | [消息输入](references/messages.md)：读取范围、提交方式与整条消息失败边界 |
+| 过程卡、表情、结束 @、阶段性答案、本轮文件 | [运行反馈与文件](references/feedback-and-files.md)：开关、展示范围、统计口径与发送时的文件版本 |
+| 状态、账号额度、压缩、停止 | [状态与控制](references/status-and-control.md)：区分上下文用量和共享账号额度，说明客户端时区与停止限制 |
+| 定时创建、修改、暂停或立即运行任务 | [定时任务](references/scheduled-tasks.md)：执行目标、时间规则、计划与单次执行的区别 |
+| 持久分支、Side 或 Goal | [持久分支、Side 与 Goal](references/fork-side-goal.md)：并发、共享目录、失效与暂停/结束后果 |
+| Admin 入口、登录、集中管理或系统维护 | [Admin Web](references/admin.md)：管理权限、操作范围与重启影响 |
+| Skills、MCP 未登录或 OAuth 过期、App/CLI 差异 | [原生能力与宿主差异](references/native-capabilities.md)：调用方式、原生 MCP 登录与凭证复用条件 |
+| 使用报错、任务失败或状态未知 | [常见问题](references/faq.md)，再按问题链接补读详细规则 |
 
 ## 回答与边界
 

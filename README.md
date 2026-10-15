@@ -36,19 +36,19 @@
 - **把任务交给 Codex。** 在飞书中阅读代码、修改项目、整理资料；任务由官方 Codex SDK
   管理的原生会话执行，沿用运行主机上的工具和工作目录。
 - **边做边沟通。** 普通任务执行时继续发消息，可以补充条件或调整方向；也可以开启
-  [过程卡](skills/netizen-user-guide/references/user-guide.md#飞书中的运行反馈)查看进展。
+  [过程卡](skills/netizen-user-guide/references/feedback-and-files.md#飞书中的运行反馈)查看进展。
 - **带上图片与讨论背景。** 支持图片、逐条引用，以及可选的
-  [群聊上下文](skills/netizen-user-guide/references/user-guide.md#发送消息引用与图片)。
+  [群聊上下文](skills/netizen-user-guide/references/messages.md#发送消息引用与图片)。
 - **取回本轮文件。** 完成后从回复卡片中按需发送有原生执行记录的文件；发送的是点击时
-  的当前内容，详见[文件说明](skills/netizen-user-guide/references/user-guide.md#查看和发送本轮文件)。
+  的当前内容，详见[文件说明](skills/netizen-user-guide/references/feedback-and-files.md#查看和发送本轮文件)。
 - **保留上下文，另开一条讨论。** 用
-  [持久分支](skills/netizen-user-guide/references/user-guide.md#fork-持久分支)在当前聊天或其他群
+  [持久分支](skills/netizen-user-guide/references/fork-side-goal.md#fork-持久分支)在当前聊天或其他群
   创建普通话题，之后独立继续。
 - **展开临时讨论，推进持续目标。** 用
-  [Side](skills/netizen-user-guide/references/user-guide.md#side-临时话题)另开临时话题，或用
-  [Goal](skills/netizen-user-guide/references/user-guide.md#goal)让 Codex 围绕目标持续推进。
+  [Side](skills/netizen-user-guide/references/fork-side-goal.md#side-临时话题)另开临时话题，或用
+  [Goal](skills/netizen-user-guide/references/fork-side-goal.md#goal)让 Codex 围绕目标持续推进。
 - **让任务按时开始。** 用自然语言或 `/cron` 创建
-  [定时任务](skills/netizen-user-guide/references/user-guide.md#定时任务)，可每次在独立话题执行，也可在原会话定时继续。
+  [定时任务](skills/netizen-user-guide/references/scheduled-tasks.md#定时任务)，可每次在独立话题执行，也可在原会话定时继续。
 
 普通会话的历史由 Codex 保存，可在 Codex App/CLI 中继续使用；App/CLI 中新增的消息不会
 自动回填飞书。多个会话可以并行，同一项目的文件目录共享，修改会相互可见。
@@ -109,7 +109,7 @@ Agent／脚本使用 `netizen update --json`：stdout 只输出最终 JSON，进
 5. 收到回复后继续交流；如果出现“本轮文件”，点击“发送”取回需要的文件。
 
 不确定下一步时发送 `/help` 查看快速开始。通过 `/defaults` 或 Admin 配好
-[会话默认配置](skills/netizen-user-guide/references/user-guide.md#默认会话配置与自动创建)后，
+[会话默认配置](skills/netizen-user-guide/references/sessions.md#默认会话配置与自动创建)后，
 没有当前会话时也可直接发送任务：机器人会在消息所在主线或话题创建会话并执行。
 没有可用默认配置时，机器人仍会提示准备步骤；被拦下的任务需在准备好后重新发送。
 
@@ -117,7 +117,7 @@ Agent／脚本使用 `netizen update --json`：stdout 只输出最终 JSON，进
 不接受参数。普通任务执行中发来的新消息用于调整当前任务，不会排队成下一个任务。
 
 安装遇到问题可从[部署文档](docs/deployment.md)继续；已能对话时，常见疑问见
-[使用 FAQ](skills/netizen-user-guide/references/user-guide.md#常见问题)。
+[使用 FAQ](skills/netizen-user-guide/references/faq.md#常见问题)。
 
 ## 命令
 
@@ -133,12 +133,12 @@ Agent／脚本使用 `netizen update --json`：stdout 只输出最终 JSON，进
 | 调整模型、思考强度和过程卡 | `/config`，当前会话空闲时使用 |
 | 查看当前任务和上下文用量 | `/status` |
 | 查看共享 Codex 账号额度和重置时间 | `/usage` |
-| 中断当前任务 | `/stop`；不保证前台工具进程退出，见[停止说明](skills/netizen-user-guide/references/user-guide.md#stop) |
+| 中断当前任务 | `/stop`；不保证前台工具进程退出，见[停止说明](skills/netizen-user-guide/references/status-and-control.md#stop) |
 | 查找当前机器人的管理入口 | `/admin`；返回实际管理 URL 和实例根目录，不返回登录凭据 |
 | 管理定时任务 | `/cron`，也可以直接用自然语言描述计划 |
 | 查看当前实例提供的命令 | `/help` |
 
-重命名、归档、恢复、删除等完整用法见[命令索引](skills/netizen-user-guide/references/user-guide.md#完整命令索引)。
+重命名、归档、恢复、删除等完整用法见[命令索引](skills/netizen-user-guide/references/commands.md#完整命令索引)。
 当前实例的命令开放情况以 `/help` 为准，任务状态以 `/status` 和卡片提示为准。
 
 ### 两个常见场景
@@ -159,7 +159,7 @@ Side 会在同一聊天中新建话题，可继续多轮讨论。它与原会话
 ```
 
 计划每次创建独立执行话题；暂停计划不会停止已经触发的任务。
-[定时任务用法](skills/netizen-user-guide/references/user-guide.md#定时任务)
+[定时任务用法](skills/netizen-user-guide/references/scheduled-tasks.md#定时任务)
 
 <a id="admin-web"></a>
 
@@ -183,12 +183,12 @@ Admin 是实例必备能力；管理员可在“系统管理 → 权限管理 �
 - **共享环境。** 飞书应用的可用范围和群成员关系控制谁能访问；同一实例复用服务账号，
   不提供按用户或项目隔离的权限体系。Admin Web 面向受信内网，名单中的管理员权限相同。
 - **输入与输出。** 支持文本、普通图片和富文本图片，也可提供飞书 2.0 卡片、合并转发与转发话题作为
-  [背景材料](skills/netizen-user-guide/references/user-guide.md#卡片合并转发与转发话题)。材料内部的媒体只提供未读附件描述；直接文件和音视频仍不支持。
+  [背景材料](skills/netizen-user-guide/references/messages.md#卡片合并转发与转发话题)。材料内部的媒体只提供未读附件描述；直接文件和音视频仍不支持。
   飞书 1.0 卡片明确不支持。
   输出文件按本轮原生记录发现，不扫描工作区补齐，也不自动上传。
 - **Codex 能力有宿主差异。** 飞书复用原生会话和工具，但并非每个 App/CLI 控件都可用；
   全新会话采用 `auto_review`，持久分支沿用原生继承权限；不提供 App 的 Ask/Custom 选择器。
-  [完整差异与当前限制](skills/netizen-user-guide/references/user-guide.md#与-codex-appcli-的差异)
+  [完整差异与当前限制](skills/netizen-user-guide/references/native-capabilities.md#与-codex-appcli-的差异)
 
 <a id="用户指南-skill"></a>
 
