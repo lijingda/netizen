@@ -93,7 +93,9 @@ printf 'logout-noise=ignored'
                 username="service-user",
                 python_executable=Path(sys.executable),
                 base_environment={"PATH": "/usr/bin:/bin"},
-                timeout=2,
+                # Real login-shell startup measures correctness, not
+                # subsecond CI scheduling latency.
+                timeout=30,
             )
 
             self.assertEqual(environment["NETIZEN_PROFILE_SENTINEL"], "loaded")
