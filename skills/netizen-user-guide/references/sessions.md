@@ -91,7 +91,10 @@ ID），输入旁提供官方获取指南；也可在目标单聊中使用 `/def
   原生 Thread、历史、配置和 Task Feedback，下一条普通消息仍 resume 同一 native ID。
   运行中、状态未知或有已登记后台 terminal 时会拒绝；Side 使用 `/side close`。
 
-短 ID 只用于当前 Scope 中的会话选择。不能拿另一个聊天或话题里的短 ID 跨 Scope 切换。
+这里的短 ID 是 **Netizen 会话编号（Binding ID）** 的前缀，只用于当前 Scope 中的会话
+选择。不能拿另一个聊天或话题里的短 ID 跨 Scope 切换。**Codex 会话 ID（Thread ID）**
+则是完整原生标识，供[会话协作工具](session-collaboration.md)指定目标；列表和状态详情
+会明确区分两者，并提供完整原生 ID 文本。查看后台或归档会话的 ID 不需要先切换或恢复。
 
 ## 归档、恢复和删除
 

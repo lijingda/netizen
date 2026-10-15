@@ -1542,6 +1542,101 @@ Scheduler 按整分钟查询到期计划，管理变更仍可主动唤醒并重�
 thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admission，遵守既有恢复边界。
 关闭先停认领和管理 admission、有界排空交接，再由普通 Runtime shutdown，最后关闭传输和 Store。
 
+## 普通会话协作
+
+[ADR 0081](adr/0081-coordinate-ordinary-sessions-with-native-external-messages.md) 定义这条入口。
+同一 ServiceCore 在启动 App Server 前绑定临时会话 MCP，复用 Scheduler 的同进程传输、
+可信调用 metadata、鉴权与有界停服机制，独立注册六个工具；全部与普通输入共享 Store、
+Runtime、Channel 和 AsyncCodex。工具就绪前不开准入，关闭时先拒绝新调用再有界收尾。
+不写用户 `config.toml`、替换 MCP 表或额外注入 developer/base instructions。
+
+### 工具与可访问目录
+
+`create_thread`、`list_threads`、`list_archived_threads`、`read_thread`、
+`send_message_to_thread`、`wait_threads` 以固定 CLI `rust-v0.162.1` 的名称、camelCase
+参数和返回结构为基准。create/send 使用 `prompt` 与可选 `model`，create 另有可选
+`title`；结果中的 `threadId` 是完整原生 Thread ID。发送成功仅说明输入已接受，后续
+read/wait 才提供任务结果；未知副作用与确定未接受分开反馈。
+
+工具目标必须经完整 Native Thread ID 精确映射为本实例、当前飞书应用的普通 Binding。
+不自动登记外部 CLI/App Thread，不包含 Side 或原生子 agent。Binding ID、chat/topic、
+位置链接、是否 current 等通过明确 Netizen metadata 展示，不能覆盖原生 ID/状态。
+已有人工控制继续按 Binding 引用工作；短原生 ID、名称和话题链接不自动解析成操作目标。
+尚未物化的 Binding 没有可调用 Thread ID；查询不能触发物化。
+
+两个发现工具支持 `limit`（默认 10，上限 50）、可选 `searchTerm` 和 `cursor`，返回
+`nextCursor`。先按实例、目标范围和元信息搜索形成候选，再分页，不能只在原生近期第一页
+筛选。游标绑定查询和范围版本；下一次调用遇到权限变化时旧游标失效。只允许发现时不交付
+preview、summary 或回答正文。名称有歧义由模型与用户澄清，不新增文本 mention 别名。
+
+read 保留 `turnLimit`（默认 1，上限 10）、`includeOutputs`、每项输出预算与分页游标。
+当前公开 SDK 不提供历史分页 facade，因此采用 CLI 已有的完整历史 read 后分页方式，
+不为此增加私有 RPC；模型结果保持 8,000 字节预算，截断不损坏 ID/游标或接受状态。
+本功能的 `netizen_sessions` create/send 来信在默认读取中单独保留
+`codexDelegation.sourceThreadId/input`，来源与正文按委派摘要展示；它仍是工具来源，
+其他工具输出继续遵循 `includeOutputs`，摘要也受既有输出预算约束。
+wait 最多八个不同的其他目标，使用独立的 `afterCursor` 状态快照，`timeoutMs=0` 立即
+查询，默认/上限 120 秒。一个目标唤醒即可返回，不要求每次包含全体 polls。原生历史
+仍是唯一来源；分页、等待和输出裁剪不建立本地历史或协作任务表。
+
+### 创建与外部消息交接
+
+来源取自原生 MCP `_meta.threadId`，不接受参数或正文冒充来源。新建继承来源 Project
+和 canonical cwd，仅在来源 chat 新建普通 sibling topic；可选模型覆盖遵循原生规则。
+新会话关闭 Reaction Pulse 和 Completion Mention，复制 Progress Card，之后独立。
+新建标题沿用 Netizen 的 120 字符限制，接口 schema 同步注明；提示词遵循原生 1,000
+UTF-8 字节限制。模型目录 ID 在 SDK 提交前解析为实际 model，不直接混用两者。
+普通话题发布、缺 topic 时的 seed、exact 发送响应核对和空目标原子登记与已有创建路径
+共用，来源 Scope 不切换。创建所有权进入既有 Project 删除/停服边界；真人提前建立
+目标 Binding 时不能覆盖。不可将即时创建写成 Scheduled Plan 或 Side。
+
+可选 `title` 传入既有后台 NamingJob；有标题时直接尝试写入，无标题时自动生成。后者
+等待 exact Turn 内与本次 ExternalMessage 的 namespace/name/output 匹配的输入证据。
+复用每 Binding 单任务、名称写锁与人工改名优先规则，不调用人工 rename lifecycle。
+本次失败不阻塞任务或继续聊天；旧任务已收尾且后续新 Turn 仍无名时按既有规则补名。
+
+创建首条输入及后续跨会话来信构造明确 agent 来源和公开 SDK `ExternalMessage`，
+向 exact Thread 提交，由 Codex 在接收时选择 start/join。普通飞书、问题卡和定时输入
+保留原有 exact Turn 准入。Runtime 按实际返回的 Turn ID 复用既有消费者或建立新一轮
+消费者，不启动重复 `handle.run()`，不把旧轮结果改归属到新来信。
+
+目标非 current 时可以在允许范围内发现/读取，但发送不发布任务锚点也不提交输入；若
+发布期间目标切换，原生提交前拒绝并说明锚点未执行。归档、停止、Goal、压缩和无法确认
+状态按既有准入反馈，不隐式 activate/unarchive/fork 或转投。SDK 的正常 resume 加载
+当前目标 handle 不等于改变 Scope current。
+
+固定 Python SDK 拒绝向本连接管理的 active Goal 调用 `turn(ExternalMessage)`；本入口
+保留该限制，不绕过 SDK。Goal 只读预检失败或状态未确认均发生在提交前，回执明确
+`accepted=false`；只有实际提交结果无法确认时才返回 `accepted=null`。
+
+来信在目标飞书话题显示为注明来源的普通机器人消息，然后内部提交一次；展示失败和
+native 接受事实分别报告。接受回执不等待命名，首轮展示使用五秒预算；展示超时或
+调用取消仍返回已知 Thread/Turn 和 accepted=true，普通展示 finally 释放结果消费者。
+失败提示使用同一展示预算；异常、超时或取消均保留原错误、目标信息及已判定的接受状态。
+结果、阶段性答案、Files 和控制复用普通会话机制，reasoning
+与原始工具数据不进入飞书回复卡片。展示消息不回流启动工作，继续复用 Channel 自发
+过滤和现有 TTL 去重；不增加防重表、持久投递队列或全局机器人身份启动门槛。
+
+### 实例范围配置与标识展示
+
+现有实例 YAML 的 `sessionTools.discovery` 与 `sessionTools.readSend` 分别保存
+`mode: all|only|exclude|disabled` 和 `chatIds`。两组默认 all，按目标 chat 匹配普通
+Binding，所有来源共用。readSend 包括 read、send、wait 和 create 的目标检查；已知
+Thread ID 可在 discovery 关闭时使用，仍须通过 readSend。工具入口捕获不可变规则并
+检查一次；发现过滤与正文摘要可见性也使用同一份规则。调用过程中修改范围不撤销
+本次调用，下一次调用使用新规则；目标身份及生命周期仍按原规则校验。该范围设置
+不终止已接受的原生任务，也不改变既有定时工具或普通入站。
+
+Admin 沿用实例管理员、同源请求和一次性 action grant；编辑复用配置快照冲突检测与
+原子写入，成功后切换共享进程内规则。没有新文件、数据库表、权限服务或角色体系。
+外部修改配置时拒绝覆盖，需重新加载配置；不会偷偷丢弃其他 YAML 设置。
+
+`/status`、普通/归档列表与 Admin 清楚区分“Codex 会话 ID（Thread ID）”和“Netizen
+会话编号（Binding ID）”，完整原生 ID 可在不激活目标的情况下取得。Lazy 明示首条消息
+后生成，已有 ID 的目录缺项不能误报成 Lazy。Chat/Topic 是位置；Admin 原管理动作与
+`identity` 精确只读筛选保持既有含义。该改动仅改善显示、引用说明与复制，不引入通用
+ID 解析器、别名或管理路由迁移。
+
 ## 数据与配置
 
 ### Channel 数据库与结构校验

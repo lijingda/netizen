@@ -3925,8 +3925,8 @@ class CardRendererTest(unittest.TestCase):
         self.assertLess(text.index("Active work"), text.index("Other work"))
         self.assertLess(text.index("Active work"), text.index("新会话"))
         self.assertIn("● 当前", text)
-        self.assertIn("Native：native-o", text)
-        self.assertIn("Native：pending", text)
+        self.assertIn("Codex 会话 ID（跨会话工具）：native-one", text)
+        self.assertIn("Codex 会话 ID（跨会话工具）：尚未生成，首条消息后创建", text)
         self.assertIn("切换不会停止其他会话正在运行的任务", text)
         buttons = _elements(card.card, "button")
         labels = [b["text"]["content"] for b in buttons]

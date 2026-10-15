@@ -2586,7 +2586,8 @@ class AdminStaticAssetsTest(unittest.TestCase):
         parser = _AdminAssetParser()
         parser.feed(html)
 
-        self.assertEqual(parser.scripts, ["/static/chat-picker.js", "/static/identity.js", "/static/admin.js"])
+        self.assertEqual(parser.scripts, ["/static/chat-picker.js", "/static/identity.js",
+                                          "/static/session-access.js", "/static/admin.js"])
         self.assertEqual(parser.stylesheets, ["/static/admin.css", "/static/chat-picker.css"])
         self.assertFalse(parser.inline_script_text.strip())
         self.assertTrue({"projects", "sessions", "sessions-ordinary", "sessions-temporary", "updates"} <= parser.ids)

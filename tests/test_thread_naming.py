@@ -7,7 +7,8 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from openai_codex import InternalRpcError, InvalidRequestError
+from openai_codex import ExternalMessage, InternalRpcError, InvalidRequestError
+from openai_codex.types import ThreadItem
 
 from netizen_cli.model_settings import TurnModelSettings
 from netizen_cli.runtime.thread_naming import NAMING_PROMPT, NamingJob, ThreadNamer
@@ -244,6 +245,50 @@ class ThreadNamerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.commits, [])
         self.assertEqual(self.parent.summary_read_count, 1)
         self.assertEqual(self.parent.full_read_count, 0)
+
+    async def test_preferred_title_writes_without_fork_or_input_history(self) -> None:
+        self.parent.native.turns = []
+        self.namer.start("binding", self.parent, "parent-turn", preferred_title="指定标题")
+        await self.drain()
+        self.assertEqual(self.commits, [("binding", "parent", "指定标题")])
+        self.assertEqual(self.codex.fork_calls, [])
+        self.assertEqual(self.parent.full_read_count, 0)
+
+    async def test_preferred_title_does_not_replace_existing_name(self) -> None:
+        self.parent.native.name = "已经命名"
+        self.namer.start("binding", self.parent, "parent-turn", preferred_title="指定标题")
+        await self.drain()
+        self.assertEqual(self.commits, [])
+        self.assertEqual(self.codex.fork_calls, [])
+
+    async def test_external_input_must_match_exact_turn_namespace_name_and_output(self) -> None:
+        external = ExternalMessage("create_thread", "本次协作任务", "netizen_sessions")
+        expected = dict(id="external-input", type="functionCallOutput", namespace=external.namespace,
+                        name=external.tool_name, output=external.content)
+        for altered in (
+            {"namespace": "another_server"}, {"name": "another_tool"},
+            {"output": "另一条任务"}, {"output": []}, {"type": "userMessage", "content": []},
+        ):
+            with self.subTest(altered=altered):
+                self.parent.native.turns[0].items = [ThreadItem.model_validate(expected | altered)]
+                self.parent.native.turns.append(SimpleNamespace(
+                    id="other-turn", items=[ThreadItem.model_validate(expected)],
+                ))
+                prior_reads = self.parent.full_read_count
+                self.namer.start("binding", self.parent, "parent-turn", external_input=external)
+                async with asyncio.timeout(1):
+                    while self.parent.full_read_count < prior_reads + 2:
+                        await asyncio.sleep(0)
+                self.assertEqual(self.codex.fork_calls, [])
+                self.namer.invalidate("binding")
+                await self.drain()
+                self.parent.native.turns.pop()
+        self.parent.native.turns[0].items = [ThreadItem.model_validate(expected)]
+        self.namer.start("binding", self.parent, "parent-turn", external_input=external)
+        await self.running()
+        self.codex.child.handle.finished.set()
+        await self.drain()
+        self.assertEqual(self.commits, [("binding", "parent", "会话自动命名")])
 
     async def test_missing_name_shape_skips_generation(self) -> None:
         del self.parent.native.name

@@ -77,6 +77,7 @@ from .callbacks import (
 )
 from .reply import reply_card
 from .model_info import with_model_details
+from .session_ids import session_identity_lines
 
 
 SESSIONS_PAGE_SIZE = 10
@@ -835,7 +836,7 @@ def config_card(
     allow_context_mode: bool = True,
     catalog_error: str | None = None,
 ) -> OutboundCard:
-    builder = _builder("当前会话配置", f"{short_id} · {project_alias}")
+    builder = _builder("当前会话配置", f"Netizen 会话编号：{short_id} · {project_alias}")
     builder.markdown(
         "Model 可继承 Codex，也可显式选择 Model / Effort / Speed；"
         "保存不会启动任务。Model 是模型，Effort 是思考强度，Speed 是速度。"
@@ -887,7 +888,7 @@ def rename_binding_card(
     project_alias: str,
     current_title: str,
 ) -> OutboundCard:
-    builder = _builder("重命名当前会话", f"{short_id} · {project_alias}")
+    builder = _builder("重命名当前会话", f"Netizen 会话编号：{short_id} · {project_alias}")
     builder.markdown(
         f"当前名称：`{_md_code(current_title)}`\n"
         "名称直接写入原生 Codex Thread，并同步显示在 Codex App/CLI。"
@@ -923,7 +924,7 @@ def archive_binding_card(
     project_alias: str,
     title: str,
 ) -> OutboundCard:
-    builder = _builder("归档当前会话", f"{short_id} · {project_alias}")
+    builder = _builder("归档当前会话", f"Netizen 会话编号：{short_id} · {project_alias}")
     builder.markdown(
         f"即将归档：`{_md_code(title)}`\n"
         "Codex 会处理该 Thread 当前的原生活动后执行归档。"
@@ -958,7 +959,7 @@ def delete_binding_card(
 ) -> OutboundCard:
     builder = _builder(
         "永久删除当前会话",
-        f"{short_id} · {project_alias}",
+        f"Netizen 会话编号：{short_id} · {project_alias}",
         template="red",
     )
     if native_thread_id is None:
@@ -1013,7 +1014,7 @@ def sessions_delete_binding_card(
 ) -> OutboundCard:
     builder = _builder(
         "永久删除会话",
-        f"{short_id} · {project_alias}",
+        f"Netizen 会话编号：{short_id} · {project_alias}",
         template="red",
     )
     if native_thread_id is None:
@@ -1104,7 +1105,7 @@ def archived_sessions_delete_binding_card(
 ) -> OutboundCard:
     builder = _builder(
         "永久删除已归档会话",
-        f"{short_id} · {project_alias}",
+        f"Netizen 会话编号：{short_id} · {project_alias}",
         template="red",
     )
     builder.markdown(
@@ -1211,19 +1212,16 @@ def _session_row(
     expected_turn_id = (
         _turn_reference(session.turn_id) if session.turn_id is not None else None
     )
-    native = (
-        session.native_thread_id[:8]
-        if session.native_thread_id is not None
-        else "pending"
-    )
     marker_text = "● 当前" if session.active else "○"
     text = (
         f"{marker_text} {session.title}\n"
-        f"会话：{session.short_id} · Project：{session.project_alias} · "
-        f"Native：{native} · 状态：{session.state}"
+        f"Project：{session.project_alias} · 状态：{session.state}"
     )
     if session.catalog_unconfirmed:
         text += " · 归档状态：未确认"
+    text += "\n" + "\n".join(session_identity_lines(
+        short_id=session.short_id, native_thread_id=session.native_thread_id,
+    ))
     controls: list[dict[str, Any]] = []
     if not session.active:
         controls.append(
@@ -1250,7 +1248,7 @@ def _session_row(
                 confirm=(
                     "确认归档此会话？",
                     (
-                        f"将归档会话 {session.short_id}（{session.title}）。"
+                        f"将归档 Netizen 会话 {session.short_id}（{session.title}）。"
                         "历史不会删除，之后可以恢复。"
                     ),
                 ),
@@ -1426,7 +1424,7 @@ def binding_lifecycle_result_card(
 ) -> OutboundCard:
     builder = _builder(
         title,
-        f"{short_id} · {project_alias}",
+        f"Netizen 会话编号：{short_id} · {project_alias}",
         template="green",
     )
     builder.markdown(message)
@@ -1609,12 +1607,12 @@ def binding_created_card(
 ) -> OutboundCard:
     builder = _builder(
         "会话创建成功",
-        f"{project_alias} · {short_id}",
+        f"{project_alias} · Netizen 会话编号：{short_id}",
         template="green",
     )
     builder.markdown(
         f"✅ 已选择项目 `{_md_code(project_alias)}`，"
-        f"并创建、切换到会话 **{short_id}**。"
+        f"并创建、切换到 Netizen 会话 **{short_id}**。"
     )
     builder.markdown(
         "现在可以直接发送任务，例如：**梳理这个项目的结构。**\n"
@@ -1639,7 +1637,7 @@ def binding_configured_card(
 ) -> OutboundCard:
     builder = _builder(
         "会话配置已保存",
-        f"{project_alias} · {short_id}",
+        f"{project_alias} · Netizen 会话编号：{short_id}",
         template="green",
     )
     builder.markdown(_model_source_summary(settings))
@@ -2295,9 +2293,11 @@ def _archived_session_row(
                 "elements": [
                     _plain(
                         f"{session.title}\n"
-                        f"会话：{session.short_id} · "
-                        f"Project：{session.project_alias} · "
-                        f"Native：{session.native_thread_id[:8]}"
+                        f"Project：{session.project_alias}\n"
+                        + "\n".join(session_identity_lines(
+                            short_id=session.short_id,
+                            native_thread_id=session.native_thread_id,
+                        ))
                     )
                 ],
             },

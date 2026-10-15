@@ -57,6 +57,15 @@ Mention Context Mode、对应 revision、creator 和时间。它不复制 Codex 
 **Active Binding**：Scope 中普通消息默认进入的 Binding。`/new`、`/resume` 只切换
 这条指针，不停止其他 Binding 的 Turn。
 
+**Codex Session ID / Codex 会话 ID**：原生 Thread 的完整标识，也是跨会话协作工具的
+目标引用。它不同于 Netizen 的 Binding ID，也不同于所在飞书聊天或话题的标识。
+
+**Netizen Session Reference / Netizen 会话编号**：普通 Binding 的本地标识；界面可显示
+其短前缀，供当前 Scope 的人工选择与管理。尚未创建原生 Thread 的 Binding 也有此编号。
+
+**Session Agent Input / 会话协作来信**：一个普通会话经协作工具向另一普通会话提交的
+工具来源输入。飞书中的机器人消息是它的展示，不代表真人用户发言或新增用户授权。
+
 **Session Defaults / 会话默认配置**：聊天中缺少当前会话时用于自动创建普通 Binding 的
 Project 与显式会话配置意图。配置属于聊天，生成的会话属于真实消息所在的 Scope。
 

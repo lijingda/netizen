@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,38 @@ class TopicMessage:
     thread_id: str | None
     root_id: str | None
     parent_id: str | None
+
+
+async def complete_fresh_topic(
+    channel: ReplyChannel,
+    root: TopicMessage,
+    *,
+    seed_content: Any,
+    seed_uuid: str,
+    before_seed: Callable[[], None] | None = None,
+) -> TopicMessage:
+    """Validate a fresh root and promote it once when Feishu needs a seed.
+
+    The caller retains the root even if promotion fails, so its existing
+    ownership and partial-publication handling remain operation-specific.
+    """
+    if root.parent_id is not None or root.root_id not in {None, root.message_id}:
+        raise TopicPublishError("飞书未返回全新的话题根消息。", unknown=True)
+    if root.thread_id is not None:
+        return root
+    if before_seed is not None:
+        before_seed()
+    origin = await send_topic_message(
+        channel, root.chat_id, seed_content,
+        SendOpts(receive_id_type="chat_id", reply_to=root.message_id,
+                 reply_in_thread=True, reply_target_gone="fail", uuid=seed_uuid),
+    )
+    if (
+        origin.thread_id is None or origin.root_id != root.message_id
+        or origin.parent_id != root.message_id
+    ):
+        raise TopicPublishError("飞书未确认种子消息与新话题的关系。", unknown=True)
+    return origin
 
 
 async def send_topic_message(channel: ReplyChannel, chat_id: str, content: Any, opts: SendOpts) -> TopicMessage:

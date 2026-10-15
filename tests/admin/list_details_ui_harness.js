@@ -61,11 +61,14 @@ async function api(path, options = {}) {
   assert.equal(selected, 2);
   assert.equal(identityRow.querySelector("strong").textContent, session.nativeTitle);
   assert.equal(identityRow.querySelector("img"), null);
-  assert(identityRow.textContent.includes("Binding b-short"));
+  assert(identityRow.textContent.includes("Netizen 会话编号：b-short"));
+  const threadInput = disclosure.querySelectorAll("input").at(-1);
+  assert.match(threadInput.getAttribute("aria-label"), /Codex 会话 ID.*跨会话工具.*完整值/);
   const lazyRow = document.createElement("tr");
   sessionIdentityCell(lazyRow, { ...session, nativeThreadId: null, topicId: null, nativeTitle: null, catalogState: "lazy" });
   assert.equal(lazyRow.querySelector("strong").textContent, "Lazy Session");
   assert.equal(lazyRow.querySelectorAll("input").length, 2);
+  assert.match(lazyRow.textContent, /Codex 会话 ID 尚未生成/);
 
   for (const action of ["activate", "configure", "rename", "archive", "unarchive", "unarchiveCurrent", "deleteLazy", "deleteMaterialized", "stop", "release"]) {
     session.actions[action] = { actionToken: action };

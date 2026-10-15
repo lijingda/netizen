@@ -3042,11 +3042,11 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         lines = _status_text(self.channel.replies[-1][1]).splitlines()
         for expected in (
             "当前会话",
-            "会话：11111111",
+            "Netizen 会话编号（/resume）：11111111",
             "名称：新会话",
             "会话预览：暂无（首条消息后生成）",
             "Project：test",
-            "Native Thread：pending（首条消息后创建）",
+            "Codex 会话 ID（跨会话工具）：尚未生成，首条消息后创建",
             "状态：idle",
             "Netizen 订阅：未建立（会话尚未物化）",
             "上下文窗口：暂无（首条消息后生成）",
@@ -3072,7 +3072,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         for expected in (
             "Project：test",
             "Git Branch：main...origin/main [ahead 2]",
-            "Native Thread：pending（首条消息后创建）",
+            "Codex 会话 ID（跨会话工具）：尚未生成，首条消息后创建",
         ):
             self.assertIn(expected, lines)
         read_branch.assert_awaited_once_with(self.project.resolve())
@@ -3289,9 +3289,15 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("name must win", text)
         self.assertIn("Preview " + "x" * 39 + "…", text)
         self.assertIn("新会话", text)
-        self.assertIn("会话：11111111 · Project：test", text)
-        self.assertIn("会话：22222222 · Project：test", text)
-        self.assertIn("会话：33333333 · Project：test", text)
+        rows = [item["content"] for item in _elements(card.card, "plain_text")]
+        for short_id, native_id in (
+            ("11111111", "native-one"),
+            ("22222222", "native-two"),
+            ("33333333", "尚未生成，首条消息后创建"),
+        ):
+            row = next(value for value in rows if f"Netizen 会话编号（/resume）：{short_id}" in value)
+            self.assertIn("Project：test", row)
+            self.assertIn(f"Codex 会话 ID（跨会话工具）：{native_id}", row)
         self.assertIn("● 当前", text)
         self.assertIn("设为当前", text)
         self.assertEqual(len(self.runtime.thread_metadata_calls), 1)
@@ -5335,7 +5341,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
         lines = _status_text(self.channel.replies[-1][1]).splitlines()
-        self.assertIn("Native Thread：native-one", lines)
+        self.assertIn("Codex 会话 ID（跨会话工具）：native-one", lines)
         self.assertIn(
             "Model：继承 Codex",
             lines,

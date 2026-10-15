@@ -12,6 +12,10 @@ Turn）时，尝试为无名称的 Thread 后台生成名称。steer、恢复 ob
 continuation、Side 和命名分支自身不触发。已有名称保持不变，不判断消息信息量。
 本次已结束但未命名时，下一次新 Turn 再尝试；没有定时重试、跨重启恢复或历史回填。
 
+[ADR 0081](0081-coordinate-ordinary-sessions-with-native-external-messages.md) 补充协作入口：
+指定初始标题复用本任务的后台写入，跳过生成 fork；未指定时，exact Turn 内匹配本次
+ExternalMessage 的工具输出也可作为输入可见性证据。其余并发、失败和收尾规则不变。
+
 ## 后台任务与原生身份
 
 每个 Binding 最多一个命名任务，先同步占位，再在锁外读取原生名称。固定 SDK 的

@@ -378,6 +378,12 @@ body.schedule-detail-open { overflow: hidden; }
 .system-tabs { width: fit-content; margin: 22px 0; }
 .admin-users { padding: 0; margin: 0; list-style: none; }
 .admin-users > li { display: flex; justify-content: space-between; align-items: center; gap: 16px; border-top: 1px solid var(--line); padding: 16px 0; }
+.session-access { margin-top: 32px; padding-top: 18px; border-top: 1px solid var(--line); }
+.session-access-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 24px; }
+.session-access-grid h4 { margin: 0 0 8px; }
+.session-access-grid p { min-height: 48px; color: var(--muted); line-height: 1.6; }
+.session-access-grid textarea { width: 100%; resize: vertical; font-family: monospace; }
+.session-access-grid [hidden] { display: none; }
 .identity-panel { max-width: 480px; border: 1px solid var(--line); border-radius: 14px; margin-bottom: 24px; padding: 20px; color: var(--ink); }
 .identity-panel h3 { margin: 0; }
 .identity-panel > p { margin: 20px 0; }

@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from openai_codex import ExternalMessage
+
 from netizen_cli.bindings import BindingStore
 from netizen_cli.codex_runtime import CodexRuntime, SubmitDisposition
 from netizen_cli.domain import FeishuScope, ScopeKind
@@ -36,12 +38,21 @@ class NamingThread(FakeThread):
         if self.ephemeral:
             response.thread.path = None
         for turn in response.thread.turns:
-            if not any(getattr(item.root, "type", None) == "userMessage" for item in turn.items):
+            external = self.codex.external_inputs.get(turn.id)
+            if external is not None:
+                if not any(getattr(item.root, "type", None) == "functionCallOutput" for item in turn.items):
+                    turn.items.insert(0, SimpleNamespace(root=SimpleNamespace(
+                        type="functionCallOutput", name=external.tool_name,
+                        namespace=external.namespace, output=external.content,
+                    )))
+            elif not any(getattr(item.root, "type", None) == "userMessage" for item in turn.items):
                 turn.items.insert(0, SimpleNamespace(root=SimpleNamespace(type="userMessage")))
         return response
 
     async def turn(self, input, **kwargs):
         handle = await super().turn(input, **kwargs)
+        if isinstance(input, ExternalMessage):
+            self.codex.external_inputs[handle.id] = input
         original_run = handle.run
 
         async def run():
@@ -68,6 +79,7 @@ class NamingCodex(FakeCodex):
     def __init__(self):
         super().__init__()
         self.names = {}
+        self.external_inputs = {}
         self.write_entered = asyncio.Event()
         self.write_gate = None
         self.manual_write_gates = {}
@@ -157,6 +169,72 @@ class RuntimeThreadNamingTest(unittest.IsolatedAsyncioTestCase):
     async def finish_parent(self, turn_id):
         next(h for h in self.codex.handles if h.id == turn_id).complete()
         self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+    async def submit_external(self, *, title=None):
+        submission = await self.runtime.submit_external(
+            binding=self.binding, cwd=self.cwd,
+            message=ExternalMessage("create_thread", "协作任务", "netizen_sessions"),
+            owner_id="agent", origin=object(), title=title,
+        )
+        if submission.release_receipt_attempt is not None:
+            submission.release_receipt_attempt()
+        return submission
+
+    async def test_external_preferred_title_is_background_and_manual_name_remains_last(self):
+        gate = self.codex.manual_write_gates["Chosen"] = asyncio.Event()
+        first = await asyncio.wait_for(self.submit_external(title="  Chosen  "), 1)
+        await asyncio.wait_for(self.codex.write_entered.wait(), 1)
+        self.assertEqual(self.codex.set_name_calls, [(first.thread_id, "Chosen")])
+        self.assertEqual(self.codex.fork_calls, [])
+        self.assertIsNone(self.runtime.lifecycle_state(self.binding.id))
+        self.assertFalse(self.runtime._lock(self.binding.id).locked())
+        steered = await asyncio.wait_for(self.submit(text="继续工作"), 1)
+        self.assertIs(steered.disposition, SubmitDisposition.STEERED)
+
+        # Expiry/invalidation cannot release a writer whose RPC is still in
+        # flight, or allow the next Turn to launch a competing naming attempt.
+        self.runtime._thread_namer.invalidate(self.binding.id)
+        manual = asyncio.create_task(self.runtime.rename_exact(self.binding.id, "Manual"))
+        await eventually(lambda: self.runtime._name_writes._locks[self.binding.id].contenders == 2)
+        await self.finish_parent(first.turn_id)
+        second = await asyncio.wait_for(self.submit(), 1)
+        self.assertIs(second.disposition, SubmitDisposition.STARTED)
+        self.assertEqual(self.codex.fork_calls, [])
+        self.assertFalse(manual.done())
+        gate.set()
+        self.assertEqual(await asyncio.wait_for(manual, 1), "Manual")
+        await eventually(lambda: not self.runtime._thread_namer._jobs)
+        self.assertEqual(self.codex.names[first.thread_id], "Manual")
+        self.assertEqual(self.codex.set_name_calls, [(first.thread_id, "Chosen"), (first.thread_id, "Manual")])
+        await self.finish_parent(second.turn_id)
+
+    async def test_external_preferred_title_failure_keeps_task_and_next_turn_can_name(self):
+        self.codex.set_name_errors.append(RuntimeError("unknown name write outcome"))
+        first = await self.submit_external(title="Chosen")
+        await eventually(lambda: not self.runtime._thread_namer._jobs)
+        self.assertEqual(self.codex.set_name_calls, [(first.thread_id, "Chosen")])
+        self.assertEqual(self.codex.fork_calls, [])
+        self.assertIsNone(self.runtime.lifecycle_state(self.binding.id))
+        self.assertTrue(self.runtime._accepting)
+        steered = await self.submit(text="继续工作")
+        self.assertIs(steered.disposition, SubmitDisposition.STEERED)
+        await self.finish_parent(first.turn_id)
+
+        second = await self.submit()
+        child = await self.naming_handle()
+        child.complete(response='{"title":"Automatic"}')
+        await eventually(lambda: self.codex.names.get(first.thread_id) == "Automatic")
+        await self.finish_parent(second.turn_id)
+        self.assertEqual(len(self.outcomes), 2)
+
+    async def test_external_without_title_generates_from_its_exact_input(self):
+        first = await self.submit_external()
+        child = await self.naming_handle()
+        child.complete(response='{"title":"Automatic"}')
+        await eventually(lambda: self.codex.names.get(first.thread_id) == "Automatic")
+        self.assertEqual(len(self.codex.fork_calls), 1)
+        self.assertIsNone(self.runtime.lifecycle_state(self.binding.id))
+        await self.finish_parent(first.turn_id)
 
     async def test_new_turn_names_once_steer_and_private_work_are_invisible(self):
         first = await self.submit()

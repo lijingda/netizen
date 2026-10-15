@@ -258,6 +258,7 @@ class SideCloseFailed(RuntimeError):
 class SubmitDisposition(str, Enum):
     STARTED = "started"
     STEERED = "steered"
+    JOINED = "joined"
 
 
 class GoalFinalizationStatus(str, Enum):

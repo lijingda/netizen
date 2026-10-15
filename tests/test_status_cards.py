@@ -38,8 +38,8 @@ class StatusCardTest(unittest.TestCase):
         panel, = _elements(card, "collapsible_panel")
         self.assertFalse(panel["expanded"])
         details = "\n".join(item["content"] for item in _elements(panel, "plain_text"))
-        self.assertIn("会话：12345678", details)
-        self.assertIn("Native Thread：01a0f202-31e1-7f62-81c9-3db3ee56ff04", details)
+        self.assertIn("Netizen 会话编号（/resume）：12345678", details)
+        self.assertIn("Codex 会话 ID（跨会话工具）：01a0f202-31e1-7f62-81c9-3db3ee56ff04", details)
         self.assertIn("本进程未订阅", details)
         self.assertNotIn("24,500", details)
         self.assertNotIn("Model：", details)
@@ -125,6 +125,21 @@ class StatusCardTest(unittest.TestCase):
             self.assertNotEqual(old["behaviors"][0]["value"].pop("nonce"), new["behaviors"][0]["value"].pop("nonce"))
         self.assertEqual(card, renewed)
 
+    def test_lazy_status_preserves_absent_native_identity_across_renewal(self):
+        card = _session_card(native_thread_id=None)
+        plain = "\n".join(item["content"] for item in _elements(card, "plain_text"))
+        self.assertIn("Codex 会话 ID（跨会话工具）：尚未生成，首条消息后创建", plain)
+        self.assertIn("Netizen 会话编号（/resume）：12345678", plain)
+        value = _elements(card, "button")[0]["behaviors"][0]["value"]
+        decoded = decode_status_command(
+            scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
+            message_id="om_status", sender_id="ou_clicker", value=value,
+        )
+        self.assertIsNone(decoded.snapshot["native_thread_id"])
+        self.assertEqual(decoded.target_id, "12345678-full-binding-id")
+        renewed = decoded.card().card
+        self.assertIn("尚未生成，首条消息后创建", str(renewed))
+
     def test_decoder_rejects_unknown_commands_scope_and_untyped_snapshots(self):
         value = _elements(_session_card(), "button")[0]["behaviors"][0]["value"]
         invalid = [
@@ -133,6 +148,7 @@ class StatusCardTest(unittest.TestCase):
             {"arguments": ["arbitrary"]}, {"snapshot": {}},
             {"snapshot": {**value["snapshot"], "metadata_lines": ["missing preview"]}},
             {"snapshot": {**value["snapshot"], "state": {"tag": "button"}}},
+            {"snapshot": {**value["snapshot"], "native_thread_id": 123}},
             {"snapshot": {**value["snapshot"], "progress_lines": ["x"] * 33}},
         ]
         for change in invalid:

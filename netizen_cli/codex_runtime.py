@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from openai_codex import (
     AsyncThread,
+    ExternalMessage,
     ImageInput,
     InternalRpcError,
     InvalidRequestError,
@@ -49,7 +50,7 @@ from .domain import (
     MentionContextMode,
     NativeCapability,
 )
-from .model_settings import ModelCatalog, TurnModelSettings
+from .model_settings import ModelCatalog, ModelCatalogError, TurnModelSettings
 from .partial_answers import PartialAnswer, partial_answers_from_items
 from .error_messages import describe_error, native_turn_failure
 from .runtime.name_writes import ThreadNameWrites
@@ -480,6 +481,10 @@ class CodexRuntime:
         self._side_idle_seconds = side_idle_seconds
         self._ordinary_thread_idle_seconds = ordinary_thread_idle_seconds
         self._active: dict[str, _ActiveTurn] = {}
+        # ExternalMessage may start the next native Turn while the previous
+        # Turn is still materializing its Result/Files. Its existing consumer
+        # retains exact ownership until that independent handoff completes.
+        self._retiring_turns: dict[tuple[str, str], _ActiveTurn] = {}
         self._compacting: dict[str, _ActiveCompaction] = {}
         self._goals: dict[str, _ActiveGoal] = {}
         self._context_window_usage: dict[str, _ContextWindowUsageSnapshot] = {}
@@ -495,6 +500,7 @@ class CodexRuntime:
         self._subscription_idle_tasks: set[asyncio.Task[None]] = set()
         self._name_writes = ThreadNameWrites()
         self._accepting = True
+        self._shutdown_requested = False
         self._thread_namer = (
             ThreadNamer(
                 codex=codex,
@@ -1324,17 +1330,17 @@ class CodexRuntime:
             raise SideSessionConflict("Side 路由已结束或父会话已变化，本次未创建。")
 
     @asynccontextmanager
-    async def track_fork_creation(self, project_alias: str) -> AsyncIterator[None]:
-        """Include one ordinary fork handoff in existing shutdown ownership."""
+    async def track_topic_creation(self, project_alias: str) -> AsyncIterator[None]:
+        """Own an ordinary topic creation through its final Binding handoff."""
 
         task = asyncio.current_task()
         if task is None or task in self._fork_creations:
-            raise RuntimeError("fork creation must have one non-nested owning task")
+            raise RuntimeError("topic creation must have one non-nested owning task")
         self._fork_creations[task] = project_alias
         already_tracked = task in self._tasks
         self._tasks.add(task)
         try:
-            self.require_fork_creation_open(project_alias)
+            self.require_topic_creation_open(project_alias)
             yield
         finally:
             self._fork_creations.pop(task, None)
@@ -1344,13 +1350,23 @@ class CodexRuntime:
     def project_has_fork_creation(self, project_alias: str) -> bool:
         return project_alias in self._fork_creations.values()
 
+    @asynccontextmanager
+    async def track_fork_creation(self, project_alias: str) -> AsyncIterator[None]:
+        """Compatibility name for the shared ordinary-topic creation owner."""
+
+        async with self.track_topic_creation(project_alias):
+            yield
+
     def require_fork_creation_open(self, project_alias: str) -> None:
+        self.require_topic_creation_open(project_alias)
+
+    def require_topic_creation_open(self, project_alias: str) -> None:
         """Fence native creation and the final synchronous Binding commit."""
 
         if not self._accepting:
-            raise RuntimeClosed("服务正在停止，本次分支创建未完成。")
+            raise RuntimeClosed("服务正在停止，本次会话创建未完成。")
         if self._fork_creations.get(asyncio.current_task()) != project_alias:
-            raise RuntimeError("fork creation handoff is not owned by this task")
+            raise RuntimeError("topic creation handoff is not owned by this task")
         self._bindings.require_project_not_deleting(project_alias)
 
     def _require_fork_source_locked(
@@ -1951,6 +1967,27 @@ class CodexRuntime:
         response = await self._codex.models()
         return ModelCatalog.from_response(response)
 
+    async def native_thread_model(self, binding_id: str) -> str:
+        """Read the exact source's effective native model without loading it."""
+
+        binding = self._bindings.get(binding_id)
+        if not self._accepting:
+            raise RuntimeClosed("服务正在停止，暂不能读取来源模型。")
+        if binding.native_thread_id is None:
+            raise ThreadNotMaterialized("来源会话尚未生成 Codex Thread，无法继承模型。")
+        response = await AsyncThread(self._codex, binding.native_thread_id).read()
+        native = getattr(response, "thread", None)
+        current = self._bindings.get(binding_id)
+        if (
+            getattr(native, "id", None) != binding.native_thread_id
+            or current.native_thread_id != binding.native_thread_id
+        ):
+            raise SteerRace("读取来源模型期间会话身份已变化，本次未创建。")
+        model = getattr(native, "model", None)
+        if not isinstance(model, str) or not model:
+            raise ModelCatalogError("来源原生会话未返回模型，无法确认继承配置。")
+        return model
+
     async def thread_summary(
         self, thread_id: str,
     ) -> NativeThreadMetadata:
@@ -2332,11 +2369,16 @@ class CodexRuntime:
         thread: NativeThread,
         turn_id: str,
         settings: TurnModelSettings | None = None,
+        *,
+        preferred_title: str | None = None,
+        external_input: ExternalMessage | None = None,
     ) -> None:
         if self._thread_namer is None or not self._accepting:
             return
         try:
-            self._thread_namer.start(binding_id, thread, turn_id, settings)
+            self._thread_namer.start(binding_id, thread, turn_id, settings,
+                                     preferred_title=preferred_title,
+                                     external_input=external_input)
         except Exception:
             # Auxiliary setup must never turn an accepted user Turn into an
             # apparent submission failure. Do not log user content or titles.
@@ -2964,6 +3006,45 @@ class CodexRuntime:
                     )
             raise
 
+    async def submit_external(
+        self,
+        *,
+        binding: ThreadBinding,
+        cwd: Path,
+        message: ExternalMessage,
+        owner_id: str,
+        origin: object,
+        model: str | None = None,
+        title: str | None = None,
+    ) -> Submission:
+        """Deliver verified tool-origin content to an exact current Thread.
+
+        Only this entry uses native start/join semantics. Ordinary Feishu,
+        question-card and scheduled inputs retain their exact-Turn admission.
+        """
+
+        if not isinstance(message, ExternalMessage):
+            raise TypeError("external submission requires an ExternalMessage")
+        if title is not None:
+            title = " ".join(title.split())
+            if not title or len(title) > 120:
+                raise ValueError("会话名称必须为 1 到 120 个字符。")
+        native_model = None
+        if model is not None:
+            catalog = await self.model_catalog()
+            selected = next(
+                (item for item in catalog.models if model in {item.id, item.model}),
+                None,
+            )
+            if selected is None:
+                raise ModelCatalogError("所选 Model 已不可用，跨会话消息未发送。")
+            native_model = selected.model
+        return await self._submit(
+            binding=binding, cwd=cwd, input=message, owner_id=owner_id,
+            origin=origin, external=True, external_model=native_model,
+            preferred_title=title,
+        )
+
     def _guard_no_scheduled_initial(self, binding_id: str) -> None:
         if self._bindings.scheduled_initial_reservation(binding_id) is not None:
             raise ScheduledInitialStartConflict("定时任务正在启动，请稍后重发。")
@@ -2980,7 +3061,12 @@ class CodexRuntime:
         context_commit: ContextCursorCommit | None = None,
         skill_names: tuple[str, ...] = (),
         initial: _ScheduledInitialSubmission | None = None,
+        external: bool = False,
+        external_model: str | None = None,
+        preferred_title: str | None = None,
     ) -> Submission:
+        if isinstance(input, ExternalMessage) != external:
+            raise TypeError("ExternalMessage must use the verified external input entry")
         initial_run_id = initial.run_id if initial is not None else None
         if initial_run_id is None:
             self._guard_no_scheduled_initial(binding.id)
@@ -2988,7 +3074,7 @@ class CodexRuntime:
             self._bindings.require_scheduled_initial(initial_run_id, binding.id)
         if admission is not None and admission.binding_id != binding.id:
             raise ValueError("submission admission belongs to another Binding")
-        if admission is None and initial is None and binding.id in self._goals:
+        if not external and admission is None and initial is None and binding.id in self._goals:
             admission = await self.capture_submission_admission(binding.id)
         prepared_binding = self._bindings.get(binding.id)
         if not prepared_binding.active:
@@ -3017,7 +3103,12 @@ class CodexRuntime:
             raise SteerRace(
                 "准备本条消息期间任务反馈配置已变化，本条消息未执行，请重新发送。"
             )
-        if prepared_binding.message_context_mode is MentionContextMode.CATCH_UP:
+        if external:
+            # Tool-origin input is not a new human context window. Do not read
+            # chat catch-up, consume its cursor or rebase it onto a user role.
+            if admission is not None or context_commit is not None or skill_names or initial:
+                raise ValueError("external input cannot use ordinary preparation")
+        elif prepared_binding.message_context_mode is MentionContextMode.CATCH_UP:
             if initial_run_id is None:
                 if admission is None or context_commit is None:
                     raise ValueError("catch-up submission requires admission and cursor commit")
@@ -3035,6 +3126,7 @@ class CodexRuntime:
             configured_settings is not None
             and admission is None
             and initial_run_id is None
+            and not external
         ):
             admission = await self.capture_submission_admission(binding.id)
             prepared_binding = self._bindings.get(binding.id)
@@ -3057,6 +3149,11 @@ class CodexRuntime:
 
         resolved_settings = None
         settings_for_new_turn = configured_settings
+        if external_model is not None:
+            # Explicit model selection belongs to this native request. It must
+            # not silently rewrite the target's Binding settings or force the
+            # target's configured effort onto a different model.
+            settings_for_new_turn = None
         if admission is not None and admission.thread_id is not None:
             # A running Turn can only be steered. Binding settings apply only
             # when Netizen starts a new Turn and are never injected into steer.
@@ -3113,6 +3210,10 @@ class CodexRuntime:
                 raise SteerRace(
                     "准备本条消息期间 active 会话已切换，本条消息未执行，请重新发送。"
                 )
+            if external:
+                self._bindings.require_project_not_deleting(binding.project_alias)
+                if not self._bindings.get_project(binding.project_alias).enabled:
+                    raise ProjectDisabled(binding.project_alias)
             if binding.settings_revision != prepared_settings_revision:
                 raise SteerRace(
                     "准备本条消息期间会话配置已变化，本条消息未执行，请重新发送。"
@@ -3125,7 +3226,7 @@ class CodexRuntime:
                 raise SteerRace(
                     "准备本条消息期间任务反馈配置已变化，本条消息未执行，请重新发送。"
                 )
-            if initial is not None:
+            if initial is not None or external:
                 await self._guard_no_goal_locked(binding)
                 goal = None
             else:
@@ -3168,7 +3269,7 @@ class CodexRuntime:
                     input=native_input,
                     context_commit=context_commit,
                 )
-            if active is not None:
+            if active is not None and not external:
                 self._mark_thread_subscribed_locked(binding, active.thread)
                 self._refresh_turn_activity(active)
                 stale_after_cursor = active.plan_cursor
@@ -3212,7 +3313,9 @@ class CodexRuntime:
             # after an earlier Turn persisted its native Thread ID.
             binding = self._bindings.get(binding.id)
             try:
-                if binding.native_thread_id is None:
+                if active is not None:
+                    thread = active.thread
+                elif binding.native_thread_id is None:
                     # The public API has no "inherit Ask/Custom" sentinel;
                     # omitting approval_mode deliberately selects its
                     # auto_review default.
@@ -3221,6 +3324,8 @@ class CodexRuntime:
                         # Initialize native model metadata with the first Turn's
                         # selected model, including its context window budget.
                         start_kwargs["model"] = resolved_settings.model
+                    if external_model is not None:
+                        start_kwargs["model"] = external_model
                     thread = await self._codex.thread_start(**start_kwargs)
                 else:
                     # Do not override cwd, sandbox, model, approval, config, or
@@ -3238,6 +3343,11 @@ class CodexRuntime:
                 self.close_admission()
                 raise
             except Exception as error:
+                if external and isinstance(error, ThreadLifecycleError):
+                    # Exact resume rejection proves there was no delivery;
+                    # another client may have archived the target after the
+                    # tool's read-only catalog check.
+                    raise
                 # Starting/resuming is side-effectful and a lost response does
                 # not prove that App Server left native state untouched.
                 self.close_admission()
@@ -3261,7 +3371,7 @@ class CodexRuntime:
                 thread,
             )
 
-            if initial_run_id is not None:
+            if initial_run_id is not None or external:
                 # A Project deletion may freeze creation while thread/start
                 # is in flight. Its exact native identity is now retained, but
                 # no first Turn may begin after that freeze.
@@ -3270,11 +3380,19 @@ class CodexRuntime:
                     if not self._bindings.get_project(binding.project_alias).enabled:
                         raise ProjectDisabled(binding.project_alias)
                 except Exception:
-                    self._bindings.schedules.release(
-                        initial_run_id, error_code="project_unavailable",
-                    )
+                    if initial_run_id is not None:
+                        self._bindings.schedules.release(
+                            initial_run_id, error_code="project_unavailable",
+                        )
                     raise
 
+            if external and not self._accepting:
+                # start/resume and Goal inspection await native I/O. Retain an
+                # already assigned Thread ID, but do not send a first/new task
+                # after shutdown or an unknown mutation closed admission.
+                raise RuntimeClosed("服务正在停止，跨会话消息未发送。")
+            if external and not self._bindings.get(binding.id).active:
+                raise SteerRace("目标会话已切到后台，跨会话消息未发送。")
             try:
                 turn_kwargs: dict[str, object] = {}
                 if resolved_settings is not None:
@@ -3283,12 +3401,18 @@ class CodexRuntime:
                         "effort": resolved_settings.effort,
                         "service_tier": resolved_settings.service_tier_id,
                     }
+                if external_model is not None:
+                    turn_kwargs["model"] = external_model
                 handle = await thread.turn(native_input, **turn_kwargs)
             except asyncio.CancelledError:
                 self._invalidate_context_window_usage(binding.id)
                 self.close_admission()
                 raise
             except Exception as error:
+                if external and isinstance(error, InvalidRequestError):
+                    # An explicit native rejection proves non-delivery. Never
+                    # retry it as steer/user input or close unrelated Bindings.
+                    raise
                 # turn/start is side-effectful: a lost response cannot prove
                 # that App Server did not start the Turn. Never admit another
                 # Turn on this or any other Binding until the service restarts.
@@ -3304,6 +3428,23 @@ class CodexRuntime:
                     "native Turn handle returned a different Thread ID; "
                     "service admission is closed"
                 )
+
+            if active is not None and handle.id == active.handle.id:
+                # The returned handle has its own SDK notification cursor.
+                # Dropping it releases that unused cursor through SDK-owned
+                # finalization. Keep the original consumer, owner and origin.
+                self._refresh_turn_activity(active)
+                active.plan_may_be_stale = True
+                active.plan_stale_after_cursor = active.plan_cursor
+                active.activity_revision += 1
+                return Submission(
+                    disposition=SubmitDisposition.JOINED,
+                    binding_id=binding.id, thread_id=thread.id, turn_id=handle.id,
+                    task_feedback=active.task_feedback,
+                    feedback_revision=active.feedback_revision,
+                )
+            if active is not None:
+                self._retiring_turns[(binding.id, active.handle.id)] = active
 
             receipt_attempted = asyncio.Event()
             active = _ActiveTurn(
@@ -3333,6 +3474,11 @@ class CodexRuntime:
                         "服务已停止接收新任务，请重启后对账。"
                     ) from error
             self._track(active)
+            if external and self._shutdown_requested:
+                # turn/start was already in flight when shutdown took its
+                # snapshot. Its newly accepted handle still needs the same
+                # exact interrupt/cleanup ownership as snapshot members.
+                self._track_late_shutdown_turn(active)
             try:
                 self._commit_context_cursor_locked(
                     binding=binding,
@@ -3344,7 +3490,11 @@ class CodexRuntime:
                 # persistence warning instead of a normal receipt callback.
                 receipt_attempted.set()
                 raise
-            self._start_automatic_name(binding.id, thread, handle.id, resolved_settings)
+            self._start_automatic_name(
+                binding.id, thread, handle.id, resolved_settings,
+                preferred_title=preferred_title,
+                external_input=input if external else None,
+            )
             return Submission(
                 disposition=SubmitDisposition.STARTED,
                 binding_id=binding.id,
@@ -4598,6 +4748,16 @@ class CodexRuntime:
                 active.task.cancel()
             changed = True
 
+        for key, retired in tuple(self._retiring_turns.items()):
+            if retired.binding_id != binding_id:
+                continue
+            self._retiring_turns.pop(key)
+            retired.activity_observation_enabled = False
+            retired.receipt_attempted.set()
+            if retired.task is not None and not retired.task.done():
+                retired.task.cancel()
+            changed = True
+
         compaction = self._compacting.pop(binding_id, None)
         if compaction is not None:
             compaction.receipt_attempted.set()
@@ -5180,6 +5340,7 @@ class CodexRuntime:
             self._cancel_subscription_idle(record)
 
     async def interrupt_all(self) -> None:
+        self._shutdown_requested = True
         self.close_admission()
         await self._drain_subscription_idle_tasks()
         snapshot = tuple(self._active.items())
@@ -5188,6 +5349,8 @@ class CodexRuntime:
         for active in self._compacting.values():
             active.receipt_attempted.set()
         for _binding_id, active in snapshot:
+            active.receipt_attempted.set()
+        for active in self._retiring_turns.values():
             active.receipt_attempted.set()
         for _binding_id, active in goal_snapshot:
             active.receipt_attempted.set()
@@ -5304,6 +5467,7 @@ class CodexRuntime:
         for binding_id in tuple(self._lifecycles):
             self._advance_admission_revision(binding_id)
         self._active.clear()
+        self._retiring_turns.clear()
         self._compacting.clear()
         self._lifecycles.clear()
         for record in self._subscriptions.values():
@@ -6243,12 +6407,13 @@ class CodexRuntime:
                         },
                     )
                     continue
-                self._context_window_usage[active.binding_id] = (
-                    _ContextWindowUsageSnapshot(
-                        thread_id=active.handle.thread_id,
-                        usage=usage,
+                if self._active.get(active.binding_id) is active:
+                    self._context_window_usage[active.binding_id] = (
+                        _ContextWindowUsageSnapshot(
+                            thread_id=active.handle.thread_id,
+                            usage=usage,
+                        )
                     )
-                )
                 observed_usage = True
         except asyncio.CancelledError:
             raise
@@ -6278,6 +6443,7 @@ class CodexRuntime:
         unavailable_error: BaseException | None = None
         activity: TurnActivitySnapshot | None = None
         retain_active = False
+        retired_turn = False
         try:
             observation: TurnResult | _TurnObservation | None = None
             if recover_first:
@@ -6298,7 +6464,7 @@ class CodexRuntime:
                         )
 
             while error is None and unavailable_error is None:
-                if self._active.get(active.binding_id) is not active:
+                if not self._owns_turn_observation(active):
                     return
                 self._refresh_turn_activity(active)
                 if observation is None:
@@ -6370,7 +6536,7 @@ class CodexRuntime:
                             active.handle.thread_id, active.handle.id,
                         )
                     finally:
-                        if not observed_usage:
+                        if not observed_usage and self._active.get(active.binding_id) is active:
                             self._invalidate_context_window_usage(active.binding_id)
             finally:
                 while not retain_active:
@@ -6397,12 +6563,15 @@ class CodexRuntime:
                         break
                     await active.cleanup_ready.wait()
                 self._signal_turn_rechecked(active)
+                retired_turn = self._retiring_turns.pop(
+                    (active.binding_id, active.handle.id), None,
+                ) is active
 
         await active.receipt_attempted.wait()
         if unavailable_error is not None:
             if not notify_unavailable:
                 return
-            if not await self._turn_unavailable_notice_is_current(active):
+            if not retired_turn and not await self._turn_unavailable_notice_is_current(active):
                 return
             notice = TurnObservationUnavailableOutcome(
                 binding_id=active.binding_id,
@@ -6471,7 +6640,7 @@ class CodexRuntime:
         try:
             async with asyncio.timeout(_TURN_OBSERVATION_RECOVERY_TIMEOUT_SECONDS):
                 while io_count < _TURN_OBSERVATION_RECOVERY_MAX_IO:
-                    if self._active.get(active.binding_id) is not active:
+                    if not self._owns_turn_observation(active):
                         raise asyncio.CancelledError
                     if resume_required and not resume_attempted:
                         io_count += 1
@@ -6489,7 +6658,7 @@ class CodexRuntime:
                                 "thread_resume returned a different native Thread identity"
                             )
                         async with self._lock(active.binding_id):
-                            if self._active.get(active.binding_id) is not active:
+                            if not self._owns_turn_observation(active):
                                 raise asyncio.CancelledError
                             binding = self._bindings.get(active.binding_id)
                             if binding.native_thread_id != active.handle.thread_id:
@@ -6497,7 +6666,8 @@ class CodexRuntime:
                                     "Binding changed native Thread during Turn observation"
                                 )
                             active.thread = thread
-                            self._mark_thread_subscribed_locked(binding, thread)
+                            if self._active.get(active.binding_id) is active:
+                                self._mark_thread_subscribed_locked(binding, thread)
                         resume_attempted = True
                         resume_required = False
                         if io_count >= _TURN_OBSERVATION_RECOVERY_MAX_IO:
@@ -6522,6 +6692,12 @@ class CodexRuntime:
                         last_error = caught
                     else:
                         if isinstance(classified, _TurnObservation):
+                            if self._is_retiring_turn(active):
+                                last_error = _TurnViewUnverified(
+                                    "previous Turn is not terminal after native start/join advanced"
+                                )
+                                await asyncio.sleep(self._poll_interval_seconds)
+                                continue
                             return classified
                         if (
                             _enum_value(getattr(classified, "status", None)) == "interrupted"
@@ -6898,7 +7074,11 @@ class CodexRuntime:
         )
         self._require_exact_observation_thread(active, native_thread)
         thread_status = _thread_status_type(native_thread)
-        if thread_status == "active" and active.in_progress_observed:
+        if (
+            thread_status == "active"
+            and active.in_progress_observed
+            and not self._is_retiring_turn(active)
+        ):
             return _TurnObservation.ACTIVE
         if thread_status not in {"active", "idle", "notLoaded", "systemError"}:
             raise RuntimeError(
@@ -6919,6 +7099,10 @@ class CodexRuntime:
             if isinstance(classified, _TurnObservation):
                 return classified
         if isinstance(classified, _TurnObservation):
+            if self._is_retiring_turn(active):
+                raise _TurnViewUnverified(
+                    "previous Turn is not terminal after native start/join advanced"
+                )
             if thread_status == "idle":
                 raise _TurnViewUnverified(
                     "native Thread changed from idle to an in-progress exact Turn"
@@ -7100,9 +7284,31 @@ class CodexRuntime:
             raise
         return getattr(response, "thread", None)
 
+    def _is_retiring_turn(self, active: _ActiveTurn) -> bool:
+        return self._retiring_turns.get((active.binding_id, active.handle.id)) is active
+
+    def _owns_turn_observation(self, active: _ActiveTurn) -> bool:
+        return self._active.get(active.binding_id) is active or self._is_retiring_turn(active)
+
     def _track(self, active: _ActiveTurn) -> None:
         self._active[active.binding_id] = active
         self._start_turn_consumer(active)
+
+    def _track_late_shutdown_turn(self, active: _ActiveTurn) -> None:
+        active.receipt_attempted.set()
+
+        async def stop() -> None:
+            try:
+                await self._interrupt(active.binding_id, active)
+            except Exception:
+                logger.exception(
+                    "late accepted external Turn shutdown cleanup failed",
+                    extra={"thread_id": active.handle.thread_id, "turn_id": active.handle.id},
+                )
+
+        task = asyncio.create_task(stop(), name=f"codex-shutdown-turn:{active.handle.id}")
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     def _start_turn_consumer(
         self,

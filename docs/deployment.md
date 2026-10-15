@@ -620,6 +620,75 @@ MCP 不依赖浏览器的 Admin 登录状态。停止先关闭认领和管理 ad
 启动边界验收包括当前 schema 显式初始化、受支持旧库迁移、不受支持库只读拒绝、
 元数据与 Side/Project 墓碑保留。迁移持有 lifetime lock；提交后失败不自动恢复旧数据库。
 
+### 普通会话协作兼容性与验收
+
+[ADR 0081](adr/0081-coordinate-ordinary-sessions-with-native-external-messages.md) 的六工具、
+共享 MCP 传输或 ExternalMessage Runtime 交接变更，需完成 `make check` 及受影响的
+原生 probe。可运行以下隔离探针，并以外部进程 deadline 限制整个进程（全部场景建议
+240 秒；脚本内部每场景另有 45 秒界限）：
+
+```bash
+.venv/bin/python scripts/probe_session_collaboration.py \
+  --output /tmp/netizen-session-collaboration-evidence.json
+```
+
+`--case sdk_create_idle|sdk_join|runtime_join|runtime_terminal_race|session_mcp|runtime_external_name|runtime_external_title` 可选择
+受影响场景。脚本复用现有本地 Responses mock provider，运行真正 bundled App Server，
+只使用临时 Codex 目录与 loopback，不调用真实模型账号或发送飞书消息。Runtime 竞态
+只延迟一次真实公开 history read 的返回，不伪造原生 Turn ID 或完成结果。
+
+2026-10-15 在 `openai-codex` / bundled CLI `0.162.1` 已通过五个场景：
+
+- ExternalMessage 首次创建、空闲开始新轮以及运行中加入原轮；模型输入保持
+  `function_call_output`，持久历史和冷读保持 `functionCallOutput`，没有转成 userMessage。
+- 生产 `submit_external` 的 JOINED 只有一个结果消费者，保留原 owner/origin；原生旧轮
+  已完成但本地观察延迟时，返回新 Turn，新旧两轮各交付一次且归属正确。
+- 生产 SessionMcpRunner 的六工具可被真实 App Server 提供给本地模拟模型；一次
+  `list_threads` 调用收到正确的原生来源 Thread metadata，结果进入后续模型请求和历史。
+  生产 `approve`/`prompt`/145 秒配置可解析，另一个用户 MCP 仍可发现，配置文件字节不变。
+
+同日最终 `make check` 通过 3,139 项测试（15 项条件跳过），含 wheel/sdist 隔离资源、
+Python 编译、依赖一致性、SDK Activity/20/20/40 probes 与只读 Skill roots 检查。
+Admin JavaScript 行为测试本机使用 Node.js 24.18.1；CI 规定的 Node.js 22 未在本机复跑。
+
+同日 Goal 预检回执修正后重新执行 `make check`：3,141 项测试通过（15 项条件跳过），
+编译、依赖与上述 SDK 检查全部通过。新增回归确认 Goal 只读预检失败/状态未知时零原生
+投递并返回明确未接受，真正副作用未知仍保持未知回执；同时补齐配置示例中两组默认
+范围的既有测试断言。此修正保留 SDK 对 active Goal 来信的限制，没有修改原生投递方式。
+
+MCP 场景回调是记录参数的 fixture，不代表真实模型会自主正确编排六工具。该证据也不
+覆盖 mutation 的实际审批交互、等待完整 145 秒、真实飞书单聊/群/话题的新建与卡片
+客户端效果；这些在授权的测试聊天按创建→读取→发送→等待及人工干预路径验收。
+本次工作区实现未部署到实例，不将本地检查写作线上验收通过。
+
+2026-10-15 后续优化追加通过 `runtime_external_name` / `runtime_external_title` 两场景：
+真实生产 Runtime 的 ExternalMessage 首条输入被 ephemeral 命名 fork 继承，主任务先于
+命名完成、父历史无命名污染；指定标题时真实后台 set_name 被 barrier 延迟，任务接受
+与完成仍先返回，零 fork、仅一个任务模型请求。两场景都经生产 SessionService 读取
+真实历史，默认 `codexDelegation` 保留来源 Thread ID 与正文，原始 output 仍隐藏。
+首次自动命名 probe 暴露 SDK output RootModel 与字符串匹配差异，修正并加入官方类型
+回归后复验通过；未改 SDK。证据为 `/tmp/netizen-session-external-name-evidence.json`
+和 `/tmp/netizen-session-external-title-evidence.json`，均未调用真实模型账号或飞书。
+
+同轮另执行既有 `probe_thread_naming.py --runtime-only`，真实模型的普通输入命名、
+首轮继承、无工具生成、订阅收尾、父会话继续对话与归档通过。该验证限生产命名路径的
+局部修改，没有重跑默认模式的独立中断专项。新建协作话题的真实飞书客户端、真实模型
+自主编排及 create/send 审批交互仍需按上述范围验收，不能用这两项 native probe 替代。
+
+本轮优化最终 `make check` 退出 0：运行 3,157 项测试，15 项条件跳过，包含包构建与
+隔离资源验证；编译、依赖、SDK Activity / 20 immediate / 20 history / 40 terminal
+drains 和只读 Skill roots 全部通过。日志 `/tmp/netizen-session-optimization-make-check.log`。
+独立正确性复核未发现新的功能缺陷或过度实现，`git diff --check` 通过；本机 Node.js
+仍为 24.18.1，未替代 CI 的 Node.js 22 门禁。本轮未部署或发送真实飞书消息。
+
+同日独立复核发现失败卡更新被工具 deadline 取消时仍会覆盖原错误回执，已在共用
+失败展示路径按成功回执方式修复。确定未提交保持 false，投递未知保持 null，错误及
+目标信息不丢失。新增 MCP→Service→Application 回归在卡片更新开始后确定性触发
+期限，两种结果均通过；原 reviewer 复核确认问题关闭。修正后 `make check` 退出 0，
+3,158 项测试通过（15 项条件跳过），编译、依赖及上述 SDK probes 全部通过；日志
+`/tmp/netizen-session-failure-receipt-make-check.log`。本次仅修改失败展示保护，未重复
+真实模型/飞书验收，未部署；前述客户端及 CI Node.js 22 验证边界不变。
+
 ### 持久分支、恢复与删除验收
 
 [ADR 0078](adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md) 的三项边界

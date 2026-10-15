@@ -14,6 +14,7 @@ from .callbacks import (
     CardActionError, _builder, _button_row, _repeatable_callback_button, _plain,
     _plain_text, _required_string,
 )
+from .session_ids import session_identity_lines
 
 
 _STATUS_COMMAND = "status.command"
@@ -91,7 +92,11 @@ def _decode_snapshot(target_kind: str, value: Any) -> dict[str, Any]:
         lines = {"metadata_lines": 2, "git_branch_lines": 1, "context_mode_lines": 4, "model_lines": 4, "progress_lines": 32}
     if not isinstance(value, Mapping) or set(value) != strings | lines.keys():
         raise CardActionError("状态卡展示快照无效，请重新发送 /status。")
-    if any(not isinstance(value[key], str) for key in strings):
+    if any(
+        not isinstance(value[key], str)
+        and not (key == "native_thread_id" and value[key] is None)
+        for key in strings
+    ):
         raise CardActionError("状态卡展示文字无效，请重新发送 /status。")
     for key, limit in lines.items():
         items = value[key]
@@ -132,7 +137,7 @@ def session_status_card(
     binding_id: str,
     short_id: str,
     project_alias: str,
-    native_thread_id: str,
+    native_thread_id: str | None,
     state: str,
     metadata_lines: tuple[str, str],
     git_branch_lines: tuple[str, ...],
@@ -168,8 +173,9 @@ def session_status_card(
         "expanded": False,
         "header": {"title": _plain_text("会话详情与订阅")},
         "elements": [_plain("\n".join((
-            f"会话：{short_id}",
-            f"Native Thread：{native_thread_id}",
+            *session_identity_lines(
+                short_id=short_id, native_thread_id=native_thread_id,
+            ),
             subscription_line,
         )))],
     })

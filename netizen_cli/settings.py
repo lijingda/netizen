@@ -14,6 +14,7 @@ import yaml
 
 from .lark_app import LARK_APP_RELATIVE_PATH, LarkAppConfigError, load_lark_app
 from .admin.port_config import ConfigFileSnapshot
+from .sessions.policy import SessionAccessPolicy, SessionPolicyError
 
 
 class SettingsError(ValueError):
@@ -36,6 +37,7 @@ class Settings:
     projects: dict[str, Path] = field(default_factory=dict)
     security_mode: str = "audit"
     admin_web: AdminWebSettings = AdminWebSettings()
+    session_tools: SessionAccessPolicy = SessionAccessPolicy()
     config_path: Path | None = None
     config_snapshot: ConfigFileSnapshot | None = field(default=None, repr=False)
 
@@ -63,6 +65,10 @@ class Settings:
         instance = _mapping(loaded, "instance")
         channel = _optional_mapping(loaded, "channel")
         admin_web = _admin_web_settings(loaded)
+        try:
+            session_tools = SessionAccessPolicy.from_mapping(loaded.get("sessionTools", {}))
+        except SessionPolicyError as error:
+            raise SettingsError(str(error)) from error
         raw_projects = loaded.get("projects", {})
         if not isinstance(raw_projects, dict):
             raise SettingsError("projects must map aliases to absolute paths")
@@ -106,6 +112,7 @@ class Settings:
             projects=projects,
             security_mode=security_mode,
             admin_web=admin_web,
+            session_tools=session_tools,
             config_path=config_path,
             config_snapshot=config_snapshot,
         )

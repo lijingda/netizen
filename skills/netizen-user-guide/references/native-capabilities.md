@@ -40,6 +40,9 @@ Netizen 可直接复用原生保存的 MCP 凭证，无须在飞书另行登录�
 Netizen 复用原生 Codex Thread、历史、配置和工具，但飞书不是 CLI/App 宿主界面。
 
 - 可在 CLI/App 中 resume 飞书创建的原生 Thread；CLI/App 新增的消息不会自动回填飞书。
+- 可通过自然语言让 agent [新建、查找、读取和联系普通会话](session-collaboration.md)。
+  工具采用 Codex CLI 的原生形态，范围限定为本 Netizen 实例登记的普通会话，并按 Admin
+  配置过滤；新任务呈现为当前聊天的新话题。
 - Codex App 可直接打开本机工作区文件；飞书对支持的本轮文件改为在终态卡片中按需发送
   到话题。飞书不会自动上传整个工作区或保存 Turn 完成时文件版本。
 - `/copy`、`/vim`、`/theme`、`/exit` 和 `/quit` 属于宿主界面或生命周期命令，在飞书中不可用。

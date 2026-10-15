@@ -48,7 +48,7 @@ class PortConfigurationTest(unittest.TestCase):
         self.assertEqual(loaded, yaml.safe_load(self.content))
         self.assertNotEqual(self.path.stat().st_ino, original_inode)
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
-        self.assertEqual(list(self.path.parent.glob(".admin-port-*")), [])
+        self.assertEqual(list(self.path.parent.glob(".netizen-config-*")), [])
 
     def test_existing_admin_values_and_other_yaml_values_are_preserved(self) -> None:
         self.path.write_bytes(self.content + b"adminWeb:\n  host: 127.0.0.1\n  accessHost: admin.test\n")
@@ -96,7 +96,7 @@ class PortConfigurationTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 persist_admin_port(ConfigFileSnapshot.read(self.path), 8788)
         self.assertEqual(self.path.read_bytes(), self.content)
-        self.assertEqual(list(self.path.parent.glob(".admin-port-*")), [])
+        self.assertEqual(list(self.path.parent.glob(".netizen-config-*")), [])
 
     def test_explicit_port_cannot_be_allocated(self) -> None:
         for values in ({"port": 8787}, {"port": None}):
@@ -162,6 +162,7 @@ class AdminPortAllocationTest(unittest.IsolatedAsyncioTestCase):
         selected = runner.addresses[0][1]
         self.assertGreater(selected, port)
         self.assertEqual(yaml.safe_load(config.read_bytes())["adminWeb"]["port"], selected)
+        self.assertEqual(runner.config_snapshot, ConfigFileSnapshot.read(config))
         self.assertEqual(runner.urls, (f"http://127.0.0.1:{selected}/",))
         self.assertTrue(runner.loopback_only)
         self.assertFalse(runner.transport.admission_open)

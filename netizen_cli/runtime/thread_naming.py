@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
-from openai_codex import InternalRpcError, InvalidRequestError
+from openai_codex import ExternalMessage, InternalRpcError, InvalidRequestError
 
 from ..model_settings import TurnModelSettings
 from ..sdk_gap_adapter import ThreadSubscriptionControl
@@ -45,6 +45,8 @@ class NamingJob:
     parent: NativeThread
     turn_id: str
     settings: TurnModelSettings | None
+    preferred_title: str | None = None
+    external_input: ExternalMessage | None = None
     invalidated: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task[None] | None = None
     thread: NativeThread | None = None
@@ -89,13 +91,17 @@ class ThreadNamer:
         parent: NativeThread,
         turn_id: str,
         settings: TurnModelSettings | None = None,
+        *,
+        preferred_title: str | None = None,
+        external_input: ExternalMessage | None = None,
     ) -> None:
         """Reserve one background attempt without awaiting any native work."""
         if self._closed:
             return
         if binding_id in self._jobs:
             return
-        job = NamingJob(binding_id, parent, turn_id, settings)
+        job = NamingJob(binding_id, parent, turn_id, settings,
+                        preferred_title=preferred_title, external_input=external_input)
         self._jobs[binding_id] = job
         task = asyncio.create_task(self._generate(job), name=f"thread-name:{parent.id}")
         job.task = task
@@ -170,6 +176,11 @@ class ThreadNamer:
             if not await self._input_visible(job):
                 return
             self._require_current(job)
+            if job.preferred_title is not None:
+                # A caller-supplied initial title uses the same background slot
+                # and name-write ownership, without a generated-title fork.
+                await self._observe(job, self._worker(job, self._commit(job, job.preferred_title)))
+                return
             job.acquiring = self._worker(job, self._fork(job))
             thread = await asyncio.shield(job.acquiring)
             self._require_current(job)
@@ -253,7 +264,8 @@ class ThreadNamer:
         """Wait for readable metadata and input within one background deadline.
 
         A start ACK can precede even the first readable rollout. Existing names
-        need only a summary; unnamed Threads additionally need exact Turn input.
+        need only a summary. A supplied title also needs no fork context;
+        generated titles require the exact accepted Turn's input first.
         """
         summary_ready = False
         try:
@@ -299,6 +311,8 @@ class ThreadNamer:
                             raise ValueError("invalid native Thread name")
                         if name and name.strip():
                             return False
+                        if job.preferred_title is not None:
+                            return True
                         if not summary_ready:
                             summary_ready = True
                             continue
@@ -306,14 +320,30 @@ class ThreadNamer:
                             if getattr(turn, "id", None) != job.turn_id:
                                 continue
                             if any(
-                                getattr(getattr(item, "root", item), "type", None)
-                                == "userMessage"
+                                self._matches_input(job, getattr(item, "root", item))
                                 for item in getattr(turn, "items", ())
                             ):
                                 return True
                     await asyncio.sleep(_CONTEXT_POLL_SECONDS)
         except TimeoutError:
             return False
+
+    @staticmethod
+    def _matches_input(job: NamingJob, item: Any) -> bool:
+        external = job.external_input
+        if external is None:
+            return getattr(item, "type", None) == "userMessage"
+        output = getattr(item, "output", None)
+        # Public SDK history wraps the string-or-content-list union in a
+        # RootModel. Only the exact plain text submitted here is input proof.
+        output = getattr(output, "root", output)
+        return (
+            getattr(item, "type", None) == "functionCallOutput"
+            and getattr(item, "namespace", None) == external.namespace
+            and getattr(item, "name", None) == external.tool_name
+            and isinstance(output, str)
+            and output == external.content
+        )
 
     async def _fork(self, job: NamingJob) -> NativeThread:
         # An exception is not proof that a side-effectful RPC did not execute.

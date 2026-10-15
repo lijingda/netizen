@@ -52,7 +52,7 @@ def _identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def persist_admin_port(snapshot: ConfigFileSnapshot, port: int) -> None:
+def persist_admin_port(snapshot: ConfigFileSnapshot, port: int) -> ConfigFileSnapshot:
     """Preserve all YAML values and refuse a detected concurrent human edit.
 
     The caller retains its listening socket and instance lifetime lock. This
@@ -72,7 +72,7 @@ def persist_admin_port(snapshot: ConfigFileSnapshot, port: int) -> None:
     values = dict(values)
     loaded["adminWeb"] = values
     values["port"] = port
-    _write_configuration(snapshot, loaded)
+    return write_configuration(snapshot, loaded)
 
 
 def _validate_port(port: int) -> None:
@@ -80,10 +80,11 @@ def _validate_port(port: int) -> None:
         raise AdminPortConfigurationError("Admin port must be from 1 to 65535")
 
 
-def _write_configuration(snapshot: ConfigFileSnapshot, loaded: dict) -> None:
+def write_configuration(snapshot: ConfigFileSnapshot, loaded: dict) -> ConfigFileSnapshot:
+    """Replace the existing instance YAML after checking its exact snapshot."""
     content = yaml.safe_dump(loaded, allow_unicode=True, sort_keys=False).encode("utf-8")
     snapshot.require_unchanged()
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".admin-port-", dir=snapshot.path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".netizen-config-", dir=snapshot.path.parent)
     temporary = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "wb") as output:
@@ -96,3 +97,4 @@ def _write_configuration(snapshot: ConfigFileSnapshot, loaded: dict) -> None:
     finally:
         with contextlib.suppress(FileNotFoundError):
             temporary.unlink()
+    return ConfigFileSnapshot.read(snapshot.path)

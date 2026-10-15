@@ -25,6 +25,7 @@ Netizen 通过官方 Codex SDK 将飞书接入原生 Codex。默认按当前 Net
 | 查命令、操作入口 | [命令索引](references/commands.md)，再进入对应功能说明 |
 | 会话隔离、上下文、并发，追加消息为何没有新开任务 | [核心心智模型](references/concepts.md)：Scope、Project、Turn 与 steer |
 | 新建、默认配置、切换、命名、归档、删除、模型与反馈设置 | [会话与 Project](references/sessions.md)：作用范围、后续生效及历史删除后果 |
+| 让会话新建话题、发现、读取或联系其他会话 | [会话协作](references/session-collaboration.md)：原生 Thread ID、目标状态及两组实例范围 |
 | 群聊 @、引用、图片、转发材料、回答提问卡 | [消息输入](references/messages.md)：读取范围、提交方式与整条消息失败边界 |
 | 过程卡、表情、结束 @、阶段性答案、本轮文件 | [运行反馈与文件](references/feedback-and-files.md)：开关、展示范围、统计口径与发送时的文件版本 |
 | 状态、账号额度、压缩、停止 | [状态与控制](references/status-and-control.md)：区分上下文用量和共享账号额度，说明客户端时区与停止限制 |
