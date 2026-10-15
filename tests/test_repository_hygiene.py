@@ -107,7 +107,7 @@ class RepositoryHygieneTest(unittest.TestCase):
     def test_end_user_guidance_exposes_only_card_based_new(self) -> None:
         documents = (
             ROOT / "README.md",
-            ROOT / "skills/netizen-user-guide/references/user-guide.md",
+            *sorted((ROOT / "skills/netizen-user-guide/references").rglob("*.md")),
         )
         retired_forms = (
             re.compile(r"/new\s+<"),
@@ -118,7 +118,6 @@ class RepositoryHygieneTest(unittest.TestCase):
         for document in documents:
             text = document.read_text(encoding="utf-8")
             with self.subTest(document=document.relative_to(ROOT)):
-                self.assertIn("/new", text)
                 for pattern in retired_forms:
                     self.assertIsNone(pattern.search(text))
 
