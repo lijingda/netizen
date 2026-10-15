@@ -15,6 +15,17 @@ projects:
 channel:
   securityMode: audit
 
+# Optional collaboration-tool ranges; both default to all when omitted.
+# Admin can update these at runtime. These rules do not restrict ordinary chat input.
+# Each mode is all, only, exclude, or disabled; only/exclude use exact chat IDs.
+sessionTools:
+  discovery:
+    mode: all
+    chatIds: []
+  readSend:
+    mode: all
+    chatIds: []
+
 # Required management UI, using this app's Feishu administrator identities.
 # It listens on all interfaces for direct access inside the trusted private network.
 adminWeb:

@@ -86,6 +86,9 @@ from .sdk_gap_adapter import (
 from .settings import Settings
 from .schedules.mcp import ScheduleMcpRunner
 from .schedules.scheduler import Scheduler
+from .sessions.mcp import SessionMcpRunner
+from .sessions.policy import SessionPolicyService
+from .sessions.service import SessionService
 from .terminal_cleanup import PinnedExperimentalTerminalCleanup
 from .turn_plan_observer import (
     PinnedTurnActivityObserver,
@@ -182,6 +185,9 @@ class ServiceCore:
         self._feishu_read_client: Any | None = None
         self._admin: AdminWebRunner | None = None
         self._schedule_mcp: ScheduleMcpRunner | None = None
+        self._session_mcp: SessionMcpRunner | None = None
+        self._session_service: SessionService | None = None
+        self._session_policy: SessionPolicyService | None = None
         self._scheduler: Scheduler | None = None
         self.application: ChannelApplication | None = None
         self._started = False
@@ -206,12 +212,18 @@ class ServiceCore:
                 access_host=self._settings.admin_web.access_host,
             )
             await self._admin.bind()
+            self._session_policy = SessionPolicyService(
+                self._settings.session_tools,
+                config_snapshot=self._admin.config_snapshot,
+            )
             stage_started_at = _log_startup_timing("Admin listener", stage_started_at)
 
             # Bind the native MCP transport before App Server initializes its
             # catalog. Calls remain closed until the shared application is ready.
             self._schedule_mcp = ScheduleMcpRunner()
             await self._schedule_mcp.bind()
+            self._session_mcp = SessionMcpRunner()
+            await self._session_mcp.bind()
             stage_started_at = _log_startup_timing("Schedule MCP listener", stage_started_at)
 
             expired_sides = self._store.expire_live_side_topics()
@@ -225,10 +237,12 @@ class ServiceCore:
                     config_overrides=(
                         *_CODEX_SERVICE_CONFIG_OVERRIDES,
                         *self._schedule_mcp.config_overrides,
+                        *self._session_mcp.config_overrides,
                     ),
                     env={
                         **os.environ,
                         **self._schedule_mcp.app_server_env,
+                        **self._session_mcp.app_server_env,
                         "NETIZEN_ROOT": str(self._instance_root),
                     },
                 )
@@ -315,7 +329,9 @@ class ServiceCore:
 
             self._schedule_mcp.attach(manage_schedule)
             if self._admin is not None:
-                self._admin.attach_management(self._management)
+                self._admin.attach_management(
+                    self._management, session_policy=self._session_policy,
+                )
             self.application = ChannelApplication(
                 app_id=self._settings.app_id,
                 channel=self._channel,
@@ -330,6 +346,16 @@ class ServiceCore:
                 admin_loopback_only=self._admin.loopback_only if self._admin is not None else None,
                 instance_root=self._instance_root,
             )
+            self._session_service = SessionService(
+                bindings=self._store,
+                runtime=self._runtime,
+                codex=self._codex,
+                app_id=self._settings.app_id,
+                policy=self._session_policy,
+                create_thread=self.application.create_session_thread,
+                send_message=self.application.send_session_message,
+            )
+            self._session_mcp.attach(self._session_service.call)
             self._scheduler = Scheduler(
                 bindings=self._store, runtime=self._runtime,
                 app_id=self._settings.app_id,
@@ -355,6 +381,8 @@ class ServiceCore:
             self._admin.open_admission()
         if self._schedule_mcp is not None:
             self._schedule_mcp.open_admission()
+        if self._session_mcp is not None:
+            self._session_mcp.open_admission()
         if self._scheduler is not None:
             self._scheduler.start()
 
@@ -374,6 +402,12 @@ class ServiceCore:
             self._schedule_mcp.close_admission()
             await _cleanup_with_budget(
                 "partial schedule MCP close", self._schedule_mcp.close,
+                deadline=deadline, cap=5,
+            )
+        if self._session_mcp is not None:
+            self._session_mcp.close_admission()
+            await _cleanup_with_budget(
+                "partial session MCP close", self._session_mcp.close,
                 deadline=deadline, cap=5,
             )
         if self._admin is not None:
@@ -426,6 +460,8 @@ class ServiceCore:
                 self._scheduler.close_admission()
             if self._schedule_mcp is not None:
                 self._schedule_mcp.close_admission()
+            if self._session_mcp is not None:
+                self._session_mcp.close_admission()
             if self._admin is not None:
                 self._admin.close_admission()
             try:
@@ -467,6 +503,11 @@ class ServiceCore:
             if self._schedule_mcp is not None:
                 await _cleanup_with_budget(
                     "schedule MCP handler drain", lambda: self._schedule_mcp.drain(deadline),
+                    deadline=deadline, cap=10,
+                )
+            if self._session_mcp is not None:
+                await _cleanup_with_budget(
+                    "session MCP handler drain", lambda: self._session_mcp.drain(deadline),
                     deadline=deadline, cap=10,
                 )
             if self._scheduler is not None:
@@ -544,6 +585,11 @@ class ServiceCore:
                     if self._schedule_mcp is not None:
                         await _cleanup_with_budget(
                             "schedule MCP transport close", self._schedule_mcp.close,
+                            deadline=deadline, cap=5,
+                        )
+                    if self._session_mcp is not None:
+                        await _cleanup_with_budget(
+                            "session MCP transport close", self._session_mcp.close,
                             deadline=deadline, cap=5,
                         )
                     await _cleanup_with_budget(

@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import re
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from lark_channel import (
     OutboundPost,
     SendOpts,
 )
+from openai_codex import ExternalMessage, InvalidRequestError
 
 from .bindings import (
     AmbiguousBinding,
@@ -95,7 +97,7 @@ from .channel.completion_mentions import send_completion_mention
 from .channel.input_preparation import MessageInputPreparer
 from .channel.question_inputs import CardAnswerConversation, CardAnswerOrigin, card_answer_sender
 from .channel.ports import ReplyChannel
-from .channel.topics import TopicPublishError, send_topic_message
+from .channel.topics import TopicMessage, TopicPublishError, complete_fresh_topic, send_topic_message
 from .cards.scheduled import (
     decode_schedule_action,
     is_schedule_card_action,
@@ -219,6 +221,8 @@ from .domain import (
     ScheduledBindingOrigin,
     ScheduledConversation,
     ScheduledOrigin,
+    SessionAgentConversation,
+    SessionAgentOrigin,
     SettingsSection,
     ScopeKind,
     TurnFileActionIntent,
@@ -304,6 +308,7 @@ from .turn_files import (
     turn_patch_summary,
 )
 from .schedules.models import Claim, ScheduleConflict, ScheduleError, ScheduleNotFound
+from .sessions.errors import SessionToolError
 
 
 logger = logging.getLogger(__name__)
@@ -314,6 +319,7 @@ _TEXTUAL_CONTENT_TYPES = frozenset({"text", "post"})
 _SESSION_QUERY_TIMEOUT_SECONDS = 10.0
 _SIDE_CARD_METADATA_TIMEOUT_SECONDS = 1.0
 _CONTEXT_RECEIPT_TIMEOUT_SECONDS = 5.0
+_SESSION_RECEIPT_TIMEOUT_SECONDS = 5.0
 _DONE_REACTION = "DONE"
 _ERROR_REACTION = "ERROR"
 _INTERRUPTED_REACTION = "CrossMark"
@@ -742,6 +748,290 @@ class ChannelApplication:
         finally:
             await self._reactions.close()
 
+    def _session_tool_binding(self, thread_id: str) -> tuple[ThreadBinding, FeishuScope]:
+        binding = self._bindings.find_by_native_thread_id(thread_id)
+        if binding is None:
+            raise SessionToolError("thread_not_registered", "Codex 会话未登记在当前 Netizen 实例。")
+        record = self._bindings.get_scope(binding.scope_key)
+        if record.app_id != self._app_id:
+            raise SessionToolError("thread_not_registered", "Codex 会话不属于当前飞书应用。")
+        return binding, FeishuScope(record.app_id, record.chat_id, record.kind, record.topic_id)
+
+    def _require_session_target(self, thread_id: str) -> tuple[ThreadBinding, FeishuScope]:
+        binding, scope = self._session_tool_binding(thread_id)
+        if not binding.active:
+            raise SessionToolError("target_not_current", "目标会话不是该聊天或话题的当前会话；未自动切换或恢复。", {
+                "threadId": thread_id,
+                "netizen": {"bindingId": binding.id, "chatId": scope.chat_id,
+                            "topicId": scope.topic_id, "isCurrent": False, "accepted": False},
+            })
+        return binding, scope
+
+    async def _session_agent_card(self, source: ThreadBinding, prompt: str, *, title: str | None = None) -> OutboundCard:
+        # The source is this tool's authenticated caller. Its title is display
+        # attribution; neither it nor the prompt can manufacture Feishu @s.
+        source_title = source.short_id
+        try:
+            metadata = await self._runtime.thread_summary(source.native_thread_id)
+            source_title = _normalized_thread_text(metadata.name, max_chars=120) or source_title
+        except Exception:
+            pass
+        content = (
+            f"来自会话：{source_title}\nCodex 会话 ID：{source.native_thread_id}"
+            f"\nNetizen 会话编号：{source.short_id}\n\n{prompt}"
+        )
+        return OutboundCard(card={
+            "schema": "2.0", "config": {"width_mode": "default"},
+            "header": {"title": {"tag": "plain_text", "content": title or "会话协作来信"}},
+            "body": {"elements": [{"tag": "div", "text": {"tag": "plain_text", "content": content}}]},
+        })
+
+    @staticmethod
+    def _session_message(source: ThreadBinding, prompt: str, *, tool_name: str) -> ExternalMessage:
+        return ExternalMessage(
+            namespace="netizen_sessions", tool_name=tool_name,
+            content=json.dumps({
+                "sourceThreadId": source.native_thread_id,
+                "sourceBindingId": source.id,
+                "message": prompt,
+            }, ensure_ascii=False),
+        )
+
+    def _session_receipt(self, binding: ThreadBinding, scope: FeishuScope, submission: Submission) -> dict[str, Any]:
+        result = {"threadId": submission.thread_id, "turnId": submission.turn_id, "netizen": {
+            "bindingId": binding.id, "chatId": scope.chat_id, "topicId": scope.topic_id,
+            "topicUrl": topic_open_url(scope.chat_id, scope.topic_id) if scope.topic_id else None,
+            "isCurrent": binding.active, "accepted": True,
+            "disposition": submission.disposition.value,
+        }}
+        # The native acceptance is already known. A concurrent deletion or a
+        # failed local status refresh cannot turn it into an unknown delivery.
+        try:
+            result["netizen"]["isCurrent"] = self._bindings.get(binding.id).active
+        except BindingNotFound:
+            result["netizen"].update(isCurrent=False, targetDeleted=True)
+        except Exception:
+            result["netizen"].update(isCurrent=None, statusWarning="投递已接受；当前会话状态未能刷新。")
+        return result
+
+    async def _present_session_submission(self, submission: Submission, origin: SessionAgentOrigin) -> None:
+        # Joined input keeps the original Turn's owner, origin and consumer.
+        # Its visible anchor already confirms delivery without another card.
+        if submission.disposition is SubmitDisposition.STARTED:
+            try:
+                async with asyncio.timeout(_SESSION_RECEIPT_TIMEOUT_SECONDS):
+                    await self._present_ordinary_receipt(submission, origin)
+            except asyncio.CancelledError:
+                # The native input is already accepted. A tool deadline during
+                # display must still return its known Thread/Turn receipt.
+                # The ordinary presenter releases the consumer in its finally.
+                logger.warning("session collaboration receipt display cancelled after acceptance")
+            except Exception:
+                logger.warning("session collaboration receipt display failed", exc_info=True)
+
+    async def _present_session_failure(
+        self, published: TopicMessage | None, card: OutboundCard | None,
+        error: SessionToolError,
+    ) -> None:
+        """Mark the existing request anchor without changing delivery facts."""
+        if published is None or card is None:
+            return
+        accepted = error.details.get("netizen", {}).get("accepted")
+        notice = (
+            "该协作请求未执行：" + str(error)
+            if accepted is False else
+            "该协作请求的投递结果未确认，可能已被接收。请先通过 /status 或会话历史核查，不要重复提交。"
+        )
+        updated = {**card.card, "body": {**card.card["body"], "elements": [
+            *card.card["body"]["elements"],
+            {"tag": "div", "text": {"tag": "plain_text", "content": notice}},
+        ]}}
+        try:
+            async with asyncio.timeout(_SESSION_RECEIPT_TIMEOUT_SECONDS):
+                await self._safe_update_card(published.message_id, OutboundCard(card=updated))
+        except asyncio.CancelledError:
+            # Display cancellation must not replace the original error or its
+            # already classified delivery outcome with a generic unknown.
+            logger.warning("session collaboration rejection display cancelled")
+        except Exception:
+            logger.warning("session collaboration rejection display failed", exc_info=True)
+
+    def _session_failure(self, error: Exception, *, binding: ThreadBinding | None,
+                         scope: FeishuScope | None, root: TopicMessage | None,
+                         submission_attempted: bool) -> SessionToolError:
+        known_rejection = isinstance(error, (
+            SessionToolError, RuntimeClosed, SteerRace, ThreadStopping, ThreadCompacting,
+            ThreadOccupied, ThreadGoalActive, ThreadLifecycleError, ModelCatalogError,
+            SkillCatalogError, SkillReferenceError, InvalidRequestError,
+            ProjectConflict, ProjectNotFound, BindingNotFound, GoalStateUnknown,
+        )) or type(error) is GoalControlError
+        # The external entry only reads Goal state before delivery. Preserve
+        # unknown outcomes for subclasses such as GoalMutationStateUnknown.
+        details: dict[str, Any] = {"netizen": {"accepted": (
+            None if submission_attempted and not known_rejection else False
+        )}}
+        if binding is not None:
+            current: bool | None = None
+            try:
+                binding = self._bindings.get(binding.id)
+                current = binding.active
+            except BindingNotFound:
+                current = False
+                details["netizen"]["targetDeleted"] = True
+            except Exception:
+                pass
+            details["threadId"] = binding.native_thread_id
+            details["netizen"].update(bindingId=binding.id, isCurrent=current)
+        if scope is not None:
+            details["netizen"].update(chatId=scope.chat_id, topicId=scope.topic_id)
+        if root is not None:
+            details["netizen"]["messageId"] = root.message_id
+            if scope is None:
+                details["netizen"].update(chatId=root.chat_id, topicId=root.thread_id)
+        if isinstance(error, SessionToolError):
+            details["netizen"].update(error.details.get("netizen", {}))
+            details.update({key: value for key, value in error.details.items() if key != "netizen"})
+            return SessionToolError(error.code, str(error), details)
+        code = "submission_unknown" if details["netizen"]["accepted"] is None else "input_rejected"
+        if isinstance(error, TopicPublishError):
+            code = "publishing_unknown" if error.unknown else "publishing_failed"
+        return SessionToolError(code, describe_error(error), details)
+
+    async def create_session_thread(
+        self, source_thread_id: str, prompt: str, *, title: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """Create an ordinary sibling topic after the session tool's admission."""
+        binding = root = destination = card = None
+        submission_attempted = False
+        try:
+            source, source_scope = self._session_tool_binding(source_thread_id)
+            if title is not None:
+                title = " ".join(title.split())
+                if not title or len(title) > 120:
+                    raise SessionToolError("invalid_title", "会话名称必须为 1 到 120 个字符。")
+            selected_model = model or await self._runtime.native_thread_model(source.id)
+            catalog = await self._runtime.model_catalog()
+            option = next((item for item in catalog.models if selected_model in {item.id, item.model}), None)
+            if option is None:
+                raise SessionToolError("invalid_model", "指定或继承的模型当前不可用。")
+            settings = source.turn_settings
+            if settings is None or settings.model_id != option.id:
+                settings = BindingTurnSettings(option.id, option.default_effort_id, option.default_service_tier_id)
+            catalog.resolve(model_id=settings.model_id, effort_id=settings.effort_id, service_tier_id=settings.service_tier_id)
+            project = await self._management.resolve_new_project(
+                source.project_alias, deadline=asyncio.get_running_loop().time() + 10.0,
+            )
+            target = await self._management.validate_chat_target(source_scope.chat_id)
+            card = await self._session_agent_card(source, prompt, title=title)
+            call_id = uuid.uuid4().hex
+            async with self._runtime.track_topic_creation(project.alias):
+                self._session_tool_binding(source_thread_id)
+                self._runtime.require_topic_creation_open(project.alias)
+                root = await send_topic_message(self._channel, source_scope.chat_id, card,
+                    SendOpts(receive_id_type="chat_id", uuid=call_id))
+                def require_seed_creation() -> None:
+                    self._runtime.require_topic_creation_open(project.alias)
+                    if not self._bindings.get_project(project.alias).enabled:
+                        raise ProjectConflict("Project 已停用，本次未启动。")
+                published = await complete_fresh_topic(
+                    self._channel, root,
+                    seed_content="协作任务见话题顶部消息；创建完成后可在本话题继续交流或使用 /stop。",
+                    seed_uuid=hashlib.sha256((call_id + ":seed").encode()).hexdigest()[:32],
+                    before_seed=require_seed_creation,
+                )
+                if published.thread_id == source_scope.topic_id:
+                    raise TopicPublishError("飞书未创建新的普通话题。", unknown=True)
+                destination = FeishuScope(self._app_id, source_scope.chat_id, ScopeKind.TOPIC, published.thread_id)
+                context_mode = source.message_context_mode if target.chat_kind == "group" else MentionContextMode.CURRENT_ONLY
+                anchor = await self._resolve_context_anchor(destination, published.message_id) if (
+                    context_mode is MentionContextMode.CATCH_UP
+                ) else None
+                async with self._scope_coordinator.hold(destination.key):
+                    self._runtime.require_topic_creation_open(project.alias)
+                    binding = self._bindings.create_channel_binding(
+                        scope=destination, project_alias=project.alias,
+                        creator_id="session_agent:" + source.id,
+                        expected_project_revision=project.revision,
+                        turn_settings=settings,
+                        task_feedback=BindingTaskFeedback(False, source.task_feedback.progress_card_enabled, False),
+                        message_context_mode=context_mode, context_anchor=anchor,
+                        empty_topic_root_message_id=root.message_id,
+                    )
+                origin = SessionAgentOrigin(self._app_id, destination.chat_id, published.message_id,
+                    SessionAgentConversation(destination.chat_id, target.chat_kind, destination.topic_id),
+                    source.id, source_thread_id, binding.id, call_id)
+                self._runtime.require_topic_creation_open(project.alias)
+                submission_attempted = True
+                submission = await self._runtime.submit_external(
+                    binding=binding, cwd=project.cwd,
+                    message=self._session_message(source, prompt, tool_name="create_thread"),
+                    owner_id="session_agent:" + source.id, origin=origin, title=title,
+                )
+                await self._present_session_submission(submission, origin)
+                return self._session_receipt(binding, destination, submission)
+        except Exception as error:
+            failure = self._session_failure(error, binding=binding, scope=destination,
+                                            root=root, submission_attempted=submission_attempted)
+            await self._present_session_failure(root, card, failure)
+            raise failure from error
+
+    async def send_session_message(
+        self, source_thread_id: str, target_thread_id: str, prompt: str, *,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """Deliver an admitted session tool call to its still-current exact Thread."""
+        source, _ = self._session_tool_binding(source_thread_id)
+        if source_thread_id == target_thread_id:
+            raise SessionToolError("invalid_target", "不能向当前调用会话自身发送跨会话来信。")
+        binding, scope = self._require_session_target(target_thread_id)
+        sent = card = None
+        submission_attempted = False
+        try:
+            if await self._runtime.thread_is_archived(target_thread_id):
+                raise SessionToolError("target_archived", "目标已归档；未自动恢复归档。")
+            if model is not None:
+                catalog = await self._runtime.model_catalog()
+                if not any(model in {item.id, item.model} for item in catalog.models):
+                    raise SessionToolError("invalid_model", "指定模型当前不可用。")
+            project = self._projects.resolve_for_binding(binding.project_alias)
+            target = await self._management.validate_chat_target(scope.chat_id)
+            reply_to = None
+            if scope.kind is ScopeKind.TOPIC:
+                if self._message_history is None:
+                    raise MessageHistoryUnavailable("话题消息读取能力不可用，本次未发送。")
+                reply_to = (await self._message_history.resolve_topic_reply_anchor(scope)).message_id
+            card = await self._session_agent_card(source, prompt)
+            self._session_tool_binding(source_thread_id)
+            self._require_session_target(target_thread_id)
+            call_id = uuid.uuid4().hex
+            sent = await send_topic_message(self._channel, scope.chat_id, card, SendOpts(
+                receive_id_type="chat_id", reply_to=reply_to,
+                reply_in_thread=scope.kind is ScopeKind.TOPIC,
+                reply_target_gone="fail", uuid=call_id,
+            ))
+            if sent.thread_id != scope.topic_id or (
+                reply_to is not None and (not sent.root_id or sent.parent_id != reply_to)
+            ):
+                raise TopicPublishError("来信消息不属于指定会话，本次未投递。", unknown=True)
+            origin = SessionAgentOrigin(self._app_id, scope.chat_id, sent.message_id,
+                SessionAgentConversation(scope.chat_id, target.chat_kind, scope.topic_id),
+                source.id, source_thread_id, binding.id, call_id)
+            binding, scope = self._require_session_target(target_thread_id)
+            submission_attempted = True
+            submission = await self._runtime.submit_external(
+                binding=binding, cwd=project.cwd,
+                message=self._session_message(source, prompt, tool_name="send_message_to_thread"),
+                owner_id="session_agent:" + source.id, origin=origin, model=model,
+            )
+            await self._present_session_submission(submission, origin)
+            return self._session_receipt(binding, scope, submission)
+        except Exception as error:
+            failure = self._session_failure(error, binding=binding, scope=scope, root=sent,
+                                            submission_attempted=submission_attempted)
+            await self._present_session_failure(sent, card, failure)
+            raise failure from error
+
     async def dispatch_scheduled_run(self, claim: Claim) -> None:
         """Publish one claimed occurrence and hand it to the ordinary Runtime."""
         if claim.run.target_kind == "binding":
@@ -786,21 +1076,15 @@ class ChannelApplication:
             publishing_started = True
             root = await send_topic_message(self._channel, run.chat_id, root_content, SendOpts(receive_id_type="chat_id", uuid=run.root_uuid))
             store.set_run(run.id, root_message_id=root.message_id)
-            if root.parent_id is not None or root.root_id not in {None, root.message_id}:
-                raise TopicPublishError("飞书未返回全新的话题根消息。", unknown=True)
-            origin_message = root
-            if root.thread_id is None:
+            def require_seed_project() -> None:
                 self._bindings.require_project_not_deleting(run.project_alias)
                 if not self._bindings.get_project(run.project_alias).enabled:
                     raise ProjectConflict("Project 已停用，本次未启动。")
-                origin_message = await send_topic_message(
-                    self._channel, run.chat_id,
-                    f"定时任务{trigger_label}。执行内容见话题根消息；可在本话题继续交流。",
-                    SendOpts(receive_id_type="chat_id", reply_to=root.message_id,
-                             reply_in_thread=True, reply_target_gone="fail", uuid=run.seed_uuid),
-                )
-                if origin_message.thread_id is None or origin_message.root_id != root.message_id or origin_message.parent_id != root.message_id:
-                    raise TopicPublishError("飞书未确认种子消息与新话题的关系。", unknown=True)
+            origin_message = await complete_fresh_topic(
+                self._channel, root,
+                seed_content=f"定时任务{trigger_label}。执行内容见话题根消息；可在本话题继续交流。",
+                seed_uuid=run.seed_uuid, before_seed=require_seed_project,
+            )
             assert origin_message.thread_id is not None
             scope = FeishuScope(self._app_id, run.chat_id, ScopeKind.TOPIC, origin_message.thread_id)
             origin = ScheduledOrigin(self._app_id, run.chat_id, origin_message.message_id,
@@ -1205,7 +1489,7 @@ class ChannelApplication:
                 logger.exception("failed to send scheduled retry feedback")
 
     async def _reply_to_origin(self, message: Any, content: Any) -> object:
-        if isinstance(message, (ScheduledBindingOrigin, CardAnswerOrigin, _CardCommandOrigin)):
+        if isinstance(message, (ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin, _CardCommandOrigin)):
             return await self._channel.reply(message, content, SendOpts(
                 receive_id_type="chat_id", reply_to=message.message_id,
                 reply_in_thread=message.conversation.thread_id is not None,
@@ -3226,7 +3510,7 @@ class ChannelApplication:
                 )
             ]
             delivery_options = {}
-            if isinstance(origin, (ScheduledOrigin, ScheduledBindingOrigin, CardAnswerOrigin)):
+            if isinstance(origin, (ScheduledOrigin, ScheduledBindingOrigin, SessionAgentOrigin, CardAnswerOrigin)):
                 delivery_options = {
                     "reply": lambda card: self._reply_to_origin(origin, card),
                 }
@@ -3872,17 +4156,11 @@ class ChannelApplication:
                     fork_status_card(status="creating", **common),
                     SendOpts(receive_id_type="chat_id", uuid=hashlib.sha256(
                         ("netizen-fork-root:v1\0" + thread.id).encode()).hexdigest()[:32]))
-                if root.parent_id is not None or root.root_id not in {None, root.message_id}:
-                    raise TopicPublishError("飞书未确认新话题根消息，本次未绑定分支。", unknown=True)
-                origin = root
-                if root.thread_id is None:
-                    origin = await send_topic_message(self._channel, target_chat_id,
-                        "分支创建结果请查看话题顶部卡片。创建成功后，可在本话题发送消息继续。",
-                        SendOpts(receive_id_type="chat_id", reply_to=root.message_id,
-                            reply_in_thread=True, reply_target_gone="fail", uuid=hashlib.sha256(
-                                ("netizen-fork-seed:v1\0" + thread.id).encode()).hexdigest()[:32]))
-                    if origin.thread_id is None or origin.root_id != root.message_id or origin.parent_id != root.message_id:
-                        raise TopicPublishError("飞书未确认种子消息与新话题的关系，本次未绑定分支。", unknown=True)
+                origin = await complete_fresh_topic(
+                    self._channel, root,
+                    seed_content="分支创建结果请查看话题顶部卡片。创建成功后，可在本话题发送消息继续。",
+                    seed_uuid=hashlib.sha256(("netizen-fork-seed:v1\0" + thread.id).encode()).hexdigest()[:32],
+                )
                 if origin.thread_id is None or (target_chat_id == scope.chat_id and origin.thread_id == scope.topic_id):
                     raise TopicPublishError("飞书未创建新的普通话题，本次未绑定分支。", unknown=True)
                 destination = FeishuScope(self._app_id, target_chat_id, ScopeKind.TOPIC, origin.thread_id)
@@ -5087,7 +5365,6 @@ class ChannelApplication:
                 await self._reply_no_current_binding(message, intent.scope)
                 return
             state = await self._binding_state(binding)
-            native = binding.native_thread_id or "pending（首条消息后创建）"
             metadata = await self._read_thread_metadata((binding,))
             thread_metadata_lines = _thread_metadata_status_lines(
                 binding,
@@ -5127,7 +5404,7 @@ class ChannelApplication:
                     binding_id=binding.id,
                     short_id=binding.short_id,
                     project_alias=binding.project_alias,
-                    native_thread_id=native,
+                    native_thread_id=binding.native_thread_id,
                     state=state,
                     metadata_lines=thread_metadata_lines,
                     git_branch_lines=git_branch_lines,
@@ -7287,7 +7564,7 @@ def _outcome_completion_mention_user_id(
     """
     if (
         not outcome.task_feedback.completion_mention_enabled
-        or isinstance(outcome.origin, (ScheduledOrigin, ScheduledBindingOrigin))
+        or isinstance(outcome.origin, (ScheduledOrigin, ScheduledBindingOrigin, SessionAgentOrigin))
         or outcome.background_cleanup_requested
     ):
         return None

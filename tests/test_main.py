@@ -572,6 +572,14 @@ class FakeScheduleMcpRunner:
         self.events.append("mcp:close")
 
 
+class FakeSessionMcpRunner(FakeScheduleMcpRunner):
+    config_overrides = (
+        'mcp_servers.netizen_sessions_test={url="http://127.0.0.1:32124/mcp", '
+        'bearer_token_env_var="NETIZEN_SESSION_MCP_TOKEN_TEST", enabled=true}',
+    )
+    app_server_env = {"NETIZEN_SESSION_MCP_TOKEN_TEST": "temporary-session-token"}
+
+
 class FakeScheduler:
     def __init__(self, events: list[str], **options: object) -> None:
         self.events = events
@@ -614,6 +622,9 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.schedule_events: list[str] = []
         self.mcp_runners: list[FakeScheduleMcpRunner] = []
+        self.session_events: list[str] = []
+        self.session_mcp_runners: list[FakeSessionMcpRunner] = []
+        self.session_mcp_bind_error: BaseException | None = None
         self.schedulers: list[FakeScheduler] = []
         self.mcp_bind_error: BaseException | None = None
         self.schedule_recovery_error: BaseException | None = None
@@ -641,7 +652,14 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             self.schedulers.append(scheduler)
             return scheduler
 
+        def make_session_mcp() -> FakeSessionMcpRunner:
+            runner = FakeSessionMcpRunner(self.session_events)
+            runner.bind_error = self.session_mcp_bind_error
+            self.session_mcp_runners.append(runner)
+            return runner
+
         self.enterContext(patch("netizen_cli.main.ScheduleMcpRunner", make_mcp))
+        self.enterContext(patch("netizen_cli.main.SessionMcpRunner", make_session_mcp))
         self.enterContext(patch("netizen_cli.main.Scheduler", make_scheduler))
         self.enterContext(patch("netizen_cli.main.AppServerSkillRoots", make_skill_roots))
         self.enterContext(patch("netizen_cli.main.builtin_skill_root", return_value=self.builtin_root))
@@ -649,6 +667,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
             bind=AsyncMock(), close_listener=AsyncMock(), drain=AsyncMock(),
             close_auth=Mock(), attach_management=Mock(), open_admission=Mock(),
             close_admission=Mock(), urls=(), loopback_only=True,
+            config_snapshot=None,
         )))
 
     def _make_core(self, root: Path) -> ServiceCore:
@@ -737,6 +756,21 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 codex.assert_not_called()
         self.assertEqual(self.mcp_runners, [])
 
+    async def test_session_mcp_bind_failure_closes_both_transports_before_codex(self) -> None:
+        self.session_mcp_bind_error = OSError("session listener failed")
+        with tempfile.TemporaryDirectory() as raw:
+            core = self._make_core(Path(raw))
+            with patch("netizen_cli.main.AsyncCodex") as codex_constructor:
+                with self.assertRaisesRegex(OSError, "session listener failed"):
+                    await core.start()
+                codex_constructor.assert_not_called()
+            with self.assertRaisesRegex(RuntimeError, "not ready"):
+                core.open_admission()
+        self.assertEqual(self.session_events.count("mcp:close"), 1)
+        self.assertEqual(self.schedule_events.count("mcp:close"), 1)
+        self.assertNotIn("mcp:open", self.session_events)
+        self.assertEqual(self.schedulers, [])
+
     async def test_recovery_failure_closes_schedule_components_and_native_transport(self) -> None:
         self.schedule_recovery_error = RuntimeError("recovery failed")
         events = self.schedule_events
@@ -755,6 +789,12 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
 
             async def dispatch_scheduled_run(self, claim: object) -> None:
                 raise AssertionError("recovery cannot dispatch a new occurrence")
+
+            async def create_session_thread(self, **kwargs: object) -> dict:
+                raise AssertionError("recovery cannot create a session")
+
+            async def send_session_message(self, **kwargs: object) -> dict:
+                raise AssertionError("recovery cannot submit a session input")
 
         with tempfile.TemporaryDirectory() as raw:
             core = self._make_core(Path(raw))
@@ -791,13 +831,15 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 admin_options.update(kwargs)
                 self.urls = ()
                 self.loopback_only = True
+                self.config_snapshot = kwargs.get("config_snapshot")
 
             async def bind(self) -> None:
                 events.append("admin:bind")
                 self.urls = ("http://admin.example.test:8788/",)
 
-            def attach_management(self, management: object) -> None:
+            def attach_management(self, management: object, *, session_policy: object) -> None:
                 self.management = management
+                self.session_policy = session_policy
                 events.append("admin:attach")
 
             def open_admission(self) -> None:
@@ -908,6 +950,11 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(core.application._admin_urls, ("http://admin.example.test:8788/",))
                 self.assertEqual(core.application._instance_root, instance_root)
                 self.assertTrue(core.application._admin_loopback_only)
+                self.assertIs(core._admin.session_policy, core._session_policy)
+                self.assertEqual(
+                    core._session_mcp.callback, core._session_service.call,
+                )
+                self.assertNotIn("mcp:open", self.session_events)
                 self.assertEqual(core._management._updates.product_root, instance_root)
                 self.assertNotIn("admin:open", events)
                 self.assertNotIn("mcp:open", events)
@@ -951,6 +998,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                 admin = SimpleNamespace(
                     bind=AsyncMock(), close_listener=AsyncMock(), drain=AsyncMock(),
                     close_auth=Mock(), urls=(), loopback_only=False,
+                    config_snapshot=None,
                 )
                 error = RuntimeError("builtin Skills unavailable")
                 roots = SimpleNamespace(set_roots=AsyncMock(side_effect=error))
@@ -1467,12 +1515,14 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(config, CodexConfig)
         self.assertEqual(
             config.config_overrides,
-            ("allow_login_shell=false",) + FakeScheduleMcpRunner.config_overrides,
+            ("allow_login_shell=false",) + FakeScheduleMcpRunner.config_overrides
+            + FakeSessionMcpRunner.config_overrides,
         )
         self.assertIsNone(config.codex_bin)
         self.assertEqual(
             config.env,
             captured_environment | FakeScheduleMcpRunner.app_server_env
+            | FakeSessionMcpRunner.app_server_env
             | {"NETIZEN_ROOT": str(root.resolve())},
         )
         self.assertEqual(len(cleanup_codex), 1)

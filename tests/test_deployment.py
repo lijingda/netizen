@@ -48,11 +48,17 @@ class DeploymentAssetsTest(unittest.TestCase):
             (ROOT / "config.example.yaml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(set(config), {"instance", "projects", "channel", "adminWeb"})
+        self.assertEqual(
+            set(config), {"instance", "projects", "channel", "adminWeb", "sessionTools"}
+        )
         self.assertEqual(set(config["instance"]), {"dataDir", "projectRoot"})
         self.assertEqual(config["instance"]["projectRoot"], "/home/your-user/projects")
         self.assertEqual(config["projects"], {"test": "/home/your-user/projects/test"})
         self.assertEqual(config["channel"], {"securityMode": "audit"})
+        self.assertEqual(config["sessionTools"], {
+            "discovery": {"mode": "all", "chatIds": []},
+            "readSend": {"mode": "all", "chatIds": []},
+        })
         self.assertEqual(
             config["adminWeb"], {"host": "0.0.0.0"}
         )

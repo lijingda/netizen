@@ -29,6 +29,10 @@ their cited ADRs before changing that boundary.
   SDK compatibility boundaries are in [adapters](docs/design.md#sdk-适配边界).
   Goal input retains exact physical-Turn admission across rollover
   ([ADR 0069](docs/adr/0069-steer-the-current-physical-goal-turn.md)).
+  Ordinary session collaboration follows
+  [ADR 0081](docs/adr/0081-coordinate-ordinary-sessions-with-native-external-messages.md):
+  native Thread IDs, instance tool ranges, and the narrow ExternalMessage start/join
+  entry. Preserve existing human/card/scheduled exact-Turn admission.
   Background Thread naming has its own failure and cleanup boundary in
   [ADR 0067](docs/adr/0067-name-threads-with-private-ephemeral-forks.md).
 - Message provenance, mention catch-up, quotes, and images:
@@ -96,8 +100,10 @@ their cited ADRs before changing that boundary.
   but cannot submit arbitrary immediate Prompts (ADR 0061/0068).
   Do not add another runtime, long-lived service, scheduler, history model, or
   configuration layer.
-- Preserve exact Scope/Binding-to-native-Thread identity. Running input steers
-  the exact Turn; it is never queued, merged, or converted into another Turn.
+- Preserve exact Scope/Binding-to-native-Thread identity. Existing running input
+  steers the exact Turn; it is never queued or converted into another Turn.
+  Only the verified session-tool entry uses native ExternalMessage start/join
+  (ADR 0081); it does not change ordinary input admission.
   Unknown side effects fail closed at the documented operation-specific scope.
 - Different Bindings may run concurrently in the same canonical Project cwd.
   Do not add a global semaphore, Project lock, workspace copy, per-Binding
@@ -146,7 +152,7 @@ their cited ADRs before changing that boundary.
   RBAC, a Netizen allowlist, or Project ACLs. Native Codex controls model, tools,
   Skills, MCP, sandboxing, and environment policy except the documented Binding
   Model/Effort/Speed intent, non-login tool boundary, and dedicated temporary
-  Scheduler MCP server entry (ADR 0061). This public process override must not
+  Scheduler/session collaboration MCP server entries (ADR 0061/0081). These public process overrides must not
   write user configuration, replace user MCP entries, or override developer/base
   instructions. Fresh Threads use the public SDK's `auto_review` default;
   persistent forks retain native inherited permissions without client overrides.

@@ -80,7 +80,7 @@ from .queries import (
     _text_set_query,
 )
 from .transport import AdminHttpState, AdminHttpTransport, Request, Response
-from .port_config import ConfigFileSnapshot, persist_admin_port
+from .port_config import AdminPortConfigurationError, ConfigFileSnapshot, persist_admin_port
 from ..instance import instance_digest
 from ..chat_avatars import CHAT_AVATAR_IMAGE_SOURCES, avatar_url
 from ..settings import validate_access_host
@@ -160,6 +160,9 @@ from ..projects import (
 from ..schedules.models import AmbiguousLocalTime, ScheduleError, resolve_once_local
 from ..defaults import DefaultConfigurationError
 from ..session_settings import SessionSettings, SessionSettingsError
+from ..sessions.policy import (
+    SessionAccessPolicy, SessionPolicyConflict, SessionPolicyError, SessionPolicyService,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -244,6 +247,7 @@ class AdminActionPreconditions:
     default_revision: ExpectedValue[int]
     default_order_revision: ExpectedValue[int]
     admin_revision: ExpectedValue[int] = ExpectedValue.dont_check()
+    session_policy_revision: ExpectedValue[str] = ExpectedValue.dont_check()
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +276,7 @@ class AdminWebApplication:
         instance_root: Path | None = None,
         credentials: AdminCredentials | None = None,
         login: AdminLogin | None = None,
+        session_policy: SessionPolicyService | None = None,
     ) -> None:
         self._auth = auth
         self._management = management
@@ -279,6 +284,7 @@ class AdminWebApplication:
         self._users = auth.users
         self._credentials = credentials
         self._login_flow = login
+        self._session_policy = session_policy
         suffix = f"_{instance_digest(instance_root)}" if instance_root is not None else ""
         self._session_cookie = _SESSION_COOKIE + suffix
         self._preauth_cookie = _PREAUTH_COOKIE + suffix
@@ -560,6 +566,8 @@ class AdminWebApplication:
             )
         if route == ("GET", "/static/identity.js"):
             return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["identity.js"])
+        if route == ("GET", "/static/session-access.js"):
+            return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["session-access.js"])
         if route == ("GET", "/api/v1/identity"):
             _require_query_keys(context.query, set())
             session = self._authenticate(context)
@@ -567,6 +575,8 @@ class AdminWebApplication:
             return _json_response(200, {"openId": profile.open_id, "name": profile.name, "avatarUrl": _user_avatar(profile.avatar_url)})
         if route == ("GET", "/api/v1/admin-users"):
             return self._admin_users(context)
+        if route == ("GET", "/api/v1/session-tool-access"):
+            return self._session_tool_access(context)
         if context.method == "POST" and context.path in {
             "/api/v1/admin-users/add", "/api/v1/admin-users/remove", "/api/v1/admin-users/selector-config",
         }:
@@ -627,6 +637,7 @@ class AdminWebApplication:
             )
 
         mutations: dict[str, Callable[[_RequestContext], Awaitable[Response]]] = {
+            "/api/v1/session-tool-access/save": self._save_session_tool_access,
             "/api/v1/defaults/save": self._default_save,
             "/api/v1/defaults/delete": self._default_delete,
             "/api/v1/defaults/reorder": self._default_reorder,
@@ -1954,6 +1965,49 @@ class AdminWebApplication:
             raise AdminWebError(503, "identity_unavailable", "飞书身份服务暂不可用。")
         return self._credentials
 
+    def _session_tool_access(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        service = self._session_policy
+        if service is None:
+            raise AdminWebError(503, "unavailable", "跨会话工具权限暂不可用。")
+        view = service.view()
+        return _json_response(200, {
+            **view,
+            "saveAction": self._grant(
+                context, "session-tool-access.save", AdminActionTarget("session-tool-access", "instance"),
+                _empty_preconditions(session_policy_revision=ExpectedValue.expect(view["revision"])),
+            ) if service.editable else None,
+        })
+
+    async def _save_session_tool_access(self, context: _RequestContext) -> Response:
+        payload, grant = self._redeem(context, "session-tool-access.save",
+            expected_resource="session-tool-access", allowed_extra={"discovery", "readSend"})
+        if grant.target.target_id != "instance":
+            raise StaleActionGrant()
+        revision = _expected_value(_grant_preconditions(grant).session_policy_revision, "session tool access")
+        service = self._session_policy
+        if service is None:
+            raise AdminWebError(503, "unavailable", "跨会话工具权限暂不可用。")
+        try:
+            policy = SessionAccessPolicy.from_mapping({
+                "discovery": payload.get("discovery"), "readSend": payload.get("readSend"),
+            })
+        except SessionPolicyError as error:
+            raise AdminWebError(400, "invalid_session_tool_access", str(error)) from None
+
+        async def apply() -> None:
+            try:
+                service.update(policy, expected_revision=revision)
+            except SessionPolicyConflict:
+                raise AdminWebError(409, "stale_session_tool_access", "权限已被修改，请刷新后再保存。") from None
+            except AdminPortConfigurationError:
+                raise AdminWebError(409, "configuration_changed", "实例配置文件已变化；请重启实例加载配置后再保存。") from None
+            except (SessionPolicyError, OSError):
+                raise AdminWebError(503, "configuration_unavailable", "无法保存实例权限配置，当前权限未更新。") from None
+
+        await self._mutation(context, "session-tool-access.save", "instance", apply())
+        return self._session_tool_access(context)
+
     async def _identity_call(self, context: _RequestContext, operation: Awaitable[T]) -> T:
         try:
             result = await operation
@@ -2229,6 +2283,11 @@ class AdminWebRunner:
         return self._instance_root
 
     @property
+    def config_snapshot(self) -> ConfigFileSnapshot | None:
+        """The exact startup snapshot including an automatically allocated port."""
+        return self._config_snapshot
+
+    @property
     def urls(self) -> tuple[str, ...]:
         """Bound runtime addresses, never guesses from pending disk settings."""
         return self._urls
@@ -2254,7 +2313,7 @@ class AdminWebRunner:
                         if error.errno != errno.EADDRINUSE:
                             raise
                     else:
-                        persist_admin_port(snapshot, port)
+                        self._config_snapshot = persist_admin_port(snapshot, port)
                         self._port = port
                         break
                 else:
@@ -2300,7 +2359,8 @@ class AdminWebRunner:
                 self._auth.close()
             raise
 
-    def attach_management(self, management: InstanceManagementService) -> None:
+    def attach_management(self, management: InstanceManagementService, *,
+                          session_policy: SessionPolicyService | None = None) -> None:
         """Attach the sole application service after the closed listener binds."""
 
         if self._application is not None:
@@ -2308,6 +2368,7 @@ class AdminWebRunner:
         application = AdminWebApplication(
             auth=self._auth, management=management, instance_root=self._instance_root,
             credentials=self._credentials, login=self._login,
+            session_policy=session_policy,
         )
         if self._authorities is not None:
             application.configure_authorities(self._authorities)
@@ -2481,7 +2542,7 @@ def admin_access_urls(
 def _load_assets() -> dict[str, bytes]:
     root = importlib.resources.files("netizen_cli.admin").joinpath("static")
     assets: dict[str, bytes] = {}
-    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js"):
+    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js"):
         assets[name] = root.joinpath(name).read_bytes()
     return assets
 
@@ -2780,6 +2841,7 @@ def _empty_preconditions(
     default_revision: ExpectedValue[int] | None = None,
     default_order_revision: ExpectedValue[int] | None = None,
     admin_revision: ExpectedValue[int] | None = None,
+    session_policy_revision: ExpectedValue[str] | None = None,
 ) -> AdminActionPreconditions:
     return AdminActionPreconditions(
         active_binding_id or ExpectedValue.dont_check(),
@@ -2799,6 +2861,7 @@ def _empty_preconditions(
         default_revision or ExpectedValue.dont_check(),
         default_order_revision or ExpectedValue.dont_check(),
         admin_revision or ExpectedValue.dont_check(),
+        session_policy_revision or ExpectedValue.dont_check(),
     )
 
 

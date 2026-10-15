@@ -13,6 +13,7 @@
 
 默认会话规则与表单见[会话默认配置](sessions.md#默认会话配置与自动创建)，
 计划的创建和运行见[定时任务](scheduled-tasks.md)。
+会话协作的“发现”和“读取与发送”范围见[会话协作](session-collaboration.md#管理可访问范围)。
 
 实例提供必备的 Admin Web，用于跨飞书 Scope 集中筛选和管理 Projects、普通 Sessions、
 Side Topics、会话默认配置与定时计划。它与飞书共用同一个 Registry/Runtime，通过飞书

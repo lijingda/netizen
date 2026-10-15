@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/static/chat-picker.css">
   <script src="/static/chat-picker.js" defer></script>
   <script src="/static/identity.js" defer></script>
+  <script src="/static/session-access.js" defer></script>
   <script src="/static/admin.js" defer></script>
 </head>
 <body>
@@ -389,6 +390,35 @@
           <div class="identity-panel-actions"><button id="admin-selector-retry" class="refresh" hidden>重试加载</button><button id="admin-selector-reload" class="refresh" hidden>重新加载页面</button><button id="admin-user-confirm" class="action" disabled>确认添加</button></div>
         </section>
         <ul id="admin-users" class="admin-users" aria-label="管理员名单"></ul>
+        <section class="session-access" aria-labelledby="session-access-heading">
+          <h3 id="session-access-heading">跨会话工具权限</h3>
+          <p class="defaults-help">仅控制 Agent 对本实例普通会话的跨会话访问。所有来源聊天共用规则，范围按目标聊天匹配，包含其中的主会话与话题。两组权限互不依赖。</p>
+          <form id="session-access-form" class="card-form">
+            <fieldset id="session-access-fields" disabled>
+              <div class="session-access-grid">
+                <section>
+                  <h4>发现</h4><p>允许列出、搜索会话标识及位置；不能单独授权读取消息正文。</p>
+                  <label>目标范围<select id="session-access-discovery-mode"><option value="all">全部</option><option value="only">仅指定聊天</option><option value="exclude">排除指定聊天（黑名单）</option><option value="disabled">关闭</option></select></label>
+                  <div id="session-access-discovery-targets" hidden>
+                    <div id="session-access-discovery-picker"></div>
+                    <label>聊天 ID，每行一个<textarea id="session-access-discovery-chats" rows="5" maxlength="257000" placeholder="oc_…" aria-describedby="session-access-chat-help"></textarea></label>
+                  </div>
+                </section>
+                <section>
+                  <h4>读取与发送</h4><p>允许读取、发送和等待结果；在当前聊天创建话题并启动任务也检查此范围。关闭发现后仍可凭完整 Codex 会话 ID 操作。</p>
+                  <label>目标范围<select id="session-access-readSend-mode"><option value="all">全部</option><option value="only">仅指定聊天</option><option value="exclude">排除指定聊天（黑名单）</option><option value="disabled">关闭</option></select></label>
+                  <div id="session-access-readSend-targets" hidden>
+                    <div id="session-access-readSend-picker"></div>
+                    <label>聊天 ID，每行一个<textarea id="session-access-readSend-chats" rows="5" maxlength="257000" placeholder="oc_…" aria-describedby="session-access-chat-help"></textarea></label>
+                  </div>
+                </section>
+              </div>
+              <p id="session-access-chat-help" class="defaults-field-help">可选择群聊加入名单，或填写聊天 ID（单聊也用聊天 ID，不是用户 ID）。聊天 ID 可在会话列表的“会话标识”中复制。名单为空时，“仅指定聊天”不允许任何目标，“排除指定聊天”允许全部目标。</p>
+            </fieldset>
+            <p id="session-access-note" class="defaults-field-help" role="status"></p>
+            <div class="actions"><button id="session-access-cancel" class="refresh" type="button" disabled>放弃修改</button><button id="session-access-save" class="action" type="submit" disabled>保存权限</button></div>
+          </form>
+        </section>
       </div>
     </section>
     <section id="updates" class="panel" aria-labelledby="updates-heading" hidden>

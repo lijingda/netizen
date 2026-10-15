@@ -1,0 +1,30 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import unittest
+
+from tests.admin.test_session_filter_ui import _HtmlTree
+
+
+class SessionAccessUiTest(unittest.TestCase):
+    def test_independent_rule_editor_preserves_drafts_and_never_replays_save(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            reason = "Node.js 22 is required for Admin JavaScript behavior tests"
+            if os.environ.get("CI") == "true":
+                self.fail(reason)
+            self.skipTest(reason)
+        static = Path(__file__).resolve().parents[2] / "netizen_cli/admin/static"
+        tree = _HtmlTree()
+        tree.feed((static / "index.html").read_text(encoding="utf-8"))
+        fixture = Path(__file__).with_name("session_access_ui_harness.js")
+        before, after = fixture.read_text(encoding="utf-8").split("// SHIPPED_SESSION_ACCESS\n")
+        dom = fixture.with_name("dom_harness.js").read_text(encoding="utf-8")
+        result = subprocess.run([node], input="const htmlTree = " + json.dumps(tree.root) + ";\n"
+            + dom + before + (static / "session-access.js").read_text(encoding="utf-8") + after,
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

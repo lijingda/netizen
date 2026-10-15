@@ -61,6 +61,7 @@ function expireAdminSession() {
   const notice = document.querySelector("#auth-expired");
   if (notice) notice.hidden = false;
   window.NetizenIdentity?.expire();
+  window.NetizenSessionAccess?.expire();
   setStatus("登录已过期，请重新登录。", true);
 }
 
@@ -404,7 +405,7 @@ function actionsCell(row) {
 function confirmMaterializedDelete(session) {
   const name = session.nativeTitle || "未命名 Session";
   return window.confirm(
-    `确认永久删除这个会话？\n\n会话：${name}\nScope：${session.scopeKey}\nShort ID：${session.shortId}`
+    `确认永久删除这个会话？\n\n会话：${name}\nScope：${session.scopeKey}\nNetizen 会话编号：${session.shortId}`
     + "\n\n原生 Thread、spawned descendants、Codex App/CLI 历史和本地 Binding 都会永久消失，无法恢复。",
   );
 }
@@ -1608,15 +1609,16 @@ function sessionIdentityCell(row, session) {
   }
   const bindingId = document.createElement("div");
   bindingId.className = "id";
-  bindingId.textContent = `Binding ${session.shortId}`;
+  bindingId.textContent = `Netizen 会话编号：${session.shortId}`;
   td.append(bindingId);
   const details = document.createElement("details");
   details.className = "session-identities";
   const summary = document.createElement("summary");
   summary.textContent = "会话标识";
   details.append(summary);
-  for (const [label, value] of [["Chat", session.chatId], ["Topic", session.topicId],
-    ["Binding", session.bindingId], ["Thread", session.nativeThreadId]]) {
+  for (const [label, value] of [["飞书聊天 ID（位置）", session.chatId], ["飞书话题 ID（位置）", session.topicId],
+    ["Netizen 会话编号（Binding ID，管理与切换）", session.bindingId],
+    ["Codex 会话 ID（Thread ID，跨会话工具）", session.nativeThreadId]]) {
     if (!value) continue;
     const field = document.createElement("label");
     field.textContent = label;
@@ -1624,15 +1626,21 @@ function sessionIdentityCell(row, session) {
     input.type = "text";
     input.readOnly = true;
     input.value = value;
-    input.setAttribute("aria-label", `${label} ID，选中后可复制`);
+    input.setAttribute("aria-label", `${label}，完整值，选中后可复制`);
     input.addEventListener("focus", () => input.select());
     input.addEventListener("click", () => input.select());
     field.append(input);
     details.append(field);
   }
   const hint = document.createElement("small");
-  hint.textContent = "点击标识全选，再按 Ctrl/Cmd+C 复制。";
+  hint.textContent = "点击标识全选，再按 Ctrl/Cmd+C 复制。跨会话工具使用完整 Codex 会话 ID；现有管理与 /resume 使用 Netizen 编号。";
   details.append(hint);
+  if (!session.nativeThreadId) {
+    const pending = document.createElement("p");
+    pending.className = "meta-line";
+    pending.textContent = "Codex 会话 ID 尚未生成，首条消息后创建。";
+    details.append(pending);
+  }
   td.append(details);
   row.append(td);
 }
@@ -2033,7 +2041,7 @@ function openSessionSettingsEditor(session, returnFocus) {
     privateChat, contextAvailable: !privateChat && base.message_context_mode === "catch-up",
     loading: true, saving: false, optionsSerial: 0 };
   sessionSettingsInput("editor").hidden = false;
-  sessionSettingsInput("identity").textContent = `${session.nativeTitle || "未命名 Session"} · ${session.shortId} · ${session.projectAlias}`;
+  sessionSettingsInput("identity").textContent = `${session.nativeTitle || "未命名 Session"} · Netizen 会话编号：${session.shortId} · ${session.projectAlias}`;
   renderSessionSettingsEditor();
   if (!sessionSettingsInput("drawer").open) sessionSettingsInput("drawer").showModal();
   document.body.classList.toggle("session-settings-drawer-open", true);
@@ -2633,18 +2641,20 @@ function confirmDiscardChanges(changed) {
 
 function hasUnsavedEditors() {
   return sessionSettingsHasChanges() || defaultEditorHasChanges() || scheduleEditorHasChanges()
-    || Boolean(pendingScheduleDraft?.dirty);
+    || Boolean(pendingScheduleDraft?.dirty) || Boolean(window.NetizenSessionAccess?.dirty());
 }
 
 // Navigation asks once before closing any editor. Busy submissions retain the
 // existing fail-closed boundary; this helper never cancels or repeats a POST.
 function confirmDiscardEditors() {
-  if (sessionSettingsEditor?.saving || defaultsBusy || (scheduleEditor && scheduleInput("fields").disabled)) return false;
+  if (sessionSettingsEditor?.saving || defaultsBusy || (scheduleEditor && scheduleInput("fields").disabled)
+      || window.NetizenSessionAccess?.busy()) return false;
   if (!confirmDiscardChanges(hasUnsavedEditors())) return false;
   closeSessionSettingsEditor({ confirmed: true });
   closeDefaultEditor({ confirmed: true });
   if (scheduleEditor) closeScheduleEditor({ confirmed: true });
   cancelScheduleSelection({ confirmed: true });
+  window.NetizenSessionAccess?.discard();
   return true;
 }
 
@@ -2877,7 +2887,7 @@ function renderScheduleTarget() {
   scheduleInput("binding").value = selected;
   scheduleInput("select-session").hidden = Boolean(selected);
   scheduleInput("binding-summary").textContent = target
-    ? `${target.nativeTitle || target.shortId || "未命名会话"}\n${target.chatLabel || target.chatId} · ${target.projectAlias}\n会话 ${target.shortId || target.bindingId.slice(0, 8)}${target.topicId ? ` · 话题 ${target.topicId}` : ""}`
+    ? `${target.nativeTitle || target.shortId || "未命名会话"}\n${target.chatLabel || target.chatId} · ${target.projectAlias}\nNetizen 会话编号：${target.shortId || target.bindingId.slice(0, 8)}${target.topicId ? ` · 话题 ${target.topicId}` : ""}`
       + (target.pointerState !== "current" || target.catalogState === "archived" ? "\n目标当前不是可执行的当前会话，计划将自动暂停；不会自动切换或恢复会话。" : "")
     : selected ? `${editor.plan.target_label || selected}\n${editor.plan.chat?.chatLabel || editor.plan.chat_id} · ${editor.plan.project_alias}`
       : "请前往 Sessions 找到具体会话，再点击该行的“创建定时任务”。已填写内容会在当前页面保留。";
@@ -3913,7 +3923,10 @@ async function refresh(tab, cursor = undefined) {
     if (tab === "updates") await loadUpdates();
     if (tab === "schedules" && await loadSchedules(cursor) === false) return false;
     if (tab === "defaults") await loadDefaults();
-    if (tab === "system") await window.NetizenIdentity.loadUsers();
+    if (tab === "system") {
+      const results = await Promise.all([window.NetizenIdentity.loadUsers(), window.NetizenSessionAccess?.load()]);
+      if (results[1] === false) return false;
+    }
     if (state.authExpired) return false;
     if (isCurrentView()) setStatus("已更新。");
     return true;

@@ -113,6 +113,31 @@ class ScheduledBindingOrigin:
         return self.message_id
 
 
+@dataclass(frozen=True, slots=True)
+class SessionAgentConversation:
+    chat_id: str
+    chat_type: str
+    thread_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionAgentOrigin:
+    """Verified agent delivery and its real bot-authored feedback anchor."""
+
+    app_id: str
+    chat_id: str
+    message_id: str
+    conversation: SessionAgentConversation
+    source_binding_id: str
+    source_thread_id: str
+    target_binding_id: str
+    call_id: str
+
+    @property
+    def id(self) -> str:
+        return self.message_id
+
+
 class NativeCapability(str, Enum):
     ACCOUNT_RATE_LIMITS = "account-rate-limits"
     SKILLS = "skills"

@@ -893,11 +893,16 @@ class BindingStore:
         task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
         message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
         context_anchor: MessageContextAnchor | None = None,
+        empty_topic_root_message_id: str | None = None,
     ) -> ThreadBinding:
         """Atomically validate Project state, upsert exact Scope, and activate."""
 
         if expected_project_revision is not None and expected_project_revision < 1:
             raise ValueError("expected Project revision must be positive")
+        if empty_topic_root_message_id is not None and (
+            scope.kind is not ScopeKind.TOPIC or not empty_topic_root_message_id
+        ):
+            raise ValueError("a fresh topic requires its exact root message ID")
         return self._create_binding(
             scope=scope,
             project_alias=project_alias,
@@ -907,6 +912,7 @@ class BindingStore:
             message_context_mode=message_context_mode,
             context_anchor=context_anchor,
             expected_project_revision=expected_project_revision,
+            empty_topic_root_message_id=empty_topic_root_message_id,
         )
 
     def create_fork_binding(
