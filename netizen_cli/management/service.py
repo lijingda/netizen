@@ -1698,48 +1698,6 @@ class InstanceManagementService:
             service_tier_id=service_tier_id,
         )
 
-    async def create_exact_lazy_binding(
-        self,
-        *,
-        scope_key: str,
-        project_alias: str,
-        expected_project_revision: int,
-        expected_active_binding_id: str | None,
-        activate: bool,
-        turn_settings: BindingTurnSettings | None = None,
-        deadline: float | None = None,
-    ) -> CreatedBinding:
-        project = await self._blocking_io.submit(
-            self._projects.resolve_for_new,
-            project_alias,
-            expected_revision=expected_project_revision,
-            deadline=deadline,
-        )
-        async with self._scope_coordinator.hold(scope_key):
-            scope = self._bindings.get_scope(scope_key).scope
-            previous_id = self._active_id(scope_key)
-            if previous_id != expected_active_binding_id:
-                raise ActivePointerChanged(
-                    "Scope active Binding changed before Lazy creation"
-                )
-            try:
-                binding = self._bindings.create_admin_binding(
-                    scope=scope,
-                    project_alias=project.alias,
-                    expected_project_revision=expected_project_revision,
-                    activate=activate,
-                    turn_settings=turn_settings,
-                )
-            except (
-                StoredProjectNotFound,
-                StoredProjectDisabled,
-                StoredProjectRevisionConflict,
-            ) as error:
-                self._raise_project_create_error(project_alias, error)
-            if activate:
-                await self._runtime.binding_pointer_changed(previous_id, binding.id)
-        return CreatedBinding(project=project, binding=binding)
-
     async def resume_current_binding(
         self,
         *,

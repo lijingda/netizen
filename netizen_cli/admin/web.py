@@ -95,7 +95,6 @@ from ..bindings import (
     BindingContextRevisionConflict,
     BindingFeedbackRevisionConflict,
     BindingSettingsRevisionConflict,
-    BindingTurnSettings,
     ProjectConflict as StoredProjectConflict,
     ScopeNotFound,
     SideTopicNotFound,
@@ -643,7 +642,6 @@ class AdminWebApplication:
             "/api/v1/projects/set-enabled": self._project_set_enabled,
             "/api/v1/projects/delete-preview": self._project_delete_preview,
             "/api/v1/projects/delete": self._project_delete,
-            "/api/v1/sessions/create-lazy": self._session_create_lazy,
             "/api/v1/sessions/activate": self._session_activate,
             "/api/v1/sessions/configure": self._session_configure,
             "/api/v1/sessions/rename": self._session_rename,
@@ -1279,12 +1277,6 @@ class AdminWebApplication:
             actions["stop"] = self._grant(
                 context, "sessions.stop", target, preconditions
             )
-        actions["createLazy"] = self._grant(
-            context,
-            "sessions.create-lazy",
-            AdminActionTarget("scope", binding.scope_key, binding.scope_key),
-            preconditions,
-        )
         metadata = item.native.metadata if item.native is not None else None
         return {
             "bindingId": binding.id,
@@ -1659,52 +1651,6 @@ class AdminWebApplication:
             "message": message,
         })
 
-    async def _session_create_lazy(self, context: _RequestContext) -> Response:
-        payload, grant = self._redeem(
-            context,
-            "sessions.create-lazy",
-            expected_resource="scope",
-            allowed_extra={
-                "projectAlias",
-                "projectRevision",
-                "activate",
-                "turnSettings",
-            },
-        )
-        project_alias = _required_text(payload, "projectAlias", maximum=64)
-        project_revision = _required_int(payload, "projectRevision", minimum=1)
-        activate = _required_bool(payload, "activate")
-        settings = await self._validated_settings(payload.get("turnSettings"))
-        preconditions = _grant_preconditions(grant)
-        created = await self._mutation(
-            context,
-            "sessions.create-lazy",
-            grant.target.target_id,
-            self._management.create_exact_lazy_binding(
-                scope_key=grant.target.target_id,
-                project_alias=project_alias,
-                expected_project_revision=project_revision,
-                expected_active_binding_id=_expected_optional(
-                    preconditions.active_binding_id,
-                    "active Binding",
-                ),
-                activate=activate,
-                turn_settings=settings,
-                deadline=asyncio.get_running_loop().time()
-                + _MUTATION_DEADLINE_SECONDS,
-            ),
-        )
-        return _json_response(
-            200,
-            {
-                "requestId": context.request.request_id,
-                "bindingId": created.binding.id,
-                "scopeKey": created.binding.scope_key,
-                "projectAlias": created.project.alias,
-                "current": created.binding.active,
-            },
-        )
-
     async def _session_activate(self, context: _RequestContext) -> Response:
         _payload, grant = self._redeem(
             context,
@@ -2001,18 +1947,6 @@ class AdminWebApplication:
                 "alreadyTerminal": closed.outcome is None,
                 "missingRuntimeSession": closed.missing_runtime_session,
             },
-        )
-
-    async def _validated_settings(self, value: object) -> BindingTurnSettings | None:
-        if value is None:
-            return None
-        if not isinstance(value, dict):
-            raise AdminWebError(400, "invalid_settings", "会话配置必须是对象或 null。")
-        _require_body_keys(value, {"modelId", "effortId", "serviceTierId"})
-        return await self._management.resolve_turn_settings(
-            model_id=_required_text(value, "modelId", maximum=256),
-            effort_id=_required_text(value, "effortId", maximum=128),
-            service_tier_id=_required_text(value, "serviceTierId", maximum=128),
         )
 
     def _identity_credentials(self) -> AdminCredentials:

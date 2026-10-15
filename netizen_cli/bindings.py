@@ -907,8 +907,6 @@ class BindingStore:
             message_context_mode=message_context_mode,
             context_anchor=context_anchor,
             expected_project_revision=expected_project_revision,
-            activate=True,
-            allow_scope_insert=True,
         )
 
     def create_fork_binding(
@@ -946,40 +944,11 @@ class BindingStore:
                 message_context_mode=context_mode,
                 context_anchor=context_anchor if context_mode is MentionContextMode.CATCH_UP else None,
                 expected_project_revision=expected_project_revision,
-                activate=True, allow_scope_insert=True,
                 native_thread_id=native_thread_id,
                 empty_topic_root_message_id=root_message_id,
             )
         except sqlite3.IntegrityError as error:
             raise BindingConflict("原生分支已绑定到其他会话，本次未覆盖。") from error
-
-    def create_admin_binding(
-        self,
-        *,
-        scope: FeishuScope,
-        project_alias: str,
-        expected_project_revision: int,
-        activate: bool = False,
-        creator_id: str = "admin:web",
-        turn_settings: BindingTurnSettings | None = None,
-        task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
-    ) -> ThreadBinding:
-        """Atomically create a Lazy Binding in an exact existing Scope."""
-
-        if expected_project_revision < 1:
-            raise ValueError("expected Project revision must be positive")
-        return self._create_binding(
-            scope=scope,
-            project_alias=project_alias,
-            creator_id=creator_id,
-            turn_settings=turn_settings,
-            task_feedback=task_feedback,
-            message_context_mode=MentionContextMode.CURRENT_ONLY,
-            context_anchor=None,
-            expected_project_revision=expected_project_revision,
-            activate=activate,
-            allow_scope_insert=False,
-        )
 
     def _create_binding(
         self,
@@ -992,8 +961,6 @@ class BindingStore:
         message_context_mode: MentionContextMode,
         context_anchor: MessageContextAnchor | None,
         expected_project_revision: int | None,
-        activate: bool,
-        allow_scope_insert: bool,
         scheduled_run_id: str | None = None,
         native_thread_id: str | None = None,
         empty_topic_root_message_id: str | None = None,
@@ -1043,8 +1010,6 @@ class BindingStore:
                 (scope.key,),
             ).fetchone()
             if scope_row is None:
-                if not allow_scope_insert:
-                    raise ScopeNotFound(scope.key)
                 self._connection.execute(
                     """
                     INSERT INTO scopes(
@@ -1070,11 +1035,10 @@ class BindingStore:
                     ).fetchone() is not None
                 ):
                     raise ScopeConflict("话题已经建立会话，请继续使用该会话。")
-                if allow_scope_insert:
-                    self._connection.execute(
-                        "UPDATE scopes SET updated_at = ? WHERE scope_key = ?",
-                        (now, scope.key),
-                    )
+                self._connection.execute(
+                    "UPDATE scopes SET updated_at = ? WHERE scope_key = ?",
+                    (now, scope.key),
+                )
 
             project_row = self._connection.execute(
                 _PROJECT_SELECT + " WHERE alias = ? AND deleted = 0",
@@ -1118,18 +1082,17 @@ class BindingStore:
                     creator_id,
                     now,
                     now,
-                    int(activate),
+                    1,
                 ),
             )
-            if activate:
-                self._connection.execute(
-                    """
-                    UPDATE scopes
-                    SET active_binding_id = ?, updated_at = ?
-                    WHERE scope_key = ?
-                    """,
-                    (binding_id, now, scope.key),
-                )
+            self._connection.execute(
+                """
+                UPDATE scopes
+                SET active_binding_id = ?, updated_at = ?
+                WHERE scope_key = ?
+                """,
+                (binding_id, now, scope.key),
+            )
             if scheduled_run_id is not None:
                 self.schedules._set_run(
                     scheduled_run_id, phase="binding_ready", binding_id=binding_id,
@@ -1150,8 +1113,7 @@ class BindingStore:
             turn_settings=session_settings.turn_settings,
             task_feedback=session_settings.task_feedback,
             message_context_mode=session_settings.message_context_mode,
-            context_anchor=context_anchor, expected_project_revision=None, activate=True,
-            allow_scope_insert=True,
+            context_anchor=context_anchor, expected_project_revision=None,
             scheduled_run_id=run_id,
         )
 

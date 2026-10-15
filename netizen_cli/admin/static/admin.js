@@ -1862,20 +1862,6 @@ function wireSessionActions(actions, session) {
   });
   const schedule = actionButton("创建定时任务", () => openScheduleForSession(session, schedule));
   secondary.append(schedule);
-  if (a.createLazy) secondary.append(actionButton("新建 Lazy", async () => {
-    if (!state.projects) await loadProjects();
-    const alias = window.prompt("Project alias");
-    if (!alias) return;
-    const project = state.projects.items.find((item) => item.alias === alias && item.enabled);
-    if (!project) return setStatus("未找到当前页中已启用的 Project，请先刷新 Projects。", true);
-    const activate = window.confirm("是否立即设为当前会话？");
-    await mutate("/api/v1/sessions/create-lazy", a.createLazy, {
-      projectAlias: alias,
-      projectRevision: project.revision,
-      activate,
-      turnSettings: null,
-    });
-  }));
   if (a.configure) {
     const button = actionButton("配置", () => openSessionSettingsEditor(session, button));
     actions.append(button);

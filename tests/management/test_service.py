@@ -934,49 +934,6 @@ class InstanceManagementServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(renamed.binding.id, first.id)
         self.assertEqual(self.store.active_binding(self.scope.key).id, replacement.id)
 
-    async def test_admin_lazy_create_supports_inactive_and_current_modes(self) -> None:
-        current = await self._create()
-        revision = self.projects.resolve_for_new("test").revision
-
-        inactive = await self.service.create_exact_lazy_binding(
-            scope_key=self.scope.key,
-            project_alias="test",
-            expected_project_revision=revision,
-            expected_active_binding_id=current.id,
-            activate=False,
-        )
-        self.assertFalse(inactive.binding.active)
-        self.assertIsNone(inactive.binding.activated_at)
-        self.assertEqual(inactive.binding.creator_id, "admin:web")
-        self.assertEqual(self.store.active_binding(self.scope.key).id, current.id)
-
-        selected = await self.service.create_exact_lazy_binding(
-            scope_key=self.scope.key,
-            project_alias="test",
-            expected_project_revision=revision,
-            expected_active_binding_id=current.id,
-            activate=True,
-        )
-        self.assertTrue(selected.binding.active)
-        self.assertIsNotNone(selected.binding.activated_at)
-        self.assertEqual(
-            self.store.active_binding(self.scope.key).id,
-            selected.binding.id,
-        )
-        self.assertIn(
-            ("pointer", current.id, selected.binding.id),
-            self.runtime.calls,
-        )
-
-        with self.assertRaises(ActivePointerChanged):
-            await self.service.create_exact_lazy_binding(
-                scope_key=self.scope.key,
-                project_alias="test",
-                expected_project_revision=revision,
-                expected_active_binding_id=current.id,
-                activate=False,
-            )
-
     async def test_session_query_hydrates_only_materialized_page_records(self) -> None:
         materialized = await self._create()
         self.store.assign_native_thread_id(materialized.id, "native-active")
