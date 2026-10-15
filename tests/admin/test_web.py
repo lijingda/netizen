@@ -2168,7 +2168,9 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.management.session_items_override = (
             SessionInventoryItem(
                 BindingInventoryRecord(fork, scope),
-                NativeThreadView(None, NativeThreadMetadata("native-fork", "Unread fork", "Inherited history")),
+                NativeThreadView(None, NativeThreadMetadata(
+                    "native-fork", "Unread fork", "Inherited history", updated_at=1_792_074_779,
+                )),
                 ChatLabelResolver.fallback(scope.chat_id),
             ),
         )
@@ -2180,6 +2182,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(item["catalogState"], "unknown")
                 self.assertEqual(item["pointerState"], "current")
                 self.assertEqual(item["nativeTitle"], "Unread fork")
+                self.assertEqual(item["updatedAt"], 1_792_074_779)
                 self.assertNotIn("activate", item["actions"])
                 status, _, result = await self.json_post(
                     f"/api/v1/sessions/{operation}", session,

@@ -5087,7 +5087,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
         self.store.assign_native_thread_id(binding.id, "native-one")
-        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
+        self.runtime.thread_summary_values["native-one"] = NativeThreadMetadata(
             thread_id="native-one",
             name="  Release\nreview ",
             preview="Check\tcurrent changes",
@@ -5101,7 +5101,27 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("名称：Release review", lines)
         self.assertIn("会话预览：Check current changes", lines)
         self.assertIn("上下文窗口：暂不可用（下次可观测 Turn 完成后更新）", lines)
-        self.assertEqual(self.runtime.thread_metadata_calls, [("native-one",)])
+        self.assertEqual(self.runtime.thread_summary_calls, ["native-one"])
+        self.assertEqual(self.runtime.thread_metadata_calls, [])
+
+    async def test_status_reads_named_external_only_thread_missing_from_catalog(self) -> None:
+        await self.fixture.new()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.store.active_binding(scope.key)
+        self.store.assign_native_thread_id(binding.id, "external-only")
+        self.runtime.thread_summary_values["external-only"] = NativeThreadMetadata(
+            "external-only", "协作会话", "", updated_at=1_792_074_779,
+        )
+
+        await self.app.handle_message(FakeMessage("/status", message_id="om_status"))
+
+        lines = _status_text(self.channel.replies[-1][1]).splitlines()
+        self.assertIn("名称：协作会话", lines)
+        self.assertIn("会话预览：暂无", lines)
+        self.assertEqual(self.runtime.thread_summary_calls, ["external-only"])
+        self.assertEqual(self.runtime.thread_metadata_calls, [])
+        self.assertEqual(self.runtime.submit_calls, [])
+        self.assertEqual(self.store.active_binding(scope.key).id, binding.id)
 
     async def test_status_hides_source_trailer_from_native_preview(self) -> None:
         await self.fixture.new()
@@ -5113,7 +5133,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             '{"kind": "feishu_current_message", "sender":'
         )
         metadata = NativeThreadMetadata("native-one", "打招呼", preview)
-        self.runtime.thread_metadata_values["native-one"] = metadata
+        self.runtime.thread_summary_values["native-one"] = metadata
 
         await self.app.handle_message(
             FakeMessage("/status", message_id="om_status")
@@ -5136,7 +5156,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             '[点击](https://example.test) `echo` <at id="ou_user">用户</at> '
             '<feishu_current_message_context> 示例'
         )
-        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
+        self.runtime.thread_summary_values["native-one"] = NativeThreadMetadata(
             "native-one", name, preview,
         )
 
@@ -5164,7 +5184,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
         self.store.assign_native_thread_id(binding.id, "native-one")
-        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
+        self.runtime.thread_summary_values["native-one"] = NativeThreadMetadata(
             thread_id="native-one",
             name=None,
             preview="First task",
@@ -5255,7 +5275,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
         binding = self.store.active_binding(scope.key)
         self.store.assign_native_thread_id(binding.id, "native-one")
-        self.runtime.thread_metadata_values["native-one"] = NativeThreadMetadata(
+        self.runtime.thread_summary_values["native-one"] = NativeThreadMetadata(
             thread_id="native-one",
             name=None,
             preview="First task",
@@ -5278,7 +5298,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.store.assign_native_thread_id(binding.id, "native-one")
         self.runtime.thread_metadata_error = RuntimeError("history unavailable")
 
-        with self.assertLogs("netizen_cli.channel_app", level="WARNING"):
+        with patch.object(self.runtime, "thread_summary", side_effect=RuntimeError("read unavailable")):
             await self.app.handle_message(
                 FakeMessage("/status", message_id="om_status")
             )
