@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 
-_POSITIVE_TTL_SECONDS = 10 * 60.0
+_POSITIVE_TTL_SECONDS = 30 * 60.0
+_P2P_POSITIVE_TTL_SECONDS = 7 * 24 * 60 * 60.0
 _NEGATIVE_TTL_SECONDS = 30.0
 _CACHE_CAPACITY = 4_096
 _LOOKUP_CONCURRENCY = 10
+_LOOKUPS_PER_SECOND = 30
+_LOOKUPS_PER_MINUTE = 600
 _LOOKUP_BUDGET_SECONDS = 2.5
 
 
@@ -56,25 +59,34 @@ class ChatLabelResolver:
         *,
         clock: Callable[[], float] = time.monotonic,
         positive_ttl_seconds: float = _POSITIVE_TTL_SECONDS,
+        p2p_positive_ttl_seconds: float = _P2P_POSITIVE_TTL_SECONDS,
         negative_ttl_seconds: float = _NEGATIVE_TTL_SECONDS,
         capacity: int = _CACHE_CAPACITY,
         concurrency: int = _LOOKUP_CONCURRENCY,
+        lookups_per_second: int = _LOOKUPS_PER_SECOND,
+        lookups_per_minute: int = _LOOKUPS_PER_MINUTE,
         lookup_budget_seconds: float = _LOOKUP_BUDGET_SECONDS,
     ) -> None:
-        if positive_ttl_seconds <= 0 or negative_ttl_seconds <= 0:
+        if min(positive_ttl_seconds, p2p_positive_ttl_seconds, negative_ttl_seconds) <= 0:
             raise ValueError("chat label TTLs must be positive")
         if capacity < 1:
             raise ValueError("chat label cache capacity must be positive")
         if concurrency < 1:
             raise ValueError("chat label lookup concurrency must be positive")
+        if lookups_per_second < 1 or lookups_per_minute < 1:
+            raise ValueError("chat label lookup rates must be positive")
         if lookup_budget_seconds <= 0:
             raise ValueError("chat label lookup budget must be positive")
         self._provider = provider
         self._clock = clock
         self._positive_ttl_seconds = positive_ttl_seconds
+        self._p2p_positive_ttl_seconds = p2p_positive_ttl_seconds
         self._negative_ttl_seconds = negative_ttl_seconds
         self._capacity = capacity
         self._semaphore = asyncio.Semaphore(concurrency)
+        self._lookups_per_second = lookups_per_second
+        self._lookups_per_minute = lookups_per_minute
+        self._lookup_starts: deque[float] = deque()
         self._lookup_budget_seconds = lookup_budget_seconds
         self._cache: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._inflight: dict[str, asyncio.Task[ChatLabel]] = {}
@@ -132,6 +144,7 @@ class ChatLabelResolver:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._inflight.clear()
         self._cache.clear()
+        self._lookup_starts.clear()
 
     @staticmethod
     def fallback(
@@ -169,11 +182,12 @@ class ChatLabelResolver:
             label = task.result()
         except Exception:
             label = self.fallback(chat_id)
-        ttl = (
-            self._positive_ttl_seconds
-            if label.resolved
-            else self._negative_ttl_seconds
-        )
+        if not label.resolved:
+            ttl = self._negative_ttl_seconds
+        elif label.chat_mode == "p2p":
+            ttl = self._p2p_positive_ttl_seconds
+        else:
+            ttl = self._positive_ttl_seconds
         self._cache[chat_id] = _CacheEntry(label, self._clock() + ttl)
         self._cache.move_to_end(chat_id)
         while len(self._cache) > self._capacity:
@@ -181,7 +195,10 @@ class ChatLabelResolver:
 
     async def _resolve_one(self, chat_id: str, *, deadline: float) -> ChatLabel:
         try:
-            async with self._semaphore:
+            async with asyncio.timeout_at(deadline):
+                await self._semaphore.acquire()
+            try:
+                await self._wait_for_lookup_start(deadline=deadline)
                 info = await self._before_deadline(
                     self._provider.get_chat_info(chat_id),
                     deadline=deadline,
@@ -230,12 +247,35 @@ class ChatLabelResolver:
                     p2p_target_open_id=p2p_target_open_id,
                     chat_type=chat_type,
                 )
+            finally:
+                self._semaphore.release()
         except asyncio.CancelledError:
             raise
         except TimeoutError:
             return self.fallback(chat_id)
         except Exception:
             return self.fallback(chat_id)
+
+    async def _wait_for_lookup_start(self, *, deadline: float) -> None:
+        """Count one chat, including its member lookup, in both rolling windows."""
+        while True:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError("chat label lookup deadline elapsed")
+            now = self._clock()
+            starts = self._lookup_starts
+            while starts and starts[0] <= now - 60.0:
+                starts.popleft()
+            delay = 0.0
+            if len(starts) >= self._lookups_per_second:
+                delay = max(delay, starts[-self._lookups_per_second] + 1.0 - now)
+            if len(starts) >= self._lookups_per_minute:
+                delay = max(delay, starts[0] + 60.0 - now)
+            if delay <= 0:
+                # All callers share this loop; checking and recording without an
+                # await prevents concurrent pages from spending the same allowance.
+                starts.append(now)
+                return
+            await self._before_deadline(asyncio.sleep(delay), deadline=deadline)
 
     @staticmethod
     async def _before_deadline(awaitable: Any, *, deadline: float) -> Any:
