@@ -150,6 +150,7 @@ from tests.support.channel_cards import (
     direct_card_event,
     new_form_values,
 )
+from tests.support.legacy_bindings import legacy_admin_lazy_binding
 from tests.support.channel_fixtures import channel_fixture, side_channel_fixture
 
 PULSE_ON = BindingTaskFeedback(reaction_pulse_enabled=True)
@@ -8517,12 +8518,9 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 expected_project_revision=other.revision,
             )
         ).binding
-        await self.app._management.create_exact_lazy_binding(
-            scope_key=scope.key,
-            project_alias="unused",
+        legacy_admin_lazy_binding(
+            self.store, scope=scope, project_alias="unused",
             expected_project_revision=unused.revision,
-            expected_active_binding_id=current.id,
-            activate=False,
         )
 
         async def render(message_id: str) -> tuple[OutboundCard, str | None]:

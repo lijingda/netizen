@@ -1553,8 +1553,9 @@ thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admis
 `bindings` 保存全空或全有的三个 Binding-scoped catalog
 ID、settings revision、三个显式保存的 Binding Task Feedback 布尔值及 feedback revision、
 `current-only|catch-up`、全空或全有的 exact Context Boundary、context revision，以及
-`ever_activated` 标记；默认值为 1，Admin 仅创建且从未设为
+`ever_activated` 标记；默认值为 1，历史 Admin 仅创建且从未设为
 当前的 Lazy Binding 为 0，第一次 active-pointer 提交由 trigger 原子改为 1。
+Admin 已移除创建入口；保留此列、读取与激活语义以管理已有记录，无需数据库迁移。
 `current-only` 不得有 boundary，group/topic 的 catch-up 必须有完整 boundary；模式/边界
 更新和 Runtime 接受后的 cursor CAS 都由数据库约束保护。`side_topics` 保存
 app/chat/topic/root/source、Parent Binding
@@ -1805,6 +1806,11 @@ Codex 目录未显式绑定时如实提示，不推测服务的有效默认目�
 
 ### 会话目录与分页
 
+Admin 仅管理已有普通会话，不提供创建 Lazy Binding 的按钮、授权或 API。用户在目标
+飞书聊天／话题通过 `/new` 或已有默认配置创建会话；后台预建空会话不能完成对话，
+不保留第二套手动创建入口。已有 Lazy 会话继续支持查看、配置、设为当前和删除；
+定时任务仍按既有 Scheduler 契约创建话题或向已有会话投递。
+
 Admin 的 Sessions 下分“普通会话”和“临时会话”两个二级 Tab，默认普通会话；不再设置
 独立 Side Topics 一级入口，也不提供跨类型混合列表。两类列表均展示创建时间、最近更新，
 支持点击表头按任一时间升序或降序，默认最近更新降序。两个 Tab 分别保留筛选草稿、
@@ -2008,7 +2014,7 @@ action。Web 仍不注册 Prompt/Turn、完整 history、Goal mutation、Compact
 任意筛选结果的批量 native mutation route。
 
 普通会话按可用能力将“配置”“停止”“设为当前”及恢复操作直接展示；创建定时任务、
-重命名、归档、删除、新建 Lazy 和释放订阅收入“更多”。危险操作不新增独立分组，
+重命名、归档、删除和释放订阅收入“更多”。危险操作不新增独立分组，
 保留原有颜色、二次确认和 exact grant 校验；临时会话少量操作继续直接展示。
 
 临时会话按共享能力展示停止和结束操作。停止只中断当前 Side Turn，Side 保留并可继续；

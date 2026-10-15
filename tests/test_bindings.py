@@ -13,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from tests.support.legacy_bindings import legacy_admin_lazy_binding
+
 from netizen_cli.bindings import (
     AmbiguousBinding,
     BindingCursor,
@@ -1105,7 +1107,8 @@ os._exit(0)
             self.assertIsNotNone(channel.activated_at)
             self.assertEqual(store.get_scope(direct.key).scope, direct)
 
-            admin = store.create_admin_binding(
+            admin = legacy_admin_lazy_binding(
+                store,
                 scope=direct,
                 project_alias=project.alias,
                 expected_project_revision=project.revision,
@@ -1128,26 +1131,6 @@ os._exit(0)
                 1,
             )
 
-            created_current = store.create_admin_binding(
-                scope=direct,
-                project_alias=project.alias,
-                expected_project_revision=project.revision,
-                activate=True,
-            )
-            self.assertTrue(created_current.active)
-            self.assertIsNotNone(created_current.activated_at)
-            self.assertEqual(created_current.creator_id, "admin:web")
-            self.assertEqual(
-                store.active_binding(direct.key).id,
-                created_current.id,
-            )
-
-            with self.assertRaises(ScopeNotFound):
-                store.create_admin_binding(
-                    scope=missing,
-                    project_alias=project.alias,
-                    expected_project_revision=project.revision,
-                )
             with self.assertRaises(ProjectDisabled):
                 store.create_channel_binding(
                     scope=missing,
@@ -1804,7 +1787,8 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([item.side_topic.id for item in following.items], side_ids[-2::-1])
 
-        inactive = self.store.create_admin_binding(
+        inactive = legacy_admin_lazy_binding(
+            self.store,
             scope=self.direct,
             project_alias="alpha",
             expected_project_revision=1,

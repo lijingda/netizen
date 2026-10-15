@@ -84,7 +84,6 @@ from netizen_cli.management import (
     ChatLabel,
     ChatLabelResolver,
     ClosedSide,
-    CreatedBinding,
     InstanceManagementService,
     ManagementRuntimePort,
     NativeThreadView,
@@ -430,17 +429,6 @@ class FakeManagement:
         if self.set_enabled_release is not None:
             await self.set_enabled_release.wait()
         return Project("test", self.project.cwd, values["enabled"], 2)
-
-    async def create_exact_lazy_binding(self, **values):
-        self.calls.append(("create-lazy", values))
-        binding = self.lazy
-        return CreatedBinding(self.project, binding)
-
-    async def resolve_turn_settings(self, **values):
-        self.calls.append(("resolve-settings", values))
-        return BindingTurnSettings(
-            values["model_id"], values["effort_id"], values["service_tier_id"]
-        )
 
     async def activate_exact_binding(self, **values):
         self.calls.append(("activate", values))
@@ -1570,21 +1558,6 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             all(item["target"].expected_active_binding_id is None for item in delete_calls)
         )
 
-        items = await fresh_items()
-        create = items["binding-native"]["actions"]["createLazy"]
-        status, _headers, payload = await self.json_post(
-            "/api/v1/sessions/create-lazy",
-            session,
-            _action_payload(
-                create,
-                projectAlias="test",
-                projectRevision=1,
-                activate=False,
-                turnSettings=None,
-            ),
-        )
-        self.assertEqual(status, 200, payload)
-
         status, _headers, side_page = await self.json_get(
             "/api/v1/side-topics", session
         )
@@ -1606,6 +1579,23 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 200)
         self.assertNotIn("close", side_page["items"][0]["actions"])
+
+    async def test_session_creation_is_unavailable_in_admin(self):
+        self.runner.open_admission()
+        session = await self.login()
+        status, _, page = await self.json_get("/api/v1/sessions", session)
+        self.assertEqual(status, 200, page)
+        for item in page["items"]:
+            with self.subTest(binding=item["bindingId"]):
+                self.assertNotIn("createLazy", item["actions"])
+        self.management.calls.clear()
+        status, _, result = await self.json_post(
+            "/api/v1/sessions/create-lazy", session,
+            {"projectAlias": "test", "projectRevision": 1, "activate": False,
+             "turnSettings": None},
+        )
+        self.assertEqual(status, 404, result)
+        self.assertEqual(self.management.calls, [])
 
     async def test_side_query_defaults_multiselect_cursor_and_readable_projection(self):
         self.runner.open_admission()
@@ -2136,7 +2126,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(item["runtime"]["primaryStatus"], "running")
                 self.assertEqual(
                     set(item["actions"]),
-                    {"configure", "createLazy", "stop", "activate", "archive", "deleteMaterialized"},
+                    {"configure", "stop", "activate", "archive", "deleteMaterialized"},
                 )
                 status, _, result = await self.json_post(
                     "/api/v1/sessions/activate", session,

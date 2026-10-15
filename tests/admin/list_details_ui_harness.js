@@ -67,7 +67,7 @@ async function api(path, options = {}) {
   assert.equal(lazyRow.querySelector("strong").textContent, "Lazy Session");
   assert.equal(lazyRow.querySelectorAll("input").length, 2);
 
-  for (const action of ["createLazy", "activate", "configure", "rename", "archive", "unarchive", "unarchiveCurrent", "deleteLazy", "deleteMaterialized", "stop", "release"]) {
+  for (const action of ["activate", "configure", "rename", "archive", "unarchive", "unarchiveCurrent", "deleteLazy", "deleteMaterialized", "stop", "release"]) {
     session.actions[action] = { actionToken: action };
   }
   const actions = document.createElement("div");
@@ -77,7 +77,7 @@ async function api(path, options = {}) {
   const more = actions.querySelector("details");
   assert(!more.open);
   assert.deepEqual(more.querySelectorAll("button").map((button) => button.textContent),
-    ["创建定时任务", "新建 Lazy", "重命名", "归档", "删除 Lazy", "删除", "释放订阅"]);
+    ["创建定时任务", "重命名", "归档", "删除 Lazy", "删除", "释放订阅"]);
   const button = (label) => actions.querySelectorAll("button").find((item) => item.textContent === label);
   button("配置").click();
   assert.deepEqual(editorCall, [session, button("配置")]);

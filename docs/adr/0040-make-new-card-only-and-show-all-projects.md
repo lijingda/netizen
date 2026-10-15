@@ -7,6 +7,10 @@ related: 0039
 
 # 把普通会话创建收口到 `/new` 卡片并展示全部 Project
 
+2026-10-15 修订：移除 Admin exact Lazy creation，见
+[ADR 0031 修订](0031-add-in-process-admin-web-control-plane.md)。下文保留该入口的描述
+仅为历史决策；当前手动新建会话通过飞书 `/new` 完成。
+
 ## 背景
 
 当前普通 Binding 有两条创建路径：零参数 `/new` 打开 Project、Model、Effort、Speed

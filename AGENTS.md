@@ -87,7 +87,9 @@ their cited ADRs before changing that boundary.
 - Follow the [Netizen/Codex responsibility boundary](docs/design.md#netizen-与-codex-的职责边界):
   Netizen owns SDK requests/results and its resources; Codex owns native execution.
 - The in-process Admin Web is a management-only adapter over that same
-  application/runtime boundary (ADR 0031). The one-shot Admin deployment process
+  application/runtime boundary (ADR 0031). It manages existing sessions but does
+  not create ordinary Bindings; interactive session creation belongs to Feishu.
+  The one-shot Admin deployment process
   for explicit instance restarts is the sole deployment exception
   (ADR 0057/0059/0076); Admin cannot upgrade the shared program. The sole in-process Scheduler shares that boundary; Admin
   may maintain Scheduled Plans and request manual runs of their saved versions,

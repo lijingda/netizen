@@ -8,6 +8,10 @@ amended_by: 0070
 
 # 为普通 Binding 增加 @ 时补充期间消息的上下文模式
 
+2026-10-15 修订：Admin Lazy 创建入口已移除，见
+[ADR 0031 修订](0031-add-in-process-admin-web-control-plane.md)。下文 V1 Admin create
+约定保留为历史记录；Admin 管理已有会话时仍不能凭空构造新的 catch-up 边界。
+
 2026-09-23 修订：[ADR 0070](0070-schedule-inputs-in-existing-bindings.md) 允许原会话
 定时输入使用真实系统锚点作为 catch-up upper，普通真人消息仍需逐条 @ 准入。
 

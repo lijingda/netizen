@@ -1517,7 +1517,8 @@ Active + Lazy + Unknown，Project 可搜索
 周期查询或失败重试，手动刷新及操作后刷新仍生效，成功后更新时间、失败保留旧时间；
 登录和维护操作的轮询保持原样。依次验收 Project
 register/create/enable/disable，
-两个 Scope 中 active/inactive、Lazy/materialized/archived Binding 的 create/activate/
+确认 Admin 不再展示新建会话入口，已登录请求旧 `/api/v1/sessions/create-lazy` 返回 404。
+在飞书准备两个 Scope 中 active/inactive、Lazy/materialized/archived Binding，验收 activate/
 configure/rename/archive/两种 unarchive/delete-lazy/Stop/Release，以及一个 open Side 的 exact
 Close。Sessions 的“临时会话”默认选择 creating/open，使用项目和群选择器、状态多选与
 创建时间，默认每页 20，支持 10/20/50/100 与前后翻页；没有 Parent/Topic/Root ID 筛选。
