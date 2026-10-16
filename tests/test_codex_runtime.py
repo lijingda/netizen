@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from openai_codex import (
+    CodexError,
     ImageInput,
     InternalRpcError,
     InvalidRequestError,
@@ -3939,6 +3940,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         read = AsyncMock(return_value=SimpleNamespace(thread=SimpleNamespace(
             id="native-1", name="Existing empty Thread", preview="",
             updated_at=1_730_831_111,
+            created_at=1_730_800_000,
         )))
         with patch("netizen_cli.codex_runtime.AsyncThread", return_value=SimpleNamespace(read=read)) as thread:
             metadata = await self.runtime.thread_summary("native-1")
@@ -3946,6 +3948,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         read.assert_awaited_once_with(include_turns=False)
         self.assertEqual(metadata, NativeThreadMetadata(
             "native-1", "Existing empty Thread", "", updated_at=1_730_831_111,
+            created_at=1_730_800_000,
         ))
         self.assertEqual(self.codex.thread_list_calls, [])
 
@@ -3997,6 +4000,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                         name="First title",
                         preview="first prompt",
                         updated_at=1_730_831_111,
+                        created_at=1_730_800_000,
                     ),
                 ],
                 next_cursor="unused-page",
@@ -4013,6 +4017,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     "First title",
                     "first prompt",
                     updated_at=1_730_831_111,
+                    created_at=1_730_800_000,
                 ),
                 "native-2": NativeThreadMetadata(
                     "native-2",
@@ -4038,6 +4043,102 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 },
             ],
         )
+
+    async def test_catalog_page_preserves_native_order_and_leaves_next_page_unread(self) -> None:
+        for archived, sort_key, direction in (
+            (False, "updated_at", "desc"), (True, "created_at", "asc"),
+        ):
+            with self.subTest(archived=archived, sort_key=sort_key):
+                self.codex.thread_list_calls.clear()
+                self.codex.thread_list_pages = [
+                    SimpleNamespace(data=[
+                        SimpleNamespace(id="native-z", name="Title", preview="delegation",
+                                        updated_at=30, created_at=10),
+                        SimpleNamespace(id="native-a", name=None, preview="",
+                                        updated_at=20, created_at=15),
+                    ], next_cursor="next-page"),
+                    SimpleNamespace(data=[], next_cursor=None),
+                ]
+                page = await self.runtime.thread_catalog_page(
+                    archived=archived, cursor="current-page", limit=2,
+                    sort_key=sort_key, sort_direction=direction,
+                )
+                self.assertEqual(page.threads, (
+                    NativeThreadMetadata("native-z", "Title", "delegation", updated_at=30, created_at=10),
+                    NativeThreadMetadata("native-a", None, "", updated_at=20, created_at=15),
+                ))
+                self.assertEqual(page.next_cursor, "next-page")
+                self.assertEqual(self.codex.thread_list_calls, [{
+                    "archived": archived, "cursor": "current-page", "limit": 2,
+                    "sort_key": sort_key, "sort_direction": direction,
+                    "use_state_db_only": True, "model_providers": [],
+                }])
+                self.assertEqual(len(self.codex.thread_list_pages), 1)
+        self.assertEqual(self.codex.resume_calls, [])
+
+    async def test_catalog_page_rejects_malformed_or_nonadvancing_responses(self) -> None:
+        row = SimpleNamespace(id="native-1", name=None, preview="preview")
+        for data, next_cursor in (
+            (None, None), ([row, row], None), ([row, row, row], None),
+            ([SimpleNamespace(id="", name=None, preview="preview")], None),
+            ([SimpleNamespace(id="native-1", name=10, preview="preview")], None),
+            ([SimpleNamespace(id="native-1", name=None, preview=None)], None),
+            ([row], ""), ([row], 5), ([row], "same-page"),
+        ):
+            with self.subTest(data=data, next_cursor=next_cursor):
+                self.codex.thread_list_pages = [SimpleNamespace(data=data, next_cursor=next_cursor)]
+                with self.assertRaises(ThreadCatalogError):
+                    await self.runtime.thread_catalog_page(archived=False, cursor="same-page", limit=2)
+
+    async def test_catalog_page_validates_options_before_sdk_access(self) -> None:
+        for kwargs in (
+            {"archived": 1}, {"limit": 0}, {"limit": True}, {"limit": 101},
+            {"cursor": ""}, {"cursor": 1}, {"sort_key": "name"}, {"sort_direction": "backwards"},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                await self.runtime.thread_catalog_page(**{"archived": False, **kwargs})
+        self.assertEqual(self.codex.thread_list_calls, [])
+
+    async def test_catalog_page_deadline_covers_native_request(self) -> None:
+        loop = asyncio.get_running_loop()
+        with self.assertRaises(ThreadCatalogDeadlineExceeded):
+            await self.runtime.thread_catalog_page(archived=False, deadline=loop.time() - 1)
+        self.assertEqual(self.codex.thread_list_calls, [])
+
+        async def stalled(**kwargs):
+            await asyncio.Event().wait()
+
+        with patch.object(self.codex, "thread_list", side_effect=stalled) as read:
+            with self.assertRaises(ThreadCatalogDeadlineExceeded):
+                await self.runtime.thread_catalog_page(archived=False, deadline=loop.time() + 0.02)
+            read.assert_awaited_once()
+
+    async def test_catalog_page_wraps_sdk_and_transport_read_failures(self) -> None:
+        for error in (
+            CodexError("invalid protocol response"),
+            InternalRpcError(-32603, "native directory unavailable"),
+            ServerBusyError(-32000, "native server overloaded"),
+            TransportClosedError("transport closed"),
+            BrokenPipeError("transport pipe closed"),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.object(self.codex, "thread_list", side_effect=error),
+            ):
+                with self.assertRaises(ThreadCatalogError) as caught:
+                    await self.runtime.thread_catalog_page(archived=False)
+                self.assertIs(type(caught.exception), ThreadCatalogError)
+                self.assertIs(caught.exception.__cause__, error)
+
+    async def test_catalog_page_preserves_cancellation_and_programming_errors(self) -> None:
+        for error in (asyncio.CancelledError(), TypeError("unexpected argument")):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.object(self.codex, "thread_list", side_effect=error),
+            ):
+                with self.assertRaises(type(error)) as caught:
+                    await self.runtime.thread_catalog_page(archived=False)
+                self.assertIs(caught.exception, error)
 
     async def test_archived_thread_metadata_uses_native_archived_filter(self) -> None:
         self.codex.thread_list_pages = [

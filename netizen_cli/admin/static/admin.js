@@ -578,7 +578,6 @@ let openFilter = null;
 const filterOptions = {
   project: [],
   scopeKind: [["direct", "单聊"], ["group", "群聊"], ["topic", "话题"]],
-  inventoryState: [["active", "Active"], ["lazy", "Lazy"], ["unknown", "状态未确认"], ["archived", "Archived"], ["missing", "Missing"]],
   current: [["true", "当前"], ["false", "非当前"]],
   state: [["creating", "创建中"], ["open", "存活"], ["closed", "已结束"], ["expired", "已失效"], ["failed", "失败"]],
   enabled: [["true", "已启用"], ["false", "已暂停"]],
@@ -796,8 +795,7 @@ function initializeFilter(root) {
   const single = Boolean(root.dataset.scheduleFilter);
   const prefix = single ? "schedule" : root.dataset.sideMulti ? "side" : "session";
   const valueField = single ? document.querySelector(`#schedule-filter-${name}`) : null;
-  const defaults = name === "inventoryState" ? ["active", "lazy", "unknown"]
-    : name === "state" ? ["creating", "open"] : name === "ended" ? ["false"] : [];
+  const defaults = name === "state" ? ["creating", "open"] : name === "ended" ? ["false"] : [];
   const legend = root.querySelector("legend");
   legend.id = `${prefix}-${name}-label`;
   const trigger = document.createElement("button");
@@ -1034,7 +1032,17 @@ function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
     const filters = root.dataset.sideMulti ? sideMultiFilters : sessionMultiFilters;
     const values = filters.get(name).values();
     for (const value of values) query.append(name, value);
-    if (["inventoryState", "state"].includes(name) && values.length === 0) query.set(name, "all");
+    if (name === "state" && values.length === 0) query.set(name, "all");
+  }
+  if (form.id === "session-filter") {
+    // Exact links remain targeted while the user changes state or date filters.
+    const identity = new URLSearchParams(state.sessionPage?.query || "").get("identity");
+    if (identity) query.set("identity", identity);
+    if (query.get("inventoryState") === "lazy") {
+      for (const key of ["createdFrom", "createdBefore", "updatedFrom", "updatedBefore"]) query.delete(key);
+    } else if (!query.has("updatedFrom") && !query.has("updatedBefore")) {
+      query.set("updatedRange", "all"); // URL intent only; never sent to the API.
+    }
   }
   if (!query.has("pageSize")) query.set("pageSize", defaultPageSize);
   return query;
@@ -1054,6 +1062,7 @@ const timeRangePresetLabels = {
   "last-24-hours": "最近 24 小时",
   "last-7-days": "最近 7 天",
   "last-30-days": "最近 30 天",
+  "last-3-months": "最近 3 个月",
 };
 
 function twoDigits(value) {
@@ -1178,7 +1187,7 @@ function allTimeRange() {
   };
 }
 
-function presetTimeRange(kind, now = new Date()) {
+function presetTimeRange(kind, now = new Date(), openEnded = false) {
   if (kind === "all") return allTimeRange();
   let from;
   let before;
@@ -1188,6 +1197,14 @@ function presetTimeRange(kind, now = new Date()) {
   } else if (kind === "yesterday") {
     from = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
     before = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  } else if (kind === "last-3-months") {
+    before = new Date(now.getTime());
+    from = new Date(now.getTime());
+    const day = from.getDate();
+    from.setDate(1);
+    from.setMonth(from.getMonth() - 3);
+    const lastDay = new Date(from.getFullYear(), from.getMonth() + 1, 0).getDate();
+    from.setDate(Math.min(day, lastDay));
   } else {
     const durationDays = {
       "last-24-hours": 1,
@@ -1199,13 +1216,14 @@ function presetTimeRange(kind, now = new Date()) {
     from = new Date(now.getTime() - durationDays * 24 * 60 * 60 * 1000);
   }
   const label = timeRangePresetLabels[kind];
-  const summary = kind.startsWith("last-")
+  const rolling = kind.startsWith("last-");
+  const summary = rolling && !openEnded
     ? `${label} · 至 ${compactLocalMinute(before)} · ${utcOffsetLabel(before)}`
     : `${label} · ${utcOffsetLabel(from)}`;
   return {
     kind,
     from: canonicalUtc(from),
-    before: canonicalUtc(before),
+    before: openEnded && rolling ? "" : canonicalUtc(before),
     startValue: localMinuteValue(from),
     endValue: localMinuteValue(new Date(before.getTime() - 60 * 1000)),
     summary,
@@ -1252,6 +1270,11 @@ function initializeTimeRangeFilter(root) {
   }
   root.append(timeRangeTemplate.content.cloneNode(true));
   const identity = root.dataset.timeRangeId;
+  const field = root.dataset.timeRangeField || "created";
+  const label = root.querySelector("legend").textContent;
+  const defaultKind = root.dataset.timeRangeDefault || "all";
+  // Rolling update filters include later updates when this applied page is refreshed.
+  const preset = (kind) => presetTimeRange(kind, new Date(), field === "updated");
   const fromNode = root.querySelector("[data-time-range-from]");
   const beforeNode = root.querySelector("[data-time-range-before]");
   const trigger = root.querySelector("[data-time-range-trigger]");
@@ -1270,6 +1293,11 @@ function initializeTimeRangeFilter(root) {
   const clear = root.querySelector("[data-time-range-clear]");
   const presetButtons = [...root.querySelectorAll("[data-time-range-preset]")];
 
+  fromNode.name = `${field}From`;
+  beforeNode.name = `${field}Before`;
+  title.textContent = label;
+  quickClear.setAttribute("aria-label", `清除${label}筛选`);
+  quickClear.title = `清除${label}筛选`;
   popover.id = `${identity}-popover`;
   title.id = `${identity}-title`;
   help.id = `${identity}-help`;
@@ -1282,8 +1310,8 @@ function initializeTimeRangeFilter(root) {
   start.setAttribute("aria-describedby", `${help.id} ${zone.id} ${error.id}`);
   end.setAttribute("aria-describedby", `${help.id} ${zone.id} ${error.id}`);
 
-  let applied = allTimeRange();
-  let draft = allTimeRange();
+  let applied = preset(defaultKind);
+  let draft = { ...applied };
 
   function setInputValidity(invalid) {
     for (const [node, name] of [[start, "start"], [end, "end"]]) {
@@ -1297,7 +1325,7 @@ function initializeTimeRangeFilter(root) {
     beforeNode.value = applied.before;
     summary.textContent = applied.summary;
     trigger.classList.toggle("has-value", applied.kind !== "all");
-    trigger.setAttribute("aria-label", `创建时间：${applied.summary}`);
+    trigger.setAttribute("aria-label", `${label}：${applied.summary}`);
     quickClear.hidden = applied.kind === "all";
   }
 
@@ -1383,7 +1411,7 @@ function initializeTimeRangeFilter(root) {
 
   function prepareQuery() {
     if (applied.kind === "all" || applied.kind === "custom") return;
-    applied = presetTimeRange(applied.kind);
+    applied = preset(applied.kind);
     renderApplied();
   }
 
@@ -1408,7 +1436,7 @@ function initializeTimeRangeFilter(root) {
     cancel: cancelDraft,
     prepareQuery,
     setBounds(from, before) {
-      if (!from && !before) { this.reset(); return; }
+      if (!from && !before) { this.reset("all"); return; }
       const startDate = new Date(from);
       const beforeDate = new Date(before);
       const endDate = new Date(beforeDate.getTime() - 60000);
@@ -1420,9 +1448,9 @@ function initializeTimeRangeFilter(root) {
       closePopover({ restoreFocus: false });
       renderApplied();
     },
-    reset() {
-      applied = allTimeRange();
-      draft = allTimeRange();
+    reset(kind = defaultKind) {
+      applied = preset(kind);
+      draft = { ...applied };
       closePopover({ restoreFocus: false });
       renderApplied();
     },
@@ -1441,7 +1469,7 @@ function initializeTimeRangeFilter(root) {
   });
   for (const button of presetButtons) {
     button.addEventListener("click", () => {
-      draft = presetTimeRange(button.dataset.timeRangePreset);
+      draft = preset(button.dataset.timeRangePreset);
       renderDraft();
     });
   }
@@ -1453,7 +1481,10 @@ function initializeTimeRangeFilter(root) {
   });
   cancel.addEventListener("click", () => cancelDraft());
   done.addEventListener("click", () => {
-    if (draft.kind === "custom" && !validateDraft()) {
+    // A restored URL may have only one bound. Confirming it unchanged must
+    // preserve that valid range; edited custom input still requires both dates.
+    const unchanged = start.value === applied.startValue && end.value === applied.endValue;
+    if (draft.kind === "custom" && !unchanged && !validateDraft()) {
       (start.getAttribute("aria-invalid") === "true" ? start : end).focus();
       return;
     }
@@ -1645,11 +1676,14 @@ function sessionIdentityCell(row, session) {
   row.append(td);
 }
 
-function sessionUpdatedAtLabel(session) {
-  if (session.catalogState === "lazy") return "尚未开始";
-  if (!Number.isSafeInteger(session.updatedAt) || session.updatedAt < 0) return "—";
-  const date = new Date(session.updatedAt * 1000);
+function nativeSessionDateLabel(value) {
+  if (!Number.isSafeInteger(value) || value < 0) return "—";
+  const date = new Date(value * 1000);
   return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function sessionUpdatedAtLabel(session) {
+  return session.catalogState === "lazy" ? "尚未开始" : nativeSessionDateLabel(session.updatedAt);
 }
 
 function sessionDateLabel(value) {
@@ -1706,22 +1740,38 @@ function sessionSort(kind) {
 function sessionFilterPage(kind = "session", { resetSort = false } = {}) {
   const query = formQuery(document.querySelector(`#${kind}-filter`), "20");
   const sort = resetSort ? { by: "updatedAt", direction: "desc" } : sessionSort(kind);
-  query.set("sortBy", sort.by);
+  query.set("sortBy", kind === "session" && query.get("inventoryState") === "lazy" ? "createdAt" : sort.by);
   query.set("sortDirection", sort.direction);
   return firstSessionPage(query.toString());
 }
 
 function renderSessionSort(kind) {
   const sort = sessionSort(kind);
+  const applied = new URLSearchParams(state[`${kind}Page`]?.query || "");
+  const lazy = kind === "session" && applied.get("inventoryState") === "lazy";
   for (const button of document.querySelectorAll("[data-session-sort]")) {
     if (button.dataset.sessionSort !== kind) continue;
     const selected = button.dataset.sortBy === sort.by;
     const descending = selected && sort.direction === "desc";
-    const label = button.dataset.sortBy === "createdAt" ? "创建时间" : "最近更新";
+    const label = button.dataset.sortBy === "createdAt" ? lazy ? "登记时间" : "创建时间" : "最近更新";
+    button.disabled = lazy && button.dataset.sortBy === "updatedAt";
+    const labelNode = button.querySelector(".sort-label");
+    if (labelNode) {
+      labelNode.textContent = label;
+      button.title = lazy ? "Netizen 登记时间；此时尚无 Codex 创建时间" : "Codex 原生会话创建时间，与创建时间筛选口径一致；按浏览器本地时区显示";
+    }
     button.parentElement.setAttribute("aria-sort", selected ? descending ? "descending" : "ascending" : "none");
     button.setAttribute("aria-label", `按${label}${descending ? "由远及近" : "由近及远"}排序`
       + (selected ? `（当前${descending ? "由近及远" : "由远及近"}）` : ""));
     button.querySelector(".sort-indicator").textContent = selected ? descending ? "↓" : "↑" : "↕";
+  }
+}
+
+function updateSessionDateFilters() {
+  const lazy = document.querySelector("#session-inventory-state").value === "lazy";
+  for (const root of document.querySelector("#session-filter").querySelectorAll("[data-time-range]")) {
+    if (lazy) timeRangeControllers.get(root)?.cancel({ restoreFocus: false });
+    root.disabled = lazy;
   }
 }
 
@@ -1741,6 +1791,7 @@ async function sortSessionPage(kind, by) {
   const page = state[`${kind}Page`];
   // Sorting operates on the displayed result, not unsubmitted filter drafts.
   const query = new URLSearchParams(page.query ?? sessionFilterPage(kind).query);
+  if (kind === "session" && query.get("inventoryState") === "lazy" && by === "updatedAt") return false;
   const previous = sessionSort(kind);
   query.set("sortBy", by);
   query.set("sortDirection", previous.by === by && previous.direction === "desc" ? "asc" : "desc");
@@ -1758,13 +1809,18 @@ function renderSessionPagination(kind = "session") {
 function resetSessionFilters(kind = "session") {
   const form = document.querySelector(`#${kind}-filter`);
   form.reset();
+  if (kind === "session") updateSessionDateFilters();
   (kind === "side" ? sideChatPicker : sessionChatPicker)?.reset();
   const filters = kind === "side" ? sideMultiFilters : sessionMultiFilters;
   for (const controller of filters.values()) controller.reset();
   for (const root of form.querySelectorAll("[data-time-range]")) {
     timeRangeControllers.get(root)?.reset();
   }
-  return refresh("sessions", sessionFilterPage(kind, { resetSort: true }));
+  const page = sessionFilterPage(kind, { resetSort: true });
+  const query = new URLSearchParams(page.query);
+  query.delete("identity");
+  page.query = query.toString();
+  return refresh("sessions", page);
 }
 
 function invalidateSessionListRequest() {
@@ -1780,11 +1836,12 @@ async function loadSessionPage(kind, page, render) {
     const query = page.query == null
       ? formQuery(document.querySelector(`#${kind}-filter`), "20")
       : new URLSearchParams(page.query);
-    if (!query.has("sortBy")) query.set("sortBy", "updatedAt");
+    if (!query.has("sortBy")) query.set("sortBy", kind === "session" && query.get("inventoryState") === "lazy" ? "createdAt" : "updatedAt");
     if (!query.has("sortDirection")) query.set("sortDirection", "desc");
     const candidate = { ...page, query: query.toString(), previousCursors: [...page.previousCursors] };
     await loadSessionProjectOptions(kind === "side" ? sideMultiFilters : sessionMultiFilters, isCurrent);
     if (!isCurrent()) return false;
+    query.delete("updatedRange");
     if (page.cursor) query.set("cursor", page.cursor);
     const data = await api(`/api/v1/${kind === "side" ? "side-topics" : "sessions"}?${query}`);
     if (!isCurrent()) return false;
@@ -1812,8 +1869,9 @@ async function loadSessions(page = state.sessionPage) {
 }
 
 function renderSessions(data) {
-  document.querySelector("#sessions-catalog-notice").hidden = data.catalogAvailable !== false
-    && !data.items.some((session) => session.catalogState === "unknown");
+  const query = new URLSearchParams(state.sessionPage.query || "");
+  document.querySelector("#sessions-lazy-notice").hidden = query.get("inventoryState") !== "lazy";
+  document.querySelector("#sessions-identity-notice").hidden = !query.has("identity");
   const body = document.querySelector("#sessions-body");
   body.replaceChildren();
   for (const session of data.items) {
@@ -1844,7 +1902,7 @@ function renderSessions(data) {
     const turnSettings = settings.turn_settings;
     const model = turnSettings ? `${turnSettings.model_id} / ${turnSettings.effort_id} / ${turnSettings.service_tier_id}` : "继承 Codex";
     cell(row, `${settings.message_context_mode} · ${model}`);
-    cell(row, sessionDateLabel(session.createdAt), "session-time");
+    cell(row, session.catalogState === "lazy" ? sessionDateLabel(session.registeredAt) : nativeSessionDateLabel(session.createdAt), "session-time");
     cell(row, sessionUpdatedAtLabel(session), "session-time");
     const actions = actionsCell(row);
     wireSessionActions(actions, session);
@@ -1931,7 +1989,7 @@ function renderSides(data) {
       const link = document.createElement("a");
       link.className = "action";
       link.textContent = "查看来源会话";
-      link.href = `/sessions/ordinary?identity=${encodeURIComponent(parent.bindingId)}&inventoryState=all`;
+      link.href = `/sessions/ordinary?identity=${encodeURIComponent(parent.bindingId)}&updatedRange=all`;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
       actions.append(link);
@@ -3708,7 +3766,7 @@ async function loadScheduleRuns(page = scheduleRunsPage) {
       }
       if (run.binding_id && !run.binding_removed) {
         const link = document.createElement("a");
-        link.href = `/sessions/ordinary?${new URLSearchParams({ identity: run.binding_id, inventoryState: "all" })}`;
+        link.href = `/sessions/ordinary?${new URLSearchParams({ identity: run.binding_id, updatedRange: "all" })}`;
         link.textContent = "打开 Session";
         links.append(link);
       }
@@ -3751,7 +3809,7 @@ async function moveScheduleRunsPage(direction) {
 const adminPagePaths = { projects: "/projects", schedules: "/schedules", defaults: "/defaults",
   updates: "/maintenance", system: "/system" };
 const sessionUrlKeys = ["project", "scopeKind", "inventoryState", "current", "chatId", "topicId", "identity",
-  "createdFrom", "createdBefore", "pageSize", "sortBy", "sortDirection"];
+  "createdFrom", "createdBefore", "updatedFrom", "updatedBefore", "updatedRange", "pageSize", "sortBy", "sortDirection"];
 const sideUrlKeys = ["project", "state", "chatId", "createdFrom", "createdBefore", "pageSize", "sortBy", "sortDirection"];
 let navigationReady = false;
 let navigationIndex = 0;
@@ -3768,7 +3826,19 @@ function pageQuery(tab, sessionTab, raw = "") {
   }
   if (tab === "sessions") {
     const field = sessionTab === "temporary" ? "state" : "inventoryState";
-    if (!query.has(field)) for (const value of sessionTab === "temporary" ? ["creating", "open"] : ["active", "lazy", "unknown"]) query.append(field, value);
+    if (!query.has(field)) for (const value of sessionTab === "temporary" ? ["creating", "open"] : ["active"]) query.append(field, value);
+    if (sessionTab === "ordinary") {
+      if (!["active", "archived", "lazy"].includes(query.get(field))) query.set(field, "active");
+      else query.set(field, query.get(field));
+      if (query.get(field) === "lazy") {
+        for (const key of ["createdFrom", "createdBefore", "updatedFrom", "updatedBefore", "updatedRange"]) query.delete(key);
+        query.set("sortBy", "createdAt");
+      } else if (!query.has("updatedFrom") && !query.has("updatedBefore") && query.get("updatedRange") !== "all") {
+        const range = presetTimeRange("last-3-months", new Date(), true);
+        query.set("updatedFrom", range.from);
+      }
+      if (query.has("updatedFrom") || query.has("updatedBefore")) query.delete("updatedRange");
+    }
     if (!query.has("pageSize")) query.set("pageSize", "20");
     if (!query.has("sortBy")) query.set("sortBy", "updatedAt");
     if (!query.has("sortDirection")) query.set("sortDirection", "desc");
@@ -3779,13 +3849,15 @@ function pageQuery(tab, sessionTab, raw = "") {
 
 function pageUrl(tab, sessionTab = state.sessionTab, raw = "") {
   const path = tab === "sessions" ? `/sessions/${sessionTab}` : adminPagePaths[tab];
-  const query = pageQuery(tab, sessionTab, raw);
+  const intent = new URLSearchParams(raw);
+  if (tab === "sessions" && sessionTab === "ordinary" && raw && !intent.has("updatedFrom") && !intent.has("updatedBefore")) intent.set("updatedRange", "all");
+  const query = pageQuery(tab, sessionTab, intent);
   if (tab === "sessions") {
     for (const [key, value] of [["pageSize", "20"], ["sortBy", "updatedAt"], ["sortDirection", "desc"]]) {
       if (query.getAll(key).length === 1 && query.get(key) === value) query.delete(key);
     }
     const key = sessionTab === "temporary" ? "state" : "inventoryState";
-    const defaults = sessionTab === "temporary" ? "creating,open" : "active,lazy,unknown";
+    const defaults = sessionTab === "temporary" ? "creating,open" : "active";
     if (query.getAll(key).sort().join(",") === defaults) query.delete(key);
   }
   if (tab === "schedules" && query.get("ended") === "false") query.delete("ended");
@@ -3829,6 +3901,7 @@ function readPageLocation() {
   if (path === "/" && query.get("binding_id")) {
     tab = "sessions";
     query.set("identity", query.get("binding_id"));
+    if (!query.has("updatedFrom") && !query.has("updatedBefore")) query.set("updatedRange", "all");
   }
   return { tab, sessionTab, query: pageQuery(tab, sessionTab, query) };
 }
@@ -3846,7 +3919,12 @@ function restorePageFilters(route) {
     document.querySelector(`#${kind}-chat-filter`).value = chatId || "";
     document.querySelector(`#${kind}-page-size`).value = query.get("pageSize");
     for (const root of document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")) {
-      timeRangeControllers.get(root).setBounds(query.get("createdFrom") || "", query.get("createdBefore") || "");
+      const field = root.dataset.timeRangeField || "created";
+      timeRangeControllers.get(root).setBounds(query.get(`${field}From`) || "", query.get(`${field}Before`) || "");
+    }
+    if (kind === "session") {
+      document.querySelector("#session-inventory-state").value = query.get("inventoryState");
+      updateSessionDateFilters();
     }
     state[`${kind}Page`] = firstSessionPage(query.toString());
     const name = kind === "side" ? "sides" : "sessions";
@@ -4035,6 +4113,7 @@ document.querySelector("#create-project").addEventListener("submit", async (even
   formElement.reset();
 });
 
+document.querySelector("#session-inventory-state").addEventListener("change", updateSessionDateFilters);
 document.querySelector("#session-filter").addEventListener("submit", (event) => {
   event.preventDefault();
   refresh("sessions", sessionFilterPage());

@@ -13,6 +13,7 @@ import time
 import unittest
 from html.parser import HTMLParser
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -32,10 +33,14 @@ from netizen_cli.admin.presentation import (
 from netizen_cli.admin.queries import (
     _created_range_query,
     _current_query,
+    _decode_session_cursor,
+    _encode_cursor,
+    _encode_session_cursor,
     _scope_kinds_query,
-    _session_inventory_states,
+    _session_inventory_state,
     _session_page_size,
     _text_set_query,
+    _updated_range_query,
 )
 from netizen_cli.admin.web import (
     AdminWebRunner,
@@ -78,6 +83,7 @@ from netizen_cli.codex_runtime import (
     ThreadOccupied,
 )
 from netizen_cli.domain import GoalStatus, MentionContextMode, ScopeKind
+from netizen_cli.runtime.contracts import ThreadCatalogError
 from netizen_cli.session_settings import BindingTaskFeedback, SessionSettings
 from netizen_cli.management import (
     BindingStatusProjection,
@@ -95,7 +101,7 @@ from netizen_cli.management import (
     SessionInventoryItem,
     SessionInventoryPage,
     SessionInventoryState,
-    SessionUpdatedCursor,
+    SessionNativeCursor,
     SideTopicInventoryItem,
     SideTopicInventoryPage,
     StoppedBinding,
@@ -341,7 +347,7 @@ class FakeManagement:
                 BindingInventoryRecord(self.native, self.scope),
                 NativeThreadView(
                     NativeThreadCatalogState.ACTIVE,
-                    NativeThreadMetadata("native-active", "Active", "preview", updated_at=1_730_831_111),
+                    NativeThreadMetadata("native-active", "Active", "preview", created_at=1_730_000_000, updated_at=1_730_831_111),
                 ),
                 label,
             ),
@@ -349,12 +355,13 @@ class FakeManagement:
                 BindingInventoryRecord(self.archived, self.scope),
                 NativeThreadView(
                     NativeThreadCatalogState.ARCHIVED,
-                    NativeThreadMetadata("native-archived", "Archived", "old", updated_at=1_730_750_000),
+                    NativeThreadMetadata("native-archived", "Archived", "old", created_at=1_720_000_000, updated_at=1_730_750_000),
                 ),
                 label,
             ),
         )
-        return SessionInventoryPage(records, None)
+        state = _kwargs["query"].inventory_state
+        return SessionInventoryPage(tuple(item for item in records if item.inventory_state is state), None)
 
     async def query_side_topics(self, **_kwargs):
         self.query_side_topic_calls.append(dict(_kwargs))
@@ -493,31 +500,34 @@ class AdminSessionPresentationTest(unittest.TestCase):
             all(_release_disposition_message(item) for item in ReleaseDisposition)
         )
 
-    def test_session_inventory_states_default_includes_unknown_and_normalizes_sets(self) -> None:
-        self.assertEqual(
-            _session_inventory_states({}),
-            (
-                SessionInventoryState.ACTIVE,
-                SessionInventoryState.LAZY,
-                SessionInventoryState.UNKNOWN,
-            ),
-        )
-        for state in SessionInventoryState:
-            self.assertEqual(
-                _session_inventory_states({"inventoryState": [state.value]}),
-                (state,),
-            )
-        self.assertEqual(
-            _session_inventory_states({"inventoryState": ["lazy", "active", "lazy"]}),
-            (SessionInventoryState.ACTIVE, SessionInventoryState.LAZY),
-        )
-        self.assertIsNone(_session_inventory_states({"inventoryState": ["all"]}))
-        self.assertIsNone(_session_inventory_states({
-            "inventoryState": [state.value for state in SessionInventoryState]
-        }))
-        for values in (["materialized"], ["all", "lazy"], [""], []):
+    def test_session_inventory_state_is_single_and_defaults_to_active(self) -> None:
+        self.assertIs(_session_inventory_state({}), SessionInventoryState.ACTIVE)
+        for state in (SessionInventoryState.ACTIVE, SessionInventoryState.ARCHIVED, SessionInventoryState.LAZY):
+            self.assertIs(_session_inventory_state({"inventoryState": [state.value]}), state)
+        for values in (["materialized"], ["all"], ["unknown"], ["missing"], ["active", "lazy"], ["active", "active"], [""], []):
             with self.subTest(values=values), self.assertRaises(AdminWebError):
-                _session_inventory_states({"inventoryState": values})
+                _session_inventory_state({"inventoryState": values})
+
+    def test_session_cursor_preserves_source_page_and_consumed_offset(self) -> None:
+        for cursor in (
+            SessionNativeCursor(None, 17),
+            SessionNativeCursor("native-page", 99),
+            SessionNativeCursor("start", 0),
+        ):
+            with self.subTest(cursor=cursor):
+                encoded = _encode_session_cursor(cursor, "filters")
+                decoded = _decode_session_cursor(encoded, "filters", inventory_state=SessionInventoryState.ACTIVE)
+                self.assertEqual(decoded, cursor)
+        for values in (
+            ("start", "not-start", "0"), ("invalid", "start", "0"),
+            ("next", "native-page", "-1"), ("next", "native-page", "100"),
+            ("next", "native-page", "01"), ("next", "native-page", "1.0"),
+        ):
+            with self.subTest(values=values), self.assertRaises(AdminWebError):
+                _decode_session_cursor(
+                    _encode_cursor("session-native", values, "filters"),
+                    "filters", inventory_state=SessionInventoryState.ACTIVE,
+                )
 
     def test_session_multiselect_values_are_exact_and_canonical(self) -> None:
         self.assertEqual(
@@ -624,6 +634,20 @@ class AdminSessionPresentationTest(unittest.TestCase):
             with self.subTest(values=values), self.assertRaises(AdminWebError) as caught:
                 _created_range_query(values)
             self.assertEqual(caught.exception.code, code)
+
+    def test_updated_range_uses_the_same_strict_instant_contract(self) -> None:
+        self.assertEqual(_updated_range_query({
+            "updatedFrom": ["2030-01-02T08:30+08:00"],
+            "updatedBefore": ["2030-01-03T00:00Z"],
+        }), ("2030-01-02T00:30:00.000000+00:00", "2030-01-03T00:00:00.000000+00:00"))
+        for values in (
+            {"updatedFrom": ["2030-01-02T00:00"]},
+            {"updatedBefore": ["2030-02-30T00:00Z"]},
+            {"updatedFrom": ["2030-01-03T00:00Z"], "updatedBefore": ["2030-01-02T00:00Z"]},
+            {"updatedFrom": ["2030-01-03T00:00Z"], "updatedBefore": ["2030-01-03T08:00+08:00"]},
+        ):
+            with self.subTest(values=values), self.assertRaises(AdminWebError):
+                _updated_range_query(values)
 
 
 class AdminWebTest(unittest.IsolatedAsyncioTestCase):
@@ -1389,7 +1413,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.runner.open_admission()
         session = await self.login()
         status, _headers, page = await self.json_get(
-            "/api/v1/sessions?inventoryState=all", session,
+            "/api/v1/sessions?inventoryState=active", session,
         )
         self.assertEqual(status, 200)
         item = next(row for row in page["items"] if row["bindingId"] == "binding-native")
@@ -1405,7 +1429,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["code"], "thread_occupied")
         self.assertEqual(payload["message"], message)
         status, _headers, _page = await self.json_get(
-            "/api/v1/sessions?inventoryState=all", session,
+            "/api/v1/sessions?inventoryState=active", session,
         )
         self.assertEqual(status, 200)
 
@@ -1503,12 +1527,14 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         session = await self.login()
 
         async def fresh_items():
-            status, _headers, page = await self.json_get(
-                "/api/v1/sessions?inventoryState=all",
-                session,
-            )
-            self.assertEqual(status, 200)
-            return {item["bindingId"]: item for item in page["items"]}
+            items = {}
+            for state in ("active", "archived", "lazy"):
+                status, _headers, page = await self.json_get(
+                    f"/api/v1/sessions?inventoryState={state}", session,
+                )
+                self.assertEqual(status, 200)
+                items.update((item["bindingId"], item) for item in page["items"])
+            return items
 
         cases = [
             ("binding-lazy", "activate", "/api/v1/sessions/activate", {}),
@@ -1764,20 +1790,14 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 400)
         self.assertEqual(error["code"], "invalid_cursor")
 
-    async def test_session_multiselect_cursor_uses_normalized_filter_sets(self) -> None:
+    async def test_session_cursor_uses_normalized_filters_and_all_time_ranges(self) -> None:
         self.runner.open_admission()
         session = await self.login()
-        native_cursor = SessionUpdatedCursor(1_730_831_111, "binding-last")
-        with patch.object(
-            self.management,
-            "query_sessions",
-            return_value=SessionInventoryPage((), native_cursor),
-        ) as query:
+        native_cursor = SessionNativeCursor(None, 37)
+        with patch.object(self.management, "query_sessions", return_value=SessionInventoryPage((), native_cursor)) as query:
             status, _, page = await self.json_get(
                 "/api/v1/sessions?project=beta&project=alpha&project=beta"
-                "&scopeKind=topic&scopeKind=direct&current=true&current=false"
-                "&inventoryState=unknown&inventoryState=lazy&inventoryState=active"
-                "&inventoryState=lazy",
+                "&scopeKind=topic&scopeKind=direct&current=true&current=false&inventoryState=active",
                 session,
             )
             self.assertEqual(status, 200, page)
@@ -1785,41 +1805,30 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(filters.local.project_aliases, ("alpha", "beta"))
             self.assertEqual(filters.local.scope_kinds, (ScopeKind.DIRECT, ScopeKind.TOPIC))
             self.assertIsNone(filters.local.current)
-            self.assertEqual(filters.inventory_states, (
-                SessionInventoryState.ACTIVE, SessionInventoryState.LAZY,
-                SessionInventoryState.UNKNOWN,
-            ))
+            self.assertIs(filters.inventory_state, SessionInventoryState.ACTIVE)
             cursor = page["nextCursor"]
-            equivalent = (
-                "/api/v1/sessions?project=alpha&project=beta"
-                "&scopeKind=direct&scopeKind=topic"
-            )
+            equivalent = "/api/v1/sessions?project=alpha&project=beta&scopeKind=direct&scopeKind=topic"
             status, _, page = await self.json_get(f"{equivalent}&cursor={cursor}", session)
             self.assertEqual(status, 200, page)
             self.assertEqual(query.call_args.kwargs["cursor"], native_cursor)
             for change in (
                 "&project=gamma", "&scopeKind=group", "&current=true",
-                "&inventoryState=lazy", "&inventoryState=active&inventoryState=lazy",
-                "&inventoryState=unknown", "&pageSize=50",
-                "&sortBy=createdAt", "&sortDirection=asc",
+                "&inventoryState=lazy", "&inventoryState=archived", "&pageSize=50",
+                "&sortBy=createdAt", "&sortDirection=asc", "&identity=another",
+                "&createdFrom=2030-01-01T00:00Z", "&createdBefore=2030-01-01T00:00Z",
+                "&updatedFrom=2030-01-01T00:00Z", "&updatedBefore=2030-01-01T00:00Z",
             ):
                 with self.subTest(change=change):
-                    status, _, error = await self.json_get(
-                        f"{equivalent}{change}&cursor={cursor}", session
-                    )
+                    status, _, error = await self.json_get(f"{equivalent}{change}&cursor={cursor}", session)
                     self.assertEqual(status, 400, error)
                     self.assertEqual(error["code"], "invalid_cursor")
 
+            # Explicitly selecting all other filter choices is equivalent to omitting them.
             status, _, page = await self.json_get(
-                "/api/v1/sessions?scopeKind=direct&scopeKind=group&scopeKind=topic"
-                "&current=false&current=true&inventoryState=active&inventoryState=lazy"
-                "&inventoryState=archived&inventoryState=missing&inventoryState=unknown",
-                session,
+                "/api/v1/sessions?scopeKind=direct&scopeKind=group&scopeKind=topic&current=false&current=true", session,
             )
             self.assertEqual(status, 200, page)
-            status, _, page = await self.json_get(
-                f"/api/v1/sessions?inventoryState=all&cursor={page['nextCursor']}", session
-            )
+            status, _, page = await self.json_get(f"/api/v1/sessions?cursor={page['nextCursor']}", session)
             self.assertEqual(status, 200, page)
 
     async def test_session_multiselect_query_count_remains_bounded(self) -> None:
@@ -1849,7 +1858,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 for direction in ("asc", "desc"):
                     with self.subTest(route=route, key=key, direction=direction):
                         if route == "sessions":
-                            native_cursor = BindingCursor("2030", "binding-last") if key == "createdAt" else SessionUpdatedCursor(None, "binding-last")
+                            native_cursor = SessionNativeCursor("opaque-native-page-token")
                             result = SessionInventoryPage((), native_cursor)
                         else:
                             native_cursor = SideTopicCursor("2030", "side-last", "2031" if key == "updatedAt" else None)
@@ -1878,13 +1887,73 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
     async def test_session_default_order_is_updated_desc_and_accepts_explicit_equivalent_cursor(self) -> None:
         self.runner.open_admission()
         session = await self.login()
-        with patch.object(self.management, "query_sessions", return_value=SessionInventoryPage((), SessionUpdatedCursor(100, "last"))) as call:
+        with patch.object(self.management, "query_sessions", return_value=SessionInventoryPage((), SessionNativeCursor("opaque-native-page-token"))) as call:
             status, _, page = await self.json_get("/api/v1/sessions", session)
             self.assertEqual(status, 200, page)
             query = call.call_args.kwargs["query"]
             self.assertEqual((query.sort_by, query.sort_direction), ("updated_at", "desc"))
+            self.assertIs(query.inventory_state, SessionInventoryState.ACTIVE)
+            self.assertIsNone(query.created_from)
+            self.assertIsNone(query.created_before)
+            self.assertIsNone(query.updated_from)
+            self.assertIsNone(query.updated_before)
             status, _, error = await self.json_get("/api/v1/sessions?sortBy=updatedAt&sortDirection=desc&cursor=" + page["nextCursor"], session)
             self.assertEqual(status, 200, error)
+
+    async def test_session_state_rejects_multi_state_and_legacy_all_before_query(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        with patch.object(self.management, "query_sessions") as call:
+            for query in (
+                "inventoryState=all", "inventoryState=unknown", "inventoryState=missing",
+                "inventoryState=active&inventoryState=archived",
+                "inventoryState=active&inventoryState=active", "inventoryState=",
+            ):
+                with self.subTest(query=query):
+                    status, _, error = await self.json_get(f"/api/v1/sessions?{query}", session)
+                    self.assertEqual(status, 400, error)
+            call.assert_not_awaited()
+
+    async def test_lazy_cursor_remains_local_and_cannot_be_used_for_native_catalog(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        local_cursor = BindingCursor("2030-01-01T00:00:00+00:00", "binding-last")
+        with patch.object(self.management, "query_sessions", return_value=SessionInventoryPage((), local_cursor)) as call:
+            status, _, page = await self.json_get("/api/v1/sessions?inventoryState=lazy", session)
+            self.assertEqual(status, 200, page)
+            cursor = page["nextCursor"]
+            status, _, page = await self.json_get(f"/api/v1/sessions?inventoryState=lazy&cursor={cursor}", session)
+            self.assertEqual(status, 200, page)
+            self.assertEqual(call.call_args.kwargs["cursor"], local_cursor)
+            status, _, error = await self.json_get(f"/api/v1/sessions?inventoryState=active&cursor={cursor}", session)
+            self.assertEqual(status, 400, error)
+            self.assertEqual(error["code"], "invalid_cursor")
+
+    async def test_native_time_ranges_are_normalized_and_bound_to_cursor(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        cursor = SessionNativeCursor("opaque-native-page-token")
+        with patch.object(self.management, "query_sessions", return_value=SessionInventoryPage((), cursor)) as call:
+            query_values = {
+                "createdFrom": "2030-01-01T08:00+08:00",
+                "createdBefore": "2030-02-01T08:00+08:00",
+                "updatedFrom": "2030-03-01T08:00+08:00",
+                "updatedBefore": "2030-04-01T08:00+08:00",
+            }
+            status, _, page = await self.json_get("/api/v1/sessions?" + urlencode(query_values), session)
+            self.assertEqual(status, 200, page)
+            query = call.call_args.kwargs["query"]
+            for name, field in (("createdFrom", "created_from"), ("createdBefore", "created_before"), ("updatedFrom", "updated_from"), ("updatedBefore", "updated_before")):
+                self.assertEqual(getattr(query, field), datetime.fromisoformat(query_values[name]).timestamp())
+            self.assertIsNone(query.local.created_from)
+            self.assertIsNone(query.local.created_before)
+            equivalent = {key: value.replace("T08:00+08:00", "T00:00Z") for key, value in query_values.items()}
+            status, _, response = await self.json_get("/api/v1/sessions?" + urlencode({**equivalent, "cursor": page["nextCursor"]}), session)
+            self.assertEqual(status, 200, response)
+            self.assertEqual(call.call_args.kwargs["cursor"], cursor)
+            status, _, error = await self.json_get("/api/v1/sessions?" + urlencode({**equivalent, "updatedBefore": "2030-04-02T00:00Z", "cursor": page["nextCursor"]}), session)
+            self.assertEqual(status, 400, error)
+            self.assertEqual(error["code"], "invalid_cursor")
 
     async def test_project_options_are_authenticated_paginated_and_issue_no_actions(self) -> None:
         self.runner.open_admission()
@@ -1975,6 +2044,16 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["code"], "query_limit")
         self.assertIn("缩小筛选范围", result["message"])
 
+    async def test_sessions_catalog_failure_is_an_explicit_read_error(self) -> None:
+        self.runner.open_admission()
+        session = await self.login()
+        with patch.object(self.management, "query_sessions", side_effect=ThreadCatalogError("invalid page")):
+            status, _, result = await self.json_get("/api/v1/sessions", session)
+        self.assertEqual(status, 503)
+        self.assertEqual(result["code"], "catalog_unavailable")
+        self.assertIn("目录读取失败", result["message"])
+        self.assertNotIn("items", result)
+
     async def test_sessions_api_exposes_page_size_presentation_and_state(self) -> None:
         self.runner.open_admission()
         session = await self.login()
@@ -1988,17 +2067,17 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         call = self.management.query_session_calls[-1]
         self.assertEqual(call["limit"], 20)
         self.assertEqual(
-            call["query"].inventory_states,
-            (
-                SessionInventoryState.ACTIVE,
-                SessionInventoryState.LAZY,
-                SessionInventoryState.UNKNOWN,
-            ),
+            call["query"].inventory_state,
+            SessionInventoryState.ACTIVE,
         )
-        self.assertTrue(page["catalogAvailable"])
         self.assertGreaterEqual(call["deadline"], started + 10.0)
         self.assertLessEqual(call["deadline"], finished + 10.0)
+        self.assertEqual([item["bindingId"] for item in page["items"]], ["binding-native"])
         by_id = {item["bindingId"]: item for item in page["items"]}
+        for inventory_state in ("archived", "lazy"):
+            status, _, selected = await self.json_get(f"/api/v1/sessions?inventoryState={inventory_state}", session)
+            self.assertEqual(status, 200, selected)
+            by_id.update((item["bindingId"], item) for item in selected["items"])
         self.assertEqual(by_id["binding-native"]["sessionType"], "message")
         self.assertEqual(by_id["binding-native"]["chatMode"], "p2p")
         self.assertTrue(by_id["binding-native"]["chatLabelResolved"])
@@ -2016,6 +2095,10 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_id["binding-native"]["updatedAt"], 1_730_831_111)
         self.assertEqual(by_id["binding-archived"]["updatedAt"], 1_730_750_000)
         self.assertIsNone(by_id["binding-lazy"]["updatedAt"])
+        self.assertEqual(by_id["binding-native"]["createdAt"], 1_730_000_000)
+        self.assertEqual(by_id["binding-archived"]["createdAt"], 1_720_000_000)
+        self.assertIsNone(by_id["binding-lazy"]["createdAt"])
+        self.assertEqual(by_id["binding-lazy"]["registeredAt"], self.management.lazy.created_at)
         for item in by_id.values():
             self.assertNotIn("sessionState", item)
             self.assertNotIn("nativeState", item)
@@ -2054,16 +2137,16 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(
-            self.management.query_session_calls[-1]["query"].inventory_states,
-            (SessionInventoryState.LAZY,),
+            self.management.query_session_calls[-1]["query"].inventory_state,
+            SessionInventoryState.LAZY,
         )
         status, _headers, _page = await self.json_get(
-            "/api/v1/sessions?inventoryState=all",
+            "/api/v1/sessions?inventoryState=active",
             session,
         )
         self.assertEqual(status, 200)
-        self.assertIsNone(
-            self.management.query_session_calls[-1]["query"].inventory_states
+        self.assertIs(
+            self.management.query_session_calls[-1]["query"].inventory_state, SessionInventoryState.ACTIVE,
         )
         status, _headers, error = await self.json_get(
             "/api/v1/sessions?inventoryState=materialized",
@@ -2110,12 +2193,12 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
                 status, _, page = await self.json_get(
-                    "/api/v1/sessions?inventoryState=unknown", session,
+                    "/api/v1/sessions?inventoryState=active", session,
                 )
                 self.assertEqual(status, 200, page)
                 self.assertEqual(
-                    self.management.query_session_calls[-1]["query"].inventory_states,
-                    (SessionInventoryState.UNKNOWN,),
+                    self.management.query_session_calls[-1]["query"].inventory_state,
+                    SessionInventoryState.ACTIVE,
                 )
                 item = page["items"][0]
                 self.assertEqual(item["catalogState"], "unknown")
@@ -2139,18 +2222,6 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(values["target"].scope_key, unknown.scope_key)
                 self.assertEqual(page["items"][1]["catalogState"], "lazy")
                 self.assertIn("deleteLazy", page["items"][1]["actions"])
-
-        with patch.object(
-            self.management,
-            "query_sessions",
-            return_value=SessionInventoryPage((), None, catalog_available=False),
-        ):
-            status, _, page = await self.json_get(
-                "/api/v1/sessions?inventoryState=active", session,
-            )
-            self.assertEqual(status, 200, page)
-            self.assertEqual(page["items"], [])
-            self.assertFalse(page["catalogAvailable"])
 
     async def test_unlisted_current_fork_can_use_exact_archive_and_delete_actions(self) -> None:
         self.runner.open_admission()
@@ -2229,7 +2300,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
 
         self.management.native_delete_available = False
         status, _headers, page = await self.json_get(
-            "/api/v1/sessions?inventoryState=all",
+            "/api/v1/sessions?inventoryState=active",
             session,
         )
 
@@ -2260,7 +2331,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
         status, _headers, page = await self.json_get(
-            "/api/v1/sessions?inventoryState=all",
+            "/api/v1/sessions?inventoryState=active",
             session,
         )
 
@@ -2272,7 +2343,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         self.runner.open_admission()
         session = await self.login()
         status, _headers, page = await self.json_get(
-            "/api/v1/sessions?inventoryState=all",
+            "/api/v1/sessions?inventoryState=active",
             session,
         )
         self.assertEqual(status, 200)
@@ -2313,9 +2384,11 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             f"/api/v1/sessions?{encoded}", session
         )
         self.assertEqual(status, 200, payload)
-        local = self.management.query_session_calls[-1]["query"].local
-        self.assertEqual(local.created_from, "2030-01-02T00:30:00.000000+00:00")
-        self.assertEqual(local.created_before, "2030-01-03T00:45:00.000000+00:00")
+        query = self.management.query_session_calls[-1]["query"]
+        self.assertEqual(query.created_from, datetime.fromisoformat("2030-01-02T00:30:00+00:00").timestamp())
+        self.assertEqual(query.created_before, datetime.fromisoformat("2030-01-03T00:45:00+00:00").timestamp())
+        self.assertIsNone(query.local.created_from)
+        self.assertIsNone(query.local.created_before)
 
         status, _headers, payload = await self.json_get(
             f"/api/v1/side-topics?{encoded}", session
@@ -2363,7 +2436,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
 
         status, _headers, page = await self.json_get(
-            "/api/v1/sessions?inventoryState=all",
+            "/api/v1/sessions?inventoryState=active",
             session,
         )
 
@@ -2397,7 +2470,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
 
         status, _headers, page = await self.json_get(
-            "/api/v1/sessions?inventoryState=all",
+            "/api/v1/sessions?inventoryState=active",
             session,
         )
 
@@ -2419,7 +2492,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         session = await self.login()
 
         status, _headers, page = await self.json_get(
-            "/api/v1/sessions?inventoryState=all", session,
+            "/api/v1/sessions?inventoryState=archived", session,
         )
 
         self.assertEqual(status, 200)
@@ -2441,7 +2514,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
         status, _headers, page = await self.json_get(
-            "/api/v1/sessions?inventoryState=all", session,
+            "/api/v1/sessions?inventoryState=archived", session,
         )
 
         self.assertEqual(status, 200)
@@ -2650,7 +2723,7 @@ class AdminStaticAssetsTest(unittest.TestCase):
         javascript = (root / "admin.js").read_text(encoding="utf-8")
         stylesheet = (root / "admin.css").read_text(encoding="utf-8")
 
-        self.assertEqual(html.count('class="time-range-filter" data-time-range'), 2)
+        self.assertEqual(html.count('class="time-range-filter" data-time-range'), 3)
         self.assertIn('id="time-range-template"', html)
         self.assertIn('name="createdFrom" data-time-range-from', html)
         self.assertIn('name="createdBefore" data-time-range-before', html)
@@ -2666,6 +2739,7 @@ class AdminStaticAssetsTest(unittest.TestCase):
             "last-24-hours",
             "last-7-days",
             "last-30-days",
+            "last-3-months",
         ):
             self.assertIn(f'data-time-range-preset="{preset}"', html)
         for label in ("清除", "取消", "完成"):

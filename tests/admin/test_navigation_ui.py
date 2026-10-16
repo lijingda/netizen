@@ -35,9 +35,14 @@ class NavigationUiTest(unittest.TestCase):
         script += (static / "admin.js").read_text(encoding="utf-8") + after
         for initial_url in (
             "/projects",
-            "/sessions/ordinary?project=docs&project=netizen&inventoryState=all&chatId=oc_selected"
+            "/sessions/ordinary",
+            "/sessions/ordinary?updatedFrom=2026-07-01T00%3A00%3A00Z",
+            "/sessions/ordinary?project=docs&project=netizen&inventoryState=archived&chatId=oc_selected"
             "&createdFrom=2026-10-01T00%3A00%3A00Z&createdBefore=2026-10-02T00%3A00%3A00Z"
             "&pageSize=50&sortBy=createdAt&sortDirection=asc&cursor=stale&actionToken=secret",
+            "/sessions/ordinary?project=docs&project=netizen&inventoryState=archived&chatId=oc_selected"
+            "&createdFrom=2026-10-01T00%3A00%3A00Z&createdBefore=2026-10-02T00%3A00%3A00Z"
+            "&pageSize=50&sortBy=createdAt&sortDirection=asc&updatedRange=all",
             "/sessions/temporary?project=docs&state=closed&pageSize=50&sortDirection=asc",
             "/schedules?project=netizen&ended=all&enabled=false",
             "/defaults?kind=group_name",

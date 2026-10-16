@@ -23,7 +23,22 @@ async function refresh(tab, page) {
   const checkbox = (name, value) => roots.get(name).querySelectorAll("input")
     .find((input) => input.type === "checkbox" && input.value === value);
   const query = () => formQuery(form, "20");
-  assert.deepEqual(query().getAll("inventoryState"), ["active", "lazy", "unknown"]);
+  const inventory = document.querySelector("#session-inventory-state");
+  const selectState = (value) => { inventory.value = value; inventory.dispatch("change"); };
+  assert.deepEqual(inventory.querySelectorAll("option").map((option) => option.value), ["active", "archived", "lazy"]);
+  const updatedRoot = form.querySelectorAll("[data-time-range]").find((root) => root.dataset.timeRangeField === "updated");
+  assert(query().get("updatedFrom"));
+  assert(!query().has("updatedBefore"), "rolling updates must include activity after the initial read");
+  assert.match(updatedRoot.querySelector("[data-time-range-summary]").textContent, /最近 3 个月/);
+  for (const [year, month, day, expected] of [[2026, 4, 31, [2026, 1, 28]], [2024, 4, 31, [2024, 1, 29]], [2026, 11, 31, [2026, 8, 30]]]) {
+    const now = new Date(year, month, day, 12, 34, 56);
+    const range = presetTimeRange("last-3-months", now);
+    const start = new Date(range.from);
+    assert.deepEqual([start.getFullYear(), start.getMonth(), start.getDate()], expected);
+    assert.equal(start.getHours(), 12);
+    assert.equal(new Date(range.before).getTime(), now.getTime());
+  }
+  assert.deepEqual(query().getAll("inventoryState"), ["active"]);
   assert.equal(query().get("pageSize"), "20");
   assert(!query().has("project"));
   assert(!query().has("scopeKind"));
@@ -60,7 +75,7 @@ async function refresh(tab, page) {
   };
   for (const [name, value] of [
     ["project", "netizen"], ["scopeKind", "topic"],
-    ["inventoryState", "unknown"], ["current", "false"],
+    ["current", "false"],
   ]) {
     const trigger = control(name, "multi-filter-trigger");
     trigger.click();
@@ -103,14 +118,13 @@ async function refresh(tab, page) {
   // Selection is OR within each dimension and kept as separate repeated parameters.
   checkbox("scopeKind", "direct").click();
   checkbox("scopeKind", "topic").click();
-  checkbox("inventoryState", "archived").click();
+  selectState("archived");
   checkbox("current", "false").click();
   assert.deepEqual(query().getAll("scopeKind"), ["direct", "topic"]);
-  assert.deepEqual(query().getAll("inventoryState"), ["active", "lazy", "unknown", "archived"]);
+  assert.deepEqual(query().getAll("inventoryState"), ["archived"]);
   assert.deepEqual(query().getAll("current"), ["false"]);
-  control("inventoryState", "multi-filter-clear").click();
-  assert.deepEqual(query().getAll("inventoryState"), ["all"]);
-  assert.equal(control("inventoryState", "multi-filter-summary").textContent, "全部");
+  selectState("active");
+  assert.deepEqual(query().getAll("inventoryState"), ["active"]);
   control("project", "multi-filter-clear").click();
   assert(!query().has("project"));
 
@@ -146,13 +160,33 @@ async function refresh(tab, page) {
   const displayedPage = state.sessionPage;
   await resetSessionFilters();
   assert.equal(refreshed, "sessions");
-  assert.deepEqual(query().getAll("inventoryState"), ["active", "lazy", "unknown"]);
+  assert.deepEqual(query().getAll("inventoryState"), ["active"]);
   assert.equal(query().get("pageSize"), "20");
   for (const key of ["project", "scopeKind", "current", "createdFrom", "createdBefore"]) {
     assert(!query().has(key), `${key} should be reset`);
   }
   assert.equal(state.sessionPage, displayedPage, "reset drafts do not replace a result before a successful load");
   assert.equal(rangeRoot.querySelector("[data-time-range-summary]").textContent, "全部时间");
+  assert.match(updatedRoot.querySelector("[data-time-range-summary]").textContent, /最近 3 个月/);
+  const updatedBounds = query().get("updatedFrom");
+  rangeRoot.querySelector("[data-time-range-trigger]").click();
+  rangeRoot.querySelectorAll("[data-time-range-preset]").find((button) => button.dataset.timeRangePreset === "today").click();
+  rangeRoot.querySelector("[data-time-range-done]").click();
+  assert(query().get("createdFrom"));
+  assert.notEqual(query().get("createdFrom"), updatedBounds, "creation and update filters keep separate bounds");
+  updatedRoot.querySelector("[data-time-range-quick-clear]").click();
+  assert.equal(query().get("updatedRange"), "all");
+  assert(!query().has("updatedFrom"));
+  assert(query().get("createdFrom"), "clearing updates preserves creation filter");
+  selectState("lazy");
+  updateSessionDateFilters();
+  assert(rangeRoot.disabled && updatedRoot.disabled);
+  assert.equal(sessionFilterPage().query.includes("sortBy=createdAt"), true);
+  for (const key of ["createdFrom", "createdBefore", "updatedFrom", "updatedBefore"]) assert(!query().has(key));
+  selectState("active");
+  updateSessionDateFilters();
+  assert(!rangeRoot.disabled && !updatedRoot.disabled);
+  await resetSessionFilters();
 
   // A deleted option stays removable, and options refresh never silently changes a selection.
   checkbox("project", "netizen").click();
@@ -194,17 +228,16 @@ async function refresh(tab, page) {
   await loadSessions();
   const applied = state.sessionPage.query;
   const bounds = sessionQueries.at(-1).get("createdFrom");
-  checkbox("inventoryState", "active").click();
-  checkbox("inventoryState", "archived").click();
+  selectState("archived");
   checkbox("project", "netizen").click();
   checkbox("scopeKind", "topic").click();
   applyTimePreset("yesterday");
-  assert.deepEqual(query().getAll("inventoryState"), ["lazy", "unknown", "archived"]);
+  assert.deepEqual(query().getAll("inventoryState"), ["archived"]);
   assert.notEqual(query().get("createdFrom"), bounds);
   loadOnRefresh = true;
   await moveSessionPage("next");
   assert.equal(sessionQueries.at(-1).get("cursor"), "page-two");
-  assert.deepEqual(sessionQueries.at(-1).getAll("inventoryState"), ["active", "lazy", "unknown"]);
+  assert.deepEqual(sessionQueries.at(-1).getAll("inventoryState"), ["active"]);
   assert.equal(sessionQueries.at(-1).get("createdFrom"), bounds);
   assert(!sessionQueries.at(-1).has("project"));
   assert(!sessionQueries.at(-1).has("scopeKind"));
@@ -221,7 +254,7 @@ async function refresh(tab, page) {
   assert.equal(state.sessionPage.number, 1);
   failNextPage = false;
   await loadSessions(sessionFilterPage());
-  assert.deepEqual(sessionQueries.at(-1).getAll("inventoryState"), ["lazy", "unknown", "archived"]);
+  assert.deepEqual(sessionQueries.at(-1).getAll("inventoryState"), ["archived"]);
   assert.deepEqual(sessionQueries.at(-1).getAll("project"), ["netizen"]);
   assert.deepEqual(sessionQueries.at(-1).getAll("scopeKind"), ["topic"]);
   assert.notEqual(sessionQueries.at(-1).get("createdFrom"), bounds);
@@ -238,15 +271,11 @@ async function refresh(tab, page) {
     runtime: { primaryStatus: "running", primaryStatusResolution: "local" },
     actions: { stop: {} },
   };
-  let sessionResponse = { items: [unknown], nextCursor: null, catalogAvailable: true };
+  let sessionResponse = { items: [unknown], nextCursor: null };
   answer = (path) => path.startsWith("/api/v1/projects/options?")
     ? { items: [], nextCursor: null } : sessionResponse;
   await loadSessions(sessionFilterPage());
-  const notice = document.querySelector("#sessions-catalog-notice");
   const rows = document.querySelector("#sessions-body");
-  assert.equal(notice.hidden, false);
-  assert.equal(notice.getAttribute("role"), "status");
-  assert.match(notice.textContent, /无法确认.*刷新/);
   assert.match(rows.textContent, /Read summary.*状态未确认.*running/);
   assert.doesNotMatch(rows.textContent, /Lazy Session|原生会话缺失/);
   const actions = rows.querySelector(".actions");
@@ -313,15 +342,6 @@ async function refresh(tab, page) {
         .some((input) => input.readOnly && input.value === location.topicId), "full topic identity remains available for copying");
     }
   }
-
-  // An empty filtered page still discloses a failed catalog read; a healthy refresh clears it.
-  sessionResponse = { items: [], nextCursor: null, catalogAvailable: false };
-  await loadSessions();
-  assert.equal(notice.hidden, false);
-  assert.equal(rows.querySelectorAll("tr").length, 0);
-  sessionResponse = { items: [], nextCursor: null, catalogAvailable: true };
-  await loadSessions();
-  assert.equal(notice.hidden, true);
 
   // The shared group picker submits exact chat IDs and resets applied pagination on filtering.
   const answerSessions = answer;

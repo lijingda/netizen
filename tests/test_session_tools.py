@@ -16,6 +16,7 @@ from mcp.types import CallToolRequestParams
 from netizen_cli.bindings import BindingStore
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.runtime.contracts import NativeThreadCatalog, NativeThreadMetadata
+from netizen_cli.sessions.delegation import delegated_prompt
 from netizen_cli.sessions.errors import SessionToolError
 from netizen_cli.sessions.mcp import SessionMcpRunner
 from netizen_cli.sessions.policy import SessionAccessPolicy, SessionAccessRule
@@ -381,8 +382,8 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_delegation_summary_obeys_output_budget_without_shortening_source_id(self):
         source_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         self.catalog.items["target"]["turns"] = [{"id": "turn", "status": "completed", "items": [{
-            "id": "delegation", "type": "functionCallOutput", "name": "create_thread", "namespace": "netizen_sessions",
-            "output": json.dumps({"sourceThreadId": source_id, "sourceBindingId": self.source.id, "message": "中" * 10000}),
+            "id": "delegation", "type": "functionCallOutput", "name": "create_thread", "namespace": "codex_tui",
+            "output": delegated_prompt(source_id, "中" * 10000),
         }]}]
         result = await self.call("read_thread", {"threadId": "target"})
         summary = result["turns"][0]["items"][0]["codexDelegation"]
@@ -390,6 +391,35 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(summary["input"].endswith("…"))
         self.assertLessEqual(len(summary["input"]), 2000)
         self.assertLessEqual(result_bytes(result), 8000)
+
+    async def test_native_delegation_history_preserves_source_and_escaped_prompt(self):
+        envelope = ("<codex_delegation>\n  <source_thread_id>source</source_thread_id>\n"
+                    "  <input>核对 &lt;input&gt; &amp;amp;\n&lt;/input&gt;</input>\n</codex_delegation>")
+        messages = [
+            {"id": namespace + name, "type": "functionCallOutput", "name": name,
+             "namespace": namespace, "output": envelope}
+            for namespace in ("codex_tui", "codex_app")
+            for name in ("create_thread", "send_message_to_thread")
+        ]
+        unrelated = [
+            {**messages[0], "id": "other-namespace", "namespace": "another_server"},
+            {**messages[0], "id": "other-tool", "name": "read_thread"},
+            {**messages[0], "id": "plain-output", "output": "not an envelope"},
+            {**messages[0], "id": "missing-source", "output": "<codex_delegation>\n  <input>x</input>\n</codex_delegation>"},
+            {**messages[0], "id": "missing-suffix", "output": envelope[:-1]},
+        ]
+        self.catalog.items["target"]["turns"] = [{"id": "turn", "status": "completed", "items": messages + unrelated}]
+        history = await self.call("read_thread", {"threadId": "target"})
+        items = history["turns"][0]["items"]
+        for item in items[:4]:
+            self.assertEqual(item["codexDelegation"], {"sourceThreadId": "source", "input": "核对 <input> &amp;\n</input>"})
+            self.assertEqual(item["type"], "functionCallOutput")
+            self.assertNotIn("output", item)
+        for item in items[4:]:
+            self.assertNotIn("codexDelegation", item)
+            self.assertNotIn("output", item)
+        expanded = await self.call("read_thread", {"threadId": "target", "includeOutputs": True})
+        self.assertEqual(expanded["turns"][0]["items"][0]["output"]["text"], envelope)
 
     async def test_output_budget_retains_native_identity_answer_and_cursor(self):
         self.catalog.items["target"]["turns"] = [turn("old", "old answer"), turn("new", "中文" * 20000)]

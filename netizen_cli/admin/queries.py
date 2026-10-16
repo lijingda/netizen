@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from .errors import AdminWebError
 from ..bindings import BindingCursor, SideTopicCursor
 from ..domain import ScopeKind
-from ..management import SessionInventoryState, SessionUpdatedCursor
+from ..management import SessionInventoryState, SessionNativeCursor
 
 
 _MAX_TEXT_BYTES = 4_096
@@ -113,22 +113,34 @@ def _text_set_query(
 def _created_range_query(
     values: Mapping[str, list[str]],
 ) -> tuple[str | None, str | None]:
-    created_from = _optional_created_time_query(values, "createdFrom")
-    created_before = _optional_created_time_query(values, "createdBefore")
+    return _time_range_query(values, "created", "创建")
+
+
+def _updated_range_query(
+    values: Mapping[str, list[str]],
+) -> tuple[str | None, str | None]:
+    return _time_range_query(values, "updated", "更新")
+
+
+def _time_range_query(
+    values: Mapping[str, list[str]], prefix: str, label: str,
+) -> tuple[str | None, str | None]:
+    lower = _optional_time_query(values, f"{prefix}From")
+    upper = _optional_time_query(values, f"{prefix}Before")
     if (
-        created_from is not None
-        and created_before is not None
-        and created_from >= created_before
+        lower is not None
+        and upper is not None
+        and lower >= upper
     ):
         raise AdminWebError(
             400,
             "invalid_time_range",
-            "创建时间的开始时间必须早于结束时间。",
+            f"{label}时间的开始时间必须早于结束时间。",
         )
-    return created_from, created_before
+    return lower, upper
 
 
-def _optional_created_time_query(
+def _optional_time_query(
     values: Mapping[str, list[str]],
     name: str,
 ) -> str | None:
@@ -190,27 +202,17 @@ def _current_query(values: Mapping[str, list[str]]) -> bool | None:
     return raw[0] == "true" if len(raw) == 1 else None
 
 
-def _session_inventory_states(
+def _session_inventory_state(
     values: Mapping[str, list[str]],
-) -> tuple[SessionInventoryState, ...] | None:
-    raw = _text_set_query(values, "inventoryState")
-    if raw is None:
-        return (
-            SessionInventoryState.ACTIVE,
-            SessionInventoryState.LAZY,
-            SessionInventoryState.UNKNOWN,
-        )
-    if raw == ("all",):
-        return None
-    try:
-        states = tuple(SessionInventoryState(value) for value in raw)
-    except ValueError:
+) -> SessionInventoryState:
+    raw = _optional_one(values, "inventoryState") or "active"
+    if raw not in {"active", "archived", "lazy"}:
         raise AdminWebError(
             400,
             "invalid_inventory_state",
             "会话状态无效。",
-        ) from None
-    return None if set(states) == set(SessionInventoryState) else states
+        )
+    return SessionInventoryState(raw)
 
 
 def _id_query(values: Mapping[str, list[str]], name: str) -> tuple[str, ...]:
@@ -308,13 +310,14 @@ def _decode_binding_cursor(
 
 
 def _encode_session_cursor(
-    cursor: BindingCursor | SessionUpdatedCursor | None,
+    cursor: BindingCursor | SessionNativeCursor | None,
     fingerprint: str,
 ) -> str | None:
-    if not isinstance(cursor, SessionUpdatedCursor):
+    if not isinstance(cursor, SessionNativeCursor):
         return _encode_binding_cursor(cursor, fingerprint)
+    marker = "start" if cursor.cursor is None else "next"
     return _encode_cursor(
-        "session-updated", (str(cursor.updated_at) if cursor.updated_at is not None else "unknown", cursor.binding_id), fingerprint,
+        "session-native", (marker, cursor.cursor if cursor.cursor is not None else "start", str(cursor.offset)), fingerprint,
     )
 
 
@@ -322,19 +325,21 @@ def _decode_session_cursor(
     encoded: str | None,
     fingerprint: str,
     *,
-    sort_by: str,
-) -> BindingCursor | SessionUpdatedCursor | None:
-    if sort_by == "created_at":
+    inventory_state: SessionInventoryState,
+) -> BindingCursor | SessionNativeCursor | None:
+    if inventory_state is SessionInventoryState.LAZY:
         return _decode_binding_cursor(encoded, fingerprint)
-    values = _decode_cursor(encoded, kind="session-updated", length=2, fingerprint=fingerprint)
+    values = _decode_cursor(encoded, kind="session-native", length=3, fingerprint=fingerprint)
     if values is None:
         return None
-    raw_time, binding_id = values
-    if raw_time == "unknown":
-        return SessionUpdatedCursor(None, binding_id)
-    if not re.fullmatch(r"0|[1-9][0-9]{0,15}", raw_time):
+    marker, raw_cursor, raw_offset = values
+    if (
+        marker not in {"start", "next"}
+        or marker == "start" and raw_cursor != "start"
+        or re.fullmatch(r"0|[1-9][0-9]?", raw_offset) is None
+    ):
         raise AdminWebError(400, "invalid_cursor", "分页游标无效。")
-    return SessionUpdatedCursor(int(raw_time), binding_id)
+    return SessionNativeCursor(None if marker == "start" else raw_cursor, int(raw_offset))
 
 
 def _encode_side_cursor(

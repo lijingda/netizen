@@ -6,6 +6,8 @@ import json
 from enum import Enum
 from typing import Any
 
+from .delegation import parse_delegated_prompt
+
 MAX_RESULT_BYTES = 8000
 
 
@@ -31,11 +33,20 @@ def output_summary(text: str, limit: int) -> dict[str, Any]:
 
 
 def _delegation_summary(item: dict[str, Any]) -> dict[str, str] | None:
-    # Like the native task tools, expose the delegated request even when raw
-    # outputs are hidden. Only Netizen's own namespace, tools and envelope match.
-    if item.get("namespace") != "netizen_sessions" or item.get("name") not in {
+    # Like the native task tools, expose recognized delegated requests even
+    # when raw outputs are hidden. This projection never grants input authority.
+    if item.get("name") not in {
         "create_thread", "send_message_to_thread",
     } or not isinstance(item.get("output"), str):
+        return None
+    if item.get("namespace") in {"codex_tui", "codex_app"}:
+        delegation = parse_delegated_prompt(item["output"])
+        if delegation is None:
+            return None
+        source, prompt = delegation
+        return {"sourceThreadId": source, "input": truncate(prompt, 2000)}
+    # Retain the existing projection for already recorded Netizen inputs.
+    if item.get("namespace") != "netizen_sessions":
         return None
     try:
         envelope = json.loads(item["output"])

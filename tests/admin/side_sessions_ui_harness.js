@@ -18,11 +18,11 @@ const ordinary = {
   bindingId: "binding-parent", shortId: "parent", chatId: "oc_parent", chatLabel: "研发群",
   chatLabelResolved: true, chatMode: "group", chatOpenUrl: "https://applink.feishu.cn/chat",
   nativeTitle: "普通会话标题", sessionType: "message", catalogState: "active", pointerState: "current",
-  createdAt: "2026-10-10T08:00:00+00:00", updatedAt: Date.UTC(2026, 9, 12, 7) / 1000,
+  createdAt: Date.UTC(2026, 9, 10, 8) / 1000, updatedAt: Date.UTC(2026, 9, 12, 7) / 1000,
   projectAlias: "netizen", sessionSettings: { message_context_mode: "current-only", turn_settings: null },
   runtime: { bindingId: "binding-parent", primaryStatus: "idle", primaryStatusResolution: "local" }, actions: {},
 };
-if (initialSearch.includes("inventoryState=all")) ordinary.catalogState = "archived";
+if (initialSearch.includes("inventoryState=archived")) ordinary.catalogState = "archived";
 const grant = (action) => ({ actionToken: action, csrfToken: "csrf", target: { resource: "side", sideId: "side-a" } });
 const side = {
   sideId: "side-a", parentBindingId: "binding-parent", parentSession: { bindingId: "binding-parent", title: "普通会话标题", available: true },
@@ -86,13 +86,23 @@ async function advanceTime(duration) {
     assert.equal(state.sessionTab, "ordinary");
     const query = requests.findLast((request) => request.path === "/api/v1/sessions").query;
     assert.equal(query.get("identity"), "binding-parent");
-    assert.deepEqual(query.getAll("inventoryState"), initialSearch.includes("inventoryState=all") ? ["all"] : ["active", "lazy", "unknown"]);
+    assert.deepEqual(query.getAll("inventoryState"), initialSearch.includes("inventoryState=archived") ? ["archived"] : ["active"]);
     assert.equal(document.querySelector("#sessions-ordinary").hidden, false);
     assert(document.querySelector("#sessions-body").textContent.includes("普通会话标题"));
-    if (initialSearch.includes("inventoryState=all")) {
+    if (initialSearch.includes("inventoryState=archived")) {
       assert(document.querySelector("#sessions-body").textContent.includes("已归档"));
-      assert.deepEqual(formQuery(document.querySelector("#session-filter")).getAll("inventoryState"), ["all"]);
+      assert.deepEqual(formQuery(document.querySelector("#session-filter")).getAll("inventoryState"), ["archived"]);
     }
+    assert(!query.has("updatedFrom"), "exact links should not hide older sessions");
+    assert(!query.has("updatedRange"), "unlimited marker stays in the URL only");
+    assert.equal(document.querySelector("#sessions-identity-notice").hidden, false);
+    const inventory = document.querySelector("#session-inventory-state");
+    inventory.value = "archived"; inventory.dispatch("change");
+    document.querySelector("#session-filter").dispatch("submit"); await flush();
+    assert.equal(requests.findLast((request) => request.path === "/api/v1/sessions").query.get("identity"), "binding-parent");
+    await resetSessionFilters();
+    assert(!requests.findLast((request) => request.path === "/api/v1/sessions").query.has("identity"));
+    assert.equal(document.querySelector("#sessions-identity-notice").hidden, true);
     return;
   }
   assert.equal(state.tab, "projects");
@@ -101,7 +111,7 @@ async function advanceTime(duration) {
   selectTab("sessions");
   await flush();
   const ordinaryQuery = requests.findLast((request) => request.path === "/api/v1/sessions").query;
-  assert.deepEqual(ordinaryQuery.getAll("inventoryState"), ["active", "lazy", "unknown"]);
+  assert.deepEqual(ordinaryQuery.getAll("inventoryState"), ["active"]);
   assert.equal(ordinaryQuery.get("pageSize"), "20");
   const ordinaryText = document.querySelector("#sessions-body").textContent;
   const ordinaryPage = state.sessionPage;
@@ -123,7 +133,7 @@ async function advanceTime(duration) {
   const parentUrl = new URL(parentLink.href, "http://localhost");
   assert.equal(parentUrl.pathname, "/sessions/ordinary");
   assert.equal(parentUrl.searchParams.get("identity"), "binding-parent");
-  assert.equal(parentUrl.searchParams.get("inventoryState"), "all");
+  assert.equal(parentUrl.searchParams.get("updatedRange"), "all");
   assert.equal(parentLink.target, "_blank");
   const buttons = () => row().querySelectorAll("button");
   assert.deepEqual(buttons().map((button) => button.textContent), ["停止", "结束临时会话"]);
@@ -217,6 +227,38 @@ async function advanceTime(duration) {
   assert.equal(document.querySelector("#sessions-ordinary").hidden, false);
   await checkAtomicSessionLists();
   await checkSessionSorting();
+  await selectSessionTab("ordinary");
+  await resetSessionFilters();
+  const inventory = document.querySelector("#session-inventory-state");
+  inventory.value = "lazy"; inventory.dispatch("change");
+  const ranges = document.querySelector("#session-filter").querySelectorAll("[data-time-range]");
+  assert(ranges.every((root) => root.disabled));
+  const registeredAt = "2026-09-01T12:34:56+00:00";
+  ordinaryAnswer = async () => ({ items: [{ ...ordinary, nativeThreadId: null, catalogState: "lazy", createdAt: null, updatedAt: null, registeredAt }], nextCursor: null });
+  document.querySelector("#session-filter").dispatch("submit"); await flush();
+  const lazyQuery = requests.findLast((request) => request.path === "/api/v1/sessions").query;
+  assert.equal(lazyQuery.get("inventoryState"), "lazy");
+  assert.equal(lazyQuery.get("sortBy"), "createdAt");
+  for (const key of ["createdFrom", "createdBefore", "updatedFrom", "updatedBefore", "updatedRange"]) assert(!lazyQuery.has(key));
+  const sortButtons = document.querySelectorAll("[data-session-sort]").filter((button) => button.dataset.sessionSort === "session");
+  const lazyUpdated = sortButtons.find((button) => button.dataset.sortBy === "updatedAt");
+  const lazyCreated = sortButtons.find((button) => button.dataset.sortBy === "createdAt");
+  assert(lazyUpdated.disabled);
+  assert.equal(lazyCreated.querySelector(".sort-label").textContent, "登记时间");
+  assert.equal(document.querySelector("#sessions-lazy-notice").hidden, false);
+  const lazyRow = document.querySelector("#sessions-body").children[0];
+  assert.equal(lazyRow.children[7].textContent, sessionDateLabel(registeredAt));
+  assert.equal(lazyRow.children[8].textContent, "尚未开始");
+  const beforeSort = requests.length;
+  await sortSessionPage("session", "updatedAt");
+  assert.equal(requests.length, beforeSort, "Lazy cannot claim to sort unknown native update times");
+  lazyCreated.click(); await flush();
+  assert.equal(requests.findLast((request) => request.path === "/api/v1/sessions").query.get("sortDirection"), "asc");
+  inventory.value = "active"; inventory.dispatch("change");
+  assert(ranges.every((root) => !root.disabled));
+  await resetSessionFilters();
+  assert(!lazyUpdated.disabled);
+  assert.equal(lazyCreated.querySelector(".sort-label").textContent, "创建时间");
   function confirmationIncludes(text) { return confirmations.some((message) => message.includes(text)); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 
@@ -329,7 +371,7 @@ async function checkSessionSorting() {
 
     const createdCell = row().children[kind === "side" ? 5 : 7];
     const updatedCell = row().children[kind === "side" ? 6 : 8];
-    assert.equal(createdCell.textContent, sessionDateLabel(kind === "side" ? side.createdAt : ordinary.createdAt));
+    assert.equal(createdCell.textContent, kind === "side" ? sessionDateLabel(side.createdAt) : nativeSessionDateLabel(ordinary.createdAt));
     assert.equal(updatedCell.textContent, kind === "side" ? sessionDateLabel(side.updatedAt) : sessionUpdatedAtLabel(ordinary));
 
     chat.value = "oc_applied";

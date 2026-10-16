@@ -41,6 +41,16 @@ output 完全匹配。命名不走人工 rename 的 lifecycle，不影响已接�
 本次失败后不连续重试，后续新 Turn 仍无名且旧任务已收尾时沿用现有补名机会。
 
 新工具首条任务和后续来信由可信工具入口构造 SDK `ExternalMessage`，保持工具来源。
+2026-10-16 补充：出站 ExternalMessage 使用 CLI `rust-v0.163.0` 的 `codex_tui`
+兼容 namespace 与固定 `<codex_delegation>` envelope，携带真实来源 Thread ID，并按
+CLI 顺序转义正文的 `&`、`<`、`>`。该 namespace 是原生委派协议标签，不宣称消息来自
+真人或另一个 CLI 进程；MCP server 名、Netizen 权限与飞书来源展示保持原有身份。
+原生识别 `create_thread`／`send_message_to_thread` 后，在 preview 为空时从该工具输入
+生成 preview；后续输入不覆盖非空 preview。配合公开 `thread_list(use_state_db_only=True)`
+使仅收到协作来信的新普通会话可正常发现。保持工具级不可信角色，不制造 userMessage，
+不额外运行模型、写原生库或回填旧空预览。升级 SDK 时需复验格式、角色与目录可见性；
+若原生提供公开通用委派／预览入口，再以该公开契约替代特定 namespace 适配。
+
 向 exact Thread 提交，由原生在接收时决定启动新 Turn 或加入正在执行的普通 Turn。
 这构成对现有精确 Turn 输入规则的窄扩展：普通飞书、问题卡与定时输入仍按各自原有
 start/steer 契约处理。不能通过正文、`is_bot` 或模型自填来源获得新入口。

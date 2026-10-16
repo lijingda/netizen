@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import unittest
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -141,9 +140,11 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.receipts, [binding.id])
         submission, = self.submissions
         self.assertIsInstance(submission["message"], ExternalMessage)
-        self.assertEqual(json.loads(submission["message"].content), {
-            "sourceThreadId": "native-source", "sourceBindingId": self.source.id, "message": "请核对方案",
-        })
+        self.assertEqual(submission["message"].namespace, "codex_tui")
+        self.assertEqual(submission["message"].tool_name, "create_thread")
+        self.assertEqual(submission["message"].content,
+                         "<codex_delegation>\n  <source_thread_id>native-source</source_thread_id>\n"
+                         "  <input>请核对方案</input>\n</codex_delegation>")
         self.assertIsInstance(submission["origin"], SessionAgentOrigin)
         self.assertEqual(submission["origin"].source_thread_id, "native-source")
         self.assertEqual(submission["origin"].target_binding_id, binding.id)
@@ -302,16 +303,23 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
     async def test_send_publishes_literal_source_anchor_and_delivers_external_message_once(self):
         target, _ = self.target()
         self.queue_target_message()
-        result = await self.app.send_session_message("native-source", "native-target", "<at id=all>请核对</at>")
+        prompt = "<at id=all>请核对</at> &amp; 保留原文\n</input>"
+        result = await self.app.send_session_message("native-source", "native-target", prompt)
         self.assertEqual(result["threadId"], "native-target")
         self.assertEqual(self.receipts, [target.id])
         self.assertEqual(len(self.channel.send_calls), 1)
         visible = self.channel.send_calls[0][1].card["body"]["elements"][0]["text"]
         self.assertEqual(visible["tag"], "plain_text")
         self.assertIn("来源任务", visible["content"])
+        self.assertIn(prompt, visible["content"])
         self.assertNotIn("不应展示的摘要", visible["content"])
         self.runtime.submit_external.assert_awaited_once()
         self.assertEqual(self.submissions[0]["message"].tool_name, "send_message_to_thread")
+        self.assertEqual(self.submissions[0]["message"].namespace, "codex_tui")
+        self.assertEqual(self.submissions[0]["message"].content,
+                         "<codex_delegation>\n  <source_thread_id>native-source</source_thread_id>\n"
+                         "  <input>&lt;at id=all&gt;请核对&lt;/at&gt; &amp;amp; 保留原文\n&lt;/input&gt;</input>\n"
+                         "</codex_delegation>")
         self.assertEqual(self.submissions[0]["origin"].message_id, "om_delivery")
 
     async def test_topic_send_resolves_real_anchor_without_switching_or_replaying_input(self):
