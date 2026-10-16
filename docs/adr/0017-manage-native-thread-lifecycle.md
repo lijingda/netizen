@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-12
 amends: 0008, 0014
-amended_by: 0019, 0036, 0037, 0038, 0049
+amended_by: 0019, 0036, 0037, 0038, 0049, 0082
 related: 0001, 0016
 ---
 
@@ -19,6 +19,9 @@ related: 0001, 0016
 > materialized persisted Thread 保留 lifecycle 控制，并为 archived catalog 增加独立
 > Delete。archive/delete 直接委托 App Server 的有界 shutdown/removal，不再要求
 > Netizen 先停止本地活动或证明 idle；响应不确定只做一次目录对账。
+> [ADR 0082](0082-restore-archived-sessions-from-exact-native-results.md) 取消归档恢复的
+> catalog preflight，改用 exact unarchive/resume 返回，并保留部分成功与 Binding-local
+> unknown；已是 current 的重复恢复保留现有上下文边界。
 
 ## 背景
 
@@ -46,15 +49,15 @@ Netizen 已能在一个 Feishu Scope 中创建、切换和展示多个 Binding�
 
 卡片携带完整 Binding ID。rename/archive/delete 提交时必须在 Scope 锁内重新确认它仍是
 当前 active Binding；旧卡片不能影响后来切换到的会话。归档列表的恢复按钮只允许选择
-同一 Scope 内仍存在的 exact Binding，并在执行前重新验证它仍出现在原生 archived
-catalog。
+同一 Scope 内仍存在的 exact Binding；原先执行前复核 archived catalog 的要求已由
+ADR 0082 改为单次 exact unarchive/resume 链。
 
 ### Codex 是名称、归档和删除的事实源
 
 Channel Database 不增加 name、preview、archived、deleted 或 lifecycle 表。展示时通过
-公开分页 `thread_list(archived=False|True)` 读取原生 `name` 和 `preview`；归档状态也只
-由原生 catalog 判定。Binding 继续只保存 native Thread ID 与 Channel 自己拥有的映射和
-Turn-setting intent。
+公开分页 `thread_list(archived=False|True)` 读取原生 `name` 和 `preview`；归档展示状态
+由原生 catalog 判定，归档恢复按 ADR 0082 直接使用操作返回。Binding 继续只保存 native
+Thread ID 与 Channel 自己拥有的映射和 Turn-setting intent。
 
 rename 使用公开 `AsyncThread.set_name()`，archive/unarchive 使用公开
 `AsyncCodex.thread_archive()` / `thread_unarchive()`。三者不得走私有 RPC。归档与删除

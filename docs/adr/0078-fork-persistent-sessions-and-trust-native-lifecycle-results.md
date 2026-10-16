@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-10-08
 amends: 0028, 0031, 0037, 0049, 0060
+amended_by: 0082
 related: 0021, 0067, 0073, 0077
 ---
 
@@ -80,6 +81,10 @@ ID 帮助链接只指向官方指南，不引入 OAuth 或发送探测消息。
 Fork 表单使用 v5，只解析当前协议，不新增旧卡字段转换或兼容分支。
 
 ## 普通会话恢复与切换
+
+[ADR 0082](0082-restore-archived-sessions-from-exact-native-results.md) 另行规定归档恢复：
+直接 unarchive 后按精确结果 resume，未知结果仍按该入口隔离到目标 Binding；下述普通
+`/resume` 的全局 unknown 边界不变。
 
 `/resume`、会话列表的“设为当前”和 Admin 的同类操作共用 `activate_exact`。保留本地
 Scope/Binding、current、lifecycle 与 Context Boundary 检查；有 native ID 时直接调用

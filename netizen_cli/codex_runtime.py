@@ -90,6 +90,7 @@ from .runtime.contracts import (
     ThreadArchived,
     ThreadResumeNotFound,
     ThreadResumeFailed,
+    ThreadRestoreRejected,
     ThreadNotArchived,
     ThreadDeleteUnavailable,
     ThreadDeleteTargetChanged,
@@ -2720,6 +2721,7 @@ class CodexRuntime:
             if activate:
                 if (
                     binding.message_context_mode is MentionContextMode.CATCH_UP
+                    and not binding.active
                     and context_anchor is None
                 ):
                     raise ContextAnchorRequired(
@@ -2737,54 +2739,111 @@ class CodexRuntime:
                 raise ValueError("non-current restore cannot carry a context anchor")
             if binding.native_thread_id is None:
                 raise ThreadNotArchived("Lazy 会话不是归档会话。")
-            if binding.id in self._active or binding.id in self._compacting:
-                raise ThreadLifecycleError(
-                    "该 Binding 仍有本服务原生活动，不能作为归档会话恢复。"
+            if binding.id in self._compacting:
+                raise ThreadCompacting("当前会话正在压缩上下文，暂不能恢复。")
+            running = self._active.get(binding.id)
+            if running is not None and running.state is not ActiveState.RUNNING:
+                if running.state is ActiveState.STOPPING:
+                    raise ThreadStopping("当前 Turn 正在停止，暂不能恢复。")
+                raise TurnObservationUnavailable(
+                    "当前 Turn 观测不可用，请重新检查或停止后再恢复。"
                 )
-            if binding.id in self._goals:
-                raise self._goal_slot_error(self._goals[binding.id])
-            if not await self.thread_is_archived(binding.native_thread_id):
-                raise ThreadNotArchived(
-                    "该会话不在 Codex 归档列表中；请刷新 /sessions archived。"
-                )
+            goal = self._goals.get(binding.id)
+            if goal is not None and (
+                goal.state is not GoalOperationState.RUNNING or goal.handle is None
+            ):
+                raise self._goal_slot_error(goal)
             operation = self._begin_lifecycle_locked(
                 binding,
                 ThreadLifecycleState.UNARCHIVING,
             )
+            unarchived = False
+            resumed = False
             try:
-                unarchived = await self._codex.thread_unarchive(
-                    binding.native_thread_id
-                )
-                if unarchived.id != binding.native_thread_id:
-                    raise RuntimeError(
-                        "thread_unarchive returned a different native ID"
+                try:
+                    result = await self._codex.thread_unarchive(
+                        binding.native_thread_id
                     )
-                thread = await self._codex.thread_resume(
-                    binding.native_thread_id, include_turns=False
-                )
+                except InvalidRequestError as error:
+                    # Both rejections precede storage mutation in the pinned
+                    # local store. Neither proves absence or writer ownership;
+                    # one exact resume determines whether this process can join.
+                    if error.code != -32600 or error.message not in (
+                        f"no archived rollout found for thread id {binding.native_thread_id}",
+                        f"thread {binding.native_thread_id} already has an active writer",
+                    ):
+                        raise
+                else:
+                    if result.id != binding.native_thread_id:
+                        raise RuntimeError(
+                            "thread_unarchive returned a different native ID"
+                        )
+                    unarchived = True
+                try:
+                    thread = await self._codex.thread_resume(
+                        binding.native_thread_id, include_turns=False
+                    )
+                except InvalidRequestError as error:
+                    rejection = _resume_rejection(error, binding.native_thread_id)
+                    if rejection is None:
+                        raise
+                    reasons = {
+                        "archived": "原生会话目前已归档，请重新发起恢复。",
+                        "not_found": "未找到该原生会话的可恢复记录。",
+                        "closing": "原生会话正在关闭，请等待完成后重新操作。",
+                        "occupied": (
+                            "无法取得该会话，可能由其他 Codex 实例占用。"
+                            "请释放占用后重新操作。"
+                        ),
+                    }
+                    outcome = "未切换当前会话。" if activate else "未完成会话恢复。"
+                    raise ThreadRestoreRejected(
+                        ("本次已解除归档，但" if unarchived else "")
+                        + outcome + reasons[rejection] + "本地会话关联已保留。",
+                        unarchived=unarchived,
+                    ) from error
                 if thread.id != binding.native_thread_id:
                     raise RuntimeError(
                         "thread_resume returned a different unarchived native ID"
                     )
+                resumed = True
+                # Preserve the confirmed subscription even if activate() commits
+                # then fails its final read. Rejoin never replaces Turn/Goal handles.
+                self._mark_thread_subscribed_locked(binding, thread)
                 restored = (
                     self._bindings.activate(
                         scope_key=binding.scope_key,
                         binding_id=binding.id,
                         context_anchor=context_anchor,
                     )
-                    if activate
+                    if activate and not binding.active
                     else self._bindings.get(binding.id)
                 )
-                self._mark_thread_subscribed_locked(restored, thread)
                 if activate:
                     self._advance_admission_revision(binding.id)
+            except ThreadRestoreRejected:
+                self._finish_lifecycle_locked(operation)
+                self._schedule_known_subscription_locked(
+                    binding.id, binding.native_thread_id,
+                )
+                raise
             except asyncio.CancelledError:
                 self._retain_unknown_lifecycle(operation)
                 raise
             except Exception as error:
                 self._retain_unknown_lifecycle(operation)
+                if resumed:
+                    message = (
+                        "原生 Codex 会话已恢复，但本地切换结果未确认；"
+                        if activate else
+                        "原生 Codex 会话已恢复，但本地订阅状态未确认；"
+                    )
+                elif unarchived:
+                    message = "本次已解除归档，但后续会话恢复结果未确认；"
+                else:
+                    message = "Codex 会话恢复结果未确认；"
                 raise ThreadLifecycleStateUnknown(
-                    "Codex 会话恢复结果未确认；当前 Binding "
+                    message + "当前 Binding "
                     "的生命周期状态待对账。"
                 ) from error
             self._finish_lifecycle_locked(operation)
@@ -4414,32 +4473,27 @@ class CodexRuntime:
 
         A timeout, another invalid request, or the same text from a different
         operation is not proof that the requested operation had no side effects.
-        Post-mutation restore and active-Turn recovery retain their own rules.
+        Restore shares the exact classifier, but retains its own phase outcomes
+        and Binding-local unknown boundary. Active-Turn recovery is independent.
         """
 
         try:
             return await self._codex.thread_resume(thread_id, include_turns=False)
         except InvalidRequestError as error:
-            if error.code != -32600:
-                raise
-            if error.message == (
-                f"session {thread_id} is archived. Run `codex unarchive {thread_id}` "
-                "to unarchive it first."
-            ):
+            rejection = _resume_rejection(error, thread_id)
+            if rejection == "archived":
                 raise ThreadArchived(
                     "原生会话已归档；请先使用“恢复归档并切换”。"
                 ) from error
-            if error.message == f"no rollout found for thread id {thread_id}":
+            if rejection == "not_found":
                 raise ThreadResumeNotFound(
                     "未找到该原生会话的可恢复记录；Binding 已保留。"
                 ) from error
-            if error.message == (
-                f"thread {thread_id} is closing; retry thread/resume after the thread is closed"
-            ):
+            if rejection == "closing":
                 raise ThreadLifecycleError(
                     "原生会话正在关闭；请等待关闭完成后再恢复。"
                 ) from error
-            if error.message == f"thread {thread_id} already has an active writer":
+            if rejection == "occupied":
                 raise ThreadOccupied(
                     "该会话正被其他 Codex 实例占用，本次操作未执行。"
                     "请在占用该会话的 Codex App 中归档，或在占用它的 CLI 会话中执行 /archive；"
@@ -7548,6 +7602,30 @@ class CodexRuntime:
             lock = asyncio.Lock()
             self._locks[binding_id] = lock
         return lock
+
+
+def _resume_rejection(
+    error: InvalidRequestError,
+    thread_id: str,
+) -> Literal["archived", "not_found", "closing", "occupied"] | None:
+    """Classify only a direct, exact-ID public thread_resume rejection."""
+
+    if error.code != -32600:
+        return None
+    if error.message == (
+        f"session {thread_id} is archived. Run `codex unarchive {thread_id}` "
+        "to unarchive it first."
+    ):
+        return "archived"
+    if error.message == f"no rollout found for thread id {thread_id}":
+        return "not_found"
+    if error.message == (
+        f"thread {thread_id} is closing; retry thread/resume after the thread is closed"
+    ):
+        return "closing"
+    if error.message == f"thread {thread_id} already has an active writer":
+        return "occupied"
+    return None
 
 
 def _enum_value(value: object) -> str | None:

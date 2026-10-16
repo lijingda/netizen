@@ -23,6 +23,8 @@ their cited ADRs before changing that boundary.
   [archive/delete](docs/design.md#原生归档与删除).
   Persistent forks and shared resume/delete result handling follow
   [ADR 0078](docs/adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md).
+  Archive restoration uses exact native results and Binding-local uncertainty
+  ([ADR 0082](docs/adr/0082-restore-archived-sessions-from-exact-native-results.md)).
   Missing-current session creation uses chat defaults and the original message Scope
   ([ADR 0073](docs/adr/0073-create-sessions-from-chat-defaults.md)); keep `/new`, input
   admission, and Project deletion semantics independent of those rules.

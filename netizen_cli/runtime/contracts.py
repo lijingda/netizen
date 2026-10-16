@@ -191,6 +191,14 @@ class ThreadResumeFailed(ThreadLifecycleError):
     """Native resume or its subsequent local activation is not confirmed."""
 
 
+class ThreadRestoreRejected(ThreadLifecycleError):
+    """Exact resume rejected restoration, with the unarchive outcome known."""
+
+    def __init__(self, message: str, *, unarchived: bool) -> None:
+        super().__init__(message)
+        self.unarchived = unarchived
+
+
 class ThreadNotArchived(ThreadLifecycleError):
     pass
 

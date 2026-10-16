@@ -228,8 +228,9 @@ model、config 或 env override。
 `/sessions archived` 恢复并切换。其他会话和管理功能仍可使用；占用释放后用户可重新提交。
 错误类型、code、Thread ID 或完整 message 不匹配，以及取消、响应丢失、start/turn/fork
 等其他 mutation 的错误，继续遵守原操作的未知副作用规则。这一窄分类只在 resume RPC
-边界生效，不检查异常链或其他操作抛出的同名消息。已经 unarchive 后的 resume 失败仍保留
-Binding-local lifecycle-unknown；已启动 Turn 的观测恢复也保留原 exact Turn 与观测状态。
+边界生效，不检查异常链或其他操作抛出的同名消息。归档恢复按 ADR 0082 区分后续 resume
+的明确拒绝、部分成功与未知结果，只有未知结果保留 Binding-local lifecycle-unknown；
+已启动 Turn 的观测恢复保留原 exact Turn 与观测状态。
 `thread.turn()` 若没有返回 handle，其副作用结果无法确认：服务立即关闭全部新
 admission 并要求重启，不能把 Binding 当 idle 再启动第二轮。
 
@@ -362,6 +363,23 @@ materialized persisted 行都可确认后 exact archive/delete，不以本地 Tu
 提供独立两阶段 Delete，并与 active 列表共用同一原生 primitive；最终只把 root ID
 交给 App Server 级联删除 spawned descendants。归档恢复仍显式选择目标：
 `/unarchive <短 ID>` 或归档卡按钮恢复 exact native ID 并切换 Binding。
+
+归档恢复按 [ADR 0082](adr/0082-restore-archived-sessions-from-exact-native-results.md)
+保留 Scope 协调、Binding 锁与本地 lifecycle/上下文校验，直接调用一次公开 unarchive，
+不先 list/read。正常返回同 ID，或精确的 `InvalidRequestError/-32600` 与
+`no archived rollout found for thread id <exact_id>`／
+`thread <exact_id> already has an active writer` 两种已验证的移动前拒绝，才继续一次
+同 ID resume。前者不能区分已恢复和缺失，后者也可能是本连接 loaded/running；不单凭
+unarchive 拒绝判断状态或 owner。其余未知结果停止链路，不追加目录对账或自动重试。
+
+resume 返回同 ID 后先保留普通订阅，再提交 current/context；目标已经是 current 时
+保留现有 Context Boundary 与 context revision，Admin 仅恢复也不修改它们。允许保留
+exact handle 的普通 `RUNNING` 和 Goal `RUNNING` rejoin，不替换执行 handle/观察者；
+Compaction、普通 `STOPPING`／`OBSERVATION_UNAVAILABLE` 和 Goal 的其他活动或未知状态
+继续在原生调用前拒绝。resume 明确归档、缺失、writer 或关闭拒绝释放本次 reservation，
+保留本地关联和原 current/context；unarchive 已成功则反馈部分成功。原生或本地提交
+结果未知保留目标 Binding-local lifecycle-unknown，已知订阅仍交还既有释放边界，旧准备
+输入失效；不保证本地事务回滚。卡片更新失败不改变已确认结果。
 
 ### 持久分支创建与交接
 
@@ -522,7 +540,8 @@ Mention Context Mode 按
 
 Context Boundary 是 Binding-scoped exact 飞书消息 marker，不是机器人回复时间。`/new`
 创建 catch-up Binding、`/resume`、`/unarchive` 或从 current-only 切换为 catch-up 时，以
-exact control/card message 重置边界，避免补录 Binding 非 active 期间的讨论。按 ADR 0073
+exact control/card message 重置边界，避免补录 Binding 非 active 期间的讨论。ADR 0082
+的归档恢复若目标已经是 current，保留现有边界及 revision，不以旧卡重置它们。按 ADR 0073
 自动创建时只将初始边界改为本次真实触发消息，该消息仍作为首轮请求执行，首轮不补读更早
 讨论；后续读取、准备和提交复用同一流程。start/steer
 被 native Runtime 确认接受后，Runtime 才在同一 Binding lock 内 CAS 推进边界；失败、竞态
@@ -744,8 +763,9 @@ terminal 都保留订阅并等待新的完整空闲窗口；unsubscribe unknown 
 确认 unsubscribe 前始终保持 unknown。自动释放绝不 cleanup、terminate 或 signal 进程。
 shutdown 先禁止新 timer，取消并排空已有 timer，再关闭 Codex transport。
 
-`thread/unarchive` 只恢复归档 rollout；Runtime 随后必须 exact `thread_resume`，并只用
-resume 返回的 handle 建立订阅记录。`/release` 只显式释放当前 active 普通 Binding 的当前
+`thread/unarchive` 只恢复归档 rollout；Runtime 按 ADR 0082 的精确返回条件继续一次
+`thread_resume`，只用 resume 返回的 handle 建立订阅记录，并保留已有活动执行 handle。
+`/release` 只显式释放当前 active 普通 Binding 的当前
 连接订阅；Lazy Binding 或本来未订阅是幂等成功，busy、后台 terminal 与状态未知都明确
 拒绝。`/status` 展示的也只是本 Netizen
 进程的瞬态订阅投影。`unsubscribed`、`notSubscribed` 或 `notLoaded` 不表示 Thread 被删除，
@@ -2479,8 +2499,9 @@ exact materialized 行归档，以及按 ADR 0038/0049 经独立红色确认卡�
 Scope/Binding/native identity 与二次确认，但不携带 Runtime activity 前置条件。本地活动仍在
 运行也直接委托 App Server removal，不先 stop/pause 或等待 terminal。materialized `/delete` 还要明确 spawned
 descendants 与 Codex App/CLI 历史会永久消失。归档列表只为同一 Scope 的原生 archived
-Thread 生成恢复和独立删除入口；恢复仍校验 archived catalog，删除则把 exact native ID
-直接交给同一 Delete primitive，不把 stale 或跨 Scope Binding 激活或删除。
+Thread 生成恢复和独立删除入口；提交恢复不复查 catalog，按 ADR 0082 使用 exact
+unarchive/resume 结果；删除把 exact native ID 直接交给同一 Delete primitive。
+两者仍复核本地 Scope/Binding/native 身份，不把身份已变或跨 Scope 的目标激活或删除。
 
 按 ADR 0018，不注册独立的 `/skills` 浏览 control；用户可用普通自然语言消息询问当前
 可用 Skill。显式执行仍是普通消息开头一个或多个 `$skill-name`，并在提交前通过 live
@@ -2565,7 +2586,7 @@ SDK/App Server 升级的检查集合、触发条件和顺序统一见
   共享管理服务由 ServiceCore 统一关闭，ChannelApplication 只关闭自己的展示资源；
   首次管理 I/O 排空未完成时，ServiceCore 在同一总时限内再做一次有界补充清理。
 - Admin mutation 发出后遇到 response loss/cancellation 不自动重试。一次性 grant 已消费，
-  页面只报告已知结果；native archive/delete lifecycle 结果未知只保留目标 Binding-local
+  页面只报告已知结果；native archive/unarchive/delete lifecycle 结果未知只保留目标 Binding-local
   `lifecycle-unknown`，不扩大为全局 admission 关闭。选择会话时的直接 resume 结果未知则
   沿用共享 Runtime 的全局 admission 关闭语义。结构化日志不含 credential、cookie/token、cwd、
   name/preview 或 request body。
@@ -2607,8 +2628,11 @@ SDK/App Server 升级的检查集合、触发条件和顺序统一见
   Binding；interrupt、terminal cleanup 或 unsubscribe 未确认时保持 closing 且拒绝新
   Prompt，重复 close 只重试未确认步骤。服务重启不恢复 ephemeral Thread，而是在 handler
   注册前把遗留 creating/open route 转为 expired。
-- Thread rename/unarchive mutation 一旦开始而结果无法确认，保留目标 Binding 的 lifecycle
-  slot；archive 正常响应后提交本地映射，异常只做一次有界 catalog 对账，不重发 mutation。
+- Thread rename mutation 一旦开始而结果无法确认，保留目标 Binding 的 lifecycle slot。
+  unarchive 按 ADR 0082 处理两条精确移动前拒绝和后续 resume 明确拒绝；已完成阶段须如实
+  反馈，未知结果只保留目标 Binding-local lifecycle slot，不自动重试或目录对账。原生已
+  成功、本地提交未确认时保留已知订阅，不声称 current 回滚。
+  archive 正常响应后提交本地映射，异常只做一次有界 catalog 对账，不重发 mutation。
   exact ID 只在 archived 时提交，仍 active 时释放 reservation，无法确认时只隔离目标。
   Delete 仅在本次原生成功响应后删除 Binding；明确 RPC 拒绝保留 Binding、清理可能失效的
   活动投影并允许重新确认；传输/响应未知保留 Binding-local lifecycle slot。Delete 不追加
