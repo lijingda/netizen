@@ -47,6 +47,7 @@ from netizen_cli.codex_runtime import (
     CompactionStateUnknown,
     ContextWindowUsage,
     ContextBoundaryCommitFailed,
+    ContextAnchorRequired,
     ContextCursorCommit,
     CodexRuntime,
     RuntimeClosed,
@@ -85,6 +86,7 @@ from netizen_cli.codex_runtime import (
     ThreadNotMaterialized,
     ThreadOccupied,
     ThreadReleaseError,
+    ThreadRestoreRejected,
     ThreadRunningConfiguration,
     ThreadSubscriptionState,
     ThreadStopping,
@@ -3207,12 +3209,6 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-archived")
         other = self.binding()
-        self.codex.thread_list_pages = [
-            SimpleNamespace(
-                data=[SimpleNamespace(id="native-archived", name=None, preview="old")],
-                next_cursor=None,
-            )
-        ]
 
         restored = await self.runtime.restore_exact(binding.id)
         await self._wait_for_calls(1)
@@ -3220,6 +3216,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(restored.active)
         self.assertEqual(self.store.active_binding(self.scope.key).id, other.id)
         self.assertEqual(self.subscription.calls, ["native-archived"])
+        self.assertEqual(self.codex.thread_list_calls, [])
 
     async def test_activate_serializes_with_stale_inactive_release_timer(self) -> None:
         self.runtime.close_admission()
@@ -3365,6 +3362,502 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.06)
         self.assertEqual(self.inspector.calls, [])
         self.assertEqual(self.subscription.calls, [])
+
+
+class RestoreActivationTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.cwd = Path(self.directory.name)
+        self.store = BindingStore()
+        self.store.bootstrap_project(alias="test", cwd=str(self.cwd))
+        self.scope = FeishuScope("app", "group", ScopeKind.GROUP)
+        self.codex = FakeCodex()
+        self.runtime = CodexRuntime(
+            codex=self.codex,
+            bindings=self.store,
+            terminal_cleanup=FakeTerminalCleanup(self.codex.events),
+            thread_subscription_control=FakeThreadSubscriptionControl(),
+            background_terminal_inspector=FakeBackgroundTerminalInspector(),
+            ordinary_thread_idle_seconds=600,
+            automatic_thread_naming=False,
+        )
+
+    async def asyncTearDown(self) -> None:
+        self.runtime.close_admission()
+        await self.runtime.cancel_tasks()
+        self.store.close()
+        self.directory.cleanup()
+
+    def binding(self, native_id: str | None = None, *, catch_up: bool = False):
+        binding = self.store.create_channel_binding(
+            scope=self.scope,
+            project_alias="test",
+            creator_id="user",
+            message_context_mode=(
+                MentionContextMode.CATCH_UP if catch_up else MentionContextMode.CURRENT_ONLY
+            ),
+            context_anchor=MessageContextAnchor("old-boundary", 100) if catch_up else None,
+        )
+        if native_id is not None:
+            self.store.assign_native_thread_id(binding.id, native_id)
+        return self.store.get(binding.id)
+
+    def assert_not_switched(self, target, other) -> None:
+        self.assertEqual(self.store.active_binding(self.scope.key).id, other.id)
+        retained = self.store.get(target.id)
+        self.assertEqual(retained.native_thread_id, target.native_thread_id)
+        self.assertEqual(retained.context_anchor, target.context_anchor)
+        self.assertEqual(retained.context_revision, target.context_revision)
+
+    async def assert_binding_local_unknown(self, target, other) -> None:
+        self.assert_not_switched(target, other)
+        self.assertEqual(
+            self.runtime.lifecycle_state(target.id).state,
+            ThreadLifecycleState.UNKNOWN,
+        )
+        with self.assertRaises(ThreadLifecycleStateUnknown):
+            await self.runtime.capture_submission_admission(target.id)
+        await self.runtime.capture_submission_admission(other.id)
+        self.assertTrue(self.runtime._accepting)
+
+    async def test_success_registers_exact_resume_handle_without_list_or_read(self) -> None:
+        target = self.binding("native-1")
+        self.binding()
+        returned = FakeThread("native-1", self.codex)
+        with patch.object(self.codex, "thread_resume", return_value=returned) as resume:
+            restored = await self.runtime.restore_as_current_exact(target.id)
+
+        resume.assert_awaited_once_with("native-1", include_turns=False)
+        self.assertTrue(restored.active)
+        self.assertIs(self.runtime._subscriptions[target.id].thread, returned)
+        self.assertEqual(self.codex.unarchive_calls, ["native-1"])
+        self.assertEqual(self.codex.thread_list_calls, [])
+        self.assertEqual(self.codex.read_calls, [])
+        self.assertEqual(self.codex.turn_calls, [])
+
+    async def test_verified_unarchive_rejections_each_continue_to_one_exact_resume(self) -> None:
+        for index, message in enumerate((
+            "no archived rollout found for thread id {id}",
+            "thread {id} already has an active writer",
+        )):
+            with self.subTest(message=message):
+                target = self.binding(f"native-{index}")
+                self.binding()
+                self.codex.unarchive_errors.append(InvalidRequestError(
+                    -32600, message.format(id=target.native_thread_id),
+                ))
+                restored = await self.runtime.restore_as_current_exact(target.id)
+                self.assertTrue(restored.active)
+                self.assertIsNone(self.runtime.lifecycle_state(target.id))
+                self.assertIsNotNone(self.runtime.thread_subscription_snapshot(target.id))
+
+        self.assertEqual(self.codex.unarchive_calls, ["native-0", "native-1"])
+        self.assertEqual(self.codex.resume_calls, [
+            ("native-0", {"include_turns": False}),
+            ("native-1", {"include_turns": False}),
+        ])
+        self.assertEqual(self.codex.thread_list_calls, [])
+        self.assertEqual(self.codex.read_calls, [])
+        self.assertEqual(self.codex.turn_calls, [])
+
+    async def test_verified_resume_rejections_keep_context_and_report_actual_phase(self) -> None:
+        messages = (
+            "no rollout found for thread id {id}",
+            "thread {id} already has an active writer",
+            "thread {id} is closing; retry thread/resume after the thread is closed",
+            "session {id} is archived. Run `codex unarchive {id}` to unarchive it first.",
+        )
+        for unarchived in (False, True):
+            for index, message in enumerate(messages):
+                with self.subTest(unarchived=unarchived, message=message):
+                    native_id = f"native-{unarchived}-{index}"
+                    target = self.binding(native_id, catch_up=True)
+                    other = self.binding()
+                    if not unarchived:
+                        self.codex.unarchive_errors.append(InvalidRequestError(
+                            -32600, f"no archived rollout found for thread id {native_id}",
+                        ))
+                    self.codex.resume_errors.append(InvalidRequestError(
+                        -32600, message.format(id=native_id),
+                    ))
+                    resumes = len(self.codex.resume_calls)
+                    with self.assertRaises(ThreadRestoreRejected) as raised:
+                        await self.runtime.restore_as_current_exact(
+                            target.id, context_anchor=MessageContextAnchor("new", 200),
+                        )
+                    self.assertEqual(raised.exception.unarchived, unarchived)
+                    if unarchived:
+                        self.assertIn("已解除归档", str(raised.exception))
+                    self.assertEqual(len(self.codex.resume_calls), resumes + 1)
+                    self.assert_not_switched(target, other)
+                    self.assertIsNone(self.runtime.lifecycle_state(target.id))
+                    self.assertIsNone(self.runtime.thread_subscription_snapshot(target.id))
+                    await self.runtime.capture_submission_admission(other.id)
+                    self.assertTrue(self.runtime._accepting)
+
+        self.assertEqual(len(self.codex.unarchive_calls), 8)
+        self.assertEqual(len(self.codex.resume_calls), 8)
+        self.assertEqual(self.codex.thread_list_calls, [])
+        self.assertEqual(self.codex.read_calls, [])
+
+    async def test_foreign_writer_rejection_allows_later_explicit_retry(self) -> None:
+        target = self.binding("native-1")
+        other = self.binding()
+        writer = "thread native-1 already has an active writer"
+        self.codex.unarchive_errors.append(InvalidRequestError(-32600, writer))
+        self.codex.resume_errors.append(InvalidRequestError(-32600, writer))
+        with self.assertRaises(ThreadRestoreRejected) as raised:
+            await self.runtime.restore_as_current_exact(target.id)
+        self.assertFalse(raised.exception.unarchived)
+        self.assert_not_switched(target, other)
+        self.assertEqual(self.codex.unarchive_calls, ["native-1"])
+        self.assertEqual(len(self.codex.resume_calls), 1)
+
+        restored = await self.runtime.restore_as_current_exact(target.id)
+        self.assertTrue(restored.active)
+        self.assertEqual(self.codex.unarchive_calls, ["native-1", "native-1"])
+        self.assertEqual(len(self.codex.resume_calls), 2)
+
+    async def test_restore_invalidates_prepared_start_and_steer_after_success_or_rejection(self) -> None:
+        for running in (False, True):
+            for rejected in (False, True):
+                with self.subTest(running=running, rejected=rejected):
+                    target = self.binding(None if running else f"idle-{rejected}")
+                    handle = None
+                    if running:
+                        submission = await self.runtime.submit(
+                            binding=target, cwd=self.cwd, input="original work",
+                            owner_id="user", origin=object(),
+                        )
+                        submission.release_receipt_attempt()
+                        handle = self.runtime._active[target.id].handle
+                        target = self.store.get(target.id)
+                    admission = await self.runtime.capture_submission_admission(target.id)
+                    turn_calls = list(self.codex.turn_calls)
+                    writer = f"thread {target.native_thread_id} already has an active writer"
+                    self.codex.unarchive_errors.append(InvalidRequestError(-32600, writer))
+                    if rejected:
+                        self.codex.resume_errors.append(InvalidRequestError(-32600, writer))
+                        with self.assertRaises(ThreadRestoreRejected):
+                            await self.runtime.restore_as_current_exact(target.id)
+                    else:
+                        await self.runtime.restore_as_current_exact(target.id)
+
+                    with self.assertRaises(SteerRace):
+                        await self.runtime.submit(
+                            binding=target, cwd=self.cwd, input="stale prepared input",
+                            owner_id="user", origin=object(), admission=admission,
+                        )
+                    self.assertEqual(self.codex.turn_calls, turn_calls)
+                    self.assertIsNone(self.runtime.lifecycle_state(target.id))
+                    if handle is not None:
+                        self.assertIs(self.runtime._active[target.id].handle, handle)
+                        self.assertEqual(handle.steers, [])
+                        self.assertEqual(handle.interrupt_count, 0)
+
+    @staticmethod
+    def uncertain_errors(message: str, native_id: str):
+        return (
+            TransportClosedError("response lost"),
+            TimeoutError("deadline"),
+            InvalidRequestError(-32600, "unrecognized error"),
+            InvalidRequestError(-32600, message.replace(native_id, "wrong-id")),
+            InvalidRequestError(-32600, "prefix " + message),
+            InvalidRequestError(-32600, message + " suffix"),
+            InvalidRequestError(-32603, message),
+            InternalRpcError(-32600, message),
+        )
+
+    async def test_unverified_unarchive_errors_stop_before_resume_and_isolate_binding(self) -> None:
+        for index in range(16):
+            native_id = f"native-{index}"
+            message = (
+                f"no archived rollout found for thread id {native_id}"
+                if index < 8 else
+                f"thread {native_id} already has an active writer"
+            )
+            error = self.uncertain_errors(
+                message, native_id,
+            )[index % 8]
+            with self.subTest(error=error):
+                target = self.binding(native_id, catch_up=True)
+                other = self.binding()
+                self.codex.unarchive_errors.append(error)
+                with self.assertRaises(ThreadLifecycleStateUnknown):
+                    await self.runtime.restore_as_current_exact(
+                        target.id, context_anchor=MessageContextAnchor("new", 200),
+                    )
+                await self.assert_binding_local_unknown(target, other)
+                self.assertIsNone(self.runtime.thread_subscription_snapshot(target.id))
+
+        self.assertEqual(len(self.codex.unarchive_calls), 16)
+        self.assertEqual(self.codex.resume_calls, [])
+        self.assertEqual(self.codex.thread_list_calls, [])
+        self.assertEqual(self.codex.read_calls, [])
+
+    async def test_unverified_resume_errors_stop_before_switch_and_isolate_binding(self) -> None:
+        for index in range(8):
+            native_id = f"native-{index}"
+            error = self.uncertain_errors(
+                f"no rollout found for thread id {native_id}", native_id,
+            )[index]
+            with self.subTest(error=error):
+                target = self.binding(native_id, catch_up=True)
+                other = self.binding()
+                if index % 2:
+                    self.codex.unarchive_errors.append(InvalidRequestError(
+                        -32600, f"no archived rollout found for thread id {native_id}",
+                    ))
+                self.codex.resume_errors.append(error)
+                with self.assertRaises(ThreadLifecycleStateUnknown) as raised:
+                    await self.runtime.restore_as_current_exact(
+                        target.id, context_anchor=MessageContextAnchor("new", 200),
+                    )
+                self.assertEqual("已解除归档" in str(raised.exception), not index % 2)
+                await self.assert_binding_local_unknown(target, other)
+                self.assertIsNone(self.runtime.thread_subscription_snapshot(target.id))
+
+        self.assertEqual(len(self.codex.unarchive_calls), 8)
+        self.assertEqual(len(self.codex.resume_calls), 8)
+        self.assertEqual(self.codex.thread_list_calls, [])
+        self.assertEqual(self.codex.read_calls, [])
+
+    async def test_wrong_native_id_at_either_phase_never_switches_or_subscribes(self) -> None:
+        for index, method in enumerate(("thread_unarchive", "thread_resume")):
+            with self.subTest(method=method):
+                target = self.binding(f"native-{index}")
+                other = self.binding()
+                resumes = len(self.codex.resume_calls)
+                with patch.object(self.codex, method, return_value=FakeThread("wrong", self.codex)) as call:
+                    with self.assertRaises(ThreadLifecycleStateUnknown):
+                        await self.runtime.restore_as_current_exact(target.id)
+                call.assert_awaited_once()
+                if method == "thread_unarchive":
+                    self.assertEqual(len(self.codex.resume_calls), resumes)
+                await self.assert_binding_local_unknown(target, other)
+                self.assertIsNone(self.runtime.thread_subscription_snapshot(target.id))
+
+    async def test_cancellation_during_either_native_phase_keeps_binding_local_unknown(self) -> None:
+        for index, method in enumerate(("thread_unarchive", "thread_resume")):
+            with self.subTest(method=method):
+                target = self.binding(f"native-{index}")
+                other = self.binding()
+                entered = asyncio.Event()
+
+                async def block(*args, **kwargs):
+                    entered.set()
+                    await asyncio.Event().wait()
+
+                with patch.object(self.codex, method, side_effect=block) as call:
+                    pending = asyncio.create_task(self.runtime.restore_as_current_exact(target.id))
+                    await asyncio.wait_for(entered.wait(), timeout=1)
+                    pending.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await pending
+                call.assert_awaited_once()
+                await self.assert_binding_local_unknown(target, other)
+                self.assertIsNone(self.runtime.thread_subscription_snapshot(target.id))
+        self.assertEqual(self.codex.resume_calls, [])
+
+    async def test_cancellation_while_waiting_for_binding_lock_has_no_native_effect(self) -> None:
+        target = self.binding("native-1")
+        other = self.binding()
+        entered = asyncio.Event()
+
+        async def restore():
+            entered.set()
+            return await self.runtime.restore_as_current_exact(target.id)
+
+        async with self.runtime._lock(target.id):
+            pending = asyncio.create_task(restore())
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            pending.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await pending
+        self.assert_not_switched(target, other)
+        self.assertIsNone(self.runtime.lifecycle_state(target.id))
+        self.assertEqual(self.codex.unarchive_calls, [])
+        self.assertEqual(self.codex.resume_calls, [])
+
+    async def test_already_current_restore_keeps_advanced_context_boundary(self) -> None:
+        target = self.binding("native-1", catch_up=True)
+        target = self.store.commit_context_anchor(
+            binding_id=target.id,
+            expected_context_revision=target.context_revision,
+            anchor=MessageContextAnchor("accepted-newer-input", 300),
+        )
+        for anchor in (MessageContextAnchor("old-card", 200), None):
+            with self.subTest(anchor=anchor):
+                self.codex.unarchive_errors.append(InvalidRequestError(
+                    -32600, "thread native-1 already has an active writer",
+                ))
+                with patch.object(self.store, "activate", wraps=self.store.activate) as activate:
+                    restored = await self.runtime.restore_as_current_exact(
+                        target.id, context_anchor=anchor,
+                    )
+                activate.assert_not_called()
+                self.assertTrue(restored.active)
+                self.assertEqual(restored.context_anchor, target.context_anchor)
+                self.assertEqual(restored.context_revision, target.context_revision)
+
+    async def test_real_switch_validates_anchor_before_native_calls_then_commits(self) -> None:
+        target = self.binding("native-1", catch_up=True)
+        other = self.binding()
+        with self.assertRaises(ContextAnchorRequired):
+            await self.runtime.restore_as_current_exact(target.id)
+        self.assert_not_switched(target, other)
+        self.assertIsNone(self.runtime.lifecycle_state(target.id))
+        self.assertEqual(self.codex.unarchive_calls, [])
+        self.assertEqual(self.codex.resume_calls, [])
+        anchor = MessageContextAnchor("card", 200)
+        restored = await self.runtime.restore_as_current_exact(target.id, context_anchor=anchor)
+        self.assertTrue(restored.active)
+        self.assertEqual(restored.context_anchor, anchor)
+        self.assertEqual(restored.context_revision, target.context_revision + 1)
+
+    async def test_local_commit_failure_retains_subscription_and_does_not_claim_rollback(self) -> None:
+        original = self.store.activate
+        for after_commit in (False, True):
+            with self.subTest(after_commit=after_commit):
+                target = self.binding(f"native-{after_commit}", catch_up=True)
+                other = self.binding()
+                revision = self.runtime._admission_revision(target.id)
+
+                def failing_activate(**kwargs):
+                    self.assertIsNotNone(self.runtime.thread_subscription_snapshot(target.id))
+                    if after_commit:
+                        original(**kwargs)
+                    raise RuntimeError("local commit or read failed")
+
+                anchor = MessageContextAnchor("card", 200)
+                with patch.object(self.store, "activate", side_effect=failing_activate):
+                    with self.assertRaisesRegex(ThreadLifecycleStateUnknown, "本地切换结果未确认"):
+                        await self.runtime.restore_as_current_exact(target.id, context_anchor=anchor)
+                self.assertEqual(
+                    self.store.active_binding(self.scope.key).id,
+                    target.id if after_commit else other.id,
+                )
+                retained = self.store.get(target.id)
+                self.assertEqual(retained.context_anchor, anchor if after_commit else target.context_anchor)
+                self.assertEqual(
+                    self.runtime.lifecycle_state(target.id).state,
+                    ThreadLifecycleState.UNKNOWN,
+                )
+                self.assertGreater(self.runtime._admission_revision(target.id), revision)
+                self.assertEqual(self.runtime._subscriptions[target.id].thread_id, target.native_thread_id)
+                self.assertTrue(self.runtime._accepting)
+
+    async def test_running_turn_rejoin_preserves_handle_observer_and_exact_turn(self) -> None:
+        target = self.binding()
+        submission = await self.runtime.submit(
+            binding=target, cwd=self.cwd, input="work", owner_id="user", origin=object(),
+        )
+        submission.release_receipt_attempt()
+        target = self.store.get(target.id)
+        running = self.runtime._active[target.id]
+        handle, observer = running.handle, running.task
+        self.binding()
+        self.codex.unarchive_errors.append(InvalidRequestError(
+            -32600, f"thread {target.native_thread_id} already has an active writer",
+        ))
+        restored = await self.runtime.restore_as_current_exact(target.id)
+        self.assertTrue(restored.active)
+        self.assertIs(self.runtime._active[target.id], running)
+        self.assertIs(running.handle, handle)
+        self.assertIs(running.task, observer)
+        self.assertEqual(self.runtime.active_turn(target.id).turn_id, submission.turn_id)
+        self.assertEqual(len(self.codex.handles), 1)
+        self.assertEqual(handle.interrupt_count, 0)
+
+    async def test_stopping_and_unavailable_turns_reject_before_native_calls(self) -> None:
+        target = self.binding()
+        submission = await self.runtime.submit(
+            binding=target, cwd=self.cwd, input="work", owner_id="user", origin=object(),
+        )
+        submission.release_receipt_attempt()
+        target = self.store.get(target.id)
+        running = self.runtime._active[target.id]
+        other = self.binding()
+        for state, expected_error in (
+            (ActiveState.STOPPING, ThreadStopping),
+            (ActiveState.OBSERVATION_UNAVAILABLE, TurnObservationUnavailable),
+        ):
+            with self.subTest(state=state):
+                running.state = state
+                with self.assertRaises(expected_error):
+                    await self.runtime.restore_as_current_exact(target.id)
+                self.assert_not_switched(target, other)
+                self.assertIsNone(self.runtime.lifecycle_state(target.id))
+        self.assertEqual(self.codex.unarchive_calls, [])
+        self.assertEqual(self.codex.resume_calls, [])
+
+    async def test_running_goal_rejoin_preserves_handle_observer_and_goal_policy(self) -> None:
+        target = self.binding()
+        control = FakeGoalControl(self.codex)
+        self.runtime._goal_control = control
+        await self.runtime.start_goal(
+            binding=target, cwd=self.cwd, objective="work", owner_id="user", origin=object(),
+        )
+        target = self.store.get(target.id)
+        running = self.runtime._goals[target.id]
+        handle, observer = running.handle, running.task
+        reads = list(control.get_calls)
+        self.binding()
+        self.codex.unarchive_errors.append(InvalidRequestError(
+            -32600, f"thread {target.native_thread_id} already has an active writer",
+        ))
+        restored = await self.runtime.restore_as_current_exact(target.id)
+        self.assertTrue(restored.active)
+        self.assertIs(self.runtime._goals[target.id], running)
+        self.assertIs(running.handle, handle)
+        self.assertIs(running.task, observer)
+        self.assertEqual(control.get_calls, reads)
+        self.assertEqual(control.resume_calls, [])
+        self.assertEqual(len(control.handles), 1)
+
+    async def test_nonrunning_or_unowned_goal_rejects_before_native_calls(self) -> None:
+        target = self.binding()
+        self.runtime._goal_control = FakeGoalControl(self.codex)
+        await self.runtime.start_goal(
+            binding=target, cwd=self.cwd, objective="work", owner_id="user", origin=object(),
+        )
+        target = self.store.get(target.id)
+        other = self.binding()
+        running = self.runtime._goals[target.id]
+        handle = running.handle
+        expected_errors = {
+            GoalOperationState.STARTING: ThreadGoalActive,
+            GoalOperationState.RUNNING: ThreadGoalActive,
+            GoalOperationState.PAUSING: ThreadGoalActive,
+            GoalOperationState.EXTERNAL_ACTIVE: ExternalGoalActive,
+            GoalOperationState.UNKNOWN: GoalStateUnknown,
+        }
+        try:
+            for state in GoalOperationState:
+                with self.subTest(state=state):
+                    running.state = state
+                    running.handle = None if state is GoalOperationState.RUNNING else handle
+                    expected_error = expected_errors[state]
+                    with self.assertRaises(expected_error) as caught:
+                        await self.runtime.restore_as_current_exact(target.id)
+                    self.assertIs(type(caught.exception), expected_error)
+                    self.assert_not_switched(target, other)
+                    self.assertIsNone(self.runtime.lifecycle_state(target.id))
+        finally:
+            running.handle = handle
+        self.assertEqual(self.codex.unarchive_calls, [])
+        self.assertEqual(self.codex.resume_calls, [])
+
+    async def test_compaction_rejects_before_native_calls(self) -> None:
+        target = self.binding("native-1")
+        other = self.binding()
+        self.runtime._compacting[target.id] = SimpleNamespace()
+        with self.assertRaises(ThreadCompacting):
+            await self.runtime.restore_as_current_exact(target.id)
+        self.assert_not_switched(target, other)
+        self.assertIsNone(self.runtime.lifecycle_state(target.id))
+        self.assertEqual(self.codex.unarchive_calls, [])
+        self.assertEqual(self.codex.resume_calls, [])
 
 
 class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
@@ -4368,26 +4861,15 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.runtime.active_turn(binding.id))
         await self.finish(self.codex.handles[0], submission)
 
-    async def test_unarchive_uses_archived_inventory_then_activates_binding(self) -> None:
+    async def test_unarchive_activates_binding_without_archived_inventory(self) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
         self.store.archive_binding(binding.id)
         binding = self.store.get(binding.id)
-        self.codex.thread_list_pages = [
-            SimpleNamespace(
-                data=[
-                    SimpleNamespace(
-                        id="native-1",
-                        name="Archived",
-                        preview="old task",
-                    )
-                ],
-                next_cursor=None,
-            )
-        ]
-
         restored = await self.runtime.restore_as_current_exact(binding.id)
 
+        self.assertEqual(self.codex.thread_list_calls, [])
+        self.assertEqual(self.codex.read_calls, [])
         self.assertEqual(self.codex.unarchive_calls, ["native-1"])
         self.assertEqual(self.codex.resume_calls, [("native-1", {"include_turns": False})])
         self.assertTrue(restored.active)
@@ -4397,19 +4879,14 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
         other = self.binding()
-        self.codex.thread_list_pages = [
-            SimpleNamespace(
-                data=[SimpleNamespace(id="native-1", name=None, preview="old")],
-                next_cursor=None,
-            )
-        ]
-
         restored = await self.runtime.restore_exact(binding.id)
 
         self.assertFalse(restored.active)
         self.assertEqual(self.store.active_binding(self.scope.key).id, other.id)
         self.assertEqual(self.codex.unarchive_calls, ["native-1"])
         self.assertEqual(self.codex.resume_calls, [("native-1", {"include_turns": False})])
+        self.assertEqual(self.codex.thread_list_calls, [])
+        self.assertEqual(self.codex.read_calls, [])
 
     async def test_exact_stop_targets_running_inactive_binding(self) -> None:
         binding = self.binding()
@@ -4447,12 +4924,6 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.store.assign_native_thread_id(binding.id, "native-1")
         self.store.archive_binding(binding.id)
         binding = self.store.get(binding.id)
-        self.codex.thread_list_pages = [
-            SimpleNamespace(
-                data=[SimpleNamespace(id="native-1", name=None, preview="old task")],
-                next_cursor=None,
-            )
-        ]
         self.codex.resume_errors.append(RuntimeError("resume failed"))
 
         with self.assertRaises(ThreadLifecycleStateUnknown):
@@ -4470,27 +4941,23 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await self.runtime.capture_submission_admission(binding.id)
         self.assertTrue(self.runtime._accepting)
 
-    async def test_occupied_thread_after_unarchive_retains_unknown_lifecycle(self) -> None:
+    async def test_occupied_thread_after_unarchive_reports_partial_success(self) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-1")
         self.store.archive_binding(binding.id)
-        self.codex.thread_list_pages = [SimpleNamespace(
-            data=[SimpleNamespace(id="native-1", name=None, preview="archived")],
-            next_cursor=None,
-        )]
         self.codex.resume_errors.append(InvalidRequestError(
             -32600, "thread native-1 already has an active writer",
         ))
 
-        with self.assertRaises(ThreadLifecycleStateUnknown):
+        with self.assertRaises(ThreadRestoreRejected) as raised:
             await self.runtime.restore_as_current_exact(binding.id)
 
+        self.assertTrue(raised.exception.unarchived)
         self.assertEqual(self.codex.unarchive_calls, ["native-1"])
         self.assertEqual(self.codex.resume_calls, [
             ("native-1", {"include_turns": False}),
         ])
-        self.assertEqual(self.runtime.lifecycle_state(binding.id).state,
-                         ThreadLifecycleState.UNKNOWN)
+        self.assertIsNone(self.runtime.lifecycle_state(binding.id))
         self.assertFalse(self.store.get(binding.id).active)
         self.assertIsNone(self.store.active_binding(self.scope.key))
         self.assertTrue(self.runtime._accepting)

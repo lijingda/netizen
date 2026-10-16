@@ -3,13 +3,15 @@ status: accepted
 date: 2026-08-20
 amends: 0009, 0021
 related: 0010, 0017, 0020, 0026
-amended_by: 0078
+amended_by: 0078, 0082
 ---
 
 # 释放空闲普通 Thread 的连接订阅
 
 > 后续修订：[ADR 0078](0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md)
 > 将公开持久 fork 返回的同一 handle 纳入普通订阅，并明确选择会话时的直接 resume。
+> [ADR 0082](0082-restore-archived-sessions-from-exact-native-results.md) 明确归档恢复按
+> exact 原生返回继续 resume，先保留订阅再提交切换，已知运行中的执行 handle 保持不变。
 > 以下保留决策时的契约与证据。
 
 ## 背景

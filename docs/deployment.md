@@ -280,6 +280,13 @@ LaunchAgent 安装、启动和 ready 冒烟，不能用 CI 代替。
 与其他检查配置不变的探针串行执行。未知删除结果不自动重试，保留输出的 exact ID
 供人工核查；飞书创建、选群和回调另行验收。
 
+归档恢复边界（ADR 0082）变更时，运行
+`.venv/bin/python scripts/probe_thread_restore.py --output /tmp/thread-restore.json`
+并设置外部 90 秒进程 deadline；可用 `--timeout` 调整默认 60 秒的内部总时限。专项使用
+生产 CodexRuntime、临时 HOME/CODEX_HOME/cwd、本地 mock Responses provider 与真实
+bundled App Server，验证正常恢复、已恢复、missing、writer 拒绝和原 Turn rejoin。
+它不操作既有用户会话，不替代真实模型 Goal 继续或飞书卡片端到端验收；结果须单独记录。
+
 阶段性答案、命令大输出持久化、压缩或卸载边界变化时，可运行两个显式原生专项：
 `scripts/probe_sdk_partial_answers.py`（外部 150 秒 deadline）和
 `scripts/probe_sdk_native_boundaries.py`（外部 180 秒 deadline）。两者均可用 `--case`
@@ -706,7 +713,8 @@ drains 和只读 Skill roots 全部通过。日志 `/tmp/netizen-session-optimiz
 ### 持久分支、恢复与删除验收
 
 [ADR 0078](adr/0078-fork-persistent-sessions-and-trust-native-lifecycle-results.md) 的三项边界
-分别验证，不能用临时 Side 成功代替持久 fork，也不能用目录展示代替恢复或删除的结果。
+与 [ADR 0082](adr/0082-restore-archived-sessions-from-exact-native-results.md) 的归档恢复分别
+验证，不能用临时 Side 成功代替持久 fork，也不能用目录展示代替恢复或删除的结果。
 
 | 范围 | 自动化与原生验证 | 飞书客户端验证 |
 | --- | --- | --- |
@@ -714,7 +722,19 @@ drains 和只读 Skill roots 全部通过。日志 `/tmp/netizen-session-optimiz
 | 群选择与提交 | Cron/Fork 共用完整有界查找快照，与 Files 共用页码控件；任意跳页不读取群目录/头像，单页无导航；完整清单、所有页及保留选择均过容量检查，不截断；只用所选目标方式，来源/current/revision 变化时不覆盖；失败保留草稿和新 nonce | 初始不预载目录；查找下方显示带头像的结果框，框下按需显示页码和唯一跳转按钮；首→末→中→首后群名/头像/已选群及名称/任务/模型草稿保持；重查清空旧选择；过多或查询未完成提示细化关键词/填 ID，空群或无效 ID 可修正重试；受理后禁用提交、成功移除按钮 |
 | 创建交接 | root/seed 响应阻塞时提前输入；默认配置先创建则 fork 冲突，fork 先提交则输入进入分支；每阶段失败、Project 删除和 shutdown | 提示等待完成后再发消息，失败只报告已知事实，已成功会话不会因回执失败被撤销 |
 | 普通恢复 | `activate_exact` 直接 resume，无 list/read 预检；未发新消息且列表缺席分支、Lazy、运行中 rejoin、明确拒绝、未知结果、本地提交失败和旧输入失效 | `/resume`、列表切换、Admin 同一语义；成功后反馈，拒绝保留 current，不卡在目录“未确认”状态 |
+| 归档恢复 | 无 list/read 预检；unarchive 同 ID 成功或两条精确移动前拒绝才继续单次 resume；missing/writer/closing/再次归档、部分成功、Binding-local unknown、本地提交前后失败；运行中保留执行 handle，已 current 保留 anchor/revision | 命令、归档卡和 Admin 共用结果分类；已恢复仍可切换，明确拒绝保留关联；部分成功如实提示，卡片失败不重发恢复 |
 | 普通删除 | 成功才删 Binding，RPC 拒绝保留并清理失效投影，传输未知局部隔离；零自动 list/read/retry；来源受分支历史引用限制 | 普通/归档/分支相同确认与反馈；不会把源会话删除解释为独立分支级联删除 |
+
+2026-10-16，SDK/App Server `0.162.1` 的归档恢复专项通过：生产 Runtime 与临时 SQLite
+连接真实 bundled App Server，验证 archived、loaded idle、cold already-unarchived、
+running rejoin、missing 和第二 App Server writer 占用六个场景。每次恢复仅调用一次
+unarchive 和一次 resume，没有 list/read 预检；running 保留原执行 handle，拒绝保留
+Binding/current 且释放本次 lifecycle。两次本地 mock Responses 请求后，原生历史仍
+严格只有两条 Turn。该证据不包含真实模型、Goal 自动续跑、飞书回调至卡片可见耗时或部署。
+本轮 `make check` 通过（3141 项测试，15 项平台或可选环境条件跳过；编译、依赖及 SDK
+探针通过），包含收紧为具体异常类型的恢复保护分支与旧输入准入回归。后者覆盖
+idle/running × 恢复成功/明确拒绝四种情况，不启动新 Turn 或误 steer。
+独立代码 review 未发现阻断问题；未部署。
 
 真实原生持久性验证仅使用 disposable cwd 和自建 Thread：有历史的来源创建持久 fork，
 在分支尚无新增 Turn 时同连接 resume、关闭首个 App Server 后冷 resume，核对 exact ID
@@ -1909,8 +1929,10 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     archived 行完成独立二次确认 Delete，确认不先 unarchive、active pointer 不变且 spawned
     descendants 随 root 从四视图消失。active 与 archived materialized delete 必须复用同一
     native-first primitive 和原生返回处理。`/archive` 与 `/delete` 仍不接受目标参数且保持
-    current-only；归档列表恢复仍校验 archived catalog，删除只复核 exact Scope/Binding/native
-    身份并交给 App Server，不额外目录预检。
+    current-only；归档列表恢复按 ADR 0082 的单次 unarchive/resume 原生返回处理，删除只复核
+    exact Scope/Binding/native 身份并交给 App Server，两者均不额外目录预检。恢复已是 current
+    的目标不能把 catch-up anchor/revision 回退到旧卡；目标缺失或外部占用时保留关联和原
+    current，已解除归档但后续失败须反馈部分结果，未知只隔离目标 Binding。
 19. 在已物化 Parent 上分别从 P2P、P2P 话题、普通群主线、普通群话题和话题模式群触发
     `/side`；从已有话题触发必须得到同 chat 的 sibling，不得留在或嵌套原话题。P2P 与
     P2P Side 话题无需 @，三类群入口及 Side 后续每条消息都必须 @。每个 Side 连续完成

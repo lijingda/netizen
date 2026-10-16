@@ -3,10 +3,14 @@ status: accepted
 date: 2026-08-24
 amends: 0011, 0015, 0016, 0029, 0030
 related: 0001, 0004, 0021
-amended_by: 0070
+amended_by: 0070, 0082
 ---
 
 # 为普通 Binding 增加 @ 时补充期间消息的上下文模式
+
+2026-10-16 修订：[ADR 0082](0082-restore-archived-sessions-from-exact-native-results.md)
+允许归档恢复选择已经恢复的目标；目标已是 current 时保留现有边界及 revision，真正
+切换时仍按下文 exact control/card marker 重置。
 
 2026-10-15 修订：Admin Lazy 创建入口已移除，见
 [ADR 0031 修订](0031-add-in-process-admin-web-control-plane.md)。下文 V1 Admin create
