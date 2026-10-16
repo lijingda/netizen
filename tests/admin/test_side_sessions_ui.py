@@ -27,7 +27,7 @@ class SideSessionsUiTest(unittest.TestCase):
         script = "const htmlTree = " + json.dumps(tree.root) + ";\n" + dom + before
         script += (static / "chat-picker.js").read_text(encoding="utf-8")
         script += (static / "admin.js").read_text(encoding="utf-8") + after
-        for search in ("", "?binding_id=binding-parent", "?binding_id=binding-parent&inventoryState=all"):
+        for search in ("", "?binding_id=binding-parent", "?binding_id=binding-parent&inventoryState=archived"):
             with self.subTest(search=search):
                 result = subprocess.run(
                     [node], input="const initialSearch = " + json.dumps(search) + ";\n" + script,

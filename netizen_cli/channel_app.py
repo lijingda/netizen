@@ -308,6 +308,7 @@ from .turn_files import (
     turn_patch_summary,
 )
 from .schedules.models import Claim, ScheduleConflict, ScheduleError, ScheduleNotFound
+from .sessions.delegation import delegated_prompt
 from .sessions.errors import SessionToolError
 
 
@@ -789,12 +790,8 @@ class ChannelApplication:
     @staticmethod
     def _session_message(source: ThreadBinding, prompt: str, *, tool_name: str) -> ExternalMessage:
         return ExternalMessage(
-            namespace="netizen_sessions", tool_name=tool_name,
-            content=json.dumps({
-                "sourceThreadId": source.native_thread_id,
-                "sourceBindingId": source.id,
-                "message": prompt,
-            }, ensure_ascii=False),
+            namespace="codex_tui", tool_name=tool_name,
+            content=delegated_prompt(source.native_thread_id, prompt),
         )
 
     def _session_receipt(self, binding: ThreadBinding, scope: FeishuScope, submission: Submission) -> dict[str, Any]:

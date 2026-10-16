@@ -16,6 +16,7 @@ import socket
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, TypeVar
@@ -74,10 +75,11 @@ from .queries import (
     _page_size,
     _require_query_keys,
     _scope_kinds_query,
-    _session_inventory_states,
+    _session_inventory_state,
     _session_page_size,
     _session_order_query,
     _text_set_query,
+    _updated_range_query,
 )
 from .transport import AdminHttpState, AdminHttpTransport, Request, Response
 from .port_config import AdminPortConfigurationError, ConfigFileSnapshot, persist_admin_port
@@ -1119,6 +1121,8 @@ class AdminWebApplication:
             "current",
             "createdFrom",
             "createdBefore",
+            "updatedFrom",
+            "updatedBefore",
             "sortBy",
             "sortDirection",
         }
@@ -1126,6 +1130,7 @@ class AdminWebApplication:
         page_size = _session_page_size(context.query)
         sort_by, sort_direction = _session_order_query(context.query)
         created_from, created_before = _created_range_query(context.query)
+        updated_from, updated_before = _updated_range_query(context.query)
         local = BindingQuery(
             project_aliases=_text_set_query(context.query, "project"),
             scope_kinds=_scope_kinds_query(context.query),
@@ -1133,32 +1138,37 @@ class AdminWebApplication:
             topic_id=_optional_text_query(context.query, "topicId"),
             identity=_optional_text_query(context.query, "identity"),
             current=_current_query(context.query),
-            created_from=created_from,
-            created_before=created_before,
         )
-        inventory_states = _session_inventory_states(context.query)
+        inventory_state = _session_inventory_state(context.query)
         filter_values = {
             "pageSize": page_size,
             "sortBy": sort_by,
             "sortDirection": sort_direction,
             "local": _jsonable(local),
-            "inventoryState": (
-                tuple(state.value for state in inventory_states)
-                if inventory_states is not None
-                else "all"
-            ),
+            "inventoryState": inventory_state.value,
+            "createdFrom": created_from,
+            "createdBefore": created_before,
+            "updatedFrom": updated_from,
+            "updatedBefore": updated_before,
         }
         fingerprint = _fingerprint("sessions", filter_values)
-        cursor = _decode_session_cursor(_optional_one(context.query, "cursor"), fingerprint, sort_by=sort_by)
+        cursor = _decode_session_cursor(
+            _optional_one(context.query, "cursor"), fingerprint,
+            inventory_state=inventory_state,
+        )
         deadline = (
             asyncio.get_running_loop().time() + _SESSION_QUERY_DEADLINE_SECONDS
         )
         page = await self._management.query_sessions(
             query=SessionQuery(
                 local=local,
-                inventory_states=inventory_states,
+                inventory_state=inventory_state,
                 sort_by=sort_by,
                 sort_direction=sort_direction,
+                created_from=datetime.fromisoformat(created_from).timestamp() if created_from else None,
+                created_before=datetime.fromisoformat(created_before).timestamp() if created_before else None,
+                updated_from=datetime.fromisoformat(updated_from).timestamp() if updated_from else None,
+                updated_before=datetime.fromisoformat(updated_before).timestamp() if updated_before else None,
             ),
             cursor=cursor,
             limit=page_size,
@@ -1192,7 +1202,6 @@ class AdminWebApplication:
                 "items": items,
                 "nextCursor": _encode_session_cursor(page.next_cursor, fingerprint),
                 "pageSize": page_size,
-                "catalogAvailable": page.catalog_available,
             },
         )
 
@@ -1318,7 +1327,8 @@ class AdminWebApplication:
             "nativePreview": metadata.preview if metadata is not None else None,
             "updatedAt": metadata.updated_at if metadata is not None else None,
             "creator": binding.creator_id,
-            "createdAt": binding.created_at,
+            "createdAt": metadata.created_at if metadata is not None else None,
+            "registeredAt": binding.created_at,
             "activatedAt": binding.activated_at,
             "sessionSettings": SessionSettings.from_binding(binding).to_dict(),
             "runtime": _runtime_binding_json(status),
@@ -3028,6 +3038,8 @@ def _map_error(error: BaseException) -> AdminWebError | None:
         return AdminWebError(504, "query_timeout", "查询超时，请缩小筛选范围。")
     if isinstance(error, ThreadCatalogDeadlineExceeded):
         return AdminWebError(504, "query_timeout", "原生会话查询超时。")
+    if isinstance(error, ThreadCatalogError):
+        return AdminWebError(503, "catalog_unavailable", "原生会话目录读取失败，请稍后刷新。")
     if isinstance(error, TimeoutError):
         return AdminWebError(504, "deadline_exceeded", "操作等待超时，请刷新对账。")
     if isinstance(
@@ -3041,7 +3053,6 @@ def _map_error(error: BaseException) -> AdminWebError | None:
             BlockingIODrainTimeout,
             BlockingIOShutdownTimeout,
             RuntimeClosed,
-            ThreadCatalogError,
             ThreadLifecycleStateUnknown,
             ThreadReleaseStateUnknown,
         ),

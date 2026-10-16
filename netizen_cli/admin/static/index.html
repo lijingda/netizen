@@ -82,10 +82,15 @@
         <div id="session-chat-picker"></div>
         <input id="session-chat-filter" name="chatId" type="hidden">
         <fieldset class="multi-filter" data-session-multi="scopeKind"><legend>Scope</legend></fieldset>
-        <fieldset class="multi-filter" data-session-multi="inventoryState"><legend>会话状态</legend></fieldset>
+        <label>会话状态
+          <select id="session-inventory-state" name="inventoryState"><option value="active" selected>未归档</option><option value="archived">已归档</option><option value="lazy">Lazy（尚未开始）</option></select>
+        </label>
         <fieldset class="multi-filter" data-session-multi="current"><legend>当前指针</legend></fieldset>
         <fieldset class="time-range-filter" data-time-range data-time-range-id="session-created">
           <legend>创建时间</legend>
+        </fieldset>
+        <fieldset class="time-range-filter" data-time-range data-time-range-id="session-updated" data-time-range-field="updated" data-time-range-default="last-3-months">
+          <legend>更新时间</legend>
         </fieldset>
         <label>每页
           <select id="session-page-size" name="pageSize"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select>
@@ -93,7 +98,8 @@
         <button type="submit">筛选</button>
         <button type="button" id="session-filter-reset" class="refresh">重置</button>
       </form>
-      <p id="sessions-catalog-notice" class="hint" role="status" hidden>原生目录暂时无法确认部分会话的状态，请稍后刷新。</p>
+      <p id="sessions-lazy-notice" class="hint" hidden>Lazy 会话尚未在 Codex 创建，按 Netizen 登记时间排序；创建时间和更新时间筛选不适用。</p>
+      <p id="sessions-identity-notice" class="hint" hidden>按指定会话 ID 筛选；未找到时可切换会话状态。</p>
       <div id="session-schedule-selection" class="selection-notice" hidden>
         <p>请选择执行此定时任务的会话。已填写的内容暂存在当前页面，刷新页面将丢失。</p>
         <button id="session-schedule-cancel" class="refresh" type="button">取消选择</button>
@@ -103,7 +109,7 @@
       </div>
       <div class="table-wrap"><table><thead><tr>
         <th>飞书位置</th><th>类型</th><th>Session</th><th>会话状态</th><th>运行态</th><th>Project</th><th>配置</th>
-        <th aria-sort="none"><button type="button" class="session-sort" data-session-sort="session" data-sort-by="createdAt" aria-label="按创建时间由近及远排序" title="会话创建时间，与创建时间筛选口径一致；按浏览器本地时区显示">创建时间<span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+        <th aria-sort="none"><button type="button" class="session-sort" data-session-sort="session" data-sort-by="createdAt" aria-label="按创建时间由近及远排序" title="Codex 原生会话创建时间，与创建时间筛选口径一致；按浏览器本地时区显示"><span class="sort-label">创建时间</span><span class="sort-indicator" aria-hidden="true">↕</span></button></th>
         <th aria-sort="descending"><button type="button" class="session-sort" data-session-sort="session" data-sort-by="updatedAt" aria-label="按最近更新由远及近排序（当前由近及远）" title="Codex 原生会话最近更新时间；按浏览器本地时区显示">最近更新<span class="sort-indicator" aria-hidden="true">↓</span></button></th><th>操作</th>
       </tr></thead><tbody id="sessions-body"></tbody></table></div>
       <nav class="pagination" aria-label="Sessions 分页">
@@ -489,6 +495,7 @@
           <button type="button" data-time-range-preset="last-24-hours">最近 24 小时</button>
           <button type="button" data-time-range-preset="last-7-days">最近 7 天</button>
           <button type="button" data-time-range-preset="last-30-days">最近 30 天</button>
+          <button type="button" data-time-range-preset="last-3-months">最近 3 个月</button>
         </div>
       </div>
       <div class="time-range-custom">

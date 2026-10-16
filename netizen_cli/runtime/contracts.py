@@ -489,6 +489,13 @@ class NativeThreadMetadata:
     name: str | None
     preview: str
     updated_at: int | None = None  # Native Unix timestamp in seconds; never persisted here.
+    created_at: int | None = None  # Native creation time; independent of Binding registration.
+
+
+@dataclass(frozen=True, slots=True)
+class NativeThreadCatalogPage:
+    threads: tuple[NativeThreadMetadata, ...]
+    next_cursor: str | None
 
 
 class NativeThreadCatalogState(str, Enum):

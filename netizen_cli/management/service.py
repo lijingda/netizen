@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import heapq
 import logging
+import math
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -52,8 +52,10 @@ from ..runtime.contracts import (
     ActiveTurnSnapshot,
     BindingRuntimeSnapshot,
     NativeThreadCatalog,
+    NativeThreadCatalogPage,
     NativeThreadCatalogState,
     NativeThreadMetadata,
+    ThreadCatalogError,
     ReleaseDisposition,
     SideLifecycleOutcome,
     SideCloseFailed,
@@ -95,6 +97,7 @@ from ..model_settings import ModelCatalog
 _BINDING_STATUS_RESOLUTION_CONCURRENCY = 8
 _NATIVE_INDEX_READ_SECONDS = 3.0
 _SESSION_SUMMARY_READ_CONCURRENCY = 4
+_SESSION_NATIVE_PAGE_SIZE = 100
 _PROJECT_DELETE_SECONDS = 120.0
 _PROJECT_DELETE_STEP_SECONDS = 30.0
 logger = logging.getLogger(__name__)
@@ -290,22 +293,27 @@ class SessionInventoryState(str, Enum):
 @dataclass(frozen=True, slots=True)
 class SessionQuery:
     local: BindingQuery = BindingQuery()
-    inventory_states: tuple[SessionInventoryState, ...] | None = None
-    sort_by: Literal["created_at", "updated_at"] = "created_at"
+    inventory_state: SessionInventoryState = SessionInventoryState.ACTIVE
+    sort_by: Literal["created_at", "updated_at"] = "updated_at"
     sort_direction: Literal["asc", "desc"] = "desc"
+    # Native Unix seconds, independent of the Binding's registration time.
+    created_from: float | None = None
+    created_before: float | None = None
+    updated_from: float | None = None
+    updated_before: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class SessionUpdatedCursor:
-    updated_at: int | None
-    binding_id: str
+class SessionNativeCursor:
+    cursor: str | None
+    offset: int = 0
 
     def __post_init__(self) -> None:
-        if not self.binding_id or (
-            self.updated_at is not None
-            and (type(self.updated_at) is not int or self.updated_at < 0)
+        if (
+            self.cursor is not None and (not isinstance(self.cursor, str) or not self.cursor)
+            or type(self.offset) is not int or not 0 <= self.offset < _SESSION_NATIVE_PAGE_SIZE
         ):
-            raise ValueError("Session update cursor is invalid")
+            raise ValueError("Session native cursor is invalid")
 
 
 def _session_inventory_state(
@@ -318,9 +326,10 @@ def _session_inventory_state(
     return SessionInventoryState(native.state.value)
 
 
-def _native_updated_at(native: NativeThreadView | None) -> int | None:
-    value = native.metadata.updated_at if native is not None and native.metadata is not None else None
-    return value if type(value) is int and value >= 0 else None
+def _native_time_matches(value: int | None, lower: float | None, upper: float | None) -> bool:
+    if lower is None and upper is None:
+        return True
+    return value is not None and (lower is None or value >= lower) and (upper is None or value < upper)
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,8 +346,7 @@ class SessionInventoryItem:
 @dataclass(frozen=True, slots=True)
 class SessionInventoryPage:
     items: tuple[SessionInventoryItem, ...]
-    next_cursor: BindingCursor | SessionUpdatedCursor | None
-    catalog_available: bool = True
+    next_cursor: BindingCursor | SessionNativeCursor | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -761,6 +769,21 @@ class ManagementRuntimePort:
             deadline=deadline,
             use_state_db_only=use_state_db_only,
             **ordering,
+        )
+
+    async def thread_catalog_page_exact(
+        self,
+        *,
+        archived: bool,
+        cursor: str | None = None,
+        limit: int = 20,
+        sort_key: Literal["created_at", "updated_at"] = "updated_at",
+        sort_direction: Literal["asc", "desc"] = "desc",
+        deadline: float,
+    ) -> NativeThreadCatalogPage:
+        return await self.__runtime.thread_catalog_page(
+            archived=archived, cursor=cursor, limit=limit,
+            sort_key=sort_key, sort_direction=sort_direction, deadline=deadline,
         )
 
 
@@ -1192,203 +1215,111 @@ class InstanceManagementService:
         self,
         *,
         query: SessionQuery = SessionQuery(),
-        cursor: BindingCursor | SessionUpdatedCursor | None = None,
+        cursor: BindingCursor | SessionNativeCursor | None = None,
         limit: int = 20,
         deadline: float,
     ) -> SessionInventoryPage:
-        if (
-            isinstance(limit, bool)
-            or not isinstance(limit, int)
-            or not 1 <= limit <= 100
-        ):
+        if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("page size must be between 1 and 100")
-        if query.inventory_states is not None and (
-            not isinstance(query.inventory_states, tuple)
-            or not query.inventory_states
-            or any(
-                not isinstance(state, SessionInventoryState)
-                for state in query.inventory_states
-            )
-        ):
-            raise ValueError("Session inventory states filter is invalid")
+        if not isinstance(query.inventory_state, SessionInventoryState) or query.inventory_state not in {
+            SessionInventoryState.ACTIVE, SessionInventoryState.ARCHIVED, SessionInventoryState.LAZY,
+        }:
+            raise ValueError("Session inventory state filter is invalid")
         if query.sort_by not in {"created_at", "updated_at"} or query.sort_direction not in {"asc", "desc"}:
             raise ValueError("Session ordering is invalid")
-        states = (
-            frozenset(query.inventory_states)
-            if query.inventory_states is not None
-            else frozenset(SessionInventoryState)
-        )
-        if query.sort_by == "updated_at":
-            if cursor is not None and not isinstance(cursor, SessionUpdatedCursor):
-                raise ValueError("Session cursor does not match its ordering")
-            return await self._query_sessions_by_update(
-                query=query, states=states, cursor=cursor, limit=limit, deadline=deadline,
-            )
-        if cursor is not None and not isinstance(cursor, BindingCursor):
-            raise ValueError("Session cursor does not match its ordering")
-        query = replace(query, local=replace(query.local, sort_direction=query.sort_direction))
-        if states == frozenset(SessionInventoryState):
-            page = await self._bindings.query_bindings(
-                query=query.local,
-                cursor=cursor,
-                limit=limit,
-                deadline_seconds=self._query_seconds(deadline),
-            )
-            thread_ids = tuple(dict.fromkeys(
-                record.binding.native_thread_id for record in page.items
-                if record.binding.native_thread_id is not None
-            ))
-            native = await self._indexed_native_views(
-                thread_ids=thread_ids, deadline=deadline,
-            )
-            return await self._session_page(
-                page.items,
-                native=native,
-                next_cursor=page.next_cursor,
-                deadline=deadline,
-            )
+        for lower, upper in (
+            (query.created_from, query.created_before),
+            (query.updated_from, query.updated_before),
+        ):
+            if any(value is not None and (type(value) not in (int, float) or not math.isfinite(value)) for value in (lower, upper)):
+                raise ValueError("Session time range is invalid")
+            if lower is not None and upper is not None and lower >= upper:
+                raise ValueError("Session time range is invalid")
 
-        if states == {SessionInventoryState.LAZY}:
-            page = await self._bindings.query_bindings(
-                query=replace(query.local, materialized=False),
-                cursor=cursor,
-                limit=limit,
-                deadline_seconds=self._query_seconds(deadline),
-            )
-            return await self._session_page(
-                page.items,
-                native={},
-                next_cursor=page.next_cursor,
-                deadline=deadline,
-            )
-
+        # Native timestamps belong to Codex, not the local Binding index. Lazy
+        # has no native times and uses its separate registration-time order.
         local = replace(
-            query.local,
-            materialized=None if SessionInventoryState.LAZY in states else True,
+            query.local, created_from=None, created_before=None,
+            sort_direction=query.sort_direction,
+            materialized=query.inventory_state is not SessionInventoryState.LAZY,
         )
-        native = await self._indexed_native_views(deadline=deadline)
-        selected: list[BindingInventoryRecord] = []
-        scan_cursor = cursor
-        next_cursor: BindingCursor | None = None
-        exhausted = False
-        while len(selected) <= limit and not exhausted:
+        if query.inventory_state is SessionInventoryState.LAZY:
+            if cursor is not None and not isinstance(cursor, BindingCursor):
+                raise ValueError("Session cursor does not match its inventory state")
             page = await self._bindings.query_bindings(
-                query=local,
-                cursor=scan_cursor,
-                limit=50,
+                query=local, cursor=cursor, limit=limit,
                 deadline_seconds=self._query_seconds(deadline),
             )
-            if not page.items:
-                break
-            for record in page.items:
-                binding = record.binding
-                scan_cursor = BindingCursor(binding.created_at, binding.id)
-                view = (native or {}).get(binding.native_thread_id)
-                state = _session_inventory_state(binding, view)
-                if state not in states:
-                    continue
-                selected.append(record)
-                if len(selected) > limit:
-                    # Only a matching lookahead proves another result page.
-                    # Anchor at the last displayed row, not the lookahead.
-                    last = selected[limit - 1].binding
-                    next_cursor = BindingCursor(last.created_at, last.id)
-                    break
-            else:
-                if page.next_cursor is None:
-                    exhausted = True
-                else:
-                    scan_cursor = page.next_cursor
-                continue
-            break
-
-        return await self._session_page(
-            tuple(selected[:limit]),
-            native=native,
-            next_cursor=next_cursor,
-            deadline=deadline,
-        )
-
-    async def _query_sessions_by_update(
-        self,
-        *,
-        query: SessionQuery,
-        states: frozenset[SessionInventoryState],
-        cursor: SessionUpdatedCursor | None,
-        limit: int,
-        deadline: float,
-    ) -> SessionInventoryPage:
-        # Filter Channel identities in one bounded read, not one SDK call per
-        # Binding or repeated 100-row SQL pages. Never persist native metadata.
-        local = query.local
-        if states == {SessionInventoryState.LAZY}:
-            local = replace(local, materialized=False)
-        elif SessionInventoryState.LAZY not in states:
-            local = replace(local, materialized=True)
-        records = await self._bindings.query_binding_candidates(
-            query=local, deadline_seconds=self._query_seconds(deadline, maximum=2.0),
-        )
-        native = (
-            await self._indexed_native_views(
-                deadline=deadline, parallel=True,
+            return await self._session_page(
+                page.items, native={}, next_cursor=page.next_cursor, deadline=deadline,
             )
-            if any(record.binding.native_thread_id is not None for record in records)
-            else {}
-        )
-        records = tuple(
-            record for record in records
-            if _session_inventory_state(
-                record.binding, (native or {}).get(record.binding.native_thread_id),
-            ) in states
-        )
-        # The native catalog can omit readable Threads with an empty preview.
-        # Recover their summaries before selecting a page, so its timestamps,
-        # ordering and cursor all use the same metadata. Keep time for rendering.
-        views = await self._session_native_views(
-            tuple(record.binding for record in records), native=native,
-            deadline=self._enrichment_deadline(deadline, _NATIVE_INDEX_READ_SECONDS),
-        )
-        descending = query.sort_direction == "desc"
 
-        def candidates():
-            for record in records:
-                binding = record.binding
-                updated = _native_updated_at(views.get(binding.native_thread_id))
-                if cursor is not None:
-                    if cursor.updated_at is None:
-                        if updated is not None:
-                            continue
-                        after = binding.id < cursor.binding_id if descending else binding.id > cursor.binding_id
-                    elif updated is None:
-                        after = True  # Missing native timestamps are last in either direction.
-                    else:
-                        key, anchor = (updated, binding.id), (cursor.updated_at, cursor.binding_id)
-                        after = key < anchor if descending else key > anchor
-                    if not after:
-                        continue
-                yield record, updated
-
-        # Select just the requested page plus lookahead in O(n log page_size),
-        # without sorting/copying every full record. Both catalogs must be
-        # complete to classify missing/conflicting identities honestly; do not
-        # stop at the first native page and silently omit matching Bindings.
-        select = heapq.nlargest if descending else heapq.nsmallest
-        selected = select(
-            limit + 1, candidates(),
-            key=lambda item: (
-                item[1] is not None if descending else item[1] is None,
-                item[1] if item[1] is not None else 0,
-                item[0].binding.id,
-            ),
+        if cursor is not None and not isinstance(cursor, SessionNativeCursor):
+            raise ValueError("Session cursor does not match its inventory state")
+        scan_cursor = cursor.cursor if cursor is not None else None
+        offset = cursor.offset if cursor is not None else 0
+        seen_cursors = {scan_cursor} if scan_cursor is not None else set()
+        selected: list[BindingInventoryRecord] = []
+        views: dict[str, NativeThreadView] = {}
+        next_cursor: SessionNativeCursor | None = None
+        native_state = NativeThreadCatalogState(query.inventory_state.value)
+        lower, upper = (
+            (query.created_from, query.created_before) if query.sort_by == "created_at"
+            else (query.updated_from, query.updated_before)
         )
-        next_cursor = None
-        if len(selected) > limit:
-            record, updated = selected[limit - 1]
-            next_cursor = SessionUpdatedCursor(updated, record.binding.id)
-        self._query_seconds(deadline)
+        while len(selected) < limit:
+            self._query_seconds(deadline)
+            page = await self._runtime.thread_catalog_page_exact(
+                archived=query.inventory_state is SessionInventoryState.ARCHIVED,
+                cursor=scan_cursor, limit=_SESSION_NATIVE_PAGE_SIZE, sort_key=query.sort_by,
+                sort_direction=query.sort_direction, deadline=deadline,
+            )
+            if len(page.threads) > _SESSION_NATIVE_PAGE_SIZE or (page.next_cursor is not None and page.next_cursor in seen_cursors):
+                raise ThreadCatalogError("native Thread catalog returned an invalid page")
+            eligible: list[tuple[int, NativeThreadMetadata]] = []
+            range_exhausted = False
+            for index, metadata in enumerate(page.threads[offset:], start=offset):
+                # Only the range on the native sort axis can prove exhaustion.
+                # Creation order plus a recent-update filter may scan to EOF.
+                ordered_time = getattr(metadata, query.sort_by)
+                if ordered_time is not None and (
+                    query.sort_direction == "desc" and lower is not None and ordered_time < lower
+                    or query.sort_direction == "asc" and upper is not None and ordered_time >= upper
+                ):
+                    range_exhausted = True
+                    break
+                if (
+                    _native_time_matches(metadata.created_at, query.created_from, query.created_before)
+                    and _native_time_matches(metadata.updated_at, query.updated_from, query.updated_before)
+                    and metadata.thread_id not in views
+                ):
+                    eligible.append((index, metadata))
+            records = await self._bindings.query_bindings_by_native_thread_ids(
+                thread_ids=tuple(metadata.thread_id for _, metadata in eligible),
+                query=local, deadline_seconds=self._query_seconds(deadline),
+            ) if eligible else ()
+            by_id = {record.binding.native_thread_id: record for record in records}
+            for index, metadata in eligible:
+                record = by_id.get(metadata.thread_id)
+                if record is not None and metadata.thread_id not in views:
+                    selected.append(record)
+                    views[metadata.thread_id] = NativeThreadView(native_state, metadata)
+                    if len(selected) == limit:
+                        # Carry a position in this source page, not its end
+                        # cursor: the tail has not yet been displayed. Re-reading
+                        # at most one bounded page avoids a persistent buffer.
+                        if index + 1 < len(page.threads):
+                            next_cursor = SessionNativeCursor(scan_cursor, index + 1)
+                        elif page.next_cursor is not None:
+                            next_cursor = SessionNativeCursor(page.next_cursor)
+                        break
+            if len(selected) == limit or range_exhausted or page.next_cursor is None:
+                break
+            scan_cursor = page.next_cursor
+            seen_cursors.add(scan_cursor)
+            offset = 0
         return await self._session_page(
-            tuple(record for record, _updated in selected[:limit]), native=native,
-            next_cursor=next_cursor, deadline=deadline, views=views,
+            selected, native=views, next_cursor=next_cursor, deadline=deadline,
         )
 
     async def query_scope_sessions(
@@ -2149,7 +2080,6 @@ class InstanceManagementService:
         *,
         deadline: float,
         thread_ids: tuple[str, ...] | None = None,
-        parallel: bool = False,
     ) -> dict[str, NativeThreadView] | None:
         if thread_ids == ():
             return {}
@@ -2158,14 +2088,9 @@ class InstanceManagementService:
             async with asyncio.timeout_at(native_deadline):
                 async def read_catalog(archived: bool):
                     if thread_ids is None:
-                        ordering = {} if not parallel else {
-                            # Updates can move a Thread between native pages.
-                            # Use stable traversal for the complete metadata join.
-                            "sort_key": "created_at", "sort_direction": "desc",
-                        }
                         catalog = await self._runtime.thread_catalog_exact(
                             archived=archived, deadline=native_deadline,
-                            use_state_db_only=True, **ordering,
+                            use_state_db_only=True,
                         )
                         return catalog.by_id()
                     else:
@@ -2173,15 +2098,7 @@ class InstanceManagementService:
                             thread_ids, archived=archived, deadline=native_deadline,
                             use_state_db_only=True,
                         )
-                if not parallel:
-                    active, archived = await read_catalog(False), await read_catalog(True)
-                else:
-                    # Only the new sorted inventory path overlaps the two
-                    # independent read-only catalogs; other consumers are unchanged.
-                    async with asyncio.TaskGroup() as group:
-                        active_task = group.create_task(read_catalog(False))
-                        archived_task = group.create_task(read_catalog(True))
-                    active, archived = active_task.result(), archived_task.result()
+                active, archived = await read_catalog(False), await read_catalog(True)
             if len(active.keys() | archived.keys()) > 100_000:
                 raise ValueError("management index exceeds the catalog limit")
         except Exception as error:
@@ -2202,15 +2119,10 @@ class InstanceManagementService:
         self,
         records: Sequence[BindingInventoryRecord],
         *,
-        native: dict[str, NativeThreadView] | None,
-        next_cursor: BindingCursor | SessionUpdatedCursor | None,
+        native: dict[str, NativeThreadView],
+        next_cursor: BindingCursor | SessionNativeCursor | None,
         deadline: float,
-        views: dict[str, NativeThreadView] | None = None,
     ) -> SessionInventoryPage:
-        if views is None:
-            views = await self._session_native_views(
-                tuple(record.binding for record in records), native=native, deadline=deadline,
-            )
         labels = await self.resolve_chat_labels(
             (record.scope.chat_id for record in records), deadline=deadline,
         )
@@ -2218,13 +2130,12 @@ class InstanceManagementService:
             items=tuple(
                 SessionInventoryItem(
                     record=record,
-                    native=views.get(record.binding.native_thread_id),
+                    native=native.get(record.binding.native_thread_id),
                     chat=labels[record.scope.chat_id],
                 )
                 for record in records
             ),
             next_cursor=next_cursor,
-            catalog_available=native is not None,
         )
 
     async def _session_native_views(
@@ -2240,8 +2151,8 @@ class InstanceManagementService:
             )
             for binding in bindings if binding.native_thread_id is not None
         }
-        # Read missing summaries for this page, or for candidates before time
-        # ordering. An exact read cannot establish archive/existence state.
+        # Enrich known IDs for Scope cards, status and Side source displays.
+        # An exact read alone cannot establish archive state.
         # The caller's deadline covers both queuing and the actual reads.
 
         async def hydrate(thread_id: str) -> None:

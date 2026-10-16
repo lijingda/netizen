@@ -1,7 +1,7 @@
 const sessionMultiFilters = new Map();
 const state = { tab: "sessions", sessions: null, sessionPage: {
   cursor: "page-two", nextCursor: "page-three", previousCursors: [null], number: 2,
-  query: "project=netizen&scopeKind=group&inventoryState=active&inventoryState=lazy&pageSize=20",
+  query: "project=netizen&scopeKind=group&inventoryState=active&pageSize=20",
 } };
 Object.defineProperty(document.querySelector("#sessions-body"), "rows", {
   get() { return this.querySelectorAll("tr"); },
@@ -93,7 +93,7 @@ async function api(path, options = {}) {
   generation += 1;
   return { items: serverSessions.map((session) => ({
     ...structuredClone(session), actions: { configure: grant(session.bindingId) },
-  })), nextCursor: "page-three", catalogAvailable: true };
+  })), nextCursor: "page-three" };
 }
 async function loadSessionProjectOptions() {}
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -124,7 +124,7 @@ function assertPageRetained(page) {
   assert.deepEqual(state.sessionPage, page);
   const query = new URL(gets.filter((path) => path.startsWith("/api/v1/sessions?")).at(-1), "http://admin").searchParams;
   assert.equal(query.get("cursor"), page.cursor);
-  assert.deepEqual(query.getAll("inventoryState"), ["active", "lazy"]);
+  assert.deepEqual(query.getAll("inventoryState"), ["active"]);
   assert.equal(query.get("project"), "netizen");
 }
 const cases = {

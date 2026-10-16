@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from openai_codex import (
     AsyncThread,
+    CodexError,
     ExternalMessage,
     ImageInput,
     InternalRpcError,
@@ -127,6 +128,7 @@ from .runtime.contracts import (
     NativeThreadMetadata,
     NativeThreadCatalogState,
     NativeThreadCatalog,
+    NativeThreadCatalogPage,
     ContextWindowUsage,
     ActiveGoalSnapshot,
     ThreadLifecycleSnapshot,
@@ -2014,6 +2016,7 @@ class CodexRuntime:
             raise ThreadCatalogError("thread/read returned an invalid Thread summary")
         return NativeThreadMetadata(
             thread_id, name, preview, updated_at=_thread_updated_at(thread),
+            created_at=_thread_created_at(thread),
         )
 
     async def thread_metadata(
@@ -2103,6 +2106,7 @@ class CodexRuntime:
                             name=name,
                             preview=preview,
                             updated_at=_thread_updated_at(thread),
+                            created_at=_thread_created_at(thread),
                         )
                         remaining.remove(thread_id)
 
@@ -2127,6 +2131,82 @@ class CodexRuntime:
             ) from error
 
         return found
+
+    async def thread_catalog_page(
+        self,
+        *,
+        archived: bool,
+        cursor: str | None = None,
+        limit: int = 20,
+        sort_key: Literal["created_at", "updated_at"] = "updated_at",
+        sort_direction: Literal["asc", "desc"] = "desc",
+        deadline: float | None = None,
+    ) -> NativeThreadCatalogPage:
+        """Read one native database page without expanding the whole catalog."""
+
+        if not isinstance(archived, bool):
+            raise ValueError("archived must be boolean")
+        if cursor is not None and (not isinstance(cursor, str) or not cursor):
+            raise ValueError("native catalog cursor must be a non-empty string")
+        if type(limit) is not int or not 1 <= limit <= _THREAD_LIST_PAGE_LIMIT:
+            raise ValueError("native catalog page size must be between 1 and 100")
+        if sort_key not in ("created_at", "updated_at"):
+            raise ValueError("sort_key must be created_at or updated_at")
+        if sort_direction not in ("asc", "desc"):
+            raise ValueError("sort_direction must be asc or desc")
+        if deadline is not None and deadline <= asyncio.get_running_loop().time():
+            raise ThreadCatalogDeadlineExceeded("native Thread catalog deadline elapsed")
+        try:
+            async with asyncio.timeout_at(deadline):
+                response = await self._codex.thread_list(
+                    archived=archived,
+                    cursor=cursor,
+                    limit=limit,
+                    model_providers=[],
+                    use_state_db_only=True,
+                    sort_key=sort_key,
+                    sort_direction=sort_direction,
+                )
+        except TimeoutError as error:
+            raise ThreadCatalogDeadlineExceeded(
+                "native Thread catalog deadline elapsed"
+            ) from error
+        except (CodexError, OSError) as error:
+            # SDK protocol failures and closed/broken transport are failures of
+            # this read-only directory query, not unknown operation outcomes.
+            raise ThreadCatalogError("native Thread catalog read failed") from error
+
+        data = getattr(response, "data", None)
+        if not isinstance(data, list) or len(data) > limit:
+            raise ThreadCatalogError("thread_list returned an invalid data page")
+        seen_ids: set[str] = set()
+        threads: list[NativeThreadMetadata] = []
+        for thread in data:
+            thread_id = getattr(thread, "id", None)
+            name = getattr(thread, "name", None)
+            preview = getattr(thread, "preview", None)
+            if not isinstance(thread_id, str) or not thread_id:
+                raise ThreadCatalogError("thread_list returned an invalid Thread ID")
+            if thread_id in seen_ids:
+                raise ThreadCatalogError("thread_list repeated a native Thread ID")
+            if name is not None and not isinstance(name, str):
+                raise ThreadCatalogError("thread_list returned an invalid Thread name")
+            if not isinstance(preview, str):
+                raise ThreadCatalogError("thread_list returned an invalid Thread preview")
+            seen_ids.add(thread_id)
+            threads.append(NativeThreadMetadata(
+                thread_id=thread_id,
+                name=name,
+                preview=preview,
+                updated_at=_thread_updated_at(thread),
+                created_at=_thread_created_at(thread),
+            ))
+        next_cursor = getattr(response, "next_cursor", None)
+        if next_cursor is not None and (
+            not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor
+        ):
+            raise ThreadCatalogError("thread_list returned an invalid pagination cursor")
+        return NativeThreadCatalogPage(tuple(threads), next_cursor)
 
     async def thread_catalog(
         self,
@@ -2217,6 +2297,7 @@ class CodexRuntime:
                                 name=name,
                                 preview=preview,
                                 updated_at=_thread_updated_at(thread),
+                                created_at=_thread_created_at(thread),
                             )
                         )
 
@@ -7701,6 +7782,13 @@ def _thread_status_type(native_thread: object) -> str | None:
 
 def _thread_updated_at(native_thread: object) -> int | None:
     value = getattr(native_thread, "updated_at", None)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _thread_created_at(native_thread: object) -> int | None:
+    value = getattr(native_thread, "created_at", None)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value

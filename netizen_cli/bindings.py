@@ -2200,6 +2200,33 @@ class BindingStore:
             next_cursor = BindingCursor(last["created_at"], last["binding_id"])
         return BindingPage(items=items, next_cursor=next_cursor)
 
+    async def query_bindings_by_native_thread_ids(
+        self,
+        *,
+        thread_ids: tuple[str, ...],
+        query: BindingQuery = BindingQuery(),
+        deadline_seconds: float = 0.5,
+    ) -> tuple[BindingInventoryRecord, ...]:
+        """Join one native page to this instance's filtered Bindings off-loop."""
+
+        if not isinstance(thread_ids, tuple) or len(thread_ids) > 100:
+            raise ValueError("native Thread lookup requires at most 100 IDs")
+        if any(not isinstance(thread_id, str) or not thread_id for thread_id in thread_ids):
+            raise ValueError("native Thread IDs must be non-empty strings")
+        if not thread_ids:
+            return ()
+        unique_ids = tuple(dict.fromkeys(thread_ids))
+        # native_thread_id is unique, so this bound cannot truncate matching rows.
+        statement, parameters = _binding_inventory_statement(
+            query=query, cursor=None, limit=len(unique_ids), thread_ids=unique_ids,
+        )
+
+        def operation(connection: sqlite3.Connection) -> tuple[BindingInventoryRecord, ...]:
+            rows = connection.execute(statement, parameters).fetchall()
+            return tuple(_binding_inventory(row) for row in rows)
+
+        return await self._submit_query(operation, deadline_seconds=deadline_seconds)
+
     async def query_binding_candidates(
         self,
         *,
@@ -2941,6 +2968,7 @@ def _binding_inventory_statement(
     query: BindingQuery,
     cursor: BindingCursor | None,
     limit: int,
+    thread_ids: tuple[str, ...] | None = None,
 ) -> tuple[str, list[object]]:
     if query.sort_direction not in ("asc", "desc"):
         raise ValueError("Binding sort direction is invalid")
@@ -2948,6 +2976,9 @@ def _binding_inventory_statement(
     comparison = ">" if query.sort_direction == "asc" else "<"
     clauses: list[str] = []
     parameters: list[object] = []
+    if thread_ids is not None:
+        clauses.append("b.native_thread_id IN (" + ",".join("?" for _ in thread_ids) + ")")
+        parameters.extend(thread_ids)
     if query.app_id is not None:
         _require_query_value("App ID", query.app_id)
         clauses.append("s.app_id = ?")

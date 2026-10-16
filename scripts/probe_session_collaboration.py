@@ -354,12 +354,13 @@ class NamingObservedThread:
 
 async def runtime_naming_case(root: Path, *, supplied_title: bool) -> dict[str, Any]:
     """Native external-input naming plus the production default history view."""
-    from openai_codex import AsyncCodex, AsyncThread, CodexConfig, ExternalMessage
+    from openai_codex import AsyncCodex, AsyncThread, CodexConfig
 
     source_root = str(Path(__file__).resolve().parents[1])
     if source_root not in sys.path:
         sys.path.insert(0, source_root)
     from netizen_cli.bindings import BindingStore
+    from netizen_cli.channel_app import ChannelApplication
     from netizen_cli.codex_runtime import CodexRuntime
     from netizen_cli.domain import FeishuScope, ScopeKind
     from netizen_cli.sdk_gap_adapter import AppServerThreadSubscriptionControl
@@ -368,7 +369,7 @@ async def runtime_naming_case(root: Path, *, supplied_title: bool) -> dict[str, 
     from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup
 
     expected_title = "Provided collaboration title" if supplied_title else "Generated collaboration title"
-    task_text = "NATIVE-EXTERNAL-NAMING: inspect the migration risk."
+    task_text = "NATIVE-EXTERNAL-NAMING: inspect <migration> & preserve &lt;literal&gt;."
     replies = [final_reply("work", "EXTERNAL-TASK-COMPLETED")]
     if not supplied_title:
         replies.append(final_reply("name", json.dumps({"title": expected_title})))
@@ -395,9 +396,10 @@ async def runtime_naming_case(root: Path, *, supplied_title: bool) -> dict[str, 
             async with AsyncCodex(CodexConfig(cwd=str(cwd), env=env)) as codex:
                 source_thread = await codex.thread_start(cwd=str(cwd))
                 store.assign_native_thread_id(source_binding.id, source_thread.id)
-                envelope = json.dumps({"sourceThreadId": source_thread.id,
-                                       "sourceBindingId": source_binding.id, "message": task_text})
-                external = ExternalMessage(tool_name="create_thread", namespace="netizen_sessions", content=envelope)
+                external = ChannelApplication._session_message(
+                    store.get(source_binding.id), task_text, tool_name="create_thread",
+                )
+                envelope = external.content
                 recorder = NamingRecorder(codex, hold_title=supplied_title)
                 runtime = CodexRuntime(
                     codex=recorder, bindings=store,
@@ -442,6 +444,21 @@ async def runtime_naming_case(root: Path, *, supplied_title: bool) -> dict[str, 
                     assert target_binding.id not in namer._jobs, "naming resource ownership did not drain"
                     snapshot = native_json(await AsyncThread(codex, submitted.thread_id).read(include_turns=True))["thread"]
                     assert snapshot["name"] == expected_title, snapshot
+                    assert snapshot["preview"] == task_text, snapshot
+                    for sort_key in ("created_at", "updated_at"):
+                        for sort_direction in ("asc", "desc"):
+                            catalog = await runtime.thread_catalog_page(
+                                archived=False, limit=100, sort_key=sort_key,
+                                sort_direction=sort_direction,
+                                deadline=asyncio.get_running_loop().time() + 5,
+                            )
+                            listed = next((item for item in catalog.threads if item.thread_id == submitted.thread_id), None)
+                            assert listed is not None and listed.preview == task_text, catalog
+                            assert type(listed.created_at) is int and type(listed.updated_at) is int, listed
+                    archived = await runtime.thread_catalog_page(
+                        archived=True, limit=100, deadline=asyncio.get_running_loop().time() + 5,
+                    )
+                    assert not archived.threads and archived.next_cursor is None, archived
                     assert [turn["id"] for turn in snapshot["turns"]] == [submitted.turn_id], snapshot
                     items = snapshot["turns"][0]["items"]
                     assert not any(item["type"] == "userMessage" for item in items), items
@@ -466,6 +483,8 @@ async def runtime_naming_case(root: Path, *, supplied_title: bool) -> dict[str, 
                             "parent_history_contains_only_original_turn": True,
                             "naming_inherits_exact_external_tool_input": not supplied_title,
                             "default_read_delegation": delegation, "raw_output_hidden": True,
+                            "native_preview": snapshot["preview"], "native_state_db_listed": True,
+                            "production_catalog_page_time_sorts": True, "empty_archived_page": True,
                             "production_runtime_and_read_service": True, "feishu_delivery_tested": False}
                 finally:
                     work_gate.set()

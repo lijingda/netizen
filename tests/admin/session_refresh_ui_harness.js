@@ -28,6 +28,11 @@
     assert.equal(requests.filter((request) => request.path === endpoint).length >= 2, true);
     assert.notEqual(body.textContent, firstText);
     assert.notEqual(freshness.textContent, firstTimestamp);
+    if (kind === "session") {
+      const applied = requests.findLast((request) => request.path === endpoint).query;
+      assert(applied.get("updatedFrom"));
+      assert(!applied.has("updatedBefore"), "refresh must include updates made after the first page load");
+    }
     assert.equal(state[`${kind}RefreshedAt`], Date.now());
     assert(!requests.some((request) => request.path === "/api/v1/runtime-snapshots"));
 
@@ -59,13 +64,15 @@
     // not schedule retry requests. A later manual refresh recovers immediately.
     const visible = body.textContent;
     const timestamp = freshness.textContent;
-    const rejected = async () => { throw new Error("list read unavailable"); };
+    const readFailure = kind === "session" ? "原生会话目录读取失败，请稍后刷新。" : "list read unavailable";
+    const rejected = async () => { throw new Error(readFailure); };
     if (kind === "side") sideAnswer = rejected;
     else ordinaryAnswer = rejected;
     await advanceTime(1000);
     refreshButton.click(); await flush();
     assert.equal(body.textContent, visible);
     assert.equal(freshness.textContent, timestamp);
+    assert.equal(statusNode.textContent, readFailure + " 当前仍显示上次成功读取的结果。");
     const afterFailure = requests.length;
     await advanceTime(60000);
     assert.equal(requests.length, afterFailure);
@@ -73,6 +80,7 @@
     else ordinaryAnswer = answer;
     refreshButton.click(); await flush();
     assert.notEqual(freshness.textContent, timestamp);
+    assert.equal(statusNode.textContent, "已更新。");
   }
 
   // One-shot list reads still render unavailable/archived/local runtime facts

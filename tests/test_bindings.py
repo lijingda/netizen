@@ -1588,6 +1588,58 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIsNone(second.next_cursor)
 
+    async def test_binding_native_page_lookup_joins_only_filtered_requested_ids_off_loop(self) -> None:
+        older = self.create_binding(
+            scope=self.topic, project="alpha", created_at="2030-01-01T00:00:00+00:00", native=True,
+        )
+        current = self.create_binding(
+            scope=self.topic, project="alpha", created_at="2030-01-02T00:00:00+00:00", native=True,
+        )
+        other = self.create_binding(
+            scope=self.direct, project="beta", created_at="2030-01-03T00:00:00+00:00", native=True,
+        )
+        statements = []
+        reader_threads = []
+
+        def trace(statement):
+            statements.append(statement)
+            reader_threads.append(threading.get_ident())
+
+        await self.store._submit_query(
+            lambda connection: connection.set_trace_callback(trace), deadline_seconds=1,
+        )
+        query = BindingQuery(
+            project_alias="alpha", scope_kind=ScopeKind.TOPIC,
+            app_id="cli_test", chat_id="oc_group", topic_id="omt_topic", current=False,
+        )
+        items = await self.store.query_bindings_by_native_thread_ids(
+            thread_ids=(older.native_thread_id, current.native_thread_id, other.native_thread_id),
+            query=query,
+        )
+        self.assertEqual([item.binding.id for item in items], [older.id])
+        self.assertEqual(items[0].scope.scope, self.topic)
+        self.assertEqual(len(statements), 1)
+        self.assertIn("b.native_thread_id IN (", statements[0])
+        self.assertEqual(len(set(reader_threads)), 1)
+        self.assertNotEqual(reader_threads[0], threading.get_ident())
+
+        items = await self.store.query_bindings_by_native_thread_ids(
+            thread_ids=(current.native_thread_id,), query=BindingQuery(identity=older.id),
+        )
+        self.assertEqual(items, ())
+        items = await self.store.query_bindings_by_native_thread_ids(
+            thread_ids=(current.native_thread_id, current.native_thread_id, "unknown"),
+            query=BindingQuery(identity=current.native_thread_id),
+        )
+        self.assertEqual([item.binding.id for item in items], [current.id])
+
+    async def test_binding_native_page_lookup_rejects_unbounded_or_invalid_ids(self) -> None:
+        for thread_ids in (("",), (None,), (1,), tuple(f"native-{index}" for index in range(101))):
+            with self.subTest(thread_ids=thread_ids), self.assertRaises(ValueError):
+                await self.store.query_bindings_by_native_thread_ids(thread_ids=thread_ids)
+        with patch.object(self.store, "_submit_query", side_effect=AssertionError("empty lookup read")):
+            self.assertEqual(await self.store.query_bindings_by_native_thread_ids(thread_ids=()), ())
+
     async def test_binding_candidates_filter_once_and_reject_overflow(self) -> None:
         expected = []
         for index in range(4):

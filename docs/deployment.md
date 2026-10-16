@@ -643,6 +643,26 @@ MCP 不依赖浏览器的 Admin 登录状态。停止先关闭认领和管理 ad
 
 ### 普通会话协作兼容性与验收
 
+2026-10-16 预览适配与 Admin 分页优化：在 `openai-codex` / bundled CLI `0.163.0`
+重新通过 `runtime_external_name` 与 `runtime_external_title` 隔离场景。生产出站格式为
+`codex_tui` + CLI 委派 envelope，特殊字符正文成为原生 preview，历史仍为工具消息且保留
+真实来源，DB-only 目录可发现。后续增强 title 场景验证生产 `thread_catalog_page` 的
+创建／更新时间、升／降序、原生时间投影及空归档页；证据
+`/tmp/netizen-preview-catalog-page-evidence.json`。所有这些验证只使用本地 mock provider，
+未调用真实模型账号、飞书或部署生产服务。Admin 浏览器交互由 Node DOM harness 验证，
+未把该测试写作真实浏览器视觉或飞书客户端验收。
+
+本轮四路审查及修复后 `make check` 通过：3,180 项测试完成（15 项条件跳过），Python 编译、依赖
+一致性、Activity、20 immediate / 20 history / 40 terminal drains 与只读 Skill roots 门禁
+均通过。日志 `/tmp/netizen-native-pagination-review-make-check-final.log`。分页与前端独立复核
+发现的稀疏尾部逐条请求、恢复单边日期无法确认问题均已修正；静态多页无漏项及
+19 个匹配 + 10,000 个外部候选只需 101 次分页请求由行为测试覆盖，不作为生产压测数据。
+后续审查修正真实 SDK／传输读取失败的错误归类，保留取消和超时语义，并清理 Admin
+成功响应中已不可达的目录失败标志及提示条；Scope 降级路径保持。另有 1,000 组静态
+随机分页验证通过，证据 `/tmp/netizen-review-admin-native-pagination-fuzz.out`，
+不代表动态目录快照一致性或生产规模验收。
+
+
 [ADR 0081](adr/0081-coordinate-ordinary-sessions-with-native-external-messages.md) 的六工具、
 共享 MCP 传输或 ExternalMessage Runtime 交接变更，需完成 `make check` 及受影响的
 原生 probe。可运行以下隔离探针，并以外部进程 deadline 限制整个进程（全部场景建议

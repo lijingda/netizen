@@ -85,6 +85,27 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   assert.equal(historyEntries.length, 1, "initial canonicalization replaces, not pushes");
   assert(!window.location.search.includes("cursor="));
   assert(!window.location.search.includes("actionToken="));
+  if (initialUrl.startsWith("/sessions/ordinary") && !initialUrl.includes("project=")) {
+    const root = document.querySelector("#session-filter").querySelectorAll("[data-time-range]")
+      .find((candidate) => candidate.dataset.timeRangeField === "updated");
+    const before = lastQuery("/api/v1/sessions").get("updatedFrom");
+    assert(before);
+    assert(!lastQuery("/api/v1/sessions").has("updatedBefore"));
+    root.querySelector("[data-time-range-trigger]").click();
+    assert.equal(root.querySelector("[data-time-range-done]").disabled, false);
+    root.querySelector("[data-time-range-done]").click();
+    assert.equal(root.querySelector("[data-time-range-popover]").hidden, true);
+    assert.equal(root.querySelector("[data-time-range-error]").textContent, "");
+    root.querySelector("[data-time-range-trigger]").click();
+    const start = root.querySelector("[data-time-range-start]");
+    start.value = "2026-07-02T00:00"; start.dispatch("input");
+    assert.equal(root.querySelector("[data-time-range-done]").disabled, true, "edited custom dates still require a complete range");
+    root.querySelector("[data-time-range-cancel]").click();
+    document.querySelector("#session-filter").dispatch("submit"); await flush();
+    assert.equal(lastQuery("/api/v1/sessions").get("updatedFrom"), before);
+    assert(!lastQuery("/api/v1/sessions").has("updatedBefore"));
+    return;
+  }
   if (initialUrl.startsWith("/sessions/")) {
     const temporary = initialUrl.includes("temporary");
     assert.equal(state.tab, "sessions");
@@ -101,7 +122,16 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
       assert.equal(before.get("chatId"), "oc_selected");
       assert.equal(before.get("createdFrom"), "2026-10-01T00:00:00Z");
       assert.equal(before.get("createdBefore"), "2026-10-02T00:00:00Z");
-      assert.deepEqual(before.getAll("inventoryState"), ["all"]);
+      assert.deepEqual(before.getAll("inventoryState"), ["archived"]);
+      if (initialUrl.includes("updatedRange=all")) {
+        assert(!query.has("updatedFrom"));
+        assert(!query.has("updatedBefore"));
+        assert(!query.has("updatedRange"));
+        assert.equal(new URLSearchParams(window.location.search).get("updatedRange"), "all");
+      } else {
+        assert(query.get("updatedFrom"));
+        assert(!query.has("updatedBefore"));
+      }
     } else assert.deepEqual(before.getAll("state"), ["closed"]);
     return;
   }
@@ -188,6 +218,22 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   assert.equal(lastQuery("/api/v1/sessions").get("sortBy"), "updatedAt");
   window.history.go(1); await flush();
   assert.equal(lastQuery("/api/v1/sessions").get("sortBy"), "createdAt");
+  // Unlimited update bounds survive URL navigation; the marker never reaches the API.
+  const updatedRange = document.querySelector("#session-filter").querySelectorAll("[data-time-range]").find((root) => root.dataset.timeRangeField === "updated");
+  updatedRange.querySelector("[data-time-range-quick-clear]").click();
+  document.querySelector("#session-filter").dispatch("submit"); await flush();
+  const unlimitedUrl = href();
+  assert.equal(new URLSearchParams(window.location.search).get("updatedRange"), "all");
+  for (const key of ["updatedRange", "updatedFrom", "updatedBefore"]) assert(!lastQuery("/api/v1/sessions").has(key));
+  await selectTab("projects");
+  window.history.go(-1); await flush();
+  assert.equal(href(), unlimitedUrl);
+  assert.equal(updatedRange.querySelector("[data-time-range-summary]").textContent, "全部时间");
+  assert(!lastQuery("/api/v1/sessions").has("updatedFrom"));
+  await resetSessionFilters();
+  assert(lastQuery("/api/v1/sessions").get("updatedFrom"));
+  assert.match(updatedRange.querySelector("[data-time-range-summary]").textContent, /最近 3 个月/);
+
   const slow = deferred();
   ordinaryAnswer = () => slow.promise;
   const oldRefresh = refresh("sessions"); await flush();

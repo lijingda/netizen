@@ -24,7 +24,7 @@ class ProjectFormUiTest(unittest.TestCase):
         source = (static / "admin.js").read_text(encoding="utf-8")
         handlers = source[
             source.index('document.querySelector("#register-project").addEventListener'):
-            source.index('document.querySelector("#session-filter").addEventListener')
+            source.index('document.querySelector("#session-inventory-state").addEventListener')
         ]
         fixture = Path(__file__).with_name("project_form_ui_harness.js")
         before, after = fixture.read_text(encoding="utf-8").split(

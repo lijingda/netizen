@@ -134,7 +134,7 @@ async function api(path, options = {}) {
   const linked = new URL(runLink.href, "http://localhost");
   assert.equal(linked.pathname, "/sessions/ordinary");
   assert.equal(linked.searchParams.get("identity"), "binding-target");
-  assert.equal(linked.searchParams.get("inventoryState"), "all");
+  assert.equal(linked.searchParams.get("updatedRange"), "all");
   scheduleInput("runs-next").click(); await flush();
   assert.equal(scheduleRunsPage.number, 2);
   assert.deepEqual(scheduleRunsPage.previousCursors, [null]);
