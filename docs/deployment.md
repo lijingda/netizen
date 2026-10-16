@@ -43,7 +43,7 @@ allowlist；修改 pinned SDK/App Server 或这些 Adapter 时，开发迭代必
 live probe 与 Runtime 原生返回分类、局部 unknown 和零自动重试测试（ADR 0078）。ADR 0020/0052 的 active-Turn Activity observer
 另行精确锁定 SDK 版本、源码指纹、generated shape 和非消费 event-store contract；门禁失败只
 关闭提前 Activity/问题/阶段性答案观察，不关闭普通 Turn；答案从可取得的权威终态 items
-补齐。SDK `0.162.1` 的 Side `handle.run()` 遇到 failed 直接抛错、不返回 items，因此
+补齐。SDK `0.163.0` 的 Side `handle.run()` 遇到 failed 直接抛错、不返回 items，因此
 high-water/observer 降级后只能保留此前已观察片段，后续未观察且未返回 items 的片段
 不能补齐；不增加 ephemeral history 读取或第二消费者。
 这个降级以 ADR 0009 独立的 service-wide
@@ -290,6 +290,20 @@ LaunchAgent 安装、启动和 ready 冒烟，不能用 CI 代替。
 required MCP 启动断连回收及压缩准备失败。后者直接使用公开 WebSocket wire，是测试 harness，不能
 复用于生产私有 gateway；目前依赖 POSIX 文件锁。mock provider 的原生执行通过不代表
 真实模型触发频率、压缩自动路径或飞书展示已验收。
+
+取消、incomplete response 或冷恢复权限变化时，另运行
+`scripts/probe_sdk_cancellation.py`（外部 180 秒 deadline）和
+`scripts/probe_sdk_response_recovery.py`（外部 500 秒 deadline）。两者复用上述隔离
+mock provider 和真实 bundled App Server，均支持 `--case` / `--output`。取消探针区分
+动态工具与 Code Mode 的真实取消、同 Thread 恢复，以及 Goal 自动 interrupted 续跑的
+**观测失配防护与局部恢复**；后者通过生产 Runtime 验证仅保留当前 Goal unknown、禁止
+旧最终结果、另一 Binding 在故障 Goal 仍运行时可执行，以及确认原生空闲后原 Thread
+可继续普通对话；不证明 SDK 完整续流或最终 blocked 交付。响应探针通过生产 Runtime
+验证稳定片段、失败释放、上下文用量与
+同 Thread 续聊，并在三个独立 App Server 中验证 cold resume 的实际允许/拒绝文件操作和
+显式权限覆盖。另覆盖 request/stream retries=2 时不可重试错误仍只发一次请求，以及
+`interrupted` 响应在同一普通 Turn 内自动继续。它们不覆盖网络 grants、managed policy
+或 Responses WebSocket。
 
 阶段性答案的真实飞书传输另用 `scripts/probe_feishu_partial_answers.py`，仅在用户明确
 授权的测试群运行。先用 `--dry-run` 检查生产渲染器生成的载荷；实际投递去掉该参数：
@@ -907,6 +921,45 @@ SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和
 [requirements.lock](../requirements.lock) 为准。以下证据保留实际验证时的版本；旧版本的
 结果不会自动变成新版本、真实飞书链路或目标主机的验收结论。定时任务另见
 [专属兼容性记录](#定时任务兼容性与验收)。
+
+2026-10-16 的 `0.162.1` → `0.163.0` 升级完成精确 Python 包与 bundled App Server
+源码复核。高层 API 和私有消费代码未变，生成模型/通知注册表改变；现有窄适配没有
+公开等价替代。cleanup 与 Activity 保留原门禁，使用新版源码指纹
+`ba6d264e10f7612772473a24a64534e286a8c2badd584675aa1daeccd6086ce9`。
+
+Goal 局部恢复修正后的最终本机 `make check` 通过，执行 3,144 项测试（16 项条件跳过），包括 wheel/sdist
+隔离验证、编译、依赖一致性、SDK Activity/20/20/40 synthetic 与只读 Skill roots。
+本次本机使用 CPython 3.12、Node.js 24；不代替 Node.js 22 和完整 Python 版本的 CI 矩阵。
+Linux 临时候选环境全部 17 个真实账号原生 phase 通过，包括 exact steer、压缩、并发、
+Linux marker 中断/清理/续聊、生命周期、Side、订阅释放、配置、Goal 与 sandbox。
+同一账号的只读额度、持久 fork、后台命名、child Files、Skills 七阶段、调度五阶段及
+Project 删除两场景专项均通过；用户配置不变断言和自有资源清理按各探针执行。
+
+本地 mock provider 加真实 App Server 的 28 个功能场景通过，覆盖普通会话协作、
+阶段性答案、大输出历史、local/remote-v2 压缩及错误、卸载与慢 MCP、incomplete response
+和冷恢复权限、动态工具与 Code Mode 取消；另有 1 个 Goal 观测失配防护场景通过。
+incomplete 验证经生产 Runtime 保留稳定片段、失败后释放槽位并在同 Thread 继续；
+context 使用 last 而非累计 token；非零重试与普通 Turn 的 interrupted 自动续请求另有
+有界场景。冷恢复跨三个进程实际验证 read-only 读取成功、
+写入拒绝和显式 workspace-write 覆盖。没有覆盖网络 grants、managed policy、
+Responses WebSocket 和 Code Mode 前台 cell 的独立 wait。独立输出回收探针还确认，
+自有子进程仍持有 stdout/stderr pipe 时，生产 non-login 路径和显式开启的 local
+exec-server 路径均有界结束并保留输出尾部；远端 Environment 的最终 poll 未独立实测。
+
+Goal 专项发现两版 SDK 都在第一次 interrupted 后收流，新版原生连续无活动保护会
+继续到第三次 interrupted 后 blocked，使旧 Runtime 误认过早 final。本次只加强公开
+history 身份核验：已有后继 Turn 时只保留当前 Goal unknown，不关闭实例 admission，
+禁止旧 Result/Files 和 clear。下一条消息或 `/goal` 查询在原 consumer 交接结束后做
+有界只读重检；确认 Goal 非 active、exact Thread idle 且无运行中 Turn 后释放本地占用，
+允许同一会话继续对话。原生 mutation 结果未知不走观察恢复路径，旧 steer admission
+不能被改投为新 Turn。修正后的真实 App Server 探针确认另一 Binding 在故障 Goal 仍运行
+时完成，以及原生 blocked/idle 后原 Thread 新普通 Turn 完成，原生 Goal 保留且零自动
+clear；Goal 行为子集 62 项通过。它不修复完整续流，不保证此路径的最终 blocked 交付。
+普通 completed 自动换轮的 partial 保留、exact 最终结果和自动 clear 已用生产
+Runtime 复验通过；真实账号显式暂停/恢复/steer/最终回复门禁也通过。
+
+以上不包含真实飞书投递、客户端操作或 Linux/macOS 服务部署/ready 验收；本次没有发布、
+更新或重启已有实例。
 
 2026-10-10 的 `0.161.0` → `0.162.1` 升级在本机 macOS arm64 完成新版源码指纹复核：
 `7c50badc428374e91233516562fb971b1727b00157b93e5771221a672a20d215`。
@@ -1762,6 +1815,11 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
    handoff 返回前显式 clear 与同秒同 objective 新 Goal 都被拒绝，handoff 超时后非 unknown
    slot 会释放，shutdown 对已终态 Goal 零 pause/cleanup。使初始 Goal 卡发送失败后发送
    `/goal`，恢复卡必须复用 exact logical run、继续 Activity 并接住最终 Result/Files。
+   另模拟纯观察失败（含 clear 发出前的只读检查失败）：只有当前 Goal 被保留，其他 Binding
+   仍可执行。原 consumer handoff 结束后，下一条消息或 `/goal` 做有界只读重检；确认
+   Goal 非 active、exact Thread idle 且无 inProgress Turn 后允许同会话新对话，零自动
+   clear/pause。原生仍 active、读取失败/超时/身份错误时保留当前占用；旧 steer token
+   不能改投新 Turn，mutation 未知不能按观察失败释放，已关闭的实例 admission 不重开。
    重启期间保留的 active Goal 必须显示为外部活跃并拒绝 mutation，提示在原生 Codex 暂停，
    不能自动重挂；重启前旧控制按钮 stale，新的 `/goal` 卡按钮才可用。生命周期内不得用外部
    CLI/App Server 并发改写同一 Thread Goal，因为 thread-scoped clear 没有 generation CAS。

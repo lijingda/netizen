@@ -828,7 +828,18 @@ RUNNING 的 Goal；启动、暂停、收尾、未知与外部 active 状态均�
 cleanup。pause、interrupt、cleanup 或 mutation 响应未知时槽位不释放，并按副作用范围
 fail closed。只有 SDK logical stream 正常终止、`goal/get` 为非 active、公开 Thread
 idle、完整 history 中 exact 最终物理 Turn terminal 四项同时成立，consumer 才冻结并
-投递一个逻辑终态；单个物理 Turn completed 不代表 Goal 完成。四项证据完成后，
+投递一个逻辑终态；该 exact Turn 必须是完整 history 的最后一个物理 Turn。流已结束后，
+若公开历史显示其后还有新 Turn，即使 Goal/Thread 仍 active，也按观测失配保留 unknown
+且只占用当前 Goal，不关闭实例 admission，不能用较新的历史 ID 替换流的终态或重新接管通知。
+纯观察失败与 mutation 结果未知分开：前者在下次消息准入或 `/goal` 查看时，等待原
+consumer 的有界终态 handoff 结束，再用一次有界 `goal/get` 和完整 `thread.read()`
+确认 exact Thread 为 idle、没有 inProgress Turn、Goal 非 active（或已不存在），释放
+本地 Goal 槽并推进 admission revision。读取失败、notLoaded、仍 active 或身份不符均只
+保留该 Goal；不后台轮询、不自动 pause/clear、不补造遗漏的 Result/Files，也不重新
+打开已关闭的实例 admission。旧 Goal 的 steer admission 仍失效，不能变成新 Turn。
+原生 start/steer/pause/clear 等 mutation 结果未知或 cleanup 未完成不通过这条路径释放。
+单个物理 Turn
+completed 不代表 Goal 完成。四项证据完成后，
 只有 persisted Goal 为 `complete` 且 exact 最终物理 Turn 为 `completed` 时才自动执行一次
 `goal/clear`，并以再次读取为 absent 确认收尾。paused、blocked、usage/budget limited 和
 external-active 均不自动 clear；clear 返回 false、响应丢失/取消或复读仍存在时保留
@@ -850,6 +861,15 @@ expected-generation CAS，因此 clear 前复读无法原子覆盖外部在最�
 resume 只允许 persisted paused Goal，并固定执行 register route -> set active -> 等待首个
 新物理 Turn。shutdown 不会对 `starting/unknown/external-active` 发起第二套 cleanup；
 最终 transport close 后才取消并关闭残留 consumer。
+
+SDK `0.163.0` 仍有自动 interrupted continuation 的观测缺口：例如 PreCompact hook
+中止一次自动压缩后，App Server 可以继续 Goal，但 Python logical stream 会在第一次
+interrupted 后注销 route。新版本在连续三次无活动的中断后可将原生 Goal 置为 blocked，
+这不恢复已丢失的通知。Netizen 做上述公开历史失配防护和按需空闲重检，不保证此路径
+后续的 Activity、阶段性答案、问题、steer 或最终 blocked 交付，也不以 unknown 宣称
+原生已停止；确认空闲后，同一会话可继续普通对话，原生 blocked Goal 仍保留。
+上游 SDK 修正 logical stream 并通过 interrupted rollover、显式 pause 和最终轮次验收后，
+才可解除此缺口；普通 completed rollover 与显式 pause/resume 继续走既有契约。
 
 ### SDK 适配边界
 
@@ -1196,7 +1216,7 @@ Thread 或文件目录，不增加数据库历史。
 Turn/item 身份并去重；重复/迟到事件、补读和重试不能重复追加或改换归属。普通观察
 不可用后停止周期观察 I/O；Side 的 observer/cursor 降级及 4096 high-water 仍转入唯一
 `run()`，不为提前推送增加消费者或 ephemeral history 轮询。终态从可取得的权威 typed
-items 补齐已知遗漏。SDK `0.162.1` 的 Side `handle.run()` 遇到 failed 直接抛错、不返回
+items 补齐已知遗漏。SDK `0.163.0` 的 Side `handle.run()` 遇到 failed 直接抛错、不返回
 items；若先因 high-water 或 observer 异常降级，只能保留此前已观察片段，之后未观察且
 未返回 items 的片段不能补齐。Goal 只补读最终物理 Turn，不追补旧轮。
 

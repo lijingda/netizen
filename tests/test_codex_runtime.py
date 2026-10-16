@@ -3169,7 +3169,7 @@ class ThreadSubscriptionRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.runtime._compacting.pop(binding.id)
 
         self.runtime._goals[binding.id] = SimpleNamespace(
-            state=GoalOperationState.RUNNING
+            state=GoalOperationState.RUNNING, observation_unavailable=False,
         )
         with self.assertRaises(ThreadGoalActive):
             await self.runtime.release_exact(binding.id)
@@ -5871,6 +5871,375 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(outcome.error, GoalStateUnknown)
         self.assertEqual(control.clear_calls, [])
 
+    async def assert_goal_stream_final_is_stale(
+        self, *, later_status: str, goal_status: GoalStatus,
+    ):
+        binding, handle, _ = await self.start_fake_goal()
+        admission = await self.runtime.capture_submission_admission(binding.id)
+        partial = PartialAnswer(handle.thread_id, handle.id, "stable-partial", "Already observed.")
+        handle.emit_activity(TurnActivityNotificationProjection(
+            turn_id=handle.id, partial_answer=partial,
+        ))
+        later = SimpleNamespace(
+            id="later-physical-turn", status=FakeStatus(later_status),
+            error=None, items=[], started_at=3, completed_at=None, duration_ms=None,
+        )
+        with (
+            self.assertLogs("netizen_cli.codex_runtime", level="ERROR"),
+            patch("netizen_cli.codex_runtime.collect_turn_patch_children", new_callable=AsyncMock) as collect,
+        ):
+            handle.finish(goal_status=goal_status, response="Unverified old result.")
+            handle.record.items.append(completed_file_change("old-file"))
+            self.codex.goal_turns.append((handle.thread_id, later))
+            self.assertTrue(await self.runtime.wait_idle(timeout=1))
+            collect.assert_not_awaited()
+
+        outcome = self.outcomes[-1]
+        self.assertIsInstance(outcome.error, GoalStateUnknown)
+        self.assertIsNone(outcome.final_turn_status)
+        self.assertIsNone(outcome.final_response)
+        self.assertEqual(outcome.final_items, ())
+        self.assertEqual(outcome.partial_answers, (partial,))
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.NOT_APPLICABLE)
+        self.assertEqual(self.runtime.active_goal(binding.id).state, GoalOperationState.UNKNOWN)
+        self.assertTrue(self.runtime._accepting)
+        self.assertEqual(handle.control.clear_calls, [])
+        self.assertEqual(handle.pause_calls, 0)
+        self.assertEqual(self.cleanup.calls, [])
+        self.assertEqual(later.status.value, later_status)
+        if goal_status is GoalStatus.ACTIVE:
+            with self.assertRaises(GoalStateUnknown):
+                await self.submit(binding, "must not start or steer")
+        self.assertEqual(handle.steers, [])
+        self.assertEqual(self.codex.turn_calls, [])
+        return binding, handle, later, admission
+
+    async def test_goal_stream_final_before_later_completed_turn_fails_closed(self) -> None:
+        await self.assert_goal_stream_final_is_stale(
+            later_status="completed", goal_status=GoalStatus.COMPLETE,
+        )
+
+    async def test_goal_stream_final_before_later_interrupted_turn_fails_closed(self) -> None:
+        await self.assert_goal_stream_final_is_stale(
+            later_status="interrupted", goal_status=GoalStatus.BLOCKED,
+        )
+
+    async def test_goal_stream_final_before_active_continuation_fails_closed(self) -> None:
+        await self.assert_goal_stream_final_is_stale(
+            later_status="inProgress", goal_status=GoalStatus.ACTIVE,
+        )
+
+    async def test_goal_observation_failure_leaves_other_binding_available(self) -> None:
+        binding, handle, _, _ = await self.assert_goal_stream_final_is_stale(
+            later_status="inProgress", goal_status=GoalStatus.ACTIVE,
+        )
+        other = self.binding(FeishuScope("cli_test", "oc_other", ScopeKind.DIRECT))
+        submitted = await self.submit(other, "independent conversation")
+        self.assertEqual(submitted.disposition, SubmitDisposition.STARTED)
+        self.assertNotEqual(submitted.thread_id, handle.thread_id)
+        await self.finish(self.codex.handles[-1], submitted)
+        self.assertIsNotNone(self.runtime.active_goal(binding.id))
+        self.assertTrue(self.runtime._accepting)
+        self.assertEqual(handle.pause_calls, 0)
+
+    async def test_goal_observation_failure_recovers_for_new_message_only_after_idle(self) -> None:
+        binding, handle, later, _ = await self.assert_goal_stream_final_is_stale(
+            later_status="inProgress", goal_status=GoalStatus.ACTIVE,
+        )
+        with self.assertRaises(GoalStateUnknown):
+            await self.submit(binding, "still running")
+        self.assertEqual(self.codex.turn_calls, [])
+
+        later.status.value = "interrupted"
+        handle.control.persisted = goal_snapshot(
+            GoalStatus.BLOCKED, objective="keep working",
+        )
+        blocked = handle.control.persisted
+        submitted = await self.submit(binding, "continue our conversation")
+        self.assertEqual(submitted.disposition, SubmitDisposition.STARTED)
+        self.assertEqual(submitted.thread_id, handle.thread_id)
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+        self.assertIs(handle.control.persisted, blocked)
+        self.assertEqual(handle.control.clear_calls, [])
+        self.assertEqual(handle.pause_calls, 0)
+        self.assertEqual(handle.wait_terminal_calls, 1)
+        self.assertEqual(self.cleanup.calls, [])
+        await self.finish(self.codex.handles[-1], submitted)
+        self.assertIsInstance(self.outcomes[-1], TurnOutcome)
+        self.assertTrue(self.runtime._accepting)
+
+    async def test_goal_recovery_does_not_convert_old_steer_admission_to_new_turn(self) -> None:
+        binding, handle, _, admission = await self.assert_goal_stream_final_is_stale(
+            later_status="interrupted", goal_status=GoalStatus.BLOCKED,
+        )
+        with self.assertRaises(SteerRace):
+            await self.submit(binding, "prepared for the old Goal", admission)
+        self.assertEqual(self.codex.turn_calls, [])
+        self.assertEqual(handle.steers, [])
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+        submitted = await self.submit(binding, "fresh message")
+        self.assertEqual(submitted.disposition, SubmitDisposition.STARTED)
+        await self.finish(self.codex.handles[-1], submitted)
+        self.assertTrue(self.runtime._accepting)
+
+    async def test_goal_recovery_waits_for_unknown_outcome_handoff(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        delivering = asyncio.Event()
+        release_delivery = asyncio.Event()
+
+        async def capture(outcome):
+            self.outcomes.append(outcome)
+            if isinstance(outcome, GoalOutcome):
+                delivering.set()
+                await release_delivery.wait()
+
+        self.runtime._on_completion = capture
+        later = SimpleNamespace(
+            id="unobserved-turn", status=FakeStatus("interrupted"), items=[],
+        )
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
+            handle.finish(goal_status=GoalStatus.BLOCKED)
+            self.codex.goal_turns.append((handle.thread_id, later))
+            await asyncio.wait_for(delivering.wait(), timeout=1)
+        try:
+            with self.assertRaises(GoalStateUnknown):
+                await self.submit(binding, "before notice handoff")
+            self.assertIsNotNone(self.runtime.active_goal(binding.id))
+            self.assertEqual(self.codex.turn_calls, [])
+            self.assertTrue(self.runtime._accepting)
+        finally:
+            release_delivery.set()
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        submitted = await self.submit(binding, "after notice handoff")
+        await self.finish(self.codex.handles[-1], submitted)
+        self.assertEqual(len([item for item in self.outcomes if isinstance(item, GoalOutcome)]), 1)
+
+    async def test_goal_recovery_requires_authoritative_idle_read(self) -> None:
+        binding, handle, later, _ = await self.assert_goal_stream_final_is_stale(
+            later_status="interrupted", goal_status=GoalStatus.BLOCKED,
+        )
+        original_read = FakeThread.read
+        blocked = handle.control.persisted
+        for condition in (
+            "read-error", "read-timeout", "wrong-thread", "not-loaded",
+            "in-progress", "active-goal", "wrong-goal-thread",
+        ):
+            with self.subTest(condition=condition):
+                async def uncertain_read(thread, *, include_turns=False):
+                    if condition == "read-error":
+                        raise TransportClosedError("read disconnected")
+                    if condition == "read-timeout":
+                        await asyncio.Event().wait()
+                    response = await original_read(thread, include_turns=include_turns)
+                    if condition == "wrong-thread":
+                        response.thread.id = "different-thread"
+                    elif condition == "not-loaded":
+                        response.thread.status.root.type = "notLoaded"
+                    elif condition == "in-progress":
+                        # An idle metadata view does not override a running Turn.
+                        response.thread.status.root.type = "idle"
+                        later.status.value = "inProgress"
+                    return response
+
+                if condition == "active-goal":
+                    handle.control.persisted = goal_snapshot(
+                        GoalStatus.ACTIVE, objective="keep working",
+                    )
+                elif condition == "wrong-goal-thread":
+                    handle.control.persisted = goal_snapshot(
+                        GoalStatus.BLOCKED, objective="keep working", thread_id="different-thread",
+                    )
+                with (
+                    patch.object(FakeThread, "read", uncertain_read),
+                    patch("netizen_cli.codex_runtime._TURN_OBSERVATION_RECOVERY_TIMEOUT_SECONDS", 0.02),
+                ):
+                    with self.assertRaises(GoalStateUnknown):
+                        await asyncio.wait_for(self.submit(binding, "not confirmed idle"), timeout=1)
+                self.assertIsNotNone(self.runtime.active_goal(binding.id))
+                self.assertEqual(self.codex.turn_calls, [])
+                self.assertEqual(handle.control.clear_calls, [])
+                self.assertEqual(handle.pause_calls, 0)
+                self.assertTrue(self.runtime._accepting)
+                later.status.value = "interrupted"
+                handle.control.persisted = blocked
+
+        submitted = await self.submit(binding, "authoritative idle now")
+        await self.finish(self.codex.handles[-1], submitted)
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+
+    async def test_goal_recovery_accepts_absent_goal_without_clearing_it(self) -> None:
+        binding, handle, _, _ = await self.assert_goal_stream_final_is_stale(
+            later_status="interrupted", goal_status=GoalStatus.BLOCKED,
+        )
+        handle.control.persisted = None
+        submitted = await self.submit(binding, "goal was cleared externally")
+        await self.finish(self.codex.handles[-1], submitted)
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+        self.assertEqual(handle.control.clear_calls, [])
+        self.assertEqual(handle.pause_calls, 0)
+
+    async def test_goal_recovery_does_not_reopen_shutdown_admission(self) -> None:
+        binding, handle, _, _ = await self.assert_goal_stream_final_is_stale(
+            later_status="interrupted", goal_status=GoalStatus.BLOCKED,
+        )
+        self.runtime.close_admission()
+        await self.runtime.goal_snapshot(binding)
+        with self.assertRaises(RuntimeClosed):
+            await self.submit(binding, "shutdown remains closed")
+        self.assertFalse(self.runtime._accepting)
+        self.assertEqual(self.codex.turn_calls, [])
+        self.assertEqual(handle.control.clear_calls, [])
+
+    async def test_goal_mutation_unknown_is_not_released_after_observation_failure(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        handle.steer_error = GoalMutationStateUnknown("steer response lost")
+        with self.assertRaises(GoalStateUnknown):
+            await self.submit(binding, "uncertain mutation")
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
+            handle.terminal_logical_turn_id = "wrong-logical-turn"
+            handle.finish(goal_status=GoalStatus.BLOCKED)
+            self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        await self.runtime.goal_snapshot(binding)
+        self.assertIsNotNone(self.runtime.active_goal(binding.id))
+        self.assertFalse(self.runtime._accepting)
+        with self.assertRaises(RuntimeClosed):
+            await self.submit(binding, "must not retry mutation")
+        self.assertEqual(self.codex.turn_calls, [])
+        self.assertEqual(handle.control.clear_calls, [])
+        self.assertEqual(handle.pause_calls, 0)
+
+    async def test_goal_snapshot_generation_mismatch_is_local_and_can_recover(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        handle.control.persisted = goal_snapshot(
+            GoalStatus.BLOCKED, objective="external replacement", created_at=2,
+        )
+        with self.assertRaises(GoalStateUnknown):
+            await self.runtime.goal_snapshot(binding)
+        self.assertTrue(self.runtime._accepting)
+        self.assertIsNotNone(self.runtime.active_goal(binding.id))
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
+            handle.finish(goal_status=GoalStatus.BLOCKED)
+            self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        snapshot = await self.runtime.goal_snapshot(binding)
+        self.assertEqual(snapshot.status, GoalStatus.BLOCKED)
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+        submitted = await self.submit(binding, "new conversation after idle")
+        await self.finish(self.codex.handles[-1], submitted)
+        self.assertEqual(handle.control.clear_calls, [])
+        self.assertEqual(handle.pause_calls, 0)
+
+    async def test_paused_goal_observation_failure_recovers_after_confirmed_cleanup(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        self.codex.full_read_errors.append(TransportClosedError("paused history disconnected"))
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
+            self.assertEqual(await self.runtime.stop(binding.id), StopDisposition.GOAL_REQUESTED)
+            self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        self.assertIsInstance(self.outcomes[-1].error, GoalStateUnknown)
+        self.assertTrue(self.runtime._accepting)
+        self.assertEqual(handle.pause_calls, 1)
+        self.assertEqual(self.cleanup.calls, [handle.thread_id])
+        submitted = await self.submit(binding, "continue after confirmed pause")
+        await self.finish(self.codex.handles[-1], submitted)
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+        self.assertEqual(handle.control.persisted.status, GoalStatus.PAUSED)
+        self.assertEqual(handle.control.clear_calls, [])
+        self.assertEqual(handle.pause_calls, 1)
+        self.assertEqual(self.cleanup.calls, [handle.thread_id])
+
+    async def test_goal_missing_final_history_waits_for_exact_materialization(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        first_missing = asyncio.Event()
+        reveal_history = asyncio.Event()
+        original_read = FakeThread.read
+
+        async def delayed_history(thread, *, include_turns=False):
+            response = await original_read(thread, include_turns=include_turns)
+            if include_turns:
+                if not first_missing.is_set():
+                    response.thread.turns = []
+                    first_missing.set()
+                else:
+                    await reveal_history.wait()
+            return response
+
+        with patch.object(FakeThread, "read", delayed_history):
+            handle.finish(response="Materialized exact latest result.")
+            await asyncio.wait_for(first_missing.wait(), timeout=1)
+            self.assertEqual(self.outcomes, [])
+            self.assertIsNotNone(self.runtime.active_goal(binding.id))
+            self.assertTrue(self.runtime._accepting)
+            reveal_history.set()
+            self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+        outcome = self.outcomes[-1]
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.final_physical_turn_id, handle.id)
+        self.assertEqual(outcome.final_response, "Materialized exact latest result.")
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.CLEARED)
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+
+    async def test_goal_missing_final_history_still_has_a_bounded_deadline(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        first_missing = asyncio.Event()
+        never_materialized = asyncio.Event()
+        original_read = FakeThread.read
+
+        async def missing_history(thread, *, include_turns=False):
+            response = await original_read(thread, include_turns=include_turns)
+            if include_turns:
+                if first_missing.is_set():
+                    await never_materialized.wait()
+                response.thread.turns = []
+                first_missing.set()
+            return response
+
+        with (
+            patch.object(FakeThread, "read", missing_history),
+            patch("netizen_cli.codex_runtime._COMPACTION_TERMINAL_TIMEOUT_SECONDS", 0.05),
+            self.assertLogs("netizen_cli.codex_runtime", level="ERROR"),
+        ):
+            handle.finish()
+            await asyncio.wait_for(first_missing.wait(), timeout=1)
+            self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+        self.assertIsInstance(self.outcomes[-1].error, GoalStateUnknown)
+        self.assertIsNone(self.outcomes[-1].final_response)
+        self.assertEqual(handle.control.clear_calls, [])
+        self.assertEqual(self.runtime.active_goal(binding.id).state, GoalOperationState.UNKNOWN)
+        self.assertTrue(self.runtime._accepting)
+
+    async def test_goal_not_loaded_waits_without_reading_history(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        not_loaded_seen = asyncio.Event()
+        allow_loaded = asyncio.Event()
+        original_read = FakeThread.read
+
+        async def loading_thread(thread, *, include_turns=False):
+            if include_turns:
+                self.assertTrue(allow_loaded.is_set(), "must not read unloaded Goal history")
+            elif not not_loaded_seen.is_set():
+                response = await original_read(thread, include_turns=False)
+                response.thread.status.root.type = "notLoaded"
+                not_loaded_seen.set()
+                return response
+            else:
+                await allow_loaded.wait()
+            return await original_read(thread, include_turns=include_turns)
+
+        with patch.object(FakeThread, "read", loading_thread):
+            handle.finish(response="Loaded Goal result.")
+            await asyncio.wait_for(not_loaded_seen.wait(), timeout=1)
+            self.assertEqual(self.outcomes, [])
+            self.assertIsNotNone(self.runtime.active_goal(binding.id))
+            allow_loaded.set()
+            self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+        outcome = self.outcomes[-1]
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.final_response, "Loaded Goal result.")
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.CLEARED)
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+
     async def test_complete_goal_with_noncompleted_final_turn_is_not_cleared(
         self,
     ) -> None:
@@ -6021,6 +6390,55 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeClosed):
             await self.submit(self.store.get(binding.id), "must remain closed")
 
+    async def test_goal_clear_unknown_wins_over_queued_snapshot_observation_failure(self) -> None:
+        runtime = self.runtime
+        binding = self.binding()
+        snapshot_started = asyncio.Event()
+        queued_snapshots = []
+
+        async def read_queued_snapshot():
+            snapshot_started.set()
+            return await runtime.goal_snapshot(self.store.get(binding.id))
+
+        class LostClearWithQueuedSnapshot(FakeGoalControl):
+            async def clear(self, thread_id: str) -> bool:
+                self.clear_calls.append(thread_id)
+                # The consumer owns the Binding lock. Queue the status reader
+                # before its clear error handler can acquire that lock again.
+                queued_snapshots.append(asyncio.create_task(read_queued_snapshot()))
+                await snapshot_started.wait()
+                self.persisted = goal_snapshot(
+                    GoalStatus.COMPLETE, objective="replacement after lost clear", created_at=2,
+                )
+                raise TransportClosedError("clear response lost")
+
+        control = LostClearWithQueuedSnapshot(self.codex)
+        self.runtime._goal_control = control
+        submission = await self.runtime.start_goal(
+            binding=binding, cwd=self.cwd, objective="original completed Goal",
+            owner_id="ou_user", origin=object(),
+        )
+        submission.release_receipt_attempt()
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
+            control.handles[0].finish(response="confirmed answer")
+            self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        snapshot_results = await asyncio.gather(*queued_snapshots, return_exceptions=True)
+        self.assertEqual(len(snapshot_results), 1)
+        self.assertIsInstance(snapshot_results[0], GoalStateUnknown)
+        self.assertEqual(self.outcomes[-1].final_response, "confirmed answer")
+        self.assertEqual(self.outcomes[-1].finalization, GoalFinalizationStatus.UNKNOWN)
+
+        # A later idle read may release a pure observation failure, but it must
+        # never reinterpret an unconfirmed clear as that recoverable condition.
+        frozen = await self.runtime.goal_snapshot(self.store.get(binding.id))
+        self.assertEqual(frozen.objective, "original completed Goal")
+        self.assertIsNotNone(self.runtime.active_goal(binding.id))
+        self.assertFalse(self.runtime._accepting)
+        self.assertEqual(control.clear_calls, [submission.thread_id])
+        with self.assertRaises(RuntimeClosed):
+            await self.submit(self.store.get(binding.id), "cannot retry unknown mutation")
+        self.assertEqual(self.codex.turn_calls, [])
+
     async def test_completed_goal_unconfirmed_clear_is_unknown_and_not_retried(
         self,
     ) -> None:
@@ -6165,6 +6583,47 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.runtime.active_goal(binding.id).state,
             GoalOperationState.UNKNOWN,
         )
+        self.assertTrue(self.runtime._accepting)
+        replacement = control.persisted
+        submitted = await self.submit(self.store.get(binding.id), "after replacement is idle")
+        await self.finish(self.codex.handles[-1], submitted)
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+        self.assertIs(control.persisted, replacement)
+        self.assertEqual(control.clear_calls, [])
+
+    async def test_completed_goal_preclear_read_failure_keeps_result_and_recovers_locally(self) -> None:
+        class UnavailableBeforeClearControl(FakeGoalControl):
+            async def get(self, thread_id: str) -> GoalSnapshot | None:
+                snapshot = await super().get(thread_id)
+                if len(self.get_calls) == 4:
+                    raise TransportClosedError("finalization read disconnected")
+                return snapshot
+
+        control = UnavailableBeforeClearControl(self.codex)
+        self.runtime._goal_control = control
+        binding = self.binding()
+        goal = await self.runtime.start_goal(
+            binding=binding, cwd=self.cwd, objective="finish before read outage",
+            owner_id="ou_user", origin=object(),
+        )
+        goal.release_receipt_attempt()
+        with self.assertLogs("netizen_cli.codex_runtime", level="ERROR"):
+            control.handles[0].finish(response="confirmed answer survives read outage")
+            self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        outcome = self.outcomes[-1]
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.final_response, "confirmed answer survives read outage")
+        self.assertEqual(outcome.final_turn_status, "completed")
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.UNKNOWN)
+        self.assertIsInstance(outcome.finalization_error, GoalStateUnknown)
+        self.assertTrue(self.runtime._accepting)
+        self.assertIsNotNone(self.runtime.active_goal(binding.id))
+        self.assertEqual(control.clear_calls, [])
+        submitted = await self.submit(self.store.get(binding.id), "conversation continues")
+        await self.finish(self.codex.handles[-1], submitted)
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+        self.assertEqual(control.persisted.status, GoalStatus.COMPLETE)
+        self.assertEqual(control.clear_calls, [])
 
     async def test_goal_replacement_before_terminal_read_fails_closed(self) -> None:
         class ReplacedBeforeTerminalReadControl(FakeGoalControl):
