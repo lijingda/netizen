@@ -328,6 +328,7 @@ class _ActiveGoal:
     cleanup_required: bool = False
     cleanup_succeeded: bool = False
     terminal_observed: bool = False
+    observation_unavailable: bool = False
     cleanup_ready: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task[None] | None = None
 
@@ -4020,6 +4021,7 @@ class CodexRuntime:
             binding = self._bindings.get(binding.id)
             if binding.native_thread_id is None:
                 return None
+            await self._recheck_goal_observation_locked(binding)
             active = self._goals.get(binding.id)
             if (
                 active is not None
@@ -4054,10 +4056,10 @@ class CodexRuntime:
                         )
                     )
                 ):
-                    active.state = GoalOperationState.UNKNOWN
-                    self.close_admission()
+                    self._mark_goal_observation_unavailable(active)
                     raise GoalStateUnknown(
-                        "当前原生 Goal generation 已变化；服务已关闭 admission。"
+                        "当前原生 Goal 已变化，本次观察无法继续；"
+                        "稍后发送消息或查看 /goal 时会重新检查该会话是否空闲。"
                     )
                 if active.terminal_observed and snapshot is None:
                     return active.persisted
@@ -4510,6 +4512,7 @@ class CodexRuntime:
             )
 
     async def _prompt_goal_locked(self, binding: ThreadBinding) -> _ActiveGoal | None:
+        await self._recheck_goal_observation_locked(binding)
         active = self._goals.get(binding.id)
         if active is None:
             await self._guard_no_goal_locked(binding)
@@ -4569,6 +4572,7 @@ class CodexRuntime:
         )
 
     async def _guard_no_goal_locked(self, binding: ThreadBinding) -> None:
+        await self._recheck_goal_observation_locked(binding)
         active = self._goals.get(binding.id)
         if active is not None:
             raise self._goal_slot_error(active)
@@ -4587,6 +4591,58 @@ class CodexRuntime:
                 "当前 Thread 有一个由其他 Codex 客户端继续执行的 active Goal；"
                 "本条普通消息未执行。"
             )
+
+    def _mark_goal_observation_unavailable(self, active: _ActiveGoal) -> None:
+        # Never downgrade an uncertain mutation to a recoverable read failure.
+        if active.state is GoalOperationState.RUNNING or (
+            active.state is GoalOperationState.PAUSING and active.cleanup_succeeded
+        ):
+            active.observation_unavailable = True
+        active.state = GoalOperationState.UNKNOWN
+        self._advance_admission_revision(active.binding_id)
+
+    async def _recheck_goal_observation_locked(self, binding: ThreadBinding) -> None:
+        """Release only a failed observer after an on-demand, read-only idle check."""
+
+        active = self._goals.get(binding.id)
+        if active is None or not active.observation_unavailable:
+            return
+        # Preserve the old outcome's delivery before admitting another Turn.
+        if (
+            active.task is None or not active.task.done()
+            or (active.cleanup_required and not active.cleanup_succeeded)
+        ):
+            raise self._goal_slot_error(active)
+        try:
+            async with asyncio.timeout(_TURN_OBSERVATION_RECOVERY_TIMEOUT_SECONDS):
+                if active.thread is None or binding.native_thread_id != active.thread_id:
+                    raise RuntimeError("Goal observation Thread identity changed")
+                goal = await self._require_goal_control().get(active.thread_id)
+                if goal is not None and (
+                    goal.thread_id != active.thread_id or goal.status is GoalStatus.ACTIVE
+                ):
+                    raise RuntimeError("native Goal is active or its identity is unverified")
+                response = await active.thread.read(include_turns=True)
+                native = getattr(response, "thread", None)
+                if (
+                    getattr(native, "id", None) != active.thread_id
+                    or _thread_status_type(native) != "idle"
+                    or any(
+                        _enum_value(getattr(turn, "status", None)) == "inProgress"
+                        for turn in getattr(native, "turns", ())
+                    )
+                ):
+                    raise RuntimeError("native Goal Thread is not confirmed idle")
+        except Exception as error:
+            raise GoalStateUnknown(
+                "本次 Goal 观察已停止，尚未确认原生会话空闲；"
+                "本次操作未执行，请稍后重试。其他会话可继续使用。"
+            ) from error
+        if self._goals.get(binding.id) is not active:
+            raise GoalStateUnknown("检查期间 Goal 占用已变化，请重新操作。")
+        self._goals.pop(binding.id)
+        self._advance_admission_revision(binding.id)
+        self._schedule_known_subscription_locked(binding.id, active.thread_id)
 
     def _track_external_goal(
         self,
@@ -4617,6 +4673,11 @@ class CodexRuntime:
         self._invalidate_context_window_usage(binding.id)
 
     def _goal_slot_error(self, active: _ActiveGoal) -> RuntimeError:
+        if active.observation_unavailable:
+            return GoalStateUnknown(
+                "本次 Goal 观察已停止，该会话尚未确认空闲；"
+                "请稍后发送消息或查看 /goal 重试。其他会话可继续使用。"
+            )
         if active.state is GoalOperationState.EXTERNAL_ACTIVE:
             return ExternalGoalActive(
                 "当前 Thread 有重启前或外部客户端启动的 active Goal；"
@@ -6797,9 +6858,12 @@ class CodexRuntime:
                 # be cleared/released; native terminal does not prove delivery.
                 if active.state is GoalOperationState.UNKNOWN:
                     retain_active = True
-                    error = GoalStateUnknown(
-                        "Goal 消息或操作结果未确认；最终结果仍会展示，"
-                        "但会话保持占用，请重启后对账。"
+                    error = (
+                        self._goal_slot_error(active)
+                        if active.observation_unavailable else GoalStateUnknown(
+                            "Goal 消息或操作结果未确认；最终结果仍会展示，"
+                            "但会话保持占用，请重启后对账。"
+                        )
                     )
             while active.cleanup_required and not active.cleanup_succeeded:
                 await active.cleanup_ready.wait()
@@ -6810,6 +6874,7 @@ class CodexRuntime:
                 and persisted.status is GoalStatus.COMPLETE
                 and active.final_turn_status == "completed"
             ):
+                clear_attempted = False
                 try:
                     async with self._lock(active.binding_id):
                         if self._goals.get(active.binding_id) is not active:
@@ -6838,6 +6903,7 @@ class CodexRuntime:
                                 "completed Goal became active before finalization"
                             )
                         if current.status is GoalStatus.COMPLETE:
+                            clear_attempted = True
                             await self._clear_completed_goal(active)
                             finalization = GoalFinalizationStatus.CLEARED
                 except BaseException as caught:
@@ -6845,13 +6911,21 @@ class CodexRuntime:
                     finalization_error = GoalStateUnknown(
                         "已完成 Goal 的自动清理结果未确认；最终结果仍会展示，"
                         "但会话保持占用且服务已关闭 admission。"
+                        if clear_attempted else
+                        "Goal 自动清理前的状态无法确认；最终结果仍会展示。"
+                        "稍后发送消息或查看 /goal 时会重新检查该会话是否空闲。"
                     )
                     finalization_error.__cause__ = caught
                     retain_active = True
-                    active.state = GoalOperationState.UNKNOWN
-                    self.close_admission()
+                    async with self._lock(active.binding_id):
+                        if clear_attempted:
+                            active.state = GoalOperationState.UNKNOWN
+                            active.observation_unavailable = False
+                            self.close_admission()
+                        else:
+                            self._mark_goal_observation_unavailable(active)
                     logger.error(
-                        "completed Goal finalization is unknown; admission closed",
+                        "completed Goal finalization is unknown",
                         exc_info=(type(caught), caught, caught.__traceback__),
                         extra={
                             "thread_id": active.thread_id,
@@ -6872,13 +6946,12 @@ class CodexRuntime:
                 active.terminal_observed
                 and isinstance(caught, TerminalCleanupFailed)
             ):
-                self.close_admission()
-                active.state = GoalOperationState.UNKNOWN
-                error = GoalStateUnknown(
-                    "Codex Goal 终态未确认；服务已关闭 admission，请重启后对账。"
-                )
+                async with self._lock(active.binding_id):
+                    self._mark_goal_observation_unavailable(active)
+                error = self._goal_slot_error(active)
+                error.__cause__ = caught
                 logger.error(
-                    "native Goal terminal state is unknown; admission closed",
+                    "native Goal terminal observation failed; retaining this Goal slot",
                     exc_info=(type(caught), caught, caught.__traceback__),
                     extra={
                         "thread_id": active.thread_id,
@@ -6988,27 +7061,26 @@ class CodexRuntime:
                 raise RuntimeError("persisted Goal identity mismatch")
             if not _same_goal_generation(active, persisted):
                 raise RuntimeError("persisted Goal generation mismatch")
-            if persisted.status is GoalStatus.ACTIVE:
-                await asyncio.sleep(self._poll_interval_seconds)
-                continue
             response = await thread.read(include_turns=False)
             native = getattr(response, "thread", None)
             if getattr(native, "id", None) != active.thread_id:
                 raise RuntimeError("Goal Thread identity mismatch")
             status = _thread_status_type(native)
-            if status in {"active", "notLoaded"}:
+            if status not in {"idle", "active", "notLoaded"}:
+                raise RuntimeError(f"unexpected Goal Thread status: {status!r}")
+            if status == "notLoaded":
                 await asyncio.sleep(self._poll_interval_seconds)
                 continue
-            if status != "idle":
-                raise RuntimeError(f"unexpected Goal Thread status: {status!r}")
             response = await thread.read(include_turns=True)
             native = getattr(response, "thread", None)
             if getattr(native, "id", None) != active.thread_id:
                 raise RuntimeError("Goal history Thread identity mismatch")
+            history_status = _thread_status_type(native)
+            if history_status not in {"idle", "active", "notLoaded"}:
+                raise RuntimeError(
+                    f"unexpected Goal history Thread status: {history_status!r}"
+                )
             turns = tuple(getattr(native, "turns", ()))
-            if any(_enum_value(getattr(turn, "status", None)) == "inProgress" for turn in turns):
-                await asyncio.sleep(self._poll_interval_seconds)
-                continue
             exact = next(
                 (
                     turn
@@ -7017,6 +7089,19 @@ class CodexRuntime:
                 ),
                 None,
             )
+            # An interrupted physical Turn can end the SDK logical stream while
+            # native Goal continuation keeps running. A later history Turn proves
+            # that the stream's final identity is stale; never adopt the later Turn.
+            if exact is not None and exact is not turns[-1]:
+                raise RuntimeError("Goal stream final Turn is not the latest history Turn")
+            if (
+                persisted.status is GoalStatus.ACTIVE
+                or status != "idle"
+                or history_status != "idle"
+                or any(_enum_value(getattr(turn, "status", None)) == "inProgress" for turn in turns)
+            ):
+                await asyncio.sleep(self._poll_interval_seconds)
+                continue
             if exact is None:
                 await asyncio.sleep(self._poll_interval_seconds * 4)
                 continue
