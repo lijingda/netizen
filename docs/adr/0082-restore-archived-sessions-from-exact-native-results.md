@@ -14,7 +14,7 @@ related: 0049, 0069, 0070
 
 ## 原生结果与失败边界
 
-固定 SDK/App Server 0.162.1 没有独立的“已经恢复”结果。只在以下三种结果后调用
+固定 SDK/App Server 0.163.0 没有独立的“已经恢复”结果。只在以下三种结果后调用
 `thread_resume(exact_id, include_turns=False)`，不传设置或权限 override：
 
 - unarchive 正常返回同一 ID；
@@ -27,8 +27,8 @@ related: 0049, 0069, 0070
 只有后续 resume 返回同一 ID，才可以继续登记订阅及本地切换。类型、code、完整消息、
 exact ID 与调用阶段必须同时匹配；不检查异常链、不匹配关键词、不把其他 RPC 错误视为
 无副作用。后续 SDK 升级须重新核验这些原生边界。
-对应源码为固定 tag 的 [LocalThreadStore unarchive](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/thread-store/src/local/unarchive_thread.rs)
-与 [App Server Thread processor](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/app-server/src/request_processors/thread_processor.rs)。
+对应源码为固定 tag 的 [LocalThreadStore unarchive](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/thread-store/src/local/unarchive_thread.rs)
+与 [App Server Thread processor](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/app-server/src/request_processors/thread_processor.rs)。
 
 resume 的已验证明确归档、缺失、writer 或关闭拒绝结束本次操作，释放本次 lifecycle
 reservation，保留 Binding/current/context，不循环 unarchive/resume 或自动清除关联。

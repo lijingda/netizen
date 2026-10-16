@@ -736,6 +736,10 @@ Binding/current 且释放本次 lifecycle。两次本地 mock Responses 请求�
 idle/running × 恢复成功/明确拒绝四种情况，不启动新 Turn 或误 steer。
 独立代码 review 未发现阻断问题；未部署。
 
+同日同步已升级 SDK/App Server `0.163.0` 的 main 后，重新核对 unarchive 的移动前拒绝、
+resume 的精确错误与 running Goal 通知路径，六个隔离原生恢复场景再次通过；没有增加
+兼容分支，也没有改变 main 已有的 Goal 观测失败恢复规则。上述真实 Goal 与飞书验证边界仍保留。
+
 真实原生持久性验证仅使用 disposable cwd 和自建 Thread：有历史的来源创建持久 fork，
 在分支尚无新增 Turn 时同连接 resume、关闭首个 App Server 后冷 resume，核对 exact ID
 和继承上下文。目录可能漏列，但不影响直接恢复。随后验证来源的历史引用删除拒绝，
