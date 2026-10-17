@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from lark_channel import OutboundCard
+from lark_channel import OutboundCard, OutboundPost
 
 from netizen_cli.cards import turn_progress_card
 from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
+from netizen_cli.partial_answers import PartialAnswer
 from netizen_cli.runtime.contracts import ActiveState, TurnActivitySnapshot
 
 
@@ -109,20 +111,43 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
             self.channel.update_card.await_args.args[0], "om_topic_progress"
         )
 
-    async def test_failed_validation_never_starts_polling_or_retains_a_session(self):
+    async def test_failed_initial_validation_keeps_only_validated_no_card_partial_delivery(self):
         for error in (None, RuntimeError("topic confirmation unavailable")):
             with self.subTest(error=error):
-                validate = AsyncMock(return_value=False, side_effect=error)
-                with patch.object(self.presenter, "_poll", new_callable=AsyncMock) as poll:
-                    if error is None:
-                        started = await self.start(validate_reply=validate)
-                    else:
-                        with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR"):
-                            started = await self.start(validate_reply=validate)
-                    self.assertFalse(started)
-                    poll.assert_not_called()
-                validate.assert_awaited_once_with(self.result)
+                partial = PartialAnswer(thread_id=self.identity["thread_id"],
+                    turn_id=self.identity["turn_id"], item_id="partial-one", text="scheduled partial")
+                self.runtime.turn_activity.return_value = replace(self.activity, partial_answers=(partial,))
+                self.presenter._poll_seconds = 0.001
+                partial_result = SimpleNamespace(success=True, message_id="om_partial")
+                reply_partial = AsyncMock(return_value=partial_result)
+                partial_checked = asyncio.Event()
+
+                async def check(result):
+                    if result is partial_result:
+                        partial_checked.set()
+                    if error is not None:
+                        raise error
+                    return False
+
+                validate = AsyncMock(side_effect=check)
+                with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR"):
+                    self.assertTrue(await self.start(validate_reply=validate, reply_partial=reply_partial))
+                    await asyncio.wait_for(partial_checked.wait(), 1)
+                    session = self.presenter._sessions[tuple(self.identity.values())]
+                    self.assertIsNone(session.message_id)
+                    self.assertIsNotNone(session.task)
+                    delivery = await self.presenter.prepare_partial_answers(
+                        owner_id=self.identity["binding_id"], thread_id=self.identity["thread_id"],
+                        turn_id=self.identity["turn_id"], side=False, reply=reply_partial,
+                    )
+                self.assertEqual([call.args[0] for call in validate.await_args_list],
+                    [self.result, partial_result])
+                reply_partial.assert_awaited_once_with(OutboundPost(markdown="**阶段性答案**\n\nscheduled partial"))
+                self.assertEqual(session.confirmed_partials, set())
                 self.assertIsNone(await self.finish())
+                self.assertFalse(await self.presenter.deliver_partial_answers(delivery, (partial,)))
+                reply_partial.assert_awaited_once()
+                self.assertEqual(self.presenter._sessions, {})
                 self.channel.update_card.assert_not_awaited()
 
     async def test_validation_obeys_initial_reply_operation_deadline(self):
@@ -141,11 +166,17 @@ class ScheduledReplyPresenterTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(presenter, "_poll", new_callable=AsyncMock) as poll:
             with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR"):
-                self.assertFalse(await presenter.start(
+                self.assertTrue(await asyncio.wait_for(presenter.start(
                     **self.identity, origin=self.origin, validate_reply=validate,
-                ))
-            poll.assert_not_called()
+                ), 1))
+            poll.assert_called_once()
         self.assertTrue(entered.is_set())
+        session = presenter._sessions[tuple(self.identity.values())]
+        self.assertIsNone(session.message_id)
+        render = Mock()
+        self.assertIsNone(await presenter.finish(**self.identity, activity=self.activity, render=render))
+        render.assert_not_called()
+        self.channel.update_card.assert_not_awaited()
 
     async def test_terminal_retries_preserve_explicit_rejection_or_unknown_result(self):
         rejected = SimpleNamespace(success=False, raw={"code": 230017})

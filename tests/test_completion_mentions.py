@@ -125,6 +125,18 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
             root_id="om_older_root", parent_id=card_id,
         ))
 
+    def assert_goal_answer_and_controls(self, *, enabled, target, text="Goal 结果正文"):
+        self.assertEqual(len(self.channel.replies), 2)
+        self.assertEqual([message_id for message_id, _ in self.channel.replies], [target, target])
+        answer = self.channel.replies[0][1]
+        self.assert_mention(answer, enabled=enabled, text=text)
+        self.assertEqual(answer.markdown if isinstance(answer, OutboundPost) else answer, text)
+        controls = self.channel.replies[1][1]
+        self.assertIsInstance(controls, OutboundCard)
+        self.assertNotIn(text, str(controls.card))
+        self.assertNotIn("<at ", json.dumps(controls.card))
+        return controls
+
     def assert_reminder(self, *, enabled=True, card_id="om_progress", topic=False):
         self.assertEqual(len(self.channel.send_calls), int(enabled))
         if not enabled:
@@ -550,9 +562,10 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     self.channel.replies.clear()
                     self.channel.updates.clear()
                     self.channel.send_calls.clear()
-                    self.channel.reply_results.append(sent_result(
-                        f"om_goal_{progress}_{index}", chat_id="oc_direct",
-                    ))
+                    self.channel.reply_results.extend([
+                        sent_result(f"om_goal_answer_{progress}_{index}", chat_id="oc_direct"),
+                        sent_result(f"om_goal_controls_{progress}_{index}", chat_id="oc_direct"),
+                    ])
                     outcome = self.goal_outcome(
                         logical_turn_id=f"goal-{progress}-{index}",
                         goal=native_goal(
@@ -567,16 +580,11 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                         ),
                     )
                     await self.app.handle_completion(outcome)
-                    self.assertEqual(len(self.channel.replies), 1)
-                    card = self.channel.replies[0][1]
+                    card = self.assert_goal_answer_and_controls(enabled=enabled, target=self.origin.id)
                     self.assertEqual(
                         bool(_elements(card.card, "collapsible_panel")),
                         progress and turn_status in {"completed", "failed", "interrupted"},
                     )
-                    if error is not None:
-                        self.assertNotIn("<at ", json.dumps(card.card))
-                    else:
-                        self.assert_mention(card, enabled=enabled, text="Goal 结果正文")
                     self.assert_reminder(enabled=False)
 
     async def test_goal_card_reminder_respects_scope_and_all_feedback_combinations(self):
@@ -630,17 +638,16 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                         TimeoutError("update reply lost") for _ in range(failures)
                     )
                     if update_fails:
-                        self.channel.reply_results.append(sent_result(
-                            "om_new_goal", chat_id=scope.chat_id, thread_id=scope.topic_id,
-                        ))
+                        self.channel.reply_results.extend([
+                            sent_result("om_goal_answer", chat_id=scope.chat_id, thread_id=scope.topic_id),
+                            sent_result("om_goal_controls", chat_id=scope.chat_id, thread_id=scope.topic_id),
+                        ])
                     elif enabled:
                         self.queue_reminder(card_id, thread_id=scope.topic_id)
                     with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR") if failures else nullcontext():
                         await self.app.handle_completion(outcome)
                     if update_fails:
-                        self.assertEqual(len(self.channel.replies), 1)
-                        self.assertEqual(self.channel.replies[0][0], fallback_origin.id)
-                        self.assert_mention(self.channel.replies[0][1], enabled=enabled, text="Goal 结果正文")
+                        self.assert_goal_answer_and_controls(enabled=enabled, target=fallback_origin.id)
                     else:
                         self.assertEqual(self.channel.replies, [])
                     self.assertEqual(len(self.channel.updates), 3 if update_fails else failures + 1)
@@ -652,7 +659,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                         topic=kind is ScopeKind.TOPIC,
                     )
 
-    async def test_uncertain_goal_update_and_card_fallback_only_mention_on_first_attempt(self):
+    async def test_uncertain_goal_update_and_answer_post_never_repeat_mention_in_controls(self):
         for progress in (False, True):
             with self.subTest(progress=progress):
                 running = native_goal(created_at=1 + int(progress))
@@ -669,7 +676,10 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                 self.channel.card_update_results.extend(
                     TimeoutError("terminal update response lost") for _ in range(3)
                 )
-                self.channel.reply_results.append(TimeoutError("fallback card response lost"))
+                self.channel.reply_results.extend([
+                    TimeoutError("fallback answer response lost"),
+                    sent_result("om_goal_controls", chat_id="oc_direct"),
+                ])
                 with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
                     await self.app.handle_completion(self.goal_outcome(
                         origin=origin, goal=replace(running, status=GoalStatus.COMPLETE),
@@ -678,10 +688,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(self.channel.updates), 3)
                 self.assertEqual(self.channel.updates[0][0], "om_goal")
                 self.assert_mention(self.channel.updates[0][1], enabled=False, text="Goal 结果正文")
-                self.assertEqual(len(self.channel.replies), 2)
-                self.assertIsInstance(self.channel.replies[0][1], OutboundCard)
-                self.assert_mention(self.channel.replies[0][1], enabled=True, text="Goal 结果正文")
-                self.assert_mention(self.channel.replies[1][1], enabled=False, text="Goal 结果正文")
+                self.assert_goal_answer_and_controls(enabled=True, target=self.origin.id)
                 self.assert_reminder(enabled=False)
 
     async def test_oversized_goal_result_keeps_mention_when_only_goal_controls_were_updated(self):
@@ -709,6 +716,8 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("<at ", json.dumps(self.channel.updates[0][1]))
                 self.assertEqual(len(self.channel.replies), 1)
                 self.assert_mention(self.channel.replies[0][1], enabled=True, text=answer)
+                self.assertEqual(self.channel.replies[0][1].markdown, answer)
+                self.assertNotIn(answer, str(self.channel.updates[0][1]))
                 self.assert_reminder(enabled=False)
 
     async def test_progress_goal_reminder_uses_delivered_card_not_stale_origin(self):
@@ -730,9 +739,10 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                     self.channel.card_update_results.extend(
                         TimeoutError("update reply lost") for _ in range(3)
                     )
-                    self.channel.reply_results.append(sent_result(
-                        "om_new_goal", chat_id="oc_direct",
-                    ))
+                    self.channel.reply_results.extend([
+                        sent_result("om_goal_answer", chat_id="oc_direct"),
+                        sent_result("om_goal_controls", chat_id="oc_direct"),
+                    ])
                 if not update_fails:
                     self.queue_reminder("om_current_goal")
                 outcome = self.goal_outcome(
@@ -747,9 +757,9 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(self.channel.updates), 3 if update_fails else 1)
                 self.assertEqual(self.channel.updates[0][0], "om_current_goal")
                 self.assert_mention(self.channel.updates[0][1], enabled=False, text="Goal 结果正文")
-                self.assertEqual(len(self.channel.replies), int(update_fails))
+                self.assertEqual(len(self.channel.replies), 2 * int(update_fails))
                 if update_fails:
-                    self.assert_mention(self.channel.replies[0][1], enabled=True, text="Goal 结果正文")
+                    self.assert_goal_answer_and_controls(enabled=True, target=self.origin.id)
                 self.assert_reminder(enabled=not update_fails, card_id="om_current_goal")
 
     def test_scheduled_initial_turn_never_mentions_a_human_even_with_valid_owner(self):

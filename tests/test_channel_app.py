@@ -6110,12 +6110,14 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.updates[-1][0], "om_goal_progress")
         self.assertIn("goal answer survives", str(self.channel.updates[-1][1]))
         self.assertNotIn(key, self.app._progress_cards._goal_sessions)
-        self.assertEqual(len(self.channel.replies), 1 if terminal_succeeds else 2)
+        self.assertEqual(len(self.channel.replies), 1 if terminal_succeeds else 3)
         if not terminal_succeeds:
+            self.assertEqual(self.channel.replies[-2][1], completion_post("goal answer survives"))
             self.assertEqual(self.channel.replies[-1][0], prompt.id)
             fallback = self.channel.replies[-1][1]
             self.assertIsInstance(fallback, OutboundCard)
-            self.assertIn("goal answer survives", str(fallback.card))
+            self.assertNotIn("goal answer survives", str(fallback.card))
+            self.assertIn("答案正文另行发送", str(fallback.card))
 
     async def test_goal_finish_does_not_deadlock_with_refresh_in_flight(self) -> None:
         await self.fixture.new()
@@ -6778,7 +6780,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("已请求清理", rendered)
         self.assertIn(result_path, rendered)
 
-    async def test_terminal_goal_fallback_card_clear_preserves_result_and_files(
+    async def test_terminal_goal_fallback_card_clear_preserves_controls_and_files(
         self,
     ) -> None:
         await self.fixture.new()
@@ -6796,6 +6798,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.channel.reply_results.extend(
             (
                 sent_result("om_goal_original", chat_id="oc_direct"),
+                sent_result("om_goal_answer", chat_id="oc_direct"),
                 sent_result("om_goal_fallback", chat_id="oc_direct"),
             )
         )
@@ -6828,7 +6831,9 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(fallback, OutboundCard)
         assert isinstance(fallback, OutboundCard)
         fallback_text = json.dumps(fallback.card, ensure_ascii=False)
-        self.assertIn("fallback answer survives", fallback_text)
+        self.assertEqual(self.channel.replies[-2][1], completion_post("fallback answer survives"))
+        self.assertNotIn("fallback answer survives", fallback_text)
+        self.assertIn("答案正文另行发送", fallback_text)
         self.assertIn(result_path.name, fallback_text)
         clear_value = next(
             behavior["value"]
@@ -6848,7 +6853,8 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.clear_goal_calls, [self.store.get(binding.id)])
         updated = json.dumps(self.channel.updates[-1][1], ensure_ascii=False)
         self.assertIn("Goal 已结束", updated)
-        self.assertIn("fallback answer survives", updated)
+        self.assertNotIn("fallback answer survives", updated)
+        self.assertIn("答案正文另行发送", updated)
         self.assertIn(result_path.name, updated)
 
     async def test_restart_stale_goal_control_cannot_drop_result_modules(self) -> None:
@@ -7027,7 +7033,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn(
-            "结果正文无法完整放入卡片",
+            "答案正文另行发送",
             json.dumps(self.channel.updates[-1][1], ensure_ascii=False),
         )
         self.assertEqual(self.channel.replies[-1][1], completion_post(oversized))
