@@ -136,7 +136,7 @@ def _card_scenarios(scope: FeishuScope) -> list[tuple[str, list[tuple[str, Outbo
 
 
 async def _text_samples(send_post) -> int:
-    # No native runtime or notification consumer: finish uses only supplied
+    # No native runtime or notification consumer: delivery uses only supplied
     # exact completed items and the real production rich-text delivery method.
     presenter = _ReplyCardPresenter(None, None, operation_timeout_seconds=30)
     try:
@@ -145,9 +145,10 @@ async def _text_samples(send_post) -> int:
             thread_id, turn_id = f"probe-thread-{side}", f"probe-turn-{side}"
             first = PartialAnswer(thread_id, turn_id, "first", f"{_NOTICE}\n{label}／关闭进度卡：第一段稳定答案。")
             second = PartialAnswer(thread_id, turn_id, "second", f"{_NOTICE}\n{label}／关闭进度卡：第二段稳定答案。")
-            confirmed = await presenter.finish_partial_answers(owner_id=f"probe-owner-{side}", thread_id=thread_id,
-                turn_id=turn_id, partial_answers=(first, first, second), side=side, progress_enabled=False,
+            delivery = await presenter.prepare_partial_answers(owner_id=f"probe-owner-{side}", thread_id=thread_id,
+                turn_id=turn_id, side=side,
                 reply=lambda post: send_post(label, post))
+            confirmed = await presenter.deliver_partial_answers(delivery, (first, first, second))
             if not confirmed:
                 raise RuntimeError("synthetic rich-text sample delivery was not confirmed")
         return 4

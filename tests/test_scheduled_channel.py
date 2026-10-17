@@ -26,6 +26,8 @@ from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.domain import (
     FeishuScope,
     ScopeKind,
+    ScheduledBindingConversation,
+    ScheduledBindingOrigin,
     ScheduledOrigin,
     MentionContextMode,
     MessageContextAnchor,
@@ -262,6 +264,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             binding_id=request["binding"].id, thread_id="native-" + claim.run.id,
             turn_id="turn-initial", owner_id=request["owner_id"], origin=request["origin"],
             result=completed_turn_result(final_response="only one terminal result"),
+            partial_answers=(PartialAnswer("native-" + claim.run.id, "turn-initial", "partial-one", "card partial"),),
             task_feedback=BindingTaskFeedback(True, True)))
         self.assertEqual(len(self.channel.replies), 1)  # initial progress card only
         self.assertEqual(len(self.channel.updates), len(responses))
@@ -294,14 +297,19 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_render_failure_before_update_can_fall_back(self):
         claim, request = await self.progress_fixture()
         self.store.schedules.release(claim.run.id)
-        self.channel.reply_results.append(sent_result("om_final", chat_id="oc_group", thread_id="omt_fresh"))
+        self.channel.reply_results.extend([
+            sent_result("om_partial", chat_id="oc_group", thread_id="omt_fresh"),
+            sent_result("om_final", chat_id="oc_group", thread_id="omt_fresh"),
+        ])
         with patch("netizen_cli.channel_app.turn_progress_card", side_effect=ValueError("cannot render")):
             await self.app.handle_completion(TurnOutcome(
                 binding_id=request["binding"].id, thread_id="native-" + claim.run.id,
                 turn_id="turn-initial", owner_id=request["owner_id"], origin=request["origin"],
                 result=completed_turn_result(final_response="render fallback"),
+                partial_answers=(PartialAnswer("native-" + claim.run.id, "turn-initial", "partial-one", "original partial"),),
                 task_feedback=BindingTaskFeedback(True, True)))
-        self.assertEqual(len(self.channel.replies), 2)
+        self.assertEqual(len(self.channel.replies), 3)
+        self.assertEqual(self.channel.replies[-2][1], OutboundPost(markdown="**阶段性答案**\n\noriginal partial"))
         self.assertEqual(self.channel.replies[-1][1], "render fallback")
         self.assertEqual(self.channel.updates, [])
         self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "sent")
@@ -726,8 +734,8 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(call.kwargs["message_id"], "om_seed")
                     self.assertTrue(call.kwargs["reply_in_thread"])
                 driver.create_message.assert_not_awaited()
-                # This receipt belongs to the truthful closing, not the partial.
-                self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "sent")
+                # A confirmed closing cannot certify an unconfirmed answer batch.
+                self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "sent" if confirmed else "unknown")
 
     async def test_running_partial_with_unknown_destination_is_not_replayed_or_a_completion_receipt(self):
         claim = self.claim()
@@ -779,6 +787,54 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.channel.replies), 2)
         self.assertIn("投递未确认", self.channel.replies[-1][1])
         self.assertNotIn("stable answer", self.channel.replies[-1][1])
+        self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "unknown")
+
+    async def test_failed_partial_then_confirmed_final_keeps_whole_batch_unknown(self):
+        claim, request = await self.completion_fixture()
+        native_id = "native-" + claim.run.id
+        partial = PartialAnswer(native_id, "turn-initial", "partial-one", "partial original<br><br>")
+        observed = []
+
+        async def reply(origin, content, opts=None):
+            observed.append(content)
+            self.assertIsNone(self.store.schedules.get_run(claim.run.id).delivery_state)
+            if len(observed) == 1:
+                return SimpleNamespace(success=False)
+            return sent_result("om_final", chat_id="oc_group", thread_id="omt_fresh")
+
+        with patch.object(self.channel, "reply", side_effect=reply):
+            await self.app.handle_completion(TurnOutcome(
+                binding_id=request["binding"].id, thread_id=native_id, turn_id="turn-initial",
+                owner_id=request["owner_id"], origin=request["origin"],
+                result=completed_turn_result(final_response="final original"), partial_answers=(partial,),
+            ))
+        self.assertEqual(observed, [OutboundPost(markdown=f"**阶段性答案**\n\n{partial.text}"), "final original"])
+        self.assertEqual(self.store.schedules.get_run(claim.run.id).delivery_state, "unknown")
+
+    async def test_scheduled_binding_origin_uses_ordinary_partial_fallback_after_update_failure(self):
+        claim, request = await self.progress_fixture()
+        native_id = "native-" + claim.run.id
+        run_before = self.store.schedules.get_run(claim.run.id)
+        origin = ScheduledBindingOrigin(
+            app_id="app", chat_id="oc_group", message_id="om_seed",
+            conversation=ScheduledBindingConversation("oc_group", "group", "omt_fresh"),
+            plan_id=claim.plan.id, run_id=claim.run.id, binding_id=request["binding"].id,
+        )
+        self.channel.card_update_results.extend(SimpleNamespace(success=False, raw={"code": 2200}) for _ in range(3))
+        self.channel.reply_results.extend(sent_result(f"om_post_{index}", chat_id="oc_group", thread_id="omt_fresh") for index in range(2))
+        with patch("netizen_cli.channel.reply_presenter._TERMINAL_CARD_RETRY_SECONDS", 0):
+            await self.app.handle_completion(TurnOutcome(
+                binding_id=request["binding"].id, thread_id=native_id, turn_id="turn-initial",
+                owner_id=request["owner_id"], origin=origin,
+                result=completed_turn_result(final_response="ordinary final"),
+                partial_answers=(PartialAnswer(native_id, "turn-initial", "partial-one", "ordinary partial"),),
+                task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+            ))
+        self.assertEqual(len(self.channel.updates), 3)
+        self.assertEqual([content for _, content in self.channel.replies[1:]], [
+            OutboundPost(markdown="**阶段性答案**\n\nordinary partial"), "ordinary final",
+        ])
+        self.assertEqual(self.store.schedules.get_run(claim.run.id), run_before)
 
     async def test_success_without_exact_destination_is_not_marked_delivered_or_retried(self):
         claim, request = await self.completion_fixture()

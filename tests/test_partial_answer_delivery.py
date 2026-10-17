@@ -3,16 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from lark_channel import OutboundCard, OutboundPost
+from lark_channel import Identity, OutboundCard, OutboundPost
 
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
 from netizen_cli.codex_runtime import (
-    GoalOperationState, GoalOutcome, GoalFinalizationStatus, Submission, SubmitDisposition, TurnOutcome,
+    GoalOperationState, GoalOutcome, GoalFinalizationStatus, SideTurnOutcome, Submission, SubmitDisposition, TurnOutcome,
 )
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.partial_answers import PartialAnswer
@@ -20,7 +21,7 @@ from netizen_cli.sdk_gap_adapter import GoalStatus
 from tests.support.channel_fixtures import channel_fixture
 from tests.support.channel_messages import FakeChannel, FakeMessage
 from tests.support.channel_results import (
-    completed_turn_result, goal_activity_snapshot, native_goal,
+    completed_turn_result, file_change_item, goal_activity_snapshot, native_goal,
     sent_result, side_turn_activity_snapshot, turn_activity_snapshot,
 )
 from tests.support.channel_runtime import StubRuntime
@@ -63,10 +64,11 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(channel.replies, [])
                 self.assertEqual(channel.reactions, [])
                 self.assertEqual(posts, [OutboundPost(markdown="**阶段性答案**\n\nfirst stable answer")])
-                confirmed = await presenter.finish_partial_answers(
-                    owner_id=owner, thread_id=thread, turn_id=turn,
-                    partial_answers=(first, first, answer(thread="wrong"), second),
-                    side=side, progress_enabled=False, reply=reply,
+                delivery = await presenter.prepare_partial_answers(
+                    owner_id=owner, thread_id=thread, turn_id=turn, side=side, reply=reply,
+                )
+                confirmed = await presenter.deliver_partial_answers(
+                    delivery, (first, first, answer(thread="wrong"), second),
                 )
                 self.assertTrue(confirmed)
                 self.assertEqual(len(posts), 2)
@@ -93,8 +95,9 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
             origin=FakeMessage("work", message_id="om_origin"), progress_enabled=False, reply_partial=reply)
         await asyncio.wait_for(attempted.wait(), 1)
         await presenter.park_unavailable(binding_id="binding-one", thread_id="native-one", turn_id="turn-one")
-        confirmed = await presenter.finish_partial_answers(owner_id="binding-one", thread_id="native-one",
-            turn_id="turn-one", partial_answers=(partial,), side=False, progress_enabled=False, reply=reply)
+        delivery = await presenter.prepare_partial_answers(owner_id="binding-one", thread_id="native-one",
+            turn_id="turn-one", side=False, reply=reply)
+        confirmed = await presenter.deliver_partial_answers(delivery, (partial,))
         self.assertFalse(confirmed)
         self.assertEqual(len(attempts), 1)
 
@@ -119,13 +122,18 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         await presenter.start(binding_id="binding-one", thread_id="native-one", turn_id="turn-one",
             origin=FakeMessage("work", message_id="om_origin"), progress_enabled=False, reply_partial=reply)
         await asyncio.wait_for(entered.wait(), 1)
-        finishing = asyncio.create_task(presenter.finish_partial_answers(owner_id="binding-one",
-            thread_id="native-one", turn_id="turn-one", partial_answers=partials,
-            side=False, progress_enabled=False, reply=reply))
+        preparing = asyncio.create_task(presenter.prepare_partial_answers(owner_id="binding-one",
+            thread_id="native-one", turn_id="turn-one", side=False, reply=reply))
+        session = presenter._sessions[("binding-one", "native-one", "turn-one")]
+        await asyncio.wait_for(session.stopped.wait(), 1)
         release.set()
-        self.assertTrue(await asyncio.wait_for(finishing, 1))
+        delivery = await asyncio.wait_for(preparing, 1)
+        self.assertEqual(len(attempts), 1)
+        self.assertIs(delivery.attempted_partials, session.attempted_partials)
+        self.assertIs(delivery.confirmed_partials, session.confirmed_partials)
+        self.assertIn(("binding-one", "native-one", "turn-one"), presenter._sessions)
+        self.assertTrue(await presenter.deliver_partial_answers(delivery, partials))
         self.assertEqual(len(attempts), 2)
-        self.assertEqual(presenter._sessions, {})
 
     async def test_formatting_failure_before_transport_can_be_retried_at_terminal(self):
         channel, runtime = FakeChannel(), StubRuntime()
@@ -140,8 +148,9 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         with patch("netizen_cli.channel.reply_presenter.OutboundPost", side_effect=ValueError("format failed")):
             await presenter._deliver_partial_answers(session, (partial,))
         reply.assert_not_awaited()
-        confirmed = await presenter.finish_partial_answers(owner_id="binding-one", thread_id="native-one",
-            turn_id="turn-one", partial_answers=(partial,), side=False, progress_enabled=False, reply=reply)
+        delivery = await presenter.prepare_partial_answers(owner_id="binding-one", thread_id="native-one",
+            turn_id="turn-one", side=False, reply=reply)
+        confirmed = await presenter.deliver_partial_answers(delivery, (partial,))
         self.assertTrue(confirmed)
         reply.assert_awaited_once()
 
@@ -165,11 +174,131 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
                     reply_partial=reply, validate_reply=validate)
                 session = presenter._sessions[("binding-one", "native-one", "turn-one")]
                 await asyncio.wait_for(presenter._deliver_partial_answers(session, (answer(),)), timeout=1)
-                confirmed = await presenter.finish_partial_answers(owner_id="binding-one",
-                    thread_id="native-one", turn_id="turn-one", partial_answers=(answer(),),
-                    side=False, progress_enabled=False, reply=reply)
+                delivery = await presenter.prepare_partial_answers(owner_id="binding-one",
+                    thread_id="native-one", turn_id="turn-one", side=False, reply=reply)
+                confirmed = await presenter.deliver_partial_answers(delivery, (answer(),))
                 self.assertFalse(confirmed)
                 reply.assert_awaited_once()
+
+
+    async def test_initial_card_failure_keeps_running_partial_delivery_without_a_card(self):
+        for side in (False, True):
+            for failure in ("send", "render", "missing-id", "validation"):
+                if side and failure == "validation":
+                    continue
+                with self.subTest(side=side, failure=failure):
+                    channel, runtime = FakeChannel(), StubRuntime()
+                    presenter = _ReplyCardPresenter(channel, runtime, poll_seconds=0.001)
+                    self.addAsyncCleanup(presenter.close)
+                    owner = "side-one" if side else "binding-one"
+                    thread = "native-side-1" if side else "native-one"
+                    turn = "side-turn-1" if side else "turn-one"
+                    snapshot = (side_turn_activity_snapshot(side_id=owner) if side
+                                else turn_activity_snapshot(binding_id=owner))
+                    partial = answer(thread=thread, turn=turn)
+                    snapshot = replace(snapshot, partial_answers=(partial,), revision=2)
+                    values = runtime.side_turn_activity_values if side else runtime.turn_activity_values
+                    values[owner] = snapshot
+                    delivered = asyncio.Event()
+                    posts = []
+
+                    async def reply_partial(post):
+                        posts.append(post)
+                        delivered.set()
+                        return sent_result("om_partial", chat_id="oc_direct")
+
+                    reply = AsyncMock(return_value=(object() if failure == "missing-id" else
+                        sent_result("om_untrusted" if failure == "validation" else "om_card", chat_id="oc_direct")))
+                    if failure == "send":
+                        reply.side_effect = RuntimeError("initial card unavailable")
+                    context = (patch("netizen_cli.channel.reply_presenter.turn_progress_card",
+                                     side_effect=ValueError("card render failed"))
+                               if failure == "render" else nullcontext())
+                    with context:
+                        common = dict(thread_id=thread, turn_id=turn, reply=reply,
+                            origin=FakeMessage("work", message_id="om_origin"),
+                            progress_enabled=True, reply_partial=reply_partial)
+                        started = (await presenter.start_side(side_id=owner, **common) if side else
+                            await presenter.start(binding_id=owner, **common,
+                                validate_reply=AsyncMock(return_value=False) if failure == "validation" else None))
+                    self.assertTrue(started)
+                    await asyncio.wait_for(delivered.wait(), 1)
+                    sessions = presenter._side_sessions if side else presenter._sessions
+                    self.assertIsNone(sessions[(owner, thread, turn)].message_id)
+                    self.assertEqual(posts, [OutboundPost(markdown="**阶段性答案**\n\nfirst stable answer")])
+                    self.assertEqual(channel.updates, [])
+
+    async def test_prepare_receipts_survive_failed_terminal_card_then_fill_only_missing_items(self):
+        channel, runtime = FakeChannel(), StubRuntime()
+        presenter = _ReplyCardPresenter(channel, runtime, poll_seconds=10)
+        self.addAsyncCleanup(presenter.close)
+        runtime.turn_activity_values["binding-one"] = turn_activity_snapshot(binding_id="binding-one")
+        reply = AsyncMock(return_value=sent_result("om_partial", chat_id="oc_direct"))
+        common = dict(binding_id="binding-one", thread_id="native-one", turn_id="turn-one",
+            origin=FakeMessage("work", message_id="om_origin"), reply_partial=reply)
+        await presenter.start(**common, progress_enabled=False)
+        first, second = answer(), answer("second", "two")
+        session = presenter._sessions[("binding-one", "native-one", "turn-one")]
+        await presenter._deliver_partial_answers(session, (first,))
+        await presenter.start(**common, progress_enabled=True,
+            reply=AsyncMock(return_value=sent_result("om_card", chat_id="oc_direct")))
+        delivery = await presenter.prepare_partial_answers(owner_id="binding-one", thread_id="native-one",
+            turn_id="turn-one", side=False, reply=reply)
+        self.assertEqual(reply.await_count, 1)
+
+        def render(snapshot):
+            raise ValueError("terminal card too large")
+
+        failed = await presenter.finish(binding_id="binding-one", thread_id="native-one", turn_id="turn-one",
+            activity=None, render=render)
+        self.assertIsNone(failed)
+        self.assertEqual(presenter._sessions, {})
+        self.assertTrue(await presenter.deliver_partial_answers(delivery, (first, second)))
+        self.assertEqual(reply.await_count, 2)
+        self.assertEqual(reply.call_args.args[0].markdown, "**阶段性答案**\n\nsecond")
+
+    async def test_terminal_delivery_budget_covers_whole_batch_and_does_not_replay_timeout(self):
+        presenter = _ReplyCardPresenter(FakeChannel(), StubRuntime(), operation_timeout_seconds=1)
+        self.addAsyncCleanup(presenter.close)
+        entered = asyncio.Event()
+        posts = []
+
+        async def reply(post):
+            posts.append(post)
+            entered.set()
+            await asyncio.Event().wait()
+
+        delivery = await presenter.prepare_partial_answers(owner_id="binding-one", thread_id="native-one",
+            turn_id="turn-one", side=False, reply=reply)
+        partials = (answer(), answer("second", "two"), answer("third", "three"))
+        result = await asyncio.wait_for(
+            presenter.deliver_partial_answers(delivery, partials, timeout_seconds=0.01), 1,
+        )
+        self.assertFalse(result)
+        self.assertTrue(entered.is_set())
+        self.assertEqual(len(posts), 1)
+        self.assertFalse(await presenter.deliver_partial_answers(delivery, partials, timeout_seconds=0))
+        self.assertEqual(len(posts), 1)
+        self.assertTrue(await presenter.deliver_partial_answers(delivery, (), timeout_seconds=0))
+        self.assertFalse(await presenter.deliver_partial_answers(
+            delivery, (answer(thread="wrong-thread"),), timeout_seconds=0,
+        ))
+        self.assertEqual(delivery.attempted_partials, {("native-one", "turn-one", "partial-one")})
+        self.assertEqual(delivery.confirmed_partials, set())
+
+    async def test_goal_delivery_allows_multiple_physical_turns_but_requires_exact_thread(self):
+        presenter = _ReplyCardPresenter(FakeChannel(), StubRuntime())
+        self.addAsyncCleanup(presenter.close)
+        reply = AsyncMock(return_value=sent_result("om_partial", chat_id="oc_direct"))
+        delivery = await presenter.prepare_partial_answers(owner_id="binding-one", thread_id="native-one",
+            turn_id=None, side=False, reply=reply)
+        first, second = answer(turn="physical-one"), answer("second", turn="physical-two")
+        partials = (first, answer("wrong thread", thread="another-thread"), second, first)
+        self.assertTrue(await presenter.deliver_partial_answers(delivery, partials))
+        self.assertEqual([call.args[0].markdown for call in reply.await_args_list],
+            ["**阶段性答案**\n\nfirst stable answer", "**阶段性答案**\n\nsecond"])
+        self.assertTrue(await presenter.deliver_partial_answers(delivery, partials))
+        self.assertEqual(reply.await_count, 2)
 
 
 class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
@@ -223,26 +352,26 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("未产生文本回复", text)
                 self.assertNotIn("first stable answer", text)
 
-    async def test_running_card_failure_keeps_partial_module_in_replacement_card(self):
-        self.channel.reply_results.append(sent_result("om_replacement", chat_id="oc_direct"))
+    async def test_missing_progress_card_sends_partial_before_final(self):
+        self.channel.reply_results.append(sent_result("om_partial", chat_id="oc_direct"))
         outcome = TurnOutcome(binding_id=self.binding.id, thread_id="native-one", turn_id="turn-one",
             owner_id="ou_user", origin=FakeMessage("work", message_id="om_origin"),
             result=completed_turn_result(final_response="final answer"), partial_answers=(answer(),),
             task_feedback=BindingTaskFeedback(progress_card_enabled=True))
         await self.app.handle_completion(outcome)
-        self.assertEqual(len(self.channel.replies), 1)
-        card = self.channel.replies[0][1]
-        self.assertIsInstance(card, OutboundCard)
-        self.assertIn("first stable answer", str(card.card))
-        self.assertIn("final answer", str(card.card))
+        self.assertEqual(len(self.channel.replies), 2)
+        self.assertEqual(self.channel.replies[0][1], OutboundPost(markdown="**阶段性答案**\n\nfirst stable answer"))
+        closing = self.channel.replies[1][1]
+        self.assertEqual(closing.markdown if isinstance(closing, OutboundPost) else closing, "final answer")
 
-    async def test_partial_only_card_capacity_failure_never_claims_answer_delivery(self):
+    async def test_partial_only_unknown_post_never_claims_answer_delivery(self):
         outcome = TurnOutcome(binding_id=self.binding.id, thread_id="native-one", turn_id="turn-one",
             owner_id="ou_user", origin=FakeMessage("work", message_id="om_origin"),
             result=completed_turn_result(final_response=None), partial_answers=(answer(),),
             task_feedback=BindingTaskFeedback(progress_card_enabled=True))
-        with patch("netizen_cli.channel_app.reply_card", side_effect=ValueError("existing capacity guard")):
-            await self.app.handle_completion(outcome)
+        self.channel.reply_results.append(SimpleNamespace(success=False))
+        await self.app.handle_completion(outcome)
+        self.assertEqual(len(self.channel.replies), 2)
         closing = self.channel.replies[-1][1]
         text = closing.markdown if isinstance(closing, OutboundPost) else closing
         self.assertIn("投递未确认", text)
@@ -258,10 +387,13 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
         card = self.channel.replies[-1][1]
         self.assertIsInstance(card, OutboundCard)
         self.assertIn("自动结束结果未知", str(card.card))
-        self.assertIn("first stable answer", str(card.card))
+        self.assertNotIn("first stable answer", str(card.card))
+        self.assertEqual(self.channel.replies[0][1].markdown,
+                         "**阶段性答案**\n\nfirst stable answer")
+        self.assertIn("自动结束结果未知", str(self.channel.replies[1][1]))
         self.assertNotIn("未产生文本回复", str(card.card))
 
-    async def test_partial_replacement_card_keeps_failed_and_interrupted_chrome(self):
+    async def test_failed_and_interrupted_fallback_sends_partial_before_status(self):
         for status in ("failed", "interrupted"):
             with self.subTest(status=status):
                 self.channel.replies.clear()
@@ -270,10 +402,13 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
                     result=SimpleNamespace(status=status, final_response=None, items=[]),
                     partial_answers=(answer(),), task_feedback=BindingTaskFeedback(progress_card_enabled=True))
                 await self.app.handle_completion(outcome)
-                card = self.channel.replies[-1][1]
-                self.assertIsInstance(card, OutboundCard)
-                self.assertNotEqual(card.card["header"]["template"], "green")
-                self.assertIn("first stable answer", str(card.card))
+                self.assertEqual(len(self.channel.replies), 2)
+                self.assertEqual(self.channel.replies[0][1], OutboundPost(markdown="**阶段性答案**\n\nfirst stable answer"))
+                closing = self.channel.replies[-1][1]
+                self.assertIsInstance(closing, (str, OutboundPost))
+                text = closing.markdown if isinstance(closing, OutboundPost) else closing
+                self.assertIn("中断" if status == "interrupted" else "未完成", text)
+                self.assertNotIn("first stable answer", text)
 
     async def test_goal_failed_fallback_send_does_not_claim_partial_delivery(self):
         self.channel.reply_results.append(SimpleNamespace(success=False))
@@ -281,11 +416,13 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
             owner_id="ou_user", origin=FakeMessage("work", message_id="om_origin"), goal=native_goal(status=GoalStatus.COMPLETE),
             final_physical_turn_id="turn-one", final_turn_status="completed", partial_answers=(answer(),))
         await self.app.handle_completion(outcome)
-        self.assertEqual(len(self.channel.replies), 2)
-        last = self.channel.replies[-1][1]
+        self.assertEqual(len(self.channel.replies), 3)
+        self.assertIsInstance(self.channel.replies[0][1], OutboundPost)
+        last = self.channel.replies[1][1]
         text = last.markdown if isinstance(last, OutboundPost) else last
         self.assertIn("投递未确认", text)
         self.assertNotIn("答案见阶段性答案", text)
+        self.assertIsInstance(self.channel.replies[-1][1], OutboundCard)
 
     async def test_oversized_goal_partial_still_updates_same_control_card_to_terminal(self):
         from netizen_cli.cards import goal_generation
@@ -310,27 +447,94 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
                 self.channel.updates.clear()
                 self.channel.replies.clear()
                 oversized = answer("x" * 55_001, item="oversized")
+                partials = (previous, oversized) if prior_delivered else (oversized,)
+                self.channel.reply_results.extend(
+                    sent_result(f"om_partial_{index}", chat_id="oc_direct")
+                    for index in range(len(partials))
+                )
                 outcome = GoalOutcome(binding_id=self.binding.id, thread_id="native-one", logical_turn_id="goal-one",
                     owner_id="ou_user", origin=origin, goal=native_goal(status=GoalStatus.COMPLETE),
                     final_physical_turn_id="turn-one", final_turn_status="completed", final_response=final_response,
-                    partial_answers=((previous, oversized) if prior_delivered else (oversized,)))
+                    partial_answers=partials)
                 await self.app.handle_completion(outcome)
                 self.assertTrue(self.channel.updates)
                 message_id, card = self.channel.updates[-1]
                 self.assertEqual(message_id, "om_goal_large")
                 self.assertEqual(card["header"]["template"], "green")
-                self.assertIn("阶段性答案未能完整保留在终态卡片", str(card))
+                self.assertIn("答案正文另行发送", str(card))
                 self.assertNotIn(oversized.text, str(card))
-                self.assertEqual(len(self.channel.replies), 1)
+                self.assertEqual(len(self.channel.replies), len(partials) + 1)
+                for (_, post), partial in zip(self.channel.replies, partials):
+                    self.assertEqual(post.markdown, "**阶段性答案**\n\n" + partial.text)
                 plain = self.channel.replies[-1][1]
                 text = plain.markdown if isinstance(plain, OutboundPost) else plain
                 self.assertNotIn(oversized.text, text)
                 if final_response is None:
-                    self.assertIn("完整投递未确认", text)
-                    self.assertNotIn("答案见阶段性答案", text)
+                    self.assertIn("答案见阶段性答案", text)
+                    self.assertNotIn("投递未确认", text)
                     self.assertNotIn("阶段性答案未发送", text)
                 else:
                     self.assertEqual(text, final_response)
+
+    async def test_goal_failed_original_card_posts_rollover_answers_before_compact_controls(self):
+        from netizen_cli.cards import goal_generation
+        from netizen_cli.channel.reply_presenter import GoalCardOrigin
+
+        goal = native_goal()
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        await self.fixture.register_goal_card(scope=scope, binding=self.binding, goal=goal,
+            message_id="om_goal", runtime_state=GoalOperationState.RUNNING.value)
+        origin = GoalCardOrigin(message_id="om_goal", scope=scope,
+            binding_id=self.binding.id, short_id=self.binding.short_id,
+            project_alias=self.binding.project_alias, goal_generation=goal_generation(goal),
+            fallback_origin=FakeMessage("work", message_id="om_origin"))
+        self.channel.replies.clear()
+        self.channel.updates.clear()
+        self.channel.card_update_results.extend(TimeoutError("response lost") for _ in range(3))
+        self.channel.reply_results.extend(sent_result(f"om_answer_{index}", chat_id="oc_direct")
+                                          for index in range(4))
+        partials = (answer("earlier physical turn", turn="turn-old"),
+                    answer("last physical turn", turn="turn-final"))
+        outcome = GoalOutcome(binding_id=self.binding.id, thread_id="native-one", logical_turn_id="goal-one",
+            owner_id="ou_user", origin=origin, goal=replace(goal, status=GoalStatus.PAUSED),
+            final_physical_turn_id="turn-final", final_turn_status="interrupted",
+            final_response="final answer", partial_answers=partials)
+        await self.app.handle_completion(outcome)
+        self.assertEqual(len(self.channel.updates), 3)
+        self.assertEqual([post.markdown for _, post in self.channel.replies[:2]], [
+            "**阶段性答案**\n\nearlier physical turn", "**阶段性答案**\n\nlast physical turn",
+        ])
+        self.assertEqual(self.channel.replies[2][1], "final answer")
+        card = self.channel.replies[3][1]
+        self.assertIsInstance(card, OutboundCard)
+        self.assertIn("恢复 Goal", str(card.card))
+        self.assertNotIn("earlier physical turn", str(card.card))
+        self.assertNotIn("final answer", str(card.card))
+
+    async def test_goal_control_recovery_cannot_consume_answer_fallback_budget(self):
+        control_started = asyncio.Event()
+        never = asyncio.Event()
+
+        async def reply(message, content, opts=None):
+            self.channel.replies.append((message.id, content))
+            if isinstance(content, OutboundCard):
+                control_started.set()
+                await never.wait()
+            return sent_result("om_answer", chat_id="oc_direct")
+
+        outcome = GoalOutcome(binding_id=self.binding.id, thread_id="native-one", logical_turn_id="goal-one",
+            owner_id="ou_user", origin=FakeMessage("work", message_id="om_origin"),
+            goal=native_goal(status=GoalStatus.PAUSED), final_physical_turn_id="turn-one",
+            final_turn_status="interrupted", final_response="final answer", partial_answers=(answer(),))
+        with patch.object(self.channel, "reply", side_effect=reply), patch(
+            "netizen_cli.codex_runtime._GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS", 1.0,
+        ), self.assertLogs("netizen_cli.channel_app", level="WARNING"):
+            completed = asyncio.create_task(self.app.handle_completion(outcome))
+            await asyncio.wait_for(control_started.wait(), 1)
+            self.assertEqual(self.channel.replies[0][1].markdown, "**阶段性答案**\n\nfirst stable answer")
+            self.assertEqual(self.channel.replies[1][1], "final answer")
+            await asyncio.wait_for(completed, 2)
+        self.assertEqual(len(self.channel.replies), 3)
 
     async def test_goal_progress_off_still_refreshes_partial_answers(self):
         goal = native_goal()
@@ -345,6 +549,160 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(projection.activity)
         self.assertEqual(projection.partial_answer.contents, ("first stable answer",))
         self.assertEqual(revision[-1], 2)
+
+
+class OrdinarySideTerminalFallbackTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.fixture = await self.enterAsyncContext(channel_fixture())
+        await self.fixture.new()
+        self.app, self.channel, self.runtime = self.fixture.app, self.fixture.channel, self.fixture.runtime
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = self.fixture.store.active_binding(scope.key)
+        self.fixture.store.assign_native_thread_id(binding.id, "native-one")
+        self.binding = self.fixture.store.get(binding.id)
+        self.origin = FakeMessage("work", message_id="om_origin")
+        self.app._progress_cards = _ReplyCardPresenter(self.channel, self.runtime, poll_seconds=3600)
+
+    def outcome(self, *, side=False, content="final original", partials=(), progress=True, mention=False, result=None):
+        values = dict(
+            thread_id="native-one", turn_id="turn-one", owner_id="ou_user", origin=self.origin,
+            result=result or completed_turn_result(final_response=content), partial_answers=partials,
+            task_feedback=BindingTaskFeedback(progress_card_enabled=progress, completion_mention_enabled=mention),
+        )
+        if side:
+            return SideTurnOutcome(side_id="side-one", parent_binding_id=self.binding.id,
+                cwd=self.fixture.project, **values)
+        return TurnOutcome(binding_id=self.binding.id, **values)
+
+    async def start_progress(self, outcome):
+        side = isinstance(outcome, SideTurnOutcome)
+        snapshot = (side_turn_activity_snapshot(side_id=outcome.side_id,
+            thread_id=outcome.thread_id, turn_id=outcome.turn_id) if side else
+            turn_activity_snapshot(binding_id=outcome.binding_id,
+                thread_id=outcome.thread_id, turn_id=outcome.turn_id))
+        values = self.runtime.side_turn_activity_values if side else self.runtime.turn_activity_values
+        values[outcome.side_id if side else outcome.binding_id] = snapshot
+        self.channel.reply_results.append(sent_result("om_progress", chat_id="oc_direct"))
+        kwargs = dict(thread_id=outcome.thread_id, turn_id=outcome.turn_id, origin=outcome.origin)
+        started = (await self.app._progress_cards.start_side(side_id=outcome.side_id, **kwargs) if side else
+            await self.app._progress_cards.start(binding_id=outcome.binding_id, **kwargs))
+        self.assertTrue(started)
+        self.channel.replies.clear()
+        return replace(outcome, activity=snapshot)
+
+    @staticmethod
+    def post_text(message):
+        return message.markdown if isinstance(message, OutboundPost) else message
+
+    async def test_same_card_recovery_or_exhausted_updates_choose_one_terminal_delivery(self):
+        partials = (answer("first original<br><br>", "one"), answer("second original", "two"))
+        for side in (False, True):
+            for recovers in (True, False):
+                with self.subTest(side=side, recovers=recovers):
+                    self.channel.replies.clear()
+                    self.channel.updates.clear()
+                    outcome = await self.start_progress(self.outcome(side=side, partials=partials))
+                    self.channel.card_update_results.extend([
+                        SimpleNamespace(success=False, raw={"code": 2200}),
+                        *([sent_result("om_progress", chat_id="oc_direct")] if recovers else [
+                            SimpleNamespace(success=False, raw={"code": 2200}),
+                            SimpleNamespace(success=False, raw={"code": 2200}),
+                        ]),
+                    ])
+                    if not recovers:
+                        self.channel.reply_results.extend(sent_result(f"om_post_{index}", chat_id="oc_direct") for index in range(3))
+                    with patch("netizen_cli.channel.reply_presenter._TERMINAL_CARD_RETRY_SECONDS", 0), self.assertLogs(
+                        "netizen_cli.channel.reply_presenter", level="ERROR",
+                    ):
+                        await self.app.handle_completion(outcome)
+                    self.assertEqual(len(self.channel.updates), 2 if recovers else 3)
+                    self.assertEqual({message_id for message_id, _ in self.channel.updates}, {"om_progress"})
+                    if recovers:
+                        self.assertEqual(self.channel.replies, [])
+                        visible = str(self.channel.updates[-1][1])
+                        for text in (partials[0].text, partials[1].text, "final original"):
+                            self.assertIn(text, visible)
+                    else:
+                        self.assertEqual([self.post_text(message) for _, message in self.channel.replies], [
+                            f"**阶段性答案**\n\n{partials[0].text}",
+                            f"**阶段性答案**\n\n{partials[1].text}", "final original",
+                        ])
+                        self.assertFalse(any(isinstance(message, OutboundCard) for _, message in self.channel.replies))
+                    self.assertEqual(outcome.partial_answers, partials)
+
+    async def test_missing_card_fallback_preserves_exact_sources_and_mentions_only_final(self):
+        partials = (answer("8. 原始编号\n\n   - 嵌套<br><br>内容", "one"), answer("second original", "two"))
+        final = "| key | value |\n| --- | --- |\n| original | value |\n"
+        for side in (False, True):
+            with self.subTest(side=side):
+                self.channel.replies.clear()
+                self.channel.reply_results.extend(sent_result(f"om_post_{index}", chat_id="oc_direct") for index in range(3))
+                outcome = self.outcome(side=side, content=final, partials=partials, mention=True)
+                await self.app.handle_completion(outcome)
+                messages = [message for _, message in self.channel.replies]
+                self.assertEqual([self.post_text(message) for message in messages], [
+                    f"**阶段性答案**\n\n{partials[0].text}", f"**阶段性答案**\n\n{partials[1].text}", final,
+                ])
+                self.assertTrue(all(isinstance(message, OutboundPost) for message in messages))
+                self.assertEqual([message.mentions for message in messages], [[], [], [Identity(open_id="ou_user")]])
+                self.assertEqual([source for source, _ in self.channel.replies], [self.origin.id] * 3)
+                self.assertEqual(outcome.final_response, final)
+
+    async def test_unknown_running_partial_is_not_replayed_during_terminal_fallback(self):
+        first, last = answer("unknown first", "one"), answer("last original", "two")
+        for side in (False, True):
+            with self.subTest(side=side):
+                self.channel.replies.clear()
+                outcome = self.outcome(side=side, partials=(first, first, answer(thread="wrong"), last), progress=False)
+                snapshot = (side_turn_activity_snapshot(side_id="side-one", thread_id="native-one", turn_id="turn-one") if side else
+                    turn_activity_snapshot(binding_id=self.binding.id))
+                values = self.runtime.side_turn_activity_values if side else self.runtime.turn_activity_values
+                values["side-one" if side else self.binding.id] = snapshot
+                kwargs = dict(thread_id="native-one", turn_id="turn-one", origin=self.origin, progress_enabled=False)
+                if side:
+                    await self.app._progress_cards.start_side(side_id="side-one", **kwargs)
+                    session = self.app._progress_cards._side_sessions[("side-one", "native-one", "turn-one")]
+                else:
+                    await self.app._progress_cards.start(binding_id=self.binding.id, **kwargs)
+                    session = self.app._progress_cards._sessions[(self.binding.id, "native-one", "turn-one")]
+                self.channel.reply_results.append(SimpleNamespace(success=False))
+                await self.app._progress_cards._deliver_partial_answers(session, (first,))
+                self.channel.reply_results.extend(sent_result(f"om_post_{index}", chat_id="oc_direct") for index in range(2))
+                await self.app.handle_completion(outcome)
+                self.assertEqual([self.post_text(message) for _, message in self.channel.replies], [
+                    "**阶段性答案**\n\nunknown first", "**阶段性答案**\n\nlast original", "final original",
+                ])
+
+    async def test_no_progress_files_card_follows_partials_without_embedding_them(self):
+        path = self.fixture.project / "result.txt"
+        path.write_text("result", encoding="utf-8")
+        partial = answer("standalone partial")
+        outcome = self.outcome(progress=False, partials=(partial,), result=completed_turn_result(
+            file_change_item(str(path)), final_response="final original",
+        ))
+        self.channel.reply_results.extend(sent_result(f"om_post_{index}", chat_id="oc_direct") for index in range(2))
+        await self.app.handle_completion(outcome)
+        self.assertEqual(len(self.channel.replies), 2)
+        self.assertEqual(self.channel.replies[0][1], OutboundPost(markdown="**阶段性答案**\n\nstandalone partial"))
+        card = self.channel.replies[1][1]
+        self.assertIsInstance(card, OutboundCard)
+        self.assertIn("final original", str(card.card))
+        self.assertIn("result.txt", str(card.card))
+        self.assertNotIn(partial.text, str(card.card))
+
+    async def test_slow_partial_batch_leaves_time_for_final_attempt(self):
+        outcome = self.outcome(partials=(answer("slow first", "one"), answer("not reached", "two")))
+        attempted = []
+
+        async def reply(origin, message, opts=None):
+            attempted.append(self.post_text(message))
+            if len(attempted) == 1:
+                await asyncio.Event().wait()
+            return sent_result("om_final", chat_id="oc_direct")
+
+        with patch.object(self.channel, "reply", side_effect=reply):
+            await asyncio.wait_for(self.app._reply_task_answers(outcome, "final original", timeout_seconds=0.1), 1)
+        self.assertEqual(attempted, ["**阶段性答案**\n\nslow first", "final original"])
 
 
 class GoalPartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
@@ -485,3 +843,40 @@ class GoalPartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current.result.content, "final physical turn result")
         self.assertEqual(current.activity.progress.steps, ())
         self.assertNotIn("old physical turn step", str(channel.updates[-1][1]))
+
+    async def test_body_fallback_guard_blocks_resume_and_rejects_the_superseded_run(self):
+        presenter = _ReplyCardPresenter(FakeChannel(), StubRuntime())
+        self.addAsyncCleanup(presenter.close)
+        await self.start(presenter, self.projection("first"))
+        entered = asyncio.Event()
+
+        async def resume():
+            entered.set()
+            await self.start(presenter, self.projection(), logical_turn_id="resumed-goal")
+
+        guard = dict(binding_id="binding-one", thread_id="native-one", generation="g" * 43,
+            logical_turn_id="goal-one", origin=self.origin())
+        async with presenter.goal_fallback_guard(**guard) as current:
+            self.assertTrue(current)
+            resuming = asyncio.create_task(resume())
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertFalse(resuming.done())
+        await asyncio.wait_for(resuming, 1)
+        async with presenter.goal_fallback_guard(**guard) as current:
+            self.assertFalse(current)
+
+    async def test_body_fallback_guard_rejects_retired_and_closed_routes(self):
+        presenter = _ReplyCardPresenter(FakeChannel(), StubRuntime(), poll_seconds=10)
+        self.addAsyncCleanup(presenter.close)
+        await self.start(presenter, self.projection("first"), refresh=AsyncMock(return_value=None))
+        await presenter.update_goal(source_id="om_goal", generation="g" * 43,
+            projection=self.projection("first", status="paused"), retain_session=False)
+        guard = dict(binding_id="binding-one", thread_id="native-one", generation="g" * 43,
+            logical_turn_id="goal-one", origin=self.origin())
+        async with presenter.goal_fallback_guard(**guard) as current:
+            self.assertFalse(current)
+        async with presenter.goal_fallback_guard(**dict(guard, generation=None)) as current:
+            self.assertTrue(current)
+        await presenter.close()
+        async with presenter.goal_fallback_guard(**dict(guard, generation=None)) as current:
+            self.assertFalse(current)

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from enum import Enum
 
@@ -78,7 +79,7 @@ class GoalCardOrigin:
 @dataclass(slots=True)
 class _PartialAnswerDelivery:
     thread_id: str
-    turn_id: str
+    turn_id: str | None
     stopped: asyncio.Event
     reply_partial: Callable[[OutboundPost], Awaitable[object]]
     validate_reply: Callable[[object], Awaitable[bool]] | None = None
@@ -240,8 +241,8 @@ class _ReplyCardPresenter:
                         if reply is None
                         else await reply(card)
                     )
-                    if validate_reply is not None and not await validate_reply(result):
-                        return False
+                    if validate_reply is None or await validate_reply(result):
+                        message_id = _progress_card_message_id(result)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -249,14 +250,11 @@ class _ReplyCardPresenter:
                     "failed to send initial progress card",
                     extra={"binding_id": binding_id, "turn_id": turn_id},
                 )
-                return False
-            message_id = _progress_card_message_id(result)
             if message_id is None:
                 logger.error(
                     "failed to start progress card: reply message ID unavailable",
                     extra={"binding_id": binding_id, "turn_id": turn_id},
                 )
-                return False
         current = self._runtime.turn_activity(
             binding_id,
             thread_id=thread_id,
@@ -291,48 +289,65 @@ class _ReplyCardPresenter:
         )
         return True
 
-    async def finish_partial_answers(
+    async def prepare_partial_answers(
         self,
         *,
         owner_id: str,
         thread_id: str,
-        turn_id: str,
-        partial_answers: tuple[PartialAnswer, ...],
+        turn_id: str | None,
         side: bool,
-        progress_enabled: bool,
         reply: Callable[[OutboundPost], Awaitable[object]],
         validate_reply: Callable[[object], Awaitable[bool]] | None = None,
-    ) -> bool:
-        """Quiesce running delivery, then fill known gaps without replaying uncertain sends."""
+    ) -> _PartialAnswerDelivery:
+        """Quiesce running delivery and retain receipts before trying the terminal card."""
 
         sessions = self._side_sessions if side else self._sessions
-        key = (owner_id, thread_id, turn_id)
-        session = sessions.get(key)
+        session = None if turn_id is None else sessions.get((owner_id, thread_id, turn_id))
         if session is not None:
-            await self._stop_session(session)
-        if progress_enabled:
-            # The terminal whole-card projection carries every answer. A
-            # replacement is handled by the existing card fallback path.
-            return False
-        if session is None:
-            session = _PartialAnswerDelivery(
-                thread_id=thread_id, turn_id=turn_id,
-                stopped=asyncio.Event(), reply_partial=reply,
-                validate_reply=validate_reply,
-            )
-        sessions.pop(key, None)
+            try:
+                async with asyncio.timeout(self._operation_timeout_seconds):
+                    await self._stop_session(session)
+            except TimeoutError:
+                # Cancellation affects only this local presentation task. Its
+                # attempted item remains uncertain and must never be replayed.
+                session.task = None
+                logger.warning("running partial-answer delivery stop budget exhausted")
+        return _PartialAnswerDelivery(
+            thread_id=thread_id, turn_id=turn_id,
+            stopped=asyncio.Event(), reply_partial=reply,
+            validate_reply=validate_reply if validate_reply is not None else (
+                None if session is None else session.validate_reply
+            ),
+            attempted_partials=set() if session is None else session.attempted_partials,
+            confirmed_partials=set() if session is None else session.confirmed_partials,
+        )
+
+    async def deliver_partial_answers(
+        self,
+        delivery: _PartialAnswerDelivery,
+        answers: tuple[PartialAnswer, ...],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> bool:
+        """Attempt each missing item once within one bounded terminal delivery."""
+
+        budget = self._operation_timeout_seconds if timeout_seconds is None else timeout_seconds
+        if budget < 0:
+            raise ValueError("partial-answer delivery timeout must be nonnegative")
         try:
-            async with asyncio.timeout(self._operation_timeout_seconds):
-                await self._deliver_partial_answers(session, partial_answers, terminal=True)
+            if budget > 0:
+                async with asyncio.timeout(budget):
+                    await self._deliver_partial_answers(delivery, answers, terminal=True)
         except TimeoutError:
             logger.warning("terminal partial-answer delivery budget exhausted")
         identities = {
             (answer.thread_id, answer.turn_id, answer.item_id)
-            for answer in partial_answers
-            if answer.thread_id == thread_id and answer.turn_id == turn_id
+            for answer in answers
+            if answer.thread_id == delivery.thread_id
+            and (delivery.turn_id is None or answer.turn_id == delivery.turn_id)
             and answer.text.strip()
         }
-        return bool(identities) and identities <= session.confirmed_partials
+        return (not answers or bool(identities)) and identities <= delivery.confirmed_partials
 
     async def _deliver_partial_answers(
         self,
@@ -350,7 +365,7 @@ class _ReplyCardPresenter:
             identity = (answer.thread_id, answer.turn_id, answer.item_id)
             if (
                 answer.thread_id != session.thread_id
-                or answer.turn_id != session.turn_id
+                or (session.turn_id is not None and answer.turn_id != session.turn_id)
                 or not answer.text.strip()
                 or identity in session.attempted_partials
             ):
@@ -577,6 +592,7 @@ class _ReplyCardPresenter:
                         if reply is None
                         else await reply(card)
                     )
+                message_id = _progress_card_message_id(result)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -584,14 +600,11 @@ class _ReplyCardPresenter:
                     "failed to send initial Side progress card",
                     extra={"side_id": side_id, "turn_id": turn_id},
                 )
-                return False
-            message_id = _progress_card_message_id(result)
             if message_id is None:
                 logger.error(
                     "failed to start Side progress card: reply message ID unavailable",
                     extra={"side_id": side_id, "turn_id": turn_id},
                 )
-                return False
         key = (side_id, thread_id, turn_id)
         previous = self._side_sessions.pop(key, None)
         if previous is not None:
@@ -815,6 +828,32 @@ class _ReplyCardPresenter:
                 projection=projection,
                 retain_session=retain_session,
             )
+
+    @asynccontextmanager
+    async def goal_fallback_guard(
+        self,
+        *,
+        binding_id: str,
+        thread_id: str,
+        generation: str | None,
+        logical_turn_id: str | None,
+        origin: GoalCardOrigin,
+    ) -> AsyncIterator[bool]:
+        """Keep the Goal presentation route stable during bounded body fallback."""
+
+        async with self._goal_lock:
+            current = not self._closed
+            if current and generation is not None:
+                key = (binding_id, thread_id, generation)
+                latest_run = self._goal_latest_runs.get(key)
+                session = self._goal_sessions.get(key)
+                retired = (origin.message_id or "", generation, logical_turn_id or "")
+                current = (
+                    (latest_run is None or latest_run == logical_turn_id)
+                    and (session is None or session.logical_turn_id == logical_turn_id)
+                    and (session is not None or retired not in self._retired_goal_runs)
+                )
+            yield current
 
     async def reply_goal_fallback(
         self,

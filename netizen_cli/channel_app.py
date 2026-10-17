@@ -142,6 +142,7 @@ from .channel.reply_presenter import (
     _CardUpdateAttempt,
     _GoalCardDelivery,
     _GoalCardReceipt,
+    _PartialAnswerDelivery,
     _ReplyCardPresenter,
 )
 from .codex_runtime import CodexRuntime
@@ -321,6 +322,7 @@ _SESSION_QUERY_TIMEOUT_SECONDS = 10.0
 _SIDE_CARD_METADATA_TIMEOUT_SECONDS = 1.0
 _CONTEXT_RECEIPT_TIMEOUT_SECONDS = 5.0
 _SESSION_RECEIPT_TIMEOUT_SECONDS = 5.0
+_TERMINAL_ANSWER_DELIVERY_TIMEOUT_SECONDS = 10.0
 _DONE_REACTION = "DONE"
 _ERROR_REACTION = "ERROR"
 _INTERRUPTED_REACTION = "CrossMark"
@@ -736,7 +738,9 @@ class ChannelApplication:
         self._management.enable_schedules(app_id=app_id, chat_info=channel)
         self._management.enable_defaults(app_id=app_id, chat_info=channel)
         self._scope_coordinator = management.scope_coordinator
-        self._scheduled_completions: set[str] = set()
+        # Whether earlier standalone answers in this completion were confirmed.
+        # Only the final send writes the aggregate Scheduled Run receipt.
+        self._scheduled_completions: dict[str, bool] = {}
         self._reactions = _ReactionController(channel)
         self._progress_cards = _ReplyCardPresenter(channel, runtime)
         runtime.set_completion_handler(self.handle_completion)
@@ -1573,7 +1577,7 @@ class ChannelApplication:
                     raw = _object_field(result, "raw")
                     data = _object_field(raw, "data")
                     if await self._scheduled_reply_confirmed(message, result):
-                        state = "sent"
+                        state = "sent" if self._scheduled_completions[message.run_id] else "unknown"
                     else:
                         logger.warning("scheduled reply destination was not confirmed", extra={
                             "run_id": message.run_id,
@@ -2216,12 +2220,12 @@ class ChannelApplication:
         origin = getattr(outcome, "origin", None)
         scheduled = isinstance(outcome, TurnOutcome) and isinstance(origin, ScheduledOrigin)
         if scheduled:
-            self._scheduled_completions.add(origin.run_id)
+            self._scheduled_completions[origin.run_id] = True
         try:
             await self._handle_completion(outcome)
         finally:
             if scheduled:
-                self._scheduled_completions.discard(origin.run_id)
+                self._scheduled_completions.pop(origin.run_id, None)
                 # Keep an undelivered terminal Run until the final I/O attempt
                 # finishes; setting a receipt earlier would allow retention
                 # pruning to delete it while the result card is still updating.
@@ -2295,13 +2299,11 @@ class ChannelApplication:
                     f"会话上下文压缩以未知状态结束：{outcome.status!r}。",
                 )
             return
-        partials_confirmed = await self._progress_cards.finish_partial_answers(
+        partial_delivery = await self._progress_cards.prepare_partial_answers(
             owner_id=(outcome.binding_id if isinstance(outcome, TurnOutcome) else outcome.side_id),
             thread_id=outcome.thread_id,
             turn_id=outcome.turn_id,
-            partial_answers=outcome.partial_answers,
             side=isinstance(outcome, SideTurnOutcome),
-            progress_enabled=outcome.task_feedback.progress_card_enabled,
             reply=lambda post: self._reply_to_origin(outcome.origin, post),
             validate_reply=(
                 (lambda result: self._scheduled_reply_confirmed(outcome.origin, result))
@@ -2328,11 +2330,9 @@ class ChannelApplication:
         if outcome.error is None and outcome.status == "completed":
             prepared_response = await self._prepare_task_result_images(outcome)
             if not prepared_response and outcome.partial_answers:
-                prepared_response = (
-                    "任务已完成，答案见阶段性答案。"
-                    if partials_confirmed or outcome.task_feedback.progress_card_enabled
-                    else "任务已完成，但阶段性答案投递未确认。"
-                )
+                # A successful whole-card update below contains the answers.
+                # The standalone fallback checks its own delivery receipts.
+                prepared_response = "任务已完成，答案见阶段性答案。"
         if outcome.task_feedback.progress_card_enabled:
             try:
                 attempt = await self._complete_task_progress_card(
@@ -2363,22 +2363,35 @@ class ChannelApplication:
                 # Never publish a second scheduled result on that uncertainty.
                 if isinstance(outcome.origin, ScheduledOrigin):
                     return
-        if outcome.error is not None:
-            await self._reply_task_result(
-                outcome, _task_failure_text(outcome),
-            )
-            return
-        if outcome.status == "interrupted":
-            await self._reply_task_result(outcome, _task_interruption_text(outcome), allow_completion_mention=False)
-            return
-        if outcome.status != "completed":
-            await self._reply_task_result(
-                outcome, _task_failure_text(outcome),
-            )
-            return
-        await self._complete_task_with_files(
-            outcome, diff_summary, prepared_response=prepared_response,
-        )
+        try:
+            if outcome.error is not None or outcome.status not in {"completed", "interrupted"}:
+                await self._reply_task_answers(
+                    outcome, _task_failure_text(outcome), partial_delivery=partial_delivery,
+                )
+            elif outcome.status == "interrupted":
+                await self._reply_task_answers(
+                    outcome, _task_interruption_text(outcome), partial_delivery=partial_delivery,
+                    allow_completion_mention=False,
+                )
+            elif not outcome.partial_answers:
+                await self._complete_task_with_files(
+                    outcome, diff_summary, prepared_response=prepared_response,
+                )
+            else:
+                await self._reply_task_answers(
+                    outcome,
+                    prepared_response or outcome.final_response or "任务已结束，未产生文本回复。",
+                    partial_delivery=partial_delivery,
+                    unconfirmed_content=(
+                        "任务已完成，但阶段性答案投递未确认。"
+                        if outcome.partial_answers and not outcome.final_response else None
+                    ),
+                    final_reply=lambda content: self._complete_task_with_files(
+                        outcome, diff_summary, prepared_response=content,
+                    ),
+                )
+        finally:
+            await self._abandon_task_progress_card(outcome)
 
     async def _prepare_task_result_images(
         self,
@@ -2613,7 +2626,6 @@ class ChannelApplication:
                 additions=diff_summary.additions,
                 deletions=diff_summary.deletions,
                 completion_mention_user_id=_outcome_completion_mention_user_id(outcome),
-                partial_answers=(outcome.partial_answers if outcome.task_feedback.progress_card_enabled else ()),
             ) if files else None
         except asyncio.CancelledError:
             raise
@@ -2692,6 +2704,10 @@ class ChannelApplication:
         )
 
     async def _complete_goal(self, outcome: GoalOutcome) -> None:
+        from .codex_runtime import _GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS - 0.1
         try:
             binding: ThreadBinding | None = self._bindings.get(outcome.binding_id)
         except BindingNotFound:
@@ -2902,7 +2918,7 @@ class ChannelApplication:
             ),
         )
         terminal_card: OutboundCard | None = None
-        plain_result_required = False
+        original_files = projection.files
         try:
             terminal_card = reply_card(projection)
         except TurnFileCardLimitError as error:
@@ -2939,43 +2955,6 @@ class ChannelApplication:
                 "terminal Goal Reply Card could not be rendered",
                 extra={"binding_id": outcome.binding_id},
             )
-
-        if terminal_card is None:
-            goal_module = projection.goal
-            assert goal_module is not None
-            partial_notice = (
-                "阶段性答案未能完整保留在终态卡片中，完整投递未确认。"
-                if projection.partial_answer is not None else None
-            )
-            compact_notice = f"{notice} 结果正文无法完整放入卡片，已另行回复。"
-            if partial_notice is not None:
-                compact_notice = f"{compact_notice} {partial_notice}"
-                if not outcome.final_response:
-                    # Earlier fragments may already have been displayed. This
-                    # fallback cannot attest delivery of the complete answer.
-                    result_text = f"{notice} {partial_notice}"
-            projection = replace(
-                projection,
-                goal=replace(
-                    goal_module,
-                    notice=compact_notice,
-                    notice_is_error=True,
-                ),
-                partial_answer=None,
-                result=None,
-                files=None,
-            )
-            plain_result_required = result_text is not None
-            try:
-                terminal_card = reply_card(projection)
-            except Exception:
-                logger.exception(
-                    "compact terminal Goal Reply Card could not be rendered",
-                    extra={"binding_id": outcome.binding_id},
-                )
-
-        if terminal_card is None and outcome.partial_answers and not outcome.final_response:
-            result_text = f"{notice} 阶段性答案投递未确认。"
 
         generation = (
             goal_generation(goal)
@@ -3027,53 +3006,100 @@ class ChannelApplication:
         if delivery.status is _GoalCardDelivery.SUPERSEDED:
             return
         if delivery.status is _GoalCardDelivery.DELIVERED:
-            if plain_result_required:
-                await self._reply_task_result(outcome, result_text or notice, origin=target)
-            else:
-                await self._remind_task_completion(outcome, delivery.message_id, scope=scope)
+            await self._remind_task_completion(outcome, delivery.message_id, scope=scope)
             return
-        allow_completion_mention = True
-        if terminal_card is None:
-            await self._reply_task_result(
-                outcome, result_text or notice, origin=target,
-                allow_completion_mention=allow_completion_mention,
-            )
+
+        # The original card remains the primary answer surface. Once it cannot
+        # carry the terminal answer, use the same ordered post handoff as other
+        # Turns. Keep the exact run stable while sending; a resumed run must not
+        # receive a delayed predecessor's answers.
+        async with self._progress_cards.goal_fallback_guard(
+            binding_id=identity_binding_id, thread_id=outcome.thread_id,
+            logical_turn_id=outcome.logical_turn_id, generation=generation, origin=origin,
+        ) as current:
+            if not current:
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logger.warning("terminal Goal answer handoff budget exhausted")
+                return
+            try:
+                await self._reply_task_answers(
+                    outcome, result_text or notice, origin=target,
+                    timeout_seconds=min(10.0, remaining),
+                    unconfirmed_content=(
+                        f"{notice} 阶段性答案投递未确认。"
+                        if outcome.partial_answers and not outcome.final_response else None
+                    ),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("terminal Goal answer fallback was not confirmed")
+
+        if deadline - loop.time() <= 0:
             return
-        if generation is None:
-            # No known Goal generation can satisfy completion-mention eligibility.
-            await self._reply(target, terminal_card)
-            if plain_result_required:
-                await self._reply_task_result(outcome, result_text or notice, origin=target)
-            return
-        fallback_delivery = await self._progress_cards.reply_goal_fallback(
-            binding_id=identity_binding_id,
-            thread_id=outcome.thread_id,
-            logical_turn_id=outcome.logical_turn_id,
-            generation=generation,
-            target=target,
-            card=terminal_card,
-            origin=origin,
-            projection=projection,
-            retain_session=retain_terminal_session,
+        # Recover controls and exact-final-Turn Files only after the answer
+        # handoff. Files require a Result module, so use a short neutral pointer
+        # rather than duplicating any native partial/final body in another card.
+        goal_module = projection.goal
+        assert goal_module is not None
+        projection = replace(
+            projection,
+            goal=replace(goal_module, notice=f"{notice} 答案正文另行发送。"),
+            partial_answer=None,
+            result=ReplyCardResultModule("答案正文另行发送。") if original_files else None,
+            files=original_files,
         )
-        if fallback_delivery is _GoalCardDelivery.SUPERSEDED:
-            return
-        if fallback_delivery in {_GoalCardDelivery.FAILED, _GoalCardDelivery.NOT_ATTEMPTED}:
-            if outcome.partial_answers and not outcome.final_response:
-                result_text = f"{notice} 阶段性答案投递未确认。"
-            if (
-                fallback_delivery is _GoalCardDelivery.FAILED
-                and projection.result is not None
-                and projection.result.completion_mention_user_id is not None
-            ):
-                allow_completion_mention = False
-            await self._reply_task_result(
-                outcome, result_text or notice, origin=target,
-                allow_completion_mention=allow_completion_mention,
+        try:
+            terminal_card = reply_card(projection)
+        except TurnFileCardLimitError as error:
+            projection = replace(
+                projection,
+                goal=replace(
+                    projection.goal,
+                    notice=f"{notice} 答案正文另行发送。文件模块未生成：{error}",
+                    notice_is_error=True,
+                ),
+                result=None, files=None,
             )
+            try:
+                terminal_card = reply_card(projection)
+            except Exception:
+                logger.exception("compact terminal Goal Reply Card could not be rendered")
+                return
+        except Exception:
+            logger.exception("compact terminal Goal Reply Card could not be rendered")
             return
-        if plain_result_required:
-            await self._reply_task_result(outcome, result_text or notice, origin=target)
+
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        try:
+            async with asyncio.timeout(remaining):
+                if generation is None:
+                    await self._reply(target, terminal_card)
+                    return
+                # A local render failure has not attempted the original card.
+                # It may still accept the compact terminal control projection.
+                if delivery.status is _GoalCardDelivery.NOT_ATTEMPTED and origin.message_id is not None:
+                    compact_delivery = await self._progress_cards.finish_goal(
+                        binding_id=identity_binding_id, thread_id=outcome.thread_id,
+                        logical_turn_id=outcome.logical_turn_id, generation=generation,
+                        origin=origin, projection=projection, retain_session=retain_terminal_session,
+                    )
+                    if compact_delivery.status in {
+                        _GoalCardDelivery.SUPERSEDED, _GoalCardDelivery.DELIVERED,
+                    }:
+                        return
+                await self._progress_cards.reply_goal_fallback(
+                    binding_id=identity_binding_id, thread_id=outcome.thread_id,
+                    logical_turn_id=outcome.logical_turn_id, generation=generation,
+                    target=target, card=terminal_card, origin=origin,
+                    projection=projection, retain_session=retain_terminal_session,
+                )
+        except TimeoutError:
+            logger.warning("terminal Goal control recovery budget exhausted")
 
     async def _present_running_goal(
         self,
@@ -7009,6 +7035,66 @@ class ChannelApplication:
             ),
         )
 
+    async def _reply_task_answers(
+        self,
+        outcome: TurnOutcome | SideTurnOutcome | GoalOutcome,
+        content: str,
+        *,
+        origin: object | None = None,
+        allow_completion_mention: bool = True,
+        partial_delivery: _PartialAnswerDelivery | None = None,
+        timeout_seconds: float = _TERMINAL_ANSWER_DELIVERY_TIMEOUT_SECONDS,
+        unconfirmed_content: str | None = None,
+        final_reply: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
+        """Deliver ordered answers once, reserving time and completion effects for final."""
+
+        target = outcome.origin if origin is None else origin
+        if final_reply is None:
+            async def final_reply(text: str) -> None:
+                await self._reply_task_result(
+                    outcome, text, origin=target,
+                    allow_completion_mention=allow_completion_mention,
+                )
+        if not outcome.partial_answers and not isinstance(outcome, GoalOutcome):
+            # Preserve the existing final-only path and its transport budget.
+            await final_reply(content)
+            return
+        if timeout_seconds <= 0:
+            logger.warning("terminal answer delivery budget exhausted before sending")
+            return
+        if partial_delivery is None:
+            partial_delivery = _PartialAnswerDelivery(
+                thread_id=outcome.thread_id,
+                turn_id=None if isinstance(outcome, GoalOutcome) else outcome.turn_id,
+                stopped=asyncio.Event(),
+                reply_partial=lambda post: self._reply_to_origin(target, post),
+                validate_reply=(
+                    (lambda result: self._scheduled_reply_confirmed(target, result))
+                    if isinstance(target, ScheduledOrigin) else None
+                ),
+            )
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                confirmed = await self._progress_cards.deliver_partial_answers(
+                    partial_delivery, outcome.partial_answers,
+                    timeout_seconds=min(5.0, timeout_seconds / 2),
+                )
+                if not confirmed:
+                    logger.warning(
+                        "terminal partial-answer delivery was not fully confirmed",
+                        extra={"thread_id": outcome.thread_id},
+                    )
+                    if unconfirmed_content is not None:
+                        content = unconfirmed_content
+                if isinstance(target, ScheduledOrigin) and target.run_id in self._scheduled_completions:
+                    self._scheduled_completions[target.run_id] = confirmed
+                await final_reply(content)
+        except TimeoutError:
+            # A timed-out post may already have published SDK chunks. Do not
+            # retry the whole item or create a background delivery lifecycle.
+            logger.warning("terminal answer delivery budget exhausted", extra={"thread_id": outcome.thread_id})
+
     async def _reply_task_result(
         self,
         outcome: TurnOutcome | SideTurnOutcome | GoalOutcome,
@@ -7017,45 +7103,12 @@ class ChannelApplication:
         origin: object | None = None,
         allow_completion_mention: bool = True,
     ) -> None:
-        mention = _outcome_completion_mention_user_id(outcome) if allow_completion_mention else None
-        if (
-            not isinstance(outcome, GoalOutcome)
-            and outcome.task_feedback.progress_card_enabled
-            and outcome.partial_answers
-        ):
-            terminal_status = (
-                outcome.status if outcome.error is None and outcome.status in {"completed", "interrupted"}
-                else "failed"
-            )
-            activity = (
-                _reply_activity_module(outcome.activity, terminal_status=terminal_status, collapsed=True)
-                if outcome.activity is not None else ReplyCardActivityModule(
-                    TurnProgressManifest(
-                        state="running", steer_count=0, plan_available=False,
-                        plan_generated=False, plan_may_be_stale=False,
-                    ),
-                    terminal_status=terminal_status, collapsed=True,
-                )
-            )
-            try:
-                replacement_card = reply_card(ReplyCardProjection(
-                    activity=activity,
-                    partial_answer=ReplyCardPartialAnswerModule(
-                        tuple(answer.text for answer in outcome.partial_answers)
-                    ),
-                    result=ReplyCardResultModule(content, completion_mention_user_id=mention),
-                ))
-            except Exception:
-                logger.exception("replacement answer card could not be rendered")
-                if outcome.error is None and not outcome.final_response and outcome.status == "completed":
-                    content = "任务已完成，但阶段性答案投递未确认。"
-            else:
-                await self._reply(outcome.origin if origin is None else origin, replacement_card)
-                return
         await self._reply(
             outcome.origin if origin is None else origin,
             content,
-            completion_mention_user_id=mention,
+            completion_mention_user_id=(
+                _outcome_completion_mention_user_id(outcome) if allow_completion_mention else None
+            ),
         )
 
     async def _reply(
