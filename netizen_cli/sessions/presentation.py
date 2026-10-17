@@ -145,23 +145,30 @@ _PROTECTED = frozenset({"id", "threadId", "bindingId", "chatId", "topicId", "tur
 
 
 def fit_result(value: dict[str, Any]) -> dict[str, Any]:
-    """Trim prose and older history while retaining valid IDs and pagination."""
+    """Trim prose/items while retaining native page membership and cursors."""
     if result_bytes(value) <= MAX_RESULT_BYTES:
         return value
     value = copy.deepcopy(value)
     value["truncated"] = True
     turns = value.get("turns", [])
-    while len(turns) > 1 and result_bytes(value) > MAX_RESULT_BYTES:
-        turns.pop()
-        value["page"].update(hasMore=True, nextCursor=turns[-1]["id"])
+    # A native cursor is opaque, not a Turn ID. Keep every returned Turn so
+    # budget trimming cannot skip history or fabricate its continuation.
     # Keep the newest answer preferentially; remove older non-answer items.
+    size = result_bytes(value)
     for turn in turns:
         items = turn.get("items", [])
-        while len(items) > 1 and result_bytes(value) > MAX_RESULT_BYTES:
+        while len(items) > 1 and size > MAX_RESULT_BYTES:
             last_answer = next((i for i in range(len(items) - 1, -1, -1) if items[i].get("type") == "agentMessage"), None)
             index = next((i for i, item in enumerate(items) if item.get("type") != "agentMessage"),
                          next((i for i in range(len(items)) if i != last_answer), 0))
-            items.pop(index)
+            # At least one item remains, so removal also drops one JSON comma.
+            # Count each removed payload once instead of serializing the whole
+            # remaining page for every item (large pages block the event loop).
+            size -= result_bytes(items.pop(index)) + 1
+            if "itemsTruncated" in turn:
+                size += result_bytes(True) - result_bytes(turn["itemsTruncated"])
+            else:
+                size += result_bytes({"itemsTruncated": True}) - 1
             turn["itemsTruncated"] = True
     def shorten(node: Any, limit: int) -> None:
         if isinstance(node, dict):

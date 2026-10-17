@@ -1070,8 +1070,6 @@ class AdminWebApplication:
                     "bindingCount": item.aggregate.binding_count,
                     "lazyBindingCount": item.aggregate.lazy_binding_count,
                     "materializedBindingCount": item.aggregate.materialized_binding_count,
-                    "archivedBindingCount": item.archived_binding_count,
-                    "unconfirmedBindingCount": item.unconfirmed_binding_count,
                     "lastActivatedAt": item.aggregate.last_activated_at,
                     "actions": project_actions,
                 }

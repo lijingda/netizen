@@ -3,9 +3,12 @@ status: accepted
 date: 2026-10-15
 amends: 0023, 0030, 0061, 0067
 related: 0069, 0070, 0073, 0078, 0079, 0080
+amended_by: 0083
 ---
 
 # 普通会话协作使用原生工具形态与 ExternalMessage
+
+> [ADR 0083](0083-page-native-session-history-through-a-narrow-read-adapter.md) 改用按需目录分页和固定只读历史分页适配，发送不再预扫归档目录。
 
 用户需要让一个普通会话创建、发现、读取和联系其他普通会话，并在飞书话题中直接查看和
 干预。采用 Codex CLI `rust-v0.162.1` 已使用的六个独立工具形态，由模型决定协作步骤；

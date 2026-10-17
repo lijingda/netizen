@@ -13,9 +13,9 @@ from lark_channel import Identity, OutboundCard, OutboundPost
 from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.channel.reply_presenter import _ReplyCardPresenter
 from netizen_cli.codex_runtime import (
-    GoalOperationState, GoalOutcome, GoalFinalizationStatus, SideTurnOutcome, Submission, SubmitDisposition, TurnOutcome,
+    GoalOutcome, GoalFinalizationStatus, GoalSubmission, SideTurnOutcome, Submission, SubmitDisposition, TurnOutcome,
 )
-from netizen_cli.domain import FeishuScope, ScopeKind
+from netizen_cli.domain import FeishuScope, NativeCapability, ScopeKind
 from netizen_cli.partial_answers import PartialAnswer
 from netizen_cli.sdk_gap_adapter import GoalStatus
 from tests.support.channel_fixtures import channel_fixture
@@ -291,7 +291,7 @@ class PartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(presenter.close)
         reply = AsyncMock(return_value=sent_result("om_partial", chat_id="oc_direct"))
         delivery = await presenter.prepare_partial_answers(owner_id="binding-one", thread_id="native-one",
-            turn_id=None, side=False, reply=reply)
+            turn_id="logical-one", side=False, logical_turn=True, reply=reply)
         first, second = answer(turn="physical-one"), answer("second", turn="physical-two")
         partials = (first, answer("wrong thread", thread="another-thread"), second, first)
         self.assertTrue(await presenter.deliver_partial_answers(delivery, partials))
@@ -384,14 +384,15 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
             finalization=GoalFinalizationStatus.UNKNOWN, finalization_error=RuntimeError("clear result lost"),
             partial_answers=(answer(),))
         await self.app.handle_completion(outcome)
-        card = self.channel.replies[-1][1]
-        self.assertIsInstance(card, OutboundCard)
-        self.assertIn("自动结束结果未知", str(card.card))
-        self.assertNotIn("first stable answer", str(card.card))
+        self.assertEqual(len(self.channel.replies), 2)
         self.assertEqual(self.channel.replies[0][1].markdown,
                          "**阶段性答案**\n\nfirst stable answer")
-        self.assertIn("自动结束结果未知", str(self.channel.replies[1][1]))
-        self.assertNotIn("未产生文本回复", str(card.card))
+        closing = self.channel.replies[-1][1]
+        text = closing.markdown if isinstance(closing, OutboundPost) else closing
+        self.assertIn("自动结束结果未确认", text)
+        self.assertIn("clear result lost", text)
+        self.assertNotIn("first stable answer", text)
+        self.assertNotIsInstance(closing, OutboundCard)
 
     async def test_failed_and_interrupted_fallback_sends_partial_before_status(self):
         for status in ("failed", "interrupted"):
@@ -416,139 +417,90 @@ class PartialAnswerChannelTest(unittest.IsolatedAsyncioTestCase):
             owner_id="ou_user", origin=FakeMessage("work", message_id="om_origin"), goal=native_goal(status=GoalStatus.COMPLETE),
             final_physical_turn_id="turn-one", final_turn_status="completed", partial_answers=(answer(),))
         await self.app.handle_completion(outcome)
-        self.assertEqual(len(self.channel.replies), 3)
+        self.assertEqual(len(self.channel.replies), 2)
         self.assertIsInstance(self.channel.replies[0][1], OutboundPost)
         last = self.channel.replies[1][1]
         text = last.markdown if isinstance(last, OutboundPost) else last
         self.assertIn("投递未确认", text)
         self.assertNotIn("答案见阶段性答案", text)
-        self.assertIsInstance(self.channel.replies[-1][1], OutboundCard)
+        self.assertNotIsInstance(self.channel.replies[-1][1], OutboundCard)
 
-    async def test_oversized_goal_partial_still_updates_same_control_card_to_terminal(self):
-        from netizen_cli.cards import goal_generation
-        from netizen_cli.channel.reply_presenter import GoalCardOrigin
-        from netizen_cli.domain import ReplyCardPartialAnswerModule
-        for prior_delivered, final_response in ((False, None), (True, None), (True, "final result")):
-            with self.subTest(prior_delivered=prior_delivered, final_response=final_response):
-                goal = native_goal()
-                scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
-                await self.fixture.register_goal_card(scope=scope, binding=self.binding, goal=goal,
-                    message_id="om_goal_large", runtime_state=GoalOperationState.RUNNING.value)
-                origin = GoalCardOrigin(message_id="om_goal_large", scope=scope,
-                    binding_id=self.binding.id, short_id=self.binding.short_id,
-                    project_alias=self.binding.project_alias, goal_generation=goal_generation(goal))
-                previous = answer("previously displayed small answer")
-                if prior_delivered:
-                    current = self.app._progress_cards.goal_projection(
-                        source_id="om_goal_large", generation=goal_generation(goal))
-                    self.assertTrue(await self.app._progress_cards.update_goal(
-                        source_id="om_goal_large", generation=goal_generation(goal),
-                        projection=replace(current, partial_answer=ReplyCardPartialAnswerModule((previous.text,)))))
-                self.channel.updates.clear()
-                self.channel.replies.clear()
-                oversized = answer("x" * 55_001, item="oversized")
-                partials = (previous, oversized) if prior_delivered else (oversized,)
-                self.channel.reply_results.extend(
-                    sent_result(f"om_partial_{index}", chat_id="oc_direct")
-                    for index in range(len(partials))
-                )
-                outcome = GoalOutcome(binding_id=self.binding.id, thread_id="native-one", logical_turn_id="goal-one",
-                    owner_id="ou_user", origin=origin, goal=native_goal(status=GoalStatus.COMPLETE),
-                    final_physical_turn_id="turn-one", final_turn_status="completed", final_response=final_response,
-                    partial_answers=partials)
-                await self.app.handle_completion(outcome)
-                self.assertTrue(self.channel.updates)
-                message_id, card = self.channel.updates[-1]
-                self.assertEqual(message_id, "om_goal_large")
-                self.assertEqual(card["header"]["template"], "green")
-                self.assertIn("答案正文另行发送", str(card))
-                self.assertNotIn(oversized.text, str(card))
-                self.assertEqual(len(self.channel.replies), len(partials) + 1)
-                for (_, post), partial in zip(self.channel.replies, partials):
-                    self.assertEqual(post.markdown, "**阶段性答案**\n\n" + partial.text)
-                plain = self.channel.replies[-1][1]
-                text = plain.markdown if isinstance(plain, OutboundPost) else plain
-                self.assertNotIn(oversized.text, text)
-                if final_response is None:
-                    self.assertIn("答案见阶段性答案", text)
-                    self.assertNotIn("投递未确认", text)
-                    self.assertNotIn("阶段性答案未发送", text)
-                else:
-                    self.assertEqual(text, final_response)
-
-    async def test_goal_failed_original_card_posts_rollover_answers_before_compact_controls(self):
-        from netizen_cli.cards import goal_generation
-        from netizen_cli.channel.reply_presenter import GoalCardOrigin
-
-        goal = native_goal()
-        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
-        await self.fixture.register_goal_card(scope=scope, binding=self.binding, goal=goal,
-            message_id="om_goal", runtime_state=GoalOperationState.RUNNING.value)
-        origin = GoalCardOrigin(message_id="om_goal", scope=scope,
-            binding_id=self.binding.id, short_id=self.binding.short_id,
-            project_alias=self.binding.project_alias, goal_generation=goal_generation(goal),
-            fallback_origin=FakeMessage("work", message_id="om_origin"))
-        self.channel.replies.clear()
-        self.channel.updates.clear()
-        self.channel.card_update_results.extend(TimeoutError("response lost") for _ in range(3))
-        self.channel.reply_results.extend(sent_result(f"om_answer_{index}", chat_id="oc_direct")
-                                          for index in range(4))
+    async def test_goal_fallback_preserves_all_physical_turn_partials_without_management_card(self):
         partials = (answer("earlier physical turn", turn="turn-old"),
-                    answer("last physical turn", turn="turn-final"))
-        outcome = GoalOutcome(binding_id=self.binding.id, thread_id="native-one", logical_turn_id="goal-one",
-            owner_id="ou_user", origin=origin, goal=replace(goal, status=GoalStatus.PAUSED),
-            final_physical_turn_id="turn-final", final_turn_status="interrupted",
-            final_response="final answer", partial_answers=partials)
-        await self.app.handle_completion(outcome)
-        self.assertEqual(len(self.channel.updates), 3)
-        self.assertEqual([post.markdown for _, post in self.channel.replies[:2]], [
-            "**阶段性答案**\n\nearlier physical turn", "**阶段性答案**\n\nlast physical turn",
-        ])
-        self.assertEqual(self.channel.replies[2][1], "final answer")
-        card = self.channel.replies[3][1]
-        self.assertIsInstance(card, OutboundCard)
-        self.assertIn("恢复 Goal", str(card.card))
-        self.assertNotIn("earlier physical turn", str(card.card))
-        self.assertNotIn("final answer", str(card.card))
-
-    async def test_goal_control_recovery_cannot_consume_answer_fallback_budget(self):
-        control_started = asyncio.Event()
-        never = asyncio.Event()
-
-        async def reply(message, content, opts=None):
-            self.channel.replies.append((message.id, content))
-            if isinstance(content, OutboundCard):
-                control_started.set()
-                await never.wait()
-            return sent_result("om_answer", chat_id="oc_direct")
-
+                    answer("x" * 55_001, item="oversized", turn="turn-final"))
+        self.channel.reply_results.extend(sent_result(f"om_answer_{index}", chat_id="oc_direct")
+                                          for index in range(3))
         outcome = GoalOutcome(binding_id=self.binding.id, thread_id="native-one", logical_turn_id="goal-one",
             owner_id="ou_user", origin=FakeMessage("work", message_id="om_origin"),
-            goal=native_goal(status=GoalStatus.PAUSED), final_physical_turn_id="turn-one",
-            final_turn_status="interrupted", final_response="final answer", partial_answers=(answer(),))
-        with patch.object(self.channel, "reply", side_effect=reply), patch(
-            "netizen_cli.codex_runtime._GOAL_COMPLETION_DELIVERY_TIMEOUT_SECONDS", 1.0,
-        ), self.assertLogs("netizen_cli.channel_app", level="WARNING"):
-            completed = asyncio.create_task(self.app.handle_completion(outcome))
-            await asyncio.wait_for(control_started.wait(), 1)
-            self.assertEqual(self.channel.replies[0][1].markdown, "**阶段性答案**\n\nfirst stable answer")
-            self.assertEqual(self.channel.replies[1][1], "final answer")
-            await asyncio.wait_for(completed, 2)
+            goal=native_goal(status=GoalStatus.PAUSED),
+            final_physical_turn_id="turn-final", final_turn_status="completed",
+            final_response="final answer", partial_answers=partials,
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True))
+        await self.app.handle_completion(outcome)
         self.assertEqual(len(self.channel.replies), 3)
+        self.assertEqual([post.markdown for _, post in self.channel.replies[:2]],
+                         ["**阶段性答案**\n\n" + partial.text for partial in partials])
+        closing = self.channel.replies[-1][1]
+        self.assertEqual(closing.markdown if isinstance(closing, OutboundPost) else closing, "final answer")
+        self.assertEqual(self.channel.updates, [])
+        self.assertTrue(all(not isinstance(content, OutboundCard) for _, content in self.channel.replies))
 
-    async def test_goal_progress_off_still_refreshes_partial_answers(self):
-        goal = native_goal()
-        self.runtime.goal_snapshot_value = goal
-        self.runtime.active_goals[self.binding.id] = SimpleNamespace(state=GoalOperationState.RUNNING)
-        snapshot = replace(goal_activity_snapshot(binding_id=self.binding.id), partial_answers=(answer(),), revision=2)
-        self.runtime.goal_activity_values[self.binding.id] = snapshot
-        refresh = self.app._goal_refresh_callback(binding=self.binding,
-            scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
-            thread_id="native-one", logical_turn_id="goal-one", activity_enabled=False)
-        revision, projection = await refresh()
-        self.assertIsNone(projection.activity)
-        self.assertEqual(projection.partial_answer.contents, ("first stable answer",))
-        self.assertEqual(revision[-1], 2)
+    async def test_goal_progress_off_still_streams_rollover_partial_answers(self):
+        first = answer(turn="physical-one")
+        second = answer("next stable answer", turn="physical-two")
+        self.runtime.goal_activity_values[self.binding.id] = replace(
+            goal_activity_snapshot(binding_id=self.binding.id), partial_answers=(first,), revision=2)
+        delivered = asyncio.Queue()
+
+        async def reply(message, post, opts=None):
+            self.channel.replies.append((message.id, post))
+            delivered.put_nowait(post)
+            return sent_result("om_partial", chat_id="oc_direct")
+
+        with patch.object(self.channel, "reply", side_effect=reply):
+            self.assertTrue(await self.app._present_running_goal(
+                binding=self.binding,
+                submission=GoalSubmission(self.binding.id, "native-one", "goal-one", lambda: None),
+                origin=FakeMessage("work", message_id="om_origin")))
+            first_post = await asyncio.wait_for(delivered.get(), 1)
+            self.runtime.goal_activity_values[self.binding.id] = replace(
+                self.runtime.goal_activity_values[self.binding.id],
+                physical_turn_id="physical-two", partial_answers=(first, second), revision=3)
+            second_post = await asyncio.wait_for(delivered.get(), 1)
+        self.assertEqual(first_post.markdown, "**阶段性答案**\n\nfirst stable answer")
+        self.assertEqual(second_post.markdown, "**阶段性答案**\n\nnext stable answer")
+        self.assertEqual(delivered.qsize(), 0)
+        self.assertEqual(len(self.channel.replies), 2)
+        self.assertEqual(self.channel.updates, [])
+
+    async def test_goal_management_delivery_failure_releases_handoff_and_keeps_result(self):
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        for action in ("ship safely", "resume"):
+            with self.subTest(action=action):
+                released = []
+                self.channel.replies.clear()
+                self.runtime.goal_snapshot_value = native_goal(
+                    GoalStatus.PAUSED if action == "resume" else GoalStatus.ACTIVE,
+                )
+                self.runtime.goal_activity_values[self.binding.id] = goal_activity_snapshot(binding_id=self.binding.id)
+                self.runtime.goal_submission = GoalSubmission(
+                    self.binding.id, "native-one", "goal-one", lambda: released.append(True),
+                )
+                self.channel.reply_results.append(RuntimeError("management card unavailable"))
+                origin = FakeMessage("/goal " + action, message_id="om_goal_input")
+                with self.assertLogs("netizen_cli.channel_app", "ERROR"):
+                    await self.app.handle_message(origin)
+                self.assertEqual(released, [True])
+                await self.app.handle_completion(GoalOutcome(
+                    binding_id=self.binding.id, thread_id="native-one", logical_turn_id="goal-one",
+                    owner_id="ou_user", origin=origin, goal=native_goal(GoalStatus.COMPLETE),
+                    final_physical_turn_id="physical-last", final_turn_status="completed",
+                    final_response="confirmed final answer",
+                ))
+                closing = self.channel.replies[-1][1]
+                self.assertEqual(closing.markdown if isinstance(closing, OutboundPost) else closing,
+                                 "confirmed final answer")
+                self.assertEqual(self.app._progress_cards._sessions, {})
 
 
 class OrdinarySideTerminalFallbackTest(unittest.IsolatedAsyncioTestCase):
@@ -706,118 +658,17 @@ class OrdinarySideTerminalFallbackTest(unittest.IsolatedAsyncioTestCase):
 
 
 class GoalPartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
-    def projection(self, *contents, status="active", activity=None, result=None):
-        from netizen_cli.domain import (
-            ReplyCardGoalModule, ReplyCardPartialAnswerModule, ReplyCardProjection,
-        )
-        return ReplyCardProjection(
-            scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
-            goal=ReplyCardGoalModule(
-                binding_id="binding-one", short_id="binding1", project_alias="test",
-                goal_generation="g" * 43, status=status, runtime_state=f"goal-{status}",
-                objective="finish the task", token_budget=None, tokens_used=20,
-            ),
-            partial_answer=ReplyCardPartialAnswerModule(tuple(contents)) if contents else None,
-            activity=activity, result=result,
-        )
-
-    def origin(self):
-        from netizen_cli.channel.reply_presenter import GoalCardOrigin
-        return GoalCardOrigin(
-            message_id="om_goal", scope=FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT),
-            binding_id="binding-one", short_id="binding1", project_alias="test",
-            goal_generation="g" * 43,
-        )
-
-    async def start(self, presenter, projection, *, logical_turn_id="goal-one", refresh=None):
-        self.assertTrue(await presenter.start_goal(
-            binding_id="binding-one", thread_id="native-one", logical_turn_id=logical_turn_id,
-            generation="g" * 43, origin=self.origin(), projection=projection,
-            revision=1, refresh=refresh,
-        ))
-
-    async def test_status_refresh_waits_for_inflight_partial_before_merging(self):
+    async def test_logical_reply_keeps_rollover_answers_on_one_card_then_releases_session(self):
+        from netizen_cli.cards import turn_progress_card
         channel, runtime = FakeChannel(), StubRuntime()
         presenter = _ReplyCardPresenter(channel, runtime, poll_seconds=0.001)
         self.addAsyncCleanup(presenter.close)
-        initial = self.projection("first")
-        latest = self.projection("first", "newly delivered")
-        entered, release = asyncio.Event(), asyncio.Event()
-
-        async def refresh():
-            return 2, latest
-
-        async def update(message_id, card):
-            if "newly delivered" in str(card) and not entered.is_set():
-                entered.set()
-                await release.wait()
-            channel.updates.append((message_id, card))
-            return sent_result(message_id, chat_id="oc_direct")
-
-        with patch.object(channel, "update_card", side_effect=update):
-            await self.start(presenter, initial, refresh=refresh)
-            await asyncio.wait_for(entered.wait(), 1)
-            session = presenter._goal_sessions[("binding-one", "native-one", "g" * 43)]
-            status_update = asyncio.create_task(presenter.refresh_goal_snapshot(
-                source_id="om_goal", generation="g" * 43,
-                logical_turn_id="goal-one", projection=initial,
-            ))
-            await asyncio.wait_for(session.stopped.wait(), 1)
-            release.set()
-            self.assertTrue(await asyncio.wait_for(status_update, 1))
-        current = presenter.goal_projection(source_id="om_goal", generation="g" * 43)
-        self.assertEqual(current.partial_answer.contents, ("first", "newly delivered"))
-        self.assertIn("newly delivered", str(channel.updates[-1][1]))
-
-    async def test_pause_preserves_partials_and_manual_resume_resets_the_new_run(self):
-        from netizen_cli.channel.reply_presenter import _GoalCardDelivery
-        from netizen_cli.domain import ReplyCardResultModule
-        channel, runtime = FakeChannel(), StubRuntime()
-        presenter = _ReplyCardPresenter(channel, runtime)
-        self.addAsyncCleanup(presenter.close)
-        await self.start(presenter, self.projection("previous run answer"))
-        paused = self.projection(
-            "previous run answer", status="paused", result=ReplyCardResultModule("Goal 已暂停。"),
-        )
-        receipt = await presenter.finish_goal(
-            binding_id="binding-one", thread_id="native-one", logical_turn_id="goal-one",
-            generation="g" * 43, origin=self.origin(), projection=paused, retain_session=True,
-        )
-        self.assertEqual(receipt.status, _GoalCardDelivery.DELIVERED)
-        self.assertEqual(
-            presenter.goal_projection(source_id="om_goal", generation="g" * 43).partial_answer.contents,
-            ("previous run answer",),
-        )
-        await self.start(presenter, self.projection(), logical_turn_id="goal-resumed")
-        resumed_card = channel.updates[-1][1]
-        self.assertNotIn("previous run answer", str(resumed_card))
-        self.assertIsNone(presenter.goal_projection(source_id="om_goal", generation="g" * 43).partial_answer)
-        delayed = await presenter.finish_goal(
-            binding_id="binding-one", thread_id="native-one", logical_turn_id="goal-one",
-            generation="g" * 43, origin=self.origin(), projection=paused, retain_session=True,
-        )
-        self.assertEqual(delayed.status, _GoalCardDelivery.SUPERSEDED)
-        self.assertIs(channel.updates[-1][1], resumed_card)
-
-    async def test_rollover_projection_keeps_prior_answers_separate_from_final_result(self):
-        from netizen_cli.channel.reply_presenter import _GoalCardDelivery
-        from netizen_cli.domain import (
-            ReplyCardActivityModule, ReplyCardResultModule, TurnProgressManifest, TurnProgressManifestStep,
-        )
-        channel, runtime = FakeChannel(), StubRuntime()
-        presenter = _ReplyCardPresenter(channel, runtime, poll_seconds=0.001)
-        self.addAsyncCleanup(presenter.close)
-        first_activity = ReplyCardActivityModule(TurnProgressManifest(
-            state="running", steer_count=0, plan_available=True, plan_generated=True,
-            plan_may_be_stale=False, steps=(TurnProgressManifestStep("old physical turn step", "completed"),),
-        ))
-        next_activity = ReplyCardActivityModule(replace(first_activity.progress, steps=()))
-        initial = self.projection("first turn answer", activity=first_activity)
-        next_turn = self.projection("first turn answer", "second turn answer", activity=next_activity)
+        first = answer("first turn answer", turn="physical-one")
+        second = answer("second turn answer", turn="physical-two")
+        current = replace(turn_activity_snapshot(binding_id="binding-one", turn_id="logical-one"),
+                          partial_answers=(first,), revision=1)
         updated = asyncio.Event()
-
-        async def refresh():
-            return 2, next_turn
+        channel.reply_results.append(sent_result("om_reply", chat_id="oc_direct"))
 
         async def update(message_id, card):
             channel.updates.append((message_id, card))
@@ -826,57 +677,40 @@ class GoalPartialAnswerPresenterTest(unittest.IsolatedAsyncioTestCase):
             return sent_result(message_id, chat_id="oc_direct")
 
         with patch.object(channel, "update_card", side_effect=update):
-            await self.start(presenter, initial, refresh=refresh)
+            self.assertTrue(await presenter.start(binding_id="binding-one", thread_id="native-one",
+                turn_id="logical-one", origin=FakeMessage("work", message_id="om_origin"),
+                snapshot_reader=lambda: current, logical_turn=True))
+            current = replace(current, partial_answers=(first, second), steps=(), revision=2)
             await asyncio.wait_for(updated.wait(), 1)
-            terminal = replace(
-                next_turn,
-                activity=replace(next_activity, terminal_status="completed", collapsed=True),
-                result=ReplyCardResultModule("final physical turn result"),
-            )
-            receipt = await presenter.finish_goal(
-                binding_id="binding-one", thread_id="native-one", logical_turn_id="goal-one",
-                generation="g" * 43, origin=self.origin(), projection=terminal, retain_session=True,
-            )
-        self.assertEqual(receipt.status, _GoalCardDelivery.DELIVERED)
-        current = presenter.goal_projection(source_id="om_goal", generation="g" * 43)
-        self.assertEqual(current.partial_answer.contents, ("first turn answer", "second turn answer"))
-        self.assertEqual(current.result.content, "final physical turn result")
-        self.assertEqual(current.activity.progress.steps, ())
-        self.assertNotIn("old physical turn step", str(channel.updates[-1][1]))
+            receipt = await presenter.finish(binding_id="binding-one", thread_id="native-one",
+                turn_id="logical-one", activity=current,
+                render=lambda snapshot: turn_progress_card(snapshot=snapshot,
+                    partial_answers=(first, second), final_response="final physical turn result",
+                    terminal_status="completed", collapsed=True))
+        self.assertTrue(receipt.confirmed)
+        self.assertEqual(len(channel.replies), 1)
+        card = channel.updates[-1][1]
+        self.assertEqual(channel.updates[-1][0], "om_reply")
+        for text in (first.text, second.text, "final physical turn result"):
+            self.assertIn(text, str(card))
+        self.assertNotIn("暂停 Goal", str(card))
+        self.assertEqual(presenter._sessions, {})
 
-    async def test_body_fallback_guard_blocks_resume_and_rejects_the_superseded_run(self):
-        presenter = _ReplyCardPresenter(FakeChannel(), StubRuntime())
+    async def test_resuming_same_logical_reply_keeps_running_delivery_and_card(self):
+        channel, runtime = FakeChannel(), StubRuntime()
+        presenter = _ReplyCardPresenter(channel, runtime)
         self.addAsyncCleanup(presenter.close)
-        await self.start(presenter, self.projection("first"))
-        entered = asyncio.Event()
-
-        async def resume():
-            entered.set()
-            await self.start(presenter, self.projection(), logical_turn_id="resumed-goal")
-
-        guard = dict(binding_id="binding-one", thread_id="native-one", generation="g" * 43,
-            logical_turn_id="goal-one", origin=self.origin())
-        async with presenter.goal_fallback_guard(**guard) as current:
-            self.assertTrue(current)
-            resuming = asyncio.create_task(resume())
-            await asyncio.wait_for(entered.wait(), 1)
-            self.assertFalse(resuming.done())
-        await asyncio.wait_for(resuming, 1)
-        async with presenter.goal_fallback_guard(**guard) as current:
-            self.assertFalse(current)
-
-    async def test_body_fallback_guard_rejects_retired_and_closed_routes(self):
-        presenter = _ReplyCardPresenter(FakeChannel(), StubRuntime(), poll_seconds=10)
-        self.addAsyncCleanup(presenter.close)
-        await self.start(presenter, self.projection("first"), refresh=AsyncMock(return_value=None))
-        await presenter.update_goal(source_id="om_goal", generation="g" * 43,
-            projection=self.projection("first", status="paused"), retain_session=False)
-        guard = dict(binding_id="binding-one", thread_id="native-one", generation="g" * 43,
-            logical_turn_id="goal-one", origin=self.origin())
-        async with presenter.goal_fallback_guard(**guard) as current:
-            self.assertFalse(current)
-        async with presenter.goal_fallback_guard(**dict(guard, generation=None)) as current:
-            self.assertTrue(current)
-        await presenter.close()
-        async with presenter.goal_fallback_guard(**dict(guard, generation=None)) as current:
-            self.assertFalse(current)
+        first = answer(turn="physical-one")
+        snapshot = replace(turn_activity_snapshot(binding_id="binding-one", turn_id="logical-one"),
+                           partial_answers=(first,))
+        channel.reply_results.append(sent_result("om_reply", chat_id="oc_direct"))
+        options = dict(binding_id="binding-one", thread_id="native-one", turn_id="logical-one",
+                       origin=FakeMessage("work", message_id="om_origin"),
+                       snapshot_reader=lambda: snapshot, logical_turn=True)
+        self.assertTrue(await presenter.start(**options))
+        self.assertTrue(await presenter.start(**options))
+        self.assertEqual(len(channel.replies), 1)
+        self.assertIn(first.text, str(channel.replies[0][1].card))
+        self.assertEqual(len(presenter._sessions), 1)
+        await presenter.abandon(binding_id="binding-one", thread_id="native-one", turn_id="logical-one")
+        self.assertEqual(presenter._sessions, {})

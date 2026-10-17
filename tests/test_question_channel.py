@@ -11,7 +11,6 @@ from lark_channel.channel.channel import _card_action_identity
 
 from netizen_cli.cards.questions import render_question_card
 from netizen_cli.channel.question_inputs import CardAnswerOrigin
-from netizen_cli.channel.reply_presenter import GoalCardOrigin
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.message_history import MessageHistoryStats, MessageHistoryWindow
 from netizen_cli.runtime.contracts import ContextBoundaryCommitFailed, SteerRace, Submission, SubmitDisposition, TurnStartFailed
@@ -369,14 +368,13 @@ class QuestionChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.submit_calls, [])
         self.assertNotEqual(self.channel.send_calls[0][2].uuid, self.channel.send_calls[1][2].uuid)
 
-    async def test_goal_question_can_use_original_prompt_if_goal_card_was_not_delivered(self):
+    async def test_goal_question_uses_original_prompt_independently_of_management_card(self):
         self.channel.send_results.append(sent_result("om_q", chat_id=self.scope.chat_id))
-        origin = GoalCardOrigin(
-            None, self.scope, self.binding.id, self.binding.short_id, "test",
-            fallback_origin=FakeMessage("/goal finish", message_id="om_goal_input"),
-        )
-        await self.app.handle_questions(BindingQuestionTarget(self.binding.id), origin, QuestionRequest("question", (UserQuestion("Which one?"),)))
+        origin = FakeMessage("/goal finish", message_id="om_goal_input")
+        await self.app.handle_questions(BindingQuestionTarget(self.binding.id), origin,
+            QuestionRequest("question", (UserQuestion("Which one?"),)))
         self.assertEqual(self.channel.send_calls[0][2].reply_to, "om_goal_input")
+        self.assertEqual(self.channel.updates, [])
 
     async def test_sdk_redelivery_is_deduplicated_and_rejected_card_can_retry(self):
         event = self.event()

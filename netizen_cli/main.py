@@ -89,6 +89,7 @@ from .schedules.scheduler import Scheduler
 from .sessions.mcp import SessionMcpRunner
 from .sessions.policy import SessionPolicyService
 from .sessions.service import SessionService
+from .thread_history import AppServerThreadHistory
 from .terminal_cleanup import PinnedExperimentalTerminalCleanup
 from .turn_plan_observer import (
     PinnedTurnActivityObserver,
@@ -354,6 +355,7 @@ class ServiceCore:
                 policy=self._session_policy,
                 create_thread=self.application.create_session_thread,
                 send_message=self.application.send_session_message,
+                history=AppServerThreadHistory(self._codex),
             )
             self._session_mcp.attach(self._session_service.call)
             self._scheduler = Scheduler(

@@ -67,6 +67,7 @@ _REPEATABLE_CARD_CONTROL_NAMES = frozenset(
         CardControlName.RECHECK_EXACT_TURN,
         CardControlName.SESSIONS_PAGE,
         CardControlName.REFRESH_ARCHIVED_SESSIONS,
+        CardControlName.GOAL_REFRESH,
         CardControlName.GOAL_PAUSE,
         CardControlName.GOAL_RESUME,
         CardControlName.SIDE_CLOSE,

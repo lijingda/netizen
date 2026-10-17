@@ -3,10 +3,14 @@ status: accepted
 date: 2026-08-10
 amends: 0008, 0009, 0012
 related: 0010, 0013
-amended_by: 0018, 0047, 0069
+amended_by: 0018, 0047, 0069, 0083, 0084
 ---
 
 # 用可逐项移除的薄 Adapter 补齐 Python SDK 高层能力缺口
+
+> [ADR 0083](0083-page-native-session-history-through-a-narrow-read-adapter.md) 改用按需目录分页和固定只读历史分页适配，发送不再预扫归档目录。
+>
+> [ADR 0084](0084-separate-goal-controls-from-logical-turn-replies.md) 将 Goal 管理改为独立静态卡，任务回复复用普通逻辑流；pause/clear 不中断当前 Turn，`/stop` 仍暂停并中断。下文保留原决定的历史背景。
 
 > `/skills` 浏览入口已由
 > [ADR 0018](0018-remove-skills-command.md) 删除；本 ADR 定义的 SkillCatalog 与

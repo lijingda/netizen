@@ -15,12 +15,12 @@ from mcp.types import CallToolRequestParams
 
 from netizen_cli.bindings import BindingStore
 from netizen_cli.domain import FeishuScope, ScopeKind
-from netizen_cli.runtime.contracts import NativeThreadCatalog, NativeThreadMetadata
+from netizen_cli.runtime.contracts import NativeThreadCatalogPage, NativeThreadMetadata
 from netizen_cli.sessions.delegation import delegated_prompt
 from netizen_cli.sessions.errors import SessionToolError
 from netizen_cli.sessions.mcp import SessionMcpRunner
 from netizen_cli.sessions.policy import SessionAccessPolicy, SessionAccessRule
-from netizen_cli.sessions.presentation import fit_result, result_bytes
+from netizen_cli.sessions.presentation import fit_result, result_bytes, turn_summary
 from netizen_cli.sessions.schema import TOOL_ARGUMENTS, validate_arguments
 from netizen_cli.sessions.service import SessionService
 
@@ -41,13 +41,33 @@ class Catalog:
         self.items = {}
         self.archived = set()
         self.reads = []
+        self.history_reads = []
+        self.catalog_reads = []
         self.read_hook = None
 
-    async def thread_catalog(self, *, archived, deadline):
-        return NativeThreadCatalog(archived, tuple(
+    async def list_turns(self, thread_id, *, cursor=None, limit=1, items_view="full"):
+        self.history_reads.append(("turns", thread_id, cursor, limit, items_view))
+        turns = list(reversed(copy.deepcopy(self.items[thread_id]["turns"])))
+        start = int(cursor.removeprefix("native-page:")) if cursor else 0
+        data = turns[start:start + limit]
+        if items_view == "summary":
+            for item in data:
+                item["items"] = []
+        return SimpleNamespace(data=data, next_cursor=f"native-page:{start + limit}" if start + limit < len(turns) else None)
+
+    async def list_items(self, thread_id, turn_id, *, limit=20):
+        self.history_reads.append(("items", thread_id, turn_id, limit))
+        turn = next(turn for turn in self.items[thread_id]["turns"] if turn["id"] == turn_id)
+        return SimpleNamespace(data=[SimpleNamespace(item=copy.deepcopy(item)) for item in reversed(turn["items"][-limit:])])
+
+    async def thread_catalog_page(self, *, archived, cursor, limit, sort_key, sort_direction, deadline):
+        self.catalog_reads.append((archived, cursor, limit))
+        items = sorted((
             NativeThreadMetadata(thread_id, item.get("name"), item["preview"], item["updatedAt"])
             for thread_id, item in self.items.items() if (thread_id in self.archived) == archived
-        ))
+        ), key=lambda item: (item.updated_at, item.thread_id), reverse=True)
+        start = int(cursor.removeprefix("catalog:")) if cursor else 0
+        return NativeThreadCatalogPage(tuple(items[start:start + limit]), f"catalog:{start + limit}" if start + limit < len(items) else None)
 
     def handle(self, codex, thread_id):
         async def read(*, include_turns):
@@ -88,7 +108,7 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
             self.calls.append(("send", kwargs))
             return {"threadId": kwargs["target_thread_id"], "netizen": {"accepted": True}}
         self.service = SessionService(bindings=self.store, runtime=self.catalog, codex=object(), app_id="app",
-                                      policy=self.policy, create_thread=create, send_message=send)
+                                      policy=self.policy, create_thread=create, send_message=send, history=self.catalog)
         self.source = self.binding("chat-a", "source")
         self.target = self.binding("chat-b", "target")
         self.patch = patch("netizen_cli.sessions.service.AsyncThread", self.catalog.handle)
@@ -152,13 +172,13 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         self.policy.discovery = {"chat-b"}
         self.policy.read_send = {"chat-b"}
         self.binding("chat-b", "third", updated=20)
-        original = self.catalog.thread_catalog
+        original = self.catalog.thread_catalog_page
         async def revoke(**kwargs):
             self.policy.discovery = set()
             self.policy.read_send = set()
             self.policy.revision = "two"
             return await original(**kwargs)
-        self.catalog.thread_catalog = revoke
+        self.catalog.thread_catalog_page = revoke
         admitted = await self.call("list_threads", {"limit": 1})
         self.assertEqual([item["id"] for item in admitted["threads"]], ["third"])
         self.assertEqual(admitted["threads"][0]["summary"], "PRIVATE BODY")
@@ -170,12 +190,12 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_discovery_does_not_gain_preview_permission_mid_call(self):
         self.policy.discovery = {"chat-b"}
         self.policy.read_send = set()
-        original = self.catalog.thread_catalog
+        original = self.catalog.thread_catalog_page
         async def grant(**kwargs):
             self.policy.read_send = {"chat-b"}
             self.policy.revision = "two"
             return await original(**kwargs)
-        self.catalog.thread_catalog = grant
+        self.catalog.thread_catalog_page = grant
         admitted = await self.call("list_threads")
         self.assertNotIn("summary", admitted["threads"][0])
         self.assertEqual((await self.call("list_threads"))["threads"][0]["summary"], "PRIVATE BODY")
@@ -207,6 +227,51 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         stale = await self.call("list_threads", {"cursor": cursor})
         self.assertEqual(stale["error"]["code"], "invalid_cursor")
 
+    async def test_discovery_reads_one_directory_page_and_never_all_candidates(self):
+        for index in range(250):
+            self.catalog.items[f"external-{index}"] = thread(f"external-{index}", updated=-index)
+        with patch.object(self.store, "query_binding_candidates", side_effect=AssertionError("full local inventory")):
+            page = await self.call("list_threads", {"limit": 1})
+        self.assertEqual(len(page["threads"]), 1)
+        self.assertEqual(self.catalog.catalog_reads, [(False, None, 100)])
+        self.assertIsNotNone(page["nextCursor"])
+
+    async def test_sparse_discovery_search_scans_following_native_pages(self):
+        self.policy.discovery = {"chat-b"}
+        self.catalog.items["target"]["name"] = "needle"
+        self.catalog.items["target"]["updatedAt"] = 1
+        for index in range(105):
+            self.catalog.items[f"external-{index}"] = thread(f"external-{index}", updated=100 + index)
+        result = await self.call("list_threads", {"searchTerm": "needle"})
+        self.assertEqual([item["id"] for item in result["threads"]], ["target"])
+        self.assertEqual(self.catalog.catalog_reads, [(False, None, 100), (False, "catalog:100", 100)])
+
+    async def test_discovery_budget_checkpoint_and_lazy_phase_never_skip_targets(self):
+        expected = {"source", "target"}
+        for index in range(7):
+            self.binding("chat-b", f"large-{index}", title="中" * 2000, updated=20 + index)
+            expected.add(f"large-{index}")
+        lazy = self.binding("chat-lazy")
+        found, lazy_ids, cursor = [], [], None
+        for _ in range(20):
+            result = await self.call("list_threads", {"limit": 50, **({"cursor": cursor} if cursor else {})})
+            self.assertNotIn("error", result)
+            self.assertLessEqual(result_bytes(result), 8000)
+            found.extend(item["id"] for item in result["threads"] if item["id"] is not None)
+            lazy_ids.extend(item["netizen"]["bindingId"] for item in result["threads"] if item["id"] is None)
+            cursor = result["nextCursor"]
+            if cursor is None:
+                break
+        self.assertIsNone(cursor)
+        self.assertEqual(set(found), expected)
+        self.assertEqual(len(found), len(expected))
+        self.assertEqual(lazy_ids, [lazy.id])
+
+    async def test_missing_native_catalog_entry_is_not_reintroduced_by_discovery(self):
+        del self.catalog.items["target"]
+        result = await self.call("list_threads")
+        self.assertEqual([item["id"] for item in result["threads"]], ["source"])
+
     async def test_archived_pending_and_background_are_not_activated(self):
         pending = self.binding("chat-pending")
         self.catalog.archived.add("target")
@@ -233,13 +298,52 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         self.catalog.items["target"]["turns"] = turns
         first = await self.call("read_thread", {"threadId": "target"})
         self.assertEqual(first["turns"][0]["id"], "turn-2")
-        self.assertEqual(first["page"]["nextCursor"], "turn-2")
+        self.assertEqual(first["page"]["nextCursor"], "native-page:1")
         self.assertNotIn("secret output", json.dumps(first))
         second = await self.call("read_thread", {"threadId": "target", "cursor": first["page"]["nextCursor"], "turnLimit": 2})
         self.assertEqual([item["id"] for item in second["turns"]], ["turn-1", "turn-0"])
         self.assertFalse(second["page"]["hasMore"])
         output = await self.call("read_thread", {"threadId": "target", "includeOutputs": True, "maxOutputCharsPerItem": 3})
         self.assertEqual(output["turns"][0]["items"][0]["output"], {"text": "sec", "truncated": True, "originalChars": 13})
+        self.assertTrue(all(not full for _, full in self.catalog.reads))
+        self.assertEqual(self.catalog.history_reads[:2], [
+            ("turns", "target", None, 1, "full"),
+            ("turns", "target", "native-page:1", 2, "full"),
+        ])
+
+    async def test_history_budget_retains_page_membership_and_native_cursor(self):
+        self.catalog.items["target"]["turns"] = [turn(str(index), "中" * 20000) for index in range(12)]
+        result = await self.call("read_thread", {"threadId": "target", "turnLimit": 10})
+        self.assertEqual([item["id"] for item in result["turns"]], [str(index) for index in reversed(range(2, 12))])
+        self.assertEqual(result["page"]["nextCursor"], "native-page:10")
+        self.assertLessEqual(result_bytes(result), 8000)
+        last = await self.call("read_thread", {"threadId": "target", "cursor": result["page"]["nextCursor"], "turnLimit": 10})
+        self.assertEqual([item["id"] for item in last["turns"]], ["1", "0"])
+
+    async def test_wait_reads_latest_turn_and_bounded_items_for_both_history_modes(self):
+        for mode in ("paginated", "legacy"):
+            with self.subTest(mode=mode):
+                self.catalog.items["target"].update(historyMode=mode, turns=[turn(str(index), f"answer {index}") for index in range(100)])
+                self.catalog.history_reads.clear()
+                result = await self.call("wait_threads", {"targets": [{"threadId": "target"}], "timeoutMs": 0})
+                self.assertEqual(result["wake"]["turnId"], "99")
+                self.assertEqual(result["polls"][0]["latestAssistantMessage"]["text"], "answer 99")
+                expected = [("turns", "target", None, 1, "full" if mode == "legacy" else "summary")]
+                if mode != "legacy":
+                    expected.append(("items", "target", "99", 20))
+                self.assertEqual(self.catalog.history_reads, expected)
+        self.assertTrue(all(not full for _, full in self.catalog.reads))
+
+    async def test_failed_history_page_never_falls_back_to_full_thread(self):
+        with patch.object(self.catalog, "list_turns", side_effect=TimeoutError):
+            result = await self.call("read_thread", {"threadId": "target"})
+            self.assertEqual(result["error"]["code"], "unavailable")
+        self.catalog.items["target"]["turns"] = [turn("latest", "answer")]
+        with patch.object(self.catalog, "list_items", side_effect=TimeoutError):
+            result = await self.call("wait_threads", {"targets": [{"threadId": "target"}], "timeoutMs": 0})
+            self.assertIsNone(result["wake"])
+            self.assertEqual(result["errors"][0]["code"], "unavailable")
+        self.assertTrue(all(not full for _, full in self.catalog.reads))
 
     async def test_permission_change_during_native_read_applies_to_next_call(self):
         async def revoke(_thread_id):
@@ -249,7 +353,7 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["thread"]["preview"], "PRIVATE BODY")
         denied = await self.call("read_thread", {"threadId": "target"})
         self.assertEqual(denied["error"]["code"], "access_denied")
-        self.assertEqual(self.catalog.reads, [("target", True)])
+        self.assertEqual(self.catalog.reads, [("target", False)])
 
     async def test_read_still_revalidates_removed_target_after_native_read(self):
         async def remove(_thread_id):
@@ -426,7 +530,8 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         value = await self.call("read_thread", {"threadId": "target", "turnLimit": 2})
         self.assertLessEqual(result_bytes(value), 8000)
         self.assertEqual(value["thread"]["id"], "target")
-        self.assertEqual(value["page"]["nextCursor"], "new")
+        self.assertIsNone(value["page"]["nextCursor"])
+        self.assertEqual([item["id"] for item in value["turns"]], ["new", "old"])
         self.assertEqual(value["turns"][0]["items"][0]["id"], "answer-new")
         self.assertTrue(value["truncated"])
 
@@ -472,6 +577,69 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(item["receiverThreadIds"]), {receiver})
         self.assertTrue(item["receiverThreadIdsTruncated"])
         self.assertLessEqual(result_bytes(result), 8000)
+
+
+class SessionProjectionTests(unittest.TestCase):
+    def test_item_budget_boundary_preserves_unicode_answer_and_only_removes_needed_items(self):
+        for flag in (None, False, True):
+            for excess in (0, 1):
+                with self.subTest(items_truncated=flag, excess=excess):
+                    answer = {"id": "answer", "type": "agentMessage", "text": '中文😀\\\n"'}
+                    trailing = {"id": "trailing", "type": "commandExecution", "command": "pwd"}
+                    expected = {
+                        "thread": {"id": "thread"}, "page": {"nextCursor": "opaque:游标", "hasMore": True},
+                        "turns": [{"id": "turn", "items": [answer, trailing], "itemsTruncated": True}],
+                        "truncated": True,
+                    }
+                    answer["text"] += "x" * (8000 + excess - result_bytes(expected))
+                    original = copy.deepcopy(expected)
+                    original.pop("truncated")
+                    original_turn = original["turns"][0]
+                    if flag is None:
+                        original_turn.pop("itemsTruncated")
+                    else:
+                        original_turn["itemsTruncated"] = flag
+                    original_turn["items"].insert(0, {
+                        "id": "old-tool", "type": "commandExecution", "output": "中" * 100,
+                    })
+                    unchanged = copy.deepcopy(original)
+                    result = fit_result(original)
+                    if excess:
+                        expected["turns"][0]["items"].pop()
+                    self.assertEqual(result, expected)
+                    self.assertLessEqual(result_bytes(result), 8000)
+                    self.assertEqual(original, unchanged)
+
+    def test_large_history_page_has_bounded_serialization_work(self):
+        items = [{
+            "id": f"command-{index}", "type": "commandExecution", "command": "run",
+            "status": "completed", "aggregatedOutput": "中" * 20000,
+        } for index in range(19)] + [{
+            "id": "answer", "type": "agentMessage", "text": "答" * 20000, "phase": "final_answer",
+        }]
+        value = {
+            "thread": {"id": "thread"}, "page": {"nextCursor": "opaque-next", "hasMore": True},
+            "turns": [turn_summary({"id": f"turn-{index}", "status": "completed", "items": items}, True, 20000)
+                      for index in range(10)],
+        }
+        input_bytes = result_bytes(value)
+        serialized_bytes = 0
+
+        def measured_size(node):
+            nonlocal serialized_bytes
+            size = result_bytes(node)
+            serialized_bytes += size
+            return size
+
+        with patch("netizen_cli.sessions.presentation.result_bytes", side_effect=measured_size):
+            result = fit_result(value)
+        # Bound actual encoding work rather than wall-clock time: this must not
+        # repeatedly encode every remaining large payload after each removal.
+        self.assertLess(serialized_bytes, input_bytes * 6)
+        self.assertLessEqual(result_bytes(result), 8000)
+        self.assertEqual([turn["id"] for turn in result["turns"]], [f"turn-{index}" for index in range(10)])
+        self.assertEqual(result["page"], value["page"])
+        self.assertTrue(all([item["id"] for item in turn["items"]] == ["answer"] for turn in result["turns"]))
 
 
 class SessionMcpTests(unittest.IsolatedAsyncioTestCase):

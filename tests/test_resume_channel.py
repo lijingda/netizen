@@ -118,9 +118,15 @@ class ResumeChannelTest(unittest.IsolatedAsyncioTestCase):
             target = (await fixture.create_binding(scope)).binding
             fixture.store.assign_native_thread_id(target.id, "native-unlisted")
             await fixture.create_binding(scope)
+            fixture.runtime.thread_metadata_values["native-unlisted"] = (
+                NativeThreadMetadata("native-unlisted", "Previously listed", "old task")
+            )
             await fixture.app.handle_message(FakeMessage("/sessions", message_id="om_sessions"))
             card = fixture.channel.replies[-1][1]
-            self.assertIn("归档状态：未确认", str(card))
+            self.assertIn("Previously listed", str(card))
+            # The issued card retains an exact ID even when a later directory
+            # query omits it. Only native resume decides whether it is usable.
+            fixture.runtime.thread_metadata_values.pop("native-unlisted")
 
             await fixture.app.handle_card_action(direct_button_event(
                 callback(card, "设为当前"), message_id="om_sessions",
@@ -138,8 +144,12 @@ class ResumeChannelTest(unittest.IsolatedAsyncioTestCase):
                     target = (await fixture.create_binding(scope)).binding
                     fixture.store.assign_native_thread_id(target.id, "native-unlisted")
                     current = (await fixture.create_binding(scope)).binding
+                    fixture.runtime.thread_metadata_values["native-unlisted"] = (
+                        NativeThreadMetadata("native-unlisted", "Previously listed", "old task")
+                    )
                     await fixture.app.handle_message(FakeMessage("/sessions", message_id="om_sessions"))
                     card = fixture.channel.replies[-1][1]
+                    fixture.runtime.thread_metadata_values.pop("native-unlisted")
                     changes = tuple(fixture.runtime.active_binding_change_calls)
                     with (
                         patch.object(fixture.runtime, "activate_exact", AsyncMock(

@@ -25,12 +25,14 @@ from netizen_cli.bindings import BindingTaskFeedback
 from netizen_cli.codex_runtime import (
     GoalFinalizationStatus,
     GoalOutcome,
+    GoalSubmission,
     SideTurnOutcome,
     TurnOutcome,
 )
 from netizen_cli.domain import (
     FeishuScope,
     GoalStatus,
+    NativeCapability,
     ScheduledConversation,
     ScheduledOrigin,
     ScopeKind,
@@ -125,17 +127,19 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
             root_id="om_older_root", parent_id=card_id,
         ))
 
-    def assert_goal_answer_and_controls(self, *, enabled, target, text="Goal 结果正文"):
-        self.assertEqual(len(self.channel.replies), 2)
-        self.assertEqual([message_id for message_id, _ in self.channel.replies], [target, target])
-        answer = self.channel.replies[0][1]
-        self.assert_mention(answer, enabled=enabled, text=text)
-        self.assertEqual(answer.markdown if isinstance(answer, OutboundPost) else answer, text)
-        controls = self.channel.replies[1][1]
-        self.assertIsInstance(controls, OutboundCard)
-        self.assertNotIn(text, str(controls.card))
-        self.assertNotIn("<at ", json.dumps(controls.card))
-        return controls
+    async def start_goal_reply(self, outcome, *, scope=None, binding=None):
+        scope, binding = scope or self.scope, binding or self.binding
+        snapshot = replace(goal_activity_snapshot(binding_id=binding.id),
+            thread_id=outcome.thread_id, logical_turn_id=outcome.logical_turn_id)
+        self.runtime.goal_activity_values[binding.id] = snapshot
+        if outcome.task_feedback.progress_card_enabled:
+            self.channel.reply_results.append(sent_result("om_progress", chat_id=scope.chat_id,
+                                                          thread_id=scope.topic_id))
+        self.assertTrue(await self.app._present_running_goal(
+            binding=binding, origin=outcome.origin,
+            submission=GoalSubmission(binding.id, outcome.thread_id, outcome.logical_turn_id,
+                lambda: None, task_feedback=outcome.task_feedback)))
+        return replace(outcome, activity=snapshot)
 
     def assert_reminder(self, *, enabled=True, card_id="om_progress", topic=False):
         self.assertEqual(len(self.channel.send_calls), int(enabled))
@@ -542,225 +546,164 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(self.channel.replies), 1)
                 self.assert_reminder(enabled=progress)
 
-    async def test_goal_only_logical_known_ending_mentions_with_and_without_progress(self):
+    async def test_goal_logical_reply_completion_is_independent_of_goal_management_state(self):
         cases = (
-            (GoalStatus.COMPLETE, "completed", None, False, True),
-            (GoalStatus.BLOCKED, "failed", None, False, True),
-            (GoalStatus.USAGE_LIMITED, "completed", None, False, True),
-            (GoalStatus.BUDGET_LIMITED, "completed", None, False, True),
-            (GoalStatus.ACTIVE, "completed", None, False, False),
-            (GoalStatus.PAUSED, "completed", None, False, False),
-            (GoalStatus.COMPLETE, "interrupted", None, False, False),
-            (GoalStatus.COMPLETE, "completed", None, True, False),
-            (GoalStatus.COMPLETE, None, None, False, False),
-            (None, "completed", None, False, False),
-            (GoalStatus.COMPLETE, "completed", RuntimeError("state unknown"), False, False),
+            (GoalStatus.COMPLETE, "completed", False, True),
+            (GoalStatus.BLOCKED, "failed", False, True),
+            (GoalStatus.USAGE_LIMITED, "completed", False, True),
+            (GoalStatus.BUDGET_LIMITED, "completed", False, True),
+            (GoalStatus.PAUSED, "completed", False, True),
+            (None, "completed", False, True),  # Explicit clear does not discard the Turn result.
+            (GoalStatus.PAUSED, "interrupted", False, False),
+            (GoalStatus.COMPLETE, "completed", True, False),
         )
         for progress in (False, True):
-            for index, (status, turn_status, error, cleanup, enabled) in enumerate(cases):
-                with self.subTest(progress=progress, status=status, turn_status=turn_status, error=error):
+            for index, (status, turn_status, cleanup, enabled) in enumerate(cases):
+                with self.subTest(progress=progress, status=status, turn_status=turn_status):
                     self.channel.replies.clear()
                     self.channel.updates.clear()
                     self.channel.send_calls.clear()
-                    self.channel.reply_results.extend([
-                        sent_result(f"om_goal_answer_{progress}_{index}", chat_id="oc_direct"),
-                        sent_result(f"om_goal_controls_{progress}_{index}", chat_id="oc_direct"),
-                    ])
                     outcome = self.goal_outcome(
                         logical_turn_id=f"goal-{progress}-{index}",
-                        goal=native_goal(
-                            status, created_at=index + 1 + 100 * int(progress),
-                        ) if status else None,
-                        final_turn_status=turn_status, error=error,
-                        background_cleanup_requested=cleanup,
-                        task_feedback=BindingTaskFeedback(progress_card_enabled=progress),
-                        activity=replace(
-                            goal_activity_snapshot(binding_id=self.binding.id),
-                            logical_turn_id=f"goal-{progress}-{index}",
-                        ),
-                    )
+                        goal=native_goal(status) if status else None,
+                        final_turn_status=turn_status, background_cleanup_requested=cleanup,
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=progress))
+                    outcome = await self.start_goal_reply(outcome)
+                    if progress and enabled:
+                        self.queue_reminder()
                     await self.app.handle_completion(outcome)
-                    card = self.assert_goal_answer_and_controls(enabled=enabled, target=self.origin.id)
-                    self.assertEqual(
-                        bool(_elements(card.card, "collapsible_panel")),
-                        progress and turn_status in {"completed", "failed", "interrupted"},
-                    )
-                    self.assert_reminder(enabled=False)
+                    expected = "中断" if turn_status == "interrupted" else "Goal 结果正文"
+                    if progress:
+                        self.assertEqual(len(self.channel.replies), 1)
+                        self.assertEqual(len(self.channel.updates), 1)
+                        self.assert_mention(self.channel.updates[-1][1], enabled=False, text=expected)
+                    else:
+                        self.assertEqual(len(self.channel.replies), 1)
+                        self.assert_mention(self.channel.replies[-1][1], enabled=enabled, text=expected)
+                    self.assert_reminder(enabled=progress and enabled)
+                    self.assertNotIn("恢复 Goal", str(self.channel.replies))
+                    self.assertNotIn("清除 Goal", str(self.channel.updates))
 
-    async def test_goal_card_reminder_respects_scope_and_all_feedback_combinations(self):
+    async def test_goal_unconfirmed_terminal_does_not_notify_completion(self):
+        for progress in (False, True):
+            with self.subTest(progress=progress):
+                self.channel.replies.clear()
+                self.channel.updates.clear()
+                self.channel.send_calls.clear()
+                outcome = self.goal_outcome(final_physical_turn_id=None, final_turn_status=None,
+                    final_response=None, error=RuntimeError("native terminal is unknown"),
+                    task_feedback=BindingTaskFeedback(progress_card_enabled=progress))
+                outcome = await self.start_goal_reply(outcome)
+                await self.app.handle_completion(outcome)
+                content = self.channel.updates[-1][1] if progress else self.channel.replies[-1][1]
+                self.assert_mention(content, enabled=False, text="native terminal is unknown")
+                self.assert_reminder(enabled=False)
+
+    async def test_goal_reply_reminder_respects_scope_and_feedback(self):
         for kind in (ScopeKind.DIRECT, ScopeKind.GROUP, ScopeKind.TOPIC):
-            scope = FeishuScope(
-                "cli_test", "oc_direct", kind,
-                "omt_goal" if kind is ScopeKind.TOPIC else None,
-            )
+            scope = FeishuScope("cli_test", "oc_direct", kind,
+                                "omt_goal" if kind is ScopeKind.TOPIC else None)
             binding = self.binding
             if kind is not ScopeKind.DIRECT:
                 created = await self.fixture.create_binding(scope)
-                binding = created.binding
-            fallback_origin = FakeMessage(
-                "run goal", message_id="om_goal_origin", sender_id="ou_other",
-                chat_type="p2p" if kind is ScopeKind.DIRECT else "group",
-                thread_id=scope.topic_id,
-            )
-            for index, (pulse, progress, enabled, update_state) in enumerate(
-                product((False, True), (False, True), (False, True), ("success", "retry", "failed"))
-            ):
-                with self.subTest(kind=kind, pulse=pulse, progress=progress, enabled=enabled, update_state=update_state):
-                    running = replace(
-                        native_goal(created_at=index + 1),
-                        thread_id=binding.native_thread_id or f"native-{kind.value}",
-                    )
-                    card_id = f"om_goal_{kind.value}_{index}"
-                    await self.fixture.register_goal_card(
-                        scope=scope, binding=binding, goal=running,
-                        message_id=card_id, runtime_state="goal-running",
-                        logical_turn_id=f"logical-{index}",
-                    )
-                    binding = self.fixture.store.get(binding.id)
+                self.fixture.store.assign_native_thread_id(created.binding.id, f"native-{kind.value}")
+                binding = self.fixture.store.get(created.binding.id)
+            origin = FakeMessage("run goal", message_id="om_goal_origin", sender_id="ou_other",
+                chat_type="p2p" if kind is ScopeKind.DIRECT else "group", thread_id=scope.topic_id)
+            for progress, enabled in product((False, True), repeat=2):
+                with self.subTest(kind=kind, progress=progress, enabled=enabled):
                     self.channel.replies.clear()
+                    self.channel.updates.clear()
                     self.channel.send_calls.clear()
-                    origin = reply_presenter.GoalCardOrigin(
-                        message_id=card_id, scope=scope,
-                        binding_id=binding.id, short_id=binding.short_id,
-                        project_alias=binding.project_alias, fallback_origin=fallback_origin,
-                    )
-                    outcome = self.goal_outcome(
-                        binding_id=binding.id, thread_id=running.thread_id,
-                        origin=origin, logical_turn_id=f"logical-{index}",
-                        goal=replace(running, status=GoalStatus.COMPLETE),
-                        task_feedback=BindingTaskFeedback(pulse, progress, enabled),
-                        finalization=GoalFinalizationStatus.UNKNOWN,
-                        finalization_error=RuntimeError("clear reply lost"),
-                    )
-                    update_fails = update_state == "failed"
-                    failures = 3 if update_fails else int(update_state == "retry")
-                    self.channel.card_update_results.extend(
-                        TimeoutError("update reply lost") for _ in range(failures)
-                    )
-                    if update_fails:
-                        self.channel.reply_results.extend([
-                            sent_result("om_goal_answer", chat_id=scope.chat_id, thread_id=scope.topic_id),
-                            sent_result("om_goal_controls", chat_id=scope.chat_id, thread_id=scope.topic_id),
-                        ])
-                    elif enabled:
-                        self.queue_reminder(card_id, thread_id=scope.topic_id)
-                    with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR") if failures else nullcontext():
-                        await self.app.handle_completion(outcome)
-                    if update_fails:
-                        self.assert_goal_answer_and_controls(enabled=enabled, target=fallback_origin.id)
-                    else:
-                        self.assertEqual(self.channel.replies, [])
-                    self.assertEqual(len(self.channel.updates), 3 if update_fails else failures + 1)
-                    for message_id, card in self.channel.updates:
-                        self.assertEqual(message_id, card_id)
-                        self.assert_mention(card, enabled=False, text="Goal 结果正文")
-                    self.assert_reminder(
-                        enabled=enabled and not update_fails, card_id=card_id,
-                        topic=kind is ScopeKind.TOPIC,
-                    )
-
-    async def test_uncertain_goal_update_and_answer_post_never_repeat_mention_in_controls(self):
-        for progress in (False, True):
-            with self.subTest(progress=progress):
-                running = native_goal(created_at=1 + int(progress))
-                await self.fixture.register_goal_card(
-                    scope=self.scope, binding=self.binding, goal=running,
-                    message_id="om_goal", runtime_state="goal-running",
-                )
-                self.channel.replies.clear()
-                origin = reply_presenter.GoalCardOrigin(
-                    message_id="om_goal", scope=self.scope,
-                    binding_id=self.binding.id, short_id=self.binding.short_id,
-                    project_alias=self.binding.project_alias, fallback_origin=self.origin,
-                )
-                self.channel.card_update_results.extend(
-                    TimeoutError("terminal update response lost") for _ in range(3)
-                )
-                self.channel.reply_results.extend([
-                    TimeoutError("fallback answer response lost"),
-                    sent_result("om_goal_controls", chat_id="oc_direct"),
-                ])
-                with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
-                    await self.app.handle_completion(self.goal_outcome(
-                        origin=origin, goal=replace(running, status=GoalStatus.COMPLETE),
-                        task_feedback=BindingTaskFeedback(progress_card_enabled=progress),
-                    ))
-                self.assertEqual(len(self.channel.updates), 3)
-                self.assertEqual(self.channel.updates[0][0], "om_goal")
-                self.assert_mention(self.channel.updates[0][1], enabled=False, text="Goal 结果正文")
-                self.assert_goal_answer_and_controls(enabled=True, target=self.origin.id)
-                self.assert_reminder(enabled=False)
-
-    async def test_oversized_goal_result_keeps_mention_when_only_goal_controls_were_updated(self):
-        for progress in (False, True):
-            with self.subTest(progress=progress):
-                running = native_goal(created_at=1 + int(progress))
-                await self.fixture.register_goal_card(
-                    scope=self.scope, binding=self.binding, goal=running,
-                    message_id="om_goal", runtime_state="goal-running",
-                )
-                self.channel.replies.clear()
-                origin = reply_presenter.GoalCardOrigin(
-                    message_id="om_goal", scope=self.scope,
-                    binding_id=self.binding.id, short_id=self.binding.short_id,
-                    project_alias=self.binding.project_alias, fallback_origin=self.origin,
-                )
-                answer = "Goal 结果正文\n" + "x" * 60_000
-                with self.assertLogs("netizen_cli.channel_app", level="WARNING"):
-                    await self.app.handle_completion(self.goal_outcome(
-                        origin=origin, goal=replace(running, status=GoalStatus.COMPLETE),
-                        final_response=answer,
-                        task_feedback=BindingTaskFeedback(progress_card_enabled=progress),
-                    ))
-                self.assertEqual(len(self.channel.updates), 1)
-                self.assertNotIn("<at ", json.dumps(self.channel.updates[0][1]))
-                self.assertEqual(len(self.channel.replies), 1)
-                self.assert_mention(self.channel.replies[0][1], enabled=True, text=answer)
-                self.assertEqual(self.channel.replies[0][1].markdown, answer)
-                self.assertNotIn(answer, str(self.channel.updates[0][1]))
-                self.assert_reminder(enabled=False)
-
-    async def test_progress_goal_reminder_uses_delivered_card_not_stale_origin(self):
-        for update_fails in (False, True):
-            with self.subTest(update_fails=update_fails):
-                running = native_goal(created_at=1 + int(update_fails))
-                await self.fixture.register_goal_card(
-                    scope=self.scope, binding=self.binding, goal=running,
-                    message_id="om_current_goal", runtime_state="goal-running",
-                )
-                self.channel.replies.clear()
-                self.channel.send_calls.clear()
-                origin = reply_presenter.GoalCardOrigin(
-                    message_id="om_stale_goal", scope=self.scope,
-                    binding_id=self.binding.id, short_id=self.binding.short_id,
-                    project_alias=self.binding.project_alias, fallback_origin=self.origin,
-                )
-                if update_fails:
-                    self.channel.card_update_results.extend(
-                        TimeoutError("update reply lost") for _ in range(3)
-                    )
-                    self.channel.reply_results.extend([
-                        sent_result("om_goal_answer", chat_id="oc_direct"),
-                        sent_result("om_goal_controls", chat_id="oc_direct"),
-                    ])
-                if not update_fails:
-                    self.queue_reminder("om_current_goal")
-                outcome = self.goal_outcome(
-                    origin=origin, goal=replace(running, status=GoalStatus.COMPLETE),
-                    task_feedback=BindingTaskFeedback(progress_card_enabled=True),
-                )
-                if update_fails:
-                    with self.assertLogs("netizen_cli.channel.reply_presenter", level="ERROR"):
-                        await self.app.handle_completion(outcome)
-                else:
+                    outcome = self.goal_outcome(binding_id=binding.id, thread_id=binding.native_thread_id,
+                        origin=origin, logical_turn_id=f"goal-{kind}-{progress}-{enabled}",
+                        task_feedback=BindingTaskFeedback(progress_card_enabled=progress,
+                                                          completion_mention_enabled=enabled))
+                    outcome = await self.start_goal_reply(outcome, scope=scope, binding=binding)
+                    if progress and enabled:
+                        self.queue_reminder(thread_id=scope.topic_id)
                     await self.app.handle_completion(outcome)
-                self.assertEqual(len(self.channel.updates), 3 if update_fails else 1)
-                self.assertEqual(self.channel.updates[0][0], "om_current_goal")
-                self.assert_mention(self.channel.updates[0][1], enabled=False, text="Goal 结果正文")
-                self.assertEqual(len(self.channel.replies), 2 * int(update_fails))
-                if update_fails:
-                    self.assert_goal_answer_and_controls(enabled=True, target=self.origin.id)
-                self.assert_reminder(enabled=not update_fails, card_id="om_current_goal")
+                    self.assertEqual(len(self.channel.replies), 1)
+                    content = self.channel.updates[-1][1] if progress else self.channel.replies[-1][1]
+                    self.assert_mention(content, enabled=enabled and not progress, text="Goal 结果正文")
+                    self.assert_reminder(enabled=enabled and progress, topic=kind is ScopeKind.TOPIC)
+
+    async def test_goal_uncertain_card_update_falls_back_once_without_updating_management(self):
+        outcome = await self.start_goal_reply(self.goal_outcome(
+            task_feedback=BindingTaskFeedback(progress_card_enabled=True),
+            finalization=GoalFinalizationStatus.UNKNOWN,
+            finalization_error=RuntimeError("clear reply lost")))
+        self.channel.card_update_results.extend(TimeoutError("reply lost") for _ in range(3))
+        with self.assertLogs("netizen_cli.channel.reply_presenter", "ERROR"):
+            await self.app.handle_completion(outcome)
+        self.assertEqual(len(self.channel.updates), 3)
+        self.assertEqual({message_id for message_id, _ in self.channel.updates}, {"om_progress"})
+        self.assertEqual(len(self.channel.replies), 2)
+        self.assert_mention(self.channel.replies[-1][1], enabled=True, text="Goal 结果正文")
+        self.assertIn("clear reply lost", self.channel.replies[-1][1].markdown)
+        self.assertNotIn("清除 Goal", str(self.channel.replies[-1][1]))
+        self.assert_reminder(enabled=False)
+
+    async def test_goal_file_paging_keeps_final_physical_turn_id_and_does_not_repeat_mention(self):
+        paths = tuple(f"goal-result-{index:02}.txt" for index in range(10))
+        for path in paths:
+            (self.fixture.project / path).write_text(path)
+        for progress in (False, True):
+            with self.subTest(progress=progress):
+                self.channel.replies.clear()
+                self.channel.updates.clear()
+                self.channel.send_calls.clear()
+                outcome = self.goal_outcome(logical_turn_id="physical-first",
+                    final_physical_turn_id="physical-last", final_items=(file_change_item(*paths),),
+                    task_feedback=BindingTaskFeedback(progress_card_enabled=progress))
+                outcome = await self.start_goal_reply(outcome)
+                if progress:
+                    self.queue_reminder()
+                await self.app.handle_completion(outcome)
+                card = self.channel.updates[-1][1] if progress else self.channel.replies[-1][1].card
+                self.assert_mention(card, enabled=not progress, text="Goal 结果正文")
+                page = _card_button_value(OutboundCard(card=card), "跳转")
+                self.assertEqual(page["turn_id"], "turn:v1:physical-last")
+                await self.app.handle_card_action(direct_button_event(page,
+                    message_id="om_progress" if progress else "om_result",
+                    form_value={"turn_file_page": "1"}))
+                updated = self.channel.updates[-1][1]
+                self.assert_mention(updated, enabled=False, text="Goal 结果正文")
+                self.assertIn("goal-result-08.txt", str(updated))
+                next_page = _card_button_value(OutboundCard(card=updated), "跳转")
+                self.assertEqual(next_page["turn_id"], "turn:v1:physical-last")
+                self.assertEqual(len(self.channel.replies), 1)
+                self.assert_reminder(enabled=progress)
+
+    async def test_goal_resumed_from_direct_chat_card_retains_scope_for_result_files(self):
+        self.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        path = self.fixture.project / "resumed.txt"
+        path.write_text("file result")
+        for progress in (False, True):
+            with self.subTest(progress=progress):
+                self.channel.replies.clear()
+                self.channel.updates.clear()
+                self.runtime.goal_snapshot_value = native_goal(GoalStatus.PAUSED)
+                self.runtime.goal_activity_values[self.binding.id] = goal_activity_snapshot(binding_id=self.binding.id)
+                feedback = BindingTaskFeedback(progress_card_enabled=progress, completion_mention_enabled=False)
+                self.runtime.goal_submission = GoalSubmission(
+                    self.binding.id, "native-one", "goal-one", lambda: None, task_feedback=feedback,
+                )
+                if progress:
+                    self.channel.reply_results.append(sent_result("om_progress", chat_id="oc_direct"))
+                management = await self.app._goal_management_card(self.binding, self.scope)
+                await self.app.handle_card_action(direct_button_event(
+                    _card_button_value(management, "恢复 Goal"), message_id="om_management",
+                ))
+                origin = self.runtime.resume_goal_calls[-1]["origin"]
+                await self.app.handle_completion(self.goal_outcome(
+                    origin=origin, final_items=(file_change_item(str(path)),), task_feedback=feedback,
+                ))
+                result = (OutboundCard(card=self.channel.updates[-1][1]) if progress
+                          else self.channel.replies[-1][1])
+                self.assertIsInstance(result, OutboundCard)
+                self.assertIn("resumed.txt", str(result.card))
+                self.assertEqual(self.app._scope(origin), self.scope)
 
     def test_scheduled_initial_turn_never_mentions_a_human_even_with_valid_owner(self):
         origin = ScheduledOrigin(

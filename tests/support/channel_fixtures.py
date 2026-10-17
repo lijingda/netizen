@@ -10,12 +10,10 @@ from pathlib import Path
 
 from lark_channel import OutboundCard
 
-from netizen_cli import channel_app
 from netizen_cli.bindings import BindingStore, BindingTaskFeedback
-from netizen_cli.cards import goal_generation, reply_card
-from netizen_cli.channel import reply_presenter
+from netizen_cli.cards import goal_card
 from netizen_cli.channel_app import ChannelApplication
-from netizen_cli.domain import FeishuScope, NativeCapability, ReplyCardProjection, ScopeKind
+from netizen_cli.domain import FeishuScope, NativeCapability, ScopeKind
 from netizen_cli.management import (
     InstanceManagementService,
     ManagementRuntimePort,
@@ -71,35 +69,11 @@ class ChannelFixture:
         if binding.native_thread_id is None:
             self.store.assign_native_thread_id(binding.id, goal.thread_id)
             binding = self.store.get(binding.id)
-        projection = ReplyCardProjection(
-            scope=scope,
-            goal=channel_app._reply_goal_module(
-                binding=binding,
-                goal=goal,
-                runtime_state=runtime_state,
-            ),
+        return goal_card(
+            scope=scope, binding_id=binding.id, short_id=binding.short_id,
+            project_alias=binding.project_alias, goal=goal, runtime_state=runtime_state,
         )
-        generation = goal_generation(goal)
-        assert (
-            await self.app._progress_cards.start_goal(
-                binding_id=binding.id,
-                thread_id=goal.thread_id,
-                logical_turn_id=logical_turn_id,
-                generation=generation,
-                origin=reply_presenter.GoalCardOrigin(
-                    message_id=message_id,
-                    scope=scope,
-                    binding_id=binding.id,
-                    short_id=binding.short_id,
-                    project_alias=binding.project_alias,
-                ),
-                projection=projection,
-                revision=("test",),
-                refresh=None,
-            )
-        )
-        self.channel.updates.clear()
-        return reply_card(projection)
+
 
 
 @dataclass

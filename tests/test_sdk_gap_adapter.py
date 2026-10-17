@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import gc
 import json
 import subprocess
@@ -29,6 +30,7 @@ from netizen_cli.sdk_gap_adapter import (
     AppServerThreadDeleteControl,
     AppServerThreadSubscriptionControl,
     GoalControlError,
+    GoalMutationRejected,
     GoalMutationStateUnknown,
     GoalStatus,
     SIDE_THREAD_BOUNDARY,
@@ -184,6 +186,9 @@ for line in sys.stdin:
                 "thread/goal/updated",
                 {"threadId": "thread-goal", "goal": goal("active")},
             )
+            if mode == "goal-manage" and params.get("objective") is None:
+                send({"id": request_id, "result": {"goal": goal("active")}})
+                continue
             first = "turn-resume" if mode == "resume" else "turn-1"
             notify(
                 "turn/started",
@@ -246,7 +251,7 @@ for line in sys.stdin:
                     "turn/completed",
                     {"threadId": "thread-goal", "turn": turn(first, "completed")},
                 )
-            elif mode not in {"pause", "pause-loss", "interrupt-loss"} and not mode.startswith("goal-steer"):
+            elif mode not in {"pause", "pause-loss", "interrupt-loss", "goal-manage"} and not mode.startswith("goal-steer"):
                 notify(
                     "turn/completed",
                     {"threadId": "thread-goal", "turn": turn("turn-1", "completed")},
@@ -301,6 +306,12 @@ for line in sys.stdin:
                 sys.exit(0)
             send({"id": request_id, "result": {"goal": goal(goal_status)}})
     elif method == "turn/steer":
+        if mode == "goal-manage":
+            send({"id": request_id, "result": {"turnId": active_turn_id}})
+            notify("turn/completed", {
+                "threadId": "thread-goal", "turn": turn(active_turn_id, "completed"),
+            })
+            continue
         if mode == "goal-steer-loss":
             sys.exit(0)
         if params.get("expectedTurnId") != active_turn_id:
@@ -932,6 +943,67 @@ class SdkGapAdapterContractTest(unittest.IsolatedAsyncioTestCase):
 
         methods = [item.get("method") for item in messages if "id" in item]
         self.assertEqual(methods, ["initialize", "thread/goal/get"])
+
+    async def test_goal_status_controls_keep_one_logical_stream_until_turn_finishes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            log_path = Path(raw) / "requests.jsonl"
+            async with AsyncCodex(_config(log_path, "goal-manage")) as codex:
+                process = codex._client._sync._proc
+                control = AppServerGoalControl(codex)
+                handle = await control.start("thread-goal", "manage independently")
+                observed = asyncio.create_task(handle.wait_terminal())
+                paused = await control.pause("thread-goal")
+                self.assertEqual(paused.status, GoalStatus.PAUSED)
+                self.assertEqual(handle.current_physical_turn_id(), "turn-1")
+                self.assertFalse(handle.is_finished())
+                self.assertFalse(observed.done())
+                resumed = await control.activate("thread-goal")
+                self.assertEqual(resumed.status, GoalStatus.ACTIVE)
+                self.assertEqual(handle.id, "turn-1")
+                self.assertEqual(handle.current_physical_turn_id(), "turn-1")
+                self.assertFalse(handle.is_finished())
+                self.assertTrue(await control.clear("thread-goal"))
+                self.assertIsNone(await control.get("thread-goal"))
+                self.assertFalse(observed.done())
+                # An independent final Turn event, not pause/clear, ends the
+                # same real SDK logical stream and preserves its physical ID.
+                await handle.steer("finish current turn", expected_turn_id="turn-1")
+                terminal = await asyncio.wait_for(observed, timeout=1)
+                self.assertEqual(terminal.final_physical_turn_id, "turn-1")
+                self.assertEqual(terminal.turn_status, "completed")
+                await handle.aclose()
+            _close_probe_pipes(process)
+            gc.collect()
+            messages = _messages(log_path)
+
+        methods = [item.get("method") for item in messages if "id" in item]
+        self.assertNotIn("turn/interrupt", methods)
+        sets = [item["params"] for item in messages if item.get("method") == "thread/goal/set"]
+        self.assertEqual([value["status"] for value in sets], ["active", "paused", "active"])
+        self.assertEqual(sum("objective" in value for value in sets), 1)
+
+    async def test_goal_status_only_exact_missing_goal_error_is_known_rejection(self) -> None:
+        errors = (
+            (InvalidRequestError(-32600, "cannot update goal for thread thread-goal: no goal exists"), GoalMutationRejected),
+            (InvalidRequestError(-32600, "cannot update goal for thread other: no goal exists"), GoalMutationStateUnknown),
+            (InvalidRequestError(-32600, "no goal exists"), GoalMutationStateUnknown),
+            (InvalidRequestError(-32603, "cannot update goal for thread thread-goal: no goal exists"), GoalMutationStateUnknown),
+            (RuntimeError("cannot update goal for thread thread-goal: no goal exists"), GoalMutationStateUnknown),
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            log_path = Path(raw) / "requests.jsonl"
+            async with AsyncCodex(_config(log_path, "clear")) as codex:
+                process = codex._client._sync._proc
+                control = AppServerGoalControl(codex)
+                for method in (control.pause, control.activate):
+                    for error, expected in errors:
+                        with self.subTest(method=method.__name__, error=error):
+                            with patch.object(codex._client, "thread_goal_set", new=AsyncMock(side_effect=error)) as request:
+                                with self.assertRaises(expected):
+                                    await method("thread-goal")
+                                self.assertEqual(request.await_count, 1)
+            _close_probe_pipes(process)
+            gc.collect()
 
     async def test_goal_pause_persists_before_interrupting_exact_turn(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

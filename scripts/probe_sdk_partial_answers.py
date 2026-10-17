@@ -463,6 +463,155 @@ async def goal_rollover_case(root: Path) -> dict[str, Any]:
             store.close()
 
 
+async def goal_controls_case(root: Path) -> dict[str, Any]:
+    """Separate native Goal mutations from an in-progress physical Turn."""
+    from unittest.mock import patch
+
+    from openai_codex import AsyncCodex, CodexConfig
+
+    source_root = str(Path(__file__).resolve().parents[1])
+    if source_root not in sys.path:
+        sys.path.insert(0, source_root)
+    from netizen_cli.bindings import BindingStore
+    from netizen_cli.codex_runtime import CodexRuntime, GoalFinalizationStatus, StopDisposition
+    from netizen_cli.domain import FeishuScope, ScopeKind
+    from netizen_cli.sdk_gap_adapter import AppServerGoalControl, GoalMutationRejected, GoalStatus
+    from netizen_cli.terminal_cleanup import PinnedExperimentalTerminalCleanup
+
+    replies = [
+        (200, response_events("cleared-goal-final", *message_events(
+            "cleared-goal-answer", "Current Turn completed after clear.", "final_answer",
+        ))),
+        (200, response_events("stopped-goal-unused", *message_events(
+            "stopped-goal-answer", "This response must be interrupted.", "final_answer",
+        ))),
+    ]
+    with mock_provider(replies) as provider:
+        finish_gate, stop_gate = threading.Event(), threading.Event()
+        provider.response_gates = {1: finish_gate, 2: stop_gate}
+        cwd, env = isolated_config(root, provider)
+        config_path = Path(env["CODEX_HOME"]) / "config.toml"
+        config_path.write_text(config_path.read_text() + "\n[features]\ngoals = true\n")
+        store = BindingStore(root / "channel.sqlite3")
+        store.bootstrap_project(alias="goal-probe", cwd=str(cwd))
+        binding = store.create_channel_binding(
+            scope=FeishuScope("probe-app", "probe-chat", ScopeKind.GROUP),
+            project_alias="goal-probe", creator_id="probe-owner",
+        )
+        outcomes = []
+        completed = asyncio.Event()
+
+        async def on_completion(outcome: Any) -> None:
+            outcomes.append(outcome)
+            completed.set()
+
+        async def wait_request(count: int) -> None:
+            async with asyncio.timeout(10):
+                while len(provider.requests) < count:
+                    await asyncio.sleep(0.02)
+
+        try:
+            async with AsyncCodex(CodexConfig(cwd=str(cwd), env=env)) as codex:
+                control = AppServerGoalControl(codex)
+                runtime = CodexRuntime(
+                    codex=codex, bindings=store, goal_control=control,
+                    terminal_cleanup=PinnedExperimentalTerminalCleanup(codex),
+                    on_completion=on_completion, automatic_thread_naming=False,
+                )
+                # Count calls while forwarding every one to the real bundled
+                # server. The HTTP barrier keeps a physical Turn in progress.
+                with patch.object(codex._client, "turn_interrupt", wraps=codex._client.turn_interrupt) as interrupts:
+                    try:
+                        initial = await runtime.start_goal(
+                            binding=binding, cwd=cwd, objective="Wait for this Turn's scripted answer.",
+                            owner_id="probe-owner", origin=object(),
+                        )
+                        initial.release_receipt_attempt()
+                        await wait_request(1)
+                        thread_id = initial.thread_id
+                        observed_thread = runtime._goals[binding.id].thread
+                        assert observed_thread is not None
+
+                        async def assert_running() -> None:
+                            native = _json(await observed_thread.read(include_turns=True))["thread"]
+                            assert native["status"]["type"] == "active", native
+                            exact = [turn for turn in native["turns"] if turn["id"] == initial.logical_turn_id]
+                            assert len(exact) == 1 and exact[0]["status"] == "inProgress", native
+                            assert not completed.is_set(), outcomes
+
+                        await assert_running()
+                        paused = await runtime.pause_goal(store.get(binding.id))
+                        assert paused.status is GoalStatus.PAUSED, paused
+                        await assert_running()
+                        resumed = await runtime.resume_goal(
+                            binding=store.get(binding.id), owner_id="another-owner", origin=object(),
+                        )
+                        assert resumed.continued and resumed.logical_turn_id == initial.logical_turn_id, resumed
+                        assert (await control.get(thread_id)).status is GoalStatus.ACTIVE
+                        await assert_running()
+                        assert len(provider.requests) == 1, provider.requests
+                        assert await runtime.clear_goal(store.get(binding.id))
+                        assert await runtime.goal_snapshot(store.get(binding.id)) is None
+                        await assert_running()
+                        assert interrupts.await_count == 0, interrupts.await_args_list
+                        finish_gate.set()
+                        await asyncio.wait_for(completed.wait(), 15)
+                        assert await runtime.wait_idle(timeout=5)
+                        outcome = outcomes[0]
+                        assert outcome.error is None and outcome.finalization_error is None, outcome
+                        assert outcome.final_physical_turn_id == initial.logical_turn_id, outcome
+                        assert outcome.final_turn_status == "completed", outcome
+                        assert outcome.final_response == "Current Turn completed after clear.", outcome
+                        assert outcome.goal is None and outcome.finalization is GoalFinalizationStatus.CLEARED, outcome
+                        assert await control.get(thread_id) is None
+                        for method in (control.pause, control.activate):
+                            try:
+                                await method(thread_id)
+                            except GoalMutationRejected:
+                                pass
+                            else:
+                                raise AssertionError("missing Goal was not a known preflight rejection")
+
+                        completed.clear()
+                        stopped = await runtime.start_goal(
+                            binding=store.get(binding.id), cwd=cwd, objective="Wait for explicit stop.",
+                            owner_id="probe-owner", origin=object(),
+                        )
+                        stopped.release_receipt_attempt()
+                        await wait_request(2)
+                        assert await runtime.stop(binding.id) is StopDisposition.GOAL_REQUESTED
+                        assert interrupts.await_count == 1, interrupts.await_args_list
+                        assert interrupts.await_args.args == (thread_id, stopped.logical_turn_id)
+                        stop_gate.set()
+                        await asyncio.wait_for(completed.wait(), 15)
+                        assert await runtime.wait_idle(timeout=5)
+                        stop_outcome = outcomes[1]
+                        assert stop_outcome.error is None, stop_outcome
+                        assert stop_outcome.final_turn_status == "interrupted", stop_outcome
+                        assert stop_outcome.background_cleanup_requested, stop_outcome
+                        assert (await control.get(thread_id)).status is GoalStatus.PAUSED
+                        assert len(outcomes) == 2 and len(provider.requests) == 2
+                        assert all(error == "model response connection closed early" for error in provider.errors), provider.errors
+                        return {
+                            "scenario": "goal_controls_keep_current_turn", "passed": True,
+                            "thread_id": thread_id, "clear_turn_id": initial.logical_turn_id,
+                            "stop_turn_id": stopped.logical_turn_id,
+                            "pause_kept_turn_running": True, "resume_reused_logical_operation": True,
+                            "clear_kept_turn_running": True, "clear_result_delivered_once": True,
+                            "absent_goal_status_change_is_exact_known_rejection": True,
+                            "stop_paused_and_interrupted_exact_turn": True,
+                            "interrupt_rpc_count": interrupts.await_count, "model_request_count": 2,
+                            "production_runtime_and_adapter": True, "feishu_delivery_tested": False,
+                        }
+                    finally:
+                        finish_gate.set()
+                        stop_gate.set()
+                        await runtime.interrupt_all()
+                        await runtime.cancel_tasks()
+        finally:
+            store.close()
+
+
 async def run_probe(selected: str = "all") -> dict[str, Any]:
     from codex_cli_bin import bundled_codex_path
 
@@ -470,13 +619,15 @@ async def run_probe(selected: str = "all") -> dict[str, Any]:
     version = subprocess.run([binary, "--version"], check=True, capture_output=True, text=True, timeout=10).stdout.strip()
     cases = []
     with tempfile.TemporaryDirectory(prefix="netizen-native-partial-") as directory:
-        names = ("partial_tool_partial_final", "partial_only_completed", "large_command_history", "large_mcp_history", "goal_partial_rollover") if selected == "all" else (selected,)
+        names = ("partial_tool_partial_final", "partial_only_completed", "large_command_history", "large_mcp_history", "goal_partial_rollover", "goal_controls") if selected == "all" else (selected,)
         for name in names:
             root = Path(directory) / name
             root.mkdir()
             async with asyncio.timeout(45):
                 if name == "goal_partial_rollover":
                     cases.append(await goal_rollover_case(root))
+                elif name == "goal_controls":
+                    cases.append(await goal_controls_case(root))
                 else:
                     cases.append(await (large_output_case(root, mcp=name == "large_mcp_history") if name.startswith("large_") else partial_case(name, root)))
     return {
@@ -488,7 +639,7 @@ async def run_probe(selected: str = "all") -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", choices=("all", "partial_tool_partial_final", "partial_only_completed", "large_command_history", "large_mcp_history", "goal_partial_rollover"), default="all")
+    parser.add_argument("--case", choices=("all", "partial_tool_partial_final", "partial_only_completed", "large_command_history", "large_mcp_history", "goal_partial_rollover", "goal_controls"), default="all")
     parser.add_argument("--output", type=Path, help="Optional JSON evidence file")
     args = parser.parse_args()
     result = asyncio.run(run_probe(args.case))

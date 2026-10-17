@@ -662,6 +662,7 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch("netizen_cli.main.SessionMcpRunner", make_session_mcp))
         self.enterContext(patch("netizen_cli.main.Scheduler", make_scheduler))
         self.enterContext(patch("netizen_cli.main.AppServerSkillRoots", make_skill_roots))
+        self.history_factory = self.enterContext(patch("netizen_cli.main.AppServerThreadHistory"))
         self.enterContext(patch("netizen_cli.main.builtin_skill_root", return_value=self.builtin_root))
         self.enterContext(patch("netizen_cli.main.AdminWebRunner", side_effect=lambda **_kwargs: SimpleNamespace(
             bind=AsyncMock(), close_listener=AsyncMock(), drain=AsyncMock(),
@@ -1487,6 +1488,8 @@ class ServiceCoreTest(unittest.IsolatedAsyncioTestCase):
                     await core.start()
                     self.assertEqual(os.environ, captured_environment)
                     assert core._runtime is not None
+                    self.history_factory.assert_called_once_with(core._codex)
+                    self.assertIs(core._session_service._history, self.history_factory.return_value)
                     self.assertIs(
                         core._runtime._thread_delete_control.codex,
                         delete_codex[0],

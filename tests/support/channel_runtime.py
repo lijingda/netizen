@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from netizen_cli.bindings import (
     BindingStore,
@@ -17,6 +18,7 @@ from netizen_cli.codex_runtime import (
     GoalActivitySnapshot,
     GoalSubmission,
     NativeThreadMetadata,
+    NativeThreadCatalogPage,
     ReleaseDisposition,
     SideLifecycleOutcome,
     SideSessionNotFound,
@@ -100,6 +102,7 @@ class StubRuntime:
         self.active_goals: dict[str, object] = {}
         self.goal_submission: GoalSubmission | None = None
         self.start_goal_calls: list[dict[str, object]] = []
+        self.pause_goal_calls: list[object] = []
         self.resume_goal_calls: list[dict[str, object]] = []
         self.clear_goal_calls: list[object] = []
         self.clear_goal_result = True
@@ -111,6 +114,7 @@ class StubRuntime:
         self.archived_thread_metadata_calls: list[tuple[str, ...]] = []
         self.thread_metadata_error: Exception | None = None
         self.thread_metadata_options: list[dict] = []
+        self.thread_catalog_calls: list[dict] = []
         self.thread_summary_calls: list[str] = []
         self.thread_summary_values: dict[str, NativeThreadMetadata] = {}
         self.context_window_usage_values: dict[str, ContextWindowUsage] = {}
@@ -258,9 +262,24 @@ class StubRuntime:
             if thread_id in values
         }
 
+    async def thread_catalog_page(self, *, archived: bool, cursor=None, limit=20, **options):
+        self.thread_catalog_calls.append(dict(archived=archived, cursor=cursor, limit=limit, **options))
+        if self.thread_metadata_error is not None:
+            raise self.thread_metadata_error
+        values = self.archived_thread_metadata_values if archived else self.thread_metadata_values
+        sort_key = options.get("sort_key", "updated_at")
+        rows = sorted(values.values(), key=lambda row: (getattr(row, sort_key) or 0, row.thread_id),
+                      reverse=options.get("sort_direction", "desc") == "desc")
+        offset = int(cursor or "0")
+        selected = rows[offset:offset + limit]
+        return NativeThreadCatalogPage(tuple(selected), str(offset + limit) if offset + limit < len(rows) else None)
+
     async def thread_summary(self, thread_id: str) -> NativeThreadMetadata:
         self.thread_summary_calls.append(thread_id)
-        return self.thread_summary_values[thread_id]
+        for values in (self.thread_summary_values, self.thread_metadata_values, self.archived_thread_metadata_values):
+            if thread_id in values:
+                return values[thread_id]
+        raise KeyError(thread_id)
 
     def context_window_usage(self, binding_id: str) -> ContextWindowUsage | None:
         self.context_window_usage_calls.append(binding_id)
@@ -544,6 +563,13 @@ class StubRuntime:
         assert self.goal_submission is not None
         return self.goal_submission
 
+    async def pause_goal(self, binding, **kwargs):
+        from netizen_cli.domain import GoalStatus
+        self.pause_goal_calls.append(binding)
+        assert self.goal_snapshot_value is not None
+        self.goal_snapshot_value = replace(self.goal_snapshot_value, status=GoalStatus.PAUSED)
+        return self.goal_snapshot_value
+
     async def resume_goal(self, **kwargs):
         self.resume_goal_calls.append(kwargs)
         assert self.goal_submission is not None
@@ -553,6 +579,8 @@ class StubRuntime:
         self.clear_goal_calls.append(binding)
         if self.clear_goal_error is not None:
             raise self.clear_goal_error
+        if self.clear_goal_result:
+            self.goal_snapshot_value = None
         return self.clear_goal_result
 
     def is_compacting(self, binding_id: str) -> bool:

@@ -541,11 +541,6 @@ async function loadProjects(cursor = undefined) {
     ));
     row.append(status);
     cell(row, `${project.bindingCount}（Lazy ${project.lazyBindingCount}）`);
-    cell(row, project.archivedBindingCount == null
-      ? "未确认"
-      : project.unconfirmedBindingCount > 0
-        ? `已确认 ${project.archivedBindingCount}；另有 ${project.unconfirmedBindingCount} 个会话状态未确认`
-        : project.archivedBindingCount);
     cell(row, project.lastActivatedAt);
     const actions = actionsCell(row);
     if (project.actions.setEnabled) {

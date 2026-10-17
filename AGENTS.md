@@ -34,7 +34,8 @@ their cited ADRs before changing that boundary.
   Ordinary session collaboration follows
   [ADR 0081](docs/adr/0081-coordinate-ordinary-sessions-with-native-external-messages.md):
   native Thread IDs, instance tool ranges, and the narrow ExternalMessage start/join
-  entry. Preserve existing human/card/scheduled exact-Turn admission.
+  entry. Preserve existing human/card/scheduled exact-Turn admission. Directory and
+  model read/wait pagination follow [ADR 0083](docs/adr/0083-page-native-session-history-through-a-narrow-read-adapter.md).
   Background Thread naming has its own failure and cleanup boundary in
   [ADR 0067](docs/adr/0067-name-threads-with-private-ephemeral-forks.md).
 - Message provenance, mention catch-up, quotes, and images:
@@ -124,7 +125,8 @@ their cited ADRs before changing that boundary.
   adapters are terminal cleanup (ADR 0009), Goal/Skills (0014), Side boundary
   (0021), Thread unsubscribe (0028), Thread Delete (0037), and non-consuming
   Activity observation (0020/0052), process-local Skill roots (0074), and read-only
-  account rate limits ([0077](docs/adr/0077-read-account-rate-limits-on-demand.md)).
+  account rate limits ([0077](docs/adr/0077-read-account-rate-limits-on-demand.md)),
+  and fixed read-only history pages ([0083](docs/adr/0083-page-native-session-history-through-a-narrow-read-adapter.md)).
   Do not add a generic/private RPC gateway,
   parse CLI output, patch SDK internals, copy protocol models, or signal
   arbitrary processes. New gaps require an accepted ADR and a removal trigger.
@@ -139,11 +141,12 @@ their cited ADRs before changing that boundary.
   `lark-oapi` port using the same app credentials (ADR 0039). Preserve chat-main
   versus thread-topic semantics, inert historical context, and its rollout gate.
 - Display is best effort and never changes native execution. Keep Reply Cards
-  within the closed Goal/Activity/Partial Answer/Result/Files set; never expose reasoning or raw
+  within the closed Activity/Partial Answer/Result/Files set; Goal management cards are separate; never expose reasoning or raw
   tool arguments/output. Files use exact Turn evidence, not workspace scans.
   Partial Answers use the existing observation/consumption chain independently of
   Progress Card, never signal completion, and never create database answer history.
-  Preserve Goal's four-proof completion and exact final-Turn Result/Files handoff contract.
+  Preserve Goal's four-proof completion and exact final-Turn Result/Files handoff contract,
+  including confirmed explicit clear while the current Turn completes (ADR 0084).
 - Every materialized persisted non-ephemeral Thread retains archive/delete
   controls. Delegate shutdown to App Server after reserving exact lifecycle
   intent and releasing Binding/Scope locks; do not pre-interrupt, cleanup, or

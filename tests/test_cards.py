@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 from lark_channel import OutboundCard
 
+from netizen_cli.channel.session_pages import SessionCardPage
+from netizen_cli.management import SessionNativeCursor
 from netizen_cli.cards import callbacks
 from netizen_cli.cards import (
     ArchivedSessionCardItem,
@@ -163,6 +165,7 @@ class CardCodecTest(unittest.TestCase):
             CardControlName.RECHECK_EXACT_TURN,
             CardControlName.SESSIONS_PAGE,
             CardControlName.REFRESH_ARCHIVED_SESSIONS,
+            CardControlName.GOAL_REFRESH,
             CardControlName.GOAL_PAUSE,
             CardControlName.GOAL_RESUME,
             CardControlName.SIDE_CLOSE,
@@ -3111,6 +3114,7 @@ class CardRendererTest(unittest.TestCase):
 
         self.assertIn("ship safely", serialized)
         self.assertIn("goal.pause", serialized)
+        self.assertIn("goal.refresh", serialized)
         self.assertIn(
             "binding:v1:11111111-0000-0000-0000-000000000001",
             serialized,
@@ -3353,7 +3357,7 @@ class CardRendererTest(unittest.TestCase):
                 )
             )
 
-    def test_v5_pagination_rebuilds_goal_activity_result_and_files(self) -> None:
+    def test_v5_pagination_rebuilds_activity_partial_result_and_files(self) -> None:
         files = tuple(
             ReplyCardFileItem(
                 path=f"/tmp/result-{index:02}.txt",
@@ -3365,17 +3369,7 @@ class CardRendererTest(unittest.TestCase):
         )
         projection = ReplyCardProjection(
             scope=self.scope,
-            goal=ReplyCardGoalModule(
-                binding_id="binding-123",
-                short_id="binding1",
-                project_alias="test",
-                goal_generation="z" * 43,
-                status="paused",
-                runtime_state="goal-paused",
-                objective="generate reports",
-                token_budget=None,
-                tokens_used=50,
-            ),
+            partial_answer=ReplyCardPartialAnswerModule(("已完成第一部分。",)),
             activity=ReplyCardActivityModule(
                 progress=TurnProgressManifest(
                     state="running",
@@ -3444,8 +3438,9 @@ class CardRendererTest(unittest.TestCase):
         self.assertEqual(page_value["v"], 5)
         self.assertEqual((page_value["a"], page_value["d"]), (55, 45))
         self.assertEqual(
-            set(page_value["reply"]), {"goal", "activity", "result"}
+            set(page_value["reply"]), {"goal", "activity", "partial_answer", "result"}
         )
+        self.assertIsNone(page_value["reply"]["goal"])
         encoded = json.dumps(page_value, ensure_ascii=False)
         self.assertNotIn("do-not-leak", encoded)
         self.assertIn("敏感内容已隐藏", encoded)
@@ -3492,10 +3487,9 @@ class CardRendererTest(unittest.TestCase):
             deletions=intent.deletions,
         )
         rebuilt_text = json.dumps(rebuilt.card, ensure_ascii=False)
-        self.assertIn("generate reports", rebuilt_text)
+        self.assertIn("已完成第一部分", rebuilt_text)
         self.assertIn("敏感内容已隐藏", rebuilt_text)
         self.assertIn("报告已生成", rebuilt_text)
-        self.assertIn("最近一次原生上报，可能尚未反映追加消息", rebuilt_text)
         rebuilt_visible = "\n".join(
             element["content"]
             for element in _elements(rebuilt.card, "markdown")
@@ -3504,7 +3498,13 @@ class CardRendererTest(unittest.TestCase):
         self.assertIn("+55", rebuilt_visible)
         self.assertIn("-45", rebuilt_visible)
         self.assertNotIn("result-00.txt", rebuilt_visible)
-        self.assertIn("结束 Goal", rebuilt_text)
+        rebuilt_intents = {
+            behavior["value"]["intent"]
+            for button in _elements(rebuilt.card, "button")
+            for behavior in button.get("behaviors", ())
+        }
+        self.assertFalse(any(value.startswith("goal.") for value in rebuilt_intents))
+        self.assertIn("turn-file.page", rebuilt_intents)
         self.assertNotIn("**Time**", rebuilt_text)
         self.assertIn("millisecond='333'", rebuilt_text)
         self.assertIn("millisecond='444'", rebuilt_text)
@@ -3514,19 +3514,6 @@ class CardRendererTest(unittest.TestCase):
         for item in intent.reply.activity.progress.operations[1:]:
             self.assertIn(item.text, rebuilt_text)
             self.assertIn(f"millisecond='{item.event_timestamp_ms}'", rebuilt_text)
-
-        retargeted = json.loads(json.dumps(page_value))
-        retargeted["binding_id"] = "binding:v1:binding-other"
-        with self.assertRaisesRegex(CardActionError, "Goal .* Files"):
-            decode_turn_file_action(
-                app_id="cli_test",
-                message_id="om_card",
-                callback_chat_id=self.scope.chat_id,
-                sender_id="ou_user",
-                tag="button",
-                form_value={"turn_file_page": "1"},
-                value=retargeted,
-            )
 
     def test_partial_answer_module_stays_expanded_and_keeps_complete_ordered_text(self) -> None:
         snapshot = SimpleNamespace(
@@ -3915,7 +3902,6 @@ class CardRendererTest(unittest.TestCase):
         card = sessions_card(
             scope=self.scope,
             sessions=(active, other, lazy),
-            total_count=3,
             active_binding_id=active.binding_id,
             native_delete_available=True,
             page=0,
@@ -4036,7 +4022,6 @@ class CardRendererTest(unittest.TestCase):
         card = sessions_card(
             scope=self.scope,
             sessions=sessions,
-            total_count=len(sessions),
             active_binding_id=sessions[0].binding_id,
             native_delete_available=True,
         )
@@ -4092,7 +4077,6 @@ class CardRendererTest(unittest.TestCase):
     ) -> None:
         card = sessions_card(
             scope=self.scope,
-            total_count=1,
             active_binding_id="11111111-0000-0000-0000-000000000001",
             sessions=(
                 SessionCardItem(
@@ -4112,7 +4096,7 @@ class CardRendererTest(unittest.TestCase):
 
         buttons = _elements(card.card, "button")
         labels = {button["text"]["content"] for button in buttons}
-        self.assertEqual(labels, {"归档", "删除", "停止", "重新检查"})
+        self.assertEqual(labels, {"归档", "删除", "停止", "重新检查", "刷新列表", "已归档"})
         recheck = next(
             button
             for button in buttons
@@ -4147,7 +4131,6 @@ class CardRendererTest(unittest.TestCase):
         card = sessions_card(
             scope=self.scope,
             sessions=sessions,
-            total_count=len(sessions),
             active_binding_id=sessions[0].binding_id,
             native_delete_available=False,
         )
@@ -4259,7 +4242,7 @@ class CardRendererTest(unittest.TestCase):
             "sessions.archived.refresh",
         )
 
-    def test_sessions_card_renders_supplied_pages_and_total(self) -> None:
+    def test_sessions_card_renders_cursor_navigation_without_total(self) -> None:
         sessions = tuple(
             SessionCardItem(
                 binding_id=f"{i:08d}-0000-0000-0000-000000000000",
@@ -4272,43 +4255,50 @@ class CardRendererTest(unittest.TestCase):
             )
             for i in range(25)
         )
+        first = SessionCardPage()
+        second = first.next(SessionNativeCursor("native-page-2"))
+        third = second.next(SessionNativeCursor("native-page-3"))
         card = sessions_card(
             scope=self.scope,
             sessions=sessions[:10],
-            total_count=25,
             active_binding_id=sessions[0].binding_id,
             native_delete_available=True,
             page=0,
+            session_cursor=first.encode(self.scope),
+            next_cursor=second.encode(self.scope),
         )
         text = str(card.card)
-        self.assertIn("第 1/3 页", text)
+        self.assertIn("第 1 页", text)
         self.assertIn("下一页", text)
         self.assertNotIn("上一页", text)
 
         card = sessions_card(
             scope=self.scope,
             sessions=sessions[10:20],
-            total_count=25,
             active_binding_id=sessions[0].binding_id,
             native_delete_available=True,
             page=1,
+            session_cursor=second.encode(self.scope),
+            previous_cursor=first.encode(self.scope),
+            next_cursor=third.encode(self.scope),
         )
         text = str(card.card)
-        self.assertIn("第 2/3 页", text)
+        self.assertIn("第 2 页", text)
         self.assertIn("上一页", text)
         self.assertIn("下一页", text)
 
-        # The application has clamped to the last valid page.
+        # The last page has no continuation cursor.
         card = sessions_card(
             scope=self.scope,
             sessions=sessions[20:],
-            total_count=25,
             active_binding_id=sessions[0].binding_id,
             native_delete_available=True,
             page=2,
+            session_cursor=third.encode(self.scope),
+            previous_cursor=second.encode(self.scope),
         )
         text = str(card.card)
-        self.assertIn("第 3/3 页", text)
+        self.assertIn("第 3 页", text)
         self.assertIn("上一页", text)
         self.assertNotIn("下一页", text)
 
@@ -4316,7 +4306,6 @@ class CardRendererTest(unittest.TestCase):
         card = sessions_card(
             scope=self.scope,
             sessions=(),
-            total_count=0,
             active_binding_id=None,
             native_delete_available=False,
             page=0,
