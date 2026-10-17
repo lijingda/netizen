@@ -325,7 +325,7 @@ class FakeManagement:
 
     async def query_projects(self, **_kwargs):
         aggregate = ProjectAggregate(self.project_record, 3, 1, 2, "2030-01-02")
-        return ProjectInventoryPage((ProjectInventoryItem(aggregate, 1),), None)
+        return ProjectInventoryPage((ProjectInventoryItem(aggregate),), None)
 
     async def query_sessions(self, **_kwargs):
         self.query_session_calls.append(dict(_kwargs))
@@ -2268,31 +2268,24 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
                 if operation == "delete-materialized":
                     self.assertEqual(values["expected_native_thread_id"], fork.native_thread_id)
 
-    async def test_projects_api_keeps_local_inventory_when_catalog_is_unconfirmed(self) -> None:
+    async def test_projects_api_has_only_local_counts_and_preserves_actions(self) -> None:
         self.runner.open_admission()
         session = await self.login()
         aggregate = ProjectAggregate(self.management.project_record, 3, 1, 2, "2030-01-02")
-        for archived_count, unconfirmed_count in ((0, 0), (1, 1), (None, 2)):
-            with self.subTest(archived=archived_count), patch.object(
-                self.management,
-                "query_projects",
-                return_value=ProjectInventoryPage((
-                    ProjectInventoryItem(
-                        aggregate,
-                        archived_count,
-                        unconfirmed_binding_count=unconfirmed_count,
-                    ),
-                ), None),
-            ):
-                status, _, page = await self.json_get("/api/v1/projects", session)
-                self.assertEqual(status, 200, page)
-                item = page["items"][0]
-                self.assertEqual(item["bindingCount"], 3)
-                self.assertEqual(item["lazyBindingCount"], 1)
-                self.assertEqual(item["archivedBindingCount"], archived_count)
-                self.assertEqual(item["unconfirmedBindingCount"], unconfirmed_count)
-                self.assertIn("setEnabled", item["actions"])
-                self.assertIn("previewDelete", item["actions"])
+        with patch.object(
+            self.management, "query_projects",
+            return_value=ProjectInventoryPage((ProjectInventoryItem(aggregate),), None),
+        ):
+            status, _, page = await self.json_get("/api/v1/projects", session)
+        self.assertEqual(status, 200, page)
+        item = page["items"][0]
+        self.assertEqual(item["bindingCount"], 3)
+        self.assertEqual(item["lazyBindingCount"], 1)
+        self.assertEqual(item["materializedBindingCount"], 2)
+        self.assertNotIn("archivedBindingCount", item)
+        self.assertNotIn("unconfirmedBindingCount", item)
+        self.assertIn("setEnabled", item["actions"])
+        self.assertIn("previewDelete", item["actions"])
 
     async def test_materialized_delete_action_requires_capability_not_catalog_membership(self) -> None:
         self.runner.open_admission()

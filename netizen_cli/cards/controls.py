@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from ..bindings import (
     SideTopicState,
 )
 from ..completion_mention import valid_completion_mention_user_id
+from ..channel.session_pages import SessionCardPage
 from ..domain import (
     ActiveState,
     CardControlIntent,
@@ -1011,6 +1013,7 @@ def sessions_delete_binding_card(
     title: str,
     native_thread_id: str | None,
     page: int,
+    session_cursor: str | None = None,
 ) -> OutboundCard:
     builder = _builder(
         "永久删除会话",
@@ -1047,13 +1050,14 @@ def sessions_delete_binding_card(
                     binding_id=_binding_reference(binding_id),
                     expected_native_thread_id=expected_native_thread_id,
                     page=page,
+                    **({"session_cursor": session_cursor} if session_cursor else {}),
                 ),
                 style="danger",
                 confirm=("永久删除且无法恢复", confirm_body),
             ),
             _repeatable_callback_button(
                 label="返回会话列表",
-                value=_sessions_page_envelope(scope=scope, target=page),
+                value=_sessions_page_envelope(scope=scope, target=page, cursor=session_cursor),
             ),
         )
     )
@@ -1067,31 +1071,39 @@ def archived_sessions_card(
     native_delete_available: bool,
     notice: str | None = None,
     notice_is_error: bool = False,
-    unconfirmed_count: int = 0,
+    page: int = 0,
+    session_cursor: str | None = None,
+    previous_cursor: str | None = None,
+    next_cursor: str | None = None,
 ) -> OutboundCard:
+    session_cursor = _session_action_cursor(scope, session_cursor)
     builder = _builder("已归档会话", "恢复后自动切换")
     if notice:
         builder.raw(_notice(notice, error=notice_is_error))
     builder.markdown(
         "已归档会话不会出现在普通 `/sessions` 中。恢复不会修改历史或会话配置；"
-        "删除会永久移除原生 Thread、其 spawned descendants 与本地 Binding。"
+        "删除会永久移除原生 Thread、其 spawned descendants 与本地 Binding。\n"
+        "更多管理请使用 Admin 会话列表，发送 `/admin` 打开。"
     )
     if not sessions:
         builder.markdown(
-            ("当前未确认到已归档会话。" if unconfirmed_count else "当前聊天或话题没有已归档会话。")
-            + "发送 `/sessions` 查看普通会话，"
+            "本页没有已归档会话。发送 `/sessions` 查看普通会话，"
             "或发送 `/new` 新建会话。"
         )
-        return OutboundCard(card=builder.to_dict())
     for session in sessions:
         builder.raw(
             _archived_session_row(
                 scope=scope,
                 session=session,
                 native_delete_available=native_delete_available,
+                session_cursor=session_cursor,
             )
         )
-    return OutboundCard(card=builder.to_dict())
+    builder.raw(_sessions_pagination(
+        scope=scope, page=page, previous_cursor=previous_cursor, next_cursor=next_cursor,
+        state="archived",
+    ))
+    return _session_list_card(builder.to_dict())
 
 
 def archived_sessions_delete_binding_card(
@@ -1102,6 +1114,7 @@ def archived_sessions_delete_binding_card(
     project_alias: str,
     title: str,
     native_thread_id: str,
+    session_cursor: str | None = None,
 ) -> OutboundCard:
     builder = _builder(
         "永久删除已归档会话",
@@ -1124,6 +1137,7 @@ def archived_sessions_delete_binding_card(
                     expected_native_thread_id=_native_thread_reference(
                         native_thread_id
                     ),
+                    **({"session_cursor": session_cursor} if session_cursor else {}),
                 ),
                 style="danger",
                 confirm=(
@@ -1136,6 +1150,7 @@ def archived_sessions_delete_binding_card(
                 value=_envelope(
                     scope,
                     CardControlName.REFRESH_ARCHIVED_SESSIONS,
+                    **({"session_cursor": session_cursor} if session_cursor else {}),
                 ),
             ),
         )
@@ -1148,37 +1163,42 @@ def sessions_card(
     scope: FeishuScope,
     sessions: tuple[SessionCardItem, ...],
     native_delete_available: bool,
-    total_count: int,
     active_binding_id: str | None,
     page: int = 0,
-    unconfirmed_count: int = 0,
     notice: str | None = None,
     notice_is_error: bool = False,
+    session_cursor: str | None = None,
+    previous_cursor: str | None = None,
+    next_cursor: str | None = None,
+    current: SessionCardItem | None = None,
+    lazy: bool = False,
+    has_lazy: bool = False,
 ) -> OutboundCard:
-    subtitle = (
-        f"{total_count} 个会话（含 {unconfirmed_count} 个归档状态未确认）"
-        if unconfirmed_count else f"{total_count} 个普通会话"
-    )
+    session_cursor = _session_action_cursor(scope, session_cursor)
+    subtitle = "尚未开始对话的会话" if lazy else "按 Codex 更新时间排序"
     builder = _builder("会话", subtitle)
     if notice:
         builder.raw(_notice(notice, error=notice_is_error))
     builder.markdown(
         "切换不会停止其他会话正在运行的任务。"
-        "归档与删除会直接委托 Codex 处理当前原生活动。归档保留历史，可从 "
-        "`/sessions archived` 恢复；删除会级联移除派生会话，需进入红色确认卡。"
+        "归档保留历史，可恢复；删除需红色确认，并级联删除派生会话。\n"
+        "更多管理请使用 Admin 会话列表，发送 `/admin` 打开。"
     )
+    if current is not None:
+        builder.markdown("**当前会话**")
+        builder.raw(_session_row(
+            scope=scope, session=current, page=page,
+            expected_active_binding_id=active_binding_id,
+            native_delete_available=native_delete_available,
+            session_cursor=session_cursor,
+        ))
+        builder.markdown("**本页会话**")
     if not sessions:
         builder.markdown(
-            "当前聊天或话题没有普通会话。发送 `/new` 新建会话，"
+            ("本页没有未开始的会话。" if lazy else "本页没有普通会话。")
+            + "发送 `/new` 新建会话，"
             "或发送 `/sessions archived` 查找已归档会话。"
         )
-        return OutboundCard(card=builder.to_dict())
-
-    total_pages = max(
-        1,
-        (total_count + SESSIONS_PAGE_SIZE - 1) // SESSIONS_PAGE_SIZE,
-    )
-
     for session in sessions:
         builder.raw(
             _session_row(
@@ -1187,18 +1207,35 @@ def sessions_card(
                 page=page,
                 expected_active_binding_id=active_binding_id,
                 native_delete_available=native_delete_available,
+                session_cursor=session_cursor,
             )
         )
 
-    if total_pages > 1:
-        builder.raw(
-            _sessions_pagination(
-                scope=scope,
-                page=page,
-                total_pages=total_pages,
-            )
+    builder.raw(_sessions_pagination(
+        scope=scope, page=page, previous_cursor=previous_cursor, next_cursor=next_cursor,
+        state="lazy" if lazy else "active", has_lazy=has_lazy,
+    ))
+    return _session_list_card(builder.to_dict())
+
+
+def _session_action_cursor(scope: FeishuScope, token: str | None) -> str | None:
+    if token is None:
+        return None
+    navigation = SessionCardPage.decode(token, scope)
+    # Row actions need the exact return position, not a copy of the entire
+    # back stack in every button. Navigation buttons retain that history.
+    return SessionCardPage(
+        navigation.state, navigation.page, (navigation.cursor,),
+    ).encode(scope)
+
+
+def _session_list_card(card: dict[str, Any]) -> OutboundCard:
+    # Use the Channel SDK's outbound serialization, including every callback.
+    if len(json.dumps(card, ensure_ascii=False).encode("utf-8")) > 55_000:
+        raise CardActionError(
+            "会话列表卡片内容过长，暂不能展示；请使用 Admin 会话列表。"
         )
-    return OutboundCard(card=builder.to_dict())
+    return OutboundCard(card=card)
 
 
 def _session_row(
@@ -1208,7 +1245,9 @@ def _session_row(
     page: int,
     expected_active_binding_id: str | None,
     native_delete_available: bool,
+    session_cursor: str | None = None,
 ) -> dict[str, Any]:
+    navigation = {"session_cursor": session_cursor} if session_cursor else {}
     expected_turn_id = (
         _turn_reference(session.turn_id) if session.turn_id is not None else None
     )
@@ -1231,6 +1270,7 @@ def _session_row(
                     scope,
                     CardControlName.ACTIVATE_BINDING,
                     binding_id=_binding_reference(session.binding_id),
+                    **navigation,
                 ),
                 style="primary_filled",
             )
@@ -1243,6 +1283,7 @@ def _session_row(
                     scope,
                     CardControlName.ARCHIVE_EXACT_BINDING,
                     binding_id=_binding_reference(session.binding_id),
+                    **navigation,
                     page=page,
                 ),
                 confirm=(
@@ -1271,6 +1312,7 @@ def _session_row(
                     scope,
                     CardControlName.PREPARE_EXACT_DELETE_BINDING,
                     binding_id=_binding_reference(session.binding_id),
+                    **navigation,
                     expected_native_thread_id=(
                         _native_thread_reference(session.native_thread_id)
                         if session.native_thread_id is not None
@@ -1289,6 +1331,7 @@ def _session_row(
                     scope,
                     CardControlName.STOP_EXACT_BINDING,
                     binding_id=_binding_reference(session.binding_id),
+                    **navigation,
                     expected_active_binding_id=(
                         _binding_reference(expected_active_binding_id)
                         if expected_active_binding_id is not None
@@ -1311,6 +1354,7 @@ def _session_row(
                     scope,
                     CardControlName.RECHECK_EXACT_TURN,
                     binding_id=_binding_reference(session.binding_id),
+                    **navigation,
                     expected_active_binding_id=(
                         _binding_reference(expected_active_binding_id)
                         if expected_active_binding_id is not None
@@ -1356,62 +1400,56 @@ def _sessions_pagination(
     *,
     scope: FeishuScope,
     page: int,
-    total_pages: int,
+    previous_cursor: str | None,
+    next_cursor: str | None,
+    state: str = "active",
+    has_lazy: bool = False,
 ) -> dict[str, Any]:
-    columns: list[dict[str, Any]] = [
-        {
-            "tag": "column",
-            "width": "weighted",
-            "weight": 1,
-            "vertical_align": "center",
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": f"<font color='grey'>第 {page + 1}/{total_pages} 页</font>",
-                }
-            ],
-        }
-    ]
-    if page > 0:
-        columns.append(
-            {
-                "tag": "column",
-                "width": "auto",
-                "elements": [
-                    _repeatable_callback_button(
-                        label="上一页",
-                        value=_sessions_page_envelope(
-                            scope=scope,
-                            target=page - 1,
-                        ),
-                    )
-                ],
-            }
-        )
-    if page + 1 < total_pages:
-        columns.append(
-            {
-                "tag": "column",
-                "width": "auto",
-                "elements": [
-                    _repeatable_callback_button(
-                        label="下一页",
-                        value=_sessions_page_envelope(
-                            scope=scope,
-                            target=page + 1,
-                        ),
-                    )
-                ],
-            }
-        )
-    return {"tag": "column_set", "flex_mode": "none", "columns": columns}
+    buttons = []
+    if previous_cursor is not None:
+        buttons.append(_repeatable_callback_button(
+            label="上一页", value=_sessions_page_envelope(
+                scope=scope, target=page - 1, cursor=previous_cursor,
+            ),
+        ))
+    if next_cursor is not None:
+        buttons.append(_repeatable_callback_button(
+            label="下一页", value=_sessions_page_envelope(
+                scope=scope, target=page + 1, cursor=next_cursor,
+            ),
+        ))
+    # A fresh first-page query is always available, including after native
+    # cursor expiry or when the bounded back stack no longer reaches page one.
+    buttons.append(_repeatable_callback_button(
+        label="返回首页" if page else "刷新列表",
+        value=_sessions_page_envelope(
+            scope=scope, target=0, cursor=SessionCardPage(state).encode(scope),
+        ),
+    ))
+    for target, label in (("active", "普通会话"), ("archived", "已归档"), ("lazy", "未开始")):
+        if target == state or target == "lazy" and not has_lazy:
+            continue
+        buttons.append(_repeatable_callback_button(
+            label=label, value=_sessions_page_envelope(
+                scope=scope, target=0, cursor=SessionCardPage(target).encode(scope),
+            ),
+        ))
+    return {
+        "tag": "column_set", "flex_mode": "none",
+        "columns": [
+            {"tag": "column", "width": "weighted", "weight": 1,
+             "elements": [{"tag": "markdown", "content": f"第 {page + 1} 页"}]},
+            *({"tag": "column", "width": "auto", "elements": [button]} for button in buttons),
+        ],
+    }
 
 
-def _sessions_page_envelope(*, scope: FeishuScope, target: int) -> dict[str, Any]:
+def _sessions_page_envelope(
+    *, scope: FeishuScope, target: int, cursor: str | None = None,
+) -> dict[str, Any]:
     return _envelope(
-        scope,
-        CardControlName.SESSIONS_PAGE,
-        page=target,
+        scope, CardControlName.SESSIONS_PAGE, page=target,
+        **({"session_cursor": cursor} if cursor else {}),
     )
 
 
@@ -1779,6 +1817,7 @@ def decode_button_action(
         },
         CardControlName.SESSIONS_PAGE: {"page"},
         CardControlName.REFRESH_ARCHIVED_SESSIONS: set(),
+        CardControlName.GOAL_REFRESH: {"binding_id"},
         CardControlName.GOAL_PAUSE: {
             "binding_id",
             "goal_generation",
@@ -1802,6 +1841,15 @@ def decode_button_action(
         raise CardActionError("未知 Scope kind。") from error
     scope_fields = {"topic_id"} if scope_kind is ScopeKind.TOPIC else set()
     expected = common | scope_fields | extra_by_name[name]
+    session_navigation_names = {
+        CardControlName.ACTIVATE_BINDING, CardControlName.ARCHIVE_EXACT_BINDING,
+        CardControlName.PREPARE_EXACT_DELETE_BINDING, CardControlName.DELETE_EXACT_BINDING,
+        CardControlName.PREPARE_ARCHIVED_DELETE_BINDING, CardControlName.DELETE_ARCHIVED_BINDING,
+        CardControlName.STOP_EXACT_BINDING, CardControlName.RECHECK_EXACT_TURN,
+        CardControlName.SESSIONS_PAGE, CardControlName.REFRESH_ARCHIVED_SESSIONS,
+    }
+    if name in session_navigation_names and "session_cursor" in payload:
+        expected.add("session_cursor")
     if (
         name is CardControlName.DELETE_BINDING
         and "expected_native_thread_id" in payload
@@ -1827,6 +1875,7 @@ def decode_button_action(
     enabled = None
     section = None
     page = None
+    session_cursor = None
     expected_activity_revision = None
     expected_turn_id = None
     goal_generation_value = None
@@ -1898,6 +1947,14 @@ def decode_button_action(
         ):
             raise CardActionError("页码必须是非负整数。")
         page = raw_page
+    if "session_cursor" in payload:
+        session_cursor = _bounded_string(payload["session_cursor"], "session_cursor", max_chars=1024)
+        try:
+            navigation = SessionCardPage.decode(session_cursor, scope)
+        except ValueError as error:
+            raise CardActionError(str(error)) from error
+        if page is not None and page != navigation.page:
+            raise CardActionError("会话分页已过期，请重新发送 /sessions。")
     if "goal_generation" in payload:
         goal_generation_value = _decode_goal_generation(
             payload["goal_generation"]
@@ -1913,8 +1970,7 @@ def decode_button_action(
         expected_by_action = {
             CardControlName.GOAL_PAUSE: {GoalStatus.ACTIVE.value},
             CardControlName.GOAL_RESUME: {GoalStatus.PAUSED.value},
-            CardControlName.GOAL_CLEAR: valid_goal_statuses
-            - {GoalStatus.ACTIVE.value},
+            CardControlName.GOAL_CLEAR: valid_goal_statuses,
         }
         if expected_goal_status not in expected_by_action[name]:
             raise CardActionError("Goal 动作与预期状态不一致。")
@@ -1943,6 +1999,7 @@ def decode_button_action(
         expected_turn_id=expected_turn_id,
         side_id=side_id,
         page=page,
+        session_cursor=session_cursor,
         goal_generation=goal_generation_value,
         expected_goal_status=expected_goal_status,
     )
@@ -2252,6 +2309,7 @@ def _archived_session_row(
     scope: FeishuScope,
     session: ArchivedSessionCardItem,
     native_delete_available: bool,
+    session_cursor: str | None = None,
 ) -> dict[str, Any]:
     controls = [
         _callback_button(
@@ -2275,6 +2333,7 @@ def _archived_session_row(
                     expected_native_thread_id=_native_thread_reference(
                         session.native_thread_id
                     ),
+                    **({"session_cursor": session_cursor} if session_cursor else {}),
                 ),
                 style="danger",
             )

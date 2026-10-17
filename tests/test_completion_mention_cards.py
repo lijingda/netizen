@@ -4,8 +4,7 @@ import json
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from netizen_cli.cards import (
     TurnFileCardLimitError,
@@ -17,24 +16,26 @@ from netizen_cli.cards import (
     turn_progress_card,
     turn_progress_card_from_manifest,
 )
-from netizen_cli.channel.reply_presenter import (
-    GoalCardOrigin,
-    _GoalCardDelivery,
-    _ReplyCardPresenter,
-)
+from netizen_cli.bindings import BindingTaskFeedback
+from netizen_cli.codex_runtime import GoalOutcome
 from netizen_cli.completion_mention import valid_completion_mention_user_id
 from netizen_cli.domain import (
     FeishuScope,
+    NativeCapability,
     ReplyCardActivityModule,
     ReplyCardFileItem,
     ReplyCardFilesModule,
-    ReplyCardGoalModule,
+    ReplyCardPartialAnswerModule,
     ReplyCardProjection,
     ReplyCardResultModule,
     ScopeKind,
     TurnProgressManifest,
 )
 from netizen_cli.turn_files import TurnFile
+from netizen_cli.sdk_gap_adapter import GoalStatus
+from tests.support.channel_fixtures import channel_fixture
+from tests.support.channel_messages import FakeMessage
+from tests.support.channel_results import native_goal
 
 
 USER_ID = "ou_completion_owner"
@@ -44,11 +45,6 @@ SCOPE = FeishuScope("cli_test", "oc_group", ScopeKind.GROUP)
 PROGRESS = TurnProgressManifest(
     state="running", steer_count=0, plan_available=False,
     plan_generated=False, plan_may_be_stale=False, steps=(),
-)
-GOAL = ReplyCardGoalModule(
-    binding_id="binding-one", short_id="one", project_alias="test",
-    goal_generation="z" * 43, status="blocked", runtime_state="goal-blocked",
-    objective="generate reports", token_budget=None, tokens_used=50,
 )
 
 
@@ -124,11 +120,12 @@ class CompletionMentionCardsTest(unittest.TestCase):
 
     def test_file_pagination_preserves_modules_without_repeating_mention(self):
         files = self.files()
-        for kind in ("files", "progress", "goal"):
+        for kind in ("files", "progress", "partials"):
             with self.subTest(kind=kind):
-                if kind == "goal":
+                if kind == "partials":
                     first = reply_card(ReplyCardProjection(
-                        scope=SCOPE, goal=GOAL,
+                        scope=SCOPE,
+                        partial_answer=ReplyCardPartialAnswerModule(("early physical turn answer",)),
                         activity=ReplyCardActivityModule(
                             PROGRESS, terminal_status="completed", collapsed=True,
                         ),
@@ -165,7 +162,7 @@ class CompletionMentionCardsTest(unittest.TestCase):
                     item for item in callback_values
                     if item["intent"] == "turn-file.page"
                 )
-                self.assertEqual(value["v"], 5 if kind == "goal" else 4)
+                self.assertEqual(value["v"], 5 if kind == "partials" else 4)
                 intent = decode_turn_file_action(
                     app_id=SCOPE.app_id, message_id="om_card",
                     callback_chat_id=SCOPE.chat_id, sender_id="ou_clicker",
@@ -176,7 +173,7 @@ class CompletionMentionCardsTest(unittest.TestCase):
                     scope=intent.scope, binding_id=intent.binding_id,
                     turn_id=intent.turn_id, manifest=intent.files, page=intent.page,
                 )
-                if kind == "goal":
+                if kind == "partials":
                     self.assertIsNone(intent.reply.result.completion_mention_user_id)
                     rebuilt = reply_card_from_manifest(**arguments, reply=intent.reply)
                 elif kind == "progress":
@@ -194,8 +191,8 @@ class CompletionMentionCardsTest(unittest.TestCase):
                 self.assertIn("result-8.txt", "\n".join(markdown))
                 if kind != "files":
                     self.assertTrue(list(elements(rebuilt.card, "collapsible_panel")))
-                if kind == "goal":
-                    self.assertIn(GOAL.objective, "\n".join(markdown))
+                if kind == "partials":
+                    self.assertIn("early physical turn answer", "\n".join(markdown))
 
     def test_mention_is_counted_in_card_size_limit(self):
         plain = ReplyCardProjection(result=ReplyCardResultModule(ANSWER))
@@ -208,53 +205,29 @@ class CompletionMentionCardsTest(unittest.TestCase):
 
 
 class CompletionMentionPresenterTest(unittest.IsolatedAsyncioTestCase):
-    async def test_retained_goal_controls_do_not_repeat_terminal_mention(self):
-        for fallback in (False, True):
-            with self.subTest(fallback=fallback):
-                channel = SimpleNamespace(
-                    update_card=AsyncMock(return_value=SimpleNamespace(success=True)),
-                    reply=AsyncMock(return_value=SimpleNamespace(
-                        success=True, message_id="om_card",
-                    )),
-                )
-                presenter = _ReplyCardPresenter(channel, SimpleNamespace())
-                self.addAsyncCleanup(presenter.close)
-                projection = ReplyCardProjection(
-                    scope=SCOPE, goal=GOAL,
-                    result=ReplyCardResultModule(ANSWER, USER_ID),
-                )
-                origin = GoalCardOrigin(
-                    message_id="om_card", scope=SCOPE, binding_id=GOAL.binding_id,
-                    short_id=GOAL.short_id, project_alias=GOAL.project_alias,
-                )
-                arguments = dict(
-                    binding_id=GOAL.binding_id, thread_id="thread-one",
-                    logical_turn_id="logical-one", generation=GOAL.goal_generation,
-                    origin=origin, projection=projection, retain_session=True,
-                )
-                if fallback:
-                    result = await presenter.reply_goal_fallback(
-                        **arguments, target=object(), card=reply_card(projection),
-                    )
-                    delivered = channel.reply.call_args.args[1].card
-                else:
-                    result = await presenter.finish_goal(**arguments)
-                    delivered = channel.update_card.call_args.args[1]
-                self.assertIs(result if fallback else result.status, _GoalCardDelivery.DELIVERED)
-                self.assertEqual(visible_markdown(delivered).count(MENTION), 1)
-                retained = presenter.goal_projection(
-                    source_id="om_card", generation=GOAL.goal_generation,
-                )
-                self.assertIsNone(retained.result.completion_mention_user_id)
-                presenter._goal_cards.clear()
-                session_retained = presenter.goal_projection(
-                    source_id="om_card", generation=GOAL.goal_generation,
-                )
-                self.assertEqual(session_retained, retained)
-                self.assertTrue(await presenter.update_goal_module(
-                    source_id="om_card", generation=GOAL.goal_generation, scope=SCOPE,
-                    goal=replace(GOAL, notice="Updated status"), retain_session=True,
-                ))
-                updated = channel.update_card.call_args.args[1]
-                self.assertIn(ANSWER, visible_markdown(updated))
-                self.assertNotIn(USER_ID, json.dumps(updated))
+    async def test_goal_management_queries_do_not_repeat_reply_or_terminal_mention(self):
+        fixture = await self.enterAsyncContext(channel_fixture())
+        await fixture.new()
+        fixture.runtime.available_capabilities = frozenset({NativeCapability.GOAL})
+        scope = FeishuScope("cli_test", "oc_direct", ScopeKind.DIRECT)
+        binding = fixture.store.active_binding(scope.key)
+        fixture.store.assign_native_thread_id(binding.id, "native-one")
+        binding = fixture.store.get(binding.id)
+        await fixture.app.handle_completion(GoalOutcome(
+            binding_id=binding.id, thread_id="native-one", logical_turn_id="logical-one",
+            final_physical_turn_id="physical-last", final_turn_status="completed",
+            owner_id=USER_ID, origin=FakeMessage("work", message_id="om_origin"),
+            goal=native_goal(GoalStatus.COMPLETE), final_response=ANSWER,
+            task_feedback=BindingTaskFeedback(completion_mention_enabled=True),
+        ))
+        answer = fixture.channel.replies[-1][1]
+        self.assertEqual(answer.markdown, ANSWER)
+        self.assertEqual([identity.open_id for identity in answer.mentions], [USER_ID])
+        for snapshot in (native_goal(GoalStatus.COMPLETE), None):
+            fixture.runtime.goal_snapshot_value = snapshot
+            await fixture.app.handle_message(FakeMessage("/goal", message_id="om_query"))
+            card = fixture.channel.replies[-1][1].card
+            self.assertNotIn(ANSWER, json.dumps(card, ensure_ascii=False))
+            self.assertNotIn(USER_ID, json.dumps(card))
+        self.assertEqual(len(fixture.channel.replies), 3)
+        self.assertEqual(fixture.channel.updates, [])

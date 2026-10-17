@@ -38,6 +38,7 @@ from netizen_cli.codex_runtime import (
     ActiveState,
     ExternalGoalActive,
     GoalFinalizationStatus,
+    GoalNotFound,
     GoalOutcome,
     GoalOperationState,
     GoalStateUnknown,
@@ -106,6 +107,7 @@ from netizen_cli.domain import (
 from netizen_cli.model_settings import ModelCatalogError
 from netizen_cli.sdk_gap_adapter import (
     DiscoveredSkill,
+    GoalMutationRejected,
     GoalMutationStateUnknown,
     GoalPauseAck,
     GoalSnapshot,
@@ -709,6 +711,7 @@ class FakeGoalHandle:
         self.terminal = asyncio.Event()
         self.closed = False
         self.pause_calls = 0
+        self.interrupt_calls = 0
         self.pause_errors: list[BaseException] = []
         self.pause_started = asyncio.Event()
         self.pause_gate: asyncio.Event | None = None
@@ -735,6 +738,9 @@ class FakeGoalHandle:
 
     def current_physical_turn_id(self) -> str | None:
         return self.record.id if self.record.status.value == "inProgress" else None
+
+    def is_finished(self) -> bool:
+        return self.terminal.is_set()
 
     async def steer(self, input: object, *, expected_turn_id: str) -> object:
         self.steers.append((expected_turn_id, input))
@@ -791,6 +797,8 @@ class FakeGoalHandle:
             GoalStatus.PAUSED,
             objective=self.control.persisted.objective,
         )
+        if self.current_physical_turn_id() is None:
+            return GoalPauseAck(self.control.persisted, None, False)
         self.record.status.value = "interrupted"
         self.record.completed_at = 2
         self.terminal.set()
@@ -800,17 +808,26 @@ class FakeGoalHandle:
         self.closed = True
         self.terminal.set()
 
+    async def interrupt(self) -> str | None:
+        self.interrupt_calls += 1
+        turn_id = self.current_physical_turn_id()
+        self.record.status.value = "interrupted"
+        self.record.completed_at = 2
+        self.terminal.set()
+        return turn_id
+
     def finish(
         self,
         *,
-        goal_status: GoalStatus = GoalStatus.COMPLETE,
+        goal_status: GoalStatus | None = GoalStatus.COMPLETE,
         turn_status: str = "completed",
         response: str = "goal done",
     ) -> None:
-        self.control.persisted = goal_snapshot(
-            goal_status,
-            objective=self.control.persisted.objective,
-        )
+        if goal_status is not None:
+            self.control.persisted = goal_snapshot(
+                goal_status,
+                objective=self.control.persisted.objective,
+            )
         self.record.status.value = turn_status
         self.record.completed_at = 2
         self.record.items = [
@@ -848,6 +865,8 @@ class FakeGoalControl:
         self.start_calls: list[tuple[str, str]] = []
         self.resume_calls: list[str] = []
         self.clear_calls: list[str] = []
+        self.pause_calls: list[str] = []
+        self.activate_calls: list[str] = []
         self.start_errors: list[BaseException] = []
 
     async def get(self, thread_id: str) -> GoalSnapshot | None:
@@ -878,6 +897,18 @@ class FakeGoalControl:
         self.clear_calls.append(thread_id)
         self.persisted = None
         return True
+
+    async def pause(self, thread_id: str) -> GoalSnapshot:
+        self.pause_calls.append(thread_id)
+        assert self.persisted is not None
+        self.persisted = goal_snapshot(GoalStatus.PAUSED, objective=self.persisted.objective)
+        return self.persisted
+
+    async def activate(self, thread_id: str) -> GoalSnapshot:
+        self.activate_calls.append(thread_id)
+        assert self.persisted is not None
+        self.persisted = goal_snapshot(GoalStatus.ACTIVE, objective=self.persisted.objective)
+        return self.persisted
 
 
 class FakeThreadDeleteControl:
@@ -4412,7 +4443,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(discarded.binding_id, binding.id)
         self.assertEqual(discarded.thread_id, submission.thread_id)
-        self.assertIsNone(discarded.turn_id)
+        self.assertEqual(discarded.turn_id, submission.logical_turn_id)
 
     async def test_delete_running_turn_delegates_without_local_stop(
         self,
@@ -6103,6 +6134,186 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsInstance(self.outcomes[-1].error, GoalStateUnknown)
 
+    async def test_goal_pause_keeps_current_turn_running_until_its_real_result(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        snapshot = await self.runtime.pause_goal(binding, expected_created_at=1)
+
+        self.assertEqual(snapshot.status, GoalStatus.PAUSED)
+        self.assertEqual(handle.control.pause_calls, ["native-1"])
+        self.assertEqual(handle.pause_calls, 0)
+        self.assertEqual(handle.interrupt_calls, 0)
+        self.assertEqual(handle.record.status.value, "inProgress")
+        self.assertEqual(self.cleanup.calls, [])
+        self.assertEqual(self.outcomes, [])
+        steered = await self.submit(binding, "finish this turn")
+        self.assertEqual(steered.disposition, SubmitDisposition.STEERED)
+
+        handle.finish(goal_status=GoalStatus.PAUSED, response="finished after pause")
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        self.assertEqual(self.outcomes[-1].final_response, "finished after pause")
+        self.assertEqual(self.outcomes[-1].final_turn_status, "completed")
+        self.assertIsNone(self.outcomes[-1].error)
+        self.assertEqual(handle.control.clear_calls, [])
+
+    async def test_goal_resume_running_turn_reuses_the_same_logical_observer(self) -> None:
+        binding, handle, first = await self.start_fake_goal()
+        await self.runtime.pause_goal(binding)
+        owner = self.runtime._goals[binding.id]
+        resumed = await self.runtime.resume_goal(
+            binding=binding, owner_id="another-user", origin=object(),
+        )
+
+        self.assertTrue(resumed.continued)
+        self.assertEqual(resumed.logical_turn_id, first.logical_turn_id)
+        self.assertIs(self.runtime._goals[binding.id], owner)
+        self.assertIs(owner.handle, handle)
+        self.assertEqual(handle.control.resume_calls, [])
+        self.assertEqual(handle.control.activate_calls, ["native-1"])
+        self.assertEqual(len(handle.control.handles), 1)
+        handle.rollover("goal-continued-physical")
+        handle.finish(response="continued goal done")
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        self.assertEqual(len(self.outcomes), 1)
+        self.assertEqual(self.outcomes[-1].final_physical_turn_id, "goal-continued-physical")
+        self.assertEqual(self.outcomes[-1].finalization, GoalFinalizationStatus.CLEARED)
+        self.assertEqual(handle.wait_terminal_calls, 1)
+
+    async def test_goal_resume_terminal_race_keeps_unknown_ownership(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        await self.runtime.pause_goal(binding)
+        activate = handle.control.activate
+
+        async def activate_after_terminal(thread_id: str) -> GoalSnapshot:
+            handle.finish(goal_status=GoalStatus.PAUSED)
+            return await activate(thread_id)
+
+        handle.control.activate = activate_after_terminal
+        with self.assertRaises(GoalStateUnknown):
+            await self.runtime.resume_goal(binding=binding, owner_id="ou_user", origin=object())
+        self.assertEqual(self.runtime.active_goal(binding.id).state, GoalOperationState.UNKNOWN)
+        self.assertEqual(handle.control.resume_calls, [])
+        self.assertFalse(self.runtime._accepting)
+        # Let teardown observe a settled native state without claiming the lost
+        # activation receipt resolved the original operation ownership.
+        handle.control.persisted = goal_snapshot(
+            GoalStatus.PAUSED, objective=handle.control.persisted.objective,
+        )
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+    async def test_goal_status_preflight_rejection_preserves_running_observer(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        for operation in ("pause", "resume"):
+            with self.subTest(operation=operation):
+                if operation == "resume":
+                    await self.runtime.pause_goal(binding)
+                    method = "activate"
+                else:
+                    method = "pause"
+                original = self.runtime._goals[binding.id]
+                with patch.object(
+                    handle.control, method,
+                    new=AsyncMock(side_effect=GoalMutationRejected("no Goal exists")),
+                ):
+                    with self.assertRaises(GoalNotFound):
+                        if operation == "pause":
+                            await self.runtime.pause_goal(binding)
+                        else:
+                            await self.runtime.resume_goal(
+                                binding=binding, owner_id="ou_user", origin=object(),
+                            )
+                self.assertIs(self.runtime._goals[binding.id], original)
+                self.assertEqual(original.state, GoalOperationState.RUNNING)
+                self.assertTrue(self.runtime._accepting)
+                self.assertEqual(handle.record.status.value, "inProgress")
+                self.assertEqual(handle.interrupt_calls, 0)
+        handle.finish()
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+
+    async def test_goal_clear_keeps_current_result_observer_without_recreating_goal(self) -> None:
+        binding, handle, first = await self.start_fake_goal()
+        self.assertTrue(await self.runtime.clear_goal(binding, expected_created_at=1))
+        self.assertIsNone(await self.runtime.goal_snapshot(binding))
+        self.assertEqual(handle.record.status.value, "inProgress")
+        self.assertEqual(handle.pause_calls, 0)
+        self.assertEqual(handle.interrupt_calls, 0)
+        self.assertEqual(self.cleanup.calls, [])
+        self.assertIsNotNone(self.runtime.active_goal(binding.id))
+        steered = await self.submit(binding, "still finish this turn")
+        self.assertEqual(steered.turn_id, first.logical_turn_id)
+        handle.finish(goal_status=None, response="result after goal clear")
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        outcome = self.outcomes[-1]
+        self.assertIsNone(outcome.error)
+        self.assertIsNone(outcome.goal)
+        self.assertEqual(outcome.finalization, GoalFinalizationStatus.CLEARED)
+        self.assertEqual(outcome.final_response, "result after goal clear")
+        self.assertEqual(handle.control.clear_calls, ["native-1"])
+        self.assertTrue(self.runtime._accepting)
+        self.assertIsNone(self.runtime.active_goal(binding.id))
+
+    async def test_stop_after_goal_clear_only_interrupts_remaining_turn(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        await self.runtime.clear_goal(binding)
+        stopped = await self.runtime.stop(binding.id)
+        self.assertEqual(stopped, StopDisposition.GOAL_REQUESTED)
+        self.assertEqual(handle.pause_calls, 0)
+        self.assertEqual(handle.interrupt_calls, 1)
+        self.assertEqual(self.cleanup.calls, ["native-1"])
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        self.assertIsNone(self.outcomes[-1].error)
+        self.assertEqual(self.outcomes[-1].final_turn_status, "interrupted")
+        self.assertIsNone(handle.control.persisted)
+
+    async def test_goal_clear_acknowledgement_serializes_with_terminal_read(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        clear = handle.control.clear
+
+        async def gated_clear(thread_id: str) -> bool:
+            result = await clear(thread_id)
+            entered.set()
+            await release.wait()
+            return result
+
+        handle.control.clear = gated_clear
+        clearing = asyncio.create_task(self.runtime.clear_goal(binding))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        handle.finish(goal_status=None, response="completed during clear")
+        release.set()
+        self.assertTrue(await clearing)
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        self.assertIsNone(self.outcomes[-1].error)
+        self.assertEqual(self.outcomes[-1].final_response, "completed during clear")
+        self.assertEqual(self.outcomes[-1].finalization, GoalFinalizationStatus.CLEARED)
+
+    async def test_goal_clear_response_loss_keeps_absence_unconfirmed(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+
+        async def lost_clear(thread_id: str) -> bool:
+            handle.control.persisted = None
+            raise GoalMutationStateUnknown("clear response lost")
+
+        handle.control.clear = lost_clear
+        with self.assertRaises(GoalStateUnknown):
+            await self.runtime.clear_goal(binding)
+        self.assertFalse(self.runtime._goals[binding.id].goal_cleared)
+        self.assertEqual(self.runtime.active_goal(binding.id).state, GoalOperationState.UNKNOWN)
+        self.assertFalse(self.runtime._accepting)
+        self.assertEqual(handle.record.status.value, "inProgress")
+        self.assertEqual(handle.interrupt_calls, 0)
+
+    async def test_paused_goal_clear_does_not_interrupt_later_ordinary_turn(self) -> None:
+        binding, handle, _ = await self.start_fake_goal()
+        handle.finish(goal_status=GoalStatus.PAUSED)
+        self.assertTrue(await self.runtime.wait_idle(timeout=1))
+        ordinary = await self.submit(self.store.get(binding.id), "ordinary work")
+        self.assertTrue(await self.runtime.clear_goal(binding))
+        self.assertIsNotNone(self.runtime.active_turn(binding.id))
+        self.assertEqual(self.cleanup.calls, [])
+        await self.finish(self.codex.handles[-1], ordinary)
+        self.assertIsNone(self.outcomes[-1].error)
+
     async def test_goal_prepared_input_cannot_cross_pause_and_resume(self) -> None:
         binding, handle, _ = await self.start_fake_goal()
         admission = await self.runtime.capture_submission_admission(binding.id)
@@ -6359,12 +6570,18 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         handle.finish(response="completed before pause persisted")
 
-        async def wait_for_terminal_proof() -> None:
-            while not self.runtime._goals[binding.id].terminal_observed:
+        async def wait_for_stream_terminal() -> None:
+            while self.runtime._goals[binding.id].stream_terminal is None:
                 await asyncio.sleep(0)
 
-        await asyncio.wait_for(wait_for_terminal_proof(), timeout=0.2)
-        handle.pause_gate.set()
+        # Terminal cross-check now shares the Binding lock with control ACKs,
+        # so the physical completion can arrive first without clearing past a
+        # pending pause. Release the mutation even if an assertion fails.
+        try:
+            await asyncio.wait_for(wait_for_stream_terminal(), timeout=1)
+            self.assertFalse(self.runtime._goals[binding.id].terminal_observed)
+        finally:
+            handle.pause_gate.set()
         self.assertEqual(
             await stop_task,
             StopDisposition.GOAL_REQUESTED,
@@ -8370,7 +8587,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                         "codexErrorInfo": "tooManyDenials",
                         "additionalDetails": "private raw response",
                     })
-                self.assertTrue(await self.runtime.wait_idle(timeout=0.2))
+                self.assertTrue(await self.runtime.wait_idle(timeout=1))
 
                 outcome = self.outcomes[-1]
                 self.assertEqual(outcome.status, "interrupted")

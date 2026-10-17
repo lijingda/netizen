@@ -150,9 +150,8 @@ Reaction 中的 `OnIt` 失败时，已成功的 native steer 始终回退一条�
 Progress Card 中间投递失败时由既有轮询重试最新快照，连续三次失败停止轮询；读取或
 渲染失败仍立即停止。普通 Turn、Side 与 Goal 终态对身份有效的原卡独立尝试最多三次
 相同更新，失败间隔 0.5 秒，整组请求与间隔共用 5 秒预算。原卡不可用、终态渲染失败或
-重试耗尽时，普通/Side Turn 才回退到无文件
-富文本/静态文本、有文件完成卡的标准路径；Goal 使用新的自包含组合卡或明确的文本
-fallback，不能因为更新失败丢掉权威结果。
+重试耗尽时，普通/Side Turn 与 Goal logical run 都回退到无文件富文本/静态文本、
+有文件完成卡的标准路径，不能因为更新失败丢掉权威结果。Goal 管理快照独立于回复。
 
 引用功能发布后要用真实消息手工验收普通文本与 CardKit 2.0 应用卡片。卡片用例应
 确认 header/body 可见文本进入 Codex，而按钮 value、确认弹窗和隐藏 option 不进入；
@@ -297,6 +296,19 @@ bundled App Server，验证正常恢复、已恢复、missing、writer 拒绝和
 required MCP 启动断连回收及压缩准备失败。后者直接使用公开 WebSocket wire，是测试 harness，不能
 复用于生产私有 gateway；目前依赖 POSIX 文件锁。mock provider 的原生执行通过不代表
 真实模型触发频率、压缩自动路径或飞书展示已验收。
+
+历史分页适配（ADR 0083）变化时，运行
+`timeout 210 .venv/bin/python scripts/probe_thread_history.py`，保存标准输出证据。它使用
+生产 `AppServerThreadHistory`、隔离原生状态与本地 mock provider，覆盖 paginated/legacy
+历史、opaque 游标续页、最近 items、非法游标后的连接复用和归档读取；不访问生产账号
+或飞书，不替代真实模型自主调用工具的验收。
+
+Goal 管理/回复分离（ADR 0084）的控制变化另运行
+`scripts/probe_sdk_partial_answers.py --case goal_controls --output /tmp/goal-controls.json`
+（外部 150 秒 deadline）。HTTP response barrier 保持真实物理 Turn 运行，核验 pause、
+同流 resume、clear 不 interrupt，清除后当前 Turn 仍交付，以及 `/stop` 的 pause、exact
+interrupt 和 cleanup；同时复验 `goal_partial_rollover` 与受影响的取消场景。它们使用
+生产 Runtime/Adapter，不将本地 mock 模型结果宣称为真实模型或飞书展示验收。
 
 取消、incomplete response 或冷恢复权限变化时，另运行
 `scripts/probe_sdk_cancellation.py`（外部 180 秒 deadline）和
@@ -965,6 +977,20 @@ SDK 精确依赖以 [pyproject.toml](../pyproject.toml) 和
 [requirements.lock](../requirements.lock) 为准。以下证据保留实际验证时的版本；旧版本的
 结果不会自动变成新版本、真实飞书链路或目标主机的验收结论。定时任务另见
 [专属兼容性记录](#定时任务兼容性与验收)。
+
+2026-10-17 的规模优化与 Goal 分离（ADR 0083/0084）在 SDK/bundled App Server
+`0.163.0` 上经六路独立复核后通过本机 `make check`：3,210 项测试、15 项条件跳过，编译、依赖一致性、
+Activity/20/20/40 SDK synthetic 与只读 Skill roots 门禁通过。生产历史适配的隔离原生
+探针覆盖 paginated/legacy 各三轮、opaque 游标续页、非法游标后复用和归档读取；legacy
+items 不支持时只读最新一轮 Full。生产 Goal Runtime/Adapter 的本地 mock provider
+探针验证 pause/clear 不 interrupt、同流 resume、清除后的结果交付、stop 精确中断，
+以及两轮自动续跑与 complete 自动 clear。既有 interrupted continuation 观测缺口的
+局部隔离和 idle 后恢复复验通过，不表示缺口已修复。飞书卡片容量与回调为本地行为测试，
+不替代真实目标应用客户端验收；本轮未部署、未验证真实模型自主工具调用或十万会话压测。
+
+2026-10-18 按产品范围移除上一轮为旧混合 Goal 测试卡增加的专用兼容处理，不承诺旧卡
+交互保留；当前静态管理卡与普通回复仍按 ADR 0084 验收。删除后完整 `make check`
+通过：3,209 项测试、15 项条件跳过，编译、依赖及 SDK 门禁通过。
 
 2026-10-16 的 `0.162.1` → `0.163.0` 升级完成精确 Python 包与 bundled App Server
 源码复核。高层 API 和私有消费代码未变，生成模型/通知注册表改变；现有窄适配没有
@@ -1789,7 +1815,7 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
    原生生成、实际飞书发送和客户端显示分别记录；未触发原生 partial 时不得以合成事件
    通过冒充已验证生成能力。另验证 Side 降级后 failed `run()` 抛错仍保留已观察片段，
    不虚构后续未取得 items 的答案恢复。容量超限继续按现有规则处理，不新增 partial
-   专用兜底；Goal 精简卡省略阶段性模块时不得声称完整答案已经交付。
+   专用兜底；Goal logical reply 使用同一交付判据，不得把管理卡发送成功当作答案已交付。
 
    running 时 `/status` 仍出现完整 native ID、已接受 steer 次数和同一 checklist。在可观测
    Turn 完成、公开 usage 通知已排空后 `/status` 显示当前
@@ -1838,35 +1864,33 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
    原生 Turn；running 时同样只 steer exact Turn 一次。未知、
    disabled、重名或 stale 引用必须零 Codex mutation；引用消息历史里的 `$skill` 不得
    激活，当前消息的引用仍正常。
-7. 在已通过 zero-Turn live gate 的环境发送 `/goal <objective>`，只出现一张组合卡，并与
-   `/status`、`/sessions` 一致显示 Goal 状态；同一 Binding 的普通 Prompt steer 当前
-   exact 物理 Turn，`/config`、`/compact` 仍被拒绝。准备期间换轮必须明确拒绝旧目标，
-   不重投或新增 Turn；启动、暂停、收尾、unknown 与无安全 route 时仍拒绝。原生 Goal
-   phase 验证当前 Turn steer、resume 后旧 expected-ID 拒绝及新 Turn steer 改变结果。
-   Progress Card 关闭时该卡保留 Goal/可选 Partial Answer/终态 Result/可选 Files，开启时
-   增加 Activity，且 start、rollover、pause、resume、terminal 都更新同一个 message ID；
-   rollover 后 Activity 只显示新物理 Turn 的原生事件时间和操作信息；阶段性答案则保留同次
-   连续执行已观察片段，至少两轮验证去重、旧轮迟到事件与最新投影。暂停保留、手动恢复
-   重置，服务重启的新状态卡不重建片段；最终 Result/Files 仍只取 exact 最终物理 Turn。
-   `/goal pause` 与 `/stop` 都先暂停 Goal、中断 exact 物理 Turn 并请求 terminal cleanup，
-   随后卡片或 `/goal resume` 可继续；paused、blocked、usage/budget limited 都不得自动
-   clear，并保留“结束 Goal”。只有 logical stream、persisted Goal、exact final Turn 与
-   Thread idle 四项证据完整，Goal 为 complete 且 final Turn 为 completed 时才自动 clear；
-   清理后卡片仍显示冻结的最终回答和 exact final Turn 文件，`/sessions` 恢复 idle 的归档/
-   删除按钮。模拟 clear false、响应丢失和清理后仍可读，必须显示收尾不确定、保留 unknown
-   slot、关闭 admission、零自动重试但不丢最终回答；即使 clear 已生效且后续 get absent，
-   `/goal` 也必须显示冻结的 goal-unknown，`/goal clear` 必须拒绝。用阻塞终态投递证明
-   handoff 返回前显式 clear 与同秒同 objective 新 Goal 都被拒绝，handoff 超时后非 unknown
-   slot 会释放，shutdown 对已终态 Goal 零 pause/cleanup。使初始 Goal 卡发送失败后发送
-   `/goal`，恢复卡必须复用 exact logical run、继续 Activity 并接住最终 Result/Files。
-   另模拟纯观察失败（含 clear 发出前的只读检查失败）：只有当前 Goal 被保留，其他 Binding
-   仍可执行。原 consumer handoff 结束后，下一条消息或 `/goal` 做有界只读重检；确认
-   Goal 非 active、exact Thread idle 且无 inProgress Turn 后允许同会话新对话，零自动
-   clear/pause。原生仍 active、读取失败/超时/身份错误时保留当前占用；旧 steer token
-   不能改投新 Turn，mutation 未知不能按观察失败释放，已关闭的实例 admission 不重开。
-   重启期间保留的 active Goal 必须显示为外部活跃并拒绝 mutation，提示在原生 Codex 暂停，
-   不能自动重挂；重启前旧控制按钮 stale，新的 `/goal` 卡按钮才可用。生命周期内不得用外部
-   CLI/App Server 并发改写同一 Thread Goal，因为 thread-scoped clear 没有 generation CAS。
+7. 在已通过 zero-Turn live gate 的环境发送 `/goal <objective>`，管理快照与任务回复分开。
+   `/goal` 静态卡显示当前状态，只有再次查询或点击刷新/控制时更新，不承载答案与文件。
+   同一 Binding 的普通 Prompt 仍 steer 当前 exact 物理 Turn；`/config`、`/compact` 仍
+   被拒绝。准备期间换轮必须拒绝旧目标，不重投或新增 Turn；启动、停止中、收尾、unknown
+   与无安全 route 时拒绝。仅暂停或清除 Goal 后当前物理 Turn 仍运行时，继续允许精确 steer。
+   Progress Card 开启时，一个 SDK logical stream 复用一张普通回复卡；关闭时复用富文本
+   和有文件完成卡。rollover 不新发卡，Activity 切到新物理 Turn，阶段性答案在同一逻辑流
+   内累计；至少两轮验证去重与旧轮迟到事件。最终 Result/Files 只取 exact 最终物理 Turn。
+   `/goal pause` 只暂停后续续跑，`/goal clear` 只清除 Goal，均不中断当前 Turn、不中断结果
+   交付。执行中的同流 resume 不重复建回复或通知 route；旧流已结束时 resume 才开始新回复。
+   `/stop` 暂停 Goal 并中断 exact 当前物理 Turn，再执行 terminal cleanup；已显式 clear
+   时仅停止当前执行。paused、blocked、usage/budget limited 不自动 clear。logical stream、
+   persisted Goal、exact final Turn 与 Thread idle 四项证据完整，Goal complete 且 final
+   Turn completed 时才自动 clear；本进程已确认显式 clear 时允许 Goal absent，但仍须
+   核验当前执行与 final Turn，不能丢弃答案或文件。
+   管理操作与展示分开验证：卡片更新失败保留确定成功/失败回执，不重做原生 mutation；
+   未确认终态不得发送完成提及。旧按钮用原生稳定标记和当前状态校验，跨重启不依赖旧卡
+   owner；不同 Goal 必须拒绝，同秒同 objective/budget 重建的有限歧义按 ADR 0084 接受。
+   模拟 clear false、响应丢失和清理后仍可读，保留 mutation unknown、关闭 admission、
+   零自动重试；只读 get absent 不能解除这一隔离。阻塞终态交付时不得启动新 Goal；
+   非 unknown slot 在有界 handoff 后释放，shutdown 对已终态 Goal 零 pause/cleanup。
+   另模拟纯观察失败：只有当前 Goal 被保留，其他 Binding 仍可执行；原 consumer handoff
+   结束后，下一条消息或 `/goal` 有界只读重检，确认 Goal 非 active、Thread idle 且无
+   inProgress Turn 后允许新对话，零自动 clear/pause。原生仍 active、读取失败或身份错误
+   时保留占用，旧 steer token 不改投；mutation unknown 不按观察失败释放。
+   重启后外部 active Goal 不自动接管，仍提示在原生 Codex 处理；thread-scoped clear
+   无 generation CAS，不能声称已原子防止外部客户端并发替换 Goal。
 8. 长 Turn 中发第二条消息，结果必须被 steer 改变；native steer 失败时不得出现
    `OnIt` 或 steer count，必须明确提示本条未执行。故意使 `OnIt` 投递失败时，只在 native
    steer 已成功后收到“已接收调整”兜底，原 Turn pulse 不受影响。
@@ -2015,7 +2039,7 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     只有富文本/静态文本最终回复；有文件 Turn 必须只有一张同时包含最终回复和本轮文件的
     现有完成卡。Progress Card 开启时，两种结果都更新最初的同一张运行卡，有文件时继续
     包含自包含 manifest（无阶段性模块时 v4，有阶段性模块时 v5）。再验证 Goal exact 最终物理 Turn completed 的文件进入同一张
-    Goal 卡并使用 v5 完整 Reply Card manifest，而更早 rollover Turn 的文件不会被猜测
+    逻辑执行回复卡，manifest 同样按有无阶段性模块选择 v5/v4，而更早 rollover Turn 的文件不会被猜测
     聚合；Side exact completed Turn 的 structured items 进入对应完成/进度卡，并显示
     成功 patch 的累计行数；Side aggregate diff、先前 Side Turn 和未进入受支持 native
     事实的文件不会被补齐。Goal live phase 必须让 resumed exact final physical Turn 创建
@@ -2042,7 +2066,8 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     显示脱敏逻辑位置；所有条目隐藏大小、按钮统一为“发送”，按 8 个一页完整翻页，可见正文
     不出现绝对路径、文件列表预览、diff 正文或发送全部；v5 callback payload 则必须逐项携带明文
     absolute path，并对已知统计携带成对 `a/d`，翻页后完整保留整轮统计与
-    Goal/Activity/Partial Answer/Result；旧 v4 与不含 Partial Answer 的 v5 也必须继续可用。
+    Activity/Partial Answer/Result；普通回复的 v4 与不含 Partial Answer 的 v5 仍须可用。
+    升级前的混合 Goal/答案测试卡不在兼容与验收范围内。
     依次在 P2P 平面消息、
     群主线和已有话题点击普通文件或图片的“发送”：平面卡片必须出现以该卡片为锚点的话题，记录真实
     root/parent/thread 返回；已有话题必须保持原 thread ID，飞书能正常预览/下载实际文件。
@@ -2062,7 +2087,7 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     完成真实 create/update；在飞书实际选择末页、中间页和首页并
     点击“跳转”，确认 submit callback 同时保留完整 `value` manifest 与所选页码的
     `form_value`，每次更新后仍能再次跳转，且只在提交按钮中出现完整 manifest。重启前后
-    同卡必须保留 Goal/Activity/Partial Answer/Result、整轮与逐文件统计；不能只用合成回调证明
+    同卡必须保留 Activity/Partial Answer/Result、整轮与逐文件统计。不能只用合成回调证明
     表单点击可用。记录实际序列化容量与平台返回，检查各页都不超过 55,000 bytes；
     任一页无法完整容纳时应明确省略 Files，不截断。没有 live 条件时明确记录这部分
     未验证，不能宣称真实表单兼容或容量验收通过。

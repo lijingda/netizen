@@ -342,6 +342,7 @@ class GoalSubmission:
     release_receipt_attempt: Callable[[], None]
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
+    continued: bool = False
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:

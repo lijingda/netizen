@@ -20,7 +20,7 @@ from netizen_cli.domain import (
 )
 from netizen_cli.runtime.contracts import (
     GoalStateUnknown, NativeThreadMetadata, ScheduledInitialStartConflict, Submission, SubmitDisposition,
-    TurnObservationUnavailable,
+    TurnObservationUnavailable, ThreadArchived,
 )
 from netizen_cli.sdk_gap_adapter import GoalControlError, GoalMutationStateUnknown
 from netizen_cli.sessions.errors import SessionToolError
@@ -356,14 +356,31 @@ class SessionCollaborationApplicationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.send_calls, [])
         self.runtime.submit_external.assert_not_awaited()
 
-    async def test_archived_target_rejects_before_visible_publication(self):
+    async def test_archived_target_uses_exact_native_rejection_without_catalog_precheck(self):
         self.target()
-        self.runtime.archived_thread_metadata_values["native-target"] = object()
+        self.queue_target_message()
+        self.runtime.thread_is_archived = AsyncMock(side_effect=AssertionError("must not scan archive catalog"))
+        self.runtime.submit_external.side_effect = ThreadArchived("目标已归档；未自动恢复归档。")
         with self.assertRaises(SessionToolError) as failed:
             await self.app.send_session_message("native-source", "native-target", "任务")
         self.assertEqual(failed.exception.code, "target_archived")
-        self.assertEqual(self.channel.send_calls, [])
-        self.runtime.submit_external.assert_not_awaited()
+        self.assertFalse(failed.exception.details["netizen"]["accepted"])
+        self.runtime.thread_is_archived.assert_not_awaited()
+        self.runtime.submit_external.assert_awaited_once()
+        self.assertEqual(len(self.channel.send_calls), 1)
+        self.assertIn("该协作请求未执行", str(self.channel.updates[-1][1]))
+
+    async def test_unavailable_native_handle_is_not_guessed_to_be_archived(self):
+        self.target()
+        self.queue_target_message()
+        self.runtime.thread_is_archived = AsyncMock(side_effect=AssertionError("must not scan archive catalog"))
+        self.runtime.submit_external.side_effect = InvalidRequestError(-32600, "thread not found: native-target")
+        with self.assertRaises(SessionToolError) as failed:
+            await self.app.send_session_message("native-source", "native-target", "任务")
+        self.assertEqual(failed.exception.code, "input_rejected")
+        self.assertFalse(failed.exception.details["netizen"]["accepted"])
+        self.runtime.thread_is_archived.assert_not_awaited()
+        self.runtime.submit_external.assert_awaited_once()
 
     async def test_target_switch_during_publication_rejects_instead_of_retargeting(self):
         target, scope = self.target()

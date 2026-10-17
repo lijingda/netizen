@@ -260,7 +260,8 @@ Channel Database。
 **SDK Gap Adapter / SDK 能力缺口适配器**：ADR 0014 定义的临时、可逐项删除边界。
 它只复用同一个 `AsyncCodex` 已初始化的 App Server，为 ADR 0014 的固定 Goal/Skills
 method、ADR 0021 的固定 Side boundary、ADR 0028 的固定 Thread unsubscribe method、
-ADR 0037 的固定 Thread Delete method 及 ADR 0074 的进程级 Skill roots 提供窄语义口；
+ADR 0037 的固定 Thread Delete method、ADR 0074 的进程级 Skill roots、ADR 0077 的只读
+账号额度及 ADR 0083 的固定历史分页读取提供窄语义口；
 不暴露通用 RPC，不复制协议或状态，
 也不按 SDK 版本号做运行时许可。SDK 升级由能力 shape、真实 SDK client synthetic harness
 和目标环境 live probe 放行；高层 facade 支持一项就切回并删除一项 shim。
@@ -295,17 +296,17 @@ Goal 不写入 Channel Database。
 一次 clear-and-confirm；它先冻结最终回复与 exact 最终物理 Turn，再清除原生 Goal。
 paused、blocked、usage-limited、budget-limited 与任何 unknown 状态都不自动收尾。
 
-**Goal Control Identity / Goal 控制身份**：当前进程 exact Reply Card message source、
-logical run 与 SDK 可见不可变字段 fingerprint 的组合。fingerprint 使用 Thread、秒级
-`createdAt`、objective 与 token budget，因此不是全局唯一 generation；控制按钮必须同时
-通过当前 source ownership 与原生状态复读。服务重启后旧按钮视为 stale。
+**Goal Control Identity / Goal 控制身份**：独立管理卡的 exact Binding/Thread 和 SDK 可见
+不可变字段 fingerprint。fingerprint 使用 Thread、秒级 `createdAt`、objective 与 token
+budget，因此不是全局唯一 generation；操作前复读原生状态核对，不保留历史回复 owner
+或快照。管理卡仅展示请求时的状态，刷新后重新查询，不能代表任务回复的生命周期。
 
 **Externally Active Goal / 外部活跃 Goal**：服务重启或外部 Codex 客户端留下的 active
 persisted Goal，但当前进程没有可安全重建的通知 route。Netizen 只读识别并阻止同一
 Binding 的新 mutation；当前不猜测重挂或替用户暂停。
 
 **Native Capability Gate / 原生能力门控**：统一命令注册表中对原生能力可用性的声明。
-能力必须来自公开高层 API，或来自 ADR 0014 / ADR 0021 / ADR 0028 / ADR 0037 已验证的
+能力必须来自公开高层 API，或来自 ADR 0014 / ADR 0021 / ADR 0028 / ADR 0037 / ADR 0077 / ADR 0083 已验证的
 窄 Adapter；否则保持 unavailable，不能通过 prompt、本地状态或任意私有 RPC 模拟。
 当前 Goal、Skills、Side 与 Native Thread Delete 已通过独立口接入，Plan control 与 Apps
 仍是显式 gap。
@@ -337,19 +338,19 @@ reasoning，也不是 Turn 历史或终态事实源；操作预览不代表对�
 recovery，且不写入 Channel Database。展示复用普通 Turn 的 Lifecycle Reaction 以及
 Activity、Partial Answer、Result、Files 回复模块，但不允许 Goal。
 
-**Lifecycle Reaction / 任务生命周期表情**：普通与 Side Turn 始终开启的尽力节点反馈：
+**Lifecycle Reaction / 任务生命周期表情**：普通、Side Turn 与 Goal logical run 的尽力节点反馈：
 accepted 原消息使用 `Typing`，成功 steer 使用 `OnIt`，终态使用
 `DONE`/`ERROR`/`CrossMark`。它不是 Turn 事实源，也不进入 Channel Database。
 
 **Reaction Pulse / 执行中表情闪烁**：Binding 可选开启的 `THINKING` 运行脉冲，默认
-关闭；它不控制 Lifecycle Reaction。Side 在创建时冻结 Parent 当时的选择。
+关闭；它不控制 Lifecycle Reaction。Goal logical run 沿用同一设置；Side 在创建时冻结 Parent 当时的选择。
 
-**Reply Card / 回复卡**：依附 Completion Origin、由 Goal、Activity、Partial Answer、Result 与 Files
-五种 typed Reply Card Module 按需组合的一张 Card 2.0。Goal、Activity 或 Files 任一模块
-存在时使用卡片；只有 Result 时继续使用富文本/静态文本。它不是 Turn 或 Goal 的状态事实源。
+**Reply Card / 回复卡**：依附 Completion Origin、由 Activity、Partial Answer、Result 与 Files
+四种 typed Reply Card Module 按需组合的一张 Card 2.0。Activity 或 Files 存在时使用卡片；
+没有运行卡的正文使用富文本/静态文本。Goal 管理卡独立展示原生状态快照，不承载任务答案。
 
-**Reply Card Module / 回复卡模块**：Reply Card 中封闭、类型化的展示块；当前只有 Goal、
-Activity、Partial Answer、Result 与 Files 五种。模块只投影已经确认的领域状态，不独立发送或更新消息，也
+**Reply Card Module / 回复卡模块**：任务回复中封闭、类型化的展示块；当前为
+Activity、Partial Answer、Result 与 Files 四种。模块只投影已经确认的领域状态，不独立发送或更新消息，也
 不构成动态插件系统。
 
 **Partial Answer / 阶段性答案**：Codex 明确标记为稳定但非终态的答案片段，任务之后仍可能

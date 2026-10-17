@@ -555,6 +555,60 @@ class BindingStoreTest(unittest.TestCase):
         self.assertEqual(self.store.active_binding(self.scope.key).id, first.id)
         self.assertNotEqual(first.id, second.id)
 
+    def test_reference_queries_are_exact_or_bounded_and_keep_scope(self) -> None:
+        first = self.create()
+        self.create()
+        other_scope = FeishuScope("cli_test", "oc_other", ScopeKind.DIRECT)
+        outside = self.store.create_channel_binding(
+            scope=other_scope, project_alias="test", creator_id="user",
+        )
+        statements = []
+        self.store._connection.set_trace_callback(statements.append)
+        try:
+            with patch.object(self.store, "list_bindings", side_effect=AssertionError("full scope scan")):
+                self.assertEqual(self.store.resolve_reference(scope_key=self.scope.key, reference=first.id).id, first.id)
+                self.assertEqual(self.store.resolve_reference(scope_key=other_scope.key, reference=outside.short_id).id, outside.id)
+                for reference in (outside.id, "bbbbbbbb", "%", "_", "*", "?", "[", "AAAAAAAA"):
+                    with self.subTest(reference=reference), self.assertRaises(BindingNotFound):
+                        self.store.resolve_reference(scope_key=self.scope.key, reference=reference)
+                with self.assertRaises(AmbiguousBinding):
+                    self.store.resolve_reference(scope_key=self.scope.key, reference="aaaaaaaa")
+        finally:
+            self.store._connection.set_trace_callback(None)
+        prefix_queries = [statement for statement in statements if "binding_id GLOB" in statement]
+        self.assertTrue(prefix_queries)
+        self.assertTrue(all("LIMIT 2" in statement for statement in prefix_queries))
+
+    def test_binding_existence_uses_scope_and_materialization(self) -> None:
+        self.assertFalse(self.store.has_bindings(self.scope.key))
+        binding = self.create()
+        with patch.object(self.store, "list_bindings", side_effect=AssertionError("full scope scan")):
+            self.assertTrue(self.store.has_bindings(self.scope.key))
+            self.assertTrue(self.store.has_bindings(self.scope.key, materialized=False))
+            self.assertFalse(self.store.has_bindings(self.scope.key, materialized=True))
+            self.store.assign_native_thread_id(binding.id, "native")
+            self.assertFalse(self.store.has_bindings(self.scope.key, materialized=False))
+            self.assertTrue(self.store.has_bindings(self.scope.key, materialized=True))
+            self.assertFalse(self.store.has_bindings("other-scope"))
+
+    def test_latest_activated_binding_respects_eligible_projects_and_scope(self) -> None:
+        with patch("netizen_cli.bindings._now", return_value="2026-01-01T00:00:00+00:00"):
+            first = self.create("test")
+        with patch("netizen_cli.bindings._now", return_value="2026-01-02T00:00:00+00:00"):
+            second = self.create("none")
+        with patch("netizen_cli.bindings._now", return_value="2026-01-03T00:00:00+00:00"):
+            unused = legacy_admin_lazy_binding(
+                self.store, scope=self.scope, project_alias="test",
+                expected_project_revision=self.store.get_project("test").revision,
+            )
+        self.assertIsNone(unused.activated_at)
+        with patch.object(self.store, "list_bindings", side_effect=AssertionError("full scope scan")):
+            self.assertEqual(self.store.get_latest_activated_binding(self.scope.key, project_aliases=("test", "none")).id, second.id)
+            self.assertEqual(self.store.get_latest_activated_binding(self.scope.key, project_aliases=("test",)).id, first.id)
+            self.assertIsNone(self.store.get_latest_activated_binding(self.scope.key, project_aliases=()))
+            self.assertIsNone(self.store.get_latest_activated_binding("other-scope", project_aliases=("test",)))
+            self.assertIsNone(self.store.get_latest_activated_binding(self.scope.key, project_aliases=("missing",)))
+
     def test_archive_clears_only_the_exact_active_pointer(self) -> None:
         binding = self.create("test")
         self.store.assign_native_thread_id(binding.id, "native-1")
@@ -1639,6 +1693,52 @@ class BindingStoreQueryTest(unittest.IsolatedAsyncioTestCase):
                 await self.store.query_bindings_by_native_thread_ids(thread_ids=thread_ids)
         with patch.object(self.store, "_submit_query", side_effect=AssertionError("empty lookup read")):
             self.assertEqual(await self.store.query_bindings_by_native_thread_ids(thread_ids=()), ())
+
+    async def test_native_id_batch_work_stays_bounded_as_scope_and_project_grow(self) -> None:
+        target = self.create_binding(
+            scope=self.topic, project="alpha", created_at="2030-01-01T00:00:00+00:00", native=True,
+        )
+        connection = self.store._connection
+        # These newer rows used to make a tiny ID lookup traverse the whole
+        # Scope/Project. Count VM work, not elapsed time or a planner's wording.
+        connection.execute(
+            """
+            WITH RECURSIVE numbers(value) AS (
+                VALUES(1) UNION ALL SELECT value + 1 FROM numbers WHERE value < 10000
+            )
+            INSERT INTO bindings (
+                binding_id, scope_key, project_alias, native_thread_id,
+                creator_id, created_at, activated_at
+            )
+            SELECT 'bulk-' || value, ?, 'alpha', 'native-bulk-' || value,
+                   'ou_user', '2030-01-02T00:00:00+00:00', '2030-01-02T00:00:00+00:00'
+            FROM numbers
+            """,
+            (self.topic.key,),
+        )
+        for query in (
+            BindingQuery(project_alias="alpha", materialized=True),
+            BindingQuery(app_id="cli_test", scope_kind=ScopeKind.TOPIC,
+                         chat_id="oc_group", topic_id="omt_topic", materialized=True),
+        ):
+            with self.subTest(query=query):
+                statement, parameters = _binding_inventory_statement(
+                    query=query, cursor=None, limit=1, thread_ids=(target.native_thread_id,),
+                )
+                steps = 0
+
+                def progress():
+                    nonlocal steps
+                    steps += 100
+                    return int(steps > 10000)
+
+                connection.set_progress_handler(progress, 100)
+                try:
+                    rows = connection.execute(statement, parameters).fetchall()
+                finally:
+                    connection.set_progress_handler(None, 0)
+                self.assertEqual([row["binding_id"] for row in rows], [target.id])
+                self.assertLess(steps, 10000)
 
     async def test_binding_candidates_filter_once_and_reject_overflow(self) -> None:
         expected = []

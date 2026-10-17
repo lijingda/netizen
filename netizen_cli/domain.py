@@ -256,6 +256,7 @@ class CardControlName(str, Enum):
     RECHECK_EXACT_TURN = "binding.turn.recheck"
     SESSIONS_PAGE = "sessions.page"
     REFRESH_ARCHIVED_SESSIONS = "sessions.archived.refresh"
+    GOAL_REFRESH = "goal.refresh"
     GOAL_PAUSE = "goal.pause"
     GOAL_RESUME = "goal.resume"
     GOAL_CLEAR = "goal.clear"
@@ -292,6 +293,7 @@ class CardControlIntent:
     message_context_mode: MentionContextMode | None = None
     side_id: str | None = None
     page: int | None = None
+    session_cursor: str | None = None
     goal_generation: str | None = None
     expected_goal_status: str | None = None
 

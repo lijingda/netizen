@@ -153,6 +153,7 @@ from .sdk_gap_adapter import (
     GoalControlError,
     GoalHandle,
     GoalMutationStateUnknown,
+    GoalMutationRejected,
     GoalSnapshot,
     GoalStreamTerminal,
     SideBoundaryControl,
@@ -304,6 +305,7 @@ class _ActiveGoal:
     receipt_attempted: asyncio.Event
     state: GoalOperationState
     persisted: GoalSnapshot | None = None
+    goal_cleared: bool = False
     generation_created_at: int | None = None
     generation_token_budget: int | None = None
     stream_terminal: GoalStreamTerminal | None = None
@@ -4189,10 +4191,14 @@ class CodexRuntime:
                         (
                             snapshot is None
                             and not active.terminal_observed
+                            and not active.goal_cleared
                         )
                         or (
                             snapshot is not None
-                            and not _same_goal_generation(active, snapshot)
+                            and (
+                                active.goal_cleared
+                                or not _same_goal_generation(active, snapshot)
+                            )
                         )
                     )
                 ):
@@ -4201,7 +4207,7 @@ class CodexRuntime:
                         "当前原生 Goal 已变化，本次观察无法继续；"
                         "稍后发送消息或查看 /goal 时会重新检查该会话是否空闲。"
                     )
-                if active.terminal_observed and snapshot is None:
+                if active.terminal_observed and snapshot is None and not active.goal_cleared:
                     return active.persisted
                 active.persisted = snapshot
             if snapshot is not None and snapshot.status is GoalStatus.ACTIVE:
@@ -4353,7 +4359,52 @@ class CodexRuntime:
                 )
             existing = self._goals.get(binding.id)
             if existing is not None:
-                raise self._goal_slot_error(existing)
+                if (
+                    existing.state is not GoalOperationState.RUNNING
+                    or existing.terminal_observed
+                    or existing.goal_cleared
+                    or existing.handle is None
+                    or existing.handle.is_finished()
+                    or existing.handle.current_physical_turn_id() is None
+                ):
+                    raise self._goal_slot_error(existing)
+                persisted = await control.get(existing.thread_id)
+                if persisted is None or not _same_goal_generation(existing, persisted):
+                    raise GoalNotFound("Goal 已变化，本次恢复未执行；请重新发送 /goal。")
+                if expected_created_at is not None and persisted.created_at != expected_created_at:
+                    raise GoalNotFound("Goal 已变化，本次恢复未执行；请重新发送 /goal。")
+                if persisted.status is not GoalStatus.PAUSED:
+                    raise ThreadGoalActive("只有 paused Goal 可恢复。")
+                try:
+                    resumed = await control.activate(existing.thread_id)
+                    if (
+                        resumed.status is not GoalStatus.ACTIVE
+                        or not _same_goal_generation(existing, resumed)
+                    ):
+                        raise RuntimeError("Goal generation changed while resuming")
+                    if existing.handle.is_finished():
+                        raise RuntimeError("Goal observer ended while resuming")
+                except GoalMutationRejected as error:
+                    raise GoalNotFound(str(error)) from error
+                except BaseException as error:
+                    existing.state = GoalOperationState.UNKNOWN
+                    existing.observation_unavailable = False
+                    self.close_admission()
+                    if isinstance(error, asyncio.CancelledError):
+                        raise
+                    raise GoalStateUnknown("Goal 恢复结果或观察归属未确认；不能自动重试。") from error
+                existing.persisted = resumed
+                self._advance_admission_revision(binding.id)
+                assert existing.handle.id is not None
+                return GoalSubmission(
+                    binding_id=binding.id,
+                    thread_id=existing.thread_id,
+                    logical_turn_id=existing.handle.id,
+                    release_receipt_attempt=existing.receipt_attempted.set,
+                    task_feedback=existing.task_feedback,
+                    feedback_revision=existing.feedback_revision,
+                    continued=True,
+                )
             binding = self._bindings.get(binding.id)
             if binding.native_thread_id is None:
                 raise GoalNotMaterialized("当前会话还没有原生 Codex Thread。")
@@ -4462,6 +4513,60 @@ class CodexRuntime:
             feedback_revision=active.feedback_revision,
         )
 
+    async def pause_goal(
+        self,
+        binding: ThreadBinding,
+        *,
+        expected_created_at: int | None = None,
+    ) -> GoalSnapshot:
+        """Pause continuation while the current Turn and its observer continue."""
+        control = self._require_goal_control()
+        async with self._lock(binding.id):
+            self._guard_no_lifecycle_locked(binding.id)
+            binding = self._bindings.get(binding.id)
+            if binding.native_thread_id is None:
+                raise GoalNotFound("当前会话没有 Codex Goal。")
+            active = self._goals.get(binding.id)
+            if active is not None and (
+                active.state is not GoalOperationState.RUNNING
+                or active.terminal_observed or active.goal_cleared
+            ):
+                raise self._goal_slot_error(active)
+            persisted = await control.get(binding.native_thread_id)
+            if persisted is None or (
+                expected_created_at is not None
+                and persisted.created_at != expected_created_at
+            ):
+                raise GoalNotFound("Goal 已变化，本次暂停未执行；请重新发送 /goal。")
+            if active is not None and not _same_goal_generation(active, persisted):
+                raise GoalNotFound("Goal 已变化，本次暂停未执行；请重新发送 /goal。")
+            if persisted.status is GoalStatus.PAUSED:
+                return persisted
+            if active is None:
+                if persisted.status is GoalStatus.ACTIVE:
+                    self._track_external_goal(binding, persisted)
+                    raise self._goal_slot_error(self._goals[binding.id])
+                raise ThreadGoalActive("当前 Goal 未在执行，无需暂停。")
+            try:
+                paused = await control.pause(active.thread_id)
+                if (
+                    paused.status is not GoalStatus.PAUSED
+                    or not _same_goal_generation(active, paused)
+                ):
+                    raise RuntimeError("Goal generation changed while pausing")
+            except GoalMutationRejected as error:
+                raise GoalNotFound(str(error)) from error
+            except BaseException as error:
+                active.state = GoalOperationState.UNKNOWN
+                active.observation_unavailable = False
+                self.close_admission()
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+                raise GoalStateUnknown("Goal 暂停结果未确认；不能自动重试。") from error
+            active.persisted = paused
+            self._advance_admission_revision(binding.id)
+            return paused
+
     async def clear_goal(
         self,
         binding: ThreadBinding,
@@ -4471,7 +4576,7 @@ class CodexRuntime:
         control = self._require_goal_control()
         async with self._lock(binding.id):
             self._guard_no_lifecycle_locked(binding.id)
-            if binding.id in self._compacting or self._active.get(binding.id) is not None:
+            if binding.id in self._compacting:
                 raise ThreadRunningConfiguration(
                     "当前会话有其他原生操作，不能清除 Goal。"
                 )
@@ -4481,7 +4586,12 @@ class CodexRuntime:
             active = self._goals.get(binding.id)
             if (
                 active is not None
-                and active.state is not GoalOperationState.EXTERNAL_ACTIVE
+                and (
+                    active.state not in {
+                        GoalOperationState.RUNNING, GoalOperationState.EXTERNAL_ACTIVE,
+                    }
+                    or active.terminal_observed
+                )
             ):
                 raise self._goal_slot_error(active)
             persisted = await control.get(binding.native_thread_id)
@@ -4502,30 +4612,39 @@ class CodexRuntime:
                 raise GoalNotFound(
                     "Goal 已变化，本次结束未执行；请重新发送 /goal。"
                 )
-            if persisted.status is GoalStatus.ACTIVE:
+            if active is not None and active.handle is not None:
+                if not _same_goal_generation(active, persisted):
+                    raise GoalNotFound("Goal 已变化，本次结束未执行；请重新发送 /goal。")
+            elif persisted.status is GoalStatus.ACTIVE:
                 if binding.id not in self._goals:
                     self._track_external_goal(binding, persisted)
-                raise ThreadGoalActive("Goal 仍在 active；请先使用 /goal pause 或 /stop。")
-            active = self._goals.get(binding.id)
-            if active is not None and active.state is not GoalOperationState.EXTERNAL_ACTIVE:
-                raise self._goal_slot_error(active)
-            thread = await self._open_goal_thread(binding=binding, cwd=None)
-            await self._validate_goal_thread_ready(thread)
-            sentinel = _ActiveGoal(
-                binding_id=binding.id,
-                thread_id=thread.id,
-                thread=thread,
-                handle=None,
-                owner_id="",
-                origin=object(),
-                objective=persisted.objective,
-                receipt_attempted=asyncio.Event(),
-                state=GoalOperationState.STARTING,
-                persisted=persisted,
-                generation_created_at=persisted.created_at,
-                generation_token_budget=persisted.token_budget,
-            )
-            self._goals[binding.id] = sentinel
+                raise self._goal_slot_error(self._goals[binding.id])
+            if active is not None and active.handle is not None:
+                sentinel = active
+                thread = active.thread
+                assert thread is not None
+            else:
+                ordinary = self._active.get(binding.id)
+                if ordinary is not None:
+                    thread = ordinary.thread
+                else:
+                    thread = await self._open_goal_thread(binding=binding, cwd=None)
+                    await self._validate_goal_thread_ready(thread)
+                sentinel = _ActiveGoal(
+                    binding_id=binding.id,
+                    thread_id=thread.id,
+                    thread=thread,
+                    handle=None,
+                    owner_id="",
+                    origin=object(),
+                    objective=persisted.objective,
+                    receipt_attempted=asyncio.Event(),
+                    state=GoalOperationState.STARTING,
+                    persisted=persisted,
+                    generation_created_at=persisted.created_at,
+                    generation_token_budget=persisted.token_budget,
+                )
+                self._goals[binding.id] = sentinel
             self._advance_admission_revision(binding.id)
             try:
                 cleared = await control.clear(thread.id)
@@ -4544,7 +4663,13 @@ class CodexRuntime:
                 sentinel.state = GoalOperationState.UNKNOWN
                 self.close_admission()
                 raise GoalStateUnknown("Codex Goal 清除后状态无法确认。")
-            self._goals.pop(binding.id, None)
+            if sentinel.handle is not None:
+                # Keep the same observer until the running physical Turn ends.
+                # Only this acknowledged mutation permits absent persisted Goal.
+                sentinel.goal_cleared = True
+                sentinel.persisted = None
+            else:
+                self._goals.pop(binding.id, None)
             self._advance_admission_revision(binding.id)
             self._schedule_known_subscription_locked(binding.id, thread.id)
             return True
@@ -4963,6 +5088,8 @@ class CodexRuntime:
 
         goal = self._goals.pop(binding_id, None)
         if goal is not None:
+            if goal.handle is not None:
+                turn_id = goal.handle.id
             goal.activity_observation_enabled = False
             goal.receipt_attempted.set()
             goal.cleanup_ready.set()
@@ -5492,11 +5619,17 @@ class CodexRuntime:
         active.cleanup_required = True
         active.cleanup_ready.clear()
         try:
-            ack = await handle.pause()
-            active.persisted = ack.goal
-            active.interrupt_acknowledged = (
-                ack.interrupt_acknowledged or ack.physical_turn_id is None
-            )
+            if active.goal_cleared:
+                # Clearing the Goal does not stop its still-running physical Turn.
+                # /stop must not attempt to pause a Goal that no longer exists.
+                await handle.interrupt()
+                active.interrupt_acknowledged = True
+            else:
+                ack = await handle.pause()
+                active.persisted = ack.goal
+                active.interrupt_acknowledged = (
+                    ack.interrupt_acknowledged or ack.physical_turn_id is None
+                )
         except asyncio.CancelledError:
             active.state = GoalOperationState.UNKNOWN
             active.cleanup_ready.set()
@@ -6985,9 +7118,12 @@ class CodexRuntime:
                 raise RuntimeError("Goal stream terminal identity mismatch")
             async with asyncio.timeout(_COMPACTION_TERMINAL_TIMEOUT_SECONDS):
                 persisted = await self._read_goal_terminal(active)
-            active.persisted = persisted
-            active.terminal_observed = True
             async with self._lock(active.binding_id):
+                if active.goal_cleared:
+                    persisted = None
+                    finalization = GoalFinalizationStatus.CLEARED
+                active.persisted = persisted
+                active.terminal_observed = True
                 # The stream can finish before an in-flight steer RPC returns.
                 # Wait for its receipt before deciding whether this slot may
                 # be cleared/released; native terminal does not prove delivery.
@@ -7006,6 +7142,7 @@ class CodexRuntime:
                     active.cleanup_ready.clear()
             if (
                 not retain_active
+                and persisted is not None
                 and persisted.status is GoalStatus.COMPLETE
                 and active.final_turn_status == "completed"
             ):
@@ -7179,7 +7316,7 @@ class CodexRuntime:
         if not cleared or confirmed is not None:
             raise RuntimeError("completed Goal clear could not be confirmed")
 
-    async def _read_goal_terminal(self, active: _ActiveGoal) -> GoalSnapshot:
+    async def _read_goal_terminal(self, active: _ActiveGoal) -> GoalSnapshot | None:
         control = self._require_goal_control()
         thread = active.thread
         terminal = active.stream_terminal
@@ -7189,13 +7326,22 @@ class CodexRuntime:
         if thread is None or terminal is None:
             raise RuntimeError("Goal terminal cross-check is missing native handles")
         while True:
-            persisted = await control.get(active.thread_id)
-            if persisted is None:
-                raise RuntimeError("persisted Goal disappeared before terminal check")
-            if persisted.thread_id != active.thread_id:
-                raise RuntimeError("persisted Goal identity mismatch")
-            if not _same_goal_generation(active, persisted):
-                raise RuntimeError("persisted Goal generation mismatch")
+            # A clear acknowledgement and its absence proof are committed under
+            # the same lock. Do not mistake an in-flight requested clear for an
+            # external disappearance; uncertain clear still fails closed.
+            async with self._lock(active.binding_id):
+                if self._goals.get(active.binding_id) is not active:
+                    raise RuntimeError("Goal observer no longer owns this operation")
+                persisted = await control.get(active.thread_id)
+                if persisted is None:
+                    if not active.goal_cleared:
+                        raise RuntimeError("persisted Goal disappeared before terminal check")
+                elif active.goal_cleared:
+                    raise RuntimeError("a cleared Goal was replaced before terminal check")
+                elif persisted.thread_id != active.thread_id:
+                    raise RuntimeError("persisted Goal identity mismatch")
+                elif not _same_goal_generation(active, persisted):
+                    raise RuntimeError("persisted Goal generation mismatch")
             response = await thread.read(include_turns=False)
             native = getattr(response, "thread", None)
             if getattr(native, "id", None) != active.thread_id:
@@ -7230,7 +7376,7 @@ class CodexRuntime:
             if exact is not None and exact is not turns[-1]:
                 raise RuntimeError("Goal stream final Turn is not the latest history Turn")
             if (
-                persisted.status is GoalStatus.ACTIVE
+                (persisted is not None and persisted.status is GoalStatus.ACTIVE)
                 or status != "idle"
                 or history_status != "idle"
                 or any(_enum_value(getattr(turn, "status", None)) == "inProgress" for turn in turns)

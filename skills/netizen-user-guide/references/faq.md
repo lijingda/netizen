@@ -46,8 +46,8 @@
 可在 `/new` 卡片中选择，或等当前会话空闲后通过 `/config` 修改；两项互不依赖。
 即使 Reaction Pulse 关闭，任务
 accepted、成功 steer 和终态仍会尽力显示生命周期表情。Progress Card 关闭并不影响普通 Turn 的
-最终回复：没有文件时仍回复富文本/静态文本，有文件时仍使用完成卡。Goal 始终有一张状态
-与控制卡，关闭该选项只会隐藏 Activity 过程模块。Side 使用创建瞬间冻结的 Parent 选项；
+最终回复：没有文件时仍回复富文本/静态文本，有文件时仍使用完成卡。Goal 的任务回复
+也遵循这一设置；`/goal` 的静态管理卡独立展示。Side 使用创建瞬间冻结的 Parent 选项；
 若想改变既有 Side 的反馈方式，需要回到 Parent 修改后重新创建 Side。
 
 详见[运行反馈](feedback-and-files.md#飞书中的运行反馈)与[Side 设置](fork-side-goal.md#side-临时话题)。

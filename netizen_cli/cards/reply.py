@@ -895,7 +895,7 @@ def _reply_goal_block(
                     name=CardControlName.GOAL_PAUSE,
                     label="暂停 Goal",
                     style="primary",
-                    confirm=("暂停 Goal", "将暂停 Goal 并中断当前物理 Turn。"),
+                    confirm=("暂停 Goal", "暂停后续自动续跑；正在执行的任务会继续。"),
                 )
             )
         if (
@@ -913,8 +913,8 @@ def _reply_goal_block(
                 )
             )
         if (
-            goal.status != GoalStatus.ACTIVE.value
-            and not controls_unknown
+            not controls_unknown
+            and not external
             and goal.runtime_state != "goal-cleared"
         ):
             buttons.append(
@@ -923,7 +923,7 @@ def _reply_goal_block(
                     goal=goal,
                     name=CardControlName.GOAL_CLEAR,
                     label="结束 Goal",
-                    confirm=("结束 Goal", "结束后将无法从此 Goal 状态恢复。"),
+                    confirm=("结束 Goal", "移除目标并停止后续自动续跑；正在执行的任务会继续。"),
                 )
             )
         if buttons:
@@ -935,6 +935,12 @@ def _reply_goal_block(
                     "当前 SDK 无法安全补收通知并重挂。请先在原生 Codex 中暂停。"
                 )
             )
+    if scope is not None:
+        elements.append(_button_row(_repeatable_callback_button(
+            label="刷新 Goal 状态",
+            value=_envelope(scope, CardControlName.GOAL_REFRESH,
+                binding_id=_binding_reference(goal.binding_id)),
+        )))
     return {
         "tag": "column_set",
         "element_id": _GOAL_ELEMENT_ID,

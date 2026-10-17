@@ -1537,16 +1537,55 @@ class BindingStore:
         return [_binding(row) for row in rows]
 
     def resolve_reference(self, *, scope_key: str, reference: str) -> ThreadBinding:
-        candidates = [
-            binding
-            for binding in self.list_bindings(scope_key)
-            if binding.id == reference or binding.id.startswith(reference)
-        ]
-        if not candidates:
+        try:
+            exact = self.get(reference)
+        except BindingNotFound:
+            exact = None
+        if exact is not None:
+            if exact.scope_key != scope_key:
+                raise BindingNotFound(reference)
+            return exact
+        # GLOB keeps case-sensitive prefix matching and permits an indexed
+        # prefix range. Escape its metacharacters; a reference is never a glob.
+        prefix = reference.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
+        with self._lock:
+            rows = self._connection.execute(
+                _BINDING_SELECT + " WHERE b.scope_key = ? AND b.binding_id GLOB ? LIMIT 2",
+                (scope_key, prefix + "*"),
+            ).fetchall()
+        if not rows:
             raise BindingNotFound(reference)
-        if len(candidates) != 1:
+        if len(rows) != 1:
             raise AmbiguousBinding(reference)
-        return candidates[0]
+        return _binding(rows[0])
+
+    def has_bindings(self, scope_key: str, *, materialized: bool | None = None) -> bool:
+        """Check local membership without decoding an entire Scope inventory."""
+        clause = ""
+        if materialized is not None:
+            clause = " AND native_thread_id IS NOT NULL" if materialized else " AND native_thread_id IS NULL"
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM bindings WHERE scope_key = ?" + clause + " LIMIT 1",
+                (scope_key,),
+            ).fetchone()
+        return row is not None
+
+    def get_latest_activated_binding(
+        self, scope_key: str, *, project_aliases: tuple[str, ...],
+    ) -> ThreadBinding | None:
+        """Find the latest usable Project hint without decoding older sessions."""
+        if not project_aliases:
+            return None
+        with self._lock:
+            row = self._connection.execute(
+                _BINDING_SELECT + " WHERE b.scope_key = ? AND b.ever_activated = 1 "
+                "AND b.activated_at IS NOT NULL "
+                "AND b.project_alias IN (" + ",".join("?" for _ in project_aliases) + ") "
+                "ORDER BY b.ever_activated DESC, b.activated_at DESC, b.created_at DESC LIMIT 1",
+                (scope_key, *project_aliases),
+            ).fetchone()
+        return _binding(row) if row is not None else None
 
     def bootstrap_project(self, *, alias: str, cwd: str) -> ProjectRecord:
         now = _now()
@@ -2976,9 +3015,19 @@ def _binding_inventory_statement(
     comparison = ">" if query.sort_direction == "asc" else "<"
     clauses: list[str] = []
     parameters: list[object] = []
+    source = ""
     if thread_ids is not None:
-        clauses.append("b.native_thread_id IN (" + ",".join("?" for _ in thread_ids) + ")")
+        # Resolve the bounded native batch before applying local filters. A
+        # flat WHERE lets SQLite prefer a Scope/Project index and scan its
+        # entire inventory for every native page. The inner LIMIT prevents
+        # flattening; native_thread_id is unique, so no requested row is lost.
+        source = (
+            "WITH bindings AS (SELECT * FROM main.bindings b "
+            "WHERE b.native_thread_id IN (" + ",".join("?" for _ in thread_ids)
+            + ") LIMIT ?) "
+        )
         parameters.extend(thread_ids)
+        parameters.append(len(thread_ids))
     if query.app_id is not None:
         _require_query_value("App ID", query.app_id)
         clauses.append("s.app_id = ?")
@@ -3059,7 +3108,7 @@ def _binding_inventory_statement(
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     parameters.append(limit)
     return (
-        _BINDING_INVENTORY_SELECT
+        source + _BINDING_INVENTORY_SELECT
         + where
         + f" ORDER BY b.created_at {direction}, b.binding_id {direction} LIMIT ?",
         parameters,

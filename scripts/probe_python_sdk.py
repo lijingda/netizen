@@ -1861,6 +1861,9 @@ async def _goal_live(cwd: Path) -> dict[str, Any]:
                     raise AssertionError(
                         "a second SDK client could not reconcile the active Goal"
                     )
+            # Exercise Netizen /stop's compound pause + exact interruption.
+            # Plain /goal pause is independently covered by the isolated native
+            # goal_controls case and must leave this physical Turn running.
             pause = await handle.pause()
             await terminal_cleanup.clean_thread(thread.id)
             first_terminal = await asyncio.wait_for(

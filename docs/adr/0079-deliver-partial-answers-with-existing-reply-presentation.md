@@ -4,9 +4,12 @@ date: 2026-10-10
 updated: 2026-10-17
 amends: 0047, 0048, 0052
 related: 0056, 0058, 0069, 0071, 0072, 0078
+amended_by: 0084
 ---
 
 # 在现有回复形态中交付阶段性答案
+
+> [ADR 0084](0084-separate-goal-controls-from-logical-turn-replies.md) 将 Goal 管理改为独立静态卡，任务回复复用普通逻辑流；pause/clear 不中断当前 Turn，`/stop` 仍暂停并中断。下文保留原决定的历史背景。
 
 Codex SDK/App Server `0.162.1` 的 `partial_answer` 是稳定答案正文，之后仍可能继续执行；
 现有最终正文提取和 Activity 都不会交付它。将全部片段塞入最终 Result 会延迟答案、重复

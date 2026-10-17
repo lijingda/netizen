@@ -64,6 +64,10 @@ class GoalControlError(RuntimeError):
     """A Goal operation failed before a successful semantic result."""
 
 
+class GoalMutationRejected(GoalControlError):
+    """A verified native preflight rejection proves no Goal mutation occurred."""
+
+
 class GoalMutationStateUnknown(GoalControlError):
     """A Goal mutation may have taken effect and must not be retried implicitly."""
 
@@ -154,6 +158,8 @@ class GoalHandle(Protocol):
 
     def current_physical_turn_id(self) -> str | None: ...
 
+    def is_finished(self) -> bool: ...
+
     async def steer(self, input: Any, *, expected_turn_id: str) -> object: ...
 
     async def wait_terminal(
@@ -166,6 +172,8 @@ class GoalHandle(Protocol):
 
     async def pause(self) -> GoalPauseAck: ...
 
+    async def interrupt(self) -> str | None: ...
+
     async def aclose(self) -> None: ...
 
 
@@ -175,6 +183,10 @@ class GoalControl(Protocol):
     async def start(self, thread_id: str, objective: str) -> GoalHandle: ...
 
     async def resume(self, thread_id: str) -> GoalHandle: ...
+
+    async def pause(self, thread_id: str) -> GoalSnapshot: ...
+
+    async def activate(self, thread_id: str) -> GoalSnapshot: ...
 
     async def clear(self, thread_id: str) -> bool: ...
 
@@ -600,7 +612,7 @@ class AppServerGoalControl:
         }
         if set(inspect.signature(stream_type).parameters) != expected_stream_parameters:
             raise SdkGapCapabilityUnavailable("goal stream constructor shape changed")
-        for state_method in ("current_turn", "wait_for_start"):
+        for state_method in ("current_turn", "wait_for_start", "is_finished"):
             if not callable(getattr(state_type, state_method, None)):
                 raise SdkGapCapabilityUnavailable(
                     f"goal state shape missing {state_method}"
@@ -679,6 +691,37 @@ class AppServerGoalControl:
                 "Codex Goal 恢复结果未确认；不能自动重试。",
                 handle=handle,
             ) from error
+
+    async def pause(self, thread_id: str) -> GoalSnapshot:
+        """Pause continuation without interrupting the current physical Turn."""
+        return await self._set_status(thread_id, GoalStatus.PAUSED)
+
+    async def activate(self, thread_id: str) -> GoalSnapshot:
+        """Reactivate an observed operation without registering another stream."""
+        return await self._set_status(thread_id, GoalStatus.ACTIVE)
+
+    async def _set_status(self, thread_id: str, status: GoalStatus) -> GoalSnapshot:
+        _validate_thread_id(thread_id)
+        try:
+            response = await self._client.thread_goal_set(
+                thread_id, status=self._status_model(status.value),
+            )
+            snapshot = _goal_snapshot(getattr(response, "goal", None))
+            if snapshot.thread_id != thread_id or snapshot.status is not status:
+                raise RuntimeError("Goal status acknowledgement did not match request")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if (
+                isinstance(error, InvalidRequestError)
+                and error.code == -32600
+                and error.message == f"cannot update goal for thread {thread_id}: no goal exists"
+            ):
+                raise GoalMutationRejected("原生 Goal 已不存在，本次状态修改未执行。") from error
+            raise GoalMutationStateUnknown(
+                "Codex Goal 状态修改结果未确认；不能自动重试。"
+            ) from error
+        return snapshot
 
     async def clear(self, thread_id: str) -> bool:
         _validate_thread_id(thread_id)
@@ -906,6 +949,9 @@ class _AppServerGoalHandle:
         value = self._state.current_turn()
         return value if isinstance(value, str) and value else None
 
+    def is_finished(self) -> bool:
+        return self._state.is_finished()
+
     async def steer(self, input: Any, *, expected_turn_id: str) -> object:
         """Steer only the captured physical Turn, without acquiring a stream."""
 
@@ -964,6 +1010,7 @@ class _AppServerGoalHandle:
         )
 
     async def pause(self) -> GoalPauseAck:
+        """Stop the logical operation: pause continuation, then interrupt its Turn."""
         try:
             response = await self._client.pause_goal(self.thread_id)
         except asyncio.CancelledError:
@@ -979,20 +1026,25 @@ class _AppServerGoalHandle:
                 "Codex Goal 暂停响应无法确认。",
                 handle=self,
             )
+        physical_turn_id = await self.interrupt()
+        return GoalPauseAck(snapshot, physical_turn_id, physical_turn_id is not None)
+
+    async def interrupt(self) -> str | None:
+        """Interrupt only the exact currently observed physical Turn."""
         physical_turn_id = self.current_physical_turn_id()
         if physical_turn_id is None:
-            return GoalPauseAck(snapshot, None, False)
+            return None
         try:
             await self._client.turn_interrupt(self.thread_id, physical_turn_id)
         except asyncio.CancelledError:
             raise
         except Exception as error:
             raise GoalMutationStateUnknown(
-                "Goal 已暂停，但当前物理 Turn 的中断结果未确认。",
+                "当前物理 Turn 的中断结果未确认。",
                 handle=self,
                 physical_turn_id=physical_turn_id,
             ) from error
-        return GoalPauseAck(snapshot, physical_turn_id, True)
+        return physical_turn_id
 
     async def aclose(self) -> None:
         await self._stream.aclose()
@@ -1003,6 +1055,7 @@ def facade_migration_requirements() -> tuple[str, ...]:
 
     from openai_codex import AsyncThread
     from .account_rate_limits import facade_migration_requirements as account_migrations
+    from .thread_history import facade_migration_requirements as history_migrations
 
     requirements: list[str] = []
     candidates = {
@@ -1043,7 +1096,7 @@ def facade_migration_requirements() -> tuple[str, ...]:
         names = tuple(f"{owner.__name__}.{name}" for owner, name in entries if hasattr(owner, name))
         if names:
             requirements.append(f"migration-required:{capability}:{','.join(names)}")
-    return tuple(requirements) + account_migrations()
+    return tuple(requirements) + account_migrations() + history_migrations()
 
 
 def require_no_facade_migration() -> None:

@@ -2,10 +2,12 @@
 status: accepted
 date: 2026-08-28
 amends: 0014, 0024, 0027, 0046
-amended_by: 0048, 0052, 0053, 0079
+amended_by: 0048, 0052, 0053, 0079, 0084
 ---
 
 # 组合类型化回复卡并只自动收尾完成的 Goal
+
+> [ADR 0084](0084-separate-goal-controls-from-logical-turn-replies.md) 将 Goal 管理改为独立静态卡，任务回复复用普通逻辑流；pause/clear 不中断当前 Turn，`/stop` 仍暂停并中断。下文保留原决定的历史背景。
 
 > [ADR 0079](0079-deliver-partial-answers-with-existing-reply-presentation.md) 将封闭集合扩展为
 > Goal/Activity/Partial Answer/Result/Files，运行中交付阶段性答案；Goal 连续自动换轮保留

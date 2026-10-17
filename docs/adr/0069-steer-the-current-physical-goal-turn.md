@@ -3,9 +3,12 @@ status: accepted
 date: 2026-09-22
 amends: 0014
 related: 0039, 0047, 0052
+amended_by: 0084
 ---
 
 # 将 Goal 中的普通消息 steer 到捕获的当前物理 Turn
+
+> [ADR 0084](0084-separate-goal-controls-from-logical-turn-replies.md) 将 Goal 管理改为独立静态卡，任务回复复用普通逻辑流；pause/clear 不中断当前 Turn，`/stop` 仍暂停并中断。下文保留原决定的历史背景。
 
 Goal 的续跑和物理 Turn 切换已经由 SDK 管理；原生 `turn/steer` 接受 exact
 `expectedTurnId`，不禁止正在执行 Goal 的普通物理 Turn。原先一律拒绝 Goal 期间

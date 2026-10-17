@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -92,12 +91,11 @@ from ..sdk_gap_adapter import GoalControlError, GoalSnapshot
 from ..schedules.service import ScheduleService
 from ..defaults.service import SessionDefaultsService
 from ..model_settings import ModelCatalog
+from ..session_inventory import NativeSessionCursor as SessionNativeCursor, query_native_sessions
 
 
 _BINDING_STATUS_RESOLUTION_CONCURRENCY = 8
-_NATIVE_INDEX_READ_SECONDS = 3.0
 _SESSION_SUMMARY_READ_CONCURRENCY = 4
-_SESSION_NATIVE_PAGE_SIZE = 100
 _PROJECT_DELETE_SECONDS = 120.0
 _PROJECT_DELETE_STEP_SECONDS = 30.0
 logger = logging.getLogger(__name__)
@@ -303,19 +301,6 @@ class SessionQuery:
     updated_before: float | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class SessionNativeCursor:
-    cursor: str | None
-    offset: int = 0
-
-    def __post_init__(self) -> None:
-        if (
-            self.cursor is not None and (not isinstance(self.cursor, str) or not self.cursor)
-            or type(self.offset) is not int or not 0 <= self.offset < _SESSION_NATIVE_PAGE_SIZE
-        ):
-            raise ValueError("Session native cursor is invalid")
-
-
 def _session_inventory_state(
     binding: ThreadBinding, native: NativeThreadView | None,
 ) -> SessionInventoryState:
@@ -324,12 +309,6 @@ def _session_inventory_state(
     if native is None or native.state is None:
         return SessionInventoryState.UNKNOWN
     return SessionInventoryState(native.state.value)
-
-
-def _native_time_matches(value: int | None, lower: float | None, upper: float | None) -> bool:
-    if lower is None and upper is None:
-        return True
-    return value is not None and (lower is None or value >= lower) and (upper is None or value < upper)
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,11 +331,10 @@ class SessionInventoryPage:
 @dataclass(frozen=True, slots=True)
 class ScopeSessionPage:
     items: tuple[SessionInventoryItem, ...]
-    total_count: int
-    page: int
+    next_cursor: BindingCursor | SessionNativeCursor | None
+    current: SessionInventoryItem | None
     active_binding_id: str | None
-    catalog_available: bool
-    unconfirmed_count: int
+    has_lazy: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,9 +380,7 @@ class SideTopicInventoryPage:
 @dataclass(frozen=True, slots=True)
 class ProjectInventoryItem:
     aggregate: ProjectAggregate
-    archived_binding_count: int | None
     deleting: bool = False
-    unconfirmed_binding_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -968,42 +944,11 @@ class InstanceManagementService:
             limit=limit,
             deadline_seconds=self._query_seconds(deadline),
         )
-        native = (
-            await self._indexed_native_views(deadline=deadline)
-            if any(item.materialized_binding_count for item in page.items)
-            else {}
-        )
-        confirmed = {
-            thread_id: view for thread_id, view in (native or {}).items()
-            if view.state is not None
-        }
-        try:
-            project_by_thread = await self._bindings.project_aliases_for_native_threads(
-                tuple(confirmed), expected_projects=page.items,
-                deadline_seconds=self._query_seconds(deadline),
-            )
-        except Exception as error:
-            logger.warning("project catalog counts unavailable error_type=%s", type(error).__name__)
-            native = None
-            project_by_thread = {}
-        known_counts = Counter(project_by_thread.values())
-        archived_counts = Counter(
-            alias for thread_id, alias in project_by_thread.items()
-            if confirmed[thread_id].state is NativeThreadCatalogState.ARCHIVED
-        )
         return ProjectInventoryPage(
             items=tuple(
                 ProjectInventoryItem(
                     aggregate=item,
-                    archived_binding_count=(
-                        archived_counts[item.project.alias]
-                        if native is not None or item.materialized_binding_count == 0
-                        else None
-                    ),
                     deleting=self._bindings.project_delete_in_progress(item.project.alias),
-                    unconfirmed_binding_count=max(
-                        0, item.materialized_binding_count - known_counts[item.project.alias],
-                    ),
                 )
                 for item in page.items
             ),
@@ -1256,70 +1201,19 @@ class InstanceManagementService:
 
         if cursor is not None and not isinstance(cursor, SessionNativeCursor):
             raise ValueError("Session cursor does not match its inventory state")
-        scan_cursor = cursor.cursor if cursor is not None else None
-        offset = cursor.offset if cursor is not None else 0
-        seen_cursors = {scan_cursor} if scan_cursor is not None else set()
-        selected: list[BindingInventoryRecord] = []
-        views: dict[str, NativeThreadView] = {}
-        next_cursor: SessionNativeCursor | None = None
-        native_state = NativeThreadCatalogState(query.inventory_state.value)
-        lower, upper = (
-            (query.created_from, query.created_before) if query.sort_by == "created_at"
-            else (query.updated_from, query.updated_before)
+        page = await query_native_sessions(
+            bindings=self._bindings, read_page=self._runtime.thread_catalog_page_exact, query=local,
+            archived=query.inventory_state is SessionInventoryState.ARCHIVED,
+            cursor=cursor, limit=limit, deadline=deadline,
+            sort_key=query.sort_by, sort_direction=query.sort_direction,
+            created_from=query.created_from, created_before=query.created_before,
+            updated_from=query.updated_from, updated_before=query.updated_before,
         )
-        while len(selected) < limit:
-            self._query_seconds(deadline)
-            page = await self._runtime.thread_catalog_page_exact(
-                archived=query.inventory_state is SessionInventoryState.ARCHIVED,
-                cursor=scan_cursor, limit=_SESSION_NATIVE_PAGE_SIZE, sort_key=query.sort_by,
-                sort_direction=query.sort_direction, deadline=deadline,
-            )
-            if len(page.threads) > _SESSION_NATIVE_PAGE_SIZE or (page.next_cursor is not None and page.next_cursor in seen_cursors):
-                raise ThreadCatalogError("native Thread catalog returned an invalid page")
-            eligible: list[tuple[int, NativeThreadMetadata]] = []
-            range_exhausted = False
-            for index, metadata in enumerate(page.threads[offset:], start=offset):
-                # Only the range on the native sort axis can prove exhaustion.
-                # Creation order plus a recent-update filter may scan to EOF.
-                ordered_time = getattr(metadata, query.sort_by)
-                if ordered_time is not None and (
-                    query.sort_direction == "desc" and lower is not None and ordered_time < lower
-                    or query.sort_direction == "asc" and upper is not None and ordered_time >= upper
-                ):
-                    range_exhausted = True
-                    break
-                if (
-                    _native_time_matches(metadata.created_at, query.created_from, query.created_before)
-                    and _native_time_matches(metadata.updated_at, query.updated_from, query.updated_before)
-                    and metadata.thread_id not in views
-                ):
-                    eligible.append((index, metadata))
-            records = await self._bindings.query_bindings_by_native_thread_ids(
-                thread_ids=tuple(metadata.thread_id for _, metadata in eligible),
-                query=local, deadline_seconds=self._query_seconds(deadline),
-            ) if eligible else ()
-            by_id = {record.binding.native_thread_id: record for record in records}
-            for index, metadata in eligible:
-                record = by_id.get(metadata.thread_id)
-                if record is not None and metadata.thread_id not in views:
-                    selected.append(record)
-                    views[metadata.thread_id] = NativeThreadView(native_state, metadata)
-                    if len(selected) == limit:
-                        # Carry a position in this source page, not its end
-                        # cursor: the tail has not yet been displayed. Re-reading
-                        # at most one bounded page avoids a persistent buffer.
-                        if index + 1 < len(page.threads):
-                            next_cursor = SessionNativeCursor(scan_cursor, index + 1)
-                        elif page.next_cursor is not None:
-                            next_cursor = SessionNativeCursor(page.next_cursor)
-                        break
-            if len(selected) == limit or range_exhausted or page.next_cursor is None:
-                break
-            scan_cursor = page.next_cursor
-            seen_cursors.add(scan_cursor)
-            offset = 0
+        native_state = NativeThreadCatalogState(query.inventory_state.value)
         return await self._session_page(
-            selected, native=views, next_cursor=next_cursor, deadline=deadline,
+            tuple(item.record for item in page.items),
+            native={item.metadata.thread_id: NativeThreadView(native_state, item.metadata) for item in page.items},
+            next_cursor=page.next_cursor, deadline=deadline,
         )
 
     async def query_scope_sessions(
@@ -1327,60 +1221,62 @@ class InstanceManagementService:
         *,
         scope: FeishuScope,
         archived: bool = False,
-        page: int = 0,
-        limit: int | None = 10,
+        lazy: bool = False,
+        cursor: BindingCursor | SessionNativeCursor | None = None,
+        limit: int = 10,
         deadline: float,
     ) -> ScopeSessionPage:
-        """Use the shared inventory for a Scope's stateless numbered cards.
-
-        Preserve activation order, current-first ordering and page clamping.
-        The existing archived card is unpaged (limit=None); confirmed archived
-        rows already have metadata and never need Goal or summary enrichment.
-        """
-        if limit is None:
-            if not archived or page != 0:
-                raise ValueError("only the archived list can be unpaged")
-        elif isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        """Read one Scope page, with an independent exact current-session entry."""
+        if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("page size must be between 1 and 100")
+        if archived and lazy:
+            raise ValueError("a Scope session page cannot be both archived and Lazy")
+        if cursor is not None and not isinstance(cursor, BindingCursor if lazy else SessionNativeCursor):
+            raise ValueError("Session cursor does not match its inventory state")
         self._query_seconds(deadline)
-        bindings = self._bindings.list_bindings(scope.key)
-        thread_ids = tuple(dict.fromkeys(
-            binding.native_thread_id for binding in bindings
-            if binding.native_thread_id is not None
-        ))
-        native = await self._indexed_native_views(thread_ids=thread_ids, deadline=deadline)
-        if archived and native is None:
-            raise ThreadLifecycleError("无法读取 Codex 归档会话列表，请稍后重试。")
-        selected = []
-        unconfirmed_count = 0
-        for binding in bindings:
-            state = _session_inventory_state(binding, (native or {}).get(binding.native_thread_id))
-            unconfirmed_count += state is SessionInventoryState.UNKNOWN
-            if (state is SessionInventoryState.ARCHIVED) == archived:
-                selected.append(binding)
-        if not archived:
-            selected.sort(key=lambda binding: not binding.active)
-        total_count = len(selected)
-        active_binding_id = next((binding.id for binding in bindings if binding.active), None)
-        if limit is not None:
-            page = max(0, min(page, max(0, (total_count - 1) // limit)))
-            selected = selected[page * limit:(page + 1) * limit]
-        views = await self._session_native_views(selected, native=native, deadline=deadline)
-        scope_record = self._bindings.get_scope(scope.key) if bindings else None
-        return ScopeSessionPage(
-            items=tuple(
-                SessionInventoryItem(
-                    record=BindingInventoryRecord(binding, scope_record),
-                    native=views.get(binding.native_thread_id),
-                    chat=ChatLabelResolver.fallback(scope.chat_id),
+        current_binding = self._bindings.active_binding(scope.key)
+        local = BindingQuery(
+            app_id=scope.app_id, chat_id=scope.chat_id, scope_kind=scope.kind,
+            topic_id=scope.topic_id, materialized=not lazy,
+        )
+        has_lazy = self._bindings.has_bindings(scope.key, materialized=False)
+        if lazy:
+            page = await self._bindings.query_bindings(
+                query=local, cursor=cursor, limit=limit,
+                deadline_seconds=self._query_seconds(deadline),
+            )
+            items = tuple(SessionInventoryItem(
+                record, None, ChatLabelResolver.fallback(scope.chat_id),
+            ) for record in page.items)
+            next_cursor = page.next_cursor
+        elif self._bindings.has_bindings(scope.key, materialized=True):
+            page = await query_native_sessions(
+                bindings=self._bindings, read_page=self._runtime.thread_catalog_page_exact, query=local,
+                archived=archived, cursor=cursor, limit=limit, deadline=deadline,
+            )
+            native_state = NativeThreadCatalogState.ARCHIVED if archived else NativeThreadCatalogState.ACTIVE
+            items = tuple(SessionInventoryItem(
+                item.record, NativeThreadView(native_state, item.metadata),
+                ChatLabelResolver.fallback(scope.chat_id),
+            ) for item in page.items)
+            next_cursor = page.next_cursor
+        else:
+            items, next_cursor = (), None
+        current = None
+        if current_binding is not None and not archived:
+            current = next((item for item in items if item.record.binding.id == current_binding.id), None)
+            if current is None:
+                # A current session omitted by the native list stays reachable
+                # by its exact local identity, without hydrating all old rows.
+                views = await self._session_native_views((current_binding,), native=None, deadline=deadline)
+                current = SessionInventoryItem(
+                    BindingInventoryRecord(current_binding, self._bindings.get_scope(scope.key)),
+                    views.get(current_binding.native_thread_id), ChatLabelResolver.fallback(scope.chat_id),
                 )
-                for binding in selected
-            ),
-            total_count=total_count,
-            page=page,
-            active_binding_id=active_binding_id,
-            catalog_available=native is not None,
-            unconfirmed_count=unconfirmed_count,
+        return ScopeSessionPage(
+            items=items, next_cursor=next_cursor, current=current,
+            active_binding_id=current_binding.id if current_binding is not None else None,
+            has_lazy=has_lazy,
         )
 
     async def binding_metadata_exact(
@@ -2068,52 +1964,6 @@ class InstanceManagementService:
             record=self._bindings.get_side_topic(record.id),
             outcome=outcome,
         )
-
-    @staticmethod
-    def _enrichment_deadline(deadline: float, seconds: float) -> float:
-        # Keep time for local rows, labels and Runtime projections if native I/O stalls.
-        now = asyncio.get_running_loop().time()
-        return now + min(seconds, max(0.0, (deadline - now) / 2))
-
-    async def _indexed_native_views(
-        self,
-        *,
-        deadline: float,
-        thread_ids: tuple[str, ...] | None = None,
-    ) -> dict[str, NativeThreadView] | None:
-        if thread_ids == ():
-            return {}
-        native_deadline = self._enrichment_deadline(deadline, _NATIVE_INDEX_READ_SECONDS)
-        try:
-            async with asyncio.timeout_at(native_deadline):
-                async def read_catalog(archived: bool):
-                    if thread_ids is None:
-                        catalog = await self._runtime.thread_catalog_exact(
-                            archived=archived, deadline=native_deadline,
-                            use_state_db_only=True,
-                        )
-                        return catalog.by_id()
-                    else:
-                        return await self._runtime.thread_metadata_exact(
-                            thread_ids, archived=archived, deadline=native_deadline,
-                            use_state_db_only=True,
-                        )
-                active, archived = await read_catalog(False), await read_catalog(True)
-            if len(active.keys() | archived.keys()) > 100_000:
-                raise ValueError("management index exceeds the catalog limit")
-        except Exception as error:
-            # Native catalog enrichment cannot hide Channel-owned rows. Never
-            # fall back to rollout scans or infer Missing from an unavailable list.
-            logger.warning("management index unavailable error_type=%s", type(error).__name__)
-            return None
-        return {
-            thread_id: (
-                NativeThreadView(None, None)
-                if thread_id in active and thread_id in archived
-                else classify_native_thread_view(thread_id, active=active, archived=archived)
-            )
-            for thread_id in active.keys() | archived.keys()
-        }
 
     async def _session_page(
         self,
