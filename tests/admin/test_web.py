@@ -2782,6 +2782,9 @@ class AdminStaticAssetsTest(unittest.TestCase):
 const now = new Date("2026-09-02T08:20:30.456Z");
 const today = presetTimeRange("today", now);
 const rolling = presetTimeRange("last-24-hours", now);
+const exactMinute = presetTimeRange("last-24-hours", new Date("2026-09-02T08:20:00Z"));
+const updated = presetTimeRange("last-3-months", now, true);
+const crossYear = presetTimeRange("last-3-months", new Date("2026-01-02T08:20:30Z"));
 const custom = customTimeRange("2026-08-27T00:00", "2026-09-02T23:59");
 const reversed = customTimeRange("2026-09-02T10:00", "2026-09-02T09:59");
 const gap = customTimeRange("2026-03-08T02:30", "2026-03-08T03:30");
@@ -2849,6 +2852,9 @@ const restoredAfterClose = !bodyClasses.has("time-range-modal-open")
 process.stdout.write(JSON.stringify({
   today,
   rolling,
+  exactMinute,
+  updated,
+  crossYear,
   custom,
   reversed,
   gap,
@@ -2873,6 +2879,15 @@ process.stdout.write(JSON.stringify({
             return json.loads(completed.stdout)
 
         shanghai = run("Asia/Shanghai")
+        self.assertEqual(shanghai["today"]["summary"], "今天 · UTC+08:00\n2026-09-02 00:00 ~ 2026-09-02 23:59")
+        self.assertEqual(shanghai["rolling"]["summary"], "最近 24 小时 · UTC+08:00\n2026-09-01 16:20 ~ 2026-09-02 16:20")
+        self.assertEqual(shanghai["updated"]["summary"], "最近 3 个月（至今） · UTC+08:00\n2026-06-02 16:20 ~ 2026-09-02 16:20")
+        self.assertEqual(shanghai["updated"]["before"], "")
+        self.assertEqual(shanghai["rolling"]["endValue"], "2026-09-02T16:20")
+        self.assertEqual(shanghai["exactMinute"]["summary"], "最近 24 小时 · UTC+08:00\n2026-09-01 16:20 ~ 2026-09-02 16:19")
+        self.assertEqual(shanghai["exactMinute"]["endValue"], "2026-09-02T16:19")
+        self.assertEqual(shanghai["crossYear"]["summary"], "最近 3 个月 · UTC+08:00\n2025-10-02 16:20 ~ 2026-01-02 16:20")
+        self.assertEqual(shanghai["custom"]["range"]["summary"], "UTC+08:00\n2026-08-27 00:00 ~ 2026-09-02 23:59")
         self.assertEqual(
             (shanghai["today"]["from"], shanghai["today"]["before"]),
             (
@@ -2905,6 +2920,8 @@ process.stdout.write(JSON.stringify({
             self.assertTrue(shanghai[key], key)
 
         new_york = run("America/New_York")
+        self.assertEqual(new_york["rolling"]["summary"], "最近 24 小时 · UTC-04:00\n2026-09-01 04:20 ~ 2026-09-02 04:20")
+        self.assertEqual(new_york["crossYear"]["summary"], "最近 3 个月 · UTC-04:00 → UTC-05:00\n2025-10-02 03:20 ~ 2026-01-02 03:20")
         self.assertIn("不存在", new_york["gap"]["error"])
         self.assertIn("重复", new_york["fold"]["error"])
 

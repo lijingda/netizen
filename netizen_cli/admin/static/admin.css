@@ -101,7 +101,8 @@ input, select, textarea { min-width: 0; border: 1px solid #bac3d0; border-radius
 .time-range-calendar-icon { position: relative; width: 15px; height: 14px; flex: 0 0 auto; border: 1.5px solid currentColor; border-radius: 3px; color: var(--muted); }
 .time-range-calendar-icon::before { content: ""; position: absolute; left: -1.5px; right: -1.5px; top: 3px; border-top: 1.5px solid currentColor; }
 .time-range-calendar-icon::after { content: ""; position: absolute; width: 2px; height: 2px; left: 3px; top: 7px; border-radius: 50%; background: currentColor; box-shadow: 4px 0 currentColor, 8px 0 currentColor; }
-.time-range-summary { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.time-range-summary { min-width: 0; flex: 1; white-space: pre-line; overflow-wrap: anywhere; }
+.time-range-dates { color: var(--muted); font-size: 11px; }
 .time-range-chevron { flex: 0 0 auto; color: var(--muted); font-size: 16px; line-height: 1; }
 .time-range-quick-clear { position: absolute; z-index: 1; top: 50%; right: 30px; width: 24px; height: 24px; transform: translateY(-50%); border: 0; border-radius: 50%; padding: 0; background: transparent; color: var(--muted); font-size: 18px; line-height: 22px; }
 .time-range-quick-clear:hover { background: #edf1f6; color: var(--ink); }

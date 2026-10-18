@@ -91,7 +91,18 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
     const before = lastQuery("/api/v1/sessions").get("updatedFrom");
     assert(before);
     assert(!lastQuery("/api/v1/sessions").has("updatedBefore"));
+    assert(!lastQuery("/api/v1/sessions").has("updatedRange"), "preset names never enter the API query");
+    const presetKind = new URLSearchParams(window.location.search).get("updatedRange");
+    if (!initialUrl.includes("updatedFrom=") || initialUrl.includes("updatedRange=last-3-months")) {
+      assert.equal(presetKind, "last-3-months");
+      assert.match(root.querySelector("[data-time-range-summary]").textContent,
+        /^最近 3 个月（至今） · UTC[+-]\d{2}:\d{2}(?: → UTC[+-]\d{2}:\d{2})?\n\d{4}-\d{2}-\d{2} \d{2}:\d{2} ~ \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    } else {
+      assert.equal(presetKind, null, "custom bounds must not be guessed to be a preset");
+    }
     root.querySelector("[data-time-range-trigger]").click();
+    if (presetKind) assert.equal(root.querySelectorAll("[data-time-range-preset]")
+      .find((button) => button.dataset.timeRangePreset === presetKind).getAttribute("aria-pressed"), "true");
     assert.equal(root.querySelector("[data-time-range-done]").disabled, false);
     root.querySelector("[data-time-range-done]").click();
     assert.equal(root.querySelector("[data-time-range-popover]").hidden, true);
@@ -122,6 +133,12 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
       assert.equal(before.get("chatId"), "oc_selected");
       assert.equal(before.get("createdFrom"), "2026-10-01T00:00:00Z");
       assert.equal(before.get("createdBefore"), "2026-10-02T00:00:00Z");
+      if (initialUrl.includes("createdRange=today")) {
+        assert.equal(before.get("createdRange"), "today");
+        assert(!query.has("createdRange"));
+        const created = document.querySelector("#session-filter").querySelector("[data-time-range]");
+        assert.match(created.querySelector("[data-time-range-summary]").textContent, /^今天 · UTC[+-]\d{2}:\d{2}(?: → UTC[+-]\d{2}:\d{2})?\n.+ ~ .+$/);
+      }
       assert.deepEqual(before.getAll("inventoryState"), ["archived"]);
       if (initialUrl.includes("updatedRange=all")) {
         assert(!query.has("updatedFrom"));
@@ -132,7 +149,15 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
         assert(query.get("updatedFrom"));
         assert(!query.has("updatedBefore"));
       }
-    } else assert.deepEqual(before.getAll("state"), ["closed"]);
+    } else {
+      assert.deepEqual(before.getAll("state"), ["closed"]);
+      assert.equal(before.get("createdRange"), "last-7-days");
+      assert.equal(query.get("createdFrom"), "2026-10-01T00:00:00Z");
+      assert.equal(query.get("createdBefore"), "2026-10-08T00:00:00Z");
+      assert(!query.has("createdRange"));
+      assert.match(document.querySelector("#side-filter").querySelector("[data-time-range-summary]").textContent,
+        /^最近 7 天 · UTC[+-]\d{2}:\d{2}(?: → UTC[+-]\d{2}:\d{2})?\n.+ ~ .+$/);
+    }
     return;
   }
   if (initialUrl.startsWith("/schedules")) {
@@ -216,6 +241,9 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   assert.equal(href(), applied);
   assert.deepEqual(sessionMultiFilters.get("project").values(), ["docs"]);
   assert.equal(lastQuery("/api/v1/sessions").get("sortBy"), "updatedAt");
+  assert.match(document.querySelectorAll("[data-time-range]")
+    .find((root) => root.dataset.timeRangeId === "session-updated")
+    .querySelector("[data-time-range-summary]").textContent, /^最近 3 个月（至今） · UTC[+-]\d{2}:\d{2}(?: → UTC[+-]\d{2}:\d{2})?\n.+ ~ .+$/);
   window.history.go(1); await flush();
   assert.equal(lastQuery("/api/v1/sessions").get("sortBy"), "createdAt");
   // Unlimited update bounds survive URL navigation; the marker never reaches the API.

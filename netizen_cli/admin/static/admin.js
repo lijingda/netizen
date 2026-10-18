@@ -1022,6 +1022,10 @@ function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
   for (const [key, value] of new FormData(form)) {
     if (String(value)) query.append(key, String(value));
   }
+  for (const root of form.querySelectorAll("[data-time-range]")) {
+    const kind = timeRangeControllers.get(root)?.presetKind();
+    if (kind) query.set(`${root.dataset.timeRangeField || "created"}Range`, kind);
+  }
   for (const root of form.querySelectorAll("[data-session-multi], [data-side-multi]")) {
     const name = root.dataset.sessionMulti || root.dataset.sideMulti;
     const filters = root.dataset.sideMulti ? sideMultiFilters : sessionMultiFilters;
@@ -1034,7 +1038,7 @@ function formQuery(form, defaultPageSize = "25", refreshRelativeTime = true) {
     const identity = new URLSearchParams(state.sessionPage?.query || "").get("identity");
     if (identity) query.set("identity", identity);
     if (query.get("inventoryState") === "lazy") {
-      for (const key of ["createdFrom", "createdBefore", "updatedFrom", "updatedBefore"]) query.delete(key);
+      for (const key of ["createdFrom", "createdBefore", "createdRange", "updatedFrom", "updatedBefore", "updatedRange"]) query.delete(key);
     } else if (!query.has("updatedFrom") && !query.has("updatedBefore")) {
       query.set("updatedRange", "all"); // URL intent only; never sent to the API.
     }
@@ -1080,10 +1084,6 @@ function localMinuteValue(value) {
 
 function formatLocalMinute(value) {
   return localMinuteValue(value).replace("T", " ");
-}
-
-function compactLocalMinute(value) {
-  return `${twoDigits(value.getMonth() + 1)}-${twoDigits(value.getDate())} ${twoDigits(value.getHours())}:${twoDigits(value.getMinutes())}`;
 }
 
 function utcOffsetLabel(value) {
@@ -1182,6 +1182,24 @@ function allTimeRange() {
   };
 }
 
+function timeRangeSummary(from, before, kind = "custom", now = new Date()) {
+  if (!from && !before) return "全部时间";
+  const rolling = kind.startsWith("last-");
+  const start = new Date(from);
+  // Show the last included minute, including a partially included rolling minute.
+  const end = before ? new Date(new Date(before).getTime() - 1) : now;
+  const startLabel = Number.isNaN(start.getTime()) ? from || "不限起点" : formatLocalMinute(start);
+  const endLabel = !before && !rolling ? "不限终点"
+    : Number.isNaN(end.getTime()) ? before : formatLocalMinute(end);
+  const label = timeRangePresetLabels[kind];
+  const name = label && kind !== "all" ? `${label}${!before && rolling ? "（至今）" : ""}` : "";
+  const dates = [from ? start : null, before || rolling ? end : null]
+    .filter((value) => value && !Number.isNaN(value.getTime()));
+  const offsets = [...new Set(dates.map(utcOffsetLabel))].join(" → ");
+  const heading = [name, offsets].filter(Boolean).join(" · ");
+  return `${heading ? `${heading}\n` : ""}${startLabel} ~ ${endLabel}`;
+}
+
 function presetTimeRange(kind, now = new Date(), openEnded = false) {
   if (kind === "all") return allTimeRange();
   let from;
@@ -1210,18 +1228,16 @@ function presetTimeRange(kind, now = new Date(), openEnded = false) {
     before = new Date(now.getTime());
     from = new Date(now.getTime() - durationDays * 24 * 60 * 60 * 1000);
   }
-  const label = timeRangePresetLabels[kind];
   const rolling = kind.startsWith("last-");
-  const summary = rolling && !openEnded
-    ? `${label} · 至 ${compactLocalMinute(before)} · ${utcOffsetLabel(before)}`
-    : `${label} · ${utcOffsetLabel(from)}`;
+  const fromUtc = canonicalUtc(from);
+  const beforeUtc = openEnded && rolling ? "" : canonicalUtc(before);
   return {
     kind,
-    from: canonicalUtc(from),
-    before: openEnded && rolling ? "" : canonicalUtc(before),
+    from: fromUtc,
+    before: beforeUtc,
     startValue: localMinuteValue(from),
-    endValue: localMinuteValue(new Date(before.getTime() - 60 * 1000)),
-    summary,
+    endValue: localMinuteValue(new Date(before.getTime() - 1)),
+    summary: timeRangeSummary(fromUtc, beforeUtc, kind, now),
   };
 }
 
@@ -1252,7 +1268,7 @@ function customTimeRange(startValue, endValue) {
       before: canonicalUtc(before),
       startValue,
       endValue,
-      summary: `${formatLocalMinute(parsedStart.date)} — ${formatLocalMinute(parsedEnd.date)} · ${utcOffsetLabel(parsedStart.date)}`,
+      summary: timeRangeSummary(canonicalUtc(parsedStart.date), canonicalUtc(before)),
     },
     error: "",
     invalid: null,
@@ -1318,7 +1334,19 @@ function initializeTimeRangeFilter(root) {
   function renderApplied() {
     fromNode.value = applied.from;
     beforeNode.value = applied.before;
-    summary.textContent = applied.summary;
+    applied.summary = timeRangeSummary(applied.from, applied.before, applied.kind);
+    const [heading, bounds] = applied.summary.split("\n");
+    if (bounds) {
+      const name = document.createElement("span");
+      name.textContent = `${heading}\n`;
+      const dates = document.createElement("span");
+      dates.className = "time-range-dates";
+      dates.textContent = bounds;
+      summary.replaceChildren(name, dates);
+    } else summary.textContent = applied.summary;
+    const dates = [applied.from, applied.before || new Date()].filter(Boolean)
+      .map((value) => new Date(value)).filter((value) => !Number.isNaN(value.getTime()));
+    trigger.title = `${applied.summary}\n${zoneDescription(dates)}`;
     trigger.classList.toggle("has-value", applied.kind !== "all");
     trigger.setAttribute("aria-label", `${label}：${applied.summary}`);
     quickClear.hidden = applied.kind === "all";
@@ -1405,7 +1433,7 @@ function initializeTimeRangeFilter(root) {
   }
 
   function prepareQuery() {
-    if (applied.kind === "all" || applied.kind === "custom") return;
+    if (applied.kind === "all" || applied.kind === "custom" || applied.restored) return;
     applied = preset(applied.kind);
     renderApplied();
   }
@@ -1430,15 +1458,17 @@ function initializeTimeRangeFilter(root) {
   const controller = {
     cancel: cancelDraft,
     prepareQuery,
-    setBounds(from, before) {
+    refreshSummary: renderApplied,
+    presetKind() { return applied.kind !== "all" && applied.kind !== "custom" ? applied.kind : null; },
+    setBounds(from, before, kind = "custom") {
       if (!from && !before) { this.reset("all"); return; }
       const startDate = new Date(from);
       const beforeDate = new Date(before);
-      const endDate = new Date(beforeDate.getTime() - 60000);
-      applied = { kind: "custom", from, before,
+      const endDate = new Date(beforeDate.getTime() - 1);
+      // URL bounds stay absolute; the preset name is presentation metadata only.
+      applied = { kind: Object.hasOwn(timeRangePresetLabels, kind) && kind !== "all" ? kind : "custom", from, before, restored: true,
         startValue: Number.isNaN(startDate.getTime()) ? "" : localMinuteValue(startDate),
-        endValue: Number.isNaN(endDate.getTime()) ? "" : localMinuteValue(endDate),
-        summary: `${Number.isNaN(startDate.getTime()) ? from || "不限起点" : formatLocalMinute(startDate)} — ${Number.isNaN(endDate.getTime()) ? before || "不限终点" : formatLocalMinute(endDate)}` };
+        endValue: Number.isNaN(endDate.getTime()) ? "" : localMinuteValue(endDate) };
       draft = { ...applied };
       closePopover({ restoreFocus: false });
       renderApplied();
@@ -1836,7 +1866,7 @@ async function loadSessionPage(kind, page, render) {
     const candidate = { ...page, query: query.toString(), previousCursors: [...page.previousCursors] };
     await loadSessionProjectOptions(kind === "side" ? sideMultiFilters : sessionMultiFilters, isCurrent);
     if (!isCurrent()) return false;
-    query.delete("updatedRange");
+    for (const field of ["created", "updated"]) query.delete(`${field}Range`);
     if (page.cursor) query.set("cursor", page.cursor);
     const data = await api(`/api/v1/${kind === "side" ? "side-topics" : "sessions"}?${query}`);
     if (!isCurrent()) return false;
@@ -1849,6 +1879,9 @@ async function loadSessionPage(kind, page, render) {
     renderSessionPagination(kind);
     renderSessionSort(kind);
     renderSessionFreshness();
+    for (const root of document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")) {
+      timeRangeControllers.get(root)?.refreshSummary();
+    }
     syncPageUrl();
     setStatus("已更新。");
     return true;
@@ -3804,8 +3837,8 @@ async function moveScheduleRunsPage(direction) {
 const adminPagePaths = { projects: "/projects", schedules: "/schedules", defaults: "/defaults",
   updates: "/maintenance", system: "/system" };
 const sessionUrlKeys = ["project", "scopeKind", "inventoryState", "current", "chatId", "topicId", "identity",
-  "createdFrom", "createdBefore", "updatedFrom", "updatedBefore", "updatedRange", "pageSize", "sortBy", "sortDirection"];
-const sideUrlKeys = ["project", "state", "chatId", "createdFrom", "createdBefore", "pageSize", "sortBy", "sortDirection"];
+  "createdFrom", "createdBefore", "createdRange", "updatedFrom", "updatedBefore", "updatedRange", "pageSize", "sortBy", "sortDirection"];
+const sideUrlKeys = ["project", "state", "chatId", "createdFrom", "createdBefore", "createdRange", "pageSize", "sortBy", "sortDirection"];
 let navigationReady = false;
 let navigationIndex = 0;
 let navigationHref = "";
@@ -3826,13 +3859,20 @@ function pageQuery(tab, sessionTab, raw = "") {
       if (!["active", "archived", "lazy"].includes(query.get(field))) query.set(field, "active");
       else query.set(field, query.get(field));
       if (query.get(field) === "lazy") {
-        for (const key of ["createdFrom", "createdBefore", "updatedFrom", "updatedBefore", "updatedRange"]) query.delete(key);
+        for (const key of ["createdFrom", "createdBefore", "createdRange", "updatedFrom", "updatedBefore", "updatedRange"]) query.delete(key);
         query.set("sortBy", "createdAt");
       } else if (!query.has("updatedFrom") && !query.has("updatedBefore") && query.get("updatedRange") !== "all") {
         const range = presetTimeRange("last-3-months", new Date(), true);
         query.set("updatedFrom", range.from);
+        query.set("updatedRange", range.kind);
       }
-      if (query.has("updatedFrom") || query.has("updatedBefore")) query.delete("updatedRange");
+    }
+    for (const field of ["created", "updated"]) {
+      const kind = query.get(`${field}Range`);
+      const hasBounds = query.has(`${field}From`) || query.has(`${field}Before`);
+      const valid = Object.hasOwn(timeRangePresetLabels, kind) && (kind === "all" ? !hasBounds : hasBounds);
+      if (valid) query.set(`${field}Range`, kind);
+      else query.delete(`${field}Range`);
     }
     if (!query.has("pageSize")) query.set("pageSize", "20");
     if (!query.has("sortBy")) query.set("sortBy", "updatedAt");
@@ -3915,7 +3955,7 @@ function restorePageFilters(route) {
     document.querySelector(`#${kind}-page-size`).value = query.get("pageSize");
     for (const root of document.querySelector(`#${kind}-filter`).querySelectorAll("[data-time-range]")) {
       const field = root.dataset.timeRangeField || "created";
-      timeRangeControllers.get(root).setBounds(query.get(`${field}From`) || "", query.get(`${field}Before`) || "");
+      timeRangeControllers.get(root).setBounds(query.get(`${field}From`) || "", query.get(`${field}Before`) || "", query.get(`${field}Range`) || "custom");
     }
     if (kind === "session") {
       document.querySelector("#session-inventory-state").value = query.get("inventoryState");

@@ -37,13 +37,15 @@ class NavigationUiTest(unittest.TestCase):
             "/projects",
             "/sessions/ordinary",
             "/sessions/ordinary?updatedFrom=2026-07-01T00%3A00%3A00Z",
+            "/sessions/ordinary?updatedFrom=2026-07-01T00%3A00%3A00Z&updatedRange=last-3-months",
             "/sessions/ordinary?project=docs&project=netizen&inventoryState=archived&chatId=oc_selected"
             "&createdFrom=2026-10-01T00%3A00%3A00Z&createdBefore=2026-10-02T00%3A00%3A00Z"
             "&pageSize=50&sortBy=createdAt&sortDirection=asc&cursor=stale&actionToken=secret",
             "/sessions/ordinary?project=docs&project=netizen&inventoryState=archived&chatId=oc_selected"
             "&createdFrom=2026-10-01T00%3A00%3A00Z&createdBefore=2026-10-02T00%3A00%3A00Z"
-            "&pageSize=50&sortBy=createdAt&sortDirection=asc&updatedRange=all",
-            "/sessions/temporary?project=docs&state=closed&pageSize=50&sortDirection=asc",
+            "&pageSize=50&sortBy=createdAt&sortDirection=asc&createdRange=today&updatedRange=all",
+            "/sessions/temporary?project=docs&state=closed&pageSize=50&sortDirection=asc"
+            "&createdFrom=2026-10-01T00%3A00%3A00Z&createdBefore=2026-10-08T00%3A00%3A00Z&createdRange=last-7-days",
             "/schedules?project=netizen&ended=all&enabled=false",
             "/defaults?kind=group_name",
         ):

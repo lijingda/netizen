@@ -1,4 +1,5 @@
 const sessionMultiFilters = new Map();
+const timeRangeControllers = new Map();
 const state = { tab: "sessions", sessions: null, sessionPage: {
   cursor: "page-two", nextCursor: "page-three", previousCursors: [null], number: 2,
   query: "project=netizen&scopeKind=group&inventoryState=active&pageSize=20",
