@@ -9356,7 +9356,8 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             request=QuestionRequest("foreign", (UserQuestion("Wrong Thread"),)),
         )
         submission.release_receipt_attempt()
-        await asyncio.wait_for(received.wait(), timeout=0.2)
+        # Assert delivery while running, not subsecond CI scheduling latency.
+        await asyncio.wait_for(received.wait(), timeout=2)
 
         self.assertIsNotNone(self.runtime.active_turn(binding.id))
         self.assertEqual(self.outcomes, [])
