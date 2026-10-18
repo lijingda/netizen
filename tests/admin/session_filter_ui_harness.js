@@ -155,6 +155,8 @@ async function refresh(tab, page) {
   rangeRoot.querySelector("[data-time-range-done]").click();
   assert(query().get("createdFrom"));
   assert(query().get("createdBefore"));
+  assert.equal(query().get("createdRange"), "today");
+  assert.match(rangeRoot.querySelector("[data-time-range-summary]").textContent, /^今天 · UTC[+-]\d{2}:\d{2}(?: → UTC[+-]\d{2}:\d{2})?\n.+ ~ .+$/);
   document.querySelector("#session-page-size").value = "100";
   state.sessionPage = { cursor: "later", nextCursor: "next", previousCursors: [null], number: 2 };
   const displayedPage = state.sessionPage;
@@ -227,6 +229,8 @@ async function refresh(tab, page) {
   applyTimePreset("today");
   await loadSessions();
   const applied = state.sessionPage.query;
+  const apiApplied = new URLSearchParams(applied);
+  for (const field of ["created", "updated"]) apiApplied.delete(`${field}Range`);
   const bounds = sessionQueries.at(-1).get("createdFrom");
   selectState("archived");
   checkbox("project", "netizen").click();
@@ -244,9 +248,9 @@ async function refresh(tab, page) {
   assert.equal(state.sessionPage.query, applied);
   await moveSessionPage("previous");
   assert(!sessionQueries.at(-1).has("cursor"));
-  assert.equal(sessionQueries.at(-1).toString(), applied);
+  assert.equal(sessionQueries.at(-1).toString(), apiApplied.toString());
   await refresh("sessions");
-  assert.equal(sessionQueries.at(-1).toString(), applied);
+  assert.equal(sessionQueries.at(-1).toString(), apiApplied.toString());
   failNextPage = true;
   await moveSessionPage("next");
   assert.equal(state.sessionPage.cursor, null);
