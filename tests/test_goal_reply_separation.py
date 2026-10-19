@@ -185,7 +185,9 @@ class GoalReplySeparationTest(unittest.IsolatedAsyncioTestCase):
         paths = [self.fx.project / f"goal-{index}.txt" for index in range(10)]
         for path in paths:
             path.write_text("content")
-        await self.app.handle_completion(self.outcome(final_items=(file_change_item(*(str(p) for p in paths)),)))
+        await self.app.handle_completion(self.outcome(
+            final_items=(file_change_item(*(str(p) for p in paths)),), cwd=self.fx.project,
+        ))
         card = OutboundCard(card=self.channel.updates[-1][1])
         value = button(card, "turn-file.page")
         self.assertEqual(value["turn_id"], "turn:v1:physical-final")

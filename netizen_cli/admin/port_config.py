@@ -6,6 +6,7 @@ import contextlib
 import os
 import stat
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,6 +44,27 @@ class ConfigFileSnapshot:
             raise AdminPortConfigurationError(
                 f"configuration changed since startup; retry with the current configuration: {self.path}"
             )
+
+
+class ConfigFileEditor:
+    """Serialize instance-owned section edits against one exact file snapshot.
+
+    Settings services share this object so their successful writes do not make
+    each other stale. External edits still conflict with the complete snapshot;
+    they are never silently merged or made effective in the running service.
+    """
+
+    def __init__(self, snapshot: ConfigFileSnapshot) -> None:
+        self._snapshot = snapshot
+        self._lock = threading.RLock()
+
+    def update_section(self, name: str, value: object) -> None:
+        with self._lock:
+            loaded = yaml.safe_load(self._snapshot.content)
+            if not isinstance(loaded, dict):
+                raise AdminPortConfigurationError("configuration root must be a mapping")
+            loaded[name] = value
+            self._snapshot = write_configuration(self._snapshot, loaded)
 
 
 def _identity(metadata: os.stat_result) -> tuple[int, ...]:

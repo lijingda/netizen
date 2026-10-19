@@ -207,6 +207,7 @@ _TERMINAL_RESPONSE_MATERIALIZATION_RETRIES = 4
 _TERMINAL_STREAM_DRAIN_TIMEOUT_SECONDS = 1.0
 _SIDE_CLOSE_DRAIN_TIMEOUT_SECONDS = 5.0
 _FORK_RELEASE_TIMEOUT_SECONDS = 5.0
+_PREPARED_CWD_READ_TIMEOUT_SECONDS = 5.0
 _SIDE_IDLE_SECONDS = 2 * 60 * 60
 _ORDINARY_THREAD_IDLE_SECONDS = 15 * 60
 _NAMING_SHUTDOWN_WAIT_SECONDS = 1.0
@@ -241,6 +242,7 @@ class _ActiveTurn:
     owner_id: str
     origin: object
     receipt_attempted: asyncio.Event
+    cwd: Path | None = None
     state: ActiveState = ActiveState.RUNNING
     interrupt_attempted: bool = False
     interrupt_succeeded: bool = False
@@ -304,6 +306,7 @@ class _ActiveGoal:
     objective: str
     receipt_attempted: asyncio.Event
     state: GoalOperationState
+    cwd: Path | None = None
     persisted: GoalSnapshot | None = None
     goal_cleared: bool = False
     generation_created_at: int | None = None
@@ -1261,6 +1264,7 @@ class CodexRuntime:
                 native_fork = getattr(fork_view, "thread", None)
                 if getattr(native_fork, "id", None) != thread.id:
                     raise RuntimeError("forked Side Thread read identity mismatch")
+                cwd = _native_cwd(native_fork, thread.id)
                 if getattr(native_fork, "ephemeral", None) is not True:
                     raise RuntimeError("forked Side Thread is not ephemeral")
                 forked_from_id = getattr(native_fork, "forked_from_id", None)
@@ -1278,7 +1282,7 @@ class CodexRuntime:
                         parent_thread_id=current.native_thread_id,
                         thread=thread,
                         project_alias=current.project_alias,
-                        cwd=cwd.resolve(),
+                        cwd=cwd,
                         creator_id=creator_id,
                         turn_settings=resolved_settings,
                         task_feedback=prepared_feedback,
@@ -1311,7 +1315,7 @@ class CodexRuntime:
                 parent_thread_id=current.native_thread_id,
                 thread=thread,
                 project_alias=current.project_alias,
-                cwd=cwd.resolve(),
+                cwd=cwd,
                 creator_id=creator_id,
                 turn_settings=resolved_settings,
                 task_feedback=prepared_feedback,
@@ -1327,6 +1331,7 @@ class CodexRuntime:
         side_id: str,
     ) -> None:
         self._bindings.require_project_not_deleting(binding.project_alias)
+        self._bindings.worktrees.require_binding_not_deleting(binding.id)
         try:
             route = self._bindings.get_side_topic(side_id)
         except SideTopicNotFound:
@@ -1379,6 +1384,7 @@ class CodexRuntime:
         self, source: ThreadBinding, expected_project_revision: int,
     ) -> ThreadBinding:
         self.require_fork_creation_open(source.project_alias)
+        self._bindings.worktrees.require_binding_not_deleting(source.id)
         self._guard_no_lifecycle_locked(source.id)
         current = self._bindings.get(source.id)
         if (
@@ -1601,6 +1607,20 @@ class CodexRuntime:
                 snapshots.append(self._side_snapshot(session))
         return tuple(snapshots)
 
+    def worktree_side_snapshots(
+        self, root: Path, *, limit: int = PROJECT_DELETE_LIMIT,
+    ) -> tuple[SideSessionSnapshot, ...]:
+        """Use each live Side's frozen cwd, independent of its Parent's state."""
+        if not root.is_absolute() or type(limit) is not int or not 1 <= limit <= PROJECT_DELETE_LIMIT:
+            raise ValueError("Worktree Side snapshot range is invalid")
+        snapshots = []
+        for session in self._sides.values():
+            if session.cwd.is_relative_to(root):
+                if len(snapshots) >= limit:
+                    raise ValueError("Worktree Side snapshot exceeds the limit")
+                snapshots.append(self._side_snapshot(session))
+        return tuple(snapshots)
+
     async def capture_side_submission_admission(
         self,
         side_id: str,
@@ -1611,6 +1631,7 @@ class CodexRuntime:
             session = self._require_side(side_id)
             if not self._accepting:
                 raise RuntimeClosed("服务正在停止，暂不接受 Side 消息。")
+            self._bindings.worktrees.require_cwd_not_deleting(session.cwd)
             if session.state is SideSessionState.CLOSING:
                 raise SideSessionClosing("Side 正在结束，暂不接受新消息。")
             if session.topic_id is None:
@@ -1656,6 +1677,7 @@ class CodexRuntime:
         started: SideSubmission | None = None
         async with self._side_lock(side_id):
             session = self._require_side(side_id)
+            self._bindings.worktrees.require_cwd_not_deleting(session.cwd)
             if not self._accepting:
                 raise RuntimeClosed("服务正在停止，暂不接受 Side 消息。")
             if session.state is SideSessionState.CLOSING:
@@ -1993,6 +2015,92 @@ class CodexRuntime:
         if not isinstance(model, str) or not model:
             raise ModelCatalogError("来源原生会话未返回模型，无法确认继承配置。")
         return model
+
+    async def resolve_binding_cwd(
+        self, binding_id: str, *, default_cwd: Path,
+    ) -> Path:
+        """Resolve lazy intent or exact native cwd without loading the Thread.
+
+        A missing directory is still a valid native cwd fact. Do not replace it
+        with the Project directory, inspect history, or resume as a read side effect.
+        """
+        binding = self._bindings.get(binding_id)
+        if binding.native_thread_id is None:
+            return Path(binding.working_cwd) if binding.working_cwd is not None else default_cwd
+        return await self.native_thread_cwd(binding_id)
+
+    async def native_thread_cwd(self, binding_id: str) -> Path:
+        binding = self._bindings.get(binding_id)
+        if binding.native_thread_id is None:
+            raise ThreadNotMaterialized("会话尚未生成 Codex Thread，无法读取原生工作目录。")
+        response = await AsyncThread(self._codex, binding.native_thread_id).read(
+            include_turns=False,
+        )
+        current = self._bindings.get(binding_id)
+        if current.native_thread_id != binding.native_thread_id:
+            raise SteerRace("读取原生工作目录期间会话身份已变化。")
+        cwd = _native_cwd(getattr(response, "thread", None), binding.native_thread_id)
+        self._bindings.sync_native_workspace(
+            binding_id, expected_native_thread_id=binding.native_thread_id,
+            working_cwd=str(cwd),
+        )
+        return cwd
+
+    def _adopt_native_cwd(
+        self, *, binding_id: str, thread_id: str, native_cwd: Path,
+    ) -> Path:
+        self._bindings.sync_native_workspace(
+            binding_id, expected_native_thread_id=thread_id,
+            working_cwd=str(native_cwd),
+        )
+        return native_cwd
+
+    async def _read_submission_cwd(
+        self, binding_id: str, thread: NativeThread,
+    ) -> Path:
+        try:
+            async with asyncio.timeout(_PREPARED_CWD_READ_TIMEOUT_SECONDS):
+                response = await thread.read(include_turns=False)
+            cwd = _native_cwd(getattr(response, "thread", None), thread.id)
+        except Exception as error:
+            raise SteerRace(
+                "无法确认恢复后的原生工作目录，本条消息未执行；请稍后重新发送。"
+            ) from error
+        return self._adopt_native_cwd(
+            binding_id=binding_id, thread_id=thread.id, native_cwd=cwd,
+        )
+
+    async def worktree_usage(self, binding_id: str) -> dict[str, str | None]:
+        """Read deletion evidence after waiting for exact in-flight admission.
+
+        The caller reserves the resource's delete intent before this read. Its
+        gate prevents new users after this lock is released; no Git operation
+        runs under a Binding lock. Unknown native state never proves idleness.
+        """
+        async with self._lock(binding_id):
+            binding = self._bindings.get(binding_id)
+            local_busy = (
+                binding_id in self._active or binding_id in self._goals
+                or binding_id in self._compacting or binding_id in self._lifecycles
+                or self.project_has_fork_creation(binding.project_alias)
+            )
+            if binding.native_thread_id is None:
+                return {"cwd": binding.working_cwd, "status": "active" if local_busy else "idle"}
+            cwd = None
+            try:
+                response = await AsyncThread(self._codex, binding.native_thread_id).read(include_turns=False)
+                native = getattr(response, "thread", None)
+                cwd = str(_native_cwd(native, binding.native_thread_id))
+                status = _thread_status_type(native)
+                if local_busy or status == "active":
+                    return {"cwd": cwd, "status": "active"}
+                if status not in {"idle", "notLoaded"} or self._background_terminal_inspector is None:
+                    return {"cwd": cwd, "status": "unknown"}
+                if await self._background_terminal_inspector.has_running(binding.native_thread_id):
+                    return {"cwd": cwd, "status": "active"}
+                return {"cwd": cwd, "status": "idle"}
+            except Exception:
+                return {"cwd": cwd, "status": "active" if local_busy else "unknown"}
 
     async def thread_summary(
         self, thread_id: str,
@@ -3087,7 +3195,7 @@ class CodexRuntime:
         self,
         *,
         binding: ThreadBinding,
-        cwd: Path,
+        cwd: Path | None = None,
         input: Any,
         owner_id: str,
         origin: object,
@@ -3095,6 +3203,7 @@ class CodexRuntime:
         context_commit: ContextCursorCommit | None = None,
         skill_names: tuple[str, ...] = (),
     ) -> Submission:
+        """Submit input; cwd is only a lazy Thread's creation-directory intent."""
         active = self._active.get(binding.id)
         if (
             admission is None
@@ -3103,7 +3212,7 @@ class CodexRuntime:
         ):
             admission = await self.capture_submission_admission(binding.id)
         return await self._submit(
-            binding=binding, cwd=cwd, input=input, owner_id=owner_id,
+            binding=binding, creation_cwd=cwd, input=input, owner_id=owner_id,
             origin=origin, admission=admission, context_commit=context_commit,
             skill_names=skill_names,
         )
@@ -3130,7 +3239,7 @@ class CodexRuntime:
         initial = _ScheduledInitialSubmission(run_id)
         try:
             return await self._submit(
-                binding=binding, cwd=cwd, input=input, owner_id=owner_id,
+                binding=binding, creation_cwd=cwd, input=input, owner_id=owner_id,
                 origin=origin, skill_names=skill_names, initial=initial,
             )
         except BaseException:
@@ -3153,7 +3262,7 @@ class CodexRuntime:
         self,
         *,
         binding: ThreadBinding,
-        cwd: Path,
+        cwd: Path | None = None,
         message: ExternalMessage,
         owner_id: str,
         origin: object,
@@ -3164,6 +3273,7 @@ class CodexRuntime:
 
         Only this entry uses native start/join semantics. Ordinary Feishu,
         question-card and scheduled inputs retain their exact-Turn admission.
+        cwd is only a lazy Thread's creation-directory intent.
         """
 
         if not isinstance(message, ExternalMessage):
@@ -3183,7 +3293,7 @@ class CodexRuntime:
                 raise ModelCatalogError("所选 Model 已不可用，跨会话消息未发送。")
             native_model = selected.model
         return await self._submit(
-            binding=binding, cwd=cwd, input=message, owner_id=owner_id,
+            binding=binding, creation_cwd=cwd, input=message, owner_id=owner_id,
             origin=origin, external=True, external_model=native_model,
             preferred_title=title,
         )
@@ -3196,7 +3306,7 @@ class CodexRuntime:
         self,
         *,
         binding: ThreadBinding,
-        cwd: Path,
+        creation_cwd: Path | None,
         input: Any,
         owner_id: str,
         origin: object,
@@ -3312,11 +3422,22 @@ class CodexRuntime:
                 service_tier_id=settings_for_new_turn.service_tier_id,
             )
         native_input = input
+        execution_cwd: Path | None = None
+        prepared_skill_thread: tuple[NativeThread, _ThreadSubscription, int] | None = None
+        prepared_skill_thread_id: str | None = None
         if skill_names:
             if admission is None and initial_run_id is None:
                 admission = await self.capture_submission_admission(binding.id)
+            if initial_run_id is None:
+                assert admission is not None
+                execution_cwd, prepared_skill_thread = await self._prepare_skill_cwd(
+                    binding_id=binding.id, creation_cwd=creation_cwd, admission=admission,
+                )
+            else:
+                execution_cwd = _thread_creation_cwd(prepared_binding, creation_cwd)
+            prepared_skill_thread_id = self._bindings.get(binding.id).native_thread_id
             native_input = await self._compile_skill_input(
-                cwd=cwd,
+                cwd=execution_cwd,
                 text=input,
                 names=skill_names,
             )
@@ -3342,6 +3463,7 @@ class CodexRuntime:
             if not self._accepting:
                 raise RuntimeClosed("服务正在停止，暂不接受新任务。")
             self._guard_no_lifecycle_locked(binding.id)
+            self._bindings.worktrees.require_binding_not_deleting(binding.id)
             if initial_run_id is None:
                 self._guard_no_scheduled_initial(binding.id)
             if binding.id in self._compacting:
@@ -3380,6 +3502,8 @@ class CodexRuntime:
                     "准备本条消息期间 active 会话已切换，本条消息未执行，请重新发送。"
                 )
             active = self._active.get(binding.id)
+            if active is None and goal is None and binding.native_thread_id is None:
+                execution_cwd = _thread_creation_cwd(binding, creation_cwd)
             if initial_run_id is not None:
                 if active is not None or binding.native_thread_id is not None:
                     raise ScheduledInitialStartConflict(
@@ -3402,6 +3526,32 @@ class CodexRuntime:
                 admission=admission,
                 goal=goal,
             )
+            if skill_names and binding.native_thread_id != prepared_skill_thread_id:
+                # A failed concurrent operation may materialize a lazy Thread
+                # without consuming an admission revision. Its cwd no longer
+                # belongs to the lazy directory used for Skill discovery.
+                raise SteerRace(
+                    "准备 Skill 输入期间原生会话身份已变化，本条消息未执行，请重新发送。"
+                )
+            if prepared_skill_thread is not None:
+                prepared_thread, prepared_subscription, generation = prepared_skill_thread
+                if (
+                    self._subscriptions.get(binding.id) is not prepared_subscription
+                    or prepared_subscription.generation != generation
+                    or prepared_subscription.thread is not prepared_thread
+                    or binding.native_thread_id != prepared_thread.id
+                    or prepared_subscription.state not in {
+                        ThreadSubscriptionState.SUBSCRIBED,
+                        ThreadSubscriptionState.RELEASE_PENDING,
+                    }
+                ):
+                    raise SteerRace(
+                        "准备 Skill 输入期间 Thread 订阅已变化，本条消息未执行，请重新发送。"
+                    )
+            if goal is not None:
+                execution_cwd = _accepted_execution_cwd(goal.cwd)
+            elif active is not None:
+                execution_cwd = _accepted_execution_cwd(active.cwd)
             self._advance_admission_revision(binding.id)
             if goal is not None:
                 assert admission is not None and admission.turn_id is not None
@@ -3458,11 +3608,14 @@ class CodexRuntime:
             try:
                 if active is not None:
                     thread = active.thread
+                elif prepared_skill_thread is not None:
+                    thread = prepared_skill_thread[0]
                 elif binding.native_thread_id is None:
                     # The public API has no "inherit Ask/Custom" sentinel;
                     # omitting approval_mode deliberately selects its
                     # auto_review default.
-                    start_kwargs: dict[str, object] = {"cwd": str(cwd)}
+                    assert execution_cwd is not None
+                    start_kwargs: dict[str, object] = {"cwd": str(execution_cwd)}
                     if resolved_settings is not None:
                         # Initialize native model metadata with the first Turn's
                         # selected model, including its context window budget.
@@ -3509,10 +3662,23 @@ class CodexRuntime:
                     self.close_admission()
                     raise
 
-            self._mark_thread_subscribed_locked(
+            subscription = self._mark_thread_subscribed_locked(
                 self._bindings.get(binding.id),
                 thread,
             )
+
+            if (
+                active is None
+                and binding.native_thread_id is not None
+                and prepared_skill_thread is None
+            ):
+                try:
+                    execution_cwd = await self._read_submission_cwd(binding.id, thread)
+                except BaseException:
+                    # Resume is known successful, but no input was sent. Retain
+                    # its handle and use the normal idle-release policy.
+                    self._schedule_subscription_release_locked(subscription)
+                    raise
 
             if initial_run_id is not None or external:
                 # A Project deletion may freeze creation while thread/start
@@ -3536,6 +3702,7 @@ class CodexRuntime:
                 raise RuntimeClosed("服务正在停止，跨会话消息未发送。")
             if external and not self._bindings.get(binding.id).active:
                 raise SteerRace("目标会话已切到后台，跨会话消息未发送。")
+            assert execution_cwd is not None
             try:
                 turn_kwargs: dict[str, object] = {}
                 if resolved_settings is not None:
@@ -3597,6 +3764,7 @@ class CodexRuntime:
                 owner_id=owner_id,
                 origin=origin,
                 receipt_attempted=receipt_attempted,
+                cwd=execution_cwd,
                 task_feedback=binding.task_feedback,
                 feedback_revision=binding.feedback_revision,
                 plan_available=self._turn_plan_observer is not None,
@@ -3647,6 +3815,62 @@ class CodexRuntime:
                 task_feedback=active.task_feedback,
                 feedback_revision=active.feedback_revision,
             )
+
+    async def _prepare_skill_cwd(
+        self, *, binding_id: str, creation_cwd: Path | None, admission: SubmissionAdmission,
+    ) -> tuple[Path, tuple[NativeThread, _ThreadSubscription, int] | None]:
+        """Resolve an idle Thread before cwd-dependent, lock-free discovery.
+
+        The caller keeps its original admission. A resumed handle is reusable
+        only while the existing subscription generation remains unchanged.
+        """
+        async with self._lock(binding_id):
+            if not self._accepting:
+                raise RuntimeClosed("服务正在停止，暂不接受新任务。")
+            self._guard_no_lifecycle_locked(binding_id)
+            self._guard_no_scheduled_initial(binding_id)
+            self._bindings.worktrees.require_binding_not_deleting(binding_id)
+            if binding_id in self._compacting:
+                raise ThreadCompacting("当前会话正在压缩上下文，完成前暂不接受新消息。")
+            binding = self._bindings.get(binding_id)
+            if not binding.active:
+                raise SteerRace("准备本条消息期间 active 会话已切换，本条消息未执行，请重新发送。")
+            active = self._active.get(binding_id)
+            goal = self._goals.get(binding_id)
+            self._redeem_submission_admission(
+                binding_id=binding_id, active=active, admission=admission, goal=goal,
+            )
+            if goal is not None or active is not None:
+                # Steer belongs to the already accepted physical Turn, not a
+                # fresh resume or a caller's earlier read-only cwd snapshot.
+                accepted_cwd = _accepted_execution_cwd(goal.cwd if goal is not None else active.cwd)
+                return accepted_cwd, None
+            if binding.native_thread_id is None:
+                # Lazy Skill validation must remain free of thread/start.
+                return _thread_creation_cwd(binding, creation_cwd), None
+            try:
+                thread = await self._resume_thread_for_operation(binding.native_thread_id)
+                if thread.id != binding.native_thread_id:
+                    raise RuntimeError("thread_resume returned a different native ID")
+            except ThreadOccupied:
+                raise
+            except asyncio.CancelledError:
+                self.close_admission()
+                raise
+            except Exception as error:
+                self.close_admission()
+                raise TurnStartFailed(
+                    "Codex Thread 启动或恢复结果未确认；"
+                    "服务已停止接收新任务，请重启服务。"
+                ) from error
+            subscription = self._mark_thread_subscribed_locked(binding, thread)
+            try:
+                execution_cwd = await self._read_submission_cwd(binding_id, thread)
+            finally:
+                # Discovery may fail, be cancelled or outlive idle release.
+                # Its normal subscription policy needs no preparation lease.
+                self._schedule_subscription_release_locked(subscription)
+            return execution_cwd, (thread, subscription, subscription.generation)
 
     async def _compile_skill_input(
         self,
@@ -4221,11 +4445,12 @@ class CodexRuntime:
         self,
         *,
         binding: ThreadBinding,
-        cwd: Path,
+        cwd: Path | None = None,
         objective: str,
         owner_id: str,
         origin: object,
     ) -> GoalSubmission:
+        """Start a Goal; cwd is only a lazy Thread's creation-directory intent."""
         control = self._require_goal_control()
         objective = objective.strip()
         if not objective or len(objective) > 4_000:
@@ -4237,6 +4462,7 @@ class CodexRuntime:
             if not self._accepting:
                 raise RuntimeClosed("服务正在停止，暂不接受新 Goal。")
             self._guard_no_lifecycle_locked(binding.id)
+            self._bindings.worktrees.require_binding_not_deleting(binding.id)
             if binding.id in self._compacting:
                 raise ThreadCompacting("当前会话正在压缩上下文，不能启动 Goal。")
             if self._active.get(binding.id) is not None:
@@ -4247,8 +4473,14 @@ class CodexRuntime:
             if existing is not None:
                 raise self._goal_slot_error(existing)
             binding = self._bindings.get(binding.id)
-            thread = await self._open_goal_thread(binding=binding, cwd=cwd)
-            await self._validate_goal_thread_ready(thread)
+            creation_cwd = (
+                _thread_creation_cwd(binding, cwd) if binding.native_thread_id is None else None
+            )
+            thread = await self._open_goal_thread(binding=binding, creation_cwd=creation_cwd)
+            execution_cwd = self._adopt_native_cwd(
+                binding_id=binding.id, thread_id=thread.id,
+                native_cwd=await self._validate_goal_thread_ready(thread),
+            )
             persisted = await control.get(thread.id)
             if persisted is not None and persisted.status is GoalStatus.ACTIVE:
                 self._track_external_goal(binding, persisted, thread=thread)
@@ -4266,6 +4498,7 @@ class CodexRuntime:
                 objective=objective,
                 receipt_attempted=receipt_attempted,
                 state=GoalOperationState.STARTING,
+                cwd=execution_cwd,
                 persisted=persisted,
                 task_feedback=binding.task_feedback,
                 feedback_revision=binding.feedback_revision,
@@ -4353,6 +4586,7 @@ class CodexRuntime:
             raise RuntimeClosed("服务正在停止，暂不能恢复 Goal。")
         async with self._lock(binding.id):
             self._guard_no_lifecycle_locked(binding.id)
+            self._bindings.worktrees.require_binding_not_deleting(binding.id)
             if binding.id in self._compacting or self._active.get(binding.id) is not None:
                 raise ThreadRunningConfiguration(
                     "当前会话有其他原生操作，不能恢复 Goal。"
@@ -4408,8 +4642,11 @@ class CodexRuntime:
             binding = self._bindings.get(binding.id)
             if binding.native_thread_id is None:
                 raise GoalNotMaterialized("当前会话还没有原生 Codex Thread。")
-            thread = await self._open_goal_thread(binding=binding, cwd=None)
-            await self._validate_goal_thread_ready(thread)
+            thread = await self._open_goal_thread(binding=binding, creation_cwd=None)
+            cwd = await self._validate_goal_thread_ready(thread)
+            self._bindings.sync_native_workspace(
+                binding.id, expected_native_thread_id=thread.id, working_cwd=str(cwd),
+            )
             persisted = await control.get(thread.id)
             if persisted is None:
                 raise GoalNotFound("当前会话没有可恢复的 Codex Goal。")
@@ -4435,6 +4672,7 @@ class CodexRuntime:
                 objective=persisted.objective,
                 receipt_attempted=receipt_attempted,
                 state=GoalOperationState.STARTING,
+                cwd=cwd,
                 persisted=persisted,
                 generation_created_at=persisted.created_at,
                 generation_token_budget=persisted.token_budget,
@@ -4628,7 +4866,7 @@ class CodexRuntime:
                 if ordinary is not None:
                     thread = ordinary.thread
                 else:
-                    thread = await self._open_goal_thread(binding=binding, cwd=None)
+                    thread = await self._open_goal_thread(binding=binding, creation_cwd=None)
                     await self._validate_goal_thread_ready(thread)
                 sentinel = _ActiveGoal(
                     binding_id=binding.id,
@@ -4714,15 +4952,15 @@ class CodexRuntime:
         self,
         *,
         binding: ThreadBinding,
-        cwd: Path | None,
+        creation_cwd: Path | None,
     ) -> NativeThread:
         try:
             if binding.native_thread_id is None:
-                if cwd is None:
+                if creation_cwd is None:
                     raise GoalNotMaterialized(
                         "当前会话还没有原生 Codex Thread。"
                     )
-                thread = await self._codex.thread_start(cwd=str(cwd))
+                thread = await self._codex.thread_start(cwd=str(creation_cwd))
                 self._bindings.assign_native_thread_id(binding.id, thread.id)
             else:
                 thread = await self._resume_thread_for_operation(
@@ -4745,7 +4983,7 @@ class CodexRuntime:
                 "Codex Thread 启动或恢复结果未确认；服务已关闭 admission。"
             ) from error
 
-    async def _validate_goal_thread_ready(self, thread: NativeThread) -> None:
+    async def _validate_goal_thread_ready(self, thread: NativeThread) -> Path:
         try:
             response = await thread.read(include_turns=False)
         except InvalidRequestError as error:
@@ -4770,6 +5008,7 @@ class CodexRuntime:
             raise GoalNotMaterialized(
                 "原生 Thread 尚未持久化 path，当前不能启动或恢复 Goal。"
             )
+        return _native_cwd(native, thread.id)
 
     async def _prompt_goal_locked(self, binding: ThreadBinding) -> _ActiveGoal | None:
         await self._recheck_goal_observation_locked(binding)
@@ -6927,6 +7166,7 @@ class CodexRuntime:
             turn_id=active.handle.id,
             owner_id=active.owner_id,
             origin=active.origin,
+            cwd=active.cwd,
             result=result,
             error=error,
             background_cleanup_requested=active.cleanup_succeeded,
@@ -7249,6 +7489,7 @@ class CodexRuntime:
                 logical_turn_id=handle.id,
                 owner_id=active.owner_id,
                 origin=active.origin,
+                cwd=active.cwd,
                 goal=persisted,
                 final_physical_turn_id=(
                     active.stream_terminal.final_physical_turn_id
@@ -7648,6 +7889,8 @@ class CodexRuntime:
                     "native Thread turns are not materialized yet"
                 ) from error
             raise
+        # Current Thread metadata cannot prove the accepted Turn's directory:
+        # another client may already have changed cwd after its completion.
         return getattr(response, "thread", None)
 
     def _is_retiring_turn(self, active: _ActiveTurn) -> bool:
@@ -7917,6 +8160,33 @@ def _is_paginated_turn_read_unavailable(error: BaseException) -> bool:
 
 def _is_transient_thread_rpc_error(error: BaseException) -> bool:
     return isinstance(error, InternalRpcError) or is_retryable_error(error)
+
+
+def _thread_creation_cwd(binding: ThreadBinding, requested: Path | None) -> Path:
+    cwd = Path(binding.working_cwd) if binding.working_cwd is not None else requested
+    if not isinstance(cwd, Path) or not cwd.is_absolute():
+        raise SteerRace("新建原生会话需要明确的绝对工作目录。")
+    return cwd
+
+
+def _accepted_execution_cwd(cwd: Path | None) -> Path:
+    if not isinstance(cwd, Path) or not cwd.is_absolute():
+        raise SteerRace("无法确认当前任务的原生工作目录，不能使用调用方或 Project 目录替代。")
+    return cwd
+
+
+def _native_cwd(native_thread: object, thread_id: str) -> Path:
+    cwd = getattr(native_thread, "cwd", None)
+    # Public 0.163.0 Thread.cwd is AbsolutePathBuf(RootModel[str]).
+    cwd = getattr(cwd, "root", cwd)
+    if (
+        getattr(native_thread, "id", None) != thread_id
+        or not isinstance(cwd, str)
+        or not cwd
+        or not Path(cwd).is_absolute()
+    ):
+        raise ThreadCatalogError("原生 Thread 未返回匹配身份的绝对工作目录，不能回退到 Project 目录。")
+    return Path(cwd)
 
 
 def _thread_status_type(native_thread: object) -> str | None:

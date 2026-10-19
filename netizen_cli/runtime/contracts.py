@@ -661,6 +661,8 @@ class TurnOutcome:
     activity: TurnActivitySnapshot | None = None
     patch_children: TaskPatchChildren = TaskPatchChildren()
     partial_answers: tuple[PartialAnswer, ...] = ()
+    # Execution-directory evidence for this Turn, never the Project default.
+    cwd: Path | None = None
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:
@@ -742,6 +744,7 @@ class GoalOutcome:
     finalization_error: BaseException | None = None
     patch_children: TaskPatchChildren = TaskPatchChildren()
     partial_answers: tuple[PartialAnswer, ...] = ()
+    cwd: Path | None = None
 
     def __post_init__(self) -> None:
         if self.feedback_revision < 1:

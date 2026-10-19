@@ -9,8 +9,15 @@ instance:
 # User and chat availability are configured in the Feishu app console. Netizen
 # does not maintain a second allowlist.
 projects:
-  # All native Codex Threads under this alias share the exact same cwd.
+  # Default cwd. /new can explicitly select a managed Worktree of this Project.
   test: /home/your-user/projects/test
+
+# Instance-owned Git worktrees; Admin can change these settings for future creates.
+# Omitted root uses <instance-root>/worktrees; existing checkouts are not moved.
+# No Codex App global configuration or private managed index is modified.
+worktrees:
+  # root: /home/your-user/.netizen/worktrees
+  fetchBeforeCreate: false
 
 channel:
   securityMode: audit

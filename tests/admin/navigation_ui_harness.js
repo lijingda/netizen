@@ -52,7 +52,7 @@ const scheduledPlan = () => ({
 fetch = async (path, options = {}) => {
   const url = new URL(path, "https://admin");
   if (!["/api/v1/projects", "/api/v1/schedules", "/api/v1/defaults", "/logout", "/api/v1/identity",
-    "/api/v1/admin-users", "/api/v1/admin-users/selector-config"].includes(url.pathname)) return baseFetch(path, options);
+    "/api/v1/admin-users", "/api/v1/admin-users/selector-config", "/api/v1/worktrees", "/api/v1/worktrees/settings"].includes(url.pathname)) return baseFetch(path, options);
   requests.push({ path: url.pathname, query: url.searchParams, options });
   if (failPage) throw new Error("本页读取失败");
   const next = url.searchParams.has("cursor");
@@ -66,6 +66,8 @@ fetch = async (path, options = {}) => {
     next_cursor: next ? null : "plans-next", default_timezone: "Asia/Shanghai", actions: {},
   };
   else if (url.pathname === "/api/v1/defaults") data = { items: [], has_more: false, actions: {} };
+  else if (url.pathname === "/api/v1/worktrees") data = { items: [], nextCursor: null };
+  else if (url.pathname === "/api/v1/worktrees/settings") data = { root: "", effectiveRoot: "/instance/worktrees", editable: false, fetchBeforeCreate: false, actions: {} };
   else if (url.pathname === "/api/v1/identity") data = { openId: "fixture-admin", name: "管理员" };
   else if (url.pathname === "/api/v1/admin-users") data = {
     users: [], revision: 1, addAction: adminGrant, selectorAction: adminGrant,
@@ -85,6 +87,15 @@ const lastQuery = (path) => requests.findLast((request) => request.path === path
   assert.equal(historyEntries.length, 1, "initial canonicalization replaces, not pushes");
   assert(!window.location.search.includes("cursor="));
   assert(!window.location.search.includes("actionToken="));
+  if (initialUrl.startsWith("/worktrees")) {
+    assert.equal(state.tab, "worktrees");
+    assert.equal(href(), "/worktrees");
+    assert.equal(document.querySelector("#worktrees").hidden, false);
+    assert.match(document.querySelector("#worktrees-body").textContent, /本页没有受管 Worktree/);
+    assert.equal(document.querySelector("#worktree-create-submit").disabled, true);
+    assert(!lastQuery("/api/v1/worktrees").has("cursor"));
+    return;
+  }
   if (initialUrl.startsWith("/sessions/ordinary") && !initialUrl.includes("project=")) {
     const root = document.querySelector("#session-filter").querySelectorAll("[data-time-range]")
       .find((candidate) => candidate.dataset.timeRangeField === "updated");

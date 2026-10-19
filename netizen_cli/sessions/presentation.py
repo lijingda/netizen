@@ -141,7 +141,7 @@ def result_bytes(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
-_PROTECTED = frozenset({"id", "threadId", "bindingId", "chatId", "topicId", "turnId", "cursor", "nextCursor", "afterCursor", "latestAssistantMessageId", "latestToolMarkerId", "projectId", "sourceThreadId", "senderThreadId", "receiverThreadIds", "agentThreadId", "code", "type", "status", "reason", "order", "disposition"})
+_PROTECTED = frozenset({"id", "threadId", "bindingId", "chatId", "topicId", "turnId", "cursor", "nextCursor", "afterCursor", "latestAssistantMessageId", "latestToolMarkerId", "projectId", "sourceThreadId", "senderThreadId", "receiverThreadIds", "agentThreadId", "cwd", "code", "type", "status", "reason", "order", "disposition"})
 
 
 def fit_result(value: dict[str, Any]) -> dict[str, Any]:

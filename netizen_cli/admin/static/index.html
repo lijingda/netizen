@@ -9,6 +9,7 @@
   <script src="/static/chat-picker.js" defer></script>
   <script src="/static/identity.js" defer></script>
   <script src="/static/session-access.js" defer></script>
+  <script src="/static/worktrees.js" defer></script>
   <script src="/static/admin.js" defer></script>
 </head>
 <body>
@@ -24,6 +25,7 @@
 
   <nav class="tabs" aria-label="管理模块">
     <a class="tab active" data-tab="projects" href="/projects" aria-current="page">Projects</a>
+    <a class="tab" data-tab="worktrees" href="/worktrees">Worktrees</a>
     <a class="tab" data-tab="sessions" href="/sessions/ordinary">Sessions</a>
     <a class="tab" data-tab="schedules" href="/schedules">定时任务</a>
     <a class="tab" data-tab="defaults" href="/defaults">默认会话配置</a>
@@ -65,6 +67,34 @@
         <span id="projects-page" aria-live="polite">第 1 页</span>
         <button id="projects-next" class="next" disabled>下一页</button>
       </nav>
+    </section>
+
+    <section id="worktrees" class="panel" aria-labelledby="worktrees-heading" hidden>
+      <div class="section-head"><div><p class="eyebrow">MANAGED CHECKOUTS</p><h2 id="worktrees-heading">Worktrees</h2></div><button class="refresh" data-refresh="worktrees">刷新</button></div>
+      <p class="hint">仅管理本实例创建的工作区。多个会话可共享文件和分支；列表按需查询，不扫描未提交内容，也不能证明没有外部客户端使用。</p>
+      <div class="forms-grid">
+        <form id="worktree-settings" class="card-form">
+          <h3>配置</h3>
+          <label>新建根目录（留空使用实例默认目录）<input id="worktree-root" maxlength="4096"></label>
+          <p id="worktree-effective-root" class="hint"></p>
+          <label class="cascade-choice"><input id="worktree-fetch" type="checkbox">创建前 fetch；失败则终止创建</label>
+          <p class="hint">只影响之后创建的位置，已有工作区仍按原路径管理；不修改 Codex App 配置。</p>
+          <button id="worktree-settings-save" type="submit" disabled>保存配置</button>
+        </form>
+        <form id="worktree-create" class="card-form">
+          <h3>新建 Worktree</h3>
+          <label>Project<select id="worktree-project" required><option value="">选择 Project</option></select></label>
+          <label>检出方式<select id="worktree-mode"><option value="detached">Detached（不绑定命名分支）</option><option value="existing">检出已有本地分支</option><option value="new">创建并检出新分支</option></select></label>
+          <label id="worktree-ref-label">起点提交 / 分支<input id="worktree-ref" list="worktree-refs" placeholder="HEAD"><datalist id="worktree-refs"></datalist></label>
+          <label id="worktree-existing-label" hidden>本地分支<select id="worktree-existing"></select></label>
+          <label id="worktree-new-label" hidden>新分支名称<input id="worktree-new-branch" maxlength="1024"></label>
+          <p id="worktree-create-note" class="hint">只检出已提交内容，不复制未提交、未跟踪或忽略文件，不执行环境初始化。不创建会话。</p>
+          <button id="worktree-create-submit" type="submit" disabled>创建 Worktree</button>
+        </form>
+      </div>
+      <p id="worktree-result" class="status" role="status" aria-live="polite"></p>
+      <div class="table-wrap"><table><thead><tr><th>Project / 标识</th><th>工作目录</th><th>当前状态</th><th>分支 / HEAD</th><th>关联会话</th><th>操作</th></tr></thead><tbody id="worktrees-body"></tbody></table></div>
+      <nav class="pagination" aria-label="Worktrees 分页"><button id="worktrees-previous" class="next" disabled>上一页</button><span id="worktrees-page" aria-live="polite">第 1 页</span><button id="worktrees-next" class="next" disabled>下一页</button></nav>
     </section>
 
     <section id="sessions" class="panel" aria-labelledby="sessions-heading" hidden>

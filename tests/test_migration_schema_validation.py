@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from netizen_cli.bindings import BindingStore, _COMPATIBLE_INDEXES
-from netizen_cli.database_migrations import plan_channel_database
+from netizen_cli.database_migrations import plan_channel_database, migrate_channel_database
 from netizen_cli.migrations.schema import require_schema
 
 
@@ -36,6 +36,7 @@ class MigrationSchemaValidationTest(unittest.TestCase):
 
     def test_compatible_updated_indexes_preserve_v14_data_and_match_new_store(self) -> None:
         self.create_v14()
+        migrate_channel_database(self.database, expected_source_version=14)
 
         def saved_data(connection):
             return tuple(line for line in connection.iterdump() if line.startswith("INSERT INTO"))
@@ -60,11 +61,12 @@ class MigrationSchemaValidationTest(unittest.TestCase):
                     "side_topics_state_updated": (("state", 0), ("updated_at", 1), ("side_id", 1)),
                 })
             self.assertEqual(plan_channel_database(self.database), {
-                "source_version": 14, "target_version": 14, "steps": [],
+                "source_version": 15, "target_version": 15, "steps": [],
             })
 
     def test_failed_compatible_index_creation_rolls_back_without_changing_data(self) -> None:
         self.create_v14()
+        migrate_channel_database(self.database, expected_source_version=14)
         with closing(sqlite3.connect(self.database)) as connection:
             before = tuple(line for line in connection.iterdump() if line.startswith("INSERT INTO"))
         with patch("netizen_cli.bindings._COMPATIBLE_INDEXES", (*_COMPATIBLE_INDEXES, "INVALID SQL")):

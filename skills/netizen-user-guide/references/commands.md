@@ -9,7 +9,7 @@ control 或一个 prompt，不能串联多个命令。群聊中的命令同样�
 | --- | --- | --- |
 | 普通文本 | 空闲时开始任务；运行中补充当前任务，不排队 | [Turn 与 steer](concepts.md#turnsteer-与排队) |
 | `//...` | 将字面 `/...` 作为普通任务文本发送 | [文本与斜杠](messages.md#普通文本和斜杠) |
-| `/new` | 用卡片选择 Project 并新建当前会话，不接受参数 | [新建会话](sessions.md#新建与配置-project) |
+| `/new` | 用卡片选择 Project 及可选受管 worktree，新建当前会话；不接受参数 | [新建会话](sessions.md#新建与配置-project) |
 | `/defaults` | 用一张表单查看、保存或删除当前聊天的会话默认配置，不接受参数 | [默认配置](sessions.md#默认会话配置与自动创建) |
 | `/settings` | 登记、创建、启用或停用 Project | [Project 管理](sessions.md#新建与配置-project) |
 | `/config` | 修改当前空闲会话的模型、思考强度、速度、任务反馈和群聊消息范围，后续新任务生效 | [会话设置](sessions.md#session-settings) |
@@ -26,7 +26,7 @@ control 或一个 prompt，不能串联多个命令。群聊中的命令同样�
 | `/status` | 查看会话、原生任务步骤、上下文窗口和配置来源 | [状态快照](status-and-control.md#status) |
 | `/usage` | 按需查看共享 Codex 账号的剩余额度和重置时间；无需创建会话 | [账号额度](status-and-control.md#usage) |
 | `/stop` | 中断当前任务；Goal 先暂停，不保证所有工具进程退出 | [停止语义](status-and-control.md#stop) |
-| `/side [首轮问题]` | 从已有历史创建临时分支话题，与 Parent 共享项目目录 | [Side](fork-side-goal.md#side-临时话题) |
+| `/side [首轮问题]` | 从已有历史创建临时分支话题，与 Parent 共享实际工作目录 | [Side](fork-side-goal.md#side-临时话题) |
 | `/side close` | 在 Side 话题内结束临时会话 | [Side](fork-side-goal.md#side-临时话题) |
 | `/goal [目标]` | 查看或启动持续目标 | [Goal](fork-side-goal.md#goal) |
 | `/goal pause`、`/goal resume`、`/goal clear` | 暂停、恢复或显式结束当前 Goal | [Goal](fork-side-goal.md#goal) |

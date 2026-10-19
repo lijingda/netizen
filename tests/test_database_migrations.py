@@ -74,18 +74,21 @@ class DatabaseMigrationsTest(unittest.TestCase):
         }
 
     def test_current_database_noop_and_plan_do_not_write(self) -> None:
+        migrations.migrate_channel_database(self.database, expected_source_version=14)
         before = self.files()
-        expected = {"source_version": 14, "target_version": 14, "steps": []}
+        expected = {"source_version": 15, "target_version": 15, "steps": []}
         self.assertEqual(migrations.plan_channel_database(self.database), expected)
-        self.assertEqual(migrations.migrate_channel_database(self.database, expected_source_version=14), expected)
+        self.assertEqual(migrations.migrate_channel_database(self.database, expected_source_version=15), expected)
         self.assertEqual(self.files(), before)
         validate_channel_database(self.database)
 
-    def test_frozen_baseline_matches_current_runtime_database(self) -> None:
+    def test_migrated_baseline_matches_current_runtime_database(self) -> None:
         path = self.database.parent / "fresh.sqlite3"
         store = BindingStore(path)
         store.close()
-        self.assertEqual(migrations.plan_channel_database(path)["source_version"], 14)
+        self.assertEqual(migrations.plan_channel_database(path)["source_version"], 15)
+        migrations.migrate_channel_database(self.database, expected_source_version=14)
+        validate_channel_database(self.database)
 
     def test_supported_cross_version_path_preserves_all_original_metadata(self) -> None:
         before = self.contents()
@@ -247,13 +250,14 @@ class DatabaseMigrationsTest(unittest.TestCase):
         self.assertEqual(self.files(), before)
 
     def test_current_wal_preflight_and_noop_preserve_uncheckpointed_data(self) -> None:
+        migrations.migrate_channel_database(self.database, expected_source_version=14)
         connection = sqlite3.connect(self.database, isolation_level=None)
         self.addCleanup(connection.close)
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("UPDATE projects SET revision = 7")
         before = self.files()
         self.assertIn("channel.sqlite3-wal", before)
-        self.assertEqual(migrations.migrate_channel_database(self.database, expected_source_version=14)["steps"], [])
+        self.assertEqual(migrations.migrate_channel_database(self.database, expected_source_version=15)["steps"], [])
         self.assertEqual(self.files(), before)
         self.assertEqual(connection.execute("SELECT revision FROM projects").fetchone()[0], 7)
 

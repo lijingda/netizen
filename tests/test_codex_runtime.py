@@ -464,6 +464,7 @@ class FakeThread:
                 ephemeral=self.ephemeral,
                 forked_from_id=self.forked_from_id,
                 path=f"/tmp/{self.id}.jsonl",
+                cwd=self.codex.thread_cwds.get(self.id, str(Path.cwd())),
             )
         )
 
@@ -471,6 +472,7 @@ class FakeThread:
 class FakeCodex:
     def __init__(self) -> None:
         self.next_thread = 1
+        self.thread_cwds: dict[str, str] = {}
         self.start_kwargs: list[dict[str, object]] = []
         self.resume_calls: list[tuple[str, dict[str, object]]] = []
         self.turn_inputs: list[tuple[str, object]] = []
@@ -532,6 +534,7 @@ class FakeCodex:
         if self.start_errors:
             raise self.start_errors.pop(0)
         thread = FakeThread(f"native-{self.next_thread}", self)
+        self.thread_cwds[thread.id] = str(kwargs.get("cwd", Path.cwd()))
         self.next_thread += 1
         return thread
 
@@ -567,6 +570,7 @@ class FakeCodex:
         self.fork_calls.append((thread_id, kwargs))
         if self.fork_errors:
             raise self.fork_errors.pop(0)
+        self.thread_cwds[f"side-{len(self.fork_calls)}"] = self.thread_cwds.get(thread_id, str(Path.cwd()))
         return FakeThread(
             f"side-{len(self.fork_calls)}",
             self,
@@ -1068,6 +1072,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             task_feedback=task_feedback,
         )
         self.store.assign_native_thread_id(binding.id, native_thread_id)
+        self.codex.thread_cwds[native_thread_id] = str(self.cwd)
         return self.store.get(binding.id)
 
     async def open_side(self):
@@ -1075,6 +1080,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
         return await self.open_side_for_binding(binding)
 
     async def open_side_for_binding(self, binding, *, source: str | None = None):
+        self.codex.thread_cwds.setdefault(binding.native_thread_id, str(self.cwd))
         record = self.store.create_side_topic(
             app_id=self.scope.app_id,
             chat_id=self.scope.chat_id,
@@ -8908,6 +8914,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         binding = self.binding()
         self.store.assign_native_thread_id(binding.id, "native-existing")
+        self.codex.thread_cwds["native-existing"] = str(self.cwd)
         self.codex.resume_errors.append(InvalidRequestError(
             -32600, "thread native-existing already has an active writer",
         ))
@@ -8991,6 +8998,7 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     codex.start_errors.append(error)
                 else:
                     self.store.assign_native_thread_id(binding.id, "native-existing")
+                    codex.thread_cwds["native-existing"] = str(self.cwd)
                     codex.turn_errors_after_start.append(error)
                 runtime = CodexRuntime(
                     codex=codex,
@@ -10728,8 +10736,6 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ("interrupted", True),
         ):
             with self.subTest(recovered_status=recovered_status, recovery=recovery):
-                if recovery:
-                    self.codex.read_errors.append(InternalRpcError(-32603, "temporary history outage"))
                 recovery_entered = asyncio.Event()
                 release_recovery = asyncio.Event()
                 native_read = FakeThread.read
@@ -10766,6 +10772,8 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 ):
                     submission = await self.submit(binding)
                     handle = self.codex.handles[-1]
+                    if recovery:
+                        self.codex.read_errors.append(InternalRpcError(-32603, "temporary history outage"))
                     submission.release_receipt_attempt()
                     try:
                         await asyncio.wait_for(recovery_entered.wait(), 1)
@@ -10981,10 +10989,10 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.codex.handles), 1)
 
     async def _park_turn_for_recovery(self, binding):
+        submission = await self.submit(binding)
         self.codex.read_errors.extend(
             InternalRpcError(-32603, "temporary history outage") for _ in range(4)
         )
-        submission = await self.submit(binding)
         submission.release_receipt_attempt()
         await self.runtime.wait_idle()
         self.assertEqual(self.runtime.active_turn(binding.id).state, ActiveState.OBSERVATION_UNAVAILABLE)
@@ -11327,8 +11335,8 @@ class CodexRuntimeTest(unittest.IsolatedAsyncioTestCase):
                             response.thread.turns += response.thread.turns[-1:]
                     return response
 
+                submission = await self.submit(binding)
                 with patch.object(FakeThread, "read", invalid_read):
-                    submission = await self.submit(binding)
                     self.codex.handles[-1].fail("backend failure")
                     submission.release_receipt_attempt()
                     await self.runtime.wait_idle()

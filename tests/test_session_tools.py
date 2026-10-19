@@ -23,6 +23,7 @@ from netizen_cli.sessions.policy import SessionAccessPolicy, SessionAccessRule
 from netizen_cli.sessions.presentation import fit_result, result_bytes, turn_summary
 from netizen_cli.sessions.schema import TOOL_ARGUMENTS, validate_arguments
 from netizen_cli.sessions.service import SessionService
+from netizen_cli.worktrees.errors import WorktreeError
 
 
 class Policy:
@@ -129,6 +130,123 @@ class SessionToolTests(unittest.IsolatedAsyncioTestCase):
 
     async def call(self, name, data=None, source="source"):
         return await self.service.call(name, data or {}, source)
+
+    async def test_discovery_uses_native_cwd_and_reports_unknown_without_project_fallback(self):
+        self.catalog.items["target"]["cwd"] = "/managed/worktree"
+        listing = await self.call("list_threads")
+        self.assertEqual(next(item for item in listing["threads"] if item["id"] == "target")["cwd"], "/managed/worktree")
+        async def unavailable(identifier):
+            if identifier == "target":
+                raise OSError("native unavailable")
+        self.catalog.read_hook = unavailable
+        listing = await self.call("list_threads")
+        target = next(item for item in listing["threads"] if item["id"] == "target")
+        self.assertIsNone(target["cwd"])
+        self.assertTrue(target["netizen"]["cwdUnavailable"])
+
+    async def test_lazy_discovery_uses_explicit_working_cwd_without_native_creation(self):
+        lazy = self.store.create_channel_binding(scope=FeishuScope("app", "lazy", ScopeKind.GROUP),
+                                                project_alias="p", creator_id="person", working_cwd="/selected/worktree")
+        listing = await self.call("list_threads")
+        item = next(item for item in listing["threads"] if item["netizen"]["bindingId"] == lazy.id)
+        self.assertEqual(item["cwd"], "/selected/worktree")
+        self.assertIsNone(item["id"])
+        self.assertEqual(self.calls, [])
+
+    def worktree_service(self):
+        calls = []
+        async def query(**kwargs):
+            calls.append(("list", kwargs))
+            return {"worktrees": [{"id": "managed", "cwd": "/managed/tree"}], "nextCursor": None}
+        async def create(*, project_alias, **kwargs):
+            calls.append(("create", {"project_alias": project_alias, **kwargs}))
+            return {"worktree": {"id": "new-managed", "cwd": "/managed/new", "creationState": "ready"}}
+        async def cwd(binding_id, **kwargs):
+            self.assertEqual(binding_id, self.source.id)
+            return Path("/actual/source")
+        self.catalog.resolve_binding_cwd = cwd
+        self.service._worktrees = SimpleNamespace(query=query, create=create)
+        return calls
+
+    async def test_worktree_tools_use_source_project_and_actual_cwd_without_creating_session(self):
+        calls = self.worktree_service()
+        listed = await self.call("list_worktrees", {"limit": 4, "cursor": "page"})
+        self.assertEqual(listed["worktrees"][0]["id"], "managed")
+        result = await self.call("create_worktree", {"ref": "refs/heads/main", "allowAsync": True})
+        self.assertEqual(result["worktree"]["id"], "new-managed")
+        self.assertEqual(calls, [
+            ("list", {"project_alias": "p", "cursor": "page", "limit": 4}),
+            ("create", {"project_alias": "p", "expected_project_revision": self.store.get_project("p").revision,
+                        "ref": "refs/heads/main", "source_cwd": Path("/actual/source"),
+                        "origin_binding_id": self.source.id, "agent_default": True}),
+        ])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.catalog.items["source"]["cwd"], "/project")
+
+    async def test_worktree_discovery_and_creation_keep_independent_access(self):
+        calls = self.worktree_service()
+        self.policy.discovery = set()
+        self.policy.read_send = {"chat-a"}
+        self.assertEqual((await self.call("list_worktrees"))["error"]["code"], "access_denied")
+        self.assertNotIn("error", await self.call("create_worktree"))
+        self.policy.discovery = {"chat-a"}
+        self.policy.read_send = set()
+        self.assertNotIn("error", await self.call("list_worktrees"))
+        self.assertEqual((await self.call("create_worktree"))["error"]["code"], "access_denied")
+        self.assertEqual([name for name, _ in calls], ["create", "list"])
+
+    async def test_removed_branch_tool_is_rejected_before_backend_dispatch(self):
+        calls = self.worktree_service()
+        result = await self.call("list_worktree_branches")
+        self.assertEqual(result["error"]["code"], "unknown_tool")
+        self.assertEqual(calls, [])
+        self.assertEqual(self.calls, [])
+
+    async def test_worktree_creation_does_not_fall_back_when_native_cwd_unavailable(self):
+        calls = self.worktree_service()
+        async def failed(*args, **kwargs):
+            raise OSError("unavailable cwd")
+        self.catalog.resolve_binding_cwd = failed
+        result = await self.call("create_worktree")
+        self.assertEqual(result["error"]["code"], "unavailable")
+        self.assertEqual(calls, [])
+
+    async def test_worktree_known_partial_failure_preserves_receipt_and_unknown_is_not_retried(self):
+        self.worktree_service()
+        calls = []
+        async def known(*args, **kwargs):
+            calls.append(kwargs)
+            raise WorktreeError("creation_failed", "Checkout failed; inspect retained registration.",
+                                details={"worktree": {"id": "registered", "creationState": "failed"}})
+        self.service._worktrees.create = known
+        result = await self.call("create_worktree")
+        self.assertEqual(result["error"]["code"], "creation_failed")
+        self.assertEqual(result["worktree"]["id"], "registered")
+        self.assertEqual(len(calls), 1)
+        async def unknown(*args, **kwargs):
+            calls.append(kwargs)
+            raise OSError("sensitive git output")
+        self.service._worktrees.create = unknown
+        result = await self.call("create_worktree")
+        self.assertEqual(result["error"]["code"], "outcome_unknown")
+        self.assertNotIn("sensitive", json.dumps(result))
+        self.assertEqual(len(calls), 2)
+
+    async def test_worktree_results_never_shorten_usable_paths_or_skip_pages(self):
+        self.worktree_service()
+        async def huge(**kwargs):
+            return {"worktrees": [{"id": "id", "cwd": "/" + "x" * 9000}], "nextCursor": "next"}
+        self.service._worktrees.query = huge
+        result = await self.call("list_worktrees")
+        self.assertEqual(result["error"]["code"], "response_too_large")
+        self.assertNotIn("nextCursor", result)
+        self.assertNotIn("worktrees", result)
+        async def huge_create(*args, **kwargs):
+            return {"worktree": {"id": "created", "cwd": "/" + "x" * 9000, "creationState": "ready"}}
+        self.service._worktrees.create = huge_create
+        result = await self.call("create_worktree")
+        self.assertEqual(result["worktree"], {"id": "created", "creationState": "ready"})
+        self.assertLessEqual(result_bytes(result), 8000)
 
     async def test_topic_metadata_reuses_native_feishu_thread_link(self):
         binding = self.store.create_channel_binding(scope=FeishuScope("app", "chat-topic", ScopeKind.TOPIC, "omt_topic"),
@@ -685,8 +803,35 @@ class SessionMcpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["default_tools_approval_mode"], "approve")
         self.assertEqual(config["tools"]["send_message_to_thread"]["approval_mode"], "prompt")
         self.assertEqual(config["tools"]["create_thread"]["approval_mode"], "prompt")
+        self.assertEqual(config["tools"]["create_worktree"]["approval_mode"], "prompt")
         self.assertGreater(config["tool_timeout_sec"], 120)
         self.assertEqual(set(config["enabled_tools"]), set(TOOL_ARGUMENTS))
+        self.assertNotIn("list_worktree_branches", config["enabled_tools"])
+
+    async def test_removed_branch_tool_is_not_advertised_and_calls_fail_explicitly(self):
+        listed = await self.runner._list_tools(None, None)
+        self.assertNotIn("list_worktree_branches", {tool.name for tool in listed.tools})
+        result = await self.call("list_worktree_branches", {}, {"threadId": "source"})
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content["error"]["code"], "unknown_tool")
+        self.assertEqual(self.calls, [])
+
+    async def test_worktree_schemas_cannot_override_caller_path_project_or_delete(self):
+        self.assertEqual(set(TOOL_ARGUMENTS["create_thread"].model_fields), {"prompt", "title", "model"})
+        self.assertNotIn("delete_worktree", TOOL_ARGUMENTS)
+        for tool, data in (("create_thread", {"prompt": "p", "cwd": "/other"}),
+                           ("create_worktree", {"cwd": "/other"}),
+                           ("create_worktree", {"projectAlias": "other"}),
+                           ("create_worktree", {"branch": "new"}),
+                           ("create_worktree", {"allowAsync": False}),
+                           ("create_worktree", {"allowAsync": 1}),
+                           ("list_worktrees", {"sourceThreadId": "other"})):
+            with self.subTest(tool=tool, data=data), self.assertRaises(SessionToolError):
+                validate_arguments(tool, data)
+        self.assertEqual(validate_arguments("create_worktree", {}), {"allowAsync": True})
+        listed = {tool.name: tool for tool in (await self.runner._list_tools(None, None)).tools}
+        self.assertFalse(listed["create_worktree"].annotations.read_only_hint)
+        self.assertTrue(listed["list_worktrees"].annotations.read_only_hint)
 
     async def test_error_remains_a_tool_failure(self):
         async def fail(*args):

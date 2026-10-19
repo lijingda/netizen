@@ -161,7 +161,7 @@ Binding-local 情形。它不表示 Thread 历史损坏，也不改变持久 Thr
 
 **Turn File / 本轮文件**：一个已完成的 Ordinary/Side Turn，或 Goal 的 exact 最终
 physical Turn 及其本轮新建子任务，通过受支持的原生事实指向的当前文件。
-Project 只是相对路径解析基准，
+会话实际工作目录只是相对路径解析基准，
 不是文件授权边界；自包含卡片在 callback payload 中携带 absolute path 与完整 manifest，
 切换 active Binding 或服务重启不改变已发送卡片的操作来源。
 _Avoid_：“产物快照”“Turn 完成时版本”，因为 Netizen 不保存内容、摘要或修改检测，
@@ -311,14 +311,14 @@ Binding 的新 mutation；当前不猜测重挂或替用户暂停。
 当前 Goal、Skills、Side 与 Native Thread Delete 已通过独立口接入，Plan control 与 Apps
 仍是显式 gap。
 
-**Project**：Project Registry 中显式登记的 Channel alias 及其 canonical 真实 cwd。
-多个 native Thread 可同时共享和修改它；它不是 clone、worktree 或快照。
+**Project**：Project Registry 中显式登记的 Channel alias 及其 canonical 默认工作目录。
+多个会话可共享该目录，也可选择其受管 worktree；Project 本身不是 clone、worktree 或快照。
 
 **Project Registry**：整个 Netizen 实例共享的 Project 目录。它保存 Project 的
 alias、canonical cwd、是否可用于新会话及删除记录；停用不影响已有会话，也不删除目录。
 
 **Project Deletion / Project 删除**：实例管理员明确确认的 Project 登记与其完整关联普通
-会话的永久清理，包含归档会话和关联 Side 的结束；不包含磁盘代码目录。
+会话的永久清理，包含归档会话和关联 Side 的结束；可另选删除关联受管 worktree，但始终保留原 Project 代码目录。
 
 **Project Tombstone / Project 墓碑**：已删除 Project 留下的 alias 登记记录，防止配置在
 重启后恢复它；显式重新登记同名 Project 才开始新的有效登记。
@@ -369,7 +369,8 @@ JSONL/SQLite 格式。
 **Channel Database**：`channel.sqlite3`，只保存 Scope、Binding、Project Registry、
 schema version、Channel SDK dedup TTL key、Binding 上可选的 Binding Turn Settings
 目录 ID、Binding Task Feedback、Mention Context Mode 与 exact Context Boundary
-metadata，以及不含 native ID/content 的 Side Topic Route/墓碑；不保存补充消息正文、
+metadata、受管 Worktree 身份与创建回执、Project 登记代次和会话工作区选择/关联，
+以及不含 native ID/content 的 Side Topic Route/墓碑；不保存补充消息正文、
 解析后的 wire value、Codex 已生效配置、Turn Activity Projection、Progress Card session、
 普通 Thread 订阅状态或空闲 timer。
 
@@ -377,3 +378,30 @@ metadata，以及不含 native ID/content 的 Side Topic Route/墓碑；不保�
 发送者。Netizen 不再按 user、chat 或角色做二次准入；同一普通 Scope 的参与者共享
 Binding 控制能力，同一 Side Topic 的参与者共享 stop/close 能力，不限创建者；这不会
 授予 Admin Control Plane 的实例级 authority。
+
+## Worktree 词汇
+
+以下为 [ADR 0085](docs/adr/0085-manage-worktrees-independently-of-sessions.md)
+规定的独立资源与会话目录关系；实现和验收边界见工程设计与部署文档。
+
+**Managed Worktree / 受管工作树**：经 Netizen worktree 能力创建并登记、具有独立身份的
+Git 工作区，可供多个会话共享；它不是某个会话的私有副本。
+_Avoid_：会话私有目录、会话快照。
+
+**External Worktree / 外部工作树**：不是由本实例 worktree 能力创建并登记的工作区。
+目录可被访问或被某个会话使用，不等于本实例拥有其管理和删除权。
+
+**Session Working Directory / 会话工作目录**：会话实际使用的目录，区别于所属 Project
+登记的默认目录；它可以是 worktree 中的项目子目录，而不一定是 checkout 根目录。
+
+**Worktree Session Association / 工作树会话关联**：会话以某个受管工作区作为实际 cwd 的关系。
+多个会话可以关联同一工作区，创建该工作区的会话不因此成为它的唯一使用者或所有者。
+
+**Worktree Creation Origin / 工作树创建来源**：发起受管工作区创建的入口或会话来源，
+区别于以该工作区作为 cwd 的会话关联；创建来源本身不赋予工作区私有所有权。
+
+**Orphaned Managed Worktree / 项目已删除的受管工作树**：所属 Project 登记已删除、但被
+显式保留的受管工作区；它不同于目录已经从磁盘消失的工作区。
+
+**Missing Worktree Directory / 工作树目录缺失**：受管登记指向的原目录已确认不存在，
+不代表关联会话历史或原生 Thread 已被删除，也不同于状态查询失败或超时。

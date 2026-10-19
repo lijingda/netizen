@@ -50,6 +50,8 @@ import lark_oapi as lark
 from openai_codex import AsyncCodex, CodexConfig
 
 from .admin.web import AdminWebRunner
+from .admin.port_config import ConfigFileEditor
+from .worktrees.settings import WorktreeSettingsService
 from .admin.users import AdminUsers, AdminUsersError
 from .admin.feishu import FeishuClient
 from .cli_setup import require_admin_binding, SetupError
@@ -213,9 +215,11 @@ class ServiceCore:
                 access_host=self._settings.admin_web.access_host,
             )
             await self._admin.bind()
+            config_editor = (ConfigFileEditor(self._admin.config_snapshot)
+                             if self._admin.config_snapshot is not None else None)
             self._session_policy = SessionPolicyService(
                 self._settings.session_tools,
-                config_snapshot=self._admin.config_snapshot,
+                config_editor=config_editor,
             )
             stage_started_at = _log_startup_timing("Admin listener", stage_started_at)
 
@@ -318,6 +322,10 @@ class ServiceCore:
                 chat_directory=FeishuChatDirectory(self._feishu_read_client),
                 root=self._instance_root,
             )
+            worktrees = self._management.enable_worktrees(settings=WorktreeSettingsService(
+                self._settings.worktrees, default_root=self._instance_root / "worktrees",
+                config_editor=config_editor,
+            ))
             schedules = self._management.enable_schedules(
                 app_id=self._settings.app_id, chat_info=self._channel,
             )
@@ -356,6 +364,7 @@ class ServiceCore:
                 create_thread=self.application.create_session_thread,
                 send_message=self.application.send_session_message,
                 history=AppServerThreadHistory(self._codex),
+                worktrees=worktrees,
             )
             self._session_mcp.attach(self._session_service.call)
             self._scheduler = Scheduler(

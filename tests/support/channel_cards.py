@@ -21,6 +21,17 @@ def _elements(value: object, tag: str) -> list[dict[str, object]]:
     return found
 
 
+def form_controls(value: object) -> list[dict[str, object]]:
+    """Read submitted controls in display order through presentation containers."""
+    if isinstance(value, dict):
+        if value.get("tag") in {"select_static", "input", "button"} and "name" in value:
+            return [value]
+        return [item for child in value.values() for item in form_controls(child)]
+    if isinstance(value, list):
+        return [item for child in value for item in form_controls(child)]
+    return []
+
+
 def _card_button_value(card: OutboundCard, label: str) -> dict[str, object]:
     values = _card_button_values(card, label)
     if values:
@@ -95,8 +106,7 @@ def new_form_values(
     )
     fields = {
         item["name"]: item
-        for item in form["elements"]
-        if "name" in item
+        for item in form_controls(form)
     }
     project_reference = next(
         option["value"]

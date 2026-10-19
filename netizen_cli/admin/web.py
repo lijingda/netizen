@@ -165,6 +165,7 @@ from ..session_settings import SessionSettings, SessionSettingsError
 from ..sessions.policy import (
     SessionAccessPolicy, SessionPolicyConflict, SessionPolicyError, SessionPolicyService,
 )
+from ..worktrees.errors import WorktreeError
 
 
 logger = logging.getLogger(__name__)
@@ -182,7 +183,7 @@ _RUNTIME_SNAPSHOT_BATCH_SIZE = 50
 _AUTO_PORTS = range(8787, 8887)
 _ADMIN_PAGE_PATHS = frozenset({
     "/", "/projects", "/sessions/ordinary", "/sessions/temporary",
-    "/schedules", "/defaults", "/maintenance", "/system",
+    "/schedules", "/defaults", "/maintenance", "/system", "/worktrees",
 })
 
 _SECURITY_HEADERS = (
@@ -250,6 +251,8 @@ class AdminActionPreconditions:
     default_order_revision: ExpectedValue[int]
     admin_revision: ExpectedValue[int] = ExpectedValue.dont_check()
     session_policy_revision: ExpectedValue[str] = ExpectedValue.dont_check()
+    cascade_delete: ExpectedValue[bool] = ExpectedValue.dont_check()
+    worktree_settings_revision: ExpectedValue[str] = ExpectedValue.dont_check()
 
 
 @dataclass(frozen=True, slots=True)
@@ -570,6 +573,8 @@ class AdminWebApplication:
             return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["identity.js"])
         if route == ("GET", "/static/session-access.js"):
             return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["session-access.js"])
+        if route == ("GET", "/static/worktrees.js"):
+            return Response(200, ((b"Content-Type", b"text/javascript; charset=utf-8"),), self._assets["worktrees.js"])
         if route == ("GET", "/api/v1/identity"):
             _require_query_keys(context.query, set())
             session = self._authenticate(context)
@@ -595,6 +600,12 @@ class AdminWebApplication:
             )
         if route == ("GET", "/api/v1/projects"):
             return await self._projects(context)
+        if route == ("GET", "/api/v1/worktrees"):
+            return await self._worktrees(context)
+        if route == ("GET", "/api/v1/worktrees/branches"):
+            return await self._worktree_branches(context)
+        if route == ("GET", "/api/v1/worktrees/settings"):
+            return self._worktree_settings(context)
         if route == ("GET", "/api/v1/chats"):
             return await self._chats(context)
         if route == ("GET", "/api/v1/chats/validate"):
@@ -639,6 +650,10 @@ class AdminWebApplication:
             )
 
         mutations: dict[str, Callable[[_RequestContext], Awaitable[Response]]] = {
+            "/api/v1/worktrees/create": self._worktree_create,
+            "/api/v1/worktrees/settings": self._worktree_save_settings,
+            "/api/v1/worktrees/delete-preview": self._worktree_delete_preview,
+            "/api/v1/worktrees/delete": self._worktree_delete,
             "/api/v1/session-tool-access/save": self._save_session_tool_access,
             "/api/v1/defaults/save": self._default_save,
             "/api/v1/defaults/delete": self._default_delete,
@@ -1006,6 +1021,124 @@ class AdminWebApplication:
             if page.next_page_token is not None else None,
             "notice": page.notice,
         })
+
+    def _worktree_service(self):
+        service = getattr(self._management, "worktrees", None)
+        if service is None:
+            raise AdminWebError(503, "unavailable", "Worktree 管理暂不可用。")
+        return service
+
+    async def _worktrees(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, {"project", "cursor", "pageSize"})
+        result = await self._worktree_service().query(
+            project_alias=_optional_text_query(context.query, "project", maximum=64),
+            cursor=_optional_one(context.query, "cursor"),
+            limit=_page_size(context.query),
+            deadline=asyncio.get_running_loop().time() + _QUERY_DEADLINE_SECONDS,
+        )
+        items = [{**item, "actions": {"previewDelete": self._grant(
+            context, "worktrees.delete-preview", AdminActionTarget("worktree", item["id"]),
+            _empty_preconditions(),
+        )}} for item in result["items"]]
+        return _json_response(200, {**result, "items": items, "requestId": context.request.request_id})
+
+    async def _worktree_branches(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, {"project"})
+        alias = _optional_text_query(context.query, "project", maximum=64)
+        if not alias:
+            raise AdminWebError(400, "invalid_input", "请选择 Project。")
+        result = await self._worktree_service().branches(project_alias=alias)
+        actions = {}
+        if result.get("isGit", True):
+            actions["create"] = self._grant(
+                context, "worktrees.create", AdminActionTarget("project", alias),
+                _empty_preconditions(project_revision=ExpectedValue.expect(result["projectRevision"])),
+            )
+        return _json_response(200, {**result, "actions": actions, "requestId": context.request.request_id})
+
+    async def _worktree_create(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        payload, grant = self._redeem(
+            context, "worktrees.create", expected_resource="project", allowed_extra={"mode"}, optional_extra={"ref", "branch"},
+        )
+        mode = _required_text(payload, "mode", maximum=16)
+        if mode not in {"detached", "existing", "new"}:
+            raise AdminWebError(400, "invalid_input", "检出方式无效。")
+        resource = await self._mutation(context, "worktrees.create", grant.target.target_id,
+            self._worktree_service().create(
+                project_alias=grant.target.target_id,
+                expected_project_revision=_expected_value(_grant_preconditions(grant).project_revision, "Project revision"),
+                ref=_optional_text_body(payload, "ref", maximum=1024), mode=mode,
+                branch=_optional_text_body(payload, "branch", maximum=1024),
+            ),
+        )
+        return _json_response(200, {"requestId": context.request.request_id, "resource": resource})
+
+    def _worktree_settings(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        settings = self._worktree_service().settings_view()
+        actions = {}
+        if settings["editable"]:
+            actions["save"] = self._grant(
+                context, "worktrees.settings", AdminActionTarget("worktree-settings", "instance"),
+                _empty_preconditions(worktree_settings_revision=ExpectedValue.expect(settings["revision"])),
+            )
+        return _json_response(200, {**settings, "actions": actions, "requestId": context.request.request_id})
+
+    async def _worktree_save_settings(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        payload, grant = self._redeem(
+            context, "worktrees.settings", expected_resource="worktree-settings",
+            allowed_extra={"root", "fetchBeforeCreate"},
+        )
+        result = await self._mutation(context, "worktrees.settings", "instance",
+            self._worktree_service().update_settings(
+                root="" if payload["root"] == "" else _required_text(payload, "root", maximum=4096),
+                fetch_before_create=_required_bool(payload, "fetchBeforeCreate"),
+                expected_revision=_expected_value(_grant_preconditions(grant).worktree_settings_revision, "Worktree settings revision"),
+            ),
+        )
+        return _json_response(200, {**result, "requestId": context.request.request_id})
+
+    async def _worktree_delete_preview(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        payload, grant = self._redeem(
+            context, "worktrees.delete-preview", expected_resource="worktree", optional_extra={"deleteSessions"},
+        )
+        delete_sessions = _required_bool(payload, "deleteSessions") if "deleteSessions" in payload else False
+        preview = await self._worktree_service().preview_delete(grant.target.target_id, delete_sessions=delete_sessions)
+        actions = {}
+        if preview["safe"]:
+            actions["delete"] = self._grant(
+                context, "worktrees.delete", grant.target,
+                _empty_preconditions(
+                    inventory_fingerprint=ExpectedValue.expect(preview["fingerprint"]),
+                    cascade_delete=ExpectedValue.expect(delete_sessions),
+                ),
+            )
+        # The browser receives a one-shot grant, not a writable inventory token.
+        public = {key: value for key, value in preview.items() if key != "fingerprint"}
+        return _json_response(200, {**public, "actions": actions, "requestId": context.request.request_id})
+
+    async def _worktree_delete(self, context: _RequestContext) -> Response:
+        _require_query_keys(context.query, set())
+        _, grant = self._redeem(context, "worktrees.delete", expected_resource="worktree")
+        preconditions = _grant_preconditions(grant)
+        try:
+            result = await self._mutation(context, "worktrees.delete", grant.target.target_id,
+                self._worktree_service().delete(
+                    grant.target.target_id,
+                    delete_sessions=_expected_value(preconditions.cascade_delete, "Worktree cascade choice"),
+                    expected_fingerprint=_expected_value(preconditions.inventory_fingerprint, "Worktree inventory"),
+                ),
+            )
+        except WorktreeError as error:
+            if not error.details.get("deletedSessionCount"):
+                raise
+            result = {"worktreeId": grant.target.target_id, "deleted": False, "code": error.code,
+                "deletedSessionCount": error.details["deletedSessionCount"],
+                "remainingSessionCount": error.details.get("remainingSessionCount"), "message": str(error)}
+        return _json_response(200, {**result, "requestId": context.request.request_id})
 
     async def _projects(self, context: _RequestContext) -> Response:
         allowed = {"cursor", "pageSize"}
@@ -1586,11 +1719,13 @@ class AdminWebApplication:
 
     async def _project_delete_preview(self, context: _RequestContext) -> Response:
         _require_query_keys(context.query, set())
-        _, grant = self._redeem(
-            context, "projects.delete-preview", expected_resource="project",
+        payload, grant = self._redeem(
+            context, "projects.delete-preview", expected_resource="project", optional_extra={"deleteWorktrees"},
         )
+        delete_worktrees = _required_bool(payload, "deleteWorktrees") if "deleteWorktrees" in payload else False
         snapshot = await self._management.preview_project_delete(
             alias=grant.target.target_id,
+            delete_worktrees=delete_worktrees,
             expected_revision=_expected_value(
                 _grant_preconditions(grant).project_revision, "Project revision",
             ),
@@ -1607,11 +1742,15 @@ class AdminWebApplication:
             "sideCount": len(snapshot.sides),
             "scheduledPlanCount": len(snapshot.scheduled_plans),
             "scheduledRunCount": len(snapshot.scheduled_runs),
+            "worktreeCount": len(snapshot.worktrees),
+            "worktrees": [{"id": item.id, "root": item.root, "cwd": item.cwd} for item in snapshot.worktrees],
+            "deleteWorktrees": delete_worktrees,
             "actions": {"delete": self._grant(
                 context, "projects.delete", AdminActionTarget("project", project.alias),
                 _empty_preconditions(
                     project_revision=ExpectedValue.expect(project.revision),
                     inventory_fingerprint=ExpectedValue.expect(snapshot.fingerprint),
+                    cascade_delete=ExpectedValue.expect(delete_worktrees),
                 ),
             )},
         })
@@ -1628,6 +1767,7 @@ class AdminWebApplication:
                 expected_inventory_fingerprint=_expected_value(
                     preconditions.inventory_fingerprint, "Project inventory",
                 ),
+                delete_worktrees=_expected_value(preconditions.cascade_delete, "Project cascade choice"),
             ),
         )
         messages = {
@@ -1639,6 +1779,8 @@ class AdminWebApplication:
             "schedule_creation_in_progress": "关联定时任务仍在创建话题或执行交接结果未决，请查看剩余记录后重新确认。",
             "fork_creation_in_progress": "关联分支仍在创建话题，请等待创建完成后刷新并重新确认。",
             "delete_failed": "删除未全部完成，请查看剩余会话状态后重新确认。",
+            "worktree_delete_failed": "受管 Worktree 尚未安全删除，请处理剩余项后重新确认。",
+            "worktree_creation_in_progress": "受管 Worktree 正在创建，请等待交接完成后重新确认。",
         }
         if result.deleted:
             message = f"已删除 Project {result.project_alias} 及关联 Sessions，代码目录已保留。"
@@ -1647,7 +1789,7 @@ class AdminWebApplication:
                 f"Project {result.project_alias} 已保留并停用。"
                 f"已清理 {result.deleted_session_count} 个 Sessions，"
                 f"剩余 {len(result.remaining_sessions)} 个 Sessions、{result.remaining_side_count} 个 Side。"
-                + messages[result.code]
+                + messages.get(result.code, "部分资源尚未清理，请检查剩余项后重新确认。")
             )
         if result.deleted_plan_count:
             message += f"已删除 {result.deleted_plan_count} 个定时计划；后续会话清理失败也不会恢复计划。"
@@ -1655,6 +1797,7 @@ class AdminWebApplication:
             "requestId": context.request.request_id,
             "deleted": result.deleted,
             "projectAlias": result.project_alias,
+            "deleteWorktrees": _expected_value(preconditions.cascade_delete, "Project cascade choice"),
             "deletedSessionCount": result.deleted_session_count,
             "remainingSessionCount": len(result.remaining_sessions),
             "remainingSessions": [
@@ -1664,6 +1807,8 @@ class AdminWebApplication:
             "remainingSideCount": result.remaining_side_count,
             "deletedPlanCount": result.deleted_plan_count,
             "remainingScheduledRunCount": result.remaining_scheduled_run_count,
+            "deletedWorktreeCount": result.deleted_worktree_count,
+            "remainingWorktreeCount": result.remaining_worktree_count,
             "failedBindingId": result.failed_binding_id,
             "failedSideId": result.failed_side_id,
             "code": result.code,
@@ -2125,9 +2270,10 @@ class AdminWebApplication:
         *,
         expected_resource: str,
         allowed_extra: set[str] | None = None,
+        optional_extra: set[str] | None = None,
     ):
         payload = _parse_json(context.request)
-        _require_body_keys(payload, _ACTION_KEYS | (allowed_extra or set()))
+        _require_body_keys(payload, _ACTION_KEYS | (allowed_extra or set()) | ((optional_extra or set()) & payload.keys()))
         target = _action_target(payload)
         grant = self._redeem_parsed(
             context,
@@ -2192,6 +2338,9 @@ class AdminWebApplication:
                 if isinstance(result, ProjectDeletionResult) and not result.deleted:
                     terminal = "incomplete"
                     error_name = result.code
+                elif action_kind == "worktrees.delete" and isinstance(result, Mapping) and not result.get("deleted"):
+                    terminal = "incomplete"
+                    error_name = str(result.get("code", "outcome_unknown"))
                 return result
             except BaseException as error:
                 terminal = "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
@@ -2550,7 +2699,7 @@ def admin_access_urls(
 def _load_assets() -> dict[str, bytes]:
     root = importlib.resources.files("netizen_cli.admin").joinpath("static")
     assets: dict[str, bytes] = {}
-    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js"):
+    for name in ("index.html", "admin.css", "admin.js", "chat-picker.js", "chat-picker.css", "login.html", "login.js", "identity.js", "session-access.js", "worktrees.js"):
         assets[name] = root.joinpath(name).read_bytes()
     return assets
 
@@ -2850,6 +2999,8 @@ def _empty_preconditions(
     default_order_revision: ExpectedValue[int] | None = None,
     admin_revision: ExpectedValue[int] | None = None,
     session_policy_revision: ExpectedValue[str] | None = None,
+    cascade_delete: ExpectedValue[bool] | None = None,
+    worktree_settings_revision: ExpectedValue[str] | None = None,
 ) -> AdminActionPreconditions:
     return AdminActionPreconditions(
         active_binding_id or ExpectedValue.dont_check(),
@@ -2870,6 +3021,8 @@ def _empty_preconditions(
         default_order_revision or ExpectedValue.dont_check(),
         admin_revision or ExpectedValue.dont_check(),
         session_policy_revision or ExpectedValue.dont_check(),
+        cascade_delete or ExpectedValue.dont_check(),
+        worktree_settings_revision or ExpectedValue.dont_check(),
     )
 
 
@@ -2964,6 +3117,10 @@ _UPDATE_HTTP_ERRORS = {
 
 
 def _map_error(error: BaseException) -> AdminWebError | None:
+    if isinstance(error, WorktreeError):
+        status = {"invalid_arguments": 400, "not_git": 400, "not_found": 404,
+            "unavailable": 503, "outcome_unknown": 503, "configuration_unavailable": 503}.get(error.code, 409)
+        return AdminWebError(status, error.code, str(error))
     if isinstance(error, LoginRejected):
         return AdminWebError(401, "login_rejected", "登录请求无效或尝试过于频繁，请稍后重新打开登录页。")
     if isinstance(error, (SessionRejected, AdmissionClosed)):

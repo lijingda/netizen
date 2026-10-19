@@ -32,9 +32,11 @@ class NavigationUiTest(unittest.TestCase):
         script = "const htmlTree = " + json.dumps(tree.root) + ";\n" + dom + common + before
         script += (static / "chat-picker.js").read_text(encoding="utf-8")
         script += (static / "identity.js").read_text(encoding="utf-8")
+        script += (static / "worktrees.js").read_text(encoding="utf-8")
         script += (static / "admin.js").read_text(encoding="utf-8") + after
         for initial_url in (
             "/projects",
+            "/worktrees?cursor=stale&actionToken=secret",
             "/sessions/ordinary",
             "/sessions/ordinary?updatedFrom=2026-07-01T00%3A00%3A00Z",
             "/sessions/ordinary?updatedFrom=2026-07-01T00%3A00%3A00Z&updatedRange=last-3-months",

@@ -124,13 +124,19 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
         first = await self.send(owner="original", origin=origin)
         active = self.runtime._active[self.binding.id]
         task = active.task
-        second = await self.send(owner="new", origin=object())
+        read_count = len(self.codex.read_calls)
+        second = await self.runtime.submit_external(
+            binding=self.binding,
+            message=ExternalMessage("send_message_to_thread", "join", "netizen"),
+            owner_id="new", origin=object(),
+        )
         self.assertEqual(second.disposition, SubmitDisposition.JOINED)
         self.assertEqual((second.thread_id, second.turn_id), (first.thread_id, first.turn_id))
         self.assertIsNone(second.release_receipt_attempt)
         self.assertIs(self.runtime._active[self.binding.id].task, task)
         self.assertEqual(self.codex.handles[0].steers, [])
         self.assertEqual(self.codex.resume_calls, [])
+        self.assertEqual(len(self.codex.read_calls), read_count)
         await self.finish(first)
         self.assertEqual(len(self.outcomes), 1)
         self.assertEqual(self.outcomes[0].owner_id, "original")
@@ -138,13 +144,35 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_next_turn_keeps_previous_result_without_removing_new_active(self):
         first_origin, second_origin = object(), object()
-        first = await self.send(origin=first_origin)
+        worktree = self.cwd / "worktree"
+        worktree.mkdir()
+        first = await self.runtime.submit_external(
+            binding=self.binding, cwd=worktree,
+            message=ExternalMessage("send_message_to_thread", "first task", "netizen"),
+            owner_id="agent", origin=first_origin,
+        )
         first.release_receipt_attempt()
         self.codex.advance_on_external = True
+        read_count = len(self.codex.read_calls)
+        # The helper passes the stale Project cwd, which is not an execution
+        # directory for this already materialized, locally active Thread.
         second = await self.send(origin=second_origin)
         second.release_receipt_attempt()
         self.assertEqual(second.disposition, SubmitDisposition.STARTED)
         self.assertNotEqual(second.turn_id, first.turn_id)
+        self.assertEqual(self.runtime._active[self.binding.id].cwd, worktree)
+        self.assertEqual(len(self.codex.read_calls), read_count)
+        self.assertEqual(self.codex.resume_calls, [])
+        catalog = fixtures.FakeSkillCatalog(fixtures.fake_skills())
+        self.runtime._skill_catalog = catalog
+        steered = await self.runtime.submit(
+            binding=self.binding, input="$code-review inspect",
+            skill_names=("code-review",), owner_id="user", origin=object(),
+        )
+        self.assertEqual(steered.turn_id, second.turn_id)
+        self.assertEqual(catalog.calls, [(worktree, True)])
+        self.assertEqual(len(self.codex.read_calls), read_count)
+        self.assertEqual(self.codex.resume_calls, [])
         await asyncio.wait_for(self.completion.wait(), timeout=1)
         self.assertEqual(self.outcomes[0].turn_id, first.turn_id)
         self.assertEqual(self.outcomes[0].final_response, "first result")
@@ -153,7 +181,25 @@ class SessionExternalRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await self.finish(second, "second result")
         self.assertEqual([item.turn_id for item in self.outcomes], [first.turn_id, second.turn_id])
         self.assertIs(self.outcomes[1].origin, second_origin)
+        self.assertEqual([item.cwd for item in self.outcomes], [worktree, worktree])
         self.assertEqual(self.runtime._retiring_turns, {})
+
+    async def test_active_external_input_never_falls_back_when_accepted_cwd_is_missing(self):
+        first = await self.send()
+        active = self.runtime._active[self.binding.id]
+        active.cwd = None
+        read_count, turn_count = len(self.codex.read_calls), len(self.codex.turn_calls)
+        for advance in (False, True):
+            with self.subTest(advance=advance):
+                self.codex.advance_on_external = advance
+                with self.assertRaises(SteerRace):
+                    await self.send()
+        self.assertEqual(len(self.codex.read_calls), read_count)
+        self.assertEqual(len(self.codex.turn_calls), turn_count)
+        self.assertEqual(self.codex.resume_calls, [])
+        self.assertTrue(self.runtime._accepting)
+        active.cwd = self.cwd
+        await self.finish(first)
 
     async def test_idle_target_resumes_same_native_thread(self):
         first = await self.send()

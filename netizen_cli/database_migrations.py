@@ -16,6 +16,7 @@ from typing import TypedDict
 
 from .bindings import SCHEMA_VERSION
 from .migrations.v14 import validate as validate_v14
+from .migrations.v15 import apply as apply_v15, validate as validate_v15
 
 
 MIN_SUPPORTED_SCHEMA_VERSION = 14
@@ -30,9 +31,8 @@ class Migration:
     validate_target: Validator
 
 
-# Add an adjacent step only when the persisted schema actually changes. The
-# baseline release deliberately has no artificial v15 migration.
-MIGRATIONS: tuple[Migration, ...] = ()
+# Published adjacent steps and their validators are immutable.
+MIGRATIONS: tuple[Migration, ...] = (Migration(14, 15, apply_v15, validate_v15),)
 
 
 class MigrationStep(TypedDict):

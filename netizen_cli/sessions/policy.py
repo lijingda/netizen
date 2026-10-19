@@ -7,9 +7,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-import yaml
-
-from ..admin.port_config import ConfigFileSnapshot, write_configuration
+from ..admin.port_config import ConfigFileEditor, ConfigFileSnapshot
 
 
 class SessionPolicyError(ValueError):
@@ -82,9 +80,10 @@ class SessionPolicyService:
     """
 
     def __init__(self, policy: SessionAccessPolicy = SessionAccessPolicy(), *,
-                 config_snapshot: ConfigFileSnapshot | None = None) -> None:
+                 config_snapshot: ConfigFileSnapshot | None = None,
+                 config_editor: ConfigFileEditor | None = None) -> None:
         self._policy = policy
-        self._snapshot = config_snapshot
+        self._editor = config_editor or (ConfigFileEditor(config_snapshot) if config_snapshot else None)
         self._revision = uuid.uuid4().hex
         self._lock = threading.RLock()
 
@@ -94,7 +93,7 @@ class SessionPolicyService:
 
     @property
     def editable(self) -> bool:
-        return self._snapshot is not None
+        return self._editor is not None
 
     def snapshot(self) -> tuple[SessionAccessPolicy, str]:
         """Capture immutable rules for one tool call and its discovery cursor."""
@@ -115,14 +114,9 @@ class SessionPolicyService:
         with self._lock:
             if expected_revision != self._revision:
                 raise SessionPolicyConflict("session tool access changed; refresh before saving")
-            if self._snapshot is None:
+            if self._editor is None:
                 raise SessionPolicyError("instance configuration is unavailable")
-            loaded = yaml.safe_load(self._snapshot.content)
-            if not isinstance(loaded, dict):
-                raise SessionPolicyError("configuration root must be a mapping")
-            loaded["sessionTools"] = policy.to_dict()
-            snapshot = write_configuration(self._snapshot, loaded)
-            self._snapshot = snapshot
+            self._editor.update_section("sessionTools", policy.to_dict())
             self._policy = policy
             # Invalidate old action grants/cursors even when a rule changes back.
             self._revision = uuid.uuid4().hex

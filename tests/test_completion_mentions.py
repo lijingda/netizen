@@ -79,14 +79,14 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
     def outcome(self, *, side=False, **changes):
         values = dict(
             thread_id="native-one", turn_id="turn-one", owner_id="ou_initiator",
-            origin=self.origin,
+            origin=self.origin, cwd=self.fixture.project,
             result=completed_turn_result(final_response="结果正文"),
         )
         values.update(changes)
         if side:
             return SideTurnOutcome(
                 side_id="side-one", parent_binding_id=self.binding.id,
-                cwd=self.fixture.project, **values,
+                **values,
             )
         return TurnOutcome(binding_id=self.binding.id, **values)
 
@@ -96,7 +96,7 @@ class CompletionMentionTest(unittest.IsolatedAsyncioTestCase):
             logical_turn_id="goal-one", owner_id="ou_initiator", origin=self.origin,
             goal=native_goal(GoalStatus.COMPLETE),
             final_physical_turn_id="turn-final", final_turn_status="completed",
-            final_response="Goal 结果正文",
+            final_response="Goal 结果正文", cwd=self.fixture.project,
         )
         values.update(changes)
         return GoalOutcome(**values)

@@ -92,6 +92,9 @@ from ..schedules.service import ScheduleService
 from ..defaults.service import SessionDefaultsService
 from ..model_settings import ModelCatalog
 from ..session_inventory import NativeSessionCursor as SessionNativeCursor, query_native_sessions
+from ..worktrees.errors import WorktreeError
+from ..worktrees.service import WorktreeService
+from ..worktrees.settings import WorktreeSettingsService
 
 
 _BINDING_STATUS_RESOLUTION_CONCURRENCY = 8
@@ -401,6 +404,8 @@ class ProjectDeletionResult:
     code: str = "deleted"
     deleted_plan_count: int = 0
     remaining_scheduled_run_count: int = 0
+    deleted_worktree_count: int = 0
+    remaining_worktree_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -701,8 +706,17 @@ class ManagementRuntimePort:
     def project_side_snapshots(self, alias: str) -> tuple[SideSessionSnapshot, ...]:
         return self.__runtime.project_side_snapshots(alias)
 
+    def worktree_side_snapshots(self, root: Path) -> tuple[SideSessionSnapshot, ...]:
+        return self.__runtime.worktree_side_snapshots(root)
+
     def project_has_fork_creation(self, alias: str) -> bool:
         return self.__runtime.project_has_fork_creation(alias)
+
+    async def worktree_usage(self, binding_id: str) -> dict[str, Any]:
+        return await self.__runtime.worktree_usage(binding_id)
+
+    async def resolve_binding_cwd(self, binding_id: str, *, default_cwd: Path) -> Path:
+        return await self.__runtime.resolve_binding_cwd(binding_id, default_cwd=default_cwd)
 
     async def thread_metadata_exact(
         self,
@@ -802,7 +816,13 @@ class InstanceManagementService:
         self._summary_reads_closed = False
         self.schedules: ScheduleService | None = None
         self.defaults: SessionDefaultsService | None = None
+        self.worktrees: WorktreeService | None = None
         self._schedule_creation_drain: Callable[[str, float], Awaitable[bool]] | None = None
+
+    def enable_worktrees(self, *, settings: WorktreeSettingsService) -> WorktreeService:
+        if self.worktrees is None:
+            self.worktrees = WorktreeService(self, settings=settings)
+        return self.worktrees
 
     def enable_schedules(self, *, app_id: str, chat_info: Any = None) -> ScheduleService:
         if self.schedules is None:
@@ -844,6 +864,8 @@ class InstanceManagementService:
         self._summary_reads_closed = True
         if self.schedules is not None:
             self.schedules.close_admission()
+        if self.worktrees is not None:
+            await self.worktrees.close(deadline=deadline)
         await self._updates.close(deadline=deadline)
         if self._chat_labels is not None:
             await self._chat_labels.aclose()
@@ -961,6 +983,7 @@ class InstanceManagementService:
         alias: str,
         expected_revision: int,
         deadline: float,
+        delete_worktrees: bool = False,
     ) -> ProjectDeleteSnapshot:
         snapshot = await self._blocking_io.submit(
             self._projects.preview_delete, alias,
@@ -969,6 +992,15 @@ class InstanceManagementService:
         if snapshot.project.revision != expected_revision:
             raise StaleProject("Project 已改变，请刷新后重新确认。")
         self._require_project_delete_capability(snapshot)
+        if delete_worktrees and snapshot.worktrees:
+            if self.worktrees is None:
+                raise WorktreeError("unavailable", "工作区管理不可用，未开始删除。")
+            for record in snapshot.worktrees:
+                async with asyncio.timeout_at(deadline):
+                    preview = await self.worktrees.preview_delete(record.id, delete_sessions=True,
+                        _project_deletion_bindings=frozenset(item.binding.id for item in snapshot.bindings))
+                if not preview["safe"]:
+                    raise WorktreeError("unsafe_delete", "工作区尚不可删除：" + "；".join(preview["reasons"]))
         return snapshot
 
     def _require_project_delete_capability(self, snapshot: ProjectDeleteSnapshot) -> None:
@@ -987,6 +1019,7 @@ class InstanceManagementService:
         expected_revision: int,
         expected_inventory_fingerprint: str,
         deadline: float | None = None,
+        delete_worktrees: bool = False,
     ) -> ProjectDeletionResult:
         """Delete one confirmed inventory through the existing exact operations.
 
@@ -1014,6 +1047,7 @@ class InstanceManagementService:
         )
         failed_binding_id: str | None = None
         failed_side_id: str | None = None
+        deleted_worktree_count = 0
         code = "deleted"
         deleted = False
         try:
@@ -1097,6 +1131,21 @@ class InstanceManagementService:
             failed_binding_id = None
             if self._runtime.project_side_snapshots(alias):
                 raise SideCloseFailed("Project 仍有未完成关闭的 Side。")
+            if delete_worktrees and snapshot.worktrees:
+                if self.worktrees is None:
+                    raise WorktreeError("unavailable", "工作区管理不可用，剩余目录保留。")
+                for record in snapshot.worktrees:
+                    current = self._bindings.worktrees.get(record.id)
+                    if current != record:
+                        raise WorktreeError("inventory_changed", "工作区身份已经改变，剩余目录保留。")
+                    preview = await self.worktrees.preview_delete(record.id, delete_sessions=False)
+                    if not preview["safe"]:
+                        raise WorktreeError("unsafe_delete", "剩余工作区未通过安全检查。")
+                    result = await self.worktrees.delete(record.id, delete_sessions=False,
+                        expected_fingerprint=preview["fingerprint"], deadline=deadline)
+                    if not result["deleted"]:
+                        raise WorktreeError(result["code"], "部分工作区删除未确认完成。")
+                    deleted_worktree_count += 1
             self._projects.finish_delete(
                 alias=alias,
                 expected_revision=snapshot.project.revision,
@@ -1122,6 +1171,8 @@ class InstanceManagementService:
                 code = "schedule_creation_in_progress"
             elif isinstance(error, ForkPublicationInProgress):
                 code = "fork_creation_in_progress"
+            elif isinstance(error, WorktreeError):
+                code = error.code
             else:
                 code = "delete_failed"
         finally:
@@ -1141,6 +1192,8 @@ class InstanceManagementService:
             remaining_side_count, failed_binding_id, failed_side_id, code,
             len(snapshot.scheduled_plans),
             len(self._bindings.schedules.project_pending_runs(alias)),
+            deleted_worktree_count,
+            len(self._bindings.worktrees.list_for_project(alias, generation=snapshot.project.generation)),
         )
 
     def _project_delete_remaining(
@@ -1487,6 +1540,8 @@ class InstanceManagementService:
         context_anchor: MessageContextAnchor | None = None,
         deadline: float | None = None,
         only_if_empty: bool = False,
+        worktree_id: str | None = None,
+        worktree_create: dict[str, Any] | None = None,
     ) -> CreatedBinding:
         project = await self._blocking_io.submit(
             self._projects.resolve_for_new,
@@ -1494,6 +1549,26 @@ class InstanceManagementService:
             expected_revision=expected_project_revision,
             deadline=deadline,
         )
+        workspace = None
+        resource = None
+        if worktree_id is not None or worktree_create is not None:
+            if only_if_empty or self.worktrees is None or (worktree_id is not None and worktree_create is not None):
+                raise WorktreeError("invalid_arguments", "无效的工作区创建选择。")
+            if worktree_create is not None:
+                if not isinstance(worktree_create, dict) or worktree_create.keys() - {"mode", "ref", "branch"}:
+                    raise WorktreeError("invalid_arguments", "工作区创建参数无效。")
+                resource = await self.worktrees.create(project_alias=project.alias,
+                    expected_project_revision=project.revision, **worktree_create)
+                worktree_id = resource["id"]
+            try:
+                workspace = await self.worktrees.select(project_alias=project.alias, worktree_id=worktree_id,
+                                                       expected_project_revision=project.revision)
+            except Exception as error:
+                if resource is not None:
+                    raise WorktreeError("session_creation_failed",
+                        f"工作区已创建并保留：{resource['cwd']}；会话未创建，可在 Admin 检查后通过 /new 复用。",
+                        details={"worktree": resource}) from error
+                raise
         async with self._scope_coordinator.hold(scope.key):
             previous_id = self._active_id(scope.key)
             if only_if_empty and previous_id is not None:
@@ -1512,14 +1587,33 @@ class InstanceManagementService:
                     task_feedback=task_feedback,
                     message_context_mode=message_context_mode,
                     context_anchor=context_anchor,
+                    working_cwd=workspace.cwd if workspace is not None else None,
+                    worktree_id=workspace.id if workspace is not None else None,
                 )
             except (
                 StoredProjectNotFound,
                 StoredProjectDisabled,
                 StoredProjectRevisionConflict,
             ) as error:
+                if resource is not None:
+                    raise WorktreeError("session_creation_failed",
+                        f"工作区已创建并保留：{resource['cwd']}；会话创建失败，可在 Admin 管理或通过 /new 复用。",
+                        details={"worktree": resource}) from error
                 self._raise_project_create_error(project_alias, error)
-            await self._runtime.binding_pointer_changed(previous_id, binding.id)
+            except Exception as error:
+                if resource is not None:
+                    raise WorktreeError("session_creation_failed",
+                        f"工作区已创建并保留：{resource['cwd']}；会话创建未完成，请在 Admin 检查后通过 /new 复用。",
+                        details={"worktree": resource}) from error
+                raise
+            try:
+                await self._runtime.binding_pointer_changed(previous_id, binding.id)
+            except Exception as error:
+                if resource is not None:
+                    raise WorktreeError("session_handoff_failed",
+                        f"工作区和会话已建立，但运行时交接失败；工作区 {resource['cwd']} 已保留，请检查会话状态，勿重复创建。",
+                        details={"worktree": resource, "bindingId": binding.id}) from error
+                raise
         return CreatedBinding(project=project, binding=binding)
 
     async def resolve_turn_settings(

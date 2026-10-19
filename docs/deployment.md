@@ -63,6 +63,7 @@ SDK/cleanup 启动门禁通过为前提；不能用 Activity 的展示降级绕�
   config.yaml                                # 私有 Channel 配置
   lark-app/config.json                       # 固定 netizen profile
   credentials/admin-user-tokens.json         # 当前管理员用户凭证；私有，跨重启保留
+  worktrees/                                 # 默认受管 checkout 根；可在 Admin 改以后新建位置
   state/
     admin-users.json                         # 当前应用的管理员名单与展示快照
     channel.sqlite3[-wal|-shm|-journal]
@@ -88,7 +89,9 @@ ${CODEX_HOME:-~/.codex}/                      # 用户共享原生状态，不�
 配置 `instance.dataDir` 必须是该 root 的 state，Project 与共享 Codex 数据不搬动。
 
 remove 默认仅解除系统服务及自启，保留数据；--purge 先展示并确认有限、已验证的文件
-清单，永不递归删除 root／home，不删除未知文件、Project 或共享 Codex 状态。
+清单，永不递归删除 root／home，不删除未知文件、Project、Worktree 内容或共享 Codex 状态。
+purge 删除 Channel 数据库后受管工作区登记也消失；磁盘目录保留不等于可自动恢复登记，
+重新初始化不会收编这些目录，清理前应自行保存必要的路径与成果。
 名单、用户凭证及遗留 `credentials/admin-web-secret` 均属于精确 purge 清单；普通
 setup/start/update 不自动删除遗留 secret，也不再生成或读取它。
 移除实例不卸载 Python 环境中的共享包。
@@ -814,11 +817,130 @@ JavaScript 行为测试、编译、依赖与 SDK synthetic 门禁），独立代
 任务、购买额度或触发 reset。MCP 指南只核对原生登录与同环境凭证复用说明；文档存在
 不表示已验收真实 OAuth。
 
+### 受管 Worktree 专项验收
+
+ADR 0085 的当前实现覆盖 Admin 管理、飞书 `/new`、Agent 两工具与实际 cwd 传递。
+本节是专项要求，不代表已部署或真实飞书/native 链路已经通过。`/fork` 不增加 worktree
+创建/选择；environment、文件复制、快照恢复、自动回收、Handoff 和 App 私有管理互认均不在本版。
+
+- 运行 `make check`，保留新增 `test_worktree_*`、Admin Worktree Python/JavaScript
+  行为测试和 v14 → v15 冻结迁移夹具结果。临时 Git 仓库验证 detached/已有未占用分支/
+  新分支、子目录、外部改分支/删目录/替换路径、fetch 失败、无 HEAD、未知创建回执与部分成功；
+  不得在用户的真实成果目录上验证删除。
+- P2P、群主线、普通话题分别验证 `/new` 只读加载目录步骤、原卡 Scope、Project revision
+  和重复回调；默认项目目录、非 Git 无工作区字段、已有工作区不切分支。原生 Thread
+  只在首条任务/Goal 物化；工作区创建成功而会话失败必须保留并可再选。公开卡片容量错误
+  明确反馈，不能静默截断；卡片更新失败的同 Scope 文本反馈包含已确认部分结果。
+- 在一次性 native 测试 Thread 中，用 A/B 两个目录的同名文件与 Skill 核对普通首轮、
+  首条 Goal、Side、既有持久 fork、模型 `create_thread`、已有 Binding 定时输入、Files/
+  图片与分支状态均使用实际 cwd。A 创建 B 不迁移调用会话；来源 B 新建会话仍在 B。
+  不为测试给 `create_thread` 加 cwd 参数，也不借 /fork 创建新工作区。
+- Admin 验证配置写入、旧 revision 拒绝、修改根不移动旧目录、默认不 fetch、fetch 失败
+  明确停止；列表只按需读取当前页，未知/缺失/身份改变分开展示。Agent 两工具验证
+  可信来源、discovery/readSend 范围、分页、默认分支与人工 HEAD 的差异、未知结果不重试。
+- Worktree/Project 两个可选级联勾选均默认关闭；预览与执行绑定 exact 清单/选项并二次确认。
+  校验保留会话时的活动/Side/来源使用保护、勾选时 native shutdown/delete 的精确结果、
+  dirty/untracked/ignored/未保留 detached 提交保护和部分成功不回滚；真实 native 删除
+  仍按既有 disposable delete phase 验收。不得用“目录缺失”或目录列表缺项替代成功响应。
+- 删除 Project 保留工作区后，Admin 标示孤立、`/new` 不列入、同 alias 重建不重新关联。
+  删除目录但保留会话时，保留历史与原 cwd，记录 native 实际返回，不宣称缺目录下所有
+  Turn 保证成功或一律禁聊。验证 purge 保留 Worktree 内容但清理数据库中的登记。
+
+真实飞书客户端、目标平台安装/启动迁移和受影响 native 生命周期分别记录证据；本地
+fixture、Git 测试或页面 JavaScript harness 均不替代这些验收，不自动发布或重启现有实例。
+
+2026-10-19 完成 filter 补齐、Agent 分支工具移除及恢复后 cwd 复核的本地 `make check` 已通过：3391 项测试，
+15 项按既有平台或显式启用条件跳过；
+包括临时 Git、Worktree 应用层/卡片/Agent 工具/Admin HTTP 与 JavaScript 行为、迁移和
+删除并发保护测试。编译、依赖检查与 SDK 门禁均通过，包括 Activity 非消费观测、普通完成/
+公开 read 恢复竞态、终态元数据排空及进程级 Skills 注册。最终 diff 检查通过；本轮未部署，
+上述真实飞书客户端、目标平台启动迁移及 native 生命周期专项仍待验收。
+
+复审修订收紧创建失败分类：无效 ref/分支、已占用或重名分支等能够证明尚未
+尝试 `worktree add` 的失败只撤销精确预留登记，不操作目录；fetch 已更新的引用不回滚。
+add 后 reset 未启动、取消/超时和未知结果仍保留登记。独立复审通过；Project 默认目录
+缺失继续按不可用处理，不增加已有工作区绕过该检查的兜底。
+
+后续复审按 CLI 策略补齐 Git filter 的命令局部覆盖，新增真实临时仓库验证目标
+`includeIf.onbranch`/`includeIf.gitdir` 配置、最终删除内部检查与持久配置不变；未增加
+新的隔离系统。Agent `list_worktree_branches` 已移除，仅保留列表与创建工具；Admin
+和飞书内部选项查询保留。cwd 交接复核已按下述边界修复；正式 `/new` 的布局调整先发送
+了禁用提交的预览卡供确认，随后已在源码中落地分组、并排控件和短灰说明。模型配置、
+消息上下文及任务反馈继续复用原控件生成逻辑，选项文本/值、默认值、必填属性及提交
+字段不变；与改动前控件的 128 组合独立对比全部一致，340 项相关回归通过。
+布局落地后的 `make check` 全部通过：3394 项测试、15 项按既有条件跳过，编译、依赖
+一致性和 SDK synthetic probes 均通过；独立呈现复审未发现控件语义变化。
+未部署；预览发送成功及本地控件测试不代替真实飞书嵌套表单提交和移动端布局验收。
+
+2026-10-19 的独立原生 cwd 探针已通过。使用 `openai-codex==0.163.0` bundled App Server、
+隔离临时原生状态和 loopback mock Responses，验证公开 `Thread.cwd` 的 `AbsolutePathBuf`
+返回形态、`thread_start(cwd=...)`、新 App Server 的冷读取，以及不传 cwd 的 resume 保留
+原目录。扩展后的同一探针还使用生产 `CodexRuntime` 验证：只读准备取得 A 后，另一
+客户端 cold resume 到 B、完成 Turn 并退出；准备于 A 的原输入在恢复后直接采用 B 完成，
+仅发送一次、不覆盖 B，Binding 目录同步为 B，`TurnOutcome.cwd=B`，后续准入仍开放。
+统一目录所有权后的复验改为已有 Thread 提交完全省略调用方 cwd，仍满足上述断言；
+先前的只读目录查询仅作为交接前的观察证据，不参与 Runtime 选择执行目录。
+本次共 3 次 loopback mock 请求、0 次真实模型请求，临时状态已清理；未调用飞书或访问真实
+业务 Project。该结果不证明完整 Worktree 交互、缺失目录或 native 删除链路通过。
+复验用外部 deadline（macOS 对应 `gtimeout`）：
+
+```bash
+timeout 90s python scripts/probe_worktree_cwd.py
+```
+
+同日额外原生探针确认 idle/unloaded Thread 的跨客户端 cwd 交接窗口：只读取得 A 后，
+另一客户端 cold resume 到 B、完成 Turn 并退出，前者不传 cwd 恢复时实际使用 B。
+已有订阅的 loaded Thread 忽略不同 cwd 的 resume override；另一 Server 同时恢复则
+被 active-writer 保护拒绝。共 3 次 loopback mock 请求、0 次真实模型请求，临时状态已清理。
+这不是运行中任意改目录，也不是完整飞书端到端复现。固定 0.163.0 CLI 从 resume 响应
+取得 cwd，普通 `turn/start` 显式传 cwd。源码复核及用户确认后，Netizen 已移除之前
+“准备目录与恢复目录不同即拒绝输入”的额外策略，改为采用本次恢复后的实际 cwd 继续。
+固定 Python 高层 SDK 仅返回 Thread handle，故通过恢复后的公开 read 取得实际 cwd，
+不把准备前旧 cwd 写回原生配置。未知、无效或超时只拒绝本条未发送输入，不推进
+Context Boundary、不自动重试。已确认目录复用 exact-native 关联同步和 Worktree 删除
+准入；成功恢复但未发送的订阅继续按 idle 策略释放。普通输入、ExternalMessage 和 Goal
+初始输入均采用实际 cwd，Goal 冷恢复仍沿用该行为；活动 Turn/Goal 保留 exact-Turn steer。
+
+飞书文本、引用和图片准备不依赖 cwd，未为此重做材料准备。已有空闲 Thread 的显式
+Skill 输入先恢复并读取实际 cwd，再锁外查找 Skill，提交前复核原 admission、原生
+Thread 身份与订阅对象/代次并复用同一 handle，不二次恢复；活动输入用本轮已接纳的
+目录，lazy 输入仍先解析 Skill 再创建 Thread。相关行为测试覆盖目录变化、并发输入、
+订阅释放、发现期间其他操作物化 Thread、发现失败/取消及读取失败边界；上述原生
+探针覆盖目录交接与单次提交，不宣称验证了原生
+Skill 加载或完整飞书端到端链路。
+
+本次 cwd 修正后的 `make check` 全部通过：3402 项测试、15 项按既有条件跳过，编译、
+依赖一致性及 SDK synthetic probes 均通过；其中目录行为回归为 37 项。独立复审发现的
+“Skill 发现期间失败 Goal 创建物化 Thread”竞态已由局部身份校验修复并补充回归，复审
+无遗留阻塞。未部署，真实飞书端到端交互与模型执行时的 Skill 加载不在本次验证范围。
+
+随后将执行目录统一收敛到 Runtime：Channel 只提供 lazy 创建意图；已有 Thread 恢复后
+读实际目录，复用活动 Thread 同时复用其已确认目录。该规则覆盖 ExternalMessage 原生
+返回新 Turn 的窗口，不再把调用方旧目录记入新轮的 Skill/Files 上下文；普通、定时和
+Goal 提交均移除目标目录预读，来源继承和状态查询保留。没有新增缓存、持久化字段或
+扫描。调用次数回归确认：普通 lazy 创建不新增 read；已有空闲 Thread（含 Skill）为
+一次 resume 和一次 cwd read；活动 steer、ExternalMessage join/next Turn 不新增
+read/resume，Goal 保留既有 readiness read。这是请求次数证据，不是生产延迟压测。
+
+本轮原生复验通过 cwd 交接及 `probe_session_collaboration.py` 的 `runtime_join`、
+`runtime_terminal_race` 两场景：生产 Runtime 分别保持同轮加入和新轮交接，结果各消费
+一次。使用 SDK/App Server 0.163.0、临时原生状态和 loopback mock Responses，三个专项
+合计 7 次 mock 请求、0 次真实模型请求，不访问业务 Project 或发送飞书消息。
+
+统一目录来源后的完整 `make check` 退出 0：3409 项测试、15 项按既有平台/可选环境
+条件跳过；编译、依赖、Activity、20 次即时完成、20 次公开 read 恢复、40 次终态元数据
+排空及进程级 Skills 发现门禁全部通过。两处旧定时探针的 Channel 预读断言已改为
+验证不预读，同时保留 Runtime 原生 read/目录同步、exact steer 与清理证据。提交前目录
+事实缺失复用明确未接受错误，不能误报投递未知。独立复验确认旧目录混入新 Turn 的问题
+关闭，最终 diff 检查通过；本轮未部署，真实飞书端到端、真实模型 Skill 加载及生产延迟
+压测未执行。
+
 ### 数据库迁移与中断恢复验收
 
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移移到每次实际
-启动，保留 ADR 0075 的 v14 基线与冻结步骤。当前仍为 v14，没有虚构生产 v15；
-旧 schema／布局的转换不因此自动得到支持。以下为新 CLI 的验收要求，不是通过记录：
+启动，保留 ADR 0075 的 v14 基线与冻结步骤。当前 schema 为 v15，新增冻结的
+v14 → v15 Worktree 元数据转换；v13 及更早 schema／旧布局不因此自动得到支持。
+以下为新 CLI 的验收要求，不是通过记录：
 
 - setup 才创建新库；start、自动重启及恢复启动都校验已有库，缺库不能重新初始化。
 - lifetime lock 从迁移准备持续持有到服务退出；同实例并发启动、查询和更新不得成为
@@ -874,8 +996,8 @@ Adapter 边界时仍按[既有触发条件](#代码门禁与按需实时兼容�
 - catch-up 首轮使用真实触发消息作为初始边界，当前正文／引用／图片正常提交且不补读
   更早讨论；随后在群主线与话题分别验证从该消息之后读取。继续满足既有 chat/thread
   history rollout gate；本地“lower 等于 upper”的测试不能替代真实消息及客户端验收。
-- schema v14 新库完整初始化、当前库重装保留默认配置和规则顺序，v13 及更早库只读
-  拒绝。后续版本迁移遵循 ADR 0076；启动迁移持续持有 lifetime lock，不提供自动旧库恢复。
+- schema v15 新库完整初始化、v14 冻结夹具迁移及当前库重装保留默认配置和规则顺序，
+  v13 及更早库只读拒绝。迁移遵循 ADR 0076；启动迁移持续持有 lifetime lock，不提供自动旧库恢复。
   Project 删除后默认配置保留，使用时按不可用提示降级，不新增联动删除。
 
 真实群聊消息和客户端操作须在指定的测试环境验收；缺少该条件时分别记录未验证范围，
@@ -1575,10 +1697,15 @@ HTTP，不得把端口直接暴露到不受信网络。正式链路的真人和�
 [专项验收](#admin-飞书登录与管理员维护验收)。
 
 `instance.projectRoot` 是必填的绝对路径，用于限制从飞书自动创建的空 Project；它不是
-Binding 的默认 cwd。Channel 业务只支持当前完整 schema v14；实际启动入口按
+Binding 的默认 cwd。Channel 业务只支持当前完整 schema v15；实际启动入口按
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 在 lifetime lock 内
-检查数据并按需迁移，setup 才创建新库。当前没有生产迁移步骤；未来冻结步骤从 v14
-持续维护。提交前错误回滚事务，提交后服务失败保留新库，不自动恢复旧备份。
+检查数据并按需迁移，setup 才创建新库。当前有冻结的 v14 → v15 转换，最低受支持基线
+仍为 v14。提交前错误回滚事务，提交后服务失败保留新库，不自动恢复旧备份。
+
+`worktrees.root` 可省略，默认 `<instance-root>/worktrees`；`fetchBeforeCreate` 默认
+false。Admin 修改同一配置段，只影响以后新建；不移动已有 checkout、不修改 Codex App
+配置。v15 保存受管身份、Project 登记代次及 Binding 的工作区选择，不保存 Git 分支或
+dirty 状态；已物化会话的 cwd 以原生结果为准。
 
 `session_defaults` 和 `session_defaults_order` 仅保存 App 隔离的聊天默认配置、群名匹配
 条件与有序规则元数据，不保存聊天正文或有效 Codex 配置。
@@ -1823,7 +1950,8 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
    并标注“上一轮完成时”的快照；本轮完成后覆盖为新值，快速完成的 Turn 也读取原始
    handle 保留的通知。没有可用的新 usage 时清除旧值并显示暂不可用。该继承路径不得读取模型
    目录或向 SDK 传 Model/Effort/Speed override。
-3. 零参数 `/new` 在存在 enabled Project 时只显示一个创建 form，不显示任务输入或快速按钮。
+3. 零参数 `/new` 在存在 enabled Project 时保留一个创建 form，并增加独立的只读目录加载
+   form，不显示任务输入或快捷创建按钮。工作区路径与分支选择按 [专项验收](#受管-worktree-专项验收)核对。
    Project 使用现有单个静态下拉框，并展示 Registry 中全部 enabled 项；同 Scope 当前或
    最近使用且仍 enabled 的 Project 可基于现有 Binding 记录预选，不新增 recent 状态；没有
    该记录时下拉保持未选。零 enabled Project 时不显示 form，只引导 `/settings`，且零 Binding
@@ -1862,8 +1990,9 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
 6. `/skills` 必须作为未知命令拒绝且零 Codex mutation；用自然语言询问当前可用 Skill
    必须按普通 Prompt 启动或 steer。在消息开头连续输入两个 `$skill-name`，只启动一个
    原生 Turn；running 时同样只 steer exact Turn 一次。未知、
-   disabled、重名或 stale 引用必须零 Codex mutation；引用消息历史里的 `$skill` 不得
-   激活，当前消息的引用仍正常。
+   disabled、重名或 stale 引用不得发送 Turn/steer，lazy 会话也不得创建 Thread；已有
+   空闲 Thread 可先恢复以取得实际 cwd，校验失败后按正常 idle 策略释放订阅。
+   引用消息历史里的 `$skill` 不得激活，当前消息的引用仍正常。
 7. 在已通过 zero-Turn live gate 的环境发送 `/goal <objective>`，管理快照与任务回复分开。
    `/goal` 静态卡显示当前状态，只有再次查询或点击刷新/控制时更新，不承载答案与文件。
    同一 Binding 的普通 Prompt 仍 steer 当前 exact 物理 Turn；`/config`、`/compact` 仍
@@ -1904,7 +2033,8 @@ identity 的一方提交。重启服务后旧 Admin session 必须失效，持�
     必须拒绝。重启服务后不扫描旧 Binding 或重建 timer。最后验证全局
     `codex exec resume <native-id> "..."` 能接续飞书 Thread；必要时要等 App Server 的
     最后订阅宽限期释放 writer，不能把 unsubscribe 返回当成 writer 已释放证明。
-11. 同一 Project 两个 Binding 同时运行，cwd 相同、native ID 不同。
+11. 同一 Project 两个未选择 Worktree 的 Binding 同时运行，cwd 相同、native ID 不同；
+    另选 Worktree 的会话使用所选目录，不因此引入 Project 级执行锁。
 12. 运行 exact-`argv[0]` interrupt probe，记录 foreground 5 秒退出分类；probe 有界
    等待其测试 marker 自然退出后，检查无遗留 exact marker/App Server probe 进程。
 13. 加一个测试群：未 @ 不触发，每条 @ 可用。在话题群中分别用纯文本根消息

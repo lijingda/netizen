@@ -19,7 +19,7 @@ Turn、历史、工具与权限。Admin Web 是同一应用边界上的管理入
 用户状态；不因此增加业务 instance ID、权限隔离或跨实例服务依赖。
 
 普通单聊、群聊主线或话题各是一个 Scope，可关联多个 Binding 和一个当前指针。
-Binding 选择一个 Project 的 canonical cwd，并在物化后精确绑定一个 native Thread；
+Binding 关联一个 Project，可显式选择其受管 worktree，并在物化后精确绑定一个 native Thread；
 Thread 内可以有多个 Turn。`/new` 先创建 lazy Binding，第一条真实请求才物化 Thread。
 切换当前 Binding 不停止其他 Binding 的执行。Side 是从已物化 Parent Thread 创建的
 ephemeral fork，依靠独立话题 route 保留身份，不是普通 Scope/Binding；Goal 则在同一个
@@ -78,7 +78,7 @@ Netizen 调用公开高层 API；现有能力缺口只走已批准的窄 Adapter
 | 所有者 | 负责的状态 |
 | --- | --- |
 | Codex 原生状态 | 登录、Thread/Turn 历史、Goal、工具、Skills、MCP 与原生配置；Netizen 复用 effective user 的标准 `$CODEX_HOME`。 |
-| Channel SQLite | Scope/Binding/Project 元数据、显式配置意图与 revision、聊天默认配置与有序群名规则、去重 TTL、上下文边界及不含 native ID 的 Side 路由墓碑；定时任务窄扩展保存当前计划指令与最小交接记录。 |
+| Channel SQLite | Scope/Binding/Project 元数据、受管 Worktree 身份/创建回执及工作区选择、显式配置意图与 revision、聊天默认配置与有序群名规则、去重 TTL、上下文边界及不含 native ID 的 Side 路由墓碑；定时任务窄扩展保存当前计划指令与最小交接记录。 |
 | 当前进程内存 | 活动 Turn/Goal/Side、锁与准入、订阅计时、Activity/usage 展示、Admin session 与一次性控制凭据；重启不自动重建这些执行或展示状态。 |
 | 实例 state 目录 | 实例维护锁、初始化证据、ready/lifetime/runtime identity、迁移备份与有界 Admin 重启结果；不进入 Channel SQLite。 |
 
@@ -87,7 +87,7 @@ Netizen 调用公开高层 API；现有能力缺口只走已批准的窄 Adapter
 Codex 配置与卡片 session 不复制到 Channel 数据库。内置 Skill 的清单和安装包加载边界统一见
 [候选验证与切换](deployment.md#候选验证与切换)，其他用户 Skill 保持原生管理。
 
-不同 Binding、Parent 与 Side 可以并发使用同一个真实 Project cwd，文件改动彼此可见；
+不同 Binding、Parent 与 Side 可以并发使用同一个实际 cwd，文件改动彼此可见；
 不能以全局 semaphore、Project lock、目录副本或独立 `CODEX_HOME` 隔离它们。飞书展示
 尽力完成，失败不改变原生执行；文件必须来自 exact Turn 证据，不能靠扫描目录补齐。
 未知副作用按各操作规定的范围 fail closed，不能把观测失败当成任务已结束。停止、
@@ -115,6 +115,51 @@ durable queue。普通 Turn 的结构化本轮文件可在终态卡片中按需�
 同账号多实例只分开部署与运维，不形成数据保密或执行隔离边界；按机器人登记不同
 Project 不限制工具读取该账号可访问的其他文件，Codex 用户状态仍共享。
 
+### 受管 Worktree 与实际目录
+
+[ADR 0085](adr/0085-manage-worktrees-independently-of-sessions.md) 定义独立资源与共享
+语义。Admin、飞书 `/new` 和 Agent 工具共用 `WorktreeService` 与窄 Git 后端，只管理
+本实例通过该服务创建并登记的资源；不会收编 shell Git、Codex App/CLI 或其他实例的工作区，
+也不写 Codex 私有索引或宣称生命周期互通。Worktree 不属于某个会话私有，删除或归档
+单个会话不会顺带回收目录。
+
+人工入口默认从所选 Project 当前 HEAD 创建 detached checkout，可显式检出未占用的
+本地分支或从选定 revision 建新分支；远端分支仅作为起点。已有工作区只复用，不隐式
+切换分支。Project 位于仓库子目录时，新目录保留对应相对子目录；目标提交缺少该目录
+就明确失败。只检出提交内容，不搬迁 staged/unstaged、untracked/ignored 文件，不运行
+environment/setup，也不提供快照恢复、自动回收、Handoff 或孤立资源重新关联。
+`/fork` 不新增创建/选择 worktree 功能；既有 native fork 仍继承来源实际目录。
+
+创建工作区并登记成功与创建 Binding 是两个步骤：后者失败仍保留前者，Admin 可管理、
+后续 `/new` 可复用。创建结果未知保留登记和已知路径，不能盲目重试、自动删目录或把
+不完整创建冒充可用。能够证明工作区创建尚未开始的准备失败只撤销本次预留登记，不动
+目录；创建已经可能开始后，即使后续命令没有启动也不能丢弃创建证据。目录选择不扩展
+Codex 文件访问权限，原生执行、信任和权限仍由 SDK 处理。
+
+Project 是归属与默认目录；lazy Binding 保存显式 `working_cwd`/`worktree_id`，没有
+显式选择才取 Project 默认目录。已物化 Thread 由原生 cwd 决定，不能从 Project 猜回。
+提交入口的 cwd 仅表达新建 Thread 的目录意图；Runtime 在取得或复用 Thread 时确定
+执行目录：新建采用选定目录，恢复读取本次原生 cwd，复用活动 Thread 则同时复用其
+已确认目录。调用方不再为已有 Thread 提前读取或传递执行目录。
+ordinary/Goal、Skill、Side、持久 fork、模型创建、已有 Binding 定时输入及相对文件/图片
+解析均使用实际目录；新话题定时计划不增加 worktree 配置。目录缺失时保留历史和原 cwd、
+提示缺失并按 Codex 实际返回处理后续请求，不统一禁聊、不静默回主目录或重建文件。
+Project 默认目录本身缺失时，`/new` 沿用既有 Project 不可用检查，由用户修复；不以
+已有 worktree 绕过该准入或自动恢复 Project。
+
+Admin `/worktrees` 进入、分页及手动刷新时查询当前页，列表仅检查目录身份与 HEAD/分支，
+不扫描全部 dirty 文件；查询失败显示未知，不当成 clean 或已删除。路径重建也须匹配登记
+身份。删除前才检查未保存文件（包括 ignored/untracked）、未保留 detached 提交、已知
+会话/Side/创建来源活动及 exact 清单，二次确认后重新复核；不会强制 Git 删除或递归清理兜底。
+“同时删除关联会话”默认不勾选；勾选后先走既有 native delete 链路再删除目录。成功项
+不回滚，部分失败或未知结果须刷新后重新确认。外部使用无法完整探测，页面明确说明此限制。
+
+配置复用实例 `config.yaml` 的 `worktrees.root` 与 `fetchBeforeCreate`：默认根为
+`<instance-root>/worktrees`、fetch 关闭；改根只影响后续新建，开启 fetch 后失败则停止
+创建。实例卸载/purge 不删除 Worktree 成果，但 purge 清理数据库后受管登记也消失，
+保留目录不会被自动重建登记或收编。部署与真人验收状态见
+[Worktree 专项验收](deployment.md#受管-worktree-专项验收)，不能以文档存在视为已部署或 live 通过。
+
 ## 架构
 
 ```mermaid
@@ -132,7 +177,7 @@ flowchart LR
     SDK["一个 AsyncCodex"]
     Backend["SDK pinned App Server / CLI"]
     Home[("Standard CODEX_HOME")]
-    Cwd["Project cwd"]
+    Cwd["实际 cwd / Project 默认目录或 Worktree"]
 
     Lark <--> Channel
     Channel --> UX
@@ -192,15 +237,15 @@ Binding，也不形成配置继承链；创建时冻结 Parent 当时的 Model/E
 Feedback，之后独立，Mention Context Mode 固定为 current-only。
 
 exact `/new` 保留原有手动创建入口；任何 `/new ...` 参数都零 mutation 地拒绝。
-它打开 Card 2.0，提交只写入包含 Project、可选 Turn Settings 和 Mention Context
-Mode 的 lazy Binding，不要求任务、不创建 native Thread；完整表单及目录降级语义见
+它打开 Card 2.0，提交创建包含 Project、可选工作区、Turn Settings 和 Mention Context
+Mode 的 lazy Binding；选择新建工作区时先创建并登记目录，不要求任务、不创建 native Thread；完整表单及目录降级语义见
 [新建与配置表单](#新建与配置表单)。没有当前 Binding 的普通输入还可按
 [聊天默认配置](#聊天默认配置与自动创建)自动创建；`/new` 不读取这些默认值或改变预填行为。
 下一条需要启动新 Turn 的普通消息执行：
 
 1. 若有 Binding 配置，在进入 native mutation 前重新调用 live `codex.models()`，按所选
    Model 验证 Effort/Tier 并解析 wire value；
-2. lazy Binding 调用 `thread_start(cwd=canonical_project_cwd)`；若有 Binding 配置，
+2. lazy Binding 调用 `thread_start(cwd=所选实际目录)`，无显式选择时使用 Project 默认目录；若有 Binding 配置，
    同时传入本次 live resolve 的 `model`，使原生 Thread 按首轮所选模型初始化。随后
    write-once 保存 Thread ID；已有 native ID 则只 `thread_resume(exact_id)`；
 3. `thread.turn(prompt, **override)`，没有 Binding 配置时 kwargs 为空；
@@ -430,7 +475,7 @@ Fork 将目标区标为“分支位置”，方式下拉与群搜索、结果分
 仍由按钮提交。分组不改变字段提交和目标解析。Cron 沿用现有平铺布局。
 
 公开 `thread_fork(ephemeral=False, include_turns=False)` 继承原生历史和权限；分支与来源
-共用 Project/cwd，复制显式 Model/Effort/Speed、Task Feedback 和上下文模式，之后各自独立。
+共用 Project 和来源实际 cwd，匹配受管工作区时保留关联，复制显式 Model/Effort/Speed、Task Feedback 和上下文模式，之后各自独立。
 目标为单聊时仅将后续飞书补读模式归为 current-only，来源设置与已继承的原生历史不变。
 不复制有效配置或聊天消息游标、不强制覆盖原生权限、不建立工作目录副本；catch-up 初始
 边界取新话题 root/seed。分支完成后使用全部普通会话操作，重启也按普通持久会话恢复。
@@ -471,7 +516,7 @@ stopping、Goal、compaction、lifecycle unknown、外部 active 或 Lazy Bindin
 fork 后读取 exact ID/ephemeral/parent shape，并通过固定 Side Adapter 注入不可由用户
 修改的边界。Parent active pointer 或配置后续变化不传播到已创建 Side；Side 保存创建
 时解析出的 Binding Turn Settings 快照，在同一个 ephemeral Thread 上重复用于后续新
-Turn。Parent 和多个 Side 可并发，共享 canonical Project cwd 而不增加 Project 锁。
+Turn。Parent 和多个 Side 可并发，共享来源实际 cwd 而不增加 Project 锁。
 
 创建请求先按 `(app_id, source_message_id)` 原子写 `creating` route，再向 underlying
 chat fresh send 根卡片。从已有话题触发也不能 reply 当前消息，因此结果是同级 sibling。
@@ -495,7 +540,7 @@ Side 根卡主展示来源会话名称、所属项目、发起人和飞书客户
 route 记录的 exact Parent Binding，不追随当前指针。原生名称优先，缺省时复用有界摘要，
 读取失败保留占位。补读与其他精确摘要读取共享最多 4 个 SDK worker，排队与读取合计最多 1 秒；
 超时后的请求继续计数直到实际返回，不增加目录扫描、恢复 Thread 或后台重试。
-项目工作目录优先取运行中的 Side 快照；终态时尽力读取原 Binding 的项目元数据，
+工作目录优先取运行中的 Side 快照；终态时尽力解析原 Binding 的实际目录，
 Parent 与运行态都不可用时省略，不猜测其他会话。上述展示信息不新增持久化字段。
 
 根卡首次发布以入站发送者姓名展示发起人，不依赖人员组件；确认 topic 后再在同一 root
@@ -523,6 +568,16 @@ root，再按需以 `reply_in_thread=True` promotion；promotion 固定 `fail`�
 MessageInputPreparer 只准备本次输入材料；ChannelApplication 在准备前捕获 admission，
 在提交时组装 Context Boundary commit 并调用 Runtime。准备期间不持 Binding 锁，精确身份
 与换轮拒绝规则见[锁与输入准入](#锁与输入准入)；读取失败的公共边界见[失败语义](#失败语义)。
+Channel 只提供 lazy Thread 的创建目录意图，不为已有 Thread 提交预读 cwd。恢复已有
+原生 Thread 后、发送输入前，Runtime 通过公开 SDK 取得本次实际 cwd，更新最小目录
+关联并继续本条输入；复用活动 Thread 时，同时复用其已确认目录，无论原生结果是加入
+当前 Turn 还是启动下一 Turn。飞书文本、引用、图片准备不依赖 cwd；显式 Skill 解析
+须使用该执行目录，本轮输出文件也固定采用它。
+目录事实未取得时只拒绝本条输入、不推进 Context Boundary；不回退到旧目录或 Project，
+不关闭其他会话的准入。不用调用方旧 cwd 覆盖 Codex，也不自动重试输入。创建来源继承、
+状态等独立查询仍可按需读取实际目录，但不作为已有目标 Thread 的提交目录来源。
+活动 Turn 的 steer 继续使用原 exact-Turn 准入，不额外恢复 Thread 或读取 cwd；不新增
+目录缓存、数据库字段、Git 扫描或全局锁。
 
 ### 补充历史与上下文边界
 
@@ -696,10 +751,13 @@ prompt 会线性放大该风险。Pilot 基于受控用户、低频小图接受�
 ### 显式 Skill 调用与按需历史读取
 
 普通 text/post 请求开头的连续 `$skill-name` 引用由 Prompt compiler 在当前消息上解析。Runtime
-先捕获 exact admission，再按 canonical Project cwd 调用 live `skills/list`；每个名称
+先捕获 exact admission，再按会话实际 cwd 调用 live `skills/list`；已有空闲 Thread
+先恢复并读取实际 cwd，再解析 Skill，不沿用恢复前旧目录的解析结果；活动 Thread
+直接使用已确认目录，lazy Thread 使用选定的创建目录。每个名称
 必须唯一、enabled 且来自该 cwd 的目录，随后保留原文本并追加公开
 `SkillInput(name, path)`。多个 Skill 仍只对应一次 `turn()` 或一次 exact `steer()`；
-discovery 期间不持有 Binding 锁，返回后用 admission revision 防止任务状态被重解释。
+discovery 期间不持有 Binding 锁，返回后复核原 admission、准备时的原生 Thread 身份
+以及已恢复订阅的代次，防止任务状态或 Skill 所属目录被重解释。
 被引用历史中的 `$` 会在版本化 quote envelope 中编码为非激活文本，不能把历史内容
 变成当前 Skill 调用。
 
@@ -965,8 +1023,8 @@ SDK patch 或另一套 Goal 编排。
 
 **附件归属查询（`thread/attachmentOwner/list`）**
 
-0.162.1 新增的 `thread/attachmentOwner/list` 暂不接入。开始设计“新建独立 worktree 会话”
-时，重新评估附件的资源归属、追溯与清理需求，以及 SDK 是否已有公开等价能力。原生查询
+0.162.1 新增的 `thread/attachmentOwner/list` 暂不接入。受管 Worktree 按 ADR 0085
+使用本实例资源与关联清单；将来公开 SDK 提供等价管理能力时再评估替换。原生查询
 仅覆盖当前 App Server store，须完整分页，且不是原子的 cleanup 检查；不能替代
 ADR 0060 的 Project 精确清单或 ADR 0078 的原生 delete 成功证明，不为此新增私有 gateway。
 
@@ -1614,7 +1672,7 @@ thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admis
 
 [ADR 0081](adr/0081-coordinate-ordinary-sessions-with-native-external-messages.md) 定义这条入口。
 同一 ServiceCore 在启动 App Server 前绑定临时会话 MCP，复用 Scheduler 的同进程传输、
-可信调用 metadata、鉴权与有界停服机制，独立注册六个工具；全部与普通输入共享 Store、
+可信调用 metadata、鉴权与有界停服机制，注册六个会话工具及三个受管 Worktree 工具；全部与普通输入共享 Store、
 Runtime、Channel 和 AsyncCodex。工具就绪前不开准入，关闭时先拒绝新调用再有界收尾。
 不写用户 `config.toml`、替换 MCP 表或额外注入 developer/base instructions。
 
@@ -1653,7 +1711,8 @@ wait 最多八个不同的其他目标，使用独立的 `afterCursor` 状态快
 ### 创建与外部消息交接
 
 来源取自原生 MCP `_meta.threadId`，不接受参数或正文冒充来源。新建继承来源 Project
-和 canonical cwd，仅在来源 chat 新建普通 sibling topic；可选模型覆盖遵循原生规则。
+和原生 Thread 实际 cwd，仅在来源 chat 新建普通 sibling topic；匹配受管 Worktree 时关联
+同一资源。`create_thread` 不增加 cwd/worktree 参数；可选模型覆盖遵循原生规则。
 新会话关闭 Reaction Pulse 和 Completion Mention，复制 Progress Card，之后独立。
 新建标题沿用 Netizen 的 120 字符限制，接口 schema 同步注明；提示词遵循原生 1,000
 UTF-8 字节限制。模型目录 ID 在 SDK 提交前解析为实际 model，不直接混用两者。
@@ -1708,13 +1767,29 @@ Admin 沿用实例管理员、同源请求和一次性 action grant；编辑复�
 `identity` 精确只读筛选保持既有含义。该改动仅改善显示、引用说明与复制，不引入通用
 ID 解析器、别名或管理路由迁移。
 
+### Agent Worktree 工具
+
+`list_worktrees`、`create_worktree` 复用同一应用服务与实例临时
+MCP 连接；来源只能是可信 `_meta.threadId` 映射的普通 Binding，Project 不能由参数冒充。
+列表受来源聊天的 discovery 范围约束，创建受 readSend 范围约束，不继承 Admin 登录权限。
+列表使用 `limit`/`cursor`（默认 10，上限 50），不收编外部目录；Agent 按需通过 Git 查询
+分支，不提供专用分支查询工具。Admin 与飞书表单的内部选项查询保留。
+`create_worktree` 仅接受可选 `ref` 与 CLI 形态的 `allowAsync:true`，返回有界
+创建结果而非后台任务，不支持目标路径、命名分支或删除。省略 `ref` 使用缓存的仓库默认
+分支规则，无可解析默认时须指定 ref；人工入口默认 HEAD。新建 detached 工作区不改变
+调用会话 cwd，因此随后调用 `create_thread` 仍继承原来源目录，不能自动采用“刚创建”的工作区。
+
 ## 数据与配置
 
 ### Channel 数据库与结构校验
 
-`channel.sqlite3` 的 schema v14 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+`channel.sqlite3` 的 schema v15 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`、`session_defaults`、`session_defaults_order`，以及
-`schedule_plans`、`schedule_runs`、`schedule_requests`。
+`schedule_plans`、`schedule_runs`、`schedule_requests`、`managed_worktrees`。
+v15 为 Project 增加登记 `generation`，为 Binding 增加可选 `working_cwd`/`worktree_id`。
+受管资源只保存 ID、Project alias/登记代次、checkout 根与 cwd、Git 身份证据、创建来源、
+创建状态/revision/时间；HEAD、分支、dirty 和原生历史不落库。Project 删除而保留的资源
+不会因同 alias 重建挂回新代次。已物化 Thread 的 cwd 仍以原生读取为准，本地字段不是第二份原生真值。
 `dedup_keys` 直接实现 Channel SDK 冻结的 `seen/mark` DedupStore 协议。
 `bindings` 保存全空或全有的三个 Binding-scoped catalog
 ID、settings revision、三个显式保存的 Binding Task Feedback 布尔值及 feedback revision、
@@ -1734,7 +1809,7 @@ Codex 配置或卡片 session，也不与 Project 删除级联。
 Runtime 只接受当前完整 schema；只有显式 `netizen setup` 可以初始化新库。
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移从安装器移到
 每次实际启动：入口先取得实例 lifetime lock，检查初始化证据、配置和数据库，再按
-数据格式版本选取完整迁移路径。基线仍为 v14，沿用
+数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15；基线仍为 v14，沿用
 [ADR 0075](adr/0075-migrate-channel-databases-during-installation.md) 的冻结 SQL／转换与
 历史夹具规则；应用版本变化不自动增加 schema。迁移步骤、版本推进及最终完整性校验
 在同一个 SQLite 事务内完成。只在需要迁移时保存私有恢复备份；无变化不重复迁移。
@@ -1751,8 +1826,8 @@ exact 接收 Turn ID 引用和有界管理请求去重。Run 通过 Binding 获�
 映射或原生终态历史。计划删除清空指令并保留不可复活墓碑；最近已释放 Run 有界保留。
 除此以外，数据库没有 prompt、补充消息正文/发送者投影、当前消息发送者投影、回复、ephemeral
 native Thread ID、Turn、Goal、
-Skill catalog、原生 plan/checklist、Turn Activity Projection、reaction、Reply Card identity、cwd
-副本、本轮文件清单/快照/摘要、card session、Codex config、Thread name/archive 状态或
+Skill catalog、原生 plan/checklist、Turn Activity Projection、reaction、Reply Card identity、
+本轮文件清单/快照/摘要、card session、Codex config、Thread name/archive 状态或
 queue 表，也不保存 Admin credential、session、action/CSRF token、native metadata 索引或
 audit record。
 
@@ -1768,14 +1843,15 @@ deadline，不据此声称回滚。
 
 ### Project 登记与准入
 
-Project 是持久化的 `alias -> canonical absolute cwd`；每个 Binding 必须显式绑定
+Project 是持久化的 `alias -> canonical absolute 默认 cwd`；每个 Binding 必须显式绑定
 Registry 中的一个 Project，不存在 default/unbound 或服务 cwd fallback。YAML mapping
 只做 `INSERT OR IGNORE` bootstrap；飞书卡片可登记已有绝对路径，或只在必填的
 `projectRoot` 内创建空目录。`/new` 可以从同 Scope 的现有 Binding 记录预选当前或最近
 使用且仍 enabled 的 Project，不另存 recent 状态；没有可推导偏好时必须由用户选择，
 没有 enabled Project 时引导 `/settings` 且不创建 Binding。停用阻止新 Binding 和定时触发，已有
 Binding 仍能继续。Admin 可按 [ADR 0060](adr/0060-delete-projects-with-exact-session-inventory.md)
-明确删除 Project 及完整关联 Sessions，成功后保留 Registry 墓碑；Netizen 从不删除目录。
+明确删除 Project 及完整关联 Sessions，成功后保留 Registry 墓碑和原 Project 目录；
+ADR 0085 另允许明确选择删除关联受管 Worktree，不能据此删除外部目录。
 ADR 0061 将关联定时计划和仍在创建会话的定时执行纳入同一清单；提交即删除关联计划，
 后续部分失败或同名重新登记均不复活它们。
 它不做 workspace clone 或 Project ACL。
@@ -2253,7 +2329,8 @@ Admin 新话题计划同样先区分群聊与单聊，复用群选择器并保�
 
 Project 删除是 ADR 0060/0061 的独立 action：二次确认展示 alias、完整关联 Sessions/Side、
 定时计划与在途定时创建数量、
-永久删除原生历史和保留 cwd 的后果，一次性 grant 固定 Project revision 与 exact 清单
+永久删除原生历史和保留原 Project cwd 的后果；“同时删除关联受管 worktree”默认不勾选。
+一次性 grant 固定 Project revision、该选项与 exact 清单
 fingerprint。短 Store transaction 校验清单、停用 Project 并删除关联计划；进程内 intent 阻止新 Binding、
 新 Side、新调度认领、重复删除与重新启用，不持有 Project execution lock。清单最多 1000 个 Binding
 和 1000 条 Side route，超限拒绝；操作总预算 120 秒，每个对象最多 30 秒。
@@ -2267,6 +2344,11 @@ Project，不能提前把 route 标成终态；发布/补偿完成后的清理�
 持久 fork 的进程内在途创建覆盖原生操作、root/seed 发布和完整绑定，Project 删除遇到该
 交接尚未结束时同样保留停用 Project、本次报告未完成；收尾后重新预览确认，不增加后台
 续删或持久创建状态。最终绑定复核 Project，不能晚到挂接已停用/删除条目。
+
+勾选级联工作区后，清单纳入本 Project 登记代次的受管资源；仅在相关会话/Side 清理与
+工作区安全删除全部确认后才完成 Project 删除。工作区失败也作为剩余项报告。不勾选则
+保留目录和登记，Admin 标示原 Project 已删除；本版不重新关联，不能在 `/new` 选用，
+同 alias 重建也不自动接管。原 Project 目录和外部工作区始终不属于级联目标。
 
 ## 飞书命令与控制卡片
 
@@ -2297,7 +2379,8 @@ SDK safety 层被当成旧投递。Netizen 因此只在可重复动作的公共�
 两类删除确认页导航、exact Turn 重新检查、Goal 暂停/恢复、Side 关闭重试和文件分页均走
 这一出口。`/status` 命令别名按钮也复用同一出口；处理后只重绘 callback 携带的只读展示
 快照以更新 nonce，不重新查询状态或重复命令。新增 Project 的 submit 没有 callback value，因此把同一类 nonce 编入必填的
-Project mode option value。decoder 只移除 transport nonce，不要求它存在，也不校验其格式；
+Project mode option value；`/new` 只读“加载项目目录选项”同样在 Project option 中携带 nonce。
+decoder 只移除 transport nonce，不要求它存在，也不校验其格式；
 Project mode 同样先恢复业务 mode，再忽略可选 transport 后缀。因此 nonce 不进入 typed
 intent、SQLite、业务 precondition 或 outbound UUID，缺失或畸形也不改变业务 payload 的
 有效性。同一份已渲染按钮的飞书重复投递仍共享 nonce，继续由 SDK 去重；卡片成功重绘后相同
@@ -2310,7 +2393,13 @@ UUID 保证重复点击不重复发消息，这些动作不加 nonce。SDK 改�
 
 ### 新建与配置表单
 
-`/new` 卡片只有一个创建 form：一个包含全部 enabled Projects 的 Project 下拉框，以及
+`/new` 创建表单按项目、模型配置、消息上下文、任务反馈、工作区顺序展开分组，
+组标题加粗；模型整行、Effort/Speed 并排，反馈说明与选择并排。该布局调整仅改变展示，
+不改变现有控件的选项值、默认值、提交字段或配置语义，也不调整 `/config`、`/defaults`。
+P2P 的消息上下文和非 Git 项目的工作区继续按既有条件不显示。
+
+`/new` 卡片保留一个创建 form，另有不创建会话的“加载项目目录选项”只读 form。创建 form
+包含全部 enabled Projects 的 Project 下拉框，以及
 Model、Effort、Speed、Reaction Pulse、Progress Card 和 Completion Mention；群聊和群话题再增加 Mention
 Context Mode。Reaction Pulse 默认关闭，Progress Card 和 Completion Mention 默认开启，三项可独立修改；这项
 进度卡新建默认值取代 ADR 0046 最初的关闭，不修改已有 Binding 的进度卡选择；
@@ -2318,12 +2407,20 @@ Context Mode。Reaction Pulse 默认关闭，Progress Card 和 Completion Mentio
 `current-only`，P2P 不显示 mode 字段。Model 下拉包含稳定的 `inherit Codex` sentinel；
 选择实际模型时三项必须完整并经
 live catalog resolve。模型目录不可用时仍展示 Project、Task Feedback、Context Mode 和
-inherit 的 minimal form，不要求用户改走命令。提交后只创建 lazy Binding，并把原卡重绘为
+inherit 的 minimal form，不要求用户改走命令。提交后创建 lazy Binding，不物化原生 Thread，并把原卡重绘为
 包含 Project、会话短 ID、Model 来源、Task Feedback、Mention Context Mode 和下一步的绿色
 终态；业务失败显示红色原因。若完整 Project card 被飞书平台拒绝，明确说明没有静默截断、
 分页或快捷创建兜底。若公开卡片更新返回失败或抛错，回调在同一聊天或话题回复等价结果，
 避免已提交的 Binding 没有反馈。完整决定见
 [ADR 0040](adr/0040-make-new-card-only-and-show-all-projects.md)。
+
+已预选 Project 时按需加载工作区；没有预选或更换 Project 时先显式加载其目录选项，
+不依赖 SDK 未透传的 select change 回调。非 Git 项目不显示工作区/分支控件；Git 项目
+默认“项目目录”，可选当前可用受管 worktree 或新建。新建分支配置只对新建生效，复用
+既有目录不 checkout。选项携带 Project alias/revision 与资源 ID，提交再次校验；跨项目
+旧选项拒绝，不接受任意 cwd。保持旧默认目录表单兼容。读取失败不冒充空目录；创建
+工作区后会话失败说明保留资源。成功卡及文本 fallback 显示选定实际工作目录；无卡片
+session、无额外原生 Thread 或 Prompt。工作区细则见 ADR 0085。
 
 `/defaults` 使用一张表单查看和配置当前 App/chat 的会话默认值；不要求当前 Scope 已有
 Binding，在普通话题中操作也作用于所属聊天。表单明确显示作用范围与配置来源：有精确
@@ -2417,7 +2514,7 @@ callback 携带严格字段、类型及容量校验的只读展示快照，仅�
 动态字段使用纯文本组件，不解释 Markdown、HTML 或提及。
 卡片保留当前 Binding、原生 `name`、首条消息 `preview`、Project、完整
 native Thread ID、运行状态、当前 active Turn checklist、已接受 steer 次数、上下文窗口
-用量、Model、Effort、Speed 和配置来源。若 Project cwd 位于 Git work tree 中，普通与
+用量、Model、Effort、Speed 和配置来源。若会话实际 cwd 位于 Git work tree 中，普通与
 Side `/status` 还会即时显示 Git `status --porcelain=v1 --branch` 的 branch header 内容；
 Netizen 只移除稳定的 `## ` 格式前缀，不自行解释普通分支、upstream、detached HEAD 或空
 仓库。探测禁用 optional locks 和 repository-configured filesystem monitor，不读取
