@@ -2142,7 +2142,7 @@ class SideRuntimeTest(unittest.IsolatedAsyncioTestCase):
             if isinstance(item, SideTurnOutcome)
         )
         self.assertEqual(outcome.parent_binding_id, binding.id)
-        self.assertEqual(outcome.cwd, self.cwd.resolve())
+        self.assertEqual(outcome.cwd, self.cwd)
         self.assertEqual(outcome.task_feedback, feedback)
         assert outcome.activity is not None
         self.assertEqual(outcome.activity.side_id, record.id)

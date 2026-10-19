@@ -197,9 +197,13 @@ class WorktreeChannelCwdTest(unittest.IsolatedAsyncioTestCase):
         self.materialize()
         (self.fixture.project / "answer.txt").write_text("wrong source")
         (self.selected / "answer.txt").write_text("correct source")
-        _, files = self.app._completion_files(self.outcome(cwd=self.selected), TurnDiffSummary())
-        self.assertEqual(files[0].resolved_path, self.selected / "answer.txt")
-        self.assertEqual(files[0].size, len("correct source"))
+        alias = self.fixture.project_root / "selected-alias"
+        alias.symlink_to(self.selected, target_is_directory=True)
+        for cwd in (self.selected, alias):
+            with self.subTest(cwd=cwd):
+                _, files = self.app._completion_files(self.outcome(cwd=cwd), TurnDiffSummary())
+                self.assertEqual(files[0].resolved_path, (self.selected / "answer.txt").resolve())
+                self.assertEqual(files[0].size, len("correct source"))
 
     async def test_files_without_cwd_evidence_do_not_use_project_default(self):
         self.materialize()

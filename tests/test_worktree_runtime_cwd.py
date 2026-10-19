@@ -656,11 +656,13 @@ class WorktreeRuntimeCwdTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.runtime._accepting)
 
     async def test_side_snapshot_uses_native_fork_directory_not_callers_default(self):
-        self.materialize()
+        native_cwd = self.root / "native-cwd-alias"
+        native_cwd.symlink_to(self.selected, target_is_directory=True)
+        self.materialize(native_cwd)
         snapshot = await self.runtime.create_side(
             side_id="side", binding=self.binding, cwd=self.main, creator_id="user",
         )
-        self.assertEqual(snapshot.cwd, self.selected)
+        self.assertEqual(snapshot.cwd, native_cwd)
         self.assertNotIn("cwd", self.codex.fork_calls[0][1])
 
     async def test_worktree_side_usage_keeps_frozen_directory_after_parent_removal(self):
