@@ -919,6 +919,7 @@ class BindingStoreTest(unittest.TestCase):
                 "schedule_requests",
                 "session_defaults",
                 "session_defaults_order",
+                "managed_worktrees",
             },
         )
         self.assertTrue(

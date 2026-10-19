@@ -9,15 +9,17 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from openai_codex import AsyncThread
 from openai_codex.errors import InvalidRequestError
 
-from ..bindings import BindingCursor, BindingNotFound, BindingQuery, BindingStore, ScopeNotFound
+from ..bindings import BindingCursor, BindingNotFound, BindingQuery, BindingStore, ProjectNotFound, ScopeNotFound
 from ..feishu_links import chat_open_url, topic_open_url
 from ..thread_history import AppServerThreadHistory, ThreadHistory
 from ..session_inventory import NativeSessionCursor, query_native_sessions
+from ..worktrees.errors import WorktreeError
 from .errors import SessionToolError
 from .policy import SessionAccessPolicy, SessionPolicyService
 from .presentation import fit_result, native_json, result_bytes, truncate, turn_summary
@@ -25,17 +27,37 @@ from .schema import validate_arguments
 
 logger = logging.getLogger(__name__)
 _READ_SECONDS = 10.0
+_WORKTREE_TOOLS = {"list_worktrees", "create_worktree"}
+
+
+def _fit_worktree_result(value: dict[str, Any]) -> dict[str, Any]:
+    """Do not turn an over-budget path/ref into a different usable identifier."""
+    if result_bytes(value) <= 8000:
+        return value
+    minimal: dict[str, Any] = {"error": {"code": "response_too_large", "message":
+        "Worktree information exceeded the output budget. Request a smaller list page or inspect Admin. "
+        "A creation may already have succeeded; do not automatically retry."}}
+    worktree = value.get("worktree")
+    if isinstance(worktree, dict):
+        minimal["worktree"] = {key: worktree[key] for key in ("id", "creationState") if key in worktree}
+    for key in ("id", "worktreeId", "creationState", "created"):
+        if key in value:
+            minimal[key] = value[key]
+    if result_bytes(minimal) > 8000:
+        minimal = {"error": minimal["error"]}
+    return minimal
 
 
 class SessionService:
     def __init__(self, *, bindings: BindingStore, runtime: Any, codex: Any, app_id: str,
                  policy: SessionPolicyService, create_thread: Callable[..., Awaitable[dict[str, Any]]],
                  send_message: Callable[..., Awaitable[dict[str, Any]]],
-                 history: ThreadHistory | None = None) -> None:
+                 history: ThreadHistory | None = None, worktrees: Any = None) -> None:
         self._bindings, self._runtime, self._codex = bindings, runtime, codex
         self._app_id, self._policy = app_id, policy
         self._create, self._send = create_thread, send_message
         self._history = history
+        self._worktrees = worktrees
 
     def _binding(self, thread_id: str | None, *, source: bool = False) -> tuple[Any, Any]:
         binding = self._bindings.find_by_native_thread_id(thread_id) if thread_id else None
@@ -68,7 +90,8 @@ class SessionService:
                 "materialized": binding.native_thread_id is not None}
 
     async def call(self, tool_name: str, arguments: Mapping[str, Any], native_thread_id: str | None) -> dict[str, Any]:
-        mutation = tool_name in {"create_thread", "send_message_to_thread"}
+        mutation = tool_name in {"create_thread", "send_message_to_thread", "create_worktree"}
+        fit = _fit_worktree_result if tool_name in _WORKTREE_TOOLS else fit_result
         invoked = False
         try:
             data = validate_arguments(tool_name, arguments)
@@ -76,7 +99,31 @@ class SessionService:
             # Admin edits apply to the next call. An admitted operation keeps
             # these immutable rules while native and Channel I/O is in flight.
             policy, revision = self._policy.snapshot()
-            if tool_name in {"list_threads", "list_archived_threads"}:
+            if tool_name in _WORKTREE_TOOLS:
+                if tool_name == "create_worktree":
+                    self._authorize(policy, source_scope.chat_id)
+                elif not policy.discovery.allows(source_scope.chat_id):
+                    raise SessionToolError("access_denied", "Worktree discovery is disabled for the caller's chat.")
+                if self._worktrees is None:
+                    raise SessionToolError("unavailable", "Managed worktree tools are not ready.")
+                project = self._bindings.get_project(source.project_alias)
+                if not project.enabled:
+                    raise SessionToolError("project_unavailable", "The caller's Project is disabled.")
+                if tool_name == "list_worktrees":
+                    async with asyncio.timeout(_READ_SECONDS):
+                        value = await self._worktrees.query(project_alias=project.alias, cursor=data.get("cursor"), limit=data["limit"])
+                else:
+                    async with asyncio.timeout(_READ_SECONDS):
+                        cwd = await self._runtime.resolve_binding_cwd(source.id, default_cwd=Path(project.cwd))
+                    invoked = True
+                    # Leave the application's 120-second budget time to
+                    # return a known registration receipt before the MCP
+                    # call's 140-second outer deadline expires.
+                    async with asyncio.timeout(125):
+                        value = await self._worktrees.create(project_alias=project.alias, expected_project_revision=project.revision,
+                                                            ref=data.get("ref"), source_cwd=cwd,
+                                                            origin_binding_id=source.id, agent_default=True)
+            elif tool_name in {"list_threads", "list_archived_threads"}:
                 async with asyncio.timeout(_READ_SECONDS):
                     value = await self._list(data, policy, revision, archived=tool_name == "list_archived_threads")
             elif tool_name == "read_thread":
@@ -98,16 +145,20 @@ class SessionService:
                 invoked = True
                 value = await self._send(source_thread_id=source.native_thread_id, target_thread_id=data["threadId"],
                                          prompt=data["prompt"], model=data.get("model"))
-            return fit_result(value)
+            return fit(value)
         except SessionToolError as error:
-            return fit_result(error.result())
+            return fit(error.result())
+        except WorktreeError as error:
+            return fit({**error.details, "error": {"code": error.code, "message": str(error)}})
+        except ProjectNotFound:
+            return {"error": {"code": "project_unavailable", "message": "The caller's Project no longer exists."}}
         except (BindingNotFound, ScopeNotFound):
             return {"error": {"code": "target_not_registered", "message": "The session was removed. Refresh the target information."}}
         except Exception:
             # Native exception text may include prompts or sensitive SDK payloads.
             logger.warning("Session tool failed (%s)", tool_name)
             return {"error": {"code": "outcome_unknown" if mutation and invoked else "unavailable",
-                              "message": "Delivery outcome is unknown; inspect the exact target before taking further action. Do not automatically retry." if mutation and invoked else "Session information is unavailable. Retry this read later."},
+                              "message": "Operation outcome is unknown; inspect the exact target before taking further action. Do not automatically retry." if mutation and invoked else "Session information is unavailable. Retry this read later."},
                     **({"threadId": data["threadId"]} if mutation and "threadId" in locals().get("data", {}) else {}),
                     **({"netizen": {"accepted": None}} if mutation and invoked else {})}
 
@@ -137,7 +188,7 @@ class SessionService:
             value = {"id": binding.native_thread_id, "kind": "codex", "projectId": None,
                      "title": truncate(title, 2000) if title else None,
                      "status": "unknown" if native else "pending",
-                     "cwd": self._bindings.get_project(binding.project_alias).cwd,
+                     "cwd": None if native else (binding.working_cwd or self._bindings.get_project(binding.project_alias).cwd),
                      "updatedAt": native.updated_at if native else _timestamp(binding.created_at),
                      "netizen": {**self._metadata(binding, scope), "archived": archived if native else None}}
             if native and policy.read_send.allows(scope.chat_id):
@@ -202,8 +253,12 @@ class SessionService:
                         thread = await self._native_read(value["id"], include_turns=False)
                     value["status"] = thread["status"]["type"]
                     value["projectId"] = thread.get("projectId")
+                    value["cwd"] = thread.get("cwd")
+                    if not value["cwd"]:
+                        value["netizen"]["cwdUnavailable"] = True
                 except Exception:
                     value["netizen"]["statusUnavailable"] = True
+                    value["netizen"]["cwdUnavailable"] = True
             # Query snapshots may predate a foreground switch during I/O.
             binding = self._bindings.get(value["netizen"]["bindingId"])
             scope = self._bindings.get_scope(binding.scope_key)

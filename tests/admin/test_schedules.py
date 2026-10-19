@@ -372,7 +372,7 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_project_delete_exposes_plans_and_unresolved_dispatch_counts(self) -> None:
         self.management.preview_project_delete = AsyncMock(return_value=SimpleNamespace(
-            project=self.management.project_record, bindings=(), sides=(),
+            project=self.management.project_record, bindings=(), sides=(), worktrees=(),
             scheduled_plans=(("plan-a", 2), ("plan-b", 5)), scheduled_runs=(object(),),
             fingerprint="exact-schedule-inventory",
         ))

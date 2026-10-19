@@ -337,6 +337,7 @@ def _new_binding_form(
     allow_context_mode: bool,
     message_context_mode: MentionContextMode,
     task_feedback: BindingTaskFeedback,
+    workspace_options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     initial_project = next(
         (
@@ -346,8 +347,7 @@ def _new_binding_form(
         ),
         None,
     )
-    elements = [
-        _form_label("项目工作目录"),
+    elements = [_new_form_section("项目", [
         _static_select(
             name="new_project",
             placeholder="选择项目",
@@ -364,45 +364,149 @@ def _new_binding_form(
                 else None
             ),
         ),
-    ]
+    ])]
     if catalog is None:
-        elements.extend(
-            [
-                _form_label("Model"),
-                _static_select(
-                    name="new_model",
-                    placeholder="选择 Model 来源",
-                    options=(("继承 Codex", _new_model_reference(None)),),
-                    initial_option=_new_model_reference(None),
-                ),
-            ]
-        )
+        model_elements = [
+            _static_select(
+                name="new_model",
+                placeholder="选择 Model 来源",
+                options=(("继承 Codex", _new_model_reference(None)),),
+                initial_option=_new_model_reference(None),
+            ),
+        ]
     else:
-        elements.extend(
-            _model_settings_form_elements(
-                prefix="new",
-                catalog=catalog,
-                model_value_encoder=_new_model_reference,
-                inherit_initial_when_unset=False,
-            )
+        model_fields = _model_settings_form_elements(
+            prefix="new",
+            catalog=catalog,
+            model_value_encoder=_new_model_reference,
+            inherit_initial_when_unset=False,
         )
+        model_elements = [model_fields[1], _new_form_columns(
+            (1, model_fields[2:4]), (1, model_fields[4:6]),
+        )]
+    elements.append(_new_form_section("模型配置", model_elements))
     if allow_context_mode:
-        elements.extend(
-            _context_mode_form_elements(
-                prefix="new",
-                initial_mode=message_context_mode,
-            )
+        context = _context_mode_form_elements(prefix="new", initial_mode=message_context_mode)
+        context[-1] = _form_hint(
+            "机器人始终只响应 @。选择“自动带上”会把两次 @ 之间未 @ 机器人的群聊消息交给 Codex。"
         )
-    elements.extend(
-        _task_feedback_form_elements(prefix="new", initial=task_feedback)
+        elements.append(_new_form_section("消息上下文", context))
+    feedback = _task_feedback_form_elements(prefix="new", initial=task_feedback)
+    feedback_hints = (
+        "执行时闪烁；关闭仍保留状态表情。部分移动端会显示为消息。",
+        "展示执行状态与清单，结束后自动折叠。",
+        "完成或失败时 @ 发起人；主动停止、定时自动首轮不提醒。",
     )
+    elements.append(_new_form_section("任务反馈", [
+        _new_form_columns((3, [label, _form_hint(hint)]), (1, [select]))
+        for label, select, hint in zip(feedback[::3], feedback[1::3], feedback_hints, strict=True)
+    ]))
+    if workspace_options is not None and workspace_options.get("isGit") is True:
+        elements.append(_new_form_section("工作区", _new_workspace_elements(workspace_options)))
     elements.append(
         _form_submit_button(name="new_binding_submit_v6", label="新建会话")
     )
     return {
         "tag": "form",
         "name": "new_binding_v6",
+        "vertical_spacing": "12px",
         "elements": elements,
+    }
+
+
+def _new_form_columns(*columns: tuple[int, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Arrange existing /new controls without changing their submitted values."""
+    rendered = []
+    for weight, elements in columns:
+        styled = []
+        for element in elements:
+            if element["tag"] in {"select_static", "input"}:
+                element = {**element, "width": "fill"}
+            elif element["tag"] == "markdown" and element["content"].startswith("<font color='grey'>"):
+                element = {**element, "text_size": "notation"}
+            styled.append(element)
+        rendered.append({
+            "tag": "column", "width": "weighted", "weight": weight,
+            "vertical_spacing": "8px", "vertical_align": "center", "elements": styled,
+        })
+    return {
+        "tag": "column_set", "flex_mode": "none", "horizontal_spacing": "8px",
+        "columns": rendered,
+    }
+
+
+def _new_form_section(title: str, elements: list[dict[str, Any]]) -> dict[str, Any]:
+    return _new_form_columns((1, [{"tag": "markdown", "content": f"**{title}**"}, *elements]))
+
+
+def _workspace_reference(options: Mapping[str, Any], choice: str) -> str:
+    return (
+        f"workspace:v1:{options['projectAlias']}:{options['projectRevision']}:"
+        + choice
+    )
+
+
+def _new_workspace_elements(options: Mapping[str, Any]) -> list[dict[str, Any]]:
+    choices = [
+        ("项目目录（不使用 worktree）", _workspace_reference(options, "project")),
+        ("新建 worktree", _workspace_reference(options, "new")),
+    ]
+    for item in options.get("items", ()):
+        if item.get("state") != "ready" or item.get("available") is not True:
+            continue
+        branch = item.get("branch") or "detached"
+        choices.append((
+            f"{item['id']} · {branch} · {item['cwd']}",
+            _workspace_reference(options, "id:" + item["id"]),
+        ))
+    refs = [("当前 HEAD", "HEAD")]
+    for branch in options.get("branches", ()):
+        occupied = " · 已占用，仅可作起点" if branch.get("occupiedPaths") else ""
+        remote = "远端 · " if branch.get("remote") else "本地 · "
+        refs.append((remote + branch["name"] + occupied, branch["ref"]))
+    return [
+        _form_label("工作区（切换项目后请重新加载目录选项）"),
+        _static_select(
+            name="new_workspace", placeholder="选择工作区", options=tuple(choices),
+            initial_option=_workspace_reference(options, "project"),
+        ),
+        _form_label("以下分支配置仅在“新建 worktree”时生效；已有工作区不会切换分支"),
+        _static_select(
+            name="new_worktree_mode", placeholder="选择检出方式",
+            options=(("Detached（不绑定命名分支）", "detached"),
+                     ("检出已有本地分支（不能已被占用）", "existing"),
+                     ("创建并检出新分支", "new")),
+            initial_option="detached",
+        ),
+        _form_label("起点 revision；检出已有分支时请选择对应的本地分支"),
+        _static_select(
+            name="new_worktree_ref", placeholder="选择起点/已有分支",
+            options=tuple(refs), initial_option="HEAD",
+        ),
+        {"tag": "input", "name": "new_worktree_branch", "max_length": 255,
+         "label": _plain_text("新分支名（仅创建新分支时填写）"),
+         "placeholder": _plain_text("例如：feature/my-task")},
+    ]
+
+
+def _new_workspace_project_form(
+    projects: tuple[Project, ...], initial_project_alias: str | None,
+) -> dict[str, Any]:
+    nonce = _new_callback_nonce()
+    options = tuple((
+        f"{project.alias} · {project.cwd}",
+        _project_reference(project) + ":nonce:" + nonce,
+    ) for project in projects)
+    initial = next((value for project, (_, value) in zip(projects, options)
+                    if project.alias == initial_project_alias), None)
+    return {
+        "tag": "form", "name": "new_workspace_project_v1", "elements": [
+            _form_label("使用其他工作区：选择项目并加载目录选项（不会创建会话）"),
+            _static_select(name="new_workspace_project", placeholder="选择项目",
+                           options=options, initial_option=initial),
+            _form_submit_button(name="new_workspace_project_submit_v1",
+                                label="加载项目目录选项"),
+        ],
     }
 
 
@@ -782,10 +886,13 @@ def new_binding_card(
     allow_context_mode: bool = True,
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
     task_feedback: BindingTaskFeedback | None = None,
+    workspace_options: Mapping[str, Any] | None = None,
+    allow_workspace_selection: bool = False,
+    workspace_error: str | None = None,
 ) -> OutboundCard:
     builder = _builder("新建会话", "选择项目，开始一次对话")
     builder.markdown(
-        "项目是 Codex 实际工作的目录。选择项目并创建会话后，直接发送任务即可开始。"
+        "默认在项目目录工作，也可为 Git 项目选择受管 worktree。创建会话后，直接发送任务即可开始。"
         "创建会话本身不会启动任务。"
     )
     if not projects:
@@ -794,6 +901,17 @@ def new_binding_card(
             "再发送 `/new`。发送 `/help` 查看快速开始。"
         )
     else:
+        if allow_workspace_selection:
+            builder.raw(_new_workspace_project_form(projects, initial_project_alias))
+        if workspace_error:
+            builder.raw(_notice(workspace_error, error=True))
+        if workspace_options is not None:
+            builder.markdown(
+                "已加载项目 " + _md_code(str(workspace_options["projectAlias"]))
+                + (" 的工作区；新建 worktree 只检出提交内容，不复制本地改动或运行环境初始化。"
+                   if workspace_options.get("isGit") is True
+                   else " 不是 Git 仓库，本次仅使用项目目录。")
+            )
         builder.markdown(
             "不确定模型配置时，可选择“继承 Codex”；"
             "也可选择 Model（模型）、Effort（思考强度）和 Speed（速度），"
@@ -817,6 +935,7 @@ def new_binding_card(
                 task_feedback=(
                     task_feedback or SessionSettings.new_defaults(catalog).task_feedback
                 ),
+                workspace_options=workspace_options,
             )
         )
     return OutboundCard(card=with_model_details(builder.to_dict(), catalog if projects else None))
@@ -1642,6 +1761,7 @@ def binding_created_card(
     settings: TurnModelSettings | None = None,
     message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
     task_feedback: BindingTaskFeedback | None = None,
+    workspace_cwd: str | None = None,
 ) -> OutboundCard:
     builder = _builder(
         "会话创建成功",
@@ -1652,6 +1772,8 @@ def binding_created_card(
         f"✅ 已选择项目 `{_md_code(project_alias)}`，"
         f"并创建、切换到 Netizen 会话 **{short_id}**。"
     )
+    if workspace_cwd is not None:
+        builder.markdown(f"实际工作目录：`{_md_code(workspace_cwd)}`。")
     builder.markdown(
         "现在可以直接发送任务，例如：**梳理这个项目的结构。**\n"
         "如果刚才的任务因没有会话而未执行，请重新发送。\n"
@@ -1759,6 +1881,7 @@ def decode_button_action(
     form_only = {
         CardControlName.REGISTER_PROJECT,
         CardControlName.CREATE_BINDING,
+        CardControlName.PREPARE_NEW_WORKSPACE,
         CardControlName.CONFIGURE_BINDING,
         CardControlName.RENAME_BINDING,
     }
@@ -2065,7 +2188,25 @@ def _decode_new_binding_form(
     if tag != "button" or not message_id or not sender_id:
         raise CardActionError("会话配置表单回调不完整。")
     payload = dict(form_value)
+    if "new_workspace_project" in payload:
+        if set(payload) != {"new_workspace_project"}:
+            raise CardActionError("目录加载表单混合了其他操作字段。")
+        reference = _required_string(payload["new_workspace_project"], "new_workspace_project")
+        alias, revision = _decode_project_reference(reference.partition(":nonce:")[0])
+        return CardControlIntent(
+            scope=scope, source_id=message_id, sender_id=sender_id,
+            name=CardControlName.PREPARE_NEW_WORKSPACE,
+            project_alias=alias, expected_revision=revision,
+        )
     _require_completion_mention_field(payload, prefix="new")
+    workspace = {}
+    workspace_fields = {
+        "new_workspace", "new_worktree_mode", "new_worktree_ref", "new_worktree_branch",
+    }
+    if workspace_fields & set(payload):
+        if not workspace_fields - {"new_worktree_branch"} <= set(payload):
+            raise CardActionError("工作区表单不完整，请重新加载项目目录选项。")
+        workspace = {name: payload.pop(name) for name in workspace_fields if name in payload}
     base_fields = {
         "new_project",
         "new_model",
@@ -2091,6 +2232,9 @@ def _decode_new_binding_form(
     )
     settings = decode_session_settings_fields(payload, prefix="new", model_id=model_id)
     turn = settings.turn_settings
+    worktree_id, worktree_create = _decode_new_workspace(
+        workspace, project_alias, expected_revision,
+    )
     return CardControlIntent(
         scope=scope,
         source_id=message_id,
@@ -2105,7 +2249,47 @@ def _decode_new_binding_form(
         reaction_pulse_enabled=settings.task_feedback.reaction_pulse_enabled,
         progress_card_enabled=settings.task_feedback.progress_card_enabled,
         completion_mention_enabled=settings.task_feedback.completion_mention_enabled,
+        worktree_id=worktree_id,
+        worktree_create=worktree_create,
     )
+
+
+def _decode_new_workspace(
+    payload: Mapping[str, Any], project_alias: str, project_revision: int,
+) -> tuple[str | None, dict[str, str | None] | None]:
+    if not payload:
+        return None, None
+    reference = _required_string(payload["new_workspace"], "new_workspace")
+    match = re.fullmatch(
+        r"workspace:v1:([a-z0-9][a-z0-9_-]{0,63}):([1-9][0-9]*):(project|new|id:([A-Za-z0-9_-]{1,128}))",
+        reference,
+    )
+    if match is None:
+        raise CardActionError("工作区选择无效，请重新加载项目目录选项。")
+    mode = _required_string(payload["new_worktree_mode"], "new_worktree_mode")
+    ref = _bounded_string(payload["new_worktree_ref"], "new_worktree_ref", max_chars=1000)
+    branch_value = payload.get("new_worktree_branch")
+    branch = (
+        _bounded_string(branch_value, "new_worktree_branch", max_chars=255).strip()
+        if branch_value not in (None, "") else ""
+    )
+    if mode not in {"detached", "existing", "new"}:
+        raise CardActionError("未知的 worktree 分支配置。")
+    choice = match.group(3)
+    if choice == "project":
+        return None, None
+    if (match.group(1), int(match.group(2))) != (project_alias, project_revision):
+        raise CardActionError("项目已切换，请先重新加载该项目的目录选项。")
+    if choice.startswith("id:"):
+        # Creation settings cannot change an existing workspace's branch.
+        return match.group(4), None
+    if mode == "new" and not branch:
+        raise CardActionError("创建新分支时请填写新分支名。")
+    if mode == "existing":
+        if not ref.startswith("refs/heads/") or not ref.removeprefix("refs/heads/"):
+            raise CardActionError("检出已有分支时，请选择未被占用的本地分支。")
+        branch = ref.removeprefix("refs/heads/")
+    return None, {"mode": mode, "ref": ref, "branch": branch if mode != "detached" else None}
 
 
 def _decode_config_form(

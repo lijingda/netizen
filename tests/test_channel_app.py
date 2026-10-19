@@ -132,6 +132,7 @@ from tests.support.channel_results import (
 )
 from tests.support.channel_runtime import StubRuntime
 from tests.support.channel_cards import (
+    form_controls,
     _elements,
     _card_button_value,
     _card_button_values,
@@ -1095,6 +1096,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     file_change_item(*paths),
                     final_response="files ready",
                 ),
+                cwd=self.project,
                 task_feedback=feedback,
                 activity=activity,
             )
@@ -1173,6 +1175,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     result=completed_turn_result(
                         final_response="answer survives"
                     ),
+                    cwd=self.project,
                     task_feedback=feedback,
                     activity=activity,
                 )
@@ -1456,7 +1459,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         form = _elements(picker.card, "form")[0]
         context_field = next(
             item
-            for item in form["elements"]
+            for item in form_controls(form)
             if item.get("name") == "new_context_mode"
         )
         values["new_context_mode"] = next(
@@ -1503,7 +1506,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         form = _elements(picker.card, "form")[0]
         context_field = next(
             item
-            for item in form["elements"]
+            for item in form_controls(form)
             if item.get("name") == "new_context_mode"
         )
         values["new_context_mode"] = next(
@@ -1993,6 +1996,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 turn_id="turn-files",
                 owner_id="ou_user",
                 origin=origin,
+                cwd=self.project,
                 result=completed_turn_result(
                     file_change_item("reports/sales.xlsx"),
                     final_response="analysis complete",
@@ -2035,6 +2039,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     turn_id="turn-diff-only",
                     owner_id="ou_user",
                     origin=origin,
+                    cwd=self.project,
                     result=completed_turn_result(
                         final_response="research complete"
                     ),
@@ -2085,6 +2090,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 await self.app.handle_completion(TurnOutcome(
                     binding_id=binding.id, thread_id="native-files", turn_id="root-turn",
                     owner_id="ou_user", origin=origin,
+                    cwd=self.project,
                     result=completed_turn_result(own, final_response="done"),
                     patch_children=TaskPatchChildren((batch,), complete),
                 ))
@@ -2120,6 +2126,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 turn_id="turn-files",
                 owner_id="ou_user",
                 origin=origin,
+                cwd=self.project,
                 result=completed_turn_result(
                     image_generation_item(image),
                     final_response=None,
@@ -2179,6 +2186,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                         await self.app.handle_completion(TurnOutcome(
                             binding_id=binding.id, thread_id="native-images", turn_id=turn_id,
                             owner_id="ou_user", origin=origin,
+                            cwd=self.project,
                             result=completed_turn_result(
                                 image_generation_item(image),
                                 final_response="before\n\n![first](result.png)\n\nmiddle\n\n![second](result.png)\n\nafter",
@@ -2221,6 +2229,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_completion(TurnOutcome(
             binding_id=binding.id, thread_id="native-images", turn_id="turn-images",
             owner_id="ou_user", origin=origin,
+            cwd=self.project,
             result=completed_turn_result(final_response="before\n\n![unrelated](unrelated.png)\n\nafter"),
         ))
 
@@ -2242,6 +2251,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_completion(TurnOutcome(
             binding_id=binding.id, thread_id="native-images", turn_id="turn-images",
             owner_id="ou_user", origin=origin,
+            cwd=self.project,
             result=completed_turn_result(final_response="before\n\n![missing](missing.png)\n\nafter"),
         ))
 
@@ -2274,6 +2284,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     turn_id="turn-files",
                     owner_id="ou_user",
                     origin=origin,
+                    cwd=self.project,
                     result=completed_turn_result(
                         file_change_item("report.txt"),
                         final_response="answer survives",
@@ -2309,6 +2320,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                     turn_id="turn-files",
                     owner_id="ou_user",
                     origin=origin,
+                    cwd=self.project,
                     result=completed_turn_result(
                         file_change_item("report.txt"),
                         final_response="answer survives",
@@ -2346,6 +2358,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 turn_id="turn-files",
                 owner_id="ou_user",
                 origin=origin,
+                cwd=self.project,
                 result=result,
             )
         )
@@ -2492,6 +2505,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 turn_id="turn-files",
                 owner_id="ou_user",
                 origin=origin,
+                cwd=self.project,
                 result=result,
             )
         )
@@ -2581,6 +2595,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 turn_id="turn-files",
                 owner_id="ou_user",
                 origin=origin,
+                cwd=self.project,
                 result=result,
             )
         )
@@ -2624,6 +2639,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
                 turn_id="turn-files",
                 owner_id="ou_user",
                 origin=origin,
+                cwd=self.project,
                 result=result,
             )
         )
@@ -6684,7 +6700,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         project_select = next(
             item
-            for item in form["elements"]
+            for item in form_controls(form)
             if item.get("name") == "new_project"
         )
         self.assertNotIn("initial_option", project_select)
@@ -6728,7 +6744,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
             form = next(item for item in forms if item["name"] == "new_binding_v6")
             project_select = next(
                 item
-                for item in form["elements"]
+                for item in form_controls(form)
                 if item.get("name") == "new_project"
             )
             return card, project_select.get("initial_option")
@@ -6781,8 +6797,7 @@ class ChannelApplicationTest(unittest.IsolatedAsyncioTestCase):
         )
         fields = {
             item["name"]: item
-            for item in form["elements"]
-            if "name" in item
+            for item in form_controls(form)
         }
         project_reference = next(
             option["value"]

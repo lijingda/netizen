@@ -161,6 +161,12 @@ tr:last-child td { border-bottom: 0; }
 .badge.on { background: #e5f6ed; color: #136c3c; }
 .badge.warn { background: #fff2df; color: #925400; }
 .actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.cascade-choice, .card-form label.cascade-choice { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.cascade-choice input, .card-form .cascade-choice input { width: auto; margin: 0; }
+#worktrees-body td { white-space: pre-line; overflow-wrap: anywhere; }
+#worktrees-body td:last-child { min-width: 170px; }
+#worktrees-body .action { margin-top: 8px; }
+#worktree-result { white-space: pre-line; }
 .project-delete-result { margin: 16px 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 9px; background: var(--wash); font-size: 13px; line-height: 1.6; }
 .project-delete-result.error { border-color: #e3b8b4; color: var(--danger); }
 .project-delete-result p { margin: 0; white-space: pre-line; }

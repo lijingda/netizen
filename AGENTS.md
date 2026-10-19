@@ -61,6 +61,11 @@ their cited ADRs before changing that boundary.
   Project deletion uses the exact inventory, tombstone and lifecycle boundaries
   in [the current contract](docs/design.md#project-删除与交接) and
   [ADR 0060](docs/adr/0060-delete-projects-with-exact-session-inventory.md).
+  Managed Worktree ownership and lifecycle follow
+  ([ADR 0085](docs/adr/0085-manage-worktrees-independently-of-sessions.md)); read its
+  independent ownership, actual-cwd and optional-cascade boundaries before changing
+  workspace behavior. Git owns live filesystem facts; Netizen manages only resources
+  created through its shared Worktree service, not external App/CLI worktrees.
 - Scheduled Plans, dispatch, ordinary topic Threads, and the dedicated MCP
   management entry: [scheduled tasks](docs/design.md#定时任务) and
   [ADR 0061](docs/adr/0061-schedule-ordinary-threads-in-feishu-topics.md).
@@ -108,7 +113,9 @@ their cited ADRs before changing that boundary.
   Only the verified session-tool entry uses native ExternalMessage start/join
   (ADR 0081); it does not change ordinary input admission.
   Unknown side effects fail closed at the documented operation-specific scope.
-- Different Bindings may run concurrently in the same canonical Project cwd.
+- Different Bindings may run concurrently in the same actual working directory.
+  Project identity/default cwd and the selected managed Worktree are separate;
+  materialized Thread cwd comes from Codex, never an implicit Project fallback.
   Do not add a global semaphore, Project lock, workspace copy, per-Binding
   `CODEX_HOME`, or cross-Thread execution limit.
 - Channel SQLite owns only the documented Scope/Binding/Project metadata,
@@ -117,7 +124,10 @@ their cited ADRs before changing that boundary.
   instructions, minimal dispatch/Run metadata, exact initial or accepted physical Turn references,
   and bounded management-request deduplication.
   ADR 0073 also permits chat default rules, explicit creation settings and ordering
-  revisions, independent of Project lifecycle. Never store other prompts,
+  revisions, independent of Project lifecycle. ADR 0085 adds managed Worktree
+  identity/creation receipts, Project registration generation, and Binding working-cwd
+  choices/associations; do not persist Git state or duplicate native cwd authority.
+  Never store other prompts,
   message bodies, responses, Turn history/activity, card sessions, effective
   Codex configuration, or Admin sessions/tokens/indexes/audit records.
   Side routes never store native Thread IDs.
@@ -206,7 +216,8 @@ their cited ADRs before changing that boundary.
 - Control is root-scoped, update is environment-scoped. Existing bindings never follow
   the calling venv. Explicit switching is remove (retain data) then target-environment
   start; no rebind command. Removal displays exact scope; -y skips confirmation only.
-  --purge deletes only verified instance-owned files, never Projects or a whole root.
+  --purge deletes only verified instance-owned files, never Projects, Worktree contents,
+  or a whole root.
 - Install the ordinary netizen-cli package with the user's package manager, then run
   netizen setup and start. The package install does not configure or start services.
   Public setup can perform initial browser setup and exact-App repair without a TTY

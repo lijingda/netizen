@@ -51,6 +51,19 @@ class CliDataTest(unittest.TestCase):
         with instance_lifetime_lock(self.root) as descriptor:
             initialize_instance_data(self.root, lifetime_descriptor=descriptor)
 
+    def initialize_v14(self) -> None:
+        """Simulate the old setup using frozen SQL, never a relabeled new database."""
+        fixtures = Path(__file__).parent / "fixtures"
+
+        def frozen_store(path):
+            connection = sqlite3.connect(path)
+            connection.executescript((fixtures / "channel_v14.sql").read_text())
+            connection.executescript((fixtures / "channel_v14_data.sql").read_text())
+            return connection
+
+        with patch("netizen_cli.cli_data.BindingStore", side_effect=frozen_store):
+            self.initialize()
+
     def version(self, path: Path | None = None) -> int:
         with sqlite3.connect(path or self.database) as connection:
             return connection.execute("SELECT version FROM schema_version").fetchone()[0]
@@ -62,7 +75,7 @@ class CliDataTest(unittest.TestCase):
         for _ in range(2):
             with instance_lifetime_lock(self.root) as descriptor:
                 plan = prepare_instance(self.root, lifetime_descriptor=descriptor)
-            self.assertEqual(plan, {"source_version": 14, "target_version": 14, "steps": []})
+            self.assertEqual(plan, {"source_version": 15, "target_version": 15, "steps": []})
         self.assertEqual(self.database.read_bytes(), before)
         self.assertFalse((self.root / "state" / "migration-backups").exists())
 
@@ -122,7 +135,7 @@ class CliDataTest(unittest.TestCase):
             with self.assertRaises(StartupRejected):
                 prepare_instance(self.root, lifetime_descriptor=descriptor)
             initialize_instance_data(self.root, lifetime_descriptor=descriptor)
-        self.assertEqual(self.version(), 14)
+        self.assertEqual(self.version(), 15)
 
     def test_setup_sqlite_failure_is_reported_and_partial_database_is_preserved(self) -> None:
         with instance_lifetime_lock(self.root) as descriptor:
@@ -163,7 +176,7 @@ class CliDataTest(unittest.TestCase):
         self.assertFalse((self.root / "state" / "migration-backups").exists())
 
     def test_transient_sqlite_codes_and_backup_timeout_are_not_permanent_rejections(self) -> None:
-        self.initialize()
+        self.initialize_v14()
         for code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_IOERR):
             original = sqlite3.OperationalError("arbitrary localized message")
             original.sqlite_errorcode = code
@@ -181,23 +194,28 @@ class CliDataTest(unittest.TestCase):
                     prepare_instance(self.root, lifetime_descriptor=descriptor)
 
     def test_supported_old_schema_validates_read_only_then_start_migrates_once(self) -> None:
-        self.initialize()
+        self.initialize_v14()
         before = self.database.read_bytes()
-        with future_schema(STEP_15, version=15):
-            self.assertEqual(validate_prepared_instance(self.root)["steps"], [{"from_version": 14, "to_version": 15}])
-            self.assertEqual(self.database.read_bytes(), before)
-            with instance_lifetime_lock(self.root) as descriptor:
-                prepare_instance(self.root, lifetime_descriptor=descriptor)
-            self.assertEqual(self.version(), 15)
-            backups = list((self.root / "state" / "migration-backups").glob("*/channel.sqlite3"))
-            self.assertEqual(len(backups), 1)
-            self.assertEqual(self.version(backups[0]), 14)
-            with instance_lifetime_lock(self.root) as descriptor:
-                prepare_instance(self.root, lifetime_descriptor=descriptor)
-            self.assertEqual(list((self.root / "state" / "migration-backups").glob("*/channel.sqlite3")), backups)
+        self.assertEqual(validate_prepared_instance(self.root)["steps"], [{"from_version": 14, "to_version": 15}])
+        self.assertEqual(self.database.read_bytes(), before)
+        with instance_lifetime_lock(self.root) as descriptor:
+            prepare_instance(self.root, lifetime_descriptor=descriptor)
+        self.assertEqual(self.version(), 15)
+        backups = list((self.root / "state" / "migration-backups").glob("*/channel.sqlite3"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(self.version(backups[0]), 14)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT binding_id,native_thread_id,working_cwd,worktree_id FROM bindings"
+            ).fetchall(), [("binding", "native-thread", None, None)])
+            self.assertEqual(connection.execute("SELECT generation FROM projects").fetchall(), [(1,)])
+            self.assertEqual(connection.execute("SELECT count(*) FROM schedule_plans").fetchone()[0], 2)
+        with instance_lifetime_lock(self.root) as descriptor:
+            prepare_instance(self.root, lifetime_descriptor=descriptor)
+        self.assertEqual(list((self.root / "state" / "migration-backups").glob("*/channel.sqlite3")), backups)
 
     def test_failed_migration_rolls_back_transaction_and_retains_backup(self) -> None:
-        self.initialize()
+        self.initialize_v14()
         def fail(connection: sqlite3.Connection) -> None:
             connection.execute("CREATE TABLE partial_change (id INTEGER)")
             raise RuntimeError("synthetic migration failure")
@@ -212,13 +230,12 @@ class CliDataTest(unittest.TestCase):
         self.assertEqual(len(list((self.root / "state" / "migration-backups").glob("*/channel.sqlite3"))), 1)
 
     def test_startup_failure_after_migration_commit_does_not_restore_backup(self) -> None:
-        self.initialize()
-        with future_schema(STEP_15, version=15):
-            with self.assertRaisesRegex(RuntimeError, "runtime failed"):
-                with instance_lifetime_lock(self.root) as descriptor:
-                    prepare_instance(self.root, lifetime_descriptor=descriptor)
-                    raise RuntimeError("runtime failed")
-            self.assertEqual(self.version(), 15)
+        self.initialize_v14()
+        with self.assertRaisesRegex(RuntimeError, "runtime failed"):
+            with instance_lifetime_lock(self.root) as descriptor:
+                prepare_instance(self.root, lifetime_descriptor=descriptor)
+                raise RuntimeError("runtime failed")
+        self.assertEqual(self.version(), 15)
 
     def test_every_mutation_requires_exact_held_lifetime_lock(self) -> None:
         self.initialize()
@@ -295,9 +312,10 @@ class CliDataTest(unittest.TestCase):
         stderr = self.root / "state" / "launchd.stderr.log"
         stderr.write_text("diagnostic")
         stderr.chmod(0o600)
-        paths = [self.root / "foreign.txt", self.root / "state" / "notes.txt", self.root / "Projects" / "work.py"]
+        paths = [self.root / "foreign.txt", self.root / "state" / "notes.txt", self.root / "Projects" / "work.py",
+                 self.root / "worktrees" / "managed-fixture" / "work.py"]
         for path in paths:
-            path.parent.mkdir(mode=0o700, exist_ok=True)
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             path.write_text("keep")
         inventory = purge_inventory(self.root)
         self.assertIn(self.database, inventory)
@@ -319,7 +337,7 @@ class CliDataTest(unittest.TestCase):
         self.config.write_text(f"instance:\n  projectRoot: {self.parent / 'projects'}\n")
         self.config.chmod(0o600)
         self.initialize()
-        self.assertEqual(self.version(), 14)
+        self.assertEqual(self.version(), 15)
 
     def test_purge_rejects_changed_confirmation_inventory(self) -> None:
         self.initialize()
@@ -413,18 +431,16 @@ class CliDataTest(unittest.TestCase):
         self.assertTrue(self.config.exists())
 
     def test_purge_recognized_migration_backups_preserves_foreign_backup_files(self) -> None:
-        self.initialize()
-        with future_schema(STEP_15, version=15):
-            with instance_lifetime_lock(self.root) as descriptor:
-                prepare_instance(self.root, lifetime_descriptor=descriptor)
+        self.initialize_v14()
+        with instance_lifetime_lock(self.root) as descriptor:
+            prepare_instance(self.root, lifetime_descriptor=descriptor)
         backup = next((self.root / "state" / "migration-backups").glob("*/channel.sqlite3"))
         foreign = backup.parent / "notes.txt"
         foreign.write_text("keep")
-        with future_schema(STEP_15, version=15):
-            inventory = purge_inventory(self.root)
-            self.assertIn(backup, inventory)
-            with instance_lifetime_lock(self.root) as descriptor:
-                purge_instance_data(self.root, expected_inventory=inventory, lifetime_descriptor=descriptor)
+        inventory = purge_inventory(self.root)
+        self.assertIn(backup, inventory)
+        with instance_lifetime_lock(self.root) as descriptor:
+            purge_instance_data(self.root, expected_inventory=inventory, lifetime_descriptor=descriptor)
         self.assertEqual(foreign.read_text(), "keep")
 
     def test_unfinished_legacy_recovery_blocks_setup_and_start(self) -> None:

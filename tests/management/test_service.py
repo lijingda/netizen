@@ -363,6 +363,9 @@ class FakeManagementRuntime:
             raise ValueError("Project Side snapshot exceeds the limit")
         return snapshots
 
+    def worktree_side_snapshots(self, root: Path):
+        return tuple(snapshot for snapshot in self.side_snapshots.values() if snapshot.cwd.is_relative_to(root))
+
 
 class FakeChatLabels:
     def __init__(self) -> None:

@@ -51,6 +51,9 @@ from netizen_cli.sdk_gap_adapter import GoalSnapshot
 
 
 class StubRuntime:
+    def worktree_side_snapshots(self, root: Path):
+        return tuple(snapshot for snapshot in self.side_snapshots.values() if snapshot.cwd.is_relative_to(root))
+
     def project_has_fork_creation(self, alias: str) -> bool:
         return False
 
@@ -148,6 +151,7 @@ class StubRuntime:
         self.stop_side_calls: list[str] = []
         self.side_snapshots: dict[str, SideSessionSnapshot] = {}
         self.side_submission: SideSubmission | None = None
+        self.native_cwds: dict[str, Path] = {}
         self.side_feedback: dict[
             str,
             tuple[BindingTaskFeedback, int],
@@ -195,6 +199,27 @@ class StubRuntime:
         if self.release_error is not None:
             raise self.release_error
         return self.release_disposition
+
+    async def resolve_binding_cwd(self, binding_id: str, *, default_cwd: Path) -> Path:
+        assert self.binding_store is not None
+        binding = self.binding_store.get(binding_id)
+        if binding.native_thread_id is not None:
+            return await self.native_thread_cwd(binding_id)
+        return Path(binding.working_cwd) if binding.working_cwd else default_cwd
+
+    async def native_thread_cwd(self, binding_id: str) -> Path:
+        assert self.binding_store is not None
+        binding = self.binding_store.get(binding_id)
+        assert binding.native_thread_id is not None
+        # Legacy Channel-only fixtures materialize Threads without a fake SDK
+        # start. Model their native creation directory once, independently of
+        # the caller's default_cwd; explicit native facts always take priority.
+        cwd = self.native_cwds.setdefault(
+            binding.native_thread_id,
+            Path(binding.working_cwd or self.binding_store.get_project(binding.project_alias).cwd),
+        )
+        assert isinstance(cwd, Path) and cwd.is_absolute()
+        return cwd
 
     async def submit(self, **kwargs) -> Submission:
         if self.enforce_active_submission:

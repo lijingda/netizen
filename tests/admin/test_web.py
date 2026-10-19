@@ -1203,7 +1203,7 @@ class AdminWebTest(unittest.IsolatedAsyncioTestCase):
         )
         for path in (
             "/projects", "/sessions/ordinary", "/sessions/temporary", "/schedules",
-            "/defaults", "/maintenance", "/system", "/",
+            "/defaults", "/maintenance", "/system", "/worktrees", "/",
         ):
             target = path + "?project=netizen&project=demo&sortBy=updatedAt&sortDirection=asc"
             with self.subTest(path=path):
@@ -2656,7 +2656,7 @@ class AdminStaticAssetsTest(unittest.TestCase):
         parser.feed(html)
 
         self.assertEqual(parser.scripts, ["/static/chat-picker.js", "/static/identity.js",
-                                          "/static/session-access.js", "/static/admin.js"])
+                                          "/static/session-access.js", "/static/worktrees.js", "/static/admin.js"])
         self.assertEqual(parser.stylesheets, ["/static/admin.css", "/static/chat-picker.css"])
         self.assertFalse(parser.inline_script_text.strip())
         self.assertTrue({"projects", "sessions", "sessions-ordinary", "sessions-temporary", "updates"} <= parser.ids)

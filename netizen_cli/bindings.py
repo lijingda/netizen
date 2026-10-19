@@ -35,9 +35,11 @@ from .schedules.store import (
     ScheduleStore, create_schema, require_schema,
 )
 from .session_settings import BindingTaskFeedback, BindingTurnSettings, SessionSettings
+from .worktrees.models import WorktreeRecord
+from .worktrees.store import WorktreeStore, create_schema as create_worktree_schema
 
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # Includes the running query and all submitted queries waiting for the reader.
 _ADMIN_QUERY_CAPACITY = 32
@@ -252,6 +254,8 @@ class ThreadBinding:
     context_revision: int = 1
     task_feedback: BindingTaskFeedback = BindingTaskFeedback()
     feedback_revision: int = 1
+    working_cwd: str | None = None
+    worktree_id: str | None = None
 
     @property
     def short_id(self) -> str:
@@ -267,6 +271,7 @@ class ProjectRecord:
     created_at: str
     updated_at: str
     deleted: bool = False
+    generation: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,6 +433,7 @@ class ProjectDeleteSnapshot:
     fingerprint: str
     scheduled_plans: tuple[tuple[str, int], ...] = ()
     scheduled_runs: tuple[Run, ...] = ()
+    worktrees: tuple[WorktreeRecord, ...] = ()
 
 
 def validate_channel_database(path: str | Path, *, allow_empty: bool = False) -> None:
@@ -460,6 +466,8 @@ def _require_current_schema(connection: sqlite3.Connection) -> None:
     _require_project_metadata_schema(connection)
     require_schema(connection)
     require_defaults_schema(connection)
+    from .migrations.v15 import validate
+    validate(connection)
 
 
 def _require_project_metadata_schema(
@@ -594,6 +602,7 @@ class BindingStore:
         self._connection.row_factory = sqlite3.Row
         self.schedules = ScheduleStore(self)
         self.defaults = DefaultsStore(self)
+        self.worktrees = WorktreeStore(self)
         try:
             self._initialize()
             if not self._is_memory:
@@ -647,6 +656,9 @@ class BindingStore:
                     scope_key TEXT NOT NULL REFERENCES scopes(scope_key),
                     project_alias TEXT NOT NULL,
                     native_thread_id TEXT UNIQUE,
+                    working_cwd TEXT CHECK(working_cwd IS NULL OR length(working_cwd) > 0),
+                    worktree_id TEXT CHECK(worktree_id IS NULL OR
+                        (length(worktree_id) > 0 AND working_cwd IS NOT NULL)),
                     model_id TEXT,
                     effort_id TEXT,
                     service_tier_id TEXT,
@@ -756,7 +768,9 @@ class BindingStore:
                             CHECK(typeof(deleted) = 'integer' AND deleted IN (0, 1)),
                         revision INTEGER NOT NULL CHECK(revision >= 1),
                         created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
+                        updated_at TEXT NOT NULL,
+                        generation INTEGER NOT NULL DEFAULT 1
+                            CHECK(typeof(generation) = 'integer' AND generation >= 1)
                     )
                     """
                 )
@@ -835,6 +849,7 @@ class BindingStore:
                 else:
                     create_schema(self._connection)
                     create_defaults_schema(self._connection)
+                    create_worktree_schema(self._connection)
                 if not rows:
                     self._connection.execute(
                         "INSERT INTO schema_version(version) VALUES (?)",
@@ -894,6 +909,8 @@ class BindingStore:
         message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
         context_anchor: MessageContextAnchor | None = None,
         empty_topic_root_message_id: str | None = None,
+        working_cwd: str | None = None,
+        worktree_id: str | None = None,
     ) -> ThreadBinding:
         """Atomically validate Project state, upsert exact Scope, and activate."""
 
@@ -913,6 +930,8 @@ class BindingStore:
             context_anchor=context_anchor,
             expected_project_revision=expected_project_revision,
             empty_topic_root_message_id=empty_topic_root_message_id,
+            working_cwd=working_cwd,
+            worktree_id=worktree_id,
         )
 
     def create_fork_binding(
@@ -952,6 +971,8 @@ class BindingStore:
                 expected_project_revision=expected_project_revision,
                 native_thread_id=native_thread_id,
                 empty_topic_root_message_id=root_message_id,
+                working_cwd=source.working_cwd,
+                worktree_id=source.worktree_id,
             )
         except sqlite3.IntegrityError as error:
             raise BindingConflict("原生分支已绑定到其他会话，本次未覆盖。") from error
@@ -970,9 +991,15 @@ class BindingStore:
         scheduled_run_id: str | None = None,
         native_thread_id: str | None = None,
         empty_topic_root_message_id: str | None = None,
+        working_cwd: str | None = None,
+        worktree_id: str | None = None,
     ) -> ThreadBinding:
         if not project_alias or not creator_id:
             raise ValueError("Binding Project and creator must not be empty")
+        if working_cwd is not None and (
+            not isinstance(working_cwd, str) or not Path(working_cwd).is_absolute()
+        ):
+            raise ValueError("Binding working cwd must be an absolute path")
         _validate_context_state(
             scope_kind=scope.kind,
             mode=message_context_mode,
@@ -1061,6 +1088,20 @@ class BindingStore:
             ):
                 raise ProjectRevisionConflict(project_alias)
 
+            if working_cwd is not None:
+                self.worktrees.require_cwd_not_deleting(working_cwd)
+            if worktree_id is None and working_cwd is not None:
+                matched = self.worktrees.find_by_cwd(
+                    working_cwd, project_alias=project_alias,
+                    project_generation=project_row["generation"],
+                )
+                if matched is not None:
+                    worktree_id = matched.id
+            if worktree_id is not None:
+                self.worktrees.require_bindable(
+                    worktree_id, project=_project_record(project_row), cwd=working_cwd,
+                )
+
             self._connection.execute(
                 """
                 INSERT INTO bindings(
@@ -1071,9 +1112,10 @@ class BindingStore:
                     task_reactions_enabled, progress_card_enabled,
                     completion_mention_enabled,
                     feedback_revision,
-                    creator_id, created_at, activated_at, ever_activated
+                    creator_id, created_at, activated_at, ever_activated,
+                    working_cwd, worktree_id
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -1089,6 +1131,8 @@ class BindingStore:
                     now,
                     now,
                     1,
+                    working_cwd,
+                    worktree_id,
                 ),
             )
             self._connection.execute(
@@ -1497,6 +1541,41 @@ class BindingStore:
                     "native Thread is already bound to another Feishu session"
                 ) from error
 
+    def sync_native_workspace(
+        self, binding_id: str, *, expected_native_thread_id: str, working_cwd: str,
+    ) -> ThreadBinding:
+        """Associate one exact native cwd observation; never change native execution.
+
+        The Runtime supplies this fact from an already-bound native Thread read.
+        No filesystem or native catalog access occurs inside the writer boundary.
+        Deletion evidence reads deliberately do not use this mutating entry.
+        """
+        if not expected_native_thread_id:
+            raise ValueError("native Thread identity must not be empty")
+        if not isinstance(working_cwd, str) or not Path(working_cwd).is_absolute():
+            raise ValueError("native working cwd must be an absolute path")
+        with self._transaction():
+            binding = self.get(binding_id)
+            if binding.native_thread_id != expected_native_thread_id:
+                raise BindingConflict("原生会话身份已变化，本次未同步工作区关联。")
+            self.worktrees.require_binding_not_deleting(binding_id)
+            self.worktrees.require_cwd_not_deleting(working_cwd)
+            project = self.get_project(binding.project_alias)
+            matched = self.worktrees.find_by_cwd(
+                working_cwd, project_alias=project.alias, project_generation=project.generation,
+            )
+            worktree_id = matched.id if matched is not None else None
+            if worktree_id is not None:
+                self.worktrees.require_bindable(worktree_id, project=project, cwd=working_cwd)
+            if (binding.working_cwd, binding.worktree_id) == (working_cwd, worktree_id):
+                return binding
+            self._connection.execute(
+                "UPDATE bindings SET working_cwd=?, worktree_id=? "
+                "WHERE binding_id=? AND native_thread_id=?",
+                (working_cwd, worktree_id, binding_id, expected_native_thread_id),
+            )
+            return self.get(binding_id)
+
     def active_binding(self, scope_key: str) -> ThreadBinding | None:
         with self._lock:
             row = self._connection.execute(
@@ -1588,8 +1667,10 @@ class BindingStore:
         return _binding(row) if row is not None else None
 
     def bootstrap_project(self, *, alias: str, cwd: str) -> ProjectRecord:
+        canonical_cwd = Path(cwd).resolve()
         now = _now()
         with self._transaction():
+            self.worktrees.require_project_path_not_deleting(canonical_cwd)
             self._connection.execute(
                 """
                 INSERT OR IGNORE INTO projects(
@@ -1601,9 +1682,11 @@ class BindingStore:
         return self.get_project(alias, include_deleted=True)
 
     def register_project(self, *, alias: str, cwd: str) -> ProjectRecord:
+        canonical_cwd = Path(cwd).resolve()
         now = _now()
         try:
             with self._transaction():
+                self.worktrees.require_project_path_not_deleting(canonical_cwd)
                 self.require_project_not_deleting(alias)
                 inserted = self._connection.execute(
                     """
@@ -1613,6 +1696,7 @@ class BindingStore:
                     ON CONFLICT(alias) DO UPDATE SET
                         cwd = excluded.cwd, enabled = 1, deleted = 0,
                         revision = projects.revision + 1,
+                        generation = projects.generation + 1,
                         created_at = excluded.created_at,
                         updated_at = excluded.updated_at
                     WHERE projects.deleted = 1
@@ -1712,6 +1796,8 @@ class BindingStore:
         if len(extra_side_ids) > limit:
             raise ProjectDeleteLimitExceeded(limit_message)
         project = self.get_project(alias)
+        self.worktrees.require_no_creation(alias, project.generation)
+        worktrees = self.worktrees.list_for_project(alias, generation=project.generation, limit=limit)
         binding_rows = self._connection.execute(
             _BINDING_INVENTORY_SELECT
             + " WHERE b.project_alias = ? LIMIT ?",
@@ -1767,6 +1853,8 @@ class BindingStore:
         scheduled_runs = tuple(self.schedules.get_run(row["run_id"]) for row in run_rows)
         identity = {
             "project_alias": alias,
+            "project_generation": project.generation,
+            "worktrees": [(item.id, item.revision, item.creation_state) for item in worktrees],
             "bindings": [
                 [
                     item.binding.id, item.scope.scope_key, item.scope.app_id,
@@ -1795,6 +1883,7 @@ class BindingStore:
         ).hexdigest()
         return ProjectDeleteSnapshot(
             project, bindings, sides, fingerprint, scheduled_plans, scheduled_runs,
+            worktrees,
         )
 
     def begin_project_delete(
@@ -1830,6 +1919,7 @@ class BindingStore:
                     self.get_project(alias), snapshot.bindings, snapshot.sides,
                     snapshot.fingerprint, snapshot.scheduled_plans,
                     snapshot.scheduled_runs,
+                    snapshot.worktrees,
                 )
             self._project_delete_intents[alias] = reserved
             return reserved
@@ -2631,6 +2721,7 @@ def _consume_query_exception(future: asyncio.Future[object]) -> None:
 
 
 _COMPATIBLE_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS bindings_working_cwd ON bindings(working_cwd, binding_id)",
     """
     CREATE INDEX IF NOT EXISTS bindings_global_created
     ON bindings(created_at DESC, binding_id DESC)
@@ -2684,6 +2775,8 @@ _BINDING_SELECT = """
         b.scope_key,
         b.project_alias,
         b.native_thread_id,
+        b.working_cwd,
+        b.worktree_id,
         b.model_id,
         b.effort_id,
         b.service_tier_id,
@@ -2715,7 +2808,7 @@ _SCOPE_SELECT = """
 
 
 _PROJECT_SELECT = """
-    SELECT alias, cwd, enabled, revision, created_at, updated_at, deleted
+    SELECT alias, cwd, enabled, revision, created_at, updated_at, deleted, generation
     FROM projects
 """
 
@@ -2726,6 +2819,8 @@ _BINDING_INVENTORY_SELECT = """
         b.scope_key,
         b.project_alias,
         b.native_thread_id,
+        b.working_cwd,
+        b.worktree_id,
         b.model_id,
         b.effort_id,
         b.service_tier_id,
@@ -2768,7 +2863,7 @@ _SIDE_INVENTORY_SELECT = """
 
 _PROJECT_AGGREGATE_SELECT = """
     SELECT
-        p.alias, p.cwd, p.enabled, p.revision, p.created_at, p.updated_at, p.deleted,
+        p.alias, p.cwd, p.enabled, p.revision, p.created_at, p.updated_at, p.deleted, p.generation,
         COUNT(b.binding_id) AS binding_count,
         COALESCE(SUM(CASE WHEN b.binding_id IS NOT NULL
                          AND b.native_thread_id IS NULL THEN 1 ELSE 0 END), 0)
@@ -2861,6 +2956,8 @@ def _binding(row: sqlite3.Row) -> ThreadBinding:
         context_revision=context_revision,
         task_feedback=task_feedback,
         feedback_revision=feedback_revision,
+        working_cwd=row["working_cwd"],
+        worktree_id=row["worktree_id"],
     )
 
 
@@ -2965,6 +3062,7 @@ def _project_record(row: sqlite3.Row) -> ProjectRecord:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         deleted=bool(row["deleted"]),
+        generation=row["generation"],
     )
 
 

@@ -525,6 +525,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_completion(TurnOutcome(binding_id=request["binding"].id,
             thread_id="native-" + claim.run.id, turn_id="turn-initial",
             owner_id=request["owner_id"], origin=request["origin"],
+            cwd=request["cwd"],
             result=completed_turn_result(final_response=content)))
 
     async def finish_files_fixture(self, claim, request, *, inline_image=False):
@@ -539,6 +540,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_completion(TurnOutcome(
             binding_id=request["binding"].id, thread_id="native-" + claim.run.id,
             turn_id="turn-initial", owner_id=request["owner_id"], origin=request["origin"],
+            cwd=request["cwd"],
             result=completed_turn_result(*items, final_response=response)))
 
     async def test_file_card_response_lost_does_not_publish_fallback_text(self):
@@ -894,6 +896,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
         await self.app.handle_completion(TurnOutcome(
             binding_id=binding.id, thread_id=binding.native_thread_id, turn_id="turn-initial",
             owner_id=request["owner_id"], origin=origin,
+            cwd=request["cwd"],
             result=completed_turn_result(file_change_item("report.pdf"), image_generation_item(image), final_response="scheduled report ready\n\n![trend](trend.png)"),
             activity=activity,
         ))
@@ -996,6 +999,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             (self.fixture.project_root / path).write_text(path, encoding="utf-8")
         await self.app.handle_completion(TurnOutcome(binding_id=binding.id, thread_id=binding.native_thread_id, turn_id="turn-followup",
             owner_id="ou_user", origin=prompt, result=completed_turn_result(file_change_item(*paths), final_response="followup files ready"),
+            cwd=self.fixture.project_root,
             task_feedback=feedback, activity=updated))
         terminal = self.channel.updates[-1][1]
         self.assertFalse(_elements(terminal, "collapsible_panel")[0]["expanded"])

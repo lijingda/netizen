@@ -231,6 +231,8 @@ from .experience import (
     side_command_help,
 )
 from .error_messages import describe_error, native_turn_failure
+from .worktrees.errors import WorktreeError
+from .worktrees.models import WorktreeConflict
 from .model_settings import ModelCatalogError, TurnModelSettings
 from .management import (
     ActivePointerChanged,
@@ -740,6 +742,7 @@ class ChannelApplication:
             ThreadOccupied, ThreadGoalActive, ThreadLifecycleError, ModelCatalogError,
             SkillCatalogError, SkillReferenceError, InvalidRequestError,
             ProjectConflict, ProjectNotFound, BindingNotFound, GoalStateUnknown,
+            WorktreeError, WorktreeConflict,
         )) or type(error) is GoalControlError
         # The external entry only reads Goal state before delivery. Preserve
         # unknown outcomes for subclasses such as GoalMutationStateUnknown.
@@ -775,6 +778,27 @@ class ChannelApplication:
             code = "publishing_unknown" if error.unknown else "publishing_failed"
         return SessionToolError(code, describe_error(error), details)
 
+    async def _binding_cwd(self, binding: ThreadBinding) -> Path:
+        # Project registration remains the admission boundary, but its default
+        # directory is not the working directory of a materialized Thread.
+        binding = self._bindings.get(binding.id)
+        if binding.native_thread_id is None and binding.working_cwd is None:
+            default_cwd = self._projects.resolve_for_binding(binding.project_alias).cwd
+        else:
+            default_cwd = Path(self._bindings.get_project(binding.project_alias).cwd)
+        return await self._runtime.resolve_binding_cwd(binding.id, default_cwd=default_cwd)
+
+    def _binding_creation_cwd(self, binding: ThreadBinding) -> Path | None:
+        """Supply only lazy creation intent; Runtime owns materialized cwd."""
+        binding = self._bindings.get(binding.id)
+        if binding.native_thread_id is not None:
+            self._bindings.get_project(binding.project_alias)
+            return None
+        if binding.working_cwd is not None:
+            self._bindings.get_project(binding.project_alias)
+            return Path(binding.working_cwd)
+        return self._projects.resolve_for_binding(binding.project_alias).cwd
+
     async def create_session_thread(
         self, source_thread_id: str, prompt: str, *, title: str | None = None,
         model: str | None = None,
@@ -797,14 +821,22 @@ class ChannelApplication:
             if settings is None or settings.model_id != option.id:
                 settings = BindingTurnSettings(option.id, option.default_effort_id, option.default_service_tier_id)
             catalog.resolve(model_id=settings.model_id, effort_id=settings.effort_id, service_tier_id=settings.service_tier_id)
-            project = await self._management.resolve_new_project(
-                source.project_alias, deadline=asyncio.get_running_loop().time() + 10.0,
+            project = self._bindings.get_project(source.project_alias)
+            self._bindings.require_project_not_deleting(project.alias)
+            if not project.enabled:
+                raise ProjectConflict("Project 已停用，不能创建会话。")
+            cwd = await self._binding_cwd(source)
+            registered_project = self._bindings.get_project(project.alias)
+            worktree = self._bindings.worktrees.find_by_cwd(
+                str(cwd), project_alias=project.alias,
+                project_generation=registered_project.generation,
             )
             target = await self._management.validate_chat_target(source_scope.chat_id)
             card = await self._session_agent_card(source, prompt, title=title)
             call_id = uuid.uuid4().hex
             async with self._runtime.track_topic_creation(project.alias):
                 self._session_tool_binding(source_thread_id)
+                self._bindings.worktrees.require_binding_not_deleting(source.id)
                 self._runtime.require_topic_creation_open(project.alias)
                 root = await send_topic_message(self._channel, source_scope.chat_id, card,
                     SendOpts(receive_id_type="chat_id", uuid=call_id))
@@ -835,6 +867,8 @@ class ChannelApplication:
                         task_feedback=BindingTaskFeedback(False, source.task_feedback.progress_card_enabled, False),
                         message_context_mode=context_mode, context_anchor=anchor,
                         empty_topic_root_message_id=root.message_id,
+                        working_cwd=str(cwd),
+                        worktree_id=None if worktree is None else worktree.id,
                     )
                 origin = SessionAgentOrigin(self._app_id, destination.chat_id, published.message_id,
                     SessionAgentConversation(destination.chat_id, target.chat_kind, destination.topic_id),
@@ -842,7 +876,7 @@ class ChannelApplication:
                 self._runtime.require_topic_creation_open(project.alias)
                 submission_attempted = True
                 submission = await self._runtime.submit_external(
-                    binding=binding, cwd=project.cwd,
+                    binding=binding, cwd=cwd,
                     message=self._session_message(source, prompt, tool_name="create_thread"),
                     owner_id="session_agent:" + source.id, origin=origin, title=title,
                 )
@@ -870,7 +904,7 @@ class ChannelApplication:
                 catalog = await self._runtime.model_catalog()
                 if not any(model in {item.id, item.model} for item in catalog.models):
                     raise SessionToolError("invalid_model", "指定模型当前不可用。")
-            project = self._projects.resolve_for_binding(binding.project_alias)
+            cwd = self._binding_creation_cwd(binding)
             target = await self._management.validate_chat_target(scope.chat_id)
             reply_to = None
             if scope.kind is ScopeKind.TOPIC:
@@ -896,7 +930,7 @@ class ChannelApplication:
             binding, scope = self._require_session_target(target_thread_id)
             submission_attempted = True
             submission = await self._runtime.submit_external(
-                binding=binding, cwd=project.cwd,
+                binding=binding, cwd=cwd,
                 message=self._session_message(source, prompt, tool_name="send_message_to_thread"),
                 owner_id="session_agent:" + source.id, origin=origin, model=model,
             )
@@ -1103,7 +1137,7 @@ class ChannelApplication:
                     RuntimeClosed, SteerRace, ThreadStopping, ThreadCompacting,
                     ThreadOccupied, ThreadGoalActive, ThreadLifecycleError,
                     ModelCatalogError, SkillCatalogError, SkillReferenceError,
-                    GoalNotFound, GoalNotMaterialized,
+                    GoalNotFound, GoalNotMaterialized, WorktreeConflict,
                 ))
                 store.release(run.id, error_code=(
                     "input_unknown" if current_run.phase == "starting_turn" and not rejected
@@ -1943,7 +1977,11 @@ class ChannelApplication:
                     notice_is_error=True,
                 )
                 return
-            await self._safe_update_card(message_id, error_card(str(error)))
+            updated = await self._safe_update_card(message_id, error_card(str(error)))
+            if not updated and intent is not None and intent.name in {
+                CardControlName.CREATE_BINDING, CardControlName.PREPARE_NEW_WORKSPACE,
+            }:
+                await self._safe_reply_to_card(intent, str(error))
         except (
             BindingContextRevisionConflict,
             BindingNotFound,
@@ -1996,6 +2034,7 @@ class ChannelApplication:
                 and intent.name
                 in {
                     CardControlName.CREATE_BINDING,
+                    CardControlName.PREPARE_NEW_WORKSPACE,
                     CardControlName.CONFIGURE_BINDING,
                     CardControlName.RENAME_BINDING,
                     CardControlName.ARCHIVE_BINDING,
@@ -2060,6 +2099,7 @@ class ChannelApplication:
                 and intent.name
                 in {
                     CardControlName.CREATE_BINDING,
+                    CardControlName.PREPARE_NEW_WORKSPACE,
                     CardControlName.CONFIGURE_BINDING,
                     CardControlName.RENAME_BINDING,
                     CardControlName.ARCHIVE_BINDING,
@@ -2287,16 +2327,7 @@ class ChannelApplication:
         content = outcome.final_response
         if not content or "![" not in content:
             return content
-        cwd: Path | None = None
-        try:
-            if isinstance(outcome, SideTurnOutcome):
-                cwd = outcome.cwd
-            else:
-                binding = self._bindings.get(outcome.binding_id)
-                cwd = self._projects.resolve_for_binding(binding.project_alias).cwd
-        except Exception:
-            logger.warning("inline result images lack a relative-path base")
-        return await self._prepare_result_images(content, cwd=cwd)
+        return await self._prepare_result_images(content, cwd=outcome.cwd)
 
     async def _prepare_result_images(
         self, content: str, *, cwd: Path | None,
@@ -2413,11 +2444,9 @@ class ChannelApplication:
         self, outcome: TurnOutcome | SideTurnOutcome,
     ) -> TurnDiffSummary:
         try:
-            if isinstance(outcome, TurnOutcome):
-                binding = self._bindings.get(outcome.binding_id)
-                cwd = self._projects.resolve_for_binding(binding.project_alias).cwd
-            else:
-                cwd = outcome.cwd
+            cwd = outcome.cwd
+            if cwd is None:
+                raise TurnFileError("本轮工作目录未确认，不能使用项目默认目录解释文件。")
             return turn_patch_summary(
                 tuple(getattr(outcome.result, "items", ())),
                 cwd,
@@ -2440,10 +2469,11 @@ class ChannelApplication:
             or binding.native_thread_id != outcome.thread_id
         ):
             raise TurnFileError("本轮文件与完成消息的会话身份不一致。")
-        project = self._projects.resolve_for_binding(binding.project_alias)
+        if outcome.cwd is None:
+            raise TurnFileError("本轮工作目录未确认，无法解析相对文件路径。")
         return scope, extract_turn_files(
             tuple(getattr(outcome.result, "items", ())),
-            project.cwd,
+            outcome.cwd,
             diff_summary=diff_summary,
         )
 
@@ -2618,6 +2648,7 @@ class ChannelApplication:
             binding_id=outcome.binding_id, thread_id=outcome.thread_id,
             turn_id=outcome.logical_turn_id or outcome.final_physical_turn_id or "goal",
             owner_id=outcome.owner_id, origin=origin,
+            cwd=outcome.cwd,
             result=_GoalReplyResult(
                 status=outcome.final_turn_status if terminal else None,
                 final_response=response,
@@ -2896,9 +2927,9 @@ class ChannelApplication:
         on_accepted: Callable[[], None] | None = None,
     ) -> None:
         """Share preparation, exact admission, acceptance and feedback for inputs."""
-        project = self._projects.resolve_for_binding(binding.project_alias)
         if admission is None:
             admission = await self._runtime.capture_submission_admission(binding.id)
+        cwd = self._binding_creation_cwd(binding)
         if (binding.settings_revision != admission.settings_revision
                 or binding.context_revision != admission.context_revision
                 or binding.feedback_revision != admission.feedback_revision):
@@ -2954,7 +2985,7 @@ class ChannelApplication:
 
         submit_kwargs: dict[str, Any] = dict(
             binding=binding,
-            cwd=project.cwd,
+            cwd=cwd,
             input=prepared.native_input,
             owner_id=owner_id,
             origin=message,
@@ -3632,9 +3663,10 @@ class ChannelApplication:
             if not await self._safe_update_card(message_id, card):
                 raise CardActionError("目标校验未通过，表单恢复失败；本次未创建分支，请重新发送 /fork。") from error
             return
-        project = await self._management.resolve_new_project(
-            source.project_alias, deadline=asyncio.get_running_loop().time() + 10.0,
-        )
+        project = self._bindings.get_project(source.project_alias)
+        self._bindings.require_project_not_deleting(project.alias)
+        if not project.enabled:
+            raise ProjectConflict("Project 已停用，不能创建分支。")
         if project.revision != intent.source.project_revision:
             raise CardActionError("来源 Project 已变化，请重新发送 /fork。")
         common = {"name": intent.name, "source_title": source_title, "project_alias": project.alias}
@@ -3647,6 +3679,14 @@ class ChannelApplication:
                 await self._safe_update_card(message_id, fork_status_card(status="creating", **common))
                 async with self._scope_coordinator.hold(scope.key):
                     source = self._require_fork_source(scope, intent.source)
+                    cwd = await self._binding_cwd(source)
+                    registered_project = self._bindings.get_project(project.alias)
+                    worktree = self._bindings.worktrees.find_by_cwd(
+                        str(cwd), project_alias=project.alias,
+                        project_generation=registered_project.generation,
+                    )
+                    source = replace(source, working_cwd=str(cwd),
+                                     worktree_id=None if worktree is None else worktree.id)
                     thread = await self._runtime.fork_exact(source, expected_project_revision=project.revision)
                 self._runtime.require_fork_creation_open(project.alias)
                 root = await send_topic_message(self._channel, target_chat_id,
@@ -3767,11 +3807,11 @@ class ChannelApplication:
         topic_id: str | None = None
         origin: _CardReplyTarget | None = None
         try:
-            project = self._projects.resolve_for_binding(binding.project_alias)
+            cwd = await self._binding_cwd(binding)
             await self._runtime.create_side(
                 side_id=record.id,
                 binding=binding,
-                cwd=project.cwd,
+                cwd=cwd,
                 creator_id=intent.sender_id,
             )
             root_scope = FeishuScope(
@@ -4065,10 +4105,9 @@ class ChannelApplication:
             pass
         except Exception:
             logger.warning("Side project snapshot unavailable", exc_info=True)
-        if project_cwd is None and project_alias is not None:
+        if project_cwd is None and binding is not None:
             try:
-                # Read registered metadata without filesystem or admission checks.
-                project_cwd = self._bindings.get_project(project_alias).cwd
+                project_cwd = str(await self._binding_cwd(binding))
             except Exception:
                 logger.warning("Side project display lookup failed", exc_info=True)
         return SideTopicCardContext(
@@ -4253,9 +4292,9 @@ class ChannelApplication:
                     notice = "Goal 已恢复。"
                 await self._goal_management_receipt(binding, intent.scope, message, notice=notice)
                 return
-            project = self._projects.resolve_for_binding(binding.project_alias)
+            cwd = self._binding_creation_cwd(binding)
             submission = await self._runtime.start_goal(
-                binding=binding, cwd=project.cwd,
+                binding=binding, cwd=cwd,
                 objective=self._model_task_text(message, argument, command="goal"),
                 owner_id=intent.sender_id, origin=message,
             )
@@ -4371,22 +4410,9 @@ class ChannelApplication:
                     intent.scope.key, project_aliases=tuple(enabled_aliases),
                 )
                 initial_project_alias = previous.project_alias if previous else None
-            catalog = None
-            catalog_error = None
-            try:
-                catalog = await self._runtime.model_catalog()
-            except Exception as error:
-                logger.warning(
-                    "native model catalog unavailable for /new settings",
-                    extra={"error_type": type(error).__name__},
-                )
-                catalog_error = "Model / Effort / Speed 暂不可用。"
-            card = new_binding_card(
+            card = await self._new_binding_picker(
                 scope=intent.scope,
-                projects=projects,
                 initial_project_alias=initial_project_alias,
-                catalog=catalog,
-                catalog_error=catalog_error,
                 allow_context_mode=(_message_chat_type(message) == "group"),
             )
             try:
@@ -4606,11 +4632,13 @@ class ChannelApplication:
                 metadata = None
             thread_metadata_lines = _thread_metadata_status_lines(binding, metadata)
             try:
-                project = self._projects.resolve_for_binding(binding.project_alias)
-            except ProjectError:
-                git_branch_lines = ()
+                cwd = await self._binding_cwd(binding)
+            except Exception:
+                git_branch_lines = ("工作目录状态暂不可用；未改用项目目录。",)
             else:
-                git_branch_lines = await _git_branch_status_lines(project.cwd)
+                git_branch_lines = (f"工作目录：{cwd}", *await _git_branch_status_lines(cwd))
+                if not cwd.is_dir():
+                    git_branch_lines += ("工作目录当前不可用；保留原目录，执行结果以 Codex 返回为准。",)
             context_window_line = _context_window_status_line(
                 binding,
                 self._runtime.context_window_usage(binding.id),
@@ -4965,6 +4993,20 @@ class ChannelApplication:
                 ),
             )
             return
+        if intent.name is CardControlName.PREPARE_NEW_WORKSPACE:
+            assert intent.project_alias is not None
+            assert intent.expected_revision is not None
+            chat_kind = _public_chat_kind(await self._channel.get_chat_info(intent.scope.chat_id))
+            card = await self._new_binding_picker(
+                scope=intent.scope, initial_project_alias=intent.project_alias,
+                expected_project_revision=intent.expected_revision,
+                allow_context_mode=chat_kind == "group", require_workspace=True,
+            )
+            if not await self._safe_update_card(intent.source_id, card):
+                await self._safe_reply_to_card(
+                    intent, "项目目录选项已查询，但卡片更新失败；未创建会话。请重新发送 /new。",
+                )
+            return
         if intent.name is CardControlName.CREATE_BINDING:
             assert intent.project_alias is not None
             assert intent.expected_revision is not None
@@ -4996,6 +5038,12 @@ class ChannelApplication:
                 task_feedback=task_feedback,
                 message_context_mode=message_context_mode,
                 context_anchor=context_anchor,
+                worktree_id=intent.worktree_id,
+                worktree_create=intent.worktree_create,
+            )
+            workspace_cwd = binding.working_cwd
+            workspace_summary = (
+                f"实际工作目录：`{_markdown_code(workspace_cwd)}`。" if workspace_cwd else ""
             )
             updated = await self._safe_update_card(
                 intent.source_id,
@@ -5005,6 +5053,7 @@ class ChannelApplication:
                     settings=settings,
                     task_feedback=binding.task_feedback,
                     message_context_mode=binding.message_context_mode,
+                    workspace_cwd=workspace_cwd,
                 ),
             )
             if not updated:
@@ -5012,6 +5061,7 @@ class ChannelApplication:
                     intent,
                     f"✅ 会话创建成功：已选择项目 `{project.alias}`，"
                     f"并创建、切换到会话 `{binding.short_id}`。"
+                    f"{workspace_summary}"
                     f"Model 来源：{'继承 Codex' if settings is None else '显式配置'}；"
                     f"@ 时读取的消息范围："
                     f"{context_mode_display(binding.message_context_mode)}。"
@@ -5983,19 +6033,64 @@ class ChannelApplication:
         task_feedback: BindingTaskFeedback = BindingTaskFeedback(),
         message_context_mode: MentionContextMode = MentionContextMode.CURRENT_ONLY,
         context_anchor: MessageContextAnchor | None = None,
+        worktree_id: str | None = None,
+        worktree_create: dict[str, str | None] | None = None,
     ):
-        created = await self._management.create_current_binding(
-            scope=scope,
-            creator_id=sender_id,
-            project_alias=project_alias,
-            expected_project_revision=expected_revision,
-            turn_settings=turn_settings,
-            task_feedback=task_feedback,
-            message_context_mode=message_context_mode,
-            context_anchor=context_anchor,
-        )
+        try:
+            created = await self._management.create_current_binding(
+                scope=scope,
+                creator_id=sender_id,
+                project_alias=project_alias,
+                expected_project_revision=expected_revision,
+                turn_settings=turn_settings,
+                task_feedback=task_feedback,
+                message_context_mode=message_context_mode,
+                context_anchor=context_anchor,
+                **({"worktree_id": worktree_id, "worktree_create": worktree_create}
+                   if worktree_id is not None or worktree_create is not None else {}),
+            )
+        except WorktreeError as error:
+            # WorktreeError is the safe application projection, not raw Git stderr.
+            raise CardActionError(str(error)) from None
         assert created.project is not None
         return created.project, created.binding
+
+    async def _new_binding_picker(
+        self, *, scope: FeishuScope, initial_project_alias: str | None,
+        allow_context_mode: bool, expected_project_revision: int | None = None,
+        require_workspace: bool = False,
+    ) -> OutboundCard:
+        projects = self._projects.list(enabled_only=True)
+        catalog = None
+        catalog_error = None
+        try:
+            catalog = await self._runtime.model_catalog()
+        except Exception as error:
+            logger.warning("native model catalog unavailable for /new settings",
+                           extra={"error_type": type(error).__name__})
+            catalog_error = "Model / Effort / Speed 暂不可用。"
+        worktrees = self._management.worktrees
+        workspace_options = None
+        workspace_error = None
+        if worktrees is not None and initial_project_alias is not None:
+            try:
+                workspace_options = await worktrees.options(
+                    project_alias=initial_project_alias,
+                    expected_project_revision=expected_project_revision,
+                )
+            except WorktreeError as error:
+                if require_workspace:
+                    raise CardActionError(str(error)) from None
+                workspace_error = str(error) + " 可直接在项目目录创建会话，或重新加载目录选项。"
+        elif require_workspace:
+            raise CardActionError("受管 worktree 服务不可用；本次未创建会话。")
+        return new_binding_card(
+            scope=scope, projects=projects, initial_project_alias=initial_project_alias,
+            catalog=catalog, catalog_error=catalog_error,
+            allow_context_mode=allow_context_mode,
+            workspace_options=workspace_options, workspace_error=workspace_error,
+            allow_workspace_selection=worktrees is not None,
+        )
 
     def _settings_card(
         self,

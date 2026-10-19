@@ -145,7 +145,9 @@ class FakeMcpProbeTest(unittest.IsolatedAsyncioTestCase):
             store.register_project(alias="probe", cwd=str(cwd))
             with patch("scripts.probe_scheduled_tasks.PinnedExperimentalTerminalCleanup", return_value=FakeTerminalCleanup(codex.events)), \
                  patch("scripts.probe_scheduled_tasks.AppServerThreadSubscriptionControl", return_value=FakeThreadSubscriptionControl()), \
-                 patch("scripts.probe_scheduled_tasks.AsyncThread", side_effect=lambda client, thread_id: Thread(thread_id, client)):
+                 patch("scripts.probe_scheduled_tasks.AsyncThread", side_effect=lambda client, thread_id: Thread(thread_id, client)), \
+                 patch.object(CodexRuntime, "resolve_binding_cwd", new_callable=AsyncMock,
+                              side_effect=AssertionError("Channel must not pre-read execution cwd")) as cwd_lookup:
                 if wrong_context:
                     with self.assertRaisesRegex(ProbeFailure, "binding_prior_context_not_retained"):
                         await _binding_phase(codex, cwd, store, owned)
@@ -156,9 +158,15 @@ class FakeMcpProbeTest(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(result["original_completion_origin_retained"])
                     self.assertFalse(result["real_feishu_calls"])
                     self.assertFalse(result["catch_up_tested"])
+                cwd_lookup.assert_not_awaited()
             self.assertEqual(owned.owned, {"native-1"})
             self.assertEqual(len(codex.start_kwargs), 1)
             self.assertFalse(codex.start_kwargs[0]["ephemeral"])
+            self.assertEqual(codex.thread_cwds["native-1"], str(cwd))
+            # Runtime still reads its resumed native handle and adopts its cwd;
+            # removing the Channel lookup must not remove execution evidence.
+            self.assertIn(("native-1", False), codex.read_calls)
+            self.assertEqual(store.find_by_native_thread_id("native-1").working_cwd, str(cwd))
             self.assertEqual(len(codex.turn_inputs), 2 if wrong_context else 3)
             self.assertTrue(all(thread_id == "native-1" for thread_id, _ in codex.turn_inputs))
             if not wrong_context:

@@ -632,6 +632,7 @@ class OrdinarySideTerminalFallbackTest(unittest.IsolatedAsyncioTestCase):
         outcome = self.outcome(progress=False, partials=(partial,), result=completed_turn_result(
             file_change_item(str(path)), final_response="final original",
         ))
+        outcome = replace(outcome, cwd=self.fixture.project)
         self.channel.reply_results.extend(sent_result(f"om_post_{index}", chat_id="oc_direct") for index in range(2))
         await self.app.handle_completion(outcome)
         self.assertEqual(len(self.channel.replies), 2)

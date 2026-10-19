@@ -15,6 +15,7 @@ import yaml
 from .lark_app import LARK_APP_RELATIVE_PATH, LarkAppConfigError, load_lark_app
 from .admin.port_config import ConfigFileSnapshot
 from .sessions.policy import SessionAccessPolicy, SessionPolicyError
+from .worktrees.settings import WorktreeSettings, WorktreeSettingsError
 
 
 class SettingsError(ValueError):
@@ -38,6 +39,7 @@ class Settings:
     security_mode: str = "audit"
     admin_web: AdminWebSettings = AdminWebSettings()
     session_tools: SessionAccessPolicy = SessionAccessPolicy()
+    worktrees: WorktreeSettings = WorktreeSettings()
     config_path: Path | None = None
     config_snapshot: ConfigFileSnapshot | None = field(default=None, repr=False)
 
@@ -68,6 +70,10 @@ class Settings:
         try:
             session_tools = SessionAccessPolicy.from_mapping(loaded.get("sessionTools", {}))
         except SessionPolicyError as error:
+            raise SettingsError(str(error)) from error
+        try:
+            worktrees = WorktreeSettings.from_mapping(loaded.get("worktrees", {}))
+        except WorktreeSettingsError as error:
             raise SettingsError(str(error)) from error
         raw_projects = loaded.get("projects", {})
         if not isinstance(raw_projects, dict):
@@ -113,6 +119,7 @@ class Settings:
             security_mode=security_mode,
             admin_web=admin_web,
             session_tools=session_tools,
+            worktrees=worktrees,
             config_path=config_path,
             config_snapshot=config_snapshot,
         )

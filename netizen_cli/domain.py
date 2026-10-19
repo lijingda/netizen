@@ -241,6 +241,7 @@ class CardControlName(str, Enum):
     REGISTER_PROJECT = "project.register"
     SET_PROJECT_ENABLED = "project.enabled.set"
     CREATE_BINDING = "binding.create"
+    PREPARE_NEW_WORKSPACE = "binding.workspace.prepare"
     CONFIGURE_BINDING = "binding.configure"
     RENAME_BINDING = "binding.rename"
     ARCHIVE_BINDING = "binding.archive"
@@ -296,6 +297,8 @@ class CardControlIntent:
     session_cursor: str | None = None
     goal_generation: str | None = None
     expected_goal_status: str | None = None
+    worktree_id: str | None = None
+    worktree_create: dict[str, str | None] | None = None
 
 
 class TurnFileActionName(str, Enum):

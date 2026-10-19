@@ -62,6 +62,7 @@ function expireAdminSession() {
   if (notice) notice.hidden = false;
   window.NetizenIdentity?.expire();
   window.NetizenSessionAccess?.expire();
+  window.NetizenWorktrees?.expire();
   setStatus("登录已过期，请重新登录。", true);
 }
 
@@ -444,11 +445,13 @@ function confirmProjectDelete(preview) {
     + "\n定时计划将被删除；后续会话清理失败也不会恢复计划。"
     + "\n\n原生会话、派生子会话、Codex App/CLI 历史和本地会话登记将永久删除，无法恢复。"
     + "\n全部会话删除确认成功后，才会删除 Project 登记；部分失败时会保留 Project 和剩余会话。"
+    + `\n关联受管 Worktrees：${preview.worktreeCount || 0}，${preview.deleteWorktrees ? "同时安全删除；失败项保留，不强制丢弃成果" : "保留目录，可在 Worktrees 页面处理；不会自动关联到同名新 Project"}。`
+    + (preview.deleteWorktrees && preview.worktrees?.length ? `\n将删除的 checkout 根目录：\n${preview.worktrees.map((item) => `${item.id} · ${item.root}`).join("\n")}` : "")
     + `\n\n磁盘代码目录保留：${preview.project.cwd}`,
   );
 }
 
-async function deleteProject(project) {
+async function deleteProject(project, deleteWorktrees = false) {
   const envelope = project.actions.previewDelete;
   if (!envelope || pendingProjectDeletes.has(project.alias)) return;
   pendingProjectDeletes.add(project.alias);
@@ -467,7 +470,7 @@ async function deleteProject(project) {
     const preview = await api("/api/v1/projects/delete-preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(actionPayload(envelope)),
+      body: JSON.stringify(actionPayload(envelope, deleteWorktrees ? { deleteWorktrees: true } : {})),
     });
     if (!confirmProjectDelete(preview)) {
       message = `已取消删除 Project「${project.alias}」，未提交删除。`;
@@ -497,6 +500,11 @@ async function deleteProject(project) {
     }
     if (result.remainingScheduledRunCount) {
       details.push(`仍有 ${result.remainingScheduledRunCount} 条定时执行的交接或清理未确认。`);
+    }
+    if (result.deletedWorktreeCount) message += `\n已删除 ${result.deletedWorktreeCount} 个受管 Worktree。`;
+    if (result.remainingWorktreeCount) {
+      if (result.deleteWorktrees) details.push(`仍有 ${result.remainingWorktreeCount} 个受管 Worktree 未安全删除，请在 Worktrees 页面检查。`);
+      else message += `\n已按选择保留 ${result.remainingWorktreeCount} 个受管 Worktree，可在 Worktrees 页面处理。`;
     }
     return result;
   } catch (error) {
@@ -551,8 +559,14 @@ async function loadProjects(cursor = undefined) {
       ));
     }
     if (project.actions.previewDelete) {
+      const cascadeLabel = document.createElement("label");
+      cascadeLabel.className = "cascade-choice";
+      const cascade = document.createElement("input");
+      cascade.type = "checkbox";
+      cascadeLabel.append(cascade, document.createTextNode("同时删除关联受管 Worktrees"));
+      actions.append(cascadeLabel);
       actions.append(actionButton(
-        "删除 Project 及关联 Sessions", () => deleteProject(project), true,
+        "删除 Project 及关联 Sessions", () => deleteProject(project, cascade.checked), true,
       ));
     }
     if (project.deleting || pendingProjectDeletes.has(project.alias)) {
@@ -2727,20 +2741,22 @@ function confirmDiscardChanges(changed) {
 
 function hasUnsavedEditors() {
   return sessionSettingsHasChanges() || defaultEditorHasChanges() || scheduleEditorHasChanges()
-    || Boolean(pendingScheduleDraft?.dirty) || Boolean(window.NetizenSessionAccess?.dirty());
+    || Boolean(pendingScheduleDraft?.dirty) || Boolean(window.NetizenSessionAccess?.dirty())
+    || Boolean(window.NetizenWorktrees?.dirty());
 }
 
 // Navigation asks once before closing any editor. Busy submissions retain the
 // existing fail-closed boundary; this helper never cancels or repeats a POST.
 function confirmDiscardEditors() {
   if (sessionSettingsEditor?.saving || defaultsBusy || (scheduleEditor && scheduleInput("fields").disabled)
-      || window.NetizenSessionAccess?.busy()) return false;
+      || window.NetizenSessionAccess?.busy() || window.NetizenWorktrees?.busy()) return false;
   if (!confirmDiscardChanges(hasUnsavedEditors())) return false;
   closeSessionSettingsEditor({ confirmed: true });
   closeDefaultEditor({ confirmed: true });
   if (scheduleEditor) closeScheduleEditor({ confirmed: true });
   cancelScheduleSelection({ confirmed: true });
   window.NetizenSessionAccess?.discard();
+  window.NetizenWorktrees?.discard();
   return true;
 }
 
@@ -3834,7 +3850,7 @@ async function moveScheduleRunsPage(direction) {
 
 // Only durable query intent belongs in URLs. Grants, editor drafts and live
 // keyset cursors stay in this document and are never restored as server facts.
-const adminPagePaths = { projects: "/projects", schedules: "/schedules", defaults: "/defaults",
+const adminPagePaths = { projects: "/projects", worktrees: "/worktrees", schedules: "/schedules", defaults: "/defaults",
   updates: "/maintenance", system: "/system" };
 const sessionUrlKeys = ["project", "scopeKind", "inventoryState", "current", "chatId", "topicId", "identity",
   "createdFrom", "createdBefore", "createdRange", "updatedFrom", "updatedBefore", "updatedRange", "pageSize", "sortBy", "sortDirection"];
@@ -4033,6 +4049,7 @@ async function refresh(tab, cursor = undefined) {
   setStatus("正在读取服务端事实…");
   try {
     if (tab === "projects" && await loadProjects(cursor) === false) return false;
+    if (tab === "worktrees" && await window.NetizenWorktrees.load() === false) return false;
     if (tab === "updates") await loadUpdates();
     if (tab === "schedules" && await loadSchedules(cursor) === false) return false;
     if (tab === "defaults") await loadDefaults();
@@ -4166,6 +4183,7 @@ document.querySelector("#side-page-size").addEventListener("change", () => {
 });
 document.querySelector("#projects-previous").addEventListener("click", () => moveListPage("projects", "previous"));
 document.querySelector("#projects-next").addEventListener("click", () => moveListPage("projects", "next"));
+window.NetizenWorktrees?.init({ api, actionPayload, setStatus, queryProjectOptions, isExpired: () => state.authExpired });
 document.querySelector("#sessions-previous").addEventListener("click", () => moveSessionPage("previous"));
 document.querySelector("#sessions-next").addEventListener("click", () => moveSessionPage("next"));
 document.querySelector("#sides-previous").addEventListener("click", () => moveSidePage("previous"));

@@ -10,6 +10,7 @@ from lark_channel import OutboundCard
 from netizen_cli.channel.session_pages import SessionCardPage
 from netizen_cli.management import SessionNativeCursor
 from netizen_cli.cards import callbacks
+from netizen_cli.cards import controls as card_controls
 from netizen_cli.cards import (
     ArchivedSessionCardItem,
     CardActionError,
@@ -86,6 +87,7 @@ from netizen_cli.turn_activity import (
     TurnActivityStatus,
 )
 from netizen_cli.turn_files import TurnFile
+from tests.support.channel_cards import form_controls
 
 
 class CardCodecTest(unittest.TestCase):
@@ -170,7 +172,10 @@ class CardCodecTest(unittest.TestCase):
             CardControlName.GOAL_RESUME,
             CardControlName.SIDE_CLOSE,
         }
-        repeatable_forms = {CardControlName.REGISTER_PROJECT}
+        repeatable_forms = {
+            CardControlName.REGISTER_PROJECT,
+            CardControlName.PREPARE_NEW_WORKSPACE,
+        }
         revision_bearing = {
             CardControlName.SET_PROJECT_ENABLED,
             CardControlName.CONFIGURE_BINDING,
@@ -2653,7 +2658,7 @@ class CardRendererTest(unittest.TestCase):
         self.assertNotIn("下一条真实任务", serialized)
         self.assertIn("继承 Codex", serialized)
         self.assertIn("执行中表情闪烁", serialized)
-        self.assertIn("任务接收、成功调整和结束时始终显示表情", serialized)
+        self.assertIn("关闭仍保留状态表情", serialized)
         self.assertNotIn("开启后会用表情反馈接收、运行和终态", serialized)
         self.assertIn("@ 时读取的消息范围", serialized)
         self.assertIn("机器人始终只响应", serialized)
@@ -2665,7 +2670,7 @@ class CardRendererTest(unittest.TestCase):
             if item["name"] == "new_binding_v6"
         )
         self.assertEqual(
-            [item["name"] for item in form["elements"] if "name" in item],
+            [item["name"] for item in form_controls(form)],
             [
                 "new_project",
                 "new_model",
@@ -2680,8 +2685,7 @@ class CardRendererTest(unittest.TestCase):
         )
         fields = {
             item["name"]: item
-            for item in form["elements"]
-            if "name" in item
+            for item in form_controls(form)
         }
         self.assertNotIn("initial_option", fields["new_project"])
         self.assertEqual(
@@ -2740,13 +2744,81 @@ class CardRendererTest(unittest.TestCase):
         )
         preferred_project = next(
             item
-            for item in preferred_form["elements"]
+            for item in form_controls(preferred_form)
             if item.get("name") == "new_project"
         )
         self.assertEqual(
             preferred_project["initial_option"],
             "project:v1:test:2",
         )
+
+    def test_new_layout_preserves_settings_controls_and_selected_values(self) -> None:
+        for catalog in (self.catalog, None):
+            for allow_context in (True, False):
+                for context in MentionContextMode:
+                    for feedback in (BindingTaskFeedback(False, True, True), BindingTaskFeedback(True, False, False)):
+                        with self.subTest(catalog=catalog is not None, context=allow_context,
+                                          selected=context, feedback=feedback):
+                            card = new_binding_card(
+                                scope=self.scope, projects=self.projects[:2], catalog=catalog,
+                                initial_project_alias="test", allow_context_mode=allow_context,
+                                message_context_mode=context, task_feedback=feedback,
+                            )
+                            form = _elements(card.card, "form")[0]
+                            fields = {item["name"]: item for item in form_controls(form)}
+                            expected = card_controls._task_feedback_form_elements(prefix="new", initial=feedback)
+                            if allow_context:
+                                expected += card_controls._context_mode_form_elements(prefix="new", initial_mode=context)
+                            if catalog is not None:
+                                expected += card_controls._model_settings_form_elements(
+                                    prefix="new", catalog=catalog,
+                                    model_value_encoder=callbacks._new_model_reference,
+                                    inherit_initial_when_unset=False,
+                                )
+                            else:
+                                self.assertEqual(fields["new_model"]["initial_option"], "new-model:v1:inherit")
+                                self.assertEqual([item["value"] for item in fields["new_model"]["options"]], ["new-model:v1:inherit"])
+                                self.assertNotIn("new_effort", fields)
+                                self.assertNotIn("new_speed", fields)
+                            for original in form_controls(expected):
+                                self.assertEqual(
+                                    {key: value for key, value in fields[original["name"]].items() if key != "width"},
+                                    original,
+                                )
+                            self.assertEqual(fields["new_binding_submit_v6"], card_controls._form_submit_button(
+                                name="new_binding_submit_v6", label="新建会话",
+                            ))
+                            values = {name: field["initial_option"] for name, field in fields.items()
+                                      if field["tag"] == "select_static"}
+                            decoded = decode_card_form(scope=self.scope, message_id="om_card", sender_id="ou_user",
+                                                       tag="button", form_value=values)
+                            self.assertEqual(decoded.project_alias, "test")
+                            self.assertEqual(decoded.message_context_mode, context if allow_context else MentionContextMode.CURRENT_ONLY)
+                            self.assertEqual((decoded.reaction_pulse_enabled, decoded.progress_card_enabled,
+                                              decoded.completion_mention_enabled),
+                                             (feedback.reaction_pulse_enabled, feedback.progress_card_enabled,
+                                              feedback.completion_mention_enabled))
+                            self.assertEqual(decoded.model_id, "future-model" if catalog is not None else None)
+                            self.assertEqual(decoded.effort_id, "ultra" if catalog is not None else None)
+                            self.assertEqual(decoded.service_tier_id, "priority-v2" if catalog is not None else None)
+
+    def test_new_layout_is_expanded_and_keeps_model_above_paired_effort_speed(self) -> None:
+        card = new_binding_card(scope=self.scope, projects=self.projects[:2], catalog=self.catalog)
+        form = _elements(card.card, "form")[0]
+        sections = form["elements"][:-1]
+        self.assertEqual([item["columns"][0]["elements"][0]["content"] for item in sections],
+                         ["**项目**", "**模型配置**", "**消息上下文**", "**任务反馈**"])
+        model = sections[1]["columns"][0]["elements"]
+        self.assertEqual(model[1]["name"], "new_model")
+        self.assertEqual(model[1]["width"], "fill")
+        self.assertEqual([[item["name"] for item in form_controls(column)] for column in model[2]["columns"]],
+                         [["new_effort"], ["new_speed"]])
+        self.assertEqual(_elements(form, "collapsible_panel"), [])
+        for columns in _elements(form, "column_set"):
+            self.assertEqual(columns["flex_mode"], "none")
+            self.assertTrue(all(column["tag"] == "column" and column["width"] == "weighted"
+                                for column in columns["columns"]))
+        self.assertEqual(len(_elements(card.card, "form")), 1)
 
     def test_new_card_shows_every_project_without_pagination_or_truncation(
         self,
@@ -2777,7 +2849,7 @@ class CardRendererTest(unittest.TestCase):
                 )
                 project = next(
                     item
-                    for item in form["elements"]
+                    for item in form_controls(form)
                     if item.get("name") == "new_project"
                 )
                 self.assertEqual(
@@ -2831,7 +2903,7 @@ class CardRendererTest(unittest.TestCase):
         )
         p2p_fields = {
             item["name"]: item
-            for item in p2p_form["elements"]
+            for item in form_controls(p2p_form)
             if item.get("tag") == "select_static"
         }
         decoded = decode_card_form(
@@ -3035,8 +3107,7 @@ class CardRendererTest(unittest.TestCase):
         )
         fields = {
             item.get("name")
-            for item in form["elements"]
-            if item.get("name")
+            for item in form_controls(form)
         }
         self.assertEqual(
             fields,
