@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-09-23
 amends: 0039, 0061, 0063, 0068
-related: 0029, 0046, 0051, 0060, 0069
+related: 0029, 0046, 0051, 0060, 0069, 0085
 ---
 
 # 定时向原会话提交普通输入
@@ -15,7 +15,10 @@ Binding。两者共用时间规则、唯一 Scheduler、管理服务和 Runtime�
 ## 原会话输入与反馈
 
 原会话计划保存 exact Binding 引用，从该 Binding 取得 Project、Scope 与当前配置；
-不保存独立的模型、反馈或上下文配置。自然语言使用原生调用身份解析当前普通 Binding，
+不保存独立的模型、反馈、上下文或工作区配置。workspace 与 session_settings 均为 null，
+显式工作区覆盖必须拒绝；目录继承 Runtime 当前确认的实际 cwd，不从 Project 推断或兜底。
+即使目录缺失，也不增加一律禁聊规则，仍沿用 ADR 0085 的原生恢复与输入结果边界。
+自然语言使用原生调用身份解析当前普通 Binding，
 管理入口也可以明确选择 exact Binding；创建后执行目标不可编辑为另一会话。
 Side 和无普通 Binding 的原生子任务不能隐式成为目标。
 

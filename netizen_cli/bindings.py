@@ -39,7 +39,7 @@ from .worktrees.models import WorktreeRecord
 from .worktrees.store import WorktreeStore, create_schema as create_worktree_schema
 
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # Includes the running query and all submitted queries waiting for the reader.
 _ADMIN_QUERY_CAPACITY = 32
@@ -466,7 +466,7 @@ def _require_current_schema(connection: sqlite3.Connection) -> None:
     _require_project_metadata_schema(connection)
     require_schema(connection)
     require_defaults_schema(connection)
-    from .migrations.v16 import validate
+    from .migrations.v17 import validate
     validate(connection)
 
 
@@ -1024,6 +1024,7 @@ class BindingStore:
                     run.target_kind != "new_topic"
                     or run.barrier != "held" or run.phase != "publishing_topic"
                     or run.binding_id is not None
+                    or run.worktree_id != worktree_id
                     or run.project_alias != project_alias
                     or scope.kind is not ScopeKind.TOPIC
                     or (run.app_id, run.chat_id, run.topic_id)
@@ -1154,6 +1155,8 @@ class BindingStore:
         creator_id: str = "scheduled_plan",
         session_settings: SessionSettings = SessionSettings(),
         context_anchor: MessageContextAnchor | None = None,
+        working_cwd: str | None = None, worktree_id: str | None = None,
+        expected_project_revision: int | None = None,
     ) -> ThreadBinding:
         if not isinstance(session_settings, SessionSettings):
             raise ValueError("scheduled session_settings must be SessionSettings")
@@ -1163,7 +1166,8 @@ class BindingStore:
             turn_settings=session_settings.turn_settings,
             task_feedback=session_settings.task_feedback,
             message_context_mode=session_settings.message_context_mode,
-            context_anchor=context_anchor, expected_project_revision=None,
+            context_anchor=context_anchor, expected_project_revision=expected_project_revision,
+            working_cwd=working_cwd, worktree_id=worktree_id,
             scheduled_run_id=run_id,
         )
 

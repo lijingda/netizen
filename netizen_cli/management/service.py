@@ -833,6 +833,7 @@ class InstanceManagementService:
                 bindings=self._bindings, runtime=self._runtime,
                 app_id=app_id, chat_info=chat_info,
                 chat_target_validator=self.validate_chat_target,
+                worktrees=lambda: self.worktrees,
             )
         elif self.schedules.app_id != app_id:
             raise ValueError("schedule management App identity cannot change")

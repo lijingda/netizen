@@ -19,6 +19,13 @@ const envelope = (mode) => ({
 let createGrant = envelope("create");
 let chatValidationGate = null;
 let scheduleOptionsGate = null;
+const workspaceOptions = new Map(["project-one", "project-two"].map((project, index) => [project, {
+  projectAlias: project, projectRevision: index + 1, isGit: true,
+  items: [{ id: `wt-${project}`, cwd: `/managed/${project}`, branch: null, available: true }],
+  branches: [{ ref: "refs/heads/main", name: "main" }],
+}]));
+const workspaceErrors = new Map();
+let runRecords = null;
 let unavailableProject = null;
 let openTimeRangeFilter = null;
 const defaultSessionSettings = { turn_settings: { model_id: "native-default", effort_id: "medium", service_tier_id: "default" },
@@ -27,6 +34,7 @@ const models = [{ id: "native-default", display_name: "Native default", default_
   efforts: [{ id: "medium", description: "Medium" }, { id: "high", description: "High" }],
   service_tiers: [{ id: "default", name: "Standard" }, { id: "priority", name: "Fast" }] }];
 let catalogError = null;
+let chatInfoError = null;
 let contextAvailable = true;
 const fixturePlan = () => ({
   id: "plan-exact", revision: 7, name: "<b>Report</b>",
@@ -38,6 +46,7 @@ const fixturePlan = () => ({
   execution: { kind: "none", status: "not_started", is_last: false, due_local: null },
   actions: { update: envelope("update"), delete: envelope("delete"), run_now: envelope("run_now") },
   session_settings: structuredClone(defaultSessionSettings),
+  workspace: { mode: "project" }, workspace_error: null, workspace_available: true,
 });
 let plans = [fixturePlan()];
 let posts = [];
@@ -80,8 +89,10 @@ async function api(path, options = {}) {
   const mode = query.get("mode") || "list";
   if (mode === "options") {
     const result = { ok: true, session_settings: structuredClone(defaultSessionSettings),
-      models: catalogError ? [] : structuredClone(models), context_mode_available: contextAvailable,
-      model_catalog_error: catalogError };
+      models: catalogError ? [] : structuredClone(models), context_mode_available: chatInfoError ? null : contextAvailable,
+      chat_info_error: chatInfoError,
+      model_catalog_error: catalogError, workspace_options: workspaceOptions.get(query.get("project")) || null,
+      workspace_options_error: workspaceErrors.get(query.get("project")) || null };
     if (scheduleOptionsGate) return new Promise((resolve) => {
       scheduleOptionsGate.resolve = (overrides = {}) => resolve({ ...result, ...overrides });
     });
@@ -114,7 +125,7 @@ async function api(path, options = {}) {
   if (mode === "view" && failView) throw new Error("详情刷新失败");
   if (mode === "runs" && failRuns) throw new Error("记录刷新失败");
   if (mode === "view") return { ok: true, plan: viewedPlan || fixturePlan(), preview: previewTimes || times, inflight: true };
-  if (mode === "runs") return { ok: true, runs: [
+  if (mode === "runs") return { ok: true, runs: runRecords || [
     { id: "run-one", binding_id: "binding-exact", due_at: 1893459600, status: "released", trigger_source: "manual",
       feishu_url: "https://applink.feishu.cn/client/message/link?token=om_root" },
   ], next_cursor: "runs-page" };
@@ -336,6 +347,7 @@ async function chooseScheduleTarget(value) {
   assert.equal(posts.length, 1);
   assert.equal(posts[0].path, "/api/v1/schedules/create");
   assert.deepEqual(posts[0].body, actionPayload(envelope("create"), { definition: {
+    workspace: { mode: "project" },
     name: "My report", project: "project-two", chat_id: "oc_explicit", instructions: "One.\nTwo.",
     schedule: { kind: "daily", timezone: "Asia/Shanghai", at: "10:00" }, enabled: true,
     session_settings: defaultSessionSettings,
@@ -915,7 +927,7 @@ async function chooseScheduleTarget(value) {
   const bindingCreate = posts.at(-1).body.definition;
   assert.equal(bindingCreate.target_kind, "binding");
   assert.equal(bindingCreate.target_binding_id, "binding-inactive");
-  for (const name of ["session_settings", "project", "chat_id"]) assert.equal(name in bindingCreate, false);
+  for (const name of ["session_settings", "project", "chat_id", "workspace", "expected_project_revision"]) assert.equal(name in bindingCreate, false);
   assert.equal(posts.at(-1).body.actionToken, "fresh-session-create-grant");
   assert.equal(gets.length, beforeBindingSave, "saving from Sessions must not reload or move its list");
   assert.equal(state.tab, "sessions");
@@ -942,7 +954,9 @@ async function chooseScheduleTarget(value) {
   state.tab = "schedules";
 
   const boundPlan = { ...fixturePlan(), target_kind: "binding", target_binding_id: "binding-original",
-    target_label: "已有问题", session_settings: null, blocked_reason: "target_inactive", enabled: true,
+    target_label: "已有问题", session_settings: null, workspace: null, blocked_reason: "target_inactive", enabled: true,
+    effective_workspace: { working_cwd: "/managed/original/subproject", worktree_id: "wt-original",
+      source: "binding", native_cwd_unresolved: true },
     execution: { kind: "latest", status: "input_steered", is_last: false } };
   boundPlan.actions.run_now = null;
   plans = [boundPlan];
@@ -953,15 +967,37 @@ async function chooseScheduleTarget(value) {
   assert(boundRow.textContent.includes("已追加当前任务"));
   assert(boundRow.textContent.includes("原会话 · 已有问题"));
   assert.equal(boundRow.querySelectorAll("button").find((node) => node.textContent === "立即运行").disabled, true);
+  const previousViewedPlan = viewedPlan;
+  viewedPlan = boundPlan;
+  await showSchedule(boundPlan.id);
+  assert(scheduleInput("detail-settings").textContent.includes("已登记工作目录：/managed/original/subproject"));
+  assert(scheduleInput("detail-settings").textContent.includes("Worktree：wt-original"));
+  assert(scheduleInput("detail-settings").textContent.includes("实际目录由原会话确定"));
+  closeScheduleDetail();
+  viewedPlan = previousViewedPlan;
   await openScheduleEditor(boundPlan);
   assert.equal(scheduleInput("target-kind").disabled, true);
   assert.equal(scheduleInput("binding").type, "hidden");
   assert.equal(scheduleInput("select-session").hidden, true);
   assert.equal(scheduleInput("binding").value, "binding-original");
+  assert.equal(scheduleInput("workspace-fields").hidden, true);
+  assert.equal(scheduleInput("workspace").disabled, true);
+  assert(scheduleInput("target-note").textContent.includes("实际工作目录"));
+  assert(scheduleInput("binding-summary").textContent.includes("已登记工作目录：/managed/original/subproject"));
+  assert(scheduleInput("binding-summary").textContent.includes("Worktree：wt-original"));
+  assert(scheduleInput("binding-summary").textContent.includes("本次未查询原生目录"));
+  assert.equal(scheduleEditorHasChanges(), false);
+  assert(scheduleInheritedWorkspace({ effective_workspace: { working_cwd: "/selected/lazy",
+    native_cwd_unresolved: false } }).includes("已选工作目录：/selected/lazy"));
+  const unknownDirectory = scheduleInheritedWorkspace({ project_cwd: "/must-not-fallback",
+    effective_workspace: { working_cwd: null, worktree_id: "wt-retained", native_cwd_unresolved: true } });
+  assert(unknownDirectory.includes("工作目录尚未登记"));
+  assert(unknownDirectory.includes("wt-retained"));
+  assert(!unknownDirectory.includes("/must-not-fallback"));
   await previewSchedule();
   await saveSchedule({ preventDefault() {} });
   const bindingUpdate = posts.at(-1).body.definition;
-  for (const name of ["target_kind", "target_binding_id", "session_settings", "project", "chat_id"]) {
+  for (const name of ["target_kind", "target_binding_id", "session_settings", "project", "chat_id", "workspace", "expected_project_revision"]) {
     assert.equal(name in bindingUpdate, false);
   }
   assert.equal(scheduleRunStatus("input_started"), "已启动新一轮");
@@ -1299,4 +1335,218 @@ async function chooseScheduleTarget(value) {
     assert.equal(document.querySelector("#session-schedule-selection").hidden, true);
     assert.equal(scheduleInput("drawer").open, false);
   }
+
+  // Workspace choices use the shared selector while remaining independent from model reads.
+  state.tab = "schedules";
+  plans = [fixturePlan()];
+  catalogError = { code: "unavailable", message: "模型目录读取失败" };
+  for (const workspace of [
+    { mode: "existing", worktree_id: "wt-project-one" },
+    { mode: "new" },
+    { mode: "new", ref: "refs/heads/main" },
+  ]) {
+    await openNewScheduleEditor();
+    await changeScheduleProject();
+    assert.equal(new URL(gets.at(-1), "http://localhost").searchParams.get("project"), "project-one");
+    assert(scheduleInput("session-note").textContent.includes("模型目录读取失败"));
+    scheduleInput("workspace").value = workspace.mode;
+    scheduleInput("workspace").dispatch("change");
+    assert.equal(scheduleInput("worktree-field").hidden, workspace.mode !== "existing");
+    assert.equal(scheduleInput("workspace-ref-field").hidden, workspace.mode !== "new");
+    if (workspace.worktree_id) {
+      scheduleInput("worktree").value = workspace.worktree_id;
+      scheduleInput("worktree").dispatch("change");
+    }
+    if (workspace.ref) {
+      scheduleInput("workspace-ref").value = `  ${workspace.ref}  `;
+      scheduleInput("workspace-ref").dispatch("input");
+    }
+    assert.deepEqual(scheduleEditor.workspace, workspace);
+    assert.equal(scheduleEditorHasChanges(), true);
+    await previewSchedule();
+    assert.equal(scheduleInput("save").disabled, false);
+    await saveSchedule({ preventDefault() {} });
+    assert.deepEqual(posts.at(-1).body.definition.workspace, workspace);
+    assert.equal(posts.at(-1).body.definition.expected_project_revision, 1);
+  }
+  catalogError = null;
+
+  // A chat lookup error is independent: preserve drafts and the other option groups.
+  chatInfoError = { code: "chat_info_unavailable", message: "聊天信息读取超时，请稍后重试" };
+  const chatUnknownPlan = fixturePlan();
+  chatUnknownPlan.session_settings.message_context_mode = "catch-up";
+  chatUnknownPlan.workspace = { mode: "existing", worktree_id: "wt-project-one" };
+  await openScheduleEditor(chatUnknownPlan);
+  assert.equal(scheduleEditor.contextAvailable, null);
+  assert.equal(scheduleInput("chat-kind").value, "unknown");
+  assert(scheduleInput("session-note").textContent.includes("聊天信息读取超时"));
+  assert.equal(scheduleInput("context").value, "catch-up");
+  assert.equal(scheduleInput("context").querySelectorAll("option").find((option) => option.value === "catch-up").disabled, false);
+  assert(scheduleInput("model").querySelectorAll("option").some((option) => option.value === "native-default"));
+  assert.equal(scheduleInput("worktree").value, "wt-project-one");
+  assert.equal(scheduleInput("workspace").querySelectorAll("option").find((option) => option.value === "existing").disabled, false);
+  assert.equal(scheduleEditorHasChanges(), false);
+  scheduleInput("name").value = "preserved chat error draft";
+  scheduleInput("instructions").value = "preserved instructions";
+  scheduleInput("effort").value = "high";
+  scheduleInput("effort").dispatch("change");
+  await loadScheduleSessionOptions();
+  assert.equal(scheduleInput("name").value, "preserved chat error draft");
+  assert.equal(scheduleInput("instructions").value, "preserved instructions");
+  assert.equal(scheduleInput("effort").value, "high");
+  assert.equal(scheduleInput("context").value, "catch-up");
+  assert.equal(scheduleInput("worktree").value, "wt-project-one");
+  closeScheduleEditor();
+  chatInfoError = null;
+
+  // An options refresh can revoke a choice while final chat validation is pending.
+  await openNewScheduleEditor();
+  await changeScheduleProject();
+  scheduleInput("workspace").value = "existing";
+  scheduleInput("workspace").dispatch("change");
+  scheduleInput("worktree").value = "wt-project-one";
+  scheduleInput("worktree").dispatch("change");
+  await previewSchedule();
+  chatValidationGate = {};
+  const savingWorkspace = saveSchedule({ preventDefault() {} });
+  const pendingWorkspacePosts = posts.length;
+  workspaceOptions.get("project-one").items[0].available = false;
+  await loadScheduleSessionOptions();
+  chatValidationGate.resolve();
+  chatValidationGate = null;
+  await savingWorkspace;
+  assert.equal(posts.length, pendingWorkspacePosts);
+  assert.equal(scheduleInput("worktree").value, "wt-project-one");
+  assert.equal(scheduleInput("save").disabled, true);
+  closeScheduleEditor();
+  workspaceOptions.get("project-one").items[0].available = true;
+
+  // Exact unavailable choices are retained and editable without replacing their workspace.
+  const unavailable = { ...fixturePlan(), workspace: { mode: "existing", worktree_id: "wt-deleted-exact" },
+    workspace_available: false, workspace_error: { code: "not_found", message: "所选 Worktree 登记已删除" },
+    blocked_reason: "workspace_unavailable", suspended_reason: "workspace_unavailable",
+    execution: { kind: "latest", status: "workspace_unavailable", is_last: false } };
+  unavailable.actions.run_now = null;
+  assert(scheduleBlockedLabel({ ...unavailable, blocked_reason: "blocked_unknown" }).includes("执行结果待确认"));
+  assert(scheduleBlockedLabel({ ...unavailable, blocked_reason: "blocked_unknown" }).includes("登记已删除"));
+  await openScheduleEditor(unavailable);
+  assert.equal(scheduleInput("workspace").value, "existing");
+  assert.equal(scheduleInput("worktree").value, "wt-deleted-exact");
+  assert(scheduleInput("worktree").textContent.includes("不可用"));
+  assert(scheduleInput("workspace-help").textContent.includes("登记已删除"));
+  assert.equal(scheduleEditorHasChanges(), false, "options hydration must not dirty the saved policy");
+  scheduleInput("name").value = "rename without replacing workspace";
+  await previewSchedule();
+  assert.equal(scheduleInput("save").disabled, false);
+  await saveSchedule({ preventDefault() {} });
+  assert.equal("workspace" in posts.at(-1).body.definition, false);
+  assert.equal("expected_project_revision" in posts.at(-1).body.definition, false);
+
+  await openScheduleEditor(unavailable);
+  scheduleInput("worktree").value = "wt-project-one";
+  scheduleInput("worktree").dispatch("change");
+  assert(!scheduleInput("workspace-help").textContent.includes("登记已删除"));
+  await previewSchedule();
+  assert.equal(scheduleInput("save").disabled, false);
+  scheduleInput("workspace").value = "new";
+  scheduleInput("workspace").dispatch("change");
+  assert.equal(schedulePrepared, null, "workspace changes must invalidate the reviewed preview");
+  await previewSchedule();
+  await saveSchedule({ preventDefault() {} });
+  assert.deepEqual(posts.at(-1).body.definition.workspace, { mode: "new" });
+  assert.equal(posts.at(-1).body.definition.expected_project_revision, 1);
+
+  // Failed workspace reads preserve policy and session drafts; unchanged policy still permits editing.
+  workspaceErrors.set("project-one", { code: "unavailable", message: "工作区目录状态读取超时" });
+  const validOptions = workspaceOptions.get("project-one");
+  workspaceOptions.delete("project-one");
+  await openScheduleEditor(unavailable);
+  assert(scheduleInput("workspace-help").textContent.includes("读取超时"));
+  scheduleInput("progress").checked = true;
+  scheduleInput("progress").dispatch("change");
+  scheduleInput("name").value = "keep all drafts";
+  await loadScheduleSessionOptions();
+  assert.equal(scheduleInput("name").value, "keep all drafts");
+  assert.equal(scheduleInput("progress").checked, true);
+  assert.equal(scheduleInput("worktree").value, "wt-deleted-exact");
+  await previewSchedule();
+  assert.equal(scheduleInput("save").disabled, false);
+  closeScheduleEditor();
+  await openNewScheduleEditor();
+  await changeScheduleProject();
+  scheduleInput("workspace").value = "existing";
+  changeScheduleWorkspace("workspace");
+  await previewSchedule();
+  assert.equal(scheduleInput("save").disabled, true);
+  const rejectedPosts = posts.length;
+  await saveSchedule({ preventDefault() {} });
+  assert.equal(posts.length, rejectedPosts);
+  closeScheduleEditor();
+  workspaceOptions.set("project-one", validOptions);
+  workspaceErrors.clear();
+
+  // Project changes reset the workspace visibly and stale reads cannot restore old choices.
+  await openNewScheduleEditor();
+  await changeScheduleProject();
+  scheduleInput("workspace").value = "new";
+  scheduleInput("workspace").dispatch("change");
+  scheduleInput("workspace-ref").value = "refs/heads/feature";
+  scheduleInput("workspace-ref").dispatch("input");
+  scheduleOptionsGate = {};
+  const oldOptions = loadScheduleSessionOptions();
+  const oldGate = scheduleOptionsGate;
+  scheduleOptionsGate = null;
+  workspaceOptions.get("project-two").isGit = false;
+  scheduleInput("project").value = "project-two";
+  await changeScheduleProject();
+  assert.deepEqual(scheduleEditor.workspace, { mode: "project" });
+  assert.equal(scheduleInput("workspace-ref").value, "");
+  assert(scheduleInput("workspace-help").textContent.includes("不是 Git"));
+  assert(scheduleInput("workspace").querySelectorAll("option")
+    .filter((option) => option.value !== "project").every((option) => option.disabled));
+  scheduleInput("name").value = "new project draft";
+  oldGate.resolve();
+  await oldOptions;
+  assert.equal(scheduleEditor.workspaceOptions.projectAlias, "project-two");
+  assert.equal(scheduleInput("name").value, "new project draft");
+  assert.deepEqual(scheduleEditor.workspace, { mode: "project" });
+  await previewSchedule();
+  await saveSchedule({ preventDefault() {} });
+  assert.equal(posts.at(-1).body.definition.project, "project-two");
+  assert.equal(posts.at(-1).body.definition.expected_project_revision, 2);
+  workspaceOptions.get("project-two").isGit = true;
+
+  // List/detail retain enabled intent and exact reasons; failed Runs expose retained resource receipts.
+  plans = [unavailable];
+  viewedPlan = unavailable;
+  unavailable.execution.worktree_id = "wt-retained-exact";
+  unavailable.execution.worktree = { id: "wt-retained-exact", cwd: "/managed/retained/subproject",
+    root: "/managed/retained", creation_state: "ready" };
+  runRecords = [{ id: "skipped", due_at: 1893459600, status: "workspace_unavailable" },
+    { id: "retained", due_at: 1893459601, status: "workspace_handoff_failed",
+      worktree_id: "wt-retained-exact", worktree: unavailable.execution.worktree },
+    { id: "unknown", due_at: 1893459602, status: "workspace_creation_unknown", worktree_id: "wt-unknown-exact",
+      worktree: { id: "wt-unknown-exact", cwd: "/managed/unknown", root: "/managed/unknown", creation_state: "unknown" } },
+    { id: "removed", due_at: 1893459603, status: "workspace_handoff_failed", worktree_id: "wt-removed-exact",
+      worktree: { id: "wt-removed-exact", cwd: null, root: null, creation_state: null } }];
+  await loadSchedules();
+  const unavailableRow = document.querySelector("#schedules-body").querySelector("tr");
+  assert(unavailableRow.textContent.includes("启停：已启用"));
+  assert(unavailableRow.textContent.includes("wt-deleted-exact"));
+  assert(unavailableRow.textContent.includes("登记已删除"));
+  assert(unavailableRow.textContent.includes("wt-retained-exact"));
+  assert.equal(unavailableRow.querySelectorAll("button").find((button) => button.textContent === "立即运行").disabled, true);
+  await showSchedule(unavailable.id);
+  assert(scheduleInput("detail-state").textContent.includes("登记已删除"));
+  assert(scheduleInput("detail-state").textContent.includes("/managed/retained/subproject"));
+  assert(scheduleInput("detail-settings").textContent.includes("wt-deleted-exact"));
+  assert(scheduleInput("runs-body").textContent.includes("工作区不可用，本次未执行"));
+  assert(scheduleInput("runs-body").textContent.includes("wt-retained-exact"));
+  assert(scheduleInput("runs-body").textContent.includes("工作区已保留"));
+  assert(scheduleInput("runs-body").textContent.includes("工作区创建结果待确认"));
+  assert(scheduleInput("runs-body").textContent.includes("根目录：/managed/retained"));
+  assert(scheduleInput("runs-body").textContent.includes("/managed/unknown"));
+  assert(scheduleInput("runs-body").textContent.includes("wt-removed-exact"));
+  assert(scheduleInput("runs-body").textContent.includes("资源登记已不可用"));
+  assert.equal(scheduleInput("runs-body").querySelectorAll("a").length, 0);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

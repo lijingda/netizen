@@ -33,6 +33,7 @@ class FakeSchedules:
             "instructions": "Read the project.\nSummarize the changes.",
             "project_alias": "test", "app_id": "cli_test", "chat_id": "oc_target",
             "enabled": True, "can_run_now": True,
+            "workspace": {"mode": "project"}, "workspace_error": None,
             "schedule": {"kind": "daily", "at": "09:00", "timezone": "Asia/Shanghai"},
             "next_due_at": 1893488400,
         }
@@ -40,6 +41,11 @@ class FakeSchedules:
         self.plans: list[dict] | None = None
         self.entered: asyncio.Event | None = None
         self.release: asyncio.Event | None = None
+        self.workspace_options = None
+        self.workspace_options_error = None
+        self.chat_info_error = None
+        self.models = []
+        self.model_catalog_error = {"code": "model_catalog_unavailable", "message": "模型目录暂不可用。"}
 
     async def preview(self, request: dict) -> dict:
         self.previews.append(copy.deepcopy(request))
@@ -58,12 +64,12 @@ class FakeSchedules:
             return {"ok": False, "error": self.error}
         mode = request["mode"]
         if mode == "options":
-            return {"ok": True, "models": [], "session_settings": {
+            return {"ok": True, "models": self.models, "session_settings": {
                 "turn_settings": None, "reaction_pulse_enabled": False,
                 "progress_card_enabled": False, "completion_mention_enabled": True, "message_context_mode": "current-only",
-            }, "context_mode_available": False, "model_catalog_error": {
-                "code": "model_catalog_unavailable", "message": "模型目录暂不可用。",
-            }}
+            }, "context_mode_available": None if self.chat_info_error else False,
+                "chat_info_error": self.chat_info_error, "model_catalog_error": self.model_catalog_error,
+                "workspace_options": self.workspace_options, "workspace_options_error": self.workspace_options_error}
         if mode == "list":
             return {"ok": True, "plans": copy.deepcopy(self.plans) if self.plans is not None else [copy.deepcopy(self.plan)],
                     "next_cursor": "next-page", "default_timezone": "Asia/Shanghai"}
@@ -86,7 +92,7 @@ class FakeSchedules:
                 return {"ok": False, "error": {"code": "revision_conflict", "message": "计划已变化，请刷新。"}}
             if mode == "delete":
                 return {"ok": True, "id": request["plan_id"], "revision": self.plan["revision"] + 1}
-            for key in ("name", "instructions", "chat_id", "schedule", "enabled", "session_settings"):
+            for key in ("name", "instructions", "chat_id", "schedule", "enabled", "session_settings", "workspace"):
                 if key in request:
                     self.plan[key] = request[key]
             if "project" in request:
@@ -207,7 +213,7 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
                                                 fixture._action_payload(action))
         self.assertEqual(status, 409, result)
         self.assertEqual(result["code"], "revision_conflict")
-        for code in ("run_in_progress", "blocked_unknown", "project_disabled", "project_unavailable"):
+        for code in ("run_in_progress", "blocked_unknown", "project_disabled", "project_unavailable", "workspace_unavailable"):
             action = (await self.page(session))["plans"][0]["actions"]["run_now"]
             self.schedules.error = {"code": code, "message": "当前无法运行。"}
             status, _, result = await self.json_post("/api/v1/schedules/run-now", session,
@@ -362,13 +368,84 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source, "admin")
         for key, value in definition.items():
             self.assertEqual(submitted[key], value)
-        self.assertFalse({"project", "chat_id", "session_settings", "native_thread_id"} & submitted.keys())
+        self.assertFalse({"project", "chat_id", "session_settings", "workspace", "native_thread_id"} & submitted.keys())
         self.schedules.plan.update(**target, enabled=True, blocked_reason="target_inactive", can_run_now=False)
         plan = (await self.page(session))["plans"][0]
         self.assertTrue(plan["enabled"])
         self.assertEqual(plan["target_binding_id"], "binding-exact")
         self.assertIsNone(plan["actions"]["run_now"])
         self.assertIsNotNone(plan["actions"]["update"])
+
+    async def test_workspace_options_policy_updates_and_readiness_use_shared_service(self) -> None:
+        session = await self.login()
+        self.schedules.workspace_options = {
+            "projectAlias": "test", "projectRevision": 7, "isGit": True,
+            "items": [{"id": "wt-exact", "cwd": "/managed/exact", "available": True}], "branches": [],
+        }
+        status, _, options = await self.json_get("/api/v1/schedules?mode=options&project=test", session)
+        self.assertEqual(status, 200, options)
+        self.assertEqual(self.schedules.calls[-1], ({"mode": "options", "project": "test"}, "admin"))
+        self.assertEqual(options["workspace_options"], self.schedules.workspace_options)
+        self.assertIsNotNone(options["model_catalog_error"])
+        self.schedules.workspace_options = None
+        self.schedules.workspace_options_error = {"code": "unavailable", "message": "目录状态暂未取得"}
+        status, _, options = await self.json_get("/api/v1/schedules?mode=options&project=test", session)
+        self.assertEqual(status, 200, options)
+        self.assertEqual(options["workspace_options_error"], self.schedules.workspace_options_error)
+        self.assertIn("session_settings", options)
+        for workspace in ({"mode": "project"}, {"mode": "existing", "worktree_id": "wt-exact"},
+                          {"mode": "new"}, {"mode": "new", "ref": "refs/heads/main"}):
+            with self.subTest(workspace=workspace):
+                action = (await self.page(session))["actions"]["create"]
+                status, _, created = await self.json_post("/api/v1/schedules/create", session, {
+                    **fixture._action_payload(action), "definition": {"name": "workspace plan", "workspace": workspace},
+                })
+                self.assertEqual(status, 200, created)
+                self.assertEqual(self.schedules.calls[-1][0]["workspace"], workspace)
+                self.assertEqual(created["plan"]["workspace"], workspace)
+                action = (await self.page(session))["plans"][0]["actions"]["update"]
+                status, _, updated = await self.json_post("/api/v1/schedules/update", session, {
+                    **fixture._action_payload(action), "definition": {"name": "renamed"},
+                })
+                self.assertEqual(status, 200, updated)
+                self.assertNotIn("workspace", self.schedules.calls[-1][0])
+                self.assertEqual(updated["plan"]["workspace"], workspace)
+        self.schedules.plan.update(
+            enabled=True, workspace={"mode": "existing", "worktree_id": "wt-exact"},
+            workspace_error={"code": "not_found", "message": "所选工作区登记已删除"},
+            workspace_available=False, blocked_reason="workspace_unavailable",
+            suspended_reason="workspace_unavailable", can_run_now=False,
+        )
+        for query in ("", "?mode=view&plan_id=plan-exact"):
+            status, _, result = await self.json_get("/api/v1/schedules" + query, session)
+            self.assertEqual(status, 200, result)
+            plan = result["plan"] if query else result["plans"][0]
+            self.assertTrue(plan["enabled"])
+            self.assertFalse(plan["workspace_available"])
+            self.assertEqual(plan["workspace_error"], self.schedules.plan["workspace_error"])
+            self.assertIsNone(plan["actions"]["run_now"])
+            self.assertIsNotNone(plan["actions"]["update"])
+
+    async def test_options_chat_error_preserves_other_option_groups(self) -> None:
+        session = await self.login()
+        self.schedules.chat_info_error = {"code": "chat_info_unavailable", "message": "聊天信息读取超时"}
+        self.schedules.models = [{"id": "native-model", "display_name": "Native model"}]
+        self.schedules.model_catalog_error = None
+        self.schedules.workspace_options = {
+            "projectAlias": "test", "projectRevision": 7, "isGit": True,
+            "items": [{"id": "wt-exact", "cwd": "/managed/exact", "available": True}], "branches": [],
+        }
+        status, _, result = await self.json_get(
+            "/api/v1/schedules?mode=options&chat_id=oc_unknown&project=test", session,
+        )
+        self.assertEqual(status, 200, result)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["chat_info_error"], self.schedules.chat_info_error)
+        self.assertIsNone(result["context_mode_available"])
+        self.assertEqual(result["models"], self.schedules.models)
+        self.assertIsNone(result["model_catalog_error"])
+        self.assertEqual(result["workspace_options"], self.schedules.workspace_options)
+        self.assertIn("session_settings", result)
 
     async def test_project_delete_exposes_plans_and_unresolved_dispatch_counts(self) -> None:
         self.management.preview_project_delete = AsyncMock(return_value=SimpleNamespace(
@@ -526,6 +603,53 @@ class AdminSchedulesTest(unittest.IsolatedAsyncioTestCase):
         status, _, result = await preview("2030-11-03T01:31", plan_id="plan-exact")
         self.assertEqual(status, 400, result)
         self.assertEqual(result["code"], "ambiguous_local_time")
+
+    async def test_real_schedule_service_rejects_stale_project_revision_over_http(self) -> None:
+        store = BindingStore(self.root / "project-revision.sqlite3")
+        self.addAsyncCleanup(store.aclose)
+        store.register_project(alias="test", cwd=str(self.root))
+        worktrees = SimpleNamespace(validate_policy=AsyncMock(return_value=None))
+        catalog = ModelCatalog((ModelOption(
+            "native-model", "native-model", "Native model", "", True, "medium", "default",
+            (EffortOption("medium", "Medium", "medium"),), (),
+        ),))
+        self.management.schedules = ScheduleService(
+            bindings=store, runtime=SimpleNamespace(model_catalog=AsyncMock(return_value=catalog)),
+            app_id="cli_test", worktrees=lambda: worktrees,
+            chat_info=SimpleNamespace(get_chat_info=AsyncMock(return_value=SimpleNamespace(chat_type="group"))),
+            chat_target_validator=AsyncMock(side_effect=lambda chat_id: ValidatedChatTarget(chat_id, "group")),
+            wall_clock=lambda: 1893456000, default_timezone="UTC",
+        )
+        session = await self.login()
+        definition = {
+            "name": "Detached report", "instructions": "Review.", "project": "test", "chat_id": "oc_explicit",
+            "workspace": {"mode": "new"}, "expected_project_revision": 99,
+            "schedule": {"kind": "daily", "at": "09:00", "timezone": "UTC"},
+        }
+        page = await self.page(session)
+        status, _, rejected = await self.json_post("/api/v1/schedules/create", session, {
+            **fixture._action_payload(page["actions"]["create"]), "definition": definition,
+        })
+        self.assertEqual(status, 409, rejected)
+        self.assertEqual(rejected["code"], "project_changed")
+        worktrees.validate_policy.assert_not_awaited()
+        page = await self.page(session)
+        self.assertEqual(page["plans"], [])
+        status, _, created = await self.json_post("/api/v1/schedules/create", session, {
+            **fixture._action_payload(page["actions"]["create"]),
+            "definition": {**definition, "expected_project_revision": 1},
+        })
+        self.assertEqual(status, 200, created)
+        self.assertEqual(created["plan"]["workspace"], {"mode": "new"})
+        worktrees.validate_policy.assert_awaited_once()
+        plan = (await self.page(session))["plans"][0]
+        status, _, rejected = await self.json_post("/api/v1/schedules/update", session, {
+            **fixture._action_payload(plan["actions"]["update"]),
+            "definition": {"name": "stale rename", "expected_project_revision": 99},
+        })
+        self.assertEqual(status, 409, rejected)
+        self.assertEqual(rejected["code"], "project_changed")
+        self.assertEqual((await self.page(session))["plans"][0]["name"], definition["name"])
 
     async def test_real_schedule_service_round_trip_from_preview_to_revisioned_delete(self) -> None:
         store = BindingStore(self.root / "schedules.sqlite3")

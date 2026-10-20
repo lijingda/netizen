@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from lark_channel import OutboundCard
 
+from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingStore
 from netizen_cli.channel_app import ChannelApplication
 from netizen_cli.domain import FeishuScope, ScheduledOrigin, ScopeKind
@@ -108,7 +109,7 @@ class ScheduleScopeMatrixTest(unittest.IsolatedAsyncioTestCase):
 
             runtime.submit_initial = submit_initial
             # Same Project, different chat: list/default resolution must stay exact.
-            decoy = store.schedules.create(name="other-chat-plan", instructions="other chat", project_alias="work",
+            decoy = store.schedules.create(workspace=WorkspacePolicy(), name="other-chat-plan", instructions="other chat", project_alias="work",
                 app_id="app", chat_id="oc_other", schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100),
                 enabled=False, request_id="decoy", now=100)
             state = SimpleNamespace(app=app, store=store, channel=channel, runtime=runtime, management=management,

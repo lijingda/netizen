@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
 
-from netizen_cli.cards.scheduled import decode_schedule_action
+from netizen_cli.worktrees.policy import WorkspacePolicy
+from netizen_cli.cards.scheduled import decode_schedule_action, read_schedule_form
+from netizen_cli.cards.workspace import workspace_reference
 from netizen_cli.chat_targets import ChatTargetError
 from netizen_cli.domain import FeishuScope, MentionContextMode, MessageContextAnchor, ScopeKind
 from netizen_cli.management.chat_directory import AvailableChat, AvailableChatPage
@@ -84,6 +87,88 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         values = {"cron_group_id": "", **values}
         return {"cron_name" if key.startswith("cron_name") else key: value
                 for key, value in values.items() if key not in {"cron_chat_query", "cron_chat_page"}}
+
+    async def test_internal_workspace_save_failure_keeps_draft_without_logging_exception_text(self):
+        card = await self.editor()
+        values = self.complete(card)
+        project = option_value(values["cron_project"])
+        values["cron_workspace"] = workspace_reference(project["project"], project["project_revision"], {"mode": "new"})
+        values["cron_worktree_ref"] = "HEAD"
+        marker = "private-workspace-validation-details"
+        worktrees = SimpleNamespace(validate_policy=AsyncMock(side_effect=AssertionError(marker)))
+        self.management.schedules._worktrees = lambda: worktrees
+
+        with self.assertLogs("netizen_cli.channel_app", level="ERROR") as captured:
+            retry = await self.action(form=values)
+
+        worktrees.validate_policy.assert_awaited_once()
+        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual(self.stable_form(form_values(retry)), self.stable_form(values))
+        self.assertIn("定时任务操作未确认", str(retry.card))
+        self.assertEqual(len(captured.records), 1)
+        record, = captured.records
+        self.assertEqual(record.getMessage(), "scheduled card operation failed type=AssertionError")
+        self.assertIsNone(record.exc_info)
+        self.assertNotIn(marker, str(captured.output) + str(retry.card))
+
+    async def test_workspace_refresh_keeps_incomplete_draft_on_independent_read_failure(self):
+        card = await self.editor()
+        values = form_values(card)
+        project = option_value(values["cron_project"])
+        values["cron_workspace"] = workspace_reference(project["project"], project["project_revision"], {"mode": "new"})
+        values["cron_worktree_ref"] = "refs/heads/retained"
+        values.update(cron_every_minutes="pending", cron_target_mode="id",
+            cron_chat_id="oc_unsaved", cron_chat_query="工作区加载时保留")
+        before = read_schedule_form(self.scope, values)
+        service = self.management.schedules
+        service.workspace_catalog_options = AsyncMock(return_value=(None, {
+            "code": "workspace_unavailable", "message": "工作区读取超时，状态未确认",
+        }))
+        service.model_catalog_options = AsyncMock(return_value=(None, {
+            "code": "models_unavailable", "message": "模型读取失败",
+        }))
+        service.manage = AsyncMock(wraps=service.manage)
+        changes = self.store._connection.total_changes
+        restored = await self.action(value=callback(card, "加载项目目录选项"), form=values)
+        after = read_schedule_form(self.scope, form_values(restored))
+        self.assertEqual(after, before)
+        self.assertIn("工作区读取超时", str(restored.card))
+        self.assertIn("模型读取失败", str(restored.card))
+        service.workspace_catalog_options.assert_awaited_once_with(project=project["project"], expected_project_revision=None)
+        service.manage.assert_not_awaited()
+        self.management.query_available_chats.assert_not_awaited()
+        self.assertEqual(self.store._connection.total_changes, changes)
+        self.assertEqual(self.targets.calls, [])
+
+    async def test_chat_search_paging_and_workspace_refresh_share_exact_draft_without_saving(self):
+        card = await self.editor()
+        values = form_values(card)
+        project = option_value(values["cron_project"])
+        policy = {"mode": "new"}
+        values["cron_workspace"] = workspace_reference(project["project"], project["project_revision"], policy)
+        values["cron_worktree_ref"] = "refs/heads/main"
+        values.update(cron_target_mode="group", cron_chat_query="研发", cron_chat_id="oc_pending")
+        options = {"projectAlias": project["project"], "projectRevision": project["project_revision"],
+            "isGit": True, "items": [{"id": "wt-ready", "cwd": "/tmp/wt-ready", "state": "ready", "available": True}],
+            "branches": [{"name": "main", "ref": "refs/heads/main", "remote": False}]}
+        self.management.schedules.workspace_catalog_options = AsyncMock(return_value=(options, None))
+        self.management.query_available_chats.return_value = AvailableChatPage(tuple(
+            AvailableChat(f"oc_workspace_{index}", f"研发群 {index}", "group", False) for index in range(12)
+        ), None)
+        before = self.store._connection.total_changes
+        searched = await self.action(value=callback(card, "查找群聊"), form=values)
+        paged = await self.jump(searched, 1, values={"cron_group_id": "oc_workspace_0"})
+        drafted = read_schedule_form(self.scope, form_values(paged))
+        self.assertEqual(drafted.workspace_fields, {key: values[key] for key in ("cron_workspace", "cron_worktree_ref")})
+        self.assertEqual(drafted.meta["request_id"], project["request_id"])
+        self.management.query_available_chats.reset_mock()
+        refreshed = await self.action(value=callback(paged, "加载项目目录选项"), form=form_values(paged))
+        self.assertEqual(read_schedule_form(self.scope, form_values(refreshed)),
+            replace(drafted, fields={key: value for key, value in drafted.fields.items() if key != "cron_chat_page"}))
+        self.management.query_available_chats.assert_not_awaited()
+        self.assertEqual(self.store._connection.total_changes, before)
+        self.assertEqual(self.store.schedules.list(app_id="app"), ())
+        self.assertEqual(self.targets.calls, [])
 
     async def test_new_defaults_current_and_edit_loads_saved_group_avatar(self):
         card = await self.editor()
@@ -224,7 +309,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.management.validate_available_chat = AsyncMock(
             side_effect=lambda chat_id: self.current if chat_id == self.current.chat_id else None
         )
-        created = self.store.schedules.create(
+        created = self.store.schedules.create(workspace=WorkspacePolicy(),
             name="保留原时刻", instructions="原始指令", project_alias="work", app_id="app", chat_id="oc_group",
             schedule=ScheduleRule("once", "America/New_York", at="2030-11-03T01:30:00-05:00"),
             request_id="search-fixture", now=160,
@@ -374,7 +459,7 @@ class CronChatTargetsTest(unittest.IsolatedAsyncioTestCase):
             turn_settings=BindingTurnSettings("removed-model", "high", "default"),
             message_context_mode=MentionContextMode.CATCH_UP,
         )
-        created = self.store.schedules.create(
+        created = self.store.schedules.create(workspace=WorkspacePolicy(),
             name="保留配置", instructions="原始指令", project_alias="work", app_id="app", chat_id="oc_old",
             schedule=ScheduleRule("interval", "UTC", every_minutes=60, anchor=100),
             session_settings=settings, request_id="unreadable-target", now=160,

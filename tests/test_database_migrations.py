@@ -76,9 +76,9 @@ class DatabaseMigrationsTest(unittest.TestCase):
     def test_current_database_noop_and_plan_do_not_write(self) -> None:
         migrations.migrate_channel_database(self.database, expected_source_version=14)
         before = self.files()
-        expected = {"source_version": 16, "target_version": 16, "steps": []}
+        expected = {"source_version": 17, "target_version": 17, "steps": []}
         self.assertEqual(migrations.plan_channel_database(self.database), expected)
-        self.assertEqual(migrations.migrate_channel_database(self.database, expected_source_version=16), expected)
+        self.assertEqual(migrations.migrate_channel_database(self.database, expected_source_version=17), expected)
         self.assertEqual(self.files(), before)
         validate_channel_database(self.database)
 
@@ -86,7 +86,7 @@ class DatabaseMigrationsTest(unittest.TestCase):
         path = self.database.parent / "fresh.sqlite3"
         store = BindingStore(path)
         store.close()
-        self.assertEqual(migrations.plan_channel_database(path)["source_version"], 16)
+        self.assertEqual(migrations.plan_channel_database(path)["source_version"], 17)
         migrations.migrate_channel_database(self.database, expected_source_version=14)
         validate_channel_database(self.database)
 
@@ -257,7 +257,7 @@ class DatabaseMigrationsTest(unittest.TestCase):
         connection.execute("UPDATE projects SET revision = 7")
         before = self.files()
         self.assertIn("channel.sqlite3-wal", before)
-        self.assertEqual(migrations.migrate_channel_database(self.database, expected_source_version=16)["steps"], [])
+        self.assertEqual(migrations.migrate_channel_database(self.database, expected_source_version=17)["steps"], [])
         self.assertEqual(self.files(), before)
         self.assertEqual(connection.execute("SELECT revision FROM projects").fetchone()[0], 7)
 

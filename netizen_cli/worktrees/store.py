@@ -81,7 +81,7 @@ class WorktreeStore:
     def register(
         self, *, project_alias: str, expected_project_revision: int, root: str,
         cwd: str, common_dir: str, origin_binding_id: str | None = None,
-        worktree_id: str | None = None,
+        worktree_id: str | None = None, scheduled_run_id: str | None = None,
     ) -> WorktreeRecord:
         """Reserve exact creation identity before external Git effects start."""
         from ..bindings import ProjectDisabled, ProjectRevisionConflict, _now
@@ -105,6 +105,13 @@ class WorktreeStore:
                         origin = self.owner.get(origin_binding_id)
                         if origin.project_alias != project_alias:
                             raise WorktreeConflict("创建来源会话不属于该 Project。")
+                    if scheduled_run_id is not None:
+                        run = self.owner.schedules.get_run(scheduled_run_id)
+                        if (run.target_kind != "new_topic" or run.project_alias != project_alias
+                                or run.barrier != "held" or run.phase != "publishing_topic"
+                                or run.worktree_id is not None or run.binding_id is not None
+                                or not run.root_message_id or not run.origin_message_id or not run.topic_id):
+                            raise WorktreeConflict("定时执行工作区创建交接已改变，本次未创建。")
                     self._db.execute(
                         "INSERT INTO managed_worktrees(worktree_id,project_alias,project_generation,"
                         "root,cwd,common_dir,origin_binding_id,creation_state,created_at) "
@@ -112,6 +119,9 @@ class WorktreeStore:
                         (worktree_id, project_alias, project.generation, root, cwd,
                          common_dir, origin_binding_id, _now()),
                     )
+                    if scheduled_run_id is not None:
+                        # The resource and its Run receipt commit before Git starts.
+                        self.owner.schedules._set_run(scheduled_run_id, worktree_id=worktree_id)
                 self._creating.add(worktree_id)
             except sqlite3.IntegrityError as error:
                 raise WorktreeConflict("工作区标识或目录已经登记；本次未覆盖。") from error

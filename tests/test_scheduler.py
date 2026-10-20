@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingStore
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.runtime.contracts import TurnObservationUnavailable
@@ -38,7 +39,7 @@ class BindingSchedulerTests(unittest.IsolatedAsyncioTestCase):
             scope=FeishuScope("app", "chat", ScopeKind.GROUP), project_alias="p", creator_id="person",
         )
         self.store = self.bindings.schedules
-        self.plan_id = self.store.create(
+        self.plan_id = self.store.create(workspace=None,
             name="Continue", instructions="Recheck current work.", project_alias="p", app_id="app", chat_id="chat",
             schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100), request_id="create",
             target_kind="binding", target_binding_id=self.binding.id, session_settings=None,
@@ -160,7 +161,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             ScheduleRule("once", "UTC", at="1970-01-01T00:03+00:00") if once
             else ScheduleRule("interval", "UTC", every_minutes=1, anchor=100)
         )
-        return self.store.create(name="Plan " + str(self.sequence), instructions="Original instructions",
+        return self.store.create(workspace=WorkspacePolicy(), name="Plan " + str(self.sequence), instructions="Original instructions",
                                  project_alias=project, app_id=app_id, chat_id="chat",
                                  schedule=schedule, request_id="create-" + str(self.sequence), now=100).plan_id
 

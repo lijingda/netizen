@@ -7,8 +7,9 @@ import sqlite3
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from ..worktrees.policy import WorkspacePolicy
 from ..session_settings import SessionSettings
-from .models import DefaultConfigurationError, DefaultRule, WorkspacePolicy
+from .models import DefaultConfigurationError, DefaultRule
 
 if TYPE_CHECKING:
     from ..bindings import BindingStore

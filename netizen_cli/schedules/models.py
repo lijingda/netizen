@@ -10,6 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..session_settings import SessionSettings
+from ..worktrees.policy import WorkspacePolicy
 
 
 class ScheduleError(ValueError):
@@ -294,6 +295,7 @@ class Plan:
     session_settings: SessionSettings | None = SessionSettings()
     target_kind: str = "new_topic"
     target_binding_id: str | None = None
+    workspace: WorkspacePolicy | None = WorkspacePolicy()
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,6 +376,7 @@ class Run:
     trigger_source: str = "scheduled"
     target_kind: str = "new_topic"
     disposition: str | None = None
+    worktree_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

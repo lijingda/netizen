@@ -118,7 +118,7 @@ Project 不限制工具读取该账号可访问的其他文件，Codex 用户状
 ### 受管 Worktree 与实际目录
 
 [ADR 0085](adr/0085-manage-worktrees-independently-of-sessions.md) 定义独立资源与共享
-语义。Admin、飞书 `/new`、默认会话自动创建和 Agent 工具共用 `WorktreeService` 与窄 Git 后端，只管理
+语义。Admin、飞书 `/new`、默认会话自动创建、定时新话题和 Agent 工具共用 `WorktreeService` 与窄 Git 后端，只管理
 本实例通过该服务创建并登记的资源；不会收编 shell Git、Codex App/CLI 或其他实例的工作区，
 也不写 Codex 私有索引或宣称生命周期互通。Worktree 不属于某个会话私有，删除或归档
 单个会话不会顺带回收目录。
@@ -142,7 +142,7 @@ Project 是归属与默认目录；lazy Binding 保存显式 `working_cwd`/`work
 执行目录：新建采用选定目录，恢复读取本次原生 cwd，复用活动 Thread 则同时复用其
 已确认目录。调用方不再为已有 Thread 提前读取或传递执行目录。
 ordinary/Goal、Skill、Side、持久 fork、模型创建、已有 Binding 定时输入及相对文件/图片
-解析均使用实际目录；新话题定时计划不增加 worktree 配置。目录缺失时保留历史和原 cwd、
+解析均使用实际目录；新话题定时计划使用独立工作区策略。目录缺失时保留历史和原 cwd、
 提示缺失并按 Codex 实际返回处理后续请求，不统一禁聊、不静默回主目录或重建文件。
 Project 默认目录本身缺失时，`/new` 沿用既有 Project 不可用检查，由用户修复；不以
 已有 worktree 绕过该准入或自动恢复 Project。
@@ -324,7 +324,7 @@ handle 回报不同 ID，关闭 admission 且不对不可信 handle 执行 inter
 `new` 为每个自动新建 Binding 创建一个 detached 工作区，可选 `ref` 为空时使用创建当时
 Project HEAD。只检出提交内容，不复制未提交文件，不提供固定分支名或命名模板。保存
 默认配置不创建资源；实际创建复用共享 Worktree 服务及其 Project/删除准入。已有 Binding
-不重跑策略；显式 `/new` 不读取默认值，新话题定时计划仍不增加工作区配置。
+不重跑策略；显式 `/new` 和新话题定时计划不读取默认值，后者使用计划独立保存的工作区策略。
 
 无匹配则走原有无会话引导。匹配配置不可用（例如 Project 不存在、停用，或模型设置
 失效，指定 Worktree 已删除、目录缺失/替换或状态无法确认）时，先明确说明默认配置
@@ -1480,15 +1480,51 @@ Channel 按 exact native Turn ID 在内存管理普通/Side Turn 的 Lifecycle R
 ## 定时任务
 
 Scheduled Plan 保存明确的执行指令、时间规则与执行目标，支持 `new_topic` 和 `binding`。
-新话题模式另保存 Project、目标飞书会话和独立会话配置。每次触发在目标会话中新建真实话题和普通持久 Thread；单聊、普通群、话题群及
+新话题模式另保存 Project、目标飞书会话、独立会话配置与工作区策略。每次触发在目标会话中新建真实话题和普通持久 Thread；单聊、普通群、话题群及
 已有话题来源使用相同语义。已有话题的计划在所属 chat 新建 sibling 话题，不切换来源
-Scope 的 active Binding，不 fork 来源历史，也不隔离 Project 文件目录。
+Scope 的 active Binding，不 fork 来源历史；使用项目目录、共享已有工作区还是新建目录由计划策略决定。
 执行话题的继续交流、配置、停止、归档、删除和 Files 均复用普通会话能力。
+
+### 新话题工作区
+
+`workspace` 是独立于 SessionSettings 的创建意图，复用默认会话的共享 WorkspacePolicy
+及 WorktreeService；不通过默认会话自动创建入口或其 per-Scope Future 执行。
+
+| 策略 | 每次实际执行的行为 |
+| --- | --- |
+| `project` | 使用 Project 登记目录，为创建 API 省略 workspace 和历史计划迁移的默认值。 |
+| `existing` | 使用 exact `worktree_id`，按当前 Project 登记代次及资源身份复核，共享当前文件和分支，不 checkout。 |
+| `new` | 为该 Run 新建 detached 工作区；可选 `ref`，省略时取实际创建时的 Project HEAD。 |
+
+保存 ref 意图，不提前固定 HEAD commit，也不使用 Agent `create_worktree` 的缓存默认分支
+语义。只检出已提交内容，不复制未提交/ignored 文件，不运行初始化脚本，不提供自动命名
+分支模板。项目子目录沿用共享服务的对应 cwd。保存、options、预览及 busy/missed/blocked
+跳过不创建工作区；某次首轮后的普通消息继续使用其 Binding，计划编辑不改变它的目录。
+
+创建省略 workspace 使用 `project`；更新省略保留原值，提供时完整替换；不接受任意
+cwd/path 或原生 Thread ID。修改 Project 必须使现有资源重新符合目标 Project/代次，
+不静默回退。三个入口对实际变更的 Project/workspace 严格校验；未改变这两项的名称、
+指令等修改允许保留失效选择。工作区不从来源 Binding 或聊天 `/defaults` 隐式继承；
+来源会话的 SessionSettings 一次性复制规则保持独立。
+
+指定资源已删除、目录缺失/替换、删除中或状态未知时保留计划与 `enabled` 意愿。
+首次发送前校验发现不可用，本次不发送 root/seed、不建 Binding、不提交原生输入；
+自动到期或已认领执行保留最小失败 Run 并推进本次到期点，不补跑。立即运行在认领前
+拒绝则无新 Run、不改定时游标。资源不同失败原因分别展示，不将超时等同于已删除，
+也不回退目录或自动重建。恢复同一有效资源或重选策略仅使未来执行重新具备条件。
+
+Admin 列表/详情、`/cron` 摘要/详情和 MCP list/view/mutation 计划投影提供策略、不可用
+原因与 `can_run_now=false`；原会话工作区为只读继承信息。选项和状态打开/刷新时按需有界
+读取，相同资源在本次查询内去重，不持久化健康状态、不扫描完整 dirty 文件或后台巡检。
+未取得新鲜状态不能当成确定可用。编辑器保留失效 exact 选择并说明原因，可重新选择；
+模型、聊天和工作区某组选项读取失败不丢弃其他选项或草稿。UI 状态不替代实际 dispatch 复核。
 
 ### 原会话目标
 
 原会话模式保存不可变的 `target_binding_id`，从 exact Binding 取得 Project、chat/Scope、
-模型、反馈和上下文配置；`session_settings` 为 null，不保存第二套配置。
+模型、反馈、上下文配置和 Runtime 确认的实际 cwd；`session_settings` 与 `workspace` 均为
+null，不保存第二套配置，显式 workspace 覆盖须拒绝。目录缺失不增加统一禁聊规则，
+仍按原生恢复和输入结果处理，不从 Project 兜底。
 创建时可使用本次 MCP 原生 Thread 对应的 Binding，也可明确选择一个同 App 的普通
 Binding。飞书创建入口冻结明确选定的目标，打开和保存旧表单均不要求该目标仍为当前
 Binding，也不随切换转投；目标创建后不能编辑为另一会话。Side 和未映射原生 Thread
@@ -1549,16 +1585,19 @@ OnIt/接收回执，保留原轮模型、卡片、结果来源和发起人。系
 
 | 操作 | 对调度和普通会话的影响 |
 | --- | --- |
-| 暂停、修改、删除计划 | 影响后续认领；已经认领的一次继续使用快照，已有会话保留 |
+| 暂停、修改、删除计划 | 影响后续认领；已经认领的一次继续使用冻结的配置和工作区策略，已有话题、会话及工作区保留 |
 | 启用计划 | 取下一未来时间点，不重跑旧触发；过去的一次性须先重新安排 |
 | 立即运行 | 按当前已保存版本认领一次手动执行，暂停及已结束计划也可运行；不改变启停、时间规则、游标、下次到期点或 revision |
 | 普通 /stop、归档、删除会话 | /stop 处理当前任务；新话题计划独立保留。原会话目标归档自动暂停，删除目标一并删除计划，不重放触发 |
 | 停用 Project | 跳过新触发但保留 enabled 意图，不停止已有执行；恢复后不补跑 |
 | 删除 Project | 冻结新交接并删除关联计划，在途创建仍纳入 ADR 0060 的精确清单 |
+| 删除 Worktree | 保留引用它的新话题计划和 enabled 意愿，后续执行提示不可用；若可选级联确认删除 Binding，以它为目标的原会话计划仍随之删除 |
 
 计划固定 App ID，换应用不迁移或投递旧命名空间计划。删除计划清除定义并保留不可复用
 ID 的墓碑；Project 同名重登记不复活计划。单独删除计划不使在途 Run 或已知话题从管理
 清单消失，Project 部分删除失败也不回滚已完成的计划删除。
+计划的工作区配置引用不是会话关联，不加入 Worktree 删除级联。`new` 策略某个历史 Run
+的工作区被删除不阻塞未来 Run；生成的目录由 Admin 显式管理，不自动回收。
 
 ### 管理入口与会话配置
 
@@ -1568,6 +1607,10 @@ ID 的墓碑；Project 同名重登记不复活计划。单独删除计划不使
 模型先按名称定位再用 exact ID；重名有歧义才澄清。新话题模式指令须明确资源，不依赖
 创建聊天历史；原会话模式可沿用目标 Thread 的原生上下文。
 工具说明由 MCP instructions 和 description 提供，不覆盖原生 developer/base instructions。
+普通受管工作区查询使用调用者 Project 范围内的 `list_worktrees`；`cron_manage options`
+按计划目标 Project 返回工作区与基线选项及独立读取错误。已知 exact ID 可直接用于
+create/update，无须先查 options。不新增分支查询工具，不扩张 `list_worktrees` 为任意
+Project 查询；后端直接共享 WorktreeService，不经 MCP/HTTP 互相转调或放宽各自权限边界。
 
 `run_now` 只接受 exact plan_id、expected_revision 与稳定 request_id，按已保存的指令、
 配置、Project 和目标会话执行，不接受临时覆盖。普通任务无计划语境时仍按普通 Prompt
@@ -1580,7 +1623,7 @@ Thread → Binding → Scope。可选 header 身份存在时须核对一致，�
 显式换 chat 不隐式换 Project，update 省略字段保留原值。身份只用于默认值解析，不新增
 创建者权限、群白名单或 Project ACL；目标须满足飞书应用可用性和机器人可达性。
 原会话模式只接受 exact target_binding_id，省略时从同一原生调用身份映射；不允许
-覆盖目标所属的 chat、Project 或配置。options 可按 Binding ID、Project、chat/topic
+覆盖目标所属的 chat、Project、会话配置或 workspace。options 可按 Binding ID、Project、chat/topic
 搜索同 App 的普通 Binding，包含非当前目标并标明执行可用性；在截断前过滤，避免只显示
 最近会话而找不到旧目标。
 会话列表查询忙碌或超时只返回该组选项的错误，不丢弃已取得的模型和会话配置；
@@ -1598,6 +1641,9 @@ Context Mode。创建时复制 exact 来源 Binding 的选择，显式覆盖后�
 放在底部，并提供冻结当前 Binding 的原会话入口。新建/编辑各用一张完整表单，频率
 不触发多级页面跳转，只校验对应时间字段。原会话表单只展示目标及继承说明，不编辑配置。
 卡片默认每批最多 50 个计划、5 条执行记录；更长指令通过 Admin/自然语言编辑。
+新话题表单按项目、工作区、模型、消息上下文与反馈分组，复用 `/defaults` 的工作区策略
+渲染和解析组件；指令、时间与投递位置保留计划自身语义。加载工作区或查找聊天均只读，
+完整保留草稿、分组内字段、exact revision、request_id 与真实 Scope，不保存卡片 session。
 筛选、选择和导航留在回调中，后台不存卡片 session 或草稿。提交以本次完整表单为准，
 经业务校验保存；出错恢复正常输入、exact revision、时间偏移和业务 request_id，每次
 重绘更换传输 nonce。损坏的原生控件值明确拒绝，恢复的 Scope 不替代下次真实消息位置校验。
@@ -1633,6 +1679,8 @@ Prompt。它与 `/cron`、MCP 调用相同服务入口，交接屏障占用、Pr
 未知后先查最近执行；卡片/MCP 原样重试保留请求 ID。
 卡片按钮与 Admin action grant 统一消费公共 `can_run_now`，不另算一套执行资格；
 后端认领和普通 Runtime 提交仍重新校验，按钮可用不是执行许可的最终凭据。
+Admin 默认配置与计划编辑器复用参数化工作区组件，保留失效选择、加载错误与字段校验；
+原会话只读展示目录继承信息，不出现可编辑的独立工作区策略。
 
 三个入口共用写事务：稳定 request_id 去重，相同 ID 和规范 payload 返回原标识，内容
 不同则冲突；修改/删除以 expected_revision 做 CAS，不擅自递增。凭据保留七天，响应未知
@@ -1661,14 +1709,25 @@ Scheduler 按整分钟查询到期计划，管理变更仍可主动唤醒并重�
 认领和加入唯一 Scheduler 的交接任务集合之间不让出事件循环，HTTP/MCP 请求取消不取消
 已受理交接；停机排空与 Project 删除继续覆盖这些任务。详见
 [ADR 0068](adr/0068-run-saved-scheduled-plans-manually.md)。
+异步 Git 预检放在认领前并在认领时复核版本/目标，或放在已经登记的唯一 dispatch 中；
+不能为状态读取在 claim 到 attach 之间插入 await。
 
 新话题交接阶段依次为 claimed、publishing_topic、binding_ready、starting_turn、handed_off；
 独立的 barrier 表示 held、unknown 或 released。每次外部调用前标记可能发生的副作用，
 返回后保存 exact identity。root/seed
 使用各自稳定 UUID，只允许既有发送原语的一次同 UUID 对账；仍未知不重新发布或搜索历史猜测。
-真实 topic 建立后原子创建 Scope/Binding、关联 Run，只设置新 Scope 的 pointer；用户已抢先
+单次 publication 准入成功后先解析 Project、聊天/设置和策略，`existing` 在首次发送前
+调用共享 select；`new` 此时只做只读条件校验。真实 root/seed 建立后，`new` 才调用
+共享创建服务；Git 创建前把预留的 exact `worktree_id` 关联到 Run。之后原子创建
+Scope/Binding、关联 Run，传入选定 `working_cwd`/`worktree_id` 并复核 Project/资源删除
+准入，只设置新 Scope 的 pointer；用户已抢先
 创建或切换时记录冲突。短交接槽内普通消息要求稍后重发；专用 initial-start 入口只允许
 启动新 Binding，不能退化为 steer。首轮引用写入和极快终态通过单调 CAS 交接，不复活 barrier。
+`submit_initial` 使用所选创建目录，此后执行目录由 Runtime 的原生 Thread 接管。
+校验后的删除竞态可能留下已确认话题，只报告启动失败及已知副作用，不承诺撤销消息。
+Git、飞书和原生 I/O 不持有 Scope/Binding 锁或 SQLite 事务，不增加 Project 锁或跨计划
+执行上限。工作区创建使用共享服务的 120 秒变更上限；交接、停机和删除排空预算须容纳
+这段有界操作，不能套用原来的 30 秒 dispatch 总上限。`run_now` 仍快速受理后异步交接。
 
 定时和手动首轮都使用显式 Scheduled Plan 来源、触发来源及保存的完整指令，不伪造真人
 当前消息或结束提及对象；真人消息路径保持不变。
@@ -1677,13 +1736,18 @@ Scheduler 按整分钟查询到期计划，管理变更仍可主动唤醒并重�
 准备失败允许文本回退。sent 须有明确成功及 exact chat/topic 证据，分段须逐段核实；否则
 保留 failed/unknown。投递结果独立于 native barrier，不重跑任务，也不建立持久投递队列。
 
-新话题 Run 只保存交接阶段、exact initial Turn 引用和投递回执；native Thread ID 从普通 Binding
+新话题 Run 只保存交接阶段、exact initial Turn 引用、可空工作区资源回执和投递回执；native Thread ID 从普通 Binding
 获取，原生运行结果按 exact initial Turn 有界读取，不缓存正文/终态或将后续人工 Turn 当成本次。
 解除 barrier 要有 exact 原生终态或可靠生命周期移除证据；普通 Binding 删除与关联 barrier
 释放须原子提交。已 released 不因历史暂不可读重新占用 barrier。每计划保留最近 100 条已释放
 记录，未决及路由证据不按数量裁剪，裁剪不删除普通会话。
 
-新话题恢复只检查未决 Run，不重发启动/结果、不恢复全量 stream。缺少 exact 身份保持 unknown；
+工作区已创建而 Binding/首轮失败时保留资源，执行记录展示已知 ID/路径；创建未知沿用
+受管资源登记，不自动重试或删除。只在能证明尚未尝试创建时撤销精确预留登记。Git 未知
+不等于 native Turn 未知，已确认 root/seed 也不能被改写为未确认；恢复只收敛旧 Run，
+不重建工作区。能够证明未提交原生输入的失败释放交接，不阻塞下一独立到期点。
+
+新话题恢复只检查未决 Run，不重发启动/结果、不恢复全量 stream。可能已提交原生输入却缺少 exact 身份时保持 unknown；
 确认仍在运行的一次只在下一到期点前或显式刷新时有界重查，观测失败不无限自动轮询。
 原会话恢复只标记未确认交接并释放屏障，不读取原生终态来猜测输入是否被接收。
 thread_start/resume/turn_start 的未知副作用仍关闭全服务 native admission，遵守既有恢复边界。
@@ -1804,12 +1868,15 @@ MCP 连接；来源只能是可信 `_meta.threadId` 映射的普通 Binding，Pr
 
 ### Channel 数据库与结构校验
 
-`channel.sqlite3` 的 schema v16 包含 `schema_version`、`scopes`、`bindings`、`projects`、
+`channel.sqlite3` 的 schema v17 包含 `schema_version`、`scopes`、`bindings`、`projects`、
 `side_topics`、`dedup_keys`、`session_defaults`、`session_defaults_order`，以及
 `schedule_plans`、`schedule_runs`、`schedule_requests`、`managed_worktrees`。
 v15 为 Project 增加登记 `generation`，为 Binding 增加可选 `working_cwd`/`worktree_id`。
 v16 为 `session_defaults` 增加独立的 `workspace_json`，保存 `project`、带 exact
 `worktree_id` 的 `existing` 或带可选 `ref` 的 `new` 策略；旧规则迁移为 `project`。
+v17 为 `schedule_plans` 增加独立 `workspace_json`：有效新话题计划迁移为 `project`，
+原会话计划与删除墓碑为 null；`schedule_runs` 增加可空 `worktree_id` 作为创建/选择的
+最小资源回执。不保存 Git 状态、额外 cwd 权威或工作区健康缓存，删除资源不级联删除计划。
 受管资源只保存 ID、Project alias/登记代次、checkout 根与 cwd、Git 身份证据、创建来源、
 创建状态/revision/时间；HEAD、分支、dirty 和原生历史不落库。Project 删除而保留的资源
 不会因同 alias 重建挂回新代次。已物化 Thread 的 cwd 仍以原生读取为准，本地字段不是第二份原生真值。
@@ -1832,7 +1899,7 @@ Codex 配置或卡片 session，也不与 Project 或 Worktree 删除级联。
 Runtime 只接受当前完整 schema；只有显式 `netizen setup` 可以初始化新库。
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移从安装器移到
 每次实际启动：入口先取得实例 lifetime lock，检查初始化证据、配置和数据库，再按
-数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15 → v16；基线仍为 v14，沿用
+数据格式版本选取完整迁移路径。当前冻结转换为 v14 → v15 → v16 → v17；基线仍为 v14，沿用
 [ADR 0075](adr/0075-migrate-channel-databases-during-installation.md) 的冻结 SQL／转换与
 历史夹具规则；应用版本变化不自动增加 schema。迁移步骤、版本推进及最终完整性校验
 在同一个 SQLite 事务内完成。只在需要迁移时保存私有恢复备份；无变化不重复迁移。
@@ -1845,7 +1912,7 @@ CLI start 仍明确失败，手工 Runtime 启动非零退出。修复后显式�
 Project 删除 intent、
 确认清单、fingerprint 和结果只在进程内，不保存解析后的 wire value 或已生效配置。
 ADR 0061/0070 的窄例外仅保存当前计划指令、执行目标、时间规则与游标、最小调度交接证据、
-exact 接收 Turn ID 引用和有界管理请求去重。Run 通过 Binding 获取 native Thread ID，不保存第二份
+独立工作区策略、exact 资源/接收 Turn ID 引用和有界管理请求去重。Run 通过 Binding 获取 native Thread ID，不保存第二份
 映射或原生终态历史。计划删除清空指令并保留不可复活墓碑；最近已释放 Run 有界保留。
 除此以外，数据库没有 prompt、补充消息正文/发送者投影、当前消息发送者投影、回复、ephemeral
 native Thread ID、Turn、Goal、

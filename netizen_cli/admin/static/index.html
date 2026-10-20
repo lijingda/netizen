@@ -379,6 +379,12 @@
                   <button id="schedule-select-session" type="button">前往 Sessions 选择会话</button>
                 </div>
                 <label id="schedule-project-field">Project<select id="schedule-project" required><option value="">选择 Project</option></select></label>
+                <div id="schedule-workspace-fields" class="schedule-section-fields">
+                  <label>工作区策略<select id="schedule-workspace"><option value="project">项目目录</option><option value="existing">指定已有 Worktree</option><option value="new">每次执行创建 Worktree</option></select></label>
+                  <label id="schedule-worktree-field" hidden>受管 Worktree<select id="schedule-worktree"></select></label>
+                  <label id="schedule-workspace-ref-field" hidden>起点提交 / 分支<input id="schedule-workspace-ref" list="schedule-workspace-refs" maxlength="256" placeholder="留空使用执行时 Project 的 HEAD"><datalist id="schedule-workspace-refs"></datalist></label>
+                  <p id="schedule-workspace-help" class="schedule-field-help" role="status"></p>
+                </div>
                 <div id="schedule-chat-target" class="chat-target">
                   <label>聊天类型<select id="schedule-chat-kind"><option value="group">群聊</option><option value="p2p">单聊</option><option value="unknown" hidden>类型待确认</option></select></label>
                   <div id="schedule-group-picker"></div>
@@ -388,7 +394,7 @@
                   <p id="schedule-chat-id-help" class="defaults-field-help" hidden>请填写聊天 ID，不是用户 ID；单聊请选择与本机器人的聊天。<a href="https://open.feishu.cn/document/server-docs/group/chat/chat-id-description" target="_blank" rel="noopener noreferrer">如何获取聊天 ID</a></p>
                 </div>
                 <div id="schedule-target-note" class="schedule-field-help" hidden>
-                  <p>沿用原会话的 Project、模型、上下文和反馈；空闲时启动新一轮，忙碌时追加当前任务。</p>
+                  <p>沿用原会话的 Project、实际工作目录、模型、上下文和反馈；空闲时启动新一轮，忙碌时追加当前任务。</p>
                   <p>切走或归档后自动暂停，恢复后继续；删除原会话也会删除计划。目标创建后不可更换。</p>
                 </div>
               </div>

@@ -287,7 +287,7 @@ body.schedule-drawer-open, body.defaults-drawer-open, body.session-settings-draw
 #schedules-body .schedule-state { min-width: 118px; white-space: pre-line; }
 #schedules-body .schedule-execution { min-width: 150px; white-space: pre-line; }
 #schedules-body .schedule-time, #schedules-body .schedule-target { overflow-wrap: anywhere; }
-#schedules-body .schedule-note { display: block; margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+#schedules-body .schedule-note, #schedule-runs-body .schedule-note { display: block; margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 @media (max-width: 540px) {
   .schedule-editor-head, .schedule-editor-body { padding: 16px; }
   .schedule-editor-footer { padding: 12px 16px; flex-wrap: wrap; }
@@ -381,6 +381,7 @@ body.schedule-detail-open { overflow: hidden; }
 .defaults-feedback label { display: flex; align-items: center; gap: 7px; }
 .drawer-form .defaults-feedback input { width: 16px; height: 16px; margin: 0; accent-color: var(--blue); }
 #defaults-note.error { color: var(--danger); }
+#defaults-workspace-help.error, #schedule-editor #schedule-workspace-help.error { color: var(--danger); }
 #session-settings-editor[hidden], #session-settings-editor [hidden] { display: none; }
 #session-settings-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
 #session-settings-fields:disabled { opacity: .6; }

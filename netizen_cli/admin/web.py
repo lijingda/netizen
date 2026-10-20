@@ -853,7 +853,7 @@ class AdminWebApplication:
             "view": {"mode", "plan_id"},
             "runs": {"mode", "plan_id", "cursor"},
             "preview": {"mode", "schedule", "plan_id", "chat_id", "session_settings", "target_kind", "target_binding_id", "local_at", "utc_offset", "local_end_at", "end_utc_offset"},
-            "options": {"mode", "chat_id", "binding_query"},
+            "options": {"mode", "chat_id", "binding_query", "project"},
         }
         if mode not in allowed:
             raise AdminWebError(400, "invalid_query", "定时任务查询类型无效。")
@@ -974,7 +974,7 @@ class AdminWebApplication:
         )
         definition = payload.get("definition", {})
         if not isinstance(definition, dict) or set(definition) - {
-            "name", "instructions", "project", "chat_id", "schedule", "enabled", "session_settings", "target_kind", "target_binding_id",
+            "name", "instructions", "project", "expected_project_revision", "chat_id", "schedule", "enabled", "session_settings", "workspace", "target_kind", "target_binding_id",
         }:
             raise AdminWebError(400, "invalid_input", "定时任务定义字段无效。")
         request: dict[str, object] = {
@@ -2950,7 +2950,7 @@ def _require_schedule_success(result: dict[str, Any]) -> None:
         status = {
             "revision_conflict": 409, "request_conflict": 409,
             "run_in_progress": 409, "blocked_unknown": 409,
-            "project_disabled": 409, "project_unavailable": 409,
+            "project_disabled": 409, "project_unavailable": 409, "project_changed": 409, "workspace_unavailable": 409,
             "not_found": 404, "unavailable": 503,
         }.get(code, 400)
         raise AdminWebError(status, code, error["message"])

@@ -440,8 +440,14 @@ def _restore_settings_draft(
         if element.get("tag") != "select_static" or element["name"] not in draft:
             continue
         value = draft[element["name"]]
+        if not value:
+            element.pop("initial_option", None)
+            continue
         if not any(option["value"] == value for option in element["options"]):
-            element["options"].append({"text": _plain_text("保留已选值（当前不可用）"), "value": value})
+            label = "保留已选值（当前不可用）"
+            if element["name"].endswith("_model"):
+                label += " · " + str(_decode_new_model_reference(value))
+            element["options"].append({"text": _plain_text(label), "value": value})
         element["initial_option"] = value
 
 
@@ -480,13 +486,16 @@ def _session_settings_sections(
     """Share presentation while each caller owns field values and validation."""
     model_elements = [*model_notices, model_fields[1]]
     if len(model_fields) > 2:
-        model_elements.append(_form_columns(
-            (1, model_fields[2:4]), (1, model_fields[4:6]),
-        ))
+        # These are fixed form labels, not submitted text. Markdown avoids a
+        # separate div/plain_text pair in cards that also contain search pages.
+        model_elements.append(_form_columns(*(
+            (1, [{"tag": "markdown", "content": label["text"]["content"]}, select])
+            for label, select in zip(model_fields[2::2], model_fields[3::2], strict=True)
+        )))
     sections = [_form_section("模型配置", model_elements)]
     if context_fields:
         sections.append(_form_section("消息上下文", [
-            *context_fields[:-1],
+            context_fields[1],
             _form_hint("机器人始终只响应 @。选择“自动带上”会把两次 @ 之间未 @ 机器人的群聊消息交给 Codex。"),
         ]))
     feedback_hints = (
@@ -495,7 +504,8 @@ def _session_settings_sections(
         "完成或失败时 @ 发起人；主动停止、定时自动首轮不提醒。",
     )
     sections.append(_form_section("任务反馈", [
-        _form_columns((3, [label, _form_hint(hint)]), (1, [select]))
+        _form_columns((3, [{"tag": "markdown",
+            "content": label["text"]["content"] + "\n<font color='grey'>" + hint + "</font>"}]), (1, [select]))
         for label, select, hint in zip(
             feedback_fields[::3], feedback_fields[1::3], feedback_hints, strict=True,
         )
@@ -811,7 +821,7 @@ def session_settings_form_elements(
         options = [("继承 Codex", _new_model_reference(None))]
         turn = settings.turn_settings
         if turn is not None:
-            options.append(("保留已有显式配置", _new_model_reference(turn.model_id)))
+            options.append(("保留已有显式配置 · " + turn.model_id, _new_model_reference(turn.model_id)))
         model_fields = [
             _form_label("Model"),
             _static_select(name=f"{prefix}_model", placeholder="选择 Model 来源", options=tuple(options),
@@ -824,6 +834,16 @@ def session_settings_form_elements(
                     _static_select(name=f"{prefix}_{field}", placeholder=label,
                         options=((value, value),), initial_option=value),
                 ])
+        elif settings_draft is not None:
+            for field, label in (("effort", "Effort"), ("speed", "Speed")):
+                name = f"{prefix}_{field}"
+                if name in settings_draft:
+                    value = settings_draft[name]
+                    model_fields.extend([
+                        _form_label(label),
+                        _static_select(name=name, placeholder=label,
+                            options=((value, value),) if value else (), initial_option=value or None),
+                    ])
     context = (
         _context_mode_form_elements(prefix=prefix, initial_mode=settings.message_context_mode)
         if allow_context_mode else []

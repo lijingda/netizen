@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingStore
 from netizen_cli.domain import FeishuScope, ScopeKind
 from netizen_cli.schedules.models import ScheduleRule
@@ -42,7 +43,7 @@ class ScheduleRunNowTest(unittest.IsolatedAsyncioTestCase):
         self.service.set_refresh_handler(self.scheduler.refresh)
         await self.scheduler.recover()
         self.scheduler.start()
-        self.plan = self.store.schedules.create(
+        self.plan = self.store.schedules.create(workspace=WorkspacePolicy(),
             name="Saved plan", instructions="Saved work in the saved destination.",
             project_alias="p", app_id="app", chat_id="destination-chat",
             schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100),

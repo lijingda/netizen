@@ -96,7 +96,7 @@ class WorktreeChannelCwdTest(unittest.IsolatedAsyncioTestCase):
     async def test_existing_binding_schedule_leaves_execution_directory_to_runtime(self):
         self.materialize()
         self.runtime.resolve_binding_cwd = AsyncMock(side_effect=RuntimeError("native read unavailable"))
-        created = self.store.schedules.create(
+        created = self.store.schedules.create(workspace=None,
             name="inspect", instructions="inspect", project_alias="test",
             app_id="cli_test", chat_id="oc_direct", target_kind="binding",
             target_binding_id=self.binding.id, session_settings=None,

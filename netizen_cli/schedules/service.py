@@ -7,13 +7,14 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import os
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -22,18 +23,25 @@ from ..channel.messages import public_chat_kind
 from ..chat_targets import ChatTargetError, ChatTargetValidator
 from ..model_settings import ModelCatalog, ModelCatalogError, STANDARD_SERVICE_TIER_ID
 from ..session_settings import SessionSettings, SessionSettingsError
+from ..worktrees.errors import WorktreeError
+from ..worktrees.models import WorktreeNotFound
+from ..worktrees.policy import WorkspacePolicy, WorkspacePolicyError
 from .models import MutationResult, Plan, Run, ScheduleError, ScheduleNotFound, ScheduleRule, plan_lifecycle
 
+if TYPE_CHECKING:
+    from ..worktrees.service import WorktreeService
 
+
+logger = logging.getLogger(__name__)
 _NATIVE_STATUSES = frozenset({"inProgress", "completed", "interrupted", "failed"})
 _READ_CONCURRENCY = 4
 _READ_TIMEOUT_SECONDS = 5.0
 _FIELDS = {
-    "options": {"chat_id", "binding_query"},
+    "options": {"chat_id", "binding_query", "project", "expected_project_revision"},
     "list": {"chat_id", "project", "enabled", "ended", "all", "cursor", "limit", "name", "target_kind", "target_binding_id"},
     "view": {"plan_id"},
-    "create": {"name", "instructions", "project", "chat_id", "schedule", "timezone", "enabled", "request_id", "session_settings", "target_kind", "target_binding_id"},
-    "update": {"plan_id", "expected_revision", "request_id", "name", "instructions", "project", "chat_id", "schedule", "timezone", "enabled", "session_settings", "target_kind", "target_binding_id"},
+    "create": {"name", "instructions", "project", "chat_id", "schedule", "timezone", "enabled", "request_id", "session_settings", "workspace", "expected_project_revision", "target_kind", "target_binding_id"},
+    "update": {"plan_id", "expected_revision", "request_id", "name", "instructions", "project", "chat_id", "schedule", "timezone", "enabled", "session_settings", "workspace", "expected_project_revision", "target_kind", "target_binding_id"},
     "delete": {"plan_id", "expected_revision", "request_id"},
     "run_now": {"plan_id", "expected_revision", "request_id"},
     "runs": {"plan_id", "cursor", "limit"},
@@ -75,6 +83,7 @@ class ScheduleService:
         chat_info: Any = None, wall_clock: Callable[[], float] = time.time,
         default_timezone: str | None = None,
         chat_target_validator: ChatTargetValidator | None = None,
+        worktrees: Callable[[], WorktreeService | None] | None = None,
     ) -> None:
         self.app_id = app_id
         self._bindings = bindings
@@ -82,6 +91,7 @@ class ScheduleService:
         self._runtime = runtime
         self._chat_info = chat_info
         self._chat_target_validator = chat_target_validator
+        self._worktrees = worktrees
         self._clock = wall_clock
         self.default_timezone = default_timezone or local_timezone()
         self._wake: Callable[[], None] = lambda: None
@@ -133,9 +143,11 @@ class ScheduleService:
             # Optional arguments treat null as omission, except the settings
             # object. False remains a real pause/filter value.
             data = {key: value for key, value in request.items()
-                    if mode == "run_now" or value is not None or key == "session_settings"}
+                    if mode == "run_now" or value is not None or key in {"session_settings", "workspace"}}
             if set(data) - (_FIELDS[mode] | {"mode"}):
                 raise ScheduleError("该操作包含不支持的字段。")
+            if "expected_project_revision" in data:
+                self._project_revision(data["expected_project_revision"])
             now = self._clock()
             # Hash the original structured intent, before clock-dependent
             # anchors or context defaults are materialized. Replays must also
@@ -156,7 +168,9 @@ class ScheduleService:
             chat_default = scope.chat_id if scope else None
             project_default = binding.project_alias if binding else None
             if mode == "options":
-                return await self.options(native_thread_id=native_thread_id, scope_key=scope_key, **{key: data[key] for key in ("chat_id", "binding_query") if key in data})
+                return await self.options(native_thread_id=native_thread_id, scope_key=scope_key, **{
+                    key: data[key] for key in ("chat_id", "binding_query", "project", "expected_project_revision") if key in data
+                })
             if mode == "list":
                 all_plans = data.get("all", False)
                 _boolean(all_plans, "all")
@@ -195,6 +209,7 @@ class ScheduleService:
                     chat, project = target_scope.chat_id, target.project_alias
                     await self._validate_submitted_chat(chat)
                     settings = None
+                    workspace, checked_project_revision = None, None
                 else:
                     if "target_binding_id" in data:
                         raise ScheduleError("新话题模式不接受 target_binding_id。")
@@ -202,6 +217,10 @@ class ScheduleService:
                     project = _text(data["project"] if "project" in data else project_default, "project")
                     chat_kind = await self._validate_submitted_chat(chat)
                     settings = await self._resolve_session_settings(data, binding=binding, chat_kind=chat_kind)
+                    workspace = self._workspace_policy(data.get("workspace", {"mode": "project"}))
+                    checked_project_revision = await self._check_workspace(
+                        workspace, project=project, expected_revision=data.get("expected_project_revision"),
+                    )
                 rule = self._rule(data, now=now)
                 enabled = data.get("enabled", True)
                 _boolean(enabled, "enabled")
@@ -211,12 +230,15 @@ class ScheduleService:
                     project_alias=project, app_id=self.app_id, chat_id=chat,
                     schedule=rule, enabled=enabled, source=source,
                     session_settings=settings,
+                    workspace=workspace, checked_project_revision=checked_project_revision,
                     target_kind=target_kind, target_binding_id=target_binding_id,
                     request_id=_text(data.get("request_id"), "request_id"), now=now,
                     request_payload=request_payload,
                 )
                 self._wake()
-                return await self._mutation(result, now)
+                return await self._mutation(
+                    result, now, checked_workspace=(project, workspace) if workspace is not None else None,
+                )
             plan = self._store.get(
                 _text(data.get("plan_id"), "plan_id"), include_deleted=mode == "runs",
             )
@@ -251,6 +273,9 @@ class ScheduleService:
             if mode == "run_now":
                 if self._run_now is None:
                     raise _InputError("unavailable", "调度服务尚未就绪，暂不能立即运行。")
+                if plan.target_kind == "new_topic":
+                    assert plan.workspace is not None
+                    await self._check_workspace(plan.workspace, project=plan.project_alias)
                 # The synchronous handler rechecks exact identity, revision and
                 # admission, then owns dispatch before this request can cancel.
                 result = self._run_now(plan.id, revision, request_id, request_payload)
@@ -269,15 +294,31 @@ class ScheduleService:
                 changes["project_alias"] = _text(data["project"], "project")
             if "chat_id" in changes:
                 changes["chat_id"] = _text(changes["chat_id"], "chat_id")
+            checked_project_revision = None
+            if plan.target_kind == "new_topic":
+                workspace = self._workspace_policy(data["workspace"]) if "workspace" in data else plan.workspace
+                assert workspace is not None
+                project = changes.get("project_alias", plan.project_alias)
+                if workspace != plan.workspace or project != plan.project_alias:
+                    checked_project_revision = await self._check_workspace(
+                        workspace, project=project, expected_revision=data.get("expected_project_revision"),
+                    )
+                if "workspace" in data:
+                    changes["workspace"] = workspace
             if "session_settings" in data or "chat_id" in changes:
                 chat_kind = await self._validate_submitted_chat(changes.get("chat_id", plan.chat_id))
                 if "session_settings" in data or changes.get("chat_id", plan.chat_id) != plan.chat_id:
                     changes["session_settings"] = await self._resolve_session_settings(data, previous=plan.session_settings, chat_kind=chat_kind)
             if "schedule" in data or "timezone" in data:
                 changes["schedule"] = self._rule(data, now=now, previous=plan.schedule)
-            result = self._store.update(plan.id, expected_revision=revision, request_id=request_id, changes=changes, now=now, request_payload=request_payload)
+            result = self._store.update(plan.id, expected_revision=revision, request_id=request_id, changes=changes, now=now, request_payload=request_payload,
+                                        checked_project_revision=checked_project_revision,
+                                        expected_project_revision=data.get("expected_project_revision"))
             self._wake()
-            return await self._mutation(result, now)
+            return await self._mutation(
+                result, now,
+                checked_workspace=(project, workspace) if checked_project_revision is not None else None,
+            )
         except (ScheduleError, SessionSettingsError, BindingNotFound, ScopeNotFound, ProjectNotFound, ProjectConflict) as error:
             return _failure(error)
 
@@ -320,8 +361,49 @@ class ScheduleService:
 
     @staticmethod
     def _reject_binding_overrides(request: Mapping[str, Any]) -> None:
-        if {"project", "chat_id", "session_settings"}.intersection(request):
-            raise ScheduleError("Agent 会话计划沿用目标 Binding 的 Project、位置和配置，不接受独立覆盖。")
+        if {"project", "chat_id", "session_settings", "workspace", "expected_project_revision"}.intersection(request):
+            raise ScheduleError("Agent 会话计划沿用目标 Binding 的 Project、位置、配置和实际工作目录，不接受独立覆盖。")
+
+    @staticmethod
+    def _workspace_policy(value: Any) -> WorkspacePolicy:
+        try:
+            return WorkspacePolicy.from_dict(value)
+        except WorkspacePolicyError as error:
+            raise _InputError("invalid_workspace", str(error)) from error
+
+    def _worktree_service(self) -> WorktreeService:
+        service = self._worktrees() if self._worktrees is not None else None
+        if service is None:
+            raise WorktreeError("unavailable", "工作区服务暂不可用，请稍后重试。")
+        return service
+
+    @staticmethod
+    def _project_revision(value: Any) -> int | None:
+        if value is not None and (type(value) is not int or value < 1):
+            raise ScheduleError("expected_project_revision 必须是正整数。")
+        return value
+
+    async def _check_workspace(
+        self, workspace: WorkspacePolicy, *, project: str, expected_revision: int | None = None,
+    ) -> int:
+        expected_revision = self._project_revision(expected_revision)
+        self._bindings.require_project_not_deleting(project)
+        record = self._bindings.get_project(project)
+        if not record.enabled:
+            raise ProjectDisabled(project)
+        if expected_revision is not None and record.revision != expected_revision:
+            raise _InputError("project_changed", "Project 已改变，请重新加载工作区选项。")
+        if workspace.mode != "project":
+            try:
+                async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
+                    await self._worktree_service().validate_policy(
+                        workspace, project_alias=project, expected_project_revision=record.revision,
+                    )
+            except WorktreeError as error:
+                raise _InputError("workspace_unavailable", str(error)) from error
+            except TimeoutError as error:
+                raise _InputError("workspace_unavailable", "工作区状态读取超时，请稍后重试；本次未创建工作区。") from error
+        return record.revision
 
     def _binding_target(self, request: Mapping[str, Any], *, binding: Any = None) -> tuple[Any, Any]:
         target_id = request.get("target_binding_id")
@@ -383,14 +465,35 @@ class ScheduleService:
                 raise _InputError("invalid_model_settings", "所选模型、思考强度或速度组合已不可用。请通过 options 读取当前可选项后重新选择；已有计划的其他设置可以单独修改。") from error
         return settings
 
-    async def options(self, *, native_thread_id: str | None = None, scope_key: str | None = None, chat_id: str | None = None, binding_query: str | None = None) -> dict[str, Any]:
-        result, _ = await self.form_options(native_thread_id=native_thread_id, scope_key=scope_key, chat_id=chat_id, binding_query=binding_query)
-        # Public Admin/MCP options retain their strict target-read contract.
-        if result.get("chat_info_error") is not None:
-            return {"ok": False, "error": result["chat_info_error"]}
+    async def options(self, *, native_thread_id: str | None = None, scope_key: str | None = None,
+                      chat_id: str | None = None, binding_query: str | None = None,
+                      project: str | None = None, expected_project_revision: int | None = None) -> dict[str, Any]:
+        result, _ = await self.form_options(native_thread_id=native_thread_id, scope_key=scope_key,
+            chat_id=chat_id, binding_query=binding_query, project=project, expected_project_revision=expected_project_revision)
         return result
 
-    async def form_options(self, *, native_thread_id: str | None = None, scope_key: str | None = None, chat_id: str | None = None, binding_query: str | None = None) -> tuple[dict[str, Any], ModelCatalog | None]:
+    async def workspace_catalog_options(
+        self, project: str, expected_project_revision: int | None = None,
+    ) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+        """Refresh workspace choices without reloading unrelated form inputs."""
+        project = _text(project, "project")
+        expected_project_revision = self._project_revision(expected_project_revision)
+        try:
+            async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
+                return await self._worktree_service().options(
+                    project_alias=project, expected_project_revision=expected_project_revision,
+                ), None
+        except WorktreeError as failure:
+            return None, {"code": failure.code, "message": str(failure)}
+        except TimeoutError:
+            return None, {"code": "workspace_unavailable", "message": "工作区选项读取超时，请稍后刷新。"}
+        except Exception as error:
+            logger.error("Scheduled workspace options read failed type=%s", type(error).__name__)
+            return None, {"code": "internal_error", "message": "工作区选项读取发生内部错误，请检查服务日志。"}
+
+    async def form_options(self, *, native_thread_id: str | None = None, scope_key: str | None = None,
+                           chat_id: str | None = None, binding_query: str | None = None,
+                           project: str | None = None, expected_project_revision: int | None = None) -> tuple[dict[str, Any], ModelCatalog | None]:
         """Load independent presentation inputs without losing editable defaults."""
         try:
             if binding_query is not None:
@@ -398,24 +501,48 @@ class ScheduleService:
                     raise ScheduleError("binding_query 须为最多 200 字符的查询文本。")
                 binding_query = binding_query.strip() or None
             scope, binding = self._source(native_thread_id, scope_key)
+            project = _text(project, "project") if project is not None else binding.project_alias if binding else None
+            expected_project_revision = self._project_revision(expected_project_revision)
+            if project is None and expected_project_revision is not None:
+                raise ScheduleError("expected_project_revision 需要指定 Project。")
             chat = _text(chat_id, "chat_id") if chat_id is not None else scope.chat_id if scope else None
-            kind, chat_error = None, None
-            if chat is not None:
+
+            async def chat_options():
+                if chat is None:
+                    return None, None
                 try:
-                    kind = await self._validate_chat(chat)
+                    return await self._validate_chat(chat), None
                 except _InputError as error:
-                    chat_error = _failure(error)["error"]
-            catalog, error = await self.model_catalog_options()
+                    return None, _failure(error)["error"]
+
+            async def binding_options():
+                try:
+                    targets, truncated = await self._binding_options(chat=chat, binding=binding, search=binding_query)
+                    return targets, truncated, None
+                except (BindingQueryBusy, BindingQueryClosed, BindingQueryTimeout):
+                    return [], False, {"code": "binding_options_unavailable", "message": "Agent 会话选项暂不可用，请稍后重试。"}
+
+            async def workspace_options():
+                if project is None:
+                    return None, None
+                return await self.workspace_catalog_options(project, expected_project_revision)
+
+            # Each group has its own bounded read and independent error. Their
+            # budgets overlap so slow groups cannot consume the MCP budget in
+            # sequence and discard another group's already available choices.
+            groups = await asyncio.gather(
+                chat_options(), self.model_catalog_options(), binding_options(), workspace_options(),
+                return_exceptions=True,
+            )
+            for group in groups:
+                if isinstance(group, BaseException):
+                    raise group
+            (kind, chat_error), (catalog, error), (targets, truncated, binding_error), (workspaces, workspace_error) = groups
             settings = SessionSettings.from_binding(binding) if binding else SessionSettings.new_defaults(catalog)
             if kind == "p2p":
                 settings = settings.merge({"message_context_mode": "current-only"})
-            binding_error = None
-            try:
-                targets, truncated = await self._binding_options(chat=chat, binding=binding, search=binding_query)
-            except (BindingQueryBusy, BindingQueryClosed, BindingQueryTimeout):
-                targets, truncated = [], False
-                binding_error = {"code": "binding_options_unavailable", "message": "Agent 会话选项暂不可用，请稍后重试。"}
             return {"ok": True, "session_settings": settings.to_dict(), "models": _models(catalog),
+                    "workspace_options": workspaces, "workspace_options_error": workspace_error,
                     "source_binding_id": binding.id if binding else None,
                     "binding_targets": targets, "bindings_truncated": truncated,
                     "binding_options_error": binding_error,
@@ -537,44 +664,103 @@ class ScheduleService:
         )
         return receipt
 
-    async def _mutation(self, result: Any, now: float) -> dict[str, Any]:
+    async def _mutation(self, result: Any, now: float, *,
+                        checked_workspace: tuple[str, WorkspacePolicy] | None = None) -> dict[str, Any]:
         plan = self._store.get(result.plan_id, include_deleted=True)
         if plan.deleted:
             return {"ok": True, "plan_id": result.plan_id, "revision": result.revision,
                     "replayed": result.replayed, "deleted": True,
                     "inflight": self._store.pending_for_plan(plan.id) is not None}
-        return {**await self._detail(plan, now), "replayed": result.replayed,
+        return {**await self._detail(plan, now, checked_workspace=checked_workspace), "replayed": result.replayed,
                 "operation_revision": result.revision}
 
-    async def _detail(self, plan: Plan, now: float, *, observed: Mapping[str, str] | None = None) -> dict[str, Any]:
-        value, = await self._plans((plan,), now, observed=observed)
+    async def _detail(self, plan: Plan, now: float, *, observed: Mapping[str, str] | None = None,
+                      checked_workspace: tuple[str, WorkspacePolicy] | None = None) -> dict[str, Any]:
+        value, = await self._plans((plan,), now, observed=observed, checked_workspace=checked_workspace)
         return {"ok": True, "plan": value, "snapshot_at": now,
                 "preview": _preview(plan.schedule, max(now, plan.processed_through or now)) if plan.schedule else [],
                 "inflight": value["inflight"]}
 
-    async def _plans(self, plans: Sequence[Plan], now: float, *, observed: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+    async def _plans(self, plans: Sequence[Plan], now: float, *, observed: Mapping[str, str] | None = None,
+                     checked_workspace: tuple[str, WorkspacePolicy] | None = None) -> list[dict[str, Any]]:
         # Snapshot all Channel-owned lifecycle inputs before the first await.
         # Native observation enriches execution only; it never changes barriers
         # or the ended predicate used to select this page.
         snapshots = [self._plan(plan, now) for plan in plans]
-        projections = await self._observe_runs([
-            (run, plan.schedule.timezone if plan.schedule else "UTC")
-            for plan, (_value, run) in zip(plans, snapshots) if run is not None
-        ], observed=observed)
+        projections, workspace_errors = await asyncio.gather(
+            self._observe_runs([
+                (run, plan.schedule.timezone if plan.schedule else "UTC")
+                for plan, (_value, run) in zip(plans, snapshots) if run is not None
+            ], observed=observed),
+            self._workspace_errors(plans, checked_workspace=checked_workspace),
+        )
         by_id = {run["id"]: run for run in projections}
-        for value, run in snapshots:
+        for plan, (value, run) in zip(plans, snapshots):
+            if plan.target_kind == "new_topic":
+                assert plan.workspace is not None
+                error = workspace_errors.get(self._workspace_read_key(plan.project_alias, plan.workspace))
+                value["workspace_available"] = error is None
+                value["workspace_error"] = error
+                if error is not None:
+                    if value["blocked_reason"] is None:
+                        value["blocked_reason"] = "workspace_unavailable"
+                    if value["suspended_reason"] is None:
+                        value["suspended_reason"] = "workspace_unavailable"
+                    value["can_run_now"] = False
             if run is not None:
                 projection = by_id[run.id]
                 value["execution"].update({
                     key: projection[key] for key in (
                         "status", "native_thread_id", "scope_key", "feishu_url",
+                        "worktree_id", "worktree",
                     )
                 })
         return [value for value, _run in snapshots]
 
+    async def _workspace_errors(self, plans: Sequence[Plan], *,
+                                checked_workspace: tuple[str, WorkspacePolicy] | None = None,
+                                ) -> dict[tuple[str, WorkspacePolicy], dict[str, str] | None]:
+        """One bounded, deduplicated read of each selected resource per request."""
+        keys = {
+            self._workspace_read_key(plan.project_alias, plan.workspace) for plan in plans
+            if not plan.deleted and plan.target_kind == "new_topic"
+            and plan.workspace is not None and plan.workspace.mode != "project"
+        }
+        if checked_workspace is not None:
+            keys.discard(self._workspace_read_key(*checked_workspace))
+        deadline = asyncio.get_running_loop().time() + _READ_TIMEOUT_SECONDS
+        slots = asyncio.Semaphore(_READ_CONCURRENCY)
+
+        async def read(key: tuple[str, WorkspacePolicy]) -> tuple[tuple[str, WorkspacePolicy], dict[str, str] | None]:
+            project, workspace = key
+            try:
+                async with asyncio.timeout_at(deadline):
+                    async with slots:
+                        await self._worktree_service().validate_policy(workspace, project_alias=project)
+                return key, None
+            except WorktreeError as error:
+                return key, {"code": error.code, "message": str(error)}
+            except TimeoutError:
+                return key, {"code": "workspace_unavailable", "message": "工作区状态读取超时，请稍后刷新；不会切回项目目录。"}
+            except Exception as error:
+                logger.error("Scheduled workspace state read failed type=%s", type(error).__name__)
+                return key, {"code": "internal_error", "message": "工作区状态读取发生内部错误，请检查服务日志。"}
+
+        return dict(await asyncio.gather(*(read(key) for key in keys)))
+
+    @staticmethod
+    def _workspace_read_key(project: str, workspace: WorkspacePolicy) -> tuple[str, WorkspacePolicy]:
+        # New policies read repository eligibility only; the selected ref is
+        # resolved at execution and does not require another repository read.
+        return project, WorkspacePolicy("new") if workspace.mode == "new" else workspace
+
     def _plan(self, plan: Plan, now: float) -> tuple[dict[str, Any], Run | None]:
         value = asdict(plan)
         value["session_settings"] = plan.session_settings.to_dict() if plan.session_settings is not None else None
+        value["workspace"] = plan.workspace.to_dict() if plan.workspace is not None else None
+        value["workspace_available"] = None
+        value["workspace_error"] = None
+        value["effective_workspace"] = None
         value["effective_session_settings"] = value["session_settings"]
         value["target_label"] = plan.chat_id
         value["schedule"] = plan.schedule.to_dict() if plan.schedule else None
@@ -594,6 +780,7 @@ class ScheduleService:
                 "id": run.id, "due_at": run.due_at, "phase": run.phase,
                 "trigger_source": run.trigger_source,
                 "error_code": run.error_code, "binding_id": run.binding_id,
+                "worktree_id": run.worktree_id, "worktree": self._worktree_receipt(run),
                 "due_local": _iso(run.due_at, timezone),
             }
         selected = pending or (latest[0] if latest else None)
@@ -606,6 +793,8 @@ class ScheduleService:
             "due_at": selected.due_at if selected else None,
             "due_local": _iso(selected.due_at, timezone) if selected else None,
             "native_thread_id": None, "scope_key": None, "feishu_url": None,
+            "worktree_id": selected.worktree_id if selected else None,
+            "worktree": self._worktree_receipt(selected) if selected else None,
         }
         try:
             if not self._bindings.get_project(plan.project_alias).enabled:
@@ -624,6 +813,10 @@ class ScheduleService:
                 scope, binding = self._binding_target({"target_binding_id": plan.target_binding_id})
                 value["target_label"] = self._binding_label(scope, binding)
                 value["effective_session_settings"] = SessionSettings.from_binding(binding).to_dict()
+                value["effective_workspace"] = {
+                    "working_cwd": binding.working_cwd, "worktree_id": binding.worktree_id,
+                    "source": "binding", "native_cwd_unresolved": binding.native_thread_id is not None,
+                }
             except (BindingNotFound, ScopeNotFound):
                 pass
         value["can_run_now"] = not plan.deleted and not value["blocked_reason"] and not value["inflight"]
@@ -652,6 +845,7 @@ class ScheduleService:
 
     async def _run(self, run: Run, *, timezone: str, deadline: float, slots: asyncio.Semaphore, observed: str | None = None) -> dict[str, Any]:
         value = asdict(run)
+        value["worktree"] = self._worktree_receipt(run)
         status = run.error_code or ("starting" if run.barrier == "held" else "unknown")
         if run.barrier == "unknown" or run.error_code == "publishing_unknown":
             status = "unknown"
@@ -693,6 +887,16 @@ class ScheduleService:
                 except Exception:
                     value["status"] = "unavailable"
         return value
+
+    def _worktree_receipt(self, run: Run) -> dict[str, Any] | None:
+        """Project only the exact persisted creation receipt, never live Git state."""
+        if run.worktree_id is None:
+            return None
+        try:
+            record = self._bindings.worktrees.get(run.worktree_id)
+        except WorktreeNotFound:
+            return {"id": run.worktree_id, "root": None, "cwd": None, "creation_state": None}
+        return {"id": record.id, "root": record.root, "cwd": record.cwd, "creation_state": record.creation_state}
 
 
 def _models(catalog: ModelCatalog | None) -> list[dict[str, Any]]:

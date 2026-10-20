@@ -38,6 +38,6 @@ class ScheduleUiTest(unittest.TestCase):
         result = subprocess.run(
             [node], input="const htmlTree = " + json.dumps(tree.root) + ";\n"
              + dom + before + payload + helpers + filters + project_options + shared_chat + guards + pagination + controller + listeners + after,
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -32,10 +32,15 @@ from .chat_target import (
 from .pagination import decode_page_selection, pagination_controls
 from .controls import (
     MAX_SETTING_ID_CHARS,
+    _form_columns, _form_hint, _form_section,
     _decode_context_mode_reference, _decode_new_model_reference, _decode_task_feedback_reference,
     decode_session_settings_form, session_settings_form_elements, session_settings_summary,
 )
 from .reply import TURN_FILE_CARD_JSON_LIMIT_BYTES
+from .workspace import (
+    decode_workspace_form, read_workspace_reference, workspace_field_names,
+    workspace_form_elements, workspace_reference, workspace_summary,
+)
 
 
 _VERSION = 4
@@ -46,7 +51,7 @@ _FILTERS = {
     "current_paused": "当前飞书聊天 · 已暂停", "all": "全部飞书聊天 · 全部任务",
     "all_enabled": "全部飞书聊天 · 已启用", "all_paused": "全部飞书聊天 · 已暂停",
 }
-_ACTIONS = {"list", "new", "view", "edit", "delete", "runs", "enabled", "run_now", "search_chats", "page_chats"}
+_ACTIONS = {"list", "new", "view", "edit", "delete", "runs", "enabled", "run_now", "search_chats", "page_chats", "load_workspace"}
 _FIELDS = {
     "list": (set(), set()),
     "new": (set(), {"target_kind", "target_binding_id"}),
@@ -58,6 +63,7 @@ _FIELDS = {
     "run_now": ({"plan_id", "expected_revision"}, set()),
     "search_chats": (set(), set()),
     "page_chats": ({"snapshot"}, set()),
+    "load_workspace": (set(), set()),
 }
 _MAX_INSTRUCTIONS = 8000
 _MAX_FORM_INSTRUCTIONS = 1000
@@ -82,6 +88,12 @@ _STATES = {
     "input_steered": "已追加当前任务", "input_unknown": "输入接收情况待确认",
     "input_rejected": "输入被拒绝", "anchor_failed": "触发消息发送失败",
     "anchor_unknown": "触发消息发送结果待确认",
+    "workspace_unavailable": "工作区不可用，本次未执行",
+    "workspace_creation_failed": "工作区创建失败，本次未启动",
+    "workspace_creation_unknown": "工作区创建结果待确认，本次未启动",
+    "workspace_handoff_failed": "工作区已保留，后续启动失败",
+    "dispatch_cancelled": "准备阶段已中断，本次未启动",
+    "recovery_no_start": "准备阶段已中断，未重新执行",
 }
 
 
@@ -154,6 +166,7 @@ class ScheduleFormDraft:
     target: ChatTargetDraft
     allow_context_mode: bool
     session_fields: dict[str, str] | None = None
+    workspace_fields: dict[str, str] | None = None
 
 
 def schedule_navigation(value: Any = None) -> dict[str, Any]:
@@ -259,7 +272,9 @@ def _button(scope: FeishuScope, label: str, action: str, payload: dict[str, Any]
 
 def _row(*items: dict[str, Any]) -> dict[str, Any]:
     return {"tag": "column_set", "flex_mode": "none", "horizontal_spacing": "8px", "columns": [
-        {"tag": "column", "width": "weighted", "weight": 1, "elements": [item]} for item in items
+        {"tag": "column", "width": "weighted", "weight": 1, "vertical_spacing": "4px",
+         "elements": [item]}
+        for item in items
     ]}
 
 
@@ -268,10 +283,9 @@ def _section(*items: dict[str, Any]) -> dict[str, Any]:
         "background_style": "grey-50", "padding": "12px", "vertical_spacing": "8px", "elements": list(items)}]}
 
 
-def _labeled(label: str, control: dict[str, Any]) -> dict[str, Any]:
+def _labeled(label: str, control: dict[str, Any]) -> list[dict[str, Any]]:
     # Unlike input, Feishu select/picker components do not accept `label`.
-    return {"tag": "column_set", "columns": [{"tag": "column", "width": "weighted", "weight": 1,
-        "vertical_spacing": "4px", "elements": [_plain(label), control]}]}
+    return [{"tag": "markdown", "content": label}, control]
 
 
 def _fold(title: str, *items: dict[str, Any], expanded: bool = False) -> dict[str, Any]:
@@ -368,18 +382,23 @@ def _plan_summary(plan: Mapping[str, Any]) -> str:
         f"Project：{plan.get('project_alias', '')}\n"
         f"目标飞书聊天：{plan.get('chat_id', '')}\n"
         + (f"执行目标：Agent 会话 · {plan.get('target_label') or plan.get('target_binding_id', '')}\n" if plan.get("target_kind") == "binding" else "执行目标：每次新建独立话题\n")
+        + "工作区：" + workspace_summary(None if plan.get("target_kind") == "binding"
+            else plan.get("workspace", {"mode": "project"}), new_label="每次执行新建 Worktree") + "\n"
         + f"启停：{'已启用' if plan.get('enabled') else '已暂停'}\n"
         + f"时间：{rule_text} · {rule.get('timezone', '')}\n"
         f"状态：{status}" + (f" · {_display_state(blocked)}" if blocked else "")
         + deadline
         + f"\n下次：{plan.get('next_due_local') or '无'}"
         + (f"\n最近触发：{plan['latest_run']['due_local']} · {_trigger_source(plan['latest_run'].get('trigger_source'))}" if plan.get("latest_run") else "")
+        + (_run_workspace_receipt(plan["latest_run"]) if plan.get("latest_run") else "")
     )
 
 
 def _render_selected_plan(builder: Any, scope: FeishuScope, result: dict[str, Any], *, navigation: dict[str, Any]) -> None:
     plan = result["plan"]
     builder.raw(_section(_plain(_plan_summary(plan))))
+    if plan.get("workspace_error"):
+        builder.raw(_notice(str(plan["workspace_error"]["message"]), error=True))
     instructions = str(plan.get("instructions", ""))
     if _instructions_fit(instructions):
         builder.raw(_fold("执行指令", _plain(instructions), expanded=len(instructions) <= 200))
@@ -387,6 +406,7 @@ def _render_selected_plan(builder: Any, scope: FeishuScope, result: dict[str, An
         builder.raw(_plain("执行指令（内容节选）\n" + instructions[:2000] + "…"))
         builder.raw(_notice("完整指令较长，请通过 Admin 或自然语言查看、编辑。计划原文完整保留，仍可在此启停或删除。"))
     if plan.get("target_kind") == "binding":
+        builder.raw(_plain(_binding_workspace_summary(plan.get("effective_workspace"))))
         builder.raw(_plain("Project、模型、上下文和反馈随目标 Agent 会话当前配置；系统触发不新增 @ 通知。"))
     else:
         builder.raw(_fold("Agent 会话配置", _plain(session_settings_summary(_session_settings(plan.get("session_settings", SessionSettings()))))))
@@ -416,6 +436,31 @@ def _render_selected_plan(builder: Any, scope: FeishuScope, result: dict[str, An
         _button(scope, "刷新任务", "view", {"plan_id": plan["id"]}, navigation=navigation), delete))
 
 
+def _binding_workspace_summary(workspace: Mapping[str, Any] | None) -> str:
+    lines = ["工作区：沿用目标 Agent 会话的实际工作目录，不另存工作区策略。"]
+    if workspace:
+        if workspace.get("worktree_id"):
+            lines.append("登记 Worktree：" + str(workspace["worktree_id"]))
+        if workspace.get("working_cwd"):
+            lines.append("登记工作目录：" + str(workspace["working_cwd"]))
+        if workspace.get("native_cwd_unresolved"):
+            lines.append("实际工作目录以原生会话为准；此处未重新读取。")
+    return "\n".join(lines)
+
+
+def _run_workspace_receipt(run: Mapping[str, Any]) -> str:
+    receipt = run.get("worktree") or {}
+    worktree_id = run.get("worktree_id") or receipt.get("id")
+    if not worktree_id:
+        return ""
+    lines = [f"\n本次工作区：{worktree_id}（独立资源，可在 Admin 查看）"]
+    if receipt.get("root"):
+        lines.append("登记根目录：" + str(receipt["root"]))
+    if receipt.get("cwd"):
+        lines.append("登记工作目录：" + str(receipt["cwd"]))
+    return "\n".join(lines)
+
+
 def _runs_panel(scope: FeishuScope, result: dict[str, Any], *, plan_id: str, navigation: dict[str, Any]) -> dict[str, Any]:
     items = []
     runs = result.get("runs", [])
@@ -430,6 +475,7 @@ def _runs_panel(scope: FeishuScope, result: dict[str, Any], *, plan_id: str, nav
             f"状态：{_display_state(run.get('status') or run.get('error_code') or run.get('phase'))}\n"
             + delivery
             + (f"\n合并漏跑：{run['missed_count']} 次" if run.get("missed_count", 0) > 1 else "")
+            + _run_workspace_receipt(run)
         ))
         items.append({"tag": "hr"})
     if result.get("next_cursor"):
@@ -448,7 +494,7 @@ def _select(name: str, label: str, options: Sequence[tuple[str, str]], selected:
         "width": "fill", "placeholder": _plain_text(label), "options": [{"text": _plain_text(text), "value": value} for value, text in options]}
     if selected is not None:
         result["initial_option"] = selected
-    return _labeled(label, result)
+    return result
 
 
 def schedule_form_card(scope: FeishuScope, *, projects: Sequence[Project], default_timezone: str | None,
@@ -460,9 +506,12 @@ def schedule_form_card(scope: FeishuScope, *, projects: Sequence[Project], defau
                        chats: Sequence[AvailableChat] = (), chat_avatar_keys: Mapping[str, str] | None = None,
                        chat_snapshot: ChatSearchSnapshot | None = None, chat_page: int = 0,
                        chat_directory_error: str | None = None,
+                       workspace_options: Mapping[str, Any] | None = None,
+                       workspace_error: str | None = None,
                        target_chat_id: str | None = None, target_chat_label: str | None = None,
                        target_topic_id: str | None = None,
-                       target_label: str | None = None) -> OutboundCard:
+                       target_label: str | None = None,
+                       effective_workspace: Mapping[str, Any] | None = None) -> OutboundCard:
     navigation = schedule_navigation(navigation)
     builder = _builder("编辑定时任务" if plan else "新建定时任务", "填写内容与时间，保存后按计划执行")
     existing = dict(plan or {})
@@ -520,14 +569,25 @@ def schedule_form_card(scope: FeishuScope, *, projects: Sequence[Project], defau
         meta.update(target_kind="binding", target_binding_id=target_binding_id,
             target_chat_id=target_chat_id, target_label=raw_label,
             target_chat_label=target_chat_label or "", target_topic_id=target_topic_id or "")
+        meta["target_workspace_description"] = _binding_workspace_summary(
+            existing.get("effective_workspace") or effective_workspace)
     else:
         meta["project"] = existing.get("project_alias") or initial_project or projects[0].alias
+        project = next((project for project in projects if project.alias == meta["project"]), None)
+        meta["project_revision"] = project.revision if project is not None and project.revision > 0 else None
     target = initial_chat_target(current_chat_id=scope.chat_id,
         target_chat_id=existing.get("chat_id"), options=chat_options(chats))
-    draft = ScheduleFormDraft(scope, meta, fields, settings, target, allow_context_mode)
+    workspace_fields = None
+    if not binding_target:
+        policy = existing.get("workspace", {"mode": "project"})
+        workspace_fields = {"cron_workspace": workspace_reference(meta["project"], meta["project_revision"], policy),
+                            "cron_worktree_ref": policy.get("ref") or "HEAD"}
+    draft = ScheduleFormDraft(scope, meta, fields, settings, target, allow_context_mode,
+                              workspace_fields=workspace_fields)
     return schedule_draft_card(draft, projects=projects, catalog=catalog, catalog_error=catalog_error,
         chats=chats, chat_avatar_keys=chat_avatar_keys,
-        chat_snapshot=chat_snapshot, chat_page=chat_page, chat_directory_error=chat_directory_error)
+        chat_snapshot=chat_snapshot, chat_page=chat_page, chat_directory_error=chat_directory_error,
+        workspace_options=workspace_options, workspace_error=workspace_error)
 
 
 def schedule_draft_card(draft: ScheduleFormDraft, *, projects: Sequence[Project],
@@ -535,11 +595,14 @@ def schedule_draft_card(draft: ScheduleFormDraft, *, projects: Sequence[Project]
                         chats: Sequence[AvailableChat] = (), chat_avatar_keys: Mapping[str, str] | None = None,
                         chat_snapshot: ChatSearchSnapshot | None = None, chat_page: int = 0,
                         chat_directory_error: str | None = None,
+                        workspace_options: Mapping[str, Any] | None = None,
+                        workspace_error: str | None = None,
                         notice: str | None = None) -> OutboundCard:
     """Render initial, edited, searched and failed forms from the same draft."""
     options = dict(projects=projects, catalog=catalog, catalog_error=catalog_error,
         chats=chats, chat_avatar_keys=chat_avatar_keys,
-        chat_snapshot=chat_snapshot, chat_directory_error=chat_directory_error, notice=notice)
+        chat_snapshot=chat_snapshot, chat_directory_error=chat_directory_error, notice=notice,
+        workspace_options=workspace_options, workspace_error=workspace_error)
     if chat_snapshot is None:
         return _render_schedule_draft_card(draft, chat_page=0, **options)
     if type(chat_page) is not int or not 0 <= chat_page < chat_snapshot.total_pages:
@@ -568,6 +631,7 @@ def _render_schedule_draft_card(draft: ScheduleFormDraft, *, projects: Sequence[
                                chats: Sequence[AvailableChat], chat_avatar_keys: Mapping[str, str] | None,
                                chat_snapshot: ChatSearchSnapshot | None,
                                chat_page: int, chat_directory_error: str | None,
+                               workspace_options: Mapping[str, Any] | None, workspace_error: str | None,
                                notice: str | None) -> OutboundCard:
     scope, meta, fields = draft.scope, draft.meta, draft.fields
     editing = "plan_id" in meta
@@ -580,20 +644,23 @@ def _render_schedule_draft_card(draft: ScheduleFormDraft, *, projects: Sequence[
     elements = [
         _input(_form_name(scope, "plan", uuid4().hex), "名称", fields["cron_name"]),
         _input(instructions_name, "执行内容", fields["cron_instructions"], multiline=True),
-        _row(_select("cron_kind", "执行频率", list(_KINDS.items()), fields["cron_kind"]),
-            _input(timezone_name, "时区", fields["cron_timezone"])),
-        _row(_labeled("日期 · 仅一次性", _draft_picker("cron_date", "date_picker", fields.get("cron_date", ""))),
-            _labeled("时间 · 一次性 / 每天 / 每周", _draft_picker("cron_at", "picker_time", fields.get("cron_at", "")))),
-        _row(_labeled("星期 · 仅每周", {
+        _form_columns(
+            (1, _labeled("执行频率", _select("cron_kind", "执行频率", list(_KINDS.items()), fields["cron_kind"]))),
+            (1, [_input(timezone_name, "时区", fields["cron_timezone"])])),
+        _form_columns(
+            (1, _labeled("日期 · 仅一次性", _draft_picker("cron_date", "date_picker", fields.get("cron_date", "")))),
+            (1, _labeled("时间 · 一次性 / 每天 / 每周", _draft_picker("cron_at", "picker_time", fields.get("cron_at", ""))))),
+        _form_columns((1, _labeled("星期 · 仅每周", {
             "tag": "multi_select_static", "name": "cron_weekdays", "required": False, "width": "fill",
             "placeholder": _plain_text("选择星期"),
             "options": [{"text": _plain_text("周" + "一二三四五六日"[day]), "value": str(day)} for day in range(7)],
             "selected_values": fields.get("cron_weekdays", []),
-        }), _input(minutes_name, "分钟间隔 · 仅固定间隔", fields.get("cron_every_minutes", ""), required=False)),
-        _plain("截止时间 · 仅每天 / 每周 / 固定间隔（可选）"),
-        _row(_labeled("截止日期", _draft_picker("cron_end_date", "date_picker", fields.get("cron_end_date", ""))),
-            _labeled("截止时间（含该时刻）", _draft_picker(end_time_name, "picker_time", fields.get("cron_end_time", "")))),
-        _plain("截止日期与时间使用上方时区；同时留空可取消截止。"),
+        })), (1, [_input(minutes_name, "分钟间隔 · 仅固定间隔", fields.get("cron_every_minutes", ""), required=False)])),
+        _form_hint("截止时间 · 仅每天 / 每周 / 固定间隔（可选）"),
+        _form_columns(
+            (1, _labeled("截止日期", _draft_picker("cron_end_date", "date_picker", fields.get("cron_end_date", "")))),
+            (1, _labeled("截止时间（含该时刻）", _draft_picker(end_time_name, "picker_time", fields.get("cron_end_time", ""))))),
+        _form_hint("截止日期与时间使用上方时区；同时留空可取消截止。"),
     ]
     project_meta = {key: value for key, value in meta.items()
         if key not in {"plan_id", "expected_revision", "anchor", "original_at", "original_end_at"}}
@@ -601,10 +668,12 @@ def _render_schedule_draft_card(draft: ScheduleFormDraft, *, projects: Sequence[
         target_value = _encoded(project_meta)
         target_chat_id = meta.get("target_chat_id") or scope.chat_id
         target_chat_label, target_topic_id = meta.get("target_chat_label"), meta.get("target_topic_id")
-        elements.append(_select("cron_project", "目标 Agent 会话（只读，创建后固定）",
-            [(target_value, "Agent 会话 · " + (meta.get("target_label") or meta["target_binding_id"]))], target_value))
+        elements.append(_form_columns((1, _labeled("目标 Agent 会话（只读，创建后固定）",
+            _select("cron_project", "目标 Agent 会话（只读，创建后固定）",
+                [(target_value, "Agent 会话 · " + (meta.get("target_label") or meta["target_binding_id"]))], target_value)))))
         elements.append(_plain("所属飞书聊天：" + (target_chat_label + " · " if target_chat_label else "") + target_chat_id
             + (f"\n所属飞书话题：{target_topic_id}" if target_topic_id else "")))
+        elements.append(_plain(meta.get("target_workspace_description") or _binding_workspace_summary(None)))
         elements.append(_plain("沿用目标 Agent 会话的 Project、模型、上下文和反馈。到点提交一条输入，空闲时启动新一轮，忙碌时追加当前任务。切换或归档后自动暂停，恢复后继续；删除目标 Agent 会话也会删除计划。"))
     else:
         elements.extend(_new_topic_form_fields(draft, projects=projects, project_meta=project_meta,
@@ -612,7 +681,19 @@ def _render_schedule_draft_card(draft: ScheduleFormDraft, *, projects: Sequence[
         elements.extend(_chat_target_form_fields(draft, chats=chats, chat_avatar_keys=chat_avatar_keys,
             chat_snapshot=chat_snapshot, chat_page=chat_page,
             chat_directory_error=chat_directory_error))
-    elements.append(_plain("只使用所选频率对应的日期、时间、星期或间隔；日期与时间以所填时区为准。"))
+        load = _button(scope, "加载项目目录选项", "load_workspace", navigation=meta["navigation"])
+        load.update(name="cron_workspace_load", form_action_type="submit")
+        workspace_fields = draft.workspace_fields or {}
+        selected = (read_workspace_reference(workspace_fields["cron_workspace"])
+                    if "cron_workspace" in workspace_fields else {"mode": "project"})
+        policy = {key: value for key, value in selected.items() if key not in {"project", "project_revision"}}
+        elements.append(_form_section("工作区", workspace_form_elements(
+            meta["project"], meta.get("project_revision"), policy, prefix="cron", load_button=load,
+            options=workspace_options, error=workspace_error, draft_fields=workspace_fields,
+            new_label="每次执行新建 Worktree",
+            footer="已有 Worktree 由各次执行共享文件；不可用时不新建话题，不切回项目目录。已生成工作区需在 Admin 显式管理。",
+        )))
+    elements.append(_form_hint("只使用所选频率对应的日期、时间、星期或间隔；日期与时间以所填时区为准。"))
     elements.append({"tag": "button", "name": "cron_save", "text": _plain_text("保存修改" if editing else "创建任务"),
         "type": "primary_filled", "width": "fill", "form_action_type": "submit"})
     if not binding_target:
@@ -621,7 +702,7 @@ def _render_schedule_draft_card(draft: ScheduleFormDraft, *, projects: Sequence[
         _relax_required_fields(elements)
     if notice:
         builder.raw(_notice(notice))
-    builder.raw({"tag": "form", "name": "cron_plan", "elements": elements})
+    builder.raw({"tag": "form", "name": "cron_plan", "vertical_spacing": "12px", "elements": elements})
     builder.raw(_button(scope, "取消", "view" if editing else "list",
         {"plan_id": meta["plan_id"]} if editing else {}, navigation=meta["navigation"]))
     return _card(builder)
@@ -639,7 +720,7 @@ def _draft_picker(name: str, tag: str, value: str) -> dict[str, Any]:
 def _new_topic_form_fields(draft: ScheduleFormDraft, *, projects: Sequence[Project],
                            project_meta: dict[str, Any], catalog: ModelCatalog | None,
                            catalog_error: str | None) -> list[dict[str, Any]]:
-    elements: list[dict[str, Any]] = [_plain("执行目标：每次新建独立话题。")]
+    elements: list[dict[str, Any]] = []
     selected_project = draft.meta["project"]
     project_choices = list(projects)
     if selected_project is not None and selected_project not in {project.alias for project in projects if project.enabled}:
@@ -648,16 +729,20 @@ def _new_topic_form_fields(draft: ScheduleFormDraft, *, projects: Sequence[Proje
             # Preserve only the display identity needed for read-only search
             # and retries. Saving still resolves the exact live Project.
             project_choices.append(Project(selected_project, Path("."), False, 0))
-    project_options = [(_encoded({**project_meta, "project": p.alias}), p.alias if p.enabled else p.alias + " · 已停用或不可用") for p in project_choices]
+    project_options = [(_encoded({**project_meta, "project": p.alias,
+        "project_revision": p.revision if p.revision > 0 else None}), p.alias if p.enabled else p.alias + " · 已停用或不可用")
+        for p in project_choices]
     selected_project_value = _encoded({**project_meta, "project": selected_project}) if selected_project is not None else None
-    elements.append(_select("cron_project", "执行 Project", project_options, selected_project_value))
+    if selected_project_value is not None and all(value != selected_project_value for value, _ in project_options):
+        project_options.append((selected_project_value, str(selected_project) + " · 保留原项目版本"))
+    project_control = _select("cron_project", "执行 Project", project_options, selected_project_value)
+    elements.append(_form_section("项目", [project_control]))
     incomplete_model = draft.session_fields is not None and any(
         not draft.session_fields.get("cron_session_" + field, "") for field in ("effort", "speed")
     ) and _decode_new_model_reference(draft.session_fields["cron_session_model"]) is not None
-    elements.append(_fold("Agent 会话配置",
-        _plain("配置尚未填写完整；查找群聊不会保存任务。" if incomplete_model else
-            session_settings_summary(draft.settings, allow_context_mode=draft.allow_context_mode)),
-        *_draft_session_fields(draft, catalog=catalog, catalog_error=catalog_error)))
+    if incomplete_model:
+        elements.append(_notice("配置尚未填写完整；加载选项不会保存任务。"))
+    elements.extend(_draft_session_fields(draft, catalog=catalog, catalog_error=catalog_error))
     return elements
 
 
@@ -666,24 +751,9 @@ def _draft_session_fields(draft: ScheduleFormDraft, *, catalog: ModelCatalog | N
     # Catalog choices and unsaved selections are separate inputs. In particular,
     # selecting inherit must not discard the user's pending Effort/Speed values.
     settings = replace(draft.settings, turn_settings=None) if draft.session_fields is not None and catalog else draft.settings
-    elements = session_settings_form_elements(prefix="cron_session", settings=settings, catalog=catalog,
-        catalog_error=catalog_error, allow_context_mode=draft.allow_context_mode)
-    remaining = dict(draft.session_fields or {})
-    for control in elements:
-        if control.get("tag") != "select_static" or control["name"] not in remaining:
-            continue
-        value = remaining.pop(control["name"])
-        control.pop("initial_option", None)
-        if value:
-            if value not in {option["value"] for option in control["options"]}:
-                control["options"].append({"text": _plain_text("保留所选值"), "value": value})
-            control["initial_option"] = value
-    for name, value in remaining.items():
-        # An unavailable catalog has no inherited Effort/Speed controls. Keep
-        # their pending choices as selects, not a second text-input fallback.
-        elements.append(_select(name, "Effort" if name.endswith("effort") else "Speed",
-            [(value, value)] if value else [], value or None))
-    return elements
+    return session_settings_form_elements(prefix="cron_session", settings=settings, catalog=catalog,
+        catalog_error=catalog_error, allow_context_mode=draft.allow_context_mode,
+        grouped=True, settings_draft=draft.session_fields)
 
 
 def _chat_target_form_fields(draft: ScheduleFormDraft, *,
@@ -766,10 +836,13 @@ def _plan_form_metadata(form: Mapping[str, Any]) -> dict[str, Any]:
     binding_target = meta.get("target_kind") == "binding"
     target_fields = {"target_kind", "target_binding_id"} if binding_target else {"project"}
     required = target_fields | {"navigation", "scope", "request_id"}
-    display_fields = {"target_chat_id", "target_chat_label", "target_topic_id", "target_label"} if binding_target else set()
-    if not required <= set(meta) or set(meta) - required - display_fields:
+    display_fields = {"target_chat_id", "target_chat_label", "target_topic_id", "target_label",
+        "target_workspace_description"} if binding_target else set()
+    optional = display_fields if binding_target else {"project_revision"}
+    if not required <= set(meta) or set(meta) - required - optional:
         raise CardActionError("定时任务 Project 选项无效，请重新选择。")
-    if any(not isinstance(meta[key], str) or len(meta[key]) > 512 for key in display_fields & set(meta)):
+    if any(not isinstance(meta[key], str) or len(meta[key]) > (4096 if key == "target_workspace_description" else 512)
+            for key in display_fields & set(meta)):
         raise CardActionError("目标 Agent 会话的显示信息无效，请重新打开表单。")
     if not isinstance(meta["request_id"], str) or not re.fullmatch(r"[0-9a-f]{32}", meta["request_id"]):
         raise CardActionError("定时任务表单缺少操作凭据。")
@@ -777,6 +850,9 @@ def _plan_form_metadata(form: Mapping[str, Any]) -> dict[str, Any]:
         meta["target_binding_id"] = _text(meta["target_binding_id"], "目标 Agent 会话")
     else:
         meta["project"] = _text(meta["project"], "Project")
+        if (meta.get("project_revision") is not None
+                and (type(meta["project_revision"]) is not int or meta["project_revision"] < 1)):
+            raise CardActionError("Project 版本无效，请重新加载项目目录选项。")
     meta["navigation"] = schedule_navigation(meta["navigation"])
     instructions = [name for name in form if isinstance(name, str) and (name == "cron_instructions" or name.startswith("cron_instructions__"))]
     if len(instructions) != 1:
@@ -802,6 +878,7 @@ def read_schedule_form(scope: FeishuScope, form: Mapping[str, Any]) -> ScheduleF
         mode_field="cron_target_mode", choice_field="cron_group_id", id_field="cron_chat_id")
     fields: dict[str, Any] = {}
     session_fields: dict[str, str] = {}
+    workspace_fields: dict[str, str] = {}
     evidence = {"cron_timezone": "original_at", "cron_every_minutes": "anchor", "cron_end_time": "original_end_at"}
     allowed = {"cron_name", "cron_instructions", "cron_project", "cron_timezone", "cron_kind",
         "cron_every_minutes", "cron_at", "cron_date", "cron_weekdays", "cron_end_date", "cron_end_time"}
@@ -818,6 +895,12 @@ def read_schedule_form(scope: FeishuScope, form: Mapping[str, Any]) -> ScheduleF
             if binding_target or not isinstance(value, str):
                 raise CardActionError("Agent 会话配置字段格式无效。")
             session_fields[key] = value
+            continue
+        elif key in workspace_field_names("cron"):
+            value = "" if value is None else value
+            if binding_target or not isinstance(value, str):
+                raise CardActionError("固定会话不能配置工作区，或工作区字段格式无效。")
+            workspace_fields[key] = value
             continue
         elif decorated:
             if not reference or base not in {*evidence, "cron_instructions"}:
@@ -861,8 +944,34 @@ def read_schedule_form(scope: FeishuScope, form: Mapping[str, Any]) -> ScheduleF
             raise CardActionError("飞书聊天选项无效，请重新选择。")
         target = replace(target, choice="")
     settings = SessionSettings() if binding_target else _read_draft_settings(session_fields)
+    if workspace_fields:
+        read_workspace_reference(workspace_fields.get("cron_workspace"))
     return ScheduleFormDraft(scope, meta, fields, settings, target,
-        "cron_session_context_mode" in session_fields, None if binding_target else session_fields)
+        "cron_session_context_mode" in session_fields, None if binding_target else session_fields,
+        None if binding_target else workspace_fields)
+
+
+def refresh_schedule_workspace(
+    draft: ScheduleFormDraft, options: Mapping[str, Any] | None,
+) -> ScheduleFormDraft:
+    """Explicit refresh can renew selection identity, never the plan write identity."""
+    if draft.meta.get("target_kind") == "binding":
+        raise CardActionError("固定 Agent 会话任务沿用目标工作区。")
+    meta = dict(draft.meta)
+    fields = draft.workspace_fields or {}
+    selected = read_workspace_reference(fields["cron_workspace"]) if fields.get("cron_workspace") else None
+    policy = {"mode": "project"}
+    if selected is not None and selected["project"] == meta["project"]:
+        policy = {key: value for key, value in selected.items() if key not in {"project", "project_revision"}}
+    if options is not None:
+        if options["projectAlias"] != meta["project"]:
+            raise CardActionError("工作区选项不属于所选项目。")
+        meta["project_revision"] = options["projectRevision"]
+    ref = fields.get("cron_worktree_ref", "HEAD") if policy["mode"] == "new" else "HEAD"
+    return replace(draft, meta=meta, workspace_fields={
+        "cron_workspace": workspace_reference(meta["project"], meta.get("project_revision"), policy),
+        "cron_worktree_ref": ref,
+    })
 
 
 def _read_draft_settings(fields: dict[str, str]) -> SessionSettings:
@@ -902,7 +1011,7 @@ def _decode_form(scope: FeishuScope, form: Any, *, value: Any = None) -> Schedul
         if (form_kind == "filter" and set(choice) != {"filter"}) or (form_kind == "manage" and "plan_id" not in choice):
             raise CardActionError("定时任务选项无效，请重新选择。")
         return ScheduleCardAction("list", {}, identity[2], schedule_navigation(choice))
-    if isinstance(value, Mapping) and value.get("action") in {"search_chats", "page_chats"}:
+    if isinstance(value, Mapping) and value.get("action") in {"search_chats", "page_chats", "load_workspace"}:
         action = decode_schedule_action(scope=scope, value=value)
         draft = read_schedule_form(scope, form)
         meta = draft.meta
@@ -912,9 +1021,11 @@ def _decode_form(scope: FeishuScope, form: Any, *, value: Any = None) -> Schedul
             query = _chat_query(draft.fields.get("cron_chat_query", ""))
             draft = replace(draft, target=replace(draft.target, choice=""))
             payload = {"query": query, "draft": draft}
-        else:
+        elif action.action == "page_chats":
             snapshot = decode_chat_snapshot(action.payload["snapshot"])
             payload = {"snapshot": snapshot, "page": decode_page_selection(form.get("cron_chat_page"), snapshot.total_pages), "draft": draft}
+        else:
+            payload = {"draft": draft}
         return ScheduleCardAction(action.action, payload, meta["request_id"], meta["navigation"])
     meta = _plan_form_metadata(form)
     if meta["scope"] != scope.key:
@@ -942,8 +1053,9 @@ def _decode_form(scope: FeishuScope, form: Any, *, value: Any = None) -> Schedul
                     raise CardActionError("定时任务表单的间隔起点无效。") from error
         form[field] = form.pop(name)
     settings_fields = {key: form.pop(key) for key in tuple(form) if isinstance(key, str) and key.startswith("cron_session_")}
+    workspace_fields = {key: form.pop(key) for key in workspace_field_names("cron") if key in form}
     binding_target = meta.get("target_kind") == "binding"
-    if binding_target and settings_fields:
+    if binding_target and (settings_fields or workspace_fields):
         raise CardActionError("固定 Agent 会话任务沿用目标配置，请重新打开表单。")
     settings = None if binding_target else decode_session_settings_form(settings_fields, prefix="cron_session")
     expected = {names[0], "cron_instructions", "cron_project", "cron_timezone", "cron_kind"}
@@ -983,6 +1095,11 @@ def _decode_form(scope: FeishuScope, form: Any, *, value: Any = None) -> Schedul
     else:
         assert settings is not None
         draft.update(project=meta["project"], session_settings=settings.to_dict())
+        if workspace_fields:
+            draft["workspace"] = decode_workspace_form(workspace_fields, prefix="cron",
+                project=meta["project"], revision=meta.get("project_revision"))
+        if meta.get("project_revision") is not None:
+            draft["expected_project_revision"] = meta["project_revision"]
     if not _instructions_fit(draft["instructions"]) or len(draft["instructions"]) > _MAX_FORM_INSTRUCTIONS:
         raise CardActionError("执行指令超过卡片编辑容量，请通过 Admin 或自然语言维护；尚未保存。")
     if not binding_target:

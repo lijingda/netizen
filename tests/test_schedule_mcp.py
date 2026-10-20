@@ -122,6 +122,49 @@ class ScheduleMcpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response["structuredContent"]["error"]["code"], "invalid_request")
         self.assertEqual(self.requests, [])
 
+    async def test_workspace_policy_and_project_options_reach_management_without_normalization(self):
+        self.runner.open_admission()
+        validator = Draft202012Validator(_tool_schema())
+        for workspace in ({"mode": "project"}, {"mode": "existing", "worktree_id": "exact-worktree"},
+                          {"mode": "new"}, {"mode": "new", "ref": "refs/heads/main"}):
+            request = {**CREATE_EXAMPLE, "workspace": workspace, "expected_project_revision": 4}
+            with self.subTest(workspace=workspace):
+                self.assertFalse(list(validator.iter_errors(request)))
+                response = await self.call(request, {"threadId": "caller"})
+                self.assertFalse(response["isError"], response)
+                self.assertEqual(self.requests[-1], (request, "caller"))
+        request = {"mode": "options", "project": "target", "expected_project_revision": 4}
+        self.assertFalse((await self.call(request))["isError"])
+        self.assertEqual(self.requests[-1], (request, None))
+
+    async def test_invalid_workspace_and_binding_or_manual_overrides_never_reach_management(self):
+        self.runner.open_admission()
+        validator = Draft202012Validator(_tool_schema())
+        invalid = [
+            {**CREATE_EXAMPLE, "workspace": value} for value in (
+                None, {}, {"mode": "project", "worktree_id": "id"}, {"mode": "existing"},
+                {"mode": "new", "ref": None}, {"mode": "new", "branch": "topic"},
+                {"mode": "existing", "worktree_id": "id", "cwd": "/tmp"},
+            )
+        ]
+        invalid += [
+            {**CREATE_EXAMPLE, "target_kind": "binding", "workspace": {"mode": "project"}},
+            {"mode": "run_now", "plan_id": "plan", "expected_revision": 1,
+             "request_id": "request", "workspace": {"mode": "new"}},
+        ]
+        for request in invalid:
+            with self.subTest(request=request):
+                self.assertTrue(list(validator.iter_errors(request)))
+                response = await self.call(request)
+                self.assertEqual(response["structuredContent"]["error"]["code"], "invalid_request")
+        for workspace in ({"mode": "new", "ref": " \nprivate-ref"},
+                          {"mode": "existing", "worktree_id": " trailing "}):
+            response = await self.call({**CREATE_EXAMPLE, "workspace": workspace})
+            self.assertEqual(response["structuredContent"]["error"]["code"], "invalid_request")
+            self.assertIn("workspace", {item["field"] for item in response["structuredContent"]["error"]["fields"]})
+            self.assertNotIn("private-ref", str(response))
+        self.assertEqual(self.requests, [])
+
     async def test_conflicting_or_malformed_metadata_never_reaches_service(self):
         self.runner.open_admission()
         for meta in (
