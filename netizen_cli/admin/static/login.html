@@ -9,22 +9,33 @@
 </head>
 <body class="login-body">
   <main class="login-card">
-    <p class="eyebrow">INSTANCE CONTROL PLANE</p>
-    <h1>Netizen Admin</h1>
-    <p class="instance-root">__NETIZEN_INSTANCE_ROOT__</p>
-    <p>使用已获授权的飞书管理员账号登录此实例。</p>
+    <header class="login-heading">
+      <h1>Netizen Admin</h1>
+      <p>使用已获授权的飞书管理员账号登录</p>
+    </header>
+    <div class="login-instance">
+      <span>当前实例</span>
+      <p class="instance-root">__NETIZEN_INSTANCE_ROOT__</p>
+    </div>
     <input id="login-nonce" type="hidden" value="__NETIZEN_LOGIN_NONCE__">
     <input id="login-next" type="hidden" value="__NETIZEN_LOGIN_NEXT__">
-    <p id="login-status" class="status" role="status" aria-live="polite">正在检查登录状态…</p>
     <div id="login-authorization" hidden>
-      <img id="login-qr" class="login-qr" alt="使用飞书扫描二维码完成本次登录" hidden>
-      <p>请核对本次用户码：<strong id="login-code"></strong></p>
-      <a id="login-link" class="login-link" target="_blank" rel="noopener noreferrer">打开飞书授权页</a>
-      <p class="defaults-help">只确认你为上述实例主动发起的登录。授权后返回本页，不要替他人确认登录请求。</p>
-      <p id="login-deadline" class="defaults-help"></p>
+      <a id="login-link" class="login-button login-primary" target="_blank" rel="noopener noreferrer">打开飞书授权页<span aria-hidden="true">↗</span></a>
+      <div class="login-scan">
+        <p class="login-divider">或使用飞书扫码</p>
+        <img id="login-qr" class="login-qr" alt="使用飞书扫描二维码完成本次登录" hidden>
+      </div>
+      <p class="login-user-code"><span>核对用户码</span><strong id="login-code"></strong></p>
+      <p id="login-deadline" class="login-deadline"></p>
     </div>
-    <div class="login-actions"><button id="login-start" class="action" disabled>使用飞书登录</button><button id="login-cancel" class="refresh" hidden>取消此次登录</button><button id="login-check" class="refresh" hidden>检查登录结果</button></div>
-    <a id="login-retry" href="/login" hidden>重新开始登录</a>
+    <p id="login-status" class="status" role="status" aria-live="polite">正在检查登录状态…</p>
+    <div class="login-actions">
+      <button id="login-start" class="login-button login-primary" disabled>使用飞书登录</button>
+      <button id="login-check" class="login-button login-secondary" hidden>检查登录结果</button>
+      <button id="login-cancel" class="login-button login-cancel" hidden>取消登录</button>
+    </div>
+    <a id="login-retry" class="login-button login-primary" href="/login" hidden>重新开始登录</a>
+    <p class="login-safety">只确认你为上述实例主动发起的登录，不要替他人确认登录请求。</p>
   </main>
 </body>
 </html>
