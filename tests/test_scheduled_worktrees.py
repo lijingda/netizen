@@ -63,7 +63,7 @@ class ScheduledWorktreeTests(unittest.IsolatedAsyncioTestCase):
         self.topic()
         run = await self.dispatch(claim)
         self.assertIsNone(run.worktree_id)
-        self.assertEqual(self.f.submissions[0]["cwd"], self.f.project)
+        self.assertEqual(self.f.submissions[0]["cwd"], self.f.project.resolve())
         self.assertEqual(self.resources(), ())
 
     async def test_existing_selection_is_frozen_and_reaches_binding_and_runtime(self):
