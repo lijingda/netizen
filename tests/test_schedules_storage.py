@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
+from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import (
     BindingStore, ProjectDeleting, ProjectDisabled, ProjectInventoryConflict,
     ScopeConflict, ScopeNotFound, SideTopicState, validate_channel_database,
@@ -131,7 +132,7 @@ class BindingScheduleStorageTest(unittest.TestCase):
             "project_alias": "p", "app_id": "app", "chat_id": "chat",
             "schedule": ScheduleRule("interval", "UTC", every_minutes=1, anchor=100),
             "target_kind": "binding", "target_binding_id": self.binding.id,
-            "session_settings": None, "request_id": f"create-{self.sequence}", **changes,
+            "session_settings": None, "workspace": None, "request_id": f"create-{self.sequence}", **changes,
         }).plan_id
 
     def submission(self, claim):
@@ -195,7 +196,8 @@ class BindingScheduleStorageTest(unittest.TestCase):
         self.assertTrue(self.schedules.update(plan_id, expected_revision=1, request_id="same-target", changes=changes).replayed)
 
     def test_new_topic_update_allows_project_and_chat_but_not_target_mode_change(self):
-        plan_id = self.create(target_kind="new_topic", target_binding_id=None, session_settings=SessionSettings())
+        plan_id = self.create(target_kind="new_topic", target_binding_id=None,
+                              session_settings=SessionSettings(), workspace=WorkspacePolicy())
         before = self.schedules.get(plan_id)
         with self.assertRaises(ScheduleConflict):
             self.schedules.update(plan_id, expected_revision=1, request_id="change-mode", changes={
@@ -316,7 +318,7 @@ class ScheduleStorageTest(unittest.TestCase):
         return f"request-{self.requests}"
 
     def create(self, **overrides):
-        values = dict(name="daily report", instructions="Inspect the exact repository.", project_alias="p", app_id="app", chat_id="chat", schedule=self.rule, request_id=self.request(), now=self.now)
+        values = dict(name="daily report", instructions="Inspect the exact repository.", project_alias="p", app_id="app", chat_id="chat", schedule=self.rule, request_id=self.request(), workspace=WorkspacePolicy(), now=self.now)
         values.update(overrides)
         return self.schedules.create(**values)
 
@@ -1169,7 +1171,7 @@ class ScheduleMigrationTest(unittest.TestCase):
             path = Path(directory) / "channel.db"
             store = BindingStore(path, wall_clock=lambda: 100)
             store.register_project(alias="p", cwd="/tmp/project")
-            plan_id = store.schedules.create(
+            plan_id = store.schedules.create(workspace=WorkspacePolicy(),
                 name="manual", instructions="saved task", project_alias="p", app_id="app", chat_id="chat",
                 schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100), request_id="create",
             ).plan_id
@@ -1206,7 +1208,7 @@ class ScheduleMigrationTest(unittest.TestCase):
             store = BindingStore(path, wall_clock=lambda: 100)
             store.register_project(alias="p", cwd="/tmp/project")
             rule = ScheduleRule("interval", "UTC", every_minutes=1, anchor=100, end_at="1970-01-01T01:48Z")
-            plan_id = store.schedules.create(name="limited", instructions="run", project_alias="p",
+            plan_id = store.schedules.create(workspace=WorkspacePolicy(), name="limited", instructions="run", project_alias="p",
                 app_id="app", chat_id="chat", schedule=rule, request_id="create").plan_id
             for index in range(105):
                 claim = store.schedules.claim_due(plan_id, app_id="app", now=160 + index * 60)
@@ -1265,7 +1267,7 @@ class ScheduleMigrationTest(unittest.TestCase):
             store = BindingStore(path, wall_clock=lambda: 100)
             store.register_project(alias="p", cwd="/tmp/project")
             settings = SessionSettings(BindingTurnSettings("m", "high", "default"), BindingTaskFeedback(True, False), MentionContextMode.CATCH_UP)
-            plan = store.schedules.create(name="report", instructions="task definition", project_alias="p", app_id="app", chat_id="chat", schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100), request_id="create", session_settings=settings)
+            plan = store.schedules.create(workspace=WorkspacePolicy(), name="report", instructions="task definition", project_alias="p", app_id="app", chat_id="chat", schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100), request_id="create", session_settings=settings)
             claim = store.schedules.claim_due(plan.plan_id, app_id="app", now=160)
             store.schedules.begin_publication(claim.run.id)
             store.schedules.set_run(claim.run.id, root_message_id="known-root")

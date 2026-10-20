@@ -104,7 +104,7 @@ class BindingScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
     def claim(self, binding, instructions="检查刚才的结果", *, due=160):
         self.sequence += 1
         scope = self.store.get_scope(binding.scope_key)
-        created = self.store.schedules.create(
+        created = self.store.schedules.create(workspace=None,
             name="原会话检查", instructions=instructions, project_alias=binding.project_alias,
             app_id=scope.app_id, chat_id=scope.chat_id,
             schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100),

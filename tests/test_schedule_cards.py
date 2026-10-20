@@ -19,6 +19,7 @@ from netizen_cli.cards.scheduled import (
     schedule_form_card,
     schedule_draft_card,
     read_schedule_form,
+    refresh_schedule_workspace,
     _element_count,
     schedule_manager_card,
     schedule_navigation,
@@ -425,7 +426,7 @@ class ScheduleCardsTest(unittest.TestCase):
         self.assertFalse(interval["required"])
         self.assertTrue(any(item["name"].startswith("cron_timezone") for item in elements(card.card, "input")))
         self.assertFalse(any(item["name"].startswith("cron_timezone") for panel in elements(card.card, "collapsible_panel") for item in elements(panel, "input")))
-        self.assertEqual([item["text"]["content"] for item in elements(card.card, "button")], ["查找群聊", "创建任务", "取消"])
+        self.assertEqual([item["text"]["content"] for item in elements(card.card, "button")], ["查找群聊", "加载项目目录选项", "创建任务", "取消"])
 
     def test_edit_field_identity_fits_real_topic_and_uuid_plan_limits(self):
         self.scope = FeishuScope("cli_" + "a" * 16, "oc_" + "a" * 32, ScopeKind.TOPIC, "omt_" + "b" * 32)
@@ -709,7 +710,14 @@ class ScheduleCardsTest(unittest.TestCase):
                 form[instructions] = form[instructions] or "新指令"
                 self.assertEqual(decode_schedule_action(scope=self.scope, value=None, form=form).payload["project"], "work")
                 form["cron_project"] = control["options"][0]["value"]
-                action = decode_schedule_action(scope=self.scope, value=None, form=form)
+                with self.assertRaisesRegex(CardActionError, "重新加载"):
+                    decode_schedule_action(scope=self.scope, value=None, form=form)
+                load = decode_schedule_action(scope=self.scope, value=callback(card, "加载项目目录选项"), form=form)
+                draft = refresh_schedule_workspace(load.payload["draft"], {
+                    "projectAlias": "available", "projectRevision": available.revision,
+                })
+                refreshed = schedule_draft_card(draft, projects=[available])
+                action = decode_schedule_action(scope=self.scope, value=None, form=form_values(refreshed))
                 self.assertEqual(action.payload["project"], "available")
                 if "plan" in existing:
                     self.assertEqual(action.payload["instructions"], self.plan["instructions"])
@@ -740,7 +748,7 @@ class ScheduleCardsTest(unittest.TestCase):
         self.assertEqual(corrected.request_id, first.request_id)
         self.assertEqual(corrected.payload["schedule"], {"kind": "interval", "timezone": "Asia/Shanghai", "every_minutes": 15, "end_at": None})
         self.assertEqual(corrected.payload["expected_revision"], self.plan["revision"])
-        self.assertEqual([item["text"]["content"] for item in elements(card.card, "button")], ["查找群聊", "保存修改", "取消"])
+        self.assertEqual([item["text"]["content"] for item in elements(card.card, "button")], ["查找群聊", "加载项目目录选项", "保存修改", "取消"])
 
     def test_retry_form_renews_transport_identity_but_keeps_all_business_fields(self):
         self.plan["schedule"] = {"kind": "interval", "timezone": "America/New_York", "every_minutes": 45,

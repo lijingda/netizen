@@ -2520,6 +2520,81 @@ function chatTarget(prefix, onChange = null) {
   return controller;
 }
 
+function workspaceErrorMessage(error) {
+  return typeof error === "string" ? error : error?.message || "";
+}
+
+function workspacePolicyAvailable(workspace, options, project) {
+  if (workspace.mode === "project") return true;
+  if (!options?.isGit || options.projectAlias !== project) return false;
+  return workspace.mode === "new"
+    || options.items.some((item) => item.available === true && item.id === workspace.worktree_id);
+}
+
+function workspacePolicySummary(workspace, { scheduled = false } = {}) {
+  if (!workspace) return "沿用原会话的实际工作目录";
+  if (workspace.mode === "existing") return `指定 Worktree：${workspace.worktree_id}`;
+  if (workspace.mode === "new") return `${scheduled ? "每次执行" : "每个新会话"}创建 Worktree · ${workspace.ref || "创建时 Project HEAD"}`;
+  return "项目目录";
+}
+
+function renderWorkspacePolicy(input, editor, { project, loading = false, scheduled = false } = {}) {
+  const workspace = editor.workspace;
+  const options = editor.workspaceOptions;
+  const available = options?.isGit && options.projectAlias === project;
+  const items = available ? options.items.filter((item) => item.available === true) : [];
+  input("workspace").value = workspace.mode;
+  for (const option of input("workspace").querySelectorAll("option")) {
+    option.disabled = option.value !== "project" && (!available || option.value === "existing" && !items.length);
+  }
+  input("worktree-field").hidden = workspace.mode !== "existing";
+  input("workspace-ref-field").hidden = workspace.mode !== "new";
+  scheduleSelectOptions(input("worktree"), [["", "选择受管 Worktree"],
+    ...items.map((item) => [item.id, `${item.cwd} · ${item.branch || "detached"} · ${item.id}`])],
+  workspace.worktree_id || "");
+  input("worktree").required = workspace.mode === "existing";
+  input("workspace-ref").value = workspace.ref || "";
+  for (const field of ["workspace", "worktree", "workspace-ref"]) input(field).disabled = loading;
+  input("workspace-refs").replaceChildren();
+  for (const branch of options?.branches || []) {
+    const option = document.createElement("option");
+    option.value = branch.ref;
+    option.textContent = branch.name;
+    input("workspace-refs").append(option);
+  }
+  const notes = [];
+  if (loading) notes.push("正在读取工作区选项…");
+  if (editor.workspaceError) notes.push(workspaceErrorMessage(editor.workspaceError));
+  else if (options?.isGit === false) notes.push("该 Project 不是 Git 仓库，只支持项目目录。");
+  else if (!project) notes.push("先选择 Project，再选择工作区策略。");
+  if (workspace.mode === "existing") {
+    notes.push(scheduled ? "各次执行共享所选 Worktree 的文件和分支；资源不可用时保留计划并跳过执行。"
+      : "新会话共享所选 Worktree 的文件和分支；删除或失效后保留此配置，自动创建会话时明确报错。");
+    if (!loading && !workspacePolicyAvailable(workspace, options, project)) {
+      notes.push("所选 Worktree 当前不可用，请重新选择；不会切回项目目录。");
+    }
+  } else if (workspace.mode === "new") {
+    notes.push(scheduled
+      ? "每次执行创建一份 detached Worktree；该次会话的后续消息复用。留空使用执行时 Project 的 HEAD，预览和保存不创建目录。"
+      : "每次自动创建新会话时创建一次 detached Worktree；后续消息复用。留空使用创建时 Project 的 HEAD，保存配置不创建目录。");
+    if (!loading && !available) notes.push("当前无法使用新建 Worktree 策略，请检查 Project。");
+  } else notes.push(scheduled ? "每次执行创建的会话使用 Project 的项目目录。" : "新会话使用 Project 的项目目录。");
+  input("workspace-help").textContent = notes.join(" ");
+  input("workspace-help").classList.toggle("error", !loading && !workspacePolicyAvailable(workspace, options, project));
+}
+
+function changeWorkspacePolicy(input, editor, field) {
+  if (field === "workspace") {
+    const mode = input("workspace").value;
+    editor.workspace = mode === "existing" ? { mode, worktree_id: "" } : { mode };
+  } else if (field === "worktree") {
+    editor.workspace = { mode: "existing", worktree_id: input(field).value };
+  } else {
+    const ref = input(field).value.trim();
+    editor.workspace = { mode: "new", ...(ref ? { ref } : {}) };
+  }
+}
+
 let defaultsEditor = null;
 let defaultsProjects = [];
 let defaultsOffset = 0;
@@ -2598,49 +2673,13 @@ function renderDefaultProject(project) {
 
 function defaultWorkspaceAvailable() {
   const editor = defaultsEditor;
-  if (!editor || editor.workspace.mode === "project") return true;
-  const options = editor.workspaceOptions;
-  if (!options?.isGit || options.projectAlias !== defaultsInput("project").value) return false;
-  return editor.workspace.mode === "new"
-    || options.items.some((item) => item.id === editor.workspace.worktree_id);
+  return !editor || workspacePolicyAvailable(editor.workspace, editor.workspaceOptions, defaultsInput("project").value);
 }
 
 function renderDefaultWorkspace() {
-  const editor = defaultsEditor;
-  const workspace = editor.workspace;
-  const options = editor.workspaceOptions;
-  const available = options?.isGit && options.projectAlias === defaultsInput("project").value;
-  defaultsInput("workspace").value = workspace.mode;
-  for (const option of defaultsInput("workspace").querySelectorAll("option")) {
-    option.disabled = option.value !== "project" && (!available || option.value === "existing" && !options.items.length);
-  }
-  defaultsInput("worktree-field").hidden = workspace.mode !== "existing";
-  defaultsInput("workspace-ref-field").hidden = workspace.mode !== "new";
-  scheduleSelectOptions(defaultsInput("worktree"), [["", "选择受管 Worktree"],
-    ...(available ? options.items : []).map((item) => [item.id, `${item.cwd} · ${item.branch || "detached"} · ${item.id}`])],
-  workspace.worktree_id || "");
-  defaultsInput("worktree").required = workspace.mode === "existing";
-  defaultsInput("workspace-ref").value = workspace.ref || "";
-  defaultsInput("workspace-refs").replaceChildren();
-  for (const branch of options?.branches || []) {
-    const option = document.createElement("option");
-    option.value = branch.ref;
-    option.textContent = branch.name;
-    defaultsInput("workspace-refs").append(option);
-  }
-  const notes = [];
-  if (editor.workspaceError) notes.push(editor.workspaceError);
-  else if (options?.isGit === false) notes.push("该 Project 不是 Git 仓库，只支持项目目录。");
-  else if (!defaultsInput("project").value) notes.push("先选择 Project，再选择工作区策略。");
-  if (workspace.mode === "existing") {
-    notes.push("新会话共享所选 Worktree 的文件和分支；删除或失效后保留此配置，自动创建会话时明确报错。");
-    if (!editor.loading && !defaultWorkspaceAvailable()) notes.push("所选 Worktree 当前不可用，请重新选择；不会切回项目目录。");
-  } else if (workspace.mode === "new") {
-    notes.push("每次自动创建新会话时创建一次 detached Worktree；后续消息复用。留空使用创建时 Project 的 HEAD，保存配置不创建目录。");
-    if (!editor.loading && !available) notes.push("当前无法使用新建 Worktree 策略，请检查 Project。");
-  } else notes.push("新会话使用 Project 的项目目录。");
-  defaultsInput("workspace-help").textContent = notes.join(" ");
-  defaultsInput("workspace-help").classList.toggle("error", !editor.loading && !defaultWorkspaceAvailable());
+  renderWorkspacePolicy(defaultsInput, defaultsEditor, {
+    project: defaultsInput("project").value, loading: defaultsEditor.loading,
+  });
 }
 
 async function changeDefaultProject() {
@@ -2655,15 +2694,7 @@ async function changeDefaultProject() {
 function changeDefaultWorkspace(field) {
   const editor = defaultsEditor;
   if (!editor || editor.loading || defaultsBusy) return;
-  if (field === "workspace") {
-    const mode = defaultsInput("workspace").value;
-    editor.workspace = mode === "existing" ? { mode, worktree_id: "" } : { mode };
-  } else if (field === "worktree") {
-    editor.workspace = { mode: "existing", worktree_id: defaultsInput(field).value };
-  } else {
-    const ref = defaultsInput(field).value.trim();
-    editor.workspace = { mode: "new", ...(ref ? { ref } : {}) };
-  }
+  changeWorkspacePolicy(defaultsInput, editor, field);
   renderDefaultSettings();
 }
 
@@ -2922,8 +2953,7 @@ function defaultSettingsCell(row, settings, workspace) {
   detail.textContent = scheduleSessionSummary(settings).split(" · ").slice(1).join(" · ");
   const location = document.createElement("div");
   location.className = "default-settings-detail";
-  location.textContent = workspace.mode === "existing" ? `指定 Worktree：${workspace.worktree_id}`
-    : workspace.mode === "new" ? `每个新会话创建 Worktree · ${workspace.ref || "创建时 Project HEAD"}` : "项目目录";
+  location.textContent = workspacePolicySummary(workspace);
   td.append(title, detail, location);
   row.append(td);
 }
@@ -3063,6 +3093,10 @@ function scheduleRunStatus(status) {
     not_started: "尚未执行", expired: "已过期，未执行", missed: "已错过",
     skipped_busy: "上次仍在执行，本次跳过", blocked_unknown: "上次结果待确认，本次跳过",
     project_disabled: "Project 已停用，本次未执行", project_unavailable: "Project 不可用，本次未执行",
+    workspace_unavailable: "工作区不可用，本次未执行",
+    workspace_creation_failed: "工作区创建失败，本次未执行",
+    workspace_creation_unknown: "工作区创建结果待确认，本次未执行",
+    workspace_handoff_failed: "工作区已保留，会话交接失败",
     released: "调度已收尾", recovery_no_start: "服务恢复，本次未启动",
     publishing_unknown: "话题投递待确认", deleted: "执行会话已删除",
     initial_start_rejected: "启动被拒绝", publishing_failed: "话题发布失败",
@@ -3077,23 +3111,52 @@ function scheduleTriggerSource(source) {
   return source === "manual" ? "手动触发" : source === "scheduled" ? "定时触发" : "";
 }
 
+function scheduleWorktreeReceipt(run, { details = true } = {}) {
+  if (!run?.worktree_id) return "";
+  const labels = [`Worktree：${run.worktree_id}`];
+  const receipt = run.worktree;
+  if (details && receipt) {
+    if (receipt.cwd) labels.push(`工作目录：${receipt.cwd}`);
+    if (receipt.root && receipt.root !== receipt.cwd) labels.push(`根目录：${receipt.root}`);
+    if (!receipt.cwd && !receipt.root) labels.push("资源登记已不可用");
+    if (receipt.creation_state === "unknown") labels.push("创建结果待确认");
+    else if (receipt.creation_state === "creating") labels.push("创建尚未确认完成");
+  }
+  return labels.join(" · ");
+}
+
 function scheduleExecutionLabel(execution) {
   const label = scheduleRunStatus(execution.status);
   if (execution.kind === "none") return label;
   if (execution.status === "deleted") return label;
   if (execution.kind === "current") return `${execution.is_last ? "最后一次" : "本次"}${label}`;
-  if (["skipped_busy", "blocked_unknown", "project_disabled", "project_unavailable"].includes(execution.status)) return label;
+  if (["skipped_busy", "blocked_unknown", "project_disabled", "project_unavailable", "workspace_unavailable"].includes(execution.status)) return label;
   return `上次${label}`;
 }
 
 function scheduleBlockedLabel(plan) {
-  return { blocked_unknown: "执行结果待确认", project_disabled: "Project 已停用",
+  const primary = { blocked_unknown: "执行结果待确认", project_disabled: "Project 已停用",
     project_unavailable: "Project 不可用", target_inactive: "原会话已切走或归档，自动暂停",
     target_missing: "原会话不可用", target_mismatch: "原会话位置不匹配" }[plan.blocked_reason] || "";
+  const workspace = workspaceErrorMessage(plan.workspace_error)
+    || ([plan.blocked_reason, plan.suspended_reason].includes("workspace_unavailable") ? "工作区不可用" : "");
+  return [primary, workspace].filter(Boolean).join(" · ");
 }
 
 function scheduleTargetLabel(plan) {
   return plan.target_kind === "binding" ? `原会话 · ${plan.target_label || plan.target_binding_id}` : "每次新建独立话题";
+}
+
+function scheduleInheritedWorkspace(plan) {
+  const workspace = plan.effective_workspace;
+  if (!workspace) return "沿用原会话的实际工作目录；目录信息暂未取得。";
+  const labels = [workspace.working_cwd
+    ? `${workspace.native_cwd_unresolved ? "已登记" : "已选"}工作目录：${workspace.working_cwd}`
+    : "工作目录尚未登记"];
+  if (workspace.worktree_id) labels.push(`Worktree：${workspace.worktree_id}`);
+  labels.push(workspace.native_cwd_unresolved
+    ? "实际目录由原会话确定，本次未查询原生目录。" : "执行时沿用原会话的工作目录。");
+  return labels.join(" · ");
 }
 
 function scheduleNote(parent, value) {
@@ -3209,6 +3272,10 @@ function validateScheduleFields({ saving = false } = {}) {
   if (kind === "weekly" && !Array.from(scheduleInput("weekdays").querySelectorAll("input")).some((input) => input.checked)) {
     setScheduleFieldError("weekdays", "请至少选择一天。");
   }
+  if (saving && !scheduleWorkspaceCanSave()) {
+    setScheduleFieldError("workspace", scheduleEditor.workspaceLoading ? "工作区选项仍在读取，请稍后保存。"
+      : workspaceErrorMessage(scheduleEditor.workspaceError) || "请选择可用的工作区策略。");
+  }
   if (scheduleFieldErrors.size) {
     if (scheduleEditor?.action) showScheduleFormError("请检查标红的表单项。");
     focusScheduleError();
@@ -3223,7 +3290,8 @@ function validateScheduleFields({ saving = false } = {}) {
 function showScheduleRequestError(error, { submitted = false } = {}) {
   const field = ({ ambiguous_local_time: "offset", ambiguous_end_time: "end-offset",
     invalid_chat_id: "chat", not_group_chat: "chat",
-    project_disabled: "project", project_unavailable: "project", project_deleting: "project" })[error.code];
+    project_disabled: "project", project_unavailable: "project", project_deleting: "project", project_changed: "project",
+    workspace_unavailable: "workspace" })[error.code];
   if (field && (!["chat", "project"].includes(field) || scheduleTargetKind() !== "binding")) {
     setScheduleFieldError(field, error.message);
     focusScheduleError();
@@ -3250,6 +3318,7 @@ function renderScheduleTarget() {
   scheduleInput("chat-target").hidden = binding;
   if (binding) { scheduleInput("chat").required = false; chatTarget("schedule").close(); }
   scheduleInput("session-settings").hidden = binding;
+  renderScheduleWorkspace();
   const target = editor.targetSession;
   const selected = editor.plan?.target_binding_id || target?.bindingId || "";
   scheduleInput("binding").value = selected;
@@ -3259,6 +3328,7 @@ function renderScheduleTarget() {
       + (target.pointerState !== "current" || target.catalogState === "archived" ? "\n目标当前不是可执行的当前会话，计划将自动暂停；不会自动切换或恢复会话。" : "")
     : selected ? `${editor.plan.target_label || selected}\n${editor.plan.chat?.chatLabel || editor.plan.chat_id} · ${editor.plan.project_alias}`
       : "请前往 Sessions 找到具体会话，再点击该行的“创建定时任务”。已填写内容会在当前页面保留。";
+  if (binding && editor.plan) scheduleInput("binding-summary").textContent += `\n${scheduleInheritedWorkspace(editor.plan)}`;
   scheduleInput("preview").disabled = binding && !selected;
 }
 
@@ -3304,7 +3374,8 @@ function scheduleEditorValues() {
     binding: binding ? scheduleInput("binding").value : "",
     project: binding ? "" : scheduleInput("project").value,
     chat: binding ? "" : scheduleInput("chat").value, rule,
-    settings: binding ? null : sessionSettingsFingerprint(scheduleEditor.sessionDraft) };
+    settings: binding ? null : sessionSettingsFingerprint(scheduleEditor.sessionDraft),
+    workspace: binding ? null : structuredClone(scheduleEditor.workspace) };
 }
 
 function scheduleEditorHasChanges() {
@@ -3381,6 +3452,8 @@ function changeScheduleChat(resolve = true) {
   if (!editor) return;
   clearScheduleFieldError("chat");
   editor.optionsSerial += 1;
+  editor.workspaceLoading = false;
+  editor.chatMessage = "";
   editor.contextAvailable = chatTarget("schedule").kind() === "p2p" ? false : null;
   if (editor.contextAvailable === false) {
     editor.sessionDraft.message_context_mode = "current-only";
@@ -3388,11 +3461,14 @@ function changeScheduleChat(resolve = true) {
   }
   invalidateSchedulePreview();
   renderScheduleSessionSettings();
+  renderScheduleWorkspace();
   if (resolve && scheduleInput("chat").value.trim()) loadScheduleSessionOptions();
 }
 
 function scheduleRuleFingerprint() {
   return JSON.stringify({ rule: readScheduleRule(),
+    project: scheduleTargetKind() === "binding" ? null : scheduleInput("project").value,
+    workspace: scheduleTargetKind() === "binding" ? null : scheduleEditor?.workspace,
     utc_offset: scheduleInput("kind").value === "once" ? scheduleInput("offset").value : "",
     end_utc_offset: scheduleInput("kind").value !== "once" ? scheduleInput("end-offset").value : "" });
 }
@@ -3489,9 +3565,63 @@ function renderScheduleSessionSettings() {
   scheduleInput("session-summary").textContent = scheduleSessionSummary(settings);
   const notes = [];
   if (editor.catalogMessage) notes.push(editor.catalogMessage);
+  if (editor.chatMessage) notes.push(editor.chatMessage);
   if (current && !model && !editor.catalogMessage) notes.push("已保存的模型当前不可用，原配置保持不变。可调整其他配置，或显式选择新模型。");
   if (editor.contextAvailable === false) notes.push("私聊目标不支持补齐未读上下文；请选择当前消息后保存。");
   scheduleInput("session-note").textContent = notes.join(" ");
+}
+
+function scheduleWorkspaceChanged() {
+  const editor = scheduleEditor;
+  return !editor?.plan || scheduleInput("project").value !== editor.plan.project_alias
+    || JSON.stringify(editor.workspace) !== JSON.stringify(editor.plan.workspace);
+}
+
+function scheduleWorkspaceCanSave() {
+  if (!scheduleEditor || scheduleTargetKind() === "binding" || !scheduleWorkspaceChanged()) return true;
+  return workspacePolicyAvailable(scheduleEditor.workspace, scheduleEditor.workspaceOptions, scheduleInput("project").value);
+}
+
+function renderScheduleWorkspace() {
+  const editor = scheduleEditor;
+  if (!editor) return;
+  const binding = scheduleTargetKind() === "binding";
+  scheduleInput("workspace-fields").hidden = binding;
+  if (binding) {
+    for (const field of ["workspace", "worktree", "workspace-ref"]) scheduleInput(field).disabled = true;
+    scheduleInput("worktree").required = false;
+    return;
+  }
+  const unchanged = !scheduleWorkspaceChanged();
+  renderWorkspacePolicy(scheduleInput, { ...editor,
+    workspaceError: editor.workspaceError || (unchanged ? editor.plan.workspace_error : null) }, { project: scheduleInput("project").value,
+    loading: editor.workspaceLoading, scheduled: true });
+  if (unchanged && (!workspacePolicyAvailable(editor.workspace, editor.workspaceOptions, scheduleInput("project").value)
+      || editor.plan.workspace_available === false)) {
+    scheduleInput("workspace-help").textContent += " 可保留此策略修改计划，之后执行仍会重新校验。";
+  }
+}
+
+function updateScheduleSaveAvailability() {
+  scheduleInput("save").disabled = !schedulePrepared || !scheduleEditor?.action
+    || (!schedulePrepared.hasFuture && !scheduleEditor.plan) || !scheduleWorkspaceCanSave();
+}
+
+async function changeScheduleProject() {
+  if (!scheduleEditor || scheduleInput("fields").disabled) return;
+  scheduleEditor.workspace = { mode: "project" };
+  clearScheduleFieldError("workspace");
+  invalidateSchedulePreview();
+  await loadScheduleSessionOptions();
+}
+
+function changeScheduleWorkspace(field) {
+  if (!scheduleEditor || scheduleEditor.workspaceLoading || scheduleInput("fields").disabled
+      || scheduleTargetKind() === "binding") return;
+  changeWorkspacePolicy(scheduleInput, scheduleEditor, field);
+  clearScheduleFieldError("workspace");
+  invalidateSchedulePreview();
+  renderScheduleWorkspace();
 }
 
 async function loadScheduleSessionOptions() {
@@ -3501,11 +3631,22 @@ async function loadScheduleSessionOptions() {
   const serial = ++editor.optionsSerial;
   const query = new URLSearchParams({ mode: "options" });
   if (chatId && scheduleTargetKind() !== "binding") query.set("chat_id", chatId);
+  if (scheduleTargetKind() !== "binding" && scheduleInput("project").value) {
+    query.set("project", scheduleInput("project").value);
+  }
+  editor.workspaceOptions = null;
+  editor.workspaceError = null;
+  editor.workspaceLoading = query.has("project");
+  renderScheduleWorkspace();
+  updateScheduleSaveAvailability();
   try {
     const data = await api(`/api/v1/schedules?${query}`);
     if (scheduleEditor !== editor || serial !== editor.optionsSerial) return;
     editor.models = data.models;
-    editor.contextAvailable = data.context_mode_available;
+    editor.contextAvailable = data.chat_info_error ? null : data.context_mode_available;
+    editor.chatMessage = data.chat_info_error?.message || "";
+    editor.workspaceOptions = data.workspace_options || null;
+    editor.workspaceError = data.workspace_options_error || null;
     if (scheduleTargetKind() !== "binding") chatTarget("schedule").resolveKind(editor.contextAvailable);
     editor.catalogMessage = data.model_catalog_error
       ? `${data.model_catalog_error.message} 已有配置保持不变，仍可调整其他项目。` : "";
@@ -3523,9 +3664,17 @@ async function loadScheduleSessionOptions() {
     if (scheduleEditor !== editor || serial !== editor.optionsSerial) return;
     editor.models = [];
     editor.contextAvailable = null;
+    editor.chatMessage = "";
     editor.catalogMessage = `${error.message} 可选配置暂未刷新，已有选择保持不变。`;
+    editor.workspaceError = error.message;
     renderScheduleSessionSettings();
     renderScheduleTarget();
+  } finally {
+    if (scheduleEditor === editor && serial === editor.optionsSerial) {
+      editor.workspaceLoading = false;
+      renderScheduleWorkspace();
+      updateScheduleSaveAvailability();
+    }
   }
 }
 
@@ -3638,7 +3787,7 @@ async function previewSchedule() {
     scheduleInput("preview-message").textContent = data.preview.length
       ? `预计触发时间 · ${data.schedule.timezone}`
       : scheduleEditor?.plan ? "没有后续触发时间。仍可保存计划修改；已认领的执行可以继续。" : "没有后续触发时间，请调整规则。";
-    scheduleInput("save").disabled = (!data.preview.length && !scheduleEditor?.plan) || !scheduleEditor?.action;
+    updateScheduleSaveAvailability();
   } catch (error) {
     if (serial !== schedulePreviewSerial) return;
     if (["ambiguous_local_time", "ambiguous_end_time"].includes(error.code) && Array.isArray(error.choices)) {
@@ -3667,7 +3816,10 @@ function openScheduleEditor(plan = null, source = {}) {
   scheduleEditor = { plan, action, sessionBase: structuredClone(settings), sessionDraft: structuredClone(settings),
     targetSession: source.targetSession || null, returnFocus: source.returnFocus || document.activeElement,
     fromSessions: Boolean(source.targetSession), models: [], contextAvailable: null,
-    optionsSerial: 0, settingsTouched: false, catalogMessage: "正在读取模型目录…" };
+    optionsSerial: 0, settingsTouched: false, catalogMessage: "正在读取模型目录…", chatMessage: "",
+    workspace: structuredClone(plan?.target_kind === "binding" || source.targetSession ? null
+      : plan ? plan.workspace : { mode: "project" }),
+    workspaceOptions: null, workspaceError: null, workspaceLoading: false };
   const rule = plan?.schedule || { kind: "daily", at: "09:00", timezone: source.timezone || state.schedules?.default_timezone || "" };
   scheduleInput("editor").hidden = false;
   scheduleInput("editor-title").textContent = plan ? `编辑计划 · ${plan.name}` : "创建计划";
@@ -3748,6 +3900,10 @@ async function saveSchedule(event) {
     showScheduleFormError("配置已更新，请重新预览后保存。");
     return;
   }
+  if (!scheduleWorkspaceCanSave()) {
+    validateScheduleFields({ saving: true });
+    return;
+  }
   scheduleEditorSerial += 1;
   const action = editor.action;
   const hasFuture = prepared.hasFuture;
@@ -3765,6 +3921,12 @@ async function saveSchedule(event) {
   } else {
     definition.project = scheduleInput("project").value.trim();
     definition.chat_id = scheduleInput("chat").value.trim();
+    if (scheduleWorkspaceChanged()) {
+      definition.workspace = structuredClone(editor.workspace);
+      if (editor.workspaceOptions?.projectAlias === definition.project) {
+        definition.expected_project_revision = editor.workspaceOptions.projectRevision;
+      }
+    }
   }
   const settings = scheduleSessionPatch();
   if (Object.keys(settings).length) definition.session_settings = settings;
@@ -3904,7 +4066,8 @@ async function loadSchedules(cursor = undefined, appliedQuery = scheduleListQuer
   for (const plan of data.plans) {
     const row = document.createElement("tr");
     cell(row, plan.name);
-    cell(row, plan.project_alias);
+    const project = cell(row, plan.project_alias);
+    scheduleNote(project, workspacePolicySummary(plan.workspace, { scheduled: true }));
     const target = document.createElement("td");
     target.className = "schedule-target";
     const link = document.createElement("a");
@@ -3937,6 +4100,7 @@ async function loadSchedules(cursor = undefined, appliedQuery = scheduleListQuer
     const source = scheduleTriggerSource(plan.execution.trigger_source);
     if (source) scheduleNote(execution, source);
     if (plan.execution.due_local) scheduleNote(execution, scheduleLocalTime(plan.execution.due_local));
+    if (plan.execution.worktree_id) scheduleNote(execution, scheduleWorktreeReceipt(plan.execution, { details: false }));
     row.append(execution);
     const actions = actionsCell(row);
     const detail = actionButton("详情 / 最近记录", () => showSchedule(plan.id, detail));
@@ -4021,12 +4185,15 @@ async function showSchedule(planId, returnFocus = document.activeElement) {
     scheduleInput("detail-state").textContent = `${schedulePlanState(data.plan).replace("\n", " · ")} · ${scheduleExecutionLabel(data.plan.execution)}`
       + (scheduleTriggerSource(data.plan.execution.trigger_source) ? ` · ${scheduleTriggerSource(data.plan.execution.trigger_source)}` : "")
       + (scheduleBlockedLabel(data.plan) ? ` · ${scheduleBlockedLabel(data.plan)}` : "")
+      + (data.plan.execution.worktree_id ? ` · ${scheduleWorktreeReceipt(data.plan.execution)}` : "")
       + ` · 目标会话 ID：${data.plan.chat_id}`
       + (data.inflight ? "。编辑、暂停或删除不会取消本次执行。" : "");
     scheduleInput("detail-instructions").textContent = data.plan.instructions;
     scheduleInput("detail-settings").textContent = data.plan.target_kind === "binding"
       ? `${scheduleTargetLabel(data.plan)} · 沿用原会话当前配置；系统输入不新增 @ 通知。`
       : scheduleSessionSummary(data.plan.session_settings || defaultScheduleSessionSettings());
+    scheduleInput("detail-settings").textContent += ` · ${data.plan.target_kind === "binding"
+      ? scheduleInheritedWorkspace(data.plan) : workspacePolicySummary(data.plan.workspace, { scheduled: true })}`;
     scheduleInput("detail-rule").textContent = scheduleRuleLabel(data.plan.schedule);
     renderSchedulePreview("#schedule-detail-preview", data.preview);
     scheduleInput("detail-note").textContent = "";
@@ -4064,7 +4231,8 @@ async function loadScheduleRuns(page = scheduleRunsPage) {
       const row = document.createElement("tr");
       cell(row, scheduleDate(run.due_at));
       cell(row, scheduleTriggerSource(run.trigger_source));
-      cell(row, scheduleRunStatus(run.status || run.stage));
+      const result = cell(row, scheduleRunStatus(run.status || run.stage));
+      if (run.worktree_id) scheduleNote(result, scheduleWorktreeReceipt(run));
       const links = actionsCell(row);
       if (run.feishu_url) {
         const link = document.createElement("a");
@@ -4539,8 +4707,13 @@ for (const eventName of ["input", "change"]) {
 scheduleInput("kind").addEventListener("change", invalidateSchedulePreview);
 scheduleInput("editor").addEventListener("submit", saveSchedule);
 scheduleInput("chat").addEventListener("change", loadScheduleSessionOptions);
+scheduleInput("project").addEventListener("change", changeScheduleProject);
+for (const field of ["workspace", "worktree"]) {
+  scheduleInput(field).addEventListener("change", () => changeScheduleWorkspace(field));
+}
+scheduleInput("workspace-ref").addEventListener("input", () => changeScheduleWorkspace("workspace-ref"));
 scheduleInput("target-kind").addEventListener("change", () => {
-  for (const field of ["binding", "project", "chat"]) clearScheduleFieldError(field);
+  for (const field of ["binding", "project", "chat", "workspace"]) clearScheduleFieldError(field);
   invalidateSchedulePreview();
   renderScheduleTarget();
   loadScheduleSessionOptions();

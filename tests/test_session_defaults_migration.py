@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from netizen_cli import database_migrations as migrations
 from netizen_cli.bindings import BindingStore, validate_channel_database
-from netizen_cli.defaults.models import WorkspacePolicy
+from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.migrations import v16
 from netizen_cli.migrations.schema import require_schema
 
@@ -37,7 +37,9 @@ class SessionDefaultsMigrationTest(unittest.TestCase):
             )]
             before = {table: connection.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
         self.assertEqual(migrations.plan_channel_database(self.path), {
-            "source_version": 15, "target_version": 16, "steps": [{"from_version": 15, "to_version": 16}],
+            "source_version": 15, "target_version": 17, "steps": [
+                {"from_version": 15, "to_version": 16}, {"from_version": 16, "to_version": 17},
+            ],
         })
         migrations.migrate_channel_database(self.path, expected_source_version=15)
         validate_channel_database(self.path)
@@ -56,7 +58,7 @@ class SessionDefaultsMigrationTest(unittest.TestCase):
             self.assertEqual(store.worktrees.get("worktree-shared").identity_token, "root:1:2/gitdir:3:4")
             self.assertEqual(store.get("binding").worktree_id, "worktree-shared")
         before_noop = self.contents()
-        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=16)["steps"], [])
+        self.assertEqual(migrations.migrate_channel_database(self.path, expected_source_version=17)["steps"], [])
         self.assertEqual(self.contents(), before_noop)
 
     def test_fresh_and_upgraded_schema_have_identical_constraints(self):
@@ -78,7 +80,7 @@ class SessionDefaultsMigrationTest(unittest.TestCase):
 
         step = migrations.Migration(15, 16, fail, v16.validate)
         before = self.contents()
-        with patch.object(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:1], step)):
+        with patch.object(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:1], step, *migrations.MIGRATIONS[2:])):
             with self.assertRaisesRegex(RuntimeError, "after workspace column"):
                 migrations.migrate_channel_database(self.path, expected_source_version=15)
         self.assertEqual(self.contents(), before)

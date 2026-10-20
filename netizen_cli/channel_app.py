@@ -102,6 +102,7 @@ from .cards.scheduled import (
     is_schedule_card_action,
     schedule_form_card,
     schedule_draft_card,
+    refresh_schedule_workspace,
     schedule_manager_card,
     schedule_navigation,
     schedule_query,
@@ -952,6 +953,8 @@ class ChannelApplication:
         native_submission = False
         publication_owned = False
         publishing_started = False
+        workspace_creating = False
+        workspace = None
         origin: ScheduledOrigin | None = None
         try:
             if run.app_id != self._app_id or plan.app_id != self._app_id:
@@ -967,6 +970,18 @@ class ChannelApplication:
                 raise ScheduleError("无法确认目标是可访问的飞书会话，本次定时任务未启动。")
             if plan.session_settings.message_context_mode is MentionContextMode.CATCH_UP and chat_kind != "group":
                 raise ScheduleError("私聊不支持读取群聊增量，请修改计划的消息读取范围。")
+            assert plan.workspace is not None
+            worktrees = self._management.worktrees
+            if plan.workspace.mode != "project":
+                if worktrees is None:
+                    raise WorktreeError("unavailable", "工作区服务暂不可用，本次未启动。")
+                # An unavailable selected checkout must reject before any Feishu send.
+                workspace = await worktrees.validate_policy(
+                    plan.workspace, project_alias=project.alias,
+                    expected_project_revision=project.revision,
+                )
+                if workspace is not None:
+                    store.set_run(run.id, worktree_id=workspace.id)
             skill_names = parse_skill_references(plan.instructions)
             self._bindings.require_project_not_deleting(run.project_alias)
             if not self._bindings.get_project(run.project_alias).enabled:
@@ -1005,10 +1020,27 @@ class ChannelApplication:
                 if plan.session_settings.message_context_mode is MentionContextMode.CATCH_UP
                 else None
             )
+            if plan.workspace.mode == "new":
+                workspace_creating = True
+                resource = await worktrees.create(
+                    project_alias=project.alias, expected_project_revision=project.revision,
+                    mode="detached", ref=plan.workspace.ref, scheduled_run_id=run.id,
+                )
+                workspace_creating = False
+                workspace = self._bindings.worktrees.get(resource["id"])
+            elif workspace is not None:
+                # Recheck deletion/identity after the publication awaits.
+                workspace = await worktrees.select(
+                    project_alias=project.alias, worktree_id=workspace.id,
+                    expected_project_revision=project.revision,
+                )
             async with self._scope_coordinator.hold(scope.key):
                 binding = self._bindings.create_scheduled_binding(
                     run_id=run.id, scope=scope, creator_id="scheduled_plan:" + plan.id,
                     session_settings=plan.session_settings, context_anchor=context_anchor,
+                    expected_project_revision=project.revision,
+                    working_cwd=workspace.cwd if workspace is not None else None,
+                    worktree_id=workspace.id if workspace is not None else None,
                 )
             projection = {
                 "kind": "scheduled_plan", "version": 1, "plan_id": plan.id,
@@ -1023,23 +1055,31 @@ class ChannelApplication:
             input_value = plan.instructions + "\n\n<scheduled_plan>\n" + json.dumps(projection, ensure_ascii=False) + "\n</scheduled_plan>"
             native_submission = True
             submission = await self._runtime.submit_initial(
-                binding=binding, cwd=project.cwd, input=input_value,
+                binding=binding, cwd=Path(workspace.cwd) if workspace is not None else project.cwd, input=input_value,
                 owner_id="scheduled_plan:" + plan.id, origin=origin,
                 run_id=run.id, skill_names=skill_names,
             )
             await self._present_ordinary_receipt(submission, origin)
         except BaseException as error:
             if publication_owned and not native_submission:
+                resource_reserved = store.get_run(run.id).worktree_id is not None
                 code = (
                     "publishing_unknown" if (
                         isinstance(error, TopicPublishError) and error.unknown
                     ) or (
                         isinstance(error, asyncio.CancelledError)
-                        and publishing_started
+                        and publishing_started and origin is None
                     )
                     else "publishing_failed" if isinstance(error, TopicPublishError)
+                    else "workspace_creation_unknown" if workspace_creating and resource_reserved and (
+                        isinstance(error, asyncio.CancelledError)
+                        or isinstance(error, WorktreeError) and error.code == "outcome_unknown"
+                    )
+                    else "workspace_creation_failed" if workspace_creating
+                    else "workspace_unavailable" if isinstance(error, (WorktreeError, WorktreeConflict))
                     else "scope_conflict" if isinstance(error, (ScheduleConflict, BindingConflict, ScopeConflict))
                     else "project_unavailable" if isinstance(error, (ProjectError, ProjectConflict, ProjectNotFound))
+                    else "workspace_handoff_failed" if workspace is not None
                     else "dispatch_rejected"
                 )
                 # No native call occurred. The publication facts remain visible;
@@ -1051,7 +1091,10 @@ class ChannelApplication:
             if origin is not None:
                 try:
                     async with asyncio.timeout(5):
-                        await self._reply(origin, f"定时任务未完成启动：{str(error)[:400]}。请通过 /cron 查看本次记录。")
+                        receipt = store.get_run(run.id)
+                        resource_note = (f" 关联工作区：{receipt.worktree_id}，请在 Admin 检查；不会自动删除或重建。"
+                                         if receipt.worktree_id else "")
+                        await self._reply(origin, f"定时任务未完成启动：{str(error)[:400]}。请通过 /cron 查看本次记录。" + resource_note)
                 except Exception:
                     logger.warning("scheduled start notice was not delivered", extra={"run_id": run.id})
 
@@ -1264,6 +1307,11 @@ class ChannelApplication:
                     fixed_display = {
                         "target_chat_id": target, "target_topic_id": fixed_scope.topic_id,
                         "target_label": fixed_binding.id,
+                        "effective_workspace": {
+                            "working_cwd": fixed_binding.working_cwd,
+                            "worktree_id": fixed_binding.worktree_id,
+                            "native_cwd_unresolved": fixed_binding.native_thread_id is not None,
+                        },
                     }
                     try:
                         labels = await self._management.resolve_chat_labels(
@@ -1273,7 +1321,12 @@ class ChannelApplication:
                     except Exception:
                         # Display names never change the exact readonly target.
                         pass
-                options, catalog = await service.form_options(scope_key=scope.key, chat_id=target)
+                projects = self._projects.list(enabled_only=True)
+                project_alias = None if fixed_target_id is not None else (
+                    (plan or {}).get("project_alias") or (binding.project_alias if binding else None)
+                    or (projects[0].alias if projects else None)
+                )
+                options, catalog = await service.form_options(scope_key=scope.key, chat_id=target, project=project_alias)
                 self._require_schedule_result(options)
                 chat_info_error = options.get("chat_info_error")
                 if fixed_target_id is not None and chat_info_error:
@@ -1286,33 +1339,49 @@ class ChannelApplication:
                     chat_options["chat_directory_error"] = (
                         "目标飞书聊天暂不可读取，聊天类型尚未确认；已保留原 ID 和配置，提交时将重新校验。"
                     )
-                form_options = dict(projects=self._projects.list(enabled_only=True),
+                workspace_error = options.get("workspace_options_error")
+                form_options = dict(projects=projects,
                     default_timezone=service.default_timezone, plan=plan,
                     target_binding_id=target_binding_id,
                     initial_project=binding.project_alias if binding else None,
                     session_settings=options["session_settings"], catalog=catalog,
                     catalog_error=catalog_error.get("message") if catalog_error else None,
                     allow_context_mode=options["context_mode_available"] is not False,
+                    workspace_options=options.get("workspace_options"),
+                    workspace_error=workspace_error.get("message") if workspace_error else None,
                     navigation=navigation,
                     **fixed_display)
                 card = schedule_form_card(scope, **form_options, **chat_options)
-            elif decoded.action in {"search_chats", "page_chats"}:
+            elif decoded.action in {"search_chats", "page_chats", "load_workspace"}:
                 # The draft is display state, not a create/update request.
                 # Search and failed saves share its renderer, not retry logic.
-                catalog, catalog_error = await service.model_catalog_options()
+                draft = payload["draft"]
+                (catalog, catalog_error), (workspace_options, workspace_error) = await asyncio.gather(
+                    service.model_catalog_options(),
+                    service.workspace_catalog_options(
+                        project=draft.meta["project"],
+                        expected_project_revision=(None if decoded.action == "load_workspace"
+                                                   else draft.meta.get("project_revision")),
+                    ),
+                )
                 projects = self._projects.list(enabled_only=True)
                 catalog_notice = catalog_error["message"] if catalog_error else None
+                workspace_notice = workspace_error["message"] if workspace_error else None
+                if decoded.action == "load_workspace":
+                    draft = refresh_schedule_workspace(draft, workspace_options)
                 try:
                     snapshot = (await self._card_chat_snapshot(query=payload["query"])
-                                if decoded.action == "search_chats" else payload["snapshot"])
-                    card = schedule_draft_card(payload["draft"], projects=projects,
+                                if decoded.action == "search_chats" else payload.get("snapshot"))
+                    card = schedule_draft_card(draft, projects=projects,
                         catalog=catalog, catalog_error=catalog_notice,
+                        workspace_options=workspace_options, workspace_error=workspace_notice,
                         chat_snapshot=snapshot, chat_page=payload.get("page", 0))
                 except CardActionError as error:
                     # Incomplete/oversized results are never presented as a
                     # complete snapshot. The editable business draft survives.
-                    card = schedule_draft_card(payload["draft"], projects=projects,
+                    card = schedule_draft_card(draft, projects=projects,
                         catalog=catalog, catalog_error=catalog_notice,
+                        workspace_options=workspace_options, workspace_error=workspace_notice,
                         chat_directory_error=str(error))
             elif decoded.action == "save":
                 request = {**payload, "mode": "update" if payload.get("plan_id") else "create", "request_id": decoded.request_id}
@@ -1349,7 +1418,7 @@ class ChannelApplication:
         except (CardActionError, ScheduleError, ProjectError) as error:
             await self._recover_schedule_card_action(event, scope=scope, notice=str(error))
         except Exception as error:
-            logger.exception("scheduled card operation failed", extra={"error_type": type(error).__name__})
+            logger.error("scheduled card operation failed type=%s", type(error).__name__)
             await self._recover_schedule_card_action(event, scope=scope,
                 notice="定时任务操作未确认。可原样重试确认，同一请求不会重复创建计划或触发执行；修改前请先确认上次保存结果。")
 

@@ -8,12 +8,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from netizen_cli.bindings import BindingStore, validate_channel_database
 from netizen_cli.chat_targets import ChatTargetError
 from netizen_cli.defaults import DefaultConfigurationError
-from netizen_cli.defaults.models import WorkspacePolicy
+from netizen_cli.worktrees.policy import WorkspacePolicy, WorkspacePolicyError
 from netizen_cli.defaults.service import SessionDefaultsService
 from netizen_cli.domain import MentionContextMode
 from netizen_cli.model_settings import EffortOption, ModelCatalog, ModelOption
@@ -380,6 +380,26 @@ class SessionDefaultsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.bindings.defaults.exact("app", "oc_chat"))
         self.assertEqual((await self.save())["workspace"], {"mode": "project"})
 
+    async def test_new_workspace_policy_validation_does_not_require_branch_inventory(self):
+        worktrees = self.enable_worktrees()
+        with patch.object(worktrees._git, "list_branches", AsyncMock(side_effect=AssertionError("unexpected inventory"))):
+            rule = await self.save(workspace={"mode": "new", "ref": "refs/heads/main"})
+        self.assertEqual(rule["workspace"], {"mode": "new", "ref": "refs/heads/main"})
+        self.assertEqual(self.bindings.worktrees.list_for_project("p"), ())
+        self.assertFalse((self.root / "managed").exists())
+
+    async def test_workspace_validation_timeout_is_reported_but_internal_errors_propagate(self):
+        worktrees = self.enable_worktrees()
+        with patch.object(worktrees, "validate_policy", AsyncMock(side_effect=TimeoutError())):
+            with self.assertRaises(DefaultConfigurationError) as raised:
+                await self.save(workspace={"mode": "new"})
+        self.assertEqual(raised.exception.code, "workspace_unavailable")
+        self.assertIn("超时", str(raised.exception))
+        with patch.object(worktrees, "validate_policy", AsyncMock(side_effect=AssertionError("internal validation defect"))):
+            with self.assertRaisesRegex(AssertionError, "internal validation defect"):
+                await self.save(workspace={"mode": "new"})
+        self.assertIsNone(self.bindings.defaults.exact("app", "oc_chat"))
+
     async def test_existing_workspace_deleted_keeps_rule_and_never_adopts_replacement(self):
         worktrees = self.enable_worktrees()
         resource = await worktrees.create(project_alias="p")
@@ -478,7 +498,7 @@ class WorkspacePolicyTest(unittest.TestCase):
                       {"mode": "new", "ref": None}, {"mode": "new", "ref": " "},
                       {"mode": "new", "ref": "\nHEAD"}, {"mode": "new", "ref": "x" * 257},
                       {"mode": "new", "worktree_id": "id"}):
-            with self.subTest(value=value), self.assertRaises(DefaultConfigurationError):
+            with self.subTest(value=value), self.assertRaises(WorkspacePolicyError):
                 WorkspacePolicy.from_dict(value)
 
 

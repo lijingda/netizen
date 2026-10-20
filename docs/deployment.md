@@ -656,6 +656,68 @@ MCP 不依赖浏览器的 Admin 登录状态。停止先关闭认领和管理 ad
 启动边界验收包括当前 schema 显式初始化、受支持旧库迁移、不受支持库只读拒绝、
 元数据与 Side/Project 墓碑保留。迁移持有 lifetime lock；提交后失败不自动恢复旧数据库。
 
+#### 定时工作区扩展验收
+
+2026-10-20 已确认的方案修订见 [ADR 0061](adr/0061-schedule-ordinary-threads-in-feishu-topics.md#新话题工作区策略)
+与 [工作区设计](design.md#新话题工作区)。以下是本次扩展的验证要求，实际完成的范围在本节
+末尾分别记录；既有定时任务或默认会话工作区证据不能替代本次验证。本轮实施授权不包含部署或发布。
+
+- 数据与 API：冻结 v16 → v17 与完整 v14 → v17 迁移、新库等价、重复启动、失败回滚；
+  旧有效 new_topic 迁移为 `project`，binding/墓碑为 null，历史 Run 的空资源回执合法。
+  严格拒绝非法策略与任意路径；create 缺省、update 保留/替换、修改 Project 后 exact
+  身份复核、binding 拒绝 workspace 覆盖，未变失效资源允许无关字段修改。
+- 共享服务与 Git：options/预览/保存及 busy/missed/blocked 无创建副作用；existing
+  选定 cwd/id、不切分支；new 每个实际 Run 仅一份 detached 工作区，默认本次 HEAD、
+  显式 ref、项目子目录、无效 ref 与非 Git 失败均准确。不读取 `/defaults` 或来源 Worktree。
+- 发布和准入：单次 publication 所有权先于工作区副作用；existing 首发前已知不可用时
+  零 root/seed、零 Binding、零 native submit，保留 enabled 和明确原因；自动到期不补跑。
+  手动认领前拒绝无 Run/游标变更，认领后失效保留失败 Run。重复请求/dispatch、定时与
+  run_now 并发及认领后编辑/暂停/删除不能重复创建或改变冻结策略；claim 到 attach 不插入 await。
+- 失败与重启：root/seed 后创建失败、工作区成功但 Binding/首轮失败、Git 取消/超时/未知，
+  以及创建中/绑定前 Project 或 Worktree 删除。资源 ID 在 Git 创建前已关联 Run，进程
+  中断后能定位保留资源；不盲重试、删目录或重建同一 Run 的工作区。区分 Git、飞书与
+  native 未知，确认的消息不能改称未知；未提交原生输入可证明时正确释放交接屏障。
+- 时限与生命周期：共享创建 120 秒预算与 dispatch、停机排空和 Project 删除等待相容，
+  长 Git/飞书/native I/O 不占 Scope/Binding 锁或 SQLite 事务。Project 删除仍墓碑计划；
+  Worktree 删除不删除引用它的新话题计划，显式级联删除 Binding 仍清理其原会话计划。
+  暂停/删除计划不回收资源，历史 new Run 工作区删除不影响未来独立创建。
+- 三个入口：Admin 列表/详情/编辑、`/cron` 摘要/详情/编辑和 MCP list/view/mutation
+  一致展示策略、失效具体原因、`can_run_now=false` 与最近执行资源回执；未知不伪装已删除
+  或可用，失效选择保留。原会话只读继承实际目录。状态按需、有界读取并按资源去重，
+  不扫描完整仓库或增加持久健康状态；陈旧界面仍由后端复核。
+- 共享 UI 与 MCP：Admin 和卡片复用工作区策略组件，加载工作区/查群/失败重绘完整保留
+  分组字段、指令、时间、模型与身份/版本/request_id，核对元素数和字节预算及移动端布局。
+  模型/聊天/工作区选项错误独立。`list_worktrees` 保持调用者 Project 范围，
+  `cron_manage options` 提供计划目标选项，已知 exact ID 可直接写入，不新增 MCP 转调或扩大权限。
+- 原生与平台：按受影响边界用一次性资源验证新首轮/后续消息、Skill、Files 的真实 cwd，
+  原会话 start/steer/Goal 不回归；真实 MCP 参数生成、飞书 root/seed 和卡片回调、
+  目标主机启动迁移分别记录。替身测试和 `make check` 不等于这些 live 验收通过。
+
+2026-10-20 隔离原生探针通过：在 SDK/bundled App Server `0.163.0`、临时 Git 仓库与
+临时 HOME/CODEX_HOME 下，生产 Channel dispatch 和 Runtime 分别执行 `new`、`existing`
+策略，再向各自 Thread 提交一条普通后续消息。共创建 2 个持久原生 Thread、1 个受管
+detached Worktree，消耗 4 次 loopback mock Responses 请求。两种策略均确认首轮
+native cwd、Binding/Run 的 exact 工作区引用和 completion cwd 一致；后续消息不传 cwd
+override，仍复用原 Thread/目录且不新增工作区。初轮 barrier 已释放，结果在内存飞书
+替身中确认投递；来源 active Binding 不变，未提交/未跟踪文件未复制，源目录改动保留。
+原生 rollout 初建时有两次短暂空记录读取失败，既有有界观测恢复后全部断言通过。
+
+探针为 `/tmp/netizen-scheduled-worktree-native-probe.py`，JSON 证据为
+`/tmp/netizen-scheduled-worktree-native-evidence.json`，外部进程超时 120 秒，实际耗时
+1.637 秒。真实模型与飞书调用均为零，用户 Codex 配置未修改，临时状态已清理。
+此结果只证明上述原生目录与普通后续输入交接；真实飞书客户端布局/回调、真实 MCP
+参数生成、目标平台启动迁移，以及本次工作区组合下的 Skill/Files 与完整生命周期
+仍未验收，不能据此声明全部实时兼容性通过或已部署。
+
+同日收敛验证通过 `make check`：3,531 项测试、15 项按条件跳过，Python 编译与依赖检查
+通过；SDK Activity、20 次 handle 快速完成、20 次公开 read 恢复、40 次终态元数据 drain
+及进程内 Skill roots 探针通过。相关回归覆盖冻结迁移、Service/MCP、Admin HTTP/JS、
+卡片草稿与容量，以及真实临时 Git 下的删除竞态、回执原子性、Scheduler 超时/停机和
+重启不重放。门禁日志为 `/tmp/netizen-workspace-simplify-make-check.log`。
+门禁期间最后调整了 `/cron` 内部错误日志的类型输出及对应断言，随后该模块 18 项回归
+全部通过，日志为 `/tmp/netizen-workspace-simplify-cron-logging.log`；其余 398 个源码、
+脚本与测试文件摘要一致。此记录不代表发布或目标实例部署。
+
 ### 普通会话协作兼容性与验收
 
 2026-10-16 预览适配与 Admin 分页优化：在 `openai-codex` / bundled CLI `0.163.0`
@@ -938,8 +1000,9 @@ read/resume，Goal 保留既有 readiness read。这是请求次数证据，不�
 ### 数据库迁移与中断恢复验收
 
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 将迁移移到每次实际
-启动，保留 ADR 0075 的 v14 基线与冻结步骤。当前 schema 为 v16，冻结转换为
-v14 → v15 Worktree 元数据与 v15 → v16 默认工作区策略；v13 及更早 schema／旧布局不因此自动得到支持。
+启动，保留 ADR 0075 的 v14 基线与冻结步骤。当前 schema 为 v17，冻结转换为
+v14 → v15 Worktree 元数据、v15 → v16 默认工作区策略与 v16 → v17 定时工作区策略/Run
+资源回执；v13 及更早 schema／旧布局不因此自动得到支持。
 以下为新 CLI 的验收要求，不是通过记录：
 
 - setup 才创建新库；start、自动重启及恢复启动都校验已有库，缺库不能重新初始化。
@@ -1007,7 +1070,7 @@ Adapter 边界时仍按[既有触发条件](#代码门禁与按需实时兼容�
   admission，不排队、不保证创建者先执行；Git 操作不得长期持有 Scope 锁。交错提交
   `/new`、Project/Worktree 删除及 shutdown，检查资源保留、已知部分成功反馈和未知结果
   不自动重试；已有 Binding 不因修改默认策略而换目录或重新创建。
-- schema v16 新库完整初始化、v14 → v15 → v16 与 v15 → v16 冻结夹具迁移及当前库重装
+- 当前 schema 新库完整初始化、v14 → v15 → v16 默认工作区冻结夹具及继续到 v17 的迁移、当前库重装
   保留默认配置和规则顺序；旧规则使用项目目录，新增策略严格校验持久化形态。
   v13 及更早库只读拒绝。迁移遵循 ADR 0076；启动迁移持续持有 lifetime lock，不提供自动旧库恢复。
   Project/Worktree 删除后默认配置保留，使用时明确提示不可用，不新增联动删除或资源回收。
@@ -1716,9 +1779,9 @@ HTTP，不得把端口直接暴露到不受信网络。正式链路的真人和�
 [专项验收](#admin-飞书登录与管理员维护验收)。
 
 `instance.projectRoot` 是必填的绝对路径，用于限制从飞书自动创建的空 Project；它不是
-Binding 的默认 cwd。Channel 业务只支持当前完整 schema v16；实际启动入口按
+Binding 的默认 cwd。Channel 业务只支持当前完整 schema v17；实际启动入口按
 [ADR 0076](adr/0076-separate-cli-installations-from-instance-data.md) 在 lifetime lock 内
-检查数据并按需迁移，setup 才创建新库。当前有冻结的 v14 → v15 → v16 转换，最低受支持基线
+检查数据并按需迁移，setup 才创建新库。当前有冻结的 v14 → v15 → v16 → v17 转换，最低受支持基线
 仍为 v14。提交前错误回滚事务，提交后服务失败保留新库，不自动恢复旧备份。
 
 `worktrees.root` 可省略，默认 `<instance-root>/worktrees`；`fetchBeforeCreate` 默认
@@ -1729,6 +1792,8 @@ dirty 状态；已物化会话的 cwd 以原生结果为准。
 `session_defaults` 和 `session_defaults_order` 仅保存 App 隔离的聊天默认配置、群名匹配
 条件与有序规则元数据；v16 增加独立 `workspace_json` 保存默认工作区创建意图，旧规则
 迁移为项目目录。它不属于 SessionSettings，不保存聊天正文、Git 状态或有效 Codex 配置。
+v17 的 `schedule_plans.workspace_json` 保存新话题计划独立策略，原会话/墓碑为 null，
+`schedule_runs.worktree_id` 保存最小资源回执；Worktree 删除不级联删除新话题计划。
 `schedule_plans`、`schedule_runs` 和 `schedule_requests` 仅保存当前计划指令与会话配置、
 最小调度交接/initial Turn 引用及有界管理请求去重，不复制原生历史。
 当前库重装及后续受支持迁移保留 Scope/Binding/Project、会话默认配置及规则顺序、去重

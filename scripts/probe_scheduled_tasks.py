@@ -38,6 +38,7 @@ from openai_codex.errors import JsonRpcError
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
+from netizen_cli.worktrees.policy import WorkspacePolicy  # noqa: E402
 from netizen_cli.bindings import BindingNotFound, BindingStore  # noqa: E402
 from netizen_cli.channel_app import ChannelApplication  # noqa: E402
 from netizen_cli.chat_targets import ValidatedChatTarget  # noqa: E402
@@ -654,7 +655,7 @@ async def _dispatch_phase(codex: AsyncCodex, cwd: Path, store: BindingStore, own
         await scheduler.recover()
         # The fake clock makes a single interval due immediately. The timer is
         # closed as soon as it claims; no future occurrence is ever launched.
-        plan_id = store.schedules.create(name="Dispatch probe", instructions="仅回复 SCHEDULE-PROBE-INITIAL；不调用工具，不运行命令，不修改文件。",
+        plan_id = store.schedules.create(workspace=WorkspacePolicy(), name="Dispatch probe", instructions="仅回复 SCHEDULE-PROBE-INITIAL；不调用工具，不运行命令，不修改文件。",
             project_alias="probe", app_id="probe", chat_id="probe-chat", request_id=str(uuid.uuid4()),
             schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=clock[0]), now=clock[0]).plan_id
         scheduler.start()
@@ -755,7 +756,7 @@ async def _manual_phase(
     try:
         await scheduler.recover()
         name = "MANUAL-PROBE-" + uuid.uuid4().hex
-        plan_id = store.schedules.create(
+        plan_id = store.schedules.create(workspace=WorkspacePolicy(),
             name=name, instructions="仅回复 SCHEDULE-PROBE-MANUAL；不调用工具，不运行命令，不修改文件。",
             project_alias="probe", app_id="probe", chat_id="probe-manual-chat", enabled=False,
             schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=clock[0]),
@@ -872,7 +873,7 @@ async def _binding_phase(
         seed_ids = {turn.id for turn in seeded.thread.turns}
         _require(bool(seed_ids) and seeded.thread.ephemeral is False, "binding_seed_history_missing")
         await scheduler.recover()
-        plan_id = store.schedules.create(
+        plan_id = store.schedules.create(workspace=None,
             name="Existing Binding probe",
             instructions="停止当前的其他输出，仅回复前文约定记住的暗号。不调用工具、不运行命令、不修改文件。",
             project_alias="probe", app_id="probe", chat_id="probe-binding-chat",

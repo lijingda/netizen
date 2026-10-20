@@ -19,6 +19,7 @@ from lark_channel import (
     RetryConfig,
 )
 
+from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingTaskFeedback, BindingTurnSettings
 from netizen_cli.cards import decode_turn_file_action
 from netizen_cli.channel import reply_presenter
@@ -79,7 +80,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
 
 
     def claim(self, instructions="检查明确资源", *, session_settings=SessionSettings()):
-        result = self.store.schedules.create(name="日报", instructions=instructions, project_alias="work", app_id="app", chat_id="oc_group",
+        result = self.store.schedules.create(workspace=WorkspacePolicy(), name="日报", instructions=instructions, project_alias="work", app_id="app", chat_id="oc_group",
             schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100), request_id="create-plan", now=100, session_settings=session_settings)
         claimed = self.store.schedules.claim_due(result.plan_id, app_id="app", now=160)
         self.assertIsNotNone(claimed)
@@ -1075,7 +1076,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
     async def test_manager_defaults_to_enabled_unfinished_and_refreshes_exact_selection(self):
         active = self.fixture.manager_plan("可执行任务")
         paused = self.fixture.manager_plan("暂停任务", enabled=False)
-        ended = self.store.schedules.create(name="已结束任务", instructions="曾经执行",
+        ended = self.store.schedules.create(workspace=WorkspacePolicy(), name="已结束任务", instructions="曾经执行",
             project_alias="work", app_id="app", chat_id="oc_group",
             schedule=ScheduleRule("once", "UTC", at="1970-01-01T00:02+00:00"),
             request_id="ended-fixture", now=100)
@@ -1102,7 +1103,7 @@ class ScheduledChannelTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(callback(selected, "刷新任务")["payload"]["plan_id"], plan_id)
 
     async def test_default_selection_retains_last_pending_occurrence_without_next_due(self):
-        created = self.store.schedules.create(name="最后一次启动中", instructions="独立执行",
+        created = self.store.schedules.create(workspace=WorkspacePolicy(), name="最后一次启动中", instructions="独立执行",
             project_alias="work", app_id="app", chat_id="oc_group",
             schedule=ScheduleRule("once", "UTC", at="1970-01-01T00:02+00:00"),
             request_id="pending-selection", now=100)

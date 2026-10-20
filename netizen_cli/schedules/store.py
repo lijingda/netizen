@@ -10,6 +10,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ..session_settings import SessionSettings
+from ..worktrees.policy import WorkspacePolicy
 
 from .models import (
     Claim, MutationResult, Plan, Run, ScheduleBlockedUnknown, ScheduleConflict, ScheduleError,
@@ -39,6 +40,7 @@ _RUN_TABLE = """CREATE TABLE schedule_runs (
         trigger_source TEXT NOT NULL DEFAULT 'scheduled' CHECK(trigger_source IN ('scheduled','manual')),
         target_kind TEXT NOT NULL DEFAULT 'new_topic' CHECK(target_kind IN ('new_topic','binding')),
         disposition TEXT CHECK(disposition IN ('started','steered')),
+        worktree_id TEXT CHECK(worktree_id IS NULL OR (target_kind = 'new_topic' AND length(worktree_id) > 0)),
         CHECK(target_kind = 'new_topic' OR binding_id IS NOT NULL),
         CHECK(disposition IS NULL OR (target_kind = 'binding' AND initial_turn_id IS NOT NULL AND barrier = 'released'))
     )"""
@@ -59,6 +61,7 @@ SCHEMA = (
         processed_through REAL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
         source TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0,1)),
         session_settings_json TEXT,
+        workspace_json TEXT,
         target_kind TEXT NOT NULL DEFAULT 'new_topic' CHECK(target_kind IN ('new_topic','binding')),
         target_binding_id TEXT,
         CHECK((target_kind = 'new_topic' AND target_binding_id IS NULL) OR
@@ -79,13 +82,13 @@ TABLE_COLUMNS = {
     "schedule_plans": {
         "plan_id", "revision", "name", "instructions", "project_alias", "app_id", "chat_id",
         "schedule_json", "enabled", "next_due_at", "processed_through", "created_at",
-        "updated_at", "source", "deleted", "session_settings_json", "target_kind", "target_binding_id",
+        "updated_at", "source", "deleted", "session_settings_json", "target_kind", "target_binding_id", "workspace_json",
     },
     "schedule_runs": {
         "run_id", "plan_id", "plan_revision", "due_at", "project_alias", "app_id", "chat_id",
         "phase", "barrier", "root_uuid", "seed_uuid", "root_message_id", "topic_id",
         "origin_message_id", "binding_id", "initial_turn_id", "error_code", "delivery_state",
-        "created_at", "updated_at", "missed_from", "missed_count", "binding_removed", "trigger_source", "target_kind", "disposition",
+        "created_at", "updated_at", "missed_from", "missed_count", "binding_removed", "trigger_source", "target_kind", "disposition", "worktree_id",
     },
     "schedule_requests": {"request_id", "operation", "payload_digest", "plan_id", "revision", "expires_at", "run_id"},
 }
@@ -129,22 +132,23 @@ def require_schema(connection: sqlite3.Connection) -> None:
         "OR initial_turn_id IS NULL OR initial_turn_id='' OR barrier!='released')) LIMIT 1"
     ).fetchone():
         raise RuntimeError("current scheduling input receipt is invalid")
-    for row in connection.execute("SELECT deleted, session_settings_json, target_kind, target_binding_id FROM schedule_plans"):
+    for row in connection.execute("SELECT deleted, session_settings_json, workspace_json, target_kind, target_binding_id FROM schedule_plans"):
         raw = row["session_settings_json"]
         if (row["target_kind"] == "binding") != bool(row["target_binding_id"]):
             raise RuntimeError("current scheduling target identity is invalid")
         if row["target_kind"] == "binding":
-            if raw is not None:
-                raise RuntimeError("current Binding plan retains session settings")
+            if raw is not None or row["workspace_json"] is not None:
+                raise RuntimeError("current Binding plan retains session settings or workspace policy")
             continue
         if row["deleted"]:
-            if raw is not None:
-                raise RuntimeError("current deleted plan retains session settings")
+            if raw is not None or row["workspace_json"] is not None:
+                raise RuntimeError("current deleted plan retains session settings or workspace policy")
             continue
         try:
             SessionSettings.from_dict(json.loads(raw))
+            WorkspacePolicy.from_dict(json.loads(row["workspace_json"]))
         except (TypeError, ValueError) as error:
-            raise RuntimeError("current scheduled session settings are invalid") from error
+            raise RuntimeError("current scheduled session settings or workspace policy are invalid") from error
 
 
 def _require_table_schema(connection: sqlite3.Connection) -> None:
@@ -211,6 +215,8 @@ def _plan(row: sqlite3.Row) -> Plan:
                           if row["session_settings_json"] is not None
                           else SessionSettings() if row["target_kind"] == "new_topic" else None),
         target_kind=row["target_kind"], target_binding_id=row["target_binding_id"],
+        workspace=(WorkspacePolicy.from_dict(json.loads(row["workspace_json"]))
+                   if not row["deleted"] and row["target_kind"] == "new_topic" else None),
     )
 
 
@@ -251,6 +257,31 @@ class ScheduleStore:
         self.owner.require_project_not_deleting(alias)
         if not self.owner.get_project(alias).enabled:
             raise ProjectDisabled(alias)
+
+    def _require_checked_workspace(self, plan: Plan, checked_revision: int) -> None:
+        """Close async validation races in this mutation's existing transaction."""
+        from ..bindings import ProjectConflict, ProjectNotFound
+        from ..worktrees.models import WorktreeConflict, WorktreeNotFound
+
+        try:
+            self.owner.require_project_not_deleting(plan.project_alias)
+            project = self.owner.get_project(plan.project_alias)
+            if type(checked_revision) is not int or project.revision != checked_revision or not project.enabled:
+                raise ProjectConflict("Project 已被修改或停用。")
+        except (ProjectConflict, ProjectNotFound) as cause:
+            error = ScheduleConflict("Project 已不可用于此计划，请刷新后重试。")
+            error.code = "project_unavailable"
+            raise error from cause
+        if plan.workspace is None or plan.workspace.mode != "existing":
+            return
+        try:
+            assert plan.workspace.worktree_id is not None
+            record = self.owner.worktrees.get(plan.workspace.worktree_id)
+            self.owner.worktrees.require_bindable(record.id, project=project, cwd=record.cwd)
+        except (WorktreeConflict, WorktreeNotFound) as cause:
+            error = ScheduleConflict("计划的工作区已不可用，请刷新并重新选择。")
+            error.code = "workspace_unavailable"
+            raise error from cause
 
     def binding_target_error(self, plan: Plan) -> str | None:
         """Project eligibility from exact ownership and the live Scope pointer."""
@@ -310,11 +341,13 @@ class ScheduleStore:
         if type(plan.enabled) is not bool or not isinstance(plan.schedule, ScheduleRule):
             raise ScheduleError("计划需要有效规则和布尔 enabled。")
         if plan.target_kind == "new_topic":
-            if plan.target_binding_id is not None or not isinstance(plan.session_settings, SessionSettings):
-                raise ScheduleError("新话题计划需要独立会话设置，不能指定原会话。")
+            if (plan.target_binding_id is not None or not isinstance(plan.session_settings, SessionSettings)
+                    or not isinstance(plan.workspace, WorkspacePolicy)):
+                raise ScheduleError("新话题计划需要独立会话设置与工作区策略，不能指定原会话。")
         elif plan.target_kind == "binding":
-            if not isinstance(plan.target_binding_id, str) or not plan.target_binding_id or plan.session_settings is not None:
-                raise ScheduleError("原会话计划需要准确 Binding，并沿用该会话设置。")
+            if (not isinstance(plan.target_binding_id, str) or not plan.target_binding_id
+                    or plan.session_settings is not None or plan.workspace is not None):
+                raise ScheduleError("原会话计划需要准确 Binding，并沿用该会话设置与工作目录。")
         else:
             raise ScheduleError("执行目标仅支持新话题或原会话。")
         if not isinstance(plan.source, str) or len(plan.source) > 1000:
@@ -326,40 +359,49 @@ class ScheduleStore:
         # renders its common three-occurrence preview.
         plan.schedule.preview(boundary)
 
-    def create(self, *, name: str, instructions: str, project_alias: str, app_id: str, chat_id: str, schedule: ScheduleRule, request_id: str, enabled: bool = True, source: str = "", now: float | None = None, request_payload: object | None = None, session_settings: SessionSettings | None = SessionSettings(), target_kind: str = "new_topic", target_binding_id: str | None = None) -> MutationResult:
+    def create(self, *, name: str, instructions: str, project_alias: str, app_id: str, chat_id: str, schedule: ScheduleRule, request_id: str, workspace: WorkspacePolicy | None, enabled: bool = True, source: str = "", now: float | None = None, request_payload: object | None = None, session_settings: SessionSettings | None = SessionSettings(), target_kind: str = "new_topic", target_binding_id: str | None = None, checked_project_revision: int | None = None) -> MutationResult:
         now = self._now(now)
         if session_settings is not None and not isinstance(session_settings, SessionSettings):
             raise ScheduleError("计划需要有效的会话设置。")
+        if workspace is not None and not isinstance(workspace, WorkspacePolicy):
+            raise ScheduleError("计划需要有效的工作区策略。")
         payload = dict(name=name, instructions=instructions, project_alias=project_alias, app_id=app_id, chat_id=chat_id, schedule=schedule.to_dict(), enabled=enabled, source=source, target_kind=target_kind, target_binding_id=target_binding_id)
         payload["session_settings"] = session_settings.to_dict() if session_settings is not None else None
+        payload["workspace"] = workspace.to_dict() if workspace is not None else None
         if request_payload is not None:
             payload = request_payload
         with self.owner._transaction():
             if result := self._request(request_id, "create", payload, now):
                 return result
-            plan = Plan(str(uuid.uuid4()), 1, name, instructions, project_alias, app_id, chat_id, schedule, enabled, schedule.next_after(now) if enabled else None, None, now, now, source, session_settings=session_settings, target_kind=target_kind, target_binding_id=target_binding_id)
+            plan = Plan(str(uuid.uuid4()), 1, name, instructions, project_alias, app_id, chat_id, schedule, enabled, schedule.next_after(now) if enabled else None, None, now, now, source, session_settings=session_settings, target_kind=target_kind, target_binding_id=target_binding_id, workspace=workspace)
             self._validate(plan, now)
             self._project(project_alias)
+            if checked_project_revision is not None:
+                self._require_checked_workspace(plan, checked_project_revision)
             self.require_binding_target(plan, require_active=False)
             self._db.execute(
-                "INSERT INTO schedule_plans(plan_id,revision,name,instructions,project_alias,app_id,chat_id,schedule_json,enabled,next_due_at,processed_through,created_at,updated_at,source,deleted,session_settings_json,target_kind,target_binding_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
-                (plan.id, 1, name, instructions, project_alias, app_id, chat_id, _json(schedule.to_dict()), int(enabled), plan.next_due_at, None, now, now, source, _json(session_settings.to_dict()) if session_settings is not None else None, target_kind, target_binding_id),
+                "INSERT INTO schedule_plans(plan_id,revision,name,instructions,project_alias,app_id,chat_id,schedule_json,enabled,next_due_at,processed_through,created_at,updated_at,source,deleted,session_settings_json,target_kind,target_binding_id,workspace_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+                (plan.id, 1, name, instructions, project_alias, app_id, chat_id, _json(schedule.to_dict()), int(enabled), plan.next_due_at, None, now, now, source, _json(session_settings.to_dict()) if session_settings is not None else None, target_kind, target_binding_id, _json(workspace.to_dict()) if workspace is not None else None),
             )
             result = MutationResult(plan.id, 1)
             self._remember(request_id, "create", payload, result, now)
             return result
 
-    def update(self, plan_id: str, *, expected_revision: int, request_id: str, changes: dict[str, Any], now: float | None = None, request_payload: object | None = None) -> MutationResult:
-        allowed = {"name", "instructions", "project_alias", "chat_id", "schedule", "enabled", "session_settings", "target_kind", "target_binding_id"}
+    def update(self, plan_id: str, *, expected_revision: int, request_id: str, changes: dict[str, Any], now: float | None = None, request_payload: object | None = None, checked_project_revision: int | None = None, expected_project_revision: int | None = None) -> MutationResult:
+        allowed = {"name", "instructions", "project_alias", "chat_id", "schedule", "enabled", "session_settings", "target_kind", "target_binding_id", "workspace"}
         if not isinstance(changes, dict) or not changes or set(changes) - allowed:
             raise ScheduleError("更新字段为空或包含不可修改字段。")
         if "schedule" in changes and not isinstance(changes["schedule"], ScheduleRule):
             raise ScheduleError("更新需要完整的时间规则。")
         if "session_settings" in changes and changes["session_settings"] is not None and not isinstance(changes["session_settings"], SessionSettings):
             raise ScheduleError("更新需要完整的会话设置，原会话目标使用 null。")
+        if "workspace" in changes and changes["workspace"] is not None and not isinstance(changes["workspace"], WorkspacePolicy):
+            raise ScheduleError("更新需要完整的工作区策略，原会话目标使用 null。")
         changes = dict(changes)
-        payload_changes = {key: value.to_dict() if isinstance(value, (ScheduleRule, SessionSettings)) else value for key, value in changes.items()}
+        payload_changes = {key: value.to_dict() if isinstance(value, (ScheduleRule, SessionSettings, WorkspacePolicy)) else value for key, value in changes.items()}
         payload = dict(plan_id=plan_id, expected_revision=expected_revision, changes=payload_changes)
+        if expected_project_revision is not None:
+            payload["expected_project_revision"] = expected_project_revision
         if request_payload is not None:
             payload = request_payload
         now = self._now(now)
@@ -373,6 +415,14 @@ class ScheduleStore:
                    for field in ("target_kind", "target_binding_id")):
                 raise ScheduleConflict("计划的执行目标类型和原会话不可修改，请新建计划。")
             changed = replace(current, **changes, revision=current.revision + 1, updated_at=now)
+            if expected_project_revision is not None:
+                # Explicit form identity is independent of workspace validity:
+                # metadata edits may retain an unavailable saved workspace.
+                project = self.owner.get_project(changed.project_alias)
+                if type(expected_project_revision) is not int or project.revision != expected_project_revision:
+                    error = ScheduleConflict("Project 已改变，请重新加载工作区选项。")
+                    error.code = "project_changed"
+                    raise error
             schedule_changed = changed.schedule != current.schedule
             enabled_changed = changed.enabled != current.enabled
             enabling = enabled_changed and changed.enabled
@@ -389,6 +439,8 @@ class ScheduleStore:
             else:
                 self.owner.require_project_not_deleting(changed.project_alias)
                 self.owner.get_project(changed.project_alias)
+            if checked_project_revision is not None:
+                self._require_checked_workspace(changed, checked_project_revision)
             assert changed.schedule is not None
             boundary = max(now, current.processed_through if current.processed_through is not None else now)
             if schedule_changed or enabled_changed:
@@ -398,8 +450,8 @@ class ScheduleStore:
                 # that is still within the normal scheduler grace period.
                 due = current.next_due_at
             self._db.execute(
-                "UPDATE schedule_plans SET revision=?, name=?, instructions=?, project_alias=?, chat_id=?, schedule_json=?, enabled=?, next_due_at=?, updated_at=?, session_settings_json=?, target_kind=?, target_binding_id=? WHERE plan_id=?",
-                (changed.revision, changed.name, changed.instructions, changed.project_alias, changed.chat_id, _json(changed.schedule.to_dict()), int(changed.enabled), due, now, _json(changed.session_settings.to_dict()) if changed.session_settings is not None else None, changed.target_kind, changed.target_binding_id, plan_id),
+                "UPDATE schedule_plans SET revision=?, name=?, instructions=?, project_alias=?, chat_id=?, schedule_json=?, enabled=?, next_due_at=?, updated_at=?, session_settings_json=?, target_kind=?, target_binding_id=?, workspace_json=? WHERE plan_id=?",
+                (changed.revision, changed.name, changed.instructions, changed.project_alias, changed.chat_id, _json(changed.schedule.to_dict()), int(changed.enabled), due, now, _json(changed.session_settings.to_dict()) if changed.session_settings is not None else None, changed.target_kind, changed.target_binding_id, _json(changed.workspace.to_dict()) if changed.workspace is not None else None, plan_id),
             )
             result = MutationResult(plan_id, changed.revision)
             self._remember(request_id, "update", payload, result, now)
@@ -424,7 +476,7 @@ class ScheduleStore:
 
     def _tombstone(self, where: str, parameters: tuple[object, ...], now: float) -> None:
         self._db.execute(
-            "UPDATE schedule_plans SET deleted=1, enabled=0, name='', instructions='', schedule_json=NULL, session_settings_json=NULL, source='', next_due_at=NULL, revision=revision+1, updated_at=? WHERE deleted=0 AND " + where,
+            "UPDATE schedule_plans SET deleted=1, enabled=0, name='', instructions='', schedule_json=NULL, session_settings_json=NULL, workspace_json=NULL, source='', next_due_at=NULL, revision=revision+1, updated_at=? WHERE deleted=0 AND " + where,
             (now, *parameters),
         )
 
@@ -607,7 +659,7 @@ class ScheduleStore:
             return Claim(run, plan) if reason is None else None
 
     def _set_run(self, run_id: str, **changes: Any) -> Run:
-        allowed = {"phase", "barrier", "root_message_id", "topic_id", "origin_message_id", "binding_id", "initial_turn_id", "error_code", "delivery_state", "binding_removed", "disposition"}
+        allowed = {"phase", "barrier", "root_message_id", "topic_id", "origin_message_id", "binding_id", "initial_turn_id", "error_code", "delivery_state", "binding_removed", "disposition", "worktree_id"}
         if set(changes) - allowed:
             raise ScheduleError("不支持的执行阶段字段。")
         current = self.get_run(run_id)
@@ -621,11 +673,13 @@ class ScheduleStore:
             raise ScheduleError("无效调度 barrier。")
         if current.barrier == "released":
             changes.pop("barrier", None)
-        for field in ("root_message_id", "topic_id", "origin_message_id", "binding_id", "initial_turn_id"):
+        for field in ("root_message_id", "topic_id", "origin_message_id", "binding_id", "initial_turn_id", "worktree_id"):
             if field in changes:
                 value, previous = changes[field], getattr(current, field)
                 if not isinstance(value, str) or not value or (previous is not None and previous != value):
                     raise ScheduleConflict(f"{field} 是不可替换的 exact identity。")
+        if "worktree_id" in changes and current.target_kind != "new_topic":
+            raise ScheduleConflict("原会话执行不能保存独立工作区回执。")
         if "binding_removed" in changes and (type(changes["binding_removed"]) is not bool or (current.binding_removed and not changes["binding_removed"])):
             raise ScheduleConflict("会话移除事实不可撤销。")
         if "disposition" in changes and (

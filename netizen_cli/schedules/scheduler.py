@@ -15,6 +15,7 @@ from typing import Protocol
 
 from ..bindings import BindingStore, ProjectDeleting
 from .models import Claim, MutationResult, Run, ScheduleError, ScheduleNotFound
+from ..worktrees.models import WorktreeNotFound
 
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ DUE_BATCH_SIZE = 100
 RECOVERY_TIMEOUT_SECONDS = 10.0
 READ_TIMEOUT_SECONDS = 3.0
 DISPATCH_TIMEOUT_SECONDS = 30.0
+WORKTREE_DISPATCH_TIMEOUT_SECONDS = 180.0
 BINDING_DISPATCH_TIMEOUT_SECONDS = 180.0
 _TERMINAL = {"completed", "interrupted", "failed"}
 _PRE_NATIVE = {"claimed", "publishing_topic", "binding_ready"}
@@ -90,10 +92,7 @@ class Scheduler:
                     else "recovery_no_start"
                 ))
             elif run.phase in _PRE_NATIVE:
-                self._store.release(run.id, error_code=(
-                    "publishing_unknown" if run.phase == "publishing_topic"
-                    else "recovery_no_start"
-                ))
+                self._store.release(run.id, error_code=self._pre_native_failure(run, "recovery_no_start"))
             elif run.barrier != "unknown":
                 await self._observe(run, deadline=deadline)
             # A persisted unknown is not retried by every service restart.
@@ -288,7 +287,11 @@ class Scheduler:
 
     async def _dispatch_once(self, claim: Claim) -> None:
         try:
-            timeout = BINDING_DISPATCH_TIMEOUT_SECONDS if claim.run.target_kind == "binding" else DISPATCH_TIMEOUT_SECONDS
+            timeout = (
+                BINDING_DISPATCH_TIMEOUT_SECONDS if claim.run.target_kind == "binding"
+                else WORKTREE_DISPATCH_TIMEOUT_SECONDS if claim.plan.workspace.mode == "new"
+                else DISPATCH_TIMEOUT_SECONDS
+            )
             async with asyncio.timeout(timeout):
                 await self._dispatch(claim)
         except asyncio.CancelledError:
@@ -309,6 +312,21 @@ class Scheduler:
             ):
                 self._settle_dispatch(run.id, "dispatch_incomplete")
 
+    def _pre_native_failure(self, run: Run, reason: str) -> str:
+        if run.phase != "publishing_topic":
+            return reason
+        if not (run.root_message_id and run.origin_message_id and run.topic_id):
+            return "publishing_unknown"
+        if run.worktree_id is not None:
+            try:
+                resource = self._bindings.worktrees.get(run.worktree_id)
+            except WorktreeNotFound:
+                return "workspace_unavailable"
+            return ("workspace_handoff_failed" if resource.creation_state == "ready"
+                    else "workspace_creation_unknown")
+        # Both Feishu receipts are confirmed, and no native call was attempted.
+        return reason
+
     def _settle_dispatch(self, run_id: str, reason: str) -> None:
         try:
             run = self._store.get_run(run_id)
@@ -326,7 +344,7 @@ class Scheduler:
         if run.barrier == "unknown":
             return
         if run.phase in _PRE_NATIVE:
-            self._store.release(run_id, error_code="publishing_unknown" if run.phase == "publishing_topic" else reason)
+            self._store.release(run_id, error_code=self._pre_native_failure(run, reason))
         else:
             self._store.set_run(run_id, barrier="unknown", error_code=reason)
 

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from lark_channel import OutboundCard
 
+from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingStore, BindingTaskFeedback
 from netizen_cli.cards import goal_card
 from netizen_cli.channel_app import ChannelApplication
@@ -124,7 +125,7 @@ class ScheduledChannelFixture(ChannelFixture):
     receipts: list[str] = field(default_factory=list)
 
     def manager_plan(self, name, *, chat_id="oc_group", enabled=True):
-        created = self.store.schedules.create(name=name, instructions="独立指令：" + name,
+        created = self.store.schedules.create(workspace=WorkspacePolicy(), name=name, instructions="独立指令：" + name,
             project_alias="work", app_id="app", chat_id=chat_id, enabled=enabled,
             schedule=ScheduleRule("interval", "UTC", every_minutes=60, anchor=100),
             request_id="manager-" + name, now=100)

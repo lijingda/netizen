@@ -540,7 +540,7 @@ class ScheduleServiceTest(unittest.IsolatedAsyncioTestCase):
                 for caller in ("admin", "mcp"):
                     public = await self.service.manage({"mode": "options", "chat_id": target},
                         native_thread_id=source.native_thread_id, source=caller)
-                    self.assertEqual(public, {"ok": False, "error": options["chat_info_error"]})
+                    self.assertEqual(public, options)
 
     async def test_form_chat_and_catalog_failures_are_independent(self):
         source = self.configured_binding()

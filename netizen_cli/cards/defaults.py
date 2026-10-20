@@ -16,9 +16,9 @@ from ..model_settings import ModelCatalog
 from ..projects import Project
 from ..session_settings import SessionSettings
 from .callbacks import CardActionError, _builder, _notice, _plain, _plain_text
+from .workspace import decode_workspace_form, workspace_form_elements
 from .controls import (
     _form_hint,
-    _form_label,
     _form_section,
     _form_submit_button,
     decode_session_settings_form,
@@ -188,104 +188,18 @@ def _workspace_elements(
     project: str | None, project_revision: int | None, workspace: Mapping[str, Any],
     *, options: Mapping[str, Any] | None, error: str | None,
 ) -> list[dict[str, Any]]:
-    elements = [
-        _form_hint("使用上方项目加载工作区选项；切换项目后请重新加载。保存只记录策略，不会创建工作区。"),
-        {"tag": "button", "name": "defaults_workspace_load", "text": _plain_text("加载项目目录选项"),
-         "type": "default", "width": "fill", "form_action_type": "submit",
-         "behaviors": [{"type": "callback", "value": {
-             "kind": "netizen_defaults", "action": "load_workspace", "v": _VERSION, "nonce": uuid4().hex,
-         }}]},
-    ]
-    if error:
-        elements.append(_notice(error, error=True))
-    if project is None:
-        return elements
-    if options is not None:
-        elements.append(_form_hint(
-            f"已加载项目「{options['projectAlias']}」的工作区。"
-            if options.get("isGit") is True else "该项目不是 Git 仓库，仅支持项目目录。"
-        ))
-    # A saved choice must remain visible even when the live directory query
-    # fails or the selected resource is no longer offered by WorktreeService.
-    identity = {
-        "project": options["projectAlias"] if options is not None else project,
-        "project_revision": options["projectRevision"] if options is not None else project_revision,
-    }
-    choices = [("项目目录", {"mode": "project"})]
-    if options is not None and options.get("isGit") is True:
-        choices.append(("每个新会话新建 Worktree（Detached）", {"mode": "new"}))
-        for item in options.get("items", ()):
-            if item.get("state") == "ready" and item.get("available") is True:
-                choices.append((
-                    f"{item['id']} · {item.get('branch') or 'detached'} · {item['cwd']}",
-                    {"mode": "existing", "worktree_id": item["id"]},
-                ))
-    selection = {key: value for key, value in workspace.items() if key != "ref"}
-    if not any(choice == selection for _, choice in choices):
-        label = (
-            f"{workspace['worktree_id']} · 不可用（保留原配置）"
-            if workspace["mode"] == "existing" else "每个新会话新建 Worktree（保留原配置）"
-        )
-        choices.append((label, selection))
-        elements.append(_notice("原工作区策略暂不可用，已保留；请选择有效策略后保存，或删除默认配置。", error=True))
-    elements.append(_form_label("工作区策略"))
-    elements.append({
-        "tag": "select_static", "name": "defaults_workspace", "required": True,
-        "placeholder": _plain_text("选择工作区策略"),
-        "options": [{"text": _plain_text(label), "value": _encoded({**identity, **choice})}
-                    for label, choice in choices],
-        "initial_option": _encoded({**identity, **selection}),
-    })
-    if any(choice["mode"] == "new" for _, choice in choices):
-        refs = [("创建会话时的 Project HEAD", "HEAD")]
-        if options is not None:
-            refs.extend(
-                (("远端 · " if branch.get("remote") else "本地 · ") + branch["name"], branch["ref"])
-                for branch in options.get("branches", ())
-            )
-        ref = workspace.get("ref") or "HEAD"
-        if not any(value == ref for _, value in refs):
-            refs.append((str(ref) + " · 保留原配置", ref))
-        elements.extend([
-            _form_label("新建起点（仅新建策略生效）"),
-            {"tag": "select_static", "name": "defaults_worktree_ref",
-             "placeholder": _plain_text("选择新建起点"),
-             "options": [{"text": _plain_text(label), "value": value} for label, value in refs],
-             "initial_option": ref},
-            _form_hint("每次创建独立 Detached 工作区；只检出提交内容，不复制未提交改动或初始化环境。"),
-        ])
-    elements.append(_form_hint("指定已有 Worktree 会共享文件；资源失效时自动创建失败，不切回项目目录。已有会话不受默认配置修改影响。"))
-    return elements
+    button = {"tag": "button", "name": "defaults_workspace_load", "text": _plain_text("加载项目目录选项"),
+        "type": "default", "width": "fill", "form_action_type": "submit",
+        "behaviors": [{"type": "callback", "value": {
+            "kind": "netizen_defaults", "action": "load_workspace", "v": _VERSION, "nonce": uuid4().hex,
+        }}]}
+    return workspace_form_elements(project, project_revision, workspace, prefix="defaults", load_button=button,
+        options=options, error=error,
+        footer="指定已有 Worktree 会共享文件；资源失效时自动创建失败，不切回项目目录。已有会话不受默认配置修改影响。")
 
 
 def _decode_workspace(fields: Mapping[str, Any], project: str, revision: int | None) -> dict[str, str]:
-    if not fields:
-        return {"mode": "project"}
-    if "defaults_workspace" not in fields:
-        raise CardActionError("工作区表单不完整，请重新加载项目目录选项。")
-    selected = _decoded(fields["defaults_workspace"])
-    mode = selected.get("mode")
-    expected_fields = {"project", "project_revision", "mode"}
-    if mode == "existing":
-        expected_fields.add("worktree_id")
-    if not isinstance(mode, str) or mode not in {"project", "existing", "new"} or set(selected) != expected_fields:
-        raise CardActionError("默认工作区选项无效，请重新加载项目目录选项。")
-    if (selected["project"] != project or selected["project_revision"] != revision
-            or (selected["project_revision"] is not None and type(selected["project_revision"]) is not int)):
-        raise CardActionError("工作区选项不属于当前 Project 或版本已变化，请重新加载项目目录选项。")
-    result = {"mode": mode}
-    if mode == "existing":
-        worktree_id = selected["worktree_id"]
-        if not isinstance(worktree_id, str) or _RECORD_ID.fullmatch(worktree_id) is None:
-            raise CardActionError("默认工作区 ID 无效，请重新加载项目目录选项。")
-        result["worktree_id"] = worktree_id
-    elif mode == "new":
-        ref = fields.get("defaults_worktree_ref", "HEAD")
-        if not isinstance(ref, str) or len(ref) > 256 or any(ord(character) < 32 for character in ref):
-            raise CardActionError("新建工作区起点无效，请重新选择。")
-        if ref.strip() and ref != "HEAD":
-            result["ref"] = ref.strip()
-    return result
+    return decode_workspace_form(fields, prefix="defaults", project=project, revision=revision)
 
 
 def is_defaults_card_action(value: Any, form: Any = None) -> bool:

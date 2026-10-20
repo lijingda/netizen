@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from openai_codex import AsyncCodex, CodexConfig
 
+from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingNotFound, BindingStore, ProjectDisabled
 from netizen_cli.codex_runtime import (
     ActiveState, CodexRuntime, RuntimeClosed, ScheduledInitialStartConflict,
@@ -68,7 +69,7 @@ class ScheduledRuntimeTest(unittest.IsolatedAsyncioTestCase):
     def occurrence(self, *, session_settings=SessionSettings(), context_anchor=None):
         self.sequence += 1
         suffix = str(self.sequence)
-        plan = self.store.schedules.create(
+        plan = self.store.schedules.create(workspace=WorkspacePolicy(),
             name="Routine " + suffix, instructions="Inspect the project",
             project_alias="p", app_id="app", chat_id="chat",
             schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=100),

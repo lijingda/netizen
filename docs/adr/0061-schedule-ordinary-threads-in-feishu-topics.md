@@ -3,10 +3,15 @@ status: accepted
 date: 2026-09-08
 amends: 0008, 0023, 0029, 0030, 0031, 0034, 0060
 related: 0016, 0017, 0021, 0022, 0037, 0039, 0049
-amended_by: 0063, 0068, 0070
+amended_by: 0063, 0068, 0070, 0075, 0076, 0085
 ---
 
 # 在独立飞书话题中调度普通持久会话
+
+2026-10-20 修订：新话题计划增加独立工作区策略，复用
+[ADR 0085](0085-manage-worktrees-independently-of-sessions.md) 的受管资源、目录交接及失败边界。
+它不读取聊天默认配置；原会话目标继续继承 exact Binding 的实际目录。schema v17
+通过 ADR 0075/0076 的冻结迁移保存策略和最小 Run 工作区回执，取代下文早期无迁移政策。
 
 2026-09-23 修订：[ADR 0070](0070-schedule-inputs-in-existing-bindings.md) 增加 exact
 Binding 目标，复用普通输入的 start/steer；本文的新话题创建与初轮屏障保留为 `new_topic` 模式。
@@ -66,11 +71,51 @@ Netizen 需要支持自然语言、飞书卡片和 Admin 对定时计划进行�
 - Project 删除提交同时删除已确认的关联计划并阻止新调度交接；在途外部副作用继续纳入
   精确剩余清单。部分删除失败不复活计划，同名 Project 重新登记也不复活旧计划。
 
+## 新话题工作区策略
+
+新话题计划保存独立于 SessionSettings 的 `workspace`：`project` 使用 Project 目录；
+`existing` 保存 exact 受管 Worktree ID，各次执行共享其当前文件与分支；`new` 为每次
+实际执行的 Run 新建 detached 工作区，可选 `ref`，省略时取创建当时 Project HEAD。
+仅检出提交内容，不复制未提交文件、不执行初始化脚本，也不保存固定命名分支模板。
+创建计划省略 workspace 使用 `project`，更新省略则保留旧策略；显式提供时完整替换。
+不从来源 Binding 或 `/defaults` 隐式复制工作区。原会话计划 workspace 为 null，
+显式覆盖必须拒绝；不增加目录缺失时一律禁聊的规则。
+
+options、预览、保存、busy/missed/blocked 跳过不创建工作区。指定资源在首次飞书发送前
+经共享选择服务校验；已确认不可用时零 root/seed、零 Binding、零原生提交，保留计划和
+enabled 意愿，记录本次未执行并推进自动到期点，不补跑。手动请求在认领前拒绝则不伪造
+Run、不改定时游标；已经受理的 Run 可在首次发送前明确失败。
+目录缺失、身份替换、删除预约与读取未知分别解释，不回退目录、不重建替代品。同路径
+新资源或同 alias Project 重登记不能冒充原资源。用户重新选定有效策略只影响未来认领。
+
+交接复用唯一 Scheduler、Run 屏障与单次发布准入：取得所有权后先校验，发送真实
+root/seed，再按 `new` 策略创建工作区、绑定目录并提交首轮。创建前把 exact 资源 ID
+关联到 Run，保留进程中断后可追溯的最小回执。绑定前再次复核 Project/Worktree 删除准入；
+已经发送话题后的竞态只报告已知失败，不撤销或声称没有话题。长 Git/飞书/原生 I/O
+不持有 Scope/Binding 锁或数据库事务，不增加默认会话的 per-Scope 创建 Future、
+Project 执行锁或跨会话并发上限。
+
+Admin、`/cron` 和 MCP 投影按需展示策略、不可用原因和 `can_run_now`，不持久化资源健康
+状态或后台巡检。失效引用保留在编辑器中，未改变 Project/workspace 的名称、指令等编辑
+允许保存；实际变更时严格校验。普通工作区查询继续用调用者 Project 范围的
+`list_worktrees`，计划配置选项用 `cron_manage options`；已知 exact ID 可直接用于写入。
+两者直接复用服务，不经 MCP/HTTP 互相转调或扩大工具范围。
+
+删除 Worktree 不级联删除引用它的新话题计划；若显式级联删除 Binding，则仍删除以该
+Binding 为目标的原会话计划。Project 删除继续墓碑关联计划，不套用聊天默认配置的保留规则。
+暂停、修改、删除计划不回收已生成的工作区；每次新建策略的旧资源删除不阻塞未来执行。
+
 ## 失败边界与后果
 
 时间到期先持久 claim，再发飞书消息和启动原生执行。第一版不补跑停机错过的触发，不自动
 重试失败的业务执行，不承诺外部副作用 exactly-once；同一计划的 initial Turn 未确认结束时
 不重叠启动。pause/delete 不终止已有普通任务，用户通过普通会话控制处理它。
+
+工作区已创建而 Binding 或首轮失败时保留资源，并在执行记录中给出 exact ID/路径。
+Git 创建取消、超时或结果未知沿用受管资源回执，不自动重试或删目录；它不等于 native
+Turn 可能启动。重启仅收敛旧 Run，不重建工作区、不重放输入；仅在能证明原生输入未提交时
+释放该交接屏障，原生未知仍按下述既有边界处理。创建预算须容纳共享服务的有界 Git
+变更预算，并与停机及 Project 删除排空一致；不能用旧的 30 秒交接总限额提前截断创建。
 
 thread_start/thread_resume/turn_start 结果未知继续沿用现有 Runtime 的全服务 native
 admission 关闭规则。不能借增加调度器之机将它缩小为计划局部。恢复后只按持久 exact

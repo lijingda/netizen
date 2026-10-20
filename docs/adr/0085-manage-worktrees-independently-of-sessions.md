@@ -39,6 +39,7 @@ SDK 尚未提供的专用管理接口，或复制 Codex App 的全部环境、�
 | Admin | 配置、分页查询、刷新、创建和显式删除受管 worktree；不创建普通会话，不提供 “New chat in this worktree”。 |
 | 飞书 `/new` | 单个工作区选择：项目目录（默认）、已有可用受管 worktree、新建 worktree。非 Git 项目隐藏 worktree 控件。 |
 | 默认会话配置 | Admin 与 `/defaults` 保存项目目录、指定已有受管 worktree、每个自动新建 Binding 创建 detached worktree 三种策略；保存不创建资源，实际自动创建时复用本服务。 |
+| 新话题定时计划 | Admin、`/cron` 与 `cron_manage` 保存独立工作区策略；指定资源在首次消息前检查，每个实际执行的 `new` Run 创建 detached worktree。 |
 | 飞书 `/fork` | 本版不增加 worktree 创建或选择，沿用普通持久 fork；来源已在 worktree 时正确继承实际目录和关联。 |
 | Agent worktree 工具 | 仅提供发现受管工作区和创建能力，复用同一服务；创建返回资源标识、根目录/实际工作目录及真实分支或 detached 状态。分支由 Agent 按需通过 Git 查询并填写 `ref`，不提供专用分支查询或删除工具。 |
 | Agent `create_thread` | 参数保持 CLI 形态，不增加 `cwd`、worktree 或 branch；后台使用来源 Thread 的实际 cwd 创建会话。 |
@@ -57,7 +58,8 @@ Binding；普通首条输入或首条 `/goal` 才通过已有 SDK `thread_start(
 真实 Scope、规则优先级与输入准入。工作区策略与 SessionSettings 分开保存；每个自动
 新建 Binding 创建一次工作区，后续消息继续使用该 Binding。自动新建仅建 detached checkout，
 可选 `ref` 留空时使用创建时 Project HEAD，不持久化某次解析出的 commit，也不提供重复
-使用的命名分支。已有 Binding、显式 `/new` 及定时新话题不读取这项默认策略。
+使用的命名分支。已有 Binding、显式 `/new` 及定时新话题不读取这项默认策略；定时新话题
+使用自己的计划工作区策略，不隐式继承创建者 cwd。
 
 2026-10-19 复审确认：若登记的 Project 目录因用户切分支等操作而缺失，沿用现有
 Project 不可用处理，由用户修复 Project；不为 `/new` 复用已有 worktree 增加绕过
@@ -172,11 +174,20 @@ Project alias 可在显式重新登记后恢复使用；指定已有工作区仍
 的登记代次，因此不能因同 alias 或同路径出现而恢复旧资源引用。用户须重新选择有效
 工作区或修改策略。保存、修改和删除默认配置都不回收已经创建的工作区。
 
+2026-10-20 新话题定时计划扩展：项目目录、指定 exact 工作区、每 Run 新建 detached
+工作区复用同一 WorkspacePolicy 和服务；新建基线默认创建时 Project HEAD，允许可选 ref。
+指定资源首次发送前不可用时不建立话题或原生执行，保留计划与启停意愿；并发删除仍以
+最终绑定准入及已知副作用为准。Run 在 Git 创建前关联最小资源回执，后续失败或重启保留
+已知资源，不自动补建、补偿或回收。完整交接与展示约定见
+[ADR 0061](0061-schedule-ordinary-threads-in-feishu-topics.md#新话题工作区策略)。
+计划的配置引用不是会话关联，删除 Worktree 不删除新话题计划；Project 删除仍按原约定
+删除关联计划。对以 Binding 为目标的计划，工作区可选级联确认删除 Binding 后仍清理该计划。
+
 ## 明确不做与默认策略
 
 不做 environment/setup、文件自动复制、快照/恢复、自动回收、Handoff、外部 worktree
 收编、孤立工作区重新关联、飞书 `/worktree` 管理、`/fork` 创建/选择 worktree 或 Admin
-新会话。既有 Binding 的定时输入必须适配实际 cwd，但本版不新增定时新话题的工作区配置。
+新会话。既有 Binding 的定时输入继承实际 cwd；新话题计划按上述独立策略选择工作区。
 两个级联勾选项默认不勾选，不改变已确认的可选级联能力。
 
 以下两组策略已获用户确认：

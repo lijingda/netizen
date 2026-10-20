@@ -26,6 +26,7 @@ class ListDetailsUiTest(unittest.TestCase):
             source[source.index("function cell("):source.index("function showProjectDeleteResult(")],
             source[source.index("function chatModeLabel("):source.index("function sessionUpdatedAtLabel(")],
             source[source.index("function wireSessionActions("):source.index("async function loadSides(")],
+            source[source.index("function workspaceErrorMessage("):source.index("let defaultsEditor =")],
             source[source.index("function scheduleDate("):source.index("let scheduleEditor =")],
             source[source.index("let scheduleDetailSerial ="):source.index("let scheduleListCursor =")],
             source[source.index("function scheduleInput("):source.index("const scheduleFieldErrors =")],

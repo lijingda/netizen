@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 
 from ..mcp_transport import EmbeddedMcpRunner, MAX_BODY_BYTES, native_thread_id as _native_thread_id
+from ..worktrees.policy import WorkspacePolicy, WorkspacePolicyError
 
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,7 @@ INSTRUCTIONS = """Manage Netizen scheduled tasks with cron_manage: create, list,
 
 When the user asks to manage scheduled tasks, use cron_manage and follow its schema. If the tool is deferred, find it through the available tool search first.
 
-Plans default to target_kind=new_topic: each occurrence starts an independent persistent Codex Thread in a new Feishu topic. For follow-ups in the same conversation, choose target_kind=binding: each occurrence submits an input to the exact original Binding, starting a Turn or steering the running Turn through ordinary message handling. Omit target_binding_id to use the calling ordinary Thread's Binding. Switching away or archiving suspends automatic execution; restoring the target resumes future times without catch-up. Deleting the Binding deletes its plans. Pausing prevents automatic claims; deleting prevents all new claims. An already claimed occurrence may continue. Stop or continue work through ordinary conversation controls. Save clear task instructions in the plan.
+Plans default to target_kind=new_topic: each occurrence starts an independent persistent Codex Thread in a new Feishu topic. Its workspace policy chooses the Project directory (default), an exact existing managed Worktree, or one new detached Worktree per accepted occurrence. Use cron_manage options with project for plan workspace choices; list_worktrees remains the ordinary caller-Project discovery tool. For follow-ups in the same conversation, choose target_kind=binding: each occurrence submits an input to the exact original Binding, starting a Turn or steering the running Turn through ordinary message handling and inheriting its actual working directory. Omit target_binding_id to use the calling ordinary Thread's Binding. Switching away or archiving suspends automatic execution; restoring the target resumes future times without catch-up. Deleting the Binding deletes its plans. Pausing prevents automatic claims; deleting prevents all new claims. An already claimed occurrence may continue. Stop or continue work through ordinary conversation controls. Save clear task instructions in the plan.
 When asked to run an existing plan once now, use run_now. Enabling a plan uses update and waits for its next scheduled time; changing its recurring time also uses update. Ordinary work without an existing-plan context remains an ordinary task.
 """
 
@@ -68,8 +69,9 @@ TOOL_DESCRIPTION = """Manage Netizen scheduled tasks with cron_manage: options, 
 Find candidates by name before using an exact plan_id; clarify ambiguous matches. Resolve relative times into a structured schedule and IANA timezone, and save reusable instructions with explicit resource references. target_kind=new_topic (default) starts an independent ordinary Thread in a new Feishu topic. target_kind=binding submits to the exact original Binding and shares its context, current settings and ordinary start/steer behavior. For requests such as 'continue here in ten minutes', use binding. Pausing prevents automatic claims; deleting prevents all new claims. Already claimed work may continue and uses ordinary stop/continue controls.
 For create/update/delete/run_now supply a UUID request_id; retry the same request with the same ID after a timeout. For update/delete/run_now copy the exact current revision from the latest list/view/create/update result into expected_revision; never increment it yourself. An existing current result does not require another view call. Omitted chat_id/project on create use the calling native Thread's Binding: the current Feishu conversation may be a group or a private chat; a topic uses its containing conversation. list defaults to that current conversation; all=true lists this instance's plans. update keeps omitted fields unchanged. No native Thread identity belongs in tool arguments.
 run_now executes the saved plan once, including manually paused or ended plans, without changing its schedule, next due time or enabled state. Supply only mode, plan_id, expected_revision and request_id; instructions and destination come from that saved version. The result is an acceptance receipt with run_id and current run information, not proof of completion. Results go to the saved target; share the returned feishu_url when available. For new_topic an unfinished or uncertain previous initial Turn blocks another run. For binding, started/steered records prove input acceptance only: subsequent scheduled inputs remain independent even after an unknown outcome, while ordinary Runtime admission still applies. Inactive targets cannot run_now; this never switches or restores a conversation. Inspect view/runs when blocked; do not rewrite or duplicate the plan or execute its instructions yourself as a workaround. After a management timeout, reuse the original request_id; never generate a new one merely to retry an uncertain trigger.
-For binding, omitted target_binding_id uses the calling ordinary Thread's exact Binding; Side or unmapped callers must supply an exact Binding ID returned by options. Native Thread IDs are never tool arguments. The target identity is immutable after creation. Do not supply project, chat_id or session_settings for binding: these follow the target conversation at execution time. enabled remains the user's pause preference; suspended_reason separately reports automatic suspension, and can_run_now reports target eligibility. options supplies source_binding_id and binding_targets; list may filter target_kind/target_binding_id.
+For binding, omitted target_binding_id uses the calling ordinary Thread's exact Binding; Side or unmapped callers must supply an exact Binding ID returned by options. Native Thread IDs are never tool arguments. The target identity is immutable after creation. Do not supply project, chat_id, session_settings or workspace for binding: these follow the target conversation and its actual working directory at execution time. enabled remains the user's pause preference; suspended_reason separately reports automatic suspension, and can_run_now reports target eligibility. options supplies source_binding_id and binding_targets; list may filter target_kind/target_binding_id.
 For new_topic, create copies the calling Binding's session settings once; later Binding changes do not change the plan. session_settings is a partial override: turn_settings=null explicitly inherits native Codex settings; a model override supplies all three IDs. Other fields control reaction pulse, progress card and message context. Use options to discover current model/effort/service-tier IDs and defaults when choosing settings; ordinary creation needs no preliminary options call. A private target supports only current-only; an inherited catch-up default is normalized, but explicitly requesting catch-up is rejected. Updating unrelated fields retains the plan's settings even if its model is no longer available.
+For new_topic, workspace is a complete policy object: {"mode":"project"}, {"mode":"existing","worktree_id":"exact managed ID"}, {"mode":"new"}, or {"mode":"new","ref":"refs/heads/main"}. Omitted workspace on create uses the Project directory; omitted workspace on update preserves the saved policy. It never reads chat defaults or inherits the caller's Worktree. existing shares that resource's current files and branch; new creates one detached Worktree per accepted run, using that execution's Project HEAD when ref is omitted. Saving/options never creates directories. Use options with project and optional expected_project_revision to discover available choices; an exact known ID can be used directly without another lookup. Missing, replaced or unreadable resources block execution without fallback; inspect workspace_error and can_run_now. enabled stays unchanged. Unrelated edits may preserve an unavailable policy. run_now cannot override workspace. Do not create Worktrees yourself to simulate the new policy.
 Recurring daily/weekly/interval schedules have no cutoff by default. Optional schedule.end_at is an inclusive cutoff timestamp with an explicit UTC offset and minute precision; turn a requested cutoff date into a specific time and timezone. Once schedules cannot use end_at.
 Providing schedule on update replaces the whole rule: include unchanged kind/time/timezone and end_at to keep them. To remove end_at, omit it or set it to null in the replacement schedule. Omitting schedule entirely keeps the existing rule and cutoff.
 Use the exact fields mode, instructions and schedule.kind. After invalid_request, correct the indicated fields and call cron_manage again; no shell commands or resource listing are needed to repair arguments.
@@ -127,6 +129,23 @@ class _SessionSettingsArguments(BaseModel):
     message_context_mode: Literal["current-only", "catch-up"] = "current-only"
 
 
+class _ProjectWorkspaceArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    mode: Literal["project"]
+
+
+class _ExistingWorkspaceArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    mode: Literal["existing"]
+    worktree_id: str = Field(min_length=1, max_length=256)
+
+
+class _NewWorkspaceArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    mode: Literal["new"]
+    ref: str = Field(default=None, min_length=1, max_length=256)
+
+
 class _Arguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -134,7 +153,8 @@ class _Arguments(BaseModel):
     plan_id: str | None = Field(default=None, min_length=1)
     name: str | None = Field(default=None, min_length=1)
     instructions: str | None = Field(default=None, min_length=1)
-    project: str | None = Field(default=None, min_length=1)
+    project: str | None = Field(default=None, min_length=1, description="new_topic create/update Project alias, or options target Project for workspace choices. Omitted create/options uses the source Binding's Project.")
+    expected_project_revision: int | None = Field(default=None, ge=1, description="Optional Project revision from workspace options; use on options/create/update to reject stale Project selections. Not accepted for binding targets.")
     chat_id: str | None = Field(default=None, min_length=1)
     target_kind: Literal["new_topic", "binding"] | None = Field(default=None, description="Create/list: new_topic (default) starts an independent topic and Thread; binding submits an input to the original conversation, starting or steering through ordinary message handling. Immutable after create.")
     target_binding_id: str | None = Field(default=None, min_length=1, description="Exact Binding ID from options for binding targets or list filtering. Omit on binding create to use the calling ordinary Thread's Binding. Never supply a native Thread ID. Immutable after create.")
@@ -156,6 +176,10 @@ class _Arguments(BaseModel):
     timezone: str | None = Field(default=None, min_length=1, description="IANA timezone, e.g. Asia/Shanghai.")
     enabled: bool | None = None
     session_settings: _SessionSettingsArguments = Field(default=None, description="Optional partial session settings. Omitted fields copy the source Binding at creation or keep the plan's existing values on update. Explicit turn_settings=null resets model settings to native inheritance.")
+    workspace: Annotated[
+        _ProjectWorkspaceArguments | _ExistingWorkspaceArguments | _NewWorkspaceArguments,
+        Field(discriminator="mode"),
+    ] = Field(default=None, description="new_topic only: complete workspace policy. project uses Project cwd; existing needs exact worktree_id; new creates one detached Worktree per accepted run, optionally from ref (otherwise execution-time Project HEAD). Omit on create for project, on update to preserve. No path/cwd or branch creation fields.")
     expected_revision: int | None = Field(default=None, ge=1, description="Copy the exact current revision from the latest list/view/create/update result. Do not increment it; no extra view call is needed if already known.")
     request_id: str | None = Field(default=None, min_length=1, description="Stable UUID for mutation retries.")
     cursor: str | None = None
@@ -170,6 +194,10 @@ class _Arguments(BaseModel):
             raise ValueError("Required fields are missing for this mode.")
         if self.mode == "run_now" and self.model_fields_set - _RUN_NOW_FIELDS:
             raise ValueError("run_now only accepts exact plan identity, revision and request_id.")
+        if self.target_kind == "binding" and {"workspace", "expected_project_revision"} & self.model_fields_set:
+            raise ValueError("binding targets inherit their actual workspace and do not accept overrides.")
+        if self.workspace is not None:
+            WorkspacePolicy.from_dict(self.workspace.model_dump(exclude_unset=True))
         return self
 
 
@@ -188,6 +216,10 @@ def _tool_schema() -> dict[str, Any]:
             field: False for field in schema["properties"] if field not in _RUN_NOW_FIELDS
         }},
     })
+    schema["allOf"].append({
+        "if": {"required": ["target_kind"], "properties": {"target_kind": {"const": "binding"}}},
+        "then": {"properties": {"workspace": False, "expected_project_revision": False}},
+    })
     return schema
 
 
@@ -197,6 +229,8 @@ _FIELD_HINTS = {
     "name": "Supply a nonempty plan name.",
     "instructions": "Supply nonempty reusable task instructions in instructions.",
     "project": "Supply a nonempty Project alias. Omit on create to use the current Binding's Project; omit on update to keep the plan's Project.",
+    "expected_project_revision": "Copy the positive Project revision returned with workspace options. Use only for options or new_topic create/update.",
+    "workspace": "For new_topic supply exactly {mode:project}, {mode:existing,worktree_id:exact-id}, or {mode:new} with optional nonempty ref. Do not supply workspace for binding or run_now; omit on update to preserve the policy.",
     "chat_id": "Supply a nonempty Feishu conversation ID. Omit on create to use the current conversation (group or private chat); omit on update to keep the plan's target.",
     "target_kind": "Use new_topic for independent topic executions or binding for inputs to the original conversation. The target type is immutable after create.",
     "target_binding_id": "Supply an exact Binding ID returned by options. Omit on binding create to use the current ordinary Binding; Side/unmapped callers must specify it. Never supply a native Thread ID.",
@@ -258,6 +292,13 @@ def _invalid_arguments(arguments: Any, error: ValidationError) -> CallToolResult
                 fields["schedule." + field] = _FIELD_HINTS["schedule." + field]
         if kind == "once" and schedule.get("end_at") is not None:
             fields["schedule.end_at"] = _FIELD_HINTS["schedule.end_at"]
+        if "workspace" in arguments:
+            try:
+                WorkspacePolicy.from_dict(arguments["workspace"])
+            except WorkspacePolicyError:
+                fields["workspace"] = _FIELD_HINTS["workspace"]
+            if arguments.get("target_kind") == "binding":
+                fields["workspace"] = _FIELD_HINTS["workspace"]
     manual = isinstance(arguments, dict) and arguments.get("mode") == "run_now"
     if manual and set(arguments) - _RUN_NOW_FIELDS:
         fields["arguments"] = "run_now only accepts mode, plan_id, expected_revision and request_id. Remove all other fields; it uses the saved plan without overrides."

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 
+from netizen_cli.worktrees.policy import WorkspacePolicy
 from netizen_cli.bindings import BindingNotFound, ProjectDeleting
 from netizen_cli.domain import ActiveState, FeishuScope, ScopeKind
 from netizen_cli.management import ExactBindingTarget
@@ -27,7 +28,7 @@ class ScheduledProjectDeletionTest(unittest.IsolatedAsyncioTestCase):
 
     def plan(self, *, project: str = "test"):
         self.plan_counter += 1
-        result = self.store.schedules.create(
+        result = self.store.schedules.create(workspace=WorkspacePolicy(),
             name=f"Scheduled work {self.plan_counter}", instructions="Private instructions.",
             project_alias=project, app_id="cli_test", chat_id="oc_scheduled",
             schedule=ScheduleRule("interval", "UTC", every_minutes=1, anchor=0),

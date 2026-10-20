@@ -12,9 +12,10 @@ from ..chat_targets import ChatTargetError, ChatTargetValidator
 from ..domain import MentionContextMode
 from ..model_settings import ModelCatalogError, STANDARD_SERVICE_TIER_ID
 from ..projects import Project, ProjectError, ProjectRegistry
+from ..worktrees.policy import WorkspacePolicy, WorkspacePolicyError
 from ..session_settings import SessionSettings, SessionSettingsError
 from ..worktrees.errors import WorktreeError
-from .models import DefaultConfigurationError, DefaultRule, WorkspacePolicy
+from .models import DefaultConfigurationError, DefaultRule
 from .store import MAX_GROUP_RULES
 
 if TYPE_CHECKING:
@@ -122,25 +123,17 @@ class SessionDefaultsService:
         if rule.workspace.mode == "project":
             return
         try:
-            worktrees = self._worktree_service()
-            if rule.workspace.mode == "existing":
-                assert rule.workspace.worktree_id is not None
-                await worktrees.select(
-                    project_alias=project.alias, worktree_id=rule.workspace.worktree_id,
-                    expected_project_revision=project.revision,
-                )
-            else:
-                # Read-only Git discovery; saving a policy never creates a checkout.
-                await worktrees.branches(project_alias=project.alias)
+            await self._worktree_service().validate_policy(
+                rule.workspace, project_alias=project.alias,
+                expected_project_revision=project.revision,
+            )
         except WorktreeError as error:
             raise DefaultConfigurationError(
                 f"默认配置的工作区不可用：{error}", code="workspace_unavailable",
             ) from error
-        except DefaultConfigurationError:
-            raise
-        except Exception as error:
+        except TimeoutError as error:
             raise DefaultConfigurationError(
-                "暂时无法校验默认配置的工作区，请稍后重试。", code="workspace_unavailable",
+                "默认配置的工作区校验超时，请稍后重试。", code="workspace_unavailable",
             ) from error
 
     async def manage(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -223,7 +216,10 @@ class SessionDefaultsService:
             settings = SessionSettings.from_dict(request.get("session_settings"))
         except SessionSettingsError as error:
             raise DefaultConfigurationError(str(error)) from error
-        workspace = WorkspacePolicy.from_dict(request.get("workspace", {"mode": "project"}))
+        try:
+            workspace = WorkspacePolicy.from_dict(request.get("workspace", {"mode": "project"}))
+        except WorkspacePolicyError as error:
+            raise DefaultConfigurationError(str(error)) from error
         project = _text(request.get("project"), "project", maximum=64)
         if chat_id is not None:
             if self._chat_target_validator is None:

@@ -13,9 +13,11 @@ from typing import TYPE_CHECKING, Any
 
 from ..admin.port_config import AdminPortConfigurationError
 from ..bindings import BindingNotFound, ProjectNotFound, SideTopicQuery, SideTopicState
+from ..projects import ProjectError
 from .errors import WorktreeError
 from .git import GitError, NotGitRepository, WorktreeGit, WorktreeIdentity, WorktreeState
 from .models import WorktreeConflict, WorktreeCursor, WorktreeNotFound, WorktreeRecord
+from .policy import WorkspacePolicy
 from .settings import WorktreeSettings, WorktreeSettingsError, WorktreeSettingsService
 
 if TYPE_CHECKING:
@@ -217,14 +219,48 @@ class WorktreeService:
             self._store.require_bindable(record.id, project=project, cwd=record.cwd)
         except WorktreeConflict as error:
             raise WorktreeError("conflict", str(error)) from error
-        if (await self._state(record)).status != "ready":
-            raise WorktreeError("unavailable", "工作区目录缺失、已被替换或状态未取得，请刷新；不会切回项目目录。")
+        state = await self._state(record)
+        if state.status != "ready":
+            reason = {"missing": "工作区目录缺失", "replaced": "工作区身份已被替换",
+                      "unknown": "工作区状态暂时无法确认"}.get(state.status, "工作区不可用")
+            raise WorktreeError("unavailable", reason + "，请刷新；不会切回项目目录。")
         return record
+
+    async def validate_policy(
+        self, policy: WorkspacePolicy, *, project_alias: str,
+        expected_project_revision: int | None = None,
+    ) -> WorktreeRecord | None:
+        """Read creation eligibility without creating a checkout or freezing HEAD."""
+        if not isinstance(policy, WorkspacePolicy):
+            raise WorktreeError("invalid_arguments", "工作区策略无效。")
+        if policy.mode == "project":
+            return None
+        try:
+            project = await self._management.resolve_new_project(
+                project_alias, deadline=asyncio.get_running_loop().time() + 10,
+            )
+        except ProjectError as error:
+            raise WorktreeError("project_unavailable", str(error)) from error
+        revision = expected_project_revision if expected_project_revision is not None else project.revision
+        self._project(project_alias, revision)
+        if policy.mode == "existing":
+            return await self.select(project_alias=project_alias, worktree_id=policy.worktree_id,
+                                     expected_project_revision=revision)
+        try:
+            async with asyncio.timeout(_READ_SECONDS):
+                await self._git.inspect_repository(Path(project.cwd))
+        except GitError as error:
+            raise WorktreeError("not_git" if isinstance(error, NotGitRepository) else "unavailable",
+                                "无法确认 Project 的 Git 仓库；未创建工作区。") from error
+        except TimeoutError as error:
+            raise WorktreeError("unavailable", "Git 仓库状态未在时限内取得，请稍后刷新。") from error
+        self._project(project_alias, revision)
+        return None
 
     async def create(self, *, project_alias: str, expected_project_revision: int | None = None,
                      ref: str | None = None, mode: str = "detached", branch: str | None = None,
                      source_cwd: str | Path | None = None, origin_binding_id: str | None = None,
-                     agent_default: bool = False) -> dict[str, Any]:
+                     agent_default: bool = False, scheduled_run_id: str | None = None) -> dict[str, Any]:
         if self._closed:
             raise WorktreeError("unavailable", "服务正在关闭，未开始创建工作区。")
         if mode not in {"detached", "existing", "new"} or any(
@@ -268,7 +304,7 @@ class WorktreeService:
                 self._project(project_alias, project.revision)
                 record = self._store.register(project_alias=project_alias, expected_project_revision=project.revision,
                     root=str(target), cwd=str(target / repository.relative_cwd), common_dir=str(repository.common_dir),
-                    origin_binding_id=origin_binding_id, worktree_id=identifier)
+                    origin_binding_id=origin_binding_id, worktree_id=identifier, scheduled_run_id=scheduled_run_id)
                 created = await self._git.create(source, target, ref=ref, mode=mode, branch=branch,
                     fetch=settings.fetch_before_create, agent_default=agent_default)
                 record = self._store.mark_ready(record.id, git_dir=str(created.identity.git_dir),

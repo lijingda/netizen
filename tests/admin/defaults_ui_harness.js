@@ -696,7 +696,8 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   // replaces a missing resource with the project directory.
   workspaceOptions = {
     available: { projectAlias: "available", projectRevision: 7, isGit: true,
-      items: [{ id: "managed-one", cwd: "/worktrees/one", branch: "main" }],
+      items: [{ id: "managed-one", cwd: "/worktrees/one", branch: "main", available: true },
+        { id: "deleting-exact", cwd: "/worktrees/deleting", branch: null, state: "ready", available: false }],
       branches: [{ ref: "refs/heads/main", name: "main" }] },
     nongit: { projectAlias: "nongit", projectRevision: 8, isGit: false, items: [], branches: [] },
   };
@@ -711,6 +712,16 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await saveDefault({ preventDefault() {} });
   assert.deepEqual(posts.at(-1).body.definition.workspace, existingRule.workspace);
   assert.equal(posts.at(-1).body.definition.expected_project_revision, 7);
+
+  // A Git-ready record can still be unavailable due to deletion admission.
+  openDefaultEditor("group_name", { ...existingRule, workspace: { mode: "existing", worktree_id: "deleting-exact" } });
+  await flush();
+  assert.equal(defaultsInput("worktree").value, "deleting-exact");
+  assert(defaultsInput("worktree").querySelectorAll("option")
+    .find((option) => option.value === "deleting-exact").textContent.includes("不可用"));
+  assert.equal(defaultsInput("save").disabled, true);
+  assert.equal(defaultEditorHasChanges(), false);
+  closeDefaultEditor();
 
   const unavailableRule = { ...existingRule, workspace: { mode: "existing", worktree_id: "deleted-worktree" } };
   openDefaultEditor("group_name", unavailableRule);

@@ -419,7 +419,7 @@ class DefaultsChannelTest(unittest.IsolatedAsyncioTestCase):
                 "branches": [{"name": "main", "ref": "refs/heads/main", "remote": False}],
             }
         service = SimpleNamespace(
-            options=AsyncMock(side_effect=options), branches=AsyncMock(return_value={"isGit": True}),
+            options=AsyncMock(side_effect=options), validate_policy=AsyncMock(),
             select=AsyncMock(), create=AsyncMock(), close=AsyncMock(),
         )
         self.fixture.management.worktrees = service
@@ -452,12 +452,12 @@ class DefaultsChannelTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(saved.session_settings.message_context_mode, MentionContextMode.CATCH_UP)
         self.assertIsNone(self.store.active_binding(scope.key))
         self.assertFalse(self.submissions)
-        worktrees.branches.assert_awaited_once()
+        worktrees.validate_policy.assert_awaited_once()
         worktrees.create.assert_not_awaited()
 
     async def test_defaults_workspace_refresh_preserves_policy_and_model_draft_on_failure(self):
         from netizen_cli.cards.callbacks import _new_model_reference
-        from netizen_cli.defaults.models import WorkspacePolicy
+        from netizen_cli.worktrees.policy import WorkspacePolicy
         from netizen_cli.worktrees.errors import WorktreeError
 
         worktrees = self.enable_default_workspaces()
@@ -489,7 +489,7 @@ class DefaultsChannelTest(unittest.IsolatedAsyncioTestCase):
         worktrees.create.assert_not_awaited()
 
     async def test_defaults_workspace_project_switch_requires_load_and_resets_choice(self):
-        from netizen_cli.defaults.models import WorkspacePolicy
+        from netizen_cli.worktrees.policy import WorkspacePolicy
 
         worktrees = self.enable_default_workspaces()
         self.store.defaults.save(
