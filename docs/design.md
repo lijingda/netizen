@@ -1785,6 +1785,11 @@ read 保留 `turnLimit`（默认 1，上限 10）、`includeOutputs`、每项输
 公开 SDK 尚无历史分页 facade，按 ADR 0083 使用同一连接的固定只读分页适配：metadata
 不含历史，Turn 使用原生 Full 页和 opaque cursor。模型结果保持 8,000 字节预算，
 截断不损坏 ID/游标或接受状态，也不能丢掉整轮却返回越过它的游标。
+仅 `read_thread` 超出该预算时采用 CLI `rust-v0.163.0` 的裁剪策略：每轮保留最后一条
+Agent 消息（没有则为空），精简 Thread/Turn 元数据；仍超限时按实际 UTF-8 字节预算
+二分裁短文本。保留消息 phase、轮次状态、原生分页与 `netizen` 扩展信息并标注截断，
+不将过程消息解释为完成；元数据本身无法容纳时沿用明确的超限错误。预算内返回和其他
+工具的裁剪行为不变。
 本功能的 `netizen_sessions` create/send 来信在默认读取中单独保留
 `codexDelegation.sourceThreadId/input`，来源与正文按委派摘要展示；它仍是工具来源，
 其他工具输出继续遵循 `includeOutputs`，摘要也受既有输出预算约束。
